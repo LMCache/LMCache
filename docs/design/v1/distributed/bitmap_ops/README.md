@@ -75,3 +75,24 @@ any value `<= 0`) marks a full-attention group.
 
 `TrimPolicy.PREFIX` selects the single longest servable prefix (right-most 1);
 any other policy keeps every set bit (gaps included).
+
+## Performance
+
+`fold_unfold_ranked` dispatches by size: the pure-Python scan for small
+requests, and a **vectorized torch** implementation once
+`num_groups · num_chunks · num_ranks` crosses `_TORCH_FOLD_MIN_KEYS`. The fold
+math (rank reduction, windowed servability, cross-group intersection, unfold)
+becomes a handful of tensor ops — sub-millisecond regardless of size. See
+`benchmark.py` (`python -m lmcache.v1.distributed.bitmap_ops.benchmark`):
+
+| Case (worst case: all present) | Python | torch |
+|---|---|---|
+| DeepSeek 1M @256, 8 groups, world_size=8 (262k keys) | ~178 ms | ~32 ms |
+| same, 50% prefix present | ~87 ms | ~11 ms |
+| stress: 4M keys | ~1584 ms | ~340 ms |
+
+The torch path is bounded not by compute (<1 ms) but by the `Bitmap`↔tensor
+conversion (`get_indices_list` + scatter in, `batched_set` out), since `Bitmap`
+exposes no dense buffer. A native dense export (`Bitmap → uint8 array`) would
+remove that wall and recover the compute-only numbers (~100×); it's the
+follow-up if the fold ever sits on a latency-critical path.

@@ -1,19 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for the fold / unfold prefix-cache hit logic."""
 
+# Standard
+import random
+
 # Third Party
 import pytest
 
 # First Party
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import TrimPolicy
-from lmcache.v1.distributed.storage_controllers.bitmap_ops import (
+from lmcache.v1.distributed.bitmap_ops import (
     FULL_ATTENTION_WINDOW,
     fold_unfold,
     fold_unfold_ranked,
     merge_bitmaps,
     select_retained,
     unfold_range,
+)
+from lmcache.v1.distributed.bitmap_ops.fold import (
+    _fold_unfold_ranked_python,
+    _fold_unfold_ranked_torch,
 )
 
 
@@ -278,3 +285,52 @@ class TestMergeBitmaps:
         a.set(0)
         b.set(3)
         assert merge_bitmaps([a, b], 5).get_indices_list() == [0, 3]
+
+
+class TestRankedTorchMatchesPython:
+    """The vectorized torch fold must match the pure-Python reference exactly."""
+
+    @staticmethod
+    def _result(fn, num_chunks, num_ranks, gw, present):
+        nk = len(gw) * num_chunks * num_ranks
+        bm = Bitmap(nk)
+        bm.batched_set([i for i, p in enumerate(present) if p])
+        hit, mask = fn(bm, num_chunks, num_ranks, gw)
+        return hit, mask.get_indices_list()
+
+    def test_random_equivalence(self):
+        rng = random.Random(1234)
+        for _ in range(300):
+            num_groups = rng.randint(1, 4)
+            num_chunks = rng.randint(1, 16)
+            num_ranks = rng.randint(1, 3)
+            gw = [rng.choice([-1, 1, 2, 3]) for _ in range(num_groups)]
+            nk = num_groups * num_chunks * num_ranks
+            present = [rng.random() < 0.6 for _ in range(nk)]
+            hit_py, mask_py = self._result(
+                _fold_unfold_ranked_python, num_chunks, num_ranks, gw, present
+            )
+            hit_t, mask_t = self._result(
+                _fold_unfold_ranked_torch, num_chunks, num_ranks, gw, present
+            )
+            assert (hit_py, mask_py) == (hit_t, mask_t), (
+                f"mismatch gw={gw} C={num_chunks} R={num_ranks}"
+            )
+
+    def test_dispatch_large_input_matches_reference(self):
+        # Above the dispatch threshold the public API uses torch; it must still
+        # match the Python reference (full + sliding-window groups, gappy data).
+        gw = [-1, -1, 4, 4, 8, 1, -1, 2]  # 8 groups
+        num_chunks, num_ranks = 64, 8  # 8 * 64 * 8 = 4096 keys >= threshold
+        nk = len(gw) * num_chunks * num_ranks
+        rng = random.Random(7)
+        present = [rng.random() < 0.7 for _ in range(nk)]
+        bm = Bitmap(nk)
+        bm.batched_set([i for i, p in enumerate(present) if p])
+
+        hit_pub, mask_pub = fold_unfold_ranked(bm, num_chunks, num_ranks, gw)
+        hit_ref, mask_ref = self._result(
+            _fold_unfold_ranked_python, num_chunks, num_ranks, gw, present
+        )
+        assert hit_pub == hit_ref
+        assert mask_pub.get_indices_list() == mask_ref
