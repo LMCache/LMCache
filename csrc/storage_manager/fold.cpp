@@ -8,16 +8,14 @@ namespace lmcache {
 
 namespace storage_manager {
 
-std::pair<size_t, Bitmap> fold_unfold_ranked(
-    const Bitmap& found, size_t num_chunks, size_t num_ranks,
-    const std::vector<int64_t>& group_windows) {
+Bitmap fold(const Bitmap& found, size_t num_chunks, size_t num_ranks,
+            const std::vector<int64_t>& group_windows) {
   const size_t num_groups = group_windows.size();
   const size_t group_stride = num_chunks * num_ranks;
-  const size_t num_keys = num_groups * group_stride;
 
-  // Fold: ``servable[L]`` stays true only if every group can serve a length-L
-  // prefix under its rule. ``run`` is the count of consecutive present chunks
-  // ending at the current chunk, so a length-L prefix needs the last
+  // ``servable[L]`` stays set only if every group can serve a length-L prefix
+  // under its rule. ``run`` is the count of consecutive present chunks ending
+  // at the current chunk, so a length-L prefix needs the last
   // ``min(window, L)`` chunks present, i.e. ``run >= min(window, L)``. Length 0
   // is always servable.
   std::vector<char> servable(num_chunks + 1, 1);
@@ -43,33 +41,36 @@ std::pair<size_t, Bitmap> fold_unfold_ranked(
     }
   }
 
-  // Right-most servable prefix length (length 0 is always servable).
-  size_t hit_length = 0;
-  for (size_t prefix_len = num_chunks + 1; prefix_len-- > 0;) {
-    if (servable[prefix_len]) {
-      hit_length = prefix_len;
-      break;
-    }
+  Bitmap servable_lengths(num_chunks + 1);
+  for (size_t prefix_len = 0; prefix_len <= num_chunks; ++prefix_len) {
+    if (servable[prefix_len]) servable_lengths.set(prefix_len);
   }
+  return servable_lengths;
+}
 
-  // Unfold: the chunks each group needs to serve ``hit_length``, expanded over
-  // every kv_rank. The retained cells of a group are a contiguous bit range
+Bitmap unfold(size_t hit_length, size_t num_chunks, size_t num_ranks,
+              const std::vector<int64_t>& group_windows) {
+  if (hit_length > num_chunks) hit_length = num_chunks;
+  const size_t num_groups = group_windows.size();
+  const size_t group_stride = num_chunks * num_ranks;
+
+  // The chunks each group needs to serve ``hit_length``, expanded over every
+  // kv_rank. The retained cells of a group are a contiguous bit range
   // ``[gbase + lo * num_ranks, gbase + hit_length * num_ranks)``, so a single
   // ``set_range`` (whole-byte fill) covers each group.
-  Bitmap retain_mask(num_keys);
-  if (hit_length > 0) {
-    for (size_t g = 0; g < num_groups; ++g) {
-      const int64_t window = group_windows[g];
-      size_t lo = 0;
-      if (window > 0 && hit_length > static_cast<size_t>(window)) {
-        lo = hit_length - static_cast<size_t>(window);
-      }
-      const size_t gbase = g * group_stride;
-      retain_mask.set_range(gbase + lo * num_ranks,
-                            gbase + hit_length * num_ranks);
+  Bitmap retain_mask(num_groups * group_stride);
+  if (hit_length == 0) return retain_mask;
+  for (size_t g = 0; g < num_groups; ++g) {
+    const int64_t window = group_windows[g];
+    size_t lo = 0;
+    if (window > 0 && hit_length > static_cast<size_t>(window)) {
+      lo = hit_length - static_cast<size_t>(window);
     }
+    const size_t gbase = g * group_stride;
+    retain_mask.set_range(gbase + lo * num_ranks,
+                          gbase + hit_length * num_ranks);
   }
-  return {hit_length, retain_mask};
+  return retain_mask;
 }
 
 }  // namespace storage_manager

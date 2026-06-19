@@ -93,6 +93,13 @@ class Bitmap {
   size_t clo() const;
 
   /**
+   * @brief index of the highest set bit (the "right-most 1").
+   *
+   * @return the largest index whose bit is set, or ``-1`` if no bit is set.
+   */
+  int64_t find_rightmost_one() const;
+
+  /**
    * @brief bitwise AND operation between two bitmaps.
    *
    * @return a new Bitmap that is the result of the bitwise AND operation.

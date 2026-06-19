@@ -12,14 +12,16 @@ from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import TrimPolicy
 from lmcache.v1.distributed.bitmap_ops import (
     FULL_ATTENTION_WINDOW,
+    find_rightmost_one,
+    fold,
     fold_unfold,
     fold_unfold_ranked,
     merge_bitmaps,
     select_retained,
+    unfold,
     unfold_range,
 )
-from lmcache.native_storage_ops import fold_unfold_ranked as _native_fold_unfold_ranked
-from lmcache.v1.distributed.bitmap_ops.fold import _fold_unfold_ranked_python
+from lmcache.v1.distributed.bitmap_ops.fold import _fold_python, _unfold_python
 
 
 def _make_presence(num_chunks: int, present_per_group: list[list[int]]) -> Bitmap:
@@ -285,18 +287,82 @@ class TestMergeBitmaps:
         assert merge_bitmaps([a, b], 5).get_indices_list() == [0, 3]
 
 
-class TestRankedNativeMatchesPython:
-    """The native C++ fold must match the pure-Python reference exactly."""
+# --------------------------------------------------------------------------- #
+# Separated operators: fold / find_rightmost_one / unfold                      #
+# --------------------------------------------------------------------------- #
 
-    @staticmethod
-    def _result(fn, num_chunks, num_ranks, gw, present):
-        nk = len(gw) * num_chunks * num_ranks
-        bm = Bitmap(nk)
-        bm.batched_set([i for i, p in enumerate(present) if p])
-        hit, mask = fn(bm, num_chunks, num_ranks, gw)
-        return hit, mask.get_indices_list()
 
-    def test_random_equivalence(self):
+class TestFoldOperator:
+    """``fold`` produces the servable-prefix-lengths bitmap (bit L = every group
+    can serve length L)."""
+
+    def test_full_attention_servable_is_downward_closed(self):
+        # full group present {0,1,2} of 4 -> servable lengths {0,1,2,3}.
+        found = _make_ranked(4, 1, [[(0, 0), (1, 0), (2, 0)]])
+        servable = fold(found, 4, 1, [FULL_ATTENTION_WINDOW])
+        assert servable.get_indices_list() == [0, 1, 2, 3]
+
+    def test_sliding_window_servable_is_gappy(self):
+        # window-2 group present chunks {0,1,3,4} of 5. A length L is servable
+        # iff chunks [L-2, L) present: L=0 ok, 1 ok(0), 2 ok(0,1), 3 no(1,2),
+        # 4 no(2,3), 5 ok(3,4) -> {0,1,2,5}.
+        found = _make_ranked(5, 1, [[(0, 0), (1, 0), (3, 0), (4, 0)]])
+        servable = fold(found, 5, 1, [2])
+        assert servable.get_indices_list() == [0, 1, 2, 5]
+
+    def test_bit_zero_always_set(self):
+        found = _make_ranked(3, 2, [[]])  # nothing present
+        servable = fold(found, 3, 2, [FULL_ATTENTION_WINDOW])
+        assert servable.get_indices_list() == [0]
+
+
+class TestFindRightmostOne:
+    """``find_rightmost_one`` returns the highest set bit, -1 if none."""
+
+    def test_basic(self):
+        bm = Bitmap(10)
+        for i in (1, 4, 7):
+            bm.set(i)
+        assert find_rightmost_one(bm) == 7
+
+    def test_empty_returns_minus_one(self):
+        assert find_rightmost_one(Bitmap(10)) == -1
+        assert find_rightmost_one(Bitmap(0)) == -1
+
+    def test_single_and_last_bit(self):
+        bm = Bitmap(9)
+        bm.set(8)
+        assert find_rightmost_one(bm) == 8
+
+
+class TestUnfoldOperator:
+    """``unfold`` expands a hit length into the ranked retain mask."""
+
+    def test_full_plus_sliding_window(self):
+        # hit=4, full group keeps [0,4), window-2 group keeps [2,4); 2 ranks.
+        mask = unfold(4, 5, 2, [FULL_ATTENTION_WINDOW, 2])
+        stride = 5 * 2
+        expected = [0, 1, 2, 3, 4, 5, 6, 7]  # full: chunks 0..3 x 2 ranks
+        expected += [stride + 4, stride + 5, stride + 6, stride + 7]  # win: c2,c3
+        assert mask.get_indices_list() == expected
+
+    def test_zero_hit_is_empty(self):
+        assert unfold(0, 5, 2, [FULL_ATTENTION_WINDOW, 2]).get_indices_list() == []
+
+    def test_hit_clamped_to_num_chunks(self):
+        # hit beyond num_chunks is clamped; full group keeps every chunk.
+        mask = unfold(99, 3, 1, [FULL_ATTENTION_WINDOW])
+        assert mask.get_indices_list() == [0, 1, 2]
+
+
+# --------------------------------------------------------------------------- #
+# Native vs pure-Python fallback equivalence (the native ops are the oracle's  #
+# fast path; the fallbacks must agree bit-for-bit)                             #
+# --------------------------------------------------------------------------- #
+
+
+class TestNativeMatchesFallback:
+    def test_fold_and_unfold_random_equivalence(self):
         rng = random.Random(1234)
         for _ in range(300):
             num_groups = rng.randint(1, 4)
@@ -304,31 +370,166 @@ class TestRankedNativeMatchesPython:
             num_ranks = rng.randint(1, 3)
             gw = [rng.choice([-1, 1, 2, 3]) for _ in range(num_groups)]
             nk = num_groups * num_chunks * num_ranks
-            present = [rng.random() < 0.6 for _ in range(nk)]
-            hit_py, mask_py = self._result(
-                _fold_unfold_ranked_python, num_chunks, num_ranks, gw, present
-            )
-            hit_native, mask_native = self._result(
-                _native_fold_unfold_ranked, num_chunks, num_ranks, gw, present
-            )
-            assert (hit_py, mask_py) == (hit_native, mask_native), (
-                f"mismatch gw={gw} C={num_chunks} R={num_ranks}"
+            bm = Bitmap(nk)
+            bm.batched_set([i for i in range(nk) if rng.random() < 0.6])
+
+            native_servable = fold(bm, num_chunks, num_ranks, gw)
+            py_servable = _fold_python(bm, num_chunks, num_ranks, gw)
+            assert (
+                native_servable.get_indices_list() == py_servable.get_indices_list()
+            ), f"fold mismatch gw={gw} C={num_chunks} R={num_ranks}"
+
+            hit = find_rightmost_one(native_servable)
+            native_mask = unfold(hit, num_chunks, num_ranks, gw)
+            py_mask = _unfold_python(hit, num_chunks, num_ranks, gw)
+            assert native_mask.get_indices_list() == py_mask.get_indices_list(), (
+                f"unfold mismatch gw={gw} C={num_chunks} R={num_ranks} hit={hit}"
             )
 
-    def test_public_api_matches_reference(self):
-        # The public fold_unfold_ranked dispatches to native; it must match the
-        # Python reference (8 mixed full + sliding-window groups, gappy data).
-        gw = [-1, -1, 4, 4, 8, 1, -1, 2]
-        num_chunks, num_ranks = 64, 8
-        nk = len(gw) * num_chunks * num_ranks
-        rng = random.Random(7)
-        present = [rng.random() < 0.7 for _ in range(nk)]
-        bm = Bitmap(nk)
-        bm.batched_set([i for i, p in enumerate(present) if p])
 
-        hit_pub, mask_pub = fold_unfold_ranked(bm, num_chunks, num_ranks, gw)
-        hit_ref, mask_ref = self._result(
-            _fold_unfold_ranked_python, num_chunks, num_ranks, gw, present
+# --------------------------------------------------------------------------- #
+# End-to-end: full fold -> find_rightmost_one -> unfold pipeline against an    #
+# independent reference modeling vLLM's hybrid prefix-cache hit logic.         #
+# --------------------------------------------------------------------------- #
+
+
+def _reference_longest_hit(num_chunks, group_present, group_windows):
+    """Longest model-wide prefix hit, mirroring vLLM's per-group
+    ``find_longest_cache_hit`` combined across a hybrid model (independent
+    brute force; no vLLM import).
+
+    A length-``L`` prefix is a model-wide hit iff every object group can serve
+    it under its rule:
+
+    * full attention (``window <= 0``): chunks ``[0, L)`` all present
+      (vLLM ``FullAttentionManager``);
+    * sliding window ``w``: chunks ``[max(0, L - w), L)`` all present
+      (vLLM ``SlidingWindowManager``).
+
+    Args:
+        num_chunks: number of chunks.
+        group_present: ``group_present[g]`` = set of chunk indices present for
+            object group ``g`` (after requiring every kv_rank present).
+        group_windows: per-group window size; ``<= 0`` means full attention.
+
+    Returns:
+        The largest ``L`` in ``[0, num_chunks]`` servable by all groups.
+    """
+    best = 0
+    for length in range(num_chunks + 1):
+        servable_by_all = True
+        for present, window in zip(group_present, group_windows):
+            lo = 0 if window <= 0 else max(0, length - window)
+            if not all(j in present for j in range(lo, length)):
+                servable_by_all = False
+                break
+        if servable_by_all:
+            best = length
+    return best
+
+
+def _expected_retained_indices(hit, num_chunks, num_ranks, group_windows):
+    """The ranked retain-mask indices the pipeline should produce for ``hit``."""
+    indices = []
+    stride = num_chunks * num_ranks
+    for g, window in enumerate(group_windows):
+        lo, hi = unfold_range(hit, window)
+        for j in range(lo, hi):
+            base = g * stride + j * num_ranks
+            indices.extend(range(base, base + num_ranks))
+    return sorted(indices)
+
+
+class TestEndToEndAgainstVllmStyleReference:
+    """Drive the full fold/find_rightmost_one/unfold pipeline and compare the
+    hit length and retain mask against an independent vLLM-style oracle."""
+
+    def _run(self, num_chunks, num_ranks, group_windows, present_cells):
+        # present_cells[g] = set of (chunk, rank) present for group g.
+        stride = num_chunks * num_ranks
+        bm = Bitmap(len(group_windows) * stride)
+        for g, cells in enumerate(present_cells):
+            for chunk, rank in cells:
+                bm.set(g * stride + chunk * num_ranks + rank)
+        hit, mask = fold_unfold_ranked(bm, num_chunks, num_ranks, group_windows)
+
+        # Reference: a chunk is present for a group only if all ranks present.
+        group_present = [
+            {
+                chunk
+                for chunk in range(num_chunks)
+                if all((chunk, r) in cells for r in range(num_ranks))
+            }
+            for cells in present_cells
+        ]
+        ref_hit = _reference_longest_hit(num_chunks, group_present, group_windows)
+        assert hit == ref_hit, (
+            f"hit {hit} != reference {ref_hit} "
+            f"(windows={group_windows}, present={group_present})"
         )
-        assert hit_pub == hit_ref
-        assert mask_pub.get_indices_list() == mask_ref
+        assert mask.get_indices_list() == _expected_retained_indices(
+            hit, num_chunks, num_ranks, group_windows
+        )
+
+    def test_full_attention_only_is_contiguous_prefix(self):
+        # Two full-attention groups; hit is the shortest contiguous prefix.
+        self._run(
+            num_chunks=6,
+            num_ranks=2,
+            group_windows=[FULL_ATTENTION_WINDOW, FULL_ATTENTION_WINDOW],
+            present_cells=[
+                {(j, r) for j in range(5) for r in range(2)},  # chunks 0..4
+                {(j, r) for j in range(3) for r in range(2)},  # chunks 0..2
+            ],
+        )  # -> hit 3
+
+    def test_sliding_window_tail_extends_hit(self):
+        # Full group has 0..5; window-2 group only has the tail {4,5} -> hit 6.
+        self._run(
+            num_chunks=6,
+            num_ranks=1,
+            group_windows=[FULL_ATTENTION_WINDOW, 2],
+            present_cells=[
+                {(j, 0) for j in range(6)},
+                {(4, 0), (5, 0)},
+            ],
+        )
+
+    def test_mamba_window_one(self):
+        self._run(
+            num_chunks=4,
+            num_ranks=1,
+            group_windows=[FULL_ATTENTION_WINDOW, 1],
+            present_cells=[{(j, 0) for j in range(4)}, {(3, 0)}],
+        )  # -> hit 4
+
+    def test_missing_rank_breaks_chunk(self):
+        # chunk 2 missing one rank -> not present -> caps the full-attn prefix.
+        self._run(
+            num_chunks=5,
+            num_ranks=2,
+            group_windows=[FULL_ATTENTION_WINDOW],
+            present_cells=[
+                {(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (3, 0), (3, 1)},
+            ],
+        )  # -> hit 2
+
+    def test_random_scenarios(self):
+        rng = random.Random(20240617)
+        for _ in range(400):
+            num_groups = rng.randint(1, 5)
+            num_chunks = rng.randint(0, 20)
+            num_ranks = rng.randint(1, 3)
+            group_windows = [
+                rng.choice([-1, -1, 1, 2, 3, 5]) for _ in range(num_groups)
+            ]
+            present_cells = []
+            for _g in range(num_groups):
+                cells = {
+                    (chunk, rank)
+                    for chunk in range(num_chunks)
+                    for rank in range(num_ranks)
+                    if rng.random() < 0.65
+                }
+                present_cells.append(cells)
+            self._run(num_chunks, num_ranks, group_windows, present_cells)

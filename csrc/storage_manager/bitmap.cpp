@@ -145,6 +145,22 @@ size_t Bitmap::clo() const {
   return inverted.clz();
 }
 
+int64_t Bitmap::find_rightmost_one() const {
+  // Scan bytes from the most significant down; the first non-zero byte holds
+  // the highest set bit. Bits beyond size_ are never set, so the result is
+  // always < size_.
+  for (size_t byte = data_.size(); byte-- > 0;) {
+    const uint8_t value = data_[byte];
+    if (value != 0) {
+      const unsigned highest =
+          31u -
+          static_cast<unsigned>(__builtin_clz(static_cast<unsigned>(value)));
+      return static_cast<int64_t>(byte * kBitsPerByte + highest);
+    }
+  }
+  return -1;
+}
+
 Bitmap Bitmap::operator&(const Bitmap& other) const {
   const size_t result_size = (size_ <= other.size_) ? size_ : other.size_;
   Bitmap result(result_size);

@@ -37,14 +37,14 @@ from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import TrimPolicy
 
 try:
-    # Native C++ fold (operates on the packed Bitmap buffer; no Python per-bit
-    # loop, no tensor conversion). Always present in a normally built package;
-    # the Python reference is used only if an older extension lacks it.
-    from lmcache.native_storage_ops import (
-        fold_unfold_ranked as _native_fold_unfold_ranked,
-    )
+    # Native C++ operators (operate on the packed Bitmap buffer; no Python
+    # per-bit loop). Always present in a normally built package; the pure-Python
+    # fallbacks below are used only if an older extension lacks them.
+    from lmcache.native_storage_ops import fold as _native_fold
+    from lmcache.native_storage_ops import unfold as _native_unfold
 except ImportError:  # pragma: no cover - stale/native-less build
-    _native_fold_unfold_ranked = None
+    _native_fold = None
+    _native_unfold = None
 
 FULL_ATTENTION_WINDOW = -1
 """Sentinel ``group_windows`` value marking a full-attention object group
@@ -72,86 +72,18 @@ def unfold_range(prefix_len: int, window: int) -> tuple[int, int]:
     return (lo, prefix_len)
 
 
-def fold_unfold(
-    found: Bitmap,
-    num_chunks: int,
-    group_windows: Sequence[int],
-) -> tuple[int, Bitmap]:
-    """Compute the model-wide hit length and the per-group retain mask.
-
-    See the module docstring for the fold -> right-most-1 -> unfold pipeline.
-
-    Args:
-        found: group-major presence bitmap of length
-            ``len(group_windows) * num_chunks``; bit ``g * num_chunks + j`` set
-            iff chunk ``j`` is available for object group ``g``.
-        num_chunks: number of LMCache chunks in the request.
-        group_windows: per-object-group cross-chunk sliding-window size in
-            chunks, in object-group order; ``<= 0`` means full attention.
-
-    Returns:
-        ``(hit_length, retain_mask)``: ``hit_length`` is the longest prefix (in
-        chunks) every group can serve, and ``retain_mask`` is a group-major
-        bitmap (same length as ``found``) with the chunks each group must keep.
-
-    Raises:
-        ValueError: If ``group_windows`` is empty or ``num_chunks`` is negative.
-    """
-    if not group_windows:
-        raise ValueError("group_windows must be non-empty")
-    if num_chunks < 0:
-        raise ValueError(f"num_chunks must be >= 0 (got {num_chunks})")
-
-    num_groups = len(group_windows)
-    num_keys = num_groups * num_chunks
-
-    # Fold + intersect in O(num_groups * num_chunks): for each group, ``run`` is
-    # the count of consecutive present chunks ending at the current chunk, so a
-    # prefix of length L is servable iff the last ``min(window, L)`` chunks are
-    # present, i.e. ``run >= min(window, L)``. ``servable[L]`` stays True only if
-    # every group can serve a length-L prefix (length 0 is always servable).
-    servable = [True] * (num_chunks + 1)
-    for group_idx, window in enumerate(group_windows):
-        base = group_idx * num_chunks
-        effective_window = num_chunks if window <= 0 else window
-        run = 0
-        for prefix_len in range(1, num_chunks + 1):
-            run = run + 1 if found.test(base + prefix_len - 1) else 0
-            if servable[prefix_len] and run < min(effective_window, prefix_len):
-                servable[prefix_len] = False
-
-    # Right-most servable prefix length (length 0 is always servable).
-    hit_length = 0
-    for prefix_len in range(num_chunks, -1, -1):
-        if servable[prefix_len]:
-            hit_length = prefix_len
-            break
-
-    # Unfold: the concrete chunks each group needs to serve `hit_length`.
-    retain_mask = Bitmap(num_keys)
-    for group_idx, window in enumerate(group_windows):
-        base = group_idx * num_chunks
-        lo, hi = unfold_range(hit_length, window)
-        for j in range(lo, hi):
-            retain_mask.set(base + j)
-    return hit_length, retain_mask
-
-
-def fold_unfold_ranked(
+def fold(
     found: Bitmap,
     num_chunks: int,
     num_ranks: int,
     group_windows: Sequence[int],
-) -> tuple[int, Bitmap]:
-    """Fold/unfold over the ``group x chunk x kv_rank`` lookup key layout.
+) -> Bitmap:
+    """Fold per-(group, chunk, rank) presence into servable prefix lengths.
 
-    The lookup key list (see
-    :func:`lmcache.v1.distributed.api.ipc_key_to_object_keys`) carries, per
-    object group, one key per ``(chunk, kv_rank)`` in chunk-major / rank-minor
-    order. A chunk is treated as present for a group only when **every** kv_rank
-    shard is present; the returned mask sets **all** ranks of each retained
-    ``(group, chunk)``. This reduces the 3-D layout to the ``(group, chunk)``
-    grid :func:`fold_unfold` expects, then re-expands the result.
+    For each object group, computes which prefix lengths it can serve under its
+    rule (a length-``L`` prefix needs the last ``min(window, L)`` chunks
+    present), and intersects across groups. A chunk is present for a group only
+    when **every** kv_rank shard is present.
 
     Args:
         found: presence bitmap of length
@@ -164,18 +96,13 @@ def fold_unfold_ranked(
             chunks, in object-group order; ``<= 0`` means full attention.
 
     Returns:
-        ``(hit_length, retain_mask)``: ``hit_length`` in chunks and a retain
-        mask over the same ranked layout as ``found``.
+        A bitmap of size ``num_chunks + 1``; bit ``L`` set iff every group can
+        serve a length-``L`` prefix. Bit 0 is always set. Feed it to
+        :func:`find_rightmost_one` to get the model-wide hit length.
 
     Raises:
         ValueError: If ``group_windows`` is empty, ``num_chunks`` is negative,
             or ``num_ranks`` is not positive.
-
-    Note:
-        Delegates to the native C++ implementation, which scans the packed
-        ``Bitmap`` buffer directly (no Python per-bit loop, no tensor
-        conversion). Falls back to the pure-Python reference only if the native
-        op is unavailable; both produce identical results.
     """
     if num_ranks < 1:
         raise ValueError(f"num_ranks must be >= 1 (got {num_ranks})")
@@ -184,44 +111,167 @@ def fold_unfold_ranked(
     if num_chunks < 0:
         raise ValueError(f"num_chunks must be >= 0 (got {num_chunks})")
 
-    if _native_fold_unfold_ranked is not None:
-        return _native_fold_unfold_ranked(
-            found, num_chunks, num_ranks, list(group_windows)
-        )
-    return _fold_unfold_ranked_python(found, num_chunks, num_ranks, group_windows)
+    if _native_fold is not None:
+        return _native_fold(found, num_chunks, num_ranks, list(group_windows))
+    return _fold_python(found, num_chunks, num_ranks, group_windows)
 
 
-def _fold_unfold_ranked_python(
+def find_rightmost_one(servable: Bitmap) -> int:
+    """Index of the highest set bit (the right-most 1), or -1 if none.
+
+    Applied to :func:`fold`'s servable-lengths bitmap, this is the model-wide
+    prefix hit length (always ``>= 0`` there, since bit 0 is set).
+
+    Args:
+        servable: Any bitmap; typically the output of :func:`fold`.
+
+    Returns:
+        The largest set bit index, or ``-1`` if no bit is set.
+    """
+    return servable.find_rightmost_one()
+
+
+def unfold(
+    hit_length: int,
+    num_chunks: int,
+    num_ranks: int,
+    group_windows: Sequence[int],
+) -> Bitmap:
+    """Expand a model-wide hit length into the per-group retain mask.
+
+    Each group retains the chunks it needs to serve ``hit_length``:
+    ``[0, hit_length)`` for full attention, ``[hit_length - window, hit_length)``
+    for a sliding window, with **all** kv_ranks of each retained
+    ``(group, chunk)`` set.
+
+    Args:
+        hit_length: model-wide prefix hit length in chunks (clamped to
+            ``num_chunks``).
+        num_chunks: number of LMCache chunks in the request.
+        num_ranks: number of kv_rank shards per chunk.
+        group_windows: per-object-group cross-chunk sliding-window size in
+            chunks, in object-group order; ``<= 0`` means full attention.
+
+    Returns:
+        A retain mask over the same ranked layout as :func:`fold`'s input,
+        length ``len(group_windows) * num_chunks * num_ranks``.
+
+    Raises:
+        ValueError: If ``group_windows`` is empty, ``num_chunks`` is negative,
+            or ``num_ranks`` is not positive.
+    """
+    if num_ranks < 1:
+        raise ValueError(f"num_ranks must be >= 1 (got {num_ranks})")
+    if not group_windows:
+        raise ValueError("group_windows must be non-empty")
+    if num_chunks < 0:
+        raise ValueError(f"num_chunks must be >= 0 (got {num_chunks})")
+
+    if _native_unfold is not None:
+        return _native_unfold(hit_length, num_chunks, num_ranks, list(group_windows))
+    return _unfold_python(hit_length, num_chunks, num_ranks, group_windows)
+
+
+def fold_unfold_ranked(
     found: Bitmap,
     num_chunks: int,
     num_ranks: int,
     group_windows: Sequence[int],
 ) -> tuple[int, Bitmap]:
-    """Pure-Python reference fold over the ranked layout (see
-    :func:`fold_unfold_ranked`). Fallback when the native op is unavailable and
-    the oracle the native op is tested against."""
+    """Compose :func:`fold` -> :func:`find_rightmost_one` -> :func:`unfold`.
+
+    Convenience for the full pipeline over the ``group x chunk x kv_rank``
+    lookup key layout: the model-wide hit length and the keys each group must
+    retain to serve it.
+
+    Args:
+        found: presence bitmap (see :func:`fold`).
+        num_chunks: number of LMCache chunks in the request.
+        num_ranks: number of kv_rank shards per chunk.
+        group_windows: per-object-group cross-chunk window sizes.
+
+    Returns:
+        ``(hit_length, retain_mask)`` over the same ranked layout as ``found``.
+    """
+    servable = fold(found, num_chunks, num_ranks, group_windows)
+    hit_length = find_rightmost_one(servable)
+    return hit_length, unfold(hit_length, num_chunks, num_ranks, group_windows)
+
+
+def fold_unfold(
+    found: Bitmap,
+    num_chunks: int,
+    group_windows: Sequence[int],
+) -> tuple[int, Bitmap]:
+    """:func:`fold_unfold_ranked` for the single-rank (group-major) layout.
+
+    Args:
+        found: group-major presence bitmap of length
+            ``len(group_windows) * num_chunks``; bit ``g * num_chunks + j`` set
+            iff chunk ``j`` is available for object group ``g``.
+        num_chunks: number of LMCache chunks in the request.
+        group_windows: per-object-group cross-chunk window sizes.
+
+    Returns:
+        ``(hit_length, retain_mask)`` over the group-major layout.
+    """
+    return fold_unfold_ranked(found, num_chunks, 1, group_windows)
+
+
+def _fold_python(
+    found: Bitmap,
+    num_chunks: int,
+    num_ranks: int,
+    group_windows: Sequence[int],
+) -> Bitmap:
+    """Pure-Python fallback for :func:`fold` (used if the native op is absent)."""
     num_groups = len(group_windows)
     group_stride = num_chunks * num_ranks
 
-    # Reduce ranks: chunk present iff all its kv_rank shards are present.
-    reduced = Bitmap(num_groups * num_chunks)
-    for group_idx in range(num_groups):
+    # For each group, ``run`` is the count of consecutive present chunks ending
+    # at the current chunk, so a length-L prefix is servable iff the last
+    # ``min(window, L)`` chunks are present. ``servable[L]`` stays True only if
+    # every group can serve length L (length 0 is always servable).
+    servable = [True] * (num_chunks + 1)
+    for group_idx, window in enumerate(group_windows):
         gbase = group_idx * group_stride
-        for j in range(num_chunks):
-            cbase = gbase + j * num_ranks
-            if all(found.test(cbase + r) for r in range(num_ranks)):
-                reduced.set(group_idx * num_chunks + j)
+        effective_window = num_chunks if window <= 0 else window
+        run = 0
+        for prefix_len in range(1, num_chunks + 1):
+            cbase = gbase + (prefix_len - 1) * num_ranks
+            present = all(found.test(cbase + r) for r in range(num_ranks))
+            run = run + 1 if present else 0
+            if servable[prefix_len] and run < min(effective_window, prefix_len):
+                servable[prefix_len] = False
 
-    hit_length, retain_gn = fold_unfold(reduced, num_chunks, group_windows)
+    servable_lengths = Bitmap(num_chunks + 1)
+    for prefix_len in range(num_chunks + 1):
+        if servable[prefix_len]:
+            servable_lengths.set(prefix_len)
+    return servable_lengths
 
-    # Re-expand the retained (group, chunk) cells back over every kv_rank.
+
+def _unfold_python(
+    hit_length: int,
+    num_chunks: int,
+    num_ranks: int,
+    group_windows: Sequence[int],
+) -> Bitmap:
+    """Pure-Python fallback for :func:`unfold`."""
+    hit_length = min(hit_length, num_chunks)
+    num_groups = len(group_windows)
+    group_stride = num_chunks * num_ranks
     retain_mask = Bitmap(num_groups * group_stride)
-    for idx in retain_gn.get_indices_list():
-        group_idx, j = divmod(idx, num_chunks)
-        cbase = group_idx * group_stride + j * num_ranks
-        for r in range(num_ranks):
-            retain_mask.set(cbase + r)
-    return hit_length, retain_mask
+    if hit_length <= 0:
+        return retain_mask
+    for group_idx, window in enumerate(group_windows):
+        lo, hi = unfold_range(hit_length, window)
+        gbase = group_idx * group_stride
+        for j in range(lo, hi):
+            cbase = gbase + j * num_ranks
+            for r in range(num_ranks):
+                retain_mask.set(cbase + r)
+    return retain_mask
 
 
 def merge_bitmaps(bitmaps: Iterable[Bitmap], num_keys: int) -> Bitmap:

@@ -18,14 +18,17 @@ presence bitmaps into one hit length plus the concrete chunks to keep.
 
 ## Design: fold → right-most-1 → unfold
 
-1. **fold** — per group, compute the set of prefix lengths it can serve. A
-   single backward/forward pass tracks the run of consecutive present chunks, so
-   the whole step is `O(num_groups * num_chunks)` (`fold_unfold`).
-2. **intersect + right-most-1** — a length is a model-wide hit only if every
-   group can serve it; the longest surviving length is the hit length `i*`.
-3. **unfold** — expand `i*` back into the chunks each group must retain
-   (`unfold_range`): `[0, i*)` for full attention, `[i*-w, i*)` for a window.
-   The union over groups is the **retain mask** used to load, lock, and transfer.
+1. **fold** (`fold`) — per group, compute the prefix lengths it can serve and
+   intersect across groups into a servable-lengths bitmap. A single pass tracks
+   the run of consecutive present chunks, so the step is
+   `O(num_groups * num_chunks)`.
+2. **right-most-1** (`find_rightmost_one`) — the highest set bit of the servable
+   bitmap is the hit length `i*` (a length is a hit only if every group can
+   serve it).
+3. **unfold** (`unfold`) — expand `i*` back into the chunks each group must
+   retain (`[0, i*)` for full attention, `[i*-w, i*)` for a window; see
+   `unfold_range`). The union over groups is the **retain mask** used to load,
+   lock, and transfer.
 
 When every group is full attention this collapses to the leading-ones count of
 the AND of the per-group presences — i.e. plain longest-contiguous-prefix
@@ -65,10 +68,21 @@ any value `<= 0`) marks a full-attention group.
 
 ## Public API
 
+The pipeline is exposed as **three composable operators** so the selection
+logic can evolve without rewriting the primitives:
+
+| Operator | Purpose |
+|---|---|
+| `fold` | Presence (`group x chunk x kv_rank`) → servable-prefix-lengths bitmap (bit `L` = every group can serve length `L`). |
+| `find_rightmost_one` | Highest set bit of a bitmap — applied to `fold`'s output, the model-wide hit length. |
+| `unfold` | Hit length → per-group retain mask over the ranked layout. |
+
+Convenience / supporting:
+
 | Function | Purpose |
 |---|---|
-| `fold_unfold` | Fold/unfold over a `group x chunk` presence bitmap. |
-| `fold_unfold_ranked` | Same, over the `group x chunk x kv_rank` lookup layout. |
+| `fold_unfold_ranked` | Composes `fold` → `find_rightmost_one` → `unfold`. |
+| `fold_unfold` | `fold_unfold_ranked` for the single-rank (`group x chunk`) layout. |
 | `unfold_range` | Chunk range one group needs for a given hit length. |
 | `merge_bitmaps` | Bitwise-OR several presence bitmaps (e.g. L1 ∪ L2). |
 | `select_retained` | Non-windowed `TrimPolicy` selection. |
@@ -78,23 +92,23 @@ any other policy keeps every set bit (gaps included).
 
 ## Performance
 
-`fold_unfold_ranked` delegates to a **native C++ implementation**
-(`csrc/storage_manager/fold.cpp`, exported as
-`native_storage_ops.fold_unfold_ranked`) that scans the packed `Bitmap` buffer
-directly — no Python per-bit loop and no `Bitmap`↔tensor conversion. The
-pure-Python version is kept as a reference/oracle and as a fallback if the
-native op is unavailable. See `benchmark.py`
+`fold` and `unfold` delegate to **native C++** (`csrc/storage_manager/fold.cpp`,
+exported as `native_storage_ops.fold` / `unfold`) and `find_rightmost_one` to
+`Bitmap.find_rightmost_one()`. They scan the packed `Bitmap` buffer directly —
+no Python per-bit loop and no `Bitmap`↔tensor conversion. Pure-Python fallbacks
+(`_fold_python` / `_unfold_python`) are used only if the extension lacks the
+ops, and serve as the equivalence oracle in tests. See `benchmark.py`
 (`python -m lmcache.v1.distributed.bitmap_ops.benchmark`):
 
-| Case | Python | native | speedup |
+| Case (full pipeline) | Python | native | speedup |
 |---|---|---|---|
-| DeepSeek 1M @256, 8 groups, world_size=8 (262k keys), all present | ~186 ms | ~0.57 ms | ~325× |
-| same, 50% prefix present (realistic) | ~90 ms | ~0.35 ms | ~258× |
-| world_size=1 (32k keys) | ~75 ms | ~0.17 ms | ~450× |
-| stress: 4M keys | ~1600 ms | ~4.7 ms | ~340× |
+| DeepSeek 1M @256, 8 groups, world_size=8 (262k keys), all present | ~158 ms | ~0.6 ms | ~260× |
+| same, 50% prefix present (realistic) | ~75 ms | ~0.35 ms | ~215× |
+| world_size=1 (32k keys) | ~46 ms | ~0.17 ms | ~275× |
+| stress: 4M keys | ~1300 ms | ~5 ms | ~255× |
 
-The unfold writes the retained keys back as contiguous spans via
+`unfold` writes the retained keys back as contiguous spans via
 `Bitmap::set_range` (whole-byte fills) rather than per-bit sets, so even the
 all-present worst case stays sub-millisecond at the DeepSeek scale. The
-remaining cost is the presence scan; a word-level rank-reduction (all-ranks
-test over a contiguous span) is the next lever if it's ever needed.
+remaining cost is the presence scan in `fold`; a word-level rank-reduction
+(all-ranks test over a contiguous span) is the next lever if it's ever needed.

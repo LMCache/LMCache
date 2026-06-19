@@ -19,12 +19,16 @@ using lmcache::utils::RangePatternMatcher;
 PYBIND11_MODULE(native_storage_ops, m) {
   m.doc() = "Native storage operations for LMCache";
 
-  m.def("fold_unfold_ranked", &lmcache::storage_manager::fold_unfold_ranked,
-        py::arg("found"), py::arg("num_chunks"), py::arg("num_ranks"),
-        py::arg("group_windows"),
-        "Fold/unfold over the group x chunk x kv_rank layout. Returns "
-        "(hit_length, retain_mask): the longest model-wide prefix every object "
-        "group can serve and the keys each group must retain to serve it.");
+  m.def("fold", &lmcache::storage_manager::fold, py::arg("found"),
+        py::arg("num_chunks"), py::arg("num_ranks"), py::arg("group_windows"),
+        "Fold per-(group, chunk, rank) presence into a servable-prefix-lengths "
+        "bitmap (size num_chunks + 1); bit L set iff every object group can "
+        "serve a length-L prefix.");
+  m.def(
+      "unfold", &lmcache::storage_manager::unfold, py::arg("hit_length"),
+      py::arg("num_chunks"), py::arg("num_ranks"), py::arg("group_windows"),
+      "Expand a model-wide hit length into the per-group retain mask over the "
+      "group x chunk x kv_rank layout.");
 
   py::class_<TTLLock>(m, "TTLLock")
       .def(py::init<uint32_t>(), py::arg("ttl_second") = 300,
@@ -57,6 +61,8 @@ PYBIND11_MODULE(native_storage_ops, m) {
            "Count the number of leading zeros.")
       .def("count_leading_ones", &Bitmap::clo,
            "Count the number of leading ones.")
+      .def("find_rightmost_one", &Bitmap::find_rightmost_one,
+           "Index of the highest set bit (the right-most 1), or -1 if none.")
       .def("__and__", &Bitmap::operator&, py::arg("other"),
            "Bitwise AND operation between two bitmaps.")
       .def("__or__", &Bitmap::operator|, py::arg("other"),

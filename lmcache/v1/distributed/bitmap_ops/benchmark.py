@@ -18,8 +18,15 @@ import time
 
 # First Party
 from lmcache.native_storage_ops import Bitmap
-from lmcache.native_storage_ops import fold_unfold_ranked as native_fold
-from lmcache.v1.distributed.bitmap_ops.fold import _fold_unfold_ranked_python
+from lmcache.v1.distributed.bitmap_ops import find_rightmost_one, fold_unfold_ranked
+from lmcache.v1.distributed.bitmap_ops.fold import _fold_python, _unfold_python
+
+
+def _python_pipeline(found, num_chunks, num_ranks, group_windows):
+    """Pure-Python fold -> find_rightmost_one -> unfold (no native ops)."""
+    servable = _fold_python(found, num_chunks, num_ranks, group_windows)
+    hit = find_rightmost_one(servable)
+    return hit, _unfold_python(hit, num_chunks, num_ranks, group_windows)
 
 
 def _best_ms(fn, reps: int) -> float:
@@ -49,11 +56,11 @@ def bench_case(
 
     windows = list(group_windows)
     py_ms = _best_ms(
-        lambda: _fold_unfold_ranked_python(found, num_chunks, num_ranks, windows),
+        lambda: _python_pipeline(found, num_chunks, num_ranks, windows),
         reps,
     )
     native_ms = _best_ms(
-        lambda: native_fold(found, num_chunks, num_ranks, windows),
+        lambda: fold_unfold_ranked(found, num_chunks, num_ranks, windows),
         reps,
     )
     speedup = py_ms / native_ms if native_ms else float("inf")

@@ -117,6 +117,10 @@ class Bitmap:
         """Return the number of leading ones."""
         ...
 
+    def find_rightmost_one(self) -> int:
+        """Index of the highest set bit (the right-most 1), or -1 if none."""
+        ...
+
     def __and__(self, other: Bitmap) -> Bitmap:
         """
         Bitwise AND with another bitmap.
@@ -159,16 +163,13 @@ class Bitmap:
         """String representation: '1' for set bits, '0' for clear bits."""
         ...
 
-def fold_unfold_ranked(
+def fold(
     found: Bitmap,
     num_chunks: int,
     num_ranks: int,
     group_windows: Sequence[int],
-) -> tuple[int, Bitmap]:
-    """Fold/unfold over the ``group x chunk x kv_rank`` ranked layout.
-
-    The longest model-wide prefix every object group can serve (full attention
-    or a cross-chunk sliding window) plus the keys each group must retain.
+) -> Bitmap:
+    """Fold per-(group, chunk, rank) presence into servable prefix lengths.
 
     Args:
         found: Group-major / chunk-major / rank-minor presence bitmap of length
@@ -179,9 +180,30 @@ def fold_unfold_ranked(
             ``<= 0`` means full attention.
 
     Returns:
-        ``(hit_length, retain_mask)``: the hit length in chunks and a retain
-        mask over the same ranked layout (all ranks of each retained
-        ``(group, chunk)`` set).
+        A bitmap of size ``num_chunks + 1``; bit ``L`` set iff every object
+        group can serve a length-``L`` prefix. Bit 0 is always set.
+    """
+    ...
+
+def unfold(
+    hit_length: int,
+    num_chunks: int,
+    num_ranks: int,
+    group_windows: Sequence[int],
+) -> Bitmap:
+    """Expand a model-wide hit length into the per-group retain mask.
+
+    Args:
+        hit_length: Model-wide prefix hit length in chunks (clamped to
+            ``num_chunks``).
+        num_chunks: Number of LMCache chunks in the request.
+        num_ranks: Number of kv_rank shards per chunk.
+        group_windows: Per-object-group cross-chunk window size in chunks;
+            ``<= 0`` means full attention.
+
+    Returns:
+        Retain mask of length ``len(group_windows) * num_chunks * num_ranks``
+        (all ranks of each retained ``(group, chunk)`` set).
     """
     ...
 
