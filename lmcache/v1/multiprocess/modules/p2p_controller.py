@@ -366,6 +366,9 @@ class P2PController:
         except (httpx.HTTPError, ValueError) as e:
             logger.warning("P2P instance discovery failed: %s", e)
             return self._apply_state(_P2PState.UNREGISTERED, {})
+        except Exception:
+            logger.exception("Unexpected error during P2P instance discovery")
+            return self._apply_state(_P2PState.UNREGISTERED, {})
 
         if not self._is_self_registered(instances):
             return self._apply_state(_P2PState.UNREGISTERED, {})

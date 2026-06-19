@@ -459,6 +459,18 @@ def test_poll_cycle_registered_excludes_self_and_adds_peer():
     assert status["p2p_peers"] == ["peerA"]
 
 
+def test_poll_cycle_unexpected_error_does_not_crash():
+    """An unexpected parsing error is caught and maps to Unregistered."""
+    controller, _ = _make_controller()
+    client = _enable_polling(controller)
+    # A non-dict entry makes parsing raise AttributeError (raw.get on a str).
+    client.get.return_value = _instances_response(["not-a-dict"])
+
+    summary = controller._poll_cycle()  # must not raise
+    assert summary.success is True
+    assert controller.report_status()["p2p_state"] == _P2PState.UNREGISTERED.value
+
+
 def test_poll_cycle_skips_peer_without_p2p_url():
     """A peer that advertises no p2p url is not adapted."""
     controller, ctx = _make_controller()
