@@ -99,6 +99,7 @@ Documentation
    :caption: Non-KV caching
 
    non_kv_cache/encoder_cache
+   non_kv_cache/hidden_states
 
 :raw-html:`<br />`
 

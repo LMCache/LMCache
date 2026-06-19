@@ -173,8 +173,9 @@ class HiddenStateStore:
                 f"len(token_ids) - token_offset ({expected_rows})"
             )
 
-        hs_cpu = hidden_states.detach().to("cpu", dtype=torch.float32).contiguous()
-        hidden_dim = hs_cpu.shape[1]
+        # Detach but keep the tensor on its original device
+        hs_src = hidden_states.detach()
+        hidden_dim = hs_src.shape[1]
 
         chunks = self._chunk(token_ids)
         stored = 0
@@ -207,7 +208,8 @@ class HiddenStateStore:
                     "HiddenStateStore: allocator returned MemoryObj with no "
                     "backing tensor"
                 )
-            tensor.copy_(hs_cpu[start - token_offset : end - token_offset])
+
+            tensor.copy_(hs_src[start - token_offset : end - token_offset])
 
             layer_map = self._chunks.setdefault(key, {})
             layer_map[layer_idx] = obj
@@ -239,6 +241,7 @@ class HiddenStateStore:
         """
         chunks = self._chunk(token_ids)
         out_rows: List[torch.Tensor] = []
+        hit_keys: List[CacheEngineKey] = []
         for _, _, key in chunks:
             if not self._kv_present(key):
                 # KV evicted -> drop HS for this key (coupled eviction) and stop.
@@ -258,7 +261,10 @@ class HiddenStateStore:
                     "HiddenStateStore: cached MemoryObj has no backing tensor"
                 )
             out_rows.append(tensor)
-            # Update LRU on hit.
+            hit_keys.append(key)
+
+        # evict the keys from the LRU
+        for key in reversed(hit_keys):
             self._lru.pop(key, None)
             self._lru[key] = None
 
@@ -318,7 +324,7 @@ class HiddenStateStore:
         shape = torch.Size([n_tokens, hidden_dim])
         dtype = torch.float32
         for _ in range(_HS_ALLOC_MAX_RETRIES):
-            obj = self._allocator.allocate(shape, dtype, MemoryFormat.EC_TD)
+            obj = self._allocator.allocate(shape, dtype, MemoryFormat.HS_TD)
             if obj is not None:
                 return obj
             # Pressure: drop our LRU entry and retry. Never touches KV.

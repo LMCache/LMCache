@@ -75,6 +75,14 @@ class MemoryFormat(Enum):
     """[num_tokens, hidden_dim]
     """
 
+    # Hidden-state store (HS) tensor format. Same logical shape as EC_TD
+    # ([num_tokens, hidden_dim]) but tagged separately so the allocator and
+    # any future mp/serialization paths can distinguish encoder-cache entries
+    # from hidden-state entries.
+    HS_TD = auto()
+    """[num_tokens, hidden_dim]
+    """
+
     def token_dim(self) -> int:
         if self == MemoryFormat.KV_2LTD:
             return 2
@@ -89,6 +97,8 @@ class MemoryFormat(Enum):
         elif self == MemoryFormat.KV_MLA_FMT:
             return 2
         elif self == MemoryFormat.EC_TD:
+            return 0
+        elif self == MemoryFormat.HS_TD:
             return 0
         return 0
 
@@ -2126,6 +2136,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_T2D,
             MemoryFormat.KV_MLA_FMT,
             MemoryFormat.EC_TD,
+            MemoryFormat.HS_TD,
         ]:
             with self.host_mem_lock:
                 return self.pin_allocator.allocate(shapes, dtypes, fmt, str(self))
@@ -2151,6 +2162,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_T2D,
             MemoryFormat.KV_MLA_FMT,
             MemoryFormat.EC_TD,
+            MemoryFormat.HS_TD,
         ]:
             with self.host_mem_lock:
                 return self.pin_allocator.batched_allocate(
@@ -2170,6 +2182,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_T2D,
             MemoryFormat.KV_MLA_FMT,
             MemoryFormat.EC_TD,
+            MemoryFormat.HS_TD,
         ]:
             with self.host_mem_lock:
                 self.pin_allocator.free(memory_obj)
@@ -2196,6 +2209,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_T2D,
             MemoryFormat.KV_MLA_FMT,
             MemoryFormat.EC_TD,
+            MemoryFormat.HS_TD,
         ]:
             with self.host_mem_lock:
                 self.pin_allocator.batched_free(memory_objs)

@@ -1,9 +1,11 @@
 # HiddenStateStore
 
 `HiddenStateStore` is an LMCache-internal store dedicated to caching per-token
-hidden-state tensors next to KV chunks. It exists to support multi-stage
-pipelines (e.g. vLLM-Omni thinker -> talker) where the talker needs the
-thinker's intermediate activations for the cached prefix.
+hidden-state tensors next to KV chunks. It exists to support any system where
+we may need to draw out intermediate activations from an inference forward
+pass (e.g. vLLM-Omni thinker -> talker) where a downstream stage needs the
+upstream stage's intermediate activations for the cached prefix and cannot
+reconstruct them from KV alone.
 
 ## Goals
 
@@ -12,7 +14,12 @@ thinker's intermediate activations for the cached prefix.
   `engine.hidden_state_store`, but does not embed hidden-state state in
   itself.
 - Use a **separate pinned CPU memory pool** so that hidden-state allocations
-  cannot fragment the KV pool.
+  cannot fragment the KV pool. KV tensors and intermediate activations have
+  **heterogeneous shapes** (KV is per-layer `[num_tokens, 2, head_dim]`-style
+  while hidden states / other activations are typically
+  `[num_tokens, hidden_dim]` and may differ in dtype and per-layer count), so
+  packing them into a shared allocator would either waste space or force
+  one cache to evict the other under pressure.
 - **Reuse** existing chunking and key generation
   (`ChunkedTokenDatabase.process_tokens` -> `CacheEngineKey`) so each hidden
   chunk is keyed identically to its KV counterpart.

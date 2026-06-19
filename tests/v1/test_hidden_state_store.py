@@ -171,6 +171,54 @@ def test_kv_eviction_truncates_retrieved_prefix():
 
 
 # ---------------------------------------------------------------------------
+# Retrieve refreshes LRU in reverse prefix order
+# ---------------------------------------------------------------------------
+
+
+def test_retrieve_refreshes_lru_in_reverse_prefix_order():
+    """After a prefix retrieve, earliest chunks are MRU and suffix chunks LRU.
+
+    ``retrieve_hidden_states`` collects hit keys during the prefix walk, then
+    touches ``_lru`` in reverse order so that under HS-only pool pressure the
+    suffix is evicted before the prefix (matching KV cache LRU semantics).
+    """
+    fix = _Fixture()
+    token_ids = list(range(3 * CHUNK_SIZE))
+    keys = fix.keys_for(token_ids)
+    fix.mark_kv_present(keys)
+
+    fix.store.store_hidden_states(
+        token_ids, torch.randn(len(token_ids), HIDDEN_DIM)
+    )
+    # Store order: oldest -> newest.
+    assert list(fix.store._lru.keys()) == keys
+
+    fix.store.retrieve_hidden_states(token_ids)
+    # Reverse touch on hit: suffix oldest, prefix newest.
+    assert list(fix.store._lru.keys()) == [keys[2], keys[1], keys[0]]
+    fix.close()
+
+
+def test_retrieve_reverse_lru_evicts_suffix_before_prefix():
+    """HS-only eviction after retrieve drops the suffix chunk, not the prefix."""
+    fix = _Fixture()
+    token_ids = list(range(3 * CHUNK_SIZE))
+    keys = fix.keys_for(token_ids)
+    fix.mark_kv_present(keys)
+
+    fix.store.store_hidden_states(
+        token_ids, torch.randn(len(token_ids), HIDDEN_DIM)
+    )
+    fix.store.retrieve_hidden_states(token_ids)
+
+    assert fix.store._evict_one_lru()
+    assert fix.store.has_chunk(keys[0])
+    assert fix.store.has_chunk(keys[1])
+    assert not fix.store.has_chunk(keys[2])
+    fix.close()
+
+
+# ---------------------------------------------------------------------------
 # HS-only eviction does not touch KV
 # ---------------------------------------------------------------------------
 
