@@ -53,6 +53,10 @@ from lmcache.v1.distributed.transfer_channel import (  # noqa: E402
 from lmcache.v1.distributed.transfer_channel.impl.nixl_impl import (  # noqa: E402
     NixlTransferChannelContext,
 )
+from lmcache.v1.multiprocess.config import (  # noqa: E402
+    CoordinatorConfig,
+    P2PConfig,
+)
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController  # noqa: E402
 from lmcache.v1.multiprocess.mq import MessageQueueServer  # noqa: E402
 from lmcache.v1.multiprocess.protocol import get_payload_classes  # noqa: E402
@@ -138,7 +142,12 @@ def test_p2p_adapter_end_to_end():
         )
 
         # --- Peer side: MQ server hosting the P2P controller ---
-        controller = P2PController(_PeerContext(peer_sm))
+        controller = P2PController(
+            _PeerContext(peer_sm),
+            P2PConfig(),
+            CoordinatorConfig(),
+            instance_id="peer",
+        )
         peer_mq_url = f"tcp://{_next_url()}"
         mq_server = MessageQueueServer(peer_mq_url, zmq.Context.instance())
         specs = controller.get_handlers()

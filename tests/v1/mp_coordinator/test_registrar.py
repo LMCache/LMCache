@@ -42,6 +42,54 @@ def test_register_returns_assigned_id():
     asyncio.run(run())
 
 
+def test_register_forwards_p2p_and_mq_fields():
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Standard
+        import json
+
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"instance_id": "i1", "re_registered": False})
+
+    async def run():
+        async with _client(handler) as client:
+            await register(
+                client,
+                _BASE,
+                http_port=8080,
+                advertise_ip="10.0.0.1",
+                instance_id="i1",
+                p2p_advertised_url="10.0.0.1:7600",
+                mq_port=5555,
+            )
+
+    asyncio.run(run())
+    # The MQ server is reachable at the same advertised ip, so no separate
+    # mq_ip is sent -- only the port.
+    assert captured["ip"] == "10.0.0.1"
+    assert captured["p2p_advertised_url"] == "10.0.0.1:7600"
+    assert captured["mq_port"] == 5555
+
+
+def test_register_omits_mq_port_when_p2p_disabled():
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Standard
+        import json
+
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"instance_id": "i1", "re_registered": False})
+
+    async def run():
+        async with _client(handler) as client:
+            await register(client, _BASE, http_port=8080, advertise_ip="10.0.0.1")
+
+    asyncio.run(run())
+    assert captured["mq_port"] == 0
+
+
 async def _run_loop_briefly(client: httpx.AsyncClient, **kwargs) -> None:
     """Run keep_registered for a few ticks, then cancel it."""
     task = asyncio.create_task(
