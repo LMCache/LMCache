@@ -2,7 +2,21 @@
 
 **Repository:** https://github.com/efschu/LMCache  
 **Branch:** `dev`  
-**Latest Wheel:** `wheelhouse/lmcache-0.4.8rc2.dev15-cp312-cp312-linux_x86_64.whl`
+**Latest Release:** [v0.4.8rc2-dev15](https://github.com/efschu/LMCache/releases/tag/v0.4.8rc2-dev15)
+
+---
+
+## Downloads
+
+| Asset | SHA256 |
+|-------|--------|
+| `lmcache-0.4.8rc2.dev15-cp312-cp312-linux_x86_64.whl` | `ebbf8be0...` |
+
+**Quick Install:**
+```bash
+curl -L -O https://github.com/efschu/LMCache/releases/download/v0.4.8rc2-dev15/lmcache-0.4.8rc2.dev15-cp312-cp312-linux_x86_64.whl
+pip install lmcache-0.4.8rc2.dev15-cp312-cp312-linux_x86_64.whl --force-reinstall --no-deps
+```
 
 ---
 
@@ -134,16 +148,12 @@ vllm serve Qwen/Qwen3.6-27B \
 ---
 
 ## Documentation
-
 | Document | Description |
 |----------|-------------|
 | [README.md](README.md) | This file - Overview and quick start |
-| [BUILD.md](docs/BUILD.md) | Detailed build instructions for wheels |
+| [BUILD_GUIDE.md](docs/BUILD_GUIDE.md) | **Step-by-step build instructions** |
+| [BUILD.md](docs/BUILD.md) | Technical build details and CI/CD |
 | [Lmcache_engine_driven_multigroup.md](Lmcache_engine_driven_multigroup.md) | Full design document with protocol specs |
-
----
-
-## Build from Source
 
 See [BUILD.md](docs/BUILD.md) for detailed build instructions.
 
