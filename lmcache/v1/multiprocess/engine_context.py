@@ -40,6 +40,10 @@ class _LayoutDescEntry:
 
     layout_desc: MemoryLayoutDesc
     ref_count: int
+    object_group_windows: tuple[int, ...] = ()
+    """Per-object-group cross-chunk sliding-window sizes (in chunks), in
+    object-group order, used by the hybrid prefix-cache lookup. ``-1`` per entry
+    means full attention; an empty tuple means a single full-attention group."""
 
 
 class LayoutDescRegistry:
@@ -62,6 +66,7 @@ class LayoutDescRegistry:
         model_name: str,
         world_size: int,
         layout_desc: MemoryLayoutDesc,
+        object_group_windows: tuple[int, ...] = (),
     ) -> None:
         """Register a layout descriptor for a (model_name, world_size) pair.
 
@@ -72,6 +77,10 @@ class LayoutDescRegistry:
             model_name: The model name.
             world_size: The world size.
             layout_desc: The memory layout descriptor.
+            object_group_windows: Per-object-group cross-chunk sliding-window
+                sizes (in chunks), in object-group order, for the hybrid
+                prefix-cache lookup; ``-1`` per entry means full attention.
+                Empty means a single full-attention group.
         """
         key = (model_name, world_size)
         with self._lock:
@@ -80,10 +89,12 @@ class LayoutDescRegistry:
                 self._registry[key] = _LayoutDescEntry(
                     layout_desc=layout_desc,
                     ref_count=1,
+                    object_group_windows=object_group_windows,
                 )
                 return
 
             entry.layout_desc = layout_desc
+            entry.object_group_windows = object_group_windows
             entry.ref_count += 1
 
     def unregister(self, model_name: str, world_size: int) -> None:
@@ -123,6 +134,26 @@ class LayoutDescRegistry:
             if entry is None:
                 return None
             return entry.layout_desc
+
+    def find_object_group_windows(
+        self, model_name: str, world_size: int
+    ) -> tuple[int, ...]:
+        """Look up the per-object-group windows for a (model_name, world_size).
+
+        Args:
+            model_name: The model name.
+            world_size: The world size.
+
+        Returns:
+            The per-object-group cross-chunk window sizes registered for the
+            pair, or an empty tuple if the pair is not registered (treated as a
+            single full-attention group by callers).
+        """
+        with self._lock:
+            entry = self._registry.get((model_name, world_size))
+            if entry is None:
+                return ()
+            return entry.object_group_windows
 
 
 class MPCacheServerContext:

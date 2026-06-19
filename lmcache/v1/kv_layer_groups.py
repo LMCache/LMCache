@@ -7,6 +7,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
+import os
 
 # Third Party
 import torch
@@ -23,6 +24,29 @@ if TYPE_CHECKING:
     from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 
 logger = init_logger(__name__)
+
+# Toggle for splitting kernel groups into per-window object groups. Off by
+# default, which keeps every kernel group in a single full-attention object
+# group (the pre-hybrid behavior). Read at detection time so it can be set per
+# process / overridden in tests.
+SEPARATE_OBJECT_GROUPS_ENV = "LMCACHE_SEPARATE_OBJECT_GROUPS"
+
+
+def separate_object_groups_enabled() -> bool:
+    """Whether object-group separation by sliding-window size is enabled.
+
+    Controlled by the :data:`SEPARATE_OBJECT_GROUPS_ENV` environment variable;
+    accepts ``1``/``true``/``yes``/``on`` (case-insensitive). Defaults to off.
+
+    Returns:
+        ``True`` if separation is enabled, ``False`` otherwise.
+    """
+    return os.getenv(SEPARATE_OBJECT_GROUPS_ENV, "false").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
 # ------------------------------------------------------------------ #
 #  Constants                                                           #
@@ -522,13 +546,10 @@ class KVLayerGroupsManager:
             object group must share the same "big-sliding-window" size -- so that
             they can be retrieved at the same time from the same object.
             For small sliding window (subchunk window) models, it will return 1.
+            When object-group separation is disabled (the default), there is a
+            single full-attention object group and this returns ``-1``.
         """
-        # NOTE(ApostaC): object-level skipping is not enabled yet, so we
-        # always return -1 here instead of reading the object group's
-        # ``sw_size_chunks``. Switch to
-        # ``self._object_groups[object_group_idx].sw_size_chunks`` once the
-        # lookup/registry side supports multiple object groups.
-        return -1
+        return self._object_groups[object_group_idx].sw_size_chunks
 
     def calculate_num_blocks(self, kernel_group_idx: int, num_tokens: int) -> int:
         """Calculate the number of blocks for a given number of tokens in a
@@ -556,40 +577,50 @@ class KVLayerGroupsManager:
     def _detect_object_groups(
         self, engine_group_infos: "Sequence[EngineGroupInfo]"
     ) -> list[ObjectGroupInfo]:
-        """Detect object groups based on the provided engine group infos.
+        """Bucket kernel groups into object groups.
+
+        When object-group separation is disabled (the default; see
+        :func:`separate_object_groups_enabled`), every kernel group shares a
+        single full-attention object group -- the pre-hybrid behavior. When
+        enabled, kernel groups are bucketed by cross-chunk sliding-window size:
+        non-sliding-window groups (``sw_size_tokens == -1``) share one
+        full-attention object group, and each distinct window size (rounded up
+        to chunks) forms its own object group, so the kernel groups inside one
+        object share a single prefix-matching rule. A non-hybrid model yields a
+        single full-attention object group either way.
 
         Args:
             engine_group_infos: LMCache-owned engine KV cache group metadata.
 
         Returns:
-            A list of ObjectGroupInfo instances representing the detected object groups.
+            One :class:`ObjectGroupInfo` per object group. Without separation, a
+            single group covering every kernel group; with separation, one group
+            per distinct window size, ordered by each bucket's first kernel
+            group index.
         """
-        # TODO(ApostaC): The following commented code groups the object groups based
-        # on the sliding window information. We need to re-enable this after the lookup
-        # logic for sliding window has been implemented.
-        # For now, we put all the kernel groups into one object group.
+        if not separate_object_groups_enabled():
+            return [
+                ObjectGroupInfo(
+                    kernel_group_indices=list(range(len(self._kernel_groups)))
+                )
+            ]
 
-        # chunk_size = self._lmcache_tokens_per_chunk
-        # groups_by_sw_size: dict[int, list[int]] = defaultdict(list)
-        # for kernel_group_idx, group in enumerate(self._kernel_groups):
-        #    if group.sw_size_tokens == -1:
-        #        sw_size_chunks = -1
-        #    else:
-        #        sw_size_chunks = (
-        #            group.sw_size_tokens + chunk_size - 1
-        #        ) // chunk_size
-        #    groups_by_sw_size[sw_size_chunks].append(kernel_group_idx)
-        # return [
-        #    ObjectGroupInfo(
-        #        kernel_group_indices=kernel_group_indices,
-        #        sw_size_chunks=sw_size_chunks,
-        #    )
-        #    for sw_size_chunks, kernel_group_indices in sorted(
-        #        groups_by_sw_size.items(), key=lambda kv: kv[1][0]
-        #    )
-        # ]
+        chunk_size = self._lmcache_tokens_per_chunk
+        groups_by_sw_size: dict[int, list[int]] = defaultdict(list)
+        for kernel_group_idx, group in enumerate(self._kernel_groups):
+            if group.sw_size_tokens == -1:
+                sw_size_chunks = -1
+            else:
+                sw_size_chunks = (group.sw_size_tokens + chunk_size - 1) // chunk_size
+            groups_by_sw_size[sw_size_chunks].append(kernel_group_idx)
         return [
-            ObjectGroupInfo(kernel_group_indices=list(range(len(self._kernel_groups))))
+            ObjectGroupInfo(
+                kernel_group_indices=kernel_group_indices,
+                sw_size_chunks=sw_size_chunks,
+            )
+            for sw_size_chunks, kernel_group_indices in sorted(
+                groups_by_sw_size.items(), key=lambda kv: kv[1][0]
+            )
         ]
 
     @staticmethod

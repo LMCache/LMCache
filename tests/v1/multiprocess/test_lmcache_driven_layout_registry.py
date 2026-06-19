@@ -12,10 +12,21 @@ import pytest
 import torch
 
 
+class _FakeKVLayerGroupsManager:
+    """Minimal manager stub: one full-attention object group."""
+
+    num_object_groups: int = 1
+
+    def get_sw_size_chunks(self, object_group_id: int) -> int:
+        """Full attention for every object group."""
+        return -1
+
+
 class _FakeGPUContext:
     """Small stand-in for GPUCacheContext used by registration tests."""
 
     num_layers: int = 2
+    kv_layer_groups_manager: _FakeKVLayerGroupsManager = _FakeKVLayerGroupsManager()
 
     def close(self) -> None:
         """No-op teardown (real GPUCacheContext.close deregisters its GDS buffer)."""
@@ -124,3 +135,55 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
 
     module.unregister_kv_cache(2)
     assert ctx.layout_desc_registry.find("shared-model", 1) is None
+
+
+def _layout() -> Any:
+    """A minimal layout descriptor for registry tests."""
+    # First Party
+    from lmcache.v1.distributed.api import MemoryLayoutDesc
+
+    return MemoryLayoutDesc(shapes=[torch.Size([2, 4])], dtypes=[torch.float16])
+
+
+def test_registry_object_group_windows_roundtrip() -> None:
+    """register stores per-group windows; find_object_group_windows reads them."""
+    # First Party
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    registry = LayoutDescRegistry()
+    registry.register("m", 2, _layout(), object_group_windows=(-1, 2))
+
+    assert registry.find_object_group_windows("m", 2) == (-1, 2)
+
+
+def test_registry_windows_default_empty_when_unregistered() -> None:
+    """find_object_group_windows returns () for an unknown (model, world_size)."""
+    # First Party
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    registry = LayoutDescRegistry()
+
+    assert registry.find_object_group_windows("missing", 1) == ()
+
+
+def test_registry_windows_default_empty_when_omitted() -> None:
+    """A registration without windows resolves to the empty tuple (single group)."""
+    # First Party
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    registry = LayoutDescRegistry()
+    registry.register("m", 1, _layout())
+
+    assert registry.find_object_group_windows("m", 1) == ()
+
+
+def test_registry_windows_updated_on_reregister() -> None:
+    """Re-registering the same pair refreshes the stored windows."""
+    # First Party
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    registry = LayoutDescRegistry()
+    registry.register("m", 1, _layout(), object_group_windows=(-1,))
+    registry.register("m", 1, _layout(), object_group_windows=(-1, 4))
+
+    assert registry.find_object_group_windows("m", 1) == (-1, 4)

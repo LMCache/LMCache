@@ -134,6 +134,12 @@ class InFlightPrefetchRequest:
     policy: TrimPolicy = TrimPolicy.PREFIX
     """Which retained-subset policy to apply (see :class:`TrimPolicy`)."""
 
+    group_windows: tuple[int, ...] = ()
+    """Per-object-group cross-chunk sliding-window sizes (in chunks), in
+    object-group order, propagated from the lookup for the prefetch policy.
+    Carried for the upcoming windowed fold; the current full-attention prefix
+    trim does not consume it. Empty means a single full-attention group."""
+
     # Lookup phase: adapter_idx -> task_id (removed as results arrive)
     pending_lookup_tasks: dict[int, L2TaskId] = field(default_factory=dict)
     # Lookup phase: adapter_idx -> bitmap (populated as results arrive)
@@ -209,6 +215,7 @@ class PrefetchController(StorageControllerInterface):
                 MemoryLayoutDesc,
                 int,
                 TrimPolicy,
+                tuple[int, ...],
             ]
         ] = []
 
@@ -227,6 +234,7 @@ class PrefetchController(StorageControllerInterface):
                 MemoryLayoutDesc,
                 int,
                 TrimPolicy,
+                tuple[int, ...],
             ]
         ] = []
         self._next_request_id: PrefetchRequestId = 0
@@ -292,6 +300,7 @@ class PrefetchController(StorageControllerInterface):
         layout_desc: MemoryLayoutDesc,
         extra_count: int = 0,
         policy: TrimPolicy = TrimPolicy.PREFIX,
+        group_windows: tuple[int, ...] = (),
     ) -> PrefetchRequestId:
         """
         Submit a prefetch request for the given keys.
@@ -318,6 +327,10 @@ class PrefetchController(StorageControllerInterface):
                 workers can each consume one read lock.
             policy: Which retained-subset policy to apply (see
                 :class:`TrimPolicy`).  Defaults to ``PREFIX``.
+            group_windows: Per-object-group cross-chunk sliding-window sizes (in
+                chunks), propagated to the request for the prefetch policy. The
+                current full-attention prefix trim does not consume it; empty
+                means a single full-attention group.
 
         Returns:
             A request ID for tracking via query_prefetch_result.
@@ -326,7 +339,7 @@ class PrefetchController(StorageControllerInterface):
             request_id = self._next_request_id
             self._next_request_id += 1
             self._submission_queue.append(
-                (request_id, keys, layout_desc, extra_count, policy)
+                (request_id, keys, layout_desc, extra_count, policy, group_windows)
             )
         self._submission_efd.notify()
         return request_id
@@ -554,11 +567,13 @@ class PrefetchController(StorageControllerInterface):
         while (
             self._pending_queue and len(self._in_flight_requests) < self._max_in_flight
         ):
-            request_id, keys, layout_desc, extra_count, policy = (
+            request_id, keys, layout_desc, extra_count, policy, group_windows = (
                 self._pending_queue.pop(0)
             )
             self._status_pending_count -= 1
-            self._start_lookup_phase(request_id, keys, layout_desc, extra_count, policy)
+            self._start_lookup_phase(
+                request_id, keys, layout_desc, extra_count, policy, group_windows
+            )
 
     # =========================================================================
     # Lookup phase
@@ -571,6 +586,7 @@ class PrefetchController(StorageControllerInterface):
         layout_desc: MemoryLayoutDesc,
         extra_count: int = 0,
         policy: TrimPolicy = TrimPolicy.PREFIX,
+        group_windows: tuple[int, ...] = (),
     ) -> None:
         """Submit lookup_and_lock to all adapters for a new request."""
         if not self._l2_adapters:
@@ -589,6 +605,7 @@ class PrefetchController(StorageControllerInterface):
             phase=PrefetchPhase.LOOKUP,
             extra_count=extra_count,
             policy=policy,
+            group_windows=group_windows,
             pending_lookup_tasks=pending_lookup_tasks,
         )
         self._in_flight_requests[request_id] = request
