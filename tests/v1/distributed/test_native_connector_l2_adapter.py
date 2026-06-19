@@ -16,7 +16,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
     NativeConnectorL2Adapter,
     _object_key_to_string,
@@ -27,6 +27,8 @@ from lmcache.v1.memory_management import (
     TensorMemoryObj,
 )
 from lmcache.v1.platform import consume_fd, create_event_notifier
+
+_EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
 # =============================================================================
 # Mock Native Connector (simulates the pybind C++ IStorageConnector interface)
@@ -498,7 +500,7 @@ class TestLookupAndLockInterface:
         key = create_object_key(999)
         lookup_fd = adapter.get_lookup_and_lock_event_fd()
 
-        task_id = adapter.submit_lookup_and_lock_task([key])
+        task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
 
         bitmap = adapter.query_lookup_and_lock_result(task_id)
@@ -517,7 +519,7 @@ class TestLookupAndLockInterface:
         adapter.pop_completed_store_tasks()
 
         # Lookup
-        task_id = adapter.submit_lookup_and_lock_task([key])
+        task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
 
         bitmap = adapter.query_lookup_and_lock_result(task_id)
@@ -535,7 +537,9 @@ class TestLookupAndLockInterface:
         wait_for_event_fd(store_fd, timeout=5.0)
         adapter.pop_completed_store_tasks()
 
-        task_id = adapter.submit_lookup_and_lock_task([existing, missing])
+        task_id = adapter.submit_lookup_and_lock_task(
+            [existing, missing], _EMPTY_LAYOUT
+        )
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
 
         bitmap = adapter.query_lookup_and_lock_result(task_id)
@@ -547,7 +551,7 @@ class TestLookupAndLockInterface:
         key = create_object_key(1)
         lookup_fd = adapter.get_lookup_and_lock_event_fd()
 
-        task_id = adapter.submit_lookup_and_lock_task([key])
+        task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         wait_for_event_fd(lookup_fd, timeout=5.0)
 
         result1 = adapter.query_lookup_and_lock_result(task_id)
@@ -580,7 +584,7 @@ class TestUnlockInterface:
         wait_for_event_fd(store_fd, timeout=5.0)
         adapter.pop_completed_store_tasks()
 
-        task_id = adapter.submit_lookup_and_lock_task([key])
+        task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         wait_for_event_fd(lookup_fd, timeout=5.0)
         adapter.query_lookup_and_lock_result(task_id)
 
@@ -682,7 +686,7 @@ class TestEndToEndWorkflow:
         assert adapter.pop_completed_store_tasks()[store_tid].is_successful()
 
         # Lookup
-        lookup_tid = adapter.submit_lookup_and_lock_task([key])
+        lookup_tid = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         bitmap = adapter.query_lookup_and_lock_result(lookup_tid)
         assert bitmap.test(0) is True
@@ -715,7 +719,7 @@ class TestEndToEndWorkflow:
         assert adapter.pop_completed_store_tasks()[store_tid].is_successful()
 
         # Lookup all
-        lookup_tid = adapter.submit_lookup_and_lock_task(keys)
+        lookup_tid = adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         bitmap = adapter.query_lookup_and_lock_result(lookup_tid)
         for i in range(n):
@@ -1156,7 +1160,7 @@ class TestDeleteInterface:
         adapter.pop_completed_store_tasks()
 
         # Verify exists
-        task_id = adapter.submit_lookup_and_lock_task([key])
+        task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         wait_for_event_fd(lookup_fd, timeout=5.0)
         bitmap = adapter.query_lookup_and_lock_result(task_id)
         assert bitmap.test(0) is True
@@ -1166,7 +1170,7 @@ class TestDeleteInterface:
         adapter.delete([key])
 
         # Verify gone
-        task_id = adapter.submit_lookup_and_lock_task([key])
+        task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         wait_for_event_fd(lookup_fd, timeout=5.0)
         bitmap = adapter.query_lookup_and_lock_result(task_id)
         assert bitmap.test(0) is False
@@ -1193,7 +1197,7 @@ class TestDeleteInterface:
         adapter.delete(keys[:3])
 
         # Verify: first 3 gone, last 2 remain
-        task_id = adapter.submit_lookup_and_lock_task(keys)
+        task_id = adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
         wait_for_event_fd(lookup_fd, timeout=5.0)
         bitmap = adapter.query_lookup_and_lock_result(task_id)
         for i in range(3):

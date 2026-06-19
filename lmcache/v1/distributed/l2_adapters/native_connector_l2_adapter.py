@@ -29,7 +29,7 @@ import threading
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
@@ -226,6 +226,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     def submit_lookup_and_lock_task(
         self,
         keys: list[ObjectKey],
+        layout_desc: MemoryLayoutDesc,
     ) -> L2TaskId:
         key_strings = [_object_key_to_string(k) for k in keys]
 

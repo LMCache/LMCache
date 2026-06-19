@@ -46,6 +46,8 @@ from lmcache.v1.memory_management import (
 )
 from lmcache.v1.platform import consume_fd
 
+_EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
+
 _DEFAULT_SHAPE = torch.Size([2, 4, 8])
 
 
@@ -178,7 +180,7 @@ def bitmap_to_bools(bitmap: Bitmap, size: int) -> list[bool]:
 
 
 def lookup_and_wait(adapter: DaxL2Adapter, keys: list[ObjectKey]) -> list[bool]:
-    task_id = adapter.submit_lookup_and_lock_task(keys)
+    task_id = adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
     assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
     bitmap = adapter.query_lookup_and_lock_result(task_id)
     assert bitmap is not None
@@ -494,7 +496,9 @@ def test_dax_adapter_store_lookup_load_and_one_shot_results(tmp_path):
         assert adapter.pop_completed_store_tasks() == {}
         assert listener.stored == [[key0, key2]]
 
-        lookup_task = adapter.submit_lookup_and_lock_task([key0, key1, key2])
+        lookup_task = adapter.submit_lookup_and_lock_task(
+            [key0, key1, key2], _EMPTY_LAYOUT
+        )
         assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         lookup_bitmap = adapter.query_lookup_and_lock_result(lookup_task)
         assert lookup_bitmap is not None
@@ -537,11 +541,11 @@ def test_dax_adapter_unlock_refcount_and_delete_skips_locked_keys(tmp_path):
         key = create_object_key(20)
         store_and_wait(adapter, key, obj)
 
-        first_lookup = adapter.submit_lookup_and_lock_task([key])
+        first_lookup = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         assert adapter.query_lookup_and_lock_result(first_lookup) is not None
 
-        second_lookup = adapter.submit_lookup_and_lock_task([key])
+        second_lookup = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         assert adapter.query_lookup_and_lock_result(second_lookup) is not None
 
@@ -619,7 +623,9 @@ def test_dax_adapter_full_arena_does_not_evict_internally(tmp_path):
         assert listener.stored == [[key0], [key1]]
         assert adapter.get_usage().usage_fraction == pytest.approx(1.0)
 
-        lookup_task = adapter.submit_lookup_and_lock_task([key0, key1, key2])
+        lookup_task = adapter.submit_lookup_and_lock_task(
+            [key0, key1, key2], _EMPTY_LAYOUT
+        )
         assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         bitmap = adapter.query_lookup_and_lock_result(lookup_task)
         assert bitmap is not None
@@ -723,7 +729,7 @@ def test_dax_adapter_restart_is_volatile_only(tmp_path):
 
         reopened = DaxL2Adapter(config)
         try:
-            lookup_task = reopened.submit_lookup_and_lock_task([key])
+            lookup_task = reopened.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
             assert wait_for_event_fd(reopened.get_lookup_and_lock_event_fd())
             bitmap = reopened.query_lookup_and_lock_result(lookup_task)
             assert bitmap is not None

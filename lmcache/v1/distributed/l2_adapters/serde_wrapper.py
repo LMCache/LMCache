@@ -223,8 +223,10 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
     # Lookup / unlock (pure delegation)
     # ------------------------------------------------------------------
 
-    def submit_lookup_and_lock_task(self, keys: list[ObjectKey]) -> L2TaskId:
-        return self._inner.submit_lookup_and_lock_task(keys)
+    def submit_lookup_and_lock_task(
+        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+    ) -> L2TaskId:
+        return self._inner.submit_lookup_and_lock_task(keys, layout_desc)
 
     def query_lookup_and_lock_result(self, task_id: L2TaskId) -> Bitmap | None:
         return self._inner.query_lookup_and_lock_result(task_id)
