@@ -101,7 +101,8 @@ storage manager owns its lifecycle. The config carries the peer's two URLs:
 ## close()
 
 Sets a closed flag (later submits are inert), unregisters the lookup/load fds
-from the periodic notifier, closes the MQ client, and closes the three event
-notifiers. The transfer-channel client is **not** closed here — for
-bi-directional transports (NIXL) it is a shared view owned by the
-`TransferChannelContext`.
+from the periodic notifier, removes the transfer-channel client from the
+`TransferChannelContext` via `remove_transfer_channel_client(peer_url)` (which
+closes it and releases its transport handles), closes the MQ client, and closes
+the three event notifiers. `close()` is idempotent: the closed flag guards
+against a second teardown of these shared resources.
