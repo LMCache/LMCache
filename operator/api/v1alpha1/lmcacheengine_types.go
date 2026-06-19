@@ -251,6 +251,50 @@ type RawL2AdapterSpec struct {
 	Config map[string]apiextensionsv1.JSON `json:"config,omitempty"`
 }
 
+// CoordinatorConnectionSpec configures how an engine server registers with an
+// MP coordinator. It maps to the server's coordinator-client flags
+// (lmcache/v1/multiprocess/config.py: add_coordinator_args). Exactly one of
+// ref or url must be set.
+type CoordinatorConnectionSpec struct {
+	// ref names an LMCacheCoordinator in the same namespace. The operator
+	// resolves it to the coordinator's in-cluster Service URL.
+	// +optional
+	Ref *corev1.LocalObjectReference `json:"ref,omitempty"`
+
+	// url is an explicit coordinator base URL (e.g. http://coordinator:9300),
+	// used to target a coordinator the operator does not manage.
+	// +optional
+	URL *string `json:"url,omitempty"`
+
+	// advertiseIP is the IP the coordinator should reach this server at.
+	//
+	// DO NOT SET THIS IN ALMOST EVERY CASE. When unset, the server's pod IP is
+	// injected automatically via the downward API, which is the correct value
+	// for normal in-cluster deployments. Only set this if you know exactly what
+	// you are doing -- e.g. the coordinator runs outside the cluster and must
+	// reach the server through a specific externally-routable address. An
+	// incorrect value silently breaks coordinator-to-server connectivity.
+	// +optional
+	AdvertiseIP *string `json:"advertiseIP,omitempty"`
+
+	// heartbeatInterval is the seconds between heartbeats; must be > 0.
+	// +optional
+	// +kubebuilder:default=5
+	HeartbeatInterval *float64 `json:"heartbeatInterval,omitempty"`
+
+	// l2EventReporting enables reporting L2 store/lookup events to the
+	// coordinator for fleet-wide usage tracking and eviction.
+	// +optional
+	// +kubebuilder:default=false
+	L2EventReporting *bool `json:"l2EventReporting,omitempty"`
+
+	// l2EventFlushInterval is the seconds between L2 event flush attempts; must
+	// be > 0.
+	// +optional
+	// +kubebuilder:default=1
+	L2EventFlushInterval *float64 `json:"l2EventFlushInterval,omitempty"`
+}
+
 // LMCacheEngineSpec defines the desired state of LMCacheEngine.
 type LMCacheEngineSpec struct {
 	// gpuVendor selects the GPU vendor. "nvidia" (default) requires the NVIDIA
@@ -288,6 +332,11 @@ type LMCacheEngineSpec struct {
 	// Currently only a single adapter is supported.
 	// +optional
 	L2Backend *L2BackendSpec `json:"l2Backend,omitempty"`
+
+	// coordinator configures registration with an MP coordinator. When unset,
+	// the server does not register with any coordinator.
+	// +optional
+	Coordinator *CoordinatorConnectionSpec `json:"coordinator,omitempty"`
 
 	// resourceOverrides allows overriding auto-computed resource requirements.
 	// +optional

@@ -1,0 +1,218 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/observability/index.rst:2
+msgid "Observability"
+msgstr "可观察性"
+
+#: ../../source/mp/observability/index.rst:4
+msgid ""
+"LMCache multiprocess mode provides three complementary observability "
+"modes: **metrics** (Prometheus counters via OTel), **logging** (Python "
+"logging with optional OTel log forwarding), and **tracing** (OTel spans "
+"for per-request latency)."
+msgstr ""
+"LMCache MP 模式（多进程）提供三种互补的可观察性模式：\\ **指标**\\ （通过 OTel 的 Prometheus 计数器）、\\ **日志**\\ （带有可选 OTel 日志转发的 Python 日志记录）和 **追踪**\\ （OTel span，用于每个请求的延迟分析）。"
+
+#: ../../source/mp/observability/index.rst:9
+msgid ""
+"All three modes are powered by an internal **EventBus** that decouples "
+"producers (L1Manager, StorageManager, MPCacheServer) from subscribers."
+msgstr "这三种模式都由一个内部的 **EventBus** 提供支持，该总线将生产者（L1Manager、StorageManager、MPCacheServer）与订阅者解耦。"
+
+#: ../../source/mp/observability/index.rst:17
+msgid "Quick Start"
+msgstr "快速开始"
+
+#: ../../source/mp/observability/index.rst:19
+msgid ""
+"By default, **metrics** and **logging** are enabled; **tracing** is "
+"disabled. No extra flags are needed:"
+msgstr ""
+"默认情况下，\\ **指标**\\ 和\\ **日志记录**\\ 是启用的；\\ **追踪**\\ 是禁用的。无需额外的标志："
+
+#: ../../source/mp/observability/index.rst:27
+msgid "To enable tracing, supply an OTLP endpoint:"
+msgstr "要启用追踪，请提供 OTLP 端点："
+
+#: ../../source/mp/observability/index.rst:36
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/mp/observability/index.rst:42
+msgid "Argument"
+msgstr "参数"
+
+#: ../../source/mp/observability/index.rst:43
+#: ../../source/mp/observability/index.rst:91
+msgid "Default"
+msgstr "默认"
+
+#: ../../source/mp/observability/index.rst:44
+#: ../../source/mp/observability/index.rst:92
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/mp/observability/index.rst:45
+msgid "``--disable-observability``"
+msgstr "``--disable-observability``"
+
+#: ../../source/mp/observability/index.rst:46
+#: ../../source/mp/observability/index.rst:50
+#: ../../source/mp/observability/index.rst:53
+#: ../../source/mp/observability/index.rst:56
+msgid "off"
+msgstr "关闭"
+
+#: ../../source/mp/observability/index.rst:47
+msgid ""
+"Master switch: disable the EventBus entirely (no metrics, logging, or "
+"tracing subscribers are registered)."
+msgstr "主开关：完全禁用 EventBus（不注册任何指标、日志记录或追踪订阅者）。"
+
+#: ../../source/mp/observability/index.rst:49
+msgid "``--disable-metrics``"
+msgstr "``--disable-metrics``"
+
+#: ../../source/mp/observability/index.rst:51
+msgid "Skip metrics subscribers (Prometheus endpoint is not started)."
+msgstr "跳过指标订阅者（Prometheus 端点未启动）。"
+
+#: ../../source/mp/observability/index.rst:52
+msgid "``--disable-logging``"
+msgstr "``--disable-logging``"
+
+#: ../../source/mp/observability/index.rst:54
+msgid "Skip logging subscribers."
+msgstr "跳过日志订阅者。"
+
+#: ../../source/mp/observability/index.rst:55
+msgid "``--enable-tracing``"
+msgstr "``--enable-tracing``"
+
+#: ../../source/mp/observability/index.rst:57
+msgid "Register tracing subscribers. Requires ``--otlp-endpoint``."
+msgstr ""
+"注册追踪订阅者。需要 ``--otlp-endpoint``\\ 。"
+
+#: ../../source/mp/observability/index.rst:58
+msgid "``--event-bus-queue-size``"
+msgstr "``--event-bus-queue-size``"
+
+#: ../../source/mp/observability/index.rst:59
+msgid "``10000``"
+msgstr "``10000``"
+
+#: ../../source/mp/observability/index.rst:60
+msgid "Maximum events in the EventBus queue before tail-drop."
+msgstr "事件总线队列中最大事件数，超过后将进行尾部丢弃。"
+
+#: ../../source/mp/observability/index.rst:61
+msgid "``--otlp-endpoint``"
+msgstr "``--otlp-endpoint``"
+
+#: ../../source/mp/observability/index.rst:62
+#: ../../source/mp/observability/index.rst:73
+#: ../../source/mp/observability/index.rst:79
+msgid "*(none)*"
+msgstr "*(无)*"
+
+#: ../../source/mp/observability/index.rst:63
+msgid ""
+"OTLP gRPC endpoint (e.g. ``http://localhost:4317``). Used for exporting "
+"metrics (push mode) and traces."
+msgstr ""
+"OTLP gRPC 端点（例如 ``http://localhost:4317``\\ ）。用于导出指标（推送模式）和追踪数据。"
+
+#: ../../source/mp/observability/index.rst:65
+msgid "``--prometheus-port``"
+msgstr "``--prometheus-port``"
+
+#: ../../source/mp/observability/index.rst:66
+msgid "``9090``"
+msgstr "``9090``"
+
+#: ../../source/mp/observability/index.rst:67
+msgid "Port for the Prometheus ``/metrics`` HTTP endpoint."
+msgstr "Prometheus ``/metrics`` HTTP 端点的端口。"
+
+#: ../../source/mp/observability/index.rst:68
+msgid "``--metrics-sample-rate``"
+msgstr "``--metrics-sample-rate``"
+
+#: ../../source/mp/observability/index.rst:69
+msgid "``0.01``"
+msgstr "``0.01``"
+
+#: ../../source/mp/observability/index.rst:70
+msgid ""
+"Fraction of chunks/blocks to track for lifecycle histograms (0, 1.0]. "
+"Counters always count all events. Default is 1%."
+msgstr "用于生命周期直方图的 chunk/block 采样比例 (0, 1.0]。计数器始终统计所有事件。默认值为 1%。"
+
+#: ../../source/mp/observability/index.rst:72
+msgid "``--trace-level``"
+msgstr "``--trace-level``"
+
+#: ../../source/mp/observability/index.rst:74
+msgid ""
+"Enable trace recording at the given level. Currently only ``storage`` is "
+"supported (records ``StorageManager`` public-API calls for offline "
+"replay). When unset, trace recording is off. See :ref:`trace-recording` "
+"for details."
+msgstr ""
+"在指定级别启用追踪录制。目前仅支持 ``storage``\\ （记录 ``StorageManager`` 公共 API 调用以便离线回放）。未设置时，追踪录制关闭。详情请参见 :ref:`trace-recording`。"
+
+#: ../../source/mp/observability/index.rst:78
+msgid "``--trace-output``"
+msgstr "``--trace-output``"
+
+#: ../../source/mp/observability/index.rst:80
+msgid ""
+"Path to write the trace file. If omitted while ``--trace-level`` is set, "
+"a timestamped file under ``$TMPDIR`` is minted (``lmcache-"
+"trace-<pid>-<UTC>.lct``) and its path is logged at INFO."
+msgstr ""
+"追踪文件的写入路径。若设置了 ``--trace-level`` 但省略此项，将在 ``$TMPDIR`` 下自动生成一个带时间戳的文件（\\ ``lmcache-trace-<pid>-<UTC>.lct``\\ ），并以 INFO 级别记录其路径。"
+
+#: ../../source/mp/observability/index.rst:84
+msgid "**Environment variables:**"
+msgstr "**环境变量：**"
+
+#: ../../source/mp/observability/index.rst:90
+msgid "Variable"
+msgstr "变量"
+
+#: ../../source/mp/observability/index.rst:93
+msgid "``LMCACHE_LOG_LEVEL``"
+msgstr "``LMCACHE_LOG_LEVEL``"
+
+#: ../../source/mp/observability/index.rst:94
+msgid "``INFO``"
+msgstr "``INFO``"
+
+#: ../../source/mp/observability/index.rst:95
+msgid ""
+"Controls the log level for all LMCache loggers. Valid values: ``DEBUG``, "
+"``INFO``, ``WARNING``, ``ERROR``, ``CRITICAL``."
+msgstr ""
+"控制所有 LMCache 日志记录器的日志级别。有效值：\\ ``DEBUG``\\ 、\\ ``INFO``\\ 、\\ ``WARNING``\\ 、\\ ``ERROR``\\ 、\\ ``CRITICAL``\\ 。"
+

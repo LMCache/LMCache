@@ -279,9 +279,9 @@ Mirror the same `start_time`, `zmq_endpoint`, and `http_endpoint` additions if
 | `zmq_endpoint` | `MPCacheServer.__init__` + `run_cache_server()` | New constructor kwarg, passed from `MPServerConfig` |
 | `http_endpoint` | `run_http_server()` lifespan + `report_status()` | Set on engine after construction when HTTP is enabled |
 
-### 4. Expose Engine KV format, shape, and attention backend in `kv_cache_layout`
+### 4. Expose engine KV format, shape, and attention backend in `kv_cache_layout`
 
-**Files:** `lmcache/v1/gpu_connector/utils.py`, `lmcache/v1/multiprocess/gpu_context.py`, `lmcache/v1/multiprocess/server.py`
+**Files:** `lmcache/v1/gpu_connector/utils.py`, `lmcache/v1/platform/cuda/cache_context.py`, `lmcache/v1/multiprocess/server.py`
 
 Helper functions in `utils.py` (derived from `legible_print_engine_kv_format()`):
 - `get_engine_kv_shape_description(engine_kv_format)` — symbolic shape (e.g., `NL x [2, NB, BS, NH, HS]`)

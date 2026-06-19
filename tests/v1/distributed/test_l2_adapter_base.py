@@ -14,7 +14,7 @@ import threading
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     AdapterUsage,
@@ -51,7 +51,7 @@ class _StubAdapter(L2AdapterInterface):
     def pop_completed_store_tasks(self) -> dict[L2TaskId, L2StoreResult]:
         return {}
 
-    def submit_lookup_and_lock_task(self, keys):
+    def submit_lookup_and_lock_task(self, keys, layout_desc: MemoryLayoutDesc):
         return 0
 
     def query_lookup_and_lock_result(self, task_id):

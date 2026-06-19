@@ -24,6 +24,10 @@ from lmcache.v1.distributed.internal_api import L1ManagerListener
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.storage_controller import StorageControllerInterface
+from lmcache.v1.distributed.storage_controllers.adapter_lifecycle import (
+    AddAdapterOp,
+    RemoveAdapterOp,
+)
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
     StorePolicy,
@@ -227,9 +231,24 @@ class StoreController(StorageControllerInterface):
         policy: StorePolicy,
     ) -> None:
         self._l1_manager = l1_manager
-        self._l2_adapters = l2_adapters
-        self._adapter_descriptors = adapter_descriptors
+        self._l2_adapters: dict[int, L2AdapterInterface] = {
+            desc.index: adapter
+            for desc, adapter in zip(adapter_descriptors, l2_adapters, strict=True)
+        }
+        self._adapter_descriptors: dict[int, AdapterDescriptor] = {
+            desc.index: desc for desc in adapter_descriptors
+        }
         self._policy = policy
+
+        # Adapters that are being drained and will be removed after all
+        # the in-flight operations are done.
+        self._draining: dict[int, threading.Event] = {}
+
+        # Control-plane queue for runtime add/remove, used by the internal
+        # loop thread
+        self._adapter_ops_lock = threading.Lock()
+        self._pending_adapter_ops: list[AddAdapterOp | RemoveAdapterOp] = []
+        self._adapter_ctrl_efd = create_event_notifier()
 
         self._listener = StoreListener()
         self._l1_manager.register_listener(self._listener)
@@ -256,12 +275,24 @@ class StoreController(StorageControllerInterface):
                     else []
                 ),
             )
+            register_gauge(
+                "lmcache.l2_store",
+                "lmcache_mp.l2_adapters",
+                (
+                    "Count of L2 adapters attached to the store controller, "
+                    "tagged by ``state`` (active or draining)."
+                ),
+                lambda: (
+                    StoreController._gauge_target.get_adapter_state_observations()
+                    if StoreController._gauge_target is not None
+                    else []
+                ),
+            )
 
-        # Map eventfd -> adapter index for quick lookup in poll results
+        # Map store eventfd -> adapter id for quick lookup in poll results
         self._efd_to_adapter_index: dict[int, int] = {}
-        for i, adapter in enumerate(self._l2_adapters):
-            efd = adapter.get_store_event_fd()
-            self._efd_to_adapter_index[efd] = i
+        for adapter_id, adapter in self._l2_adapters.items():
+            self._efd_to_adapter_index[adapter.get_store_event_fd()] = adapter_id
 
         self._stop_flag = threading.Event()
         self._thread = threading.Thread(
@@ -287,17 +318,84 @@ class StoreController(StorageControllerInterface):
         self._thread.join()
         self._cleanup_in_flight_tasks()
         self._listener.close()
+        self._adapter_ctrl_efd.close()
 
     def report_status(self) -> dict:
         """Return a status dict for the store controller."""
         is_healthy = self._thread.is_alive()
+        num_draining = len(self._draining)
         return {
             "is_healthy": is_healthy,
             "thread_alive": is_healthy,
             "pending_keys_count": self._listener.pending_count(),
             "in_flight_task_count": self._status_in_flight_count,
             "num_l2_adapters": len(self._l2_adapters),
+            "num_active_adapters": len(self._l2_adapters) - num_draining,
+            "num_draining_adapters": num_draining,
         }
+
+    def add_adapter(
+        self,
+        adapter_id: int,
+        adapter: L2AdapterInterface,
+        descriptor: AdapterDescriptor,
+    ) -> None:
+        """Blocking function to add a new adapter into the store controller
+        with the specified adapter ID and descriptor.
+
+        Args:
+            adapter_id: Stable id assigned by the StorageManager.
+            adapter: The adapter instance to attach.
+            descriptor: The adapter's descriptor (``descriptor.index`` must
+                equal ``adapter_id``).
+
+        Raises:
+            RuntimeError: If the background loop did not apply the op in
+                time (e.g. the loop is not running).
+        """
+        op = AddAdapterOp(
+            adapter_id=adapter_id,
+            adapter=adapter,
+            descriptor=descriptor,
+            done=threading.Event(),
+        )
+        with self._adapter_ops_lock:
+            self._pending_adapter_ops.append(op)
+        self._adapter_ctrl_efd.notify()
+        if not op.done.wait(timeout=STORE_LOOP_POLL_TIMEOUT_MS / 1000 + 5.0):
+            raise RuntimeError(
+                f"StoreController did not attach adapter {adapter_id} in time"
+            )
+
+    def request_remove_adapter(self, adapter_id: int) -> threading.Event:
+        """Non-blocking function to request the removal of a L2 adapter
+        specified by the adapter ID.
+
+        New store tasks stop routing to the adapter immediately; in-flight
+        tasks are allowed to complete.
+
+        Args:
+            adapter_id: Stable id of the adapter to drain.
+
+        Returns:
+            An Event signaled when the adapter is fully drained.
+        """
+        op = RemoveAdapterOp(adapter_id=adapter_id, done=threading.Event())
+        with self._adapter_ops_lock:
+            self._pending_adapter_ops.append(op)
+        self._adapter_ctrl_efd.notify()
+        return op.done
+
+    def get_adapter_state_observations(
+        self,
+    ) -> list[tuple[int | float, dict[str, object]]]:
+        """``(count, {"state": ...})`` tuples for the ``lmcache_mp.l2_adapters``
+        gauge. ``len()`` reads are GIL-atomic, safe from the OTel thread."""
+        num_draining = len(self._draining)
+        return [
+            (len(self._l2_adapters) - num_draining, {"state": "active"}),
+            (num_draining, {"state": "draining"}),
+        ]
 
     def get_inflight_stores_observations(
         self,
@@ -313,16 +411,18 @@ class StoreController(StorageControllerInterface):
         counts: dict[int, int] = defaultdict(int)
         for adapter_index, _ in self._in_flight_tasks.copy():
             counts[adapter_index] += 1
-        return [
-            (
-                count,
-                {
-                    "l2_name": self._adapter_descriptors[idx].type_name,
-                    "adapter_index": idx,
-                },
+        observations: list[tuple[int | float, dict[str, object]]] = []
+        for idx, count in counts.items():
+            # A just-finalized adapter may be gone from the descriptor map
+            # while a stale in-flight snapshot still references it; skip it
+            # rather than KeyError on the OTel reader thread.
+            desc = self._adapter_descriptors.get(idx)
+            if desc is None:
+                continue
+            observations.append(
+                (count, {"l2_name": desc.type_name, "adapter_index": idx})
             )
-            for idx, count in counts.items()
-        ]
+        return observations
 
     # Private methods
 
@@ -340,11 +440,15 @@ class StoreController(StorageControllerInterface):
 
         listener_efd = self._listener.get_event_fd()
         poller.register(listener_efd, select.POLLIN)
+        poller.register(self._adapter_ctrl_efd.fileno(), select.POLLIN)
 
         for efd in self._efd_to_adapter_index:
             poller.register(efd, select.POLLIN)
 
         while not self._stop_flag.is_set():
+            # First, apply runtime add/remove of the L2 adapters.
+            self._apply_pending_adapter_ops(poller)
+
             ready = poller.poll(STORE_LOOP_POLL_TIMEOUT_MS)
 
             signaled_adapters: dict[StorePhase, set[int]] = {
@@ -393,6 +497,62 @@ class StoreController(StorageControllerInterface):
                             task_key[1],
                         )
 
+            # Finalize any draining adapter no longer have any in-flight
+            # tasks.
+            self._finalize_drained_adapters(poller)
+
+    def _apply_pending_adapter_ops(self, poller: "select.poll") -> None:
+        """Apply queued add/remove ops on the store loop thread."""
+        with self._adapter_ops_lock:
+            ops = self._pending_adapter_ops
+            self._pending_adapter_ops = []
+        for op in ops:
+            if isinstance(op, AddAdapterOp):
+                self._l2_adapters[op.adapter_id] = op.adapter
+                self._adapter_descriptors[op.adapter_id] = op.descriptor
+                efd = op.adapter.get_store_event_fd()
+                self._efd_to_adapter_index[efd] = op.adapter_id
+                poller.register(efd, select.POLLIN)
+                logger.info("StoreController attached adapter %d", op.adapter_id)
+                op.done.set()
+            elif isinstance(op, RemoveAdapterOp):
+                if op.adapter_id not in self._l2_adapters:
+                    # Already gone (double remove); signal so the caller
+                    # doesn't block.
+                    op.done.set()
+                    continue
+                # Mark draining; routing skips it immediately. The adapter
+                # stays registered so in-flight completions still process.
+                self._draining[op.adapter_id] = op.done
+                logger.info(
+                    "StoreController draining adapter %d (no new stores routed)",
+                    op.adapter_id,
+                )
+
+    def _adapter_in_use(self, adapter_id: int) -> bool:
+        """True if any in-flight store task targets ``adapter_id``."""
+        for task_adapter_id, _ in self._in_flight_tasks:
+            if task_adapter_id == adapter_id:
+                return True
+        return False
+
+    def _finalize_drained_adapters(self, poller: "select.poll") -> None:
+        """Detach draining adapters that no longer have in-flight tasks."""
+        for adapter_id in list(self._draining):
+            if self._adapter_in_use(adapter_id):
+                continue
+            adapter = self._l2_adapters.pop(adapter_id)
+            self._adapter_descriptors.pop(adapter_id, None)
+            efd = adapter.get_store_event_fd()
+            self._efd_to_adapter_index.pop(efd, None)
+            try:
+                poller.unregister(efd)
+            except (KeyError, OSError):
+                pass
+            done = self._draining.pop(adapter_id)
+            logger.info("StoreController detached adapter %d", adapter_id)
+            done.set()
+
     def _process_new_keys(self, keys: list[ObjectKey]) -> None:
         """
         Process a batch of newly written keys.
@@ -412,7 +572,15 @@ class StoreController(StorageControllerInterface):
 
     def _submit_store_for_single_shape(self, keys: list[ObjectKey]) -> None:
         """Submit ``keys`` (all same shape) to their target adapters."""
-        plan = self._policy.select_store_targets(keys, self._adapter_descriptors)
+        # Only route to adapters that are live (not draining). Descriptors
+        # for draining adapters are kept for in-flight completion handling
+        # but excluded here so no new task targets them.
+        routing_descriptors = [
+            desc
+            for adapter_id, desc in self._adapter_descriptors.items()
+            if adapter_id not in self._draining
+        ]
+        plan = self._policy.select_store_targets(keys, routing_descriptors)
 
         l1_mgr = self._l1_manager
 
@@ -420,12 +588,11 @@ class StoreController(StorageControllerInterface):
             if not target_keys:
                 continue
 
-            if adapter_index >= len(self._l2_adapters):
+            if adapter_index not in self._l2_adapters:
                 logger.error(
-                    "StorePolicy returned invalid adapter index %d "
-                    "(only %d adapters available). Skipping.",
+                    "StorePolicy returned invalid adapter id %d "
+                    "(not among attached adapters). Skipping.",
                     adapter_index,
-                    len(self._l2_adapters),
                 )
                 continue
 

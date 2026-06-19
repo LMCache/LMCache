@@ -393,6 +393,57 @@ def test_nixl_endpoint_list_malformed_url_raises():
         NixlStorageConfig.from_cache_engine_config(config, metadata)
 
 
+def _presence_cache_metadata() -> LMCacheMetadata:
+    return LMCacheMetadata(
+        model_name="Llama-3.1-70B-Instruct",
+        world_size=1,
+        local_world_size=1,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=torch.bfloat16,
+        kv_shape=(4, 2, 256, 8, 128),
+    )
+
+
+@pytest.mark.no_shared_allocator
+def test_nixl_presence_cache_only_defaults_false():
+    """presence_cache_only defaults to False when the config key is absent."""
+    BASE_DIR = Path(__file__).parent
+    config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
+
+    nixl_config = NixlStorageConfig.from_cache_engine_config(
+        config, _presence_cache_metadata()
+    )
+
+    assert nixl_config.presence_cache_only is False
+
+
+@pytest.mark.no_shared_allocator
+def test_nixl_presence_cache_only_parsed():
+    """nixl_presence_cache_only=True is parsed onto NixlStorageConfig."""
+    BASE_DIR = Path(__file__).parent
+    config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
+    config.extra_config["nixl_presence_cache"] = True
+    config.extra_config["nixl_presence_cache_only"] = True
+
+    nixl_config = NixlStorageConfig.from_cache_engine_config(
+        config, _presence_cache_metadata()
+    )
+
+    assert nixl_config.presence_cache_only is True
+
+
+@pytest.mark.no_shared_allocator
+def test_nixl_presence_cache_only_requires_presence_cache():
+    """nixl_presence_cache_only=True without nixl_presence_cache raises ValueError."""
+    BASE_DIR = Path(__file__).parent
+    config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
+    config.extra_config["nixl_presence_cache_only"] = True
+
+    with pytest.raises(ValueError, match="nixl_presence_cache must be true"):
+        config.validate()
+
+
 @pytest.mark.no_shared_allocator
 def test_nixl_posix_backend(nixl_tmp_path):
     BASE_DIR = Path(__file__).parent

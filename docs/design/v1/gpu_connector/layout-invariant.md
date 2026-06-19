@@ -7,12 +7,12 @@
 > of the kv_caches alongside the format, so callers never need a
 > separate normalization step. Every other module queries KV-cache
 > information via helpers in `lmcache/v1/gpu_connector/utils.py` that
-> accept a `EngineKVFormat` argument.
+> accept an `EngineKVFormat` argument.
 
 "Layout parsing" means: list-nesting depth, tensor-dimension ordering,
 HND vs NHD, MLA vs MHA, per-layer vs cross-layer. All of that is
-encoded in `EngineKVFormat`; downstream code must never re-derive it from
-raw shapes.
+encoded in `EngineKVFormat`; downstream code must never re-derive it
+from raw shapes.
 
 ## Canonical type
 
@@ -96,11 +96,14 @@ kv_format/
 
 ## Adding a new format
 
-1. Add the enum value in `csrc/mem_kernels.cuh` and `csrc/pybind.cpp`.
+1. Add the enum value in `csrc/kv_transfer_types.h` (the single
+   backend-agnostic definition shared by every accelerator backend), then
+   register it in each backend's pybind module — `csrc/pybind.cpp` (CUDA)
+   and `csrc/sycl/pybind_sycl.cpp` (SYCL/XPU).
 2. Add a branch in the engine's `detectors/<engine>.py` `discover()`. It keys
-   off `(list_depth, tensor_ndim)` from `measure_structure`, returning
-   `(format, kv)`; any reshape-via-hints (e.g. TRT-LLM's 4-D `view`'d to 6-D)
-   happens in the same method before the shape checks.
+   off `(list_depth, tensor_ndim)` from `measure_list_depth_until_tensor`,
+   returning `(format, kv)`; any reshape-via-hints (e.g. TRT-LLM's 4-D `view`'d
+   to 6-D) happens in the same method before the shape checks.
 3. Add a `KVFormatSpec` subclass as a new `specs/<engine_kv_format>.py` file
    (named after the format, declaring its `engine_kv_format`). `registry.py`
    discovers it automatically — no other file changes. The ABC makes the
@@ -117,7 +120,7 @@ consumer for a new layout — the branching belongs in a spec.
 ## Helper surface
 
 Every helper below takes `DiscoverableKVCache` and (where layout matters)
-a `EngineKVFormat`. Nothing else may index raw shapes.
+an `EngineKVFormat`. Nothing else may index raw shapes.
 
 ### Discovery
 
@@ -235,7 +238,7 @@ consumer code must never do any of the following — it queries via the
   only way in — no test-only shortcuts, no cached topology fields; the
   manager exposes only `kv_layer_groups`, `num_groups`, and
   `get_shape_desc`.
-- **`lmcache/v1/multiprocess/gpu_context.py::GPUCacheContext`** —
+- **`lmcache/v1/platform/cuda/cache_context.py::GPUCacheContext`** —
   constructs the manager directly at init, delegates
   `get_shape_desc(group_idx)` to it, assembles per-group GPU pointer
   tensors via `get_group_data_ptrs`. No parallel `shape_descs_` /

@@ -99,6 +99,32 @@ def test_whitespace_instance_id_is_generated():
         assert resp.json()["instance_id"].strip()
 
 
+def test_p2p_advertised_url_round_trips():
+    with _client() as client:
+        client.post(
+            "/instances",
+            json={
+                "instance_id": "i1",
+                "ip": "127.0.0.1",
+                "http_port": 8080,
+                "p2p_advertised_url": "http://10.0.0.1:9100",
+            },
+        )
+        listed = client.get("/instances").json()["instances"]
+        assert listed[0]["p2p_advertised_url"] == "http://10.0.0.1:9100"
+
+
+def test_p2p_advertised_url_defaults_to_empty():
+    with _client() as client:
+        # Omitting p2p_advertised_url leaves it empty (instance is not in P2P).
+        client.post(
+            "/instances",
+            json={"instance_id": "i1", "ip": "127.0.0.1", "http_port": 8080},
+        )
+        listed = client.get("/instances").json()["instances"]
+        assert listed[0]["p2p_advertised_url"] == ""
+
+
 def test_healthz():
     with _client() as client:
         assert client.get("/healthz").json() == {"status": "healthy"}

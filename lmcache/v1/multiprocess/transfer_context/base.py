@@ -2,12 +2,12 @@
 """Non-GPU context abstractions and utilities for multiprocess transport.
 
 This module provides:
-- ``NonGpuContextMetadata``: layout metadata dataclass for non-CUDA workers.
-- ``NonGpuContext``: abstract base class with a two-phase prepare/commit
+- ``EngineDrivenContextMetadata``: layout metadata dataclass for non-CUDA workers.
+- ``EngineDrivenContext``: abstract base class with a two-phase prepare/commit
   interface for CPU-side KV data transfer. Concrete implementations (e.g.
-  ``NonGpuContextPickle``) each decide *how* data is serialised and transported.
-- ``create_non_gpu_context()``: factory that returns the appropriate
-  ``NonGpuContext`` subclass.
+  ``EngineDrivenContextPickle``) each decide *how* data is serialised and transported.
+- ``create_engine_driven_context()``: factory that returns the appropriate
+  ``EngineDrivenContext`` subclass.
 - ``compute_kv_layout``, ``gather_paged_kv_to_cpu``, ``scatter_cpu_to_paged_kv``:
   shared gather/scatter utilities used by all concrete implementations.
 """
@@ -106,7 +106,7 @@ def _tensors_to_ptrs(tensors: list[torch.Tensor]) -> list[int]:
 
 
 @dataclass
-class NonGpuContextMetadata:
+class EngineDrivenContextMetadata:
     """Non-GPU context layout metadata for non-CUDA workers.
 
     Attributes:
@@ -120,7 +120,7 @@ class NonGpuContextMetadata:
     use_mla: bool
 
 
-class NonGpuContext(ABC):
+class EngineDrivenContext(ABC):
     """Abstract base class for CPU-side KV data transfer contexts.
 
     All concrete implementations share a common message-queue client and
@@ -135,7 +135,7 @@ class NonGpuContext(ABC):
 
     def __init__(
         self,
-        metadata: NonGpuContextMetadata,
+        metadata: EngineDrivenContextMetadata,
         mq_client: MessageQueueClient,
         mq_timeout: float,
     ) -> None:
@@ -195,16 +195,16 @@ class NonGpuContext(ABC):
         ...
 
 
-def create_non_gpu_context(
-    metadata: NonGpuContextMetadata,
+def create_engine_driven_context(
+    metadata: EngineDrivenContextMetadata,
     mq_client: MessageQueueClient,
     mq_timeout: float,
     shm_name: str,
     pool_size: int,
     *,
     use_pickle: bool = False,
-) -> NonGpuContext:
-    """Factory that returns the appropriate :class:`NonGpuContext` implementation.
+) -> EngineDrivenContext:
+    """Factory that returns the appropriate :class:`EngineDrivenContext` implementation.
 
     Returns SHM-based implementation when shared-memory pool information is
     available; otherwise falls back to the pickle-based implementation.
@@ -222,22 +222,22 @@ def create_non_gpu_context(
             available.
 
     Returns:
-        A concrete :class:`NonGpuContext` instance.
+        A concrete :class:`EngineDrivenContext` instance.
     """
     if not shm_name or pool_size <= 0:
         use_pickle = True
 
     if not use_pickle:
         # Local
-        from .shm import NonGpuContextShm
+        from .shm import EngineDrivenContextShm
 
         try:
             logger.info(
-                "Creating NonGpuContextShm (shm_name=%s, pool_size=%d)",
+                "Creating EngineDrivenContextShm (shm_name=%s, pool_size=%d)",
                 shm_name,
                 pool_size,
             )
-            return NonGpuContextShm(
+            return EngineDrivenContextShm(
                 metadata, mq_client, mq_timeout, shm_name, pool_size
             )
         except Exception:
@@ -249,10 +249,10 @@ def create_non_gpu_context(
             )
 
     # Local
-    from .pickle import NonGpuContextPickle
+    from .pickle import EngineDrivenContextPickle
 
-    logger.info("Creating NonGpuContextPickle (pickle transport)")
-    return NonGpuContextPickle(metadata, mq_client, mq_timeout)
+    logger.info("Creating EngineDrivenContextPickle (pickle transport)")
+    return EngineDrivenContextPickle(metadata, mq_client, mq_timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -603,8 +603,8 @@ def scatter_cpu_to_paged_kv(
     chunk_tokens = blocks_per_chunk * block_size
 
     # Block-level transfer can only skip whole blocks. A non-aligned prefix is
-    # rounded down to the nearest block (matching the GPU transfer path in
-    # gpu_transfer.py) rather than raising, so a slightly misaligned skip
+    # rounded down to the nearest block (matching the lmcache-driven path in
+    # lmcache_driven_transfer.py) rather than raising, so a slightly misaligned skip
     # degrades gracefully instead of failing the whole retrieve.
     if skip_first_n_tokens % block_size != 0:
         logger.error(

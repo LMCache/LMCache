@@ -55,6 +55,7 @@ def _mock_backend(**overrides) -> Mock:
     backend = Mock(spec=NixlDynamicStorageBackend)
     backend.agent = Mock()
     backend._cache_add = Mock()
+    backend.presence_cache_only = False
     # Default: _format_object_key returns a predictable string
     backend._format_object_key = Mock(
         side_effect=lambda key: f"formatted_{key.chunk_hash}"
@@ -162,6 +163,16 @@ class TestContains:
         assert self._call(backend, _make_key(42)) is False
         backend._cache_add.assert_not_called()
 
+    def test_presence_cache_only_skips_remote(self) -> None:
+        """With presence_cache_only set, a presence-cache miss returns False
+        without issuing the queryMem call (key_exists not called)."""
+        backend = _mock_backend(presence_cache_only=True)
+        backend._exists_in_put_tasks_or_cache.return_value = (False, False)
+
+        assert self._call(backend, _make_key(7)) is False
+        backend.key_exists.assert_not_called()
+        backend._cache_add.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # NixlDynamicStorageBackend.batched_contains
@@ -246,6 +257,20 @@ class TestBatchedContains:
         # Only the 2 remaining keys should go to agent
         call_args = backend.agent.batched_nixl_desc_exists.call_args[0][0]
         assert len(call_args) == 2
+
+    def test_presence_cache_only_skips_remote(self) -> None:
+        """With presence_cache_only set, batched_contains returns the count of
+        leading local hits and never issues the remote batched query."""
+        keys = _make_keys(3)
+        backend = _mock_backend(presence_cache_only=True)
+        backend._exists_in_put_tasks_or_cache.side_effect = [
+            (True, True),
+            (False, False),
+        ]
+
+        assert self._call(backend, keys) == 1
+        backend.agent.batched_nixl_desc_exists.assert_not_called()
+        backend._cache_add.assert_not_called()
 
     def test_remote_hits_are_cached(self) -> None:
         """Remote hits should be added to the presence cache."""

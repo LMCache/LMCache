@@ -74,6 +74,14 @@ def _get_backend() -> Any:
     import torch
 
     backend_candidates = [
+        # Keep backend priority aligned with _detect_device().
+        # MUSA currently uses a Python adapter under the platform package,
+        # unlike the compiled XPU/CUDA extension modules.
+        (
+            "lmcache.v1.platform.musa.ops",
+            "musa_ops",
+            lambda: hasattr(torch, "musa") and torch.musa.is_available(),  # type: ignore[attr-defined]
+        ),
         (
             "lmcache.xpu_ops",
             "xpu_ops",
