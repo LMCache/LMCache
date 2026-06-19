@@ -1,7 +1,7 @@
 .. _recipe_phi3:
 
-Phi3ForCausalLM
-====================
+Phi-3 / Phi-4
+=============
 
 Validated models
 ----------------

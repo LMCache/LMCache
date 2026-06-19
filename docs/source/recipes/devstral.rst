@@ -1,7 +1,7 @@
 .. _recipe_devstral:
 
-MistralForCausalLM
-===================
+Mistral / Devstral
+==================
 
 Validated models
 ----------------

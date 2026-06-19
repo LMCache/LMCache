@@ -1,7 +1,7 @@
 .. _recipe_llama:
 
-LlamaForCausalLM
-====================
+Llama
+=====
 
 Validated models
 ----------------
