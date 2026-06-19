@@ -68,7 +68,7 @@ import (
 //   - VLLM_IMAGE                    vLLM image. Default lmcache/vllm-openai:latest-nightly.
 //   - CACHEBLEND_ENGINE_IMAGE       blend server image. Default lmcache/vllm-openai:latest-nightly.
 //   - CACHEBLEND_PAYLOAD_IMAGE      PRIVATE plugin image. Default
-//     tensormesh/cacheblend-plugin:nightly-latest.
+//     tensormesh/cacheblend-plugin:latest-nightly.
 //   - CACHEBLEND_REGISTRY_USER      Docker registry username for the payload image.
 //   - CACHEBLEND_REGISTRY_TOKEN     Docker registry password / PAT (read-only pull).
 //   - CACHEBLEND_REGISTRY_SERVER    Registry server. Default https://index.docker.io/v1/.
@@ -108,11 +108,11 @@ var _ = Describe("vLLM + CacheBlendEngine integration smoke (GPU)", Ordered, fun
 
 	It("injects CacheBlend, registers rope state on the engine, and serves a completion", func() {
 		model := envDefault("VLLM_MODEL", "Qwen/Qwen2.5-0.5B")
-		// nightly by default: the engine, vLLM, and the nightly-latest payload
+		// nightly by default: the engine, vLLM, and the latest-nightly payload
 		// plugin must sit in the same CacheBlend compatibility window.
 		vllmImage := envDefault("VLLM_IMAGE", "lmcache/vllm-openai:latest-nightly")
 		engineImage := envDefault("CACHEBLEND_ENGINE_IMAGE", "lmcache/vllm-openai:latest-nightly")
-		payloadImage := envDefault("CACHEBLEND_PAYLOAD_IMAGE", "tensormesh/cacheblend-plugin:nightly-latest")
+		payloadImage := envDefault("CACHEBLEND_PAYLOAD_IMAGE", "tensormesh/cacheblend-plugin:latest-nightly")
 		backendLog := regexp.MustCompile(
 			envDefault("CACHEBLEND_BACKEND_LOG_PATTERN", `Using AttentionBackendEnum\.CUSTOM backend`))
 
@@ -170,7 +170,9 @@ var _ = Describe("vLLM + CacheBlendEngine integration smoke (GPU)", Ordered, fun
 		By("waiting for the vLLM Deployment to become Available (model load + connector handshake)")
 		// 15 min — cold image pull (~10GB) + payload init container pull +
 		// model config download + vLLM startup. /v1/models gates readiness.
-		Expect(utils.WaitDeploymentAvailable(
+		// Fails fast (~seconds) if the private payload pull is wedged
+		// (bad/missing pull secret, wrong tag) rather than burning the timeout.
+		Expect(utils.WaitDeploymentAvailableOrImagePullError(
 			ctx, k8sClient,
 			types.NamespacedName{Namespace: nsName, Name: vllmDeploy.Name},
 			15*time.Minute,

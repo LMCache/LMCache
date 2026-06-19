@@ -283,7 +283,7 @@ Timeout is 60 min — cold image pulls + model download routinely eat
 #### CacheBlend integration knobs
 
 `cacheblend_integration_smoke_test.go` pulls a **private** payload image
-(`tensormesh/cacheblend-plugin:nightly-latest`). It builds a
+(`tensormesh/cacheblend-plugin:latest-nightly`). It builds a
 `dockerconfigjson` pull Secret in the test namespace from env credentials, so
 set these (in Buildkite: pipeline secrets, same mechanism as `HF_TOKEN`):
 
@@ -292,11 +292,11 @@ set these (in Buildkite: pipeline secrets, same mechanism as `HF_TOKEN`):
 - `CACHEBLEND_REGISTRY_SERVER` — registry server (default
   `https://index.docker.io/v1/` for Docker Hub).
 - `CACHEBLEND_PAYLOAD_IMAGE` — override the private plugin image (default
-  `tensormesh/cacheblend-plugin:nightly-latest`).
+  `tensormesh/cacheblend-plugin:latest-nightly`).
 - `CACHEBLEND_ENGINE_IMAGE` — blend server image (default
   `lmcache/vllm-openai:latest-nightly`). `VLLM_IMAGE` (also defaults to
   `latest-nightly` for this spec) / `VLLM_MODEL` apply as above. Engine, vLLM,
-  and the nightly-latest payload plugin must share a compatibility window.
+  and the latest-nightly payload plugin must share a compatibility window.
 - `CACHEBLEND_BACKEND_LOG_PATTERN` — regex proving vLLM loaded the CUSTOM
   attention backend (default `Using AttentionBackendEnum\.CUSTOM backend`).
 - `SKIP_CACHEBLEND_INTEGRATION=true` — skip this spec.

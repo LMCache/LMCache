@@ -20,7 +20,7 @@ metadata:
 spec:
   # The lmcache blend server image. Public; pinned to the same image the
   # vLLM workload uses so a fresh GPU node pulls it only once. Nightly to stay
-  # in the CacheBlend compatibility window with the nightly-latest payload.
+  # in the CacheBlend compatibility window with the latest-nightly payload.
   image:
     repository: lmcache/vllm-openai
     tag: latest-nightly
@@ -35,7 +35,7 @@ spec:
     # repository/tag from CACHEBLEND_PAYLOAD_IMAGE; these are the defaults.
     payloadImage:
       repository: tensormesh/cacheblend-plugin
-      tag: nightly-latest
+      tag: latest-nightly
       pullPolicy: IfNotPresent
     # Pull secret for the private payload image. Created by the spec in this
     # namespace (name must match the spec's pullSecretName constant).
