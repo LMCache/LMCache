@@ -128,6 +128,12 @@ var _ = Describe("vLLM + CacheBlendEngine integration smoke (GPU)", Ordered, fun
 		cbe, err := utils.NewCBEFromFixture("cacheblendengine.yaml", nsName, "cb-integration")
 		Expect(err).NotTo(HaveOccurred())
 		setImageSpec(&cbe.Spec.Image, engineImage)
+		// The fixture always carries an injection block, but guard against a
+		// future fixture edit dropping it — a nil Injection here would panic
+		// rather than fail the spec cleanly.
+		if cbe.Spec.Injection == nil {
+			cbe.Spec.Injection = &lmcachev1alpha1.InjectionSpec{}
+		}
 		setImageSpec(&cbe.Spec.Injection.PayloadImage, payloadImage)
 		Expect(utils.ApplyCBE(ctx, k8sClient, cbe)).To(Succeed())
 
