@@ -7,6 +7,7 @@ to, i.e. the ``wait_prefetch_status -> query_prefetch_status`` path: count
 computation, event emission, and exactly-once job consumption. The storage
 manager is mocked, so no GPU or native bitmap is needed.
 """
+
 # Standard
 from unittest import mock
 import threading
