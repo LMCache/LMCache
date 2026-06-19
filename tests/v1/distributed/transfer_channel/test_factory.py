@@ -45,6 +45,9 @@ class _FakeContext(TransferChannelContext):
     def get_transfer_channel_client(self, peer_advertise_url: str):
         raise NotImplementedError
 
+    def remove_transfer_channel_client(self, peer_advertise_url: str) -> None:
+        raise NotImplementedError
+
     def get_transfer_channel_address(self, lmcache_addresses):
         raise NotImplementedError
 

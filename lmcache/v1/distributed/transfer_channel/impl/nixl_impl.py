@@ -468,6 +468,31 @@ class NixlTransferChannelContext(TransferChannelContext):
             )
         return existing
 
+    def remove_transfer_channel_client(self, peer_advertise_url: str) -> None:
+        """Discard the client for ``peer_advertise_url`` and free its resources.
+
+        Call this when reads from the peer are no longer needed (e.g. the
+        owning L2 adapter is being removed). Any task ids previously returned by
+        that client become invalid. A later ``get_transfer_channel_client`` for
+        the same peer returns a fresh client. The peer is not notified.
+
+        Calling this for a peer with no current client does nothing.
+
+        Args:
+            peer_advertise_url: The ``host:port`` of the peer, as passed to
+                ``get_transfer_channel_client``.
+        """
+        with self._lock:
+            client = self._clients.pop(peer_advertise_url, None)
+        if client is None:
+            return
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001 - best-effort cleanup
+            logger.exception(
+                "Error closing transfer channel client for %s", peer_advertise_url
+            )
+
     ############################################################
     # Cleanup
     ############################################################

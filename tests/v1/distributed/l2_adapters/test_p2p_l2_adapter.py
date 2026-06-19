@@ -70,7 +70,7 @@ def _adapter(lookup_timeout_s: float = 10.0, load_timeout_s: float = 10.0):
         )
         adapter = P2PL2Adapter(config)
         try:
-            yield adapter, mq, tc_client, notifier
+            yield adapter, mq, tc_ctx, tc_client, notifier
         finally:
             adapter.close()
 
@@ -149,7 +149,7 @@ def test_factory_creates_adapter():
 
 
 def test_event_fds_are_distinct_and_registered():
-    with _adapter() as (adapter, _mq, _tc, notifier):
+    with _adapter() as (adapter, _mq, _tc_ctx, _tc, notifier):
         fds = {
             adapter.get_store_event_fd(),
             adapter.get_lookup_and_lock_event_fd(),
@@ -175,7 +175,7 @@ def test_lookup_forwards_layout_desc_and_returns_addresses():
         TransferChannelAddress(offset=200, size=20),
         TransferChannelAddress(offset=-1, size=0),  # not found on peer
     ]
-    with _adapter() as (adapter, mq, _tc, _notifier):
+    with _adapter() as (adapter, mq, _tc_ctx, _tc, _notifier):
         mq.submit_request.side_effect = _lookup_side_effect(42, addresses)
 
         task_id = adapter.submit_lookup_and_lock_task(keys, _LAYOUT)
@@ -201,7 +201,7 @@ def test_lookup_forwards_layout_desc_and_returns_addresses():
 def test_lookup_query_not_ready_then_ready():
     keys = [_key(0)]
     addresses = [TransferChannelAddress(offset=100, size=10)]
-    with _adapter() as (adapter, mq, _tc, _notifier):
+    with _adapter() as (adapter, mq, _tc_ctx, _tc, _notifier):
         responses = iter([_FakeFuture(value=None), _FakeFuture(value=addresses)])
 
         def _dispatch(request_type, payloads, response_cls=None):
@@ -223,7 +223,7 @@ def test_lookup_query_not_ready_then_ready():
 
 def test_lookup_submit_timeout_yields_miss():
     keys = [_key(0), _key(1)]
-    with _adapter() as (adapter, mq, _tc, _notifier):
+    with _adapter() as (adapter, mq, _tc_ctx, _tc, _notifier):
 
         def _dispatch(request_type, payloads, response_cls=None):
             if request_type == RequestType.P2P_LOOKUP_AND_LOCK:
@@ -245,7 +245,7 @@ def test_lookup_submit_timeout_yields_miss():
 
 def test_lookup_deadline_expired_yields_miss():
     keys = [_key(0)]
-    with _adapter(lookup_timeout_s=0.01) as (adapter, mq, _tc, _notifier):
+    with _adapter(lookup_timeout_s=0.01) as (adapter, mq, _tc_ctx, _tc, _notifier):
         # Lookup id resolves, but the query is never ready before the deadline.
         def _dispatch(request_type, payloads, response_cls=None):
             if request_type == RequestType.P2P_LOOKUP_AND_LOCK:
@@ -261,7 +261,7 @@ def test_lookup_deadline_expired_yields_miss():
 
 
 def test_query_unknown_task_returns_none():
-    with _adapter() as (adapter, _mq, _tc, _notifier):
+    with _adapter() as (adapter, _mq, _tc_ctx, _tc, _notifier):
         assert adapter.query_lookup_and_lock_result(999) is None
 
 
@@ -272,7 +272,7 @@ def test_query_unknown_task_returns_none():
 
 def test_load_reads_into_local_objects():
     keys = [_key(0), _key(1)]
-    with _adapter() as (adapter, _mq, tc_client, _notifier):
+    with _adapter() as (adapter, _mq, _tc_ctx, tc_client, _notifier):
         adapter._remote_addresses[keys[0]] = TransferChannelAddress(offset=100, size=10)
         adapter._remote_addresses[keys[1]] = TransferChannelAddress(offset=200, size=20)
         tc_client.submit_read.return_value = 55
@@ -304,7 +304,7 @@ def test_load_reads_into_local_objects():
 
 def test_load_not_finished_returns_none():
     keys = [_key(0)]
-    with _adapter() as (adapter, _mq, tc_client, _notifier):
+    with _adapter() as (adapter, _mq, _tc_ctx, tc_client, _notifier):
         adapter._remote_addresses[keys[0]] = TransferChannelAddress(offset=100, size=10)
         tc_client.submit_read.return_value = 1
         tc_client.query_read_status.return_value = TransferChannelReadResult(
@@ -318,7 +318,7 @@ def test_load_not_finished_returns_none():
 
 def test_load_deadline_expired_yields_failure():
     keys = [_key(0)]
-    with _adapter(load_timeout_s=0.01) as (adapter, _mq, tc_client, _notifier):
+    with _adapter(load_timeout_s=0.01) as (adapter, _mq, _tc_ctx, tc_client, _notifier):
         adapter._remote_addresses[keys[0]] = TransferChannelAddress(offset=100, size=10)
         tc_client.submit_read.return_value = 1
         task_id = adapter.submit_load_task(
@@ -337,7 +337,7 @@ def test_load_deadline_expired_yields_failure():
 
 def test_unlock_sends_rpc_and_clears_addresses():
     keys = [_key(0), _key(1)]
-    with _adapter() as (adapter, mq, _tc, _notifier):
+    with _adapter() as (adapter, mq, _tc_ctx, _tc, _notifier):
         adapter._remote_addresses[keys[0]] = TransferChannelAddress(offset=1, size=1)
         adapter.submit_unlock(keys)
         unlock_call = mq.submit_request.call_args
@@ -347,13 +347,13 @@ def test_unlock_sends_rpc_and_clears_addresses():
 
 
 def test_unlock_empty_is_noop():
-    with _adapter() as (adapter, mq, _tc, _notifier):
+    with _adapter() as (adapter, mq, _tc_ctx, _tc, _notifier):
         adapter.submit_unlock([])
         mq.submit_request.assert_not_called()
 
 
 def test_store_completes_immediately_without_leaking():
-    with _adapter() as (adapter, _mq, _tc, _notifier):
+    with _adapter() as (adapter, _mq, _tc_ctx, _tc, _notifier):
         task_id = adapter.submit_store_task([_key(0)], [MagicMock()])
         completed = adapter.pop_completed_store_tasks()
         assert set(completed) == {task_id}
@@ -365,7 +365,7 @@ def test_store_completes_immediately_without_leaking():
 
 def test_load_missing_address_is_failure_not_raise():
     keys = [_key(0)]
-    with _adapter() as (adapter, _mq, tc_client, _notifier):
+    with _adapter() as (adapter, _mq, _tc_ctx, tc_client, _notifier):
         # No lookup ran, so no remote address is stashed for this key.
         task_id = adapter.submit_load_task(
             keys, [MagicMock(shm_offset=0, shm_byte_length=10)]
@@ -378,7 +378,7 @@ def test_load_missing_address_is_failure_not_raise():
 
 def test_load_invalid_address_is_failure_not_raise():
     keys = [_key(0)]
-    with _adapter() as (adapter, _mq, tc_client, _notifier):
+    with _adapter() as (adapter, _mq, _tc_ctx, tc_client, _notifier):
         # An invalid stashed address must be rejected, not read.
         adapter._remote_addresses[keys[0]] = TransferChannelAddress(offset=-1, size=0)
         task_id = adapter.submit_load_task(
@@ -391,7 +391,7 @@ def test_load_invalid_address_is_failure_not_raise():
 
 
 def test_report_status():
-    with _adapter() as (adapter, _mq, _tc, _notifier):
+    with _adapter() as (adapter, _mq, _tc_ctx, _tc, _notifier):
         status = adapter.report_status()
         assert status["is_healthy"] is True
         assert status["peer_mq_server_url"] == "tcp://peer:5555"
@@ -401,7 +401,7 @@ def test_report_status():
 
 
 def test_close_unregisters_fds_and_closes_client():
-    with _adapter() as (adapter, mq, _tc, notifier):
+    with _adapter() as (adapter, mq, tc_ctx, _tc, notifier):
         lookup_fd = adapter.get_lookup_and_lock_event_fd()
         load_fd = adapter.get_load_event_fd()
         adapter.close()
@@ -409,3 +409,14 @@ def test_close_unregisters_fds_and_closes_client():
         assert lookup_fd in unregistered
         assert load_fd in unregistered
         mq.close.assert_called()
+        # The transfer-channel client is dropped from the context on close.
+        tc_ctx.remove_transfer_channel_client.assert_called_once_with("peer:7600")
+
+
+def test_close_is_idempotent():
+    with _adapter() as (adapter, mq, tc_ctx, _tc, _notifier):
+        adapter.close()
+        adapter.close()
+        # The second close is a no-op: no duplicate teardown of shared resources.
+        mq.close.assert_called_once()
+        tc_ctx.remove_transfer_channel_client.assert_called_once_with("peer:7600")
