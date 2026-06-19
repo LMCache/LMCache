@@ -1,10 +1,10 @@
 .. _recipe_glm5_2:
 
-GlmMoeDsaForCausalLM
-====================
+GLM 5.1/5.2
+===========
 
 A large Mixture-of-Experts model using **Dynamic Sparse Attention (DSA)**, shared
-by the **GLM-5.2** series. Like DeepSeek-V4-Flash, the sparse-attention path
+by the **GLM-5.1 / GLM-5.2** series. Like DeepSeek-V4-Flash, the sparse-attention path
 splits the model's layers into more than one KV cache group; the
 ``LMCacheMPConnector`` stores and retrieves each group in its own block size, so
 KV reuse works without extra flags.

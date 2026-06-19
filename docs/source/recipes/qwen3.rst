@@ -1,7 +1,7 @@
 .. _recipe_qwen3:
 
-Qwen3MoeForCausalLM
-====================
+Qwen3 MoE
+=========
 
 Validated models
 ----------------
