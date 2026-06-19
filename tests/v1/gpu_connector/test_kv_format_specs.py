@@ -14,9 +14,9 @@ import torch
 
 # First Party
 from lmcache.v1.gpu_connector.kv_format import (
+    describe_shape,
     get_spec,
     get_spec_class,
-    shape_desc,
 )
 import lmcache.c_ops as lmc_ops
 
@@ -250,7 +250,7 @@ def test_static_metadata(case):
     assert cls.is_mla == gold["is_mla"], name
     assert cls.is_hnd == gold["is_hnd"], name
     assert cls.is_cross_layer == gold["is_cross_layer"], name
-    assert shape_desc(fmt) == gold["shape_desc"], name
+    assert describe_shape(fmt) == gold["shape_desc"], name
 
 
 def test_scalar_geometry(case):

@@ -12,7 +12,7 @@ import torch
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.kv_format.detectors.base import (
     EngineDetector,
-    measure_structure,
+    measure_list_depth_until_tensor,
 )
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, LayoutHints
 import lmcache.c_ops as lmc_ops
@@ -55,7 +55,9 @@ class SGLANG_Detector(EngineDetector):
                 regrouped.append(reshaped)
             kv_caches = regrouped
 
-        list_depth, tensor_ndim, first_tensor = measure_structure(kv_caches)
+        list_depth, tensor_ndim, first_tensor = measure_list_depth_until_tensor(
+            kv_caches
+        )
         if list_depth == 1 and first_tensor.shape[1] == 1:  # MLA, fused PBS
             return lmc_ops.EngineKVFormat.NL_X_NBBS_ONE_HS, kv_caches
         if list_depth == 2:

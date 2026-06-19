@@ -15,14 +15,14 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.python_ops_fallback import set_shape_desc_dtype
-from lmcache.utils import EngineType
+from lmcache.utils import EngineType, lmcache_deprecate
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector.kv_format import (
     concrete_shape,
+    describe_shape,
     detect_format,
     get_spec,
     get_spec_class,
-    shape_desc,
 )
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, LayoutHints
 
@@ -114,7 +114,7 @@ def get_engine_kv_shape_description(engine_kv_format: "lmc_ops.EngineKVFormat") 
     HS=head_size, PBS=page_buffer_size (NB*BS).
     """
     try:
-        return shape_desc(engine_kv_format)
+        return describe_shape(engine_kv_format)
     except KeyError:
         return f"Unknown ({engine_kv_format})"
 
@@ -259,6 +259,10 @@ def get_block_size(
     return get_spec(kv_caches, engine_kv_format).block_size(layer_idx)
 
 
+@lmcache_deprecate(
+    "page_buffer_size is only used by the legacy non-MP (in-process) connectors; "
+    "the MP transfer path reads geometry from a per-group PageBufferShapeDesc instead"
+)
 def get_page_buffer_size(
     kv_caches: DiscoverableKVCache, engine_kv_format: "lmc_ops.EngineKVFormat"
 ) -> int:

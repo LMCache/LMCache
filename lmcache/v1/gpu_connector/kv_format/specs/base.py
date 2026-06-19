@@ -22,7 +22,7 @@ import lmcache.c_ops as lmc_ops
 
 # A format's enum name *is* its shape: ``_``-joined tokens, with ``X`` marking a
 # list level. ``TWO_X_NL_X_NBBS_NH_HS`` reads as ``2 x NL x [PBS, NH, HS]``.
-# shape_desc and concrete_shape both render from it, so they can never drift.
+# describe_shape and concrete_shape both render from it, so they can never drift.
 _LABELS = {
     "ONE": "1",
     "TWO": "2",
@@ -49,8 +49,13 @@ def _render_shape(fmt: "lmc_ops.EngineKVFormat", token: Callable[[str], str]) ->
     return " x ".join([token(t) for t in lists] + [f"[{body}]"])
 
 
-def shape_desc(fmt: "lmc_ops.EngineKVFormat") -> str:
-    """Symbolic shape of a format, e.g. ``NL_X_NB_BS_HS`` -> ``NL x [NB, BS, HS]``."""
+def describe_shape(fmt: "lmc_ops.EngineKVFormat") -> str:
+    """Symbolic shape of a format, e.g. ``NL_X_NB_BS_HS`` -> ``NL x [NB, BS, HS]``.
+
+    Named ``describe_shape`` (not ``shape_desc``) to avoid confusion with the
+    unrelated :class:`lmc_ops.PageBufferShapeDesc` and its ``shape_desc``
+    instances used on the transfer path.
+    """
     return _render_shape(fmt, lambda t: _LABELS[t])
 
 
@@ -75,6 +80,24 @@ class KVFormatSpec(ABC):
     Class attributes: ``engine_kv_format`` (the format this describes, its
     identity), ``is_mla`` / ``is_hnd`` / ``is_cross_layer`` (layout flags), and
     ``attention_backends`` (diagnostic labels; first is the representative).
+
+    Method usage by mode -- every spec is consumed through the ``get_*``
+    facade in ``gpu_connector.utils``:
+
+    * Used by **both** MP (multiprocess) and non-MP (in-process) connectors:
+      :meth:`num_layers`, :meth:`num_blocks`, :meth:`block_size`,
+      :meth:`num_heads`, :meth:`hidden_dim`, :meth:`head_size`, :meth:`dtype`,
+      :meth:`data_ptrs`.
+    * Used by **non-MP only** (the legacy in-process GPU/XPU/HPU/MUSA
+      connectors, none of the MP transfer path): :meth:`page_buffer_size`,
+      :meth:`tokens_per_layer`, :meth:`elements_per_layer`. The MP path derives
+      these from a per-group :class:`PageBufferShapeDesc` instead.
+
+    Lifetime: a spec **borrows** ``kv_caches`` -- it does not own the GPU KV
+    tensors. ``get_spec`` builds a fresh instance per call and callers use it
+    transiently (``get_spec(...).num_layers()``), so the borrowed reference is
+    released as soon as the spec is dropped. Never cache a spec on a long-lived
+    object: that would keep the engine's GPU KV tensors alive past disconnect.
     """
 
     engine_kv_format: ClassVar["lmc_ops.EngineKVFormat"]
@@ -84,6 +107,8 @@ class KVFormatSpec(ABC):
     attention_backends: ClassVar[tuple[str, ...]] = ()
 
     def __init__(self, kv_caches: DiscoverableKVCache) -> None:
+        # Borrowed, not owned: see the class docstring's "Lifetime" note. The
+        # spec must stay transient so it never outlives the engine's KV tensors.
         self.kv_caches = kv_caches
 
     @abstractmethod
@@ -100,7 +125,10 @@ class KVFormatSpec(ABC):
 
     @abstractmethod
     def page_buffer_size(self) -> int:
-        """Return ``num_blocks * block_size`` (or the fused PBS axis)."""
+        """Return ``num_blocks * block_size`` (or the fused PBS axis).
+
+        Non-MP only (see the class docstring).
+        """
 
     @abstractmethod
     def num_heads(self, layer_idx: int = 0) -> int:
@@ -116,11 +144,17 @@ class KVFormatSpec(ABC):
 
     @abstractmethod
     def tokens_per_layer(self) -> int:
-        """Return the token capacity per layer (``num_blocks * block_size``)."""
+        """Return the token capacity per layer (``num_blocks * block_size``).
+
+        Non-MP only (see the class docstring).
+        """
 
     @abstractmethod
     def elements_per_layer(self) -> int:
-        """Return the element count per layer (both K and V for non-MLA)."""
+        """Return the element count per layer (both K and V for non-MLA).
+
+        Non-MP only (see the class docstring).
+        """
 
     @abstractmethod
     def dtype(self, layer_idx: int = 0) -> torch.dtype:
@@ -136,7 +170,7 @@ class KVFormatSpec(ABC):
         """
 
     def concrete_shape_str(self) -> str:
-        """``shape_desc`` with real dims, e.g. ``80 x [2, 2048, 128, 8, 128]``."""
+        """``describe_shape`` with real dims, e.g. ``80 x [2, 2048, 128, 8, 128]``."""
         return concrete_shape(
             self.engine_kv_format, lambda label: getattr(self, _ACCESSORS[label])()
         )

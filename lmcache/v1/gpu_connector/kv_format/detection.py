@@ -12,7 +12,7 @@ from lmcache.v1.gpu_connector.kv_format.contiguity import (
     attempt_permute_to_contiguous_view,
 )
 from lmcache.v1.gpu_connector.kv_format.detectors import get_detector
-from lmcache.v1.gpu_connector.kv_format.specs import shape_desc
+from lmcache.v1.gpu_connector.kv_format.specs import describe_shape
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, LayoutHints
 import lmcache.c_ops as lmc_ops
 
@@ -42,6 +42,6 @@ def detect_format(
     if engine_kv_format is None:
         raise ValueError(f"unsupported kv_caches structure for {serving_engine}")
     logger.info(
-        "Engine KV Format: %s %s", engine_kv_format, shape_desc(engine_kv_format)
+        "Engine KV Format: %s %s", engine_kv_format, describe_shape(engine_kv_format)
     )
     return engine_kv_format, kv_caches

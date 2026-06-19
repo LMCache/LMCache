@@ -12,7 +12,7 @@ import torch
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.kv_format.detectors.base import (
     EngineDetector,
-    measure_structure,
+    measure_list_depth_until_tensor,
 )
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, LayoutHints
 import lmcache.c_ops as lmc_ops
@@ -53,7 +53,9 @@ class TRTLLM_Detector(EngineDetector):
                 head_dim,
             )
 
-        list_depth, tensor_ndim, _first_tensor = measure_structure(kv_caches)
+        list_depth, tensor_ndim, _first_tensor = measure_list_depth_until_tensor(
+            kv_caches
+        )
         if list_depth == 0 and tensor_ndim == 6:
             return lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS, kv_caches
         return None, kv_caches

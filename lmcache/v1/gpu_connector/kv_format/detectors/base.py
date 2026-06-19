@@ -17,7 +17,7 @@ from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, Layout
 import lmcache.c_ops as lmc_ops
 
 
-def measure_structure(
+def measure_list_depth_until_tensor(
     kv_caches: DiscoverableKVCache,
 ) -> tuple[int, int, DiscoverableKVCache]:
     """Return ``(list_depth, tensor_ndim, first_tensor)`` for *kv_caches*.

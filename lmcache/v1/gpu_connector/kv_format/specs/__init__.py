@@ -9,14 +9,14 @@ the per-format implementations, and ``registry.py`` is the format -> spec table.
 from lmcache.v1.gpu_connector.kv_format.specs.base import (
     KVFormatSpec,
     concrete_shape,
-    shape_desc,
+    describe_shape,
 )
 from lmcache.v1.gpu_connector.kv_format.specs.registry import get_spec, get_spec_class
 
 __all__ = [
     "KVFormatSpec",
     "concrete_shape",
+    "describe_shape",
     "get_spec",
     "get_spec_class",
-    "shape_desc",
 ]

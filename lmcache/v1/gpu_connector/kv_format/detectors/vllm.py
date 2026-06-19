@@ -13,7 +13,7 @@ from lmcache import torch_device_type
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.kv_format.detectors.base import (
     EngineDetector,
-    measure_structure,
+    measure_list_depth_until_tensor,
 )
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, LayoutHints
 import lmcache.c_ops as lmc_ops
@@ -43,7 +43,9 @@ class VLLM_Detector(EngineDetector):
             split = [t.reshape(*t.shape[:3], 2, fused_dim // 2) for t in kv_caches]
             return lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS, split
 
-        list_depth, tensor_ndim, first_tensor = measure_structure(kv_caches)
+        list_depth, tensor_ndim, first_tensor = measure_list_depth_until_tensor(
+            kv_caches
+        )
 
         # vLLM's CPU attention backend stores KV in HND but misreports it, so
         # force HND there; otherwise honor the hint, defaulting to NHD.
