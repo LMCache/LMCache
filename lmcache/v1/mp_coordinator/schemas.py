@@ -76,6 +76,9 @@ class RegisterRequest(BaseModel):
         p2p_advertised_url: URL the instance advertises for peer-to-peer
             transfers. Optional -- empty when the instance does not participate
             in P2P.
+        mq_port: Port of the instance's ZMQ message-queue server that P2P peers
+            send lookup/unlock RPCs to, reachable at the instance's ``ip``.
+            Optional -- 0 when P2P is disabled.
     """
 
     instance_id: Annotated[str, StringConstraints(strip_whitespace=True)] = ""
@@ -83,6 +86,7 @@ class RegisterRequest(BaseModel):
     http_port: int = Field(ge=1, le=65535)
     metadata: dict[str, str] = Field(default_factory=dict)
     p2p_advertised_url: Annotated[str, StringConstraints(strip_whitespace=True)] = ""
+    mq_port: int = Field(default=0, ge=0, le=65535)
 
 
 class RegisterResponse(BaseModel):

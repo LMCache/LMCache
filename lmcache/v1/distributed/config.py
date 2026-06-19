@@ -313,6 +313,24 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
         )
 
 
+def l1_exposes_single_memory_region(config: StorageManagerConfig) -> bool:
+    """Whether L1 is a single memory region a transfer channel can register.
+
+    Args:
+        config: Storage manager configuration to inspect.
+
+    Returns:
+        ``True`` if L1 is a single registerable memory region, ``False`` for
+        GDS L1 or Device-DAX L1.
+    """
+    l1_config = config.l1_manager_config
+    if l1_config.gds_l1_config is not None:
+        return False
+    if l1_config.memory_config.devdax_path:
+        return False
+    return True
+
+
 def add_storage_manager_args(
     parser: argparse.ArgumentParser,
 ) -> argparse.ArgumentParser:
