@@ -51,6 +51,12 @@ Options
    * - ``--trigger-watermark RATIO``
      - Eviction fires when usage reaches this fraction of the quota, ``0.0``
        (exclusive) to ``1.0`` (default: ``1.0``).
+   * - ``--blend-chunk-size N``
+     - Tokens per chunk for the global CacheBlend directory; must equal the
+       LMCache chunk size the blend servers use (default: ``256``).
+   * - ``--blend-probe-stride N``
+     - Positions between CacheBlend match probes; ``1`` probes every offset
+       for full recall (default: ``1``).
 
 Configuration
 -------------
@@ -58,9 +64,10 @@ Configuration
 Every flag is optional. Unset flags fall back to the
 ``LMCACHE_MP_COORDINATOR_*`` environment variables (``HOST``, ``PORT``,
 ``INSTANCE_TIMEOUT``, ``HEALTH_CHECK_INTERVAL``, ``EVICTION_CHECK_INTERVAL``,
-``EVICTION_RATIO``, ``TRIGGER_WATERMARK``), and then to the built-in
-defaults. A supplied flag always overrides the matching env-derived value, so
-env-only deployments keep working unchanged.
+``EVICTION_RATIO``, ``TRIGGER_WATERMARK``, ``BLEND_CHUNK_SIZE``,
+``BLEND_PROBE_STRIDE``), and then to the built-in defaults. A supplied flag
+always overrides the matching env-derived value, so env-only deployments keep
+working unchanged.
 
 A second set of env-only knobs controls the startup L2 resync —
 ``LMCACHE_MP_COORDINATOR_ENABLE_STARTUP_RESYNC`` (default ``True``),

@@ -11,7 +11,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import EvictionConfig
 from lmcache.v1.distributed.internal_api import L2AdapterListener
 from lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter import (
@@ -26,6 +26,8 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+
+_EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
 
 def _has_ext() -> bool:
@@ -211,7 +213,7 @@ def _run_store(adapter: RawBlockL2Adapter, keys, objects) -> bool:
 
 
 def _run_lookup(adapter: RawBlockL2Adapter, keys):
-    task_id = adapter.submit_lookup_and_lock_task(keys)
+    task_id = adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
     assert _wait_event_fd(adapter.get_lookup_and_lock_event_fd())
     return task_id, adapter.query_lookup_and_lock_result(task_id)
 
@@ -607,7 +609,9 @@ def test_raw_block_l2_adapter_error_bitmaps_keep_submitted_size():
             with patch.object(
                 adapter, "_run_lookup_task", side_effect=RuntimeError("lookup failed")
             ):
-                lookup_task_id = adapter.submit_lookup_and_lock_task(keys)
+                lookup_task_id = adapter.submit_lookup_and_lock_task(
+                    keys, _EMPTY_LAYOUT
+                )
                 assert _wait_event_fd(adapter.get_lookup_and_lock_event_fd())
                 lookup_bitmap = adapter.query_lookup_and_lock_result(lookup_task_id)
             assert lookup_bitmap is not None
