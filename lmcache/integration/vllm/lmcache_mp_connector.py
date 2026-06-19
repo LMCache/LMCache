@@ -578,11 +578,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # reader counts to vary per (server, pp_stage) pair and break
         # the single-``tp_size`` LOOKUP / FREE_LOOKUP_LOCKS protocol.
         # Non-MLA mode is not affected by this restriction.
-        if n_servers > 1 and mla_enabled(vllm_config.model_config):
+        if n_servers > 1:
             pp_size = vllm_config.parallel_config.pipeline_parallel_size
             if pp_size > 1:
                 raise ValueError(
-                    "LMCacheMPConnector multi-server MLA mode only supports "
+                    "LMCacheMPConnector multi-server mode only supports "
                     "tensor parallelism (TP), not pipeline parallelism (PP). "
                     f"Got pp_size={pp_size}."
                 )
