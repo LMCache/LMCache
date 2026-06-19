@@ -324,6 +324,21 @@ class ValkeyWorkerPool:
         else:
             self._get_client().set(key_str.encode(), data)
 
+    def _get_scratch(self, size: int) -> bytearray:
+        """Per-thread reusable staging buffer for buffer-GET (issue #6215).
+
+        glide writes into this thread-private bytearray (not slab memory),
+        then we copy into the destination under the GIL. Eliminates the
+        dangling-slot race without pinning or touching ref_count/pin_count.
+        The buffer is grown on demand and reused across GETs on the same
+        worker thread, so there is no per-call allocation.
+        """
+        buf = getattr(self._local, "scratch", None)
+        if buf is None or len(buf) < size:
+            buf = bytearray(size)
+            self._local.scratch = buf
+        return buf
+
     def _do_get_into(self, key_str: str, buf: Any) -> int:
         """GET a key directly into ``buf``.
 
@@ -335,6 +350,12 @@ class ValkeyWorkerPool:
         isn't already, because glide's buffer protocol rejects
         non-byte-format views (e.g. a float-typed tensor view).
 
+        Safety (issue #6215): glide's native buffer-GET writes with the
+        GIL released, so it must never write directly into ``dst`` when
+        ``dst`` aliases slab-allocator memory that another thread could
+        recycle mid-write. We stage into a thread-private scratch buffer
+        and copy into ``dst`` under the GIL.
+
         Returns:
             Number of bytes available for the key (``>= 0``), or
             :data:`GET_MISS` (``-1``) if the key does not exist.
@@ -344,11 +365,17 @@ class ValkeyWorkerPool:
         if dst.format != "B":
             dst = dst.cast("B")
         if self.has_buffer_get:
-            result = client.get(key_str.encode(), buffer=dst)
+            size = len(dst)
+            scratch_view = memoryview(self._get_scratch(size))[:size]
+            result = client.get(key_str.encode(), buffer=scratch_view)
             if result is None:
                 return GET_MISS
             # glide buffer GET returns the number of bytes written.
-            return int(result) if isinstance(result, int) else len(dst)
+            n = int(result) if isinstance(result, int) else size
+            # Only copy what fits; the caller treats a size mismatch as a
+            # miss and will not use the buffer, but we must not overflow it.
+            dst[: min(n, size)] = scratch_view[: min(n, size)]
+            return n
         data = client.get(key_str.encode())
         if data is None:
             return GET_MISS
