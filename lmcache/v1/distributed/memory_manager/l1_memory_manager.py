@@ -194,8 +194,13 @@ class L1MemoryManager:
             )
 
         address_manager = get_address_manager(self._allocator)
-        free_size = address_manager.get_free_size()
-        total_size = address_manager.get_heap_size()
+        if hasattr(address_manager, "get_usage_snapshot"):
+            free_size, _allocated_size, total_size = (
+                address_manager.get_usage_snapshot()
+            )
+        else:
+            free_size = address_manager.get_free_size()
+            total_size = address_manager.get_heap_size()
         used_size = total_size - free_size
         return used_size, total_size
 

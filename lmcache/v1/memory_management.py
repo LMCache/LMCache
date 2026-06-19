@@ -350,7 +350,7 @@ class MemoryObj(metaclass=abc.ABCMeta):
 
     @property
     @abc.abstractmethod
-    def byte_array(self) -> bytes:
+    def byte_array(self) -> bytes | bytearray | memoryview:
         """
         Get the byte array from the MemoryObj.
         The size is will be the physical size instead of the unaligned size.
@@ -886,7 +886,11 @@ class BytesBufferMemoryObj(MemoryObj):
     Wraps a raw flat tensor with some metadata
     """
 
-    def __init__(self, raw_bytes: bytes, metadata: Optional[MemoryObjMetadata] = None):
+    def __init__(
+        self,
+        raw_bytes: bytes | bytearray,
+        metadata: Optional[MemoryObjMetadata] = None,
+    ):
         self.raw_data = raw_bytes
         if metadata is None:
             bytes_shape = torch.Size([len(self.raw_data), 0, 0, 0])
@@ -970,7 +974,7 @@ class BytesBufferMemoryObj(MemoryObj):
         return None
 
     @property
-    def byte_array(self) -> bytes:
+    def byte_array(self) -> bytes | bytearray:
         return self.raw_data
 
     @property
@@ -1093,7 +1097,7 @@ class GDSMemoryObject(MemoryObj):
         return None
 
     @property
-    def byte_array(self) -> bytes:
+    def byte_array(self) -> bytes | bytearray | memoryview:
         raise NotImplementedError(
             f"GDSMemoryObject(slab_offset={self.slab_offset}).byte_array is not "
             "supported; bytes live in the GDS slab file and the staging buffer "
@@ -1545,6 +1549,20 @@ class AddressManager:
         """
         return self._size - self.total_allocated_size
 
+    @synchronized("_lock")
+    def get_usage_snapshot(self) -> tuple[int, int, int]:
+        """Return free, allocated, and heap sizes from one locked snapshot.
+
+        Returns:
+            A tuple of ``(free_size, allocated_size, heap_size)`` in bytes.
+        """
+        return (
+            self._size - self.total_allocated_size,
+            self.total_allocated_size,
+            self._size,
+        )
+
+    @synchronized("_lock")
     def check_consistency(self) -> bool:
         """
         Check if the address manager is consistent.
@@ -1807,20 +1825,18 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         clear = True
         logger.info("Checking memory allocator consistency")
         logger.info(f" - Total active allocations: {self.num_active_allocations}")
-        logger.info(
-            f" - Total allocated size: "
-            f"{self.address_manager.total_allocated_size / 1048576} MB"
-        )
+        (
+            total_free_size,
+            total_allocated_size,
+            heap_size,
+        ) = self.address_manager.get_usage_snapshot()
+        logger.info(f" - Total allocated size: {total_allocated_size / 1048576} MB")
 
         # Check the real total free size
-        total_free_size = self.address_manager.get_free_size()
         logger.info(f" - Total free size: {total_free_size / 1048576} MB")
 
         # Check if the numbers are consistent
-        if (
-            total_free_size + self.address_manager.total_allocated_size
-            != self.address_manager.get_heap_size()
-        ):
+        if total_free_size + total_allocated_size != heap_size:
             logger.error("Memory allocator size is inconsistent")
             logger.error("This implies a bug in the memory allocator")
             clear = False

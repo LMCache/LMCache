@@ -10,7 +10,12 @@ import torch
 # First Party
 from lmcache.observability import LMCStatsMonitor
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.distributed.config import L1MemoryManagerConfig
+from lmcache.v1.distributed.memory_manager import (
+    l1_memory_manager as l1_memory_manager_module,
+)
 from lmcache.v1.memory_management import (
+    AddressManager,
     BytesBufferMemoryObj,
     GPUMemoryAllocator,
     HostMemoryAllocator,
@@ -145,6 +150,66 @@ def test_tensor_allocator(use_paging):
         check_allocator(allocator, total_size)
 
     allocator.close()
+
+
+def test_tensor_allocator_memcheck_uses_consistent_address_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """memcheck should not mix allocator state from before and after sbrk."""
+    allocator = TensorMemoryAllocator(
+        torch.zeros(2 * AddressManager.ALIGN_BYTES, dtype=torch.uint8),
+        init_address_space=AddressManager.ALIGN_BYTES,
+    )
+
+    original_get_free_size = allocator.address_manager.get_free_size
+
+    def expand_after_reading_free_size() -> int:
+        free_size = original_get_free_size()
+        allocator.address_manager.sbrk(AddressManager.ALIGN_BYTES)
+        return free_size
+
+    monkeypatch.setattr(
+        allocator.address_manager,
+        "get_free_size",
+        expand_after_reading_free_size,
+    )
+
+    assert allocator.memcheck() is True
+    allocator.close()
+
+
+def test_l1_memory_usage_supports_paged_address_manager(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """L1 usage should support paged address managers without snapshots."""
+    page_size = 1024
+    total_size = 4 * page_size
+    paged_allocator = MixedMemoryAllocator(
+        total_size,
+        use_paging=True,
+        shapes=[torch.Size([page_size])],
+        dtypes=[torch.uint8],
+        fmt=MemoryFormat.KV_2LTD,
+    )
+    monkeypatch.setattr(
+        l1_memory_manager_module,
+        "create_memory_allocator",
+        lambda _config: paged_allocator,
+    )
+    manager = l1_memory_manager_module.L1MemoryManager(
+        L1MemoryManagerConfig(
+            size_in_bytes=total_size,
+            use_lazy=False,
+        )
+    )
+
+    try:
+        assert isinstance(paged_allocator.pin_allocator, PagedTensorMemoryAllocator)
+        address_manager = paged_allocator.pin_allocator.address_manager
+        assert not hasattr(address_manager, "get_usage_snapshot")
+        assert manager.get_memory_usage() == (0, total_size)
+    finally:
+        manager.close()
 
 
 @pytest.mark.parametrize(
