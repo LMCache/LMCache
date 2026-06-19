@@ -1,7 +1,10 @@
 # LMCache Engine-Driven Multi-Group Fork
 
 **Repository:** https://github.com/efschu/LMCache  
-**Branch:** `dev-engine-driven-multigroup`
+**Branch:** `dev`  
+**Latest Wheel:** `wheelhouse/lmcache-0.4.8rc2.dev15-cp312-cp312-linux_x86_64.whl`
+
+---
 
 ## Overview
 
@@ -87,31 +90,15 @@ Fixed a race condition where multi-group prefetch handles (groups 1-3) were subm
 - Call `finish_read_prefetched` for **all groups** (group-0 through group-N)
 - Touch L1 keys only for group-0 (matching original behavior)
 
-## Build Instructions
+---
 
-### Prerequisites
+## Quick Start
 
-- Docker
-- NVIDIA Docker runtime (for GPU access during build)
-- Git
-
-### Build Manylinux Wheel
+### Download Wheel
 
 ```bash
-# Clone the repository
-git clone https://github.com/efschu/LMCache.git
-cd LMCache
-git checkout dev-engine-driven-multigroup
-
-# Build wheel using manylinux Docker container
-docker run --rm \
-  -v $(pwd):/io \
-  -e BUILDKITE_TOKEN \
-  ghcr.io/efschu/lmcache-manylinux-builder:latest \
-  /io
-
-# Wheel will be in ./wheelhouse/
-ls -la wheelhouse/
+# Download from GitHub Releases or build from source
+# Latest build: wheelhouse/lmcache-0.4.8rc2.dev15-cp312-cp312-linux_x86_64.whl
 ```
 
 ### Install
@@ -147,21 +134,56 @@ vllm serve Qwen/Qwen3.6-27B \
   }'
 ```
 
-## Testing
+**Important:** Use `CUDA_VISIBLE_DEVICES=""` (not `NVIDIA_VISIBLE_DEVICES=""`) to prevent the server from allocating GPU memory.
+
+---
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [README.md](README.md) | This file - Overview and quick start |
+| [BUILD.md](docs/BUILD.md) | Detailed build instructions for wheels |
+| [Lmcache_engine_driven_multigroup.md](Lmcache_engine_driven_multigroup.md) | Full design document with protocol specs |
+
+---
+
+## Build from Source
+
+See [BUILD.md](docs/BUILD.md) for detailed build instructions.
+
+### Quick Build
 
 ```bash
-# Run unit tests
-pytest tests/
+# Clone repository
+git clone https://github.com/efschu/LMCache.git
+cd LMCache
 
-# Run specific multi-group tests
-pytest tests/v1/ -k "multi_group or engine_driven"
+# Build wheel with Docker (GPU required)
+docker run --rm \
+    --gpus all \
+    --security-opt apparmor=unconfined \
+    -v $(pwd):/lm \
+    -v $(pwd)/wheelhouse:/whl \
+    ghcr.io/efschu/lmcache-manylinux-builder-gpu \
+    bash -c '
+        export TORCH_CUDA_ARCH_LIST="8.6;8.9;9.0"
+        export ENABLE_CXX11_ABI=1
+        cd /lm
+        /opt/python/cp312-cp312/bin/pip wheel . --no-deps -w /whl
+    '
+
+# Install
+pip install wheelhouse/lmcache-*.whl --force-reinstall --no-deps
 ```
+
+---
 
 ## Commit History
 
-### Commit: `11a440d` - Add multi-group KV-cache design doc for engine-driven lmcache
+### Commit: `26d830d` - Add multi-group KV-cache design document for engine-driven lmcache
 
-This single commit contains the full implementation:
+This commit contains the full implementation:
 
 1. **`lmcache/v1/multiprocess/custom_types.py`**
    - Added `GroupLayoutInfo` msgspec.Struct for per-group layout metadata
@@ -193,14 +215,108 @@ This single commit contains the full implementation:
 7. **`lmcache/v1/protocols/engine.py`**
    - Extended `PrepareRetrieveResponse` with `cpu_data: bytes` field
 
+---
+
+## Testing
+
+```bash
+# Run unit tests
+pytest tests/
+
+# Run specific multi-group tests
+pytest tests/v1/ -k "multi_group or engine_driven"
+```
+
+---
+
 ## Design Document
 
 See [Lmcache_engine_driven_multigroup.md](./Lmcache_engine_driven_multigroup.md) for the full design document including:
-- Detailed data flow analysis
-- Protocol specifications
-- API contracts
-- Migration guide
+
+- **Detailed data flow analysis** - How data flows between vLLM and LMCache
+- **Protocol specifications** - Wire format for engine-driven transfer
+- **API contracts** - Function signatures and expected behaviors
+- **Migration guide** - How to migrate from old transfer mode
+
+---
+
+## Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                          vLLM Worker                                 │
+│  ┌─────────────┐    ┌──────────────┐    ┌───────────────────────┐  │
+│  │ Paged KV    │───▶│ gather_paged │───▶│ EngineDrivenTransfer  │  │
+│  │ Cache       │    │ _kv_to_cpu() │    │ .submit_store()       │  │
+│  └─────────────┘    └──────────────┘    └───────────┬───────────┘  │
+│                                                      │              │
+│  ┌─────────────┐    ┌──────────────┐               │              │
+│  │ Paged KV    │◀───│ scatter_cpu  │◀──────────────┘              │
+│  │ Cache       │    │ _to_paged_kv │    ┌───────────────────────┐  │
+│  └─────────────┘    └──────────────┘    │ EngineDrivenTransfer  │  │
+│                                         │ .submit_retrieve()    │  │
+│                                         └───────────┬───────────┘  │
+└─────────────────────────────────────────────────────┼─────────────┘
+                                                      │ IPC
+                                                      ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                       LMCache Server (CPU-only)                      │
+│  ┌──────────────┐    ┌─────────────────┐    ┌───────────────────┐ │
+│  │ Lookup       │───▶│ finish_read     │───▶│ ObjectGroupStore  │ │
+│  │ Manager      │    │ _prefetched()   │    │ (all groups)      │ │
+│  └──────────────┘    └─────────────────┘    └───────────────────┘ │
+│         │                                                       │   │
+│         │    ┌─────────────────┐                               │   │
+│         └───▶│ PrefetchJob     │                               │   │
+│              │ (handles for    │                               │   │
+│              │  groups 0..N)   │                               │   │
+│              └─────────────────┘                               │   │
+│                                                                     │
+│  ┌──────────────┐    ┌─────────────────┐                          │
+│  │ L1 Memory    │◀──▶│ LRU Eviction    │                          │
+│  │ (RAM)        │    │ Policy          │                          │
+│  └──────────────┘    └─────────────────┘                          │
+│         │                                                             │
+│         ▼                                                             │
+│  ┌──────────────┐                                                     │
+│  │ L2 Disk      │                                                     │
+│  │ (KV-Cache)   │                                                     │
+│  └──────────────┘                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## GPU Memory Comparison
+
+| Component | Before (Original) | After (This Fork) |
+|-----------|------------------|-------------------|
+| vLLM Worker | 36 GB | 36 GB |
+| LMCache Server | 666 MB × 2 GPUs | ~216 MB (CPU only) |
+| **Total GPU Memory** | **~37.3 GB** | **~36.4 GB** |
+
+Savings: **~900 MB per GPU** for LMCache server overhead elimination.
+
+---
 
 ## License
 
 Apache 2.0 (same as upstream LMCache)
+
+---
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature/my-feature`
+3. Make your changes
+4. Build and test: `pip wheel . --no-deps -w wheelhouse/`
+5. Submit a pull request
+
+---
+
+## References
+
+- [LMCache upstream repository](https://github.com/LMCache/LMCache)
+- [vLLM KV Transfer documentation](https://docs.vllm.ai/en/latest/features/kv_transfer.html)
+- [PyTorch CUDA extensions](https://pytorch.org/docs/stable/cpp_extension.html)
