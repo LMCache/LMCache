@@ -101,6 +101,24 @@ class CoordinatorCommand(BaseCommand):
                 "quota, 0.0 (exclusive) to 1.0 (default: 1.0)."
             ),
         )
+        parser.add_argument(
+            "--blend-chunk-size",
+            type=int,
+            default=None,
+            help=(
+                "Tokens per chunk for the global CacheBlend directory; must "
+                "equal the LMCache chunk size the blend servers use (default: 256)."
+            ),
+        )
+        parser.add_argument(
+            "--blend-probe-stride",
+            type=int,
+            default=None,
+            help=(
+                "Positions between CacheBlend match probes; 1 probes every "
+                "offset for full recall (default: 1)."
+            ),
+        )
 
     def execute(self, args: argparse.Namespace) -> None:
         """Build the coordinator config and serve the app with uvicorn.
@@ -145,6 +163,8 @@ class CoordinatorCommand(BaseCommand):
                 ("eviction_check_interval", args.eviction_check_interval),
                 ("eviction_ratio", args.eviction_ratio),
                 ("trigger_watermark", args.trigger_watermark),
+                ("blend_chunk_size", args.blend_chunk_size),
+                ("blend_probe_stride", args.blend_probe_stride),
             )
             if value is not None
         }

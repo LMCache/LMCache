@@ -33,11 +33,11 @@ router = APIRouter()
 # semantics don't map cleanly onto a single layer tensor, and the diagnostic
 # API declines them with HTTP 501 until a real need appears.
 _BLOCK_AXIS_BY_FORMAT: dict[Any, int] = {
-    lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS: 1,  # [2, NB, BS, NH, HS]
-    lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS: 0,  # [NB, 2, BS, NH, HS]
-    lmc_ops.GPUKVFormat.NL_X_NB_BS_HS: 0,  # MLA: [NB, BS, HS]
-    lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS: 1,  # [2, NB, NH, BS, HS]
-    lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS: 0,  # [NB, 2, NH, BS, HS]
+    lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS: 1,  # [2, NB, BS, NH, HS]
+    lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS: 0,  # [NB, 2, BS, NH, HS]
+    lmc_ops.EngineKVFormat.NL_X_NB_BS_HS: 0,  # MLA: [NB, BS, HS]
+    lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS: 1,  # [2, NB, NH, BS, HS]
+    lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS: 0,  # [NB, 2, NH, BS, HS]
 }
 
 
@@ -106,7 +106,7 @@ async def kvcache_check(
         400: ``block_ids`` missing/malformed, or ``chunk_size``
             missing/non-positive.
         404: ``instance_id`` not registered, or KV tensors empty.
-        501: engine has no ``gpu_contexts``, or the GPU KV format is
+        501: engine has no ``cache_contexts``, or the KV format is
             not supported by this endpoint.
         503: engine not yet initialised on ``app.state``.
     """
@@ -117,14 +117,14 @@ async def kvcache_check(
             content={"error": "engine not initialized"},
         )
 
-    gpu_ctxs = getattr(engine, "gpu_contexts", None)
-    if gpu_ctxs is None:
+    cache_ctxs = getattr(engine, "cache_contexts", None)
+    if cache_ctxs is None:
         return JSONResponse(
             status_code=501,
             content={"error": "checksum not supported for this engine type"},
         )
 
-    ctx = gpu_ctxs.get(instance_id)
+    ctx = cache_ctxs.get(instance_id)
     if ctx is None:
         return JSONResponse(
             status_code=404,
@@ -159,14 +159,14 @@ async def kvcache_check(
             content={"error": "kv_caches empty"},
         )
 
-    gpu_kv_format = ctx.gpu_kv_format_
-    block_axis = _BLOCK_AXIS_BY_FORMAT.get(gpu_kv_format)
+    engine_kv_format = ctx.engine_kv_format
+    block_axis = _BLOCK_AXIS_BY_FORMAT.get(engine_kv_format)
     if block_axis is None:
         return JSONResponse(
             status_code=501,
             content={
                 "error": "checksum not supported for GPU KV format %s"
-                % gpu_kv_format.name
+                % engine_kv_format.name
             },
         )
 

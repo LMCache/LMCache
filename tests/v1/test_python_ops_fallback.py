@@ -822,27 +822,27 @@ def scenario_single_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.
         device=device,
     ).to(torch.int64)
 
-    # (gpu_kv_format, is_mla, token_major, direction)
+    # (engine_kv_format, is_mla, token_major, direction)
     # direction: False = LMC→vLLM (H2D), True = vLLM→LMC (D2H)
     test_cases = [
         # flash attn: [2, NB, BS, NH, HS] — two_major
-        (ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS, False, True, False),
-        (ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS, False, False, False),
-        (ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS, False, True, True),
+        (ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS, False, True, False),
+        (ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS, False, False, False),
+        (ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS, False, True, True),
         # flash infer: [NB, 2, BS, NH, HS]
-        (ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS, False, True, False),
-        (ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS, False, False, False),
-        (ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS, False, True, True),
+        (ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS, False, True, False),
+        (ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS, False, False, False),
+        (ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS, False, True, True),
         # vLLM MLA: [NB, BS, HS]
-        (ops.GPUKVFormat.NL_X_NB_BS_HS, True, True, False),
-        (ops.GPUKVFormat.NL_X_NB_BS_HS, True, True, True),
+        (ops.EngineKVFormat.NL_X_NB_BS_HS, True, True, False),
+        (ops.EngineKVFormat.NL_X_NB_BS_HS, True, True, True),
     ]
 
-    for gpu_kv_format, is_mla, token_major, direction in test_cases:
+    for engine_kv_format, is_mla, token_major, direction in test_cases:
         dir_tag = "v2l" if direction else "l2v"
-        is_two_major = gpu_kv_format == ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
+        is_two_major = engine_kv_format == ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
         case_desc = (
-            f"fmt={gpu_kv_format}, MLA={is_mla}, TM={token_major}, Dir={dir_tag}"
+            f"fmt={engine_kv_format}, MLA={is_mla}, TM={token_major}, Dir={dir_tag}"
         )
 
         # ── 1. Setup Shapes ──
@@ -926,7 +926,7 @@ def scenario_single_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.
             vllm_tensor,
             slot_mapping,
             xfer_dir,
-            gpu_kv_format,
+            engine_kv_format,
             token_major,
         )
         device_sync(device)
@@ -965,11 +965,11 @@ def scenario_single_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.
         if is_mla:
             lmc_shape = (num_tokens, hidden_size)
             vllm_shape = (num_blocks, block_size, hidden_size)
-            fmt = ops.GPUKVFormat.NL_X_NB_BS_HS
+            fmt = ops.EngineKVFormat.NL_X_NB_BS_HS
         else:
             lmc_shape = (num_tokens, 2, hidden_size)
             vllm_shape = (2, num_blocks, block_size, num_heads, head_size)
-            fmt = ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
+            fmt = ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
 
         lmc_size = 1
         for s in lmc_shape:
@@ -1178,13 +1178,13 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
     )
 
     # ── Format-specific test cases ──
-    # Each: (gpu_kv_format, is_mla, block_size_arg)
+    # Each: (engine_kv_format, is_mla, block_size_arg)
     format_cases = [
-        (ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS, False, 1),  # vLLM cross layer
-        (ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS, False, 1),  # flash attn
-        (ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS, False, block_size),  # flash infer
-        (ops.GPUKVFormat.NL_X_NB_BS_HS, True, 1),  # vLLM MLA
-        (ops.GPUKVFormat.NL_X_NBBS_ONE_HS, True, 1),  # SGLang MLA
+        (ops.EngineKVFormat.NB_NL_TWO_BS_NH_HS, False, 1),  # vLLM cross layer
+        (ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS, False, 1),  # flash attn
+        (ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS, False, block_size),  # flash infer
+        (ops.EngineKVFormat.NL_X_NB_BS_HS, True, 1),  # vLLM MLA
+        (ops.EngineKVFormat.NL_X_NBBS_ONE_HS, True, 1),  # SGLang MLA
     ]
 
     # Decide mode based on the running device.
@@ -1192,12 +1192,12 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
     # only the Python fallback supports list[Tensor].
     use_tensor_list = device not in ("cpu", "cuda", "xpu")
 
-    for gpu_kv_format, is_mla, bs_arg in format_cases:
+    for engine_kv_format, is_mla, bs_arg in format_cases:
         k_or_v_size = 1 if is_mla else 2
 
         for direction in [True, False]:
             dir_tag = "paged2lmc" if direction else "lmc2paged"
-            fmt_name = str(gpu_kv_format).split(".")[-1]
+            fmt_name = str(engine_kv_format).split(".")[-1]
 
             # ── 1. LMCache Tensor ──
             lmc_shape = (k_or_v_size, num_layers, num_tokens, head_size)
@@ -1220,7 +1220,7 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
             # ── 2. Paged Buffers (one per layer) ──
             page_buffers = []
             for ly in range(num_layers):
-                if gpu_kv_format == ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
+                if engine_kv_format == ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS:
                     num_blocks = page_buffer_size // bs_arg
                     pb = torch.zeros(
                         (num_blocks, 2, bs_arg, head_size),
@@ -1250,7 +1250,10 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
                                 + s * 10
                                 + torch.arange(head_size, device=device)
                             ).to(dtype)
-                            if gpu_kv_format == ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
+                            if (
+                                engine_kv_format
+                                == ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS
+                            ):
                                 blk_idx = s // bs_arg
                                 blk_off = s % bs_arg
                                 pb[blk_idx, kv, blk_off] = val
@@ -1286,7 +1289,7 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
                 torch.device(device),
                 page_buffer_size,
                 xfer_dir,
-                gpu_kv_format,
+                engine_kv_format,
                 bs_arg,
             )
             device_sync(device)
@@ -1298,7 +1301,7 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
                     for kv in range(k_or_v_size):
                         lmc_val = key_value[kv, ly, t_id]
 
-                        if gpu_kv_format == ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS:
+                        if engine_kv_format == ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS:
                             blk_idx = s_idx // bs_arg
                             blk_off = s_idx % bs_arg
                             paged_val = page_buffers[ly][blk_idx, kv, blk_off]
@@ -1320,7 +1323,7 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
 
     # ── 6. Collect ONE canonical result for cross-backend comparison ──
     # Use flash attn format (NL_X_TWO_NB_BS_NH_HS), re-run canonical cases
-    canonical_format = ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
+    canonical_format = ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
     results: dict[str, torch.Tensor] = {}
     for direction in [True, False]:
         dir_tag = "paged2lmc" if direction else "lmc2paged"
@@ -1401,15 +1404,18 @@ def scenario_multi_layer_kv_transfer_unilateral(
         device=device,
     )
 
-    # ── Test cases: (gpu_kv_format, is_mla) ──
+    # ── Test cases: (engine_kv_format, is_mla) ──
     format_cases = [
-        (ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS, False),  # SGLang MHA (unilateral path)
         (
-            ops.GPUKVFormat.NL_X_NB_BS_HS,
+            ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+            False,
+        ),  # SGLang MHA (unilateral path)
+        (
+            ops.EngineKVFormat.NL_X_NB_BS_HS,
             True,
         ),  # vLLM MLA (delegates to multi_layer_kv_transfer)
         (
-            ops.GPUKVFormat.NL_X_NBBS_ONE_HS,
+            ops.EngineKVFormat.NL_X_NBBS_ONE_HS,
             True,
         ),  # SGLang MLA (delegates to multi_layer_kv_transfer)
     ]
@@ -1419,7 +1425,7 @@ def scenario_multi_layer_kv_transfer_unilateral(
     # only the Python fallback supports list[Tensor].
     use_tensor_list = device not in ("cpu", "cuda", "xpu")
 
-    for gpu_kv_format, is_mla in format_cases:
+    for engine_kv_format, is_mla in format_cases:
         k_or_v_size = 1 if is_mla else 2
 
         for direction in [True, False]:
@@ -1529,7 +1535,7 @@ def scenario_multi_layer_kv_transfer_unilateral(
                 torch.device(device),
                 page_buffer_size,
                 xfer_dir,
-                gpu_kv_format,
+                engine_kv_format,
             )
             device_sync(device)
 
@@ -1549,7 +1555,7 @@ def scenario_multi_layer_kv_transfer_unilateral(
                             lmc_val.to("cpu"),
                             paged_val.to("cpu"),
                             msg=(
-                                f"Mismatch: {gpu_kv_format} {dir_tag} "
+                                f"Mismatch: {engine_kv_format} {dir_tag} "
                                 f"(tensor_list={use_tensor_list}), "
                                 f"KV={kv}, layer={ly}, "
                                 f"token={t_id}, slot={s_idx}"
@@ -1625,7 +1631,7 @@ def scenario_multi_layer_kv_transfer_unilateral(
             torch.device(device),
             page_buffer_size,
             xfer_dir,
-            ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
+            ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
         )
         device_sync(device)
 
@@ -1853,7 +1859,7 @@ def scenario_multi_layer_block_kv_transfer(
     shape_desc.hs = head_size
     shape_desc.element_size = dtype.itemsize
     shape_desc.kv_size = 2
-    gpu_kv_format = ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
+    engine_kv_format = ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
     num_chunks = num_blocks // blocks_per_chunk
     d2h_chunks = _alloc_chunks((2, num_layers, chunk_tokens, hidden_dim), num_chunks)
     block_ids = list(range(num_blocks))
@@ -1872,7 +1878,7 @@ def scenario_multi_layer_block_kv_transfer(
         ops.TransferDirection.D2H,
         shape_desc,
         chunk_tokens,
-        gpu_kv_format,
+        engine_kv_format,
         0,
     )
     paged_h2d = [torch.zeros_like(layer) for layer in paged_layers]
@@ -1888,7 +1894,7 @@ def scenario_multi_layer_block_kv_transfer(
         ops.TransferDirection.H2D,
         shape_desc,
         chunk_tokens,
-        gpu_kv_format,
+        engine_kv_format,
         0,
     )
     for i in range(num_layers):
@@ -1907,7 +1913,7 @@ def scenario_multi_layer_block_kv_transfer(
         )
         for _ in range(num_layers)
     ]
-    gpu_kv_format_fi_nhd = ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS
+    engine_kv_format_fi_nhd = ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS
     d2h_chunks_fi_nhd = _alloc_chunks(
         (2, num_layers, chunk_tokens, hidden_dim), num_chunks
     )
@@ -1927,7 +1933,7 @@ def scenario_multi_layer_block_kv_transfer(
         ops.TransferDirection.D2H,
         shape_desc,
         chunk_tokens,
-        gpu_kv_format_fi_nhd,
+        engine_kv_format_fi_nhd,
         0,
     )
     paged_h2d_fi_nhd = [torch.zeros_like(layer) for layer in paged_layers_fi_nhd]
@@ -1947,7 +1953,7 @@ def scenario_multi_layer_block_kv_transfer(
         ops.TransferDirection.H2D,
         shape_desc,
         chunk_tokens,
-        gpu_kv_format_fi_nhd,
+        engine_kv_format_fi_nhd,
         0,
     )
     for i in range(num_layers):
@@ -1966,7 +1972,7 @@ def scenario_multi_layer_block_kv_transfer(
         )
         for _ in range(num_layers)
     ]
-    gpu_kv_format_hnd = ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS
+    engine_kv_format_hnd = ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS
     d2h_chunks_hnd = _alloc_chunks(
         (2, num_layers, chunk_tokens, hidden_dim), num_chunks
     )
@@ -1984,7 +1990,7 @@ def scenario_multi_layer_block_kv_transfer(
         ops.TransferDirection.D2H,
         shape_desc,
         chunk_tokens,
-        gpu_kv_format_hnd,
+        engine_kv_format_hnd,
         0,
     )
     paged_h2d_hnd = [torch.zeros_like(layer) for layer in paged_layers_hnd]
@@ -2002,7 +2008,7 @@ def scenario_multi_layer_block_kv_transfer(
         ops.TransferDirection.H2D,
         shape_desc,
         chunk_tokens,
-        gpu_kv_format_hnd,
+        engine_kv_format_hnd,
         0,
     )
     for i in range(num_layers):
@@ -2021,7 +2027,7 @@ def scenario_multi_layer_block_kv_transfer(
         )
         for _ in range(num_layers)
     ]
-    gpu_kv_format_fi_hnd = ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS
+    engine_kv_format_fi_hnd = ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS
     d2h_chunks_fi_hnd = _alloc_chunks(
         (2, num_layers, chunk_tokens, hidden_dim), num_chunks
     )
@@ -2041,7 +2047,7 @@ def scenario_multi_layer_block_kv_transfer(
         ops.TransferDirection.D2H,
         shape_desc,
         chunk_tokens,
-        gpu_kv_format_fi_hnd,
+        engine_kv_format_fi_hnd,
         0,
     )
     paged_h2d_fi_hnd = [torch.zeros_like(layer) for layer in paged_layers_fi_hnd]
@@ -2061,7 +2067,7 @@ def scenario_multi_layer_block_kv_transfer(
         ops.TransferDirection.H2D,
         shape_desc,
         chunk_tokens,
-        gpu_kv_format_fi_hnd,
+        engine_kv_format_fi_hnd,
         0,
     )
     for i in range(num_layers):
@@ -2087,7 +2093,7 @@ def scenario_multi_layer_block_kv_transfer(
     shape_desc_mla.hs = mla_hidden
     shape_desc_mla.element_size = dtype.itemsize
     shape_desc_mla.kv_size = 1
-    gpu_kv_format_mla = ops.GPUKVFormat.NL_X_NB_BS_HS
+    engine_kv_format_mla = ops.EngineKVFormat.NL_X_NB_BS_HS
     d2h_chunks_mla = _alloc_chunks((num_layers, chunk_tokens, mla_hidden), num_chunks)
     ops.multi_layer_block_kv_transfer(
         paged_layers_mla
@@ -2103,7 +2109,7 @@ def scenario_multi_layer_block_kv_transfer(
         ops.TransferDirection.D2H,
         shape_desc_mla,
         chunk_tokens,
-        gpu_kv_format_mla,
+        engine_kv_format_mla,
         0,
     )
     paged_h2d_mla = [torch.zeros_like(layer) for layer in paged_layers_mla]
@@ -2121,7 +2127,7 @@ def scenario_multi_layer_block_kv_transfer(
         ops.TransferDirection.H2D,
         shape_desc_mla,
         chunk_tokens,
-        gpu_kv_format_mla,
+        engine_kv_format_mla,
         0,
     )
     for i in range(num_layers):
@@ -2138,7 +2144,7 @@ def scenario_multi_layer_block_kv_transfer(
         torch.randn(num_blocks * block_size, 1, mla_hidden, dtype=dtype).to(device)
         for _ in range(num_layers)
     ]
-    gpu_kv_format_sglang_mla = ops.GPUKVFormat.NL_X_NBBS_ONE_HS
+    engine_kv_format_sglang_mla = ops.EngineKVFormat.NL_X_NBBS_ONE_HS
     d2h_chunks_sglang_mla = _alloc_chunks(
         (num_layers, chunk_tokens, mla_hidden), num_chunks
     )
@@ -2158,7 +2164,7 @@ def scenario_multi_layer_block_kv_transfer(
         ops.TransferDirection.D2H,
         shape_desc_mla,
         chunk_tokens,
-        gpu_kv_format_sglang_mla,
+        engine_kv_format_sglang_mla,
         0,
     )
     paged_h2d_sglang_mla = [
@@ -2180,7 +2186,7 @@ def scenario_multi_layer_block_kv_transfer(
         ops.TransferDirection.H2D,
         shape_desc_mla,
         chunk_tokens,
-        gpu_kv_format_sglang_mla,
+        engine_kv_format_sglang_mla,
         0,
     )
     for i in range(num_layers):
@@ -2202,7 +2208,7 @@ def scenario_multi_layer_block_kv_transfer(
         head_size,
         dtype=dtype,
     ).to(device)
-    gpu_kv_format_cross_nhd = ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS
+    engine_kv_format_cross_nhd = ops.EngineKVFormat.NB_NL_TWO_BS_NH_HS
     d2h_chunks_cross_nhd = _alloc_chunks(
         (2, num_layers, chunk_tokens, hidden_dim), num_chunks
     )
@@ -2220,7 +2226,7 @@ def scenario_multi_layer_block_kv_transfer(
         ops.TransferDirection.D2H,
         shape_desc,
         chunk_tokens,
-        gpu_kv_format_cross_nhd,
+        engine_kv_format_cross_nhd,
         0,
     )
     paged_h2d_cross_nhd = torch.zeros_like(paged_cross_nhd)
@@ -2238,7 +2244,7 @@ def scenario_multi_layer_block_kv_transfer(
         ops.TransferDirection.H2D,
         shape_desc,
         chunk_tokens,
-        gpu_kv_format_cross_nhd,
+        engine_kv_format_cross_nhd,
         0,
     )
     orig = paged_cross_nhd.cpu()
@@ -2257,7 +2263,7 @@ def scenario_multi_layer_block_kv_transfer(
         head_size,
         dtype=dtype,
     ).to(device)
-    gpu_kv_format_cross_hnd = ops.GPUKVFormat.NB_NL_TWO_NH_BS_HS
+    engine_kv_format_cross_hnd = ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS
     d2h_chunks_cross_hnd = _alloc_chunks(
         (2, num_layers, chunk_tokens, hidden_dim), num_chunks
     )
@@ -2275,7 +2281,7 @@ def scenario_multi_layer_block_kv_transfer(
         ops.TransferDirection.D2H,
         shape_desc,
         chunk_tokens,
-        gpu_kv_format_cross_hnd,
+        engine_kv_format_cross_hnd,
         0,
     )
     paged_h2d_cross_hnd = torch.zeros_like(paged_cross_hnd)
@@ -2293,7 +2299,7 @@ def scenario_multi_layer_block_kv_transfer(
         ops.TransferDirection.H2D,
         shape_desc,
         chunk_tokens,
-        gpu_kv_format_cross_hnd,
+        engine_kv_format_cross_hnd,
         0,
     )
     orig = paged_cross_hnd.cpu()
@@ -2314,7 +2320,7 @@ def scenario_multi_layer_block_kv_transfer(
             for _ in range(num_layers)
         ],
     ]
-    gpu_kv_format_sglang_nbbs = ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS
+    engine_kv_format_sglang_nbbs = ops.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS
     d2h_chunks_sglang_nbbs = _alloc_chunks(
         (2, num_layers, chunk_tokens, hidden_dim), num_chunks
     )
@@ -2335,7 +2341,7 @@ def scenario_multi_layer_block_kv_transfer(
         ops.TransferDirection.D2H,
         shape_desc,
         chunk_tokens,
-        gpu_kv_format_sglang_nbbs,
+        engine_kv_format_sglang_nbbs,
         0,
     )
     paged_h2d_sglang_nbbs = [
@@ -2358,7 +2364,7 @@ def scenario_multi_layer_block_kv_transfer(
         ops.TransferDirection.H2D,
         shape_desc,
         chunk_tokens,
-        gpu_kv_format_sglang_nbbs,
+        engine_kv_format_sglang_nbbs,
         0,
     )
     for kv in range(2):
@@ -2386,7 +2392,7 @@ def scenario_multi_layer_block_kv_transfer(
             for _ in range(num_layers)
         ],
     ]
-    gpu_kv_format_sglang_nb = ops.GPUKVFormat.TWO_X_NL_X_NB_BS_NH_HS
+    engine_kv_format_sglang_nb = ops.EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS
     d2h_chunks_sglang_nb = _alloc_chunks(
         (2, num_layers, chunk_tokens, hidden_dim), num_chunks
     )
@@ -2407,7 +2413,7 @@ def scenario_multi_layer_block_kv_transfer(
         ops.TransferDirection.D2H,
         shape_desc,
         chunk_tokens,
-        gpu_kv_format_sglang_nb,
+        engine_kv_format_sglang_nb,
         0,
     )
     paged_h2d_sglang_nb = [
@@ -2430,7 +2436,7 @@ def scenario_multi_layer_block_kv_transfer(
         ops.TransferDirection.H2D,
         shape_desc,
         chunk_tokens,
-        gpu_kv_format_sglang_nb,
+        engine_kv_format_sglang_nb,
         0,
     )
     for kv in range(2):
@@ -2451,7 +2457,7 @@ def scenario_multi_layer_block_kv_transfer(
         )
         for _ in range(num_layers)
     ]
-    gpu_kv_format_nhd = ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
+    engine_kv_format_nhd = ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
     # With skip=2, effective blocks start at index 2.
     # Object 0 occupies flat indices [0, blocks_per_chunk), skipping first 2.
     # Object 1 occupies flat indices [blocks_per_chunk, 2*blocks_per_chunk).
@@ -2472,7 +2478,7 @@ def scenario_multi_layer_block_kv_transfer(
         ops.TransferDirection.D2H,
         shape_desc,
         chunk_tokens,
-        gpu_kv_format_nhd,
+        engine_kv_format_nhd,
         skip_n,
     )
     paged_h2d_skip = [torch.zeros_like(layer) for layer in paged_layers_skip]
@@ -2490,7 +2496,7 @@ def scenario_multi_layer_block_kv_transfer(
         ops.TransferDirection.H2D,
         shape_desc,
         chunk_tokens,
-        gpu_kv_format_nhd,
+        engine_kv_format_nhd,
         skip_n,
     )
     # Blocks [skip_n:num_blocks] should round-trip at their original positions
@@ -2543,7 +2549,7 @@ def scenario_multi_layer_block_kv_transfer(
         ops.TransferDirection.D2H,
         shape_desc,
         chunk_tokens,
-        gpu_kv_format_nhd,
+        engine_kv_format_nhd,
         0,
     )
     paged_h2d_permuted = [torch.zeros_like(layer) for layer in paged_layers_permuted]
@@ -2563,7 +2569,7 @@ def scenario_multi_layer_block_kv_transfer(
         ops.TransferDirection.H2D,
         shape_desc,
         chunk_tokens,
-        gpu_kv_format_nhd,
+        engine_kv_format_nhd,
         0,
     )
     for i in range(num_layers):
@@ -2610,7 +2616,7 @@ def scenario_multi_layer_block_kv_transfer(
         ops.TransferDirection.D2H,
         shape_desc_mc,
         chunk_tokens,
-        gpu_kv_format_nhd,
+        engine_kv_format_nhd,
         0,
     )
     paged_h2d_mc = [torch.zeros_like(layer) for layer in paged_layers_mc]
@@ -2628,7 +2634,7 @@ def scenario_multi_layer_block_kv_transfer(
         ops.TransferDirection.H2D,
         shape_desc_mc,
         chunk_tokens,
-        gpu_kv_format_nhd,
+        engine_kv_format_nhd,
         0,
     )
     for i in range(num_layers):

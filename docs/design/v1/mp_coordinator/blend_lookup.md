@@ -80,15 +80,23 @@ The table is keyed by `(model_scope, poly_hash)`:
 - **`poly_hash`** — the content-only 64-bit polynomial chunk hash
   (`chunk_hash_windows_numba` with the fleet-constant base `POLY_BASE`), computed
   **by the coordinator** from the published tokens.
-- **`model_scope`** = `f"{model_name}@{cache_salt}"`. CacheBlend reuse is
-  same-model only (K is model-specific), and `cache_salt` is explicit cache
-  isolation — both are part of `ObjectKey` (`distributed/api.py`). Content from a
-  different scope lands under a different key and is never matched.
+- **`model_scope`** = the model name. CacheBlend reuse is same-model only
+  (K is model-specific), so cross-model content never matches.
 
-**TP rank is not in the key.** KV is stored per rank, but the directory matches
-content (rank-agnostic); the querying server expands a matched `object_key` into
-its `world_size` per-rank `ObjectKey`s at retrieve (`ipc_key_to_object_keys`),
-exactly as the local path does. So one fingerprint serves all ranks.
+**`cache_salt` is not in the key** (and neither is TP rank): both are applied at
+retrieve. The querying server expands a matched `object_key` into per-rank
+`ObjectKey`s using **its own** `cache_salt` and `world_size`
+(`ipc_key_to_object_keys` reads them from the request's key), exactly as the
+local path does. So a cross-salt match lands in the requester's own salt
+namespace and confirmed-misses at the sparse prefetch unless a same-salt copy
+exists — tenant isolation holds with **one table per model** instead of one per
+`(model, salt)`. Filtering by the *storer's* salt would be wrong: the directory
+is first-writer-wins per content, so the first storer's salt would get pinned
+and other tenants could never match their own copies of identical content.
+(Cost: a cross-salt match with no same-salt copy is a wasted prefetch — the
+already-tolerated stale-entry failure mode. The directory does reveal cross-salt
+content *existence* to the trusted mp-servers; acceptable for trusted fleet
+infra, revisit if not.)
 
 The 64-bit poly-hash carries the same collision behavior as the local matcher
 (which also matches on the 64-bit poly); acceptable within a model scope, and a
@@ -96,23 +104,40 @@ collision only causes a wasted prefetch (caught downstream), never wrong KV.
 
 ## Coordinator directory (`blend_directory.py`)
 
-`GlobalBlendMatcher` (thread-safe, single lock, mirroring `InstanceRegistry`):
+`GlobalBlendMatcher` (thread-safe) partitions fingerprints **per scope**, each in
+a `_ScopeTable` with its own lock; a small top-level lock guards only the scope
+map and the reverse eviction map:
 
 ```
-_index   : dict[(model_scope, poly_hash:int) -> ChunkLoc(object_key, old_st)]
+_scopes  : dict[model_scope -> _ScopeTable]
+  _ScopeTable.slots       : np.int64 direct-address table, low hash bits -> cid
+  _ScopeTable.hashes/locs : per-cid full poly hash + ChunkLoc(object_key, old_st)
+  _ScopeTable.poly_to_cid : dict for idempotent insert / eviction lookup
 _by_key  : dict[object_key -> list[(model_scope, poly_hash)]]   # for eviction
 ```
 
 - `register(ranges)` — for each `StoreRange(model_scope, tokens, object_keys,
-  old_st_base)`, chunk the tokens, hash each chunk, and insert
-  `(model_scope, poly_hash) → (object_key, old_st)`; idempotent (first-writer
-  wins per key).
-- `remove(object_keys)` — drop all entries for an evicted chunk (reverse map).
+  old_st_base)`, chunk the tokens, hash each chunk, and insert each fingerprint
+  **in place** (O(1) per chunk); idempotent (first-writer wins per key).
+- `remove(object_keys)` — tombstone all entries for an evicted chunk (reverse
+  map); a tombstoned entry is skipped at match.
 - `match(model_scope, tokens)` — roll a chunk-window hash over the request
-  tokens, probe every `probe_stride` positions against the scope's table; dedup
-  by `object_key`; return `[(object_key, old_st, cur_st)]`. Mirrors
-  `BlendTokenRangeMatcherV3.match_sub_sequence`, minus the local direct-address
-  table (a real dict gives exact 64-bit match, no separate collision step).
+  tokens, then probe every `probe_stride` position against the scope's
+  **direct-address table** in one numpy gather; a full-64-bit re-check in the
+  sparse hit loop rejects bucket collisions; dedup by `object_key`; return
+  `[(object_key, old_st, cur_st)]`. Mirrors the local
+  `BlendTokenRangeMatcherV3.match_sub_sequence`.
+
+**Match is vectorized; mutation is in place.** All operations on a scope run
+under its lock, which is cheap because the probe is one gather plus a sparse
+verify loop (sub-millisecond). Tables are sized per scope and grow by rebuild
+(power of two, a few times the live entry count — small scopes stay small,
+unlike the local matcher's fixed 2^20 array); rebuilds happen only on the write
+path, at load-factor growth or when tombstones outnumber live entries, so
+lookups never pay them. On a bucket collision the later insert wins; the loser
+is merely unmatchable — a missed reuse recomputed downstream, never wrong KV.
+This replaces the original per-position Python `dict.get` probe loop, which was
+O(n) per query and held the directory's single global lock for its duration.
 
 It is **ephemeral**: rebuilt from publishes after a restart; a stale instance
 leaving the fleet does not drop fingerprints (shared-L2 object keys stay valid).
@@ -132,6 +157,14 @@ a synchronous `httpx.Client` plus a daemon, mirroring the module's existing
   wall-clock bound is the client HTTP `request_timeout` (default 50 ms): a slow
   or down coordinator returns/​times-out into an empty result, so the lookup
   proceeds local-only without stalling. No separate poll-count budget.
+  - **Match queries run concurrently.** The daemon dispatches each match to a
+    thread pool (`LMCACHE_COORDINATOR_BLEND_MATCH_CONCURRENCY`, default 8), so
+    one slow coordinator reply no longer stalls the queries behind it.
+  - **Compact wire form.** Request tokens ship as a base64 little-endian
+    `uint32` buffer (`tokens_b64`, via `encode_tokens`/`decode_tokens` in
+    `schemas.py`) — ~1.4x smaller than a JSON list and decoded in one
+    `np.frombuffer` straight to the matcher's array. Register still ships raw
+    tokens as JSON (lower frequency).
 
 Opt-in via `LMCACHE_COORDINATOR_URL`; absent → the module receives `None` and
 every publish/query path is skipped (behavior unchanged).
@@ -181,6 +214,7 @@ publish is optional and not required for correctness.)
 | coordinator down | no global leg | HTTP times out → empty result → local-only |
 | poly-hash collision | wasted prefetch | confirmed-miss → recompute |
 | stale entry (evicted) | wasted prefetch | miss → recompute; lazy remove |
+| cross-salt match, no same-salt copy | wasted prefetch | requester-salt ObjectKey misses → recompute |
 | publish dropped | a chunk unindexed globally | recomputed on a peer until re-published |
 
 ## Future evolution (not in this PR)

@@ -41,7 +41,7 @@ class with its own ext code. This is load-bearing for the wire format:
   subclass and `to_tensor` dispatches to the override.
 
 The receiving server therefore needs no per-type branching: a
-`list[CudaIPCWrapper]` arriving at `MPCacheEngine.register_kv_cache`
+`list[CudaIPCWrapper]` arriving at `MPCacheServer.register_kv_cache`
 contains either kind, and `to_tensor()` does the right thing.
 
 ## Sender-side validation

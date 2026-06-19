@@ -16,17 +16,17 @@ from lmcache import torch_dev
 from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints, is_mla
-from lmcache.v1.multiprocess.custom_types import RegisterNonGpuContextPayload
+from lmcache.v1.multiprocess.custom_types import RegisterEngineDrivenContextPayload
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType
-from lmcache.v1.multiprocess.protocols.engine import RegisterNonGpuContextResponse
+from lmcache.v1.multiprocess.protocols.engine import RegisterEngineDrivenContextResponse
 from lmcache.v1.multiprocess.transfer_context.base import (
-    NonGpuContext,
-    NonGpuContextMetadata,
+    EngineDrivenContext,
+    EngineDrivenContextMetadata,
     compute_kv_layout,
-    create_non_gpu_context,
+    create_engine_driven_context,
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )
@@ -36,25 +36,27 @@ logger = init_logger(__name__)
 
 # Environment variable that lets the user override the default routing
 # performed by :func:`create_transfer_context`. Accepted values match the
-# string values of :class:`MPTransferMode` (``auto`` / ``handle`` /
-# ``data``); ``auto`` reproduces the historical device-type-based dispatch.
+# string values of :class:`MPTransferMode` (``auto`` / ``engine_driven`` /
+# ``lmcache_driven``); ``auto`` reproduces the historical device-type-based
+# dispatch.
 ENV_MP_TRANSFER_MODE = "LMCACHE_MP_TRANSFER_MODE"
 
 
 class MPTransferMode(str, Enum):
     """Routing mode used by :func:`create_transfer_context`.
 
-    * ``AUTO``: dispatch by ``tensor.device.type`` (CUDA -> handle, others
-      -> data). Preserves the historical behaviour.
-    * ``HANDLE``: force :class:`HandleTransferContext` (IPC / SHM zero-copy
-      path). Requires a registered KV-wrapper factory for the device.
-    * ``DATA``: force :class:`DataTransferContext` (worker-side gather /
-      scatter copy path).
+    * ``AUTO``: dispatch by ``tensor.device.type`` (CUDA -> lmcache-driven,
+      others -> engine-driven). Preserves the historical behaviour.
+    * ``ENGINE_DRIVEN``: force :class:`EngineDrivenTransferContext`
+      (worker-side gather / scatter copy path).
+    * ``LMCACHE_DRIVEN``: force :class:`LMCacheDrivenTransferContext`
+      (IPC / SHM zero-copy path). Requires a registered KV-wrapper factory
+      for the device.
     """
 
     AUTO = "auto"
-    HANDLE = "handle"
-    DATA = "data"
+    ENGINE_DRIVEN = "engine_driven"
+    LMCACHE_DRIVEN = "lmcache_driven"
 
 
 def _resolve_mode(mode: "str | MPTransferMode | None") -> MPTransferMode:
@@ -75,17 +77,17 @@ def _resolve_mode(mode: "str | MPTransferMode | None") -> MPTransferMode:
         ) from exc
 
 
-def _build_handle_context(device_type: str) -> "TransferContext":
-    """Build a :class:`HandleTransferContext` after capability check."""
+def _build_lmcache_driven_context(device_type: str) -> "TransferContext":
+    """Build a :class:`LMCacheDrivenTransferContext` after capability check."""
     try:
         platform_registry.get_kv_wrapper_factory(device_type)
     except ValueError as exc:
         raise ValueError(
-            "MP transfer mode 'handle' is not supported for device type "
+            "MP transfer mode 'lmcache_driven' is not supported for device type "
             "%r: no KV-cache wrapper factory is registered. "
-            "Use mode 'data' or 'auto' instead." % device_type
+            "Use mode 'engine_driven' or 'auto' instead." % device_type
         ) from exc
-    return HandleTransferContext()
+    return LMCacheDrivenTransferContext()
 
 
 class IPCEvent(Protocol):
@@ -101,7 +103,9 @@ SendRequest = Callable[[MessageQueueClient, RequestType, list[object]], Messagin
 def _single_group_block_ids(block_ids: list[list[int]]) -> list[int]:
     """Return the flat block-id list for transports without HMA support."""
     if len(block_ids) != 1:
-        raise RuntimeError("non-GPU transfer does not support hybrid KV cache groups")
+        raise RuntimeError(
+            "engine-driven transfer does not support hybrid KV cache groups"
+        )
     return block_ids[0]
 
 
@@ -214,8 +218,13 @@ class TransferContext(ABC):
         """Release resources held by this context."""
 
 
-class HandleTransferContext(TransferContext):
-    """Handle-based IPC + MQ future transport context."""
+class LMCacheDrivenTransferContext(TransferContext):
+    """LMCache-driven IPC + MQ future transport context.
+
+    In this mode the serving engine provides device handles (IPC for CUDA,
+    SHM wrappers for CPU with CUDA-IPC-like semantics) and the LMCache
+    server performs direct device-side data transfer.
+    """
 
     def __init__(self) -> None:
         self._mq_client: MessageQueueClient | None = None
@@ -266,7 +275,7 @@ class HandleTransferContext(TransferContext):
     ) -> MessagingFuture:
         if self._mq_client is None or self._send_request is None:
             raise RuntimeError(
-                "Handle transfer context is not registered. "
+                "LMCache-driven transfer context is not registered. "
                 "Call register() before submit_store()."
             )
         return self._send_request(
@@ -288,7 +297,7 @@ class HandleTransferContext(TransferContext):
     ) -> MessagingFuture:
         if self._mq_client is None or self._send_request is None:
             raise RuntimeError(
-                "Handle transfer context is not registered. "
+                "LMCache-driven transfer context is not registered. "
                 "Call register() before submit_retrieve()."
             )
         return self._send_request(
@@ -302,13 +311,18 @@ class HandleTransferContext(TransferContext):
         self._send_request = None
 
 
-class DataTransferContext(TransferContext):
-    """Data transfer context for non-CUDA workers."""
+class EngineDrivenTransferContext(TransferContext):
+    """Engine-driven transfer context for non-CUDA workers.
+
+    In this mode the engine (worker side) owns the data movement: the
+    worker adapter gathers/packs KV into CPU buffers, commits via
+    message-queue, and the server side persists/rehydrates from storage.
+    """
 
     def __init__(self) -> None:
-        self._non_gpu_context: NonGpuContext | None = None
+        self._engine_driven_context: EngineDrivenContext | None = None
         self._layout_hints: LayoutHints | None = None
-        self._gpu_kv_format: Any = None
+        self._engine_kv_format: Any = None
 
     def register(
         self,
@@ -338,12 +352,12 @@ class DataTransferContext(TransferContext):
             num_layers,
             hidden_dim_size,
             dtype_str,
-            gpu_kv_format,
+            engine_kv_format,
         ) = compute_kv_layout(kv_caches, layout_hints=layout_hints)
         self._layout_hints = layout_hints
-        self._gpu_kv_format = gpu_kv_format
+        self._engine_kv_format = engine_kv_format
 
-        use_mla_flag = is_mla(gpu_kv_format)
+        use_mla_flag = is_mla(engine_kv_format)
         shape = (
             torch.Size([num_layers, blocks_in_chunk * block_size, hidden_dim_size])
             if use_mla_flag
@@ -356,9 +370,9 @@ class DataTransferContext(TransferContext):
 
         future = send_request(
             mq_client,
-            RequestType.REGISTER_KV_CACHE_NON_GPU_CONTEXT,
+            RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
             [
-                RegisterNonGpuContextPayload(
+                RegisterEngineDrivenContextPayload(
                     instance_id=instance_id,
                     model_name=model_name,
                     world_size=world_size,
@@ -373,16 +387,16 @@ class DataTransferContext(TransferContext):
         response = future.result(timeout=mq_timeout)
         shm_name = ""
         pool_size = 0
-        if isinstance(response, RegisterNonGpuContextResponse):
+        if isinstance(response, RegisterEngineDrivenContextResponse):
             shm_name = response.shm_name
             pool_size = response.pool_size
 
-        metadata = NonGpuContextMetadata(
+        metadata = EngineDrivenContextMetadata(
             layout_desc=layout_desc,
             block_size=block_size,
             use_mla=use_mla_flag,
         )
-        self._non_gpu_context = create_non_gpu_context(
+        self._engine_driven_context = create_engine_driven_context(
             metadata,
             mq_client,
             mq_timeout,
@@ -406,14 +420,14 @@ class DataTransferContext(TransferContext):
         _event: IPCEvent,
         blocks_in_chunk: int,
     ) -> MessagingFuture:
-        if self._non_gpu_context is None:
+        if self._engine_driven_context is None:
             raise RuntimeError(
-                "Data transfer context is not registered. "
+                "Engine-driven transfer context is not registered. "
                 "Call register() before submit_store()."
             )
 
         torch_dev.synchronize()
-        result = self._non_gpu_context.prepare_store(key, instance_id)
+        result = self._engine_driven_context.prepare_store(key, instance_id)
         out_buffers, chunk_indices = result if result is not None else (None, None)
         # All chunks already in cache — nothing to gather or commit.
         if chunk_indices is not None and len(chunk_indices) == 0:
@@ -425,14 +439,14 @@ class DataTransferContext(TransferContext):
             _single_group_block_ids(block_ids),
             blocks_in_chunk,
             layout_hints=self._layout_hints,
-            gpu_kv_format=self._gpu_kv_format,
+            engine_kv_format=self._engine_kv_format,
             out=out_buffers,
             chunk_indices=chunk_indices,
         )
         if out_buffers is not None:
             # SHM path uses async device->CPU copies; complete them before commit.
             torch_dev.synchronize()
-        ok = self._non_gpu_context.commit_store(key, instance_id, cpu_chunks)
+        ok = self._engine_driven_context.commit_store(key, instance_id, cpu_chunks)
 
         future = MessagingFuture()
         future.set_result(ok)
@@ -449,13 +463,13 @@ class DataTransferContext(TransferContext):
         blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
     ) -> MessagingFuture:
-        if self._non_gpu_context is None:
+        if self._engine_driven_context is None:
             raise RuntimeError(
-                "Data transfer context is not registered. "
+                "Engine-driven transfer context is not registered. "
                 "Call register() before submit_retrieve()."
             )
 
-        src_buffers = self._non_gpu_context.prepare_retrieve(key, instance_id)
+        src_buffers = self._engine_driven_context.prepare_retrieve(key, instance_id)
         ok = src_buffers is not None
         if src_buffers is not None:
             try:
@@ -466,7 +480,7 @@ class DataTransferContext(TransferContext):
                     blocks_in_chunk,
                     skip_first_n_tokens=skip_first_n_tokens,
                     layout_hints=self._layout_hints,
-                    gpu_kv_format=self._gpu_kv_format,
+                    engine_kv_format=self._engine_kv_format,
                 )
             except (RuntimeError, ValueError, TypeError, IndexError):
                 logger.exception("Failed to scatter retrieved CPU context chunks")
@@ -474,16 +488,16 @@ class DataTransferContext(TransferContext):
             # SHM path: ensure all device writes are complete before releasing
             # the SHM slot (server may immediately reuse it after commit_retrieve).
             torch_dev.synchronize()
-        self._non_gpu_context.commit_retrieve(key, instance_id)
+        self._engine_driven_context.commit_retrieve(key, instance_id)
 
         future: MessagingFuture[bool] = MessagingFuture()
         future.set_result(ok)
         return future
 
     def close(self) -> None:
-        if self._non_gpu_context is not None:
-            self._non_gpu_context.close()
-            self._non_gpu_context = None
+        if self._engine_driven_context is not None:
+            self._engine_driven_context.close()
+            self._engine_driven_context = None
 
 
 def create_transfer_context(
@@ -526,11 +540,11 @@ def create_transfer_context(
         device_type,
         resolved_mode.value,
     )
-    if resolved_mode is MPTransferMode.HANDLE:
-        return _build_handle_context(device_type)
-    if resolved_mode is MPTransferMode.DATA:
-        return DataTransferContext()
-    # AUTO: preserve the historical device-type-based dispatch.
+    if resolved_mode is MPTransferMode.LMCACHE_DRIVEN:
+        return _build_lmcache_driven_context(device_type)
+    if resolved_mode is MPTransferMode.ENGINE_DRIVEN:
+        return EngineDrivenTransferContext()
+    # AUTO: dispatch by device type (CUDA -> handle path, else -> data path).
     if device_type == "cuda":
-        return HandleTransferContext()
-    return DataTransferContext()
+        return LMCacheDrivenTransferContext()
+    return EngineDrivenTransferContext()

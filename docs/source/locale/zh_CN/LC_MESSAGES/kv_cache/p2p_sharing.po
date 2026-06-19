@@ -45,11 +45,13 @@ msgstr "前提条件"
 
 #: ../../source/kv_cache/p2p_sharing.rst:13
 msgid "**Multi-GPU Setup**: Your server should have at least 2 GPUs"
-msgstr "**多 GPU 设置**：您的服务器应该至少有 2 个 GPU"
+msgstr ""
+"**多 GPU 设置**\\ ：您的服务器应该至少有 2 个 GPU"
 
 #: ../../source/kv_cache/p2p_sharing.rst:14
 msgid "**NIC**: RDMA is recommended for more performance."
-msgstr "**网络接口卡**：建议使用 RDMA 以获得更好的性能。"
+msgstr ""
+"**网络接口卡**\\ ：建议使用 RDMA 以获得更好的性能。"
 
 #: ../../source/kv_cache/p2p_sharing.rst:15
 msgid "**NIXL**: Install from `NIXL <https://github.com/ai-dynamo/nixl>`_"

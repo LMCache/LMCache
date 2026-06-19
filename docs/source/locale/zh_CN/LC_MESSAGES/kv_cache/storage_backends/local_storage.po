@@ -58,7 +58,8 @@ msgid ""
 "If you have **multiple NVMe devices** (or any independent mount points), "
 "you can assign each GPU its own disk path so that each device writes to a"
 " dedicated drive."
-msgstr "如果您有 **多个 NVMe 设备**（或任何独立的挂载点），您可以为每个 GPU 分配自己的磁盘路径，以便每个设备写入专用驱动器。"
+msgstr ""
+"如果您有 **多个 NVMe 设备**\\ （或任何独立的挂载点），您可以为每个 GPU 分配自己的磁盘路径，以便每个设备写入专用驱动器。"
 
 #: ../../source/kv_cache/storage_backends/local_storage.rst:59
 msgid ""
@@ -70,7 +71,8 @@ msgid ""
 "num_paths``), so all KV cache files from a given GPU land on the same "
 "NVMe.  This is especially useful when GPUs and NVMe devices share a PCIe "
 "switch or NUMA node."
-msgstr "在 ``local_disk`` 中指定一个 **以逗号分隔的路径列表**。每个路径可以选择性地使用 ``file://`` 前缀。 ``local_disk_path_sharding`` 选项控制每个 GPU 工作线程如何选择其路径。目前仅支持 ``\"by_gpu\"``（默认），它根据设备索引（``device_id % num_paths``）选择路径，因此来自给定 GPU 的所有 KV 缓存文件都会落在同一个 NVMe 上。当 GPU 和 NVMe 设备共享 PCIe 交换机或 NUMA 节点时，这尤其有用。"
+msgstr ""
+"在 ``local_disk`` 中指定一个 **以逗号分隔的路径列表**\\ 。每个路径可以选择性地使用 ``file://`` 前缀。 ``local_disk_path_sharding`` 选项控制每个 GPU 工作线程如何选择其路径。目前仅支持 ``\"by_gpu\"``\\ （默认），它根据设备索引（\\ ``device_id % num_paths``\\ ）选择路径，因此来自给定 GPU 的所有 KV 缓存文件都会落在同一个 NVMe 上。当 GPU 和 NVMe 设备共享 PCIe 交换机或 NUMA 节点时，这尤其有用。"
 
 #: ../../source/kv_cache/storage_backends/local_storage.rst:67
 msgid "For example, with two GPUs and two paths:"
@@ -86,7 +88,8 @@ msgstr "``cuda:1`` → ``/mnt/nvme1/kvcache/``"
 
 #: ../../source/kv_cache/storage_backends/local_storage.rst:72
 msgid "``max_local_disk_size`` is the **total budget** shared across all paths."
-msgstr "``max_local_disk_size`` 是所有路径共享的 **总预算**。"
+msgstr ""
+"``max_local_disk_size`` 是所有路径共享的 **总预算**\\ 。"
 
 #: ../../source/kv_cache/storage_backends/local_storage.rst:74
 msgid "**Environment variable example:**"
@@ -110,7 +113,8 @@ msgid ""
 "bandwidth from both devices simultaneously).  The multi-path feature is "
 "most useful when you cannot or do not want to reconfigure the block "
 "devices — for example, when they already have other data."
-msgstr "如果您能够使用内核级 RAID 0（例如 ``mdadm --level=0``），您将获得真正的块级条带化（即使是单个大文件也可以同时使用两个设备的带宽）。当您无法或不想重新配置块设备时，多路径功能最为有用——例如，当它们已经包含其他数据时。"
+msgstr ""
+"如果您能够使用内核级 RAID 0（例如 ``mdadm --level=0``\\ ），您将获得真正的块级条带化（即使是单个大文件也可以同时使用两个设备的带宽）。当您无法或不想重新配置块设备时，多路径功能最为有用——例如，当它们已经包含其他数据时。"
 
 #: ../../source/kv_cache/storage_backends/local_storage.rst:105
 msgid "Local Storage Explanation:"
@@ -122,7 +126,8 @@ msgid ""
 "(``local_disk`` is set to ``None``) and the max local disk size is set to"
 " 0GB instead of 5GB like the default max local cpu size since the disk "
 "space is not strictly necessary for LMCache to function."
-msgstr "与 CPU RAM 卸载不同，磁盘卸载默认是 *禁用* 的（``local_disk`` 设置为 ``None``），最大本地磁盘大小设置为 0GB，而不是像默认最大本地 CPU 大小那样设置为 5GB，因为磁盘空间对于 LMCache 的功能并不是严格必要的。"
+msgstr ""
+"与 CPU RAM 卸载不同，磁盘卸载默认是 *禁用* 的（\\ ``local_disk`` 设置为 ``None``\\ ），最大本地磁盘大小设置为 0GB，而不是像默认最大本地 CPU 大小那样设置为 5GB，因为磁盘空间对于 LMCache 的功能并不是严格必要的。"
 
 #: ../../source/kv_cache/storage_backends/local_storage.rst:111
 msgid ""
@@ -143,7 +148,8 @@ msgid ""
 "storage (i.e. ``LMCACHE_LOCAL_CPU=True`` should be set, see :doc:`CPU RAM"
 " <./cpu_ram>`) for specified tokens (these KV caches are also still kept "
 "in the disk)."
-msgstr "磁盘和远程后端（参见 :doc:`Redis <./redis>`、:doc:`Mooncake <./mooncake>`、:doc:`Valkey <./valkey>`、:doc:`InfiniStore <./infinistore>`）具有异步 put() 操作，因此 IO 延迟不会在阻塞 get() 操作的同时减慢推理。 本地磁盘后端还具有 prefetch() 操作，该操作将主动将 KV 缓存从磁盘移动到 CPU 内存卸载存储（即应设置 ``LMCACHE_LOCAL_CPU=True``，参见 :doc:`CPU RAM <./cpu_ram>`），以便为指定的令牌预取（这些 KV 缓存仍然保留在磁盘中）。"
+msgstr ""
+"磁盘和远程后端（参见 :doc:`Redis <./redis>`、:doc:`Mooncake <./mooncake>`、:doc:`Valkey <./valkey>`、:doc:`InfiniStore <./infinistore>`）具有异步 put() 操作，因此 IO 延迟不会在阻塞 get() 操作的同时减慢推理。 本地磁盘后端还具有 prefetch() 操作，该操作将主动将 KV 缓存从磁盘移动到 CPU 内存卸载存储（即应设置 ``LMCACHE_LOCAL_CPU=True``\\ ，参见 :doc:`CPU RAM <./cpu_ram>`），以便为指定的令牌预取（这些 KV 缓存仍然保留在磁盘中）。"
 
 #: ../../source/kv_cache/storage_backends/local_storage.rst:121
 msgid "Architecture Overview"
@@ -163,14 +169,16 @@ msgstr "**关键组件：**"
 msgid ""
 "**Metadata Dictionary**: Maps each ``CacheEngineKey`` to its disk "
 "metadata (file path, size, shape, dtype, pin status)"
-msgstr "**元数据字典**：将每个 ``CacheEngineKey`` 映射到其磁盘元数据（文件路径、大小、形状、数据类型、固定状态）"
+msgstr ""
+"**元数据字典**\\ ：将每个 ``CacheEngineKey`` 映射到其磁盘元数据（文件路径、大小、形状、数据类型、固定状态）"
 
 #: ../../source/kv_cache/storage_backends/local_storage.rst:174
 msgid ""
 "**Cache Policy**: Configurable eviction policy (LRU, LFU, FIFO, or MRU) "
 "that tracks access patterns and decides which entries to evict when space"
 " is needed"
-msgstr "**缓存策略**：可配置的逐出策略（LRU、LFU、FIFO 或 MRU），跟踪访问模式并决定在需要空间时逐出哪些条目"
+msgstr ""
+"**缓存策略**\\ ：可配置的逐出策略（LRU、LFU、FIFO 或 MRU），跟踪访问模式并决定在需要空间时逐出哪些条目"
 
 #: ../../source/kv_cache/storage_backends/local_storage.rst:175
 msgid ""
@@ -183,7 +191,8 @@ msgstr "**LocalDiskWorker**: 带有优先级队列的异步任务执行器 - 预
 msgid ""
 "**Local Disk**: Filesystem where KV cache chunks are stored as individual"
 " ``.pt`` files"
-msgstr "**本地磁盘**：KV Cache 块作为单独的 ``.pt`` 文件存储的文件系统"
+msgstr ""
+"**本地磁盘**\\ ：KV Cache 块作为单独的 ``.pt`` 文件存储的文件系统"
 
 #: ../../source/kv_cache/storage_backends/local_storage.rst:180
 msgid "Save Flow (PUT)"
@@ -263,14 +272,16 @@ msgstr "创建一个名为 ``disk-offload.yaml`` 的 lmcache 配置文件"
 
 #: ../../source/kv_cache/storage_backends/local_storage.rst:272
 msgid "Example ``config.yaml``:"
-msgstr "示例 ``config.yaml``："
+msgstr ""
+"示例 ``config.yaml``\\ ："
 
 #: ../../source/kv_cache/storage_backends/local_storage.rst:282
 msgid ""
 "If you don't want to use a config file, uncomment the first five "
 "environment variables and then comment out the ``LMCACHE_CONFIG_FILE`` "
 "below:"
-msgstr "如果您不想使用配置文件，请取消注释前五个环境变量，然后注释掉下面的 ``LMCACHE_CONFIG_FILE``："
+msgstr ""
+"如果您不想使用配置文件，请取消注释前五个环境变量，然后注释掉下面的 ``LMCACHE_CONFIG_FILE``\\ ："
 
 #: ../../source/kv_cache/storage_backends/local_storage.rst:299
 msgid ""
@@ -321,7 +332,8 @@ msgid ""
 "RAM is checked before the disk by LMCache. In practice, the disk will be "
 "capable of storing a larger quantity of KV caches so the CPU RAM "
 "offloading will only be able to store a subset of the disk's KV caches."
-msgstr "请注意，如果我们启用 ``LMCACHE_LOCAL_CPU=True``，我们将仅使用来自 :doc:`CPU RAM <./cpu_ram>` 的相同示例，因为 LMCache 在检查磁盘之前会先检查 CPU RAM。实际上，磁盘能够存储更多的 KV 缓存，因此 CPU RAM 的卸载只能存储磁盘 KV 缓存的一个子集。"
+msgstr ""
+"请注意，如果我们启用 ``LMCACHE_LOCAL_CPU=True``\\ ，我们将仅使用来自 :doc:`CPU RAM <./cpu_ram>` 的相同示例，因为 LMCache 在检查磁盘之前会先检查 CPU RAM。实际上，磁盘能够存储更多的 KV 缓存，因此 CPU RAM 的卸载只能存储磁盘 KV 缓存的一个子集。"
 
 #: ../../source/kv_cache/storage_backends/local_storage.rst:389
 msgid "**Example Output:**"

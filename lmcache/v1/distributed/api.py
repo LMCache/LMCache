@@ -15,7 +15,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
 logger = init_logger(__name__)
 
@@ -97,6 +97,16 @@ class ObjectKey:
                 f"(got {len(self.cache_salt)})"
             )
 
+    def to_encoded_object_key(self) -> "EncodedObjectKey":
+        """Return the JSON-safe :class:`EncodedObjectKey` projection."""
+        return EncodedObjectKey(
+            chunk_hash_hex=self.chunk_hash.hex(),
+            model_name=self.model_name,
+            kv_rank=self.kv_rank,
+            object_group_id=self.object_group_id,
+            cache_salt=self.cache_salt,
+        )
+
     @staticmethod
     def IntHash2Bytes(chunk_hash: int) -> bytes:
         # NOTE: this is only used by tests
@@ -162,6 +172,60 @@ class ObjectKey:
 
 
 @dataclass(frozen=True)
+class EncodedObjectKey:
+    """JSON-safe wire form of :class:`ObjectKey` — ``chunk_hash`` is
+    hex-encoded; other fields are preserved verbatim."""
+
+    chunk_hash_hex: str
+    """Hex-encoded ``ObjectKey.chunk_hash``."""
+
+    model_name: str
+    kv_rank: int
+
+    object_group_id: int = 0
+    """Defaults to ``0`` so pre-``object_group_id`` wire payloads still
+    deserialize."""
+
+    cache_salt: str = ""
+
+    def to_object_key(self) -> ObjectKey:
+        """Recover the corresponding :class:`ObjectKey`.
+
+        Raises:
+            ValueError: ``chunk_hash_hex`` is not valid hex, or one of
+                :class:`ObjectKey`'s field invariants is violated.
+        """
+        return ObjectKey(
+            chunk_hash=bytes.fromhex(self.chunk_hash_hex),
+            model_name=self.model_name,
+            kv_rank=self.kv_rank,
+            object_group_id=self.object_group_id,
+            cache_salt=self.cache_salt,
+        )
+
+
+@dataclass(frozen=True)
+class KeyEntry:
+    """One entry in a :class:`KeyListPage` including the encoded object
+    key and its object size."""
+
+    key: EncodedObjectKey
+    size_bytes: int
+
+
+@dataclass(frozen=True)
+class KeyListPage:
+    """A page of keys returned by ``L2AdapterInterface.list_l2_keys``."""
+
+    entries: tuple[KeyEntry, ...]
+    """The keys in the current page."""
+
+    next_page_token: str | None
+    """``None`` means this is the last page. Otherwise pass the token
+    verbatim to the next call to fetch the next page."""
+
+
+@dataclass(frozen=True)
 class MemoryLayoutDesc:
     """
     Describes the layout of a memory object
@@ -207,12 +271,12 @@ class PrefetchHandle:
 
 
 def ipc_key_to_object_keys(
-    ipc_key: IPCCacheEngineKey,
+    ipc_key: IPCCacheServerKey,
     chunk_hashes: list[bytes],
     object_group_ids: list[int],
 ) -> list[list[ObjectKey]]:
     """
-    Convert a single IPCCacheEngineKey and its chunk hashes to per-object-group
+    Convert a single IPCCacheServerKey and its chunk hashes to per-object-group
     lists of ObjectKey.
 
     When the ipc_key's worker_id is None, each chunk hash is exploded into
@@ -241,7 +305,7 @@ def ipc_key_to_object_keys(
     if ipc_key.worker_id is None:
         # For look up request, we want to expand to all workers
         # TODO (ApostaC): include local world size/rank info
-        # in the future once it's in IPCCacheEngineKey
+        # in the future once it's in IPCCacheServerKey
         kv_ranks = [
             ObjectKey.ComputeKVRank(
                 world_size=ipc_key.world_size,

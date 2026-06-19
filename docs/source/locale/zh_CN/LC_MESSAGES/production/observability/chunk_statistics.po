@@ -44,21 +44,25 @@ msgstr "块统计跟踪和分析 KV Cache 块，以提供以下指标："
 msgid ""
 "**Total chunks processed**: The total number of chunks that have been "
 "processed"
-msgstr "**处理的总块数**：已处理的块的总数"
+msgstr ""
+"**处理的总块数**\\ ：已处理的块的总数"
 
 #: ../../source/production/observability/chunk_statistics.rst:14
 msgid "**Unique chunks**: The number of distinct chunks encountered"
-msgstr "**唯一块**：遇到的不同块的数量"
+msgstr ""
+"**唯一块**\\ ：遇到的不同块的数量"
 
 #: ../../source/production/observability/chunk_statistics.rst:15
 msgid "**Duplicate chunks**: The number of repeated chunks"
-msgstr "**重复块**：重复块的数量"
+msgstr ""
+"**重复块**\\ ：重复块的数量"
 
 #: ../../source/production/observability/chunk_statistics.rst:16
 msgid ""
 "**Reuse rate**: The ratio of duplicate chunks to total chunks, indicating"
 " cache efficiency"
-msgstr "**重用率**：重复块与总块的比例，指示缓存效率"
+msgstr ""
+"**重用率**\\ ：重复块与总块的比例，指示缓存效率"
 
 #: ../../source/production/observability/chunk_statistics.rst:18
 msgid "This information is valuable for:"
@@ -234,7 +238,8 @@ msgstr "``memory_bloom_filter``"
 
 #: ../../source/production/observability/chunk_statistics.rst:204
 msgid "Recording strategy: ``memory_bloom_filter`` or ``file_hash``"
-msgstr "记录策略：``memory_bloom_filter`` 或 ``file_hash``"
+msgstr ""
+"记录策略：\\ ``memory_bloom_filter`` 或 ``file_hash``"
 
 #: ../../source/production/observability/chunk_statistics.rst:205
 msgid "``chunk_statistics_auto_start_statistics``"
@@ -432,7 +437,8 @@ msgid ""
 "LMCache provides a comprehensive analysis script at "
 "``examples/chunk_statistics/analyze_chunk_hashes.py`` that supports "
 "multiple analysis modes."
-msgstr "LMCache 提供了一个全面的分析脚本，位于 ``examples/chunk_statistics/analyze_chunk_hashes.py``，支持多种分析模式。"
+msgstr ""
+"LMCache 提供了一个全面的分析脚本，位于 ``examples/chunk_statistics/analyze_chunk_hashes.py``\\ ，支持多种分析模式。"
 
 #: ../../source/production/observability/chunk_statistics.rst:314
 msgid "Best Practices"
@@ -474,7 +480,8 @@ msgstr "跟踪 ``bloom_filter_size_mb`` 指标以确保其适合可用内存"
 
 #: ../../source/production/observability/chunk_statistics.rst:329
 msgid "Adjust ``expected_chunks`` if memory usage is too high"
-msgstr "如果内存使用过高，请调整 ``expected_chunks``。"
+msgstr ""
+"如果内存使用过高，请调整 ``expected_chunks``\\ 。"
 
 #: ../../source/production/observability/chunk_statistics.rst:331
 msgid "**File Rotation:**"

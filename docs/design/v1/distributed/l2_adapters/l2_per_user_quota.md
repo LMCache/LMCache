@@ -21,7 +21,7 @@ untouched.
 
 ```
 vLLM API Server
-  │  sends cache_salt directly on IPCCacheEngineKey
+  │  sends cache_salt directly on IPCCacheServerKey
   ▼
 LMCache MP Server
   │  ipc_key_to_object_keys(key, chunk_hashes)
@@ -126,7 +126,7 @@ both the scheduler and worker adapters.
 
 Both the scheduler adapter (LOOKUP) and worker adapter (STORE/RETRIEVE)
 receive `cache_salt` from the vLLM connector via
-`LMCacheMPRequestMetadata`. Both set `cache_salt` on `IPCCacheEngineKey`
+`LMCacheMPRequestMetadata`. Both set `cache_salt` on `IPCCacheServerKey`
 directly. No server-side session caching is needed.
 
 ```
@@ -143,13 +143,13 @@ Scheduler path (LOOKUP):
   scheduler_adapter.maybe_submit_lookup_request(
       request_id, token_ids, cache_salt=tracker.cache_salt)
   → _create_key(..., cache_salt="alice")
-  → IPCCacheEngineKey(cache_salt="alice", ...)  ──LOOKUP──►  MP Server
+  → IPCCacheServerKey(cache_salt="alice", ...)  ──LOOKUP──►  MP Server
                                                            │
 Worker path (STORE/RETRIEVE):                              │
   worker_adapter.batched_submit_store_requests(            │
       request_ids, ops, event, cache_salts=["alice", ...])    │
   → _create_key(..., cache_salt="alice")                      │
-  → IPCCacheEngineKey(cache_salt="alice", ...) ──STORE──►  MP Server
+  → IPCCacheServerKey(cache_salt="alice", ...) ──STORE──►  MP Server
                                                            │
                                               key.cache_salt = "alice"
                                               ipc_key_to_object_keys(key, hashes)
@@ -161,7 +161,7 @@ Because both scheduler and worker set `cache_salt` directly on the IPC key,
 the server simply reads `key.cache_salt` in all code paths. No session-based
 fallback is needed.
 
-`cache_salt` is added as an identity field on `IPCCacheEngineKey` (with
+`cache_salt` is added as an identity field on `IPCCacheServerKey` (with
 `compare=True`, unlike `request_id`). `request_id` is ephemeral session
 metadata — two requests with different `request_id`s but the same tokens
 should hit the same cache. `cache_salt` is the opposite: same tokens from
@@ -170,7 +170,7 @@ participating in `ObjectKey.__eq__` / `__hash__`.
 
 ```python
 @dataclass(order=True, frozen=True)
-class IPCCacheEngineKey:
+class IPCCacheServerKey:
     model_name: str
     world_size: int
     worker_id: int | None
@@ -182,7 +182,7 @@ class IPCCacheEngineKey:
 ```
 
 `cache_salt` is placed **after** `request_id` (at the end) to preserve
-msgspec wire compatibility. `IPCCacheEngineKey` is serialized positionally
+msgspec wire compatibility. `IPCCacheServerKey` is serialized positionally
 via `msgspec.msgpack`; appending `cache_salt` at the end means an old client
 sending 7 fields to a new server will decode correctly with `cache_salt`
 defaulting to `""`. No changes to existing field positions.
@@ -292,12 +292,12 @@ Add `cache_salt: str = ""` to `ObjectKey` (as shown in section 1).
 propagates it to each constructed `ObjectKey` — no separate parameter,
 so callers cannot accidentally drop the salt.
 
-### 2. Server — `cache_salt` is carried by `IPCCacheEngineKey`
+### 2. Server — `cache_salt` is carried by `IPCCacheServerKey`
 
 **File:** `lmcache/v1/multiprocess/server.py`
 
 Since both the scheduler and worker adapters set `cache_salt` on
-`IPCCacheEngineKey`, the server simply calls `ipc_key_to_object_keys(...)`
+`IPCCacheServerKey`, the server simply calls `ipc_key_to_object_keys(...)`
 and the salt flows through automatically:
 
 ```python
@@ -347,7 +347,7 @@ self.worker_adapter.batched_submit_retrieve_requests(
 
 - `maybe_submit_lookup_request(request_id, token_ids, cache_salt="")`
 - `free_lookup_locks(..., cache_salt="")`
-- `_create_key(..., cache_salt="")` — passes `cache_salt` to `IPCCacheEngineKey`
+- `_create_key(..., cache_salt="")` — passes `cache_salt` to `IPCCacheServerKey`
 
 **Worker adapter** (STORE/RETRIEVE path):
 
@@ -355,13 +355,13 @@ self.worker_adapter.batched_submit_retrieve_requests(
 - `batched_submit_retrieve_requests(request_ids, ops, event, cache_salts=None)`
 - `submit_store_request(request_id, op, event, cache_salt="")`
 - `submit_retrieve_request(request_id, op, event, cache_salt="")`
-- `_create_key(..., cache_salt="")` — passes `cache_salt` to `IPCCacheEngineKey`
+- `_create_key(..., cache_salt="")` — passes `cache_salt` to `IPCCacheServerKey`
 
 Both adapters' `_create_key()` passes `cache_salt` through:
 
 ```python
 def _create_key(self, token_ids, start, end, request_id, cache_salt=""):
-    return IPCCacheEngineKey(
+    return IPCCacheServerKey(
         model_name=self.model_name,
         world_size=self.world_size,
         worker_id=...,
@@ -721,7 +721,7 @@ curl http://localhost:8000/quota
 
 - **No cache_salt from API:** When the API caller doesn't set `cache_salt`,
   `request.cache_salt` is `None`, which maps to `cache_salt=""`.
-  `IPCCacheEngineKey.cache_salt` defaults to `""`. All such keys share the
+  `IPCCacheServerKey.cache_salt` defaults to `""`. All such keys share the
   same (anonymous) namespace.
 - **`eviction_policy: "LRU"`:** Per-user quota logic is not active. The
   watermark is applied against aggregate capacity as before. Existing
@@ -790,15 +790,15 @@ Populate `cache_salt` from `request.cache_salt` and pass to adapters.
 
 ### PR2 — LMCache: `cache_salt` on data model + server (LMCache repo)
 
-Add `cache_salt` to `ObjectKey` and `IPCCacheEngineKey`. Server passes
+Add `cache_salt` to `ObjectKey` and `IPCCacheServerKey`. Server passes
 it through. Update serialization. No behavioral change with `cache_salt=""`.
 
 | File | Change |
 |------|--------|
 | `lmcache/v1/distributed/api.py` | `cache_salt: str = ""` on `ObjectKey` with `__post_init__` validation (`@`, `/`, `\`, NUL, length cap on `cache_salt`; `@` rejected on `model_name`); `ipc_key_to_object_keys()` reads `ipc_key.cache_salt` directly (no separate param) |
-| `lmcache/v1/multiprocess/custom_types.py` | `cache_salt: str = ""` on `IPCCacheEngineKey` with `__post_init__` validation; update `no_worker_id_version()`, `from_token_ids()` |
+| `lmcache/v1/multiprocess/custom_types.py` | `cache_salt: str = ""` on `IPCCacheServerKey` with `__post_init__` validation; update `no_worker_id_version()`, `from_token_ids()` |
 | `lmcache/v1/multiprocess/server.py` / `blend_server_v2.py` | No code changes — existing `ipc_key_to_object_keys(key, chunk_hashes)` calls now carry salt automatically |
-| `lmcache/integration/vllm/vllm_multi_process_adapter.py` | Scheduler + worker `_create_key()` now forward `cache_salt` to `IPCCacheEngineKey` |
+| `lmcache/integration/vllm/vllm_multi_process_adapter.py` | Scheduler + worker `_create_key()` now forward `cache_salt` to `IPCCacheServerKey` |
 | `lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py` | `_object_key_to_string()` appends trailing `@<cache_salt>` when salted; un-salted output is unchanged |
 | `lmcache/v1/distributed/l2_adapters/fs_l2_adapter.py` | `_object_key_to_filename()` / `_filename_to_object_key()` accept 3-field (unsalted) or 4-field (salted) shapes |
 | `csrc/storage_backends/fs/connector.cpp` | `key_to_filename()` splits on `@` and dispatches by field count |

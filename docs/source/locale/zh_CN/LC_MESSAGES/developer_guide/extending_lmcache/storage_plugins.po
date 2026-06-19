@@ -109,7 +109,8 @@ msgid ""
 "(single-process). For **MP mode** (multiprocess), LMCache provides the "
 "``plugin`` L2 adapter type, which dynamically loads a third-party "
 "``L2AdapterInterface`` implementation at runtime."
-msgstr "上述描述的存储插件系统适用于 **非 MP 模式**（单进程）。对于 **MP 模式**（多进程），LMCache 提供了 ``plugin`` L2 适配器类型，该类型在运行时动态加载第三方 ``L2AdapterInterface`` 实现。"
+msgstr ""
+"上述描述的存储插件系统适用于 **非 MP 模式**\\ （单进程）。对于 **MP 模式**\\ （多进程），LMCache 提供了 ``plugin`` L2 适配器类型，该类型在运行时动态加载第三方 ``L2AdapterInterface`` 实现。"
 
 #: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:65
 msgid "Overview"
@@ -130,7 +131,8 @@ msgid ""
 ":doc:`native_connectors`). It reuses the built-in bridging logic so you "
 "only need to implement 6 connector methods rather than the full "
 "``L2AdapterInterface``."
-msgstr "如果您的存储后端是一个原生的 C++ 连接器（使用 pybind 封装），请考虑使用 ``native_plugin`` 类型（请参见 :doc:`native_connectors`）。它重用了内置的桥接逻辑，因此您只需实现 6 个连接器方法，而不是完整的 ``L2AdapterInterface``。"
+msgstr ""
+"如果您的存储后端是一个原生的 C++ 连接器（使用 pybind 封装），请考虑使用 ``native_plugin`` 类型（请参见 :doc:`native_connectors`）。它重用了内置的桥接逻辑，因此您只需实现 6 个连接器方法，而不是完整的 ``L2AdapterInterface``\\ 。"
 
 #: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:79
 msgid "Configuration"
@@ -230,7 +232,8 @@ msgstr "**显式** ``config_class_name`` 字段在 JSON 配置中。"
 msgid ""
 "**Convention**: adapter class name + ``\"Config\"`` suffix (e.g. "
 "``MyL2Adapter`` looks for ``MyL2AdapterConfig``)."
-msgstr "**约定**：适配器类名 + ``\"Config\"`` 后缀（例如 ``MyL2Adapter`` 查找 ``MyL2AdapterConfig``）。"
+msgstr ""
+"**约定**\\ ：适配器类名 + ``\"Config\"`` 后缀（例如 ``MyL2Adapter`` 查找 ``MyL2AdapterConfig``\\ ）。"
 
 #: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:127
 msgid ""
@@ -256,13 +259,15 @@ msgstr "插件合同"
 
 #: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:137
 msgid "A plugin adapter class **must**:"
-msgstr "插件适配器类 **必须**："
+msgstr ""
+"插件适配器类 **必须**\\ ："
 
 #: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:139
 msgid ""
 "Subclass ``L2AdapterInterface`` from "
 "``lmcache.v1.distributed.l2_adapters.base``."
-msgstr "从 ``lmcache.v1.distributed.l2_adapters.base`` 子类化 ``L2AdapterInterface``。"
+msgstr ""
+"从 ``lmcache.v1.distributed.l2_adapters.base`` 子类化 ``L2AdapterInterface``\\ 。"
 
 #: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:140
 msgid ""
@@ -271,28 +276,33 @@ msgid ""
 "``query_lookup_and_lock_result``, ``submit_unlock``, "
 "``submit_load_task``, ``query_load_result``, ``close``, and all three "
 "event-fd getters."
-msgstr "实现所有抽象方法：``submit_store_task``、``pop_completed_store_tasks``、``submit_lookup_and_lock_task``、``query_lookup_and_lock_result``、``submit_unlock``、``submit_load_task``、``query_load_result``、``close``，以及所有三个事件文件描述符获取器。"
+msgstr ""
+"实现所有抽象方法：\\ ``submit_store_task``\\ 、\\ ``pop_completed_store_tasks``\\ 、\\ ``submit_lookup_and_lock_task``\\ 、\\ ``query_lookup_and_lock_result``\\ 、\\ ``submit_unlock``\\ 、\\ ``submit_load_task``\\ 、\\ ``query_load_result``\\ 、\\ ``close``\\ ，以及所有三个事件文件描述符获取器。"
 
 #: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:143
 msgid ""
 "Provide **three distinct event fds** (store / lookup / load). The "
 "controllers build ``fd -> adapter`` maps; duplicates will misroute "
 "events."
-msgstr "提供 **三个不同的事件 fd**（存储 / 查找 / 加载）。控制器构建 ``fd -> 适配器`` 映射；重复会导致事件错误路由。"
+msgstr ""
+"提供 **三个不同的事件 fd**\\ （存储 / 查找 / 加载）。控制器构建 ``fd -> 适配器`` 映射；重复会导致事件错误路由。"
 
 #: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:145
 msgid ""
 "Be **thread-safe**: ``StoreController`` and ``PrefetchController`` call "
 "adapter methods from different threads concurrently."
-msgstr "确保 **线程安全**：``StoreController`` 和 ``PrefetchController`` 从不同线程并发调用适配器方法。"
+msgstr ""
+"确保 **线程安全**\\ ：\\ ``StoreController`` 和 ``PrefetchController`` 从不同线程并发调用适配器方法。"
 
 #: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:147
 msgid "Accept ``**kwargs`` in ``__init__`` to stay forward-compatible."
-msgstr "在``__init__``中接受``**kwargs``以保持向前兼容。"
+msgstr ""
+"在\\ ``__init__``\\ 中接受\\ ``**kwargs``\\ 以保持向前兼容。"
 
 #: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:149
 msgid "A plugin adapter class **should**:"
-msgstr "插件适配器类 **应该**："
+msgstr ""
+"插件适配器类 **应该**\\ ："
 
 #: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:151
 msgid ""
@@ -305,7 +315,8 @@ msgid ""
 "Use ``create_event_notifier()`` from ``lmcache.v1.platform`` for the "
 "three event fds (cross-platform: ``os.eventfd`` on Linux, ``os.pipe`` "
 "fallback elsewhere)."
-msgstr "使用 ``lmcache.v1.platform`` 中的 ``create_event_notifier()`` 来处理三个事件文件描述符（跨平台：在 Linux 上使用 ``os.eventfd``，在其他地方使用 ``os.pipe`` 作为后备）。"
+msgstr ""
+"使用 ``lmcache.v1.platform`` 中的 ``create_event_notifier()`` 来处理三个事件文件描述符（跨平台：在 Linux 上使用 ``os.eventfd``\\ ，在其他地方使用 ``os.pipe`` 作为后备）。"
 
 #: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:154
 msgid "Clean up all resources (event fds, threads, connections) in ``close()``."
@@ -359,7 +370,8 @@ msgstr "附加资源"
 msgid ""
 "Plugin adapter source: "
 "``lmcache/v1/distributed/l2_adapters/plugin_l2_adapter.py``"
-msgstr "插件适配器源代码：``lmcache/v1/distributed/l2_adapters/plugin_l2_adapter.py``"
+msgstr ""
+"插件适配器源代码：\\ ``lmcache/v1/distributed/l2_adapters/plugin_l2_adapter.py``"
 
 #: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:246
 msgid ""
@@ -371,7 +383,8 @@ msgstr "原生插件适配器: ``lmcache/v1/distributed/l2_adapters/native_conne
 msgid ""
 "Design document: "
 "``lmcache/v1/distributed/l2_adapters/design_docs/plugin.md``"
-msgstr "设计文档：``lmcache/v1/distributed/l2_adapters/design_docs/plugin.md``"
+msgstr ""
+"设计文档：\\ ``lmcache/v1/distributed/l2_adapters/design_docs/plugin.md``"
 
 #: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:248
 msgid "L2 adapter base interface: ``lmcache/v1/distributed/l2_adapters/base.py``"

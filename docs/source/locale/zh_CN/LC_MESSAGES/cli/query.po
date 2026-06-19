@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/cli/query.rst:2
 msgid "lmcache query"
-msgstr "lmcache 查询"
+msgstr "lmcache query"
 
 #: ../../source/cli/query.rst:4
 msgid ""
@@ -50,7 +50,8 @@ msgid ""
 " with ``--documents NAME=PATH``. The prompt token count is taken directly"
 " from the usage data reported by the engine (``stream_options: "
 "{include_usage: true}``)."
-msgstr "``query engine`` 子命令向引擎 API 发送一个请求并报告指标。 ``--prompt`` 支持占位符： ``{lmcache}`` 加载 ``lmcache/cli/documents/lmcache.txt``，并且可以通过 ``--documents NAME=PATH`` 传递自定义文档。提示的令牌计数直接来自引擎报告的使用数据 (``stream_options: {include_usage: true}``)。"
+msgstr ""
+"``query engine`` 子命令向引擎 API 发送一个请求并报告指标。 ``--prompt`` 支持占位符： ``{lmcache}`` 加载 ``lmcache/cli/documents/lmcache.txt``\\ ，并且可以通过 ``--documents NAME=PATH`` 传递自定义文档。提示的令牌计数直接来自引擎报告的使用数据 (``stream_options: {include_usage: true}``)。"
 
 #: ../../source/cli/query.rst:45
 msgid "Options"
@@ -78,7 +79,8 @@ msgstr "是"
 
 #: ../../source/cli/query.rst:56
 msgid "Serving engine base URL (e.g. ``http://localhost:8000/v1``)."
-msgstr "服务引擎基础 URL（例如 ``http://localhost:8000/v1``）。"
+msgstr ""
+"服务引擎基础 URL（例如 ``http://localhost:8000/v1``\\ ）。"
 
 #: ../../source/cli/query.rst:57
 msgid "``--prompt TEXT``"
@@ -142,7 +144,8 @@ msgstr "``--completions``"
 
 #: ../../source/cli/query.rst:77
 msgid "Use ``POST /v1/completions`` only."
-msgstr "仅使用 ``POST /v1/completions``。"
+msgstr ""
+"仅使用 ``POST /v1/completions``\\ 。"
 
 #: ../../source/cli/query.rst:78
 msgid "``--chat-first``"
@@ -150,7 +153,8 @@ msgstr "``--chat-first``"
 
 #: ../../source/cli/query.rst:80
 msgid "Try ``/v1/chat/completions`` first, then fall back to ``/v1/completions``."
-msgstr "首先尝试 ``/v1/chat/completions``，然后回退到 ``/v1/completions``。"
+msgstr ""
+"首先尝试 ``/v1/chat/completions``\\ ，然后回退到 ``/v1/completions``\\ 。"
 
 #: ../../source/cli/query.rst:82
 msgid "``--format``"
@@ -158,7 +162,8 @@ msgstr "``--format``"
 
 #: ../../source/cli/query.rst:84
 msgid "Output format: ``terminal`` (default) or ``json``."
-msgstr "输出格式：``terminal``（默认）或``json``。"
+msgstr ""
+"输出格式：\\ ``terminal``\\ （默认）或\\ ``json``\\ 。"
 
 #: ../../source/cli/query.rst:85
 msgid "``--output PATH``"
@@ -166,7 +171,8 @@ msgstr "``--output PATH``"
 
 #: ../../source/cli/query.rst:87
 msgid "Save metrics to a file (format follows ``--format``)."
-msgstr "将指标保存到文件中（格式遵循 ``--format``）。"
+msgstr ""
+"将指标保存到文件中（格式遵循 ``--format``\\ ）。"
 
 #: ../../source/cli/query.rst:88
 msgid "``-q`` / ``--quiet``"

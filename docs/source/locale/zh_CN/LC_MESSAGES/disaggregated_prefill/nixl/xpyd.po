@@ -86,13 +86,15 @@ msgstr "**NIXL**: 从 `NIXL GitHub 仓库 <https://github.com/ai-dynamo/nixl>`_ 
 msgid ""
 "**Hardware**: At least 4 GPUs (2 for prefillers + 2 for decoders in 2p2d "
 "setup)"
-msgstr "**硬件**：至少需要 4 个 GPU（2 个用于 Prefillers + 2 个用于 2p2d 设置中的解码器）"
+msgstr ""
+"**硬件**\\ ：至少需要 4 个 GPU（2 个用于 Prefillers + 2 个用于 2p2d 设置中的解码器）"
 
 #: ../../source/disaggregated_prefill/nixl/xpyd.rst:54
 msgid ""
 "**Model Access**: Valid Hugging Face token (HF_TOKEN) for Llama 3.1 8B "
 "Instruct"
-msgstr "**模型访问**：有效的 Hugging Face 令牌 (HF_TOKEN) 用于 Llama 3.1 8B Instruct"
+msgstr ""
+"**模型访问**\\ ：有效的 Hugging Face 令牌 (HF_TOKEN) 用于 Llama 3.1 8B Instruct"
 
 #: ../../source/disaggregated_prefill/nixl/xpyd.rst:57
 msgid "Quick Start (2p2d Example)"
@@ -100,11 +102,13 @@ msgstr "快速开始 (2p2d 示例)"
 
 #: ../../source/disaggregated_prefill/nixl/xpyd.rst:59
 msgid "**Set your Hugging Face token**:"
-msgstr "**设置你的 Hugging Face 令牌**："
+msgstr ""
+"**设置你的 Hugging Face 令牌**\\ ："
 
 #: ../../source/disaggregated_prefill/nixl/xpyd.rst:65
 msgid "**Navigate to the example directory**:"
-msgstr "**导航到示例目录**："
+msgstr ""
+"**导航到示例目录**\\ ："
 
 #: ../../source/disaggregated_prefill/nixl/xpyd.rst:71
 msgid "**Run the example**:"
@@ -143,7 +147,8 @@ msgid ""
 "**Important**: For correct KV cache transfer, ensure all processes use "
 "the same ``PYTHONHASHSEED`` to keep the hash of the KV cache consistent "
 "across processes:"
-msgstr "**重要**：为了正确的 KV Cache 传输，确保所有进程使用相同的 ``PYTHONHASHSEED`` 以保持 KV Cache 在进程间的一致性："
+msgstr ""
+"**重要**\\ ：为了正确的 KV Cache 传输，确保所有进程使用相同的 ``PYTHONHASHSEED`` 以保持 KV Cache 在进程间的一致性："
 
 #: ../../source/disaggregated_prefill/nixl/xpyd.rst:96
 msgid "Prefiller Configuration"
@@ -211,13 +216,15 @@ msgstr "代理服务器协调多预填充器的分离式工作流程："
 
 #: ../../source/disaggregated_prefill/nixl/xpyd.rst:154
 msgid "**Request Handling**: Receives client requests on port 9000"
-msgstr "**请求处理**：在 9000 端口接收客户端请求"
+msgstr ""
+"**请求处理**\\ ：在 9000 端口接收客户端请求"
 
 #: ../../source/disaggregated_prefill/nixl/xpyd.rst:155
 msgid ""
 "**Load Balancing**: Distributes requests across multiple prefillers using"
 " round-robin"
-msgstr "**负载均衡**：使用轮询将请求分配到多个预填充器"
+msgstr ""
+"**负载均衡**\\ ：使用轮询将请求分配到多个预填充器"
 
 #: ../../source/disaggregated_prefill/nixl/xpyd.rst:156
 msgid ""
@@ -231,7 +238,8 @@ msgstr "**Prefill Response**: 接收预填充器，表示 nixl 转移已完成"
 
 #: ../../source/disaggregated_prefill/nixl/xpyd.rst:158
 msgid "**Response Streaming**: Streams the full response from the decoder"
-msgstr "**响应流**：从解码器流式传输完整响应"
+msgstr ""
+"**响应流**\\ ：从解码器流式传输完整响应"
 
 #: ../../source/disaggregated_prefill/nixl/xpyd.rst:159
 msgid "**Performance Monitoring**: Tracks Time-To-First-Token (TTFT) statistics"
@@ -243,7 +251,8 @@ msgid ""
 "``--num-prefillers`` instances - **Fault tolerance**: Handles prefiller "
 "failures gracefully - **Monitoring**: Provides detailed TTFT statistics "
 "for each prefiller"
-msgstr "主要特性：- **轮询分配**：在 ``--num-prefillers`` 实例之间平衡负载 - **容错**：优雅地处理预填充器故障 - **监控**：为每个预填充器提供详细的 TTFT 统计信息"
+msgstr ""
+"主要特性：- **轮询分配**\\ ：在 ``--num-prefillers`` 实例之间平衡负载 - **容错**\\ ：优雅地处理预填充器故障 - **监控**\\ ：为每个预填充器提供详细的 TTFT 统计信息"
 
 #: ../../source/disaggregated_prefill/nixl/xpyd.rst:166
 msgid "Supported endpoints: - ``/v1/completions`` - ``/v1/chat/completions``"
@@ -282,7 +291,8 @@ msgid ""
 "on a different GPU (CUDA_VISIBLE_DEVICES) - Different ports for each "
 "prefiller (7100, 7101, etc.) - Different ports for each decoder (7200, "
 "7201, etc.)"
-msgstr "与 1p1d 的主要区别： - 每个 Prefiller 获取一个唯一的 ``lmcache_rpc_port``（producer1、producer2 等） - 每个 Prefiller 在不同的 GPU 上运行（CUDA_VISIBLE_DEVICES） - 每个 Prefiller 使用不同的端口（7100、7101 等） - 每个解码器使用不同的端口（7200、7201 等）"
+msgstr ""
+"与 1p1d 的主要区别： - 每个 Prefiller 获取一个唯一的 ``lmcache_rpc_port``\\ （producer1、producer2 等） - 每个 Prefiller 在不同的 GPU 上运行（CUDA_VISIBLE_DEVICES） - 每个 Prefiller 使用不同的端口（7100、7101 等） - 每个解码器使用不同的端口（7200、7201 等）"
 
 #: ../../source/disaggregated_prefill/nixl/xpyd.rst:250
 msgid "Basic Test"
@@ -306,7 +316,8 @@ msgid ""
 "Multiple prefillers can handle more concurrent requests - **Better "
 "TTFT**: Load balancing reduces queuing delays - **Improved utilization**:"
 " Better GPU utilization across multiple devices"
-msgstr "预期的性能提升与 2p2d 相关：- **更高的吞吐量**：多个预填充器可以处理更多的并发请求 - **更好的 TTFT**：负载均衡减少排队延迟 - **更好的利用率**：多个设备之间更好的 GPU 利用率"
+msgstr ""
+"预期的性能提升与 2p2d 相关：- **更高的吞吐量**\\ ：多个预填充器可以处理更多的并发请求 - **更好的 TTFT**\\ ：负载均衡减少排队延迟 - **更好的利用率**\\ ：多个设备之间更好的 GPU 利用率"
 
 #: ../../source/disaggregated_prefill/nixl/xpyd.rst:280
 msgid "Sample benchmark results:"
@@ -357,7 +368,8 @@ msgstr "常见问题"
 
 #: ../../source/disaggregated_prefill/nixl/xpyd.rst:341
 msgid "**GPU Memory**: Ensure each GPU has sufficient memory for the model"
-msgstr "**显存**：确保每个 GPU 具有足够的内存以支持模型"
+msgstr ""
+"**显存**\\ ：确保每个 GPU 具有足够的内存以支持模型"
 
 #: ../../source/disaggregated_prefill/nixl/xpyd.rst:342
 msgid "**NIXL Installation**: Verify NIXL is properly installed and accessible"
@@ -365,7 +377,8 @@ msgstr "**NIXL 安装**: 验证 NIXL 是否正确安装并可访问"
 
 #: ../../source/disaggregated_prefill/nixl/xpyd.rst:343
 msgid "**Port Conflicts**: Check that all required ports are available"
-msgstr "**端口冲突**：检查所有必需的端口是否可用"
+msgstr ""
+"**端口冲突**\\ ：检查所有必需的端口是否可用"
 
 #: ../../source/disaggregated_prefill/nixl/xpyd.rst:344
 msgid "**HF Token**: Ensure your Hugging Face token has access to Llama models"
@@ -383,21 +396,25 @@ msgstr "多实例特定问题"
 msgid ""
 "**Uneven Load**: Monitor prefiller statistics to ensure balanced "
 "distribution"
-msgstr "**不均匀负载**：监控 Prefill 统计数据以确保负载均衡分配"
+msgstr ""
+"**不均匀负载**\\ ：监控 Prefill 统计数据以确保负载均衡分配"
 
 #: ../../source/disaggregated_prefill/nixl/xpyd.rst:351
 msgid ""
 "**Resource Contention**: Watch for GPU memory pressure with multiple "
 "instances"
-msgstr "**资源争用**：监控多个实例的显存压力"
+msgstr ""
+"**资源争用**\\ ：监控多个实例的显存压力"
 
 #: ../../source/disaggregated_prefill/nixl/xpyd.rst:352
 msgid ""
 "**Network Bottlenecks**: Monitor NIXL transfer performance between "
 "instances"
-msgstr "**网络瓶颈**：监控实例之间的 NIXL 传输性能"
+msgstr ""
+"**网络瓶颈**\\ ：监控实例之间的 NIXL 传输性能"
 
 #: ../../source/disaggregated_prefill/nixl/xpyd.rst:353
 msgid "**Startup Timing**: Stagger prefiller launches to avoid resource conflicts"
-msgstr "**启动时机**：错开 Prefill 启动以避免资源冲突"
+msgstr ""
+"**启动时机**\\ ：错开 Prefill 启动以避免资源冲突"
 

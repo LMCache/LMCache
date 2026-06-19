@@ -15,11 +15,9 @@ Welcome to LMCache!
   :alt: LMCache
   :class: no-scaled-link
 
-.. raw:: html
+.. rst-class:: hero-tagline
 
-   <p style="text-align:center; font-size:24px;">
-   <strong> Supercharge Your LLM with the Fastest KV Cache Layer. </strong>
-   </p>
+**Supercharge Your LLM with the Fastest KV Cache Layer.**
 
 .. note::
    We are currently in the process of upgrading our documentation to provide better guidance and examples. Some sections may be under construction. Thank you for your patience!
@@ -33,14 +31,11 @@ Welcome to LMCache!
    <a class="github-button" href="https://github.com/LMCache/LMCache/fork" data-show-count="true" data-icon="octicon-repo-forked" data-size="large" aria-label="Fork">Fork</a>
    </p>
 
-.. raw:: html
+.. container:: hero-description
 
-   <p style="text-align:justify">
-   LMCache lets LLMs prefill each text only once. By storing the KV caches of all reusable texts, LMCache can reuse the KV caches of any reused text (not necessarily prefix) in any serving engine instance. 
-   It thus reduces prefill delay, i.e., time to first token (TTFT), as well as saves the precious GPU cycles and memory.
+   LMCache lets LLMs prefill each text only once. By storing the KV caches of all reusable texts, LMCache can reuse the KV caches of any reused text (not necessarily prefix) in any serving engine instance. It thus reduces prefill delay, i.e., time to first token (TTFT), as well as saves the precious GPU cycles and memory.
 
-   By combining LMCache with vLLM, LMCaches achieves 3-10x delay savings and GPU cycle reduction in many LLM use cases, including multi-round QA and RAG.
-   </p>
+   By combining LMCache with vLLM, LMCache achieves 3-10x delay savings and GPU cycle reduction in many LLM use cases, including multi-round QA and RAG.
 
 
 For more information, check out the following:
@@ -62,153 +57,84 @@ Documentation
 
 .. toctree::
    :maxdepth: 2
-   :caption: Welcome to LMCache
 
-   self
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Getting Started
-
-   getting_started/installation
-   getting_started/quickstart
-   getting_started/quickstart/index
-   getting_started/benchmarking
-   getting_started/kv_cache_calculator
-   getting_started/troubleshoot
-   getting_started/faq
-   getting_started/quickstart/standalone_starter
-   
+   getting_started/index
 
 :raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 2
-   :caption: Recipes
+   :maxdepth: 3
+
+   interacting_with_server
+
+:raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 3
 
    recipes/index
 
 :raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 2
-   :caption: KV Cache offloading and sharing
+   :maxdepth: 4
 
-   kv_cache/storage_backends/index
-   kv_cache/async_loading
-   kv_cache/caching_policies
-   kv_cache/p2p_sharing
+   mp/l2_storage/index
 
 :raw-html:`<br />`
 
 .. toctree::
    :maxdepth: 2
-   :caption: Non-KV caching
 
-   non_kv_cache/encoder_cache
-
-:raw-html:`<br />`
-
-.. toctree::
-   :maxdepth: 3
-   :caption: Multiprocess Mode
-
-   mp/index
+   distributed_kv_cache
 
 :raw-html:`<br />`
 
 .. toctree::
    :maxdepth: 2
-   :caption: Disaggregated prefill
 
-   disaggregated_prefill/nixl/index
-   disaggregated_prefill/shared_storage
+   production/index
 
 :raw-html:`<br />`
 
 .. toctree::
    :maxdepth: 2
-   :caption: KV Cache management
 
-   kv_cache_management/index
-
-:raw-html:`<br />`
-
-.. toctree::
-   :maxdepth: 2
-   :caption: KV Cache Optimizations
-
-   kv_cache_optimizations/compression/index
-   kv_cache_optimizations/blending
-   kv_cache_optimizations/layerwise
+   mp/observability/index
 
 :raw-html:`<br />`
 
 .. toctree::
    :maxdepth: 2
-   :caption: Use LMCache in production
 
-   production/docker_deployment
-   production/kubernetes_deployment
-   production/kv_cache_events
-   production/observability/index
-   production/performance_tuning
+   community/index
 
 :raw-html:`<br />`
 
 .. toctree::
    :maxdepth: 2
-   :caption: CLI
 
-   cli/index
-
-:raw-html:`<br />`
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Internal API Server
-
-   internal_api_server/internal_api_server
+   kv_cache_optimizations/index
 
 :raw-html:`<br />`
 
 .. toctree::
    :maxdepth: 2
-   :caption: Controller WebUI
-   
-   controller/index
 
-:raw-html:`<br />`
-
-.. toctree::
-   :caption: Developer Guide
-
-   developer_guide/contributing
-   developer_guide/docker_file
-   developer_guide/architecture
-   developer_guide/integration
-   developer_guide/extending_lmcache/index
-   developer_guide/cli
-   developer_guide/usage/index
+   developer_guide/index
 
 :raw-html:`<br />`
 
 .. toctree::
    :maxdepth: 2
-   :caption: API Reference
 
-   api_reference/configurations
-   api_reference/storage_backends
-   api_reference/dynamic_connector
-   api_reference/multimodality
-   
+   non_kv_cache/index
+
 :raw-html:`<br />`
 
 .. toctree::
    :maxdepth: 2
-   :caption: Community
 
-   community/meetings
-   community/blogs
+   legacy/index
 
 :raw-html:`<br />`

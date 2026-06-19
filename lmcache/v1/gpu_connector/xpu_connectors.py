@@ -129,11 +129,11 @@ class VLLMPagedMemXPUConnectorV2(GPUConnectorInterface):
         )
         self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
 
-        self.gpu_kv_format, kv_caches = normalize_kv_and_discover_format(
+        self.engine_kv_format, kv_caches = normalize_kv_and_discover_format(
             kv_caches, EngineType.VLLM
         )
-        self.num_blocks = get_num_blocks(kv_caches, self.gpu_kv_format)
-        self.block_size = get_block_size(kv_caches, self.gpu_kv_format)
+        self.num_blocks = get_num_blocks(kv_caches, self.engine_kv_format)
+        self.block_size = get_block_size(kv_caches, self.engine_kv_format)
         self.page_buffer_size = self.num_blocks * self.block_size
 
         return self.kv_cache_pointers_on_gpu[idx]
@@ -197,7 +197,7 @@ class VLLMPagedMemXPUConnectorV2(GPUConnectorInterface):
             self.device,
             self.page_buffer_size,
             lmc_ops.TransferDirection.H2D,
-            self.gpu_kv_format,
+            self.engine_kv_format,
             self.block_size,
             skip_prefix_n_tokens,
         )
@@ -244,7 +244,7 @@ class VLLMPagedMemXPUConnectorV2(GPUConnectorInterface):
                     self.kvcaches[0].device,
                     self.page_buffer_size,
                     lmc_ops.TransferDirection.D2H,
-                    self.gpu_kv_format,
+                    self.engine_kv_format,
                     self.block_size,
                 )
             else:
@@ -258,7 +258,7 @@ class VLLMPagedMemXPUConnectorV2(GPUConnectorInterface):
                     self.kvcaches[0].device,
                     self.page_buffer_size,
                     lmc_ops.TransferDirection.D2H,
-                    self.gpu_kv_format,
+                    self.engine_kv_format,
                     self.block_size,
                 )
                 memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
@@ -355,11 +355,11 @@ class VLLMPagedMemXPUConnectorV3(GPUConnectorInterface):
             kv_cache_pointers_on_gpu.copy_(kv_cache_pointers)
             self.group_kv_cache_pointers_on_gpu.append(kv_cache_pointers_on_gpu)
 
-        self.gpu_kv_format, self.kvcaches = normalize_kv_and_discover_format(
+        self.engine_kv_format, self.kvcaches = normalize_kv_and_discover_format(
             self.kvcaches, EngineType.VLLM
         )
-        self.num_blocks = get_num_blocks(self.kvcaches, self.gpu_kv_format)
-        self.block_size = get_block_size(self.kvcaches, self.gpu_kv_format)
+        self.num_blocks = get_num_blocks(self.kvcaches, self.engine_kv_format)
+        self.block_size = get_block_size(self.kvcaches, self.engine_kv_format)
         self.page_buffer_size = self.num_blocks * self.block_size
 
         self.init = True
@@ -397,7 +397,7 @@ class VLLMPagedMemXPUConnectorV3(GPUConnectorInterface):
                 self.device,
                 self.page_buffer_size,
                 lmc_ops.TransferDirection.H2D,
-                self.gpu_kv_format,
+                self.engine_kv_format,
                 self.block_size,
                 skip_prefix_n_tokens,
             )
@@ -427,7 +427,7 @@ class VLLMPagedMemXPUConnectorV3(GPUConnectorInterface):
                         self.device,
                         self.page_buffer_size,
                         lmc_ops.TransferDirection.D2H,
-                        self.gpu_kv_format,
+                        self.engine_kv_format,
                         self.block_size,
                     )
             else:
@@ -444,7 +444,7 @@ class VLLMPagedMemXPUConnectorV3(GPUConnectorInterface):
                         self.device,
                         self.page_buffer_size,
                         lmc_ops.TransferDirection.D2H,
-                        self.gpu_kv_format,
+                        self.engine_kv_format,
                         self.block_size,
                     )
                     memory_obj_tensor = memory_obj.get_tensor(i)
@@ -558,13 +558,15 @@ class VLLMBufferLayerwiseXPUConnector(GPUConnectorInterface):
             # is okay since fragmentation shouldn't exist in the `gpu_buffer_allocator`
             # in layerwise mode.
 
-            self.gpu_kv_format, kv_caches = normalize_kv_and_discover_format(
+            self.engine_kv_format, kv_caches = normalize_kv_and_discover_format(
                 kv_caches, EngineType.VLLM
             )
-            assert_is_vllm_flash_attn_or_flash_infer(self.gpu_kv_format)
-            self.tokens_per_layer = get_tokens_per_layer(kv_caches, self.gpu_kv_format)
+            assert_is_vllm_flash_attn_or_flash_infer(self.engine_kv_format)
+            self.tokens_per_layer = get_tokens_per_layer(
+                kv_caches, self.engine_kv_format
+            )
             self.elements_per_layer = get_elements_per_layer(
-                kv_caches, self.gpu_kv_format
+                kv_caches, self.engine_kv_format
             )
             logger.info(
                 f"Lazily initializing GPU buffer (max tokens={self.tokens_per_layer})."
@@ -680,7 +682,7 @@ class VLLMBufferLayerwiseXPUConnector(GPUConnectorInterface):
                     self.kvcaches[layer_id - 2],
                     slot_mapping_full,
                     lmc_ops.TransferDirection.H2D,
-                    self.gpu_kv_format,
+                    self.engine_kv_format,
                     token_major=False,  # shape is [2, num_tokens, hidden_dim]
                 )
                 del self.buffer_mapping[layer_id - 2]
@@ -840,7 +842,7 @@ class VLLMBufferLayerwiseXPUConnector(GPUConnectorInterface):
                     self.kvcaches[layer_id],
                     slot_mapping_full,
                     lmc_ops.TransferDirection.D2H,
-                    self.gpu_kv_format,
+                    self.engine_kv_format,
                     token_major=False,  # shape is [2, num_tokens, hidden_dim]
                 )
                 for (buf_start, buf_end), memory_obj, old_positions in zip(
@@ -957,13 +959,15 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
             # is okay since fragmentation shouldn't exist in the `gpu_buffer_allocator`
             # in layerwise mode.
 
-            self.gpu_kv_format, kv_caches = normalize_kv_and_discover_format(
+            self.engine_kv_format, kv_caches = normalize_kv_and_discover_format(
                 kv_caches, EngineType.VLLM
             )
-            assert_is_vllm_flash_attn_or_flash_infer(self.gpu_kv_format)
-            self.tokens_per_layer = get_tokens_per_layer(kv_caches, self.gpu_kv_format)
+            assert_is_vllm_flash_attn_or_flash_infer(self.engine_kv_format)
+            self.tokens_per_layer = get_tokens_per_layer(
+                kv_caches, self.engine_kv_format
+            )
             self.elements_per_layer = get_elements_per_layer(
-                kv_caches, self.gpu_kv_format
+                kv_caches, self.engine_kv_format
             )
             logger.info(
                 f"Lazily initializing GPU buffer (max tokens={self.tokens_per_layer})."
@@ -1077,7 +1081,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                             self.kvcaches[layer_id],
                             slot_mapping[start:end],
                             lmc_ops.TransferDirection.H2D,
-                            self.gpu_kv_format,
+                            self.engine_kv_format,
                             token_major=True,
                         )
 
@@ -1087,7 +1091,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                         self.kvcaches[layer_id],
                         slot_mapping_full,
                         lmc_ops.TransferDirection.H2D,
-                        self.gpu_kv_format,
+                        self.engine_kv_format,
                         token_major=True,
                     )
         yield
@@ -1185,7 +1189,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                         self.kvcaches[layer_id],
                         slot_mapping_full,
                         lmc_ops.TransferDirection.D2H,
-                        self.gpu_kv_format,
+                        self.engine_kv_format,
                         token_major=True,
                     )
                 for start, end, memory_obj in zip(
@@ -1203,7 +1207,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
                             self.kvcaches[layer_id],
                             slot_mapping[start:end],
                             lmc_ops.TransferDirection.D2H,
-                            self.gpu_kv_format,
+                            self.engine_kv_format,
                             token_major=True,
                         )
                     # Set metadata format
@@ -1277,13 +1281,13 @@ class SGLangXPUConnector(GPUConnectorInterface):
 
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
         # Discover format first to handle flattening correctly
-        self.gpu_kv_format, kv_caches = normalize_kv_and_discover_format(
+        self.engine_kv_format, kv_caches = normalize_kv_and_discover_format(
             kv_caches, EngineType.SGLANG
         )
 
         # For TWO_X_NL_X_NBBS_NH_HS format, kv_caches is [[k_list], [v_list]]
         # We need to flatten it to [k0, k1, ..., v0, v1, ...]
-        if self.gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
+        if self.engine_kv_format == lmc_ops.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS:
             flat_kv_caches = kv_caches[0] + kv_caches[1]  # [k_list] + [v_list]
             device = flat_kv_caches[0].device
         else:
@@ -1306,7 +1310,7 @@ class SGLangXPUConnector(GPUConnectorInterface):
         # sglang MLA kv_caches[0].shape: [num_pages * page_size, 1, head_size]
         # sglang MHA kv_caches: [[k_list], [v_list]]
         # each with shape [num_pages * page_size, num_heads, head_size]
-        self.page_buffer_size = get_page_buffer_size(kv_caches, self.gpu_kv_format)
+        self.page_buffer_size = get_page_buffer_size(kv_caches, self.engine_kv_format)
         return self.kv_cache_pointers_on_gpu[idx]
 
     @_lmcache_nvtx_annotate
@@ -1361,7 +1365,7 @@ class SGLangXPUConnector(GPUConnectorInterface):
             kvcaches[0][0].device,
             self.page_buffer_size,
             lmc_ops.TransferDirection.H2D,
-            self.gpu_kv_format,
+            self.engine_kv_format,
         )
 
     @_lmcache_nvtx_annotate
@@ -1404,7 +1408,7 @@ class SGLangXPUConnector(GPUConnectorInterface):
                 kvcaches[0][0].device,
                 self.page_buffer_size,
                 lmc_ops.TransferDirection.D2H,
-                self.gpu_kv_format,
+                self.engine_kv_format,
             )
         else:
             # kvcaches -> gpu_buffer -> memobj
@@ -1417,7 +1421,7 @@ class SGLangXPUConnector(GPUConnectorInterface):
                 kvcaches[0][0].device,
                 self.page_buffer_size,
                 lmc_ops.TransferDirection.D2H,
-                self.gpu_kv_format,
+                self.engine_kv_format,
             )
             memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
@@ -1476,7 +1480,7 @@ class SGLangLayerwiseXPUConnector(GPUConnectorInterface):
             self.num_kv_cache, dtype=torch.uint64, device="cpu"
         )
         self.use_gpu = use_gpu
-        self.gpu_kv_format = None
+        self.engine_kv_format = None
         self.gpu_buffer_allocator: Optional[GPUMemoryAllocator] = None
 
     def _lazy_initialize_buffer(self, kv_caches):
@@ -1489,13 +1493,15 @@ class SGLangLayerwiseXPUConnector(GPUConnectorInterface):
         discovered_format, normalized_kv_caches = normalize_kv_and_discover_format(
             kv_caches, EngineType.SGLANG
         )
-        if self.gpu_kv_format is None:
-            self.gpu_kv_format = discovered_format
+        if self.engine_kv_format is None:
+            self.engine_kv_format = discovered_format
 
         if self.use_gpu and self.gpu_buffer_allocator is None:
-            self.tokens_per_layer = get_tokens_per_layer(kv_caches, self.gpu_kv_format)
+            self.tokens_per_layer = get_tokens_per_layer(
+                kv_caches, self.engine_kv_format
+            )
             self.elements_per_layer = get_elements_per_layer(
-                normalized_kv_caches, self.gpu_kv_format
+                normalized_kv_caches, self.engine_kv_format
             )
             logger.info(
                 f"Lazily initializing GPU buffer (max tokens={self.tokens_per_layer})."
@@ -1601,7 +1607,7 @@ class SGLangLayerwiseXPUConnector(GPUConnectorInterface):
                             self.kvcaches[layer_id],
                             slot_mapping[start:end],
                             lmc_ops.TransferDirection.H2D,
-                            self.gpu_kv_format,
+                            self.engine_kv_format,
                             token_major=True,
                         )
                     else:
@@ -1621,7 +1627,7 @@ class SGLangLayerwiseXPUConnector(GPUConnectorInterface):
                         self.kvcaches[layer_id],
                         slot_mapping_full,
                         lmc_ops.TransferDirection.H2D,
-                        self.gpu_kv_format,
+                        self.engine_kv_format,
                         token_major=True,
                     )
                 else:
@@ -1724,7 +1730,7 @@ class SGLangLayerwiseXPUConnector(GPUConnectorInterface):
                         self.kvcaches[layer_id],
                         slot_mapping_full,
                         lmc_ops.TransferDirection.D2H,
-                        self.gpu_kv_format,
+                        self.engine_kv_format,
                         token_major=True,
                     )
                 else:
@@ -1758,7 +1764,7 @@ class SGLangLayerwiseXPUConnector(GPUConnectorInterface):
                             self.kvcaches[layer_id],
                             slot_mapping[start:end],
                             lmc_ops.TransferDirection.D2H,
-                            self.gpu_kv_format,
+                            self.engine_kv_format,
                             token_major=True,
                         )
                     else:

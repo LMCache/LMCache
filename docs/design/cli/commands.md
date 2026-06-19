@@ -192,14 +192,15 @@ RETRIEVE → STORE → END_SESSION``).
 Supports two run modes via ``--mode``:
 
 - **``gpu``** (default) -- allocates real CUDA tensors and uses CUDA IPC
-  (handle transfer path).
+  (LMCache-driven handle transfer path).
 - **``cpu``** -- allocates POSIX-SHM-backed tensors; the server maps the same
-  physical pages for zero-copy STORE/RETRIEVE (data transfer path by default).
-  To use the zero-copy SHM handle path, add ``--transfer-mode handle``.
+  physical pages for zero-copy STORE/RETRIEVE (engine-driven transfer path by
+  default). To use the zero-copy SHM handle path, add
+  ``--transfer-mode lmcache_driven``.
 
 The transfer path can be overridden explicitly with ``--transfer-mode
-{auto,handle,data}``. ``auto`` keeps the historical mapping: gpu→handle,
-cpu→data.
+{auto,engine_driven,lmcache_driven}``. ``auto`` keeps the historical mapping:
+gpu→lmcache_driven, cpu→engine_driven.
 
 ```bash
 $ lmcache bench server \

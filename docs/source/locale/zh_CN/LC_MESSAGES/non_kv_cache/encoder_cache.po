@@ -41,7 +41,8 @@ msgid ""
 " connector is modality-agnostic — it caches a tensor of shape "
 "``[num_tokens, hidden_dim]`` keyed by ``mm_hash``, without knowing which "
 "encoder produced it."
-msgstr "这适用于 vLLM 通过其编码器缓存扩展点暴露的任何模态：视觉编码器（用于图像和采样视频帧的 CLIP / ViT 风格塔）、音频编码器（用于原始波形的 Whisper 风格塔）以及诸如 Qwen2.5-Omni 的组合模态编码器。连接器是模态无关的——它缓存一个形状为 ``[num_tokens, hidden_dim]`` 的张量，键为 ``mm_hash``，而不知道是哪个编码器生成的。"
+msgstr ""
+"这适用于 vLLM 通过其编码器缓存扩展点暴露的任何模态：视觉编码器（用于图像和采样视频帧的 CLIP / ViT 风格塔）、音频编码器（用于原始波形的 Whisper 风格塔）以及诸如 Qwen2.5-Omni 的组合模态编码器。连接器是模态无关的——它缓存一个形状为 ``[num_tokens, hidden_dim]`` 的张量，键为 ``mm_hash``\\ ，而不知道是哪个编码器生成的。"
 
 #: ../../source/non_kv_cache/encoder_cache.rst:18
 msgid ""
@@ -50,7 +51,8 @@ msgid ""
 "vLLM side and an ``ECCacheEngine`` on the LMCache side; together they "
 "back the encoder cache with any of LMCache's storage backends (local CPU,"
 " local disk, remote, NIXL)."
-msgstr "vLLM 通过 ``ECConnectorBase``（仅限 vLLM v1）暴露了编码器缓存扩展点。LMCache 在 vLLM 端提供了一个 ``LMCacheECConnector`` 适配器，在 LMCache 端提供了一个 ``ECCacheEngine``；它们共同支持使用 LMCache 的任何存储后端（本地 CPU、本地磁盘、远程、NIXL）来备份编码器缓存。"
+msgstr ""
+"vLLM 通过 ``ECConnectorBase``\\ （仅限 vLLM v1）暴露了编码器缓存扩展点。LMCache 在 vLLM 端提供了一个 ``LMCacheECConnector`` 适配器，在 LMCache 端提供了一个 ``ECCacheEngine``\\ ；它们共同支持使用 LMCache 的任何存储后端（本地 CPU、本地磁盘、远程、NIXL）来备份编码器缓存。"
 
 #: ../../source/non_kv_cache/encoder_cache.rst:25
 msgid "Enabling it"
@@ -58,13 +60,15 @@ msgstr "启用它"
 
 #: ../../source/non_kv_cache/encoder_cache.rst:27
 msgid "Pass ``--ec-transfer-config`` to ``vllm serve``:"
-msgstr "将 ``--ec-transfer-config`` 传递给 ``vllm serve``："
+msgstr ""
+"将 ``--ec-transfer-config`` 传递给 ``vllm serve``\\ ："
 
 #: ../../source/non_kv_cache/encoder_cache.rst:38
 msgid ""
 "``ec_role`` choices: ``ec_producer`` (saves only), ``ec_consumer`` (reads"
 " only), ``ec_both`` (single-instance default)."
-msgstr "``ec_role`` 选项： ``ec_producer``（仅保存）， ``ec_consumer``（仅读取）， ``ec_both``（单实例默认）。"
+msgstr ""
+"``ec_role`` 选项： ``ec_producer``\\ （仅保存）， ``ec_consumer``\\ （仅读取）， ``ec_both``\\ （单实例默认）。"
 
 #: ../../source/non_kv_cache/encoder_cache.rst:41
 msgid ""
@@ -79,7 +83,8 @@ msgid ""
 "(e.g. ``ec_max_local_disk_size: 64`` or "
 "``LMCACHE_EC_MAX_LOCAL_DISK_SIZE=64``). EC and KV always run with "
 "**separate** ``StorageManager`` instances so one cannot evict the other."
-msgstr "要独立于（单独的）KV Cache 调整 EC 存储大小，请在 YAML 中使用 ``ec_`` 前缀覆盖，或在环境中使用 ``LMCACHE_EC_`` 前缀（例如 ``ec_max_local_disk_size: 64`` 或 ``LMCACHE_EC_MAX_LOCAL_DISK_SIZE=64``）。EC 和 KV 始终在 **独立** 的 ``StorageManager`` 实例中运行，因此一个不能逐出另一个。"
+msgstr ""
+"要独立于（单独的）KV Cache 调整 EC 存储大小，请在 YAML 中使用 ``ec_`` 前缀覆盖，或在环境中使用 ``LMCACHE_EC_`` 前缀（例如 ``ec_max_local_disk_size: 64`` 或 ``LMCACHE_EC_MAX_LOCAL_DISK_SIZE=64``\\ ）。EC 和 KV 始终在 **独立** 的 ``StorageManager`` 实例中运行，因此一个不能逐出另一个。"
 
 #: ../../source/non_kv_cache/encoder_cache.rst:59
 msgid ""
@@ -87,7 +92,8 @@ msgid ""
 "starts, but EC entries live in CPU memory only and do not survive process"
 " restart. Set ``local_disk`` (or ``ec_local_disk``) to a real path if you"
 " want cache persistence — there is no implicit on-disk default location."
-msgstr "如果您不设置 ``local_disk``（或其 EC 覆盖），引擎仍然会启动，但 EC 条目仅存在于 CPU 内存中，并且在进程重启时不会保留。如果您希望缓存持久化，请将 ``local_disk``（或 ``ec_local_disk``）设置为一个真实路径——没有隐式的磁盘默认位置。"
+msgstr ""
+"如果您不设置 ``local_disk``\\ （或其 EC 覆盖），引擎仍然会启动，但 EC 条目仅存在于 CPU 内存中，并且在进程重启时不会保留。如果您希望缓存持久化，请将 ``local_disk``\\ （或 ``ec_local_disk``\\ ）设置为一个真实路径——没有隐式的磁盘默认位置。"
 
 #: ../../source/non_kv_cache/encoder_cache.rst:66
 msgid "Verifying it's working"
@@ -101,13 +107,15 @@ msgstr "三个独立信号："
 msgid ""
 "**vLLM metric.** ``loggers.py`` reports ``MM cache hit rate: X%`` after "
 "warm requests."
-msgstr "**vLLM 指标。** ``loggers.py`` 在预热请求后报告 ``MM 缓存命中率：X%``。"
+msgstr ""
+"**vLLM 指标。** ``loggers.py`` 在预热请求后报告 ``MM 缓存命中率：X%``\\ 。"
 
 #: ../../source/non_kv_cache/encoder_cache.rst:72
 msgid ""
 "**LMCache log line.** Cold (first-time) requests emit ``LMCache INFO: EC "
 "put: stored N bytes for mm_hash=H``. Warm requests emit no ``EC put``."
-msgstr "**LMCache 日志行。** 冷（首次）请求会发出 ``LMCache INFO: EC put: stored N bytes for mm_hash=H``。热请求不会发出 ``EC put``。"
+msgstr ""
+"**LMCache 日志行。** 冷（首次）请求会发出 ``LMCache INFO: EC put: stored N bytes for mm_hash=H``\\ 。热请求不会发出 ``EC put``\\ 。"
 
 #: ../../source/non_kv_cache/encoder_cache.rst:75
 msgid ""
@@ -116,7 +124,8 @@ msgid ""
 "and is reused thereafter. The ``@1@0@`` prefix reflects sentinel "
 "``world_size=1, worker_id=0`` in the EC cache key, so all tensor-parallel"
 " ranks share one entry."
-msgstr "**磁盘文件。** 在 ``local_disk`` 下，形式为 ``<model>@1@0@<chunk_hash>@<dtype>.pt`` 的条目在第一次请求后出现，并在此后被重用。``@1@0@`` 前缀反映了 EC 缓存键中的哨兵 ``world_size=1, worker_id=0``，因此所有张量并行的 rank 共享一个条目。"
+msgstr ""
+"**磁盘文件。** 在 ``local_disk`` 下，形式为 ``<model>@1@0@<chunk_hash>@<dtype>.pt`` 的条目在第一次请求后出现，并在此后被重用。\\ ``@1@0@`` 前缀反映了 EC 缓存键中的哨兵 ``world_size=1, worker_id=0``\\ ，因此所有张量并行的 rank 共享一个条目。"
 
 #: ../../source/non_kv_cache/encoder_cache.rst:82
 msgid "Design notes (user-visible)"
@@ -128,7 +137,8 @@ msgid ""
 "across TP ranks, so the EC key uses ``world_size=1, worker_id=0`` "
 "regardless of the deployment's actual TP. Concurrent puts from N ranks "
 "land on the same key with identical contents."
-msgstr "**缓存键使用哨兵 TP 形状。** 编码器输出在 TP 排中复制，因此 EC 键使用 ``world_size=1, worker_id=0``，而不管部署的实际 TP。来自 N 个排名的并发放置会落在相同的键上，内容相同。"
+msgstr ""
+"**缓存键使用哨兵 TP 形状。** 编码器输出在 TP 排中复制，因此 EC 键使用 ``world_size=1, worker_id=0``\\ ，而不管部署的实际 TP。来自 N 个排名的并发放置会落在相同的键上，内容相同。"
 
 #: ../../source/non_kv_cache/encoder_cache.rst:89
 msgid ""
@@ -136,7 +146,8 @@ msgid ""
 " the encoder output dtype (``vllm_config.model_config.dtype``), not "
 "``metadata.kv_dtype``. Changing KV quantization does not invalidate EC "
 "entries."
-msgstr "**数据类型与 KV 量化解耦。** EC 缓存键的 dtype 字段是编码器输出的数据类型（``vllm_config.model_config.dtype``），而不是 ``metadata.kv_dtype``。更改 KV 量化不会使 EC 条目失效。"
+msgstr ""
+"**数据类型与 KV 量化解耦。** EC 缓存键的 dtype 字段是编码器输出的数据类型（\\ ``vllm_config.model_config.dtype``\\ ），而不是 ``metadata.kv_dtype``\\ 。更改 KV 量化不会使 EC 条目失效。"
 
 #: ../../source/non_kv_cache/encoder_cache.rst:93
 msgid ""
@@ -145,7 +156,8 @@ msgid ""
 "request-scoped). Sharing one allocator pool would let one cache evict the"
 " other in unpredictable ways. Per-cache sizing knobs (``ec_max_local_*``)"
 " are explicit instead."
-msgstr "**将 StorageManager 与 KV 分离。** KV 和 EC 的访问模式非常不同（KV 是分块/逐层/高吞吐量；EC 是单张张量/请求范围）。共享一个分配器池会导致一个缓存以不可预测的方式逐出另一个缓存。因此，针对每个缓存的大小调整参数（``ec_max_local_*``）是明确的。"
+msgstr ""
+"**将 StorageManager 与 KV 分离。** KV 和 EC 的访问模式非常不同（KV 是分块/逐层/高吞吐量；EC 是单张张量/请求范围）。共享一个分配器池会导致一个缓存以不可预测的方式逐出另一个缓存。因此，针对每个缓存的大小调整参数（\\ ``ec_max_local_*``\\ ）是明确的。"
 
 #: ../../source/non_kv_cache/encoder_cache.rst:98
 msgid ""
@@ -155,7 +167,8 @@ msgid ""
 " scheduler-side ``has_cache_item`` needs a fully constructed "
 "``StorageManager`` and LMCache currently aborts disk-backend setup when "
 "``metadata.role == \"scheduler\"``."
-msgstr "**连接器角色固定为“worker”。** vLLM 的 ``ECConnectorBase`` 是双角色（调度器和工作者）。LMCache 连接器无论如何都会调用 ``create_lmcache_metadata(..., role=\\\"worker\\\")``，因为调度器端的 ``has_cache_item`` 需要一个完全构造的 ``StorageManager``，而 LMCache 当前在 ``metadata.role == \\\"scheduler\\\"`` 时会中止磁盘后端的设置。"
+msgstr ""
+"**连接器角色固定为“worker”。** vLLM 的 ``ECConnectorBase`` 是双角色（调度器和工作者）。LMCache 连接器无论如何都会调用 ``create_lmcache_metadata(..., role=\\\"worker\\\")``\\ ，因为调度器端的 ``has_cache_item`` 需要一个完全构造的 ``StorageManager``\\ ，而 LMCache 当前在 ``metadata.role == \\\"scheduler\\\"`` 时会中止磁盘后端的设置。"
 
 #: ../../source/non_kv_cache/encoder_cache.rst:105
 msgid ""
@@ -173,13 +186,15 @@ msgid ""
 "Instruct`` (bf16) and Big Buck Bunny (10:34, 720p, ≈ 60 MB MP4). Same "
 "chat-completion request sent 1 cold + N warm times against the same vLLM "
 "server."
-msgstr "在一台单个 H100 80GB 上进行实时测量，使用 ``Qwen/Qwen2.5-VL-7B-Instruct``（bf16）和《大雄兔的故事》（10:34，720p，≈ 60 MB MP4）。对同一 vLLM 服务器发送相同的聊天完成请求，1 次冷启动 + N 次热启动。"
+msgstr ""
+"在一台单个 H100 80GB 上进行实时测量，使用 ``Qwen/Qwen2.5-VL-7B-Instruct``\\ （bf16）和《大雄兔的故事》（10:34，720p，≈ 60 MB MP4）。对同一 vLLM 服务器发送相同的聊天完成请求，1 次冷启动 + N 次热启动。"
 
 #: ../../source/non_kv_cache/encoder_cache.rst:116
 msgid ""
 "Two configurations, varying only ``num_frames`` (how many frames vLLM "
 "samples from the video):"
-msgstr "两个配置，仅改变 ``num_frames``（vLLM 从视频中采样的帧数）："
+msgstr ""
+"两个配置，仅改变 ``num_frames``\\ （vLLM 从视频中采样的帧数）："
 
 #: ../../source/non_kv_cache/encoder_cache.rst:123
 msgid "num_frames"

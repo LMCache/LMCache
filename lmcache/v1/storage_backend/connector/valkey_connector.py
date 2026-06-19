@@ -205,12 +205,41 @@ class _ThreadWorkerPool:
         """SET a key (runs on a worker thread)."""
         self._get_client().set(key_str.encode(), data)
 
+    def _get_scratch(self, size: int) -> bytearray:
+        """Per-thread reusable staging buffer for buffer-GET (issue #6215).
+
+        GLIDE writes into this thread-private bytearray (not slab memory),
+        then we copy into the destination under the GIL.  Eliminates the
+        dangling-slot race without pinning or touching ref_count/pin_count.
+        The buffer is grown on demand and reused across GETs on the same
+        worker thread, so there is no per-call allocation.
+        """
+        buf = getattr(self._local, "scratch", None)
+        if buf is None or len(buf) < size:
+            buf = bytearray(size)
+            self._local.scratch = buf
+        return buf
+
     def _do_get_into(self, key_str: str, buf: memoryview) -> bool:
-        """GET a key into a buffer (runs on a worker thread)."""
+        """GET a key into a buffer (runs on a worker thread).
+
+        Safety (issue #6215): GLIDE's native buffer-GET writes with the GIL
+        released, so it must never write directly into ``buf`` when ``buf``
+        aliases slab-allocator memory that another thread could recycle
+        mid-write.  We stage into a thread-private scratch buffer and copy
+        into ``buf`` under the GIL.
+        """
         client = self._get_client()
         if self._has_buffer_get:
-            result = client.get(key_str.encode(), buffer=buf)
-            return result is not None
+            size = buf.nbytes
+            scratch = self._get_scratch(size)
+            scratch_view = memoryview(scratch)[:size]
+            result = client.get(key_str.encode(), buffer=scratch_view)
+            if result is None:
+                return False
+            n = int(result)
+            buf[:n] = scratch_view[:n]
+            return True
         else:
             data = client.get(key_str.encode())
             if data is None:

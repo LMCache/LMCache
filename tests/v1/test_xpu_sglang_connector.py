@@ -796,7 +796,7 @@ def test_sglang_layerwise_uses_mla_kernel_transfers(monkeypatch):
         dst,
         slot_map,
         direction,
-        gpu_kv_format,
+        engine_kv_format,
         token_major=False,
     ):
         single_layer_calls.append((direction, token_major))
@@ -805,7 +805,7 @@ def test_sglang_layerwise_uses_mla_kernel_transfers(monkeypatch):
             dst,
             slot_map,
             direction,
-            gpu_kv_format,
+            engine_kv_format,
             token_major,
         )
 

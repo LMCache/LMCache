@@ -43,7 +43,7 @@ def _build_manager(
 
     return KVLayerGroupsManager(
         tensors,
-        gpu_kv_format=lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
+        engine_kv_format=lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
         num_blocks=num_blocks,
         engine_group_infos=engine_group_infos,
     )

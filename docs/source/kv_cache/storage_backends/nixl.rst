@@ -64,6 +64,14 @@ Key settings:
 
     ``enable_p2p: true`` is rejected together with ``nixl_buffer_device: cpu``. The combination is structurally supported — both backends share ``LocalCPUBackend``'s pinned pool, each runs its own NIXL agent over it, and allocations route through ``LocalCPUBackend.allocate()`` — but it has not been exercised end-to-end and has no CI coverage. Use ``enable_p2p: true`` with ``nixl_buffer_device: cuda`` instead, or disable ``enable_p2p`` when running the NIXL CPU shared pool.
 
+- ``nixl_presence_cache``: whether to keep an in-DRAM presence cache of keys known to exist, so repeated existence checks for the same key are answered locally instead of via a NIXL ``query_memory`` call. Applies to the dynamic backend (``nixl_pool_size: 0``). Default: ``false``.
+
+- ``nixl_presence_cache_only``: when ``true``, the dynamic NIXL backend treats the local presence cache (and in-progress put set) as authoritative for existence checks. If a key is not known locally, lookup reports a miss **without** issuing a NIXL ``query_memory`` check. This requires ``nixl_presence_cache: true`` and can intentionally produce **false negatives** for objects that exist in the underlying storage but are absent from local presence metadata — giving "DRAM-only metadata" semantics where a process restart always yields a logically empty cache. Default: ``false``.
+
+  .. note::
+
+     This is a **lookup/existence-check** mode, not a "never touch the underlying storage" policy. It gates ``contains`` / ``batched_contains`` (and the async variant); direct retrieval still reads from the underlying storage. In normal operation a retrieval is only issued for a key that lookup already reported as present, so locally-unknown keys are not fetched. The option is only consulted by the dynamic backend (``nixl_pool_size: 0``); it is accepted but unused for static configurations.
+
 .. note::
 
     Supported backends are: ["GDS", "GDS_MT", "POSIX", "HF3FS", "OBJ", "AZURE_BLOB", "DOCA_MEMOS"].

@@ -246,8 +246,8 @@ class KVCacheDescriber:
                 ("dtype", "Dtype"),
                 ("is_mla", "MLA"),
                 ("attention_backend", "Attention backend"),
-                ("gpu_kv_shape", "GPU KV shape"),
-                ("gpu_kv_concrete_shape", "GPU KV tensor shape"),
+                ("engine_kv_shape", "Engine KV shape"),
+                ("engine_kv_concrete_shape", "Engine KV tensor shape"),
             ):
                 if _key in group:
                     sec.add(_key, _label, group[_key])

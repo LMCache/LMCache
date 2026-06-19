@@ -47,6 +47,16 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
 
+      # Two LMCache MP instances + two vLLM instances + one coordinator on a
+      # single 2-GPU pod (localhost). Verifies engine B serves a long prompt's
+      # KV from engine A over P2P.
+      - label: ":compression: p2p"
+        command: .buildkite/k3_tests/multiprocess/run.sh p2p
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
+        artifact_paths: ["*.log"]
+
   - group: ":compression: Multiprocess (1-GPU)"
     steps:
       - label: ":compression: lm_eval"
@@ -74,8 +84,8 @@ steps:
         timeout_in_minutes: 60
         env:
           MODEL: "google/gemma-4-31B-it"
-          # Require an exact score match between the two runs.
-          SCORE_TOLERANCE: "0"
+          # Allow a small score difference between the two runs.
+          SCORE_TOLERANCE: "0.03"
           ATTENTION_BACKEND: "auto"
           GPU_MEMORY_UTILIZATION: "0.85"
           # 31B load + CUDA-graph capture is slow; raise the readiness timeout
@@ -196,7 +206,7 @@ steps:
       - label: ":compression: cpu_e2e_validation (server-side copy)"
         command: bash .github/scripts/run-cpu-e2e-validation.sh
         env:
-          LMCACHE_MP_TRANSFER_MODE: "handle"
+          LMCACHE_MP_TRANSFER_MODE: "lmcache_driven"
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins:

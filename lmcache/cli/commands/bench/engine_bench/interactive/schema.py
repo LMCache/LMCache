@@ -179,6 +179,18 @@ ALL_ITEMS: list[ConfigItem] = [
         default=100.0,
         phase=PHASE_GENERAL,
     ),
+    ConfigItem(
+        key="ignore_eos",
+        display_name="Ignore EOS",
+        description=(
+            "Force generation to run for the full output length by ignoring "
+            "the model's EOS token (vLLM extension). Makes decode throughput "
+            "reproducible."
+        ),
+        input_type="bool",
+        default=False,
+        phase=PHASE_GENERAL,
+    ),
     # ── Phase 3: long-doc-permutator ─────────────────────────────────
     ConfigItem(
         key="ldp_num_contexts",
@@ -263,6 +275,15 @@ ALL_ITEMS: list[ConfigItem] = [
         description="Maximum concurrent in-flight requests.",
         input_type="int",
         default=3,
+        condition=_workload_is("long-doc-qa"),
+        phase=PHASE_WORKLOAD,
+    ),
+    ConfigItem(
+        key="ldqa_max_output_length",
+        display_name="Max output length (tokens)",
+        description="Max tokens to generate per benchmark query.",
+        input_type="int",
+        default=128,
         condition=_workload_is("long-doc-qa"),
         phase=PHASE_WORKLOAD,
     ),

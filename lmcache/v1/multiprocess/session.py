@@ -12,7 +12,7 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 logger = init_logger(__name__)
@@ -33,7 +33,7 @@ class Session:
     last_prefix_hash: Any = None
     num_chunks_processed: int = 0
     created_at: float = field(default_factory=time.time)
-    lookup_ipc_key: Optional[IPCCacheEngineKey] = None
+    lookup_ipc_key: Optional[IPCCacheServerKey] = None
     extras: dict[str, Any] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 

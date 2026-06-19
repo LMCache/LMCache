@@ -12,6 +12,7 @@ from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import (
+    DevDaxMemoryAllocator,
     MemoryAllocatorInterface,
     MemoryObj,
     MixedMemoryAllocator,
@@ -51,7 +52,26 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
     Returns:
         MemoryAllocatorInterface: An instance of a memory allocator.
     """
-    if config.use_lazy:
+    if config.devdax_path:
+        devdax_size = config.devdax_size_in_bytes or config.size_in_bytes
+        local_size = config.size_in_bytes if config.devdax_size_in_bytes else 0
+        logger.debug(
+            "use devdax memory allocator, dram size is %d bytes, "
+            "devdax path is %s, "
+            "devdax size is %d bytes, align bytes is %d bytes",
+            local_size,
+            config.devdax_path,
+            devdax_size,
+            config.align_bytes,
+        )
+        return DevDaxMemoryAllocator(
+            devdax_size,
+            config.devdax_path,
+            local_size=local_size,
+            shm_name=config.shm_name or None,
+            align_bytes=config.align_bytes,
+        )
+    elif config.use_lazy:
         logger.debug(
             "use lazy memory allocator, init size is %d bytes, "
             "final size is %d bytes, align bytes is %d bytes",
@@ -159,19 +179,19 @@ class L1MemoryManager:
             trigger eviction when the memory usage reaches a watermark.
         """
 
-        # HACK: now trying to read this from the address manager in a ad-hoc
-        # manner
+        if hasattr(self._allocator, "get_memory_usage"):
+            return self._allocator.get_memory_usage()
+
         def get_address_manager(allocator: MemoryAllocatorInterface):
             if isinstance(allocator, MixedMemoryAllocator) and hasattr(
                 allocator.pin_allocator, "address_manager"
             ):
                 return allocator.pin_allocator.address_manager
-            elif isinstance(allocator, LazyMemoryAllocator):
+            if isinstance(allocator, LazyMemoryAllocator):
                 return allocator.get_address_manager()
-            else:
-                raise NotImplementedError(
-                    "get_memory_usage is not implemented for this allocator type."
-                )
+            raise NotImplementedError(
+                "get_memory_usage is not implemented for this allocator type."
+            )
 
         address_manager = get_address_manager(self._allocator)
         free_size = address_manager.get_free_size()
@@ -190,6 +210,8 @@ class L1MemoryManager:
             NotImplementedError: If the allocator type does not support this operation.
         """
         if isinstance(self._allocator, MixedMemoryAllocator):
+            buffer = self._allocator.buffer
+        elif isinstance(self._allocator, DevDaxMemoryAllocator):
             buffer = self._allocator.buffer
         elif isinstance(self._allocator, LazyMemoryAllocator):
             # TODO(ApostaC): need to test if the RDMA registration works

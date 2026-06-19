@@ -31,13 +31,15 @@ msgstr "LMCache 支持两种类型的配置："
 msgid ""
 "**Configuration file**: a YAML (recommended) or JSON file that contains "
 "the configuration items."
-msgstr "**配置文件**：一个包含配置项的 YAML（推荐）或 JSON 文件。"
+msgstr ""
+"**配置文件**\\ ：一个包含配置项的 YAML（推荐）或 JSON 文件。"
 
 #: ../../source/api_reference/configurations.rst:7
 msgid ""
 "**Environment variables**: environment variables that start with "
 "``LMCACHE_``."
-msgstr "**环境变量**：以 ``LMCACHE_`` 开头的环境变量。"
+msgstr ""
+"**环境变量**\\ ：以 ``LMCACHE_`` 开头的环境变量。"
 
 #: ../../source/api_reference/configurations.rst:9
 msgid ""
@@ -152,8 +154,7 @@ msgid ""
 "allocated hugepages (``sysctl vm.nr_hugepages``). Values: true/false. "
 "Default: false"
 msgstr ""
-"是否使用 Linux 大页（2 MB）作为 CPU 固定的 KV Cache 内存。不兼容 P2P "
-"模式或共享内存（多进程）。需要预分配大页（``sysctl vm.nr_hugepages``）。值：true/false。默认值：false"
+"是否使用 Linux 大页（2 MB）作为 CPU 固定的 KV Cache 内存。不兼容 P2P 模式或共享内存（多进程）。需要预分配大页（\\ ``sysctl vm.nr_hugepages``\\ ）。值：true/false。默认值：false"
 
 #: ../../source/api_reference/configurations.rst:40
 msgid "local_disk"
@@ -170,9 +171,7 @@ msgid ""
 " I/O. See ``local_disk_path_sharding`` for how paths are assigned to "
 "GPUs."
 msgstr ""
-"本地磁盘缓存目录的路径（或以逗号分隔的路径）。格式：``\"file:///path/to/cache\"`` 或 "
-"``\"/path/a,/path/b\"`` 用于多设备 I/O。有关路径如何分配给 GPU，请参见 "
-"``local_disk_path_sharding``。"
+"本地磁盘缓存目录的路径（或以逗号分隔的路径）。格式：\\ ``\"file:///path/to/cache\"`` 或 ``\"/path/a,/path/b\"`` 用于多设备 I/O。有关路径如何分配给 GPU，请参见 ``local_disk_path_sharding``\\ 。"
 
 #: ../../source/api_reference/configurations.rst:43
 msgid "local_disk_path_sharding"
@@ -189,8 +188,7 @@ msgid ""
 " only ``\"by_gpu\"`` is supported, which selects paths based on GPU "
 "device ID (default: \"by_gpu\")."
 msgstr ""
-"当提供多个路径时选择路径的策略。目前仅支持 ``\"by_gpu\"``，该策略根据 GPU 设备 ID "
-"选择路径（默认值：\\\"by_gpu\\\"）。"
+"当提供多个路径时选择路径的策略。目前仅支持 ``\"by_gpu\"``\\ ，该策略根据 GPU 设备 ID 选择路径（默认值：\\\"by_gpu\\\"）。"
 
 #: ../../source/api_reference/configurations.rst:46
 msgid "max_local_disk_size"
@@ -362,7 +360,8 @@ msgstr "LMCACHE_PRIORITY_LIMIT"
 msgid ""
 "Caches requests only if priority value ≤ limit. (**Not applicable for PD "
 "Disaggregation**) Type: int. Default: None"
-msgstr "仅在优先级值 ≤ 限制时缓存请求。（**不适用于 PD 分离**）类型：int。默认值：无"
+msgstr ""
+"仅在优先级值 ≤ 限制时缓存请求。（\\ **不适用于 PD 分离**\\ ）类型：int。默认值：无"
 
 #: ../../source/api_reference/configurations.rst:85
 msgid "min_retrieve_tokens"
@@ -402,10 +401,7 @@ msgid ""
 "one-way from prefiller to decoder only. Default: null (store to all "
 "active backends)"
 msgstr ""
-"一个存储后端名称，用于存储 KV "
-"缓存。当指定时，只有匹配的后端接收存储操作。有效值是存储管理器中注册的后端类名称，包括：``\\\"LocalCPUBackend\\\"``、``\\\"LocalDiskBackend\\\"``、``\\\"RemoteBackend\\\"``、``\\\"PDBackend\\\"``、``\\\"P2PBackend\\\"``、``\\\"GdsBackend\\\"``"
-" 等，以及任何存储插件后端。注意：``\\\"PDBackend\\\"`` 不能用作 PD 设置中解码器实例的存储位置，因为 PDBackend"
-" 仅从预填充器到解码器是单向的。默认值：null（存储到所有活动后端）"
+"一个存储后端名称，用于存储 KV 缓存。当指定时，只有匹配的后端接收存储操作。有效值是存储管理器中注册的后端类名称，包括：\\ ``\\\"LocalCPUBackend\\\"``\\ 、\\ ``\\\"LocalDiskBackend\\\"``\\ 、\\ ``\\\"RemoteBackend\\\"``\\ 、\\ ``\\\"PDBackend\\\"``\\ 、\\ ``\\\"P2PBackend\\\"``\\ 、\\ ``\\\"GdsBackend\\\"`` 等，以及任何存储插件后端。注意：\\ ``\\\"PDBackend\\\"`` 不能用作 PD 设置中解码器实例的存储位置，因为 PDBackend 仅从预填充器到解码器是单向的。默认值：null（存储到所有活动后端）"
 
 #: ../../source/api_reference/configurations.rst:91
 msgid "retrieve_locations"
@@ -425,9 +421,7 @@ msgid ""
 "``\"GdsBackend\"``, etc, and any storage plugin backends. Default: null "
 "(search all active backends)"
 msgstr ""
-"检索或查找 KV Cache "
-"时要搜索的存储后端名称列表。当指定时，仅搜索列出的后端。有效值为在存储管理器中注册的后端类名称，包括：``\\\"LocalCPUBackend\\\"``、``\\\"LocalDiskBackend\\\"``、``\\\"RemoteBackend\\\"``、``\\\"PDBackend\\\"``、``\\\"P2PBackend\\\"``、``\\\"GdsBackend\\\"``"
-" 等，以及任何存储插件后端。默认值：null（搜索所有活动后端）"
+"检索或查找 KV Cache 时要搜索的存储后端名称列表。当指定时，仅搜索列出的后端。有效值为在存储管理器中注册的后端类名称，包括：\\ ``\\\"LocalCPUBackend\\\"``\\ 、\\ ``\\\"LocalDiskBackend\\\"``\\ 、\\ ``\\\"RemoteBackend\\\"``\\ 、\\ ``\\\"PDBackend\\\"``\\ 、\\ ``\\\"P2PBackend\\\"``\\ 、\\ ``\\\"GdsBackend\\\"`` 等，以及任何存储插件后端。默认值：null（搜索所有活动后端）"
 
 #: ../../source/api_reference/configurations.rst:94
 msgid "extra_config"
@@ -475,19 +469,22 @@ msgstr "**关键特性：**"
 msgid ""
 "**One-time expansion**: Memory expands until target size is reached, then"
 " stops"
-msgstr "**一次性扩展**：内存扩展直到达到目标大小，然后停止"
+msgstr ""
+"**一次性扩展**\\ ：内存扩展直到达到目标大小，然后停止"
 
 #: ../../source/api_reference/configurations.rst:110
 msgid ""
 "**No shrinking**: Once allocated, memory is never released back to the "
 "system"
-msgstr "**不收缩**：一旦分配，内存将永远不会释放回系统"
+msgstr ""
+"**不收缩**\\ ：一旦分配，内存将永远不会释放回系统"
 
 #: ../../source/api_reference/configurations.rst:111
 msgid ""
 "**Automatic activation**: Only activates when ``max_local_cpu_size`` "
 "exceeds ``lazy_memory_safe_size``"
-msgstr "**自动激活**：仅在 ``max_local_cpu_size`` 超过 ``lazy_memory_safe_size`` 时激活"
+msgstr ""
+"**自动激活**\\ ：仅在 ``max_local_cpu_size`` 超过 ``lazy_memory_safe_size`` 时激活"
 
 #: ../../source/api_reference/configurations.rst:120
 msgid "enable_lazy_memory_allocator"
@@ -1033,10 +1030,7 @@ msgid ""
 "to know when KV transfer is complete before forwarding the decode "
 "request. Values: true/false. Default: false"
 msgstr ""
-"当为真时，发送方在 KV 传输后跳过 ZMQ 代理通知，并且不需要 pd_proxy_host/pd_proxy_port。此选项仅适用于管理通过"
-" HTTP 的分离式解码请求流的外部调度器（例如，vLLM 生产堆栈路由器），并且不依赖于 ZMQ 通知。它不得与 LMCache "
-"的内置分离代理（``disagg_proxy_server.py``）一起使用，因为该代理依赖于 ZMQ 通知来知道 KV "
-"传输何时完成，然后再转发解码请求。值：true/false。默认值：false"
+"当为真时，发送方在 KV 传输后跳过 ZMQ 代理通知，并且不需要 pd_proxy_host/pd_proxy_port。此选项仅适用于管理通过 HTTP 的分离式解码请求流的外部调度器（例如，vLLM 生产堆栈路由器），并且不依赖于 ZMQ 通知。它不得与 LMCache 的内置分离代理（\\ ``disagg_proxy_server.py``\\ ）一起使用，因为该代理依赖于 ZMQ 通知来知道 KV 传输何时完成，然后再转发解码请求。值：true/false。默认值：false"
 
 #: ../../source/api_reference/configurations.rst:293
 msgid "pd_bidirectional"
@@ -1179,10 +1173,7 @@ msgid ""
 "must start with ``http://`` or ``https://``; an empty list raises "
 "``ValueError`` at engine init."
 msgstr ""
-"每个工作节点的对象存储端点 URL 列表。每个 TP 工作节点通过 ``local_worker_id`` 轮询选择一个条目，覆盖 "
-"``nixl_backend_params.endpoint_override``。仅在 ``nixl_backend`` 为 "
-"``\"OBJ\"`` 时应用（否则静默忽略）。每个条目必须以 ``http://`` 或 ``https://`` "
-"开头；空列表在引擎初始化时会引发 ``ValueError``。"
+"每个工作节点的对象存储端点 URL 列表。每个 TP 工作节点通过 ``local_worker_id`` 轮询选择一个条目，覆盖 ``nixl_backend_params.endpoint_override``\\ 。仅在 ``nixl_backend`` 为 ``\"OBJ\"`` 时应用（否则静默忽略）。每个条目必须以 ``http://`` 或 ``https://`` 开头；空列表在引擎初始化时会引发 ``ValueError``\\ 。"
 
 #: ../../source/api_reference/configurations.rst:360
 msgid "nixl_use_hugepages"
@@ -1194,7 +1185,8 @@ msgid ""
 "value is copied into ``local_cpu_use_hugepages`` (a warning is logged) "
 "and the key is dropped. Hugepages have never applied to GPU buffers; in "
 "CPU mode the NIXL pool is now owned by ``LocalCPUBackend``."
-msgstr "**已弃用。** 请改用 ``local_cpu_use_hugepages``。设置后，该值将被复制到 ``local_cpu_use_hugepages``（会记录警告），并且该键将被丢弃。大页从未应用于 GPU 缓冲区；在 CPU 模式下，NIXL 池现在由 ``LocalCPUBackend`` 拥有。"
+msgstr ""
+"**已弃用。** 请改用 ``local_cpu_use_hugepages``\\ 。设置后，该值将被复制到 ``local_cpu_use_hugepages``\\ （会记录警告），并且该键将被丢弃。大页从未应用于 GPU 缓冲区；在 CPU 模式下，NIXL 池现在由 ``LocalCPUBackend`` 拥有。"
 
 #: ../../source/api_reference/configurations.rst:365
 msgid "Additional Storage Configurations"
@@ -1218,9 +1210,7 @@ msgid ""
 " (e.g. ``/mnt/nvme0/cache,/mnt/nvme1/cache``). See ``gds_path_sharding`` "
 "for how paths are assigned to GPUs."
 msgstr ""
-"GDS 后端的路径。支持以逗号分隔的多设备 I/O 路径（例如 "
-"``/mnt/nvme0/cache,/mnt/nvme1/cache``）。有关路径如何分配给 GPU，请参见 "
-"``gds_path_sharding``。"
+"GDS 后端的路径。支持以逗号分隔的多设备 I/O 路径（例如 ``/mnt/nvme0/cache,/mnt/nvme1/cache``\\ ）。有关路径如何分配给 GPU，请参见 ``gds_path_sharding``\\ 。"
 
 #: ../../source/api_reference/configurations.rst:379
 msgid "gds_path_sharding"
@@ -1468,7 +1458,8 @@ msgstr "内部 API 服务器提供以下端点："
 
 #: ../../source/api_reference/configurations.rst:463
 msgid "**Metrics**: Performance and cache statistics"
-msgstr "**指标**：性能和缓存统计信息"
+msgstr ""
+"**指标**\\ ：性能和缓存统计信息"
 
 #: ../../source/api_reference/configurations.rst:464
 msgid "**Configuration**: Runtime configuration inspection"
@@ -1476,21 +1467,25 @@ msgstr "**配置**: 运行时配置检查"
 
 #: ../../source/api_reference/configurations.rst:465
 msgid "**Metadata**: Engine and model metadata"
-msgstr "**元数据**：引擎和模型元数据"
+msgstr ""
+"**元数据**\\ ：引擎和模型元数据"
 
 #: ../../source/api_reference/configurations.rst:466
 msgid "**Threads**: Thread debugging information"
-msgstr "**线程**：线程调试信息"
+msgstr ""
+"**线程**\\ ：线程调试信息"
 
 #: ../../source/api_reference/configurations.rst:467
 msgid "**Log Level**: Dynamic log level adjustment"
-msgstr "**日志级别**：动态日志级别调整"
+msgstr ""
+"**日志级别**\\ ：动态日志级别调整"
 
 #: ../../source/api_reference/configurations.rst:468
 msgid ""
 "**Script Execution**: Run custom Python scripts with access to the "
 "LMCache engine"
-msgstr "**脚本执行**：运行自定义 Python 脚本，访问 LMCache 引擎"
+msgstr ""
+"**脚本执行**\\ ：运行自定义 Python 脚本，访问 LMCache 引擎"
 
 #: ../../source/api_reference/configurations.rst:471
 msgid "Configuration Options"

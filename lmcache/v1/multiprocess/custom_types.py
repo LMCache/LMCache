@@ -17,7 +17,7 @@ Defines the types and the customized encoder/decoders for inter-process
 communications.
 
 Key Types:
-- IPCCacheEngineKey: Token-based cache key
+- IPCCacheServerKey: Token-based cache key
   - Contains token_ids, start, end, request_id (all required)
   - Converted to ObjectKey for storage operations via ipc_key_to_object_keys()
 """
@@ -219,7 +219,7 @@ class RawCudaIPCWrapper(CudaIPCWrapper):
 
 
 @dataclass(order=True, frozen=True)
-class IPCCacheEngineKey:
+class IPCCacheServerKey:
     """Cache key for the IPC (multiprocess) protocol.
 
     This key type is sent by the client over ZMQ (serialized via msgspec).
@@ -256,7 +256,7 @@ class IPCCacheEngineKey:
     cache_salt: str = ""
 
     # Duplicated from ObjectKey — cannot import ObjectKey here due to
-    # circular dependency (api.py imports IPCCacheEngineKey).
+    # circular dependency (api.py imports IPCCacheServerKey).
     _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
     _SALT_MAX_LEN = 128
 
@@ -284,7 +284,7 @@ class IPCCacheEngineKey:
         end: int = 0,
         request_id: str = "",
         cache_salt: str = "",
-    ) -> "IPCCacheEngineKey":
+    ) -> "IPCCacheServerKey":
         """Create a key from token ids. Only used by the tests."""
         return cls(
             model_name=model_name,
@@ -297,9 +297,9 @@ class IPCCacheEngineKey:
             cache_salt=cache_salt,
         )
 
-    def no_worker_id_version(self) -> "IPCCacheEngineKey":
+    def no_worker_id_version(self) -> "IPCCacheServerKey":
         """Create a copy with worker_id=None for lookup requests."""
-        return IPCCacheEngineKey(
+        return IPCCacheServerKey(
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=None,
@@ -315,8 +315,8 @@ class IPCCacheEngineKey:
 KVCache = list[CudaIPCWrapper]
 
 
-class RegisterNonGpuContextPayload(msgspec.Struct):
-    """Payload for the REGISTER_KV_CACHE_NON_GPU_CONTEXT protocol message.
+class RegisterEngineDrivenContextPayload(msgspec.Struct):
+    """Payload for the REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT protocol message.
 
     Attributes:
         instance_id: Worker instance identifier (typically PID).
@@ -391,10 +391,17 @@ class CBUnifiedLookupResult:
             those are merged in before the sparse prefetch -- prefix-covered and
             locally-duplicated ones dropped -- so they ride the identical
             prefetch + retrieve path and need no separate handling.
+        segmented_prefix_segments: Post-gap chunks retained by the
+            ``SEGMENTED_PREFIX`` prefix leg (beyond ``count_leading_ones``) — at
+            their original positions (``old_st == cur_st``), so the connector
+            tags them ``prefix`` (pure load, no recompute) and only the gap is
+            recomputed. Sourced from the prefix bitmap, not the fingerprint
+            matcher; empty when ``SEGMENTED_PREFIX`` is off.
     """
 
     prefix_coverage_tokens: int
     non_prefix_segments: list[CBMatchResult]
+    segmented_prefix_segments: list[CBMatchResult] = field(default_factory=list)
 
 
 _CUSTOMERIZED_SERIALIZERS = {
@@ -413,6 +420,10 @@ def get_customized_encoder(type: Any) -> msgspec.msgpack.Encoder:
             if isinstance(obj, supported_type):
                 data = cfg.serializer(obj)
                 return msgspec.msgpack.Ext(cfg.code, data)
+        if isinstance(obj, torch.dtype):
+            return str(obj).removeprefix("torch.")
+        if isinstance(obj, torch.Size):
+            return list(obj)
         raise TypeError(f"Unsupported type for serialization: {type(obj)}")
 
     return msgspec.msgpack.Encoder(enc_hook=enc_hook)
@@ -425,4 +436,15 @@ def get_customized_decoder(type: Any) -> msgspec.msgpack.Decoder:
                 return cfg.deserializer(data)
         raise TypeError(f"Unsupported ext code for deserialization: {code}")
 
-    return msgspec.msgpack.Decoder(ext_hook=ext_hook, type=type)
+    def dec_hook(expected_type: type, obj: Any) -> Any:
+        if expected_type is torch.dtype:
+            return getattr(torch, obj)
+        if expected_type is torch.Size:
+            return torch.Size(obj)
+        if isinstance(obj, expected_type):
+            return obj
+        raise NotImplementedError(
+            f"Unsupported type for deserialization: {expected_type}"
+        )
+
+    return msgspec.msgpack.Decoder(ext_hook=ext_hook, dec_hook=dec_hook, type=type)

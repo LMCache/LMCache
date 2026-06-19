@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"POT-Creation-Date: 2026-06-15 11:17+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -33,7 +33,10 @@ msgid ""
 "different destinations. See "
 ":ref:`getting_started/quickstart/offload_kv_cache:Supported offloading "
 "destinations` for more details."
-msgstr "除了 CPU 内存，LMCache 还支持将 KV Cache 卸载到许多不同的目标。有关更多详细信息，请参见 :ref:`getting_started/quickstart/offload_kv_cache:Supported offloading destinations`。"
+msgstr ""
+"除了 CPU 内存，LMCache 还支持将 KV Cache 卸载到许多不同的目标。有关更多详细信息，请参见 "
+":ref:`getting_started/quickstart/offload_kv_cache:Supported offloading "
+"destinations`。"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:13
 msgid "Prerequisites"
@@ -64,7 +67,13 @@ msgid ""
 " See the `examples README <https://github.com/vllm-"
 "project/vllm/tree/main/examples/others/lmcache#2-cpu-offload-examples>`_ "
 "to understand how to run the script for vLLM v1."
-msgstr "本节演示如何在离线推理场景中使用 LMCache 和 vLLM 进行 CPU 内存卸载。我们在这里使用的示例脚本可以在 `vLLM examples <https://github.com/vllm-project/vllm/blob/main/examples/others/lmcache/cpu_offload_lmcache.py>`_ 中找到。请参阅 `examples README <https://github.com/vllm-project/vllm/tree/main/examples/others/lmcache#2-cpu-offload-examples>`_ 以了解如何运行 vLLM v1 的脚本。"
+msgstr ""
+"本节演示如何在离线推理场景中使用 LMCache 和 vLLM 进行 CPU 内存卸载。我们在这里使用的示例脚本可以在 `vLLM "
+"examples <https://github.com/vllm-"
+"project/vllm/blob/main/examples/others/lmcache/cpu_offload_lmcache.py>`_ "
+"中找到。请参阅 `examples README <https://github.com/vllm-"
+"project/vllm/tree/main/examples/others/lmcache#2-cpu-offload-examples>`_ "
+"以了解如何运行 vLLM v1 的脚本。"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:28
 msgid "First, set up the necessary environment variables for LMCache:"
@@ -128,7 +137,9 @@ msgid ""
 "limits, storage backends, and more. We'll cover advanced configuration "
 "options in later examples. For now, let's run a minimal example with "
 "default configuration."
-msgstr "LMCache 支持通过 ``lmcache_config.yaml`` 文件进行广泛的配置，您可以在其中自定义块大小、内存限制、存储后端等更多内容。我们将在后面的示例中介绍高级配置选项。现在，让我们运行一个使用默认配置的最小示例。"
+msgstr ""
+"LMCache 支持通过 ``lmcache_config.yaml`` "
+"文件进行广泛的配置，您可以在其中自定义块大小、内存限制、存储后端等更多内容。我们将在后面的示例中介绍高级配置选项。现在，让我们运行一个使用默认配置的最小示例。"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:115
 msgid ""
@@ -189,113 +200,150 @@ msgid "Prerequisites (Setup)"
 msgstr "前提条件（设置）"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:170
-msgid "At least 24GB GPU memory"
-msgstr "至少 24GB 显存"
+msgid "A CUDA GPU. The example picks a model that fits the GPU automatically:"
+msgstr "一块 CUDA GPU。示例会自动选择适合该 GPU 的模型："
 
-#: ../../source/getting_started/quickstart/offload_kv_cache.rst:171
-msgid "Sufficient CPU memory (LMCache will use 15 GB by default in this example)."
-msgstr "足够的 CPU 内存（在此示例中，LMCache 默认将使用 15 GB）。"
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:172
+msgid ""
+"``Qwen/Qwen3-8B`` (bf16) when the GPU has ~36 GiB or more (e.g. A100-80G,"
+" H100)."
+msgstr "``Qwen/Qwen3-8B`` (bf16) 当显存大约为 36 GiB 或更多时（例如 A100-80G, H100）。"
 
-#: ../../source/getting_started/quickstart/offload_kv_cache.rst:174
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:173
+msgid ""
+"``Qwen/Qwen3-8B-FP8`` with ``kv_cache_dtype=\"fp8\"`` when the GPU has "
+"~24 GiB and supports native FP8 (Ada Lovelace / Hopper, ``sm_89+``; e.g. "
+"L4, L40, RTX 4090)."
+msgstr "``Qwen/Qwen3-8B-FP8`` 与 ``kv_cache_dtype=\"fp8\"`` 当 GPU 具有约 24 GiB 并支持原生 FP8（Ada Lovelace / Hopper，``sm_89+``；例如 L4、L40、RTX 4090）。"
+
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:175
+msgid ""
+"``Qwen/Qwen3-1.7B`` as the fallback for smaller GPUs (~10 GiB and up), "
+"including Ampere 24 GiB cards (RTX A5000, RTX 3090) where FP8 is "
+"unsupported."
+msgstr "``Qwen/Qwen3-1.7B`` 作为较小显卡的后备选择（约 10 GiB 及以上），包括不支持 FP8 的安培 24 GiB 显卡（RTX A5000、RTX 3090）。"
+
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:178
+msgid ""
+"Sufficient CPU memory. The example clamps the LMCache pinned host buffer "
+"to fit your system RAM and ``RLIMIT_MEMLOCK`` (``ulimit -l``), so it also"
+" works on smaller hosts without manual tuning."
+msgstr "足够的 CPU 内存。该示例将 LMCache 固定主机缓冲区限制为适合您的系统 RAM 和 ``RLIMIT_MEMLOCK`` (``ulimit -l``)，因此它也可以在不进行手动调整的小型主机上运行。"
+
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:183
 msgid "Example script"
 msgstr "示例脚本"
 
-#: ../../source/getting_started/quickstart/offload_kv_cache.rst:176
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:185
 msgid "Save the following script as ``cpu-offloading.py``:"
 msgstr "将以下脚本保存为 ``cpu-offloading.py``："
 
-#: ../../source/getting_started/quickstart/offload_kv_cache.rst:343
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:405
 msgid "Running the Example"
 msgstr "运行示例"
 
-#: ../../source/getting_started/quickstart/offload_kv_cache.rst:345
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:407
 msgid "First, run the script without LMCache:"
 msgstr "首先，运行不带 LMCache 的脚本："
 
-#: ../../source/getting_started/quickstart/offload_kv_cache.rst:351
-#: ../../source/getting_started/quickstart/offload_kv_cache.rst:366
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:413
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:428
 msgid "You'll see output like:"
 msgstr "您将看到类似的输出："
 
-#: ../../source/getting_started/quickstart/offload_kv_cache.rst:357
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:419
 msgid ""
 "Without LMCache, there's no speedup between runs even if vLLM has prefix "
 "caching enabled. This is because the KV cache exceeds GPU memory and "
 "can't be reused."
 msgstr "没有 LMCache，即使 vLLM 启用了前缀缓存，运行之间也没有加速。这是因为 KV Cache 超出了显存，无法被重用。"
 
-#: ../../source/getting_started/quickstart/offload_kv_cache.rst:360
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:422
 msgid "Now, run with LMCache enabled:"
 msgstr "现在，启用 LMCache 运行："
 
-#: ../../source/getting_started/quickstart/offload_kv_cache.rst:372
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:434
 msgid ""
 "The significant speedup in the second case demonstrates how LMCache "
 "effectively manages KV cache offloading to CPU memory. When the total "
 "size of KV cache exceeds GPU memory, LMCache allows you to store and "
 "reuse the cache from CPU memory, resulting in much faster subsequent "
 "generations for prompts with shared prefixes."
-msgstr "第二种情况显著的加速展示了 LMCache 如何有效管理 KV Cache 卸载到 CPU 内存。当 KV Cache 的总大小超过显存时，LMCache 允许您从 CPU 内存中存储和重用缓存，从而为具有共享前缀的提示生成更快的后续结果。"
+msgstr ""
+"第二种情况显著的加速展示了 LMCache 如何有效管理 KV Cache 卸载到 CPU 内存。当 KV Cache "
+"的总大小超过显存时，LMCache 允许您从 CPU 内存中存储和重用缓存，从而为具有共享前缀的提示生成更快的后续结果。"
 
-#: ../../source/getting_started/quickstart/offload_kv_cache.rst:378
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:440
 msgid "Supported offloading destinations"
 msgstr "支持的卸载目标"
 
-#: ../../source/getting_started/quickstart/offload_kv_cache.rst:380
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:442
 msgid "LMCache now supports offloading KV cache to the following destinations:"
 msgstr "LMCache 现在支持将 KV Cache 卸载到以下目标："
 
-#: ../../source/getting_started/quickstart/offload_kv_cache.rst:382
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:444
 msgid ":doc:`CPU memory <../../kv_cache/storage_backends/cpu_ram>`"
 msgstr ":doc:`CPU 内存 <../../kv_cache/storage_backends/cpu_ram>`"
 
-#: ../../source/getting_started/quickstart/offload_kv_cache.rst:383
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:445
 msgid ":doc:`Local file system <../../kv_cache/storage_backends/local_storage>`"
 msgstr ":doc:`本地文件系统 <../../kv_cache/storage_backends/local_storage>`"
 
-#: ../../source/getting_started/quickstart/offload_kv_cache.rst:384
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:446
 msgid ":doc:`Mooncake Storage <../../kv_cache/storage_backends/mooncake>`"
 msgstr ":doc:`Mooncake 存储 <../../kv_cache/storage_backends/mooncake>`"
 
-#: ../../source/getting_started/quickstart/offload_kv_cache.rst:385
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:447
 msgid ":doc:`InfiniStore <../../kv_cache/storage_backends/infinistore>`"
 msgstr ":doc:`InfiniStore <../../kv_cache/storage_backends/infinistore>`"
 
-#: ../../source/getting_started/quickstart/offload_kv_cache.rst:386
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:448
 msgid ":doc:`Redis <../../kv_cache/storage_backends/redis>`"
 msgstr "：doc:`Redis <../../kv_cache/storage_backends/redis>`"
 
-#: ../../source/getting_started/quickstart/offload_kv_cache.rst:387
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:449
 msgid ":doc:`ValKey <../../kv_cache/storage_backends/valkey>`"
 msgstr ":doc:`ValKey <../../kv_cache/storage_backends/valkey>`"
 
-#: ../../source/getting_started/quickstart/offload_kv_cache.rst:390
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:452
 msgid "Troubleshooting"
 msgstr "故障排除"
 
-#: ../../source/getting_started/quickstart/offload_kv_cache.rst:392
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:454
 msgid "If you encounter the following error:"
 msgstr "如果您遇到以下错误："
 
-#: ../../source/getting_started/quickstart/offload_kv_cache.rst:399
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:461
 msgid "You can resolve this issue using one of the following methods:"
 msgstr "您可以通过以下方法解决此问题："
 
-#: ../../source/getting_started/quickstart/offload_kv_cache.rst:401
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:463
 msgid "Set ``VLLM_WORKER_MULTIPROC_METHOD=spawn`` in the environment variables."
 msgstr "在环境变量中设置 ``VLLM_WORKER_MULTIPROC_METHOD=spawn``。"
 
-#: ../../source/getting_started/quickstart/offload_kv_cache.rst:402
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:464
 msgid ""
 "Or update the Python code to guard usage of vllm behind a if ``__name__ "
 "== '__main__':`` block."
 msgstr "或者更新 Python 代码，将 vllm 的使用放在 ``if __name__ == '__main__':`` 块中。"
 
-#: ../../source/getting_started/quickstart/offload_kv_cache.rst:413
+#: ../../source/getting_started/quickstart/offload_kv_cache.rst:475
 msgid ""
 "For details, please refer to the `vLLM Troubleshooting Guide: Python "
 "multiprocessing "
 "<https://docs.vllm.ai/en/latest/usage/troubleshooting.html#python-"
 "multiprocessing>`_."
-msgstr "有关详细信息，请参阅 `vLLM 故障排除指南：Python 多进程 <https://docs.vllm.ai/en/latest/usage/troubleshooting.html#python-multiprocessing>`_。"
+msgstr ""
+"有关详细信息，请参阅 `vLLM 故障排除指南：Python 多进程 "
+"<https://docs.vllm.ai/en/latest/usage/troubleshooting.html#python-"
+"multiprocessing>`_。"
+
+#~ msgid "At least 24GB GPU memory"
+#~ msgstr "至少 24GB 显存"
+
+#~ msgid ""
+#~ "Sufficient CPU memory (LMCache will use"
+#~ " 15 GB by default in this "
+#~ "example)."
+#~ msgstr "足够的 CPU 内存（在此示例中，LMCache 默认将使用 15 GB）。"
 

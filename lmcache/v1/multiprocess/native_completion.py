@@ -56,7 +56,7 @@ class _Registration(msgspec.Struct):
 class DeviceHostFuncDispatcher:
     """Drain buffered C++ completions and dispatch each payload to the handler
     registered for its ``kind``. One instance per process; owned by
-    ``MPCacheEngine``."""
+    ``MPCacheServer``."""
 
     def __init__(self, drain_interval_seconds: float = 0.005) -> None:
         self._registry: dict[str, _Registration] = {}

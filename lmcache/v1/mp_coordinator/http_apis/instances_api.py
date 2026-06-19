@@ -75,6 +75,8 @@ async def register_instance(
             registration_time=time.time(),
             last_heartbeat_time=time.monotonic(),
             metadata=dict(body.metadata),
+            p2p_advertised_url=body.p2p_advertised_url,
+            mq_port=body.mq_port,
         )
     )
     logger.info("Registered instance %s at %s:%s", instance_id, body.ip, body.http_port)
@@ -128,6 +130,8 @@ async def list_instances(request: Request) -> Any:
             "http_port": instance.http_port,
             "registration_time": instance.registration_time,
             "metadata": instance.metadata,
+            "p2p_advertised_url": instance.p2p_advertised_url,
+            "mq_port": instance.mq_port,
         }
         for instance in _registry(request).all_instances()
     ]

@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import threading
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
@@ -38,10 +38,10 @@ def test_free_locks_in_request_type():
 
 
 def test_free_locks_payload_classes():
-    """FREE_LOOKUP_LOCKS payload should be [IPCCacheEngineKey, int]."""
+    """FREE_LOOKUP_LOCKS payload should be [IPCCacheServerKey, int]."""
     payload_classes = get_payload_classes(RequestType.FREE_LOOKUP_LOCKS)
     assert len(payload_classes) == 2
-    assert payload_classes[0] is IPCCacheEngineKey
+    assert payload_classes[0] is IPCCacheServerKey
     assert payload_classes[1] is int
 
 
@@ -126,7 +126,7 @@ def test_server_free_lookup_locks_no_matching_chunks():
     module = LookupModule(ctx)
 
     # Key with start == end means no chunks to free
-    key = IPCCacheEngineKey(
+    key = IPCCacheServerKey(
         model_name="testmodel",
         world_size=1,
         worker_id=None,
@@ -198,7 +198,7 @@ def test_adapter_free_lookup_locks_sends_request():
     assert len(payloads) == 2
 
     key = payloads[0]
-    assert isinstance(key, IPCCacheEngineKey)
+    assert isinstance(key, IPCCacheServerKey)
     assert key.worker_id is None
     assert key.model_name == "test_model"
     assert key.request_id == "req-1"

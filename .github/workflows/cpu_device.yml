@@ -94,11 +94,11 @@ jobs:
             pyproject.toml
             requirements/*.txt
 
-      - name: Cache HuggingFace models
+      - name: Cache opt-125m model (GitHub release)
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: hf-opt-125m-v1
+          key: opt-125m-gh-v2
 
       - name: Install vLLM CPU (prebuilt nightly from PyPI)
         run: bash .github/scripts/install_vllm_cpu.sh
@@ -106,24 +106,26 @@ jobs:
       - name: Install lmcache (CPU-only, no vLLM)
         run: bash .github/scripts/install_lmcache_cpu.sh
 
-      - name: Download facebook/opt-125m
-        run: bash .github/scripts/download_model.sh facebook/opt-125m
+      - name: Download facebook/opt-125m (GitHub release)
+        run: bash .github/scripts/download_opt125m_github.sh
 
-      - name: Server bench — Data
+      - name: Server bench — LMCache-driven
         run: |
-          LMCACHE_BENCH_TRANSFER_MODE=data \
+          LMCACHE_BENCH_TRANSFER_MODE=lmcache_driven \
           LMCACHE_HTTP_PORT_BENCH=18080 \
           LMCACHE_ZMQ_PORT_BENCH=15555 \
             bash .github/scripts/cpu_device_test.sh server_bench
 
-      - name: Server bench — Handle
+      - name: Server bench — Engine-driven
         run: |
-          LMCACHE_BENCH_TRANSFER_MODE=handle \
+          LMCACHE_BENCH_TRANSFER_MODE=engine_driven \
           LMCACHE_HTTP_PORT_BENCH=18081 \
           LMCACHE_ZMQ_PORT_BENCH=15556 \
             bash .github/scripts/cpu_device_test.sh server_bench
 
-      - name: vLLM e2e — Data (pickle)
+      - name: vLLM e2e — Engine-driven (pickle)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           LMCACHE_E2E_TRANSPORT_MODE=pickle \
           LMCACHE_HTTP_PORT_E2E=18082 \
@@ -132,8 +134,10 @@ jobs:
             bash .github/scripts/cpu_device_test.sh vllm_e2e
 
       # POSIX SHM transport is Linux-only.
-      - name: vLLM e2e — Data (shm)
+      - name: vLLM e2e — Engine-driven (shm)
         if: runner.os == 'Linux'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           LMCACHE_E2E_TRANSPORT_MODE=shm \
           LMCACHE_HTTP_PORT_E2E=18083 \
@@ -141,9 +145,11 @@ jobs:
           VLLM_PORT_E2E=18001 \
             bash .github/scripts/cpu_device_test.sh vllm_e2e
 
-      - name: vLLM e2e — Handle
+      - name: vLLM e2e — Engine-driven
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          LMCACHE_E2E_TRANSPORT_MODE=handle \
+          LMCACHE_E2E_TRANSPORT_MODE=engine_driven \
           LMCACHE_HTTP_PORT_E2E=18084 \
           LMCACHE_ZMQ_PORT_E2E=15559 \
           VLLM_PORT_E2E=18002 \

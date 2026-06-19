@@ -25,7 +25,7 @@ from lmcache.cli.commands.describe import (
 
 SAMPLE_STATUS = {
     "is_healthy": True,
-    "engine_type": "MPCacheEngine",
+    "engine_type": "MPCacheServer",
     "chunk_size": 256,
     "hash_algorithm": "sha256",
     "registered_gpu_ids": [0],
@@ -47,10 +47,10 @@ SAMPLE_STATUS = {
                         "tokens_per_block": 16,
                         "slots_per_block": 16,
                         "dtype": "torch.float16",
-                        "gpu_kv_concrete_shape": "32 x [2, 2048, 16, 8, 128]",
+                        "engine_kv_concrete_shape": "32 x [2, 2048, 16, 8, 128]",
                         "is_mla": False,
-                        "gpu_kv_format": "NL_X_TWO_NB_BS_NH_HS",
-                        "gpu_kv_shape": "NL x [2, NB, BS, NH, HS]",
+                        "engine_kv_format": "NL_X_TWO_NB_BS_NH_HS",
+                        "engine_kv_shape": "NL x [2, NB, BS, NH, HS]",
                         "attention_backend": "vLLM non-MLA flash attention",
                     },
                 ],
@@ -178,7 +178,7 @@ class TestDescribeKvcacheFields:
         m = output["metrics"]
         assert m["health"] == "OK"
         assert m["url"] == "http://localhost:8000"
-        assert m["engine_type"] == "MPCacheEngine"
+        assert m["engine_type"] == "MPCacheServer"
         assert m["chunk_size"] == 256
         assert m["l1_capacity_gb"] == 60.0
         assert m["l1_used_gb"] == "42.30 (70.5%)"
@@ -208,8 +208,8 @@ class TestDescribeKvcacheFields:
         assert kg["dtype"] == "torch.float16"
         assert kg["is_mla"] is False
         assert kg["attention_backend"] == "vLLM non-MLA flash attention"
-        assert kg["gpu_kv_shape"] == "NL x [2, NB, BS, NH, HS]"
-        assert kg["gpu_kv_concrete_shape"] == "32 x [2, 2048, 16, 8, 128]"
+        assert kg["engine_kv_shape"] == "NL x [2, NB, BS, NH, HS]"
+        assert kg["engine_kv_concrete_shape"] == "32 x [2, 2048, 16, 8, 128]"
 
     def test_unhealthy(self):
         """Verify health shows UNHEALTHY when is_healthy is False."""
@@ -245,7 +245,7 @@ class TestDescribeKvcacheFields:
         # First Party
         from lmcache.cli.commands.describe import DescribeCommand
 
-        minimal_data = {"is_healthy": True, "engine_type": "MPCacheEngine"}
+        minimal_data = {"is_healthy": True, "engine_type": "MPCacheServer"}
         cmd = DescribeCommand()
 
         class FakeArgs:

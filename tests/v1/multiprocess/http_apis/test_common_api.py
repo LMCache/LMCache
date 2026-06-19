@@ -39,25 +39,25 @@ class TestCommonApiAggregation:
     def test_run_script_endpoint_present(self):
         """/run_script must be registered on the mp server."""
         app = _app_with_all_apis()
-        paths = {r.path for r in app.routes if hasattr(r, "path")}
+        paths = set(app.openapi()["paths"])
         assert "/run_script" in paths
 
     def test_common_env_endpoint_present(self):
         """/env from env_api should be registered."""
         app = _app_with_all_apis()
-        paths = {r.path for r in app.routes if hasattr(r, "path")}
+        paths = set(app.openapi()["paths"])
         assert "/env" in paths
 
     def test_common_loglevel_endpoint_present(self):
         """/loglevel from loglevel_api should be registered."""
         app = _app_with_all_apis()
-        paths = {r.path for r in app.routes if hasattr(r, "path")}
+        paths = set(app.openapi()["paths"])
         assert "/loglevel" in paths
 
     def test_conf_endpoint_present(self):
         """/conf from conf_api should be registered."""
         app = _app_with_all_apis()
-        paths = {r.path for r in app.routes if hasattr(r, "path")}
+        paths = set(app.openapi()["paths"])
         assert "/conf" in paths
 
 

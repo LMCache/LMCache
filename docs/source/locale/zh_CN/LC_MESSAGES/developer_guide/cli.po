@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -25,7 +25,7 @@ msgstr "扩展 CLI"
 
 #: ../../source/developer_guide/cli.rst:4
 msgid "This guide explains how to add new subcommands to the ``lmcache`` CLI."
-msgstr "本指南解释了如何向 ``lmcache`` CLI 添加新的子命令。"
+msgstr "本指南介绍如何为 ``lmcache`` CLI 添加新子命令。"
 
 #: ../../source/developer_guide/cli.rst:7
 msgid "Architecture Overview"
@@ -36,81 +36,87 @@ msgid "The CLI uses explicit command registration:"
 msgstr "CLI 使用显式命令注册："
 
 #: ../../source/developer_guide/cli.rst:11
+msgid "Each command is a class inheriting from ``BaseCommand``."
+msgstr "每个命令都是一个继承自 ``BaseCommand`` 的类。"
+
+#: ../../source/developer_guide/cli.rst:12
 msgid ""
-"Each command is a class inheriting from ``BaseCommand`` in "
-"``lmcache/cli/commands/base.py``."
-msgstr "每个命令都是一个继承自 ``BaseCommand`` 的类，位于 ``lmcache/cli/commands/base.py`` 中。"
+"Commands are instantiated and listed in a central ``ALL_COMMANDS`` "
+"registry."
+msgstr "所有命令均在中央 ``ALL_COMMANDS`` 注册表中实例化并列出。"
 
 #: ../../source/developer_guide/cli.rst:13
 msgid ""
-"Commands are instantiated and listed in ``ALL_COMMANDS`` in "
-"``lmcache/cli/commands/__init__.py``."
-msgstr "命令在 ``lmcache/cli/commands/__init__.py`` 中的 ``ALL_COMMANDS`` 中被实例化和列出。"
-
-#: ../../source/developer_guide/cli.rst:15
-msgid ""
-"At startup, ``main.py`` iterates ``ALL_COMMANDS`` and calls "
+"At startup, the entry point iterates ``ALL_COMMANDS`` and calls "
 "``cmd.register(subparsers)`` to wire up argparse."
-msgstr "在启动时，``main.py`` 迭代 ``ALL_COMMANDS`` 并调用 ``cmd.register(subparsers)`` 来连接 argparse。"
+msgstr "启动时，入口点遍历 ``ALL_COMMANDS`` 并调用 ``cmd.register(subparsers)``，将各子命令注册到 argparse。"
 
-#: ../../source/developer_guide/cli.rst:18
+#: ../../source/developer_guide/cli.rst:16
 msgid ""
-"``BaseCommand`` is an abstract class with four required methods. "
-"Forgetting any of them raises ``TypeError`` at instantiation time."
-msgstr "``BaseCommand`` 是一个抽象类，具有四个必需的方法。忘记其中任何一个都会在实例化时引发 ``TypeError``。"
+"``BaseCommand`` is an abstract class with a small set of required methods"
+" (name, help, argument registration, and execute). Forgetting any of them"
+" raises ``TypeError`` at instantiation time."
+msgstr "``BaseCommand`` 是一个抽象类，包含少量必需方法（名称、帮助、参数注册及执行）。若遗漏其中任一方法，实例化时将引发 ``TypeError``。"
 
-#: ../../source/developer_guide/cli.rst:22
-msgid "File Layout"
-msgstr "文件布局"
-
-#: ../../source/developer_guide/cli.rst:49
+#: ../../source/developer_guide/cli.rst:21
 msgid "Step-by-Step: Adding a New Command"
 msgstr "逐步指南：添加新命令"
 
+#: ../../source/developer_guide/cli.rst:23
+msgid "**Step 1.** Create a new command class that subclasses ``BaseCommand``:"
+msgstr "**步骤 1.** 创建一个继承自 ``BaseCommand`` 的新命令类："
+
 #: ../../source/developer_guide/cli.rst:51
-msgid "**Step 1.** Create ``lmcache/cli/commands/describe.py``:"
-msgstr "**第 1 步。** 创建 ``lmcache/cli/commands/describe.py``："
+msgid "**Step 2.** Add an instance of it to the ``ALL_COMMANDS`` registry:"
+msgstr "**步骤 2.** 将其实例添加到 ``ALL_COMMANDS`` 注册表中："
 
-#: ../../source/developer_guide/cli.rst:79
-msgid "**Step 2.** Register it in ``lmcache/cli/commands/__init__.py``:"
-msgstr "**步骤 2.** 在 ``lmcache/cli/commands/__init__.py`` 中注册它："
-
-#: ../../source/developer_guide/cli.rst:94
+#: ../../source/developer_guide/cli.rst:62
 msgid ""
 "That's it --- ``lmcache describe --url http://localhost:8000`` is now "
 "available."
-msgstr "就是这样 --- ``lmcache describe --url http://localhost:8000`` 现在可以使用了。"
+msgstr "至此，``lmcache describe --url http://localhost:8000`` 即可正常使用。"
 
-#: ../../source/developer_guide/cli.rst:98
+#: ../../source/developer_guide/cli.rst:65
 msgid "Using the Metrics System"
 msgstr "使用指标系统"
 
-#: ../../source/developer_guide/cli.rst:100
+#: ../../source/developer_guide/cli.rst:67
 msgid "The metrics system uses a **handler + formatter** architecture:"
 msgstr "指标系统使用 **处理器 + 格式化器** 架构："
 
-#: ../../source/developer_guide/cli.rst:102
+#: ../../source/developer_guide/cli.rst:69
 msgid "**Metrics** — the collector. Holds sections and entries."
 msgstr "**指标** — 收集器。包含部分和条目。"
 
-#: ../../source/developer_guide/cli.rst:103
+#: ../../source/developer_guide/cli.rst:70
 msgid "**Handler** — the destination (stdout, file, etc.)."
 msgstr "**处理器** — 目标（标准输出、文件等）。"
 
-#: ../../source/developer_guide/cli.rst:104
+#: ../../source/developer_guide/cli.rst:71
 msgid "**Formatter** — the rendering (ASCII table, JSON, etc.)."
 msgstr "**格式化器** — 渲染（ASCII 表格、JSON 等）。"
 
-#: ../../source/developer_guide/cli.rst:106
+#: ../../source/developer_guide/cli.rst:73
 msgid ""
 "``BaseCommand.create_metrics()`` sets up default handlers automatically, "
 "so command authors just build metrics and call ``emit()``:"
-msgstr "``BaseCommand.create_metrics()`` 自动设置默认处理程序，因此命令作者只需构建指标并调用 ``emit()``："
+msgstr "``BaseCommand.create_metrics()`` 会自动配置默认处理器，命令开发者只需构建指标数据并调用 ``emit()`` 即可："
 
-#: ../../source/developer_guide/cli.rst:128
+#: ../../source/developer_guide/cli.rst:95
 msgid ""
 "The ``--format`` and ``--output`` flags are added automatically by "
 "``BaseCommand.register()`` — subcommands do not need to add them "
 "manually."
-msgstr "``--format`` 和 ``--output`` 标志由 ``BaseCommand.register()`` 自动添加 — 子命令不需要手动添加它们。"
+msgstr ""
+"``--format`` 和 ``--output`` 标志由 ``BaseCommand.register()`` 自动添加 — "
+"子命令无需手动添加。"
+
+#~ msgid "File Layout"
+#~ msgstr "文件布局"
+
+#~ msgid "**Step 1.** Create ``lmcache/cli/commands/describe.py``:"
+#~ msgstr "**第 1 步。** 创建 ``lmcache/cli/commands/describe.py``："
+
+#~ msgid "**Step 2.** Register it in ``lmcache/cli/commands/__init__.py``:"
+#~ msgstr "**步骤 2.** 在 ``lmcache/cli/commands/__init__.py`` 中注册它："
 

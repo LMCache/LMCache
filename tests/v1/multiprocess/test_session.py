@@ -9,7 +9,7 @@ import time
 import pytest
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.session import Session, SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
@@ -281,7 +281,7 @@ class TestSessionLookupIpcKey:
 
     def test_lookup_ipc_key_set_and_get(self, session: Session) -> None:
         """lookup_ipc_key should be settable and retrievable."""
-        key = IPCCacheEngineKey.from_token_ids(
+        key = IPCCacheServerKey.from_token_ids(
             model_name="test-model",
             world_size=1,
             worker_id=None,
@@ -306,7 +306,7 @@ class TestSessionManagerRemoveReturnsSession:
         session.set_tokens(list(range(8)))
         session.get_hashes(0, 8)
 
-        key = IPCCacheEngineKey.from_token_ids(
+        key = IPCCacheServerKey.from_token_ids(
             model_name="model",
             world_size=1,
             worker_id=None,

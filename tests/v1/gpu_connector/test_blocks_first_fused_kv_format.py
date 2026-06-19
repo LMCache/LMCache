@@ -50,7 +50,7 @@ def test_discovery_splits_fused_axis():
     fmt, norm = U.normalize_kv_and_discover_format(
         _raw_blocks_first_caches(), EngineType.VLLM, HINTS
     )
-    assert fmt == lmc_ops.GPUKVFormat.NL_X_NB_NH_BS_TWO_HS
+    assert fmt == lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS
     # 4D [NB, NH, BS, 2*HS] -> canonical 5D [NB, NH, BS, 2, HS]
     assert tuple(norm[0].shape) == (NB, NH, BS, 2, HS)
 
@@ -116,7 +116,7 @@ def test_multi_layer_block_kv_transfer_roundtrip():
     """Server-side copy (handle mode) D2H + H2D round-trip.
 
     Regression for the CI ``cpu_e2e_validation (server-side copy)`` failure:
-    ``GPUTransferModule.store`` calls ``multi_layer_block_kv_transfer`` for
+    ``LMCacheDrivenTransferModule.store`` calls ``multi_layer_block_kv_transfer`` for
     this format, so the per-layer HND fallback must recognize it and split
     K/V at dim 3.
     """

@@ -41,6 +41,15 @@ class MPCoordinatorConfig:
         blend_probe_stride: Positions between match probes. With partial-fill
             reuse any offset is usable, so ``1`` (probe every offset) gives full
             recall; raise only to trade recall for coordinator CPU.
+        enable_startup_resync: When ``True``, run a one-shot L2 resync
+            on startup to backfill trackers from an MP server's
+            ``GET /l2/keys``.
+        resync_poll_interval: Seconds between registry checks while
+            waiting for the first MP server to register.
+        resync_max_wait: Maximum seconds startup resync waits for an MP
+            server before giving up.
+        resync_page_size: ``page_size`` forwarded to ``GET /l2/keys``
+            during resync.
     """
 
     host: str = "0.0.0.0"
@@ -52,6 +61,10 @@ class MPCoordinatorConfig:
     trigger_watermark: float = 1.0
     blend_chunk_size: int = 256
     blend_probe_stride: int = 1
+    enable_startup_resync: bool = True
+    resync_poll_interval: float = 1.0
+    resync_max_wait: float = 60.0
+    resync_page_size: int = 1000
 
     def __post_init__(self) -> None:
         """Validate timing parameters.
@@ -71,6 +84,12 @@ class MPCoordinatorConfig:
             raise ValueError(
                 "trigger_watermark must be between 0.0 (exclusive) and 1.0"
             )
+        if self.resync_poll_interval <= 0:
+            raise ValueError("resync_poll_interval must be positive")
+        if self.resync_max_wait < 0:
+            raise ValueError("resync_max_wait must be non-negative")
+        if self.resync_page_size <= 0:
+            raise ValueError("resync_page_size must be positive")
         if self.blend_chunk_size < 1:
             raise ValueError("blend_chunk_size must be positive")
         if self.blend_probe_stride < 1:
@@ -101,6 +120,12 @@ class MPCoordinatorConfig:
                 )
                 return default
 
+        def _bool(name: str, default: bool) -> bool:
+            raw = os.getenv(f"{_ENV_PREFIX}{name}")
+            if raw is None:
+                return default
+            return raw.strip().lower() in ("1", "true", "yes", "on")
+
         return cls(
             host=_str("HOST", cls.host),
             port=int(_num("PORT", cls.port, int)),
@@ -117,4 +142,12 @@ class MPCoordinatorConfig:
             blend_probe_stride=int(
                 _num("BLEND_PROBE_STRIDE", cls.blend_probe_stride, int)
             ),
+            enable_startup_resync=_bool(
+                "ENABLE_STARTUP_RESYNC", cls.enable_startup_resync
+            ),
+            resync_poll_interval=_num(
+                "RESYNC_POLL_INTERVAL", cls.resync_poll_interval, float
+            ),
+            resync_max_wait=_num("RESYNC_MAX_WAIT", cls.resync_max_wait, float),
+            resync_page_size=int(_num("RESYNC_PAGE_SIZE", cls.resync_page_size, int)),
         )

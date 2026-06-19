@@ -66,7 +66,8 @@ msgstr "**示例响应** (HTTP 200):"
 #: ../../source/internal_api_server/controller_apis.rst:50
 #: ../../source/internal_api_server/controller_apis.rst:175
 msgid "**Error Response** (controller not available, HTTP 503):"
-msgstr "**错误响应**（控制器不可用，HTTP 503）："
+msgstr ""
+"**错误响应**\\ （控制器不可用，HTTP 503）："
 
 #: ../../source/internal_api_server/controller_apis.rst:58
 msgid "**Response Schema**:"
@@ -191,7 +192,8 @@ msgstr "使用灵活的查询参数获取工作信息。行为取决于参数的
 
 #: ../../source/internal_api_server/controller_apis.rst:86
 msgid "**No parameters**: List all registered workers across all instances."
-msgstr "**无参数**：列出所有实例中注册的所有工作者。"
+msgstr ""
+"**无参数**\\ ：列出所有实例中注册的所有工作者。"
 
 #: ../../source/internal_api_server/controller_apis.rst:87
 msgid "**``instance_id`` only**: List all workers for a specific instance."
@@ -228,23 +230,28 @@ msgstr "``worker_id``"
 msgid ""
 "(Optional) Worker ID for specific worker details (requires "
 "``instance_id``)"
-msgstr "（可选）特定工作者详细信息的工作者 ID（需要 ``instance_id``）"
+msgstr ""
+"（可选）特定工作者详细信息的工作者 ID（需要 ``instance_id``\\ ）"
 
 #: ../../source/internal_api_server/controller_apis.rst:114
 msgid "**Example Response** (list workers):"
-msgstr "**示例响应**（列出工作者）："
+msgstr ""
+"**示例响应**\\ （列出工作者）："
 
 #: ../../source/internal_api_server/controller_apis.rst:144
 msgid "**Example Response** (single worker):"
-msgstr "**示例响应**（单个工作者）："
+msgstr ""
+"**示例响应**\\ （单个工作者）："
 
 #: ../../source/internal_api_server/controller_apis.rst:159
 msgid "**Error Response** (worker not found, HTTP 404):"
-msgstr "**错误响应**（未找到工作者，HTTP 404）："
+msgstr ""
+"**错误响应**\\ （未找到工作者，HTTP 404）："
 
 #: ../../source/internal_api_server/controller_apis.rst:167
 msgid "**Error Response** (instance not found, HTTP 404):"
-msgstr "**错误响应**（实例未找到，HTTP 404）："
+msgstr ""
+"**错误响应**\\ （实例未找到，HTTP 404）："
 
 #: ../../source/internal_api_server/controller_apis.rst:183
 msgid "**Worker Response Schema**:"

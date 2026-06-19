@@ -231,21 +231,26 @@ Install LMCache
             ``lmcache-cli`` and ``lmcache`` ship the same ``lmcache`` CLI command.
             Do not install both in the same environment.
 
+Build the Docker Image
+----------------------
+
+Instead of pulling a prebuilt image, you can build the LMCache (integrated with
+vLLM) image yourself from the provided Dockerfile, located in
+`docker/ <https://github.com/LMCache/LMCache/tree/dev/docker>`_.
+
+From the root of the LMCache repository:
+
+.. code-block:: bash
+
+    docker build --tag <IMAGE_NAME>:<TAG> --target image-build --file docker/Dockerfile .
+
+Replace ``<IMAGE_NAME>`` and ``<TAG>`` with your desired image name and tag. See
+the example build file in `docker/ <https://github.com/LMCache/LMCache/tree/dev/docker>`_
+for an explanation of all build arguments.
+
 Verify Installation
 -------------------
 
 .. code-block:: bash
 
     python -c "import lmcache.c_ops"
-
-Compatibility Matrix
-~~~~~~~~~~~~~~~~~~~~
-
-✅ compatible · ❌ API incompatible · 🕯 torch mismatch (use ``--no-build-isolation``)
-
-
-.. container:: compat-table-scroll
-
-   .. csv-table::
-      :file: Installation_compatibility_matrix.csv
-      :header-rows: 1

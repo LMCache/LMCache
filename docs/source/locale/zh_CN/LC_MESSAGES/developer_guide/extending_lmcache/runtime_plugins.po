@@ -72,7 +72,8 @@ msgid ""
 "JSON string containing plugin configuration - "
 "``LMCACHE_RUNTIME_PLUGIN_WORKER_ID``: Current worker ID - "
 "``LMCACHE_RUNTIME_PLUGIN_WORKER_COUNT``: Total worker count in cluster"
-msgstr "环境变量： - ``LMCACHE_RUNTIME_PLUGIN_ROLE``：进程角色（例如，``SCHEDULER``，``WORKER``） - ``LMCACHE_RUNTIME_PLUGIN_CONFIG``：包含插件配置的 JSON 字符串 - ``LMCACHE_RUNTIME_PLUGIN_WORKER_ID``：当前工作线程 ID - ``LMCACHE_RUNTIME_PLUGIN_WORKER_COUNT``：集群中的总工作线程数"
+msgstr ""
+"环境变量： - ``LMCACHE_RUNTIME_PLUGIN_ROLE``\\ ：进程角色（例如，\\ ``SCHEDULER``\\ ，\\ ``WORKER``\\ ） - ``LMCACHE_RUNTIME_PLUGIN_CONFIG``\\ ：包含插件配置的 JSON 字符串 - ``LMCACHE_RUNTIME_PLUGIN_WORKER_ID``\\ ：当前工作线程 ID - ``LMCACHE_RUNTIME_PLUGIN_WORKER_COUNT``\\ ：集群中的总工作线程数"
 
 #: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:24
 msgid "Configuration File (``lmcache.yaml``):"
@@ -90,11 +91,13 @@ msgstr "插件文件名决定执行目标："
 msgid ""
 "Role-Specific Plugins: - Format: "
 "``<ROLE>[_<WORKER_ID>][_<DESCRIPTION>].<EXTENSION>`` - Examples:"
-msgstr "角色特定插件： - 格式：``<ROLE>[_<WORKER_ID>][_<DESCRIPTION>].<EXTENSION>`` - 示例："
+msgstr ""
+"角色特定插件： - 格式：\\ ``<ROLE>[_<WORKER_ID>][_<DESCRIPTION>].<EXTENSION>`` - 示例："
 
 #: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:42
 msgid "``scheduler_foo_plugin.py``: Runs only on ``SCHEDULER``"
-msgstr "``scheduler_foo_plugin.py``：仅在 ``SCHEDULER`` 上运行"
+msgstr ""
+"``scheduler_foo_plugin.py``\\ ：仅在 ``SCHEDULER`` 上运行"
 
 #: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:43
 msgid "``worker_0_test.sh``: Runs only on worker ID 0"
@@ -121,7 +124,8 @@ msgstr "执行模型"
 msgid ""
 "**Interpreter Detection**: - Uses shebang line (e.g., "
 "``#!/opt/venv/bin/python``) - Fallback interpreters:"
-msgstr "**解释器检测**： - 使用 shebang 行（例如，``#!/opt/venv/bin/python``） - 备用解释器："
+msgstr ""
+"**解释器检测**\\ ： - 使用 shebang 行（例如，\\ ``#!/opt/venv/bin/python``\\ ） - 备用解释器："
 
 #: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:57
 msgid "``.py`` → ``python``"
@@ -135,13 +139,15 @@ msgstr "``.sh`` → ``bash``"
 msgid ""
 "**Output Handling**: - Stdout/stderr captured continuously - Logged with "
 "plugin name prefix"
-msgstr "**输出处理**：- 持续捕获标准输出/标准错误 - 以插件名称前缀记录"
+msgstr ""
+"**输出处理**\\ ：- 持续捕获标准输出/标准错误 - 以插件名称前缀记录"
 
 #: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:64
 msgid ""
 "**Process Management**: - Launched as subprocesses - Terminated when "
 "parent process exits"
-msgstr "**进程管理**： - 作为子进程启动 - 当父进程退出时终止"
+msgstr ""
+"**进程管理**\\ ： - 作为子进程启动 - 当父进程退出时终止"
 
 #: ../../source/developer_guide/extending_lmcache/runtime_plugins.rst:69
 msgid "Example Runtime Plugins"

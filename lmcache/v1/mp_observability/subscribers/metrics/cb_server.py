@@ -77,6 +77,14 @@ class BlendMetricsSubscriber(EventSubscriber):
             description="Tokens served by blend from non-prefix (shifted) chunks.",
             unit="tokens",
         )
+        self._lookup_segmented_prefix_hit_tokens = meter.create_counter(
+            "lmcache_blend.lookup_segmented_prefix_hit_tokens",
+            description=(
+                "Tokens served by blend from the segmented-prefix tail "
+                "(post-gap same-position chunks reused via the prefix leg)."
+            ),
+            unit="tokens",
+        )
         self._lookup_fingerprint_hits = meter.create_counter(
             "lmcache_blend.lookup_fingerprint_hits",
             description="Chunks matched by local fingerprint table",
@@ -162,6 +170,9 @@ class BlendMetricsSubscriber(EventSubscriber):
         self._lookup_prefix_hit_tokens.add(event.metadata.get("prefix_hit_tokens", 0))
         self._lookup_non_prefix_hit_tokens.add(
             event.metadata.get("non_prefix_hit_tokens", 0)
+        )
+        self._lookup_segmented_prefix_hit_tokens.add(
+            event.metadata.get("segmented_prefix_hit_tokens", 0)
         )
         self._lookup_fingerprint_hits.add(event.metadata["fingerprint_hits"])
         self._lookup_storage_hits.add(event.metadata["storage_hits"])

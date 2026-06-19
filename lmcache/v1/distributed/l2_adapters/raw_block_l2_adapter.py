@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
@@ -448,7 +448,9 @@ class RawBlockL2Adapter(L2AdapterInterface):
             self._completed_store_tasks = {}
         return completed
 
-    def submit_lookup_and_lock_task(self, keys: list[ObjectKey]) -> L2TaskId:
+    def submit_lookup_and_lock_task(
+        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+    ) -> L2TaskId:
         """Submit a non-blocking lookup-and-lock task.
 
         Args:

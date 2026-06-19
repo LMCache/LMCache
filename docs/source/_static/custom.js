@@ -165,3 +165,119 @@ function initializeDocsWidgets() {
 }
 
 document.addEventListener("DOMContentLoaded", initializeDocsWidgets);
+
+/**
+ * Default-expand the top-level sidebar sections so visitors can skim the full
+ * information architecture at a glance. Sections remain collapsible -- this
+ * only changes the initial Alpine ``expanded`` state of each ``.toctree-l1``
+ * (the theme starts them collapsed unless they are the current page).
+ *
+ * @returns {void}
+ */
+// Top-level sections that should start collapsed (secondary / reference /
+// deprecated material) rather than expanded-by-default.
+const COLLAPSED_BY_DEFAULT = [
+  "legacy/index",
+  "developer_guide/index",
+  "non_kv_cache/index",
+  "community/index",
+  "kv_cache_optimizations/index",
+];
+
+let didInitialNavExpand = false;
+
+function expandTopLevelNavSections() {
+  // Run the default expansion exactly once. Without this guard it fires on
+  // both `alpine:initialized` and the DOMContentLoaded fallback, and if the
+  // user collapses a section between the two calls the second one re-opens it.
+  if (didInitialNavExpand) {
+    return;
+  }
+  // Need Alpine ready to set the reactive `expanded` state; bail without
+  // marking done so a later trigger can retry.
+  if (!(window.Alpine && window.Alpine.$data)) {
+    return;
+  }
+  let expandedAny = false;
+  document.querySelectorAll("nav .toctree-l1").forEach((li) => {
+    const link = li.querySelector(":scope > a");
+    const href = link ? link.getAttribute("href") || "" : "";
+    if (COLLAPSED_BY_DEFAULT.some((p) => href.includes(p))) {
+      return;
+    }
+    try {
+      const data = window.Alpine.$data(li);
+      if (data && "expanded" in data) {
+        data.expanded = true;
+        expandedAny = true;
+      }
+    } catch (e) {
+      /* nav item not yet managed by Alpine */
+    }
+  });
+  if (expandedAny) {
+    didInitialNavExpand = true;
+  }
+}
+
+// Run both on Alpine init and as a fallback, to cover either load ordering.
+document.addEventListener("alpine:initialized", expandTopLevelNavSections);
+document.addEventListener("DOMContentLoaded", () =>
+  setTimeout(expandTopLevelNavSections, 0),
+);
+
+/**
+ * Preserve the left sidebar's scroll position across page navigations. The
+ * sidebar (``#left-sidebar``) is an independently scrollable container, so a
+ * normal page load re-renders it at the top -- making the nav "jump" every
+ * time you click a link. We stash its scrollTop in sessionStorage before
+ * leaving and restore it on the next page.
+ *
+ * @returns {void}
+ */
+const SIDEBAR_SCROLL_KEY = "lmcacheSidebarScroll";
+
+function saveSidebarScroll() {
+  const sidebar = document.getElementById("left-sidebar");
+  if (sidebar) {
+    sessionStorage.setItem(SIDEBAR_SCROLL_KEY, String(sidebar.scrollTop));
+  }
+}
+
+function restoreSidebarScroll() {
+  const sidebar = document.getElementById("left-sidebar");
+  const saved = sessionStorage.getItem(SIDEBAR_SCROLL_KEY);
+  if (!sidebar || saved === null) {
+    return;
+  }
+  const target = parseInt(saved, 10) || 0;
+  // Sections expand asynchronously (Alpine reveals the child <ul> via x-show),
+  // so the sidebar starts short and scrollTop gets clamped near the top.
+  // Re-apply the target across several animation frames until it sticks.
+  let tries = 0;
+  const apply = () => {
+    sidebar.scrollTop = target;
+    tries += 1;
+    if (tries < 20 && Math.abs(sidebar.scrollTop - target) > 1) {
+      requestAnimationFrame(apply);
+    }
+  };
+  requestAnimationFrame(apply);
+}
+
+// Save the position whenever a sidebar link is clicked (captures it exactly
+// at click time) and as a fallback right before the page is hidden.
+document.addEventListener("DOMContentLoaded", () => {
+  const sidebar = document.getElementById("left-sidebar");
+  if (sidebar) {
+    sidebar.addEventListener("click", (e) => {
+      if (e.target.closest("a")) {
+        saveSidebarScroll();
+      }
+    });
+  }
+});
+window.addEventListener("pagehide", saveSidebarScroll);
+// Restore on initial load and on bfcache restore (pageshow).
+document.addEventListener("DOMContentLoaded", restoreSidebarScroll);
+window.addEventListener("pageshow", restoreSidebarScroll);

@@ -66,9 +66,7 @@ msgid ""
 "means it is possible to set ``LMCACHE_LOCAL_CPU=False`` even though "
 "``LMCACHE_MAX_LOCAL_CPU_SIZE`` is set to a non-zero number."
 msgstr ""
-"``LMCACHE_MAX_LOCAL_CPU_SIZE`` 是 LMCache 将保留的页面锁定（用于快速 GPU 传输）CPU "
-"内存的数量，必须设置为大于 0 的数字，因为本地和远程后端在使用 GPU 传输 KV 缓存时也会使用 CPU 内存作为中间缓冲区。这意味着即使 "
-"``LMCACHE_MAX_LOCAL_CPU_SIZE`` 设置为非零数字，也可以将 ``LMCACHE_LOCAL_CPU=False``。"
+"``LMCACHE_MAX_LOCAL_CPU_SIZE`` 是 LMCache 将保留的页面锁定（用于快速 GPU 传输）CPU 内存的数量，必须设置为大于 0 的数字，因为本地和远程后端在使用 GPU 传输 KV 缓存时也会使用 CPU 内存作为中间缓冲区。这意味着即使 ``LMCACHE_MAX_LOCAL_CPU_SIZE`` 设置为非零数字，也可以将 ``LMCACHE_LOCAL_CPU=False``\\ 。"
 
 #: ../../source/kv_cache/storage_backends/cpu_ram.rst:51
 msgid ""
@@ -80,9 +78,7 @@ msgid ""
 "be LRU evicted to make space so there is no danger of running out of "
 "pinned CPU RAM."
 msgstr ""
-"然而，建议*始终*将``LMCACHE_LOCAL_CPU=True``设置为真（默认值为``True``，因此如果不指定，CPU "
-"卸载将自动启用），因为这允许 LMCache 保留的所有当前未使用的固定 CPU 内存用于保存 KV 缓存。当固定 CPU "
-"内存需要用于任何磁盘或远程传输时，CPU KV 缓存将被 LRU 逐出以腾出空间，因此不会出现固定 CPU 内存耗尽的危险。"
+"然而，建议*始终*将\\ ``LMCACHE_LOCAL_CPU=True``\\ 设置为真（默认值为\\ ``True``\\ ，因此如果不指定，CPU 卸载将自动启用），因为这允许 LMCache 保留的所有当前未使用的固定 CPU 内存用于保存 KV 缓存。当固定 CPU 内存需要用于任何磁盘或远程传输时，CPU KV 缓存将被 LRU 逐出以腾出空间，因此不会出现固定 CPU 内存耗尽的危险。"
 
 #: ../../source/kv_cache/storage_backends/cpu_ram.rst:56
 msgid ""
@@ -120,7 +116,8 @@ msgid ""
 " For large KV cache buffers (multiple gigabytes), enabling **Linux "
 "hugepages** (2 MiB pages) can reduce TLB (Translation Lookaside Buffer) "
 "pressure and improve memory access performance."
-msgstr "默认情况下，LMCache 使用常规的 4 KiB 页面分配 CPU 固定内存。对于大型 KV Cache 缓冲区（多个千兆字节），启用 **Linux 大页**（2 MiB 页面）可以减少 TLB（转换后备缓冲区）压力并提高内存访问性能。"
+msgstr ""
+"默认情况下，LMCache 使用常规的 4 KiB 页面分配 CPU 固定内存。对于大型 KV Cache 缓冲区（多个千兆字节），启用 **Linux 大页**\\ （2 MiB 页面）可以减少 TLB（转换后备缓冲区）压力并提高内存访问性能。"
 
 #: ../../source/kv_cache/storage_backends/cpu_ram.rst:76
 msgid "**System prerequisite**"
@@ -155,7 +152,8 @@ msgstr "大页 **与 P2P 模式不兼容** (``enable_p2p: true``)。"
 
 #: ../../source/kv_cache/storage_backends/cpu_ram.rst:113
 msgid "Hugepages are **not compatible with shared memory** (``shm_name`` is set)."
-msgstr "大页与 **共享内存** 不兼容（``shm_name`` 已设置）。"
+msgstr ""
+"大页与 **共享内存** 不兼容（\\ ``shm_name`` 已设置）。"
 
 #: ../../source/kv_cache/storage_backends/cpu_ram.rst:114
 msgid ""

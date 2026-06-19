@@ -33,6 +33,10 @@ MANIFEST
 pip-log.txt
 pip-delete-this-directory.txt
 
+# Optional native backend build artifacts (scripts/build_libaerospike.sh)
+.deps/
+.aerospike-ci.env
+
 # Unit test / coverage reports
 htmlcov/
 .tox/

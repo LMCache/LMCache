@@ -123,9 +123,9 @@ class TestIpcKeyToObjectKeys:
     def test_forwards_cache_salt_single_worker(self):
         # First Party
         from lmcache.v1.distributed.api import ipc_key_to_object_keys
-        from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
-        k = IPCCacheEngineKey.from_token_ids(
+        k = IPCCacheServerKey.from_token_ids(
             model_name="m",
             world_size=1,
             worker_id=0,
@@ -140,9 +140,9 @@ class TestIpcKeyToObjectKeys:
         """worker_id=None explodes one chunk into one ObjectKey per worker."""
         # First Party
         from lmcache.v1.distributed.api import ipc_key_to_object_keys
-        from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
-        k = IPCCacheEngineKey.from_token_ids(
+        k = IPCCacheServerKey.from_token_ids(
             model_name="m",
             world_size=4,
             worker_id=None,
@@ -156,9 +156,9 @@ class TestIpcKeyToObjectKeys:
     def test_empty_salt_passes_through(self):
         # First Party
         from lmcache.v1.distributed.api import ipc_key_to_object_keys
-        from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
-        k = IPCCacheEngineKey.from_token_ids(
+        k = IPCCacheServerKey.from_token_ids(
             model_name="m",
             world_size=1,
             worker_id=0,
@@ -170,9 +170,9 @@ class TestIpcKeyToObjectKeys:
     def test_object_group_id_zero(self):
         # First Party
         from lmcache.v1.distributed.api import ipc_key_to_object_keys
-        from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
-        k = IPCCacheEngineKey.from_token_ids(
+        k = IPCCacheServerKey.from_token_ids(
             model_name="m",
             world_size=1,
             worker_id=0,
@@ -186,9 +186,9 @@ class TestIpcKeyToObjectKeys:
         including the worker-expansion (scheduler) path."""
         # First Party
         from lmcache.v1.distributed.api import ipc_key_to_object_keys
-        from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
-        k = IPCCacheEngineKey.from_token_ids(
+        k = IPCCacheServerKey.from_token_ids(
             model_name="m",
             world_size=4,
             worker_id=None,
@@ -202,9 +202,9 @@ class TestIpcKeyToObjectKeys:
         """Each requested object group gets its own positional key list."""
         # First Party
         from lmcache.v1.distributed.api import ipc_key_to_object_keys
-        from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
-        k = IPCCacheEngineKey.from_token_ids(
+        k = IPCCacheServerKey.from_token_ids(
             model_name="m",
             world_size=2,
             worker_id=None,
@@ -237,15 +237,15 @@ class TestObjectKeyValidation:
             )
 
 
-class TestIPCCacheEngineKeyCacheSalt:
-    """cache_salt on IPCCacheEngineKey: validation + wire compat."""
+class TestIPCCacheServerKeyCacheSalt:
+    """cache_salt on IPCCacheServerKey: validation + wire compat."""
 
     def test_reject_at_in_salt(self):
         # First Party
-        from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
         with pytest.raises(ValueError, match="cache_salt"):
-            IPCCacheEngineKey.from_token_ids(
+            IPCCacheServerKey.from_token_ids(
                 model_name="m",
                 world_size=1,
                 worker_id=0,
@@ -255,10 +255,10 @@ class TestIPCCacheEngineKeyCacheSalt:
 
     def test_reject_slash_in_salt(self):
         # First Party
-        from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
         with pytest.raises(ValueError, match="cache_salt"):
-            IPCCacheEngineKey.from_token_ids(
+            IPCCacheServerKey.from_token_ids(
                 model_name="m",
                 world_size=1,
                 worker_id=0,
@@ -268,9 +268,9 @@ class TestIPCCacheEngineKeyCacheSalt:
 
     def test_no_worker_id_version_preserves_salt(self):
         # First Party
-        from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
-        k = IPCCacheEngineKey.from_token_ids(
+        k = IPCCacheServerKey.from_token_ids(
             model_name="m",
             world_size=4,
             worker_id=2,
@@ -288,7 +288,7 @@ class TestIPCCacheEngineKeyCacheSalt:
         import msgspec
 
         # First Party
-        from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
         old_payload = {
             "model_name": "m",
@@ -300,7 +300,7 @@ class TestIPCCacheEngineKeyCacheSalt:
             "request_id": "r1",
         }
         wire = msgspec.msgpack.encode(old_payload)
-        decoded = msgspec.msgpack.decode(wire, type=IPCCacheEngineKey)
+        decoded = msgspec.msgpack.decode(wire, type=IPCCacheServerKey)
         assert decoded.cache_salt == ""
 
     def test_wire_compat_new_payload_roundtrip(self):
@@ -308,9 +308,9 @@ class TestIPCCacheEngineKeyCacheSalt:
         import msgspec
 
         # First Party
-        from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
-        k = IPCCacheEngineKey.from_token_ids(
+        k = IPCCacheServerKey.from_token_ids(
             model_name="m",
             world_size=1,
             worker_id=0,
@@ -318,6 +318,6 @@ class TestIPCCacheEngineKeyCacheSalt:
             cache_salt="alice",
         )
         wire = msgspec.msgpack.encode(k)
-        decoded = msgspec.msgpack.decode(wire, type=IPCCacheEngineKey)
+        decoded = msgspec.msgpack.decode(wire, type=IPCCacheServerKey)
         assert decoded == k
         assert decoded.cache_salt == "alice"

@@ -8,47 +8,19 @@ Architecture Overview
 
 The CLI uses explicit command registration:
 
-1. Each command is a class inheriting from ``BaseCommand`` in
-   ``lmcache/cli/commands/base.py``.
-2. Commands are instantiated and listed in ``ALL_COMMANDS`` in
-   ``lmcache/cli/commands/__init__.py``.
-3. At startup, ``main.py`` iterates ``ALL_COMMANDS`` and calls
+1. Each command is a class inheriting from ``BaseCommand``.
+2. Commands are instantiated and listed in a central ``ALL_COMMANDS`` registry.
+3. At startup, the entry point iterates ``ALL_COMMANDS`` and calls
    ``cmd.register(subparsers)`` to wire up argparse.
 
-``BaseCommand`` is an abstract class with four required methods. Forgetting any
-of them raises ``TypeError`` at instantiation time.
-
-File Layout
------------
-
-.. code-block:: text
-
-   lmcache/cli/
-   ├── __init__.py
-   ├── main.py              # Entry point
-   ├── metrics/             # Metrics system
-   │   ├── __init__.py      # Re-exports
-   │   ├── metrics.py       # Metrics collector
-   │   ├── section.py       # Section data class
-   │   ├── handler.py       # StreamHandler, FileHandler
-   │   └── formatter.py     # TerminalFormatter, JsonFormatter
-   └── commands/
-       ├── __init__.py      # ALL_COMMANDS registry
-       ├── base.py          # BaseCommand ABC
-       ├── describe.py      # lmcache describe
-       ├── kvcache.py       # lmcache kvcache
-       ├── mock.py          # Example command
-       ├── ping.py          # lmcache ping
-       ├── query/           # lmcache query
-       │   ├── __init__.py  # QueryCommand
-       │   ├── prompt.py    # Prompt placeholder expansion
-       │   └── request.py   # OpenAI-compatible HTTP requests
-       └── server.py        # lmcache server
+``BaseCommand`` is an abstract class with a small set of required methods
+(name, help, argument registration, and execute). Forgetting any of them
+raises ``TypeError`` at instantiation time.
 
 Step-by-Step: Adding a New Command
 -----------------------------------
 
-**Step 1.** Create ``lmcache/cli/commands/describe.py``:
+**Step 1.** Create a new command class that subclasses ``BaseCommand``:
 
 .. code-block:: python
 
@@ -76,23 +48,18 @@ Step-by-Step: Adding a New Command
            metrics.add("chunks", "Cached chunks", 1024)
            metrics.emit()
 
-**Step 2.** Register it in ``lmcache/cli/commands/__init__.py``:
+**Step 2.** Add an instance of it to the ``ALL_COMMANDS`` registry:
 
 .. code-block:: python
 
    from lmcache.cli.commands.describe import DescribeCommand
 
    ALL_COMMANDS: list[BaseCommand] = [
-       MockCommand(),
-       KVCacheCommand(),
+       # ... existing commands ...
        DescribeCommand(),   # add here
-       PingCommand(),
-       QueryCommand(),
-       ServerCommand(),
    ]
 
 That's it --- ``lmcache describe --url http://localhost:8000`` is now available.
-
 
 Using the Metrics System
 ------------------------

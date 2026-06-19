@@ -36,6 +36,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 import argparse
 import itertools
+import math
 import mmap
 import os
 import sys
@@ -49,6 +50,7 @@ from lmcache import torch_dev
 # time. On a slim install these symbols are placeholders; the
 # ``_require_full_install`` guard inside the helpers module keeps
 # orchestration safe.
+from lmcache.cli.commands.base import _add_output_args
 from lmcache.cli.commands.bench.server_bench.helpers import (
     _DEFAULT_SHAPE_SPEC,
     _IMPORT_ERROR,
@@ -143,16 +145,18 @@ def register_server_parser(
     )
     parser.add_argument(
         "--transfer-mode",
-        choices=["auto", "handle", "data"],
+        choices=["auto", "engine_driven", "lmcache_driven"],
         default="auto",
         help=(
             "Transport routing for STORE/RETRIEVE (default: auto). "
-            "`handle` forces the GPU-style single-shot path "
-            "(REGISTER_KV_CACHE + STORE/RETRIEVE), which on CPU mode "
-            "uses POSIX SHM to back zero-copy server-side mappings. "
-            "`data` forces the worker-side gather/scatter path "
-            "(REGISTER_KV_CACHE_NON_GPU_CONTEXT + PREPARE/COMMIT). "
-            "`auto` keeps the historical mapping: gpu->handle, cpu->data."
+            "`lmcache_driven` forces the server-driven handle path "
+            "(REGISTER_KV_CACHE + STORE/RETRIEVE), which supports "
+            "both CUDA IPC and CPU SHM for zero-copy transfers. "
+            "`engine_driven` forces the worker-side gather/scatter "
+            "data path (REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT + "
+            "PREPARE/COMMIT). "
+            "`auto` keeps the historical mapping: "
+            "gpu->lmcache_driven, cpu->engine_driven."
         ),
     )
     parser.add_argument(
@@ -225,6 +229,9 @@ def register_server_parser(
         help=("HTTP base URL for checksum API (default: http://localhost:8080)"),
     )
 
+    # Common ``--format / --output / --quiet`` flags.
+    _add_output_args(parser)
+
     parser.set_defaults(func=dispatch_func)
     return parser
 
@@ -234,18 +241,16 @@ def register_server_parser(
 # ---------------------------------------------------------------------------
 
 
-def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
+def run_server_bench(
     command: "BaseCommand",
     args: argparse.Namespace,
 ) -> None:
     """Centralized orchestrator: run the server bench loop.
 
     Args:
-        command: The outer ``BenchCommand`` instance. Currently unused
-            (server prints directly), but kept for signature
-            symmetry with :func:`run_engine_bench` /
-            :func:`run_l2_adapter_bench` and to allow future migration
-            to ``command.create_metrics``.
+        command: The owning :class:`BaseCommand` instance, used to
+            obtain a configured :class:`Metrics` object via
+            ``command.create_metrics``.
         args: Parsed CLI arguments for ``lmcache bench server``.
     """
     _require_full_install()
@@ -262,30 +267,47 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
     from lmcache.v1.multiprocess.group_view import EngineGroupInfo
     from lmcache.v1.multiprocess.mq import MessageQueueClient
 
+    quiet = getattr(args, "quiet", False)
+
+    def log(msg: str) -> None:
+        """Print progress messages; suppressed by --quiet."""
+        if not quiet:
+            print(msg)
+
     use_gpu = args.mode == "gpu"
     if use_gpu and not torch_dev.is_available():
         print("ERROR: --mode gpu requires CUDA")
         sys.exit(1)
 
     # Resolve transfer mode. ``auto`` reproduces the historical
-    # behaviour: gpu -> handle path, cpu -> data path. ``handle``
-    # / ``data`` are explicit overrides; ``handle`` on CPU mode is
-    # the SHM-backed zero-copy path (server-side copy).
+    # behaviour: gpu -> lmcache_driven path, cpu -> engine_driven path.
+    # ``lmcache_driven`` / ``engine_driven`` are explicit overrides.
     transfer_mode = getattr(args, "transfer_mode", "auto")
     if transfer_mode == "auto":
         use_handle = use_gpu
-    elif transfer_mode == "handle":
+    elif transfer_mode == "lmcache_driven":
         use_handle = True
     else:
         use_handle = False
     if use_handle and not use_gpu:
-        print(
-            "  [info] --transfer-mode=handle on cpu mode: using "
-            "REGISTER_KV_CACHE + STORE/RETRIEVE over POSIX SHM"
+        log(
+            "  [info] --transfer-mode=lmcache_driven on cpu mode: "
+            "using REGISTER_KV_CACHE + STORE/RETRIEVE over POSIX SHM"
         )
 
+    total_requests = 0
+    total_checksum_ok = 0
+    total_checksum_fail = 0
+
+    # Latency collectors: keyed by (pass_label, op_type).
+    # Each entry is a list of latency values in ms.
+    cold_lookup_ms: list[float] = []
+    cold_store_ms: list[float] = []
+    warm_lookup_ms: list[float] = []
+    warm_retrieve_ms: list[float] = []
+
     url = args.rpc_url
-    print(
+    log(
         "Connecting to LMCache MP Server at %s (mode=%s) ..." % (url, args.mode),
     )
 
@@ -295,7 +317,7 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
     try:
         # Query chunk size from server
         chunk_size = _get_chunk_size(client)
-        print("Server chunk_size = %d" % chunk_size)
+        log("Server chunk_size = %d" % chunk_size)
 
         # Parse KV shape spec
         layer_groups = parse_kvcache_shape_spec(args.kvcache_shape_spec)
@@ -305,7 +327,7 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
         # Echo the resolved spec so operators can verify that their
         # input was interpreted as intended. The echoed string is a
         # valid ``--kvcache-shape-spec`` itself.
-        print(
+        log(
             "Resolved KV shape spec: %s" % format_kvcache_shape_spec(layer_groups),
         )
         # Paged KV demands identical ``NB`` / ``BS`` across all groups
@@ -328,12 +350,12 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
         num_blocks = spec_nb if spec_nb > 0 else args.num_blocks
         block_size = spec_bs if spec_bs > 0 else args.block_size
         if spec_nb and spec_nb != args.num_blocks:
-            print(
+            log(
                 "  [info] spec nb=%d overrides --num-blocks=%d"
                 % (spec_nb, args.num_blocks)
             )
         if spec_bs and spec_bs != args.block_size:
-            print(
+            log(
                 "  [info] spec bs=%d overrides --block-size=%d"
                 % (spec_bs, args.block_size)
             )
@@ -390,14 +412,14 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
         ]
 
         num_tokens = args.num_tokens
-        print(
+        log(
             "Each request: %d tokens (%d full chunks)"
             % (
                 num_tokens + 1,
                 (num_tokens + 1) // chunk_size,
             )
         )
-        print(
+        log(
             "KV shape: %d layers, %s heads x %s, "
             "dtype=%s, blocks=%dx%d, kv=%s"
             % (
@@ -422,7 +444,7 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
             from lmcache.v1.multiprocess.custom_types import CudaIPCWrapper
 
             allocated = _allocate_gpu_kv_cache(groups=layer_groups)
-            print(
+            log(
                 "Allocated %d GPU tensors on %s" % (len(allocated), allocated[0].device)
             )
             kv_wrappers = [CudaIPCWrapper(t) for t in allocated]
@@ -439,7 +461,7 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
             cpu_tensors, cpu_wrappers, shm_names = _allocate_cpu_shm_kv_cache(
                 groups=layer_groups, shm_prefix=shm_prefix
             )
-            print(
+            log(
                 "Allocated %d CPU SHM tensors (prefix=%s)"
                 % (len(cpu_tensors), shm_prefix)
             )
@@ -459,8 +481,8 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
             use_handle=use_handle,
             engine_group_infos=engine_group_infos,
         )
-        print("REGISTER_KV_CACHE: %s" % ("OK" if register_result else "FAIL"))
-        print()
+        log("REGISTER_KV_CACHE: %s" % ("OK" if register_result else "FAIL"))
+        log("")
 
         # In data mode the server reply carries the SHM pool name
         # and size; the bench mmaps the same pool so STORE/RETRIEVE
@@ -488,10 +510,10 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
         client_tensors = None if use_handle else client_kv_tensors
 
         for seq_no in seq_iter:
-            print("=== Request seq=%d ===" % seq_no)
+            log("=== Request seq=%d ===" % seq_no)
 
             # Pass 1: cold (miss -> store)
-            cold_checksums = _process_request(
+            cold_result = _process_request(
                 client,
                 seq_no,
                 num_tokens,
@@ -506,11 +528,16 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
                 client_tensors=client_tensors,
                 server_pool=server_pool,
             )
+            if cold_result is not None:
+                if cold_result.lookup_ms is not None:
+                    cold_lookup_ms.append(cold_result.lookup_ms)
+                if cold_result.store_ms is not None:
+                    cold_store_ms.append(cold_result.store_ms)
 
             time.sleep(args.interval)
 
             # Pass 2: warm (hit -> retrieve)
-            warm_checksums = _process_request(
+            warm_result = _process_request(
                 client,
                 seq_no,
                 num_tokens,
@@ -525,13 +552,23 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
                 client_tensors=client_tensors,
                 server_pool=server_pool,
             )
+            if warm_result is not None:
+                if warm_result.lookup_ms is not None:
+                    warm_lookup_ms.append(warm_result.lookup_ms)
+                if warm_result.retrieve_ms is not None:
+                    warm_retrieve_ms.append(warm_result.retrieve_ms)
 
             # Compare checksums
+            total_requests += 1
+            cold_checksums = cold_result.checksums if cold_result else None
+            warm_checksums = warm_result.checksums if warm_result else None
             if cold_checksums and warm_checksums:
                 if cold_checksums == warm_checksums:
-                    print("  [seq %d] CHECKSUM MATCH OK" % seq_no)
+                    total_checksum_ok += 1
+                    log("  [seq %d] CHECKSUM MATCH OK" % seq_no)
                 else:
-                    print("  [seq %d] CHECKSUM MISMATCH!" % seq_no)
+                    total_checksum_fail += 1
+                    log("  [seq %d] CHECKSUM MISMATCH!" % seq_no)
                     for i, (c, w) in enumerate(
                         zip(
                             cold_checksums,
@@ -539,7 +576,7 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
                             strict=False,
                         )
                     ):
-                        print(
+                        log(
                             "    chunk %d: cold=%s warm=%s %s"
                             % (
                                 i,
@@ -549,10 +586,10 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
                             )
                         )
 
-            print()
+            log("")
             time.sleep(args.interval)
     except KeyboardInterrupt:
-        print("\nStopping...")
+        log("\nStopping...")
     finally:
         # Release the bench-side mmap of the server SHM pool first
         # (data mode only; ``server_pool`` stays ``None`` otherwise).
@@ -572,4 +609,111 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
                 shm_unlink(_name)
             except OSError:
                 pass
-    print("Done.")
+
+    # Emit structured metrics summary.
+    _emit_server_bench_metrics(
+        command=command,
+        args=args,
+        total_requests=total_requests,
+        total_checksum_ok=total_checksum_ok,
+        total_checksum_fail=total_checksum_fail,
+        cold_lookup_ms=cold_lookup_ms,
+        cold_store_ms=cold_store_ms,
+        warm_lookup_ms=warm_lookup_ms,
+        warm_retrieve_ms=warm_retrieve_ms,
+    )
+    log("Done.")
+
+
+def _emit_server_bench_metrics(
+    command: "BaseCommand",
+    args: argparse.Namespace,
+    total_requests: int,
+    total_checksum_ok: int,
+    total_checksum_fail: int,
+    cold_lookup_ms: list[float] | None = None,
+    cold_store_ms: list[float] | None = None,
+    warm_lookup_ms: list[float] | None = None,
+    warm_retrieve_ms: list[float] | None = None,
+) -> None:
+    """Emit server bench summary using the CLI metrics system.
+
+    Args:
+        command: The owning :class:`BaseCommand` instance.
+        args: Parsed CLI arguments.
+        total_requests: Total number of request pairs processed.
+        total_checksum_ok: Number of requests with matching checksums.
+        total_checksum_fail: Number of requests with mismatched checksums.
+        cold_lookup_ms: Per-request cold lookup latencies (ms).
+        cold_store_ms: Per-request cold store latencies (ms).
+        warm_lookup_ms: Per-request warm lookup latencies (ms).
+        warm_retrieve_ms: Per-request warm retrieve latencies (ms).
+    """
+    if total_requests == 0:
+        return
+
+    metrics = command.create_metrics("Server Bench Result", args, width=64)
+
+    cfg_section = metrics.add_section("config", "Configuration")
+    cfg_section.add("rpc_url", "RPC URL", args.rpc_url)
+    cfg_section.add("mode", "Mode", args.mode)
+    cfg_section.add(
+        "transfer_mode", "Transfer mode", getattr(args, "transfer_mode", "auto")
+    )
+    cfg_section.add("num_tokens", "Tokens / request", args.num_tokens)
+    cfg_section.add("interval", "Interval (s)", args.interval)
+
+    result_section = metrics.add_section("results", "Results")
+    result_section.add("total_requests", "Total requests", total_requests)
+    result_section.add("checksum_ok", "Checksum OK", total_checksum_ok)
+    result_section.add("checksum_fail", "Checksum FAIL", total_checksum_fail)
+    if total_requests > 0:
+        pass_rate = total_checksum_ok / total_requests * 100
+        result_section.add("pass_rate", "Pass rate (%)", round(pass_rate, 2))
+
+    # Per-operation latency summary (cold pass).
+    _add_latency_section(metrics, "cold_lookup", "Cold Lookup (ms)", cold_lookup_ms)
+    _add_latency_section(metrics, "cold_store", "Cold Store (ms)", cold_store_ms)
+
+    # Per-operation latency summary (warm pass).
+    _add_latency_section(metrics, "warm_lookup", "Warm Lookup (ms)", warm_lookup_ms)
+    _add_latency_section(
+        metrics, "warm_retrieve", "Warm Retrieve (ms)", warm_retrieve_ms
+    )
+
+    metrics.emit()
+
+
+def _add_latency_section(
+    metrics,
+    section_id: str,
+    section_title: str,
+    latencies: list[float] | None,
+) -> None:
+    """Add a latency summary section to the metrics report.
+
+    Computes count, mean, min, max, p50, and p99 from the raw
+    latency list. Skipped if the list is empty or None.
+
+    Args:
+        metrics: The :class:`Metrics` instance.
+        section_id: Unique section identifier.
+        section_title: Human-readable section title.
+        latencies: Raw latency values in milliseconds.
+    """
+    if not latencies:
+        return
+
+    sorted_lat = sorted(latencies)
+    count = len(sorted_lat)
+    mean = sum(sorted_lat) / count
+    p50_idx = max(0, math.ceil(count * 0.50) - 1)
+    p99_idx = max(0, math.ceil(count * 0.99) - 1)
+
+    section = metrics.add_section(section_id, section_title)
+    section.add(f"{section_id}_count", "count", count)
+    section.add(f"{section_id}_mean", "mean", round(mean, 3))
+    section.add(f"{section_id}_min", "min", round(sorted_lat[0], 3))
+    section.add(f"{section_id}_max", "max", round(sorted_lat[-1], 3))
+    section.add(f"{section_id}_p50", "p50", round(sorted_lat[p50_idx], 3))
+    section.add(f"{section_id}_p99", "p99", round(sorted_lat[p99_idx], 3))

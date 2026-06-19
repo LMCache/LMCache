@@ -107,6 +107,7 @@ Every scenario has a ready-to-edit manifest under [`config/samples/`](config/sam
 | AMD GPUs (ROCm) | [`lmcache_v1alpha1_lmcacheengine_amd.yaml`](config/samples/lmcache_v1alpha1_lmcacheengine_amd.yaml) |
 | vLLM Deployment wired to an LMCacheEngine | [`vllm_deployment.yaml`](config/samples/vllm_deployment.yaml) |
 | CacheBlend engine + opted-in vLLM (see [CacheBlend](#cacheblend)) | [`lmcache_v1alpha1_cacheblendengine.yaml`](config/samples/lmcache_v1alpha1_cacheblendengine.yaml), [`vllm_cacheblend_deployment.yaml`](config/samples/vllm_cacheblend_deployment.yaml) |
+| MP coordinator (fleet-wide registry, L2 quota eviction, global CacheBlend directory) + **commented field reference** | [`lmcache_v1alpha1_lmcachecoordinator.yaml`](config/samples/lmcache_v1alpha1_lmcachecoordinator.yaml) |
 
 Notes:
 

@@ -76,13 +76,15 @@ msgstr "**NIXL**: 从 `NIXL GitHub 仓库 <https://github.com/ai-dynamo/nixl>`_ 
 
 #: ../../source/disaggregated_prefill/nixl/1p1d.rst:44
 msgid "**Hardware**: At least 2 GPUs"
-msgstr "**硬件**：至少需要 2 个 GPU"
+msgstr ""
+"**硬件**\\ ：至少需要 2 个 GPU"
 
 #: ../../source/disaggregated_prefill/nixl/1p1d.rst:45
 msgid ""
 "**Model Access**: Valid Hugging Face token (HF_TOKEN) for Llama 3.1 8B "
 "Instruct"
-msgstr "**模型访问**：有效的 Hugging Face 令牌 (HF_TOKEN) 用于 Llama 3.1 8B Instruct"
+msgstr ""
+"**模型访问**\\ ：有效的 Hugging Face 令牌 (HF_TOKEN) 用于 Llama 3.1 8B Instruct"
 
 #: ../../source/disaggregated_prefill/nixl/1p1d.rst:48
 msgid "Quick Start"
@@ -90,11 +92,13 @@ msgstr "快速开始"
 
 #: ../../source/disaggregated_prefill/nixl/1p1d.rst:50
 msgid "**Set your Hugging Face token**:"
-msgstr "**设置您的 Hugging Face 令牌**："
+msgstr ""
+"**设置您的 Hugging Face 令牌**\\ ："
 
 #: ../../source/disaggregated_prefill/nixl/1p1d.rst:56
 msgid "**Navigate to the example directory**:"
-msgstr "**导航到示例目录**："
+msgstr ""
+"**导航到示例目录**\\ ："
 
 #: ../../source/disaggregated_prefill/nixl/1p1d.rst:62
 msgid "**Run the example**:"
@@ -133,7 +137,8 @@ msgid ""
 "**Important**: For correct KV cache transfer, ensure all processes use "
 "the same ``PYTHONHASHSEED`` to keep the hash of the KV cache consistent "
 "across processes:"
-msgstr "**重要**：为了正确的 KV Cache 传输，请确保所有进程使用相同的 ``PYTHONHASHSEED`` 以保持 KV Cache 在进程间的一致性："
+msgstr ""
+"**重要**\\ ：为了正确的 KV Cache 传输，请确保所有进程使用相同的 ``PYTHONHASHSEED`` 以保持 KV Cache 在进程间的一致性："
 
 #: ../../source/disaggregated_prefill/nixl/1p1d.rst:87
 msgid "Prefiller Configuration"
@@ -193,13 +198,15 @@ msgstr "代理服务器协调分离式 Prefill 工作流："
 
 #: ../../source/disaggregated_prefill/nixl/1p1d.rst:145
 msgid "**Request Handling**: Receives client requests on port 9100"
-msgstr "**请求处理**：在 9100 端口接收客户端请求"
+msgstr ""
+"**请求处理**\\ ：在 9100 端口接收客户端请求"
 
 #: ../../source/disaggregated_prefill/nixl/1p1d.rst:146
 msgid ""
 "**Prefill Coordination**: Sends requests to the prefiller with "
 "``max_tokens=1``"
-msgstr "**分离式 Prefill 协调**: 发送请求给 Prefill 模块，``max_tokens=1``"
+msgstr ""
+"**分离式 Prefill 协调**: 发送请求给 Prefill 模块，\\ ``max_tokens=1``"
 
 #: ../../source/disaggregated_prefill/nixl/1p1d.rst:147
 msgid "**Prefill Response**: Receives prefiller that says nixl transfer is done"
@@ -207,11 +214,13 @@ msgstr "**Prefill Response**: 接收预填充器，表示 nixl 转移已完成"
 
 #: ../../source/disaggregated_prefill/nixl/1p1d.rst:148
 msgid "**Response Streaming**: Streams the full response from the decoder"
-msgstr "**响应流**：从解码器流式传输完整响应"
+msgstr ""
+"**响应流**\\ ：从解码器流式传输完整响应"
 
 #: ../../source/disaggregated_prefill/nixl/1p1d.rst:149
 msgid "**Performance Monitoring**: Tracks Time-To-First-Token (TTFT) statistics"
-msgstr "**性能监控**：跟踪首次令牌时间（TTFT）统计信息"
+msgstr ""
+"**性能监控**\\ ：跟踪首次令牌时间（TTFT）统计信息"
 
 #: ../../source/disaggregated_prefill/nixl/1p1d.rst:151
 msgid "Supported endpoints:"
@@ -306,7 +315,8 @@ msgstr "常见问题"
 
 #: ../../source/disaggregated_prefill/nixl/1p1d.rst:257
 msgid "**GPU Memory**: Ensure each GPU has sufficient memory for the model"
-msgstr "**显存**：确保每个 GPU 具有足够的内存来支持模型"
+msgstr ""
+"**显存**\\ ：确保每个 GPU 具有足够的内存来支持模型"
 
 #: ../../source/disaggregated_prefill/nixl/1p1d.rst:258
 msgid "**NIXL Installation**: Verify NIXL is properly installed and accessible"
@@ -314,7 +324,8 @@ msgstr "**NIXL 安装**: 验证 NIXL 是否正确安装并可访问"
 
 #: ../../source/disaggregated_prefill/nixl/1p1d.rst:259
 msgid "**Port Conflicts**: Check that ports 7100, 7200, and 9000 are available"
-msgstr "**端口冲突**：检查端口 7100、7200 和 9000 是否可用"
+msgstr ""
+"**端口冲突**\\ ：检查端口 7100、7200 和 9000 是否可用"
 
 #: ../../source/disaggregated_prefill/nixl/1p1d.rst:260
 msgid "**HF Token**: Ensure your Hugging Face token has access to Llama models"

@@ -43,31 +43,36 @@ msgstr "健康监控器提供："
 msgid ""
 "**Automatic health checks**: Periodically monitors the health of all "
 "registered components"
-msgstr "**自动健康检查**：定期监控所有注册组件的健康状况"
+msgstr ""
+"**自动健康检查**\\ ：定期监控所有注册组件的健康状况"
 
 #: ../../source/production/observability/health_monitor.rst:14
 msgid ""
 "**Extensible framework**: Easily add custom health checks for new "
 "components"
-msgstr "**可扩展框架**：轻松为新组件添加自定义健康检查"
+msgstr ""
+"**可扩展框架**\\ ：轻松为新组件添加自定义健康检查"
 
 #: ../../source/production/observability/health_monitor.rst:15
 msgid ""
 "**Remote backend monitoring**: Built-in support for monitoring remote "
 "storage backends via ping"
-msgstr "**远程后端监控**：内置支持通过 ping 监控远程存储后端"
+msgstr ""
+"**远程后端监控**\\ ：内置支持通过 ping 监控远程存储后端"
 
 #: ../../source/production/observability/health_monitor.rst:16
 msgid ""
 "**Degraded mode support**: Automatically blocks operations when the "
 "system is unhealthy"
-msgstr "**降级模式支持**：当系统不健康时自动阻止操作"
+msgstr ""
+"**降级模式支持**\\ ：当系统不健康时自动阻止操作"
 
 #: ../../source/production/observability/health_monitor.rst:17
 msgid ""
 "**Prometheus metrics integration**: Health status exposed via metrics "
 "endpoint"
-msgstr "**Prometheus 指标集成**：通过指标端点暴露健康状态"
+msgstr ""
+"**Prometheus 指标集成**\\ ：通过指标端点暴露健康状态"
 
 #: ../../source/production/observability/health_monitor.rst:20
 msgid "Architecture"
@@ -290,15 +295,18 @@ msgstr "当健康监测器检测到不健康状态时："
 
 #: ../../source/production/observability/health_monitor.rst:105
 msgid "**Store operations**: Skipped with a warning message"
-msgstr "**存储操作**：跳过并显示警告信息"
+msgstr ""
+"**存储操作**\\ ：跳过并显示警告信息"
 
 #: ../../source/production/observability/health_monitor.rst:106
 msgid "**Retrieve operations**: Return empty results with a warning message"
-msgstr "**检索操作**：返回空结果并带有警告信息"
+msgstr ""
+"**检索操作**\\ ：返回空结果并带有警告信息"
 
 #: ../../source/production/observability/health_monitor.rst:107
 msgid "**Lookup operations**: Return 0 (no cache hits) with a warning message"
-msgstr "**查找操作**：返回 0（没有缓存命中）并附带警告信息"
+msgstr ""
+"**查找操作**\\ ：返回 0（没有缓存命中）并附带警告信息"
 
 #: ../../source/production/observability/health_monitor.rst:109
 msgid "This prevents cascading failures when remote backends are unavailable."
@@ -340,7 +348,8 @@ msgstr "**当它处于活动状态时：**"
 
 #: ../../source/production/observability/health_monitor.rst:127
 msgid "Only when a remote backend is configured (``remote_url`` is set)"
-msgstr "仅在配置了远程后端时（``remote_url`` 已设置）"
+msgstr ""
+"仅在配置了远程后端时（\\ ``remote_url`` 已设置）"
 
 #: ../../source/production/observability/health_monitor.rst:128
 msgid "Only if the connector supports the ``ping()`` operation"

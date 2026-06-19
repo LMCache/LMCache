@@ -91,7 +91,8 @@ msgstr "**参数**: 无"
 
 #: ../../source/internal_api_server/vllm_apis.rst:25
 msgid "**Response**: Plain version string."
-msgstr "**响应**：纯文本版本字符串。"
+msgstr ""
+"**响应**\\ ：纯文本版本字符串。"
 
 #: ../../source/internal_api_server/vllm_apis.rst:33
 msgid "``GET /commit_id`` — LMCache Commit ID"
@@ -331,14 +332,16 @@ msgid ""
 "mutable at runtime by default unless explicitly marked as ``\"mutable\": "
 "False`` in ``_CONFIG_DEFINITIONS``. The default will be changed to "
 "**immutable** once the feature is stabilized."
-msgstr "此功能目前是 **实验性** 的。除非在 ``_CONFIG_DEFINITIONS`` 中明确标记为 ``\"mutable\": False``，否则所有配置键在运行时默认是可变的。一旦该功能稳定，默认值将更改为 **不可变**。"
+msgstr ""
+"此功能目前是 **实验性** 的。除非在 ``_CONFIG_DEFINITIONS`` 中明确标记为 ``\"mutable\": False``\\ ，否则所有配置键在运行时默认是可变的。一旦该功能稳定，默认值将更改为 **不可变**\\ 。"
 
 #: ../../source/internal_api_server/vllm_apis.rst:157
 msgid ""
 "Updating a configuration only modifies the value in the "
 "``LMCacheEngineConfig`` object. If a component has already cached the "
 "value elsewhere, the change will **not** take effect for that component."
-msgstr "更新配置仅会修改 ``LMCacheEngineConfig`` 对象中的值。如果某个组件已经在其他地方缓存了该值，则该更改对该组件将**无效**。"
+msgstr ""
+"更新配置仅会修改 ``LMCacheEngineConfig`` 对象中的值。如果某个组件已经在其他地方缓存了该值，则该更改对该组件将\\ **无效**\\ 。"
 
 #: ../../source/internal_api_server/vllm_apis.rst:161
 #: ../../source/internal_api_server/vllm_apis.rst:269
@@ -370,7 +373,8 @@ msgstr "**示例响应** (HTTP 200):"
 
 #: ../../source/internal_api_server/vllm_apis.rst:184
 msgid "**Example Response** (partial failure, HTTP 400):"
-msgstr "**示例响应**（部分失败，HTTP 400）："
+msgstr ""
+"**示例响应**\\ （部分失败，HTTP 400）："
 
 #: ../../source/internal_api_server/vllm_apis.rst:193
 msgid "**Error Cases**:"
@@ -442,7 +446,8 @@ msgstr "列表[str]"
 msgid ""
 "(Optional) Storage backends to clear (e.g. ``LocalCPUBackend``, "
 "``LocalDiskBackend``). If not specified, clears all."
-msgstr "(可选) 要清除的存储后端（例如 ``LocalCPUBackend``、``LocalDiskBackend``）。如果未指定，则清除所有。"
+msgstr ""
+"(可选) 要清除的存储后端（例如 ``LocalCPUBackend``\\ 、\\ ``LocalDiskBackend``\\ ）。如果未指定，则清除所有。"
 
 #: ../../source/internal_api_server/vllm_apis.rst:265
 msgid "``POST /cache/store`` — Store KV Cache"
@@ -465,11 +470,13 @@ msgstr "``tokens_mock``"
 msgid ""
 "Two comma-separated numbers: ``\"start,end\"`` (e.g. ``\"0,100\"`` "
 "generates tokens [0..99])"
-msgstr "两个用逗号分隔的数字：``\"start,end\"``（例如，``\"0,100\"`` 生成令牌 [0..99]）"
+msgstr ""
+"两个用逗号分隔的数字：\\ ``\"start,end\"``\\ （例如，\\ ``\"0,100\"`` 生成令牌 [0..99]）"
 
 #: ../../source/internal_api_server/vllm_apis.rst:294
 msgid "**Error Response** (missing params, HTTP 400):"
-msgstr "**错误响应**（缺少参数，HTTP 400）："
+msgstr ""
+"**错误响应**\\ （缺少参数，HTTP 400）："
 
 #: ../../source/internal_api_server/vllm_apis.rst:305
 msgid "``POST /cache/retrieve`` — Retrieve KV Cache"
@@ -485,7 +492,8 @@ msgstr "**路径**: ``/cache/retrieve``"
 
 #: ../../source/internal_api_server/vllm_apis.rst:316
 msgid "Two comma-separated numbers: ``\"start,end\"`` (e.g. ``\"0,100\"``)"
-msgstr "两个用逗号分隔的数字：``\"start,end\"``（例如 ``\"0,100\"``）"
+msgstr ""
+"两个用逗号分隔的数字：\\ ``\"start,end\"``\\ （例如 ``\"0,100\"``\\ ）"
 
 #: ../../source/internal_api_server/vllm_apis.rst:337
 msgid "``GET /cache/kvcache/check`` — KVCache Checksum"
@@ -509,7 +517,8 @@ msgstr "``slot_mapping``"
 msgid ""
 "Slot indices, comma-separated. Supports ranges: ``\"0,1,2,3\"`` or "
 "``\"1,2,3,[9,12],17,19\"``"
-msgstr "槽索引，以逗号分隔。支持范围：``\"0,1,2,3\"`` 或 ``\"1,2,3,[9,12],17,19\"``"
+msgstr ""
+"槽索引，以逗号分隔。支持范围：\\ ``\"0,1,2,3\"`` 或 ``\"1,2,3,[9,12],17,19\"``"
 
 #: ../../source/internal_api_server/vllm_apis.rst:350
 msgid "``chunk_size``"
@@ -536,7 +545,8 @@ msgstr "布尔值"
 
 #: ../../source/internal_api_server/vllm_apis.rst:351
 msgid "If ``true``, output per-layer checksums per chunk (default: ``false``)"
-msgstr "如果 ``true``，则每个块输出每层的校验和（默认值：``false``）"
+msgstr ""
+"如果 ``true``\\ ，则每个块输出每层的校验和（默认值：\\ ``false``\\ ）"
 
 #: ../../source/internal_api_server/vllm_apis.rst:364
 msgid "**Example Response** (``layerwise=false``):"
@@ -568,7 +578,8 @@ msgstr "``enabled``"
 msgid ""
 "``\"true\"`` to enable, ``\"false\"`` to disable. Omit to query current "
 "status."
-msgstr "``\"true\"`` 表示启用，``\"false\"`` 表示禁用。省略此项以查询当前状态。"
+msgstr ""
+"``\"true\"`` 表示启用，\\ ``\"false\"`` 表示禁用。省略此项以查询当前状态。"
 
 #: ../../source/internal_api_server/vllm_apis.rst:433
 msgid "``GET /cache/kvcache/info`` — KVCache Information"
@@ -600,7 +611,8 @@ msgstr "**路径**: ``/cache/load-fs-chunks``"
 
 #: ../../source/internal_api_server/vllm_apis.rst:472
 msgid "**Request Body**:"
-msgstr "**请求体**："
+msgstr ""
+"**请求体**\\ ："
 
 #: ../../source/internal_api_server/vllm_apis.rst:475
 msgid "Field"
@@ -636,7 +648,8 @@ msgstr "**标签**: ``cache-management``"
 
 #: ../../source/internal_api_server/vllm_apis.rst:503
 msgid "**Error Response** (invalid config, HTTP 400):"
-msgstr "**错误响应**（无效配置，HTTP 400）："
+msgstr ""
+"**错误响应**\\ （无效配置，HTTP 400）："
 
 #: ../../source/internal_api_server/vllm_apis.rst:515
 msgid "Freeze Mode"
@@ -791,7 +804,8 @@ msgid ""
 "``enable_scheduler_bypass_lookup``), you only need to update the "
 "**scheduler's** configuration and recreate its lookup client. The workers"
 " don't need changes in this case."
-msgstr "对于某些配置（例如，切换 ``enable_scheduler_bypass_lookup``），您只需更新 **调度器** 的配置并重新创建其查找客户端。在这种情况下，工作节点无需更改。"
+msgstr ""
+"对于某些配置（例如，切换 ``enable_scheduler_bypass_lookup``\\ ），您只需更新 **调度器** 的配置并重新创建其查找客户端。在这种情况下，工作节点无需更改。"
 
 #: ../../source/internal_api_server/vllm_apis.rst:710
 msgid "``GET /lookup/info`` — Lookup Client/Server Information"
@@ -802,7 +816,8 @@ msgid ""
 "Get information about the current lookup client and server status. Shows "
 "wrapper chain if applicable (e.g., "
 "``HitLimitLookupClient(LMCacheLookupClient)``)."
-msgstr "获取当前查找客户端和服务器状态的信息。如果适用，显示包装链（例如，``HitLimitLookupClient(LMCacheLookupClient)``）。"
+msgstr ""
+"获取当前查找客户端和服务器状态的信息。如果适用，显示包装链（例如，\\ ``HitLimitLookupClient(LMCacheLookupClient)``\\ ）。"
 
 #: ../../source/internal_api_server/vllm_apis.rst:716
 msgid "**Path**: ``/lookup/info``"
@@ -811,7 +826,8 @@ msgstr "**路径**: ``/lookup/info``"
 #: ../../source/internal_api_server/vllm_apis.rst:724
 #: ../../source/internal_api_server/vllm_apis.rst:848
 msgid "**Example Response** (scheduler):"
-msgstr "**示例响应**（调度器）："
+msgstr ""
+"**示例响应**\\ （调度器）："
 
 #: ../../source/internal_api_server/vllm_apis.rst:734
 #: ../../source/internal_api_server/vllm_apis.rst:858
@@ -850,11 +866,13 @@ msgstr "``dryrun``"
 
 #: ../../source/internal_api_server/vllm_apis.rst:781
 msgid "If ``true``, only show what would be created"
-msgstr "如果为 ``true``，则仅显示将要创建的内容。"
+msgstr ""
+"如果为 ``true``\\ ，则仅显示将要创建的内容。"
 
 #: ../../source/internal_api_server/vllm_apis.rst:794
 msgid "**Example Response** (dryrun):"
-msgstr "**示例响应**（干运行）："
+msgstr ""
+"**示例响应**\\ （干运行）："
 
 #: ../../source/internal_api_server/vllm_apis.rst:804
 msgid "**Example Response** (actual create):"
@@ -896,7 +914,8 @@ msgid ""
 "``enable_scheduler_bypass_lookup``), you only need to update the "
 "scheduler's configuration and recreate its lookup client. Worker-side "
 "lookup servers don't need to be recreated in this case."
-msgstr "对于某些配置更改（例如，切换 ``enable_scheduler_bypass_lookup``），您只需更新调度器的配置并重新创建其查找客户端。在这种情况下，工作节点的查找服务器无需重新创建。"
+msgstr ""
+"对于某些配置更改（例如，切换 ``enable_scheduler_bypass_lookup``\\ ），您只需更新调度器的配置并重新创建其查找客户端。在这种情况下，工作节点的查找服务器无需重新创建。"
 
 #: ../../source/internal_api_server/vllm_apis.rst:878
 msgid "``POST /chunk_statistics/start`` — Start Statistics"
@@ -912,7 +931,8 @@ msgstr "**路径**: ``/chunk_statistics/start``"
 
 #: ../../source/internal_api_server/vllm_apis.rst:900
 msgid "**Error Response** (not supported, HTTP 400):"
-msgstr "**错误响应**（不支持，HTTP 400）："
+msgstr ""
+"**错误响应**\\ （不支持，HTTP 400）："
 
 #: ../../source/internal_api_server/vllm_apis.rst:911
 msgid "``POST /chunk_statistics/stop`` — Stop Statistics"
@@ -1000,7 +1020,8 @@ msgstr "要绕过的后端名称（必填）"
 #: ../../source/internal_api_server/vllm_apis.rst:1057
 #: ../../source/internal_api_server/vllm_apis.rst:1100
 msgid "**Error Response** (unknown backend, HTTP 400):"
-msgstr "**错误响应**（未知后端，HTTP 400）："
+msgstr ""
+"**错误响应**\\ （未知后端，HTTP 400）："
 
 #: ../../source/internal_api_server/vllm_apis.rst:1068
 msgid "``PUT /bypass/remove`` — Remove a Backend from Bypass List"

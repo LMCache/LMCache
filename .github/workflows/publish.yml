@@ -18,6 +18,11 @@ on:
 env:
     LC_ALL: en_US.UTF-8
 
+# Cancel superseded runs on the same ref, but never abort a tag/release publish.
+concurrency:
+    group: publish-${{ github.ref }}
+    cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') && github.event_name != 'release' }}
+
 defaults:
     run:
         shell: bash
@@ -103,8 +108,12 @@ jobs:
     # - a commit lands on dev (PR merged)
     publish-test-pypi:
         name: Publish packages to test.pypi.org
+        # Require upstream jobs to have succeeded so a cancelled/skipped build
+        # doesn't trigger a publish that fails on the missing artifact.
         if: |
-            !failure() && !cancelled() &&
+            needs.build-main.result == 'success' &&
+            needs.test.result == 'success' &&
+            needs.code-quality.result == 'success' &&
             needs.changes.outputs.lmcache == 'true' &&
             github.repository_owner == 'LMCache' &&
             github.event_name == 'push' && github.ref == 'refs/heads/dev'
@@ -137,7 +146,9 @@ jobs:
     publish-cli-test-pypi:
         name: Publish lmcache-cli packages to test.pypi.org
         if: |
-            !failure() && !cancelled() &&
+            needs.build-cli.result == 'success' &&
+            needs.test.result == 'success' &&
+            needs.code-quality.result == 'success' &&
             needs.changes.outputs.lmcache == 'true' &&
             github.repository_owner == 'LMCache' &&
             github.event_name == 'push' && github.ref == 'refs/heads/dev'
@@ -171,7 +182,9 @@ jobs:
     publish-pypi:
         name: Publish release to pypi.org
         if: |
-            !failure() && !cancelled() &&
+            needs.build-main.result == 'success' &&
+            needs.test.result == 'success' &&
+            needs.code-quality.result == 'success' &&
             needs.changes.outputs.lmcache == 'true' &&
             github.repository_owner == 'LMCache' && github.event.action == 'published'
         permissions:
@@ -210,7 +223,9 @@ jobs:
     publish-cli-pypi:
         name: Publish lmcache-cli release to pypi.org
         if: |
-            !failure() && !cancelled() &&
+            needs.build-cli.result == 'success' &&
+            needs.test.result == 'success' &&
+            needs.code-quality.result == 'success' &&
             needs.changes.outputs.lmcache == 'true' &&
             github.repository_owner == 'LMCache' && github.event.action == 'published'
         permissions:
@@ -247,7 +262,9 @@ jobs:
     publish-cu129-github-release:
         name: Publish cu129 wheel to GitHub Release
         if: |
-            !failure() && !cancelled() &&
+            needs.build-cu129.result == 'success' &&
+            needs.test.result == 'success' &&
+            needs.code-quality.result == 'success' &&
             needs.changes.outputs.lmcache == 'true' &&
             github.repository_owner == 'LMCache' && github.event.action == 'published'
         permissions:
@@ -288,13 +305,14 @@ jobs:
                     dist/*.whl
 
     # Build container image and push to DockerHub when:
-    # - a new GitHub release is created
+    # - a new stable GitHub release is created (non-RC)
     publish-image:
         name: Publish image to DockerHub
         if: |
             needs.publish-pypi.result == 'success' &&
             !cancelled() &&
-            github.repository_owner == 'LMCache' && github.event.action == 'published'
+            github.repository_owner == 'LMCache' && github.event.action == 'published' &&
+            !contains(github.ref_name, 'rc')
 
         runs-on: ubuntu-latest
         needs: [publish-pypi, publish-cu129-github-release]
@@ -324,15 +342,16 @@ jobs:
             - name: Free disk space
               uses: ./.github/actions/free-disk-space
 
-            - name: Get the latest tag (corresponds to release cut in publish-pypi job)
+            - name: Resolve the release tag that triggered this run
               run: |
-                echo "LATEST_TAG=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)" >> "$GITHUB_ENV"
+                echo "LATEST_TAG=${{ github.ref_name }}" >> "$GITHUB_ENV"
 
             - name: Build lmcache/vllm-openai container image (cu13)
               run: |
                 docker build \
                 --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.09-cuda13.0-devel-ubuntu24.04 \
                 --build-arg CUDA_VERSION=13.0 \
+                --build-arg LMCACHE_VERSION=${{ env.LATEST_TAG }} \
                 --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
                 --target image-release \
                 --tag lmcache/vllm-openai:latest --tag lmcache/vllm-openai:${{ env.LATEST_TAG }} \
@@ -448,3 +467,65 @@ jobs:
               run: |
                 docker push lmcache/standalone:latest-cu129
                 docker push lmcache/standalone:${{ env.LATEST_TAG }}-cu129
+
+    # Build RC container image and push to DockerHub when:
+    # - a new RC GitHub release is created (e.g. v0.4.8rc1)
+    # Only pushes lmcache/vllm-openai:<tag> — does not touch latest or other image variants.
+    publish-image-rc:
+        name: Publish RC image to DockerHub
+        if: |
+            needs.publish-pypi.result == 'success' &&
+            !cancelled() &&
+            github.repository_owner == 'LMCache' && github.event.action == 'published' &&
+            contains(github.ref_name, 'rc')
+
+        runs-on: ubuntu-latest
+        needs: [publish-pypi]
+
+        steps:
+            - name: "Harden Runner"
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: audit
+
+            - name: Login to DockerHub
+              uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+              with:
+                username: ${{ vars.DOCKERHUB_USERNAME }}
+                password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              with:
+                fetch-depth: 0
+
+            - name: Free disk space
+              uses: ./.github/actions/free-disk-space
+
+            - name: Get the release tag
+              run: |
+                REF="${{ github.ref_name }}"
+                [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+rc[0-9]+$ ]] && echo "LATEST_RC_TAG=$REF" >> "$GITHUB_ENV"
+
+            - name: Build lmcache/vllm-openai container image (cu13)
+              run: |
+                docker build \
+                --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.09-cuda13.0-devel-ubuntu24.04 \
+                --build-arg CUDA_VERSION=13.0 \
+                --build-arg LMCACHE_VERSION=${{ env.LATEST_RC_TAG }} \
+                --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
+                --target image-release \
+                --tag lmcache/vllm-openai:${{ env.LATEST_RC_TAG }} \
+                --file docker/Dockerfile .
+
+            - name: Smoke test lmcache/vllm-openai (cu13)
+              run: |
+                docker run --rm --entrypoint lmcache lmcache/vllm-openai:${{ env.LATEST_RC_TAG }} --help
+
+            - name: Push lmcache/vllm-openai RC image to DockerHub
+              run: |
+                docker push lmcache/vllm-openai:${{ env.LATEST_RC_TAG }}

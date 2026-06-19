@@ -33,7 +33,8 @@ msgid ""
 "Redis and Valkey servers, using the RESP2 wire protocol over TCP. It is "
 "designed for maximum throughput on KV cache store and retrieval "
 "operations, achieving **6+ GB/s** on reads with optimal configuration."
-msgstr "RESP 后端是一个高性能的原生 C++ 存储连接器，适用于 Redis 和 Valkey 服务器，使用 TCP 上的 RESP2 传输协议。它旨在实现 KV Cache 存储和检索操作的最大吞吐量，在最佳配置下读取速度可达到 **6+ GB/s**。"
+msgstr ""
+"RESP 后端是一个高性能的原生 C++ 存储连接器，适用于 Redis 和 Valkey 服务器，使用 TCP 上的 RESP2 传输协议。它旨在实现 KV Cache 存储和检索操作的最大吞吐量，在最佳配置下读取速度可达到 **6+ GB/s**\\ 。"
 
 #: ../../source/kv_cache/storage_backends/resp.rst:13
 msgid "Key advantages over the standard Redis connector:"
@@ -43,26 +44,30 @@ msgstr "相较于标准 Redis 连接器的主要优势："
 msgid ""
 "**Multi-threaded C++ I/O**: Worker threads operate in parallel with zero-"
 "copy buffer passing and full GIL release"
-msgstr "**多线程 C++ I/O**：工作线程并行操作，采用零拷贝缓冲区传递和完全释放全局解释器锁（GIL）"
+msgstr ""
+"**多线程 C++ I/O**\\ ：工作线程并行操作，采用零拷贝缓冲区传递和完全释放全局解释器锁（GIL）"
 
 #: ../../source/kv_cache/storage_backends/resp.rst:16
 msgid ""
 "**Batched tiling**: Large batch operations are automatically split across"
 " worker threads for maximum parallelism"
-msgstr "**批处理切片**：大型批处理操作会自动在工作线程之间拆分，以实现最大并行性"
+msgstr ""
+"**批处理切片**\\ ：大型批处理操作会自动在工作线程之间拆分，以实现最大并行性"
 
 #: ../../source/kv_cache/storage_backends/resp.rst:17
 msgid ""
 "**eventfd-based completions**: The kernel wakes Python on completion -- "
 "no polling overhead"
-msgstr "**基于 eventfd 的完成**：内核在完成时唤醒 Python——没有轮询开销"
+msgstr ""
+"**基于 eventfd 的完成**\\ ：内核在完成时唤醒 Python——没有轮询开销"
 
 #: ../../source/kv_cache/storage_backends/resp.rst:18
 msgid ""
 "**Dual-mode support**: The same C++ connector works in both non-MP mode "
 "(via ``ConnectorClientBase``) and MP mode (via "
 "``NativeConnectorL2Adapter`` as an L2 adapter)"
-msgstr "**双模式支持**：相同的 C++ 连接器在非 MP 模式（通过 ``ConnectorClientBase``）和 MP 模式（通过 ``NativeConnectorL2Adapter`` 作为 L2 适配器）下均可工作。"
+msgstr ""
+"**双模式支持**\\ ：相同的 C++ 连接器在非 MP 模式（通过 ``ConnectorClientBase``\\ ）和 MP 模式（通过 ``NativeConnectorL2Adapter`` 作为 L2 适配器）下均可工作。"
 
 #: ../../source/kv_cache/storage_backends/resp.rst:20
 msgid ""
@@ -70,7 +75,8 @@ msgid ""
 ":doc:`Adding Native Connectors "
 "<../../developer_guide/extending_lmcache/native_connectors>` for the full"
 " architecture."
-msgstr "本地 C++ 源代码位于 ``csrc/storage_backends/redis/``。有关完整架构，请参见 :doc:`添加本地连接器 <../../developer_guide/extending_lmcache/native_connectors>`。"
+msgstr ""
+"本地 C++ 源代码位于 ``csrc/storage_backends/redis/``\\ 。有关完整架构，请参见 :doc:`添加本地连接器 <../../developer_guide/extending_lmcache/native_connectors>`。"
 
 #: ../../source/kv_cache/storage_backends/resp.rst:24
 msgid "Prerequisites"
@@ -171,7 +177,8 @@ msgid ""
 "The chunk size (in tokens) determines how many bytes each Redis key-value"
 " pair holds. This is the **single most important parameter** for "
 "throughput."
-msgstr "块大小（以令牌为单位）决定了每个 Redis 键值对所占用的字节数。这是 **吞吐量最重要的参数**。"
+msgstr ""
+"块大小（以令牌为单位）决定了每个 Redis 键值对所占用的字节数。这是 **吞吐量最重要的参数**\\ 。"
 
 #: ../../source/kv_cache/storage_backends/resp.rst:85
 msgid ""
@@ -368,7 +375,8 @@ msgid ""
 "read at adapter creation time inside the adapter itself, so they are "
 "**never stored in the config object** and **never printed in startup "
 "logs**."
-msgstr "配置文件（非多租户）和 ``--l2-adapter`` JSON（多租户）优先于环境变量。环境变量作为默认值使用——当相应的配置值为空或未设置时使用。它们在适配器创建时被读取，因此**从不存储在配置对象中**，并且**从不在启动日志中打印**。"
+msgstr ""
+"配置文件（非多租户）和 ``--l2-adapter`` JSON（多租户）优先于环境变量。环境变量作为默认值使用——当相应的配置值为空或未设置时使用。它们在适配器创建时被读取，因此\\ **从不存储在配置对象中**\\ ，并且\\ **从不在启动日志中打印**\\ 。"
 
 #: ../../source/kv_cache/storage_backends/resp.rst:208
 msgid "**Example — MP mode with env vars:**"
@@ -428,7 +436,8 @@ msgstr "在 MP 模式下，LMCache 作为一个独立的服务器进程运行，
 
 #: ../../source/kv_cache/storage_backends/resp.rst:278
 msgid "**Step 1: Start Redis** (see `Redis Server Setup`_ above)"
-msgstr "**步骤 1：启动 Redis**（请参见上面的 `Redis Server Setup`_）"
+msgstr ""
+"**步骤 1：启动 Redis**\\ （请参见上面的 `Redis Server Setup`_）"
 
 #: ../../source/kv_cache/storage_backends/resp.rst:280
 msgid "**Step 2: Launch LMCache MP Server:**"
@@ -573,7 +582,8 @@ msgid ""
 "(``trigger_watermark``), the eviction controller will delete the least-"
 "recently-used ~20% of stored keys (``eviction_ratio``) using the Redis "
 "``DEL`` command."
-msgstr "这配置了 10 GB 的容量限制。当使用量超过 80%（``trigger_watermark``）时，逐出控制器将使用 Redis ``DEL`` 命令删除最近最少使用的 ~20% 存储的键（``eviction_ratio``）。"
+msgstr ""
+"这配置了 10 GB 的容量限制。当使用量超过 80%（\\ ``trigger_watermark``\\ ）时，逐出控制器将使用 Redis ``DEL`` 命令删除最近最少使用的 ~20% 存储的键（\\ ``eviction_ratio``\\ ）。"
 
 #: ../../source/kv_cache/storage_backends/resp.rst:383
 msgid ""
@@ -611,11 +621,13 @@ msgstr "**服务器部署：**"
 
 #: ../../source/kv_cache/storage_backends/resp.rst:426
 msgid "Use Redis 8.2+ with ``--io-threads 4`` (or more, matching available cores)"
-msgstr "使用 Redis 8.2+ 和 ``--io-threads 4``（或更多，匹配可用核心）"
+msgstr ""
+"使用 Redis 8.2+ 和 ``--io-threads 4``\\ （或更多，匹配可用核心）"
 
 #: ../../source/kv_cache/storage_backends/resp.rst:427
 msgid "Disable persistence (``--save '' --appendonly no``) for KV cache workloads"
-msgstr "禁用持久化（``--save '' --appendonly no``）以支持 KV Cache 工作负载"
+msgstr ""
+"禁用持久化（\\ ``--save '' --appendonly no``\\ ）以支持 KV Cache 工作负载"
 
 #: ../../source/kv_cache/storage_backends/resp.rst:428
 msgid "Pin Redis to its own NUMA node if running on multi-socket systems"
@@ -698,7 +710,8 @@ msgstr "附加资源"
 msgid ""
 "Benchmark script: "
 "``examples/kv_cache_reuse/remote_backends/resp/benchmark_resp_client.py``"
-msgstr "基准测试脚本：``examples/kv_cache_reuse/remote_backends/resp/benchmark_resp_client.py``"
+msgstr ""
+"基准测试脚本：\\ ``examples/kv_cache_reuse/remote_backends/resp/benchmark_resp_client.py``"
 
 #: ../../source/kv_cache/storage_backends/resp.rst:454
 msgid "C++ source: ``csrc/storage_backends/redis/``"

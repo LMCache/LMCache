@@ -7,12 +7,12 @@
 > of the kv_caches alongside the format, so callers never need a
 > separate normalization step. Every other module queries KV-cache
 > information via helpers in `lmcache/v1/gpu_connector/utils.py` that
-> accept a `GPUKVFormat` argument.
+> accept an `EngineKVFormat` argument.
 
 "Layout parsing" means: list-nesting depth, tensor-dimension ordering,
 HND vs NHD, MLA vs MHA, per-layer vs cross-layer. All of that is
-encoded in `GPUKVFormat`; downstream code must never re-derive it from
-raw shapes.
+encoded in `EngineKVFormat`; downstream code must never re-derive it
+from raw shapes.
 
 ## Canonical type
 
@@ -31,7 +31,10 @@ are responsible for unwrapping to this form before calling any helper.
 
 ## Adding a new format
 
-1. Add the enum value in `csrc/mem_kernels.cuh` and `csrc/pybind.cpp`.
+1. Add the enum value in `csrc/kv_transfer_types.h` (the single
+   backend-agnostic definition shared by every accelerator backend), then
+   register it in each backend's pybind module — `csrc/pybind.cpp` (CUDA)
+   and `csrc/sycl/pybind_sycl.cpp` (SYCL/XPU).
 2. Extend `normalize_kv_and_discover_format` to detect it. The dispatch
    keys off `(list_depth, tensor_ndim)` — both are computed once in a
    single descent via the private `_list_depth_tensor_dim` probe, so
@@ -51,17 +54,17 @@ consumer for a new layout — the branching belongs in `utils.py`.
 ## Helper surface
 
 Every helper below takes `DiscoverableKVCache` and (where layout matters)
-a `GPUKVFormat`. Nothing else may index raw shapes.
+an `EngineKVFormat`. Nothing else may index raw shapes.
 
 ### Discovery
 
 | Helper | Returns |
 |---|---|
-| `normalize_kv_and_discover_format(kv_caches, engine, layout_hints)` | `tuple[GPUKVFormat, DiscoverableKVCache]` — the one parser. Returns the canonical (permuted-to-contiguous) kv_caches alongside the detected format; callers must use the returned tensor structure for subsequent operations. |
+| `normalize_kv_and_discover_format(kv_caches, engine, layout_hints)` | `tuple[EngineKVFormat, DiscoverableKVCache]` — the one parser. Returns the canonical (permuted-to-contiguous) kv_caches alongside the detected format; callers must use the returned tensor structure for subsequent operations. |
 
 ### Format → engine map
 
-| `GPUKVFormat` | Engine | Layout | Structure |
+| `EngineKVFormat` | Engine | Layout | Structure |
 |---|---|---|---|
 | `NB_NL_TWO_BS_NH_HS` | vLLM cross-layer | NHD | bare 6-D tensor `[NB, NL, 2, BS, NH, HS]` |
 | `NB_NL_TWO_NH_BS_HS` | TRT-LLM cross-layer | HND | bare 6-D tensor `[NB, NL, 2, NH, BS, HS]` |
@@ -92,7 +95,7 @@ either the 4-D bare tensor or `[4-D]`; the function handles both.
 
 ### Scalar accessors
 
-All of these dispatch on `GPUKVFormat`. The ones that can vary per layer
+All of these dispatch on `EngineKVFormat`. The ones that can vary per layer
 take an optional `layer_idx: int = 0`; passing an explicit index enables
 per-layer queries (for heterogeneous groups) without any intermediate
 helper.
@@ -134,7 +137,7 @@ helper.
   1; x = x[0]`). There is no public depth helper and there shouldn't
   be one — `normalize_kv_and_discover_format` encapsulates the
   descent, and downstream code only ever needs the resulting
-  `GPUKVFormat`.
+  `EngineKVFormat`.
 - Wrapping a tensor with `[tensor]` to adapt to a helper's list-depth
   expectation — the accessors take `layer_idx` directly.
 - Hand-rolled pointer assembly (`[t.data_ptr() for t in kv_caches]`) —
@@ -145,7 +148,7 @@ helper.
   use `attempt_permute_to_contiguous_view` which refuses to copy.
 - "Canonicalize" functions that rewrite `kv_caches` to a uniform shape
   before passing to helpers. The helpers already canonicalize by
-  accepting `GPUKVFormat`, and any reshape/normalize step that *is*
+  accepting `EngineKVFormat`, and any reshape/normalize step that *is*
   needed lives inside `normalize_kv_and_discover_format` — callers
   receive the canonical form back from that one call.
 
@@ -164,7 +167,7 @@ helper.
   only way in — no test-only shortcuts, no cached topology fields; the
   manager exposes only `kv_layer_groups`, `num_groups`, and
   `get_shape_desc`.
-- **`lmcache/v1/multiprocess/gpu_context.py::GPUCacheContext`** —
+- **`lmcache/v1/platform/cuda/cache_context.py::GPUCacheContext`** —
   constructs the manager directly at init, delegates
   `get_shape_desc(group_idx)` to it, assembles per-group GPU pointer
   tensors via `get_group_data_ptrs`. No parallel `shape_descs_` /
@@ -186,7 +189,7 @@ permutation from strides and needs no hints.
 `utils.py` sets `# mypy: disable-error-code="union-attr,call-overload"`
 at the file level. This is the **one module** that does format-
 dispatched raw indexing on `DiscoverableKVCache` (`kv_caches.shape[i]`,
-`kv_caches[0][j]`) — the `gpu_kv_format` argument is the proof the
+`kv_caches[0][j]`) — the `engine_kv_format` argument is the proof the
 indexing is well-defined, but mypy can't carry that proof through a
 recursive Union without per-line casts. The file-level directive
 replaces 50+ `# type: ignore` comments scattered through the

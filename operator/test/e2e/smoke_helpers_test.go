@@ -130,7 +130,13 @@ func dumpNamespace(ns string) {
 	for _, args := range [][]string{
 		{"get", "events", "-n", ns, "--sort-by=.lastTimestamp"},
 		{"get", "lmcacheengines", "-n", ns, "-o", "yaml"},
+		{"get", "cacheblendengines", "-n", ns, "-o", "yaml"},
 		{"get", "pods", "-n", ns, "-o", "wide"},
+		// imagePullSecrets is not rendered by `describe pod`; print it
+		// explicitly so a wedged private-image pull can be triaged as
+		// "secret not attached" vs "bad credentials".
+		{"get", "pods", "-n", ns, "-o",
+			"jsonpath={range .items[*]}{.metadata.name}{\" imagePullSecrets=\"}{.spec.imagePullSecrets}{\"\\n\"}{end}"},
 		{"describe", "pods", "-n", ns},
 	} {
 		out, _ := exec.Command("kubectl", args...).CombinedOutput()

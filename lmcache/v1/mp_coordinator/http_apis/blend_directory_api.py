@@ -24,6 +24,7 @@ from lmcache.v1.mp_coordinator.schemas import (
     BlendMatchRequest,
     BlendMatchResponse,
     GlobalMatchModel,
+    decode_tokens,
 )
 
 logger = init_logger(__name__)
@@ -89,12 +90,15 @@ def evict_fingerprints(body: BlendEvictRequest, request: Request) -> BlendEvictR
 def match_fingerprints(body: BlendMatchRequest, request: Request) -> BlendMatchResponse:
     """Match a request's rolling-hash array against the directory.
 
+    The request tokens arrive base64-packed (``tokens_b64``); they are decoded
+    to a ``uint64`` array and handed straight to the matcher.
+
     Returns:
         Matched chunks (``object_key`` / ``old_st`` / ``cur_st``), ascending by
         ``cur_st``.
     """
     directory = _directory(request)
-    matches = directory.match(body.model_scope, body.tokens)
+    matches = directory.match(body.model_scope, decode_tokens(body.tokens_b64))
     return BlendMatchResponse(
         matches=[
             GlobalMatchModel(object_key=m.object_key, old_st=m.old_st, cur_st=m.cur_st)

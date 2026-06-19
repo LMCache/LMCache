@@ -30,33 +30,34 @@ namespace lmc {
 
 // inline helper to check MLA (callable from device and host)
 __host__ __device__ __forceinline__ bool is_mla(
-    const GPUKVFormat gpu_kv_format) {
-  return gpu_kv_format == GPUKVFormat::NL_X_NB_BS_HS ||   // vllm MLA
-         gpu_kv_format == GPUKVFormat::NL_X_NBBS_ONE_HS;  // SGLang MLA
+    const EngineKVFormat engine_kv_format) {
+  return engine_kv_format == EngineKVFormat::NL_X_NB_BS_HS ||   // vllm MLA
+         engine_kv_format == EngineKVFormat::NL_X_NBBS_ONE_HS;  // SGLang MLA
 }
 
 // inline helper to check HND layout (callable from device and host)
 __host__ __device__ __forceinline__ bool is_hnd(
-    const GPUKVFormat gpu_kv_format) {
-  return gpu_kv_format ==
-             GPUKVFormat::NL_X_TWO_NB_NH_BS_HS ||             // flash attn HND
-         gpu_kv_format == GPUKVFormat::NL_X_NB_TWO_NH_BS_HS;  // flash infer HND
+    const EngineKVFormat engine_kv_format) {
+  return engine_kv_format ==
+             EngineKVFormat::NL_X_TWO_NB_NH_BS_HS ||  // flash attn HND
+         engine_kv_format ==
+             EngineKVFormat::NL_X_NB_TWO_NH_BS_HS;  // flash infer HND
 }
 
 // All paged (non-MLA) formats rely on block_size for offset computation.
-inline void check_block_size(const GPUKVFormat gpu_kv_format,
+inline void check_block_size(const EngineKVFormat engine_kv_format,
                              const int block_size) {
-  TORCH_CHECK(is_mla(gpu_kv_format) || block_size > 0,
-              "block_size is required (must be > 0) for GPUKVFormat ",
-              static_cast<int>(gpu_kv_format));
+  TORCH_CHECK(is_mla(engine_kv_format) || block_size > 0,
+              "block_size is required (must be > 0) for EngineKVFormat ",
+              static_cast<int>(engine_kv_format));
 }
 
 // HND formats additionally need head_size to decompose scalar offsets.
-inline void check_head_size(const GPUKVFormat gpu_kv_format,
+inline void check_head_size(const EngineKVFormat engine_kv_format,
                             const int head_size) {
-  TORCH_CHECK(!is_hnd(gpu_kv_format) || head_size > 0,
-              "head_size is required (must be > 0) for GPUKVFormat ",
-              static_cast<int>(gpu_kv_format));
+  TORCH_CHECK(!is_hnd(engine_kv_format) || head_size > 0,
+              "head_size is required (must be > 0) for EngineKVFormat ",
+              static_cast<int>(engine_kv_format));
 }
 
 template <typename scalar_t>
@@ -146,7 +147,7 @@ __global__ void reshape_and_cache_back_flash_kernel(
   }
 }
 
-template <typename scalar_t, GPUKVFormat format>
+template <typename scalar_t, EngineKVFormat format>
 __global__ void single_layer_kv_transfer_kernel(
     scalar_t* __restrict__ lmc_key_value_cache,
     scalar_t* __restrict__ vllm_key_value_cache,
@@ -155,9 +156,9 @@ __global__ void single_layer_kv_transfer_kernel(
     const int lmc_stride, const int lmc_value_offset, const int num_heads,
     const int head_size_in_64bit, const int block_size,
     const TransferDirection direction) {
-  constexpr bool USE_MLA = (format == GPUKVFormat::NL_X_NB_BS_HS);
-  constexpr bool HND_LAYOUT = (format == GPUKVFormat::NL_X_TWO_NB_NH_BS_HS ||
-                               format == GPUKVFormat::NL_X_NB_TWO_NH_BS_HS);
+  constexpr bool USE_MLA = (format == EngineKVFormat::NL_X_NB_BS_HS);
+  constexpr bool HND_LAYOUT = (format == EngineKVFormat::NL_X_TWO_NB_NH_BS_HS ||
+                               format == EngineKVFormat::NL_X_NB_TWO_NH_BS_HS);
 
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
@@ -212,7 +213,7 @@ __global__ void single_layer_kv_transfer_kernel(
   }
 }
 
-template <GPUKVFormat format>
+template <EngineKVFormat format>
 __device__ __forceinline__ int64_t page_buffer_offset(
     const int k_or_v, const int token_idx, const int scalar_offset,
     const int scalars_per_token, const int page_buffer_size,
@@ -230,7 +231,7 @@ __device__ __forceinline__ int64_t page_buffer_offset(
   scalar_offset into (head_idx, head_offset)
 
   The job of page_buffer_offset is to translate these logical arguments into a
-  physical address based on the GPUKVFormat.
+  physical address based on the EngineKVFormat.
 
   NOTE(perf): For HND formats, threads within a warp access non-contiguous
   addresses when crossing head boundaries (stride BS*HS between heads),
@@ -245,17 +246,17 @@ __device__ __forceinline__ int64_t page_buffer_offset(
   */
 
   // vllm cross layer
-  if constexpr (format == GPUKVFormat::NB_NL_TWO_BS_NH_HS) {
+  if constexpr (format == EngineKVFormat::NB_NL_TWO_BS_NH_HS) {
     return k_or_v * page_buffer_size * scalars_per_token +
            token_idx * scalars_per_token + scalar_offset;
   }
   // vllm flash attention (NHD)
-  else if constexpr (format == GPUKVFormat::NL_X_TWO_NB_BS_NH_HS) {
+  else if constexpr (format == EngineKVFormat::NL_X_TWO_NB_BS_NH_HS) {
     return k_or_v * page_buffer_size * scalars_per_token +
            token_idx * scalars_per_token + scalar_offset;
   }
   // vllm flash infer (NHD)
-  else if constexpr (format == GPUKVFormat::NL_X_NB_TWO_BS_NH_HS) {
+  else if constexpr (format == EngineKVFormat::NL_X_NB_TWO_BS_NH_HS) {
     const int block_idx = token_idx / block_size;
     const int block_offset = token_idx % block_size;
     return block_idx * 2 * block_size * scalars_per_token +
@@ -263,12 +264,12 @@ __device__ __forceinline__ int64_t page_buffer_offset(
            block_offset * scalars_per_token + scalar_offset;
   }
   // MLA formats: vLLM (NL_X_NB_BS_HS) and SGLang (NL_X_NBBS_ONE_HS)
-  else if constexpr (format == GPUKVFormat::NL_X_NB_BS_HS ||
-                     format == GPUKVFormat::NL_X_NBBS_ONE_HS) {
+  else if constexpr (format == EngineKVFormat::NL_X_NB_BS_HS ||
+                     format == EngineKVFormat::NL_X_NBBS_ONE_HS) {
     return token_idx * scalars_per_token + scalar_offset;
   }
   // vllm flash attention (HND) — physical: [2, NB, NH, BS, HS]
-  else if constexpr (format == GPUKVFormat::NL_X_TWO_NB_NH_BS_HS) {
+  else if constexpr (format == EngineKVFormat::NL_X_TWO_NB_NH_BS_HS) {
     const int block_idx = token_idx / block_size;
     const int block_offset = token_idx % block_size;
     const int head_idx = scalar_offset / head_size;
@@ -280,7 +281,7 @@ __device__ __forceinline__ int64_t page_buffer_offset(
            head_offset;
   }
   // vllm flash infer (HND) — physical: [NB, 2, NH, BS, HS]
-  else if constexpr (format == GPUKVFormat::NL_X_NB_TWO_NH_BS_HS) {
+  else if constexpr (format == EngineKVFormat::NL_X_NB_TWO_NH_BS_HS) {
     const int block_idx = token_idx / block_size;
     const int block_offset = token_idx % block_size;
     const int head_idx = scalar_offset / head_size;
@@ -364,7 +365,7 @@ __global__ void single_layer_kv_transfer_sgl_kernel(
  * key_value[block.z, block.y, block.x, thread.x] <=> ptrs[block.y][block.z,
  * slot_id, thread.x]
  */
-template <typename scalar_t, bool DIRECTION, GPUKVFormat format>
+template <typename scalar_t, bool DIRECTION, EngineKVFormat format>
 __global__ void load_and_reshape_multi_layer_kernel(
     scalar_t* __restrict__ key_value,           // [2, num_layer, num_tokens,
                                                 // scalars_per_token]
@@ -527,7 +528,7 @@ void multi_layer_kv_transfer_templated(
     const torch::Tensor& key_value_ptrs,  // [num_layers]
     const torch::Tensor& slot_mapping,    // [num_tokens],
     const torch::Device& paged_memory_device, const int page_buffer_size,
-    const TransferDirection direction, const GPUKVFormat gpu_kv_format,
+    const TransferDirection direction, const EngineKVFormat engine_kv_format,
     const int block_size, const int head_size, const int skip_prefix_n_tokens) {
   T* key_value_ptr = get_kernel_ptr<T, torch::Tensor>(key_value);
   T** page_buffer_ptrs =
@@ -546,10 +547,10 @@ void multi_layer_kv_transfer_templated(
   // to match scalars_per_token (num_xwords) which is also in xword units.
   int head_size_xword = head_size > 0 ? head_size / elements_per_xword : 0;
 
-  lmc::check_block_size(gpu_kv_format, block_size);
-  lmc::check_head_size(gpu_kv_format, head_size_xword);
+  lmc::check_block_size(engine_kv_format, block_size);
+  lmc::check_head_size(engine_kv_format, head_size_xword);
 
-  int k_or_v_size = lmc::is_mla(gpu_kv_format) ? 1 : 2;
+  int k_or_v_size = lmc::is_mla(engine_kv_format) ? 1 : 2;
 
   dim3 grid(num_transfer_tokens, num_layers, k_or_v_size);
   dim3 block(std::min(num_xwords, 128));
@@ -558,56 +559,64 @@ void multi_layer_kv_transfer_templated(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   if (direction == TransferDirection::H2D) {
-    switch (gpu_kv_format) {
-      case GPUKVFormat::NB_NL_TWO_BS_NH_HS:
-        LAUNCH_KERNEL_WITH_FORMAT(T, false, GPUKVFormat::NB_NL_TWO_BS_NH_HS);
+    switch (engine_kv_format) {
+      case EngineKVFormat::NB_NL_TWO_BS_NH_HS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, false, EngineKVFormat::NB_NL_TWO_BS_NH_HS);
         break;
-      case GPUKVFormat::NL_X_TWO_NB_BS_NH_HS:
-        LAUNCH_KERNEL_WITH_FORMAT(T, false, GPUKVFormat::NL_X_TWO_NB_BS_NH_HS);
+      case EngineKVFormat::NL_X_TWO_NB_BS_NH_HS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, false,
+                                  EngineKVFormat::NL_X_TWO_NB_BS_NH_HS);
         break;
-      case GPUKVFormat::NL_X_NB_TWO_BS_NH_HS:
-        LAUNCH_KERNEL_WITH_FORMAT(T, false, GPUKVFormat::NL_X_NB_TWO_BS_NH_HS);
+      case EngineKVFormat::NL_X_NB_TWO_BS_NH_HS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, false,
+                                  EngineKVFormat::NL_X_NB_TWO_BS_NH_HS);
         break;
-      case GPUKVFormat::NL_X_NB_BS_HS:
-        LAUNCH_KERNEL_WITH_FORMAT(T, false, GPUKVFormat::NL_X_NB_BS_HS);
+      case EngineKVFormat::NL_X_NB_BS_HS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, false, EngineKVFormat::NL_X_NB_BS_HS);
         break;
-      case GPUKVFormat::NL_X_NBBS_ONE_HS:
-        LAUNCH_KERNEL_WITH_FORMAT(T, false, GPUKVFormat::NL_X_NBBS_ONE_HS);
+      case EngineKVFormat::NL_X_NBBS_ONE_HS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, false, EngineKVFormat::NL_X_NBBS_ONE_HS);
         break;
-      case GPUKVFormat::NL_X_TWO_NB_NH_BS_HS:
-        LAUNCH_KERNEL_WITH_FORMAT(T, false, GPUKVFormat::NL_X_TWO_NB_NH_BS_HS);
+      case EngineKVFormat::NL_X_TWO_NB_NH_BS_HS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, false,
+                                  EngineKVFormat::NL_X_TWO_NB_NH_BS_HS);
         break;
-      case GPUKVFormat::NL_X_NB_TWO_NH_BS_HS:
-        LAUNCH_KERNEL_WITH_FORMAT(T, false, GPUKVFormat::NL_X_NB_TWO_NH_BS_HS);
+      case EngineKVFormat::NL_X_NB_TWO_NH_BS_HS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, false,
+                                  EngineKVFormat::NL_X_NB_TWO_NH_BS_HS);
         break;
       default:
-        throw std::runtime_error("Unsupported GPUKVFormat");
+        throw std::runtime_error("Unsupported EngineKVFormat");
     }
   } else {
-    switch (gpu_kv_format) {
-      case GPUKVFormat::NB_NL_TWO_BS_NH_HS:
-        LAUNCH_KERNEL_WITH_FORMAT(T, true, GPUKVFormat::NB_NL_TWO_BS_NH_HS);
+    switch (engine_kv_format) {
+      case EngineKVFormat::NB_NL_TWO_BS_NH_HS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, true, EngineKVFormat::NB_NL_TWO_BS_NH_HS);
         break;
-      case GPUKVFormat::NL_X_TWO_NB_BS_NH_HS:
-        LAUNCH_KERNEL_WITH_FORMAT(T, true, GPUKVFormat::NL_X_TWO_NB_BS_NH_HS);
+      case EngineKVFormat::NL_X_TWO_NB_BS_NH_HS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, true,
+                                  EngineKVFormat::NL_X_TWO_NB_BS_NH_HS);
         break;
-      case GPUKVFormat::NL_X_NB_TWO_BS_NH_HS:
-        LAUNCH_KERNEL_WITH_FORMAT(T, true, GPUKVFormat::NL_X_NB_TWO_BS_NH_HS);
+      case EngineKVFormat::NL_X_NB_TWO_BS_NH_HS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, true,
+                                  EngineKVFormat::NL_X_NB_TWO_BS_NH_HS);
         break;
-      case GPUKVFormat::NL_X_NB_BS_HS:
-        LAUNCH_KERNEL_WITH_FORMAT(T, true, GPUKVFormat::NL_X_NB_BS_HS);
+      case EngineKVFormat::NL_X_NB_BS_HS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, true, EngineKVFormat::NL_X_NB_BS_HS);
         break;
-      case GPUKVFormat::NL_X_NBBS_ONE_HS:
-        LAUNCH_KERNEL_WITH_FORMAT(T, true, GPUKVFormat::NL_X_NBBS_ONE_HS);
+      case EngineKVFormat::NL_X_NBBS_ONE_HS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, true, EngineKVFormat::NL_X_NBBS_ONE_HS);
         break;
-      case GPUKVFormat::NL_X_TWO_NB_NH_BS_HS:
-        LAUNCH_KERNEL_WITH_FORMAT(T, true, GPUKVFormat::NL_X_TWO_NB_NH_BS_HS);
+      case EngineKVFormat::NL_X_TWO_NB_NH_BS_HS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, true,
+                                  EngineKVFormat::NL_X_TWO_NB_NH_BS_HS);
         break;
-      case GPUKVFormat::NL_X_NB_TWO_NH_BS_HS:
-        LAUNCH_KERNEL_WITH_FORMAT(T, true, GPUKVFormat::NL_X_NB_TWO_NH_BS_HS);
+      case EngineKVFormat::NL_X_NB_TWO_NH_BS_HS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, true,
+                                  EngineKVFormat::NL_X_NB_TWO_NH_BS_HS);
         break;
       default:
-        throw std::runtime_error("Unsupported GPUKVFormat");
+        throw std::runtime_error("Unsupported EngineKVFormat");
     }
   }
 }
@@ -621,17 +630,17 @@ void multi_layer_kv_transfer(
     torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
     const torch::Tensor& slot_mapping, const torch::Device& paged_memory_device,
     const int page_buffer_size, const TransferDirection direction,
-    const GPUKVFormat gpu_kv_format, const int block_size, const int head_size,
-    const int skip_prefix_n_tokens) {
+    const EngineKVFormat engine_kv_format, const int block_size,
+    const int head_size, const int skip_prefix_n_tokens) {
   int num_origin_elements = key_value.size(3);
   int copy_size = num_origin_elements * key_value.element_size();
 #ifndef LAUNCH_MULTI_LAYER_KV_TRANSFER
-  #define LAUNCH_MULTI_LAYER_KV_TRANSFER(type)                               \
-    do {                                                                     \
-      multi_layer_kv_transfer_templated<type>(                               \
-          key_value, key_value_ptrs, slot_mapping, paged_memory_device,      \
-          page_buffer_size, direction, gpu_kv_format, block_size, head_size, \
-          skip_prefix_n_tokens);                                             \
+  #define LAUNCH_MULTI_LAYER_KV_TRANSFER(type)                          \
+    do {                                                                \
+      multi_layer_kv_transfer_templated<type>(                          \
+          key_value, key_value_ptrs, slot_mapping, paged_memory_device, \
+          page_buffer_size, direction, engine_kv_format, block_size,    \
+          head_size, skip_prefix_n_tokens);                             \
     } while (0)
 #endif
   if (copy_size % 8 == 0) {
@@ -680,14 +689,14 @@ void multi_layer_kv_transfer_unilateral(
     const torch::Tensor& key_value_ptrs,  // [num_layers*2]
     const torch::Tensor& slot_mapping,    // [num_tokens],
     const torch::Device& paged_memory_device, const int page_buffer_size,
-    const TransferDirection direction, const GPUKVFormat gpu_kv_format) {
-  const bool use_mla = lmc::is_mla(gpu_kv_format);
+    const TransferDirection direction, const EngineKVFormat engine_kv_format) {
+  const bool use_mla = lmc::is_mla(engine_kv_format);
   // MLA case collapses back to multi_layer_kv_transfer
   // (vLLM and SGLang indexing are compatible)
   if (use_mla) {
     return multi_layer_kv_transfer(key_value, key_value_ptrs, slot_mapping,
                                    paged_memory_device, page_buffer_size,
-                                   direction, gpu_kv_format);
+                                   direction, engine_kv_format);
   }
 
   int64_t* key_value_ptr = get_kernel_ptr<int64_t, torch::Tensor>(key_value);
@@ -753,7 +762,7 @@ void single_layer_kv_transfer(
                                // MLA: [num_blocks, block_size, head_size]
 
     torch::Tensor& slot_mapping,  // [num_tokens]
-    const TransferDirection direction, const GPUKVFormat gpu_kv_format,
+    const TransferDirection direction, const EngineKVFormat engine_kv_format,
     const bool token_major  // true: lmc_key_value_cache is
                             // [num_tokens, 2, num_heads*head_size]
                             // false: lmc_key_value_cache is
@@ -780,8 +789,8 @@ void single_layer_kv_transfer(
   int head_size_in_64bit;
   int block_size;
 
-  const bool use_mla = lmc::is_mla(gpu_kv_format);
-  const bool hnd_layout = lmc::is_hnd(gpu_kv_format);
+  const bool use_mla = lmc::is_mla(engine_kv_format);
+  const bool hnd_layout = lmc::is_hnd(engine_kv_format);
 
   if (use_mla) {
     // MLA format: [num_blocks, block_size, head_size]
@@ -800,8 +809,8 @@ void single_layer_kv_transfer(
     head_size_in_64bit = vllm_key_value_cache.size(4) / elements_per_entry;
   }
 
-  lmc::check_block_size(gpu_kv_format, block_size);
-  lmc::check_head_size(gpu_kv_format, head_size_in_64bit);
+  lmc::check_block_size(engine_kv_format, block_size);
+  lmc::check_head_size(engine_kv_format, head_size_in_64bit);
 
   int lmc_stride;
   int lmc_value_offset;
@@ -824,12 +833,12 @@ void single_layer_kv_transfer(
     vllm_block_key_stride_in_64bit =
         vllm_key_value_cache.stride(0) / elements_per_entry;
     vllm_value_offset = 0;  // No separate K/V for MLA
-  } else if (gpu_kv_format == GPUKVFormat::NL_X_TWO_NB_BS_NH_HS ||
-             gpu_kv_format == GPUKVFormat::NL_X_TWO_NB_NH_BS_HS) {
+  } else if (engine_kv_format == EngineKVFormat::NL_X_TWO_NB_BS_NH_HS ||
+             engine_kv_format == EngineKVFormat::NL_X_TWO_NB_NH_BS_HS) {
     vllm_block_key_stride_in_64bit =
         vllm_key_value_cache.stride(1) / elements_per_entry;
     vllm_value_offset = vllm_key_value_cache.stride(0) / elements_per_entry;
-  } else {  // gpu_kv_format == GPUKVFormat::NL_X_NB_TWO_BS_NH_HS
+  } else {  // engine_kv_format == EngineKVFormat::NL_X_NB_TWO_BS_NH_HS
     vllm_block_key_stride_in_64bit =
         vllm_key_value_cache.stride(0) / elements_per_entry;
     vllm_value_offset = vllm_key_value_cache.stride(1) / elements_per_entry;
@@ -844,7 +853,7 @@ void single_layer_kv_transfer(
       device_of(vllm_key_value_cache));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  // Dispatch to the appropriate template specialization based on GPUKVFormat
+  // Dispatch to the appropriate template specialization based on EngineKVFormat
 #define LAUNCH_SINGLE_LAYER_KERNEL(FORMAT)                                     \
   lmc::single_layer_kv_transfer_kernel<int64_t, FORMAT>                        \
       <<<grid, block, 0, stream>>>(                                            \
@@ -854,21 +863,21 @@ void single_layer_kv_transfer(
           direction);                                                          \
   break;
 
-  switch (gpu_kv_format) {
-    case GPUKVFormat::NL_X_NB_BS_HS:
-      LAUNCH_SINGLE_LAYER_KERNEL(GPUKVFormat::NL_X_NB_BS_HS)
-    case GPUKVFormat::NL_X_TWO_NB_BS_NH_HS:
-      LAUNCH_SINGLE_LAYER_KERNEL(GPUKVFormat::NL_X_TWO_NB_BS_NH_HS)
-    case GPUKVFormat::NL_X_NB_TWO_BS_NH_HS:
-      LAUNCH_SINGLE_LAYER_KERNEL(GPUKVFormat::NL_X_NB_TWO_BS_NH_HS)
-    case GPUKVFormat::NL_X_TWO_NB_NH_BS_HS:
-      LAUNCH_SINGLE_LAYER_KERNEL(GPUKVFormat::NL_X_TWO_NB_NH_BS_HS)
-    case GPUKVFormat::NL_X_NB_TWO_NH_BS_HS:
-      LAUNCH_SINGLE_LAYER_KERNEL(GPUKVFormat::NL_X_NB_TWO_NH_BS_HS)
+  switch (engine_kv_format) {
+    case EngineKVFormat::NL_X_NB_BS_HS:
+      LAUNCH_SINGLE_LAYER_KERNEL(EngineKVFormat::NL_X_NB_BS_HS)
+    case EngineKVFormat::NL_X_TWO_NB_BS_NH_HS:
+      LAUNCH_SINGLE_LAYER_KERNEL(EngineKVFormat::NL_X_TWO_NB_BS_NH_HS)
+    case EngineKVFormat::NL_X_NB_TWO_BS_NH_HS:
+      LAUNCH_SINGLE_LAYER_KERNEL(EngineKVFormat::NL_X_NB_TWO_BS_NH_HS)
+    case EngineKVFormat::NL_X_TWO_NB_NH_BS_HS:
+      LAUNCH_SINGLE_LAYER_KERNEL(EngineKVFormat::NL_X_TWO_NB_NH_BS_HS)
+    case EngineKVFormat::NL_X_NB_TWO_NH_BS_HS:
+      LAUNCH_SINGLE_LAYER_KERNEL(EngineKVFormat::NL_X_NB_TWO_NH_BS_HS)
     default:
       TORCH_CHECK(false,
-                  "Unsupported GPUKVFormat for single_layer_kv_transfer: ",
-                  static_cast<int>(gpu_kv_format));
+                  "Unsupported EngineKVFormat for single_layer_kv_transfer: ",
+                  static_cast<int>(engine_kv_format));
   }
 #undef LAUNCH_SINGLE_LAYER_KERNEL
 }

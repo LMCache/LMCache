@@ -10,7 +10,7 @@ see [EVENTS.md](EVENTS.md).
 ## 1. Architecture: Event Bus with Pub/Sub
 
 ```
-Producers (L1Manager, StorageManager, MPCacheEngine)
+Producers (L1Manager, StorageManager, MPCacheServer)
     │
     │  bus.publish(Event(...))
     ▼

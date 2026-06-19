@@ -21,32 +21,32 @@ PYBIND11_MODULE(c_ops, m) {
       .value("H2D", TransferDirection::H2D)
       .value("D2H", TransferDirection::D2H)
       .export_values();
-  py::enum_<GPUKVFormat>(m, "GPUKVFormat")
-      .value("NB_NL_TWO_BS_NH_HS", GPUKVFormat::NB_NL_TWO_BS_NH_HS)
-      .value("NL_X_TWO_NB_BS_NH_HS", GPUKVFormat::NL_X_TWO_NB_BS_NH_HS)
-      .value("NL_X_NB_TWO_BS_NH_HS", GPUKVFormat::NL_X_NB_TWO_BS_NH_HS)
-      .value("NL_X_NB_BS_HS", GPUKVFormat::NL_X_NB_BS_HS)
-      .value("TWO_X_NL_X_NBBS_NH_HS", GPUKVFormat::TWO_X_NL_X_NBBS_NH_HS)
-      .value("NL_X_NBBS_ONE_HS", GPUKVFormat::NL_X_NBBS_ONE_HS)
-      .value("NL_X_TWO_NB_NH_BS_HS", GPUKVFormat::NL_X_TWO_NB_NH_BS_HS)
-      .value("NL_X_NB_TWO_NH_BS_HS", GPUKVFormat::NL_X_NB_TWO_NH_BS_HS)
-      .value("NB_NL_TWO_NH_BS_HS", GPUKVFormat::NB_NL_TWO_NH_BS_HS)
-      .value("TWO_X_NL_X_NB_BS_NH_HS", GPUKVFormat::TWO_X_NL_X_NB_BS_NH_HS)
-      .value("NL_X_NB_NH_BS_TWO_HS", GPUKVFormat::NL_X_NB_NH_BS_TWO_HS)
+  py::enum_<EngineKVFormat>(m, "EngineKVFormat")
+      .value("NB_NL_TWO_BS_NH_HS", EngineKVFormat::NB_NL_TWO_BS_NH_HS)
+      .value("NL_X_TWO_NB_BS_NH_HS", EngineKVFormat::NL_X_TWO_NB_BS_NH_HS)
+      .value("NL_X_NB_TWO_BS_NH_HS", EngineKVFormat::NL_X_NB_TWO_BS_NH_HS)
+      .value("NL_X_NB_BS_HS", EngineKVFormat::NL_X_NB_BS_HS)
+      .value("TWO_X_NL_X_NBBS_NH_HS", EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS)
+      .value("NL_X_NBBS_ONE_HS", EngineKVFormat::NL_X_NBBS_ONE_HS)
+      .value("NL_X_TWO_NB_NH_BS_HS", EngineKVFormat::NL_X_TWO_NB_NH_BS_HS)
+      .value("NL_X_NB_TWO_NH_BS_HS", EngineKVFormat::NL_X_NB_TWO_NH_BS_HS)
+      .value("NB_NL_TWO_NH_BS_HS", EngineKVFormat::NB_NL_TWO_NH_BS_HS)
+      .value("TWO_X_NL_X_NB_BS_NH_HS", EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS)
+      .value("NL_X_NB_NH_BS_TWO_HS", EngineKVFormat::NL_X_NB_NH_BS_TWO_HS)
       .export_values();
   m.def("multi_layer_kv_transfer", &multi_layer_kv_transfer,
         py::arg("key_value"), py::arg("key_value_ptrs"),
         py::arg("slot_mapping"), py::arg("paged_memory_device"),
         py::arg("page_buffer_size"), py::arg("direction"),
-        py::arg("gpu_kv_format"), py::arg("block_size") = 0,
+        py::arg("engine_kv_format"), py::arg("block_size") = 0,
         py::arg("head_size") = 0, py::arg("skip_prefix_n_tokens") = 0,
         py::call_guard<py::gil_scoped_release>());
   m.def("multi_layer_kv_transfer_unilateral",
         &multi_layer_kv_transfer_unilateral);
   m.def("single_layer_kv_transfer", &single_layer_kv_transfer,
         py::arg("lmc_key_value_cache"), py::arg("vllm_key_value_cache"),
-        py::arg("slot_mapping"), py::arg("direction"), py::arg("gpu_kv_format"),
-        py::arg("token_major") = false);
+        py::arg("slot_mapping"), py::arg("direction"),
+        py::arg("engine_kv_format"), py::arg("token_major") = false);
   m.def("single_layer_kv_transfer_sgl", &single_layer_kv_transfer_sgl,
         py::arg("lmc_key_value_cache"), py::arg("sgl_key_cache"),
         py::arg("sgl_value_cache"), py::arg("slot_mapping"),
@@ -87,7 +87,7 @@ PYBIND11_MODULE(c_ops, m) {
         py::arg("paged_buffer_ptrs_tensor"), py::arg("lmcache_objects_ptrs"),
         py::arg("block_ids"), py::arg("device"), py::arg("direction"),
         py::arg("shape_desc"), py::arg("lmcache_chunk_size"),
-        py::arg("gpu_kv_format"), py::arg("skip_prefix_n_blocks"),
+        py::arg("engine_kv_format"), py::arg("skip_prefix_n_blocks"),
         py::call_guard<py::gil_scoped_release>());
   py::class_<PageBufferShapeDesc>(m, "PageBufferShapeDesc")
       .def(py::init<>())
@@ -118,4 +118,6 @@ PYBIND11_MODULE(c_ops, m) {
     }
     return out;
   });
+  // Backward-compat alias: GPUKVFormat -> EngineKVFormat
+  m.attr("GPUKVFormat") = m.attr("EngineKVFormat");
 }

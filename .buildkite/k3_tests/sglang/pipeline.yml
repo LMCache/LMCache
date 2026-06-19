@@ -28,6 +28,12 @@ steps:
   - label: ":zap: SGLang+LMCache — Performance"
     command: .buildkite/k3_tests/sglang/run.sh perf
     timeout_in_minutes: 15
+    retry:
+      automatic:
+        - exit_status: -1
+          limit: 2
+        - exit_status: 1
+          limit: 2
     agents: { queue: "k8s" }
     plugins:
       - kubernetes:

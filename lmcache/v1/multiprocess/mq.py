@@ -15,6 +15,7 @@ import zmq
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
@@ -70,6 +71,10 @@ _SPECIAL_ENCODER_DECODERS = {
     list[CudaIPCWrapper]: (
         get_customized_encoder(list[CudaIPCWrapper]),
         get_customized_decoder(list[CudaIPCWrapper]),
+    ),
+    MemoryLayoutDesc: (
+        get_customized_encoder(MemoryLayoutDesc),
+        get_customized_decoder(MemoryLayoutDesc),
     ),
 }
 

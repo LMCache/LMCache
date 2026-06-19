@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import KeyListPage, MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
 from lmcache.v1.memory_management import MemoryObj
 
@@ -239,6 +239,7 @@ class L2AdapterInterface(ABC):
     def submit_lookup_and_lock_task(
         self,
         keys: list[ObjectKey],
+        layout_desc: MemoryLayoutDesc,
     ) -> L2TaskId:
         """
         Submit a lookup and lock task to look up and lock a batch of objects
@@ -246,6 +247,9 @@ class L2AdapterInterface(ABC):
 
         Args:
             keys (list[ObjectKey]): the list of keys to be looked up and locked.
+            layout_desc (MemoryLayoutDesc): the memory layout of the objects.
+                This is an advisory hint; most adapters ignore it. The P2P
+                adapter forwards it to the peer cache server.
 
         Returns:
             L2TaskId: the task id of the submitted lookup and lock task.
@@ -467,6 +471,30 @@ class L2AdapterInterface(ABC):
             eviction should override this method.
         """
         return None
+
+    def list_l2_keys(
+        self,
+        model_name: str | None = None,
+        page_size: int = 500,
+        cursor: str | None = None,
+    ) -> KeyListPage:
+        """List keys currently resident in this adapter, paginated.
+
+        Args:
+            model_name: if set, restrict to keys with this
+                ``ObjectKey.model_name``.
+            page_size: maximum entries to return in this page.
+            cursor: opaque cursor from the previous page; ``None`` on
+                the first call.
+
+        Raises:
+            NotImplementedError: the adapter does not support listing.
+            ValueError: ``page_size`` is non-positive or ``cursor`` is
+                malformed.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement list_l2_keys"
+        )
 
     def get_usage(self) -> AdapterUsage:
         """

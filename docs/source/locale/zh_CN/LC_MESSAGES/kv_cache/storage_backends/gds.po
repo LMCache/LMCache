@@ -73,10 +73,7 @@ msgid ""
 "selects a path based on the device index (``device_id % num_paths``), so "
 "traffic is spread evenly across the drives without any manual pinning."
 msgstr ""
-"当系统有多个 NVMe 驱动器时，可以通过在 ``gds_path`` 中指定以逗号分隔的路径列表来分配 GDS "
-"I/O。``gds_path_sharding`` 选项控制每个 GPU 工作线程如何选择其路径。目前仅支持 "
-"``\"by_gpu\"``（默认），该选项根据设备索引（``device_id % "
-"num_paths``）选择路径，因此流量在驱动器之间均匀分配，无需手动固定。"
+"当系统有多个 NVMe 驱动器时，可以通过在 ``gds_path`` 中指定以逗号分隔的路径列表来分配 GDS I/O。\\ ``gds_path_sharding`` 选项控制每个 GPU 工作线程如何选择其路径。目前仅支持 ``\"by_gpu\"``\\ （默认），该选项根据设备索引（\\ ``device_id % num_paths``\\ ）选择路径，因此流量在驱动器之间均匀分配，无需手动固定。"
 
 #: ../../source/kv_cache/storage_backends/gds.rst:61
 msgid ""
@@ -121,8 +118,7 @@ msgid ""
 "``cuda:4`` maps back to ``/mnt/nvme0/cache``). A single path (no commas) "
 "works exactly as before."
 msgstr ""
-"如果 GPU 的数量超过路径数量，则分配会循环（例如，``cuda:4`` 映射回 "
-"``/mnt/nvme0/cache``）。单个路径（没有逗号）与之前的工作方式完全相同。"
+"如果 GPU 的数量超过路径数量，则分配会循环（例如，\\ ``cuda:4`` 映射回 ``/mnt/nvme0/cache``\\ ）。单个路径（没有逗号）与之前的工作方式完全相同。"
 
 #: ../../source/kv_cache/storage_backends/gds.rst:90
 msgid ""
@@ -160,9 +156,7 @@ msgid ""
 "utilization 0.85`` and depending on your workflow fine-tune it from "
 "there."
 msgstr ""
-"后端目前预先注册缓冲区空间以加速 GDS 操作。此缓冲区空间在显存中注册，因此在设置时应考虑 ``--gpu-memory-"
-"utilization`` 等来自 ``vllm`` 的选项。例如，对于通常具有 80GiB 显存的 H100，一个好的经验法则是从 8GiB "
-"开始，并设置 ``--gpu-memory-utilization 0.85``，然后根据您的工作流程进行微调。"
+"后端目前预先注册缓冲区空间以加速 GDS 操作。此缓冲区空间在显存中注册，因此在设置时应考虑 ``--gpu-memory-utilization`` 等来自 ``vllm`` 的选项。例如，对于通常具有 80GiB 显存的 H100，一个好的经验法则是从 8GiB 开始，并设置 ``--gpu-memory-utilization 0.85``\\ ，然后根据您的工作流程进行微调。"
 
 #: ../../source/kv_cache/storage_backends/gds.rst:120
 msgid "Using AMD hipFile"
@@ -218,8 +212,7 @@ msgid ""
 "Successful output will show ``True`` for ``Kernel P2PDMA support``, ``HIP"
 " runtime``, and ``amdgpu``."
 msgstr ""
-"成功的输出将显示 ``Kernel P2PDMA support``、``HIP runtime`` 和 ``amdgpu`` 的值为 "
-"``True``。"
+"成功的输出将显示 ``Kernel P2PDMA support``\\ 、\\ ``HIP runtime`` 和 ``amdgpu`` 的值为 ``True``\\ 。"
 
 #: ../../source/kv_cache/storage_backends/gds.rst:155
 msgid "**LMCache configuration:**"
@@ -241,7 +234,8 @@ msgstr "**配置文件：**"
 msgid ""
 "Note: The ``gds_buffer_size`` configuration is used for both cuFile and "
 "hipFile buffers."
-msgstr "注意：``gds_buffer_size`` 配置用于 cuFile 和 hipFile 缓冲区。"
+msgstr ""
+"注意：\\ ``gds_buffer_size`` 配置用于 cuFile 和 hipFile 缓冲区。"
 
 #: ../../source/kv_cache/storage_backends/gds.rst:175
 msgid "Setup Example"
@@ -313,7 +307,8 @@ msgid ""
 "If you don't want to use a config file, uncomment the first three "
 "environment variables and then comment out the ``LMCACHE_CONFIG_FILE`` "
 "below:"
-msgstr "如果您不想使用配置文件，请取消注释前面三个环境变量，然后注释掉下面的 ``LMCACHE_CONFIG_FILE``："
+msgstr ""
+"如果您不想使用配置文件，请取消注释前面三个环境变量，然后注释掉下面的 ``LMCACHE_CONFIG_FILE``\\ ："
 
 #: ../../source/kv_cache/storage_backends/gds.rst:244
 msgid "POSIX fallback"
@@ -347,8 +342,7 @@ msgid ""
 " to use. Supported backends are ``cufile`` (NVIDIA cuFile) and "
 "``hipfile`` (AMD hipFile):"
 msgstr ""
-"``gds_backend`` 字段（默认值：``cufile``）用于选择使用哪个 GDS 库。支持的后端有 ``cufile``（NVIDIA"
-" cuFile）和 ``hipfile``（AMD hipFile）："
+"``gds_backend`` 字段（默认值：\\ ``cufile``\\ ）用于选择使用哪个 GDS 库。支持的后端有 ``cufile``\\ （NVIDIA cuFile）和 ``hipfile``\\ （AMD hipFile）："
 
 #: ../../source/kv_cache/storage_backends/gds.rst:270
 msgid ""

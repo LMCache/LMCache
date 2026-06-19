@@ -1,0 +1,38 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/p2p.rst:4
+msgid "P2P KV Cache Sharing"
+msgstr "P2P KV 缓存共享"
+
+#: ../../source/mp/p2p.rst:8
+msgid ""
+"The multiprocess (MP) implementation of peer-to-peer (P2P) KV cache "
+"sharing is **coming soon**."
+msgstr ""
+"点对点（P2P）KV 缓存共享的多进程（MP）实现 **即将推出**\\ 。"
+
+#: ../../source/mp/p2p.rst:11
+msgid ""
+"Until it lands, the in-process implementation is documented in the "
+":doc:`Legacy section <../legacy/index>`: :doc:`../kv_cache/p2p_sharing`."
+msgstr "在该功能落地之前，进程内实现的文档位于 :doc:`旧版部分 <../legacy/index>`：:doc:`../kv_cache/p2p_sharing`。"
+

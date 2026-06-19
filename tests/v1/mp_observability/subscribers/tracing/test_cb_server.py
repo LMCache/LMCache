@@ -994,6 +994,43 @@ class TestCBLookupSubspans:
         assert spans["cb.lookup"].attributes.get("prefix_chunks") == "2"
         assert spans["cb.sparse_prefetch"].attributes.get("found_keys") == "5"
 
+    def test_coordinator_match_span_nests_under_cb_lookup(self, exporter):
+        bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
+        bus.register_subscriber(BlendTracingSubscriber(SpanRegistry()))
+        bus.start()
+        now = time.time()
+        sid = "cb-coord-match"
+        seq = [
+            (EventType.CB_REQUEST_START, {}),
+            (EventType.CB_LOOKUP_START, {"num_tokens": 1024}),
+            (EventType.CB_COORDINATOR_MATCH_START, {}),
+            (EventType.CB_COORDINATOR_MATCH_END, {"matches": 3, "timed_out": False}),
+            (EventType.CB_LOOKUP_END, {"num_tokens": 1024, "prefix_chunks": 2}),
+            (EventType.CB_REQUEST_END, {}),
+        ]
+        for i, (et, md) in enumerate(seq):
+            bus.publish(
+                Event(
+                    event_type=et,
+                    session_id=sid,
+                    timestamp=now + i * 0.001,
+                    metadata=md,
+                )
+            )
+        time.sleep(0.3)
+        bus.stop()
+
+        spans = self._spans_by_name(exporter, sid)
+        assert "cb.coordinator_match" in spans, (
+            f"missing cb.coordinator_match; have {sorted(spans)}"
+        )
+        assert (
+            spans["cb.coordinator_match"].parent.span_id
+            == spans["cb.lookup"].context.span_id
+        ), "cb.coordinator_match should nest under cb.lookup"
+        assert spans["cb.coordinator_match"].attributes.get("matches") == "3"
+        assert spans["cb.coordinator_match"].attributes.get("timed_out") == "False"
+
     def test_scatter_span_nests_under_cb_retrieve(self, exporter):
         bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
         bus.register_subscriber(BlendTracingSubscriber(SpanRegistry()))
