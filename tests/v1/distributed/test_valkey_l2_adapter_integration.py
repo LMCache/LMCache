@@ -27,13 +27,15 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObjMetadata,
     TensorMemoryObj,
 )
 from lmcache.v1.platform import consume_fd
+
+_EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
 
 def create_object_key(
@@ -122,7 +124,7 @@ def _probe_reachable(cluster_mode: bool, startup_nodes: str) -> bool:
     except Exception:
         return False
     try:
-        tid = adapter.submit_lookup_and_lock_task([create_object_key(0)])
+        tid = adapter.submit_lookup_and_lock_task([create_object_key(0)], _EMPTY_LAYOUT)
         wait_for_event_fd(adapter.get_lookup_and_lock_event_fd(), timeout=3.0)
         adapter.query_lookup_and_lock_result(tid)
         return True
@@ -187,7 +189,7 @@ class TestValkeyL2AdapterIntegration:
         return adapter.pop_completed_store_tasks()[tid]
 
     def _lookup(self, adapter, keys):
-        tid = adapter.submit_lookup_and_lock_task(keys)
+        tid = adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
         assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         return adapter.query_lookup_and_lock_result(tid)
 

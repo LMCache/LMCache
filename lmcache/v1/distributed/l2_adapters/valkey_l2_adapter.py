@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
@@ -573,7 +573,11 @@ class ValkeyL2Adapter(L2AdapterInterface):
             self._completed_stores = {}
         return completed
 
-    def submit_lookup_and_lock_task(self, keys: list[ObjectKey]) -> L2TaskId:
+    def submit_lookup_and_lock_task(
+        self,
+        keys: list[ObjectKey],
+        layout_desc: MemoryLayoutDesc,
+    ) -> L2TaskId:
         """Submit a non-blocking batch EXISTS to Valkey.
 
         On completion the bitmap has bit ``i`` set iff key ``i`` was
@@ -582,6 +586,8 @@ class ValkeyL2Adapter(L2AdapterInterface):
 
         Args:
             keys: Keys to look up and lock.
+            layout_desc: The memory layout of the objects. Advisory hint,
+                not used by the Valkey adapter.
 
         Returns:
             The assigned task id.

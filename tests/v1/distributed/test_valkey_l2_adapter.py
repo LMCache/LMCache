@@ -184,7 +184,10 @@ _install_fake_glide()
 
 # First Party
 # First Party  (imported after fake glide is installed)
-from lmcache.v1.distributed.api import ObjectKey  # noqa: E402
+from lmcache.v1.distributed.api import (  # noqa: E402
+    MemoryLayoutDesc,
+    ObjectKey,
+)
 from lmcache.v1.distributed.internal_api import L2AdapterListener  # noqa: E402
 from lmcache.v1.distributed.l2_adapters.valkey_l2_adapter import (  # noqa: E402
     ValkeyL2Adapter,
@@ -197,6 +200,8 @@ from lmcache.v1.memory_management import (  # noqa: E402
     TensorMemoryObj,
 )
 from lmcache.v1.platform import consume_fd  # noqa: E402
+
+_EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
 # ---------------------------------------------------------------------------
 # Test helpers
@@ -534,13 +539,15 @@ class TestLookupAndLock:
         objs = [create_memory_obj(size=8) for _ in keys]
         _wait_for_store(adapter, adapter.submit_store_task(keys, objs))
 
-        task = adapter.submit_lookup_and_lock_task(keys)
+        task = adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
         bm = _wait_for_lookup(adapter, task)
         assert all(bm.test(i) for i in range(3))
 
     def test_lookup_miss(self, adapter):
         keys = [create_object_key(99)]
-        bm = _wait_for_lookup(adapter, adapter.submit_lookup_and_lock_task(keys))
+        bm = _wait_for_lookup(
+            adapter, adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+        )
         assert not bm.test(0)
 
     def test_unlock_balances_lookup(self, adapter):
@@ -549,17 +556,15 @@ class TestLookupAndLock:
         _wait_for_store(adapter, adapter.submit_store_task(keys, objs))
         # Two successful lookups → refcount == 2 per key.
         for _ in range(2):
-            _wait_for_lookup(adapter, adapter.submit_lookup_and_lock_task(keys))
+            _wait_for_lookup(
+                adapter, adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+            )
         # Two unlocks should bring it back to zero — no internal state
         # to assert publicly, just verify no exception and that we can
         # delete the keys afterward.
         adapter.submit_unlock(keys)
         adapter.submit_unlock(keys)
         adapter.delete(keys)
-
-    def test_empty_lookup_batch(self, adapter):
-        bm = _wait_for_lookup(adapter, adapter.submit_lookup_and_lock_task([]))
-        assert bm is not None
 
 
 class TestLoad:
@@ -612,7 +617,9 @@ class TestDelete:
         # Listener observed the deletions.
         assert any(set(batch) == set(keys) for batch in listener.deleted)
         # Subsequent lookup should miss.
-        bm = _wait_for_lookup(adapter, adapter.submit_lookup_and_lock_task(keys))
+        bm = _wait_for_lookup(
+            adapter, adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+        )
         assert not any(bm.test(i) for i in range(len(keys)))
 
     def test_delete_unknown_keys_is_noop(self, adapter):
@@ -627,7 +634,9 @@ class TestDelete:
         )
 
         # Lookup bumps the lock refcount.
-        bm = _wait_for_lookup(adapter, adapter.submit_lookup_and_lock_task([key]))
+        bm = _wait_for_lookup(
+            adapter, adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        )
         assert bm.test(0)
 
         adapter.delete([key])
@@ -645,7 +654,9 @@ class TestDelete:
             adapter, adapter.submit_store_task([key], [create_memory_obj(4)])
         )
         for _ in range(2):
-            _wait_for_lookup(adapter, adapter.submit_lookup_and_lock_task([key]))
+            _wait_for_lookup(
+                adapter, adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+            )
 
         adapter.submit_unlock([key])  # refcount 1, still pinned
         adapter.delete([key])
@@ -665,7 +676,9 @@ class TestKeyNamespacing:
             obj = create_memory_obj(size=4)
             _wait_for_store(a1, a1.submit_store_task([k], [obj]))
             # a2 sees no value for the same logical key.
-            bm = _wait_for_lookup(a2, a2.submit_lookup_and_lock_task([k]))
+            bm = _wait_for_lookup(
+                a2, a2.submit_lookup_and_lock_task([k], _EMPTY_LAYOUT)
+            )
             assert not bm.test(0)
         finally:
             a1.close()
@@ -678,5 +691,7 @@ class TestKeyNamespacing:
         k_b = create_object_key(1, cache_salt="user-B")
         obj = create_memory_obj(size=4)
         _wait_for_store(adapter, adapter.submit_store_task([k_a], [obj]))
-        bm = _wait_for_lookup(adapter, adapter.submit_lookup_and_lock_task([k_b]))
+        bm = _wait_for_lookup(
+            adapter, adapter.submit_lookup_and_lock_task([k_b], _EMPTY_LAYOUT)
+        )
         assert not bm.test(0)
