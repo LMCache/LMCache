@@ -43,10 +43,14 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             handler_type=HandlerType.SYNC,
         ),
         # Ping
-        # Payload: None
+        # Payload: [instance_id] -- the sender's worker instance ID, or None
+        #   for an untracked prober (the scheduler adapter).
         # Returns: bool - Always True
+        # BLOCKING on the NORMAL pool: keeps PING off the MQ main loop (where a
+        # slow SYNC REGISTER_KV_CACHE would stall it) and lets pool saturation
+        # surface as worker degraded mode.
         "PING": ProtocolDefinition(
-            payload_classes=[],
+            payload_classes=[int | None],
             response_class=bool,
             handler_type=HandlerType.BLOCKING,
         ),

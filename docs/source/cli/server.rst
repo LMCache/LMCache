@@ -78,6 +78,22 @@ Commonly used flags include:
        fleet-wide usage tracking and quota-based eviction.
    * - ``--coordinator-l2-event-flush-interval SECONDS``
      - Seconds between L2 event batch flushes (``> 0``, default ``1``).
+   * - ``--p2p-advertise-url HOST:PORT``
+     - Enable P2P KV cache sharing and advertise this server's
+       transfer-channel endpoint to peers (e.g. ``10.0.0.1:8500``). Setting it
+       turns P2P on; it additionally requires ``--coordinator-url`` for peer
+       discovery. See :doc:`/mp/p2p`.
+   * - ``--p2p-listen-url HOST:PORT``
+     - Address the transfer-channel server binds to. Defaults to
+       ``--p2p-advertise-url``. Set it when the advertised address differs from
+       the bind address (e.g. bind ``0.0.0.0`` while advertising a routable IP).
+   * - ``--p2p-lookup-timeout SECONDS``
+     - Deadline for a peer lookup before it counts as a miss (default ``30``).
+   * - ``--p2p-load-timeout SECONDS``
+     - Deadline for a peer KV read before it counts as a failure
+       (default ``30``).
+   * - ``--p2p-transfer-engine ENGINE``
+     - Transfer-channel implementation for P2P reads (default ``nixl``).
    * - ``--trace-level {storage}``
      - Enable storage-level trace recording (see :doc:`trace`).
    * - ``--trace-output PATH``

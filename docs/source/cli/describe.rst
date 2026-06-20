@@ -37,8 +37,8 @@ L2 adapters.
    Dtype:                               torch.float16
    MLA:                                         False
    Attention backend:    vLLM non-MLA flash attention
-   GPU KV shape:             NL x [2, NB, BS, NH, HS]
-   GPU KV tensor shape:   80 x [2, 2048, 128, 8, 128]
+   Engine KV shape:          NL x [2, NB, BS, NH, HS]
+   Engine KV tensor shape: 80 x [2, 2048, 128, 8, 128]
    ------------- L2: NixlStoreL2Adapter -------------
    Type:                           NixlStoreL2Adapter
    Health:                                         OK
@@ -52,8 +52,8 @@ The output shows:
 - **Overview** — health status, engine type, chunk size.
 - **L1 storage** — capacity, usage, eviction policy, cached object count.
 - **Registered models** — per-model KV cache layout: a context-wide summary
-  followed by one kernel group section per kernel group, each with the GPU KV
-  tensor shape (symbolic and concrete), attention backend, and group geometry.
+  followed by one kernel group section per kernel group, each with the engine
+  KV tensor shape (symbolic and concrete), attention backend, and group geometry.
 - **L2 adapters** — type, health, backend, stored objects, and utilization.
 
 Options
@@ -122,8 +122,8 @@ L2 adapters are collected into lists for easy programmatic access:
            "dtype": "torch.float16",
            "is_mla": false,
            "attention_backend": "vLLM non-MLA flash attention",
-           "gpu_kv_shape": "NL x [2, NB, BS, NH, HS]",
-           "gpu_kv_concrete_shape": "80 x [2, 2048, 128, 8, 128]"
+           "engine_kv_shape": "NL x [2, NB, BS, NH, HS]",
+           "engine_kv_concrete_shape": "80 x [2, 2048, 128, 8, 128]"
          }
        ],
        "l2_adapters": [
@@ -138,10 +138,10 @@ L2 adapters are collected into lists for easy programmatic access:
      }
    }
 
-GPU KV Shape Abbreviations
---------------------------
+Engine KV Shape Abbreviations
+-----------------------------
 
-The ``gpu_kv_shape`` field uses short names from the ``GPUKVFormat`` enum:
+The ``engine_kv_shape`` field uses short names from the ``EngineKVFormat`` enum:
 
 .. list-table::
    :header-rows: 1

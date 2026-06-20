@@ -169,6 +169,7 @@ class LMCacheMPConnector:
             mq_client=self.mq_client,
             health_event=self._health_event,
             interval=self._heartbeat_interval,
+            instance_id=self.instance_id,
         )
         self._heartbeat.start()
 

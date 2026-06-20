@@ -275,15 +275,15 @@ class TestAccessorsTRTLLM:
         # First Party
         from lmcache.v1.gpu_connector.utils import (
             get_attention_backend,
-            get_concrete_gpu_kv_shape,
-            get_gpu_kv_shape_description,
+            get_concrete_engine_kv_shape,
+            get_engine_kv_shape_description,
         )
         import lmcache.c_ops as lmc_ops
 
         fmt = lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS
-        assert get_gpu_kv_shape_description(fmt) == "[NB, NL, 2, NH, BS, HS]"
+        assert get_engine_kv_shape_description(fmt) == "[NB, NL, 2, NH, BS, HS]"
         assert "TRT-LLM" in get_attention_backend(fmt)
-        assert get_concrete_gpu_kv_shape(self._tensor(), fmt) == (
+        assert get_concrete_engine_kv_shape(self._tensor(), fmt) == (
             "[4, 3, 2, 8, 16, 64]"
         )
 

@@ -22,9 +22,10 @@ from lmcache.v1.mp_coordinator.blend_directory import (
     GlobalBlendMatcher,
     StoreRange,
 )
+from lmcache.v1.mp_coordinator.schemas import decode_tokens
 
 CHUNK = 3
-SCOPE = "model-a@"
+SCOPE = "model-a"
 
 
 def _matcher_request(
@@ -48,7 +49,9 @@ def _matcher_request(
             keys = payload.get("object_keys", [])
             return {"removed": matcher.remove(keys) if keys else 0}
         if method == "POST" and path == "/blend/match":
-            matches = matcher.match(payload["model_scope"], payload["tokens"])
+            matches = matcher.match(
+                payload["model_scope"], decode_tokens(payload["tokens_b64"])
+            )
             return {
                 "matches": [
                     {"object_key": m.object_key, "old_st": m.old_st, "cur_st": m.cur_st}
@@ -193,8 +196,16 @@ def test_maybe_from_env(monkeypatch: pytest.MonkeyPatch):
     assert BlendCoordinatorClient.maybe_from_env() is None
 
     monkeypatch.setenv("LMCACHE_COORDINATOR_URL", "http://coord:9300")
+    monkeypatch.delenv("LMCACHE_COORDINATOR_BLEND_TIMEOUT", raising=False)
     client = BlendCoordinatorClient.maybe_from_env()
     assert client is not None
+    assert client.match_budget_s == 1.0  # default timeout
+    client.close()
+
+    monkeypatch.setenv("LMCACHE_COORDINATOR_BLEND_TIMEOUT", "1.5")
+    client = BlendCoordinatorClient.maybe_from_env()
+    assert client is not None
+    assert client.match_budget_s == 1.5  # env override
     client.close()
 
 

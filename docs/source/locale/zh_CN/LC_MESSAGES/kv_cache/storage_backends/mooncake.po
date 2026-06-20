@@ -57,25 +57,29 @@ msgstr "关键特性"
 msgid ""
 "**Distributed memory pooling**: Aggregates memory contributions from "
 "multiple client nodes into a unified storage pool"
-msgstr "**分布式内存池**：将多个客户端节点的内存贡献聚合到一个统一的存储池中"
+msgstr ""
+"**分布式内存池**\\ ：将多个客户端节点的内存贡献聚合到一个统一的存储池中"
 
 #: ../../source/kv_cache/storage_backends/mooncake.rst:21
 msgid ""
 "**High bandwidth utilization**: Supports striping and parallel I/O "
 "transfer of large objects, fully utilizing multi-NIC aggregated bandwidth"
-msgstr "**高带宽利用率**：支持大对象的条带化和并行 I/O 传输，充分利用多 NIC 聚合带宽"
+msgstr ""
+"**高带宽利用率**\\ ：支持大对象的条带化和并行 I/O 传输，充分利用多 NIC 聚合带宽"
 
 #: ../../source/kv_cache/storage_backends/mooncake.rst:22
 msgid ""
 "**RDMA optimization**: Built on Transfer Engine with support for TCP, "
 "RDMA (InfiniBand/RoCEv2/eRDMA/NVIDIA GPUDirect)"
-msgstr "**RDMA 优化**：基于传输引擎构建，支持 TCP、RDMA（InfiniBand/RoCEv2/eRDMA/NVIDIA GPUDirect）"
+msgstr ""
+"**RDMA 优化**\\ ：基于传输引擎构建，支持 TCP、RDMA（InfiniBand/RoCEv2/eRDMA/NVIDIA GPUDirect）"
 
 #: ../../source/kv_cache/storage_backends/mooncake.rst:23
 msgid ""
 "**Dynamic resource scaling**: Supports dynamically adding and removing "
 "nodes for elastic resource management"
-msgstr "**动态资源扩展**：支持动态添加和移除节点以实现弹性资源管理"
+msgstr ""
+"**动态资源扩展**\\ ：支持动态添加和移除节点以实现弹性资源管理"
 
 #: ../../source/kv_cache/storage_backends/mooncake.rst:25
 msgid ""
@@ -100,7 +104,8 @@ msgstr "此软件包包含所有必要的组件："
 msgid ""
 "``mooncake_master``: Master service that manages cluster metadata and "
 "coordinates distributed storage operations"
-msgstr "``mooncake_master``：管理集群元数据并协调分布式存储操作的主服务"
+msgstr ""
+"``mooncake_master``\\ ：管理集群元数据并协调分布式存储操作的主服务"
 
 #: ../../source/kv_cache/storage_backends/mooncake.rst:39
 msgid ""
@@ -160,7 +165,8 @@ msgstr "**步骤 2：创建配置文件**"
 
 #: ../../source/kv_cache/storage_backends/mooncake.rst:74
 msgid "Create your ``mooncake-config.yaml``:"
-msgstr "创建您的 ``mooncake-config.yaml``："
+msgstr ""
+"创建您的 ``mooncake-config.yaml``\\ ："
 
 #: ../../source/kv_cache/storage_backends/mooncake.rst:98
 msgid "**Step 3: Start vLLM with Mooncake**"
@@ -245,7 +251,8 @@ msgstr "必需"
 
 #: ../../source/kv_cache/storage_backends/mooncake.rst:163
 msgid "Mooncake store connection URL (format: ``mooncakestore://host:port/``)."
-msgstr "Mooncake 存储连接 URL（格式：``mooncakestore://host:port/``）。"
+msgstr ""
+"Mooncake 存储连接 URL（格式：\\ ``mooncakestore://host:port/``\\ ）。"
 
 #: ../../source/kv_cache/storage_backends/mooncake.rst:164
 msgid "``remote_serde``"
@@ -310,7 +317,8 @@ msgstr "sha256_cbor_64bit"
 msgid ""
 "Hash used for pre-caching keying. For cross‑process consistency, fix "
 "``PYTHONHASHSEED`` (e.g., export ``PYTHONHASHSEED=0``)."
-msgstr "用于预缓存键的哈希。为了跨进程的一致性，固定 ``PYTHONHASHSEED``（例如，导出 ``PYTHONHASHSEED=0``）。"
+msgstr ""
+"用于预缓存键的哈希。为了跨进程的一致性，固定 ``PYTHONHASHSEED``\\ （例如，导出 ``PYTHONHASHSEED=0``\\ ）。"
 
 #: ../../source/kv_cache/storage_backends/mooncake.rst:180
 msgid "**Mooncake Parameters (via extra_config):**"
@@ -385,7 +393,8 @@ msgstr "21474836480"
 msgid ""
 "**Memory size contributed by each vLLM worker** in bytes (e.g., 20 GiB "
 "recommended)"
-msgstr "**每个 vLLM 工作线程贡献的内存大小**（以字节为单位，例如，推荐 20 GiB）"
+msgstr ""
+"**每个 vLLM 工作线程贡献的内存大小**\\ （以字节为单位，例如，推荐 20 GiB）"
 
 #: ../../source/kv_cache/storage_backends/mooncake.rst:207
 msgid "``local_buffer_size``"
@@ -407,12 +416,7 @@ msgid ""
 "In those cases, consider enabling ``save_chunk_meta: True`` and sizing "
 "``local_buffer_size`` instead."
 msgstr ""
-"Mooncake 使用的本地缓冲区大小（以字节为单位）。行为取决于 ``save_chunk_meta``：- 当 "
-"``save_chunk_meta: False``（推荐）时，LMCache 使用其本地 CPU 后端进行零拷贝 RDMA，因此 "
-"Mooncake 的 ``local_buffer_size`` 可以为 ``0``。- 当 ``save_chunk_meta: True`` "
-"时，Mooncake 使用其自己的本地缓冲区；将其设置为合适的值（例如，几个 GiB）。- 注意：某些 RDMA NIC "
-"有内存注册限制；在受限设备上注册 LMCache 的大 CPU 缓冲区可能会失败。在这些情况下，请考虑启用 ``save_chunk_meta: "
-"True`` 并调整 ``local_buffer_size`` 的大小。"
+"Mooncake 使用的本地缓冲区大小（以字节为单位）。行为取决于 ``save_chunk_meta``\\ ：- 当 ``save_chunk_meta: False``\\ （推荐）时，LMCache 使用其本地 CPU 后端进行零拷贝 RDMA，因此 Mooncake 的 ``local_buffer_size`` 可以为 ``0``\\ 。- 当 ``save_chunk_meta: True`` 时，Mooncake 使用其自己的本地缓冲区；将其设置为合适的值（例如，几个 GiB）。- 注意：某些 RDMA NIC 有内存注册限制；在受限设备上注册 LMCache 的大 CPU 缓冲区可能会失败。在这些情况下，请考虑启用 ``save_chunk_meta: True`` 并调整 ``local_buffer_size`` 的大小。"
 
 #: ../../source/kv_cache/storage_backends/mooncake.rst:213
 msgid "``transfer_timeout``"
@@ -469,8 +473,7 @@ msgid ""
 "The total cluster memory available for KV cache storage will be: "
 "``number_of_vllm_workers × global_segment_size``."
 msgstr ""
-"**理解 global_segment_size**：该参数定义了每个 vLLM 工作线程为分布式内存池贡献的内存量。KV Cache "
-"存储可用的总集群内存将为：``number_of_vllm_workers × global_segment_size``。"
+"**理解 global_segment_size**\\ ：该参数定义了每个 vLLM 工作线程为分布式内存池贡献的内存量。KV Cache 存储可用的总集群内存将为：\\ ``number_of_vllm_workers × global_segment_size``\\ 。"
 
 #: ../../source/kv_cache/storage_backends/mooncake.rst:233
 msgid ""
@@ -484,8 +487,7 @@ msgid ""
 "use the same hashing seed: ``export PYTHONHASHSEED=0``. This keeps "
 "pre‑caching keys consistent across processes."
 msgstr ""
-"如果您持续遇到未命中（没有 Mooncake 命中），请确保所有进程使用相同的哈希种子：``export "
-"PYTHONHASHSEED=0``。这可以保持跨进程的预缓存键一致。"
+"如果您持续遇到未命中（没有 Mooncake 命中），请确保所有进程使用相同的哈希种子：\\ ``export PYTHONHASHSEED=0``\\ 。这可以保持跨进程的预缓存键一致。"
 
 #: ../../source/kv_cache/storage_backends/mooncake.rst:239
 msgid ""

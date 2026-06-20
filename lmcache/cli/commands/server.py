@@ -50,9 +50,11 @@ class ServerCommand(BaseCommand):
                 add_coordinator_args,
                 add_http_frontend_args,
                 add_mp_server_args,
+                add_p2p_args,
             )
 
             add_mp_server_args(parser)
+            add_p2p_args(parser)
             add_storage_manager_args(parser)
             add_http_frontend_args(parser)
             add_observability_args(parser)

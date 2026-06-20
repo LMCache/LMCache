@@ -44,7 +44,8 @@ msgid ""
 "**Note**: `cwlota.com` is CoreWeave's S3-compatible Cloud Storage that "
 "caches for GPU locality. You can set `disable_tls: True` for non-AWS "
 "services."
-msgstr "**注意**：`cwlota.com` 是 CoreWeave 的 S3 兼容云存储，旨在为 GPU 本地性提供缓存。您可以将 `disable_tls: True` 设置为非 AWS 服务。"
+msgstr ""
+"**注意**\\ ：`cwlota.com` 是 CoreWeave 的 S3 兼容云存储，旨在为 GPU 本地性提供缓存。您可以将 `disable_tls: True` 设置为非 AWS 服务。"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:66
 msgid ""
@@ -65,7 +66,8 @@ msgstr "**remote_url**: S3 存储桶 URL (`s3://bucket-name`)"
 msgid ""
 "**save_unfull_chunk**: Save partial chunks (default: False, **must be "
 "False for S3**)"
-msgstr "**save_unfull_chunk**: 保存部分块（默认值：False，**对于 S3 必须为 False**）"
+msgstr ""
+"**save_unfull_chunk**: 保存部分块（默认值：False，\\ **对于 S3 必须为 False**\\ ）"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:74
 msgid "**enable_async_loading**: Async loading (default: False)"
@@ -139,7 +141,8 @@ msgid ""
 "spec passed to the LMCache server, rather than through ``remote_url`` + "
 "``extra_config``. Each ``--l2-adapter`` argument takes a JSON object "
 "whose ``\"type\": \"s3\"`` field selects the S3 adapter."
-msgstr "在多进程（MP）模式下，S3 通过传递给 LMCache 服务器的 JSON 规范配置为 L2 适配器，而不是通过 ``remote_url`` + ``extra_config``。每个 ``--l2-adapter`` 参数接受一个 JSON 对象，其 ``\\\"type\\\": \\\"s3\\\"`` 字段选择 S3 适配器。"
+msgstr ""
+"在多进程（MP）模式下，S3 通过传递给 LMCache 服务器的 JSON 规范配置为 L2 适配器，而不是通过 ``remote_url`` + ``extra_config``\\ 。每个 ``--l2-adapter`` 参数接受一个 JSON 对象，其 ``\\\"type\\\": \\\"s3\\\"`` 字段选择 S3 适配器。"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:122
 msgid "S3 L2 Adapter Fields"
@@ -147,13 +150,15 @@ msgstr "S3 L2 适配器字段"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:124
 msgid "**type** (required): must be ``\"s3\"``."
-msgstr "**类型**（必需）：必须是 ``\"s3\"``。"
+msgstr ""
+"**类型**\\ （必需）：必须是 ``\"s3\"``\\ 。"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:125
 msgid ""
 "**s3_endpoint** (required): bucket URL. Accepts either ``s3://bucket`` or"
 " the bare host form (e.g. ``bucket.s3.us-east-1.amazonaws.com``)."
-msgstr "**s3_endpoint** (必需): 存储桶 URL。接受 ``s3://bucket`` 或裸主机形式（例如 ``bucket.s3.us-east-1.amazonaws.com``）。"
+msgstr ""
+"**s3_endpoint** (必需): 存储桶 URL。接受 ``s3://bucket`` 或裸主机形式（例如 ``bucket.s3.us-east-1.amazonaws.com``\\ ）。"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:127
 msgid "**s3_region** (required): AWS region for the S3 client."
@@ -161,32 +166,37 @@ msgstr "**s3_region** (必需): S3 客户端的 AWS 区域。"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:128
 msgid "**s3_num_io_threads**: number of CRT IO threads (default ``64``)."
-msgstr "**s3_num_io_threads**: CRT IO 线程的数量（默认 ``64``）。"
+msgstr ""
+"**s3_num_io_threads**: CRT IO 线程的数量（默认 ``64``\\ ）。"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:129
 msgid ""
 "**s3_prefer_http2**: attempt HTTP/2 via ALPN negotiation (default "
 "``true``)."
-msgstr "**s3_prefer_http2**: 通过 ALPN 协商尝试 HTTP/2（默认 ``true``）。"
+msgstr ""
+"**s3_prefer_http2**: 通过 ALPN 协商尝试 HTTP/2（默认 ``true``\\ ）。"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:130
 msgid ""
 "**s3_enable_s3express**: enable S3 Express One Zone signing (default "
 "``false``)."
-msgstr "**s3_enable_s3express**: 启用 S3 Express 单区域签名（默认 ``false``）。"
+msgstr ""
+"**s3_enable_s3express**: 启用 S3 Express 单区域签名（默认 ``false``\\ ）。"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:131
 msgid ""
 "**disable_tls**: bypass TLS, for non-AWS HTTP endpoints (default "
 "``false``)."
-msgstr "**disable_tls**: 跳过 TLS，用于非 AWS HTTP 端点（默认 ``false``）。"
+msgstr ""
+"**disable_tls**: 跳过 TLS，用于非 AWS HTTP 端点（默认 ``false``\\ ）。"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:132
 msgid ""
 "**aws_access_key_id**, **aws_secret_access_key**: optional static "
 "credentials. When omitted the adapter uses the AWS default credentials "
 "chain (``aws configure``, environment variables, IRSA, etc.)."
-msgstr "**aws_access_key_id**, **aws_secret_access_key**: 可选的静态凭证。当省略时，适配器使用 AWS 默认凭证链（``aws configure``、环境变量、IRSA 等）。"
+msgstr ""
+"**aws_access_key_id**, **aws_secret_access_key**: 可选的静态凭证。当省略时，适配器使用 AWS 默认凭证链（\\ ``aws configure``\\ 、环境变量、IRSA 等）。"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:135
 msgid ""
@@ -194,7 +204,8 @@ msgid ""
 " L2 eviction. Set to ``0`` (default) to disable usage tracking — "
 "``get_usage()`` then returns ``(-1.0, -1.0)`` and no automatic eviction "
 "is triggered."
-msgstr "**max_capacity_gb**: ``get_usage()`` 用于基于水印的 L2 逐出所使用的容量。设置为 ``0``（默认）以禁用使用跟踪 — ``get_usage()`` 将返回 ``(-1.0, -1.0)``，并且不会触发自动逐出。"
+msgstr ""
+"**max_capacity_gb**: ``get_usage()`` 用于基于水印的 L2 逐出所使用的容量。设置为 ``0``\\ （默认）以禁用使用跟踪 — ``get_usage()`` 将返回 ``(-1.0, -1.0)``\\ ，并且不会触发自动逐出。"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:138
 msgid ""
@@ -203,7 +214,8 @@ msgid ""
 " for the full schema. When present, keys that are currently being loaded "
 "(reference-counted by the lookup-and-lock path) are skipped by "
 "``delete()``."
-msgstr "**逐出**：可选的子字典，启用此适配器的 L2 逐出控制器。有关完整的架构，请参见 :class:`L2AdapterConfigBase` ``_parse_eviction_config``。当存在时，当前正在加载的键（通过查找和锁定路径进行引用计数）将被 ``delete()`` 跳过。"
+msgstr ""
+"**逐出**\\ ：可选的子字典，启用此适配器的 L2 逐出控制器。有关完整的架构，请参见 :class:`L2AdapterConfigBase` ``_parse_eviction_config``\\ 。当存在时，当前正在加载的键（通过查找和锁定路径进行引用计数）将被 ``delete()`` 跳过。"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:145
 msgid "Differences vs Non-MP S3"
@@ -214,7 +226,8 @@ msgid ""
 "The MP adapter honors first-class eviction: it implements ``delete()`` "
 "(real S3 ``DeleteObject``), refcounted ``submit_unlock``, and "
 "``get_usage()`` driven by ``max_capacity_gb``."
-msgstr "MP 适配器支持一流的逐出：它实现了 ``delete()``（真实的 S3 ``DeleteObject``）、引用计数的 ``submit_unlock`` 和由 ``max_capacity_gb`` 驱动的 ``get_usage()``。"
+msgstr ""
+"MP 适配器支持一流的逐出：它实现了 ``delete()``\\ （真实的 S3 ``DeleteObject``\\ ）、引用计数的 ``submit_unlock`` 和由 ``max_capacity_gb`` 驱动的 ``get_usage()``\\ 。"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:150
 msgid ""
@@ -223,7 +236,8 @@ msgid ""
 "name is ``<model>@<kv_rank_hex>@<chunk_hash_hex>``, which is **not** "
 "compatible with the non-MP naming. A bucket populated by non-MP LMCache "
 "cannot be read directly by MP LMCache and vice versa."
-msgstr "键通过 ``ObjectKey`` (``model_name`` + ``kv_rank`` + ``chunk_hash``) 而不是 ``CacheEngineKey`` 来识别。线格式对象名称为 ``<model>@<kv_rank_hex>@<chunk_hash_hex>``，这与非 MP 命名 **不** 兼容。由非 MP LMCache 填充的桶不能被 MP LMCache 直接读取，反之亦然。"
+msgstr ""
+"键通过 ``ObjectKey`` (``model_name`` + ``kv_rank`` + ``chunk_hash``) 而不是 ``CacheEngineKey`` 来识别。线格式对象名称为 ``<model>@<kv_rank_hex>@<chunk_hash_hex>``\\ ，这与非 MP 命名 **不** 兼容。由非 MP LMCache 填充的桶不能被 MP LMCache 直接读取，反之亦然。"
 
 #: ../../source/kv_cache/storage_backends/s3.rst:155
 msgid "Unfull chunks are rejected (same constraint as non-MP)."
