@@ -118,7 +118,13 @@ class Bitmap:
         ...
 
     def find_rightmost_one(self) -> int:
-        """Index of the highest set bit (the right-most 1), or -1 if none."""
+        """Index of the highest set bit (the right-most 1).
+
+        Returns ``-1`` when no bit is set; the value is signed so the empty
+        case is representable (an unsigned index could not encode it). Check
+        for ``-1`` before using the result as an index into ``set`` / ``clear``
+        / ``test``.
+        """
         ...
 
     def __and__(self, other: Bitmap) -> Bitmap:

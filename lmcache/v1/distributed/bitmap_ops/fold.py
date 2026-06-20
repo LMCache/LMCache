@@ -116,7 +116,9 @@ def find_rightmost_one(servable: Bitmap) -> int:
         servable: Any bitmap; typically the output of :func:`fold`.
 
     Returns:
-        The largest set bit index, or ``-1`` if no bit is set.
+        The largest set bit index, or ``-1`` if no bit is set. The result is
+        signed so the empty case is representable; check for ``-1`` before using
+        it as an index.
     """
     return servable.find_rightmost_one()
 
@@ -228,7 +230,6 @@ def _fold_python(
         A bitmap of size ``num_chunks + 1``; bit ``L`` set iff every group can
         serve a length-``L`` prefix.
     """
-    num_groups = len(group_windows)
     group_stride = num_chunks * num_ranks
 
     # For each group, ``run`` is the count of consecutive present chunks ending

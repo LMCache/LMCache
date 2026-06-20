@@ -420,7 +420,7 @@ def _reference_longest_hit(num_chunks, group_present, group_windows):
     best = 0
     for length in range(num_chunks + 1):
         servable_by_all = True
-        for present, window in zip(group_present, group_windows):
+        for present, window in zip(group_present, group_windows, strict=True):
             lo = 0 if window <= 0 else max(0, length - window)
             if not all(j in present for j in range(lo, length)):
                 servable_by_all = False
