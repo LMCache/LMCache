@@ -54,6 +54,7 @@ class RequestType(enum.Enum):
     COMMIT_STORE = enum.auto()
     PREPARE_RETRIEVE = enum.auto()
     COMMIT_RETRIEVE = enum.auto()
+    QUERY = enum.auto()
 
     # Controller operations
     CLEAR = enum.auto()

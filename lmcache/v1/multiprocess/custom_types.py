@@ -315,7 +315,7 @@ class IPCCacheServerKey:
 
 # Type exports
 KVCache = list[CudaIPCWrapper]
-
+QCache = list[CudaIPCWrapper]
 
 class RegisterEngineDrivenContextPayload(msgspec.Struct):
     """Payload for the REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT protocol message.

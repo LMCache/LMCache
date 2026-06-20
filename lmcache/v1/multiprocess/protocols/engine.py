@@ -23,6 +23,7 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     KVCache,
     RegisterEngineDrivenContextPayload,
+    QCache,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
@@ -73,6 +74,7 @@ REQUEST_NAMES = [
     "COMMIT_STORE",
     "PREPARE_RETRIEVE",
     "COMMIT_RETRIEVE",
+    "QUERY"
 ]
 
 # Type alias for cache keys
@@ -235,6 +237,11 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         "COMMIT_RETRIEVE": ProtocolDefinition(
             payload_classes=[KeyType, int],
             response_class=bool,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        "QUERY": ProtocolDefinition(
+            payload_classes=[KeyType, int, str, QCache, bytes],
+            response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
         ),
     }

@@ -16,7 +16,7 @@ from lmcache import torch_dev
 from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints, is_mla
-from lmcache.v1.multiprocess.custom_types import RegisterEngineDrivenContextPayload
+from lmcache.v1.multiprocess.custom_types import QCache, RegisterEngineDrivenContextPayload
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.mq import MessageQueueClient
@@ -180,6 +180,34 @@ class TransferContext(ABC):
         Raises:
             RuntimeError: If register() was not called first.
         """
+    
+    @abstractmethod
+    def submit_query(
+        self,
+        request_id: str,
+        key: Any,
+        instance_id: int,
+        layer_name: str,
+        q_caches: QCache,
+        event: IPCEvent,
+    ) -> MessagingFuture:
+        """Submit a query save request and return a completion future.
+
+        Args:
+            request_id: External request identifier.
+            key: LMCache key object for the store range.
+            instance_id: Worker process instance identifier.
+            layer_name: The name of the layer this query cache belongs to.
+            q_caches: The query cache tensors.
+            event: Synchronization event object.
+            blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
+
+        Returns:
+            A future compatible with adapter-side ``query()``/``result()`` flow.
+
+        Raises:
+            RuntimeError: If register() was not called first.
+        """
 
     @abstractmethod
     def submit_retrieve(
@@ -282,6 +310,26 @@ class LMCacheDrivenTransferContext(TransferContext):
             self._mq_client,
             RequestType.STORE,
             [key, instance_id, block_ids, event.ipc_handle()],
+        ).to_cuda_future()
+
+    def submit_query(
+        self,
+        _request_id: str,
+        key: Any,
+        instance_id: int,
+        layer_name: str,
+        _q_caches: QCache,
+        event: IPCEvent,
+    ) -> MessagingFuture:
+        if self._mq_client is None or self._send_request is None:
+            raise RuntimeError(
+                "Handle transfer context is not registered. "
+                "Call register() before submit_query()."
+            )
+        return self._send_request(
+            self._mq_client,
+            RequestType.QUERY,
+            [key, instance_id, layer_name, _q_caches, event.ipc_handle()],
         ).to_cuda_future()
 
     def submit_retrieve(
@@ -450,6 +498,26 @@ class EngineDrivenTransferContext(TransferContext):
 
         future = MessagingFuture()
         future.set_result(ok)
+        return future
+
+    def submit_query(
+        self,
+        _request_id: str,
+        key: Any,
+        instance_id: int,
+        layer_name: str,
+        _q_caches: QCache,
+        event: IPCEvent,
+    ) -> MessagingFuture:
+        if self._non_gpu_context is None:
+            raise RuntimeError(
+                "Data transfer context is not registered. "
+                "Call register() before submit_store()."
+            )
+
+        # Not yet implemented on the non-GPU path
+        future: MessagingFuture[bool] = MessagingFuture()
+        future.set_result(True)
         return future
 
     def submit_retrieve(
