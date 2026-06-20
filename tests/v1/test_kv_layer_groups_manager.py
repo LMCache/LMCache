@@ -43,7 +43,7 @@ def _build_manager(
 
     return KVLayerGroupsManager(
         tensors,
-        engine_kv_format=lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+        engine_kv_formats=[lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS] * len(tensors),
         num_blocks=num_blocks,
         engine_group_infos=engine_group_infos,
     )
@@ -71,6 +71,39 @@ class TestKVLayerGroupsManager:
         assert group.shape_desc.nb == 32
         assert group.shape_desc.bs == 256
         assert group.dtype == torch.float16
+
+    def test_build_mixed_formats_per_group(self):
+        """MiniMax-M3 shape: a K+V group and a key-only MLA group are shaped
+        with their own per-layer formats (kv_size 2 and 1), not one shared
+        format -- the server-side per-group path."""
+        # First Party
+        import lmcache.c_ops as lmc_ops
+
+        tensors = [
+            torch.randn(2, 32, 256, 8, 64, dtype=torch.bfloat16),  # K+V (rank-5)
+            torch.randn(32, 256, 128, dtype=torch.bfloat16),  # MLA key-only (rank-3)
+        ]
+        manager = KVLayerGroupsManager(
+            tensors,
+            engine_kv_formats=[
+                lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+                lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
+            ],
+            num_blocks=32,
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,)),
+                EngineGroupInfo(1, (1,)),
+            ],
+        )
+
+        groups = manager.kernel_groups
+        assert len(groups) == 2
+        by_group = {g.engine_group_idx: g for g in groups}
+        assert by_group[0].shape_desc.kv_size == 2  # K+V main cache
+        assert by_group[0].shape_desc.nh == 8
+        assert by_group[1].shape_desc.kv_size == 1  # key-only MLA index cache
+        assert by_group[1].shape_desc.nh == 1
+        assert by_group[1].shape_desc.hs == 128
 
     def test_build_multiple_layers_same_shape(self):
         tensors = [

@@ -69,8 +69,7 @@ EXCLUDED_ENGINE_GROUP = -1
 
 def group_layers_by_identity(
     kv_caches: "DiscoverableKVCache",
-    engine_kv_format: "lmc_ops.EngineKVFormat",
-    num_layers: int,
+    engine_kv_formats: "Sequence[lmc_ops.EngineKVFormat]",
     per_layer_engine_group_idx: Sequence[int] | None = None,
 ) -> list[tuple[LayerGroupIdentity, list[int]]]:
     """Partition layer indices by :data:`LayerGroupIdentity`.
@@ -81,21 +80,28 @@ def group_layers_by_identity(
     Args:
         kv_caches: Registered KV cache structure inspected for per-layer shape
             and dtype.
-        engine_kv_format: Format descriptor returned by
-            :func:`normalize_kv_and_discover_format`, used to read heads/sizes.
-        num_layers: Number of registered KV tensors to partition.
-        per_layer_engine_group_idx: Optional per-registered-index engine
-            block group id. When ``None`` every layer is treated as block group
-            0 (non-hybrid); when present, layers from different engine block
-            groups never share an identity even if their tensor shapes match.
-            Layers whose value is ``EXCLUDED_ENGINE_GROUP`` are left out of all
-            groups (e.g. cross-layer KV-sharing layers whose KV lives in their
-            target owner's blocks).
+        engine_kv_formats: One Engine KV format per registered tensor, each
+            returned by :func:`normalize_kv_and_discover_format` and used to read
+            heads/sizes/``kv_size``. Its length is the layer count. Homogeneous
+            models repeat one shared format; a model that mixes formats across
+            engine groups -- e.g. MiniMax-M3's K+V main cache (``kv_size=2``) plus
+            its key-only MLA index cache (``kv_size=1``) -- supplies the differing
+            per-layer formats.
+        per_layer_engine_group_idx: Optional engine block group id per layer.
+            When ``None`` every layer is treated as block group 0 (non-hybrid);
+            when present, layers from different engine block groups never share an
+            identity even if their tensor shapes match. Layers whose value is
+            ``EXCLUDED_ENGINE_GROUP`` are left out of all groups (e.g. cross-layer
+            KV-sharing layers whose KV lives in their target owner's blocks).
 
     Returns:
         A list of ``(identity, layer_indices)`` pairs sorted by each group's
         first layer index, so the group order is deterministic and identical on
         both the vLLM and server sides.
+
+    Raises:
+        ValueError: If ``per_layer_engine_group_idx`` is given but its length
+            does not match ``engine_kv_formats``.
     """
     # First Party
     from lmcache.v1.gpu_connector.utils import (
@@ -106,8 +112,16 @@ def group_layers_by_identity(
         is_mla,
     )
 
-    mla = is_mla(engine_kv_format)
-    kv_size = 1 if mla else 2
+    num_layers = len(engine_kv_formats)
+    if (
+        per_layer_engine_group_idx is not None
+        and len(per_layer_engine_group_idx) != num_layers
+    ):
+        raise ValueError(
+            f"per_layer_engine_group_idx has {len(per_layer_engine_group_idx)} "
+            f"entries but engine_kv_formats has {num_layers} layers"
+        )
+
     groups_dict: dict[LayerGroupIdentity, list[int]] = defaultdict(list)
     for idx in range(num_layers):
         engine_group_idx = (
@@ -119,10 +133,13 @@ def group_layers_by_identity(
         # KV-sharing layers, whose KV lives in their target owner's blocks).
         if engine_group_idx == EXCLUDED_ENGINE_GROUP:
             continue
-        nh = 1 if mla else get_num_heads(kv_caches, engine_kv_format, idx)
-        hs = get_head_size(kv_caches, engine_kv_format, idx)
-        dt = get_dtype(kv_caches, engine_kv_format, idx)
-        bs = get_block_size(kv_caches, engine_kv_format, idx)
+        layer_format = engine_kv_formats[idx]
+        mla = is_mla(layer_format)
+        kv_size = 1 if mla else 2
+        nh = 1 if mla else get_num_heads(kv_caches, layer_format, idx)
+        hs = get_head_size(kv_caches, layer_format, idx)
+        dt = get_dtype(kv_caches, layer_format, idx)
+        bs = get_block_size(kv_caches, layer_format, idx)
 
         identity = LayerGroupIdentity(
             kv_size=kv_size,
@@ -277,7 +294,7 @@ class KVLayerGroupsManager:
     def __init__(
         self,
         kv_caches: "DiscoverableKVCache",
-        engine_kv_format: "lmc_ops.EngineKVFormat",
+        engine_kv_formats: "Sequence[lmc_ops.EngineKVFormat]",
         num_blocks: int,
         engine_group_infos: "Sequence[EngineGroupInfo]" = (),
         lmcache_tokens_per_chunk: int = 256,
@@ -296,9 +313,13 @@ class KVLayerGroupsManager:
 
         Args:
             kv_caches: KV cache structure accepted by
-                :func:`normalize_kv_and_discover_format`.
-            engine_kv_format: Format returned by
-                :func:`normalize_kv_and_discover_format`.
+                :func:`normalize_and_discover_per_group_formats`.
+            engine_kv_formats: One Engine KV format per layer (its length is the
+                layer count), from
+                :func:`normalize_and_discover_per_group_formats`. A model that
+                mixes formats across engine groups (e.g. MiniMax-M3) supplies the
+                differing per-layer formats so each group is shaped with its own;
+                homogeneous models repeat one shared format.
             num_blocks: Number of paged blocks in the device KV cache.
             engine_group_infos: Engine KV cache group metadata, one info per
                 kernel group in kernel-group order, or empty.
@@ -308,7 +329,6 @@ class KVLayerGroupsManager:
         # lmcache.v1.gpu_connector.__init__ → metadata → kv_layer_groups.
         # First Party
         from lmcache.v1.gpu_connector.utils import (
-            get_num_layers,
             make_page_buffer_shape_desc,
             resolve_block_stride_and_log_layout,
         )
@@ -317,7 +337,7 @@ class KVLayerGroupsManager:
         self._kernel_groups: list[KernelGroupInfo] = []
         self._object_groups: list[ObjectGroupInfo] = []
 
-        num_layers = get_num_layers(kv_caches, engine_kv_format)
+        num_layers = len(engine_kv_formats)
         if num_layers == 0:
             logger.debug("No KV caches available, skipping KV layer groups building")
             return
@@ -325,9 +345,8 @@ class KVLayerGroupsManager:
         per_layer_engine_group_idx = get_engine_group_indices(
             engine_group_infos, num_layers
         )
-
         groups_by_identity = group_layers_by_identity(
-            kv_caches, engine_kv_format, num_layers, per_layer_engine_group_idx
+            kv_caches, engine_kv_formats, per_layer_engine_group_idx
         )
 
         # Engine group infos are produced by the same group_layers_by_identity
@@ -345,15 +364,20 @@ class KVLayerGroupsManager:
         for group_idx, ((_, _, _, bs, engine_group_idx, dt), indices) in enumerate(
             groups_by_identity
         ):
+            # Layers are bucketed by geometry derived from their format, so in
+            # practice every layer in a group shares one format; use the first
+            # layer's. (Promoting format into the identity to make this provable
+            # is a follow-up.)
+            group_format = engine_kv_formats[indices[0]]
             block_stride_elems = resolve_block_stride_and_log_layout(
                 kv_caches,
-                engine_kv_format,
+                group_format,
                 layer_idx=indices[0],
                 group_idx=group_idx,
             )
             shape_desc = make_page_buffer_shape_desc(
                 kv_caches,
-                engine_kv_format,
+                group_format,
                 layer_idx=indices[0],
                 num_layers_in_group=len(indices),
                 num_blocks=num_blocks,

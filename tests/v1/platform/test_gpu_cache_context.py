@@ -99,7 +99,7 @@ def _build_manager(
     """Build a real :class:`KVLayerGroupsManager` from synthetic tensors."""
     return KVLayerGroupsManager(
         tensors,
-        engine_kv_format=engine_kv_format,
+        engine_kv_formats=[engine_kv_format] * len(tensors),
         num_blocks=num_blocks,
         engine_group_infos=engine_group_infos,
         lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,

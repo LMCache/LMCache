@@ -33,10 +33,11 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_blocks,
     get_num_layers,
     is_mla,
-    normalize_kv_and_discover_format,
+    normalize_and_discover_per_group_formats,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.multiprocess.custom_types import KVCache
+from lmcache.v1.multiprocess.group_view import engine_group_layer_indices
 from lmcache.v1.platform.base_cache_context import BaseCacheContext
 from lmcache.v1.platform.cpu.stub_cpu_device import StubStream
 
@@ -92,21 +93,28 @@ class CPUCacheContext(BaseCacheContext):
         # GPUCacheContext uses, so we don't need to hand-roll any
         # PageBufferShapeDesc here. ``layout_hints`` / ``engine_type``
         # are forwarded so the signature matches GPUCacheContext.
+        # Detect each engine group's format from the registered tensors so a
+        # model mixing formats across groups (e.g. MiniMax-M3) groups and shapes
+        # correctly. Homogeneous models yield one shared format for every layer.
         (
-            engine_kv_format,
             kv_caches_normalized,
-        ) = normalize_kv_and_discover_format(
+            engine_kv_formats,
+        ) = normalize_and_discover_per_group_formats(
             unwrapped,
+            engine_group_layer_indices(engine_group_infos),
             engine_type,
-            layout_hints=layout_hints,
+            layout_hints,
         )
         kv_caches_list: list[torch.Tensor] = list(kv_caches_normalized)
+        # Representative format for context-wide, format-only queries (identical
+        # to the single detected format for every homogeneous model).
+        engine_kv_format = engine_kv_formats[0]
         is_mla_val = is_mla(engine_kv_format)
         num_layers_val = get_num_layers(kv_caches_list, engine_kv_format)
         num_blocks_val = get_num_blocks(kv_caches_list, engine_kv_format)
         kv_layer_groups_manager = KVLayerGroupsManager(
             kv_caches_list,
-            engine_kv_format=engine_kv_format,
+            engine_kv_formats=engine_kv_formats,
             num_blocks=num_blocks_val,
             engine_group_infos=engine_group_infos,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
