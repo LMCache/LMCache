@@ -177,8 +177,8 @@ coordinator. This is the recommended way to develop and debug P2P.
    # Terminal 1 — coordinator
    lmcache coordinator --host 0.0.0.0 --port 9300
 
-   # Terminal 2 — node "A": LMCache + vLLM on GPU 0
-   CUDA_VISIBLE_DEVICES=0 lmcache server \
+   # Terminal 2 — node "A": LMCache server
+   lmcache server \
        --host 127.0.0.1 --port 6555 --http-port 7555 \
        --l1-size-gb 50 --eviction-policy LRU \
        --l1-align-bytes 65536 \
@@ -187,11 +187,12 @@ coordinator. This is the recommended way to develop and debug P2P.
        --coordinator-advertise-ip 127.0.0.1 \
        --p2p-advertise-url 127.0.0.1:8555
 
+   # Terminal 3 — node "A": vLLM on GPU 0
    CUDA_VISIBLE_DEVICES=0 vllm serve <model> --port 8000 \
        --kv-transfer-config '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"lmcache.mp.port":6555}}'
 
-   # Terminal 3 — node "B": LMCache + vLLM on GPU 1
-   CUDA_VISIBLE_DEVICES=1 lmcache server \
+   # Terminal 4 — node "B": LMCache server
+   lmcache server \
        --host 127.0.0.1 --port 6556 --http-port 7556 \
        --l1-size-gb 50 --eviction-policy LRU \
        --l1-align-bytes 65536 \
@@ -200,6 +201,7 @@ coordinator. This is the recommended way to develop and debug P2P.
        --coordinator-advertise-ip 127.0.0.1 \
        --p2p-advertise-url 127.0.0.1:8556
 
+   # Terminal 5 — node "B": vLLM on GPU 1
    CUDA_VISIBLE_DEVICES=1 vllm serve <model> --port 8001 \
        --kv-transfer-config '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"lmcache.mp.port":6556}}'
 
