@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for the fold / unfold prefix-cache hit logic."""
 
-# Standard
-import random
-
 # Third Party
 import pytest
 
@@ -356,35 +353,40 @@ class TestUnfoldOperator:
 
 
 # --------------------------------------------------------------------------- #
-# Native vs pure-Python fallback equivalence (the native ops are the oracle's  #
-# fast path; the fallbacks must agree bit-for-bit)                             #
+# Native ops must match the pure-Python reference (_fold_python/_unfold_python) #
+# bit-for-bit, on deterministic constructed inputs.                            #
 # --------------------------------------------------------------------------- #
 
 
-class TestNativeMatchesFallback:
-    def test_fold_and_unfold_random_equivalence(self):
-        rng = random.Random(1234)
-        for _ in range(300):
-            num_groups = rng.randint(1, 4)
-            num_chunks = rng.randint(1, 16)
-            num_ranks = rng.randint(1, 3)
-            gw = [rng.choice([-1, 1, 2, 3]) for _ in range(num_groups)]
-            nk = num_groups * num_chunks * num_ranks
+class TestNativeMatchesReference:
+    # (num_chunks, num_ranks, group_windows) shapes, small to large.
+    CASES = [
+        (64, 1, [FULL_ATTENTION_WINDOW]),
+        (64, 4, [FULL_ATTENTION_WINDOW, FULL_ATTENTION_WINDOW]),
+        (100, 3, [FULL_ATTENTION_WINDOW, 2, 5, 1]),
+        (300, 4, [FULL_ATTENTION_WINDOW, FULL_ATTENTION_WINDOW, 8, 32, 1]),
+    ]
+
+    def test_fold_matches_reference(self):
+        for num_chunks, num_ranks, gw in self.CASES:
+            nk = len(gw) * num_chunks * num_ranks
             bm = Bitmap(nk)
-            bm.batched_set([i for i in range(nk) if rng.random() < 0.6])
-
-            native_servable = fold(bm, num_chunks, num_ranks, gw)
-            py_servable = _fold_python(bm, num_chunks, num_ranks, gw)
+            # Deterministic irregular gap pattern (no RNG): drop ~1/7 of bits on
+            # an irregular stride so windows and rank-reduction are exercised.
+            bm.batched_set([i for i in range(nk) if (i * 5 + i // num_ranks) % 7 != 0])
             assert (
-                native_servable.get_indices_list() == py_servable.get_indices_list()
-            ), f"fold mismatch gw={gw} C={num_chunks} R={num_ranks}"
+                fold(bm, num_chunks, num_ranks, gw).get_indices_list()
+                == _fold_python(bm, num_chunks, num_ranks, gw).get_indices_list()
+            ), f"fold mismatch C={num_chunks} R={num_ranks} gw={gw}"
 
-            hit = find_rightmost_one(native_servable)
-            native_mask = unfold(hit, num_chunks, num_ranks, gw)
-            py_mask = _unfold_python(hit, num_chunks, num_ranks, gw)
-            assert native_mask.get_indices_list() == py_mask.get_indices_list(), (
-                f"unfold mismatch gw={gw} C={num_chunks} R={num_ranks} hit={hit}"
-            )
+    def test_unfold_matches_reference_at_boundaries(self):
+        for num_chunks, num_ranks, gw in self.CASES:
+            # Cover empty, both ends, and interior hit lengths.
+            for hit in (0, 1, num_chunks // 3, num_chunks - 1, num_chunks):
+                assert (
+                    unfold(hit, num_chunks, num_ranks, gw).get_indices_list()
+                    == _unfold_python(hit, num_chunks, num_ranks, gw).get_indices_list()
+                ), f"unfold mismatch hit={hit} C={num_chunks} R={num_ranks} gw={gw}"
 
 
 # --------------------------------------------------------------------------- #
@@ -444,7 +446,9 @@ class TestEndToEndAgainstVllmStyleReference:
     """Drive the full fold/find_rightmost_one/unfold pipeline and compare the
     hit length and retain mask against an independent vLLM-style oracle."""
 
-    def _run(self, num_chunks, num_ranks, group_windows, present_cells):
+    def _run(
+        self, num_chunks, num_ranks, group_windows, present_cells, expected_hit=None
+    ):
         # present_cells[g] = set of (chunk, rank) present for group g.
         stride = num_chunks * num_ranks
         bm = Bitmap(len(group_windows) * stride)
@@ -467,6 +471,8 @@ class TestEndToEndAgainstVllmStyleReference:
             f"hit {hit} != reference {ref_hit} "
             f"(windows={group_windows}, present={group_present})"
         )
+        if expected_hit is not None:
+            assert hit == expected_hit, f"hit {hit} != hand-derived {expected_hit}"
         assert mask.get_indices_list() == _expected_retained_indices(
             hit, num_chunks, num_ranks, group_windows
         )
@@ -514,22 +520,45 @@ class TestEndToEndAgainstVllmStyleReference:
             ],
         )  # -> hit 2
 
-    def test_random_scenarios(self):
-        rng = random.Random(20240617)
-        for _ in range(400):
-            num_groups = rng.randint(1, 5)
-            num_chunks = rng.randint(0, 20)
-            num_ranks = rng.randint(1, 3)
-            group_windows = [
-                rng.choice([-1, -1, 1, 2, 3, 5]) for _ in range(num_groups)
-            ]
-            present_cells = []
-            for _g in range(num_groups):
-                cells = {
-                    (chunk, rank)
-                    for chunk in range(num_chunks)
-                    for rank in range(num_ranks)
-                    if rng.random() < 0.65
-                }
-                present_cells.append(cells)
-            self._run(num_chunks, num_ranks, group_windows, present_cells)
+    def test_large_adversarial_hybrid(self):
+        # A large, deterministic scenario engineered so the hit is decided by a
+        # mid-window sliding-window gap, with decoy later gaps a wrong algorithm
+        # might trip on. 300 chunks x 4 ranks x 5 groups.
+        #
+        # windows: [full, full, SW8, SW32, mamba]
+        #   - g0 full: gap at chunk 150          -> full prefix capped at 150
+        #   - g1 full: one rank of chunk 220 gone -> chunk 220 absent (rank test)
+        #   - g2 SW8:  gaps at 10,11,12 (old)     -> must NOT affect a hit > 20
+        #   - g3 SW32: gap at chunk 130           -> lengths 131..162 unservable
+        #   - g4 mamba: fully present
+        # The only length servable by all groups and <= 150 is 130 (g3's gap at
+        # 130 blocks 131..162; g3 is servable again only at >= 163, beyond g0's
+        # 150 cap). So the model-wide hit is exactly 130.
+        num_chunks, num_ranks = 300, 4
+        group_windows = [FULL_ATTENTION_WINDOW, FULL_ATTENTION_WINDOW, 8, 32, 1]
+        cells = [
+            {(j, r) for j in range(num_chunks) for r in range(num_ranks)}
+            for _ in group_windows
+        ]
+        cells[0] -= {(150, r) for r in range(num_ranks)}
+        cells[1].discard((220, 2))
+        cells[2] -= {(j, r) for j in (10, 11, 12) for r in range(num_ranks)}
+        cells[3] -= {(130, r) for r in range(num_ranks)}
+        self._run(num_chunks, num_ranks, group_windows, cells, expected_hit=130)
+
+    def test_dense_deterministic_pattern(self):
+        # Wide grid with a deterministic irregular gap pattern (no RNG): drops
+        # ~1/9 of cells on an irregular stride so many window/intersection
+        # boundaries are exercised. Validated against the reference oracle.
+        num_chunks, num_ranks = 128, 3
+        group_windows = [FULL_ATTENTION_WINDOW, 2, 5, 1]
+        cells = []
+        for g in range(len(group_windows)):
+            present = {
+                (j, r)
+                for j in range(num_chunks)
+                for r in range(num_ranks)
+                if (j * 7 + r * 3 + g * 5) % 9 != 0
+            }
+            cells.append(present)
+        self._run(num_chunks, num_ranks, group_windows, cells)

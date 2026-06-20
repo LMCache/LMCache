@@ -34,17 +34,9 @@ from collections.abc import Iterable, Sequence
 
 # First Party
 from lmcache.native_storage_ops import Bitmap
+from lmcache.native_storage_ops import fold as _native_fold
+from lmcache.native_storage_ops import unfold as _native_unfold
 from lmcache.v1.distributed.api import TrimPolicy
-
-try:
-    # Native C++ operators (operate on the packed Bitmap buffer; no Python
-    # per-bit loop). Always present in a normally built package; the pure-Python
-    # fallbacks below are used only if an older extension lacks them.
-    from lmcache.native_storage_ops import fold as _native_fold
-    from lmcache.native_storage_ops import unfold as _native_unfold
-except ImportError:  # pragma: no cover - stale/native-less build
-    _native_fold = None
-    _native_unfold = None
 
 FULL_ATTENTION_WINDOW = -1
 """Sentinel ``group_windows`` value marking a full-attention object group
@@ -111,9 +103,7 @@ def fold(
     if num_chunks < 0:
         raise ValueError(f"num_chunks must be >= 0 (got {num_chunks})")
 
-    if _native_fold is not None:
-        return _native_fold(found, num_chunks, num_ranks, list(group_windows))
-    return _fold_python(found, num_chunks, num_ranks, group_windows)
+    return _native_fold(found, num_chunks, num_ranks, list(group_windows))
 
 
 def find_rightmost_one(servable: Bitmap) -> int:
@@ -167,9 +157,7 @@ def unfold(
     if num_chunks < 0:
         raise ValueError(f"num_chunks must be >= 0 (got {num_chunks})")
 
-    if _native_unfold is not None:
-        return _native_unfold(hit_length, num_chunks, num_ranks, list(group_windows))
-    return _unfold_python(hit_length, num_chunks, num_ranks, group_windows)
+    return _native_unfold(hit_length, num_chunks, num_ranks, list(group_windows))
 
 
 def fold_unfold_ranked(
@@ -224,7 +212,22 @@ def _fold_python(
     num_ranks: int,
     group_windows: Sequence[int],
 ) -> Bitmap:
-    """Pure-Python fallback for :func:`fold` (used if the native op is absent)."""
+    """Reference (pure-Python) implementation of :func:`fold`, for testing only.
+
+    Kept as the oracle the native :func:`fold` is validated against in the test
+    suite; it is not used at runtime. Behavior matches :func:`fold`.
+
+    Args:
+        found: Group-major / chunk-major / rank-minor presence bitmap.
+        num_chunks: Number of LMCache chunks in the request.
+        num_ranks: Number of kv_rank shards per chunk.
+        group_windows: Per-object-group cross-chunk window size in chunks;
+            ``<= 0`` means full attention.
+
+    Returns:
+        A bitmap of size ``num_chunks + 1``; bit ``L`` set iff every group can
+        serve a length-``L`` prefix.
+    """
     num_groups = len(group_windows)
     group_stride = num_chunks * num_ranks
 
@@ -257,7 +260,22 @@ def _unfold_python(
     num_ranks: int,
     group_windows: Sequence[int],
 ) -> Bitmap:
-    """Pure-Python fallback for :func:`unfold`."""
+    """Reference (pure-Python) implementation of :func:`unfold`, for testing only.
+
+    Kept as the oracle the native :func:`unfold` is validated against in the
+    test suite; it is not used at runtime. Behavior matches :func:`unfold`.
+
+    Args:
+        hit_length: Model-wide prefix hit length in chunks (clamped to
+            ``num_chunks``).
+        num_chunks: Number of LMCache chunks in the request.
+        num_ranks: Number of kv_rank shards per chunk.
+        group_windows: Per-object-group cross-chunk window size in chunks;
+            ``<= 0`` means full attention.
+
+    Returns:
+        Retain mask of length ``len(group_windows) * num_chunks * num_ranks``.
+    """
     hit_length = min(hit_length, num_chunks)
     num_groups = len(group_windows)
     group_stride = num_chunks * num_ranks
