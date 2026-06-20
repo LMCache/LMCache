@@ -118,21 +118,12 @@ def create_engine_group_infos_from_vllm(
     # First Party
     from lmcache.utils import EngineType
     from lmcache.v1.gpu_connector.utils import (
-        get_num_layers,
-        normalize_kv_and_discover_format,
+        normalize_and_discover_per_group_formats,
     )
     from lmcache.v1.kv_layer_groups import (
         EXCLUDED_ENGINE_GROUP,
         group_layers_by_identity,
     )
-
-    # Inspect the real registered tensors for physical layout and dtype.
-    engine_kv_format, normalized_kv_caches = normalize_kv_and_discover_format(
-        list(kv_caches.values()),
-        EngineType.VLLM,
-        layout_hints=layout_hints,
-    )
-    num_layers = get_num_layers(normalized_kv_caches, engine_kv_format)
 
     # vLLM-specific field access (confined to this function): map each
     # registered KV tensor to its vLLM engine KV cache group index. vLLM places
@@ -140,12 +131,26 @@ def create_engine_group_infos_from_vllm(
     # have disjoint block-id spaces and must not share an LMCache group. ``None``
     # means a single (non-hybrid) group, i.e. every layer shares one block-id
     # space.
+    per_layer_discoverable_kv_caches = list(kv_caches.values())
     layer_to_idx = {name: idx for idx, name in enumerate(kv_caches.keys())}
     vllm_groups = (
         getattr(kv_cache_config, "kv_cache_groups", ()) or ()
         if kv_cache_config is not None
         else ()
     )
+
+    # Detect the Engine KV format of each registered tensor: per engine group
+    # when they mix formats (e.g. MiniMax-M3), one shared format otherwise.
+    layer_index_groups = [
+        [layer_to_idx[name] for name in group.layer_names] for group in vllm_groups
+    ]
+    normalized_kv_caches, engine_kv_formats = normalize_and_discover_per_group_formats(
+        per_layer_discoverable_kv_caches,
+        layer_index_groups,
+        EngineType.VLLM,
+        layout_hints,
+    )
+    num_layers = len(engine_kv_formats)
     # Layers absent from every engine group's ``layer_names`` are cross-layer
     # KV-sharing layers (e.g. google/gemma-4-E4B-it): vLLM aliases them to a
     # target owner's KV tensor, so the owner's group already covers them. Tag
@@ -183,8 +188,7 @@ def create_engine_group_infos_from_vllm(
         )
         for identity, indices in group_layers_by_identity(
             normalized_kv_caches,
-            engine_kv_format,
-            num_layers,
+            engine_kv_formats,
             per_layer_group_idx,
         )
     ]
