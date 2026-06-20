@@ -129,8 +129,8 @@ def parse_kvcache_shape_spec(spec_str: str) -> List[LayerGroupSpec]:
         dtype_key = dtype_str.lower()
         if dtype_key not in dtype_map:
             raise ValueError(
-                "Unrecognized dtype '%s' in group specification: %s. "
-                "Supported: %s" % (dtype_str, group_spec, list(dtype_map.keys()))
+                f"Unrecognized dtype '{dtype_str}' in group specification: "
+                f"{group_spec}. Supported: {list(dtype_map.keys())}"
             )
 
         try:
