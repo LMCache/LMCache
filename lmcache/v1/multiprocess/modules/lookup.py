@@ -68,6 +68,34 @@ def compute_extra_count(
     return tp - 1 if tp > world_size else 0
 
 
+def _key_prefix_to_chunk_count(
+    key_prefix_len: int,
+    world_size: int,
+    num_object_groups: int,
+) -> int:
+    """Convert a contiguous key-prefix length to a chunk count.
+
+    The chunk-major key layout packs ``world_size * num_object_groups`` keys per
+    chunk, so a fully-present prefix of ``key_prefix_len`` keys spans
+    ``key_prefix_len // (world_size * num_object_groups)`` chunks.
+
+    NOTE: this is only correct under full attention -- every object group present
+    for every hit chunk. Once sliding-window prefetch lands (the windowed fold),
+    the model-wide hit is no longer a uniform contiguous key prefix, and the
+    chunk count must come from the fold's reported hit length rather than this
+    arithmetic. Isolated here so that switch is a one-function change.
+
+    Args:
+        key_prefix_len: Length of the contiguous found-key prefix.
+        world_size: Number of kv_rank shards per chunk.
+        num_object_groups: Number of object groups in the chunk-major layout.
+
+    Returns:
+        The number of fully-present chunks in the prefix.
+    """
+    return key_prefix_len // (world_size * num_object_groups)
+
+
 @dataclass
 class _PrefetchJob:
     handle: PrefetchHandle
@@ -329,9 +357,7 @@ class LookupModule:
         if found is None:
             return None
 
-        # Chunk-major layout packs world_size * num_object_groups keys per chunk.
-        found_count = found // (job.world_size * job.num_object_groups)
-        return found_count
+        return _key_prefix_to_chunk_count(found, job.world_size, job.num_object_groups)
 
     def query_prefetch_status(
         self,
@@ -369,10 +395,8 @@ class LookupModule:
         # 1. the world size is the same between keys
         # 2. the lookup sort the keys in prefix order and breaks at the
         #    first failure
-        # Chunk-major layout packs world_size * num_object_groups keys per chunk,
-        # so a chunk is a full-attention hit only when its whole slice is set.
-        found_count = found.count_leading_ones() // (
-            job.world_size * job.num_object_groups
+        found_count = _key_prefix_to_chunk_count(
+            found.count_leading_ones(), job.world_size, job.num_object_groups
         )
 
         self._ctx.event_bus.publish(

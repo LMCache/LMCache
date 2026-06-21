@@ -27,26 +27,30 @@ logger = init_logger(__name__)
 
 # Toggle for splitting kernel groups into per-window object groups. Off by
 # default, which keeps every kernel group in a single full-attention object
-# group (the pre-hybrid behavior). Read at detection time so it can be set per
-# process / overridden in tests.
-SEPARATE_OBJECT_GROUPS_ENV = "LMCACHE_SEPARATE_OBJECT_GROUPS"
+# group (the pre-hybrid behavior). This is an MP-mode (cache-server) feature
+# flag; it follows the ``ENV_MP_* = "LMCACHE_MP_*"`` env-var convention used
+# elsewhere in the multiprocess path (e.g. ``ENV_MP_TRANSFER_MODE``). Read at
+# detection time so it can be set per process / overridden in tests.
+ENV_MP_SEPARATE_OBJECT_GROUPS = "LMCACHE_MP_SEPARATE_OBJECT_GROUPS"
 
 
 def separate_object_groups_enabled() -> bool:
     """Whether object-group separation by sliding-window size is enabled.
 
-    Controlled by the :data:`SEPARATE_OBJECT_GROUPS_ENV` environment variable;
-    accepts ``1``/``true``/``yes``/``on`` (case-insensitive). Defaults to off.
+    Controlled by the :data:`ENV_MP_SEPARATE_OBJECT_GROUPS` environment
+    variable; accepts ``1``/``true``/``yes``/``on`` (case-insensitive).
+    Defaults to off.
 
     Returns:
         ``True`` if separation is enabled, ``False`` otherwise.
     """
-    return os.getenv(SEPARATE_OBJECT_GROUPS_ENV, "false").strip().lower() in (
+    return os.environ.get(ENV_MP_SEPARATE_OBJECT_GROUPS, "false").strip().lower() in (
         "1",
         "true",
         "yes",
         "on",
     )
+
 
 # ------------------------------------------------------------------ #
 #  Constants                                                           #

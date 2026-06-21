@@ -403,7 +403,7 @@ class TestKernelAndObjectGroups:
         # With separation off (the default), a full-attention group and a
         # sliding-window group still collapse into one full-attention object
         # group, and get_sw_size_chunks reports -1.
-        monkeypatch.setenv("LMCACHE_SEPARATE_OBJECT_GROUPS", "false")
+        monkeypatch.setenv("LMCACHE_MP_SEPARATE_OBJECT_GROUPS", "false")
         tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(2)]
         manager = _build_manager(
             tensors,
@@ -422,7 +422,7 @@ class TestKernelAndObjectGroups:
         # With separation on, the full-attention and sliding-window kernel groups
         # land in distinct object groups, ordered by first kernel group index,
         # and get_sw_size_chunks reports each group's real window.
-        monkeypatch.setenv("LMCACHE_SEPARATE_OBJECT_GROUPS", "true")
+        monkeypatch.setenv("LMCACHE_MP_SEPARATE_OBJECT_GROUPS", "true")
         tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(2)]
         manager = _build_manager(
             tensors,
@@ -442,12 +442,10 @@ class TestKernelAndObjectGroups:
         assert manager.object_groups[1].sw_size_chunks >= 1
         assert manager.get_sw_size_chunks(1) == manager.object_groups[1].sw_size_chunks
 
-    def test_object_group_separation_enabled_non_hybrid_single_group(
-        self, monkeypatch
-    ):
+    def test_object_group_separation_enabled_non_hybrid_single_group(self, monkeypatch):
         # Even with separation on, a non-hybrid model (no sliding-window groups)
         # yields a single full-attention object group.
-        monkeypatch.setenv("LMCACHE_SEPARATE_OBJECT_GROUPS", "true")
+        monkeypatch.setenv("LMCACHE_MP_SEPARATE_OBJECT_GROUPS", "true")
         tensors = [
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
             torch.randn(2, 32, 256, 16, 64, dtype=torch.float16),
