@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-15 11:17+0000\n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -96,9 +96,9 @@ msgid ""
 "calling guide <https://docs.vllm.ai/en/latest/features/tool_calling"
 "/#llama-models-llama3_json>`_ from vLLM."
 msgstr ""
-"通过遵循 vLLM 的 `Llama 工具调用指南 "
+"请参照 vLLM 的 `Llama 工具调用指南 "
 "<https://docs.vllm.ai/en/latest/features/tool_calling/#llama-models-"
-"llama3_json>`_ 获取工具调用的聊天模板。"
+"llama3_json>`_ 获取工具调用所需的聊天模板。"
 
 #: ../../source/recipes/llama.rst:46
 msgid "Start vLLM with the LMCache MP connector:"
@@ -110,7 +110,7 @@ msgstr "**Meta-Llama-3.1-8B** (1 GPU):"
 
 #: ../../source/recipes/llama.rst:59
 msgid "**Meta-Llama-3.1-8B-Instruct** (1 GPU):"
-msgstr "**Meta-Llama-3.1-8B-指令** (1 GPU):"
+msgstr "**Meta-Llama-3.1-8B-Instruct** (1 GPU):"
 
 #: ../../source/recipes/llama.rst:73
 msgid "**Meta-Llama-3.1-70B** (4 GPUs):"
@@ -118,14 +118,14 @@ msgstr "**Meta-Llama-3.1-70B** (4 GPUs):"
 
 #: ../../source/recipes/llama.rst:85
 msgid "**Meta-Llama-3.1-70B-Instruct** (4 GPUs):"
-msgstr "**Meta-Llama-3.1-70B-指令** (4 GPUs):"
+msgstr "**Meta-Llama-3.1-70B-Instruct** (4 GPUs):"
 
 #: ../../source/recipes/llama.rst:100
 msgid ""
 "Adjust ``--tensor-parallel-size`` to match your hardware. For the generic"
 " LMCache + vLLM wiring (ports, remote hosts), see "
-":doc:`../mp/quickstart`."
-msgstr "调整 ``--tensor-parallel-size`` 以匹配您的硬件。有关通用 LMCache + vLLM 连接（端口、远程主机），请参见 :doc:`../mp/quickstart`。"
+":doc:`../getting_started/quickstart`."
+msgstr "调整 ``--tensor-parallel-size`` 以匹配您的硬件。有关通用 LMCache + vLLM 连接（端口、远程主机），请参见 :doc:`../getting_started/quickstart`。"
 
 #: ../../source/recipes/llama.rst
 msgid "SGLang"
@@ -140,8 +140,10 @@ msgid "TRT-LLM"
 msgstr "TRT-LLM"
 
 #: ../../source/recipes/llama.rst:110
-msgid "**Status:** Not supported. LMCache TRT-LLM integration is in progress."
-msgstr "**状态：** 不支持。LMCache TRT-LLM 集成正在进行中。"
+msgid ""
+"**Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-"
+"LLM + LMCache setup."
+msgstr "**状态：** 支持。有关 TRT-LLM + LMCache 设置，请参见 :doc:`../getting_started/quickstart`。"
 
 #: ../../source/recipes/llama.rst:113
 msgid "CacheBlend support"
@@ -178,4 +180,7 @@ msgstr "注意事项"
 #: ../../source/recipes/llama.rst:132
 msgid "None known."
 msgstr "没有已知的问题。"
+
+#~ msgid "**Status:** Not supported. LMCache TRT-LLM integration is in progress."
+#~ msgstr "**状态：** 不支持。LMCache TRT-LLM 集成正在进行中。"
 

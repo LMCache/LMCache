@@ -744,15 +744,16 @@ Options
    * - ``--mode {gpu,cpu}``
      - ``gpu``
      - Run mode. ``gpu`` allocates real CUDA tensors and uses CUDA IPC
-       (handle path). ``cpu`` allocates POSIX-SHM-backed tensors and
-       uses the data-transfer path (gather/scatter via slot descriptors).
-   * - ``--transfer-mode {auto,handle,data}``
+       (lmcache-driven handle path). ``cpu`` allocates POSIX-SHM-backed tensors
+       and uses the engine-driven (worker-side gather/scatter) path by default.
+   * - ``--transfer-mode {auto,engine_driven,lmcache_driven}``
      - ``auto``
-     - Transport routing for STORE/RETRIEVE. ``handle`` forces the
-       single-shot path (``REGISTER_KV_CACHE`` + ``STORE``/``RETRIEVE``).
-       ``data`` forces the two-phase gather/scatter path
+     - Transport routing for STORE/RETRIEVE. ``lmcache_driven`` forces the
+       single-shot handle path (``REGISTER_KV_CACHE`` + ``STORE``/``RETRIEVE``),
+       which supports both CUDA IPC and CPU SHM zero-copy transfers.
+       ``engine_driven`` forces the worker-side gather/scatter path
        (``REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT`` + ``PREPARE``/``COMMIT``).
-       ``auto`` maps gpu→handle and cpu→data.
+       ``auto`` maps gpu→lmcache_driven and cpu→engine_driven.
    * - ``--num-tokens N``
      - ``512``
      - Tokens per synthetic request.
@@ -797,9 +798,9 @@ CPU mode (no GPU)
 runs on a CPU-only host (``StubCPUDevice``); the bench tool allocates
 POSIX-SHM-backed KV tensors and exercises the full RPC path.
 
-By default ``--mode cpu`` uses the data-transfer path (``auto`` →
-``cpu→data``). To use the zero-copy SHM handle path instead, pass
-``--transfer-mode handle``:
+By default ``--mode cpu`` uses the engine-driven gather/scatter path
+(``auto`` → ``cpu→engine_driven``). To use the zero-copy SHM
+handle path instead, pass ``--transfer-mode lmcache_driven``:
 
 .. code-block:: bash
 
@@ -808,11 +809,11 @@ By default ``--mode cpu`` uses the data-transfer path (``auto`` →
        --host localhost --port 5555 \
        --l1-size-gb 2 --eviction-policy LRU
 
-   # Terminal 2 -- run bench in CPU + handle mode
+   # Terminal 2 -- run bench in CPU + lmcache_driven mode
    lmcache bench server \
        --rpc-url tcp://localhost:5555 \
        --url http://localhost:8080 \
-       --mode cpu --transfer-mode handle \
+       --mode cpu --transfer-mode lmcache_driven \
        --start 0 --end 2
 
 

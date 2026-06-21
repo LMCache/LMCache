@@ -46,7 +46,8 @@ msgstr "收集了哪些数据？"
 msgid ""
 "Usage stats are emitted as three message types, implemented in "
 "``usage_context.py``:"
-msgstr "使用统计信息以三种消息类型发出，具体实现位于 ``usage_context.py``："
+msgstr ""
+"使用统计信息以三种消息类型发出，具体实现位于 ``usage_context.py``\\ ："
 
 #: ../../source/developer_guide/usage/usage_stats_collection.rst:15
 msgid ""
@@ -86,7 +87,8 @@ msgstr "预览收集的数据"
 msgid ""
 "If you enable **local logging**, usage messages are appended to your "
 "specified log file. To inspect the most recent entries:"
-msgstr "如果您启用 **本地日志记录**，使用消息将附加到您指定的日志文件中。要检查最近的条目："
+msgstr ""
+"如果您启用 **本地日志记录**\\ ，使用消息将附加到您指定的日志文件中。要检查最近的条目："
 
 #: ../../source/developer_guide/usage/usage_stats_collection.rst:56
 msgid "Configuration & Opt-out"
@@ -103,7 +105,8 @@ msgid ""
 "When ``LMCACHE_TRACK_USAGE`` is set to ``false``, "
 "``InitializeUsageContext`` will return ``None`` and no data will be sent "
 "or logged."
-msgstr "当 ``LMCACHE_TRACK_USAGE`` 设置为 ``false`` 时，``InitializeUsageContext`` 将返回 ``None``，并且不会发送或记录任何数据。"
+msgstr ""
+"当 ``LMCACHE_TRACK_USAGE`` 设置为 ``false`` 时，\\ ``InitializeUsageContext`` 将返回 ``None``\\ ，并且不会发送或记录任何数据。"
 
 #: ../../source/developer_guide/usage/usage_stats_collection.rst:67
 msgid "Local logging"
@@ -119,5 +122,6 @@ msgstr "如果您希望在将数据发送到服务器的同时（或替代）记
 msgid ""
 "Omitting the ``local_log`` argument (or passing ``None``) disables local "
 "file logging."
-msgstr "省略 ``local_log`` 参数（或传递 ``None``）将禁用本地文件日志记录。"
+msgstr ""
+"省略 ``local_log`` 参数（或传递 ``None``\\ ）将禁用本地文件日志记录。"
 

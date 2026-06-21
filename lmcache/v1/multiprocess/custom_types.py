@@ -68,7 +68,9 @@ class CudaIPCWrapper:
 
     def __init__(self, tensor: torch.Tensor):
         # First Party
-        from lmcache.v1.gpu_connector.utils import attempt_permute_to_contiguous_view
+        from lmcache.v1.gpu_connector.kv_format.contiguity import (
+            attempt_permute_to_contiguous_view,
+        )
 
         # Permute any non-contiguous view (e.g. vLLM's NHD-over-HND) so the
         # shape/stride we encode across IPC reflects the physical layout.
@@ -420,6 +422,10 @@ def get_customized_encoder(type: Any) -> msgspec.msgpack.Encoder:
             if isinstance(obj, supported_type):
                 data = cfg.serializer(obj)
                 return msgspec.msgpack.Ext(cfg.code, data)
+        if isinstance(obj, torch.dtype):
+            return str(obj).removeprefix("torch.")
+        if isinstance(obj, torch.Size):
+            return list(obj)
         raise TypeError(f"Unsupported type for serialization: {type(obj)}")
 
     return msgspec.msgpack.Encoder(enc_hook=enc_hook)
@@ -432,4 +438,15 @@ def get_customized_decoder(type: Any) -> msgspec.msgpack.Decoder:
                 return cfg.deserializer(data)
         raise TypeError(f"Unsupported ext code for deserialization: {code}")
 
-    return msgspec.msgpack.Decoder(ext_hook=ext_hook, type=type)
+    def dec_hook(expected_type: type, obj: Any) -> Any:
+        if expected_type is torch.dtype:
+            return getattr(torch, obj)
+        if expected_type is torch.Size:
+            return torch.Size(obj)
+        if isinstance(obj, expected_type):
+            return obj
+        raise NotImplementedError(
+            f"Unsupported type for deserialization: {expected_type}"
+        )
+
+    return msgspec.msgpack.Decoder(ext_hook=ext_hook, dec_hook=dec_hook, type=type)

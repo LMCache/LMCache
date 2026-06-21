@@ -116,6 +116,10 @@ class EventType(Enum):
     # MP mp.lookup_prefetch span / hit-rate aggregate).
     CB_PREFIX_LOOKUP_START = "cb.prefix_lookup.start"
     CB_PREFIX_LOOKUP_END = "cb.prefix_lookup.end"
+    # Coordinator (fleet directory) match leg — cross-server analogue of
+    # cb.fingerprint_match. Async: START at submit, END on the resolving poll.
+    CB_COORDINATOR_MATCH_START = "cb.coordinator_match.start"
+    CB_COORDINATOR_MATCH_END = "cb.coordinator_match.end"
     CB_SPARSE_PREFETCH_START = "cb.sparse_prefetch.start"
     CB_SPARSE_PREFETCH_END = "cb.sparse_prefetch.end"
 

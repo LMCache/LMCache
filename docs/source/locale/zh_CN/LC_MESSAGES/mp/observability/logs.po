@@ -1,0 +1,83 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/observability/logs.rst:2
+msgid "Logging"
+msgstr "日志记录"
+
+#: ../../source/mp/observability/logs.rst:4
+msgid ""
+"Logging subscribers emit debug-level messages for store, retrieve, "
+"lookup, L1, and StorageManager events via Python's standard ``logging`` "
+"module."
+msgstr "日志订阅者通过 Python 的标准 ``logging`` 模块为存储、检索、查找、L1 和 StorageManager 事件发出调试级别的消息。"
+
+#: ../../source/mp/observability/logs.rst:7
+msgid ""
+"When OpenTelemetry is installed, ``init_logger`` automatically attaches "
+"an OTel ``LoggingHandler`` so that log records are forwarded to any "
+"configured OTel ``LoggerProvider``. The handler respects the "
+"``LMCACHE_LOG_LEVEL`` environment variable."
+msgstr "当安装 OpenTelemetry 时，``init_logger`` 会自动附加一个 OTel ``LoggingHandler``，以便将日志记录转发到任何配置的 OTel ``LoggerProvider``。该处理程序遵循 ``LMCACHE_LOG_LEVEL`` 环境变量。"
+
+#: ../../source/mp/observability/logs.rst:16
+msgid "Key log messages:"
+msgstr "关键日志消息："
+
+#: ../../source/mp/observability/logs.rst:22
+msgid "Level"
+msgstr "级别"
+
+#: ../../source/mp/observability/logs.rst:23
+msgid "Message"
+msgstr "消息"
+
+#: ../../source/mp/observability/logs.rst:24
+#: ../../source/mp/observability/logs.rst:26
+#: ../../source/mp/observability/logs.rst:28
+msgid "INFO"
+msgstr "INFO"
+
+#: ../../source/mp/observability/logs.rst:25
+msgid "``Stored N tokens in X seconds``"
+msgstr "``Stored N tokens in X seconds``"
+
+#: ../../source/mp/observability/logs.rst:27
+msgid "``Retrieved N tokens in X seconds``"
+msgstr "``Retrieved N tokens in X seconds``"
+
+#: ../../source/mp/observability/logs.rst:29
+msgid "``Prefetch request completed (L1+L2): N/M prefix hits``"
+msgstr "``Prefetch request completed (L1+L2): N/M prefix hits``"
+
+#: ../../source/mp/observability/logs.rst:30
+#: ../../source/mp/observability/logs.rst:32
+msgid "DEBUG"
+msgstr "DEBUG"
+
+#: ../../source/mp/observability/logs.rst:31
+msgid "``MP store start: session=... device=...``"
+msgstr "``MP store start: session=... device=...``"
+
+#: ../../source/mp/observability/logs.rst:33
+msgid "``MP retrieve end: session=... retrieved_count=...``"
+msgstr "``MP retrieve end: session=... retrieved_count=...``"
+

@@ -1,7 +1,7 @@
 .. _recipe_minimax_m2:
 
-MiniMaxM2ForCausalLM
-====================
+MiniMax M2 series
+=================
 
 Validated models
 ----------------

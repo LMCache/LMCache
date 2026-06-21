@@ -27,6 +27,8 @@ from lmcache.v1.mp_observability.config import (
 )
 from lmcache.v1.mp_observability.trace import maybe_initialize_trace_recorder
 from lmcache.v1.multiprocess.config import (
+    DEFAULT_COORDINATOR_CONFIG,
+    CoordinatorConfig,
     MPServerConfig,
     add_mp_server_args,
     parse_args_to_mp_server_config,
@@ -46,6 +48,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 )
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
+from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
 from lmcache.v1.multiprocess.mq import MessageQueueServer
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
@@ -159,12 +162,15 @@ def add_handler_helper(
 def _build_modules(
     ctx: MPCacheServerContext,
     mp_config: MPServerConfig,
+    coordinator_config: CoordinatorConfig,
 ) -> list[EngineModule]:
     """Assemble the list of engine modules based on configuration.
 
     Args:
         ctx: The shared engine context.
         mp_config: Server configuration determining which modules to load.
+        coordinator_config: Coordinator connection used by the P2P controller
+            for peer discovery.
 
     Returns:
         List of initialized engine modules.
@@ -174,6 +180,12 @@ def _build_modules(
         supported_transfer_mode="engine_driven".
     """
     lookup_module = LookupModule(ctx)
+    p2p_controller = P2PController(
+        ctx,
+        mp_config.p2p_config,
+        coordinator_config,
+        mp_config.instance_id,
+    )
 
     # Build the transfer and blend modules first so the ManagementModule can
     # be constructed with them as liveness targets / reap listeners. They are
@@ -258,7 +270,13 @@ def _build_modules(
     # and joins the reaper before those modules clear their state and before
     # storage_manager.close() runs.
     blend_modules = [blend_module] if blend_module is not None else []
-    return [lookup_module, management, *transfer_modules, *blend_modules]
+    return [
+        lookup_module,
+        p2p_controller,
+        management,
+        *transfer_modules,
+        *blend_modules,
+    ]
 
 
 def run_cache_server(
@@ -267,6 +285,7 @@ def run_cache_server(
     obs_config: ObservabilityConfig,
     return_engine: bool = False,
     start_prometheus_http_server: bool = True,
+    coordinator_config: CoordinatorConfig = DEFAULT_COORDINATOR_CONFIG,
 ) -> tuple[MessageQueueServer, MPCacheServer] | None:
     """Run the LMCache cache server with ZMQ message queue.
 
@@ -274,6 +293,8 @@ def run_cache_server(
         mp_config: Configuration for the ZMQ multiprocess server.
         storage_manager_config: Configuration for the storage manager.
         obs_config: Configuration for the observability stack.
+        coordinator_config: Coordinator connection used by the P2P controller
+            for peer discovery.
         return_engine: If True, return (server, engine) after starting;
                        if False, run blocking loop to keep server alive.
         start_prometheus_http_server: Whether to start a standalone
@@ -329,7 +350,7 @@ def run_cache_server(
         hash_algorithm=mp_config.hash_algorithm,
     )
 
-    modules = _build_modules(ctx, mp_config)
+    modules = _build_modules(ctx, mp_config, coordinator_config)
     engine = MPCacheServer(ctx, modules)
 
     zmq_context = zmq.Context.instance()

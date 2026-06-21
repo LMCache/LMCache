@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/cli/server.rst:2
 msgid "lmcache server"
-msgstr "lmcache 服务器"
+msgstr "lmcache server"
 
 #: ../../source/cli/server.rst:4
 msgid ""
@@ -31,16 +31,15 @@ msgid ""
 "server that ``lmcache describe``, ``lmcache ping kvcache``, ``lmcache "
 "kvcache``, and ``lmcache bench server`` talk to."
 msgstr ""
-"``lmcache server`` 命令启动独立的 LMCache 多进程 (MP) 服务器，该服务器暴露 ZMQ 控制平面和 HTTP 前端 "
-"(状态、健康检查、清除缓存、校验和 API)。这是 ``lmcache describe``、``lmcache ping "
-"kvcache``、``lmcache kvcache`` 和 ``lmcache bench server`` 进行交互的服务器。"
+"``lmcache server`` 命令启动独立的 LMCache 多进程 (MP) 服务器，该服务器暴露 ZMQ 控制平面和 HTTP 前端 (状态、健康检查、清除缓存、校验和 API)。这是 ``lmcache describe``\\ 、\\ ``lmcache ping kvcache``\\ 、\\ ``lmcache kvcache`` 和 ``lmcache bench server`` 进行交互的服务器。"
 
 #: ../../source/cli/server.rst:12
 msgid ""
 "This command requires the full ``lmcache`` installation with CUDA "
 "extensions. It is **not** available in the lightweight ``lmcache-cli`` "
 "package."
-msgstr "此命令需要完整的 ``lmcache`` 安装，并带有 CUDA 扩展。它在轻量级的 ``lmcache-cli`` 包中 **不可用**。"
+msgstr ""
+"此命令需要完整的 ``lmcache`` 安装，并带有 CUDA 扩展。它在轻量级的 ``lmcache-cli`` 包中 **不可用**\\ 。"
 
 #: ../../source/cli/server.rst:21
 msgid "Quick start"
@@ -111,7 +110,8 @@ msgstr "``--eviction-policy POLICY``"
 
 #: ../../source/cli/server.rst:59
 msgid "L1 eviction policy (e.g. ``LRU``)."
-msgstr "L1 逐出策略（例如 ``LRU``）。"
+msgstr ""
+"L1 逐出策略（例如 ``LRU``\\ ）。"
 
 #: ../../source/cli/server.rst:60
 msgid "``--eviction-trigger-watermark RATIO``"
@@ -147,8 +147,7 @@ msgid ""
 "``http://coordinator:9300``). Opt-in; enables fleet registration. See "
 ":doc:`/mp/coordinator`."
 msgstr ""
-"在此基础 URL（例如 ``http://coordinator:9300``）注册 MP 协调器。可选；启用车队注册。请参见 "
-":doc:`/mp/coordinator`。"
+"在此基础 URL（例如 ``http://coordinator:9300``\\ ）注册 MP 协调器。可选；启用车队注册。请参见 :doc:`/mp/coordinator`。"
 
 #: ../../source/cli/server.rst:70
 msgid "``--coordinator-advertise-ip IP``"
@@ -168,7 +167,8 @@ msgstr "``--coordinator-heartbeat-interval SECONDS``"
 msgid ""
 "Seconds between heartbeats (``> 0``, default ``5``). Keep well below the "
 "coordinator's instance timeout."
-msgstr "心跳之间的秒数（``> 0``，默认值为 ``5``）。应远低于协调器的实例超时。"
+msgstr ""
+"心跳之间的秒数（\\ ``> 0``\\ ，默认值为 ``5``\\ ）。应远低于协调器的实例超时。"
 
 #: ../../source/cli/server.rst:76
 msgid "``--coordinator-l2-event-reporting``"
@@ -186,7 +186,8 @@ msgstr "``--coordinator-l2-event-flush-interval SECONDS``"
 
 #: ../../source/cli/server.rst:80
 msgid "Seconds between L2 event batch flushes (``> 0``, default ``1``)."
-msgstr "L2 事件批量刷新之间的秒数（``> 0``，默认 ``1``）。"
+msgstr ""
+"L2 事件批量刷新之间的秒数（\\ ``> 0``\\ ，默认 ``1``\\ ）。"
 
 #: ../../source/cli/server.rst:81
 #, python-brace-format
@@ -211,6 +212,5 @@ msgid ""
 "through their own flag groups; see ``lmcache server --help`` for the "
 "complete set."
 msgstr ""
-"L2 适配器、可观察性和 Prometheus 导出器通过各自的标志组进行配置；有关完整的设置，请参见 ``lmcache server "
-"--help``。"
+"L2 适配器、可观察性和 Prometheus 导出器通过各自的标志组进行配置；有关完整的设置，请参见 ``lmcache server --help``\\ 。"
 

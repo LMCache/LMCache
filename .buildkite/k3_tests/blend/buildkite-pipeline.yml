@@ -1,0 +1,20 @@
+# Paste this into the Buildkite pipeline's "Steps" editor.
+# It uploads the real pipeline definition from the repo.
+#
+# Fill in HF_TOKEN (gated model access), GH_TOKEN (read access to the private
+# plugin repo), and CB_PLUGIN_REPO (owner/name of the plugin repo). CB_PLUGIN_REF
+# selects which plugin commit to test the PR against; CB_PLUGIN_DIR is the clone
+# destination in the pod.
+agents:
+  queue: "k8s"
+
+env:
+  HF_TOKEN: ""                   # HuggingFace token — gated model access (e.g. Llama)
+  GH_TOKEN: ""                   # GitHub token — read access to the private plugin repo
+  CB_PLUGIN_REPO: ""             # owner/name of the plugin repo (required; set here or in the UI)
+  CB_PLUGIN_REF: "main"          # plugin git ref to test the PR against
+  CB_PLUGIN_DIR: "/tmp/cb-plugin"  # clone destination in the pod
+
+steps:
+  - label: ":pipeline: Upload pipeline"
+    command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/blend/pipeline.yml

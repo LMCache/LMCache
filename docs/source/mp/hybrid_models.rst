@@ -23,24 +23,27 @@ Recipe pages for the validated hybrid-attention architectures:
    :header-rows: 1
    :widths: 34 34 32
 
-   * - Architecture
+   * - Model
      - Attention layout
      - Recipe
-   * - ``Gemma3ForConditionalGeneration``
+   * - Gemma 3
      - Sliding-window + full
      - :doc:`/recipes/gemma3`
-   * - ``Gemma4ForConditionalGeneration``
+   * - Gemma 4
      - Sliding-window + full
      - :doc:`/recipes/gemma4`
-   * - ``GptOssForCausalLM``
+   * - gpt-oss
      - Sliding-window + full
      - :doc:`/recipes/gpt_oss`
-   * - ``Qwen3_5ForConditionalGeneration``
+   * - Qwen3.5 / Qwen3.6 series
      - Mamba / GDN + full
      - :doc:`/recipes/qwen3_5`
-   * - ``DeepseekV4ForCausalLM``
+   * - DeepSeek-V4-Flash
      - Sparse-MLA (multiple KV groups)
      - :doc:`/recipes/deepseek_v4_flash`
+   * - GLM 5.1/5.2
+     - Dynamic Sparse Attention (multiple KV groups)
+     - :doc:`/recipes/glm5_2`
 
 .. toctree::
    :hidden:
@@ -51,6 +54,7 @@ Recipe pages for the validated hybrid-attention architectures:
    /recipes/gpt_oss
    /recipes/qwen3_5
    /recipes/deepseek_v4_flash
+   /recipes/glm5_2
 
 What Works
 ----------

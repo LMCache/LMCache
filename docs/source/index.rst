@@ -15,11 +15,9 @@ Welcome to LMCache!
   :alt: LMCache
   :class: no-scaled-link
 
-.. raw:: html
+.. rst-class:: hero-tagline
 
-   <p style="text-align:center; font-size:24px;">
-   <strong> Supercharge Your LLM with the Fastest KV Cache Layer. </strong>
-   </p>
+**Supercharge Your LLM with the Fastest KV Cache Layer.**
 
 .. note::
    We are currently in the process of upgrading our documentation to provide better guidance and examples. Some sections may be under construction. Thank you for your patience!
@@ -33,14 +31,11 @@ Welcome to LMCache!
    <a class="github-button" href="https://github.com/LMCache/LMCache/fork" data-show-count="true" data-icon="octicon-repo-forked" data-size="large" aria-label="Fork">Fork</a>
    </p>
 
-.. raw:: html
+.. container:: hero-description
 
-   <p style="text-align:justify">
-   LMCache lets LLMs prefill each text only once. By storing the KV caches of all reusable texts, LMCache can reuse the KV caches of any reused text (not necessarily prefix) in any serving engine instance. 
-   It thus reduces prefill delay, i.e., time to first token (TTFT), as well as saves the precious GPU cycles and memory.
+   LMCache lets LLMs prefill each text only once. By storing the KV caches of all reusable texts, LMCache can reuse the KV caches of any reused text (not necessarily prefix) in any serving engine instance. It thus reduces prefill delay, i.e., time to first token (TTFT), as well as saves the precious GPU cycles and memory.
 
-   By combining LMCache with vLLM, LMCaches achieves 3-10x delay savings and GPU cycle reduction in many LLM use cases, including multi-round QA and RAG.
-   </p>
+   By combining LMCache with vLLM, LMCache achieves 3-10x delay savings and GPU cycle reduction in many LLM use cases, including multi-round QA and RAG.
 
 
 For more information, check out the following:

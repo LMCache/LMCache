@@ -46,8 +46,10 @@ jobs:
               with:
                 fetch-depth: 0
 
-            - name: Remove non-release tags
-              run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+$' | xargs -r git tag -d
+            # Keep stable vX.Y.Z and rc/a/b pre-release tags; strip variant tags
+            # (v*-cu129, v*-alpha) that yield invalid PEP 440 versions (see #3123).
+            - name: Remove non-release tags (keep stable + rc/a/b pre-releases)
+              run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+((rc|a|b)[0-9]+)?$' | xargs -r git tag -d
 
             - name: Setup Python 3.13
               uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
@@ -72,13 +74,22 @@ jobs:
               run: |
                 pip install dist/lmcache_cli-*.whl
 
-                # CLI wheel must be pure-Python.
+                # CLI wheel must be pure-Python: no compiled extension bundled.
                 if unzip -l dist/lmcache_cli-*.whl | grep -E '\.(so|pyd)$'; then
                   echo "::error::CLI wheel contains compiled extensions; should be pure-Python"
                   exit 1
                 fi
 
+                # Pure-Python surface must import without torch / native ops.
                 python -c "import lmcache"
+
+                # Native CUDA ops must be unreachable from the slim wheel.
+                if python -c "import lmcache.c_ops" 2>/dev/null; then
+                  echo "::error::CLI wheel can import lmcache.c_ops; native ops must be absent from the pure-Python wheel"
+                  exit 1
+                fi
+                echo "OK: lmcache.c_ops is not importable from the CLI wheel"
+
                 lmcache --help
 
                 # Slim-supported subcommands only (server is full-only).
