@@ -24,6 +24,7 @@ import re
 import pytest
 
 # First Party
+import lmcache._engine_kv_format as engine_kv_format
 import lmcache.python_ops_fallback as fallback
 
 try:
@@ -220,7 +221,12 @@ _shared_func_names = sorted(
     (set(_fallback_callables) & set(_c_ops_callables)) - _EXCLUDED_FUNCS
 )
 
-_fallback_enums = _public_enums(fallback)
+# Enums the fallback re-exports from the canonical lmcache._engine_kv_format
+# module (e.g. EngineKVFormat) are owned by that module, not by the fallback,
+# so discover them there too. Both that module and the compiled c_ops enum are
+# generated from csrc/engine_kv_format.def, so their parity holds by
+# construction; this check guards against a stale build or codegen.
+_fallback_enums = {**_public_enums(fallback), **_public_enums(engine_kv_format)}
 _c_ops_enums = _public_enums(c_ops) if HAS_C_OPS else {}
 _shared_enum_names = sorted(set(_fallback_enums) & set(_c_ops_enums))
 

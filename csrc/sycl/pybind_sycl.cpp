@@ -16,19 +16,14 @@ PYBIND11_MODULE(xpu_ops, m) {
       .value("H2D", TransferDirection::H2D)
       .value("D2H", TransferDirection::D2H)
       .export_values();
-  py::enum_<EngineKVFormat>(m, "EngineKVFormat")
-      .value("NB_NL_TWO_BS_NH_HS", EngineKVFormat::NB_NL_TWO_BS_NH_HS)
-      .value("NL_X_TWO_NB_BS_NH_HS", EngineKVFormat::NL_X_TWO_NB_BS_NH_HS)
-      .value("NL_X_NB_TWO_BS_NH_HS", EngineKVFormat::NL_X_NB_TWO_BS_NH_HS)
-      .value("NL_X_NB_BS_HS", EngineKVFormat::NL_X_NB_BS_HS)
-      .value("TWO_X_NL_X_NBBS_NH_HS", EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS)
-      .value("NL_X_NBBS_ONE_HS", EngineKVFormat::NL_X_NBBS_ONE_HS)
-      .value("NL_X_TWO_NB_NH_BS_HS", EngineKVFormat::NL_X_TWO_NB_NH_BS_HS)
-      .value("NL_X_NB_TWO_NH_BS_HS", EngineKVFormat::NL_X_NB_TWO_NH_BS_HS)
-      .value("NB_NL_TWO_NH_BS_HS", EngineKVFormat::NB_NL_TWO_NH_BS_HS)
-      .value("TWO_X_NL_X_NB_BS_NH_HS", EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS)
-      .value("NL_X_NB_NH_BS_TWO_HS", EngineKVFormat::NL_X_NB_NH_BS_TWO_HS)
-      .export_values();
+  // Members are single-sourced in engine_kv_format.def. The X macro's second
+  // parameter must NOT be named `value`: it would be substituted into the
+  // `.value(` call in the body. The numeric value is unused in this context.
+  auto engine_kv_format = py::enum_<EngineKVFormat>(m, "EngineKVFormat");
+#define X(name, val) engine_kv_format.value(#name, EngineKVFormat::name);
+#include "../engine_kv_format.def"
+#undef X
+  engine_kv_format.export_values();
   m.def("multi_layer_kv_transfer", &multi_layer_kv_transfer,
         py::arg("key_value"), py::arg("key_value_ptrs"),
         py::arg("slot_mapping"), py::arg("paged_memory_device"),
