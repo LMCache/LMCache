@@ -58,6 +58,10 @@ class _FakeRawBlockDevice:
     def __init__(self, path: str, *, size_bytes: int, **kwargs):
         del path, kwargs
         self._data = bytearray(size_bytes)
+        self._next_batch_id = 1
+        self._batch_results: dict[int, list[bool]] = {}
+        self.batched_reads: list[tuple[list[int], list[int]]] = []
+        self.batched_writes: list[tuple[list[int], list[int]]] = []
 
     def size_bytes(self):
         return len(self._data)
@@ -70,6 +74,37 @@ class _FakeRawBlockDevice:
         del total_len
         length = len(data) if payload_len is None else payload_len
         self._data[offset : offset + length] = bytes(memoryview(data)[:length])
+
+    def read_uring(self, offset, out, payload_len, total_len=None):
+        self.pread_into(offset, out, payload_len, total_len)
+
+    def write_uring(self, offset, data, payload_len=None, total_len=None):
+        self.pwrite_from_buffer(offset, data, payload_len, total_len)
+
+    def batched_read(self, offsets, buffers, total_lens):
+        batch_id = self._next_batch_id
+        self._next_batch_id += 1
+        self.batched_reads.append((list(offsets), list(total_lens)))
+        results = []
+        for offset, buf, total_len in zip(offsets, buffers, total_lens, strict=True):
+            self.pread_into(offset, buf, total_len, total_len)
+            results.append(True)
+        self._batch_results[batch_id] = results
+        return batch_id
+
+    def batched_write(self, offsets, buffers, total_lens):
+        batch_id = self._next_batch_id
+        self._next_batch_id += 1
+        self.batched_writes.append((list(offsets), list(total_lens)))
+        results = []
+        for offset, buf, total_len in zip(offsets, buffers, total_lens, strict=True):
+            self.pwrite_from_buffer(offset, buf, total_len, total_len)
+            results.append(True)
+        self._batch_results[batch_id] = results
+        return batch_id
+
+    def wait_iouring(self, batch_id):
+        return self._batch_results.pop(batch_id, [])
 
     def close(self):
         return None
@@ -86,7 +121,11 @@ def _install_fake_raw_block_device(monkeypatch, *, size_bytes: int = 64 * 1024):
     )
 
 
-def _make_raw_block_core(*, use_odirect: bool = False) -> RawBlockCore:
+def _make_raw_block_core(
+    *,
+    use_odirect: bool = False,
+    io_engine: str = "posix",
+) -> RawBlockCore:
     return RawBlockCore(
         RawBlockCoreConfig(
             device_path="/tmp/raw-block-boundary-test",
@@ -104,7 +143,7 @@ def _make_raw_block_core(*, use_odirect: bool = False) -> RawBlockCore:
             meta_enable_periodic=False,
             load_checkpoint_on_init=True,
             meta_verify_on_load=True,
-            io_engine="posix",
+            io_engine=io_engine,
             iouring_queue_depth=256,
         ),
         key_namespace="object",
@@ -234,6 +273,78 @@ def test_raw_block_core_non_odirect_rejects_payload_over_slot_capacity(monkeypat
         )
         assert too_large.results == [False]
         assert core.contains_key("too-large") is False
+    finally:
+        core.close()
+
+
+def test_raw_block_core_load_many_into_batches_iouring_reads(monkeypatch):
+    _install_fake_raw_block_device(monkeypatch)
+    core = _make_raw_block_core(io_engine="io_uring")
+    try:
+        specs = [
+            RawBlockKeySpec(encoded=f"key-{i}", slot_identity=i + 1) for i in range(3)
+        ]
+        objects = [_make_byte_obj(512 + i) for i in range(3)]
+        for i, obj in enumerate(objects):
+            obj.tensor.fill_(i + 1)
+        payloads = [bytes(obj.byte_array) for obj in objects]
+
+        put_result = core.put_many(specs, objects)
+        assert put_result.results == [True, True, True]
+
+        raw_dev = core._rawdev()
+        raw_dev.batched_reads.clear()
+
+        loaded = [_make_byte_obj(len(payload)) for payload in payloads]
+        load_result = core.load_many_into([spec.encoded for spec in specs], loaded)
+
+        assert load_result == [True, True, True]
+        assert [bytes(obj.byte_array) for obj in loaded] == payloads
+        assert len(raw_dev.batched_reads) == 1
+        read_offsets, read_lens = raw_dev.batched_reads[0]
+        assert len(read_offsets) == len(specs)
+        assert read_lens == [len(payload) for payload in payloads]
+    finally:
+        core.close()
+
+
+def test_raw_block_core_uring_cmd_reads_batch_split_chunks(monkeypatch):
+    _install_fake_raw_block_device(monkeypatch)
+    core = _make_raw_block_core(io_engine="io_uring")
+    try:
+        raw_dev = core._rawdev()
+        core.max_data_transfer_size = core.block_align
+
+        payload1 = b"a" * (core.block_align + 512)
+        payload2 = b"b" * core.block_align
+        offset1 = core.block_align
+        offset2 = core.block_align * 4
+        total1 = core.block_align * 2
+        total2 = core.block_align
+        raw_dev._data[offset1 : offset1 + len(payload1)] = payload1
+        raw_dev._data[offset2 : offset2 + len(payload2)] = payload2
+        raw_dev.batched_reads.clear()
+
+        out1 = bytearray(len(payload1))
+        out2 = bytearray(len(payload2))
+        results = core._read_uring_cmd_buffers(
+            [offset1, offset2],
+            [out1, out2],
+            [len(payload1), len(payload2)],
+            [total1, total2],
+        )
+
+        assert results == [True, True]
+        assert bytes(out1) == payload1
+        assert bytes(out2) == payload2
+        assert len(raw_dev.batched_reads) == 1
+        read_offsets, read_lens = raw_dev.batched_reads[0]
+        assert read_offsets == [
+            offset1,
+            offset1 + core.block_align,
+            offset2,
+        ]
+        assert read_lens == [core.block_align, core.block_align, core.block_align]
     finally:
         core.close()
 
@@ -769,7 +880,7 @@ def test_rust_raw_block_backend_close_is_thread_safe(memory_allocator, loop_in_t
 @pytest.mark.skipif(
     not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
 )
-def test_rust_raw_block_backend_batched_get_resets_inflight_on_rawdev_error(
+def test_rust_raw_block_backend_batched_get_returns_none_on_rawdev_error(
     memory_allocator, loop_in_thread
 ):
     with tempfile.TemporaryDirectory() as td:
@@ -831,8 +942,7 @@ def test_rust_raw_block_backend_batched_get_resets_inflight_on_rawdev_error(
             with patch.object(
                 backend._core, "_rawdev", side_effect=RuntimeError("boom")
             ):
-                with pytest.raises(RuntimeError, match="boom"):
-                    backend.get_blocking(key)
+                assert backend.get_blocking(key) is None
             assert backend.inflight_io_count() == 0
         finally:
             backend.close()
@@ -982,8 +1092,7 @@ def test_rust_raw_block_backend_batched_get_releases_allocation_on_read_error(
             raw_dev.pread_into.side_effect = OSError("read failed")
             with patch.object(local_cpu, "allocate", return_value=leaked_obj):
                 with patch.object(backend._core, "_rawdev", return_value=raw_dev):
-                    with pytest.raises(OSError, match="read failed"):
-                        backend.get_blocking(key)
+                    assert backend.get_blocking(key) is None
 
             assert leaked_obj.get_ref_count() == 0
             assert backend.inflight_io_count() == 0
@@ -994,7 +1103,7 @@ def test_rust_raw_block_backend_batched_get_releases_allocation_on_read_error(
 @pytest.mark.skipif(
     not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
 )
-def test_rust_raw_block_backend_batched_get_releases_loaded_prefix_on_read_error(
+def test_rust_raw_block_backend_batched_get_returns_loaded_prefix_on_read_error(
     memory_allocator, loop_in_thread
 ):
     with tempfile.TemporaryDirectory() as td:
@@ -1078,12 +1187,14 @@ def test_rust_raw_block_backend_batched_get_releases_loaded_prefix_on_read_error
                 local_cpu, "allocate", side_effect=[loaded_obj, failed_obj]
             ):
                 with patch.object(backend._core, "_rawdev", return_value=raw_dev):
-                    with pytest.raises(OSError, match="read failed"):
-                        backend.batched_get_blocking([key1, key2])
+                    results = backend.batched_get_blocking([key1, key2])
 
-            assert loaded_obj.get_ref_count() == 0
+            assert results == [loaded_obj, None]
+            assert loaded_obj.get_ref_count() == 1
             assert failed_obj.get_ref_count() == 0
             assert backend.inflight_io_count() == 0
+            loaded_obj.ref_count_down()
+            assert loaded_obj.get_ref_count() == 0
         finally:
             backend.close()
 

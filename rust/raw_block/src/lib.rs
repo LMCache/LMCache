@@ -2405,12 +2405,13 @@ impl RawBlockDevice {
     ///     batch_id: The batch ID returned by batched_write() or batched_read().
     ///               Only completions from this batch are checked.
     ///
-    /// Returns an error if any I/O operation in this batch failed. The error message
-    /// includes details about the first failure encountered.
+    /// Returns a success bitmap aligned with the operations submitted in this
+    /// batch. Submission/setup errors are still raised before a batch id is
+    /// returned.
     #[pyo3(signature = (batch_id))]
-    fn wait_iouring(&self, py: Python<'_>, batch_id: u64) -> PyResult<()> {
+    fn wait_iouring(&self, py: Python<'_>, batch_id: u64) -> PyResult<Vec<bool>> {
         if !self.use_iouring {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         // Get the per-batch tracking for this batch
@@ -2423,24 +2424,16 @@ impl RawBlockDevice {
                     // Check if there are any completions for this batch
                     let mut completions = self.batched_completions.lock().unwrap();
                     let batch_completions = completions.remove(&batch_id);
-                    let mut first_error: Option<PyErr> = None;
+                    let mut results = Vec::new();
                     if let Some(comp_vec) = batch_completions {
                         for comp in comp_vec.iter() {
-                            if let Err(e) = comp.wait() {
-                                if first_error.is_none() {
-                                    first_error = Some(e);
-                                }
-                            }
+                            results.push(comp.wait().is_ok());
                         }
                     }
                     // Clear stored buffer objects for this batch
                     let mut stored_objs = self.batched_buffer_objs.lock().unwrap();
                     stored_objs.remove(&batch_id);
-                    return if let Some(e) = first_error {
-                        Err(e)
-                    } else {
-                        Ok(())
-                    };
+                    return Ok(results);
                 }
             }
         };
@@ -2460,14 +2453,10 @@ impl RawBlockDevice {
         // Check all completion results for errors for this specific batch
         let mut completions = self.batched_completions.lock().unwrap();
         let batch_completions = completions.remove(&batch_id);
-        let mut first_error: Option<PyErr> = None;
+        let mut results = Vec::new();
         if let Some(comp_vec) = batch_completions {
             for comp in comp_vec.iter() {
-                if let Err(e) = comp.wait() {
-                    if first_error.is_none() {
-                        first_error = Some(e);
-                    }
-                }
+                results.push(comp.wait().is_ok());
             }
         }
 
@@ -2479,11 +2468,7 @@ impl RawBlockDevice {
         let mut batch_map = self.batch_in_flight.lock().unwrap();
         batch_map.remove(&batch_id);
 
-        if let Some(e) = first_error {
-            Err(e)
-        } else {
-            Ok(())
-        }
+        Ok(results)
     }
 
     /// Synchronous read using io_uring.
