@@ -51,6 +51,9 @@ def clone_tensor_memory_obj(obj: MemoryObj) -> TensorMemoryObj:
         metadata=copy.deepcopy(obj.metadata),
         parent_allocator=None,
     )
+    obj_size = obj.get_size()
+    if obj_size != new_obj.get_size():
+        new_obj.set_used_size(obj_size)
 
     return new_obj
 
@@ -327,6 +330,23 @@ class MockL2Adapter(L2AdapterInterface):
         """
         with self._lock:
             return key in self._memory_objects
+
+    def get_object_sizes(self, keys: list[ObjectKey]) -> dict[ObjectKey, int]:
+        """Return logical byte sizes for objects stored in the mock adapter.
+
+        Args:
+            keys: Object keys to query.
+
+        Returns:
+            Mapping from keys to stored logical byte sizes. Missing keys
+            are omitted from the result.
+        """
+        with self._lock:
+            return {
+                key: self._memory_objects[key].get_size()
+                for key in keys
+                if key in self._memory_objects
+            }
 
     ##################
     # Helper functions

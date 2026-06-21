@@ -72,6 +72,112 @@ def test_create_fp8_accepts_float_max_workers() -> None:
         processor.close()
 
 
+def test_cachegen_is_registered_by_default() -> None:
+    """The built-in CacheGen serde is available without extra setup."""
+    assert "cachegen" in get_registered_serde_types()
+
+
+def test_create_cachegen_missing_required_kwargs_raises() -> None:
+    """CacheGen serde rejects configs missing required fields."""
+    with pytest.raises(ValueError, match="model_name"):
+        create_serde_processor(SerdeConfig(type="cachegen"))
+    with pytest.raises(ValueError, match="chunk_size"):
+        create_serde_processor(
+            SerdeConfig(
+                type="cachegen",
+                kwargs={"model_name": "mistralai/Mistral-7B-Instruct-v0.2"},
+            )
+        )
+    with pytest.raises(ValueError, match="dtype"):
+        create_serde_processor(
+            SerdeConfig(
+                type="cachegen",
+                kwargs={
+                    "model_name": "mistralai/Mistral-7B-Instruct-v0.2",
+                    "chunk_size": 256,
+                },
+            )
+        )
+    with pytest.raises(ValueError, match="num_heads"):
+        create_serde_processor(
+            SerdeConfig(
+                type="cachegen",
+                kwargs={
+                    "model_name": "mistralai/Mistral-7B-Instruct-v0.2",
+                    "chunk_size": 256,
+                    "dtype": "bfloat16",
+                },
+            )
+        )
+    with pytest.raises(ValueError, match="head_size"):
+        create_serde_processor(
+            SerdeConfig(
+                type="cachegen",
+                kwargs={
+                    "model_name": "mistralai/Mistral-7B-Instruct-v0.2",
+                    "chunk_size": 256,
+                    "dtype": "bfloat16",
+                    "num_heads": 8,
+                },
+            )
+        )
+
+
+def test_create_cachegen_unknown_dtype_raises() -> None:
+    """CacheGen serde rejects unknown torch dtype names."""
+    with pytest.raises(ValueError, match="Unknown torch dtype"):
+        create_serde_processor(
+            SerdeConfig(
+                type="cachegen",
+                kwargs={
+                    "model_name": "mistralai/Mistral-7B-Instruct-v0.2",
+                    "chunk_size": 256,
+                    "dtype": "not_a_dtype",
+                },
+            )
+        )
+
+
+def _cachegen_kwargs(**overrides: object) -> dict[str, object]:
+    kwargs: dict[str, object] = {
+        "model_name": "mistralai/Mistral-7B-Instruct-v0.2",
+        "chunk_size": 256,
+        "dtype": "bfloat16",
+        "num_heads": 8,
+        "head_size": 128,
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("chunk_size", 0),
+        ("chunk_size", 1.5),
+        ("chunk_size", True),
+        ("num_heads", 0),
+        ("num_heads", 1.5),
+        ("num_heads", True),
+        ("head_size", 0),
+        ("head_size", 1.5),
+        ("head_size", True),
+        ("max_workers", 0),
+        ("max_workers", 1.5),
+        ("max_workers", True),
+    ],
+)
+def test_create_cachegen_rejects_invalid_positive_integer_fields(
+    field: str,
+    value: object,
+) -> None:
+    """CacheGen serde rejects non-positive and non-integral integer fields."""
+    with pytest.raises(ValueError, match=field):
+        create_serde_processor(
+            SerdeConfig(type="cachegen", kwargs=_cachegen_kwargs(**{field: value}))
+        )
+
+
 def test_register_serde_factory_dispatch() -> None:
     """A custom factory is dispatched by its registered name."""
 

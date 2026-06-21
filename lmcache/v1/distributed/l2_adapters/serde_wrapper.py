@@ -35,6 +35,9 @@ import enum
 import select
 import threading
 
+# Third Party
+import torch
+
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
@@ -252,7 +255,7 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
             wrapped_id = self._next_task_id
             self._next_task_id += 1
 
-        temp_keys, temp_objs = self._alloc_temp_buffers(keys, objects)
+        temp_keys, temp_objs = self._alloc_load_temp_buffers(keys, objects)
         if temp_objs is None:
             logger.warning(
                 "Serde wrapper: temp alloc failed for load task %d",
@@ -581,41 +584,136 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         keys: list[ObjectKey],
         objects: list[MemoryObj],
     ) -> tuple[list[ObjectKey], list[MemoryObj] | None]:
-        """Reserve one temp byte buffer per input key. All-or-nothing:
-        any single failure releases the partial successes and returns
-        ``(temp_keys, None)``.
+        """Reserve estimate-sized temp byte buffers for store.
 
         Args:
             keys: Original logical keys; used only to derive temp keys.
-            objects: Source (store) or destination (load) MemoryObjs.
-                All entries must share a single ``(shape, dtype)`` — the
-                caller (store/prefetch controller) is responsible for
-                shape-grouping before submission.
+            objects: Source MemoryObjs. All entries must share a single
+                ``(shape, dtype)`` — the caller (store controller) is
+                responsible for shape-grouping before submission.
+
+        Returns:
+            ``(temp_keys, temp_objs)`` on success, or ``(temp_keys, None)``
+            after releasing partial reservations on allocation failure.
         """
         shape_0 = objects[0].get_shapes()
         dtype_0 = objects[0].get_dtypes()
-        temp_keys = [make_temp_key(k) for k in keys]
         layout = serialized_layout_desc(
             MemoryLayoutDesc(shapes=shape_0, dtypes=dtype_0), self._serde
         )
-        results = self._l1_manager.reserve_write(
-            keys=temp_keys,
-            is_temporary=[True] * len(temp_keys),
-            layout_desc=layout,
-            mode="new",
+        return self._reserve_temp_buffers(keys, [layout] * len(keys))
+
+    def _alloc_load_temp_buffers(
+        self,
+        keys: list[ObjectKey],
+        objects: list[MemoryObj],
+    ) -> tuple[list[ObjectKey], list[MemoryObj] | None]:
+        """Reserve load temp buffers, preferring exact stored byte sizes.
+
+        Args:
+            keys: Logical L2 object keys to load.
+            objects: Destination MemoryObjs. All entries must share a
+                single ``(shape, dtype)`` — the caller (prefetch controller)
+                is responsible for shape-grouping before submission.
+
+        Returns:
+            ``(temp_keys, temp_objs)`` on success, or ``(temp_keys, None)``
+            after releasing partial reservations on allocation failure.
+        """
+        shape_0 = objects[0].get_shapes()
+        dtype_0 = objects[0].get_dtypes()
+        estimate_layout = serialized_layout_desc(
+            MemoryLayoutDesc(shapes=shape_0, dtypes=dtype_0), self._serde
         )
-        # First pass: collect every key whose reserve_write succeeded.
-        # We must scan the full list (not bail on the first failure)
-        # so a mixed-success result still releases all reserved keys.
-        successful_temp_keys: list[ObjectKey] = []
-        for temp_key in temp_keys:
-            r = results.get(temp_key)
-            if r is not None and r[0] == L1Error.SUCCESS:
-                successful_temp_keys.append(temp_key)
-        if len(successful_temp_keys) != len(temp_keys):
-            self._release_write_temps(successful_temp_keys)
+        known_sizes = self._inner.get_object_sizes(keys)
+        layouts: list[MemoryLayoutDesc] = []
+        exact_sizes: list[int | None] = []
+        for key in keys:
+            size = known_sizes.get(key)
+            if size is not None and size >= 0:
+                layouts.append(
+                    MemoryLayoutDesc(
+                        shapes=[torch.Size([max(size, 1)])],
+                        dtypes=[torch.uint8],
+                    )
+                )
+                exact_sizes.append(size)
+            else:
+                layouts.append(estimate_layout)
+                exact_sizes.append(None)
+
+        temp_keys, temp_objs = self._reserve_temp_buffers(keys, layouts)
+        if temp_objs is None:
             return temp_keys, None
-        temp_objs = [results[tk][1] for tk in temp_keys]
+        for temp_obj, exact_size in zip(temp_objs, exact_sizes, strict=True):
+            if exact_size is not None:
+                temp_obj.set_used_size(exact_size)
+        return temp_keys, temp_objs
+
+    def _reserve_temp_buffers(
+        self,
+        keys: list[ObjectKey],
+        layouts: list[MemoryLayoutDesc],
+    ) -> tuple[list[ObjectKey], list[MemoryObj] | None]:
+        """Reserve one temp byte buffer per input key.
+
+        All-or-nothing: any single failure releases the partial successes
+        and returns ``(temp_keys, None)``.
+
+        Args:
+            keys: Original logical keys; used only to derive temp keys.
+            layouts: Per-key temp byte-buffer layouts. Length must match
+                ``keys``.
+
+        Returns:
+            ``(temp_keys, temp_objs)`` when every reservation succeeds,
+            otherwise ``(temp_keys, None)``.
+        """
+        if len(keys) != len(layouts):
+            raise ValueError("keys and layouts must have the same length")
+        temp_keys = [make_temp_key(k) for k in keys]
+        if not temp_keys:
+            return temp_keys, []
+
+        first_layout = layouts[0]
+        if all(layout == first_layout for layout in layouts):
+            results = self._l1_manager.reserve_write(
+                keys=temp_keys,
+                is_temporary=[True] * len(temp_keys),
+                layout_desc=first_layout,
+                mode="new",
+            )
+            batched_successful_temp_keys: list[ObjectKey] = []
+            batched_temp_objs: list[MemoryObj] = []
+            allocation_failed = False
+            for temp_key in temp_keys:
+                r = results.get(temp_key)
+                if r is None or r[0] != L1Error.SUCCESS or r[1] is None:
+                    allocation_failed = True
+                    continue
+                batched_successful_temp_keys.append(temp_key)
+                batched_temp_objs.append(r[1])
+            if allocation_failed:
+                self._release_write_temps(batched_successful_temp_keys)
+                return temp_keys, None
+            return temp_keys, batched_temp_objs
+
+        successful_temp_keys: list[ObjectKey] = []
+        temp_objs: list[MemoryObj] = []
+
+        for temp_key, layout in zip(temp_keys, layouts, strict=True):
+            results = self._l1_manager.reserve_write(
+                keys=[temp_key],
+                is_temporary=[True],
+                layout_desc=layout,
+                mode="new",
+            )
+            r = results.get(temp_key)
+            if r is None or r[0] != L1Error.SUCCESS or r[1] is None:
+                self._release_write_temps(successful_temp_keys)
+                return temp_keys, None
+            successful_temp_keys.append(temp_key)
+            temp_objs.append(r[1])
         return temp_keys, temp_objs
 
     def _release_write_temps(self, temp_keys: list[ObjectKey]) -> None:

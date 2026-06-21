@@ -354,6 +354,21 @@ class L2AdapterInterface(ABC):
         """Register a listener to receive L2 adapter events."""
         self._listeners.append(listener)
 
+    def get_object_sizes(self, keys: list[ObjectKey]) -> dict[ObjectKey, int]:
+        """Return known stored byte sizes for ``keys``.
+
+        This method is advisory and non-blocking. Adapters return only
+        keys whose exact stored byte length is cheaply available; missing
+        keys mean "unknown", not necessarily "absent".
+
+        Args:
+            keys: Object keys to query.
+
+        Returns:
+            Mapping from keys to exact stored byte sizes in bytes.
+        """
+        return {}
+
     def _notify_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
         """Update byte accounting and notify listeners that ``keys`` were
         stored. ``sizes[i]`` is the byte size of ``keys[i]``.

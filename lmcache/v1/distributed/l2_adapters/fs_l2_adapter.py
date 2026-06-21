@@ -415,6 +415,25 @@ class FSL2Adapter(L2AdapterInterface):
             "event_loop_alive": self._loop_thread.is_alive(),
         }
 
+    def get_object_sizes(self, keys: list[ObjectKey]) -> dict[ObjectKey, int]:
+        """Return file sizes for keys currently present on disk.
+
+        Args:
+            keys: Object keys to query.
+
+        Returns:
+            Mapping from keys to exact file sizes in bytes. Missing files
+            are omitted from the result.
+        """
+        sizes: dict[ObjectKey, int] = {}
+        for key in keys:
+            path = self._key_to_path(key)
+            try:
+                sizes[key] = path.stat().st_size
+            except OSError:
+                continue
+        return sizes
+
     # ------------------------------------------------------------------
     # Eviction Interface
     # ------------------------------------------------------------------
