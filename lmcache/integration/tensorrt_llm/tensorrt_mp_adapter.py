@@ -93,6 +93,7 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
         self._mq_timeout = float(
             os.environ.get("LMCACHE_MQ_TIMEOUT", DEFAULT_MQ_TIMEOUT)
         )
+        self._closed = False
 
         future = _send_request(self._mq_client, RequestType.GET_CHUNK_SIZE, [])
         self._chunk_size = future.result(timeout=self._mq_timeout)
@@ -272,6 +273,41 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
         """No-op — block IDs are captured in :meth:`build_connector_meta`."""
         pass
 
+    def shutdown(self) -> None:
+        """Shutdown the scheduler and release resources.
+
+        This method is idempotent. It will close the MQ client
+        and destroy the ZMQ context.
+        """
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+
+        try:
+            self._mq_client.close()
+        except Exception as e:
+            if logger is not None:
+                logger.warning("LMCache MP scheduler: failed to close MQ client: %s", e)
+
+        try:
+            self._zmq_context.destroy(linger=0)
+        except Exception as e:
+            if logger is not None:
+                logger.warning(
+                    "LMCache MP scheduler: failed to destroy ZMQ context: %s", e
+                )
+
+    def close(self) -> None:
+        """Close the scheduler.
+
+        This is an alias for shutdown.
+        """
+        self.shutdown()
+
+    def __del__(self) -> None:
+        """Destructor to ensure resources are cleaned up."""
+        self.shutdown()
+
 
 class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
     """TRT-LLM worker that routes store/retrieve to an LMCache MP server."""
@@ -287,6 +323,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         self._mq_timeout = float(
             os.environ.get("LMCACHE_MQ_TIMEOUT", DEFAULT_MQ_TIMEOUT)
         )
+        self._closed = False
 
         self._instance_id = os.getpid()
         self._registered = False
@@ -486,3 +523,57 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
     ) -> Tuple[List[int], List[int]]:
         """All operations are synchronous — nothing is ever pending."""
         return [], []
+
+    def shutdown(self) -> None:
+        """Shutdown the worker and release resources.
+
+        This method is idempotent. If the worker is registered, it sends
+        an UNREGISTER_KV_CACHE request to the server, then closes the
+        MQ client and destroys the ZMQ context.
+        """
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+
+        if self._registered:
+            if _send_request is not None and RequestType is not None:
+                try:
+                    future = _send_request(
+                        self._mq_client,
+                        RequestType.UNREGISTER_KV_CACHE,
+                        [self._instance_id],
+                    )
+                    future.result(timeout=self._mq_timeout)
+                except Exception as e:
+                    if logger is not None:
+                        logger.warning(
+                            "LMCache MP worker: failed to unregister KV cache: %s",
+                            e,
+                            exc_info=True,
+                        )
+            self._registered = False
+
+        try:
+            self._mq_client.close()
+        except Exception as e:
+            if logger is not None:
+                logger.warning("LMCache MP worker: failed to close MQ client: %s", e)
+
+        try:
+            self._zmq_context.destroy(linger=0)
+        except Exception as e:
+            if logger is not None:
+                logger.warning(
+                    "LMCache MP worker: failed to destroy ZMQ context: %s", e
+                )
+
+    def close(self) -> None:
+        """Close the worker.
+
+        This is an alias for shutdown.
+        """
+        self.shutdown()
+
+    def __del__(self) -> None:
+        """Destructor to ensure resources are cleaned up."""
+        self.shutdown()
