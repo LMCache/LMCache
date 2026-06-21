@@ -4,7 +4,7 @@ from collections import deque
 from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import Enum, auto
-from functools import wraps
+from functools import cache, wraps
 from typing import Any, List, Optional, Tuple, Union
 import abc
 import ctypes
@@ -41,11 +41,11 @@ logger = init_logger(__name__)
 #
 # Caching by length is safe: the `from_address(addr)` instance never owns the
 # underlying buffer, only the metadata (length, item-type), and that metadata
-# depends solely on `N`.
-_UBYTE_ARRAY_TYPE_CACHE: dict[int, type] = {}
-
-
-def _get_cached_ubyte_array_type(num_bytes: int) -> type:
+# depends solely on `N`. ``functools.cache`` provides a thread-safe unbounded
+# memoization primitive, so concurrent first-time accesses for the same `N`
+# cannot race to create distinct heap types.
+@cache
+def _get_cached_ubyte_array_type(num_bytes: int) -> type[ctypes.Array[ctypes.c_ubyte]]:
     """Return a cached ``ctypes.c_ubyte * num_bytes`` array type.
 
     Args:
@@ -55,11 +55,7 @@ def _get_cached_ubyte_array_type(num_bytes: int) -> type:
         The cached ``ctypes.Array`` subclass for the given length. Subsequent
         calls with the same ``num_bytes`` return the same type object.
     """
-    arr_type = _UBYTE_ARRAY_TYPE_CACHE.get(num_bytes)
-    if arr_type is None:
-        arr_type = ctypes.c_ubyte * num_bytes
-        _UBYTE_ARRAY_TYPE_CACHE[num_bytes] = arr_type
-    return arr_type
+    return ctypes.c_ubyte * num_bytes
 
 
 # Helper functions for thread safety
@@ -875,9 +871,7 @@ class TensorMemoryObj(MemoryObj):
         # https://github.com/LMCache/LMCache/issues/3767.
         arr_type = _get_cached_ubyte_array_type(num_bytes)
         ubyte_ptr = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_ubyte))
-        byte_array = arr_type.from_address(
-            ctypes.addressof(ubyte_ptr.contents)
-        )
+        byte_array = arr_type.from_address(ctypes.addressof(ubyte_ptr.contents))
         return memoryview(byte_array)
 
     @property

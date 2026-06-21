@@ -320,10 +320,7 @@ def test_byte_array_caches_ctypes_array_type():
        logical byte length).
     """
     # First Party
-    from lmcache.v1.memory_management import (
-        _UBYTE_ARRAY_TYPE_CACHE,
-        _get_cached_ubyte_array_type,
-    )
+    from lmcache.v1.memory_management import _get_cached_ubyte_array_type
 
     # Direct helper contract.
     t1 = _get_cached_ubyte_array_type(1024)
@@ -331,8 +328,6 @@ def test_byte_array_caches_ctypes_array_type():
     t3 = _get_cached_ubyte_array_type(2048)
     assert t1 is t2, "same length must map to the same cached array type"
     assert t1 is not t3, "different lengths must not share a cached array type"
-    assert _UBYTE_ARRAY_TYPE_CACHE[1024] is t1
-    assert _UBYTE_ARRAY_TYPE_CACHE[2048] is t3
 
     # Property-level contract: repeated TensorMemoryObj.byte_array accesses
     # must not create new heap types.
@@ -345,11 +340,11 @@ def test_byte_array_caches_ctypes_array_type():
         # Prime the cache with this object's size (and any other state the
         # allocate path warmed up) so we measure only repeated-access growth.
         _ = obj.byte_array
-        before = len(_UBYTE_ARRAY_TYPE_CACHE)
+        before = _get_cached_ubyte_array_type.cache_info().currsize
         for _ in range(50):
             mv = obj.byte_array
             assert isinstance(mv, memoryview)
-        after = len(_UBYTE_ARRAY_TYPE_CACHE)
+        after = _get_cached_ubyte_array_type.cache_info().currsize
         assert after == before, (
             f"byte_array leaked array types across 50 repeated accesses: "
             f"cache grew from {before} to {after}"
