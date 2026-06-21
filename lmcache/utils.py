@@ -94,6 +94,77 @@ def check_interprocess_event_support() -> None:
         )
 
 
+def try_pin_buffer(ptr: int, size: int) -> bool:
+    """Try to pin a host buffer via cudaHostRegister for async D2H copies.
+
+    Args:
+        ptr: Raw host pointer (integer address) to pin.
+        size: Size of the buffer in bytes.
+
+    Returns:
+        True if the buffer was successfully pinned, False otherwise.
+    """
+    # First Party
+    from lmcache import torch_dev
+
+    if not torch_dev.is_available() or not hasattr(torch_dev, "cudart"):
+        return False
+    try:
+        # TODO: take torch_dev.cudart().cudaHostRegister as temp solution
+        # may abstract a function for ptr register for diff platforms
+        err = torch_dev.cudart().cudaHostRegister(ptr, size, 0)
+        if err == 0:
+            return True
+        logger.warning(
+            "cudaHostRegister failed (ptr=%d, size=%d, err=%s); "
+            "D2H copies will be synchronous",
+            ptr,
+            size,
+            err,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to pin buffer (ptr=%d, size=%d): %r; "
+            "D2H copies will be synchronous",
+            ptr,
+            size,
+            exc,
+        )
+    return False
+
+
+def try_unpin_buffer(ptr: int) -> bool:
+    """Try to unpin a host buffer via cudaHostUnregister.
+
+    Args:
+        ptr: Raw host pointer (integer address) to unpin.
+
+    Returns:
+        True if the buffer was successfully unpinned, False otherwise.
+    """
+    # First Party
+    from lmcache import torch_dev
+
+    try:
+        # TODO: take torch_dev.cudart().cudaHostUnregister as temp solution
+        # may abstract a function for ptr unregister for diff platforms
+        err = torch_dev.cudart().cudaHostUnregister(ptr)
+        if err == 0:
+            return True
+        logger.warning(
+            "cudaHostUnregister failed (ptr=%d, err=%s)",
+            ptr,
+            err,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to unpin buffer (ptr=%d): %r",
+            ptr,
+            exc,
+        )
+    return False
+
+
 # Math utility functions
 def cdiv(a: int, b: int) -> int:
     """Ceiling division."""
