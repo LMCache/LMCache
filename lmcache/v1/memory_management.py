@@ -29,6 +29,39 @@ import lmcache.c_ops as lmc_ops
 logger = init_logger(__name__)
 
 
+# Cache for ctypes ubyte-array types keyed by length.
+#
+# ctypes does not cache `(c_ubyte * N)` array types -- each call to the `*`
+# operator builds a fresh heap type via PyCArrayType_from_ctype. The heap
+# type metadata stays alive forever (held by the type system), so calling
+# `(ctypes.c_ubyte * N).from_address(...)` on every TensorMemoryObj.byte_array
+# access leaks ~1-2 kB per call. Under long-running remote-backend put/get
+# workloads this is the dominant source of monotonic anonymous-memory growth
+# (see https://github.com/LMCache/LMCache/issues/3767).
+#
+# Caching by length is safe: the `from_address(addr)` instance never owns the
+# underlying buffer, only the metadata (length, item-type), and that metadata
+# depends solely on `N`.
+_UBYTE_ARRAY_TYPE_CACHE: dict[int, type] = {}
+
+
+def _get_cached_ubyte_array_type(num_bytes: int) -> type:
+    """Return a cached ``ctypes.c_ubyte * num_bytes`` array type.
+
+    Args:
+        num_bytes: The length of the array type in bytes.
+
+    Returns:
+        The cached ``ctypes.Array`` subclass for the given length. Subsequent
+        calls with the same ``num_bytes`` return the same type object.
+    """
+    arr_type = _UBYTE_ARRAY_TYPE_CACHE.get(num_bytes)
+    if arr_type is None:
+        arr_type = ctypes.c_ubyte * num_bytes
+        _UBYTE_ARRAY_TYPE_CACHE[num_bytes] = arr_type
+    return arr_type
+
+
 # Helper functions for thread safety
 def synchronized(lock_attr_name):
     """
@@ -834,8 +867,15 @@ class TensorMemoryObj(MemoryObj):
         # the metadata length.
         num_bytes = self.get_size()
         ptr = self.raw_data.data_ptr()
+        # ctypes does not cache (c_ubyte * N) array types -- each `*` builds a
+        # fresh heap type. With this property accessed once per remote put/get,
+        # uncached creation leaks ~1-2 kB per call (heap-type metadata is held
+        # by the type system and never reclaimed). Cache the array type per
+        # size so steady-state usage reuses a fixed set of types. See
+        # https://github.com/LMCache/LMCache/issues/3767.
+        arr_type = _get_cached_ubyte_array_type(num_bytes)
         ubyte_ptr = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_ubyte))
-        byte_array = (ctypes.c_ubyte * num_bytes).from_address(
+        byte_array = arr_type.from_address(
             ctypes.addressof(ubyte_ptr.contents)
         )
         return memoryview(byte_array)
