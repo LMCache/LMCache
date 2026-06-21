@@ -41,7 +41,7 @@ _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 def _make_adapter(tmp_path: Path) -> RawBlockL2Adapter:
     path = make_raw_block_file(tmp_path)
     config = RawBlockL2AdapterConfig(
-        device_path=str(path),
+        device_paths=str(path),
         capacity_bytes=RAW_BLOCK_CI_CAPACITY_BYTES,
         block_align=RAW_BLOCK_CI_BLOCK_ALIGN,
         header_bytes=RAW_BLOCK_CI_HEADER_BYTES,
