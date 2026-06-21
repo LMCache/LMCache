@@ -225,14 +225,12 @@ class EngineDrivenContextShm(EngineDrivenContext):
     def close(self) -> None:
         if self._shm is None:
             return
+        self._unpin_shm_buffer()
         try:
-            self._unpin_shm_buffer()
+            self._shm.close()
         finally:
-            try:
-                self._shm.close()
-            finally:
-                self._shm = None
-                self._shm_buffer = None
+            self._shm = None
+            self._shm_buffer = None
 
     def _pin_shm_buffer(self) -> None:
         """Pin the SHM buffer as page-locked host memory via cudaHostRegister.

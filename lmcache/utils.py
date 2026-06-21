@@ -145,6 +145,9 @@ def try_unpin_buffer(ptr: int) -> bool:
     # First Party
     from lmcache import torch_dev
 
+    if not torch_dev.is_available() or not hasattr(torch_dev, "cudart"):
+        return False
+
     try:
         # TODO: take torch_dev.cudart().cudaHostUnregister as temp solution
         # may abstract a function for ptr unregister for diff platforms
