@@ -631,14 +631,23 @@ class LocalDiskBackend(StorageBackendInterface):
                 with open(tmp_path, "wb") as f:
                     f.write(buffer)
             else:
-                aligned_size = ((size + self.os_disk_bs - 1) // self.os_disk_bs) * self.os_disk_bs
-                aligned_buf = mmap.mmap(-1, aligned_size, mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+                bs = self.os_disk_bs
+                aligned_size = ((size + bs - 1) // bs) * bs
+                aligned_buf = mmap.mmap(
+                    -1, aligned_size,
+                    mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS,
+                )
                 try:
                     aligned_buf.write(buffer)
                     if aligned_size > size:
                         aligned_buf.write(b'\x00' * (aligned_size - size))
                     aligned_buf.seek(0)
-                    fd = os.open(tmp_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_DIRECT, 0o644)
+                    fd = os.open(
+                        tmp_path,
+                        os.O_CREAT | os.O_WRONLY | os.O_TRUNC
+                        | os.O_DIRECT,
+                        0o644,
+                    )
                     try:
                         offset = 0
                         remaining = aligned_size
@@ -653,7 +662,9 @@ class LocalDiskBackend(StorageBackendInterface):
                         os.close(fd)
                 except OSError:
                     logger.warning(
-                        "O_DIRECT write failed for %s, falling back to buffered I/O", path
+                        "O_DIRECT write failed for %s, "
+                        "falling back to buffered I/O",
+                        path,
                     )
                     with open(tmp_path, "wb") as f:
                         f.write(buffer)
