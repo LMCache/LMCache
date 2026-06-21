@@ -534,12 +534,13 @@ class TestAsyncSaveBytesToDiskExceptionSafety:
             local_disk_backend.usage == usage_before
         ), f"usage {local_disk_backend.usage} != expected {usage_before}"
 
-        # current_cache_size must be rolled back
+        # current_cache_size must be rolled back to 0
+        # (submit_put_task incremented it to buf_size, except block rolls back)
         assert (
-            local_disk_backend.current_cache_size == cache_size_before
+            local_disk_backend.current_cache_size == 0
         ), (
             f"current_cache_size {local_disk_backend.current_cache_size} "
-            f"!= expected {cache_size_before}"
+            f"!= expected 0"
         )
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
