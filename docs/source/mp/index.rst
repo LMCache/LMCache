@@ -287,9 +287,10 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
      - (P2P) Look up the given keys and read-lock the locally cached
        prefix. Returns a task id which the caller passes to
        ``P2P_QUERY_LOOKUP_RESULTS`` to poll for the transfer addresses.
-       Part of the peer-to-peer KV cache sharing surface; the handler
-       module is not yet wired into the default
-       ``_build_modules()`` path -- see :doc:`p2p`.
+       Served by ``P2PController`` (loaded unconditionally by
+       ``_build_modules()``); whether this server also acts as a P2P
+       client is controlled by ``--p2p-advertise-url`` -- see
+       :doc:`p2p`.
    * - ``P2P_QUERY_LOOKUP_RESULTS``
      - BLOCKING
      - (P2P) Poll the transfer addresses for a lookup task. Returns a

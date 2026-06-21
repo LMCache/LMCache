@@ -176,6 +176,42 @@ The HTTP frontend is included when running ``lmcache server``.
      - ``8080``
      - Port to bind the HTTP server.
 
+P2P
+---
+
+Source: ``lmcache/v1/multiprocess/config.py``
+
+These flags configure peer-to-peer KV cache sharing between MP servers
+(see :doc:`p2p`). They are registered by ``add_p2p_args()`` on the
+``lmcache server`` parser. P2P is enabled when ``--p2p-advertise-url``
+is set, which additionally requires a coordinator URL via
+``--coordinator-url`` (or ``LMCACHE_COORDINATOR_URL``).
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 55
+
+   * - Argument
+     - Default
+     - Description
+   * - ``--p2p-advertise-url``
+     - ``""`` (P2P disabled)
+     - Transfer-channel server ``host:port`` this instance advertises to
+       peers. Setting it enables P2P (also requires ``--coordinator-url``).
+   * - ``--p2p-listen-url``
+     - ``""``
+     - Transfer-channel server ``host:port`` to bind. Defaults to
+       ``--p2p-advertise-url``.
+   * - ``--p2p-lookup-timeout``
+     - ``30.0``
+     - Seconds before a peer lookup result counts as a miss.
+   * - ``--p2p-load-timeout``
+     - ``30.0``
+     - Seconds before a peer load counts as a failure.
+   * - ``--p2p-transfer-engine``
+     - ``nixl``
+     - Transfer-channel implementation to use.
+
 L1 Memory Manager
 ------------------
 
