@@ -2,7 +2,7 @@
 
 # Standard
 from importlib import resources
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 import argparse
 import asyncio
 import json
@@ -172,105 +172,46 @@ async def fetch_all_child_nodes_concurrently(
     return proxy_nodes
 
 
-async def _fetch_child_nodes_from_api_nodes(
-    host: str, port: str, proxy_name: str
-) -> list:
-    """Try to fetch child nodes via /api/nodes from a multiProcess server.
+async def fetch_nodes_from_coordinator(url: str) -> list[dict]:
+    """Try to fetch fleet membership from the MP coordinator's instance registry.
 
-    Returns a non-empty list of child node dicts when the target is a
-    multiProcess lmcache server that exposes /api/nodes.  Returns an
-    empty list for inProcess nodes (connection error or no children).
+    Args:
+        url: Base URL of the MP coordinator.
+
+    Returns:
+        A single-element list whose ``nodes`` are the registered mp servers, or an
+        empty list when the coordinator is unreachable.
     """
-    try:
-        url = "http://%s:%s/api/nodes" % (host, port)
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-        nodes_data = response.json().get("nodes", [])
-        children = []
-        for node in nodes_data:
-            if node.get("children"):
-                for child in node["children"]:
-                    child["proxy_id"] = proxy_name
-                    children.append(child)
-            else:
-                node["proxy_id"] = proxy_name
-                children.append(node)
-        return children
-    except Exception:
-        return []
-
-
-async def fetch_nodes_from_supplier(url: str) -> list[dict]:
-    """Fetch node information from node supplier.
-
-    For each discovered node, attempt to retrieve its child nodes via
-    ``/api/nodes`` (multiProcess lmcache server).  If that call
-    succeeds and returns children, those children are used as the
-    ``nodes`` list (multiProcess mode).  Otherwise the node itself is
-    used as the sole child (inProcess / leaf mode).
-    """
+    # Fetch instances from coordinator
+    base_url = url.rstrip("/")
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(url)
+            response = await client.get(f"{base_url}/instances")
             response.raise_for_status()
-            data = response.json()
-
-            unique_nodes: dict[str, dict] = {}
-            for api_address, info in data.get("processInfos", {}).items():
-                for entity in info.get("lmCacheInfoEntities", []):
-                    addr = entity["apiAddress"]
-                    if addr.startswith("http://"):
-                        addr = addr[7:]
-                    host, port = addr.split(":")
-                    node_key = "%s:%s" % (host, port)
-                    if node_key not in unique_nodes:
-                        unique_nodes[node_key] = {
-                            "host": host,
-                            "port": port,
-                        }
-
-            # Fetch child nodes concurrently for all discovered nodes.
-            proxy_list = [
-                {
-                    "name": "proxy_%s" % node_key.replace(":", "_"),
-                    "host": info["host"],
-                    "port": info["port"],
-                }
-                for node_key, info in unique_nodes.items()
-            ]
-            child_tasks = [
-                _fetch_child_nodes_from_api_nodes(p["host"], p["port"], p["name"])
-                for p in proxy_list
-            ]
-            child_results = await asyncio.gather(*child_tasks, return_exceptions=True)
-
-            result = []
-            for proxy, children in zip(proxy_list, child_results, strict=False):
-                if isinstance(children, Exception) or not children:
-                    # inProcess mode: node itself is the leaf target.
-                    leaf = {
-                        "name": proxy["name"],
-                        "host": proxy["host"],
-                        "port": proxy["port"],
-                    }
-                    nodes = [leaf]
-                else:
-                    # multiProcess mode: use discovered child nodes.
-                    assert not isinstance(children, BaseException)
-                    nodes = children
-                result.append(
-                    {
-                        "name": proxy["name"],
-                        "host": proxy["host"],
-                        "port": proxy["port"],
-                        "nodes": nodes,
-                    }
-                )
-            return result
+            instances = response.json().get("instances", [])
     except Exception as e:
-        print(f"Failed to fetch nodes from supplier: {e}")
+        print(f"Failed to fetch nodes from coordinator: {e}")
         return []
+
+    # Transform into proxy -> nodes structure
+    children = [
+        {
+            "name": f"mp_{instance['instance_id']}",
+            "host": instance["ip"],
+            "port": str(instance["http_port"]),
+            "proxy_id": "coordinator",
+        }
+        for instance in instances
+    ]
+    parsed = urlparse(base_url)
+    return [
+        {
+            "name": "coordinator",
+            "host": parsed.hostname or "",
+            "port": str(parsed.port or ""),
+            "nodes": children,
+        }
+    ]
 
 
 def load_config(config_path: str | None = None) -> None:
@@ -462,7 +403,7 @@ async def update_node(node_name: str, request: Request):
     """Update a proxy or child node identified by ``node_name``.
 
     Searches top-level proxies first, then children of every proxy,
-    so both direct proxies and supplier-discovered leaf nodes can be
+    so both direct proxies and coordinator-discovered leaf nodes can be
     updated through the same endpoint (mirrors ``proxy_request_by_name``).
     """
     try:
@@ -537,7 +478,7 @@ async def proxy_request_by_name(request: Request, node_name: str, path: str):
     """Proxy requests using node name as identifier.
 
     Searches top-level target_nodes first, then child nodes of every
-    proxy, so both direct nodes and supplier-discovered leaf nodes are
+    proxy, so both direct nodes and coordinator-discovered leaf nodes are
     reachable with a single /proxy2/{name}/{path} call.
     """
     # 1. top-level proxy nodes
@@ -719,49 +660,28 @@ async def stop_heartbeat_api():
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-async def load_nodes_from_supplier(node_supplier_url: str | None = None) -> bool:
-    """Load node information from node supplier.
+async def initialize_nodes(coordinator_url: str | None = None) -> None:
+    """Initialize node configuration from CLI args or coordinator URL.
 
     Args:
-        node_supplier_url: Discovery service URL, e.g. ``/lmcache_infos``.
-
-    Returns:
-        ``True`` when a non-empty node list was retrieved and stored.
-    """
-    if not node_supplier_url:
-        return False
-
-    print(f"Fetching nodes from supplier: {node_supplier_url}")
-    nodes = await fetch_nodes_from_supplier(node_supplier_url)
-    if nodes:
-        _node_registry.replace(nodes)
-        print(f"Loaded {len(target_nodes)} proxy nodes from supplier")
-
-        # Child nodes are already populated by fetch_nodes_from_supplier;
-        # no secondary /api/nodes round-trip is needed.
-        for proxy in target_nodes:
-            print(f"Proxy {proxy['name']} loaded {len(proxy['nodes'])} child nodes")
-        return True
-    else:
-        print("Warning: No nodes loaded from supplier")
-        return False
-
-
-async def initialize_nodes(node_supplier_url: str | None = None) -> None:
-    """Initialize node configuration from CLI args or supplier URL.
-
-    Args:
-        node_supplier_url: Optional discovery service URL.  When set,
-            nodes are loaded via :func:`load_nodes_from_supplier`.
-            Otherwise falls back to ``args.nodes`` / ``args.config``.
+        coordinator_url: Optional coordinator base URL.  When set,
+            fleet membership is sourced from the coordinator's registry
+            via ``fetch_nodes_from_coordinator``. Otherwise, falls
+            back to ``args.nodes`` or ``args.config``.
     """
     global args
 
     if args is None:
         raise ValueError("args is not initialized")
 
-    if node_supplier_url:
-        await load_nodes_from_supplier(node_supplier_url)
+    if coordinator_url:
+        print(f"Fetching nodes from coordinator: {coordinator_url}")
+        nodes = await fetch_nodes_from_coordinator(coordinator_url)
+        if nodes:
+            _node_registry.replace(nodes)
+            print(f"Loaded {len(nodes[0]['nodes'])} mp servers from coordinator")
+        else:
+            print("Warning: No nodes fetched from coordinator")
     elif args.nodes:
         try:
             nodes = json.loads(args.nodes)
@@ -783,46 +703,46 @@ async def initialize_nodes(node_supplier_url: str | None = None) -> None:
         load_config(args.config)
 
 
-# Minimum seconds between two supplier refreshes triggered by ``/``.
-# Each refresh fans out to every registered proxy's ``/api/nodes``
-# endpoint, so an unthrottled ``/`` would DOS both the supplier and
-# every proxy. 30s matches the default heartbeat interval.
-_SUPPLIER_REFRESH_INTERVAL_SEC = 30.0
-_supplier_last_refresh: float = 0.0
-_supplier_refresh_lock = asyncio.Lock()
+# Minimum seconds between two coordinator refreshes triggered by ``/``.
+# Each refresh issues one ``GET /instances`` to the coordinator, so an
+# unthrottled ``/`` would hammer it. 30s matches the default heartbeat
+# interval.
+_COORDINATOR_REFRESH_INTERVAL_SEC = 30.0
+_coordinator_last_refresh: float = 0.0
+_coordinator_refresh_lock = asyncio.Lock()
 
 
-async def _maybe_refresh_from_supplier(node_supplier_url: str) -> None:
-    """Refresh the node registry from supplier, at most once per interval.
+async def _maybe_refresh_from_coordinator(coordinator_url: str) -> None:
+    """Refresh the node registry from coordinator, at most once per interval.
 
     The first caller within the interval performs the refresh; other
     concurrent callers return immediately (stale-on-read). This keeps
     the homepage responsive even under high traffic.
     """
-    global _supplier_last_refresh
+    global _coordinator_last_refresh
     now = time.monotonic()
-    if now - _supplier_last_refresh < _SUPPLIER_REFRESH_INTERVAL_SEC:
+    if now - _coordinator_last_refresh < _COORDINATOR_REFRESH_INTERVAL_SEC:
         return
-    if _supplier_refresh_lock.locked():
+    if _coordinator_refresh_lock.locked():
         return
-    async with _supplier_refresh_lock:
+    async with _coordinator_refresh_lock:
         now = time.monotonic()
-        if now - _supplier_last_refresh < _SUPPLIER_REFRESH_INTERVAL_SEC:
+        if now - _coordinator_last_refresh < _COORDINATOR_REFRESH_INTERVAL_SEC:
             return
-        await initialize_nodes(node_supplier_url)
-        _supplier_last_refresh = time.monotonic()
+        await initialize_nodes(coordinator_url)
+        _coordinator_last_refresh = time.monotonic()
 
 
 @router.get("/")
 async def serve_frontend():
     """Return frontend homepage.
 
-    When a node supplier URL is configured, trigger a throttled
+    When a coordinator URL is configured, trigger a throttled
     background-style refresh so opening the homepage repeatedly does
-    not hammer the supplier or every proxy's ``/api/nodes``.
+    not hammer the coordinator or every proxy's ``/api/nodes``.
     """
-    if args.node_supplier_url:
-        await _maybe_refresh_from_supplier(args.node_supplier_url)
+    if args.coordinator_url:
+        await _maybe_refresh_from_coordinator(args.coordinator_url)
 
     try:
         # Use package resource path
@@ -968,10 +888,10 @@ def main():
         help="Heartbeat interval (seconds), default 30",
     )
     parser.add_argument(
-        "--node-supplier-url",
+        "--coordinator-url",
         type=str,
         default=None,
-        help="URL to fetch node information from, e.g.: http://example.com/lmcache_infos",
+        help="MP coordinator base URL to source fleet membership from, default None",
     )
     parser.add_argument(
         "--log-level",
@@ -990,7 +910,7 @@ def main():
     args = parser.parse_args()
 
     # Initialize node configuration
-    asyncio.run(initialize_nodes(args.node_supplier_url))
+    asyncio.run(initialize_nodes(args.coordinator_url))
 
     app = create_app()
     print(f"Monitoring service running at http://{args.host}:{args.port}")
