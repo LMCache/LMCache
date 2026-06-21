@@ -594,6 +594,7 @@ def main() -> None:
         http_url=args.lmcache_url,
         model_name=app.state.lmcache_model_name,
         timeout=app.state.timeout,
+        kv_buffer_bytes=65536 * 10240 * 10,
     )
     uvicorn.run(app, host=args.app_host, port=args.app_port)
 

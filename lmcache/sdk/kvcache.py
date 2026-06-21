@@ -1,17 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-SDK for retrieving and storing KV cache tensors via LMCache's MQ endpoints.
+SDK for retrieving and storing KV cache tensors.
 """
 
 # Standard
 from __future__ import annotations
-from multiprocessing import shared_memory
 from collections.abc import Sequence
-from multiprocessing.resource_tracker import unregister
 import time
 import uuid
 import os
-from typing import Any
+import collections
+import threading
 
 # Third Party
 import requests
@@ -19,34 +18,65 @@ import torch
 import zmq
 
 # First Party
+from lmcache import torch_dev
+from lmcache.integration.vllm.vllm_multi_process_adapter import send_lmcache_request
+from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
-from lmcache.v1.multiprocess.transfer_context.shm import ShmSlotDescriptor
+from lmcache.v1.multiprocess.transfer_context.base import gather_paged_kv_to_cpu, scatter_cpu_to_paged_kv
 from lmcache.logging import init_logger
+from lmcache.v1.multiprocess.transfer_context.worker_transfer import create_transfer_context
 
 logger = init_logger(__name__)
 
 class KVCacheSDKError(RuntimeError):
     """Raised when an SDK KV-cache operation fails."""
 
+class BlockPool:
+    """Free-list of physical block indices into the SDK's paged KV buffer.
+    Manages allocation and free for SDK's paged KV cache blocks.
+    """
+
+    def __init__(self, num_blocks: int) -> None:
+        self._free: collections.deque[int] = collections.deque(range(num_blocks))
+        self._lock = threading.Lock()
+        self.num_blocks = num_blocks
+        print(f"Initialized BlockPool with {num_blocks} blocks.", flush=True)
+
+    def alloc(self, n: int) -> list[int]:
+        print(f"Allocating {n} blocks from BlockPool with {len(self._free)} free blocks...")
+        with self._lock:
+            if n > len(self._free):
+                raise KVCacheSDKError(
+                    f"block pool exhausted: need {n}, have {len(self._free)} "
+                    f"free of {self.num_blocks}"
+                )
+            return [self._free.popleft() for _ in range(n)]
+
+    def free(self, ids: list[int]) -> None:
+        print(f"Freeing #blocks: {len(ids)} back to BlockPool...", flush=True)
+        with self._lock:
+            self._free.extend(ids)
  
 class LMCacheKVCacheContext:
     """
     Retrieve and store KV cache tensors via LMCache's MQ endpoints.
 
-    Communicates with LMCache through the ZMQ message queue.
-    Data transfer is done through shared memory segments.
-
     The model layout must already be registered in the running LMCache server
     (e.g. by a vllm instance that called REGISTER_KV_CACHE).
+    Getting the layout information from server requires inference engine running
+    with GPU so that SDK can derive the shapes.
+
+    SDK is running on CPU, so the allocated paged KV cache is on CPU, and the
+    geometry is always in HND order regardless of the inference engine's.
     """
 
     def __init__(
         self,
         url: str,
-        model_name: str,
         http_url: str,
+        model_name: str,
         timeout: float = 60.0,
     ) -> None:
         """
@@ -54,6 +84,7 @@ class LMCacheKVCacheContext:
         
         Args:
             url: ZMQ endpoint URL for the LMCache message queue.
+            http_url: HTTP endpoint URL for fetching informations.
             model_name: Model name used by the running LMCache server instance.
             timeout: Timeout in seconds for blocking MQ calls. Defaults to 60.
         
@@ -67,6 +98,7 @@ class LMCacheKVCacheContext:
         self.instance_id = os.getpid()
         self._http_url = http_url
 
+        mp_conf = {}
         try:
             response = requests.get(f"{self._http_url}/conf", timeout=timeout)
             response.raise_for_status()
@@ -86,25 +118,113 @@ class LMCacheKVCacheContext:
             flush=True,
         )
 
+        self._cache_context_meta_conf = {}
         try:
             response = requests.get(f"{self._http_url}/status", timeout=timeout)
             response.raise_for_status()
-            non_cuda_context_meta_conf = response.json().get("non_cuda_context_meta", {})
+            self._cache_context_meta_conf = response.json().get("cache_context_meta", {})
         except (requests.RequestException, KeyError, ValueError) as err:
             raise KVCacheSDKError(
                 f"failed to fetch server config from {self._http_url}/status"
             ) from err
-        first_context_meta = next(iter(non_cuda_context_meta_conf.values()), {})
-        self._world_size: int = int(first_context_meta.get("world_size", 1))
 
-        self._mq_client.submit_request(
-            RequestType.REGISTER_SDK_TRANSFER_STRATEGY,
-            [self.instance_id, self._model_name, self._world_size],
-            get_response_class(RequestType.REGISTER_SDK_TRANSFER_STRATEGY),
-        ).result(timeout=timeout)
-        
         self._pending_lookups: set[str] = set()
         self._finished_lookups: dict[str, int] = {}
+
+    def register_kv_caches(
+        self,
+        kv_buffer_bytes: int,
+    ) -> None:
+        """Register the KV cache layout for the model with the SDK context.
+        
+        Args:
+            kv_buffer_bytes: The size of the KV cache buffer in bytes (user-supplied).
+        """
+        entry = next((e for e in self._cache_context_meta_conf.values()
+                        if e.get("model_name") == self._model_name), None)
+        if not entry:
+            raise KVCacheSDKError(
+                f"no registered GPU layout for model_name={self._model_name!r}; "
+                "MP mode cannot derive geometry from model_name alone — "
+                "register from a vLLM instance first, or pass the geometry explicitly."
+            )
+        
+        self._world_size = int(entry.get("world_size", 1))
+        kv_cache_layout = entry.get("kv_cache_layout", {})
+        if not kv_cache_layout:
+            raise KVCacheSDKError(
+                f"no registered KV cache layout for {self._model_name!r}."
+            )
+        num_layers = kv_cache_layout.get("num_layers", 0)
+
+        kernel_groups = kv_cache_layout.get("kernel_groups", [])
+        if len(kernel_groups) != 1:
+            raise KVCacheSDKError(
+                f"Currently not supporting hybrid models with multiple kernel groups; "
+                f"found {len(kernel_groups)} for model_name={self._model_name!r}."
+            )
+        kernel_group = kernel_groups[0]
+        dtype = getattr(torch, kernel_group["dtype"].replace("torch.", ""))
+        tokens_per_block = kernel_group.get("tokens_per_block", 0)
+
+        inner = [
+            int(x) for x in
+            kernel_group["engine_kv_concrete_shape"].split("[")[1].rstrip("] ").split(",")
+        ]
+
+        # From get_num_heads (lmcache/v1/gpu_connector/utils.py)
+        #     lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
+        #     # NHD: [..., BS, NH, HS] — num_heads at shape[3]
+        #     lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,
+        #     # HND: [..., NH, BS, HS] — num_heads at shape[2]
+        head_dim = inner[-1]
+        if "NH_BS" in kernel_group["engine_kv_format"]:
+            num_kv_heads, block_size = inner[-3], inner[-2]
+        else:
+            block_size, num_kv_heads = inner[-3], inner[-2]
+        if block_size != tokens_per_block:
+            raise KVCacheSDKError(
+                f"decoded block_size {block_size} != tokens_per_block "
+                f"{tokens_per_block} for model_name={self._model_name!r}"
+            )
+
+        bytes_per_block_per_layer = (
+            2 * num_kv_heads * block_size * head_dim * dtype.itemsize
+        )
+        num_blocks = kv_buffer_bytes // (num_layers * bytes_per_block_per_layer)
+        if num_blocks < 1:
+            raise KVCacheSDKError(
+                f"budget {kv_buffer_bytes} too small for even one block "
+                f"({num_layers * bytes_per_block_per_layer} bytes/block/layer)"
+            )
+
+        # SDK runs on CPU, LMCache's detects HND (gpu_connector/utils.py:663). 
+        # Build in HND-physical order [NB, 2, NH, BS, HS] (flip from GPU order)
+        # So, no matter the inference engine runs on CPU or GPU, SDK will always
+        # use HND.
+        self.block_pool = BlockPool(num_blocks=num_blocks)
+        shape = (num_blocks, 2, num_kv_heads, block_size, head_dim)
+
+        self._kv_caches = {
+            f"layer.{i}": torch.zeros(shape, dtype=dtype, device="cpu")
+            for i in range(num_layers)
+        }
+
+        self._transfer_ctx = create_transfer_context(self._kv_caches)
+        self.blocks_in_chunk = self._chunk_size // block_size
+        self._layout_hints = LayoutHints(
+            kv_layout="HND",
+            num_kv_heads=num_kv_heads,
+            tokens_per_block=block_size,
+            head_dim=head_dim,
+        )
+
+        self._transfer_ctx.register(
+            self.instance_id, self._kv_caches, self._model_name, self._world_size,
+            self.blocks_in_chunk, self._mq_client, self._mq_timeout,
+            send_request=send_lmcache_request,
+            layout_hints=self._layout_hints,
+        )
     
     def close(self) -> None:
         """Close the MQ client and ZMQ context."""
@@ -118,6 +238,9 @@ class LMCacheKVCacheContext:
         cache_salt: str = "",
     ) -> None:
         """Submit a LOOKUP request for the given token IDs.
+        Modification from lmcache/integration/vllm/vllm_multi_process_adapter.py.
+        Need duplicate since SDK has TransferContext, not Adapter, but still need
+        lookup and end_session functionality.
         
         Args:
             request_id: Unique ID for this lookup request.
@@ -158,6 +281,9 @@ class LMCacheKVCacheContext:
         request_id: str
     ) -> int | None:
         """Check the result of a LOOKUP request.
+        Modification from lmcache/integration/vllm/vllm_multi_process_adapter.py.
+        Need duplicate since SDK has TransferContext, not Adapter, but still need
+        lookup and end_session functionality.
 
         Args:
             request_id: The request ID of the LOOKUP to check.
@@ -195,124 +321,12 @@ class LMCacheKVCacheContext:
         self._finished_lookups[request_id] = token_count
         return token_count
     
-    def prepare_retrieve(
-        self,
-        key: IPCCacheServerKey,
-    ) -> list[dict[str, Any]] | None:
-        """Called in phase 1: ask server to prepare KV in SHM or in pickle.
-        KV data is already prefetched by the time this is called.
-        Adapted from lmcache/v1/multiprocess/transfer_context/shm.py
-        
-        Args:
-            key: The IPC cache server key containing the lookup metadata.
-        
-        Returns:
-            A list of SHM slot descriptors if using SHM transfer. 
-            None if preparation fails or times out.
-        """
-        future = self._mq_client.submit_request(
-            RequestType.PREPARE_RETRIEVE,
-            [key, self.instance_id],
-            get_response_class(RequestType.PREPARE_RETRIEVE),
-        )
-        try:
-            response = future.result(timeout=self._mq_timeout)
-        except TimeoutError:
-            return None
-        if not response.success:
-            return None
-        slots = response.context.get("slots", [])
-
-        return slots if isinstance(slots, list) else None
-
-    def commit_retrieve(
-        self,
-        key: IPCCacheServerKey,
-    ) -> bool:
-        """Called in phase 3: tell server to release the SHM slots after retrieval is done.
-        
-        Args:
-            key: The IPC cache server key containing the lookup metadata.
-        
-        Returns:
-            True if the commit is successful, False if it fails or times out.
-        """
-        future = self._mq_client.submit_request(
-            RequestType.COMMIT_RETRIEVE,
-            [key, self.instance_id],
-            get_response_class(RequestType.COMMIT_RETRIEVE),
-        )
-        try:
-            return future.result(timeout=self._mq_timeout)
-        except TimeoutError:
-            return False
-
-    def prepare_store(
-        self,
-        key: IPCCacheServerKey,
-    ) -> list[dict[str, Any]] | None:
-        """Called in phase 1: ask for slots or pickle path.
-        Adapted from lmcache/v1/multiprocess/transfer_context/shm.py
-
-        Args:
-            key: The IPC cache server key containing the store metadata.
-        
-        Returns:
-            A list of SHM slot descriptors if using SHM transfer.
-            None if preparation fails or times out.
-        """
-
-        future = self._mq_client.submit_request(
-            RequestType.PREPARE_STORE,
-            [key, self.instance_id],
-            get_response_class(RequestType.PREPARE_STORE),
-        )
-        try:
-            response = future.result(timeout=self._mq_timeout)
-        except TimeoutError as err:
-            raise TimeoutError(
-                f"[PREPARE_STORE] timed out for instance_id={self.instance_id} "
-                f"after {self._mq_timeout}s"
-            ) from err
-
-        context = response.context if isinstance(response.context, dict) else {}
-        slots = context.get("slots")
-
-        return slots if isinstance(slots, list) else None
-
-    def commit_store(
-        self,
-        key: IPCCacheServerKey,
-        _chunks: list[torch.Tensor] | bytes,
-    ) -> bool:
-        """Called in phase 3: tell server to commit the data in SHM.
-        Still retain _chunks as format for Pickle (todo).
-
-        Args:
-            key: The IPC cache server key containing the store metadata.
-            _chunks: The list of tensors to store, or bytes if using Pickle.
-        
-        Returns:
-            True if the commit is successful, False if it fails or times out.
-        """
-        future = self._mq_client.submit_request(
-            RequestType.COMMIT_STORE,
-            [key, self.instance_id, b""],
-            get_response_class(RequestType.COMMIT_STORE),
-        )
-        try:
-            return future.result(timeout=self._mq_timeout)
-        except TimeoutError as err:
-            raise TimeoutError(
-                f"[COMMIT_STORE] timed out for instance_id={self.instance_id} "
-                f"after {self._mq_timeout}s"
-            ) from err
-
-    def end_session(self, request_id: str) -> None:
+    def end_session(self, request_id: str, block_ids: list[int] | None = None) -> None:
         """End a session and clean up associated resources on the server.
         
         Args:
             request_id: The request ID of the session to end.
+            block_ids: Optional list of block IDs to free.
         """
         self._pending_lookups.discard(request_id)
         self._finished_lookups.pop(request_id, None)
@@ -321,6 +335,9 @@ class LMCacheKVCacheContext:
             [request_id],
             get_response_class(RequestType.END_SESSION),
         ).result(timeout=self._mq_timeout)
+        
+        if block_ids is not None:
+            self.block_pool.free(block_ids)
 
     # Helper functions
     def _create_key(
@@ -361,6 +378,7 @@ def connect(
     url: str,
     http_url: str,
     model_name: str,
+    kv_buffer_bytes: int,
     timeout: float = 60.0,
 ) -> "LMCacheKVCacheContext":
     """Create and initialize the LMCache SDK context.
@@ -369,18 +387,23 @@ def connect(
         url: ZMQ endpoint URL for the LMCache message queue.
         http_url: HTTP endpoint URL for fetching server configuration.
         model_name: Model name used by the running LMCache server instance.
+        kv_buffer_bytes: The size of the KV cache buffer in bytes.
         timeout: Timeout in seconds for blocking MQ calls. Defaults to 60.
     
     Returns:
         An initialized LMCacheKVCacheContext instance.
         Ready to be passed to close(), retrieve(), and store() functions.
     """
-    return LMCacheKVCacheContext(
+    ctx = LMCacheKVCacheContext(
         url=url, 
         http_url=http_url,
         model_name=model_name, 
         timeout=timeout
     )
+    ctx.register_kv_caches(
+        kv_buffer_bytes=kv_buffer_bytes,
+    )
+    return ctx
 
 def close(ctx: "LMCacheKVCacheContext") -> None:
     """Close the LMCache SDK context and release resources.
@@ -447,35 +470,38 @@ def retrieve(
         time.sleep(0.01)
         num_prefetched_tokens = ctx.check_lookup_result(request_id)
     
-    # Phase 1: Ask server to prepare KV in SHM or in pickle
-    prep_result = ctx.prepare_retrieve(key)
-    if not prep_result:
-        raise KVCacheSDKError("PREPARE_RETRIEVE did not return SHM slot descriptors or pickle data")
+    # Phase 1: Ask server to prepare KV and copy to ctx._kv_caches
+    num_chunks = num_prefetched_tokens // ctx._chunk_size
+    n_blocks   = num_chunks * ctx.blocks_in_chunk
+    flat_block_ids = ctx.block_pool.alloc(n_blocks)
+    block_ids = [flat_block_ids]
 
-    # Phase 2: SDK reads the SHM slots, copies into a contiguous tensor
-    try:
-        out_buffer = [ShmSlotDescriptor.from_dict(s) for s in prep_result]
+    fut = ctx._transfer_ctx.submit_retrieve(
+        request_id, 
+        key, 
+        ctx.instance_id,
+        ctx._kv_caches, 
+        block_ids, 
+        None, # SDK is talking to LMCache, which lives in CPU.
+        ctx.blocks_in_chunk
+    )
+    ok = fut.result(timeout=ctx._mq_timeout)
 
-        shm = shared_memory.SharedMemory(name=ctx.shm_name, create=False)
-        unregister(f"/{shm.name}", "shared_memory")  # server owns the segment
-        try:
-            shards: list[torch.Tensor] = []
-            for slot in out_buffer:
-                dtype = getattr(torch, slot.dtype)
-                view = torch.frombuffer(
-                    shm.buf,
-                    dtype=dtype,
-                    count=slot.length // torch.empty((), dtype=dtype).element_size(),
-                    offset=slot.offset,
-                ).view(slot.shape)
-                shards.append(view)
-            assembled = _assemble_contiguous(shards, ctx._world_size, ctx._chunk_size)
-        finally:
-            shm.close()
-    finally:
-        # Phase 3: tell server to release the SHM slots
-        ctx.commit_retrieve(key)
-        ctx.end_session(request_id)
+    # Phase 2: copy from ctx._kv_caches to a contiguous tensor and return
+    if not ok:
+        ctx.end_session(request_id, block_ids=flat_block_ids)
+        return None
+
+    chunks = gather_paged_kv_to_cpu(
+        ctx._kv_caches,
+        flat_block_ids,
+        ctx.blocks_in_chunk,
+        layout_hints=ctx._layout_hints,
+    )
+    torch_dev.synchronize()
+    ctx.end_session(request_id, block_ids=flat_block_ids)
+
+    assembled = torch.cat(chunks, dim=2).contiguous() if chunks else None
 
     return assembled
 
@@ -497,9 +523,7 @@ def store(
         True if the store operation is successful, False otherwise.
     """
     kv_cpu = kv.detach().cpu().contiguous()
-
     token_ids = list(tokens)
-    _validate_store_tensor(kv_cpu, token_ids, ctx._model_name, ctx._chunk_size)
 
     # Phase 0: assign request ID to this request
     request_id = f"store-{uuid.uuid4().hex}"
@@ -512,130 +536,31 @@ def store(
         worker_id=0
     )
 
-    # Phase 1: server reserves SHM slots, returns descriptors
-    prep_result = ctx.prepare_store(key)
-    if not prep_result:
-        raise KVCacheSDKError("PREPARE_STORE did not return SHM slot descriptors")
-
-    # Phase 2: SDK copies data into SHM slots
-    try:
-        out_buffer = [ShmSlotDescriptor.from_dict(s) for s in prep_result]
-        d_per_worker = kv_cpu.shape[3] // ctx._world_size
-
-        shm = shared_memory.SharedMemory(name=ctx.shm_name, create=False)
-        unregister(f"/{shm.name}", "shared_memory")
-        try:
-            for slot_idx, slot in enumerate(out_buffer):
-                chunk_i = slot_idx // ctx._world_size
-                worker_j = slot_idx % ctx._world_size
-                t_start = chunk_i * ctx._chunk_size
-                t_end = t_start + ctx._chunk_size
-                d_start = worker_j * d_per_worker
-                d_end = d_start + d_per_worker
-
-                dtype = getattr(torch, slot.dtype)
-                dst = torch.frombuffer(
-                    shm.buf,
-                    dtype=dtype,
-                    count=slot.length // torch.empty((), dtype=dtype).element_size(),
-                    offset=slot.offset,
-                ).view(slot.shape)
-
-                shard = kv_cpu[:, :, t_start:t_end, d_start:d_end].contiguous()
-                dst.copy_(shard)
-        finally:
-            shm.close()
-    finally:
-        # Phase 3: tell server to write the data from SHM to storage manager
-        commit_result = ctx.commit_store(key, b"")
-        ctx.end_session(request_id)
-    
-    return commit_result
-
-# Helper functions
-
-def _assemble_contiguous(
-    shards: list[torch.Tensor],
-    world_size: int,
-    chunk_size: int,
-) -> torch.Tensor:
-    """Assemble per-shard tensors from the server into a single contiguous CPU tensor.
-
-    Shards arrive ordered as:
-    Each shard shape is [2, L, chunk_size, D // world_size].
-
-    Args:
-        shards: Flat shard list from the pickle payload/SHM read.
-        world_size: TP shards per chunk.
-        chunk_size: Tokens per LMCache chunk.
-
-    Returns:
-        Contiguous CPU tensor of shape [2, L, hit_tokens, D].
-
-    Raises:
-        KVCacheSDKError: If shards is empty or incomplete.
-    """
-    if not shards:
-        raise KVCacheSDKError("no shards returned from COMMIT_RETRIEVE")
-
-    hit_chunks = len(shards) // world_size
-    if hit_chunks == 0:
-        raise KVCacheSDKError(
-            f"incomplete shard set: {len(shards)} shards for world_size={world_size}"
-        )
-
-    first = shards[0]
-    num_layers = first.shape[1]
-    d_per_worker = first.shape[3]
-    hidden_dim = d_per_worker * world_size
-    hit_tokens = hit_chunks * chunk_size
-
-    result = torch.empty(
-        (2, num_layers, hit_tokens, hidden_dim),
-        dtype=first.dtype,
-        device="cpu",
+    # Phase 1: copy the kv_cpu tensor to self._kv_caches
+    num_chunks = kv_cpu.shape[2] // ctx._chunk_size
+    block_ids = [ctx.block_pool.alloc(num_chunks * ctx.blocks_in_chunk)]
+    chunks = [c.contiguous() for c in kv_cpu.split(ctx._chunk_size, dim=2)]
+    scatter_cpu_to_paged_kv(
+        ctx._kv_caches,
+        block_ids[0],
+        chunks,
+        ctx.blocks_in_chunk,
+        layout_hints=ctx._layout_hints,
     )
-    for shard_idx, shard in enumerate(shards[: hit_chunks * world_size]):
-        chunk_idx = shard_idx // world_size
-        worker_id = shard_idx % world_size
-        t_start = chunk_idx * chunk_size
-        d_start = worker_id * d_per_worker
-        result[
-            :, :, t_start : t_start + chunk_size, d_start : d_start + d_per_worker
-        ].copy_(shard.cpu())
 
-    return result.contiguous()
+    # Phase 2: server read data from self._kv_caches, write to storage manager
+    try:
+        fut = ctx._transfer_ctx.submit_store(
+            request_id,
+            key,
+            ctx.instance_id,
+            ctx._kv_caches,
+            block_ids,
+            None, # SDK is talking to LMCache, which lives in CPU.
+            ctx.blocks_in_chunk
+        )
+        store_result = fut.result(timeout=ctx._mq_timeout)
+    finally:
+        ctx.end_session(request_id, block_ids=block_ids[0])
 
-def _validate_store_tensor(
-    kv: torch.Tensor,
-    tokens: Sequence[int],
-    model_name: str,
-    chunk_size: int,
-) -> None:
-    """Validate tensor shape against token metadata and server chunk size.
-    
-    Args:
-        kv: The KV cache tensor to validate.
-        tokens: The list of token IDs corresponding to the KV cache tensor.
-        model_name: The model name to check for emptiness.
-        chunk_size: The chunk size configured in the LMCache server.
-    
-    Raises:
-        KVCacheSDKError: If any validation check fails.
-    """
-    if not model_name:
-        raise KVCacheSDKError("model_name must be provided")
-    if not tokens:
-        raise KVCacheSDKError("tokens must be provided")
-    if kv.ndim != 4:
-        raise KVCacheSDKError(
-            f"kv tensor must be 4-D [2, L, T, D], got shape {tuple(kv.shape)}"
-        )
-    total_tokens = (len(tokens) // chunk_size) * chunk_size
-    if total_tokens == 0:
-        raise KVCacheSDKError("tokens must contain at least one complete chunk")
-    if kv.shape[2] != total_tokens:
-        raise KVCacheSDKError(
-            f"kv tensor token dim {kv.shape[2]} does not match "
-            f"complete token prefix {total_tokens}"
-        )
+    return store_result

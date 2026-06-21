@@ -35,8 +35,7 @@ lmcache server \
   --chunk-size 256 \
   --port 6556 \
   --http-port 8081 \
-  --shm-name mypool \
-  --no-l1-use-lazy
+  --shm-name mypool # if using SHM, if pickle no need this flag
 ```
 
 ---
