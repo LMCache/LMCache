@@ -65,7 +65,8 @@ msgstr ""
 msgid ""
 "**Model Access**: Valid Hugging Face token (HF_TOKEN) for Llama 3.1 8B "
 "Instruct"
-msgstr "**模型访问**：有效的 Hugging Face 令牌 (HF_TOKEN) 用于 Llama 3.1 8B Instruct"
+msgstr ""
+"**模型访问**\\ ：有效的 Hugging Face 令牌 (HF_TOKEN) 用于 Llama 3.1 8B Instruct"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:22
 msgid "Ways to configure LMCache NIXL Offloading"
@@ -73,7 +74,8 @@ msgstr "配置 LMCache NIXL 卸载的方法"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:24
 msgid "**Configuration File**:"
-msgstr "**配置文件**："
+msgstr ""
+"**配置文件**\\ ："
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:26
 msgid "Passed in through ``LMCACHE_CONFIG_FILE=lmcache-config.yaml``"
@@ -95,9 +97,7 @@ msgid ""
 "shares ``LocalCPUBackend``'s pinned pool, which is sized by "
 "``max_local_cpu_size``."
 msgstr ""
-"``nixl_buffer_size``：NIXL 传输的缓冲区大小。**仅限 GPU 模式**（``nixl_buffer_device: "
-"cuda``）。将其设置为 ``nixl_buffer_device: cpu`` 是配置错误，将被拒绝——在 CPU 模式下，NIXL 共享 "
-"``LocalCPUBackend`` 的固定池，该池的大小由 ``max_local_cpu_size`` 决定。"
+"``nixl_buffer_size``\\ ：NIXL 传输的缓冲区大小。\\ **仅限 GPU 模式**\\ （\\ ``nixl_buffer_device: cuda``\\ ）。将其设置为 ``nixl_buffer_device: cpu`` 是配置错误，将被拒绝——在 CPU 模式下，NIXL 共享 ``LocalCPUBackend`` 的固定池，该池的大小由 ``max_local_cpu_size`` 决定。"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:46
 msgid ""
@@ -106,9 +106,7 @@ msgid ""
 " hot cache and concurrent NIXL I/O in flight. Must be > 0 when "
 "``nixl_buffer_device: cpu``. Default: ``5.0``."
 msgstr ""
-"``max_local_cpu_size``: ``LocalCPUBackend`` 的固定池大小（以 GiB 为单位）。在 CPU "
-"模式下，该池与 NIXL 共享，必须能够容纳热缓存和并发的 NIXL I/O。设置为 ``nixl_buffer_device: cpu`` "
-"时必须大于 0。默认值：``5.0``。"
+"``max_local_cpu_size``: ``LocalCPUBackend`` 的固定池大小（以 GiB 为单位）。在 CPU 模式下，该池与 NIXL 共享，必须能够容纳热缓存和并发的 NIXL I/O。设置为 ``nixl_buffer_device: cpu`` 时必须大于 0。默认值：\\ ``5.0``\\ 。"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:48
 msgid ""
@@ -136,12 +134,7 @@ msgid ""
 "the backend acts as a staging buffer only, mirroring how ``local_disk`` "
 "already uses ``LocalCPUBackend``."
 msgstr ""
-"``nixl_buffer_device``: 指定 NIXL 管理的内存应位于何处。对于 ``GDS``、``GDS_MT`` 和 "
-"``OBJ`` 后端，支持 ``cpu`` 或 ``cuda``；对于 ``POSIX``、``HF3FS``、``AZURE_BLOB`` 和 "
-"``DOCA_MEMOS``，必须为 ``cpu``。在 CPU 模式下，NIXL 共享 ``LocalCPUBackend`` 的固定缓冲区；当"
-" ``nixl_buffer_device: cpu`` 时，``LocalCPUBackend`` 始终会被创建，无论 "
-"``local_cpu`` 设置如何。``local_cpu: false`` 仍然会抑制热缓存提升——后端仅作为暂存缓冲区，镜像 "
-"``local_disk`` 已经如何使用 ``LocalCPUBackend``。"
+"``nixl_buffer_device``: 指定 NIXL 管理的内存应位于何处。对于 ``GDS``\\ 、\\ ``GDS_MT`` 和 ``OBJ`` 后端，支持 ``cpu`` 或 ``cuda``\\ ；对于 ``POSIX``\\ 、\\ ``HF3FS``\\ 、\\ ``AZURE_BLOB`` 和 ``DOCA_MEMOS``\\ ，必须为 ``cpu``\\ 。在 CPU 模式下，NIXL 共享 ``LocalCPUBackend`` 的固定缓冲区；当 ``nixl_buffer_device: cpu`` 时，\\ ``LocalCPUBackend`` 始终会被创建，无论 ``local_cpu`` 设置如何。\\ ``local_cpu: false`` 仍然会抑制热缓存提升——后端仅作为暂存缓冲区，镜像 ``local_disk`` 已经如何使用 ``LocalCPUBackend``\\ 。"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:54
 msgid "``nixl_backend``: configuration of which nixl backend to use for storage."
@@ -163,10 +156,7 @@ msgid ""
 "accepted with a warning and copied into this field; will be removed in a "
 "future release."
 msgstr ""
-"``local_cpu_use_hugepages``: 是否为 ``LocalCPUBackend`` 的固定池使用 Linux 大页（2 "
-"MiB）（NIXL 在 CPU 模式下共享）。需要预分配的大页（``sysctl "
-"vm.nr_hugepages``）。默认值：``false``。**已弃用的别名：** "
-"``extra_config.nixl_use_hugepages`` — 接受时会发出警告并复制到此字段；将在未来的版本中移除。"
+"``local_cpu_use_hugepages``: 是否为 ``LocalCPUBackend`` 的固定池使用 Linux 大页（2 MiB）（NIXL 在 CPU 模式下共享）。需要预分配的大页（\\ ``sysctl vm.nr_hugepages``\\ ）。默认值：\\ ``false``\\ 。\\ **已弃用的别名：** ``extra_config.nixl_use_hugepages`` — 接受时会发出警告并复制到此字段；将在未来的版本中移除。"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:61
 msgid ""
@@ -177,8 +167,7 @@ msgid ""
 "degrades proportionally to the fraction of unfull last chunks across "
 "active sequences."
 msgstr ""
-"在 CPU 模式下，共享分页分配器每个对象消耗一个完整的页面。使用 ``save_unfull_chunk: "
-"true``（仅在静态模式下有效——动态模式会拒绝它；请参见“动态模式”→“限制”），部分块仍然占用一个完整的页面，因此有效容量与活动序列中未满最后块的比例成正比地下降。"
+"在 CPU 模式下，共享分页分配器每个对象消耗一个完整的页面。使用 ``save_unfull_chunk: true``\\ （仅在静态模式下有效——动态模式会拒绝它；请参见“动态模式”→“限制”），部分块仍然占用一个完整的页面，因此有效容量与活动序列中未满最后块的比例成正比地下降。"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:65
 msgid ""
@@ -190,11 +179,7 @@ msgid ""
 "true`` with ``nixl_buffer_device: cuda`` instead, or disable "
 "``enable_p2p`` when running the NIXL CPU shared pool."
 msgstr ""
-"``enable_p2p: true`` 与 ``nixl_buffer_device: cpu`` "
-"一起被拒绝。这个组合在结构上是支持的——两个后端共享 ``LocalCPUBackend`` 的固定池，各自运行自己的 NIXL "
-"代理，并且分配通过 ``LocalCPUBackend.allocate()`` 路由——但尚未进行端到端的测试，也没有 CI 覆盖。在使用 "
-"NIXL CPU 共享池时，请改用 ``nixl_buffer_device: cuda`` 的 ``enable_p2p: "
-"true``，或者在运行时禁用 ``enable_p2p``。"
+"``enable_p2p: true`` 与 ``nixl_buffer_device: cpu`` 一起被拒绝。这个组合在结构上是支持的——两个后端共享 ``LocalCPUBackend`` 的固定池，各自运行自己的 NIXL 代理，并且分配通过 ``LocalCPUBackend.allocate()`` 路由——但尚未进行端到端的测试，也没有 CI 覆盖。在使用 NIXL CPU 共享池时，请改用 ``nixl_buffer_device: cuda`` 的 ``enable_p2p: true``\\ ，或者在运行时禁用 ``enable_p2p``\\ 。"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:69
 msgid ""
@@ -249,17 +234,14 @@ msgid ""
 "selects an endpoint in round-robin order based on its ``local_worker_id``"
 " (the worker ID within its host)."
 msgstr ""
-"当使用 OBJ 后端与多个张量并行 (TP) 工作节点时，您可以通过提供一个端点列表来在多个对象存储端点之间分配工作节点，方法是使用 "
-"``nixl_endpoint_list``。每个工作节点根据其 ``local_worker_id``（其主机内的工作节点 "
-"ID）以轮询方式选择一个端点。"
+"当使用 OBJ 后端与多个张量并行 (TP) 工作节点时，您可以通过提供一个端点列表来在多个对象存储端点之间分配工作节点，方法是使用 ``nixl_endpoint_list``\\ 。每个工作节点根据其 ``local_worker_id``\\ （其主机内的工作节点 ID）以轮询方式选择一个端点。"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:172
 msgid ""
 "When ``nixl_endpoint_list`` is set, any ``endpoint_override`` value in "
 "``nixl_backend_params`` is ignored (a warning is logged)."
 msgstr ""
-"当设置 ``nixl_endpoint_list`` 时，``nixl_backend_params`` 中的任何 "
-"``endpoint_override`` 值将被忽略（会记录警告）。"
+"当设置 ``nixl_endpoint_list`` 时，\\ ``nixl_backend_params`` 中的任何 ``endpoint_override`` 值将被忽略（会记录警告）。"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:175
 msgid ""
@@ -322,10 +304,7 @@ msgid ""
 "``nixl_buffer_device`` must be ``cpu``. ``nixl_endpoint_list`` is not "
 "supported for DOCA_MEMOS."
 msgstr ""
-"``DOCA_MEMOS`` 将 KV Cache 存储在 NVIDIA CMX（上下文内存存储）上，这是一个通过 NIXL 访问的 "
-"BlueField-4 上下文内存层。它是一种对象风格的后端（类似于 ``OBJ``），支持静态模式（``nixl_pool_size`` > "
-"0）和动态模式（``nixl_pool_size`` = 0）。``nixl_buffer_device`` 必须为 "
-"``cpu``。``nixl_endpoint_list`` 不支持 DOCA_MEMOS。"
+"``DOCA_MEMOS`` 将 KV Cache 存储在 NVIDIA CMX（上下文内存存储）上，这是一个通过 NIXL 访问的 BlueField-4 上下文内存层。它是一种对象风格的后端（类似于 ``OBJ``\\ ），支持静态模式（\\ ``nixl_pool_size`` > 0）和动态模式（\\ ``nixl_pool_size`` = 0）。\\ ``nixl_buffer_device`` 必须为 ``cpu``\\ 。\\ ``nixl_endpoint_list`` 不支持 DOCA_MEMOS。"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:246
 msgid ""

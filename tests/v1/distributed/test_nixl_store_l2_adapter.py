@@ -19,7 +19,7 @@ import torch
 nixl = pytest.importorskip("nixl")
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey  # noqa: E402
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey  # noqa: E402
 from lmcache.v1.distributed.internal_api import (  # noqa: E402
     L1MemoryDesc,
     L2AdapterListener,
@@ -55,6 +55,8 @@ from lmcache.v1.memory_management import (  # noqa: E402
     TensorMemoryObj,
 )
 from lmcache.v1.platform import consume_fd  # noqa: E402
+
+_EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
 # =============================================================================
 # Constants
@@ -331,7 +333,7 @@ class TestLookupAndLockInterface:
         adpt, _ = adapter
         key = create_object_key(1)
 
-        task_id = adpt.submit_lookup_and_lock_task([key])
+        task_id = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
 
         assert isinstance(task_id, int)
 
@@ -341,7 +343,7 @@ class TestLookupAndLockInterface:
         key = create_object_key(1)
         lookup_fd = adpt.get_lookup_and_lock_event_fd()
 
-        adpt.submit_lookup_and_lock_task([key])
+        adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
 
         assert wait_for_event_fd(lookup_fd, timeout=5.0), (
             "Lookup event fd was not signaled within timeout"
@@ -353,7 +355,7 @@ class TestLookupAndLockInterface:
         key = create_object_key(999)  # Never stored
         lookup_fd = adpt.get_lookup_and_lock_event_fd()
 
-        task_id = adpt.submit_lookup_and_lock_task([key])
+        task_id = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         wait_for_event_fd(lookup_fd, timeout=5.0)
 
         bitmap = adpt.query_lookup_and_lock_result(task_id)
@@ -375,7 +377,7 @@ class TestLookupAndLockInterface:
         adpt.pop_completed_store_tasks()
 
         # Now lookup
-        task_id = adpt.submit_lookup_and_lock_task([key])
+        task_id = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         wait_for_event_fd(lookup_fd, timeout=5.0)
 
         bitmap = adpt.query_lookup_and_lock_result(task_id)
@@ -398,7 +400,9 @@ class TestLookupAndLockInterface:
         adpt.pop_completed_store_tasks()
 
         # Lookup both keys
-        task_id = adpt.submit_lookup_and_lock_task([existing_key, nonexistent_key])
+        task_id = adpt.submit_lookup_and_lock_task(
+            [existing_key, nonexistent_key], _EMPTY_LAYOUT
+        )
         wait_for_event_fd(lookup_fd, timeout=5.0)
 
         bitmap = adpt.query_lookup_and_lock_result(task_id)
@@ -419,7 +423,7 @@ class TestLookupAndLockInterface:
         key = create_object_key(1)
         lookup_fd = adpt.get_lookup_and_lock_event_fd()
 
-        task_id = adpt.submit_lookup_and_lock_task([key])
+        task_id = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         wait_for_event_fd(lookup_fd, timeout=5.0)
 
         # First query returns result
@@ -461,7 +465,7 @@ class TestUnlockInterface:
         adpt.pop_completed_store_tasks()
 
         # Lookup and lock
-        task_id = adpt.submit_lookup_and_lock_task([key])
+        task_id = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         wait_for_event_fd(lookup_fd, timeout=5.0)
         adpt.query_lookup_and_lock_result(task_id)
 
@@ -592,7 +596,7 @@ class TestEndToEndWorkflow:
         assert completed[store_task_id].is_successful()
 
         # Step 2: Lookup and lock
-        lookup_task_id = adpt.submit_lookup_and_lock_task([key])
+        lookup_task_id = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         lookup_bitmap = adpt.query_lookup_and_lock_result(lookup_task_id)
         assert lookup_bitmap.test(0) is True
@@ -630,7 +634,7 @@ class TestEndToEndWorkflow:
         assert completed[store_task_id].is_successful()
 
         # Lookup
-        lookup_task_id = adpt.submit_lookup_and_lock_task([key])
+        lookup_task_id = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         lookup_bitmap = adpt.query_lookup_and_lock_result(lookup_task_id)
         assert lookup_bitmap.test(0) is True
@@ -671,7 +675,7 @@ class TestEndToEndWorkflow:
         assert completed[store_task_id].is_successful()
 
         # Lookup all
-        lookup_task_id = adpt.submit_lookup_and_lock_task(keys)
+        lookup_task_id = adpt.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         lookup_bitmap = adpt.query_lookup_and_lock_result(lookup_task_id)
         for i in range(num_objects):
@@ -861,7 +865,7 @@ class TestEvictionInterface:
 
         adpt.delete([key])
 
-        task_id = adpt.submit_lookup_and_lock_task([key])
+        task_id = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         bitmap = adpt.query_lookup_and_lock_result(task_id)
         assert bitmap.test(0) is False
@@ -929,7 +933,7 @@ class TestEvictionInterface:
         _store_and_wait(adpt, key, obj)
 
         # Pin the key via lookup_and_lock
-        task_id = adpt.submit_lookup_and_lock_task([key])
+        task_id = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         adpt.query_lookup_and_lock_result(task_id)
 
@@ -975,7 +979,7 @@ class TestEvictionInterface:
         adpt.pop_completed_store_tasks()
 
         # Lookup and lock (required before load)
-        task_id = adpt.submit_lookup_and_lock_task([key])
+        task_id = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         adpt.query_lookup_and_lock_result(task_id)
 
@@ -1008,7 +1012,7 @@ class TestEvictionInterface:
         adpt.pop_completed_store_tasks()
 
         # Lookup and lock
-        task_id = adpt.submit_lookup_and_lock_task([real_key])
+        task_id = adpt.submit_lookup_and_lock_task([real_key], _EMPTY_LAYOUT)
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         adpt.query_lookup_and_lock_result(task_id)
 
@@ -1054,7 +1058,7 @@ class TestEvictionInterface:
         _store_and_wait(adpt, key, obj)
 
         # Pin via lookup
-        task_id = adpt.submit_lookup_and_lock_task([key])
+        task_id = adpt.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         adpt.query_lookup_and_lock_result(task_id)
 

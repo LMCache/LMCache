@@ -28,6 +28,7 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _poll_prefetch_status,
     _query_checksum,
     _send_lookup,
+    _send_unregister_kv_cache,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocols.base import RequestType
@@ -506,6 +507,103 @@ class TestLookupProtocol:
             )
             assert hit == 5
             assert router.last_query_request_id == "req-42"
+            client.close()
+        finally:
+            router.stop()
+
+
+# ------------------------------------------------------------------ #
+#  _send_unregister_kv_cache (deregister on shutdown)                  #
+# ------------------------------------------------------------------ #
+
+
+class _UnregisterRouter:
+    """Fake ROUTER that records UNREGISTER requests and replies void.
+
+    Both ``UNREGISTER_KV_CACHE`` and
+    ``UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT`` carry a single
+    ``instance_id`` payload and return ``None`` (void). This fake
+    records the request type and decoded ``instance_id`` of the last
+    UNREGISTER it saw so the test can assert the bench sends the
+    correct protocol for each transfer mode.
+    """
+
+    def __init__(self, endpoint: str) -> None:
+        self.last_request_type: RequestType | None = None
+        self.last_instance_id: int | None = None
+        self._ctx = zmq.Context.instance()
+        self._router = self._ctx.socket(zmq.ROUTER)
+        self._router.bind(endpoint)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2)
+        self._router.close(linger=0)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            if not self._router.poll(100, zmq.POLLIN):
+                continue
+            frames = self._router.recv_multipart()
+            identity, uid_f, type_f, *payload = frames
+            req_type = msgspec.msgpack.decode(type_f, type=RequestType)
+            if req_type in (
+                RequestType.UNREGISTER_KV_CACHE,
+                RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
+            ):
+                self.last_request_type = req_type
+                self.last_instance_id = msgspec.msgpack.decode(payload[0], type=int)
+                # Void reply: no payload frame.
+                self._router.send_multipart([identity, uid_f, type_f])
+
+
+class TestUnregisterKVCache:
+    def _make_client(self, endpoint: str) -> MessageQueueClient:
+        ctx = zmq.Context.instance()
+        return MessageQueueClient(endpoint, ctx)
+
+    def test_handle_mode_sends_unregister_kv_cache(
+        self,
+        router_endpoint: str,
+    ) -> None:
+        """Handle mode uses the GPU/SHM ``UNREGISTER_KV_CACHE`` protocol."""
+        router = _UnregisterRouter(router_endpoint)
+        router.start()
+        try:
+            client = self._make_client(router_endpoint)
+            assert (
+                _send_unregister_kv_cache(client, instance_id=7, use_handle=True)
+                is True
+            )
+            assert router.last_request_type == RequestType.UNREGISTER_KV_CACHE
+            assert router.last_instance_id == 7
+            client.close()
+        finally:
+            router.stop()
+
+    def test_data_mode_sends_engine_driven_unregister(
+        self,
+        router_endpoint: str,
+    ) -> None:
+        """Data mode uses the engine-driven context unregister protocol."""
+        router = _UnregisterRouter(router_endpoint)
+        router.start()
+        try:
+            client = self._make_client(router_endpoint)
+            assert (
+                _send_unregister_kv_cache(client, instance_id=0, use_handle=False)
+                is True
+            )
+            assert (
+                router.last_request_type
+                == RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
+            )
+            assert router.last_instance_id == 0
             client.close()
         finally:
             router.stop()

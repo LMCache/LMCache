@@ -124,3 +124,14 @@ nav .toctree-l1:has(> a.expandable) {
     padding-top: 0.6rem;
     border-top: 1px solid rgba(128, 128, 128, 0.25);
 }
+
+/* Homepage hero text (translatable RST replacing former raw HTML) */
+.hero-tagline {
+    text-align: center;
+    font-size: 24px;
+    font-weight: bold;
+}
+
+.hero-description {
+    text-align: justify;
+}

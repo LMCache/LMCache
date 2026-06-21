@@ -14,7 +14,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.l2_adapters.factory import create_l2_adapter_from_registry
 from lmcache.v1.memory_management import (
     MemoryFormat,
@@ -22,6 +22,8 @@ from lmcache.v1.memory_management import (
     TensorMemoryObj,
 )
 from lmcache.v1.platform import consume_fd
+
+_EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
 AEROSPIKE_HOST = os.environ.get("AEROSPIKE_TEST_HOST", "127.0.0.1")
 AEROSPIKE_PORT = int(os.environ.get("AEROSPIKE_TEST_PORT", "3000"))
@@ -131,7 +133,7 @@ class TestAerospikeL2Integration:
             done = adapter.pop_completed_store_tasks()
             assert done[tid].is_successful()
 
-            lookup_tid = adapter.submit_lookup_and_lock_task([key])
+            lookup_tid = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
             _wait_fd(adapter.get_lookup_and_lock_event_fd())
             lookup_bm = adapter.query_lookup_and_lock_result(lookup_tid)
             assert lookup_bm is not None

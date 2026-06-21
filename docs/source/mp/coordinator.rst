@@ -73,6 +73,27 @@ variables:
      - ``1``
      - Positions between CacheBlend match probes. ``1`` probes every offset
        for full recall.
+   * - ``LMCACHE_MP_COORDINATOR_ENABLE_STARTUP_RESYNC``
+     - ``True``
+     - When ``True``, the coordinator runs a one-shot L2 resync on
+       startup that paginates an MP server's ``GET /l2/keys`` and
+       backfills usage + eviction trackers from existing L2 contents.
+       Disable to start from empty trackers (handy for tests, or
+       deployments that start the coordinator before any MP server).
+   * - ``LMCACHE_MP_COORDINATOR_RESYNC_POLL_INTERVAL``
+     - ``1``
+     - Seconds between registry checks while waiting for the first
+       MP server to register so startup resync can begin.
+   * - ``LMCACHE_MP_COORDINATOR_RESYNC_MAX_WAIT``
+     - ``60``
+     - Maximum seconds startup resync waits for an MP server before
+       giving up. The coordinator keeps running with empty trackers
+       until normal usage events fill them in.
+   * - ``LMCACHE_MP_COORDINATOR_RESYNC_PAGE_SIZE``
+     - ``1000``
+     - ``page_size`` forwarded to the MP server's ``GET /l2/keys``
+       during resync. Larger values reduce RTT count; the server
+       clamps to its own ceiling.
 
 Connecting MP servers
 ---------------------
@@ -139,12 +160,38 @@ L2 usage tracking and eviction
 ------------------------------
 
 When MP servers enable ``--coordinator-l2-event-reporting``, they stream L2
-store and lookup events to the coordinator. The coordinator aggregates
-per-``cache_salt`` usage, enforces quotas, and selects LRU keys to evict.
+``store``, ``lookup``, and ``delete`` events to the coordinator. The coordinator
+aggregates per-``cache_salt`` usage, enforces quotas, and selects LRU keys
+to evict.
 
 Each event batch carries the server's ``instance_id`` and a monotonically
 increasing sequence number (``seq``) scoped to that instance. These fields
 enable future gap detection to identify lost batches.
+
+**Active eviction loop.** Every
+``LMCACHE_MP_COORDINATOR_EVICTION_CHECK_INTERVAL`` seconds, the
+coordinator inspects per-salt usage against the registered quotas and,
+for any salt over the trigger watermark, picks LRU victims and
+dispatches a single ``DELETE /l2`` to a uniformly random registered MP
+server. Because all MP servers share the same backing L2 (e.g. one S3
+bucket), one dispatch evicts the keys for the whole fleet. The MP
+server's L2 adapter fires ``on_l2_keys_deleted`` listeners after the
+delete completes; those listeners ship ``delete`` events back through
+``POST /l2/events``, which is what updates the coordinator's LRU +
+per-salt totals. Dispatch failures or no-instances-registered fall
+through to the next cycle — at-least-once semantics, safe because the
+S3 delete is idempotent.
+
+**Startup resync.** On boot, the coordinator waits up to
+``LMCACHE_MP_COORDINATOR_RESYNC_MAX_WAIT`` seconds for the first MP
+server to register, then paginates its
+``GET /l2/keys`` and seeds the in-memory usage + eviction trackers
+with whatever is already resident in L2 — so a fresh coordinator
+does not start from zero usage. Set
+``LMCACHE_MP_COORDINATOR_ENABLE_STARTUP_RESYNC=False`` to skip this
+phase. Best-effort: resync failures are logged and the manager gives
+up; the ongoing usage-event stream from MP servers eventually corrects
+any initial blind spots.
 
 **Quota management** -- set per-``cache_salt`` byte budgets. Salts without a
 quota default to a 0-byte limit (allowlist semantics).
@@ -165,6 +212,10 @@ Use ``_default`` as the path parameter to target the empty-string salt.
 
 **Event ingestion** -- MP servers POST batched events; this is handled
 automatically by the event listener and is not typically called manually.
+Supported event types are ``store``, ``lookup``, and ``delete``. A
+``delete`` event subtracts the key's previously-recorded bytes from the
+per-salt totals (the wire ``bytes`` field is ignored for ``delete``;
+the coordinator already knows the size from the original ``store``).
 
 .. code-block:: bash
 
@@ -174,10 +225,12 @@ automatically by the event listener and is not typically called manually.
             "instance_id": "server-1",
             "seq": 1,
             "events": [
-                {"type": "store", "key": {"chunk_hash_hex": "aa", "model_name": "m", "kv_rank": 0, "cache_salt": "user-a"}, "bytes": 1024}
+                {"type": "store",  "key": {"chunk_hash_hex": "aa", "model_name": "m", "kv_rank": 0, "cache_salt": "user-a"}, "bytes": 1024},
+                {"type": "lookup", "key": {"chunk_hash_hex": "aa", "model_name": "m", "kv_rank": 0, "cache_salt": "user-a"}, "bytes": 0},
+                {"type": "delete", "key": {"chunk_hash_hex": "aa", "model_name": "m", "kv_rank": 0, "cache_salt": "user-a"}, "bytes": 0}
             ]
         }'
-    # -> {"recorded": 1}
+    # -> {"recorded": 3}
 
 **Status queries** -- inspect usage and quota info.
 
@@ -209,7 +262,7 @@ L2 endpoint summary
      - Remove a salt's quota entry.
    * - ``POST``
      - ``/l2/events``
-     - Ingest a batch of L2 store/lookup events.
+     - Ingest a batch of L2 ``store`` / ``lookup`` / ``delete`` events.
    * - ``GET``
      - ``/l2/status/{cache_salt}``
      - Quota and usage for a single salt.
