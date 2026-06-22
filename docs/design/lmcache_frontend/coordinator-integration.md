@@ -41,7 +41,7 @@ directly from each node.
 ## Assumptions
 
 - The coordinator is a **single instance** and the sole source of truth.
-- Tts registry is in-memory and ephemeral (rebuilt from heartbeats after a restart).
+- Its registry is in-memory and ephemeral (rebuilt from heartbeats after a restart).
 - The frontend reads from **one** `--coordinator-url` and does not aggregate across coordinators. 
 - Right after a coordinator restart `GET /instances` may be temporarily empty; the frontend 
   keeps its last-known list rather than clearing it.
