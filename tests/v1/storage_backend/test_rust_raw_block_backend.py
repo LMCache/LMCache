@@ -349,6 +349,99 @@ def test_raw_block_core_uring_cmd_reads_batch_split_chunks(monkeypatch):
         core.close()
 
 
+@pytest.mark.parametrize("completion_results", [[], [True]])
+def test_raw_block_core_uring_cmd_write_rejects_short_completion_bitmap(
+    monkeypatch, completion_results
+):
+    _install_fake_raw_block_device(monkeypatch)
+    core = _make_raw_block_core(io_engine="io_uring")
+    try:
+        raw_dev = core._rawdev()
+        raw_dev.wait_iouring = lambda batch_id: completion_results
+        core.max_data_transfer_size = core.block_align
+
+        payload = bytearray(b"x" * (core.block_align * 2))
+        with pytest.raises(RuntimeError, match="io_uring_cmd write failed"):
+            core._write_uring_cmd_buffers(
+                [core.block_align],
+                [payload],
+                [len(payload)],
+                [len(payload)],
+            )
+    finally:
+        core.close()
+
+
+@pytest.mark.parametrize("completion_results", [[], [True]])
+def test_raw_block_core_uring_cmd_read_rejects_short_completion_bitmap(
+    monkeypatch, completion_results
+):
+    _install_fake_raw_block_device(monkeypatch)
+    core = _make_raw_block_core(io_engine="io_uring")
+    try:
+        raw_dev = core._rawdev()
+        raw_dev.wait_iouring = lambda batch_id: completion_results
+        core.max_data_transfer_size = core.block_align
+
+        out = bytearray(core.block_align * 2)
+        results = core._read_uring_cmd_buffers(
+            [core.block_align],
+            [out],
+            [len(out)],
+            [len(out)],
+        )
+
+        assert results == [False]
+    finally:
+        core.close()
+
+
+@pytest.mark.parametrize("completion_results", [[], [True]])
+def test_raw_block_core_iouring_write_rejects_short_completion_bitmap(
+    monkeypatch, completion_results
+):
+    _install_fake_raw_block_device(monkeypatch)
+    core = _make_raw_block_core(io_engine="io_uring")
+    try:
+        raw_dev = core._rawdev()
+        raw_dev.wait_iouring = lambda batch_id: completion_results
+
+        payloads = [bytearray(b"x" * 512), bytearray(b"y" * 512)]
+        with pytest.raises(RuntimeError, match="io_uring write failed"):
+            core._write_buffers(
+                [core.block_align, core.block_align * 2],
+                payloads,
+                [len(payload) for payload in payloads],
+                [len(payload) for payload in payloads],
+            )
+    finally:
+        core.close()
+
+
+@pytest.mark.parametrize("completion_results", [[], [True]])
+def test_raw_block_core_iouring_read_rejects_short_completion_bitmap(
+    monkeypatch, completion_results
+):
+    _install_fake_raw_block_device(monkeypatch)
+    core = _make_raw_block_core(io_engine="io_uring")
+    try:
+        raw_dev = core._rawdev()
+        raw_dev.wait_iouring = lambda batch_id: completion_results
+
+        out1 = bytearray(512)
+        out2 = bytearray(512)
+        results = core._read_buffers(
+            [core.block_align, core.block_align * 2],
+            [out1, out2],
+            [len(out1), len(out2)],
+            [len(out1), len(out2)],
+        )
+
+        assert results == [False, False]
+    finally:
+        core.close()
+
+
 def test_raw_block_core_odirect_prepare_payload_boundaries(monkeypatch):
     _install_fake_raw_block_device(monkeypatch)
     core = _make_raw_block_core(use_odirect=True)

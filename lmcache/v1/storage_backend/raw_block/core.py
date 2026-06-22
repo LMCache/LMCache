@@ -931,7 +931,7 @@ class RawBlockCore:
                     logger.error("RawBlockCore batched load failed: %s", e)
                     io_results = [False] * len(read_indices)
 
-                for item_idx, ok in zip(read_indices, io_results, strict=False):
+                for item_idx, ok in zip(read_indices, io_results, strict=True):
                     if not ok:
                         continue
                     entry = items[item_idx][1]
@@ -1357,7 +1357,14 @@ class RawBlockCore:
             chunk_lens,
             chunk_placement_ids,
         )
-        if not all(raw_dev.wait_iouring(batch_id)):
+        if not all(
+            self._wait_iouring_results(
+                raw_dev,
+                batch_id,
+                len(chunk_offsets),
+                "io_uring_cmd write",
+            )
+        ):
             raise RuntimeError("raw-block io_uring_cmd write failed")
         keepalive.clear()
 
@@ -1378,7 +1385,8 @@ class RawBlockCore:
 
         Returns:
             A list of per-logical-read success booleans aligned with
-            ``offsets``.
+            ``offsets``. If a submitted batch returns too few or too many
+            completions, all submitted logical reads are reported as false.
         """
         raw_dev = self._rawdev()
         results = [False] * len(offsets)
@@ -1439,7 +1447,12 @@ class RawBlockCore:
                 chunk_buffers,
                 chunk_lens,
             )
-            chunk_results = list(raw_dev.wait_iouring(batch_id))
+            chunk_results = self._wait_iouring_results(
+                raw_dev,
+                batch_id,
+                len(chunk_offsets),
+                "io_uring_cmd read",
+            )
         except Exception:
             return results
 
@@ -1515,7 +1528,14 @@ class RawBlockCore:
                 [int(total_len) for total_len in total_lens],
                 per_write_placement_ids,
             )
-            if not all(raw_dev.wait_iouring(batch_id)):
+            if not all(
+                self._wait_iouring_results(
+                    raw_dev,
+                    batch_id,
+                    len(offsets),
+                    "io_uring write",
+                )
+            ):
                 raise RuntimeError("raw-block io_uring write failed")
             return
 
@@ -1547,7 +1567,9 @@ class RawBlockCore:
             total_lens: Physical I/O lengths for each read.
 
         Returns:
-            A list of per-read success booleans aligned with ``offsets``.
+            A list of per-read success booleans aligned with ``offsets``. The
+            returned list always has the same length as ``offsets``; completion
+            count mismatches are reported as false entries.
 
         Raises:
             RuntimeError: If the requested io_uring mode is unavailable before
@@ -1586,7 +1608,12 @@ class RawBlockCore:
                 list(buffers),
                 [int(total_len) for total_len in total_lens],
             )
-            return list(raw_dev.wait_iouring(batch_id))
+            return self._wait_iouring_results(
+                raw_dev,
+                batch_id,
+                len(offsets),
+                "io_uring read",
+            )
 
         results = []
         for offset, buf, payload_len, total_len in zip(
@@ -1598,6 +1625,25 @@ class RawBlockCore:
             except Exception:
                 results.append(False)
         return results
+
+    def _wait_iouring_results(
+        self,
+        raw_dev: Any,
+        batch_id: int,
+        expected_count: int,
+        operation: str,
+    ) -> list[bool]:
+        """Wait for an io_uring batch and return a full-size success bitmap."""
+        results = list(raw_dev.wait_iouring(batch_id))
+        if len(results) != expected_count:
+            logger.error(
+                "RawBlockCore %s completion count mismatch: expected %d, got %d",
+                operation,
+                expected_count,
+                len(results),
+            )
+            return [False] * expected_count
+        return [bool(result) for result in results]
 
     def _write_one(
         self,
