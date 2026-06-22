@@ -166,6 +166,8 @@ class MPCacheServerContext:
         storage_manager_config: Configuration for the storage manager.
         chunk_size: Chunk size for KV cache operations.
         hash_algorithm: Hash algorithm for token hashing.
+        separate_object_groups: Whether to split kernel groups into one object
+            group per sliding-window size at KV-cache registration.
     """
 
     def __init__(
@@ -173,8 +175,10 @@ class MPCacheServerContext:
         storage_manager_config: StorageManagerConfig,
         chunk_size: int = 256,
         hash_algorithm: str = "blake3",
+        separate_object_groups: bool = False,
     ) -> None:
         self._chunk_size = chunk_size
+        self._separate_object_groups = separate_object_groups
 
         # Initialize the process-global GDS context.
         # No-op when GDS L1 is disabled (config is None).
@@ -203,6 +207,11 @@ class MPCacheServerContext:
     def chunk_size(self) -> int:
         """Chunk size for KV cache operations."""
         return self._chunk_size
+
+    @property
+    def separate_object_groups(self) -> bool:
+        """Whether to split kernel groups into per-sliding-window object groups."""
+        return self._separate_object_groups
 
     @property
     def storage_manager(self) -> StorageManager:

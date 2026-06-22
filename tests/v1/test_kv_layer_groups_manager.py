@@ -30,6 +30,7 @@ def _build_manager(
     *,
     num_blocks: int,
     engine_group_infos: Sequence[EngineGroupInfo] = (),
+    separate_object_groups: bool = False,
 ) -> KVLayerGroupsManager:
     """Build a manager using the per-layer NHD format.
 
@@ -46,6 +47,7 @@ def _build_manager(
         engine_kv_format=lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
         num_blocks=num_blocks,
         engine_group_infos=engine_group_infos,
+        separate_object_groups=separate_object_groups,
     )
 
 
@@ -399,11 +401,10 @@ class TestKernelAndObjectGroups:
         assert obj.sw_size_chunks == -1
         assert manager.get_sw_size_chunks(0) == -1
 
-    def test_object_group_separation_disabled_merges_groups(self, monkeypatch):
+    def test_object_group_separation_disabled_merges_groups(self):
         # With separation off (the default), a full-attention group and a
         # sliding-window group still collapse into one full-attention object
         # group, and get_sw_size_chunks reports -1.
-        monkeypatch.setenv("LMCACHE_MP_SEPARATE_OBJECT_GROUPS", "false")
         tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(2)]
         manager = _build_manager(
             tensors,
@@ -412,17 +413,17 @@ class TestKernelAndObjectGroups:
                 EngineGroupInfo(0, (0,)),
                 EngineGroupInfo(1, (1,), sw_size_tokens=64),
             ],
+            separate_object_groups=False,
         )
         assert manager.num_kernel_groups == 2
         assert manager.num_object_groups == 1
         assert manager.object_groups[0].kernel_group_indices == [0, 1]
         assert manager.get_sw_size_chunks(0) == -1
 
-    def test_object_group_separation_enabled_buckets_by_window(self, monkeypatch):
+    def test_object_group_separation_enabled_buckets_by_window(self):
         # With separation on, the full-attention and sliding-window kernel groups
         # land in distinct object groups, ordered by first kernel group index,
         # and get_sw_size_chunks reports each group's real window.
-        monkeypatch.setenv("LMCACHE_MP_SEPARATE_OBJECT_GROUPS", "true")
         tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(2)]
         manager = _build_manager(
             tensors,
@@ -431,6 +432,7 @@ class TestKernelAndObjectGroups:
                 EngineGroupInfo(0, (0,)),
                 EngineGroupInfo(1, (1,), sw_size_tokens=64),
             ],
+            separate_object_groups=True,
         )
         assert manager.num_kernel_groups == 2
         assert manager.num_object_groups == 2
@@ -442,15 +444,14 @@ class TestKernelAndObjectGroups:
         assert manager.object_groups[1].sw_size_chunks >= 1
         assert manager.get_sw_size_chunks(1) == manager.object_groups[1].sw_size_chunks
 
-    def test_object_group_separation_enabled_non_hybrid_single_group(self, monkeypatch):
+    def test_object_group_separation_enabled_non_hybrid_single_group(self):
         # Even with separation on, a non-hybrid model (no sliding-window groups)
         # yields a single full-attention object group.
-        monkeypatch.setenv("LMCACHE_MP_SEPARATE_OBJECT_GROUPS", "true")
         tensors = [
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
             torch.randn(2, 32, 256, 16, 64, dtype=torch.float16),
         ]
-        manager = _build_manager(tensors, num_blocks=32)
+        manager = _build_manager(tensors, num_blocks=32, separate_object_groups=True)
         assert manager.num_object_groups == 1
         assert manager.get_sw_size_chunks(0) == -1
 

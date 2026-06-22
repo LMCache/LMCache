@@ -7,7 +7,6 @@ from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
-import os
 
 # Third Party
 import torch
@@ -24,33 +23,6 @@ if TYPE_CHECKING:
     from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 
 logger = init_logger(__name__)
-
-# Toggle for splitting kernel groups into per-window object groups. Off by
-# default, which keeps every kernel group in a single full-attention object
-# group (the pre-hybrid behavior). This is an MP-mode (cache-server) feature
-# flag; it follows the ``ENV_MP_* = "LMCACHE_MP_*"`` env-var convention used
-# elsewhere in the multiprocess path (e.g. ``ENV_MP_TRANSFER_MODE``). Read at
-# detection time so it can be set per process / overridden in tests.
-ENV_MP_SEPARATE_OBJECT_GROUPS = "LMCACHE_MP_SEPARATE_OBJECT_GROUPS"
-
-
-def separate_object_groups_enabled() -> bool:
-    """Whether object-group separation by sliding-window size is enabled.
-
-    Controlled by the :data:`ENV_MP_SEPARATE_OBJECT_GROUPS` environment
-    variable; accepts ``1``/``true``/``yes``/``on`` (case-insensitive).
-    Defaults to off.
-
-    Returns:
-        ``True`` if separation is enabled, ``False`` otherwise.
-    """
-    return os.environ.get(ENV_MP_SEPARATE_OBJECT_GROUPS, "false").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
-
 
 # ------------------------------------------------------------------ #
 #  Constants                                                           #
@@ -309,6 +281,7 @@ class KVLayerGroupsManager:
         num_blocks: int,
         engine_group_infos: "Sequence[EngineGroupInfo]" = (),
         lmcache_tokens_per_chunk: int = 256,
+        separate_object_groups: bool = False,
     ) -> None:
         """Partition layers into groups keyed by
         :data:`LayerGroupIdentity`.
@@ -331,6 +304,9 @@ class KVLayerGroupsManager:
             engine_group_infos: Engine KV cache group metadata, one info per
                 kernel group in kernel-group order, or empty.
             lmcache_logical_chunk_size: Tokens per LMCache chunk
+            separate_object_groups: When True, split kernel groups into one
+                object group per sliding-window size; when False (default), all
+                kernel groups share a single full-attention object group.
         """
         # Import here to break a circular import via
         # lmcache.v1.gpu_connector.__init__ → metadata → kv_layer_groups.
@@ -427,6 +403,7 @@ class KVLayerGroupsManager:
             )
 
         self._lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
+        self._separate_object_groups = separate_object_groups
 
         logger.info(
             "KV layer groups: ---\n%s\n---",
@@ -593,7 +570,7 @@ class KVLayerGroupsManager:
         Returns:
             One :class:`ObjectGroupInfo` per object group.
         """
-        if not separate_object_groups_enabled():
+        if not self._separate_object_groups:
             return [
                 ObjectGroupInfo(
                     kernel_group_indices=list(range(len(self._kernel_groups)))

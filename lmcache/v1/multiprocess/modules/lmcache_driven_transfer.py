@@ -548,6 +548,7 @@ class LMCacheDrivenTransferModule:
             layout_hints=layout_hints or None,
             engine_group_infos=engine_group_infos,
             engine_type=engine_type,
+            separate_object_groups=self._ctx.separate_object_groups,
         )
         self._cache_contexts[instance_id] = ContextEntry(
             cache_context=cache_context,

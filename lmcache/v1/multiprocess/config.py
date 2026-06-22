@@ -45,6 +45,11 @@ class MPServerConfig:
     ('default' for standard prefix caching, 'blend' when cacheblend is enabled).
     """
 
+    separate_object_groups: bool = False
+    """When True, split kernel groups into one object group per sliding-window
+    size at KV-cache registration (hybrid models). When False (default), all
+    kernel groups share a single full-attention object group."""
+
     supported_transfer_mode: str = "auto"
     """Transfer mode: 'lmcache_driven' for server-driven transfer
     (STORE/RETRIEVE, supports CUDA IPC and CPU SHM), 'engine_driven' for
@@ -257,6 +262,13 @@ def add_mp_server_args(
         help="Python modules that the /run_script endpoint is allowed to "
         "import. Example: --script-allowed-imports numpy pandas",
     )
+    mp_group.add_argument(
+        "--separate-object-groups",
+        action="store_true",
+        help="Split kernel groups into one object group per sliding-window size "
+        "at KV-cache registration (for hybrid models). Off by default, keeping a "
+        "single full-attention object group.",
+    )
     return parser
 
 
@@ -289,6 +301,7 @@ def parse_args_to_mp_server_config(
         max_cpu_workers=max_cpu,
         hash_algorithm=args.hash_algorithm,
         engine_type=args.engine_type,
+        separate_object_groups=args.separate_object_groups,
         supported_transfer_mode=args.supported_transfer_mode,
         runtime_plugin_config=RuntimePluginConfig(
             locations=(args.runtime_plugin_locations or []),
