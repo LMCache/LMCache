@@ -198,6 +198,55 @@ def test_serialize_preserves_dtype():
     blob = _serialize_multi_group_chunks(group_chunks)
     restored = _deserialize_multi_group_chunks(blob)
     assert restored[0][0].dtype == torch.bfloat16
+    # Values should be close (bf16 has lower precision than f32)
+    torch.testing.assert_close(
+        restored[0][0].float(), group_chunks[0][0].float(), atol=0.01, rtol=0.05
+    )
+
+
+@pytest.mark.skipif(
+    not hasattr(torch, "float8_e4m3fn"),
+    reason="torch.float8_e4m3fn not available in this PyTorch build",
+)
+def test_serialize_preserves_fp8_e4m3fn():
+    """fp8_e4m3fn dtypes must roundtrip via uint8 view."""
+    # Generate values within fp8_e4m3fn range
+    src = torch.randn(2, 4, 16, 128).clamp(-240.0, 240.0).to(torch.float8_e4m3fn)
+    group_chunks = [[src]]
+    blob = _serialize_multi_group_chunks(group_chunks)
+    restored = _deserialize_multi_group_chunks(blob)
+    assert restored[0][0].dtype == torch.float8_e4m3fn
+    assert restored[0][0].shape == src.shape
+    # Bit-exact: fp8 is a view of uint8
+    assert torch.equal(restored[0][0].view(torch.uint8), src.view(torch.uint8))
+
+
+@pytest.mark.skipif(
+    not hasattr(torch, "float8_e5m2"),
+    reason="torch.float8_e5m2 not available in this PyTorch build",
+)
+def test_serialize_preserves_fp8_e5m2():
+    """fp8_e5m2 dtypes must roundtrip via uint8 view."""
+    src = torch.randn(2, 4, 16, 128).clamp(-240.0, 240.0).to(torch.float8_e5m2)
+    group_chunks = [[src]]
+    blob = _serialize_multi_group_chunks(group_chunks)
+    restored = _deserialize_multi_group_chunks(blob)
+    assert restored[0][0].dtype == torch.float8_e5m2
+    assert torch.equal(restored[0][0].view(torch.uint8), src.view(torch.uint8))
+
+
+def test_serialize_mixed_dtypes_in_one_blob():
+    """A multi-group blob can mix dtypes per group."""
+    group_chunks = [
+        [torch.randn(2, 4, 16, 128, dtype=torch.bfloat16)],
+        [torch.randn(2, 4, 8, 64, dtype=torch.float16)],
+        [torch.randn(2, 4, 4, 32, dtype=torch.float32)],
+    ]
+    blob = _serialize_multi_group_chunks(group_chunks)
+    restored = _deserialize_multi_group_chunks(blob)
+    assert restored[0][0].dtype == torch.bfloat16
+    assert restored[1][0].dtype == torch.float16
+    assert restored[2][0].dtype == torch.float32
 
 
 # ─── Test 5: slice_kv_caches_for_group ───────────────────────────────────────

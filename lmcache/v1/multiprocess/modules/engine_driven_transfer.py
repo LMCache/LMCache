@@ -548,6 +548,13 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         )
         group_chunks = _deserialize_multi_group_chunks(cpu_data)
         num_groups = len(entry.metadata.group_layout_descs)
+        if len(group_chunks) != num_groups:
+            logger.error(
+                "Group count mismatch in commit_store: expected %d, got %d",
+                num_groups,
+                len(group_chunks),
+            )
+            return False
         all_obj_keys = self._resolve_all_group_obj_keys(key, num_groups)
         session = self._ctx.session_manager.get_or_create(key.request_id)
         st = session.extras.pop("store_start_time", None)
