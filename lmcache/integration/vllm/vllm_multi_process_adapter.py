@@ -130,6 +130,8 @@ def _resolve_extra_config(
 class _IpcEvent(Protocol):
     def ipc_handle(self) -> Any: ...
 
+    def wait(self, stream: Any = None) -> None: ...
+
 
 def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
     # Emit a per-layer (name, shape, dtype) summary so the operator can
@@ -1565,6 +1567,22 @@ class LMCacheMPWorkerAdapter:
         errors = self.error_block_ids.copy()
         self.error_block_ids.clear()
         return errors
+
+    def handle_preemptions(self, need_flush: bool) -> None:
+        """Handle worker-side preemption hints from connector metadata.
+
+        When ``need_flush`` is true, synchronize deferred engine-driven gather
+        work before the next forward pass can overwrite paged KV blocks.
+
+        Args:
+            need_flush: When True, flush in-flight gather operations on the
+                transfer context. When False, this is a no-op.
+        """
+        if not need_flush:
+            return
+        if not self.is_healthy or self.transfer_ctx is None:
+            return
+        self.transfer_ctx.flush_inflight_gathers()
 
     def shutdown(self) -> None:
         """
