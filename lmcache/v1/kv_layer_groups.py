@@ -583,24 +583,15 @@ class KVLayerGroupsManager:
     ) -> list[ObjectGroupInfo]:
         """Bucket kernel groups into object groups.
 
-        When object-group separation is disabled (the default; see
-        :func:`separate_object_groups_enabled`), every kernel group shares a
-        single full-attention object group -- the pre-hybrid behavior. When
-        enabled, kernel groups are bucketed by cross-chunk sliding-window size:
-        non-sliding-window groups (``sw_size_tokens == -1``) share one
-        full-attention object group, and each distinct window size (rounded up
-        to chunks) forms its own object group, so the kernel groups inside one
-        object share a single prefix-matching rule. A non-hybrid model yields a
-        single full-attention object group either way.
+        Puts all kernel groups into a single object group when object-group
+        separation is disabled (the default). Otherwise groups the kernel groups
+        by sliding-window size measured in number of chunks.
 
         Args:
             engine_group_infos: LMCache-owned engine KV cache group metadata.
 
         Returns:
-            One :class:`ObjectGroupInfo` per object group. Without separation, a
-            single group covering every kernel group; with separation, one group
-            per distinct window size, ordered by each bucket's first kernel
-            group index.
+            One :class:`ObjectGroupInfo` per object group.
         """
         if not separate_object_groups_enabled():
             return [

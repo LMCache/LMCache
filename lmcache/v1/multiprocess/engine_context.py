@@ -40,10 +40,10 @@ class _LayoutDescEntry:
 
     layout_desc: MemoryLayoutDesc
     ref_count: int
-    object_group_windows: tuple[int, ...] = ()
+    object_group_windows: tuple[int, ...] = (-1,)
     """Per-object-group cross-chunk sliding-window sizes (in chunks), in
-    object-group order, used by the hybrid prefix-cache lookup. ``-1`` per entry
-    means full attention; an empty tuple means a single full-attention group."""
+    object-group order. ``-1`` means a full-attention group; the default
+    ``(-1,)`` is a single full-attention group."""
 
 
 class LayoutDescRegistry:
@@ -66,7 +66,7 @@ class LayoutDescRegistry:
         model_name: str,
         world_size: int,
         layout_desc: MemoryLayoutDesc,
-        object_group_windows: tuple[int, ...] = (),
+        object_group_windows: tuple[int, ...] = (-1,),
     ) -> None:
         """Register a layout descriptor for a (model_name, world_size) pair.
 
@@ -78,9 +78,8 @@ class LayoutDescRegistry:
             world_size: The world size.
             layout_desc: The memory layout descriptor.
             object_group_windows: Per-object-group cross-chunk sliding-window
-                sizes (in chunks), in object-group order, for the hybrid
-                prefix-cache lookup; ``-1`` per entry means full attention.
-                Empty means a single full-attention group.
+                sizes (in chunks), in object-group order; ``-1`` means full
+                attention. Defaults to a single full-attention group.
         """
         key = (model_name, world_size)
         with self._lock:
@@ -146,13 +145,13 @@ class LayoutDescRegistry:
 
         Returns:
             The per-object-group cross-chunk window sizes registered for the
-            pair, or an empty tuple if the pair is not registered (treated as a
-            single full-attention group by callers).
+            pair, or ``(-1,)`` (a single full-attention group) if the pair is
+            not registered.
         """
         with self._lock:
             entry = self._registry.get((model_name, world_size))
             if entry is None:
-                return ()
+                return (-1,)
             return entry.object_group_windows
 
 

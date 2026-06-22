@@ -156,25 +156,25 @@ def test_registry_object_group_windows_roundtrip() -> None:
     assert registry.find_object_group_windows("m", 2) == (-1, 2)
 
 
-def test_registry_windows_default_empty_when_unregistered() -> None:
-    """find_object_group_windows returns () for an unknown (model, world_size)."""
+def test_registry_windows_default_single_group_when_unregistered() -> None:
+    """find_object_group_windows returns (-1,) for an unknown (model, world_size)."""
     # First Party
     from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 
     registry = LayoutDescRegistry()
 
-    assert registry.find_object_group_windows("missing", 1) == ()
+    assert registry.find_object_group_windows("missing", 1) == (-1,)
 
 
-def test_registry_windows_default_empty_when_omitted() -> None:
-    """A registration without windows resolves to the empty tuple (single group)."""
+def test_registry_windows_default_single_group_when_omitted() -> None:
+    """A registration without windows resolves to a single full-attention group."""
     # First Party
     from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 
     registry = LayoutDescRegistry()
     registry.register("m", 1, _layout())
 
-    assert registry.find_object_group_windows("m", 1) == ()
+    assert registry.find_object_group_windows("m", 1) == (-1,)
 
 
 def test_registry_windows_updated_on_reregister() -> None:

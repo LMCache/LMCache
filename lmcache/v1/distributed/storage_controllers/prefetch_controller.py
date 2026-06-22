@@ -136,9 +136,7 @@ class InFlightPrefetchRequest:
 
     group_windows: tuple[int, ...] = ()
     """Per-object-group cross-chunk sliding-window sizes (in chunks), in
-    object-group order, propagated from the lookup for the prefetch policy.
-    Carried for the upcoming windowed fold; the current full-attention prefix
-    trim does not consume it. Empty means a single full-attention group."""
+    object-group order. ``-1`` means a full-attention group."""
 
     # Lookup phase: adapter_idx -> task_id (removed as results arrive)
     pending_lookup_tasks: dict[int, L2TaskId] = field(default_factory=dict)
@@ -328,9 +326,7 @@ class PrefetchController(StorageControllerInterface):
             policy: Which retained-subset policy to apply (see
                 :class:`TrimPolicy`).  Defaults to ``PREFIX``.
             group_windows: Per-object-group cross-chunk sliding-window sizes (in
-                chunks), propagated to the request for the prefetch policy. The
-                current full-attention prefix trim does not consume it; empty
-                means a single full-attention group.
+                chunks), in object-group order; ``-1`` means full attention.
 
         Returns:
             A request ID for tracking via query_prefetch_result.

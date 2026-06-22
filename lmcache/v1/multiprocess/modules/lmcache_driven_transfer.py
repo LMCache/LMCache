@@ -558,10 +558,6 @@ class LMCacheDrivenTransferModule:
         layout_desc = get_layout_desc(
             cache_context, self._ctx.chunk_size, object_group_id=0
         )
-        # Publish the per-object-group cross-chunk windows so the (manager-blind)
-        # lookup path can size the chunk-major key layout and propagate the
-        # windows downstream. ``-1`` for a group means full attention; with
-        # object-group separation disabled this is a single ``(-1,)`` window.
         kv_groups_manager = cache_context.kv_layer_groups_manager
         object_group_windows = tuple(
             kv_groups_manager.get_sw_size_chunks(object_group_id)

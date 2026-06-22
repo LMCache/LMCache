@@ -79,12 +79,6 @@ def _key_prefix_to_chunk_count(
     chunk, so a fully-present prefix of ``key_prefix_len`` keys spans
     ``key_prefix_len // (world_size * num_object_groups)`` chunks.
 
-    NOTE: this is only correct under full attention -- every object group present
-    for every hit chunk. Once sliding-window prefetch lands (the windowed fold),
-    the model-wide hit is no longer a uniform contiguous key prefix, and the
-    chunk count must come from the fold's reported hit length rather than this
-    arithmetic. Isolated here so that switch is a one-function change.
-
     Args:
         key_prefix_len: Length of the contiguous found-key prefix.
         world_size: Number of kv_rank shards per chunk.
@@ -92,6 +86,12 @@ def _key_prefix_to_chunk_count(
 
     Returns:
         The number of fully-present chunks in the prefix.
+
+    Note:
+        Correct only under full attention -- every object group present for
+        every hit chunk. Once sliding-window prefetch lands, the hit is no
+        longer a uniform contiguous key prefix and the chunk count must come
+        from the fold's reported hit length instead.
     """
     return key_prefix_len // (world_size * num_object_groups)
 
@@ -108,9 +108,6 @@ class _PrefetchJob:
     # emission time in ``query_prefetch_status``.
     requested_tokens: int
     num_object_groups: int = 1
-    """Number of object groups in the chunk-major key layout; the per-chunk key
-    count is ``world_size * num_object_groups``. ``1`` (the default) is the
-    single full-attention group / object-group-separation-disabled case."""
     # Captured at lookup time so the ``MP_LOOKUP_PREFETCH_END`` event can
     # carry them as labels.  ``model_name`` lets dashboards slice hit rate
     # per model in multi-model deployments; ``cache_salt`` slices per
@@ -299,15 +296,11 @@ class LookupModule:
         session.set_tokens(list(key.token_ids))
         session.lookup_ipc_key = key
 
-        # Resolve the registered object groups and lay keys out chunk-major
-        # (chunk -> object group -> kv_rank), so each chunk's keys are contiguous
-        # and a chunk is a full-attention hit only when every group is present.
-        # An unregistered model defaults to a single full-attention group. The
-        # per-group windows are propagated to the prefetch policy; the current
-        # full-attention prefix logic does not consume them yet.
+        # Lay keys out chunk-major across object groups (see
+        # _chunk_major_object_keys); pass the windows to the prefetch policy.
         windows = self._ctx.layout_desc_registry.find_object_group_windows(
             model_name, world_size
-        ) or (-1,)
+        )
         obj_keys = self._chunk_major_object_keys(key, chunk_hashes, len(windows))
 
         handle = self._ctx.storage_manager.submit_prefetch_task(
@@ -444,10 +437,8 @@ class LookupModule:
         )
         if not chunk_hashes:
             return
-        # Release across every object group: a hybrid model locks keys in
-        # multiple groups at lookup, so releasing only group 0 would leak the
-        # rest. ``finish_read_prefetched`` is a no-op for keys that were not
-        # locked, so over-resolving is safe.
+        # Release across every object group, mirroring lookup, which locks keys
+        # in every group; releasing only group 0 would leak the rest.
         obj_keys = self._object_keys_all_groups(key, chunk_hashes)
 
         extra_count = compute_extra_count(tp_size, key.world_size)
@@ -486,9 +477,6 @@ class LookupModule:
             return
 
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in session.get_hashes(0)]
-        # Touch every object group's keys so their LRU recency stays aligned
-        # across groups (a chunk is a model-wide hit only if all its groups are
-        # resident, so they should age together).
         obj_keys = self._object_keys_all_groups(session.lookup_ipc_key, chunk_hashes)
         # unified touch of all keys, which include retrieved and stored keys
         # TODO(chunxiaozheng): when l2 is enabled, the prefetched keys from l2 are temp
@@ -508,13 +496,14 @@ class LookupModule:
     ) -> list[ObjectKey]:
         """Build a chunk-major flat key list across all object groups.
 
-        Resolves keys per object group (each group's list is chunk-major /
-        rank-minor) and interleaves them so the layout is
-        ``chunk -> object group -> kv_rank``: every chunk's ``num_groups * R``
-        keys are contiguous. A contiguous leading-ones prefix over the flat list
-        then equals the full-attention model-wide hit (a chunk counts only when
-        all its groups are present). With a single group this is byte-identical
-        to the single-group layout.
+        The keys are ordered ``chunk -> object group -> kv_rank`` so that all
+        keys belonging to one chunk are contiguous. A leading-ones prefix over
+        the flat list then maps directly to a whole-chunk hit count.
+
+        Example (2 chunks ``c0,c1``; 2 groups ``g0,g1``; 2 kv_ranks ``r0,r1``)::
+
+            [c0g0r0, c0g0r1, c0g1r0, c0g1r1,   # chunk 0: all groups, all ranks
+             c1g0r0, c1g0r1, c1g1r0, c1g1r1]   # chunk 1: ...
 
         Args:
             key: The IPC key (model/world/worker, salt).
@@ -548,8 +537,6 @@ class LookupModule:
         Used by the lock-release and touch paths, which must cover all object
         groups (a hybrid model locks/stores keys in multiple groups). Key order
         is irrelevant for those callers, so groups are flattened group-major.
-        Falls back to a single group when the model registered no group
-        metadata.
 
         Args:
             key: The IPC key (model/world/worker, salt).
@@ -561,8 +548,7 @@ class LookupModule:
         windows = self._ctx.layout_desc_registry.find_object_group_windows(
             key.model_name, key.world_size
         )
-        group_ids = list(range(len(windows))) if windows else [0]
-        per_group = ipc_key_to_object_keys(key, chunk_hashes, group_ids)
+        per_group = ipc_key_to_object_keys(key, chunk_hashes, list(range(len(windows))))
         return [k for group_keys in per_group for k in group_keys]
 
     def _register_prefetch_job(self, job: _PrefetchJob) -> None:

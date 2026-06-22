@@ -421,9 +421,7 @@ class StorageManager:
                 :class:`TrimPolicy`).  ``PREFIX`` keeps the contiguous prefix;
                 ``SPARSE`` keeps every found key (gap-tolerant).
             group_windows: Per-object-group cross-chunk sliding-window sizes (in
-                chunks), propagated to the prefetch controller/policy. The
-                current full-attention prefix logic does not consume it; empty
-                means a single full-attention group.
+                chunks), in object-group order; ``-1`` means full attention.
 
         Returns:
             PrefetchHandle to track the task.
