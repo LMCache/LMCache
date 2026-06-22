@@ -104,6 +104,10 @@ class LMCBlender:
             attn_mask=None,
             positions=None,
         )
+        # Batch-safety: each blend() call installs its own per-request metadata
+        # here so concurrent requests in one prefill step do not clobber each
+        # other. Defaults to the shared instance for any non-blend path.
+        self._active_metadata = self.metadata
         self._rotary_by_layer = [
             self._get_rotary_emb(layer.self_attn) for layer in self.layers
         ]
@@ -140,8 +144,8 @@ class LMCBlender:
         Falls back to 1D arange if the required metadata is unavailable.
         Returns a tensor of shape [3, num_tokens] for M-RoPE or [num_tokens] for 1D.
         """
-        input_ids = self.metadata.input_ids
-        image_grid_thw = self.metadata.image_grid_thw
+        input_ids = self._active_metadata.input_ids
+        image_grid_thw = self._active_metadata.image_grid_thw
         cfg = self._mrope_model_config
 
         if input_ids is None or cfg is None:
@@ -310,8 +314,8 @@ class LMCBlender:
     ) -> torch.Tensor:
         """CodecSight I-frame selection using GOP / mm_positions."""
         gop = self.gop
-        tokens_per_frame = int(self.metadata.tokens_per_frame or 0)
-        mm_positions: Optional[Sequence[Any]] = self.metadata.mm_positions
+        tokens_per_frame = int(self._active_metadata.tokens_per_frame or 0)
+        mm_positions: Optional[Sequence[Any]] = self._active_metadata.mm_positions
 
         if mm_positions:
             selected_chunks: list[torch.Tensor] = []
@@ -372,7 +376,7 @@ class LMCBlender:
           - ``prefix``:    first r% of all image tokens concatenated
         Falls back to prefix-of-all-overlap when mm_positions is absent.
         """
-        mm_positions: Optional[Sequence[Any]] = self.metadata.mm_positions
+        mm_positions: Optional[Sequence[Any]] = self._active_metadata.mm_positions
         r = self.vlcache_recompute_ratio
 
         if not mm_positions:
@@ -491,14 +495,14 @@ class LMCBlender:
         """
         num_tokens = q.shape[0]
 
-        if self.metadata.imp_indices is None:
-            self.metadata.imp_indices = selected_indices
-            if self.metadata.positions.ndim == 2:
-                self.metadata.positions = self.metadata.positions[:, selected_indices]
+        if self._active_metadata.imp_indices is None:
+            self._active_metadata.imp_indices = selected_indices
+            if self._active_metadata.positions.ndim == 2:
+                self._active_metadata.positions = self._active_metadata.positions[:, selected_indices]
             else:
-                self.metadata.positions = self.metadata.positions[selected_indices]
-            self.metadata.selection_effective_len = effective_len
-            self.metadata.is_full_selection = (
+                self._active_metadata.positions = self._active_metadata.positions[selected_indices]
+            self._active_metadata.selection_effective_len = effective_len
+            self._active_metadata.is_full_selection = (
                 selected_indices.numel() == effective_len
             )
             logger.debug(
@@ -508,19 +512,19 @@ class LMCBlender:
                 num_tokens,
             )
 
-        imp_indices = self.metadata.imp_indices
+        imp_indices = self._active_metadata.imp_indices
         assert imp_indices is not None
-        sel_eff_len = int(self.metadata.selection_effective_len or 0)
+        sel_eff_len = int(self._active_metadata.selection_effective_len or 0)
         if sel_eff_len > 0 and effective_len >= sel_eff_len:
             layer_imp = imp_indices
-            layer_positions = self.metadata.positions
+            layer_positions = self._active_metadata.positions
         else:
             valid_mask = imp_indices < effective_len
             layer_imp = imp_indices[valid_mask]
-            if self.metadata.positions.ndim == 2:
-                layer_positions = self.metadata.positions[:, valid_mask]
+            if self._active_metadata.positions.ndim == 2:
+                layer_positions = self._active_metadata.positions[:, valid_mask]
             else:
-                layer_positions = self.metadata.positions[valid_mask]
+                layer_positions = self._active_metadata.positions[valid_mask]
 
         if layer_imp.numel() == 0 and effective_len > 0:
             if q.device not in self._single_zero_idx:
@@ -528,15 +532,15 @@ class LMCBlender:
                     [0], device=q.device, dtype=torch.long
                 )
             layer_imp = self._single_zero_idx[q.device]
-            if self.metadata.positions.ndim == 2:
+            if self._active_metadata.positions.ndim == 2:
                 layer_positions = self._single_zero_idx[q.device].unsqueeze(0).expand(3, -1)
             else:
                 layer_positions = self._single_zero_idx[q.device]
-            self.metadata.imp_indices = layer_imp
-            self.metadata.positions = layer_positions
+            self._active_metadata.imp_indices = layer_imp
+            self._active_metadata.positions = layer_positions
 
         full_range = (
-            self.metadata.is_full_selection
+            self._active_metadata.is_full_selection
             and effective_len == num_tokens
             and sel_eff_len == num_tokens
         )
@@ -588,17 +592,17 @@ class LMCBlender:
             )
 
         # Initialize positions once per blend request.
-        if self.metadata.positions is None:
+        if self._active_metadata.positions is None:
             if self.is_mrope and self._mrope_model_config is not None:
-                self.metadata.positions = self._compute_mrope_positions(
+                self._active_metadata.positions = self._compute_mrope_positions(
                     q.shape[0], q.device,
                 )
                 logger.info(
                     "Computed M-RoPE positions: shape=%s",
-                    list(self.metadata.positions.shape),
+                    list(self._active_metadata.positions.shape),
                 )
             else:
-                self.metadata.positions = torch.arange(
+                self._active_metadata.positions = torch.arange(
                     q.shape[0], device=q.device, dtype=torch.int64
                 )
 
@@ -608,7 +612,7 @@ class LMCBlender:
         # direct_reuse: no recomputation, just return cached KV
         # ==============================================================
         if self.blend_mode == "direct_reuse":
-            q, _ = rotary(self.metadata.positions, q, k)
+            q, _ = rotary(self._active_metadata.positions, q, k)
             return q, old_k, old_v, residual, attn_output, attn_metadata
 
         # ==============================================================
@@ -619,8 +623,8 @@ class LMCBlender:
         # so each selected query attends to the entire cached KV.
         # ==============================================================
         if self.blend_mode == "topk":
-            q, k = rotary(self.metadata.positions, q, k)
-            write_indices = self.metadata.imp_indices
+            q, k = rotary(self._active_metadata.positions, q, k)
+            write_indices = self._active_metadata.imp_indices
 
             if layer_id in self.common_metadata.check_layers:
                 diff_k = torch.sum(
@@ -650,11 +654,11 @@ class LMCBlender:
                 q = q[top_indices]
                 residual = residual[top_indices]
 
-                self.metadata.imp_indices = top_indices
-                if self.metadata.positions.ndim == 2:
-                    self.metadata.positions = self.metadata.positions[:, top_indices]
+                self._active_metadata.imp_indices = top_indices
+                if self._active_metadata.positions.ndim == 2:
+                    self._active_metadata.positions = self._active_metadata.positions[:, top_indices]
                 else:
-                    self.metadata.positions = self.metadata.positions[top_indices]
+                    self._active_metadata.positions = self._active_metadata.positions[top_indices]
                 attn_output = attn_output[:topk_num]
                 attn_metadata.update_from_top_indices(top_indices)
                 write_indices = top_indices
@@ -669,7 +673,7 @@ class LMCBlender:
         # codecsight / vlcache: index-based selective recomputation
         # ==============================================================
         _MIN_BLEND_TOKENS = 128
-        first_layer = self.metadata.imp_indices is None
+        first_layer = self._active_metadata.imp_indices is None
 
         if first_layer:
             effective_len = min(q.shape[0], old_k.shape[0])
@@ -679,7 +683,7 @@ class LMCBlender:
                     "falling back to direct_reuse",
                     effective_len, _MIN_BLEND_TOKENS, self.blend_mode,
                 )
-                q, _ = rotary(self.metadata.positions, q, k)
+                q, _ = rotary(self._active_metadata.positions, q, k)
                 return q, old_k, old_v, residual, attn_output, attn_metadata
             hit_indices = self._compute_hit_indices(effective_len, q.device)
             if self.blend_mode == "codecsight":
@@ -699,8 +703,8 @@ class LMCBlender:
         # Subsequent layers: q/k/v/residual are already reduced to
         # the selected subset by compute_layer. Apply rotary and write
         # into the full KV cache at the stored indices.
-        imp_indices = self.metadata.imp_indices
-        q, k = rotary(self.metadata.positions, q, k)
+        imp_indices = self._active_metadata.imp_indices
+        q, k = rotary(self._active_metadata.positions, q, k)
         old_k[imp_indices] = k
         old_v[imp_indices] = v
         return q, old_k, old_v, residual, attn_output, attn_metadata
@@ -717,6 +721,10 @@ class LMCBlender:
         Perform layerwise retrieve + blending.
         """
         # TODO(Jiayi): store is currently not included in this function
+        # Capture this request's metadata; re-installed before each per-layer
+        # step below so interleaved concurrent generators (batched prefill in
+        # the deferred/async path) never read each other's selection state.
+        md = self._active_metadata
         check_layers = self.common_metadata.check_layers
         inputs_embeds = kwargs.pop("inputs_embeds", None)
         deepstack_input_embeds = kwargs.pop("deepstack_input_embeds", None)
@@ -738,7 +746,7 @@ class LMCBlender:
                 next(layerwise_retriever)
                 yield
             next(layerwise_retriever)
-            self.metadata.clean()
+            md.clean()
             yield
             return
 
@@ -751,7 +759,7 @@ class LMCBlender:
                 next(layerwise_retriever)
                 yield
             next(layerwise_retriever)
-            self.metadata.clean()
+            md.clean()
             yield
             return
 
@@ -761,13 +769,14 @@ class LMCBlender:
             deepstack_input_embeds=deepstack_input_embeds,
         )
         for _ in range(self.num_layers):
+            self._active_metadata = md
             next(layerwise_retriever)
             next(layerwise_model_executor)
             yield
 
         next(layerwise_retriever)
 
-        self.metadata.clean()
+        md.clean()
         yield
 
     def blend(
@@ -791,19 +800,24 @@ class LMCBlender:
         if isinstance(tokens, list):
             tokens = torch.tensor(tokens).cuda()
         logger.info("enter blend (defer=%s)", defer)
+        # Per-request metadata: isolate this request's blend state so concurrent
+        # requests batched in the same prefill step cannot collide on shared
+        # state. blend_layer re-installs this before each layer step.
+        md = LMCBlendMetadata(imp_indices=None, attn_mask=None, positions=None)
+        self._active_metadata = md
         tokens_per_frame = kwargs.get("tokens_per_frame")
         if tokens_per_frame is not None:
-            self.metadata.tokens_per_frame = int(tokens_per_frame)
+            self._active_metadata.tokens_per_frame = int(tokens_per_frame)
         mm_positions = kwargs.get("mm_positions")
         if mm_positions is not None:
-            self.metadata.mm_positions = mm_positions
+            self._active_metadata.mm_positions = mm_positions
         image_grid_thw = kwargs.get("image_grid_thw")
         if image_grid_thw is not None:
-            self.metadata.image_grid_thw = image_grid_thw
+            self._active_metadata.image_grid_thw = image_grid_thw
         if isinstance(tokens, torch.Tensor):
-            self.metadata.input_ids = tokens.tolist()
+            self._active_metadata.input_ids = tokens.tolist()
         else:
-            self.metadata.input_ids = list(tokens)
+            self._active_metadata.input_ids = list(tokens)
 
         layerwise_blender = self.blend_layer(tokens, mask, **kwargs)
 

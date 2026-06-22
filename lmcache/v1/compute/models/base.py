@@ -315,7 +315,7 @@ class LMCBaseModel(nn.Module, ABC):
                     if deepstack_input_embeds.ndim == 3 and global_layer_idx < deepstack_input_embeds.shape[0]:
                         ds_slice = deepstack_input_embeds[global_layer_idx]
                         if residual is not None:
-                            imp_indices = getattr(self.blender.metadata, "imp_indices", None)
+                            imp_indices = getattr(self.blender._active_metadata, "imp_indices", None)
                             if imp_indices is not None and ds_slice.shape[0] != residual.shape[0]:
                                 ds_slice = ds_slice.index_select(0, imp_indices)
                             if ds_slice.shape[0] == residual.shape[0]:
