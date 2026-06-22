@@ -13,7 +13,9 @@ import pytest
 # First Party
 from lmcache.cli.commands.describe import (
     DescribeError,
+    fetch_health,
     fetch_json,
+    fetch_running_requests,
     fmt_health,
     normalize_url,
     safe_get,
@@ -383,3 +385,232 @@ class TestFetchJson:
                 fetch_json(f"http://127.0.0.1:{port}/status")
         finally:
             server.server_close()
+
+
+class TestFetchHealth:
+    def test_ok(self):
+        handler = type(
+            "_H",
+            (_MockHandler,),
+            {"response_body": b"", "response_code": 200},
+        )
+        server = HTTPServer(("127.0.0.1", 0), handler)
+        port = server.server_address[1]
+        t = Thread(target=server.handle_request, daemon=True)
+        t.start()
+        try:
+            assert fetch_health(f"http://127.0.0.1:{port}/health") is True
+        finally:
+            server.server_close()
+
+    def test_non_200(self):
+        handler = type(
+            "_H",
+            (_MockHandler,),
+            {"response_body": b"", "response_code": 503},
+        )
+        server = HTTPServer(("127.0.0.1", 0), handler)
+        port = server.server_address[1]
+        t = Thread(target=server.handle_request, daemon=True)
+        t.start()
+        try:
+            assert fetch_health(f"http://127.0.0.1:{port}/health") is False
+        finally:
+            server.server_close()
+
+    def test_connection_refused(self):
+        assert fetch_health("http://127.0.0.1:19999/health") is False
+
+
+class TestFetchRunningRequests:
+    def _serve(self, body: bytes, code: int = 200):
+        handler = type(
+            "_H",
+            (_MockHandler,),
+            {"response_body": body, "response_code": code},
+        )
+        server = HTTPServer(("127.0.0.1", 0), handler)
+        port = server.server_address[1]
+        t = Thread(target=server.handle_request, daemon=True)
+        t.start()
+        return server, port
+
+    def test_single_series(self):
+        body = (
+            b"# HELP vllm:num_requests_running Number of running requests.\n"
+            b"# TYPE vllm:num_requests_running gauge\n"
+            b'vllm:num_requests_running{model_name="m"} 3.0\n'
+        )
+        server, port = self._serve(body)
+        try:
+            assert fetch_running_requests(f"http://127.0.0.1:{port}/metrics") == 3
+        finally:
+            server.server_close()
+
+    def test_sums_multiple_series(self):
+        body = (
+            b'vllm:num_requests_running{model_name="a"} 3.0\n'
+            b'vllm:num_requests_running{model_name="b"} 1.0\n'
+        )
+        server, port = self._serve(body)
+        try:
+            assert fetch_running_requests(f"http://127.0.0.1:{port}/metrics") == 4
+        finally:
+            server.server_close()
+
+    def test_metric_absent(self):
+        body = b"# only other metrics here\nvllm:num_requests_waiting 5.0\n"
+        server, port = self._serve(body)
+        try:
+            assert fetch_running_requests(f"http://127.0.0.1:{port}/metrics") is None
+        finally:
+            server.server_close()
+
+    def test_connection_refused(self):
+        assert fetch_running_requests("http://127.0.0.1:19999/metrics") is None
+
+
+# ---------------------------------------------------------------------------
+# describe engine
+# ---------------------------------------------------------------------------
+
+SAMPLE_MODELS = {
+    "object": "list",
+    "data": [
+        {
+            "id": "meta-llama/Llama-3.1-8B-Instruct",
+            "object": "model",
+            "owned_by": "vllm",
+            "max_model_len": 131072,
+        }
+    ],
+}
+
+
+class TestDescribeEngineFields:
+    """Test that ``_describe_engine`` extracts fields from a sample
+    ``/v1/models`` response plus a ``/health`` result."""
+
+    def _run(self, models, is_healthy):
+        """Execute ``describe engine`` with mocked HTTP and return metrics dict."""
+        # First Party
+        from lmcache.cli.commands.describe import DescribeCommand
+
+        cmd = DescribeCommand()
+
+        class FakeArgs:
+            target = "engine"
+            url = "http://localhost:8000"
+            format = "json"
+            output = None
+
+        with (
+            patch(
+                "lmcache.cli.commands.describe.fetch_json",
+                return_value=models,
+            ),
+            patch(
+                "lmcache.cli.commands.describe.fetch_health",
+                return_value=is_healthy,
+            ),
+            patch(
+                "lmcache.cli.commands.describe.fetch_running_requests",
+                return_value=3,
+            ),
+        ):
+            # Standard
+            import io
+
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                cmd.execute(FakeArgs())
+            return json.loads(buf.getvalue())
+
+    def test_field_extraction(self):
+        """Verify model, context, status, and running requests are populated."""
+        output = self._run(SAMPLE_MODELS, is_healthy=True)
+        assert output["title"] == "Inference Engine"
+        m = output["metrics"]
+        assert m["model"] == "meta-llama/Llama-3.1-8B-Instruct"
+        assert m["max_context"] == 131072
+        assert m["status"] == "OK"
+        assert m["running_requests"] == 3
+
+    def test_unhealthy(self):
+        """Verify status shows UNHEALTHY when /health is not OK."""
+        output = self._run(SAMPLE_MODELS, is_healthy=False)
+        assert output["metrics"]["status"] == "UNHEALTHY"
+
+    def test_missing_model(self):
+        """Verify empty model list renders model/context as None."""
+        output = self._run({"object": "list", "data": []}, is_healthy=True)
+        m = output["metrics"]
+        assert m["model"] is None
+        assert m["max_context"] is None
+
+
+class TestDescribeEngineDefaultUrl:
+    def test_engine_default_url(self):
+        """Verify url=None resolves to the engine default (localhost:8000)."""
+        # First Party
+        from lmcache.cli.commands.describe import DescribeCommand
+
+        cmd = DescribeCommand()
+
+        class FakeArgs:
+            target = "engine"
+            url = None
+            format = "json"
+            output = None
+
+        captured: dict[str, str] = {}
+
+        def fake_fetch(url, *args, **kwargs):
+            captured["url"] = url
+            return SAMPLE_MODELS
+
+        with (
+            patch(
+                "lmcache.cli.commands.describe.fetch_json",
+                side_effect=fake_fetch,
+            ),
+            patch(
+                "lmcache.cli.commands.describe.fetch_health",
+                return_value=True,
+            ),
+            patch(
+                "lmcache.cli.commands.describe.fetch_running_requests",
+                return_value=3,
+            ),
+        ):
+            # Standard
+            import io
+
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                cmd.execute(FakeArgs())
+
+        assert "8000" in captured["url"]
+
+
+class TestDescribeEngineErrors:
+    def test_error_exits_1(self):
+        """Verify sys.exit(1) when the engine cannot be reached."""
+        # First Party
+        from lmcache.cli.commands.describe import DescribeCommand
+
+        cmd = DescribeCommand()
+
+        class FakeArgs:
+            target = "engine"
+            url = "http://localhost:8000"
+            format = None
+            output = None
+
+        with patch(
+            "lmcache.cli.commands.describe.fetch_json",
+            side_effect=DescribeError("Cannot connect"),
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd.execute(FakeArgs())
+            assert exc_info.value.code == 1
