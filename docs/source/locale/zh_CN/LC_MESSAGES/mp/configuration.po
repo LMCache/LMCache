@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"POT-Creation-Date: 2026-06-22 11:07+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -34,32 +34,32 @@ msgstr "本页面记录了 LMCache 多进程服务器接受的每个 CLI 参数�
 msgid "MP Server"
 msgstr "MP 服务器"
 
-#: ../../source/mp/configuration.rst:14 ../../source/mp/configuration.rst:154
+#: ../../source/mp/configuration.rst:14 ../../source/mp/configuration.rst:161
 msgid "Source: ``lmcache/v1/multiprocess/config.py``"
 msgstr "源: ``lmcache/v1/multiprocess/config.py``"
 
-#: ../../source/mp/configuration.rst:20 ../../source/mp/configuration.rst:132
-#: ../../source/mp/configuration.rst:162 ../../source/mp/configuration.rst:181
-#: ../../source/mp/configuration.rst:219 ../../source/mp/configuration.rst:241
-#: ../../source/mp/configuration.rst:260 ../../source/mp/configuration.rst:292
-#: ../../source/mp/configuration.rst:392
+#: ../../source/mp/configuration.rst:20 ../../source/mp/configuration.rst:139
+#: ../../source/mp/configuration.rst:169 ../../source/mp/configuration.rst:188
+#: ../../source/mp/configuration.rst:235 ../../source/mp/configuration.rst:257
+#: ../../source/mp/configuration.rst:276 ../../source/mp/configuration.rst:308
+#: ../../source/mp/configuration.rst:382
 msgid "Argument"
 msgstr "参数"
 
-#: ../../source/mp/configuration.rst:21 ../../source/mp/configuration.rst:133
-#: ../../source/mp/configuration.rst:163 ../../source/mp/configuration.rst:182
-#: ../../source/mp/configuration.rst:220 ../../source/mp/configuration.rst:242
-#: ../../source/mp/configuration.rst:261 ../../source/mp/configuration.rst:293
-#: ../../source/mp/configuration.rst:393 ../../source/mp/configuration.rst:443
+#: ../../source/mp/configuration.rst:21 ../../source/mp/configuration.rst:140
+#: ../../source/mp/configuration.rst:170 ../../source/mp/configuration.rst:189
+#: ../../source/mp/configuration.rst:236 ../../source/mp/configuration.rst:258
+#: ../../source/mp/configuration.rst:277 ../../source/mp/configuration.rst:309
+#: ../../source/mp/configuration.rst:383 ../../source/mp/configuration.rst:433
 msgid "Default"
 msgstr "默认"
 
-#: ../../source/mp/configuration.rst:22 ../../source/mp/configuration.rst:134
-#: ../../source/mp/configuration.rst:164 ../../source/mp/configuration.rst:183
-#: ../../source/mp/configuration.rst:221 ../../source/mp/configuration.rst:243
-#: ../../source/mp/configuration.rst:262 ../../source/mp/configuration.rst:294
-#: ../../source/mp/configuration.rst:394 ../../source/mp/configuration.rst:444
-#: ../../source/mp/configuration.rst:477
+#: ../../source/mp/configuration.rst:22 ../../source/mp/configuration.rst:141
+#: ../../source/mp/configuration.rst:171 ../../source/mp/configuration.rst:190
+#: ../../source/mp/configuration.rst:237 ../../source/mp/configuration.rst:259
+#: ../../source/mp/configuration.rst:278 ../../source/mp/configuration.rst:310
+#: ../../source/mp/configuration.rst:384 ../../source/mp/configuration.rst:434
+#: ../../source/mp/configuration.rst:467
 msgid "Description"
 msgstr "描述"
 
@@ -78,7 +78,9 @@ msgid ""
 "on every metric and span (so telemetry and coordinator membership share "
 "one id). When the flag is not passed, defaults to a random UUID v4 minted"
 " at startup."
-msgstr "此 MP 服务器的稳定标识。用作协调器成员身份键，并投影到每条指标和每个 Span 的 OTel ``service.instance.id`` 资源属性（从而使遥测数据与协调器成员身份共享同一个 ID）。若未传递该参数，则默认为启动时生成的随机 UUID v4。"
+msgstr ""
+"此 MP 服务器的稳定身份。用作协调器成员资格密钥，并在每个指标和跨度上投影到 OTel ``service.instance.id`` "
+"资源属性（因此遥测和协调器成员资格共享一个 ID）。当未传递该标志时，默认为在启动时生成的随机 UUID v4。"
 
 #: ../../source/mp/configuration.rst:31
 msgid "``--host``"
@@ -96,7 +98,7 @@ msgstr "绑定 ZMQ 服务器的主机地址。"
 msgid "``--port``"
 msgstr "``--port``"
 
-#: ../../source/mp/configuration.rst:35 ../../source/mp/configuration.rst:449
+#: ../../source/mp/configuration.rst:35 ../../source/mp/configuration.rst:439
 msgid "``5555``"
 msgstr "``5555``"
 
@@ -146,7 +148,7 @@ msgid ""
 "Worker threads for the GPU affinity pool (STORE/RETRIEVE). Requests from "
 "the same vLLM instance are always dispatched to the same thread, "
 "eliminating GPU transfer lock contention."
-msgstr "GPU 亲和性池（STORE/RETRIEVE）的工作线程。来自同一 vLLM 实例的请求始终分发到同一线程，从而消除 GPU 传输锁竞争。"
+msgstr "用于 GPU 亲和力池（存储/检索）的工作线程。来自同一 vLLM 实例的请求始终分配到同一线程，从而消除 GPU 传输锁争用。"
 
 #: ../../source/mp/configuration.rst:50
 msgid "``--max-cpu-workers``"
@@ -154,7 +156,7 @@ msgstr "``--max-cpu-workers``"
 
 #: ../../source/mp/configuration.rst:52
 msgid "Worker threads for the normal CPU pool (LOOKUP, etc.)."
-msgstr "普通 CPU 池（LOOKUP 等）的工作线程。"
+msgstr "正常 CPU 池（查找等）的工作线程。"
 
 #: ../../source/mp/configuration.rst:53
 msgid "``--hash-algorithm``"
@@ -168,15 +170,14 @@ msgstr "``blake3``"
 msgid ""
 "Hash algorithm for token-based operations. Choices: ``builtin``, "
 "``sha256_cbor``, ``blake3``."
-msgstr ""
-"基于 token 的操作所使用的哈希算法。可选项：\\ ``builtin``\\ 、\\ ``sha256_cbor``\\ 、\\ ``blake3``\\ 。"
+msgstr "基于令牌的操作的哈希算法。可选项：``builtin``、``sha256_cbor``、``blake3``。"
 
 #: ../../source/mp/configuration.rst:57
 msgid "``--engine-type``"
 msgstr "``--engine-type``"
 
-#: ../../source/mp/configuration.rst:58 ../../source/mp/configuration.rst:296
-#: ../../source/mp/configuration.rst:304
+#: ../../source/mp/configuration.rst:58 ../../source/mp/configuration.rst:312
+#: ../../source/mp/configuration.rst:320
 msgid "``default``"
 msgstr "``default``"
 
@@ -189,13 +190,17 @@ msgid ""
 "``--supported-transfer-mode`` to be ``lmcache_driven`` or ``auto``. "
 "Choices: ``default``, ``blend``, ``blend_legacy``."
 msgstr ""
-"缓存引擎后端类型。\\ ``default`` 使用标准前缀缓存；\\ ``blend`` 选择当前的 CacheBlend V3 实现（将 ``BlendV3Module`` 组合到引擎中）；\\ ``blend_legacy`` 选择原始的 CacheBlend（将 ``BlendModule`` 组合到引擎中）。这两种 blend 变体都需要 ``--supported-transfer-mode`` 设置为 ``lmcache_driven`` 或 ``auto``\\ 。可选项：\\ ``default``\\ 、\\ ``blend``\\ 、\\ ``blend_legacy``\\ 。"
+"缓存引擎后端类型。``default`` 使用标准前缀缓存；``blend`` 选择当前的 CacheBlend V3 实现（将 "
+"``BlendV3Module`` 组合到引擎中）；``blend_legacy`` 选择原始的 CacheBlend（将 "
+"``BlendModule`` 组合到引擎中）。这两种 blend 变体都需要 ``--supported-transfer-mode`` 设置为"
+" ``lmcache_driven`` 或 "
+"``auto``。可选项：``default``、``blend``、``blend_legacy``。"
 
 #: ../../source/mp/configuration.rst:66
 msgid "``--supported-transfer-mode``"
 msgstr "``--supported-transfer-mode``"
 
-#: ../../source/mp/configuration.rst:67 ../../source/mp/configuration.rst:462
+#: ../../source/mp/configuration.rst:67 ../../source/mp/configuration.rst:452
 msgid "``auto``"
 msgstr "``auto``"
 
@@ -208,7 +213,10 @@ msgid ""
 "of either device type can connect without manual configuration. Choices: "
 "``lmcache_driven``, ``engine_driven``, ``auto``."
 msgstr ""
-"服务器加载的工作进程 → 服务器传输路径。\\ ``lmcache_driven`` 仅启用服务器驱动的传输路径（STORE/RETRIEVE，支持 CUDA IPC 与 CPU SHM）；\\ ``engine_driven`` 仅启用非 GPU（PREPARE/COMMIT）传输路径；\\ ``auto``\\ （默认）同时加载两者，使任意设备类型的工作进程无需手动配置即可连接。可选项：\\ ``lmcache_driven``\\ 、\\ ``engine_driven``\\ 、\\ ``auto``\\ 。"
+"服务器加载的工作进程 → 服务器传输路径。 ``lmcache_driven`` 仅启用服务器驱动的传输路径（STORE/RETRIEVE，支持 "
+"CUDA IPC 和 CPU SHM）； ``engine_driven`` 仅启用非 GPU（PREPARE/COMMIT）传输路径； "
+"``auto``（默认）加载两者，以便任一设备类型的工作进程可以在无需手动配置的情况下连接。 选项： ``lmcache_driven``， "
+"``engine_driven``， ``auto``。"
 
 #: ../../source/mp/configuration.rst:76
 msgid "``--runtime-plugin-locations``"
@@ -245,7 +253,9 @@ msgid ""
 "``'{\"plugin.frontend.heartbeat_url\": "
 "\"http://localhost:5000/heartbeat\"}'``."
 msgstr ""
-"通过 ``LMCACHE_RUNTIME_PLUGIN_EXTRA_CONFIG`` 转发到运行时插件的额外键值配置的 JSON 字符串。示例：\\ ``'{\\\"plugin.frontend.heartbeat_url\\\": \\\"http://localhost:5000/heartbeat\\\"}'``\\ 。"
+"通过 ``LMCACHE_RUNTIME_PLUGIN_EXTRA_CONFIG`` 转发到运行时插件的额外键值配置的 JSON "
+"字符串。示例：``'{\\\"plugin.frontend.heartbeat_url\\\": "
+"\\\"http://localhost:5000/heartbeat\\\"}'``。"
 
 #: ../../source/mp/configuration.rst:87
 msgid "``--script-allowed-imports``"
@@ -257,13 +267,14 @@ msgid ""
 "HTTP ``/run_script`` endpoint are allowed to import. Example: ``--script-"
 "allowed-imports numpy pandas``."
 msgstr ""
-"允许在 HTTP ``/run_script`` 端点发布的脚本导入的以空格分隔的 Python 模块名称列表。示例：\\ ``--script-allowed-imports numpy pandas``\\ 。"
+"允许在 HTTP ``/run_script`` 端点发布的脚本导入的以空格分隔的 Python 模块名称列表。示例：``--script-"
+"allowed-imports numpy pandas``。"
 
 #: ../../source/mp/configuration.rst:92
 msgid "``--shm-name``"
 msgstr "``--shm-name``"
 
-#: ../../source/mp/configuration.rst:93
+#: ../../source/mp/configuration.rst:93 ../../source/mp/configuration.rst:211
 msgid "*(not set)*"
 msgstr "*(未设置)*"
 
@@ -275,7 +286,9 @@ msgid ""
 "pool. ``\"\"`` (empty string): disable SHM and force the pickle transfer "
 "path.  Any other value: use that exact name for the SHM pool segment."
 msgstr ""
-"非 GPU KV 传输的 SHM 段名称（仅在加载非 GPU 路径时使用，即 ``--supported-transfer-mode`` 为 ``auto`` 或 ``engine_driven``\\ ）。未设置（默认）：自动分配一个共享内存池。 ``\\\"\\\"``\\ （空字符串）：禁用 SHM 并强制使用 pickle 传输路径。 任何其他值：将该确切名称用于 SHM 池段。"
+"非 GPU KV 传输的 SHM 段名称（仅在加载非 GPU 路径时使用，即 ``--supported-transfer-mode`` 为 "
+"``auto`` 或 ``engine_driven``）。未设置（默认）：自动分配一个共享内存池。 ``\\\"\\\"``（空字符串）：禁用 "
+"SHM 并强制使用 pickle 传输路径。 任何其他值：将该确切名称用于 SHM 池段。"
 
 #: ../../source/mp/configuration.rst:101
 msgid "``--worker-reap-timeout-seconds``"
@@ -295,7 +308,9 @@ msgid ""
 "never reap a live worker; the adapter warns at startup if its interval is"
 " raised without raising this."
 msgstr ""
-"工作线程发送至少一个心跳 PING 后进入静默状态的最长容忍时间（秒），超时后将回收其 KV Cache 注册，并释放泄漏的 GPU 上下文和 CUDA IPC 句柄。\\ ``0`` 表示禁用回收。建议将此值保持在引擎适配器 ``lmcache.mp.heartbeat_interval``\\ （默认 10 秒）的至少 3 倍，以免少量心跳丢失导致活跃工作线程被误回收；若未同步调大此值而单独调大心跳间隔，适配器将在启动时发出警告。"
+"在发送至少一个心跳 PING 后静默的工作线程的沉默预算（秒），此时将收回其 KV Cache 注册，释放泄漏的 GPU 上下文和 CUDA "
+"IPC 句柄。``0`` 禁用收回。保持此值至少为引擎适配器的 ``lmcache.mp.heartbeat_interval`` 的 3 "
+"倍（默认 10 秒），以确保几次丢失的 PING 不会收回一个活跃的工作线程；如果在不提高此值的情况下提高其间隔，适配器在启动时会发出警告。"
 
 #: ../../source/mp/configuration.rst:110
 msgid "``--worker-registration-grace-seconds``"
@@ -312,17 +327,35 @@ msgid ""
 "``--worker-reap-timeout-seconds``. Generous by default so slow model "
 "warmup is never mistaken for a dead worker."
 msgstr ""
-"针对已注册但从未发送 PING 的工作线程（仍在预热或在首次请求前已崩溃）的静默容忍时间（秒）。必须大于或等于 ``--worker-reap-timeout-seconds``\\ 。默认值较宽松，以避免将缓慢的模型预热误判为工作线程已宕机。"
+"为注册但从未发送 PING 的工作线程（仍在预热或在首次请求之前死亡）设置的沉默预算（秒）。必须大于或等于 ``--worker-reap-"
+"timeout-seconds``。默认值宽松，以确保慢模型预热不会被误认为是死工作线程。"
+
+#: ../../source/mp/configuration.rst:116
+msgid "``--enable-segmented-prefix``"
+msgstr "``--enable-segmented-prefix``"
+
+#: ../../source/mp/configuration.rst:117
+msgid "``False``"
+msgstr "``False``"
 
 #: ../../source/mp/configuration.rst:118
+msgid ""
+"CacheBlend (``--engine-type blend``) only: on a mid-prefix L2 retrieve "
+"failure, retain the gapped prefix so the post-gap chunks stay L1-resident"
+" and only the dropped gap is recomputed, instead of truncating the prefix"
+" at the gap. No effect for other engines. See "
+":doc:`/mp/l2_storage/fault_inject` for a way to exercise it."
+msgstr "CacheBlend (``--engine-type blend``) 仅适用：在中间前缀 L2 检索失败时，保留缺口前缀，以便缺口后的块保持在 L1 中驻留，只有丢失的缺口被重计算，而不是在缺口处截断前缀。对其他引擎没有影响。有关如何使用它，请参见 :doc:`/mp/l2_storage/fault_inject`。"
+
+#: ../../source/mp/configuration.rst:125
 msgid "Lookup Hash Logging"
 msgstr "查找哈希日志记录"
 
-#: ../../source/mp/configuration.rst:120
+#: ../../source/mp/configuration.rst:127
 msgid "Source: ``lmcache/v1/mp_observability/subscribers/logging/lookup_hash.py``"
 msgstr "源: ``lmcache/v1/mp_observability/subscribers/logging/lookup_hash.py``"
 
-#: ../../source/mp/configuration.rst:122
+#: ../../source/mp/configuration.rst:129
 msgid ""
 "When enabled, the server publishes chunk hashes computed during "
 "``lookup()`` as ``MP_LOOKUP`` events on the EventBus.  The "
@@ -330,113 +363,115 @@ msgid ""
 "offline analysis.  Disabled by default.  These arguments are part of the "
 "Observability group."
 msgstr ""
-"启用时，服务器将在 EventBus 上以 ``MP_LOOKUP`` 事件的形式发布 ``lookup()`` 期间计算的块哈希。\\ ``LookupHashLoggingSubscriber`` 会将这些事件写入滚动 JSONL 文件以供离线分析。默认禁用。这些参数属于可观察性配置组。"
+"启用时，服务器将在 EventBus 上发布在 ``lookup()`` 期间计算的块哈希作为 ``MP_LOOKUP`` 事件。 "
+"``LookupHashLoggingSubscriber`` 将这些写入旋转的 JSONL 文件以供离线分析。 默认情况下禁用。 "
+"这些参数是可观察性组的一部分。"
 
-#: ../../source/mp/configuration.rst:135
+#: ../../source/mp/configuration.rst:142
 msgid "``--lookup-hash-log-dir``"
 msgstr "``--lookup-hash-log-dir``"
 
-#: ../../source/mp/configuration.rst:136
+#: ../../source/mp/configuration.rst:143
 msgid "``\"\"`` (disabled)"
 msgstr "``\"\"`` (禁用)"
 
-#: ../../source/mp/configuration.rst:137
+#: ../../source/mp/configuration.rst:144
 msgid ""
 "Directory to write lookup hash JSONL files. An empty string disables "
 "logging."
 msgstr "写入查找哈希 JSONL 文件的目录。空字符串将禁用日志记录。"
 
-#: ../../source/mp/configuration.rst:139
+#: ../../source/mp/configuration.rst:146
 msgid "``--lookup-hash-log-rotation-interval``"
 msgstr "``--lookup-hash-log-rotation-interval``"
 
-#: ../../source/mp/configuration.rst:140
+#: ../../source/mp/configuration.rst:147
 msgid "``21600`` (6 h)"
 msgstr "``21600`` (6 小时)"
 
-#: ../../source/mp/configuration.rst:141
+#: ../../source/mp/configuration.rst:148
 msgid "Time interval in seconds before rotating to a new log file."
-msgstr "滚动到新日志文件前的时间间隔（秒）。"
+msgstr "在切换到新日志文件之前的时间间隔（以秒为单位）。"
 
-#: ../../source/mp/configuration.rst:142
+#: ../../source/mp/configuration.rst:149
 msgid "``--lookup-hash-log-rotation-max-size``"
 msgstr "``--lookup-hash-log-rotation-max-size``"
 
-#: ../../source/mp/configuration.rst:143
+#: ../../source/mp/configuration.rst:150
 msgid "``104857600`` (100 MB)"
 msgstr "``104857600`` (100 MB)"
 
-#: ../../source/mp/configuration.rst:144
+#: ../../source/mp/configuration.rst:151
 msgid ""
 "Max file size in bytes before rotating even if the time interval has not "
 "elapsed."
-msgstr "即使时间间隔未到，触发滚动的最大文件大小（字节）。"
+msgstr "在时间间隔尚未到达之前，旋转前的最大文件大小（以字节为单位）。"
 
-#: ../../source/mp/configuration.rst:146
+#: ../../source/mp/configuration.rst:153
 msgid "``--lookup-hash-log-max-files``"
 msgstr "``--lookup-hash-log-max-files``"
 
-#: ../../source/mp/configuration.rst:147
+#: ../../source/mp/configuration.rst:154
 msgid "``100``"
 msgstr "``100``"
 
-#: ../../source/mp/configuration.rst:148
+#: ../../source/mp/configuration.rst:155
 msgid ""
 "Max number of log files to keep.  Oldest files are deleted when this "
 "limit is exceeded."
 msgstr "保留的最大日志文件数量。当超过此限制时，最旧的文件将被删除。"
 
-#: ../../source/mp/configuration.rst:152
+#: ../../source/mp/configuration.rst:159
 msgid "HTTP Frontend"
 msgstr "HTTP 前端"
 
-#: ../../source/mp/configuration.rst:156
+#: ../../source/mp/configuration.rst:163
 msgid "The HTTP frontend is included when running ``lmcache server``."
 msgstr "HTTP 前端在运行 ``lmcache server`` 时包含在内。"
 
-#: ../../source/mp/configuration.rst:165
+#: ../../source/mp/configuration.rst:172
 msgid "``--http-host``"
 msgstr "``--http-host``"
 
-#: ../../source/mp/configuration.rst:166
+#: ../../source/mp/configuration.rst:173
 msgid "``0.0.0.0``"
 msgstr "``0.0.0.0``"
 
-#: ../../source/mp/configuration.rst:167
+#: ../../source/mp/configuration.rst:174
 msgid "Host to bind the HTTP (FastAPI/uvicorn) server."
 msgstr "绑定 HTTP (FastAPI/uvicorn) 服务器的主机。"
 
-#: ../../source/mp/configuration.rst:168
+#: ../../source/mp/configuration.rst:175
 msgid "``--http-port``"
 msgstr "``--http-port``"
 
-#: ../../source/mp/configuration.rst:169
+#: ../../source/mp/configuration.rst:176
 msgid "``8080``"
 msgstr "``8080``"
 
-#: ../../source/mp/configuration.rst:170
+#: ../../source/mp/configuration.rst:177
 msgid "Port to bind the HTTP server."
 msgstr "绑定 HTTP 服务器的端口。"
 
-#: ../../source/mp/configuration.rst:173
+#: ../../source/mp/configuration.rst:180
 msgid "L1 Memory Manager"
 msgstr "L1 内存管理器"
 
-#: ../../source/mp/configuration.rst:175 ../../source/mp/configuration.rst:207
-#: ../../source/mp/configuration.rst:235 ../../source/mp/configuration.rst:254
-#: ../../source/mp/configuration.rst:286
+#: ../../source/mp/configuration.rst:182 ../../source/mp/configuration.rst:223
+#: ../../source/mp/configuration.rst:251 ../../source/mp/configuration.rst:270
+#: ../../source/mp/configuration.rst:302
 msgid "Source: ``lmcache/v1/distributed/config.py``"
 msgstr "来源: ``lmcache/v1/distributed/config.py``"
 
-#: ../../source/mp/configuration.rst:184
+#: ../../source/mp/configuration.rst:191
 msgid "``--l1-size-gb``"
 msgstr "``--l1-size-gb``"
 
-#: ../../source/mp/configuration.rst:185 ../../source/mp/configuration.rst:264
+#: ../../source/mp/configuration.rst:192 ../../source/mp/configuration.rst:280
 msgid "*required*"
 msgstr "*必需*"
 
-#: ../../source/mp/configuration.rst:186
+#: ../../source/mp/configuration.rst:193
 msgid ""
 "Size of the L1 tier in GB. Sizes the pinned-DRAM L1 by default, or the "
 "GDS slab file when ``--gds-l1-path`` is set (see *GDS L1 Tier* below)."
@@ -444,15 +479,15 @@ msgstr ""
 "L1 层的大小（以 GB 为单位）。默认情况下，设置固定 DRAM 的 L1 大小，或者在设置了 ``--gds-l1-path`` 时，设置 "
 "GDS 块文件（请参见下面的 *GDS L1 层*）。"
 
-#: ../../source/mp/configuration.rst:188
+#: ../../source/mp/configuration.rst:195
 msgid "``--l1-use-lazy`` / ``--no-l1-use-lazy``"
 msgstr "``--l1-use-lazy`` / ``--no-l1-use-lazy``"
 
-#: ../../source/mp/configuration.rst:189 ../../source/mp/configuration.rst:228
+#: ../../source/mp/configuration.rst:196 ../../source/mp/configuration.rst:244
 msgid "``True``"
 msgstr "``True``"
 
-#: ../../source/mp/configuration.rst:190
+#: ../../source/mp/configuration.rst:197
 msgid ""
 "Enable or disable lazy allocation for L1 memory. Pass ``--l1-use-lazy`` "
 "to enable (default) or ``--no-l1-use-lazy`` to explicitly disable. Lazy "
@@ -461,37 +496,53 @@ msgid ""
 " is automatically downgraded to eager allocation with a logged warning, "
 "regardless of the flag value."
 msgstr ""
-"启用或禁用 L1 内存的延迟分配。传递 ``--l1-use-lazy`` 以启用（默认），或传递 ``--no-l1-use-lazy`` 以显式禁用。延迟分配依赖于 ``cudart`` 主机固定内存，因此在非 CUDA 后端（\\ ``lmcache.torch_dev`` 未暴露 ``cudart`` 属性）下，无论标志取值如何，都会自动降级为立即分配并记录警告。"
+"启用或禁用 L1 内存的延迟分配。传递 ``--l1-use-lazy`` 以启用（默认）或 ``--no-l1-use-lazy`` "
+"以显式禁用。延迟分配依赖于 ``cudart`` 主机固定内存，因此在非 CUDA 后端（其中 ``lmcache.torch_dev`` 不暴露"
+" ``cudart`` 属性）时，它会自动降级为急切分配，并记录警告，无论标志值如何。"
 
-#: ../../source/mp/configuration.rst:197
+#: ../../source/mp/configuration.rst:204
 msgid "``--l1-init-size-gb``"
 msgstr "``--l1-init-size-gb``"
 
-#: ../../source/mp/configuration.rst:198
+#: ../../source/mp/configuration.rst:205
 msgid "``20``"
 msgstr "``20``"
 
-#: ../../source/mp/configuration.rst:199
+#: ../../source/mp/configuration.rst:206
 msgid "Initial allocation size (GB) when using lazy allocation."
 msgstr "使用延迟分配时的初始分配大小（GB）。"
 
-#: ../../source/mp/configuration.rst:200
+#: ../../source/mp/configuration.rst:207
 msgid "``--l1-align-bytes``"
 msgstr "``--l1-align-bytes``"
 
-#: ../../source/mp/configuration.rst:201
+#: ../../source/mp/configuration.rst:208
 msgid "``4096``"
 msgstr "``4096``"
 
-#: ../../source/mp/configuration.rst:202
+#: ../../source/mp/configuration.rst:209
 msgid "Alignment size in bytes (default 4 KB)."
 msgstr "对齐大小（以字节为单位，默认 4 KB）。"
 
-#: ../../source/mp/configuration.rst:205
+#: ../../source/mp/configuration.rst:210
+msgid "``--l1-devdax-path``"
+msgstr "``--l1-devdax-path``"
+
+#: ../../source/mp/configuration.rst:212
+msgid ""
+"Optional ``/dev/dax*`` device or mmap-able file to use as the L1 backing "
+"arena.  When set, disable lazy allocation with ``--no-l1-use-lazy`` and "
+"disable SHM transfer advertising with ``--shm-name \"\"`` because the L1 "
+"bytes live in the DAX mapping.  If a DAX L2 adapter with the same "
+"``device_path`` is registered, that adapter's ``max_dax_size_gb`` is used"
+" as the L1 Device-DAX overflow size."
+msgstr "可选的 ``/dev/dax*`` 设备或可 mmap 的文件，用作 L1 后备区域。当设置时，使用 ``--no-l1-use-lazy`` 禁用延迟分配，并使用 ``--shm-name \\\"\\\"`` 禁用 SHM 传输广告，因为 L1 字节存在于 DAX 映射中。如果注册了具有相同 ``device_path`` 的 DAX L2 适配器，则该适配器的 ``max_dax_size_gb`` 将用作 L1 Device-DAX 溢出大小。"
+
+#: ../../source/mp/configuration.rst:221
 msgid "GDS L1 Tier"
 msgstr "GDS L1 层"
 
-#: ../../source/mp/configuration.rst:209
+#: ../../source/mp/configuration.rst:225
 msgid ""
 "Opt-in. Setting ``--gds-l1-path`` switches the L1 medium from pinned DRAM"
 " to an NVMe slab file accessed via GPUDirect Storage (cuFile DMA). The "
@@ -499,17 +550,19 @@ msgid ""
 "slab. Disable byte-array L2 adapters when this is on (the GDS tier "
 "exposes no L1 memory buffer for them to register)."
 msgstr ""
-"可选功能。设置 ``--gds-l1-path`` 可将 L1 存储介质从固定 DRAM 切换为通过 GPUDirect Storage（cuFile DMA）访问的 NVMe slab 文件。此时 CPU 固定 DRAM 层将被禁用，\\ ``--l1-size-gb`` 用于设置 slab 大小。启用此选项后，请禁用字节数组 L2 适配器（GDS 层不为其提供可注册的 L1 内存缓冲区）。"
+"选择加入。设置 ``--gds-l1-path`` 将 L1 媒介从固定 DRAM 切换到通过 GPUDirect Storage (cuFile"
+" DMA) 访问的 NVMe 块文件。然后禁用 CPU 固定 DRAM 层，并且 ``--l1-size-gb`` "
+"设置块的大小。当此选项开启时，禁用字节数组 L2 适配器（GDS 层不为它们注册提供 L1 内存缓冲区）。"
 
-#: ../../source/mp/configuration.rst:222
+#: ../../source/mp/configuration.rst:238
 msgid "``--gds-l1-path``"
 msgstr "``--gds-l1-path``"
 
-#: ../../source/mp/configuration.rst:223
+#: ../../source/mp/configuration.rst:239
 msgid "Not set"
 msgstr "未设置"
 
-#: ../../source/mp/configuration.rst:224
+#: ../../source/mp/configuration.rst:240
 msgid ""
 "NVMe directory for the GDS L1 slab. Setting this enables the GDS L1 tier;"
 " one shared slab per process lives at ``<path>/lmcache_gds_slab.bin``."
@@ -517,53 +570,53 @@ msgstr ""
 "GDS L1 slab 的 NVMe 目录。设置此项将启用 GDS L1 层；每个进程共享一个位于 "
 "``<path>/lmcache_gds_slab.bin`` 的 slab。"
 
-#: ../../source/mp/configuration.rst:227
+#: ../../source/mp/configuration.rst:243
 msgid "``--gds-l1-use-direct-io`` / ``--no-gds-l1-use-direct-io``"
 msgstr "``--gds-l1-use-direct-io`` / ``--no-gds-l1-use-direct-io``"
 
-#: ../../source/mp/configuration.rst:229
+#: ../../source/mp/configuration.rst:245
 msgid ""
 "Open the slab with ``O_DIRECT`` (required for the GDS DMA fast path on "
 "ext4)."
 msgstr "使用 ``O_DIRECT`` 打开 slab（在 ext4 上的 GDS DMA 快速路径所需）。"
 
-#: ../../source/mp/configuration.rst:233
+#: ../../source/mp/configuration.rst:249
 msgid "L1 Manager TTLs"
 msgstr "L1 管理器 TTLs"
 
-#: ../../source/mp/configuration.rst:244
+#: ../../source/mp/configuration.rst:260
 msgid "``--l1-write-ttl-seconds``"
 msgstr "``--l1-write-ttl-seconds``"
 
-#: ../../source/mp/configuration.rst:245
+#: ../../source/mp/configuration.rst:261
 msgid "``600``"
 msgstr "``600``"
 
-#: ../../source/mp/configuration.rst:246
+#: ../../source/mp/configuration.rst:262
 msgid "Time-to-live for each object's write lock (seconds)."
 msgstr "每个对象的写锁的生存时间（秒）。"
 
-#: ../../source/mp/configuration.rst:247
+#: ../../source/mp/configuration.rst:263
 msgid "``--l1-read-ttl-seconds``"
 msgstr "``--l1-read-ttl-seconds``"
 
-#: ../../source/mp/configuration.rst:248
+#: ../../source/mp/configuration.rst:264
 msgid "``300``"
 msgstr "``300``"
 
-#: ../../source/mp/configuration.rst:249
+#: ../../source/mp/configuration.rst:265
 msgid "Time-to-live for each object's read lock (seconds)."
 msgstr "每个对象的读取锁的生存时间（秒）。"
 
-#: ../../source/mp/configuration.rst:252
+#: ../../source/mp/configuration.rst:268
 msgid "Eviction Policy"
 msgstr "逐出策略"
 
-#: ../../source/mp/configuration.rst:263
+#: ../../source/mp/configuration.rst:279
 msgid "``--eviction-policy``"
 msgstr "``--eviction-policy``"
 
-#: ../../source/mp/configuration.rst:265
+#: ../../source/mp/configuration.rst:281
 msgid ""
 "Eviction policy. Choices: ``LRU``, ``IsolatedLRU``, ``noop``. Use "
 "``noop`` for buffer-only mode where L1 acts as a pure write buffer (data "
@@ -574,41 +627,45 @@ msgid ""
 "effective limit of ``0`` bytes, so its data is evicted at the next "
 "eviction cycle (allowlist semantics)."
 msgstr ""
-"逐出策略。可选项：\\ ``LRU``\\ 、\\ ``IsolatedLRU``\\ 、\\ ``noop``\\ 。\\ ``noop`` 用于纯缓冲区模式，此时 L1 仅作为写缓冲区（数据写入 L2 后即从 L1 删除）。\\ ``IsolatedLRU`` 为每个 ``cache_salt`` 维护独立的 LRU 列表，并要求在运行时通过 ``/quota`` HTTP 端点为每个 ``cache_salt`` 配置配额（参见 :ref:`mp-http-quota-api`）；未注册配额的 ``cache_salt`` 的有效上限为 ``0`` 字节，其数据将在下一个逐出周期被清除（白名单语义）。"
+"逐出策略。可选项：``LRU``、``IsolatedLRU``、``noop``。在仅缓冲模式下使用``noop``，此时 L1 "
+"作为纯写缓冲区（数据在 L2 存储后从 L1 中删除）。``IsolatedLRU`` 为每个 ``cache_salt`` 维护一个 LRU "
+"列表，并要求在运行时通过 ``/quota`` HTTP 端点配置每个 ``cache_salt`` 的配额（参见 :ref:`mp-http-"
+"quota-api`）；没有注册配额的 ``cache_salt`` 的有效限制为 ``0`` "
+"字节，因此其数据将在下一个逐出周期被逐出（白名单语义）。"
 
-#: ../../source/mp/configuration.rst:276
+#: ../../source/mp/configuration.rst:292
 msgid "``--eviction-trigger-watermark``"
 msgstr "``--eviction-trigger-watermark``"
 
-#: ../../source/mp/configuration.rst:277
+#: ../../source/mp/configuration.rst:293
 msgid "``0.8``"
 msgstr "``0.8``"
 
-#: ../../source/mp/configuration.rst:278
+#: ../../source/mp/configuration.rst:294
 msgid "Memory usage ratio (0.0--1.0) that triggers eviction."
 msgstr "触发逐出的内存使用比例 (0.0--1.0)。"
 
-#: ../../source/mp/configuration.rst:279
+#: ../../source/mp/configuration.rst:295
 msgid "``--eviction-ratio``"
 msgstr "``--eviction-ratio``"
 
-#: ../../source/mp/configuration.rst:280
+#: ../../source/mp/configuration.rst:296
 msgid "``0.2``"
 msgstr "``0.2``"
 
-#: ../../source/mp/configuration.rst:281
+#: ../../source/mp/configuration.rst:297
 msgid "Fraction of allocated memory to evict when triggered (0.0--1.0)."
 msgstr "触发时逐出的已分配内存比例 (0.0--1.0)。"
 
-#: ../../source/mp/configuration.rst:284
+#: ../../source/mp/configuration.rst:300
 msgid "L2 Policies"
 msgstr "L2 策略"
 
-#: ../../source/mp/configuration.rst:295
+#: ../../source/mp/configuration.rst:311
 msgid "``--l2-store-policy``"
 msgstr "``--l2-store-policy``"
 
-#: ../../source/mp/configuration.rst:297
+#: ../../source/mp/configuration.rst:313
 msgid ""
 "L2 store policy.  Determines which adapters receive each key and whether "
 "keys are deleted from L1 after L2 store. The ``default`` policy stores "
@@ -616,13 +673,15 @@ msgid ""
 "keys to all adapters and then deletes them from L1 (buffer-only mode). "
 "Choices: ``default``, ``skip_l1``."
 msgstr ""
-"L2 存储策略。决定每个键被写入哪些适配器，以及 L2 存储完成后是否从 L1 删除该键。\\ ``default`` 策略将所有键写入全部适配器并保留 L1 中的数据。\\ ``skip_l1`` 策略将所有键写入全部适配器后从 L1 删除（纯缓冲区模式）。可选项：\\ ``default``\\ 、\\ ``skip_l1``\\ 。"
+"L2 存储策略。确定每个适配器接收哪些键，以及在 L2 存储后是否从 L1 中删除键。``default`` 策略将所有键存储到所有适配器并保留 "
+"L1。``skip_l1`` 策略将所有键存储到所有适配器，然后从 L1 "
+"中删除它们（仅缓冲区模式）。可选项：``default``，``skip_l1``。"
 
-#: ../../source/mp/configuration.rst:303
+#: ../../source/mp/configuration.rst:319
 msgid "``--l2-prefetch-policy``"
 msgstr "``--l2-prefetch-policy``"
 
-#: ../../source/mp/configuration.rst:305
+#: ../../source/mp/configuration.rst:321
 msgid ""
 "L2 prefetch policy.  Determines which adapter loads each key when "
 "multiple adapters have it. The ``default`` policy picks the first adapter"
@@ -630,326 +689,264 @@ msgid ""
 "finishes). The ``retain`` policy uses the same load plan but keeps "
 "prefetched keys permanently in L1. Choices: ``default``, ``retain``."
 msgstr ""
-"L2 预取策略。当多个适配器均持有某个键时，决定由哪个适配器加载该键。\\ ``default`` 策略选择第一个适配器（索引最小）。预取的键是临时的（读取完成后删除）。\\ ``retain`` 策略采用相同的加载计划，但将预取的键永久保留在 L1 中。可选项：\\ ``default``\\ 、\\ ``retain``\\ 。"
+"L2 预取策略。确定在多个适配器拥有每个键时，哪个适配器加载该键。``default`` "
+"策略选择第一个适配器（最低索引）。预取的键是临时的（在读取器完成后删除）。``retain`` 策略使用相同的加载计划，但将预取的键永久保留在 "
+"L1 中。选择：``default``，``retain``。"
 
-#: ../../source/mp/configuration.rst:312
+#: ../../source/mp/configuration.rst:328
 msgid "``--l2-prefetch-max-in-flight``"
 msgstr "``--l2-prefetch-max-in-flight``"
 
-#: ../../source/mp/configuration.rst:313
+#: ../../source/mp/configuration.rst:329
 msgid "``8``"
 msgstr "``8``"
 
-#: ../../source/mp/configuration.rst:314
+#: ../../source/mp/configuration.rst:330
 msgid ""
 "Maximum number of concurrent prefetch (L2 load) requests. Limits how many"
 " in-flight loads the PrefetchController may issue at once, preventing "
 "excessive L1 memory pressure."
-msgstr "最大并发预取（L2 加载）请求数量。限制 PrefetchController 同时发起的在途加载数，防止 L1 内存压力过大。"
+msgstr "最大并发预取（L2 加载）请求的数量。限制 PrefetchController 同时发出的在途加载数量，以防止过度的 L1 内存压力。"
 
-#: ../../source/mp/configuration.rst:317
+#: ../../source/mp/configuration.rst:333
 msgid "``--periodic-notifier-interval-ms``"
 msgstr "``--periodic-notifier-interval-ms``"
 
-#: ../../source/mp/configuration.rst:318
+#: ../../source/mp/configuration.rst:334
 msgid "``5``"
 msgstr "``5``"
 
-#: ../../source/mp/configuration.rst:319
+#: ../../source/mp/configuration.rst:335
 msgid ""
 "Interval in milliseconds for the periodic event notifier heartbeat.  A "
 "native C++ background thread writes to all registered file descriptors at"
 " this interval, waking controller poll loops for L2 adapters that lack "
 "native async completion callbacks."
 msgstr ""
-"定期事件通知器心跳的间隔（毫秒）。一个原生 C++ 后台线程按此间隔向所有已注册的文件描述符写入数据，以唤醒缺少原生异步完成回调的 L2 "
+"定期事件通知器心跳的间隔（以毫秒为单位）。一个本地 C++ 后台线程在此间隔内写入所有注册的文件描述符，唤醒缺少本地异步完成回调的 L2 "
 "适配器的控制器轮询循环。"
 
-#: ../../source/mp/configuration.rst:326
+#: ../../source/mp/configuration.rst:342
 msgid "L2 Adapters"
 msgstr "L2 适配器"
 
-#: ../../source/mp/configuration.rst:328
+#: ../../source/mp/configuration.rst:344
 msgid "Source: ``lmcache/v1/distributed/l2_adapters/config.py``"
 msgstr "源: ``lmcache/v1/distributed/l2_adapters/config.py``"
 
-#: ../../source/mp/configuration.rst:330
+#: ../../source/mp/configuration.rst:346
 msgid ""
 "L2 adapters are configured via repeatable ``--l2-adapter <JSON>`` "
 "arguments. Each JSON object must include a ``\"type\"`` field that "
 "selects the adapter type. The order of ``--l2-adapter`` arguments "
 "determines the adapter order (cascade)."
 msgstr ""
-"L2 适配器通过可重复的 ``--l2-adapter <JSON>`` 参数进行配置。每个 JSON 对象必须包含一个 ``\"type\"`` 字段，用于选择适配器类型。\\ ``--l2-adapter`` 参数的顺序决定了适配器的顺序（级联）。"
+"L2 适配器通过可重复的 ``--l2-adapter <JSON>`` 参数进行配置。每个 JSON 对象必须包含一个 ``\"type\"``"
+" 字段，用于选择适配器类型。``--l2-adapter`` 参数的顺序决定了适配器的顺序（级联）。"
 
-#: ../../source/mp/configuration.rst:334
+#: ../../source/mp/configuration.rst:350
 msgid ""
 "Registered adapter types: ``nixl_store``, ``nixl_store_dynamic``, ``fs``,"
 " ``fs_native``, ``mock``, ``mooncake_store``, ``aerospike``, ``s3``, "
 "``resp``, ``plugin``, ``native_plugin``, ``raw_block``, ``dax``."
 msgstr ""
-"注册的适配器类型：\\ ``nixl_store``, ``nixl_store_dynamic``, ``fs``, ``fs_native``, ``mock``, ``mooncake_store``, ``aerospike``, ``s3``, ``resp``, ``plugin``, ``native_plugin``, ``raw_block``, ``dax``\\ 。"
+"注册的适配器类型：``nixl_store``, ``nixl_store_dynamic``, ``fs``, ``fs_native``, "
+"``mock``, ``mooncake_store``, ``aerospike``, ``s3``, ``resp``, "
+"``plugin``, ``native_plugin``, ``raw_block``, ``dax``。"
 
-#: ../../source/mp/configuration.rst:338
+#: ../../source/mp/configuration.rst:354
 msgid ""
 "Each adapter type's required and optional fields, plus per-backend "
 "examples, are documented on its own page under :doc:`Secondary KV Storage"
 " <l2_storage/index>` -- including the adapters not detailed inline here "
-"(``fs_native``, ``raw_block``, ``dax``, ``mooncake_store``, ``hfbucket``,"
-" ``resp``)."
-msgstr ""
-"每种适配器类型的必填和可选字段及各后端示例，均记录在 :doc:`Secondary KV Storage <l2_storage/index>` 下各自的页面中，包括此处未详细说明的适配器（\\ ``fs_native``\\ 、\\ ``raw_block``\\ 、\\ ``dax``\\ 、\\ ``mooncake_store``\\ 、\\ ``hfbucket``\\ 、\\ ``resp``\\ ）。"
-
-#: ../../source/mp/configuration.rst:344
-msgid "``aerospike`` -- Aerospike native connector"
-msgstr "``aerospike`` -- Aerospike 原生连接器"
-
-#: ../../source/mp/configuration.rst:346
-msgid ""
-"Native C++ Aerospike L2 adapter (optional; build with "
-"``BUILD_AEROSPIKE=1``). See :doc:`l2_storage/index` for build "
-"prerequisites and the full field list."
-msgstr "原生 C++ Aerospike L2 适配器（可选，需使用 ``BUILD_AEROSPIKE=1`` 构建）。构建前提条件和完整字段列表请参见 :doc:`l2_storage/index`。"
-
-#: ../../source/mp/configuration.rst:349
-msgid "Fields:"
-msgstr "字段："
-
-#: ../../source/mp/configuration.rst:351
-msgid "``hosts`` *(required)*: Seed hosts ``host:port[,host:port...]``."
-msgstr ""
-"``hosts`` *(必需)*: 种子主机 ``host:port[,host:port...]``\\ 。"
-
-#: ../../source/mp/configuration.rst:352
-msgid "``namespace`` *(optional, default ``\"lmcache\"``)*: Aerospike namespace."
-msgstr "``namespace`` *(可选，默认 ``\"lmcache\"``)*: Aerospike 命名空间。"
-
-#: ../../source/mp/configuration.rst:353
-msgid ""
-"``set_name`` / ``set`` *(optional, default ``\"kv_chunks\"``)*: Aerospike"
-" set."
-msgstr "``set_name`` / ``set`` *(可选，默认 ``\\\"kv_chunks\\\"``)*: Aerospike 集。"
-
-#: ../../source/mp/configuration.rst:354
-msgid "``num_workers`` *(optional, default ``8``)*: C++ I/O worker threads."
-msgstr "``num_workers`` *(可选，默认 ``8``)*: C++ I/O 工作线程。"
-
-#: ../../source/mp/configuration.rst:355
-msgid "``read_timeout_ms`` / ``write_timeout_ms`` *(optional)*: Client timeouts."
-msgstr "``read_timeout_ms`` / ``write_timeout_ms`` *(可选)*: 客户端超时。"
-
-#: ../../source/mp/configuration.rst:356
-msgid ""
-"``default_ttl_seconds`` *(optional, default ``86400``)*: Record TTL "
-"(``0`` = namespace default)."
-msgstr "``default_ttl_seconds`` *(可选，默认 ``86400``)*: 记录的 TTL (``0`` = 命名空间默认)。"
-
-#: ../../source/mp/configuration.rst:358
-msgid ""
-"``target_segment_bytes`` / ``max_record_bytes`` *(optional, default "
-"``0``)*: Shard target and record-cap override (``0`` = auto-discover)."
-msgstr "``target_segment_bytes`` / ``max_record_bytes`` *(可选，默认 ``0``)*: 分片目标和记录容量覆盖 (``0`` = 自动发现)。"
-
-#: ../../source/mp/configuration.rst:360
-msgid "``username`` / ``password`` *(optional)*: Enterprise Edition auth."
-msgstr "``username`` / ``password`` *(可选)*: 企业版认证。"
+"(``fs_native``, ``raw_block``, ``dax``, ``mooncake_store``, "
+"``aerospike``, ``hfbucket``, ``resp``)."
+msgstr "每种适配器类型的必需字段和可选字段，以及每个后端的示例，都在其自己的页面上记录，位于 :doc:`Secondary KV Storage <l2_storage/index>` 下 -- 包括此处未详细说明的适配器（``fs_native``, ``raw_block``, ``dax``, ``mooncake_store``, ``aerospike``, ``hfbucket``, ``resp``）。"
 
 #: ../../source/mp/configuration.rst:361
-msgid ""
-"``max_capacity_gb`` *(optional, default ``0``)*: L2 capacity for eviction"
-" (``0`` disables tracking)."
-msgstr ""
-"``max_capacity_gb`` *(可选，默认 ``0``)*: 用于逐出跟踪的 L2 容量上限（\\ ``0`` 表示禁用跟踪）。"
-
-#: ../../source/mp/configuration.rst:364
-msgid "Example:"
-msgstr "示例："
-
-#: ../../source/mp/configuration.rst:371
 msgid "Multiple adapters (cascade)"
 msgstr "多个适配器（级联）"
 
-#: ../../source/mp/configuration.rst:373
+#: ../../source/mp/configuration.rst:363
 msgid ""
 "Pass ``--l2-adapter`` multiple times.  Adapters are used in the order "
 "given:"
-msgstr ""
-"多次传递 ``--l2-adapter``\\ 。适配器按给定顺序使用："
+msgstr "多次传递 ``--l2-adapter``。适配器按给定顺序使用："
 
-#: ../../source/mp/configuration.rst:381
+#: ../../source/mp/configuration.rst:371
 msgid "Observability"
 msgstr "可观察性"
 
-#: ../../source/mp/configuration.rst:383
+#: ../../source/mp/configuration.rst:373
 msgid "Source: ``lmcache/v1/mp_observability/config.py``"
 msgstr "源: ``lmcache/v1/mp_observability/config.py``"
 
-#: ../../source/mp/configuration.rst:385
+#: ../../source/mp/configuration.rst:375
 msgid ""
 "See :doc:`observability/index` for full details on the three modes "
 "(metrics, logging, tracing)."
-msgstr "三种模式（指标、日志记录、链路追踪）的完整说明，请参见 :doc:`observability/index`。"
+msgstr "有关三种模式（指标、日志、追踪）的完整细节，请参见 :doc:`observability/index`。"
 
-#: ../../source/mp/configuration.rst:395
+#: ../../source/mp/configuration.rst:385
 msgid "``--disable-observability``"
 msgstr "``--disable-observability``"
 
-#: ../../source/mp/configuration.rst:396 ../../source/mp/configuration.rst:399
-#: ../../source/mp/configuration.rst:402 ../../source/mp/configuration.rst:405
+#: ../../source/mp/configuration.rst:386 ../../source/mp/configuration.rst:389
+#: ../../source/mp/configuration.rst:392 ../../source/mp/configuration.rst:395
 msgid "off"
 msgstr "关闭"
 
-#: ../../source/mp/configuration.rst:397
+#: ../../source/mp/configuration.rst:387
 msgid "Master switch: disable the EventBus entirely."
-msgstr "总开关：完全禁用 EventBus。"
+msgstr "主开关：完全禁用 EventBus。"
 
-#: ../../source/mp/configuration.rst:398
+#: ../../source/mp/configuration.rst:388
 msgid "``--disable-metrics``"
 msgstr "``--disable-metrics``"
 
-#: ../../source/mp/configuration.rst:400
+#: ../../source/mp/configuration.rst:390
 msgid "Skip metrics subscribers (no Prometheus endpoint)."
-msgstr "跳过指标订阅者（不暴露 Prometheus 端点）。"
+msgstr "跳过指标订阅者（没有 Prometheus 端点）。"
 
-#: ../../source/mp/configuration.rst:401
+#: ../../source/mp/configuration.rst:391
 msgid "``--disable-logging``"
 msgstr "``--disable-logging``"
 
-#: ../../source/mp/configuration.rst:403
+#: ../../source/mp/configuration.rst:393
 msgid "Skip logging subscribers."
 msgstr "跳过日志订阅者。"
 
-#: ../../source/mp/configuration.rst:404
+#: ../../source/mp/configuration.rst:394
 msgid "``--enable-tracing``"
 msgstr "``--enable-tracing``"
 
-#: ../../source/mp/configuration.rst:406
+#: ../../source/mp/configuration.rst:396
 msgid "Register tracing subscribers. Requires ``--otlp-endpoint``."
-msgstr ""
-"注册链路追踪订阅者。需要 ``--otlp-endpoint``\\ 。"
+msgstr "注册追踪订阅者。需要 ``--otlp-endpoint``。"
 
-#: ../../source/mp/configuration.rst:407
+#: ../../source/mp/configuration.rst:397
 msgid "``--event-bus-queue-size``"
 msgstr "``--event-bus-queue-size``"
 
-#: ../../source/mp/configuration.rst:408
+#: ../../source/mp/configuration.rst:398
 msgid "``10000``"
 msgstr "``10000``"
 
-#: ../../source/mp/configuration.rst:409
+#: ../../source/mp/configuration.rst:399
 msgid "Max events in the EventBus queue before tail-drop."
 msgstr "事件总线队列中最大事件数，超过后将进行尾部丢弃。"
 
-#: ../../source/mp/configuration.rst:410
+#: ../../source/mp/configuration.rst:400
 msgid "``--otlp-endpoint``"
 msgstr "``--otlp-endpoint``"
 
-#: ../../source/mp/configuration.rst:411
+#: ../../source/mp/configuration.rst:401
 msgid "*(none)*"
 msgstr "*(无)*"
 
-#: ../../source/mp/configuration.rst:412
+#: ../../source/mp/configuration.rst:402
 msgid "OTLP gRPC endpoint for exporting metrics and traces."
-msgstr "用于导出指标和链路追踪数据的 OTLP gRPC 端点。"
+msgstr "用于导出指标和跟踪的 OTLP gRPC 端点。"
 
-#: ../../source/mp/configuration.rst:413
+#: ../../source/mp/configuration.rst:403
 msgid "``--prometheus-port``"
 msgstr "``--prometheus-port``"
 
-#: ../../source/mp/configuration.rst:414
+#: ../../source/mp/configuration.rst:404
 msgid "``9090``"
 msgstr "``9090``"
 
-#: ../../source/mp/configuration.rst:415
+#: ../../source/mp/configuration.rst:405
 msgid "Port for the Prometheus ``/metrics`` endpoint."
 msgstr "Prometheus ``/metrics`` 端点的端口。"
 
-#: ../../source/mp/configuration.rst:418
+#: ../../source/mp/configuration.rst:408
 msgid "vLLM Client Configuration"
 msgstr "vLLM 客户端配置"
 
-#: ../../source/mp/configuration.rst:420
+#: ../../source/mp/configuration.rst:410
 msgid ""
 "On the vLLM side, specify the LMCache server host and port via the "
 "``kv_connector_extra_config`` parameter:"
 msgstr "在 vLLM 端，通过 ``kv_connector_extra_config`` 参数指定 LMCache 服务器的主机和端口："
 
-#: ../../source/mp/configuration.rst:429
+#: ../../source/mp/configuration.rst:419
 msgid ""
 "``LMCacheMPConnector`` reads the following keys from "
 "``kv_connector_extra_config``:"
 msgstr "``LMCacheMPConnector`` 从 ``kv_connector_extra_config`` 中读取以下键："
 
-#: ../../source/mp/configuration.rst:433
+#: ../../source/mp/configuration.rst:423
 msgid "Connector ``extra_config`` Keys"
 msgstr "连接器 ``extra_config`` 键"
 
-#: ../../source/mp/configuration.rst:435
+#: ../../source/mp/configuration.rst:425
 msgid ""
 "All connector-level options are passed through "
 "``kv_connector_extra_config`` and use the ``lmcache.mp.`` prefix."
 msgstr "所有连接器级别的选项都通过 ``kv_connector_extra_config`` 传递，并使用 ``lmcache.mp.`` 前缀。"
 
-#: ../../source/mp/configuration.rst:442
+#: ../../source/mp/configuration.rst:432
 msgid "Key"
 msgstr "键"
 
-#: ../../source/mp/configuration.rst:445
+#: ../../source/mp/configuration.rst:435
 msgid "``lmcache.mp.host``"
 msgstr "``lmcache.mp.host``"
 
-#: ../../source/mp/configuration.rst:446
+#: ../../source/mp/configuration.rst:436
 msgid "``tcp://localhost``"
 msgstr "``tcp://localhost``"
 
-#: ../../source/mp/configuration.rst:447
+#: ../../source/mp/configuration.rst:437
 msgid "Host (with ZMQ transport prefix) of the LMCache MP server."
 msgstr "LMCache MP 服务器的主机（带有 ZMQ 传输前缀）。"
 
-#: ../../source/mp/configuration.rst:448
+#: ../../source/mp/configuration.rst:438
 msgid "``lmcache.mp.port``"
 msgstr "``lmcache.mp.port``"
 
-#: ../../source/mp/configuration.rst:450
+#: ../../source/mp/configuration.rst:440
 msgid "Port of the LMCache MP server. Must match the server's ``--port``."
 msgstr "LMCache MP 服务器的端口。必须与服务器的 ``--port`` 匹配。"
 
-#: ../../source/mp/configuration.rst:451
+#: ../../source/mp/configuration.rst:441
 msgid "``lmcache.mp.mq_timeout``"
 msgstr "``lmcache.mp.mq_timeout``"
 
-#: ../../source/mp/configuration.rst:452
+#: ../../source/mp/configuration.rst:442
 msgid "``300.0``"
 msgstr "``300.0``"
 
-#: ../../source/mp/configuration.rst:453
+#: ../../source/mp/configuration.rst:443
 msgid ""
 "Timeout (seconds) for blocking message-queue requests, including the "
 "initial chunk-size query and KV cache registration/unregistration. If the"
 " server does not respond within this window, the connector raises "
 "``ConnectionError`` on startup."
 msgstr ""
-"阻塞消息队列请求的超时时间（秒），包括初始块大小查询和 KV Cache 注册/注销。如果服务器在此时间窗口内未响应，连接器将在启动时引发 ``ConnectionError``\\ 。"
+"阻塞消息队列请求的超时时间（秒），包括初始块大小查询和 KV Cache 注册/注销。如果服务器在此时间窗口内未响应，连接器将在启动时引发 "
+"``ConnectionError``。"
 
-#: ../../source/mp/configuration.rst:457
+#: ../../source/mp/configuration.rst:447
 msgid "``lmcache.mp.heartbeat_interval``"
 msgstr "``lmcache.mp.heartbeat_interval``"
 
-#: ../../source/mp/configuration.rst:458
+#: ../../source/mp/configuration.rst:448
 msgid "``10.0``"
 msgstr "``10.0``"
 
-#: ../../source/mp/configuration.rst:459
+#: ../../source/mp/configuration.rst:449
 msgid ""
 "Interval (seconds) between periodic heartbeat pings sent from the "
 "connector to the server."
-msgstr "连接器向服务器发送周期性心跳 PING 的时间间隔（秒）。"
+msgstr "连接器向服务器发送的定期心跳 ping 之间的间隔（秒）。"
 
-#: ../../source/mp/configuration.rst:461
+#: ../../source/mp/configuration.rst:451
 msgid "``lmcache.mp.mp_transfer_mode``"
 msgstr "``lmcache.mp.mp_transfer_mode``"
 
-#: ../../source/mp/configuration.rst:463
+#: ../../source/mp/configuration.rst:453
 msgid ""
 "Routing mode for the worker -> server transfer context. One of ``auto`` "
 "(CUDA -> engine_driven, others -> lmcache_driven), ``engine_driven`` "
@@ -957,38 +954,42 @@ msgid ""
 "gather/scatter copy). Overrides the ``LMCACHE_MP_TRANSFER_MODE`` env var "
 "when set."
 msgstr ""
-"工作进程 → 服务器传输上下文的路由模式。可选值：\\ ``auto``\\ （CUDA 设备使用 engine_driven，其他设备使用 lmcache_driven）、\\ ``engine_driven``\\ （强制使用 IPC / SHM 零拷贝）或 ``lmcache_driven``\\ （强制使用工作进程端 gather/scatter 拷贝）。若设置了此选项，将覆盖 ``LMCACHE_MP_TRANSFER_MODE`` 环境变量。"
+"工作进程与服务器传输上下文的路由模式。可以是 ``auto``（CUDA -> engine_driven，其他 -> "
+"lmcache_driven）、``engine_driven``（强制 IPC / SHM 零拷贝）或 "
+"``lmcache_driven``（强制工作进程端聚集/分散拷贝）。当设置时，会覆盖 ``LMCACHE_MP_TRANSFER_MODE`` "
+"环境变量。"
 
-#: ../../source/mp/configuration.rst:470
+#: ../../source/mp/configuration.rst:460
 msgid "Environment Variables"
 msgstr "环境变量"
 
-#: ../../source/mp/configuration.rst:476
+#: ../../source/mp/configuration.rst:466
 msgid "Variable"
 msgstr "变量"
 
-#: ../../source/mp/configuration.rst:478
+#: ../../source/mp/configuration.rst:468
 msgid "``LMCACHE_LOG_LEVEL``"
 msgstr "``LMCACHE_LOG_LEVEL``"
 
-#: ../../source/mp/configuration.rst:479
+#: ../../source/mp/configuration.rst:469
 msgid ""
 "Log level for LMCache (``DEBUG``, ``INFO``, ``WARNING``, ``ERROR``). Set "
 "to ``DEBUG`` to see L2 store activity, prefetch results, etc."
 msgstr ""
-"LMCache 的日志级别（\\ ``DEBUG``\\ 、\\ ``INFO``\\ 、\\ ``WARNING``\\ 、\\ ``ERROR``\\ ）。设置为 ``DEBUG`` 以查看 L2 存储活动、预取结果等。"
+"LMCache 的日志级别（``DEBUG``、``INFO``、``WARNING``、``ERROR``）。设置为 ``DEBUG`` 以查看"
+" L2 存储活动、预取结果等。"
 
-#: ../../source/mp/configuration.rst:481
+#: ../../source/mp/configuration.rst:471
 msgid "``PYTHONHASHSEED``"
 msgstr "``PYTHONHASHSEED``"
 
-#: ../../source/mp/configuration.rst:482
+#: ../../source/mp/configuration.rst:472
 msgid ""
 "Set to a fixed value for reproducible hashing across processes (relevant "
 "when using ``--hash-algorithm builtin``)."
 msgstr "设置为固定值以实现跨进程的可重复哈希（在使用 ``--hash-algorithm builtin`` 时相关）。"
 
-#: ../../source/mp/configuration.rst:486
+#: ../../source/mp/configuration.rst:476
 msgid "Full Example"
 msgstr "完整示例"
 
@@ -1134,4 +1135,69 @@ msgstr "完整示例"
 #~ "``service.instance.id`` 附加在每个指标和跨度上。当未传递该标志时，默认为随机 UUID"
 #~ " v4。传递 ``--service-instance-id=\\\"\\\"`` "
 #~ "以强制设置为空值。"
+
+#~ msgid "``aerospike`` -- Aerospike native connector"
+#~ msgstr "``aerospike`` -- Aerospike 原生连接器"
+
+#~ msgid ""
+#~ "Native C++ Aerospike L2 adapter "
+#~ "(optional; build with ``BUILD_AEROSPIKE=1``). "
+#~ "See :doc:`l2_storage/index` for build "
+#~ "prerequisites and the full field list."
+#~ msgstr ""
+#~ "原生 C++ Aerospike L2 适配器（可选；使用 "
+#~ "``BUILD_AEROSPIKE=1`` 构建）。有关构建前提条件和完整字段列表，请参见 "
+#~ ":doc:`l2_storage/index`。"
+
+#~ msgid "Fields:"
+#~ msgstr "字段："
+
+#~ msgid "``hosts`` *(required)*: Seed hosts ``host:port[,host:port...]``."
+#~ msgstr "``hosts`` *(必需)*: 种子主机 ``host:port[,host:port...]``。"
+
+#~ msgid ""
+#~ "``namespace`` *(optional, default ``\"lmcache\"``)*:"
+#~ " Aerospike namespace."
+#~ msgstr "``namespace`` *(可选，默认 ``\"lmcache\"``)*: Aerospike 命名空间。"
+
+#~ msgid ""
+#~ "``set_name`` / ``set`` *(optional, default "
+#~ "``\"kv_chunks\"``)*: Aerospike set."
+#~ msgstr "``set_name`` / ``set`` *(可选，默认 ``\\\"kv_chunks\\\"``)*: Aerospike 集。"
+
+#~ msgid "``num_workers`` *(optional, default ``8``)*: C++ I/O worker threads."
+#~ msgstr "``num_workers`` *(可选，默认 ``8``)*: C++ I/O 工作线程。"
+
+#~ msgid ""
+#~ "``read_timeout_ms`` / ``write_timeout_ms`` "
+#~ "*(optional)*: Client timeouts."
+#~ msgstr "``read_timeout_ms`` / ``write_timeout_ms`` *(可选)*: 客户端超时。"
+
+#~ msgid ""
+#~ "``default_ttl_seconds`` *(optional, default "
+#~ "``86400``)*: Record TTL (``0`` = "
+#~ "namespace default)."
+#~ msgstr "``default_ttl_seconds`` *(可选，默认 ``86400``)*: 记录的 TTL (``0`` = 命名空间默认)。"
+
+#~ msgid ""
+#~ "``target_segment_bytes`` / ``max_record_bytes`` "
+#~ "*(optional, default ``0``)*: Shard target "
+#~ "and record-cap override (``0`` = "
+#~ "auto-discover)."
+#~ msgstr ""
+#~ "``target_segment_bytes`` / ``max_record_bytes`` "
+#~ "*(可选，默认 ``0``)*: 分片目标和记录容量覆盖 (``0`` = "
+#~ "自动发现)。"
+
+#~ msgid "``username`` / ``password`` *(optional)*: Enterprise Edition auth."
+#~ msgstr "``username`` / ``password`` *(可选)*: 企业版认证。"
+
+#~ msgid ""
+#~ "``max_capacity_gb`` *(optional, default ``0``)*: "
+#~ "L2 capacity for eviction (``0`` disables"
+#~ " tracking)."
+#~ msgstr "``max_capacity_gb`` *(可选，默认 ``0``)*: L2 逐出容量 (``0`` 禁用跟踪)。"
+
+#~ msgid "Example:"
+#~ msgstr "示例："
 

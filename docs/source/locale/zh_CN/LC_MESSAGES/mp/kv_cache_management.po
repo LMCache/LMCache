@@ -27,13 +27,12 @@ msgstr "KV Cache 管理"
 msgid ""
 "The multiprocess (MP) cache-management surface (operations such as "
 "``move``, ``pin``, and ``compress``) is **coming soon**."
-msgstr ""
-"MP（多进程）缓存管理接口层（如 ``move``\\ 、\\ ``pin`` 和 ``compress`` 等操作）即将 **推出**\\ 。"
+msgstr "多进程 (MP) 缓存管理界面 (如 ``move``、``pin`` 和 ``compress`` 等操作) 将会 **很快推出**。"
 
 #: ../../source/mp/kv_cache_management.rst:11
 msgid ""
 "Until it lands, the in-process management commands are documented in the "
 ":doc:`Legacy section <../legacy/index>`: "
 ":doc:`../kv_cache_management/index`."
-msgstr "在此功能发布之前，进程内管理命令已记录于 :doc:`旧版章节 <../legacy/index>`： :doc:`../kv_cache_management/index`。"
+msgstr "在它发布之前，进程内管理命令已在 :doc:`遗留部分 <../legacy/index>` 中记录： :doc:`../kv_cache_management/index`。"
 

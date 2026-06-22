@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"POT-Creation-Date: 2026-06-22 11:07+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -19,11 +19,13 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Generated-By: Babel 2.18.0\n"
 
-#: ../../source/non_kv_cache/hidden_states.rst:2
-msgid "Hidden States"
-msgstr "隐藏状态"
+#: ../../source/extension/index.rst:2
+msgid "Extension Guide"
+msgstr "扩展指南"
 
-#: ../../source/non_kv_cache/hidden_states.rst:6
-msgid "Hidden-state caching is **in progress**."
-msgstr "隐藏状态缓存正在 **进行中**。"
+#: ../../source/extension/index.rst:4
+msgid ""
+"This section describes how to extend LMCache by adding new CLI commands, "
+"plugins, or other components."
+msgstr "本节描述了如何通过添加新的 CLI 命令、插件或其他组件来扩展 LMCache。"
 

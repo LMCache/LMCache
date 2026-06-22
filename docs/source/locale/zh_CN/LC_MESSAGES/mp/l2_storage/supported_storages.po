@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"POT-Creation-Date: 2026-06-22 11:07+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -29,7 +29,9 @@ msgid ""
 "``--l2-adapter`` flag (each backend's ``\"type\"`` is shown below); every"
 " backend has its own configuration page. They are grouped by the kind of "
 "medium they target."
-msgstr "LMCache 提供了多个 L2 存储后端。使用 ``--l2-adapter`` 标志选择一个或多个（每个后端的 ``\"type\"`` 如下所示）；每个后端均有其各自的配置页面。它们按目标介质的类型进行分组。"
+msgstr ""
+"LMCache 提供了多个 L2 存储后端。使用 ``--l2-adapter`` 标志选择一个或多个（每个后端的 ``\"type\"`` "
+"如下所示）；每个后端都有其自己的配置页面。它们按目标介质的类型进行分组。"
 
 #: ../../source/mp/l2_storage/supported_storages.rst:13
 msgid "Backend"
@@ -71,7 +73,7 @@ msgstr "文件与块"
 
 #: ../../source/mp/l2_storage/supported_storages.rst:22
 msgid ":doc:`FS (native) <fs_native>`"
-msgstr ":doc:`FS（原生）<fs_native>`"
+msgstr ":doc:`FS (native) <fs_native>`"
 
 #: ../../source/mp/l2_storage/supported_storages.rst:23
 msgid "``fs_native``"
@@ -154,6 +156,15 @@ msgid "``mock``"
 msgstr "``mock``"
 
 #: ../../source/mp/l2_storage/supported_storages.rst:48
+#: ../../source/mp/l2_storage/supported_storages.rst:51
 msgid "Testing"
 msgstr "测试"
+
+#: ../../source/mp/l2_storage/supported_storages.rst:49
+msgid ":doc:`Fault Inject <fault_inject>`"
+msgstr "`:doc:`故障注入 <fault_inject>` `"
+
+#: ../../source/mp/l2_storage/supported_storages.rst:50
+msgid "``fault_inject``"
+msgstr "``fault_inject``"
 

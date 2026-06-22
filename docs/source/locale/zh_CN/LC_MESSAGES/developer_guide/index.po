@@ -27,5 +27,5 @@ msgstr "开发者指南"
 msgid ""
 "How to contribute to LMCache and extend it with new storage backends, CLI"
 " commands, and HTTP endpoints."
-msgstr "如何为 LMCache 贡献代码，并通过新的存储后端、CLI 命令和 HTTP 端点对其进行扩展。"
+msgstr "如何为 LMCache 贡献代码，并通过新的存储后端、CLI 命令和 HTTP 端点扩展它。"
 

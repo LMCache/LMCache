@@ -27,5 +27,5 @@ msgstr "KV Cache 优化"
 msgid ""
 "Techniques that improve KV cache reuse and efficiency beyond plain prefix"
 " caching."
-msgstr "在普通前缀缓存基础之上，进一步提升 KV Cache 复用率与效率的技术。"
+msgstr "提高 KV Cache 重用和效率的技术，超越简单的前缀缓存。"
 

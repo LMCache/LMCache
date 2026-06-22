@@ -21,10 +21,9 @@ msgstr ""
 
 #: ../../source/kv_cache_optimizations/segmented_prefill.rst:2
 msgid "Segmented Prefill"
-msgstr "分段式预填充"
+msgstr "分离式 Prefill"
 
 #: ../../source/kv_cache_optimizations/segmented_prefill.rst:6
 msgid "Documentation for segmented prefill is **coming soon**."
-msgstr ""
-"分段式预填充的文档\\ **即将**\\ 发布。"
+msgstr "分离式 Prefill 的文档将于 **很快** 发布。"
 
