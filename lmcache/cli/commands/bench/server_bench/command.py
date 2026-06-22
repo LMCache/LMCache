@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """``lmcache bench server`` subcommand implementation.
 
-This module owns the full registration + execution flow for the
-end-to-end LMCache MP cache-server sanity test. ``BenchCommand`` only
-forwards CLI dispatch to :func:`run_server_bench` and parser
-registration to :func:`register_server_parser`.
+This module provides argument registration via :func:`add_server_arguments`
+and the execution orchestrator :func:`run_server_bench` for the end-to-end
+LMCache MP cache-server sanity test.
 
 The command exercises the full store / retrieve data path:
 
@@ -50,10 +49,8 @@ from lmcache import torch_dev
 # time. On a slim install these symbols are placeholders; the
 # ``_require_full_install`` guard inside the helpers module keeps
 # orchestration safe.
-from lmcache.cli.commands.base import _add_output_args
 from lmcache.cli.commands.bench.server_bench.helpers import (
     _DEFAULT_SHAPE_SPEC,
-    _IMPORT_ERROR,
     DTYPE_MAP,
     _allocate_cpu_shm_kv_cache,
     _allocate_gpu_kv_cache,
@@ -73,7 +70,7 @@ if TYPE_CHECKING:
 # Stash the original (full-install) ImportError so the parser-stub
 # branch and the orchestrator branch can both surface it verbatim.
 __all__ = (
-    "register_server_parser",
+    "add_server_arguments",
     "run_server_bench",
 )
 
@@ -83,51 +80,15 @@ __all__ = (
 # ---------------------------------------------------------------------------
 
 
-def register_server_parser(
-    subparsers: argparse._SubParsersAction,
-    dispatch_func,
-) -> argparse.ArgumentParser:
-    """Register the ``lmcache bench server`` subcommand parser.
+def add_server_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add ``lmcache bench server`` arguments to *parser*.
 
-    On a slim ``lmcache-cli`` install (where torch / zmq / the MP
-    runtime are absent) this still registers a *stub* parser so
-    ``lmcache bench --help`` keeps working; the stub defers to
-    :func:`run_server_bench`, which prints an actionable install
-    hint and exits with status ``1``.
+    Requires the full LMCache install (torch, zmq, etc.).
+    Callers should check ``_IMPORT_ERROR`` before calling this.
 
     Args:
-        subparsers: The ``bench`` subparsers action.
-        dispatch_func: Function to bind via ``set_defaults(func=...)``.
-            Typically ``BenchCommand.execute`` so that the outer
-            dispatcher can route the call back into
-            :func:`run_server_bench`.
-
-    Returns:
-        The created ``ArgumentParser`` (mostly for testing).
+        parser: The ``ArgumentParser`` for the server bench subcommand.
     """
-    if _IMPORT_ERROR is not None:
-        # Slim install — register a stub parser only.
-        stub = subparsers.add_parser(
-            "server",
-            help="(requires full lmcache install)",
-            description=(
-                "End-to-end sanity test for the LMCache MP cache server. "
-                "Requires the full `lmcache` package; not available in "
-                "the `lmcache-cli` install."
-            ),
-        )
-        stub.set_defaults(func=dispatch_func)
-        return stub
-
-    parser = subparsers.add_parser(
-        "server",
-        help="End-to-end test for LMCache MP cache server (GPU mode).",
-        description=(
-            "End-to-end sanity test for the LMCache MP cache server: "
-            "runs LOOKUP / STORE / RETRIEVE against a live MP server "
-            "and verifies KV cache checksums."
-        ),
-    )
 
     parser.add_argument(
         "--rpc-url",
@@ -229,12 +190,6 @@ def register_server_parser(
         default="http://localhost:8080",
         help=("HTTP base URL for checksum API (default: http://localhost:8080)"),
     )
-
-    # Common ``--format / --output / --quiet`` flags.
-    _add_output_args(parser)
-
-    parser.set_defaults(func=dispatch_func)
-    return parser
 
 
 # ---------------------------------------------------------------------------
