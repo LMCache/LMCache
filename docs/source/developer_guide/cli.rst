@@ -3,28 +3,46 @@ Extending the CLI
 
 This guide explains how to add new subcommands to the ``lmcache`` CLI.
 
+.. note::
+
+   For the full extension guide -- including N-level nested subcommands
+   via ``CompositeCommand`` and the auto-discovery rules -- see
+   :doc:`/extension/cli`.
+
 Architecture Overview
 ---------------------
 
-The CLI uses explicit command registration:
+The CLI uses **auto-discovery** of subcommand classes:
 
 1. Each command is a class inheriting from ``BaseCommand``.
-2. Commands are instantiated and listed in a central ``ALL_COMMANDS`` registry.
-3. At startup, the entry point iterates ``ALL_COMMANDS`` and calls
+2. Commands live in their own module (or sub-package) under
+   ``lmcache/cli/commands/``. They are picked up at startup by
+   ``discover_subclasses()`` (in
+   ``lmcache/v1/utils/subclass_discovery.py``) and exposed via
+   ``ALL_COMMANDS`` in ``commands/__init__.py``.
+3. The entry point iterates ``ALL_COMMANDS`` and calls
    ``cmd.register(subparsers)`` to wire up argparse.
+
+No manual registration is required -- creating the module is enough.
+Helper modules whose names start with an underscore (e.g.
+``_helpers.py``) are excluded from discovery.
 
 ``BaseCommand`` is an abstract class with a small set of required methods
 (name, help, argument registration, and execute). Forgetting any of them
-raises ``TypeError`` at instantiation time.
+raises ``TypeError`` at instantiation time. Commands that only group
+sub-subcommands inherit from ``CompositeCommand`` instead -- see
+:doc:`/extension/cli` for that pattern.
 
 Step-by-Step: Adding a New Command
 -----------------------------------
 
-**Step 1.** Create a new command class that subclasses ``BaseCommand``:
+**Step 1.** Create a new module under ``lmcache/cli/commands/`` and
+define a class that subclasses ``BaseCommand``:
 
 .. code-block:: python
 
    # SPDX-License-Identifier: Apache-2.0
+   # lmcache/cli/commands/describe.py
    import argparse
 
    from lmcache.cli.commands.base import BaseCommand
@@ -48,18 +66,13 @@ Step-by-Step: Adding a New Command
            metrics.add("chunks", "Cached chunks", 1024)
            metrics.emit()
 
-**Step 2.** Add an instance of it to the ``ALL_COMMANDS`` registry:
+**Step 2.** That's it -- the command is discovered automatically. No
+edits to ``commands/__init__.py`` are required.
+``lmcache describe --url http://localhost:8000`` is now available.
 
-.. code-block:: python
-
-   from lmcache.cli.commands.describe import DescribeCommand
-
-   ALL_COMMANDS: list[BaseCommand] = [
-       # ... existing commands ...
-       DescribeCommand(),   # add here
-   ]
-
-That's it --- ``lmcache describe --url http://localhost:8000`` is now available.
+For nested subcommands (e.g. ``lmcache tool cache-simulator simulate``),
+follow the ``CompositeCommand`` pattern documented in
+:doc:`/extension/cli`.
 
 Using the Metrics System
 ------------------------
