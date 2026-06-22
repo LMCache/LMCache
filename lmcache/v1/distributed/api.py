@@ -179,40 +179,41 @@ class MemoryLayoutDesc:
 
 @dataclass(frozen=True)
 class AttnWindowDesc:
-    """Cross-chunk attention window of one object group, in LMCache chunks.
+    """Cross-chunk attention windows of all object groups, in LMCache chunks.
 
-    Describes how much of the prefix the group needs present to serve a
-    cache hit: a full-attention group needs the whole prefix; a sliding-window
-    group of ``w`` chunks needs only the last ``w`` (mamba is ``w == 1``).
-    Construct via :meth:`full` or :meth:`sliding_window`.
+    Mirrors :class:`MemoryLayoutDesc`: a single descriptor covers every object
+    group of a registration. ``window_chunks[g]`` is the number of trailing
+    prefix chunks object group ``g`` needs present to serve a cache hit. ``-1``
+    means full attention (the whole prefix); ``w >= 1`` is a sliding window of
+    ``w`` chunks (mamba is ``1``).
     """
 
-    window_chunks: int
-    """Trailing prefix chunks the group needs; ``-1`` means full attention
-    (the whole prefix)."""
+    window_chunks: list[int]
 
-    @classmethod
-    def full(cls) -> "AttnWindowDesc":
-        """A full-attention window (depends on the entire prefix)."""
-        return cls(window_chunks=-1)
-
-    @classmethod
-    def sliding_window(cls, window_chunks: int) -> "AttnWindowDesc":
-        """A sliding-window of ``window_chunks`` chunks (mamba is ``1``).
-
-        Raises:
-            ValueError: If ``window_chunks`` is less than 1.
-        """
-        if window_chunks < 1:
-            raise ValueError(
-                f"sliding-window size must be >= 1 chunk (got {window_chunks})"
-            )
-        return cls(window_chunks=window_chunks)
+    def __post_init__(self) -> None:
+        for w in self.window_chunks:
+            if w == 0 or w < -1:
+                raise ValueError(
+                    "AttnWindowDesc: each window must be -1 (full attention) "
+                    f"or >= 1 chunk, got {w}"
+                )
 
     @property
-    def is_full_attention(self) -> bool:
-        """Whether the group depends on the entire prefix."""
-        return self.window_chunks < 0
+    def num_object_groups(self) -> int:
+        """Number of object groups this descriptor covers."""
+        return len(self.window_chunks)
+
+    def is_full_attention(self, object_group_idx: int) -> bool:
+        """Whether the object group depends on the entire prefix.
+
+        Args:
+            object_group_idx: 0-based object group index.
+
+        Returns:
+            True if the group attends to the whole prefix, False if it uses a
+            bounded sliding window.
+        """
+        return self.window_chunks[object_group_idx] < 0
 
 
 @dataclass(frozen=True)

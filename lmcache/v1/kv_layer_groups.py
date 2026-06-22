@@ -510,25 +510,25 @@ class KVLayerGroupsManager:
             return self._lmcache_tokens_per_chunk
         return sw_size_tokens
 
-    def get_attn_window(self, object_group_idx: int) -> AttnWindowDesc:
-        """Return the cross-chunk attention window of an object group.
-
-        Args:
-            object_group_idx: 0-based object group index.
+    def get_attn_desc(self) -> AttnWindowDesc:
+        """Return the cross-chunk attention windows of all object groups.
 
         Returns:
-            The object group's :class:`AttnWindowDesc` (full attention for a
-            non-sliding-window group).
+            An :class:`AttnWindowDesc` whose ``window_chunks[g]`` is object
+            group ``g``'s window (``-1`` for a non-sliding-window group), in
+            object-group order.
 
         Note:
             All kernel groups in one object group share a single window so they
             can be retrieved together. When object-group separation is disabled
             (the default), there is a single full-attention object group.
         """
-        window_chunks = self._object_groups[object_group_idx].sw_size_chunks
-        if window_chunks < 1:
-            return AttnWindowDesc.full()
-        return AttnWindowDesc.sliding_window(window_chunks)
+        return AttnWindowDesc(
+            window_chunks=[
+                w if w >= 1 else -1
+                for w in (g.sw_size_chunks for g in self._object_groups)
+            ]
+        )
 
     def calculate_num_blocks(self, kernel_group_idx: int, num_tokens: int) -> int:
         """Calculate the number of blocks for a given number of tokens in a

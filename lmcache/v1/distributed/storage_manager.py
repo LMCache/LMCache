@@ -406,7 +406,7 @@ class StorageManager:
         extra_count: int = 0,
         external_request_id: str = "",
         policy: TrimPolicy = TrimPolicy.PREFIX,
-        attn_windows: tuple[AttnWindowDesc, ...] = (),
+        attn_desc: AttnWindowDesc = AttnWindowDesc(window_chunks=[]),
     ) -> PrefetchHandle:
         """Prefetch objects into L1 asynchronously.
 
@@ -421,7 +421,7 @@ class StorageManager:
             policy: Which retained-subset policy to apply (see
                 :class:`TrimPolicy`).  ``PREFIX`` keeps the contiguous prefix;
                 ``SPARSE`` keeps every found key (gap-tolerant).
-            attn_windows: Per-object-group cross-chunk attention windows, in
+            attn_desc: Cross-chunk attention windows of all object groups, in
                 object-group order.
 
         Returns:
@@ -467,7 +467,7 @@ class StorageManager:
                     layout_desc,
                     extra_count=extra_count,
                     policy=TrimPolicy.SPARSE,
-                    attn_windows=attn_windows,
+                    attn_desc=attn_desc,
                 )
             return PrefetchHandle(
                 prefetch_request_id=prefetch_request_id,
@@ -521,7 +521,7 @@ class StorageManager:
                 remaining_keys,
                 layout_desc,
                 extra_count=extra_count,
-                attn_windows=attn_windows,
+                attn_desc=attn_desc,
             )
             # The controller indexes its result bitmap over remaining_keys
             # (0-based); map those local indices back to original positions.

@@ -102,22 +102,21 @@ class TestTrimPolicy:
 
 class TestAttnWindowDesc:
     def test_full_roundtrip(self):
-        d = AttnWindowDesc.full()
-        out = _roundtrip(d)
-        assert out == d
-        assert out.is_full_attention
+        out = _roundtrip(AttnWindowDesc(window_chunks=[-1]))
+        assert out.window_chunks == [-1]
+        assert out.is_full_attention(0)
 
-    def test_sliding_window_roundtrip(self):
-        d = AttnWindowDesc.sliding_window(4)
-        out = _roundtrip(d)
-        assert out == d
-        assert not out.is_full_attention
+    def test_mixed_roundtrip(self):
+        out = _roundtrip(AttnWindowDesc(window_chunks=[-1, 4, 1]))
+        assert out.window_chunks == [-1, 4, 1]
+        assert out.is_full_attention(0)
+        assert not out.is_full_attention(1)
+        assert out.num_object_groups == 3
 
-    def test_tuple_roundtrip(self):
-        windows = (AttnWindowDesc.full(), AttnWindowDesc.sliding_window(2))
-        out = _roundtrip(windows)
-        assert out == windows
-        assert isinstance(out, tuple)
+    def test_empty_roundtrip(self):
+        out = _roundtrip(AttnWindowDesc(window_chunks=[]))
+        assert out.window_chunks == []
+        assert out.num_object_groups == 0
 
 
 class TestSet:

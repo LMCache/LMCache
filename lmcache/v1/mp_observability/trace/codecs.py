@@ -245,14 +245,12 @@ def _dec_trim_policy(name: str) -> TrimPolicy:
     return TrimPolicy[name]
 
 
-def _enc_attn_window(d: AttnWindowDesc) -> int:
-    return d.window_chunks
+def _enc_attn_window(d: AttnWindowDesc) -> list[int]:
+    return list(d.window_chunks)
 
 
-def _dec_attn_window(window_chunks: int) -> AttnWindowDesc:
-    if window_chunks < 1:
-        return AttnWindowDesc.full()
-    return AttnWindowDesc.sliding_window(window_chunks)
+def _dec_attn_window(window_chunks: list[int]) -> AttnWindowDesc:
+    return AttnWindowDesc(window_chunks=list(window_chunks))
 
 
 def _enc_set(s: set) -> list:

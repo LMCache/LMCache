@@ -17,12 +17,12 @@ class _FakeKVLayerGroupsManager:
 
     num_object_groups: int = 1
 
-    def get_attn_window(self, object_group_id: int) -> Any:
-        """Full attention for every object group."""
+    def get_attn_desc(self) -> Any:
+        """One full-attention object group."""
         # First Party
         from lmcache.v1.distributed.api import AttnWindowDesc
 
-        return AttnWindowDesc.full()
+        return AttnWindowDesc(window_chunks=[-1])
 
 
 class _FakeGPUContext:
@@ -149,40 +149,39 @@ def _layout() -> Any:
     return MemoryLayoutDesc(shapes=[torch.Size([2, 4])], dtypes=[torch.float16])
 
 
-def test_registry_attn_windows_roundtrip() -> None:
-    """register stores per-group windows; find_attn_windows reads them."""
+def test_registry_attn_desc_roundtrip() -> None:
+    """register stores the attention-window descriptor; find_attn_desc reads it."""
     # First Party
     from lmcache.v1.distributed.api import AttnWindowDesc
     from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 
     registry = LayoutDescRegistry()
-    windows = (AttnWindowDesc.full(), AttnWindowDesc.sliding_window(2))
-    registry.register("m", 2, _layout(), attn_windows=windows)
+    registry.register(
+        "m", 2, _layout(), attn_desc=AttnWindowDesc(window_chunks=[-1, 2])
+    )
 
-    assert registry.find_attn_windows("m", 2) == windows
+    assert registry.find_attn_desc("m", 2).window_chunks == [-1, 2]
 
 
 def test_registry_windows_default_single_group_when_unregistered() -> None:
-    """find_attn_windows returns one full-attention group for an unknown pair."""
+    """find_attn_desc returns one full-attention group for an unknown pair."""
     # First Party
-    from lmcache.v1.distributed.api import AttnWindowDesc
     from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 
     registry = LayoutDescRegistry()
 
-    assert registry.find_attn_windows("missing", 1) == (AttnWindowDesc.full(),)
+    assert registry.find_attn_desc("missing", 1).window_chunks == [-1]
 
 
 def test_registry_windows_default_single_group_when_omitted() -> None:
     """A registration without windows resolves to a single full-attention group."""
     # First Party
-    from lmcache.v1.distributed.api import AttnWindowDesc
     from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 
     registry = LayoutDescRegistry()
     registry.register("m", 1, _layout())
 
-    assert registry.find_attn_windows("m", 1) == (AttnWindowDesc.full(),)
+    assert registry.find_attn_desc("m", 1).window_chunks == [-1]
 
 
 def test_registry_windows_updated_on_reregister() -> None:
@@ -192,8 +191,9 @@ def test_registry_windows_updated_on_reregister() -> None:
     from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 
     registry = LayoutDescRegistry()
-    registry.register("m", 1, _layout(), attn_windows=(AttnWindowDesc.full(),))
-    windows = (AttnWindowDesc.full(), AttnWindowDesc.sliding_window(4))
-    registry.register("m", 1, _layout(), attn_windows=windows)
+    registry.register("m", 1, _layout(), attn_desc=AttnWindowDesc(window_chunks=[-1]))
+    registry.register(
+        "m", 1, _layout(), attn_desc=AttnWindowDesc(window_chunks=[-1, 4])
+    )
 
-    assert registry.find_attn_windows("m", 1) == windows
+    assert registry.find_attn_desc("m", 1).window_chunks == [-1, 4]

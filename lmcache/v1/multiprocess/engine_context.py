@@ -2,7 +2,7 @@
 """Shared context and layout descriptor registry for engine modules."""
 
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TypedDict
 import threading
 
@@ -41,9 +41,11 @@ class _LayoutDescEntry:
 
     layout_desc: MemoryLayoutDesc
     ref_count: int
-    attn_windows: tuple[AttnWindowDesc, ...] = (AttnWindowDesc.full(),)
-    """Per-object-group cross-chunk attention windows, in object-group order.
-    Defaults to a single full-attention group."""
+    attn_desc: AttnWindowDesc = field(
+        default_factory=lambda: AttnWindowDesc(window_chunks=[-1])
+    )
+    """Cross-chunk attention windows of all object groups, in object-group
+    order. Defaults to a single full-attention group."""
 
 
 class LayoutDescRegistry:
@@ -66,7 +68,7 @@ class LayoutDescRegistry:
         model_name: str,
         world_size: int,
         layout_desc: MemoryLayoutDesc,
-        attn_windows: tuple[AttnWindowDesc, ...] = (AttnWindowDesc.full(),),
+        attn_desc: AttnWindowDesc = AttnWindowDesc(window_chunks=[-1]),
     ) -> None:
         """Register a layout descriptor for a (model_name, world_size) pair.
 
@@ -77,7 +79,7 @@ class LayoutDescRegistry:
             model_name: The model name.
             world_size: The world size.
             layout_desc: The memory layout descriptor.
-            attn_windows: Per-object-group cross-chunk attention windows, in
+            attn_desc: Cross-chunk attention windows of all object groups, in
                 object-group order. Defaults to a single full-attention group.
         """
         key = (model_name, world_size)
@@ -87,12 +89,12 @@ class LayoutDescRegistry:
                 self._registry[key] = _LayoutDescEntry(
                     layout_desc=layout_desc,
                     ref_count=1,
-                    attn_windows=attn_windows,
+                    attn_desc=attn_desc,
                 )
                 return
 
             entry.layout_desc = layout_desc
-            entry.attn_windows = attn_windows
+            entry.attn_desc = attn_desc
             entry.ref_count += 1
 
     def unregister(self, model_name: str, world_size: int) -> None:
@@ -133,25 +135,22 @@ class LayoutDescRegistry:
                 return None
             return entry.layout_desc
 
-    def find_attn_windows(
-        self, model_name: str, world_size: int
-    ) -> tuple[AttnWindowDesc, ...]:
-        """Look up the per-object-group attention windows for a pair.
+    def find_attn_desc(self, model_name: str, world_size: int) -> AttnWindowDesc:
+        """Look up the attention-window descriptor for a pair.
 
         Args:
             model_name: The model name.
             world_size: The world size.
 
         Returns:
-            The per-object-group :class:`AttnWindowDesc` tuple registered for
-            the pair, or a single full-attention group if the pair is not
-            registered.
+            The :class:`AttnWindowDesc` registered for the pair, or a single
+            full-attention group if the pair is not registered.
         """
         with self._lock:
             entry = self._registry.get((model_name, world_size))
             if entry is None:
-                return (AttnWindowDesc.full(),)
-            return entry.attn_windows
+                return AttnWindowDesc(window_chunks=[-1])
+            return entry.attn_desc
 
 
 class MPCacheServerContext:

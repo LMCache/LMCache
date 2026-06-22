@@ -269,10 +269,11 @@ def transfer_kv_per_object_group(
     kernel_group_ids = object_group.kernel_group_indices
     is_h2d = direction == lmc_ops.TransferDirection.H2D
 
-    attn_window = kv_groups_manager.get_attn_window(object_group_id)
+    attn_desc = kv_groups_manager.get_attn_desc()
     num_objects_to_skip = 0
-    if not attn_window.is_full_attention and is_h2d:
-        num_objects_to_skip = max(0, len(memory_objs) - attn_window.window_chunks)
+    if not attn_desc.is_full_attention(object_group_id) and is_h2d:
+        sw_size_chunks = attn_desc.window_chunks[object_group_id]
+        num_objects_to_skip = max(0, len(memory_objs) - sw_size_chunks)
         logger.debug(
             "Detected sliding window for object group %d: "
             "skipping the first %d objects in the batch",
@@ -560,12 +561,9 @@ class LMCacheDrivenTransferModule:
             cache_context, self._ctx.chunk_size, object_group_id=0
         )
         kv_groups_manager = cache_context.kv_layer_groups_manager
-        attn_windows = tuple(
-            kv_groups_manager.get_attn_window(object_group_id)
-            for object_group_id in range(kv_groups_manager.num_object_groups)
-        )
+        attn_desc = kv_groups_manager.get_attn_desc()
         self._ctx.layout_desc_registry.register(
-            model_name, world_size, layout_desc, attn_windows
+            model_name, world_size, layout_desc, attn_desc
         )
 
         logger.info(

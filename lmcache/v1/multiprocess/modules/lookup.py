@@ -298,17 +298,19 @@ class LookupModule:
 
         # Lay keys out chunk-major across object groups (see
         # _chunk_major_object_keys); pass the windows to the prefetch policy.
-        attn_windows = self._ctx.layout_desc_registry.find_attn_windows(
+        attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
             model_name, world_size
         )
-        obj_keys = self._chunk_major_object_keys(key, chunk_hashes, len(attn_windows))
+        obj_keys = self._chunk_major_object_keys(
+            key, chunk_hashes, attn_desc.num_object_groups
+        )
 
         handle = self._ctx.storage_manager.submit_prefetch_task(
             obj_keys,
             layout_desc,
             extra_count=extra_count,
             external_request_id=key.request_id,
-            attn_windows=attn_windows,
+            attn_desc=attn_desc,
         )
         self._register_prefetch_job(
             _PrefetchJob(
@@ -316,7 +318,7 @@ class LookupModule:
                 world_size=key.world_size,
                 request_id=key.request_id,
                 requested_tokens=requested_tokens,
-                num_object_groups=len(attn_windows),
+                num_object_groups=attn_desc.num_object_groups,
                 model_name=model_name,
                 cache_salt=key.cache_salt,
             )
@@ -545,10 +547,10 @@ class LookupModule:
         Returns:
             The flattened list of object keys across all object groups.
         """
-        attn_windows = self._ctx.layout_desc_registry.find_attn_windows(
+        attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
             key.model_name, key.world_size
         )
-        group_ids = list(range(len(attn_windows)))
+        group_ids = list(range(attn_desc.num_object_groups))
         per_group = ipc_key_to_object_keys(key, chunk_hashes, group_ids)
         return [k for group_keys in per_group for k in group_keys]
 
