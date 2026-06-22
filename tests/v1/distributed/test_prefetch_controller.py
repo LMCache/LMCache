@@ -1313,3 +1313,52 @@ class TestMergeBitmaps:
         a.set(0)
         b.set(3)
         assert merge_bitmaps([a, b], 5).get_indices_list() == [0, 3]
+
+
+class TestWaitPrefetchResult:
+    """Test the blocking wait_prefetch_result interface."""
+
+    def test_wait_blocks_until_result_ready(self, l1_manager):
+        """wait_prefetch_result blocks until the background result is published,
+        returns True, and does not consume the result."""
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(5)]
+        store_keys_in_l2(adapter, keys, layout)
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(keys, layout)
+        # Blocks until the background thread publishes the result.
+        assert ctrl.wait_prefetch_result(req_id, timeout=10.0) is True
+        # wait_prefetch_result must not consume the result.
+        result = ctrl.query_prefetch_result(req_id)
+        assert result is not None
+        assert result.count_leading_ones() == 5
+
+        l1_manager.finish_read(keys)
+        ctrl.stop()
+        adapter.close()
+
+    def test_wait_times_out_for_unknown_request(self, l1_manager):
+        """wait_prefetch_result returns False, after genuinely waiting, when no
+        result arrives within the timeout."""
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[],
+            adapter_descriptors=[],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        start = time.monotonic()
+        assert ctrl.wait_prefetch_result(999999, timeout=0.2) is False
+        assert time.monotonic() - start >= 0.2
+
+        ctrl.stop()

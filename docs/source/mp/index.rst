@@ -209,6 +209,11 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
      - BLOCKING
      - Poll a prefetch job by request_id. Returns the loaded chunk count
        when done, or ``None`` while the prefetch is still in progress.
+   * - ``WAIT_PREFETCH_STATUS``
+     - BLOCKING
+     - (SGLang only) Block until a prefetch job completes, then return its
+       loaded chunk count, or ``None`` on timeout. The blocking alternative
+       to polling ``QUERY_PREFETCH_STATUS``.
    * - ``QUERY_PREFETCH_LOOKUP_HITS``
      - BLOCKING
      - Query the lookup-phase hit chunk count by request_id, before the
