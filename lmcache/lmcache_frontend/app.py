@@ -2,7 +2,7 @@
 
 # Standard
 from importlib import resources
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote
 import argparse
 import asyncio
 import json
@@ -77,14 +77,10 @@ class _NodeRegistry:
         outbound URL breaks the SSRF taint flow for static analysers.
         """
         port = str(port)
-        for proxy in self._nodes:
-            p_host, p_port = str(proxy.get("host")), str(proxy.get("port"))
-            if p_host == host and p_port == port:
-                return p_host, p_port
-            for child in proxy.get("nodes", []):
-                c_host, c_port = str(child.get("host")), str(child.get("port"))
-                if c_host == host and c_port == port:
-                    return c_host, c_port
+        for node in self._nodes:
+            n_host, n_port = str(node.get("host")), str(node.get("port"))
+            if n_host == host and n_port == port:
+                return n_host, n_port
         return None
 
 
@@ -103,16 +99,19 @@ args = None
 
 
 async def fetch_nodes_from_coordinator(url: str) -> list[dict]:
-    """Try to fetch fleet membership from the MP coordinator's instance registry.
+    """Fetch fleet membership from the MP coordinator's instance registry.
+
+    Queries the coordinator's ``GET /instances`` (the single source of
+    truth for fleet membership) and returns the registered mp servers as
+    a flat list of node dicts.
 
     Args:
         url: Base URL of the MP coordinator.
 
     Returns:
-        A single-element list whose ``nodes`` are the registered mp servers, or an
-        empty list when the coordinator is unreachable.
+        ``[{"name", "host", "port"}, ...]`` for the registered mp
+        servers, or ``[]`` when the coordinator is unreachable.
     """
-    # Fetch instances from coordinator
     base_url = url.rstrip("/")
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -123,29 +122,18 @@ async def fetch_nodes_from_coordinator(url: str) -> list[dict]:
         print(f"Failed to fetch nodes from coordinator: {e}")
         return []
 
-    # Transform into proxy -> nodes structure
-    children = [
+    return [
         {
             "name": f"mp_{instance['instance_id']}",
             "host": instance["ip"],
             "port": str(instance["http_port"]),
-            "proxy_id": "coordinator",
         }
         for instance in instances
-    ]
-    parsed = urlparse(base_url)
-    return [
-        {
-            "name": "coordinator",
-            "host": parsed.hostname or "",
-            "port": str(parsed.port or ""),
-            "nodes": children,
-        }
     ]
 
 
 def load_config(config_path: str | None = None) -> None:
-    """Load proxy/node list from a JSON config file.
+    """Load the flat node list from a JSON config file.
 
     Args:
         config_path: Optional path to the JSON file.  When ``None`` the
@@ -171,29 +159,20 @@ def load_config(config_path: str | None = None) -> None:
         _node_registry.replace([])
 
 
-def validate_node(node: dict, is_proxy: bool = False) -> bool:
+def validate_node(node: dict) -> bool:
     """Validate a single node configuration dict.
 
     Args:
         node: Candidate node dict.
-        is_proxy: Reserved for future proxy-specific validation.
 
     Returns:
-        True when ``node`` has the required ``name``/``host``/``port``
-        keys and (optionally) a string ``proxy_id``.
+        True when ``node`` has the required ``name``/``host``/``port`` keys.
     """
     if not isinstance(node, dict):
         return False
 
     required_keys = {"name", "host", "port"}
-    if not required_keys.issubset(node.keys()):
-        return False
-
-    if "proxy_id" in node and node["proxy_id"]:
-        if not isinstance(node["proxy_id"], str):
-            return False
-
-    return True
+    return required_keys.issubset(node.keys())
 
 
 def validate_nodes(nodes: list) -> bool:
@@ -206,40 +185,12 @@ def validate_nodes(nodes: list) -> bool:
 
 @router.get("/api/nodes")
 async def get_all_nodes() -> dict:
-    """Get all nodes in tree structure (proxies with their child nodes).
+    """Return the flat list of mp-server nodes sourced from the coordinator.
 
     Returns:
-        ``{"nodes": [...]}`` where each element is a proxy dict whose
-        ``children`` list contains the leaf nodes behind it.
+        ``{"nodes": [{"name", "host", "port"}, ...]}``.
     """
-    all_nodes = []
-    for proxy in target_nodes:
-        # Create proxy node with children property
-        proxy_node = {
-            "id": f"proxy_{proxy['name']}",
-            "name": proxy["name"],
-            "host": proxy["host"],
-            "port": proxy["port"],
-            "is_proxy": True,
-            "children": [],
-        }
-
-        # Add child nodes
-        for node in proxy.get("nodes", []):
-            proxy_node["children"].append(
-                {
-                    "id": "node_%s" % node["name"],
-                    "name": node["name"],
-                    "host": node["host"],
-                    "port": node["port"],
-                    "is_proxy": False,
-                    "proxy_id": proxy["name"],
-                }
-            )
-
-        all_nodes.append(proxy_node)
-
-    return {"nodes": all_nodes}
+    return {"nodes": list(target_nodes)}
 
 
 @router.api_route(
@@ -249,29 +200,15 @@ async def get_all_nodes() -> dict:
 async def proxy_request_by_name(request: Request, node_name: str, path: str):
     """Proxy requests using node name as identifier.
 
-    Searches top-level target_nodes first, then child nodes of every
-    proxy, so both direct nodes and coordinator-discovered leaf nodes are
-    reachable with a single /proxy2/{name}/{path} call.
+    Resolves ``node_name`` against the flat node registry and forwards
+    with a single /proxy2/{name}/{path} call.
     """
-    # 1. top-level proxy nodes
     node = next((n for n in target_nodes if n["name"] == node_name), None)
-
-    # 2. child nodes of every proxy
-    if not node:
-        for proxy in target_nodes:
-            node = next(
-                (n for n in proxy.get("nodes", []) if n["name"] == node_name),
-                None,
-            )
-            if node:
-                break
-
     if not node:
         raise HTTPException(
             status_code=404, detail=f"Node with name '{node_name}' not found"
         )
 
-    # Use existing proxy_request logic
     return await proxy_request(
         request, target_host=node["host"], target_port_or_socket=node["port"], path=path
     )
@@ -451,23 +388,14 @@ async def initialize_nodes(coordinator_url: str | None = None) -> None:
         nodes = await fetch_nodes_from_coordinator(coordinator_url)
         if nodes:
             _node_registry.replace(nodes)
-            print(f"Loaded {len(nodes[0]['nodes'])} mp servers from coordinator")
+            print(f"Loaded {len(nodes)} mp servers from coordinator")
         else:
-            print("Warning: No nodes fetched from coordinator")
+            print(f"Warning: coordinator {coordinator_url} returned no instances")
     elif args.nodes:
         try:
             nodes = json.loads(args.nodes)
             if validate_nodes(nodes):
-                _node_registry.replace(
-                    [
-                        {
-                            "name": "local_proxy",
-                            "host": args.host,
-                            "port": args.port,
-                            "nodes": nodes,
-                        }
-                    ]
-                )
+                _node_registry.replace(nodes)
                 print(f"Loaded {len(nodes)} target nodes from command line arguments")
         except json.JSONDecodeError:
             print("Failed to parse nodes JSON parameter")
@@ -554,34 +482,12 @@ async def _fetch_node_metrics(node):
 
 @router.get("/metrics")
 async def aggregated_metrics():
-    """Aggregate /metrics from all leaf (child) nodes across every proxy.
-
-    Previously only nodes under the ``local_proxy`` entry were
-    aggregated, which silently returned nothing in supplier mode
-    (where proxy names follow the ``proxy_<host>_<port>`` pattern).
-    Now every proxy's ``nodes`` list is flattened.
-    """
+    """Aggregate /metrics from every registered mp-server node."""
     if not target_nodes:
         return PlainTextResponse("# No nodes configured\n", status_code=404)
 
-    nodes: list[dict] = []
-    seen: set[str] = set()
-    for proxy in target_nodes:
-        for child in proxy.get("nodes", []) or []:
-            # De-duplicate by name so the same leaf reported via
-            # multiple proxies is only scraped once.
-            name = child.get("name")
-            if name and name in seen:
-                continue
-            if name:
-                seen.add(name)
-            nodes.append(child)
-
-    if not nodes:
-        return PlainTextResponse(
-            "# No nodes available for metrics collection\n", status_code=404
-        )
-
+    # Snapshot the registry to avoid mid-iteration mutation
+    nodes = list(target_nodes)
     metrics_results = await asyncio.gather(
         *[_fetch_node_metrics(node) for node in nodes]
     )
