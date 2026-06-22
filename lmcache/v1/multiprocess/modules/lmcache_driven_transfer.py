@@ -896,7 +896,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         "finish_write",
                         list(all_dict.keys()),
                     )
-                    if self._store_timer._enabled:
+                    if self._store_timer.is_enabled:
                         _timer = self._store_timer
                         _tname = timer_name
 
@@ -1084,7 +1084,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         "finish_read_prefetched",
                         prefetched_keys,
                     )
-                    if self._store_timer._enabled:
+                    if self._store_timer.is_enabled:
                         _timer = self._store_timer
                         _tname = timer_name
 

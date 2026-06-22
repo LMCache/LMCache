@@ -68,6 +68,11 @@ class StoreTimer:
         self._groups: dict[str, list[tuple[str, float]]] = {}
         self._lock = threading.Lock()
 
+    @property
+    def is_enabled(self) -> bool:
+        """Whether the timer is enabled."""
+        return self._enabled
+
     def mark(self, name: str, step: str) -> None:
         """Record a step under a named group.
 
