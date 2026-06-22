@@ -113,8 +113,8 @@ class LMCacheKVCacheContext:
                 f"failed to fetch server config from {self._http_url}/conf"
             ) from err
         self._chunk_size: int = int(mp_conf["chunk_size"])
-        self.shm_name: str = str(mp_conf["shm_name"]).lstrip("/")
-        if not self.shm_name.startswith("lmcache_l1_pool_"):
+        self.shm_name: str = str(mp_conf.get("shm_name", "")).lstrip("/")
+        if self.shm_name and not self.shm_name.startswith("lmcache_l1_pool_"):
             self.shm_name = f"lmcache_l1_pool_{self.shm_name}"
         print(
             f"Initialized LMCacheKVCacheContext with instance_id={self.instance_id}, "
