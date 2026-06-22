@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Lightweight store-path timing utility for multiprocess transfer contexts."""
+"""Step-based timing utility for performance debugging."""
 
 # Standard
 import logging
@@ -12,7 +12,7 @@ from lmcache.utils import init_logger
 logger = init_logger(__name__)
 
 
-class StoreTimer:
+class PerfStepTimer:
     """Thread-safe timing utility supporting multiple named groups.
 
     Only records timestamps when debug logging is enabled — zero overhead in
@@ -21,7 +21,7 @@ class StoreTimer:
     time.perf_counter() call.
 
     A single timer instance can track multiple independent *names* (e.g.
-    different store paths or sub-operations), each with its own ordered
+    different paths or sub-operations), each with its own ordered
     sequence of (step, time) entries.  Safe for concurrent use from multiple
     threads.
 
@@ -31,14 +31,14 @@ class StoreTimer:
 
     Usage::
 
-        timer = StoreTimer(prefix="req-42")
+        timer = PerfStepTimer(prefix="req-42")
 
         # Thread A — GPU IPC path
         timer.mark("gpu_ipc", "copy_start")
         timer.mark("gpu_ipc", "copy_done")
         timer.mark("gpu_ipc", "kv_releasable")
         timer.emit("gpu_ipc")
-        # [STORE-TIMING] prefix=req-42 name=gpu_ipc
+        # [PERF-STEP-TIMING] prefix=req-42 name=gpu_ipc
         #   copy_start -> copy_done=3.089ms copy_done ->
         #   kv_releasable=2.228ms total=5.317ms
 
@@ -93,7 +93,7 @@ class StoreTimer:
             self._groups.setdefault(name, []).append((step, t))
 
     def emit(self, name: str) -> None:
-        """Emit a ``[STORE-TIMING]`` debug log line for a specific name group.
+        """Emit a ``[PERF-STEP-TIMING]`` debug log line for a specific name group.
 
         The output shows the **delta** between each pair of adjacent steps,
         plus the total time from first to last step.
@@ -125,7 +125,7 @@ class StoreTimer:
         parts.append(f"total={total_ms:.3f}ms")
 
         logger.debug(
-            "[STORE-TIMING] %sname=%s %s",
+            "[PERF-STEP-TIMING] %sname=%s %s",
             f"prefix={self._prefix} " if self._prefix else "",
             name,
             " ".join(parts),

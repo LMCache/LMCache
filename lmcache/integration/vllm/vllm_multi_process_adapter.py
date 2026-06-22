@@ -16,7 +16,7 @@ import zmq
 # First Party
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
 from lmcache.integration.vllm.utils import vllm_layout_hints
-from lmcache.store_timer import StoreTimer
+from lmcache.perf_step_timer import PerfStepTimer
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
@@ -1070,7 +1070,7 @@ class LMCacheMPWorkerAdapter:
             },
         )
 
-        self._store_timer = StoreTimer(prefix="adapter")
+        self._store_timer = PerfStepTimer(prefix="adapter")
 
     @property
     def is_healthy(self) -> bool:

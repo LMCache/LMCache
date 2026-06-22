@@ -14,7 +14,7 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
-from lmcache.store_timer import StoreTimer
+from lmcache.perf_step_timer import PerfStepTimer
 from lmcache.utils import (
     EngineType,
     _lmcache_nvtx_annotate,
@@ -448,7 +448,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         )
         self._device_host_func_dispatcher.start()
 
-        self._store_timer = StoreTimer(prefix="lmcache_driven")
+        self._store_timer = PerfStepTimer(prefix="lmcache_driven")
 
     @property
     def context(self) -> MPCacheServerContext:

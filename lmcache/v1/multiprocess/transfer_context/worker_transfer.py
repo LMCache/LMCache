@@ -13,7 +13,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev
-from lmcache.store_timer import StoreTimer
+from lmcache.perf_step_timer import PerfStepTimer
 from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints, is_mla
@@ -324,7 +324,7 @@ class EngineDrivenTransferContext(TransferContext):
         self._engine_driven_context: EngineDrivenContext | None = None
         self._layout_hints: LayoutHints | None = None
         self._engine_kv_format: Any = None
-        self._store_timer = StoreTimer(prefix="engine_driven")
+        self._store_timer = PerfStepTimer(prefix="engine_driven")
 
     def register(
         self,
