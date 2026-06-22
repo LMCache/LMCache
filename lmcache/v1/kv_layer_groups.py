@@ -514,14 +514,13 @@ class KVLayerGroupsManager:
         """Return the cross-chunk attention windows of all object groups.
 
         Returns:
-            An :class:`AttnWindowDesc` whose ``num_chunks_in_sw[g]`` is object
-            group ``g``'s window (``-1`` for a non-sliding-window group), in
-            object-group order.
+            An :class:`AttnWindowDesc` with one entry per object group, in
+            object-group order; the entry is ``-1`` for a non-sliding-window
+            group.
 
         Note:
-            All kernel groups in one object group share a single window so they
-            can be retrieved together. When object-group separation is disabled
-            (the default), there is a single full-attention object group.
+            With object-group separation disabled (the default), the result
+            has a single full-attention entry.
         """
         return AttnWindowDesc(
             num_chunks_in_sw=[

@@ -179,13 +179,12 @@ class MemoryLayoutDesc:
 
 @dataclass(frozen=True)
 class AttnWindowDesc:
-    """Cross-chunk attention windows of all object groups, in LMCache chunks.
+    """Per-object-group cross-chunk attention windows, in LMCache chunks.
 
-    Mirrors :class:`MemoryLayoutDesc`: a single descriptor covers every object
-    group of a registration. ``num_chunks_in_sw[g]`` is the number of trailing
-    prefix chunks object group ``g`` needs present to serve a cache hit. ``-1``
-    means full attention (the whole prefix); ``w >= 1`` is a sliding window of
-    ``w`` chunks (mamba is ``1``).
+    ``num_chunks_in_sw[g]`` is the number of trailing prefix chunks that must
+    be present for object group ``g`` to serve a cache hit. ``-1`` means full
+    attention (the whole prefix); ``w >= 1`` is a sliding window of ``w``
+    chunks (mamba is ``1``).
     """
 
     num_chunks_in_sw: list[int]
