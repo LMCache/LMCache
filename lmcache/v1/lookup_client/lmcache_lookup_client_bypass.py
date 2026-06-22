@@ -88,7 +88,7 @@ class LMCacheBypassLookupClient(LookupClientInterface):
             return result
 
         except Exception as e:
-            logger.error(f"Error in bypass lookup: {e}")
+            logger.error("Error in bypass lookup: %s", e)
             return 0
 
     def supports_producer_reuse(self) -> bool:
