@@ -18,15 +18,14 @@ import torch
 import zmq
 
 # First Party
-from lmcache import torch_dev
 from lmcache.integration.vllm.vllm_multi_process_adapter import send_lmcache_request
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
-from lmcache.v1.multiprocess.transfer_context.base import gather_paged_kv_to_cpu, scatter_cpu_to_paged_kv
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import create_transfer_context
+from lmcache.v1.multiprocess.transfer_context.contiguous import ContiguousEngineDrivenTransfer
 
 logger = init_logger(__name__)
 
@@ -210,20 +209,24 @@ class LMCacheKVCacheContext:
             for i in range(num_layers)
         }
 
-        self._transfer_ctx = create_transfer_context(self._kv_caches)
+        transfer_ctx = create_transfer_context(self._kv_caches)
         self.blocks_in_chunk = self._chunk_size // block_size
-        self._layout_hints = LayoutHints(
+        layout_hints = LayoutHints(
             kv_layout="HND",
             num_kv_heads=num_kv_heads,
             tokens_per_block=block_size,
             head_dim=head_dim,
         )
 
-        self._transfer_ctx.register(
+        transfer_ctx.register(
             self.instance_id, self._kv_caches, self._model_name, self._world_size,
             self.blocks_in_chunk, self._mq_client, self._mq_timeout,
             send_request=send_lmcache_request,
-            layout_hints=self._layout_hints,
+            layout_hints=layout_hints,
+        )
+
+        self._transfer_ctx = ContiguousEngineDrivenTransfer(
+            transfer_ctx.engine_driven_context, self._chunk_size
         )
     
     def close(self) -> None:
@@ -470,40 +473,23 @@ def retrieve(
         time.sleep(0.01)
         num_prefetched_tokens = ctx.check_lookup_result(request_id)
     
-    # Phase 1: Ask server to prepare KV and copy to ctx._kv_caches
-    num_chunks = num_prefetched_tokens // ctx._chunk_size
-    n_blocks   = num_chunks * ctx.blocks_in_chunk
-    flat_block_ids = ctx.block_pool.alloc(n_blocks)
-    block_ids = [flat_block_ids]
-
-    fut = ctx._transfer_ctx.submit_retrieve(
-        request_id, 
-        key, 
-        ctx.instance_id,
-        ctx._kv_caches, 
-        block_ids, 
-        None, # SDK is talking to LMCache, which lives in CPU.
-        ctx.blocks_in_chunk
-    )
-    ok = fut.result(timeout=ctx._mq_timeout)
-
-    # Phase 2: copy from ctx._kv_caches to a contiguous tensor and return
-    if not ok:
-        ctx.end_session(request_id, block_ids=flat_block_ids)
+    if num_prefetched_tokens <= 0:
+        ctx.end_session(request_id)
         return None
 
-    chunks = gather_paged_kv_to_cpu(
-        ctx._kv_caches,
-        flat_block_ids,
-        ctx.blocks_in_chunk,
-        layout_hints=ctx._layout_hints,
+    # Phase 1: retrieve the cached prefix as one contiguous tensor
+    key = ctx._create_key(
+        token_ids=list(tokens[:num_prefetched_tokens]),
+        start=0,
+        end=num_prefetched_tokens,
+        request_id=request_id,
+        cache_salt=cache_salt,
+        worker_id=0,
     )
-    torch_dev.synchronize()
-    ctx.end_session(request_id, block_ids=flat_block_ids)
-
-    assembled = torch.cat(chunks, dim=2).contiguous() if chunks else None
-
-    return assembled
+    try:
+        return ctx._transfer_ctx.retrieve(key, ctx.instance_id)
+    finally:
+        ctx.end_session(request_id)
 
 def store(
     ctx: "LMCacheKVCacheContext",
@@ -524,43 +510,22 @@ def store(
     """
     kv_cpu = kv.detach().cpu().contiguous()
     token_ids = list(tokens)
+    total_tokens = (len(token_ids) // ctx._chunk_size) * ctx._chunk_size
+    token_ids = token_ids[:total_tokens]
 
     # Phase 0: assign request ID to this request
     request_id = f"store-{uuid.uuid4().hex}"
     key = ctx._create_key(
         token_ids=token_ids,
         start=0,
-        end=(len(tokens) // ctx._chunk_size) * ctx._chunk_size,
+        end=total_tokens,
         request_id=request_id,
         cache_salt=cache_salt,
         worker_id=0
     )
 
-    # Phase 1: copy the kv_cpu tensor to self._kv_caches
-    num_chunks = kv_cpu.shape[2] // ctx._chunk_size
-    block_ids = [ctx.block_pool.alloc(num_chunks * ctx.blocks_in_chunk)]
-    chunks = [c.contiguous() for c in kv_cpu.split(ctx._chunk_size, dim=2)]
-    scatter_cpu_to_paged_kv(
-        ctx._kv_caches,
-        block_ids[0],
-        chunks,
-        ctx.blocks_in_chunk,
-        layout_hints=ctx._layout_hints,
-    )
-
-    # Phase 2: server read data from self._kv_caches, write to storage manager
+    # Phase 1: store the KV cache tensor
     try:
-        fut = ctx._transfer_ctx.submit_store(
-            request_id,
-            key,
-            ctx.instance_id,
-            ctx._kv_caches,
-            block_ids,
-            None, # SDK is talking to LMCache, which lives in CPU.
-            ctx.blocks_in_chunk
-        )
-        store_result = fut.result(timeout=ctx._mq_timeout)
+        return ctx._transfer_ctx.store(key, ctx.instance_id, kv_cpu)
     finally:
-        ctx.end_session(request_id, block_ids=block_ids[0])
-
-    return store_result
+        ctx.end_session(request_id)
