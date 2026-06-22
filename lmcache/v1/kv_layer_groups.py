@@ -15,6 +15,7 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.python_ops_fallback import set_shape_desc_dtype
 from lmcache.utils import lmcache_deprecate
+from lmcache.v1.distributed.api import AttnWindowDesc
 import lmcache.c_ops as lmc_ops
 
 if TYPE_CHECKING:
@@ -509,28 +510,25 @@ class KVLayerGroupsManager:
             return self._lmcache_tokens_per_chunk
         return sw_size_tokens
 
-    def get_sw_size_chunks(self, object_group_idx: int) -> int:
-        """Return the sliding window size of a given kernel group,
-        The size is measured in lmcache chunks.
-
-        If the kernel group is non-sliding window, return -1
+    def get_attn_window(self, object_group_idx: int) -> AttnWindowDesc:
+        """Return the cross-chunk attention window of an object group.
 
         Args:
-            object_group_idx: 0-based kernel group index.
+            object_group_idx: 0-based object group index.
 
         Returns:
-            The sliding window size rounded up to chunks for sliding
-            window models. -1 otherwise.
+            The object group's :class:`AttnWindowDesc` (full attention for a
+            non-sliding-window group).
 
         Note:
-            It uses object_group_idx, because the kernel groups in the same
-            object group must share the same "big-sliding-window" size -- so that
-            they can be retrieved at the same time from the same object.
-            For small sliding window (subchunk window) models, it will return 1.
-            When object-group separation is disabled (the default), there is a
-            single full-attention object group and this returns ``-1``.
+            All kernel groups in one object group share a single window so they
+            can be retrieved together. When object-group separation is disabled
+            (the default), there is a single full-attention object group.
         """
-        return self._object_groups[object_group_idx].sw_size_chunks
+        window_chunks = self._object_groups[object_group_idx].sw_size_chunks
+        if window_chunks < 1:
+            return AttnWindowDesc.full()
+        return AttnWindowDesc.sliding_window(window_chunks)
 
     def calculate_num_blocks(self, kernel_group_idx: int, num_tokens: int) -> int:
         """Calculate the number of blocks for a given number of tokens in a

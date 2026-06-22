@@ -178,6 +178,44 @@ class MemoryLayoutDesc:
 
 
 @dataclass(frozen=True)
+class AttnWindowDesc:
+    """Cross-chunk attention window of one object group, in LMCache chunks.
+
+    Describes how much of the prefix the group needs present to serve a
+    cache hit: a full-attention group needs the whole prefix; a sliding-window
+    group of ``w`` chunks needs only the last ``w`` (mamba is ``w == 1``).
+    Construct via :meth:`full` or :meth:`sliding_window`.
+    """
+
+    window_chunks: int
+    """Trailing prefix chunks the group needs; ``-1`` means full attention
+    (the whole prefix)."""
+
+    @classmethod
+    def full(cls) -> "AttnWindowDesc":
+        """A full-attention window (depends on the entire prefix)."""
+        return cls(window_chunks=-1)
+
+    @classmethod
+    def sliding_window(cls, window_chunks: int) -> "AttnWindowDesc":
+        """A sliding-window of ``window_chunks`` chunks (mamba is ``1``).
+
+        Raises:
+            ValueError: If ``window_chunks`` is less than 1.
+        """
+        if window_chunks < 1:
+            raise ValueError(
+                f"sliding-window size must be >= 1 chunk (got {window_chunks})"
+            )
+        return cls(window_chunks=window_chunks)
+
+    @property
+    def is_full_attention(self) -> bool:
+        """Whether the group depends on the entire prefix."""
+        return self.window_chunks < 0
+
+
+@dataclass(frozen=True)
 class PrefetchHandle:
     """Opaque handle returned by ``StorageManager.submit_prefetch_task``.
 

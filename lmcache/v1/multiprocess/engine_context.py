@@ -9,6 +9,7 @@ import threading
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
+    AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
     ipc_key_to_object_keys,
@@ -40,10 +41,9 @@ class _LayoutDescEntry:
 
     layout_desc: MemoryLayoutDesc
     ref_count: int
-    object_group_windows: tuple[int, ...] = (-1,)
-    """Per-object-group cross-chunk sliding-window sizes (in chunks), in
-    object-group order. ``-1`` means a full-attention group; the default
-    ``(-1,)`` is a single full-attention group."""
+    attn_windows: tuple[AttnWindowDesc, ...] = (AttnWindowDesc.full(),)
+    """Per-object-group cross-chunk attention windows, in object-group order.
+    Defaults to a single full-attention group."""
 
 
 class LayoutDescRegistry:
@@ -66,7 +66,7 @@ class LayoutDescRegistry:
         model_name: str,
         world_size: int,
         layout_desc: MemoryLayoutDesc,
-        object_group_windows: tuple[int, ...] = (-1,),
+        attn_windows: tuple[AttnWindowDesc, ...] = (AttnWindowDesc.full(),),
     ) -> None:
         """Register a layout descriptor for a (model_name, world_size) pair.
 
@@ -77,9 +77,8 @@ class LayoutDescRegistry:
             model_name: The model name.
             world_size: The world size.
             layout_desc: The memory layout descriptor.
-            object_group_windows: Per-object-group cross-chunk sliding-window
-                sizes (in chunks), in object-group order; ``-1`` means full
-                attention. Defaults to a single full-attention group.
+            attn_windows: Per-object-group cross-chunk attention windows, in
+                object-group order. Defaults to a single full-attention group.
         """
         key = (model_name, world_size)
         with self._lock:
@@ -88,12 +87,12 @@ class LayoutDescRegistry:
                 self._registry[key] = _LayoutDescEntry(
                     layout_desc=layout_desc,
                     ref_count=1,
-                    object_group_windows=object_group_windows,
+                    attn_windows=attn_windows,
                 )
                 return
 
             entry.layout_desc = layout_desc
-            entry.object_group_windows = object_group_windows
+            entry.attn_windows = attn_windows
             entry.ref_count += 1
 
     def unregister(self, model_name: str, world_size: int) -> None:
@@ -134,25 +133,25 @@ class LayoutDescRegistry:
                 return None
             return entry.layout_desc
 
-    def find_object_group_windows(
+    def find_attn_windows(
         self, model_name: str, world_size: int
-    ) -> tuple[int, ...]:
-        """Look up the per-object-group windows for a (model_name, world_size).
+    ) -> tuple[AttnWindowDesc, ...]:
+        """Look up the per-object-group attention windows for a pair.
 
         Args:
             model_name: The model name.
             world_size: The world size.
 
         Returns:
-            The per-object-group cross-chunk window sizes registered for the
-            pair, or ``(-1,)`` (a single full-attention group) if the pair is
-            not registered.
+            The per-object-group :class:`AttnWindowDesc` tuple registered for
+            the pair, or a single full-attention group if the pair is not
+            registered.
         """
         with self._lock:
             entry = self._registry.get((model_name, world_size))
             if entry is None:
-                return (-1,)
-            return entry.object_group_windows
+                return (AttnWindowDesc.full(),)
+            return entry.attn_windows
 
 
 class MPCacheServerContext:

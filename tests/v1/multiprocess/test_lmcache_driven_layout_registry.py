@@ -17,9 +17,12 @@ class _FakeKVLayerGroupsManager:
 
     num_object_groups: int = 1
 
-    def get_sw_size_chunks(self, object_group_id: int) -> int:
+    def get_attn_window(self, object_group_id: int) -> Any:
         """Full attention for every object group."""
-        return -1
+        # First Party
+        from lmcache.v1.distributed.api import AttnWindowDesc
+
+        return AttnWindowDesc.full()
 
 
 class _FakeGPUContext:
@@ -146,45 +149,51 @@ def _layout() -> Any:
     return MemoryLayoutDesc(shapes=[torch.Size([2, 4])], dtypes=[torch.float16])
 
 
-def test_registry_object_group_windows_roundtrip() -> None:
-    """register stores per-group windows; find_object_group_windows reads them."""
+def test_registry_attn_windows_roundtrip() -> None:
+    """register stores per-group windows; find_attn_windows reads them."""
     # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc
     from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 
     registry = LayoutDescRegistry()
-    registry.register("m", 2, _layout(), object_group_windows=(-1, 2))
+    windows = (AttnWindowDesc.full(), AttnWindowDesc.sliding_window(2))
+    registry.register("m", 2, _layout(), attn_windows=windows)
 
-    assert registry.find_object_group_windows("m", 2) == (-1, 2)
+    assert registry.find_attn_windows("m", 2) == windows
 
 
 def test_registry_windows_default_single_group_when_unregistered() -> None:
-    """find_object_group_windows returns (-1,) for an unknown (model, world_size)."""
+    """find_attn_windows returns one full-attention group for an unknown pair."""
     # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc
     from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 
     registry = LayoutDescRegistry()
 
-    assert registry.find_object_group_windows("missing", 1) == (-1,)
+    assert registry.find_attn_windows("missing", 1) == (AttnWindowDesc.full(),)
 
 
 def test_registry_windows_default_single_group_when_omitted() -> None:
     """A registration without windows resolves to a single full-attention group."""
     # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc
     from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 
     registry = LayoutDescRegistry()
     registry.register("m", 1, _layout())
 
-    assert registry.find_object_group_windows("m", 1) == (-1,)
+    assert registry.find_attn_windows("m", 1) == (AttnWindowDesc.full(),)
 
 
 def test_registry_windows_updated_on_reregister() -> None:
     """Re-registering the same pair refreshes the stored windows."""
     # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc
     from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 
     registry = LayoutDescRegistry()
-    registry.register("m", 1, _layout(), object_group_windows=(-1,))
-    registry.register("m", 1, _layout(), object_group_windows=(-1, 4))
+    registry.register("m", 1, _layout(), attn_windows=(AttnWindowDesc.full(),))
+    windows = (AttnWindowDesc.full(), AttnWindowDesc.sliding_window(4))
+    registry.register("m", 1, _layout(), attn_windows=windows)
 
-    assert registry.find_object_group_windows("m", 1) == (-1, 4)
+    assert registry.find_attn_windows("m", 1) == windows

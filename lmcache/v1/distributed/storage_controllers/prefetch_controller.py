@@ -23,7 +23,12 @@ import threading
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, TrimPolicy
+from lmcache.v1.distributed.api import (
+    AttnWindowDesc,
+    MemoryLayoutDesc,
+    ObjectKey,
+    TrimPolicy,
+)
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
@@ -134,9 +139,8 @@ class InFlightPrefetchRequest:
     policy: TrimPolicy = TrimPolicy.PREFIX
     """Which retained-subset policy to apply (see :class:`TrimPolicy`)."""
 
-    group_windows: tuple[int, ...] = ()
-    """Per-object-group cross-chunk sliding-window sizes (in chunks), in
-    object-group order. ``-1`` means a full-attention group."""
+    attn_windows: tuple[AttnWindowDesc, ...] = ()
+    """Per-object-group cross-chunk attention windows, in object-group order."""
 
     # Lookup phase: adapter_idx -> task_id (removed as results arrive)
     pending_lookup_tasks: dict[int, L2TaskId] = field(default_factory=dict)
@@ -213,7 +217,7 @@ class PrefetchController(StorageControllerInterface):
                 MemoryLayoutDesc,
                 int,
                 TrimPolicy,
-                tuple[int, ...],
+                tuple[AttnWindowDesc, ...],
             ]
         ] = []
 
@@ -232,7 +236,7 @@ class PrefetchController(StorageControllerInterface):
                 MemoryLayoutDesc,
                 int,
                 TrimPolicy,
-                tuple[int, ...],
+                tuple[AttnWindowDesc, ...],
             ]
         ] = []
         self._next_request_id: PrefetchRequestId = 0
@@ -298,7 +302,7 @@ class PrefetchController(StorageControllerInterface):
         layout_desc: MemoryLayoutDesc,
         extra_count: int = 0,
         policy: TrimPolicy = TrimPolicy.PREFIX,
-        group_windows: tuple[int, ...] = (),
+        attn_windows: tuple[AttnWindowDesc, ...] = (),
     ) -> PrefetchRequestId:
         """
         Submit a prefetch request for the given keys.
@@ -325,8 +329,8 @@ class PrefetchController(StorageControllerInterface):
                 workers can each consume one read lock.
             policy: Which retained-subset policy to apply (see
                 :class:`TrimPolicy`).  Defaults to ``PREFIX``.
-            group_windows: Per-object-group cross-chunk sliding-window sizes (in
-                chunks), in object-group order; ``-1`` means full attention.
+            attn_windows: Per-object-group cross-chunk attention windows, in
+                object-group order.
 
         Returns:
             A request ID for tracking via query_prefetch_result.
@@ -335,7 +339,7 @@ class PrefetchController(StorageControllerInterface):
             request_id = self._next_request_id
             self._next_request_id += 1
             self._submission_queue.append(
-                (request_id, keys, layout_desc, extra_count, policy, group_windows)
+                (request_id, keys, layout_desc, extra_count, policy, attn_windows)
             )
         self._submission_efd.notify()
         return request_id
@@ -563,12 +567,12 @@ class PrefetchController(StorageControllerInterface):
         while (
             self._pending_queue and len(self._in_flight_requests) < self._max_in_flight
         ):
-            request_id, keys, layout_desc, extra_count, policy, group_windows = (
+            request_id, keys, layout_desc, extra_count, policy, attn_windows = (
                 self._pending_queue.pop(0)
             )
             self._status_pending_count -= 1
             self._start_lookup_phase(
-                request_id, keys, layout_desc, extra_count, policy, group_windows
+                request_id, keys, layout_desc, extra_count, policy, attn_windows
             )
 
     # =========================================================================
@@ -582,7 +586,7 @@ class PrefetchController(StorageControllerInterface):
         layout_desc: MemoryLayoutDesc,
         extra_count: int = 0,
         policy: TrimPolicy = TrimPolicy.PREFIX,
-        group_windows: tuple[int, ...] = (),
+        attn_windows: tuple[AttnWindowDesc, ...] = (),
     ) -> None:
         """Submit lookup_and_lock to all adapters for a new request."""
         if not self._l2_adapters:
@@ -601,7 +605,7 @@ class PrefetchController(StorageControllerInterface):
             phase=PrefetchPhase.LOOKUP,
             extra_count=extra_count,
             policy=policy,
-            group_windows=group_windows,
+            attn_windows=attn_windows,
             pending_lookup_tasks=pending_lookup_tasks,
         )
         self._in_flight_requests[request_id] = request

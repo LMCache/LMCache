@@ -12,6 +12,7 @@ import time
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap, PeriodicEventNotifier
 from lmcache.v1.distributed.api import (
+    AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
@@ -405,7 +406,7 @@ class StorageManager:
         extra_count: int = 0,
         external_request_id: str = "",
         policy: TrimPolicy = TrimPolicy.PREFIX,
-        group_windows: tuple[int, ...] = (),
+        attn_windows: tuple[AttnWindowDesc, ...] = (),
     ) -> PrefetchHandle:
         """Prefetch objects into L1 asynchronously.
 
@@ -420,8 +421,8 @@ class StorageManager:
             policy: Which retained-subset policy to apply (see
                 :class:`TrimPolicy`).  ``PREFIX`` keeps the contiguous prefix;
                 ``SPARSE`` keeps every found key (gap-tolerant).
-            group_windows: Per-object-group cross-chunk sliding-window sizes (in
-                chunks), in object-group order; ``-1`` means full attention.
+            attn_windows: Per-object-group cross-chunk attention windows, in
+                object-group order.
 
         Returns:
             PrefetchHandle to track the task.
@@ -466,7 +467,7 @@ class StorageManager:
                     layout_desc,
                     extra_count=extra_count,
                     policy=TrimPolicy.SPARSE,
-                    group_windows=group_windows,
+                    attn_windows=attn_windows,
                 )
             return PrefetchHandle(
                 prefetch_request_id=prefetch_request_id,
@@ -520,7 +521,7 @@ class StorageManager:
                 remaining_keys,
                 layout_desc,
                 extra_count=extra_count,
-                group_windows=group_windows,
+                attn_windows=attn_windows,
             )
             # The controller indexes its result bitmap over remaining_keys
             # (0-based); map those local indices back to original positions.
