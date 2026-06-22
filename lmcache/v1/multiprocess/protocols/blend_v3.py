@@ -5,7 +5,7 @@
 from lmcache.v1.multiprocess.custom_types import (
     CBMatchResult,
     CBUnifiedLookupResult,
-    CudaIPCWrapper,
+    DeviceIPCWrapper,
     IPCCacheServerKey,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
@@ -25,7 +25,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Payload: (instance_id, cos_sin_cache_ipc, head_size, is_neox_style).
         # Returns: None.
         "CB_REGISTER_ROPE_V3": ProtocolDefinition(
-            payload_classes=[int, CudaIPCWrapper, int, bool],
+            payload_classes=[int, DeviceIPCWrapper, int, bool],
             response_class=None,
             handler_type=HandlerType.SYNC,
         ),

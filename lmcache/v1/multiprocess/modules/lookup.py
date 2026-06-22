@@ -125,6 +125,11 @@ class LookupModule:
                 ThreadPoolType.NORMAL,
             ),
             HandlerSpec(
+                RequestType.WAIT_PREFETCH_STATUS,
+                self.wait_prefetch_status,
+                ThreadPoolType.NORMAL,
+            ),
+            HandlerSpec(
                 RequestType.QUERY_PREFETCH_LOOKUP_HITS,
                 self.query_prefetch_lookup_hits,
                 ThreadPoolType.NORMAL,
@@ -372,6 +377,39 @@ class LookupModule:
             self._prefetch_jobs.pop(request_id, None)
 
         return found_count
+
+    def wait_prefetch_status(
+        self,
+        request_id: str,
+        timeout: float,
+    ) -> int | None:
+        """Block until a prefetch job completes, then return its chunk count.
+
+        Like query_prefetch_status, but waits for the daemon to publish the
+        result instead of returning None while the prefetch is still in
+        progress, so the caller does not have to busy-poll. The job entry is
+        removed once a non-None result is returned (exactly-once semantics).
+
+        Args:
+            request_id: The external request ID passed in the lookup key.
+            timeout: Maximum number of seconds to wait for the prefetch.
+
+        Returns:
+            Chunk count (int) when done, None if the wait timed out, 0 if the
+            request_id is unknown (already completed and consumed, or invalid).
+        """
+        with self._prefetch_job_lock:
+            job = self._prefetch_jobs.get(request_id)
+        if job is None:
+            logger.warning(
+                "Prefetch job for request %s not found (already completed or invalid)",
+                request_id,
+            )
+            return 0
+
+        if not self._ctx.storage_manager.wait_prefetch_status(job.handle, timeout):
+            return None
+        return self.query_prefetch_status(request_id)
 
     def free_lookup_locks(
         self,
