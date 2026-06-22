@@ -15,15 +15,15 @@ without rewriting the primitives):
 
 | Operator | Purpose |
 |---|---|
-| `fold` | Presence (`group x chunk x kv_rank`) → servable-prefix-lengths bitmap (bit `L` set iff every group can serve length `L`). |
-| `find_rightmost_one` | Highest set bit of a bitmap — on `fold`'s output, the model-wide hit length. |
+| `fold` | Presence (`group x chunk x kv_rank`) → servable bitmap (bit `j` set iff every group can serve a length-`j+1` prefix). |
+| `highest_set_bit` | Highest set bit of a bitmap, or `-1` if none — on `fold`'s output, the hit length minus one (hit length = result + 1, so `-1` → 0). |
 | `unfold` | Hit length → per-group retain mask over the ranked layout. |
 
 Supporting / convenience:
 
 | Function | Purpose |
 |---|---|
-| `fold_unfold_ranked` | Composes `fold` → `find_rightmost_one` → `unfold`. |
+| `fold_unfold_ranked` | Composes `fold` → `highest_set_bit` → `unfold`. |
 | `fold_unfold` | `fold_unfold_ranked` for the single-rank (`group x chunk`) layout. |
 | `unfold_range` | Chunk range one group needs for a given hit length. |
 | `merge_bitmaps` | Bitwise-OR several presence bitmaps (e.g. L1 ∪ L2). |
@@ -37,8 +37,8 @@ matching.
 ## Performance
 
 `fold` and `unfold` delegate to native C++ (`csrc/storage_manager/fold.cpp`,
-exported as `native_storage_ops.fold` / `unfold`) and `find_rightmost_one` to
-`Bitmap.find_rightmost_one()`. They scan the packed `Bitmap` buffer directly —
+exported as `native_storage_ops.fold` / `unfold`) and `highest_set_bit` to
+`Bitmap.highest_set_bit()`. They scan the packed `Bitmap` buffer directly —
 no Python per-bit loop and no `Bitmap`↔tensor conversion. `_fold_python` /
 `_unfold_python` are reference implementations used only as test oracles. See
 `benchmark.py` (`python -m lmcache.v1.distributed.bitmap_ops.benchmark`):

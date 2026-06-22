@@ -61,10 +61,9 @@ PYBIND11_MODULE(native_storage_ops, m) {
            "Count the number of leading zeros.")
       .def("count_leading_ones", &Bitmap::clo,
            "Count the number of leading ones.")
-      .def("find_rightmost_one", &Bitmap::find_rightmost_one,
-           "Index of the highest set bit (the right-most 1). Returns -1 if no "
-           "bit is set; the return is signed so the empty case is "
-           "representable, so check for -1 before using it as an index.")
+      .def("highest_set_bit", &Bitmap::highest_set_bit,
+           "Index of the highest set bit, or -1 if no bit is set (the return "
+           "is signed so the empty bitmap is representable).")
       .def("__and__", &Bitmap::operator&, py::arg("other"),
            "Bitwise AND operation between two bitmaps.")
       .def("__or__", &Bitmap::operator|, py::arg("other"),

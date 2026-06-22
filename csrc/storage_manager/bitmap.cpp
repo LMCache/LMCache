@@ -145,7 +145,7 @@ size_t Bitmap::clo() const {
   return inverted.clz();
 }
 
-int64_t Bitmap::find_rightmost_one() const {
+int64_t Bitmap::highest_set_bit() const {
   // Scan bytes from the most significant down; the first non-zero byte holds
   // the highest set bit. Bits beyond size_ are never set, so the result is
   // always < size_.

@@ -9,10 +9,10 @@ from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import TrimPolicy
 from lmcache.v1.distributed.bitmap_ops import (
     FULL_ATTENTION_WINDOW,
-    find_rightmost_one,
     fold,
     fold_unfold,
     fold_unfold_ranked,
+    highest_set_bit,
     merge_bitmaps,
     select_retained,
     unfold,
@@ -285,51 +285,54 @@ class TestMergeBitmaps:
 
 
 # --------------------------------------------------------------------------- #
-# Separated operators: fold / find_rightmost_one / unfold                      #
+# Separated operators: fold / highest_set_bit / unfold                      #
 # --------------------------------------------------------------------------- #
 
 
 class TestFoldOperator:
-    """``fold`` produces the servable-prefix-lengths bitmap (bit L = every group
-    can serve length L)."""
+    """``fold`` produces the servable bitmap (bit ``j`` = every group can serve
+    a length-``j + 1`` prefix)."""
 
     def test_full_attention_servable_is_downward_closed(self):
-        # full group present {0,1,2} of 4 -> servable lengths {0,1,2,3}.
+        # full group present {0,1,2} of 4 -> servable lengths {1,2,3} -> bits
+        # {0,1,2} (bit j == length j+1).
         found = _make_ranked(4, 1, [[(0, 0), (1, 0), (2, 0)]])
         servable = fold(found, 4, 1, [FULL_ATTENTION_WINDOW])
-        assert servable.get_indices_list() == [0, 1, 2, 3]
+        assert servable.get_indices_list() == [0, 1, 2]
 
     def test_sliding_window_servable_is_gappy(self):
         # window-2 group present chunks {0,1,3,4} of 5. A length L is servable
-        # iff chunks [L-2, L) present: L=0 ok, 1 ok(0), 2 ok(0,1), 3 no(1,2),
-        # 4 no(2,3), 5 ok(3,4) -> {0,1,2,5}.
+        # iff chunks [L-2, L) present: L=1 ok(0), 2 ok(0,1), 3 no(1,2),
+        # 4 no(2,3), 5 ok(3,4) -> lengths {1,2,5} -> bits {0,1,4}.
         found = _make_ranked(5, 1, [[(0, 0), (1, 0), (3, 0), (4, 0)]])
         servable = fold(found, 5, 1, [2])
-        assert servable.get_indices_list() == [0, 1, 2, 5]
+        assert servable.get_indices_list() == [0, 1, 4]
 
-    def test_bit_zero_always_set(self):
+    def test_nothing_present_is_empty(self):
+        # No chunk present -> no length servable -> empty bitmap (highest_set_bit
+        # returns -1, so the pipeline reports hit length 0).
         found = _make_ranked(3, 2, [[]])  # nothing present
         servable = fold(found, 3, 2, [FULL_ATTENTION_WINDOW])
-        assert servable.get_indices_list() == [0]
+        assert servable.get_indices_list() == []
 
 
-class TestFindRightmostOne:
-    """``find_rightmost_one`` returns the highest set bit, -1 if none."""
+class TestHighestSetBit:
+    """``highest_set_bit`` returns the highest set bit, -1 if none."""
 
     def test_basic(self):
         bm = Bitmap(10)
         for i in (1, 4, 7):
             bm.set(i)
-        assert find_rightmost_one(bm) == 7
+        assert highest_set_bit(bm) == 7
 
     def test_empty_returns_minus_one(self):
-        assert find_rightmost_one(Bitmap(10)) == -1
-        assert find_rightmost_one(Bitmap(0)) == -1
+        assert highest_set_bit(Bitmap(10)) == -1
+        assert highest_set_bit(Bitmap(0)) == -1
 
     def test_single_and_last_bit(self):
         bm = Bitmap(9)
         bm.set(8)
-        assert find_rightmost_one(bm) == 8
+        assert highest_set_bit(bm) == 8
 
 
 class TestUnfoldOperator:
@@ -390,7 +393,7 @@ class TestNativeMatchesReference:
 
 
 # --------------------------------------------------------------------------- #
-# End-to-end: full fold -> find_rightmost_one -> unfold pipeline against an    #
+# End-to-end: full fold -> highest_set_bit -> unfold pipeline against an    #
 # independent reference modeling vLLM's hybrid prefix-cache hit logic.         #
 # --------------------------------------------------------------------------- #
 
@@ -443,7 +446,7 @@ def _expected_retained_indices(hit, num_chunks, num_ranks, group_windows):
 
 
 class TestEndToEndAgainstVllmStyleReference:
-    """Drive the full fold/find_rightmost_one/unfold pipeline and compare the
+    """Drive the full fold/highest_set_bit/unfold pipeline and compare the
     hit length and retain mask against an independent vLLM-style oracle."""
 
     def _run(

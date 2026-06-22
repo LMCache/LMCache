@@ -93,17 +93,14 @@ class Bitmap {
   size_t clo() const;
 
   /**
-   * @brief index of the highest set bit (the "right-most 1").
+   * @brief index of the highest set bit.
    *
-   * The return type is signed (``int64_t``, not ``size_t``) specifically so the
-   * empty case can be reported as ``-1``; an unsigned type has no spare value
-   * for "no bit set". Callers that feed the result back into ``set`` /
-   * ``clear`` / ``test`` (which take ``size_t``) must therefore check for
-   * ``-1`` first.
+   * The return type is signed (``int64_t``) so the empty bitmap can be reported
+   * as ``-1`` (an unsigned index has no spare value for "no bit set").
    *
    * @return the largest index whose bit is set, or ``-1`` if no bit is set.
    */
-  int64_t find_rightmost_one() const;
+  int64_t highest_set_bit() const;
 
   /**
    * @brief bitwise AND operation between two bitmaps.

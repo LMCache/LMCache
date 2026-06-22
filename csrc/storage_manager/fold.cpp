@@ -13,12 +13,12 @@ Bitmap fold(const Bitmap& found, size_t num_chunks, size_t num_ranks,
   const size_t num_groups = group_windows.size();
   const size_t group_stride = num_chunks * num_ranks;
 
-  // ``servable[L]`` stays set only if every group can serve a length-L prefix
-  // under its rule. ``run`` is the count of consecutive present chunks ending
-  // at the current chunk, so a length-L prefix needs the last
-  // ``min(window, L)`` chunks present, i.e. ``run >= min(window, L)``. Length 0
-  // is always servable.
-  std::vector<char> servable(num_chunks + 1, 1);
+  // ``servable[j]`` (bit ``j``, prefix length ``j + 1``) stays set only if
+  // every group can serve a length-``j + 1`` prefix under its rule. ``run`` is
+  // the count of consecutive present chunks ending at the current chunk, so a
+  // length-L prefix needs the last ``min(window, L)`` chunks present, i.e.
+  // ``run >= min(window, L)``.
+  std::vector<char> servable(num_chunks, 1);
   for (size_t g = 0; g < num_groups; ++g) {
     const int64_t window = group_windows[g];
     const size_t eff_window =
@@ -35,15 +35,15 @@ Bitmap fold(const Bitmap& found, size_t num_chunks, size_t num_ranks,
         }
       }
       run = chunk_present ? run + 1 : 0;
-      if (servable[prefix_len] && run < std::min(eff_window, prefix_len)) {
-        servable[prefix_len] = 0;
+      if (servable[prefix_len - 1] && run < std::min(eff_window, prefix_len)) {
+        servable[prefix_len - 1] = 0;
       }
     }
   }
 
-  Bitmap servable_lengths(num_chunks + 1);
-  for (size_t prefix_len = 0; prefix_len <= num_chunks; ++prefix_len) {
-    if (servable[prefix_len]) servable_lengths.set(prefix_len);
+  Bitmap servable_lengths(num_chunks);
+  for (size_t j = 0; j < num_chunks; ++j) {
+    if (servable[j]) servable_lengths.set(j);
   }
   return servable_lengths;
 }

@@ -18,14 +18,14 @@ import time
 
 # First Party
 from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.bitmap_ops import find_rightmost_one, fold_unfold_ranked
+from lmcache.v1.distributed.bitmap_ops import fold_unfold_ranked, highest_set_bit
 from lmcache.v1.distributed.bitmap_ops.fold import _fold_python, _unfold_python
 
 
 def _python_pipeline(found, num_chunks, num_ranks, group_windows):
-    """Pure-Python fold -> find_rightmost_one -> unfold (no native ops)."""
+    """Pure-Python fold -> highest_set_bit -> unfold (no native ops)."""
     servable = _fold_python(found, num_chunks, num_ranks, group_windows)
-    hit = find_rightmost_one(servable)
+    hit = highest_set_bit(servable) + 1  # -1 (no servable prefix) -> 0
     return hit, _unfold_python(hit, num_chunks, num_ranks, group_windows)
 
 

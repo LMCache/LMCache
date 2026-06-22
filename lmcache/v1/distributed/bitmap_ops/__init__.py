@@ -2,16 +2,16 @@
 """Bitmap arithmetic for multi-object-group prefix-cache hit computation.
 
 See :mod:`~lmcache.v1.distributed.bitmap_ops.fold` and the
-package ``README.md`` for the fold -> right-most-1 -> unfold design.
+package ``README.md`` for the fold -> highest-set-bit -> unfold design.
 """
 
 # First Party
 from lmcache.v1.distributed.bitmap_ops.fold import (
     FULL_ATTENTION_WINDOW,
-    find_rightmost_one,
     fold,
     fold_unfold,
     fold_unfold_ranked,
+    highest_set_bit,
     merge_bitmaps,
     select_retained,
     unfold,
@@ -20,7 +20,7 @@ from lmcache.v1.distributed.bitmap_ops.fold import (
 
 __all__ = [
     "FULL_ATTENTION_WINDOW",
-    "find_rightmost_one",
+    "highest_set_bit",
     "fold",
     "fold_unfold",
     "fold_unfold_ranked",

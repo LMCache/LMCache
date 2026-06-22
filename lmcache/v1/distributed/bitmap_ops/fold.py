@@ -13,17 +13,17 @@ A model-wide prefix-cache hit of length ``L`` requires *every* object group to
 be able to serve a prefix of length ``L`` under its own rule. This module turns
 the per-group presence bitmaps into that single answer in three steps:
 
-1. **fold** — per group, compute the set of prefix lengths it can serve
-   (``_group_serves``);
-2. **intersect + right-most-1** — a length is a model-wide hit only if all
-   groups can serve it; the longest such length is the hit length ``i*``;
-3. **unfold** — expand ``i*`` back into the concrete chunks each group needs
+1. **fold** — combine the per-group presence into a servable bitmap: bit ``j``
+   is set iff every group can serve a length-``j + 1`` prefix;
+2. **highest-set-bit** — the model-wide hit length is the highest set bit plus
+   one (``-1`` -> 0, no hit);
+3. **unfold** — expand the hit length into the concrete chunks each group needs
    (``unfold_range``), producing the retain mask used to load / lock / transfer.
 
 When every group is full attention the servable set is a downward-closed prefix,
-so ``i*`` equals the leading-ones count of the AND of the per-group presences --
-i.e. the plain ``TrimPolicy.PREFIX`` / require-all intersection. Fold/unfold is a
-strict generalization of that behavior.
+so the hit length equals the leading-ones count of the AND of the per-group
+presences -- i.e. the plain ``TrimPolicy.PREFIX`` / require-all intersection.
+Fold/unfold is a strict generalization of that behavior.
 
 Bitmaps here are laid out **group-major**: bit ``g * num_chunks + j`` is set iff
 chunk ``j`` is available for object group ``g``.
@@ -88,9 +88,9 @@ def fold(
             chunks, in object-group order; ``<= 0`` means full attention.
 
     Returns:
-        A bitmap of size ``num_chunks + 1``; bit ``L`` set iff every group can
-        serve a length-``L`` prefix. Bit 0 is always set. Feed it to
-        :func:`find_rightmost_one` to get the model-wide hit length.
+        A bitmap of size ``num_chunks``; bit ``j`` set iff every group can
+        serve a length-``j + 1`` prefix. Feed it to :func:`highest_set_bit`;
+        the model-wide hit length is that index plus one (``-1`` -> 0).
 
     Raises:
         ValueError: If ``group_windows`` is empty, ``num_chunks`` is negative,
@@ -106,21 +106,22 @@ def fold(
     return _native_fold(found, num_chunks, num_ranks, list(group_windows))
 
 
-def find_rightmost_one(servable: Bitmap) -> int:
-    """Index of the highest set bit (the right-most 1), or -1 if none.
-
-    Applied to :func:`fold`'s servable-lengths bitmap, this is the model-wide
-    prefix hit length (always ``>= 0`` there, since bit 0 is set).
+def highest_set_bit(servable: Bitmap) -> int:
+    """Model-wide prefix hit length: the highest set bit of a fold output.
 
     Args:
-        servable: Any bitmap; typically the output of :func:`fold`.
+        servable: A servable-lengths bitmap from :func:`fold`.
 
     Returns:
-        The largest set bit index, or ``-1`` if no bit is set. The result is
-        signed so the empty case is representable; check for ``-1`` before using
-        it as an index.
+        The highest set bit index. On :func:`fold`'s output this is the
+        model-wide hit length, always ``>= 0`` because :func:`fold` always sets
+        bit 0 (the empty prefix is servable by every group).
+
+    Raises:
+        ValueError: If ``servable`` has no set bit. This cannot occur on
+            :func:`fold`'s output, which always sets bit 0.
     """
-    return servable.find_rightmost_one()
+    return servable.highest_set_bit()
 
 
 def unfold(
@@ -168,7 +169,7 @@ def fold_unfold_ranked(
     num_ranks: int,
     group_windows: Sequence[int],
 ) -> tuple[int, Bitmap]:
-    """Compose :func:`fold` -> :func:`find_rightmost_one` -> :func:`unfold`.
+    """Compose :func:`fold` -> :func:`highest_set_bit` -> :func:`unfold`.
 
     Convenience for the full pipeline over the ``group x chunk x kv_rank``
     lookup key layout: the model-wide hit length and the keys each group must
@@ -184,7 +185,9 @@ def fold_unfold_ranked(
         ``(hit_length, retain_mask)`` over the same ranked layout as ``found``.
     """
     servable = fold(found, num_chunks, num_ranks, group_windows)
-    hit_length = find_rightmost_one(servable)
+    # fold's bits are chunk-indexed (bit j == prefix length j + 1), so the hit
+    # length is the highest set bit plus one; -1 (no servable prefix) -> 0.
+    hit_length = highest_set_bit(servable) + 1
     return hit_length, unfold(hit_length, num_chunks, num_ranks, group_windows)
 
 
@@ -227,16 +230,16 @@ def _fold_python(
             ``<= 0`` means full attention.
 
     Returns:
-        A bitmap of size ``num_chunks + 1``; bit ``L`` set iff every group can
-        serve a length-``L`` prefix.
+        A bitmap of size ``num_chunks``; bit ``j`` set iff every group can
+        serve a length-``j + 1`` prefix.
     """
     group_stride = num_chunks * num_ranks
 
     # For each group, ``run`` is the count of consecutive present chunks ending
     # at the current chunk, so a length-L prefix is servable iff the last
-    # ``min(window, L)`` chunks are present. ``servable[L]`` stays True only if
-    # every group can serve length L (length 0 is always servable).
-    servable = [True] * (num_chunks + 1)
+    # ``min(window, L)`` chunks are present. ``servable[j]`` (bit ``j``, prefix
+    # length ``j + 1``) stays True only if every group can serve that length.
+    servable = [True] * num_chunks
     for group_idx, window in enumerate(group_windows):
         gbase = group_idx * group_stride
         effective_window = num_chunks if window <= 0 else window
@@ -245,13 +248,13 @@ def _fold_python(
             cbase = gbase + (prefix_len - 1) * num_ranks
             present = all(found.test(cbase + r) for r in range(num_ranks))
             run = run + 1 if present else 0
-            if servable[prefix_len] and run < min(effective_window, prefix_len):
-                servable[prefix_len] = False
+            if servable[prefix_len - 1] and run < min(effective_window, prefix_len):
+                servable[prefix_len - 1] = False
 
-    servable_lengths = Bitmap(num_chunks + 1)
-    for prefix_len in range(num_chunks + 1):
-        if servable[prefix_len]:
-            servable_lengths.set(prefix_len)
+    servable_lengths = Bitmap(num_chunks)
+    for j in range(num_chunks):
+        if servable[j]:
+            servable_lengths.set(j)
     return servable_lengths
 
 

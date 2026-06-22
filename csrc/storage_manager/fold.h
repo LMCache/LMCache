@@ -17,8 +17,8 @@ namespace storage_manager {
  *
  * For each object group, computes which prefix lengths it can serve under its
  * rule (full attention or a cross-chunk sliding window), and intersects across
- * groups. The result feeds :func:`Bitmap::find_rightmost_one` (the model-wide
- * hit length) and then :func:`unfold`.
+ * groups. The result feeds :func:`Bitmap::highest_set_bit`; the model-wide hit
+ * length is that index plus one (``-1`` -> hit length 0), then :func:`unfold`.
  *
  * The input ``found`` is group-major / chunk-major / rank-minor: bit
  * ``g * (num_chunks * num_ranks) + j * num_ranks + r`` is set iff chunk ``j``
@@ -32,8 +32,8 @@ namespace storage_manager {
  * @param group_windows Per-object-group cross-chunk sliding-window size in
  *     chunks, in object-group order; ``<= 0`` means full attention.
  *
- * @return A bitmap of size ``num_chunks + 1``; bit ``L`` set iff every group
- *     can serve a length-``L`` prefix. Bit 0 is always set.
+ * @return A bitmap of size ``num_chunks``; bit ``j`` set iff every group can
+ *     serve a length-``j + 1`` prefix.
  */
 Bitmap fold(const Bitmap& found, size_t num_chunks, size_t num_ranks,
             const std::vector<int64_t>& group_windows);
