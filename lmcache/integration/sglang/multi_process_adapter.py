@@ -2,9 +2,9 @@
 # Standard
 from dataclasses import dataclass
 from typing import Optional
-import os
 import threading
 import time
+import uuid
 
 # Third Party
 from sglang.srt.configs.model_config import ModelConfig
@@ -113,7 +113,15 @@ class LMCacheMPConnector:
         self.model_name = sgl_config.model_path
         self.num_layers = len(k_pool)
         self.tp_group = tp_group
-        self.instance_id = os.getpid()
+
+        # Instance id for GPU worker. uuid4-derived (OS entropy) rather
+        # than os.getpid() to avoid collision in containerized deployments.
+        # Masked to 63 bits to stay signed-int64-safe for any msgpack peer.
+        self.instance_id = uuid.uuid4().int & ((1 << 63) - 1)
+        logger.info(
+            "LMCache MP worker adapter created with instance_id=%d",
+            self.instance_id,
+        )
         self._mq_timeout = mq_timeout
         self._heartbeat_interval = heartbeat_interval
         self._registered = False
