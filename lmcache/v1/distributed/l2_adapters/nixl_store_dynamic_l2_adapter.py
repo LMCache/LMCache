@@ -86,7 +86,10 @@ def _object_key_to_storage_name(key: ObjectKey) -> str:
     """
     safe_model_name = key.model_name.replace("/", "--")
     chunk_hex = key.chunk_hash.hex()
-    return f"{safe_model_name}_{key.kv_rank:08x}_{key.object_group_id:x}_{chunk_hex}"
+    name = f"{safe_model_name}_{key.kv_rank:08x}_{key.object_group_id:x}_{chunk_hex}"
+    if key.cache_salt:
+        name = f"{name}_{key.cache_salt}"
+    return name
 
 
 def _object_key_to_filename(key: ObjectKey) -> str:
@@ -571,7 +574,19 @@ class DynamicNixlStorageAgent:
         object_name: str,
         page_size: int,
     ) -> None:
-        """Write memory pages into one object-storage object."""
+        """Write memory pages into one object-storage object.
+
+        Args:
+            mem_indices: L1 memory page indices to transfer into the object.
+            object_name: Deterministic object-storage key to write.
+            page_size: Size in bytes of each L1 memory page.
+
+        Returns:
+            None.
+
+        Raises:
+            Exception: Propagates NIXL registration or transfer failures.
+        """
         object_size = len(mem_indices) * page_size
         reg_descs, xfer_handler = self._register_single_object(
             object_name, object_size, page_size
@@ -598,7 +613,19 @@ class DynamicNixlStorageAgent:
         object_name: str,
         page_size: int,
     ) -> None:
-        """Read one object-storage object into memory pages."""
+        """Read one object-storage object into memory pages.
+
+        Args:
+            mem_indices: L1 memory page indices to receive object data.
+            object_name: Deterministic object-storage key to read.
+            page_size: Size in bytes of each L1 memory page.
+
+        Returns:
+            None.
+
+        Raises:
+            Exception: Propagates NIXL registration or transfer failures.
+        """
         object_size = len(mem_indices) * page_size
         reg_descs, xfer_handler = self._register_single_object(
             object_name, object_size, page_size
@@ -641,11 +668,34 @@ class DynamicNixlStorageAgent:
         return os.path.join(self.file_path, _object_key_to_filename(key))
 
     def get_object_name_for_key(self, key: ObjectKey) -> str:
-        """Return the object-storage name for a given ObjectKey."""
+        """Return the object-storage name for a given ObjectKey.
+
+        Args:
+            key: Object key whose model, rank, group, hash, and optional
+                cache salt identify the object.
+
+        Returns:
+            Deterministic object-storage key for the given object key.
+
+        Raises:
+            None.
+        """
         return _object_key_to_object_name(key)
 
     def object_exists(self, object_name: str) -> bool:
-        """Return whether an OBJ backend contains ``object_name``."""
+        """Return whether an OBJ backend contains ``object_name``.
+
+        Args:
+            object_name: Object-storage key to query through the NIXL OBJ
+                backend.
+
+        Returns:
+            True if the object query returns a registered descriptor, false
+            otherwise. Query failures are treated as misses.
+
+        Raises:
+            None. Query exceptions are logged and converted to False.
+        """
         reg_list = [(0, 0, 0, object_name)]
         try:
             resp = self.nixl_agent.query_memory(reg_list, self.backend, mem_type="OBJ")
