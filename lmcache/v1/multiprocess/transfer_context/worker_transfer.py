@@ -13,6 +13,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev
+from lmcache.store_timer import StoreTimer
 from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints, is_mla
@@ -323,6 +324,7 @@ class EngineDrivenTransferContext(TransferContext):
         self._engine_driven_context: EngineDrivenContext | None = None
         self._layout_hints: LayoutHints | None = None
         self._engine_kv_format: Any = None
+        self._store_timer = StoreTimer(prefix="engine_driven")
 
     def register(
         self,
@@ -426,7 +428,10 @@ class EngineDrivenTransferContext(TransferContext):
                 "Call register() before submit_store()."
             )
 
+        timer_name = f"engine_driven_store_{_request_id}"
+        self._store_timer.mark(timer_name, "enter")
         torch_dev.synchronize()
+        self._store_timer.mark(timer_name, "kv_sync")
         result = self._engine_driven_context.prepare_store(key, instance_id)
         out_buffers, chunk_indices = result if result is not None else (None, None)
         # All chunks already in cache — nothing to gather or commit.
@@ -446,7 +451,10 @@ class EngineDrivenTransferContext(TransferContext):
         if out_buffers is not None:
             # SHM path uses async device->CPU copies; complete them before commit.
             torch_dev.synchronize()
+        self._store_timer.mark(timer_name, "worker_copy")
         ok = self._engine_driven_context.commit_store(key, instance_id, cpu_chunks)
+        self._store_timer.mark(timer_name, "worker_ctx_return")
+        self._store_timer.emit(timer_name)
 
         future = MessagingFuture()
         future.set_result(ok)
@@ -469,7 +477,10 @@ class EngineDrivenTransferContext(TransferContext):
                 "Call register() before submit_retrieve()."
             )
 
+        timer_name = f"engine_driven_retrieve_{_request_id}"
+        self._store_timer.mark(timer_name, "enter")
         src_buffers = self._engine_driven_context.prepare_retrieve(key, instance_id)
+        self._store_timer.mark(timer_name, "kv_sync")
         ok = src_buffers is not None
         if src_buffers is not None:
             try:
@@ -488,7 +499,10 @@ class EngineDrivenTransferContext(TransferContext):
             # SHM path: ensure all device writes are complete before releasing
             # the SHM slot (server may immediately reuse it after commit_retrieve).
             torch_dev.synchronize()
+        self._store_timer.mark(timer_name, "worker_copy")
         self._engine_driven_context.commit_retrieve(key, instance_id)
+        self._store_timer.mark(timer_name, "worker_ctx_return")
+        self._store_timer.emit(timer_name)
 
         future: MessagingFuture[bool] = MessagingFuture()
         future.set_result(ok)
