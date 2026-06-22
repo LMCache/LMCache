@@ -800,7 +800,7 @@ def _log_config(self):
             value = f"{value} GB"
         config_dict[name] = value
 
-    logger.info(f"LMCache Configuration: {config_dict}")
+    logger.info("LMCache Configuration: %s", config_dict)
     return self
 
 
