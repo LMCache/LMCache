@@ -358,7 +358,7 @@ class DynamicNixlStorageAgent:
     ) -> tuple[Any, Any]:
         """Register a flattened list of file pages for one NIXL batch."""
         reg_list = []
-        xfer_desc = []
+        xfer_desc: list[tuple[int, int, int]] = []
         for desc in descs:
             num_pages = desc.size // page_size
             reg_list.append((0, desc.size, desc.device_id, ""))
@@ -381,7 +381,7 @@ class DynamicNixlStorageAgent:
     ) -> tuple[Any, Any]:
         """Register a flattened list of object pages for one NIXL batch."""
         reg_list = []
-        xfer_desc = []
+        xfer_desc: list[tuple[int, int, int]] = []
         device_ids = self._alloc_device_ids(len(specs))
         for spec, device_id in zip(specs, device_ids, strict=True):
             num_pages = spec.size // page_size
@@ -992,7 +992,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
     def _notify_keys_stored_without_usage(self, keys: list[ObjectKey]) -> None:
         """Notify listeners of stored OBJ keys without byte accounting."""
         for listener in self._listeners:
-            listener.on_l2_keys_stored(keys)
+            listener.on_l2_keys_stored(keys, [0] * len(keys))
 
     async def _execute_store_in_the_loop(
         self,
