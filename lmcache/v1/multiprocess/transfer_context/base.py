@@ -788,11 +788,14 @@ def _serialize_multi_group_chunks(
     """Serialize multiple groups as a compact pickle blob.
 
     Format: pickle.dumps([
-        [(array_chunk0, dtype_str_or_None), (array_chunk1, dtype_str_or_None), ...],  # group 0
-        [(array_chunk0, dtype_str_or_None), (array_chunk1, dtype_str_or_None), ...],  # group 1
+        [(array_chunk0, dtype_str), (array_chunk1, dtype_str), ...],  # group 0
+        [(array_chunk0, dtype_str), (array_chunk1, dtype_str), ...],  # group 1
         ...
     ])
-    where dtype_str_or_None is "bfloat16" if original dtype was bfloat16, else None.
+    where dtype_str is the original torch dtype name (e.g. "bfloat16",
+    "float8_e4m3fn", "float8_e5m2"). numpy has no native support for
+    bfloat16 or fp8, so those tensors are bit-cast/viewed to a numpy-friendly
+    dtype (float32 for bfloat16, uint8 for fp8) before serialization.
 
     Args:
         group_chunks: Per-group list of CPU chunk tensors.
@@ -802,17 +805,20 @@ def _serialize_multi_group_chunks(
     """
     import pickle
 
-    # numpy has no bfloat16; we serialize as float32 + store dtype name
+    # Map each non-numpy-native torch dtype to a numpy-friendly view dtype.
+    # numpy supports float32/float64/int8/uint8/etc. but not bfloat16 or fp8.
+    def _to_numpy(t: torch.Tensor):
+        if t.dtype == torch.bfloat16:
+            return t.contiguous().float().numpy(), "bfloat16"
+        if hasattr(torch, "float8_e4m3fn") and t.dtype == torch.float8_e4m3fn:
+            return t.contiguous().view(torch.uint8).numpy(), "float8_e4m3fn"
+        if hasattr(torch, "float8_e5m2") and t.dtype == torch.float8_e5m2:
+            return t.contiguous().view(torch.uint8).numpy(), "float8_e5m2"
+        # Default: keep dtype as-is.
+        return t.contiguous().numpy(), str(t.dtype).replace("torch.", "")
+
     serializable = [
-        [
-            (
-                chunk.contiguous().float().numpy(),
-                "bfloat16",
-            )
-            if chunk.dtype == torch.bfloat16
-            else (chunk.contiguous().numpy(), None)
-            for chunk in group
-        ]
+        [_to_numpy(chunk) for chunk in group]
         for group in group_chunks
     ]
     return pickle.dumps(serializable)
@@ -821,7 +827,12 @@ def _serialize_multi_group_chunks(
 def _deserialize_multi_group_chunks(
     cpu_data: bytes,
 ) -> list[list[torch.Tensor]]:
-    """Deserialize a multi-group pickle blob back to tensors."""
+    """Deserialize a multi-group pickle blob back to tensors.
+
+    Restores the original torch dtype from the stored dtype name string.
+    For bfloat16, casts back from float32. For fp8 dtypes, reinterprets the
+    uint8 buffer as the original fp8 dtype.
+    """
     import pickle
 
     raw = pickle.loads(cpu_data)
@@ -832,6 +843,8 @@ def _deserialize_multi_group_chunks(
             t = torch.from_numpy(arr)
             if dtype_name == "bfloat16":
                 t = t.to(torch.bfloat16)
+            elif dtype_name in ("float8_e4m3fn", "float8_e5m2"):
+                t = t.view(getattr(torch, dtype_name))
             t_group.append(t)
         tensors.append(t_group)
     return tensors

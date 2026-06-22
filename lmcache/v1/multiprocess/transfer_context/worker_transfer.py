@@ -519,10 +519,11 @@ class EngineDrivenTransferContext(TransferContext):
 
         if len(self._engine_group_infos) > 1:
             # ── Multi-group path ─────────────────────────────────────────
-            assert len(block_ids) == len(self._engine_group_infos), (
-                f"block_ids has {len(block_ids)} groups, "
-                f"but {len(self._engine_group_infos)} engine_group_infos registered"
-            )
+            if len(block_ids) != len(self._engine_group_infos):
+                raise ValueError(
+                    f"block_ids has {len(block_ids)} groups, "
+                    f"but {len(self._engine_group_infos)} engine_group_infos registered"
+                )
             group_chunks = gather_paged_kv_multi_group_to_cpu(
                 kv_caches,
                 block_ids,
