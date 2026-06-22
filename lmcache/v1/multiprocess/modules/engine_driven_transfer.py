@@ -417,7 +417,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                     "Instance %d already registered (non-GPU); refreshing liveness",
                     instance_id,
                 )
-        
+                return
         layout_desc, _ = self._ctx.resolve_model_name(model_name)
         if layout_desc is None:
             raise ValueError(f"No KV layout registered for model {model_name}")
