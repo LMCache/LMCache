@@ -40,8 +40,15 @@ class EngineBenchConfig:
     export_json: bool
     quiet: bool
     ignore_eos: bool = False
+    # Name used to address the model in vLLM OpenAI API requests (the
+    # ``--served-model-name`` alias). ``model`` stays the HF path used for
+    # LMCache ``/status`` matching and tokenizer loading. Defaults to ``model``
+    # when the two are the same. See https://github.com/LMCache/LMCache/issues/3809.
+    api_model: str = ""
 
     def __post_init__(self) -> None:
+        if not self.api_model:
+            self.api_model = self.model
         if not self.engine_url:
             raise ValueError("engine_url must be non-empty")
         if self.kv_cache_volume_gb <= 0:
@@ -225,6 +232,12 @@ def parse_args_to_config(args: argparse.Namespace) -> EngineBenchConfig:
         A fully-resolved EngineBenchConfig.
     """
     model = args.model if args.model else auto_detect_model(args.engine_url)
+    # vLLM addresses the model by its --served-model-name alias in API
+    # requests, while LMCache /status matching and tokenizer loading use the HF
+    # model path (``model``). When they differ, --served-model-name selects the
+    # API name; it defaults to ``model`` for the common case where they match.
+    # See https://github.com/LMCache/LMCache/issues/3809.
+    api_model = getattr(args, "served_model_name", None) or model
 
     tokens_per_gb = args.tokens_per_gb_kvcache
     if tokens_per_gb is None:
@@ -239,6 +252,7 @@ def parse_args_to_config(args: argparse.Namespace) -> EngineBenchConfig:
     return EngineBenchConfig(
         engine_url=args.engine_url,
         model=model,
+        api_model=api_model,
         workload=args.workload,
         kv_cache_volume_gb=args.kv_cache_volume,
         tokens_per_gb_kvcache=tokens_per_gb,
