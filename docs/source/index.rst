@@ -17,7 +17,7 @@ Welcome to LMCache!
 
 .. rst-class:: hero-tagline
 
-**Supercharge Your LLM with the Fastest KV Cache Layer.**
+**A KV Cache Management Layer for Scalable LLM Inference.**
 
 .. note::
    We are currently in the process of upgrading our documentation to provide better guidance and examples. Some sections may be under construction. Thank you for your patience!
@@ -33,9 +33,9 @@ Welcome to LMCache!
 
 .. container:: hero-description
 
-   LMCache lets LLMs prefill each text only once. By storing the KV caches of all reusable texts, LMCache can reuse the KV caches of any reused text (not necessarily prefix) in any serving engine instance. It thus reduces prefill delay, i.e., time to first token (TTFT), as well as saves the precious GPU cycles and memory.
+   LMCache is a **KV cache management layer** for LLM inference. It turns KV cache from a temporary state into reusable *AI-native knowledge* that can be *stored* persistently, *reused* across multiple serving engines, *monitored* with an observability stack, and *transformed* for better generation quality. As a result, LMCache **reduces TTFT** (time-to-first-token) and **improves throughput**, especially for long-context agentic, multi-turn conversation, and knowledge-augmented workloads (e.g., RAG).
 
-   By combining LMCache with vLLM, LMCache achieves 3-10x delay savings and GPU cycle reduction in many LLM use cases, including multi-round QA and RAG.
+   LMCache is **vendor-neutral**. It can be used as a KV cache layer for a range of mainstream open-source serving engines, inference frameworks, hardware vendors, storage systems, and infrastructure providers. The vendor neutrality allows users to freely switch between serving engines and storage vendors, while reusing the stored KV caches.
 
 
 For more information, check out the following:
