@@ -70,6 +70,7 @@ from lmcache.v1.platform import create_event_notifier
 logger = init_logger(__name__)
 
 DEFAULT_FILE_CREATE_MODE = 0o644
+MAX_OBJ_DEVICE_ID = 1_000_000
 
 
 # ---------------------------------------------------------------
@@ -223,10 +224,12 @@ class DynamicNixlStorageAgent:
         return reg_descs, xfer_handler
 
     def _alloc_device_id(self) -> int:
-        """Allocate a unique OBJ device id for one register/deregister cycle."""
+        """Allocate a bounded OBJ device id for one register/deregister cycle."""
         with self._device_id_lock:
             device_id = self._device_id_counter
-            self._device_id_counter += 1
+            self._device_id_counter = (
+                self._device_id_counter + 1
+            ) % MAX_OBJ_DEVICE_ID
         return device_id
 
     def _register_single_object(
@@ -348,11 +351,13 @@ class DynamicNixlStorageAgent:
             logger.warning("File already deleted: %s", file_path)
 
     def _alloc_device_ids(self, count: int) -> list[int]:
-        """Allocate unique OBJ device ids for one register/deregister cycle."""
+        """Allocate bounded OBJ device ids for one register/deregister cycle."""
         with self._device_id_lock:
             start = self._device_id_counter
-            self._device_id_counter += count
-        return list(range(start, start + count))
+            self._device_id_counter = (
+                self._device_id_counter + count
+            ) % MAX_OBJ_DEVICE_ID
+        return [(start + offset) % MAX_OBJ_DEVICE_ID for offset in range(count)]
 
     def _register_batched_files(
         self,
