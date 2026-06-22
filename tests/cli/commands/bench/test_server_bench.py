@@ -77,7 +77,7 @@ class TestCommandMetadata:
             "lmcache.cli.commands.bench.server_bench.helpers"
         )
         # Public command surface mirrors the sibling subpackages.
-        assert callable(sv_cmd.register_server_parser)
+        assert callable(sv_cmd.add_server_arguments)
         assert callable(sv_cmd.run_server_bench)
 
 
