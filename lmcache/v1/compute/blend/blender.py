@@ -363,6 +363,31 @@ class LMCBlender:
             selected = hit_indices
         return selected
 
+    def _random_select(
+        self,
+        hit_indices: torch.Tensor,
+        effective_len: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Random-K control (P2 ablation): select the SAME NUMBER of tokens as
+        the I-frame (codecsight) strategy would, but at random positions among
+        the cache-hit tokens. Matched budget K isolates the I-frame *signal*
+        from the *amount* of recomputation. Deterministic via a fixed seed so
+        the ablation is reproducible.
+        """
+        k = int(self._codecsight_select(hit_indices, effective_len, device).numel())
+        n = int(hit_indices.numel())
+        if k <= 0 or n == 0:
+            return hit_indices[:1] if n > 0 else hit_indices
+        if k >= n:
+            return hit_indices
+        g = torch.Generator(device="cpu")
+        g.manual_seed(1234 + effective_len)  # stable across layers/runs
+        perm = torch.randperm(n, generator=g).to(device)
+        sel = hit_indices[perm[:k]]
+        sel, _ = torch.sort(sel)
+        return sel
+
     def _vlcache_select(
         self,
         hit_indices: torch.Tensor,
@@ -688,6 +713,10 @@ class LMCBlender:
             hit_indices = self._compute_hit_indices(effective_len, q.device)
             if self.blend_mode == "codecsight":
                 selected = self._codecsight_select(
+                    hit_indices, effective_len, q.device,
+                )
+            elif self.blend_mode == "random":
+                selected = self._random_select(
                     hit_indices, effective_len, q.device,
                 )
             else:

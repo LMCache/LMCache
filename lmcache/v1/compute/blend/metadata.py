@@ -6,7 +6,7 @@ from typing import List, Optional, Sequence, Any
 # Third Party
 import torch
 
-BLEND_MODES = ("direct_reuse", "topk", "codecsight", "vlcache")
+BLEND_MODES = ("direct_reuse", "topk", "codecsight", "vlcache", "random")
 
 @dataclass
 class LMCBlendCommonMetadata:
