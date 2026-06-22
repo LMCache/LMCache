@@ -117,19 +117,18 @@ async def fetch_nodes_from_coordinator(url: str) -> list[dict]:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(f"{base_url}/instances")
             response.raise_for_status()
-            instances = response.json().get("instances", [])
+            instances = response.json().get("instances") or []
+        return [
+            {
+                "name": f"mp_{instance['instance_id']}",
+                "host": instance["ip"],
+                "port": str(instance["http_port"]),
+            }
+            for instance in instances
+        ]
     except Exception as e:
         print(f"Failed to fetch nodes from coordinator: {e}")
         return []
-
-    return [
-        {
-            "name": f"mp_{instance['instance_id']}",
-            "host": instance["ip"],
-            "port": str(instance["http_port"]),
-        }
-        for instance in instances
-    ]
 
 
 def load_config(config_path: str | None = None) -> None:
@@ -397,6 +396,11 @@ async def initialize_nodes(coordinator_url: str | None = None) -> None:
             if validate_nodes(nodes):
                 _node_registry.replace(nodes)
                 print(f"Loaded {len(nodes)} target nodes from command line arguments")
+            else:
+                print(
+                    "Failed to validate nodes parameter: missing required keys "
+                    "('name', 'host', 'port')"
+                )
         except json.JSONDecodeError:
             print("Failed to parse nodes JSON parameter")
     elif args.config:
