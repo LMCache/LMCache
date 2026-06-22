@@ -1,13 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 """Test mode implementation for MP mode L2 adapter basic checks"""
 
+# Future
+from __future__ import annotations
+
 # Standard
 import argparse
 import select
 import time
+from typing import TYPE_CHECKING
 
 # Third Party
 import torch
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.native_storage_ops import Bitmap
+    from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
 
 # First Party
 from lmcache.v1.check import check_mode
@@ -17,7 +26,7 @@ from lmcache.v1.check.utils import (
     parse_kv_dtype,
     print_performance_results,
 )
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2StoreResult
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.config import (
@@ -112,11 +121,15 @@ def _run_store_phase(adapter, keys, objects):
     return elapsed_ms, ok
 
 
-def _run_lookup_phase(adapter, keys):
+def _run_lookup_phase(
+    adapter: L2AdapterInterface,
+    keys: list[ObjectKey],
+    layout_desc: MemoryLayoutDesc,
+) -> tuple[float | None, Bitmap | None]:
     """Run lookup phase and return (stats, bitmap)."""
     efd = adapter.get_lookup_and_lock_event_fd()
     start = time.perf_counter()
-    task_id = adapter.submit_lookup_and_lock_task(keys)
+    task_id = adapter.submit_lookup_and_lock_task(keys, layout_desc)
     if not _wait_event_fd(efd):
         print("  Lookup: timed out waiting for eventfd")
         return None, None
@@ -214,10 +227,18 @@ def _test_single_adapter(
         )
         for i in range(num_tests)
     ]
+    layout_desc = MemoryLayoutDesc(
+        shapes=[torch.Size([obj_size])],
+        dtypes=[kv_dtype],
+    )
 
     # -- Phase 1: lookup non-existing keys -------------------
     print("Phase 1: Lookup non-existing keys...")
-    lk_absent_ms, lk_bitmap = _run_lookup_phase(adapter, non_exist_keys)
+    lk_absent_ms, lk_bitmap = _run_lookup_phase(
+        adapter,
+        non_exist_keys,
+        layout_desc,
+    )
     if lk_bitmap is None:
         print("  FAIL: lookup returned None bitmap")
         ne_pass = 0
@@ -239,7 +260,11 @@ def _test_single_adapter(
 
     # -- Phase 3: lookup existing keys -----------------------
     print("Phase 3: Lookup existing keys...")
-    lk_exist_ms, lk_bitmap = _run_lookup_phase(adapter, exist_keys)
+    lk_exist_ms, lk_bitmap = _run_lookup_phase(
+        adapter,
+        exist_keys,
+        layout_desc,
+    )
     if lk_bitmap is None:
         print("  FAIL: lookup returned None bitmap")
         exist_pass = 0

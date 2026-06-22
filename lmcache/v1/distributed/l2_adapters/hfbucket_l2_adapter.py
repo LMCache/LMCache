@@ -8,7 +8,7 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -53,6 +53,7 @@ logger = init_logger(__name__)
 # Use a separate temp root from non-MP HFBucket to avoid collisions.
 _DEFAULT_DOWNLOAD_TMP_DIR = Path(tempfile.gettempdir()) / "lmcache-hfbucket-mp"
 _METADATA_CACHE_PRUNE_INTERVAL = 128
+_DELETE_WAIT_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -426,6 +427,17 @@ class HFBucketL2Adapter(L2AdapterInterface):
             return self._completed_load_tasks.pop(task_id, None)
 
     def delete(self, keys: list[ObjectKey]) -> None:
+        """Delete unlocked keys from Hugging Face bucket L2 storage.
+
+        Args:
+            keys: Object keys to delete.
+
+        Note:
+            The event-loop delete task emits ``_notify_keys_deleted``
+            after bucket deletion and local size tracking complete. This
+            wrapper waits for completion, but a timeout does not cancel
+            the task or drop the eventual notification.
+        """
         if not keys:
             return
 
@@ -442,13 +454,16 @@ class HFBucketL2Adapter(L2AdapterInterface):
             self._loop,
         )
         try:
-            deleted_keys, deleted_sizes = future.result(timeout=30.0)
+            future.result(timeout=_DELETE_WAIT_TIMEOUT_SECONDS)
+        except FutureTimeoutError:
+            logger.warning(
+                "HFBucketL2Adapter delete did not complete within %.1fs for %d keys; "
+                "the event-loop task is still running",
+                _DELETE_WAIT_TIMEOUT_SECONDS,
+                len(deletable),
+            )
         except Exception as exc:
             logger.warning("HFBucketL2Adapter delete failed: %s", exc)
-            return
-
-        if deleted_keys:
-            self._notify_keys_deleted(deleted_keys, deleted_sizes)
 
     def report_status(self) -> dict:
         usage = self.get_usage()
@@ -611,12 +626,19 @@ class HFBucketL2Adapter(L2AdapterInterface):
     async def _execute_delete(
         self,
         keys: list[ObjectKey],
-    ) -> tuple[list[ObjectKey], list[int]]:
-        return await self._loop.run_in_executor(
-            self._executor,
-            self._delete_batch_sync,
-            keys,
-        )
+    ) -> None:
+        try:
+            deleted_keys, deleted_sizes = await self._loop.run_in_executor(
+                self._executor,
+                self._delete_batch_sync,
+                keys,
+            )
+        except Exception:
+            logger.exception("HFBucketL2Adapter delete task failed")
+            return
+
+        if deleted_keys:
+            self._notify_keys_deleted(deleted_keys, deleted_sizes)
 
     def _store_batch_sync(
         self,
