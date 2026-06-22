@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 """Microbenchmark for the ranked fold (:func:`fold_unfold_ranked`).
 
@@ -5,7 +6,7 @@ Compares the pure-Python reference against the native C++ implementation across
 request sizes, including a DeepSeek-scale hybrid case (1M tokens, 8 object
 groups mixing full attention and sliding window). Run with::
 
-    python -m lmcache.v1.distributed.bitmap_ops.benchmark
+    python benchmarks/microbenchmark/bitmap_ops_benchmark.py
 
 The native op scans the packed ``Bitmap`` buffer directly -- no Python per-bit
 loop and no ``Bitmap``<->tensor conversion -- so it stays sub-millisecond even

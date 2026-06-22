@@ -41,7 +41,8 @@ exported as `native_storage_ops.fold` / `unfold`) and `highest_set_bit` to
 `Bitmap.highest_set_bit()`. They scan the packed `Bitmap` buffer directly —
 no Python per-bit loop and no `Bitmap`↔tensor conversion. `_fold_python` /
 `_unfold_python` are reference implementations used only as test oracles. See
-`benchmark.py` (`python -m lmcache.v1.distributed.bitmap_ops.benchmark`):
+`benchmarks/microbenchmark/bitmap_ops_benchmark.py`
+(`python benchmarks/microbenchmark/bitmap_ops_benchmark.py`):
 
 | Case (full pipeline) | Python | native | speedup |
 |---|---|---|---|
