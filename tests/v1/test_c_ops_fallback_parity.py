@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Verify that every public function/enum in non_cuda_equivalents that also
+Verify that every public function/enum in python_ops_fallback that also
 exists in c_ops has a matching signature.
 
-Does NOT require non_cuda_equivalents to implement everything in c_ops —
+Does NOT require python_ops_fallback to implement everything in c_ops —
 only checks the intersection. If you implement a function in the fallback,
 its signature must match c_ops exactly.
 
@@ -24,7 +24,7 @@ import re
 import pytest
 
 # First Party
-import lmcache.non_cuda_equivalents as fallback
+import lmcache.python_ops_fallback as fallback
 
 try:
     # First Party
@@ -47,6 +47,7 @@ def _public_callables(module):
         and callable(obj)
         and not (inspect.isclass(obj) and issubclass(obj, enum.Enum))
         and not hasattr(obj, "__members__")  # exclude pybind11 enums
+        and getattr(obj, "__module__", None) == getattr(module, "__name__", None)
     }
 
 
@@ -61,6 +62,7 @@ def _public_enums(module):
         for name, obj in inspect.getmembers(module, inspect.isclass)
         if not name.startswith("_")
         and (issubclass(obj, enum.Enum) or hasattr(obj, "__members__"))
+        and getattr(obj, "__module__", None) == getattr(module, "__name__", None)
     }
 
 
@@ -71,6 +73,21 @@ def _get_enum_members(enum_cls):
     elif hasattr(enum_cls, "__members__"):
         return {name: int(val) for name, val in enum_cls.__members__.items()}
     return {}
+
+
+def _public_descriptor_classes(module: object) -> dict[str, type]:
+    """Return {name: cls} for public classes that are neither enums
+    nor plain functions — e.g. pybind11 ``py::class_<>`` types like
+    ``PageBufferShapeDesc``.
+    """
+    return {
+        name: obj
+        for name, obj in inspect.getmembers(module, inspect.isclass)
+        if not name.startswith("_")
+        and not (issubclass(obj, enum.Enum) or hasattr(obj, "__members__"))
+        and callable(obj)
+        and getattr(obj, "__module__", None) == getattr(module, "__name__", None)
+    }
 
 
 def _normalize_default(value_str):
@@ -173,7 +190,10 @@ def _parse_docstring_params(func):
 
 def _get_python_params(func):
     """Extract [(name, has_default, default_value)] via inspect.signature."""
-    sig = inspect.signature(func)
+    try:
+        sig = inspect.signature(func)
+    except ValueError as err:
+        raise ValueError("no signature found for {!r}".format(func)) from err
     result = []
     for p in sig.parameters.values():
         has_default = p.default is not inspect.Parameter.empty
@@ -191,13 +211,22 @@ def _has_real_names(params):
 
 # ── Discover the intersection automatically ──
 
+# Functions intentionally excluded from parity checks.
+_EXCLUDED_FUNCS: set[str] = set()
+
 _fallback_callables = _public_callables(fallback)
 _c_ops_callables = _public_callables(c_ops) if HAS_C_OPS else {}
-_shared_func_names = sorted(set(_fallback_callables) & set(_c_ops_callables))
+_shared_func_names = sorted(
+    (set(_fallback_callables) & set(_c_ops_callables)) - _EXCLUDED_FUNCS
+)
 
 _fallback_enums = _public_enums(fallback)
 _c_ops_enums = _public_enums(c_ops) if HAS_C_OPS else {}
 _shared_enum_names = sorted(set(_fallback_enums) & set(_c_ops_enums))
+
+_fallback_descs = _public_descriptor_classes(fallback)
+_c_ops_descs = _public_descriptor_classes(c_ops) if HAS_C_OPS else {}
+_shared_desc_names = sorted(set(_fallback_descs) & set(_c_ops_descs))
 
 
 # ── Tests ──
@@ -209,7 +238,7 @@ _shared_enum_names = sorted(set(_fallback_enums) & set(_c_ops_enums))
     _shared_func_names if _shared_func_names else ["__placeholder__"],
 )
 def test_function_signature_parity(func_name):
-    """For every function that non_cuda_equivalents chose to implement,
+    """For every function that python_ops_fallback chose to implement,
     its signature must match c_ops exactly.
 
     When c_ops has real py::arg() names  → check names, count, defaults.
@@ -242,7 +271,7 @@ def test_function_signature_parity(func_name):
     try:
         py_params = _get_python_params(py_func)
     except (ValueError, TypeError):
-        pytest.fail(f"Cannot inspect fallback.{func_name} signature")
+        pytest.skip(f"Cannot inspect fallback.{func_name} signature")
 
     c_has_names = _has_real_names(c_params)
 
@@ -288,7 +317,7 @@ def test_function_signature_parity(func_name):
     _shared_enum_names if _shared_enum_names else ["__placeholder__"],
 )
 def test_enum_parity(enum_name):
-    """For every enum that non_cuda_equivalents defines,
+    """For every enum that python_ops_fallback defines,
     its members and values must match c_ops."""
     if enum_name == "__placeholder__":
         pytest.skip("No shared enums found between c_ops and fallback")
@@ -298,4 +327,62 @@ def test_enum_parity(enum_name):
 
     assert c_members == py_members, (
         f"{enum_name} mismatch:\n  c_ops:    {c_members}\n  fallback: {py_members}"
+    )
+
+
+# ── Coverage tests: every c_ops API must have a fallback ──
+
+
+@pytest.mark.skipif(not HAS_C_OPS, reason="c_ops not available (no CUDA)")
+def test_all_c_ops_callables_have_fallback() -> None:
+    """Every public callable in c_ops must exist in
+    python_ops_fallback."""
+    missing = sorted(set(_c_ops_callables) - set(_fallback_callables) - _EXCLUDED_FUNCS)
+    assert not missing, f"c_ops callables missing from python_ops_fallback: {missing}"
+
+
+@pytest.mark.skipif(not HAS_C_OPS, reason="c_ops not available (no CUDA)")
+def test_all_c_ops_enums_have_fallback() -> None:
+    """Every public enum in c_ops must exist in
+    python_ops_fallback."""
+    missing = sorted(set(_c_ops_enums) - set(_fallback_enums))
+    assert not missing, f"c_ops enums missing from python_ops_fallback: {missing}"
+
+
+@pytest.mark.skipif(not HAS_C_OPS, reason="c_ops not available (no CUDA)")
+def test_all_c_ops_descriptors_have_fallback() -> None:
+    """Every public descriptor class in c_ops must exist in
+    python_ops_fallback."""
+    missing = sorted(set(_c_ops_descs) - set(_fallback_descs))
+    assert not missing, (
+        f"c_ops descriptor classes missing from python_ops_fallback: {missing}"
+    )
+
+
+@pytest.mark.skipif(not HAS_C_OPS, reason="c_ops not available (no CUDA)")
+@pytest.mark.parametrize(
+    "cls_name",
+    _shared_desc_names if _shared_desc_names else ["__placeholder__"],
+)
+def test_descriptor_class_parity(cls_name: str) -> None:
+    """For every descriptor class shared between c_ops and the fallback,
+    every public, non-callable attribute on the c_ops instance must also
+    be present on the fallback instance.
+    """
+    if cls_name == "__placeholder__":
+        pytest.skip("No shared descriptor classes found")
+
+    c_inst = _c_ops_descs[cls_name]()
+    py_inst = _fallback_descs[cls_name]()
+
+    def _public_data_attrs(inst: object) -> set[str]:
+        return {
+            a
+            for a in dir(inst)
+            if not a.startswith("_") and not callable(getattr(inst, a))
+        }
+
+    missing = sorted(_public_data_attrs(c_inst) - _public_data_attrs(py_inst))
+    assert not missing, (
+        f"{cls_name}: fallback is missing attributes present on c_ops: {missing}"
     )

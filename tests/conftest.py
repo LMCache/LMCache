@@ -1,9 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+# Copyright (c) 2026 Samsung Electronics Co., Ltd.All Rights Reserved
+#
+# 2026/4/20 Add mock for hf3fs_fuse
+#   Wenwen Chen <wenwen.chen@samsung.com>
+
+# Standard
 from dataclasses import dataclass
+from multiprocessing.shared_memory import SharedMemory
+from pathlib import Path
+from typing import Optional
 from unittest.mock import patch
 import asyncio
 import importlib.util
+import os
 import random
 import shlex
 import socket
@@ -357,6 +367,198 @@ class MockRedisCluster:
         pass
 
 
+class MockHf3fsIoring:
+    """Mock I/O ring that stores data to local temp storage.
+
+    This mock implements the same interface as the real hf3fs ioring,
+    but uses local filesystem for actual I/O operations.
+    """
+
+    def __init__(
+        self,
+        mount_point: str,
+        entries: int,
+        for_read: bool = True,
+        timeout: int = 200,
+        numa: int = -1,
+    ):
+        self.mount_point = mount_point
+        self.entries = entries
+        self.for_read = for_read
+        self.timeout = timeout
+        self.numa = numa
+        self._prepared_iov = None
+        self._prepared_is_read: Optional[bool] = None
+        self._prepared_fd: Optional[int] = None
+        self._prepared_offset: Optional[int] = None
+        self._result_bytes = 0
+
+    def prepare(self, iov, is_read: bool, fd: int, offset: int):
+        """Prepare I/O operation - stores parameters for later use."""
+        self._prepared_iov = iov
+        self._prepared_is_read = is_read
+        self._prepared_fd = fd
+        self._prepared_offset = offset
+
+    def submit(self):
+        """Submit I/O operation - performs actual file I/O.
+
+        For write operations: writes data from shared memory to file.
+        For read operations: reads data from file into shared memory.
+        """
+        # Standard
+        import sys
+
+        if self._prepared_iov is None or self._prepared_fd is None:
+            return self
+
+        try:
+            # Get the shared memory buffer from iov
+            shm = self._prepared_iov.shm
+            if shm is None:
+                print(
+                    f"MockHf3fsIoring.submit: shm is None, "
+                    f"_prepared_iov={self._prepared_iov}",
+                    file=sys.stderr,
+                )
+                return self
+
+            # Get the length of data to transfer
+            slice_start = 0
+            if hasattr(self._prepared_iov, "slice_start"):
+                slice_start = self._prepared_iov.slice_start
+            slice_end = None
+            if hasattr(self._prepared_iov, "slice_end"):
+                slice_end = self._prepared_iov.slice_end
+
+            if slice_end is not None:
+                length = slice_end - slice_start
+            elif slice_start > 0:
+                length = shm.size - slice_start if hasattr(shm, "size") else 4096
+            else:
+                length = shm.size if hasattr(shm, "size") else 4096
+
+            if self._prepared_is_read:
+                os.lseek(self._prepared_fd, self._prepared_offset, os.SEEK_SET)
+                # Read data from file
+                data = os.read(self._prepared_fd, length)
+                # Write data to shared memory using slice range
+                if slice_end:
+                    shm.buf[slice_start:slice_end] = data
+                else:
+                    shm.buf[slice_start:] = data
+                self._result_bytes = len(data)
+            else:
+                # Get data from shared memory using slice range
+                if slice_end:
+                    data = bytes(shm.buf[slice_start:slice_end])
+                else:
+                    data = bytes(shm.buf[slice_start:])
+                os.lseek(self._prepared_fd, self._prepared_offset, os.SEEK_SET)
+                # Write data to file
+                bytes_written = os.write(self._prepared_fd, data)
+                self._result_bytes = bytes_written
+
+        except Exception as e:
+            # Log error but don't fail - return 0 bytes
+            # Standard
+            import traceback
+
+            print(f"MockHf3fsIoring.submit error: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            self._result_bytes = 0
+
+        return self
+
+    def wait(self, min_results: int = 1):
+        """Wait for I/O completion and return results.
+
+        Returns:
+            List of MockIorResult, each with .result containing bytes transferred
+        """
+
+        class MockIorResult:
+            def __init__(self, result: int):
+                self.result = result
+
+        return [MockIorResult(self._result_bytes)]
+
+
+class MockHf3fsIovec:
+    """Mock I/O vector for HF3FS operations."""
+
+    def __init__(
+        self,
+        shm: SharedMemory,
+        hf3fs_mount_point: str,
+        numa: int = -1,
+        slice_start: int = 0,
+        slice_end: Optional[int] = None,
+    ):
+        self.shm = shm
+        self.mount_point = hf3fs_mount_point
+        self.numa = numa
+        self.slice_start = slice_start
+        self.slice_end = slice_end  # None means full range
+
+    def __getitem__(self, index):
+        # Support slicing operation, e.g., iov[:length]
+        if isinstance(index, slice):
+            start = index.start or 0
+            end = index.stop
+            return MockHf3fsIovec(self.shm, self.mount_point, self.numa, start, end)
+        return self
+
+    def __len__(self):
+        if self.slice_end is not None:
+            return self.slice_end - self.slice_start
+        elif self.slice_start > 0:
+            return getattr(self.shm, "size", 4096) - self.slice_start
+        return getattr(self.shm, "size", 4096)
+
+
+class MockHf3fsFuse:
+    """Mock for hf3fs_fuse.io module functions."""
+
+    @staticmethod
+    def extract_mount_point(path: str) -> str:
+        """Mock extract_mount_point - returns the path as-is if it exists.
+
+        In real 3FS, this function extracts the actual 3FS mount point from a path.
+        For testing, we just return the path if it exists, or return as-is.
+        """
+        p = Path(path)
+        if p.exists():
+            return str(p.resolve())
+        return path
+
+    @staticmethod
+    def make_iovec(shm: SharedMemory, hf3fs_mount_point: str, numa: int = -1):
+        """Mock make_iovec - creates a mock I/O vector."""
+        return MockHf3fsIovec(shm, hf3fs_mount_point, numa)
+
+    @staticmethod
+    def make_ioring(
+        mount_point: str,
+        entries: int,
+        for_read: bool = True,
+        timeout: int = 200,
+        numa: int = -1,
+    ):
+        """Mock make_ioring - creates a mock I/O ring."""
+        return MockHf3fsIoring(mount_point, entries, for_read, timeout, numa)
+
+    @staticmethod
+    def register_fd(fd: int):
+        """Mock register_fd - no-op for testing."""
+        pass
+
+    @staticmethod
+    def deregister_fd(fd: int):
+        """Mock deregister_fd - no-op for testing."""
+        pass
+
+
 @dataclass
 class LMCacheServerProcess:
     server_url: str
@@ -389,6 +591,43 @@ def mock_redis_sentinel():
 def mock_redis_cluster():
     with patch("redis.asyncio.cluster.RedisCluster", MockRedisCluster) as mock:
         yield mock
+
+
+@pytest.fixture(scope="function", autouse=True)
+def mock_hf3fs():
+    """Mock hf3fs_fuse.io module for testing without 3FS filesystem.
+
+    This fixture creates a fake hf3fs_fuse.io module in sys.modules before
+    any imports happen, allowing tests to run without the actual package.
+    """
+    # Standard
+    from types import ModuleType
+    import sys
+
+    # Create a fake hf3fs_fuse module if it doesn't exist
+    hf3fs_fuse = ModuleType("hf3fs_fuse")
+    hf3fs_fuse.__file__ = "/mock/hf3fs_fuse/__init__.py"
+
+    # Create hf3fs_fuse.io module
+    hf3fs_io = ModuleType("hf3fs_fuse.io")
+    hf3fs_io.__file__ = "/mock/hf3fs_fuse/io.py"
+
+    # Add mock functions to hf3fs_fuse.io
+    hf3fs_io.extract_mount_point = MockHf3fsFuse.extract_mount_point
+    hf3fs_io.make_iovec = MockHf3fsFuse.make_iovec
+    hf3fs_io.make_ioring = MockHf3fsFuse.make_ioring
+    hf3fs_io.register_fd = MockHf3fsFuse.register_fd
+    hf3fs_io.deregister_fd = MockHf3fsFuse.deregister_fd
+
+    # Register modules in sys.modules
+    sys.modules["hf3fs_fuse"] = hf3fs_fuse
+    sys.modules["hf3fs_fuse.io"] = hf3fs_io
+
+    yield
+
+    # Cleanup: remove the mock modules after test
+    sys.modules.pop("hf3fs_fuse", None)
+    sys.modules.pop("hf3fs_fuse.io", None)
 
 
 @pytest.fixture(scope="module")
@@ -560,3 +799,91 @@ def lmcache_engine_metadata(role="worker"):
         use_mla=False,
         role=role,
     )
+
+
+@pytest.fixture(scope="session")
+def bigtable_emulator():
+    """Start or connect to the Bigtable emulator for integration testing."""
+    # Standard
+    import os
+    import shutil
+    import subprocess
+    import time
+
+    existing_host = os.environ.get("BIGTABLE_EMULATOR_HOST")
+    if existing_host:
+        print(f"\n[Fixture] Reusing existing Bigtable emulator at {existing_host}...")
+        yield existing_host
+        return
+
+    if os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true":
+        pytest.skip("Skipping Bigtable emulator integration tests in CI")
+
+    if not shutil.which("gcloud"):
+        pytest.skip(
+            "gcloud CLI not found, skipping Bigtable Emulator integration tests"
+        )
+
+    port = "8899"
+    host_port = f"localhost:{port}"
+
+    print(f"\n[Fixture] Starting Bigtable emulator on {host_port}...")
+    emulator_process = subprocess.Popen(
+        [
+            "gcloud",
+            "beta",
+            "emulators",
+            "bigtable",
+            "start",
+            f"--host-port={host_port}",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    os.environ["BIGTABLE_EMULATOR_HOST"] = host_port
+
+    def is_port_open(h: str, p: int, t: float = 1.0) -> bool:
+        # Standard
+        import socket
+
+        try:
+            with socket.create_connection((h, p), timeout=t):
+                return True
+        except OSError:
+            return False
+
+    # Wait for the emulator to initialize
+    port_num = int(port)
+    start_time = time.time()
+    success = False
+    while time.time() - start_time < 10.0:
+        if is_port_open("localhost", port_num):
+            success = True
+            break
+        time.sleep(0.5)
+
+    if not success:
+        print(
+            f"\n[Fixture] Bigtable emulator failed to bind to {host_port} within 10s!"
+        )
+        try:
+            stdout, stderr = emulator_process.communicate(timeout=2.0)
+            print(f"Stdout:\n{stdout.decode('utf-8', errors='ignore')}")
+            print(f"Stderr:\n{stderr.decode('utf-8', errors='ignore')}")
+        except Exception as e:
+            print(f"Could not retrieve process logs: {e}")
+        emulator_process.kill()
+        pytest.fail("Failed to start Bigtable emulator")
+
+    yield host_port
+
+    print("\n[Fixture] Stopping Bigtable emulator...")
+    emulator_process.terminate()
+    try:
+        emulator_process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        emulator_process.kill()
+
+    if "BIGTABLE_EMULATOR_HOST" in os.environ:
+        del os.environ["BIGTABLE_EMULATOR_HOST"]

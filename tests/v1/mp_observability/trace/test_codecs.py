@@ -7,7 +7,12 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, PrefetchHandle
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    ObjectKey,
+    PrefetchHandle,
+    TrimPolicy,
+)
 from lmcache.v1.mp_observability.trace import codecs
 
 
@@ -45,6 +50,17 @@ class TestObjectKey:
         out = _roundtrip(k)
         assert out == k
 
+    def test_object_group_id_roundtrip(self):
+        k = ObjectKey(
+            chunk_hash=b"\x00\x01\x02",
+            model_name="m",
+            kv_rank=42,
+            object_group_id=7,
+        )
+        out = _roundtrip(k)
+        assert out == k
+        assert out.object_group_id == 7
+
     def test_inside_list(self):
         keys = [
             ObjectKey(chunk_hash=b"a", model_name="m", kv_rank=1),
@@ -68,12 +84,30 @@ class TestPrefetchHandle:
         h = PrefetchHandle(
             prefetch_request_id=7,
             external_request_id="req-1",
-            l1_prefix_hit_count=3,
+            l1_found_indices=(0, 1, 2),
             total_requested_keys=10,
             submit_time=12345.6,
+            l2_orig_indices=(3, 4, 5),
         )
         out = _roundtrip(h)
         assert out == h
+
+
+class TestTrimPolicy:
+    def test_roundtrip(self):
+        for p in TrimPolicy:
+            assert _roundtrip(p) is p
+
+
+class TestSet:
+    def test_roundtrip(self):
+        keys = {
+            ObjectKey(chunk_hash=b"a", model_name="m", kv_rank=1),
+            ObjectKey(chunk_hash=b"b", model_name="m", kv_rank=2),
+        }
+        out = _roundtrip(keys)
+        assert out == keys
+        assert isinstance(out, set)
 
 
 class TestTorchTypes:

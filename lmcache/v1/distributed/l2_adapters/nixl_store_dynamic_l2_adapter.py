@@ -41,7 +41,7 @@ from nixl._api import (
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.internal_api import L1MemoryDesc
+from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
@@ -73,7 +73,9 @@ def _object_key_to_filename(key: ObjectKey) -> str:
     """
     safe_model_name = key.model_name.replace("/", "--")
     chunk_hex = key.chunk_hash.hex()
-    return f"{safe_model_name}_{key.kv_rank:08x}_{chunk_hex}.bin"
+    return (
+        f"{safe_model_name}_{key.kv_rank:08x}_{key.object_group_id:x}_{chunk_hex}.bin"
+    )
 
 
 # ---------------------------------------------------------------
@@ -101,6 +103,7 @@ class DynamicNixlStorageAgent:
         self.backend_params = backend_params
         self.l1_align_bytes = l1_memory_desc.align_bytes
         self.file_path = backend_params["file_path"]
+        os.makedirs(self.file_path, exist_ok=True)
         self.use_direct_io = (
             str(backend_params.get("use_direct_io", "false")).lower() == "true"
         )
@@ -358,7 +361,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
 
         # Task ID management
         self._next_task_id: L2TaskId = 0
-        self._completed_store_tasks: dict[L2TaskId, bool] = {}
+        self._completed_store_tasks: dict[L2TaskId, L2StoreResult] = {}
         self._completed_lookup_tasks: dict[L2TaskId, Bitmap] = {}
         self._completed_load_tasks: dict[L2TaskId, Bitmap] = {}
         self._lock = threading.Lock()
@@ -408,7 +411,7 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         )
         return task_id
 
-    def pop_completed_store_tasks(self) -> dict[L2TaskId, bool]:
+    def pop_completed_store_tasks(self) -> dict[L2TaskId, L2StoreResult]:
         with self._lock:
             completed = self._completed_store_tasks
             self._completed_store_tasks = {}
@@ -418,7 +421,9 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
     # Lookup and Lock Interface
     #####################
 
-    def submit_lookup_and_lock_task(self, keys: list[ObjectKey]) -> L2TaskId:
+    def submit_lookup_and_lock_task(
+        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+    ) -> L2TaskId:
         with self._lock:
             task_id = self._get_next_task_id()
 
@@ -649,8 +654,11 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         if stored_keys:
             self._notify_keys_stored(stored_keys, stored_sizes)
 
+        bytes_transferred = sum(stored_sizes)
         with self._lock:
-            self._completed_store_tasks[task_id] = success
+            self._completed_store_tasks[task_id] = L2StoreResult(
+                success, bytes_transferred
+            )
         self._signal_store_event()
 
     def _execute_lookup_in_the_loop(

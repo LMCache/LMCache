@@ -74,14 +74,16 @@ class ObservabilityConfig:
     minted and logged at INFO."""
 
     service_instance_id: str | None = None
-    """Identifier for this MP server instance.  Attached as the OTel
-    Resource attribute ``service.instance.id`` on every metric and span.
-    One MP server has exactly one instance id.
+    """OTel ``service.instance.id`` resource attribute, attached to every
+    metric and span. There is no CLI flag for it: the operator-facing id is
+    ``--instance-id`` (``MPServerConfig.instance_id``), which ``run_cache_server``
+    projects onto this attribute so telemetry and coordinator membership share
+    one id.
 
-    ``None`` (the default, also the state when the CLI flag is not
-    passed) falls back to a random UUID v4 at ``init_observability``
-    time.  An explicit empty string is preserved verbatim so operators
-    who want the attribute to report ``""`` can ask for it."""
+    ``None`` (the default) means "not set": standalone callers that build an
+    ``ObservabilityConfig`` directly (e.g. the trace CLI driver) fall back to a
+    random UUID v4 at ``init_observability`` time. An explicit value is
+    preserved verbatim."""
 
 
 DEFAULT_OBSERVABILITY_CONFIG = ObservabilityConfig(enabled=False)
@@ -160,18 +162,6 @@ def add_observability_args(
         help=(
             "Fraction of chunks/blocks to track for lifecycle histograms "
             "(0, 1.0]. Counters always count all events. Default is 0.01 (1%%)."
-        ),
-    )
-    group.add_argument(
-        "--service-instance-id",
-        type=str,
-        default=None,
-        help=(
-            "Identifier for this MP server instance. Attached as the OTel "
-            "Resource attribute 'service.instance.id' on every metric and "
-            "span. When the flag is not passed, defaults to a random "
-            "UUID v4 minted at startup. Pass --service-instance-id='' to "
-            "force an empty attribute value."
         ),
     )
 
@@ -262,7 +252,6 @@ def parse_args_to_observability_config(
         ),
         trace_level=args.trace_level,
         trace_output=args.trace_output,
-        service_instance_id=args.service_instance_id,
     )
 
     if config.tracing_enabled and config.otlp_endpoint is None:
@@ -274,11 +263,21 @@ def parse_args_to_observability_config(
     return config
 
 
-def init_observability(obs_config: ObservabilityConfig) -> EventBus:
+def init_observability(
+    obs_config: ObservabilityConfig,
+    *,
+    start_prometheus_http_server: bool = True,
+) -> EventBus:
     """Initialize OTel providers, EventBus, and register subscribers.
 
     This is the single entry-point that every MP server calls at startup.
     Returns a **started** EventBus.
+
+    Args:
+        obs_config: Observability configuration.
+        start_prometheus_http_server: Whether to start a standalone
+            Prometheus HTTP server.  Set to ``False`` when an
+            external HTTP framework already serves ``/metrics``.
     """
     # First Party
     from lmcache.v1.mp_observability.event_bus import (
@@ -303,6 +302,7 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
             otlp_endpoint=obs_config.otlp_endpoint,
             prometheus_port=obs_config.prometheus_port,
             resource_attributes=resource_attrs,
+            start_http_server=start_prometheus_http_server,
         )
 
     if obs_config.enabled and obs_config.tracing_enabled:
@@ -329,6 +329,7 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
             EventBusSelfMetricsSubscriber,
             L0L1ThroughputSubscriber,
             L0LifecycleSubscriber,
+            L1EvictionLoopSubscriber,
             L1FailureMetricsSubscriber,
             L1LifecycleSubscriber,
             L1MetricsSubscriber,
@@ -337,7 +338,6 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
             L2ThroughputSubscriber,
             LookupMetricsSubscriber,
             SMLifecycleSubscriber,
-            SMMetricsSubscriber,
         )
 
         sample_rate = obs_config.metrics_sample_rate
@@ -345,12 +345,12 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
         bus.register_subscriber(L1MetricsSubscriber())
         bus.register_subscriber(L1LifecycleSubscriber(sample_rate=sample_rate))
         bus.register_subscriber(L1FailureMetricsSubscriber())
-        bus.register_subscriber(L0L1ThroughputSubscriber(sample_rate=sample_rate))
+        bus.register_subscriber(L1EvictionLoopSubscriber())
+        bus.register_subscriber(L0L1ThroughputSubscriber())
         bus.register_subscriber(L2MetricsSubscriber())
         bus.register_subscriber(L2FailureMetricsSubscriber())
-        bus.register_subscriber(L2ThroughputSubscriber(sample_rate=sample_rate))
+        bus.register_subscriber(L2ThroughputSubscriber())
         bus.register_subscriber(LookupMetricsSubscriber())
-        bus.register_subscriber(SMMetricsSubscriber())
         bus.register_subscriber(SMLifecycleSubscriber(sample_rate=sample_rate))
         bus.register_subscriber(BlendMetricsSubscriber())
         bus.register_subscriber(EngineMetricsSubscriber())

@@ -14,6 +14,11 @@ import pytest
 
 # First Party
 from lmcache.cli.commands.bench import BenchCommand
+from lmcache.cli.commands.bench.engine_bench.command import (
+    _emit_final_metrics,
+    _resolve_args,
+    run_engine_bench,
+)
 from lmcache.cli.commands.bench.engine_bench.config import EngineBenchConfig
 from lmcache.cli.commands.bench.engine_bench.stats import (
     FinalStats,
@@ -39,10 +44,12 @@ def _make_args(**overrides) -> argparse.Namespace:
         no_csv=False,
         json=False,
         quiet=True,
+        ignore_eos=False,
         ldqa_document_length=100,
         ldqa_query_per_document=1,
         ldqa_shuffle_policy="tile",
         ldqa_num_inflight_requests=1,
+        ldqa_max_output_length=128,
         mrc_shared_prompt_length=2000,
         mrc_chat_history_length=10000,
         mrc_user_input_length=50,
@@ -228,9 +235,8 @@ class TestNoInteractive:
             tokens_per_gb_kvcache=6553,
             no_interactive=True,
         )
-        cmd = BenchCommand()
         with pytest.raises(SystemExit, match="--engine-url"):
-            cmd._resolve_args(args)
+            _resolve_args(args)
 
     def test_no_interactive_missing_workload(self) -> None:
         args = _make_args(
@@ -239,9 +245,8 @@ class TestNoInteractive:
             tokens_per_gb_kvcache=6553,
             no_interactive=True,
         )
-        cmd = BenchCommand()
         with pytest.raises(SystemExit, match="--workload"):
-            cmd._resolve_args(args)
+            _resolve_args(args)
 
     def test_no_interactive_missing_tokens_and_lmcache(self) -> None:
         args = _make_args(
@@ -251,16 +256,14 @@ class TestNoInteractive:
             lmcache_url=None,
             no_interactive=True,
         )
-        cmd = BenchCommand()
         with pytest.raises(
             SystemExit, match="--tokens-per-gb-kvcache or --lmcache-url"
         ):
-            cmd._resolve_args(args)
+            _resolve_args(args)
 
     def test_no_interactive_passes_with_all_args(self) -> None:
         args = _make_args(no_interactive=True)
-        cmd = BenchCommand()
-        result = cmd._resolve_args(args)
+        result = _resolve_args(args)
         assert result is args
 
     def test_no_interactive_passes_with_lmcache_url(self) -> None:
@@ -269,8 +272,7 @@ class TestNoInteractive:
             lmcache_url="http://localhost:8080",
             no_interactive=True,
         )
-        cmd = BenchCommand()
-        result = cmd._resolve_args(args)
+        result = _resolve_args(args)
         assert result is args
 
 
@@ -307,9 +309,8 @@ class TestExportConfig:
             engine_url=None,
             export_config="out.json",
         )
-        cmd = BenchCommand()
         with pytest.raises(SystemExit, match="--engine-url"):
-            cmd._resolve_args(args)
+            _resolve_args(args)
 
     def test_export_config_writes_json(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         export_path = str(tmp_path / "exported.json")
@@ -322,7 +323,7 @@ class TestExportConfig:
         old_stdout = sys.stdout
         sys.stdout = io.StringIO()
         try:
-            cmd._bench_engine(args)
+            run_engine_bench(cmd, args)
         finally:
             sys.stdout = old_stdout
 
@@ -333,6 +334,20 @@ class TestExportConfig:
         assert data["workload"] == "long-doc-qa"
         assert data["tokens_per_gb_kvcache"] == 50000
         assert "lmcache_url" not in data
+
+    def test_max_output_length_rejected_for_unsupported_workload(
+        self,
+        tmp_path,  # type: ignore[no-untyped-def]
+    ) -> None:
+        # Setting a non-default max output length for a workload without that
+        # parameter is rejected.
+        args = _make_args(
+            workload="random-prefill",
+            ldqa_max_output_length=512,
+            export_config=str(tmp_path / "exported.json"),
+        )
+        with pytest.raises(ValueError, match="max output length cannot be specified"):
+            run_engine_bench(BenchCommand(), args)
 
     def test_export_config_excludes_lmcache_url(
         self,
@@ -349,7 +364,7 @@ class TestExportConfig:
         old_stdout = sys.stdout
         sys.stdout = io.StringIO()
         try:
-            cmd._bench_engine(args)
+            run_engine_bench(cmd, args)
         finally:
             sys.stdout = old_stdout
 
@@ -376,7 +391,7 @@ class TestExportConfig:
         old_stdout = sys.stdout
         sys.stdout = io.StringIO()
         try:
-            cmd._bench_engine(args)
+            run_engine_bench(cmd, args)
         finally:
             sys.stdout = old_stdout
 
@@ -402,7 +417,7 @@ class TestBenchCommandEmitMetrics:
         old_stdout = sys.stdout
         sys.stdout = buf = io.StringIO()
         try:
-            cmd._emit_final_metrics(config, final, args)
+            _emit_final_metrics(cmd, config, final, args)
         finally:
             sys.stdout = old_stdout
 
@@ -422,7 +437,7 @@ class TestBenchCommandEmitMetrics:
         old_stdout = sys.stdout
         sys.stdout = buf = io.StringIO()
         try:
-            cmd._emit_final_metrics(config, final, args)
+            _emit_final_metrics(cmd, config, final, args)
         finally:
             sys.stdout = old_stdout
 
@@ -512,7 +527,7 @@ class TestBenchCommandOrchestrator:
         old_stdout = sys.stdout
         sys.stdout = io.StringIO()
         try:
-            cmd._bench_engine(args)
+            run_engine_bench(cmd, args)
         finally:
             sys.stdout = old_stdout
 
@@ -592,7 +607,7 @@ class TestBenchCommandOrchestrator:
         old_stdout = sys.stdout
         sys.stdout = io.StringIO()
         try:
-            cmd._bench_engine(args)
+            run_engine_bench(cmd, args)
         finally:
             sys.stdout = old_stdout
 
@@ -691,7 +706,7 @@ class TestBenchCommandOrchestrator:
         old_stdout = sys.stdout
         sys.stdout = io.StringIO()
         try:
-            cmd._bench_engine(args)
+            run_engine_bench(cmd, args)
         finally:
             sys.stdout = old_stdout
 

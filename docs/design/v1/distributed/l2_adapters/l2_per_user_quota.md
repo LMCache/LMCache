@@ -21,7 +21,7 @@ untouched.
 
 ```
 vLLM API Server
-  │  sends cache_salt directly on IPCCacheEngineKey
+  │  sends cache_salt directly on IPCCacheServerKey
   ▼
 LMCache MP Server
   │  ipc_key_to_object_keys(key, chunk_hashes)
@@ -39,7 +39,7 @@ L1 Manager → StoreController → L2 Adapter
   │                      → base class updates _total_bytes_used
   │                        and _bytes_by_cache_salt
   ▼
-Listeners:  L2EvictionPolicy bridge → UserLRUEvictionPolicy
+Listeners:  L2EvictionPolicy bridge → IsolatedLRUEvictionPolicy
             ┌──────────────────────┐
             │ "alice" → OrderedDict │
             │ "bob"   → OrderedDict │
@@ -126,7 +126,7 @@ both the scheduler and worker adapters.
 
 Both the scheduler adapter (LOOKUP) and worker adapter (STORE/RETRIEVE)
 receive `cache_salt` from the vLLM connector via
-`LMCacheMPRequestMetadata`. Both set `cache_salt` on `IPCCacheEngineKey`
+`LMCacheMPRequestMetadata`. Both set `cache_salt` on `IPCCacheServerKey`
 directly. No server-side session caching is needed.
 
 ```
@@ -143,13 +143,13 @@ Scheduler path (LOOKUP):
   scheduler_adapter.maybe_submit_lookup_request(
       request_id, token_ids, cache_salt=tracker.cache_salt)
   → _create_key(..., cache_salt="alice")
-  → IPCCacheEngineKey(cache_salt="alice", ...)  ──LOOKUP──►  MP Server
+  → IPCCacheServerKey(cache_salt="alice", ...)  ──LOOKUP──►  MP Server
                                                            │
 Worker path (STORE/RETRIEVE):                              │
   worker_adapter.batched_submit_store_requests(            │
       request_ids, ops, event, cache_salts=["alice", ...])    │
   → _create_key(..., cache_salt="alice")                      │
-  → IPCCacheEngineKey(cache_salt="alice", ...) ──STORE──►  MP Server
+  → IPCCacheServerKey(cache_salt="alice", ...) ──STORE──►  MP Server
                                                            │
                                               key.cache_salt = "alice"
                                               ipc_key_to_object_keys(key, hashes)
@@ -161,7 +161,7 @@ Because both scheduler and worker set `cache_salt` directly on the IPC key,
 the server simply reads `key.cache_salt` in all code paths. No session-based
 fallback is needed.
 
-`cache_salt` is added as an identity field on `IPCCacheEngineKey` (with
+`cache_salt` is added as an identity field on `IPCCacheServerKey` (with
 `compare=True`, unlike `request_id`). `request_id` is ephemeral session
 metadata — two requests with different `request_id`s but the same tokens
 should hit the same cache. `cache_salt` is the opposite: same tokens from
@@ -170,7 +170,7 @@ participating in `ObjectKey.__eq__` / `__hash__`.
 
 ```python
 @dataclass(order=True, frozen=True)
-class IPCCacheEngineKey:
+class IPCCacheServerKey:
     model_name: str
     world_size: int
     worker_id: int | None
@@ -182,7 +182,7 @@ class IPCCacheEngineKey:
 ```
 
 `cache_salt` is placed **after** `request_id` (at the end) to preserve
-msgspec wire compatibility. `IPCCacheEngineKey` is serialized positionally
+msgspec wire compatibility. `IPCCacheServerKey` is serialized positionally
 via `msgspec.msgpack`; appending `cache_salt` at the end means an old client
 sending 7 fields to a new server will decode correctly with `cache_salt`
 defaulting to `""`. No changes to existing field positions.
@@ -210,29 +210,29 @@ This means the system is **allowlist-based**: only users with an explicit
 quota can retain cached data. Unknown users get temporary write access, but
 their data is cleaned up within one eviction cycle.
 
-Per-user quotas are enabled by choosing the `UserLRU` eviction policy.
+Per-user quotas are enabled by choosing the `IsolatedLRU` eviction policy.
 If the operator does not want per-user quotas, they simply use the `LRU`
 policy — no special "disable" flag is needed.
 
 ### 4. HTTP API for Quota Management
 
 The existing FastAPI HTTP server (`lmcache/v1/multiprocess/http_server.py`)
-already serves `/api/healthcheck`, `/api/status`, and `/api/clear-cache`.
+already serves `/healthcheck`, `/status`, and `/clear-cache`.
 Add quota management endpoints:
 
 ```
-PUT    /api/quota/{cache_salt}          Set/update quota for a user
-GET    /api/quota/{cache_salt}          Get quota and current usage for a user
-DELETE /api/quota/{cache_salt}          Remove quota (user's data evicted next cycle)
-GET    /api/quota                    List all quotas and per-user usage
+PUT    /quota/{cache_salt}          Set/update quota for a user
+GET    /quota/{cache_salt}          Get quota and current usage for a user
+DELETE /quota/{cache_salt}          Remove quota (user's data evicted next cycle)
+GET    /quota                    List all quotas and per-user usage
 ```
 
 **`_default` sentinel:** Empty strings cannot be URL path parameters. Use
 `_default` as the `cache_salt` in the URL to refer to the `cache_salt=""`
 namespace (anonymous / un-isolated traffic). For example,
-`PUT /api/quota/_default` sets the quota for `cache_salt=""`.
+`PUT /quota/_default` sets the quota for `cache_salt=""`.
 
-**`PUT /api/quota/{cache_salt}`** — Set or update a user's quota.
+**`PUT /quota/{cache_salt}`** — Set or update a user's quota.
 `limit_gb` is required.
 
 ```json
@@ -243,7 +243,7 @@ namespace (anonymous / un-isolated traffic). For example,
 {"cache_salt": "alice", "limit_gb": 2.0, "status": "ok"}
 ```
 
-**`GET /api/quota/{cache_salt}`** — Get quota and current usage.
+**`GET /quota/{cache_salt}`** — Get quota and current usage.
 
 ```json
 // Response
@@ -255,7 +255,7 @@ namespace (anonymous / un-isolated traffic). For example,
 }
 ```
 
-**`DELETE /api/quota/{cache_salt}`** — Remove quota entry. The user's cached
+**`DELETE /quota/{cache_salt}`** — Remove quota entry. The user's cached
 data will be evicted at the next eviction cycle (effective limit becomes 0).
 
 ```json
@@ -263,7 +263,7 @@ data will be evicted at the next eviction cycle (effective limit becomes 0).
 {"cache_salt": "alice", "status": "removed"}
 ```
 
-**`GET /api/quota`** — List all registered quotas with per-user usage.
+**`GET /quota`** — List all registered quotas with per-user usage.
 
 ```json
 // Response
@@ -277,7 +277,7 @@ data will be evicted at the next eviction cycle (effective limit becomes 0).
 
 ### 5. Policy Selection
 
-Set `eviction_policy: "UserLRU"` in the adapter's eviction config to
+Set `eviction_policy: "IsolatedLRU"` in the adapter's eviction config to
 enable per-user quotas. `"LRU"` retains existing aggregate-only behavior.
 See the **Configuration** section for the full JSON example.
 
@@ -292,12 +292,12 @@ Add `cache_salt: str = ""` to `ObjectKey` (as shown in section 1).
 propagates it to each constructed `ObjectKey` — no separate parameter,
 so callers cannot accidentally drop the salt.
 
-### 2. Server — `cache_salt` is carried by `IPCCacheEngineKey`
+### 2. Server — `cache_salt` is carried by `IPCCacheServerKey`
 
 **File:** `lmcache/v1/multiprocess/server.py`
 
 Since both the scheduler and worker adapters set `cache_salt` on
-`IPCCacheEngineKey`, the server simply calls `ipc_key_to_object_keys(...)`
+`IPCCacheServerKey`, the server simply calls `ipc_key_to_object_keys(...)`
 and the salt flows through automatically:
 
 ```python
@@ -347,7 +347,7 @@ self.worker_adapter.batched_submit_retrieve_requests(
 
 - `maybe_submit_lookup_request(request_id, token_ids, cache_salt="")`
 - `free_lookup_locks(..., cache_salt="")`
-- `_create_key(..., cache_salt="")` — passes `cache_salt` to `IPCCacheEngineKey`
+- `_create_key(..., cache_salt="")` — passes `cache_salt` to `IPCCacheServerKey`
 
 **Worker adapter** (STORE/RETRIEVE path):
 
@@ -355,13 +355,13 @@ self.worker_adapter.batched_submit_retrieve_requests(
 - `batched_submit_retrieve_requests(request_ids, ops, event, cache_salts=None)`
 - `submit_store_request(request_id, op, event, cache_salt="")`
 - `submit_retrieve_request(request_id, op, event, cache_salt="")`
-- `_create_key(..., cache_salt="")` — passes `cache_salt` to `IPCCacheEngineKey`
+- `_create_key(..., cache_salt="")` — passes `cache_salt` to `IPCCacheServerKey`
 
 Both adapters' `_create_key()` passes `cache_salt` through:
 
 ```python
 def _create_key(self, token_ids, start, end, request_id, cache_salt=""):
-    return IPCCacheEngineKey(
+    return IPCCacheServerKey(
         model_name=self.model_name,
         world_size=self.world_size,
         worker_id=...,
@@ -491,6 +491,7 @@ sizes)`. The base class handles all byte accounting.
 |---------|-----------------------------|---------------------|
 | MockL2Adapter | `int(config.max_size_gb * 1024**3)` | `True` |
 | NixlStoreL2Adapter | Pool total size | `True` |
+| RawBlockL2Adapter | RawBlockCore usable capacity | `True` |
 | NativeConnectorL2Adapter | `int(max_capacity_gb * 1024**3)` | `True` |
 | FSL2Adapter | 0 | `False` |
 
@@ -528,18 +529,18 @@ class EvictionPolicy:
 |--------|----------------|
 | `LRUEvictionPolicy` | `False` (inherits default) |
 | `NoOpEvictionPolicy` | `False` (inherits default) |
-| `UserLRUEvictionPolicy` | `True` (override) |
+| `IsolatedLRUEvictionPolicy` | `True` (override) |
 
-### 7. `UserLRUEvictionPolicy` — Per-user LRU tracking
+### 7. `IsolatedLRUEvictionPolicy` — Per-user LRU tracking
 
-**File (new):** `lmcache/v1/distributed/eviction_policy/user_lru.py`
+**File (new):** `lmcache/v1/distributed/eviction_policy/isolated_lru.py`
 
 Overrides `is_user_level` to return `True`. `get_eviction_actions` gains
 an optional `cache_salt` parameter. When set, eviction is scoped to that
 user's LRU list. When `None` (default), eviction is global.
 
 ```python
-class UserLRUEvictionPolicy(EvictionPolicy):
+class IsolatedLRUEvictionPolicy(EvictionPolicy):
 
     @property
     def is_user_level(self) -> bool:
@@ -687,7 +688,7 @@ The controller uses `policy.is_user_level` (not `isinstance`) to branch:
   "max_size_gb": 10,
   "mock_bandwidth_gb": 4,
   "eviction": {
-    "eviction_policy": "UserLRU",
+    "eviction_policy": "IsolatedLRU",
     "trigger_watermark": 0.8,
     "eviction_ratio": 0.2
   }
@@ -696,8 +697,8 @@ The controller uses `policy.is_user_level` (not `isinstance`) to branch:
 
 | Field               | Type    | Default | Description                                           |
 |---------------------|---------|---------|-------------------------------------------------------|
-| `eviction_policy`   | string  | —       | `"LRU"`, `"UserLRU"`, or `"noop"`. Required.         |
-| `trigger_watermark` | float   | `0.8`   | Usage fraction to trigger eviction. For `LRU`: against aggregate capacity. For `UserLRU`: against each user's quota. |
+| `eviction_policy`   | string  | —       | `"LRU"`, `"IsolatedLRU"`, or `"noop"`. Required.         |
+| `trigger_watermark` | float   | `0.8`   | Usage fraction to trigger eviction. For `LRU`: against aggregate capacity. For `IsolatedLRU`: against each user's quota. |
 | `eviction_ratio`    | float   | `0.2`   | Fraction of keys to evict each cycle.                 |
 
 ### Usage examples
@@ -709,18 +710,18 @@ curl -X POST http://vllm:8000/v1/chat/completions \
   -d '{"model": "llama-3-8b", "messages": [...], "cache_salt": "alice"}'
 
 # Manage quotas at runtime
-curl -X PUT http://localhost:8000/api/quota/alice \
+curl -X PUT http://localhost:8000/quota/alice \
   -H "Content-Type: application/json" -d '{"limit_gb": 2.0}'
-curl http://localhost:8000/api/quota/alice
-curl -X DELETE http://localhost:8000/api/quota/alice
-curl http://localhost:8000/api/quota
+curl http://localhost:8000/quota/alice
+curl -X DELETE http://localhost:8000/quota/alice
+curl http://localhost:8000/quota
 ```
 
 ## Behavioral Notes
 
 - **No cache_salt from API:** When the API caller doesn't set `cache_salt`,
   `request.cache_salt` is `None`, which maps to `cache_salt=""`.
-  `IPCCacheEngineKey.cache_salt` defaults to `""`. All such keys share the
+  `IPCCacheServerKey.cache_salt` defaults to `""`. All such keys share the
   same (anonymous) namespace.
 - **`eviction_policy: "LRU"`:** Per-user quota logic is not active. The
   watermark is applied against aggregate capacity as before. Existing
@@ -789,15 +790,15 @@ Populate `cache_salt` from `request.cache_salt` and pass to adapters.
 
 ### PR2 — LMCache: `cache_salt` on data model + server (LMCache repo)
 
-Add `cache_salt` to `ObjectKey` and `IPCCacheEngineKey`. Server passes
+Add `cache_salt` to `ObjectKey` and `IPCCacheServerKey`. Server passes
 it through. Update serialization. No behavioral change with `cache_salt=""`.
 
 | File | Change |
 |------|--------|
 | `lmcache/v1/distributed/api.py` | `cache_salt: str = ""` on `ObjectKey` with `__post_init__` validation (`@`, `/`, `\`, NUL, length cap on `cache_salt`; `@` rejected on `model_name`); `ipc_key_to_object_keys()` reads `ipc_key.cache_salt` directly (no separate param) |
-| `lmcache/v1/multiprocess/custom_types.py` | `cache_salt: str = ""` on `IPCCacheEngineKey` with `__post_init__` validation; update `no_worker_id_version()`, `from_token_ids()` |
+| `lmcache/v1/multiprocess/custom_types.py` | `cache_salt: str = ""` on `IPCCacheServerKey` with `__post_init__` validation; update `no_worker_id_version()`, `from_token_ids()` |
 | `lmcache/v1/multiprocess/server.py` / `blend_server_v2.py` | No code changes — existing `ipc_key_to_object_keys(key, chunk_hashes)` calls now carry salt automatically |
-| `lmcache/integration/vllm/vllm_multi_process_adapter.py` | Scheduler + worker `_create_key()` now forward `cache_salt` to `IPCCacheEngineKey` |
+| `lmcache/integration/vllm/vllm_multi_process_adapter.py` | Scheduler + worker `_create_key()` now forward `cache_salt` to `IPCCacheServerKey` |
 | `lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py` | `_object_key_to_string()` appends trailing `@<cache_salt>` when salted; un-salted output is unchanged |
 | `lmcache/v1/distributed/l2_adapters/fs_l2_adapter.py` | `_object_key_to_filename()` / `_filename_to_object_key()` accept 3-field (unsalted) or 4-field (salted) shapes |
 | `csrc/storage_backends/fs/connector.cpp` | `key_to_filename()` splits on `@` and dispatches by field count |
@@ -835,15 +836,15 @@ The feature PR. Depends on PR1a + PR1b + PR2 + PR3 + PR4.
 
 | File | Change |
 |------|--------|
-| `lmcache/v1/distributed/eviction_policy/user_lru.py` (new) | `UserLRUEvictionPolicy` |
+| `lmcache/v1/distributed/eviction_policy/isolated_lru.py` (new) | `IsolatedLRUEvictionPolicy` |
 | `lmcache/v1/distributed/quota_manager.py` (new) | `QuotaManager` |
-| `lmcache/v1/distributed/eviction_policy/factory.py` | Register `"UserLRU"` |
-| `lmcache/v1/distributed/eviction_policy/__init__.py` | Export `UserLRUEvictionPolicy` |
-| `lmcache/v1/distributed/config.py` | Add `"UserLRU"` to literal |
-| `lmcache/v1/distributed/l2_adapters/config.py` | Add `"UserLRU"` to allowed values |
+| `lmcache/v1/distributed/eviction_policy/factory.py` | Register `"IsolatedLRU"` |
+| `lmcache/v1/distributed/eviction_policy/__init__.py` | Export `IsolatedLRUEvictionPolicy` |
+| `lmcache/v1/distributed/config.py` | Add `"IsolatedLRU"` to literal |
+| `lmcache/v1/distributed/l2_adapters/config.py` | Add `"IsolatedLRU"` to allowed values |
 | `lmcache/v1/distributed/storage_controllers/eviction_controller.py` | `QuotaManager`; per-user branch using `is_user_level` + `bytes_by_cache_salt` |
 | `lmcache/v1/distributed/storage_manager.py` | Create `QuotaManager`; wire to controller + HTTP |
 | `lmcache/v1/multiprocess/http_server.py` | Quota CRUD endpoints |
-| `tests/v1/distributed/test_user_lru_eviction_policy.py` (new) | Unit tests |
+| `tests/v1/distributed/test_isolated_lru_eviction_policy.py` (new) | Unit tests |
 | `tests/v1/distributed/test_quota_manager.py` (new) | Unit tests |
 | `tests/v1/distributed/test_per_user_l2_eviction.py` (new) | Integration tests |

@@ -182,12 +182,12 @@ class TestStorageManagerTPLookup:
         # Create interleaved lookup keys for scheduler-style lookup
         lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
         handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
-        found_count = storage_manager.query_prefetch_status(handle)
+        found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
 
         # All keys should be found (5 chunks * 2 workers = 10)
         assert found_count == num_chunks * world_size
 
-        # Simulating MPCacheEngine.lookup logic
+        # Simulating MPCacheServer.lookup logic
         found_ipc_count = found_count // world_size
         assert found_ipc_count == num_chunks
 
@@ -210,7 +210,7 @@ class TestStorageManagerTPLookup:
         # Create interleaved lookup keys for scheduler-style lookup
         lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
         handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
-        found_count = storage_manager.query_prefetch_status(handle)
+        found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
 
         # Only worker 0's first chunk is found, then lookup stops
         # at worker 1's missing chunk
@@ -218,7 +218,7 @@ class TestStorageManagerTPLookup:
         # So we find chunk0_worker0 (1), then miss chunk0_worker1
         assert found_count == 1
 
-        # Simulating MPCacheEngine.lookup logic
+        # Simulating MPCacheServer.lookup logic
         found_ipc_count = found_count // world_size
         # 1 // 2 = 0, so no complete cache hit
         assert found_ipc_count == 0
@@ -242,12 +242,12 @@ class TestStorageManagerTPLookup:
         # Create interleaved lookup keys for scheduler-style lookup
         lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
         handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
-        found_count = storage_manager.query_prefetch_status(handle)
+        found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
 
         # First lookup key is chunk0_worker0 which is missing
         assert found_count == 0
 
-        # Simulating MPCacheEngine.lookup logic
+        # Simulating MPCacheServer.lookup logic
         found_ipc_count = found_count // world_size
         assert found_ipc_count == 0
 
@@ -276,12 +276,12 @@ class TestStorageManagerTPLookup:
         # Request 5 chunks with scheduler-style interleaved lookup
         lookup_keys = create_interleaved_lookup_keys(num_requested_chunks, world_size)
         handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
-        found_count = storage_manager.query_prefetch_status(handle)
+        found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
 
         # First 3 chunks * 2 workers = 6 keys found, then stops at chunk3_worker0
         assert found_count == num_stored_chunks * world_size
 
-        # Simulating MPCacheEngine.lookup logic
+        # Simulating MPCacheServer.lookup logic
         found_ipc_count = found_count // world_size
         assert found_ipc_count == num_stored_chunks
 
@@ -319,7 +319,7 @@ class TestStorageManagerTPLookup:
         # Request 5 chunks with scheduler-style interleaved lookup
         lookup_keys = create_interleaved_lookup_keys(5, world_size)
         handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
-        found_count = storage_manager.query_prefetch_status(handle)
+        found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
 
         # Lookup order:
         # chunk0_w0, chunk0_w1, chunk1_w0, chunk1_w1, chunk2_w0, chunk2_w1...
@@ -331,7 +331,7 @@ class TestStorageManagerTPLookup:
         # chunk2_w1: NOT found (stops)
         assert found_count == 5  # 2 complete chunks * 2 workers + 1 partial
 
-        # Simulating MPCacheEngine.lookup logic
+        # Simulating MPCacheServer.lookup logic
         found_ipc_count = found_count // world_size
         # 5 // 2 = 2, so only 2 complete chunks
         assert found_ipc_count == 2
@@ -359,7 +359,7 @@ class TestStorageManagerTPLookup:
         # Scheduler-style interleaved lookup
         lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
         handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
-        found_count = storage_manager.query_prefetch_status(handle)
+        found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
 
         # All keys found: 3 chunks * 4 workers = 12
         assert found_count == num_chunks * world_size
@@ -391,7 +391,7 @@ class TestStorageManagerTPLookup:
         # Scheduler-style interleaved lookup
         lookup_keys = create_interleaved_lookup_keys(num_chunks, world_size)
         handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
-        found_count = storage_manager.query_prefetch_status(handle)
+        found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
 
         # Lookup order: chunk0_w0, chunk0_w1, chunk0_w2, chunk0_w3, ...
         # chunk0_w0: found (1)
@@ -517,7 +517,7 @@ class TestTPEdgeCases:
 
         # Lookup should find all chunks
         handle = storage_manager.submit_prefetch_task(storage_keys, test_layout)
-        found_count = storage_manager.query_prefetch_status(handle)
+        found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
         assert found_count == num_chunks
 
         # Retrieve should work
@@ -560,7 +560,7 @@ class TestTPEdgeCases:
 
         # All keys should be found
         handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
-        found_count = storage_manager.query_prefetch_status(handle)
+        found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
         assert found_count == num_chunks * world_size
 
         # Verify retrieval for each worker
@@ -598,7 +598,7 @@ class TestTPEdgeCases:
 
         # Lookup all keys
         handle = storage_manager.submit_prefetch_task(storage_keys, test_layout)
-        found_count = storage_manager.query_prefetch_status(handle)
+        found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
         assert found_count == world_size
 
         # Retrieve each worker's key independently
@@ -662,7 +662,7 @@ class TestTPIntegration:
                     )
                 )
         handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
-        found_count = storage_manager.query_prefetch_status(handle)
+        found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
 
         # Step 4: Verify hit count
         # First 3 chunks * 2 workers = 6 keys found, then stops at chunk3_worker0
@@ -730,5 +730,5 @@ class TestTPIntegration:
                     )
                 )
         handle = storage_manager.submit_prefetch_task(lookup_keys, test_layout)
-        found_count = storage_manager.query_prefetch_status(handle)
+        found_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
         assert found_count == num_chunks * world_size

@@ -4,6 +4,7 @@
 """Native storage operations for LMCache."""
 
 # Standard
+from collections.abc import Sequence
 from typing import Any, Set, overload
 
 class TTLLock:
@@ -79,6 +80,10 @@ class Bitmap:
         """Set the bit at the specified index to 1."""
         ...
 
+    def batched_set(self, indices: Sequence[int]) -> None:
+        """Set every bit in ``indices`` to 1 (positions >= size ignored)."""
+        ...
+
     def clear(self, index: int) -> None:
         """Clear the bit at the specified index to 0."""
         ...
@@ -130,12 +135,12 @@ class Bitmap:
         """Return a set of indices where the bit is set to 1."""
         ...
 
-    def gather(self, items: list[Any]) -> list[Any]:
+    def gather(self, items: Sequence[Any]) -> list[Any]:
         """
         Return elements from items at indices where the bit is set to 1.
 
         Args:
-            items: A list of objects. Length should match the bitmap size.
+            items: A sequence of objects. Length should match the bitmap size.
 
         Returns:
             A list of objects from items at positions where the bitmap bit is 1.
@@ -176,6 +181,60 @@ class ParallelPatternMatcher:
         Returns:
             A sorted list of positions where the pattern starts.
             Returns an empty list if no matches are found.
+        """
+        ...
+
+class PeriodicEventNotifier:
+    """Singleton that periodically signals registered file descriptors.
+
+    A background thread writes to every registered fd at a configurable
+    interval.  The thread sleeps when no fds are registered and wakes
+    automatically when the first fd is added.
+    """
+
+    @staticmethod
+    def create(interval_ms: int, use_eventfd: bool) -> None:
+        """Create the singleton. Idempotent -- second call is a no-op.
+
+        Args:
+            interval_ms: Notification interval in milliseconds.
+            use_eventfd: True to write as eventfd (8-byte uint64),
+                False to write as pipe (1-byte).
+        """
+        ...
+
+    @staticmethod
+    def get() -> PeriodicEventNotifier | None:
+        """Return the singleton instance, or None if not created."""
+        ...
+
+    @staticmethod
+    def shutdown() -> None:
+        """Shut down the singleton and join its thread. Idempotent."""
+        ...
+
+    def register_fd(self, fd: int) -> None:
+        """Register a file descriptor for periodic signaling.
+
+        Args:
+            fd: The file descriptor to signal. For eventfd, pass the
+                eventfd itself. For pipes, pass the write end.
+        """
+        ...
+
+    def unregister_fd(self, fd: int) -> None:
+        """Unregister a file descriptor. No-op if not registered.
+
+        Args:
+            fd: The file descriptor to stop signaling.
+        """
+        ...
+
+    def set_interval_ms(self, interval_ms: int) -> None:
+        """Change the notification interval. Clamped to >= 1ms.
+
+        Args:
+            interval_ms: New interval in milliseconds.
         """
         ...
 

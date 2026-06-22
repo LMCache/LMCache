@@ -17,6 +17,7 @@ import time
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.otel_init import register_gauge
 
 try:
     # Third Party
@@ -117,6 +118,27 @@ class EventBus:
         self._discard_count: int = 0
         self._last_discard_warning: float = 0.0
         self._subscriber_exception_counts: dict[str, int] = {}
+
+        self._register_self_gauges()
+
+    def _register_self_gauges(self) -> None:
+        """Register the two self-monitoring gauges via ``register_gauge``."""
+        register_gauge(
+            "lmcache.event_bus",
+            "lmcache_mp.event_bus.queue_depth",
+            "Events currently queued in the EventBus.",
+            self.queue_depth,
+        )
+        register_gauge(
+            "lmcache.event_bus",
+            "lmcache_mp.event_bus.drain_lag_seconds",
+            (
+                "Seconds since the oldest queued event was published; 0.0 "
+                "when empty.  Rising values mean the drain thread is "
+                "falling behind."
+            ),
+            self.oldest_event_lag_seconds,
+        )
 
     # -- Public API --------------------------------------------------------
 

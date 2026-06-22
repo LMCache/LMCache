@@ -17,6 +17,9 @@ from lmcache.v1.mp_observability.subscribers.metrics.l0_lifecycle import (
     L0LifecycleSubscriber,
 )
 from lmcache.v1.mp_observability.subscribers.metrics.l1 import L1MetricsSubscriber
+from lmcache.v1.mp_observability.subscribers.metrics.l1_eviction_loop import (
+    L1EvictionLoopSubscriber,
+)
 from lmcache.v1.mp_observability.subscribers.metrics.l1_failures import (
     L1FailureMetricsSubscriber,
 )
@@ -33,7 +36,6 @@ from lmcache.v1.mp_observability.subscribers.metrics.l2_throughput import (
 from lmcache.v1.mp_observability.subscribers.metrics.lookup import (
     LookupMetricsSubscriber,
 )
-from lmcache.v1.mp_observability.subscribers.metrics.sm import SMMetricsSubscriber
 from lmcache.v1.mp_observability.subscribers.metrics.sm_lifecycle import (
     SMLifecycleSubscriber,
 )
@@ -44,6 +46,7 @@ __all__ = [
     "EventBusSelfMetricsSubscriber",
     "L0L1ThroughputSubscriber",
     "L0LifecycleSubscriber",
+    "L1EvictionLoopSubscriber",
     "L1FailureMetricsSubscriber",
     "L1LifecycleSubscriber",
     "L1MetricsSubscriber",
@@ -52,5 +55,4 @@ __all__ = [
     "L2ThroughputSubscriber",
     "LookupMetricsSubscriber",
     "SMLifecycleSubscriber",
-    "SMMetricsSubscriber",
 ]

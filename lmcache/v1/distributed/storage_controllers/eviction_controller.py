@@ -1,12 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
+# Future
+from __future__ import annotations
+
 # Standard
 from abc import abstractmethod
+from collections import Counter
+from typing import TYPE_CHECKING
 import threading
 import time
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.config import EvictionConfig
 from lmcache.v1.distributed.eviction import L1EvictionPolicy, L2EvictionPolicy
 from lmcache.v1.distributed.eviction_policy import CreateEvictionPolicy
@@ -17,6 +23,12 @@ from lmcache.v1.distributed.internal_api import (
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
 from lmcache.v1.distributed.storage_controller import StorageControllerInterface
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import get_event_bus
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.distributed.quota_manager import QuotaManager
 
 logger = init_logger(__name__)
 
@@ -93,6 +105,7 @@ class L1EvictionController(EvictionController):
         self._l1_manager = l1_manager
         self._listener = L1EvictionPolicy(self._eviction_policy)
         self._l1_manager.register_listener(self._listener)
+        self._event_bus = get_event_bus()
 
     def report_status(self) -> dict:
         return {
@@ -102,6 +115,32 @@ class L1EvictionController(EvictionController):
             "trigger_watermark": self._eviction_config.trigger_watermark,
             "eviction_ratio": self._eviction_config.eviction_ratio,
         }
+
+    def _publish_skipped(self, usage: float, watermark: float) -> None:
+        """Publish a below-watermark loop tick (no eviction this cycle)."""
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L1_EVICTION_LOOP_TICK,
+                metadata={
+                    "usage": usage,
+                    "watermark": watermark,
+                    "triggered": False,
+                },
+            )
+        )
+
+    def _publish_triggered(self, usage: float, watermark: float) -> None:
+        """Publish an above-watermark loop tick (eviction policy ran)."""
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L1_EVICTION_LOOP_TICK,
+                metadata={
+                    "usage": usage,
+                    "watermark": watermark,
+                    "triggered": True,
+                },
+            )
+        )
 
     def eviction_loop(self):
         watermark = self._eviction_config.trigger_watermark
@@ -117,6 +156,7 @@ class L1EvictionController(EvictionController):
                     usage,
                     watermark,
                 )
+                self._publish_skipped(usage, watermark)
                 continue
 
             logger.info(
@@ -130,6 +170,7 @@ class L1EvictionController(EvictionController):
             )
             for action in actions:
                 self.execute_eviction_action(action)
+            self._publish_triggered(usage, watermark)
 
     def execute_eviction_action(self, action: EvictionAction):
         if action.destination == EvictionDestination.DISCARD:
@@ -145,9 +186,11 @@ class L2AdapterEvictionState:
 
     def __init__(
         self,
+        adapter_id: int,
         adapter: L2AdapterInterface,
         eviction_config: EvictionConfig,
     ):
+        self.adapter_id = adapter_id
         self.adapter = adapter
         self.eviction_config = eviction_config
         self.eviction_policy = CreateEvictionPolicy(eviction_config)
@@ -161,13 +204,25 @@ class L2EvictionController(StorageControllerInterface):
 
     Each adapter gets its own eviction policy and listener bridge, but a
     single background thread loops over all of them.
+
+    When the adapter's policy sets ``support_isolation == True``
+    (e.g. :class:`IsolatedLRUEvictionPolicy`), the controller consults
+    the injected :class:`QuotaManager` to decide which ``cache_salt``
+    buckets are over budget and evicts from each one in isolation.
+    Otherwise it uses the adapter's aggregate ``usage_fraction``
+    against the configured watermark — unchanged from the pre-PR5
+    behavior.
     """
 
     def __init__(
         self,
         l2_adapter_states: list[L2AdapterEvictionState],
+        quota_manager: QuotaManager | None = None,
     ):
         self._adapter_states = l2_adapter_states
+        self._quota_manager = quota_manager
+        # Guards _adapter_states against concurrent runtime add/remove.
+        self._states_lock = threading.Lock()
         self._stop_flag = threading.Event()
         self._thread = threading.Thread(
             target=self._eviction_loop,
@@ -182,14 +237,34 @@ class L2EvictionController(StorageControllerInterface):
         self._stop_flag.set()
         self._thread.join()
 
+    def add_adapter_state(self, state: L2AdapterEvictionState) -> None:
+        """Register a new adapter's eviction state at runtime."""
+        with self._states_lock:
+            self._adapter_states.append(state)
+
+    def remove_adapter_state(self, adapter_id: int) -> None:
+        """Drop the eviction state for ``adapter_id``.
+
+        Blocks until any in-progress eviction pass finishes (it holds the
+        same lock), so the adapter is guaranteed idle here before the
+        caller closes it. A no-op if the adapter has no eviction state.
+        """
+        with self._states_lock:
+            self._adapter_states = [
+                s for s in self._adapter_states if s.adapter_id != adapter_id
+            ]
+
     def report_status(self) -> dict:
         # NOTE: ``usage.bytes_by_cache_salt`` is intentionally NOT
         # surfaced here. A deployment can have 10k+ salts, so embedding
         # the full bucket map in the status response would blow up the
-        # payload. A separate paginated / queried endpoint is the right
-        # home for per-salt inspection if we need it.
+        # payload. Per-salt inspection goes through the dedicated HTTP
+        # quota endpoints (which pull from ``QuotaManager`` +
+        # ``StorageManager.get_usage_bytes_by_cache_salt``).
         adapter_statuses = []
-        for state in self._adapter_states:
+        with self._states_lock:
+            states = list(self._adapter_states)
+        for state in states:
             usage = state.adapter.get_usage()
             adapter_statuses.append(
                 {
@@ -211,10 +286,21 @@ class L2EvictionController(StorageControllerInterface):
     def _eviction_loop(self):
         while not self._stop_flag.is_set():
             time.sleep(1)
-            for state in self._adapter_states:
-                self._check_and_evict(state)
+            # Hold the lock across the whole pass so remove_adapter_state
+            # cannot detach (and the caller close) an adapter while we are
+            # calling into it.
+            with self._states_lock:
+                for state in self._adapter_states:
+                    self._check_and_evict(state)
 
     def _check_and_evict(self, state: L2AdapterEvictionState):
+        if state.eviction_policy.support_isolation and self._quota_manager is not None:
+            self._check_and_evict_by_cache_salt(state)
+        else:
+            self._check_and_evict_global(state)
+
+    def _check_and_evict_global(self, state: L2AdapterEvictionState):
+        """Aggregate-usage eviction (``LRU`` / ``noop``)."""
         watermark = state.eviction_config.trigger_watermark
         eviction_ratio = state.eviction_config.eviction_ratio
 
@@ -241,6 +327,65 @@ class L2EvictionController(StorageControllerInterface):
         for action in actions:
             self._execute_eviction_action(state.adapter, action)
 
+    def _check_and_evict_by_cache_salt(self, state: L2AdapterEvictionState):
+        """Per-``cache_salt`` eviction driven by :class:`QuotaManager`.
+
+        For every salt with non-zero bytes, compare its usage against
+        ``watermark * quota``. Salts over threshold get eviction scoped
+        to their own LRU list. Salts with no quota registered have an
+        effective limit of ``0`` and are therefore always over budget,
+        so they get a full eviction (``effective_ratio=1.0``) — this
+        enforces the allowlist rule: only registered salts retain data.
+
+        Per-destination keys are batched across all over-budget salts
+        before invoking the adapter — one ``adapter.delete(...)`` call
+        per destination instead of one per (salt, destination) pair.
+        Adapters with non-trivial per-call overhead (NIXL handle setup,
+        FS sync, etc.) see this as a real win when many salts go over
+        budget in the same cycle.
+        """
+        assert self._quota_manager is not None
+        watermark = state.eviction_config.trigger_watermark
+        eviction_ratio = state.eviction_config.eviction_ratio
+        usage = state.adapter.get_usage()
+
+        # destination -> accumulated keys across all over-budget salts.
+        pending: dict[EvictionDestination, list[ObjectKey]] = {}
+
+        for cache_salt, user_bytes in usage.bytes_by_cache_salt.items():
+            if user_bytes <= 0:
+                continue
+            limit = self._quota_manager.get_limit_bytes(cache_salt)
+            # Trigger on ``>=`` to match the global branch's ``usage <
+            # watermark`` short-circuit. Salts with no quota (limit=0)
+            # always land here because ``user_bytes > 0 >= 0``.
+            if user_bytes < watermark * limit:
+                continue
+
+            # Unregistered / zero-quota salts: wipe everything.
+            # Registered salts: evict the configured ratio of their list.
+            effective_ratio = 1.0 if limit == 0 else eviction_ratio
+            logger.info(
+                "cache_salt=%r over quota (bytes=%d, limit=%d, "
+                "watermark=%.2f); evicting ratio=%.2f.",
+                cache_salt,
+                user_bytes,
+                limit,
+                watermark,
+                effective_ratio,
+            )
+            actions = state.eviction_policy.get_eviction_actions(
+                effective_ratio, cache_salt=cache_salt
+            )
+            for action in actions:
+                pending.setdefault(action.destination, []).extend(action.keys)
+
+        for destination, keys in pending.items():
+            self._execute_eviction_action(
+                state.adapter,
+                EvictionAction(keys=keys, destination=destination),
+            )
+
     def _execute_eviction_action(
         self, adapter: L2AdapterInterface, action: EvictionAction
     ):
@@ -250,3 +395,16 @@ class L2EvictionController(StorageControllerInterface):
             logger.error("Unsupported eviction destination: %s", action.destination)
             logger.error("Treating it as DISCARD.")
             adapter.delete(action.keys)
+
+        if action.keys:
+            get_event_bus().publish(
+                Event(
+                    event_type=EventType.L2_KEYS_EVICTED,
+                    metadata={
+                        "key_count": len(action.keys),
+                        "key_count_per_salt": Counter(
+                            k.cache_salt for k in action.keys
+                        ),
+                    },
+                )
+            )

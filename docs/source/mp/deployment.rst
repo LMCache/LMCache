@@ -159,19 +159,19 @@ Health Checking (HTTP Server)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 For Kubernetes liveness/readiness probes, deploy the HTTP server variant
-instead.  Use the ``/api/healthcheck`` endpoint:
+instead.  Use the ``/healthcheck`` endpoint:
 
 .. code-block:: yaml
 
     livenessProbe:
       httpGet:
-        path: /api/healthcheck
+        path: /healthcheck
         port: 8080
       initialDelaySeconds: 10
       periodSeconds: 30
     readinessProbe:
       httpGet:
-        path: /api/healthcheck
+        path: /healthcheck
         port: 8080
       initialDelaySeconds: 5
       periodSeconds: 10
@@ -181,7 +181,7 @@ Monitoring Integration
 
 Prometheus metrics are enabled by default on port 9090.  Add a
 ``ServiceMonitor`` or Prometheus scrape annotation to collect metrics from the
-LMCache DaemonSet pods.  See :doc:`observability` for metric details.
+LMCache DaemonSet pods.  See :doc:`observability/index` for metric details.
 
 Cleanup
 ~~~~~~~
@@ -218,3 +218,53 @@ A larger L1 cache means fewer L2 round-trips.
 **Logging:**
 Use ``LMCACHE_LOG_LEVEL=DEBUG`` during initial setup to verify L2 store/load
 activity.  Switch to ``INFO`` (default) for production to reduce log volume.
+
+Transfer Mode (``--supported-transfer-mode``, ``--shm-name``)
+-------------------------------------------------------------
+
+LMCache supports two worker → server transfer paths: an
+**lmcache-driven** path (server pulls/pushes via CUDA IPC or CPU SHM,
+used for STORE/RETRIEVE) and an **engine-driven** path
+(PREPARE/COMMIT, used by CPU-only or non-CUDA accelerator workers).
+The server picks which paths to load via ``--supported-transfer-mode``:
+
+- ``auto`` *(default)* -- load both paths.  Workers of either device
+  type can connect without manual configuration; the server has no
+  upfront knowledge of the connecting worker's device.
+- ``lmcache_driven`` -- load only the server-driven transfer path.
+  Supports CUDA devices (IPC) and CPU devices (SHM).  Use to skip
+  allocating the engine-driven prepare/commit resources (pickle codec).
+- ``engine_driven`` -- load only the engine-driven path.  Use when
+  serving CPU-only or non-CUDA accelerator workers.
+
+When the engine-driven path is loaded (``auto`` or ``engine_driven``),
+LMCache by default creates a shared-memory (SHM) pool for KV transfers
+between the server and vLLM workers.  The ``--shm-name`` option lets
+you control this behavior:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Value
+     - Effect
+   * - *(not set)* (default)
+     - Auto-allocate a SHM pool (current default behavior).
+   * - ``""`` (empty string)
+     - Disable the SHM pool entirely and fall back to the pickle-based
+       transfer path.  Useful when ``/dev/shm`` is unavailable or when
+       running without ``--ipc host`` in Docker.
+   * - ``"my_pool"`` (any non-empty name)
+     - Use that exact name for the SHM segment instead of the
+       auto-generated one.  Handy when you need a deterministic,
+       human-readable segment name for monitoring or debugging.
+
+**Examples:**
+
+.. code-block:: bash
+
+    # Force pickle (no SHM):
+    lmcache server --l1-size-gb 60 --eviction-policy LRU --shm-name ""
+
+    # Named SHM segment:
+    lmcache server --l1-size-gb 60 --eviction-policy LRU --shm-name "lmcache_pool"

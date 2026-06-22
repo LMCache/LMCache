@@ -94,7 +94,7 @@ def safe_get(data: dict, *keys, default=None):  # type: ignore[type-arg]
 
 
 class KVCacheDescriber:
-    """Builds the ``describe kvcache`` output from a ``/api/status`` response.
+    """Builds the ``describe kvcache`` output from a ``/status`` response.
 
     Each ``add_*`` method populates one logical section. The orchestrating
     :meth:`describe` calls them in order and emits the result.  Adding a
@@ -171,8 +171,13 @@ class KVCacheDescriber:
         )
 
     def add_models(self) -> None:
-        """Per-model KV cache layout sections."""
-        gpu_meta = self.data.get("gpu_context_meta", {})
+        """Per-model KV cache layout sections.
+
+        Each model gets one section with context-wide fields, followed by
+        one ``kernel_groups`` list entry per kernel group carrying that
+        group's identity and geometry.
+        """
+        gpu_meta = self.data.get("cache_context_meta", {})
         if not gpu_meta:
             return
 
@@ -199,28 +204,53 @@ class KVCacheDescriber:
             layout = info.get("layout")
             if not layout:
                 continue
-            sec.add(
-                "attention_backend",
-                "Attention backend",
-                layout.get("attention_backend"),
+            for _key, _label in (
+                ("num_layers", "Num layers"),
+                ("num_blocks", "Num blocks"),
+                ("cache_size_per_token", "Cache size per token (bytes)"),
+            ):
+                if _key in layout:
+                    sec.add(_key, _label, layout[_key])
+
+            self._add_kernel_groups(idx, model_name, layout.get("kernel_groups", []))
+
+    def _add_kernel_groups(
+        self, model_idx: int, model_name: str, kernel_groups: list
+    ) -> None:
+        """Emit one ``kernel_groups`` list section per kernel group.
+
+        Args:
+            model_idx: Index of the owning model section (keeps section keys
+                unique across models).
+            model_name: Human-readable model name, shown in each group header.
+            kernel_groups: The model layout's ``kernel_groups`` list (each a
+                dict produced by ``GPUCacheContext.report_status``).
+        """
+        for group in kernel_groups:
+            kg_idx = group.get("kernel_group_idx")
+            section_key = f"model_{model_idx}_kg_{kg_idx}"
+            self.metrics.add_list_section(
+                "kernel_groups",
+                section_key,
+                f"Kernel group {kg_idx} ({model_name})",
             )
-            sec.add("gpu_kv_shape", "GPU KV shape", layout.get("gpu_kv_shape"))
-            sec.add(
-                "gpu_kv_concrete_shape",
-                "GPU KV tensor shape",
-                layout.get("gpu_kv_concrete_shape"),
-            )
-            sec.add("num_layers", "Num layers", layout["num_layers"])
-            sec.add("block_size", "Block size", layout["block_size"])
-            sec.add("hidden_dim_sizes", "Hidden dim sizes", layout["hidden_dim_sizes"])
-            sec.add("dtype", "Dtype", layout["dtype"])
-            sec.add("is_mla", "MLA", layout["is_mla"])
-            sec.add("num_blocks", "Num blocks", layout["num_blocks"])
-            sec.add(
-                "cache_size_per_token",
-                "Cache size per token (bytes)",
-                layout["cache_size_per_token"],
-            )
+            sec = self.metrics[section_key]
+            sec.add("model", "Model", model_name)
+            for _key, _label in (
+                ("kernel_group_idx", "Kernel group index"),
+                ("engine_group_idx", "Engine group index"),
+                ("object_group_idx", "Object group index"),
+                ("num_layers", "Num layers"),
+                ("tokens_per_block", "Tokens per block"),
+                ("slots_per_block", "Slots per block"),
+                ("dtype", "Dtype"),
+                ("is_mla", "MLA"),
+                ("attention_backend", "Attention backend"),
+                ("engine_kv_shape", "Engine KV shape"),
+                ("engine_kv_concrete_shape", "Engine KV tensor shape"),
+            ):
+                if _key in group:
+                    sec.add(_key, _label, group[_key])
 
     def add_l2_adapters(self) -> None:
         """L2 adapter sections."""
@@ -301,7 +331,7 @@ class DescribeCommand(BaseCommand):
     def _describe_kvcache(self, args: argparse.Namespace) -> None:
         base_url = normalize_url(args.url)
         try:
-            data = fetch_json(f"{base_url}/api/status")
+            data = fetch_json(f"{base_url}/status")
         except DescribeError as exc:
             print(str(exc), file=sys.stderr)
             sys.exit(1)
