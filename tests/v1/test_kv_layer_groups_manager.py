@@ -399,7 +399,7 @@ class TestKernelAndObjectGroups:
         assert isinstance(obj, ObjectGroupInfo)
         assert obj.kernel_group_indices == list(range(manager.num_kernel_groups))
         assert obj.sw_size_chunks == -1
-        assert manager.get_attn_desc().window_chunks == [-1]
+        assert manager.get_attn_desc().num_chunks_in_sw == [-1]
 
     def test_object_group_separation_disabled_merges_groups(self):
         # With separation off (the default), a full-attention group and a
@@ -418,7 +418,7 @@ class TestKernelAndObjectGroups:
         assert manager.num_kernel_groups == 2
         assert manager.num_object_groups == 1
         assert manager.object_groups[0].kernel_group_indices == [0, 1]
-        assert manager.get_attn_desc().window_chunks == [-1]
+        assert manager.get_attn_desc().num_chunks_in_sw == [-1]
 
     def test_object_group_separation_enabled_buckets_by_window(self):
         # With separation on, the full-attention and sliding-window kernel groups
@@ -440,10 +440,10 @@ class TestKernelAndObjectGroups:
         assert manager.object_groups[0].kernel_group_indices == [0]
         assert manager.object_groups[0].sw_size_chunks == -1
         attn_desc = manager.get_attn_desc()
-        assert attn_desc.window_chunks[0] == -1
+        assert attn_desc.num_chunks_in_sw[0] == -1
         assert manager.object_groups[1].kernel_group_indices == [1]
         assert manager.object_groups[1].sw_size_chunks >= 1
-        assert attn_desc.window_chunks[1] == manager.object_groups[1].sw_size_chunks
+        assert attn_desc.num_chunks_in_sw[1] == manager.object_groups[1].sw_size_chunks
 
     def test_object_group_separation_enabled_non_hybrid_single_group(self):
         # Even with separation on, a non-hybrid model (no sliding-window groups)
@@ -454,7 +454,7 @@ class TestKernelAndObjectGroups:
         ]
         manager = _build_manager(tensors, num_blocks=32, separate_object_groups=True)
         assert manager.num_object_groups == 1
-        assert manager.get_attn_desc().window_chunks == [-1]
+        assert manager.get_attn_desc().num_chunks_in_sw == [-1]
 
     def test_kernel_groups_carry_sw_size_tokens(self):
         # Same-shape layers split by engine group; the sliding-window group's
@@ -529,7 +529,7 @@ class TestKernelAndObjectGroups:
         obj = manager.object_groups[0]
         assert obj.kernel_group_indices == list(range(manager.num_kernel_groups))
         assert obj.sw_size_chunks == -1
-        assert manager.get_attn_desc().window_chunks == [-1]
+        assert manager.get_attn_desc().num_chunks_in_sw == [-1]
 
     def test_empty_manager_has_no_groups(self):
         # Empty registration returns early in __init__; both group lists must

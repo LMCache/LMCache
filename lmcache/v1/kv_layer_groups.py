@@ -514,7 +514,7 @@ class KVLayerGroupsManager:
         """Return the cross-chunk attention windows of all object groups.
 
         Returns:
-            An :class:`AttnWindowDesc` whose ``window_chunks[g]`` is object
+            An :class:`AttnWindowDesc` whose ``num_chunks_in_sw[g]`` is object
             group ``g``'s window (``-1`` for a non-sliding-window group), in
             object-group order.
 
@@ -524,7 +524,7 @@ class KVLayerGroupsManager:
             (the default), there is a single full-attention object group.
         """
         return AttnWindowDesc(
-            window_chunks=[
+            num_chunks_in_sw=[
                 w if w >= 1 else -1
                 for w in (g.sw_size_chunks for g in self._object_groups)
             ]

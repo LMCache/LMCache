@@ -142,13 +142,20 @@ class LayoutDescRegistry:
             world_size: The world size.
 
         Returns:
-            The :class:`AttnWindowDesc` registered for the pair, or a single
-            full-attention group if the pair is not registered.
+            The :class:`AttnWindowDesc` registered for the pair.
+
+        Raises:
+            ValueError: If no descriptor is registered for the pair. Callers
+                must register the KV cache (which establishes the pair) before
+                looking up its windows.
         """
         with self._lock:
             entry = self._registry.get((model_name, world_size))
             if entry is None:
-                return DEFAULT_ATTN_WINDOW_DESC
+                raise ValueError(
+                    f"No attention-window descriptor registered for model "
+                    f"{model_name!r} with world size {world_size}"
+                )
             return entry.attn_desc
 
 

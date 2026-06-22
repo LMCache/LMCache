@@ -272,7 +272,7 @@ def transfer_kv_per_object_group(
     attn_desc = kv_groups_manager.get_attn_desc()
     num_objects_to_skip = 0
     if not attn_desc.is_full_attention(object_group_id) and is_h2d:
-        sw_size_chunks = attn_desc.window_chunks[object_group_id]
+        sw_size_chunks = attn_desc.num_chunks_in_sw[object_group_id]
         num_objects_to_skip = max(0, len(memory_objs) - sw_size_chunks)
         logger.debug(
             "Detected sliding window for object group %d: "

@@ -182,16 +182,16 @@ class AttnWindowDesc:
     """Cross-chunk attention windows of all object groups, in LMCache chunks.
 
     Mirrors :class:`MemoryLayoutDesc`: a single descriptor covers every object
-    group of a registration. ``window_chunks[g]`` is the number of trailing
+    group of a registration. ``num_chunks_in_sw[g]`` is the number of trailing
     prefix chunks object group ``g`` needs present to serve a cache hit. ``-1``
     means full attention (the whole prefix); ``w >= 1`` is a sliding window of
     ``w`` chunks (mamba is ``1``).
     """
 
-    window_chunks: list[int]
+    num_chunks_in_sw: list[int]
 
     def __post_init__(self) -> None:
-        for w in self.window_chunks:
+        for w in self.num_chunks_in_sw:
             if w == 0 or w < -1:
                 raise ValueError(
                     "AttnWindowDesc: each window must be -1 (full attention) "
@@ -201,7 +201,7 @@ class AttnWindowDesc:
     @property
     def num_object_groups(self) -> int:
         """Number of object groups this descriptor covers."""
-        return len(self.window_chunks)
+        return len(self.num_chunks_in_sw)
 
     def is_full_attention(self, object_group_idx: int) -> bool:
         """Whether the object group depends on the entire prefix.
@@ -213,10 +213,10 @@ class AttnWindowDesc:
             True if the group attends to the whole prefix, False if it uses a
             bounded sliding window.
         """
-        return self.window_chunks[object_group_idx] < 0
+        return self.num_chunks_in_sw[object_group_idx] < 0
 
 
-DEFAULT_ATTN_WINDOW_DESC = AttnWindowDesc(window_chunks=[-1])
+DEFAULT_ATTN_WINDOW_DESC = AttnWindowDesc(num_chunks_in_sw=[-1])
 """A single full-attention object group; the default when no per-object-group
 windows are supplied."""
 

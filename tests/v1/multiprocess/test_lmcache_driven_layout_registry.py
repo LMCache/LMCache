@@ -22,7 +22,7 @@ class _FakeKVLayerGroupsManager:
         # First Party
         from lmcache.v1.distributed.api import AttnWindowDesc
 
-        return AttnWindowDesc(window_chunks=[-1])
+        return AttnWindowDesc(num_chunks_in_sw=[-1])
 
 
 class _FakeGPUContext:
@@ -157,20 +157,21 @@ def test_registry_attn_desc_roundtrip() -> None:
 
     registry = LayoutDescRegistry()
     registry.register(
-        "m", 2, _layout(), attn_desc=AttnWindowDesc(window_chunks=[-1, 2])
+        "m", 2, _layout(), attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1, 2])
     )
 
-    assert registry.find_attn_desc("m", 2).window_chunks == [-1, 2]
+    assert registry.find_attn_desc("m", 2).num_chunks_in_sw == [-1, 2]
 
 
-def test_registry_windows_default_single_group_when_unregistered() -> None:
-    """find_attn_desc returns one full-attention group for an unknown pair."""
+def test_registry_attn_desc_raises_when_unregistered() -> None:
+    """find_attn_desc raises for an unknown (model, world_size) pair."""
     # First Party
     from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 
     registry = LayoutDescRegistry()
 
-    assert registry.find_attn_desc("missing", 1).window_chunks == [-1]
+    with pytest.raises(ValueError, match="No attention-window descriptor"):
+        registry.find_attn_desc("missing", 1)
 
 
 def test_registry_windows_default_single_group_when_omitted() -> None:
@@ -181,7 +182,7 @@ def test_registry_windows_default_single_group_when_omitted() -> None:
     registry = LayoutDescRegistry()
     registry.register("m", 1, _layout())
 
-    assert registry.find_attn_desc("m", 1).window_chunks == [-1]
+    assert registry.find_attn_desc("m", 1).num_chunks_in_sw == [-1]
 
 
 def test_registry_windows_updated_on_reregister() -> None:
@@ -191,9 +192,11 @@ def test_registry_windows_updated_on_reregister() -> None:
     from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 
     registry = LayoutDescRegistry()
-    registry.register("m", 1, _layout(), attn_desc=AttnWindowDesc(window_chunks=[-1]))
     registry.register(
-        "m", 1, _layout(), attn_desc=AttnWindowDesc(window_chunks=[-1, 4])
+        "m", 1, _layout(), attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1])
+    )
+    registry.register(
+        "m", 1, _layout(), attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1, 4])
     )
 
-    assert registry.find_attn_desc("m", 1).window_chunks == [-1, 4]
+    assert registry.find_attn_desc("m", 1).num_chunks_in_sw == [-1, 4]
