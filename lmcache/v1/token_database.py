@@ -107,7 +107,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
             NONE_HASH = 0
             logger.info("Using default NONE_HASH=0 (vLLM not available)")
 
-        logger.info(f"Using hash algorithm: {hash_algorithm}")
+        logger.info("Using hash algorithm: %s", hash_algorithm)
         self.metadata = metadata
         # Whether only the first rank should save cache. This flag is also used
         # to control the logical world_size embedded into CacheEngineKey.
@@ -187,7 +187,7 @@ class TokenDatabase(metaclass=abc.ABCMeta):
         for name in names_to_try:
             try:
                 hash_func = get_hash_fn_by_name(name)
-                logger.info(f"Loaded '{name}' from {module_name}")
+                logger.info("Loaded '%s' from %s", name, module_name)
                 return hash_func
             except ValueError:
                 continue

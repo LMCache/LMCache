@@ -1806,15 +1806,15 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         """
         clear = True
         logger.info("Checking memory allocator consistency")
-        logger.info(f" - Total active allocations: {self.num_active_allocations}")
+        logger.info(" - Total active allocations: %d", self.num_active_allocations)
         logger.info(
-            f" - Total allocated size: "
-            f"{self.address_manager.total_allocated_size / 1048576} MB"
+            " - Total allocated size: %f MB",
+            self.address_manager.total_allocated_size / 1048576,
         )
 
         # Check the real total free size
         total_free_size = self.address_manager.get_free_size()
-        logger.info(f" - Total free size: {total_free_size / 1048576} MB")
+        logger.info(" - Total free size: %f MB", total_free_size / 1048576)
 
         # Check if the numbers are consistent
         if (
@@ -2100,14 +2100,14 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         """
 
         logger.info("Checking memory allocator consistency")
-        logger.info(f" - Total active allocations: {self.num_active_allocations}")
+        logger.info(" - Total active allocations: %d", self.num_active_allocations)
         logger.info(
-            f" - Total allocated size: {self.total_allocated_size / 1048576} MB"
+            " - Total allocated size: %f MB", self.total_allocated_size / 1048576
         )
 
         # Check the real total free size
         total_free_size = len(self.free_blocks) * self.align_bytes
-        logger.info(f" - Total free size: {total_free_size / 1048576} MB")
+        logger.info(" - Total free size: %f MB", total_free_size / 1048576)
 
         # Check if the numbers are consistent
         if total_free_size + self.total_allocated_size != self.buffer.numel():
