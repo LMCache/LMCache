@@ -9,7 +9,7 @@ x-perf-retry: &perf-retry
   automatic:
     - exit_status: -1
       limit: 2
-    - exit_status: 1
+    - exit_status: "*"
       limit: 2
 
 steps:
