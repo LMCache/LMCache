@@ -39,6 +39,7 @@ class EngineBenchConfig:
     export_csv: bool
     export_json: bool
     quiet: bool
+    ignore_eos: bool = False
 
     def __post_init__(self) -> None:
         if not self.engine_url:
@@ -246,4 +247,5 @@ def parse_args_to_config(args: argparse.Namespace) -> EngineBenchConfig:
         export_csv=not args.no_csv,
         export_json=args.json,
         quiet=args.quiet,
+        ignore_eos=args.ignore_eos,
     )

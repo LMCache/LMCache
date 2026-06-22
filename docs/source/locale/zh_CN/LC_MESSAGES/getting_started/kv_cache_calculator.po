@@ -31,13 +31,15 @@ msgstr "使用此交互式计算器来："
 msgid ""
 "**Calculate KV Cache Size**: Estimate the memory required for caching a "
 "specific number of tokens"
-msgstr "**计算 KV Cache 大小**：估算缓存特定数量的令牌所需的内存"
+msgstr ""
+"**计算 KV Cache 大小**\\ ：估算缓存特定数量的令牌所需的内存"
 
 #: ../../source/getting_started/kv_cache_calculator.rst:7
 msgid ""
 "**Calculate Maximum Tokens**: Find out how many tokens you can cache "
 "given your available GPU RAM"
-msgstr "**计算最大令牌数**：找出在可用的 GPU RAM 下可以缓存多少令牌"
+msgstr ""
+"**计算最大令牌数**\\ ：找出在可用的 GPU RAM 下可以缓存多少令牌"
 
 #: ../../source/getting_started/kv_cache_calculator.rst:9
 msgid "This helps you plan memory requirements for your LMCache deployment."

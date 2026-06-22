@@ -354,6 +354,9 @@ def _coord_engine(chunk_size: int = 4):
 
     eng = MagicMock(spec=v3_mod.BlendV3Module)
     eng._ctx = SimpleNamespace(chunk_size=chunk_size)
+    # _event_bus is an instance attr (set in __init__), so spec= omits it;
+    # _poll_coordinator_match publishes CB_COORDINATOR_MATCH_END through it.
+    eng._event_bus = MagicMock()
     eng._build_global_segments = v3_mod.BlendV3Module._build_global_segments.__get__(
         eng
     )

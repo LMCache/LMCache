@@ -47,6 +47,16 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
 
+      # Two LMCache MP instances + two vLLM instances + one coordinator on a
+      # single 2-GPU pod (localhost). Verifies engine B serves a long prompt's
+      # KV from engine A over P2P.
+      - label: ":compression: p2p"
+        command: .buildkite/k3_tests/multiprocess/run.sh p2p
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
+        artifact_paths: ["*.log"]
+
   - group: ":compression: Multiprocess (1-GPU)"
     steps:
       - label: ":compression: lm_eval"

@@ -38,7 +38,7 @@ import threading
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import KeyListPage, MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
 from lmcache.v1.distributed.l1_manager import L1Manager
@@ -223,8 +223,10 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
     # Lookup / unlock (pure delegation)
     # ------------------------------------------------------------------
 
-    def submit_lookup_and_lock_task(self, keys: list[ObjectKey]) -> L2TaskId:
-        return self._inner.submit_lookup_and_lock_task(keys)
+    def submit_lookup_and_lock_task(
+        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+    ) -> L2TaskId:
+        return self._inner.submit_lookup_and_lock_task(keys, layout_desc)
 
     def query_lookup_and_lock_result(self, task_id: L2TaskId) -> Bitmap | None:
         return self._inner.query_lookup_and_lock_result(task_id)
@@ -309,6 +311,18 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
 
     def delete(self, keys: list[ObjectKey]) -> None:
         self._inner.delete(keys)
+
+    def list_l2_keys(
+        self,
+        model_name: str | None = None,
+        page_size: int = 500,
+        cursor: str | None = None,
+    ) -> KeyListPage:
+        return self._inner.list_l2_keys(
+            model_name=model_name,
+            page_size=page_size,
+            cursor=cursor,
+        )
 
     def register_listener(self, listener: L2AdapterListener) -> None:
         # Listeners track what's actually stored — which is inner's job.

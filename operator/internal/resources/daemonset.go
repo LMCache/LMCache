@@ -152,6 +152,21 @@ func buildDaemonSetCore(
 			},
 		)
 	}
+	// Inject the pod IP as the coordinator advertise address (downward API)
+	// when registration is enabled and no explicit advertiseIP is set, so the
+	// coordinator can reach this server. The server's --coordinator-advertise-ip
+	// flag falls back to this env var.
+	if spec.Coordinator != nil && derefString(spec.Coordinator.URL, "") != "" &&
+		(spec.Coordinator.AdvertiseIP == nil || *spec.Coordinator.AdvertiseIP == "") {
+		envVars = append(envVars, corev1.EnvVar{
+			Name: "LMCACHE_COORDINATOR_ADVERTISE_IP",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "status.podIP",
+				},
+			},
+		})
+	}
 	envVars = append(envVars, spec.Env...)
 
 	// No emptyDir /dev/shm mount — hostIPC: true exposes the host's /dev/shm

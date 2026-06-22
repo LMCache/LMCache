@@ -53,7 +53,8 @@ msgid ""
 "Even when retrieve is skipped, LMCache still records the hit tokens "
 "internally so that it does **not** re-store chunks that already exist in "
 "the cache."
-msgstr "即使跳过了查找，LMCache 仍然在内部记录命中的令牌，以便它**不**会重新存储已经存在于缓存中的块。"
+msgstr ""
+"即使跳过了查找，LMCache 仍然在内部记录命中的令牌，以便它\\ **不**\\ 会重新存储已经存在于缓存中的块。"
 
 #: ../../source/production/performance_tuning.rst:29
 msgid "When to Use"
@@ -61,7 +62,8 @@ msgstr "何时使用"
 
 #: ../../source/production/performance_tuning.rst:31
 msgid "Consider setting ``min_retrieve_tokens`` when:"
-msgstr "考虑在以下情况下设置 ``min_retrieve_tokens``："
+msgstr ""
+"考虑在以下情况下设置 ``min_retrieve_tokens``\\ ："
 
 #: ../../source/production/performance_tuning.rst:33
 msgid ""
@@ -73,7 +75,8 @@ msgstr "对于您使用的后端，小负载的传输延迟是显著的。"
 msgid ""
 "Your workload has many requests with **low cache hit ratios**, where "
 "recomputation is faster than cache loading."
-msgstr "您的工作负载有许多请求，**缓存命中率低**，在这种情况下，重计算比缓存加载更快。"
+msgstr ""
+"您的工作负载有许多请求，\\ **缓存命中率低**\\ ，在这种情况下，重计算比缓存加载更快。"
 
 #: ../../source/production/performance_tuning.rst:37
 msgid "You want to reduce unnecessary I/O for marginal cache hits."
@@ -101,7 +104,8 @@ msgstr "工作示例"
 
 #: ../../source/production/performance_tuning.rst:61
 msgid "Create an LMCache configuration file ``lmcache_config.yaml``:"
-msgstr "创建一个 LMCache 配置文件 ``lmcache_config.yaml``："
+msgstr ""
+"创建一个 LMCache 配置文件 ``lmcache_config.yaml``\\ ："
 
 #: ../../source/production/performance_tuning.rst:70
 msgid "Start vLLM with LMCache:"

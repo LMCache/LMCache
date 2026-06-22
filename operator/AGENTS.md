@@ -123,6 +123,7 @@ Both names point at the same image; only the hostnames differ.
 |---|---|
 | `runtime_smoke_test.go` | HTTP `/conf` round-trip — proves CR field values reach the live LMCache server (not just the K8s objects) by asserting `mp.port` / `mp.chunk_size` / `mp.max_workers` / `mp.hash_algorithm` / `http.http_port` against the running pod's `/conf` payload. |
 | `vllm_integration_smoke_test.go` | vLLM + LMCache round-trip — spins up a vLLM `Deployment` configured against the operator's `<engine>-connection` ConfigMap with `--no-enable-prefix-caching`, sends the same long prompt twice, and asserts `lmcache:num_hit_tokens` on the LMCache `/metrics` endpoint increments on the second call. |
+| `cacheblend_integration_smoke_test.go` | vLLM + CacheBlendEngine round-trip — reconciles a `CacheBlendEngine` (blend server DaemonSet), creates an args-only vLLM `Deployment` that opts into CacheBlend injection (label `lmcache.ai/cacheblend-inject` + engine annotation), and asserts: the mutating webhook stamped `cacheblend-injected=true` and injected `--attention-backend CUSTOM`; vLLM logs the CUSTOM backend banner and serves `/v1/models`; the engine logs `Registered CB rope state for instance N` after a completion; the completion returns HTTP 200. Pulls the PRIVATE payload image via a `dockerconfigjson` Secret built from `CACHEBLEND_REGISTRY_USER`/`CACHEBLEND_REGISTRY_TOKEN` — **Skips** if those are unset. |
 
 ### Prerequisites
 
@@ -278,6 +279,27 @@ Use when targeting OpenShift / EKS / GKE GPU clusters. Prerequisites:
 
 Timeout is 60 min — cold image pulls + model download routinely eat
 20+ min before the first inference.
+
+#### CacheBlend integration knobs
+
+`cacheblend_integration_smoke_test.go` pulls a **private** payload image
+(`tensormesh/cacheblend-plugin:latest-nightly`). It builds a
+`dockerconfigjson` pull Secret in the test namespace from env credentials, so
+set these (in Buildkite: pipeline secrets, same mechanism as `HF_TOKEN`):
+
+- `CACHEBLEND_REGISTRY_USER` / `CACHEBLEND_REGISTRY_TOKEN` — registry username +
+  read-only PAT. **Unset ⇒ the spec Skips** (keeps credential-less clusters green).
+- `CACHEBLEND_REGISTRY_SERVER` — registry server (default
+  `https://index.docker.io/v1/` for Docker Hub).
+- `CACHEBLEND_PAYLOAD_IMAGE` — override the private plugin image (default
+  `tensormesh/cacheblend-plugin:latest-nightly`).
+- `CACHEBLEND_ENGINE_IMAGE` — blend server image (default
+  `lmcache/vllm-openai:latest-nightly`). `VLLM_IMAGE` (also defaults to
+  `latest-nightly` for this spec) / `VLLM_MODEL` apply as above. Engine, vLLM,
+  and the latest-nightly payload plugin must share a compatibility window.
+- `CACHEBLEND_BACKEND_LOG_PATTERN` — regex proving vLLM loaded the CUSTOM
+  attention backend (default `Using AttentionBackendEnum\.CUSTOM backend`).
+- `SKIP_CACHEBLEND_INTEGRATION=true` — skip this spec.
 
 ---
 
