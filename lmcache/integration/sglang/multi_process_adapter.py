@@ -1,4 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# Future
+from __future__ import annotations
+
 # Standard
 from dataclasses import dataclass
 from typing import Optional
@@ -30,6 +33,7 @@ from lmcache.utils import EngineType
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheServerKey,
+    KVCache,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType
@@ -40,17 +44,18 @@ logger = init_logger(__name__)
 def _wrap_sglang_kv_caches(
     k_pool: list[torch.Tensor],
     v_pool: list[torch.Tensor],
-) -> list[CudaIPCWrapper]:
+) -> KVCache:
     """Flatten SGLang's depth-2 ``[K_layers, V_layers]`` KV layout into a
-    single flat ``list[CudaIPCWrapper]`` so it fits upstream's wire
+    single flat ``KVCache`` so it fits upstream's wire
     ``KVCache`` payload type. The daemon's
     :func:`normalize_kv_and_discover_format` recognizes this shape from
     ``EngineType.SGLANG`` plus a ``tokens_per_block`` ``LayoutHints`` field
     and splits it back at its midpoint before format detection.
     """
-    return [CudaIPCWrapper(tensor) for tensor in k_pool] + [
-        CudaIPCWrapper(tensor) for tensor in v_pool
-    ]
+    wrapped: KVCache = []
+    wrapped.extend(CudaIPCWrapper(tensor) for tensor in k_pool)
+    wrapped.extend(CudaIPCWrapper(tensor) for tensor in v_pool)
+    return wrapped
 
 
 @dataclass
@@ -137,7 +142,7 @@ class LMCacheMPConnector:
         # (instance_id, kv_cache, model_name, world_size, engine_type,
         # layout_hints, engine_group_infos). SGLang's natural KV layout is depth-2
         # ([K_layers, V_layers]); we flatten it on the wire to fit
-        # ``KVCache = list[CudaIPCWrapper]``. The daemon recognizes the
+        # ``KVCache = list[DeviceIPCWrapper]``. The daemon recognizes the
         # SGLang-MHA flat-of-2NL pattern from ``EngineType.SGLANG`` plus the
         # ``tokens_per_block`` hint and un-flattens + reshapes per layer.
         # SGLang is non-hybrid (a single KV cache group), so engine_group_infos is the

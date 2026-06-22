@@ -65,6 +65,7 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
 if TYPE_CHECKING:
     # First Party
     from lmcache.cli.commands.base import BaseCommand
+    from lmcache.v1.multiprocess.custom_types import KVCache
 
 
 # Stash the original (full-install) ImportError so the parser-stub
@@ -407,7 +408,7 @@ def run_server_bench(
             log(
                 "Allocated %d GPU tensors on %s" % (len(allocated), allocated[0].device)
             )
-            kv_wrappers = [CudaIPCWrapper(t) for t in allocated]
+            kv_wrappers: KVCache = [CudaIPCWrapper(t) for t in allocated]
             # Keep the CUDA tensors alive for the lifetime of the
             # bench process -- storage may be reclaimed otherwise --
             # and reuse the same list as the client-side data-mode
@@ -431,7 +432,7 @@ def run_server_bench(
         # Register KV cache before any store/retrieve. In handle mode
         # both GPU (CUDA-IPC) and CPU (POSIX-SHM) paths share the same
         # ``REGISTER_KV_CACHE`` protocol since ``CpuShmTensorWrapper``
-        # is a ``CudaIPCWrapper`` subclass on the wire. In data mode
+        # is a ``DeviceIPCWrapper`` subclass on the wire. In data mode
         # we fall through to the non-GPU registration protocol.
         register_result = _send_register_kv_cache(
             client,
