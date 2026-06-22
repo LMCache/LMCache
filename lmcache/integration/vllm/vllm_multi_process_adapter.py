@@ -314,6 +314,9 @@ class ParallelStrategy:
         """Number of pieces a single token chunk's KV cache is split into
         on the LMCache server storage."""
         if self.use_mla:
+            # In this PR we do not support PP + TP + MLA in multi-server mode.
+            # A precondition check enforces pp_size == 1, so kv_world_size for
+            # MLA can be derived as world_size / tp_size.
             return self.vllm_world_size // self.tp_size
         return self.vllm_world_size // self.n_servers
 

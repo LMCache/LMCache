@@ -498,7 +498,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     Multi-server deployment:
     - lmcache.mp.server_urls: server URL list or comma-separated string,
       e.g. "tcp://host1:6667,tcp://host2:6667".
-    - lmcache.mp.n_servers: server count for validation. Optional.
 
     Single-server deployment:
     - lmcache.mp.host: the host of the LMCache server.
@@ -545,17 +544,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
             server_urls = [f"{server_host}:{server_port}"]
 
-        # lmcache.mp.n_servers is the authoritative server count.
-        # If provided it must match the length of server_urls.
-        n_servers_cfg = vllm_config.kv_transfer_config.get_from_extra_config(
-            "lmcache.mp.n_servers", None
-        )
-        if n_servers_cfg is not None:
-            n_servers_cfg = int(n_servers_cfg)
-            assert n_servers_cfg == len(server_urls), (
-                f"lmcache.mp.n_servers ({n_servers_cfg}) does not match "
-                f"the number of URLs in lmcache.mp.server_urls ({len(server_urls)})"
-            )
+        # The server count is derived from lmcache.mp.server_urls.
         n_servers = len(server_urls)
 
         assert vllm_config.parallel_config.world_size % n_servers == 0, (
