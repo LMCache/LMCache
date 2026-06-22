@@ -8,6 +8,7 @@ import random
 import shlex
 import subprocess
 import tempfile
+import threading
 import time
 
 # Third Party
@@ -15,6 +16,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import (
     CacheEngineKey,
     mock_up_broadcast_fn,
@@ -23,6 +25,7 @@ from lmcache.utils import (
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventStatus, EventType
+from lmcache.v1.gpu_connector.mock_gpu_connector import MockGPUConnector
 
 # Local
 from .utils import (
@@ -1448,6 +1451,118 @@ def test_force_store_wait(autorelease_v1):
         for t in list_tokens:
             expected_count = (len(t) // chunk_size) * chunk_size
             assert engine.lookup(t) == expected_count
+
+
+def _create_admission_test_engine(autorelease_v1, store_admission_retry_ms: int):
+    """Create a CPU-only engine with a CPU pool that holds about 5 chunks."""
+    chunk_size = 256
+    kv_shape = (4, 2, chunk_size, 8, 128)
+
+    cfg = LMCacheEngineConfig.from_defaults(
+        chunk_size=chunk_size,
+        local_cpu=True,
+        # one chunk is 4 MiB (2 * 4 * 256 * 8 * 128 * 2 bytes),
+        # so a 0.02 GB pool holds 5 chunks
+        max_local_cpu_size=0.02,
+        store_admission_retry_ms=store_admission_retry_ms,
+    )
+    metadata = dumb_metadata(kv_shape)
+    connector = MockGPUConnector(kv_shape=kv_shape)
+
+    # NOTE: the instance id must be "test" so that the autorelease_v1
+    # fixture destroys the engine (and its stats logger) on teardown
+    engine = autorelease_v1(
+        LMCacheEngineBuilder.get_or_create(
+            "test",
+            cfg,
+            metadata,
+            connector,
+            mock_up_broadcast_fn,
+            mock_up_broadcast_object_fn,
+        )
+    )
+    return engine, metadata, chunk_size
+
+
+def _fill_cpu_pool(engine, metadata, chunk_size):
+    """Allocate chunks (without storing them) until the CPU pool is full."""
+    assert engine.storage_manager is not None
+    held = []
+    while True:
+        memory_obj = engine.storage_manager.allocate(
+            metadata.get_shapes(chunk_size),
+            metadata.get_dtypes(),
+            busy_loop=False,
+        )
+        if memory_obj is None:
+            break
+        held.append(memory_obj)
+    assert held, "Expected to be able to fill the CPU pool"
+    return held
+
+
+@pytest.mark.no_shared_allocator
+def test_store_drop_on_admission_failure(autorelease_v1):
+    """
+    With store_admission_retry_ms=0 (the default), a store that cannot
+    allocate CPU memory drops the chunks immediately: nothing is stored,
+    and the drop is counted in the stats monitor.
+    """
+    engine, metadata, chunk_size = _create_admission_test_engine(
+        autorelease_v1, store_admission_retry_ms=0
+    )
+    held = _fill_cpu_pool(engine, metadata, chunk_size)
+
+    monitor = LMCStatsMonitor.GetOrCreate()
+    drops_before = monitor.interval_store_dropped_chunk_count
+
+    tokens = generate_tokens(2 * chunk_size, "cpu")
+    engine.store(tokens)
+
+    assert engine.lookup(tokens) == 0
+    assert monitor.interval_store_dropped_chunk_count == drops_before + 1
+
+    for memory_obj in held:
+        memory_obj.ref_count_down()
+
+
+@pytest.mark.no_shared_allocator
+def test_store_admission_retry(autorelease_v1):
+    """
+    With store_admission_retry_ms > 0, a store that cannot allocate CPU
+    memory retries within the budget. When memory is freed mid-retry,
+    the store succeeds and no chunk is dropped.
+    """
+    engine, metadata, chunk_size = _create_admission_test_engine(
+        autorelease_v1, store_admission_retry_ms=10000
+    )
+    held = _fill_cpu_pool(engine, metadata, chunk_size)
+
+    monitor = LMCStatsMonitor.GetOrCreate()
+    drops_before = monitor.interval_store_dropped_chunk_count
+
+    def release_held():
+        for memory_obj in held:
+            memory_obj.ref_count_down()
+
+    releaser = threading.Timer(0.2, release_held)
+    releaser.start()
+    try:
+        num_tokens = 2 * chunk_size
+        tokens = generate_tokens(num_tokens, "cpu")
+        engine.store(tokens)
+    finally:
+        releaser.join()
+
+    assert monitor.interval_store_dropped_chunk_count == drops_before
+
+    # Wait for the (potentially asynchronous) put to land in the hot cache
+    timeout = 10
+    start_time = time.time()
+    while engine.lookup(tokens) < num_tokens:
+        if time.time() - start_time > timeout:
+            raise TimeoutError("Store did not complete after memory was freed")
+        time.sleep(0.05)
 
 
 @pytest.mark.skipif(
