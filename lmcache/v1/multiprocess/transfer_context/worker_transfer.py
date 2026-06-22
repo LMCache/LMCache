@@ -577,6 +577,9 @@ def _supports_async_primitives() -> bool:
     """
     if not hasattr(torch_dev, "Stream") or not hasattr(torch_dev, "Event"):
         return False
+    # CPU-only stub exposes Stream/Event but has no real async capability.
+    if hasattr(torch_dev, "is_available") and not torch_dev.is_available():
+        return False
     try:
         stream = torch_dev.Stream()
         event = torch_dev.Event()
