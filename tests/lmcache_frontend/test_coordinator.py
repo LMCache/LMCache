@@ -70,16 +70,15 @@ _FAKE_PORT = str(8000)
 # --------------------------------------------------------------------------
 
 
-def test_maps_instances_to_coordinator_proxy(monkeypatch):
-    """Test ``fetch_nodes_from_coordinator`` maps coordinator payload to
-    frontend proxy/children.
+def test_maps_instances_to_flat_node_list(monkeypatch):
+    """Test ``fetch_nodes_from_coordinator`` maps coordinator payload to a
+    flat list of mp-server nodes.
 
     Input: coordinator payload with 2 registered mp servers.
 
     Expected output:
-    - One coordinator as proxy, with 2 MP servers as children.
-    - All information (name, host, port) of coordinator and its children
-      are correctly mapped.
+    - A flat list of 2 nodes (no proxy wrapper).
+    - All information (name, host, port) of each node is correctly mapped.
     """
     payload = {
         "instances": [
@@ -94,37 +93,23 @@ def test_maps_instances_to_coordinator_proxy(monkeypatch):
         fe.fetch_nodes_from_coordinator(f"http://{_FAKE_HOST}:{_FAKE_PORT}/")
     )
 
-    # There should be one proxy, with two children
-    assert len(nodes) == 1
-    assert len(nodes[0]["nodes"]) == 2
+    # There should be a flat list of two nodes
+    assert len(nodes) == 2
 
-    # Check coordinator proxy data
-    proxy = nodes[0]
-    assert proxy["name"] == "coordinator"
-    assert proxy["host"] == _FAKE_HOST
-    assert proxy["port"] == _FAKE_PORT
-
-    # Check child nodes data
-    assert [node["name"] for node in proxy["nodes"]] == [
-        "mp_instance_1",
-        "mp_instance_2",
-    ]
-    assert [node["host"] for node in proxy["nodes"]] == ["10.0.0.1", "10.0.0.2"]
-    assert all(
-        isinstance(node["port"], str) for node in proxy["nodes"]
-    )  # port must be string
-    assert [node["port"] for node in proxy["nodes"]] == ["8080", "8081"]
-    assert all(node["proxy_id"] == "coordinator" for node in proxy["nodes"])
+    # Check node data
+    assert [node["name"] for node in nodes] == ["mp_instance_1", "mp_instance_2"]
+    assert [node["host"] for node in nodes] == ["10.0.0.1", "10.0.0.2"]
+    assert all(isinstance(node["port"], str) for node in nodes)  # port must be string
+    assert [node["port"] for node in nodes] == ["8080", "8081"]
 
 
-def test_empty_fleet_returns_coordinator_with_no_children(monkeypatch):
-    """Test ``fetch_nodes_from_coordinator`` returns a coordinator with no
-    children when the fleet is empty.
+def test_empty_fleet_returns_empty_list(monkeypatch):
+    """Test ``fetch_nodes_from_coordinator`` returns an empty list when the
+    fleet is empty.
 
     Input: coordinator payload with no registered mp servers.
 
-    Expected output:
-    - One coordinator as proxy, with no children.
+    Expected output: An empty list.
     """
     _patch_client(monkeypatch, payload={"instances": []})
 
@@ -133,10 +118,8 @@ def test_empty_fleet_returns_coordinator_with_no_children(monkeypatch):
         fe.fetch_nodes_from_coordinator(f"http://{_FAKE_HOST}:{_FAKE_PORT}/")
     )
 
-    # There should be one proxy, with no children
-    assert len(nodes) == 1
-    assert nodes[0]["name"] == "coordinator"
-    assert nodes[0]["nodes"] == []
+    # There should be no nodes
+    assert nodes == []
 
 
 def test_unreachable_coordinator_returns_empty_list(monkeypatch):
@@ -182,28 +165,11 @@ def test_trailing_slash_is_normalized(monkeypatch):
 def client_with_fleet():
     """Fake frontend TestClient seeded with a coordinator-sourced fleet."""
 
-    # Initialize a TestClient with a fake fleet of one coordinator and two mp servers
+    # Initialize a TestClient with a flat fleet of two mp servers
     fe._node_registry.replace(
         [
-            {
-                "name": "coordinator",
-                "host": _FAKE_HOST,
-                "port": _FAKE_PORT,
-                "nodes": [
-                    {
-                        "name": "mp_instance_1",
-                        "host": "10.0.0.1",
-                        "port": "8080",
-                        "proxy_id": "coordinator",
-                    },
-                    {
-                        "name": "mp_instance_2",
-                        "host": "10.0.0.2",
-                        "port": "8081",
-                        "proxy_id": "coordinator",
-                    },
-                ],
-            }
+            {"name": "mp_instance_1", "host": "10.0.0.1", "port": "8080"},
+            {"name": "mp_instance_2", "host": "10.0.0.2", "port": "8081"},
         ]
     )
 
@@ -218,35 +184,13 @@ def test_api_nodes_reflects_coordinator_membership(client_with_fleet):
     # Fetch the nodes from the frontend API
     response = client_with_fleet.get("/api/nodes")
     assert response.status_code == 200
-    tree = response.json()["nodes"]
+    nodes = response.json()["nodes"]
 
-    # Check coordinator proxy
-    assert len(tree) == 1
-    assert tree[0]["name"] == "coordinator"
-    assert tree[0]["host"] == _FAKE_HOST
-    assert tree[0]["port"] == _FAKE_PORT
-    assert tree[0]["is_proxy"] is True
-    assert "children" in tree[0] and len(tree[0]["children"]) == 2
-
-    # Check children nodes
-    children = tree[0]["children"]
-    assert [child["name"] for child in children] == ["mp_instance_1", "mp_instance_2"]
-    assert [child["host"] for child in children] == ["10.0.0.1", "10.0.0.2"]
-    assert [child["port"] for child in children] == ["8080", "8081"]
-    assert all(child["is_proxy"] is False for child in children)
-    assert [child["proxy_id"] for child in children] == ["coordinator", "coordinator"]
-
-
-def test_api_proxies_lists_coordinator(client_with_fleet):
-    """Test that the ``/api/proxies`` endpoint lists the coordinator as a proxy."""
-
-    # Fetch the proxies from the frontend API
-    response = client_with_fleet.get("/api/proxies")
-    assert response.status_code == 200
-
-    # Expected: the coordinator is listed as a proxy
-    names = [p["name"] for p in response.json()["proxies"]]
-    assert "coordinator" in names
+    # Check the flat node list
+    assert len(nodes) == 2
+    assert [node["name"] for node in nodes] == ["mp_instance_1", "mp_instance_2"]
+    assert [node["host"] for node in nodes] == ["10.0.0.1", "10.0.0.2"]
+    assert [node["port"] for node in nodes] == ["8080", "8081"]
 
 
 def test_ssrf_guard_rejects_unregistered_host(client_with_fleet):
