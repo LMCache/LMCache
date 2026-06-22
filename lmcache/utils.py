@@ -108,6 +108,9 @@ def try_pin_buffer(ptr: int, size: int) -> bool:
     from lmcache import torch_dev
 
     if not torch_dev.is_available() or not hasattr(torch_dev, "cudart"):
+        logger.warning(
+            "torch_dev does not have cudart... not able to pin memory by cudart"
+        )
         return False
     try:
         # TODO: take torch_dev.cudart().cudaHostRegister as temp solution
@@ -146,6 +149,9 @@ def try_unpin_buffer(ptr: int) -> bool:
     from lmcache import torch_dev
 
     if not torch_dev.is_available() or not hasattr(torch_dev, "cudart"):
+        logger.warning(
+            "torch_dev does not have cudart... not able to unpin memory by cudart"
+        )
         return False
 
     try:
