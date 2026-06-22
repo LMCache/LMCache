@@ -60,6 +60,14 @@ def hasher() -> TokenHasher:
     return TokenHasher(chunk_size=4, hash_algorithm="blake3")
 
 
+@pytest.fixture
+def session_mgr(hasher: TokenHasher) -> SessionManager:
+    """SessionManager with long TTL for testing, auto-cleaned up."""
+    mgr = SessionManager(hasher, ttl=600)
+    yield mgr
+    mgr.stop_cleanup()
+
+
 # =============================================================================
 # L1EvictionPolicy Bridge Tests
 # =============================================================================
@@ -192,9 +200,9 @@ class TestEndSessionTouchKeys:
     3. Handles edge cases (no session, no lookup key, empty hashes)
     """
 
-    def test_end_session_generates_correct_keys(self, hasher: TokenHasher):
+    def test_end_session_generates_correct_keys(self, hasher: TokenHasher, session_mgr: SessionManager):
         """end_session should generate ObjectKeys from session hashes and lookup key."""
-        mgr = SessionManager(hasher, ttl=600)
+        mgr = session_mgr
         session = mgr.get_or_create("req-1")
 
         tokens = list(range(12))  # 3 chunks of 4
@@ -215,9 +223,9 @@ class TestEndSessionTouchKeys:
         # With world_size=1 and worker_id=None, should have 3 keys
         assert len(obj_keys) == 3
 
-    def test_end_session_expands_keys_for_world_size(self, hasher: TokenHasher):
+    def test_end_session_expands_keys_for_world_size(self, hasher: TokenHasher, session_mgr: SessionManager):
         """end_session should expand keys for all workers when world_size > 1."""
-        mgr = SessionManager(hasher, ttl=600)
+        mgr = session_mgr
         session = mgr.get_or_create("req-1")
 
         tokens = list(range(8))  # 2 chunks of 4
@@ -243,16 +251,16 @@ class TestEndSessionTouchKeys:
         # 2 chunks * 2 workers = 4 keys
         assert len(obj_keys) == 4
 
-    def test_end_session_no_session_skips_touch(self, hasher: TokenHasher):
+    def test_end_session_no_session_skips_touch(self, hasher: TokenHasher, session_mgr: SessionManager):
         """end_session should skip touch when session doesn't exist."""
-        mgr = SessionManager(hasher, ttl=600)
+        mgr = session_mgr
         removed = mgr.remove("nonexistent")
         assert removed is None
         # No error should occur
 
-    def test_end_session_no_lookup_key_skips_touch(self, hasher: TokenHasher):
+    def test_end_session_no_lookup_key_skips_touch(self, hasher: TokenHasher, session_mgr: SessionManager):
         """end_session should skip touch when session has no lookup_ipc_key."""
-        mgr = SessionManager(hasher, ttl=600)
+        mgr = session_mgr
         session = mgr.get_or_create("req-1")
         session.set_tokens(list(range(8)))
         session.get_hashes(0, 8)
@@ -263,9 +271,9 @@ class TestEndSessionTouchKeys:
         assert removed.lookup_ipc_key is None
         # No error should occur
 
-    def test_end_session_empty_hashes_produces_no_keys(self, hasher: TokenHasher):
+    def test_end_session_empty_hashes_produces_no_keys(self, hasher: TokenHasher, session_mgr: SessionManager):
         """end_session should produce no keys when session has no computed hashes."""
-        mgr = SessionManager(hasher, ttl=600)
+        mgr = session_mgr
         session = mgr.get_or_create("req-1")
 
         ipc_key = make_ipc_key(
@@ -282,7 +290,7 @@ class TestEndSessionTouchKeys:
         obj_keys = ipc_key_to_object_keys(removed.lookup_ipc_key, chunk_hashes, [0])[0]
         assert len(obj_keys) == 0
 
-    def test_end_session_hashes_cover_retrieve_and_store(self, hasher: TokenHasher):
+    def test_end_session_hashes_cover_retrieve_and_store(self, hasher: TokenHasher, session_mgr: SessionManager):
         """Session hashes should cover both retrieve and store ranges.
 
         Simulates the typical flow:
@@ -291,7 +299,7 @@ class TestEndSessionTouchKeys:
         3. store calls session.get_hashes(hit_end, total)
         4. end_session uses session.get_hashes(0) to get all
         """
-        mgr = SessionManager(hasher, ttl=600)
+        mgr = session_mgr
         session = mgr.get_or_create("req-1")
 
         tokens = list(range(20))  # 5 chunks of 4

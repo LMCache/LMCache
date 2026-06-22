@@ -14,8 +14,51 @@ import time
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
+from lmcache.v1.periodic_thread import (
+    PeriodicThread,
+    PeriodicThreadRegistry,
+    ThreadLevel,
+    ThreadRunSummary,
+)
 
 logger = init_logger(__name__)
+
+
+class SessionCleanupThread(PeriodicThread):
+    """Periodic background thread that removes expired sessions.
+
+    Runs in the background at a configurable interval and delegates
+    to SessionManager.cleanup_expired().
+    """
+
+    DEFAULT_INTERVAL = 60.0  # seconds between cleanup cycles
+    DEFAULT_INIT_WAIT = 30.0  # delay before first cleanup cycle
+
+    def __init__(
+        self,
+        session_manager: "SessionManager",
+        interval: float = DEFAULT_INTERVAL,
+    ):
+        super().__init__(
+            name="session-cleanup-thread",
+            interval=interval,
+            level=ThreadLevel.LOW,
+            init_wait=DEFAULT_INIT_WAIT,
+        )
+        self._session_manager = session_manager
+
+        # Register with the global periodic-thread registry
+        PeriodicThreadRegistry.get_instance().register(self)
+
+    def _execute(self) -> ThreadRunSummary:
+        """Run one cleanup cycle."""
+        removed = self._session_manager.cleanup_expired()
+        return ThreadRunSummary(
+            timestamp=time.time(),
+            success=True,
+            message=f"Cleaned up {removed} expired session(s)",
+            extra_info={"removed": str(removed)},
+        )
 
 
 @dataclass
@@ -121,12 +164,20 @@ class SessionManager:
     """Thread-safe manager for per-request sessions."""
 
     DEFAULT_SESSION_TTL = 600  # 10 minutes
+    DEFAULT_CLEANUP_INTERVAL = 60.0  # seconds between cleanup cycles
 
-    def __init__(self, hasher: TokenHasher, ttl: float = DEFAULT_SESSION_TTL):
+    def __init__(
+        self,
+        hasher: TokenHasher,
+        ttl: float = DEFAULT_SESSION_TTL,
+        cleanup_interval: float = DEFAULT_CLEANUP_INTERVAL,
+    ):
         self._hasher = hasher
         self._ttl = ttl
         self._sessions: dict[str, Session] = {}
         self._lock = threading.Lock()
+        self._cleanup_thread = SessionCleanupThread(self, interval=cleanup_interval)
+        self._cleanup_thread.start()
 
     def get_or_create(self, request_id: str) -> Session:
         """Get existing session or create a new one.
@@ -189,3 +240,13 @@ class SessionManager:
         """
         with self._lock:
             return len(self._sessions)
+
+    def stop_cleanup(self, timeout: float = 5.0) -> None:
+        """Stop the background cleanup thread.
+
+        Safe to call multiple times; subsequent calls are no-ops.
+
+        Args:
+            timeout: Maximum time to wait for thread termination in seconds.
+        """
+        self._cleanup_thread.stop(timeout=timeout)

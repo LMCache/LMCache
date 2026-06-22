@@ -29,7 +29,9 @@ def session(hasher: TokenHasher) -> Session:
 @pytest.fixture
 def session_manager(hasher: TokenHasher) -> SessionManager:
     """A SessionManager with short TTL for testing expiry."""
-    return SessionManager(hasher, ttl=0.1)
+    mgr = SessionManager(hasher, ttl=0.1)
+    yield mgr
+    mgr.stop_cleanup()
 
 
 class TestSession:
@@ -302,33 +304,42 @@ class TestSessionManagerRemoveReturnsSession:
     def test_remove_returns_session_with_state(self, hasher: TokenHasher) -> None:
         """remove() should return the session with all accumulated state."""
         mgr = SessionManager(hasher, ttl=600)
-        session = mgr.get_or_create("req-1")
-        session.set_tokens(list(range(8)))
-        session.get_hashes(0, 8)
+        try:
+            session = mgr.get_or_create("req-1")
+            session.set_tokens(list(range(8)))
+            session.get_hashes(0, 8)
 
-        key = IPCCacheServerKey.from_token_ids(
-            model_name="model",
-            world_size=1,
-            worker_id=None,
-            token_ids=list(range(8)),
-            request_id="req-1",
-        )
-        session.lookup_ipc_key = key
+            key = IPCCacheServerKey.from_token_ids(
+                model_name="model",
+                world_size=1,
+                worker_id=None,
+                token_ids=list(range(8)),
+                request_id="req-1",
+            )
+            session.lookup_ipc_key = key
 
-        removed = mgr.remove("req-1")
-        assert removed is not None
-        assert removed.request_id == "req-1"
-        assert len(removed.get_hashes(0)) == 2
-        assert removed.lookup_ipc_key is key
+            removed = mgr.remove("req-1")
+            assert removed is not None
+            assert removed.request_id == "req-1"
+            assert len(removed.get_hashes(0)) == 2
+            assert removed.lookup_ipc_key is key
+        finally:
+            mgr.stop_cleanup()
 
     def test_remove_clears_from_manager(self, hasher: TokenHasher) -> None:
         """After remove(), the session should no longer be in the manager."""
         mgr = SessionManager(hasher, ttl=600)
-        mgr.get_or_create("req-1")
-        mgr.remove("req-1")
-        assert mgr.active_count() == 0
+        try:
+            mgr.get_or_create("req-1")
+            mgr.remove("req-1")
+            assert mgr.active_count() == 0
+        finally:
+            mgr.stop_cleanup()
 
     def test_remove_nonexistent_returns_none(self, hasher: TokenHasher) -> None:
         """remove() on a non-existent request_id should return None."""
         mgr = SessionManager(hasher, ttl=600)
-        assert mgr.remove("no-such-id") is None
+        try:
+            assert mgr.remove("no-such-id") is None
+        finally:
+            mgr.stop_cleanup()
