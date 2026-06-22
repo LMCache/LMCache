@@ -412,6 +412,7 @@ class TestEvictionIntegration:
         try:
             store(adapter, key, obj)
             eviction_state = L2AdapterEvictionState(
+                adapter_id=0,
                 adapter=adapter,
                 eviction_config=EvictionConfig(
                     eviction_policy="LRU",
