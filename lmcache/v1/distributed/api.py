@@ -216,6 +216,11 @@ class AttnWindowDesc:
         return self.window_chunks[object_group_idx] < 0
 
 
+DEFAULT_ATTN_WINDOW_DESC = AttnWindowDesc(window_chunks=[-1])
+"""A single full-attention object group; the default when no per-object-group
+windows are supplied."""
+
+
 @dataclass(frozen=True)
 class PrefetchHandle:
     """Opaque handle returned by ``StorageManager.submit_prefetch_task``.

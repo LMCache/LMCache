@@ -24,6 +24,7 @@ import threading
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import (
+    DEFAULT_ATTN_WINDOW_DESC,
     AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
@@ -139,9 +140,7 @@ class InFlightPrefetchRequest:
     policy: TrimPolicy = TrimPolicy.PREFIX
     """Which retained-subset policy to apply (see :class:`TrimPolicy`)."""
 
-    attn_desc: AttnWindowDesc = field(
-        default_factory=lambda: AttnWindowDesc(window_chunks=[])
-    )
+    attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
     """Cross-chunk attention windows of all object groups, in object-group
     order."""
 
@@ -305,7 +304,7 @@ class PrefetchController(StorageControllerInterface):
         layout_desc: MemoryLayoutDesc,
         extra_count: int = 0,
         policy: TrimPolicy = TrimPolicy.PREFIX,
-        attn_desc: AttnWindowDesc = AttnWindowDesc(window_chunks=[]),
+        attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
     ) -> PrefetchRequestId:
         """
         Submit a prefetch request for the given keys.
@@ -589,7 +588,7 @@ class PrefetchController(StorageControllerInterface):
         layout_desc: MemoryLayoutDesc,
         extra_count: int = 0,
         policy: TrimPolicy = TrimPolicy.PREFIX,
-        attn_desc: AttnWindowDesc = AttnWindowDesc(window_chunks=[]),
+        attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
     ) -> None:
         """Submit lookup_and_lock to all adapters for a new request."""
         if not self._l2_adapters:

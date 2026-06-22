@@ -12,6 +12,7 @@ import time
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap, PeriodicEventNotifier
 from lmcache.v1.distributed.api import (
+    DEFAULT_ATTN_WINDOW_DESC,
     AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
@@ -406,7 +407,7 @@ class StorageManager:
         extra_count: int = 0,
         external_request_id: str = "",
         policy: TrimPolicy = TrimPolicy.PREFIX,
-        attn_desc: AttnWindowDesc = AttnWindowDesc(window_chunks=[]),
+        attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
     ) -> PrefetchHandle:
         """Prefetch objects into L1 asynchronously.
 

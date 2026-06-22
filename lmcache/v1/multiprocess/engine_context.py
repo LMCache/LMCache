@@ -2,13 +2,14 @@
 """Shared context and layout descriptor registry for engine modules."""
 
 # Standard
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TypedDict
 import threading
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
+    DEFAULT_ATTN_WINDOW_DESC,
     AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
@@ -41,9 +42,7 @@ class _LayoutDescEntry:
 
     layout_desc: MemoryLayoutDesc
     ref_count: int
-    attn_desc: AttnWindowDesc = field(
-        default_factory=lambda: AttnWindowDesc(window_chunks=[-1])
-    )
+    attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
     """Cross-chunk attention windows of all object groups, in object-group
     order. Defaults to a single full-attention group."""
 
@@ -68,7 +67,7 @@ class LayoutDescRegistry:
         model_name: str,
         world_size: int,
         layout_desc: MemoryLayoutDesc,
-        attn_desc: AttnWindowDesc = AttnWindowDesc(window_chunks=[-1]),
+        attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
     ) -> None:
         """Register a layout descriptor for a (model_name, world_size) pair.
 
@@ -149,7 +148,7 @@ class LayoutDescRegistry:
         with self._lock:
             entry = self._registry.get((model_name, world_size))
             if entry is None:
-                return AttnWindowDesc(window_chunks=[-1])
+                return DEFAULT_ATTN_WINDOW_DESC
             return entry.attn_desc
 
 
