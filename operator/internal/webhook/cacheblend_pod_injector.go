@@ -18,7 +18,6 @@ package webhook
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strings"
 
@@ -30,10 +29,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
-	"github.com/LMCache/LMCache/internal/resources"
 )
 
-// Annotation keys the webhook reads and stamps (design §8).
+// CacheBlend annotation keys the webhook reads and stamps (design §8).
 const (
 	// AnnotationEngine binds a pod to a CacheBlendEngine in the same namespace.
 	// Its presence is the opt-in signal; its value is the engine name.
@@ -56,50 +54,35 @@ const (
 	AnnotationSkipReason = "lmcache.ai/cacheblend-skip-reason"
 )
 
-// valueTrue is the boolean-true string stamped on AnnotationInjected and used as
-// the opt-in value of the lmcache.ai/cacheblend-inject label.
-const valueTrue = "true"
+// CacheBlendLabelInject is the opt-in label the MutatingWebhookConfiguration's
+// objectSelector matches (mutating_webhook_selectors_patch.yaml). It gates which
+// pods reach the webhook; the handler itself gates on AnnotationEngine.
+const CacheBlendLabelInject = "lmcache.ai/cacheblend-inject"
 
-// Skip-reason values stamped on AnnotationSkipReason (design §8).
-const (
-	// SkipReasonEngineNotFound is stamped when the named engine's connection
-	// ConfigMap (or the engine CR) does not exist (fail-open).
-	SkipReasonEngineNotFound = "engine-not-found"
+// SkipReasonPayloadImageUnset is stamped when the engine's
+// injection.payloadImage resolves to an empty reference (no repository). The
+// webhook skips rather than inject an init container with an empty image, which
+// the API server would reject. CRD validation normally prevents this. This skip
+// reason is CacheBlend-only (the shared reasons live in pod_inject_common.go).
+const SkipReasonPayloadImageUnset = "payload-image-unset"
 
-	// SkipReasonCommandOverride is stamped when the target container overrides
-	// command, so appended args may never reach `vllm serve`.
-	SkipReasonCommandOverride = "command-override"
+// cacheBlendKeys is the CacheBlend injector's annotation key set, consumed by
+// the shared gate / skip / stamp helpers.
+var cacheBlendKeys = injectionKeys{
+	engine:     AnnotationEngine,
+	container:  AnnotationContainer,
+	injected:   AnnotationInjected,
+	skipReason: AnnotationSkipReason,
+}
 
-	// SkipReasonKVTransferConfigPresent is stamped when the user already supplies
-	// --kv-transfer-config; the webhook does not clobber their structured JSON.
-	SkipReasonKVTransferConfigPresent = "kv-transfer-config-present"
+// +kubebuilder:webhook:path=/mutate--v1-pod,mutating=true,failurePolicy=ignore,sideEffects=None,groups="",resources=pods,verbs=create,versions=v1,name=mcacheblendpod.lmcache.ai,admissionReviewVersions=v1,reinvocationPolicy=Never
 
-	// SkipReasonPayloadImageUnset is stamped when the engine's
-	// injection.payloadImage resolves to an empty reference (no repository). The
-	// webhook skips rather than inject an init container with an empty image,
-	// which the API server would reject. CRD validation normally prevents this.
-	SkipReasonPayloadImageUnset = "payload-image-unset"
-
-	// SkipReasonTargetContainerNotFound is stamped when the requested target
-	// container (injection.targetContainer or the cacheblend-container
-	// annotation) names a container that does not exist on the pod, so there is
-	// nothing to inject into.
-	SkipReasonTargetContainerNotFound = "target-container-not-found"
-)
-
-// kvTransferConfigDataKey is the key within the <engine>-connection ConfigMap's
-// Data map that holds the CBKVConnector kv-transfer-config JSON. It must match
-// the key written by resources.buildConnectionConfigMapCore.
-const kvTransferConfigDataKey = "kv-transfer-config.json"
-
-// +kubebuilder:webhook:path=/mutate--v1-pod,mutating=true,failurePolicy=ignore,sideEffects=None,groups="",resources=pods,verbs=create,versions=v1,name=mpod.lmcache.ai,admissionReviewVersions=v1,reinvocationPolicy=Never
-
-// PodInjector is the mutating admission handler that injects the
+// CacheBlendPodInjector is the mutating admission handler that injects the
 // lmcache-cacheblend vLLM plugin into opted-in pods (design §7). It is gated by
 // the CacheBlendEngine CR: it mutates a pod only when the pod's
 // lmcache.ai/cacheblend-engine annotation names an engine whose connection
 // ConfigMap exists. It fails open (failurePolicy: Ignore) and is idempotent.
-type PodInjector struct {
+type CacheBlendPodInjector struct {
 	// Client reads the named CacheBlendEngine and its connection ConfigMap. It
 	// uses the shared manager ServiceAccount, whose RBAC already grants
 	// cacheblendengines get and configmaps get (design §7 RBAC note).
@@ -111,38 +94,17 @@ type PodInjector struct {
 
 // Handle implements admission.Handler. It applies mutations M0–M7 to an opted-in
 // pod whose named CacheBlendEngine connection ConfigMap exists, then returns a
-// JSON patch via admission.PatchResponseFromRaw. It short-circuits to an
-// unchanged Allowed response for non-opted-in or already-injected pods, and
-// stamps a skip-reason annotation (still Allowed, fail-open) when it declines to
-// mutate (engine missing, command override, or user-supplied
+// JSON patch. It short-circuits to an unchanged Allowed response for non-opted-in
+// or already-injected pods, and stamps a skip-reason annotation (still Allowed,
+// fail-open) when it declines to mutate (engine missing, command override,
+// payload image unset, target container missing, or user-supplied
 // --kv-transfer-config).
-func (p *PodInjector) Handle(ctx context.Context, req admission.Request) admission.Response {
+func (p *CacheBlendPodInjector) Handle(ctx context.Context, req admission.Request) admission.Response {
 	log := ctrl.LoggerFrom(ctx)
 
-	pod := &corev1.Pod{}
-	if err := p.Decoder.Decode(req, pod); err != nil {
-		return admission.Errored(http.StatusBadRequest, err)
-	}
-
-	// (1) Idempotency short-circuit: a pod already carrying the injected guard is
-	// allowed unchanged on re-admission.
-	if pod.Annotations[AnnotationInjected] == valueTrue {
-		return admission.Allowed("already injected")
-	}
-
-	// (2) Opt-in gate: no engine annotation means this pod did not opt in.
-	engineName := strings.TrimSpace(pod.Annotations[AnnotationEngine])
-	if engineName == "" {
-		return admission.Allowed("not opted in")
-	}
-
-	// The webhook config carries no defaulting for the pod object, so apply the
-	// engine annotation value as the lookup namespace using the admission
-	// request's namespace (the pod's namespace; pod.Namespace may be empty on
-	// CREATE before the API server stamps it).
-	namespace := req.Namespace
-	if namespace == "" {
-		namespace = pod.Namespace
+	pod, engineName, namespace, resp, handled := cacheBlendKeys.gate(p.Decoder, req)
+	if handled {
+		return resp
 	}
 
 	// (3a) Resolve the engine CR for its injection defaults.
@@ -151,54 +113,25 @@ func (p *PodInjector) Handle(ctx context.Context, req admission.Request) admissi
 		if apierrors.IsNotFound(err) {
 			log.Info("Skipped CacheBlend injection: engine not found",
 				"engine", engineName, "namespace", namespace)
-			return p.skip(req, pod, SkipReasonEngineNotFound)
+			return cacheBlendKeys.skip(req, pod, SkipReasonEngineNotFound)
 		}
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
 	engine.SetDefaults()
 
-	// (3b) Read the engine's connection ConfigMap (existence gate, no readiness
-	// check — design §7/§9.9). Absent means the engine is not provisioned yet.
-	connCM := &corev1.ConfigMap{}
-	connName := resources.ConnectionConfigMapName(engineName)
-	if err := p.Client.Get(ctx, types.NamespacedName{Name: connName, Namespace: namespace}, connCM); err != nil {
-		if apierrors.IsNotFound(err) {
-			log.Info("Skipped CacheBlend injection: connection ConfigMap not found",
-				"configMap", connName, "namespace", namespace)
-			return p.skip(req, pod, SkipReasonEngineNotFound)
-		}
-		return admission.Errored(http.StatusInternalServerError, err)
-	}
-	kvTransferConfigJSON := connCM.Data[kvTransferConfigDataKey]
-
-	// (6) Resolve the target container (annotation or first). A requested
-	// container name that does not exist (or a pod with no containers) is a
-	// misconfiguration: skip + stamp rather than silently allowing it through.
-	containerIdx, ok := resolveTargetContainer(pod, engine.Spec.Injection.TargetContainer,
-		pod.Annotations[AnnotationContainer])
+	// (3b/6/4) Read the connection ConfigMap, resolve the target container, and
+	// apply the command-override gate (shared with the LMCache injector).
+	kvTransferConfigJSON, containerIdx, resp, ok := prepareInjection(
+		ctx, p.Client, req, pod, cacheBlendKeys, engineName, namespace,
+		engine.Spec.Injection.TargetContainer)
 	if !ok {
-		log.Info("Skipped CacheBlend injection: target container not found",
-			"engine", engineName,
-			"annotationContainer", pod.Annotations[AnnotationContainer],
-			"specTargetContainer", deref(engine.Spec.Injection.TargetContainer))
-		return p.skip(req, pod, SkipReasonTargetContainerNotFound)
+		return resp
 	}
 	target := &pod.Spec.Containers[containerIdx]
 
-	// (4) command-override gate: a wrapper command means appended args may never
-	// reach `vllm serve`, so skip + stamp (design §8).
-	if len(target.Command) > 0 {
-		log.Info("Skipped CacheBlend injection: target container overrides command",
-			"engine", engineName, "container", target.Name)
-		return p.skip(req, pod, SkipReasonCommandOverride)
-	}
-
 	// (5) user --kv-transfer-config gate: skip that flag (do not clobber the
-	// user's structured JSON) but still apply the rest of the mutation, stamping
-	// the skip reason for diagnostics (design §9.2).
+	// user's structured JSON) but still apply the rest of the mutation.
 	userHasKVTransferConfig := argsHasFlag(target.Args, cbFlagKVTransferConfig)
-
-	original := req.Object.Raw
 
 	// --- Apply mutations M0–M7 ---
 
@@ -215,7 +148,7 @@ func (p *PodInjector) Handle(ctx context.Context, req admission.Request) admissi
 	if payloadRef == "" {
 		log.Info("Skipped CacheBlend injection: payload image repository is unset",
 			"engine", engineName)
-		return p.skip(req, pod, SkipReasonPayloadImageUnset)
+		return cacheBlendKeys.skip(req, pod, SkipReasonPayloadImageUnset)
 	}
 	pod.Spec.InitContainers = appendInitContainerIfAbsent(pod.Spec.InitContainers,
 		BuildCBInitContainer(payloadRef, payloadPullPolicy))
@@ -241,70 +174,10 @@ func (p *PodInjector) Handle(ctx context.Context, req admission.Request) admissi
 		pod.Annotations[AnnotationImagePullSecrets])
 	pod.Spec.ImagePullSecrets = MergeImagePullSecrets(pod.Spec.ImagePullSecrets, injectedSecrets)
 
-	// M6 + skip-reason stamping: idempotency guard, plus the diagnostic reason if
-	// we skipped the --kv-transfer-config flag.
-	if pod.Annotations == nil {
-		pod.Annotations = map[string]string{}
-	}
-	pod.Annotations[AnnotationInjected] = valueTrue
-	if userHasKVTransferConfig {
-		pod.Annotations[AnnotationSkipReason] = SkipReasonKVTransferConfigPresent
-	}
-
-	marshaled, err := json.Marshal(pod)
-	if err != nil {
-		return admission.Errored(http.StatusInternalServerError, err)
-	}
+	// M6: stamp the idempotency guard (+ skip reason if --kv-transfer-config was
+	// user-supplied) and return the patch.
 	log.Info("Injected CacheBlend plugin", "engine", engineName, "container", target.Name)
-	return admission.PatchResponseFromRaw(original, marshaled)
-}
-
-// skip stamps the given skip reason on the pod (without injecting), marshals it,
-// and returns an Allowed patch response. The pod is still admitted (fail-open).
-func (p *PodInjector) skip(req admission.Request, pod *corev1.Pod, reason string) admission.Response {
-	if pod.Annotations == nil {
-		pod.Annotations = map[string]string{}
-	}
-	pod.Annotations[AnnotationSkipReason] = reason
-	marshaled, err := json.Marshal(pod)
-	if err != nil {
-		return admission.Errored(http.StatusInternalServerError, err)
-	}
-	return admission.PatchResponseFromRaw(req.Object.Raw, marshaled)
-}
-
-// resolveTargetContainer returns the index of the container to inject into and
-// whether one was found. The per-pod annotation override (annotationName) takes
-// precedence over the engine's injection.targetContainer default; an empty
-// selection falls back to the first container. A non-empty name that matches no
-// container yields ok=false.
-//
-// Parameters:
-//   - pod: the decoded pod.
-//   - specDefault: the engine's injection.targetContainer (nil/"" = first).
-//   - annotationName: the per-pod cacheblend-container annotation value.
-func resolveTargetContainer(
-	pod *corev1.Pod,
-	specDefault *string,
-	annotationName string,
-) (int, bool) {
-	if len(pod.Spec.Containers) == 0 {
-		return 0, false
-	}
-
-	name := strings.TrimSpace(annotationName)
-	if name == "" && specDefault != nil {
-		name = strings.TrimSpace(*specDefault)
-	}
-	if name == "" {
-		return 0, true
-	}
-	for i := range pod.Spec.Containers {
-		if pod.Spec.Containers[i].Name == name {
-			return i, true
-		}
-	}
-	return 0, false
+	return cacheBlendKeys.stampInjected(req, pod, userHasKVTransferConfig)
 }
 
 // resolveInjectedPullSecrets returns the pull-secret references to inject: the
@@ -331,21 +204,6 @@ func resolveInjectedPullSecrets(
 		out = append(out, corev1.LocalObjectReference{Name: name})
 	}
 	return out
-}
-
-// argsHasFlag reports whether args already carries the given flag in either the
-// two-token "--flag value" form or the single-token "--flag=value" form.
-func argsHasFlag(args []string, flag string) bool {
-	eqPrefix := flag + "="
-	for _, a := range args {
-		if a == flag {
-			return true
-		}
-		if strings.HasPrefix(a, eqPrefix) {
-			return true
-		}
-	}
-	return false
 }
 
 // appendVolumeIfAbsent appends v to volumes unless a volume of the same name is

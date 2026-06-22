@@ -76,12 +76,13 @@ func newTestEngine(mutate func(*lmcachev1alpha1.CacheBlendEngine)) *lmcachev1alp
 	return engine
 }
 
-// newPodInjector returns a PodInjector backed by a fake client seeded with the
-// given objects, plus the engine's connection ConfigMap when seedConn is true.
+// newPodInjector returns a CacheBlendPodInjector backed by a fake client seeded
+// with the given objects, plus the engine's connection ConfigMap when seedConn
+// is true.
 func newPodInjector(
 	engine *lmcachev1alpha1.CacheBlendEngine,
 	seedConn bool,
-) *PodInjector {
+) *CacheBlendPodInjector {
 	scheme := newTestScheme()
 	builder := fake.NewClientBuilder().WithScheme(scheme)
 	objs := []runtime.Object{engine}
@@ -89,7 +90,7 @@ func newPodInjector(
 		objs = append(objs, resources.BuildCBConnectionConfigMap(engine))
 	}
 	builder = builder.WithRuntimeObjects(objs...)
-	return &PodInjector{
+	return &CacheBlendPodInjector{
 		Client:  builder.Build(),
 		Decoder: admission.NewDecoder(scheme),
 	}
@@ -195,7 +196,7 @@ func pullSecretNames(pod *corev1.Pod) []string {
 	return out
 }
 
-var _ = Describe("PodInjector", func() {
+var _ = Describe("CacheBlendPodInjector", func() {
 	ctx := context.Background()
 
 	Describe("full M0–M7 injection", func() {
