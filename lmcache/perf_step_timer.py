@@ -29,6 +29,13 @@ class PerfStepTimer:
     not absolute time from t0, making it easy to identify which step is the
     bottleneck.
 
+    **TTL-based auto-emit:** To prevent ``_groups`` from leaking when a caller
+    calls ``mark()`` without ever calling ``emit()``, each group carries a
+    *last-mark timestamp*.  On every ``mark()`` call, groups whose last mark
+    occurred more than *ttl* seconds ago are automatically emitted and removed
+    — producing the same ``[PERF-STEP-TIMING]`` log output as an explicit
+    ``emit()`` call, so no timing data is silently lost.
+
     Usage::
 
         timer = PerfStepTimer(prefix="req-42")
@@ -51,21 +58,27 @@ class PerfStepTimer:
     Args:
         prefix: Optional prefix prepended to all log lines for easier
             grep / filtering (e.g. request id).
+        ttl: Seconds of inactivity after which a group is automatically
+            emitted and removed.  Defaults to ``5.0``.
     """
 
-    __slots__ = ("_enabled", "_prefix", "_groups", "_lock")
+    __slots__ = ("_enabled", "_prefix", "_groups", "_lock", "_ttl", "_last_mark")
 
-    def __init__(self, prefix: str = "") -> None:
+    def __init__(self, prefix: str = "", ttl: float = 5.0) -> None:
         """Initialize the timer.
 
         Args:
             prefix: Optional prefix for log output (e.g. request id).
+            ttl: Seconds after the last ``mark()`` call before a group is
+                automatically emitted.  Defaults to ``5.0``.
         """
         self._enabled = logger.isEnabledFor(logging.DEBUG)
         if not self._enabled:
             return
         self._prefix = prefix
+        self._ttl = ttl
         self._groups: dict[str, list[tuple[str, float]]] = {}
+        self._last_mark: dict[str, float] = {}
         self._lock = threading.Lock()
 
     @property
@@ -80,6 +93,10 @@ class PerfStepTimer:
         no lock, no dict access.  Thread-safe.  The same (name, step) pair
         can be recorded multiple times (reentrant) — each occurrence is kept.
 
+        As a side effect, any *other* groups whose last ``mark()`` occurred
+        more than ``ttl`` seconds ago are automatically emitted and removed
+        from ``_groups`` to prevent memory leaks.
+
         Args:
             name: Group name identifying the operation or path (e.g.
                 ``"gpu_ipc"``, ``"shm"``, ``"pickle"``).
@@ -89,8 +106,18 @@ class PerfStepTimer:
         if not self._enabled:
             return
         t = time.perf_counter()
+        stale_groups_to_log: list[tuple[str, list[tuple[str, float]]]] = []
         with self._lock:
             self._groups.setdefault(name, []).append((step, t))
+            self._last_mark[name] = t
+            for group_name, last_ts in list(self._last_mark.items()):
+                if group_name != name and (t - last_ts) > self._ttl:
+                    entries = self._groups.pop(group_name, None)
+                    self._last_mark.pop(group_name, None)
+                    if entries is not None and len(entries) >= 2:
+                        stale_groups_to_log.append((group_name, list(entries)))
+        for stale_name, entries in stale_groups_to_log:
+            self._log_entries(stale_name, entries)
 
     def emit(self, name: str) -> None:
         """Emit a ``[PERF-STEP-TIMING]`` debug log line for a specific name group.
@@ -108,12 +135,35 @@ class PerfStepTimer:
             return
         with self._lock:
             entries = self._groups.pop(name, None)
+            self._last_mark.pop(name, None)
             if entries is None or len(entries) < 2:
                 return
             # snapshot under lock
             entries = list(entries)
 
-        # Build delta pairs: step_a -> step_b=<delta>ms
+        self._log_entries(name, entries)
+
+    def emit_all(self) -> None:
+        """Emit timing lines for all recorded name groups.
+
+        Early-returns when debug logging is disabled.
+        """
+        if not self._enabled:
+            return
+        with self._lock:
+            names = list(self._groups.keys())
+        for name in names:
+            self.emit(name)
+
+    def _log_entries(self, name: str, entries: list[tuple[str, float]]) -> None:
+        """Format and log timing entries for a group.
+
+        The caller must ensure ``len(entries) >= 2``.
+
+        Args:
+            name: The group name being logged.
+            entries: Ordered list of ``(step, timestamp)`` pairs.
+        """
         parts = []
         for i in range(1, len(entries)):
             prev_step, prev_t = entries[i - 1]
@@ -130,15 +180,3 @@ class PerfStepTimer:
             name,
             " ".join(parts),
         )
-
-    def emit_all(self) -> None:
-        """Emit timing lines for all recorded name groups.
-
-        Early-returns when debug logging is disabled.
-        """
-        if not self._enabled:
-            return
-        with self._lock:
-            names = list(self._groups.keys())
-        for name in names:
-            self.emit(name)
