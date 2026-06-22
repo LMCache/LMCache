@@ -8,7 +8,7 @@ LMCache.
 
    lmcache tool <tool-name> <action> [options]
 
-Currently one tool is available: ``cache-simulator``.
+Currently two tools are available: ``cache-simulator`` and ``list-commands``.
 
 .. note::
 
@@ -51,3 +51,18 @@ Each action has its own flags. Run the built-in help for the full list:
    lmcache tool cache-simulator simulate --help
    lmcache tool cache-simulator sweep --help
    lmcache tool cache-simulator gen-dataset --help
+
+list-commands
+-------------
+
+Inspect the CLI command tree that LMCache discovered at startup:
+
+.. code-block:: bash
+
+   lmcache tool list-commands
+   lmcache tool list-commands --format json
+
+The command reports each path, command name, help text, command type
+(``group`` or ``command``), and depth. This is useful when adding or debugging
+plugin-style CLI extensions because it shows which ``BaseCommand`` and
+``CompositeCommand`` classes were registered without manual registry edits.

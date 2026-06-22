@@ -70,7 +70,7 @@ Available Commands
    * - :doc:`trace`
      - Inspect and replay storage-level trace files.
    * - :doc:`tool`
-     - Run offline analysis tools (e.g. the cache simulator).
+     - Run offline analysis tools and inspect the auto-discovered command tree.
 
 Output Formats
 --------------
@@ -105,4 +105,3 @@ See :doc:`/developer_guide/cli` for details.
    quota
    trace
    tool
-
