@@ -107,9 +107,10 @@ class GDSL1MemoryManager:
 
     def get_memory_usage(self) -> tuple[int, int]:
         """Return ``(used_bytes, total_bytes)`` of the slab."""
-        free_size = self._address_manager.get_free_size()
-        total_size = self._address_manager.get_heap_size()
-        return total_size - free_size, total_size
+        # Single locked snapshot so used/total can't be computed from reads
+        # taken across a concurrent sbrk() growth (see #3768).
+        snapshot = self._address_manager.get_size_snapshot()
+        return snapshot.allocated, snapshot.heap
 
     def get_l1_memory_desc(self) -> Optional[L1MemoryDesc]:
         """Return ``None``: the GDS L1 medium is the slab file, not a buffer.
@@ -133,19 +134,14 @@ class GDSL1MemoryManager:
         coalesced. Returns ``True`` when consistent, ``False`` otherwise.
         """
         clear = True
+        # Single locked snapshot so the consistency check can't compare sizes
+        # taken across a concurrent sbrk() growth (see #3768).
+        snapshot = self._address_manager.get_size_snapshot()
         logger.info("Checking memory allocator consistency")
-        logger.info(
-            " - Total allocated size: %s MB",
-            self._address_manager.total_allocated_size / 1048576,
-        )
+        logger.info(" - Total allocated size: %s MB", snapshot.allocated / 1048576)
+        logger.info(" - Total free size: %s MB", snapshot.free / 1048576)
 
-        total_free_size = self._address_manager.get_free_size()
-        logger.info(" - Total free size: %s MB", total_free_size / 1048576)
-
-        if (
-            total_free_size + self._address_manager.total_allocated_size
-            != self._address_manager.get_heap_size()
-        ):
+        if snapshot.free + snapshot.allocated != snapshot.heap:
             logger.error("Memory allocator size is inconsistent")
             logger.error("This implies a bug in the memory allocator")
             clear = False

@@ -1242,6 +1242,26 @@ class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
         return shapes, dtypes
 
 
+@dataclass(frozen=True)
+class AddressSizeSnapshot:
+    """A consistent snapshot of an :class:`AddressManager`'s sizes.
+
+    The three values are captured atomically under the allocator lock, so they
+    all describe the same allocator state even when lazy ``sbrk()`` growth
+    happens concurrently. For a consistent allocator ``free + allocated ==
+    heap`` always holds.
+
+    Attributes:
+        free: Total free bytes in the address space.
+        allocated: Total allocated bytes in the address space.
+        heap: Total size of the address space in bytes.
+    """
+
+    free: int
+    allocated: int
+    heap: int
+
+
 class AddressManager:
     """
     Manages a virtual address space starting from 0 for memory allocation.
@@ -1545,6 +1565,28 @@ class AddressManager:
         """
         return self._size - self.total_allocated_size
 
+    @synchronized("_lock")
+    def get_size_snapshot(self) -> AddressSizeSnapshot:
+        """
+        Atomically read free, allocated, and heap sizes under the lock.
+
+        Reading these through separate ``get_free_size()`` / ``get_heap_size()``
+        calls plus a bare ``total_allocated_size`` access can interleave with
+        ``sbrk()`` address-space growth, mixing values from different allocator
+        states and producing false inconsistencies in ``memcheck()`` and
+        memory-usage reporting. Capturing all three under a single lock
+        acquisition guarantees they describe one coherent state.
+
+        Returns:
+            An :class:`AddressSizeSnapshot` with ``free``, ``allocated``, and
+            ``heap`` byte counts, where ``free + allocated == heap``.
+        """
+        allocated = self.total_allocated_size
+        heap = self._size
+        return AddressSizeSnapshot(
+            free=heap - allocated, allocated=allocated, heap=heap
+        )
+
     def check_consistency(self) -> bool:
         """
         Check if the address manager is consistent.
@@ -1805,22 +1847,17 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         Returns True is everything is fine, otherwise False.
         """
         clear = True
+        # Read free, allocated, and heap sizes from a single locked snapshot so
+        # concurrent lazy sbrk() growth can't make the consistency check compare
+        # values from different allocator states (see #3768).
+        snapshot = self.address_manager.get_size_snapshot()
         logger.info("Checking memory allocator consistency")
         logger.info(" - Total active allocations: %d", self.num_active_allocations)
-        logger.info(
-            " - Total allocated size: %f MB",
-            self.address_manager.total_allocated_size / 1048576,
-        )
-
-        # Check the real total free size
-        total_free_size = self.address_manager.get_free_size()
-        logger.info(" - Total free size: %f MB", total_free_size / 1048576)
+        logger.info(" - Total allocated size: %f MB", snapshot.allocated / 1048576)
+        logger.info(" - Total free size: %f MB", snapshot.free / 1048576)
 
         # Check if the numbers are consistent
-        if (
-            total_free_size + self.address_manager.total_allocated_size
-            != self.address_manager.get_heap_size()
-        ):
+        if snapshot.free + snapshot.allocated != snapshot.heap:
             logger.error("Memory allocator size is inconsistent")
             logger.error("This implies a bug in the memory allocator")
             clear = False
