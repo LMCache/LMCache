@@ -183,6 +183,12 @@ class KernelGroupInfo:
     """Torch dtype of the KV cache tensors for this group. Used for
     kernel template instantiation; see class docstring for why we keep
     this alongside ``shape_desc.element_size``."""
+    engine_kv_format: "lmc_ops.EngineKVFormat"
+    """Engine KV format of this group's layers (every layer in a group shares
+    one format). The per-group transfer path reads this instead of the cache
+    context's single representative format, so a model that mixes formats across
+    engine groups -- e.g. MiniMax-M3's K+V main cache and key-only MLA index
+    cache -- dispatches each group with its own format."""
     tokens_per_block: int = 0
     """Logical engine tokens covered by one paged chunk (one engine block
     ID) of this group, as declared by the engine's KV cache spec at
@@ -401,6 +407,7 @@ class KVLayerGroupsManager:
                     layer_indices=indices,
                     shape_desc=shape_desc,
                     dtype=dt,
+                    engine_kv_format=group_format,
                     tokens_per_block=tokens_per_block,
                     engine_group_idx=engine_group_idx,
                     sw_size_tokens=sw_size_tokens,
@@ -751,6 +758,15 @@ def parse_kvcache_shape_spec(
                 "Shape must be a 5-tuple (kv_size,nb,bs,nh,hs): %s" % group_spec
             )
         kv_size, nb, bs, nh, hs = shape
+        # The shape spec fixes a canonical per-layer layout (kv_size, nb, bs, nh,
+        # hs), so recover the matching Engine KV format from kv_size (1 => key-only
+        # MLA, otherwise K+V) -- the spec carries no format enum, but the kernel
+        # group needs one just like the detected path.
+        engine_kv_format = (
+            lmc_ops.EngineKVFormat.NL_X_NB_BS_HS
+            if kv_size == 1
+            else lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+        )
         shape_desc = lmc_ops.PageBufferShapeDesc()
         shape_desc.kv_size = kv_size
         shape_desc.nl = layer_count
@@ -767,6 +783,7 @@ def parse_kvcache_shape_spec(
                 layer_indices=indices,
                 shape_desc=shape_desc,
                 dtype=dtype,
+                engine_kv_format=engine_kv_format,
             )
         )
         layer_offset += layer_count

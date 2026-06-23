@@ -104,6 +104,12 @@ class TestKVLayerGroupsManager:
         assert by_group[1].shape_desc.kv_size == 1  # key-only MLA index cache
         assert by_group[1].shape_desc.nh == 1
         assert by_group[1].shape_desc.hs == 128
+        # Each kernel group persists its own format for the transfer path.
+        assert (
+            by_group[0].engine_kv_format
+            == lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+        )
+        assert by_group[1].engine_kv_format == lmc_ops.EngineKVFormat.NL_X_NB_BS_HS
 
     def test_build_multiple_layers_same_shape(self):
         tensors = [
@@ -243,6 +249,19 @@ class TestParseKvcacheShapeSpec:
         assert g.shape_desc.nl == 32
         assert g.dtype == torch.float16
         assert g.layer_indices == list(range(32))
+        # The shape spec carries no format enum; kv_size=2 recovers the K+V one.
+        # First Party
+        import lmcache.c_ops as lmc_ops
+
+        assert g.engine_kv_format == lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+
+    def test_single_group_mla_recovers_key_only_format(self):
+        """kv_size=1 recovers the key-only MLA format (no enum in the spec)."""
+        # First Party
+        import lmcache.c_ops as lmc_ops
+
+        groups = parse_kvcache_shape_spec("(1,1024,16,1,128):bfloat16:8")
+        assert groups[0].engine_kv_format == lmc_ops.EngineKVFormat.NL_X_NB_BS_HS
 
     def test_multiple_groups(self):
         """Test parsing multiple groups separated by semicolons."""
