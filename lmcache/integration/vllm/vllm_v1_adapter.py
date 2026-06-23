@@ -1240,7 +1240,18 @@ class LMCacheConnectorV1Impl:
             )
             token_mask[:masked_token_count] = False
 
-            lmcache_cached_tokens = request.load_spec.lmcache_cached_tokens
+            # Clamp to the request's ACTUAL available tokens. Under high-N KV
+            # pressure load_spec.lmcache_cached_tokens can exceed len(tokens)
+            # (part of the cached prefix was preempted/evicted), and every
+            # downstream slice [:lmcache_cached_tokens] then overran the shorter
+            # tensors -> EngineCore crash (empty min() at N>=16; partial-prefix
+            # IndexError at N=12). Clamping keeps the blend CONSISTENT on the
+            # surviving prefix (reuse what's cached, let vLLM recompute the
+            # evicted tail) instead of aborting -- preserves throughput at high N.
+            # No-op in the normal case (cached prefix <= full request length).
+            lmcache_cached_tokens = min(
+                request.load_spec.lmcache_cached_tokens, len(tokens)
+            )
             logger.debug(f"enter self.enable_blending {self.enable_blending}, self.use_layerwise {self.use_layerwise}")
             if self.use_layerwise:
                 if idx == last_idx:
