@@ -584,7 +584,11 @@ class EngineDrivenTransferContext(TransferContext):
             # ``map`` dispatches work across the pool, returns results in
             # submission order.  Each future here is the MQ future, ready
             # to be ``.result()``-joined at the end.
-            for g_idx, fut in self._serialize_pool.map(
+            # ``starmap`` unpacks each (g_idx, chunks) tuple into positional
+            # args.  ``map`` would pass the tuple as a single arg, which
+            # would not match the function signature.  Each future here
+            # is the MQ future, ready to be ``.result()``-joined at the end.
+            for g_idx, fut in self._serialize_pool.starmap(
                 _serialize_and_submit, active,
             ):
                 mq_futures[g_idx] = fut
