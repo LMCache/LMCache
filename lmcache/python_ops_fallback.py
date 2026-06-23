@@ -402,8 +402,6 @@ def _alloc_page_aligned_pinned_view(size: int) -> Tuple[torch.Tensor, int]:
 def alloc_pinned_numa_ptr(size: int, numa_id: int = 0) -> int:
     """Non-CUDA equivalent of allocating pinned memory with NUMA awareness.
     On XPU, uses pin_memory=True (SYCL USM host allocation) for fast transfers.
-    Attempts to pin the buffer via cudaHostRegister for async D2H;
-    if pinning fails, continues without pinning.
     Note: NUMA node selection is not supported on non-CUDA."""
 
     view, aligned_ptr = _alloc_page_aligned_pinned_view(size)
@@ -411,23 +409,11 @@ def alloc_pinned_numa_ptr(size: int, numa_id: int = 0) -> int:
     # holding the view in the registry transitively keeps the underlying
     # memory alive.
     _tensor_registry[aligned_ptr] = view
-
-    # Try to pin the buffer for async D2H copies
-    if try_pin_buffer(aligned_ptr, size):
-        _pinned_ptr_registry[aligned_ptr] = size
-
     return aligned_ptr
 
 
 def free_pinned_numa_ptr(ptr: int, size: int | None = None) -> None:
-    """Non-CUDA equivalent of freeing a previously allocated NUMA pointer.
-    Unregisters pinned memory if it was pinned."""
-
-    # Unpin if previously registered
-    if ptr in _pinned_ptr_registry:
-        try_unpin_buffer(ptr)
-        _pinned_ptr_registry.pop(ptr, None)
-
+    """Non-CUDA equivalent of freeing a previously allocated NUMA pointer."""
     # Release the tensor object for that pointer reference
     _tensor_registry.pop(ptr, None)
 
@@ -435,28 +421,15 @@ def free_pinned_numa_ptr(ptr: int, size: int | None = None) -> None:
 def alloc_pinned_ptr(size: int, device_id: int = 0) -> int:
     """Non-CUDA equivalent of allocating pinned memory and returning pointer
     to it. On XPU, uses pin_memory=True (SYCL USM host allocation) for
-    fast DMA transfers. Attempts to pin the buffer via cudaHostRegister
-    for async D2H; if pinning fails, continues without pinning."""
+    fast DMA transfers. On other non-CUDA platforms, pinning is not supported."""
 
     view, aligned_ptr = _alloc_page_aligned_pinned_view(size)
     _tensor_registry[aligned_ptr] = view
-
-    # Try to pin the buffer for async D2H copies
-    if try_pin_buffer(aligned_ptr, size):
-        _pinned_ptr_registry[aligned_ptr] = size
-
     return aligned_ptr
 
 
 def free_pinned_ptr(ptr: int) -> None:
-    """Non-CUDA equivalent of freeing a previously allocated pinned pointer.
-    Unregisters pinned memory if it was pinned."""
-
-    # Unpin if previously registered
-    if ptr in _pinned_ptr_registry:
-        try_unpin_buffer(ptr)
-        _pinned_ptr_registry.pop(ptr, None)
-
+    """Non-CUDA equivalent of freeing a previously allocated pinned pointer."""
     # Release the tensor object for that pointer reference
     _tensor_registry.pop(ptr, None)
 
