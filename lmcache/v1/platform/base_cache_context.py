@@ -200,14 +200,15 @@ class BaseCacheContext(ABC):
         """Returns the PageBufferShapeDesc for *group_idx*."""
         return self.kv_layer_groups_manager.get_shape_desc(group_idx)
 
-    def get_engine_kv_format(self, group_idx: int) -> "lmc_ops.EngineKVFormat":
-        """Returns the Engine KV format of kernel *group_idx*.
+    def get_engine_kv_format(self, kernel_group_idx: int) -> "lmc_ops.EngineKVFormat":
+        """Returns the Engine KV format of kernel *kernel_group_idx*.
 
         The per-group format -- read by the transfer path so a model mixing
         formats across groups (e.g. MiniMax-M3) dispatches each group with its
         own, instead of the context's single representative ``engine_kv_format``.
         """
-        return self.kv_layer_groups_manager.kv_layer_groups[group_idx].engine_kv_format
+        groups = self.kv_layer_groups_manager.kv_layer_groups
+        return groups[kernel_group_idx].engine_kv_format
 
     def get_slots_per_chunk_in_sw(self, kernel_group_idx: int) -> int:
         """Returns the number of slots per lmcache chunk for D/H
