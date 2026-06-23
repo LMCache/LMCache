@@ -203,30 +203,60 @@ def get_kv_wrapper_factory(device_type: str) -> Callable[..., Any]:
     return factory
 
 
-def snapshot() -> Dict[str, Dict[str, Callable[..., Any]]]:
+def snapshot() -> Dict[str, Any]:
     """Return a deep-copy of the registry tables.
 
     Test suites use this to install backend overrides without leaking
     state across tests; pair with :func:`restore` in a ``finally`` /
     fixture teardown clause.
 
+    The lazy-discovery flag is captured alongside the tables: if a test
+    snapshots *before* discovery runs and restores *after*, the next
+    caller still re-runs discovery and picks up the auto-registered
+    backends, instead of seeing a stale "already discovered, table is
+    empty" view.
+
     Returns:
-        A dict with keys ``"kv_wrapper"`` and ``"availability"``, each
-        mapping device-type strings to their registered callables.
+        A dict with keys ``"kv_wrapper"``, ``"availability"`` and
+        ``"discovered"``.
     """
     return {
         "kv_wrapper": dict(_KV_WRAPPER_FACTORIES),
         "availability": dict(_AVAILABILITY),
+        "discovered": _WRAPPERS_DISCOVERED,
     }
 
 
-def restore(state: Dict[str, Dict[str, Callable[..., Any]]]) -> None:
+def restore(state: Dict[str, Any]) -> None:
     """Restore registry tables to a previously :func:`snapshot`-ed state.
 
     Args:
         state: A snapshot dict as returned by :func:`snapshot`.
     """
+    global _WRAPPERS_DISCOVERED
     _KV_WRAPPER_FACTORIES.clear()
     _KV_WRAPPER_FACTORIES.update(state.get("kv_wrapper", {}))
     _AVAILABILITY.clear()
     _AVAILABILITY.update(state.get("availability", {}))
+    _WRAPPERS_DISCOVERED = bool(state.get("discovered", False))
+
+
+def reset_for_tests() -> None:
+    """Wipe registry tables and force re-discovery on next access.
+
+    Intended **only** for test fixtures: clears every registered KV
+    wrapper / availability predicate and flips
+    :data:`_WRAPPERS_DISCOVERED` back to ``False`` so the next
+    :func:`get_kv_wrapper_factory` call re-runs the
+    :func:`_discover_wrappers_once` scan and re-populates the table
+    from the live ``platform`` sub-packages.
+
+    This is the recommended replacement for callers that previously
+    hand-mutated module-private globals; pair with an ``autouse``
+    pytest fixture to guarantee every test starts and ends with a
+    clean slate (see ``tests/v1/multiprocess/conftest.py``).
+    """
+    global _WRAPPERS_DISCOVERED
+    _KV_WRAPPER_FACTORIES.clear()
+    _AVAILABILITY.clear()
+    _WRAPPERS_DISCOVERED = False
