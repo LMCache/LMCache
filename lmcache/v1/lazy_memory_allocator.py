@@ -91,16 +91,11 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         self._final_size = align_to(final_size, self.PIN_CHUNK_SIZE)
         # Underlying buffer for the memory allocation
         self._buffer: torch.Tensor
-        # Not all backends support cudart() for host memory pinning (CUDA-specific)
-        if not hasattr(torch_dev, "cudart"):
+        if not torch_dev.ext.is_pin_supported:
             raise RuntimeError(
-                f"Backend '{torch_device_type}' does not support "
-                "cudart(). LazyMemoryAllocator requires pinned "
-                "memory via cudaHostRegister, which is not "
-                "available on this backend."
+                f"Backend '{torch_device_type}' does not support memory "
+                "pinning. LazyMemoryAllocator requires pinned memory."
             )
-        else:
-            self._cudart = torch_dev.cudart()
 
         # List of (ptr, size) for pinned memory chunks
         self._pin_record: list[tuple[int, int]] = []
@@ -201,7 +196,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
 
         # Unpin all pinned memory chunks
         for ptr, size in self._pin_record:
-            self._cudart.cudaHostUnregister(ptr)
+            torch_dev.ext.unpin_memory(ptr)
         self._pin_record.clear()
 
         # Free the underlying buffer if using NUMA allocation
@@ -242,8 +237,15 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
 
         ptr = self._buffer.data_ptr() + offset
         # Use flag: cudaHostRegisterMapped (0x02)
-        self._cudart.cudaHostRegister(ptr, size, 2)
-        self._pin_record.append((ptr, size))
+        if not torch_dev.ext.pin_memory(ptr, size, 2):
+            logger.warning(
+                "pin_memory failed for chunk at ptr=%#x size=%d; "
+                "DMA performance may be degraded",
+                ptr,
+                size,
+            )
+        else:
+            self._pin_record.append((ptr, size))
 
     def _commit_expansion(self, expand_size: int):
         """

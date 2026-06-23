@@ -149,12 +149,12 @@ class L1MemoryManagerConfig:
                 'l1-devdax-path requires SHM to be disabled. Please set --shm-name "".'
             )
 
-        # LazyMemoryAllocator requires cudart (CUDA host-pinned memory).
-        # Auto-disable on non-CUDA backends to avoid a RuntimeError.
-        if self.use_lazy and not hasattr(torch_dev, "cudart"):
+        # LazyMemoryAllocator requires pinned memory support.
+        # Auto-disable on platforms that don't support it to avoid a RuntimeError.
+        if self.use_lazy and not torch_dev.ext.is_pin_supported:
             logger.warning(
-                "LazyMemoryAllocator requires cudart which is not available "
-                "on the current backend. Disabling l1-use-lazy."
+                "LazyMemoryAllocator requires memory pinning which is not "
+                "supported on the current backend. Disabling l1-use-lazy."
             )
             self.use_lazy = False
 

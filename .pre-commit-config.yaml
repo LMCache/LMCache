@@ -28,7 +28,8 @@ repos:
     exclude: |
       (?x)^(
         lmcache/__init__\.py|
-        lmcache/.*/gpu_connector/.*
+        lmcache/.*/gpu_connector/.*|
+        lmcache/v1/platform/.*
       )$
 - repo: https://github.com/PyCQA/isort
   rev: 6.0.1

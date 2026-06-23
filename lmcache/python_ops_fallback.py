@@ -27,6 +27,7 @@ from lmcache import torch_dev
 _tensor_registry: dict[int, torch.Tensor] = {}
 _shm_registry: dict[int, shared_memory.SharedMemory] = {}
 _buf_registry: dict[int, ctypes.Array] = {}
+_pinned_ptr_registry: dict[int, int] = {}  # ptr -> size, for cudaHostUnregister
 
 # Cached copy library for lmcache_memcpy_async (lazy-initialized)
 _copy_lib_NOT_LOADED = object()
@@ -454,7 +455,9 @@ def batched_memcpy(src_ptrs: list[int], dst_ptrs: list[int], sizes: list[int]) -
 
 def alloc_shm_pinned_ptr(size: int, shm_name: str = "") -> int:
     """Non-CUDA equivalent of allocating shared memory pinned pointer.
-    Uses multiprocessing.shared_memory for cross-platform POSIX shm."""
+    Uses multiprocessing.shared_memory for cross-platform POSIX shm.
+    Attempts to pin the buffer via cudaHostRegister for async D2H;
+    if pinning fails, continues without pinning."""
 
     # Strip leading '/' for SharedMemory name
     name = shm_name.lstrip("/") if shm_name else None
@@ -479,12 +482,22 @@ def alloc_shm_pinned_ptr(size: int, shm_name: str = "") -> int:
     _tensor_registry[ptr] = tensor
     _buf_registry[ptr] = buf
     _shm_registry[ptr] = shm
+
+    # Try to pin the SHM buffer for async D2H copies
+    if torch_dev.ext.pin_memory(ptr, size):
+        _pinned_ptr_registry[ptr] = size
+
     return ptr
 
 
 def free_shm_pinned_ptr(ptr: int, size: int = 0, shm_name: str = "") -> None:
     """Non-CUDA equivalent of freeing a shared memory
-    pinned pointer."""
+    pinned pointer. Unregisters pinned memory if it was pinned."""
+
+    # Unpin if previously registered
+    if ptr in _pinned_ptr_registry:
+        torch_dev.ext.unpin_memory(ptr)
+        _pinned_ptr_registry.pop(ptr, None)
 
     # Release in order: tensor -> ctypes buf -> shm
     _tensor_registry.pop(ptr, None)
