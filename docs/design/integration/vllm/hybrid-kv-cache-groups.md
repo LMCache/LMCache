@@ -68,10 +68,10 @@ KVLayerGroupInfo list   --STORE/RETRIEVE block_ids per info-->  transfer kernels
 
 1. Discover each layer's Engine KV format from its registered tensor
    (`normalize_and_discover_per_layer_formats`). Detection is per *layout*, not
-   per engine group: one engine group may mix layouts — MiniMax-M3 packs its
-   rank-5 main K/V and rank-3 sparse-attention indexer caches into a single
-   `UniformTypeKVCacheSpecs` group — so each layout within a group is detected
-   and reported separately.
+   per engine group: one engine group may mix layouts — e.g. a model's rank-5
+   main K/V layers and a rank-3 key-only sparse-attention indexer cache can land
+   in a single `UniformTypeKVCacheSpecs` group — so each layout within a group
+   is detected and reported separately.
 2. Map each registered layer to its engine group index; layers absent from
    every group's `layer_names` (cross-layer KV-sharing layers) are tagged
    `EXCLUDED_ENGINE_GROUP` and dropped (see Cross-layer KV sharing).
@@ -79,7 +79,8 @@ KVLayerGroupInfo list   --STORE/RETRIEVE block_ids per info-->  transfer kernels
    `(kv_size, num_heads, head_size, block_size, engine_group_idx, dtype,
    engine_kv_format)` — `engine_group_idx` keeps identically-shaped layers from
    different engine groups in separate infos, and `engine_kv_format` keeps
-   different layouts that share one engine group apart (M3's K/V vs indexer).
+   different layouts that share one engine group apart (a rank-5 K/V group vs a
+   rank-3 indexer).
 4. Emit one `EngineGroupInfo` per identity; send the list in the
    `REGISTER_KV_CACHE` payload (the message queue encodes it).
 
