@@ -2,15 +2,20 @@
 """Platform backend registry.
 
 Each accelerator sub-package (``platform/cuda``, ``platform/cpu``,
-future ``platform/xpu`` ...) registers a concrete factory for the
-KV-cache IPC wrapper consumed by the multiprocess adapter.
+future ``platform/xpu`` ...) ships a concrete
+:class:`~lmcache.v1.platform.base_ipc_wrapper.DeviceIPCWrapper`
+subclass with a ``device_type`` ClassVar and a ``wrap`` factory
+classmethod.  :func:`_discover_wrappers_once` scans the ``platform``
+package for those subclasses at run-time and populates the factory
+table -- no static ``register_kv_wrapper`` calls needed.
 
 The :func:`get_kv_wrapper_factory` lookup keys on
 ``tensor.device.type`` so the call site in
 :mod:`lmcache.integration.vllm.vllm_multi_process_adapter` stays free
-of any if/elif chain. Adding a new accelerator therefore requires
+of any if/elif chain.  Adding a new accelerator therefore requires
 *zero* changes to the dispatcher; it only needs to ship its own
-sub-package and register the right callable at import time.
+sub-package with a ``DeviceIPCWrapper`` subclass that sets
+``device_type`` and ``wrap``.
 """
 
 # Future
@@ -19,20 +24,99 @@ from __future__ import annotations
 # Standard
 from typing import Any, Callable, Dict
 
+# First Party
+from lmcache.logging import init_logger
+
+logger = init_logger(__name__)
+
 # Public sentinel used by callers who want the always-available
 # fall-back regardless of the running ``torch_device_type``.
 DEFAULT_BACKEND: str = "cpu"
 
 
-# KV-cache IPC wrapper factory per device type. Concrete sub-packages
-# self-register here (CUDA -> ``CudaIPCWrapper``, CPU -> POSIX-SHM
-# wrapper) so :func:`get_kv_wrapper_factory` can dispatch by
-# ``tensor.device.type`` without any if/elif chain in the call site.
+# KV-cache IPC wrapper factory per device type.  Populated lazily on
+# first :func:`get_kv_wrapper_factory` call by scanning the
+# ``platform`` package for
+# :class:`~lmcache.v1.platform.base_ipc_wrapper.DeviceIPCWrapper`
+# subclasses.  Tests substitute entries via
+# :func:`snapshot` / :func:`restore`.
 _KV_WRAPPER_FACTORIES: Dict[str, Callable[..., Any]] = {}
 
 # Per-backend availability predicate (e.g. CUDA's ``is_available``).
 # Missing entry == always available.
 _AVAILABILITY: Dict[str, Callable[[], bool]] = {}
+
+# Guard so discovery only runs once (lazy init).
+_WRAPPERS_DISCOVERED: bool = False
+
+
+def _discover_wrappers_once() -> None:
+    """Populate :data:`_KV_WRAPPER_FACTORIES` on first use.
+
+    Walks ``lmcache.v1.platform`` two levels deep for
+    :class:`~lmcache.v1.platform.base_ipc_wrapper.DeviceIPCWrapper`
+    subclasses.  Each subclass is indexed by its *device_type*
+    ClassVar, and its *wrap* factory is stored as the KV-wrapper
+    factory — but only when ``_is_default_wrapper`` is ``True``
+    (so e.g. :class:`~lmcache.v1.platform.cuda.ipc_wrapper.RawCudaIPCWrapper`
+    is skipped in favour of
+    :class:`~lmcache.v1.platform.cuda.ipc_wrapper.CudaIPCWrapper`).
+
+    Subclasses with an empty *device_type* or ``_is_default_wrapper ==
+    False`` are skipped.  Multiple subclasses claiming the same
+    *device_type* trigger a warning; the first one wins.
+    """
+    global _WRAPPERS_DISCOVERED
+    if _WRAPPERS_DISCOVERED:
+        return
+
+    # First Party
+    from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
+    from lmcache.v1.utils.subclass_discovery import discover_subclasses
+    import lmcache.v1.platform as platform_pkg
+
+    for cls in discover_subclasses(
+        platform_pkg,
+        DeviceIPCWrapper,  # type: ignore[type-abstract]
+        levels=[2, 2],
+    ):
+        _register_discovered_wrapper(cls)
+
+    _WRAPPERS_DISCOVERED = True
+
+
+def _register_discovered_wrapper(cls: type) -> None:
+    """Index *cls* in :data:`_KV_WRAPPER_FACTORIES` by its device_type.
+
+    Only registers when ``_is_default_wrapper`` is ``True`` so sibling
+    subclasses (e.g. ``RawCudaIPCWrapper`` vs ``CudaIPCWrapper``) can
+    share a ``device_type`` without colliding.
+    """
+    if not getattr(cls, "_is_default_wrapper", False):
+        return
+
+    device_type: str = getattr(cls, "device_type", "")
+    if not device_type:
+        logger.warning(
+            "Skipping %s: empty device_type ClassVar; concrete "
+            "DeviceIPCWrapper subclasses must override it.",
+            cls.__name__,
+        )
+        return
+
+    factory = getattr(cls, "wrap", cls)
+    existing = _KV_WRAPPER_FACTORIES.get(device_type)
+    if existing is not None and existing is not factory:
+        logger.warning(
+            "Multiple KV-wrapper classes claim device_type=%r "
+            "(%s vs %s); keeping the first.",
+            device_type,
+            getattr(existing, "__name__", str(existing)),
+            cls.__name__,
+        )
+        return
+
+    _KV_WRAPPER_FACTORIES[device_type] = factory
 
 
 def register_availability(device_type: str, predicate: Callable[[], bool]) -> None:
@@ -48,6 +132,11 @@ def register_availability(device_type: str, predicate: Callable[[], bool]) -> No
 
 def register_kv_wrapper(device_type: str, factory: Callable[..., Any]) -> None:
     """Register a KV-cache IPC wrapper factory for ``device_type``.
+
+    This is the manual registration path kept for backward
+    compatibility.  New backends should instead set ``device_type``
+    and ``wrap`` on their :class:`DeviceIPCWrapper` subclass and let
+    :func:`_discover_wrappers_once` handle registration.
 
     Args:
         device_type: The device type string (e.g., ``"cuda"``).
@@ -79,10 +168,10 @@ def is_available(device_type: str) -> bool:
 def get_kv_wrapper_factory(device_type: str) -> Callable[..., Any]:
     """Pick the KV-cache wrapper factory for ``device_type``.
 
-    A missing entry means the caller is asking for a backend that
-    nobody registered (typically because the relevant sub-package was
-    not imported), which is a programming error and deserves an
-    explicit failure.
+    Triggers lazy auto-discovery on first call (see
+    :func:`_discover_wrappers_once`).  A missing entry means no
+    :class:`~lmcache.v1.platform.base_ipc_wrapper.DeviceIPCWrapper`
+    subclass declared *device_type* for the requested backend.
 
     Args:
         device_type: The device type string (e.g., ``"cuda"``).
@@ -93,6 +182,7 @@ def get_kv_wrapper_factory(device_type: str) -> Callable[..., Any]:
     Raises:
         ValueError: If no factory is registered for the device type.
     """
+    _discover_wrappers_once()
     factory = _KV_WRAPPER_FACTORIES.get(device_type)
     if factory is None:
         raise ValueError(
