@@ -14,6 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Union
 import asyncio
+import math
 import os
 import threading
 
@@ -171,6 +172,8 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
     - base_path: directory for storing KV cache files.
     - relative_tmp_dir: optional relative sub-dir for
       temp files (same as fs_connector_relative_tmp_dir).
+    - max_capacity_gb: aggregate capacity used by get_usage();
+      0 disables aggregate eviction.
     """
 
     def __init__(
@@ -179,7 +182,8 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
         relative_tmp_dir: Optional[str] = None,
         read_ahead_size: Optional[int] = None,
         use_odirect: bool = False,
-    ):
+        max_capacity_gb: float = 0.0,
+    ) -> None:
         """Initialize FSL2AdapterConfig.
 
         Args:
@@ -193,14 +197,31 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
                 using O_DIRECT for both reads and writes.
                 Requires buffer sizes aligned to the
                 filesystem block size.
+            max_capacity_gb: Maximum aggregate L2 capacity in
+                GB for usage tracking and eviction. A value of
+                0 keeps aggregate eviction disabled.
         """
         self.base_path = base_path
         self.relative_tmp_dir = relative_tmp_dir
         self.read_ahead_size = read_ahead_size
         self.use_odirect = use_odirect
+        self.max_capacity_gb = max_capacity_gb
 
     @classmethod
     def from_dict(cls, d: dict) -> "FSL2AdapterConfig":
+        """Build an FS L2 adapter config from a JSON object.
+
+        Args:
+            d: Adapter JSON dict. Must include ``base_path`` and may
+                include ``relative_tmp_dir``, ``read_ahead_size``,
+                ``use_odirect``, and ``max_capacity_gb``.
+
+        Returns:
+            Parsed ``FSL2AdapterConfig``.
+
+        Raises:
+            ValueError: If a field is missing or has an invalid type.
+        """
         base_path = d.get("base_path")
         if not isinstance(base_path, str) or not base_path:
             raise ValueError("base_path must be a non-empty string")
@@ -215,15 +236,25 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
         use_odirect = d.get("use_odirect", False)
         if not isinstance(use_odirect, bool):
             raise ValueError("use_odirect must be a boolean")
+        max_capacity_gb = d.get("max_capacity_gb", 0.0)
+        if (
+            not isinstance(max_capacity_gb, (int, float))
+            or isinstance(max_capacity_gb, bool)
+            or not math.isfinite(max_capacity_gb)
+            or max_capacity_gb < 0
+        ):
+            raise ValueError("max_capacity_gb must be a non-negative finite number")
         return cls(
             base_path=base_path,
             relative_tmp_dir=relative_tmp_dir,
             read_ahead_size=read_ahead_size,
             use_odirect=use_odirect,
+            max_capacity_gb=float(max_capacity_gb),
         )
 
     @classmethod
     def help(cls) -> str:
+        """Return CLI help text for FS L2 adapter JSON fields."""
         return (
             "FS L2 adapter config fields:\n"
             "- base_path (str): directory for KV cache "
@@ -235,7 +266,10 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
             "readahead by reading this many bytes first "
             "(optional)\n"
             "- use_odirect (bool): bypass page cache "
-            "via O_DIRECT (optional, default false)"
+            "via O_DIRECT (optional, default false)\n"
+            "- max_capacity_gb (float): max L2 capacity "
+            "in GB for usage tracking / eviction "
+            "(default 0 = disabled)"
         )
 
 
@@ -252,8 +286,8 @@ class FSL2Adapter(L2AdapterInterface):
     thread.
     """
 
-    def __init__(self, config: FSL2AdapterConfig):
-        super().__init__()
+    def __init__(self, config: FSL2AdapterConfig) -> None:
+        super().__init__(max_capacity_bytes=int(config.max_capacity_gb * (1024**3)))
         self._config = config
         base = config.base_path
         self._base_path = Path(base)
@@ -301,11 +335,12 @@ class FSL2Adapter(L2AdapterInterface):
         logger.info(
             "Initialized FSL2Adapter with base_path=%s, "
             "relative_tmp_dir=%s, "
-            "read_ahead_size=%s, use_odirect=%s",
+            "read_ahead_size=%s, use_odirect=%s, max_capacity_gb=%.2f",
             self._base_path,
             self._relative_tmp_dir,
             self._read_ahead_size,
             self._use_odirect,
+            config.max_capacity_gb,
         )
 
     # ------------------------------------------------------------------
@@ -407,12 +442,16 @@ class FSL2Adapter(L2AdapterInterface):
 
     def report_status(self) -> dict:
         """Return a status dict for the FS L2 adapter."""
+        usage = self.get_usage()
         return {
             "is_healthy": self._loop_thread.is_alive(),
             "type": "FSL2Adapter",
             "base_path": str(self._base_path),
             "use_odirect": self._use_odirect,
             "event_loop_alive": self._loop_thread.is_alive(),
+            "max_capacity_bytes": usage.total_capacity_bytes,
+            "total_bytes_used": usage.total_bytes_used,
+            "usage_fraction": usage.usage_fraction,
         }
 
     # ------------------------------------------------------------------
@@ -423,11 +462,9 @@ class FSL2Adapter(L2AdapterInterface):
         # Not implemented for the filesystem adapter.
         pass
 
-    # ``get_usage()`` is inherited from ``L2AdapterInterface``. The FS
-    # adapter declares no max capacity (default 0) so ``supports_global_eviction``
-    # returns ``False`` and ``usage_fraction == -1.0`` — the eviction
-    # controller treats this as "no eviction signal" and skips the
-    # adapter entirely.
+    # ``get_usage()`` is inherited from ``L2AdapterInterface``. The base
+    # class maintains aggregate and per-cache_salt byte totals from
+    # ``_notify_keys_stored`` / ``_notify_keys_deleted``.
 
     # ------------------------------------------------------------------
     # Cleanup
@@ -580,6 +617,8 @@ class FSL2Adapter(L2AdapterInterface):
     ) -> None:
         success = True
         bytes_written = 0
+        stored_keys: list[ObjectKey] = []
+        stored_sizes: list[int] = []
         try:
             for key, obj in zip(keys, objects, strict=True):
                 file_path, tmp_path = self._key_to_file_and_tmp_path(key)
@@ -619,6 +658,8 @@ class FSL2Adapter(L2AdapterInterface):
 
                     await aiofiles.os.replace(tmp_path, file_path)
                     bytes_written += size
+                    stored_keys.append(key)
+                    stored_sizes.append(size)
                     logger.debug(
                         "FSL2Adapter stored key %s (%d bytes)",
                         file_path.name,
@@ -639,6 +680,8 @@ class FSL2Adapter(L2AdapterInterface):
             )
             success = False
 
+        if stored_keys:
+            self._notify_keys_stored(stored_keys, stored_sizes)
         with self._lock:
             self._completed_store_tasks[task_id] = L2StoreResult(success, bytes_written)
         self._store_efd.notify()
