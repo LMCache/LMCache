@@ -64,6 +64,7 @@ REQUEST_NAMES = [
     "RETRIEVE",
     "LOOKUP",
     "QUERY_PREFETCH_STATUS",
+    "WAIT_PREFETCH_STATUS",
     "QUERY_PREFETCH_LOOKUP_HITS",
     "FREE_LOOKUP_LOCKS",
     "END_SESSION",
@@ -166,6 +167,16 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Returns: int | None - Chunk count when done, None if still in progress
         "QUERY_PREFETCH_STATUS": ProtocolDefinition(
             payload_classes=[str],
+            response_class=int | None,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Block until a prefetch job completes, then return its result
+        # Payload:
+        #   - request_id: str - The external request ID passed in the lookup key
+        #   - timeout: float - Max seconds to wait for the prefetch to finish
+        # Returns: int | None - Chunk count when done, None if the wait timed out
+        "WAIT_PREFETCH_STATUS": ProtocolDefinition(
+            payload_classes=[str, float],
             response_class=int | None,
             handler_type=HandlerType.BLOCKING,
         ),
