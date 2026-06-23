@@ -68,32 +68,32 @@ def compute_extra_count(
     return tp - 1 if tp > world_size else 0
 
 
-def _key_prefix_to_chunk_count(
-    key_prefix_len: int,
+def _get_prefix_hit_length(
+    found_prefix_len: int,
     world_size: int,
     num_object_groups: int,
 ) -> int:
-    """Convert a contiguous key-prefix length to a chunk count.
+    """Return the prefix hit length in chunks.
 
     The chunk-major key layout packs ``world_size * num_object_groups`` keys per
-    chunk, so a fully-present prefix of ``key_prefix_len`` keys spans
-    ``key_prefix_len // (world_size * num_object_groups)`` chunks.
+    chunk, so a fully-present prefix of ``found_prefix_len`` keys hits
+    ``found_prefix_len // (world_size * num_object_groups)`` chunks.
 
     Args:
-        key_prefix_len: Length of the contiguous found-key prefix.
+        found_prefix_len: Length, in keys, of the contiguous found-key prefix.
         world_size: Number of kv_rank shards per chunk.
         num_object_groups: Number of object groups in the chunk-major layout.
 
     Returns:
-        The number of fully-present chunks in the prefix.
+        The prefix hit length in chunks (fully-present chunks of the prefix).
 
     Note:
         Correct only under full attention -- every object group present for
         every hit chunk. Once sliding-window prefetch lands, the hit is no
-        longer a uniform contiguous key prefix and the chunk count must come
+        longer a uniform contiguous key prefix and the hit length must come
         from the fold's reported hit length instead.
     """
-    return key_prefix_len // (world_size * num_object_groups)
+    return found_prefix_len // (world_size * num_object_groups)
 
 
 @dataclass
@@ -352,7 +352,7 @@ class LookupModule:
         if found is None:
             return None
 
-        return _key_prefix_to_chunk_count(found, job.world_size, job.num_object_groups)
+        return _get_prefix_hit_length(found, job.world_size, job.num_object_groups)
 
     def query_prefetch_status(
         self,
@@ -390,7 +390,7 @@ class LookupModule:
         # 1. the world size is the same between keys
         # 2. the lookup sort the keys in prefix order and breaks at the
         #    first failure
-        found_count = _key_prefix_to_chunk_count(
+        found_count = _get_prefix_hit_length(
             found.count_leading_ones(), job.world_size, job.num_object_groups
         )
 
