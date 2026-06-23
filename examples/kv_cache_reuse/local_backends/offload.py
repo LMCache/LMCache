@@ -14,7 +14,9 @@ from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 
 
-def setup_environment_variables(vllm_version: str, use_disk: bool = False):
+def setup_environment_variables(
+    vllm_version: str, use_disk: bool = False, local_disk: str | None = None
+):
     # LMCache-related environment variables
 
     # LMCache is set to use 256 tokens per chunk
@@ -28,7 +30,7 @@ def setup_environment_variables(vllm_version: str, use_disk: bool = False):
         os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "5"
 
         # Enable local disk backend in LMCache
-        os.environ["LMCACHE_LOCAL_DISK"] = "file://local_disk/"
+        os.environ["LMCACHE_LOCAL_DISK"] = local_disk or "file://local_disk/"
 
         # Set the maximum size of the local disk size to 10GB
         os.environ["LMCACHE_MAX_LOCAL_DISK_SIZE"] = "10"
@@ -111,6 +113,16 @@ def parse_args():
         action="store_true",
         help="Specify whether to use disk as backend (default: False)",
     )
+    parser.add_argument(
+        "--local-disk",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated disk path(s) for the local disk backend "
+            "(e.g. /mnt/disk0,/mnt/disk1). Requires --use-disk. "
+            "Defaults to file://local_disk/ when not set."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -124,7 +136,7 @@ def main():
         lmcache_connector = "LMCacheConnectorV1"
         model = "mistralai/Mistral-7B-Instruct-v0.2"
 
-    setup_environment_variables(args.version, args.use_disk)
+    setup_environment_variables(args.version, args.use_disk, args.local_disk)
 
     with build_llm_with_lmcache(lmcache_connector, model, args.version) as llm:
         # This example script runs two requests with a shared prefix.

@@ -69,7 +69,8 @@ For example, with two GPUs and two paths:
 - ``cuda:0`` → ``/mnt/nvme0/kvcache/``
 - ``cuda:1`` → ``/mnt/nvme1/kvcache/``
 
-``max_local_disk_size`` is the **total budget** shared across all paths.
+``max_local_disk_size`` is the **total budget** for each ``LocalDiskBackend`` instance. LMCache splits that budget evenly across the instance's assigned paths. For example, ``512GB`` across four assigned SSD paths becomes ``128GB`` per path.
+In multi-path mode, LMCache treats each assigned path as an independent local disk cache with its own equal-share quota and eviction policy state. Unused space on one path is not borrowed by another path.
 
 **Environment variable example:**
 
@@ -89,9 +90,10 @@ For example, with two GPUs and two paths:
 
 .. note::
 
-    Each GPU worker uses only its assigned path, so O_DIRECT alignment
-    is determined by that path's filesystem block size.  Different
-    devices may have different block sizes without issue.
+    O_DIRECT alignment follows each assigned path's filesystem block size.
+    At initialization, each assigned path's mounted filesystem must have at
+    least its equal-share quota available. LMCache validates currently
+    available filesystem space, not raw SSD capacity.
 
 .. tip::
 

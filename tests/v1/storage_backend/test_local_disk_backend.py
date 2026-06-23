@@ -69,6 +69,19 @@ def create_test_metadata():
     )
 
 
+def create_rank_metadata(local_rank: int, local_world_size: int) -> LMCacheMetadata:
+    """Create LMCacheMetadata with explicit local worker placement."""
+    return LMCacheMetadata(
+        model_name="test_model",
+        world_size=local_world_size,
+        local_world_size=local_world_size,
+        worker_id=local_rank,
+        local_worker_id=local_rank,
+        kv_dtype=torch.bfloat16,
+        kv_shape=(28, 2, 256, 8, 128),
+    )
+
+
 def create_test_key(key_id: int = 0) -> CacheEngineKey:
     """Create a test CacheEngineKey."""
     return CacheEngineKey(
@@ -142,6 +155,9 @@ class TestLocalDiskBackend:
         assert backend.instance_id == "test_instance"
         assert backend.usage == 0
         assert len(backend.dict) == 0
+        assert backend.max_cache_size == int(config.max_local_disk_size * 1024**3)
+        assert backend.path_max_cache_sizes[temp_disk_path] == backend.max_cache_size
+        assert backend.path_current_cache_sizes[temp_disk_path] == 0
 
         local_cpu_backend.memory_allocator.close()
 
@@ -345,6 +361,295 @@ class TestMultiPathDiskBackend:
             shutil.rmtree(dir_b, ignore_errors=True)
             local_cpu_backend.memory_allocator.close()
 
+    def test_equal_quota_is_split_across_assigned_paths(
+        self, async_loop, local_cpu_backend
+    ):
+        """max_local_disk_size is split over paths assigned to this worker."""
+        dirs = [tempfile.mkdtemp() for _ in range(4)]
+        try:
+            combined = ",".join(dirs)
+            quota_per_path = 512 * 1024
+            assigned_quota = 2 * quota_per_path
+            config = create_test_config(
+                combined, max_disk_size=assigned_quota / 1024**3
+            )
+            backend = LocalDiskBackend(
+                config=config,
+                loop=async_loop,
+                local_cpu_backend=local_cpu_backend,
+                dst_device="cuda:1",
+                metadata=create_rank_metadata(local_rank=1, local_world_size=2),
+            )
+            assert backend.assigned_paths == dirs[2:4]
+            assert backend.path_max_cache_sizes == {
+                dirs[2]: quota_per_path,
+                dirs[3]: quota_per_path,
+            }
+            assert backend.max_cache_size == assigned_quota
+        finally:
+            for d in dirs:
+                shutil.rmtree(d, ignore_errors=True)
+            local_cpu_backend.memory_allocator.close()
+
+    def test_init_fails_when_assigned_path_available_space_is_too_small(
+        self, async_loop, local_cpu_backend
+    ):
+        """Init fails when any assigned filesystem is below its quota."""
+        dirs = [tempfile.mkdtemp() for _ in range(4)]
+        try:
+            combined = ",".join(dirs)
+            quota_per_path = 512 * 1024
+            config = create_test_config(
+                combined, max_disk_size=(2 * quota_per_path) / 1024**3
+            )
+            metadata = create_rank_metadata(local_rank=1, local_world_size=2)
+
+            real_stat = os.stat
+            real_statvfs = os.statvfs
+
+            class FakeStatVFS:
+                def __init__(self, *, f_bsize: int, f_frsize: int, f_bavail: int):
+                    self.f_bsize = f_bsize
+                    self.f_frsize = f_frsize
+                    self.f_bavail = f_bavail
+
+            class FakeStat:
+                def __init__(self, *, path: str, st_dev: int):
+                    self.st_dev = st_dev
+                    self.st_mode = real_stat(path).st_mode
+
+            def fake_statvfs(path):
+                if path == dirs[2]:
+                    return FakeStatVFS(f_bsize=4096, f_frsize=4096, f_bavail=1)
+                return real_statvfs(path)
+
+            def fake_stat(path):
+                if path == dirs[2]:
+                    return FakeStat(path=path, st_dev=100)
+                if path == dirs[3]:
+                    return FakeStat(path=path, st_dev=101)
+                return real_stat(path)
+
+            with (
+                patch(
+                    "lmcache.v1.storage_backend.local_disk_backend.os.statvfs",
+                    side_effect=fake_statvfs,
+                ),
+                patch(
+                    "lmcache.v1.storage_backend.local_disk_backend.os.stat",
+                    side_effect=fake_stat,
+                ),
+            ):
+                with pytest.raises(ValueError, match="available filesystem space"):
+                    LocalDiskBackend(
+                        config=config,
+                        loop=async_loop,
+                        local_cpu_backend=local_cpu_backend,
+                        dst_device="cuda:1",
+                        metadata=metadata,
+                    )
+        finally:
+            for d in dirs:
+                shutil.rmtree(d, ignore_errors=True)
+            local_cpu_backend.memory_allocator.close()
+
+    def test_init_fails_when_same_filesystem_lacks_combined_quota(
+        self, async_loop, local_cpu_backend
+    ):
+        """Paths on one filesystem are validated against their combined quota."""
+        dirs = [tempfile.mkdtemp() for _ in range(4)]
+        try:
+            combined = ",".join(dirs)
+            quota_per_path = 512 * 1024
+            config = create_test_config(
+                combined, max_disk_size=(2 * quota_per_path) / 1024**3
+            )
+            metadata = create_rank_metadata(local_rank=1, local_world_size=2)
+
+            real_stat = os.stat
+            real_statvfs = os.statvfs
+
+            class FakeStatVFS:
+                def __init__(self, *, f_bsize: int, f_frsize: int, f_bavail: int):
+                    self.f_bsize = f_bsize
+                    self.f_frsize = f_frsize
+                    self.f_bavail = f_bavail
+
+            class FakeStat:
+                def __init__(self, *, path: str, st_dev: int):
+                    self.st_dev = st_dev
+                    self.st_mode = real_stat(path).st_mode
+
+            def fake_statvfs(path):
+                if path in {dirs[2], dirs[3]}:
+                    return FakeStatVFS(
+                        f_bsize=4096,
+                        f_frsize=4096,
+                        f_bavail=(quota_per_path + quota_per_path // 2) // 4096,
+                    )
+                return real_statvfs(path)
+
+            def fake_stat(path):
+                if path in {dirs[2], dirs[3]}:
+                    return FakeStat(path=path, st_dev=99)
+                return real_stat(path)
+
+            with (
+                patch(
+                    "lmcache.v1.storage_backend.local_disk_backend.os.statvfs",
+                    side_effect=fake_statvfs,
+                ),
+                patch(
+                    "lmcache.v1.storage_backend.local_disk_backend.os.stat",
+                    side_effect=fake_stat,
+                ),
+            ):
+                with pytest.raises(ValueError, match="available filesystem space"):
+                    LocalDiskBackend(
+                        config=config,
+                        loop=async_loop,
+                        local_cpu_backend=local_cpu_backend,
+                        dst_device="cuda:1",
+                        metadata=metadata,
+                    )
+        finally:
+            for d in dirs:
+                shutil.rmtree(d, ignore_errors=True)
+            local_cpu_backend.memory_allocator.close()
+
+    def test_path_local_eviction_uses_only_target_path(
+        self, async_loop, local_cpu_backend
+    ):
+        """Quota pressure evicts only entries from the target path."""
+        dir_a = tempfile.mkdtemp()
+        dir_b = tempfile.mkdtemp()
+        try:
+            size = 512 * 1024
+            config = create_test_config(
+                f"{dir_a},{dir_b}", max_disk_size=(2 * size) / 1024**3
+            )
+            metadata = LMCacheMetadata(
+                model_name="test_model",
+                world_size=1,
+                local_world_size=1,
+                worker_id=0,
+                local_worker_id=0,
+                kv_dtype=torch.bfloat16,
+                kv_shape=(28, 2, 256, 8, 128),
+            )
+            backend = LocalDiskBackend(
+                config=config,
+                loop=async_loop,
+                local_cpu_backend=local_cpu_backend,
+                dst_device="cuda:0",
+                metadata=metadata,
+            )
+
+            key_a = create_test_key(0)
+            key_b = create_test_key(1)
+            path_a = os.path.dirname(backend._key_to_path(key_a))
+            path_b = os.path.dirname(backend._key_to_path(key_b))
+            assert path_a != path_b
+
+            backend.dict[key_a] = DiskCacheMetadata(
+                backend._key_to_path(key_a), size, None, None, None, None, 0
+            )
+            backend.dict[key_b] = DiskCacheMetadata(
+                backend._key_to_path(key_b), size, None, None, None, None, 0
+            )
+            backend.path_current_cache_sizes[path_a] = size
+            backend.path_current_cache_sizes[path_b] = size
+            backend.current_cache_size = size * 2
+            backend.path_dicts[path_a][key_a] = backend.dict[key_a]
+            backend.path_dicts[path_b][key_b] = backend.dict[key_b]
+            backend.path_cache_policies[path_a].update_on_put(key_a)
+            backend.path_cache_policies[path_b].update_on_put(key_b)
+
+            memory_obj = MagicMock(spec=MemoryObj)
+            memory_obj.tensor = torch.zeros(1)
+            memory_obj.get_physical_size.return_value = size
+            memory_obj.ref_count_up.return_value = None
+
+            backend.disk_worker.submit_task = MagicMock(return_value=asyncio.sleep(0))
+
+            with patch(
+                "lmcache.v1.storage_backend.local_disk_backend."
+                "asyncio.run_coroutine_threadsafe"
+            ) as mock_schedule:
+
+                def _close_coro(coro, _loop):
+                    coro.close()
+                    return MagicMock()
+
+                mock_schedule.side_effect = _close_coro
+                backend.submit_put_task(key_a, memory_obj)
+
+            assert key_a not in backend.dict
+            assert key_b in backend.dict
+            assert backend.path_current_cache_sizes[path_a] == size
+            assert backend.path_current_cache_sizes[path_b] == size
+            assert backend.disk_worker.submit_task.call_args.kwargs["key"] == key_a
+        finally:
+            shutil.rmtree(dir_a, ignore_errors=True)
+            shutil.rmtree(dir_b, ignore_errors=True)
+            local_cpu_backend.memory_allocator.close()
+
+    def test_worker_aware_subset_assignment(self, async_loop, local_cpu_backend):
+        """With metadata, a worker is assigned a contiguous subset of paths."""
+        dirs = [tempfile.mkdtemp() for _ in range(4)]
+        try:
+            combined = ",".join(dirs)
+            config = create_test_config(combined)
+            # 2 local workers, 4 paths: rank 1 owns the second half.
+            metadata = LMCacheMetadata(
+                model_name="test_model",
+                world_size=2,
+                local_world_size=2,
+                worker_id=1,
+                local_worker_id=1,
+                kv_dtype=torch.bfloat16,
+                kv_shape=(28, 2, 256, 8, 128),
+            )
+            backend = LocalDiskBackend(
+                config=config,
+                loop=async_loop,
+                local_cpu_backend=local_cpu_backend,
+                dst_device="cuda:1",
+                metadata=metadata,
+            )
+            assert backend.assigned_paths == dirs[2:4]
+            assert backend.path == dirs[2]
+            # _key_to_path must land under one of the assigned dirs.
+            key = create_test_key(7)
+            assert os.path.dirname(backend._key_to_path(key)) in dirs[2:4]
+            # Block size map keyed on the assigned paths only.
+            assert set(backend.path_block_sizes) == set(dirs[2:4])
+        finally:
+            for d in dirs:
+                shutil.rmtree(d, ignore_errors=True)
+            local_cpu_backend.memory_allocator.close()
+
+    def test_no_metadata_single_path_legacy(self, async_loop, local_cpu_backend):
+        """Without metadata, the legacy single-path mapping is used."""
+        dirs = [tempfile.mkdtemp() for _ in range(4)]
+        try:
+            combined = ",".join(dirs)
+            config = create_test_config(combined)
+            backend = LocalDiskBackend(
+                config=config,
+                loop=async_loop,
+                local_cpu_backend=local_cpu_backend,
+                dst_device="cuda:2",
+                metadata=None,
+            )
+            # device_id=2 -> 2 % 4 = 2 -> dirs[2], single path.
+            assert backend.assigned_paths == [dirs[2]]
+            assert backend.path == dirs[2]
+        finally:
+            for d in dirs:
+                shutil.rmtree(d, ignore_errors=True)
+            local_cpu_backend.memory_allocator.close()
+
 
 class TestParseLocalDisk:
     """Unit tests for the _parse_local_disk config parser."""
@@ -398,8 +703,10 @@ class TestGetBlockingCachePolicyUpdate:
         dtype: torch.dtype,
     ) -> None:
         """Insert a key into backend.dict without writing anything to disk."""
+        path = backend._key_to_path(key)
+        cache_path = os.path.dirname(path)
         meta = DiskCacheMetadata(
-            path="/nonexistent/path.pt",
+            path=path,
             size=0,
             shape=shape,
             dtype=dtype,
@@ -409,7 +716,8 @@ class TestGetBlockingCachePolicyUpdate:
         )
         with backend.disk_lock:
             backend.dict[key] = meta
-            backend.cache_policy.update_on_put(key)
+            backend.path_dicts[cache_path][key] = meta
+            backend.path_cache_policies[cache_path].update_on_put(key)
 
     def test_no_phantom_hit_when_load_fails(
         self, local_disk_backend: LocalDiskBackend
@@ -419,11 +727,12 @@ class TestGetBlockingCachePolicyUpdate:
         shape = torch.Size([28, 2, 256, 8, 128])
         self._inject_key(local_disk_backend, key, shape, torch.bfloat16)
 
+        cache_path = local_disk_backend._get_cache_path_for_key(key)
         with patch.object(
             local_disk_backend, "load_bytes_from_disk", return_value=None
         ):
             with patch.object(
-                local_disk_backend.cache_policy, "update_on_hit"
+                local_disk_backend.path_cache_policies[cache_path], "update_on_hit"
             ) as mock_update:
                 result = local_disk_backend.get_blocking(key)
 
@@ -440,16 +749,19 @@ class TestGetBlockingCachePolicyUpdate:
         self._inject_key(local_disk_backend, key, shape, torch.bfloat16)
 
         fake_memory_obj = MagicMock(spec=MemoryObj)
+        cache_path = local_disk_backend._get_cache_path_for_key(key)
         with patch.object(
             local_disk_backend, "load_bytes_from_disk", return_value=fake_memory_obj
         ):
             with patch.object(
-                local_disk_backend.cache_policy, "update_on_hit"
+                local_disk_backend.path_cache_policies[cache_path], "update_on_hit"
             ) as mock_update:
                 result = local_disk_backend.get_blocking(key)
 
         assert result is fake_memory_obj
-        mock_update.assert_called_once_with(key, local_disk_backend.dict)
+        mock_update.assert_called_once_with(
+            key, local_disk_backend.path_dicts[cache_path]
+        )
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
     def test_key_absent_returns_none_without_policy_update(
@@ -459,7 +771,8 @@ class TestGetBlockingCachePolicyUpdate:
         key = create_test_key(103)
 
         with patch.object(
-            local_disk_backend.cache_policy, "update_on_hit"
+            local_disk_backend.path_cache_policies[local_disk_backend.path],
+            "update_on_hit",
         ) as mock_update:
             result = local_disk_backend.get_blocking(key)
 
