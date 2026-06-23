@@ -440,6 +440,18 @@ class KVLayerGroupsManager:
         return self._kernel_groups
 
     @property
+    def num_blocks(self) -> int:
+        """Paged block count, shared across kernel groups (one block-id space).
+
+        Read from the first kernel group's ``shape_desc.nb``, which was computed
+        from that group's own tensor and format -- not a guessed representative.
+        Returns ``0`` when there are no kernel groups.
+        """
+        if not self._kernel_groups:
+            return 0
+        return self._kernel_groups[0].shape_desc.nb
+
+    @property
     @lmcache_deprecate("`kv_layer_groups` is an outdated alias for `kernel_groups`")
     def kv_layer_groups(self) -> list[KernelGroupInfo]:
         """List of :class:`KernelGroupInfo`, one per kernel group."""

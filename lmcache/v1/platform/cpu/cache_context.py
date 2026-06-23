@@ -30,7 +30,6 @@ from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
     get_group_data_ptrs,
-    get_num_blocks,
     normalize_and_discover_per_layer_formats,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
@@ -101,12 +100,7 @@ class CPUCacheContext(BaseCacheContext):
             layout_hints,
         )
         kv_caches_list: list[torch.Tensor] = list(kv_caches_normalized)
-        # Group-0 representative, for diagnostics/logging only. Everything that
-        # varies per group -- format, dtype, heads, block_size, num_blocks -- is
-        # read per KernelGroupInfo.
-        engine_kv_format = engine_kv_formats[0]
         num_layers_val = len(engine_kv_formats)
-        num_blocks_val = get_num_blocks(kv_caches_list, engine_kv_format)
         kv_layer_groups_manager = KVLayerGroupsManager(
             kv_caches_list,
             engine_kv_formats=engine_kv_formats,
@@ -122,7 +116,6 @@ class CPUCacheContext(BaseCacheContext):
             kv_caches=kv_caches_list,
             device=self.device_,
             num_layers=num_layers_val,
-            num_blocks=num_blocks_val,
             kv_layer_groups_manager=kv_layer_groups_manager,
             block_ids_buffer=block_ids_buffer,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
@@ -187,7 +180,7 @@ class CPUCacheContext(BaseCacheContext):
         logger.info(
             "CPUCacheContext: %d layers, %d blocks, dtype=%s (shm-backed)",
             self.num_layers_,
-            self.num_blocks_,
+            self.num_blocks,
             self.kv_caches_[0].dtype,
         )
 

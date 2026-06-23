@@ -57,7 +57,6 @@ class BaseCacheContext(ABC):
         kv_caches: list[torch.Tensor],
         device: torch.device,
         num_layers: int,
-        num_blocks: int,
         kv_layer_groups_manager: KVLayerGroupsManager,
         block_ids_buffer: torch.Tensor,
         lmcache_tokens_per_chunk: int,
@@ -65,7 +64,6 @@ class BaseCacheContext(ABC):
         self.kv_caches_ = kv_caches
         self.device_ = device
         self.num_layers_ = num_layers
-        self.num_blocks_ = num_blocks
         self.kv_layer_groups_manager_ = kv_layer_groups_manager
         self.block_ids_buffer_ = block_ids_buffer
         self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
@@ -153,8 +151,12 @@ class BaseCacheContext(ABC):
 
     @property
     def num_blocks(self) -> int:
-        """Returns the number of blocks in the KV cache."""
-        return self.num_blocks_
+        """Returns the number of blocks in the KV cache.
+
+        Sourced from the kernel groups (one shared block-id space), not a
+        representative-format computation.
+        """
+        return self.kv_layer_groups_manager_.num_blocks
 
     @property
     def hidden_dim_sizes(self) -> list[int]:
