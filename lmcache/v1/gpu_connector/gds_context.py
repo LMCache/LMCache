@@ -291,8 +291,7 @@ class GDSContext:
         self._base_ptrs.insert(idx, base)
         self._nbytes.insert(idx, nbytes)
         logger.info(
-            "GDSContext: registered %d bytes at 0x%x via GDS "
-            "(total registrations: %d)",
+            "GDSContext: registered %d bytes at 0x%x via GDS (total registrations: %d)",
             nbytes,
             base,
             len(self._buffers),
