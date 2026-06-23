@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Callable
 from unittest.mock import MagicMock
 import threading
+import time
 
 # Third Party
 import pytest
@@ -297,3 +298,105 @@ def test_supports_async_primitives_false_without_stream(
     # A torch_dev without Stream/Event is not async-capable.
     monkeypatch.setattr(worker_transfer, "torch_dev", object())
     assert worker_transfer._supports_async_primitives() is False
+
+
+def test_flush_inflight_gathers_waits_for_pending_gather(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """flush_inflight_gathers must not return before a submitted-but-not-yet-
+    launched gather has recorded its CUDA event (preemption race condition)."""
+    gather_gate = threading.Event()
+    flush_returned = threading.Event()
+    gather_started = threading.Event()
+
+    # Gate that blocks gather from completing until we are ready.
+    class _BlockingFakeTorchDev(_FakeTorchDev):
+        def stream(self, stream: object) -> object:
+            gather_started.set()
+            # Block here until the test releases the gate — simulating the
+            # background thread not yet recording the CUDA event.
+            gather_gate.wait(timeout=2)
+            return super().stream(stream)
+
+    # Pass gather_gate so _FakeEvent.synchronize() also uses the same gate.
+    monkeypatch.setattr(
+        async_engine_driven, "torch_dev", _BlockingFakeTorchDev(gather_gate)
+    )
+    _install_fake_gather(monkeypatch)
+
+    ctx = AsyncEngineDrivenTransferContext(commit_workers=1)
+    ctx._engine_driven_context = (
+        _FakeStoreContext(commit_impl=lambda _c: True)  # type: ignore[assignment]
+    )
+
+    ctx.submit_store(
+        "r1", object(), 1, {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
+    )
+
+    # Wait until the background thread has started (entered stream()), proving
+    # it has not yet recorded its CUDA event.
+    assert gather_started.wait(timeout=1), "background thread never started"
+
+    def _flush() -> None:
+        ctx.flush_inflight_gathers()
+        flush_returned.set()
+
+    t = threading.Thread(target=_flush, daemon=True)
+    t.start()
+
+    # flush_inflight_gathers must NOT return while the gather is still pending.
+    assert not flush_returned.wait(timeout=0.05), (
+        "flush_inflight_gathers returned before gather launched — race condition!"
+    )
+
+    # Now let the background gather proceed; flush should complete shortly.
+    gather_gate.set()
+    t.join(timeout=2)
+    assert flush_returned.is_set(), "flush_inflight_gathers did not complete"
+    ctx.close()
+
+
+def test_commit_store_serialized_by_commit_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent commit_store calls must be serialized by _commit_lock to
+    protect ZMQ socket access."""
+    gather_gate = threading.Event()
+    gather_gate.set()
+    concurrent_commits = threading.Event()
+    active_commits = [0]
+
+    def _commit(_chunks: list[torch.Tensor]) -> bool:
+        active_commits[0] += 1
+        if active_commits[0] > 1:
+            concurrent_commits.set()
+        # Briefly yield so a second commit could slip in if unlocked.
+        time.sleep(0.02)
+        active_commits[0] -= 1
+        return True
+
+    ctx = _new_context(
+        monkeypatch, gather_gate=gather_gate, commit_impl=_commit, max_inflight=4
+    )
+
+    futures = [
+        ctx.submit_store(
+            f"r{i}",
+            object(),
+            1,
+            {"k": torch.zeros(1)},
+            [[0]],
+            _FakeEvent(gather_gate),
+            1,
+        )
+        for i in range(4)
+    ]
+
+    for f in futures:
+        assert f.result(timeout=2) is True
+
+    # With _commit_lock, no two commits should have been active simultaneously.
+    assert not concurrent_commits.is_set(), (
+        "commit_store called concurrently — _commit_lock not working"
+    )
+    ctx.close()

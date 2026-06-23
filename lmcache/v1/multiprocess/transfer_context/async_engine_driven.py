@@ -82,6 +82,16 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         )
         self._inflight_lock = threading.Lock()
         self._inflight_gather_events: set[Any] = set()
+        # Tracks gather tasks that have been submitted to _commit_executor but
+        # have not yet recorded their CUDA event. flush_inflight_gathers waits
+        # on all of these before synchronizing _inflight_gather_events, closing
+        # the window where preemption could overwrite paged KV blocks before an
+        # in-flight gather has had a chance to record its CUDA event.
+        self._pending_gathers: set[threading.Event] = set()
+        # Serializes commit_store calls across worker threads, since the
+        # underlying ZMQ socket is not thread-safe and commit_workers defaults
+        # to >1.
+        self._commit_lock = threading.Lock()
         self._staging_pool: dict[
             tuple[tuple[int, ...], torch.dtype], list[torch.Tensor]
         ] = {}
@@ -185,17 +195,24 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         # Whether we gathered directly into SHM views (True) or into
         # pinned staging buffers that need to be released later (False).
         used_shm_direct = False
+        # Signals when this task has recorded its CUDA event (or exited early),
+        # allowing flush_inflight_gathers to safely proceed.
+        gather_launched = threading.Event()
         try:
             with self._inflight_lock:
                 if self._is_closing:
                     completion.set_result(False)
                     return completion
+                self._pending_gathers.add(gather_launched)
 
             result = engine_driven_context.prepare_store(key, instance_id)
 
             out_buffers, chunk_indices = result if result is not None else (None, None)
             if chunk_indices is not None and len(chunk_indices) == 0:
                 # All chunks are already in cache: no gather, no commit.
+                with self._inflight_lock:
+                    self._pending_gathers.discard(gather_launched)
+                gather_launched.set()
                 completion.set_result(True)
                 return completion
 
@@ -251,13 +268,16 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                     with self._inflight_lock:
                         if gather_done is not None:
                             self._inflight_gather_events.add(gather_done)
+                        self._pending_gathers.discard(gather_launched)
+                    gather_launched.set()
 
                     if gather_done is not None:
                         gather_done.synchronize()
 
-                    ok = engine_driven_context.commit_store(
-                        key, instance_id, gather_target
-                    )
+                    with self._commit_lock:
+                        ok = engine_driven_context.commit_store(
+                            key, instance_id, gather_target
+                        )
 
                     if not ok:
                         logger.error(
@@ -276,6 +296,8 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                     with self._inflight_lock:
                         if gather_done is not None:
                             self._inflight_gather_events.discard(gather_done)
+                        self._pending_gathers.discard(gather_launched)
+                    gather_launched.set()
                     completion.set_result(ok)
 
             # Submitting the commit task is the ownership-transfer point: once it
@@ -288,6 +310,9 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
             logger.exception("Failed to submit async engine-driven store")
             if staged_chunks:
                 self._release_staging(staged_chunks)
+            with self._inflight_lock:
+                self._pending_gathers.discard(gather_launched)
+            gather_launched.set()
             completion.set_result(False)
             return completion
 
@@ -298,13 +323,25 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
 
         Called at preemption/eviction time so that vLLM cannot overwrite
         paged KV blocks before a deferred gather has finished reading them.
+
+        Waits for all submitted-but-not-yet-launched gathers to record their
+        CUDA events before synchronizing those events, preventing a race where
+        ``flush_inflight_gathers`` returns before a background gather has
+        started.
         """
+        with self._inflight_lock:
+            pending = list(self._pending_gathers)
+        for ev in pending:
+            ev.wait()
         self._sync_gather_events(suppress_errors=False)
 
     def close(self) -> None:
         """Drain in-flight gather/commit work before closing the base context."""
         with self._inflight_lock:
             self._is_closing = True
+            pending = list(self._pending_gathers)
+        for ev in pending:
+            ev.wait()
         self._sync_gather_events(suppress_errors=True)
         self._commit_executor.shutdown(wait=True, cancel_futures=False)
         super().close()
