@@ -27,7 +27,7 @@ import torch
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.config import GdsL1Config
-from lmcache.v1.gpu_connector import _cufile_async as ca
+from lmcache.v1.gpu_connector import _gds_async as ca
 from lmcache.v1.memory_management import GDSMemoryObject
 
 logger = init_logger(__name__)
@@ -260,10 +260,7 @@ class GDSContext:
             flags |= os.O_DIRECT
         fd = os.open(self._slab_path, flags)
         try:
-            # Third Party
-            from cufile.bindings import cuFileHandleRegister
-
-            handle = cuFileHandleRegister(fd)
+            handle = ca.register_handle(fd)
         except Exception:
             os.close(fd)
             raise
