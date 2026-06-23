@@ -139,8 +139,6 @@ def create_engine_group_infos_from_vllm(
         else ()
     )
 
-    # Detect the Engine KV format of each registered tensor: per engine group
-    # when they mix formats (e.g. MiniMax-M3), one shared format otherwise.
     layer_index_groups = [
         [layer_to_idx[name] for name in group.layer_names] for group in vllm_groups
     ]
