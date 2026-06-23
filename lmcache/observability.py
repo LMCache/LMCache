@@ -9,6 +9,7 @@ from typing import (
     Dict,
     Iterable,
     List,
+    Literal,
     Optional,
     Sequence,
     Union,
@@ -32,6 +33,19 @@ if TYPE_CHECKING:
     from lmcache.v1.config import LMCacheEngineConfig
 
 logger = init_logger(__name__)
+
+GaugeMultiprocessMode = Literal[
+    "all",
+    "liveall",
+    "min",
+    "livemin",
+    "max",
+    "livemax",
+    "sum",
+    "livesum",
+    "mostrecent",
+    "livemostrecent",
+]
 
 
 @dataclass
@@ -1469,7 +1483,7 @@ class PrometheusLogger:
         name: str,
         documentation: str,
         labelnames: List[str],
-        multiprocess_mode: str,
+        multiprocess_mode: GaugeMultiprocessMode,
     ) -> None:
         metric_attr = name.removeprefix("lmcache:")
         if metric_attr == name or not metric_attr.isidentifier():
@@ -1545,6 +1559,56 @@ class PrometheusLogger:
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
         )
+
+        # SSD wear / local disk metrics (for SSD wear mitigation observability)
+        self.disk_write_ops = self._gauge_cls(
+            name="lmcache:disk_write_ops",
+            documentation="Total number of disk write operations (SSD wear)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.disk_write_bytes = self._gauge_cls(
+            name="lmcache:disk_write_bytes",
+            documentation="Total bytes written to disk (SSD wear)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.disk_remove_ops = self._gauge_cls(
+            name="lmcache:disk_remove_ops",
+            documentation="Total number of disk remove (evict) operations",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.disk_gated_count = self._gauge_cls(
+            name="lmcache:disk_gated_count",
+            documentation="Writes gated (not written to SSD) by gating policy",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.disk_gated_by_length_count = self._gauge_cls(
+            name="lmcache:disk_gated_by_length_count",
+            documentation="Writes gated by length (chunk size < min_size_bytes)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.disk_gated_by_frequency_count = self._gauge_cls(
+            name="lmcache:disk_gated_by_frequency_count",
+            documentation="Writes gated by frequency (access count < min_access_count)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.disk_write_avg_size_bytes = self._gauge_cls(
+            name="lmcache:disk_write_avg_size_bytes",
+            documentation="Average size in bytes per disk write (0 if no writes)",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
+        self.disk_evict_bytes = self._gauge_cls(
+            name="lmcache:disk_evict_bytes",
+            documentation="Total bytes evicted (removed) from disk",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent",
+        ).labels(**self.labels)
 
         event_statuses = ["ongoing", "done", "not_found"]
         for status in event_statuses:
@@ -1867,6 +1931,18 @@ class PrometheusLogger:
 
         PrometheusLogger._instances[metadata_key] = logger_instance
         return logger_instance
+
+    @staticmethod
+    @thread_safe
+    def GetInstanceOrNone() -> Optional["PrometheusLogger"]:
+        """
+        Return an existing Prometheus logger without creating one.
+
+        Returns:
+            An existing logger instance, or ``None`` when Prometheus logging has
+            not been initialized.
+        """
+        return PrometheusLogger._get_base_logger()
 
     @staticmethod
     def _get_base_logger() -> Optional["PrometheusLogger"]:

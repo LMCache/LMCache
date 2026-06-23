@@ -18,7 +18,7 @@ class LRUCachePolicy(BaseCachePolicy[KeyType, OrderedDict[KeyType, Any]]):
     LRU cache policy.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         logger.info("Initializing LRUCachePolicy")
         self.chunk_hash_to_init_timestamp: Dict[Any, float] = {}
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()

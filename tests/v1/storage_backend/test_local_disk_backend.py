@@ -196,6 +196,76 @@ class TestLocalDiskBackend:
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
+    def test_submit_put_task_gated_by_min_chunk_size(
+        self, temp_disk_path, async_loop, local_cpu_backend
+    ) -> None:
+        """Large ssd_gate_min_size_bytes rejects put before enqueue."""
+        config = create_test_config(temp_disk_path)
+        config.extra_config = {
+            "ssd_gate_min_size_bytes": 10**9,
+            "ssd_gate_min_access_count": 0,
+        }
+        backend = LocalDiskBackend(
+            config=config,
+            loop=async_loop,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cuda:0",
+        )
+        key = create_test_key(42)
+        memory_obj = MagicMock(spec=MemoryObj)
+        memory_obj.tensor = object()
+        memory_obj.get_physical_size.return_value = 1024
+
+        backend.submit_put_task(key, memory_obj)
+
+        assert not backend.exists_in_put_tasks(key)
+        local_cpu_backend.memory_allocator.close()
+
+    def test_get_blocking_success_records_read_for_frequency_gate(
+        self, temp_disk_path, async_loop, local_cpu_backend
+    ) -> None:
+        """Successful public reads warm the frequency gate for later writes."""
+        config = create_test_config(temp_disk_path)
+        config.extra_config = {"ssd_gate_min_access_count": 1}
+        backend = LocalDiskBackend(
+            config=config,
+            loop=async_loop,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cuda:0",
+        )
+        key = create_test_key(43)
+        shape = torch.Size([28, 2, 256, 8, 128])
+        meta = DiskCacheMetadata(
+            path="/nonexistent/path.pt",
+            size=1024,
+            shape=shape,
+            dtype=torch.bfloat16,
+            cached_positions=None,
+            fmt=MemoryFormat.KV_2LTD,
+            pin_count=0,
+        )
+        with backend.disk_lock:
+            backend.dict[key] = meta
+            backend.cache_policy.update_on_put(key)
+
+        memory_obj = MagicMock(spec=MemoryObj)
+        memory_obj.tensor = object()
+        memory_obj.get_physical_size.return_value = 1024
+        with patch.object(backend, "load_bytes_from_disk", return_value=memory_obj):
+            assert backend.get_blocking(key) is memory_obj
+
+        def close_scheduled_coro(coro, loop):  # noqa: ANN001, ARG001
+            coro.close()
+            return MagicMock()
+
+        with patch(
+            "asyncio.run_coroutine_threadsafe", side_effect=close_scheduled_coro
+        ):
+            backend.submit_put_task(key, memory_obj)
+
+        assert backend.exists_in_put_tasks(key)
+        local_cpu_backend.memory_allocator.close()
+
 
 class TestMultiPathDiskBackend:
     """Test cases for multi-path (multi-device) LocalDiskBackend."""

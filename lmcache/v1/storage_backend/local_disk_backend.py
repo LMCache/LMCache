@@ -13,7 +13,7 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
-from lmcache.observability import LMCStatsMonitor
+from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
 from lmcache.v1.cache_controller.message import OpType
 from lmcache.v1.config import LMCacheEngineConfig
@@ -22,6 +22,12 @@ from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.batched_message_sender import BatchedMessageSender
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
+from lmcache.v1.storage_backend.cache_policy.base_policy import BaseCachePolicy
+from lmcache.v1.storage_backend.gating import (
+    BaseStorageGate,
+    WriteVetoReason,
+    build_storage_gate_from_extra,
+)
 from lmcache.v1.storage_backend.job_executor.pq_executor import (
     AsyncPQThreadPoolExecutor,
 )
@@ -33,6 +39,110 @@ if TYPE_CHECKING:
     from lmcache.v1.cache_controller.worker import LMCacheWorker
 
 logger = init_logger(__name__)
+
+
+class DiskPrometheusListener:
+    """
+    Collects local-disk SSD wear metrics and registers Prometheus gauges.
+
+    All counter updates go through ``on_*`` methods so call sites stay thin.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._disk_write_ops = 0
+        self._disk_write_bytes = 0
+        self._disk_remove_ops = 0
+        self._disk_evict_bytes = 0
+        self._disk_gated_count = 0
+        self._disk_gated_by_length_count = 0
+        self._disk_gated_by_frequency_count = 0
+
+    def register(self) -> None:
+        """
+        Register gauges with PrometheusLogger when the singleton exists.
+
+        Scraped values read the current counters held by this listener.
+        """
+        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
+        if prometheus_logger is None:
+            return
+        prometheus_logger.disk_write_ops.set_function(lambda: self._disk_write_ops)
+        prometheus_logger.disk_write_bytes.set_function(lambda: self._disk_write_bytes)
+        prometheus_logger.disk_remove_ops.set_function(lambda: self._disk_remove_ops)
+        prometheus_logger.disk_evict_bytes.set_function(lambda: self._disk_evict_bytes)
+        prometheus_logger.disk_gated_count.set_function(lambda: self._disk_gated_count)
+        prometheus_logger.disk_gated_by_length_count.set_function(
+            lambda: self._disk_gated_by_length_count
+        )
+        prometheus_logger.disk_gated_by_frequency_count.set_function(
+            lambda: self._disk_gated_by_frequency_count
+        )
+        prometheus_logger.disk_write_avg_size_bytes.set_function(
+            self.get_disk_write_avg_size_bytes
+        )
+
+    def get_disk_write_avg_size_bytes(self) -> float:
+        """
+        Return the average disk write size in bytes.
+
+        Returns:
+            Average bytes written per disk write, or 0.0 when no writes have
+            completed.
+        """
+        with self._lock:
+            if self._disk_write_ops == 0:
+                return 0.0
+            return self._disk_write_bytes / self._disk_write_ops
+
+    def on_write(self, size_bytes: int) -> None:
+        """Record one completed disk write of ``size_bytes``."""
+        with self._lock:
+            self._disk_write_ops += 1
+            self._disk_write_bytes += size_bytes
+
+    def on_remove(self, evict_size_bytes: int) -> None:
+        """Record one disk remove (evict) of ``evict_size_bytes``."""
+        with self._lock:
+            self._disk_remove_ops += 1
+            self._disk_evict_bytes += evict_size_bytes
+
+    def on_gated_by_length(self) -> None:
+        """Record a put gated by length-based policy."""
+        with self._lock:
+            self._disk_gated_count += 1
+            self._disk_gated_by_length_count += 1
+
+    def on_gated_by_frequency(self) -> None:
+        """Record a put gated by frequency-based policy."""
+        with self._lock:
+            self._disk_gated_count += 1
+            self._disk_gated_by_frequency_count += 1
+
+    def log_summary(self) -> None:
+        """Emit current counters at INFO (e.g. when the disk backend closes)."""
+        with self._lock:
+            wops = self._disk_write_ops
+            wbytes = self._disk_write_bytes
+            rops = self._disk_remove_ops
+            ebytes = self._disk_evict_bytes
+            gated = self._disk_gated_count
+            glen = self._disk_gated_by_length_count
+            gfreq = self._disk_gated_by_frequency_count
+        avg_size = wbytes / wops if wops > 0 else 0.0
+        logger.info(
+            "Disk metrics: disk_write_ops=%s, disk_write_bytes=%s, "
+            "disk_write_avg_size_bytes=%s, disk_remove_ops=%s, disk_evict_bytes=%s, "
+            "disk_gated_count=%s (by_length=%s, by_frequency=%s)",
+            wops,
+            wbytes,
+            avg_size,
+            rops,
+            ebytes,
+            gated,
+            glen,
+            gfreq,
+        )
 
 
 # TODO(Jiayi): handle cases where cache is repetitvely prefetched.
@@ -111,7 +221,11 @@ class LocalDiskBackend(StorageBackendInterface):
         else:
             super().__init__("cpu")
 
-        self.cache_policy = get_cache_policy(config.cache_policy)
+        extra = config.extra_config or {}
+        self._storage_gate: BaseStorageGate = build_storage_gate_from_extra(extra)
+        self.cache_policy: BaseCachePolicy[Any, Any] = get_cache_policy(
+            config.cache_policy
+        )
         self.dict = self.cache_policy.init_mutable_mapping()
 
         self.dst_device = dst_device
@@ -144,10 +258,7 @@ class LocalDiskBackend(StorageBackendInterface):
         # Block size (for file system I/O)
         stat = os.statvfs(self.path)
         self.os_disk_bs = stat.f_bsize
-        self.use_odirect = False
-
-        if config.extra_config is not None:
-            self.use_odirect = config.extra_config.get("use_odirect", False)
+        self.use_odirect = bool(extra.get("use_odirect", False))
         logger.info("Using O_DIRECT for disk I/O: %s", self.use_odirect)
 
         self.disk_worker = LocalDiskWorker(loop)
@@ -181,6 +292,9 @@ class LocalDiskBackend(StorageBackendInterface):
         else:
             logger.warning("Controller message sender is not initialized")
 
+        self._disk_prom_listener = DiskPrometheusListener()
+        self._disk_prom_listener.register()
+
     def __str__(self) -> str:
         return "LocalDiskBackend"
 
@@ -194,6 +308,9 @@ class LocalDiskBackend(StorageBackendInterface):
         with self.disk_lock:
             if key not in self.dict:
                 return False
+            if not self._storage_gate.on_lookup(key):
+                return False
+            self._storage_gate.record_lookup(key)
             if pin:
                 self.dict[key].pin()
                 # vllm lookup sets pin to True
@@ -201,7 +318,10 @@ class LocalDiskBackend(StorageBackendInterface):
             return True
 
     def touch_cache(self):
-        # flip the order of the keys in the request
+        # flip the order of the keys in the request.
+        # Storage gate read counts are updated in get_blocking /
+        # batched_get_non_blocking so pin+lookup+touch then load does not
+        # double-count toward write admission.
         with self.disk_lock:
             for key in reversed(self.keys_in_request):
                 self.cache_policy.update_on_hit(key, self.dict)
@@ -240,15 +360,25 @@ class LocalDiskBackend(StorageBackendInterface):
         if force:
             self.disk_lock.acquire()
 
-        if not (meta := self.dict.pop(key, None)):
+        meta = self.dict.get(key)
+        if meta is None:
             if force:
                 self.disk_lock.release()
             return False
+
+        if not self._storage_gate.on_delete(key):
+            if force:
+                self.disk_lock.release()
+            return False
+
+        self.dict.pop(key, None)
 
         path = meta.path
         size = meta.size
         self.usage -= size
         self.stats_monitor.update_local_storage_usage(self.usage)
+
+        self._storage_gate.record_delete(key)
 
         # NOTE: The following code will cause deadlock
         # res = asyncio.run_coroutine_threadsafe(
@@ -258,6 +388,8 @@ class LocalDiskBackend(StorageBackendInterface):
         # res.result()
 
         os.remove(path)
+
+        self._disk_prom_listener.on_remove(size)
 
         if force:
             self.cache_policy.update_on_force_evict(key)
@@ -271,35 +403,6 @@ class LocalDiskBackend(StorageBackendInterface):
             )
 
         return True
-
-    def insert_key(
-        self,
-        key: CacheEngineKey,
-        size: int,
-        shape: torch.Size,
-        dtype: torch.dtype,
-        fmt: MemoryFormat,
-        cached_positions: Optional[torch.Tensor] = None,
-    ) -> None:
-        path = self._key_to_path(key)
-
-        has_stored = False
-        with self.disk_lock:
-            if key in self.dict:
-                # Update cache recency
-                self.cache_policy.update_on_hit(key, self.dict)
-                has_stored = True
-            else:
-                self.dict[key] = DiskCacheMetadata(
-                    path, size, shape, dtype, cached_positions, fmt, 0
-                )
-
-        # Push kv admit msg with batching
-        if self.batched_msg_sender is not None and not has_stored:
-            self.batched_msg_sender.add_kv_op(
-                op_type=OpType.ADMIT,
-                key=key.chunk_hash,
-            )
 
     def submit_put_task(
         self,
@@ -323,10 +426,29 @@ class LocalDiskBackend(StorageBackendInterface):
             logger.debug(f"Put task for {key} is already in progress.")
             return None
 
-        self.disk_worker.insert_put_task(key)
-
-        # TODO(Jiayi): Fragmentation is not considered here.
         required_size = memory_obj.get_physical_size()
+
+        # SSD / storage gate (see ``gating`` module). Pure check under disk_lock.
+        with self.disk_lock:
+            veto = self._storage_gate.explain_write_veto(key, required_size)
+        if veto == WriteVetoReason.LENGTH:
+            self._disk_prom_listener.on_gated_by_length()
+            logger.debug(
+                "SSD gate (length): chunk size %s below gate threshold",
+                required_size,
+            )
+            return None
+        if veto == WriteVetoReason.FREQUENCY:
+            self._disk_prom_listener.on_gated_by_frequency()
+            logger.debug(
+                "SSD gate (frequency): read count below gate threshold for key",
+            )
+            return None
+        if veto is not None:
+            logger.debug("SSD gate: write vetoed (%s)", veto.value)
+            return None
+
+        self.disk_worker.insert_put_task(key)
         all_evict_keys = []
         evict_success = True
         with self.disk_lock:
@@ -397,16 +519,22 @@ class LocalDiskBackend(StorageBackendInterface):
         """
         Load a cached KV chunk from disk synchronously.
 
-        The cache policy is updated only after a successful load so that a
-        failed load (``load_bytes_from_disk`` returning ``None``) does not
-        record a phantom cache hit and skew future eviction decisions.
+        The cache policy and gate read counters are updated only after a
+        successful load. A failed load (``load_bytes_from_disk`` returning
+        ``None``) must not record a phantom cache hit or read credit.
 
-        :param key: The cache key identifying the KV chunk.
-        :returns: A ``MemoryObj`` containing the loaded KV data, or ``None``
-            if the key is not present or the load fails.
+        Args:
+            key: The cache key identifying the KV chunk.
+
+        Returns:
+            A ``MemoryObj`` containing the loaded KV data, or ``None`` if the
+            key is not present, the gate rejects the read, or the load fails.
         """
         with self.disk_lock:
             if key not in self.dict:
+                return None
+
+            if not self._storage_gate.on_read(key):
                 return None
 
             disk_meta = self.dict[key]
@@ -417,22 +545,15 @@ class LocalDiskBackend(StorageBackendInterface):
             assert dtype is not None
             assert shape is not None
 
-        # Load is performed outside the lock: it can block for a non-trivial
-        # amount of time (CPU staging pool allocation + memcpy from disk) and
-        # must not hold disk_lock while waiting, or concurrent insert/evict
-        # operations would deadlock.
         memory_obj = self.load_bytes_from_disk(
             key, path, dtype=dtype, shape=shape, fmt=fmt
         )
 
         if memory_obj is not None:
-            # Re-acquire the lock to update the eviction policy.  The key
-            # membership check guards against the entry being evicted between
-            # the two lock regions — in that case the policy state is already
-            # consistent and no update is needed.
             with self.disk_lock:
                 if key in self.dict:
                     self.cache_policy.update_on_hit(key, self.dict)
+                    self._storage_gate.record_read(key)
 
         return memory_obj
 
@@ -442,6 +563,14 @@ class LocalDiskBackend(StorageBackendInterface):
         keys: list[CacheEngineKey],
         transfer_spec: Any = None,
     ) -> list[MemoryObj]:
+        """
+        Prefetch keys from disk.
+
+        Does not consult :meth:`BaseStorageGate.on_read`: a read veto would
+        require either dropping keys (breaking alignment with ``keys``) or
+        placeholder buffers. Blocking :meth:`get_blocking` still applies
+        ``on_read``.
+        """
         mem_objs: list[MemoryObj] = []
         paths: list[str] = []
 
@@ -482,6 +611,7 @@ class LocalDiskBackend(StorageBackendInterface):
             # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
             # Update cache recency
             self.cache_policy.update_on_hit(key, self.dict)
+            self._storage_gate.record_read(key)
 
             self.disk_lock.release()
             logger.debug(f"Prefetching {key} from disk.")
@@ -508,6 +638,9 @@ class LocalDiskBackend(StorageBackendInterface):
             for key in keys:
                 if key not in self.dict:
                     return num_hit_counts
+                if not self._storage_gate.on_lookup(key):
+                    return num_hit_counts
+                self._storage_gate.record_lookup(key)
                 if pin:
                     self.dict[key].pin()
                     self.keys_in_request.append(key)
@@ -543,7 +676,7 @@ class LocalDiskBackend(StorageBackendInterface):
 
         # ref count down here because there's a ref_count_up in
         # `submit_put_task` above.
-        # Ref count down better be before `insert_key` for testing
+        # Ref count down better be before registering the key in dict for testing
         # purposes (e.g., testing mem_leak).
         # TODO(Jiayi): This could be problematic if the
         # freed memory object is immediately reused.
@@ -554,7 +687,28 @@ class LocalDiskBackend(StorageBackendInterface):
         cached_positions = memory_obj.metadata.cached_positions
         memory_obj.ref_count_down()
 
-        self.insert_key(key, size, shape, dtype, fmt, cached_positions=cached_positions)
+        with self.disk_lock:
+            was_existing = key in self.dict
+            self._storage_gate.record_write(key, new_admission=not was_existing)
+            if was_existing:
+                self.cache_policy.update_on_hit(key, self.dict)
+                has_stored = True
+            else:
+                self.dict[key] = DiskCacheMetadata(
+                    path,
+                    size,
+                    shape,
+                    dtype,
+                    cached_positions,
+                    fmt,
+                    0,
+                )
+                has_stored = False
+        if self.batched_msg_sender is not None and not has_stored:
+            self.batched_msg_sender.add_kv_op(
+                op_type=OpType.ADMIT,
+                key=key.chunk_hash,
+            )
 
         self.disk_worker.remove_put_task(key)
 
@@ -627,8 +781,11 @@ class LocalDiskBackend(StorageBackendInterface):
                 f.write(buffer)
         else:
             fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_DIRECT, 0o644)
-            os.write(fd, buffer)
-            os.close(fd)
+            try:
+                os.write(fd, buffer)
+            finally:
+                os.close(fd)
+        self._disk_prom_listener.on_write(size)
         disk_write_time = time.time() - start_time
         logger.debug(
             f"Disk write size: {size} bytes, "
@@ -670,6 +827,7 @@ class LocalDiskBackend(StorageBackendInterface):
         return self.local_cpu_backend
 
     def close(self) -> None:
+        self._disk_prom_listener.log_summary()
         if self.batched_msg_sender is not None:
             self.batched_msg_sender.close()
         self.disk_worker.close()
