@@ -15,8 +15,9 @@ a handshake, and can then read arbitrary `(offset, size)` regions out of the
 remote peer's L1 buffer into its own. Only **reads** are supported today (a peer
 pulls data from a remote; it never pushes).
 
-The abstraction is transport-agnostic; the only implementation today is
-[`nixl`](#nixl-implementation) (RDMA/UCX via the NIXL bindings).
+The abstraction is transport-agnostic; two implementations are provided:
+[`nixl`](#nixl-implementation) (RDMA/UCX via the NIXL bindings) and
+[`tcp`](#tcp-implementation) (plain TCP sockets, no special hardware required).
 
 ## Architecture Overview
 
@@ -157,6 +158,107 @@ points:
   hanging forever. The server's `_serve_loop` polls with a 1 s timeout so it can
   observe shutdown.
 
+## tcp implementation
+
+`impl/tcp_impl.py` implements the abstraction over plain TCP sockets. It
+self-registers under the type name `"tcp"` at import time. This implementation
+requires **no special hardware** (no RDMA NIC, no NIXL library) and works on any
+network that supports TCP, making it suitable for development environments,
+commodity hardware, or cross-datacenter scenarios where RDMA is unavailable.
+
+### Design overview
+
+Unlike the nixl implementation which separates the control plane (ZMQ handshake)
+from the data plane (RDMA transfer), the TCP implementation uses a **single TCP
+connection** for both handshake and data transfer per client-server pair.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                  TCP Transfer Channel                         │
+├─────────────────────────────────────────────────────────────┤
+│  Handshake: 8-byte magic exchange ("LMTCP001")              │
+│  Data transfer: binary protocol over the same TCP socket    │
+│  → copies data through kernel TCP stack                     │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Wire protocol
+
+The protocol uses a simple binary framing with little-endian integers:
+
+**Handshake:**
+- Client sends 8-byte magic `LMTCP001`
+- Server echoes the same 8-byte magic
+
+**Read Request** (client → server):
+```
+[4B msg_type=1] [4B request_id] [4B num_entries]
+For each entry:
+  [8B offset (int64)] [8B size (int64)]
+```
+
+**Read Response** (server → client):
+```
+[4B msg_type=2] [4B request_id] [4B num_entries] [4B mask_byte_count]
+[N bytes success_mask (packed bits)]
+For each successful entry:
+  [raw bytes of entry.size]
+```
+
+### Key differences from nixl
+
+| Aspect | nixl | tcp |
+|--------|------|-----|
+| Data plane | RDMA (zero-copy, kernel bypass) | TCP socket + `memmove` |
+| Control plane | ZMQ REP/REQ (separate socket) | Same TCP connection |
+| Hardware | RDMA NIC + NIXL library | None (standard TCP) |
+| Latency | μs-level | ms-level |
+| CPU overhead | Minimal (DMA offload) | Higher (data copy + syscalls) |
+| Passive client creation | Yes (bidirectional after one handshake) | No (each direction requires its own connection) |
+| Address translation | Page-index math (`offset/align → index list`) | Identity (`offset, size` passed directly) |
+
+### Notable implementation points
+
+- **Server threading model.** The server uses a `ThreadPoolExecutor` (up to 16
+  threads) to handle concurrent client connections. Each client gets a dedicated
+  handler thread that serves read requests in a loop until the connection closes.
+- **Client async model.** `submit_read` is non-blocking: it serializes the
+  request and sends it over the socket, then returns immediately. A background
+  `_recv_loop` thread receives responses and writes data directly into L1 memory
+  via `ctypes.memmove`.
+- **Connection lifecycle.** A single persistent TCP connection is maintained per
+  peer. If the connection drops, all pending tasks are marked as failed. The
+  P2P L2 adapter's timeout mechanism will then treat these as load failures.
+- **Socket tuning.** `TCP_NODELAY` is set to avoid Nagle buffering latency.
+  Send/receive buffers are set to 4 MB for better throughput on large transfers.
+- **No page-index translation.** Unlike nixl which maps `(offset, size)` to a
+  list of page indices in a prepped descriptor list, the TCP implementation
+  passes `(offset, size)` directly in the wire protocol. The server reads from
+  `L1_base_ptr + offset` and the client writes to `L1_base_ptr + offset`.
+- **No third-party dependencies.** The implementation uses only Python standard
+  library modules (`socket`, `struct`, `threading`, `ctypes`).
+
+### Usage
+
+```python
+initialize_transfer_channel_context(
+    "tcp",
+    l1_memory_desc=l1_memory_desc,
+    listen_url="0.0.0.0:7600",
+    advertise_url="192.168.1.100:7600",
+)
+```
+
+No additional `**kwargs` are required (unlike nixl which accepts `backends`).
+
+### When to use tcp vs nixl
+
+- **Use `tcp`** when: no RDMA hardware is available, developing/testing locally,
+  or the transfer latency is not on the critical path (e.g. large prefetch
+  windows that hide the transfer time).
+- **Use `nixl`** when: RDMA hardware is available and low-latency, high-throughput
+  P2P transfer is required (production inference serving).
+
 ## Extending: add a new transfer channel implementation
 
 Implementations live under `impl/` and **self-register a factory** with the
@@ -214,6 +316,8 @@ is the public creation entry point.
 - Integration tests for the nixl implementation (guarded by
   `pytest.importorskip("nixl")`, public interface only):
   `tests/v1/distributed/transfer_channel/test_nixl_impl.py`.
+- Integration tests for the tcp implementation (no special dependencies):
+  `tests/v1/distributed/transfer_channel/test_tcp_impl.py`.
 
 ## Related
 

@@ -14,14 +14,16 @@ from scratch when the same prefix arrives on a different node.
 **Peer-to-peer (P2P) KV cache sharing turns the per-node caches into one
 logical cache.** When a node looks up a prefix that is not in its own memory,
 it can read that prefix's KV directly from the memory of the peer node that
-holds it, over the datacenter network using RDMA. The result is a much higher
-effective cache hit rate across the fleet, without any central storage tier in
-the hot path.
+holds it, over the datacenter network. The result is a much higher effective
+cache hit rate across the fleet, without any central storage tier in the hot
+path.
 
-The transfer is a one-sided RDMA read from the requesting node into its own L1
-buffer; the node that owns the data is not interrupted to serve it. On an
-RDMA-capable network (InfiniBand / RoCE) this is dramatically faster than
-recomputing the prefix or round-tripping through a shared object store.
+The transfer is performed by a pluggable **transfer engine**. The default
+(``nixl``) uses one-sided RDMA reads — the node that owns the data is not
+interrupted to serve it. On an RDMA-capable network (InfiniBand / RoCE) this
+is dramatically faster than recomputing the prefix or round-tripping through a
+shared object store. For environments without RDMA hardware, a ``tcp`` engine
+is also available that transfers data over plain TCP sockets.
 
 How it works
 ------------
@@ -36,14 +38,16 @@ P2P involves three pieces:
 * **LMCache server** — each server runs a P2P controller that periodically asks
   the coordinator for the current peer list and, for every live peer, opens a
   connection used to look up and read that peer's KV.
-* **Transfer channel** — the RDMA layer that performs the actual remote memory
-  reads. Each server registers its L1 buffer once at startup so peers can read
-  from it.
+* **Transfer channel** — the transport layer that performs the actual remote
+  memory reads. Each server registers its L1 buffer once at startup so peers
+  can read from it. The default engine (``nixl``) uses RDMA; the ``tcp`` engine
+  uses plain TCP sockets.
 
 On a cache miss, a node asks the peer that owns the prefix to *lock and locate*
-it, receives the remote addresses, RDMA-reads the KV into its own L1, and serves
-the request from there. Peers are discovered and connected automatically as
-they join, and disconnected automatically as they leave — no static peer lists.
+it, receives the remote addresses, reads the KV into its own L1 (via RDMA or
+TCP depending on the configured engine), and serves the request from there.
+Peers are discovered and connected automatically as they join, and disconnected
+automatically as they leave — no static peer lists.
 
 Requirements
 ------------
@@ -52,10 +56,11 @@ Requirements
   started with ``--p2p-advertise-url`` but no ``--coordinator-url`` refuses to
   start.
 * **An RDMA-capable network** (InfiniBand / RoCE) is strongly recommended for
-  production performance. By default P2P uses the ``nixl`` transfer engine,
-  which is shipped with LMCache, so there is nothing extra to install.
+  production performance when using the default ``nixl`` engine. The ``tcp``
+  engine works on any network but has higher latency and CPU overhead. Both
+  engines are shipped with LMCache — there is nothing extra to install.
 * **A single, contiguous L1 region.** The transfer channel registers the whole
-  L1 buffer for RDMA, so P2P is incompatible with the GDS L1 tier
+  L1 buffer, so P2P is incompatible with the GDS L1 tier
   (``--gds-l1-path``) and the Device-DAX L1 tier (``--l1-devdax-path``); the
   server refuses to start in those configurations.
 
@@ -93,11 +98,12 @@ heartbeat interval doubles as the peer-discovery poll interval. See
 
 .. tip::
 
-   Increase the L1 buffer alignment to at least 64 KB
-   (``--l1-align-bytes 65536``) on servers that participate in P2P. A larger
-   alignment lets the transfer channel issue bigger, better-aligned RDMA reads
-   and noticeably improves transfer performance. The default (4 KB) is fine for
-   non-P2P deployments.
+   When using the ``nixl`` engine, increase the L1 buffer alignment to at least
+   64 KB (``--l1-align-bytes 65536``) on servers that participate in P2P. A
+   larger alignment lets the transfer channel issue bigger, better-aligned RDMA
+   reads and noticeably improves transfer performance. The ``tcp`` engine does
+   not require large alignment but still benefits from it for internal buffer
+   management. The default (4 KB) is fine for non-P2P deployments.
 
 Transfer engine backends
 ------------------------
@@ -113,11 +119,22 @@ selected per server with ``--p2p-transfer-engine``.
      - Description
    * - ``nixl`` (default)
      - RDMA-based transport, shipped with LMCache. Runs over InfiniBand / RoCE
-       fabrics.
+       fabrics. Provides the lowest latency and highest throughput via
+       zero-copy, kernel-bypass RDMA reads.
+   * - ``tcp``
+     - Plain TCP socket transport. No special hardware required — works on any
+       network. Data is copied through the kernel TCP stack, so latency and CPU
+       overhead are higher than ``nixl``. Suitable for development, testing, or
+       environments without RDMA.
 
-``nixl`` is the only backend available today. The transfer engine is a
-pluggable abstraction, so additional backends can be added in the future
-without changing the rest of the P2P stack.
+The transfer engine is a pluggable abstraction; additional backends can be
+added in the future without changing the rest of the P2P stack.
+
+.. tip::
+
+   Use ``--p2p-transfer-engine tcp`` when RDMA hardware is unavailable or when
+   running single-node tests over loopback. Switch to ``nixl`` (the default)
+   for production deployments on RDMA-capable networks.
 
 Running a multi-node deployment
 -------------------------------
