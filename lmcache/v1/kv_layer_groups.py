@@ -85,9 +85,9 @@ def group_layers_by_identity(
         kv_caches: Registered KV cache structure, one entry per layer.
         engine_kv_formats: One Engine KV format per registered tensor; its length
             is the layer count. Homogeneous models repeat one shared format; a
-            model that mixes formats across engine groups -- e.g. MiniMax-M3's K+V
-            main cache (``kv_size=2``) plus its key-only MLA index cache
-            (``kv_size=1``) -- supplies the differing per-layer formats.
+            model that mixes formats across engine groups -- e.g. a K+V main cache
+            (``kv_size=2``) plus a key-only MLA index cache (``kv_size=1``) --
+            supplies the differing per-layer formats.
         per_layer_engine_group_idx: Optional engine block group id per layer.
             When ``None`` every layer is treated as block group 0 (non-hybrid);
             when present, layers from different engine block groups never share an
@@ -193,10 +193,10 @@ class KernelGroupInfo:
     this alongside ``shape_desc.element_size``."""
     engine_kv_format: "lmc_ops.EngineKVFormat | None" = None
     """Per-group Engine KV format, read via
-    ``BaseCacheContext.get_engine_kv_format`` so mixed-format models (e.g.
-    MiniMax-M3) dispatch each group with its own. ``None`` only for bench
-    bookkeeping groups from :func:`parse_kvcache_shape_spec`, which have no
-    detected format and never transfer; detection-built groups always set it."""
+    ``BaseCacheContext.get_engine_kv_format`` so mixed-format models dispatch each
+    group with its own. ``None`` only for bench bookkeeping groups from
+    :func:`parse_kvcache_shape_spec`, which have no detected format and never
+    transfer; detection-built groups always set it."""
     tokens_per_block: int = 0
     """Logical engine tokens covered by one paged chunk (one engine block
     ID) of this group, as declared by the engine's KV cache spec at
@@ -316,8 +316,8 @@ class KVLayerGroupsManager:
             engine_kv_formats: One Engine KV format per layer (its length is the
                 layer count), from
                 :func:`normalize_and_discover_per_layer_formats`. A model that
-                mixes formats across engine groups (e.g. MiniMax-M3) supplies the
-                differing per-layer formats so each group is shaped with its own;
+                mixes formats across engine groups supplies the differing
+                per-layer formats so each group is shaped with its own;
                 homogeneous models repeat one shared format.
             engine_group_infos: Engine KV cache group metadata, one info per
                 kernel group in kernel-group order, or empty.

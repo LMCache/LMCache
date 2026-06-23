@@ -233,9 +233,9 @@ def normalize_and_discover_per_layer_formats(
     """Normalize the KV caches and return one Engine KV format per layer.
 
     Reports each layer's own format, so models whose layers do not all share one
-    format -- e.g. MiniMax-M3's K+V main cache (``kv_size=2``) alongside its
-    key-only MLA index cache (``kv_size=1``) -- get a correct per-layer format
-    rather than a single model-wide one.
+    format -- e.g. a K+V main cache (``kv_size=2``) alongside a key-only MLA index
+    cache (``kv_size=1``) -- get a correct per-layer format rather than a single
+    model-wide one.
 
     Args:
         kv_caches: The registered KV caches: a per-layer list, or a single fused

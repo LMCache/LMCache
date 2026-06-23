@@ -186,8 +186,8 @@ class BaseCacheContext(ABC):
         """Returns the Engine KV format of kernel *kernel_group_idx*.
 
         The per-group format -- read by the transfer path so a model mixing
-        formats across groups (e.g. MiniMax-M3) dispatches each group with its
-        own, instead of the context's single representative ``engine_kv_format``.
+        formats across groups dispatches each group with its own, instead of a
+        single representative format.
 
         Raises:
             ValueError: If the group has no format (a bookkeeping group built by
@@ -204,11 +204,7 @@ class BaseCacheContext(ABC):
         return engine_kv_format
 
     def engine_kv_formats(self) -> list["lmc_ops.EngineKVFormat"]:
-        """Returns the Engine KV format of each kernel group, in group order.
-
-        A mixed-format model (e.g. MiniMax-M3) returns differing entries; a
-        homogeneous model returns one distinct value.
-        """
+        """Returns the Engine KV format of each kernel group, in group order."""
         num_groups = len(self.kv_layer_groups_manager.kernel_groups)
         return [self.get_engine_kv_format(idx) for idx in range(num_groups)]
 

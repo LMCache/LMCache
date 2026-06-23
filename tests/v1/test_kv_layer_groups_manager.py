@@ -72,7 +72,7 @@ class TestKVLayerGroupsManager:
         assert group.dtype == torch.float16
 
     def test_build_mixed_formats_per_group(self):
-        """MiniMax-M3 shape: a K+V group and a key-only MLA group are shaped
+        """Mixed-format shape: a K+V group and a key-only MLA group are shaped
         with their own per-layer formats (kv_size 2 and 1), not one shared
         format -- the server-side per-group path."""
         # First Party

@@ -45,7 +45,7 @@ class FullAttentionSpec:
 
 @dataclass
 class MLAAttentionSpec:
-    """Key-only, one-vector-per-token spec (e.g. MiniMax-M3's index cache)."""
+    """Key-only, one-vector-per-token spec (an MLA index cache)."""
 
     block_size: int
 
@@ -236,7 +236,7 @@ def test_conversion_mixed_window_layers_in_one_group_rejected():
 
 
 def test_conversion_mixed_kv_and_mla_groups():
-    """MiniMax-M3 shape: a K+V FullAttentionSpec group plus a key-only MLA index
+    """Mixed-format shape: a K+V FullAttentionSpec group plus a key-only MLA index
     group are detected per engine group and kept as separate LMCache groups with
     the correct membership and per-group token packing."""
     caches = {
