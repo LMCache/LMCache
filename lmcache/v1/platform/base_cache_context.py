@@ -203,20 +203,14 @@ class BaseCacheContext(ABC):
             )
         return engine_kv_format
 
-    def engine_kv_formats_per_layer(self) -> list["lmc_ops.EngineKVFormat"]:
-        """Returns the Engine KV format of each layer, aligned with kv_tensors.
+    def engine_kv_formats(self) -> list["lmc_ops.EngineKVFormat"]:
+        """Returns the Engine KV format of each kernel group, in group order.
 
-        Each registered KV tensor maps to the format of the kernel group that
-        owns its layer. Mixed-format models (e.g. MiniMax-M3) return differing
-        entries; homogeneous models return one value repeated per layer.
+        A mixed-format model (e.g. MiniMax-M3) returns differing entries; a
+        homogeneous model returns one distinct value.
         """
-        groups = self.kv_layer_groups_manager.kv_layer_groups
-        per_layer: dict[int, "lmc_ops.EngineKVFormat"] = {}
-        for kernel_group_idx, group in enumerate(groups):
-            engine_kv_format = self.get_engine_kv_format(kernel_group_idx)
-            for layer_idx in group.layer_indices:
-                per_layer[layer_idx] = engine_kv_format
-        return [per_layer[layer_idx] for layer_idx in range(self.num_layers)]
+        num_groups = len(self.kv_layer_groups_manager.kernel_groups)
+        return [self.get_engine_kv_format(idx) for idx in range(num_groups)]
 
     def get_slots_per_chunk_in_sw(self, kernel_group_idx: int) -> int:
         """Returns the number of slots per lmcache chunk for D/H

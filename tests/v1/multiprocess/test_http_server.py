@@ -44,10 +44,11 @@ def mock_gpu_ctx():
     tensors = _make_kv_tensors()
     type(ctx).kv_tensors = PropertyMock(return_value=tensors)
     type(ctx).block_size = PropertyMock(return_value=4)
-    # KV tensors are built as [2, NB, BS, NH, HS] -> NL_X_TWO_NB_BS_NH_HS.
-    ctx.engine_kv_formats_per_layer.return_value = [
+    # KV tensors are built as [2, NB, BS, NH, HS] -> NL_X_TWO_NB_BS_NH_HS;
+    # one homogeneous kernel group.
+    ctx.engine_kv_formats.return_value = [
         lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
-    ] * len(tensors)
+    ]
     return ctx
 
 

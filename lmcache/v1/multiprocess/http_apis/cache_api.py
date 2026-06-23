@@ -159,8 +159,8 @@ async def kvcache_check(
             content={"error": "kv_caches empty"},
         )
 
-    per_layer_formats = ctx.engine_kv_formats_per_layer()
-    if len({int(fmt) for fmt in per_layer_formats}) > 1:
+    group_formats = ctx.engine_kv_formats()
+    if len({int(fmt) for fmt in group_formats}) > 1:
         return JSONResponse(
             status_code=501,
             content={
@@ -168,7 +168,7 @@ async def kvcache_check(
                 "(this endpoint assumes one block axis for every layer)"
             },
         )
-    engine_kv_format = per_layer_formats[0]
+    engine_kv_format = group_formats[0]
     block_axis = _BLOCK_AXIS_BY_FORMAT.get(engine_kv_format)
     if block_axis is None:
         return JSONResponse(
