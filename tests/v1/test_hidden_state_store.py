@@ -77,7 +77,7 @@ class _Fixture:
         self.db = _token_db(self.config)
         self.sm = _FakeStorageManager()
         self.store = HiddenStateStore(self.config, self.db)
-        self.store.bind_storage_manager(self.sm)
+        self.store.bind_storage_manager(self.sm)  # type: ignore[arg-type]
 
     def keys_for(self, token_ids):
         return [key for _, _, key in self.db.process_tokens(tokens=token_ids)]

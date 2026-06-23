@@ -654,15 +654,14 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
             "Optional allowlist of **storage layer indices** accepted by "
             "HiddenStateStore.store_hidden_states. If None (recommended "
             "default), every layer index passed on store is cached. "
-            "**Semantics depend on the integration:** these are not necessarily "
-            "transformer layer IDs. When using vLLM-Omni's LMCacheHSBridge, "
-            "layer_idx 0 is the main hidden-state tensor and 1, 2, … are "
-            "multimodal output slots (see mm_layer_idx); copying unrelated "
-            'examples such as [0, 24] as if they were "model layers" can '
-            "**silently drop** multimodal rows because those use indices 1+. "
-            "For Omni + bridge, leave this unset unless you have verified the "
-            "exact indices your stack writes. Other integrations may use "
-            "per-model layer indices instead—consult that integration's docs. "
+            "**Semantics depend on the integration:** these are storage "
+            "layer_idx values, not necessarily transformer layer IDs. For "
+            "example, a multi-stage pipeline may use layer_idx 0 for the main "
+            "hidden-state tensor and 1, 2, … for multimodal output slots; "
+            "copying unrelated examples such as [0, 24] as if they were "
+            '"model layers" can **silently drop** rows stored under other '
+            "indices. Leave this unset unless you have verified the exact "
+            "indices your stack writes—consult your integration's docs. "
             "Relevant only when enable_hidden_state_cache=True."
         ),
     },

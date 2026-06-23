@@ -9,7 +9,7 @@ when ``config.enable_hidden_state_cache`` is True and exposed as
 
 # Standard
 from collections import OrderedDict
-from typing import TYPE_CHECKING, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Union, cast
 
 # Third Party
 import torch
@@ -314,8 +314,15 @@ class HiddenStateStore:
 
         The list is materialized so we can iterate it twice (key check and
         per-chunk copy) without re-running the hashing path.
+
+        ``process_tokens`` is typed to yield ``CacheEngineKey | int`` (the int
+        form is used by other callers); HiddenStateStore always runs it in the
+        keyed mode, so the third element is a ``CacheEngineKey`` here.
         """
-        return list(self._token_database.process_tokens(tokens=token_ids))
+        return cast(
+            "List[tuple[int, int, CacheEngineKey]]",
+            list(self._token_database.process_tokens(tokens=token_ids)),
+        )
 
     def _kv_present(self, key: CacheEngineKey) -> bool:
         """True if KV exists in any active backend, or unknown when SM unbound."""
