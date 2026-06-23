@@ -224,47 +224,32 @@ def normalize_kv_and_discover_format(
     return detect_format(kv_caches, serving_engine, layout_hints)
 
 
-def _detect_whole_list_format(
-    kv_caches: "DiscoverableKVCache",
-    serving_engine: EngineType,
-    layout_hints: "LayoutHints | None",
-) -> "tuple[DiscoverableKVCache, list[lmc_ops.EngineKVFormat]]":
-    """Detect the whole structure as one format and repeat it for every layer.
-
-    The canonical single-format path -- used when there are no engine groups, the
-    caches are a single fused tensor, or every group resolved to the same format.
-    Kept identical to the pre-per-group behavior so uniform models stay
-    byte-for-byte unchanged.
-    """
-    engine_kv_format, normalized = detect_format(
-        kv_caches, serving_engine, layout_hints
-    )
-    return normalized, [engine_kv_format] * get_num_layers(normalized, engine_kv_format)
-
-
 def normalize_and_discover_per_group_formats(
     kv_caches: "DiscoverableKVCache",
     layer_index_groups: "Sequence[Sequence[int]]",
     serving_engine: EngineType,
     layout_hints: "LayoutHints | None" = None,
 ) -> "tuple[DiscoverableKVCache, list[lmc_ops.EngineKVFormat]]":
-    """Normalize per-layer KV caches and discover one Engine KV format per layer.
+    """Normalize the KV caches and discover one Engine KV format per layer.
 
     Engines that place differently-formatted layers in different groups -- e.g.
     MiniMax-M3's K+V main cache (``kv_size=2``) alongside its key-only MLA index
     cache (``kv_size=1``) -- need each group detected on its own tensors;
     detecting the whole list at once would collapse to a single format and
-    mis-shape one group. When the groups resolve to differing formats, each group
-    is detected independently and a per-layer format list is returned. Otherwise
-    (no groups, a single fused tensor, or every group the same format -- every
-    model supported today) the whole structure is detected once and the single
-    shared format is repeated for every layer, leaving behavior byte-for-byte
-    unchanged.
+    mis-shape one group. Each engine group is therefore detected independently and
+    the per-group results are scattered back into a per-layer list.
+
+    With no engine groups, one synthetic group spanning every layer is used, which
+    is exactly the old whole-list detection. Normalization
+    (:func:`attempt_permute_to_contiguous_view` plus the detector reshape) is
+    per-tensor, so the assembled per-layer result is byte-for-byte identical to
+    detecting the whole list at once -- uniform models stay unchanged without a
+    separate code path.
 
     Args:
         kv_caches: The registered KV caches. Per-group detection applies only to a
             layer-indexable ``list`` (one entry per layer); a single fused tensor
-            is single-format by construction and takes the whole-list path.
+            is single-format by construction and is detected directly.
         layer_index_groups: Layer indices of each engine group (one inner
             sequence per group). Empty means a single non-hybrid group.
         serving_engine: Which serving engine produced the caches.
@@ -275,40 +260,37 @@ def normalize_and_discover_per_group_formats(
         one format per layer (its length is the layer count), ready for
         :func:`lmcache.v1.kv_layer_groups.group_layers_by_identity`.
     """
-    # Per-group detection is inherently per-layer, so it applies only to a
-    # layer-indexable list. No groups, or a single fused tensor, means one shared
-    # format for every layer via the canonical whole-list path.
-    if not layer_index_groups or not isinstance(kv_caches, list):
-        return _detect_whole_list_format(kv_caches, serving_engine, layout_hints)
+    # A single fused tensor is single-format by construction and cannot be indexed
+    # by layer; detect it directly and repeat the format for every layer.
+    if not isinstance(kv_caches, list):
+        engine_kv_format, normalized = detect_format(
+            kv_caches, serving_engine, layout_hints
+        )
+        return normalized, [engine_kv_format] * get_num_layers(
+            normalized, engine_kv_format
+        )
 
-    # Private writable copy: the loop scatters each group's normalized tensors in
-    # by layer index. The input is never mutated, so the whole-list fallback below
-    # still detects on the original (pristine) entries.
+    # Detect each engine group on its own tensors; with no groups, one synthetic
+    # group spans every layer (== whole-list detection). The loop reads the
+    # pristine input and scatters normalized tensors into a private copy by layer
+    # index, so the input is never mutated.
+    groups = layer_index_groups or [range(len(kv_caches))]
     normalized_per_layer = list(kv_caches)
     per_layer_format: list[Optional["lmc_ops.EngineKVFormat"]] = [None] * len(
         normalized_per_layer
     )
-    seen_formats: set[int] = set()
-    for indices in layer_index_groups:
+    for indices in groups:
         group_format, normalized_sub = detect_format(
-            [normalized_per_layer[i] for i in indices],
+            [kv_caches[i] for i in indices],
             serving_engine,
             layout_hints,
         )
-        seen_formats.add(int(group_format))
         for sub_idx, layer_idx in enumerate(indices):
             normalized_per_layer[layer_idx] = normalized_sub[sub_idx]
             per_layer_format[layer_idx] = group_format
 
-    # Groups all resolved to one format: identical to the no-groups case, so take
-    # the same canonical whole-list path rather than trusting the per-group
-    # assembly to match it (keeps uniform models byte-for-byte unchanged).
-    if len(seen_formats) == 1:
-        return _detect_whole_list_format(kv_caches, serving_engine, layout_hints)
-
-    # Heterogeneous (e.g. MiniMax-M3): return the per-layer formats. Layers in no
-    # group (cross-layer KV sharing) keep their tensor and are skipped downstream;
-    # fill their slot with any detected format so every layer has one.
+    # Layers in no group (cross-layer KV sharing) keep their tensor and are skipped
+    # downstream; fill their slot with any detected format so every layer has one.
     shared = next(fmt for fmt in per_layer_format if fmt is not None)
     return normalized_per_layer, [
         fmt if fmt is not None else shared for fmt in per_layer_format
