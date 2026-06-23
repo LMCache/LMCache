@@ -71,6 +71,7 @@ REQUEST_NAMES = [
     "UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT",
     "PREPARE_STORE",
     "COMMIT_STORE",
+    "COMMIT_STORE_GROUP",
     "PREPARE_RETRIEVE",
     "COMMIT_RETRIEVE",
 ]
@@ -224,6 +225,21 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         ),
         "COMMIT_STORE": ProtocolDefinition(
             payload_classes=[KeyType, int, bytes],
+            response_class=bool,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Per-group commit (multi-group engine-driven transfer).
+        # Used instead of COMMIT_STORE when a single group's bytes alone
+        # fit in the msgspec msgpack bin limit (4 GiB) but the combined
+        # blob for all groups does not.
+        # Payload:
+        #   - key: KeyType - Cache key
+        #   - instance_id: int - Engine instance id
+        #   - group_idx: int - Which object group to write to
+        #   - cpu_data: bytes - Pre-serialized pickle blob for this group
+        # Returns: bool - success
+        "COMMIT_STORE_GROUP": ProtocolDefinition(
+            payload_classes=[KeyType, int, int, bytes],
             response_class=bool,
             handler_type=HandlerType.BLOCKING,
         ),

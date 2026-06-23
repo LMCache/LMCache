@@ -52,6 +52,10 @@ class RequestType(enum.Enum):
     UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT = enum.auto()
     PREPARE_STORE = enum.auto()
     COMMIT_STORE = enum.auto()
+    # Multi-group engine-driven store: one message per group to avoid
+    # the 4 GiB msgspec msgpack bin limit when groups are large.
+    # Payload: [key, instance_id, group_idx, cpu_data]
+    COMMIT_STORE_GROUP = enum.auto()
     PREPARE_RETRIEVE = enum.auto()
     COMMIT_RETRIEVE = enum.auto()
 
