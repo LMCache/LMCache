@@ -263,11 +263,7 @@ def normalize_and_discover_per_layer_formats(
     groups = layer_index_groups or [range(len(kv_caches))]
     detected: dict[int, tuple[DiscoverableKVCache, "lmc_ops.EngineKVFormat"]] = {}
     for indices in groups:
-        # One engine group can still mix layouts: vLLM coalesces a rank-5 K/V
-        # cache and a rank-3 key-only indexer into one UniformTypeKVCacheSpecs
-        # group. A tensor's shape fixes its format, so detect once per distinct
-        # shape and let same-shape layers share the result. Detecting the whole
-        # mixed group at once would stamp the K/V format onto the rank-3 indexer.
+        # One engine group can still mix layouts
         layers_by_shape: dict[Hashable, list[int]] = {}
         for i in indices:
             shape = getattr(kv_caches[i], "shape", None)
