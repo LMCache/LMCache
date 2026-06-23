@@ -55,6 +55,13 @@ ENV_MP_TRANSFER_MODE = "LMCACHE_MP_TRANSFER_MODE"
 # typical consumer GPU).  Set to "1" to force-enable for A/B testing.
 ENV_MULTI_STREAM_D2D = "LMCACHE_MP_MULTI_STREAM_D2D"
 
+# Opt-in: delta-store. Worker passes ``skip_count`` per group derived
+# from the prior lookup's prefix hit count. Saves 14 GiB of wire on
+# the re-run of a cached prompt (60k-token Qwen3-27B-AWQ).
+# Default is ON -- the lookup is a no-op when no STORE direction is
+# requested, and the savings on hot-cache rebuilds are large.
+ENV_DELTA_STORE = "LMCACHE_MP_DELTA_STORE"
+
 
 class MPTransferMode(str, Enum):
     """Routing mode used by :func:`create_transfer_context`.
@@ -355,6 +362,18 @@ class EngineDrivenTransferContext(TransferContext):
         self._serialize_pool: ThreadPoolExecutor = ThreadPoolExecutor(
             max_workers=4,
             thread_name_prefix="lmcache-serialize",
+        )
+        # LRU prefetch hint predictor.  Tracks recent lookups so the
+        # connector can speculatively pre-warm a likely-next key from
+        # L2.  Inherently heuristic -- disabled by default because the
+        # L1 cache already covers the same-prompt re-run case; useful
+        # only for chat-session style workloads with overlapping
+        # prefixes.  See ``PrefetchPredictor`` for the heuristic.
+        from lmcache.v1.multiprocess.transfer_context.prefetch_predictor import (
+            PrefetchPredictor,
+        )
+        self._prefetch_predictor: PrefetchPredictor = PrefetchPredictor(
+            max_entries=8,
         )
 
     def register(
