@@ -303,7 +303,6 @@ class BaseCacheContext(ABC):
         self,
         kernel_group_idx: int,
         group: Any,
-        engine_kv_format: Any,
         group_map: dict[int, int],
     ) -> dict:
         """Build a status dict for a single kernel group.
@@ -311,6 +310,7 @@ class BaseCacheContext(ABC):
         Override this in subclasses to inject extra per-group fields
         without duplicating the whole :meth:`report_status` method.
         """
+        engine_kv_format = self.get_engine_kv_format(kernel_group_idx)
         return {
             "kernel_group_idx": kernel_group_idx,
             "engine_group_idx": group.engine_group_idx,
@@ -335,13 +335,10 @@ class BaseCacheContext(ABC):
         """Return this context's KV cache layout metadata."""
         manager = self.kv_layer_groups_manager
         kernel_groups = manager.kernel_groups
-        engine_kv_format = self.engine_kv_format
         group_map = self._build_group_report_map()
 
         group_reports = [
-            self._build_single_group_report(
-                kernel_group_idx, group, engine_kv_format, group_map
-            )
+            self._build_single_group_report(kernel_group_idx, group, group_map)
             for kernel_group_idx, group in enumerate(kernel_groups)
         ]
 

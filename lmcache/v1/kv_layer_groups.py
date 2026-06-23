@@ -184,16 +184,11 @@ class KernelGroupInfo:
     kernel template instantiation; see class docstring for why we keep
     this alongside ``shape_desc.element_size``."""
     engine_kv_format: "lmc_ops.EngineKVFormat | None" = None
-    """Engine KV format of this group's layers (every layer in a group shares
-    one format). The per-group transfer path reads this instead of the cache
-    context's single representative format, so a model that mixes formats across
-    engine groups -- e.g. MiniMax-M3's K+V main cache and key-only MLA index
-    cache -- dispatches each group with its own format.
-
-    ``None`` for groups built by :func:`parse_kvcache_shape_spec` (the
-    ``--kvcache-shape-spec`` bench path): those are client-side bookkeeping with
-    no detected format and never drive a transfer, which re-detects server-side.
-    Always set for detection-built groups, which the transfer path reads."""
+    """Per-group Engine KV format, read via
+    ``BaseCacheContext.get_engine_kv_format`` so mixed-format models (e.g.
+    MiniMax-M3) dispatch each group with its own. ``None`` only for bench
+    bookkeeping groups from :func:`parse_kvcache_shape_spec`, which have no
+    detected format and never transfer; detection-built groups always set it."""
     tokens_per_block: int = 0
     """Logical engine tokens covered by one paged chunk (one engine block
     ID) of this group, as declared by the engine's KV cache spec at

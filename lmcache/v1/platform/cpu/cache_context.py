@@ -137,12 +137,12 @@ class CPUCacheContext(BaseCacheContext):
             torch.tensor(
                 get_group_data_ptrs(
                     self.kv_caches_,
-                    self.engine_kv_format,
+                    self.get_engine_kv_format(idx),
                     group.layer_indices,
                 ),
                 dtype=torch.long,
             )
-            for group in self.kv_layer_groups_manager_.kv_layer_groups
+            for idx, group in enumerate(self.kv_layer_groups_manager_.kv_layer_groups)
         ]
 
         self.kv_cache_pointers_ = torch.tensor(
