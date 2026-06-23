@@ -1109,6 +1109,28 @@ class RawBlockCore:
         ptr = ctypes.addressof((ctypes.c_byte * 1).from_buffer(view))
         return ptr % self.block_align == 0
 
+    def _allocate_aligned_buffer(self, length: int) -> memoryview:
+        """Allocate a writable byte buffer aligned to ``self.block_align``.
+
+        Args:
+            length: Number of bytes to expose through the returned memoryview.
+
+        Returns:
+            A memoryview whose starting address is aligned to ``self.block_align``.
+
+        Raises:
+            ValueError: If ``length`` is negative.
+        """
+        if length < 0:
+            raise ValueError("length must be >= 0")
+        if length == 0:
+            return memoryview(bytearray())
+
+        backing = bytearray(length + self.block_align - 1)
+        ptr = ctypes.addressof((ctypes.c_byte * 1).from_buffer(backing))
+        offset = (-ptr) % self.block_align
+        return memoryview(backing)[offset : offset + length]
+
     def _build_direct_odirect_view(
         self,
         memory_obj: MemoryObj,
@@ -1273,9 +1295,9 @@ class RawBlockCore:
             if len(view) < total_len:
                 if len(view) < payload_len:
                     raise ValueError("input buffer shorter than payload_len")
-                padded = bytearray(total_len)
+                padded = self._allocate_aligned_buffer(total_len)
                 padded[:payload_len] = view[:payload_len]
-                view = memoryview(padded)
+                view = padded
             else:
                 view = view[:total_len]
             keepalive.append(view)
@@ -1335,7 +1357,7 @@ class RawBlockCore:
             if len(dst) < total_len:
                 if len(dst) < payload_len:
                     raise ValueError("output buffer shorter than payload_len")
-                target = memoryview(bytearray(total_len))
+                target = self._allocate_aligned_buffer(total_len)
                 copy_back = True
             else:
                 target = dst[:total_len]
