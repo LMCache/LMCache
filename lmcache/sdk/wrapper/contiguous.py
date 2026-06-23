@@ -12,7 +12,7 @@ from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContext
 
 
-class ContiguousEngineDrivenTransfer:
+class ContiguousTransferWrapper:
     """Store/retrieve a contiguous KV tensor through an ``EngineDrivenContext``.
 
     Args:

@@ -16,13 +16,18 @@ import torch
 import zmq
 
 # First Party
+import lmcache.c_ops as lmc_ops
 from lmcache.integration.vllm.vllm_multi_process_adapter import send_lmcache_request
 from lmcache.logging import init_logger
-from lmcache.v1.gpu_connector.utils import LayoutHints
+from lmcache.v1.gpu_connector.utils import (
+    LayoutHints,
+    get_block_size,
+    get_num_heads,
+)
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
-from lmcache.v1.multiprocess.transfer_context.contiguous import ContiguousEngineDrivenTransfer
+from lmcache.sdk.wrapper.contiguous import ContiguousTransferWrapper
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import create_transfer_context
 
 logger = init_logger(__name__)
@@ -82,12 +87,6 @@ class LMCacheKVCacheContext:
         self.shm_name: str = str(mp_conf.get("shm_name", "")).lstrip("/")
         if self.shm_name and not self.shm_name.startswith("lmcache_l1_pool_"):
             self.shm_name = f"lmcache_l1_pool_{self.shm_name}"
-        print(
-            f"Initialized LMCacheKVCacheContext with instance_id={self.instance_id}, "
-            f"model_name={self._model_name}, chunk_size={self._chunk_size}, "
-            f"shm_name={self.shm_name}",
-            flush=True,
-        )
 
         self._cache_context_meta_conf = {}
         try:
@@ -102,12 +101,21 @@ class LMCacheKVCacheContext:
         self._pending_lookups: set[str] = set()
         self._finished_lookups: dict[str, int] = {}
 
+        logger.info(
+            f"Initialized LMCacheKVCacheContext with instance_id={self.instance_id}, "
+            f"model_name={self._model_name}, chunk_size={self._chunk_size}, "
+            f"shm_name={self.shm_name}"
+        )
+
     def register_kv_caches(
         self,
     ) -> None:
         """Register the KV cache layout for the model with the SDK context."""
-        entry = next((e for e in self._cache_context_meta_conf.values()
-                        if e.get("model_name") == self._model_name), None)
+        entry = None
+        for e in self._cache_context_meta_conf.values():
+            if e.get("model_name") == self._model_name:
+                entry = e
+                break
         if not entry:
             raise KVCacheSDKError(
                 f"no registered GPU layout for model_name={self._model_name!r}; "
@@ -139,16 +147,11 @@ class LMCacheKVCacheContext:
                 kernel_group["engine_kv_concrete_shape"].split("[")[1].rstrip("] ").split(",")
             ]
 
-            # From get_num_heads (lmcache/v1/gpu_connector/utils.py)
-            #     lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
-            #     # NHD: [..., BS, NH, HS] — num_heads at shape[3]
-            #     lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,
-            #     # HND: [..., NH, BS, HS] — num_heads at shape[2]
+            fmt = getattr(lmc_ops.EngineKVFormat, kernel_group["engine_kv_format"])
+            probe = [torch.empty(inner, device="meta")]  # shape-only; no allocation
+            num_kv_heads = get_num_heads(probe, fmt)
+            block_size = get_block_size(probe, fmt)
             head_dim = inner[-1]
-            if "NH_BS" in kernel_group["engine_kv_format"]:
-                num_kv_heads, block_size = inner[-3], inner[-2]
-            else:
-                block_size, num_kv_heads = inner[-3], inner[-2]
             if block_size != tokens_per_block:
                 raise KVCacheSDKError(
                     f"decoded block_size {block_size} != tokens_per_block "
@@ -188,7 +191,7 @@ class LMCacheKVCacheContext:
             layout_hints=layout_hints,
         )
 
-        self._transfer_ctx = ContiguousEngineDrivenTransfer(
+        self._transfer_ctx = ContiguousTransferWrapper(
             transfer_ctx.engine_driven_context, self._chunk_size
         )
     
@@ -203,7 +206,7 @@ class LMCacheKVCacheContext:
         return self._mq_timeout
 
     @property
-    def transfer_ctx(self) -> ContiguousEngineDrivenTransfer:
+    def transfer_ctx(self) -> ContiguousTransferWrapper:
         """Return the contiguous transfer context."""
         return self._transfer_ctx
     
@@ -486,6 +489,11 @@ def store(
     Returns:
         True if the store operation is successful, False otherwise.
     """
+    if len(tokens) != kv.shape[2]:
+        raise KVCacheSDKError(
+            f"Number of tokens ({len(tokens)}) does not match KV tensor's "
+            f"token dimension ({kv.shape[2]})."
+        )
     token_ids = list(tokens)
     total_tokens = (len(token_ids) // ctx.chunk_size) * ctx.chunk_size
     token_ids = token_ids[:total_tokens]
