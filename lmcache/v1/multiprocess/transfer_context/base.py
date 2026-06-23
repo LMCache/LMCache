@@ -226,6 +226,28 @@ class EngineDrivenContext(ABC):
         except TimeoutError:
             return False
 
+    def commit_store_group_raw(
+        self, key: IPCCacheServerKey, instance_id: int, group_idx: int, cpu_data: bytes
+    ) -> bool:
+        """Send one group's pre-serialized bytes via COMMIT_STORE_GROUP.
+
+        Multi-group engine-driven transfer splits the per-key store into one
+        COMMIT_STORE_GROUP message per group so that each individual
+        ``cpu_data`` blob stays under the msgspec msgpack bin limit (4 GiB).
+        """
+        from lmcache.v1.multiprocess.protocol import RequestType
+        from lmcache.v1.multiprocess.protocol import get_response_class
+
+        future = self.mq_client.submit_request(
+            RequestType.COMMIT_STORE_GROUP,
+            [key, instance_id, group_idx, cpu_data],
+            get_response_class(RequestType.COMMIT_STORE_GROUP),
+        )
+        try:
+            return bool(future.result(timeout=self.mq_timeout))
+        except TimeoutError:
+            return False
+
     def prepare_retrieve_raw(
         self, key: IPCCacheServerKey, instance_id: int
     ) -> bytes | None:
@@ -835,6 +857,7 @@ def _deserialize_multi_group_chunks(
     """
     import pickle
 
+
     raw = pickle.loads(cpu_data)
     tensors = []
     for group in raw:
@@ -848,6 +871,18 @@ def _deserialize_multi_group_chunks(
             t_group.append(t)
         tensors.append(t_group)
     return tensors
+
+
+def _serialize_single_group_chunks(
+    group_chunks: list[torch.Tensor],
+) -> bytes:
+    """Serialize one group's CPU chunk tensors as a compact pickle blob.
+
+    Equivalent to a one-element invocation of
+    ``_serialize_multi_group_chunks`` but kept as a separate helper to
+    keep the wire format and per-group error handling clean.
+    """
+    return _serialize_multi_group_chunks([group_chunks])
 
 
 # ---------------------------------------------------------------------------

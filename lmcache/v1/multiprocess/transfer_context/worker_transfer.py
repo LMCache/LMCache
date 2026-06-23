@@ -27,6 +27,7 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContextMetadata,
     _deserialize_multi_group_chunks,
     _serialize_multi_group_chunks,
+    _serialize_single_group_chunks,
     compute_kv_layout,
     create_engine_driven_context,
     gather_paged_kv_multi_group_to_cpu,
@@ -516,7 +517,6 @@ class EngineDrivenTransferContext(TransferContext):
             )
 
         torch_dev.synchronize()
-
         if len(self._engine_group_infos) > 1:
             # ── Multi-group path ─────────────────────────────────────────
             if len(block_ids) != len(self._engine_group_infos):
@@ -531,9 +531,19 @@ class EngineDrivenTransferContext(TransferContext):
                 lmcache_tokens_per_chunk=self._lmcache_tokens_per_chunk,
                 layout_hints=self._layout_hints,
             )
-            cpu_data = _serialize_multi_group_chunks(group_chunks)
             self._engine_driven_context.prepare_store(key, instance_id)
-            ok = self._engine_driven_context.commit_store_raw(key, instance_id, cpu_data)
+            # Send one COMMIT_STORE_GROUP per group so each ``cpu_data`` blob
+            # stays under the msgspec msgpack bin limit (4 GiB). The combined
+            # multi-group blob for large hybrid models can exceed this limit.
+            ok = True
+            for group_idx, group_chunk_list in enumerate(group_chunks):
+                if not group_chunk_list:
+                    continue
+                group_cpu_data = _serialize_single_group_chunks(group_chunk_list)
+                group_ok = self._engine_driven_context.commit_store_group_raw(
+                    key, instance_id, group_idx, group_cpu_data,
+                )
+                ok = ok and group_ok
         else:
             # ── Single-group path (backward compatible) ──────────────────
             result = self._engine_driven_context.prepare_store(key, instance_id)
