@@ -230,35 +230,25 @@ def normalize_and_discover_per_layer_formats(
     serving_engine: EngineType,
     layout_hints: "LayoutHints | None" = None,
 ) -> "tuple[DiscoverableKVCache, list[lmc_ops.EngineKVFormat]]":
-    """Normalize the KV caches and discover one Engine KV format per layer.
+    """Normalize the KV caches and return one Engine KV format per layer.
 
-    Engines that place differently-formatted layers in different groups -- e.g.
-    MiniMax-M3's K+V main cache (``kv_size=2``) alongside its key-only MLA index
-    cache (``kv_size=1``) -- need each group detected on its own tensors;
-    detecting the whole list at once would collapse to a single format and
-    mis-shape one group. Each engine group is therefore detected independently and
-    the per-group results are assembled into a per-layer list.
-
-    With no engine groups, one synthetic group spanning every layer is used, which
-    is exactly the old whole-list detection. Normalization
-    (:func:`attempt_permute_to_contiguous_view` plus the detector reshape) is
-    per-tensor, so the assembled per-layer result is byte-for-byte identical to
-    detecting the whole list at once -- uniform models stay unchanged without a
-    separate code path.
+    Reports each layer's own format, so models whose layers do not all share one
+    format -- e.g. MiniMax-M3's K+V main cache (``kv_size=2``) alongside its
+    key-only MLA index cache (``kv_size=1``) -- get a correct per-layer format
+    rather than a single model-wide one.
 
     Args:
-        kv_caches: The registered KV caches. Per-group detection applies only to a
-            layer-indexable ``list`` (one entry per layer); a single fused tensor
-            is single-format by construction and is detected directly.
+        kv_caches: The registered KV caches: a per-layer list, or a single fused
+            tensor for cross-layer formats.
         layer_index_groups: Layer indices of each engine group (one inner
             sequence per group). Empty means a single non-hybrid group.
         serving_engine: Which serving engine produced the caches.
         layout_hints: See :class:`LayoutHints`.
 
     Returns:
-        ``(normalized_kv_caches, engine_kv_formats)``. ``engine_kv_formats`` holds
-        one format per layer (its length is the layer count), ready for
-        :func:`lmcache.v1.kv_layer_groups.group_layers_by_identity`.
+        ``(normalized_kv_caches, engine_kv_formats)``: the canonical KV cache
+        structure and one format per layer (length equals the layer count),
+        ready for :func:`lmcache.v1.kv_layer_groups.group_layers_by_identity`.
     """
     # A single fused tensor is single-format by construction and cannot be indexed
     # by layer; detect it directly and repeat the format for every layer.

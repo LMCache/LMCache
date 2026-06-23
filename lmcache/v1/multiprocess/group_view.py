@@ -110,10 +110,8 @@ def engine_group_layer_indices(
 ) -> list[list[int]]:
     """Return each engine group's layer indices, ordered by engine group id.
 
-    Several ``EngineGroupInfo`` may share one ``engine_group_id`` (when one
-    engine group is split by transfer identity); their ``layer_indices`` are
-    unioned. The result feeds per-engine-group KV format detection so the server
-    reconstructs the same per-layer formats the engine side produced.
+    Several ``EngineGroupInfo`` may share one ``engine_group_id``; their
+    ``layer_indices`` are unioned into that group's entry.
 
     Args:
         groups: The LMCache KV groups, in protocol order.
