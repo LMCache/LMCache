@@ -275,8 +275,7 @@ def normalize_and_discover_per_layer_formats(
     # skipped downstream; give it any detected format so every layer has one.
     fallback_format = next(fmt for _, fmt in detected.values())
     normalized_per_layer = [
-        detected[i][0] if i in detected else kv_caches[i]
-        for i in range(len(kv_caches))
+        detected[i][0] if i in detected else kv_caches[i] for i in range(len(kv_caches))
     ]
     engine_kv_formats = [
         detected[i][1] if i in detected else fallback_format

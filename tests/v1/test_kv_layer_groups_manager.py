@@ -104,8 +104,7 @@ class TestKVLayerGroupsManager:
         assert by_group[1].shape_desc.hs == 128
         # Each kernel group persists its own format for the transfer path.
         assert (
-            by_group[0].engine_kv_format
-            == lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+            by_group[0].engine_kv_format == lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
         )
         assert by_group[1].engine_kv_format == lmc_ops.EngineKVFormat.NL_X_NB_BS_HS
 
