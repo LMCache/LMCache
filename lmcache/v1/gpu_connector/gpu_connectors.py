@@ -464,9 +464,9 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         if self.init:
             return
 
-        empty_engine_groups: list[list[int]] = []
+        empty_layer_index_groups: list[list[int]] = []
         self.kvcaches, engine_kv_formats = normalize_and_discover_per_layer_formats(
-            self.kvcaches, empty_engine_groups, EngineType.VLLM, self.layout_hints
+            self.kvcaches, empty_layer_index_groups, EngineType.VLLM, self.layout_hints
         )
         self.engine_kv_format = engine_kv_formats[0]
         self.num_blocks = get_num_blocks(self.kvcaches, self.engine_kv_format)
