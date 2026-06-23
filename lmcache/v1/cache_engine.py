@@ -43,6 +43,7 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventStatus, EventType
 from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
 from lmcache.v1.gpu_connector.utils import assert_layerwise_gpu_connector
+from lmcache.v1.hidden_state_store import HiddenStateStore
 from lmcache.v1.memory_management import CuFileMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import (  # noqa: E501
     MemoryAllocatorInterface,
@@ -234,6 +235,13 @@ class LMCacheEngine:
         # Flag to indicate if initialization failed (irrecoverable error)
         self._init_failed = False
 
+        # Hidden-state cache (logically separate from KV; lives on its own
+        # pinned pool). Bound to storage_manager in post_init for coupled
+        # eviction. None when disabled in config.
+        self.hidden_state_store: Optional[HiddenStateStore] = None
+        if config.enable_hidden_state_cache:
+            self.hidden_state_store = HiddenStateStore(config, token_database)
+
     def set_health_monitor(self, health_monitor: "HealthMonitor") -> None:
         """
         Set the health monitor reference.
@@ -314,6 +322,8 @@ class LMCacheEngine:
                     lmcache_worker=self.lmcache_worker,
                     async_lookup_server=async_lookup_server,
                 )
+                if self.hidden_state_store is not None:
+                    self.hidden_state_store.bind_storage_manager(self.storage_manager)
             self.post_inited = True
 
     def freeze(self, enabled: bool) -> None:
@@ -1591,6 +1601,13 @@ class LMCacheEngine:
     def close(self) -> None:
         """Close the cache engine and free all the resources"""
         logger.info("Closing LMCacheEngine...")
+
+        if self.hidden_state_store is not None:
+            try:
+                logger.info("Closing hidden_state_store...")
+                self.hidden_state_store.close()
+            except Exception as e:
+                logger.error(f"Error closing hidden_state_store: {e}")
 
         if self.lmcache_worker is not None:
             try:
