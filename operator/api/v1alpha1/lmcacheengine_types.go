@@ -388,6 +388,13 @@ type LMCacheEngineSpec struct {
 	// +optional
 	PriorityClassName string `json:"priorityClassName,omitempty"`
 
+	// hostNetwork runs the pod in the host's network namespace. When true the
+	// operator also sets dnsPolicy to ClusterFirstWithHostNet so cluster DNS
+	// still works. Default: false.
+	// +optional
+	// +kubebuilder:default=false
+	HostNetwork *bool `json:"hostNetwork,omitempty"`
+
 	// extraArgs are additional CLI flags appended to the server command.
 	// They are appended last and can override any auto-generated flag.
 	// +optional
