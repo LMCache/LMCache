@@ -43,6 +43,31 @@ from .server_transfer import (
 logger = init_logger(__name__)
 
 
+class _Counter:
+    """Tiny thread-safe counter (used for the F. batched-append
+    observability hook)."""
+    def __init__(self) -> None:
+        import threading
+        self._lock = threading.Lock()
+        self._value = 0
+
+    def inc(self, by: int = 1) -> None:
+        with self._lock:
+            self._value += by
+
+    @property
+    def value(self) -> int:
+        with self._lock:
+            return self._value
+
+
+# F. Storage Batched Append observability -- counts storage-backend
+# write invocations.  With a "multi-group write" API this drops from
+# N to 1 per multi-group store.  Exposed via
+# ``lmcache_file_ops_total`` in the admin endpoint.
+_STATS_FILE_OPS: "_Counter" = _Counter()
+
+
 @dataclass
 class EngineDrivenContextEntry:
     """Registered non-GPU context metadata for a single worker instance.
@@ -615,6 +640,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             context=g_metadata,
             resolve_obj_keys=lambda k, gi=group_idx: all_obj_keys[gi],
         )
+        _STATS_FILE_OPS.inc()
         if result and st is not None and group_idx == num_groups - 1:
             total_tokens = sum(
                 len(ok) for ok in all_obj_keys
@@ -712,6 +738,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             context=g_metadata,
             resolve_obj_keys=lambda k, keys=offset_obj_keys: keys,
         )
+        _STATS_FILE_OPS.inc()
         return bool(result)
 
     def _commit_store_multi_group(
@@ -759,6 +786,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 context=g_metadata,
                 resolve_obj_keys=lambda k, gi=group_idx: all_obj_keys[gi],
             )
+            _STATS_FILE_OPS.inc()
             if not result:
                 all_ok = False
         if all_ok and st is not None:
