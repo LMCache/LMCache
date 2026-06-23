@@ -224,29 +224,6 @@ def normalize_kv_and_discover_format(
     return detect_format(kv_caches, serving_engine, layout_hints)
 
 
-def _layout_signature(layer: object) -> Hashable:
-    """Signature grouping KV layers that share an ``EngineKVFormat``.
-
-    Detection keys on tensor rank and on whether axis 0 or 1 is the K/V ``2``
-    axis, so layers agreeing on those share a format and are detected together
-    (shapes differing only in ``num_blocks`` stay in one split). A different-rank
-    layer -- e.g. a rank-3 key-only indexer cache sharing an engine group with
-    rank-5 K/V -- splits out and gets its own format. Non-tensor entries (nested
-    lists) fall back to one shared signature.
-
-    Args:
-        layer: One layer's registered KV cache (tensor or nested list).
-
-    Returns:
-        A hashable signature; equal signatures are detected together.
-    """
-    shape = getattr(layer, "shape", None)
-    if shape is None:
-        return ("non-tensor",)
-    ndim = len(shape)
-    return (ndim, ndim >= 1 and shape[0] == 2, ndim >= 2 and shape[1] == 2)
-
-
 def normalize_and_discover_per_layer_formats(
     kv_caches: "DiscoverableKVCache",
     layer_index_groups: "Sequence[Sequence[int]]",
@@ -286,21 +263,24 @@ def normalize_and_discover_per_layer_formats(
     groups = layer_index_groups or [range(len(kv_caches))]
     detected: dict[int, tuple[DiscoverableKVCache, "lmc_ops.EngineKVFormat"]] = {}
     for indices in groups:
-        # One engine group can still mix layouts (e.g. a rank-5 K/V group
-        # alongside a rank-3 key-only indexer cache sharing one block-id space).
-        # Format is a per-shape property, so split each group by layout and
-        # detect each split on its own; layers keep their order within a split.
-        splits: dict[Hashable, list[int]] = {}
+        # One engine group can still mix layouts: vLLM coalesces a rank-5 K/V
+        # cache and a rank-3 key-only indexer into one UniformTypeKVCacheSpecs
+        # group. A tensor's shape fixes its format, so detect once per distinct
+        # shape and let same-shape layers share the result. Detecting the whole
+        # mixed group at once would stamp the K/V format onto the rank-3 indexer.
+        layers_by_shape: dict[Hashable, list[int]] = {}
         for i in indices:
-            splits.setdefault(_layout_signature(kv_caches[i]), []).append(i)
-        for split_indices in splits.values():
-            split_format, normalized_split = detect_format(
-                [kv_caches[i] for i in split_indices],
+            shape = getattr(kv_caches[i], "shape", None)
+            key = tuple(shape) if shape is not None else None
+            layers_by_shape.setdefault(key, []).append(i)
+        for same_shape_indices in layers_by_shape.values():
+            fmt, normalized = detect_format(
+                [kv_caches[i] for i in same_shape_indices],
                 serving_engine,
                 layout_hints,
             )
-            for sub_idx, layer_idx in enumerate(split_indices):
-                detected[layer_idx] = (normalized_split[sub_idx], split_format)
+            for sub_idx, layer_idx in enumerate(same_shape_indices):
+                detected[layer_idx] = (normalized[sub_idx], fmt)
 
     # A layer in no group (cross-layer KV sharing) keeps its own tensor and is
     # skipped downstream; give it any detected format so every layer has one.
