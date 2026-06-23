@@ -14,10 +14,19 @@ HIP version. Importing this shim does not dlopen any GPU IO driver; both
 backends bind ``libcufile``/``libhipfile`` lazily on first use.
 """
 
+# Standard
+from typing import TYPE_CHECKING
+
 # Third Party
 import torch
 
-if torch.version.hip is not None:
+# A static type checker analyzes the TYPE_CHECKING branch only (one ``_backend``
+# binding, so no ``no-redef``); at runtime the ``elif``/``else`` pick the real
+# backend by platform.
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.gpu_connector import _cufile_async as _backend
+elif torch.version.hip is not None:
     # First Party
     from lmcache.v1.gpu_connector import _hipfile_async as _backend
 else:
