@@ -46,8 +46,11 @@ caller-provided load buffers during prefetch.
   per-TP device-path mappings in MP mode.
 - ``raw_block`` remains ``"type": "raw_block"`` for all supported engines.
 - ``raw_block`` owns on-device slot allocation, checkpointing, and recovery
-  through ``RawBlockCore``. Slot reclamation is driven by the shared/global
-  L2 eviction controller or explicit ``delete()`` calls.
+  through ``RawBlockCore``. Checkpoint recovery validates a stable
+  ``device_id``: ``nvme:<wwid>`` for NVMe namespaces or
+  ``file:<st_dev>:<st_ino>:<st_size>`` for regular files. Slot reclamation is
+  driven by the shared/global L2 eviction controller or explicit ``delete()``
+  calls.
 - If ``use_odirect`` is enabled, the server's ``--l1-align-bytes`` should be
   at least ``block_align``.
 - ``persist_enabled`` must remain ``true`` for this adapter.

@@ -7,7 +7,11 @@ from __future__ import annotations
 import pytest
 
 # First Party
-from lmcache.v1.storage_backend.raw_block import RawBlockCore, encode_object_key
+from lmcache.v1.storage_backend.raw_block import (
+    RawBlockCore,
+    encode_object_key,
+    resolve_raw_block_device_id,
+)
 from tests.v1.storage_backend.raw_block_test_utils import (
     make_empty_memory_obj,
     make_memory_obj,
@@ -101,6 +105,14 @@ def test_raw_block_core_delete_and_missing_load(tmp_path):
         core.close()
 
 
+def test_raw_block_core_requires_device_id_for_unsupported_checkpoint_path(tmp_path):
+    path = tmp_path / "missing_raw_block.bin"
+    config = make_raw_block_core_config(path)
+
+    with pytest.raises(ValueError, match="requires a stable device_id"):
+        RawBlockCore(config, key_namespace="object")
+
+
 def test_raw_block_core_recovers_checkpoint_from_temp_file(tmp_path):
     path = make_raw_block_file(tmp_path)
     config = make_raw_block_core_config(path)
@@ -125,6 +137,41 @@ def test_raw_block_core_recovers_checkpoint_from_temp_file(tmp_path):
         recovered.close()
 
 
+def test_raw_block_device_id_resolves_nvme_namespace_paths(monkeypatch):
+    observed_paths: list[str] = []
+
+    def fake_read_sysfs_text(path: str) -> str:
+        observed_paths.append(path)
+        return "nvme.11111111-2222-3333-4444-555555555555"
+
+    monkeypatch.setattr(
+        "lmcache.v1.storage_backend.raw_block.core._read_sysfs_text",
+        fake_read_sysfs_text,
+    )
+
+    assert (
+        resolve_raw_block_device_id("/dev/nvme0n1")
+        == "nvme:nvme.11111111-2222-3333-4444-555555555555"
+    )
+    assert observed_paths[-1] == "/sys/block/nvme0n1/wwid"
+
+    assert (
+        resolve_raw_block_device_id("/dev/ng0n1")
+        == "nvme:nvme.11111111-2222-3333-4444-555555555555"
+    )
+    assert observed_paths[-1] == "/sys/block/nvme0n1/wwid"
+
+
+def test_raw_block_device_id_resolves_regular_file_identity(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    st = path.stat()
+
+    assert (
+        resolve_raw_block_device_id(str(path))
+        == f"file:{st.st_dev}:{st.st_ino}:{st.st_size}"
+    )
+
+
 def test_raw_block_core_rebuilds_missing_free_slots_from_checkpoint(tmp_path):
     path = make_raw_block_file(tmp_path)
     config = make_raw_block_core_config(path)
@@ -144,7 +191,7 @@ def test_raw_block_core_rebuilds_missing_free_slots_from_checkpoint(tmp_path):
         applied = core.apply_loaded_state(
             {
                 "version": 1,
-                "device_path": str(path),
+                "device_id": core.device_id,
                 "capacity_bytes": core.capacity_bytes,
                 "block_align": core.block_align,
                 "header_bytes": core.header_bytes,
@@ -185,5 +232,84 @@ def test_raw_block_core_rebuilds_missing_free_slots_from_checkpoint(tmp_path):
             core.data_base_offset() + core.slot_bytes
         )
         assert core.report_status()["next_slot"] == 2
+    finally:
+        core.close()
+
+
+def test_raw_block_core_accepts_checkpoint_with_matching_device_id(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    config = make_raw_block_core_config(path)
+    core = RawBlockCore(config, key_namespace="object")
+
+    try:
+        core.device_id = "nvme:nvme.11111111-2222-3333-4444-555555555555"
+        applied = core.apply_loaded_state(
+            {
+                "version": 1,
+                "device_path": "/dev/ng0n1",
+                "device_id": "nvme:nvme.11111111-2222-3333-4444-555555555555",
+                "slot_bytes": core.slot_bytes,
+                "meta_total_bytes": core.meta_total_bytes,
+                "meta_magic": core.meta_magic_text,
+                "meta_version": core.meta_version,
+                "next_slot": 0,
+                "free_slots": [],
+                "entries": {},
+            }
+        )
+
+        assert applied is True
+    finally:
+        core.close()
+
+
+def test_raw_block_core_rejects_checkpoint_missing_device_id(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    config = make_raw_block_core_config(path)
+    core = RawBlockCore(config, key_namespace="object")
+
+    try:
+        applied = core.apply_loaded_state(
+            {
+                "version": 1,
+                "device_path": "/dev/ng0n1",
+                "slot_bytes": core.slot_bytes,
+                "meta_total_bytes": core.meta_total_bytes,
+                "meta_magic": core.meta_magic_text,
+                "meta_version": core.meta_version,
+                "next_slot": 0,
+                "free_slots": [],
+                "entries": {},
+            }
+        )
+
+        assert applied is False
+    finally:
+        core.close()
+
+
+def test_raw_block_core_rejects_checkpoint_with_different_device_id(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    config = make_raw_block_core_config(path)
+    core = RawBlockCore(config, key_namespace="object")
+
+    try:
+        core.device_id = "nvme:nvme.11111111-2222-3333-4444-555555555555"
+        applied = core.apply_loaded_state(
+            {
+                "version": 1,
+                "device_path": str(path),
+                "device_id": "nvme:nvme.aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                "slot_bytes": core.slot_bytes,
+                "meta_total_bytes": core.meta_total_bytes,
+                "meta_magic": core.meta_magic_text,
+                "meta_version": core.meta_version,
+                "next_slot": 0,
+                "free_slots": [],
+                "entries": {},
+            }
+        )
+
+        assert applied is False
     finally:
         core.close()

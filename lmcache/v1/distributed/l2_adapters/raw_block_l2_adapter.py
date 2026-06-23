@@ -255,7 +255,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             "- meta_enable_periodic (bool): enable periodic checkpointing "
             "(default true)\n"
             "- load_checkpoint_on_init (bool): load existing metadata checkpoint "
-            "on startup (default true)\n"
+            "on startup (default true; requires stable device_id)\n"
             "- meta_verify_on_load (bool): validate slot headers on recovery "
             "(default true)\n"
             "- enable_zero_copy (bool): use aligned direct buffers when possible "

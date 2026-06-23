@@ -117,6 +117,55 @@ def _resolve_sysfs_queue_dir(device_path: str) -> Optional[str]:
     return None
 
 
+def _resolve_nvme_block_name(device_path: str) -> Optional[str]:
+    """Resolve the NVMe block namespace name for block or generic char paths."""
+    base_name = os.path.basename(os.path.realpath(device_path))
+    match = re.fullmatch(r"nvme\d+n\d+", base_name)
+    if match:
+        return base_name
+    match = re.fullmatch(r"ng(\d+)n(\d+)", base_name)
+    if match:
+        ctrl, nsid = match.groups()
+        return f"nvme{ctrl}n{nsid}"
+    return None
+
+
+def _read_sysfs_text(path: str) -> Optional[str]:
+    """Read a sysfs text value and return None on failure or empty content."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            value = f.read().strip()
+    except Exception:
+        return None
+    return value or None
+
+
+def resolve_raw_block_device_id(device_path: str) -> Optional[str]:
+    """Resolve a stable identity for a raw-block backing path.
+
+    Args:
+        device_path: NVMe block path, NVMe generic namespace character path,
+            or regular file path used for tests.
+
+    Returns:
+        ``nvme:<wwid>`` for NVMe namespaces with a sysfs WWID,
+        ``file:<st_dev>:<st_ino>:<st_size>`` for regular files, or None when
+        no supported stable identity can be resolved.
+    """
+    block_name = _resolve_nvme_block_name(device_path)
+    if block_name is not None:
+        wwid = _read_sysfs_text(f"/sys/block/{block_name}/wwid")
+        return f"nvme:{wwid}" if wwid else None
+
+    try:
+        st = os.stat(os.path.realpath(device_path))
+    except OSError:
+        return None
+    if stat.S_ISREG(st.st_mode):
+        return f"file:{st.st_dev}:{st.st_ino}:{st.st_size}"
+    return None
+
+
 def _read_sysfs_int(path: str) -> Optional[int]:
     """Read an integer value from sysfs and return None on failure."""
     try:
@@ -222,6 +271,7 @@ class RawBlockCore:
         self.io_engine = normalize_raw_block_io_engine(config.io_engine)
         self.iouring_queue_depth = int(config.iouring_queue_depth)
         self.use_uring_cmd = bool(config.use_uring_cmd)
+        self.device_id = resolve_raw_block_device_id(self.device_path)
         if self.use_uring_cmd and self.use_odirect:
             logger.warning(
                 "RawBlockCore: use_odirect is ignored for NVMe namespace "
@@ -253,6 +303,13 @@ class RawBlockCore:
         validate_raw_block_io_options(
             iouring_queue_depth=self.iouring_queue_depth,
         )
+        if not self.device_id and (
+            self.load_checkpoint_on_init or self.meta_enable_periodic
+        ):
+            raise ValueError(
+                "RawBlockCore metadata checkpointing requires a stable "
+                "device_id from NVMe WWID or regular-file identity"
+            )
         if self.use_uring_cmd and self.io_engine != "io_uring":
             raise ValueError("use_uring_cmd requires io_uring as io_engine")
         if self.use_uring_cmd:
@@ -911,6 +968,7 @@ class RawBlockCore:
                 "type": "RawBlockCore",
                 "key_namespace": self.key_namespace,
                 "device_path": self.device_path,
+                "device_id": self.device_id,
                 "block_align": self.block_align,
                 "header_bytes": self.header_bytes,
                 "slot_bytes": self.slot_bytes,
@@ -1571,7 +1629,7 @@ class RawBlockCore:
             dirty_total = self._meta_dirty_total
             snapshot = {
                 "version": 1,
-                "device_path": self.device_path,
+                "device_id": self.device_id,
                 "capacity_bytes": self.capacity_bytes,
                 "block_align": self.block_align,
                 "header_bytes": self.header_bytes,
@@ -1678,6 +1736,9 @@ class RawBlockCore:
         if not force and not idle_ok:
             return False
 
+        if not self.device_id:
+            raise RuntimeError("RawBlockCore metadata checkpoint requires device_id")
+
         snapshot, dirty_total_snapshot = self._snapshot_state()
         payload = json.dumps(snapshot, separators=(",", ":"), ensure_ascii=True).encode(
             "utf-8"
@@ -1702,9 +1763,12 @@ class RawBlockCore:
             return False
         if int(data.get("version", 0)) != 1:
             return False
-        checkpoint_device_path = data.get("device_path")
-        if checkpoint_device_path and checkpoint_device_path != self.device_path:
-            logger.warning("Device metadata device_path mismatch; ignoring metadata")
+        checkpoint_device_id = data.get("device_id")
+        if not checkpoint_device_id:
+            logger.warning("Device metadata missing device_id; ignoring metadata")
+            return False
+        if not self.device_id or str(checkpoint_device_id) != self.device_id:
+            logger.warning("Device metadata device_id mismatch; ignoring metadata")
             return False
         if int(data.get("slot_bytes", self.slot_bytes)) != self.slot_bytes:
             logger.warning("Device metadata slot_bytes mismatch; ignoring metadata")
