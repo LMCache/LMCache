@@ -81,173 +81,178 @@ void free_hugepage_pinned_ptr(uintptr_t ptr, size_t size) {
     throw std::runtime_error(std::string("munmap failed: ") + strerror(errno));
   }
 
-bool c_memcpy(void* dst_ptr, const void* src_ptr, size_t length) {
-  if (dst_ptr == nullptr || src_ptr == nullptr) {
-    return false;
-  }
+  bool c_memcpy(void* dst_ptr, const void* src_ptr, size_t length) {
+    if (dst_ptr == nullptr || src_ptr == nullptr) {
+      return false;
+    }
 
-  if (length == 0) {
+    if (length == 0) {
+      return true;
+    }
+
+    std::memcpy(dst_ptr, src_ptr, length);
     return true;
   }
 
-  std::memcpy(dst_ptr, src_ptr, length);
-  return true;
-}
-
-void batched_memcpy(const std::vector<uintptr_t>& src_ptrs,
-                    const std::vector<uintptr_t>& dst_ptrs,
-                    const std::vector<size_t>& sizes) {
-  if (src_ptrs.size() != dst_ptrs.size() || src_ptrs.size() != sizes.size()) {
-    throw std::invalid_argument(
-        "batched_memcpy expects equally sized src_ptrs, dst_ptrs, and sizes");
-  }
-
-  for (size_t i = 0; i < src_ptrs.size(); ++i) {
-    if (sizes[i] == 0) {
-      continue;
+  void batched_memcpy(const std::vector<uintptr_t>& src_ptrs,
+                      const std::vector<uintptr_t>& dst_ptrs,
+                      const std::vector<size_t>& sizes) {
+    if (src_ptrs.size() != dst_ptrs.size() || src_ptrs.size() != sizes.size()) {
+      throw std::invalid_argument(
+          "batched_memcpy expects equally sized src_ptrs, dst_ptrs, and sizes");
     }
-    std::memmove(reinterpret_cast<void*>(dst_ptrs[i]),
-                 reinterpret_cast<const void*>(src_ptrs[i]), sizes[i]);
-  }
-}
 
-static void first_touch(void* p, size_t size, bool hugepages) {
-  const size_t ps =
-      hugepages ? HUGEPAGE_SIZE : static_cast<size_t>(sysconf(_SC_PAGESIZE));
-  for (size_t off = 0; off < size; off += ps) {
-    volatile char* c = static_cast<volatile char*>(p) + off;
-    *c = 0;
-  }
-}
-
-static inline int mbind_sys(void* addr, unsigned long len, int mode,
-                            const unsigned long* nodemask,
-                            unsigned long maxnode, unsigned int flags) {
-  long rc = syscall(SYS_mbind, addr, len, mode, nodemask, maxnode, flags);
-  return (rc == -1) ? -errno : 0;
-}
-
-static uintptr_t _alloc_numa_impl(size_t size, int node, bool hugepages) {
-  if (hugepages) {
-    assert(size % HUGEPAGE_SIZE == 0);
+    for (size_t i = 0; i < src_ptrs.size(); ++i) {
+      if (sizes[i] == 0) {
+        continue;
+      }
+      std::memmove(reinterpret_cast<void*>(dst_ptrs[i]),
+                   reinterpret_cast<const void*>(src_ptrs[i]), sizes[i]);
+    }
   }
 
-  void* ptr = _mmap_anon(size, hugepages);
-
-  // Maximum of 64 numa nodes
-  unsigned long mask = 1UL << node;
-  long maxnode = 8 * sizeof(mask);
-  if (mbind_sys(ptr, size, MPOL_BIND, &mask, maxnode,
-                MPOL_MF_MOVE | MPOL_MF_STRICT) != 0) {
-    int err = errno;
-    munmap(ptr, size);
-    throw std::runtime_error(std::string("mbind failed: ") + strerror(err));
+  static void first_touch(void* p, size_t size, bool hugepages) {
+    const size_t ps =
+        hugepages ? HUGEPAGE_SIZE : static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    for (size_t off = 0; off < size; off += ps) {
+      volatile char* c = static_cast<volatile char*>(p) + off;
+      *c = 0;
+    }
   }
 
-  first_touch(ptr, size, hugepages);
-
-  return reinterpret_cast<uintptr_t>(ptr);
-}
-
-uintptr_t alloc_numa_ptr(size_t size, int node) {
-  return _alloc_numa_impl(size, node, false);
-}
-
-void free_numa_ptr(uintptr_t ptr, size_t size) {
-  void* p = reinterpret_cast<void*>(ptr);
-  if (munmap(p, size) != 0) {
-    throw std::runtime_error(std::string("munmap failed: ") + strerror(errno));
-  }
-}
-
-static uintptr_t _alloc_pinned_numa_impl(size_t size, int node,
-                                         bool hugepages) {
-  void* ptr = reinterpret_cast<void*>(_alloc_numa_impl(size, node, hugepages));
-
-  cudaError_t st = cudaHostRegister(ptr, size, 0);
-  if (st != cudaSuccess) {
-    munmap(ptr, size);
-    throw std::runtime_error(std::string("cudaHostRegister failed: ") +
-                             cudaGetErrorString(st));
+  static inline int mbind_sys(void* addr, unsigned long len, int mode,
+                              const unsigned long* nodemask,
+                              unsigned long maxnode, unsigned int flags) {
+    long rc = syscall(SYS_mbind, addr, len, mode, nodemask, maxnode, flags);
+    return (rc == -1) ? -errno : 0;
   }
 
-  return reinterpret_cast<uintptr_t>(ptr);
-}
+  static uintptr_t _alloc_numa_impl(size_t size, int node, bool hugepages) {
+    if (hugepages) {
+      assert(size % HUGEPAGE_SIZE == 0);
+    }
 
-uintptr_t alloc_pinned_numa_ptr(size_t size, int node) {
-  return _alloc_pinned_numa_impl(size, node, false);
-}
+    void* ptr = _mmap_anon(size, hugepages);
 
-uintptr_t alloc_hugepage_pinned_numa_ptr(size_t size, int node) {
-  size = _align_hugepage(size);
-  return _alloc_pinned_numa_impl(size, node, true);
-}
+    // Maximum of 64 numa nodes
+    unsigned long mask = 1UL << node;
+    long maxnode = 8 * sizeof(mask);
+    if (mbind_sys(ptr, size, MPOL_BIND, &mask, maxnode,
+                  MPOL_MF_MOVE | MPOL_MF_STRICT) != 0) {
+      int err = errno;
+      munmap(ptr, size);
+      throw std::runtime_error(std::string("mbind failed: ") + strerror(err));
+    }
 
-void free_pinned_numa_ptr(uintptr_t ptr, size_t size) {
-  void* p = reinterpret_cast<void*>(ptr);
-  // Unpin first, then unmap.
-  cudaError_t st = cudaHostUnregister(p);
-  if (st != cudaSuccess) {
-    munmap(p, size);
-    throw std::runtime_error(std::string("cudaHostUnregister failed: ") +
-                             cudaGetErrorString(st));
+    first_touch(ptr, size, hugepages);
+
+    return reinterpret_cast<uintptr_t>(ptr);
   }
-  if (munmap(p, size) != 0) {
-    throw std::runtime_error(std::string("munmap failed: ") + strerror(errno));
+
+  uintptr_t alloc_numa_ptr(size_t size, int node) {
+    return _alloc_numa_impl(size, node, false);
   }
-}
 
-void free_hugepage_pinned_numa_ptr(uintptr_t ptr, size_t size) {
-  size = _align_hugepage(size);
-  free_pinned_numa_ptr(ptr, size);
-}
+  void free_numa_ptr(uintptr_t ptr, size_t size) {
+    void* p = reinterpret_cast<void*>(ptr);
+    if (munmap(p, size) != 0) {
+      throw std::runtime_error(std::string("munmap failed: ") +
+                               strerror(errno));
+    }
+  }
 
-uintptr_t alloc_shm_pinned_ptr(size_t size, const std::string& shm_name) {
-  int fd = shm_open(shm_name.c_str(), O_CREAT | O_RDWR, 0600);
-  if (fd < 0)
-    throw std::runtime_error(std::string("shm_open failed: ") +
-                             strerror(errno));
+  static uintptr_t _alloc_pinned_numa_impl(size_t size, int node,
+                                           bool hugepages) {
+    void* ptr =
+        reinterpret_cast<void*>(_alloc_numa_impl(size, node, hugepages));
 
-  if (ftruncate(fd, size) != 0) {
-    int err = errno;
+    cudaError_t st = cudaHostRegister(ptr, size, 0);
+    if (st != cudaSuccess) {
+      munmap(ptr, size);
+      throw std::runtime_error(std::string("cudaHostRegister failed: ") +
+                               cudaGetErrorString(st));
+    }
+
+    return reinterpret_cast<uintptr_t>(ptr);
+  }
+
+  uintptr_t alloc_pinned_numa_ptr(size_t size, int node) {
+    return _alloc_pinned_numa_impl(size, node, false);
+  }
+
+  uintptr_t alloc_hugepage_pinned_numa_ptr(size_t size, int node) {
+    size = _align_hugepage(size);
+    return _alloc_pinned_numa_impl(size, node, true);
+  }
+
+  void free_pinned_numa_ptr(uintptr_t ptr, size_t size) {
+    void* p = reinterpret_cast<void*>(ptr);
+    // Unpin first, then unmap.
+    cudaError_t st = cudaHostUnregister(p);
+    if (st != cudaSuccess) {
+      munmap(p, size);
+      throw std::runtime_error(std::string("cudaHostUnregister failed: ") +
+                               cudaGetErrorString(st));
+    }
+    if (munmap(p, size) != 0) {
+      throw std::runtime_error(std::string("munmap failed: ") +
+                               strerror(errno));
+    }
+  }
+
+  void free_hugepage_pinned_numa_ptr(uintptr_t ptr, size_t size) {
+    size = _align_hugepage(size);
+    free_pinned_numa_ptr(ptr, size);
+  }
+
+  uintptr_t alloc_shm_pinned_ptr(size_t size, const std::string& shm_name) {
+    int fd = shm_open(shm_name.c_str(), O_CREAT | O_RDWR, 0600);
+    if (fd < 0)
+      throw std::runtime_error(std::string("shm_open failed: ") +
+                               strerror(errno));
+
+    if (ftruncate(fd, size) != 0) {
+      int err = errno;
+      close(fd);
+      shm_unlink(shm_name.c_str());
+      throw std::runtime_error(std::string("ftruncate failed: ") +
+                               strerror(err));
+    }
+
+    void* ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     close(fd);
-    shm_unlink(shm_name.c_str());
-    throw std::runtime_error(std::string("ftruncate failed: ") + strerror(err));
+    if (ptr == MAP_FAILED) {
+      shm_unlink(shm_name.c_str());
+      throw std::runtime_error(std::string("mmap failed: ") + strerror(errno));
+    }
+
+    first_touch(ptr, size, false);
+
+    cudaError_t st = cudaHostRegister(ptr, size, 0);
+    if (st != cudaSuccess) {
+      munmap(ptr, size);
+      shm_unlink(shm_name.c_str());
+      throw std::runtime_error(std::string("cudaHostRegister failed: ") +
+                               cudaGetErrorString(st));
+    }
+
+    return reinterpret_cast<uintptr_t>(ptr);
   }
 
-  void* ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-  close(fd);
-  if (ptr == MAP_FAILED) {
+  void free_shm_pinned_ptr(uintptr_t ptr, size_t size,
+                           const std::string& shm_name) {
+    void* p = reinterpret_cast<void*>(ptr);
+    cudaError_t st = cudaHostUnregister(p);
+    if (st != cudaSuccess) {
+      munmap(p, size);
+      shm_unlink(shm_name.c_str());
+      throw std::runtime_error(std::string("cudaHostUnregister failed: ") +
+                               cudaGetErrorString(st));
+    }
+    if (munmap(p, size) != 0) {
+      shm_unlink(shm_name.c_str());
+      throw std::runtime_error(std::string("munmap failed: ") +
+                               strerror(errno));
+    }
     shm_unlink(shm_name.c_str());
-    throw std::runtime_error(std::string("mmap failed: ") + strerror(errno));
   }
-
-  first_touch(ptr, size, false);
-
-  cudaError_t st = cudaHostRegister(ptr, size, 0);
-  if (st != cudaSuccess) {
-    munmap(ptr, size);
-    shm_unlink(shm_name.c_str());
-    throw std::runtime_error(std::string("cudaHostRegister failed: ") +
-                             cudaGetErrorString(st));
-  }
-
-  return reinterpret_cast<uintptr_t>(ptr);
-}
-
-void free_shm_pinned_ptr(uintptr_t ptr, size_t size,
-                         const std::string& shm_name) {
-  void* p = reinterpret_cast<void*>(ptr);
-  cudaError_t st = cudaHostUnregister(p);
-  if (st != cudaSuccess) {
-    munmap(p, size);
-    shm_unlink(shm_name.c_str());
-    throw std::runtime_error(std::string("cudaHostUnregister failed: ") +
-                             cudaGetErrorString(st));
-  }
-  if (munmap(p, size) != 0) {
-    shm_unlink(shm_name.c_str());
-    throw std::runtime_error(std::string("munmap failed: ") + strerror(errno));
-  }
-  shm_unlink(shm_name.c_str());
-}

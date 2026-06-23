@@ -15,13 +15,13 @@ import os
 import threading
 
 # First Party
+from lmcache.c_ops import memcpy
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.protocol import RemoteMetadata
 from lmcache.v1.storage_backend.connector.fs_connector import FSConnector
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
-from lmcache.c_ops import memcpy
 
 HF3FS_AVAILABLE = True
 try:
@@ -473,7 +473,7 @@ class Hf3fsClient:
         total_bytes_read = done.result
 
         # read from shm
-        memcpy(buffer,  self.shm_read.buf,  total_bytes_read)
+        memcpy(buffer, self.shm_read.buf, total_bytes_read)
         return total_bytes_read
 
     def read(self, fd: int, buffer: memoryview, length: int, start: int = 0) -> int:
@@ -504,7 +504,7 @@ class Hf3fsClient:
         total_bytes_written = 0
 
         # write shm
-        memcpy(self.shm_write.buf, buffer,length)
+        memcpy(self.shm_write.buf, buffer, length)
 
         # prepare
         self.ior_write.prepare(self.iov_write[:length], False, fd, file_offset)
