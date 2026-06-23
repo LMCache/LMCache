@@ -209,17 +209,6 @@ class CBUnifiedLookupResult:
     segmented_prefix_segments: list[CBMatchResult] = field(default_factory=list)
 
 
-# ------------------------------------------------------------------
-# Backward-compatibility re-exports: the canonical home for
-# ``CudaIPCWrapper`` / ``RawCudaIPCWrapper`` is now
-# ``lmcache.v1.platform.cuda.ipc_wrapper``.
-# ------------------------------------------------------------------
-# First Party
-from lmcache.v1.platform.cuda.ipc_wrapper import (  # noqa: E402,F401
-    CudaIPCWrapper,
-    RawCudaIPCWrapper,
-)
-
 _CUSTOMERIZED_SERIALIZERS = {
     DeviceIPCWrapper: CustomizedSerdeConfig(
         serializer=DeviceIPCWrapper.Serialize,
