@@ -94,6 +94,3 @@ Caveats
 - **LMCache chunk size must be a multiple of the block size.** The default
   chunk size (256) already satisfies 128, so no extra flag is needed; if you
   pass ``--chunk-size`` to the server, keep it a multiple of 128.
-- **Overriding the server host.** The default ``lmcache.mp.host`` is
-  ``tcp://localhost``. If you set it explicitly, keep the ``tcp://`` scheme — a
-  bare ``host:port`` fails with a ZMQ ``Invalid argument`` error.
