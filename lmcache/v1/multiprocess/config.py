@@ -45,10 +45,10 @@ class MPServerConfig:
     ('default' for standard prefix caching, 'blend' when cacheblend is enabled).
     """
 
-    separate_object_groups: bool = False
-    """When True, split kernel groups into one object group per sliding-window
-    size at KV-cache registration (hybrid models). When False (default), all
-    kernel groups share a single full-attention object group."""
+    separate_object_groups: bool = True
+    """When True (default), split kernel groups into one object group per
+    sliding-window size at KV-cache registration (hybrid models). When False,
+    all kernel groups share a single full-attention object group."""
 
     supported_transfer_mode: str = "auto"
     """Transfer mode: 'lmcache_driven' for server-driven transfer
@@ -263,11 +263,13 @@ def add_mp_server_args(
         "import. Example: --script-allowed-imports numpy pandas",
     )
     mp_group.add_argument(
-        "--separate-object-groups",
-        action="store_true",
-        help="Split kernel groups into one object group per sliding-window size "
-        "at KV-cache registration (for hybrid models). Off by default, keeping a "
-        "single full-attention object group.",
+        "--no-separate-object-groups",
+        dest="separate_object_groups",
+        action="store_false",
+        help="Keep all kernel groups in a single full-attention object group "
+        "instead of splitting them per sliding-window size at KV-cache "
+        "registration. Object-group separation is on by default (for hybrid "
+        "models).",
     )
     return parser
 
