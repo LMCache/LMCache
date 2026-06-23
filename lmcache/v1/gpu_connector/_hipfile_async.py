@@ -34,6 +34,7 @@ bound directly from ``libhipfile.so`` via ctypes here. Requires ROCm >= 7.2.0.
 from typing import Any, Optional
 import ctypes
 import os
+import threading
 
 # Third Party
 import torch
@@ -86,6 +87,10 @@ class _HipFileDescr(ctypes.Structure):
     ]
 
 
+# Guards the one-time dlopen + driver open/close below. Only the init/teardown
+# transitions are serialized; the per-DMA fast path (``_lib()`` once loaded)
+# never touches the lock.
+_init_lock = threading.Lock()
 _lib_handle: Optional[ctypes.CDLL] = None
 
 
@@ -155,34 +160,61 @@ _driver_opened = False
 
 
 def _lib() -> ctypes.CDLL:
-    """dlopen ``libhipfile.so`` once and declare signatures. Idempotent."""
+    """dlopen ``libhipfile.so`` once and declare signatures. Idempotent.
+
+    Thread-safe via double-checked locking: the common case (already loaded)
+    returns without taking ``_init_lock``, so the per-DMA path stays lock-free.
+
+    Returns:
+        The process-global ``libhipfile.so`` handle.
+    """
     global _lib_handle
-    if _lib_handle is None:
-        _lib_handle = ctypes.CDLL(_LIBHIPFILE_SONAME)
-        _declare_signatures(_lib_handle)
+    if _lib_handle is not None:
+        return _lib_handle
+    with _init_lock:
+        if _lib_handle is None:
+            handle = ctypes.CDLL(_LIBHIPFILE_SONAME)
+            _declare_signatures(handle)
+            _lib_handle = handle
     return _lib_handle
 
 
 def _ensure_driver_open() -> None:
-    """Idempotently open the hipFile driver."""
+    """Idempotently open the hipFile driver (thread-safe).
+
+    Raises:
+        RuntimeError: If ``hipFileDriverOpen`` reports a non-success status.
+    """
     global _driver_opened
     if _driver_opened:
         return
+    # ``_lib()`` does its own locking; call it before taking ``_init_lock`` so
+    # the (non-reentrant) lock is never acquired twice on the same thread.
     lib = _lib()
-    _check(lib.hipFileDriverOpen(), "hipFileDriverOpen")
-    _driver_opened = True
+    with _init_lock:
+        if _driver_opened:
+            return
+        _check(lib.hipFileDriverOpen(), "hipFileDriverOpen")
+        _driver_opened = True
 
 
 def close_driver() -> None:
-    """Close the hipFile driver. Optional — useful in tests."""
+    """Close the hipFile driver (thread-safe). Optional — useful in tests.
+
+    Raises:
+        RuntimeError: If ``hipFileDriverClose`` reports a non-success status.
+    """
     global _driver_opened
     if not _driver_opened:
         return
     lib = _lib()
-    try:
-        _check(lib.hipFileDriverClose(), "hipFileDriverClose")
-    finally:
-        _driver_opened = False
+    with _init_lock:
+        if not _driver_opened:
+            return
+        try:
+            _check(lib.hipFileDriverClose(), "hipFileDriverClose")
+        finally:
+            _driver_opened = False
 
 
 def _op_error_string(err_code: int) -> str:
@@ -209,6 +241,16 @@ def register_handle(fd: int) -> int:
     Opens the hipFile driver on first use. The returned handle is the raw
     ``void *`` value (as an int), accepted directly as the first argument of
     ``hipFileReadAsync`` / ``hipFileWriteAsync``.
+
+    Args:
+        fd: An open file descriptor for the slab (opened with ``O_DIRECT`` for
+            the GDS fast path).
+
+    Returns:
+        The registered ``hipFileHandle_t`` as an integer.
+
+    Raises:
+        RuntimeError: If ``hipFileHandleRegister`` reports a non-success status.
     """
     _ensure_driver_open()
     lib = _lib()
@@ -225,7 +267,11 @@ def register_handle(fd: int) -> int:
 
 
 def deregister_handle(handle: int) -> None:
-    """Reverse of :func:`register_handle` (``hipFileHandleDeregister``)."""
+    """Reverse of :func:`register_handle` (``hipFileHandleDeregister``).
+
+    Args:
+        handle: The ``hipFileHandle_t`` (as an int) from :func:`register_handle`.
+    """
     _lib().hipFileHandleDeregister(ctypes.c_void_p(handle))
 
 
@@ -238,6 +284,13 @@ def register_buffer(buf: torch.Tensor) -> None:
     Must be called before any ``read_async`` / ``write_async`` whose
     ``buf_base`` falls inside this tensor's allocation. Implicitly opens the
     hipFile driver on first use.
+
+    Args:
+        buf: A GPU (HIP device) tensor to register for DMA.
+
+    Raises:
+        ValueError: If ``buf`` is not on the GPU.
+        RuntimeError: If ``hipFileBufRegister`` reports a non-success status.
     """
     if not buf.is_cuda:
         raise ValueError("register_buffer: tensor must be on the GPU")
@@ -255,7 +308,14 @@ def register_buffer(buf: torch.Tensor) -> None:
 
 
 def deregister_buffer(buf: torch.Tensor) -> None:
-    """Reverse of :func:`register_buffer`."""
+    """Reverse of :func:`register_buffer`.
+
+    Args:
+        buf: A tensor previously passed to :func:`register_buffer`.
+
+    Raises:
+        RuntimeError: If ``hipFileBufDeregister`` reports a non-success status.
+    """
     _check(
         _lib().hipFileBufDeregister(ctypes.c_void_p(buf.data_ptr())),
         "hipFileBufDeregister",
@@ -274,6 +334,12 @@ def register_stream(raw_stream: int) -> None:
     reads the size/offset pointers at stream-execution time -- so their storage
     must stay alive and unchanged until completion (see ``Submission``) -- but
     promising the values are fixed at submission lets hipFile skip per-op setup.
+
+    Args:
+        raw_stream: The integer ``hipStream_t`` handle to register.
+
+    Raises:
+        RuntimeError: If ``hipFileStreamRegister`` reports a non-success status.
     """
     _ensure_driver_open()
     _check(
@@ -285,7 +351,14 @@ def register_stream(raw_stream: int) -> None:
 
 
 def deregister_stream(raw_stream: int) -> None:
-    """Reverse of :func:`register_stream`."""
+    """Reverse of :func:`register_stream`.
+
+    Args:
+        raw_stream: The ``hipStream_t`` handle passed to :func:`register_stream`.
+
+    Raises:
+        RuntimeError: If ``hipFileStreamDeregister`` reports a non-success status.
+    """
     _check(
         _lib().hipFileStreamDeregister(ctypes.c_void_p(raw_stream)),
         "hipFileStreamDeregister",
@@ -450,5 +523,10 @@ class AsyncHandle:
     def __enter__(self) -> "AsyncHandle":
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(
+        self,
+        exc_type: Optional[type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[Any],
+    ) -> None:
         self.close()
