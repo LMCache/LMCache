@@ -118,7 +118,7 @@ def create_engine_group_infos_from_vllm(
     # First Party
     from lmcache.utils import EngineType
     from lmcache.v1.gpu_connector.utils import (
-        normalize_and_discover_per_group_formats,
+        normalize_and_discover_per_layer_formats,
     )
     from lmcache.v1.kv_layer_groups import (
         EXCLUDED_ENGINE_GROUP,
@@ -144,7 +144,7 @@ def create_engine_group_infos_from_vllm(
     layer_index_groups = [
         [layer_to_idx[name] for name in group.layer_names] for group in vllm_groups
     ]
-    normalized_kv_caches, engine_kv_formats = normalize_and_discover_per_group_formats(
+    normalized_kv_caches, engine_kv_formats = normalize_and_discover_per_layer_formats(
         per_layer_discoverable_kv_caches,
         layer_index_groups,
         EngineType.VLLM,
