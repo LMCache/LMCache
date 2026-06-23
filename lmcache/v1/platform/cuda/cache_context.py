@@ -366,7 +366,7 @@ class GPUCacheContext(BaseCacheContext):
         # Group-0 representative, for diagnostics/logging only (e.g.
         # get_attention_backend). Everything that varies per group -- format,
         # dtype, heads, block_size -- is read per KernelGroupInfo; num_blocks is
-        # asserted uniform across groups by the manager.
+        # the one shared scalar (a single block-id space across groups).
         engine_kv_format = engine_kv_formats[0]
         self.device_ = get_device(kv_caches_norm)
         num_layers_val = len(engine_kv_formats)

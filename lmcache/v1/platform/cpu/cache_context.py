@@ -103,8 +103,8 @@ class CPUCacheContext(BaseCacheContext):
         kv_caches_list: list[torch.Tensor] = list(kv_caches_normalized)
         # Group-0 representative, for diagnostics/logging only. Everything that
         # varies per group -- format, dtype, heads, block_size -- is read per
-        # KernelGroupInfo; num_blocks is asserted uniform across groups by the
-        # manager.
+        # KernelGroupInfo; num_blocks is the one shared scalar (a single block-id
+        # space across groups).
         engine_kv_format = engine_kv_formats[0]
         num_layers_val = len(engine_kv_formats)
         num_blocks_val = get_num_blocks(kv_caches_list, engine_kv_format)
