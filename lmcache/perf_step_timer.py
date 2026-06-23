@@ -169,14 +169,14 @@ class PerfStepTimer:
             prev_step, prev_t = entries[i - 1]
             curr_step, curr_t = entries[i]
             delta_ms = (curr_t - prev_t) * 1000
-            parts.append(f"{prev_step} -> {curr_step}={delta_ms:.3f}ms")
+            parts.append("%s -> %s=%.3fms" % (prev_step, curr_step, delta_ms))
 
         total_ms = (entries[-1][1] - entries[0][1]) * 1000
-        parts.append(f"total={total_ms:.3f}ms")
+        parts.append("total=%.3fms" % total_ms)
 
         logger.debug(
             "[PERF-STEP-TIMING] %sname=%s %s",
-            f"prefix={self._prefix} " if self._prefix else "",
+            "prefix=%s " % self._prefix if self._prefix else "",
             name,
             " ".join(parts),
         )
