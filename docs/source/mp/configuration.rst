@@ -120,6 +120,14 @@ Source: ``lmcache/v1/multiprocess/config.py``
        L1-resident and only the dropped gap is recomputed, instead of
        truncating the prefix at the gap. No effect for other engines. See
        :doc:`/mp/l2_storage/fault_inject` for a way to exercise it.
+   * - ``--separate-object-groups`` / ``--no-separate-object-groups``
+     - ``True``
+     - Split a hybrid model's kernel groups into one object group per
+       cross-chunk attention window (full attention, each sliding-window
+       size, mamba/GDN) at KV-cache registration. On by default; pass
+       ``--no-separate-object-groups`` to keep all layers in a single
+       full-attention object group. Transparent to correctness; a non-hybrid
+       model always resolves to one object group. See :doc:`/mp/hybrid_models`.
 
 Lookup Hash Logging
 -------------------

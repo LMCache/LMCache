@@ -93,6 +93,31 @@ detects the model's KV cache groups automatically at registration time.
    back to a single unified group). You do not need
    ``--no-disable-hybrid-kv-cache-manager`` or any related flag.
 
+Object-group separation
+-----------------------
+
+At KV-cache registration LMCache buckets a hybrid model's layers into **object
+groups** — the unit it stores and retrieves as one object. By default
+(``--separate-object-groups``, on) each distinct cross-chunk attention window
+becomes its own object group: full-attention layers form one group, and each
+sliding-window size (mamba / GDN included) forms another. Pass
+``--no-separate-object-groups`` to keep every layer in a single full-attention
+object group instead (the previous behavior).
+
+.. code-block:: bash
+
+   # default: one object group per attention window
+   lmcache server --chunk-size 256 --l1-size-gb 100
+
+   # opt out: a single full-attention object group for all layers
+   lmcache server --chunk-size 256 --l1-size-gb 100 --no-separate-object-groups
+
+The flag is transparent to correctness — prefix caching and KV reuse behave the
+same either way, and a non-hybrid model (a single attention behavior) always
+resolves to one object group regardless of the setting. Separation organizes
+storage by attention window so that each group's cross-chunk window is tracked
+independently.
+
 Mamba / Linear-Attention Hybrids
 --------------------------------
 
