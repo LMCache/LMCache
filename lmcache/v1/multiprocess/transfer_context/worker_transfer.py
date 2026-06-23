@@ -518,7 +518,6 @@ class EngineDrivenTransferContext(TransferContext):
 
         torch_dev.synchronize()
         if len(self._engine_group_infos) > 1:
-            # ── Multi-group path ─────────────────────────────────────────
             if len(block_ids) != len(self._engine_group_infos):
                 raise ValueError(
                     f"block_ids has {len(block_ids)} groups, "
