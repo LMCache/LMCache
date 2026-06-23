@@ -313,10 +313,10 @@ class KVLayerGroupsManager:
 
         Args:
             kv_caches: KV cache structure accepted by
-                :func:`normalize_and_discover_per_group_formats`.
+                :func:`normalize_and_discover_per_layer_formats`.
             engine_kv_formats: One Engine KV format per layer (its length is the
                 layer count), from
-                :func:`normalize_and_discover_per_group_formats`. A model that
+                :func:`normalize_and_discover_per_layer_formats`. A model that
                 mixes formats across engine groups (e.g. MiniMax-M3) supplies the
                 differing per-layer formats so each group is shaped with its own;
                 homogeneous models repeat one shared format.

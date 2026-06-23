@@ -33,7 +33,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_blocks,
     get_num_layers,
     is_mla,
-    normalize_and_discover_per_group_formats,
+    normalize_and_discover_per_layer_formats,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.multiprocess.custom_types import KVCache
@@ -99,7 +99,7 @@ class CPUCacheContext(BaseCacheContext):
         (
             kv_caches_normalized,
             engine_kv_formats,
-        ) = normalize_and_discover_per_group_formats(
+        ) = normalize_and_discover_per_layer_formats(
             unwrapped,
             engine_group_layer_indices(engine_group_infos),
             engine_type,

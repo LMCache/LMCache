@@ -224,7 +224,7 @@ def normalize_kv_and_discover_format(
     return detect_format(kv_caches, serving_engine, layout_hints)
 
 
-def normalize_and_discover_per_group_formats(
+def normalize_and_discover_per_layer_formats(
     kv_caches: "DiscoverableKVCache",
     layer_index_groups: "Sequence[Sequence[int]]",
     serving_engine: EngineType,
@@ -237,7 +237,7 @@ def normalize_and_discover_per_group_formats(
     cache (``kv_size=1``) -- need each group detected on its own tensors;
     detecting the whole list at once would collapse to a single format and
     mis-shape one group. Each engine group is therefore detected independently and
-    the per-group results are scattered back into a per-layer list.
+    the per-group results are assembled into a per-layer list.
 
     With no engine groups, one synthetic group spanning every layer is used, which
     is exactly the old whole-list detection. Normalization
@@ -271,14 +271,11 @@ def normalize_and_discover_per_group_formats(
         )
 
     # Detect each engine group on its own tensors; with no groups, one synthetic
-    # group spans every layer (== whole-list detection). The loop reads the
-    # pristine input and scatters normalized tensors into a private copy by layer
-    # index, so the input is never mutated.
+    # group spans every layer (== whole-list detection). Normalization is
+    # per-tensor, so assembling the per-group results matches detecting the whole
+    # list -- uniform models are unchanged.
     groups = layer_index_groups or [range(len(kv_caches))]
-    normalized_per_layer = list(kv_caches)
-    per_layer_format: list[Optional["lmc_ops.EngineKVFormat"]] = [None] * len(
-        normalized_per_layer
-    )
+    detected: dict[int, tuple[DiscoverableKVCache, "lmc_ops.EngineKVFormat"]] = {}
     for indices in groups:
         group_format, normalized_sub = detect_format(
             [kv_caches[i] for i in indices],
@@ -286,15 +283,20 @@ def normalize_and_discover_per_group_formats(
             layout_hints,
         )
         for sub_idx, layer_idx in enumerate(indices):
-            normalized_per_layer[layer_idx] = normalized_sub[sub_idx]
-            per_layer_format[layer_idx] = group_format
+            detected[layer_idx] = (normalized_sub[sub_idx], group_format)
 
-    # Layers in no group (cross-layer KV sharing) keep their tensor and are skipped
-    # downstream; fill their slot with any detected format so every layer has one.
-    shared = next(fmt for fmt in per_layer_format if fmt is not None)
-    return normalized_per_layer, [
-        fmt if fmt is not None else shared for fmt in per_layer_format
+    # A layer in no group (cross-layer KV sharing) keeps its own tensor and is
+    # skipped downstream; give it any detected format so every layer has one.
+    fallback_format = next(fmt for _, fmt in detected.values())
+    normalized_per_layer = [
+        detected[i][0] if i in detected else kv_caches[i]
+        for i in range(len(kv_caches))
     ]
+    engine_kv_formats = [
+        detected[i][1] if i in detected else fallback_format
+        for i in range(len(kv_caches))
+    ]
+    return normalized_per_layer, engine_kv_formats
 
 
 def get_num_layers(

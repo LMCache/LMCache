@@ -32,7 +32,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_blocks,
     get_num_layers,
     is_mla,
-    normalize_and_discover_per_group_formats,
+    normalize_and_discover_per_layer_formats,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.multiprocess.custom_types import KVCache
@@ -362,7 +362,7 @@ class GPUCacheContext(BaseCacheContext):
         # Detect each engine group's format from the registered tensors so a
         # model mixing formats across groups (e.g. MiniMax-M3) groups and shapes
         # correctly. Homogeneous models yield one shared format for every layer.
-        kv_caches_norm, engine_kv_formats = normalize_and_discover_per_group_formats(
+        kv_caches_norm, engine_kv_formats = normalize_and_discover_per_layer_formats(
             unwrapped,
             engine_group_layer_indices(engine_group_infos),
             engine_type,

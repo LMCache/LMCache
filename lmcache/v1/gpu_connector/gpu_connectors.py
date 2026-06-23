@@ -28,7 +28,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_layers,
     get_page_buffer_size,
     get_tokens_per_layer,
-    normalize_and_discover_per_group_formats,
+    normalize_and_discover_per_layer_formats,
     normalize_kv_and_discover_format,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
@@ -467,7 +467,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         # This legacy in-process connector has no engine group metadata, so all
         # layers form one (non-hybrid) group with a single shared format.
         no_engine_groups: list[list[int]] = []
-        self.kvcaches, engine_kv_formats = normalize_and_discover_per_group_formats(
+        self.kvcaches, engine_kv_formats = normalize_and_discover_per_layer_formats(
             self.kvcaches, no_engine_groups, EngineType.VLLM, self.layout_hints
         )
         self.engine_kv_format = engine_kv_formats[0]
