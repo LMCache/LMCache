@@ -59,7 +59,6 @@ class BaseCacheContext(ABC):
         device: torch.device,
         num_layers: int,
         num_blocks: int,
-        is_mla: bool,
         kv_layer_groups_manager: KVLayerGroupsManager,
         block_ids_buffer: torch.Tensor,
         lmcache_tokens_per_chunk: int,
@@ -69,7 +68,6 @@ class BaseCacheContext(ABC):
         self.device_ = device
         self.num_layers_ = num_layers
         self.num_blocks_ = num_blocks
-        self.is_mla_ = is_mla
         self.kv_layer_groups_manager_ = kv_layer_groups_manager
         self.block_ids_buffer_ = block_ids_buffer
         self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
@@ -170,11 +168,6 @@ class BaseCacheContext(ABC):
     def num_blocks(self) -> int:
         """Returns the number of blocks in the KV cache."""
         return self.num_blocks_
-
-    @property
-    def is_mla(self) -> bool:
-        """Returns whether the model uses MLA."""
-        return self.is_mla_
 
     @property
     def hidden_dim_sizes(self) -> list[int]:

@@ -30,8 +30,6 @@ from lmcache.v1.gpu_connector.utils import (
     get_dtype,
     get_group_data_ptrs,
     get_num_blocks,
-    get_num_layers,
-    is_mla,
     normalize_and_discover_per_layer_formats,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
@@ -365,12 +363,13 @@ class GPUCacheContext(BaseCacheContext):
             engine_type,
             layout_hints,
         )
-        # Representative format for context-wide, format-only queries (identical
-        # to the single detected format for every homogeneous model).
+        # Group-0 representative, for diagnostics/logging only (e.g.
+        # get_attention_backend). Everything that varies per group -- format,
+        # dtype, heads, block_size -- is read per KernelGroupInfo; num_blocks is
+        # asserted uniform across groups by the manager.
         engine_kv_format = engine_kv_formats[0]
         self.device_ = get_device(kv_caches_norm)
-        is_mla_val = is_mla(engine_kv_format)
-        num_layers_val = get_num_layers(kv_caches_norm, engine_kv_format)
+        num_layers_val = len(engine_kv_formats)
         num_blocks_val = get_num_blocks(kv_caches_norm, engine_kv_format)
 
         kv_layer_groups_manager = KVLayerGroupsManager(
@@ -395,7 +394,6 @@ class GPUCacheContext(BaseCacheContext):
             device=self.device_,
             num_layers=num_layers_val,
             num_blocks=num_blocks_val,
-            is_mla=is_mla_val,
             kv_layer_groups_manager=kv_layer_groups_manager,
             block_ids_buffer=block_ids_buffer,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,

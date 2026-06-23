@@ -325,6 +325,7 @@ class KVLayerGroupsManager:
         # lmcache.v1.gpu_connector.__init__ → metadata → kv_layer_groups.
         # First Party
         from lmcache.v1.gpu_connector.utils import (
+            get_num_blocks,
             make_page_buffer_shape_desc,
             resolve_block_stride_and_log_layout,
         )
@@ -363,6 +364,16 @@ class KVLayerGroupsManager:
             # Every layer in a group shares one format in practice (the
             # identity's geometry is format-derived), so the first represents it.
             group_format = engine_kv_formats[indices[0]]
+            # Every engine group must share one block-id space (same NB); a single
+            # num_blocks is stamped onto every group's shape_desc. Fail loud if an
+            # engine ever gives a group a different block count.
+            group_num_blocks = get_num_blocks([kv_caches[indices[0]]], group_format)
+            if group_num_blocks != num_blocks:
+                raise ValueError(
+                    f"kernel group {group_idx} has {group_num_blocks} paged "
+                    f"blocks but the context reported {num_blocks}; LMCache "
+                    "requires one shared block-id space across engine groups"
+                )
             block_stride_elems = resolve_block_stride_and_log_layout(
                 kv_caches,
                 group_format,
