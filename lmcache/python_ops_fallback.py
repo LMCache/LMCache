@@ -20,7 +20,8 @@ import numpy as np
 import torch
 
 # First Party
-from lmcache import torch_dev
+from lmcache import torch_dev, torch_device_type
+from lmcache.logging import init_logger
 
 # Store the tensor objects in memory so that they can be accessed
 # outside the scope of this file
@@ -377,6 +378,14 @@ try:
 except (AttributeError, ValueError, OSError):
     _PAGE_SIZE = 4096
 
+logger = init_logger(__name__)
+
+# Cached one-shot decision: pin host buffers only when an accelerator is
+# present. Probed lazily on first allocation; if a pinned allocation ever
+# fails at runtime we flip this to False permanently and fall back to
+# pageable memory for all subsequent allocations.
+_use_pinned: Optional[bool] = None
+
 
 def _alloc_page_aligned_pinned_view(size: int) -> Tuple[torch.Tensor, int]:
     """
@@ -388,7 +397,26 @@ def _alloc_page_aligned_pinned_view(size: int) -> Tuple[torch.Tensor, int]:
     backing tensor, so keeping the slice alive keeps the underlying
     memory alive (no need to track the backing tensor separately).
     """
-    backing = torch.empty(size + _PAGE_SIZE, dtype=torch.uint8, pin_memory=False)
+    # Pin the host buffer when an accelerator is present (probed once).
+    # StubCPUDevice.is_available returns False on CPU-only hosts.
+    global _use_pinned
+    if _use_pinned is None:
+        _use_pinned = torch_dev.is_available()
+    try:
+        backing = torch.empty(
+            size + _PAGE_SIZE, dtype=torch.uint8, pin_memory=_use_pinned
+        )
+    except RuntimeError:
+        if not _use_pinned:
+            # Pure host allocation failed (e.g. OOM); nothing to fall back to.
+            raise
+        logger.warning(
+            "Pinned host allocation failed on device '%s'; falling back to "
+            "unpinned allocation from now on.",
+            torch_device_type,
+        )
+        _use_pinned = False
+        backing = torch.empty(size + _PAGE_SIZE, dtype=torch.uint8, pin_memory=False)
     # First-touch initialization on the entire backing region
     backing.fill_(0)
     base = backing.data_ptr()
