@@ -581,17 +581,19 @@ class EngineDrivenTransferContext(TransferContext):
                 for g_idx, gc in enumerate(group_chunks)
                 if gc
             ]
-            # ``map`` dispatches work across the pool, returns results in
-            # submission order.  Each future here is the MQ future, ready
-            # to be ``.result()``-joined at the end.
-            # ``starmap`` unpacks each (g_idx, chunks) tuple into positional
-            # args.  ``map`` would pass the tuple as a single arg, which
-            # would not match the function signature.  Each future here
-            # is the MQ future, ready to be ``.result()``-joined at the end.
-            for g_idx, fut in self._serialize_pool.starmap(
-                _serialize_and_submit, active,
-            ):
-                mq_futures[g_idx] = fut
+            # ``submit`` is portable across Python versions where
+            # ``starmap`` may not exist.  Each worker thread calls
+            # ``_serialize_and_submit(g_idx, chunks)`` and returns
+            # ``(g_idx, mq_future)``.  We dispatch all 4 groups in
+            # parallel, then collect MQ futures for the final join.
+            serialized_futs: dict[int, "Future"] = {}
+            for g_idx, chunks in active:
+                serialized_futs[g_idx] = self._serialize_pool.submit(
+                    _serialize_and_submit, g_idx, chunks,
+                )
+            for g_idx, fut in serialized_futs.items():
+                _, mq_fut = fut.result()
+                mq_futures[g_idx] = mq_fut
             # Now collect all responses -- any per-group failure marks the
             # overall store as failed, but the rest still complete.
             for fut in mq_futures:
