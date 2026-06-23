@@ -122,7 +122,9 @@ def isolated_lru_setup():
         trigger_watermark=0.8,
         eviction_ratio=0.5,
     )
-    state = L2AdapterEvictionState(adapter=adapter, eviction_config=eviction_config)
+    state = L2AdapterEvictionState(
+        adapter_id=0, adapter=adapter, eviction_config=eviction_config
+    )
     # L2AdapterEvictionState creates its own policy internally; swap in
     # the one we made to observe it from the test side. The listener
     # it attached is stale, but the policy reference the controller

@@ -15,8 +15,12 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.gpu_connector.gds_context import (
+    get_gds_context,
+    initialize_gds_context,
+)
 from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
@@ -121,7 +125,7 @@ class LayoutDescRegistry:
             return entry.layout_desc
 
 
-class MPCacheEngineContext:
+class MPCacheServerContext:
     """Shared infrastructure for all engine modules.
 
     Holds the storage manager, token hasher, session manager, event bus,
@@ -141,6 +145,11 @@ class MPCacheEngineContext:
         hash_algorithm: str = "blake3",
     ) -> None:
         self._chunk_size = chunk_size
+
+        # Initialize the process-global GDS context.
+        # No-op when GDS L1 is disabled (config is None).
+        initialize_gds_context(storage_manager_config.l1_manager_config.gds_l1_config)
+
         self.shm_pool_info: ShmPoolInfo = self._compute_shm_pool_info(
             storage_manager_config
         )
@@ -151,6 +160,14 @@ class MPCacheEngineContext:
         self._session_manager = SessionManager(self._token_hasher)
         self._event_bus = get_event_bus()
         self._layout_desc_registry = LayoutDescRegistry()
+
+    def close(self) -> None:
+        """
+        Tear down the storage manager and the process-global GDS context.
+        """
+        self._storage_manager.close()
+        # Tear down the GDS cuFile context (the shared slab + its handle).
+        get_gds_context().close()
 
     @property
     def chunk_size(self) -> int:
@@ -182,17 +199,21 @@ class MPCacheEngineContext:
         """Registry mapping (model_name, world_size) to MemoryLayoutDesc."""
         return self._layout_desc_registry
 
-    def resolve_obj_keys(self, key: IPCCacheEngineKey) -> list[ObjectKey]:
-        """Resolve object keys from an IPC cache key.
+    def resolve_obj_keys(
+        self, key: IPCCacheServerKey, object_group_ids: list[int]
+    ) -> list[list[ObjectKey]]:
+        """Resolve per-object-group object keys from an IPC cache key.
 
         Uses the session manager to track token state and the token hasher
         to compute chunk hashes for the requested range.
 
         Args:
             key: IPC cache key describing model/session/token range.
+            object_group_ids: Object group ids to produce keys for.
 
         Returns:
-            Resolved object keys for the requested token range.
+            The i-th element is the list of ObjectKeys for
+            ``object_group_ids[i]``.
 
         Raises:
             ValueError: If ``key.worker_id`` is ``None``.
@@ -204,7 +225,7 @@ class MPCacheEngineContext:
         ]
         if key.worker_id is None:
             raise ValueError("Must resolve keys with worker_id != None")
-        return ipc_key_to_object_keys(key, chunk_hashes)
+        return ipc_key_to_object_keys(key, chunk_hashes, object_group_ids)
 
     @staticmethod
     def _compute_shm_pool_info(
@@ -218,7 +239,7 @@ class MPCacheEngineContext:
         """
         mem_cfg = storage_manager_config.l1_manager_config.memory_config
         shm_name = mem_cfg.shm_name or ""
-        if not shm_name or mem_cfg.use_lazy:
+        if not shm_name or mem_cfg.use_lazy or mem_cfg.devdax_path:
             return {"shm_name": "", "pool_size": 0}
         bare = shm_name.lstrip("/")
         if not bare.startswith("lmcache_l1_pool_"):

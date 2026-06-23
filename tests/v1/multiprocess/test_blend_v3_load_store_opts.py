@@ -230,25 +230,23 @@ def _build_fake_gpu_context(batch_size: int, num_groups: int):
     """Returns a MagicMock matching the minimal GPUCacheContext surface
     used by _apply_cb_rope_batched."""
     gpu_context = MagicMock()
-    gpu_context.kv_layer_groups_manager.num_groups = num_groups
-    # All groups: compress_ratio=1, kv_size=2.
-    groups = [SimpleNamespace(compress_ratio=1) for _ in range(num_groups)]
-    gpu_context.kv_layer_groups_manager.kv_layer_groups = groups
+    gpu_context.kv_layer_groups_manager.num_kernel_groups = num_groups
+    # All groups: uncompressed (tokens_per_block == slots_per_block), kv_size=2.
+    groups = [
+        SimpleNamespace(tokens_per_block=4, slots_per_block=4)
+        for _ in range(num_groups)
+    ]
+    gpu_context.kv_layer_groups_manager.kernel_groups = groups
 
-    # all_slots = [tmp_for_slot_0, ..., tmp_for_slot_{batch-1}]
-    # Each tmp shape: (2 kv, num_layers, slots_per_chunk, hidden_dim).
-    num_layers, slots_per_chunk, hidden_dim = 2, 4, 64
+    # Each per-(slot, group) buffer has shape
+    # (2 kv, num_layers, slots_per_block, hidden_dim).
+    num_layers, slots_per_block, hidden_dim = 2, 4, 64
     head_size = 32
 
-    def _get_tmp_chunk_gpu_buffer_batched(batch_size, group_idx):
-        return [
-            _FakeTensor((2, num_layers, slots_per_chunk, hidden_dim))
-            for _ in range(batch_size)
-        ]
+    def _get_temp_kernel_group_buffer(batch_idx, kernel_group_idx):
+        return _FakeTensor((2, num_layers, slots_per_block, hidden_dim))
 
-    gpu_context.get_tmp_chunk_gpu_buffer_batched.side_effect = (
-        _get_tmp_chunk_gpu_buffer_batched
-    )
+    gpu_context.get_temp_kernel_group_buffer.side_effect = _get_temp_kernel_group_buffer
     return gpu_context, head_size
 
 
@@ -292,8 +290,10 @@ def test_batched_rope_calls_kernel_per_group_per_slot():
 
         eng._apply_cb_rope_batched(gpu_context, rope_state, 4, slots_to_rope)
 
-    # Per-group setup (get_tmp_chunk_gpu_buffer_batched) called once per group.
-    assert gpu_context.get_tmp_chunk_gpu_buffer_batched.call_count == 2
+    # all_slots is built once per group (G=2), each fetching the full batch
+    # of slot buffers => batch_len(4) × G(2) = 8 buffer fetches, independent
+    # of how many slots are actually re-RoPE'd.
+    assert gpu_context.get_temp_kernel_group_buffer.call_count == 8
     # Kernel called N=2 slots × G=2 groups = 4 times.
     assert ops.rotary_embedding_k_fused.call_count == 4
 
@@ -315,19 +315,19 @@ def test_batched_rope_noop_on_empty_slots():
     with patch.object(v3_mod, "lmc_ops") as ops:
         eng._apply_cb_rope_batched(gpu_context, rope_state, 2, [])
 
-    assert gpu_context.get_tmp_chunk_gpu_buffer_batched.call_count == 0
+    assert gpu_context.get_temp_kernel_group_buffer.call_count == 0
     assert ops.rotary_embedding_k_fused.call_count == 0
 
 
 def test_batched_rope_raises_on_compressed_layout():
-    """compress_ratio != 1 → RuntimeError."""
+    """A compressed group (tokens_per_block != slots_per_block) → RuntimeError."""
     # First Party
     from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
 
     gpu_context = MagicMock()
-    gpu_context.kv_layer_groups_manager.num_groups = 1
-    gpu_context.kv_layer_groups_manager.kv_layer_groups = [
-        SimpleNamespace(compress_ratio=2)
+    gpu_context.kv_layer_groups_manager.num_kernel_groups = 1
+    gpu_context.kv_layer_groups_manager.kernel_groups = [
+        SimpleNamespace(tokens_per_block=8, slots_per_block=4)
     ]
     rope_state = SimpleNamespace(
         head_size=32, cos_sin_cache=MagicMock(), is_neox_style=True
@@ -338,5 +338,113 @@ def test_batched_rope_raises_on_compressed_layout():
         eng
     )
 
-    with pytest.raises(RuntimeError, match="compress_ratio="):
+    with pytest.raises(RuntimeError, match="is compressed"):
         eng._apply_cb_rope_batched(gpu_context, rope_state, 2, [(0, 1, 2)])
+
+
+# ---------------------------------------------------------------------------
+# Coordinator (global) leg: conversion to retrievable CBMatchResult + deadline
+# ---------------------------------------------------------------------------
+
+
+def _coord_engine(chunk_size: int = 4):
+    """A BlendV3Module mock with the coordinator-leg methods bound."""
+    # First Party
+    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+
+    eng = MagicMock(spec=v3_mod.BlendV3Module)
+    eng._ctx = SimpleNamespace(chunk_size=chunk_size)
+    # _event_bus is an instance attr (set in __init__), so spec= omits it;
+    # _poll_coordinator_match publishes CB_COORDINATOR_MATCH_END through it.
+    eng._event_bus = MagicMock()
+    eng._build_global_segments = v3_mod.BlendV3Module._build_global_segments.__get__(
+        eng
+    )
+    eng._poll_coordinator_match = v3_mod.BlendV3Module._poll_coordinator_match.__get__(
+        eng
+    )
+    return eng
+
+
+def test_build_global_segments_are_retrievable_cbmatchresults():
+    """Coordinator object_key hex round-trips to the hash the retrieve path
+    resolves via ipc_key_to_object_keys; positions span one chunk."""
+    # First Party
+    from lmcache.v1.mp_coordinator.blend_client import RemoteMatch
+    from lmcache.v1.multiprocess.custom_types import CBMatchResult
+
+    eng = _coord_engine(chunk_size=4)
+    raw = bytes.fromhex("00") * 0 + b"\xab\xcd\xef\x01"
+    matches = [RemoteMatch(object_key=raw.hex(), old_st=8, cur_st=20)]
+
+    segs = eng._build_global_segments(matches)
+
+    assert len(segs) == 1
+    seg = segs[0]
+    assert isinstance(seg, CBMatchResult)
+    assert seg.hash == raw  # hex -> exact bytes the retrieve path expands
+    assert (seg.old_st, seg.old_ed, seg.cur_st, seg.cur_ed) == (8, 12, 20, 24)
+
+
+def test_poll_coordinator_match_deferred_then_resolved():
+    """PENDING within deadline defers (None); a list resolves to segments."""
+    # First Party
+    from lmcache.v1.mp_coordinator.blend_client import PENDING, RemoteMatch
+
+    eng = _coord_engine(chunk_size=4)
+    coordinator = MagicMock()
+    eng._coordinator = coordinator
+    job = SimpleNamespace(coord_submitted=True, coord_deadline=time.monotonic() + 60)
+
+    coordinator.poll_match.return_value = PENDING
+    assert eng._poll_coordinator_match(job, "rid") is None  # defer
+    coordinator.take_match.assert_not_called()
+
+    coordinator.poll_match.return_value = [RemoteMatch("aa", old_st=0, cur_st=4)]
+    out = eng._poll_coordinator_match(job, "rid")
+    assert [s.cur_st for s in out] == [4]
+    coordinator.take_match.assert_called_once_with("rid")
+
+
+def test_poll_coordinator_match_gives_up_past_deadline():
+    """PENDING past the deadline degrades to local-only ([]) and drops state."""
+    # First Party
+    from lmcache.v1.mp_coordinator.blend_client import PENDING
+
+    eng = _coord_engine(chunk_size=4)
+    coordinator = MagicMock()
+    eng._coordinator = coordinator
+    coordinator.poll_match.return_value = PENDING
+    job = SimpleNamespace(coord_submitted=True, coord_deadline=time.monotonic() - 1)
+
+    assert eng._poll_coordinator_match(job, "rid") == []
+    coordinator.take_match.assert_called_once_with("rid")
+
+
+def test_non_overlapping_after_prefix():
+    """Prefix filter + leftmost-greedy overlap dedup, filter applied first."""
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import CBMatchResult
+    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+
+    f = v3_mod.BlendV3Module._non_overlapping_after_prefix
+
+    def m(cur_st: int, cur_ed: int) -> CBMatchResult:
+        return CBMatchResult(
+            old_st=0, old_ed=cur_ed - cur_st, cur_st=cur_st, cur_ed=cur_ed, hash=b""
+        )
+
+    assert f([], 0) == []
+
+    # Overlap dedup + ascending cur_st: 10-20 overlaps the kept 5-15, dropped.
+    out = f([m(10, 20), m(5, 15), m(15, 25)], 0)
+    assert [(r.cur_st, r.cur_ed) for r in out] == [(5, 15), (15, 25)]
+
+    # Prefix filter drops matches starting before the coverage.
+    out = f([m(0, 10), m(10, 20)], 5)
+    assert [r.cur_st for r in out] == [10]
+
+    # Filter precedes dedup: a prefix-covered match (5-13) must NOT suppress the
+    # usable 10-18 in the greedy pass (dedup-first would drop both -> []).
+    out = f([m(5, 13), m(10, 18)], 8)
+    assert [r.cur_st for r in out] == [10]

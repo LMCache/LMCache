@@ -1,12 +1,13 @@
 .. _recipe_gemma4:
 
-Gemma4ForConditionalGeneration
-===============================
+Gemma 4
+=======
 
 Validated models
 ----------------
 
 - `google/gemma-4-31B-it <https://huggingface.co/google/gemma-4-31B-it>`_
+- `google/gemma-4-12B-it <https://huggingface.co/google/gemma-4-12B-it>`_
 - `google/gemma-4-E4B-it <https://huggingface.co/google/gemma-4-E4B-it>`_
 
 .. tab-set::
@@ -17,7 +18,8 @@ Validated models
       **Engine documentation:**
       `Gemma 4 in vLLM supported models
       <https://docs.vllm.ai/en/latest/models/supported_models.html#multimodal-language-models>`_
-      (architecture ``Gemma4ForConditionalGeneration``).
+      (architectures ``Gemma4ForConditionalGeneration`` for 31B/E4B and
+      ``Gemma4UnifiedForConditionalGeneration`` for 12B).
 
       **Status:** Validated with LMCache.
 
@@ -40,19 +42,20 @@ Validated models
 
       |
 
-      The smaller ``google/gemma-4-E4B-it`` runs on a single GPU:
+      The smaller ``google/gemma-4-12B-it`` and ``google/gemma-4-E4B-it`` run on
+      a single GPU:
 
       .. code-block:: bash
 
-         vllm serve google/gemma-4-E4B-it \
+         vllm serve google/gemma-4-12B-it \
              --kv-transfer-config \
              '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 
       |
 
       Adjust ``--tensor-parallel-size`` to match your hardware. For the
-      generic LMCache + vLLM wiring (ports, remote hosts, in-process mode),
-      see :doc:`../mp/quickstart`.
+      generic LMCache + vLLM wiring (ports, remote hosts),
+      see :doc:`../getting_started/quickstart`.
 
       If there are any issues with vLLM setup, please refer to the
       `vLLM Recipes <https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_
@@ -64,7 +67,7 @@ Validated models
 
    .. tab-item:: TRT-LLM
 
-      **Status:** Not supported. LMCache TRT-LLM integration is in progress.
+      **Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-LLM + LMCache setup.
 
 CacheBlend support
 ------------------
@@ -95,7 +98,3 @@ Caveats
 - **Cross-layer KV sharing.** ``google/gemma-4-E4B-it`` reuses some layers' KV
   caches across layers. LMCache stores the cache-owning layers only; the sharing
   layers' KV lives in the same blocks and is restored automatically.
-- **Determinism.** Gemma 4 runs on the Triton attention backend, which is not
-  bit-exact under vLLM's batch-invariant mode, so a retrieved result may differ
-  from a freshly computed one by a small numerical margin rather than being
-  byte-identical.

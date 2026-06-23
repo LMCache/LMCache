@@ -15,8 +15,8 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
-from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
     HandlerSpec,
     ThreadPoolType,
@@ -100,14 +100,14 @@ class LookupModule:
             chunk size.
     """
 
-    def __init__(self, ctx: MPCacheEngineContext) -> None:
+    def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx
         self._prefetch_jobs: dict[str, _PrefetchJob] = {}
         self._prefetch_job_lock = threading.Lock()
         self._setup_metrics()
 
     @property
-    def context(self) -> MPCacheEngineContext:
+    def context(self) -> MPCacheServerContext:
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
 
@@ -122,6 +122,11 @@ class LookupModule:
             HandlerSpec(
                 RequestType.QUERY_PREFETCH_STATUS,
                 self.query_prefetch_status,
+                ThreadPoolType.NORMAL,
+            ),
+            HandlerSpec(
+                RequestType.WAIT_PREFETCH_STATUS,
+                self.wait_prefetch_status,
                 ThreadPoolType.NORMAL,
             ),
             HandlerSpec(
@@ -161,7 +166,7 @@ class LookupModule:
 
     def lookup(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         tp_size: int,
     ) -> None:
         """Submit a prefix lookup.
@@ -266,7 +271,7 @@ class LookupModule:
         session.set_tokens(list(key.token_ids))
         session.lookup_ipc_key = key
 
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
 
         handle = self._ctx.storage_manager.submit_prefetch_task(
             obj_keys,
@@ -373,9 +378,42 @@ class LookupModule:
 
         return found_count
 
+    def wait_prefetch_status(
+        self,
+        request_id: str,
+        timeout: float,
+    ) -> int | None:
+        """Block until a prefetch job completes, then return its chunk count.
+
+        Like query_prefetch_status, but waits for the daemon to publish the
+        result instead of returning None while the prefetch is still in
+        progress, so the caller does not have to busy-poll. The job entry is
+        removed once a non-None result is returned (exactly-once semantics).
+
+        Args:
+            request_id: The external request ID passed in the lookup key.
+            timeout: Maximum number of seconds to wait for the prefetch.
+
+        Returns:
+            Chunk count (int) when done, None if the wait timed out, 0 if the
+            request_id is unknown (already completed and consumed, or invalid).
+        """
+        with self._prefetch_job_lock:
+            job = self._prefetch_jobs.get(request_id)
+        if job is None:
+            logger.warning(
+                "Prefetch job for request %s not found (already completed or invalid)",
+                request_id,
+            )
+            return 0
+
+        if not self._ctx.storage_manager.wait_prefetch_status(job.handle, timeout):
+            return None
+        return self.query_prefetch_status(request_id)
+
     def free_lookup_locks(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         tp_size: int,
     ) -> None:
         """Release read locks acquired during lookup.
@@ -399,7 +437,7 @@ class LookupModule:
         )
         if not chunk_hashes:
             return
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
 
         extra_count = compute_extra_count(tp_size, key.world_size)
 
@@ -437,7 +475,7 @@ class LookupModule:
             return
 
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in session.get_hashes(0)]
-        obj_keys = ipc_key_to_object_keys(session.lookup_ipc_key, chunk_hashes)
+        obj_keys = ipc_key_to_object_keys(session.lookup_ipc_key, chunk_hashes, [0])[0]
         # unified touch of all keys, which include retrieved and stored keys
         # TODO(chunxiaozheng): when l2 is enabled, the prefetched keys from l2 are temp
         #  and will be deleted after finish_read_prefetched, when we touch all keys,
@@ -459,7 +497,7 @@ class LookupModule:
 
     def _setup_metrics(self) -> None:
         """Register OTel observable gauges for lookup module metrics."""
-        _gauge = partial(register_gauge, "lmcache.mp_engine")
+        _gauge = partial(register_gauge, "lmcache.mp_server")
         _gauge(
             "lmcache_mp.active_prefetch_jobs",
             "Number of active prefetch jobs",

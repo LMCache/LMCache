@@ -12,16 +12,16 @@ import torch
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     CudaIPCWrapper,
-    IPCCacheEngineKey,
+    IPCCacheServerKey,
     get_customized_decoder,
     get_customized_encoder,
 )
 
 
 def test_ipc_cache_engine_key_serialization():
-    """Test encoding and decoding of IPCCacheEngineKey using msgspec."""
-    # Create a sample IPCCacheEngineKey
-    original_key = IPCCacheEngineKey.from_token_ids(
+    """Test encoding and decoding of IPCCacheServerKey using msgspec."""
+    # Create a sample IPCCacheServerKey
+    original_key = IPCCacheServerKey.from_token_ids(
         model_name="test_model",
         world_size=4,
         worker_id=1,
@@ -35,16 +35,16 @@ def test_ipc_cache_engine_key_serialization():
     encoded = msgspec.msgpack.encode(original_key)
 
     # Decode the key
-    decoded_key = msgspec.msgpack.decode(encoded, type=IPCCacheEngineKey)
+    decoded_key = msgspec.msgpack.decode(encoded, type=IPCCacheServerKey)
 
     # Verify correctness
-    assert original_key == decoded_key, "IPCCacheEngineKeys do not match!"
+    assert original_key == decoded_key, "IPCCacheServerKeys do not match!"
 
 
 def test_ipc_cache_engine_key_serialization_with_cache_salt():
     """Roundtrip must carry ``cache_salt`` verbatim — it is part of
     cache identity so eq must hold after encode/decode."""
-    original_key = IPCCacheEngineKey.from_token_ids(
+    original_key = IPCCacheServerKey.from_token_ids(
         model_name="test_model",
         world_size=4,
         worker_id=1,
@@ -56,7 +56,7 @@ def test_ipc_cache_engine_key_serialization_with_cache_salt():
     )
 
     encoded = msgspec.msgpack.encode(original_key)
-    decoded_key = msgspec.msgpack.decode(encoded, type=IPCCacheEngineKey)
+    decoded_key = msgspec.msgpack.decode(encoded, type=IPCCacheServerKey)
 
     assert original_key == decoded_key
     assert decoded_key.cache_salt == "alice"

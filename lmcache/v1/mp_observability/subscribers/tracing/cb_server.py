@@ -23,10 +23,11 @@ conditions hold simultaneously:
 * ``_pending_gpu_ops[sid] == 0``
 * ``sid not in _waiting_for_store_final``
 
-Accepts an optional :class:`~lmcache.v1.mp_observability.subscribers.tracing\
-.span_registry.SpanRegistry` so the ``"cb.request"`` span is automatically
-nested under the MP server ``"request"`` root when both subscribers share the
-same registry.
+``cb.request`` is the trace root: blend_v3 owns the CB lookup end-to-end (prefix
++ non-prefix legs, direct against the storage manager), so a CB request never
+opens an MP ``"request"`` span to nest under. The optional
+:class:`~lmcache.v1.mp_observability.subscribers.tracing.span_registry\
+.SpanRegistry` is used to nest the CB child spans under ``cb.request``.
 """
 
 # Future
@@ -72,6 +73,23 @@ class BlendTracingSubscriber(EventSubscriber):
         EventType.CB_LOOKUP_START: "cb.lookup",
         EventType.CB_RETRIEVE_START: "cb.retrieve",
         EventType.CB_STORE_FINAL_START: "cb.store_final",
+        # V3 lookup sub-spans (nest under cb.lookup, see _SPAN_PARENTS).
+        EventType.CB_FINGERPRINT_MATCH_START: "cb.fingerprint_match",
+        EventType.CB_PREFIX_LOOKUP_START: "cb.prefix_lookup",
+        EventType.CB_COORDINATOR_MATCH_START: "cb.coordinator_match",
+        EventType.CB_SPARSE_PREFETCH_START: "cb.sparse_prefetch",
+        # V3 retrieve sub-span (nests under cb.retrieve).
+        EventType.CB_SCATTER_START: "cb.scatter",
+    }
+
+    # Child span -> parent span name for nesting; absent => nest under the
+    # cb.request root (the default for the top-level lookup/retrieve/store spans).
+    _SPAN_PARENTS: dict[str, str] = {
+        "cb.fingerprint_match": "cb.lookup",
+        "cb.prefix_lookup": "cb.lookup",
+        "cb.coordinator_match": "cb.lookup",
+        "cb.sparse_prefetch": "cb.lookup",
+        "cb.scatter": "cb.retrieve",
     }
 
     _END_TO_START: dict[EventType, EventType] = {
@@ -79,6 +97,11 @@ class BlendTracingSubscriber(EventSubscriber):
         EventType.CB_LOOKUP_END: EventType.CB_LOOKUP_START,
         EventType.CB_RETRIEVE_END: EventType.CB_RETRIEVE_START,
         EventType.CB_STORE_FINAL_END: EventType.CB_STORE_FINAL_START,
+        EventType.CB_FINGERPRINT_MATCH_END: EventType.CB_FINGERPRINT_MATCH_START,
+        EventType.CB_PREFIX_LOOKUP_END: EventType.CB_PREFIX_LOOKUP_START,
+        EventType.CB_COORDINATOR_MATCH_END: EventType.CB_COORDINATOR_MATCH_START,
+        EventType.CB_SPARSE_PREFETCH_END: EventType.CB_SPARSE_PREFETCH_START,
+        EventType.CB_SCATTER_END: EventType.CB_SCATTER_START,
     }
 
     # END events that correspond to a SUBMITTED sentinel (decrement ops counter)
@@ -126,6 +149,18 @@ class BlendTracingSubscriber(EventSubscriber):
             EventType.CB_RETRIEVE_END: self._on_end,
             EventType.CB_STORE_FINAL_START: self._on_start,
             EventType.CB_STORE_FINAL_END: self._on_end,
+            # V3 lookup sub-spans (nested under cb.lookup)
+            EventType.CB_FINGERPRINT_MATCH_START: self._on_start,
+            EventType.CB_FINGERPRINT_MATCH_END: self._on_end,
+            EventType.CB_PREFIX_LOOKUP_START: self._on_start,
+            EventType.CB_PREFIX_LOOKUP_END: self._on_end,
+            EventType.CB_COORDINATOR_MATCH_START: self._on_start,
+            EventType.CB_COORDINATOR_MATCH_END: self._on_end,
+            EventType.CB_SPARSE_PREFETCH_START: self._on_start,
+            EventType.CB_SPARSE_PREFETCH_END: self._on_end,
+            # V3 retrieve sub-span (nested under cb.retrieve, GPU-timed)
+            EventType.CB_SCATTER_START: self._on_start,
+            EventType.CB_SCATTER_END: self._on_end,
             # Point events
             EventType.CB_FINGERPRINTS_REGISTERED: self._on_point,
             EventType.CB_CHUNKS_EVICTED: self._on_point,
@@ -160,7 +195,10 @@ class BlendTracingSubscriber(EventSubscriber):
     # ------------------------------------------------------------------
 
     def _on_request_start(self, event: Event) -> None:
-        """Create the ``"cb.request"`` root span, nested under MP's root if present.
+        """Create the ``"cb.request"`` root span.
+
+        blend_v3 owns the CB lookup end-to-end, so a CB request never opens an MP
+        ``"request"`` span — ``cb.request`` is the trace root.
 
         Args:
             event: ``CB_REQUEST_START`` event with ``session_id`` set.
@@ -171,11 +209,8 @@ class BlendTracingSubscriber(EventSubscriber):
         if self._registry.get_context(sid, "cb.request") is not None:
             logger.warning("CB_REQUEST_START fired twice for session=%s; ignoring", sid)
             return
-        # Nest under the MP server's "request" span when running alongside it.
-        mp_root_ctx = self._registry.get_context(sid, "request")
         root_span = _tracer.start_span(
             "cb.request",
-            context=mp_root_ctx,
             start_time=int(event.timestamp * 1e9),
         )
         root_span.set_attribute("session_id", sid)
@@ -245,7 +280,12 @@ class BlendTracingSubscriber(EventSubscriber):
         sid = event.session_id
         span_name = self._SPAN_DEFS[event.event_type]
 
-        parent_ctx = self._registry.get_context(sid, "cb.request")
+        # Nest under the mapped parent span (e.g. cb.fingerprint_match under
+        # cb.lookup); top-level spans and any orphan fall back to cb.request.
+        parent_name = self._SPAN_PARENTS.get(span_name, "cb.request")
+        parent_ctx = self._registry.get_context(sid, parent_name)
+        if parent_ctx is None and parent_name != "cb.request":
+            parent_ctx = self._registry.get_context(sid, "cb.request")
         span = _tracer.start_span(
             span_name,
             context=parent_ctx,
@@ -298,14 +338,34 @@ class BlendTracingSubscriber(EventSubscriber):
                 root_span, _ = root_entry
                 hit_tokens = int(event.metadata.get("hit_tokens", 0))
                 requested_tokens = int(event.metadata.get("requested_tokens", 0))
-                hit_rate = (
-                    hit_tokens / requested_tokens if requested_tokens > 0 else 0.0
+                prefix_hit_tokens = int(event.metadata.get("prefix_hit_tokens", 0))
+                seg_prefix_hit_tokens = int(
+                    event.metadata.get("segmented_prefix_hit_tokens", 0)
                 )
+                non_prefix_hit_tokens = int(
+                    event.metadata.get("non_prefix_hit_tokens", 0)
+                )
+                denom = requested_tokens or 1  # avoid /0; rates are 0 when requested=0
                 root_span.set_attribute("hit_tokens", hit_tokens)
                 root_span.set_attribute("requested_tokens", requested_tokens)
-                root_span.set_attribute("hit_rate", hit_rate)
+                # hit_rate numerator = prefix + segmented-prefix tail + non-prefix
+                # reuse (hit_tokens).
+                root_span.set_attribute("hit_rate", hit_tokens / denom)
                 root_span.set_attribute(
                     "prefix_hits", int(event.metadata.get("prefix_hits", 0))
+                )
+                root_span.set_attribute("prefix_hit_tokens", prefix_hit_tokens)
+                root_span.set_attribute(
+                    "segmented_prefix_hit_tokens", seg_prefix_hit_tokens
+                )
+                root_span.set_attribute("non_prefix_hit_tokens", non_prefix_hit_tokens)
+                # Per-component hit rates (sum to hit_rate).
+                root_span.set_attribute("prefix_hit_rate", prefix_hit_tokens / denom)
+                root_span.set_attribute(
+                    "segmented_prefix_hit_rate", seg_prefix_hit_tokens / denom
+                )
+                root_span.set_attribute(
+                    "non_prefix_hit_rate", non_prefix_hit_tokens / denom
                 )
 
         if event.event_type in self._GPU_OP_END_EVENTS:

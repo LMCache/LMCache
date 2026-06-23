@@ -1,7 +1,7 @@
 .. _recipe_mixtral:
 
-MixtralForCausalLM
-====================
+Mixtral
+=======
 
 Validated models
 ----------------
@@ -58,8 +58,8 @@ Validated models
       |
 
       Adjust ``--tensor-parallel-size`` to match your hardware. For the
-      generic LMCache + vLLM wiring (ports, remote hosts, in-process mode),
-      see :doc:`../mp/quickstart`.
+      generic LMCache + vLLM wiring (ports, remote hosts),
+      see :doc:`../getting_started/quickstart`.
 
    .. tab-item:: SGLang
 
@@ -67,7 +67,7 @@ Validated models
 
    .. tab-item:: TRT-LLM
 
-      **Status:** Not supported. LMCache TRT-LLM integration is in progress.
+      **Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-LLM + LMCache setup.
 
 CacheBlend support
 ------------------

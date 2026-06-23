@@ -26,7 +26,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.custom_types import CudaIPCWrapper
+from lmcache.v1.multiprocess.custom_types import DeviceIPCWrapper
 from lmcache.v1.multiprocess.posix_shm import (
     shm_create_readwrite,
     shm_map_readwrite,
@@ -54,7 +54,7 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
-class CpuShmTensorWrapper(CudaIPCWrapper):
+class CpuShmTensorWrapper(DeviceIPCWrapper):
     """IPC wrapper for CPU tensors backed by POSIX shared memory.
 
     Used by the ``lmcache bench kvcache --mode cpu`` path and the
@@ -62,11 +62,11 @@ class CpuShmTensorWrapper(CudaIPCWrapper):
     map the **same** physical pages for the KV cache, mirroring the
     GPU-mode CUDA-IPC zero-copy semantics.
 
-    Subclassing :class:`CudaIPCWrapper` is load-bearing for the same
+    Subclassing :class:`DeviceIPCWrapper` is load-bearing for the same
     reason :class:`RawCudaIPCWrapper` does it: msgspec does not
     support unions of custom ext-encoded types, so all wire-level
     KV-cache wrappers must share the single ext code (1) registered
-    for ``CudaIPCWrapper``. Pickle preserves the subclass identity
+    for ``DeviceIPCWrapper``. Pickle preserves the subclass identity
     so ``to_tensor`` dispatches correctly on both sides.
     """
 
@@ -87,8 +87,8 @@ class CpuShmTensorWrapper(CudaIPCWrapper):
         # underlying storage may be larger when the tensor is a view.
         self.nbytes = tensor.numel() * tensor.element_size()
 
-        # CudaIPCWrapper interface fields. ``handle`` / ``device_uuid``
-        # are unused on the CPU path but kept to satisfy the parent
+        # DeviceIPCWrapper interface fields. ``handle`` / ``device_uuid``
+        # are unused on the CPU path but kept to satisfy the base
         # contract used by equality checks.
         self.handle = None
         self.dtype = tensor.dtype
@@ -123,10 +123,16 @@ class CpuShmTensorWrapper(CudaIPCWrapper):
         flat = torch.frombuffer(buf, dtype=torch.uint8)
         typed = flat.view(self.dtype)
         out = torch.as_strided(typed, self.shape, self.stride, self.storage_offset)
-        # Keep ``flat`` alive for the lifetime of ``out`` so its mmap
-        # is not released while still in use, then munmap on cleanup.
-        out._lmcache_shm_buf = flat  # type: ignore[attr-defined]
-        weakref.finalize(out, shm_munmap, addr, self.nbytes)
+        # Pin the mmap to the *storage*, not the outer tensor: views
+        # (reshape / slicing) create new tensor objects that share the
+        # storage but do not inherit Python attributes, so a finalizer
+        # attached to ``out`` would munmap as soon as ``out`` is GC'd
+        # even when a view is still reading the SHM segment.
+        # ``UntypedStorage`` is shared across views, so finalizing on it
+        # only fires once every view is also dropped.
+        storage = out.untyped_storage()
+        _CPU_SHM_KEEP_ALIVE[id(storage)] = flat
+        weakref.finalize(storage, _release_shm_segment, id(storage), addr, self.nbytes)
         return out
 
 
@@ -153,6 +159,25 @@ _CPU_SHM_LOCK = threading.Lock()
 _CPU_SHM_COUNTER = itertools.count()
 
 
+# Process-level registry that pins the base ``flat`` buffer of every live
+# ``to_tensor()`` mmap until its storage is finalized. Keyed by ``id(storage)``,
+# which is stable across views because PyTorch caches the storage Python
+# wrapper (so reshape / slicing returns the same ``UntypedStorage`` object).
+_CPU_SHM_KEEP_ALIVE: dict[int, torch.Tensor] = {}
+
+
+def _release_shm_segment(storage_id: int, addr: int, nbytes: int) -> None:
+    """Drop the pinned base buffer and ``munmap`` the mapping.
+
+    Invoked by ``weakref.finalize`` on the tensor's ``UntypedStorage`` once
+    every view of the mapping is gone, so views (e.g. ``reshape`` returning
+    a new tensor without ``_lmcache_shm_buf``) cannot trigger a premature
+    unmap that would turn into a use-after-free in the next read.
+    """
+    _CPU_SHM_KEEP_ALIVE.pop(storage_id, None)
+    shm_munmap(addr, nbytes)
+
+
 def _cleanup_shm_segment(tid: int, shm_name: str, addr: int, nbytes: int) -> None:
     """Release the mmap, unlink, and forget the cached SHM name."""
     with _CPU_SHM_LOCK:
@@ -176,7 +201,9 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
     when the migrated tensor is garbage-collected.
     """
     # First Party
-    from lmcache.v1.gpu_connector.utils import attempt_permute_to_contiguous_view
+    from lmcache.v1.gpu_connector.kv_format.contiguity import (
+        attempt_permute_to_contiguous_view,
+    )
 
     # Validate and normalise the tensor *before* touching the registry
     # or mutating storage, so a bad input never leaves things half-done.

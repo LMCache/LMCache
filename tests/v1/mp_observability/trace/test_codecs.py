@@ -50,6 +50,17 @@ class TestObjectKey:
         out = _roundtrip(k)
         assert out == k
 
+    def test_object_group_id_roundtrip(self):
+        k = ObjectKey(
+            chunk_hash=b"\x00\x01\x02",
+            model_name="m",
+            kv_rank=42,
+            object_group_id=7,
+        )
+        out = _roundtrip(k)
+        assert out == k
+        assert out.object_group_id == 7
+
     def test_inside_list(self):
         keys = [
             ObjectKey(chunk_hash=b"a", model_name="m", kv_rank=1),

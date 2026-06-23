@@ -68,7 +68,8 @@ msgid ""
 "At a high level, ``async_loading`` decouples scheduler-side lookup from "
 "worker-side prefetch/retrieval, allowing overlap between I/O and "
 "computation while preserving prefix-based correctness."
-msgstr "从高层次来看，``async_loading`` 将调度器端的查找与工作端的预取/检索解耦，允许 I/O 和计算之间的重叠，同时保持基于前缀的正确性。"
+msgstr ""
+"从高层次来看，\\ ``async_loading`` 将调度器端的查找与工作端的预取/检索解耦，允许 I/O 和计算之间的重叠，同时保持基于前缀的正确性。"
 
 #: ../../source/kv_cache/async_loading.rst:26
 msgid "The scheduler sends lookup requests with token chunk hashes and offsets."
@@ -79,7 +80,8 @@ msgid ""
 "Worker-side servers perform tiered ``batched_async_contains`` over "
 "available backends and eagerly launch non-blocking batched get operations"
 " for hit prefixes."
-msgstr "工作端服务器在可用后端上执行分层的 ``batched_async_contains``，并积极启动非阻塞的批量获取操作以处理命中前缀。"
+msgstr ""
+"工作端服务器在可用后端上执行分层的 ``batched_async_contains``\\ ，并积极启动非阻塞的批量获取操作以处理命中前缀。"
 
 #: ../../source/kv_cache/async_loading.rst:28
 msgid ""
@@ -113,7 +115,8 @@ msgstr "性能重叠"
 msgid ""
 "**I/O–Compute Overlap**: Decoupling lookup/prefetch from loading enables "
 "fetching KV chunks while vLLM continues scheduling/computation."
-msgstr "**I/O–计算重叠**：将查找/预取与加载解耦，使得在 vLLM 继续调度/计算的同时可以获取 KV 块。"
+msgstr ""
+"**I/O–计算重叠**\\ ：将查找/预取与加载解耦，使得在 vLLM 继续调度/计算的同时可以获取 KV 块。"
 
 #: ../../source/kv_cache/async_loading.rst:100
 msgid "Robustness and error handling"
@@ -123,21 +126,24 @@ msgstr "鲁棒性和错误处理"
 msgid ""
 "**Event-driven Synchronization**: ``EventManager`` ensures safe hand-off "
 "of futures and avoids race conditions between threads and the async loop."
-msgstr "**事件驱动同步**：``EventManager`` 确保未来对象的安全交接，并避免线程与异步循环之间的竞争条件。"
+msgstr ""
+"**事件驱动同步**\\ ：\\ ``EventManager`` 确保未来对象的安全交接，并避免线程与异步循环之间的竞争条件。"
 
 #: ../../source/kv_cache/async_loading.rst:102
 msgid ""
 "**Backpressure & Deadlock Avoidance**: ``AsyncSerializer`` with a "
 "weighted semaphore caps concurrent chunk retrievals based on allocator "
 "budget, preventing starvation or allocator lockups."
-msgstr "**背压与死锁避免**：``AsyncSerializer`` 使用加权信号量限制并发块检索，基于分配器预算，防止饥饿或分配器锁定。"
+msgstr ""
+"**背压与死锁避免**\\ ：\\ ``AsyncSerializer`` 使用加权信号量限制并发块检索，基于分配器预算，防止饥饿或分配器锁定。"
 
 #: ../../source/kv_cache/async_loading.rst:103
 msgid ""
 "**Graceful Miss Path**: Immediate response with ``None`` hit tokens when "
 "nothing is retrievable; worker returns quickly without stalling the "
 "scheduler."
-msgstr "**优雅未命中路径**：当无法检索到任何内容时，立即响应 ``None`` 命中令牌；工作线程快速返回，不会阻塞调度器。"
+msgstr ""
+"**优雅未命中路径**\\ ：当无法检索到任何内容时，立即响应 ``None`` 命中令牌；工作线程快速返回，不会阻塞调度器。"
 
 #: ../../source/kv_cache/async_loading.rst:106
 msgid "Comparison with vLLM Load Failure Recovery feature"
@@ -198,7 +204,8 @@ msgstr "未来工作"
 msgid ""
 "Introduce a default ``batched_async_contains`` implementation, so all "
 "backends can support ``async_loading``."
-msgstr "引入默认的 ``batched_async_contains`` 实现，以便所有后端都可以支持 ``async_loading``。"
+msgstr ""
+"引入默认的 ``batched_async_contains`` 实现，以便所有后端都可以支持 ``async_loading``\\ 。"
 
 #: ../../source/kv_cache/async_loading.rst:126
 msgid ""

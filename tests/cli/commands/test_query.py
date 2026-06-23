@@ -126,7 +126,7 @@ class TestQueryCommandExecute:
     def test_func_bound_to_execute(
         self, cmd: QueryCommand, parser: argparse.ArgumentParser
     ) -> None:
-        """``parse_args`` should bind ``func`` to :meth:`QueryCommand.execute`."""
+        """``parse_args`` should bind ``func`` to the subcommand's execute."""
         args = parser.parse_args(
             [
                 "query",
@@ -139,9 +139,11 @@ class TestQueryCommandExecute:
                 "m",
             ],
         )
-        assert args.func == cmd.execute
+        # func is bound to the discovered EngineCommand's execute
+        assert callable(args.func)
+        assert args.query_target == "engine"
 
-    @patch("lmcache.cli.commands.query.Request")
+    @patch("lmcache.cli.commands.query.engine_command.Request")
     def test_execute_calls_request_send_request(
         self,
         mock_request_cls: MagicMock,
@@ -184,7 +186,7 @@ class TestQueryCommandExecute:
         assert "Input tokens" in out
         assert "Prompt tokens" not in out
 
-    @patch("lmcache.cli.commands.query.Request")
+    @patch("lmcache.cli.commands.query.engine_command.Request")
     def test_execute_uses_engine_model_when_cli_model_omitted(
         self,
         mock_request_cls: MagicMock,

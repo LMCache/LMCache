@@ -1,23 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Blend V3 protocol — paged-aware CB pipeline.
-
-RPCs:
-* ``CB_REGISTER_ROPE_V3`` / ``CB_UNREGISTER_ROPE_V3`` — share / release the rope
-  cos/sin cache onto a context already registered via ``REGISTER_KV_CACHE``.
-* ``CB_RETRIEVE_PRE_COMPUTED_V3`` — scatter all matched chunks (prefix- and
-  non-prefix-hit) into paged KV by per-token block ID; re-RoPE only the shifted
-  (``old_st != cur_st``) subset.
-* ``CB_UNIFIED_LOOKUP`` — the sole live lookup path: one RPC runs prefix +
-  non-prefix match, reconcile, one sparse-coalesced prefetch, and per-TP-rank
-  classify. ``(IPCCacheEngineKey, tp_size)`` → ``CBUnifiedLookupResult``.
-"""
+"""Blend V3 protocol definitions."""
 
 # First Party
 from lmcache.v1.multiprocess.custom_types import (
     CBMatchResult,
     CBUnifiedLookupResult,
-    CudaIPCWrapper,
-    IPCCacheEngineKey,
+    DeviceIPCWrapper,
+    IPCCacheServerKey,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
 
@@ -36,7 +25,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Payload: (instance_id, cos_sin_cache_ipc, head_size, is_neox_style).
         # Returns: None.
         "CB_REGISTER_ROPE_V3": ProtocolDefinition(
-            payload_classes=[int, CudaIPCWrapper, int, bool],
+            payload_classes=[int, DeviceIPCWrapper, int, bool],
             response_class=None,
             handler_type=HandlerType.SYNC,
         ),
@@ -53,7 +42,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Returns: (event_ipc_handle: bytes, success: bool).
         "CB_RETRIEVE_PRE_COMPUTED_V3": ProtocolDefinition(
             payload_classes=[
-                IPCCacheEngineKey,
+                IPCCacheServerKey,
                 list[CBMatchResult],
                 list[int],
                 int,
@@ -65,13 +54,13 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Unified lookup: server runs prefix lookup + non-prefix fingerprint
         # match in one RPC, reconciles, and prefetches only the complement.
         # Payload:
-        #   - key: IPCCacheEngineKey carrying the query token IDs.
+        #   - key: IPCCacheServerKey carrying the query token IDs.
         #   - tp_size: tensor-parallel size (for MLA multi-reader locking,
         #     mirrors LOOKUP).
         # Returns: CBUnifiedLookupResult(prefix_coverage_tokens,
         #          non_prefix_segments).
         "CB_UNIFIED_LOOKUP": ProtocolDefinition(
-            payload_classes=[IPCCacheEngineKey, int],
+            payload_classes=[IPCCacheServerKey, int],
             # Nullable: handler returns None to defer until both the prefix and
             # the sparse chunks are in L1 (mirrors dense QUERY_PREFETCH_STATUS).
             response_class=CBUnifiedLookupResult | None,

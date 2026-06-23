@@ -254,6 +254,7 @@ class NixlStorageAgent:
             file_path: Directory where storage files are created.
             use_direct_io: Whether to open files with O_DIRECT.
         """
+        os.makedirs(file_path, exist_ok=True)
         if file_size % page_size != 0:
             raise ValueError(
                 f"file_size ({file_size}) must be a multiple of page_size ({page_size})"
@@ -528,7 +529,9 @@ class NixlStoreL2Adapter(L2AdapterInterface):
     # Lookup and Lock Interface
     #####################
 
-    def submit_lookup_and_lock_task(self, keys: list[ObjectKey]) -> L2TaskId:
+    def submit_lookup_and_lock_task(
+        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+    ) -> L2TaskId:
         with self._lock:
             task_id = self._get_next_task_id()
 

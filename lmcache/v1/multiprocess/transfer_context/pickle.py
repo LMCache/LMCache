@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Pickle-based NonGpuContext implementation for multiprocess mode."""
+"""Pickle-based EngineDrivenContext implementation for multiprocess mode."""
 
 # Standard
 import pickle
@@ -8,17 +8,17 @@ import pickle
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transfer_context.base import (
-    NonGpuContext,
-    NonGpuContextMetadata,
+    EngineDrivenContext,
+    EngineDrivenContextMetadata,
 )
 
 
-class NonGpuContextPickle(NonGpuContext):
-    """Pickle-based implementation of :class:`NonGpuContext`.
+class EngineDrivenContextPickle(EngineDrivenContext):
+    """Pickle-based implementation of :class:`EngineDrivenContext`.
 
     Transport mechanism:
     - **Store**: ``prepare_store`` sends ``PREPARE_STORE`` (returns empty slots
@@ -31,14 +31,14 @@ class NonGpuContextPickle(NonGpuContext):
 
     def __init__(
         self,
-        metadata: NonGpuContextMetadata,
+        metadata: EngineDrivenContextMetadata,
         mq_client: MessageQueueClient,
         mq_timeout: float,
     ) -> None:
         super().__init__(metadata, mq_client, mq_timeout)
 
     def prepare_store(
-        self, key: IPCCacheEngineKey, instance_id: int
+        self, key: IPCCacheServerKey, instance_id: int
     ) -> tuple[list[torch.Tensor], list[int]] | None:
         """Send PREPARE_STORE RPC. For pickle, returns no pre-allocated buffers."""
         future = self.mq_client.submit_request(
@@ -53,7 +53,7 @@ class NonGpuContextPickle(NonGpuContext):
         return None
 
     def commit_store(
-        self, key: IPCCacheEngineKey, instance_id: int, chunks: list[torch.Tensor]
+        self, key: IPCCacheServerKey, instance_id: int, chunks: list[torch.Tensor]
     ) -> bool:
         """Serialize chunks and send via COMMIT_STORE.
 
@@ -72,7 +72,7 @@ class NonGpuContextPickle(NonGpuContext):
             return False
 
     def prepare_retrieve(
-        self, key: IPCCacheEngineKey, instance_id: int
+        self, key: IPCCacheServerKey, instance_id: int
     ) -> list[torch.Tensor] | None:
         """Send PREPARE_RETRIEVE and deserialize the response data.
 
@@ -93,7 +93,7 @@ class NonGpuContextPickle(NonGpuContext):
         chunks: list[torch.Tensor] = pickle.loads(response.data)
         return chunks
 
-    def commit_retrieve(self, key: IPCCacheEngineKey, instance_id: int) -> bool:
+    def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
         """Send COMMIT_RETRIEVE (no-op for pickle path)."""
         future = self.mq_client.submit_request(
             RequestType.COMMIT_RETRIEVE,
