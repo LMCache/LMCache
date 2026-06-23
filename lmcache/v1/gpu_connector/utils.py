@@ -260,10 +260,6 @@ def normalize_and_discover_per_layer_formats(
             normalized, engine_kv_format
         )
 
-    # Detect each engine group on its own tensors; with no groups, one synthetic
-    # group spans every layer (== whole-list detection). Normalization is
-    # per-tensor, so assembling the per-group results matches detecting the whole
-    # list -- uniform models are unchanged.
     groups = layer_index_groups or [range(len(kv_caches))]
     detected: dict[int, tuple[DiscoverableKVCache, "lmc_ops.EngineKVFormat"]] = {}
     for indices in groups:
