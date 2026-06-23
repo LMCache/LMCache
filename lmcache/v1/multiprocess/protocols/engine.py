@@ -73,6 +73,7 @@ REQUEST_NAMES = [
     "PREPARE_STORE",
     "COMMIT_STORE",
     "COMMIT_STORE_GROUP",
+    "COMMIT_STORE_GROUP_DELTA",
     "PREPARE_RETRIEVE",
     "COMMIT_RETRIEVE",
 ]
@@ -251,6 +252,15 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Returns: bool - success
         "COMMIT_STORE_GROUP": ProtocolDefinition(
             payload_classes=[KeyType, int, int, bytes],
+            response_class=bool,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Delta-store: writes only the chunks provided in cpu_data at
+        # offset skip_count. The worker derives skip_count from the prior
+        # lookup's prefix hit count so the wire carries only the chunks
+        # not already in L2.
+        "COMMIT_STORE_GROUP_DELTA": ProtocolDefinition(
+            payload_classes=[KeyType, int, int, int, bytes],
             response_class=bool,
             handler_type=HandlerType.BLOCKING,
         ),
