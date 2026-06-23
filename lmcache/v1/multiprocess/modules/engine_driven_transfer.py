@@ -663,6 +663,95 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             )
             session.extras.pop("store_start_time", None)
         return result
+
+    @_lmcache_nvtx_annotate
+    def commit_store_group_delta(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        group_idx: int,
+        skip_count: int,
+        cpu_data: bytes,
+    ) -> bool:
+        """Delta-store variant of :meth:`commit_store_group`.
+
+        Writes the chunks in ``cpu_data`` at offset ``skip_count`` for
+        the named group.  The worker derives ``skip_count`` from the
+        prefix hit count returned by ``query_prefetch_lookup_hits`` so
+        the wire transfer carries only the chunks that are not already
+        in L2.
+
+        For 100%-hit groups the worker sends an empty ``cpu_data`` and
+        the server just no-ops the storage write -- saving 14 GiB of
+        zmq traffic on the re-run of a cached prompt.
+        """
+        import pickle
+        from lmcache.v1.multiprocess.transfer_context.base import (
+            _deserialize_multi_group_chunks,
+        )
+        entry, strategy = self._resolve_for_transfer(instance_id)
+        if not entry.metadata.is_multi_group:
+            logger.error(
+                "commit_store_group_delta called for non-multi-group context "
+                "(instance_id=%d)",
+                instance_id,
+            )
+            return False
+        num_groups = len(entry.metadata.group_layout_descs)
+        if group_idx < 0 or group_idx >= num_groups:
+            logger.error(
+                "commit_store_group_delta: group_idx %d out of range [0, %d)",
+                group_idx, num_groups,
+            )
+            return False
+        # Resolve object keys for the offset range only.  Keys before
+        # ``skip_count`` are skipped -- they are already in L2 (caller
+        # is responsible for proving this via the prior lookup).
+        all_obj_keys = self._resolve_all_group_obj_keys(key, num_groups)
+        g_obj_keys = all_obj_keys[group_idx]
+        offset_obj_keys = g_obj_keys[skip_count:]
+        # Fast path: full-prefix hit (skip_count covers all chunks for
+        # this group) -- no deserialize, no storage write.
+        if not cpu_data or skip_count >= len(g_obj_keys):
+            logger.debug(
+                "commit_store_group_delta: full-prefix skip "
+                "(group=%d, skip_count=%d, total=%d)",
+                group_idx, skip_count, len(g_obj_keys),
+            )
+            return True
+        deserialized = _deserialize_multi_group_chunks(cpu_data)
+        if len(deserialized) != 1:
+            logger.error(
+                "commit_store_group_delta: expected 1 group, got %d",
+                len(deserialized),
+            )
+            return False
+        group_chunk_list = deserialized[0]
+        if not group_chunk_list:
+            return True
+        storage_payload = pickle.dumps(
+            group_chunk_list, protocol=pickle.HIGHEST_PROTOCOL,
+        )
+        g_layout_desc = entry.metadata.group_layout_descs[group_idx]
+        g_block_size = entry.metadata.group_block_sizes[group_idx]
+        g_use_mla = entry.metadata.group_use_mla[group_idx]
+        g_metadata = EngineDrivenContextMetadata(
+            layout_desc=g_layout_desc,
+            block_size=g_block_size,
+            use_mla=g_use_mla,
+        )
+        # ``commit_store`` resolves object keys via
+        # ``resolve_obj_keys`` lambda; we override the resolution so
+        # the write lands at offset [skip_count, skip_count + N).
+        result = strategy.commit_store(
+            key=key,
+            instance_id=instance_id,
+            cpu_data=storage_payload,
+            context=g_metadata,
+            resolve_obj_keys=lambda k, keys=offset_obj_keys: keys,
+        )
+        return bool(result)
+
     def _commit_store_multi_group(
         self,
         key: IPCCacheServerKey,
