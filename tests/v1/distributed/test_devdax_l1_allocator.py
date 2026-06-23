@@ -74,12 +74,28 @@ class _FakeMooncakeL2Config:
         self.setup_config = setup_config
 
 
+class _FakeExt:
+    is_pin_supported = True
+
+    def __init__(self, fake_runtime: "_FakeCudaRuntime") -> None:
+        self._runtime = fake_runtime
+
+    def pin_memory(self, ptr: int, size: int) -> bool:
+        self._runtime.register_calls.append((ptr, size, 0))
+        return self._runtime.register_error == 0
+
+    def unpin_memory(self, ptr: int) -> bool:
+        self._runtime.unregister_calls.append(ptr)
+        return True
+
+
 class _FakeCudaRuntime:
     def __init__(self, register_error: int = 0) -> None:
         self.register_error = register_error
         self.register_calls: list[tuple[int, int, int]] = []
         self.unregister_calls: list[int] = []
         self.synchronize_calls = 0
+        self.ext = _FakeExt(self)
 
     def is_available(self) -> bool:
         return True
