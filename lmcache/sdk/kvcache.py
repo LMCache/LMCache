@@ -9,8 +9,6 @@ from collections.abc import Sequence
 import time
 import uuid
 import os
-import collections
-import threading
 
 # Third Party
 import requests
@@ -18,52 +16,20 @@ import torch
 import zmq
 
 # First Party
-from lmcache.integration.vllm.vllm_multi_process_adapter import (
-    send_lmcache_request,
-)
+from lmcache.integration.vllm.vllm_multi_process_adapter import send_lmcache_request
 from lmcache.logging import init_logger
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
-from lmcache.v1.multiprocess.transfer_context.contiguous import (
-    ContiguousEngineDrivenTransfer,
-)
-from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
-    create_transfer_context,
-)
+from lmcache.v1.multiprocess.transfer_context.contiguous import ContiguousEngineDrivenTransfer
+from lmcache.v1.multiprocess.transfer_context.worker_transfer import create_transfer_context
 
 logger = init_logger(__name__)
 
 class KVCacheSDKError(RuntimeError):
     """Raised when an SDK KV-cache operation fails."""
 
-class BlockPool:
-    """Free-list of physical block indices into the SDK's paged KV buffer.
-    Manages allocation and free for SDK's paged KV cache blocks.
-    """
-
-    def __init__(self, num_blocks: int) -> None:
-        self._free: collections.deque[int] = collections.deque(range(num_blocks))
-        self._lock = threading.Lock()
-        self.num_blocks = num_blocks
-        print(f"Initialized BlockPool with {num_blocks} blocks.", flush=True)
-
-    def alloc(self, n: int) -> list[int]:
-        print(f"Allocating {n} blocks from BlockPool with {len(self._free)} free blocks...")
-        with self._lock:
-            if n > len(self._free):
-                raise KVCacheSDKError(
-                    f"block pool exhausted: need {n}, have {len(self._free)} "
-                    f"free of {self.num_blocks}"
-                )
-            return [self._free.popleft() for _ in range(n)]
-
-    def free(self, ids: list[int]) -> None:
-        print(f"Freeing #blocks: {len(ids)} back to BlockPool...", flush=True)
-        with self._lock:
-            self._free.extend(ids)
- 
 class LMCacheKVCacheContext:
     """
     Retrieve and store KV cache tensors via LMCache's MQ endpoints.
@@ -138,13 +104,8 @@ class LMCacheKVCacheContext:
 
     def register_kv_caches(
         self,
-        kv_buffer_bytes: int,
     ) -> None:
-        """Register the KV cache layout for the model with the SDK context.
-        
-        Args:
-            kv_buffer_bytes: The size of the KV cache buffer in bytes (user-supplied).
-        """
+        """Register the KV cache layout for the model with the SDK context."""
         entry = next((e for e in self._cache_context_meta_conf.values()
                         if e.get("model_name") == self._model_name), None)
         if not entry:
@@ -154,60 +115,56 @@ class LMCacheKVCacheContext:
                 "register from a vLLM instance first, or pass the geometry explicitly."
             )
         
-        self._world_size = int(entry.get("world_size", 1))
-        kv_cache_layout = entry.get("kv_cache_layout", {})
-        if not kv_cache_layout:
-            raise KVCacheSDKError(
-                f"no registered KV cache layout for {self._model_name!r}."
-            )
-        num_layers = kv_cache_layout.get("num_layers", 0)
+        try:
+            self._world_size = int(entry.get("world_size", 1))
+            kv_cache_layout = entry.get("kv_cache_layout", {})
+            if not kv_cache_layout:
+                raise KVCacheSDKError(
+                    f"no registered KV cache layout for {self._model_name!r}."
+                )
+            num_layers = kv_cache_layout.get("num_layers", 0)
 
-        kernel_groups = kv_cache_layout.get("kernel_groups", [])
-        if len(kernel_groups) != 1:
-            raise KVCacheSDKError(
-                f"Currently not supporting hybrid models with multiple kernel groups; "
-                f"found {len(kernel_groups)} for model_name={self._model_name!r}."
-            )
-        kernel_group = kernel_groups[0]
-        dtype = getattr(torch, kernel_group["dtype"].replace("torch.", ""))
-        tokens_per_block = kernel_group.get("tokens_per_block", 0)
+            kernel_groups = kv_cache_layout.get("kernel_groups", [])
+            if len(kernel_groups) != 1:
+                raise KVCacheSDKError(
+                    f"Currently not supporting hybrid models with multiple kernel groups; "
+                    f"found {len(kernel_groups)} for model_name={self._model_name!r}."
+                )
+            kernel_group = kernel_groups[0]
+            dtype = getattr(torch, kernel_group["dtype"].replace("torch.", ""))
+            tokens_per_block = kernel_group.get("tokens_per_block", 0)
 
-        inner = [
-            int(x) for x in
-            kernel_group["engine_kv_concrete_shape"].split("[")[1].rstrip("] ").split(",")
-        ]
+            inner = [
+                int(x) for x in
+                kernel_group["engine_kv_concrete_shape"].split("[")[1].rstrip("] ").split(",")
+            ]
 
-        # From get_num_heads (lmcache/v1/gpu_connector/utils.py)
-        #     lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
-        #     # NHD: [..., BS, NH, HS] — num_heads at shape[3]
-        #     lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,
-        #     # HND: [..., NH, BS, HS] — num_heads at shape[2]
-        head_dim = inner[-1]
-        if "NH_BS" in kernel_group["engine_kv_format"]:
-            num_kv_heads, block_size = inner[-3], inner[-2]
-        else:
-            block_size, num_kv_heads = inner[-3], inner[-2]
-        if block_size != tokens_per_block:
+            # From get_num_heads (lmcache/v1/gpu_connector/utils.py)
+            #     lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
+            #     # NHD: [..., BS, NH, HS] — num_heads at shape[3]
+            #     lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,
+            #     # HND: [..., NH, BS, HS] — num_heads at shape[2]
+            head_dim = inner[-1]
+            if "NH_BS" in kernel_group["engine_kv_format"]:
+                num_kv_heads, block_size = inner[-3], inner[-2]
+            else:
+                block_size, num_kv_heads = inner[-3], inner[-2]
+            if block_size != tokens_per_block:
+                raise KVCacheSDKError(
+                    f"decoded block_size {block_size} != tokens_per_block "
+                    f"{tokens_per_block} for model_name={self._model_name!r}"
+                )
+        except Exception as err:
             raise KVCacheSDKError(
-                f"decoded block_size {block_size} != tokens_per_block "
-                f"{tokens_per_block} for model_name={self._model_name!r}"
-            )
-
-        bytes_per_block_per_layer = (
-            2 * num_kv_heads * block_size * head_dim * dtype.itemsize
-        )
-        num_blocks = kv_buffer_bytes // (num_layers * bytes_per_block_per_layer)
-        if num_blocks < 1:
-            raise KVCacheSDKError(
-                f"budget {kv_buffer_bytes} too small for even one block "
-                f"({num_layers * bytes_per_block_per_layer} bytes/block/layer)"
-            )
+                f"failed to decode KV cache layout for model_name={self._model_name!r}"
+            ) from err
 
         # SDK runs on CPU, LMCache's detects HND (gpu_connector/utils.py:663). 
         # Build in HND-physical order [NB, 2, NH, BS, HS] (flip from GPU order)
         # So, no matter the inference engine runs on CPU or GPU, SDK will always
         # use HND.
-        self.block_pool = BlockPool(num_blocks=num_blocks)
+        # Hardcode number of blocks to 1 (dummy shape) only for registering
+        num_blocks = 1
         shape = (num_blocks, 2, num_kv_heads, block_size, head_dim)
 
         self._kv_caches = {
@@ -234,6 +191,21 @@ class LMCacheKVCacheContext:
         self._transfer_ctx = ContiguousEngineDrivenTransfer(
             transfer_ctx.engine_driven_context, self._chunk_size
         )
+    
+    @property
+    def chunk_size(self) -> int:
+        """Return the chunk size of the context."""
+        return self._chunk_size
+
+    @property
+    def mq_timeout(self) -> float:
+        """Return the message queue timeout of the context."""
+        return self._mq_timeout
+
+    @property
+    def transfer_ctx(self) -> ContiguousEngineDrivenTransfer:
+        """Return the contiguous transfer context."""
+        return self._transfer_ctx
     
     def close(self) -> None:
         """Close the MQ client and ZMQ context."""
@@ -339,14 +311,18 @@ class LMCacheKVCacheContext:
         """
         self._pending_lookups.discard(request_id)
         self._finished_lookups.pop(request_id, None)
-        self._mq_client.submit_request(
-            RequestType.END_SESSION,
-            [request_id],
-            get_response_class(RequestType.END_SESSION),
-        ).result(timeout=self._mq_timeout)
-        
-        if block_ids is not None:
-            self.block_pool.free(block_ids)
+        try:
+            self._mq_client.submit_request(
+                RequestType.END_SESSION,
+                [request_id],
+                get_response_class(RequestType.END_SESSION),
+            ).result(timeout=self._mq_timeout)
+        except TimeoutError:
+            logger.warning(
+                "END_SESSION timed out after %ss for request_id=%s.",
+                self._mq_timeout,
+                request_id,
+            )
 
     # Helper functions
     def _create_key(
@@ -387,7 +363,6 @@ def connect(
     url: str,
     http_url: str,
     model_name: str,
-    kv_buffer_bytes: int,
     timeout: float = 60.0,
 ) -> "LMCacheKVCacheContext":
     """Create and initialize the LMCache SDK context.
@@ -396,7 +371,6 @@ def connect(
         url: ZMQ endpoint URL for the LMCache message queue.
         http_url: HTTP endpoint URL for fetching server configuration.
         model_name: Model name used by the running LMCache server instance.
-        kv_buffer_bytes: The size of the KV cache buffer in bytes.
         timeout: Timeout in seconds for blocking MQ calls. Defaults to 60.
     
     Returns:
@@ -409,9 +383,7 @@ def connect(
         model_name=model_name, 
         timeout=timeout
     )
-    ctx.register_kv_caches(
-        kv_buffer_bytes=kv_buffer_bytes,
-    )
+    ctx.register_kv_caches()
     return ctx
 
 def close(ctx: "LMCacheKVCacheContext") -> None:
@@ -443,7 +415,7 @@ def retrieve(
         return None
 
     # Drop tokens not fit into a whole chunk
-    total_tokens = (len(tokens) // ctx._chunk_size) * ctx._chunk_size
+    total_tokens = (len(tokens) // ctx.chunk_size) * ctx.chunk_size
     if total_tokens == 0:
         return None
 
@@ -468,9 +440,9 @@ def retrieve(
     start_time = time.time()
     num_prefetched_tokens = ctx.check_lookup_result(request_id)
     while num_prefetched_tokens is None:
-        if time.time() - start_time > ctx._mq_timeout:
+        if time.time() - start_time > ctx.mq_timeout:
             raise KVCacheSDKError(
-                f"LOOKUP request timed out after {ctx._mq_timeout}s for request_id={request_id}"
+                f"LOOKUP request timed out after {ctx.mq_timeout}s for request_id={request_id}"
             )
         logger.info(
             "Waiting for LOOKUP result for request_id=%s...",
@@ -493,7 +465,7 @@ def retrieve(
         worker_id=0,
     )
     try:
-        return ctx._transfer_ctx.retrieve(key, ctx.instance_id)
+        return ctx.transfer_ctx.retrieve(key, ctx.instance_id)
     finally:
         ctx.end_session(request_id)
 
@@ -514,10 +486,10 @@ def store(
     Returns:
         True if the store operation is successful, False otherwise.
     """
-    kv_cpu = kv.detach().cpu().contiguous()
     token_ids = list(tokens)
-    total_tokens = (len(token_ids) // ctx._chunk_size) * ctx._chunk_size
+    total_tokens = (len(token_ids) // ctx.chunk_size) * ctx.chunk_size
     token_ids = token_ids[:total_tokens]
+    kv_cpu = kv[:, :, :total_tokens, :].detach().cpu().contiguous()
 
     # Phase 0: assign request ID to this request
     request_id = f"store-{uuid.uuid4().hex}"
@@ -532,6 +504,6 @@ def store(
 
     # Phase 1: store the KV cache tensor
     try:
-        return ctx._transfer_ctx.store(key, ctx.instance_id, kv_cpu)
+        return ctx.transfer_ctx.store(key, ctx.instance_id, kv_cpu)
     finally:
         ctx.end_session(request_id)

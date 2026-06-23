@@ -2,23 +2,23 @@
 """End-to-end KV cache remapping driver for the token dropping example. Accepts multiple concurrent requests."""
 
 # Standard
-import asyncio
-from dataclasses import dataclass
 import argparse
-import json
-import time
-import random
-import torch
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+import json
+import random
+import time
 from timeit import default_timer
 
 # Third Party
-from transformers import AutoTokenizer, PreTrainedTokenizerBase, AutoConfig
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
-import httpx
 from fastapi import FastAPI
-import uvicorn
+import httpx
 from pydantic import BaseModel
+import torch
+import uvicorn
+from transformers import AutoConfig, AutoTokenizer, PreTrainedTokenizerBase
+from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
 # First Party
 import lmcache.sdk.kvcache as lmc_sdk
@@ -594,7 +594,6 @@ def main() -> None:
         http_url=args.lmcache_url,
         model_name=app.state.lmcache_model_name,
         timeout=app.state.timeout,
-        kv_buffer_bytes=65536 * 10240 * 10,
     )
     uvicorn.run(app, host=args.app_host, port=args.app_port)
 
