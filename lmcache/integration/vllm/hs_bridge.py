@@ -24,13 +24,17 @@ allowlist matches every ``layer_idx`` this bridge emits—otherwise multimodal
 slots (1+) may be dropped by HiddenStateStore.
 """
 
+# Standard
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
+# Third Party
 import torch
 
+# First Party
 from lmcache.logging import init_logger
 
 if TYPE_CHECKING:
+    # First Party
     from lmcache.v1.cache_engine import LMCacheEngine
 
 logger = init_logger(__name__)

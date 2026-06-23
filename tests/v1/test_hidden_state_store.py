@@ -21,7 +21,6 @@ from lmcache.v1.hidden_state_store import HiddenStateStore
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.token_database import ChunkedTokenDatabase
 
-
 CHUNK_SIZE = 8
 HIDDEN_DIM = 16
 
@@ -187,9 +186,7 @@ def test_retrieve_refreshes_lru_in_reverse_prefix_order():
     keys = fix.keys_for(token_ids)
     fix.mark_kv_present(keys)
 
-    fix.store.store_hidden_states(
-        token_ids, torch.randn(len(token_ids), HIDDEN_DIM)
-    )
+    fix.store.store_hidden_states(token_ids, torch.randn(len(token_ids), HIDDEN_DIM))
     # Store order: oldest -> newest.
     assert list(fix.store._lru.keys()) == keys
 
@@ -206,9 +203,7 @@ def test_retrieve_reverse_lru_evicts_suffix_before_prefix():
     keys = fix.keys_for(token_ids)
     fix.mark_kv_present(keys)
 
-    fix.store.store_hidden_states(
-        token_ids, torch.randn(len(token_ids), HIDDEN_DIM)
-    )
+    fix.store.store_hidden_states(token_ids, torch.randn(len(token_ids), HIDDEN_DIM))
     fix.store.retrieve_hidden_states(token_ids)
 
     assert fix.store._evict_one_lru()
@@ -229,9 +224,7 @@ def test_hs_eviction_does_not_imply_kv_eviction():
     keys = fix.keys_for(token_ids)
     fix.mark_kv_present(keys)
 
-    fix.store.store_hidden_states(
-        token_ids, torch.randn(len(token_ids), HIDDEN_DIM)
-    )
+    fix.store.store_hidden_states(token_ids, torch.randn(len(token_ids), HIDDEN_DIM))
     assert fix.store.drop_key(keys[0])  # HS-only LRU-style eviction
     # KV-side state untouched.
     assert keys[0] in fix.sm.present
@@ -413,7 +406,7 @@ def test_store_with_token_offset_aligns_with_kv_keys():
 
 
 def test_store_token_offset_rejects_bad_args():
-    """token_offset out of range or mismatched hidden_states length raises ValueError."""
+    """token_offset out of range or mismatched hidden_states length is rejected."""
     fix = _Fixture()
     token_ids = list(range(CHUNK_SIZE))
 
