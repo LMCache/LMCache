@@ -17,6 +17,15 @@ object is stored as a raw ``.data`` file whose name encodes the full
   bytes first (positive integer, optional).
 - ``use_odirect``: ``true`` or ``false`` (default ``false``) -- bypass the
   page cache via ``O_DIRECT``.
+- ``max_capacity_gb``: Maximum aggregate capacity, in GB, used for
+  ``get_usage()`` and status reporting (float, default ``0``).  A value of
+  ``0`` leaves aggregate capacity disabled and reports
+  ``usage_fraction == -1.0``.
+
+``max_capacity_gb`` is a reporting capacity for the adapter. It does not reserve
+filesystem space and it does not enforce a hard write quota. The pure Python
+``fs`` adapter still has no delete implementation, so do not rely on this field
+alone for filesystem-backed L2 eviction.
 
 **Configuration examples:**
 
@@ -30,3 +39,6 @@ object is stored as a raw ``.data`` file whose name encodes the full
 
     # With O_DIRECT for bypassing page cache
     --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2", "use_odirect": true}'
+
+    # Report usage against a 500 GB filesystem capacity
+    --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2", "max_capacity_gb": 500}'

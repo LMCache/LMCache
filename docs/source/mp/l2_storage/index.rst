@@ -283,7 +283,10 @@ drops by ``eviction_ratio``.
    * - ``mooncake_store``
      - No eviction support (native connector adapter).
    * - ``fs``
-     - No eviction support (``delete`` and ``get_usage`` are no-ops).
+     - No delete support. ``get_usage`` reports byte usage and returns
+       ``usage_fraction == -1.0`` when ``max_capacity_gb`` is ``0``
+       (disabled); set ``max_capacity_gb`` to report usage against an
+       aggregate filesystem capacity.
    * - native connectors
      - No eviction support.
 
