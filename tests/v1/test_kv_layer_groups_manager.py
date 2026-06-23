@@ -16,6 +16,7 @@ from lmcache.v1.kv_layer_groups import (
     LayerGroupIdentity,
     ObjectGroupInfo,
     format_kvcache_shape_spec,
+    group_layers_by_identity,
     parse_kvcache_shape_spec,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
@@ -378,6 +379,10 @@ class TestKernelGroupIdentity:
     """The grouping key is a named tuple; ``LayerGroupIdentity`` is its alias."""
 
     def test_fields_and_alias(self):
+        # First Party
+        import lmcache.c_ops as lmc_ops
+
+        fmt = lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
         ident = KernelGroupIdentity(
             kv_size=2,
             num_heads=8,
@@ -385,6 +390,7 @@ class TestKernelGroupIdentity:
             block_size=16,
             engine_group_idx=0,
             dtype=torch.float16,
+            engine_kv_format=fmt,
         )
         assert ident.kv_size == 2
         assert ident.num_heads == 8
@@ -392,14 +398,46 @@ class TestKernelGroupIdentity:
         assert ident.block_size == 16
         assert ident.engine_group_idx == 0
         assert ident.dtype == torch.float16
+        assert ident.engine_kv_format == fmt
         assert LayerGroupIdentity is KernelGroupIdentity
 
     def test_hashable_as_dict_key(self):
-        ident = KernelGroupIdentity(2, 8, 64, 16, 0, torch.float16)
+        # First Party
+        import lmcache.c_ops as lmc_ops
+
+        fmt = lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+        ident = KernelGroupIdentity(2, 8, 64, 16, 0, torch.float16, fmt)
         assert {ident: "x"}[ident] == "x"
 
     def test_excluded_engine_group_sentinel(self):
         assert EXCLUDED_ENGINE_GROUP == -1
+
+    def test_format_in_identity_splits_same_geometry(self):
+        """Two layers with identical geometry but different layouts (NHD vs HND,
+        num_heads == block_size) must not merge into one kernel group: format is
+        part of the identity, so each gets its own kernel with the correct
+        layout instead of one transferring the other with the wrong axis order.
+        """
+        # First Party
+        import lmcache.c_ops as lmc_ops
+
+        # NH == BS == 16, so NHD [.., BS, NH, ..] and HND [.., NH, BS, ..] yield
+        # the same kv_size/num_heads/head_size/block_size; only axis order differs.
+        tensors = [
+            torch.randn(2, 32, 16, 16, 64, dtype=torch.float16),
+            torch.randn(2, 32, 16, 16, 64, dtype=torch.float16),
+        ]
+        groups = group_layers_by_identity(
+            tensors,
+            [
+                lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,  # NHD
+                lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,  # HND
+            ],
+        )
+        # Without the format in the identity these share one geometry and would
+        # have merged into a single group; with it they split into two.
+        assert len(groups) == 2
+        assert {idxs[0] for _, idxs in groups} == {0, 1}
 
 
 class TestKernelAndObjectGroups:

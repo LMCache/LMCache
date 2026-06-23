@@ -179,9 +179,9 @@ def create_engine_group_infos_from_vllm(
     # same grouping from the registered tensors.
     return [
         EngineGroupInfo(
-            engine_group_id=identity[4],
+            engine_group_id=identity.engine_group_idx,
             layer_indices=tuple(indices),
-            tokens_per_block=group_tokens_per_block.get(identity[4], 0),
+            tokens_per_block=group_tokens_per_block.get(identity.engine_group_idx, 0),
             sw_size_tokens=_merge_layer_sw_sizes(per_layer_sw_size, indices),
         )
         for identity, indices in group_layers_by_identity(

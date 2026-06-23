@@ -44,11 +44,17 @@ DTYPE_MAP: dict[str, torch.dtype] = {
 
 # The tuple that uniquely identifies a set of kernel-equivalent layers; one
 # distinct identity becomes one LMCache KV group:
-# ``(kv_size, num_heads, head_size, block_size, engine_group_idx, dtype)``.
+# ``(kv_size, num_heads, head_size, block_size, engine_group_idx, dtype,
+# engine_kv_format)``.
 # The ``engine_group_idx`` slot is the engine group id (one paged-
 # block address space). Block IDs are only meaningful within one such group, so
 # layers from different groups must not share one LMCache group (and thus one
 # transfer-kernel launch) even if their tensor shape and dtype match.
+# ``engine_kv_format`` is in the identity so two layouts that share every other
+# field but differ in axis order (e.g. NHD vs HND with num_heads == block_size)
+# can never merge into one group and be transferred with the wrong layout. It is
+# redundant for current models -- format already tracks ``engine_group_idx`` --
+# but makes "one format per kernel group" true by construction, not by accident.
 class KernelGroupIdentity(NamedTuple):
     kv_size: int
     num_heads: int
@@ -56,6 +62,7 @@ class KernelGroupIdentity(NamedTuple):
     block_size: int
     engine_group_idx: int
     dtype: torch.dtype
+    engine_kv_format: "lmc_ops.EngineKVFormat"
 
 
 LayerGroupIdentity = KernelGroupIdentity  # Alias for compatibility
@@ -141,6 +148,7 @@ def group_layers_by_identity(
             block_size=bs,
             engine_group_idx=engine_group_idx,
             dtype=dt,
+            engine_kv_format=layer_format,
         )
         groups_dict[identity].append(idx)
     return sorted(groups_dict.items(), key=lambda kv: kv[1][0])
@@ -155,7 +163,7 @@ class KernelGroupInfo:
     :data:`LayerGroupIdentity`; every layer referenced by
     ``layer_indices`` shares the same
     ``(kv_size, num_heads, head_size, block_size, engine_group_idx,
-    dtype)`` signature.
+    dtype, engine_kv_format)`` signature.
     Consumers use ``layer_indices`` to pull the matching device pointers
     out of ``kv_caches`` (via
     :func:`~lmcache.v1.gpu_connector.utils.get_group_data_ptrs`) and
@@ -275,7 +283,8 @@ class KVLayerGroupsManager:
 
     At construction time, every layer in ``kv_caches`` is bucketed by its
     :data:`LayerGroupIdentity` (``(kv_size, num_heads, head_size,
-    block_size, engine_group_idx, dtype)``). Each bucket becomes one
+    block_size, engine_group_idx, dtype, engine_kv_format)``). Each bucket
+    becomes one
     :class:`KernelGroupInfo` holding the layer indices, a shared
     :class:`PageBufferShapeDesc`, and the group's torch dtype.
 
@@ -351,12 +360,13 @@ class KVLayerGroupsManager:
 
         # Emit groups in order of their first-appearing layer so that group
         # indices remain deterministic across runs.
-        for group_idx, ((_, _, _, bs, engine_group_idx, dt), indices) in enumerate(
-            groups_by_identity
-        ):
-            # Every layer in a group shares one format in practice (the
-            # identity's geometry is format-derived), so the first represents it.
-            group_format = engine_kv_formats[indices[0]]
+        for group_idx, (identity, indices) in enumerate(groups_by_identity):
+            bs = identity.block_size
+            engine_group_idx = identity.engine_group_idx
+            dt = identity.dtype
+            # Format is part of the identity, so every layer in the group shares
+            # it -- this is the whole group's format, by construction.
+            group_format = identity.engine_kv_format
             # Block count is per engine group (each is its own block-id space), so
             # read it from this group's own tensor rather than a context-wide value.
             group_num_blocks = get_num_blocks([kv_caches[indices[0]]], group_format)
