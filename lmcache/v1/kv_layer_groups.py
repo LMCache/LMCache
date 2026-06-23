@@ -355,10 +355,8 @@ class KVLayerGroupsManager:
         for group_idx, ((_, _, _, bs, engine_group_idx, dt), indices) in enumerate(
             groups_by_identity
         ):
-            # Layers are bucketed by geometry derived from their format, so in
-            # practice every layer in a group shares one format; use the first
-            # layer's. (Promoting format into the identity to make this provable
-            # is a follow-up.)
+            # Every layer in a group shares one format in practice (the
+            # identity's geometry is format-derived), so the first represents it.
             group_format = engine_kv_formats[indices[0]]
             block_stride_elems = resolve_block_stride_and_log_layout(
                 kv_caches,
