@@ -46,6 +46,9 @@ target.
    * - :doc:`Mock <mock>`
      - ``mock``
      - Testing
+   * - :doc:`Fault Inject <fault_inject>`
+     - ``fault_inject``
+     - Testing
 
 .. toctree::
    :maxdepth: 1
@@ -55,3 +58,4 @@ target.
    remote_and_distributed
    dax
    mock
+   fault_inject

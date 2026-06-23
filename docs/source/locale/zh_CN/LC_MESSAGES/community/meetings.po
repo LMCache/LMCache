@@ -98,15 +98,15 @@ msgstr "vLLM 生产栈项目"
 msgid ""
 "The Production Stack community meeting is held bi-weekly on **Tuesdays** "
 "at **5:30-6:00 PM PT**. Please find the meeting invite link below:"
-msgstr "生产堆栈社区会议每两周在**星期二**的**下午5:30-6:00（太平洋时间）**举行。请在下面找到会议邀请链接："
+msgstr ""
+"生产堆栈社区会议每两周在\\ **星期二**\\ 的\\ **下午5:30-6:00（太平洋时间）**\\ 举行。请在下面找到会议邀请链接："
 
 #: ../../source/community/meetings.rst:34
 msgid ""
 "**Calendar Invite**: `Google Calendar "
 "<https://drive.usercontent.google.com/u/0/uc?id=1I3WuivUVAq1vZ2XSW4rmqgD5c0bQcxE0&export=download>`__"
 msgstr ""
-"**日历邀请**： `Google 日历 "
-"<https://drive.usercontent.google.com/u/0/uc?id=1I3WuivUVAq1vZ2XSW4rmqgD5c0bQcxE0&export=download>`__"
+"**日历邀请**\\ ： `Google 日历 <https://drive.usercontent.google.com/u/0/uc?id=1I3WuivUVAq1vZ2XSW4rmqgD5c0bQcxE0&export=download>`__"
 
 #: ../../source/community/meetings.rst:35
 msgid ""

@@ -12,6 +12,7 @@ import os
 import sys
 
 # First Party
+from lmcache.cli.commands.base import BaseCommand
 from lmcache.cli.metrics import Metrics, StreamHandler, get_formatter
 from lmcache.logging import init_logger
 
@@ -19,34 +20,32 @@ logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.cli.commands.base import BaseCommand
-    from lmcache.cli.commands.trace.driver import ReplayResult
-    from lmcache.cli.commands.trace.stats import ReplayStatsCollector
+    from lmcache.cli.commands.trace._driver import ReplayResult
+    from lmcache.cli.commands.trace._stats import ReplayStatsCollector
 
 
-def register_replay_parser(
-    subparsers: argparse._SubParsersAction,
-    dispatch_func,
-) -> argparse.ArgumentParser:
-    """Register the ``lmcache trace replay`` subcommand parser.
+class ReplayCommand(BaseCommand):
+    """Replay a trace file against a fresh StorageManager."""
+
+    def name(self) -> str:
+        return "replay"
+
+    def help(self) -> str:
+        return "Replay a trace file against a fresh StorageManager."
+
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        add_replay_arguments(parser)
+
+    def execute(self, args: argparse.Namespace) -> None:
+        run_trace_replay(args)
+
+
+def add_replay_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add ``lmcache trace replay`` arguments to *parser*.
 
     Args:
-        subparsers: The ``trace`` subparsers action.
-        dispatch_func: Function to bind via ``set_defaults(func=...)``.
-
-    Returns:
-        The created ``ArgumentParser``.
+        parser: The ``ArgumentParser`` for the replay subcommand.
     """
-    parser = subparsers.add_parser(
-        "replay",
-        help="Replay a trace file against a fresh StorageManager.",
-        description=(
-            "Replay a trace file against a fresh StorageManager.  "
-            "Accepts the standard storage-manager config flags "
-            "(--l1-size-gb, --eviction-policy, --l2-…); see "
-            "'lmcache server --help' for the full list."
-        ),
-    )
     parser.add_argument(
         "trace_path",
         metavar="FILE",
@@ -86,12 +85,6 @@ def register_replay_parser(
         action="store_true",
         help="Also export an aggregated JSON summary.",
     )
-    parser.add_argument(
-        "-q",
-        "--quiet",
-        action="store_true",
-        help="Suppress the terminal metrics table (files are still written).",
-    )
 
     try:
         # First Party
@@ -103,11 +96,8 @@ def register_replay_parser(
     except ImportError as e:
         logger.warning("lmcache trace replay import error, error is %s", e)
 
-    parser.set_defaults(func=dispatch_func)
-    return parser
 
-
-def run_trace_replay(cmd: "BaseCommand", args: argparse.Namespace) -> None:
+def run_trace_replay(args: argparse.Namespace) -> None:
     """Construct a StorageManager from *args* and drive replay.
 
     Produces three kinds of output:
@@ -123,14 +113,10 @@ def run_trace_replay(cmd: "BaseCommand", args: argparse.Namespace) -> None:
       :class:`~lmcache.cli.metrics.Metrics` renderer.
 
     Args:
-        cmd: The parent command instance (unused but kept for interface
-            consistency).
         args: Parsed CLI arguments.
     """
-    # Deferred imports — guarded by _require_full_install() in the
-    # dispatcher before this function is called.
     # First Party
-    from lmcache.cli.commands.trace.driver import StorageReplayDriver
+    from lmcache.cli.commands.trace._driver import StorageReplayDriver
     from lmcache.v1.distributed.config import StorageManagerConfig, parse_args_to_config
     from lmcache.v1.mp_observability.config import parse_args_to_observability_config
     from lmcache.v1.mp_observability.trace.reader import TraceReader

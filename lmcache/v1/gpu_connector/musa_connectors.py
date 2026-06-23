@@ -13,11 +13,8 @@ from lmcache.v1.gpu_connector.gpu_connectors import (
     GPUConnectorInterface,
     VLLMPagedMemGPUConnectorV2,
 )
-from lmcache.v1.gpu_connector.musa_native import (
-    try_native_from_gpu,
-    try_native_to_gpu,
-)
 from lmcache.v1.gpu_connector.utils import (
+    DiscoverableKVCache,
     LayoutHints,
     _get_head_size_view,
     _split_token2d_kv,
@@ -38,6 +35,10 @@ from lmcache.v1.memory_management import (
     MemoryObj,
 )
 from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.v1.platform.musa.native_kv_transfer import (
+    try_native_from_gpu,
+    try_native_to_gpu,
+)
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
@@ -354,19 +355,27 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
         self.device = kv_caches[0].device
         assert self.device.type == "musa", "The device should be MUSA."
 
-        self.engine_kv_format, kv_caches = normalize_kv_and_discover_format(
-            kv_caches, EngineType.VLLM
+        discoverable_kv_caches = cast(DiscoverableKVCache, kv_caches)
+        normalized_kv_caches: DiscoverableKVCache
+        self.engine_kv_format, normalized_kv_caches = normalize_kv_and_discover_format(
+            discoverable_kv_caches, EngineType.VLLM
         )
-        self.num_layers = get_num_layers(kv_caches, self.engine_kv_format)
-        self.num_blocks = get_num_blocks(kv_caches, self.engine_kv_format)
-        self.block_size = get_block_size(kv_caches, self.engine_kv_format)
-        self.page_buffer_size = get_page_buffer_size(kv_caches, self.engine_kv_format)
-        self.hidden_dim_size = get_hidden_dim_size(kv_caches, self.engine_kv_format)
-        self.head_size = get_head_size(kv_caches, self.engine_kv_format)
+        self.num_layers = get_num_layers(normalized_kv_caches, self.engine_kv_format)
+        self.num_blocks = get_num_blocks(normalized_kv_caches, self.engine_kv_format)
+        self.block_size = get_block_size(normalized_kv_caches, self.engine_kv_format)
+        self.page_buffer_size = get_page_buffer_size(
+            normalized_kv_caches, self.engine_kv_format
+        )
+        self.hidden_dim_size = get_hidden_dim_size(
+            normalized_kv_caches, self.engine_kv_format
+        )
+        self.head_size = get_head_size(normalized_kv_caches, self.engine_kv_format)
         self.use_mla = is_mla(self.engine_kv_format)
-        self.dtype = get_dtype(kv_caches, self.engine_kv_format)
+        self.dtype = get_dtype(normalized_kv_caches, self.engine_kv_format)
         self.num_heads = (
-            1 if self.use_mla else get_num_heads(kv_caches, self.engine_kv_format)
+            1
+            if self.use_mla
+            else get_num_heads(normalized_kv_caches, self.engine_kv_format)
         )
 
         self._attributes_initialized = True

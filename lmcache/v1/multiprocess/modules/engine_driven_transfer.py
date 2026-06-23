@@ -23,6 +23,7 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext, ShmPoolInfo
 from lmcache.v1.multiprocess.engine_module import (
     HandlerSpec,
+    InstanceLivenessTarget,
     ThreadPoolType,
 )
 from lmcache.v1.multiprocess.protocols.base import RequestType
@@ -50,14 +51,20 @@ class EngineDrivenContextEntry:
         metadata: Layout metadata describing the non-CUDA chunk format.
         model_name: The name of the model associated with this context.
         world_size: The world size associated with this context.
+        last_seen: ``time.monotonic()`` of the most recent activity from this
+            instance (register, PING, prepare/commit). Drives reaping.
+        has_liveness_signal: True once the instance has sent at least one
+            PING. Selects the reap window. Latched only by PING.
     """
 
     metadata: EngineDrivenContextMetadata
     model_name: str
     world_size: int
+    last_seen: float = 0.0
+    has_liveness_signal: bool = False
 
 
-class EngineDrivenTransferModule:
+class EngineDrivenTransferModule(InstanceLivenessTarget):
     """Handles Engine-driven KV cache transfer operations.
 
     Owns non-GPU context registrations and provides handlers for
@@ -72,6 +79,10 @@ class EngineDrivenTransferModule:
         self._ctx = ctx
         self._engine_driven_contexts: dict[int, EngineDrivenContextEntry] = {}
         self._strategies: dict[int, TransferStrategy] = {}
+        # Guards _engine_driven_contexts and _strategies together (the reaper
+        # mutates them off the MQ main loop). Leaf lock, never held with
+        # _pending_shm_lock.
+        self._lock = threading.Lock()
         self._pending_shm_writes: dict[
             tuple[int, IPCCacheServerKey], list[ObjectKey]
         ] = {}
@@ -136,7 +147,9 @@ class EngineDrivenTransferModule:
         registered_non_cuda_ids: list[int] = []
         non_cuda_context_meta: dict[str, dict] = {}
 
-        for instance_id, entry in self._engine_driven_contexts.items():
+        with self._lock:
+            entries = dict(self._engine_driven_contexts)
+        for instance_id, entry in entries.items():
             registered_non_cuda_ids.append(instance_id)
             non_cuda_context_meta[str(instance_id)] = {
                 "model_name": entry.model_name,
@@ -152,8 +165,126 @@ class EngineDrivenTransferModule:
 
     def close(self) -> None:
         """Release resources owned by this module."""
-        self._engine_driven_contexts.clear()
-        self._strategies.clear()
+        with self._lock:
+            self._engine_driven_contexts.clear()
+            self._strategies.clear()
+
+    def touch_instance(self, instance_id: int) -> None:
+        """Refresh the worker's last-seen time and mark it ping-proven.
+
+        A no-op if the instance is not tracked.
+
+        Args:
+            instance_id: The worker instance ID.
+        """
+        now = time.monotonic()
+        with self._lock:
+            entry = self._engine_driven_contexts.get(instance_id)
+            if entry is not None:
+                entry.last_seen = now
+                entry.has_liveness_signal = True
+
+    def tracked_instance_count(self) -> int:
+        """Return the number of currently registered non-GPU instances."""
+        with self._lock:
+            return len(self._engine_driven_contexts)
+
+    def reap_stale_instances(
+        self, reap_timeout_s: float, registration_grace_s: float
+    ) -> list[int]:
+        """Reap non-GPU registrations that have gone silent.
+
+        A ping-proven instance is judged against ``reap_timeout_s``; one that
+        has never pinged against the larger ``registration_grace_s``.
+
+        Args:
+            reap_timeout_s: Silence budget for ping-proven instances.
+            registration_grace_s: Silence budget for never-pinged instances.
+
+        Returns:
+            The instance IDs reaped this scan.
+        """
+        now = time.monotonic()
+        reaped: list[tuple[int, EngineDrivenContextEntry]] = []
+        with self._lock:
+            stale_ids = [
+                iid
+                for iid, entry in self._engine_driven_contexts.items()
+                if now - entry.last_seen
+                > (
+                    reap_timeout_s
+                    if entry.has_liveness_signal
+                    else registration_grace_s
+                )
+            ]
+            for iid in stale_ids:
+                entry = self._engine_driven_contexts.pop(iid)
+                self._strategies.pop(iid, None)
+                reaped.append((iid, entry))
+        for iid, entry in reaped:
+            self._release_entry(iid, entry)
+            logger.warning(
+                "Reaped non-GPU instance %d: silent for %.1fs (pinged=%s)",
+                iid,
+                now - entry.last_seen,
+                entry.has_liveness_signal,
+            )
+        return [iid for iid, _ in reaped]
+
+    def _resolve_for_transfer(
+        self, instance_id: int
+    ) -> tuple[EngineDrivenContextEntry, TransferStrategy]:
+        """Return (entry, strategy) for a transfer, refreshing last_seen.
+
+        Pair-atomicity guarantees the entry exists whenever the strategy
+        does. Refreshes last_seen (no latch) so an active worker is not
+        reaped mid-transfer.
+
+        Args:
+            instance_id: The worker instance ID.
+
+        Returns:
+            The entry and its transfer strategy.
+
+        Raises:
+            ValueError: If the instance is not registered (or was reaped).
+        """
+        now = time.monotonic()
+        with self._lock:
+            entry = self._engine_driven_contexts.get(instance_id)
+            strategy = self._strategies.get(instance_id)
+            if entry is None or strategy is None:
+                raise ValueError(
+                    "non-GPU context not registered (or reaped) for "
+                    f"instance ID {instance_id}"
+                )
+            entry.last_seen = now
+            return entry, strategy
+
+    def _release_entry(self, instance_id: int, entry: EngineDrivenContextEntry) -> None:
+        """Release resources for a popped entry (run outside the lock).
+
+        Sweeps the instance's pending SHM transfers and unregisters its
+        layout descriptor.
+
+        Args:
+            instance_id: The popped instance ID.
+            entry: The popped entry.
+        """
+        with self._pending_shm_lock:
+            stale_writes = [k for k in self._pending_shm_writes if k[0] == instance_id]
+            stale_reads = [k for k in self._pending_shm_reads if k[0] == instance_id]
+            write_obj_keys = [self._pending_shm_writes.pop(k) for k in stale_writes]
+            read_obj_keys = [self._pending_shm_reads.pop(k) for k in stale_reads]
+
+        for obj_keys in write_obj_keys:
+            if obj_keys:
+                self._ctx.storage_manager.finish_write(obj_keys)
+        for obj_keys in read_obj_keys:
+            if obj_keys:
+                self._ctx.storage_manager.finish_read_prefetched(obj_keys)
+
+        self._ctx.layout_desc_registry.unregister(entry.model_name, entry.world_size)
 
     @staticmethod
     def _make_transfer_key(
@@ -183,15 +314,18 @@ class EngineDrivenTransferModule:
         shm_name = self._shm_pool_info["shm_name"]
         pool_size = self._shm_pool_info["pool_size"]
 
-        if payload.instance_id in self._engine_driven_contexts:
-            logger.warning(
-                "Instance %s's KV cache is already registered, "
-                "skipping the new registration",
-                payload.instance_id,
-            )
-            return RegisterEngineDrivenContextResponse(
-                shm_name=shm_name, pool_size=pool_size
-            )
+        now = time.monotonic()
+        with self._lock:
+            existing = self._engine_driven_contexts.get(payload.instance_id)
+            if existing is not None:
+                existing.last_seen = now
+                logger.info(
+                    "Instance %d already registered (non-GPU); refreshing liveness",
+                    payload.instance_id,
+                )
+                return RegisterEngineDrivenContextResponse(
+                    shm_name=shm_name, pool_size=pool_size
+                )
 
         dtype = getattr(torch, payload.dtype_str, None)
         if dtype is None or not isinstance(dtype, torch.dtype):
@@ -216,10 +350,15 @@ class EngineDrivenTransferModule:
             block_size=payload.block_size,
             use_mla=payload.use_mla,
         )
-        self._engine_driven_contexts[payload.instance_id] = EngineDrivenContextEntry(
+        # Build the entry and strategy outside the lock, then insert the pair
+        # atomically so a concurrent reap can never strand one without the
+        # other. REGISTER is SYNC-serialized, so it is the sole inserter.
+        entry = EngineDrivenContextEntry(
             metadata=metadata,
             model_name=payload.model_name,
             world_size=payload.world_size,
+            last_seen=now,
+            has_liveness_signal=False,
         )
         strategy: TransferStrategy = create_transfer_strategy(
             self._ctx.storage_manager,
@@ -230,7 +369,9 @@ class EngineDrivenTransferModule:
             pending_lock=self._pending_shm_lock,
             transfer_key_factory=self._make_transfer_key,
         )
-        self._strategies[payload.instance_id] = strategy
+        with self._lock:
+            self._engine_driven_contexts[payload.instance_id] = entry
+            self._strategies[payload.instance_id] = strategy
 
         logger.info(
             "Registered non-GPU context for instance %d (model=%s, world_size=%d)",
@@ -252,7 +393,10 @@ class EngineDrivenTransferModule:
         Args:
             instance_id: The worker instance identifier.
         """
-        entry = self._engine_driven_contexts.pop(instance_id, None)
+        with self._lock:
+            entry = self._engine_driven_contexts.pop(instance_id, None)
+            if entry is not None:
+                self._strategies.pop(instance_id, None)
         if entry is None:
             logger.warning(
                 "No registered non-GPU context found for instance ID %d",
@@ -260,34 +404,7 @@ class EngineDrivenTransferModule:
             )
             return
 
-        self._strategies.pop(instance_id, None)
-
-        with self._pending_shm_lock:
-            stale_writes = []
-            stale_reads = []
-            for transfer_key in self._pending_shm_writes:
-                if transfer_key[0] == instance_id:
-                    stale_writes.append(transfer_key)
-            for transfer_key in self._pending_shm_reads:
-                if transfer_key[0] == instance_id:
-                    stale_reads.append(transfer_key)
-
-            write_obj_keys = []
-            for transfer_key in stale_writes:
-                write_obj_keys.append(self._pending_shm_writes.pop(transfer_key))
-
-            read_obj_keys = []
-            for transfer_key in stale_reads:
-                read_obj_keys.append(self._pending_shm_reads.pop(transfer_key))
-
-        for obj_keys in write_obj_keys:
-            if obj_keys:
-                self._ctx.storage_manager.finish_write(obj_keys)
-        for obj_keys in read_obj_keys:
-            if obj_keys:
-                self._ctx.storage_manager.finish_read_prefetched(obj_keys)
-
-        self._ctx.layout_desc_registry.unregister(entry.model_name, entry.world_size)
+        self._release_entry(instance_id, entry)
         logger.info("Unregistered non-CUDA context for instance ID %d", instance_id)
 
     @_lmcache_nvtx_annotate
@@ -305,16 +422,7 @@ class EngineDrivenTransferModule:
         Returns:
             PrepareStoreResponse with empty slots for pickle mode.
         """
-        entry = self._engine_driven_contexts.get(instance_id)
-        if entry is None:
-            raise ValueError(
-                f"non-CUDA context not registered for instance ID {instance_id}"
-            )
-        strategy = self._strategies.get(instance_id)
-        if strategy is None:
-            raise ValueError(
-                f"transfer strategy not registered for instance ID {instance_id}"
-            )
+        entry, strategy = self._resolve_for_transfer(instance_id)
         response = strategy.prepare_store(
             key=key,
             instance_id=instance_id,
@@ -346,16 +454,7 @@ class EngineDrivenTransferModule:
             ValueError: If no non-GPU context is registered for the given
                 instance ID.
         """
-        entry = self._engine_driven_contexts.get(instance_id)
-        if entry is None:
-            raise ValueError(
-                f"non-CUDA context not registered for instance ID {instance_id}"
-            )
-        strategy = self._strategies.get(instance_id)
-        if strategy is None:
-            raise ValueError(
-                f"transfer strategy not registered for instance ID {instance_id}"
-            )
+        entry, strategy = self._resolve_for_transfer(instance_id)
         session = self._ctx.session_manager.get_or_create(key.request_id)
         st = session.extras.pop("store_start_time", None)
         result = strategy.commit_store(
@@ -395,11 +494,7 @@ class EngineDrivenTransferModule:
             ValueError: If no non-GPU context is registered for the given
                 instance ID.
         """
-        strategy = self._strategies.get(instance_id)
-        if strategy is None:
-            raise ValueError(
-                f"transfer strategy not registered for instance ID {instance_id}"
-            )
+        _, strategy = self._resolve_for_transfer(instance_id)
         response = strategy.prepare_retrieve(
             key=key,
             instance_id=instance_id,
@@ -424,11 +519,7 @@ class EngineDrivenTransferModule:
         Returns:
             Always ``True``.
         """
-        strategy = self._strategies.get(instance_id)
-        if strategy is None:
-            raise ValueError(
-                f"transfer strategy not registered for instance ID {instance_id}"
-            )
+        _, strategy = self._resolve_for_transfer(instance_id)
         session = self._ctx.session_manager.get_or_create(key.request_id)
         st = session.extras.pop("retrieve_start_time", None)
         result = strategy.commit_retrieve(key=key, instance_id=instance_id)

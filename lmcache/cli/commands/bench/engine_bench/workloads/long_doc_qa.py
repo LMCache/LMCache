@@ -27,6 +27,7 @@ class LongDocQAConfig:
     num_documents: int = 1
     shuffle_policy: str = "random"
     num_inflight_requests: int = 3
+    max_output_length: int = 128
 
     def __post_init__(self) -> None:
         if self.document_length <= 0:
@@ -36,6 +37,10 @@ class LongDocQAConfig:
         if self.query_per_document < 1:
             raise ValueError(
                 f"query_per_document must be >= 1, got {self.query_per_document}"
+            )
+        if self.max_output_length < 1:
+            raise ValueError(
+                f"max_output_length must be >= 1, got {self.max_output_length}"
             )
         if self.num_inflight_requests < 1:
             raise ValueError(
@@ -56,6 +61,7 @@ class LongDocQAConfig:
         query_per_document: int = 2,
         shuffle_policy: str = "random",
         num_inflight_requests: int = 3,
+        max_output_length: int = 128,
     ) -> "LongDocQAConfig":
         """Create a config with ``num_documents`` computed from KV cache budget.
 
@@ -66,6 +72,7 @@ class LongDocQAConfig:
             query_per_document: Number of questions per document.
             shuffle_policy: Request ordering — ``"random"`` or ``"tile"``.
             num_inflight_requests: Max concurrent in-flight requests.
+            max_output_length: Max tokens to generate per benchmark query.
 
         Returns:
             A fully-resolved LongDocQAConfig with computed num_documents.
@@ -88,6 +95,7 @@ class LongDocQAConfig:
             num_documents=num_documents,
             shuffle_policy=shuffle_policy,
             num_inflight_requests=num_inflight_requests,
+            max_output_length=max_output_length,
         )
 
 
@@ -265,6 +273,7 @@ class LongDocQAWorkload(BaseWorkload):
             await self._request_sender.send_request(
                 request_id,
                 messages,
+                max_tokens=self._config.max_output_length,
             )
         finally:
             self._semaphore.release()

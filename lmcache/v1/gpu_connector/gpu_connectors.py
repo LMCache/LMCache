@@ -11,12 +11,14 @@ from lmcache.logging import init_logger
 from lmcache.python_ops_fallback import set_shape_desc_dtype
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate
 from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
+from lmcache.v1.gpu_connector.kv_format.contiguity import (
+    attempt_permute_to_contiguous_view,
+)
 from lmcache.v1.gpu_connector.utils import (
     DiscoverableKVCache,
     LayoutHints,
     assert_is_vllm_flash_attn_or_flash_infer,
     assert_is_vllm_mla_or_flash_attn_or_flash_infer,
-    attempt_permute_to_contiguous_view,
     get_block_size,
     get_device,
     get_elements_per_layer,

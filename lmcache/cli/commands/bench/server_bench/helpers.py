@@ -55,8 +55,8 @@ try:
         KVLayerGroupInfo,
     )
     from lmcache.v1.multiprocess.custom_types import (
-        CudaIPCWrapper,
         IPCCacheServerKey,
+        KVCache,
         RegisterEngineDrivenContextPayload,
     )
     from lmcache.v1.multiprocess.futures import MessagingFuture
@@ -321,7 +321,7 @@ def _send_register_kv_cache(
     model_name: str = _MODEL_NAME,
     world_size: int = _WORLD_SIZE,
     layout_hints: dict | None = None,
-    kv_caches: list[CudaIPCWrapper] | None = None,
+    kv_caches: KVCache | None = None,
     use_gpu: bool = True,
     use_handle: bool | None = None,
     engine_group_infos: "list[EngineGroupInfo] | None" = None,
@@ -404,6 +404,47 @@ def _send_register_kv_cache(
     # can mmap the same pool and exchange tensor data without going
     # through pickle.
     return result
+
+
+def _send_unregister_kv_cache(
+    client: MessageQueueClient,
+    instance_id: int = 0,
+    use_handle: bool = True,
+) -> bool:
+    """Deregister a KV cache context from the MP server.
+
+    The inverse of :func:`_send_register_kv_cache`. Without this call
+    the server keeps the bench's registration (and the CUDA-IPC / POSIX
+    SHM mappings it holds) alive forever, leaking one context entry per
+    bench run.
+
+    Dispatches to the correct protocol based on ``use_handle``, mirroring
+    the register path:
+
+    * Handle mode: ``UNREGISTER_KV_CACHE``.
+    * Data mode: ``UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT``.
+
+    Both protocols take a single ``instance_id`` payload and return a void
+    reply, so success is distinguished from an RPC timeout only.
+
+    Args:
+        client: The MP message-queue client.
+        instance_id: The instance ID used at registration time. Must match
+            the ``instance_id`` passed to :func:`_send_register_kv_cache`.
+        use_handle: ``True`` for the handle path (GPU CUDA-IPC / CPU SHM),
+            ``False`` for the engine-driven data path.
+
+    Returns:
+        ``True`` if the server acknowledged the call, ``False`` on RPC
+        timeout.
+    """
+    request_type = (
+        RequestType.UNREGISTER_KV_CACHE
+        if use_handle
+        else RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
+    )
+    result = _call(client, request_type, [instance_id])
+    return result is not _TIMEOUT
 
 
 def _send_lookup(

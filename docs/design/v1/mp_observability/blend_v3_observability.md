@@ -38,6 +38,7 @@ cb.request                         [scheduler — root]  request_id, model, worl
 │  ├─ cb.lookup.rpc                [scheduler]  CB_UNIFIED_LOOKUP incl. N poll re-issues; attr: n_polls
 │  │  └─ cb.lookup                 [SERVER]  ← cross-process child; attr prefix_chunks
 │  │     ├─ cb.fingerprint_match   [server]  n_probes, table_hits, matches (token-stride=1, any offset)
+│  │     │  (cb.coordinator_match instead, when a coordinator is configured)  matches, timed_out
 │  │     │  (no cb.prefix_lookup span — prefix is traced by mp.lookup_prefetch)
 │  │     ├─ cb.sparse_prefetch     [server]  n_keys, l1_hits, l2_misses
 │  │     │  └─ cb.l2_load          [server·IO]  chunks, bytes, ms        (coalesced L2→L1)
@@ -97,6 +98,7 @@ timing is GPU-accurate):
 | new event pair | span | timing source |
 |---|---|---|
 | `CB_FINGERPRINT_MATCH_*` | `cb.fingerprint_match` | CPU |
+| `CB_COORDINATOR_MATCH_*` | `cb.coordinator_match` (fleet directory leg; mutually exclusive with the local matcher) | CPU + IO |
 | (prefix lookup) | `mp.lookup_prefetch` (reused; `prefix_chunks` attr on `cb.lookup`) | CPU |
 | `CB_SPARSE_PREFETCH_*` | `cb.sparse_prefetch` (+ existing L2 prefetch span as `cb.l2_load`) | CPU + IO |
 | `CB_SCATTER_*` | `cb.scatter` (re-RoPE folded in via `n_shifted`) | `publish_on_stream` (GPU) |
