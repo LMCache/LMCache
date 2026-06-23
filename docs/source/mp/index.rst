@@ -354,7 +354,13 @@ methods:
 
 - ``reserve_write()`` / ``finish_write()`` -- Two-phase write into L1.
 - ``submit_prefetch_task()`` / ``query_prefetch_status()`` -- Async lookup +
-  L2 prefetch.
+  L2 prefetch. ``query_prefetch_status()`` is non-blocking and returns
+  ``None`` while the L2 prefetch is still in flight.
+- ``wait_prefetch_status()`` -- Blocking alternative to polling
+  ``query_prefetch_status()``: waits on a controller condition variable
+  until the prefetch result is published (or a timeout expires).
+  L1-only prefetches return immediately. Used by the
+  ``WAIT_PREFETCH_STATUS`` RPC to avoid busy-polling on the load path.
 - ``read_prefetched_results()`` / ``finish_read_prefetched()`` -- Read
   prefetched data from L1 with automatic lock management.
 
