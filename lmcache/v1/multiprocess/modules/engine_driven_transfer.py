@@ -634,7 +634,9 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 block_size=g_block_size,
                 use_mla=g_use_mla,
             )
-            group_cpu_data = pickle.dumps(group_chunk_list)
+            group_cpu_data = pickle.dumps(
+                group_chunk_list, protocol=pickle.HIGHEST_PROTOCOL,
+            )
             result = strategy.commit_store(
                 key=key,
                 instance_id=instance_id,
