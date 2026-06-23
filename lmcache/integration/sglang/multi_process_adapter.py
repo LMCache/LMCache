@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import Optional
 import os
 import threading
-import time
 
 # Third Party
 from sglang.srt.configs.model_config import ModelConfig
@@ -39,6 +38,10 @@ from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType
 
 logger = init_logger(__name__)
+
+# Extra seconds the WAIT_PREFETCH_STATUS response is allowed beyond the daemon's
+# own blocking-wait budget, to cover the request/response round trip.
+_WAIT_LOOKUP_RESPONSE_BUFFER_S = 5.0
 
 
 def _wrap_sglang_kv_caches(
@@ -230,26 +233,24 @@ class LMCacheMPConnector:
         return (starts // self.page_size).tolist()
 
     def _wait_for_lookup(self, request_id: str) -> int:
-        """Poll QUERY_PREFETCH_STATUS with the LOOKUP's request_id until the
-        daemon reports a chunk count. Upstream switched LOOKUP to a fire-
-        and-forget call and keys the prefetch job by request_id (a string);
-        the result is the number of matched chunks once available.
+        """Wait for the LOOKUP's prefetch to finish and return the matched bytes.
+
+        Sends a single blocking WAIT_PREFETCH_STATUS request so the daemon
+        blocks until the prefetch result is published (or its wait times out),
+        instead of the client busy-polling QUERY_PREFETCH_STATUS. Upstream keys
+        the prefetch job by request_id (a string); the result is the number of
+        matched chunks once available.
         """
-        # TODO(Shaoting): busy poll. No effect when using L1 only. A real fix
-        # needs a blocking QUERY_PREFETCH_STATUS variant on the daemon side
-        # (new RequestType + PrefetchController completion Event).
-        deadline = time.monotonic() + self._mq_timeout
-        while True:
-            matched_chunks = send_lmcache_request(
-                self.mq_client,
-                RequestType.QUERY_PREFETCH_STATUS,
-                [request_id],
-            ).result(timeout=self._mq_timeout)
-            if matched_chunks is not None:
-                return matched_chunks * self._lmcache_chunk_size
-            if time.monotonic() >= deadline:
-                raise TimeoutError("Timed out waiting for LMCache prefetch to finish")
-            time.sleep(0.001)
+        # The daemon blocks up to ``self._mq_timeout`` for the result, so give
+        # the response itself a little longer than that to cover the round trip.
+        matched_chunks = send_lmcache_request(
+            self.mq_client,
+            RequestType.WAIT_PREFETCH_STATUS,
+            [request_id, self._mq_timeout],
+        ).result(timeout=self._mq_timeout + _WAIT_LOOKUP_RESPONSE_BUFFER_S)
+        if matched_chunks is None:
+            raise TimeoutError("Timed out waiting for LMCache prefetch to finish")
+        return matched_chunks * self._lmcache_chunk_size
 
     def _free_lookup_locks(
         self,
