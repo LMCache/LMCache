@@ -9,7 +9,8 @@ Here are a few examples:
 - [KV cache lookup](lookup/)
 - [KV cache move](move/)
 - [KV cache pin](pin/)
+- [KV cache controller health](health/)
 
 Unsupported APIs (WIP):
-- [KV cache decompress](decompress/)
-- [KV cache unpin](unpin/)
+- KV cache decompress
+- KV cache unpin
