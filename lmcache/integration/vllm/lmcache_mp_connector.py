@@ -140,6 +140,7 @@ def validate_mamba_step_alignment(vllm_config: VllmConfig) -> None:
 
 def build_parallel_strategy_from_vllm_config(
     vllm_config: "VllmConfig",
+    n_servers: int,
 ) -> ParallelStrategy:
     """Build a ParallelStrategy from a vLLM config.
 
@@ -147,6 +148,7 @@ def build_parallel_strategy_from_vllm_config(
 
     Args:
         vllm_config: The vLLM configuration object.
+        n_servers: Number of LMCache servers backing this deployment.
 
     Returns:
         The constructed ParallelStrategy.
@@ -158,6 +160,7 @@ def build_parallel_strategy_from_vllm_config(
         vllm_worker_id=pc.rank,
         tp_size=pc.tensor_parallel_size,
         pp_size=pc.pipeline_parallel_size,
+        n_servers=n_servers,
     )
 
 
@@ -491,8 +494,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     The connector for LMCache multi-process mode.
 
     Extra configs (kv_transfer_config.extra_config):
+
+    Multi-server deployment:
+    - lmcache.mp.server_urls: server URL list or comma-separated string,
+      e.g. "tcp://host1:6667,tcp://host2:6667".
+
+    Single-server deployment:
     - lmcache.mp.host: the host of the LMCache server.
     - lmcache.mp.port: the port of the LMCache server.
+
     - lmcache.mp.mq_timeout: timeout (seconds) for message queue requests.
     - lmcache.mp.heartbeat_interval: interval (seconds) between server
       heartbeat pings.
@@ -511,23 +521,72 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         validate_kv_cache_groups(getattr(self, "_kv_cache_config", None))
 
         assert vllm_config.kv_transfer_config is not None
-        server_host = vllm_config.kv_transfer_config.get_from_extra_config(
-            "lmcache.mp.host", "tcp://localhost"
+
+        # Multi-server: prefer lmcache.mp.server_urls (list or comma-separated
+        # string) over the single-server lmcache.mp.host / lmcache.mp.port.
+        server_urls_cfg = vllm_config.kv_transfer_config.get_from_extra_config(
+            "lmcache.mp.server_urls", None
         )
-        server_port = vllm_config.kv_transfer_config.get_from_extra_config(
-            "lmcache.mp.port", 5555
+        if server_urls_cfg:
+            if isinstance(server_urls_cfg, list):
+                server_urls = [u.strip() for u in server_urls_cfg if u.strip()]
+            else:
+                server_urls = [
+                    u.strip() for u in server_urls_cfg.split(",") if u.strip()
+                ]
+        else:
+            # Legacy single-server fallback.
+            server_host = vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.host", "tcp://localhost"
+            )
+            server_port = vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.port", 5555
+            )
+            server_urls = [f"{server_host}:{server_port}"]
+
+        # The server count is derived from lmcache.mp.server_urls.
+        n_servers = len(server_urls)
+
+        assert vllm_config.parallel_config.world_size % n_servers == 0, (
+            f"world_size ({vllm_config.parallel_config.world_size}) must be "
+            f"divisible by n_servers ({n_servers})"
         )
 
-        server_url = f"{server_host}:{server_port}"
+        # Multi-server + DP is not supported yet.
+        dp_size = getattr(vllm_config.parallel_config, "data_parallel_size", 1)
+        if n_servers > 1 and dp_size > 1:
+            raise ValueError(
+                "LMCacheMPConnector multi-server mode (n_servers > 1) does not "
+                f"support data parallelism yet; got dp_size={dp_size}. "
+                "DP across multiple LMCache servers will be "
+                "supported in a follow-up PR."
+            )
+
+        # Multi-server + MLA: only TP is supported (no PP).
+        # PP splits layers across nodes, which would cause per-piece
+        # reader counts to vary per (server, pp_stage) pair and break
+        # the single-``tp_size`` LOOKUP / FREE_LOOKUP_LOCKS protocol.
+        # Non-MLA mode is not affected by this restriction.
+        if n_servers > 1:
+            pp_size = vllm_config.parallel_config.pipeline_parallel_size
+            if pp_size > 1:
+                raise ValueError(
+                    "LMCacheMPConnector multi-server mode only supports "
+                    "tensor parallelism (TP), not pipeline parallelism (PP). "
+                    f"Got pp_size={pp_size}."
+                )
+
         zmq_context = zmq.Context.instance()
-        parallel_strategy = build_parallel_strategy_from_vllm_config(vllm_config)
+        parallel_strategy = build_parallel_strategy_from_vllm_config(
+            vllm_config, n_servers
+        )
 
         if self.role == KVConnectorRole.SCHEDULER:
             # Banner from the scheduler role only, so tensor-parallel
             # deployments print it once rather than once per worker.
             print_banner_once(sys.stderr)
             self.scheduler_adapter = LMCacheMPSchedulerAdapter(
-                server_url=server_url,
+                server_urls=server_urls,
                 context=zmq_context,
                 model_name=vllm_config.model_config.model,
                 vllm_block_size=vllm_config.cache_config.block_size,
@@ -536,8 +595,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
         elif self.role == KVConnectorRole.WORKER:
+            # Node routing: a worker connects only to its local LMCache server.
+            # Global ranks are assigned to nodes in contiguous blocks:
+            #   node 0 → ranks [0, ranks_per_node),
+            #   node 1 → [ranks_per_node, 2 * ranks_per_node), ...
+            ranks_per_node = parallel_strategy.vllm_world_size // n_servers
+            local_server_url = server_urls[
+                parallel_strategy.vllm_worker_id // ranks_per_node
+            ]
             self.worker_adapter = LMCacheMPWorkerAdapter(
-                server_url=server_url,
+                server_url=local_server_url,
                 context=zmq_context,
                 model_name=vllm_config.model_config.model,
                 vllm_block_size=vllm_config.cache_config.block_size,
@@ -790,6 +857,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         if hasattr(self, "worker_adapter"):
             self.worker_adapter.shutdown()
+        if hasattr(self, "scheduler_adapter"):
+            self.scheduler_adapter.shutdown()
         return None
 
     def get_kv_connector_stats(self) -> "KVConnectorStats | None":

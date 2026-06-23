@@ -607,6 +607,33 @@ class StorageManager:
         # L2 lookup done: total prefix hits are L1 plus the L2 continuation.
         return l1_hits + l2_r
 
+    def wait_prefetch_status(
+        self,
+        handle: PrefetchHandle,
+        timeout: float,
+    ) -> bool:
+        """
+        Block until the prefetch task for ``handle`` has a result, or timeout.
+
+        L1-only prefetches (``prefetch_request_id == -1``) have no L2 result to
+        wait for and return immediately. This lets a caller avoid busy-polling
+        query_prefetch_status; the status itself is still retrieved via
+        query_prefetch_status afterwards.
+
+        Args:
+            handle (PrefetchHandle): The handle of the prefetch task.
+            timeout: Maximum number of seconds to wait for the L2 result.
+
+        Returns:
+            True if a result is available within the timeout (always True for
+            an L1-only prefetch), False if the wait timed out.
+        """
+        if handle.prefetch_request_id == -1:
+            return True
+        return self._prefetch_controller.wait_prefetch_result(
+            handle.prefetch_request_id, timeout
+        )
+
     def query_prefetch_status(
         self,
         handle: PrefetchHandle,

@@ -354,34 +354,8 @@ Registered adapter types: ``nixl_store``, ``nixl_store_dynamic``, ``fs``,
 Each adapter type's required and optional fields, plus per-backend examples, are
 documented on its own page under :doc:`Secondary KV Storage <l2_storage/index>`
 -- including the adapters not detailed inline here (``fs_native``,
-``raw_block``, ``dax``, ``mooncake_store``, ``hfbucket``, ``resp``).
-
-``aerospike`` -- Aerospike native connector
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Native C++ Aerospike L2 adapter (optional; build with ``BUILD_AEROSPIKE=1``).
-See :doc:`l2_storage/index` for build prerequisites and the full field list.
-
-Fields:
-
-- ``hosts`` *(required)*: Seed hosts ``host:port[,host:port...]``.
-- ``namespace`` *(optional, default ``"lmcache"``)*: Aerospike namespace.
-- ``set_name`` / ``set`` *(optional, default ``"kv_chunks"``)*: Aerospike set.
-- ``num_workers`` *(optional, default ``8``)*: C++ I/O worker threads.
-- ``read_timeout_ms`` / ``write_timeout_ms`` *(optional)*: Client timeouts.
-- ``default_ttl_seconds`` *(optional, default ``86400``)*: Record TTL
-  (``0`` = namespace default).
-- ``target_segment_bytes`` / ``max_record_bytes`` *(optional, default ``0``)*:
-  Shard target and record-cap override (``0`` = auto-discover).
-- ``username`` / ``password`` *(optional)*: Enterprise Edition auth.
-- ``max_capacity_gb`` *(optional, default ``0``)*: L2 capacity for eviction
-  (``0`` disables tracking).
-
-Example:
-
-.. code-block:: bash
-
-    --l2-adapter '{"type": "aerospike", "hosts": "127.0.0.1:3000", "namespace": "lmcache", "set_name": "kv_chunks", "num_workers": 8}'
+``raw_block``, ``dax``, ``mooncake_store``, ``aerospike``, ``hfbucket``,
+``resp``).
 
 Multiple adapters (cascade)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~

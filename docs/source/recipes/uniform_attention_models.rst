@@ -38,56 +38,57 @@ Supported architectures
    :header-rows: 1
    :widths: 28 30 10 10 10 12
 
-   * - Architecture
+   * - Model
      - Example HF model
      - vLLM
      - SGLang
      - TRT-LLM
      - Recipe
 
-   * - ``MiniMaxM2ForCausalLM``
+   * - MiniMax M2 series
      - ``MiniMaxAI/MiniMax-M2``
      - ✓
      - —
      - —
      - :doc:`minimax_m2`
 
-   * - ``MistralForCausalLM``
+   * - Mistral / Devstral
      - ``mistralai/Devstral-2-123B-Instruct-2512``
      - ✓
      - —
      - —
      - :doc:`devstral`
 
-   * - ``Qwen3MoeForCausalLM``
+   * - Qwen3 MoE
      - ``Qwen/Qwen3-235B-A22B``
      - ✓
      - —
      - —
      - :doc:`qwen3`
 
-   * - ``LlamaForCausalLM``
+   * - Llama
      - ``meta-llama/Meta-Llama-3.1-70B-Instruct``
      - ✓
      - —
      - —
      - :doc:`llama`
 
-   * - ``Phi3ForCausalLM``
+   * - Phi-3 / Phi-4
      - ``microsoft/Phi-4-mini-instruct``
      - ✓
      - —
      - —
      - :doc:`phi3`
 
-   * - ``MixtralForCausalLM``
+   * - Mixtral
      - ``mistralai/Mixtral-8x7B-Instruct-v0.1``
      - ✓
      - —
      - —
      - :doc:`mixtral`
 
-Legend: ``✓`` validated, ``—`` not validated.
+Legend: ``✓`` validated, ``—`` not validated. The **Model** column is the model
+family; each recipe page lists the exact vLLM architecture class it covers.
 
 Contributing a recipe
 ---------------------

@@ -354,7 +354,7 @@ class ContinuousUsageContext:
             self.interval_num_hit_tokens = 0
             self.interval_num_stored_tokens = 0
         except Exception as e:
-            logger.debug(f"Unable to send lmcache caching usage message: {e}")
+            logger.debug("Unable to send lmcache caching usage message: %s", e)
         try:
             histogram_data = self.list_to_histogram(
                 self.cache_lifespan_data, self.cache_lifespan_buckets
@@ -367,7 +367,7 @@ class ContinuousUsageContext:
                 logger.debug("caching lifespan message sent.")
             self.cache_lifespan_data = []
         except Exception as e:
-            logger.debug(f"Unable to send lmcache caching lifespan message: {e}")
+            logger.debug("Unable to send lmcache caching lifespan message: %s", e)
 
     def list_to_histogram(self, data: List[float], buckets: List[float]) -> dict:
         histogram, _ = np.histogram(data, bins=buckets)

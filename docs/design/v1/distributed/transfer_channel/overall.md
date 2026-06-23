@@ -27,6 +27,7 @@ The abstraction is transport-agnostic; the only implementation today is
             │                                                │
             │  get_transfer_channel_server()  ── singleton ──┼──► TransferChannelServer
             │  get_transfer_channel_client(peer_url) ────────┼──► TransferChannelClient (per peer)
+            │  remove_transfer_channel_client(peer_url)      │
             │  get_transfer_channel_address([(off,size)…])   │
             │  get_num_connected_clients()                   │
             │  close()                                       │
@@ -72,6 +73,12 @@ All names below are exported from
     — get or create a client to the peer. Note: for bidirectional transports
     (like NIXL) the client may instead be created *passively* when the peer
     dials this context's server; this is transparent to the caller.
+  - `remove_transfer_channel_client(peer_advertise_url: str) -> None`
+    — discard the peer's client when reads from it are no longer needed (e.g.
+    its owning L2 adapter is being removed) and free its resources. Outstanding
+    task ids for that client become invalid; a later
+    `get_transfer_channel_client` returns a fresh one. A no-op for an unknown
+    peer.
   - `get_transfer_channel_address(lmcache_addresses: list[tuple[int, int]]) -> list[TransferChannelAddress]`
     — validate `(offset, size)` pairs against the registered region and convert.
   - `get_num_connected_clients() -> int`
