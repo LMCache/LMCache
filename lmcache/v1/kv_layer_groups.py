@@ -662,6 +662,23 @@ class KVLayerGroupsManager:
 # ------------------------------------------------------------------ #
 
 
+def _engine_kv_format_for_shape_spec(kv_size: int) -> "lmc_ops.EngineKVFormat":
+    """The Engine KV format detection would yield for a ``--kvcache-shape-spec``.
+
+    The spec builds kernel groups directly from a shape string, short-circuiting
+    detection, so a group still needs a format. The spec's column order
+    (kv_size, nb, bs, nh, hs) is the NHD per-layer layout, so ``kv_size`` selects
+    K+V (``NL_X_TWO_NB_BS_NH_HS``) vs key-only MLA (``NL_X_NB_BS_HS``).
+
+    These bench/standalone groups are client-side bookkeeping -- shape/dtype drive
+    tensor allocation and block-id maths -- so the format is not read by a
+    transfer kernel, which re-detects it server-side from the registered tensors.
+    """
+    if kv_size == 1:
+        return lmc_ops.EngineKVFormat.NL_X_NB_BS_HS
+    return lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+
+
 def parse_kvcache_shape_spec(
     spec_str: str,
 ) -> list[KernelGroupInfo]:
@@ -758,15 +775,7 @@ def parse_kvcache_shape_spec(
                 "Shape must be a 5-tuple (kv_size,nb,bs,nh,hs): %s" % group_spec
             )
         kv_size, nb, bs, nh, hs = shape
-        # The shape spec fixes a canonical per-layer layout (kv_size, nb, bs, nh,
-        # hs), so recover the matching Engine KV format from kv_size (1 => key-only
-        # MLA, otherwise K+V) -- the spec carries no format enum, but the kernel
-        # group needs one just like the detected path.
-        engine_kv_format = (
-            lmc_ops.EngineKVFormat.NL_X_NB_BS_HS
-            if kv_size == 1
-            else lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
-        )
+        engine_kv_format = _engine_kv_format_for_shape_spec(kv_size)
         shape_desc = lmc_ops.PageBufferShapeDesc()
         shape_desc.kv_size = kv_size
         shape_desc.nl = layer_count
