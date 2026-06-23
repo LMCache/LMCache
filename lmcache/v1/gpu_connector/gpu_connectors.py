@@ -478,7 +478,6 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
             self.metadata.kv_layer_groups_manager = KVLayerGroupsManager(
                 self.kvcaches,
                 engine_kv_formats=engine_kv_formats,
-                num_blocks=self.num_blocks,
             )
         klg_manager = self.metadata.kv_layer_groups_manager
 

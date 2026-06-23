@@ -89,7 +89,6 @@ def _make_kv_tensors(
 
 def _build_manager(
     tensors: list[torch.Tensor],
-    num_blocks: int = 4,
     engine_kv_format: "lmc_ops.EngineKVFormat" = (
         lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
     ),
@@ -100,7 +99,6 @@ def _build_manager(
     return KVLayerGroupsManager(
         tensors,
         engine_kv_formats=[engine_kv_format] * len(tensors),
-        num_blocks=num_blocks,
         engine_group_infos=engine_group_infos,
         lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
     )
@@ -117,7 +115,6 @@ def _make_temp_buffer(
     tensors = _make_kv_tensors(specs, num_blocks=num_blocks)
     manager = _build_manager(
         tensors,
-        num_blocks=num_blocks,
         engine_group_infos=engine_group_infos,
         lmcache_tokens_per_chunk=chunk_size,
     )

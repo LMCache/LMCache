@@ -956,6 +956,5 @@ def _create_metadata(use_mla, kv_caches, engine_kv_format):
     metadata.kv_layer_groups_manager = KVLayerGroupsManager(
         kv_list,
         engine_kv_formats=[engine_kv_format] * len(kv_list),
-        num_blocks=get_num_blocks(kv_list, engine_kv_format),
     )
     return metadata

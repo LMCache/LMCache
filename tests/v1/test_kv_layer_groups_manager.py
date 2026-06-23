@@ -28,15 +28,14 @@ pytestmark = pytest.mark.skipif(
 def _build_manager(
     tensors: list[torch.Tensor],
     *,
-    num_blocks: int,
     engine_group_infos: Sequence[EngineGroupInfo] = (),
 ) -> KVLayerGroupsManager:
     """Build a manager using the per-layer NHD format.
 
     Tensors in these tests have shape ``[2, NB, BS, NH, HS]`` — the
     canonical vLLM flash-attention per-layer NHD layout matched by
-    ``GPUKVFormat.NL_X_TWO_NB_BS_NH_HS``. ``bs`` is discovered
-    per-layer from the tensor shapes, so callers no longer pass it.
+    ``GPUKVFormat.NL_X_TWO_NB_BS_NH_HS``. ``bs`` and ``nb`` are discovered
+    per-layer from the tensor shapes, so callers pass neither.
     """
     # First Party
     import lmcache.c_ops as lmc_ops
@@ -44,7 +43,6 @@ def _build_manager(
     return KVLayerGroupsManager(
         tensors,
         engine_kv_formats=[lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS] * len(tensors),
-        num_blocks=num_blocks,
         engine_group_infos=engine_group_infos,
     )
 
@@ -53,12 +51,12 @@ class TestKVLayerGroupsManager:
     """Tests for KVLayerGroupsManager construction and lookups."""
 
     def test_build_empty(self):
-        manager = _build_manager([], num_blocks=32)
+        manager = _build_manager([])
         assert manager.kernel_groups == []
 
     def test_build_single_layer(self):
         tensors = [torch.randn(2, 32, 256, 8, 64, dtype=torch.float16)]
-        manager = _build_manager(tensors, num_blocks=32)
+        manager = _build_manager(tensors)
 
         assert len(manager.kernel_groups) == 1
         group = manager.kernel_groups[0]
@@ -89,7 +87,6 @@ class TestKVLayerGroupsManager:
                 lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
                 lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
             ],
-            num_blocks=32,
             engine_group_infos=[
                 EngineGroupInfo(0, (0,)),
                 EngineGroupInfo(1, (1,)),
@@ -115,7 +112,7 @@ class TestKVLayerGroupsManager:
         tensors = [
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16) for _ in range(3)
         ]
-        manager = _build_manager(tensors, num_blocks=32)
+        manager = _build_manager(tensors)
 
         assert len(manager.kernel_groups) == 1
         group = manager.kernel_groups[0]
@@ -130,7 +127,6 @@ class TestKVLayerGroupsManager:
         ]
         manager = _build_manager(
             tensors,
-            num_blocks=32,
             engine_group_infos=[
                 EngineGroupInfo(0, (0, 2)),
                 EngineGroupInfo(1, (1, 3)),
@@ -151,7 +147,6 @@ class TestKVLayerGroupsManager:
         with pytest.raises(ValueError, match="outside registered layer"):
             _build_manager(
                 tensors,
-                num_blocks=32,
                 engine_group_infos=[EngineGroupInfo(0, (2,))],
             )
 
@@ -166,7 +161,6 @@ class TestKVLayerGroupsManager:
         with pytest.raises(ValueError, match="engine group info"):
             _build_manager(
                 tensors,
-                num_blocks=32,
                 engine_group_infos=[EngineGroupInfo(0, (0, 1))],
             )
 
@@ -176,7 +170,7 @@ class TestKVLayerGroupsManager:
             torch.randn(2, 32, 256, 16, 64, dtype=torch.float16),
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
         ]
-        manager = _build_manager(tensors, num_blocks=32)
+        manager = _build_manager(tensors)
         assert len(manager.kernel_groups) == 2
         group1, group2 = manager.kernel_groups
         assert group1.layer_indices == [0, 2]
@@ -190,7 +184,7 @@ class TestKVLayerGroupsManager:
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float32),
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
         ]
-        manager = _build_manager(tensors, num_blocks=32)
+        manager = _build_manager(tensors)
         assert len(manager.kernel_groups) == 2
         group1, group2 = manager.kernel_groups
         assert group1.layer_indices == [0, 2]
@@ -206,7 +200,7 @@ class TestKVLayerGroupsManager:
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),  # nh=8, f16
             torch.randn(2, 32, 256, 16, 64, dtype=torch.float32),  # nh=16, f32
         ]
-        manager = _build_manager(tensors, num_blocks=32)
+        manager = _build_manager(tensors)
         assert len(manager.kernel_groups) == 4
 
         groups_by_key = {(g.shape_desc.nh, g.dtype): g for g in manager.kernel_groups}
@@ -220,7 +214,7 @@ class TestKVLayerGroupsManager:
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
             torch.randn(2, 32, 256, 16, 64, dtype=torch.float16),
         ]
-        manager = _build_manager(tensors, num_blocks=32)
+        manager = _build_manager(tensors)
 
         sd0 = manager.get_shape_desc(0)
         assert sd0.nh == 8
@@ -416,7 +410,7 @@ class TestKernelAndObjectGroups:
         tensors = [
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16) for _ in range(3)
         ]
-        manager = _build_manager(tensors, num_blocks=32)
+        manager = _build_manager(tensors)
         # The deprecated alias must still return the live list, not a bound
         # method (regression guard for the @property/@deprecate ordering).
         assert isinstance(manager.kv_layer_groups, list)
@@ -432,7 +426,7 @@ class TestKernelAndObjectGroups:
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
             torch.randn(2, 32, 256, 16, 64, dtype=torch.float16),
         ]
-        manager = _build_manager(tensors, num_blocks=32)
+        manager = _build_manager(tensors)
         assert manager.num_kernel_groups == 2
         assert manager.num_object_groups == 1
         obj = manager.object_groups[0]
@@ -447,7 +441,6 @@ class TestKernelAndObjectGroups:
         tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(2)]
         manager = _build_manager(
             tensors,
-            num_blocks=32,
             engine_group_infos=[
                 EngineGroupInfo(0, (0,)),
                 EngineGroupInfo(1, (1,), sw_size_tokens=64),
@@ -462,7 +455,6 @@ class TestKernelAndObjectGroups:
         with pytest.raises(ValueError, match="sliding window"):
             _build_manager(
                 tensors,
-                num_blocks=32,
                 engine_group_infos=[EngineGroupInfo(0, (0,), sw_size_tokens=64)],
             )
 
@@ -477,7 +469,6 @@ class TestKernelAndObjectGroups:
         ]
         manager = _build_manager(
             tensors,
-            num_blocks=32,
             engine_group_infos=[
                 EngineGroupInfo(0, (0,)),
                 EngineGroupInfo(0, (1,), sw_size_tokens=64),
@@ -503,7 +494,6 @@ class TestKernelAndObjectGroups:
         ]
         manager = _build_manager(
             tensors,
-            num_blocks=32,
             engine_group_infos=[
                 EngineGroupInfo(0, (0,)),
                 EngineGroupInfo(0, (1,), sw_size_tokens=64),
@@ -519,7 +509,7 @@ class TestKernelAndObjectGroups:
     def test_empty_manager_has_no_groups(self):
         # Empty registration returns early in __init__; both group lists must
         # still be initialized (regression guard for missing _object_groups).
-        manager = _build_manager([], num_blocks=32)
+        manager = _build_manager([])
         assert manager.kernel_groups == []
         assert manager.num_kernel_groups == 0
         assert manager.object_groups == []
@@ -532,7 +522,6 @@ class TestKernelAndObjectGroups:
         ]
         manager = _build_manager(
             tensors,
-            num_blocks=32,
             engine_group_infos=[EngineGroupInfo(0, (0, 1))],
         )
         grouped = sorted(
@@ -543,7 +532,7 @@ class TestKernelAndObjectGroups:
     def test_calculate_num_blocks_uncompressed(self):
         # bs=16, compress_ratio=1 -> 256 tokens span 16 blocks.
         tensors = [torch.randn(2, 32, 16, 8, 64, dtype=torch.float16) for _ in range(2)]
-        manager = _build_manager(tensors, num_blocks=32)
+        manager = _build_manager(tensors)
         assert manager.calculate_num_blocks(0, 256) == 16
 
     def test_dsv4_flash_style_mixed_compression(self):
@@ -558,7 +547,6 @@ class TestKernelAndObjectGroups:
         ]
         manager = _build_manager(
             tensors,
-            num_blocks=8,
             engine_group_infos=[
                 EngineGroupInfo(0, (0,), tokens_per_block=256),
                 EngineGroupInfo(0, (1,), tokens_per_block=256),
@@ -582,7 +570,6 @@ class TestKernelAndObjectGroups:
         tensors = [torch.randn(2, 32, 8, 8, 64, dtype=torch.float16) for _ in range(2)]
         manager = _build_manager(
             tensors,
-            num_blocks=32,
             engine_group_infos=[
                 EngineGroupInfo(0, (0, 1), tokens_per_block=16),
             ],

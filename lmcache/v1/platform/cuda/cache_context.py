@@ -364,9 +364,9 @@ class GPUCacheContext(BaseCacheContext):
             layout_hints,
         )
         # Group-0 representative, for diagnostics/logging only (e.g.
-        # get_attention_backend). Everything that varies per group -- format,
-        # dtype, heads, block_size -- is read per KernelGroupInfo; num_blocks is
-        # the one shared scalar (a single block-id space across groups).
+        # get_attention_backend) and the single-group blend path. Everything that
+        # varies per group -- format, dtype, heads, block_size, num_blocks -- is
+        # read per KernelGroupInfo.
         engine_kv_format = engine_kv_formats[0]
         self.device_ = get_device(kv_caches_norm)
         num_layers_val = len(engine_kv_formats)
@@ -375,7 +375,6 @@ class GPUCacheContext(BaseCacheContext):
         kv_layer_groups_manager = KVLayerGroupsManager(
             kv_caches_norm,
             engine_kv_formats=engine_kv_formats,
-            num_blocks=num_blocks_val,
             engine_group_infos=engine_group_infos,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
         )

@@ -294,7 +294,6 @@ class KVLayerGroupsManager:
         self,
         kv_caches: "DiscoverableKVCache",
         engine_kv_formats: "Sequence[lmc_ops.EngineKVFormat]",
-        num_blocks: int,
         engine_group_infos: "Sequence[EngineGroupInfo]" = (),
         lmcache_tokens_per_chunk: int = 256,
     ) -> None:
@@ -311,7 +310,6 @@ class KVLayerGroupsManager:
                 mixes formats across engine groups (e.g. MiniMax-M3) supplies the
                 differing per-layer formats so each group is shaped with its own;
                 homogeneous models repeat one shared format.
-            num_blocks: Number of paged blocks in the device KV cache.
             engine_group_infos: Engine KV cache group metadata, one info per
                 kernel group in kernel-group order, or empty.
             lmcache_logical_chunk_size: Tokens per LMCache chunk
@@ -320,6 +318,7 @@ class KVLayerGroupsManager:
         # lmcache.v1.gpu_connector.__init__ → metadata → kv_layer_groups.
         # First Party
         from lmcache.v1.gpu_connector.utils import (
+            get_num_blocks,
             make_page_buffer_shape_desc,
             resolve_block_stride_and_log_layout,
         )
@@ -358,6 +357,9 @@ class KVLayerGroupsManager:
             # Every layer in a group shares one format in practice (the
             # identity's geometry is format-derived), so the first represents it.
             group_format = engine_kv_formats[indices[0]]
+            # Block count is per engine group (each is its own block-id space), so
+            # read it from this group's own tensor rather than a context-wide value.
+            group_num_blocks = get_num_blocks([kv_caches[indices[0]]], group_format)
             block_stride_elems = resolve_block_stride_and_log_layout(
                 kv_caches,
                 group_format,
@@ -369,7 +371,7 @@ class KVLayerGroupsManager:
                 group_format,
                 layer_idx=indices[0],
                 num_layers_in_group=len(indices),
-                num_blocks=num_blocks,
+                num_blocks=group_num_blocks,
                 block_size=bs,
                 block_stride_elems=block_stride_elems,
             )
