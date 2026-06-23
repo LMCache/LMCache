@@ -159,7 +159,16 @@ async def kvcache_check(
             content={"error": "kv_caches empty"},
         )
 
-    engine_kv_format = ctx.engine_kv_format
+    per_layer_formats = ctx.engine_kv_formats_per_layer()
+    if len({int(fmt) for fmt in per_layer_formats}) > 1:
+        return JSONResponse(
+            status_code=501,
+            content={
+                "error": "checksum not supported for mixed-format models "
+                "(this endpoint assumes one block axis for every layer)"
+            },
+        )
+    engine_kv_format = per_layer_formats[0]
     block_axis = _BLOCK_AXIS_BY_FORMAT.get(engine_kv_format)
     if block_axis is None:
         return JSONResponse(

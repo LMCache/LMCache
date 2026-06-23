@@ -523,7 +523,7 @@ class TestGPUCacheContextReportStatus:
         assert group["layer_indices"] == [0, 1, 2, 3]
         assert group["is_mla"] is False
         assert group["engine_kv_format"] == "NL_X_TWO_NB_BS_NH_HS"
-        assert group["dtype"] == str(ctx.dtype)
+        assert group["dtype"] == str(ctx.kv_tensors[0].dtype)
 
     def test_report_status_multi_group(self) -> None:
         ctx = _make_context(_MULTI_GROUP)

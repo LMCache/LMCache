@@ -1689,7 +1689,7 @@ class BlendV3Module(InstanceLivenessTarget):
                                     gpu_context.device,
                                     page_buffer_size,
                                     lmc_ops.TransferDirection.H2D,
-                                    gpu_context.engine_kv_format,
+                                    gpu_context.get_engine_kv_format(group_idx),
                                     block_size=bs,
                                     head_size=rope_state.head_size,
                                 )

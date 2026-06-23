@@ -54,7 +54,6 @@ class BaseCacheContext(ABC):
     def __init__(
         self,
         *,
-        engine_kv_format: Any,
         kv_caches: list[torch.Tensor],
         device: torch.device,
         num_layers: int,
@@ -63,7 +62,6 @@ class BaseCacheContext(ABC):
         block_ids_buffer: torch.Tensor,
         lmcache_tokens_per_chunk: int,
     ) -> None:
-        self.engine_kv_format_ = engine_kv_format
         self.kv_caches_ = kv_caches
         self.device_ = device
         self.num_layers_ = num_layers
@@ -75,12 +73,6 @@ class BaseCacheContext(ABC):
     # ------------------------------------------------------------------
     # Abstract -- subclasses MUST implement
     # ------------------------------------------------------------------
-
-    @property
-    @abstractmethod
-    def dtype(self) -> torch.dtype:
-        """Returns the dtype of the KV cache tensors."""
-        ...
 
     @property
     @abstractmethod
@@ -143,11 +135,6 @@ class BaseCacheContext(ABC):
     # ------------------------------------------------------------------
     # Concrete -- shared implementations
     # ------------------------------------------------------------------
-
-    @property
-    def engine_kv_format(self) -> Any:
-        """Returns the EngineKVFormat enum value."""
-        return self.engine_kv_format_
 
     @property
     def device(self) -> torch.device:
@@ -214,6 +201,21 @@ class BaseCacheContext(ABC):
             )
         return engine_kv_format
 
+    def engine_kv_formats_per_layer(self) -> list["lmc_ops.EngineKVFormat"]:
+        """Returns the Engine KV format of each layer, aligned with kv_tensors.
+
+        Each registered KV tensor maps to the format of the kernel group that
+        owns its layer. Mixed-format models (e.g. MiniMax-M3) return differing
+        entries; homogeneous models return one value repeated per layer.
+        """
+        groups = self.kv_layer_groups_manager.kv_layer_groups
+        per_layer: dict[int, "lmc_ops.EngineKVFormat"] = {}
+        for kernel_group_idx, group in enumerate(groups):
+            engine_kv_format = self.get_engine_kv_format(kernel_group_idx)
+            for layer_idx in group.layer_indices:
+                per_layer[layer_idx] = engine_kv_format
+        return [per_layer[layer_idx] for layer_idx in range(self.num_layers)]
+
     def get_slots_per_chunk_in_sw(self, kernel_group_idx: int) -> int:
         """Returns the number of slots per lmcache chunk for D/H
         transfer."""
@@ -268,16 +270,6 @@ class BaseCacheContext(ABC):
     # ------------------------------------------------------------------
     # Derived properties (pure helpers)
     # ------------------------------------------------------------------
-
-    @property
-    def engine_kv_shape(self) -> str:
-        """Returns the symbolic KV cache layout description."""
-        return get_engine_kv_shape_description(self.engine_kv_format)
-
-    @property
-    def attention_backend(self) -> str:
-        """Returns the attention backend name."""
-        return get_attention_backend(self.engine_kv_format)
 
     @property
     def concrete_engine_kv_shape(self) -> str:

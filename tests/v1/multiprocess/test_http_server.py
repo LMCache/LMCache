@@ -41,15 +41,13 @@ def _make_kv_tensors(
 def mock_gpu_ctx():
     """Create a mock GPUCacheContext with kv_tensors."""
     ctx = MagicMock()
-    type(ctx).kv_tensors = PropertyMock(
-        return_value=_make_kv_tensors(),
-    )
+    tensors = _make_kv_tensors()
+    type(ctx).kv_tensors = PropertyMock(return_value=tensors)
     type(ctx).block_size = PropertyMock(return_value=4)
     # KV tensors are built as [2, NB, BS, NH, HS] -> NL_X_TWO_NB_BS_NH_HS.
-    ctx.engine_kv_format_ = lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
-    type(ctx).engine_kv_format = PropertyMock(
-        return_value=lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
-    )
+    ctx.engine_kv_formats_per_layer.return_value = [
+        lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+    ] * len(tensors)
     return ctx
 
 

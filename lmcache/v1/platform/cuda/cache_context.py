@@ -27,7 +27,6 @@ from lmcache.v1.gpu_connector.gds_context import get_gds_context
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
     get_device,
-    get_dtype,
     get_group_data_ptrs,
     get_num_blocks,
     normalize_and_discover_per_layer_formats,
@@ -388,7 +387,6 @@ class GPUCacheContext(BaseCacheContext):
         )
 
         super().__init__(
-            engine_kv_format=engine_kv_format,
             kv_caches=kv_caches_norm,
             device=self.device_,
             num_layers=num_layers_val,
@@ -442,10 +440,6 @@ class GPUCacheContext(BaseCacheContext):
         """
         with torch_dev.stream(self.cuda_stream_):
             get_gds_context().deregister_gpu_buffer(self._temp_buffer.buffer)
-
-    @property
-    def dtype(self) -> torch.dtype:
-        return get_dtype(self.kv_caches_, self.engine_kv_format)
 
     @property
     def stream(self) -> Any:

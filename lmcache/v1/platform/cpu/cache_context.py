@@ -119,7 +119,6 @@ class CPUCacheContext(BaseCacheContext):
         block_ids_buffer = torch.empty(_MAX_BLOCK_IDS, dtype=torch.long)
 
         super().__init__(
-            engine_kv_format=engine_kv_format,
             kv_caches=kv_caches_list,
             device=self.device_,
             num_layers=num_layers_val,
@@ -221,11 +220,6 @@ class CPUCacheContext(BaseCacheContext):
         pass
 
     # -- Properties (same API as GPUCacheContext) --
-
-    @property
-    def dtype(self) -> torch.dtype:
-        """Returns the dtype of the KV cache tensors."""
-        return self.kv_caches_[0].dtype
 
     @property
     def max_batch_size(self) -> int:
