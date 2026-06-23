@@ -206,9 +206,20 @@ class BaseCacheContext(ABC):
         The per-group format -- read by the transfer path so a model mixing
         formats across groups (e.g. MiniMax-M3) dispatches each group with its
         own, instead of the context's single representative ``engine_kv_format``.
+
+        Raises:
+            ValueError: If the group has no format (a bookkeeping group built by
+                ``parse_kvcache_shape_spec`` should never reach the transfer
+                path; detection-built groups always carry one).
         """
         groups = self.kv_layer_groups_manager.kv_layer_groups
-        return groups[kernel_group_idx].engine_kv_format
+        engine_kv_format = groups[kernel_group_idx].engine_kv_format
+        if engine_kv_format is None:
+            raise ValueError(
+                f"kernel group {kernel_group_idx} has no engine_kv_format; a "
+                "formatless bookkeeping group reached the transfer path"
+            )
+        return engine_kv_format
 
     def get_slots_per_chunk_in_sw(self, kernel_group_idx: int) -> int:
         """Returns the number of slots per lmcache chunk for D/H

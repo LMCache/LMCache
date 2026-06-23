@@ -183,12 +183,17 @@ class KernelGroupInfo:
     """Torch dtype of the KV cache tensors for this group. Used for
     kernel template instantiation; see class docstring for why we keep
     this alongside ``shape_desc.element_size``."""
-    engine_kv_format: "lmc_ops.EngineKVFormat"
+    engine_kv_format: "lmc_ops.EngineKVFormat | None" = None
     """Engine KV format of this group's layers (every layer in a group shares
     one format). The per-group transfer path reads this instead of the cache
     context's single representative format, so a model that mixes formats across
     engine groups -- e.g. MiniMax-M3's K+V main cache and key-only MLA index
-    cache -- dispatches each group with its own format."""
+    cache -- dispatches each group with its own format.
+
+    ``None`` for groups built by :func:`parse_kvcache_shape_spec` (the
+    ``--kvcache-shape-spec`` bench path): those are client-side bookkeeping with
+    no detected format and never drive a transfer, which re-detects server-side.
+    Always set for detection-built groups, which the transfer path reads."""
     tokens_per_block: int = 0
     """Logical engine tokens covered by one paged chunk (one engine block
     ID) of this group, as declared by the engine's KV cache spec at
@@ -660,23 +665,6 @@ class KVLayerGroupsManager:
 # ------------------------------------------------------------------ #
 
 
-def _engine_kv_format_for_shape_spec(kv_size: int) -> "lmc_ops.EngineKVFormat":
-    """The Engine KV format detection would yield for a ``--kvcache-shape-spec``.
-
-    The spec builds kernel groups directly from a shape string, short-circuiting
-    detection, so a group still needs a format. The spec's column order
-    (kv_size, nb, bs, nh, hs) is the NHD per-layer layout, so ``kv_size`` selects
-    K+V (``NL_X_TWO_NB_BS_NH_HS``) vs key-only MLA (``NL_X_NB_BS_HS``).
-
-    These bench/standalone groups are client-side bookkeeping -- shape/dtype drive
-    tensor allocation and block-id maths -- so the format is not read by a
-    transfer kernel, which re-detects it server-side from the registered tensors.
-    """
-    if kv_size == 1:
-        return lmc_ops.EngineKVFormat.NL_X_NB_BS_HS
-    return lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
-
-
 def parse_kvcache_shape_spec(
     spec_str: str,
 ) -> list[KernelGroupInfo]:
@@ -773,7 +761,6 @@ def parse_kvcache_shape_spec(
                 "Shape must be a 5-tuple (kv_size,nb,bs,nh,hs): %s" % group_spec
             )
         kv_size, nb, bs, nh, hs = shape
-        engine_kv_format = _engine_kv_format_for_shape_spec(kv_size)
         shape_desc = lmc_ops.PageBufferShapeDesc()
         shape_desc.kv_size = kv_size
         shape_desc.nl = layer_count
@@ -790,7 +777,6 @@ def parse_kvcache_shape_spec(
                 layer_indices=indices,
                 shape_desc=shape_desc,
                 dtype=dtype,
-                engine_kv_format=engine_kv_format,
             )
         )
         layer_offset += layer_count
