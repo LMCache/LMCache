@@ -414,6 +414,7 @@ def alloc_pinned_numa_ptr(size: int, numa_id: int = 0) -> int:
 
 def free_pinned_numa_ptr(ptr: int, size: int | None = None) -> None:
     """Non-CUDA equivalent of freeing a previously allocated NUMA pointer."""
+
     # Release the tensor object for that pointer reference
     _tensor_registry.pop(ptr, None)
 
@@ -430,6 +431,7 @@ def alloc_pinned_ptr(size: int, device_id: int = 0) -> int:
 
 def free_pinned_ptr(ptr: int) -> None:
     """Non-CUDA equivalent of freeing a previously allocated pinned pointer."""
+
     # Release the tensor object for that pointer reference
     _tensor_registry.pop(ptr, None)
 
