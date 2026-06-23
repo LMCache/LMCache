@@ -145,6 +145,15 @@ class EngineDrivenContext(ABC):
         mq_client: Message-queue client used for server communication.
         mq_timeout: Timeout in seconds for blocking MQ requests.
     """
+    def __init__(
+        self,
+        metadata: EngineDrivenContextMetadata,
+        mq_client: MessageQueueClient,
+        mq_timeout: float,
+    ) -> None:
+        self.metadata = metadata
+        self.mq_client = mq_client
+        self.mq_timeout = mq_timeout
 
     @abstractmethod
     def prepare_store(
