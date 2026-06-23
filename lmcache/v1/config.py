@@ -34,6 +34,25 @@ from lmcache.v1.config_base import (
 logger = init_logger(__name__)
 
 
+def _to_hidden_states_retrieve_mode(value: Any) -> str:
+    """Normalize hidden_states_retrieve_mode from YAML/env."""
+    if value is None:
+        return "prefix_strict"
+    s = str(value).strip().lower().replace("-", "_")
+    if s in ("prefix_strict", "prefixstrict"):
+        return "prefix_strict"
+    if s in (
+        "skip_missing_chunks",
+        "skipmissingchunks",
+        "legacy",
+    ):
+        return "skip_missing_chunks"
+    raise ValueError(
+        "hidden_states_retrieve_mode must be 'prefix_strict' or "
+        f"'skip_missing_chunks', got {value!r}"
+    )
+
+
 # Configuration aliases and deprecated mappings
 _CONFIG_ALIASES = {
     # Maps deprecated names to current names
@@ -598,6 +617,67 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
             "Application ID to send to the remote configuration service. "
             "If not set, the remote service may infer it from current config "
             "and environment variables."
+        ),
+    },
+    # Hidden state caching configurations (vLLM-Omni multi-stage pipeline)
+    "enable_hidden_state_cache": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+        "description": (
+            "Enable caching of thinker hidden states alongside KV cache entries "
+            "for vLLM-Omni multi-stage pipelines. When enabled, hidden states "
+            "are stored in a separate CPU pinned memory pool and share the same "
+            "chunk keys as their corresponding KV entries."
+        ),
+    },
+    "max_hidden_state_cpu_size": {
+        "type": float,
+        "default": 2.0,
+        "env_converter": float,
+        "description": (
+            "Maximum size in GB of pinned CPU memory for the hidden state cache. "
+            "Each chunk-layer tensor is [chunk_size, hidden_dim] float32. "
+            "Sizing formula: num_cached_layers × chunk_size × hidden_dim × 4 bytes. "
+            "Example: Qwen3-Omni with layers=[0,24], chunk_size=256, hidden_dim=5120 "
+            "→ ~10 MB/chunk; 2 GB allows ≈200 chunks (~51K tokens) of prefix. "
+            "If this budget is too small, hidden entries will be evicted before "
+            "their KV counterparts, causing partial-prefix fallback. "
+            "Relevant only when enable_hidden_state_cache=True."
+        ),
+    },
+    "hidden_state_layers": {
+        "type": Optional[list[int]],
+        "default": None,
+        "env_converter": _to_int_list,
+        "description": (
+            "Optional allowlist of **storage layer indices** accepted by "
+            "HiddenStateStore.store_hidden_states. If None (recommended "
+            "default), every layer index passed on store is cached. "
+            "**Semantics depend on the integration:** these are storage "
+            "layer_idx values, not necessarily transformer layer IDs. For "
+            "example, a multi-stage pipeline may use layer_idx 0 for the main "
+            "hidden-state tensor and 1, 2, … for multimodal output slots; "
+            "copying unrelated examples such as [0, 24] as if they were "
+            '"model layers" can **silently drop** rows stored under other '
+            "indices. Leave this unset unless you have verified the exact "
+            "indices your stack writes—consult your integration's docs. "
+            "Relevant only when enable_hidden_state_cache=True."
+        ),
+    },
+    "hidden_states_retrieve_mode": {
+        "type": str,
+        "default": "prefix_strict",
+        "env_converter": _to_hidden_states_retrieve_mode,
+        "description": (
+            "How to assemble hidden_states_out on retrieve() when some KV-hit "
+            "chunks lack a paired hidden entry. "
+            "'prefix_strict' (default): stop at the first missing chunk — "
+            "outputs align with a contiguous token prefix (recommended for "
+            "thinker→talker). "
+            "'skip_missing_chunks': legacy behavior — skip missing chunks and "
+            "concatenate later chunks; tensor length may not match ret_mask. "
+            "Relevant only when enable_hidden_state_cache=True."
         ),
     },
 }
