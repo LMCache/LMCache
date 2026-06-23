@@ -551,7 +551,21 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         Used by multi-group engine-driven transfer: the worker sends one
         ``COMMIT_STORE_GROUP`` per group so that each ``cpu_data`` blob
         stays under the msgspec msgpack bin limit (4 GiB).
+
+        The incoming ``cpu_data`` is in the worker's wire format (dev24+
+        tagged-tuple pickles, or <=dev23 legacy). We deserialize to the
+        canonical ``list[torch.Tensor]`` and re-pickle in the storage-
+        backend format (``pickle.dumps(list_of_tensors)``) before handing
+        off to ``strategy.commit_store``. This matches what
+        ``_commit_store_multi_group`` does for the legacy
+        ``COMMIT_STORE`` path and keeps the storage format unchanged
+        across ``dev24+`` upgrades (so existing L2 cache entries written
+        by ``dev23`` stay readable).
         """
+        import pickle
+        from lmcache.v1.multiprocess.transfer_context.base import (
+            _deserialize_multi_group_chunks,
+        )
         entry, strategy = self._resolve_for_transfer(instance_id)
         if not entry.metadata.is_multi_group:
             logger.error(
@@ -568,6 +582,25 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 num_groups,
             )
             return False
+        # Deserialize the wire format and re-pickle in storage format.
+        # ``_deserialize_multi_group_chunks`` returns a list of groups;
+        # this message carries exactly one, so we take index 0.
+        deserialized = _deserialize_multi_group_chunks(cpu_data)
+        if len(deserialized) != 1:
+            logger.error(
+                "commit_store_group: expected exactly 1 group in cpu_data, "
+                "got %d (instance_id=%d, group_idx=%d)",
+                len(deserialized),
+                instance_id,
+                group_idx,
+            )
+            return False
+        group_chunk_list = deserialized[0]
+        # Storage backend format: pickled list of CPU tensors (no extra
+        # tag wrapping). Use HIGHEST_PROTOCOL for faster storage I/O.
+        storage_payload = pickle.dumps(
+            group_chunk_list, protocol=pickle.HIGHEST_PROTOCOL,
+        )
         all_obj_keys = self._resolve_all_group_obj_keys(key, num_groups)
         g_layout_desc = entry.metadata.group_layout_descs[group_idx]
         g_block_size = entry.metadata.group_block_sizes[group_idx]
@@ -583,7 +616,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         result = strategy.commit_store(
             key=key,
             instance_id=instance_id,
-            cpu_data=cpu_data,
+            cpu_data=storage_payload,
             context=g_metadata,
             resolve_obj_keys=lambda k, gi=group_idx: all_obj_keys[gi],
         )
