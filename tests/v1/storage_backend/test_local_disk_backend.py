@@ -69,6 +69,19 @@ def create_test_metadata():
     )
 
 
+def create_rank_metadata(local_rank: int, local_world_size: int) -> LMCacheMetadata:
+    """Create LMCacheMetadata with explicit local worker placement."""
+    return LMCacheMetadata(
+        model_name="test_model",
+        world_size=local_world_size,
+        local_world_size=local_world_size,
+        worker_id=local_rank,
+        local_worker_id=local_rank,
+        kv_dtype=torch.bfloat16,
+        kv_shape=(28, 2, 256, 8, 128),
+    )
+
+
 def create_test_key(key_id: int = 0) -> CacheEngineKey:
     """Create a test CacheEngineKey."""
     return CacheEngineKey(
@@ -351,31 +364,28 @@ class TestMultiPathDiskBackend:
     def test_equal_quota_is_split_across_assigned_paths(
         self, async_loop, local_cpu_backend
     ):
-        """Assigned paths share the backend budget evenly."""
+        """max_local_disk_size is split over paths assigned to this worker."""
         dirs = [tempfile.mkdtemp() for _ in range(4)]
         try:
             combined = ",".join(dirs)
-            size = 512 * 1024
-            config = create_test_config(combined, max_disk_size=(4 * size) / 1024**3)
-            metadata = LMCacheMetadata(
-                model_name="test_model",
-                world_size=2,
-                local_world_size=2,
-                worker_id=1,
-                local_worker_id=1,
-                kv_dtype=torch.bfloat16,
-                kv_shape=(28, 2, 256, 8, 128),
+            quota_per_path = 512 * 1024
+            assigned_quota = 2 * quota_per_path
+            config = create_test_config(
+                combined, max_disk_size=assigned_quota / 1024**3
             )
             backend = LocalDiskBackend(
                 config=config,
                 loop=async_loop,
                 local_cpu_backend=local_cpu_backend,
                 dst_device="cuda:1",
-                metadata=metadata,
+                metadata=create_rank_metadata(local_rank=1, local_world_size=2),
             )
             assert backend.assigned_paths == dirs[2:4]
-            assert backend.path_max_cache_sizes == {dirs[2]: size, dirs[3]: size}
-            assert backend.max_cache_size == 2 * size
+            assert backend.path_max_cache_sizes == {
+                dirs[2]: quota_per_path,
+                dirs[3]: quota_per_path,
+            }
+            assert backend.max_cache_size == assigned_quota
         finally:
             for d in dirs:
                 shutil.rmtree(d, ignore_errors=True)
@@ -384,38 +394,51 @@ class TestMultiPathDiskBackend:
     def test_init_fails_when_assigned_path_available_space_is_too_small(
         self, async_loop, local_cpu_backend
     ):
-        """Init fails if assigned filesystems cannot satisfy their quota."""
+        """Init fails when any assigned filesystem is below its quota."""
         dirs = [tempfile.mkdtemp() for _ in range(4)]
         try:
             combined = ",".join(dirs)
-            size = 512 * 1024
-            config = create_test_config(combined, max_disk_size=(4 * size) / 1024**3)
-            metadata = LMCacheMetadata(
-                model_name="test_model",
-                world_size=2,
-                local_world_size=2,
-                worker_id=1,
-                local_worker_id=1,
-                kv_dtype=torch.bfloat16,
-                kv_shape=(28, 2, 256, 8, 128),
+            quota_per_path = 512 * 1024
+            config = create_test_config(
+                combined, max_disk_size=(2 * quota_per_path) / 1024**3
             )
+            metadata = create_rank_metadata(local_rank=1, local_world_size=2)
 
-            real_stats = {path: os.statvfs(path) for path in dirs}
+            real_stat = os.stat
+            real_statvfs = os.statvfs
 
-            class FakeStat:
+            class FakeStatVFS:
                 def __init__(self, *, f_bsize: int, f_frsize: int, f_bavail: int):
                     self.f_bsize = f_bsize
                     self.f_frsize = f_frsize
                     self.f_bavail = f_bavail
 
+            class FakeStat:
+                def __init__(self, *, path: str, st_dev: int):
+                    self.st_dev = st_dev
+                    self.st_mode = real_stat(path).st_mode
+
             def fake_statvfs(path):
                 if path == dirs[2]:
-                    return FakeStat(f_bsize=4096, f_frsize=4096, f_bavail=1)
-                return real_stats[path]
+                    return FakeStatVFS(f_bsize=4096, f_frsize=4096, f_bavail=1)
+                return real_statvfs(path)
 
-            with patch(
-                "lmcache.v1.storage_backend.local_disk_backend.os.statvfs",
-                side_effect=fake_statvfs,
+            def fake_stat(path):
+                if path == dirs[2]:
+                    return FakeStat(path=path, st_dev=100)
+                if path == dirs[3]:
+                    return FakeStat(path=path, st_dev=101)
+                return real_stat(path)
+
+            with (
+                patch(
+                    "lmcache.v1.storage_backend.local_disk_backend.os.statvfs",
+                    side_effect=fake_statvfs,
+                ),
+                patch(
+                    "lmcache.v1.storage_backend.local_disk_backend.os.stat",
+                    side_effect=fake_stat,
+                ),
             ):
                 with pytest.raises(ValueError, match="available filesystem space"):
                     LocalDiskBackend(
@@ -437,20 +460,14 @@ class TestMultiPathDiskBackend:
         dirs = [tempfile.mkdtemp() for _ in range(4)]
         try:
             combined = ",".join(dirs)
-            size = 512 * 1024
-            config = create_test_config(combined, max_disk_size=(4 * size) / 1024**3)
-            metadata = LMCacheMetadata(
-                model_name="test_model",
-                world_size=2,
-                local_world_size=2,
-                worker_id=1,
-                local_worker_id=1,
-                kv_dtype=torch.bfloat16,
-                kv_shape=(28, 2, 256, 8, 128),
+            quota_per_path = 512 * 1024
+            config = create_test_config(
+                combined, max_disk_size=(2 * quota_per_path) / 1024**3
             )
+            metadata = create_rank_metadata(local_rank=1, local_world_size=2)
 
-            real_stats = {path: os.statvfs(path) for path in dirs}
-            real_stat_results = {path: os.stat(path) for path in dirs}
+            real_stat = os.stat
+            real_statvfs = os.statvfs
 
             class FakeStatVFS:
                 def __init__(self, *, f_bsize: int, f_frsize: int, f_bavail: int):
@@ -459,22 +476,23 @@ class TestMultiPathDiskBackend:
                     self.f_bavail = f_bavail
 
             class FakeStat:
-                def __init__(self, *, st_dev: int):
+                def __init__(self, *, path: str, st_dev: int):
                     self.st_dev = st_dev
+                    self.st_mode = real_stat(path).st_mode
 
             def fake_statvfs(path):
                 if path in {dirs[2], dirs[3]}:
                     return FakeStatVFS(
                         f_bsize=4096,
                         f_frsize=4096,
-                        f_bavail=(size + size // 2) // 4096,
+                        f_bavail=(quota_per_path + quota_per_path // 2) // 4096,
                     )
-                return real_stats[path]
+                return real_statvfs(path)
 
             def fake_stat(path):
                 if path in {dirs[2], dirs[3]}:
-                    return FakeStat(st_dev=99)
-                return real_stat_results[path]
+                    return FakeStat(path=path, st_dev=99)
+                return real_stat(path)
 
             with (
                 patch(
