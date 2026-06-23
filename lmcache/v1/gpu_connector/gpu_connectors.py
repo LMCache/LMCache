@@ -464,11 +464,9 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         if self.init:
             return
 
-        # This legacy in-process connector has no engine group metadata, so all
-        # layers form one (non-hybrid) group with a single shared format.
-        no_engine_groups: list[list[int]] = []
+        empty_engine_groups: list[list[int]] = []
         self.kvcaches, engine_kv_formats = normalize_and_discover_per_layer_formats(
-            self.kvcaches, no_engine_groups, EngineType.VLLM, self.layout_hints
+            self.kvcaches, empty_engine_groups, EngineType.VLLM, self.layout_hints
         )
         self.engine_kv_format = engine_kv_formats[0]
         self.num_blocks = get_num_blocks(self.kvcaches, self.engine_kv_format)
