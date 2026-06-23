@@ -140,7 +140,7 @@ class PathSharder:
         local_world_size: int | None = None,
         create_dirs: bool = False,
     ) -> None:
-        paths = [p.strip() for p in raw_csv.split(",") if p.strip()]
+        paths = [os.path.normpath(p.strip()) for p in raw_csv.split(",") if p.strip()]
         if not paths:
             raise ValueError("At least one path must be provided")
 

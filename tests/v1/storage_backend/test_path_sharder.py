@@ -108,6 +108,16 @@ class TestPathSharder:
             for d in dirs:
                 shutil.rmtree(d, ignore_errors=True)
 
+    def test_normalizes_trailing_slashes(self):
+        d = tempfile.mkdtemp()
+        try:
+            s = PathSharder(f"{d}/", strategy="by_gpu", dst_device="cuda:0")
+            assert s.selected == d
+            assert s.all_paths == [d]
+            assert s.assigned_paths == [d]
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
     @patch(
         "lmcache.v1.storage_backend.path_sharder.torch_dev.is_available",
         return_value=False,
