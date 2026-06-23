@@ -261,6 +261,42 @@ def test_conversion_mixed_kv_and_mla_groups():
     assert [group.tokens_per_block for group in spec] == [16, 128]
 
 
+def test_conversion_uniform_group_mixes_kv_and_mla_layouts():
+    """vLLM can coalesce a rank-5 K+V group and a rank-3 key-only indexer group
+    into ONE ``UniformTypeKVCacheSpecs`` group, not two. Detection must split it
+    by layout so the indexer gets the rank-3 format instead of inheriting the
+    K/V format; the two land in separate LMCache groups sharing one block-id
+    space."""
+    caches = {
+        **_same_shape_caches(["main.0", "main.1"]),  # rank-5 K+V
+        **_mla_caches(["idx.0", "idx.1"]),  # rank-3 indexer (key-only)
+    }
+    uniform_spec = UniformTypeKVCacheSpecs(
+        block_size=128,
+        kv_cache_specs={
+            "main.0": FullAttentionSpec(block_size=128),
+            "main.1": FullAttentionSpec(block_size=128),
+            "idx.0": MLAAttentionSpec(block_size=128),
+            "idx.1": MLAAttentionSpec(block_size=128),
+        },
+    )
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(["main.0", "main.1", "idx.0", "idx.1"], uniform_spec)
+            ]
+        ),
+        caches,
+    )
+
+    # One vLLM engine group, but two LMCache groups split by per-layer format.
+    assert num_engine_groups(spec) == 1
+    assert [group.engine_group_id for group in spec] == [0, 0]
+    assert [group.layer_indices for group in spec] == [(0, 1), (2, 3)]
+    # Both LMCache groups share the unified block-id space (tokens_per_block).
+    assert [group.tokens_per_block for group in spec] == [128, 128]
+
+
 def test_group_layers_by_identity_uses_per_layer_format():
     """A per-layer Engine KV format gives the K+V layer kv_size=2 and the MLA
     layer kv_size=1, splitting them into separate identities -- the per-group

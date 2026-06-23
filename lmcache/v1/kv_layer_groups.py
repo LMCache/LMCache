@@ -46,15 +46,13 @@ DTYPE_MAP: dict[str, torch.dtype] = {
 # distinct identity becomes one LMCache KV group:
 # ``(kv_size, num_heads, head_size, block_size, engine_group_idx, dtype,
 # engine_kv_format)``.
-# The ``engine_group_idx`` slot is the engine group id (one paged-
-# block address space). Block IDs are only meaningful within one such group, so
-# layers from different groups must not share one LMCache group (and thus one
-# transfer-kernel launch) even if their tensor shape and dtype match.
-# ``engine_kv_format`` is in the identity so two layouts that share every other
-# field but differ in axis order (e.g. NHD vs HND with num_heads == block_size)
-# can never merge into one group and be transferred with the wrong layout. It is
-# redundant for current models -- format already tracks ``engine_group_idx`` --
-# but makes "one format per kernel group" true by construction, not by accident.
+# ``engine_group_idx`` is the engine group id (one paged-block address space):
+# block IDs are only meaningful within one group, so layers from different
+# groups must not share an LMCache group even if shape and dtype match.
+# ``engine_kv_format`` keeps layouts that share an engine group from merging --
+# load-bearing when one ``engine_group_idx`` mixes layouts (a rank-5 K/V group
+# alongside a rank-3 key-only indexer cache): this field is what splits them
+# into separate kernel groups, each transferred with its own layout.
 class KernelGroupIdentity(NamedTuple):
     kv_size: int
     num_heads: int

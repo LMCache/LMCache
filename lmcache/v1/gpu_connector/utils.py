@@ -7,7 +7,7 @@
 # callers keep working unchanged.
 # mypy: disable-error-code="union-attr,call-overload"
 # Standard
-from collections.abc import Sequence
+from collections.abc import Hashable, Sequence
 from typing import TYPE_CHECKING, Optional, Union
 
 # Third Party
@@ -224,6 +224,29 @@ def normalize_kv_and_discover_format(
     return detect_format(kv_caches, serving_engine, layout_hints)
 
 
+def _layout_signature(layer: object) -> Hashable:
+    """Signature grouping KV layers that share an ``EngineKVFormat``.
+
+    Detection keys on tensor rank and on whether axis 0 or 1 is the K/V ``2``
+    axis, so layers agreeing on those share a format and are detected together
+    (shapes differing only in ``num_blocks`` stay in one split). A different-rank
+    layer -- e.g. a rank-3 key-only indexer cache sharing an engine group with
+    rank-5 K/V -- splits out and gets its own format. Non-tensor entries (nested
+    lists) fall back to one shared signature.
+
+    Args:
+        layer: One layer's registered KV cache (tensor or nested list).
+
+    Returns:
+        A hashable signature; equal signatures are detected together.
+    """
+    shape = getattr(layer, "shape", None)
+    if shape is None:
+        return ("non-tensor",)
+    ndim = len(shape)
+    return (ndim, ndim >= 1 and shape[0] == 2, ndim >= 2 and shape[1] == 2)
+
+
 def normalize_and_discover_per_layer_formats(
     kv_caches: "DiscoverableKVCache",
     layer_index_groups: "Sequence[Sequence[int]]",
@@ -263,13 +286,21 @@ def normalize_and_discover_per_layer_formats(
     groups = layer_index_groups or [range(len(kv_caches))]
     detected: dict[int, tuple[DiscoverableKVCache, "lmc_ops.EngineKVFormat"]] = {}
     for indices in groups:
-        group_format, normalized_sub = detect_format(
-            [kv_caches[i] for i in indices],
-            serving_engine,
-            layout_hints,
-        )
-        for sub_idx, layer_idx in enumerate(indices):
-            detected[layer_idx] = (normalized_sub[sub_idx], group_format)
+        # One engine group can still mix layouts (e.g. a rank-5 K/V group
+        # alongside a rank-3 key-only indexer cache sharing one block-id space).
+        # Format is a per-shape property, so split each group by layout and
+        # detect each split on its own; layers keep their order within a split.
+        splits: dict[Hashable, list[int]] = {}
+        for i in indices:
+            splits.setdefault(_layout_signature(kv_caches[i]), []).append(i)
+        for split_indices in splits.values():
+            split_format, normalized_split = detect_format(
+                [kv_caches[i] for i in split_indices],
+                serving_engine,
+                layout_hints,
+            )
+            for sub_idx, layer_idx in enumerate(split_indices):
+                detected[layer_idx] = (normalized_split[sub_idx], split_format)
 
     # A layer in no group (cross-layer KV sharing) keeps its own tensor and is
     # skipped downstream; give it any detected format so every layer has one.
