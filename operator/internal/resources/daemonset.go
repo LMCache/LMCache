@@ -257,8 +257,8 @@ func buildDaemonSetCore(
 					Annotations: podAnnotations,
 				},
 				Spec: corev1.PodSpec{
-					HostIPC:     true,
-					HostNetwork: derefBool(spec.HostNetwork, false),
+					HostIPC:            true,
+					HostNetwork:        derefBool(spec.HostNetwork, false),
 					RuntimeClassName:   runtimeClassName,
 					ServiceAccountName: spec.ServiceAccountName,
 					PriorityClassName:  spec.PriorityClassName,
