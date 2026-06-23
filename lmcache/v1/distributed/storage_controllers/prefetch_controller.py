@@ -255,8 +255,11 @@ class PrefetchController(StorageControllerInterface):
         self._lookup_results_lock = threading.Lock()
         self._completed_lookups: dict[PrefetchRequestId, int] = {}
 
-        # Thread-safe prefetch results (background -> external)
+        # Thread-safe prefetch results (background -> external).  The condition
+        # variable lets a WAIT_PREFETCH_STATUS handler block until a result is
+        # published instead of busy-polling QUERY_PREFETCH_STATUS.
         self._prefetch_results_lock = threading.Lock()
+        self._prefetch_results_cv = threading.Condition(self._prefetch_results_lock)
         self._completed_results: dict[PrefetchRequestId, Bitmap] = {}
 
         # Map eventfds to adapter indices for quick lookup in poll.
@@ -415,6 +418,29 @@ class PrefetchController(StorageControllerInterface):
             with self._lookup_results_lock:
                 self._completed_lookups.pop(request_id, None)
         return result
+
+    def wait_prefetch_result(
+        self, request_id: PrefetchRequestId, timeout: float
+    ) -> bool:
+        """
+        Block until a prefetch request's result is published, or until timeout.
+
+        Thread-safe. Lets a handler wait for prefetch completion instead of
+        busy-polling query_prefetch_result. Does not consume the result; the
+        caller still retrieves it via query_prefetch_result.
+
+        Args:
+            request_id: The request ID from submit_prefetch_request.
+            timeout: Maximum number of seconds to wait for the result.
+
+        Returns:
+            True if the result became available within the timeout, False if
+            the wait timed out.
+        """
+        with self._prefetch_results_cv:
+            return self._prefetch_results_cv.wait_for(
+                lambda: request_id in self._completed_results, timeout
+            )
 
     def report_status(self) -> dict:
         """Return a status dict for the prefetch controller."""
@@ -1161,6 +1187,8 @@ class PrefetchController(StorageControllerInterface):
         """Store the retained-key bitmap and remove from in-flight tracking."""
         with self._prefetch_results_lock:
             self._completed_results[request_id] = result
+            # Wake any WAIT_PREFETCH_STATUS handler blocked on this result.
+            self._prefetch_results_cv.notify_all()
         removed = self._in_flight_requests.pop(request_id, None)
         if removed is not None:
             self._status_in_flight_count -= 1
