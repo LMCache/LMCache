@@ -74,19 +74,13 @@ def group_layers_by_identity(
 ) -> list[tuple[LayerGroupIdentity, list[int]]]:
     """Partition layer indices by :data:`LayerGroupIdentity`.
 
-    This helper is shared by vLLM-side LMCache group inflation and server-side
-    ``KernelGroupInfo`` construction so both sides agree on group order.
-
     Args:
-        kv_caches: Registered KV cache structure inspected for per-layer shape
-            and dtype.
-        engine_kv_formats: One Engine KV format per registered tensor, each
-            returned by :func:`normalize_kv_and_discover_format` and used to read
-            heads/sizes/``kv_size``. Its length is the layer count. Homogeneous
-            models repeat one shared format; a model that mixes formats across
-            engine groups -- e.g. MiniMax-M3's K+V main cache (``kv_size=2``) plus
-            its key-only MLA index cache (``kv_size=1``) -- supplies the differing
-            per-layer formats.
+        kv_caches: Registered KV cache structure, one entry per layer.
+        engine_kv_formats: One Engine KV format per registered tensor; its length
+            is the layer count. Homogeneous models repeat one shared format; a
+            model that mixes formats across engine groups -- e.g. MiniMax-M3's K+V
+            main cache (``kv_size=2``) plus its key-only MLA index cache
+            (``kv_size=1``) -- supplies the differing per-layer formats.
         per_layer_engine_group_idx: Optional engine block group id per layer.
             When ``None`` every layer is treated as block group 0 (non-hybrid);
             when present, layers from different engine block groups never share an
@@ -96,8 +90,7 @@ def group_layers_by_identity(
 
     Returns:
         A list of ``(identity, layer_indices)`` pairs sorted by each group's
-        first layer index, so the group order is deterministic and identical on
-        both the vLLM and server sides.
+        first layer index, so the group order is deterministic.
 
     Raises:
         ValueError: If ``per_layer_engine_group_idx`` is given but its length
@@ -299,17 +292,9 @@ class KVLayerGroupsManager:
         engine_group_infos: "Sequence[EngineGroupInfo]" = (),
         lmcache_tokens_per_chunk: int = 256,
     ) -> None:
-        """Partition layers into groups keyed by
-        :data:`LayerGroupIdentity`.
+        """Partition the layers into kernel groups for this set of KV caches.
 
-        For each layer ``i`` in ``kv_caches``, read
-        ``(kv_size, num_heads, head_size, dtype)`` via the format-aware
-        accessors in ``utils.py``. Layers with identical identities are
-        bucketed together; each bucket becomes one
-        :class:`KernelGroupInfo`.
-
-        Groups are emitted in the order of their first-appearing layer,
-        so group indices are deterministic across runs.
+        Group order is deterministic across runs.
 
         Args:
             kv_caches: KV cache structure accepted by
