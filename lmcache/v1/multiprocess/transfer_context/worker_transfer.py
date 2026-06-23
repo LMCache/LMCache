@@ -63,7 +63,6 @@ ENV_MULTI_STREAM_D2D = "LMCACHE_MP_MULTI_STREAM_D2D"
 # requested, and the savings on hot-cache rebuilds are large.
 ENV_DELTA_STORE = "LMCACHE_MP_DELTA_STORE"
 
-
 class MPTransferMode(str, Enum):
     """Routing mode used by :func:`create_transfer_context`.
 
