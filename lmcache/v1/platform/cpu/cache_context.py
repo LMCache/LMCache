@@ -93,9 +93,6 @@ class CPUCacheContext(BaseCacheContext):
         # GPUCacheContext uses, so we don't need to hand-roll any
         # PageBufferShapeDesc here. ``layout_hints`` / ``engine_type``
         # are forwarded so the signature matches GPUCacheContext.
-        # Detect each engine group's format from the registered tensors so a
-        # model mixing formats across groups (e.g. MiniMax-M3) groups and shapes
-        # correctly. Homogeneous models yield one shared format for every layer.
         (
             kv_caches_normalized,
             engine_kv_formats,

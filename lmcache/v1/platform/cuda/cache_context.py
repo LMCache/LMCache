@@ -359,9 +359,6 @@ class GPUCacheContext(BaseCacheContext):
         engine_type: EngineType = EngineType.VLLM,
     ):
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
-        # Detect each engine group's format from the registered tensors so a
-        # model mixing formats across groups (e.g. MiniMax-M3) groups and shapes
-        # correctly. Homogeneous models yield one shared format for every layer.
         kv_caches_norm, engine_kv_formats = normalize_and_discover_per_layer_formats(
             unwrapped,
             engine_group_layer_indices(engine_group_infos),
