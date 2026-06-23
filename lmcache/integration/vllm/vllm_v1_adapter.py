@@ -1022,17 +1022,20 @@ class LMCacheConnectorV1Impl:
         token_ids_t = torch.tensor(
             token_ids[:num_tokens], dtype=torch.long, device="cuda"
         )
-        # Degenerate empty prefix (e.g. a request whose cached tokens were
-        # preempted/recomputed under high-concurrency KV pressure): nothing to
-        # reconstruct. Abort the blend and fall back to layerwise retrieval --
-        # same safe path as the encoder-miss guards below. Without this, the
-        # token_ids_t.min() in the debug log raised on an empty tensor and
-        # killed the whole EngineCore (observed at N>=16).
-        if token_ids_t.numel() == 0:
+        # Incomplete cached prefix: under high-concurrency KV pressure vLLM can
+        # preempt/evict part (or all) of a request's cached tokens, so the
+        # available token_ids are fewer than the expected num_tokens. Downstream
+        # scatter/blend still clips with num_tokens, overrunning the shorter
+        # [have, hidden] tensor -> empty: token_ids_t.min() raised (N>=16);
+        # partial: "mask [num_tokens] vs tensor [have]" IndexError (N=12). Both
+        # killed the whole EngineCore. A partial prefix can't be blended
+        # faithfully anyway, so abort and fall back to layerwise retrieval --
+        # the same safe path as the encoder-miss guards below.
+        if token_ids_t.shape[0] < num_tokens:
             logger.warning(
-                "Empty token_ids in _reconstruct_inputs_embeds "
-                "(num_tokens=%d); aborting blend, falling back to "
-                "layerwise retrieval.", num_tokens,
+                "Cached prefix incomplete (%d of %d expected tokens present; "
+                "preempted/evicted under load); aborting blend, falling back "
+                "to layerwise retrieval.", int(token_ids_t.shape[0]), num_tokens,
             )
             return None, None
 
