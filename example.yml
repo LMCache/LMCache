@@ -1,0 +1,106 @@
+services:
+  vllm-qwen36-27b-dual:
+    image: lmcache/vllm-openai:v0.4.7-cu129
+    container_name: "${ESTATE_CONTAINER:-vllm-qwen36-27b-dual-balanced}"
+    restart: no
+    security_opt:
+      - apparmor=unconfined
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8010}}:8000"
+    volumes:
+      - ${MODEL_DIR:-../../../../../../models-cache}:/root/.cache/huggingface
+      - ../../../cache/torch_compile:/root/.cache/vllm/torch_compile_cache
+      - ../../../cache/triton:/root/.triton/cache
+      - ../../../patches/froggeric-chat-template/chat_template.jinja:/etc/qwen-froggeric-chat-template.jinja:ro
+      - ../../../kv-cache:/kv-cache:rw
+      - ./../../lmcache_engine_driven:/lmcache_engine_driven:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${ESTATE_GPUS:-${NVIDIA_VISIBLE_DEVICES:-all}}
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-${OFFLINE:-0}}
+      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-${OFFLINE:-0}}
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - NVLINK_MODE=${NVLINK_MODE:-auto}
+      - NCCL_CUMEM_ENABLE=0
+      - NCCL_P2P_DISABLE=1
+      - VLLM_NO_USAGE_STATS=1
+      - VLLM_USE_FLASHINFER_SAMPLER=1
+      - OMP_NUM_THREADS=1
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
+      - LMCACHE_LOCAL_DISK="file:///kv-cache"
+      - LMCACHE_MAX_LOCAL_DISK_SIZE=50
+      - LMCACHE_SERVER_CONFIG_FILE=/kv-cache/lmcache_server_config.yaml
+    shm_size: "16gb"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids:
+                - "GPU-xxx"
+                - "GPU-xxx"
+              capabilities: [gpu]
+    entrypoint:
+      - bash
+      - -c
+      - |
+        source /etc/club3090/detect_nvlink.sh
+        /opt/venv/bin/python -m ensurepip --upgrade
+        /opt/venv/bin/python -m pip install /lmcache_engine_driven/LMCache/wheelhouse/lmcache-0.4.8rc2.dev15-cp312-cp312-linux_x86_64.whl --force-reinstall --no-deps
+        export CUDA_VISIBLE_DEVICES="" NVIDIA_VISIBLE_DEVICES="" && /opt/venv/bin/python -c "from lmcache.cli.main import main; main()" server --max-workers 1 --max-gpu-workers 1 --max-cpu-workers 1 --chunk-size 1600 --l1-size-gb 40 --eviction-policy LRU --port 6555 --l2-adapter '{"type":"fs","base_path":"/kv-cache", "max_capacity_gb": 250}' &
+        LMCACHE_PID=$!
+        trap "kill $LMCACHE_PID" EXIT
+        if [ "${_NVLINK_ENABLED:-0}" = "1" ]; then
+          exec vllm serve ${VLLM_ENFORCE_EAGER:+--enforce-eager} "$@"
+        else
+          exec vllm serve ${VLLM_ENFORCE_EAGER:+--enforce-eager} --disable-custom-all-reduce "$@"
+        fi
+      - --
+    command:
+      - --model
+      - /root/.cache/huggingface/Qwen3.6-27B-AWQ-BF16-INT4
+      - --served-model-name
+      - qwen3.6-27b-awq-bf16-int4
+      - --quantization
+      - compressed-tensors
+      - --dtype
+      - bfloat16
+      - --tensor-parallel-size
+      - "${TP:-2}"
+      - --pipeline-parallel-size
+      - "${PP:-1}"
+      - --max-model-len
+      - "-1"
+      - --gpu-memory-utilization
+      - "${GPU_MEMORY_UTILIZATION:-0.97}"
+      - --max-num-seqs
+      - "1"
+      - --max-num-batched-tokens
+      - "1600"
+      - --kv-cache-dtype
+      - fp8
+      - --trust-remote-code
+      - --chat-template
+      - /etc/qwen-froggeric-chat-template.jinja
+      - --reasoning-parser
+      - qwen3
+      - --default-chat-template-kwargs
+      - '{"enable_thinking": false, "preserve_thinking": true}'
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - qwen3_coder
+      - --enable-prefix-caching
+      - --enable-chunked-prefill
+      - --speculative-config
+      - '{"method":"mtp","num_speculative_tokens":2}'
+      - --override-generation-config
+      - '{"temperature":${TEMP:-${TEMPERATURE:-0.6}},"top_p":${TOP_P:-0.95},"top_k":${TOP_K:-20},"min_p":${MIN_P:-0.0},"repetition_penalty":${REPEAT_PENALTY:-1.0}}'
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --mamba-cache-mode
+      - align
+      - --kv-transfer-config
+      - '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.host": "tcp://localhost", "lmcache.mp.port":6555, "lmcache.mp.mp_transfer_mode": "auto"}}'

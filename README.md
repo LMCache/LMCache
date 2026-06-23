@@ -1,150 +1,322 @@
-<div align="center">
-  <p align="center">
-    <img src="asset/logo.png" alt="lmcache logo" width="45%">
-  </p>
-  <h3 align="center">
-    A KV Cache Management Layer for Scalable LLM Inference
-  </h3>
-    <hr width="78%">
+# LMCache Engine-Driven Multi-Group Fork
 
-  <h3 align="center">
-    <a href="https://blog.lmcache.ai/">Blog</a> |
-    <a href="https://docs.lmcache.ai/">Documentation</a> |
-    <a href="https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3zxjao8h0-lRfBfnLqbALOtLsWn2ITxA">Join Slack</a> |
-    <a href="https://docs.lmcache.ai/community/meetings.html">Community Meeting</a> |
-    <a href="https://github.com/LMCache/LMCache/issues/2923">Roadmap</a>
-  </h3>
+**Repository:** https://github.com/efschu/LMCache  
+**Branch:** `dev`  
+**Latest Release:** [v0.4.8rc2-dev15](https://github.com/efschu/LMCache/releases/tag/v0.4.8rc2-dev15)
 
-  [![PyPI](https://img.shields.io/pypi/v/lmcache)](https://pypi.org/project/lmcache/)
-  [![PyPI - Downloads](https://img.shields.io/pypi/dm/lmcache)](https://pypi.org/project/lmcache/)
-  [![GitHub commit activity](https://img.shields.io/github/commit-activity/w/LMCache/LMCache)](https://github.com/LMCache/LMCache/graphs/commit-activity)
-  [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/LMCache/LMCache/)
+---
 
-</div>
+## Downloads
 
-## Updates
-- [2026/05] 🔥 Agentic workload benchmark on AMD MI300X ([blog](https://blog.lmcache.ai/en/2026/05/12/benchmarking-lmcache-for-multi-turn-agentic-workloads-on-amd-mi300x/)).
-- [2026/04] 🔥 LMCache's new multiprocess(MP) architecture release ([blog](https://blog.lmcache.ai/en/2026/04/03/lmcaches-new-architecture-boosts-moe-inference-performance-by-10x/)).
-- [2026/03] LMCache at GTC 2026 ([post](https://www.linkedin.com/posts/lmcache-lab_llm-opensource-nvidiagtc-activity-7442721875664826369-pMAu?utm_source=share&utm_medium=member_desktop&rcm=ACoAADkIIvQBTyG53kXXX70OZdE5rhpllYQqmIA)).
-- [2026/01] LMCache multi-node P2P CPU memory sharing, from experimental feature to production ([blog](https://blog.lmcache.ai/en/2026/01/21/p2p-1/)).
+| Asset | SHA256 |
+|-------|--------|
+| `lmcache-0.4.8rc2.dev15-cp312-cp312-linux_x86_64.whl` | `ebbf8be0...` |
 
-<details>
-<summary>More</summary>
-
-- [2025/11] LMCache x CoreWeave accelerate efficient LLM inference for Cohere ([blog](https://blog.lmcache.ai/en/2025/10/29/breaking-the-memory-barrier-how-lmcache-and-coreweave-power-efficient-llm-inference-for-cohere/)).
-- [2025/10] LMCache joins the PyTorch Foundation and Tensormesh unveiled ([blog](https://blog.lmcache.ai/en/2025/10/31/tensormesh-unveiled-and-lmcache-joins-the-pytorch-foundation/), [PyTorch](https://pytorch.org/blog/lmcache-joins-pytorch-ecosystem/)).
-- [2025/09] NVIDIA Dynamo integrates LMCache, accelerating LLM inference ([blog](https://blog.lmcache.ai/en/2025/09/18/nvidia-dynamo-integrates-lmcache-accelerating-llm-inference/)).
-- [2025/08] 🎉 LMCache hits 5,000+ GitHub stars ([blog](https://blog.lmcache.ai/en/2025/08/28/%f0%9f%8e%89-lmcache-hits-5000-github-stars-thank-you-community/)).
-- [2025/08] LMCache supports gpt-oss (20B/120B) on day 1 ([blog](https://blog.lmcache.ai/en/2025/08/05/lmcache-supports-gpt-oss-20b-120b-on-day-1/)).
-- [2025/07] Get faster LLM inference and cheaper responses with LMCache and Redis ([Redis blog](https://redis.io/blog/get-faster-llm-inference-and-cheaper-responses-with-lmcache-and-redis/)).
-- [2025/07] LMCache extends its turbo-boost to multimodal models in vLLM V1 ([blog](https://blog.lmcache.ai/en/2025/07/03/lmcache-extends-its-turbo-boost-to-multimodal-models-in-vllm-v1/)).
-- [2025/06] LLM Production Stack goes cross-hardware: AMD, Arm and Ascend ([blog](https://blog.lmcache.ai/en/2025/06/20/llm-production-stack-goes-cross-hardware-ascend-arm-and-amd-support-incoming/)).
-
-</details>
-
-## About
-
-LMCache is a **KV cache management layer** for LLM inference. It turns KV cache from a temporary state into reusable *AI-native knowledge* that can be *stored* persistently, *reused* across multiple serving engines, *monitored* with an observability stack, and *transformed* for better generation quality. As a result, LMCache **reduces TTFT** (time-to-first-token) and **improves throughput**, especially for long-context agentic, multi-turn conversation, and knowledge-augmented workloads (e.g., RAG).
-
-LMCache is **vendor-neutral**. It can be used as a KV cache layer for a range of mainstream open-source serving engines, inference frameworks, hardware vendors, storage systems, and infrastructure providers. The vendor neutrality allows users to freely switch between serving engines and storage vendors, while reusing the stored KV caches.
-
-<p align="center">
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="asset/deployment_modes_dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="asset/deployment_modes_light.png">
-  <img alt="LMCache Deployment Modes" src="asset/deployment_modes_light.png">
-</picture>
-</p>
-
-### Key features
-
-- **Engine-independent deployment**: LMCache, as a standalone daemon process, manages KV cache independently from the inference engine process, so that KV cache will not be lost even if the inference engine crashes (i.e., no fate-sharing with engines).
-
-- **Persistent, tiered KV cache offloading and reuse**: Move KV caches out of GPU memory into a tiered storage hierarchy spanning CPU memory, local storage, and remote backends, enabling reuse across requests, sessions, and engine instances to reduce repeated prefill computation and improve TTFT.
-
-- **Production-level KV cache observability**: LMCache provides a rich set of KV cache observability metrics, including typical Kubernetes metrics (health monitoring, performance diagnostics), KV-cache-specific metrics (request-level and token-level prefix cache hits, lifecycle, request-level KV cache performance), management metrics (user-specific usage), and more.
-
-- **Pluggable storage and transport backends**: Easily integrate remote storage and KV transfer backends through a unified interface, enabling KV cache offloading and sharing across storage providers. Through this interface, LMCache supports storage backends including CPU RAM, local disk (SSD), Redis/Valkey, Mooncake, InfiniStore, S3-compatible object storage, NIXL, and GDS.
-
-- **Non-prefix KV reuse**: Extend KV reuse beyond prefix caching by reusing cached KV blocks at any position in the prompt. This leverages CacheBlend to selectively recompute tokens for quality recovery.
-
-- **PD disaggregation and KV transfer**: Support KV cache transfer from prefill workers to decode workers over NVLink, RDMA, or TCP through transport layers such as NIXL.
-
-- **Pluggable KV transformation**: A simple interface for researchers to write compression, token dropping, and custom serialization through a flexible SERDE interface.
-
-LMCache is becoming an integral layer in the LLM inference *ecosystem*, with *community*-driven integration with serving engines, inference frameworks, hardware vendors, storage systems, and infrastructure providers:
-
-<p align="center">
-  <img src="asset/ecosystem.png" alt="LMCache ecosystem">
-</p>
-
-## Getting Started
-
-To use LMCache, simply install `lmcache` from your package manager, e.g. pip:
+**Quick Install:**
 ```bash
-pip install lmcache
+curl -L -O https://github.com/efschu/LMCache/releases/download/v0.4.8rc2-dev15/lmcache-0.4.8rc2.dev15-cp312-cp312-linux_x86_64.whl
+pip install lmcache-0.4.8rc2.dev15-cp312-cp312-linux_x86_64.whl --force-reinstall --no-deps
 ```
 
-For more setup options and examples, see:
-- [Installation](https://docs.lmcache.ai/getting_started/installation.html)
-- [Quickstart](https://docs.lmcache.ai/getting_started/quickstart.html)
-- [LMCache Recipes](https://docs.lmcache.ai/recipes/index.html)
-- [CLI Reference](https://docs.lmcache.ai/cli/index.html)
-- [Benchmarking Guide](https://docs.lmcache.ai/getting_started/benchmarking.html)
-- [Production Deployment](https://docs.lmcache.ai/mp/deployment.html)
+---
 
-## Contributing
-We welcome and value contributions and collaborations. Join us in improving LMCache. Check out the [Contributing Guide](https://docs.lmcache.ai/developer_guide/contributing.html) or join our [Slack community](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3zxjao8h0-lRfBfnLqbALOtLsWn2ITxA) to get started.
+## Overview
 
-## Adoption and Partnerships
-LMCache has a growing community of developers, researchers, industry adopters, and partners building the next generation of efficient LLM inference systems.
+This fork implements **engine-driven KV cache transfer** for **hybrid multi-group models** (e.g., Qwen3.6-27B with GDN/Mamba + Attention groups) in LMCache v1.
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="asset/partner_dark.png">
-    <source media="(prefers-color-scheme: light)" srcset="asset/partner_light.png">
-    <img alt="LMCache Adoption and Partnerships" src="asset/partner_light.png">
-  </picture>
-</p>
+### Problem Statement
 
-As an independent open-source project, LMCache is becoming the de-facto standard for KV Cache management in LLM inference. Its continued development and community work are supported in part by [Tensormesh](https://www.tensormesh.ai/).
+The original LMCache `lmcache server` process allocated **666 MB VRAM per GPU** even though it should be a pure CPU-caching daemon. This happens because:
 
-## Citation
+```
+vLLM Worker (GPU)
+  └─ sends CUDA-IPC handles → LMCache Server
+  └─ Server opens CUDA-IPC → creates CUDA Primary Context (~550 MB/GPU)
+  └─ Server executes multi_layer_block_kv_transfer CUDA kernels
+```
 
-LMCache builds on research in KV cache management, including cache reuse, offloading, compression, and serving optimization. If you use LMCache in your research, please cite the LMCache paper and related work.
+Additionally, the engine-driven path was **blocked for hybrid models** due to a hard check:
 
-~~~bibtex
-@article{cheng2025lmcache,
-  title={LMCache: An Efficient KV Cache Layer for Enterprise-Scale LLM Inference},
-  author={Cheng, Yihua and Liu, Yuhan and Yao, Jiayi and An, Yuwei and Chen, Xiaokun and Feng, Shaoting and Huang, Yuyang and Shen, Samuel and Du, Kuntai and Jiang, Junchen},
-  journal={arXiv preprint arXiv:2510.09665},
-  year={2025}
-}
-~~~
+```python
+def _single_group_block_ids(block_ids: list[list[int]]) -> list[int]:
+    if len(block_ids) != 1:
+        raise RuntimeError(
+            "engine-driven transfer does not support hybrid KV cache groups"
+        )
+```
 
-<details>
-<summary>Related papers</summary>
+Qwen3.6-27B has at least 2 groups (Attention + GDN-State), so this check blocked engine-driven mode entirely.
 
-~~~bibtex
-@inproceedings{liu2024cachegen,
-  title={Cachegen: Kv cache compression and streaming for fast large language model serving},
-  author={Liu, Yuhan and Li, Hanchen and Cheng, Yihua and Ray, Siddhant and Huang, Yuyang and Zhang, Qizheng and Du, Kuntai and Yao, Jiayi and Lu, Shan and Ananthanarayanan, Ganesh and others},
-  booktitle={Proceedings of the ACM SIGCOMM 2024 Conference},
-  pages={38--56},
-  year={2024}
-}
+## Solution: Engine-Driven Multi-Group Transfer
 
-@inproceedings{yao2025cacheblend,
-  title={Cacheblend: Fast large language model serving for rag with cached knowledge fusion},
-  author={Yao, Jiayi and Li, Hanchen and Liu, Yuhan and Ray, Siddhant and Cheng, Yihua and Zhang, Qizheng and Du, Kuntai and Lu, Shan and Jiang, Junchen},
-  booktitle={Proceedings of the twentieth European conference on computer systems},
-  pages={94--109},
-  year={2025}
-}
-~~~
+### Architecture
 
-</details>
+```
+vLLM Worker (GPU)
+  └─ executes GPU→CPU copy itself (gather_paged_kv_to_cpu)
+  └─ sends CPU bytes via COMMIT_STORE
+
+LMCache Server (CPU-only, NO VRAM!)
+  └─ receives CPU bytes, deserializes
+  └─ stores in L1-RAM / L2-Disk
+```
+
+### Key Changes
+
+#### 1. Per-Group Layout Metadata (`custom_types.py`)
+
+Added `GroupLayoutInfo` to track per-group metadata:
+- `block_size`, `num_layers`, `hidden_dim_size`, `dtype_str`
+- `use_mla` (Modified Local Attention flag)
+- `tokens_per_block` (from EngineGroupInfo)
+
+Extended `RegisterEngineDrivenContextPayload` with optional `group_layouts: list[GroupLayoutInfo]`.
+
+#### 2. Multi-Group Gather/Scatter Functions (`transfer_context/base.py`)
+
+- `slice_kv_caches_for_group()`: Extract layer subset for one group
+- `gather_paged_kv_multi_group_to_cpu()`: Gather all groups to CPU tensors
+- `scatter_cpu_multi_group_to_paged_kv()`: Scatter CPU tensors back to GPU paged KV
+
+#### 3. Worker-Side Multi-Group Support (`transfer_context/worker_transfer.py`)
+
+- `EngineDrivenTransferContext.register()`: Sends per-group layout metadata
+- `EngineDrivenTransferContext.submit_store()`: Gathers all groups, serializes as pickle blob
+- `EngineDrivenTransferContext.submit_retrieve()`: Deserializes blob, scatters to all groups
+
+#### 4. Server-Side Multi-Group Support (`modules/engine_driven_transfer.py`)
+
+- `register_kv_cache_engine_driven_context()`: Creates per-group `MemoryLayoutDesc` entries
+- `_commit_store_multi_group()`: Stores to all Object Groups
+- `_prepare_retrieve_multi_group()`: Loads all groups, returns serialized blob
+
+#### 5. Multi-Group Prefetch Awaiting (`modules/lookup.py`)
+
+Fixed a race condition where multi-group prefetch handles (groups 1-3) were submitted but never awaited:
+
+- Added `multi_group_handles: list[PrefetchHandle]` to `_PrefetchJob` dataclass
+- In `end_session()`: await primary handle + all `multi_group_handles` via `query_prefetch_status`
+- Call `finish_read_prefetched` for **all groups** (group-0 through group-N)
+- Touch L1 keys only for group-0 (matching original behavior)
+
+---
+
+## Quick Start
+
+### Download Wheel
+
+```bash
+# Download from GitHub Releases or build from source
+# Latest build: wheelhouse/lmcache-0.4.8rc2.dev15-cp312-cp312-linux_x86_64.whl
+```
+
+### Install
+
+```bash
+pip install lmcache-*.whl --force-reinstall --no-deps
+```
+
+### Usage with vLLM
+
+```bash
+# Start LMCache server (CPU-only, no GPU memory!)
+CUDA_VISIBLE_DEVICES="" lmcache server \
+  --max-workers 1 \
+  --max-gpu-workers 1 \
+  --max-cpu-workers 1 \
+  --chunk-size 1600 \
+  --l1-size-gb 10 \
+  --eviction-policy LRU \
+  --port 6555 \
+  --l2-adapter '{"type":"fs","base_path":"/kv-cache", "max_capacity_gb": 250}' &
+
+# Start vLLM with LMCache connector
+vllm serve Qwen/Qwen3.6-27B \
+  --kv-transfer-config '{
+    "kv_connector": "LMCacheMPConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+      "lmcache.mp.host": "tcp://localhost",
+      "lmcache.mp.port": 6555,
+      "lmcache.mp.mp_transfer_mode": "auto"
+    }
+  }'
+```
+
+**Important:** Use `CUDA_VISIBLE_DEVICES=""` (not `NVIDIA_VISIBLE_DEVICES=""`) to prevent the server from allocating GPU memory.
+
+---
+
+## Documentation
+| Document | Description |
+|----------|-------------|
+| [README.md](README.md) | This file - Overview and quick start |
+| [BUILD_GUIDE.md](docs/BUILD_GUIDE.md) | **Step-by-step build instructions** |
+| [BUILD.md](docs/BUILD.md) | Technical build details and CI/CD |
+| [Lmcache_engine_driven_multigroup.md](Lmcache_engine_driven_multigroup.md) | Full design document with protocol specs |
+
+See [BUILD.md](docs/BUILD.md) for detailed build instructions.
+
+### Quick Build
+
+```bash
+# Clone repository
+git clone https://github.com/efschu/LMCache.git
+cd LMCache
+
+# Build wheel with Docker (GPU required)
+docker run --rm \
+    --gpus all \
+    --security-opt apparmor=unconfined \
+    -v $(pwd):/lm \
+    -v $(pwd)/wheelhouse:/whl \
+    ghcr.io/efschu/lmcache-manylinux-builder-gpu \
+    bash -c '
+        export TORCH_CUDA_ARCH_LIST="8.6;8.9;9.0"
+        export ENABLE_CXX11_ABI=1
+        cd /lm
+        /opt/python/cp312-cp312/bin/pip wheel . --no-deps -w /whl
+    '
+
+# Install
+pip install wheelhouse/lmcache-*.whl --force-reinstall --no-deps
+```
+
+---
+
+## Commit History
+
+### Commit: `26d830d` - Add multi-group KV-cache design document for engine-driven lmcache
+
+This commit contains the full implementation:
+
+1. **`lmcache/v1/multiprocess/custom_types.py`**
+   - Added `GroupLayoutInfo` msgspec.Struct for per-group layout metadata
+   - Extended `RegisterEngineDrivenContextPayload` with `group_layouts` field
+
+2. **`lmcache/v1/multiprocess/transfer_context/base.py`**
+   - Added `slice_kv_caches_for_group()` helper function
+   - Added `gather_paged_kv_multi_group_to_cpu()` for multi-group gather
+   - Added `scatter_cpu_multi_group_to_paged_kv()` for multi-group scatter
+
+3. **`lmcache/v1/multiprocess/transfer_context/worker_transfer.py`**
+   - Extended `EngineDrivenTransferContext` with multi-group support
+   - Added `_serialize_multi_group_chunks()` and `_deserialize_multi_group_chunks()`
+   - Modified `register()`, `submit_store()`, `submit_retrieve()` for multi-group
+
+4. **`lmcache/v1/multiprocess/modules/engine_driven_transfer.py`**
+   - Extended `register_kv_cache_engine_driven_context()` for multi-group registration
+   - Added `_commit_store_multi_group()` server-side storage
+   - Added `_prepare_retrieve_multi_group()` server-side retrieval
+
+5. **`lmcache/v1/multiprocess/modules/lookup.py`**
+   - Fixed multi-group prefetch handling: await all group handles before `finish_read_prefetched`
+   - Added `multi_group_handles` field to `_PrefetchJob` dataclass
+   - Modified `end_session()` to call `finish_read_prefetched` for all groups
+
+6. **`lmcache/v1/multiprocess/group_view.py`**
+   - Added `EngineGroupInfo` msgspec.Struct for engine-side group metadata
+
+7. **`lmcache/v1/protocols/engine.py`**
+   - Extended `PrepareRetrieveResponse` with `cpu_data: bytes` field
+
+---
+
+## Testing
+
+```bash
+# Run unit tests
+pytest tests/
+
+# Run specific multi-group tests
+pytest tests/v1/ -k "multi_group or engine_driven"
+```
+
+---
+
+## Design Document
+
+See [Lmcache_engine_driven_multigroup.md](./Lmcache_engine_driven_multigroup.md) for the full design document including:
+
+- **Detailed data flow analysis** - How data flows between vLLM and LMCache
+- **Protocol specifications** - Wire format for engine-driven transfer
+- **API contracts** - Function signatures and expected behaviors
+- **Migration guide** - How to migrate from old transfer mode
+
+---
+
+## Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                          vLLM Worker                                 │
+│  ┌─────────────┐    ┌──────────────┐    ┌───────────────────────┐  │
+│  │ Paged KV    │───▶│ gather_paged │───▶│ EngineDrivenTransfer  │  │
+│  │ Cache       │    │ _kv_to_cpu() │    │ .submit_store()       │  │
+│  └─────────────┘    └──────────────┘    └───────────┬───────────┘  │
+│                                                      │              │
+│  ┌─────────────┐    ┌──────────────┐               │              │
+│  │ Paged KV    │◀───│ scatter_cpu  │◀──────────────┘              │
+│  │ Cache       │    │ _to_paged_kv │    ┌───────────────────────┐  │
+│  └─────────────┘    └──────────────┘    │ EngineDrivenTransfer  │  │
+│                                         │ .submit_retrieve()    │  │
+│                                         └───────────┬───────────┘  │
+└─────────────────────────────────────────────────────┼─────────────┘
+                                                      │ IPC
+                                                      ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                       LMCache Server (CPU-only)                      │
+│  ┌──────────────┐    ┌─────────────────┐    ┌───────────────────┐ │
+│  │ Lookup       │───▶│ finish_read     │───▶│ ObjectGroupStore  │ │
+│  │ Manager      │    │ _prefetched()   │    │ (all groups)      │ │
+│  └──────────────┘    └─────────────────┘    └───────────────────┘ │
+│         │                                                       │   │
+│         │    ┌─────────────────┐                               │   │
+│         └───▶│ PrefetchJob     │                               │   │
+│              │ (handles for    │                               │   │
+│              │  groups 0..N)   │                               │   │
+│              └─────────────────┘                               │   │
+│                                                                     │
+│  ┌──────────────┐    ┌─────────────────┐                          │
+│  │ L1 Memory    │◀──▶│ LRU Eviction    │                          │
+│  │ (RAM)        │    │ Policy          │                          │
+│  └──────────────┘    └─────────────────┘                          │
+│         │                                                             │
+│         ▼                                                             │
+│  ┌──────────────┐                                                     │
+│  │ L2 Disk      │                                                     │
+│  │ (KV-Cache)   │                                                     │
+│  └──────────────┘                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## GPU Memory Comparison
+
+
+Savings: **~668 MB per GPU** for LMCache server overhead elimination.
+
+---
 
 ## License
 
-The LMCache codebase is licensed under Apache License 2.0. See the [LICENSE](LICENSE) file for details.
+Apache 2.0 (same as upstream LMCache)
+
+---
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature/my-feature`
+3. Make your changes
+4. Build and test: `pip wheel . --no-deps -w wheelhouse/`
+5. Submit a pull request
+
+---
+
+## References
+
+- [LMCache upstream repository](https://github.com/LMCache/LMCache)
+- [vLLM KV Transfer documentation](https://docs.vllm.ai/en/latest/features/kv_transfer.html)
+- [PyTorch CUDA extensions](https://pytorch.org/docs/stable/cpp_extension.html)

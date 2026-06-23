@@ -1,0 +1,46 @@
+# Manylinux builder for LMCache
+# Builds wheels for manylinux_2_28_x86_64 platform
+# Usage: docker build -t lmcache-manylinux-builder -f docker/Dockerfile.manylinux .
+#        docker run --rm -v $(pwd):/io lmcache-manylinux-builder
+
+FROM pytorch/manylinux2_28-builder:cuda13.0
+
+ARG PYTHON_VERSION=3.12
+ARG LMCACHE_VERSION=0.4.8.dev38
+
+# Install build dependencies
+RUN /opt/python/cp312-cp312/bin/pip install \
+    ninja \
+    packaging>=24.2 \
+    setuptools>=77.0.3 \
+    setuptools_scm>=8 \
+    wheel \
+    cibuildwheel>=2.21 \
+    auditwheel
+
+WORKDIR /io
+
+# Copy source
+COPY . /io/LMCache
+WORKDIR /io/LMCache
+
+# Build wheel using cibuildwheel
+ENV CIBW_BUILD="cp312-manylinux_2_28_x86_64"
+ENV CIBW_MANYLINUX_X86_64_IMAGE="pytorch/manylinux2_28-builder:cuda13.0"
+ENV CIBW_BEFORE_ALL_LINUX="export TORCH_CUDA_ARCH_LIST='7.5;8.0;8.6;8.9;9.0;10.0;12.0' && export ENABLE_CXX11_ABI=1"
+ENV CIBW_REPAIR_WHEEL_COMMAND_LINUX="auditwheel repair --plat manylinux_2_28_x86_64 --exclude libtorch.so --exclude libtorch_cuda.so --exclude libtorch_python.so --exclude libc10.so --exclude libc10_cuda.so --exclude libcudart.so.13 -w {dest_dir} {wheel}"
+ENV CIBW_SKIP="*-musllinux* *-win_* *-macosx_*"
+ENV CIBW_OUTPUT_DIR="/io/wheelhouse"
+ENV PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cu130"
+
+# Build the wheel
+RUN /opt/python/cp312-cp312/bin/pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu130 && \
+    /opt/python/cp312-cp312/bin/pip install msgspec numpy && \
+    /opt/python/cp312-cp312/bin/pip wheel . --no-deps -w /io/wheelhouse || true
+
+# Build with cibuildwheel
+RUN /opt/python/cp312-cp312/bin/pip install cibuildwheel && \
+    /opt/python/cp312-cp312/bin/python -m cibuildwheel --platform linux --output-dir /io/wheelhouse
+
+# List output
+RUN ls -la /io/wheelhouse/

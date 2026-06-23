@@ -271,8 +271,19 @@ class LookupModule:
         session.set_tokens(list(key.token_ids))
         session.lookup_ipc_key = key
 
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
+        # For hybrid multi-group models, every object group is stored under a
+        # separate object_group_id and must be prefetched from L2 into L1 so
+        # the multi-group retrieve (which reads all groups from L1) finds them.
+        # The group-0 handle drives the prefix-hit statistic returned to vLLM;
+        # groups 1..N are prefetched on their own layout descriptors but their
+        # handles are not tracked for hit accounting (their key counts would
+        # otherwise inflate found_count).
+        group_layout_descs = self._ctx.layout_desc_registry.find_group_layout_descs(
+            model_name, world_size
+        )
+        num_groups = len(group_layout_descs)
 
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
         handle = self._ctx.storage_manager.submit_prefetch_task(
             obj_keys,
             layout_desc,
@@ -289,6 +300,18 @@ class LookupModule:
                 cache_salt=key.cache_salt,
             )
         )
+
+        if num_groups > 1:
+            for group_idx in range(1, num_groups):
+                g_obj_keys = ipc_key_to_object_keys(
+                    key, chunk_hashes, [group_idx]
+                )[0]
+                self._ctx.storage_manager.submit_prefetch_task(
+                    g_obj_keys,
+                    group_layout_descs[group_idx],
+                    extra_count=extra_count,
+                    external_request_id=key.request_id,
+                )
 
     def query_prefetch_lookup_hits(
         self,
@@ -437,13 +460,22 @@ class LookupModule:
         )
         if not chunk_hashes:
             return
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
 
         extra_count = compute_extra_count(tp_size, key.world_size)
 
-        self._ctx.storage_manager.finish_read_prefetched(
-            obj_keys, extra_count=extra_count
+        # Release group-0 locks plus, for hybrid multi-group models, the
+        # per-group locks acquired by the multi-group lookup prefetch. Each
+        # group was locked under its own object_group_id, so every group must
+        # be released or its read locks leak and block future eviction.
+        group_layout_descs = self._ctx.layout_desc_registry.find_group_layout_descs(
+            key.model_name, key.world_size
         )
+        num_groups = max(1, len(group_layout_descs))
+        for group_idx in range(num_groups):
+            g_obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [group_idx])[0]
+            self._ctx.storage_manager.finish_read_prefetched(
+                g_obj_keys, extra_count=extra_count
+            )
 
     def end_session(self, request_id: str) -> None:
         """Remove the session for a finished request.

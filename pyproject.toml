@@ -20,8 +20,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "lmcache"
 authors = [{name = "LMCache Team", email = "lmcacheteam@gmail.com"}]
-license = "Apache-2.0"
-license-files = ["LICENSE"]
+license = {text = "Apache-2.0"}
 readme = "README.md"
 description = "A LLM serving engine extension to reduce TTFT and increase throughput, especially under long-context scenarios."
 classifiers = [
@@ -59,6 +58,7 @@ local_scheme = "no-local-version"
 # only treat vX.Y.Z-style tags as version anchors; ignores nightly/nightly-cu129 tags
 tag_regex = "^v?(?P<version>\\d+\\.\\d+\\.\\d+.*)$"
 git_describe_command = ["git", "describe", "--tags", "--long", "--match", "v[0-9]*.[0-9]*", "--exclude", "v*-*"]
+fallback_version = "0.1.dev4"
 
 [tool.setuptools.packages.find]
 where = [""]
