@@ -93,15 +93,17 @@ PYBIND11_MODULE(c_ops, m) {
           throw std::runtime_error("Null buffer pointer");
         }
 
-        if (length > static_cast<size_t>(dst_info.size) ||
-            length > static_cast<size_t>(src_info.size)) {
+        size_t dst_bytes = static_cast<size_t>(dst_info.size) *
+                           static_cast<size_t>(dst_info.itemsize);
+        size_t src_bytes = static_cast<size_t>(src_info.size) *
+                           static_cast<size_t>(src_info.itemsize);
+        if (length > dst_bytes || length > src_bytes) {
           throw std::runtime_error("Length exceeds buffer size");
         }
-
+        py::gil_scoped_release release;
         return c_memcpy(dst_info.ptr, src_info.ptr, length);
       },
       py::arg("dst_buf"), py::arg("src_buf"), py::arg("length"),
-      py::call_guard<py::gil_scoped_release>(),
       "Copy length bytes from src_buf to dst_buf (releases GIL)");
   m.def("batched_memcpy", &batched_memcpy, py::arg("src_ptrs"),
         py::arg("dst_ptrs"), py::arg("sizes"),
