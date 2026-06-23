@@ -271,6 +271,55 @@ class EngineDrivenContext(ABC):
             [key, instance_id, group_idx, cpu_data],
             get_response_class(RequestType.COMMIT_STORE_GROUP),
         )
+
+    def commit_store_group_delta_raw_async(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        group_idx: int,
+        skip_count: int,
+        cpu_data: bytes,
+    ) -> "MessagingFuture":
+        """Async variant of :meth:`commit_store_group_delta`.
+
+        Used by multi-group engine-driven transfer where the worker
+        already knows that the first ``skip_count`` chunks for this
+        group are in L2 (caller is responsible for proving this via
+        the prior lookup). The server writes only the chunks provided
+        in ``cpu_data`` at offset ``skip_count``.
+        """
+        from lmcache.v1.multiprocess.protocol import (
+            RequestType,
+            get_response_class,
+        )
+        return self.mq_client.submit_request(
+            RequestType.COMMIT_STORE_GROUP_DELTA,
+            [key, instance_id, group_idx, skip_count, cpu_data],
+            get_response_class(RequestType.COMMIT_STORE_GROUP_DELTA),
+        )
+
+    def commit_store_group_delta(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        group_idx: int,
+        skip_count: int,
+        cpu_data: bytes,
+    ) -> bool:
+        """Synchronous delta-store commit (waits for server response)."""
+        future = self.commit_store_group_delta_raw_async(
+            key, instance_id, group_idx, skip_count, cpu_data,
+        )
+        try:
+            return bool(future.result(timeout=self.mq_timeout))
+        except TimeoutError:
+            logger.error(
+                "commit_store_group_delta timed out after %ss "
+                "(group=%d, skip_count=%d)",
+                self.mq_timeout, group_idx, skip_count,
+            )
+            return False
+
     def prepare_retrieve_raw(
         self, key: IPCCacheServerKey, instance_id: int
     ) -> bytes | None:

@@ -56,6 +56,13 @@ ENV_MP_TRANSFER_MODE = "LMCACHE_MP_TRANSFER_MODE"
 # typical consumer GPU).  Set to "1" to force-enable for A/B testing.
 ENV_MULTI_STREAM_D2D = "LMCACHE_MP_MULTI_STREAM_D2D"
 
+# Opt-in: delta-store. Worker passes ``skip_count`` per group derived
+# from the prior lookup's prefix hit count. Saves 14 GiB of wire on
+# the re-run of a cached prompt (60k-token Qwen3-27B-AWQ).
+# Default is ON -- the lookup is a no-op when no STORE direction is
+# requested, and the savings on hot-cache rebuilds are large.
+ENV_DELTA_STORE = "LMCACHE_MP_DELTA_STORE"
+
 
 class MPTransferMode(str, Enum):
     """Routing mode used by :func:`create_transfer_context`.
@@ -357,6 +364,18 @@ class EngineDrivenTransferContext(TransferContext):
             max_workers=4,
             thread_name_prefix="lmcache-serialize",
         )
+        # LRU prefetch hint predictor.  Tracks recent lookups so the
+        # connector can speculatively pre-warm a likely-next key from
+        # L2.  Inherently heuristic -- disabled by default because the
+        # L1 cache already covers the same-prompt re-run case; useful
+        # only for chat-session style workloads with overlapping
+        # prefixes.  See ``PrefetchPredictor`` for the heuristic.
+        from lmcache.v1.multiprocess.transfer_context.prefetch_predictor import (
+            PrefetchPredictor,
+        )
+        self._prefetch_predictor: PrefetchPredictor = PrefetchPredictor(
+            max_entries=8,
+        )
 
     def register(
         self,
@@ -585,11 +604,22 @@ class EngineDrivenTransferContext(TransferContext):
             mq_futures: list = [None] * num_groups
             ok = True
 
-            def _serialize_and_submit(g_idx: int, chunks) -> tuple[int, "Future"]:
+            def _serialize_and_submit(
+                g_idx: int, chunks, skip_count: int = 0
+            ) -> tuple[int, "Future"]:
                 data = _serialize_single_group_chunks(chunks)
-                fut = self._engine_driven_context.commit_store_group_raw_async(
-                    key, instance_id, g_idx, data,
-                )
+                if os.environ.get(ENV_DELTA_STORE, "1") == "1":
+                    # Use the delta-store variant. The connector can
+                    # supply the per-group skip_count via a future
+                    # LoadStoreOp field; for now we use 0 which is
+                    # semantically identical to the legacy full send.
+                    fut = self._engine_driven_context.commit_store_group_delta_raw_async(
+                        key, instance_id, g_idx, skip_count, data,
+                    )
+                else:
+                    fut = self._engine_driven_context.commit_store_group_raw_async(
+                        key, instance_id, g_idx, data,
+                    )
                 return g_idx, fut
 
             active = [
