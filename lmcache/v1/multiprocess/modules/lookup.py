@@ -305,9 +305,7 @@ class LookupModule:
         attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
             model_name, world_size
         )
-        obj_keys = self._chunk_major_object_keys(
-            key, chunk_hashes, attn_desc.num_object_groups
-        )
+        obj_keys = self._chunk_major_object_keys(key, chunk_hashes)
 
         handle = self._ctx.storage_manager.submit_prefetch_task(
             obj_keys,
@@ -452,12 +450,7 @@ class LookupModule:
         # of releasing every one -- otherwise chunks the engine still holds can
         # be over-released (e.g. window=512, LMCache hit 1024, vLLM hit 768 ->
         # chunks 512..768 may leak). Revisit when sliding-window prefetch is on.
-        attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
-            key.model_name, key.world_size
-        )
-        obj_keys = self._chunk_major_object_keys(
-            key, chunk_hashes, attn_desc.num_object_groups
-        )
+        obj_keys = self._chunk_major_object_keys(key, chunk_hashes)
 
         extra_count = compute_extra_count(tp_size, key.world_size)
 
@@ -494,14 +487,8 @@ class LookupModule:
             )
             return
 
-        ipc_key = session.lookup_ipc_key
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in session.get_hashes(0)]
-        attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
-            ipc_key.model_name, ipc_key.world_size
-        )
-        obj_keys = self._chunk_major_object_keys(
-            ipc_key, chunk_hashes, attn_desc.num_object_groups
-        )
+        obj_keys = self._chunk_major_object_keys(session.lookup_ipc_key, chunk_hashes)
         # unified touch of all keys, which include retrieved and stored keys
         # TODO(chunxiaozheng): when l2 is enabled, the prefetched keys from l2 are temp
         #  and will be deleted after finish_read_prefetched, when we touch all keys,
@@ -516,16 +503,16 @@ class LookupModule:
         self,
         key: IPCCacheServerKey,
         chunk_hashes: list[bytes],
-        num_groups: int,
     ) -> list[ObjectKey]:
         """Resolve the flat object-key list across all object groups,
         chunk-major.
 
-        The keys are ordered ``chunk -> object group -> kv_rank`` so that all
-        keys belonging to one chunk are contiguous; a leading-ones prefix over
-        the flat list then maps directly to a whole-chunk hit count. Callers
-        that need the full key set regardless of order (lock release, touch)
-        use this too.
+        The object-group count is read from the layout registry for
+        ``key``'s ``(model_name, world_size)``. The keys are ordered
+        ``chunk -> object group -> kv_rank`` so that all keys belonging to one
+        chunk are contiguous; a leading-ones prefix over the flat list then maps
+        directly to a whole-chunk hit count. Callers that need the full key set
+        regardless of order (lock release, touch) use this too.
 
         Example (2 chunks ``c0,c1``; 2 groups ``g0,g1``; 2 kv_ranks ``r0,r1``)::
 
@@ -535,11 +522,13 @@ class LookupModule:
         Args:
             key: The IPC key (model/world/worker, salt).
             chunk_hashes: Chunk hashes to resolve keys for.
-            num_groups: Number of object groups to resolve.
 
         Returns:
             The chunk-major flattened list of object keys across all groups.
         """
+        num_groups = self._ctx.layout_desc_registry.find_attn_desc(
+            key.model_name, key.world_size
+        ).num_object_groups
         per_group = ipc_key_to_object_keys(key, chunk_hashes, list(range(num_groups)))
         if num_groups == 1:
             return per_group[0]
