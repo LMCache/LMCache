@@ -85,10 +85,20 @@ class CpuShmTensorWrapper(DeviceIPCWrapper):
 
     @classmethod
     def wrap(cls, tensor: torch.Tensor) -> "CpuShmTensorWrapper":
-        """Factory classmethod for auto-registration via
+        """Factory used by
         :func:`~lmcache.v1.platform._registry._discover_wrappers_once`.
 
-        Delegates to :func:`migrate_to_shm_and_wrap`."""
+        Delegates to :func:`migrate_to_shm_and_wrap`, which migrates the
+        tensor's storage to a POSIX SHM segment so the LMCache mp server
+        can map the same physical pages.
+
+        Args:
+            tensor: A contiguous CPU tensor to migrate and wrap.
+
+        Returns:
+            A new :class:`CpuShmTensorWrapper` referencing the SHM
+            segment that now backs ``tensor``.
+        """
         return migrate_to_shm_and_wrap(tensor)
 
     def __init__(self, tensor: torch.Tensor, shm_name: str) -> None:

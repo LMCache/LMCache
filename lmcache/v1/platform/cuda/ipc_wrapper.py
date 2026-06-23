@@ -36,11 +36,19 @@ class CudaIPCWrapper(DeviceIPCWrapper):
 
     @classmethod
     def wrap(cls, tensor: torch.Tensor) -> "CudaIPCWrapper":
-        """Factory for auto-registration via
-        :func:`~lmcache.v1.platform._registry._discover_wrappers_once`."""
+        """Factory used by
+        :func:`~lmcache.v1.platform._registry._discover_wrappers_once`.
+
+        Args:
+            tensor: A CUDA tensor backed by PyTorch's caching allocator.
+
+        Returns:
+            A new :class:`CudaIPCWrapper` wrapping ``tensor`` for the
+            multiprocess wire.
+        """
         return cls(tensor)
 
-    def __init__(self, tensor: torch.Tensor):
+    def __init__(self, tensor: torch.Tensor) -> None:
         # First Party
         from lmcache.v1.gpu_connector.kv_format.contiguity import (
             attempt_permute_to_contiguous_view,

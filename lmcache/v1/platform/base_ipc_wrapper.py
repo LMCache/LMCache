@@ -13,7 +13,7 @@ on the receiving side.
 from __future__ import annotations
 
 # Standard
-from typing import ClassVar
+from typing import Any, ClassVar, Tuple
 import pickle
 import threading
 
@@ -47,6 +47,19 @@ class DeviceIPCWrapper:
     #: skips subclasses where this is ``False``.
     _is_default_wrapper: ClassVar[bool] = False
 
+    # Interface fields populated by each concrete subclass's
+    # ``__init__``.  Declared here so the base-class ``__eq__`` (and
+    # type-checkers) can see them; ``handle`` is intentionally typed as
+    # ``Any`` because each backend stores a different opaque payload
+    # (``tuple`` for CUDA shared-storage IPC, ``None`` for the SHM /
+    # raw-CUDA paths that override ``to_tensor``).
+    handle: Any
+    dtype: torch.dtype
+    shape: Tuple[int, ...]
+    stride: Tuple[int, ...]
+    storage_offset: int
+    device_uuid: str
+
     _discovered_device_mapping: dict[str, int] = {}
     _device_mapping_lock = threading.Lock()
 
@@ -56,7 +69,7 @@ class DeviceIPCWrapper:
         return str(torch_dev.get_device_properties(device_index).uuid)
 
     @classmethod
-    def _discover_devices(cls):
+    def _discover_devices(cls) -> None:
         """Discover all available accelerator devices and map their UUIDs
         to the physical device ordinals.
         """
@@ -97,7 +110,14 @@ class DeviceIPCWrapper:
         """
         raise NotImplementedError
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
+        # ``isinstance`` first so type-checkers can narrow ``other`` to
+        # ``DeviceIPCWrapper`` before we touch its attributes; the
+        # exact-type check that follows then enforces that, e.g., a
+        # ``CudaIPCWrapper`` is never considered equal to a
+        # ``RawCudaIPCWrapper`` even though they share a base class.
+        if not isinstance(other, DeviceIPCWrapper):
+            return False
         if type(self) is not type(other):
             return False
         return (
@@ -111,8 +131,30 @@ class DeviceIPCWrapper:
 
     @staticmethod
     def Serialize(obj: "DeviceIPCWrapper") -> bytes:
+        """Pickle ``obj`` for the multiprocess wire.
+
+        Pickle (rather than msgspec) is used so the concrete subclass
+        identity round-trips: every wrapper shares the single msgspec
+        ext code (1), and the receiver relies on the unpickled type to
+        dispatch ``to_tensor`` correctly.
+
+        Args:
+            obj: The wrapper instance to serialize.
+
+        Returns:
+            The pickled bytes payload.
+        """
         return pickle.dumps(obj)
 
     @staticmethod
     def Deserialize(data: bytes) -> "DeviceIPCWrapper":
+        """Inverse of :meth:`Serialize`.
+
+        Args:
+            data: The pickled bytes payload produced by :meth:`Serialize`.
+
+        Returns:
+            The reconstructed wrapper instance, with its concrete
+            subclass identity preserved.
+        """
         return pickle.loads(data)

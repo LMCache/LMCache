@@ -23,6 +23,7 @@ from __future__ import annotations
 
 # Standard
 from typing import Any, Callable, Dict
+import threading
 
 # First Party
 from lmcache.logging import init_logger
@@ -46,8 +47,12 @@ _KV_WRAPPER_FACTORIES: Dict[str, Callable[..., Any]] = {}
 # Missing entry == always available.
 _AVAILABILITY: Dict[str, Callable[[], bool]] = {}
 
-# Guard so discovery only runs once (lazy init).
+# Guard so discovery only runs once (lazy init).  The lock plus the
+# double-checked flag below keep the first concurrent caller from
+# racing a second one through the scan and emitting duplicate
+# "multiple wrappers claim device_type=..." warnings.
 _WRAPPERS_DISCOVERED: bool = False
+_DISCOVERY_LOCK = threading.Lock()
 
 
 def _discover_wrappers_once() -> None:
@@ -67,22 +72,29 @@ def _discover_wrappers_once() -> None:
     *device_type* trigger a warning; the first one wins.
     """
     global _WRAPPERS_DISCOVERED
+    # Fast path: avoid the lock once discovery is done (the common case).
     if _WRAPPERS_DISCOVERED:
         return
 
-    # First Party
-    from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
-    from lmcache.v1.utils.subclass_discovery import discover_subclasses
-    import lmcache.v1.platform as platform_pkg
+    with _DISCOVERY_LOCK:
+        # Re-check under the lock: another thread may have run the
+        # scan while we were waiting.
+        if _WRAPPERS_DISCOVERED:
+            return
 
-    for cls in discover_subclasses(
-        platform_pkg,
-        DeviceIPCWrapper,  # type: ignore[type-abstract]
-        levels=[2, 2],
-    ):
-        _register_discovered_wrapper(cls)
+        # First Party
+        from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
+        from lmcache.v1.utils.subclass_discovery import discover_subclasses
+        import lmcache.v1.platform as platform_pkg
 
-    _WRAPPERS_DISCOVERED = True
+        for cls in discover_subclasses(
+            platform_pkg,
+            DeviceIPCWrapper,  # type: ignore[type-abstract]
+            levels=[2, 2],
+        ):
+            _register_discovered_wrapper(cls)
+
+        _WRAPPERS_DISCOVERED = True
 
 
 def _register_discovered_wrapper(cls: type) -> None:
