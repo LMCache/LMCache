@@ -22,7 +22,6 @@ from concurrent.futures import ThreadPoolExecutor
 from ctypes import c_char
 from dataclasses import dataclass
 from typing import Optional
-import ctypes
 import socket
 import struct
 import threading
@@ -181,6 +180,10 @@ class TcpTransferChannelServer(TransferChannelServer):
         self._l1_memory_desc = l1_memory_desc
         self._running = True
 
+        # Track active client sockets so we can close them on shutdown
+        self._client_sockets: set[socket.socket] = set()
+        self._client_sockets_lock = threading.Lock()
+
         host, port = _parse_url(listen_url)
         self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -206,8 +209,12 @@ class TcpTransferChannelServer(TransferChannelServer):
         """Accept incoming connections and dispatch to handler threads."""
         while self._running:
             try:
+                # TODO(chunxiaozheng): use a more efficient method to accept
+                #  and handle connections
                 client_sock, addr = self._server_socket.accept()
                 _set_socket_options(client_sock)
+                with self._client_sockets_lock:
+                    self._client_sockets.add(client_sock)
                 self._executor.submit(self._handle_client, client_sock, addr)
             except socket.timeout:
                 continue
@@ -251,6 +258,8 @@ class TcpTransferChannelServer(TransferChannelServer):
             if self._running:
                 logger.exception("Error handling client %s", addr)
         finally:
+            with self._client_sockets_lock:
+                self._client_sockets.discard(client_sock)
             client_sock.close()
 
     def _serve_read_request(
@@ -290,12 +299,22 @@ class TcpTransferChannelServer(TransferChannelServer):
             # Read directly from L1 shared memory
             src_addr = ptr + offset
             buf = (c_char * size).from_address(src_addr)
-            _send_all(client_sock, bytes(buf))
+            _send_all(client_sock, memoryview(buf))
 
     def close(self) -> None:
         """Stop accepting connections and shut down handler threads."""
         self._running = False
         self._server_socket.close()
+
+        # Close all active client sockets to unblock handler threads
+        with self._client_sockets_lock:
+            for sock in self._client_sockets:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+            self._client_sockets.clear()
+
         if self._accept_thread.is_alive():
             self._accept_thread.join(timeout=5)
         self._executor.shutdown(wait=False)
@@ -403,17 +422,17 @@ class TcpTransferChannelClient(TransferChannelClient):
             try:
                 _send_all(self._socket, req.encode())
             except (OSError, ConnectionError) as e:
-                # Mark task as failed
-                with self._lock:
-                    self._tasks[task_id] = (
-                        len(remote_addresses),
-                        TransferChannelReadResult(
-                            finished=True,
-                            succeeded_mask=[False] * len(remote_addresses),
-                        ),
-                    )
-                    self._task_local_addrs.pop(task_id, None)
+                # TODO(chunxiaozheng): should we add some recovery logic here?
                 logger.warning("Failed to send read request: %s", e)
+                # The socket is no longer usable after a send failure;
+                # mark all pending tasks as failed and close.
+                self._mark_all_failed()
+                self._closed = True
+                try:
+                    self._socket.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                self._socket.close()
 
         return task_id
 
@@ -469,10 +488,19 @@ class TcpTransferChannelClient(TransferChannelClient):
                     # Determine size from local address
                     if i < len(local_addrs):
                         size = local_addrs[i].size
-                        data = _recv_exact(self._socket, size)
-                        # Write to local L1 memory
+                        # Receive directly into L1 memory (zero intermediate copy)
                         dst_addr = self._l1_ptr + local_addrs[i].offset
-                        ctypes.memmove(dst_addr, data, size)
+                        dst_buf = (c_char * size).from_address(dst_addr)
+                        view = memoryview(dst_buf)
+                        remaining = size
+                        while remaining > 0:
+                            nbytes = self._socket.recv_into(view)
+                            if nbytes == 0:
+                                raise ConnectionError(
+                                    f"Connection closed while expecting {size} bytes"
+                                )
+                            view = view[nbytes:]
+                            remaining -= nbytes
                     else:
                         # Shouldn't happen, but handle gracefully
                         logger.warning(
