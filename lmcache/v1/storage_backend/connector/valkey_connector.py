@@ -238,11 +238,33 @@ class _ThreadWorkerPool:
             if result is None:
                 return False
             n = int(result)
+            if n != size:
+                # Fixed-size KV chunks must round-trip exactly. A short read
+                # signals a size mismatch / corrupt or stale-format entry;
+                # treat it as a miss rather than leaving stale tail bytes in
+                # buf[n:] and reporting success.
+                logger.warning(
+                    "Valkey GET size mismatch for key %s: read %d bytes, "
+                    "expected %d; treating as miss.",
+                    key_str,
+                    n,
+                    size,
+                )
+                return False
             buf[:n] = scratch_view[:n]
             return True
         else:
             data = client.get(key_str.encode())
             if data is None:
+                return False
+            if len(data) != buf.nbytes:
+                logger.warning(
+                    "Valkey GET size mismatch for key %s: read %d bytes, "
+                    "expected %d; treating as miss.",
+                    key_str,
+                    len(data),
+                    buf.nbytes,
+                )
                 return False
             buf[: len(data)] = data
             return True

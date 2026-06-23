@@ -4,6 +4,7 @@ from typing import Optional
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.config_base import _to_bool
 from lmcache.v1.storage_backend.connector import (
     ConnectorAdapter,
     ConnectorContext,
@@ -20,6 +21,11 @@ class ValkeyConnectorAdapter(ConnectorAdapter):
     Uses the GLIDE sync client with a ThreadPoolExecutor for
     high-throughput KV cache transfer.  Supports both standalone
     (default) and cluster modes via ``valkey_mode`` config.
+
+    Like ``RESPConnectorAdapter``, this adapter uses single-key, fixed-size
+    storage with no per-chunk metadata, so partial/unfull chunks are not
+    supported: ``save_chunk_meta`` and ``save_unfull_chunk`` must both be
+    ``False``.
 
     Requires ``valkey-glide`` 2.3+.
     """
@@ -51,6 +57,17 @@ class ValkeyConnectorAdapter(ConnectorAdapter):
             else {}
         )
 
+        # Single-key fixed-size storage (like RESP) carries no per-chunk
+        # metadata, so partial/unfull chunks are unsupported. save_chunk_meta
+        # comes from free-form extra_config, so coerce it (a string like
+        # "false" would otherwise be truthy).
+        if _to_bool(extra_config.get("save_chunk_meta", False)):
+            raise ValueError("save_chunk_meta must be False for Valkey glide connector")
+        if config is not None and config.save_unfull_chunk:
+            raise ValueError(
+                "save_unfull_chunk must be False for Valkey glide connector"
+            )
+
         num_workers = int(
             extra_config.get(
                 "valkey_num_workers",
@@ -59,7 +76,7 @@ class ValkeyConnectorAdapter(ConnectorAdapter):
         )
         username = str(extra_config.get("valkey_username", ""))
         password = str(extra_config.get("valkey_password", ""))
-        tls_enable = bool(extra_config.get("tls_enable", False))
+        tls_enable = _to_bool(extra_config.get("tls_enable", False))
 
         # Timeouts
         request_timeout = float(

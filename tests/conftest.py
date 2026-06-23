@@ -156,8 +156,17 @@ class MockSyncGlideClient:
     def set(self, key: bytes, value) -> None:
         self._store[key] = bytes(value)
 
-    def get(self, key: bytes):
-        return self._store.get(key)
+    def get(self, key: bytes, buffer=None):
+        data = self._store.get(key)
+        if buffer is None:
+            return data
+        # Mirror glide's native buffer-GET: write into the caller's buffer and
+        # return the number of bytes read (an int count), or None on miss.
+        if data is None:
+            return None
+        n = len(data)
+        buffer[:n] = data
+        return n
 
     def exists(self, keys: list[bytes]) -> int:
         return sum(1 for k in keys if k in self._store)
