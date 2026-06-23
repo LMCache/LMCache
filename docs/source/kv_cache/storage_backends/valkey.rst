@@ -47,6 +47,12 @@ The following ``extra_config`` keys are supported:
    * - ``valkey_database``
      - None
      - Database ID (standalone mode only, ignored in cluster mode).
+   * - ``valkey_enable_ttl``
+     - ``false``
+     - Feature flag. When ``true``, every key is written with an expiry (see ``valkey_ttl_sec``) so Valkey/Redis ``volatile-*`` eviction policies can reclaim L2 cache keys once the node reaches ``maxmemory``. When ``false`` (default), keys are persisted without a TTL.
+   * - ``valkey_ttl_sec``
+     - ``86400``
+     - Key TTL in seconds, applied only when ``valkey_enable_ttl`` is ``true``. Must be a positive integer. If the flag is enabled but this key is omitted, it defaults to ``86400`` (24 hours).
    * - ``request_timeout``
      - ``5.0``
      - GLIDE request timeout in seconds. Also used as the Python-side Future timeout.
@@ -84,6 +90,25 @@ Standalone-mode Valkey Configuration with database
      valkey_username: "Your username"
      valkey_password: "Your password"
      valkey_database: 0
+
+Standalone-mode Valkey Configuration with key TTL (volatile eviction)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Enable a per-key TTL so a node configured with a ``volatile-lru`` /
+``volatile-lfu`` eviction policy can reclaim L2 cache keys once it reaches
+``maxmemory``. Without a TTL such policies never evict the KV cache keys,
+which can choke the remote cache.
+
+.. code-block:: yaml
+
+   chunk_size: 256
+   remote_url: "valkey://<your host>:6379"
+   remote_serde: "naive"
+   extra_config:
+     valkey_username: "Your username"
+     valkey_password: "Your password"
+     valkey_enable_ttl: true
+     valkey_ttl_sec: 3600   # keys expire after 1 hour
 
 Cluster-mode
 ~~~~~~~~~~~~~~~~
