@@ -38,6 +38,11 @@ from lmcache.v1.multiprocess.mq import MessageQueueClient
 if TYPE_CHECKING:
     # First Party
     import lmcache.c_ops as lmc_ops
+from lmcache.v1.multiprocess.transfer_context.wire_format import (
+    deserialize_group_chunks_maybe as _wire_decode,
+    is_lmcache_blob as _is_lmcache_blob,
+    serialize_group_chunks_torchsave as _wire_encode,
+)
 
 logger = init_logger(__name__)
 
@@ -913,111 +918,65 @@ def scatter_cpu_to_paged_kv(
     # before consuming these chunks to ensure data validity.
 
 # ---------------------------------------------------------------------------
-# Multi-group serialization helpers
+# Multi-group serialization helpers (dev31+: torch.save wire format)
 # ---------------------------------------------------------------------------
 
 
 def _serialize_single_group_chunks(
     group_chunks: list[torch.Tensor],
 ) -> bytes:
-    """Serialize one group's CPU chunk tensors as a compact pickle blob.
+    """Serialize one group's CPU chunk tensors to the wire-format blob.
 
-    Optimization: pickles bf16/fp16/fp32/int* tensors natively via torch's
-    ``__reduce_ex__`` (preserves dtype, no conversion). This previously
-    cast bf16 to float32 for numpy compatibility, doubling serialization
-    memory traffic and adding a full copy on deserialize.
-
-    fp8 tensors (e4m3fn, e5m2) still go through a uint8 view because torch's
-    legacy pickle loader returns them as ``UntypedStorage`` without dtype
-    metadata -- see ``tests/v1/multiprocess/test_multi_group.py`` for the
-    regression test.
+    Uses :func:`wire_format.serialize_group_chunks_torchsave` which
+    produces a ``b'L'`` + ``torch.save`` blob -- ~2x faster than
+    ``pickle.HIGHEST_PROTOCOL`` on production-sized (~50 MiB) chunks.
     """
-    import pickle
-
-    def _to_serializable(t: torch.Tensor):
-        # fp8 needs explicit view to uint8 + dtype tag because torch's
-        # legacy unpickler drops the dtype info.
-        if hasattr(torch, "float8_e4m3fn") and t.dtype == torch.float8_e4m3fn:
-            return ("fp8", t.contiguous().view(torch.uint8).numpy(), "float8_e4m3fn")
-        if hasattr(torch, "float8_e5m2") and t.dtype == torch.float8_e5m2:
-            return ("fp8", t.contiguous().view(torch.uint8).numpy(), "float8_e5m2")
-        # All other dtypes (bf16, fp16, fp32, int*, uint8, bool) are
-        # All other dtypes (bf16, fp16, fp32, int*, uint8, bool) are
-        # pickled natively by torch -- no conversion, dtype preserved.
-        return ("tensor", t.contiguous())
-
-    # Wrap in outer list so the blob is structurally identical to a single-
-    # group slice of ``_serialize_multi_group_chunks`` output. The
-    # deserializer iterates groups as the outer dimension.
-    payload = [[_to_serializable(c) for c in group_chunks]]
-    return pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)
-
-
-def _to_serializable_chunk(t: torch.Tensor):
-    """Tag a chunk for the dev24+ wire format.
-
-    fp8 (e4m3fn / e5m2) needs an explicit uint8 view + dtype tag because
-    torch's legacy unpickler drops the dtype metadata for these dtypes.
-    All other dtypes (bf16, fp16, fp32, int*, uint8, bool) roundtrip via
-    torch's native ``__reduce_ex__`` -- no conversion, dtype preserved.
-    """
-    if hasattr(torch, "float8_e4m3fn") and t.dtype == torch.float8_e4m3fn:
-        return ("fp8", t.contiguous().view(torch.uint8).numpy(), "float8_e4m3fn")
-    if hasattr(torch, "float8_e5m2") and t.dtype == torch.float8_e5m2:
-        return ("fp8", t.contiguous().view(torch.uint8).numpy(), "float8_e5m2")
-    return ("tensor", t.contiguous())
-
-
-def _serialize_single_group_chunks(
-    group_chunks: list[torch.Tensor],
-) -> bytes:
-    """Serialize one group's CPU chunk tensors as a compact pickle blob.
-
-    The blob is structurally identical to a single-group slice of
-    ``_serialize_multi_group_chunks`` output so the deserializer can use
-    the same outer-loop logic.
-
-    Performance: pickles bf16/fp16/fp32/int* natively (no bf16->float32
-    conversion).  Combined with ``pickle.HIGHEST_PROTOCOL``, this gives
-    ~1.9-- speedup and 50% smaller blobs on bf16 vs the previous
-    numpy-based path.
-    """
-    import pickle
-    payload = [[_to_serializable_chunk(c) for c in group_chunks]]
-    return pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)
+    return _wire_encode(group_chunks)
 
 
 def _serialize_multi_group_chunks(
     group_chunks: list[list[torch.Tensor]],
 ) -> bytes:
-    """Serialize multiple groups as a single pickle blob.
+    """Serialize multiple groups as a single wire-format blob.
 
-    Used as the fast path for the single ``COMMIT_STORE`` request when
-    the combined size fits in the msgspec bin limit (4 GiB). When it does
-    not, callers fall back to ``_serialize_single_group_chunks`` +
-    ``COMMIT_STORE_GROUP`` per group.
+    Returns the new ``torch.save`` format with the list-of-lists
+    structure preserved -- the deserializer returns the original
+    group boundaries.
     """
-    import pickle
-    payload = [[_to_serializable_chunk(t) for t in group] for group in group_chunks]
-    return pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)
+    return _wire_encode(group_chunks)
+
+
+
+
+
 
 
 def _deserialize_multi_group_chunks(
     cpu_data: bytes,
 ) -> list[list[torch.Tensor]]:
-    """Deserialize a multi-group pickle blob back to tensors.
+    """Deserialize a wire-format blob back to ``list[list[Tensor]]``.
 
     Wire-format compatibility:
 
-    - ``dev24+`` (new): each chunk is a tagged tuple
-      ``("tensor", torch.Tensor)`` for native dtypes (bf16/fp16/fp32/int*),
-      or ``("fp8", ndarray, dtype_str)`` for fp8 tensors that needed the
-      uint8-view roundtrip. bf16 is stored as native bf16 (no conversion).
-    - ``<=dev23`` (old): each chunk is ``(ndarray, dtype_str)`` with bf16
-      upcast to float32 (or fp8 as uint8 view). Detected automatically
-      by tuple length and tag presence; no cache wipe required when
-      upgrading.
+    - ``dev31+`` (new): ``b'L'`` magic + ``torch.save`` of a flat
+      list of tensors (single-group) or list of lists (multi-group).
+    - ``dev24..dev30`` (legacy): ``pickle.HIGHEST_PROTOCOL`` of a
+      ``list[list[tagged_tuple]]``.
+    - ``<=dev23`` (old): bf16 was upcast to float32; detected by the
+      absence of the ``"tensor"`` tag in the tuple.
     """
+    if _is_lmcache_blob(cpu_data):
+        # New format.  Two shapes are possible:
+        #   - flat list of tensors (single-group)
+        #   - list of groups (multi-group)
+        # Distinguish by inspecting the first element.
+        decoded = _wire_decode(cpu_data)
+        if decoded is None:
+            return []
+        if decoded and isinstance(decoded[0], torch.Tensor):
+            return [decoded]
+        return decoded
+    # Legacy format: list of groups, each group is list of tagged tuples
     import pickle
     raw = pickle.loads(cpu_data)
     result = []
@@ -1031,10 +990,9 @@ def _deserialize_multi_group_chunks(
                 out_group.append(t)
             elif tag == "tensor_new":
                 out_group.append(payload)
-            else:  # "old" -- (ndarray, dtype_str) tuple
+            else:
                 arr, dtype_name = payload
                 if dtype_name == "bfloat16":
-                    # Old format stored bf16 as float32; cast back.
                     t = torch.from_numpy(arr).to(torch.bfloat16)
                 elif dtype_name in ("float8_e4m3fn", "float8_e5m2"):
                     t = torch.from_numpy(arr).view(getattr(torch, dtype_name))
@@ -1085,6 +1043,67 @@ def slice_kv_caches_for_group(
     """
     all_values = list(kv_caches.values())
     return {str(i): all_values[idx] for i, idx in enumerate(sorted(layer_indices))}
+
+
+
+def gather_paged_kv_multi_group_to_cpu_streams(
+    kv_caches: dict[str, torch.Tensor],
+    block_ids: list[list[int]],
+    engine_group_infos: list[EngineGroupInfo],
+    lmcache_tokens_per_chunk: int,
+    layout_hints: LayoutHints | None = None,
+    pinned_pool: "PinnedBufferPool | None" = None,
+) -> list[list[torch.Tensor]]:
+    """Multi-stream variant of :func:`gather_paged_kv_multi_group_to_cpu`.
+
+    Runs each group's gather on its own CUDA stream so the GPU->CPU
+    copies can in principle overlap.  Disabled by default because the
+    PCIe bus is shared on most consumer GPUs and the per-stream
+    synchronisation overhead dominates the small overlap win.  See
+    ``LMCACHE_MP_MULTI_STREAM_D2D`` env var.
+    """
+    import threading
+    streams = [torch.cuda.Stream() for _ in engine_group_infos]
+    # Launch each group's gather on its own stream
+    results: list[list[torch.Tensor] | None] = [None] * len(engine_group_infos)
+
+    def _do(g_idx: int) -> None:
+        with torch.cuda.stream(streams[g_idx]):
+            results[g_idx] = gather_paged_kv_to_cpu(
+                slice_kv_caches_for_group(kv_caches, engine_group_infos[g_idx].layer_indices),
+                block_ids[g_idx],
+                # blocks_in_chunk computed inside, pass engine_group_infos
+                _blocks_in_chunk_for(
+                    kv_caches, engine_group_infos[g_idx], lmcache_tokens_per_chunk, layout_hints,
+                ),
+                layout_hints=layout_hints,
+                pinned_pool=pinned_pool,
+            )
+
+    threads = [threading.Thread(target=_do, args=(i,)) for i in range(len(engine_group_infos))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    # Final sync: each stream + main
+    for s in streams:
+        s.synchronize()
+    return [r for r in results if r is not None]
+
+
+def _blocks_in_chunk_for(
+    kv_caches: dict[str, torch.Tensor],
+    info: EngineGroupInfo,
+    lmcache_tokens_per_chunk: int,
+    layout_hints: LayoutHints | None,
+) -> int:
+    g_kv = slice_kv_caches_for_group(kv_caches, info.layer_indices)
+    tpb = info.tokens_per_block if info.tokens_per_block > 0 else 1
+    if info.tokens_per_block <= 0:
+        # tokens_per_block unknown; fall back to vLLM block_size from layout
+        _, _, _, _, _ = compute_kv_layout(g_kv, layout_hints=layout_hints)
+        tpb = 1
+    return lmcache_tokens_per_chunk // tpb
 
 
 def gather_paged_kv_multi_group_to_cpu(

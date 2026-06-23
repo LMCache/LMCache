@@ -24,6 +24,7 @@ from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.protocols.engine import RegisterEngineDrivenContextResponse
 from lmcache.v1.multiprocess.transfer_context.base import (
+    gather_paged_kv_multi_group_to_cpu_streams,
     EngineDrivenContext,
     EngineDrivenContextMetadata,
     PinnedBufferPool,
@@ -48,6 +49,12 @@ logger = init_logger(__name__)
 # ``lmcache_driven``); ``auto`` reproduces the historical device-type-based
 # dispatch.
 ENV_MP_TRANSFER_MODE = "LMCACHE_MP_TRANSFER_MODE"
+
+# Opt-in: parallelise per-group GPU->CPU D2D copies across CUDA streams.
+# Default is OFF because in our benchmarks the PCIe bus is shared and
+# multi-stream adds sync overhead (~4x slower for serial D2D on a
+# typical consumer GPU).  Set to "1" to force-enable for A/B testing.
+ENV_MULTI_STREAM_D2D = "LMCACHE_MP_MULTI_STREAM_D2D"
 
 
 class MPTransferMode(str, Enum):
@@ -337,10 +344,6 @@ class EngineDrivenTransferContext(TransferContext):
         # overhead and amortises the page-locking cost across calls.
         # Pinned memory is **system RAM**, never GPU VRAM.
         self._pinned_pool: PinnedBufferPool = PinnedBufferPool()
-        # System-RAM pinned buffer pool. Avoids per-store CUDA-allocator
-        # overhead and amortises the page-locking cost across calls.
-        # Pinned memory is **system RAM**, never GPU VRAM.
-        self._pinned_pool: PinnedBufferPool = PinnedBufferPool()
         # Worker-thread pool that parallelises per-group pickle
         # serialisation.  Sized to the typical KV-group count (4 for
         # Qwen3-27B hybrid: GatedDeltaNet + Attention).  Each thread
@@ -550,14 +553,27 @@ class EngineDrivenTransferContext(TransferContext):
                     f"block_ids has {len(block_ids)} groups, "
                     f"but {len(self._engine_group_infos)} engine_group_infos registered"
                 )
-            group_chunks = gather_paged_kv_multi_group_to_cpu(
-                kv_caches,
-                block_ids,
-                self._engine_group_infos,
-                lmcache_tokens_per_chunk=self._lmcache_tokens_per_chunk,
-                layout_hints=self._layout_hints,
-                pinned_pool=self._pinned_pool,
-            )
+            if os.environ.get(ENV_MULTI_STREAM_D2D) == "1":
+                # Opt-in: parallelise D2D across CUDA streams.
+                # Disabled by default -- PCIe is shared, the sync
+                # overhead exceeds the overlap win on consumer GPUs.
+                group_chunks = gather_paged_kv_multi_group_to_cpu_streams(
+                    kv_caches,
+                    block_ids,
+                    self._engine_group_infos,
+                    lmcache_tokens_per_chunk=self._lmcache_tokens_per_chunk,
+                    layout_hints=self._layout_hints,
+                    pinned_pool=self._pinned_pool,
+                )
+            else:
+                group_chunks = gather_paged_kv_multi_group_to_cpu(
+                    kv_caches,
+                    block_ids,
+                    self._engine_group_infos,
+                    lmcache_tokens_per_chunk=self._lmcache_tokens_per_chunk,
+                    layout_hints=self._layout_hints,
+                    pinned_pool=self._pinned_pool,
+                )
             # ── Parallel serialize + pipelined submit ───────────────────
             # GPU→CPU D2D copies (issued above, all queued on the same
             # stream) finish on the single ``current_stream().synchronize()``
