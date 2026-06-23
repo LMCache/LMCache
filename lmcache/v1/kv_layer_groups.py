@@ -282,7 +282,7 @@ class KVLayerGroupsManager:
         num_blocks: int,
         engine_group_infos: "Sequence[EngineGroupInfo]" = (),
         lmcache_tokens_per_chunk: int = 256,
-        separate_object_groups: bool = False,
+        separate_object_groups: bool = True,
     ) -> None:
         """Partition layers into groups keyed by
         :data:`LayerGroupIdentity`.
@@ -305,8 +305,8 @@ class KVLayerGroupsManager:
             engine_group_infos: Engine KV cache group metadata, one info per
                 kernel group in kernel-group order, or empty.
             lmcache_logical_chunk_size: Tokens per LMCache chunk
-            separate_object_groups: When True, split kernel groups into one
-                object group per sliding-window size; when False (default), all
+            separate_object_groups: When True (default), split kernel groups
+                into one object group per sliding-window size; when False, all
                 kernel groups share a single full-attention object group.
         """
         # Import here to break a circular import via

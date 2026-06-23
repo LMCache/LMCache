@@ -9,7 +9,11 @@ from unittest.mock import MagicMock
 import time
 
 # First Party
-from lmcache.v1.distributed.api import ipc_key_to_object_keys
+from lmcache.v1.distributed.api import (
+    AttnWindowDesc,
+    ObjectKey,
+    ipc_key_to_object_keys,
+)
 from lmcache.v1.distributed.storage_manager import PrefetchHandle
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
@@ -243,15 +247,38 @@ def _lookup_key(world_size: int) -> IPCCacheServerKey:
     )
 
 
-def test_chunk_major_object_keys_orders_chunk_then_group_then_rank():
-    """Keys are laid out chunk -> object group -> kv_rank, so each chunk's keys
-    are contiguous (the property that makes a leading-ones prefix equal to the
-    full-attention model-wide hit)."""
-    module = LookupModule(MagicMock())
-    key = _lookup_key(world_size=2)
-    chunk_hashes = [b"c0", b"c1"]
+def _captured_lookup_object_keys(
+    world_size: int, num_groups: int, chunk_hashes: list[bytes]
+) -> list[ObjectKey]:
+    """Drive the public ``lookup()`` and return the object keys it submits.
 
-    keys = module._chunk_major_object_keys(key, chunk_hashes, 2)
+    The engine context is mocked so ``lookup()`` runs end-to-end; the
+    chunk-major key list it builds is recovered from the ``submit_prefetch_task``
+    call rather than by reaching into a private helper.
+    """
+    ctx = MagicMock()
+    ctx.chunk_size = 16
+    ctx.event_bus.has_subscribers.return_value = False
+    ctx.layout_desc_registry.find.return_value = MagicMock()  # non-None layout
+    ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
+        num_chunks_in_sw=[-1] * num_groups
+    )
+    ctx.token_hasher.compute_chunk_hashes.return_value = chunk_hashes
+
+    module = LookupModule(ctx)
+    module.lookup(_lookup_key(world_size=world_size), tp_size=1)
+
+    ctx.storage_manager.submit_prefetch_task.assert_called_once()
+    return ctx.storage_manager.submit_prefetch_task.call_args.args[0]
+
+
+def test_lookup_lays_keys_out_chunk_then_group_then_rank():
+    """lookup() submits keys laid out chunk -> object group -> kv_rank, so each
+    chunk's keys are contiguous (the property that makes a leading-ones prefix
+    equal to the full-attention model-wide hit)."""
+    keys = _captured_lookup_object_keys(
+        world_size=2, num_groups=2, chunk_hashes=[b"c0", b"c1"]
+    )
 
     # 2 chunks * 2 groups * 2 ranks.
     assert len(keys) == 8
@@ -265,14 +292,14 @@ def test_chunk_major_object_keys_orders_chunk_then_group_then_rank():
     assert keys[0].kv_rank != keys[1].kv_rank
 
 
-def test_chunk_major_single_group_matches_single_group_layout():
-    """With one object group the layout is byte-identical to the single-group
-    layout (the object-group-separation-disabled / non-hybrid case)."""
-    module = LookupModule(MagicMock())
-    key = _lookup_key(world_size=2)
+def test_lookup_single_group_matches_single_group_layout():
+    """With one object group the submitted layout is byte-identical to the
+    single-group layout (the object-group-separation-disabled / non-hybrid
+    case)."""
     chunk_hashes = [b"c0", b"c1"]
-
-    assert (
-        module._chunk_major_object_keys(key, chunk_hashes, 1)
-        == ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
+    keys = _captured_lookup_object_keys(
+        world_size=2, num_groups=1, chunk_hashes=chunk_hashes
     )
+
+    expected = ipc_key_to_object_keys(_lookup_key(world_size=2), chunk_hashes, [0])[0]
+    assert keys == expected

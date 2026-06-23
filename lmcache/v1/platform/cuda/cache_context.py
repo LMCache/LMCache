@@ -354,7 +354,7 @@ class GPUCacheContext(BaseCacheContext):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
-        separate_object_groups: bool = False,
+        separate_object_groups: bool = True,
     ):
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
         engine_kv_format, kv_caches_norm = normalize_kv_and_discover_format(

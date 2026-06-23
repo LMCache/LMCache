@@ -263,13 +263,11 @@ def add_mp_server_args(
         "import. Example: --script-allowed-imports numpy pandas",
     )
     mp_group.add_argument(
-        "--no-separate-object-groups",
-        dest="separate_object_groups",
-        action="store_false",
-        help="Keep all kernel groups in a single full-attention object group "
-        "instead of splitting them per sliding-window size at KV-cache "
-        "registration. Object-group separation is on by default (for hybrid "
-        "models).",
+        "--separate-object-groups",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Split kernel groups into one object group per sliding-window size "
+        "at KV-cache registration (for hybrid models). (Default is True)",
     )
     return parser
 

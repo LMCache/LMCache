@@ -87,6 +87,10 @@ def _get_prefix_hit_length(
     Returns:
         The prefix hit length in chunks (fully-present chunks of the prefix).
 
+    Example:
+        With ``world_size=2`` and ``num_object_groups=2`` (4 keys per chunk), a
+        found-key prefix of length 10 hits ``10 // 4 = 2`` whole chunks.
+
     Note:
         Correct only under full attention -- every object group present for
         every hit chunk. Once sliding-window prefetch lands, the hit is no
@@ -441,7 +445,19 @@ class LookupModule:
             return
         # Release across every object group, mirroring lookup, which locks keys
         # in every group; releasing only group 0 would leak the rest.
-        obj_keys = self._object_keys_all_groups(key, chunk_hashes)
+        #
+        # NOTE: correct only for full attention, where every locked chunk is a
+        # hit chunk. Sliding-window groups do not retain chunks outside their
+        # window, so once SWA prefetch lands this must skip those chunks instead
+        # of releasing every one -- otherwise chunks the engine still holds can
+        # be over-released (e.g. window=512, LMCache hit 1024, vLLM hit 768 ->
+        # chunks 512..768 may leak). Revisit when sliding-window prefetch is on.
+        attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
+            key.model_name, key.world_size
+        )
+        obj_keys = self._chunk_major_object_keys(
+            key, chunk_hashes, attn_desc.num_object_groups
+        )
 
         extra_count = compute_extra_count(tp_size, key.world_size)
 
@@ -478,8 +494,14 @@ class LookupModule:
             )
             return
 
+        ipc_key = session.lookup_ipc_key
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in session.get_hashes(0)]
-        obj_keys = self._object_keys_all_groups(session.lookup_ipc_key, chunk_hashes)
+        attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
+            ipc_key.model_name, ipc_key.world_size
+        )
+        obj_keys = self._chunk_major_object_keys(
+            ipc_key, chunk_hashes, attn_desc.num_object_groups
+        )
         # unified touch of all keys, which include retrieved and stored keys
         # TODO(chunxiaozheng): when l2 is enabled, the prefetched keys from l2 are temp
         #  and will be deleted after finish_read_prefetched, when we touch all keys,
@@ -496,11 +518,14 @@ class LookupModule:
         chunk_hashes: list[bytes],
         num_groups: int,
     ) -> list[ObjectKey]:
-        """Build a chunk-major flat key list across all object groups.
+        """Resolve the flat object-key list across all object groups,
+        chunk-major.
 
         The keys are ordered ``chunk -> object group -> kv_rank`` so that all
-        keys belonging to one chunk are contiguous. A leading-ones prefix over
-        the flat list then maps directly to a whole-chunk hit count.
+        keys belonging to one chunk are contiguous; a leading-ones prefix over
+        the flat list then maps directly to a whole-chunk hit count. Callers
+        that need the full key set regardless of order (lock release, touch)
+        use this too.
 
         Example (2 chunks ``c0,c1``; 2 groups ``g0,g1``; 2 kv_ranks ``r0,r1``)::
 
@@ -513,7 +538,7 @@ class LookupModule:
             num_groups: Number of object groups to resolve.
 
         Returns:
-            The chunk-major flattened list of object keys.
+            The chunk-major flattened list of object keys across all groups.
         """
         per_group = ipc_key_to_object_keys(key, chunk_hashes, list(range(num_groups)))
         if num_groups == 1:
@@ -528,31 +553,6 @@ class LookupModule:
             for group_keys in per_group:
                 obj_keys.extend(group_keys[lo:hi])
         return obj_keys
-
-    def _object_keys_all_groups(
-        self,
-        key: IPCCacheServerKey,
-        chunk_hashes: list[bytes],
-    ) -> list[ObjectKey]:
-        """Resolve a flat key list spanning every registered object group.
-
-        Used by the lock-release and touch paths, which must cover all object
-        groups (a hybrid model locks/stores keys in multiple groups). Key order
-        is irrelevant for those callers, so groups are flattened group-major.
-
-        Args:
-            key: The IPC key (model/world/worker, salt).
-            chunk_hashes: Chunk hashes to resolve keys for.
-
-        Returns:
-            The flattened list of object keys across all object groups.
-        """
-        attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
-            key.model_name, key.world_size
-        )
-        group_ids = list(range(attn_desc.num_object_groups))
-        per_group = ipc_key_to_object_keys(key, chunk_hashes, group_ids)
-        return [k for group_keys in per_group for k in group_keys]
 
     def _register_prefetch_job(self, job: _PrefetchJob) -> None:
         with self._prefetch_job_lock:
