@@ -67,7 +67,7 @@ class LMCacheKVCacheContext:
         Returns:
             LMCacheKVCacheContext instance.
         """
-        self._zmq_context = zmq.Context.instance()
+        self._zmq_context = zmq.Context()
         self._mq_client = MessageQueueClient(url, self._zmq_context)
         self._mq_timeout = timeout
         self._model_name = model_name
@@ -213,7 +213,6 @@ class LMCacheKVCacheContext:
     def close(self) -> None:
         """Close the MQ client and ZMQ context."""
         self._mq_client.close()
-        self._zmq_context.term()
     
     def maybe_submit_lookup_request(
         self,
