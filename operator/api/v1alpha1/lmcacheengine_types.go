@@ -107,10 +107,10 @@ type L1BackendSpec struct {
 
 // EvictionSpec defines the cache eviction configuration.
 type EvictionSpec struct {
-	// policy is the eviction policy. Currently only LRU is supported.
+	// policy is the eviction policy. LRU or noop.
 	// +optional
 	// +kubebuilder:default="LRU"
-	// +kubebuilder:validation:Enum=LRU
+	// +kubebuilder:validation:Enum=LRU;noop
 	Policy *string `json:"policy,omitempty"`
 
 	// triggerWatermark is the cache usage ratio that triggers eviction.
@@ -185,7 +185,7 @@ type L2BackendSpec struct {
 	// cache misses. "default" picks the first adapter that has the key.
 	// +optional
 	// +kubebuilder:default="default"
-	// +kubebuilder:validation:Enum=default
+	// +kubebuilder:validation:Enum=default;retain
 	PrefetchPolicy *string `json:"prefetchPolicy,omitempty"`
 
 	// prefetchMaxInFlight limits the number of concurrent prefetch
@@ -387,6 +387,13 @@ type LMCacheEngineSpec struct {
 	// priorityClassName is the priority class for the pods.
 	// +optional
 	PriorityClassName string `json:"priorityClassName,omitempty"`
+
+	// hostNetwork runs the pod in the host's network namespace. When true the
+	// operator also sets dnsPolicy to ClusterFirstWithHostNet so cluster DNS
+	// still works. Default: false.
+	// +optional
+	// +kubebuilder:default=false
+	HostNetwork *bool `json:"hostNetwork,omitempty"`
 
 	// extraArgs are additional CLI flags appended to the server command.
 	// They are appended last and can override any auto-generated flag.

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence, Union
 import threading
 import time
@@ -269,19 +270,16 @@ class LocalCPUBackend(AllocatorBackendInterface):
             return True
 
     def remove(self, key: CacheEngineKey, force: bool = True) -> bool:
-        if force:
-            self.cpu_lock.acquire()
-        if key not in self.hot_cache:
+        lock_context = self.cpu_lock if force else nullcontext()
+        with lock_context:
+            if key not in self.hot_cache:
+                return False
+
+            memory_obj = self.hot_cache.pop(key)
+            memory_obj.ref_count_down()
+
             if force:
-                self.cpu_lock.release()
-            return False
-
-        memory_obj = self.hot_cache.pop(key)
-        memory_obj.ref_count_down()
-
-        if force:
-            self.cache_policy.update_on_force_evict(key)
-            self.cpu_lock.release()
+                self.cache_policy.update_on_force_evict(key)
 
         if self.batched_msg_sender is not None:
             self.batched_msg_sender.add_kv_op(
