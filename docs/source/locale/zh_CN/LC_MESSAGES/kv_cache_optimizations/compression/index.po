@@ -21,19 +21,19 @@ msgstr ""
 
 #: ../../source/kv_cache_optimizations/compression/index.rst:2
 msgid "Compression"
-msgstr ""
+msgstr "压缩"
 
 #: ../../source/kv_cache_optimizations/compression/index.rst:4
 msgid ""
 "KV cache compression can greatly reduces the size of the cache, which can"
 " be beneficial for both storage/memory usage and loading speed. "
 "Currently, we support the following compression algorithms:"
-msgstr ""
+msgstr "KV Cache 压缩可以大大减少缓存的大小，这对存储/内存使用和加载速度都有好处。目前，我们支持以下压缩算法："
 
 #: ../../source/kv_cache_optimizations/compression/index.rst:7
 msgid ""
 ":ref:`CacheGen <cachegen>`: `CacheGen: KV Cache Compression and Streaming"
 " for Fast Large Language Model Serving "
 "<https://dl.acm.org/doi/10.1145/3651890.3672274>`_"
-msgstr ""
+msgstr ":ref:`CacheGen <cachegen>`: `CacheGen: KV Cache 压缩与流式传输以快速服务大型语言模型 <https://dl.acm.org/doi/10.1145/3651890.3672274>`_"
 

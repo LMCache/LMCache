@@ -1,123 +1,63 @@
 #!/usr/bin/env bash
-# Per-job environment setup: installs vLLM (nightly cu128 wheels) + LMCache from source.
-# Called at the start of every CI job.
+# Per-job environment setup for CacheBlend-plugin compatibility tests.
+ 
 set -euo pipefail
 
-# Print the failing command and line number on any error.
 trap 'echo "ERROR: setup-blend-env.sh failed at line $LINENO (exit code $?)" >&2' ERR
 
-# ── GPU health pre-check ────────────────────────────────────
-# Fail fast if GPUs are occupied by stale host processes.
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-# Bind-mounted repos are often owned by the host user while this script runs as root in Docker;
-# git then refuses "dubious ownership" and setuptools_scm fails during editable installs.
-if command -v git &>/dev/null; then
-    git config --global --add safe.directory "${REPO_ROOT}" 2>/dev/null || true
-fi
-source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
-check_gpu_health 80
 
-echo "--- :python: Installing vLLM (nightly wheels)"
+# 1. Full env: vLLM nightly + LMCache(PR) from source (+ c_ops for this GPU).
+#    setup-env.sh already runs the GPU health pre-check.
+source "${REPO_ROOT}/.buildkite/k3_harness/setup-env.sh"
 
+# setup-env.sh installed its own ERR trap; restore ours for accurate attribution.
+trap 'echo "ERROR: setup-blend-env.sh failed at line $LINENO (exit code $?)" >&2' ERR
 
-DEFAULT_VENV_BIN="/opt/venv/bin"
-UV_BIN="$(command -v uv 2>/dev/null || true)"
-UV_BIN="${UV_BIN:-/usr/local/bin/uv}"
+# 2. Plugin-harness dep not in the LMCache/vLLM dependency closure.
+echo "--- :python: Installing cacheblend-plugin harness deps"
+uv pip install httpx
 
-if [[ ! -x "${DEFAULT_VENV_BIN}/python" ]]; then
-    echo "ERROR: default venv python missing or not executable: ${DEFAULT_VENV_BIN}/python" >&2
+# 3. Pull the cacheblend-plugin. Coordinates come from the Buildkite pipeline
+#    env; CB_PLUGIN_REPO is required (set it in the pipeline env so the repo
+#    owner/name is not hardcoded here). REF/DIR have sensible fallbacks.
+CB_PLUGIN_REPO="${CB_PLUGIN_REPO:?CB_PLUGIN_REPO not set — set the plugin repo (owner/name) in the Buildkite pipeline env}"
+CB_PLUGIN_REF="${CB_PLUGIN_REF:-main}"
+CB_PLUGIN_DIR="${CB_PLUGIN_DIR:-/tmp/cb-plugin}"
+
+echo "--- :arrow_down: Pulling ${CB_PLUGIN_REPO}@${CB_PLUGIN_REF}"
+_cb_tok="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+echo "    GH_TOKEN present: $([ -n "${_cb_tok}" ] && echo yes || echo NO)"
+if [ -z "${_cb_tok}" ]; then
+    echo "ERROR: GH_TOKEN/GITHUB_TOKEN not set. ${CB_PLUGIN_REPO} is private — set a" >&2
+    echo "       fine-grained PAT (resource owner = the repo's org, Contents: read)" >&2
+    echo "       as GH_TOKEN in the Buildkite pipeline env." >&2
     exit 1
 fi
-
-vllm_default_out="$("${DEFAULT_VENV_BIN}/python" -c "import vllm; print(vllm.__version__)" 2>&1)" || {
-    echo "ERROR: vLLM is not importable in default venv (${DEFAULT_VENV_BIN}). Diagnostics:" >&2
-    echo "  python: $("${DEFAULT_VENV_BIN}/python" -c "import sys; print(sys.executable)" 2>&1)" >&2
-    echo "  import attempt output:" >&2
-    echo "${vllm_default_out}" >&2
-    exit 1
-}
-echo "vLLM in default venv (${DEFAULT_VENV_BIN}): ${vllm_default_out}"
-
-# If uv prompts because /workspace/.venv already exists: use the `--clear` flag or set UV_VENV_CLEAR=1
-# to skip the prompt and recreate; this script defaults to --allow-existing (reuse, non-interactive).
-UV_VENV_CLEAR="${UV_VENV_CLEAR:-0}"
-mkdir -p /workspace
-if [[ "${UV_VENV_CLEAR}" == "1" ]]; then
-    echo "[HINT] UV_VENV_CLEAR=1: recreating /workspace/.venv with --clear (no prompt)."
-    "${UV_BIN}" venv --clear /workspace/.venv --python "${DEFAULT_VENV_BIN}/python3.12" --seed
-else
-    "${UV_BIN}" venv --allow-existing /workspace/.venv --python "${DEFAULT_VENV_BIN}/python3.12" --seed
+_cb_url="https://x-access-token:${_cb_tok}@github.com/${CB_PLUGIN_REPO}.git"
+# Isolate from the Buildkite agent's git config: its checkout credential is a
+# GitHub App token scoped to LMCache (injected via the GLOBAL git config —
+# insteadOf / extraheader / credential.helper) and 403s on the plugin repo.
+# Ignoring global+system config forces git to use ONLY our GH_TOKEN from the URL.
+_cb_git=(env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+         git -c credential.helper=)
+rm -rf "${CB_PLUGIN_DIR}"
+# --branch handles a branch/tag; a commit SHA needs a full clone + checkout.
+if ! "${_cb_git[@]}" clone --depth 1 --branch "${CB_PLUGIN_REF}" "${_cb_url}" "${CB_PLUGIN_DIR}" 2>/dev/null; then
+    "${_cb_git[@]}" clone "${_cb_url}" "${CB_PLUGIN_DIR}"
+    git -C "${CB_PLUGIN_DIR}" checkout "${CB_PLUGIN_REF}"
 fi
-TEST_VENV_BIN="/workspace/.venv/bin"
+echo "    cacheblend-plugin @ $(git -C "${CB_PLUGIN_DIR}" rev-parse --short HEAD) (ref=${CB_PLUGIN_REF})"
 
-# When flashinfer and flashinfer-cubin resolve to different patch versions, skip strict check.
-export FLASHINFER_DISABLE_VERSION_CHECK=1
+# 4. Install the plugin editable; --no-deps keeps the env's torch/vllm/lmcache,
+#    --no-build-isolation because the plugin is pure-Python (no compile step).
+echo "--- :python: Installing cacheblend-plugin (editable)"
+git config --global --add safe.directory "${CB_PLUGIN_DIR}" 2>/dev/null || true
+uv pip install -e "${CB_PLUGIN_DIR}" --no-deps --no-build-isolation
 
-# vLLM: force cu12.9 variant; PyPI default is cu13 (libcudart.so.13), unloadable in this cu12 container.
-echo "--- :python: Installing vLLM (nightly cu129)"
+# 5. Import/registration smoke so a broken install fails here, not 180s into a
+#    server-boot timeout inside the harness.
+python -c "import lmcache_cacheblend; print('cacheblend-plugin imported OK')"
 
-# --index-strategy unsafe-best-match is needed so uv considers PyPI for vLLM's
-# transitive deps (setuptools>=77 specifically — the PyTorch cu129 index only
-# carries setuptools<=70.2.0, and uv's default first-index would refuse to
-# look at PyPI for it). VLLM_PRECOMPILED_WHEEL_VARIANT pins the vLLM CUDA
-# variant, so the resolver strategy can't pull a mismatched build.
-VLLM_PRECOMPILED_WHEEL_VARIANT=cu129 "${UV_BIN}" pip install -p "${TEST_VENV_BIN}/python" -U vllm --pre \
-    --extra-index-url https://wheels.vllm.ai/nightly/cu129 \
-    --extra-index-url https://download.pytorch.org/whl/cu129 \
-    --index-strategy unsafe-best-match
-
-
-"${DEFAULT_VENV_BIN}/python" -c 'import vllm; print(f"default venv vllm={vllm.__version__}")'
-"${TEST_VENV_BIN}/python" -c 'import vllm; print(f"test venv vllm={vllm.__version__}")'
-"${DEFAULT_VENV_BIN}/python" -c 'import torch; print(f"default venv torch={torch.__version__}, torch.version.cuda={torch.version.cuda}")'
-"${TEST_VENV_BIN}/python" -c 'import torch; print(f"test venv torch={torch.__version__}, torch.version.cuda={torch.version.cuda}")'
-
-echo "--- :wrench: Install sitecustomize.py in both venvs (transformers pre-import)"
-# The blend test runs prefiller in /opt/venv and decoder in
-# /workspace/.venv. Both launch vllm, which spawns a BG thread that
-# calls `import transformers` concurrently with the main thread's
-# later `from transformers import GenerationConfig, ...`. Pre-import
-# on the main thread via sitecustomize.py so the race is closed in
-# both venvs (see setup-env.sh for the full write-up).
-for site in \
-    /opt/venv/lib/python3.12/site-packages \
-    /workspace/.venv/lib/python3.12/site-packages; do
-    cat > "${site}/sitecustomize.py" <<'PY'
-try:
-    import transformers  # noqa: F401
-except Exception:
-    pass
-PY
-done
-
-echo "--- :python: Installing LMCache from source"
-# Skip setuptools_scm git describe; the repo carries non-PEP-440 tags
-# (nightly, nightly-cu13) that crash the newer vcs_versioning backend.
-export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
-# Select cu12 nixl wheel
-export LMCACHE_CUDA_MAJOR=12
-"${UV_BIN}" pip install -p "${DEFAULT_VENV_BIN}/python" -e . --no-build-isolation
-"${UV_BIN}" pip install -p "${TEST_VENV_BIN}/python" -e . --no-build-isolation
-# Work around openai_harmony vocab download/load issues for GPT-OSS (vLLM recipes troubleshooting).
-# related github issue: https://github.com/openai/harmony/pull/41
-TIKTOKEN_ENCODINGS_DIR="${REPO_ROOT}/tiktoken_encodings"
-mkdir -p "${TIKTOKEN_ENCODINGS_DIR}"
-if ! command -v curl &>/dev/null; then
-    echo "ERROR: curl is required for downloading tiktoken encodings" >&2
-    exit 1
-fi
-if [[ ! -s "${TIKTOKEN_ENCODINGS_DIR}/o200k_base.tiktoken" ]]; then
-  curl -fsSL "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken" -o "${TIKTOKEN_ENCODINGS_DIR}/o200k_base.tiktoken"
-fi
-if [[ ! -s "${TIKTOKEN_ENCODINGS_DIR}/cl100k_base.tiktoken" ]]; then
-  curl -fsSL "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken" -o "${TIKTOKEN_ENCODINGS_DIR}/cl100k_base.tiktoken"
-fi
-
-
-export TIKTOKEN_ENCODINGS_BASE="${TIKTOKEN_ENCODINGS_DIR}"
-echo "Using TIKTOKEN_ENCODINGS_BASE=${TIKTOKEN_ENCODINGS_BASE}"
-
-
-echo "--- :white_check_mark: Environment ready"
-"${DEFAULT_VENV_BIN}/python" -c "import vllm; import lmcache; print(f'vLLM={vllm.__version__}, LMCache installed from source with no build isolation in default venv')"
-"${TEST_VENV_BIN}/python" -c "import vllm; import lmcache; print(f'vLLM={vllm.__version__}, LMCache installed from source with no build isolation in test venv')"
+export CB_PLUGIN_DIR CB_PLUGIN_REF
+echo "--- :white_check_mark: CacheBlend env ready (plugin @ ${CB_PLUGIN_REF}, dir=${CB_PLUGIN_DIR})"

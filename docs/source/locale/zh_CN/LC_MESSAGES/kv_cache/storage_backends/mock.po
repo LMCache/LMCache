@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/kv_cache/storage_backends/mock.rst:2
 msgid "Mock"
-msgstr ""
+msgstr "模拟"
 
 #: ../../source/kv_cache/storage_backends/mock.rst:4
 msgid ""
@@ -29,48 +29,48 @@ msgid ""
 "the peeking latency, read throughput, and write throughput inside of the "
 "remote url. It will create copies of your KV cache in unmanaged local "
 "RAM."
-msgstr ""
+msgstr "LMCache 提供了一个模拟远程连接器，允许您手动设置远程 URL 中的预查看延迟、读取吞吐量和写入吞吐量。它将在未管理的本地 RAM 中创建您的 KV Cache 的副本。"
 
 #: ../../source/kv_cache/storage_backends/mock.rst:7
 msgid "Configuration"
-msgstr ""
+msgstr "配置"
 
 #: ../../source/kv_cache/storage_backends/mock.rst:9
 msgid ""
 "Create a configuration file (e.g., ``mock.yaml``) with the following "
 "content:"
-msgstr ""
+msgstr "创建一个配置文件（例如，``mock.yaml``），内容如下："
 
 #: ../../source/kv_cache/storage_backends/mock.rst:18
 msgid ""
 "The ``remote_url`` format is "
 "``mock://SIZE/?peeking_latency=LATENCY&read_throughput=READ_GBPS&write_throughput=WRITE_GBPS``"
 " where:"
-msgstr ""
+msgstr "``remote_url`` 的格式为 ``mock://SIZE/?peeking_latency=LATENCY&read_throughput=READ_GBPS&write_throughput=WRITE_GBPS``，其中："
 
 #: ../../source/kv_cache/storage_backends/mock.rst:20
 msgid "``SIZE``: Maximum storage size"
-msgstr ""
+msgstr "``SIZE``: 最大存储大小"
 
 #: ../../source/kv_cache/storage_backends/mock.rst:21
 msgid "``peeking_latency``: Latency for peeking operations (in milliseconds)"
-msgstr ""
+msgstr "``peeking_latency``: 预取操作的延迟（以毫秒为单位）"
 
 #: ../../source/kv_cache/storage_backends/mock.rst:22
 msgid "``read_throughput``: Read throughput (in GB/s)"
-msgstr ""
+msgstr "``read_throughput``: 读取吞吐量（以 GB/s 为单位）"
 
 #: ../../source/kv_cache/storage_backends/mock.rst:23
 msgid "``write_throughput``: Write throughput (in GB/s)"
-msgstr ""
+msgstr "``write_throughput``: 写入吞吐量 (以 GB/s 为单位)"
 
 #: ../../source/kv_cache/storage_backends/mock.rst:26
 msgid "Usage"
-msgstr ""
+msgstr "使用方法"
 
 #: ../../source/kv_cache/storage_backends/mock.rst:28
 msgid "Deploy a serving engine with the mock remote backend:"
-msgstr ""
+msgstr "使用模拟远程后端部署服务引擎："
 
 #: ../../source/kv_cache/storage_backends/mock.rst:37
 msgid ""
@@ -78,27 +78,27 @@ msgid ""
 "meaningless) logs on the second query to confirm that the throughput is "
 "slightly lower than 2 GB/s (the CPU <-> GPU allocation/transfer also has "
 "overhead)."
-msgstr ""
+msgstr "检查第二个查询的检索（存储是异步的，因此吞吐量没有意义）日志，以确认吞吐量略低于 2 GB/s（CPU <-> GPU 分配/传输也有开销）。"
 
 #: ../../source/kv_cache/storage_backends/mock.rst:40
 msgid "Example Query"
-msgstr ""
+msgstr "示例查询"
 
 #: ../../source/kv_cache/storage_backends/mock.rst:42
 msgid "Send a test request:"
-msgstr ""
+msgstr "发送测试请求："
 
 #: ../../source/kv_cache/storage_backends/mock.rst:55
 msgid "Expected Logs"
-msgstr ""
+msgstr "预期日志"
 
 #: ../../source/kv_cache/storage_backends/mock.rst:57
 msgid "You should see logs similar to the following:"
-msgstr ""
+msgstr "您应该看到类似于以下的日志："
 
 #: ../../source/kv_cache/storage_backends/mock.rst:64
 msgid ""
 "The logs confirm that the throughput is slightly lower than 2 GB/s due to"
 " CPU <-> GPU allocation/transfer overhead."
-msgstr ""
+msgstr "日志确认吞吐量略低于 2 GB/s，原因是 CPU <-> GPU 分配/传输开销。"
 

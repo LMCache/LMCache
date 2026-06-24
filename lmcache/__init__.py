@@ -31,8 +31,8 @@ def _detect_device() -> tuple[Any, str]:
 
     Returns:
         tuple[Any, str]: A tuple of (torch_device_module, device_type_string),
-            e.g. ``(torch.cuda, "cuda")`` or ``(torch.xpu, "xpu")``.
-
+            e.g. ``(torch.cuda, "cuda")``, ``(torch.musa, "musa")``, or
+            ``(torch.xpu, "xpu")``.
     """
     try:
         # Third Party
@@ -40,7 +40,10 @@ def _detect_device() -> tuple[Any, str]:
     except ImportError:
         return None, "cpu"  # fallback，CLI-only
 
-    if hasattr(torch, "xpu") and torch.xpu.is_available():
+    if hasattr(torch, "musa") and torch.musa.is_available():  # type: ignore[attr-defined]
+        logger.info("MUSA device is available. Using MUSA for LMCache engine.")
+        return torch.musa, "musa"  # type: ignore[attr-defined]
+    elif hasattr(torch, "xpu") and torch.xpu.is_available():
         return torch.xpu, "xpu"
     elif hasattr(torch, "hpu") and torch.hpu.is_available():
         return torch.hpu, "hpu"
@@ -66,11 +69,19 @@ def _get_backend() -> Any:
     """
     Try backends in order, first successful import wins.
     """
-    default_module = importlib.import_module("lmcache.non_cuda_equivalents")
+    default_module = importlib.import_module("lmcache.python_ops_fallback")
     # Third Party
     import torch
 
     backend_candidates = [
+        # Keep backend priority aligned with _detect_device().
+        # MUSA currently uses a Python adapter under the platform package,
+        # unlike the compiled XPU/CUDA extension modules.
+        (
+            "lmcache.v1.platform.musa.ops",
+            "musa_ops",
+            lambda: hasattr(torch, "musa") and torch.musa.is_available(),  # type: ignore[attr-defined]
+        ),
         (
             "lmcache.xpu_ops",
             "xpu_ops",
@@ -121,7 +132,7 @@ try:
     _ops = _get_backend()
     # override lmcache.c_ops with merged module,
     # in which:
-    #     non_cuda_equivalents as base,
+    #     python_ops_fallback as base,
     #     use backend implementation if exists
     sys.modules["lmcache.c_ops"] = _ops
 except (ImportError, ModuleNotFoundError):

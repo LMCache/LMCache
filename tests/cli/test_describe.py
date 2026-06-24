@@ -25,22 +25,35 @@ from lmcache.cli.commands.describe import (
 
 SAMPLE_STATUS = {
     "is_healthy": True,
-    "engine_type": "MPCacheEngine",
+    "engine_type": "MPCacheServer",
     "chunk_size": 256,
     "hash_algorithm": "sha256",
     "registered_gpu_ids": [0],
-    "gpu_context_meta": {
+    "cache_context_meta": {
         "0": {
             "model_name": "llama",
             "world_size": 1,
             "kv_cache_layout": {
                 "num_layers": 32,
-                "block_size": 16,
-                "hidden_dim_sizes": 128,
-                "dtype": "torch.float16",
-                "is_mla": False,
                 "num_blocks": 2048,
                 "cache_size_per_token": 163840,
+                "kernel_groups": [
+                    {
+                        "kernel_group_idx": 0,
+                        "engine_group_idx": 0,
+                        "object_group_idx": 0,
+                        "num_layers": 32,
+                        "layer_indices": list(range(32)),
+                        "tokens_per_block": 16,
+                        "slots_per_block": 16,
+                        "dtype": "torch.float16",
+                        "engine_kv_concrete_shape": "32 x [2, 2048, 16, 8, 128]",
+                        "is_mla": False,
+                        "engine_kv_format": "NL_X_TWO_NB_BS_NH_HS",
+                        "engine_kv_shape": "NL x [2, NB, BS, NH, HS]",
+                        "attention_backend": "vLLM non-MLA flash attention",
+                    },
+                ],
             },
         },
     },
@@ -165,7 +178,7 @@ class TestDescribeKvcacheFields:
         m = output["metrics"]
         assert m["health"] == "OK"
         assert m["url"] == "http://localhost:8000"
-        assert m["engine_type"] == "MPCacheEngine"
+        assert m["engine_type"] == "MPCacheServer"
         assert m["chunk_size"] == 256
         assert m["l1_capacity_gb"] == 60.0
         assert m["l1_used_gb"] == "42.30 (70.5%)"
@@ -180,11 +193,23 @@ class TestDescribeKvcacheFields:
         assert model["world_size"] == 1
         assert model["gpu_ids"] == "0"
         assert model["num_layers"] == 32
-        assert model["block_size"] == 16
-        assert model["hidden_dim_sizes"] == 128
-        assert model["dtype"] == "torch.float16"
-        assert model["is_mla"] is False
         assert model["num_blocks"] == 2048
+        assert model["cache_size_per_token"] == 163840
+
+        # Per-kernel-group section (list)
+        assert "kernel_groups" in m
+        kg = m["kernel_groups"][0]
+        assert kg["model"] == "llama"
+        assert kg["kernel_group_idx"] == 0
+        assert kg["engine_group_idx"] == 0
+        assert kg["object_group_idx"] == 0
+        assert kg["num_layers"] == 32
+        assert kg["slots_per_block"] == 16
+        assert kg["dtype"] == "torch.float16"
+        assert kg["is_mla"] is False
+        assert kg["attention_backend"] == "vLLM non-MLA flash attention"
+        assert kg["engine_kv_shape"] == "NL x [2, NB, BS, NH, HS]"
+        assert kg["engine_kv_concrete_shape"] == "32 x [2, 2048, 16, 8, 128]"
 
     def test_unhealthy(self):
         """Verify health shows UNHEALTHY when is_healthy is False."""
@@ -220,7 +245,7 @@ class TestDescribeKvcacheFields:
         # First Party
         from lmcache.cli.commands.describe import DescribeCommand
 
-        minimal_data = {"is_healthy": True, "engine_type": "MPCacheEngine"}
+        minimal_data = {"is_healthy": True, "engine_type": "MPCacheServer"}
         cmd = DescribeCommand()
 
         class FakeArgs:

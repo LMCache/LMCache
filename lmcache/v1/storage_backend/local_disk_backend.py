@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from concurrent.futures import Future
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence
 import asyncio
 import os
@@ -237,31 +238,27 @@ class LocalDiskBackend(StorageBackendInterface):
         key: CacheEngineKey,
         force: bool = True,
     ) -> bool:
-        if force:
-            self.disk_lock.acquire()
+        lock_context = self.disk_lock if force else nullcontext()
+        with lock_context:
+            if not (meta := self.dict.pop(key, None)):
+                return False
 
-        if not (meta := self.dict.pop(key, None)):
+            path = meta.path
+            size = meta.size
+            self.usage -= size
+            self.stats_monitor.update_local_storage_usage(self.usage)
+
+            # NOTE: The following code will cause deadlock
+            # res = asyncio.run_coroutine_threadsafe(
+            #     self.disk_worker.submit_task("delete", os.remove, path),
+            #     self.loop,
+            # )
+            # res.result()
+
+            os.remove(path)
+
             if force:
-                self.disk_lock.release()
-            return False
-
-        path = meta.path
-        size = meta.size
-        self.usage -= size
-        self.stats_monitor.update_local_storage_usage(self.usage)
-
-        # NOTE: The following code will cause deadlock
-        # res = asyncio.run_coroutine_threadsafe(
-        #     self.disk_worker.submit_task("delete", os.remove, path),
-        #     self.loop,
-        # )
-        # res.result()
-
-        os.remove(path)
-
-        if force:
-            self.cache_policy.update_on_force_evict(key)
-            self.disk_lock.release()
+                self.cache_policy.update_on_force_evict(key)
 
         # Push kv evict msg with batching
         if self.batched_msg_sender is not None:
@@ -565,6 +562,7 @@ class LocalDiskBackend(StorageBackendInterface):
             except Exception as e:
                 logger.warning(f"on_complete_callback failed for key {key}: {e}")
 
+    @_lmcache_nvtx_annotate
     def batched_async_load_bytes_from_disk(
         self,
         paths: list[str],
@@ -587,9 +585,8 @@ class LocalDiskBackend(StorageBackendInterface):
             cached_positions = self.dict[key].cached_positions
             mem_obj.metadata.cached_positions = cached_positions
 
-            self.disk_lock.acquire()
-            self.dict[key].unpin()
-            self.disk_lock.release()
+            with self.disk_lock:
+                self.dict[key].unpin()
 
         return memory_objs
 
@@ -634,6 +631,7 @@ class LocalDiskBackend(StorageBackendInterface):
             f"Bandwidth: {size / disk_write_time / 1e6:.2f} MB/s"
         )
 
+    @_lmcache_nvtx_annotate
     def read_file(self, key, buffer, path):
         start_time = time.time()
         size = len(buffer)

@@ -13,10 +13,11 @@ LMCache functionality.
 ```
 lmcache
 ├── server                          # Launch LMCache server (ZMQ + HTTP)
+├── coordinator                     # Launch the mp coordinator (HTTP)
 ├── describe {kvcache,engine}       # Rich status view of a running endpoint
 ├── ping     {kvcache,engine}       # Pure liveness check (OK/FAIL)
 ├── query    {kvcache,engine}       # Single-shot query with metrics
-├── bench    {kvcache,engine}       # Sustained performance benchmarking
+├── bench    {engine,server,l2}    # Sustained performance benchmarking
 └── kvcache  {clear,end-session}    # KV cache management actions
 ```
 
@@ -52,6 +53,25 @@ lmcache server \
 Server args are composed from existing helpers: `add_mp_server_args()`,
 `add_storage_manager_args()`, `add_prometheus_args()`, `add_telemetry_args()`,
 `add_http_frontend_args()`.
+
+### `lmcache coordinator`
+
+Replaces `python3 -m lmcache.v1.mp_coordinator`. Runs the mp coordinator's
+FastAPI/HTTP app in the foreground (Ctrl-C to stop). The coordinator tracks mp
+server instances in a registry and evicts those whose heartbeats lapse.
+
+```bash
+lmcache coordinator \
+    --host 0.0.0.0 --port 9300 \
+    --instance-timeout 30 \
+    --health-check-interval 10
+```
+
+Config resolves from `MPCoordinatorConfig.from_env()` (the
+`LMCACHE_MP_COORDINATOR_*` environment variables); any CLI flag that is supplied
+overrides the corresponding field. Each flag defaults to unset so env-only
+deployments keep working. See
+[../v1/mp_coordinator/README.md](../v1/mp_coordinator/README.md).
 
 ### `lmcache describe`
 
@@ -161,33 +181,53 @@ Checksum:                                OK
 
 ### `lmcache bench`
 
-**`bench kvcache`** -- exercises store/retrieve/lookup over ZMQ. Includes a
-correctness check: each retrieved KV cache chunk is checksummed against the original
-stored data to verify integrity under load.
+**`bench server`** -- end-to-end sanity test for a running LMCache MP cache
+server (ZMQ + HTTP). For each sequence in ``[--start, --end)`` the tool runs a
+cold pass (``LOOKUP`` miss → ``STORE``) and a warm pass (``LOOKUP`` hit →
+``RETRIEVE``), then cross-checks per-chunk checksums against the server's HTTP
+API. Exercises the full RPC path
+(``REGISTER_KV_CACHE → GET_CHUNK_SIZE → LOOKUP → QUERY_PREFETCH_STATUS →
+RETRIEVE → STORE → END_SESSION``).
+
+Supports two run modes via ``--mode``:
+
+- **``gpu``** (default) -- allocates real CUDA tensors and uses CUDA IPC
+  (LMCache-driven handle transfer path).
+- **``cpu``** -- allocates POSIX-SHM-backed tensors; the server maps the same
+  physical pages for zero-copy STORE/RETRIEVE (engine-driven transfer path by
+  default). To use the zero-copy SHM handle path, add
+  ``--transfer-mode lmcache_driven``.
+
+The transfer path can be overridden explicitly with ``--transfer-mode
+{auto,engine_driven,lmcache_driven}``. ``auto`` keeps the historical mapping:
+gpu→lmcache_driven, cpu→engine_driven.
 
 ```bash
-$ lmcache bench kvcache --url localhost:5555 --duration 30
+$ lmcache bench server \
+    --rpc-url tcp://localhost:5555 \
+    --url http://localhost:8080 \
+    --start 0 --end 2
 
-========= Bench KV Cache Result (30s) =========
---------------Operations (ops/s)----------------
-Store:                                   41.3
-Retrieve:                                127.3
-Lookup:                                  281.7
------------------Hit Rate-----------------------
-L1:                                      92.3%
-L2:                                      67.8%
----------------Bandwidth (GB/s)-----------------
-L1 read:                                 12.4
-L1 write:                                8.7
-L2 read:                                 2.1
-L2 write:                                1.4
---------------Correctness-----------------------
-Checksums:                               5060/5060 OK
-================================================
+Connecting to LMCache MP Server at tcp://localhost:5555 (mode=gpu, transfer=auto) ...
+Server chunk_size = 256
+Resolved KV shape spec: (2,1024,16,8,128):float16:32
+[seq=0] LOOKUP cold:  0/2 chunks hit (1.82 ms)
+[seq=0] STORE:        2 chunks stored (1.74 ms)
+[seq=0] LOOKUP warm:  2/2 chunks hit (1.31 ms)
+[seq=0] RETRIEVE:     2 chunks retrieved (1.48 ms)
+[seq=0] CHECKSUM MATCH OK
+[seq=1] ...
 ```
 
-Use `--verify-only` to run the correctness check without reporting throughput
-(useful in CI), or `--no-verify` to skip checksums for pure throughput measurement.
+With ``--end`` unset, the loop runs forever; stop with ``Ctrl-C``. The KV
+tensor layout is controlled by ``--kvcache-shape-spec`` (see
+``lmcache/v1/kv_layer_groups.py``); see :doc:`bench_server` in the user guide
+for the full flag list.
+
+**`bench l2`** -- store / lookup / load throughput benchmark against an
+``L2AdapterInterface`` implementation (no MP server required). Implemented at
+``lmcache/cli/commands/bench/l2_adapter_bench/``; see the
+``docs/source/cli/bench_l2.rst`` user guide for full options.
 
 **`bench engine`** -- **superset of `vllm bench serve`**. Same CLI args, same output
 format, plus an extra LMCache KV cache metrics section:
@@ -260,9 +300,28 @@ in `lmcache/cli/corpora/`.
 
 ### Architecture
 
-- **Explicit registration:** Each command inherits from `BaseCommand` (in
-  `commands/base.py`) and is registered in `commands/__init__.py`'s
-  `ALL_COMMANDS` list. See [framework-and-metrics.md](framework-and-metrics.md).
+- **Auto-discovery (N-level):** Commands at all levels are discovered
+  automatically via `discover_subclasses()` (in
+  `lmcache/v1/utils/subclass_discovery.py`). No manual registration is needed
+  — adding a new command at any depth is a single-file change.
+  - **Leaf commands:** Inherit from `BaseCommand` directly.
+  - **Command groups:** Inherit from `CompositeCommand(BaseCommand)`. Its
+    `register()` scans the package where the concrete subclass is defined for
+    nested `BaseCommand` subclasses and registers each one automatically.
+  - **Recursive nesting:** A discovered subcommand can itself be a
+    `CompositeCommand`, enabling arbitrary depth (e.g.
+    `tool → cache-simulator → simulate`).
+- **Class hierarchy:**
+  - `BaseCommand` — abstract base class for all CLI commands (leaf or composite).
+  - `CompositeCommand(BaseCommand)` — base class for commands that contain
+    auto-discovered sub-subcommands (e.g. `query`, `bench`, `quota`, `trace`,
+    `tool`). Subclasses only need to implement `name()` and `help()`.
+- **Adding a new command:**
+  - *Top-level:* Create a new `.py` file (or sub-package with `__init__.py`)
+    under `commands/` with a concrete `BaseCommand` subclass. Done.
+  - *Second-level:* Create a new `.py` file (or sub-package with `__init__.py`)
+    under the parent command's package with a concrete `BaseCommand` subclass.
+    Done. No edits to the parent's `__init__.py` required.
 - **`send_request()` helper:** Creates a temporary `MessageQueueClient`, submits
   a ZMQ request, waits with timeout (default 5s), tears down. All ZMQ commands
   use this. Extended to handle HTTP targets alongside ZMQ.
@@ -278,15 +337,40 @@ lmcache/cli/
 ├── main.py              # main() entry point
 ├── metrics/             # Metrics system (see framework-and-metrics.md)
 ├── commands/
-│   ├── __init__.py      # ALL_COMMANDS registry
-│   ├── base.py          # BaseCommand ABC
+│   ├── __init__.py      # Auto-discovers ALL_COMMANDS (no manual edits)
+│   ├── base.py          # BaseCommand ABC + CompositeCommand
 │   ├── mock.py          # lmcache mock  (example/test command)
 │   ├── server.py        # lmcache server
-│   ├── describe.py      # lmcache describe {kvcache,engine}
+│   ├── coordinator.py   # lmcache coordinator
+│   ├── describe.py      # lmcache describe {kvcache}
 │   ├── ping.py          # lmcache ping {kvcache,engine}
-│   ├── query.py         # lmcache query {kvcache,engine}
-│   ├── bench.py         # lmcache bench {kvcache,engine}
-│   └── kvcache.py       # lmcache kvcache {clear,end-session}
+│   ├── kvcache.py       # lmcache kvcache {clear,end-session}
+│   ├── query/           # lmcache query (CompositeCommand)
+│   │   ├── __init__.py          # QueryCommand(CompositeCommand)
+│   │   ├── engine_command.py    # Auto-discovered: lmcache query engine
+│   │   └── kvcache_command.py   # Auto-discovered: lmcache query kvcache
+│   ├── bench/           # lmcache bench (CompositeCommand)
+│   │   ├── __init__.py          # BenchCommand(CompositeCommand)
+│   │   ├── engine_bench/        # Auto-discovered: lmcache bench engine
+│   │   ├── server_bench/        # Auto-discovered: lmcache bench server
+│   │   └── l2_adapter_bench/    # Auto-discovered: lmcache bench l2
+│   ├── quota/           # lmcache quota (CompositeCommand)
+│   │   ├── __init__.py          # QuotaCommand(CompositeCommand)
+│   │   ├── set_command.py       # Auto-discovered: lmcache quota set
+│   │   ├── get_command.py       # Auto-discovered: lmcache quota get
+│   │   ├── list_command.py      # Auto-discovered: lmcache quota list
+│   │   └── delete_command.py    # Auto-discovered: lmcache quota delete
+│   ├── trace/           # lmcache trace (CompositeCommand)
+│   │   ├── __init__.py          # TraceCommand(CompositeCommand)
+│   │   ├── info_command.py      # Auto-discovered: lmcache trace info
+│   │   └── replay_command.py    # Auto-discovered: lmcache trace replay
+│   └── tool/            # lmcache tool (CompositeCommand)
+│       ├── __init__.py          # ToolCommand(CompositeCommand)
+│       └── cache_simulator/     # Auto-discovered: lmcache tool cache-simulator
+│           ├── __init__.py              # CacheSimulatorCommand(CompositeCommand)
+│           ├── simulate_command.py      # Auto-discovered: simulate
+│           ├── sweep_command.py         # Auto-discovered: sweep
+│           └── gen_dataset_command.py   # Auto-discovered: gen-dataset
 ├── config.py            # CLIConfig (centralized config system)
 └── corpora/             # Built-in prompt corpora
 ```
@@ -294,6 +378,14 @@ lmcache/cli/
 ### Other notes
 
 - **Entry point:** `lmcache = "lmcache.cli.main:main"` in `pyproject.toml`.
+- **Auto-discovery mechanism:** Powered by `discover_subclasses()` in
+  `lmcache/v1/utils/subclass_discovery.py`. Uses `pkgutil.iter_modules` to
+  scan direct submodules, then `inspect.getmembers` to find concrete
+  `BaseCommand` subclasses. Each subclass is yielded at most once.
+- **`CompositeCommand` pattern:** A `CompositeCommand` scans its own package
+  for `BaseCommand` subclasses (excluding itself and abstract classes).
+  Sub-packages with `__init__.py` defining a `BaseCommand` are also discovered,
+  enabling nested command groups (e.g. `tool cache-simulator simulate`).
 - **`bench engine`:** Wraps `vllm.benchmarks`, then queries `/status` for
   cache metrics.
 - **`query kvcache`:** Tokenizes `--prompt` using the model's tokenizer, then
@@ -305,7 +397,7 @@ lmcache/cli/
 |-------|-------|
 | **0** | CLI framework (explicit registration, `Metrics`), `mock` example command, entry point — see [framework-and-metrics.md](framework-and-metrics.md) |
 | **1** | **`server`** (done), `ping kvcache`, `kvcache clear`, `kvcache end-session`, `describe kvcache` |
-| **2** | `ping engine`, `query engine`, `query kvcache`, `bench engine`, `bench kvcache`, `describe engine`, corpora |
+| **2** | `ping engine`, `query engine`, `query kvcache`, `bench engine`, `bench server`, `bench l2`, `describe engine`, corpora |
 | **3** | `kvcache evict` (future) |
 
 Existing `lmcache_server` entry point kept as a deprecated alias for 2 minor releases.

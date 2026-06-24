@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generator, Optional, Union
 import math
 import os
+import sys
 
 # Third Party
 from vllm.config import (
@@ -28,6 +29,7 @@ import torch
 # Use LMCache's own math utilities instead of vllm's
 # (avoids dependency on vllm internal changes like https://github.com/vllm-project/vllm/pull/27188)
 from lmcache import utils
+from lmcache.banner import print_banner_once
 from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
@@ -455,6 +457,11 @@ class LMCacheConnectorV1Impl:
         role: KVConnectorRole,
         parent: KVConnectorBase_V1,
     ):
+        # Banner from the scheduler role only, so tensor-parallel
+        # deployments print it once rather than once per worker.
+        if role == KVConnectorRole.SCHEDULER:
+            print_banner_once(sys.stderr)
+
         self._parent = parent
         self._vllm_config = vllm_config
         self._role = role
@@ -572,6 +579,20 @@ class LMCacheConnectorV1Impl:
 
         self.force_skip_save = bool(os.environ.get("LMCACHE_FORCE_SKIP_SAVE", False))
         self._requests_priority: dict[str, int] = {}
+
+        # Chunked KV loading: cap the number of external tokens
+        # reported per scheduling step to prevent GPU block pool
+        # exhaustion at high concurrency with long contexts.
+        # Configurable via kv_connector_extra_config:
+        #   "lmcache.max_tokens_per_load": <int>
+        # Default 0 (no cap — original behavior, all matched tokens
+        # reported at once). Set to a positive value (e.g. 131072)
+        # to enable chunked loading.
+        self._max_tokens_per_load: int = int(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.max_tokens_per_load", 0
+            )
+        )
         self._invalid_block_ids: set[int] = set()
 
     def _check_legacy_register_kv_caches(self) -> None:
@@ -618,15 +639,19 @@ class LMCacheConnectorV1Impl:
         """Get the lookup server from manager."""
         return self._manager.lookup_server
 
-    def _setup_metrics(self):
+    def _setup_metrics(self) -> None:
         """Setup metrics for monitoring data structures in the connector."""
-        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
-        if prometheus_logger is None:
+        metadata = self._manager.lmcache_engine_metadata
+        if metadata is None:
             logger.warning(
-                "PrometheusLogger is not initialized, "
+                "LMCache metadata is not initialized, "
                 "connector metrics will not be collected"
             )
             return
+        prometheus_logger = PrometheusLogger.GetOrCreate(
+            metadata,
+            config=self.config,
+        )
 
         # Set up metrics for scheduler-specific and general data structures
         metrics_map = {
@@ -1121,7 +1146,17 @@ class LMCacheConnectorV1Impl:
 
             slot_mapping = request.slot_mapping
             assert isinstance(slot_mapping, torch.Tensor)
-            assert len(slot_mapping) == len(token_ids)
+            if len(slot_mapping) != len(token_ids):
+                logger.warning(
+                    "Skipping KV save for request %s: slot_mapping/token_ids "
+                    "length mismatch (slot_mapping=%d, token_ids=%d). Likely "
+                    "an upstream allocation/preemption desync; the engine "
+                    "stays alive and only this request's save is dropped.",
+                    request.req_id,
+                    len(slot_mapping),
+                    len(token_ids),
+                )
+                continue
 
             # TODO: have a pre-allocated buffer to hold the slot_mappings
             slot_mapping = slot_mapping.to(self.device)
@@ -1433,9 +1468,44 @@ class LMCacheConnectorV1Impl:
                 max(need_to_allocate, 0),
             )
 
+        # Chunked KV loading: cap the number of tokens reported
+        # to the scheduler to avoid exhausting the GPU block pool
+        # when many concurrent requests each need large allocations.
+        # Remaining tokens beyond the cap will be computed locally
+        # via chunked prefill rather than loaded from external cache.
+        capped_lmcache_tokens = num_external_hit_tokens
+        if (
+            self._max_tokens_per_load > 0
+            and need_to_allocate > self._max_tokens_per_load
+        ):
+            # Align cap to LMCache chunk boundaries so that the
+            # retrieve path receives chunk-aligned token ranges.
+            cap = (
+                self._max_tokens_per_load
+                // self._lmcache_chunk_size
+                * self._lmcache_chunk_size
+            )
+            need_to_allocate = cap
+            # Align capped_lmcache_tokens to chunk boundary so that
+            # session.get_hashes() receives a chunk-aligned end value.
+            capped_lmcache_tokens = (
+                (num_computed_tokens + cap)
+                // self._lmcache_chunk_size
+                * self._lmcache_chunk_size
+            )
+            logger.debug(
+                "Reqid: %s, Chunked KV loading: capped from "
+                "%d to %d external tokens "
+                "(max_tokens_per_load=%d)",
+                req_id,
+                num_external_hit_tokens - num_computed_tokens,
+                need_to_allocate,
+                self._max_tokens_per_load,
+            )
+
         self.load_specs[req_id] = LoadSpec(
             vllm_cached_tokens=num_computed_tokens,
-            lmcache_cached_tokens=num_external_hit_tokens,
+            lmcache_cached_tokens=capped_lmcache_tokens,
             can_load=False,
         )
 

@@ -171,6 +171,7 @@ def create_worker_adapter(
         parallel_strategy=parallel_strategy,
         mq_timeout=mq_timeout,
         heartbeat_interval=heartbeat_interval,
+        extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
     )
 
 
@@ -453,7 +454,7 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
             request_strs.append(
                 f"RequestMetadata(request_id={req_meta.request_id}, "
                 f"direction={req_meta.direction}, "
-                f"num_blocks={len(req_meta.op)}, "
+                f"num_blocks={len(req_meta.op.flat_block_ids)}, "
                 f"block_ids={req_meta.op.block_ids})"
             )
         return "[" + "\n".join(request_strs) + "]"
@@ -472,6 +473,11 @@ class LMCacheMPConnector(KVConnectorBase_V1):
     - lmcache.mp.mq_timeout: timeout (seconds) for message queue requests.
     - lmcache.mp.heartbeat_interval: interval (seconds) between server
       heartbeat pings.
+    - lmcache.mp.mp_transfer_mode: routing mode for the worker -> server
+      transfer context. One of ``auto`` (default; CUDA -> engine_driven,
+      others -> lmcache_driven), ``engine_driven`` (force IPC / SHM
+      zero-copy), ``lmcache_driven`` (force worker-side gather/scatter
+      copy). Overrides the ``LMCACHE_MP_TRANSFER_MODE`` env var when set.
     """
 
     def __init__(

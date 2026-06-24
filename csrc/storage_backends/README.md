@@ -52,6 +52,28 @@ Therefore the framework enforces:
 | `connector_base.h` | `ConnectorBase<T>` — core harness (eventfd, SQ/CQ, threading, tiling). Override 4 required + 1 optional method per backend |
 | `connector_pybind_utils.h` | Pybind utilities with GIL release + `LMCACHE_BIND_CONNECTOR_METHODS` macro |
 | `redis/` | Reference implementation (RESP2 protocol over TCP) |
+| `aerospike/` | Optional native Aerospike backend (meta + segment sharding; `BUILD_AEROSPIKE=1`) |
+
+## Aerospike (optional build)
+
+The Aerospike connector is **not** built by default. Enable it when packaging or
+developing:
+
+Set ``AEROSPIKE_INCLUDE_DIR`` and ``AEROSPIKE_LIBRARY_DIR`` to a libaerospike
+development install (or use ``BUILD_AEROSPIKE=1`` after placing headers/libs under
+``.deps/`` as in ``.github/workflows/aerospike_integration.yml``), then:
+
+```bash
+BUILD_AEROSPIKE=1 pip install -e .
+```
+
+MP mode:
+
+```bash
+--l2-adapter '{"type": "aerospike", "hosts": "127.0.0.1:3000", "namespace": "lmcache", "set_name": "kv_chunks", "num_workers": 8}'
+```
+
+Config module: ``lmcache/v1/distributed/l2_adapters/aerospike_l2_adapter.py``.
 
 ## How to add a new native backend
 
@@ -157,7 +179,7 @@ PYBIND11_MODULE(lmcache_mybackend, m) {
 Add your sources to `setup.py` alongside the existing Redis extension:
 
 ```python
-# In cuda_extension() and rocm_extension():
+# In _common_cpp_extensions():
 mybackend_sources = [
     "csrc/storage_backends/mybackend/pybind.cpp",
     "csrc/storage_backends/mybackend/connector.cpp",
@@ -286,3 +308,4 @@ Python eventfd.
 - [ ] Python client inheriting `ConnectorClientBase` (non-MP mode)
 - [ ] L2 adapter config class + factory registration (MP mode)
 - [ ] Unit tests (see `tests/v1/distributed/test_native_connector_l2_adapter.py`)
+- [ ] Optional: Aerospike integration (`RUN_AEROSPIKE_INTEGRATION=1`, see `tests/v1/distributed/test_aerospike_l2_integration.py`)

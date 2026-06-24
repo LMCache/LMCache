@@ -5,7 +5,7 @@ This module tests:
 1. L1EvictionPolicy.on_l1_keys_accessed bridges to policy.on_keys_touched
 2. L1EvictionPolicy.on_l1_keys_read_finished also triggers touch
 3. L1Manager.touch_keys dispatches to all registered listeners
-4. MPCacheEngine.end_session performs unified touch with correct keys
+4. MPCacheServer.end_session performs unified touch with correct keys
 5. StorageManager.touch_l1_keys delegates to L1Manager
 """
 
@@ -19,7 +19,7 @@ import pytest
 from lmcache.v1.distributed.api import ObjectKey, ipc_key_to_object_keys
 from lmcache.v1.distributed.eviction import L1EvictionPolicy
 from lmcache.v1.distributed.eviction_policy import LRUEvictionPolicy
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
@@ -41,9 +41,9 @@ def make_ipc_key(
     world_size: int = 1,
     worker_id: int | None = None,
     request_id: str = "req-1",
-) -> IPCCacheEngineKey:
-    """Create an IPCCacheEngineKey for testing."""
-    return IPCCacheEngineKey.from_token_ids(
+) -> IPCCacheServerKey:
+    """Create an IPCCacheServerKey for testing."""
+    return IPCCacheServerKey.from_token_ids(
         model_name=model_name,
         world_size=world_size,
         worker_id=worker_id,
@@ -210,7 +210,7 @@ class TestEndSessionTouchKeys:
         assert removed.lookup_ipc_key is not None
 
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in removed.get_hashes(0)]
-        obj_keys = ipc_key_to_object_keys(removed.lookup_ipc_key, chunk_hashes)
+        obj_keys = ipc_key_to_object_keys(removed.lookup_ipc_key, chunk_hashes, [0])[0]
 
         # With world_size=1 and worker_id=None, should have 3 keys
         assert len(obj_keys) == 3
@@ -238,7 +238,7 @@ class TestEndSessionTouchKeys:
         assert removed.lookup_ipc_key is not None
 
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in removed.get_hashes(0)]
-        obj_keys = ipc_key_to_object_keys(removed.lookup_ipc_key, chunk_hashes)
+        obj_keys = ipc_key_to_object_keys(removed.lookup_ipc_key, chunk_hashes, [0])[0]
 
         # 2 chunks * 2 workers = 4 keys
         assert len(obj_keys) == 4
@@ -279,7 +279,7 @@ class TestEndSessionTouchKeys:
         assert removed.lookup_ipc_key is not None
 
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in removed.get_hashes(0)]
-        obj_keys = ipc_key_to_object_keys(removed.lookup_ipc_key, chunk_hashes)
+        obj_keys = ipc_key_to_object_keys(removed.lookup_ipc_key, chunk_hashes, [0])[0]
         assert len(obj_keys) == 0
 
     def test_end_session_hashes_cover_retrieve_and_store(self, hasher: TokenHasher):

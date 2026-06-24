@@ -21,18 +21,18 @@ msgstr ""
 
 #: ../../source/kv_cache/multiprocess_mode.rst:4
 msgid "Multiprocess Mode (Redirect)"
-msgstr ""
+msgstr "多进程模式（重定向）"
 
 #: ../../source/kv_cache/multiprocess_mode.rst:7
 msgid ""
 "This page has moved.  The multiprocess mode documentation is now at "
 ":doc:`/mp/index`."
-msgstr ""
+msgstr "此页面已移动。多进程模式文档现在位于 :doc:`/mp/index`。"
 
 #: ../../source/kv_cache/multiprocess_mode.rst:10
 msgid ""
 "Please see the new :doc:`/mp/index` section for complete documentation "
 "including quick start, configuration reference, L2 storage, deployment, "
 "observability, and architecture guides."
-msgstr ""
+msgstr "请参阅新的 :doc:`/mp/index` 部分以获取完整的文档，包括快速入门、配置参考、L2 存储、部署、可观察性和架构指南。"
 

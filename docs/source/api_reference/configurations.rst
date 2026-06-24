@@ -34,6 +34,9 @@ Basic cache settings that control the core functionality of LMCache.
    * - max_local_cpu_size
      - LMCACHE_MAX_LOCAL_CPU_SIZE
      - Maximum CPU cache size in GB. Default: 5.0
+   * - local_cpu_use_hugepages
+     - LMCACHE_LOCAL_CPU_USE_HUGEPAGES
+     - Whether to use Linux hugepages (2 MB) for CPU-pinned KV cache memory. Not compatible with P2P mode or shared memory (multiprocess). Requires pre-allocated hugepages (``sysctl vm.nr_hugepages``). Values: true/false. Default: false
    * - local_disk
      - LMCACHE_LOCAL_DISK
      - Path (or comma-separated paths) to local disk cache directories. Format: ``"file:///path/to/cache"`` or ``"/path/a,/path/b"`` for multi-device I/O. See ``local_disk_path_sharding`` for how paths are assigned to GPUs.
@@ -354,6 +357,8 @@ Settings for using Nixl as a storage backend instead of disaggregated prefill. T
      - Number of files or objects in the storage pool
    * - nixl_endpoint_list
      - List of object-storage endpoint URLs for per-worker distribution. Each TP worker selects an entry round-robin by ``local_worker_id``, overriding ``nixl_backend_params.endpoint_override``. Only applied when ``nixl_backend`` is ``"OBJ"`` (silently ignored otherwise). Each entry must start with ``http://`` or ``https://``; an empty list raises ``ValueError`` at engine init.
+   * - nixl_use_hugepages
+     - **Deprecated.** Use ``local_cpu_use_hugepages`` instead. When set, the value is copied into ``local_cpu_use_hugepages`` (a warning is logged) and the key is dropped. Hugepages have never applied to GPU buffers; in CPU mode the NIXL pool is now owned by ``LocalCPUBackend``.
 
 
 Additional Storage Configurations
