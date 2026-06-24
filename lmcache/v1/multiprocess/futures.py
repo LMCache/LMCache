@@ -13,6 +13,28 @@ class MessagingFuture(Generic[T]):
     def __init__(self):
         self.is_done_ = threading.Event()
         self.result_ = None
+        # Callbacks fired on result-set.  Used to chain work without
+        # blocking the MQ polling thread or worker thread on
+        # ``future.result(timeout=...)``.  See ``add_done_callback``.
+        self._callbacks: list = []
+
+    def add_done_callback(self, fn) -> None:
+        """Register a callback to run once ``set_result`` is called.
+
+        If the future is already done, the callback runs synchronously
+        (in the caller's thread).  Otherwise, it runs in the thread
+        that calls ``set_result`` (the shared polling loop).  Keeps the
+        callback chain short to avoid stalling the loop.
+        """
+        if self.is_done_.is_set():
+            try:
+                fn(self.result_)
+            except Exception:
+                # Do not propagate from callback -- one bad callback
+                # would otherwise kill the polling loop.
+                pass
+            return
+        self._callbacks.append(fn)
 
     def query(self) -> bool:
         """
@@ -56,16 +78,23 @@ class MessagingFuture(Generic[T]):
         return self.result_
 
     def set_result(self, result: T) -> None:
-        """
-        Set the result of the future and mark it as done. This function is NOT
-        SUPPOSED TO BE CALLED by users directly. It should be only called by
-        the messaging system when the result is available.
+        """Mark the future done and fire any registered callbacks.
 
-        Args:
-            result (T): The result to set.
+        NOT to be called by users directly -- only the messaging
+        system should set results.
         """
         self.result_ = result
         self.is_done_.set()
+        # Drain callbacks in registration order.  Snapshot first so a
+        # callback that re-registers does not mutate during iteration.
+        for fn in list(self._callbacks):
+            try:
+                fn(result)
+            except Exception:
+                # Do not propagate from callback -- one bad callback
+                # would otherwise kill the polling loop.
+                pass
+        self._callbacks.clear()
 
     def to_cuda_future(
         self,

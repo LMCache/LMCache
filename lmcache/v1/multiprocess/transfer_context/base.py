@@ -17,7 +17,8 @@ from __future__ import annotations
 
 # Standard
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 import inspect
 
@@ -32,11 +33,16 @@ from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.mq import MessageQueueClient
-
 if TYPE_CHECKING:
     # First Party
     import lmcache.c_ops as lmc_ops
+from lmcache.v1.multiprocess.transfer_context.wire_format import (
+    deserialize_group_chunks_maybe as _wire_decode,
+    is_lmcache_blob as _is_lmcache_blob,
+    serialize_group_chunks_torchsave as _wire_encode,
+)
 
 logger = init_logger(__name__)
 
@@ -73,16 +79,16 @@ def _detect_block_transfer_accepts_tensor() -> bool:
                 ann_str = str(param.annotation)
                 if "Tensor" in ann_str:
                     return True
-                # Annotation exists but no Tensor mention → ptr-only
+                # Annotation exists but no Tensor mention -> ptr-only
                 return False
         except (ValueError, TypeError):
             pass
 
     except Exception:
-        # Import failed or any other error → conservative: assume ptr-only
+        # Import failed or any other error -> conservative: assume ptr-only
         pass
 
-    # Default: inspect failed or lmc_ops not available → assume ptr-only
+    # Default: inspect failed or lmc_ops not available -> assume ptr-only
     return False
 
 
@@ -110,15 +116,27 @@ class EngineDrivenContextMetadata:
     """Non-GPU context layout metadata for non-CUDA workers.
 
     Attributes:
-        layout_desc: Memory layout descriptor used to interpret chunk payloads.
-        block_size: Number of tokens per paged block.
-        use_mla: Whether the worker KV format is MLA.
+        layout_desc: Memory layout descriptor (single-group, backward compat).
+        block_size: Tokens per paged block (single-group, backward compat).
+        use_mla: Whether MLA format is used (single-group, backward compat).
+        group_layout_descs: Per-group layout descriptors for hybrid models.
+        group_block_sizes: Per-group block sizes for hybrid models.
+        group_use_mla: Per-group MLA flags for hybrid models.
+        group_blocks_in_chunk: Per-group blocks-in-chunk counts for hybrid models.
     """
 
     layout_desc: MemoryLayoutDesc
     block_size: int
     use_mla: bool
+    group_layout_descs: list[MemoryLayoutDesc] = field(default_factory=list)
+    group_block_sizes: list[int] = field(default_factory=list)
+    group_use_mla: list[bool] = field(default_factory=list)
+    group_blocks_in_chunk: list[int] = field(default_factory=list)
 
+    @property
+    def is_multi_group(self) -> bool:
+        """Return True if this metadata describes a hybrid multi-group model."""
+        return len(self.group_layout_descs) > 1
 
 class EngineDrivenContext(ABC):
     """Abstract base class for CPU-side KV data transfer contexts.
@@ -132,7 +150,6 @@ class EngineDrivenContext(ABC):
         mq_client: Message-queue client used for server communication.
         mq_timeout: Timeout in seconds for blocking MQ requests.
     """
-
     def __init__(
         self,
         metadata: EngineDrivenContextMetadata,
@@ -143,11 +160,6 @@ class EngineDrivenContext(ABC):
         self.mq_client = mq_client
         self.mq_timeout = mq_timeout
 
-    @property
-    def layout_desc(self) -> MemoryLayoutDesc:
-        """The memory layout descriptor for this context."""
-        return self.metadata.layout_desc
-
     @abstractmethod
     def prepare_store(
         self, key: IPCCacheServerKey, instance_id: int
@@ -155,7 +167,7 @@ class EngineDrivenContext(ABC):
         """Prepare SHM buffers for a store operation.
 
         Returns:
-            None: pickle mode — no pre-allocated buffers. Caller gathers all
+            None: pickle mode -- no pre-allocated buffers. Caller gathers all
                 chunks to CPU itself and sends the serialized data via
                 commit_store.
             ([], []): SHM mode but all chunks already cached. Caller should
@@ -193,6 +205,130 @@ class EngineDrivenContext(ABC):
     def close(self) -> None:
         """Release any resources held by this context."""
         ...
+    def commit_store_raw(
+        self, key: IPCCacheServerKey, instance_id: int, cpu_data: bytes
+    ) -> bool:
+        """Send pre-serialized bytes directly via COMMIT_STORE.
+
+        Used by multi-group transfers where the caller has already serialized
+        the chunks. No additional pickle.dumps() is performed.
+        """
+        from lmcache.v1.multiprocess.protocol import RequestType
+        from lmcache.v1.multiprocess.protocol import get_response_class
+
+        future = self.mq_client.submit_request(
+            RequestType.COMMIT_STORE,
+            [key, instance_id, cpu_data],
+            get_response_class(RequestType.COMMIT_STORE),
+        )
+        try:
+            return bool(future.result(timeout=self.mq_timeout))
+        except TimeoutError:
+            return False
+
+    def prepare_retrieve_raw(
+        self, key: IPCCacheServerKey, instance_id: int
+    ) -> bytes | None:
+        """Send PREPARE_RETRIEVE and return raw bytes (no pickle.loads).
+
+        Used by multi-group transfers where the caller deserializes with
+        ``_deserialize_multi_group_chunks``. Returns ``None`` on cache-miss
+        or timeout.
+        """
+        from lmcache.v1.multiprocess.protocol import RequestType
+        from lmcache.v1.multiprocess.protocol import get_response_class
+
+        future = self.mq_client.submit_request(
+            RequestType.PREPARE_RETRIEVE,
+            [key, instance_id],
+            get_response_class(RequestType.PREPARE_RETRIEVE),
+        )
+        try:
+            response = future.result(timeout=self.mq_timeout)
+        except TimeoutError:
+            return None
+        if not response.success or not response.data:
+            return None
+        return response.data
+
+
+class PinnedBufferPool:
+    """Pool of pinned (page-locked) CPU tensors keyed by (shape, dtype).
+
+    Pinned memory is allocated in **system RAM** (via ``cudaHostAlloc``
+    / ``mlock`` on Linux) -- it does **not** consume any GPU VRAM.  The
+    pool is grown lazily on first ``acquire`` and never shrinks: the OS
+    reclaims pinned pages only when the underlying physical pages are
+    unpinned, so retaining them keeps the allocator cost amortised.
+
+    Used by ``EngineDrivenTransferContext.submit_store`` to avoid per-
+    chunk ``torch.empty(pin_memory=True)`` calls inside
+    ``gather_paged_kv_to_cpu``.  Each pool entry is a single CPU tensor;
+    the pool itself holds them in a FIFO deque per (shape, dtype).
+    """
+
+    def __init__(self) -> None:
+        self._pools: dict[tuple[tuple[int, ...], torch.dtype], deque[torch.Tensor]] = {}
+        self._acquired_count = 0
+
+    def acquire(
+        self,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        count: int = 1,
+    ) -> list[torch.Tensor]:
+        """Pop up to ``count`` tensors of the given shape from the pool.
+
+        New tensors are allocated with ``pin_memory=True`` on cache miss.
+        """
+        key = (shape, dtype)
+        pool = self._pools.setdefault(key, deque())
+        out: list[torch.Tensor] = []
+        for _ in range(count):
+            if pool:
+                out.append(pool.popleft())
+            else:
+                out.append(
+                    torch.empty(shape, dtype=dtype,
+                                device=torch.device("cpu"),
+                                pin_memory=True)
+                )
+            self._acquired_count += 1
+        return out
+
+    def release(self, buffers: list[torch.Tensor]) -> None:
+        """Return buffers to the pool for reuse on the next acquire."""
+        for buf in buffers:
+            key = (tuple(buf.shape), buf.dtype)
+            self._pools.setdefault(key, deque()).append(buf)
+
+    def clear(self) -> None:
+        """Release all pinned memory.  Call on context destruction."""
+        self._pools.clear()
+        self._acquired_count = 0
+
+    def stats(self) -> dict:
+        """Snapshot of pool state (for diagnostics / benchmarks)."""
+        return {
+            "shapes": [(k[0], k[1], len(v)) for k, v in self._pools.items()],
+            "acquired_total": self._acquired_count,
+        }
+
+
+def _pool() -> "PinnedBufferPool":
+    """Module-level pool singleton.  Use ``_POOL`` directly if needed.
+
+    Lifetime is the Python process: pinned memory grows with the process
+    and is freed on interpreter shutdown.  Multi-group paths that
+    benefit from per-context isolation can create their own
+    ``PinnedBufferPool()`` and pass it through ``gather_paged_kv_*``.
+    """
+    global _POOL
+    try:
+        return _POOL
+    except NameError:
+        _POOL = PinnedBufferPool()
+        return _POOL
 
 
 def create_engine_driven_context(
@@ -222,8 +358,15 @@ def create_engine_driven_context(
             available.
 
     Returns:
-        A concrete :class:`EngineDrivenContext` instance.
+    A concrete :class:`EngineDrivenContext` instance.
     """
+    if metadata.is_multi_group:
+        use_pickle = True
+        logger.info(
+            "Multi-group engine-driven context: forcing pickle transport "
+            "(SHM pool is sized for single-group layout)"
+        )
+
     if not shm_name or pool_size <= 0:
         use_pickle = True
 
@@ -307,9 +450,9 @@ def gather_paged_kv_to_cpu(
     engine_kv_format: "lmc_ops.EngineKVFormat" | None = None,
     out: list[torch.Tensor] | None = None,
     chunk_indices: list[int] | None = None,
+    pinned_pool: "PinnedBufferPool | None" = None,
 ) -> list[torch.Tensor]:
     """Gather paged KV blocks into CPU chunk tensors.
-
     Args:
         kv_caches: Per-layer KV tensor mapping.
         block_ids: Flattened block IDs for all chunks.
@@ -325,7 +468,14 @@ def gather_paged_kv_to_cpu(
             ``out``, only those chunks are gathered and written into
             ``out[i]`` in order.  When ``None``, all chunks are gathered
             (backward-compatible behaviour).
-
+        pinned_pool: Optional ``PinnedBufferPool`` to source pre-allocated
+            pinned CPU tensors.  When set and ``out is None``, the function
+            draws buffers from the pool rather than calling
+            ``torch.empty(pin_memory=True)`` for each chunk.  This skips
+            the CUDA-allocator overhead on every store and avoids
+            system-RAM page-locking cost on the second call onward
+            (buffers are returned to the pool on the caller side).
+            Pinned memory is **system RAM**, never GPU VRAM.
     Returns:
         List of CPU tensors, one per chunk. For non-MLA each chunk has shape
         ``[2, num_layers, chunk_tokens, hidden_dim]`` where dimension ``0``
@@ -391,26 +541,35 @@ def gather_paged_kv_to_cpu(
 
     if out is None:
         use_mla = is_mla(engine_kv_format)
-        if use_mla:
-            chunks = [
-                torch.empty(
-                    (num_layers, chunk_tokens, hidden_dim_size),
-                    dtype=tensors[0].dtype,
-                    device=torch.device("cpu"),
-                    pin_memory=requires_pinned,
-                )
-                for _ in iter_indices
-            ]
+        # Pull from pinned_pool when available -- avoids per-chunk
+        # torch.empty(pin_memory=True) and the CUDA allocator round-trip.
+        if pinned_pool is not None:
+            if use_mla:
+                shape = (num_layers, chunk_tokens, hidden_dim_size)
+            else:
+                shape = (2, num_layers, chunk_tokens, hidden_dim_size)
+            chunks = pinned_pool.acquire(shape, tensors[0].dtype, len(iter_indices))
         else:
-            chunks = [
-                torch.empty(
-                    (2, num_layers, chunk_tokens, hidden_dim_size),
-                    dtype=tensors[0].dtype,
-                    device=torch.device("cpu"),
-                    pin_memory=requires_pinned,
-                )
-                for _ in iter_indices
-            ]
+            if use_mla:
+                chunks = [
+                    torch.empty(
+                        (num_layers, chunk_tokens, hidden_dim_size),
+                        dtype=tensors[0].dtype,
+                        device=torch.device("cpu"),
+                        pin_memory=requires_pinned,
+                    )
+                    for _ in iter_indices
+                ]
+            else:
+                chunks = [
+                    torch.empty(
+                        (2, num_layers, chunk_tokens, hidden_dim_size),
+                        dtype=tensors[0].dtype,
+                        device=torch.device("cpu"),
+                        pin_memory=requires_pinned,
+                    )
+                    for _ in iter_indices
+                ]
     else:
         _target_out = out[: len(iter_indices)]
 
@@ -712,3 +871,263 @@ def scatter_cpu_to_paged_kv(
     # We intentionally omit synchronization here for performance.
     # WARNING: The caller MUST explicitly call `torch_dev.synchronize()`
     # before consuming these chunks to ensure data validity.
+
+# ---------------------------------------------------------------------------
+# Multi-group serialization helpers (dev31+: torch.save wire format)
+# ---------------------------------------------------------------------------
+
+
+def _serialize_multi_group_chunks(
+    group_chunks: list[list[torch.Tensor]],
+) -> bytes:
+    """Serialize multiple groups as a compact pickle blob.
+
+    Format: pickle.dumps([
+        [(array_chunk0, dtype_str), (array_chunk1, dtype_str), ...],  # group 0
+        [(array_chunk0, dtype_str), (array_chunk1, dtype_str), ...],  # group 1
+        ...
+    ])
+    where dtype_str is the original torch dtype name (e.g. "bfloat16",
+    "float8_e4m3fn", "float8_e5m2"). numpy has no native support for
+    bfloat16 or fp8, so those tensors are bit-cast/viewed to a numpy-friendly
+    dtype (float32 for bfloat16, uint8 for fp8) before serialization.
+
+    Args:
+        group_chunks: Per-group list of CPU chunk tensors.
+
+    Returns:
+        Pickled bytes suitable for COMMIT_STORE.
+    """
+    import pickle
+
+    # Map each non-numpy-native torch dtype to a numpy-friendly view dtype.
+    # numpy supports float32/float64/int8/uint8/etc. but not bfloat16 or fp8.
+    def _to_numpy(t: torch.Tensor):
+        if t.dtype == torch.bfloat16:
+            return t.contiguous().float().numpy(), "bfloat16"
+        if hasattr(torch, "float8_e4m3fn") and t.dtype == torch.float8_e4m3fn:
+            return t.contiguous().view(torch.uint8).numpy(), "float8_e4m3fn"
+        if hasattr(torch, "float8_e5m2") and t.dtype == torch.float8_e5m2:
+            return t.contiguous().view(torch.uint8).numpy(), "float8_e5m2"
+        # Default: keep dtype as-is.
+        return t.contiguous().numpy(), str(t.dtype).replace("torch.", "")
+
+    serializable = [
+        [_to_numpy(chunk) for chunk in group]
+        for group in group_chunks
+    ]
+    return pickle.dumps(serializable)
+
+
+def _deserialize_multi_group_chunks(
+    cpu_data: bytes,
+) -> list[list[torch.Tensor]]:
+    """Deserialize a wire-format blob back to ``list[list[Tensor]]``.
+
+    Restores the original torch dtype from the stored dtype name string.
+    For bfloat16, casts back from float32. For fp8 dtypes, reinterprets the
+    uint8 buffer as the original fp8 dtype.
+    """
+    if _is_lmcache_blob(cpu_data):
+        # New format.  Two shapes are possible:
+        #   - flat list of tensors (single-group)
+        #   - list of groups (multi-group)
+        # Distinguish by inspecting the first element.
+        decoded = _wire_decode(cpu_data)
+        if decoded is None:
+            return []
+        if decoded and isinstance(decoded[0], torch.Tensor):
+            return [decoded]
+        return decoded
+    # Legacy format: list of groups, each group is list of tagged tuples
+    import pickle
+
+    raw = pickle.loads(cpu_data)
+    tensors = []
+    for group in raw:
+        t_group = []
+        for arr, dtype_name in group:
+            t = torch.from_numpy(arr)
+            if dtype_name == "bfloat16":
+                t = t.to(torch.bfloat16)
+            elif dtype_name in ("float8_e4m3fn", "float8_e5m2"):
+                t = t.view(getattr(torch, dtype_name))
+            t_group.append(t)
+        tensors.append(t_group)
+    return tensors
+
+
+# ---------------------------------------------------------------------------
+# Multi-group gather / scatter utilities
+# ---------------------------------------------------------------------------
+
+
+def slice_kv_caches_for_group(
+    kv_caches: dict[str, torch.Tensor],
+    layer_indices: tuple[int, ...],
+) -> dict[str, torch.Tensor]:
+    """Extract a subset of KV tensors for a single group.
+
+    Args:
+        kv_caches: All layers, ordered as passed by the adapter.
+        layer_indices: 0-based indices of the layers belonging to this group.
+
+    Returns:
+        Ordered dict with only the layers of this group.
+    """
+    all_values = list(kv_caches.values())
+    return {str(i): all_values[idx] for i, idx in enumerate(sorted(layer_indices))}
+
+
+
+def gather_paged_kv_multi_group_to_cpu_streams(
+    kv_caches: dict[str, torch.Tensor],
+    block_ids: list[list[int]],
+    engine_group_infos: list[EngineGroupInfo],
+    lmcache_tokens_per_chunk: int,
+    layout_hints: LayoutHints | None = None,
+    pinned_pool: "PinnedBufferPool | None" = None,
+) -> list[list[torch.Tensor]]:
+    """Multi-stream variant of :func:`gather_paged_kv_multi_group_to_cpu`.
+
+    Runs each group's gather on its own CUDA stream so the GPU->CPU
+    copies can in principle overlap.  Disabled by default because the
+    PCIe bus is shared on most consumer GPUs and the per-stream
+    synchronisation overhead dominates the small overlap win.  See
+    ``LMCACHE_MP_MULTI_STREAM_D2D`` env var.
+    """
+    import threading
+    streams = [torch.cuda.Stream() for _ in engine_group_infos]
+    # Launch each group's gather on its own stream
+    results: list[list[torch.Tensor] | None] = [None] * len(engine_group_infos)
+
+    def _do(g_idx: int) -> None:
+        with torch.cuda.stream(streams[g_idx]):
+            results[g_idx] = gather_paged_kv_to_cpu(
+                slice_kv_caches_for_group(kv_caches, engine_group_infos[g_idx].layer_indices),
+                block_ids[g_idx],
+                # blocks_in_chunk computed inside, pass engine_group_infos
+                _blocks_in_chunk_for(
+                    kv_caches, engine_group_infos[g_idx], lmcache_tokens_per_chunk, layout_hints,
+                ),
+                layout_hints=layout_hints,
+                pinned_pool=pinned_pool,
+            )
+
+    threads = [threading.Thread(target=_do, args=(i,)) for i in range(len(engine_group_infos))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    # Final sync: each stream + main
+    for s in streams:
+        s.synchronize()
+    return [r for r in results if r is not None]
+
+
+def _blocks_in_chunk_for(
+    kv_caches: dict[str, torch.Tensor],
+    info: EngineGroupInfo,
+    lmcache_tokens_per_chunk: int,
+    layout_hints: LayoutHints | None,
+) -> int:
+    g_kv = slice_kv_caches_for_group(kv_caches, info.layer_indices)
+    tpb = info.tokens_per_block if info.tokens_per_block > 0 else 1
+    if info.tokens_per_block <= 0:
+        # tokens_per_block unknown; fall back to vLLM block_size from layout
+        _, _, _, _, _ = compute_kv_layout(g_kv, layout_hints=layout_hints)
+        tpb = 1
+    return lmcache_tokens_per_chunk // tpb
+
+
+def gather_paged_kv_multi_group_to_cpu(
+    kv_caches: dict[str, torch.Tensor],
+    block_ids: list[list[int]],
+    engine_group_infos: list[EngineGroupInfo],
+    lmcache_tokens_per_chunk: int,
+    layout_hints: LayoutHints | None = None,
+    pinned_pool: "PinnedBufferPool | None" = None,
+) -> list[list[torch.Tensor]]:
+    """Gather all KV groups to CPU tensors.
+
+    Args:
+        kv_caches: All layers, ordered as passed by the adapter.
+        block_ids: Block IDs per group.
+        engine_group_infos: Group metadata from registration.
+        lmcache_tokens_per_chunk: Global LMCache chunk size in tokens.
+        layout_hints: Optional layout hints.
+        pinned_pool: Optional ``PinnedBufferPool`` used to source pre-
+            allocated pinned CPU tensors for each group's chunks.  When
+            set, the allocator is bypassed and the per-group chunk buffers
+            are reused across calls (no GPU VRAM cost).
+    """
+    result: list[list[torch.Tensor]] = []
+    for group_idx, group_info in enumerate(engine_group_infos):
+        group_kv = slice_kv_caches_for_group(kv_caches, group_info.layer_indices)
+        tokens_per_block = group_info.tokens_per_block
+        if tokens_per_block <= 0:
+            block_size, _, _, _, _ = compute_kv_layout(
+                group_kv, layout_hints=layout_hints
+            )
+            tokens_per_block = block_size
+        blocks_in_chunk = lmcache_tokens_per_chunk // tokens_per_block
+        if blocks_in_chunk == 0:
+            raise ValueError(
+                f"Group {group_idx}: tokens_per_block ({tokens_per_block}) > "
+                f"lmcache_tokens_per_chunk ({lmcache_tokens_per_chunk}). "
+                "Each block is larger than the chunk size."
+            )
+        group_chunks = gather_paged_kv_to_cpu(
+            group_kv,
+            block_ids[group_idx],
+            blocks_in_chunk,
+            layout_hints=layout_hints,
+            pinned_pool=pinned_pool,
+        )
+        result.append(group_chunks)
+    return result
+
+
+def scatter_cpu_multi_group_to_paged_kv(
+    kv_caches: dict[str, torch.Tensor],
+    block_ids: list[list[int]],
+    group_chunks: list[list[torch.Tensor]],
+    engine_group_infos: list[EngineGroupInfo],
+    lmcache_tokens_per_chunk: int,
+    skip_first_n_tokens: int = 0,
+    layout_hints: LayoutHints | None = None,
+) -> None:
+    """Scatter CPU tensors back into paged KV for all groups.
+
+    Args:
+        kv_caches: All layers, ordered as passed by the adapter.
+        block_ids: Block IDs per group.
+        group_chunks: ``group_chunks[group_idx][chunk_idx]`` = CPU tensor.
+        engine_group_infos: Group metadata from registration.
+        lmcache_tokens_per_chunk: Global LMCache chunk size in tokens.
+        skip_first_n_tokens: Tokens to skip at the start (for APC).
+        layout_hints: Optional layout hints.
+    """
+    for group_idx, group_info in enumerate(engine_group_infos):
+        group_kv = slice_kv_caches_for_group(kv_caches, group_info.layer_indices)
+        tokens_per_block = group_info.tokens_per_block
+        if tokens_per_block <= 0:
+            block_size, _, _, _, _ = compute_kv_layout(
+                group_kv, layout_hints=layout_hints
+            )
+            tokens_per_block = block_size
+        blocks_in_chunk = lmcache_tokens_per_chunk // tokens_per_block
+        if blocks_in_chunk == 0:
+            raise ValueError(
+                f"Group {group_idx}: tokens_per_block ({tokens_per_block}) > "
+                f"lmcache_tokens_per_chunk ({lmcache_tokens_per_chunk}). "
+                "Each block is larger than the chunk size."
+            )
+        scatter_cpu_to_paged_kv(
+            group_kv,
+            block_ids[group_idx],
+            group_chunks[group_idx],
+            blocks_in_chunk,
+            skip_first_n_tokens=skip_first_n_tokens if group_idx == 0 else 0,
+            layout_hints=layout_hints,
+        )

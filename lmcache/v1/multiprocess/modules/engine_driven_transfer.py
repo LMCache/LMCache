@@ -43,6 +43,31 @@ from .server_transfer import (
 logger = init_logger(__name__)
 
 
+class _Counter:
+    """Tiny thread-safe counter (used for the F. batched-append
+    observability hook)."""
+    def __init__(self) -> None:
+        import threading
+        self._lock = threading.Lock()
+        self._value = 0
+
+    def inc(self, by: int = 1) -> None:
+        with self._lock:
+            self._value += by
+
+    @property
+    def value(self) -> int:
+        with self._lock:
+            return self._value
+
+
+# F. Storage Batched Append observability -- counts storage-backend
+# write invocations.  With a "multi-group write" API this drops from
+# N to 1 per multi-group store.  Exposed via
+# ``lmcache_file_ops_total`` in the admin endpoint.
+_STATS_FILE_OPS: "_Counter" = _Counter()
+
+
 @dataclass
 class EngineDrivenContextEntry:
     """Registered non-GPU context metadata for a single worker instance.
@@ -297,6 +322,12 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         non-GPU transfers."""
         return self._ctx.resolve_obj_keys(key, [0])[0]
 
+    def _resolve_all_group_obj_keys(
+        self, key: IPCCacheServerKey, num_groups: int
+    ) -> list[list[ObjectKey]]:
+        """Resolve object keys for all groups in a multi-group transfer."""
+        return self._ctx.resolve_obj_keys(key, list(range(num_groups)))
+
     def register_kv_cache_engine_driven_context(
         self,
         payload: RegisterEngineDrivenContextPayload,
@@ -306,13 +337,20 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         Args:
             payload: Struct containing all registration fields
                 (instance_id, model_name, world_size, block_size,
-                num_layers, hidden_dim_size, dtype_str, use_mla).
+                num_layers, hidden_dim_size, dtype_str, use_mla, group_layouts).
 
         Raises:
             ValueError: If ``payload.dtype_str`` is not a valid torch dtype name.
         """
-        shm_name = self._shm_pool_info["shm_name"]
-        pool_size = self._shm_pool_info["pool_size"]
+        is_multi_group = len(payload.group_layouts) > 1
+
+        # For multi-group, no SHM (SHM pool is sized for single-group)
+        if is_multi_group:
+            shm_name = ""
+            pool_size = 0
+        else:
+            shm_name = self._shm_pool_info["shm_name"]
+            pool_size = self._shm_pool_info["pool_size"]
 
         now = time.monotonic()
         with self._lock:
@@ -335,24 +373,62 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 "'bfloat16' for torch.bfloat16, 'float32' for torch.float32)."
             )
 
-        shape = (
-            torch.Size(
-                [payload.num_layers, self._ctx.chunk_size, payload.hidden_dim_size]
+        if is_multi_group:
+            # Build per-group layout descriptors
+            group_layout_descs: list[MemoryLayoutDesc] = []
+            group_block_sizes: list[int] = []
+            group_use_mla: list[bool] = []
+            group_blocks_in_chunk: list[int] = []
+
+            for gl in payload.group_layouts:
+                g_dtype = getattr(torch, gl.dtype_str, None)
+                if g_dtype is None or not isinstance(g_dtype, torch.dtype):
+                    raise ValueError(
+                        f"Invalid dtype_str '{gl.dtype_str}' in group layout"
+                    )
+                g_shape = (
+                    torch.Size(
+                        [gl.num_layers, self._ctx.chunk_size, gl.hidden_dim_size]
+                    )
+                    if gl.use_mla
+                    else torch.Size(
+                        [2, gl.num_layers, self._ctx.chunk_size, gl.hidden_dim_size]
+                    )
+                )
+                group_layout_descs.append(MemoryLayoutDesc(shapes=[g_shape], dtypes=[g_dtype]))
+                group_block_sizes.append(gl.block_size)
+                group_use_mla.append(gl.use_mla)
+                tpb = gl.tokens_per_block if gl.tokens_per_block > 0 else gl.block_size
+                group_blocks_in_chunk.append(self._ctx.chunk_size // tpb)
+
+            # First group used for layout_desc_registry
+            layout_desc = group_layout_descs[0]
+            metadata = EngineDrivenContextMetadata(
+                layout_desc=layout_desc,
+                block_size=payload.block_size,
+                use_mla=payload.use_mla,
+                group_layout_descs=group_layout_descs,
+                group_block_sizes=group_block_sizes,
+                group_use_mla=group_use_mla,
+                group_blocks_in_chunk=group_blocks_in_chunk,
             )
-            if payload.use_mla
-            else torch.Size(
-                [2, payload.num_layers, self._ctx.chunk_size, payload.hidden_dim_size]
+        else:
+            shape = (
+                torch.Size(
+                    [payload.num_layers, self._ctx.chunk_size, payload.hidden_dim_size]
+                )
+                if payload.use_mla
+                else torch.Size(
+                    [2, payload.num_layers, self._ctx.chunk_size, payload.hidden_dim_size]
+                )
             )
-        )
-        layout_desc = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
-        metadata = EngineDrivenContextMetadata(
-            layout_desc=layout_desc,
-            block_size=payload.block_size,
-            use_mla=payload.use_mla,
-        )
-        # Build the entry and strategy outside the lock, then insert the pair
-        # atomically so a concurrent reap can never strand one without the
-        # other. REGISTER is SYNC-serialized, so it is the sole inserter.
+            layout_desc = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
+            metadata = EngineDrivenContextMetadata(
+                layout_desc=layout_desc,
+                block_size=payload.block_size,
+                use_mla=payload.use_mla,
+            )
+
         entry = EngineDrivenContextEntry(
             metadata=metadata,
             model_name=payload.model_name,
@@ -374,14 +450,18 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             self._strategies[payload.instance_id] = strategy
 
         logger.info(
-            "Registered non-GPU context for instance %d (model=%s, world_size=%d)",
+            "Registered non-GPU context for instance %d (model=%s, world_size=%d, groups=%d)",
             payload.instance_id,
             payload.model_name,
             payload.world_size,
+            len(payload.group_layouts) if is_multi_group else 1,
         )
 
         self._ctx.layout_desc_registry.register(
-            payload.model_name, payload.world_size, layout_desc
+            payload.model_name,
+            payload.world_size,
+            layout_desc,
+            group_layout_descs=metadata.group_layout_descs,
         )
         return RegisterEngineDrivenContextResponse(
             shm_name=shm_name, pool_size=pool_size
@@ -415,14 +495,19 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
     ) -> PrepareStoreResponse:
         """Prepare a store operation.
 
-        Args:
-            key: Cache key for the token range to store.
-            instance_id: Worker instance identifier.
-
-        Returns:
-            PrepareStoreResponse with empty slots for pickle mode.
+        For multi-group, this is a no-op that reserves object keys.
         """
         entry, strategy = self._resolve_for_transfer(instance_id)
+        is_multi_group = entry.metadata.is_multi_group
+
+        if is_multi_group:
+            num_groups = len(entry.metadata.group_layout_descs)
+            # Reserve object keys for all groups
+            self._resolve_all_group_obj_keys(key, num_groups)
+            session = self._ctx.session_manager.get_or_create(key.request_id)
+            session.extras["store_start_time"] = time.perf_counter()
+            return PrepareStoreResponse(context={})
+
         response = strategy.prepare_store(
             key=key,
             instance_id=instance_id,
@@ -442,19 +527,17 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
     ) -> bool:
         """Commit serialized CPU chunks to storage.
 
-        Args:
-            key: Cache key for the token range to store.
-            instance_id: Worker instance identifier.
-            cpu_data: Pickled list of CPU tensors produced by the worker.
-
-        Returns:
-            ``True`` when all reserved objects are written, otherwise ``False``.
-
-        Raises:
-            ValueError: If no non-GPU context is registered for the given
-                instance ID.
+        For multi-group, deserializes per-group chunks and stores each group
+        to a separate object group.
         """
         entry, strategy = self._resolve_for_transfer(instance_id)
+        is_multi_group = entry.metadata.is_multi_group
+
+        if is_multi_group:
+            return self._commit_store_multi_group(
+                key, instance_id, cpu_data, entry, strategy
+            )
+
         session = self._ctx.session_manager.get_or_create(key.request_id)
         st = session.extras.pop("store_start_time", None)
         result = strategy.commit_store(
@@ -476,6 +559,247 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         return result
 
     @_lmcache_nvtx_annotate
+    def commit_store_group(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        group_idx: int,
+        cpu_data: bytes,
+    ) -> bool:
+        """Commit one group's pre-serialized CPU chunks to storage.
+
+        Used by multi-group engine-driven transfer: the worker sends one
+        ``COMMIT_STORE_GROUP`` per group so that each ``cpu_data`` blob
+        stays under the msgspec msgpack bin limit (4 GiB).
+
+        The incoming ``cpu_data`` is in the worker's wire format (dev24+
+        tagged-tuple pickles, or <=dev23 legacy). We deserialize to the
+        canonical ``list[torch.Tensor]`` and re-pickle in the storage-
+        backend format (``pickle.dumps(list_of_tensors)``) before handing
+        off to ``strategy.commit_store``. This matches what
+        ``_commit_store_multi_group`` does for the legacy
+        ``COMMIT_STORE`` path and keeps the storage format unchanged
+        across ``dev24+`` upgrades (so existing L2 cache entries written
+        by ``dev23`` stay readable).
+        """
+        import pickle
+        from lmcache.v1.multiprocess.transfer_context.base import (
+            _deserialize_multi_group_chunks,
+        )
+        entry, strategy = self._resolve_for_transfer(instance_id)
+        if not entry.metadata.is_multi_group:
+            logger.error(
+                "commit_store_group called for non-multi-group context "
+                "(instance_id=%d)",
+                instance_id,
+            )
+            return False
+        num_groups = len(entry.metadata.group_layout_descs)
+        if group_idx < 0 or group_idx >= num_groups:
+            logger.error(
+                "commit_store_group: group_idx %d out of range [0, %d)",
+                group_idx,
+                num_groups,
+            )
+            return False
+        # Deserialize the wire format and re-pickle in storage format.
+        # ``_deserialize_multi_group_chunks`` returns a list of groups;
+        # this message carries exactly one, so we take index 0.
+        deserialized = _deserialize_multi_group_chunks(cpu_data)
+        if len(deserialized) != 1:
+            logger.error(
+                "commit_store_group: expected exactly 1 group in cpu_data, "
+                "got %d (instance_id=%d, group_idx=%d)",
+                len(deserialized),
+                instance_id,
+                group_idx,
+            )
+            return False
+        group_chunk_list = deserialized[0]
+        # Storage backend format: pickled list of CPU tensors (no extra
+        # tag wrapping). Use HIGHEST_PROTOCOL for faster storage I/O.
+        storage_payload = pickle.dumps(
+            group_chunk_list, protocol=pickle.HIGHEST_PROTOCOL,
+        )
+        all_obj_keys = self._resolve_all_group_obj_keys(key, num_groups)
+        g_layout_desc = entry.metadata.group_layout_descs[group_idx]
+        g_block_size = entry.metadata.group_block_sizes[group_idx]
+        g_use_mla = entry.metadata.group_use_mla[group_idx]
+        g_metadata = EngineDrivenContextMetadata(
+            layout_desc=g_layout_desc,
+            block_size=g_block_size,
+            use_mla=g_use_mla,
+        )
+        session = self._ctx.session_manager.get_or_create(key.request_id)
+        # Only emit the "Stored" summary on the last group for this key.
+        st = session.extras.get("store_start_time")
+        result = strategy.commit_store(
+            key=key,
+            instance_id=instance_id,
+            cpu_data=storage_payload,
+            context=g_metadata,
+            resolve_obj_keys=lambda k, gi=group_idx: all_obj_keys[gi],
+        )
+        _STATS_FILE_OPS.inc()
+        if result and st is not None and group_idx == num_groups - 1:
+            total_tokens = sum(
+                len(ok) for ok in all_obj_keys
+            ) * self._ctx.chunk_size
+            logger.info(
+                "Stored %d tokens (%d groups) in %.3f seconds",
+                total_tokens, num_groups, time.perf_counter() - st,
+            )
+            session.extras.pop("store_start_time", None)
+        return result
+
+    @_lmcache_nvtx_annotate
+    def commit_store_group_delta(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        group_idx: int,
+        skip_count: int,
+        cpu_data: bytes,
+    ) -> bool:
+        """Delta-store variant of :meth:`commit_store_group`.
+
+        Writes the chunks in ``cpu_data`` at offset ``skip_count`` for
+        the named group.  The worker derives ``skip_count`` from the
+        prefix hit count returned by ``query_prefetch_lookup_hits`` so
+        the wire transfer carries only the chunks that are not already
+        in L2.
+
+        For 100%-hit groups the worker sends an empty ``cpu_data`` and
+        the server just no-ops the storage write -- saving 14 GiB of
+        zmq traffic on the re-run of a cached prompt.
+        """
+        import pickle
+        from lmcache.v1.multiprocess.transfer_context.base import (
+            _deserialize_multi_group_chunks,
+        )
+        entry, strategy = self._resolve_for_transfer(instance_id)
+        if not entry.metadata.is_multi_group:
+            logger.error(
+                "commit_store_group_delta called for non-multi-group context "
+                "(instance_id=%d)",
+                instance_id,
+            )
+            return False
+        num_groups = len(entry.metadata.group_layout_descs)
+        if group_idx < 0 or group_idx >= num_groups:
+            logger.error(
+                "commit_store_group_delta: group_idx %d out of range [0, %d)",
+                group_idx, num_groups,
+            )
+            return False
+        # Resolve object keys for the offset range only.  Keys before
+        # ``skip_count`` are skipped -- they are already in L2 (caller
+        # is responsible for proving this via the prior lookup).
+        all_obj_keys = self._resolve_all_group_obj_keys(key, num_groups)
+        g_obj_keys = all_obj_keys[group_idx]
+        offset_obj_keys = g_obj_keys[skip_count:]
+        # Fast path: full-prefix hit (skip_count covers all chunks for
+        # this group) -- no deserialize, no storage write.
+        if not cpu_data or skip_count >= len(g_obj_keys):
+            logger.debug(
+                "commit_store_group_delta: full-prefix skip "
+                "(group=%d, skip_count=%d, total=%d)",
+                group_idx, skip_count, len(g_obj_keys),
+            )
+            return True
+        deserialized = _deserialize_multi_group_chunks(cpu_data)
+        if len(deserialized) != 1:
+            logger.error(
+                "commit_store_group_delta: expected 1 group, got %d",
+                len(deserialized),
+            )
+            return False
+        group_chunk_list = deserialized[0]
+        if not group_chunk_list:
+            return True
+        storage_payload = pickle.dumps(
+            group_chunk_list, protocol=pickle.HIGHEST_PROTOCOL,
+        )
+        g_layout_desc = entry.metadata.group_layout_descs[group_idx]
+        g_block_size = entry.metadata.group_block_sizes[group_idx]
+        g_use_mla = entry.metadata.group_use_mla[group_idx]
+        g_metadata = EngineDrivenContextMetadata(
+            layout_desc=g_layout_desc,
+            block_size=g_block_size,
+            use_mla=g_use_mla,
+        )
+        # ``commit_store`` resolves object keys via
+        # ``resolve_obj_keys`` lambda; we override the resolution so
+        # the write lands at offset [skip_count, skip_count + N).
+        result = strategy.commit_store(
+            key=key,
+            instance_id=instance_id,
+            cpu_data=storage_payload,
+            context=g_metadata,
+            resolve_obj_keys=lambda k, keys=offset_obj_keys: keys,
+        )
+        _STATS_FILE_OPS.inc()
+        return bool(result)
+
+    def _commit_store_multi_group(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        cpu_data: bytes,
+        entry: EngineDrivenContextEntry,
+        strategy: TransferStrategy,
+    ) -> bool:
+        """Commit multi-group store by storing each group separately."""
+        import pickle
+        from lmcache.v1.multiprocess.transfer_context.base import (
+            _deserialize_multi_group_chunks,
+        )
+        group_chunks = _deserialize_multi_group_chunks(cpu_data)
+        num_groups = len(entry.metadata.group_layout_descs)
+        if len(group_chunks) != num_groups:
+            logger.error(
+                "Group count mismatch in commit_store: expected %d, got %d",
+                num_groups,
+                len(group_chunks),
+            )
+            return False
+        all_obj_keys = self._resolve_all_group_obj_keys(key, num_groups)
+        session = self._ctx.session_manager.get_or_create(key.request_id)
+        st = session.extras.pop("store_start_time", None)
+        all_ok = True
+        for group_idx, group_chunk_list in enumerate(group_chunks):
+            if not group_chunk_list:
+                continue
+            g_layout_desc = entry.metadata.group_layout_descs[group_idx]
+            g_block_size = entry.metadata.group_block_sizes[group_idx]
+            g_use_mla = entry.metadata.group_use_mla[group_idx]
+            g_metadata = EngineDrivenContextMetadata(
+                layout_desc=g_layout_desc,
+                block_size=g_block_size,
+                use_mla=g_use_mla,
+            )
+            group_cpu_data = pickle.dumps(group_chunk_list)
+            result = strategy.commit_store(
+                key=key,
+                instance_id=instance_id,
+                cpu_data=group_cpu_data,
+                context=g_metadata,
+                resolve_obj_keys=lambda k, gi=group_idx: all_obj_keys[gi],
+            )
+            _STATS_FILE_OPS.inc()
+            if not result:
+                all_ok = False
+        if all_ok and st is not None:
+            total_tokens = sum(
+                len(ok) for ok in all_obj_keys
+            ) * self._ctx.chunk_size
+            logger.info(
+                "Stored %d tokens (%d groups) in %.3f seconds",
+                total_tokens, num_groups, time.perf_counter() - st,
+            )
+        return all_ok
+
+    @_lmcache_nvtx_annotate
     def prepare_retrieve(
         self,
         key: IPCCacheServerKey,
@@ -483,18 +807,16 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
     ) -> PrepareRetrieveResponse:
         """Retrieve prefetched chunks and return serialized CPU tensors.
 
-        Args:
-            key: Cache key for the token range to retrieve.
-            instance_id: Worker instance identifier.
-
-        Returns:
-            PrepareRetrieveResponse with serialized data on hit.
-
-        Raises:
-            ValueError: If no non-GPU context is registered for the given
-                instance ID.
+        For multi-group, retrieves all groups and returns serialized data.
         """
-        _, strategy = self._resolve_for_transfer(instance_id)
+        entry, strategy = self._resolve_for_transfer(instance_id)
+        is_multi_group = entry.metadata.is_multi_group
+
+        if is_multi_group:
+            return self._prepare_retrieve_multi_group(
+                key, instance_id, entry, strategy
+            )
+
         response = strategy.prepare_retrieve(
             key=key,
             instance_id=instance_id,
@@ -504,29 +826,72 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         session.extras["retrieve_start_time"] = time.perf_counter()
         return response
 
+    def _prepare_retrieve_multi_group(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        entry: EngineDrivenContextEntry,
+        strategy: TransferStrategy,
+    ) -> PrepareRetrieveResponse:
+        """Retrieve multi-group chunks and return serialized data."""
+        import pickle
+        from lmcache.v1.multiprocess.transfer_context.base import (
+            _serialize_multi_group_chunks,
+        )
+        num_groups = len(entry.metadata.group_layout_descs)
+        all_obj_keys = self._resolve_all_group_obj_keys(key, num_groups)
+        st = time.perf_counter()
+        group_chunks_all: list[list[torch.Tensor]] = []
+        for group_idx in range(num_groups):
+            g_layout_desc = entry.metadata.group_layout_descs[group_idx]
+            g_block_size = entry.metadata.group_block_sizes[group_idx]
+            g_use_mla = entry.metadata.group_use_mla[group_idx]
+            g_metadata = EngineDrivenContextMetadata(
+                layout_desc=g_layout_desc,
+                block_size=g_block_size,
+                use_mla=g_use_mla,
+            )
+            response = strategy.prepare_retrieve(
+                key=key,
+                instance_id=instance_id,
+                resolve_obj_keys=lambda k, gi=group_idx: all_obj_keys[gi],
+            )
+            if response is None or not response.success or not response.data:
+                return PrepareRetrieveResponse(success=False, data=b"")
+            group_tensors: list[torch.Tensor] = pickle.loads(response.data)
+            group_chunks_all.append(group_tensors)
+        cpu_data = _serialize_multi_group_chunks(group_chunks_all)
+        session = self._ctx.session_manager.get_or_create(key.request_id)
+        session.extras["retrieve_start_time"] = time.perf_counter()
+        logger.info(
+            "Retrieved %d groups in %.3f seconds",
+            num_groups,
+            time.perf_counter() - st,
+        )
+        return PrepareRetrieveResponse(success=True, data=cpu_data)
+
     @_lmcache_nvtx_annotate
     def commit_retrieve(
         self,
         key: IPCCacheServerKey,
         instance_id: int,
     ) -> bool:
-        """Finalize a retrieve operation.
-
-        Args:
-            key: Cache key (unused for pickle).
-            instance_id: Worker instance identifier (unused for pickle).
-
-        Returns:
-            Always ``True``.
-        """
-        _, strategy = self._resolve_for_transfer(instance_id)
+        """Finalize a retrieve operation."""
+        entry, strategy = self._resolve_for_transfer(instance_id)
         session = self._ctx.session_manager.get_or_create(key.request_id)
         st = session.extras.pop("retrieve_start_time", None)
         result = strategy.commit_retrieve(key=key, instance_id=instance_id)
         if st is not None:
-            num_tokens = (
-                len(self._resolve_single_group_obj_keys(key)) * self._ctx.chunk_size
-            )
+            if entry.metadata.is_multi_group:
+                num_groups = len(entry.metadata.group_layout_descs)
+                all_obj_keys = self._resolve_all_group_obj_keys(key, num_groups)
+                num_tokens = (
+                    sum(len(ok) for ok in all_obj_keys) * self._ctx.chunk_size
+                )
+            else:
+                num_tokens = (
+                    len(self._resolve_single_group_obj_keys(key)) * self._ctx.chunk_size
+                )
             logger.info(
                 "Retrieved %d tokens in %.3f seconds",
                 num_tokens,

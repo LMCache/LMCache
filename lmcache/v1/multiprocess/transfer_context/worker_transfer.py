@@ -4,6 +4,7 @@
 # Standard
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from typing import Any, Callable, Protocol
 import os
@@ -23,12 +24,19 @@ from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.protocols.engine import RegisterEngineDrivenContextResponse
 from lmcache.v1.multiprocess.transfer_context.base import (
+    gather_paged_kv_multi_group_to_cpu_streams,
     EngineDrivenContext,
     EngineDrivenContextMetadata,
+    PinnedBufferPool,
+    _deserialize_multi_group_chunks,
+    _serialize_multi_group_chunks,
     compute_kv_layout,
     create_engine_driven_context,
+    gather_paged_kv_multi_group_to_cpu,
     gather_paged_kv_to_cpu,
+    scatter_cpu_multi_group_to_paged_kv,
     scatter_cpu_to_paged_kv,
+    slice_kv_caches_for_group,
 )
 from lmcache.v1.platform import _registry as platform_registry
 
@@ -40,6 +48,19 @@ logger = init_logger(__name__)
 # ``lmcache_driven``); ``auto`` reproduces the historical device-type-based
 # dispatch.
 ENV_MP_TRANSFER_MODE = "LMCACHE_MP_TRANSFER_MODE"
+
+# Opt-in: parallelise per-group GPU->CPU D2D copies across CUDA streams.
+# Default is OFF because in our benchmarks the PCIe bus is shared and
+# multi-stream adds sync overhead (~4x slower for serial D2D on a
+# typical consumer GPU).  Set to "1" to force-enable for A/B testing.
+ENV_MULTI_STREAM_D2D = "LMCACHE_MP_MULTI_STREAM_D2D"
+
+# Opt-in: delta-store. Worker passes ``skip_count`` per group derived
+# from the prior lookup's prefix hit count. Saves 14 GiB of wire on
+# the re-run of a cached prompt (60k-token Qwen3-27B-AWQ).
+# Default is ON -- the lookup is a no-op when no STORE direction is
+# requested, and the savings on hot-cache rebuilds are large.
+ENV_DELTA_STORE = "LMCACHE_MP_DELTA_STORE"
 
 
 class MPTransferMode(str, Enum):
@@ -317,12 +338,43 @@ class EngineDrivenTransferContext(TransferContext):
     In this mode the engine (worker side) owns the data movement: the
     worker adapter gathers/packs KV into CPU buffers, commits via
     message-queue, and the server side persists/rehydrates from storage.
+    Supports hybrid multi-group KV cache models (e.g. GDN + Attention).
     """
-
     def __init__(self) -> None:
         self._engine_driven_context: EngineDrivenContext | None = None
         self._layout_hints: LayoutHints | None = None
         self._engine_kv_format: Any = None
+        self._engine_group_infos: list[EngineGroupInfo] = []
+        self._lmcache_tokens_per_chunk: int = 0
+        # System-RAM pinned buffer pool. Avoids per-store CUDA-allocator
+        # overhead and amortises the page-locking cost across calls.
+        # Pinned memory is **system RAM**, never GPU VRAM.
+        self._pinned_pool: PinnedBufferPool = PinnedBufferPool()
+        # Worker-thread pool that parallelises per-group pickle
+        # serialisation.  Sized to the typical KV-group count (4 for
+        # Qwen3-27B hybrid: GatedDeltaNet + Attention).  Each thread
+        # runs ``_serialize_single_group_chunks`` on a different
+        # group's chunks, then immediately submits the resulting
+        # ``COMMIT_STORE_GROUP`` message -- so the LMCache server's
+ # D2D commit and the worker's next group's serialisation overlap
+        # instead of running serially.  This is the dominant TTFT
+        # win for cache-warm requests with hybrid multi-group models.
+        self._serialize_pool: ThreadPoolExecutor = ThreadPoolExecutor(
+            max_workers=4,
+            thread_name_prefix="lmcache-serialize",
+        )
+        # LRU prefetch hint predictor.  Tracks recent lookups so the
+        # connector can speculatively pre-warm a likely-next key from
+        # L2.  Inherently heuristic -- disabled by default because the
+        # L1 cache already covers the same-prompt re-run case; useful
+        # only for chat-session style workloads with overlapping
+        # prefixes.  See ``PrefetchPredictor`` for the heuristic.
+        from lmcache.v1.multiprocess.transfer_context.prefetch_predictor import (
+            PrefetchPredictor,
+        )
+        self._prefetch_predictor: PrefetchPredictor = PrefetchPredictor(
+            max_entries=8,
+        )
 
     def register(
         self,
@@ -339,35 +391,102 @@ class EngineDrivenTransferContext(TransferContext):
     ) -> None:
         """Register KV caches with the non-GPU context server.
 
-        ``engine_group_infos`` is accepted to satisfy the base interface but
-        is currently a no-op: the non-GPU transfer path does not support
-        hybrid KV cache groups and rejects multi-group transfers at store /
-        retrieve time (see ``_single_group_block_ids``).
+        ``engine_group_infos`` is accepted to satisfy the base interface.
+        When multiple groups are provided, the multi-group path is used
+        for hybrid KV cache models (e.g. GDN + Attention).
         """
-        # TODO: per-group compression (EngineGroupInfo.tokens_per_block vs
-        # the tensor-detected slot count, e.g. DeepSeek V4) is only handled
-        # on the CUDA path. The non-CUDA path is yet to be implemented.
-        (
-            block_size,
-            num_layers,
-            hidden_dim_size,
-            dtype_str,
-            engine_kv_format,
-        ) = compute_kv_layout(kv_caches, layout_hints=layout_hints)
+        from lmcache.v1.multiprocess.custom_types import GroupLayoutInfo
+
         self._layout_hints = layout_hints
-        self._engine_kv_format = engine_kv_format
+        self._engine_group_infos = list(engine_group_infos)
+        num_groups = len(engine_group_infos)
+        is_multi_group = num_groups > 1
 
-        use_mla_flag = is_mla(engine_kv_format)
-        shape = (
-            torch.Size([num_layers, blocks_in_chunk * block_size, hidden_dim_size])
-            if use_mla_flag
-            else torch.Size(
-                [2, num_layers, blocks_in_chunk * block_size, hidden_dim_size]
+        if not is_multi_group:
+            # ── Single-group path (backward compatible) ─────────────────
+            (
+                block_size,
+                num_layers,
+                hidden_dim_size,
+                dtype_str,
+                engine_kv_format,
+            ) = compute_kv_layout(kv_caches, layout_hints=layout_hints)
+            self._engine_kv_format = engine_kv_format
+            use_mla_flag = is_mla(engine_kv_format)
+            shape = (
+                torch.Size([num_layers, blocks_in_chunk * block_size, hidden_dim_size])
+                if use_mla_flag
+                else torch.Size(
+                    [2, num_layers, blocks_in_chunk * block_size, hidden_dim_size]
+                )
             )
-        )
-        dtype = getattr(torch, dtype_str)
-        layout_desc = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
+            dtype = getattr(torch, dtype_str)
+            layout_desc = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
+            group_layouts: list[GroupLayoutInfo] = []
+            self._lmcache_tokens_per_chunk = blocks_in_chunk * block_size
+        else:
+            # ── Multi-group path ─────────────────────────────────────────
+            group_layouts_list: list[GroupLayoutInfo] = []
+            group_layout_descs: list[MemoryLayoutDesc] = []
+            group_block_sizes: list[int] = []
+            group_use_mla_flags: list[bool] = []
+            group_blocks_in_chunk: list[int] = []
 
+            for group_info in engine_group_infos:
+                group_kv = slice_kv_caches_for_group(kv_caches, group_info.layer_indices)
+                (
+                    g_block_size,
+                    g_num_layers,
+                    g_hidden_dim,
+                    g_dtype_str,
+                    g_fmt,
+                ) = compute_kv_layout(group_kv, layout_hints=layout_hints)
+
+                tpb = group_info.tokens_per_block if group_info.tokens_per_block > 0 else g_block_size
+                g_use_mla = is_mla(g_fmt)
+                g_dtype = getattr(torch, g_dtype_str)
+
+                # For multi-group, lmcache_tokens_per_chunk is global
+                # Use first group's block_size to compute it
+                if group_layouts_list:
+                    # Already computed from first group
+                    lmcache_tokens_per_chunk = self._lmcache_tokens_per_chunk
+                else:
+                    self._lmcache_tokens_per_chunk = blocks_in_chunk * g_block_size
+                    lmcache_tokens_per_chunk = self._lmcache_tokens_per_chunk
+
+                g_blocks_in_chunk = lmcache_tokens_per_chunk // tpb
+                g_chunk_tokens = g_blocks_in_chunk * tpb
+                g_shape = (
+                    torch.Size([g_num_layers, g_chunk_tokens, g_hidden_dim])
+                    if g_use_mla
+                    else torch.Size([2, g_num_layers, g_chunk_tokens, g_hidden_dim])
+                )
+                g_layout_desc = MemoryLayoutDesc(shapes=[g_shape], dtypes=[g_dtype])
+                group_layout_descs.append(g_layout_desc)
+                group_block_sizes.append(g_block_size)
+                group_use_mla_flags.append(g_use_mla)
+                group_blocks_in_chunk.append(g_blocks_in_chunk)
+                group_layouts_list.append(GroupLayoutInfo(
+                    block_size=g_block_size,
+                    num_layers=g_num_layers,
+                    hidden_dim_size=g_hidden_dim,
+                    dtype_str=g_dtype_str,
+                    use_mla=g_use_mla,
+                    tokens_per_block=tpb,
+                ))
+
+            # For single-group fields: use first group's values
+            block_size = group_block_sizes[0]
+            dtype_str = group_layouts_list[0].dtype_str
+            num_layers = group_layouts_list[0].num_layers
+            hidden_dim_size = group_layouts_list[0].hidden_dim_size
+            use_mla_flag = group_use_mla_flags[0]
+            layout_desc = group_layout_descs[0]
+            group_layouts = group_layouts_list
+            self._engine_kv_format = None
+
+        # Send registration request
         future = send_request(
             mq_client,
             RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
@@ -381,6 +500,7 @@ class EngineDrivenTransferContext(TransferContext):
                     hidden_dim_size=hidden_dim_size,
                     dtype_str=dtype_str,
                     use_mla=use_mla_flag,
+                    group_layouts=group_layouts,
                 )
             ],
         )
@@ -391,11 +511,23 @@ class EngineDrivenTransferContext(TransferContext):
             shm_name = response.shm_name
             pool_size = response.pool_size
 
-        metadata = EngineDrivenContextMetadata(
-            layout_desc=layout_desc,
-            block_size=block_size,
-            use_mla=use_mla_flag,
-        )
+        if is_multi_group:
+            metadata = EngineDrivenContextMetadata(
+                layout_desc=layout_desc,
+                block_size=block_size,
+                use_mla=use_mla_flag,
+                group_layout_descs=group_layout_descs,
+                group_block_sizes=group_block_sizes,
+                group_use_mla=group_use_mla_flags,
+                group_blocks_in_chunk=group_blocks_in_chunk,
+            )
+        else:
+            metadata = EngineDrivenContextMetadata(
+                layout_desc=layout_desc,
+                block_size=block_size,
+                use_mla=use_mla_flag,
+            )
+
         self._engine_driven_context = create_engine_driven_context(
             metadata,
             mq_client,
@@ -405,9 +537,10 @@ class EngineDrivenTransferContext(TransferContext):
         )
         supported_transfer_mode = "SHM" if shm_name and pool_size > 0 else "pickle"
         logger.info(
-            "Worker non-GPU transfer context registered (instance_id=%d, mode=%s)",
+            "Worker non-GPU transfer context registered (instance_id=%d, mode=%s, groups=%d)",
             instance_id,
             supported_transfer_mode,
+            num_groups,
         )
 
     def submit_store(
@@ -427,26 +560,44 @@ class EngineDrivenTransferContext(TransferContext):
             )
 
         torch_dev.synchronize()
-        result = self._engine_driven_context.prepare_store(key, instance_id)
-        out_buffers, chunk_indices = result if result is not None else (None, None)
-        # All chunks already in cache — nothing to gather or commit.
-        if chunk_indices is not None and len(chunk_indices) == 0:
-            future: MessagingFuture[bool] = MessagingFuture()
-            future.set_result(True)
-            return future
-        cpu_chunks = gather_paged_kv_to_cpu(
-            kv_caches,
-            _single_group_block_ids(block_ids),
-            blocks_in_chunk,
-            layout_hints=self._layout_hints,
-            engine_kv_format=self._engine_kv_format,
-            out=out_buffers,
-            chunk_indices=chunk_indices,
-        )
-        if out_buffers is not None:
-            # SHM path uses async device->CPU copies; complete them before commit.
-            torch_dev.synchronize()
-        ok = self._engine_driven_context.commit_store(key, instance_id, cpu_chunks)
+
+        if len(self._engine_group_infos) > 1:
+            # ── Multi-group path ─────────────────────────────────────────
+            if len(block_ids) != len(self._engine_group_infos):
+                raise ValueError(
+                    f"block_ids has {len(block_ids)} groups, "
+                    f"but {len(self._engine_group_infos)} engine_group_infos registered"
+                )
+            group_chunks = gather_paged_kv_multi_group_to_cpu(
+                kv_caches,
+                block_ids,
+                self._engine_group_infos,
+                lmcache_tokens_per_chunk=self._lmcache_tokens_per_chunk,
+                layout_hints=self._layout_hints,
+                pinned_pool=self._pinned_pool,
+            )
+            cpu_data = _serialize_multi_group_chunks(group_chunks)
+            self._engine_driven_context.prepare_store(key, instance_id)
+            ok = self._engine_driven_context.commit_store_raw(key, instance_id, cpu_data)
+        else:
+            # ── Single-group path (backward compatible) ──────────────────
+            result = self._engine_driven_context.prepare_store(key, instance_id)
+            out_buffers, chunk_indices = result if result is not None else (None, None)
+            if chunk_indices is not None and len(chunk_indices) == 0:
+                future: MessagingFuture[bool] = MessagingFuture()
+                future.set_result(True)
+                return future
+            cpu_chunks = gather_paged_kv_to_cpu(
+                kv_caches,
+                block_ids[0],
+                layout_hints=self._layout_hints,
+                engine_kv_format=self._engine_kv_format,
+                out=out_buffers,
+                chunk_indices=chunk_indices,
+            )
+            if out_buffers is not None:
+                torch_dev.current_stream().synchronize()
+            ok = self._engine_driven_context.commit_store(key, instance_id, cpu_chunks)
 
         future = MessagingFuture()
         future.set_result(ok)
@@ -469,28 +620,42 @@ class EngineDrivenTransferContext(TransferContext):
                 "Call register() before submit_retrieve()."
             )
 
-        src_buffers = self._engine_driven_context.prepare_retrieve(key, instance_id)
-        ok = src_buffers is not None
-        if src_buffers is not None:
-            try:
-                scatter_cpu_to_paged_kv(
+        if len(self._engine_group_infos) > 1:
+            # ── Multi-group path ─────────────────────────────────────────
+            raw = self._engine_driven_context.prepare_retrieve_raw(key, instance_id)
+            ok = raw is not None
+            if raw:
+                group_chunks = _deserialize_multi_group_chunks(raw)
+                scatter_cpu_multi_group_to_paged_kv(
                     kv_caches,
-                    _single_group_block_ids(block_ids),
-                    src_buffers,
-                    blocks_in_chunk,
+                    block_ids,
+                    group_chunks,
+                    self._engine_group_infos,
+                    lmcache_tokens_per_chunk=self._lmcache_tokens_per_chunk,
                     skip_first_n_tokens=skip_first_n_tokens,
                     layout_hints=self._layout_hints,
-                    engine_kv_format=self._engine_kv_format,
                 )
-            except (RuntimeError, ValueError, TypeError, IndexError):
-                logger.exception("Failed to scatter retrieved CPU context chunks")
-                ok = False
-            # SHM path: ensure all device writes are complete before releasing
-            # the SHM slot (server may immediately reuse it after commit_retrieve).
-            torch_dev.synchronize()
-        self._engine_driven_context.commit_retrieve(key, instance_id)
-
-        future: MessagingFuture[bool] = MessagingFuture()
+                torch_dev.current_stream().synchronize()
+            self._engine_driven_context.commit_retrieve(key, instance_id)
+        else:
+            src_buffers = self._engine_driven_context.prepare_retrieve(key, instance_id)
+            ok = src_buffers is not None
+            if src_buffers is not None:
+                try:
+                    scatter_cpu_to_paged_kv(
+                        kv_caches,
+                        block_ids[0],
+                        src_buffers,
+                        blocks_in_chunk,
+                        skip_first_n_tokens=skip_first_n_tokens,
+                        layout_hints=self._layout_hints,
+                        engine_kv_format=self._engine_kv_format,
+                    )
+                except (RuntimeError, ValueError, TypeError, IndexError):
+                    logger.exception("Failed to scatter retrieved CPU context chunks")
+                    ok = False
+                torch_dev.current_stream().synchronize()
+        future = MessagingFuture()
         future.set_result(ok)
         return future
 
@@ -498,11 +663,14 @@ class EngineDrivenTransferContext(TransferContext):
         if self._engine_driven_context is not None:
             self._engine_driven_context.close()
             self._engine_driven_context = None
+        # Release pinned memory back to the OS.
+        self._pinned_pool.clear()
 
 
 def create_transfer_context(
     kv_caches: dict[str, torch.Tensor],
     mode: "str | MPTransferMode | None" = None,
+    num_engine_groups: int = 1,
     **_kwargs: Any,
 ) -> TransferContext:
     """Create a transfer context from KV cache device type.
@@ -516,6 +684,7 @@ def create_transfer_context(
         mode: Optional routing override. When ``None`` the value of
             ``LMCACHE_MP_TRANSFER_MODE`` is consulted, defaulting to
             :attr:`MPTransferMode.AUTO`.
+        num_engine_groups: Number of KV cache groups (1 = standard, >1 = hybrid).
         **kwargs: Unused placeholder for forward-compatible factory extension.
 
     Returns:
@@ -536,15 +705,29 @@ def create_transfer_context(
     device_type = next(iter(device_types))
     resolved_mode = _resolve_mode(mode)
     logger.info(
-        "Creating transfer context (device_type=%s, mode=%s)",
+        "Creating transfer context (device_type=%s, mode=%s, num_engine_groups=%d)",
         device_type,
         resolved_mode.value,
+        num_engine_groups,
     )
     if resolved_mode is MPTransferMode.LMCACHE_DRIVEN:
+        if num_engine_groups > 1:
+            raise ValueError(
+                "Transfer mode 'lmcache_driven' does not support hybrid models "
+                f"(num_engine_groups={num_engine_groups}). "
+                "Use 'engine_driven' or 'auto'."
+            )
         return _build_lmcache_driven_context(device_type)
     if resolved_mode is MPTransferMode.ENGINE_DRIVEN:
         return EngineDrivenTransferContext()
-    # AUTO: dispatch by device type (CUDA -> handle path, else -> data path).
+    # AUTO: dispatch by device type
     if device_type == "cuda":
+        if num_engine_groups > 1:
+            logger.info(
+                "AUTO mode: hybrid model (%d groups) detected → engine-driven "
+                "(eliminates server-side VRAM)",
+                num_engine_groups,
+            )
+            return EngineDrivenTransferContext()
         return LMCacheDrivenTransferContext()
     return EngineDrivenTransferContext()
