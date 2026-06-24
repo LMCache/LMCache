@@ -47,3 +47,4 @@ httptools
 cachetools
 google-api-core
 google-cloud-bigtable
+google-cloud-storage
