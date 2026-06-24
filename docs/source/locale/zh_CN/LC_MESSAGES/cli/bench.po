@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-15 11:17+0000\n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -27,7 +27,7 @@ msgstr "lmcache bench"
 msgid ""
 "The ``lmcache bench`` command runs sustained performance benchmarks. It "
 "has three sub-commands, each targeting a different layer of the stack:"
-msgstr "``lmcache bench`` 命令运行持续性能基准测试。它有三个子命令，每个子命令针对堆栈的不同层级："
+msgstr "``lmcache bench`` 命令用于运行持续性能基准测试。它有三个子命令，分别针对不同的栈层级："
 
 #: ../../source/cli/bench.rst:13
 msgid "Sub-command"
@@ -37,7 +37,7 @@ msgstr "子命令"
 #: ../../source/cli/bench.rst:219 ../../source/cli/bench.rst:260
 #: ../../source/cli/bench.rst:311 ../../source/cli/bench.rst:398
 #: ../../source/cli/bench.rst:462 ../../source/cli/bench.rst:736
-#: ../../source/cli/bench.rst:1037
+#: ../../source/cli/bench.rst:1114
 msgid "Description"
 msgstr "描述"
 
@@ -49,7 +49,7 @@ msgstr "``engine``"
 msgid ""
 "Benchmark an inference engine (e.g. vLLM) with workloads that exercise "
 "different KV-cache reuse patterns."
-msgstr "使用不同的 KV Cache 重用模式的工作负载对推理引擎（例如 vLLM）进行基准测试。"
+msgstr "使用多种 KV Cache 重用模式的工作负载对推理引擎（例如 vLLM）进行基准测试。"
 
 #: ../../source/cli/bench.rst:18
 msgid "``server``"
@@ -59,7 +59,7 @@ msgstr "``server``"
 msgid ""
 "End-to-end sanity test against a running LMCache MP cache server (ZMQ + "
 "HTTP). Requires the full ``lmcache`` install and a GPU."
-msgstr "针对运行中的 LMCache MP 缓存服务器（ZMQ + HTTP）的端到端完整性测试。需要完整的 ``lmcache`` 安装和一个 GPU。"
+msgstr "针对正在运行的 LMCache MP 缓存服务器（ZMQ + HTTP）的端到端健全性测试。需要完整安装 ``lmcache`` 以及一块 GPU。"
 
 #: ../../source/cli/bench.rst:21
 msgid "``l2``"
@@ -69,11 +69,11 @@ msgstr "``l2``"
 msgid ""
 "Throughput / latency benchmark against an L2 cache adapter (store / "
 "lookup / load)."
-msgstr "针对 L2 缓存适配器的吞吐量/延迟基准测试（存储/查找/加载）。"
+msgstr "针对 L2 缓存适配器的吞吐量／延迟基准测试（存储／查找／加载）。"
 
 #: ../../source/cli/bench.rst:33
 msgid "engine"
-msgstr "引擎"
+msgstr "engine"
 
 #: ../../source/cli/bench.rst:35
 msgid ""
@@ -83,7 +83,7 @@ msgid ""
 "TTFT, decoding speed, and throughput metrics."
 msgstr ""
 "``lmcache bench engine`` 命令对推理引擎（例如 "
-"vLLM）进行持续性能基准测试。它支持多种工作负载类型，以测试不同的缓存模式，并报告 TTFT、解码速度和吞吐量指标。"
+"vLLM）执行持续性能基准测试。它支持多种工作负载类型，用于测试不同的缓存模式，并上报 TTFT、解码速度和吞吐量等指标。"
 
 #: ../../source/cli/bench.rst:44
 msgid "There are three ways to configure the benchmark:"
@@ -97,7 +97,8 @@ msgstr "**CLI 参数** -- 在命令行中传递所有选项。"
 msgid ""
 "**Interactive mode** -- run ``lmcache bench engine`` without required "
 "args and follow the step-by-step prompts."
-msgstr "**交互模式** -- 运行 ``lmcache bench engine`` 而不需要参数，并按照逐步提示进行操作。"
+msgstr ""
+"**交互模式** -- 在不传入必需参数的情况下运行 ``lmcache bench engine``\\ ，然后按照逐步提示进行操作。"
 
 #: ../../source/cli/bench.rst:49
 msgid ""
@@ -111,7 +112,7 @@ msgstr "快速开始"
 
 #: ../../source/cli/bench.rst:56
 msgid "**Minimal (with all required arguments):**"
-msgstr "**最小化（包含所有必需参数）：**"
+msgstr "**最小示例（包含所有必需参数）：**"
 
 #: ../../source/cli/bench.rst:65
 msgid "**Interactive mode (guided setup):**"
@@ -122,7 +123,7 @@ msgid ""
 "The interactive mode walks you through each required setting, then asks "
 "whether you want to configure general and workload-specific options or "
 "use defaults."
-msgstr "交互模式会引导您完成每个必需的设置，然后询问您是否希望配置通用选项和特定于工作负载的选项，还是使用默认值。"
+msgstr "交互模式会引导您逐一完成每项必需设置，然后询问是否需要配置通用选项和工作负载专项选项，或者直接使用默认值。"
 
 #: ../../source/cli/bench.rst:75
 msgid "**From a saved config file:**"
@@ -133,7 +134,7 @@ msgid ""
 "Config files contain benchmark parameters (workload, KV cache settings, "
 "etc.) but not the engine URL, so you can reuse the same config against "
 "different engines."
-msgstr "配置文件包含基准测试参数（工作负载、KV Cache 设置等），但不包括引擎 URL，因此您可以在不同的引擎上重用相同的配置。"
+msgstr "配置文件包含基准测试参数（工作负载、KV Cache 设置等），但不包含引擎 URL，因此同一份配置可以在不同引擎上复用。"
 
 #: ../../source/cli/bench.rst:86
 msgid "**Export a config without running the benchmark:**"
@@ -144,8 +145,7 @@ msgid ""
 "This resolves all auto-detected values (model name, tokens per GB) and "
 "saves them to a portable JSON file that works without an LMCache server."
 msgstr ""
-"这将解析所有自动检测到的值（模型名称、每 GB 的令牌数），并将它们保存到一个便携式 JSON 文件中，该文件可以在没有 LMCache "
-"服务器的情况下使用。"
+"此操作会解析所有自动检测到的值（模型名称、每 GB 的 token 数），并将其保存为可移植的 JSON 文件，无需 LMCache 服务器即可使用。"
 
 #: ../../source/cli/bench.rst:99
 msgid "**Non-interactive mode (for scripts and CI):**"
@@ -155,7 +155,7 @@ msgstr "**非交互模式（用于脚本和 CI）：**"
 msgid ""
 "Errors immediately if any required argument is missing, instead of "
 "entering interactive mode. Useful in automated pipelines."
-msgstr "如果缺少任何必需的参数，则立即报错，而不是进入交互模式。这在自动化管道中非常有用。"
+msgstr "若缺少任何必需参数，立即报错而非进入交互模式，适用于自动化流水线。"
 
 #: ../../source/cli/bench.rst:112
 msgid ""
@@ -163,8 +163,7 @@ msgid ""
 "kvcache`` directly instead of ``--lmcache-url`` (see :ref:`bench-tokens-"
 "per-gb` for how to find this value)."
 msgstr ""
-"如果您没有 LMCache 服务器，可以直接传递 ``--tokens-per-gb-kvcache``，而不是 ``--lmcache-"
-"url``（有关如何找到此值，请参见 :ref:`bench-tokens-per-gb`）。"
+"如果您没有 LMCache 服务器，可以直接传递 ``--tokens-per-gb-kvcache``\\ ，而不是 ``--lmcache-url``\\ （有关如何找到此值，请参见 :ref:`bench-tokens-per-gb`）。"
 
 #: ../../source/cli/bench.rst:118
 msgid "General Options"
@@ -173,13 +172,13 @@ msgstr "常规选项"
 #: ../../source/cli/bench.rst:124 ../../source/cli/bench.rst:217
 #: ../../source/cli/bench.rst:258 ../../source/cli/bench.rst:309
 #: ../../source/cli/bench.rst:396 ../../source/cli/bench.rst:460
-#: ../../source/cli/bench.rst:734 ../../source/cli/bench.rst:1035
+#: ../../source/cli/bench.rst:734 ../../source/cli/bench.rst:1112
 msgid "Flag"
-msgstr "标志"
+msgstr "参数选项"
 
 #: ../../source/cli/bench.rst:125
 msgid "Required"
-msgstr "必需"
+msgstr "是否必需"
 
 #: ../../source/cli/bench.rst:127
 msgid "``--config FILE``"
@@ -192,14 +191,14 @@ msgstr "``--config FILE``"
 #: ../../source/cli/bench.rst:172 ../../source/cli/bench.rst:175
 #: ../../source/cli/bench.rst:178
 msgid "No"
-msgstr "不"
+msgstr "否"
 
 #: ../../source/cli/bench.rst:129
 msgid ""
 "Load configuration from a JSON file. Skips interactive mode. CLI flags "
 "override values in the file. The engine URL is not stored in config files"
 " and must be provided separately."
-msgstr "从 JSON 文件加载配置。跳过交互模式。CLI 标志会覆盖文件中的值。引擎 URL 不会存储在配置文件中，必须单独提供。"
+msgstr "从 JSON 文件加载配置，跳过交互模式。命令行参数会覆盖文件中的值。引擎 URL 不存储于配置文件中，需单独提供。"
 
 #: ../../source/cli/bench.rst:132
 msgid "``--export-config FILE``"
@@ -212,8 +211,8 @@ msgid ""
 "saved so the config is portable. Environment- specific values (engine "
 "URL, LMCache URL) are excluded."
 msgstr ""
-"将解析后的配置导出到 JSON 文件并退出。不会运行基准测试。自动检测的值（模型，每 GB "
-"的令牌数）被解析并保存，以便配置可移植。特定于环境的值（引擎 URL，LMCache URL）被排除在外。"
+"将已解析的配置导出到 JSON 文件后退出，不会执行基准测试。自动检测的值（模型名称、每 GB 的 token 数）会被解析并保存，使配置具有可移植性。"
+"特定于环境的值（引擎 URL、LMCache URL）不会被导出。"
 
 #: ../../source/cli/bench.rst:138
 msgid "``--no-interactive``"
@@ -223,7 +222,7 @@ msgstr "``--no-interactive``"
 msgid ""
 "Disable interactive mode. Errors if required arguments are missing "
 "instead of prompting. Useful for scripts and CI."
-msgstr "禁用交互模式。如果缺少必需的参数则报错，而不是提示。对脚本和 CI 很有用。"
+msgstr "禁用交互模式。若缺少必需参数则立即报错，而非进行提示。适合在脚本和 CI 中使用。"
 
 #: ../../source/cli/bench.rst:142
 msgid "``--engine-url URL``"
@@ -238,8 +237,7 @@ msgid ""
 "Inference engine URL (e.g., ``http://localhost:8000``). Set "
 "``OPENAI_API_KEY`` env var if authentication is needed."
 msgstr ""
-"推理引擎 URL（例如，``http://localhost:8000``）。如果需要身份验证，请设置 ``OPENAI_API_KEY`` "
-"环境变量。"
+"推理引擎 URL（例如 ``http://localhost:8000``\\ ）。若需要身份验证，请设置 ``OPENAI_API_KEY`` 环境变量。"
 
 #: ../../source/cli/bench.rst:146
 msgid "``--workload TYPE``"
@@ -250,8 +248,7 @@ msgid ""
 "Workload type: ``long-doc-qa``, ``multi-round-chat``, ``long-doc-"
 "permutator``, ``prefix-suffix-tuner``, or ``random-prefill``."
 msgstr ""
-"工作负载类型：``long-doc-qa``、``multi-round-chat``、``long-doc-permutator"
-"``、``prefix-suffix-tuner`` 或 ``random-prefill``。"
+"工作负载类型：\\ ``long-doc-qa``\\ 、\\ ``multi-round-chat``\\ 、\\ ``long-doc-permutator``\\ 、\\ ``prefix-suffix-tuner`` 或 ``random-prefill``\\ 。"
 
 #: ../../source/cli/bench.rst:151
 msgid "``--tokens-per-gb-kvcache N``"
@@ -266,8 +263,7 @@ msgid ""
 "Tokens per GB of KV cache. Required unless ``--lmcache-url`` is set. See "
 ":ref:`bench-tokens-per-gb` for how to find this value."
 msgstr ""
-"每 GB KV Cache 的令牌数。除非设置了 ``--lmcache-url``，否则这是必需的。有关如何找到此值的信息，请参见 :ref"
-":`bench-tokens-per-gb`。"
+"每 GB KV Cache 的 token 数。除非已设置 ``--lmcache-url``\\ ，否则此参数为必填项。关于如何获取该值，请参见 :ref:`bench-tokens-per-gb`。"
 
 #: ../../source/cli/bench.rst:155
 msgid "``--lmcache-url URL``"
@@ -277,7 +273,8 @@ msgstr "``--lmcache-url URL``"
 msgid ""
 "LMCache HTTP server URL. When provided, ``--tokens-per-gb-kvcache`` is "
 "auto-detected from the server."
-msgstr "LMCache HTTP 服务器 URL。当提供时，``--tokens-per-gb-kvcache`` 会从服务器自动检测。"
+msgstr ""
+"LMCache HTTP 服务器 URL。若提供此参数，\\ ``--tokens-per-gb-kvcache`` 将自动从服务器检测。"
 
 #: ../../source/cli/bench.rst:159
 msgid "``--model NAME``"
@@ -285,7 +282,7 @@ msgstr "``--model NAME``"
 
 #: ../../source/cli/bench.rst:161
 msgid "Model name. Auto-detected from the engine if omitted."
-msgstr "模型名称。如果省略，将从引擎自动检测。"
+msgstr "模型名称。若省略，将自动从引擎检测。"
 
 #: ../../source/cli/bench.rst:162
 msgid "``--kv-cache-volume GB``"
@@ -293,7 +290,7 @@ msgstr "``--kv-cache-volume GB``"
 
 #: ../../source/cli/bench.rst:164
 msgid "Target active KV cache volume in GB (default: 100)."
-msgstr "目标活动 KV Cache 容量（单位：GB，默认值：100）。"
+msgstr "目标活跃 KV Cache 容量，单位为 GB（默认值：100）。"
 
 #: ../../source/cli/bench.rst:165
 msgid "``--seed N``"
@@ -309,7 +306,7 @@ msgstr "``--output-dir DIR``"
 
 #: ../../source/cli/bench.rst:170
 msgid "Directory for CSV and JSON output files (default: current directory)."
-msgstr "CSV 和 JSON 输出文件的目录（默认：当前目录）。"
+msgstr "CSV 和 JSON 输出文件的保存目录（默认：当前目录）。"
 
 #: ../../source/cli/bench.rst:171
 msgid "``--no-csv``"
@@ -327,13 +324,13 @@ msgstr "``--json``"
 msgid "Export a JSON summary file."
 msgstr "导出 JSON 摘要文件。"
 
-#: ../../source/cli/bench.rst:177
+#: ../../source/cli/bench.rst:177 ../../source/cli/bench.rst:786
 msgid "``-q`` / ``--quiet``"
 msgstr "``-q`` / ``--quiet``"
 
 #: ../../source/cli/bench.rst:179
 msgid "Suppress the real-time progress display."
-msgstr "抑制实时进度显示。"
+msgstr "禁止显示实时进度。"
 
 #: ../../source/cli/bench.rst:185
 msgid "Finding ``--tokens-per-gb-kvcache``"
@@ -343,13 +340,15 @@ msgstr "查找 ``--tokens-per-gb-kvcache``"
 msgid ""
 "If you have an LMCache server running, the easiest approach is to pass "
 "``--lmcache-url`` and let the tool auto-detect the value."
-msgstr "如果您有一个正在运行的 LMCache 服务器，最简单的方法是传递 ``--lmcache-url`` 并让工具自动检测该值。"
+msgstr ""
+"如果已有正在运行的 LMCache 服务器，最简便的方法是传递 ``--lmcache-url``\\ ，让工具自动检测该值。"
 
 #: ../../source/cli/bench.rst:190
 msgid ""
 "If you are using **vLLM without LMCache**, look for these lines in vLLM's"
 " startup log:"
-msgstr "如果您正在使用 **vLLM 而没有 LMCache**，请在 vLLM 的启动日志中查找这些行："
+msgstr ""
+"如果正在使用 **不带 LMCache 的 vLLM**\\ ，请在 vLLM 的启动日志中查找以下行："
 
 #: ../../source/cli/bench.rst:198
 msgid "Then compute::"
@@ -361,19 +360,19 @@ msgstr "工作负载"
 
 #: ../../source/cli/bench.rst:207
 msgid "long-doc-qa"
-msgstr "长文档问答"
+msgstr "long-doc-qa"
 
 #: ../../source/cli/bench.rst:209
 msgid ""
 "Simulates repeated Q&A over long documents. Warmup sends each document "
 "once to populate the KV cache, then benchmark queries are dispatched with"
 " semaphore-controlled concurrency."
-msgstr "模拟对长文档的重复问答。热身阶段将每个文档发送一次以填充 KV Cache，然后以信号量控制的并发方式发送基准查询。"
+msgstr "模拟对长文档的重复问答。预热阶段将每个文档发送一次以填充 KV Cache，然后以信号量控制的并发方式派发基准测试查询。"
 
 #: ../../source/cli/bench.rst:218 ../../source/cli/bench.rst:259
 #: ../../source/cli/bench.rst:310 ../../source/cli/bench.rst:397
 #: ../../source/cli/bench.rst:461 ../../source/cli/bench.rst:735
-#: ../../source/cli/bench.rst:1036
+#: ../../source/cli/bench.rst:1113
 msgid "Default"
 msgstr "默认"
 
@@ -388,7 +387,7 @@ msgstr "10000"
 
 #: ../../source/cli/bench.rst:222
 msgid "Token length of each synthetic document."
-msgstr "每个合成文档的令牌长度。"
+msgstr "每个合成文档的 token 长度。"
 
 #: ../../source/cli/bench.rst:223
 msgid "``--ldqa-query-per-document``"
@@ -400,7 +399,7 @@ msgstr "2"
 
 #: ../../source/cli/bench.rst:225
 msgid "Number of questions asked per document."
-msgstr "每个文档提问的数量。"
+msgstr "每个文档的提问数量。"
 
 #: ../../source/cli/bench.rst:226
 msgid "``--ldqa-shuffle-policy``"
@@ -412,7 +411,8 @@ msgstr "随机"
 
 #: ../../source/cli/bench.rst:228
 msgid "Request ordering: ``random`` (shuffled) or ``tile`` (round-by-round)."
-msgstr "请求排序：``random``（随机）或``tile``（逐轮）。"
+msgstr ""
+"请求排序方式：\\ ``random``\\ （随机打乱）或 ``tile``\\ （逐轮轮转）。"
 
 #: ../../source/cli/bench.rst:229
 msgid "``--ldqa-num-inflight-requests``"
@@ -424,7 +424,7 @@ msgstr "3"
 
 #: ../../source/cli/bench.rst:231 ../../source/cli/bench.rst:327
 msgid "Maximum concurrent in-flight requests."
-msgstr "最大并发进行中的请求数量。"
+msgstr "最大并发在途请求数。"
 
 #: ../../source/cli/bench.rst:233 ../../source/cli/bench.rst:280
 #: ../../source/cli/bench.rst:329 ../../source/cli/bench.rst:420
@@ -434,7 +434,7 @@ msgstr "**示例：**"
 
 #: ../../source/cli/bench.rst:248
 msgid "multi-round-chat"
-msgstr "多轮聊天"
+msgstr "multi-round-chat"
 
 #: ../../source/cli/bench.rst:250
 msgid ""
@@ -442,7 +442,7 @@ msgid ""
 "user sessions, dispatches requests at a fixed QPS rate, and records "
 "responses in session history so each subsequent query includes prior "
 "context."
-msgstr "模拟具有状态的多轮聊天。创建并发用户会话，以固定的 QPS 速率调度请求，并在会话历史中记录响应，以便每个后续查询都包含先前的上下文。"
+msgstr "模拟有状态的多轮聊天。创建并发用户会话，以固定 QPS 速率调度请求，并将响应记录到会话历史中，使每个后续查询都包含先前的上下文。"
 
 #: ../../source/cli/bench.rst:261
 msgid "``--mrc-shared-prompt-length``"
@@ -454,7 +454,7 @@ msgstr "2000"
 
 #: ../../source/cli/bench.rst:263
 msgid "System prompt token length per session."
-msgstr "每个会话的系统提示令牌长度。"
+msgstr "每个会话的系统提示 token 长度。"
 
 #: ../../source/cli/bench.rst:264
 msgid "``--mrc-chat-history-length``"
@@ -462,7 +462,7 @@ msgstr "``--mrc-chat-history-length``"
 
 #: ../../source/cli/bench.rst:266
 msgid "Pre-filled chat history token length."
-msgstr "预填充聊天历史令牌长度。"
+msgstr "预填充的聊天历史 token 长度。"
 
 #: ../../source/cli/bench.rst:267
 msgid "``--mrc-user-input-length``"
@@ -474,7 +474,7 @@ msgstr "50"
 
 #: ../../source/cli/bench.rst:269
 msgid "Tokens per user query."
-msgstr "每个用户查询的令牌数。"
+msgstr "每个用户查询的 token 数。"
 
 #: ../../source/cli/bench.rst:270
 msgid "``--mrc-output-length``"
@@ -486,7 +486,7 @@ msgstr "200"
 
 #: ../../source/cli/bench.rst:272
 msgid "Max tokens to generate per response."
-msgstr "每个响应生成的最大令牌数。"
+msgstr "每个响应最多生成的 token 数。"
 
 #: ../../source/cli/bench.rst:273
 msgid "``--mrc-qps``"
@@ -510,7 +510,7 @@ msgstr "60.0"
 
 #: ../../source/cli/bench.rst:278
 msgid "Benchmark duration in seconds."
-msgstr "基准测试持续时间（以秒为单位）。"
+msgstr "基准测试持续时间，单位为秒。"
 
 #: ../../source/cli/bench.rst:293
 msgid "long-doc-permutator"
@@ -521,13 +521,13 @@ msgid ""
 "Stress-tests blended KV cache reuse by sending permutations of a set of "
 "context documents. Each request concatenates all context documents in a "
 "different order:"
-msgstr "通过发送一组上下文文档的排列组合，压力测试混合 KV Cache 的重用。每个请求以不同的顺序连接所有上下文文档："
+msgstr "通过发送一组上下文文档的不同排列，对混合 KV Cache 的重用进行压力测试。每个请求以不同顺序拼接所有上下文文档："
 
 #: ../../source/cli/bench.rst:302
 msgid ""
 "A single dummy warmup request is sent before the benchmark phase. "
 "Requests are dispatched with semaphore-controlled concurrency."
-msgstr "在基准测试阶段之前，会发送一个单一的虚拟预热请求。请求以信号量控制的并发方式分发。"
+msgstr "基准测试阶段开始前会发送一个虚拟预热请求。请求以信号量控制并发方式派发。"
 
 #: ../../source/cli/bench.rst:312
 msgid "``--ldp-num-contexts``"
@@ -539,7 +539,7 @@ msgstr "5"
 
 #: ../../source/cli/bench.rst:314
 msgid "Number of unique context documents."
-msgstr "唯一上下文文档的数量。"
+msgstr "独立上下文文档的数量。"
 
 #: ../../source/cli/bench.rst:315
 msgid "``--ldp-context-length``"
@@ -551,7 +551,7 @@ msgstr "5000"
 
 #: ../../source/cli/bench.rst:317
 msgid "Token length of each context document."
-msgstr "每个上下文文档的令牌长度。"
+msgstr "每个上下文文档的 token 长度。"
 
 #: ../../source/cli/bench.rst:318
 msgid "``--ldp-system-prompt-length``"
@@ -563,7 +563,7 @@ msgstr "1000"
 
 #: ../../source/cli/bench.rst:320
 msgid "Token length of the shared system prompt. Use ``0`` for no system prompt."
-msgstr "共享系统提示的令牌长度。使用 ``0`` 表示没有系统提示。"
+msgstr "共享系统提示的 token 长度。使用 ``0`` 表示无系统提示。"
 
 #: ../../source/cli/bench.rst:321
 msgid "``--ldp-num-permutations``"
@@ -577,7 +577,8 @@ msgstr "10"
 msgid ""
 "Number of distinct permutations to send. Capped at N! where N = ``--ldp-"
 "num-contexts``."
-msgstr "发送的不同排列组合的数量。上限为 N!，其中 N = ``--ldp-num-contexts``。"
+msgstr ""
+"发送的不同排列数量，上限为 N!（其中 N = ``--ldp-num-contexts``\\ ）。"
 
 #: ../../source/cli/bench.rst:325
 msgid "``--ldp-num-inflight-requests``"
@@ -597,7 +598,7 @@ msgid ""
 "three LMCache configurations to demonstrate the value of each cache tier "
 "(L0 HBM, L1 DRAM, L2 disk):"
 msgstr ""
-"一个两遍顺序工作负载，旨在 **不变** 地在三个 LMCache 配置中运行，以展示每个缓存层级（L0 HBM、L1 DRAM、L2 "
+"一个两遍顺序工作负载，设计为在三种 LMCache 配置下 **不做任何修改** 地运行，以展示各缓存层级（L0 HBM、L1 DRAM、L2 "
 "磁盘）的价值："
 
 #: ../../source/cli/bench.rst:354
@@ -626,7 +627,7 @@ msgstr "L0 (HBM)"
 
 #: ../../source/cli/bench.rst:361
 msgid "none -- every request a cold prefill"
-msgstr "无 -- 每个请求都是冷预填充"
+msgstr "无 —— 每个请求均为冷预填充"
 
 #: ../../source/cli/bench.rst:363
 msgid "vLLM + LMCache L1 + L2"
@@ -654,8 +655,8 @@ msgid ""
 "overflow (L0 size for Baseline 1, L1 size for Baselines 2 and 3). The "
 "workload itself is identical across baselines."
 msgstr ""
-"将 ``--kv-cache-volume`` 设置为您希望溢出的层的大小（基线 1 的 L0 大小，基线 2 和 3 的 L1 "
-"大小）。工作负载在各个基线之间是相同的。"
+"将 ``--kv-cache-volume`` 设置为希望发生溢出的层的大小（基线 1 对应 L0 大小，基线 2 和 3 对应 L1 "
+"大小）。各基线的工作负载本身完全相同。"
 
 #: ../../source/cli/bench.rst:375
 msgid "Each request has the layout::"
@@ -665,19 +666,19 @@ msgstr "每个请求的布局::"
 msgid ""
 "``num_prefixes`` distinct prefixes, each starting with ``PREFIX_<8-hex>``"
 " so the prefix's tokenized hash differs across the pool."
-msgstr "``num_prefixes`` 个不同的前缀，每个前缀以 ``PREFIX_<8-hex>`` 开头，因此前缀的标记化哈希在池中是不同的。"
+msgstr "``num_prefixes`` 个不同的前缀，每个前缀以 ``PREFIX_<8-hex>`` 开头，以确保各前缀在池内的 token 化哈希各不相同。"
 
 #: ../../source/cli/bench.rst:381
 msgid ""
 "A fresh random 32-token breaker per request, defeating ordinary prefix "
 "caching past the prefix boundary."
-msgstr "每个请求一个新的随机 32-token 断路器，打破普通前缀缓存的前缀边界。"
+msgstr "每个请求包含一段新的随机 32-token 分隔符，用于突破普通前缀缓存的前缀边界。"
 
 #: ../../source/cli/bench.rst:383
 msgid ""
 "A single shared suffix used by every request -- the only entry CacheBlend"
 " can reuse."
-msgstr "每个请求使用的单个共享后缀——这是 CacheBlend 唯一可以重用的条目。"
+msgstr "所有请求共享的单个后缀 —— 这是 CacheBlend 唯一能够重用的条目。"
 
 #: ../../source/cli/bench.rst:386
 msgid ""
@@ -687,8 +688,8 @@ msgid ""
 "overflow of the targeted tier is enough to make every pass-2 request miss"
 " that tier and fall through to the next one."
 msgstr ""
-"第 1 次传递（预热）将每个前缀发送一次以填充缓存；其统计数据会被丢弃。第 2 次传递以相同的顺序再次发送它们。由于 LRU 在每次第 2 "
-"次访问时逐出下一个所需的前缀，即使目标层溢出 1.05 倍也足以使每个第 2 次请求未命中该层并降级到下一层。"
+"第 1 遍（预热）将每个前缀各发送一次以填充缓存，其统计数据被丢弃。第 2 遍以相同顺序再次发送。由于 LRU 在每次第 2 遍访问时会逐出下一个"
+"所需前缀，即使目标层仅溢出 1.05 倍，也足以使每个第 2 遍请求在该层未命中并降级到下一层。"
 
 #: ../../source/cli/bench.rst:399
 msgid "``--psf-context-length``"
@@ -700,7 +701,7 @@ msgstr "8000"
 
 #: ../../source/cli/bench.rst:401
 msgid "Total tokens per request (prefix + breaker + suffix)."
-msgstr "每个请求的总令牌数（前缀 + 分隔符 + 后缀）。"
+msgstr "每个请求的总 token 数（前缀 + 分隔符 + 后缀）。"
 
 #: ../../source/cli/bench.rst:402
 msgid "``--psf-prefix-ratio``"
@@ -714,7 +715,7 @@ msgstr "0.8"
 msgid ""
 "Fraction of context-length used by the prefix. Must be in (0.0, 1.0). The"
 " remainder (minus a 32-token breaker) is the shared suffix."
-msgstr "前缀使用的上下文长度的比例。必须在 (0.0, 1.0) 之间。其余部分（减去 32 个标记的分隔符）是共享后缀。"
+msgstr "前缀占上下文长度的比例，必须在 (0.0, 1.0) 区间内。剩余部分（减去 32 个 token 的分隔符）即为共享后缀。"
 
 #: ../../source/cli/bench.rst:406
 msgid "``--psf-thrash``"
@@ -733,9 +734,9 @@ msgid ""
 "internally), enough to drive every pass-2 request to a miss of that tier "
 "under sequential dispatch + LRU."
 msgstr ""
-"**KV-cache 层的大小（以 GB 为单位），用于溢出。** 对于普通的 vLLM，请使用 L0（HBM）大小，或者对于分层基线，请使用 "
-"L1（LMCache DRAM）大小。工作负载将其前缀池的大小设置为略大于此值（内部溢出 5%），足以使每个顺序调度 + LRU 的 pass-2"
-" 请求在该层中未命中。"
+"**要溢出的 KV Cache 层的大小（单位：GB）。** 原生 vLLM 请使用 L0（HBM）大小；分层基线请使用 "
+"L1（LMCache DRAM）大小。工作负载的前缀池大小略大于此值（内部溢出 5%），足以在顺序调度 + LRU 条件下使每个 pass-2"
+" 请求在该层发生未命中。"
 
 #: ../../source/cli/bench.rst:414
 msgid ""
@@ -744,9 +745,7 @@ msgid ""
 " ``--kv-cache-volume`` is unused by this workload — sizing is driven "
 "solely by ``--psf-thrash``."
 msgstr ""
-"通过 ``floor(psf_thrash * 1.05 * tokens_per_gb / prefix_tokens)`` 计算的 "
-"pass-2（测量）请求数量等于前缀池大小。此工作负载未使用 ``--kv-cache-volume`` — 尺寸完全由 ``--psf-"
-"thrash`` 驱动。"
+"pass-2（测量阶段）的请求数等于前缀池大小，计算公式为 ``floor(psf_thrash * 1.05 * tokens_per_gb / prefix_tokens)``\\ 。此工作负载不使用 ``--kv-cache-volume``\\ ，规模完全由 ``--psf-thrash`` 决定。"
 
 #: ../../source/cli/bench.rst:433
 #, python-format
@@ -756,9 +755,9 @@ msgid ""
 "``--eviction-ratio 0.99`` (default ``0.20`` only clears 20% per cycle, "
 "leaving ~60% of pass-1 content in cache through pass 2):"
 msgstr ""
-"为了使分析模型声明“thrash ≈ L1 大小 → ~0% LMCache 命中率”在经验上成立，LMCache 服务器必须以 "
-"``--eviction-ratio 0.99`` 启动（默认的 ``0.20`` 仅在每个周期清除 20%，在第 2 次传递中大约保留 60% "
-"的第 1 次传递内容）："
+"为使分析模型的论断“thrash ≈ L1 大小 → ~0% LMCache 命中率”在实验中成立，LMCache 服务器必须以 "
+"``--eviction-ratio 0.99`` 启动（默认值 ``0.20`` 每个周期仅清除 20%，第 2 遍时约有 60% "
+"的第 1 遍内容仍留存在缓存中）："
 
 #: ../../source/cli/bench.rst:444
 msgid ""
@@ -767,18 +766,18 @@ msgid ""
 "actually run.  Without that sleep, fast benchmarks complete before any "
 "eviction fires."
 msgstr ""
-"工作负载在第 1 次（热身）和第 2 次（测量）之间会休眠 5 秒，因此 LMCache 的 1Hz "
-"批量逐出轮询线程有时间实际运行。没有这个休眠，快速基准测试在任何逐出触发之前就完成了。"
+"工作负载在第 1 遍（预热）和第 2 遍（测量）之间会休眠 5 秒，以便 LMCache 的 1Hz "
+"批量逐出轮询线程有机会实际运行。若没有这段休眠，快速基准测试会在任何逐出触发之前就已完成。"
 
 #: ../../source/cli/bench.rst:451
 msgid "random-prefill"
-msgstr "随机预填充"
+msgstr "random-prefill"
 
 #: ../../source/cli/bench.rst:453
 msgid ""
 "Fires all requests simultaneously with ``max_tokens=1`` to measure pure "
 "prefill performance. No warmup phase."
-msgstr "同时发送所有请求，``max_tokens=1``，以测量纯粹的 Prefill 性能。没有预热阶段。"
+msgstr "以 ``max_tokens=1`` 同时发送所有请求，用于测量纯预填充性能，无预热阶段。"
 
 #: ../../source/cli/bench.rst:463
 msgid "``--rp-request-length``"
@@ -786,7 +785,7 @@ msgstr "``--rp-request-length``"
 
 #: ../../source/cli/bench.rst:465
 msgid "Token length per prefill request."
-msgstr "每个 Prefill 请求的令牌长度。"
+msgstr "每个预填充请求的 token 长度。"
 
 #: ../../source/cli/bench.rst:466
 msgid "``--rp-num-requests``"
@@ -794,7 +793,7 @@ msgstr "``--rp-num-requests``"
 
 #: ../../source/cli/bench.rst:468
 msgid "Number of requests to fire."
-msgstr "要发送的请求数量。"
+msgstr "发送的请求总数。"
 
 #: ../../source/cli/bench.rst:483
 msgid "Interactive Mode"
@@ -810,41 +809,42 @@ msgid ""
 "interactive`` is not set), the tool enters interactive mode. It guides "
 "you through four phases:"
 msgstr ""
-"当未提供 ``--engine-url`` 或 ``--workload``（并且未设置 ``--no-"
-"interactive``）时，工具将进入交互模式。它将引导您完成四个阶段："
+"当未提供 ``--engine-url`` 或 ``--workload``\\ （且未设置 ``--no-interactive``\\ ）时，工具将进入交互模式，引导您完成以下四个阶段："
 
 #: ../../source/cli/bench.rst:493
 msgid ""
 "**Required settings** -- engine URL, workload type, LMCache server (or "
 "tokens per GB)."
-msgstr "**必需设置** -- 引擎 URL、工作负载类型、LMCache 服务器（或每 GB 的令牌）。"
+msgstr "**必需设置** —— 引擎 URL、工作负载类型、LMCache 服务器（或每 GB 的 token 数）。"
 
 #: ../../source/cli/bench.rst:495
 msgid "**General settings** (optional gate) -- model name, KV cache volume."
-msgstr "**通用设置**（可选门）-- 模型名称，KV Cache 容量。"
+msgstr ""
+"**通用设置**\\ （可选）—— 模型名称、KV Cache 容量。"
 
 #: ../../source/cli/bench.rst:496
 msgid "**Workload settings** (optional gate) -- workload-specific parameters."
-msgstr "**工作负载设置**（可选网关）-- 工作负载特定参数。"
+msgstr ""
+"**工作负载设置**\\ （可选）—— 工作负载专项参数。"
 
 #: ../../source/cli/bench.rst:497
 msgid ""
 "**Summary and action** -- review configuration, then start the benchmark "
 "or export to a JSON file."
-msgstr "**摘要和操作** -- 审查配置，然后启动基准测试或导出到 JSON 文件。"
+msgstr "**摘要与操作** —— 审查配置，然后启动基准测试或将配置导出为 JSON 文件。"
 
 #: ../../source/cli/bench.rst:500
 msgid ""
 "Each prompt focuses on a single setting. Selection prompts use arrow "
 "keys; text and number prompts accept typed input with defaults shown in "
 "brackets."
-msgstr "每个提示专注于单个设置。选择提示使用箭头键；文本和数字提示接受键入的输入，默认值以括号显示。"
+msgstr "每个提示聚焦于单一设置。选择类提示使用方向键操作；文本和数字类提示接受键入输入，默认值显示在括号中。"
 
 #: ../../source/cli/bench.rst:543
 msgid ""
 "When you choose \"Export configuration\", all auto-detected values (model"
 " name, tokens per GB) are resolved and saved to a portable JSON file."
-msgstr "当您选择“导出配置”时，所有自动检测到的值（模型名称、每 GB 的令牌数）将被解析并保存到一个可移植的 JSON 文件中。"
+msgstr "当您选择“导出配置”时，所有自动检测到的值（模型名称、每 GB 的 token 数）将被解析并保存为可移植的 JSON 文件。"
 
 #: ../../source/cli/bench.rst:548
 msgid "Config File"
@@ -855,7 +855,8 @@ msgid ""
 "Config files store benchmark parameters but **not** environment-specific "
 "values like engine URL or LMCache URL. This lets you reuse the same "
 "config across different environments."
-msgstr "配置文件存储基准测试参数，但**不**存储特定于环境的值，例如引擎 URL 或 LMCache URL。这使您可以在不同环境中重用相同的配置。"
+msgstr ""
+"配置文件存储基准测试参数，但\\ **不**\\ 存储特定于环境的值（如引擎 URL 或 LMCache URL），以便同一份配置可在不同环境下复用。"
 
 #: ../../source/cli/bench.rst:554
 msgid "You can create a config file in three ways:"
@@ -875,7 +876,7 @@ msgstr "**``--export-config``** -- 从 CLI 解析并导出，而不运行。"
 msgid ""
 "**Manually** -- write JSON with keys matching CLI arg names (dashes "
 "replaced by underscores)."
-msgstr "**手动** -- 编写 JSON，键名与 CLI 参数名称匹配（用下划线替换破折号）。"
+msgstr "**手动编写** —— 编写 JSON，键名与 CLI 参数名称对应（将连字符替换为下划线）。"
 
 #: ../../source/cli/bench.rst:561
 msgid "Example config file:"
@@ -883,15 +884,15 @@ msgstr "示例配置文件："
 
 #: ../../source/cli/bench.rst:576
 msgid "Load it with ``--config`` (engine URL must be provided separately):"
-msgstr "使用 ``--config`` 加载它（引擎 URL 必须单独提供）："
+msgstr "通过 ``--config`` 加载该配置文件（引擎 URL 需单独提供）："
 
 #: ../../source/cli/bench.rst:583
 msgid ""
 "CLI arguments override config file values, so you can use a base config "
 "and tweak individual settings:"
-msgstr "CLI 参数会覆盖配置文件中的值，因此您可以使用基本配置并调整单个设置："
+msgstr "命令行参数会覆盖配置文件中的值，因此可以以基础配置为模板，按需调整个别设置："
 
-#: ../../source/cli/bench.rst:594
+#: ../../source/cli/bench.rst:594 ../../source/cli/bench.rst:859
 msgid "Output"
 msgstr "输出"
 
@@ -903,7 +904,7 @@ msgstr "终端（实时进度）"
 msgid ""
 "During the benchmark, a live progress display shows in-flight requests, "
 "average TTFT, decode speed, and throughput. Suppress it with ``-q``."
-msgstr "在基准测试期间，实时进度显示会显示正在进行的请求、平均 TTFT、解码速度和吞吐量。使用 ``-q`` 可以抑制它。"
+msgstr "基准测试运行期间，实时进度面板会展示在途请求数、平均 TTFT、解码速度和吞吐量。可通过 ``-q`` 禁止显示。"
 
 #: ../../source/cli/bench.rst:603
 msgid "Terminal (final summary)"
@@ -922,35 +923,35 @@ msgid ""
 "``bench_results.csv`` -- per-request metrics (TTFT, latency, decode "
 "speed, token counts). Written by default; skip with ``--no-csv``."
 msgstr ""
-"``bench_results.csv`` -- 每个请求的指标（TTFT、延迟、解码速度、令牌计数）。默认情况下写入；使用 ``--no-"
+"``bench_results.csv`` —— 每个请求的指标（TTFT、延迟、解码速度、token 计数）。默认写入；可通过 ``--no-"
 "csv`` 跳过。"
 
 #: ../../source/cli/bench.rst:637
 msgid ""
 "``bench_summary.json`` -- aggregate statistics with percentiles and "
 "config metadata. Opt-in with ``--json``."
-msgstr "``bench_summary.json`` -- 聚合统计数据，包括百分位数和配置元数据。通过 ``--json`` 选项启用。"
+msgstr "``bench_summary.json`` —— 聚合统计数据，包含百分位数和配置元数据。通过 ``--json`` 选项启用。"
 
 #: ../../source/cli/bench.rst:640
 msgid "Both files are written to ``--output-dir`` (default: current directory)."
-msgstr "两个文件都写入到 ``--output-dir``（默认：当前目录）。"
+msgstr "两个文件均写入 ``--output-dir`` 指定的目录（默认：当前目录）。"
 
 #: ../../source/cli/bench.rst:644
 msgid "Exit Codes"
 msgstr "退出代码"
 
-#: ../../source/cli/bench.rst:650 ../../source/cli/bench.rst:871
-#: ../../source/cli/bench.rst:1222
+#: ../../source/cli/bench.rst:650 ../../source/cli/bench.rst:948
+#: ../../source/cli/bench.rst:1299
 msgid "Code"
 msgstr "代码"
 
-#: ../../source/cli/bench.rst:651 ../../source/cli/bench.rst:872
-#: ../../source/cli/bench.rst:1223
+#: ../../source/cli/bench.rst:651 ../../source/cli/bench.rst:949
+#: ../../source/cli/bench.rst:1300
 msgid "Meaning"
 msgstr "含义"
 
 #: ../../source/cli/bench.rst:652 ../../source/cli/bench.rst:766
-#: ../../source/cli/bench.rst:873 ../../source/cli/bench.rst:1224
+#: ../../source/cli/bench.rst:950 ../../source/cli/bench.rst:1301
 msgid "``0``"
 msgstr "``0``"
 
@@ -958,10 +959,10 @@ msgstr "``0``"
 msgid "All requests succeeded."
 msgstr "所有请求均成功。"
 
-#: ../../source/cli/bench.rst:654 ../../source/cli/bench.rst:876
-#: ../../source/cli/bench.rst:1050 ../../source/cli/bench.rst:1058
-#: ../../source/cli/bench.rst:1065 ../../source/cli/bench.rst:1068
-#: ../../source/cli/bench.rst:1227
+#: ../../source/cli/bench.rst:654 ../../source/cli/bench.rst:953
+#: ../../source/cli/bench.rst:1127 ../../source/cli/bench.rst:1135
+#: ../../source/cli/bench.rst:1142 ../../source/cli/bench.rst:1145
+#: ../../source/cli/bench.rst:1304
 msgid "``1``"
 msgstr "``1``"
 
@@ -971,7 +972,7 @@ msgstr "一个或多个请求失败。"
 
 #: ../../source/cli/bench.rst:661
 msgid "server"
-msgstr "服务器"
+msgstr "server"
 
 #: ../../source/cli/bench.rst:663
 msgid ""
@@ -981,8 +982,8 @@ msgid ""
 "synthetic requests, then optionally verifies per-chunk checksums through "
 "the HTTP API."
 msgstr ""
-"``lmcache bench server`` 命令是对 LMCache 多进程 (MP) 缓存服务器的端到端完整性测试。它通过 ZMQ "
-"连接到正在运行的服务器，并对一系列合成请求执行完整的 KV Cache 数据路径，然后可选地通过 HTTP API 验证每个块的校验和。"
+"``lmcache bench server`` 命令是针对 LMCache MP 模式（多进程）缓存服务器的端到端健全性测试。它通过 ZMQ "
+"连接至正在运行的服务器，对一系列合成请求执行完整的 KV Cache 数据路径，并可选地通过 HTTP API 验证每个块的校验和。"
 
 #: ../../source/cli/bench.rst:673
 msgid ""
@@ -992,30 +993,28 @@ msgid ""
 "device. It also requires the full ``lmcache`` install (not the "
 "lightweight ``lmcache-cli`` package)."
 msgstr ""
-"与 :ref:`lmcache bench engine <lmcache-bench-engine>` "
-"不同，此命令**不**需要推理引擎。它只需要一个正在运行的 LMCache MP 服务器 (ZMQ + HTTP)。GPU 模式还额外需要一个支持"
-" CUDA 的设备。它还需要完整的 ``lmcache`` 安装（而不是轻量级的 ``lmcache-cli`` 包）。"
+"与 :ref:`lmcache bench engine <lmcache-bench-engine>` 不同，此命令\\ **不**\\ 需要推理引擎，只需要一个正在运行的 LMCache MP 服务器（ZMQ + HTTP）。GPU 模式还额外需要支持 CUDA 的设备，同时需要完整安装 ``lmcache``\\ （而非轻量级的 ``lmcache-cli`` 包）。"
 
-#: ../../source/cli/bench.rst:681 ../../source/cli/bench.rst:903
+#: ../../source/cli/bench.rst:681 ../../source/cli/bench.rst:980
 msgid "What it does"
 msgstr "它的功能"
 
 #: ../../source/cli/bench.rst:683
 msgid "For each sequence in ``[--start, --end)``, the tool runs two passes:"
-msgstr "对于 ``[--start, --end)`` 中的每个序列，该工具运行两个阶段："
+msgstr "对于 ``[--start, --end)`` 范围内的每个序列，该工具执行两个阶段："
 
 #: ../../source/cli/bench.rst:685
 msgid ""
 "**Cold pass** -- ``LOOKUP`` is expected to miss, so the generated KV "
 "tensors are ``STORE``\\ d on the server."
-msgstr "**冷启动** -- ``LOOKUP`` 预计会未命中，因此生成的 KV 张量会被 ``STORE``\\\\ 存储在服务器上。"
+msgstr "**冷通道** —— ``LOOKUP`` 预计未命中，因此生成的 KV 张量将通过 ``STORE``\\\\ 写入服务器。"
 
 #: ../../source/cli/bench.rst:687
 msgid ""
 "**Warm pass** -- ``LOOKUP`` is expected to hit; the tool issues "
 "``RETRIEVE`` and compares the retrieved KV chunks' checksums to the "
 "originals."
-msgstr "**热通道** -- ``LOOKUP`` 预计会命中；工具发出 ``RETRIEVE`` 并将检索到的 KV 块的校验和与原始值进行比较。"
+msgstr "**热通道** —— ``LOOKUP`` 预计命中；工具发出 ``RETRIEVE`` 并将检索到的 KV 块校验和与原始值进行比对。"
 
 #: ../../source/cli/bench.rst:691
 msgid "The full RPC path exercised is::"
@@ -1028,10 +1027,10 @@ msgid ""
 "mismatch between producer and consumer surfaces as a loud ``CHECKSUM "
 "MISMATCH`` log line."
 msgstr ""
-"当 ``--url`` 指向服务器的 HTTP 端点时，逐块的校验和会额外与服务器端的计算进行交叉检查，因此生产者和消费者之间的不匹配会以显眼的 "
-"``CHECKSUM MISMATCH`` 日志行显示出来。"
+"当 ``--url`` 指向服务器的 HTTP 端点时，逐块校验和还会与服务器端的计算结果进行交叉核验，生产者与消费者之间的任何不一致都将以醒目的 "
+"``CHECKSUM MISMATCH`` 日志行呈现。"
 
-#: ../../source/cli/bench.rst:704 ../../source/cli/bench.rst:960
+#: ../../source/cli/bench.rst:704 ../../source/cli/bench.rst:1037
 msgid "Quick start"
 msgstr "快速开始"
 
@@ -1048,10 +1047,9 @@ msgid ""
 "By default the tool runs forever (``--end`` unset); stop it with "
 "``Ctrl-C`` at any time. Pass ``--end N`` for a bounded run."
 msgstr ""
-"默认情况下，该工具会一直运行（``--end`` 未设置）；您可以随时使用 ``Ctrl-C`` 停止它。传递 ``--end N`` "
-"以进行有限运行。"
+"默认情况下该工具会持续运行（\\ ``--end`` 未设置）；可随时使用 ``Ctrl-C`` 停止。传递 ``--end N`` 可限定运行次数。"
 
-#: ../../source/cli/bench.rst:728 ../../source/cli/bench.rst:1029
+#: ../../source/cli/bench.rst:728 ../../source/cli/bench.rst:1106
 msgid "Options"
 msgstr "选项"
 
@@ -1065,7 +1063,7 @@ msgstr "``tcp://localhost:5555``"
 
 #: ../../source/cli/bench.rst:739
 msgid "ZMQ endpoint of the MP cache server."
-msgstr "MP 缓存服务器的 ZMQ 端点。"
+msgstr "MP 模式缓存服务器的 ZMQ 端点。"
 
 #: ../../source/cli/bench.rst:740
 msgid "``--url URL``"
@@ -1079,7 +1077,7 @@ msgstr "``http://localhost:8080``"
 msgid ""
 "HTTP base URL of the server's checksum API. Used to verify per-chunk "
 "checksums end-to-end."
-msgstr "服务器的校验和 API 的 HTTP 基础 URL。用于端到端验证每个块的校验和。"
+msgstr "服务器校验和 API 的 HTTP 基础 URL，用于端到端逐块校验和验证。"
 
 #: ../../source/cli/bench.rst:744
 #, python-brace-format
@@ -1096,8 +1094,7 @@ msgid ""
 "path). ``cpu`` allocates POSIX-SHM-backed tensors and uses the data-"
 "transfer path (gather/scatter via slot descriptors)."
 msgstr ""
-"运行模式。``gpu`` 分配真实的 CUDA 张量并使用 CUDA IPC（句柄路径）。``cpu`` 分配基于 POSIX-SHM "
-"的张量并使用数据传输路径（通过槽描述符进行聚集/分散）。"
+"运行模式。\\ ``gpu`` 分配真实的 CUDA 张量并使用 CUDA IPC（句柄路径）；\\ ``cpu`` 分配基于 POSIX-SHM 的张量并使用数据传输路径（通过槽描述符进行 gather/scatter）。"
 
 #: ../../source/cli/bench.rst:749
 #, python-brace-format
@@ -1112,13 +1109,11 @@ msgstr "``auto``"
 msgid ""
 "Transport routing for STORE/RETRIEVE. ``handle`` forces the single-shot "
 "path (``REGISTER_KV_CACHE`` + ``STORE``/``RETRIEVE``). ``data`` forces "
-"the two-phase gather/scatter path (``REGISTER_KV_CACHE_NON_GPU_CONTEXT`` "
-"+ ``PREPARE``/``COMMIT``). ``auto`` maps gpu→handle and cpu→data."
+"the two-phase gather/scatter path "
+"(``REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT`` + ``PREPARE``/``COMMIT``). "
+"``auto`` maps gpu→handle and cpu→data."
 msgstr ""
-"STORE/RETRIEVE 的传输路由。``handle`` 强制执行单次路径 (``REGISTER_KV_CACHE`` + "
-"``STORE``/``RETRIEVE``)。``data`` 强制执行两阶段的收集/散布路径 "
-"(``REGISTER_KV_CACHE_NON_GPU_CONTEXT`` + ``PREPARE``/``COMMIT``)。``auto``"
-" 将 gpu 映射到 handle，将 cpu 映射到 data。"
+"STORE/RETRIEVE 的传输路由。\\ ``handle`` 强制使用单次路径（\\ ``REGISTER_KV_CACHE`` + ``STORE``/``RETRIEVE``\\ ）；\\ ``data`` 强制使用两阶段 gather/scatter 路径（\\ ``REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT`` + ``PREPARE``/``COMMIT``\\ ）；\\ ``auto`` 将 gpu 映射到 handle，cpu 映射到 data。"
 
 #: ../../source/cli/bench.rst:756
 msgid "``--num-tokens N``"
@@ -1130,7 +1125,7 @@ msgstr "``512``"
 
 #: ../../source/cli/bench.rst:758
 msgid "Tokens per synthetic request."
-msgstr "每个合成请求的令牌数。"
+msgstr "每个合成请求的 token 数。"
 
 #: ../../source/cli/bench.rst:759
 msgid "``--num-blocks N``"
@@ -1142,7 +1137,7 @@ msgstr "``1024``"
 
 #: ../../source/cli/bench.rst:761
 msgid "Number of paged blocks allocated on the GPU."
-msgstr "在 GPU 上分配的分页块数量。"
+msgstr "在 GPU 上分配的分页 KV 块数量。"
 
 #: ../../source/cli/bench.rst:762
 msgid "``--block-size N``"
@@ -1154,7 +1149,7 @@ msgstr "``16``"
 
 #: ../../source/cli/bench.rst:764
 msgid "Tokens per paged block."
-msgstr "每个分页块的令牌数。"
+msgstr "每个分页块的 token 数。"
 
 #: ../../source/cli/bench.rst:765
 msgid "``--start N``"
@@ -1168,8 +1163,9 @@ msgstr "运行的第一个序列号。"
 msgid "``--end N``"
 msgstr "``--end N``"
 
-#: ../../source/cli/bench.rst:769 ../../source/cli/bench.rst:1039
-#: ../../source/cli/bench.rst:1086
+#: ../../source/cli/bench.rst:769 ../../source/cli/bench.rst:783
+#: ../../source/cli/bench.rst:787 ../../source/cli/bench.rst:1116
+#: ../../source/cli/bench.rst:1163
 msgid "*(unset)*"
 msgstr "*(未设置)*"
 
@@ -1177,7 +1173,7 @@ msgstr "*(未设置)*"
 msgid ""
 "Exclusive upper bound on sequence numbers. When omitted the loop runs "
 "forever."
-msgstr "序列号的独占上限。当省略时，循环将无限运行。"
+msgstr "序列号的独占上限，省略时循环将无限运行。"
 
 #: ../../source/cli/bench.rst:772
 msgid "``--interval SECS``"
@@ -1203,124 +1199,193 @@ msgstr "``(2,1024,16,8,128):float16:32``"
 msgid "KV cache shape spec (see below)."
 msgstr "KV Cache 形状规格（见下文）。"
 
-#: ../../source/cli/bench.rst:781
+#: ../../source/cli/bench.rst:778
+msgid "``--format FORMAT``"
+msgstr "``--format FORMAT``"
+
+#: ../../source/cli/bench.rst:779
+msgid "``terminal``"
+msgstr "``terminal``"
+
+#: ../../source/cli/bench.rst:780
+msgid ""
+"Stdout output format for the final metrics summary. Available: "
+"``terminal``, ``json``."
+msgstr ""
+"最终指标摘要的标准输出格式。可用格式：\\ ``terminal``\\ 、\\ ``json``\\ 。"
+
+#: ../../source/cli/bench.rst:782
+msgid "``--output PATH``"
+msgstr "``--output PATH``"
+
+#: ../../source/cli/bench.rst:784
+msgid ""
+"Save the final metrics summary to a file at PATH (format chosen by "
+"``--format``)."
+msgstr "将最终的指标摘要保存到 PATH 指定的文件中（格式由 ``--format`` 选择）。"
+
+#: ../../source/cli/bench.rst:788
+msgid ""
+"Suppress all progress messages during the run. Only the final structured "
+"metrics summary is emitted (unless also redirected via ``--output``)."
+msgstr "在运行期间抑制所有进度消息。仅输出最终的结构化指标摘要（除非也通过 ``--output`` 重定向）。"
+
+#: ../../source/cli/bench.rst:794
 msgid "CPU mode (no GPU)"
 msgstr "CPU 模式（无 GPU）"
 
-#: ../../source/cli/bench.rst:783
+#: ../../source/cli/bench.rst:796
 msgid ""
 "``--mode cpu`` runs the same end-to-end path without a GPU. The server "
 "runs on a CPU-only host (``StubCPUDevice``); the bench tool allocates "
 "POSIX-SHM-backed KV tensors and exercises the full RPC path."
-msgstr "``--mode cpu`` 在没有 GPU 的情况下运行相同的端到端路径。服务器在仅有 CPU 的主机 (``StubCPUDevice``) 上运行；基准工具分配基于 POSIX-SHM 的 KV 张量并执行完整的 RPC 路径。"
+msgstr ""
+"``--mode cpu`` 在没有 GPU 的情况下运行相同的端到端路径。服务器在仅有 CPU 的主机 (``StubCPUDevice``) "
+"上运行；基准工具分配基于 POSIX-SHM 的 KV 张量并执行完整的 RPC 路径。"
 
-#: ../../source/cli/bench.rst:787
+#: ../../source/cli/bench.rst:800
 msgid ""
 "By default ``--mode cpu`` uses the data-transfer path (``auto`` → "
 "``cpu→data``). To use the zero-copy SHM handle path instead, pass "
 "``--transfer-mode handle``:"
-msgstr "默认情况下 ``--mode cpu`` 使用数据传输路径 (``auto`` → ``cpu→data``)。要改为使用零拷贝 SHM 句柄路径，请传递 ``--transfer-mode handle``："
+msgstr ""
+"默认情况下 ``--mode cpu`` 使用数据传输路径 (``auto`` → ``cpu→data``)。要改为使用零拷贝 SHM 句柄路径，请传递 ``--transfer-mode handle``\\ ："
 
-#: ../../source/cli/bench.rst:807
+#: ../../source/cli/bench.rst:820
 msgid "KV cache shape spec"
 msgstr "KV 缓存形状规格"
 
-#: ../../source/cli/bench.rst:809
+#: ../../source/cli/bench.rst:822
 msgid ""
 "The ``--kvcache-shape-spec`` flag describes how KV tensors are laid out "
 "on the GPU. A spec is one or more groups separated by ``;``:"
-msgstr "``--kvcache-shape-spec`` 标志描述了 KV 张量在 GPU 上的布局。规格是一个或多个用 ``;`` 分隔的组："
+msgstr "``--kvcache-shape-spec`` 参数描述 KV 张量在 GPU 上的布局，规格由一个或多个以 ``;`` 分隔的组构成："
 
-#: ../../source/cli/bench.rst:816
+#: ../../source/cli/bench.rst:829
 msgid "Fields:"
 msgstr "字段："
 
-#: ../../source/cli/bench.rst:818
+#: ../../source/cli/bench.rst:831
 msgid "``kv_size`` -- 2 for classical attention (separate K/V), 1 for MLA."
-msgstr "``kv_size`` -- 经典注意力（分开的 K/V）为 2，MLA 为 1。"
+msgstr "``kv_size`` —— 经典注意力机制（独立 K/V）为 2，MLA 为 1。"
 
-#: ../../source/cli/bench.rst:819
+#: ../../source/cli/bench.rst:832
 msgid "``NB`` -- number of paged blocks."
-msgstr "``NB`` -- 页块数量。"
+msgstr "``NB`` —— 分页块数量。"
 
-#: ../../source/cli/bench.rst:820
+#: ../../source/cli/bench.rst:833
 msgid "``BS`` -- block size (tokens per block)."
-msgstr "``BS`` -- 块大小（每块的令牌数）。"
+msgstr "``BS`` —— 块大小（每块的 token 数）。"
 
-#: ../../source/cli/bench.rst:821
+#: ../../source/cli/bench.rst:834
 msgid "``NH`` -- number of attention heads per layer."
-msgstr "``NH`` -- 每层的注意力头数量。"
+msgstr "``NH`` —— 每层的注意力头数量。"
 
-#: ../../source/cli/bench.rst:822
+#: ../../source/cli/bench.rst:835
 msgid "``HS`` -- head size (in elements)."
-msgstr "``HS`` -- 头大小（以元素为单位）。"
+msgstr "``HS`` —— 注意力头大小（以元素为单位）。"
 
-#: ../../source/cli/bench.rst:823
+#: ../../source/cli/bench.rst:836
 msgid ""
 "``dtype`` -- element dtype (e.g. ``float16``, ``bfloat16``, ``float32``, "
 "``uint8``). The full set matches the keys of ``DTYPE_MAP`` in "
 "``lmcache/v1/kv_layer_groups.py``."
 msgstr ""
-"``dtype`` -- 元素数据类型（例如 "
-"``float16``、``bfloat16``、``float32``、``uint8``）。完整的集合与 "
-"``lmcache/v1/kv_layer_groups.py`` 中的 ``DTYPE_MAP`` 键匹配。"
+"``dtype`` —— 元素数据类型（例如 ``float16``\\ 、\\ ``bfloat16``\\ 、\\ ``float32``\\ 、\\ ``uint8``\\ ），完整集合与 ``lmcache/v1/kv_layer_groups.py`` 中 ``DTYPE_MAP`` 的键一致。"
 
-#: ../../source/cli/bench.rst:826
+#: ../../source/cli/bench.rst:839
 msgid "``layers`` -- number of layers in this group."
-msgstr "``layers`` -- 该组中的层数。"
+msgstr "``layers`` —— 该组包含的层数。"
 
-#: ../../source/cli/bench.rst:828
+#: ../../source/cli/bench.rst:841
 msgid ""
 "Multi-group specs let you model heterogeneous layers (for example, MLA "
 "layers + classical attention layers in the same model):"
-msgstr "多组规格允许您建模异构层（例如，在同一模型中结合 MLA 层和经典注意力层）："
+msgstr "多组规格支持对异构层建模（例如，同一模型中同时包含 MLA 层和经典注意力层）："
 
-#: ../../source/cli/bench.rst:837
+#: ../../source/cli/bench.rst:850
 msgid ""
 "All groups must share the same ``NB`` and ``BS`` (this is a physical "
 "constraint of paged KV). Layer counts across groups sum to the total "
 "layer count registered with the server."
-msgstr "所有组必须共享相同的 ``NB`` 和 ``BS``（这是分页 KV 的物理限制）。各组的层数总和等于注册到服务器的总层数。"
+msgstr ""
+"所有组必须共享相同的 ``NB`` 和 ``BS``\\ （这是分页 KV 的物理约束），各组层数之和等于向服务器注册的总层数。"
 
-#: ../../source/cli/bench.rst:841
+#: ../../source/cli/bench.rst:854
 msgid ""
 "See ``parse_kvcache_shape_spec`` in ``lmcache/v1/kv_layer_groups.py`` for"
 " the authoritative parsing rules and validation errors."
 msgstr ""
-"请参阅 ``parse_kvcache_shape_spec`` 在 ``lmcache/v1/kv_layer_groups.py`` "
-"中的权威解析规则和验证错误。"
+"完整的解析规则和验证错误说明请参阅 ``lmcache/v1/kv_layer_groups.py`` 中的 ``parse_kvcache_shape_spec``\\ 。"
 
-#: ../../source/cli/bench.rst:846 ../../source/cli/bench.rst:1117
-msgid "Example output"
-msgstr "示例输出"
+#: ../../source/cli/bench.rst:861
+msgid ""
+"After the run completes (or is interrupted with ``Ctrl-C``), a structured"
+" metrics summary is printed. The summary includes:"
+msgstr "运行完成后（或被 ``Ctrl-C`` 中断后），将打印结构化的指标摘要，内容包括："
 
-#: ../../source/cli/bench.rst:860
+#: ../../source/cli/bench.rst:864
+msgid ""
+"**Configuration** -- RPC URL, mode, transfer mode, tokens per request, "
+"interval."
+msgstr "**配置** —— RPC URL、模式、传输模式、每请求 token 数、间隔。"
+
+#: ../../source/cli/bench.rst:866
+msgid "**Results** -- total requests, checksum OK / FAIL counts, pass rate."
+msgstr "**结果** —— 总请求数、校验和 OK／FAIL 计数、通过率。"
+
+#: ../../source/cli/bench.rst:867
+msgid ""
+"**Latency sections** -- per-operation latency statistics (count, mean, "
+"min, max, p50, p99) for cold lookup, cold store, warm lookup, and warm "
+"retrieve."
+msgstr "**延迟部分** —— 每个操作的延迟统计信息（count、mean、min、max、p50、p99），涵盖冷查找、冷存储、热查找和热检索。"
+
+#: ../../source/cli/bench.rst:871
+msgid ""
+"Use ``--format json`` to get machine-readable output, or ``--output "
+"FILE`` to save the summary to a file."
+msgstr "使用 ``--format json`` 获取机器可读的输出，或使用 ``--output FILE`` 将摘要保存到文件中。"
+
+#: ../../source/cli/bench.rst:920
+msgid "Example output (progress)"
+msgstr "示例输出（进度）"
+
+#: ../../source/cli/bench.rst:922
+msgid ""
+"During the run, progress messages are printed to stdout (suppressed by "
+"``-q`` / ``--quiet``):"
+msgstr "运行期间，进度消息会打印到 stdout（可通过 ``-q`` / ``--quiet`` 禁止）："
+
+#: ../../source/cli/bench.rst:937
 msgid ""
 "Any ``CHECKSUM MISMATCH``, ``ERROR``, or Python traceback in the log "
 "indicates a real problem worth investigating."
-msgstr "日志中的任何 ``CHECKSUM MISMATCH``、``ERROR`` 或 Python 回溯都表明存在值得调查的实际问题。"
+msgstr ""
+"日志中出现任何 ``CHECKSUM MISMATCH``\\ 、\\ ``ERROR`` 或 Python 回溯，均表明存在值得调查的真实问题。"
 
-#: ../../source/cli/bench.rst:865 ../../source/cli/bench.rst:1216
+#: ../../source/cli/bench.rst:942 ../../source/cli/bench.rst:1293
 msgid "Exit codes"
 msgstr "退出代码"
 
-#: ../../source/cli/bench.rst:874
+#: ../../source/cli/bench.rst:951
 msgid ""
 "Test loop completed (or was interrupted cleanly with Ctrl-C) with no "
 "checksum mismatches."
-msgstr "测试循环完成（或通过 Ctrl-C 干净地中断），没有校验和不匹配。"
+msgstr "测试循环正常完成（或通过 Ctrl-C 干净中断），无校验和不匹配。"
 
-#: ../../source/cli/bench.rst:877
+#: ../../source/cli/bench.rst:954
 msgid ""
 "Fatal error (for example, CUDA unavailable in ``--mode gpu``, server "
 "unreachable, or a checksum mismatch)."
-msgstr "致命错误（例如，在 ``--mode gpu`` 中 CUDA 不可用、服务器无法访问或校验和不匹配）。"
+msgstr ""
+"致命错误（例如，\\ ``--mode gpu`` 时 CUDA 不可用、服务器无法访问或校验和不匹配）。"
 
-#: ../../source/cli/bench.rst:883
+#: ../../source/cli/bench.rst:960
 msgid "l2"
 msgstr "l2"
 
-#: ../../source/cli/bench.rst:885
+#: ../../source/cli/bench.rst:962
 msgid ""
 "The ``lmcache bench l2`` command benchmarks an L2 cache adapter (e.g. the"
 " local-filesystem adapter) end-to-end through the same "
@@ -1329,12 +1394,12 @@ msgid ""
 "tested without code changes: you describe the adapter with a single JSON "
 "spec and pick the operations to exercise."
 msgstr ""
-"``lmcache bench l2`` 命令通过 LMCache 在生产中使用的相同 "
+"``lmcache bench l2`` 命令通过与 LMCache 生产环境相同的 "
 "``parse_args_to_l2_adapters_config`` + ``create_l2_adapter`` 流水线，对 L2 "
-"缓存适配器（例如本地文件系统适配器）进行端到端基准测试。任何注册的适配器类型都可以在不更改代码的情况下进行测试：您只需用一个 JSON "
-"规范描述适配器，并选择要执行的操作。"
+"缓存适配器（例如本地文件系统适配器）进行端到端基准测试。任何已注册的适配器类型均可在无需修改代码的情况下进行测试：只需用一个 JSON "
+"规范描述该适配器，并选择要执行的操作即可。"
 
-#: ../../source/cli/bench.rst:896
+#: ../../source/cli/bench.rst:973
 msgid ""
 "Unlike :ref:`lmcache bench engine <lmcache-bench-engine>`, this command "
 "does **not** require an inference engine or an LMCache MP server. It only"
@@ -1342,37 +1407,35 @@ msgid ""
 "adapter, that simply means a writable directory)."
 msgstr ""
 "与 :ref:`lmcache bench engine <lmcache-bench-engine>` 不同，此命令 **不** 需要推理引擎或"
-" LMCache MP 服务器。它只需要适配器自身的后端存储可访问（对于 ``fs`` 适配器，这仅意味着一个可写的目录）。"
+" LMCache MP 服务器，只需适配器的后端存储可访问（对于 ``fs`` 适配器，只需一个可写目录）。"
 
-#: ../../source/cli/bench.rst:905
+#: ../../source/cli/bench.rst:982
 msgid ""
 "For each measured operation the tool drives the adapter directly via its "
 "public submit/wait API:"
-msgstr "对于每个测量的操作，该工具通过适配器的公共提交/等待 API 直接驱动适配器："
+msgstr "对于每个待测操作，该工具通过适配器的公共 submit/wait API 直接驱动适配器："
 
-#: ../../source/cli/bench.rst:908
+#: ../../source/cli/bench.rst:985
 msgid ""
 "``Store``  -- ``submit_store_task`` writes ``num_keys`` MemoryObjs per "
 "submit and waits for the store eventfd."
 msgstr ""
-"``Store``  -- ``submit_store_task`` 写入 ``num_keys`` 个 MemoryObjs "
-"每次提交，并等待存储 eventfd。"
+"``Store``  -- ``submit_store_task`` 每次提交写入 ``num_keys`` 个 MemoryObj，并等待存储 eventfd。"
 
-#: ../../source/cli/bench.rst:910
+#: ../../source/cli/bench.rst:987
 msgid ""
 "``Lookup`` -- ``submit_lookup_and_lock_task`` checks key existence (no "
 "payload transfer) and waits for the lookup eventfd."
-msgstr "``查找`` -- ``submit_lookup_and_lock_task`` 检查键的存在性（不传输有效负载）并等待查找 eventfd。"
+msgstr "``Lookup`` -- ``submit_lookup_and_lock_task`` 检查键是否存在（不传输负载），并等待查找 eventfd。"
 
-#: ../../source/cli/bench.rst:912
+#: ../../source/cli/bench.rst:989
 msgid ""
 "``Load``   -- ``submit_load_task`` reads ``num_keys`` MemoryObjs per "
 "submit and waits for the load eventfd."
 msgstr ""
-"``Load``   -- ``submit_load_task`` 读取 ``num_keys`` MemoryObjs 每次提交，并等待加载 "
-"eventfd。"
+"``Load``   -- ``submit_load_task`` 每次提交读取 ``num_keys`` 个 MemoryObj，并等待加载 eventfd。"
 
-#: ../../source/cli/bench.rst:915
+#: ../../source/cli/bench.rst:992
 msgid ""
 "Each measured **round** issues ``--in-flight`` submits sequentially from "
 "a single producer thread and then waits for all of them to complete; the "
@@ -1380,10 +1443,10 @@ msgid ""
 "last completion. Warmup rounds run before measurement and their results "
 "are discarded from the final summary."
 msgstr ""
-"每个测量的 **轮次** 从单个生产者线程顺序发出 ``--in-flight`` "
-"提交，然后等待所有提交完成；轮次持续时间是从第一次提交到最后一次完成的墙钟时间。热身轮次在测量之前运行，其结果会从最终摘要中丢弃。"
+"每个测量 **轮次** 从单个生产者线程顺序发出 ``--in-flight`` 次提交，然后等待全部完成；"
+"轮次持续时间为从第一次提交到最后一次完成的墙钟时间。预热轮次在测量前运行，其结果不计入最终摘要。"
 
-#: ../../source/cli/bench.rst:921
+#: ../../source/cli/bench.rst:998
 msgid ""
 "All three operations share the same key idx universe, so running ``--only"
 " store`` followed by ``--only load`` (or ``--only lookup``) with "
@@ -1391,11 +1454,9 @@ msgid ""
 "benchmark useful as a quick regression test for adapters that should "
 "support a clean store -> load round-trip."
 msgstr ""
-"这三种操作共享相同的键 idx 宇宙，因此运行 ``--only store`` 然后是 ``--only load``（或 ``--only "
-"lookup``）并使用相同的其他标志时，正好命中相同的键。这使得基准测试作为适配器的快速回归测试变得有用，适配器应该支持干净的存储 -> "
-"加载往返。"
+"三种操作共享相同的键索引空间，因此在其他参数不变的情况下先运行 ``--only store`` 再运行 ``--only load``\\ （或 ``--only lookup``\\ ）会访问完全相同的键。这使基准测试可作为适配器的快速回归测试，验证其是否支持完整的存储 -> 加载往返。"
 
-#: ../../source/cli/bench.rst:929
+#: ../../source/cli/bench.rst:1006
 msgid ""
 "When ``--only`` is not given, the three operations are run **in a single "
 "process in the order** ``store -> lookup -> load``. For adapters whose "
@@ -1405,83 +1466,80 @@ msgid ""
 "data that ``store`` just wrote still hot in RAM, and the reported numbers"
 " reflect page-cache throughput rather than the underlying device."
 msgstr ""
-"当未给出 ``--only`` 时，这三个操作将在 **单个进程中按顺序** 执行 ``store -> lookup -> "
-"load``。对于其后端存储位于操作系统级缓存之后的适配器——尤其是本地文件系统（``fs``）适配器，它受 Linux **页面缓存** "
-"的影响——这意味着 ``lookup`` 和 ``load`` 几乎总是会观察到 ``store`` 刚刚写入的数据仍然在 RAM "
-"中热存储，报告的数字反映的是页面缓存的吞吐量，而不是底层设备的吞吐量。"
+"若未指定 ``--only``\\ ，三个操作将在 **单个进程中按顺序** 执行：\\ ``store -> lookup -> load``\\ 。对于后端存储位于操作系统级缓存之后的适配器——尤其是受 Linux **页面缓存** 影响的本地文件系统（\\ ``fs``\\ ）适配器——``lookup`` 和 ``load`` 几乎总能观察到 ``store`` 刚写入的数据仍驻留在 RAM 中，因此上报数字反映的是页面缓存吞吐量而非底层设备吞吐量。"
 
-#: ../../source/cli/bench.rst:938
+#: ../../source/cli/bench.rst:1015
 msgid ""
 "To benchmark each operation against a cold cache, run them separately "
 "with ``--only`` and drop the OS caches in between, for example::"
-msgstr "要对每个操作在冷缓存下进行基准测试，请使用 ``--only`` 单独运行它们，并在之间清除操作系统缓存，例如::"
+msgstr "若要在冷缓存条件下对各操作分别进行基准测试，请使用 ``--only`` 单独运行，并在两次运行之间清除操作系统缓存，例如::"
 
-#: ../../source/cli/bench.rst:948
+#: ../../source/cli/bench.rst:1025
 msgid ""
 "For adapters that bypass the page cache (e.g. ``fs`` with "
 "``\"use_odirect\": true``) or that talk to a remote service without a "
 "local cache, the default combined run is usually fine."
 msgstr ""
-"对于绕过页面缓存的适配器（例如，使用 ``\"use_odirect\": true`` 的 "
-"``fs``）或与没有本地缓存的远程服务通信的适配器，默认的组合运行通常是可以的。"
+"对于绕过页面缓存的适配器（例如设置了 ``\"use_odirect\": true`` 的 "
+"``fs`` 适配器）或与无本地缓存的远程服务通信的适配器，直接使用默认的组合运行即可。"
 
-#: ../../source/cli/bench.rst:952
+#: ../../source/cli/bench.rst:1029
 msgid ""
 "O_DIRECT adapters may also require the benchmark L1 buffer to satisfy the"
 " adapter's block alignment. Use ``--l1-align-bytes`` to set that "
 "alignment, commonly ``4096`` for local block devices. The payload size "
 "(``--data-size-kb * 1024``) must be a multiple of the selected alignment."
-msgstr "O_DIRECT 适配器可能还需要基准测试 L1 缓冲区以满足适配器的块对齐。使用 ``--l1-align-bytes`` 设置该对齐，通常对于本地块设备为 ``4096``。有效负载大小 (``--data-size-kb * 1024``) 必须是所选对齐的倍数。"
+msgstr ""
+"O_DIRECT 适配器可能还要求基准测试的 L1 缓冲区满足适配器的块对齐要求。可通过 ``--l1-align-bytes`` 设置对齐值，本地块设备通常为 ``4096``\\ 。负载大小（\\ ``--data-size-kb * 1024``\\ ）必须是该对齐值的整数倍。"
 
-#: ../../source/cli/bench.rst:962
+#: ../../source/cli/bench.rst:1039
 msgid "Benchmark the local filesystem adapter with default parameters:"
 msgstr "使用默认参数对本地文件系统适配器进行基准测试："
 
-#: ../../source/cli/bench.rst:969
+#: ../../source/cli/bench.rst:1046
 msgid ""
 "This runs all three operations (store, lookup, load) with one warmup "
 "round and one measurement round."
-msgstr "这将运行所有三个操作（存储、查找、加载），并进行一次预热轮次和一次测量轮次。"
+msgstr "将运行全部三个操作（store、lookup、load），包括一次预热轮次和一次测量轮次。"
 
-#: ../../source/cli/bench.rst:972
+#: ../../source/cli/bench.rst:1049
 msgid "Stress the adapter with more in-flight submits and larger payloads:"
-msgstr "对适配器施加更多的并发提交和更大的负载："
+msgstr "使用更多并发提交和更大负载对适配器施压："
 
-#: ../../source/cli/bench.rst:982
+#: ../../source/cli/bench.rst:1059
 msgid "Benchmark an O_DIRECT adapter with aligned L1 buffers:"
-msgstr "对齐 L1 缓冲区的 O_DIRECT 适配器进行基准测试："
+msgstr "对使用对齐 L1 缓冲区的 O_DIRECT 适配器进行基准测试："
 
-#: ../../source/cli/bench.rst:991
+#: ../../source/cli/bench.rst:1068
 msgid "Run only one operation (useful to isolate store vs. load throughput):"
-msgstr "仅运行一个操作（有助于隔离存储与加载的吞吐量）："
+msgstr "仅运行单个操作（用于单独测量 store 与 load 的吞吐量）："
 
-#: ../../source/cli/bench.rst:999
+#: ../../source/cli/bench.rst:1076
 msgid ""
 "Lookup with a controlled hit rate (the benchmark splits the lookup keys "
 "between a potentially-existing range and a guaranteed-non-existent "
 "range):"
-msgstr "使用受控命中率的查找（基准测试将查找键分为一个潜在存在的范围和一个保证不存在的范围）："
+msgstr "使用受控命中率执行查找（基准测试将查找键拆分为可能存在的范围和保证不存在的范围）："
 
-#: ../../source/cli/bench.rst:1009
+#: ../../source/cli/bench.rst:1086
 msgid ""
 "Enable a store -> load round-trip data integrity check on the last "
 "measured round:"
-msgstr "在最后一次测量的轮次上启用存储 -> 加载往返数据完整性检查："
+msgstr "在最后一轮测量中启用 store -> load 往返数据完整性校验："
 
-#: ../../source/cli/bench.rst:1018
+#: ../../source/cli/bench.rst:1095
 msgid ""
 "If you prefer to keep the JSON spec out of the command line, set the "
 "``L2_ADAPTER_JSON`` environment variable instead of passing "
 "``--l2-adapter``:"
 msgstr ""
-"如果您希望将 JSON 规范保留在命令行之外，请设置 ``L2_ADAPTER_JSON`` 环境变量，而不是传递 "
-"``--l2-adapter``："
+"如果希望不在命令行中暴露 JSON 规范，可设置 ``L2_ADAPTER_JSON`` 环境变量，而无需传递 ``--l2-adapter``\\ ："
 
-#: ../../source/cli/bench.rst:1038
+#: ../../source/cli/bench.rst:1115
 msgid "``--l2-adapter JSON``"
 msgstr "``--l2-adapter JSON``"
 
-#: ../../source/cli/bench.rst:1040
+#: ../../source/cli/bench.rst:1117
 #, python-brace-format
 msgid ""
 "L2 adapter spec as JSON with a ``\"type\"`` field plus adapter-specific "
@@ -1490,81 +1548,80 @@ msgid ""
 "provided, falls back to the ``L2_ADAPTER_JSON`` environment variable. "
 "Either the flag or the env var is **required**."
 msgstr ""
-"L2 适配器规范以 JSON 格式提供，包含 ``\"type\"`` 字段和适配器特定的配置，例如 "
-"``'{\\\"type\\\":\\\"fs\\\",\\\"base_path\\\":\\\"/tmp/bench\\\"}'``。可以多次传递；只有第一个规范会被基准测试。如果未提供，则回退到"
-" ``L2_ADAPTER_JSON`` 环境变量。标志或环境变量 **必需**。"
+"L2 适配器规范，以 JSON 格式提供，包含 ``\"type\"`` 字段及适配器专项配置，例如 ``'{\\\"type\\\":\\\"fs\\\",\\\"base_path\\\":\\\"/tmp/bench\\\"}'``\\ 。可多次传递；仅对第一个规范进行基准测试。若未提供，则退回到 ``L2_ADAPTER_JSON`` 环境变量。该参数或环境变量二者之一 **必须** 指定。"
 
-#: ../../source/cli/bench.rst:1046
+#: ../../source/cli/bench.rst:1123
 msgid "``--num-keys N``"
 msgstr "``--num-keys N``"
 
-#: ../../source/cli/bench.rst:1047
+#: ../../source/cli/bench.rst:1124
 msgid "``32``"
 msgstr "``32``"
 
-#: ../../source/cli/bench.rst:1048
+#: ../../source/cli/bench.rst:1125
 msgid "Number of keys per submit."
-msgstr "每次提交的键数量。"
+msgstr "每次提交的键数。"
 
-#: ../../source/cli/bench.rst:1049
+#: ../../source/cli/bench.rst:1126
 msgid "``--in-flight N``"
 msgstr "``--in-flight N``"
 
-#: ../../source/cli/bench.rst:1051
+#: ../../source/cli/bench.rst:1128
 msgid ""
 "In-flight submits per round. Each round issues this many submits "
 "sequentially from a single producer thread, then waits for all of them."
-msgstr "每轮的在途提交数量。每轮从单个生产者线程顺序发出这么多提交，然后等待所有提交完成。"
+msgstr "每轮的在途提交数。每轮从单个生产者线程按序发出指定数量的提交，然后等待全部完成。"
 
-#: ../../source/cli/bench.rst:1054
+#: ../../source/cli/bench.rst:1131
 msgid "``--data-size-kb N``"
 msgstr "``--data-size-kb N``"
 
-#: ../../source/cli/bench.rst:1055
+#: ../../source/cli/bench.rst:1132
 msgid "``256``"
 msgstr "``256``"
 
-#: ../../source/cli/bench.rst:1056
+#: ../../source/cli/bench.rst:1133
 msgid "Data size per key, in KiB."
-msgstr "每个键的数据大小，以 KiB 为单位。"
+msgstr "每个键的数据大小，单位为 KiB。"
 
-#: ../../source/cli/bench.rst:1057
+#: ../../source/cli/bench.rst:1134
 msgid "``--l1-align-bytes N``"
 msgstr "``--l1-align-bytes N``"
 
-#: ../../source/cli/bench.rst:1059
+#: ../../source/cli/bench.rst:1136
 msgid ""
 "Alignment in bytes for benchmark L1 buffers. Use a value at least as "
 "large as the adapter's block alignment when benchmarking O_DIRECT "
 "backends, for example ``4096`` for local block devices. ``--data-size-kb "
 "* 1024`` must be a multiple of this value."
-msgstr "基准测试 L1 缓冲区的对齐字节数。在基准测试 O_DIRECT 后端时，使用至少与适配器的块对齐相同的值，例如本地块设备的 ``4096``。``--data-size-kb * 1024`` 必须是该值的倍数。"
+msgstr ""
+"基准测试 L1 缓冲区的对齐字节数。测试 O_DIRECT 后端时，该值应不小于适配器的块对齐要求，本地块设备通常为 ``4096``\\ 。\\ ``--data-size-kb * 1024`` 必须是该值的整数倍。"
 
-#: ../../source/cli/bench.rst:1064
+#: ../../source/cli/bench.rst:1141
 msgid "``--rounds N``"
 msgstr "``--rounds N``"
 
-#: ../../source/cli/bench.rst:1066
+#: ../../source/cli/bench.rst:1143
 msgid "Measurement rounds per operation."
-msgstr "每次操作的测量轮数。"
+msgstr "每个操作的测量轮数。"
 
-#: ../../source/cli/bench.rst:1067
+#: ../../source/cli/bench.rst:1144
 msgid "``--warmup-rounds N``"
 msgstr "``--warmup-rounds N``"
 
-#: ../../source/cli/bench.rst:1069
+#: ../../source/cli/bench.rst:1146
 msgid "Warmup rounds run before measurement; their results are discarded."
-msgstr "在测量之前运行的预热轮次；它们的结果会被丢弃。"
+msgstr "在测量前运行的预热轮次，其结果不计入统计。"
 
-#: ../../source/cli/bench.rst:1071
+#: ../../source/cli/bench.rst:1148
 msgid "``--lookup-max-hit-rate F``"
 msgstr "``--lookup-max-hit-rate F``"
 
-#: ../../source/cli/bench.rst:1072
+#: ../../source/cli/bench.rst:1149
 msgid "``0.0``"
 msgstr "``0.0``"
 
-#: ../../source/cli/bench.rst:1073
+#: ../../source/cli/bench.rst:1150
 msgid ""
 "Upper bound on the lookup hit rate, in ``[0, 1]``. The benchmark requests"
 " ``floor(N * rate)`` keys from the potentially-existing range and ``N - "
@@ -1572,42 +1629,40 @@ msgid ""
 " number of lookup keys. The actual hit rate may be lower if those keys "
 "were never stored in this run."
 msgstr ""
-"查找命中率的上限，范围在 ``[0, 1]`` 之间。基准测试请求 ``floor(N * rate)`` 个来自潜在存在范围的键，以及 ``N "
-"- hit`` 个来自保证不存在范围的键，其中 ``N`` 是查找键的总数。如果这些键在此运行中从未存储，则实际命中率可能会更低。"
+"查找命中率的上限，范围为 ``[0, 1]``\\ 。基准测试请求 ``floor(N * rate)`` 个来自可能存在范围的键，以及 ``N - hit`` 个来自保证不存在范围的键，其中 ``N`` 为查找键总数。若这些键在本次运行中从未被存储过，则实际命中率可能更低。"
 
-#: ../../source/cli/bench.rst:1079
+#: ../../source/cli/bench.rst:1156
 msgid "``--skip-verify`` / ``--no-skip-verify``"
 msgstr "``--skip-verify`` / ``--no-skip-verify``"
 
-#: ../../source/cli/bench.rst:1080
+#: ../../source/cli/bench.rst:1157
 msgid "``--skip-verify``"
 msgstr "``--skip-verify``"
 
-#: ../../source/cli/bench.rst:1081
+#: ../../source/cli/bench.rst:1158
 msgid ""
 "Skip the store -> load round-trip data integrity check (the default). "
 "Pass ``--no-skip-verify`` to enable verification on the last measured "
 "round; this requires both ``store`` and ``load`` to be exercised."
 msgstr ""
-"跳过存储 -> 加载往返数据完整性检查（默认）。传递 ``--no-skip-verify`` 以在最后一次测量的轮次上启用验证；这要求同时执行 "
-"``store`` 和 ``load``。"
+"跳过 store -> load 往返数据完整性检查（默认行为）。传递 ``--no-skip-verify`` 可在最后一轮测量中启用校验，此时要求同时执行 ``store`` 和 ``load``\\ 。"
 
-#: ../../source/cli/bench.rst:1085
+#: ../../source/cli/bench.rst:1162
 #, python-brace-format
 msgid "``--only {lookup,store,load}``"
-msgstr "``--仅 {查找,存储,加载}``"
+msgstr "``--only {lookup,store,load}``"
 
-#: ../../source/cli/bench.rst:1087
+#: ../../source/cli/bench.rst:1164
 msgid ""
 "Run only the specified operation. When omitted, all three operations are "
 "run in the order ``store -> lookup -> load``."
-msgstr "仅运行指定的操作。省略时，将按顺序运行所有三个操作 ``store -> lookup -> load``。"
+msgstr "仅运行指定操作。省略时，按 ``store -> lookup -> load`` 顺序运行全部三个操作。"
 
-#: ../../source/cli/bench.rst:1092
+#: ../../source/cli/bench.rst:1169
 msgid "Adapter JSON spec"
 msgstr "适配器 JSON 规范"
 
-#: ../../source/cli/bench.rst:1094
+#: ../../source/cli/bench.rst:1171
 msgid ""
 "The ``--l2-adapter`` JSON is parsed by "
 "``lmcache.v1.distributed.l2_adapters.config.parse_args_to_l2_adapters_config``,"
@@ -1615,64 +1670,66 @@ msgid ""
 "field is ``type``; all remaining fields are forwarded to the adapter "
 "implementation as keyword arguments."
 msgstr ""
-"``--l2-adapter`` JSON 由 "
-"``lmcache.v1.distributed.l2_adapters.config.parse_args_to_l2_adapters_config``"
-" 解析，这是 LMCache 在其他地方使用的相同入口点。最小必需字段是 ``type``；所有剩余字段作为关键字参数转发给适配器实现。"
+"``--l2-adapter`` JSON 由 ``lmcache.v1.distributed.l2_adapters.config.parse_args_to_l2_adapters_config`` 解析，这也是 LMCache 在其他地方使用的同一入口点。最小必填字段为 ``type``\\ ，其余字段均以关键字参数形式转发给适配器实现。"
 
-#: ../../source/cli/bench.rst:1100
+#: ../../source/cli/bench.rst:1177
 msgid "Example for the local-filesystem adapter:"
 msgstr "本地文件系统适配器示例："
 
-#: ../../source/cli/bench.rst:1112
+#: ../../source/cli/bench.rst:1189
 msgid ""
 "See the source under ``lmcache/v1/distributed/l2_adapters/`` for the full"
 " list of adapter types and their accepted fields."
-msgstr "请参阅 ``lmcache/v1/distributed/l2_adapters/`` 下的源代码，以获取适配器类型及其接受字段的完整列表。"
+msgstr "适配器类型及其支持字段的完整列表，请参阅 ``lmcache/v1/distributed/l2_adapters/`` 目录下的源代码。"
 
-#: ../../source/cli/bench.rst:1119
+#: ../../source/cli/bench.rst:1194
+msgid "Example output"
+msgstr "示例输出"
+
+#: ../../source/cli/bench.rst:1196
 msgid "Per-round progress (suppressed by ``-q``):"
-msgstr "每轮进度（通过 ``-q`` 被抑制）："
+msgstr "每轮进度（可通过 ``-q`` 禁止）："
 
-#: ../../source/cli/bench.rst:1152
+#: ../../source/cli/bench.rst:1229
 msgid "Final summary (one section per exercised operation):"
-msgstr "最终总结（每个操作一个部分）："
+msgstr "最终摘要（每个操作对应一个部分）："
 
-#: ../../source/cli/bench.rst:1182
+#: ../../source/cli/bench.rst:1259
 msgid ""
 "Each operation section reports per-round duration statistics (avg / min /"
 " max / p50 / p99 / std), aggregate throughput (``avg_throughput_mbps`` --"
 " 0 for ``Lookup`` since it has no payload), average key-rate "
 "(``avg_ops_per_sec``), and a per-key latency."
 msgstr ""
-"每个操作部分报告每轮持续时间统计（平均 / 最小 / 最大 / p50 / p99 / "
-"标准差）、汇总吞吐量（``avg_throughput_mbps`` -- "
-"对于``Lookup``来说为0，因为它没有有效负载）、平均键速率（``avg_ops_per_sec``）以及每个键的延迟。"
+"每个操作部分报告每轮持续时间统计（avg / min / max / p50 / p99 / std）、汇总吞吐量（\\ ``avg_throughput_mbps``\\ ，\\ ``Lookup`` 为 0，因其无负载传输）、平均键速率（\\ ``avg_ops_per_sec``\\ ）及每键延迟。"
 
-#: ../../source/cli/bench.rst:1187
+#: ../../source/cli/bench.rst:1264
 msgid ""
 "For ``Lookup``, three additional fields are reported when ``--lookup-max-"
 "hit-rate`` is non-zero or some keys were found:"
-msgstr "对于 ``Lookup``，当 ``--lookup-max-hit-rate`` 非零或找到了一些键时，会报告三个额外字段："
+msgstr ""
+"对于 ``Lookup``\\ ，当 ``--lookup-max-hit-rate`` 非零或存在命中键时，还会上报以下三个额外字段："
 
-#: ../../source/cli/bench.rst:1190
+#: ../../source/cli/bench.rst:1267
 msgid "``Expected max hit rate`` -- the configured upper bound."
-msgstr "``预期最大命中率`` -- 配置的上限。"
+msgstr "``Expected max hit rate`` —— 已配置的命中率上限。"
 
-#: ../../source/cli/bench.rst:1191
+#: ../../source/cli/bench.rst:1268
 msgid ""
 "``Expected hit keys`` -- ``floor(total_keys * rate)``, scaled for the "
 "measured rounds only."
-msgstr "``期望命中键`` -- ``floor(total_keys * rate)``, 仅针对测量的轮次进行缩放。"
+msgstr ""
+"``Expected hit keys`` —— ``floor(total_keys * rate)``\\ ，仅对测量轮次进行缩放。"
 
-#: ../../source/cli/bench.rst:1193
+#: ../../source/cli/bench.rst:1270
 msgid "``Actual hit rate`` -- the measured hit rate over the kept rounds."
-msgstr "``实际命中率`` -- 在保留的轮次中测量的命中率。"
+msgstr "``Actual hit rate`` —— 在有效测量轮次中实测的命中率。"
 
-#: ../../source/cli/bench.rst:1197
+#: ../../source/cli/bench.rst:1274
 msgid "Round-trip verification"
 msgstr "往返验证"
 
-#: ../../source/cli/bench.rst:1199
+#: ../../source/cli/bench.rst:1276
 msgid ""
 "When ``--no-skip-verify`` is passed and both ``store`` and ``load`` were "
 "run, the benchmark compares the load buffers from the last measured round"
@@ -1680,39 +1737,36 @@ msgid ""
 "``make_memory_objects`` in "
 "``lmcache/cli/commands/bench/l2_adapter_bench/data.py``):"
 msgstr ""
-"当传递 ``--no-skip-verify`` 并且同时运行了 ``store`` 和 ``load`` "
-"时，基准测试将最后测量轮次的加载缓冲区与 ``store`` 写入的字节模式进行比较（请参见 "
-"``lmcache/cli/commands/bench/l2_adapter_bench/data.py`` 中的 "
-"``make_memory_objects``）："
+"当传递 ``--no-skip-verify`` 且同时运行了 ``store`` 和 ``load`` 时，基准测试会将最后一轮测量的加载缓冲区与 ``store`` 写入的字节模式进行比对（参见 ``lmcache/cli/commands/bench/l2_adapter_bench/data.py`` 中的 ``make_memory_objects``\\ ）："
 
-#: ../../source/cli/bench.rst:1210
+#: ../../source/cli/bench.rst:1287
 msgid ""
 "Verification is **off** by default because the stricter byte pattern "
 "requires both the store and load object batches to stay resident so the "
 "loaded data can be compared against the original store pattern."
-msgstr "默认情况下，验证是 **关闭** 的，因为更严格的字节模式要求存储和加载对象批次保持常驻，以便加载的数据可以与原始存储模式进行比较。"
+msgstr "默认情况下，验证是 **关闭** 的，因为更严格的字节模式要求存储和加载对象批次均保持常驻内存，以便将加载的数据与原始存储模式进行比对。"
 
-#: ../../source/cli/bench.rst:1225
+#: ../../source/cli/bench.rst:1302
 msgid ""
 "All requested operations completed and (when enabled) the round-trip "
 "verification passed."
-msgstr "所有请求的操作已完成，并且（在启用时）往返验证通过。"
+msgstr "所有请求操作均已完成，且（在启用时）往返验证通过。"
 
-#: ../../source/cli/bench.rst:1228
+#: ../../source/cli/bench.rst:1305
 msgid ""
 "Adapter creation failed, round-trip verification failed, or an operation "
 "hit a fatal error (e.g. all rounds timed out)."
-msgstr "适配器创建失败，往返验证失败，或某个操作遇到致命错误（例如，所有轮次超时）。"
+msgstr "适配器创建失败、往返验证失败，或某个操作遭遇致命错误（例如所有轮次均超时）。"
 
-#: ../../source/cli/bench.rst:1230
+#: ../../source/cli/bench.rst:1307
 msgid "``2``"
 msgstr "``2``"
 
-#: ../../source/cli/bench.rst:1231
+#: ../../source/cli/bench.rst:1308
 msgid ""
 "The ``--l2-adapter`` JSON / ``L2_ADAPTER_JSON`` env var was missing or "
 "could not be parsed."
-msgstr "缺少或无法解析 ``--l2-adapter`` JSON / ``L2_ADAPTER_JSON`` 环境变量。"
+msgstr "``--l2-adapter`` JSON 或 ``L2_ADAPTER_JSON`` 环境变量缺失或无法解析。"
 
 #~ msgid ""
 #~ "Run mode. Only ``gpu`` is supported "

@@ -47,14 +47,17 @@ def mock_gpu_ctx():
     type(ctx).block_size = PropertyMock(return_value=4)
     # KV tensors are built as [2, NB, BS, NH, HS] -> NL_X_TWO_NB_BS_NH_HS.
     ctx.engine_kv_format_ = lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+    type(ctx).engine_kv_format = PropertyMock(
+        return_value=lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+    )
     return ctx
 
 
 @pytest.fixture
 def mock_engine(mock_gpu_ctx):
-    """Create a mock engine with gpu_contexts."""
+    """Create a mock engine with cache_contexts."""
     engine = MagicMock()
-    engine.gpu_contexts = {0: mock_gpu_ctx}
+    engine.cache_contexts = {0: mock_gpu_ctx}
     return engine
 
 
@@ -136,9 +139,9 @@ class TestKVCacheCheckEndpoint:
         resp = client_no_engine.get("/kvcache/check?block_ids=0&chunk_size=1")
         assert resp.status_code == 503
 
-    def test_no_gpu_contexts(self, client_with_engine, mock_engine):
-        """501 when engine has no gpu_contexts attribute."""
-        mock_engine.gpu_contexts = None
+    def test_no_cache_contexts(self, client_with_engine, mock_engine):
+        """501 when engine has no cache_contexts attribute."""
+        mock_engine.cache_contexts = None
         resp = client_with_engine.get("/kvcache/check?block_ids=0&chunk_size=1")
         assert resp.status_code == 501
 

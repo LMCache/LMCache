@@ -93,14 +93,15 @@ Engine and Modules
 All server entry points share the same ``MPCacheServer`` and
 ``StorageManager`` core. ``MPCacheServer`` is now a thin compositor:
 it holds an ``MPCacheServerContext`` and a list of ``EngineModule``
-instances assembled by ``build_engine_modules()`` (in ``server.py``)
+instances assembled by ``_build_modules()`` (in ``server.py``)
 based on ``--engine-type`` and ``--supported-transfer-mode``.
 
 **``server.py``** -- The default ZMQ-only server.  Creates an
 ``MPCacheServer``, assembles the engine modules
-(``LookupModule`` + ``ManagementModule`` + ``GPUTransferModule``
-and/or ``NonGPUTransferModule`` depending on
-``--supported-transfer-mode`` — ``gpu`` or ``non_gpu`` loads just one,
+(``LookupModule`` + ``ManagementModule`` + ``LMCacheDrivenTransferModule``
+and/or ``EngineDrivenTransferModule`` depending on
+``--supported-transfer-mode`` — ``lmcache_driven`` or ``engine_driven`` loads
+just one,
 ``auto`` (default) loads both — plus a CacheBlend module when
 ``--engine-type`` is set: ``blend`` appends ``BlendV3Module`` (the
 current paged-aware implementation), and ``blend_legacy`` appends
@@ -120,12 +121,14 @@ paragraphs. Selected by passing ``--engine-type blend_legacy`` to
 paged-aware CacheBlend V3 pipeline that runs on the sparse-prefetch
 path. Adds the V3 RPCs (``CB_REGISTER_ROPE_V3``,
 ``CB_UNREGISTER_ROPE_V3``, ``CB_RETRIEVE_PRE_COMPUTED_V3``,
-``CB_UNIFIED_LOOKUP``) and reuses the existing ``GPUTransferModule``
-and ``LookupModule``. Selected by passing ``--engine-type blend`` to
+``CB_UNIFIED_LOOKUP``) and reuses the existing
+``LMCacheDrivenTransferModule`` and ``LookupModule``. Selected by
+passing ``--engine-type blend`` to
 ``lmcache server``.
 
-Both blend variants require ``--supported-transfer-mode`` to be ``gpu``
-or ``auto`` and will refuse to load when it is ``non_gpu``.
+Both blend variants require ``--supported-transfer-mode`` to be
+``lmcache_driven`` or ``auto`` and will refuse to load when it is
+``engine_driven``.
 
 **``http_server.py``** -- Wraps ``run_cache_server()`` (from ``server.py``)
 inside a FastAPI application.  Endpoints are contributed by modules under
@@ -156,46 +159,47 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
    * - ``UNREGISTER_KV_CACHE``
      - SYNC
      - Unregister KV cache tensors.
-   * - ``REGISTER_KV_CACHE_NON_GPU_CONTEXT``
+   * - ``REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT``
      - SYNC
-     - Register a non-GPU KV cache context (CPU/accelerator workers using
-       the PREPARE/COMMIT transfer path). Loaded only when
-       ``--supported-transfer-mode`` is ``non_gpu`` or ``auto``. Returns a
-       ``RegisterNonGpuContextResponse`` carrying the SHM segment name and
-       pool size when the SHM path is in use (empty for the pickle path).
-   * - ``UNREGISTER_KV_CACHE_NON_GPU_CONTEXT``
+     - Register an engine-driven KV cache context (CPU/accelerator
+       workers using the PREPARE/COMMIT transfer path). Loaded only when
+       ``--supported-transfer-mode`` is ``engine_driven`` or ``auto``.
+       Returns a ``RegisterEngineDrivenContextResponse`` carrying the
+       SHM segment name and pool size when the SHM path is in use
+       (empty for the pickle path).
+   * - ``UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT``
      - SYNC
-     - Unregister a non-GPU KV cache context.
+     - Unregister an engine-driven KV cache context.
    * - ``STORE``
      - BLOCKING
-     - Store KV cache chunks from GPU to L1 (CPU). GPU transfer path
-       (CUDA IPC); loaded only when ``--supported-transfer-mode`` is
-       ``gpu`` or ``auto``.
+     - Store KV cache chunks from GPU to L1 (CPU). LMCache-driven
+       transfer path (CUDA IPC); loaded only when
+       ``--supported-transfer-mode`` is ``lmcache_driven`` or ``auto``.
    * - ``RETRIEVE``
      - BLOCKING
-     - Copy KV cache chunks from L1 (CPU) back to GPU. GPU transfer path
-       (CUDA IPC); loaded only when ``--supported-transfer-mode`` is
-       ``gpu`` or ``auto``.
+     - Copy KV cache chunks from L1 (CPU) back to GPU. LMCache-driven
+       transfer path (CUDA IPC); loaded only when
+       ``--supported-transfer-mode`` is ``lmcache_driven`` or ``auto``.
    * - ``PREPARE_STORE``
      - BLOCKING
-     - (Non-GPU path) Worker asks the server to prepare store-side
+     - (Engine-driven path) Worker asks the server to prepare store-side
        transfer state for a key. Loaded when ``--supported-transfer-mode``
-       is ``non_gpu`` or ``auto``.
+       is ``engine_driven`` or ``auto``.
    * - ``COMMIT_STORE``
      - BLOCKING
-     - (Non-GPU path) Worker commits the chunk's serialized bytes (pickle
-       path) or releases the prepared SHM slot (SHM path) so the server
-       can persist into L1 storage.
+     - (Engine-driven path) Worker commits the chunk's serialized bytes
+       (pickle path) or releases the prepared SHM slot (SHM path) so the
+       server can persist into L1 storage.
    * - ``PREPARE_RETRIEVE``
      - BLOCKING
-     - (Non-GPU path) Worker asks the server to prepare the retrieval
-       payload for a key. The pickle path returns the bytes inline; the
-       SHM path returns slot info so the worker can read from shared
-       memory.
+     - (Engine-driven path) Worker asks the server to prepare the
+       retrieval payload for a key. The pickle path returns the bytes
+       inline; the SHM path returns slot info so the worker can read
+       from shared memory.
    * - ``COMMIT_RETRIEVE``
      - BLOCKING
-     - (Non-GPU path) Worker acknowledges retrieval completion so the
-       server can release the underlying read locks and reclaim any
+     - (Engine-driven path) Worker acknowledges retrieval completion so
+       the server can release the underlying read locks and reclaim any
        transport state.
    * - ``LOOKUP``
      - BLOCKING
@@ -205,6 +209,11 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
      - BLOCKING
      - Poll a prefetch job by request_id. Returns the loaded chunk count
        when done, or ``None`` while the prefetch is still in progress.
+   * - ``WAIT_PREFETCH_STATUS``
+     - BLOCKING
+     - (SGLang only) Block until a prefetch job completes, then return its
+       loaded chunk count, or ``None`` on timeout. The blocking alternative
+       to polling ``QUERY_PREFETCH_STATUS``.
    * - ``QUERY_PREFETCH_LOOKUP_HITS``
      - BLOCKING
      - Query the lookup-phase hit chunk count by request_id, before the
@@ -278,6 +287,24 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
        match, reconciles, issues one sparse-coalesced prefetch, and
        classifies per-TP-rank. Returns ``CBUnifiedLookupResult`` (or
        ``None`` while the prefetch is still in flight).
+   * - ``P2P_LOOKUP_AND_LOCK``
+     - BLOCKING
+     - (P2P) Look up the given keys and read-lock the locally cached
+       prefix. Returns a task id which the caller passes to
+       ``P2P_QUERY_LOOKUP_RESULTS`` to poll for the transfer addresses.
+       Part of the peer-to-peer KV cache sharing surface; the handler
+       module is not yet wired into the default
+       ``_build_modules()`` path -- see :doc:`p2p`.
+   * - ``P2P_QUERY_LOOKUP_RESULTS``
+     - BLOCKING
+     - (P2P) Poll the transfer addresses for a lookup task. Returns a
+       list of ``TransferChannelAddress`` once the lookup is complete,
+       or ``None`` while the lookup is still in progress or its
+       results have already been consumed.
+   * - ``P2P_UNLOCK_OBJECTS``
+     - BLOCKING
+     - (P2P) Release the read locks previously taken by
+       ``P2P_LOOKUP_AND_LOCK`` on the given keys.
 
 **Handler types:**
 
@@ -530,7 +557,7 @@ Adding a new request type
    ``blend_v2``, or ``blend_v3``) and add the request name to that
    module's ``REQUEST_NAMES``.
 3. Implement the handler method on the appropriate ``EngineModule``
-   (e.g. ``LookupModule``, ``GPUTransferModule``, ``BlendV3Module``) and
+   (e.g. ``LookupModule``, ``LMCacheDrivenTransferModule``, ``BlendV3Module``) and
    expose it as a ``HandlerSpec`` from that module's ``get_handlers()``.
 4. ``run_cache_server()`` registers every ``HandlerSpec`` returned by the
    loaded modules via ``add_handler_helper()`` — no manual registration
@@ -556,9 +583,9 @@ Key Source Files
        (per-module handler registration)
    * - ``lmcache/v1/multiprocess/modules/``
      - Engine module implementations: ``lookup.py`` (``LookupModule``),
-       ``management.py`` (``ManagementModule``), ``gpu_transfer.py``
-       (``GPUTransferModule``), ``non_gpu_transfer.py``
-       (``NonGPUTransferModule``), ``blend.py``
+       ``management.py`` (``ManagementModule``), ``lmcache_driven_transfer.py``
+       (``LMCacheDrivenTransferModule``), ``engine_driven_transfer.py``
+       (``EngineDrivenTransferModule``), ``blend.py``
        (``BlendModule`` / ``BlendEngineV2``, selected by
        ``--engine-type blend_legacy``), and ``blend_v3.py``
        (``BlendV3Module``, the paged-aware CacheBlend V3 pipeline

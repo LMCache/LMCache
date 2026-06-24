@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/cli/describe.rst:2
 msgid "lmcache describe"
-msgstr "lmcache 描述"
+msgstr "lmcache describe"
 
 #: ../../source/cli/describe.rst:4
 msgid ""
@@ -76,7 +76,8 @@ msgstr "``kvcache``"
 msgid ""
 "Target to describe (positional, required; currently only ``kvcache`` is "
 "supported)."
-msgstr "描述目标（位置参数，必需；当前仅支持 ``kvcache``）。"
+msgstr ""
+"描述目标（位置参数，必需；当前仅支持 ``kvcache``\\ ）。"
 
 #: ../../source/cli/describe.rst:71
 msgid "``--url``"
@@ -84,7 +85,8 @@ msgstr "``--url``"
 
 #: ../../source/cli/describe.rst:72
 msgid "LMCache HTTP server URL (default: ``http://localhost:8080``)."
-msgstr "LMCache HTTP 服务器 URL（默认：``http://localhost:8080``）。"
+msgstr ""
+"LMCache HTTP 服务器 URL（默认：\\ ``http://localhost:8080``\\ ）。"
 
 #: ../../source/cli/describe.rst:73
 msgid "``--format``"
@@ -92,7 +94,8 @@ msgstr "``--format``"
 
 #: ../../source/cli/describe.rst:74
 msgid "Output format: ``terminal`` (default) or ``json``."
-msgstr "输出格式：``terminal``（默认）或``json``。"
+msgstr ""
+"输出格式：\\ ``terminal``\\ （默认）或\\ ``json``\\ 。"
 
 #: ../../source/cli/describe.rst:75
 msgid "``--output PATH``"
@@ -100,7 +103,8 @@ msgstr "``--output PATH``"
 
 #: ../../source/cli/describe.rst:76
 msgid "Save metrics to a file (format follows ``--format``)."
-msgstr "将指标保存到文件中（格式遵循 ``--format``）。"
+msgstr ""
+"将指标保存到文件中（格式遵循 ``--format``\\ ）。"
 
 #: ../../source/cli/describe.rst:77
 msgid "``-q`` / ``--quiet``"

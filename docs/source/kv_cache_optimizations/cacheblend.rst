@@ -16,7 +16,7 @@ Start the LMCache server with the blend engine:
    lmcache server --l1-size-gb 20 --eviction-policy LRU --engine-type blend
 
 The ``blend`` engine composes a ``BlendModule`` into the server and requires
-``--supported-transfer-mode`` to be ``gpu`` or ``auto`` (the default). See
+``--supported-transfer-mode`` to be ``lmcache_driven`` or ``auto`` (the default). See
 :doc:`/mp/configuration` for the related server flags.
 
 .. note::

@@ -36,7 +36,8 @@ msgstr "LMCache 支持内置的远程存储连接器，包括 Redis、InfiniStor
 msgid ""
 "The ``remote_url`` configuration is **deprecated** and will be removed in"
 " a future release. Please use ``remote_storage_plugins`` instead."
-msgstr "``remote_url`` 配置已**弃用**，并将在未来的版本中移除。请改用 ``remote_storage_plugins``。"
+msgstr ""
+"``remote_url`` 配置已\\ **弃用**\\ ，并将在未来的版本中移除。请改用 ``remote_storage_plugins``\\ 。"
 
 #: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:14
 msgid "Connector Definition Requirements"
@@ -58,7 +59,8 @@ msgstr "从 ``ConnectorAdapter`` 继承"
 
 #: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:20
 msgid "Set the URL scheme in the constructor (e.g., ``mystore://``)"
-msgstr "在构造函数中设置 URL 方案（例如，``mystore://``）"
+msgstr ""
+"在构造函数中设置 URL 方案（例如，\\ ``mystore://``\\ ）"
 
 #: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:21
 msgid "Implement the ``create_connector`` method"
@@ -76,7 +78,8 @@ msgstr "从 ``RemoteConnector`` 继承"
 msgid ""
 "Implement all abstract methods: ``exists``, ``exists_sync``, ``get``, "
 "``put``, ``list``, ``close``"
-msgstr "实现所有抽象方法：``exists``、``exists_sync``、``get``、``put``、``list``、``close``"
+msgstr ""
+"实现所有抽象方法：\\ ``exists``\\ 、\\ ``exists_sync``\\ 、\\ ``get``\\ 、\\ ``put``\\ 、\\ ``list``\\ 、\\ ``close``"
 
 #: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:30
 msgid ""
@@ -90,7 +93,8 @@ msgid ""
 "The ``create_connector`` method receives a ``ConnectorContext`` object "
 "containing the URL, event loop, local CPU backend, config, metadata, and "
 "``plugin_name``."
-msgstr "``create_connector`` 方法接收一个 ``ConnectorContext`` 对象，其中包含 URL、事件循环、本地 CPU 后端、配置、元数据和 ``plugin_name``。"
+msgstr ""
+"``create_connector`` 方法接收一个 ``ConnectorContext`` 对象，其中包含 URL、事件循环、本地 CPU 后端、配置、元数据和 ``plugin_name``\\ 。"
 
 #: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:35
 msgid "Plugin Naming Convention"
@@ -99,28 +103,32 @@ msgstr "插件命名约定"
 #: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:36
 #, python-brace-format
 msgid "Plugin names follow the format ``{type}`` or ``{type}.{instance}``:"
-msgstr "插件名称遵循格式 ``{type}`` 或 ``{type}.{instance}``："
+msgstr ""
+"插件名称遵循格式 ``{type}`` 或 ``{type}.{instance}``\\ ："
 
 #: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:38
 #, python-brace-format
 msgid ""
 "``{type}`` — a single instance of that connector type (e.g. ``fs``, "
 "``mooncakestore``)"
-msgstr "``{type}`` — 该连接器类型的单个实例（例如 ``fs``, ``mooncakestore``）"
+msgstr ""
+"``{type}`` — 该连接器类型的单个实例（例如 ``fs``, ``mooncakestore``\\ ）"
 
 #: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:39
 #, python-brace-format
 msgid ""
 "``{type}.{instance}`` — a named instance, allowing **multiple instances "
 "of the same type** (e.g. ``fs.primary``, ``fs.backup``)"
-msgstr "``{type}.{instance}`` — 一个命名实例，允许 **同类型的多个实例**（例如 ``fs.primary``, ``fs.backup``）"
+msgstr ""
+"``{type}.{instance}`` — 一个命名实例，允许 **同类型的多个实例**\\ （例如 ``fs.primary``, ``fs.backup``\\ ）"
 
 #: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:41
 msgid ""
 "The framework extracts the *type* portion (everything before the first "
 "``.``) to locate the matching ``ConnectorAdapter``. The full plugin name "
 "is used as the configuration key prefix."
-msgstr "框架提取 *type* 部分（在第一个 ``.`` 之前的所有内容）以定位匹配的 ``ConnectorAdapter``。完整的插件名称用作配置键前缀。"
+msgstr ""
+"框架提取 *type* 部分（在第一个 ``.`` 之前的所有内容）以定位匹配的 ``ConnectorAdapter``\\ 。完整的插件名称用作配置键前缀。"
 
 #: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:44
 msgid "Using Built-in Connectors via Plugins"
@@ -132,7 +140,8 @@ msgid ""
 "be used directly via ``remote_storage_plugins`` without specifying "
 "``module_path`` or ``class_name``. Their configuration is placed under "
 "``extra_config``:"
-msgstr "内置连接器（``fs``, ``mooncakestore``, ``hfbucket`` 等）可以通过 ``remote_storage_plugins`` 直接使用，而无需指定 ``module_path`` 或 ``class_name``。它们的配置放在 ``extra_config`` 下："
+msgstr ""
+"内置连接器（\\ ``fs``, ``mooncakestore``, ``hfbucket`` 等）可以通过 ``remote_storage_plugins`` 直接使用，而无需指定 ``module_path`` 或 ``class_name``\\ 。它们的配置放在 ``extra_config`` 下："
 
 #: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:58
 msgid "Multiple instances of the same connector type:"
@@ -171,7 +180,8 @@ msgstr "多个自定义连接器的实例："
 
 #: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:125
 msgid "``remote_url`` is **deprecated**; use ``remote_storage_plugins`` instead"
-msgstr "``remote_url`` 已被 **弃用**；请改用 ``remote_storage_plugins``。"
+msgstr ""
+"``remote_url`` 已被 **弃用**\\ ；请改用 ``remote_storage_plugins``\\ 。"
 
 #: ../../source/developer_guide/extending_lmcache/remote_storage_plugins.rst:126
 msgid ""

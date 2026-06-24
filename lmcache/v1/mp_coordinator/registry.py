@@ -12,6 +12,7 @@ timestamps, metadata. How to reach an instance for push is derived from its
 
 # Standard
 from dataclasses import dataclass, field
+import random
 import threading
 import time
 
@@ -36,6 +37,9 @@ class MPInstance:
         metadata: Free-form string key/value pairs supplied at registration.
         p2p_advertised_url: URL this instance advertises for peer-to-peer
             transfers. Empty when the instance does not participate in P2P.
+        mq_port: Port of the instance's ZMQ message-queue server that P2P peers
+            send lookup/unlock RPCs to, reachable at this instance's ``ip``. 0
+            when P2P is disabled.
     """
 
     instance_id: str
@@ -45,6 +49,7 @@ class MPInstance:
     last_heartbeat_time: float
     metadata: dict[str, str] = field(default_factory=dict)
     p2p_advertised_url: str = ""
+    mq_port: int = 0
 
 
 class InstanceRegistry:
@@ -122,6 +127,15 @@ class InstanceRegistry:
         """
         with self._lock:
             return list(self._instances.values())
+
+    def random_instance(self) -> "MPInstance | None":
+        """Return a uniformly random registered instance, or ``None``
+        when the registry is empty."""
+        with self._lock:
+            instances = list(self._instances.values())
+        if not instances:
+            return None
+        return random.choice(instances)
 
     def update_heartbeat(self, instance_id: str, timestamp: float) -> bool:
         """Record a heartbeat timestamp for an instance.

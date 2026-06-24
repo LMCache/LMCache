@@ -40,23 +40,27 @@ msgstr "功能"
 
 #: ../../source/production/observability/frontend.rst:18
 msgid "**Cluster Monitoring**: Web-based dashboard for visualizing cluster status"
-msgstr "**集群监控**：基于网页的仪表板，用于可视化集群状态"
+msgstr ""
+"**集群监控**\\ ：基于网页的仪表板，用于可视化集群状态"
 
 #: ../../source/production/observability/frontend.rst:19
 msgid ""
 "**Request Proxying**: HTTP proxy service to forward requests to any "
 "cluster node"
-msgstr "**请求代理**：HTTP 代理服务，用于将请求转发到任何集群节点"
+msgstr ""
+"**请求代理**\\ ：HTTP 代理服务，用于将请求转发到任何集群节点"
 
 #: ../../source/production/observability/frontend.rst:20
 msgid ""
 "**Flexible Configuration**: Support for both IP:port and Unix domain "
 "sockets"
-msgstr "**灵活配置**：支持 IP:端口 和 Unix 域套接字"
+msgstr ""
+"**灵活配置**\\ ：支持 IP:端口 和 Unix 域套接字"
 
 #: ../../source/production/observability/frontend.rst:21
 msgid "**Plugin System**: Integration with LMCache plugin framework"
-msgstr "**插件系统**：与 LMCache 插件框架的集成"
+msgstr ""
+"**插件系统**\\ ：与 LMCache 插件框架的集成"
 
 #: ../../source/production/observability/frontend.rst:25
 msgid "Installation"
@@ -188,23 +192,27 @@ msgstr "贡献方式："
 msgid ""
 "**Report Issues**: Found a bug or have a feature request? Open an issue "
 "on GitHub."
-msgstr "**报告问题**：发现了一个错误或有功能请求？在 GitHub 上提交一个问题。"
+msgstr ""
+"**报告问题**\\ ：发现了一个错误或有功能请求？在 GitHub 上提交一个问题。"
 
 #: ../../source/production/observability/frontend.rst:150
 msgid ""
 "**Submit Pull Requests**: Fork the repository, make your changes, and "
 "submit a PR."
-msgstr "**提交拉取请求**：分叉仓库，进行更改，并提交 PR。"
+msgstr ""
+"**提交拉取请求**\\ ：分叉仓库，进行更改，并提交 PR。"
 
 #: ../../source/production/observability/frontend.rst:152
 msgid "**Improve Documentation**: Help us make the docs clearer and more helpful."
-msgstr "**改善文档**：帮助我们使文档更清晰、更有帮助。"
+msgstr ""
+"**改善文档**\\ ：帮助我们使文档更清晰、更有帮助。"
 
 #: ../../source/production/observability/frontend.rst:153
 msgid ""
 "**Share Feedback**: Let us know how you're using LMCache Frontend and "
 "what could be improved."
-msgstr "**分享反馈**：让我们知道您如何使用 LMCache 前端以及可以改进的地方。"
+msgstr ""
+"**分享反馈**\\ ：让我们知道您如何使用 LMCache 前端以及可以改进的地方。"
 
 #: ../../source/production/observability/frontend.rst:156
 msgid "Join us in making LMCache Frontend better for everyone!"

@@ -31,6 +31,7 @@ COMMON_EXTENSIONS: list[CommonExtSpec] = [
         name="native_storage_ops",
         sources=[
             "csrc/storage_manager/bitmap.cpp",
+            "csrc/storage_manager/fold.cpp",
             "csrc/storage_manager/periodic_event_notifier.cpp",
             "csrc/storage_manager/pybind.cpp",
             "csrc/storage_manager/ttl_lock.cpp",

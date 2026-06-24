@@ -23,11 +23,22 @@ _DEVICE_SCOPED_VLLM_BOOL_FEATURES: tuple[tuple[str, str, frozenset[str]], ...] =
 def _validate_vllm_device_features(config: LMCacheEngineConfig) -> None:
     """Reject vLLM configurations that can't run on the active device.
 
+    Three classes of misconfiguration are rejected here, all *before* any
+    device-specific construction so the error surfaces as a plain
+    ``ValueError`` instead of a deep ``torch.cuda.Stream()`` crash or a
+    ``RuntimeError`` from ``torch.device('musa:0')`` on a non-MUSA build:
+
+    1. Any flag in :data:`_DEVICE_SCOPED_VLLM_BOOL_FEATURES` requested on
+       a device that has no implementation for that path.
+    2. ``config.use_layerwise=True`` on HPU — HPU only ships
+       :class:`VLLMPagedMemHPUConnectorV2`; previously, the dispatch silently
+       fell through to the CUDA layerwise connector.
+
     Args:
         config: The LMCache engine configuration.
 
     Raises:
-        ValueError: For unsupported vLLM feature/device combinations.
+        ValueError: For any of the unsupported combinations above.
     """
     for attr, label, supported_devices in _DEVICE_SCOPED_VLLM_BOOL_FEATURES:
         if torch_device_type not in supported_devices and getattr(config, attr):
@@ -38,12 +49,11 @@ def _validate_vllm_device_features(config: LMCacheEngineConfig) -> None:
                 "on a supported accelerator build."
             )
 
-    if torch_device_type in {"hpu", "musa"} and config.use_layerwise:
+    if torch_device_type == "hpu" and config.use_layerwise:
         raise ValueError(
-            f"config.use_layerwise=True is not supported on {torch_device_type}; "
-            "the active vLLM connector only supports non-layerwise operation. "
-            "Set use_layerwise=False or run on an accelerator with layerwise "
-            "connector support."
+            "config.use_layerwise=True is not supported on HPU; LMCache "
+            "ships no layerwise HPU connector. Set use_layerwise=False or "
+            "run on a CUDA-capable build."
         )
 
 
@@ -63,24 +73,14 @@ def CreateGPUConnector(
                 EngineType.TRTLLM, or EngineType.MOCK).
         layout_hints: Optional hints from the serving engine about KV cache
             layout (e.g. ``{"kv_layout": "HND"}``).
-
-    Returns:
-        A GPU connector implementation for the selected serving engine and
-        active accelerator.
-
-    Raises:
-        ValueError: If the selected engine/configuration is unsupported on the
-            active accelerator.
-        RuntimeError: If the serving engine or active accelerator has no
-            connector implementation.
     """
     use_gpu = need_gpu_interm_buffer(config)
 
     if engine == EngineType.SGLANG:
         if torch_device_type == "musa":
             raise ValueError(
-                "SGLang on MUSA is not supported; only the non-layerwise vLLM "
-                "MUSA connector is available."
+                "SGLang on MUSA is not supported; only the vLLM MUSA "
+                "connector is available."
             )
 
         num_layer, _, chunk_size, num_kv_head, head_dim = metadata.kv_shape
@@ -143,6 +143,14 @@ def CreateGPUConnector(
     elif engine == EngineType.VLLM:
         _validate_vllm_device_features(config)
 
+        # First Party
+        from lmcache.v1.gpu_connector.gpu_connectors import (
+            VLLMBufferLayerwiseGPUConnector,
+            VLLMPagedMemGPUConnectorV2,
+            VLLMPagedMemGPUConnectorV3,
+            VLLMPagedMemLayerwiseGPUConnector,
+        )
+
         local_worker_id = metadata.local_worker_id
         torch_dev.set_device(local_worker_id)
         device = torch.device(f"{torch_device_type}:{local_worker_id}")
@@ -204,9 +212,14 @@ def CreateGPUConnector(
         elif torch_device_type == "musa":
             # First Party
             from lmcache.v1.gpu_connector.musa_connectors import (
+                VLLMPagedMemLayerwiseMUSAConnector,
                 VLLMPagedMemMUSAConnectorV2,
             )
 
+            if config.use_layerwise:
+                return VLLMPagedMemLayerwiseMUSAConnector.from_metadata(
+                    metadata, use_musa=use_gpu, device=device
+                )
             return VLLMPagedMemMUSAConnectorV2.from_metadata(metadata, use_gpu, device)
         elif torch_device_type == "hpu":
             # First Party

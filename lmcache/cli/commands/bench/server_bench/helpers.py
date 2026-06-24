@@ -17,6 +17,7 @@ torch / zmq.
 from __future__ import annotations
 
 # Standard
+from dataclasses import dataclass
 from typing import Any
 import ctypes
 import hashlib
@@ -54,9 +55,9 @@ try:
         KVLayerGroupInfo,
     )
     from lmcache.v1.multiprocess.custom_types import (
-        CudaIPCWrapper,
         IPCCacheServerKey,
-        RegisterNonGpuContextPayload,
+        KVCache,
+        RegisterEngineDrivenContextPayload,
     )
     from lmcache.v1.multiprocess.futures import MessagingFuture
     from lmcache.v1.multiprocess.group_view import EngineGroupInfo
@@ -64,7 +65,7 @@ try:
     from lmcache.v1.multiprocess.posix_shm import shm_open_pool_as_mmap
     from lmcache.v1.multiprocess.protocols.base import RequestType
     from lmcache.v1.multiprocess.protocols.engine import (
-        RegisterNonGpuContextResponse,
+        RegisterEngineDrivenContextResponse,
     )
     from lmcache.v1.multiprocess.transfer_context.shm import ShmSlotDescriptor
     from lmcache.v1.platform.cpu.shm import (
@@ -320,19 +321,19 @@ def _send_register_kv_cache(
     model_name: str = _MODEL_NAME,
     world_size: int = _WORLD_SIZE,
     layout_hints: dict | None = None,
-    kv_caches: list[CudaIPCWrapper] | None = None,
+    kv_caches: KVCache | None = None,
     use_gpu: bool = True,
     use_handle: bool | None = None,
     engine_group_infos: "list[EngineGroupInfo] | None" = None,
-) -> "bool | RegisterNonGpuContextResponse":
+) -> "bool | RegisterEngineDrivenContextResponse":
     """Register a KV cache context with the MP server.
 
     Dispatches to the correct protocol based on ``use_handle``:
 
     * Handle mode: ``REGISTER_KV_CACHE`` with a wrapper list
       (``CudaIPCWrapper`` for GPU, ``CpuShmTensorWrapper`` for CPU).
-    * Data mode: ``REGISTER_KV_CACHE_NON_GPU_CONTEXT`` with a
-      ``RegisterNonGpuContextPayload`` derived from ``layout_hints``.
+    * Data mode: ``REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT`` with a
+      ``RegisterEngineDrivenContextPayload`` derived from ``layout_hints``.
 
     ``use_handle`` defaults to ``use_gpu`` for backwards compatibility:
     GPU always goes through the handle path, CPU defaults to data.
@@ -383,7 +384,7 @@ def _send_register_kv_cache(
     if not isinstance(head_size, int):
         head_size = 128
     hidden_dim_size = int(num_heads) * int(head_size)
-    payload = RegisterNonGpuContextPayload(
+    payload = RegisterEngineDrivenContextPayload(
         instance_id=instance_id,
         model_name=model_name,
         world_size=world_size,
@@ -393,7 +394,9 @@ def _send_register_kv_cache(
         dtype_str=dtype_str,
         use_mla=False,
     )
-    result = _call(client, RequestType.REGISTER_KV_CACHE_NON_GPU_CONTEXT, [payload])
+    result = _call(
+        client, RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT, [payload]
+    )
     if result is _TIMEOUT:
         return False
     # The data-mode register reply carries the server's SHM pool name
@@ -401,6 +404,47 @@ def _send_register_kv_cache(
     # can mmap the same pool and exchange tensor data without going
     # through pickle.
     return result
+
+
+def _send_unregister_kv_cache(
+    client: MessageQueueClient,
+    instance_id: int = 0,
+    use_handle: bool = True,
+) -> bool:
+    """Deregister a KV cache context from the MP server.
+
+    The inverse of :func:`_send_register_kv_cache`. Without this call
+    the server keeps the bench's registration (and the CUDA-IPC / POSIX
+    SHM mappings it holds) alive forever, leaking one context entry per
+    bench run.
+
+    Dispatches to the correct protocol based on ``use_handle``, mirroring
+    the register path:
+
+    * Handle mode: ``UNREGISTER_KV_CACHE``.
+    * Data mode: ``UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT``.
+
+    Both protocols take a single ``instance_id`` payload and return a void
+    reply, so success is distinguished from an RPC timeout only.
+
+    Args:
+        client: The MP message-queue client.
+        instance_id: The instance ID used at registration time. Must match
+            the ``instance_id`` passed to :func:`_send_register_kv_cache`.
+        use_handle: ``True`` for the handle path (GPU CUDA-IPC / CPU SHM),
+            ``False`` for the engine-driven data path.
+
+    Returns:
+        ``True`` if the server acknowledged the call, ``False`` on RPC
+        timeout.
+    """
+    request_type = (
+        RequestType.UNREGISTER_KV_CACHE
+        if use_handle
+        else RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
+    )
+    result = _call(client, request_type, [instance_id])
+    return result is not _TIMEOUT
 
 
 def _send_lookup(
@@ -497,7 +541,7 @@ def _gather_paged_to_flat_chunks(
 
     Output layout matches the server's expected ``commit_store``
     payload (set up at register time by
-    ``register_kv_cache_non_gpu_context``):
+    ``register_kv_cache_engine_driven_context``):
     each chunk is ``[2, num_layers, chunk_size, hidden_dim]``,
     where ``hidden_dim = NH * HS``. Assumes a homogeneous group
     (same NH/HS/dtype across all layers); heterogeneous specs
@@ -850,6 +894,24 @@ def _query_checksum(
 # ------------------------------------------------------------------ #
 
 
+@dataclass
+class RequestResult:
+    """Result of a single request pass (cold or warm).
+
+    Carries both the checksum list (for correctness verification) and
+    per-operation latency measurements (for metrics aggregation).
+    """
+
+    checksums: list[str] | None = None
+    lookup_ms: float | None = None
+    retrieve_ms: float | None = None
+    store_ms: float | None = None
+    hit_chunks: int = 0
+    total_chunks: int = 0
+    store_tokens: int = 0
+    retrieve_tokens: int = 0
+
+
 def _process_request(
     client: MessageQueueClient,
     seq_no: int,
@@ -864,7 +926,7 @@ def _process_request(
     use_handle: bool | None = None,
     client_tensors: list["torch.Tensor"] | None = None,
     server_pool: "mmap.mmap | None" = None,
-) -> list[str] | None:
+) -> RequestResult | None:
     """Run the full lookup -> retrieve/store flow.
 
     When ``client_tensors`` is provided (data-mode self-check), the
@@ -962,6 +1024,8 @@ def _process_request(
             )
 
     # 3. RETRIEVE hit portion
+    retrieve_ms: float = 0.0
+    store_ms: float = 0.0
     if hit_chunks > 0:
         retrieve_key = _make_key(
             token_ids,
@@ -1077,7 +1141,16 @@ def _process_request(
 
     # 6. END_SESSION
     _send_end_session(client, request_id)
-    return checksums
+    return RequestResult(
+        checksums=checksums,
+        lookup_ms=lookup_ms,
+        retrieve_ms=retrieve_ms if hit_chunks > 0 else None,
+        store_ms=store_ms if miss_chunks > 0 else None,
+        hit_chunks=hit_chunks,
+        total_chunks=total_chunks,
+        store_tokens=(num_full_tokens - hit_tokens) if miss_chunks > 0 else 0,
+        retrieve_tokens=hit_tokens if hit_chunks > 0 else 0,
+    )
 
 
 # ------------------------------------------------------------------ #

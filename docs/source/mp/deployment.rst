@@ -219,25 +219,26 @@ A larger L1 cache means fewer L2 round-trips.
 Use ``LMCACHE_LOG_LEVEL=DEBUG`` during initial setup to verify L2 store/load
 activity.  Switch to ``INFO`` (default) for production to reduce log volume.
 
-Non-GPU Transfer Mode (``--supported-transfer-mode``, ``--shm-name``)
----------------------------------------------------------------------
+Transfer Mode (``--supported-transfer-mode``, ``--shm-name``)
+-------------------------------------------------------------
 
-LMCache supports two worker → server transfer paths: a **GPU** path
-(CUDA IPC, used for STORE/RETRIEVE) and a **non-GPU** path
+LMCache supports two worker → server transfer paths: an
+**lmcache-driven** path (server pulls/pushes via CUDA IPC or CPU SHM,
+used for STORE/RETRIEVE) and an **engine-driven** path
 (PREPARE/COMMIT, used by CPU-only or non-CUDA accelerator workers).
 The server picks which paths to load via ``--supported-transfer-mode``:
 
 - ``auto`` *(default)* -- load both paths.  Workers of either device
   type can connect without manual configuration; the server has no
   upfront knowledge of the connecting worker's device.
-- ``gpu`` -- load only the GPU IPC path.  Use when every worker is a
-  CUDA device and you want to skip allocating the non-GPU resources
-  (SHM pool, pickle codec).
-- ``non_gpu`` -- load only the non-GPU path.  Use when serving CPU-only
-  or non-CUDA accelerator workers.
+- ``lmcache_driven`` -- load only the server-driven transfer path.
+  Supports CUDA devices (IPC) and CPU devices (SHM).  Use to skip
+  allocating the engine-driven prepare/commit resources (pickle codec).
+- ``engine_driven`` -- load only the engine-driven path.  Use when
+  serving CPU-only or non-CUDA accelerator workers.
 
-When the non-GPU path is loaded (``auto`` or ``non_gpu``), LMCache by
-default creates a shared-memory (SHM) pool for non-GPU KV transfers
+When the engine-driven path is loaded (``auto`` or ``engine_driven``),
+LMCache by default creates a shared-memory (SHM) pool for KV transfers
 between the server and vLLM workers.  The ``--shm-name`` option lets
 you control this behavior:
 

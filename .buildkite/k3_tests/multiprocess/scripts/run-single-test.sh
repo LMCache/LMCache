@@ -84,7 +84,7 @@ echo "Results dir: $RESULTS_DIR"
 echo ""
 
 # Tests that handle their own server lifecycle (different GPU/model config)
-SELF_CONTAINED_TESTS=" deadlock mp_autostart_tp2 "
+SELF_CONTAINED_TESTS=" deadlock mp_autostart_tp2 p2p "
 
 # Tests that compare against a baseline vLLM (no LMCache) on a second GPU.
 # Only these need the baseline server (and thus a 2-GPU pod); everything
@@ -157,6 +157,9 @@ case "$TEST_NAME" in
     cache_stats)
         exec_script="${SCRIPT_DIR}/run-cache-stats.sh"
         ;;
+    p2p)
+        exec_script="${SCRIPT_DIR}/run-p2p.sh"
+        ;;
     http_api)
         exec_script="${SCRIPT_DIR}/run-http-api.sh"
         ;;
@@ -165,7 +168,7 @@ case "$TEST_NAME" in
         ;;
     *)
         echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, mp_autostart_tp2, restart_recovery, cache_stats, http_api, gds_smoke_test"
+        echo "Valid tests: lm_eval, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, mp_autostart_tp2, restart_recovery, cache_stats, http_api, gds_smoke_test, p2p"
         exit 1
         ;;
 esac

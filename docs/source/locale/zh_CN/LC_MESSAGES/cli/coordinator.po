@@ -31,15 +31,14 @@ msgid ""
 "heartbeats; the coordinator evicts any instance whose heartbeat lapses "
 "past ``--instance-timeout``."
 msgstr ""
-"``lmcache coordinator`` 命令启动 LMCache MP **协调器**，这是一个独立的 HTTP 服务，用于跟踪部署中的 "
-"MP 服务器实例。MP 服务器向其注册并发送定期心跳；协调器会逐出任何心跳超时的实例，该超时时间由 ``--instance-timeout`` "
-"指定。"
+"``lmcache coordinator`` 命令启动 LMCache MP **协调器**\\ ，这是一个独立的 HTTP 服务，用于跟踪部署中的 MP 服务器实例。MP 服务器向其注册并发送定期心跳；协调器会逐出任何心跳超时的实例，该超时时间由 ``--instance-timeout`` 指定。"
 
 #: ../../source/cli/coordinator.rst:9
 msgid ""
 "It replaces ``python -m lmcache.v1.mp_coordinator``. The process runs in "
 "the foreground; stop it with ``Ctrl-C``."
-msgstr "它替代了 ``python -m lmcache.v1.mp_coordinator``。该进程在前台运行；使用 ``Ctrl-C`` 停止它。"
+msgstr ""
+"它替代了 ``python -m lmcache.v1.mp_coordinator``\\ 。该进程在前台运行；使用 ``Ctrl-C`` 停止它。"
 
 #: ../../source/cli/coordinator.rst:17
 msgid "Quick start"
@@ -63,7 +62,8 @@ msgstr "``--host HOST``"
 
 #: ../../source/cli/coordinator.rst:36
 msgid "Bind address for the coordinator's HTTP server (default: ``0.0.0.0``)."
-msgstr "协调器 HTTP 服务器的绑定地址（默认：``0.0.0.0``）。"
+msgstr ""
+"协调器 HTTP 服务器的绑定地址（默认：\\ ``0.0.0.0``\\ ）。"
 
 #: ../../source/cli/coordinator.rst:37
 msgid "``--port PORT``"
@@ -71,7 +71,8 @@ msgstr "``--port PORT``"
 
 #: ../../source/cli/coordinator.rst:38
 msgid "HTTP port (default: ``9300``)."
-msgstr "HTTP 端口（默认值：``9300``）。"
+msgstr ""
+"HTTP 端口（默认值：\\ ``9300``\\ ）。"
 
 #: ../../source/cli/coordinator.rst:39
 msgid "``--instance-timeout SECS``"
@@ -81,7 +82,8 @@ msgstr "``--instance-timeout SECS``"
 msgid ""
 "Seconds without a heartbeat after which an instance is evicted (default: "
 "``30``)."
-msgstr "在没有心跳的情况下，经过多少秒后实例被逐出（默认值：``30``）。"
+msgstr ""
+"在没有心跳的情况下，经过多少秒后实例被逐出（默认值：\\ ``30``\\ ）。"
 
 #: ../../source/cli/coordinator.rst:42
 msgid "``--health-check-interval SECS``"
@@ -91,7 +93,8 @@ msgstr "``--health-check-interval SECS``"
 msgid ""
 "Seconds between health-check sweeps; ``0`` disables the loop (default: "
 "``10``)."
-msgstr "健康检查扫描之间的秒数；``0`` 禁用循环（默认值：``10``）。"
+msgstr ""
+"健康检查扫描之间的秒数；\\ ``0`` 禁用循环（默认值：\\ ``10``\\ ）。"
 
 #: ../../source/cli/coordinator.rst:45
 msgid "``--eviction-check-interval SECS``"
@@ -101,7 +104,8 @@ msgstr "``--eviction-check-interval SECS``"
 msgid ""
 "Seconds between L2 eviction sweeps; ``0`` disables the loop (default: "
 "``5``)."
-msgstr "L2 逐出扫描之间的秒数；``0`` 禁用循环（默认值：``5``）。"
+msgstr ""
+"L2 逐出扫描之间的秒数；\\ ``0`` 禁用循环（默认值：\\ ``5``\\ ）。"
 
 #: ../../source/cli/coordinator.rst:48
 msgid "``--eviction-ratio RATIO``"
@@ -111,7 +115,8 @@ msgstr "``--eviction-ratio RATIO``"
 msgid ""
 "Fraction of tracked keys (by count) to evict per cycle, ``0.0`` to "
 "``1.0`` (default: ``0.2``)."
-msgstr "每个周期逐出的跟踪键的比例（按计数），``0.0`` 到 ``1.0``（默认值：``0.2``）。"
+msgstr ""
+"每个周期逐出的跟踪键的比例（按计数），\\ ``0.0`` 到 ``1.0``\\ （默认值：\\ ``0.2``\\ ）。"
 
 #: ../../source/cli/coordinator.rst:51
 msgid "``--trigger-watermark RATIO``"
@@ -121,7 +126,8 @@ msgstr "``--trigger-watermark RATIO``"
 msgid ""
 "Eviction fires when usage reaches this fraction of the quota, ``0.0`` "
 "(exclusive) to ``1.0`` (default: ``1.0``)."
-msgstr "当使用量达到配额的这个比例时会触发逐出，``0.0``（不包括）到``1.0``（默认值：``1.0``）。"
+msgstr ""
+"当使用量达到配额的这个比例时会触发逐出，\\ ``0.0``\\ （不包括）到\\ ``1.0``\\ （默认值：\\ ``1.0``\\ ）。"
 
 #: ../../source/cli/coordinator.rst:56
 msgid "Configuration"
@@ -136,7 +142,8 @@ msgid ""
 "and then to the built-in defaults. A supplied flag always overrides the "
 "matching env-derived value, so env-only deployments keep working "
 "unchanged."
-msgstr "每个标志都是可选的。未设置的标志会回退到 ``LMCACHE_MP_COORDINATOR_*`` 环境变量（``HOST``、``PORT``、``INSTANCE_TIMEOUT``、``HEALTH_CHECK_INTERVAL``、``EVICTION_CHECK_INTERVAL``、``EVICTION_RATIO``、``TRIGGER_WATERMARK``），然后再回退到内置默认值。提供的标志始终会覆盖匹配的环境派生值，因此仅使用环境的部署保持不变。"
+msgstr ""
+"每个标志都是可选的。未设置的标志会回退到 ``LMCACHE_MP_COORDINATOR_*`` 环境变量（\\ ``HOST``\\ 、\\ ``PORT``\\ 、\\ ``INSTANCE_TIMEOUT``\\ 、\\ ``HEALTH_CHECK_INTERVAL``\\ 、\\ ``EVICTION_CHECK_INTERVAL``\\ 、\\ ``EVICTION_RATIO``\\ 、\\ ``TRIGGER_WATERMARK``\\ ），然后再回退到内置默认值。提供的标志始终会覆盖匹配的环境派生值，因此仅使用环境的部署保持不变。"
 
 #: ../../source/cli/coordinator.rst:65
 msgid ""
