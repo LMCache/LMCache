@@ -1845,17 +1845,19 @@ class LMCacheConnectorV1Impl:
 
         # Cleanup if request was aborted
         if request.status == RequestStatus.FINISHED_ABORTED:
-            # Notify storage backends of aborted requests
-            assert self.lmcache_engine is not None
-            sm = self.lmcache_engine.storage_manager
-            if sm is not None:
-                sm.cancel_request(request.request_id)
+            # Notify storage backends of aborted requests.
+            # lmcache_engine may be None on the scheduler side when
+            # enable_scheduler_bypass_lookup is disabled.
+            if self.lmcache_engine is not None:
+                sm = self.lmcache_engine.storage_manager
+                if sm is not None:
+                    sm.cancel_request(request.request_id)
 
             if self.async_loading:
                 # Cancel any ongoing async lookup and prefetch tasks on workers
                 lookup_id = request.request_id
-                assert self.lookup_client is not None
-                self.lookup_client.cancel_lookup(lookup_id)  # type: ignore[attr-defined]
+                if self.lookup_client is not None:
+                    self.lookup_client.cancel_lookup(lookup_id)  # type: ignore[attr-defined]
 
         params = (
             request.kv_transfer_params
