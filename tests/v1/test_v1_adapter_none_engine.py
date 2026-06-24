@@ -17,18 +17,18 @@ from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
 
 
 class _FakeParent:
-    def __init__(self, metadata=None):
+    def __init__(self, metadata: Optional[Any] = None) -> None:
         self._connector_metadata = metadata
 
-    def _get_connector_metadata(self):
+    def _get_connector_metadata(self) -> Optional[Any]:
         return self._connector_metadata
 
 
 class _FakeManager:
-    def __init__(self, engine=None):
+    def __init__(self, engine: Optional[Any] = None) -> None:
         self.lmcache_engine = engine
-        self.lmcache_engine_metadata = None
-        self.lookup_client = None
+        self.lmcache_engine_metadata: Optional[Any] = None
+        self.lookup_client: Optional[Any] = None
 
 
 def test_request_finished_with_none_engine() -> None:
