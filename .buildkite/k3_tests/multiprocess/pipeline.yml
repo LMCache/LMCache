@@ -5,6 +5,15 @@
 #   2-GPU: LMCache+vLLM on GPU 0, baseline on GPU 1 (or TP=2 across both).
 #   1-GPU: LMCache+vLLM on GPU 0 only (no baseline server).
 
+# Retry policy for known-flaky long-running multiprocess steps.
+# Note: exit_status "*" matches 1-255 only; -1 (agent lost) needs a separate rule.
+x-flaky-retry: &flaky-retry
+  automatic:
+    - exit_status: -1
+      limit: 2
+    - exit_status: "*"
+      limit: 2
+
 steps:
   - group: ":compression: Multiprocess (2-GPU)"
     steps:
@@ -29,6 +38,7 @@ steps:
       - label: ":compression: long_doc_qa"
         command: .buildkite/k3_tests/multiprocess/run.sh long_doc_qa
         timeout_in_minutes: 30
+        retry: *flaky-retry
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
@@ -36,6 +46,7 @@ steps:
       - label: ":compression: long_doc_qa_l2"
         command: .buildkite/k3_tests/multiprocess/run.sh long_doc_qa_l2
         timeout_in_minutes: 30
+        retry: *flaky-retry
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
@@ -62,6 +73,7 @@ steps:
       - label: ":compression: lm_eval"
         command: .buildkite/k3_tests/multiprocess/run.sh lm_eval
         timeout_in_minutes: 30
+        retry: *flaky-retry
         agents: { queue: "k8s" }
         plugins:
           - kubernetes:
@@ -82,6 +94,7 @@ steps:
       - label: ":compression: hma_lm_eval_gemma4"
         command: .buildkite/k3_tests/multiprocess/run.sh hma_lm_eval_gemma4
         timeout_in_minutes: 60
+        retry: *flaky-retry
         env:
           MODEL: "google/gemma-4-31B-it"
           # Allow a small score difference between the two runs.
