@@ -880,6 +880,11 @@ func (in *LMCacheEngineSpec) DeepCopyInto(out *LMCacheEngineSpec) {
 			(*out)[key] = val
 		}
 	}
+	if in.HostNetwork != nil {
+		in, out := &in.HostNetwork, &out.HostNetwork
+		*out = new(bool)
+		**out = **in
+	}
 	if in.ExtraArgs != nil {
 		in, out := &in.ExtraArgs, &out.ExtraArgs
 		*out = make([]string, len(*in))
