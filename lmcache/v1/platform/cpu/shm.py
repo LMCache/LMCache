@@ -15,6 +15,7 @@ any if/elif chain.
 from __future__ import annotations
 
 # Standard
+from typing import ClassVar
 import ctypes
 import itertools
 import os
@@ -26,13 +27,13 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.custom_types import DeviceIPCWrapper
 from lmcache.v1.multiprocess.posix_shm import (
     shm_create_readwrite,
     shm_map_readwrite,
     shm_munmap,
     shm_unlink,
 )
+from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
 
 logger = init_logger(__name__)
 
@@ -70,9 +71,35 @@ class CpuShmTensorWrapper(DeviceIPCWrapper):
     so ``to_tensor`` dispatches correctly on both sides.
     """
 
+    #: ``torch.device.type`` this wrapper handles (used by auto-discovery
+    #: in :func:`~lmcache.v1.platform._registry._discover_wrappers_once`).
+    device_type: ClassVar[str] = "cpu"
+
+    #: Marked ``True`` so auto-discovery picks this as the default
+    #: factory for ``"cpu"``.
+    _is_default_wrapper: ClassVar[bool] = True
+
     # POSIX shared-memory name (``/lmcache_...``) -- leading ``/`` is
     # required by ``shm_open(3)`` on both Linux and macOS.
     SHM_NAME_PREFIX = "/lmcache_kv_"
+
+    @classmethod
+    def wrap(cls, tensor: torch.Tensor) -> "CpuShmTensorWrapper":
+        """Factory used by
+        :func:`~lmcache.v1.platform._registry._discover_wrappers_once`.
+
+        Delegates to :func:`migrate_to_shm_and_wrap`, which migrates the
+        tensor's storage to a POSIX SHM segment so the LMCache mp server
+        can map the same physical pages.
+
+        Args:
+            tensor: A contiguous CPU tensor to migrate and wrap.
+
+        Returns:
+            A new :class:`CpuShmTensorWrapper` referencing the SHM
+            segment that now backs ``tensor``.
+        """
+        return migrate_to_shm_and_wrap(tensor)
 
     def __init__(self, tensor: torch.Tensor, shm_name: str) -> None:
         if tensor.device.type != "cpu":
