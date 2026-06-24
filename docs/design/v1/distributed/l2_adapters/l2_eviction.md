@@ -197,7 +197,7 @@ capacity) can omit steps 2–6 and rely on the base class no-op defaults.
 | `MockL2Adapter`            | ✓        | ✓           | stored, deleted     |
 | `NixlStoreL2Adapter`       | ✓ (skips pinned) | ✓ (pool-based) | stored, deleted |
 | `RawBlockL2Adapter`        | ✓ (skips locked) | ✓ | stored, accessed, deleted |
-| `FSL2Adapter`              | no-op    | `(-1, -1)`  | none                |
+| `FSL2Adapter`              | ✓ (skips locked, POSIX-safe unlink) | ✓ (requires `max_capacity_gb`) | stored, accessed, deleted |
 | `NativeConnectorL2Adapter` | ✓ (via `submit_batch_delete`) | ✓ (client-side, requires `max_capacity_gb`) | stored, deleted |
 
 **Note on `NativeConnectorL2Adapter`:** Eviction support requires two things:
@@ -208,6 +208,32 @@ capacity) can omit steps 2–6 and rely on the base class no-op defaults.
 2. The adapter must be configured with `max_capacity_gb > 0` to enable client-side
    size tracking for `get_usage()`. Without it, `get_usage()` returns `(-1, -1)` and
    the eviction controller will not trigger.
+
+**Note on `FSL2Adapter`:** Eviction is enabled by setting `max_capacity_gb > 0`;
+with the default `0` the adapter stays unbounded and fully stateless (its legacy
+behaviour) — no per-key tracking, no listener notifications. When enabled:
+
+- **Accounting** is tracked per key in an in-memory map guarded by the adapter
+  lock, so a store is counted exactly once even under a concurrent store of the
+  same key or a re-store of an already-resident key. A key found on disk but not
+  yet tracked (e.g. left by a prior run with recovery off) is accounted on the
+  next store.
+- **Locking.** A per-key refcount pins keys against eviction: `lookup_and_lock`
+  locks the hit keys (released by `submit_unlock`) and a store locks its batch
+  for the duration of the write. `delete()` skips any key with a positive
+  refcount, so a key cannot be evicted between a lookup and its load, or while it
+  is being written. POSIX also keeps an already-open file readable through its
+  descriptor and the load path treats a vanished file as a miss, so even an
+  unlocked delete that races a load never corrupts data.
+- **delete()** runs synchronously on the eviction-controller thread and
+  `unlink`s each victim file. If `unlink` hard-fails the file is still on disk,
+  so its size is restored to accounting and no delete is reported.
+- **Recovery.** On startup, `recover_on_start` (default `true`) scans `base_path`
+  so files left by a previous run count toward usage and are replayed to the
+  eviction policy when it registers; the replay targets only eviction-policy
+  listeners, so non-eviction listeners (e.g. the coordinator event reporter) are
+  not sent the warm cache as fresh store events. Set it to `false` to skip the
+  scan for very large directories.
 
 Example configuration with eviction enabled:
 
