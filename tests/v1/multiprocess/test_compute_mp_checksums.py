@@ -54,7 +54,7 @@ class TestComputeBlockChecksums5DLayout:
         result = _compute_block_checksums(
             kv,
             block_ids=[0, 1, 2, 3],
-            block_axis=1,
+            block_axes=[1] * len(kv),
             chunk_size=2,
             layerwise=False,
         )
@@ -69,7 +69,7 @@ class TestComputeBlockChecksums5DLayout:
         result = _compute_block_checksums(
             kv,
             block_ids=[0, 1, 2, 3],
-            block_axis=1,
+            block_axes=[1] * len(kv),
             chunk_size=4,
             layerwise=True,
         )
@@ -86,7 +86,7 @@ class TestComputeBlockChecksums5DLayout:
         result = _compute_block_checksums(
             kv,
             block_ids=[0, 1, 2],
-            block_axis=1,
+            block_axes=[1] * len(kv),
             chunk_size=2,
             layerwise=False,
         )
@@ -95,7 +95,9 @@ class TestComputeBlockChecksums5DLayout:
 
     def test_deterministic(self):
         kv = _make_5d_kv()
-        args = dict(block_ids=[0, 1], block_axis=1, chunk_size=2, layerwise=False)
+        args = dict(
+            block_ids=[0, 1], block_axes=[1] * len(kv), chunk_size=2, layerwise=False
+        )
         r1 = _compute_block_checksums(kv, **args)
         r2 = _compute_block_checksums(kv, **args)
         assert r1["chunk_checksums"] == r2["chunk_checksums"]
@@ -105,7 +107,7 @@ class TestComputeBlockChecksums5DLayout:
         result = _compute_block_checksums(
             kv,
             block_ids=[0, 1],
-            block_axis=1,
+            block_axes=[1] * len(kv),
             chunk_size=1,
             layerwise=False,
         )
@@ -118,7 +120,7 @@ class TestComputeBlockChecksums5DLayout:
         result = _compute_block_checksums(
             kv,
             block_ids=[0, 1, 2, 3],
-            block_axis=1,
+            block_axes=[1] * len(kv),
             chunk_size=2,
             layerwise=False,
         )
@@ -132,7 +134,7 @@ class TestComputeBlockChecksums5DLayout:
         result = _compute_block_checksums(
             kv,
             block_ids=[0, 1, 2, 3],
-            block_axis=1,
+            block_axes=[1] * len(kv),
             chunk_size=2,
             layerwise=False,
         )
@@ -149,7 +151,7 @@ class TestComputeBlockChecksums3DMLA:
         result = _compute_block_checksums(
             kv,
             block_ids=[0, 1, 2, 3],
-            block_axis=0,
+            block_axes=[0] * len(kv),
             chunk_size=2,
             layerwise=False,
         )
@@ -161,7 +163,7 @@ class TestComputeBlockChecksums3DMLA:
         result = _compute_block_checksums(
             kv,
             block_ids=[0, 1, 2, 3],
-            block_axis=0,
+            block_axes=[0] * len(kv),
             chunk_size=2,
             layerwise=True,
         )
@@ -177,7 +179,7 @@ class TestComputeBlockChecksums3DMLA:
         result = _compute_block_checksums(
             kv,
             block_ids=block_ids,
-            block_axis=0,
+            block_axes=[0] * len(kv),
             chunk_size=chunk_size,
             layerwise=False,
         )
@@ -203,14 +205,14 @@ class TestBlockSelectionSemantics:
         r1 = _compute_block_checksums(
             kv,
             block_ids=[0, 1],
-            block_axis=0,
+            block_axes=[0] * len(kv),
             chunk_size=2,
             layerwise=False,
         )
         r2 = _compute_block_checksums(
             kv,
             block_ids=[1, 0],
-            block_axis=0,
+            block_axes=[0] * len(kv),
             chunk_size=2,
             layerwise=False,
         )
@@ -221,28 +223,28 @@ class TestBlockSelectionSemantics:
         r_a = _compute_block_checksums(
             kv,
             block_ids=[0, 1],
-            block_axis=0,
+            block_axes=[0] * len(kv),
             chunk_size=1,
             layerwise=False,
         )
         r_b = _compute_block_checksums(
             kv,
             block_ids=[2, 3],
-            block_axis=0,
+            block_axes=[0] * len(kv),
             chunk_size=1,
             layerwise=False,
         )
         assert r_a["chunk_checksums"] != r_b["chunk_checksums"]
 
-    def test_unsupported_block_axis_raises(self):
-        """A block_axis out of range for the tensor ndim must bubble up
+    def test_out_of_range_block_axis_raises(self):
+        """A block axis out of range for the tensor ndim must bubble up
         from ``index_select`` as ``IndexError``."""
         kv = _make_3d_mla_kv()
         with pytest.raises(IndexError):
             _compute_block_checksums(
                 kv,
                 block_ids=[0],
-                block_axis=9,
+                block_axes=[9] * len(kv),
                 chunk_size=1,
                 layerwise=False,
             )
