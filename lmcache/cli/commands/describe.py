@@ -13,6 +13,9 @@ import sys
 import urllib.error
 import urllib.request
 
+# Third Party
+from prometheus_client.parser import text_string_to_metric_families
+
 # First Party
 from lmcache.cli.commands.base import BaseCommand
 from lmcache.cli.metrics import Metrics
@@ -105,9 +108,6 @@ def fetch_running_requests(url: str, timeout: int = 10) -> int | None:
         unreachable or the metric is absent (e.g. metrics disabled or an
         unsupported engine version).
     """
-    # Third Party
-    from prometheus_client.parser import text_string_to_metric_families
-
     try:
         with urllib.request.urlopen(
             urllib.request.Request(url), timeout=timeout
