@@ -352,6 +352,7 @@ def test_put_get_exists_list_and_remove_roundtrip(memory_allocator) -> None:
 
     try:
         asyncio.run(connector.put(key, memory_obj))
+        assert memory_obj.get_ref_count() == 0
         assert fake_client.ensure_bucket_calls == []
 
         assert connector.exists_sync(key) is True
@@ -368,7 +369,6 @@ def test_put_get_exists_list_and_remove_roundtrip(memory_allocator) -> None:
         assert connector.remove_sync(key) is True
         assert connector.exists_sync(key) is False
     finally:
-        memory_obj.ref_count_down()
         asyncio.run(connector.close())
         connector.local_cpu_backend.memory_allocator.close()
 
@@ -395,6 +395,7 @@ def test_batched_put_and_batched_get_preserve_order(memory_allocator) -> None:
 
     try:
         asyncio.run(connector.batched_put(keys, memory_objs))
+        assert [memory_obj.get_ref_count() for memory_obj in memory_objs] == [0, 0]
         assert fake_client.ensure_bucket_calls == ["test-bucket"]
 
         missing_key = create_test_key(12)
@@ -422,8 +423,6 @@ def test_batched_put_and_batched_get_preserve_order(memory_allocator) -> None:
             for result in prefix_hits:
                 result.ref_count_down()
     finally:
-        for memory_obj in memory_objs:
-            memory_obj.ref_count_down()
         asyncio.run(connector.close())
         connector.local_cpu_backend.memory_allocator.close()
 

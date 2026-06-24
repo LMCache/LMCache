@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from threading import Lock
 from typing import Protocol
 from urllib.parse import quote, unquote
-import asyncio
 import builtins
 
 # First Party
@@ -196,7 +195,7 @@ class GCSConnector(RemoteConnector):
 
     async def exists(self, key: CacheEngineKey) -> bool:
         """Return whether a full LMCache chunk exists for ``key``."""
-        return await asyncio.to_thread(self.exists_sync, key)
+        return self.exists_sync(key)
 
     def exists_sync(self, key: CacheEngineKey) -> bool:
         """Synchronously return whether a full LMCache chunk exists."""
@@ -214,7 +213,7 @@ class GCSConnector(RemoteConnector):
 
     async def list(self) -> builtins.list[str]:
         """List LMCache keys currently stored under this connector prefix."""
-        return await asyncio.to_thread(self._list_sync)
+        return self._list_sync()
 
     async def close(self) -> None:
         """Release connector-local resources."""
@@ -227,7 +226,7 @@ class GCSConnector(RemoteConnector):
 
     async def ping(self) -> int:
         """Check access to the configured bucket."""
-        return await asyncio.to_thread(self._ping_sync)
+        return self._ping_sync()
 
     def support_batched_put(self) -> bool:
         """Report support for batched uploads."""
@@ -243,7 +242,18 @@ class GCSConnector(RemoteConnector):
             raise ValueError(
                 "keys and memory_objs must have the same length for batched_put"
             )
-        await asyncio.to_thread(self._batched_put_sync, keys, memory_objs)
+
+        upload_entries: builtins.list[tuple[str, bytes]] = []
+        try:
+            for key, memory_obj in zip(keys, memory_objs, strict=True):
+                key_str = key.to_string()
+                self._validate_full_chunk_for_upload(key_str, memory_obj)
+                upload_entries.append((key_str, bytes(memory_obj.byte_array)))
+
+            self._batched_put_sync(upload_entries)
+        finally:
+            for memory_obj in memory_objs:
+                memory_obj.ref_count_down()
 
     def support_batched_get(self) -> bool:
         """Report support for batch downloads."""
@@ -258,7 +268,7 @@ class GCSConnector(RemoteConnector):
             return []
 
         key_strings = [key.to_string() for key in keys]
-        object_sizes = await asyncio.to_thread(self._resolve_object_sizes, key_strings)
+        object_sizes = self._resolve_object_sizes(key_strings)
         results: builtins.list[MemoryObj | None] = [None] * len(keys)
 
         try:
@@ -277,8 +287,7 @@ class GCSConnector(RemoteConnector):
                     )
                     continue
 
-                data = await asyncio.to_thread(
-                    self._gcs_client.download_blob,
+                data = self._gcs_client.download_blob(
                     self.bucket_name,
                     self._key_string_to_object_path(key_str),
                 )
@@ -352,7 +361,7 @@ class GCSConnector(RemoteConnector):
         """Asynchronously return the number of consecutive prefix hits."""
         del lookup_id
         del pin
-        return await asyncio.to_thread(self.batched_contains, keys)
+        return self.batched_contains(keys)
 
     def support_batched_get_non_blocking(self) -> bool:
         """Report support for non-blocking batch loads."""
@@ -411,20 +420,17 @@ class GCSConnector(RemoteConnector):
 
     def _batched_put_sync(
         self,
-        keys: Sequence[CacheEngineKey],
-        memory_objs: Sequence[MemoryObj],
+        upload_entries: Sequence[tuple[str, bytes]],
     ) -> None:
         """Upload all provided chunks."""
         self._ensure_bucket_for_writes()
         uploaded_key_strings: builtins.list[str] = []
         try:
-            for key, memory_obj in zip(keys, memory_objs, strict=True):
-                key_str = key.to_string()
-                self._validate_full_chunk_for_upload(key_str, memory_obj)
+            for key_str, payload in upload_entries:
                 self._gcs_client.upload_blob(
                     self.bucket_name,
                     self._key_string_to_object_path(key_str),
-                    bytes(memory_obj.byte_array),
+                    payload,
                 )
                 uploaded_key_strings.append(key_str)
                 self._set_cached_object_size(key_str, self.full_chunk_size_bytes)
@@ -581,7 +587,19 @@ class GCSConnector(RemoteConnector):
 
 
 def parse_gcs_bucket_handle(bucket_handle: str) -> GCSLocation:
-    """Parse ``gs://bucket[/prefix]`` into bucket name and object prefix."""
+    """Parse a GCS bucket handle into bucket and prefix components.
+
+    Args:
+        bucket_handle: Bucket handle in ``gs://<bucket>[/<prefix>]`` form.
+
+    Returns:
+        A :class:`GCSLocation` containing the bucket name and optional object
+        prefix.
+
+    Raises:
+        ValueError: If ``bucket_handle`` does not start with ``gs://`` or does
+            not include a bucket name.
+    """
     normalized_handle = bucket_handle.strip()
     if not normalized_handle.startswith(_GCS_HANDLE_PREFIX):
         raise ValueError("bucket_handle must start with 'gs://' for the gcs plugin")
@@ -601,7 +619,18 @@ def resolve_gcs_connector_config(
     config: LMCacheEngineConfig,
     plugin_name: str,
 ) -> GCSConnectorConfig:
-    """Resolve plugin-scoped configuration for the GCS connector."""
+    """Resolve the plugin-scoped configuration for a GCS connector.
+
+    Args:
+        config: Engine configuration containing ``extra_config`` overrides.
+        plugin_name: Fully-qualified remote storage plugin name.
+
+    Returns:
+        A :class:`GCSConnectorConfig` built from the plugin-specific settings.
+
+    Raises:
+        ValueError: If the required bucket handle setting is missing or invalid.
+    """
     extra_config = config.extra_config or {}
     config_prefix = f"remote_storage_plugin.{plugin_name}"
 
@@ -636,12 +665,26 @@ def resolve_gcs_connector_config(
 
 
 def encode_gcs_object_name(key_str: str) -> str:
-    """Encode a serialized LMCache key into a reversible GCS object name."""
+    """Encode a serialized LMCache key into a reversible GCS object name.
+
+    Args:
+        key_str: Serialized LMCache key string.
+
+    Returns:
+        A percent-encoded object name safe to use in GCS paths.
+    """
     return quote(key_str, safe="")
 
 
 def decode_gcs_object_name(object_name: str) -> str:
-    """Decode a reversible GCS object name back into an LMCache key string."""
+    """Decode a reversible GCS object name back into an LMCache key string.
+
+    Args:
+        object_name: Percent-encoded GCS object name.
+
+    Returns:
+        The decoded serialized LMCache key string.
+    """
     return unquote(object_name)
 
 
