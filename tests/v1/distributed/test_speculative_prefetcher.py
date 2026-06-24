@@ -33,6 +33,7 @@ class TestConstruction:
             {"popularity_weight": -0.1},
             {"popularity_weight": 1.1},
             {"max_sources": 0},
+            {"max_pop_keys": 0},
         ],
     )
     def test_invalid_args_raise(self, kwargs):
@@ -154,6 +155,31 @@ class TestBoundsAndReset:
         sp.observe_sequence(["C", "D"])  # source C (B->C also)
         sp.observe_sequence(["E", "F"])  # forces eviction
         assert sp.num_sources <= 2
+
+    def test_max_pop_keys_bound(self):
+        """The popularity table stays bounded no matter how many distinct keys
+        are observed (no unbounded growth / memory leak)."""
+        sp = SpeculativePrefetcher(max_pop_keys=8)
+        for i in range(1000):
+            sp.observe(f"key-{i}")
+        assert sp.num_keys_seen <= 8
+
+    def test_lru_source_eviction_keeps_recent(self):
+        """Eviction is least-recently-used: re-recording a source refreshes it
+        so a newly-added source evicts the stale one instead.
+
+        Drives the transition recorder directly to isolate the eviction policy
+        from the successor edges that ``observe_sequence`` would also create.
+        """
+        sp = SpeculativePrefetcher(popularity_weight=0.0, max_sources=2)
+        sp._record_transition("A", "x")  # sources: [A]
+        sp._record_transition("B", "y")  # sources: [A, B]
+        sp._record_transition("A", "z")  # refresh A -> most recent: [B, A]
+        sp._record_transition("C", "w")  # over cap -> evict LRU (B): [A, C]
+        assert sp.num_sources == 2
+        assert sp.predict_keys(recent=["A"])  # A survived
+        assert sp.predict_keys(recent=["C"])  # C present
+        assert sp.predict_keys(recent=["B"]) == []  # B evicted
 
     def test_reset_clears_state(self):
         sp = SpeculativePrefetcher()
