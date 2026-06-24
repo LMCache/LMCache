@@ -554,7 +554,7 @@ Adding a new request type
 1. Add a new member to ``RequestType`` in ``protocols/base.py``.
 2. Create a ``ProtocolDefinition`` in the appropriate ``protocols/*.py`` file
    (``engine``, ``controller``, ``observability``, ``debug``, ``blend``,
-   ``blend_v2``, or ``blend_v3``) and add the request name to that
+   ``blend_v2``, ``blend_v3``, or ``p2p``) and add the request name to that
    module's ``REQUEST_NAMES``.
 3. Implement the handler method on the appropriate ``EngineModule``
    (e.g. ``LookupModule``, ``LMCacheDrivenTransferModule``, ``BlendV3Module``) and

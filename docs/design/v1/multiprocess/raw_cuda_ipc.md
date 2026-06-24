@@ -2,7 +2,7 @@
 
 ## Why a second wrapper
 
-The default `CudaIPCWrapper` in `custom_types.py` calls
+The default `CudaIPCWrapper` in `platform/cuda/ipc_wrapper.py` calls
 `tensor.untyped_storage()._share_cuda_()` to publish the storage over
 CUDA IPC. That path only works when the storage is owned by PyTorch's
 caching allocator. TRT-LLM's KV pool is published via
@@ -28,21 +28,22 @@ the torch side restores them.
 `RawCudaIPCWrapper` is a **subclass** of `CudaIPCWrapper`, not a new
 class with its own ext code. This is load-bearing for the wire format:
 
-- `KVCache = list[CudaIPCWrapper]` is the registered msgspec type for
+- `KVCache = list[DeviceIPCWrapper]` is the registered msgspec type for
   `REGISTER_KV_CACHE`. msgspec does **not** support unions of custom
   ext-encoded types — adding a parallel class would force a wider
   decoder type and break either round-trip or the existing
-  `CudaIPCWrapper` consumers.
+  `DeviceIPCWrapper` consumers.
 - The customized serializer (`_CUSTOMERIZED_SERIALIZERS`) is keyed on
-  `CudaIPCWrapper` and dispatched by `isinstance`, so subclass instances
+  `DeviceIPCWrapper` and dispatched by `isinstance`, so subclass instances
   encode through the same path with **ext code 1**.
 - `Serialize` is `pickle.dumps(obj)`, which preserves subclass
   identity. On the receiving side `Deserialize` reconstructs the
   subclass and `to_tensor` dispatches to the override.
 
 The receiving server therefore needs no per-type branching: a
-`list[CudaIPCWrapper]` arriving at `MPCacheServer.register_kv_cache`
-contains either kind, and `to_tensor()` does the right thing.
+`list[DeviceIPCWrapper]` arriving at
+`LMCacheDrivenTransferModule.register_kv_cache` contains either kind, and
+`to_tensor()` does the right thing.
 
 ## Sender-side validation
 
