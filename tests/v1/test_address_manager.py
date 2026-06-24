@@ -5,6 +5,7 @@
 from typing import List, Tuple
 import concurrent.futures
 import threading
+import time
 
 # Third Party
 import pytest
@@ -1236,6 +1237,9 @@ class TestAddressSizeSnapshot:
         def grow():
             while not stop.is_set():
                 manager.sbrk(4096)
+                # Yield briefly so the grower does not starve the observer
+                # threads (and pin a core) in constrained CI environments.
+                time.sleep(0.001)
 
         def observe():
             for _ in range(20000):

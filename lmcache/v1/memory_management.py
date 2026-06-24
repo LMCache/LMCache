@@ -1892,6 +1892,20 @@ class PagedAddressManager:
         """Get the total free size in bytes."""
         return len(self._allocator.free_blocks) * self._allocator.align_bytes
 
+    def get_size_snapshot(self) -> AddressSizeSnapshot:
+        """Return free, allocated, and heap sizes as a single snapshot.
+
+        Mirrors :meth:`AddressManager.get_size_snapshot` so callers (e.g.
+        ``L1MemoryManager.get_memory_usage``) can read a coherent
+        ``(free, allocated, heap)`` triple regardless of which address-manager
+        implementation backs the allocator. The paged address space has a fixed
+        ``heap`` size (no lazy ``sbrk`` growth), so a lock is unnecessary; the
+        free size is derived from the current free-block count in one read.
+        """
+        heap = self.get_heap_size()
+        free = self.get_free_size()
+        return AddressSizeSnapshot(free=free, allocated=heap - free, heap=heap)
+
 
 class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     """
