@@ -18,6 +18,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
+    PrefetchMode,
     TrimPolicy,
 )
 from lmcache.v1.distributed.config import EvictionConfig, StorageManagerConfig
@@ -403,6 +404,7 @@ class StorageManager:
         policy: TrimPolicy = TrimPolicy.PREFIX,
         attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
         skip_l2: bool = False,
+        mode: PrefetchMode = PrefetchMode.LOOKUP,
     ) -> PrefetchHandle:
         """Prefetch objects into L1 asynchronously.
 
@@ -419,11 +421,47 @@ class StorageManager:
                 ``SPARSE`` keeps every found key (gap-tolerant).
             attn_desc: Cross-chunk attention windows of all object groups, in
                 object-group order.
-            skip_l2: If True, only check L1 and return without submitting to L2.
+            skip_l2: If True, do not submit to L2. For ``LOOKUP`` this returns
+                the already-resident L1 hit set only; for ``WARM`` (which does
+                not probe L1) it is a no-op that returns an empty handle.
+            mode: The prefetch intent (see :class:`PrefetchMode`).  ``WARM``
+                is the speculative pre-warm path: every key loaded from L2 is
+                retained (permanent) regardless of the configured prefetch
+                policy, and **no read lock** is taken (this method skips the
+                L1-hit ``reserve_read`` entirely).  ``LOOKUP`` (default) loads
+                for an imminent reader: retention defers to the policy and
+                found/loaded keys are read-locked.
 
         Returns:
             PrefetchHandle to track the task.
         """
+        if mode is PrefetchMode.WARM:
+            # Warm prefetch path: acquire NO read lock. Skip the L1-hit
+            # reserve_read entirely and hand all keys to the controller, which
+            # loads L2 misses and transitions them to *ready* via finish_write
+            # (no lock); keys already resident in L1 are skipped by
+            # reserve_write. The handle reports the L2-loaded set via
+            # query_prefetch_status; there is nothing to release.
+            prefetch_request_id = -1
+            if not skip_l2 and keys and self._l2_adapters:
+                prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
+                    keys,
+                    layout_desc,
+                    extra_count=extra_count,
+                    policy=policy,
+                    mode=mode,
+                )
+            return PrefetchHandle(
+                prefetch_request_id=prefetch_request_id,
+                external_request_id=external_request_id,
+                l1_found_indices=(),
+                total_requested_keys=len(keys),
+                submit_time=time.monotonic(),
+                l2_orig_indices=(
+                    tuple(range(len(keys))) if prefetch_request_id != -1 else ()
+                ),
+            )
+
         # NOTE: now we only have L1, so the prefetch is essentially checking how many
         # objects are already in L1, and adding read locks to them.
 
@@ -465,6 +503,7 @@ class StorageManager:
                     extra_count=extra_count,
                     policy=TrimPolicy.SPARSE,
                     attn_desc=attn_desc,
+                    mode=mode,
                 )
             return PrefetchHandle(
                 prefetch_request_id=prefetch_request_id,
@@ -530,6 +569,7 @@ class StorageManager:
                 extra_count=extra_count,
                 attn_desc=attn_desc,
                 policy=policy,
+                mode=mode,
             )
             # The controller indexes its result bitmap over remaining_keys
             # (0-based); map those local indices back to original positions.

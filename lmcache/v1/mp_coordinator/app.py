@@ -35,6 +35,7 @@ from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.l2.eviction_manager import (
     L2EvictionManager,
 )
+from lmcache.v1.mp_coordinator.l2.prefetch_manager import L2PrefetchManager
 from lmcache.v1.mp_coordinator.l2.resync_manager import L2ResyncManager
 from lmcache.v1.mp_coordinator.l2.usage_manager import L2UsageManager
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry
@@ -87,6 +88,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         eviction_manager=eviction_manager,
         page_size=config.resync_page_size,
     )
+    prefetch_manager = L2PrefetchManager()
     blend_directory = GlobalBlendMatcher(
         chunk_size=config.blend_chunk_size, probe_stride=config.blend_probe_stride
     )
@@ -121,6 +123,9 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         # calls (eviction dispatch + startup resync). Created inside
         # the lifespan so it binds to the running event loop.
         outbound_client = httpx.AsyncClient(timeout=30.0)
+        # Stash on app.state so request handlers (e.g. POST /l2/prefetch) can
+        # issue outbound calls; background loops capture it directly.
+        app.state.outbound_client = outbound_client
         health_task = None
         eviction_task = None
         resync_task = None
@@ -152,6 +157,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     app.state.usage_manager = usage_manager
     app.state.eviction_manager = eviction_manager
     app.state.resync_manager = resync_manager
+    app.state.prefetch_manager = prefetch_manager
     app.state.blend_directory = blend_directory
 
     apis_path = Path(__file__).parent / "http_apis"

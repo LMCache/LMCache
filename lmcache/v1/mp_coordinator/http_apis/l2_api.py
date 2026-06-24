@@ -6,19 +6,24 @@ status queries (quota + usage) for per-``cache_salt`` L2 data.
 """
 
 # Third Party
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
+import httpx
 
 # First Party
 from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.mp_coordinator.l2.eviction_manager import (
     L2EvictionManager,
 )
+from lmcache.v1.mp_coordinator.l2.prefetch_manager import L2PrefetchManager
 from lmcache.v1.mp_coordinator.l2.usage_manager import L2UsageManager
+from lmcache.v1.mp_coordinator.registry import InstanceRegistry
 from lmcache.v1.mp_coordinator.schemas import (
     EventType,
     L2StatusListResponse,
     L2StatusResponse,
+    PrefetchRequest,
+    PrefetchResponse,
     QuotaResponse,
     ReportUsageRequest,
     ReportUsageResponse,
@@ -63,6 +68,34 @@ def _eviction_manager(request: Request) -> L2EvictionManager:
     if mgr is None:
         raise RuntimeError("eviction manager not initialized")
     return mgr
+
+
+def _prefetch_manager(request: Request) -> L2PrefetchManager:
+    """Return the shared :class:`L2PrefetchManager` from ``app.state``."""
+    mgr = getattr(request.app.state, "prefetch_manager", None)
+    if mgr is None:
+        raise RuntimeError("prefetch manager not initialized")
+    return mgr
+
+
+def _registry(request: Request) -> InstanceRegistry:
+    """Return the shared :class:`InstanceRegistry` from ``app.state``."""
+    registry = getattr(request.app.state, "registry", None)
+    if registry is None:
+        raise RuntimeError("registry not initialized")
+    return registry
+
+
+def _outbound_client(request: Request) -> httpx.AsyncClient:
+    """Return the shared outbound :class:`httpx.AsyncClient` from ``app.state``.
+
+    Created in the app lifespan so it binds to the running event loop. Raises
+    ``RuntimeError`` if accessed outside the lifespan (e.g. in a bare app).
+    """
+    client = getattr(request.app.state, "outbound_client", None)
+    if client is None:
+        raise RuntimeError("outbound client not initialized")
+    return client
 
 
 # -- Quota writes ------------------------------------------------------------
@@ -141,6 +174,104 @@ async def report_events(
             tracker.record_evicted(ok)
             ctrl.on_remove(ok)
     return ReportUsageResponse(recorded=len(body.events))
+
+
+# -- Prefetch dispatch -------------------------------------------------------
+
+
+@router.post("/l2/prefetch")
+async def request_prefetch(body: PrefetchRequest, request: Request) -> PrefetchResponse:
+    """Submit a warm prefetch of a token sequence on one MP server.
+
+    Resolves ``body.instance_id`` in the registry and ``POST``s to that
+    server's ``/l2/prefetch``, which submits the load and returns a
+    ``request_id`` (the load runs in the server's storage-manager thread).
+    Poll ``GET /l2/prefetch/{instance_id}/{request_id}`` for completion.
+
+    Args:
+        body: Target instance, model/world_size, the token_ids to warm, and
+            the per-tenant cache_salt.
+
+    Returns:
+        ``PrefetchResponse`` carrying the server's ``request_id`` (empty when
+        the sequence was shorter than one chunk -- ``status`` ``"noop"``).
+
+    Raises:
+        HTTPException: 404 if ``instance_id`` is not registered; 502 if the
+            target server is unreachable or rejects the submit.
+    """
+    target = _registry(request).get(body.instance_id)
+    if target is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no MP server registered with instance_id={body.instance_id!r}",
+        )
+
+    try:
+        result = await _prefetch_manager(request).submit_prefetch(
+            target=target,
+            http_client=_outbound_client(request),
+            model_name=body.model_name,
+            world_size=body.world_size,
+            token_ids=body.token_ids,
+            cache_salt=body.cache_salt,
+        )
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"prefetch submit to {body.instance_id!r} failed: {exc}",
+        ) from None
+
+    return PrefetchResponse(
+        instance_id=body.instance_id,
+        request_id=result.get("request_id", ""),
+        chunks=result.get("chunks", 0),
+        status=result.get("status", "submitted"),
+    )
+
+
+@router.get("/l2/prefetch/{instance_id}/{request_id}")
+async def get_prefetch_status(
+    instance_id: str, request_id: str, request: Request
+) -> JSONResponse:
+    """Proxy a warm-prefetch status poll to the owning MP server.
+
+    The warm holds no lock, so this poll only reports progress; the first poll
+    that observes completion drops the job on the server (exactly-once). Poll
+    until ``"completed"``.
+
+    Args:
+        instance_id: The MP server the prefetch was submitted to.
+        request_id: The id returned by ``POST /l2/prefetch``.
+
+    Returns:
+        The server's status body relayed verbatim with its status code (200
+        ``pending`` / ``completed``, or 404 for an unknown id).
+
+    Raises:
+        HTTPException: 404 if ``instance_id`` is not registered; 502 if the
+            target server is unreachable.
+    """
+    target = _registry(request).get(instance_id)
+    if target is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no MP server registered with instance_id={instance_id!r}",
+        )
+
+    try:
+        code, payload = await _prefetch_manager(request).get_status(
+            target=target,
+            http_client=_outbound_client(request),
+            request_id=request_id,
+        )
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"prefetch status from {instance_id!r} failed: {exc}",
+        ) from None
+
+    return JSONResponse(status_code=code, content=payload)
 
 
 # -- Combined status queries -------------------------------------------------

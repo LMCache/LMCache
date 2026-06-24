@@ -11,7 +11,12 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, TrimPolicy
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    ObjectKey,
+    PrefetchMode,
+    TrimPolicy,
+)
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -623,6 +628,36 @@ class TestStorageManagerL2Prefetch:
 
         assert hit_count is not None, "Prefetch should complete"
         assert hit_count == 0, f"Expected 0 hits, got {hit_count}"
+
+        sm.close()
+
+    def test_warm_skip_l2_is_noop(self, l2_storage_manager_config, basic_layout):
+        """``mode=WARM`` + ``skip_l2=True`` submits nothing and returns an empty
+        handle.
+
+        Regression: the WARM branch must honor ``skip_l2`` (it previously
+        ignored it, issuing L2 lookup/load work and mutating L1).
+        """
+        sm = StorageManager(l2_storage_manager_config)
+        keys = [make_object_key(i) for i in range(3)]
+
+        # Populate L2, then clear L1 so any erroneous L2 load would be visible.
+        self._write_keys_and_wait_for_l2(sm, keys, basic_layout)
+        time.sleep(0.05)
+        sm.clear()
+        used, _ = sm._l1_manager.get_memory_usage()
+        assert used == 0
+
+        handle = sm.submit_prefetch_task(
+            keys, basic_layout, mode=PrefetchMode.WARM, skip_l2=True
+        )
+
+        # No controller request submitted, nothing to track.
+        assert handle.prefetch_request_id == -1
+        assert handle.l2_orig_indices == ()
+        # L1 untouched — no L2 load happened.
+        used, _ = sm._l1_manager.get_memory_usage()
+        assert used == 0, f"skip_l2 should load nothing, but {used} bytes used"
 
         sm.close()
 
