@@ -31,6 +31,7 @@ class _FakeStoreContext:
 
     commit_impl: Callable[[list[torch.Tensor]], bool]
     prepare_result: tuple[list[torch.Tensor], list[int]] | None = None
+    prepare_impl: Callable[[], None] | None = None
 
     def __post_init__(self) -> None:
         self.layout_desc = SimpleNamespace(
@@ -40,6 +41,8 @@ class _FakeStoreContext:
     def prepare_store(
         self, _key: object, _instance_id: int
     ) -> tuple[list[torch.Tensor], list[int]] | None:
+        if self.prepare_impl is not None:
+            self.prepare_impl()
         return self.prepare_result
 
     def commit_store(
@@ -399,4 +402,59 @@ def test_commit_store_serialized_by_commit_lock(
     assert not concurrent_commits.is_set(), (
         "commit_store called concurrently — _commit_lock not working"
     )
+    ctx.close()
+
+
+def test_prepare_store_runs_on_background_thread_not_forward_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """submit_store must return immediately even when prepare_store is slow.
+
+    The forward thread must not be blocked by the prepare_store RPC round-trip.
+    Both prepare_store and buffer allocation now run entirely inside the
+    background ``_prepare_gather_and_commit`` closure.
+    """
+    gather_gate = threading.Event()
+    gather_gate.set()
+    prepare_started = threading.Event()
+    prepare_gate = threading.Event()
+
+    def _slow_prepare() -> None:
+        prepare_started.set()
+        # Block until the test explicitly releases the gate.
+        prepare_gate.wait(timeout=2)
+
+    monkeypatch.setattr(async_engine_driven, "torch_dev", _FakeTorchDev(gather_gate))
+    _install_fake_gather(monkeypatch)
+
+    ctx = AsyncEngineDrivenTransferContext(commit_workers=1)
+    ctx._engine_driven_context = _FakeStoreContext(  # type: ignore[assignment]
+        commit_impl=lambda _c: True,
+        prepare_impl=_slow_prepare,
+    )
+
+    submit_returned = threading.Event()
+
+    def _submit() -> None:
+        ctx.submit_store(
+            "r1", object(), 1, {"k": torch.zeros(1)}, [[0]], _FakeEvent(gather_gate), 1
+        )
+        submit_returned.set()
+
+    t = threading.Thread(target=_submit, daemon=True)
+    t.start()
+
+    # submit_store must return before prepare_store finishes.
+    assert submit_returned.wait(timeout=1), (
+        "submit_store blocked the forward thread — prepare_store is not async"
+    )
+
+    # Confirm prepare_store was actually reached by the background thread.
+    assert prepare_started.wait(timeout=1), (
+        "background thread never reached prepare_store"
+    )
+
+    # Now release prepare_store and let the background work complete.
+    prepare_gate.set()
+    t.join(timeout=1)
     ctx.close()

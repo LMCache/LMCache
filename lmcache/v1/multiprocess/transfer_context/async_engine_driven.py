@@ -43,19 +43,21 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
     ``submit_retrieve()`` (this path does not change retrieve). Only the store
     is made async.
 
-    Store is two-phase, both executed entirely in a background thread:
+    Store is three-phase, all executed entirely in a background thread:
 
-    1. gather: wait for the forward event on the copy stream, then enqueue
+    1. prepare: call prepare_store() to negotiate buffers with the server
+       (the costliest step in pickle mode due to the synchronous RPC round-trip).
+    2. gather: wait for the forward event on the copy stream, then enqueue
        GPU->CPU copies. When SHM buffers are available, gather writes directly
        into SHM views (matching the synchronous path). Otherwise, gather
        targets pinned staging buffers.
-    2. commit: wait for gather completion (via a recorded CUDA event), then
+    3. commit: wait for gather completion (via a recorded CUDA event), then
        perform commit_store() and resolve the returned future.
 
-    ``submit_store`` only performs lightweight preparation (prepare_store,
-    buffer allocation) on the forward thread and immediately submits all
-    GPU/copy work to the background ``commit_executor``, so the forward thread
-    is never blocked by gather kernel launch latency.
+    ``submit_store`` performs only O(1) work on the forward thread (registration
+    check and block-id flattening) before submitting all three phases to the
+    background ``commit_executor``, so the forward thread is never blocked by
+    the RPC round-trip or gather kernel launch latency.
 
     This class is only instantiated by the factory when the device is
     async-capable, so the constructor creates async resources unconditionally;
@@ -159,12 +161,13 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         _event: IPCEvent,
         blocks_in_chunk: int,
     ) -> MessagingFuture:
-        """Two-phase async store (gather and commit both in background thread).
+        """Three-phase async store (prepare, gather and commit all in background).
 
-        Performs lightweight preparation (prepare_store, buffer allocation) on
-        the forward thread and immediately submits the gather + commit work to
-        the background ``commit_executor``. Returns an unresolved future that
-        resolves only after both gather completion and the commit ACK.
+        Performs only O(1) work on the forward thread (registration check and
+        block-id flattening), then submits all three phases — prepare_store,
+        gather (GPU->CPU), and commit — to the background ``commit_executor``.
+        Returns an unresolved future that resolves only after all three phases
+        complete.
 
         Args:
             _request_id: External request identifier (used for logging).
@@ -191,10 +194,6 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         engine_driven_context = self._engine_driven_context
         commit_executor = self._commit_executor
 
-        staged_chunks: list[torch.Tensor] = []
-        # Whether we gathered directly into SHM views (True) or into
-        # pinned staging buffers that need to be released later (False).
-        used_shm_direct = False
         # Signals when this task has recorded its CUDA event (or exited early),
         # allowing flush_inflight_gathers to safely proceed.
         gather_launched = threading.Event()
@@ -205,50 +204,59 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                     return completion
                 self._pending_gathers.add(gather_launched)
 
-            result = engine_driven_context.prepare_store(key, instance_id)
-
-            out_buffers, chunk_indices = result if result is not None else (None, None)
-            if chunk_indices is not None and len(chunk_indices) == 0:
-                # All chunks are already in cache: no gather, no commit.
-                with self._inflight_lock:
-                    self._pending_gathers.discard(gather_launched)
-                gather_launched.set()
-                completion.set_result(True)
-                return completion
-
             full_block_ids = _single_group_block_ids(block_ids)
 
-            num_chunks = (
-                len(chunk_indices)
-                if chunk_indices is not None
-                else len(full_block_ids) // blocks_in_chunk
-            )
-
-            # Determine gather target:
-            # - SHM path (out_buffers available): gather directly into SHM views
-            # - Pickle path (no out_buffers): gather into pinned staging buffers
-            if out_buffers is not None:
-                # SHM path: gather directly into SHM views, no staging needed.
-                gather_target = out_buffers
-                used_shm_direct = True
-            else:
-                # Pickle path: allocate pinned staging buffers.
-                layout_desc = engine_driven_context.layout_desc
-                if not layout_desc.shapes:
-                    raise RuntimeError("engine-driven layout_desc.shapes is empty")
-                if not layout_desc.dtypes:
-                    raise RuntimeError("engine-driven layout_desc.dtypes is empty")
-                staged_chunks = self._alloc_pinned_staging(
-                    layout_desc.shapes[0],
-                    layout_desc.dtypes[0],
-                    num_chunks,
-                )
-                gather_target = staged_chunks
-
-            def _commit_after_gather() -> None:
+            def _prepare_gather_and_commit() -> None:
                 gather_done: Any | None = None
                 ok = False
+                # Whether we gathered directly into SHM views (True) or into
+                # pinned staging buffers that need to be released later (False).
+                used_shm_direct = False
+                staged_chunks: list[torch.Tensor] = []
                 try:
+                    # --- Phase 1: prepare_store ---
+                    # In pickle mode this is the costliest step (sync RPC
+                    # round-trip).  Running it here keeps the forward thread free.
+                    result = engine_driven_context.prepare_store(key, instance_id)
+                    out_buffers, chunk_indices = (
+                        result if result is not None else (None, None)
+                    )
+
+                    if chunk_indices is not None and len(chunk_indices) == 0:
+                        # All chunks are already in cache: no gather, no commit.
+                        ok = True
+                        return
+
+                    num_chunks = (
+                        len(chunk_indices)
+                        if chunk_indices is not None
+                        else len(full_block_ids) // blocks_in_chunk
+                    )
+
+                    # Determine gather target:
+                    # - SHM path (out_buffers available): gather into SHM views
+                    # - Pickle path (no out_buffers): gather into pinned staging
+                    if out_buffers is not None:
+                        gather_target = out_buffers
+                        used_shm_direct = True
+                    else:
+                        layout_desc = engine_driven_context.layout_desc
+                        if not layout_desc.shapes:
+                            raise RuntimeError(
+                                "engine-driven layout_desc.shapes is empty"
+                            )
+                        if not layout_desc.dtypes:
+                            raise RuntimeError(
+                                "engine-driven layout_desc.dtypes is empty"
+                            )
+                        staged_chunks = self._alloc_pinned_staging(
+                            layout_desc.shapes[0],
+                            layout_desc.dtypes[0],
+                            num_chunks,
+                        )
+                        gather_target = staged_chunks
+
+                    # --- Phase 2: gather (GPU->CPU copy on copy stream) ---
                     with torch.inference_mode(), torch_dev.stream(self._copy_stream):
                         _event.wait(stream=self._copy_stream)
 
@@ -274,6 +282,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                     if gather_done is not None:
                         gather_done.synchronize()
 
+                    # --- Phase 3: commit ---
                     with self._commit_lock:
                         ok = engine_driven_context.commit_store(
                             key, instance_id, gather_target
@@ -300,16 +309,13 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                     gather_launched.set()
                     completion.set_result(ok)
 
-            # Submitting the commit task is the ownership-transfer point: once it
-            # succeeds, the commit task is solely responsible for releasing the
-            # staging buffers and resolving the future. The except below therefore
-            # only handles failures that occur *before* this submit, so it can
-            # never double-release or double-resolve.
-            commit_executor.submit(_commit_after_gather)
+            # Submitting the task is the ownership-transfer point: once it
+            # succeeds, the closure is solely responsible for releasing staging
+            # buffers and resolving the future. The except below therefore only
+            # handles failures that occur *before* this submit.
+            commit_executor.submit(_prepare_gather_and_commit)
         except Exception:
             logger.exception("Failed to submit async engine-driven store")
-            if staged_chunks:
-                self._release_staging(staged_chunks)
             with self._inflight_lock:
                 self._pending_gathers.discard(gather_launched)
             gather_launched.set()
