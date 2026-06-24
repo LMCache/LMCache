@@ -296,19 +296,22 @@ __global__ void multi_layer_block_transfer_kernel(
                   static_cast<int>(engine_kv_format));                  \
   }
 
+// Pointer-based launch core. Takes raw device addresses + scalars instead of
+// torch::Tensors and an explicit `stream`, so callers can issue many launches
+// back-to-back without per-launch tensor marshalling and without re-setting the
+// CUDA device guard each time. The caller MUST have an active device guard for
+// the target device (set once) before calling this.
 template <typename ScalarType>
-void multi_layer_block_kv_transfer_templated(
-    const torch::Tensor& paged_buffer_ptrs_tensor,
-    std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
-    const torch::Device& device, TransferDirection direction,
-    PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
-    EngineKVFormat engine_kv_format, int skip_prefix_n_blocks) {
+void multi_layer_block_kv_transfer_ptr_templated(
+    uintptr_t paged_buffer_ptrs_addr, const int64_t* lmcache_objects_ptrs,
+    int num_objects, uintptr_t block_ids_addr, int total_blocks,
+    TransferDirection direction, const PageBufferShapeDesc& shape_desc,
+    int lmcache_chunk_size, EngineKVFormat engine_kv_format,
+    int skip_prefix_n_blocks, cudaStream_t stream) {
   // --- Validation ---
-  int num_objects = static_cast<int>(lmcache_objects_ptrs.size());
   TORCH_CHECK(num_objects >= 1 && num_objects <= 4,
               "Expected 1-4 LMCache objects, got ", num_objects);
 
-  int total_blocks = block_ids.size(0);
   TORCH_CHECK(total_blocks % num_objects == 0, "block_ids length (",
               total_blocks, ") must be divisible by num_objects (", num_objects,
               ")");
@@ -331,13 +334,11 @@ void multi_layer_block_kv_transfer_templated(
 
   // --- Build paged buffer pointer array ---
   ScalarType** paged_buffer_ptrs =
-      reinterpret_cast<ScalarType**>(paged_buffer_ptrs_tensor.data_ptr());
+      reinterpret_cast<ScalarType**>(paged_buffer_ptrs_addr);
 
-  const at::cuda::OptionalCUDAGuard device_guard(device);
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-
-  // --- block_ids is a GPU int64 tensor, read directly ---
-  const int64_t* block_ids_ptr = block_ids.data_ptr<int64_t>();
+  // --- block_ids is a GPU int64 array, read directly ---
+  const int64_t* block_ids_ptr =
+      reinterpret_cast<const int64_t*>(block_ids_addr);
 
   // --- Grid and block dimensions ---
   int elements_per_head = shape_desc.hs * shape_desc.element_size /
@@ -355,8 +356,55 @@ void multi_layer_block_kv_transfer_templated(
   }
 }
 
+template <typename ScalarType>
+void multi_layer_block_kv_transfer_templated(
+    const torch::Tensor& paged_buffer_ptrs_tensor,
+    std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
+    const torch::Device& device, TransferDirection direction,
+    PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
+    EngineKVFormat engine_kv_format, int skip_prefix_n_blocks) {
+  const at::cuda::OptionalCUDAGuard device_guard(device);
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  multi_layer_block_kv_transfer_ptr_templated<ScalarType>(
+      reinterpret_cast<uintptr_t>(paged_buffer_ptrs_tensor.data_ptr()),
+      lmcache_objects_ptrs.data(),
+      static_cast<int>(lmcache_objects_ptrs.size()),
+      reinterpret_cast<uintptr_t>(block_ids.data_ptr<int64_t>()),
+      static_cast<int>(block_ids.size(0)), direction, shape_desc,
+      lmcache_chunk_size, engine_kv_format, skip_prefix_n_blocks, stream);
+}
+
 #undef DISPATCH_FORMAT
 #undef LAUNCH_KERNEL
+
+// Dispatch the pointer-based launch on the working dtype (matching the
+// vectorization choice in multi_layer_block_kv_transfer below).
+void launch_block_kv_transfer_ptr(
+    uintptr_t paged_buffer_ptrs_addr, const int64_t* lmcache_objects_ptrs,
+    int num_objects, uintptr_t block_ids_addr, int total_blocks,
+    TransferDirection direction, const PageBufferShapeDesc& shape_desc,
+    int lmcache_chunk_size, EngineKVFormat engine_kv_format,
+    int skip_prefix_n_blocks, cudaStream_t stream) {
+  int head_bytes = shape_desc.hs * shape_desc.element_size;
+  TORCH_CHECK(head_bytes % sizeof(uint16_t) == 0, "head_size * element_size (",
+              head_bytes, ") must be divisible by 2 for vectorized access");
+  if (head_bytes % sizeof(uint4) == 0) {
+    multi_layer_block_kv_transfer_ptr_templated<uint4>(
+        paged_buffer_ptrs_addr, lmcache_objects_ptrs, num_objects,
+        block_ids_addr, total_blocks, direction, shape_desc, lmcache_chunk_size,
+        engine_kv_format, skip_prefix_n_blocks, stream);
+  } else if (head_bytes % sizeof(uint32_t) == 0) {
+    multi_layer_block_kv_transfer_ptr_templated<uint32_t>(
+        paged_buffer_ptrs_addr, lmcache_objects_ptrs, num_objects,
+        block_ids_addr, total_blocks, direction, shape_desc, lmcache_chunk_size,
+        engine_kv_format, skip_prefix_n_blocks, stream);
+  } else {
+    multi_layer_block_kv_transfer_ptr_templated<uint16_t>(
+        paged_buffer_ptrs_addr, lmcache_objects_ptrs, num_objects,
+        block_ids_addr, total_blocks, direction, shape_desc, lmcache_chunk_size,
+        engine_kv_format, skip_prefix_n_blocks, stream);
+  }
+}
 
 }  // namespace
 
@@ -388,3 +436,58 @@ void multi_layer_block_kv_transfer(
 }
 
 #undef LAUNCH_TEMPLATED
+
+void execute_object_group_transfer(
+    TransferDirection direction, const torch::Device& device,
+    size_t host_buffer_alignment,
+    const std::vector<KernelGroupSpec>& kernel_group_specs,
+    const std::vector<BatchStep>& batch_steps) {
+  // Set the device guard and resolve the stream once for the whole plan; every
+  // staging copy and kernel launch below is enqueued on this stream in order.
+  const at::cuda::OptionalCUDAGuard device_guard(device);
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const bool is_h2d = (direction == TransferDirection::H2D);
+  const cudaMemcpyKind kind =
+      is_h2d ? cudaMemcpyHostToDevice : cudaMemcpyDeviceToHost;
+
+  const auto do_staging = [&](const std::vector<StagingCopy>& staging) {
+    for (const auto& copy : staging) {
+      lmcache_memcpy_async_one(copy.dest, copy.src, copy.nbytes, kind,
+                               copy.host_offset, host_buffer_alignment, stream);
+    }
+  };
+
+  for (const auto& step : batch_steps) {
+    // H2D stages CPU->GPU temp buffers before the kernel reads them; D2H stages
+    // GPU->CPU after the kernel writes them. The per-step ordering must be
+    // preserved because temp buffers are reused across steps.
+    if (is_h2d) {
+      do_staging(step.staging);
+    }
+    for (const auto& launch : step.launches) {
+      TORCH_CHECK(
+          launch.group_idx >= 0 &&
+              launch.group_idx < static_cast<int>(kernel_group_specs.size()),
+          "LaunchVar.group_idx out of range: ", launch.group_idx);
+      const KernelGroupSpec& group = kernel_group_specs[launch.group_idx];
+      TORCH_CHECK(
+          launch.num_objects >= 1 &&
+              launch.num_objects <=
+                  static_cast<int>(group.lmcache_objects_ptrs.size()),
+          "LaunchVar.num_objects (", launch.num_objects,
+          ") exceeds available temp buffers (",
+          group.lmcache_objects_ptrs.size(), ")");
+      const uintptr_t block_ids_addr =
+          group.block_ids_base +
+          static_cast<uintptr_t>(launch.block_ids_offset) * sizeof(int64_t);
+      launch_block_kv_transfer_ptr(
+          group.paged_buffer_ptrs, group.lmcache_objects_ptrs.data(),
+          launch.num_objects, block_ids_addr, launch.total_blocks, direction,
+          group.shape_desc, group.lmcache_chunk_size, group.engine_kv_format,
+          launch.skip_prefix_n_blocks, stream);
+    }
+    if (!is_h2d) {
+      do_staging(step.staging);
+    }
+  }
+}
