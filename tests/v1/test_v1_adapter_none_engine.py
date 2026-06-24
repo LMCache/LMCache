@@ -2,6 +2,7 @@
 
 # Standard
 from types import SimpleNamespace
+from typing import Any, Optional
 
 # Third Party
 import pytest
