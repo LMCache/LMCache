@@ -43,11 +43,11 @@ class SystemMemoryDetector:
             available_gb = memory.available / (1024**3)
 
             system = platform.system()
-            logger.info(f"{system} system available memory: {available_gb:.2f} GB")
+            logger.info("%s system available memory: %.2f GB", system, available_gb)
             return available_gb
 
         except Exception as e:
-            logger.warning(f"Failed to get system available memory using psutil: {e}")
+            logger.warning("Failed to get system available memory using psutil: %s", e)
             return 0.0
 
 
@@ -106,5 +106,5 @@ class NUMADetector:
 
             return NUMAMapping(gpu_to_numa_mapping={device_index: numa_node})
         except Exception as e:
-            logger.warning(f"Failed to auto read NUMA mapping from system: {e}")
+            logger.warning("Failed to auto read NUMA mapping from system: %s", e)
             return None
