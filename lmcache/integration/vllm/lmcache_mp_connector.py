@@ -1101,7 +1101,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # Notify LMCache to end the session for this request
         self.scheduler_adapter.end_session(request.request_id)
 
-        return True, return_params
+        return True, (return_params or None)
 
     def request_finished_all_groups(
         self,
