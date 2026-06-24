@@ -87,9 +87,14 @@ def _get_prefix_hit_length(
     Returns:
         The prefix hit length in chunks (fully-present chunks of the prefix).
 
-    Example:
-        With ``world_size=2`` and ``num_object_groups=2`` (4 keys per chunk), a
-        found-key prefix of length 10 hits ``10 // 4 = 2`` whole chunks.
+    Example (2 object groups ``g0,g1``; 2 kv_ranks ``r0,r1`` -> 4 keys per
+    chunk). A found-key prefix of 6 keys covers one full chunk plus half the
+    next::
+
+        [c0g0r0, c0g0r1, c0g1r0, c0g1r1,   # chunk 0: fully present
+         c1g0r0, c1g0r1]                    # chunk 1: 2 of 4 -> partial, dropped
+
+    so ``found_prefix_len=6`` hits ``6 // (2 * 2) = 1`` whole chunk.
 
     Note:
         Correct only under full attention -- every object group present for
