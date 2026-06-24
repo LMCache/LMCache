@@ -535,6 +535,9 @@ func TestBuildDaemonSet_Minimal(t *testing.T) {
 	if c.ImagePullPolicy != corev1.PullIfNotPresent {
 		t.Fatalf("expected PullIfNotPresent, got %s", c.ImagePullPolicy)
 	}
+	if c.SecurityContext == nil || c.SecurityContext.Privileged == nil || !*c.SecurityContext.Privileged {
+		t.Fatal("expected default securityContext.privileged=true when spec.securityContext is unset")
+	}
 
 	// Should have probes
 	if c.StartupProbe == nil {
@@ -585,6 +588,40 @@ func TestBuildDaemonSet_Minimal(t *testing.T) {
 	// Should have 3 ports (server + http + metrics) by default
 	if len(c.Ports) != 3 {
 		t.Fatalf("expected 3 container ports, got %d", len(c.Ports))
+	}
+}
+
+func TestBuildDaemonSet_CustomSecurityContext(t *testing.T) {
+	engine := minimalEngine()
+	runAsNonRoot := true
+	privileged := false
+	runAsUser := int64(1000)
+	engine.Spec.SecurityContext = &corev1.SecurityContext{
+		RunAsNonRoot: &runAsNonRoot,
+		Privileged:   &privileged,
+		RunAsUser:    &runAsUser,
+	}
+
+	ds := BuildDaemonSet(engine)
+	c := ds.Spec.Template.Spec.Containers[0]
+
+	if c.SecurityContext == nil {
+		t.Fatal("expected securityContext to be set")
+	}
+	if c.SecurityContext.Privileged == nil || *c.SecurityContext.Privileged {
+		t.Fatal("expected privileged=false from spec.securityContext")
+	}
+	if c.SecurityContext.RunAsNonRoot == nil || !*c.SecurityContext.RunAsNonRoot {
+		t.Fatal("expected runAsNonRoot=true from spec.securityContext")
+	}
+	if c.SecurityContext.RunAsUser == nil || *c.SecurityContext.RunAsUser != 1000 {
+		t.Fatal("expected runAsUser=1000 from spec.securityContext")
+	}
+
+	// Ensure a DeepCopy is used so later spec mutations do not alter the built DaemonSet.
+	*engine.Spec.SecurityContext.Privileged = true
+	if c.SecurityContext.Privileged == nil || *c.SecurityContext.Privileged {
+		t.Fatal("built daemonset securityContext should not be affected by later spec mutations")
 	}
 }
 

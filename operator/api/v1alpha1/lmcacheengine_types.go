@@ -372,6 +372,14 @@ type LMCacheEngineSpec struct {
 	// +optional
 	VolumeMounts []corev1.VolumeMount `json:"volumeMounts,omitempty"`
 
+	// securityContext defines the container-level security context for the
+	// LMCache container.
+	//
+	// When unset, the operator preserves the existing default behavior and runs
+	// the container with privileged: true.
+	// +optional
+	SecurityContext *corev1.SecurityContext `json:"securityContext,omitempty"`
+
 	// podAnnotations are additional annotations added to pods.
 	// +optional
 	PodAnnotations map[string]string `json:"podAnnotations,omitempty"`

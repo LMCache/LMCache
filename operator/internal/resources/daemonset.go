@@ -80,7 +80,15 @@ func buildDaemonSetCore(
 		rc := nvidiaRuntimeClass
 		runtimeClassName = &rc
 	}
-	privileged := true
+	containerSecurityContext := spec.SecurityContext
+	if containerSecurityContext == nil {
+		privileged := true
+		containerSecurityContext = &corev1.SecurityContext{
+			Privileged: &privileged,
+		}
+	} else {
+		containerSecurityContext = containerSecurityContext.DeepCopy()
+	}
 
 	serverPort := derefInt32(getServerPort(spec), 5555)
 	imgRepo := defaultImageRepo
@@ -276,13 +284,11 @@ func buildDaemonSetCore(
 							Ports:           containerPorts,
 							Env:             envVars,
 							Resources:       ComputeResources(spec),
-							SecurityContext: &corev1.SecurityContext{
-								Privileged: &privileged,
-							},
-							VolumeMounts:   volumeMounts,
-							StartupProbe:   startupProbe,
-							LivenessProbe:  livenessProbe,
-							ReadinessProbe: readinessProbe,
+							SecurityContext: containerSecurityContext,
+							VolumeMounts:    volumeMounts,
+							StartupProbe:    startupProbe,
+							LivenessProbe:   livenessProbe,
+							ReadinessProbe:  readinessProbe,
 						},
 					},
 					Volumes: volumes,
