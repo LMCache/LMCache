@@ -32,6 +32,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
+    PrefetchMode,
     TrimPolicy,
 )
 
@@ -245,6 +246,14 @@ def _dec_trim_policy(name: str) -> TrimPolicy:
     return TrimPolicy[name]
 
 
+def _enc_prefetch_mode(m: PrefetchMode) -> str:
+    return m.name
+
+
+def _dec_prefetch_mode(name: str) -> PrefetchMode:
+    return PrefetchMode[name]
+
+
 def _enc_attn_window(d: AttnWindowDesc) -> list[int]:
     return list(d.num_chunks_in_sw)
 
@@ -296,6 +305,10 @@ register_codec(
 register_codec(
     TrimPolicy,
     TypeCodec(tag="TrimPolicy", encode=_enc_trim_policy, decode=_dec_trim_policy),
+)
+register_codec(
+    PrefetchMode,
+    TypeCodec(tag="PrefetchMode", encode=_enc_prefetch_mode, decode=_dec_prefetch_mode),
 )
 register_codec(
     set,
