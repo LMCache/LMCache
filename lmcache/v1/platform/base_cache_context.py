@@ -208,6 +208,25 @@ class BaseCacheContext(ABC):
         num_groups = len(self.kv_layer_groups_manager.kernel_groups)
         return [self.get_engine_kv_format(idx) for idx in range(num_groups)]
 
+    def engine_kv_format_per_layer(self) -> list["lmc_ops.EngineKVFormat | None"]:
+        """Returns each layer's Engine KV format, indexed by layer index.
+
+        A model that mixes formats within one engine group (e.g. a 5-D
+        key+value group alongside a 3-D key-only group) yields different
+        formats across layers. ``None`` marks a layer in no kernel group -- a
+        cross-layer KV-sharing layer whose KV physically lives in its owner's
+        blocks (see ``group_layers_by_identity``); its format follows the
+        owner's and is not tracked per layer here.
+        """
+        formats: list["lmc_ops.EngineKVFormat | None"] = [None] * len(self.kv_caches_)
+        for kernel_group_idx, group in enumerate(
+            self.kv_layer_groups_manager.kernel_groups
+        ):
+            fmt = self.get_engine_kv_format(kernel_group_idx)
+            for layer_idx in group.layer_indices:
+                formats[layer_idx] = fmt
+        return formats
+
     def get_slots_per_chunk_in_sw(self, kernel_group_idx: int) -> int:
         """Returns the number of slots per lmcache chunk for D/H
         transfer."""

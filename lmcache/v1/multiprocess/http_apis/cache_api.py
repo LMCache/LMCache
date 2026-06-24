@@ -159,55 +159,96 @@ async def kvcache_check(
             content={"error": "kv_caches empty"},
         )
 
-    group_formats = ctx.engine_kv_formats()
-    if len({int(fmt) for fmt in group_formats}) > 1:
-        return JSONResponse(
-            status_code=501,
-            content={
-                "error": "checksum not supported for mixed-format models "
-                "(this endpoint assumes one block axis for every layer)"
-            },
-        )
-    engine_kv_format = group_formats[0]
-    block_axis = _BLOCK_AXIS_BY_FORMAT.get(engine_kv_format)
-    if block_axis is None:
-        return JSONResponse(
-            status_code=501,
-            content={
-                "error": "checksum not supported for GPU KV format %s"
-                % engine_kv_format.name
-            },
-        )
+    # Resolve each layer's block axis from its own Engine KV format, so
+    # mixed-format models (e.g. a 5-D key+value group alongside a 3-D key-only
+    # group) are gathered along the correct per-layer axis instead of rejected.
+    block_axes, axis_err = _resolve_per_layer_block_axes(
+        ctx.engine_kv_format_per_layer()
+    )
+    if block_axes is None:
+        return JSONResponse(status_code=501, content={"error": axis_err})
 
     loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(
         None,
         lambda: _compute_block_checksums(
-            kv_tensors, parsed_blocks, block_axis, chunk_size, layerwise
+            kv_tensors, parsed_blocks, block_axes, chunk_size, layerwise
         ),
     )
     result["block_id_ranges"] = compress_slot_mapping(parsed_blocks)
     return JSONResponse(content=result)
 
 
+def _resolve_per_layer_block_axes(
+    formats_per_layer: list[Optional["lmc_ops.EngineKVFormat"]],
+) -> tuple[Optional[list[int]], Optional[str]]:
+    """Map each layer's Engine KV format to its ``num_blocks`` axis.
+
+    Supports mixed-format models: every layer is gathered along the block axis
+    of its own format, so a model whose layers do not share one format (e.g. a
+    5-D key+value group alongside a 3-D key-only group) is checksummed rather
+    than rejected.
+
+    A layer with no format (``None`` -- a cross-layer KV-sharing layer that
+    aliases an owner's blocks) inherits the model's block axis when the model is
+    single-format; in a mixed-format model such a layer is ambiguous (its owner
+    is unknown here) and rejected.
+
+    Args:
+        formats_per_layer: One Engine KV format per layer in layer-index order,
+            or ``None`` for a cross-layer KV-sharing layer (see
+            :meth:`BaseCacheContext.engine_kv_format_per_layer`).
+
+    Returns:
+        ``(block_axes, None)`` with one block axis per layer on success, or
+        ``(None, error_message)`` if a format has no supported block axis or a
+        ``None`` layer cannot be resolved.
+    """
+    axis_by_format: dict[int, int] = {}
+    for fmt in formats_per_layer:
+        if fmt is None or int(fmt) in axis_by_format:
+            continue
+        axis = _BLOCK_AXIS_BY_FORMAT.get(fmt)
+        if axis is None:
+            return None, "checksum not supported for GPU KV format %s" % fmt.name
+        axis_by_format[int(fmt)] = axis
+
+    shared_axis = (
+        next(iter(axis_by_format.values())) if len(axis_by_format) == 1 else None
+    )
+    block_axes: list[int] = []
+    for fmt in formats_per_layer:
+        if fmt is not None:
+            block_axes.append(axis_by_format[int(fmt)])
+        elif shared_axis is not None:
+            block_axes.append(shared_axis)
+        else:
+            return None, (
+                "checksum not supported: a cross-layer KV-sharing layer in a "
+                "mixed-format model has no resolvable block axis"
+            )
+    return block_axes, None
+
+
 def _compute_block_checksums(
     kv_tensors: list[torch.Tensor],
     block_ids: list[int],
-    block_axis: int,
+    block_axes: list[int],
     chunk_size: int,
     layerwise: bool,
 ) -> dict[str, Any]:
     """Compute MD5 checksums over KV cache blocks, grouped ``chunk_size``
     blocks per chunk.
 
-    The gather is performed in block space on ``block_axis`` of each
-    per-layer KV tensor using :func:`torch.index_select`. ``block_axis``
-    is looked up once per request from :data:`_BLOCK_AXIS_BY_FORMAT`, so
-    adding a new KV format to the endpoint is a single dict entry.
+    The gather is performed in block space on each layer's own block axis
+    (``block_axes[layer]``) via :func:`torch.index_select`, so mixed-format
+    models gather each layer correctly. Per-format axes come from
+    :data:`_BLOCK_AXIS_BY_FORMAT`, so adding a new KV format is a single dict
+    entry.
 
     Each layer's gathered tensor is moved to CPU once, then chunk-level
-    checksums slice it along ``block_axis`` in steps of ``chunk_size``
-    blocks. ``bfloat16`` is upcast to ``float32`` only if present, since
+    checksums slice it along its block axis in steps of ``chunk_size`` blocks.
+    ``bfloat16`` is upcast to ``float32`` only if present, since
     :meth:`torch.Tensor.numpy` does not support it.
     """
     num_blocks = len(block_ids)
@@ -223,27 +264,28 @@ def _compute_block_checksums(
     # Pre-gather each layer's blocks to CPU (one H2D→D2H transfer per
     # layer), then all chunking is CPU-only below.
     layer_blocks: list[torch.Tensor] = []
-    for kv in kv_tensors:
+    for li, kv in enumerate(kv_tensors):
         idx = block_idx_by_device.get(kv.device)
         if idx is None:
             idx = block_idx_cpu.to(kv.device)
             block_idx_by_device[kv.device] = idx
-        gathered = kv.index_select(block_axis, idx).cpu()
+        gathered = kv.index_select(block_axes[li], idx).cpu()
         if gathered.dtype == torch.bfloat16:
             gathered = gathered.to(torch.float32)
         layer_blocks.append(gathered)
 
-    def _chunk_slice(t: torch.Tensor, start: int, end: int) -> torch.Tensor:
-        return t.narrow(block_axis, start, end - start).contiguous()
+    def _chunk_slice(t: torch.Tensor, axis: int, start: int, end: int) -> torch.Tensor:
+        return t.narrow(axis, start, end - start).contiguous()
 
     if layerwise:
         per_layer: dict[str, list[str]] = {}
         for li, blocks in enumerate(layer_blocks):
+            axis = block_axes[li]
             digests: list[str] = []
             for ci in range(num_chunks):
                 s = ci * chunk_size
                 e = min(s + chunk_size, num_blocks)
-                chunk = _chunk_slice(blocks, s, e)
+                chunk = _chunk_slice(blocks, axis, s, e)
                 digests.append(hashlib.md5(chunk.numpy().tobytes()).hexdigest())
             per_layer["layer_%d" % li] = digests
         return {
@@ -259,8 +301,8 @@ def _compute_block_checksums(
         s = ci * chunk_size
         e = min(s + chunk_size, num_blocks)
         md5 = hashlib.md5()
-        for blocks in layer_blocks:
-            chunk = _chunk_slice(blocks, s, e)
+        for li, blocks in enumerate(layer_blocks):
+            chunk = _chunk_slice(blocks, block_axes[li], s, e)
             md5.update(chunk.numpy().tobytes())
         aggregated.append(md5.hexdigest())
     return {
