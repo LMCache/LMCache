@@ -211,12 +211,8 @@ class BaseCacheContext(ABC):
     def engine_kv_format_per_layer(self) -> list["lmc_ops.EngineKVFormat | None"]:
         """Returns each layer's Engine KV format, indexed by layer index.
 
-        A model that mixes formats within one engine group (e.g. a 5-D
-        key+value group alongside a 3-D key-only group) yields different
-        formats across layers. ``None`` marks a layer in no kernel group -- a
-        cross-layer KV-sharing layer whose KV physically lives in its owner's
-        blocks (see ``group_layers_by_identity``); its format follows the
-        owner's and is not tracked per layer here.
+        Formats differ across layers for a mixed-format model. ``None`` marks a
+        layer in no kernel group (a cross-layer KV-sharing layer).
         """
         formats: list["lmc_ops.EngineKVFormat | None"] = [None] * len(self.kv_caches_)
         for kernel_group_idx, group in enumerate(

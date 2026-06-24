@@ -54,12 +54,11 @@ def mock_gpu_ctx():
 
 @pytest.fixture
 def mock_mixed_engine():
-    """Engine whose context mixes a 5-D key+value layer and a 3-D key-only
-    layer (e.g. a sparse-attention indexer cache) -- the endpoint must gather
-    each along its own block axis instead of rejecting the request."""
+    """Engine whose context mixes two KV formats (a key+value layer and a
+    key-only layer), so the endpoint gathers each along its own axis."""
     ctx = MagicMock()
-    kv_kv = torch.randn(2, 4, 4, 2, 8)  # NL_X_TWO_NB_BS_NH_HS, block axis 1
-    kv_idx = torch.randn(4, 4, 8)  # NL_X_NB_BS_HS (key-only), block axis 0
+    kv_kv = torch.randn(2, 4, 4, 2, 8)
+    kv_idx = torch.randn(4, 4, 8)
     type(ctx).kv_tensors = PropertyMock(return_value=[kv_kv, kv_idx])
     ctx.engine_kv_format_per_layer.return_value = [
         lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
@@ -132,8 +131,7 @@ class TestKVCacheCheckEndpoint:
         assert d1["chunk_checksums"] == d2["chunk_checksums"]
 
     def test_mixed_format_supported(self, mock_mixed_engine):
-        """A model mixing a 5-D K/V layer and a 3-D key-only layer is gathered
-        per-layer (each along its own block axis), not rejected with 501."""
+        """Two different KV formats are gathered per layer, not rejected."""
         app.state.engine = mock_mixed_engine
         client = TestClient(app)
         try:

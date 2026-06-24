@@ -159,9 +159,7 @@ async def kvcache_check(
             content={"error": "kv_caches empty"},
         )
 
-    # Resolve each layer's block axis from its own Engine KV format, so
-    # mixed-format models (e.g. a 5-D key+value group alongside a 3-D key-only
-    # group) are gathered along the correct per-layer axis instead of rejected.
+    # Per-layer block axis, so mixed-format models gather per layer.
     block_axes, axis_err = _resolve_per_layer_block_axes(
         ctx.engine_kv_format_per_layer()
     )
@@ -182,27 +180,14 @@ async def kvcache_check(
 def _resolve_per_layer_block_axes(
     formats_per_layer: list[Optional["lmc_ops.EngineKVFormat"]],
 ) -> tuple[Optional[list[int]], Optional[str]]:
-    """Map each layer's Engine KV format to its ``num_blocks`` axis.
+    """Map each layer to its ``num_blocks`` axis from its Engine KV format.
 
-    Supports mixed-format models: every layer is gathered along the block axis
-    of its own format, so a model whose layers do not share one format (e.g. a
-    5-D key+value group alongside a 3-D key-only group) is checksummed rather
-    than rejected.
+    Each layer uses its own axis, so mixed-format models are checksummed rather
+    than rejected. A ``None`` layer (cross-layer KV sharing) inherits a
+    single-format model's axis and is rejected in a mixed-format one.
 
-    A layer with no format (``None`` -- a cross-layer KV-sharing layer that
-    aliases an owner's blocks) inherits the model's block axis when the model is
-    single-format; in a mixed-format model such a layer is ambiguous (its owner
-    is unknown here) and rejected.
-
-    Args:
-        formats_per_layer: One Engine KV format per layer in layer-index order,
-            or ``None`` for a cross-layer KV-sharing layer (see
-            :meth:`BaseCacheContext.engine_kv_format_per_layer`).
-
-    Returns:
-        ``(block_axes, None)`` with one block axis per layer on success, or
-        ``(None, error_message)`` if a format has no supported block axis or a
-        ``None`` layer cannot be resolved.
+    Returns ``(block_axes, None)``, or ``(None, error)`` if a format is
+    unsupported or a ``None`` layer can't be resolved.
     """
     axis_by_format: dict[int, int] = {}
     for fmt in formats_per_layer:
