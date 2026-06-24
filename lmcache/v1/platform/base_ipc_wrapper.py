@@ -13,7 +13,7 @@ on the receiving side.
 from __future__ import annotations
 
 # Standard
-from typing import Any, ClassVar, Tuple
+from typing import Any, Tuple
 import pickle
 import threading
 
@@ -39,13 +39,13 @@ class DeviceIPCWrapper:
 
     Subclasses implement ``__init__`` (populate the interface fields from a
     tensor) and ``to_tensor`` (reconstruct the tensor from the handle).
-    """
 
-    #: Set ``True`` on the subclass that should be used as the default
-    #: factory for a given ``device_type``.  Auto-discovery
-    #: (:func:`~lmcache.v1.platform._registry._discover_wrappers_once`)
-    #: skips subclasses where this is ``False``.
-    _is_default_wrapper: ClassVar[bool] = False
+    Concrete subclasses set ``_is_default_wrapper = True`` (a ``ClassVar``)
+    to mark themselves as the default factory for their ``device_type``;
+    auto-discovery in :mod:`lmcache.v1.platform._registry` reads it via
+    ``getattr(cls, "_is_default_wrapper", False)`` so the attribute is
+    intentionally not declared on the base class.
+    """
 
     # Interface fields populated by each concrete subclass's
     # ``__init__``.  Declared here so the base-class ``__eq__`` (and
