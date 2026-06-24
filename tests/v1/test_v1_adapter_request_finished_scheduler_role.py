@@ -39,6 +39,8 @@ This test locks in:
 """
 
 # Standard
+from collections.abc import Iterator
+from contextlib import contextmanager
 from types import SimpleNamespace
 import logging
 
@@ -47,11 +49,43 @@ import pytest
 
 pytest.importorskip("vllm")
 
+# Third Party
+# Third Party (after importorskip)
+from vllm.v1.request import RequestStatus  # noqa: E402
+
 # First Party
 from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
 
-# Third Party (after importorskip)
-from vllm.v1.request import RequestStatus  # noqa: E402
+_ADAPTER_LOGGER_NAME = "lmcache.integration.vllm.vllm_v1_adapter"
+
+
+@contextmanager
+def _capture_adapter_warnings() -> Iterator[list[logging.LogRecord]]:
+    """Capture WARNING records emitted by the adapter logger.
+
+    lmcache's ``init_logger`` sets ``propagate = False`` on the adapter
+    logger, so its records never reach pytest's ``caplog`` (which attaches a
+    handler to the root logger). Attach a handler directly to the named
+    logger instead -- the convention used across the v1 adapter tests -- and
+    force WARNING level so a higher ``LMCACHE_LOG_LEVEL`` cannot filter the
+    records out before the handler sees them.
+    """
+    records: list[logging.LogRecord] = []
+
+    class _ListHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _ListHandler(level=logging.WARNING)
+    logger = logging.getLogger(_ADAPTER_LOGGER_NAME)
+    original_level = logger.level
+    logger.setLevel(logging.WARNING)
+    logger.addHandler(handler)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(original_level)
 
 
 class _FakeStorageManager:
@@ -63,10 +97,8 @@ class _FakeStorageManager:
 
 
 class _FakeEngine:
-    def __init__(self, with_storage_manager: bool = True) -> None:
-        self.storage_manager = (
-            _FakeStorageManager() if with_storage_manager else None
-        )
+    def __init__(self) -> None:
+        self.storage_manager = _FakeStorageManager()
 
 
 class _FakeLookupClient:
@@ -100,7 +132,7 @@ def _make_connector(
     properties directly.
     """
     connector = LMCacheConnectorV1Impl.__new__(LMCacheConnectorV1Impl)
-    connector._manager = SimpleNamespace(
+    connector._manager = SimpleNamespace(  # type: ignore[assignment]
         lmcache_engine=engine,
         lookup_client=lookup_client,
     )
@@ -113,26 +145,22 @@ def _make_connector(
     return connector
 
 
-def test_request_finished_scheduler_default_engine_none_skips_cleanup(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+def test_request_finished_scheduler_default_engine_none_skips_cleanup() -> None:
     """Scheduler default config: ``lmcache_engine`` is None, abort must
     not crash the EngineCore.
 
     Regression for https://github.com/LMCache/LMCache/issues/3337.
     """
-    connector = _make_connector(
-        engine=None, lookup_client=None, async_loading=False
-    )
+    connector = _make_connector(engine=None, lookup_client=None, async_loading=False)
     request = _make_aborted_request("req-scheduler-default-abort")
 
-    with caplog.at_level(logging.WARNING):
+    with _capture_adapter_warnings() as records:
         delay_free, return_params = connector.request_finished(request, [0, 1])
 
     assert delay_free is False
     assert return_params is None
 
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    warnings = [r for r in records if r.levelno == logging.WARNING]
     assert any(
         "req-scheduler-default-abort" in r.getMessage()
         and "lmcache_engine" in r.getMessage()
@@ -143,9 +171,7 @@ def test_request_finished_scheduler_default_engine_none_skips_cleanup(
     )
 
 
-def test_request_finished_scheduler_default_async_loading_runs_lookup_cancel() -> (
-    None
-):
+def test_request_finished_scheduler_default_async_loading_runs_lookup_cancel() -> None:
     """Scheduler default (engine=None) + ``async_loading=True`` +
     lookup_client present: ``lookup_client.cancel_lookup`` must still
     run. Resource-leak regression guard -- the Scheduler owns
@@ -166,17 +192,13 @@ def test_request_finished_scheduler_default_async_loading_runs_lookup_cancel() -
     )
 
 
-def test_request_finished_engine_initialized_runs_storage_manager_cancel() -> (
-    None
-):
+def test_request_finished_engine_initialized_runs_storage_manager_cancel() -> None:
     """Engine-initialized path (Worker, or Scheduler with bypass lookup):
     ``cancel_request`` must still fire on abort. Guards against the fix
     accidentally short-circuiting the happy path.
     """
-    engine = _FakeEngine(with_storage_manager=True)
-    connector = _make_connector(
-        engine=engine, lookup_client=None, async_loading=False
-    )
+    engine = _FakeEngine()
+    connector = _make_connector(engine=engine, lookup_client=None, async_loading=False)
     request = _make_aborted_request("req-engine-abort")
 
     delay_free, return_params = connector.request_finished(request, [0, 1])
@@ -186,14 +208,12 @@ def test_request_finished_engine_initialized_runs_storage_manager_cancel() -> (
     assert engine.storage_manager.cancelled == ["req-engine-abort"]
 
 
-def test_request_finished_engine_with_async_loading_runs_both_cancels() -> (
-    None
-):
+def test_request_finished_engine_with_async_loading_runs_both_cancels() -> None:
     """Engine-initialized + ``async_loading=True`` + ``lookup_client``
     present: both ``storage_manager.cancel_request`` and
     ``lookup_client.cancel_lookup`` must fire on abort.
     """
-    engine = _FakeEngine(with_storage_manager=True)
+    engine = _FakeEngine()
     lookup_client = _FakeLookupClient()
     connector = _make_connector(
         engine=engine, lookup_client=lookup_client, async_loading=True
@@ -206,29 +226,24 @@ def test_request_finished_engine_with_async_loading_runs_both_cancels() -> (
     assert lookup_client.cancelled == ["req-async-abort"]
 
 
-def test_request_finished_async_loading_without_lookup_client_skips_cancel(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+def test_request_finished_async_loading_without_lookup_client_skips_cancel() -> None:
     """``async_loading=True`` + ``lookup_client`` missing: the second
     assert in the original block would have crashed here too. The fix
     must warn and skip, matching the fail-soft contract.
     """
-    engine = _FakeEngine(with_storage_manager=True)
-    connector = _make_connector(
-        engine=engine, lookup_client=None, async_loading=True
-    )
+    engine = _FakeEngine()
+    connector = _make_connector(engine=engine, lookup_client=None, async_loading=True)
     request = _make_aborted_request("req-no-lookup-abort")
 
-    with caplog.at_level(logging.WARNING):
+    with _capture_adapter_warnings() as records:
         connector.request_finished(request, [0, 1])
 
     # storage_manager.cancel_request still fired (only the lookup path skipped)
     assert engine.storage_manager.cancelled == ["req-no-lookup-abort"]
 
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    warnings = [r for r in records if r.levelno == logging.WARNING]
     assert any(
-        "req-no-lookup-abort" in r.getMessage()
-        and "lookup_client" in r.getMessage()
+        "req-no-lookup-abort" in r.getMessage() and "lookup_client" in r.getMessage()
         for r in warnings
     ), (
         "Expected a warning naming the request id and lookup_client; "
