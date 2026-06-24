@@ -3,12 +3,14 @@
 SDK for retrieving and storing KV cache tensors.
 """
 
-# Standard
+# Future
 from __future__ import annotations
+
+# Standard
 from collections.abc import Sequence
+import os
 import time
 import uuid
-import os
 
 # Third Party
 import requests
@@ -16,10 +18,11 @@ import torch
 import zmq
 
 # First Party
-import lmcache.c_ops as lmc_ops
 from lmcache.integration.vllm.vllm_multi_process_adapter import send_lmcache_request
 from lmcache.logging import init_logger
+from lmcache.sdk.wrapper.contiguous import ContiguousTransferWrapper
 from lmcache.v1.gpu_connector.utils import (
+    DiscoverableKVCache,
     LayoutHints,
     get_block_size,
     get_num_heads,
@@ -27,13 +30,18 @@ from lmcache.v1.gpu_connector.utils import (
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
-from lmcache.sdk.wrapper.contiguous import ContiguousTransferWrapper
-from lmcache.v1.multiprocess.transfer_context.worker_transfer import create_transfer_context
+from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
+    EngineDrivenTransferContext,
+    create_transfer_context,
+)
+import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
+
 class KVCacheSDKError(RuntimeError):
     """Raised when an SDK KV-cache operation fails."""
+
 
 class LMCacheKVCacheContext:
     """
@@ -57,13 +65,13 @@ class LMCacheKVCacheContext:
     ) -> None:
         """
         Initialize the SDK context and register the SDK transfer strategy.
-        
+
         Args:
             url: ZMQ endpoint URL for the LMCache message queue.
-            http_url: HTTP endpoint URL for fetching informations.
+            http_url: HTTP endpoint URL for fetching information.
             model_name: Model name used by the running LMCache server instance.
             timeout: Timeout in seconds for blocking MQ calls. Defaults to 60.
-        
+
         Returns:
             LMCacheKVCacheContext instance.
         """
@@ -92,7 +100,9 @@ class LMCacheKVCacheContext:
         try:
             response = requests.get(f"{self._http_url}/status", timeout=timeout)
             response.raise_for_status()
-            self._cache_context_meta_conf = response.json().get("cache_context_meta", {})
+            self._cache_context_meta_conf = response.json().get(
+                "cache_context_meta", {}
+            )
         except (requests.RequestException, KeyError, ValueError) as err:
             raise KVCacheSDKError(
                 f"failed to fetch server config from {self._http_url}/status"
@@ -122,7 +132,7 @@ class LMCacheKVCacheContext:
                 "MP mode cannot derive geometry from model_name alone — "
                 "register from a vLLM instance first, or pass the geometry explicitly."
             )
-        
+
         try:
             self._world_size = int(entry.get("world_size", 1))
             kv_cache_layout = entry.get("kv_cache_layout", {})
@@ -135,20 +145,24 @@ class LMCacheKVCacheContext:
             kernel_groups = kv_cache_layout.get("kernel_groups", [])
             if len(kernel_groups) != 1:
                 raise KVCacheSDKError(
-                    f"Currently not supporting hybrid models with multiple kernel groups; "
-                    f"found {len(kernel_groups)} for model_name={self._model_name!r}."
+                    "Currently not supporting hybrid models with multiple "
+                    f"kernel groups; found {len(kernel_groups)} "
+                    f"for model_name={self._model_name!r}."
                 )
             kernel_group = kernel_groups[0]
             dtype = getattr(torch, kernel_group["dtype"].replace("torch.", ""))
             tokens_per_block = kernel_group.get("tokens_per_block", 0)
 
             inner = [
-                int(x) for x in
-                kernel_group["engine_kv_concrete_shape"].split("[")[1].rstrip("] ").split(",")
+                int(x)
+                for x in kernel_group["engine_kv_concrete_shape"]
+                .split("[")[1]
+                .rstrip("] ")
+                .split(",")
             ]
 
             fmt = getattr(lmc_ops.EngineKVFormat, kernel_group["engine_kv_format"])
-            probe = [torch.empty(inner, device="meta")]  # shape-only; no allocation
+            probe: list[DiscoverableKVCache] = [torch.empty(inner, device="meta")]
             num_kv_heads = get_num_heads(probe, fmt)
             block_size = get_block_size(probe, fmt)
             head_dim = inner[-1]
@@ -162,7 +176,7 @@ class LMCacheKVCacheContext:
                 f"failed to decode KV cache layout for model_name={self._model_name!r}"
             ) from err
 
-        # SDK runs on CPU, LMCache's detects HND (gpu_connector/utils.py:663). 
+        # SDK runs on CPU, LMCache's detects HND (gpu_connector/utils.py:663).
         # Build in HND-physical order [NB, 2, NH, BS, HS] (flip from GPU order)
         # So, no matter the inference engine runs on CPU or GPU, SDK will always
         # use HND.
@@ -185,16 +199,26 @@ class LMCacheKVCacheContext:
         )
 
         transfer_ctx.register(
-            self.instance_id, self._kv_caches, self._model_name, self._world_size,
-            self.blocks_in_chunk, self._mq_client, self._mq_timeout,
+            self.instance_id,
+            self._kv_caches,
+            self._model_name,
+            self._world_size,
+            self.blocks_in_chunk,
+            self._mq_client,
+            self._mq_timeout,
             send_request=send_lmcache_request,
             layout_hints=layout_hints,
         )
 
+        if not isinstance(transfer_ctx, EngineDrivenTransferContext):
+            raise KVCacheSDKError(
+                "SDK requires an engine-driven transfer context, got "
+                f"{type(transfer_ctx).__name__}."
+            )
         self._transfer_ctx = ContiguousTransferWrapper(
             transfer_ctx.engine_driven_context, self._chunk_size
         )
-    
+
     @property
     def chunk_size(self) -> int:
         """Return the chunk size of the context."""
@@ -209,11 +233,11 @@ class LMCacheKVCacheContext:
     def transfer_ctx(self) -> ContiguousTransferWrapper:
         """Return the contiguous transfer context."""
         return self._transfer_ctx
-    
+
     def close(self) -> None:
         """Close the MQ client and ZMQ context."""
         self._mq_client.close()
-    
+
     def maybe_submit_lookup_request(
         self,
         request_id: str,
@@ -224,7 +248,7 @@ class LMCacheKVCacheContext:
         Modification from lmcache/integration/vllm/vllm_multi_process_adapter.py.
         Need duplicate since SDK has TransferContext, not Adapter, but still need
         lookup and end_session functionality.
-        
+
         Args:
             request_id: Unique ID for this lookup request.
             token_ids: List of token IDs to look up.
@@ -259,10 +283,7 @@ class LMCacheKVCacheContext:
             return
         self._pending_lookups.add(request_id)
 
-    def check_lookup_result(
-        self, 
-        request_id: str
-    ) -> int | None:
+    def check_lookup_result(self, request_id: str) -> int | None:
         """Check the result of a LOOKUP request.
         Modification from lmcache/integration/vllm/vllm_multi_process_adapter.py.
         Need duplicate since SDK has TransferContext, not Adapter, but still need
@@ -270,9 +291,9 @@ class LMCacheKVCacheContext:
 
         Args:
             request_id: The request ID of the LOOKUP to check.
-        
+
         Returns:
-            The number of prefetched tokens if the LOOKUP is finished, 
+            The number of prefetched tokens if the LOOKUP is finished,
             0 if not finished, or None if the request ID is not found.
         """
         if request_id not in self._pending_lookups:
@@ -303,10 +324,10 @@ class LMCacheKVCacheContext:
         token_count = result * self._chunk_size
         self._finished_lookups[request_id] = token_count
         return token_count
-    
+
     def end_session(self, request_id: str, block_ids: list[int] | None = None) -> None:
         """End a session and clean up associated resources on the server.
-        
+
         Args:
             request_id: The request ID of the session to end.
             block_ids: Optional list of block IDs to free.
@@ -344,7 +365,7 @@ class LMCacheKVCacheContext:
             end: End token index.
             request_id: The request ID.
             cache_salt: Per-user isolation salt.
-            worker_id: Optional worker ID for the key. 
+            worker_id: Optional worker ID for the key.
                 If None, the key will be created without a worker ID (for lookups).
 
         Returns:
@@ -360,7 +381,8 @@ class LMCacheKVCacheContext:
             request_id=request_id,
             cache_salt=cache_salt,
         )
-    
+
+
 def connect(
     url: str,
     http_url: str,
@@ -368,33 +390,32 @@ def connect(
     timeout: float = 60.0,
 ) -> "LMCacheKVCacheContext":
     """Create and initialize the LMCache SDK context.
-    
+
     Args:
         url: ZMQ endpoint URL for the LMCache message queue.
         http_url: HTTP endpoint URL for fetching server configuration.
         model_name: Model name used by the running LMCache server instance.
         timeout: Timeout in seconds for blocking MQ calls. Defaults to 60.
-    
+
     Returns:
         An initialized LMCacheKVCacheContext instance.
         Ready to be passed to close(), retrieve(), and store() functions.
     """
     ctx = LMCacheKVCacheContext(
-        url=url, 
-        http_url=http_url,
-        model_name=model_name, 
-        timeout=timeout
+        url=url, http_url=http_url, model_name=model_name, timeout=timeout
     )
     ctx.register_kv_caches()
     return ctx
 
+
 def close(ctx: "LMCacheKVCacheContext") -> None:
     """Close the LMCache SDK context and release resources.
-    
+
     Args:
         ctx: The LMCacheKVCacheContext instance to close.
     """
     ctx.close()
+
 
 def retrieve(
     ctx: "LMCacheKVCacheContext",
@@ -402,14 +423,14 @@ def retrieve(
     cache_salt: str = "",
 ) -> torch.Tensor | None:
     """Retrieve KV cache tensors for the given token IDs.
-    
+
     Args:
         ctx: The LMCacheKVCacheContext instance to use for retrieval.
         tokens: The list of token IDs to retrieve KV cache for.
         cache_salt: Optional cache salt string for the lookup.
-    
+
     Returns:
-        A contiguous CPU tensor containing the retrieved KV cache for 
+        A contiguous CPU tensor containing the retrieved KV cache for
         the requested tokens.
         None if retrieval fails or there are no tokens to retrieve.
     """
@@ -429,7 +450,7 @@ def retrieve(
         end=total_tokens,
         request_id=request_id,
         cache_salt=cache_salt,
-        worker_id=0
+        worker_id=0,
     )
 
     # Phase 0: Trigger lookup
@@ -444,7 +465,8 @@ def retrieve(
     while num_prefetched_tokens is None:
         if time.time() - start_time > ctx.mq_timeout:
             raise KVCacheSDKError(
-                f"LOOKUP request timed out after {ctx.mq_timeout}s for request_id={request_id}"
+                f"LOOKUP request timed out after {ctx.mq_timeout}s "
+                f"for request_id={request_id}"
             )
         logger.info(
             "Waiting for LOOKUP result for request_id=%s...",
@@ -452,7 +474,7 @@ def retrieve(
         )
         time.sleep(0.01)
         num_prefetched_tokens = ctx.check_lookup_result(request_id)
-    
+
     if num_prefetched_tokens <= 0:
         ctx.end_session(request_id)
         return None
@@ -471,11 +493,12 @@ def retrieve(
     finally:
         ctx.end_session(request_id)
 
+
 def store(
     ctx: "LMCacheKVCacheContext",
-    kv: torch.Tensor, 
-    tokens: Sequence[int], 
-    cache_salt: str = ""
+    kv: torch.Tensor,
+    tokens: Sequence[int],
+    cache_salt: str = "",
 ) -> bool:
     """Store KV cache tensors for the given token IDs.
 
@@ -484,7 +507,7 @@ def store(
         kv: The KV cache tensor to store, of shape [2, L, T, D].
         tokens: The list of token IDs corresponding to the KV cache tensor.
         cache_salt: Optional cache salt string for the store.
-    
+
     Returns:
         True if the store operation is successful, False otherwise.
     """
@@ -506,7 +529,7 @@ def store(
         end=total_tokens,
         request_id=request_id,
         cache_salt=cache_salt,
-        worker_id=0
+        worker_id=0,
     )
 
     # Phase 1: store the KV cache tensor
