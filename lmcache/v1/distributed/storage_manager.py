@@ -42,6 +42,9 @@ from lmcache.v1.distributed.storage_controllers import (
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     create_prefetch_policy,
 )
+from lmcache.v1.distributed.storage_controllers.speculative_prefetcher import (
+    SpeculativePrefetcher,
+)
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
     create_store_policy,
@@ -140,6 +143,15 @@ class StorageManager:
         )
         self._store_controller.start()
 
+        # Optional speculative prefetch predictor (disabled by default).
+        speculator: SpeculativePrefetcher | None = None
+        if config.enable_speculative_prefetch:
+            speculator = SpeculativePrefetcher(
+                max_predictions=config.speculative_prefetch_max_keys,
+                min_confidence=config.speculative_prefetch_min_confidence,
+                decay=config.speculative_prefetch_decay,
+            )
+
         # Prefetch controller
         self._prefetch_controller = PrefetchController(
             l1_manager=self._l1_manager,
@@ -147,6 +159,7 @@ class StorageManager:
             adapter_descriptors=list(self._adapter_descriptors.values()),
             policy=create_prefetch_policy(config.prefetch_policy),
             max_in_flight=config.prefetch_max_in_flight,
+            speculator=speculator,
         )
         self._prefetch_controller.start()
 
