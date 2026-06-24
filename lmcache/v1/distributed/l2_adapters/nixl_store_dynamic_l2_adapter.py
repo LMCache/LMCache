@@ -227,9 +227,7 @@ class DynamicNixlStorageAgent:
         """Allocate a bounded OBJ device id for one register/deregister cycle."""
         with self._device_id_lock:
             device_id = self._device_id_counter
-            self._device_id_counter = (
-                self._device_id_counter + 1
-            ) % MAX_OBJ_DEVICE_ID
+            self._device_id_counter = (self._device_id_counter + 1) % MAX_OBJ_DEVICE_ID
         return device_id
 
     def _register_single_object(
