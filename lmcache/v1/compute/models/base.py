@@ -346,3 +346,84 @@ class LMCBaseModel(nn.Module, ABC):
                 )
 
             yield
+
+    # ------------------------------------------------------------------
+    # Tier-2: batched selective recompute (LMCACHE_BATCHED_BLEND=1)
+    # ------------------------------------------------------------------
+    def compute_layer_batched(
+        self,
+        packed_embeds: torch.Tensor,
+        req_meta: list,
+        kvcaches,
+    ):
+        """Packed selective-recompute forward for N requests in ONE pass.
+
+        See codecsight-bench/TIER2_BATCHED_BLEND.md. The token-wise ops (LN, QKV,
+        o_proj, FFN) run on the concatenated [ΣA, hidden] anchor tensor; attention
+        is a single varlen call whose cu_seqlens isolate each request (validated
+        bitwise-equal to N serial calls in tests/tier2_batched_attn_parity.py).
+
+        req_meta: list of per-request dicts, each with:
+          - 'positions':    anchor RoPE positions, [A] (1D) or [3, A] (mRoPE)
+          - 'slot_full':     paged-cache flat slots for all S cached tokens, [S]
+          - 'anchor_local':  anchor indices within 0..S, [A]
+        Phase-1 must have already loaded + RoPE-corrected each request's full
+        cached KV into the paged cache (the non-anchor context attended here).
+
+        Generator: yields once per layer (mirrors compute_layer's cadence so the
+        caller can step Phase-1 retrievers in lockstep if pipelining the load).
+        """
+        hidden_states = packed_embeds.cuda()
+        residual = None
+        A_list = [int(m["positions"].shape[-1]) for m in req_meta]
+        cu_q = torch.tensor(
+            [0] + list(torch.tensor(A_list).cumsum(0)),
+            dtype=torch.int32, device=hidden_states.device,
+        )
+
+        for layer_idx, layer in enumerate(self.layers[self.start_layer:self.end_layer]):
+            global_layer = self.start_layer + layer_idx
+
+            if residual is None:
+                residual = hidden_states
+                hidden_states = layer.input_layernorm(hidden_states)
+            else:
+                hidden_states, residual = layer.input_layernorm(hidden_states, residual)
+
+            q, k, v = self._project_qkv(layer, hidden_states)
+            q, k, v = self._process_qkv(q, k, v, layer)
+
+            # Blender owns RoPE + per-request KV gather/scatter/concat.
+            q, old_k, old_v, attn_metadata = self.blender.process_qkv_batched(
+                q, k, v, global_layer, req_meta, kvcaches, cu_q,
+            )
+
+            attn_core = self.vllm_attn_layers[global_layer]
+            num_heads = _pick(attn_core, "num_heads")
+            num_kv_heads = _pick(attn_core, "num_kv_heads", "num_key_value_heads")
+            head_size = _pick(attn_core, "head_size", "head_dim")
+
+            q = q.view(-1, num_heads, head_size)
+            old_k = old_k.view(-1, num_kv_heads, head_size)
+            old_v = old_v.view(-1, num_kv_heads, head_size)
+            attn_output = torch.zeros_like(q)
+
+            attn_output = self.lmc_attn_layers[global_layer].forward_contiguous(
+                q, old_k, old_v, attn_output, attn_metadata
+            )
+            attn_output = attn_output.view(-1, num_heads * head_size)
+
+            hidden_states, _ = layer.self_attn.o_proj(attn_output)
+            hidden_states, residual = layer.post_attention_layernorm(
+                hidden_states, residual
+            )
+
+            skip_ffn = bool(getattr(self.blender, "skip_ffn", False))
+            if skip_ffn and bool(getattr(self.blender, "skip_ffn_only_codecsight", True)):
+                skip_ffn = getattr(self.blender, "blend_mode", "") in ("codecsight",)
+            if skip_ffn:
+                hidden_states = torch.zeros_like(hidden_states)
+            else:
+                hidden_states = layer.mlp(hidden_states)
+
+            yield

@@ -701,6 +701,13 @@ class LMCacheConnectorV1Impl:
         )
         if self._async_overlap:
             self._codecsight_pipeline = True
+        # Tier-2: batched selective recompute -- gather all blend requests in a
+        # step and recompute their anchor tokens in ONE packed forward instead
+        # of N serial forwards. Default off => existing serial path unchanged.
+        # See codecsight-bench/TIER2_BATCHED_BLEND.md.
+        self._batched_blend = (
+            os.environ.get("LMCACHE_BATCHED_BLEND", "0") == "1"
+        )
         self._blend_stream = None  # lazily created (needs CUDA device)
         self._stats_monitor = LMCStatsMonitor.GetOrCreate()
         if role == KVConnectorRole.SCHEDULER:
@@ -1181,6 +1188,93 @@ class LMCacheConnectorV1Impl:
         )
         return inputs_embeds, deepstack_input_embeds
 
+    def _batched_blend_load_kv(self, metadata, kvcaches, attn_metadata) -> bool:
+        """Tier-2 batched selective recompute (LMCACHE_BATCHED_BLEND=1).
+
+        Two phases (see codecsight-bench/TIER2_BATCHED_BLEND.md):
+          Phase 1 (per request, memory-only): a plain ``retrieve_layer`` loads +
+            RoPE-corrects each request's full cached KV into the paged cache,
+            and (via the gpu_connector) records its gap positions; we then run
+            the codec I-frame selection and gather anchor embeds/positions/slots.
+          Phase 2 (one packed forward): ``blender.blend_batched`` recomputes all
+            requests' anchor tokens together and scatters refreshed K/V back.
+
+        Returns True if the batched path handled the step; False to fall back to
+        the serial loop (any precondition miss => safe fallback, no degradation).
+        """
+        # First Party
+        from lmcache.v1.compute.blend.metadata import LMCBlendMetadata
+
+        blender = self.blender
+        if blender is None:
+            return False
+
+        requests_info = []
+        chunk = self._lmcache_chunk_size
+        for request in metadata.requests:
+            if request.load_spec is None:
+                continue
+            tokens = request.token_ids
+            slot_mapping = request.slot_mapping.cuda()
+            if len(tokens) != len(slot_mapping):
+                return False
+            c = min(request.load_spec.lmcache_cached_tokens, len(tokens))
+            if c < 128:  # _MIN_BLEND_TOKENS: too short to blend -> fall back
+                return False
+
+            token_mask = torch.ones(len(tokens), dtype=torch.bool)
+            masked = request.load_spec.vllm_cached_tokens // chunk * chunk
+            token_mask[:masked] = False
+
+            embeds, _deepstack = self._reconstruct_inputs_embeds(
+                tokens, request.mm_hashes, request.mm_positions, c,
+            )
+            if embeds is None:
+                return False  # encoder cache unavailable -> serial fallback
+
+            # Phase 1: plain retrieve -> paged cache (load + RoPE-correct),
+            # synchronous so gap_positions + paged KV are ready before selection.
+            retr = self.lmcache_engine.retrieve_layer(
+                tokens[:c], token_mask[:c], kvcaches=kvcaches,
+                slot_mapping=slot_mapping[:c], sync=True,
+            )
+            for _ in retr:
+                pass
+
+            # Selection: install this request's metadata, run codec I-frame pick.
+            md = LMCBlendMetadata(imp_indices=None, attn_mask=None, positions=None)
+            md.tokens_per_frame = int(request.tokens_per_frame or 0)
+            md.mm_positions = request.mm_positions
+            md.image_grid_thw = request.image_grid_thw
+            md.input_ids = list(tokens[:c])
+            blender._active_metadata = md
+
+            dev = slot_mapping.device
+            hit = blender._compute_hit_indices(c, dev)
+            anchor_local = blender._codecsight_select(hit, c, dev)
+            if anchor_local.numel() == 0:
+                return False
+
+            if blender.is_mrope and blender._mrope_model_config is not None:
+                positions_full = blender._compute_mrope_positions(c, dev)
+                positions = positions_full[:, anchor_local]
+            else:
+                positions = torch.arange(c, device=dev, dtype=torch.int64)[anchor_local]
+
+            requests_info.append({
+                "anchor_embeds": embeds[anchor_local],
+                "positions": positions,
+                "slot_full": slot_mapping[:c],
+                "anchor_local": anchor_local,
+            })
+
+        if not requests_info:
+            return False
+
+        # Phase 2: one packed forward for all requests.
+        blender.blend_batched(requests_info, kvcaches)
+        return True
+
     @_lmcache_nvtx_annotate
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         """Start loading the KV cache from the connector buffer to vLLM's
@@ -1216,6 +1310,22 @@ class LMCacheConnectorV1Impl:
 
         self.layerwise_retrievers = []
         self.layerwise_blenders = []
+
+        # Tier-2: batched selective recompute. Eligible only for the eager
+        # codecsight blend path (the validated batch-safe mode). Falls through
+        # to the serial loop on any miss so behavior is never silently degraded.
+        if (
+            self._batched_blend
+            and self.use_layerwise
+            and self.enable_blending
+            and not self._codecsight_pipeline
+            and getattr(self.blender, "blend_mode", "") == "codecsight"
+        ):
+            handled = self._batched_blend_load_kv(
+                metadata, kvcaches, attn_metadata,
+            )
+            if handled:
+                return
 
         for idx, request in enumerate(metadata.requests):
             if request.load_spec is None:

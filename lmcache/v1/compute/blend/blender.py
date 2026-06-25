@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import Optional, Sequence, Union, Any
+import os
+import time
 
 # Third Party
 import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.compute.attention.metadata import LMCAttnMetadata
+from lmcache.v1.compute.attention.metadata import LMCAttnMetadata, LMCFlashAttnMetadata
 from lmcache.v1.compute.blend.metadata import BLEND_MODES, LMCBlendCommonMetadata, LMCBlendMetadata
 from lmcache.v1.compute.models.utils import infer_model_from_vllm
 from lmcache.v1.config import LMCacheEngineConfig
@@ -83,6 +85,11 @@ class LMCBlender:
         # layerwise_model.compute_layer pass that recomputes attention/FFN.
         self.direct_reuse_retrieve_only = True
         self._single_zero_idx: dict[torch.device, torch.Tensor] = {}
+        # P2 ablation instrumentation (behind flags, default off -> no behavior change):
+        #  LMCACHE_TIME_SELECTION=1 -> log "SELECT_TIME mode=.. ms=.." per selection
+        #  LMCACHE_EQUAL_K=1        -> top-K refreshes the SAME #tokens as I-frame (equal-K)
+        self._time_sel = os.environ.get("LMCACHE_TIME_SELECTION") == "1"
+        self._equal_k = os.environ.get("LMCACHE_EQUAL_K") == "1"
         if config.extra_config is not None:
             self.skip_ffn = bool(config.extra_config.get("skip_ffn", False))
             self.skip_ffn_only_codecsight = bool(
@@ -652,15 +659,23 @@ class LMCBlender:
             write_indices = self._active_metadata.imp_indices
 
             if layer_id in self.common_metadata.check_layers:
+                if self._time_sel:
+                    torch.cuda.synchronize(); _t0 = time.perf_counter()
                 diff_k = torch.sum(
                     (k.to(torch.float32) - old_k.to(torch.float32)) ** 2,
                     dim=[1],
                 )
                 total_len = diff_k.shape[0]
                 assert self.common_metadata.recomp_ratios is not None
-                topk_num = int(
-                    total_len * self.common_metadata.recomp_ratios[0]
-                )
+                if self._equal_k:
+                    # equal-K: match the I-frame (codecsight) refresh budget
+                    _hit = self._compute_hit_indices(total_len, k.device)
+                    topk_num = int(
+                        self._codecsight_select(_hit, total_len, k.device).numel())
+                else:
+                    topk_num = int(
+                        total_len * self.common_metadata.recomp_ratios[0]
+                    )
                 logger.info(
                     "TOPK check layer=%d: total=%d, topk_num=%d, "
                     "diff_k min=%.6f max=%.6f mean=%.6f median=%.6f, "
@@ -674,6 +689,10 @@ class LMCBlender:
                 )
                 top_indices = torch.topk(diff_k, k=topk_num).indices
                 top_indices, _ = torch.sort(top_indices)
+                if self._time_sel:
+                    torch.cuda.synchronize()
+                    logger.info("SELECT_TIME mode=topk layer=%d ms=%.4f k=%d",
+                                layer_id, (time.perf_counter() - _t0) * 1000, topk_num)
 
                 k, v = k[top_indices], v[top_indices]
                 q = q[top_indices]
@@ -711,6 +730,8 @@ class LMCBlender:
                 q, _ = rotary(self._active_metadata.positions, q, k)
                 return q, old_k, old_v, residual, attn_output, attn_metadata
             hit_indices = self._compute_hit_indices(effective_len, q.device)
+            if self._time_sel:
+                torch.cuda.synchronize(); _t0 = time.perf_counter()
             if self.blend_mode == "codecsight":
                 selected = self._codecsight_select(
                     hit_indices, effective_len, q.device,
@@ -723,6 +744,11 @@ class LMCBlender:
                 selected = self._vlcache_select(
                     hit_indices, effective_len, q.device,
                 )
+            if self._time_sel:
+                torch.cuda.synchronize()
+                logger.info("SELECT_TIME mode=%s layer=%d ms=%.4f k=%d",
+                            self.blend_mode, layer_id,
+                            (time.perf_counter() - _t0) * 1000, int(selected.numel()))
             return self._apply_selected_indices(
                 selected, effective_len, q, k, v, old_k, old_v,
                 residual, attn_output, attn_metadata, rotary,
@@ -737,6 +763,119 @@ class LMCBlender:
         old_k[imp_indices] = k
         old_v[imp_indices] = v
         return q, old_k, old_v, residual, attn_output, attn_metadata
+
+    # ------------------------------------------------------------------
+    # Tier-2: batched selective recompute (LMCACHE_BATCHED_BLEND=1)
+    # ------------------------------------------------------------------
+    def process_qkv_batched(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        layer_id: int,
+        req_meta: list,
+        kvcaches,
+        cu_q: torch.Tensor,
+    ):
+        """Batched counterpart to process_qkv for the packed anchor tensor.
+
+        RoPE is per-token (position-indexed), so it applies once on the packed
+        q/k with concatenated positions -- identical to per-segment. Then, per
+        request: scatter the freshly recomputed (RoPE'd) anchor K/V into the
+        paged cache, gather the request's full S-token context (now including
+        the fresh anchors), and concat across requests so attention sees one
+        contiguous [ΣS] key tensor with cu_seqlens_k marking the boundaries.
+
+        Returns (q_packed, packed_old_k, packed_old_v, attn_metadata).
+        """
+        rotary = self._rotary_by_layer[layer_id]
+
+        # packed positions across all requests (1D [ΣA] or mRoPE [3, ΣA])
+        pos0 = req_meta[0]["positions"]
+        if pos0.ndim == 2:
+            packed_pos = torch.cat([m["positions"] for m in req_meta], dim=1)
+        else:
+            packed_pos = torch.cat([m["positions"] for m in req_meta], dim=0)
+        q, k = rotary(packed_pos, q, k)
+
+        attn_core = self.layerwise_model.vllm_attn_layers[layer_id]
+        nkv = int(getattr(attn_core, "num_kv_heads", None)
+                  or getattr(attn_core, "num_key_value_heads"))
+        hd = int(getattr(attn_core, "head_size", None)
+                 or getattr(attn_core, "head_dim"))
+
+        k = k.view(-1, nkv, hd)
+        v = v.view(-1, nkv, hd)
+
+        kv = kvcaches[layer_id]
+        # flash-attn paged layout: [2, num_blocks, block_size, nkv, hd] (two-major)
+        two_major = kv.shape[0] == 2
+        if two_major:
+            k_all = kv[0].view(-1, nkv, hd)
+            v_all = kv[1].view(-1, nkv, hd)
+        else:  # flash-infer: [num_blocks, 2, block_size, nkv, hd]
+            k_all = kv[:, 0].reshape(-1, nkv, hd)
+            v_all = kv[:, 1].reshape(-1, nkv, hd)
+
+        old_k_segs, old_v_segs, S_list = [], [], []
+        for i, m in enumerate(req_meta):
+            a0, a1 = int(cu_q[i]), int(cu_q[i + 1])
+            slot_full = m["slot_full"]
+            anchor_local = m["anchor_local"]
+            anchor_slots = slot_full[anchor_local]
+            # scatter fresh anchor K/V into the paged cache (refresh the cache)
+            k_all[anchor_slots] = k[a0:a1]
+            v_all[anchor_slots] = v[a0:a1]
+            # gather full context (now includes the fresh anchors)
+            old_k_segs.append(k_all[slot_full])
+            old_v_segs.append(v_all[slot_full])
+            S_list.append(slot_full.shape[0])
+
+        packed_old_k = torch.cat(old_k_segs, dim=0)
+        packed_old_v = torch.cat(old_v_segs, dim=0)
+
+        dev = q.device
+        cu_k = torch.tensor(
+            [0] + list(torch.tensor(S_list).cumsum(0)),
+            dtype=torch.int32, device=dev,
+        )
+        attn_metadata = LMCFlashAttnMetadata(
+            query_start_loc=cu_q.to(torch.int32),
+            seq_lens=torch.tensor(S_list, device=dev),
+            cu_seqlens_k=cu_k,
+            max_query_len=int((cu_q[1:] - cu_q[:-1]).max()),
+            max_seq_len=max(S_list),
+        )
+        return q, packed_old_k, packed_old_v, attn_metadata
+
+    def blend_batched(self, requests: list, kvcaches):
+        """Orchestrate batched selective recompute for N requests in one forward.
+
+        `requests`: list of per-request dicts, each with:
+          - 'anchor_embeds': [A, hidden] embeddings of the anchor tokens
+          - 'positions':      anchor RoPE positions, [A] or [3, A]
+          - 'slot_full':       paged-cache flat slots for all S cached tokens, [S]
+          - 'anchor_local':    anchor indices within 0..S, [A]
+        Phase-1 (load + RoPE-correct each request's full cached KV into the paged
+        cache) must already have run -- this drives only the packed recompute.
+        Drains the compute fully (eager); returns None.
+        """
+        logger.info("blend_batched: packing %d request(s), total anchors=%d",
+                    len(requests),
+                    sum(int(r["anchor_local"].numel()) for r in requests))
+        packed_embeds = torch.cat([r["anchor_embeds"] for r in requests], dim=0)
+        req_meta = [
+            {"positions": r["positions"],
+             "slot_full": r["slot_full"],
+             "anchor_local": r["anchor_local"]}
+            for r in requests
+        ]
+        gen = self.layerwise_model.compute_layer_batched(
+            packed_embeds, req_meta, kvcaches,
+        )
+        for _ in range(self.num_layers):
+            next(gen)
+        return None
 
     # NOTE(Jiayi): Exposing this `blend_layer` interface as we might
     # want to orchestrate the blending process elsewhere

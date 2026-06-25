@@ -412,10 +412,12 @@ class SegmentTokenDatabase(TokenDatabase):
                 num_falses = mask.numel() - mask.long().sum().item()
             else:
                 num_falses = 0
-            assert num_falses < len(tokens), (
-                "The number of Falses in the mask shouldn't "
-                "be less than the length of tokens."
-            )
+            # An all-False mask = no reusable cached KV for this segment (cold first
+            # window of a video, or a fully-uniform window). Valid: recompute the whole
+            # segment (no cached suffix). Clamp instead of asserting so the engine does
+            # not crash on degenerate/cold segments. (blend path only)
+            if num_falses > len(tokens):
+                num_falses = len(tokens)
 
             token_chunks = self._fast_split_by_subtensor(
                 tokens, skip_last=skip_last_segment,
