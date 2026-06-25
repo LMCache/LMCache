@@ -67,7 +67,11 @@ logger.info(" torch_dev=%s, torch_device_type=%s", torch_dev, torch_device_type)
 # standard torch module (e.g. ``torch.cuda``) with a custom attribute that does
 # not exist in the original module.  The ``# type: ignore[attr-defined]`` suppresses
 # the expected mypy/pyright "attr-defined" error from this intentional extension.
-torch_dev.ext = DeviceExt(torch_device_type)  # type: ignore[attr-defined]
+if torch_dev is not None:
+    torch_dev.ext = DeviceExt(torch_device_type)  # type: ignore[attr-defined]
+else:
+    logger.warning("torch_dev is None, skipping DeviceExt initialization.")
+    pass
 
 
 # --------------------------
