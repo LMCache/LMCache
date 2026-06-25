@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field as _dc_field
 from typing import Any, Callable
 import pickle
 import threading
@@ -271,7 +271,7 @@ class IPCCacheServerKey:
     end: int
 
     # === Session tracking (not part of cache identity) ===
-    request_id: str = field(compare=False)
+    request_id: str = _dc_field(compare=False)
 
     # === Per-user isolation salt (part of cache identity) ===
     # msgspec encodes dataclasses as maps, so forward wire compatibility
@@ -388,7 +388,7 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
     hidden_dim_size: int
     dtype_str: str
     use_mla: bool
-    group_layouts: list[GroupLayoutInfo] = field(default_factory=list)
+    group_layouts: list[GroupLayoutInfo] = msgspec.field(default_factory=list)
 
 
 @dataclass
@@ -453,7 +453,7 @@ class CBUnifiedLookupResult:
 
     prefix_coverage_tokens: int
     non_prefix_segments: list[CBMatchResult]
-    segmented_prefix_segments: list[CBMatchResult] = field(default_factory=list)
+    segmented_prefix_segments: list[CBMatchResult] = _dc_field(default_factory=list)
 
 
 _CUSTOMERIZED_SERIALIZERS = {
