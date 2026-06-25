@@ -12,7 +12,6 @@ from concurrent.futures import ThreadPoolExecutor
 from enum import IntEnum
 from multiprocessing import shared_memory
 from typing import Any, Optional, Tuple
-import array
 import ctypes
 import ctypes.util
 import os
@@ -439,19 +438,14 @@ def free_pinned_ptr(ptr: int) -> None:
     _tensor_registry.pop(ptr, None)
 
 
-def memcpy(
-    dst_buf: bytes | bytearray | memoryview | array.array[Any],
-    src_buf: bytes | bytearray | memoryview | array.array[Any],
-    length: int,
-) -> bool:
+def memcpy(dst_buf: Any, src_buf: Any, length: int) -> bool:
     """Non-CUDA equivalent of the native memcpy helper.
 
     Copy length bytes from src_buf to dst_buf using ctypes memmove.
 
     Args:
-        dst_buf: Destination buffer supporting Python buffer protocol
-            (e.g. bytes, bytearray, memoryview, array.array, numpy.ndarray).
-        src_buf: Source buffer supporting Python buffer protocol.
+        dst_buf: Destination buffer (must support Python buffer protocol).
+        src_buf: Source buffer (must support Python buffer protocol).
         length: Number of bytes to copy.
 
     Returns:
