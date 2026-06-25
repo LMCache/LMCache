@@ -72,6 +72,7 @@ class CPUCacheContext(BaseCacheContext):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: "Sequence[EngineGroupInfo]" = (),
         engine_type: EngineType = EngineType.VLLM,
+        separate_object_groups: bool = True,
     ) -> None:
         if not kv_caches:
             raise ValueError(
@@ -110,6 +111,7 @@ class CPUCacheContext(BaseCacheContext):
             num_blocks=num_blocks_val,
             engine_group_infos=engine_group_infos,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
+            separate_object_groups=separate_object_groups,
         )
 
         # Pre-allocated block IDs buffer (CPU).

@@ -242,6 +242,49 @@ class MemoryLayoutDesc:
 
 
 @dataclass(frozen=True)
+class AttnWindowDesc:
+    """Per-object-group cross-chunk attention windows, in LMCache chunks.
+
+    ``num_chunks_in_sw[g]`` is the number of trailing prefix chunks that must
+    be present for object group ``g`` to serve a cache hit. ``-1`` means full
+    attention (the whole prefix); ``w >= 1`` is a sliding window of ``w``
+    chunks (mamba is ``1``).
+    """
+
+    num_chunks_in_sw: list[int]
+
+    def __post_init__(self) -> None:
+        for w in self.num_chunks_in_sw:
+            if w == 0 or w < -1:
+                raise ValueError(
+                    "AttnWindowDesc: each window must be -1 (full attention) "
+                    f"or >= 1 chunk, got {w}"
+                )
+
+    @property
+    def num_object_groups(self) -> int:
+        """Number of object groups this descriptor covers."""
+        return len(self.num_chunks_in_sw)
+
+    def is_full_attention(self, object_group_idx: int) -> bool:
+        """Whether the object group depends on the entire prefix.
+
+        Args:
+            object_group_idx: 0-based object group index.
+
+        Returns:
+            True if the group attends to the whole prefix, False if it uses a
+            bounded sliding window.
+        """
+        return self.num_chunks_in_sw[object_group_idx] < 0
+
+
+DEFAULT_ATTN_WINDOW_DESC = AttnWindowDesc(num_chunks_in_sw=[-1])
+"""A single full-attention object group; the default when no per-object-group
+windows are supplied."""
+
+
+@dataclass(frozen=True)
 class PrefetchHandle:
     """Opaque handle returned by ``StorageManager.submit_prefetch_task``.
 

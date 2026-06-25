@@ -15,6 +15,7 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.python_ops_fallback import set_shape_desc_dtype
 from lmcache.utils import lmcache_deprecate
+from lmcache.v1.distributed.api import AttnWindowDesc
 import lmcache.c_ops as lmc_ops
 
 if TYPE_CHECKING:
@@ -281,6 +282,7 @@ class KVLayerGroupsManager:
         num_blocks: int,
         engine_group_infos: "Sequence[EngineGroupInfo]" = (),
         lmcache_tokens_per_chunk: int = 256,
+        separate_object_groups: bool = True,
     ) -> None:
         """Partition layers into groups keyed by
         :data:`LayerGroupIdentity`.
@@ -303,6 +305,9 @@ class KVLayerGroupsManager:
             engine_group_infos: Engine KV cache group metadata, one info per
                 kernel group in kernel-group order, or empty.
             lmcache_logical_chunk_size: Tokens per LMCache chunk
+            separate_object_groups: When True (default), split kernel groups
+                into one object group per sliding-window size; when False, all
+                kernel groups share a single full-attention object group.
         """
         # Import here to break a circular import via
         # lmcache.v1.gpu_connector.__init__ → metadata → kv_layer_groups.
@@ -399,6 +404,7 @@ class KVLayerGroupsManager:
             )
 
         self._lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
+        self._separate_object_groups = separate_object_groups
 
         logger.info(
             "KV layer groups: ---\n%s\n---",
@@ -504,31 +510,24 @@ class KVLayerGroupsManager:
             return self._lmcache_tokens_per_chunk
         return sw_size_tokens
 
-    def get_sw_size_chunks(self, object_group_idx: int) -> int:
-        """Return the sliding window size of a given kernel group,
-        The size is measured in lmcache chunks.
-
-        If the kernel group is non-sliding window, return -1
-
-        Args:
-            object_group_idx: 0-based kernel group index.
+    def get_attn_desc(self) -> AttnWindowDesc:
+        """Return the cross-chunk attention windows of all object groups.
 
         Returns:
-            The sliding window size rounded up to chunks for sliding
-            window models. -1 otherwise.
+            An :class:`AttnWindowDesc` with one entry per object group, in
+            object-group order; the entry is ``-1`` for a non-sliding-window
+            group.
 
         Note:
-            It uses object_group_idx, because the kernel groups in the same
-            object group must share the same "big-sliding-window" size -- so that
-            they can be retrieved at the same time from the same object.
-            For small sliding window (subchunk window) models, it will return 1.
+            With object-group separation disabled (the default), the result
+            has a single full-attention entry.
         """
-        # NOTE(ApostaC): object-level skipping is not enabled yet, so we
-        # always return -1 here instead of reading the object group's
-        # ``sw_size_chunks``. Switch to
-        # ``self._object_groups[object_group_idx].sw_size_chunks`` once the
-        # lookup/registry side supports multiple object groups.
-        return -1
+        return AttnWindowDesc(
+            num_chunks_in_sw=[
+                w if w >= 1 else -1
+                for w in (g.sw_size_chunks for g in self._object_groups)
+            ]
+        )
 
     def calculate_num_blocks(self, kernel_group_idx: int, num_tokens: int) -> int:
         """Calculate the number of blocks for a given number of tokens in a
@@ -556,40 +555,41 @@ class KVLayerGroupsManager:
     def _detect_object_groups(
         self, engine_group_infos: "Sequence[EngineGroupInfo]"
     ) -> list[ObjectGroupInfo]:
-        """Detect object groups based on the provided engine group infos.
+        """Bucket kernel groups into object groups.
+
+        Puts all kernel groups into a single object group when object-group
+        separation is disabled (the default). Otherwise groups the kernel groups
+        by sliding-window size measured in number of chunks.
 
         Args:
             engine_group_infos: LMCache-owned engine KV cache group metadata.
 
         Returns:
-            A list of ObjectGroupInfo instances representing the detected object groups.
+            One :class:`ObjectGroupInfo` per object group.
         """
-        # TODO(ApostaC): The following commented code groups the object groups based
-        # on the sliding window information. We need to re-enable this after the lookup
-        # logic for sliding window has been implemented.
-        # For now, we put all the kernel groups into one object group.
+        if not self._separate_object_groups:
+            return [
+                ObjectGroupInfo(
+                    kernel_group_indices=list(range(len(self._kernel_groups)))
+                )
+            ]
 
-        # chunk_size = self._lmcache_tokens_per_chunk
-        # groups_by_sw_size: dict[int, list[int]] = defaultdict(list)
-        # for kernel_group_idx, group in enumerate(self._kernel_groups):
-        #    if group.sw_size_tokens == -1:
-        #        sw_size_chunks = -1
-        #    else:
-        #        sw_size_chunks = (
-        #            group.sw_size_tokens + chunk_size - 1
-        #        ) // chunk_size
-        #    groups_by_sw_size[sw_size_chunks].append(kernel_group_idx)
-        # return [
-        #    ObjectGroupInfo(
-        #        kernel_group_indices=kernel_group_indices,
-        #        sw_size_chunks=sw_size_chunks,
-        #    )
-        #    for sw_size_chunks, kernel_group_indices in sorted(
-        #        groups_by_sw_size.items(), key=lambda kv: kv[1][0]
-        #    )
-        # ]
+        chunk_size = self._lmcache_tokens_per_chunk
+        groups_by_sw_size: dict[int, list[int]] = defaultdict(list)
+        for kernel_group_idx, group in enumerate(self._kernel_groups):
+            if group.sw_size_tokens == -1:
+                sw_size_chunks = -1
+            else:
+                sw_size_chunks = (group.sw_size_tokens + chunk_size - 1) // chunk_size
+            groups_by_sw_size[sw_size_chunks].append(kernel_group_idx)
         return [
-            ObjectGroupInfo(kernel_group_indices=list(range(len(self._kernel_groups))))
+            ObjectGroupInfo(
+                kernel_group_indices=kernel_group_indices,
+                sw_size_chunks=sw_size_chunks,
+            )
+            for sw_size_chunks, kernel_group_indices in sorted(
+                groups_by_sw_size.items(), key=lambda kv: kv[1][0]
+            )
         ]
 
     @staticmethod

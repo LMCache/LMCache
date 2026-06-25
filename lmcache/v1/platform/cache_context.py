@@ -161,6 +161,7 @@ def create_cache_context(
     layout_hints: LayoutHints | None = None,
     engine_group_infos: "Sequence[EngineGroupInfo]" = (),
     engine_type: EngineType = EngineType.VLLM,
+    separate_object_groups: bool = True,
 ) -> BaseCacheContext:
     """Create the appropriate cache context for *kv_caches*.
 
@@ -183,6 +184,9 @@ def create_cache_context(
             Forwarded verbatim to the concrete context constructor.
         engine_group_infos: Engine-neutral KV cache group metadata.
         engine_type: Which serving engine produced the caches.
+        separate_object_groups: When True (default), split kernel groups into
+            one object group per sliding-window size; when False, a single
+            full-attention object group.
 
     Returns:
         A concrete cache context instance.
@@ -202,4 +206,5 @@ def create_cache_context(
         layout_hints,
         engine_group_infos,
         engine_type,
+        separate_object_groups,
     )

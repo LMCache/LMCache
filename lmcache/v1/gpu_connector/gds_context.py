@@ -1,14 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Process-global cuFile data path for the GDS L1 tier.
+"""Process-global GPUDirect Storage data path for the GDS L1 tier.
 
-One :class:`GDSContext` per worker process owns the slab file, its cuFile
-handle, the registered GPU staging buffers, and the stream-ordered cuFile
-submissions. Created once at startup by :func:`initialize_gds_context`,
-reached via :func:`get_gds_context`. :meth:`GDSContext.register_gpu_buffer`
-registers a staging buffer; :meth:`GDSContext.transfer_async` moves a chunk
-between that buffer and the slab. No POSIX fallback -- if cuFile is
-unavailable, construction fails loudly. The slab is cleared on init, so it
-does not survive a restart (GDS L1 is treated like DRAM).
+The actual GPU<->slab DMA goes through the platform GDS library -- cuFile on
+NVIDIA, hipFile on AMD ROCm -- reached via the :mod:`_gds_async` dispatch shim
+(imported here as ``ca``), so this module is platform-agnostic.
+
+One :class:`GDSContext` per worker process owns the slab file, its GDS handle,
+the registered GPU staging buffers, and the stream-ordered GDS submissions.
+Created once at startup by :func:`initialize_gds_context`, reached via
+:func:`get_gds_context`. :meth:`GDSContext.register_gpu_buffer` registers a
+staging buffer; :meth:`GDSContext.transfer_async` moves a chunk between that
+buffer and the slab. No POSIX fallback -- if the GDS library is unavailable,
+construction fails loudly. The slab is cleared on init, so it does not survive
+a restart (GDS L1 is treated like DRAM).
 """
 
 # Standard
@@ -27,17 +31,18 @@ import torch
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.config import GdsL1Config
-from lmcache.v1.gpu_connector import _cufile_async as ca
+from lmcache.v1.gpu_connector import _gds_async as ca
 from lmcache.v1.memory_management import GDSMemoryObject
 
 logger = init_logger(__name__)
 
 _SLAB_FILENAME = "lmcache_gds_slab.bin"
 _CUFILE_ALIGNMENT = 4096
-# A single cuFileBufRegister/DMA is capped at 16 MiB; larger buffers and chunks
-# are registered and transferred in <=16 MiB regions.
+# A single GDS buffer registration / DMA is capped at 16 MiB (both cuFile and
+# hipFile); larger buffers and chunks are registered and transferred in
+# <=16 MiB regions.
 _MAX_CUFILE_REGION = 16 * 1024 * 1024
-# cuFile submissions to accumulate before recording a completion event and
+# GDS submissions to accumulate before recording a completion event and
 # draining finished ones (keeps the live submission set bounded).
 _SUBMISSION_CHECKPOINT_EVERY = 64
 
@@ -53,7 +58,7 @@ class SlabDirection(enum.Enum):
 
 @dataclass
 class _StreamSubmissions:
-    """Per-stream cuFile submissions, kept alive until their DMA has run.
+    """Per-stream GDS submissions, kept alive until their DMA has run.
 
     Submissions accumulate in ``uncommitted``, move to ``inflight`` behind a
     CUDA event on the stream, and drop once it completes. Per-stream because an
@@ -68,10 +73,10 @@ class _StreamSubmissions:
 
 
 class GDSContext:
-    """Per-process cuFile context owning the slab file and its DMA path.
+    """Per-process GDS context owning the slab file and its DMA path.
 
     The singleton always exists but is inert until :meth:`initialize` creates
-    the slab and registers the cuFile handle (flipping :attr:`initialized`).
+    the slab and registers the GDS handle (flipping :attr:`initialized`).
     While off, ``register_gpu_buffer`` is a no-op.
     """
 
@@ -89,7 +94,7 @@ class GDSContext:
         # ``_submissions_lock`` (see ``_record_submission``).
         self._submissions_lock = threading.Lock()
         self._submissions: dict[int, _StreamSubmissions] = {}
-        # Registry of cuFile-registered GPU regions and the CUDA streams they run on
+        # Registry of GDS-registered GPU regions and the streams they run on
         self._registry_lock = threading.Lock()
         self._buffers: list[torch.Tensor] = []
         self._base_ptrs: list[int] = []
@@ -97,7 +102,7 @@ class GDSContext:
         self._registered_streams: set[int] = set()  # maintained for close()
 
     def initialize(self, config: GdsL1Config) -> None:
-        """Create + clear the slab and register it with cuFile.
+        """Create + clear the slab and register it with the GDS library.
 
         Args:
             config: GDS tier config. ``size_in_bytes`` sizes the preallocated
@@ -106,7 +111,8 @@ class GDSContext:
                 ``use_direct_io`` opens it with ``O_DIRECT``.
 
         Raises:
-            Exception: Whatever ``cufile`` raises if GDS is unavailable.
+            Exception: Whatever the GDS library (cuFile/hipFile) raises if GDS
+                is unavailable.
         """
         self._slab_size = (config.size_in_bytes + _CUFILE_ALIGNMENT - 1) & ~(
             _CUFILE_ALIGNMENT - 1
@@ -124,10 +130,10 @@ class GDSContext:
     # --- Public API ---------------------------------------------------
 
     def register_gpu_buffer(self, buffer: torch.Tensor) -> None:
-        """Register a staging buffer (and its CUDA stream) with cuFile.
+        """Register a staging buffer (and its stream) with the GDS library.
 
-        Registered as contiguous <=16 MiB regions (the cuFileBufRegister cap);
-        :meth:`transfer_async` splits transfers at these boundaries.
+        Registered as contiguous <=16 MiB regions (the GDS buffer-registration
+        cap); :meth:`transfer_async` splits transfers at these boundaries.
 
         Args:
             buffer: Contiguous CUDA staging buffer, 4 KiB-aligned in size.
@@ -186,7 +192,7 @@ class GDSContext:
         """DMA a chunk between ``gpu_buffer`` and its slab region.
 
         ``READ`` pulls slab -> ``gpu_buffer``; ``WRITE`` pushes the reverse.
-        Split at registered-region boundaries (each cuFile DMA must stay within
+        Split at registered-region boundaries (each GDS DMA must stay within
         one <=16 MiB region), so any chunk size works. Stream-ordered, no sync.
 
         Args:
@@ -209,7 +215,7 @@ class GDSContext:
             pos += seg_len
 
     def close(self) -> None:
-        """Sync the stream, deregister cuFile state, and close the slab handle."""
+        """Sync the stream, deregister GDS state, and close the slab handle."""
         if self._buffers:
             torch_dev.synchronize(device=self._buffers[0].device)
         with self._submissions_lock:
@@ -242,7 +248,7 @@ class GDSContext:
     # --- Internal -----------------------------------------------------
 
     def _open_and_register_slab(self, use_direct_io: bool) -> None:
-        """Create, truncate, preallocate the slab file and register it with cuFile.
+        """Create, truncate, preallocate the slab file and register it with GDS.
 
         Args:
             use_direct_io: Open with ``O_DIRECT`` (required for the GDS fast path).
@@ -260,10 +266,7 @@ class GDSContext:
             flags |= os.O_DIRECT
         fd = os.open(self._slab_path, flags)
         try:
-            # Third Party
-            from cufile.bindings import cuFileHandleRegister
-
-            handle = cuFileHandleRegister(fd)
+            handle = ca.register_handle(fd)
         except Exception:
             os.close(fd)
             raise
@@ -271,7 +274,7 @@ class GDSContext:
             fd, handle, self._slab_path, writable=True
         )
         logger.info(
-            "GDSContext: slab created at %s (%.1f GiB, O_DIRECT=%s), cuFile "
+            "GDSContext: slab created at %s (%.1f GiB, O_DIRECT=%s), GDS "
             "handle registered",
             self._slab_path,
             self._slab_size / (1 << 30),
@@ -279,7 +282,7 @@ class GDSContext:
         )
 
     def _register_region_locked(self, buffer: torch.Tensor) -> None:
-        """cuFile-register one <=16 MiB region (caller holds the lock)."""
+        """GDS-register one <=16 MiB region (caller holds the lock)."""
         nbytes = buffer.numel() * buffer.element_size()
         base = buffer.data_ptr()
         ca.register_buffer(buffer)
@@ -288,15 +291,14 @@ class GDSContext:
         self._base_ptrs.insert(idx, base)
         self._nbytes.insert(idx, nbytes)
         logger.info(
-            "GDSContext: registered %d bytes at 0x%x via cuFile "
-            "(total registrations: %d)",
+            "GDSContext: registered %d bytes at 0x%x via GDS (total registrations: %d)",
             nbytes,
             base,
             len(self._buffers),
         )
 
     def _deregister_region_locked(self, buffer: torch.Tensor) -> None:
-        """Deregister one region with cuFile (caller holds the lock).
+        """Deregister one region with the GDS library (caller holds the lock).
 
         Args:
             buffer: A staging-buffer slot previously registered.
@@ -332,7 +334,7 @@ class GDSContext:
     def _slab_read(
         self, slab_offset: int, size: int, dev_offset: int, buf_base: int
     ) -> None:
-        """Submit one ``cuFileReadAsync`` against the slab handle (stream-ordered)."""
+        """Submit one async GDS read against the slab handle (stream-ordered)."""
         if self._slab_handle is None:
             raise RuntimeError("GDSContext._slab_read: slab handle not open")
         stream_handle = torch_dev.current_stream().cuda_stream
@@ -344,7 +346,7 @@ class GDSContext:
     def _slab_write(
         self, slab_offset: int, size: int, dev_offset: int, buf_base: int
     ) -> None:
-        """Submit one ``cuFileWriteAsync`` against the slab handle (stream-ordered)."""
+        """Submit one async GDS write against the slab handle (stream-ordered)."""
         if self._slab_handle is None:
             raise RuntimeError("GDSContext._slab_write: slab handle not open")
         stream_handle = torch_dev.current_stream().cuda_stream

@@ -5,8 +5,8 @@ Most tests are pure (no cuFile): they exercise the public interface
 (singleton/no-op semantics, the <=16 MiB region split observed at the ``ca``
 cuFile seam, and the registered-region mapping driven through
 :meth:`GDSContext.transfer_async`). The ``test_gds_*_roundtrip`` tests
-exercise the real cuFile DMA path and are skipped unless CUDA + nvidia-fs
-(real GDS) are present.
+exercise the real GDS DMA path (cuFile on NVIDIA, hipFile on AMD ROCm) and are
+skipped unless that stack is present (see :func:`_gds_available`).
 """
 
 # Standard
@@ -23,7 +23,7 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.distributed.config import GdsL1Config
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.memory_manager import GDSL1MemoryManager
-from lmcache.v1.gpu_connector import _cufile_async as ca
+from lmcache.v1.gpu_connector import _gds_async as ca
 from lmcache.v1.gpu_connector.gds_context import (
     GDSContext,
     SlabDirection,
@@ -37,9 +37,32 @@ def _fake_stream(handle: int):
     return SimpleNamespace(cuda_stream=handle, synchronize=lambda: None)
 
 
+def _gds_available() -> bool:
+    """Whether a real GPUDirect Storage stack is present for the roundtrip tests.
+
+    NVIDIA: CUDA plus the nvidia-fs kernel module (``/proc/driver/nvidia-fs``).
+    AMD ROCm: a loadable ``libhipfile.so`` (the hipFile GPU IO library). When
+    the GDS-capable driver/filesystem is absent hipFile still round-trips
+    correctly via its host-bounce fallback, so library loadability is a
+    sufficient gate for the correctness checks below.
+    """
+    if not torch.cuda.is_available():
+        return False
+    if torch.version.hip is not None:
+        # Standard
+        import ctypes
+
+        try:
+            ctypes.CDLL("libhipfile.so")
+        except OSError:
+            return False
+        return True
+    return os.path.exists("/proc/driver/nvidia-fs/stats")
+
+
 requires_gds = pytest.mark.skipif(
-    not (torch.cuda.is_available() and os.path.exists("/proc/driver/nvidia-fs/stats")),
-    reason="needs CUDA + nvidia-fs (real GPUDirect Storage)",
+    not _gds_available(),
+    reason="needs CUDA + nvidia-fs or ROCm + libhipfile.so (real GPUDirect Storage)",
 )
 
 

@@ -354,6 +354,7 @@ class GPUCacheContext(BaseCacheContext):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
+        separate_object_groups: bool = True,
     ):
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
         engine_kv_format, kv_caches_norm = normalize_kv_and_discover_format(
@@ -372,6 +373,7 @@ class GPUCacheContext(BaseCacheContext):
             num_blocks=num_blocks_val,
             engine_group_infos=engine_group_infos,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
+            separate_object_groups=separate_object_groups,
         )
 
         # Pre-allocated GPU buffer for block IDs (up to 1M elements).
