@@ -1,13 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Samsung Electronics Co., Ltd.All Rights Reserved
 #
 # This file contains Python non-CUDA fallback implementations for
 # CUDA-specific operations.
+#
+# 2026/6/25 add memcpy function
+#   Wenwen Chen <wenwen.chen@samsung.com>
 #
 # Standard
 from concurrent.futures import ThreadPoolExecutor
 from enum import IntEnum
 from multiprocessing import shared_memory
 from typing import Any, Optional, Tuple
+import array
 import ctypes
 import ctypes.util
 import os
@@ -432,6 +437,50 @@ def free_pinned_ptr(ptr: int) -> None:
 
     # Release the tensor object for that pointer reference
     _tensor_registry.pop(ptr, None)
+
+
+def memcpy(
+    dst_buf: bytes | bytearray | memoryview | array.array[Any],
+    src_buf: bytes | bytearray | memoryview | array.array[Any],
+    length: int,
+) -> bool:
+    """Non-CUDA equivalent of the native memcpy helper.
+
+    Copy length bytes from src_buf to dst_buf using ctypes memmove.
+
+    Args:
+        dst_buf: Destination buffer supporting Python buffer protocol
+            (e.g. bytes, bytearray, memoryview, array.array, numpy.ndarray).
+        src_buf: Source buffer supporting Python buffer protocol.
+        length: Number of bytes to copy.
+
+    Returns:
+        True if copy succeeded.
+
+    Raises:
+        ValueError: If buffer is null or length exceeds buffer size.
+        TypeError: If input does not support buffer protocol.
+    """
+    # memoryview() auto check buffer protocol，raise TypeError if not support
+    dst_mv = memoryview(dst_buf)
+    src_mv = memoryview(src_buf)
+
+    dst_bytes = len(dst_mv) * dst_mv.itemsize
+    src_bytes = len(src_mv) * src_mv.itemsize
+
+    if length > dst_bytes or length > src_bytes:
+        raise ValueError("Length exceeds buffer size")
+
+    if length <= 0:
+        return False
+    # Note: mypy doesn't know about memoryview.ctypes,
+    # but it's a standard Python 3.3+ attribute
+    ctypes.memmove(
+        ctypes.c_void_p(dst_mv.cast("B").ctypes.data),  # type: ignore[attr-defined]
+        ctypes.c_void_p(src_mv.cast("B").ctypes.data),  # type: ignore[attr-defined]
+        length,
+    )
+    return True
 
 
 def batched_memcpy(src_ptrs: list[int], dst_ptrs: list[int], sizes: list[int]) -> None:
