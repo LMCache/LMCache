@@ -3,8 +3,8 @@
 
 # Standard
 from dataclasses import dataclass
+import pickle
 import threading
-import time
 
 # Third Party
 import torch
@@ -32,7 +32,11 @@ from lmcache.v1.multiprocess.protocols.engine import (
     PrepareStoreResponse,
     RegisterEngineDrivenContextResponse,
 )
-from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContextMetadata
+from lmcache.v1.multiprocess.transfer_context.base import (
+    EngineDrivenContextMetadata,
+    _deserialize_multi_group_chunks,
+    _serialize_multi_group_chunks,
+)
 
 # Local
 from .server_transfer import (
@@ -47,7 +51,6 @@ class _Counter:
     """Tiny thread-safe counter (used for the F. batched-append
     observability hook)."""
     def __init__(self) -> None:
-        import threading
         self._lock = threading.Lock()
         self._value = 0
 
@@ -592,10 +595,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         across ``dev24+`` upgrades (so existing L2 cache entries written
         by ``dev23`` stay readable).
         """
-        import pickle
-        from lmcache.v1.multiprocess.transfer_context.base import (
-            _deserialize_multi_group_chunks,
-        )
+        entry, strategy = self._resolve_for_transfer(instance_id)
         entry, strategy = self._resolve_for_transfer(instance_id)
         if not entry.metadata.is_multi_group:
             logger.error(
@@ -683,10 +683,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         the server just no-ops the storage write -- saving 14 GiB of
         zmq traffic on the re-run of a cached prompt.
         """
-        import pickle
-        from lmcache.v1.multiprocess.transfer_context.base import (
-            _deserialize_multi_group_chunks,
-        )
+        entry, strategy = self._resolve_for_transfer(instance_id)
         entry, strategy = self._resolve_for_transfer(instance_id)
         if not entry.metadata.is_multi_group:
             logger.error(
@@ -760,10 +757,6 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         strategy: TransferStrategy,
     ) -> bool:
         """Commit multi-group store by storing each group separately."""
-        import pickle
-        from lmcache.v1.multiprocess.transfer_context.base import (
-            _deserialize_multi_group_chunks,
-        )
         group_chunks = _deserialize_multi_group_chunks(cpu_data)
         num_groups = len(entry.metadata.group_layout_descs)
         if len(group_chunks) != num_groups:
@@ -846,10 +839,6 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         strategy: TransferStrategy,
     ) -> PrepareRetrieveResponse:
         """Retrieve multi-group chunks and return serialized data."""
-        import pickle
-        from lmcache.v1.multiprocess.transfer_context.base import (
-            _serialize_multi_group_chunks,
-        )
         num_groups = len(entry.metadata.group_layout_descs)
         all_obj_keys = self._resolve_all_group_obj_keys(key, num_groups)
         st = time.perf_counter()

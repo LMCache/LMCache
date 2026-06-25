@@ -10,11 +10,9 @@ Covers:
   - (Optional GPU) gather/scatter multi-group roundtrip
 """
 # Standard
-from dataclasses import dataclass
 import pickle
 
 # Third Party
-import msgspec
 import msgspec.msgpack as mp
 import pytest
 import torch

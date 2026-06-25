@@ -21,6 +21,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 import inspect
+import threading
 
 # Third Party
 import numpy as np
@@ -1085,13 +1086,10 @@ def slice_kv_caches_for_group(
         kv_caches: All layers, ordered as passed by the adapter.
         layer_indices: 0-based indices of the layers belonging to this group.
     Returns:
-        Ordered dict with only the layers of this group, sorted numerically.
+        Ordered dict with only the layers of this group.
     """
     all_values = list(kv_caches.values())
-    # Sort numerically, not alphabetically ("2" < "10" in Python string sort)
-    sorted_indices = sorted(layer_indices)
-    return {str(i): all_values[idx] for i, idx in enumerate(sorted_indices)}
-
+    return {str(i): all_values[idx] for i, idx in enumerate(sorted(layer_indices))}
 
 def gather_paged_kv_multi_group_to_cpu_streams(
     kv_caches: dict[str, torch.Tensor],
