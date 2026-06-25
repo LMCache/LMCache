@@ -481,7 +481,6 @@ class TestKernelAndObjectGroups:
         tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(2)]
         manager = _build_manager(
             tensors,
-            num_blocks=32,
             engine_group_infos=[
                 EngineGroupInfo(0, (0,)),
                 EngineGroupInfo(1, (1,), sw_size_tokens=64),
@@ -500,7 +499,6 @@ class TestKernelAndObjectGroups:
         tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(2)]
         manager = _build_manager(
             tensors,
-            num_blocks=32,
             engine_group_infos=[
                 EngineGroupInfo(0, (0,)),
                 EngineGroupInfo(1, (1,), sw_size_tokens=64),
@@ -525,7 +523,7 @@ class TestKernelAndObjectGroups:
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
             torch.randn(2, 32, 256, 16, 64, dtype=torch.float16),
         ]
-        manager = _build_manager(tensors, num_blocks=32, separate_object_groups=True)
+        manager = _build_manager(tensors, separate_object_groups=True)
         assert manager.num_object_groups == 1
         assert manager.get_attn_desc().num_chunks_in_sw == [-1]
 
