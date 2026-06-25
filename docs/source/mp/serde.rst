@@ -58,6 +58,57 @@ serde factory.
      - ``fp8_dtype`` (default ``float8_e4m3fn``; also accepts
        ``float8_e5m2``), ``max_workers`` (thread pool size,
        default 1)
+   * - ``turboquant``
+     - Compress KV tensors with TurboQuant presets before L2 store and
+       reconstruct them on load.
+     - ``preset`` (default ``turboquant_k8v4``), ``head_dim`` (optional,
+       default 128), ``block_size`` (default 16), ``max_workers`` (thread
+       pool size, default 1)
+
+
+TurboQuant serde
+----------------
+
+TurboQuant serde can be enabled by setting ``"type": "turboquant"`` in the
+adapter serde config. If ``preset`` is omitted, TurboQuant serde defaults to
+``turboquant_k8v4``.
+
+.. code-block:: bash
+
+    lmcache server \
+        --l1-size-gb 100 \
+        --eviction-policy LRU \
+        --l2-adapter '{
+            "type": "fs",
+            "base_path": "/data/lmcache/l2",
+            "serde": {
+                "type": "turboquant",
+                "preset": "turboquant_k8v4",
+                "block_size": 16
+            }
+        }'
+
+Supported presets:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 35 35
+
+   * - Preset
+     - Key path
+     - Value path
+   * - ``turboquant_k8v4``
+     - FP8 key
+     - 4-bit value quantization
+   * - ``turboquant_4bit_nc``
+     - 4-bit MSE key with norm correction
+     - 4-bit value quantization
+   * - ``turboquant_k3v4_nc``
+     - 3-bit MSE key with norm correction
+     - 4-bit value quantization
+   * - ``turboquant_3bit_nc``
+     - 3-bit MSE key with norm correction
+     - 3-bit value quantization
 
 
 Writing a custom serde

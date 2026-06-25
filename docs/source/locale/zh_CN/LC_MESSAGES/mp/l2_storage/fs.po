@@ -29,8 +29,7 @@ msgid ""
 "cache object is stored as a raw ``.data`` file whose name encodes the "
 "full ``ObjectKey``.  Does **not** require NIXL -- works on any POSIX file"
 " system."
-msgstr ""
-"一个纯文件系统 L2 适配器，使用异步 I/O (``aiofiles``)。每个 KV 缓存对象以原始 ``.data`` 文件的形式存储，文件名编码了完整的 ``ObjectKey``\\ 。\\ **不**\\ 需要 NIXL——可在任何 POSIX 文件系统上运行。"
+msgstr "一个纯文件系统 L2 适配器，使用异步 I/O (``aiofiles``)。每个 KV Cache 对象作为一个原始的 ``.data`` 文件存储，其名称编码了完整的 ``ObjectKey``。**不**需要 NIXL -- 可在任何 POSIX 文件系统上工作。"
 
 #: ../../source/mp/l2_storage/fs.rst:8
 msgid "**Required fields:**"
@@ -38,7 +37,7 @@ msgstr "**必填字段：**"
 
 #: ../../source/mp/l2_storage/fs.rst:10
 msgid "``base_path``: Directory for storing KV cache files."
-msgstr "``base_path``: 存储 KV 缓存文件的目录。"
+msgstr "``base_path``: 存储 KV Cache 文件的目录。"
 
 #: ../../source/mp/l2_storage/fs.rst:12
 msgid "**Optional fields:**"
@@ -48,20 +47,19 @@ msgstr "**可选字段：**"
 msgid ""
 "``relative_tmp_dir``: Relative sub-directory for temporary files during "
 "writes (atomic rename on completion)."
-msgstr "``relative_tmp_dir``: 写入期间临时文件的相对子目录（完成时进行原子重命名）。"
+msgstr "``relative_tmp_dir``：写入期间临时文件的相对子目录（完成时进行原子重命名）。"
 
 #: ../../source/mp/l2_storage/fs.rst:16
 msgid ""
 "``read_ahead_size``: Trigger file-system read-ahead by reading this many "
 "bytes first (positive integer, optional)."
-msgstr "``read_ahead_size``: 通过预先读取指定字节数来触发文件系统预读（正整数，可选）。"
+msgstr "``read_ahead_size``: 通过首先读取这么多字节来触发文件系统的预读（正整数，可选）。"
 
 #: ../../source/mp/l2_storage/fs.rst:18
 msgid ""
 "``use_odirect``: ``true`` or ``false`` (default ``false``) -- bypass the "
 "page cache via ``O_DIRECT``."
-msgstr ""
-"``use_odirect``: ``true`` 或 ``false``\\ （默认 ``false``\\ ）-- 通过 ``O_DIRECT`` 绕过页面缓存。"
+msgstr "``use_odirect``: ``true`` 或 ``false``（默认 ``false``）-- 通过 ``O_DIRECT`` 绕过页面缓存。"
 
 #: ../../source/mp/l2_storage/fs.rst:21
 msgid "**Configuration examples:**"

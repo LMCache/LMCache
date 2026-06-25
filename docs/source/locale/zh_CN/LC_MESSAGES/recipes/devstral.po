@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"POT-Creation-Date: 2026-06-22 11:07+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -20,8 +20,8 @@ msgstr ""
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/recipes/devstral.rst:4
-msgid "MistralForCausalLM"
-msgstr "MistralForCausalLM"
+msgid "Mistral / Devstral"
+msgstr "Mistral / Devstral"
 
 #: ../../source/recipes/devstral.rst:7
 msgid "Validated models"
@@ -51,7 +51,7 @@ msgstr ""
 
 #: ../../source/recipes/devstral.rst:21
 msgid "**Status:** Validated with LMCache."
-msgstr "**状态：** 已通过 LMCache 验证。"
+msgstr "**状态:** 已通过 LMCache 验证。"
 
 #: ../../source/recipes/devstral.rst:23
 msgid "Start the LMCache MP server:"
@@ -66,7 +66,9 @@ msgid ""
 "Adjust ``--tensor-parallel-size`` to match your hardware. For the generic"
 " LMCache + vLLM wiring (ports, remote hosts), see "
 ":doc:`../getting_started/quickstart`."
-msgstr "调整 ``--tensor-parallel-size`` 以匹配您的硬件。有关通用 LMCache + vLLM 连接（端口、远程主机），请参见 :doc:`../getting_started/quickstart`。"
+msgstr ""
+"调整 ``--tensor-parallel-size`` 以匹配您的硬件。有关通用 LMCache + vLLM 连接（端口、远程主机），请参见"
+" :doc:`../getting_started/quickstart`。"
 
 #: ../../source/recipes/devstral.rst:48
 msgid ""
@@ -93,7 +95,9 @@ msgstr "TRT-LLM"
 msgid ""
 "**Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-"
 "LLM + LMCache setup."
-msgstr "**状态：** 支持。有关 TRT-LLM + LMCache 设置，请参见 :doc:`../getting_started/quickstart`。"
+msgstr ""
+"**状态：** 支持。有关 TRT-LLM + LMCache 设置，请参见 "
+":doc:`../getting_started/quickstart`。"
 
 #: ../../source/recipes/devstral.rst:61
 msgid "CacheBlend support"
@@ -129,8 +133,11 @@ msgstr "注意事项"
 
 #: ../../source/recipes/devstral.rst:80
 msgid "None known."
-msgstr "暂无已知问题。"
+msgstr "没有已知的问题。"
 
 #~ msgid "**Status:** Not supported. LMCache TRT-LLM integration is in progress."
 #~ msgstr "**状态：** 不支持。LMCache TRT-LLM 集成正在进行中。"
+
+#~ msgid "MistralForCausalLM"
+#~ msgstr "MistralForCausalLM"
 

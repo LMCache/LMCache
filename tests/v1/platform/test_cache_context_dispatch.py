@@ -57,6 +57,7 @@ class _FakeContext(BaseCacheContext):
         layout_hints: Any,
         engine_group_infos: Any,
         engine_type: Any,
+        separate_object_groups: bool = True,
     ) -> None:
         # Skip ``BaseCacheContext.__init__`` -- it requires real
         # KVLayerGroupsManager / shape descriptors that are out of
@@ -66,6 +67,7 @@ class _FakeContext(BaseCacheContext):
         self.layout_hints = layout_hints
         self.engine_group_infos = engine_group_infos
         self.engine_type = engine_type
+        self.separate_object_groups = separate_object_groups
 
     # ------------------------------------------------------------------
     # Abstract stubs -- never called from these tests.

@@ -27,5 +27,5 @@ msgstr "远程与分布式"
 msgid ""
 "Object stores and distributed KV stores -- suited to warm/cold cache "
 "tiers and sharing cache across nodes."
-msgstr "对象存储和分布式 KV 存储 -- 适用于温/冷缓存分层场景以及跨节点共享缓存。"
+msgstr "对象存储和分布式 KV 存储 -- 适用于温缓存/冷缓存层以及跨节点共享缓存。"
 

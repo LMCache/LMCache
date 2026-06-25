@@ -382,7 +382,12 @@ def test_create_transfer_context_handle_mode_unsupported_device_raises(
     snapshot = platform_registry.snapshot()
     try:
         # Drop every registered factory so 'cpu' can never be resolved.
-        platform_registry.restore({"kv_wrapper": {}, "availability": {}})
+        # Pass ``discovered=True`` so the lazy discovery pass does not
+        # immediately re-register the auto-discovered backends and
+        # defeat the empty-table fixture.
+        platform_registry.restore(
+            {"kv_wrapper": {}, "availability": {}, "discovered": True}
+        )
         with pytest.raises(ValueError, match="not supported for device type"):
             create_transfer_context(
                 {"layer_0": torch.randn(2, 2)}, mode="lmcache_driven"

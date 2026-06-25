@@ -184,13 +184,6 @@ Documentation
 .. toctree::
    :maxdepth: 2
 
-   extension/index
-
-:raw-html:`<br />`
-
-.. toctree::
-   :maxdepth: 2
-
    non_kv_cache/index
 
 :raw-html:`<br />`
