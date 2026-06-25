@@ -11,11 +11,11 @@ import torch
 # First Party
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
-    CudaIPCWrapper,
     IPCCacheServerKey,
     get_customized_decoder,
     get_customized_encoder,
 )
+from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
 
 
 def test_ipc_cache_engine_key_serialization():

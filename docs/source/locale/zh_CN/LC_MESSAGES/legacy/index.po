@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/legacy/index.rst:4
 msgid "Legacy (In-Process Mode)"
-msgstr "旧版（进程内模式）"
+msgstr "遗留（进程内模式）"
 
 #: ../../source/legacy/index.rst:8
 msgid ""
@@ -29,8 +29,7 @@ msgid ""
 "LMCache ran *inside* the inference engine process (e.g. via "
 "``LMCacheConnectorV1`` on vLLM). In-process mode is **deprecated**; new "
 "deployments should use :doc:`Multiprocess (MP) mode <../mp/index>`."
-msgstr ""
-"这些页面记录了 LMCache 的原始 **进程内模式**\\ ，即 LMCache 在推理引擎进程 *内部* 运行（例如通过 ``LMCacheConnectorV1`` 集成到 vLLM）。进程内模式已 **废弃**\\ ；新的部署应使用 :doc:`多进程（MP）模式 <../mp/index>`。"
+msgstr "这些页面记录了 LMCache 的原始 **内进程模式**，其中 LMCache 在推理引擎进程中 *运行*（例如通过 ``LMCacheConnectorV1`` 在 vLLM 上）。内进程模式是 **不推荐使用** 的；新的部署应使用 :doc:`多进程 (MP) 模式 <../mp/index>`。"
 
 #: ../../source/legacy/index.rst:14
 msgid "Background"
@@ -44,8 +43,7 @@ msgid ""
 "the default -- a ``LOOKUP`` followed by background L2→L1 loads -- "
 "alongside process isolation, shared caching across engine instances, and "
 "multi-tier (L1/L2) storage."
-msgstr ""
-"LMCache 最初是一个直接嵌入推理引擎的进程内库。\\ **多进程重构**\\ 将 LMCache 迁移至独立的 ``lmcache server``\\ ，并将 **异步预取架构** 设为默认——即执行 ``LOOKUP`` 后在后台进行 L2→L1 加载——同时带来进程隔离、跨引擎实例的共享缓存以及多层（L1/L2）存储。"
+msgstr "LMCache 最初作为一个嵌入在服务引擎中的进程内库。**多进程重构**将 LMCache 移动到一个独立的 ``lmcache server`` 中，并使 **异步预取架构** 成为默认设置——一个 ``LOOKUP`` 后跟后台 L2→L1 加载——同时实现进程隔离、引擎实例之间的共享缓存以及多层 (L1/L2) 存储。"
 
 #: ../../source/legacy/index.rst:22
 msgid ""
@@ -54,5 +52,5 @@ msgid ""
 "on in-process mode and as a historical reference while MP closes any "
 "remaining gaps; where a feature already has an MP equivalent, prefer the "
 "MP docs."
-msgstr "MP 模式（多进程）现为推荐模式，并正持续完善以支持进程内模式的几乎全部功能。以下页面保留供仍在使用进程内模式的用户参考，也作为历史资料——待 MP 模式填补剩余空白期间可查阅；若某项功能已有对应的 MP 模式实现，请优先参考 MP 文档。"
+msgstr "MP 现在是推荐的模式，并且正在努力支持几乎所有在进程模式下的功能。下面的页面保留给仍在进程模式下的用户，并作为历史参考，同时 MP 解决任何剩余的差距；如果某个功能已经有 MP 等效项，请优先参考 MP 文档。"
 

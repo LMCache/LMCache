@@ -28,6 +28,7 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import (
+    AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
@@ -244,6 +245,14 @@ def _dec_trim_policy(name: str) -> TrimPolicy:
     return TrimPolicy[name]
 
 
+def _enc_attn_window(d: AttnWindowDesc) -> list[int]:
+    return list(d.num_chunks_in_sw)
+
+
+def _dec_attn_window(num_chunks_in_sw: list[int]) -> AttnWindowDesc:
+    return AttnWindowDesc(num_chunks_in_sw=list(num_chunks_in_sw))
+
+
 def _enc_set(s: set) -> list:
     return [encode_value(x) for x in s]
 
@@ -279,6 +288,10 @@ register_codec(
 register_codec(
     torch.dtype,
     TypeCodec(tag="torch.dtype", encode=_enc_torch_dtype, decode=_dec_torch_dtype),
+)
+register_codec(
+    AttnWindowDesc,
+    TypeCodec(tag="AttnWindowDesc", encode=_enc_attn_window, decode=_dec_attn_window),
 )
 register_codec(
     TrimPolicy,

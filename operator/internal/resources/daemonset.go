@@ -258,6 +258,7 @@ func buildDaemonSetCore(
 				},
 				Spec: corev1.PodSpec{
 					HostIPC:            true,
+					HostNetwork:        derefBool(spec.HostNetwork, false),
 					RuntimeClassName:   runtimeClassName,
 					ServiceAccountName: spec.ServiceAccountName,
 					PriorityClassName:  spec.PriorityClassName,
@@ -288,6 +289,10 @@ func buildDaemonSetCore(
 				},
 			},
 		},
+	}
+
+	if derefBool(spec.HostNetwork, false) {
+		ds.Spec.Template.Spec.DNSPolicy = corev1.DNSClusterFirstWithHostNet
 	}
 
 	return ds

@@ -25,7 +25,7 @@ msgstr "二级 KV 存储"
 
 #: ../../source/mp/l2_storage/index.rst:4
 msgid "LMCache multiprocess mode supports a two-tier storage architecture:"
-msgstr "LMCache MP 模式（多进程）支持两级存储架构："
+msgstr "LMCache 多进程模式支持两级存储架构："
 
 #: ../../source/mp/l2_storage/index.rst:6
 msgid ""
@@ -60,7 +60,7 @@ msgstr "vLLM 通过 ``STORE`` RPC 将 KV Cache 块存储到 L1。"
 msgid ""
 "The ``StoreController`` detects new objects (via eventfd) and "
 "asynchronously submits store tasks to each configured L2 adapter."
-msgstr "``StoreController`` 通过 eventfd 检测新对象，并异步将存储任务提交到每个已配置的 L2 适配器。"
+msgstr "``StoreController`` 通过 eventfd 检测新对象，并异步提交存储任务到每个配置的 L2 适配器。"
 
 #: ../../source/mp/l2_storage/index.rst:27
 msgid "The L2 adapter writes the data to its backend (e.g., local SSD via GDS)."
@@ -72,20 +72,19 @@ msgstr "**读取路径 (L2 -> L1):**"
 
 #: ../../source/mp/l2_storage/index.rst:31
 msgid "A ``LOOKUP`` RPC checks L1 for prefix hits."
-msgstr "``LOOKUP`` RPC 检查 L1 中的前缀缓存命中情况。"
+msgstr "一个 ``LOOKUP`` RPC 检查 L1 中的前缀命中。"
 
 #: ../../source/mp/l2_storage/index.rst:32
 msgid ""
 "For keys not found in L1, the ``PrefetchController`` submits lookup "
 "requests to L2 adapters."
-msgstr ""
-"对于在 L1 中未找到的键，\\ ``PrefetchController`` 向 L2 适配器提交查找请求。"
+msgstr "对于在 L1 中未找到的键，``PrefetchController`` 向 L2 适配器提交查找请求。"
 
 #: ../../source/mp/l2_storage/index.rst:34
 msgid ""
 "If found in L2, the data is loaded back into L1 and read-locked for the "
 "pending ``RETRIEVE`` RPC."
-msgstr "如果在 L2 中找到，数据将被加载回 L1，并为待处理的 ``RETRIEVE`` RPC 加读锁。"
+msgstr "如果在 L2 中找到，数据将被加载回 L1，并为待处理的 ``RETRIEVE`` RPC 进行读锁定。"
 
 #: ../../source/mp/l2_storage/index.rst:38
 msgid "Adapter Types"
@@ -108,8 +107,7 @@ msgid ""
 "argument.  Adapters are used in the order they are specified.  The "
 "``StoreController`` pushes data to all configured adapters, and the "
 "``PrefetchController`` queries adapters in order during lookups."
-msgstr ""
-"您可以通过重复 ``--l2-adapter`` 参数来配置多个 L2 适配器。适配器按指定的顺序使用。\\ ``StoreController`` 将数据推送到所有配置的适配器，而 ``PrefetchController`` 在查找期间按顺序查询适配器。"
+msgstr "您可以通过重复 ``--l2-adapter`` 参数来配置多个 L2 适配器。适配器按指定的顺序使用。``StoreController`` 将数据推送到所有配置的适配器，而 ``PrefetchController`` 在查找期间按顺序查询适配器。"
 
 #: ../../source/mp/l2_storage/index.rst:64
 msgid "Store and Prefetch Policies"
@@ -158,7 +156,7 @@ msgstr "``default``"
 
 #: ../../source/mp/l2_storage/index.rst:90
 msgid "Store all keys to all adapters.  Never delete from L1."
-msgstr "将所有键存储到所有适配器中。永不从 L1 中删除。"
+msgstr "将所有键存储到所有适配器中。永远不要从 L1 中删除。"
 
 #: ../../source/mp/l2_storage/index.rst:92
 msgid "``skip_l1``"
@@ -169,8 +167,7 @@ msgid ""
 "Buffer-only mode.  Store all keys to all adapters, then **delete them "
 "from L1** immediately.  Pair with ``--eviction-policy noop`` to avoid "
 "useless LRU overhead."
-msgstr ""
-"仅缓冲区模式。将所有键存储到所有适配器，然后立即 **从 L1 中删除它们**\\ 。与 ``--eviction-policy noop`` 配对以避免无用的 LRU 开销。"
+msgstr "仅缓冲区模式。将所有键存储到所有适配器，然后立即 **从 L1 中删除它们**。与 ``--eviction-policy noop`` 配对以避免无用的 LRU 开销。"
 
 #: ../../source/mp/l2_storage/index.rst:96
 #: ../../source/mp/l2_storage/index.rst:100
@@ -181,8 +178,7 @@ msgstr "``--l2-prefetch-policy``"
 msgid ""
 "For each key, pick the first (lowest-indexed) adapter that has it. "
 "Prefetched keys are **temporary** (deleted after the reader finishes)."
-msgstr ""
-"对于每个键，选择第一个（索引最低的）拥有该键的适配器。预取的键是\\ **临时的**\\ （在读取完成后删除）。"
+msgstr "对于每个键，选择第一个（索引最低的）适配器。预取的键是**临时的**（在读取器完成后删除）。"
 
 #: ../../source/mp/l2_storage/index.rst:101
 msgid "``retain``"
@@ -193,8 +189,7 @@ msgid ""
 "Same load plan as ``default``, but prefetched keys are **retained** "
 "permanently in L1.  Useful when prefetched data is likely reused by "
 "subsequent requests (e.g. shared system-prompt chunks)."
-msgstr ""
-"与 ``default`` 相同的加载计划，但预取的键将\\ **永久保留**\\ 在 L1 中。当预取的数据可能被后续请求重用时（例如，共享系统提示块），此策略非常有用。"
+msgstr "与 ``default`` 相同的加载计划，但预取的键在 L1 中**保留**永久性。 当预取的数据可能被后续请求重用时（例如，共享系统提示块），这非常有用。"
 
 #: ../../source/mp/l2_storage/index.rst:107
 msgid "Prefetch Concurrency"
@@ -206,7 +201,7 @@ msgid ""
 "prefetch requests that the ``PrefetchController`` can have in flight at "
 "any time.  A higher value increases L2-to-L1 throughput but also "
 "increases L1 memory pressure from in-flight data."
-msgstr "``--l2-prefetch-max-in-flight`` 标志限制了 ``PrefetchController`` 在任意时刻可以并发进行的预取请求数量。较大的值会提升 L2 到 L1 的吞吐量，但也会增加在途数据对 L1 内存的压力。"
+msgstr "``--l2-prefetch-max-in-flight`` 标志限制了 ``PrefetchController`` 在任何时候可以同时进行的预取请求数量。更高的值会增加 L2 到 L1 的吞吐量，但也会增加来自在飞数据的 L1 内存压力。"
 
 #: ../../source/mp/l2_storage/index.rst:119
 #: ../../source/mp/l2_storage/index.rst:178
@@ -243,8 +238,7 @@ msgid ""
 "This combination deletes keys from L1 as soon as they are stored to L2 "
 "and disables the LRU eviction tracker entirely, reducing memory and CPU "
 "overhead."
-msgstr ""
-"当 L1 仅作为写缓冲区使用（所有数据存储在 L2 中）时，使用 ``--l2-store-policy skip_l1`` 以及 ``--eviction-policy noop``\\ 。此组合会在数据存储到 L2 后立即从 L1 中删除键，并完全禁用 LRU 逐出跟踪器，从而减少内存和 CPU 开销。"
+msgstr "当 L1 仅作为写缓冲区使用（所有数据存储在 L2 中）时，使用 ``--l2-store-policy skip_l1`` 以及 ``--eviction-policy noop``。此组合会在数据存储到 L2 后立即从 L1 中删除键，并完全禁用 LRU 逐出跟踪器，从而减少内存和 CPU 开销。"
 
 #: ../../source/mp/l2_storage/index.rst:140
 msgid ""
@@ -252,8 +246,7 @@ msgid ""
 "in ``storage_controllers/`` and calling ``register_store_policy()`` or "
 "``register_prefetch_policy()`` at import time.  See the design doc "
 "``l2_adapters/design_docs/overall.md`` for details."
-msgstr ""
-"策略是可扩展的——可以通过在 ``storage_controllers/`` 中创建文件并在导入时调用 ``register_store_policy()`` 或 ``register_prefetch_policy()`` 来添加新策略。有关详细信息，请参阅设计文档 ``l2_adapters/design_docs/overall.md``\\ 。"
+msgstr "策略是可扩展的——可以通过在 ``storage_controllers/`` 中创建文件并在导入时调用 ``register_store_policy()`` 或 ``register_prefetch_policy()`` 来添加新策略。有关详细信息，请参阅设计文档 ``l2_adapters/design_docs/overall.md``。"
 
 #: ../../source/mp/l2_storage/index.rst:146
 msgid "Serde (compression / quantization)"
@@ -265,8 +258,7 @@ msgid ""
 "that transforms data on the way in and out of L2 — e.g. fp8 quantization "
 "for disk backends, or encryption for remote adapters. See :doc:`KV Cache "
 "Compression </mp/serde>` for details and configuration."
-msgstr ""
-"每个适配器可以选择性地运行一个 **serde**\\ （序列化器/反序列化器），在数据进出 L2 时进行转换——例如，针对磁盘后端的 fp8 量化，或针对远程适配器的加密。有关详细信息和配置，请参见 :doc:`KV Cache Compression </mp/serde>`。"
+msgstr "每个适配器可以选择性地运行一个 **serde**（序列化器/反序列化器），在数据进出 L2 时进行转换——例如，针对磁盘后端的 fp8 量化，或针对远程适配器的加密。有关详细信息和配置，请参见 :doc:`KV Cache Compression </mp/serde>`。"
 
 #: ../../source/mp/l2_storage/index.rst:159
 msgid "Eviction"
@@ -304,8 +296,7 @@ msgstr "*(必需)*"
 
 #: ../../source/mp/l2_storage/index.rst:182
 msgid "Policy name: ``LRU`` or ``noop``."
-msgstr ""
-"策略名称：\\ ``LRU`` 或 ``noop``\\ 。"
+msgstr "策略名称：``LRU`` 或 ``noop``。"
 
 #: ../../source/mp/l2_storage/index.rst:183
 msgid "``--eviction-trigger-watermark``"
@@ -347,8 +338,7 @@ msgid ""
 "independently declare an eviction policy by adding an ``\"eviction\"`` "
 "sub-object to its ``--l2-adapter`` JSON spec. Adapters without an "
 "``\"eviction\"`` key have no eviction controller."
-msgstr ""
-"L2 逐出是\\ **按适配器独立配置**\\ 且\\ **可选启用**\\ 的。每个适配器可以通过在其 ``--l2-adapter`` JSON 规范中添加 ``\"eviction\"`` 子对象来独立声明逐出策略。没有 ``\"eviction\"`` 键的适配器不启用逐出控制器。"
+msgstr "L2 逐出是 **每个适配器** 和 **自选** 的。每个适配器可以通过在其 ``--l2-adapter`` JSON 规范中添加 ``\"eviction\"`` 子对象来独立声明逐出策略。没有 ``\"eviction\"`` 键的适配器没有逐出控制器。"
 
 #: ../../source/mp/l2_storage/index.rst:206
 msgid ""
@@ -356,8 +346,7 @@ msgid ""
 " monitors that adapter's ``get_usage()`` value. Once usage exceeds "
 "``trigger_watermark``, the policy evicts keys until usage drops by "
 "``eviction_ratio``."
-msgstr ""
-"当为适配器启用 L2 逐出时，一个专用的后台线程会监控该适配器的 ``get_usage()`` 值。一旦使用量超过 ``trigger_watermark``\\ ，该策略将逐出键，直到使用量降低 ``eviction_ratio``\\ 。"
+msgstr "当为适配器启用 L2 逐出时，一个专用的后台线程会监控该适配器的 ``get_usage()`` 值。一旦使用量超过 ``trigger_watermark``，该策略将逐出键，直到使用量下降到 ``eviction_ratio``。"
 
 #: ../../source/mp/l2_storage/index.rst:211
 msgid "**``\"eviction\"`` sub-object fields:**"
@@ -373,8 +362,7 @@ msgstr "``eviction_policy``"
 
 #: ../../source/mp/l2_storage/index.rst:222
 msgid "Policy name: ``\"LRU\"`` or ``\"noop\"``."
-msgstr ""
-"策略名称：\\ ``\"LRU\"`` 或 ``\"noop\"``\\ 。"
+msgstr "策略名称：``\"LRU\"`` 或 ``\"noop\"``。"
 
 #: ../../source/mp/l2_storage/index.rst:223
 msgid "``trigger_watermark``"
@@ -416,8 +404,7 @@ msgstr "``nixl_store``"
 msgid ""
 "Full support. ``delete`` frees pool slots; pinned keys (in-flight loads) "
 "are skipped and retried on the next cycle."
-msgstr ""
-"完全支持。\\ ``delete`` 释放池槽；固定的键（正在进行的加载）会被跳过，并在下一个周期重试。"
+msgstr "完全支持。``delete`` 释放池槽；固定的键（正在进行的加载）会被跳过，并在下一个周期重试。"
 
 #: ../../source/mp/l2_storage/index.rst:257
 msgid "``nixl_store_dynamic``"
@@ -428,8 +415,7 @@ msgid ""
 "Full support. ``delete`` removes data files from disk; pinned keys are "
 "skipped. ``get_usage`` is byte-based (``_total_bytes / "
 "max_capacity_bytes``)."
-msgstr ""
-"完全支持。\\ ``delete`` 从磁盘中删除数据文件；被固定的键会被跳过。\\ ``get_usage`` 是基于字节的 (``_total_bytes / max_capacity_bytes``)。"
+msgstr "完全支持。``delete`` 从磁盘中删除数据文件；被固定的键会被跳过。``get_usage`` 是基于字节的 (``_total_bytes / max_capacity_bytes``)。"
 
 #: ../../source/mp/l2_storage/index.rst:261
 msgid "``mock``"
@@ -439,7 +425,7 @@ msgstr "``mock``"
 msgid ""
 "Full support. Useful for testing eviction behaviour without real storage "
 "hardware."
-msgstr "完全支持。适用于在无真实存储硬件的情况下测试逐出行为。"
+msgstr "完全支持。对于测试逐出行为而无需真实存储硬件非常有用。"
 
 #: ../../source/mp/l2_storage/index.rst:264
 msgid "``raw_block``"
@@ -449,8 +435,7 @@ msgstr "``raw_block``"
 msgid ""
 "Full shared/global eviction support. ``delete`` recycles raw-block slots;"
 " locked entries are skipped and retried on the next cycle."
-msgstr ""
-"完全支持共享/全局逐出。\\ ``delete`` 回收原始块槽；被锁定的条目会被跳过，并在下一个周期重试。"
+msgstr "完全支持共享/全局逐出。``delete`` 回收原始块槽；被锁定的条目会被跳过，并在下一个周期重试。"
 
 #: ../../source/mp/l2_storage/index.rst:267
 msgid "``s3``"
@@ -463,8 +448,7 @@ msgid ""
 "``max_capacity_gb`` is ``0`` (disabled); set a non-zero "
 "``max_capacity_gb`` to enable the watermark-triggered eviction "
 "controller."
-msgstr ""
-"``delete`` 从存储桶中移除对象并释放聚合字节计数。当 ``max_capacity_gb`` 为 ``0``\\ （禁用）时，\\ ``get_usage`` 报告 ``usage_fraction == -1.0``\\ ；设置非零的 ``max_capacity_gb`` 以启用基于水印的逐出控制器。"
+msgstr "``delete`` 从存储桶中移除对象并释放聚合字节计数。当 ``max_capacity_gb`` 为 ``0``（禁用）时，``get_usage`` 报告 ``usage_fraction == -1.0``；设置非零的 ``max_capacity_gb`` 以启用基于水印的逐出控制器。"
 
 #: ../../source/mp/l2_storage/index.rst:273
 msgid "``hfbucket``"
@@ -477,8 +461,7 @@ msgid ""
 "``max_capacity_gb`` is ``0`` (disabled); set a non-zero "
 "``max_capacity_gb`` to enable the watermark-triggered eviction "
 "controller. Locked keys (in-flight loads) are skipped."
-msgstr ""
-"``delete`` 从桶中移除对象并释放聚合字节计数。当 ``max_capacity_gb`` 为 ``0``\\ （禁用）时，\\ ``get_usage`` 报告 ``usage_fraction == -1.0``\\ ；设置非零的 ``max_capacity_gb`` 以启用基于水印的逐出控制器。锁定的键（正在加载的）会被跳过。"
+msgstr "``delete`` 从桶中移除对象并释放聚合字节计数。当 ``max_capacity_gb`` 为 ``0``（禁用）时，``get_usage`` 报告 ``usage_fraction == -1.0``；设置非零的 ``max_capacity_gb`` 以启用基于水印的逐出控制器。锁定的键（正在加载的）会被跳过。"
 
 #: ../../source/mp/l2_storage/index.rst:279
 msgid "``dax``"
@@ -489,8 +472,7 @@ msgid ""
 "Full support. ``delete`` removes unlocked keys from the in-memory index "
 "immediately and recycles fixed slots once active read borrows drain. "
 "Usage is slot-based."
-msgstr ""
-"完全支持。\\ ``delete`` 会立即从内存索引中移除未锁定的键，并在活跃读取借用排空后回收固定槽。使用量以槽数为单位计算。"
+msgstr "完全支持。``delete`` 会立即从内存索引中移除未锁定的键，并在活动读取借用耗尽后回收固定槽。用法是基于槽的。"
 
 #: ../../source/mp/l2_storage/index.rst:283
 msgid "``mooncake_store``"
@@ -506,8 +488,7 @@ msgstr "``fs``"
 
 #: ../../source/mp/l2_storage/index.rst:286
 msgid "No eviction support (``delete`` and ``get_usage`` are no-ops)."
-msgstr ""
-"不支持逐出（\\ ``delete`` 和 ``get_usage`` 均为空操作）。"
+msgstr "不支持逐出（``delete`` 和 ``get_usage`` 是无操作）。"
 
 #: ../../source/mp/l2_storage/index.rst:287
 msgid "native connectors"
@@ -558,9 +539,9 @@ msgstr "验证 L2 存储"
 
 #: ../../source/mp/l2_storage/index.rst:329
 msgid "Set ``LMCACHE_LOG_LEVEL=DEBUG`` to see L2 activity in the server logs:"
-msgstr "设置 ``LMCACHE_LOG_LEVEL=DEBUG`` 以在服务器日志中查看 L2 活动："
+msgstr "将 ``LMCACHE_LOG_LEVEL=DEBUG`` 设置为在服务器日志中查看 L2 活动："
 
 #: ../../source/mp/l2_storage/index.rst:337
 msgid "Expected log messages when L2 is active:"
-msgstr "L2 运行时的预期日志消息："
+msgstr "当 L2 活动时预期的日志消息："
 

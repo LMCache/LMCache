@@ -271,9 +271,10 @@ def transfer_kv_per_object_group(
     kernel_group_ids = object_group.kernel_group_indices
     is_h2d = direction == lmc_ops.TransferDirection.H2D
 
-    sw_size_chunks = kv_groups_manager.get_sw_size_chunks(object_group_id)
+    attn_desc = kv_groups_manager.get_attn_desc()
     num_objects_to_skip = 0
-    if sw_size_chunks >= 1 and is_h2d:
+    if not attn_desc.is_full_attention(object_group_id) and is_h2d:
+        sw_size_chunks = attn_desc.num_chunks_in_sw[object_group_id]
         num_objects_to_skip = max(0, len(memory_objs) - sw_size_chunks)
         logger.debug(
             "Detected sliding window for object group %d: "
@@ -667,11 +668,16 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             layout_hints=layout_hints or None,
             engine_group_infos=engine_group_infos,
             engine_type=engine_type,
+            separate_object_groups=self._ctx.separate_object_groups,
         )
         layout_desc = get_layout_desc(
             cache_context, self._ctx.chunk_size, object_group_id=0
         )
-        self._ctx.layout_desc_registry.register(model_name, world_size, layout_desc)
+        kv_groups_manager = cache_context.kv_layer_groups_manager
+        attn_desc = kv_groups_manager.get_attn_desc()
+        self._ctx.layout_desc_registry.register(
+            model_name, world_size, layout_desc, attn_desc
+        )
 
         with self._lock:
             self._cache_contexts[instance_id] = ContextEntry(

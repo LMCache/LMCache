@@ -28,6 +28,5 @@ msgid ""
 "CacheGen KV cache compression for multiprocess mode is **not implemented "
 "yet** (coming soon). The original in-process implementation is preserved "
 "in the Legacy section: :doc:`/kv_cache_optimizations/compression/index`."
-msgstr ""
-"CacheGen KV Cache 在 MP 模式（多进程）下的压缩功能\\ **尚未实现**\\ （即将推出）。原有的进程内实现保留在旧版章节中： :doc:`/kv_cache_optimizations/compression/index`。"
+msgstr "CacheGen KV Cache 在多进程模式下的压缩功能**尚未实现**（即将推出）。原有的进程内实现保留在遗留部分： :doc:`/kv_cache_optimizations/compression/index`。"
 

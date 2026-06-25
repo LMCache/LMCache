@@ -21,19 +21,18 @@ msgstr ""
 
 #: ../../source/mp/disaggregated_prefill.rst:4
 msgid "Disaggregated Prefill"
-msgstr "分离式预填充"
+msgstr "分离式 Prefill"
 
 #: ../../source/mp/disaggregated_prefill.rst:8
 msgid ""
 "The multiprocess (MP) implementation of disaggregated prefill is **coming"
 " soon**."
-msgstr ""
-"分离式预填充的 MP 模式（多进程）实现 **即将推出**\\ 。"
+msgstr "分离式 Prefill 的多进程 (MP) 实现 **即将推出**。"
 
 #: ../../source/mp/disaggregated_prefill.rst:11
 msgid ""
 "Until it lands, the in-process implementation (NIXL and shared-storage "
 "transports) is documented in the :doc:`Legacy section <../legacy/index>`:"
 " :doc:`../disaggregated_prefill/nixl/index`."
-msgstr "在它发布之前，进程内实现（NIXL 和共享存储传输）已在 :doc:`旧版部分 <../legacy/index>` 中记录： :doc:`../disaggregated_prefill/nixl/index`。"
+msgstr "在它发布之前，进程内实现（NIXL 和共享存储传输）已在 :doc:`遗留部分 <../legacy/index>` 中记录： :doc:`../disaggregated_prefill/nixl/index`。"
 

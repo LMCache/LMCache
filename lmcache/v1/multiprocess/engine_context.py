@@ -9,6 +9,8 @@ import threading
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
+    DEFAULT_ATTN_WINDOW_DESC,
+    AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
     ipc_key_to_object_keys,
@@ -40,6 +42,9 @@ class _LayoutDescEntry:
 
     layout_desc: MemoryLayoutDesc
     ref_count: int
+    attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
+    """Cross-chunk attention windows of all object groups, in object-group
+    order. Defaults to a single full-attention group."""
 
 
 class LayoutDescRegistry:
@@ -62,6 +67,7 @@ class LayoutDescRegistry:
         model_name: str,
         world_size: int,
         layout_desc: MemoryLayoutDesc,
+        attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
     ) -> None:
         """Register a layout descriptor for a (model_name, world_size) pair.
 
@@ -72,6 +78,8 @@ class LayoutDescRegistry:
             model_name: The model name.
             world_size: The world size.
             layout_desc: The memory layout descriptor.
+            attn_desc: Cross-chunk attention windows of all object groups, in
+                object-group order. Defaults to a single full-attention group.
         """
         key = (model_name, world_size)
         with self._lock:
@@ -80,10 +88,12 @@ class LayoutDescRegistry:
                 self._registry[key] = _LayoutDescEntry(
                     layout_desc=layout_desc,
                     ref_count=1,
+                    attn_desc=attn_desc,
                 )
                 return
 
             entry.layout_desc = layout_desc
+            entry.attn_desc = attn_desc
             entry.ref_count += 1
 
     def unregister(self, model_name: str, world_size: int) -> None:
@@ -124,6 +134,30 @@ class LayoutDescRegistry:
                 return None
             return entry.layout_desc
 
+    def find_attn_desc(self, model_name: str, world_size: int) -> AttnWindowDesc:
+        """Look up the attention-window descriptor for a pair.
+
+        Args:
+            model_name: The model name.
+            world_size: The world size.
+
+        Returns:
+            The :class:`AttnWindowDesc` registered for the pair.
+
+        Raises:
+            ValueError: If no descriptor is registered for the pair. Callers
+                must register the KV cache (which establishes the pair) before
+                looking up its windows.
+        """
+        with self._lock:
+            entry = self._registry.get((model_name, world_size))
+            if entry is None:
+                raise ValueError(
+                    f"No attention-window descriptor registered for model "
+                    f"{model_name!r} with world size {world_size}"
+                )
+            return entry.attn_desc
+
 
 class MPCacheServerContext:
     """Shared infrastructure for all engine modules.
@@ -136,6 +170,8 @@ class MPCacheServerContext:
         storage_manager_config: Configuration for the storage manager.
         chunk_size: Chunk size for KV cache operations.
         hash_algorithm: Hash algorithm for token hashing.
+        separate_object_groups: Whether to split kernel groups into one object
+            group per sliding-window size at KV-cache registration. Default True.
     """
 
     def __init__(
@@ -143,8 +179,10 @@ class MPCacheServerContext:
         storage_manager_config: StorageManagerConfig,
         chunk_size: int = 256,
         hash_algorithm: str = "blake3",
+        separate_object_groups: bool = True,
     ) -> None:
         self._chunk_size = chunk_size
+        self._separate_object_groups = separate_object_groups
 
         # Initialize the process-global GDS context.
         # No-op when GDS L1 is disabled (config is None).
@@ -173,6 +211,11 @@ class MPCacheServerContext:
     def chunk_size(self) -> int:
         """Chunk size for KV cache operations."""
         return self._chunk_size
+
+    @property
+    def separate_object_groups(self) -> bool:
+        """Whether to split kernel groups into per-sliding-window object groups."""
+        return self._separate_object_groups
 
     @property
     def storage_manager(self) -> StorageManager:

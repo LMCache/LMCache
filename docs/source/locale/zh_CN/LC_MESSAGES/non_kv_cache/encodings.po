@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/non_kv_cache/encodings.rst:2
 msgid "Encodings"
-msgstr "编码"
+msgstr "编码方式"
 
 #: ../../source/non_kv_cache/encodings.rst:6
 msgid ""
@@ -29,6 +29,5 @@ msgid ""
 "**coming soon**. The current in-process implementation is preserved in "
 "the Legacy section: :doc:`/non_kv_cache/encoder_cache` and "
 ":doc:`/api_reference/multimodality`."
-msgstr ""
-"MP 模式（多进程）对编码（编码器／多模态）缓存的支持 **即将推出**\\ 。当前的进程内实现保留在旧版章节中：:doc:`/non_kv_cache/encoder_cache` 和 :doc:`/api_reference/multimodality`。"
+msgstr "多进程 (MP) 对编码 (编码器 / 多模态) 缓存的支持 **即将到来**。当前的进程内实现保留在遗留部分： :doc:`/non_kv_cache/encoder_cache` 和 :doc:`/api_reference/multimodality`。"
 

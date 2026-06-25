@@ -89,6 +89,16 @@ if [ -n "${MAX_NUM_BATCHED_TOKENS:-}" ]; then
     MAX_NUM_BATCHED_TOKENS_ARG="--max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS}"
 fi
 
+# L1 lazy allocation mode. Default is lazy (--l1-use-lazy). Set L1_USE_LAZY=false
+# to disable lazy allocation, which enables POSIX SHM-backed L1 pool for the
+# engine_driven SHM transfer path. When lazy is enabled (default), the SHM pool
+# is disabled and engine_driven falls back to pickle transport.
+L1_LAZY_ARG=""
+if [ "${L1_USE_LAZY:-true}" = "false" ]; then
+    L1_LAZY_ARG="--no-l1-use-lazy"
+    echo "L1 lazy allocation disabled (SHM transport enabled)"
+fi
+
 # Store PIDs in a file so cleanup.sh can find them
 PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
 > "$PID_FILE"
@@ -115,6 +125,7 @@ lmcache server \
     $CHUNK_SIZE_ARG \
     --port "$LMCACHE_PORT" \
     ${GDS_L1_ARG} \
+    ${L1_LAZY_ARG} \
     > "/tmp/build_${BUILD_ID}_lmcache.log" 2>&1 &
 
 LMCACHE_PID=$!

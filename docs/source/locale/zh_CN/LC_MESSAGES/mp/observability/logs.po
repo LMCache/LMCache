@@ -54,28 +54,28 @@ msgstr "消息"
 #: ../../source/mp/observability/logs.rst:26
 #: ../../source/mp/observability/logs.rst:28
 msgid "INFO"
-msgstr "INFO"
+msgstr "信息"
 
 #: ../../source/mp/observability/logs.rst:25
 msgid "``Stored N tokens in X seconds``"
-msgstr "``Stored N tokens in X seconds``"
+msgstr "``存储 N 个令牌耗时 X 秒``"
 
 #: ../../source/mp/observability/logs.rst:27
 msgid "``Retrieved N tokens in X seconds``"
-msgstr "``Retrieved N tokens in X seconds``"
+msgstr "``检索到 N 个令牌，耗时 X 秒``"
 
 #: ../../source/mp/observability/logs.rst:29
 msgid "``Prefetch request completed (L1+L2): N/M prefix hits``"
-msgstr "``Prefetch request completed (L1+L2): N/M prefix hits``"
+msgstr "``Prefetch 请求完成 (L1+L2): N/M 前缀命中``"
 
 #: ../../source/mp/observability/logs.rst:30
 #: ../../source/mp/observability/logs.rst:32
 msgid "DEBUG"
-msgstr "DEBUG"
+msgstr "调试"
 
 #: ../../source/mp/observability/logs.rst:31
 msgid "``MP store start: session=... device=...``"
-msgstr "``MP store start: session=... device=...``"
+msgstr "``MP 存储开始: session=... device=...``"
 
 #: ../../source/mp/observability/logs.rst:33
 msgid "``MP retrieve end: session=... retrieved_count=...``"

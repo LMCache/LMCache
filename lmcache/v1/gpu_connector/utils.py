@@ -42,7 +42,7 @@ def assert_contiguous(tensor: torch.Tensor) -> None:
     LMCache transfer kernels assume logical and physical views match for
     coalesced memory accesses. Used at boundaries where we receive a
     tensor we can't or shouldn't permute (e.g. raw CUDA-IPC reconstruction
-    in :class:`~lmcache.v1.multiprocess.custom_types.RawCudaIPCWrapper`).
+    in :class:`~lmcache.v1.platform.cuda.ipc_wrapper.RawCudaIPCWrapper`).
 
     Raises:
         ValueError: If *tensor* has a nonzero storage offset, or is

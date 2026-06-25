@@ -28,7 +28,7 @@ msgid ""
 "**Prerequisites:** Linux · Python 3.9–3.13 · NVIDIA GPU (compute 7.0+) · "
 "CUDA 12.1+ · `uv <https://astral.sh/uv>`_"
 msgstr ""
-"**前提条件：** Linux · Python 3.9–3.13 · NVIDIA GPU（算力 7.0+）· CUDA 12.1+ · "
+"**前提条件：** Linux · Python 3.9–3.13 · NVIDIA GPU (计算 7.0+) · CUDA 12.1+ · "
 "`uv <https://astral.sh/uv>`_"
 
 #: ../../source/getting_started/installation.rst:9
@@ -84,8 +84,8 @@ msgid ""
 " UTC and published to GitHub Releases. No version pinning required — "
 "``--pre`` picks the latest nightly automatically."
 msgstr ""
-"Nightly wheel 包每天 UTC 时间 07:30 从最新的 ``dev`` 分支构建并发布到 GitHub Releases。无需锁定版本 — "
-"``--pre`` 会自动选取最新的 nightly 版本。"
+"夜间构建的轮子每天在 UTC 时间 07:30 从最新的 ``dev`` 分支构建，并发布到 GitHub Releases。无需版本固定 — "
+"``--pre`` 会自动选择最新的夜间版本。"
 
 #: ../../source/getting_started/installation.rst
 msgid "From Source"
@@ -122,7 +122,7 @@ msgstr "仅限 CLI"
 msgid ""
 "Lightweight CLI-only package for querying or benchmarking a remote "
 "LMCache server. No CUDA required, works on any OS."
-msgstr "轻量级纯 CLI 软件包，用于查询或对远程 LMCache 服务器进行基准测试。无需 CUDA，支持任意操作系统。"
+msgstr "轻量级的仅限 CLI 的软件包，用于查询或基准测试远程 LMCache 服务器。无需 CUDA，适用于任何操作系统。"
 
 #: ../../source/getting_started/installation.rst:231
 msgid ""
@@ -140,7 +140,7 @@ msgid ""
 "(integrated with vLLM) image yourself from the provided Dockerfile, "
 "located in `docker/ "
 "<https://github.com/LMCache/LMCache/tree/dev/docker>`_."
-msgstr "您也可以不拉取预构建镜像，而是直接使用仓库中提供的 Dockerfile 自行构建 LMCache（集成 vLLM）镜像，Dockerfile 位于 `docker/ <https://github.com/LMCache/LMCache/tree/dev/docker>`_。"
+msgstr "您可以从提供的 Dockerfile 自行构建 LMCache（与 vLLM 集成）镜像，而不是拉取预构建的镜像，该 Dockerfile 位于 `docker/ <https://github.com/LMCache/LMCache/tree/dev/docker>`_。"
 
 #: ../../source/getting_started/installation.rst:241
 msgid "From the root of the LMCache repository:"
@@ -152,7 +152,7 @@ msgid ""
 "tag. See the example build file in `docker/ "
 "<https://github.com/LMCache/LMCache/tree/dev/docker>`_ for an explanation"
 " of all build arguments."
-msgstr "将 ``<IMAGE_NAME>`` 和 ``<TAG>`` 替换为所需的镜像名称和标签。各构建参数的说明请参阅 `docker/ <https://github.com/LMCache/LMCache/tree/dev/docker>`_ 中的示例构建文件。"
+msgstr "将 ``<IMAGE_NAME>`` 和 ``<TAG>`` 替换为您所需的镜像名称和标签。有关所有构建参数的解释，请参阅 `docker/ <https://github.com/LMCache/LMCache/tree/dev/docker>`_ 中的示例构建文件。"
 
 #: ../../source/getting_started/installation.rst:252
 msgid "Verify Installation"
