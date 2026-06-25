@@ -42,6 +42,32 @@ RequestUID = int
 
 
 # Helper functions
+def _affinity_key_from_identity(identity: bytes) -> int:
+    """Derive an affinity-routing key from a zmq client identity.
+
+    Clients that participate in affinity routing (vLLM workers) set their
+    DEALER identity to their dense rank index (``kv_worker_id``) encoded as a
+    decimal byte string -- e.g. ``b"4"``. Returning that integer directly makes
+    ``affinity_key % num_workers`` a 1:1 mapping whenever the pool has at least
+    ``world_size`` workers, so each rank gets its own worker thread instead of
+    colliding under a hash.
+
+    Any other client (no identity set, or a non-integer identity) falls back to
+    hashing the identity bytes, preserving the previous routing behavior.
+
+    Args:
+        identity: The raw zmq ROUTER identity frame for the requesting client.
+
+    Returns:
+        The dense rank when ``identity`` is a decimal integer, otherwise
+        ``hash(identity)``.
+    """
+    try:
+        return int(identity)
+    except (ValueError, TypeError):
+        return hash(identity)
+
+
 def encode_request_uid(uid: RequestUID) -> bytes:
     return msgspec.msgpack.encode(uid)
 
@@ -264,10 +290,34 @@ class MessageQueueClient:
         request_type: RequestType
         request_payloads: list[Any]
 
-    def __init__(self, server_url: str, context: zmq.Context):
+    def __init__(
+        self,
+        server_url: str,
+        context: zmq.Context,
+        routing_key: int | None = None,
+    ):
+        """Create a client connected to a :class:`MessageQueueServer`.
+
+        Args:
+            server_url: The ``tcp://host:port`` URL the server is bound to.
+            context: The shared zmq context.
+            routing_key: This client's dense rank index (``kv_worker_id``,
+                in ``[0, world_size)``) for the server it connects to. When
+                provided, it is stamped onto the DEALER identity so the
+                server's affinity pool routes this client's blocking requests
+                (STORE / RETRIEVE) to a dedicated worker thread -- one rank
+                per thread -- instead of hashing an opaque identity onto a
+                shared slot. Must be unique among the clients connecting to a
+                single server. When ``None``, zmq assigns an opaque identity
+                and the server falls back to hash-based routing.
+        """
         # Socket
         self.ctx = context
         self.socket = self.ctx.socket(zmq.DEALER)
+        # Stamp the dense rank as the ROUTER identity before connecting so the
+        # server can route on it (see _affinity_key_from_identity).
+        if routing_key is not None:
+            self.socket.setsockopt(zmq.IDENTITY, str(routing_key).encode())
         self.socket.connect(server_url)
 
         # Input queue
@@ -554,7 +604,7 @@ class MessageQueueServer:
             prefix_frames (list[bytes]): The prefix frames to send back.
                 prefix_frames[0] is the zmq identity used as affinity key.
         """
-        affinity_key = hash(prefix_frames[0])
+        affinity_key = _affinity_key_from_identity(prefix_frames[0])
         future = handler_entry(payloads, affinity_key=affinity_key)
 
         def _notify_response(fut: Future):

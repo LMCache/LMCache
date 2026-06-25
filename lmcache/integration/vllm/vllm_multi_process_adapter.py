@@ -599,6 +599,11 @@ class LMCacheMPSchedulerAdapter:
         )
         assert len(server_urls) >= 1, "At least one server url required"
         self._server_urls: list[str] = list(server_urls)
+        # The scheduler issues only non-affinity requests (e.g. LOOKUP), so it
+        # leaves its DEALER identity opaque. It must NOT claim a dense-rank
+        # identity: that namespace belongs to the worker adapters, and reusing a
+        # rank here would collide with the same-rank worker on the server's
+        # ROUTER socket (which requires unique identities per peer).
         self.mq_clients: dict[str, MessageQueueClient] = {
             url: MessageQueueClient(url, context) for url in self._server_urls
         }
@@ -1097,7 +1102,23 @@ class LMCacheMPWorkerAdapter:
                 self._mp_transfer_mode = None
         else:
             self._mp_transfer_mode = None
-        self.mq_client = MessageQueueClient(server_url, context)
+        # Stamp this worker's physical rank onto the DEALER identity so the
+        # server's affinity pool routes its STORE / RETRIEVE to a dedicated
+        # thread -- one rank per thread -- instead of hashing an opaque identity
+        # onto a shared slot. This is the client that issues the GPU-bound
+        # (affinity-routed) requests.
+        #
+        # Use ``vllm_worker_id`` (the physical rank, unique per worker process /
+        # GPU), NOT ``kv_worker_id``: for MLA models the latter collapses to 0
+        # across all TP ranks (kv_worker_id = vllm_worker_id // tp_size), which
+        # would give every worker the identity b"0" and collide them on the
+        # server's ROUTER socket (only one peer keeps the identity; the rest
+        # never receive replies and time out). The affinity unit we want is the
+        # physical GPU/worker anyway -- each has its own server-side transfer
+        # context and temp buffer.
+        self.mq_client = MessageQueueClient(
+            server_url, context, routing_key=parallel_strategy.vllm_worker_id
+        )
         self._mq_timeout = mq_timeout
 
         # Instance id for GPU worker. uuid4-derived (OS entropy) rather
@@ -1105,7 +1126,9 @@ class LMCacheMPWorkerAdapter:
         # Masked to 63 bits to stay signed-int64-safe for any msgpack peer.
         self.instance_id: int = uuid.uuid4().int & ((1 << 63) - 1)
         logger.info(
-            "LMCache MP worker adapter created with instance_id=%d",
+            "LMCache MP worker adapter created: vllm_worker_id=%d "
+            "(affinity routing_key), instance_id=%d",
+            parallel_strategy.vllm_worker_id,
             self.instance_id,
         )
 
