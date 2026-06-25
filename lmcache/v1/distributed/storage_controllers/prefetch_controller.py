@@ -892,9 +892,7 @@ class PrefetchController(StorageControllerInterface):
         keys_to_reserve = merged_bitmap.gather(request.keys)
         l1_mgr = self._l1_manager
 
-        # WARM overrides the configured policy to keep every loaded key
-        # permanent (used by the warm prefetch); LOOKUP defers to the
-        # configured PrefetchPolicy.
+        # WARM retains every loaded key; LOOKUP follows the configured policy.
         if request.mode is PrefetchMode.WARM:
             retentions = [True] * len(keys_to_reserve)
         else:
@@ -1148,9 +1146,7 @@ class PrefetchController(StorageControllerInterface):
         # Transition loaded keys out of write-locked state.
         if loaded_keys:
             if request.mode is PrefetchMode.WARM:
-                # Warm prefetch: ready, NO read lock. The object is immediately
-                # resident, unlocked, and evictable -- nothing to release later;
-                # completion is observed by querying the handle.
+                # Warm: make ready, pin nothing.
                 l1_mgr.finish_write(loaded_keys)
             else:
                 # write-locked -> read-locked; extra_count so each TP worker

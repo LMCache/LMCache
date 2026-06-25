@@ -421,27 +421,18 @@ class StorageManager:
                 ``SPARSE`` keeps every found key (gap-tolerant).
             attn_desc: Cross-chunk attention windows of all object groups, in
                 object-group order.
-            skip_l2: If True, do not submit to L2. For ``LOOKUP`` this returns
-                the already-resident L1 hit set only; for ``WARM`` (which does
-                not probe L1) it is a no-op that returns an empty handle.
+            skip_l2: If True, do not load from L2. For ``LOOKUP`` only
+                already-resident L1 keys are returned; for ``WARM`` nothing is
+                loaded and an empty handle is returned.
             mode: The prefetch intent (see :class:`PrefetchMode`).  ``WARM``
-                is the speculative pre-warm path: every key loaded from L2 is
-                retained (permanent) regardless of the configured prefetch
-                policy, and **no read lock** is taken (this method skips the
-                L1-hit ``reserve_read`` entirely).  ``LOOKUP`` (default) loads
-                for an imminent reader: retention defers to the policy and
-                found/loaded keys are read-locked.
+                retains loaded keys and pins none; ``LOOKUP`` (default) pins
+                them for an imminent reader and follows the policy.
 
         Returns:
             PrefetchHandle to track the task.
         """
         if mode is PrefetchMode.WARM:
-            # Warm prefetch path: acquire NO read lock. Skip the L1-hit
-            # reserve_read entirely and hand all keys to the controller, which
-            # loads L2 misses and transitions them to *ready* via finish_write
-            # (no lock); keys already resident in L1 are skipped by
-            # reserve_write. The handle reports the L2-loaded set via
-            # query_prefetch_status; there is nothing to release.
+            # Warm path: load all keys, pin none. skip_l2 makes it a no-op.
             prefetch_request_id = -1
             if not skip_l2 and keys and self._l2_adapters:
                 prefetch_request_id = self._prefetch_controller.submit_prefetch_request(

@@ -34,23 +34,15 @@ class TrimPolicy(enum.Enum):
 
 
 class PrefetchMode(enum.Enum):
-    """The intent of a prefetch, selecting the whole load discipline per request.
+    """The intent of a prefetch request.
 
-    The two modes are not independent knobs but one discriminant: each bundles a
-    retention decision *and* a locking decision, because both follow from whether
-    there is an imminent consumer for the loaded keys.
+    ``LOOKUP`` -- prefetch for an imminent reader: loaded keys are pinned for
+    the requesting workers, and whether they persist or are dropped after use
+    follows the configured prefetch policy.
 
-    ``LOOKUP`` -- load for an imminent reader (the lookup path). Retention defers
-    to the configured :class:`PrefetchPolicy` (the global ``prefetch_policy``
-    config decides temporary vs. retained), and loaded/already-resident keys are
-    **read-locked** to pin them for the requesting workers until they finish.
-
-    ``WARM`` -- speculative pre-warm (the coordinator-driven warm prefetch). There
-    is no imminent reader, so loaded keys are forced **permanent** and
-    transitioned write-locked -> ready via ``finish_write`` -- i.e. **no read
-    lock is acquired**. The object is immediately resident, unlocked, and
-    evictable; a warm holds nothing to release, and completion is observed by
-    querying the prefetch handle. A later real lookup takes its own lock.
+    ``WARM`` -- speculative pre-warm with no imminent reader: loaded keys are
+    retained and left unpinned (immediately resident and evictable), so a later
+    lookup can hit them.
     """
 
     LOOKUP = enum.auto()

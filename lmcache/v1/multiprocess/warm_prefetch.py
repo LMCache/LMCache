@@ -2,26 +2,16 @@
 """Warm-prefetch job table for the MP server.
 
 A *warm* prefetch loads a caller-supplied set of keys from L2 into L1 and leaves
-them resident, **retained, and unlocked** so a subsequent real lookup hits L1.
-It uses ``PrefetchMode.WARM``, which loads keys permanently and **without a
-read lock** -- there is no downstream reader to pin them for, so nothing has to
-be released. It also submits with the gap-tolerant ``TrimPolicy.SPARSE`` so an
-already-resident chunk does not stop the rest from loading: because the warm
-skips the L1-hit ``reserve_read``, ``PREFIX`` would read a resident leading
-chunk as a gap and trim everything after it, loading nothing.
+them resident, retained, and unpinned, so a subsequent real lookup hits L1. It
+loads every requested key not already in L1, and pins nothing -- there is no
+downstream reader to pin for.
 
-Because nothing is locked, this table only needs the prefetch **handle** per
-job (not the keys): ``submit`` starts the load and registers
-``request_id -> handle``; ``poll`` reports status by querying that handle.
-There is **no background polling** -- the caller drives completion reactively
-via the HTTP status endpoint, and every ``StorageManager`` call here is
-non-blocking (the L2 load runs in the ``PrefetchController``'s own thread), so
-no asyncio is involved.
-
-A job whose status is never polled to completion lingers in the table (and
-leaves the controller's small completed-result entry until popped); since no
-lock is held there is no pinned L1. A future TTL sweep can call
-``query_prefetch_status`` on stale handles to drop them.
+The table tracks in-flight warm prefetches: ``submit`` starts one and returns an
+opaque request id; ``poll`` reports its status (pending, then completed) and
+drops it once the load finishes. Status is observed reactively by the caller --
+there is no background polling -- and these calls do not block. A job whose
+status is never polled to completion simply lingers until a later cleanup drops
+it; since nothing is pinned, no L1 is held.
 """
 
 # Standard
