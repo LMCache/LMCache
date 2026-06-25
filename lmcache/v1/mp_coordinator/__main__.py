@@ -21,7 +21,13 @@ def main() -> None:
     """Build the coordinator app from the environment and serve it."""
     config = MPCoordinatorConfig.from_env()
     app = create_app(config)
-    uvicorn.run(app, host=config.host, port=config.port, log_level="info")
+    uvicorn.run(
+        app,
+        host=config.host,
+        port=config.port,
+        log_level="info",
+        timeout_keep_alive=config.timeout_keep_alive,
+    )
 
 
 if __name__ == "__main__":
