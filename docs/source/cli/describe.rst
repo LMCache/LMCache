@@ -2,8 +2,15 @@ lmcache describe
 ================
 
 The ``lmcache describe`` command shows the detailed status of a running
-LMCache service, including cache health, L1 storage, registered models, and
-L2 adapters.
+service. Two targets are supported:
+
+- ``kvcache`` — the LMCache KV cache service (health, L1 storage, registered
+  models, L2 adapters).
+- ``engine`` — the inference engine (vLLM) LMCache is paired with (model,
+  context window, health, in-flight requests).
+
+KV Cache Service (``kvcache``)
+------------------------------
 
 .. code-block:: bash
 
@@ -56,6 +63,54 @@ The output shows:
   KV tensor shape (symbolic and concrete), attention backend, and group geometry.
 - **L2 adapters** — type, health, backend, stored objects, and utilization.
 
+Inference Engine (``engine``)
+-----------------------------
+
+``describe engine`` inspects the vLLM inference engine instead of the LMCache
+service, reading only the engine's own HTTP endpoints (``/v1/models``,
+``/health``, ``/metrics``).
+
+.. code-block:: bash
+
+   lmcache describe engine --url http://localhost:8000
+
+.. code-block:: text
+
+   ================ Inference Engine ================
+   Model:                  meta-llama/Llama-3.1-8B-Instruct
+   Max context (tokens):   131072
+   Status:                 OK
+   Running requests:       3
+   ==================================================
+
+The output shows:
+
+- **Model** and **Max context** — the served model id and its maximum context
+  length, from ``/v1/models``.
+- **Status** — ``OK`` / ``UNHEALTHY`` from the engine's ``/health`` probe.
+- **Running requests** — in-flight requests, summed from the
+  ``vllm:num_requests_running`` metric. Shows ``N/A`` if metrics are disabled
+  or unreachable.
+
+Only the ``/v1/models`` fetch is required: if ``/health`` or ``/metrics`` is
+unavailable the command still reports what it can rather than failing.
+
+.. code-block:: bash
+
+   lmcache describe engine --url http://localhost:8000 --format json
+
+.. code-block:: json
+
+   {
+     "title": "Inference Engine",
+     "metrics": {
+       "model": "meta-llama/Llama-3.1-8B-Instruct",
+       "max_context": 131072,
+       "status": "OK",
+       "running_requests": 3
+     }
+   }
+
 Options
 -------
 
@@ -65,11 +120,11 @@ Options
 
    * - Flag
      - Description
-   * - ``kvcache``
-     - Target to describe (positional, required; currently only
-       ``kvcache`` is supported).
+   * - ``target``
+     - What to describe (positional, required): ``kvcache`` or ``engine``.
    * - ``--url``
-     - LMCache HTTP server URL (default: ``http://localhost:8080``).
+     - Server URL. Defaults per target: ``http://localhost:8080`` for
+       ``kvcache``, ``http://localhost:8000`` for ``engine``.
    * - ``--format``
      - Output format: ``terminal`` (default) or ``json``.
    * - ``--output PATH``
