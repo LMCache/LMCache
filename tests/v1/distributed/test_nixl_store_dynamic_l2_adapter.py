@@ -389,7 +389,7 @@ class TestLoadInterface:
         adpt.pop_completed_store_tasks()
 
         # Lookup and lock
-        task_id = adpt.submit_lookup_and_lock_task(keys)
+        task_id = adpt.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
         wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
         adpt.query_lookup_and_lock_result(task_id)
 
@@ -428,7 +428,7 @@ class TestLoadInterface:
         wait_for_event_fd(adpt.get_store_event_fd())
         adpt.pop_completed_store_tasks()
 
-        task_id = adpt.submit_lookup_and_lock_task(keys)
+        task_id = adpt.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
         wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
         adpt.query_lookup_and_lock_result(task_id)
 
