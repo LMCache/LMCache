@@ -101,6 +101,13 @@ Rules:
 
 The on-device format is intentionally unchanged by the MP adapter work.
 
+Checkpoint payloads record a stable `device_id` rather than relying on
+`device_path`, which can change across reboot or when the same NVMe namespace is
+opened through `/dev/nvme*` versus `/dev/ng*`. Older checkpoints that do not
+contain `device_id` are accepted only when
+`allow_legacy_checkpoint_without_device_id=true`, and that option is intended
+only for one-time migration before writing a new checkpoint with `device_id`.
+
 Recovered keys are exposed to the shared L2 eviction policy on adapter startup,
 so reclaimed slots come from global L2 eviction or explicit `delete()` calls.
 
@@ -140,7 +147,8 @@ Important validation rules:
 - `load_checkpoint_on_init=false` starts with an empty in-memory index instead
   of loading the latest on-device metadata checkpoint
 - `allow_legacy_checkpoint_without_device_id=true` permits loading older
-  checkpoints that do not contain a `device_id`; use it only for migration
+  checkpoints that do not contain a `device_id`; use it only for migration and
+  disable it after a new checkpoint has been written
 - with `use_odirect=true`, MP L1 alignment must satisfy
   `l1_align_bytes >= block_align`
 
@@ -148,7 +156,9 @@ Important validation rules:
 
 The legacy `RustRawBlockBackend` now acts as a thin facade over `RawBlockCore`.
 It preserves non-MP behavior such as prefix-oriented contains/get semantics,
-while the MP adapter uses the core's full-bitmap lookup/load API.
+while the MP adapter uses the core's full-bitmap lookup/load API. The non-MP
+backend exposes the legacy checkpoint migration option through the
+`rust_raw_block.allow_legacy_checkpoint_without_device_id` extra config key.
 
 ## References
 

@@ -66,6 +66,22 @@ caller-provided load buffers during prefetch.
 - When ``use_uring_cmd=true``, ``use_odirect`` is ignored for NVMe namespace
   character devices.
 
+**Upgrade from checkpoints without device_id:**
+
+Raw-block checkpoint recovery validates a stable ``device_id`` so that metadata
+from one raw device is not applied to another device. Checkpoints written by
+older versions may not contain this field. When upgrading with an existing
+checkpoint that must be recovered, set
+``allow_legacy_checkpoint_without_device_id=true`` for the first startup only.
+After the legacy checkpoint is loaded and a new checkpoint is written, disable
+the option so future recovery requires stable device identity validation.
+
+If recovery is not required, set ``load_checkpoint_on_init=false`` to start with
+an empty in-memory index instead. The legacy non-MP ``rust_raw_block`` backend
+uses the extra config key
+``rust_raw_block.allow_legacy_checkpoint_without_device_id`` for the same
+migration behavior.
+
 **Configuration examples:**
 
 .. code-block:: bash
