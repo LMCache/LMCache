@@ -2869,6 +2869,10 @@ def test_alloc_pinned_ptr_is_page_aligned(size: int) -> None:
 
 def test_tensor_from_ptr_routes_musa_device(monkeypatch: pytest.MonkeyPatch) -> None:
     """MUSA device pointers must not be rejected at dispatch time."""
+    try:
+        torch.device("musa")
+    except RuntimeError:
+        pytest.skip("MUSA device type is not supported by PyTorch")
 
     def _fake_musa_ptr(
         ptr: int,
