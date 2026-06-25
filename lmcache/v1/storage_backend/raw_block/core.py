@@ -195,6 +195,7 @@ class RawBlockCoreConfig:
     meta_verify_on_load: bool
     max_data_transfer_size: int = 0
     load_checkpoint_on_init: bool = True
+    allow_legacy_checkpoint_without_device_id: bool = False
     io_engine: str = "posix"
     iouring_queue_depth: int = DEFAULT_IOURING_QUEUE_DEPTH
     use_uring_cmd: bool = False
@@ -267,6 +268,9 @@ class RawBlockCore:
         self.meta_idle_quiet_ms = int(config.meta_idle_quiet_ms)
         self.meta_enable_periodic = bool(config.meta_enable_periodic)
         self.load_checkpoint_on_init = bool(config.load_checkpoint_on_init)
+        self.allow_legacy_checkpoint_without_device_id = bool(
+            config.allow_legacy_checkpoint_without_device_id
+        )
         self.meta_verify_on_load = bool(config.meta_verify_on_load)
         self.io_engine = normalize_raw_block_io_engine(config.io_engine)
         self.iouring_queue_depth = int(config.iouring_queue_depth)
@@ -1765,9 +1769,20 @@ class RawBlockCore:
             return False
         checkpoint_device_id = data.get("device_id")
         if not checkpoint_device_id:
-            logger.warning("Device metadata missing device_id; ignoring metadata")
-            return False
-        if not self.device_id or str(checkpoint_device_id) != self.device_id:
+            if not self.allow_legacy_checkpoint_without_device_id:
+                logger.warning("Device metadata missing device_id; ignoring metadata")
+                return False
+            if not self.device_id:
+                logger.warning(
+                    "Legacy device metadata missing device_id, but current device "
+                    "has no stable device_id; ignoring metadata"
+                )
+                return False
+            logger.warning(
+                "Loading legacy device metadata without device_id; this should "
+                "only be used to migrate checkpoints written by older versions"
+            )
+        elif not self.device_id or str(checkpoint_device_id) != self.device_id:
             logger.warning("Device metadata device_id mismatch; ignoring metadata")
             return False
         if int(data.get("slot_bytes", self.slot_bytes)) != self.slot_bytes:

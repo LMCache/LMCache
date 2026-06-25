@@ -3,6 +3,9 @@
 # Future
 from __future__ import annotations
 
+# Standard
+from dataclasses import replace
+
 # Third Party
 import pytest
 
@@ -284,6 +287,34 @@ def test_raw_block_core_rejects_checkpoint_missing_device_id(tmp_path):
         )
 
         assert applied is False
+    finally:
+        core.close()
+
+
+def test_raw_block_core_allows_legacy_checkpoint_missing_device_id(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    config = replace(
+        make_raw_block_core_config(path),
+        allow_legacy_checkpoint_without_device_id=True,
+    )
+    core = RawBlockCore(config, key_namespace="object")
+
+    try:
+        applied = core.apply_loaded_state(
+            {
+                "version": 1,
+                "device_path": "/dev/ng0n1",
+                "slot_bytes": core.slot_bytes,
+                "meta_total_bytes": core.meta_total_bytes,
+                "meta_magic": core.meta_magic_text,
+                "meta_version": core.meta_version,
+                "next_slot": 0,
+                "free_slots": [],
+                "entries": {},
+            }
+        )
+
+        assert applied is True
     finally:
         core.close()
 

@@ -26,6 +26,9 @@ caller-provided load buffers during prefetch.
 - ``load_checkpoint_on_init``: Load an existing on-device metadata checkpoint
   during startup (default ``true``). Set to ``false`` to start with an empty
   in-memory index instead.
+- ``allow_legacy_checkpoint_without_device_id``: Allow loading legacy
+  checkpoints written before ``device_id`` was recorded (default ``false``).
+  Keep this disabled except during checkpoint migration.
 - ``enable_zero_copy``: Try aligned direct-buffer I/O when possible.
 - ``io_engine``: Rust raw-block I/O engine. Valid values are ``"posix"``
   (default synchronous ``pread``/``pwrite`` path), ``"io_uring"`` (direct Rust
@@ -47,7 +50,8 @@ caller-provided load buffers during prefetch.
 - ``raw_block`` remains ``"type": "raw_block"`` for all supported engines.
 - ``raw_block`` owns on-device slot allocation, checkpointing, and recovery
   through ``RawBlockCore``. Checkpoint recovery validates a stable
-  ``device_id``: ``nvme:<wwid>`` for NVMe namespaces or
+  ``device_id`` unless ``allow_legacy_checkpoint_without_device_id`` is enabled
+  for migration of old checkpoints: ``nvme:<wwid>`` for NVMe namespaces or
   ``file:<st_dev>:<st_ino>:<st_size>`` for regular files. Slot reclamation is
   driven by the shared/global L2 eviction controller or explicit ``delete()``
   calls.

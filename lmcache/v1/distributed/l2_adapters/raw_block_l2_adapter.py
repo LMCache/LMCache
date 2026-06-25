@@ -82,6 +82,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         meta_idle_quiet_ms: int = 100,
         meta_enable_periodic: bool = True,
         load_checkpoint_on_init: bool = True,
+        allow_legacy_checkpoint_without_device_id: bool = False,
         meta_verify_on_load: bool = True,
         enable_zero_copy: bool = True,
         io_engine: str = "posix",
@@ -108,6 +109,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             meta_idle_quiet_ms: Quiet period before periodic checkpoints.
             meta_enable_periodic: Whether to run the checkpoint thread.
             load_checkpoint_on_init: Whether to load existing checkpoint metadata.
+            allow_legacy_checkpoint_without_device_id: Whether recovery accepts
+                checkpoints written before device_id was recorded.
             meta_verify_on_load: Whether recovery verifies slot headers.
             enable_zero_copy: Whether to use aligned direct-buffer I/O.
             io_engine: Raw-block I/O engine: ``"posix"`` or ``"io_uring"``.
@@ -132,6 +135,9 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         self.meta_idle_quiet_ms = int(meta_idle_quiet_ms)
         self.meta_enable_periodic = bool(meta_enable_periodic)
         self.load_checkpoint_on_init = bool(load_checkpoint_on_init)
+        self.allow_legacy_checkpoint_without_device_id = bool(
+            allow_legacy_checkpoint_without_device_id
+        )
         self.meta_verify_on_load = bool(meta_verify_on_load)
         self.enable_zero_copy = bool(enable_zero_copy)
         self.io_engine = normalize_raw_block_io_engine(io_engine)
@@ -221,6 +227,9 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             meta_idle_quiet_ms=int(d.get("meta_idle_quiet_ms", 100)),
             meta_enable_periodic=bool(d.get("meta_enable_periodic", True)),
             load_checkpoint_on_init=bool(d.get("load_checkpoint_on_init", True)),
+            allow_legacy_checkpoint_without_device_id=bool(
+                d.get("allow_legacy_checkpoint_without_device_id", False)
+            ),
             meta_verify_on_load=bool(d.get("meta_verify_on_load", True)),
             enable_zero_copy=bool(d.get("enable_zero_copy", True)),
             io_engine=io_engine,
@@ -256,6 +265,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             "(default true)\n"
             "- load_checkpoint_on_init (bool): load existing metadata checkpoint "
             "on startup (default true; requires stable device_id)\n"
+            "- allow_legacy_checkpoint_without_device_id (bool): allow loading "
+            "legacy checkpoints that do not record device_id (default false)\n"
             "- meta_verify_on_load (bool): validate slot headers on recovery "
             "(default true)\n"
             "- enable_zero_copy (bool): use aligned direct buffers when possible "
@@ -290,6 +301,9 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             meta_idle_quiet_ms=self.meta_idle_quiet_ms,
             meta_enable_periodic=self.meta_enable_periodic,
             load_checkpoint_on_init=self.load_checkpoint_on_init,
+            allow_legacy_checkpoint_without_device_id=(
+                self.allow_legacy_checkpoint_without_device_id
+            ),
             meta_verify_on_load=self.meta_verify_on_load,
             io_engine=self.io_engine,
             iouring_queue_depth=self.iouring_queue_depth,

@@ -179,6 +179,15 @@ def test_raw_block_l2_adapter_config_accepts_io_engine_values(io_engine):
     assert config.io_engine == io_engine
 
 
+def test_raw_block_l2_adapter_config_passes_legacy_device_id_option():
+    config = RawBlockL2AdapterConfig.from_dict(
+        _config_dict(allow_legacy_checkpoint_without_device_id=True)
+    )
+
+    assert config.allow_legacy_checkpoint_without_device_id is True
+    assert config.to_core_config().allow_legacy_checkpoint_without_device_id is True
+
+
 def test_raw_block_l2_adapter_config_rejects_invalid_io_engine():
     with pytest.raises(ValueError, match="io_engine"):
         RawBlockL2AdapterConfig.from_dict(_config_dict(io_engine="uring"))

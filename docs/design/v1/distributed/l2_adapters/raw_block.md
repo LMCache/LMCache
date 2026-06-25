@@ -123,6 +123,7 @@ The MP adapter is configured through `--l2-adapter` JSON:
   "meta_checkpoint_interval_sec": 60,
   "meta_enable_periodic": true,
   "load_checkpoint_on_init": true,
+  "allow_legacy_checkpoint_without_device_id": false,
   "meta_verify_on_load": true,
   "num_store_workers": 2,
   "num_lookup_workers": 1,
@@ -138,6 +139,8 @@ Important validation rules:
 - `per_tp_device_paths` is rejected in MP mode
 - `load_checkpoint_on_init=false` starts with an empty in-memory index instead
   of loading the latest on-device metadata checkpoint
+- `allow_legacy_checkpoint_without_device_id=true` permits loading older
+  checkpoints that do not contain a `device_id`; use it only for migration
 - with `use_odirect=true`, MP L1 alignment must satisfy
   `l1_align_bytes >= block_align`
 

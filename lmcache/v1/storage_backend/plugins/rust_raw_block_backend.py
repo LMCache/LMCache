@@ -307,6 +307,12 @@ class RustRawBlockBackend(StoragePluginInterface):
             load_checkpoint_on_init=bool(
                 extra.get("rust_raw_block.load_checkpoint_on_init", True)
             ),
+            allow_legacy_checkpoint_without_device_id=bool(
+                extra.get(
+                    "rust_raw_block.allow_legacy_checkpoint_without_device_id",
+                    False,
+                )
+            ),
             meta_verify_on_load=bool(
                 extra.get("rust_raw_block.meta_verify_on_load", True)
             ),
