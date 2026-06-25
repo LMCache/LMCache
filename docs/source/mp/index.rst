@@ -77,7 +77,7 @@ High-Level Architecture
          |
          |--- L1Manager (l1_manager.py)
          |       |--- L1MemoryManager (CPU DRAM) or
-         |       |    GDSL1MemoryManager (NVMe slab via cuFile)
+         |       |    GDSL1MemoryManager (NVMe slab via cuFile / hipFile)
          |       |--- TTLLock per object (read/write)
          |
          |--- StoreController  -----> L2 Adapter(s) (async L1->L2 push)
@@ -383,9 +383,12 @@ tiers selected at startup (both satisfy ``L1ManagerProtocol``):
   ``--l1-size-gb``.
 - ``GDSL1MemoryManager`` -- an NVMe slab file when ``--gds-l1-path`` is set.
   The bytes live on disk; reads/writes DMA directly between the GPU staging
-  buffer and the slab via cuFile, driven by the process-global ``GDSContext``
-  (``gpu_connector/gds_context.py``) and dispatched from ``gpu_ops``. The CPU
-  tier is disabled in this mode.
+  buffer and the slab, driven by the process-global ``GDSContext``
+  (``gpu_connector/gds_context.py``) and dispatched from ``gpu_ops``. The DMA
+  backend is selected by platform via ``gpu_connector/_gds_async.py`` --
+  cuFile (``libcufile.so``) on NVIDIA and hipFile (``libhipfile.so``) on AMD
+  ROCm; see the *GDS L1 Tier* section of :doc:`configuration` for the
+  vendor-specific requirements. The CPU tier is disabled in this mode.
 
 L2 Adapters
 ~~~~~~~~~~~
