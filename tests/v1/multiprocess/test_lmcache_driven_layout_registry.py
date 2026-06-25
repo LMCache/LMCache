@@ -160,7 +160,9 @@ def test_registry_attn_desc_roundtrip() -> None:
         "m", 2, _layout(), attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1, 2])
     )
 
-    assert registry.find_attn_desc("m", 2).num_chunks_in_sw == [-1, 2]
+    desc = registry.find_attn_desc("m", 2)
+    assert desc.num_chunks_in_sw == [-1, 2]
+    assert desc.world_size == 2
 
 
 def test_registry_attn_desc_raises_when_unregistered() -> None:

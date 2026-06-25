@@ -113,6 +113,11 @@ class TestAttnWindowDesc:
         assert not out.is_full_attention(1)
         assert out.num_object_groups == 3
 
+    def test_world_size_roundtrip(self):
+        out = _roundtrip(AttnWindowDesc(num_chunks_in_sw=[-1, 4], world_size=4))
+        assert out.num_chunks_in_sw == [-1, 4]
+        assert out.world_size == 4
+
     def test_empty_roundtrip(self):
         out = _roundtrip(AttnWindowDesc(num_chunks_in_sw=[]))
         assert out.num_chunks_in_sw == []

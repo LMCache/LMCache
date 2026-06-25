@@ -19,7 +19,12 @@ import torch
 
 # First Party
 from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, TrimPolicy
+from lmcache.v1.distributed.api import (
+    AttnWindowDesc,
+    MemoryLayoutDesc,
+    ObjectKey,
+    TrimPolicy,
+)
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import L1Manager
@@ -1287,6 +1292,54 @@ class TestBuildTrimMask:
             2,
             4,
         ]
+
+    def test_prefix_sliding_window_retains_window(self):
+        """With a sliding-window group (w=2) and a full-attention group, the
+        fold retains only the in-window chunks for the SW group."""
+        # 2 groups (full_attn=-1, sw=2), 1 rank, 4 chunks
+        # chunk-major layout: g0c0, g1c0, g0c1, g1c1, g0c2, g1c2, g0c3, g1c3
+        num_keys = 8
+        attn_desc = AttnWindowDesc(num_chunks_in_sw=[-1, 2])
+        # All present
+        found = self._bm(num_keys, range(num_keys))
+        retained = build_trim_mask(
+            found, num_keys, TrimPolicy.PREFIX, attn_desc,
+        )
+        indices = retained.get_indices_list()
+        # full-attn group (even indices): all 4 chunks retained
+        assert all(i in indices for i in [0, 2, 4, 6])
+        # SW group (odd indices): only last 2 chunks (indices 5, 7) retained
+        assert 1 not in indices  # chunk 0 out of window
+        assert 3 not in indices  # chunk 1 out of window
+        assert 5 in indices  # chunk 2 in window
+        assert 7 in indices  # chunk 3 in window
+
+    def test_prefix_full_attention_only_matches_leading_ones(self):
+        """With all-full-attention groups, fold reduces to count_leading_ones."""
+        attn_desc = AttnWindowDesc(num_chunks_in_sw=[-1])
+        found = self._bm(5, [0, 1, 3, 4])  # gap at index 2
+        retained = build_trim_mask(
+            found, 5, TrimPolicy.PREFIX, attn_desc,
+        )
+        assert retained.get_indices_list() == [0, 1]
+
+    def test_prefix_sw_gap_in_full_attn_trims_correctly(self):
+        """A gap in a full-attention group limits the hit length for all groups
+        including sliding-window groups."""
+        # 2 groups (full=-1, sw=2), 1 rank, 3 chunks
+        # Layout: g0c0, g1c0, g0c1, g1c1, g0c2, g1c2
+        attn_desc = AttnWindowDesc(num_chunks_in_sw=[-1, 2])
+        # Full-attn group: chunks 0, 2 present (gap at chunk 1)
+        # SW group: all chunks present
+        # Chunk-major: g0c0=1, g1c0=1, g0c1=0, g1c1=1, g0c2=1, g1c2=1
+        found = self._bm(6, [0, 1, 3, 4, 5])  # missing index 2 (g0c1)
+        retained = build_trim_mask(
+            found, 6, TrimPolicy.PREFIX, attn_desc,
+        )
+        # Full-attn gap at chunk 1 means hit_length=1
+        # Only chunk 0 retained: g0c0 and g1c0
+        indices = retained.get_indices_list()
+        assert indices == [0, 1]
 
 
 class TestMergeBitmaps:

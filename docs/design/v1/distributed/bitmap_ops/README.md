@@ -24,7 +24,7 @@ Supporting / convenience:
 | Function | Purpose |
 |---|---|
 | `fold_unfold_ranked` | Composes `fold` → `highest_set_bit` → `unfold`. |
-| `fold_unfold` | `fold_unfold_ranked` for the single-rank (`group x chunk`) layout. |
+| `fold_unfold` | `fold_unfold_ranked` for the single-rank (`chunk x group`) layout. |
 | `unfold_range` | Chunk range one group needs for a given hit length. |
 | `merge_bitmaps` | Bitwise-OR several presence bitmaps (e.g. L1 ∪ L2). |
 | `select_retained` | Non-windowed `TrimPolicy` selection (`PREFIX` = longest prefix; any other = keep every set bit). |

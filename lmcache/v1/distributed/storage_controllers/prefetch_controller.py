@@ -38,6 +38,7 @@ from lmcache.v1.distributed.storage_controllers.adapter_lifecycle import (
     AddAdapterOp,
     RemoveAdapterOp,
 )
+from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_ranked
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     PrefetchPolicy,
 )
@@ -73,25 +74,36 @@ def build_trim_mask(
     found: Bitmap,
     num_keys: int,
     policy: TrimPolicy = TrimPolicy.PREFIX,
+    attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
 ) -> Bitmap:
     """Subset of ``found`` to keep (load + read-lock + report); the rest is
     released.
 
-    PREFIX trims at the first gap (leading contiguous run). The non-PREFIX
-    policies keep every set bit, gaps included, and differ only in intent:
-    SEGMENTED_PREFIX keeps the keys that loaded when an L2 hit fails to load
-    into L1 (e.g. OOM) mid-prefix; SPARSE keeps an intentionally scattered set.
+    PREFIX uses the fold/unfold pipeline to compute the sliding-window-aware
+    retain set.  For all-full-attention models this reduces to the contiguous
+    leading-ones prefix.  The non-PREFIX policies keep every set bit, gaps
+    included, and differ only in intent: SEGMENTED_PREFIX keeps the keys that
+    loaded when an L2 hit fails to load into L1 (e.g. OOM) mid-prefix; SPARSE
+    keeps an intentionally scattered set.
 
     Args:
         found: Bitmap of found keys, over key indices ``0..num_keys-1``.
         num_keys: Total number of requested keys.
         policy: Trim policy to apply (see :class:`TrimPolicy`).
+        attn_desc: Per-object-group attention windows for the fold.  The
+            embedded ``world_size`` determines the number of kv_rank shards
+            per chunk.
 
     Returns:
         Bitmap of the retained key indices.
     """
     if policy is TrimPolicy.PREFIX:
-        return Bitmap(num_keys, found.count_leading_ones())
+        stride = attn_desc.num_object_groups * attn_desc.world_size
+        num_chunks = num_keys // stride if stride else 0
+        _, retain = fold_unfold_ranked(
+            found, num_chunks, attn_desc.world_size, attn_desc.num_chunks_in_sw
+        )
+        return retain
     return found
 
 
@@ -146,7 +158,8 @@ class InFlightPrefetchRequest:
 
     attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
     """Cross-chunk attention windows of all object groups, in object-group
-    order."""
+    order.  The embedded ``world_size`` gives the number of kv_rank shards
+    per chunk."""
 
     # Lookup phase: adapter_idx -> task_id (removed as results arrive)
     pending_lookup_tasks: dict[int, L2TaskId] = field(default_factory=dict)
@@ -239,6 +252,7 @@ class PrefetchController(StorageControllerInterface):
                 int,
                 TrimPolicy,
                 AttnWindowDesc,
+                int,
             ]
         ] = []
 
@@ -258,6 +272,7 @@ class PrefetchController(StorageControllerInterface):
                 int,
                 TrimPolicy,
                 AttnWindowDesc,
+                int,
             ]
         ] = []
         self._next_request_id: PrefetchRequestId = 0
@@ -350,12 +365,12 @@ class PrefetchController(StorageControllerInterface):
 
         The retained subset of found keys is chosen by ``policy`` (see
         :class:`TrimPolicy`).  With the default ``PREFIX`` policy, only the
-        **contiguous prefix** of found keys is loaded from L2: if L2 has keys
-        {0, 1, 3, 4} but not key 2, only keys {0, 1} are loaded because the gap
-        at index 2 breaks the prefix.  Keys outside the retained set are never
-        transferred, saving I/O bandwidth and L1 memory.  Use
-        :meth:`query_prefetch_result` to retrieve the retained set once the
-        request completes.
+        sliding-window-aware prefix of found keys is loaded from L2 (see
+        :func:`fold_unfold_ranked`).  For all-full-attention models this
+        reduces to the contiguous leading-ones prefix.  Keys outside the
+        retained set are never transferred, saving I/O bandwidth and L1
+        memory.  Use :meth:`query_prefetch_result` to retrieve the retained
+        set once the request completes.
 
         Args:
             keys: List of object keys to prefetch from L2 into L1.
@@ -369,7 +384,8 @@ class PrefetchController(StorageControllerInterface):
             policy: Which retained-subset policy to apply (see
                 :class:`TrimPolicy`).  Defaults to ``PREFIX``.
             attn_desc: Cross-chunk attention windows of all object groups, in
-                object-group order.
+                object-group order.  The embedded ``world_size`` determines
+                the number of kv_rank shards per chunk.
 
         Returns:
             A request ID for tracking via query_prefetch_result.
@@ -762,12 +778,11 @@ class PrefetchController(StorageControllerInterface):
         while (
             self._pending_queue and len(self._in_flight_requests) < self._max_in_flight
         ):
-            request_id, keys, layout_desc, extra_count, policy, attn_desc = (
-                self._pending_queue.pop(0)
-            )
+            (request_id, keys, layout_desc, extra_count, policy,
+             attn_desc) = self._pending_queue.pop(0)
             self._status_pending_count -= 1
             self._start_lookup_phase(
-                request_id, keys, layout_desc, extra_count, policy, attn_desc
+                request_id, keys, layout_desc, extra_count, policy, attn_desc,
             )
 
     # =========================================================================
@@ -853,7 +868,9 @@ class PrefetchController(StorageControllerInterface):
         # Step 2: trim the load plan to the policy's retained subset
         num_keys = len(request.keys)
         merged_lookup = merge_bitmaps(load_plan.values(), num_keys)
-        retained = build_trim_mask(merged_lookup, num_keys, request.policy)
+        retained = build_trim_mask(
+            merged_lookup, num_keys, request.policy, request.attn_desc,
+        )
         trimmed_plan = trim_load_plan_with_mask(load_plan, retained)
 
         if not trimmed_plan:
@@ -926,7 +943,9 @@ class PrefetchController(StorageControllerInterface):
             if key in reserved_key_set:
                 reserved_bitmap.set(i)
 
-        retained = build_trim_mask(reserved_bitmap, num_keys, request.policy)
+        retained = build_trim_mask(
+            reserved_bitmap, num_keys, request.policy, request.attn_desc,
+        )
         trimmed_plan = trim_load_plan_with_mask(load_plan, retained)
         request.load_plan = trimmed_plan
 
@@ -985,7 +1004,7 @@ class PrefetchController(StorageControllerInterface):
             )
 
         ## Step 8: update the lookup result based on the final load plan
-        self._update_lookup_results(request.request_id, retained.count_leading_ones())
+        self._update_lookup_results(request.request_id, retained.popcount())
 
         self._event_bus.publish(
             Event(
@@ -1164,7 +1183,9 @@ class PrefetchController(StorageControllerInterface):
 
         # Release read locks for any loaded key outside the retained set
         # (partial load failures can create gaps).
-        retained = build_trim_mask(result_bitmap, num_keys, request.policy)
+        retained = build_trim_mask(
+            result_bitmap, num_keys, request.policy, request.attn_desc,
+        )
         released_bitmap = result_bitmap & (~retained)
         released = released_bitmap.gather(request.keys)
         if released:

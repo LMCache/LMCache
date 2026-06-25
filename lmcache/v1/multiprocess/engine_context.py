@@ -2,7 +2,7 @@
 """Shared context and layout descriptor registry for engine modules."""
 
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TypedDict
 import threading
 
@@ -82,6 +82,7 @@ class LayoutDescRegistry:
                 object-group order. Defaults to a single full-attention group.
         """
         key = (model_name, world_size)
+        attn_desc = replace(attn_desc, world_size=world_size)
         with self._lock:
             entry = self._registry.get(key)
             if entry is None:

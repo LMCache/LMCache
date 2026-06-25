@@ -245,12 +245,18 @@ def _dec_trim_policy(name: str) -> TrimPolicy:
     return TrimPolicy[name]
 
 
-def _enc_attn_window(d: AttnWindowDesc) -> list[int]:
-    return list(d.num_chunks_in_sw)
+def _enc_attn_window(d: AttnWindowDesc) -> dict:
+    return {"num_chunks_in_sw": list(d.num_chunks_in_sw),
+            "world_size": d.world_size}
 
 
-def _dec_attn_window(num_chunks_in_sw: list[int]) -> AttnWindowDesc:
-    return AttnWindowDesc(num_chunks_in_sw=list(num_chunks_in_sw))
+def _dec_attn_window(raw: dict | list) -> AttnWindowDesc:
+    if isinstance(raw, list):
+        return AttnWindowDesc(num_chunks_in_sw=list(raw))
+    return AttnWindowDesc(
+        num_chunks_in_sw=list(raw["num_chunks_in_sw"]),
+        world_size=raw.get("world_size", 1),
+    )
 
 
 def _enc_set(s: set) -> list:

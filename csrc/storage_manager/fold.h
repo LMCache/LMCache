@@ -20,8 +20,8 @@ namespace storage_manager {
  * groups. The result feeds :func:`Bitmap::highest_set_bit`; the model-wide hit
  * length is that index plus one (``-1`` -> hit length 0), then :func:`unfold`.
  *
- * The input ``found`` is group-major / chunk-major / rank-minor: bit
- * ``g * (num_chunks * num_ranks) + j * num_ranks + r`` is set iff chunk ``j``
+ * The input ``found`` is chunk-major / group / rank-minor: bit
+ * ``j * (num_groups * num_ranks) + g * num_ranks + r`` is set iff chunk ``j``
  * of object group ``g`` is present for kv_rank ``r``. A chunk counts as present
  * for a group only when every kv_rank shard is present.
  *

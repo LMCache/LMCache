@@ -252,8 +252,13 @@ class AttnWindowDesc:
     """
 
     num_chunks_in_sw: list[int]
+    world_size: int = 1
 
     def __post_init__(self) -> None:
+        if self.world_size < 1:
+            raise ValueError(
+                f"AttnWindowDesc: world_size must be >= 1, got {self.world_size}"
+            )
         for w in self.num_chunks_in_sw:
             if w == 0 or w < -1:
                 raise ValueError(

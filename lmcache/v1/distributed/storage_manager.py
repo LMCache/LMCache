@@ -20,6 +20,7 @@ from lmcache.v1.distributed.api import (
     PrefetchHandle,
     TrimPolicy,
 )
+from lmcache.v1.distributed.bitmap_ops import fold_unfold_ranked
 from lmcache.v1.distributed.config import EvictionConfig, StorageManagerConfig
 from lmcache.v1.distributed.error import L1Error, strerror
 from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2AdapterListener
@@ -418,7 +419,8 @@ class StorageManager:
                 :class:`TrimPolicy`).  ``PREFIX`` keeps the contiguous prefix;
                 ``SPARSE`` keeps every found key (gap-tolerant).
             attn_desc: Cross-chunk attention windows of all object groups, in
-                object-group order.
+                object-group order.  The embedded ``world_size`` determines the
+                number of kv_rank shards per chunk.
             skip_l2: If True, only check L1 and return without submitting to L2.
 
         Returns:
@@ -475,75 +477,121 @@ class StorageManager:
                 l2_orig_indices=tuple(sparse_l2_indices),
             )
 
-        hit_count = 0
-        for key in keys:
-            entry = l1_read_result.get(key, None)
-            if entry is None:
-                break
+        # PREFIX: fold the per-(group, chunk, rank) L1 presence into the
+        # model-wide hit and the per-object-group retain set (sliding-window
+        # aware). All-full-attention reduces to the contiguous leading-ones
+        # prefix. Keys past the L1 hit are sent to L2.
+        if policy is TrimPolicy.PREFIX:
+            return self._submit_prefix_fold(
+                keys, l1_read_result, attn_desc, extra_count,
+                external_request_id, layout_desc, skip_l2,
+            )
 
-            err, obj = entry
-            if err != L1Error.SUCCESS:
-                break
+    def _submit_prefix_fold(
+        self,
+        keys: list[ObjectKey],
+        l1_read_result: dict[ObjectKey, tuple[L1Error, "MemoryObj | None"]],
+        attn_desc: AttnWindowDesc,
+        extra_count: int,
+        external_request_id: str,
+        layout_desc: "MemoryLayoutDesc",
+        skip_l2: bool,
+    ) -> PrefetchHandle:
+        """Compute the L1 prefix retain set via fold/unfold and submit
+        remaining keys to L2.
 
-            hit_count += 1
+        Builds the chunk-major L1 presence bitmap, folds it to the model-wide
+        hit length and per-object-group retain mask (sliding-window aware),
+        releases L1 read locks on present-but-not-retained keys, and sends
+        keys from chunk ``l1_hit_chunks`` onwards to L2 when an L2 adapter is
+        available.
 
-        # NOTE: For L1, there will be cases that "object in the middle" is not found.
-        # In this case, we need to `finish_read` for the latter objects so that
-        # there won't be dangling read locks.
-        skipped_keys = []
-        for key in keys[hit_count:]:
-            if key in l1_read_result and l1_read_result[key][1] is not None:
-                # this key is actually reserved, need to release the read lock
-                skipped_keys.append(key)
+        Args:
+            keys: All requested object keys, in chunk-major order.
+            l1_read_result: Per-key result from :meth:`L1Manager.reserve_read`.
+            attn_desc: Per-object-group attention windows for ``keys``.  The
+                embedded ``world_size`` determines the number of kv_rank shards
+                per chunk.
+            extra_count: Extra read locks per key to release on non-retained
+                keys (must match the ``reserve_read`` call).
+            external_request_id: Caller request id for tracing.
+            layout_desc: Memory layout for L1 write buffer allocation (passed
+                to L2 prefetch controller).
+            skip_l2: If True, skip L2 submission even if L2 adapters exist.
 
-        if skipped_keys:
-            self._l1_manager.finish_read(skipped_keys, extra_count=extra_count)
+        Returns:
+            A PrefetchHandle with ``l1_found_indices`` set to the retained
+            L1 key indices and, when L2 is used, ``l2_orig_indices`` mapping
+            L2-local positions back to original positions.
+        """
+        num_groups = attn_desc.num_object_groups
+        stride = num_groups * attn_desc.world_size
+        num_chunks = len(keys) // stride if stride else 0
+
+        l1_presence = Bitmap(len(keys))
+        for i, key in enumerate(keys):
+            ent = l1_read_result.get(key)
+            if ent is not None and ent[0] == L1Error.SUCCESS and ent[1] is not None:
+                l1_presence.set(i)
+
+        l1_hit_chunks, retain = fold_unfold_ranked(
+            l1_presence, num_chunks, attn_desc.world_size,
+            attn_desc.num_chunks_in_sw,
+        )
+        retain_set = retain.get_indices_set()
+
+        released = [
+            keys[i]
+            for i in range(len(keys))
+            if l1_presence.test(i) and i not in retain_set
+        ]
+        if released:
+            self._l1_manager.finish_read(released, extra_count=extra_count)
+
+        retained_indices = sorted(retain_set)
+
+        # Keys from chunk l1_hit_chunks onwards are candidates for L2.
+        l1_key_boundary = l1_hit_chunks * stride
+        remaining_keys = keys[l1_key_boundary:]
 
         self._event_bus.publish(
             Event(
                 event_type=EventType.SM_READ_PREFETCHED,
                 metadata={
-                    "succeeded_keys": keys[:hit_count],
-                    "failed_keys": keys[hit_count:],
+                    "succeeded_keys": [keys[i] for i in retained_indices],
+                    "failed_keys": [
+                        keys[i] for i in range(len(keys)) if i not in retain_set
+                    ],
                 },
             )
         )
 
-        if skip_l2:
-            return PrefetchHandle(
-                prefetch_request_id=-1,
-                external_request_id=external_request_id,
-                l1_found_indices=tuple(range(hit_count)),
-                total_requested_keys=len(keys),
-                submit_time=time.monotonic(),
-                l2_orig_indices=(),
-            )
-
-        # Submit remaining keys to L2 prefetch controller
-        remaining_keys = keys[hit_count:]
+        l1_only = skip_l2 or not self._has_l2_adapters()
         prefetch_request_id = -1
         l2_orig_indices: tuple[int, ...] = ()
-        if remaining_keys and self._has_l2_adapters():
-            prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
-                remaining_keys,
-                layout_desc,
-                extra_count=extra_count,
-                attn_desc=attn_desc,
-                policy=policy,
+
+        if not l1_only and remaining_keys:
+            prefetch_request_id = (
+                self._prefetch_controller.submit_prefetch_request(
+                    remaining_keys,
+                    layout_desc,
+                    extra_count=extra_count,
+                    attn_desc=attn_desc,
+                    policy=TrimPolicy.PREFIX,
+                )
             )
-            # The controller indexes its result bitmap over remaining_keys
-            # (0-based); map those local indices back to original positions.
-            l2_orig_indices = tuple(range(hit_count, len(keys)))
+            l2_orig_indices = tuple(range(l1_key_boundary, len(keys)))
 
         submit_time = time.monotonic()
         logger.debug(
             "Prefetch request submitted: "
-            "%d total keys, %d L1 prefix hits, "
+            "%d total keys, %d L1 hit chunks (%d retained keys), "
             "%d remaining for L2 "
             "(external_request_id=%s, "
             "prefetch_request_id=%d)",
             len(keys),
-            hit_count,
+            l1_hit_chunks,
+            len(retained_indices),
             len(remaining_keys),
             external_request_id,
             prefetch_request_id,
@@ -552,7 +600,7 @@ class StorageManager:
         return PrefetchHandle(
             prefetch_request_id=prefetch_request_id,
             external_request_id=external_request_id,
-            l1_found_indices=tuple(range(hit_count)),
+            l1_found_indices=tuple(retained_indices),
             total_requested_keys=len(keys),
             submit_time=submit_time,
             l2_orig_indices=l2_orig_indices,
