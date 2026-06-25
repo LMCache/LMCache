@@ -71,7 +71,7 @@ Options
    * - ``--url``
      - LMCache HTTP server URL (default: ``http://localhost:8080``).
    * - ``--format``
-     - Output format: ``terminal`` (default) or ``json``.
+     - Output format: ``terminal`` (default), ``json``, or ``csv``.
    * - ``--output PATH``
      - Save metrics to a file (format follows ``--format``).
    * - ``-q`` / ``--quiet``

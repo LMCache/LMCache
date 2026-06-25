@@ -779,7 +779,7 @@ Options
    * - ``--format FORMAT``
      - ``terminal``
      - Stdout output format for the final metrics summary. Available:
-       ``terminal``, ``json``.
+       ``terminal``, ``json``, ``csv``.
    * - ``--output PATH``
      - *(unset)*
      - Save the final metrics summary to a file at PATH (format chosen

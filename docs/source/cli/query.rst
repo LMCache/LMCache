@@ -81,7 +81,7 @@ Options
        ``/v1/completions``.
    * - ``--format``
      - No
-     - Output format: ``terminal`` (default) or ``json``.
+     - Output format: ``terminal`` (default), ``json``, or ``csv``.
    * - ``--output PATH``
      - No
      - Save metrics to a file (format follows ``--format``).
