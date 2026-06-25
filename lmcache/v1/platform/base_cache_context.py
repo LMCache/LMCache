@@ -185,10 +185,6 @@ class BaseCacheContext(ABC):
     def get_engine_kv_format(self, kernel_group_idx: int) -> "lmc_ops.EngineKVFormat":
         """Returns the Engine KV format of kernel *kernel_group_idx*.
 
-        The per-group format -- read by the transfer path so a model mixing
-        formats across groups dispatches each group with its own, instead of a
-        single representative format.
-
         Raises:
             ValueError: If the group has no format (a bookkeeping group built by
                 ``parse_kvcache_shape_spec`` should never reach the transfer
