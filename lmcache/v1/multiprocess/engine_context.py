@@ -55,12 +55,19 @@ class LayoutDescRegistry:
     for prefetch tasks. Multiple worker instances can share the same
     ``(model_name, world_size)`` entry, so the registry keeps the descriptor
     until the last matching registration is unregistered.
+
+    Args:
+        force_retrieve_full_kv: When True, every registered
+            :class:`AttnWindowDesc` has its ``force_retrieve_full_kv`` flag set,
+            so the fold/unfold pipeline treats all object groups as
+            full-attention (prefetches every prefix chunk).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, force_retrieve_full_kv: bool = False) -> None:
         # Key: (model_name, world_size) -> layout descriptor entry
         self._registry: dict[tuple[str, int], _LayoutDescEntry] = {}
         self._lock = threading.Lock()
+        self._force_retrieve_full_kv = force_retrieve_full_kv
 
     def register(
         self,
@@ -82,7 +89,11 @@ class LayoutDescRegistry:
                 object-group order. Defaults to a single full-attention group.
         """
         key = (model_name, world_size)
-        attn_desc = replace(attn_desc, world_size=world_size)
+        attn_desc = replace(
+            attn_desc,
+            world_size=world_size,
+            force_retrieve_full_kv=self._force_retrieve_full_kv,
+        )
         with self._lock:
             entry = self._registry.get(key)
             if entry is None:
@@ -173,6 +184,8 @@ class MPCacheServerContext:
         hash_algorithm: Hash algorithm for token hashing.
         separate_object_groups: Whether to split kernel groups into one object
             group per sliding-window size at KV-cache registration. Default True.
+        force_retrieve_full_kv: When True, treat all object groups as
+            full-attention during prefetch, ignoring sliding-window sizes.
     """
 
     def __init__(
@@ -181,9 +194,11 @@ class MPCacheServerContext:
         chunk_size: int = 256,
         hash_algorithm: str = "blake3",
         separate_object_groups: bool = True,
+        force_retrieve_full_kv: bool = False,
     ) -> None:
         self._chunk_size = chunk_size
         self._separate_object_groups = separate_object_groups
+        self._force_retrieve_full_kv = force_retrieve_full_kv
 
         # Initialize the process-global GDS context.
         # No-op when GDS L1 is disabled (config is None).
@@ -198,7 +213,9 @@ class MPCacheServerContext:
         )
         self._session_manager = SessionManager(self._token_hasher)
         self._event_bus = get_event_bus()
-        self._layout_desc_registry = LayoutDescRegistry()
+        self._layout_desc_registry = LayoutDescRegistry(
+            force_retrieve_full_kv=force_retrieve_full_kv,
+        )
 
     def close(self) -> None:
         """

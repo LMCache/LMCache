@@ -56,6 +56,11 @@ class MPServerConfig:
     L1-resident (served by the sparse leg as L1 hits, the hole recomputed)
     instead of truncating the prefix at the gap. No effect for other engines."""
 
+    force_retrieve_full_kv: bool = False
+    """Retrieve the full KV cache during prefetch, ignoring per-group
+    sliding-window sizes.  When set, every prefix chunk is prefetched
+    regardless of sliding-window bounds."""
+
     supported_transfer_mode: str = "auto"
     """Transfer mode: 'lmcache_driven' for server-driven transfer
     (STORE/RETRIEVE, supports CUDA IPC and CPU SHM), 'engine_driven' for
@@ -374,6 +379,13 @@ def add_mp_server_args(
         "retrieve failure, retain the gapped prefix so post-gap chunks stay "
         "L1-resident instead of truncating at the gap. No effect otherwise.",
     )
+    mp_group.add_argument(
+        "--force-retrieve-full-kvcache",
+        action="store_true",
+        help="Retrieve the full KV cache during prefetch, ignoring per-group "
+        "sliding-window sizes. Every prefix chunk is prefetched regardless "
+        "of sliding-window bounds.",
+    )
     return parser
 
 
@@ -408,6 +420,7 @@ def parse_args_to_mp_server_config(
         engine_type=args.engine_type,
         separate_object_groups=args.separate_object_groups,
         enable_segmented_prefix=args.enable_segmented_prefix,
+        force_retrieve_full_kv=args.force_retrieve_full_kvcache,
         supported_transfer_mode=args.supported_transfer_mode,
         runtime_plugin_config=RuntimePluginConfig(
             locations=(args.runtime_plugin_locations or []),

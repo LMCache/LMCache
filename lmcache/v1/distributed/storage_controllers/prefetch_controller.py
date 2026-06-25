@@ -100,8 +100,11 @@ def build_trim_mask(
     if policy is TrimPolicy.PREFIX:
         stride = attn_desc.num_object_groups * attn_desc.world_size
         num_chunks = num_keys // stride if stride else 0
+        windows = attn_desc.num_chunks_in_sw
+        if attn_desc.force_retrieve_full_kv:
+            windows = [-1] * attn_desc.num_object_groups
         _, retain = fold_unfold_ranked(
-            found, num_chunks, attn_desc.world_size, attn_desc.num_chunks_in_sw
+            found, num_chunks, attn_desc.world_size, windows,
         )
         return retain
     return found

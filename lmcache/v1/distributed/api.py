@@ -253,6 +253,7 @@ class AttnWindowDesc:
 
     num_chunks_in_sw: list[int]
     world_size: int = 1
+    force_retrieve_full_kv: bool = False
 
     def __post_init__(self) -> None:
         if self.world_size < 1:
@@ -278,9 +279,11 @@ class AttnWindowDesc:
             object_group_idx: 0-based object group index.
 
         Returns:
-            True if the group attends to the whole prefix, False if it uses a
-            bounded sliding window.
+            True if ``force_retrieve_full_kv`` is set or the group's window
+            is ``-1``.
         """
+        if self.force_retrieve_full_kv:
+            return True
         return self.num_chunks_in_sw[object_group_idx] < 0
 
 
