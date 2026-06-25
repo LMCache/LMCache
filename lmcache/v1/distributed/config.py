@@ -247,6 +247,22 @@ class StorageManagerConfig:
     prefetch_max_in_flight: int = 8
     """ Maximum number of concurrent prefetch requests. """
 
+    enable_speculative_prefetch: bool = False
+    """ Enable the speculative prefetch predictor. When enabled, the prefetch
+    controller learns the access stream of submitted prefetch requests and can
+    predict which keys are likely to be requested next. Disabled by default. """
+
+    speculative_prefetch_max_keys: int = 8
+    """ Maximum number of keys the speculative predictor returns per query. """
+
+    speculative_prefetch_min_confidence: float = 0.1
+    """ Minimum confidence in [0, 1] for a speculative prediction to be
+    returned; higher values trade recall for precision. """
+
+    speculative_prefetch_decay: float = 0.95
+    """ Recency decay in (0, 1] for the speculative predictor's successor
+    model; lower values adapt faster to changing access patterns. """
+
     periodic_notifier_interval_ms: int = 5
     """ Interval (ms) for the periodic event notifier heartbeat. """
 
@@ -508,6 +524,34 @@ def add_storage_manager_args(
         help="Maximum number of concurrent prefetch requests. Default is 8.",
     )
     policy_group.add_argument(
+        "--enable-speculative-prefetch",
+        action="store_true",
+        help="Enable the speculative prefetch predictor: the prefetch "
+        "controller learns the request access stream and can predict the "
+        "next likely keys. Disabled by default.",
+    )
+    policy_group.add_argument(
+        "--speculative-prefetch-max-keys",
+        type=int,
+        default=8,
+        help="Maximum number of keys the speculative predictor returns per "
+        "query. Default is 8.",
+    )
+    policy_group.add_argument(
+        "--speculative-prefetch-min-confidence",
+        type=float,
+        default=0.1,
+        help="Minimum confidence in [0, 1] for a speculative prediction to be "
+        "returned. Default is 0.1.",
+    )
+    policy_group.add_argument(
+        "--speculative-prefetch-decay",
+        type=float,
+        default=0.95,
+        help="Recency decay in (0, 1] for the speculative predictor's "
+        "successor model. Default is 0.95.",
+    )
+    policy_group.add_argument(
         "--periodic-notifier-interval-ms",
         type=int,
         default=5,
@@ -599,6 +643,10 @@ def parse_args_to_config(
         store_policy=args.l2_store_policy,
         prefetch_policy=args.l2_prefetch_policy,
         prefetch_max_in_flight=args.l2_prefetch_max_in_flight,
+        enable_speculative_prefetch=args.enable_speculative_prefetch,
+        speculative_prefetch_max_keys=args.speculative_prefetch_max_keys,
+        speculative_prefetch_min_confidence=args.speculative_prefetch_min_confidence,
+        speculative_prefetch_decay=args.speculative_prefetch_decay,
         periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
     )
     return config

@@ -38,6 +38,9 @@ from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     DefaultPrefetchPolicy,
 )
+from lmcache.v1.distributed.storage_controllers.speculative_prefetcher import (
+    SpeculativePrefetcher,
+)
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
 )
@@ -1362,3 +1365,65 @@ class TestWaitPrefetchResult:
         assert time.monotonic() - start >= 0.2
 
         ctrl.stop()
+
+
+# =============================================================================
+# Speculative prefetch wiring
+# =============================================================================
+
+
+class TestSpeculativePrefetchWiring:
+    """The optional speculator should learn the submitted access stream and
+    surface predictions, while remaining a no-op when not configured."""
+
+    def test_predict_returns_empty_without_speculator(self, l1_manager):
+        """With no speculator, predict_prefetch_keys is always empty."""
+        adapter = make_adapter()
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+        try:
+            k0 = make_object_key(0)
+            ctrl.submit_prefetch_request([k0], make_layout())
+            assert ctrl.predict_prefetch_keys() == []
+            assert ctrl.predict_prefetch_keys(recent=[k0]) == []
+            assert ctrl.report_status()["speculative_prefetch_enabled"] is False
+        finally:
+            ctrl.stop()
+            adapter.close()
+
+    def test_submit_trains_speculator_and_predicts(self, l1_manager):
+        """Submitting a repeating A->B access pattern should let the controller
+        predict B from A via the wired speculator."""
+        adapter = make_adapter()
+        speculator: SpeculativePrefetcher[ObjectKey] = SpeculativePrefetcher(
+            popularity_weight=0.0, min_confidence=0.0
+        )
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+            speculator=speculator,
+        )
+        ctrl.start()
+        try:
+            key_a = make_object_key(1)
+            key_b = make_object_key(2)
+            layout = make_layout()
+            # Each two-key request encodes the A->B transition; repeat to train.
+            for _ in range(5):
+                ctrl.submit_prefetch_request([key_a, key_b], layout)
+
+            predicted = ctrl.predict_prefetch_keys(recent=[key_a])
+            assert key_b in predicted
+            status = ctrl.report_status()
+            assert status["speculative_prefetch_enabled"] is True
+            assert status["speculator_num_sources"] >= 1
+        finally:
+            ctrl.stop()
+            adapter.close()

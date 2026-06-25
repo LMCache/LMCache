@@ -41,6 +41,9 @@ from lmcache.v1.distributed.storage_controllers.adapter_lifecycle import (
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     PrefetchPolicy,
 )
+from lmcache.v1.distributed.storage_controllers.speculative_prefetcher import (
+    SpeculativePrefetcher,
+)
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
 )
@@ -191,6 +194,11 @@ class PrefetchController(StorageControllerInterface):
         adapter_descriptors: Descriptors for each L2 adapter (same order).
         policy: The prefetch policy for load plan decisions.
         max_in_flight: Maximum number of concurrent prefetch requests.
+        speculator: Optional predictor that learns the access stream of
+            submitted prefetch requests and can suggest which keys are likely
+            to be requested next (see :meth:`predict_prefetch_keys`). When
+            ``None`` (the default) the controller behaves exactly as before —
+            no observation and no prediction overhead.
     """
 
     # Singleton dispatch for the in-flight load gauges: tests may construct
@@ -207,6 +215,7 @@ class PrefetchController(StorageControllerInterface):
         adapter_descriptors: list[AdapterDescriptor],
         policy: PrefetchPolicy,
         max_in_flight: int = 8,
+        speculator: SpeculativePrefetcher[ObjectKey] | None = None,
     ) -> None:
         self._l1_manager = l1_manager
         self._l2_adapters: dict[int, L2AdapterInterface] = {
@@ -218,6 +227,13 @@ class PrefetchController(StorageControllerInterface):
         }
         self._policy = policy
         self._max_in_flight = max_in_flight
+
+        # Optional speculative predictor. Guarded by its own lock because
+        # submit_prefetch_request (which feeds it) is called from arbitrary
+        # external threads, while predict_prefetch_keys may be called from
+        # another. The predictor itself is not internally synchronized.
+        self._speculator = speculator
+        self._speculator_lock = threading.Lock()
 
         # Adapters that are being drained and will be removed after all
         # the in-flight operations are done.
@@ -381,7 +397,43 @@ class PrefetchController(StorageControllerInterface):
                 (request_id, keys, layout_desc, extra_count, policy, attn_desc)
             )
         self._submission_efd.notify()
+        # Feed the access stream to the speculative predictor (if enabled) so
+        # future predict_prefetch_keys() calls reflect this request. This only
+        # updates the model; it does not itself issue any speculative load.
+        if self._speculator is not None and keys:
+            with self._speculator_lock:
+                self._speculator.observe_sequence(keys)
         return request_id
+
+    def predict_prefetch_keys(
+        self,
+        recent: list[ObjectKey] | None = None,
+        max_keys: int | None = None,
+    ) -> list[ObjectKey]:
+        """Predict keys likely to be requested next, for speculative prefetch.
+
+        Returns the speculative predictor's ranked guesses given the access
+        stream observed so far (and optional ``recent`` context). The caller
+        decides whether to act on them by submitting a normal
+        :meth:`submit_prefetch_request`, so speculatively loaded keys flow
+        through the same lock-owned lifecycle as any other prefetch and are
+        released via :meth:`query_prefetch_result`.
+
+        Args:
+            recent: Recently accessed keys (most-recent last) used as
+                prediction context. If ``None``, the predictor's own last
+                observed key is used.
+            max_keys: Cap on the number of predictions. Defaults to the
+                predictor's configured maximum.
+
+        Returns:
+            Predicted keys ordered by descending confidence. Empty if no
+            speculator is configured or there is insufficient evidence.
+        """
+        if self._speculator is None:
+            return []
+        with self._speculator_lock:
+            return self._speculator.predict_keys(recent=recent, k=max_keys)
 
     def query_lookup_result(self, request_id: PrefetchRequestId) -> int | None:
         """
@@ -477,6 +529,10 @@ class PrefetchController(StorageControllerInterface):
             "num_l2_adapters": len(self._l2_adapters),
             "num_active_adapters": len(self._l2_adapters) - len(self._draining),
             "num_draining_adapters": len(self._draining),
+            "speculative_prefetch_enabled": self._speculator is not None,
+            "speculator_num_sources": (
+                self._speculator.num_sources if self._speculator is not None else 0
+            ),
         }
 
     def get_adapter_state_observations(
