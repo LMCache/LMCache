@@ -2865,3 +2865,27 @@ def test_alloc_pinned_ptr_is_page_aligned(size: int) -> None:
             assert buf[i] == ((i & 0xFF) ^ 0xA5)
     finally:
         _py_ops.free_pinned_ptr(ptr)
+
+
+def test_tensor_from_ptr_routes_musa_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MUSA device pointers must not be rejected at dispatch time."""
+
+    def _fake_musa_ptr(
+        ptr: int,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+        numel: int,
+        total_bytes: int,
+    ) -> torch.Tensor:
+        assert device.type == "musa"
+        assert ptr == 0x1000
+        assert shape == (2, 3)
+        assert dtype is torch.float16
+        assert numel == 6
+        assert total_bytes == 12
+        return torch.empty(shape, dtype=dtype)
+
+    monkeypatch.setattr(_py_ops, "_tensor_from_musa_ptr", _fake_musa_ptr)
+    tensor = _py_ops._tensor_from_ptr(0x1000, (2, 3), torch.float16, "musa:0")
+    assert tensor.shape == (2, 3)
