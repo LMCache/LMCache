@@ -364,6 +364,7 @@ class PinnedBufferPool:
     def __init__(self) -> None:
         self._pools: dict[tuple[tuple[int, ...], torch.dtype], deque[torch.Tensor]] = {}
         self._acquired_count = 0
+        self._lock = threading.Lock()
 
     def acquire(
         self,
@@ -372,34 +373,36 @@ class PinnedBufferPool:
         count: int = 1,
     ) -> list[torch.Tensor]:
         """Pop up to ``count`` tensors of the given shape from the pool.
-
         New tensors are allocated with ``pin_memory=True`` on cache miss.
         """
         key = (shape, dtype)
-        pool = self._pools.setdefault(key, deque())
-        out: list[torch.Tensor] = []
-        for _ in range(count):
-            if pool:
-                out.append(pool.popleft())
-            else:
-                out.append(
-                    torch.empty(shape, dtype=dtype,
-                                device=torch.device("cpu"),
-                                pin_memory=True)
-                )
-            self._acquired_count += 1
+        with self._lock:
+            pool = self._pools.setdefault(key, deque())
+            out: list[torch.Tensor] = []
+            for _ in range(count):
+                if pool:
+                    out.append(pool.popleft())
+                else:
+                    out.append(
+                        torch.empty(shape, dtype=dtype,
+                                    device=torch.device("cpu"),
+                                    pin_memory=True)
+                    )
+                self._acquired_count += 1
         return out
 
     def release(self, buffers: list[torch.Tensor]) -> None:
         """Return buffers to the pool for reuse on the next acquire."""
-        for buf in buffers:
-            key = (tuple(buf.shape), buf.dtype)
-            self._pools.setdefault(key, deque()).append(buf)
+        with self._lock:
+            for buf in buffers:
+                key = (tuple(buf.shape), buf.dtype)
+                self._pools.setdefault(key, deque()).append(buf)
 
     def clear(self) -> None:
         """Release all pinned memory.  Call on context destruction."""
-        self._pools.clear()
-        self._acquired_count = 0
+        with self._lock:
+            self._pools.clear()
+            self._acquired_count = 0
 
     def stats(self) -> dict:
         """Snapshot of pool state (for diagnostics / benchmarks)."""
@@ -1073,27 +1076,21 @@ def _classify_chunk(item: object) -> tuple[str, object]:
         return "old", item
     # Bare tensor (defensive fallback)
     return "tensor_new", item
-    return "tensor_new", item
-# ---------------------------------------------------------------------------
-# Multi-group gather / scatter utilities
-# ---------------------------------------------------------------------------
-
 def slice_kv_caches_for_group(
     kv_caches: dict[str, torch.Tensor],
     layer_indices: tuple[int, ...],
 ) -> dict[str, torch.Tensor]:
     """Extract a subset of KV tensors for a single group.
-
     Args:
         kv_caches: All layers, ordered as passed by the adapter.
         layer_indices: 0-based indices of the layers belonging to this group.
-
     Returns:
-        Ordered dict with only the layers of this group.
+        Ordered dict with only the layers of this group, sorted numerically.
     """
     all_values = list(kv_caches.values())
-    return {str(i): all_values[idx] for i, idx in enumerate(sorted(layer_indices))}
-
+    # Sort numerically, not alphabetically ("2" < "10" in Python string sort)
+    sorted_indices = sorted(layer_indices)
+    return {str(i): all_values[idx] for i, idx in enumerate(sorted_indices)}
 
 
 def gather_paged_kv_multi_group_to_cpu_streams(

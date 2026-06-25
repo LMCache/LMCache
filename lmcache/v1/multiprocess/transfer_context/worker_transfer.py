@@ -698,6 +698,11 @@ class EngineDrivenTransferContext(TransferContext):
 
         if len(self._engine_group_infos) > 1:
             # ── Multi-group path ─────────────────────────────────────────
+            if len(block_ids) != len(self._engine_group_infos):
+                raise ValueError(
+                    f"block_ids has {len(block_ids)} groups, "
+                    f"but {len(self._engine_group_infos)} engine_group_infos registered"
+                )
             raw = self._engine_driven_context.prepare_retrieve_raw(key, instance_id)
             ok = raw is not None
             if raw:
@@ -739,6 +744,10 @@ class EngineDrivenTransferContext(TransferContext):
         if self._engine_driven_context is not None:
             self._engine_driven_context.close()
             self._engine_driven_context = None
+        # Shutdown the serialisation thread pool to avoid leaking threads.
+        if self._serialize_pool is not None:
+            self._serialize_pool.shutdown(wait=True)
+            self._serialize_pool = None
         # Release pinned memory back to the OS.
         self._pinned_pool.clear()
 
