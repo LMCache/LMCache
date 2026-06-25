@@ -7,6 +7,38 @@ capabilities (e.g. memory pinning) that do not exist on the original
 torch device module.
 """
 
+# First Party
+from lmcache.v1.platform.base_pin_memory import PinMemoryBackend
+
+_PIN_MEMORY_BACKENDS: dict[str, type[PinMemoryBackend]] = {}
+
+
+def register_pin_memory_backend(device_type: str, cls: type[PinMemoryBackend]) -> None:
+    """Register a pin-memory backend implementation for a device type.
+
+    Args:
+        device_type: The device type string (for example, ``"cuda"``).
+        cls: A :class:`PinMemoryBackend` subclass (or the base class
+            itself) to instantiate for ``device_type``.
+
+    Notes:
+        Re-registering the same ``device_type`` overwrites the previous
+        backend class. Registration is expected to happen during module
+        import, so this helper does not add extra synchronization for
+        concurrent writes. Existing :class:`DeviceExt` instances keep the
+        backend object they already created; later registrations affect
+        only newly constructed instances.
+
+    Raises:
+        TypeError: If ``cls`` is not a :class:`PinMemoryBackend`
+            subclass.
+    """
+    if not isinstance(cls, type) or not issubclass(cls, PinMemoryBackend):
+        raise TypeError(
+            "register_pin_memory_backend expects a PinMemoryBackend subclass"
+        )
+    _PIN_MEMORY_BACKENDS[device_type] = cls
+
 
 class DeviceExt:
     """Extension namespace attached as ``torch_dev.ext``.
@@ -25,16 +57,8 @@ class DeviceExt:
     """
 
     def __init__(self, device_type: str) -> None:
-        # First Party
-        from lmcache.v1.platform.base_pin_memory import PinMemoryBackend
-
-        if device_type == "cuda":
-            # First Party
-            from lmcache.v1.platform.cuda.pin_memory import CudaPinMemoryBackend
-
-            self._pin: PinMemoryBackend = CudaPinMemoryBackend()
-        else:
-            self._pin = PinMemoryBackend()
+        backend_cls = _PIN_MEMORY_BACKENDS.get(device_type, PinMemoryBackend)
+        self._pin: PinMemoryBackend = backend_cls()
 
     def pin_memory(self, ptr: int, size: int, flags: int = 0) -> bool:
         """Pin a host memory region for DMA access.
