@@ -375,6 +375,15 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
             raise ValueError("s3_bucket_mode must be 'single' or 'per_cache_salt'")
         self.s3_bucket_mode = s3_bucket_mode
         self.s3_bucket_template = s3_bucket_template
+        # Fail fast on a malformed template (unknown placeholder / bad spec) at
+        # config time rather than on the first PUT in per_cache_salt mode.
+        if s3_bucket_mode == "per_cache_salt":
+            try:
+                (s3_bucket_template or "{base}-{salt}").format(salt="x", base="x")
+            except (KeyError, ValueError, IndexError) as e:
+                raise ValueError(
+                    f"invalid s3_bucket_template {s3_bucket_template!r}: {e}"
+                ) from e
 
     @classmethod
     def from_dict(cls, d: dict) -> "S3L2AdapterConfig":
@@ -486,6 +495,7 @@ class S3L2Adapter(L2AdapterInterface):
         self._host_suffix = endpoint.partition(".")[2]  # s3.<region>.amazonaws.com
         self._seen_salts: set[str] = set()  # salts observed → buckets to list for eviction
         self._ensured_buckets: set[str] = set()  # tenant buckets provisioned this process
+        self._bucket_creation_lock = threading.Lock()  # serialize provisioning
         self._mgmt_s3 = None  # lazy boto3 client for bucket create/lifecycle (control plane)
         # Auto-provision a tenant bucket on first use (+ TTL). Disable to require
         # buckets to be pre-created by an onboarding hook.
@@ -801,8 +811,13 @@ class S3L2Adapter(L2AdapterInterface):
             idx, token = _bucket_router.decode_cursor(cursor)
             entries, next_token = [], None
             while idx < len(hosts):
+                # Request only the remaining page budget so many small tenant
+                # buckets aggregate into one full page instead of forcing a
+                # round-trip per (mostly-empty) bucket.
                 fut = asyncio.run_coroutine_threadsafe(
-                    self._execute_list(prefix, max_keys, token, host=hosts[idx]),
+                    self._execute_list(
+                        prefix, max_keys - len(entries), token, host=hosts[idx]
+                    ),
                     self._loop,
                 )
                 e, t = fut.result(timeout=30.0)
@@ -810,11 +825,12 @@ class S3L2Adapter(L2AdapterInterface):
                 if t:  # this bucket has more pages → resume here next call
                     next_token = _bucket_router.encode_cursor(idx, t)
                     break
-                idx += 1  # bucket exhausted → advance
+                idx += 1  # bucket exhausted → continue into the next bucket
                 token = None
-                if entries:  # return what we have; resume at the next bucket next call
+                if len(entries) >= max_keys:  # page full → resume at next bucket
                     next_token = (
-                        _bucket_router.encode_cursor(idx, None) if idx < len(hosts) else None
+                        _bucket_router.encode_cursor(idx, None)
+                        if idx < len(hosts) else None
                     )
                     break
         page_entries = tuple(
@@ -906,10 +922,11 @@ class S3L2Adapter(L2AdapterInterface):
         )
         if host != self._endpoint:
             # remember which tenant buckets we've written to, for per-bucket
-            # eviction/listing.
-            self._seen_salts.add(
-                _bucket_router.sanitize_salt(_bucket_router.salt_of_key(key_str))
-            )
+            # eviction/listing (mutated from request threads → hold the lock).
+            with self._lock:
+                self._seen_salts.add(
+                    _bucket_router.sanitize_salt(_bucket_router.salt_of_key(key_str))
+                )
             if self._auto_create_bucket:
                 self._ensure_bucket(host)
         return host
@@ -919,38 +936,64 @@ class S3L2Adapter(L2AdapterInterface):
         lifecycle, so per_cache_salt routing works without a separate
         onboarding step. Control-plane only — uses boto3 (not the CRT data
         client). Failures are logged, not raised: a missing bucket surfaces
-        later as a normal PUT error rather than killing the request path."""
-        bucket = host.split(".", 1)[0]
-        if bucket in self._ensured_buckets:
-            return
-        self._ensured_buckets.add(bucket)
-        try:
-            import boto3
-            from botocore.exceptions import ClientError
+        later as a normal PUT error rather than killing the request path.
 
-            if self._mgmt_s3 is None:
-                self._mgmt_s3 = boto3.client("s3", region_name=self._region)
+        Thread-safe: the bucket is only recorded in ``_ensured_buckets`` after
+        a successful create+lifecycle, and provisioning is serialized by
+        ``_bucket_creation_lock`` so concurrent writers to a new tenant don't
+        race (a fast-path check avoids taking the lock once provisioned)."""
+        bucket = host.split(".", 1)[0]
+        with self._lock:
+            if bucket in self._ensured_buckets:
+                return
+        with self._bucket_creation_lock:
+            with self._lock:  # re-check: another thread may have finished while we waited
+                if bucket in self._ensured_buckets:
+                    return
             try:
-                self._mgmt_s3.create_bucket(
+                import boto3
+                from botocore.exceptions import ClientError
+
+                if self._mgmt_s3 is None:
+                    self._mgmt_s3 = boto3.client(
+                        "s3",
+                        region_name=self._region,
+                        aws_access_key_id=self._config.aws_access_key_id,
+                        aws_secret_access_key=self._config.aws_secret_access_key,
+                    )
+                try:
+                    # us-east-1 is the S3 default region and rejects an explicit
+                    # LocationConstraint; every other region requires it.
+                    if self._region == "us-east-1":
+                        self._mgmt_s3.create_bucket(Bucket=bucket)
+                    else:
+                        self._mgmt_s3.create_bucket(
+                            Bucket=bucket,
+                            CreateBucketConfiguration={
+                                "LocationConstraint": self._region
+                            },
+                        )
+                    logger.info("Auto-provisioned tenant KV bucket %s", bucket)
+                except ClientError as e:
+                    code = e.response.get("Error", {}).get("Code", "")
+                    if code not in ("BucketAlreadyOwnedByYou", "BucketAlreadyExists"):
+                        raise
+                self._mgmt_s3.put_bucket_lifecycle_configuration(
                     Bucket=bucket,
-                    CreateBucketConfiguration={"LocationConstraint": self._region},
+                    LifecycleConfiguration={"Rules": [{
+                        "ID": "kv-cache-ttl", "Filter": {"Prefix": ""},
+                        "Status": "Enabled",
+                        "Expiration": {"Days": self._bucket_ttl_days},
+                    }]},
                 )
-                logger.info("Auto-provisioned tenant KV bucket %s", bucket)
-            except ClientError as e:
-                code = e.response.get("Error", {}).get("Code", "")
-                if code not in ("BucketAlreadyOwnedByYou", "BucketAlreadyExists"):
-                    raise
-            self._mgmt_s3.put_bucket_lifecycle_configuration(
-                Bucket=bucket,
-                LifecycleConfiguration={"Rules": [{
-                    "ID": "kv-cache-ttl", "Filter": {"Prefix": ""}, "Status": "Enabled",
-                    "Expiration": {"Days": self._bucket_ttl_days},
-                }]},
-            )
-        except Exception:
-            logger.warning(
-                "Failed to auto-provision tenant bucket %s", bucket, exc_info=True
-            )
+                # Only mark provisioned after success, so a failed create isn't
+                # cached as "done" (a later write would then 404 forever).
+                with self._lock:
+                    self._ensured_buckets.add(bucket)
+            except Exception:
+                logger.warning(
+                    "Failed to auto-provision tenant bucket %s", bucket, exc_info=True
+                )
 
     def _make_request(
         self, method: str, key_str: str, *, body_stream=None, extra_headers=None
