@@ -5,24 +5,26 @@
 from typing import Any, Optional
 import json
 import sys
-import urllib.error
-import urllib.request
 
 # First Party
+# ``normalize_url`` is imported (and thus still importable from this module
+# for backward compatibility); it now lives in the shared CLI HTTP module.
+from lmcache.cli.http import CliHttpError, normalize_url, request_json
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
 
+__all__ = [
+    "DEFAULT_SALT_SENTINEL",
+    "escape_salt",
+    "http_request",
+    "normalize_url",
+    "unescape_salt",
+]
+
 # The MP HTTP server uses "_default" as a sentinel for the empty-string
 # cache_salt (anonymous / un-salted traffic).
 DEFAULT_SALT_SENTINEL = "_default"
-
-
-def normalize_url(url: str) -> str:
-    """Ensure *url* has an ``http://`` or ``https://`` scheme."""
-    if not url.startswith(("http://", "https://")):
-        url = f"http://{url}"
-    return url.rstrip("/")
 
 
 def escape_salt(salt: str) -> str:
@@ -55,24 +57,18 @@ def http_request(
     Raises:
         SystemExit: On connection error or non-2xx HTTP response.
     """
-    body = None
-    headers: dict[str, str] = {}
-    if data is not None:
-        body = json.dumps(data).encode()
-        headers["Content-Type"] = "application/json"
-
-    req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        try:
-            error_body = json.loads(e.read().decode())
-            msg = error_body.get("error") or error_body.get("message") or str(e)
-        except (json.JSONDecodeError, ValueError, OSError):
-            msg = str(e)
-        logger.error("Server error: %s", msg)
-        sys.exit(1)
-    except urllib.error.URLError as e:
-        logger.error("Cannot reach %s — is the server running? (%s)", url, e.reason)
+        return request_json(method, url, data=data, timeout=timeout)
+    except CliHttpError as exc:
+        if exc.status is not None:
+            msg = f"HTTP Error {exc.status}: {exc.reason}"
+            if exc.body is not None:
+                try:
+                    error_body = json.loads(exc.body)
+                    msg = error_body.get("error") or error_body.get("message") or msg
+                except (json.JSONDecodeError, ValueError, OSError):
+                    pass
+            logger.error("Server error: %s", msg)
+            sys.exit(1)
+        logger.error("Cannot reach %s — is the server running? (%s)", url, exc.reason)
         sys.exit(1)
