@@ -471,10 +471,15 @@ class LocalDiskBackend(StorageBackendInterface):
                     logger.error(
                         "Memory allocation failed during async disk load for key %s. "
                         "CPU staging pool may be exhausted (unpin() not called after "
-                        "a previous retrieve). Returning partial results.",
+                        "a previous retrieve). Aborting and returning empty list.",
                         key,
                     )
-                    return mem_objs
+                    for m in mem_objs:
+                        m.unpin()
+                        m.ref_count_down()
+                    for k in keys[:len(mem_objs)]:
+                        self.dict[k].unpin()
+                    return []
 
                 self.dict[key].pin()
 

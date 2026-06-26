@@ -470,19 +470,38 @@ class TestGetBlockingCachePolicyUpdate:
     def test_batched_get_non_blocking_lock_release_on_allocation_failure(
         self, local_disk_backend: LocalDiskBackend, async_loop
     ) -> None:
-        """Release disk_lock when allocate returns None."""
-        key = create_test_key(104)
-        shape = torch.Size([28, 2, 256, 8, 128])
-        self._inject_key(local_disk_backend, key, shape, torch.bfloat16)
+        """Release disk_lock, unpin and decrement ref count for allocated objects and metadata on allocation failure."""
+        from unittest.mock import MagicMock
 
-        # Mock allocate returning None
+        key1 = create_test_key(104)
+        key2 = create_test_key(105)
+        shape = torch.Size([28, 2, 256, 8, 128])
+        self._inject_key(local_disk_backend, key1, shape, torch.bfloat16)
+        self._inject_key(local_disk_backend, key2, shape, torch.bfloat16)
+
+        allocated_objs = []
+        mock_obj = MagicMock()
+
+        def mock_allocate(*args, **kwargs):
+            if len(allocated_objs) == 0:
+                allocated_objs.append(mock_obj)
+                return mock_obj
+            return None
+
+        # Mock allocate returning first obj and then None
         with patch.object(
-            local_disk_backend.local_cpu_backend, "allocate", return_value=None
+            local_disk_backend.local_cpu_backend, "allocate", side_effect=mock_allocate
         ):
-            coro = local_disk_backend.batched_get_non_blocking("test_lookup", [key])
+            coro = local_disk_backend.batched_get_non_blocking("test_lookup", [key1, key2])
             results = async_loop.run_until_complete(coro)
 
         assert results == []
+        assert len(allocated_objs) == 1
+        mock_obj.pin.assert_called_once()
+        mock_obj.unpin.assert_called_once()
+        mock_obj.ref_count_down.assert_called_once()
+        assert local_disk_backend.dict[key1].pin_count == 0
+        assert local_disk_backend.dict[key2].pin_count == 0
         # Verify lock is released and can be acquired again without blocking
         assert not local_disk_backend.disk_lock.locked()
         local_disk_backend.local_cpu_backend.memory_allocator.close()
