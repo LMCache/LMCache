@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
-from dataclasses import asdict
 import argparse
 import contextlib
 import json
@@ -11,7 +10,6 @@ import time
 # Third Party
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
-from vllm.engine.arg_utils import EngineArgs
 
 # First Party
 from lmcache.integration.vllm.utils import ENGINE_NAME
@@ -76,13 +74,18 @@ def build_llm_with_lmcache(lmcache_connector: str, model: str):
     )
     # Set GPU memory utilization to 0.5 for an A100 GPU with 40GB
     # memory. Update it accordingly for different GPU.
-    llm_args = EngineArgs(
+    #
+    # Pass kwargs directly to LLM() instead of routing through
+    # EngineArgs + asdict(). asdict() emits None for every unset EngineArgs
+    # field, and vLLM >= 0.20 / pydantic v2 rejects None for
+    # CompilationConfig fields like cudagraph_capture_sizes (list) and
+    # pass_config.fuse_minimax_qk_norm (bool). See issue #3438.
+    llm = LLM(
         model=model,
         kv_transfer_config=ktc,
         max_model_len=8000,
         gpu_memory_utilization=0.5,
     )
-    llm = LLM(**asdict(llm_args))
     try:
         yield llm
     finally:

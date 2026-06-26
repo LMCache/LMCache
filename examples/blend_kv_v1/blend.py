@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from dataclasses import asdict
 import argparse
 import contextlib
 import os
@@ -10,7 +9,6 @@ import time
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
-from vllm.engine.arg_utils import EngineArgs
 
 # First Party
 from lmcache.integration.vllm.utils import ENGINE_NAME
@@ -65,7 +63,12 @@ def build_llm_with_lmcache(lmcache_connector: str, model: str):
         kv_role="kv_both",
     )
 
-    llm_args = EngineArgs(
+    # Pass kwargs directly to LLM() instead of routing through
+    # EngineArgs + asdict(). asdict() emits None for every unset EngineArgs
+    # field, and vLLM >= 0.20 / pydantic v2 rejects None for
+    # CompilationConfig fields like cudagraph_capture_sizes (list) and
+    # pass_config.fuse_minimax_qk_norm (bool). See issue #3438.
+    llm = LLM(
         model=model,
         kv_transfer_config=ktc,
         max_model_len=32648,
@@ -73,8 +76,6 @@ def build_llm_with_lmcache(lmcache_connector: str, model: str):
         enable_prefix_caching=False,
         enforce_eager=True,
     )
-
-    llm = LLM(**asdict(llm_args))
     try:
         yield llm
     finally:
