@@ -109,7 +109,7 @@ func BuildCBEngineArgs(spec *lmcachev1alpha1.CacheBlendEngineSpec) []string {
 
 // BuildCBEngineDaemonSet constructs the DaemonSet for the blend_v3 engine of the
 // given CacheBlendEngine. It reuses the shared GPU/security pod-template
-// scaffolding (hostIPC, runtimeClassName=nvidia, privileged, NVIDIA_VISIBLE_DEVICES=all,
+// scaffolding (hostIPC, runtimeClassName=nvidia, seccomp/AppArmor Unconfined, NVIDIA_VISIBLE_DEVICES=all,
 // CPU+memory-only resources with no nvidia.com/gpu claim) so the engine shares the
 // node's GPU via CUDA IPC, and adds the blend-specific server args.
 func BuildCBEngineDaemonSet(engine *lmcachev1alpha1.CacheBlendEngine) *appsv1.DaemonSet {

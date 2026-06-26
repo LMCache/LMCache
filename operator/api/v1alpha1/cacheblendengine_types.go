@@ -95,7 +95,7 @@ type InjectionSpec struct {
 type CacheBlendEngineSpec struct {
 	// gpuVendor selects the GPU vendor. "nvidia" (default) requires the NVIDIA
 	// GPU Operator's "nvidia" RuntimeClass; "amd" runs on the default container
-	// runtime with privileged: true.
+	// runtime with seccomp/AppArmor Unconfined security context.
 	// +optional
 	// +kubebuilder:default="nvidia"
 	// +kubebuilder:validation:Enum=nvidia;amd

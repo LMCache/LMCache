@@ -6,7 +6,7 @@ See [DESIGN.md](DESIGN.md) for architecture details, reconciliation logic, and C
 
 ## Prerequisites
 
-- Kubernetes 1.20+
+- Kubernetes 1.30+ (`securityContext.appArmorProfile` used for CUDA IPC is not available before 1.30)
 - `kubectl` configured to access your cluster
 - For NVIDIA GPUs (default): NVIDIA GPU Operator with the `nvidia` RuntimeClass available on GPU nodes
 - For AMD GPUs: set `spec.gpuVendor: amd` in your `LMCacheEngine` (see [AMD GPUs (ROCm)](#amd-gpus-rocm) below)
@@ -14,7 +14,7 @@ See [DESIGN.md](DESIGN.md) for architecture details, reconciliation logic, and C
 - (CacheBlend only) [cert-manager](https://cert-manager.io) for the injection webhook's serving cert — see [CacheBlend](#cacheblend) below
 
 > [!IMPORTANT]
-> By default the operator runs LMCache pods with `runtimeClassName: nvidia` and `privileged: true` to gain GPU visibility without consuming GPU resources via the device plugin. This allows the serving engine (e.g., vLLM) to claim all GPUs on the node. Clusters using Pod Security Standards must allow the `privileged` profile for the LMCache namespace.
+> By default the operator runs LMCache pods with `runtimeClassName: nvidia`, `hostIPC: true`, and `seccomp`/`AppArmor` set to `Unconfined` (instead of `privileged: true`) to gain GPU visibility without consuming GPU resources via the device plugin. This allows the serving engine (e.g., vLLM) to claim all GPUs on the node. Clusters using Pod Security Standards must allow the `privileged` PSS profile for the LMCache namespace (required by `hostIPC: true`).
 >
 > On AMD ROCm clusters, `spec.gpuVendor: amd` omits `runtimeClassName` and skips NVIDIA-specific env vars.
 
@@ -53,7 +53,7 @@ The minimal CR just needs `l1.sizeGB`. Apply the sample (a fully-commented field
 kubectl apply -f config/samples/lmcache_v1alpha1_lmcacheengine.yaml
 ```
 
-The operator automatically handles `hostIPC`, GPU visibility (`runtimeClassName: nvidia`, `privileged: true`), node-local service routing, resource sizing, and Prometheus metrics — see [DESIGN.md](DESIGN.md) for details.
+The operator automatically handles `hostIPC`, GPU visibility (`runtimeClassName: nvidia`, `seccomp`/`AppArmor` Unconfined), node-local service routing, resource sizing, and Prometheus metrics — see [DESIGN.md](DESIGN.md) for details.
 
 ### 3. Connect vLLM to LMCache
 
@@ -139,7 +139,7 @@ image ENTRYPOINT — a `sh -c` wrapper is skipped). Editable samples:
 > (`kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml`).
 > If Pod Security Standards are enforced, label the engine's and the vLLM pod's
 > namespaces `pod-security.kubernetes.io/enforce=privileged` — the webhook injects
-> `hostIPC`/`privileged`, which `baseline`/`restricted` reject.
+> `hostIPC: true`, which `baseline`/`restricted` reject.
 
 > [!IMPORTANT]
 > CacheBlend is still in early stage development and under heavy testing. Its

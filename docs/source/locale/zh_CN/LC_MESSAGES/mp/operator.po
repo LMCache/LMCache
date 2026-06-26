@@ -98,8 +98,8 @@ msgid "Prerequisites"
 msgstr "先决条件"
 
 #: ../../source/mp/operator.rst:41
-msgid "Kubernetes 1.20+"
-msgstr "Kubernetes 1.20+"
+msgid "Kubernetes 1.30+ (``securityContext.appArmorProfile`` used for CUDA IPC is not available before 1.30)"
+msgstr "Kubernetes 1.30+（``securityContext.appArmorProfile`` 用于 CUDA IPC，1.30 以下版本不支持此字段）"
 
 #: ../../source/mp/operator.rst:42
 msgid "``kubectl`` configured to access your cluster"

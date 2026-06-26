@@ -125,9 +125,15 @@ func TestBuildCBEngineDaemonSet_GPUAndSecurity(t *testing.T) {
 	}
 	c := podSpec.Containers[0]
 
-	// privileged: true.
-	if c.SecurityContext == nil || c.SecurityContext.Privileged == nil || !*c.SecurityContext.Privileged {
-		t.Fatal("expected privileged=true")
+	// seccomp + AppArmor Unconfined instead of privileged: true.
+	if c.SecurityContext == nil ||
+		c.SecurityContext.SeccompProfile == nil ||
+		c.SecurityContext.SeccompProfile.Type != corev1.SeccompProfileTypeUnconfined {
+		t.Fatal("expected seccompProfile=Unconfined")
+	}
+	if c.SecurityContext.AppArmorProfile == nil ||
+		c.SecurityContext.AppArmorProfile.Type != corev1.AppArmorProfileTypeUnconfined {
+		t.Fatal("expected appArmorProfile=Unconfined")
 	}
 
 	// NVIDIA env exposes all GPUs without a device-plugin claim.
@@ -204,7 +210,7 @@ func TestBuildCBEngineDaemonSet_AMDNoRuntimeClass(t *testing.T) {
 	if podSpec.RuntimeClassName != nil {
 		t.Fatalf("expected nil RuntimeClassName for AMD, got %q", *podSpec.RuntimeClassName)
 	}
-	// Still privileged + hostIPC.
+	// Still seccomp/AppArmor Unconfined + hostIPC.
 	if !podSpec.HostIPC {
 		t.Fatal("expected HostIPC=true even for AMD")
 	}

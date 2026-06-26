@@ -51,9 +51,9 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 
 // buildDaemonSetCore constructs the DaemonSet shared by the LMCacheEngine and
 // CacheBlendEngine controllers. It is the single source of truth for the
-// GPU/security pod-template scaffolding (hostIPC, runtimeClassName, privileged,
-// NVIDIA_VISIBLE_DEVICES, resources without a device-plugin GPU claim) so those
-// settings cannot drift between the two engines.
+// GPU/security pod-template scaffolding (hostIPC, runtimeClassName,
+// NVIDIA_VISIBLE_DEVICES, seccomp/AppArmor profiles, resources without a
+// device-plugin GPU claim) so those settings cannot drift between the two engines.
 //
 // Parameters:
 //   - name, namespace: the owning object's identity, used for labels and metadata.
@@ -80,8 +80,6 @@ func buildDaemonSetCore(
 		rc := nvidiaRuntimeClass
 		runtimeClassName = &rc
 	}
-	privileged := true
-
 	serverPort := derefInt32(getServerPort(spec), 5555)
 	imgRepo := defaultImageRepo
 	imgTag := "latest"
@@ -277,7 +275,12 @@ func buildDaemonSetCore(
 							Env:             envVars,
 							Resources:       ComputeResources(spec),
 							SecurityContext: &corev1.SecurityContext{
-								Privileged: &privileged,
+								SeccompProfile: &corev1.SeccompProfile{
+									Type: corev1.SeccompProfileTypeUnconfined,
+								},
+								AppArmorProfile: &corev1.AppArmorProfile{
+									Type: corev1.AppArmorProfileTypeUnconfined,
+								},
 							},
 							VolumeMounts:   volumeMounts,
 							StartupProbe:   startupProbe,

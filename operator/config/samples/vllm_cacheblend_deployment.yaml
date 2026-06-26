@@ -13,7 +13,7 @@
 #   1. A CacheBlendEngine named below exists IN THIS NAMESPACE and is reconciled
 #      (its `<name>-connection` ConfigMap exists — the webhook reads it).
 #   2. This namespace is labeled pod-security.kubernetes.io/enforce=privileged
-#      (the injected hostIPC/privileged is rejected by baseline/restricted PSS).
+#      (the injected hostIPC=true is rejected by baseline/restricted PSS).
 #   3. The vLLM container launches via the image ENTRYPOINT (["vllm","serve"])
 #      with args ONLY. Do NOT use `command: ["/bin/sh","-c", ...]` — a command
 #      override makes the webhook SKIP injection (appended args can't reach

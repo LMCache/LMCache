@@ -38,7 +38,7 @@ eliminates:
 Prerequisites
 -------------
 
-- Kubernetes 1.20+
+- Kubernetes 1.30+ (``securityContext.appArmorProfile`` used for CUDA IPC is not available before 1.30)
 - ``kubectl`` configured to access your cluster
 - (Optional) `Prometheus Operator <https://github.com/prometheus-operator/prometheus-operator>`_
   for ServiceMonitor support

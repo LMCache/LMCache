@@ -160,7 +160,7 @@ var _ = Describe("LMCacheEngine smoke (no-GPU)", Ordered, func() {
 })
 
 // assertDaemonSetShape verifies the operator's auto-injected pod-level
-// settings: hostIPC, runtimeClassName=nvidia, container privileged
+// settings: hostIPC, runtimeClassName=nvidia, seccomp/AppArmor Unconfined
 // security context, --host 0.0.0.0 always present in container args,
 // and the absence of any /dev/shm volume mount that would shadow the
 // host's /dev/shm and break CUDA IPC.
@@ -174,8 +174,10 @@ func assertDaemonSetShape(ds *appsv1.DaemonSet, expectedServerPort int32) {
 
 	c := pod.Containers[0]
 	Expect(c.SecurityContext).NotTo(BeNil(), "container.securityContext must be set")
-	Expect(c.SecurityContext.Privileged).NotTo(BeNil())
-	Expect(*c.SecurityContext.Privileged).To(BeTrue(), "container.privileged must be true")
+	Expect(c.SecurityContext.SeccompProfile).NotTo(BeNil(), "container.seccompProfile must be set")
+	Expect(c.SecurityContext.SeccompProfile.Type).To(Equal(corev1.SeccompProfileTypeUnconfined), "container.seccompProfile must be Unconfined")
+	Expect(c.SecurityContext.AppArmorProfile).NotTo(BeNil(), "container.appArmorProfile must be set")
+	Expect(c.SecurityContext.AppArmorProfile.Type).To(Equal(corev1.AppArmorProfileTypeUnconfined), "container.appArmorProfile must be Unconfined")
 	Expect(c.Args).To(ContainElements("--host", "0.0.0.0"))
 	Expect(argValue(c.Args, "--port")).To(Equal(fmt.Sprintf("%d", expectedServerPort)))
 
