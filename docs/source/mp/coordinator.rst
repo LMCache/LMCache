@@ -23,9 +23,9 @@ Expected log output:
 
 The CLI accepts ``--host``, ``--port``, ``--instance-timeout``,
 ``--health-check-interval``, ``--eviction-check-interval``,
-``--eviction-ratio``, ``--trigger-watermark``, ``--blend-chunk-size``, and
-``--blend-probe-stride``; any flag overrides the matching environment variable
-below. See :doc:`/cli/coordinator` for details.
+``--eviction-ratio``, ``--trigger-watermark``, ``--blend-chunk-size``,
+``--blend-probe-stride``, and ``--timeout-keep-alive``; any flag overrides the
+matching environment variable below. See :doc:`/cli/coordinator` for details.
 Equivalently, the coordinator can still be launched as a module with
 ``python3 -m lmcache.v1.mp_coordinator``.
 
@@ -73,6 +73,13 @@ variables:
      - ``1``
      - Positions between CacheBlend match probes. ``1`` probes every offset
        for full recall.
+   * - ``LMCACHE_MP_COORDINATOR_TIMEOUT_KEEP_ALIVE``
+     - ``10``
+     - Seconds the HTTP server keeps idle connections open before closing
+       them. Must be greater than the MP servers' heartbeat interval
+       (default ``5``), otherwise heartbeat requests may hit a closing
+       connection and fail with ``Server disconnected without sending a
+       response``.
    * - ``LMCACHE_MP_COORDINATOR_ENABLE_STARTUP_RESYNC``
      - ``True``
      - When ``True``, the coordinator runs a one-shot L2 resync on
