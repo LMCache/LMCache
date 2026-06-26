@@ -470,8 +470,9 @@ class TestGetBlockingCachePolicyUpdate:
     def test_batched_get_non_blocking_lock_release_on_allocation_failure(
         self, local_disk_backend: LocalDiskBackend, async_loop
     ) -> None:
-        """Release disk_lock, unpin and decrement ref count for allocated objects and metadata on allocation failure."""
+        """Release disk_lock, unpin and decrement ref count."""
         from unittest.mock import MagicMock
+        from typing import Any
 
         key1 = create_test_key(104)
         key2 = create_test_key(105)
@@ -479,7 +480,7 @@ class TestGetBlockingCachePolicyUpdate:
         self._inject_key(local_disk_backend, key1, shape, torch.bfloat16)
         self._inject_key(local_disk_backend, key2, shape, torch.bfloat16)
 
-        allocated_objs = []
+        allocated_objs: list[Any] = []
         mock_obj = MagicMock()
 
         def mock_allocate(*args, **kwargs):
@@ -492,7 +493,9 @@ class TestGetBlockingCachePolicyUpdate:
         with patch.object(
             local_disk_backend.local_cpu_backend, "allocate", side_effect=mock_allocate
         ):
-            coro = local_disk_backend.batched_get_non_blocking("test_lookup", [key1, key2])
+            coro = local_disk_backend.batched_get_non_blocking(
+                "test_lookup", [key1, key2]
+            )
             results = async_loop.run_until_complete(coro)
 
         assert results == []
