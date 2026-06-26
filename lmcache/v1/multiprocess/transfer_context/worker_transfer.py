@@ -324,6 +324,19 @@ class EngineDrivenTransferContext(TransferContext):
         self._layout_hints: LayoutHints | None = None
         self._engine_kv_format: Any = None
 
+    @property
+    def engine_driven_context(self) -> EngineDrivenContext:
+        """Return the underlying SHM/pickle context created by ``register``.
+
+        Raises:
+            RuntimeError: If accessed before ``register`` has run.
+        """
+        if self._engine_driven_context is None:
+            raise RuntimeError(
+                "EngineDrivenTransferContext is not registered, call register() first."
+            )
+        return self._engine_driven_context
+
     def register(
         self,
         instance_id: int,

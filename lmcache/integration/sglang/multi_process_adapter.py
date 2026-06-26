@@ -30,12 +30,12 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.multiprocess.custom_types import (
-    CudaIPCWrapper,
     IPCCacheServerKey,
     KVCache,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
 
 logger = init_logger(__name__)
 

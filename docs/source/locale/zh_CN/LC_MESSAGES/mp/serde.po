@@ -29,11 +29,12 @@ msgid ""
 " its way to and from an L2 adapter. Typical uses: quantization (shrink "
 "storage footprint), compression, encryption."
 msgstr ""
-"LMCache 支持 **按适配器独立配置的 serde**\\ ，在 KV Cache 数据进出 L2 适配器时对其进行转换。典型用途：量化（缩小存储占用）、压缩、加密。"
+"LMCache 支持 **每个适配器的序列化/反序列化**，在 KV Cache 数据与 L2 "
+"适配器之间传输时进行转换。典型用途：量化（缩小存储占用）、压缩、加密。"
 
 #: ../../source/mp/serde.rst:14
 msgid "When to use serde"
-msgstr "何时使用 serde"
+msgstr "何时使用序列化与反序列化"
 
 #: ../../source/mp/serde.rst:16
 msgid ""
@@ -61,8 +62,8 @@ msgid ""
 "another stores raw bytes. When omitted, the adapter behaves exactly as if"
 " serde did not exist (no extra allocations, no extra threads)."
 msgstr ""
-"Serde 是 **按适配器可选启用** 的：一个 ``--l2-adapter`` 可以使用 "
-"fp8，而另一个则存储原始字节。若省略，适配器行为与未使用 serde 时完全一致（无额外内存分配，无额外线程）。"
+"Serde 是 **按适配器选择** 的：一个 ``--l2-adapter`` 可以使用 "
+"fp8，而另一个则存储原始字节。当省略时，适配器的行为就像 serde 不存在一样（没有额外的分配，没有额外的线程）。"
 
 #: ../../source/mp/serde.rst:31
 msgid "Configuring serde on an L2 adapter"
@@ -74,7 +75,8 @@ msgid ""
 "``type`` field selects a registered serde; remaining keys are forwarded "
 "to the serde factory."
 msgstr ""
-"向任何 ``--l2-adapter`` JSON 规范添加一个 ``\"serde\"`` 子字典。\\ ``type`` 字段选择一个已注册的 serde；其余键将转发到 serde 工厂。"
+"向任何 ``--l2-adapter`` JSON 规范添加一个 ``\"serde\"`` 子字典。``type`` 字段选择一个已注册的 "
+"serde；其余键将转发到 serde 工厂。"
 
 #: ../../source/mp/serde.rst:48
 msgid "Built-in serde types"
@@ -107,22 +109,22 @@ msgid ""
 "``fp8_dtype`` (default ``float8_e4m3fn``; also accepts ``float8_e5m2``), "
 "``max_workers`` (thread pool size, default 1)"
 msgstr ""
-"``fp8_dtype``\\ （默认 ``float8_e4m3fn``\\ ；也接受 ``float8_e5m2``\\ ），\\ ``max_workers``\\ （线程池大小，默认 1）"
+"``fp8_dtype``（默认 ``float8_e4m3fn``；也接受 "
+"``float8_e5m2``），``max_workers``（线程池大小，默认 1）"
 
 #: ../../source/mp/serde.rst:64
 msgid "Writing a custom serde"
-msgstr "编写自定义 serde"
+msgstr "编写自定义序列化/反序列化"
 
 #: ../../source/mp/serde.rst:66
 msgid ""
 "Implement the two sync ABCs (``Serializer``, ``Deserializer``) with your "
 "transform logic, then register a factory keyed on a name you pick:"
-msgstr ""
-"实现两个同步 ABC（\\ ``Serializer``\\ ，\\ ``Deserializer``\\ ），并使用您的转换逻辑，然后注册一个以您选择的名称为键的工厂："
+msgstr "实现两个同步 ABC（``Serializer``，``Deserializer``），并使用您的转换逻辑，然后注册一个以您选择的名称为键的工厂："
 
 #: ../../source/mp/serde.rst:98
 msgid "Reference it from your adapter config:"
-msgstr "从您的适配器配置中引用它："
+msgstr "从你的适配器配置中引用它："
 
 #: ../../source/mp/serde.rst:106
 msgid "Notes"
@@ -135,7 +137,8 @@ msgid ""
 "directly in the estimate (e.g., the built-in fp8 serializer returns ``1.5"
 " * num_elements``)."
 msgstr ""
-"**缓冲区大小。** ``estimate_serialized_size(layout)`` 必须返回实际序列化输出的上限——安全余量应直接计入估算值（例如，内置的 fp8 序列化器返回 ``1.5 * num_elements``\\ ）。"
+"**缓冲区大小。** ``estimate_serialized_size(layout)`` 必须返回实际序列化输出的上限 — "
+"直接在估算中包含任何安全边际（例如，内置的 fp8 序列化器返回 ``1.5 * num_elements``）。"
 
 #: ../../source/mp/serde.rst:112
 msgid ""
@@ -145,7 +148,7 @@ msgid ""
 "automatically."
 msgstr ""
 "**失败处理。** "
-"如果任何步骤失败（序列化、存储、加载或反序列化），整个提交的批次均报告为失败——批次内的部分成功不会对外呈现。失败的键会自动清理。"
+"如果任何步骤失败（序列化、存储、加载或反序列化），则整个提交的批次将被报告为失败——在一个批次内的部分成功不会被显示。失败的键会自动清理。"
 
 #: ../../source/mp/serde.rst:116
 msgid ""
@@ -181,7 +184,7 @@ msgstr "压缩方法"
 msgid ""
 "Higher-level KV cache compression methods layered on top of the per-"
 "adapter serde mechanism:"
-msgstr "构建于按适配器 serde 机制之上的高阶 KV Cache 压缩方法："
+msgstr "基于每个适配器序列化机制之上的更高级别 KV Cache 压缩方法："
 
 #~ msgid "L2 Serde (Serialization / Deserialization)"
 #~ msgstr "L2 序列化（Serialization / Deserialization）"

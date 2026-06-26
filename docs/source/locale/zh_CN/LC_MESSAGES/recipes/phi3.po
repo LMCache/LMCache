@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"POT-Creation-Date: 2026-06-22 11:07+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -20,8 +20,8 @@ msgstr ""
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/recipes/phi3.rst:4
-msgid "Phi3ForCausalLM"
-msgstr "Phi3ForCausalLM"
+msgid "Phi-3 / Phi-4"
+msgstr "Phi-3 / Phi-4"
 
 #: ../../source/recipes/phi3.rst:7
 msgid "Validated models"
@@ -59,7 +59,7 @@ msgstr ""
 
 #: ../../source/recipes/phi3.rst:22
 msgid "**Status:** Validated with LMCache."
-msgstr "**状态：** 已通过 LMCache 验证。"
+msgstr "**状态:** 已通过 LMCache 验证。"
 
 #: ../../source/recipes/phi3.rst:24
 msgid "Start the LMCache MP server:"
@@ -67,7 +67,7 @@ msgstr "启动 LMCache MP 服务器："
 
 #: ../../source/recipes/phi3.rst:32
 msgid "Start vLLM with the LMCache MP connector:"
-msgstr "使用 LMCache MP 连接器启动 vLLM："
+msgstr "启动 vLLM 与 LMCache MP 连接器："
 
 #: ../../source/recipes/phi3.rst:34
 msgid "**Phi-4-mini-instruct** (1 GPU):"
@@ -82,7 +82,9 @@ msgid ""
 "Adjust ``--tensor-parallel-size`` to match your hardware. For the generic"
 " LMCache + vLLM wiring (ports, remote hosts), see "
 ":doc:`../getting_started/quickstart`."
-msgstr "调整 ``--tensor-parallel-size`` 以匹配您的硬件。有关通用 LMCache + vLLM 连接（端口、远程主机），请参见 :doc:`../getting_started/quickstart`。"
+msgstr ""
+"调整 ``--tensor-parallel-size`` 以匹配您的硬件。有关通用 LMCache + vLLM 连接（端口、远程主机），请参见"
+" :doc:`../getting_started/quickstart`。"
 
 #: ../../source/recipes/phi3.rst
 msgid "SGLang"
@@ -100,7 +102,9 @@ msgstr "TRT-LLM"
 msgid ""
 "**Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-"
 "LLM + LMCache setup."
-msgstr "**状态：** 支持。请参见 :doc:`../getting_started/quickstart` 了解 TRT-LLM + LMCache 的设置方法。"
+msgstr ""
+"**状态：** 支持。请参见 :doc:`../getting_started/quickstart` 以获取 TRT-LLM + LMCache"
+" 的设置。"
 
 #: ../../source/recipes/phi3.rst:71
 msgid "CacheBlend support"
@@ -140,4 +144,7 @@ msgstr "没有已知的问题。"
 
 #~ msgid "**Status:** Not supported. LMCache TRT-LLM integration is in progress."
 #~ msgstr "**状态：** 不支持。LMCache TRT-LLM 集成正在进行中。"
+
+#~ msgid "Phi3ForCausalLM"
+#~ msgstr "Phi3ForCausalLM"
 

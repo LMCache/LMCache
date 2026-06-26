@@ -49,8 +49,8 @@ msgid ""
 "better, exposes management/observability endpoints, and supports sharing "
 "one cache across multiple engine instances."
 msgstr ""
-"**MP 模式（多进程）** -- **推荐。** LMCache 作为独立服务运行，vLLM 通过 "
-"``LMCacheMPConnector`` 连接。扩展性更好，提供管理与可观察性端点，并支持在多个引擎实例之间共享同一缓存。"
+"**多进程 (MP) 模式** -- **推荐。** LMCache 作为独立服务运行，vLLM 通过 "
+"``LMCacheMPConnector`` 连接。扩展性更好，暴露管理/可观察性端点，并支持在多个引擎实例之间共享一个缓存。"
 
 #: ../../source/getting_started/quickstart.rst:27
 msgid ""
@@ -76,18 +76,17 @@ msgid ""
 "frontend (default **8080**) serves the management and metrics endpoints. "
 "See :doc:`../mp/configuration` for the full list of ``lmcache server`` "
 "and connector options."
-msgstr ""
-"ZMQ 端口（默认 **5555**\\ ）接受来自 vLLM 的连接；HTTP 前端（默认 **8080**\\ ）提供管理和指标端点。有关 ``lmcache server`` 和连接器选项的完整列表，请参见 :doc:`../mp/configuration`。"
+msgstr "ZMQ 端口（默认 **5555**）接受来自 vLLM 的连接；HTTP 前端（默认 **8080**）提供管理和指标端点。有关 ``lmcache server`` 和连接器选项的完整列表，请参见 :doc:`../mp/configuration`。"
 
 #: ../../source/getting_started/quickstart.rst:52
 msgid "Start vLLM with the MP connector in a separate terminal:"
-msgstr "在另一个终端中使用 MP 连接器启动 vLLM："
+msgstr "在单独的终端中启动 vLLM 与 MP 连接器："
 
 #: ../../source/getting_started/quickstart.rst:61
 msgid ""
 "**Where does** ``LMCacheMPConnector`` **resolve to?** This depends on "
 "your vLLM version:"
-msgstr "**``LMCacheMPConnector`` 解析到哪里？** 这取决于您的 vLLM 版本："
+msgstr "**``LMCacheMPConnector`` **解析到哪里？** 这取决于您的 vLLM 版本："
 
 #: ../../source/getting_started/quickstart.rst:63
 msgid ""
@@ -96,7 +95,10 @@ msgid ""
 "``vllm.distributed.kv_transfer.kv_connector.v1.LMCacheMPConnector``; "
 "there is no way to redirect it to the LMCache-shipped implementation."
 msgstr ""
-"**vLLM < 0.20.0** -- ``\"kv_connector\":\"LMCacheMPConnector\"`` 始终解析为 vLLM 内置的 ``vllm.distributed.kv_transfer.kv_connector.v1.LMCacheMPConnector``\\ ；无法将其重定向到 LMCache 提供的实现。"
+"**vLLM < 0.20.0** -- ``\"kv_connector\":\"LMCacheMPConnector\"`` 始终解析为 "
+"vLLM 内置的 "
+"``vllm.distributed.kv_transfer.kv_connector.v1.LMCacheMPConnector``；无法将其重定向到"
+" LMCache 提供的实现。"
 
 #: ../../source/getting_started/quickstart.rst:68
 msgid ""
@@ -195,7 +197,7 @@ msgstr ""
 msgid ""
 "**You should see LMCache logs like this** -- in-process mode emits the "
 "logs inline with the vLLM engine core."
-msgstr "**您应该看到类似这样的 LMCache 日志** -- 进程内模式会将日志与 vLLM 引擎核心内联输出。"
+msgstr "**您应该看到类似于 LMCache 的日志** -- 进程模式会将日志与 vLLM 引擎核心一起内联输出。"
 
 #: ../../source/getting_started/quickstart.rst:202
 msgid "**First request** -- prompt is offloaded to LMCache:"
@@ -207,8 +209,7 @@ msgstr "**第二个请求** -- 命中缓存并存储新的尾部："
 
 #: ../../source/getting_started/quickstart.rst:217
 msgid "**Total tokens 32**: The new prompt has 32 tokens after tokenization."
-msgstr ""
-"**总令牌 32**\\ ：新提示在分词后有 32 个令牌。"
+msgstr "**总令牌 32**：新提示在分词后有 32 个令牌。"
 
 #: ../../source/getting_started/quickstart.rst:218
 msgid ""
@@ -235,8 +236,7 @@ msgstr ""
 msgid ""
 "**Stored another 8 tokens**: The new 8 tokens form a full chunk and are "
 "stored for future reuse."
-msgstr ""
-"**存储另外 8 个令牌**\\ ：这 8 个新令牌形成一个完整的块，并被存储以供将来重用。"
+msgstr "**存储另外 8 个令牌**：这 8 个新令牌形成一个完整的块，并被存储以供将来重用。"
 
 #: ../../source/getting_started/quickstart.rst
 msgid "SGLang"
@@ -275,7 +275,8 @@ msgid ""
 "**Total tokens 140**: SGLang stores KV cache for both prefill and decode "
 "tokens together, so total = 40 prompt + 100 generated = 140 tokens."
 msgstr ""
-"**总令牌 140**\\ ：SGLang 将 KV Cache 存储用于 Prefill 和解码令牌，因此总计 = 40 提示 + 100 生成 = 140 令牌。"
+"**总令牌 140**：SGLang 将 KV Cache 存储用于 Prefill 和解码令牌，因此总计 = 40 提示 + 100 生成 = "
+"140 令牌。"
 
 #: ../../source/getting_started/quickstart.rst:306
 msgid ""
@@ -297,8 +298,7 @@ msgstr ""
 msgid ""
 "**New tokens: 10**: Only 10 prompt tokens need prefill computation (40 "
 "prompt - 30 cached = 10)."
-msgstr ""
-"**新令牌：10**\\ ：只有 10 个提示令牌需要进行 Prefill 计算（40 个提示 - 30 个缓存 = 10）。"
+msgstr "**新令牌：10**：只有 10 个提示令牌需要进行 Prefill 计算（40 个提示 - 30 个缓存 = 10）。"
 
 #: ../../source/getting_started/quickstart.rst:309
 msgid ""
@@ -306,7 +306,8 @@ msgid ""
 "LMCache and skipped. Of the remaining 116 tokens, 112 (14 full 8-token "
 "chunks) are stored."
 msgstr ""
-"**140 个中存储了 112 个**\\ ：24 个令牌（3 个完整块）已在 LMCache 中，予以跳过。在剩余的 116 个令牌中，112 个（14 个完整的 8 令牌块）被存储。"
+"**存储 112 个中的 140 个**：24 个令牌（3 个完整块）已经在 LMCache 中并被跳过。在剩余的 116 个令牌中，112 "
+"个（14 个完整的 8 令牌块）被存储。"
 
 #: ../../source/getting_started/quickstart.rst
 msgid "TensorRT-LLM"
@@ -359,8 +360,7 @@ msgstr "通过环境变量配置 LMCache："
 
 #: ../../source/getting_started/quickstart.rst:363
 msgid "Build the TRT-LLM ``LLM`` with ``connector: lmcache``:"
-msgstr ""
-"使用 ``connector: lmcache`` 构建 TRT-LLM ``LLM``\\ ："
+msgstr "构建 TRT-LLM ``LLM`` 与 ``connector: lmcache``："
 
 #: ../../source/getting_started/quickstart.rst
 msgid "MP mode"
@@ -372,7 +372,8 @@ msgid ""
 "depends on a stable ``hash()``, and the server and client must agree on "
 "the seed."
 msgstr ""
-"``PYTHONHASHSEED=0`` 必须在 **两个** 终端中设置 -- 块哈希依赖于稳定的 ``hash()``\\ ，服务器端与客户端必须使用相同的种子值。"
+"``PYTHONHASHSEED=0`` 必须在 **两个** 终端中设置 -- 块哈希依赖于稳定的 ``hash()``, "
+"服务器和客户端必须就种子达成一致。"
 
 #: ../../source/getting_started/quickstart.rst:397
 msgid "In a separate terminal, point TRT-LLM at the server via ``server_url``:"
@@ -389,7 +390,9 @@ msgid ""
 "individual ``LMCACHE_*`` environment variables. See "
 ":doc:`../api_reference/configurations` for all options."
 msgstr ""
-"TRT-LLM 适配器以与 vLLM 适配器相同的方式读取 :class:`LMCacheEngineConfig`：对于 YAML 文件使用 ``LMCACHE_CONFIG_FILE``\\ ，否则使用单独的 ``LMCACHE_*`` 环境变量。有关所有选项，请参见 :doc:`../api_reference/configurations`。"
+"TRT-LLM 适配器以与 vLLM 适配器相同的方式读取 :class:`LMCacheEngineConfig`：对于 YAML 文件使用 "
+"``LMCACHE_CONFIG_FILE``，否则使用单独的 ``LMCACHE_*`` 环境变量。有关所有选项，请参见 "
+":doc:`../api_reference/configurations`。"
 
 #: ../../source/getting_started/quickstart.rst:434
 msgid ""
@@ -405,8 +408,7 @@ msgstr "更多 MP 服务器选项"
 msgid ""
 "The vLLM MP example above runs ``lmcache server`` locally on the default "
 "ports. Common variations:"
-msgstr ""
-"上述的 vLLM MP 示例在默认端口上本地运行 ``lmcache server``\\ 。常见变体："
+msgstr "上述的 vLLM MP 示例在默认端口上本地运行 ``lmcache server``。常见变体："
 
 #: ../../source/getting_started/quickstart.rst:442
 msgid ""
@@ -414,8 +416,7 @@ msgid ""
 "``localhost:5555``. To use a different port, or a server on another host,"
 " pass ``lmcache.mp.host`` / ``lmcache.mp.port`` in "
 "``kv_connector_extra_config``:"
-msgstr ""
-"**自定义端口或远程主机** -- 默认情况下，连接器与 ``localhost:5555`` 通信。要使用不同的端口或其他主机上的服务器，请在 ``kv_connector_extra_config`` 中传递 ``lmcache.mp.host`` / ``lmcache.mp.port``\\ ："
+msgstr "**自定义端口或远程主机** -- 默认情况下，连接器与 ``localhost:5555`` 通信。要使用不同的端口或其他主机上的服务器，请在 ``kv_connector_extra_config`` 中传递 ``lmcache.mp.host`` / ``lmcache.mp.port``："
 
 #: ../../source/getting_started/quickstart.rst:452
 msgid ""
@@ -423,8 +424,7 @@ msgid ""
 "shares KV tensors with vLLM over POSIX shared memory. Start ``lmcache "
 "server`` normally, then set ``lmcache.mp.mp_transfer_mode=engine_driven``"
 " on the vLLM side to enable the zero-copy SHM path."
-msgstr ""
-"**仅 CPU（无 GPU）** -- 服务器使用 ``StubCPUDevice`` 运行，并通过 POSIX 共享内存与 vLLM 共享 KV 张量。正常启动 ``lmcache server``\\ ，然后在 vLLM 端设置 ``lmcache.mp.mp_transfer_mode=engine_driven`` 以启用零拷贝 SHM 路径。"
+msgstr "**仅 CPU（无 GPU）** -- 服务器使用 ``StubCPUDevice`` 运行，并通过 POSIX 共享内存与 vLLM 共享 KV 张量。正常启动 ``lmcache server``，然后在 vLLM 端设置 ``lmcache.mp.mp_transfer_mode=engine_driven`` 以启用零拷贝 SHM 路径。"
 
 #: ../../source/getting_started/quickstart.rst:457
 msgid "**Docker** -- see :doc:`../production/docker_deployment`."
@@ -434,8 +434,7 @@ msgstr "**Docker** -- 请参阅 :doc:`../production/docker_deployment`。"
 msgid ""
 "**HTTP management endpoints** (health, clear-cache, status) -- see "
 ":doc:`../mp/http_api`."
-msgstr ""
-"**HTTP 管理端点**\\ （健康检查、清除缓存、状态）-- 请参见 :doc:`../mp/http_api`。"
+msgstr "**HTTP 管理端点**（健康检查、清除缓存、状态）-- 请参见 :doc:`../mp/http_api`。"
 
 #: ../../source/getting_started/quickstart.rst:463
 msgid "Next Steps"
@@ -446,15 +445,13 @@ msgid ""
 "**Performance Testing**: Try the :doc:`benchmarking` section to "
 "experience LMCache's performance benefits with more comprehensive "
 "examples"
-msgstr ""
-"**性能测试**\\ ：尝试 :doc:`benchmarking` 部分，以体验 LMCache 的性能优势和更全面的示例。"
+msgstr "**性能测试**：尝试 :doc:`benchmarking` 部分，以体验 LMCache 的性能优势和更全面的示例。"
 
 #: ../../source/getting_started/quickstart.rst:466
 msgid ""
 "**Production**: Deploy LMCache with Docker or Kubernetes, plus "
 "observability and tuning -- see :doc:`../mp/deployment`"
-msgstr ""
-"**生产部署**\\ ：使用 Docker 或 Kubernetes 部署 LMCache，并启用可观察性与调优 -- 请参阅 :doc:`../mp/deployment`。"
+msgstr "**生产**：使用 Docker 或 Kubernetes 部署 LMCache，并进行可观察性和调优 -- 请参阅 :doc:`../mp/deployment`。"
 
 #~ msgid ""
 #~ "**More Examples**: Explore the "

@@ -813,7 +813,6 @@ def test_vllm_paged_connector_v2_to_gpu_bench(benchmark):
 
 def _create_metadata(use_mla, kv_caches, engine_kv_format):
     # First Party
-    from lmcache.v1.gpu_connector.utils import get_num_blocks
     from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 
     num_heads = 1 if use_mla else 8
@@ -830,7 +829,6 @@ def _create_metadata(use_mla, kv_caches, engine_kv_format):
     kv_list = list(kv_caches.values())
     metadata.kv_layer_groups_manager = KVLayerGroupsManager(
         kv_list,
-        engine_kv_format=engine_kv_format,
-        num_blocks=get_num_blocks(kv_list, engine_kv_format),
+        engine_kv_formats=[engine_kv_format] * len(kv_list),
     )
     return metadata
