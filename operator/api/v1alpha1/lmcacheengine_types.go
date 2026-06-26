@@ -107,10 +107,10 @@ type L1BackendSpec struct {
 
 // EvictionSpec defines the cache eviction configuration.
 type EvictionSpec struct {
-	// policy is the eviction policy. Currently only LRU is supported.
+	// policy is the eviction policy. LRU or noop.
 	// +optional
 	// +kubebuilder:default="LRU"
-	// +kubebuilder:validation:Enum=LRU
+	// +kubebuilder:validation:Enum=LRU;noop
 	Policy *string `json:"policy,omitempty"`
 
 	// triggerWatermark is the cache usage ratio that triggers eviction.
@@ -185,7 +185,7 @@ type L2BackendSpec struct {
 	// cache misses. "default" picks the first adapter that has the key.
 	// +optional
 	// +kubebuilder:default="default"
-	// +kubebuilder:validation:Enum=default
+	// +kubebuilder:validation:Enum=default;retain
 	PrefetchPolicy *string `json:"prefetchPolicy,omitempty"`
 
 	// prefetchMaxInFlight limits the number of concurrent prefetch

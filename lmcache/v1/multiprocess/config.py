@@ -45,6 +45,11 @@ class MPServerConfig:
     ('default' for standard prefix caching, 'blend' when cacheblend is enabled).
     """
 
+    separate_object_groups: bool = True
+    """When True (default), split kernel groups into one object group per
+    sliding-window size at KV-cache registration (hybrid models). When False,
+    all kernel groups share a single full-attention object group."""
+
     enable_segmented_prefix: bool = False
     """CacheBlend only (engine_type='blend'): on a mid-prefix L2 retrieve
     failure, retain the gapped contiguous prefix so the post-gap chunks stay
@@ -340,6 +345,13 @@ def add_mp_server_args(
         "import. Example: --script-allowed-imports numpy pandas",
     )
     mp_group.add_argument(
+        "--separate-object-groups",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Split kernel groups into one object group per sliding-window size "
+        "at KV-cache registration (for hybrid models). (Default is True)",
+    )
+    mp_group.add_argument(
         "--worker-reap-timeout-seconds",
         type=float,
         default=120.0,
@@ -394,6 +406,7 @@ def parse_args_to_mp_server_config(
         max_cpu_workers=max_cpu,
         hash_algorithm=args.hash_algorithm,
         engine_type=args.engine_type,
+        separate_object_groups=args.separate_object_groups,
         enable_segmented_prefix=args.enable_segmented_prefix,
         supported_transfer_mode=args.supported_transfer_mode,
         runtime_plugin_config=RuntimePluginConfig(

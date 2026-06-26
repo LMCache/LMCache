@@ -164,9 +164,10 @@ class GdsL1Config:
     """Configuration for the GDS slab-file L1 tier.
 
     When present on :class:`L1ManagerConfig`, the L1 medium becomes an NVMe
-    slab file accessed via cuFile DMA instead of pinned DRAM (mutually
-    exclusive with the pinned-DRAM tier in ``memory_config``). Carries the
-    slab location, capacity, and DMA mode.
+    slab file accessed via GPUDirect Storage DMA (cuFile on NVIDIA, hipFile on
+    AMD ROCm) instead of pinned DRAM (mutually exclusive with the pinned-DRAM
+    tier in ``memory_config``). Carries the slab location, capacity, and DMA
+    mode.
     """
 
     file_location: str
@@ -181,7 +182,7 @@ class GdsL1Config:
     """Open the slab with ``O_DIRECT`` (required for the GDS DMA fast path)."""
 
     align_bytes: int = 4096
-    """Allocation alignment; cuFile/O_DIRECT require 4 KiB."""
+    """Allocation alignment; cuFile/hipFile and O_DIRECT require 4 KiB."""
 
 
 @dataclass
@@ -402,9 +403,10 @@ def add_storage_manager_args(
     gds_group = parser.add_argument_group(
         "GDS L1 tier",
         "Configuration for the GDS slab-file L1 tier. Setting --gds-l1-path "
-        "makes the L1 medium an NVMe slab accessed via cuFile DMA instead of "
-        "pinned DRAM; --l1-size-gb then sizes the slab. Disable byte-array L2 "
-        "adapters when this is on.",
+        "makes the L1 medium an NVMe slab accessed via GPUDirect Storage DMA "
+        "(cuFile on NVIDIA, hipFile on AMD ROCm) instead of pinned DRAM; "
+        "--l1-size-gb then sizes the slab. Disable byte-array L2 adapters when "
+        "this is on.",
     )
     gds_group.add_argument(
         "--gds-l1-path",

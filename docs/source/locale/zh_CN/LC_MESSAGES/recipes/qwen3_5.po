@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"POT-Creation-Date: 2026-06-22 11:07+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -20,8 +20,8 @@ msgstr ""
 "Generated-By: Babel 2.18.0\n"
 
 #: ../../source/recipes/qwen3_5.rst:4
-msgid "Qwen3_5ForConditionalGeneration"
-msgstr "Qwen3_5ForConditionalGeneration"
+msgid "Qwen3.5 / Qwen3.6 series"
+msgstr "Qwen3.5 / Qwen3.6 系列"
 
 #: ../../source/recipes/qwen3_5.rst:6
 msgid ""
@@ -31,8 +31,8 @@ msgid ""
 "opaque pages at registration time; see :doc:`../mp/hybrid_models` for the"
 " general handling of Mamba / linear-attention models."
 msgstr ""
-"一种混合架构，将 Mamba / Gated-DeltaNet (GDN) linear-attention 层与 full-attention 层交错，供 **Qwen3.5 和 "
-"Qwen3.6** 系列共享。LMCache 在注册时将递归状态缓存重新解释为不透明页面；有关 Mamba / linear-attention 模型的一般处理，请参见 "
+"一种混合架构，将 Mamba / Gated-DeltaNet (GDN) 线性注意力层与全注意力层交错，供 **Qwen3.5 和 "
+"Qwen3.6** 系列共享。LMCache 在注册时将递归状态缓存重新解释为不透明页面；有关 Mamba / 线性注意力模型的一般处理，请参见 "
 ":doc:`../mp/hybrid_models`。"
 
 #: ../../source/recipes/qwen3_5.rst:13
@@ -57,7 +57,9 @@ msgid ""
 "<https://docs.vllm.ai/en/latest/models/supported_models.html#text-"
 "generation>`_ (architecture ``Qwen3_5ForConditionalGeneration``)."
 msgstr ""
-"**引擎文档：** `vLLM 支持的模型中的 Qwen3.5 <https://docs.vllm.ai/en/latest/models/supported_models.html#text-generation>`_（架构 ``Qwen3_5ForConditionalGeneration``\\ ）。"
+"**引擎文档：** `vLLM 支持的模型中的 Qwen3.5 "
+"<https://docs.vllm.ai/en/latest/models/supported_models.html#text-"
+"generation>`_（架构 ``Qwen3_5ForConditionalGeneration``）。"
 
 #: ../../source/recipes/qwen3_5.rst:28
 msgid "**Status:** Validated with LMCache."
@@ -70,7 +72,9 @@ msgid ""
 "*unified block size*. That block size is model-specific — vLLM logs "
 "``Setting attention block size to N tokens`` at startup:"
 msgstr ""
-"该系列中的每个模型都需要相同的三项设置：\\ ``align`` Mamba 缓存模式、前缀缓存，以及与 vLLM 的 *统一块大小* 匹配的分块大小。该块大小因模型而异——vLLM 在启动时会输出 ``Setting attention block size to N tokens``\\ ："
+"该系列中的每个模型都需要相同的三个设置：``align`` Mamba 缓存模式、前缀缓存以及与 vLLM 的 *统一块大小* "
+"匹配的块大小。该块大小是特定于模型的 — vLLM 在启动时记录 ``Setting attention block size to N "
+"tokens``："
 
 #: ../../source/recipes/qwen3_5.rst:39
 msgid "Model"
@@ -94,7 +98,7 @@ msgstr "784"
 
 #: ../../source/recipes/qwen3_5.rst:44 ../../source/recipes/qwen3_5.rst:47
 msgid "1"
-msgstr "1"
+msgstr "一"
 
 #: ../../source/recipes/qwen3_5.rst:45
 msgid "``Qwen/Qwen3.5-0.8B``"
@@ -111,7 +115,9 @@ msgid ""
 "value below ``2N``). ``N`` is also valid but serializes prefill under "
 "load — see the note below."
 msgstr ""
-"将 LMCache 服务器的 ``--chunk-size`` 设置为 ``N``\\ （或其倍数），并将 vLLM 的 ``--max-num-batched-tokens`` 设置为 ``2N-1``\\ （小于 ``2N`` 的最大值）。\\ ``N`` 也有效，但在高负载下会使预填充串行化——请参阅下方说明。"
+"将 LMCache 服务器的 ``--chunk-size`` 设置为 ``N``（或其倍数），并将 vLLM 的 ``--max-num-"
+"batched-tokens`` 设置为 ``2N-1``（小于 ``2N`` 的最大值）。``N`` 也是有效的，但在负载下会序列化 "
+"Prefill — 请参阅下面的说明。"
 
 #: ../../source/recipes/qwen3_5.rst:54
 msgid "**Qwen3.6-27B** (1 GPU, ``N = 784`` → ``2N-1 = 1567``):"
@@ -122,7 +128,8 @@ msgid ""
 "**Qwen3.5-0.8B** (1 GPU, ``N = 544`` → ``2N-1 = 1087``): identical to the"
 " above, with ``--chunk-size 544`` and ``--max-num-batched-tokens 1087``."
 msgstr ""
-"**Qwen3.5-0.8B** (1 GPU, ``N = 544`` → ``2N-1 = 1087``): 与上述相同，使用 ``--chunk-size 544`` 和 ``--max-num-batched-tokens 1087``\\ 。"
+"**Qwen3.5-0.8B** (1 GPU, ``N = 544``): 与上述相同，使用 ``--chunk-size 544`` 和 "
+"``--max-num-batched-tokens 1087``。"
 
 #: ../../source/recipes/qwen3_5.rst:74
 #, python-format
@@ -147,7 +154,17 @@ msgid ""
 "lower ``--max-num-seqs`` to ≤ that count (each decode sequence needs one "
 "Mamba block) or raise ``--gpu-memory-utilization``."
 msgstr ""
-"``--mamba-cache-mode align`` 是必需的（GDN 不支持 ``all`` 模式）。\\ ``--max-num-batched-tokens`` 必须在 ``[N, 2N)`` 范围内（至少为统一块大小，且不超过其两倍）——否则 LMCache 在引擎启动时会报错。\\ ``align`` 在调度器步骤结束时于块边界处快照 Mamba 状态，调度器将预填充拆分为完整的 ``N``-token 块。\\ **优先选择最大值 ``2N-1``\\ ：** 单个请求在每个步骤中仍会精确推进一个块（\\ ``2N-1 < 2N``\\ ），因此 LMCache 存储的逐块快照得以保留，*同时* 剩余的 ``N-1`` 预算允许解码与预填充块并发调度。将其设置为恰好 ``N`` 会使每步预算等于一个块，因此一旦任何请求进入解码阶段（消耗 ≥1 个 token 的预算），就无法启动新的预填充请求——执行退化为每次只处理一个请求。（在 Qwen3.6-27B 上的基准测试：取值 ``N`` 时，冷启动 / 低命中率场景慢约 7 倍，GPU 批大小卡在 1；取 ``2N-1`` 后恢复完整批处理。在 LMCache 缓存已预热（约 97% 命中率）的情况下，差距较小，因为剩余的预填充量很少，但 ``2N-1`` 仍是推荐的安全默认值。）若 vLLM 在 ``2N-1`` 时报告 *\\\"max_num_seqs exceeds available Mamba cache blocks\\\"*，请将 ``--max-num-seqs`` 降低到 ≤ 该数量（每个解码序列需要一个 Mamba 块），或提高 ``--gpu-memory-utilization``\\ 。"
+"``--mamba-cache-mode align`` 是必需的（GDN 不支持 ``all`` 模式）。 ``--max-num-"
+"batched-tokens`` 必须在 ``[N, 2N)`` 范围内（至少为统一块大小且不超过其两倍）—— 否则 LMCache "
+"在引擎启动时会抛出错误。 ``align`` 在调度器步骤结束时在块边界快照 Mamba 状态，调度器将 Prefill 拆分为完整的 "
+"``N``-token 块。 **优先选择最大值 ``2N-1``：** 单个请求在每个步骤中仍然精确地推进一个块（``2N-1 < "
+"2N``），因此 LMCache 存储的每块快照得以保留，*并且* 剩余的 ``N-1`` 预算允许解码与 Prefill 块共同调度。将其设置为"
+" ``N`` 会使每步预算等于一个块，因此一旦任何请求开始解码（消耗 ≥1 个预算的 token），就无法启动新的 Prefill "
+"请求——执行序列化为一次一个请求。（在 Qwen3.6-27B 上基准测试：在 ``N`` 时，冷 / 低命中运行的速度约为 7 倍慢，GPU "
+"批量卡在 1；``2N-1`` 恢复了完整的批处理。使用温暖的 LMCache 缓存（约 97% 命中）时，差距很小，因为剩余的 Prefill "
+"很少，但 ``2N-1`` 是安全的默认值。）如果 vLLM 报告 *\\\"max_num_seqs exceeds available "
+"Mamba cache blocks\\\"* 在 ``2N-1`` 时，将 ``--max-num-seqs`` 降低到 ≤ "
+"该计数（每个解码序列需要一个 Mamba 块）或提高 ``--gpu-memory-utilization``。"
 
 #: ../../source/recipes/qwen3_5.rst:93
 msgid ""
@@ -171,7 +188,9 @@ msgstr "TRT-LLM"
 msgid ""
 "**Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-"
 "LLM + LMCache setup."
-msgstr "**状态：** 支持。TRT-LLM + LMCache 的配置方式，请参阅 :doc:`../getting_started/quickstart`。"
+msgstr ""
+"**状态：** 支持。请参阅 :doc:`../getting_started/quickstart` 以获取 TRT-LLM + LMCache"
+" 的设置。"
 
 #: ../../source/recipes/qwen3_5.rst:105
 msgid "CacheBlend support"
@@ -197,7 +216,7 @@ msgstr "状态"
 
 #: ../../source/recipes/qwen3_5.rst:118
 msgid "Notes"
-msgstr "备注"
+msgstr "笔记"
 
 #: ../../source/recipes/qwen3_5.rst:119
 msgid ":doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`"
@@ -222,7 +241,8 @@ msgid ""
 "equivalence, not token-level (the CI gate is the ``hma_lm_eval_qwen3_5`` "
 "gsm8k store-vs-retrieve comparison)."
 msgstr ""
-"缓存运行与全新运行的生成结果\\ **不保证逐位一致**\\ ：GDN 后端不支持 vLLM 的批不变模式。预期结果在得分层面等价，而非 token 层面严格一致（CI 验证门为 ``hma_lm_eval_qwen3_5`` gsm8k 存储与检索对比）。"
+"生成在缓存和新运行之间**不是位精确**的：GDN 后端不支持 vLLM 的批量不变模式。期望得分级别的等价，而不是令牌级别的等价（CI 门是 "
+"``hma_lm_eval_qwen3_5`` gsm8k 存储与检索比较）。"
 
 #: ../../source/recipes/qwen3_5.rst:130
 msgid ""
@@ -230,11 +250,11 @@ msgid ""
 "views, so content-aware processing does not apply, and cache entries must"
 " not be shared across engines with different attention backends or kernel"
 " block sizes."
-msgstr "Mamba 和 full-attention 组的缓存页面是字节不透明视图，因此不适用内容感知处理，缓存条目不得在具有不同注意力后端或内核块大小的引擎之间共享。"
+msgstr "Mamba 和全注意力组的缓存页面是字节不透明视图，因此不适用内容感知处理，缓存条目不得在具有不同注意力后端或内核块大小的引擎之间共享。"
 
 #: ../../source/recipes/qwen3_5.rst:134
 msgid "vLLM's Mamba prefix caching in ``align`` mode is experimental."
-msgstr "vLLM 的 Mamba 前缀缓存在 ``align`` 模式下属于实验性功能。"
+msgstr "vLLM 的 Mamba 前缀缓存处于 ``align`` 模式下是实验性的。"
 
 #: ../../source/recipes/qwen3_5.rst:135
 msgid ""
@@ -243,7 +263,8 @@ msgid ""
 "``hma_lm_eval_qwen3_5`` gsm8k store-vs-retrieve gate). Caching of "
 "image/video KV is not validated."
 msgstr ""
-"``Qwen/Qwen3.6-27B`` 是一个视觉语言模型（它加载一个视觉塔）；LMCache 验证涵盖 **文本** 生成（\\ ``hma_lm_eval_qwen3_5`` gsm8k 存取门）。图像/视频 KV 的缓存未经过验证。"
+"``Qwen/Qwen3.6-27B`` 是一个视觉语言模型（它加载一个视觉塔）；LMCache 验证涵盖 **文本** "
+"生成（``hma_lm_eval_qwen3_5`` gsm8k 存取门）。图像/视频 KV 的缓存未经过验证。"
 
 #~ msgid ""
 #~ "``--mamba-cache-mode align`` is required"
@@ -266,4 +287,7 @@ msgstr ""
 
 #~ msgid "**Status:** Not supported. LMCache TRT-LLM integration is in progress."
 #~ msgstr "**状态：** 不支持。LMCache TRT-LLM 集成正在进行中。"
+
+#~ msgid "Qwen3_5ForConditionalGeneration"
+#~ msgstr "Qwen3_5ForConditionalGeneration"
 

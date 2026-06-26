@@ -8,6 +8,7 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import (
+    AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
@@ -97,6 +98,25 @@ class TestTrimPolicy:
     def test_roundtrip(self):
         for p in TrimPolicy:
             assert _roundtrip(p) is p
+
+
+class TestAttnWindowDesc:
+    def test_full_roundtrip(self):
+        out = _roundtrip(AttnWindowDesc(num_chunks_in_sw=[-1]))
+        assert out.num_chunks_in_sw == [-1]
+        assert out.is_full_attention(0)
+
+    def test_mixed_roundtrip(self):
+        out = _roundtrip(AttnWindowDesc(num_chunks_in_sw=[-1, 4, 1]))
+        assert out.num_chunks_in_sw == [-1, 4, 1]
+        assert out.is_full_attention(0)
+        assert not out.is_full_attention(1)
+        assert out.num_object_groups == 3
+
+    def test_empty_roundtrip(self):
+        out = _roundtrip(AttnWindowDesc(num_chunks_in_sw=[]))
+        assert out.num_chunks_in_sw == []
+        assert out.num_object_groups == 0
 
 
 class TestSet:

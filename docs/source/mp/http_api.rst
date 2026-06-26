@@ -163,6 +163,13 @@ compatibility with the vLLM-embedded API server.
      - ``/l2/keys``
      - Paginate keys currently resident in one L2 adapter (optionally
        filtered by ``model_name``).
+   * - POST
+     - ``/l2/prefetch``
+     - Warm a node's L1 by loading a token sequence's chunks from L2 ahead
+       of traffic; returns a ``request_id``.
+   * - GET
+     - ``/l2/prefetch/{request_id}``
+     - Poll a submitted warm prefetch (``pending`` / ``completed``).
 
 **Quota management**
 
@@ -592,6 +599,13 @@ Three endpoints — ``GET /l2/adapters``, ``DELETE /l2``, and
 backends, purge keys from one, and enumerate what is currently
 resident.
 
+A further pair — ``POST /l2/prefetch`` and
+``GET /l2/prefetch/{request_id}`` — lets an operator (or the
+coordinator) **pre-warm** a node's L1 from L2 ahead of traffic and poll
+the load to completion; they are documented at the end of this section.
+The coordinator exposes an ``instance_id``-routed variant of both — see
+:doc:`coordinator`.
+
 ``DELETE /l2`` and ``GET /l2/keys`` accept an optional
 ``?adapter=<type_name>`` query parameter to target a specific adapter.
 Omit the selector to target the **primary** (first-configured)
@@ -818,6 +832,123 @@ cause keys to appear, disappear, or shift between pages.
       next=$(echo "$page" | jq -r '.next_page_token // empty')
       [ -z "$next" ] && break
     done
+
+``POST /l2/prefetch``
+~~~~~~~~~~~~~~~~~~~~~~
+
+Warm one node's L1 by loading a token sequence's chunks from L2 **ahead** of
+the requests that will use them, so the first request hits L1 instead of
+paying the L2 fetch inline. Useful when a workload is about to be routed to a
+node (a traffic shift, a hot shared system prompt).
+
+The caller describes content by **token ids**, never by internal cache keys (a
+key is a content hash plus a per-rank layout bitmap, which callers cannot
+construct). The server hashes the tokens, expands each chunk across the node's
+ranks, and submits a *warm* prefetch: loaded chunks are **retained**
+(permanent) and left **unlocked** — there is no downstream reader to pin them
+for, so a later real lookup takes its own lock. The call returns immediately;
+the load runs in the storage manager's own thread. It coalesces across all
+configured L2 adapters, so there is no ``?adapter=`` selector.
+
+**Request body:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 12 68
+
+   * - Field
+     - Type
+     - Description
+   * - ``model_name``
+     - string
+     - The served model id, exactly as registered (e.g. ``Qwen/Qwen3-8B``).
+   * - ``world_size``
+     - int
+     - The value vLLM registered for the node's KV layout and rank fan-out
+       (``1`` for a single-GPU, TP=1 deployment).
+   * - ``token_ids``
+     - list[int]
+     - The prompt token ids. Must use the same tokenizer / special-token
+       settings as the store, and contain at least one full ``chunk_size`` of
+       tokens — only complete chunks are warmed.
+   * - ``cache_salt``
+     - string
+     - Per-tenant key isolation; must match the store (default ``""``).
+
+**Response** (``202 Accepted``):
+
+.. code-block:: json
+
+    {"request_id": "abc123", "chunks": 12, "status": "submitted"}
+
+When the sequence is shorter than one chunk, nothing is submitted and there is
+no ``request_id`` to poll:
+
+.. code-block:: json
+
+    {"chunks": 0, "status": "noop"}
+
+**HTTP status codes:**
+
+- ``202``: submitted (or a ``noop`` as above).
+- ``400``: ``token_ids`` exceeds the per-request cap, or ``cache_salt``
+  violates its invariants.
+- ``409``: no layout registered for ``(model_name, world_size)`` — the model
+  has not allocated KV cache on this node yet (start vLLM first).
+- ``422``: request body fails field-level validation.
+- ``503``: engine not initialized.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s -X POST http://localhost:8080/l2/prefetch \
+        -H 'Content-Type: application/json' \
+        -d '{"model_name": "Qwen/Qwen3-8B", "world_size": 1,
+             "token_ids": [101, 102, 103], "cache_salt": "user-a"}'
+    # -> {"request_id": "abc123", "chunks": 1, "status": "submitted"}
+
+``GET /l2/prefetch/{request_id}``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Poll a submitted warm prefetch. The warm holds no lock, so the poll only
+reports progress; the first poll that observes completion drops the job
+(exactly-once), so a later poll for the same id returns ``404``.
+
+**Response** (``200 OK``) while the load runs:
+
+.. code-block:: json
+
+    {"status": "pending"}
+
+…and once complete:
+
+.. code-block:: json
+
+    {"status": "completed", "found_keys": 12, "total_keys": 12}
+
+``found_keys`` / ``total_keys`` count only chunks **loaded from L2** by this
+request; chunks already resident in L1 are skipped at ``reserve_write`` and not
+counted, so a partially-resident warm undercounts by the resident chunk count
+(a cold request loads and counts everything). The warm uses the gap-tolerant
+``SPARSE`` trim policy, so an already-resident chunk does not stop the rest from
+loading — it loads every not-yet-resident chunk and reports that count. Not
+counting the resident chunks is deliberate: an already-present entry may be a
+transient temporary from another lookup, so claiming it as warmed could mislead.
+
+**HTTP status codes:**
+
+- ``200``: status reported (``pending`` or ``completed``).
+- ``404``: unknown ``request_id`` — already completed-and-consumed, or never
+  submitted.
+- ``503``: engine not initialized.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s http://localhost:8080/l2/prefetch/abc123
+    # -> {"status": "completed", "found_keys": 1, "total_keys": 1}
 
 .. _mp-http-quota-api:
 

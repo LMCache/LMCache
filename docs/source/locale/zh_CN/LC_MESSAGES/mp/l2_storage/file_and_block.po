@@ -28,5 +28,5 @@ msgid ""
 "File-system and block-device backends that persist KV cache to local or "
 "networked storage. These are conceptually similar -- they write KV "
 "objects to files or fixed-size slots on a disk or block device."
-msgstr "将 KV 缓存持久化到本地或网络存储的文件系统和块设备后端。二者在概念上相似——均将 KV 对象写入文件或磁盘、块设备上的固定大小槽位。"
+msgstr "将 KV Cache 持久化到本地或网络存储的文件系统和块设备后端。这些在概念上是相似的——它们将 KV 对象写入文件或磁盘或块设备上的固定大小槽。"
 

@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/recipes/index.rst:4
 msgid "Recipes"
-msgstr "配置示例"
+msgstr "使用指南"
 
 #: ../../source/recipes/index.rst:6
 msgid ""
@@ -30,31 +30,31 @@ msgid ""
 "configuration that diverges from defaults. Engine-side documentation (how"
 " to serve the model itself) lives with the serving engine; recipe pages "
 "link out rather than duplicate."
-msgstr "本节列出了通过 LMCache 端到端验证的模型架构，每个架构均有一个对应的配置示例页面，仅涵盖与默认值不同的 LMCache 特定配置。引擎端文档（如何部署模型本身）随服务引擎维护；配置示例页面提供外部链接，不重复已有内容。"
+msgstr "本节列出了通过 LMCache 验证的端到端模型架构，每个架构都有一个食谱页面，仅涵盖与默认值不同的 LMCache 特定配置。引擎端文档（如何提供模型本身）与服务引擎一起存在；食谱页面链接到外部，而不是重复内容。"
 
 #: ../../source/recipes/index.rst:12
 msgid ""
 "For the generic LMCache + engine wiring (ports, remote hosts, sending a "
 "first request), see :doc:`../getting_started/quickstart` -- recipes "
 "assume that page as a prerequisite."
-msgstr "有关通用的 LMCache + 引擎连接配置（端口、远程主机、发送第一个请求），请参见 :doc:`../getting_started/quickstart` —— 各配置示例页面均以该文档为前提。"
+msgstr "有关通用的 LMCache + 引擎连接（端口、远程主机、发送第一个请求），请参见 :doc:`../getting_started/quickstart` -- 配方假设该页面为前提条件。"
 
 #: ../../source/recipes/index.rst:16
 msgid "Recipes are grouped by attention architecture:"
-msgstr "配置示例按注意力架构分组："
+msgstr "食谱按注意力架构分组："
 
 #~ msgid ""
 #~ "Engine-side documentation (how to serve"
 #~ " the model itself) lives with the "
 #~ "serving engine. Recipe pages link out"
 #~ " rather than duplicate."
-#~ msgstr "引擎端文档（如何服务模型本身）随服务引擎一起维护。配置示例页面提供外部链接，不重复已有内容。"
+#~ msgstr "引擎端文档（如何服务模型本身）随服务引擎一起维护。使用指南页面提供外部链接，不重复已有内容。"
 
 #~ msgid "Recipe page contents"
-#~ msgstr "配置示例页面内容"
+#~ msgstr "使用指南页面内容"
 
 #~ msgid "Each recipe page is intentionally minimal:"
-#~ msgstr "每个配置示例页面都故意保持简约："
+#~ msgstr "每个使用指南页面都故意保持简约："
 
 #~ msgid "**Validated models** -- exact HF repo IDs that have been tested."
 #~ msgstr "**验证过的模型** -- 已测试的确切 HF 仓库 ID。"
@@ -105,7 +105,7 @@ msgstr "配置示例按注意力架构分组："
 #~ msgstr "TRT-LLM"
 
 #~ msgid "Recipe"
-#~ msgstr "配置示例"
+#~ msgstr "使用指南"
 
 #~ msgid "``DeepseekV4ForCausalLM``"
 #~ msgstr "``DeepseekV4ForCausalLM``"
@@ -156,7 +156,7 @@ msgstr "配置示例按注意力架构分组："
 #~ msgstr "``google/gemma-3-4b-it``"
 
 #~ msgid ":doc:`gemma3`"
-#~ msgstr ":doc:`gemma3`"
+#~ msgstr "`:doc:`gemma3``"
 
 #~ msgid "``MistralForCausalLM``"
 #~ msgstr "``MistralForCausalLM``"
@@ -174,7 +174,7 @@ msgstr "配置示例按注意力架构分组："
 #~ msgstr "``openai/gpt-oss-120b``"
 
 #~ msgid ":doc:`gpt_oss`"
-#~ msgstr ":doc:`gpt_oss`"
+#~ msgstr ":gpt_oss:"
 
 #~ msgid "``Qwen3MoeForCausalLM``"
 #~ msgstr "``Qwen3MoeForCausalLM``"
@@ -183,7 +183,7 @@ msgstr "配置示例按注意力架构分组："
 #~ msgstr "``Qwen/Qwen3-235B-A22B``"
 
 #~ msgid ":doc:`qwen3`"
-#~ msgstr ":doc:`qwen3`"
+#~ msgstr "：doc:`qwen3`"
 
 #~ msgid "``Qwen3_5ForConditionalGeneration``"
 #~ msgstr "``Qwen3_5ForConditionalGeneration``"
@@ -195,7 +195,7 @@ msgstr "配置示例按注意力架构分组："
 #~ msgstr "``Qwen/Qwen3.5-0.8B``"
 
 #~ msgid ":doc:`qwen3_5`"
-#~ msgstr ":doc:`qwen3_5`"
+#~ msgstr "`:doc:`qwen3_5``"
 
 #~ msgid "``LlamaForCausalLM``"
 #~ msgstr "``LlamaForCausalLM``"
@@ -204,7 +204,7 @@ msgstr "配置示例按注意力架构分组："
 #~ msgstr "``meta-llama/Meta-Llama-3.1-70B-Instruct``"
 
 #~ msgid ":doc:`llama`"
-#~ msgstr ":doc:`llama`"
+#~ msgstr "`:doc:`llama`"
 
 #~ msgid "``Phi3ForCausalLM``"
 #~ msgstr "``Phi3ForCausalLM``"
@@ -228,7 +228,7 @@ msgstr "配置示例按注意力架构分组："
 #~ msgstr "图例：``✓`` 已验证，``—`` 未验证。"
 
 #~ msgid "Contributing a recipe"
-#~ msgstr "贡献配置示例"
+#~ msgstr "贡献一个使用指南"
 
 #~ msgid "To add a new architecture:"
 #~ msgstr "要添加一个新架构："
@@ -254,3 +254,4 @@ msgstr "配置示例按注意力架构分组："
 
 #~ msgid "Add a row to the table above and an entry to the hidden toctree below."
 #~ msgstr "在上面的表格中添加一行，并在下面的隐藏 toctree 中添加一个条目。"
+

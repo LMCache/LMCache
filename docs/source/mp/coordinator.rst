@@ -269,3 +269,56 @@ L2 endpoint summary
    * - ``GET``
      - ``/l2/status``
      - Total usage and per-salt breakdown.
+   * - ``POST``
+     - ``/l2/prefetch``
+     - Submit a warm prefetch of a token sequence on one server; returns a ``request_id``.
+   * - ``GET``
+     - ``/l2/prefetch/{instance_id}/{request_id}``
+     - Poll a submitted warm prefetch (``pending`` / ``completed``).
+
+Warm prefetch (pre-loading L1 from L2)
+--------------------------------------
+
+Pre-warm one MP server's L1 with the KV for a known prompt **before** the
+requests arrive, so the first request hits L1 instead of paying the L2 fetch
+inline -- useful when you know a workload is about to be routed to a node (a
+traffic shift, a hot shared system prompt).
+
+You describe the content by **token ids** -- the unit the cache speaks -- never
+by internal cache keys, which you cannot construct (a key is a content hash
+plus a per-rank layout bitmap). The coordinator forwards the request to the
+named server, which hashes the tokens, expands them across the node's ranks,
+loads the chunks from L2 into L1, and **retains** them so a later lookup hits.
+
+The submit returns a ``request_id``; poll the status endpoint until
+``completed``. The warm acquires no lock -- the poll simply reports progress
+and clears the server-side job once the load finishes.
+
+.. code-block:: bash
+
+    # Submit: warm tenant "user-a"'s prompt on server "server-1"
+    curl -s -X POST http://localhost:9300/l2/prefetch \
+        -H 'Content-Type: application/json' \
+        -d '{
+            "instance_id": "server-1",
+            "model_name": "Qwen/Qwen3-8B",
+            "world_size": 1,
+            "token_ids": [101, 102, 103, "..."],
+            "cache_salt": "user-a"
+        }'
+    # -> {"instance_id": "server-1", "request_id": "abc123", "chunks": 12, "status": "submitted"}
+
+    # Poll until completed
+    curl -s http://localhost:9300/l2/prefetch/server-1/abc123
+    # -> {"status": "pending"}      # load still running
+    # -> {"status": "completed", "found_keys": 12, "total_keys": 12}
+
+A few rules of thumb:
+
+- ``token_ids`` must match what was stored (same tokenizer / special tokens)
+  and contain at least one full ``chunk_size`` of tokens -- only complete
+  chunks are warmed (a shorter sequence returns ``status: "noop"``).
+- ``world_size`` selects the server's KV layout and the per-rank fan-out
+  (``1`` for a single-GPU, TP=1 deployment).
+- **Single-node scope**: one ``instance_id`` warms only that node's shards.
+  For a model sharded across multiple nodes, warm each node's instance.

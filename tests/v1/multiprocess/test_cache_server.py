@@ -21,7 +21,6 @@ from lmcache.v1.distributed.config import (
 from lmcache.v1.mp_observability.config import DEFAULT_OBSERVABILITY_CONFIG
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
-    CudaIPCWrapper,
     IPCCacheServerKey,
     KVCache,
 )
@@ -31,6 +30,7 @@ from lmcache.v1.multiprocess.protocol import (
     get_response_class,
 )
 from lmcache.v1.multiprocess.server import run_cache_server
+from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
 
 # Configuration constants
 SERVER_HOST = "localhost"

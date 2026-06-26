@@ -11,7 +11,12 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, TrimPolicy
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    ObjectKey,
+    PrefetchMode,
+    TrimPolicy,
+)
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -623,6 +628,34 @@ class TestStorageManagerL2Prefetch:
 
         assert hit_count is not None, "Prefetch should complete"
         assert hit_count == 0, f"Expected 0 hits, got {hit_count}"
+
+        sm.close()
+
+    def test_warm_skip_l2_is_noop(self, l2_storage_manager_config, basic_layout):
+        """``mode=WARM`` + ``skip_l2=True`` submits no controller request.
+
+        Regression: the WARM branch must honor ``skip_l2`` (it previously
+        ignored it, issuing L2 lookup/load work and mutating L1). The returned
+        :class:`PrefetchHandle` is the public signal — no request id to track
+        and no L2-sourced indices; since the controller is the only path that
+        loads from L2, this also means L1 is left untouched.
+        """
+        sm = StorageManager(l2_storage_manager_config)
+        keys = [make_object_key(i) for i in range(3)]
+
+        # Put the keys in L2 so a non-skip warm would have something to load,
+        # then clear L1 so a load would be the only way they could reappear.
+        self._write_keys_and_wait_for_l2(sm, keys, basic_layout)
+        sm.clear()
+
+        handle = sm.submit_prefetch_task(
+            keys, basic_layout, mode=PrefetchMode.WARM, skip_l2=True
+        )
+
+        # skip_l2 honored: the controller was never asked.
+        assert handle.prefetch_request_id == -1
+        assert handle.l2_orig_indices == ()
+        assert handle.total_requested_keys == len(keys)
 
         sm.close()
 
