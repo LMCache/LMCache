@@ -1933,7 +1933,14 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
         return torch.Size([num_tokens, 2, self.hidden_dim_size])
 
 
-_TRTLLM_KERNEL_BATCH_SIZE = 32
+# The ``multi_layer_block_kv_transfer`` kernel packs object pointers into a
+# fixed ``MemoryObj4`` struct (``csrc/mp_mem_kernels.cuh``) and hard-rejects any
+# call with more than 4 objects (``TORCH_CHECK(num_objects <= 4, ...)`` in
+# ``csrc/mp_mem_kernels.cu``). The Python batch stride must therefore never
+# exceed this cap, otherwise stores/loads spanning more than 4 chunks raise
+# ``RuntimeError: Expected 1-4 LMCache objects, got <N>``.
+_MULTI_LAYER_KERNEL_MAX_OBJECTS = 4
+_TRTLLM_KERNEL_BATCH_SIZE = _MULTI_LAYER_KERNEL_MAX_OBJECTS
 
 
 class TRTLLMGPUConnector(GPUConnectorInterface):

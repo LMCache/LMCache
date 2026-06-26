@@ -392,3 +392,101 @@ class TestRawCudaIPCWrapperType:
         registry = custom_types._CUSTOMERIZED_SERIALIZERS  # noqa: PLC2701
         assert custom_types.DeviceIPCWrapper in registry
         assert registry[custom_types.DeviceIPCWrapper].code == 1
+
+
+@pytest.mark.skipif(not _has_lmc_ops(), reason="lmcache C ops not built")
+class TestTRTLLMBatchedTransferCap:
+    """Regression for #3889.
+
+    ``multi_layer_block_kv_transfer`` hard-rejects calls carrying more than 4
+    LMCache objects, so the Python batch stride must never exceed that cap.
+    Before the fix the stride was 32, which raised
+    ``RuntimeError: Expected 1-4 LMCache objects, got <N>`` for any prompt
+    spanning more than 4 chunks. This test does not need a GPU: it stubs the
+    kernel call and only checks how many object pointers each call receives.
+    """
+
+    def test_kernel_batch_size_within_cap(self) -> None:
+        # First Party
+        from lmcache.v1.gpu_connector import gpu_connectors
+
+        assert gpu_connectors._MULTI_LAYER_KERNEL_MAX_OBJECTS == 4
+        assert (
+            gpu_connectors._TRTLLM_KERNEL_BATCH_SIZE
+            <= gpu_connectors._MULTI_LAYER_KERNEL_MAX_OBJECTS
+        )
+
+    def test_batched_transfer_never_exceeds_kernel_cap(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Standard
+        import contextlib
+
+        # First Party
+        from lmcache.v1.gpu_connector import gpu_connectors
+        from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
+
+        # Build without __init__ to avoid creating real CUDA streams.
+        connector = object.__new__(TRTLLMGPUConnector)
+        connector.device = torch.device("cpu")
+        connector.chunk_size = 256
+        connector.paged_buffer_ptrs = None
+        connector.shape_desc = None
+        connector._kv_format = None
+        connector._batch_size = gpu_connectors._TRTLLM_KERNEL_BATCH_SIZE
+
+        # One block per chunk is enough to exercise the batching stride.
+        monkeypatch.setattr(
+            connector, "_get_chunk_block_ids", lambda block_ids, start: [start]
+        )
+        monkeypatch.setattr(connector, "_stage_block_ids", lambda ids: ids)
+        monkeypatch.setattr(
+            gpu_connectors.torch.cuda,
+            "stream",
+            lambda stream: contextlib.nullcontext(),
+        )
+
+        objects_per_call: list[int] = []
+
+        def _record(paged_ptrs, ptrs, *args, **kwargs) -> None:
+            objects_per_call.append(len(ptrs))
+
+        monkeypatch.setattr(
+            gpu_connectors.lmc_ops, "multi_layer_block_kv_transfer", _record
+        )
+
+        class _FakeTensor:
+            def __init__(self, ptr: int) -> None:
+                self._ptr = ptr
+
+            def data_ptr(self) -> int:
+                return self._ptr
+
+        class _FakeMemoryObj:
+            def __init__(self, ptr: int) -> None:
+                self.tensor = _FakeTensor(ptr)
+
+        num_chunks = 9  # > 4 chunks: the failing case before the fix.
+        memory_objs = [_FakeMemoryObj(ptr=i + 1) for i in range(num_chunks)]
+        starts = list(range(num_chunks))
+
+        connector._batched_transfer(
+            memory_objs,
+            starts,
+            block_ids=[],
+            direction=lmc_ops_transfer_direction(),
+            stream=None,
+        )
+
+        assert objects_per_call, "kernel was never invoked"
+        assert max(objects_per_call) <= 4
+        # Every chunk must still be transferred exactly once.
+        assert sum(objects_per_call) == num_chunks
+
+
+def lmc_ops_transfer_direction() -> object:
+    """Return any TransferDirection value (direction is opaque to the stub)."""
+    # First Party
+    import lmcache.c_ops as lmc_ops
+
+    return lmc_ops.TransferDirection.D2H
