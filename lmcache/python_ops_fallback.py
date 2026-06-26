@@ -455,23 +455,33 @@ def memcpy(dst_buf: Any, src_buf: Any, length: int) -> bool:
         ValueError: If buffer is null or length exceeds buffer size.
         TypeError: If input does not support buffer protocol.
     """
+
     # memoryview() auto check buffer protocol，raise TypeError if not support
-    dst_mv = memoryview(dst_buf)
-    src_mv = memoryview(src_buf)
+    dst_bytes_mv = memoryview(dst_buf).cast("B")
+    src_bytes_mv = memoryview(src_buf).cast("B")
 
-    dst_bytes = len(dst_mv) * dst_mv.itemsize
-    src_bytes = len(src_mv) * src_mv.itemsize
+    # Check writability of destination
+    if dst_bytes_mv.readonly:
+        raise TypeError("Destination buffer is not writable")
 
-    if length > dst_bytes or length > src_bytes:
+    if length > len(dst_bytes_mv) or length > len(src_bytes_mv):
         raise ValueError("Length exceeds buffer size")
 
     if length <= 0:
         return False
-    # Note: mypy doesn't know about memoryview.ctypes,
-    # but it's a standard Python 3.3+ attribute
+
+    # Use ctypes.from_buffer for destination (must be writable)
+    # Use ctypes.from_buffer_copy for source (can be read-only)
+    dst_array = (ctypes.c_uint8 * length).from_buffer(dst_bytes_mv)
+
+    if src_bytes_mv.readonly:
+        src_array = (ctypes.c_uint8 * length).from_buffer_copy(src_bytes_mv)
+    else:
+        src_array = (ctypes.c_uint8 * length).from_buffer(src_bytes_mv)
+
     ctypes.memmove(
-        ctypes.c_void_p(dst_mv.cast("B").ctypes.data),  # type: ignore[attr-defined]
-        ctypes.c_void_p(src_mv.cast("B").ctypes.data),  # type: ignore[attr-defined]
+        ctypes.byref(dst_array),
+        ctypes.byref(src_array),
         length,
     )
     return True
