@@ -164,6 +164,18 @@ def test_raw_block_device_id_resolves_nvme_namespace_paths(monkeypatch):
     )
     assert observed_paths[-1] == "/sys/block/nvme0n1/wwid"
 
+    assert (
+        resolve_raw_block_device_id("/dev/nvme0n1p1")
+        == "nvme:nvme.11111111-2222-3333-4444-555555555555:p1"
+    )
+    assert observed_paths[-1] == "/sys/block/nvme0n1/wwid"
+
+    assert (
+        resolve_raw_block_device_id("/dev/nvme0n1p2")
+        == "nvme:nvme.11111111-2222-3333-4444-555555555555:p2"
+    )
+    assert observed_paths[-1] == "/sys/block/nvme0n1/wwid"
+
 
 def test_raw_block_device_id_resolves_regular_file_identity(tmp_path):
     path = make_raw_block_file(tmp_path)

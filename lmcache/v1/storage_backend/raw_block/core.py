@@ -117,16 +117,17 @@ def _resolve_sysfs_queue_dir(device_path: str) -> Optional[str]:
     return None
 
 
-def _resolve_nvme_block_name(device_path: str) -> Optional[str]:
-    """Resolve the NVMe block namespace name for block or generic char paths."""
+def _resolve_nvme_block_name(device_path: str) -> Optional[tuple[str, Optional[str]]]:
+    """Resolve the NVMe block namespace name and optional partition suffix."""
     base_name = os.path.basename(os.path.realpath(device_path))
-    match = re.fullmatch(r"nvme\d+n\d+", base_name)
+    match = re.fullmatch(r"(nvme\d+n\d+)(p\d+)?", base_name)
     if match:
-        return base_name
+        block_name, partition_suffix = match.groups()
+        return block_name, partition_suffix
     match = re.fullmatch(r"ng(\d+)n(\d+)", base_name)
     if match:
         ctrl, nsid = match.groups()
-        return f"nvme{ctrl}n{nsid}"
+        return f"nvme{ctrl}n{nsid}", None
     return None
 
 
@@ -149,13 +150,27 @@ def resolve_raw_block_device_id(device_path: str) -> Optional[str]:
 
     Returns:
         ``nvme:<wwid>`` for NVMe namespaces with a sysfs WWID,
+        ``nvme:<wwid>:<partition_suffix>`` for NVMe partitions,
         ``file:<st_dev>:<st_ino>:<st_size>`` for regular files, or None when
         no supported stable identity can be resolved.
+
+    Notes:
+        NVMe generic character devices, such as ``/dev/ng0n1``, identify the
+        whole namespace and do not encode partition identity. They intentionally
+        resolve to ``nvme:<wwid>`` rather than matching partition block paths such
+        as ``/dev/nvme0n1p1``. Partition-aware ``io_uring_cmd`` would require a
+        separate logical device path and partition-offset handling.
     """
-    block_name = _resolve_nvme_block_name(device_path)
-    if block_name is not None:
+    nvme_block = _resolve_nvme_block_name(device_path)
+    if nvme_block is not None:
+        block_name, partition_suffix = nvme_block
         wwid = _read_sysfs_text(f"/sys/block/{block_name}/wwid")
-        return f"nvme:{wwid}" if wwid else None
+        if wwid is None:
+            return None
+        device_id = f"nvme:{wwid}"
+        if partition_suffix is not None:
+            return f"{device_id}:{partition_suffix}"
+        return device_id
 
     try:
         st = os.stat(os.path.realpath(device_path))
