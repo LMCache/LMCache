@@ -21,6 +21,7 @@ from lmcache.v1.multiprocess.mq import (
     BlockingRequestHandler,
     MessageQueueClient,
     MessageQueueServer,
+    _affinity_key_from_identity,
 )
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
@@ -766,6 +767,37 @@ def test_add_affinity_thread_pool():
     assert len(server.extra_pools) == 1
 
     server.close()
+
+
+def test_affinity_key_from_identity_dense_rank():
+    """A decimal identity (dense rank) is returned as that integer."""
+    assert _affinity_key_from_identity(b"0") == 0
+    assert _affinity_key_from_identity(b"4") == 4
+    assert _affinity_key_from_identity(b"127") == 127
+
+
+def test_affinity_key_from_identity_hash_fallback():
+    """A non-integer identity falls back to hashing (legacy behavior)."""
+    opaque = b"\x00\x9a\x1f\x42\x07"
+    assert _affinity_key_from_identity(opaque) == hash(opaque)
+
+
+def test_mq_client_routing_key_sets_identity():
+    """routing_key stamps the DEALER identity; omitting it leaves it unset."""
+    context = zmq.Context.instance()
+
+    keyed = MessageQueueClient("tcp://127.0.0.1:15710", context, routing_key=4)
+    try:
+        assert keyed.socket.getsockopt(zmq.IDENTITY) == b"4"
+    finally:
+        keyed.close()
+
+    default = MessageQueueClient("tcp://127.0.0.1:15711", context)
+    try:
+        # An un-set DEALER identity reads back as empty bytes.
+        assert default.socket.getsockopt(zmq.IDENTITY) == b""
+    finally:
+        default.close()
 
 
 def test_normal_pool_error_on_sync_handler():

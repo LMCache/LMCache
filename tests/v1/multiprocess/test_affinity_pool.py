@@ -45,6 +45,79 @@ def test_affinity_routing():
     pool.shutdown()
 
 
+def test_dense_keys_get_distinct_workers():
+    """Dense keys 0..N-1 each land on their own worker (1:1, no collision).
+
+    This is the property that fixes the hash-collision bug: with a dense rank
+    key and ``max_workers >= world_size``, every rank gets a dedicated thread
+    rather than colliding onto a shared slot while others sit idle.
+    """
+    num_workers = 8
+    pool = AffinityThreadPool(max_workers=num_workers, thread_name_prefix="dense")
+
+    def record_thread() -> str:
+        return threading.current_thread().name
+
+    futures = [
+        (rank, pool.submit(record_thread, affinity_key=rank))
+        for rank in range(num_workers)
+    ]
+    threads = {rank: f.result(timeout=5) for rank, f in futures}
+
+    # Every rank ran on a distinct worker thread -> no idle workers, no sharing.
+    assert len(set(threads.values())) == num_workers
+    # And each rank lands on the slot equal to its index.
+    for rank in range(num_workers):
+        assert threads[rank] == f"dense-{rank}"
+
+    pool.shutdown()
+
+
+def test_collision_warning_on_shared_slot():
+    """Two distinct keys mapping to one slot logs a single WARNING.
+
+    LMCache loggers set ``propagate = False``, so assert on the module logger
+    directly rather than via the ``caplog`` (root-logger) fixture.
+    """
+    # Standard
+    from unittest.mock import patch
+
+    # First Party
+    from lmcache.v1.multiprocess import affinity_pool as affinity_pool_mod
+
+    pool = AffinityThreadPool(max_workers=2, thread_name_prefix="collide")
+    with patch.object(affinity_pool_mod.logger, "warning") as mock_warning:
+        # keys 0 and 2 both map to slot 0 (2 workers) -> collision.
+        pool.submit(lambda: None, affinity_key=0).result(timeout=5)
+        pool.submit(lambda: None, affinity_key=2).result(timeout=5)
+        # A third colliding key must not produce a second warning.
+        pool.submit(lambda: None, affinity_key=4).result(timeout=5)
+
+    assert mock_warning.call_count == 1
+    assert "both map to" in mock_warning.call_args.args[0]
+    pool.shutdown()
+
+
+def test_no_collision_warning_for_dense_keys():
+    """Dense keys within the worker count never warn."""
+    # Standard
+    from unittest.mock import patch
+
+    # First Party
+    from lmcache.v1.multiprocess import affinity_pool as affinity_pool_mod
+
+    pool = AffinityThreadPool(max_workers=4, thread_name_prefix="nocollide")
+    with patch.object(affinity_pool_mod.logger, "warning") as mock_warning:
+        for rank in range(4):
+            pool.submit(lambda: None, affinity_key=rank).result(timeout=5)
+        # Re-submitting the same keys reuses their slots -> still no collision.
+        for rank in range(4):
+            pool.submit(lambda: None, affinity_key=rank).result(timeout=5)
+
+    assert mock_warning.call_count == 0
+    pool.shutdown()
+
+
 def test_same_key_serialization():
     """Tasks with the same affinity key execute sequentially."""
     pool = AffinityThreadPool(max_workers=2)
