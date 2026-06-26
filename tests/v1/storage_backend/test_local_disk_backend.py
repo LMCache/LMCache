@@ -466,3 +466,23 @@ class TestGetBlockingCachePolicyUpdate:
         assert result is None
         mock_update.assert_not_called()
         local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_batched_get_non_blocking_lock_release_on_allocation_failure(
+        self, local_disk_backend: LocalDiskBackend, async_loop
+    ) -> None:
+        """Release disk_lock when allocate returns None."""
+        key = create_test_key(104)
+        shape = torch.Size([28, 2, 256, 8, 128])
+        self._inject_key(local_disk_backend, key, shape, torch.bfloat16)
+
+        # Mock allocate returning None
+        with patch.object(
+            local_disk_backend.local_cpu_backend, "allocate", return_value=None
+        ):
+            coro = local_disk_backend.batched_get_non_blocking("test_lookup", [key])
+            results = async_loop.run_until_complete(coro)
+
+        assert results == []
+        # Verify lock is released and can be acquired again without blocking
+        assert not local_disk_backend.disk_lock.locked()
+        local_disk_backend.local_cpu_backend.memory_allocator.close()

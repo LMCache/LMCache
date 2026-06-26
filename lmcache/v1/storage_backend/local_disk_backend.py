@@ -444,43 +444,44 @@ class LocalDiskBackend(StorageBackendInterface):
 
         logger.debug(f"lookup_id: {lookup_id}; Prefetching {len(keys)} keys from disk.")
         for key in keys:
-            self.disk_lock.acquire()
-            assert key in self.dict, f"Key {key} not found in disk cache after pinning"
-
-            path = self.dict[key].path
-            dtype = self.dict[key].dtype
-            shape = self.dict[key].shape
-            fmt = self.dict[key].fmt
-
-            assert dtype is not None
-            assert shape is not None
-
-            # busy_loop=False prevents spinning on the event loop thread;
-            # if staging memory is exhausted the caller will get a logged
-            # error rather than a silent deadlock.
-            memory_obj = self.local_cpu_backend.allocate(
-                shape,
-                dtype,
-                fmt,
-                busy_loop=False,
-            )
-
-            if memory_obj is None:
-                logger.error(
-                    "Memory allocation failed during async disk load for key %s. "
-                    "CPU staging pool may be exhausted (unpin() not called after "
-                    "a previous retrieve). Returning partial results.",
-                    key,
+            with self.disk_lock:
+                assert key in self.dict, (
+                    f"Key {key} not found in disk cache after pinning"
                 )
-                return mem_objs
 
-            self.dict[key].pin()
+                path = self.dict[key].path
+                dtype = self.dict[key].dtype
+                shape = self.dict[key].shape
+                fmt = self.dict[key].fmt
 
-            # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
-            # Update cache recency
-            self.cache_policy.update_on_hit(key, self.dict)
+                assert dtype is not None
+                assert shape is not None
 
-            self.disk_lock.release()
+                # busy_loop=False prevents spinning on the event loop thread;
+                # if staging memory is exhausted the caller will get a logged
+                # error rather than a silent deadlock.
+                memory_obj = self.local_cpu_backend.allocate(
+                    shape,
+                    dtype,
+                    fmt,
+                    busy_loop=False,
+                )
+
+                if memory_obj is None:
+                    logger.error(
+                        "Memory allocation failed during async disk load for key %s. "
+                        "CPU staging pool may be exhausted (unpin() not called after "
+                        "a previous retrieve). Returning partial results.",
+                        key,
+                    )
+                    return mem_objs
+
+                self.dict[key].pin()
+
+                # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
+                # Update cache recency
+                self.cache_policy.update_on_hit(key, self.dict)
+
             logger.debug(f"Prefetching {key} from disk.")
             memory_obj.pin()
             mem_objs.append(memory_obj)
