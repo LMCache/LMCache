@@ -416,34 +416,28 @@ class TestTRTLLMBatchedTransferCap:
             <= gpu_connectors._MULTI_LAYER_KERNEL_MAX_OBJECTS
         )
 
-    def test_batched_transfer_never_exceeds_kernel_cap(
+    def test_batched_to_gpu_never_exceeds_kernel_cap(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Standard
+        from unittest.mock import MagicMock
         import contextlib
 
         # First Party
         from lmcache.v1.gpu_connector import gpu_connectors
         from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
-
-        # Build without __init__ to avoid creating real CUDA streams.
-        connector = object.__new__(TRTLLMGPUConnector)
-        connector.device = torch.device("cpu")
-        connector.chunk_size = 256
-        connector.paged_buffer_ptrs = None
-        connector.shape_desc = None
-        connector._kv_format = None
-        connector._batch_size = gpu_connectors._TRTLLM_KERNEL_BATCH_SIZE
-
-        # One block per chunk is enough to exercise the batching stride.
-        monkeypatch.setattr(
-            connector, "_get_chunk_block_ids", lambda block_ids, start: [start]
+        from lmcache.v1.memory_management import (
+            MemoryFormat,
+            MemoryObj,
+            MemoryObjMetadata,
+            TensorMemoryObj,
         )
-        monkeypatch.setattr(connector, "_stage_block_ids", lambda ids: ids)
+
+        # CPU-only test: the transfer streams and the kernel are the only GPU
+        # bits, so stub them and exercise everything else for real.
+        monkeypatch.setattr(torch.cuda, "Stream", lambda **kwargs: MagicMock())
         monkeypatch.setattr(
-            gpu_connectors.torch.cuda,
-            "stream",
-            lambda stream: contextlib.nullcontext(),
+            torch.cuda, "stream", lambda stream: contextlib.nullcontext()
         )
 
         objects_per_call: list[int] = []
@@ -455,38 +449,46 @@ class TestTRTLLMBatchedTransferCap:
             gpu_connectors.lmc_ops, "multi_layer_block_kv_transfer", _record
         )
 
-        class _FakeTensor:
-            def __init__(self, ptr: int) -> None:
-                self._ptr = ptr
+        num_kv_heads, head_dim, tokens_per_block = 2, 64, 16
+        num_layers, chunk_size = 4, 256
+        connector = TRTLLMGPUConnector(
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            hidden_dim_size=num_kv_heads * head_dim,
+            num_layers=num_layers,
+            chunk_size=chunk_size,
+            dtype=torch.bfloat16,
+            device=torch.device("cpu"),
+        )
 
-            def data_ptr(self) -> int:
-                return self._ptr
+        # Register the TRT-LLM pool via the public API. flat dim is
+        # num_kv_heads * tokens_per_block * head_dim.
+        flat = num_kv_heads * tokens_per_block * head_dim
+        pool = torch.zeros(4, num_layers, 2, flat, dtype=torch.bfloat16)
+        connector.register_kv_caches(pool)
 
-        class _FakeMemoryObj:
-            def __init__(self, ptr: int) -> None:
-                self.tensor = _FakeTensor(ptr)
+        def _cpu_memory_obj() -> TensorMemoryObj:
+            raw = torch.zeros(16, dtype=torch.float32)
+            meta = MemoryObjMetadata(
+                shape=torch.Size([16]),
+                dtype=torch.float32,
+                address=0,
+                phy_size=16 * 4,
+                fmt=MemoryFormat.KV_2LTD,
+                ref_count=1,
+            )
+            return TensorMemoryObj(raw, meta, parent_allocator=None)
 
         num_chunks = 9  # > 4 chunks: the failing case before the fix.
-        memory_objs = [_FakeMemoryObj(ptr=i + 1) for i in range(num_chunks)]
-        starts = list(range(num_chunks))
+        blocks_per_chunk = chunk_size // tokens_per_block
+        memory_objs: list[MemoryObj] = [_cpu_memory_obj() for _ in range(num_chunks)]
+        starts = [i * chunk_size for i in range(num_chunks)]
+        ends = [start + chunk_size for start in starts]
+        block_ids = list(range(num_chunks * blocks_per_chunk))
 
-        connector._batched_transfer(
-            memory_objs,
-            starts,
-            block_ids=[],
-            direction=lmc_ops_transfer_direction(),
-            stream=None,
-        )
+        connector.batched_to_gpu(memory_objs, starts, ends, block_ids=block_ids)
 
         assert objects_per_call, "kernel was never invoked"
         assert max(objects_per_call) <= 4
         # Every chunk must still be transferred exactly once.
         assert sum(objects_per_call) == num_chunks
-
-
-def lmc_ops_transfer_direction() -> object:
-    """Return any TransferDirection value (direction is opaque to the stub)."""
-    # First Party
-    import lmcache.c_ops as lmc_ops
-
-    return lmc_ops.TransferDirection.D2H
