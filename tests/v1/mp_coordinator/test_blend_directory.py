@@ -2,6 +2,7 @@
 """Tests for the coordinator global CacheBlend fingerprint directory."""
 
 # Standard
+import base64
 import threading
 
 # Third Party
@@ -12,7 +13,13 @@ from lmcache.v1.mp_coordinator.blend_directory import (
     GlobalBlendMatcher,
     StoreRange,
 )
-from lmcache.v1.mp_coordinator.schemas import decode_tokens, encode_tokens
+from lmcache.v1.mp_coordinator.schemas import (
+    decode_tokens,
+    decode_tokens_u64,
+    encode_tokens,
+    encode_tokens_u64,
+)
+from lmcache.integration.vllm.utils import mm_token_surrogate_id
 
 CHUNK = 3
 SCOPE = "model-a"
@@ -76,6 +83,37 @@ class TestRegisterMatch:
         m = GlobalBlendMatcher(chunk_size=CHUNK)
         m.register([store_range("K", [1, 2, 3])])
         assert m.match(SCOPE, [7, 8, 9]) == []
+
+    def test_vlm_surrogate_identity_distinguishes_images(self) -> None:
+        m = GlobalBlendMatcher(chunk_size=CHUNK)
+        same_image_tokens = [
+            101,
+            mm_token_surrogate_id("image-a", 0),
+            mm_token_surrogate_id("image-a", 1),
+        ]
+        different_image_tokens = [
+            101,
+            mm_token_surrogate_id("image-b", 0),
+            mm_token_surrogate_id("image-b", 1),
+        ]
+
+        assert m.register([store_range("IMG", same_image_tokens)]) == 1
+
+        same_matches = m.match(SCOPE, same_image_tokens)
+        assert [(x.object_key, x.old_st, x.cur_st) for x in same_matches] == [
+            ("IMG0", 0, 0)
+        ]
+        assert m.match(SCOPE, different_image_tokens) == []
+
+    def test_vlm_surrogate_identity_distinguishes_offsets_within_image(self) -> None:
+        m = GlobalBlendMatcher(chunk_size=CHUNK)
+        image_tokens = [mm_token_surrogate_id("image-a", i) for i in range(9)]
+        shifted_image_tokens = image_tokens[3:6]
+
+        assert m.register([store_range("IMG", image_tokens[:3])]) == 1
+
+        assert m.match(SCOPE, image_tokens[:3])[0].object_key == "IMG0"
+        assert m.match(SCOPE, shifted_image_tokens) == []
 
 
 class TestIdempotencyEviction:
@@ -233,27 +271,29 @@ class TestConcurrency:
 
 class TestTokenCodec:
     def test_round_trip(self) -> None:
+        tokens = [0, 1, 2, 65535, 2**31, 2**32 - 1, 2**32 + 7, 2**63 - 1]
+        decoded = decode_tokens_u64(encode_tokens_u64(tokens))
+        assert decoded.tolist() == tokens
+
+    def test_legacy_u32_round_trip(self) -> None:
         tokens = [0, 1, 2, 65535, 2**31, 2**32 - 1]
         decoded = decode_tokens(encode_tokens(tokens))
         assert decoded.tolist() == tokens
 
     def test_empty(self) -> None:
-        assert decode_tokens(encode_tokens([])).tolist() == []
+        assert decode_tokens_u64(encode_tokens_u64([])).tolist() == []
 
     def test_decoded_feeds_match(self) -> None:
         m = GlobalBlendMatcher(chunk_size=CHUNK)
         doc = [1, 2, 3, 4, 5, 6]
         m.register([store_range("K", doc)])
-        out = m.match(SCOPE, decode_tokens(encode_tokens(doc)))
+        out = m.match(SCOPE, decode_tokens_u64(encode_tokens_u64(doc)))
         assert [x.object_key for x in out] == ["K0", "K1"]
 
     def test_malformed_base64_raises(self) -> None:
         with pytest.raises(ValueError):
-            decode_tokens("not valid base64 !!!")
+            decode_tokens_u64("not valid base64 !!!")
 
     def test_bad_byte_length_raises(self) -> None:
-        # Standard
-        import base64
-
         with pytest.raises(ValueError):
-            decode_tokens(base64.b64encode(b"abc").decode())  # 3 bytes, not /4
+            decode_tokens_u64(base64.b64encode(b"abcd").decode())  # 4 bytes, not /8
