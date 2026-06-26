@@ -8,6 +8,7 @@ import types
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.platform.device_ext import DeviceExt
 
 try:
     # First Party
@@ -60,6 +61,17 @@ def _detect_device() -> tuple[Any, str]:
 torch_dev, torch_device_type = _detect_device()
 
 logger.info(" torch_dev=%s, torch_device_type=%s", torch_dev, torch_device_type)
+
+
+# Attach the DeviceExt instance as ``torch_dev.ext``.  This monkey-patches a
+# standard torch module (e.g. ``torch.cuda``) with a custom attribute that does
+# not exist in the original module.  The ``# type: ignore[attr-defined]`` suppresses
+# the expected mypy/pyright "attr-defined" error from this intentional extension.
+if torch_dev is not None:
+    torch_dev.ext = DeviceExt(torch_device_type)  # type: ignore[attr-defined]
+else:
+    logger.warning("torch_dev is None, skipping DeviceExt initialization.")
+    pass
 
 
 # --------------------------

@@ -1027,7 +1027,14 @@ def test_engine_context_shm_pool_info(
 
     with patch(
         "lmcache.v1.distributed.config.torch_dev",
-        type("TorchDevStub", (), {"cudart": object()})(),
+        type(
+            "TorchDevStub",
+            (),
+            {
+                "cudart": object(),
+                "ext": type("_Ext", (), {"is_pin_supported": True})(),
+            },
+        )(),
     ):
         config = _make_storage_manager_config(**config_kwargs)
 
