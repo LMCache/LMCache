@@ -324,7 +324,7 @@ def _run_object_group_transfer_plan(
                 [buffer.data_ptr() for buffer in temp_buffers],
                 cache_context.get_shape_desc(kernel_group_id),
                 cache_context.get_slots_per_chunk_in_sw(kernel_group_id),
-                cache_context.engine_kv_format,
+                cache_context.get_engine_kv_format(kernel_group_id),
                 block_ids_tensor.data_ptr(),
             )
         )
@@ -336,7 +336,7 @@ def _run_object_group_transfer_plan(
     ]
     keep_alive.extend(object_group_buffers)
 
-    sw_size_chunks = kv_groups_manager.get_sw_size_chunks(object_group_id)
+    sw_size_chunks = object_group.sw_size_chunks
     num_objects_to_skip = 0
     if sw_size_chunks >= 1 and is_h2d:
         num_objects_to_skip = max(0, len(memory_objs) - sw_size_chunks)
