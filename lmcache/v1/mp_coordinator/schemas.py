@@ -13,7 +13,13 @@ from typing import Annotated
 import base64
 
 # Third Party
-from pydantic import BaseModel, Field, StringConstraints, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    model_validator,
+    StringConstraints,
+    field_validator,
+)
 import numpy as np
 
 # First Party
@@ -23,8 +29,8 @@ from lmcache.v1.distributed.api import EncodedObjectKey  # noqa: F401  re-export
 def encode_tokens(tokens: "list[int] | np.ndarray") -> str:
     """Encode token ids into a compact base64 wire string.
 
-    Token ids fit in ``uint32``, so a little-endian ``uint32`` buffer is far
-    smaller than a JSON integer list and decodes in one ``np.frombuffer`` call.
+    Legacy compatibility helper for the original ``tokens_b64`` field, which
+    uses a little-endian ``uint32`` buffer.
 
     Args:
         tokens: Token ids (a ``list[int]`` or any array castable to ``uint32``).
@@ -43,8 +49,7 @@ def decode_tokens(tokens_b64: str) -> np.ndarray:
         tokens_b64: Base64 of a little-endian ``uint32`` token buffer.
 
     Returns:
-        A ``uint64`` array of token ids (widened so it feeds the hashers
-        directly).
+        A ``uint64`` array of token ids, widened after decode.
 
     Raises:
         ValueError: If ``tokens_b64`` is not valid base64 or not a multiple of
@@ -60,6 +65,47 @@ def decode_tokens(tokens_b64: str) -> np.ndarray:
             "(malformed uint32 token buffer)"
         )
     return np.frombuffer(raw, dtype="<u4").astype(np.uint64)
+
+
+def encode_tokens_u64(tokens: "list[int] | np.ndarray") -> str:
+    """Encode token ids into the current uint64 CacheBlend match field.
+
+    CacheBlend token ids may include signed-int64-safe multimodal surrogate
+    values, so the new wire format uses a little-endian ``uint64`` buffer.
+
+    Args:
+        tokens: Token ids (a ``list[int]`` or any array castable to ``uint64``).
+
+    Returns:
+        Base64 of the little-endian ``uint64`` token buffer.
+    """
+    arr = np.ascontiguousarray(np.asarray(tokens, dtype="<u8"))
+    return base64.b64encode(arr.tobytes()).decode("ascii")
+
+
+def decode_tokens_u64(tokens_u64_b64: str) -> np.ndarray:
+    """Decode a base64 token string produced by :func:`encode_tokens_u64`.
+
+    Args:
+        tokens_u64_b64: Base64 of a little-endian ``uint64`` token buffer.
+
+    Returns:
+        A ``uint64`` array of token ids.
+
+    Raises:
+        ValueError: If ``tokens_u64_b64`` is not valid base64 or not a multiple
+            of 8 bytes.
+    """
+    try:
+        raw = base64.b64decode(tokens_u64_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"tokens_u64_b64 is not valid base64: {exc}") from exc
+    if len(raw) % 8 != 0:
+        raise ValueError(
+            f"tokens_u64_b64 byte length {len(raw)} is not a multiple of 8 "
+            "(malformed uint64 token buffer)"
+        )
+    return np.frombuffer(raw, dtype="<u8")
 
 
 class RegisterRequest(BaseModel):
@@ -284,33 +330,61 @@ class BlendMatchRequest(BaseModel):
 
     Attributes:
         model_scope: Scope to match within.
-        tokens_b64: The request tokens, packed via :func:`encode_tokens`
-            (base64 little-endian ``uint32``).
+        tokens_u64_b64: The current request token field, packed via
+            :func:`encode_tokens_u64` (base64 little-endian ``uint64``).
+        tokens_b64: Legacy request token field, packed via
+            :func:`encode_tokens` (base64 little-endian ``uint32``).
     """
 
     model_scope: str
-    tokens_b64: str = ""
+    tokens_u64_b64: str | None = None
+    tokens_b64: str | None = None
 
-    @field_validator("tokens_b64")
+    @model_validator(mode="after")
+    def _validate_exactly_one_token_payload(self) -> "BlendMatchRequest":
+        """Require exactly one token payload field."""
+        if self.tokens_u64_b64 is not None and self.tokens_b64 is not None:
+            raise ValueError("send only one of tokens_u64_b64 or tokens_b64")
+        if self.tokens_u64_b64 is None and self.tokens_b64 is None:
+            raise ValueError("one of tokens_u64_b64 or tokens_b64 is required")
+        return self
+
+    def decoded_tokens(self) -> np.ndarray:
+        """Decode the request token payload as ``uint64`` tokens."""
+        if self.tokens_u64_b64 is not None:
+            return decode_tokens_u64(self.tokens_u64_b64)
+        assert self.tokens_b64 is not None
+        return decode_tokens(self.tokens_b64)
+
+    @field_validator("tokens_u64_b64")
     @classmethod
-    def _validate_tokens_b64(cls, value: str) -> str:
+    def _validate_tokens_u64_b64(cls, value: str | None) -> str | None:
         """Reject a malformed token buffer at request validation.
 
-        Without this, ``decode_tokens`` would raise ``ValueError`` inside the
-        route handler, which FastAPI surfaces as a 500 (server error) for what
-        is really bad client input. Validating here returns a 422 instead.
+        Without this, decoding would raise ``ValueError`` inside the route
+        handler, which FastAPI surfaces as a 500 (server error) for what is
+        really bad client input. Validating here returns a 422 instead.
 
         Args:
-            value: The base64 ``tokens_b64`` field.
+            value: The base64 ``tokens_u64_b64`` field.
 
         Returns:
             The unchanged value once it is confirmed decodable.
 
         Raises:
             ValueError: If ``value`` is not valid base64 or not a whole number
-                of ``uint32`` tokens (surfaced by FastAPI as 422).
+                of ``uint64`` tokens (surfaced by FastAPI as 422).
         """
-        decode_tokens(value)
+        if value is not None:
+            decode_tokens_u64(value)
+        return value
+
+    @field_validator("tokens_b64")
+    @classmethod
+    def _validate_tokens_b64(cls, value: str | None) -> str | None:
+        """Reject a malformed legacy uint32 token buffer."""
+        if value is not None:
+            decode_tokens(value)
         return value
 
 
