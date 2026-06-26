@@ -205,10 +205,13 @@ Source: ``lmcache/v1/distributed/config.py``
      - Enable or disable lazy allocation for L1 memory.
        Pass ``--l1-use-lazy`` to enable (default) or
        ``--no-l1-use-lazy`` to explicitly disable.
-       Lazy allocation relies on ``cudart`` host-pinned memory, so on
-       non-CUDA backends (where ``lmcache.torch_dev`` exposes no
-       ``cudart`` attribute) it is automatically downgraded to eager
-       allocation with a logged warning, regardless of the flag value.
+       Lazy allocation requires host-memory pinning, which is provided per
+       platform by the ``DeviceExt`` backend attached to ``torch_dev`` (CUDA
+       uses ``cudaHostRegister`` via the torch ``cudart`` binding, with a
+       ``libcudart`` ``ctypes`` fallback). On backends where
+       ``torch_dev.ext.is_pin_supported`` is ``False`` it is automatically
+       downgraded to eager allocation with a logged warning, regardless of
+       the flag value.
    * - ``--l1-init-size-gb``
      - ``20``
      - Initial allocation size (GB) when using lazy allocation.
