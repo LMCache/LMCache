@@ -58,18 +58,22 @@ class TestCoordinatorCommandArguments:
                 "512",
                 "--blend-probe-stride",
                 "2",
+                "--timeout-keep-alive",
+                "15",
             ]
         )
         assert args.host == "127.0.0.1"
         assert args.port == 9999
         assert args.blend_chunk_size == 512
         assert args.blend_probe_stride == 2
+        assert args.timeout_keep_alive == 15
 
     def test_flags_default_to_none(self, parser):
         """Unset flags default to None so env/config defaults win."""
         args = parser.parse_args(["coordinator"])
         assert args.blend_chunk_size is None
         assert args.blend_probe_stride is None
+        assert args.timeout_keep_alive is None
 
 
 class TestCoordinatorCommandExecute:
@@ -88,6 +92,7 @@ class TestCoordinatorCommandExecute:
             trigger_watermark=None,
             blend_chunk_size=512,
             blend_probe_stride=2,
+            timeout_keep_alive=None,
         )
 
         captured = {}
