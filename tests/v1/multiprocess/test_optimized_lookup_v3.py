@@ -27,6 +27,10 @@ import numpy as np
 import pytest
 
 # First Party
+from lmcache.integration.vllm.utils import (
+    apply_mm_hashes_to_token_list,
+    mm_token_surrogate_id,
+)
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.multiprocess.custom_types import CBMatchResult
 from lmcache.v1.multiprocess.modules.blend_v3 import BlendTokenRangeMatcherV3
@@ -70,6 +74,12 @@ class OptimalLookupResult:
     prefix_hits: list[CBMatchResult]  # chain walk; old_st == cur_st, contiguous from 0
     cb_aligned: list[CBMatchResult]  # matcher hit; old_st == cur_st, past chain break
     cb_shifted: list[CBMatchResult]  # matcher hit; old_st != cur_st
+
+
+@dataclass(frozen=True)
+class DummyPlaceholderRange:
+    offset: int
+    length: int
 
 
 def _simulate_chain_walk(
@@ -370,6 +380,67 @@ def _chunk(seed: int) -> list[int]:
 # ---------------------------------------------------------------------------
 # Test cases
 # ---------------------------------------------------------------------------
+
+
+def test_vlm_surrogate_identity_distinguishes_images() -> None:
+    """Large multimodal surrogate ids are part of the V3 matcher identity."""
+    matcher = BlendTokenRangeMatcherV3(chunk_size=3)
+    same_image_tokens = [
+        101,
+        mm_token_surrogate_id("image-a", 0),
+        mm_token_surrogate_id("image-a", 1),
+    ]
+    different_image_tokens = [
+        101,
+        mm_token_surrogate_id("image-b", 0),
+        mm_token_surrogate_id("image-b", 1),
+    ]
+    shifted_image_tokens = [
+        101,
+        mm_token_surrogate_id("image-a", 3),
+        mm_token_surrogate_id("image-a", 4),
+    ]
+    chunk_hash = b"image-a-chunk"
+
+    matcher.on_new_token_hashes(same_image_tokens, [chunk_hash])
+
+    same_matches = matcher.match_sub_sequence(same_image_tokens)
+    assert [(x.hash, x.old_st, x.cur_st) for x in same_matches] == [(chunk_hash, 0, 0)]
+    assert matcher.match_sub_sequence(different_image_tokens) == []
+    assert matcher.match_sub_sequence(shifted_image_tokens) == []
+
+
+def test_vlm_identity_salts_text_chunks_after_placeholder() -> None:
+    """Sparse matcher must not reuse post-image text chunks across images."""
+    chunk_size = 4
+    matcher = BlendTokenRangeMatcherV3(chunk_size=chunk_size)
+    raw_tokens = [
+        101,
+        102,
+        103,
+        104,
+        201,
+        202,
+        203,
+        204,
+    ]
+    placeholder = [DummyPlaceholderRange(offset=1, length=2)]
+
+    image_a_tokens = apply_mm_hashes_to_token_list(raw_tokens, ["image-a"], placeholder)
+    image_b_tokens = apply_mm_hashes_to_token_list(raw_tokens, ["image-b"], placeholder)
+
+    assert image_a_tokens is not None
+    assert image_b_tokens is not None
+    assert image_a_tokens[4:8] != image_b_tokens[4:8]
+
+    matcher.on_new_token_hashes(image_a_tokens, [b"image-a-0", b"image-a-1"])
+
+    assert matcher.match_sub_sequence(image_b_tokens) == []
+    same_matches = matcher.match_sub_sequence(image_a_tokens)
+    assert [(x.hash, x.old_st, x.cur_st) for x in same_matches] == [
+        (b"image-a-0", 0, 0),
+        (b"image-a-1", 4, 4),
+    ]
 
 
 class TestOptimizedLookupEquivalence:
