@@ -477,7 +477,7 @@ class LocalDiskBackend(StorageBackendInterface):
                     for m in mem_objs:
                         m.unpin()
                         m.ref_count_down()
-                    for k in keys[:len(mem_objs)]:
+                    for k in keys[: len(mem_objs)]:
                         self.dict[k].unpin()
                     return []
 

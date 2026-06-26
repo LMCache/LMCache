@@ -471,8 +471,9 @@ class TestGetBlockingCachePolicyUpdate:
         self, local_disk_backend: LocalDiskBackend, async_loop
     ) -> None:
         """Release disk_lock, unpin and decrement ref count."""
-        from unittest.mock import MagicMock
+        # Standard
         from typing import Any
+        from unittest.mock import MagicMock
 
         key1 = create_test_key(104)
         key2 = create_test_key(105)
