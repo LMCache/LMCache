@@ -15,7 +15,7 @@ without rewriting the primitives):
 
 | Operator | Purpose |
 |---|---|
-| `fold` | Presence (`group x chunk x kv_rank`) → servable bitmap (bit `j` set iff every group can serve a length-`j+1` prefix). |
+| `fold` | Presence (`chunk x group x kv_rank`) → servable bitmap (bit `j` set iff every group can serve a length-`j+1` prefix). |
 | `highest_set_bit` | Highest set bit of a bitmap, or `-1` if none — on `fold`'s output, the hit length minus one (hit length = result + 1, so `-1` → 0). |
 | `unfold` | Hit length → per-group retain mask over the ranked layout. |
 

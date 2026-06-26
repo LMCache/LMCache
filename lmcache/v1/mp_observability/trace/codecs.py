@@ -204,6 +204,7 @@ def _enc_prefetch_handle(h: PrefetchHandle) -> dict[str, Any]:
         # Derived count kept for readable traces; decode rebuilds from indices.
         "l1_prefix_hit_count": len(h.l1_found_indices),
         "l1_found_indices": list(h.l1_found_indices),
+        "l1_hit_chunks": h.l1_hit_chunks,
         "total_requested_keys": h.total_requested_keys,
         "submit_time": h.submit_time,
         "l2_orig_indices": list(h.l2_orig_indices),
@@ -215,6 +216,7 @@ def _dec_prefetch_handle(d: dict[str, Any]) -> PrefetchHandle:
         prefetch_request_id=d["prefetch_request_id"],
         external_request_id=d["external_request_id"],
         l1_found_indices=tuple(d["l1_found_indices"]),
+        l1_hit_chunks=d.get("l1_hit_chunks", 0),
         total_requested_keys=d["total_requested_keys"],
         submit_time=d["submit_time"],
         l2_orig_indices=tuple(d.get("l2_orig_indices", ())),
@@ -246,9 +248,11 @@ def _dec_trim_policy(name: str) -> TrimPolicy:
 
 
 def _enc_attn_window(d: AttnWindowDesc) -> dict:
-    return {"num_chunks_in_sw": list(d.num_chunks_in_sw),
-            "world_size": d.world_size,
-            "force_retrieve_full_kv": d.force_retrieve_full_kv}
+    return {
+        "num_chunks_in_sw": list(d.num_chunks_in_sw),
+        "world_size": d.world_size,
+        "force_retrieve_full_kv": d.force_retrieve_full_kv,
+    }
 
 
 def _dec_attn_window(raw: dict | list) -> AttnWindowDesc:

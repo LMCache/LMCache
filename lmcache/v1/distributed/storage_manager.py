@@ -472,6 +472,7 @@ class StorageManager:
                 prefetch_request_id=prefetch_request_id,
                 external_request_id=external_request_id,
                 l1_found_indices=tuple(l1_found_indices),
+                l1_hit_chunks=0,
                 total_requested_keys=len(keys),
                 submit_time=time.monotonic(),
                 l2_orig_indices=tuple(sparse_l2_indices),
@@ -483,8 +484,13 @@ class StorageManager:
         # prefix. Keys past the L1 hit are sent to L2.
         if policy is TrimPolicy.PREFIX:
             return self._submit_prefix_fold(
-                keys, l1_read_result, attn_desc, extra_count,
-                external_request_id, layout_desc, skip_l2,
+                keys,
+                l1_read_result,
+                attn_desc,
+                extra_count,
+                external_request_id,
+                layout_desc,
+                skip_l2,
             )
 
     def _submit_prefix_fold(
@@ -494,35 +500,28 @@ class StorageManager:
         attn_desc: AttnWindowDesc,
         extra_count: int,
         external_request_id: str,
-        layout_desc: "MemoryLayoutDesc",
+        layout_desc: MemoryLayoutDesc,
         skip_l2: bool,
     ) -> PrefetchHandle:
-        """Compute the L1 prefix retain set via fold/unfold and submit
-        remaining keys to L2.
+        """PREFIX-policy path of :meth:`submit_prefetch_task`.
 
-        Builds the chunk-major L1 presence bitmap, folds it to the model-wide
-        hit length and per-object-group retain mask (sliding-window aware),
-        releases L1 read locks on present-but-not-retained keys, and sends
-        keys from chunk ``l1_hit_chunks`` onwards to L2 when an L2 adapter is
-        available.
+        Computes the sliding-window-aware L1 prefix hit, retains only the
+        in-window keys, releases read locks on non-retained L1 keys, and
+        submits remaining keys to L2.
 
         Args:
             keys: All requested object keys, in chunk-major order.
             l1_read_result: Per-key result from :meth:`L1Manager.reserve_read`.
-            attn_desc: Per-object-group attention windows for ``keys``.  The
-                embedded ``world_size`` determines the number of kv_rank shards
-                per chunk.
-            extra_count: Extra read locks per key to release on non-retained
-                keys (must match the ``reserve_read`` call).
+            attn_desc: Per-object-group attention windows for ``keys``.
+            extra_count: Extra read locks per key (must match the
+                ``reserve_read`` call).
             external_request_id: Caller request id for tracing.
-            layout_desc: Memory layout for L1 write buffer allocation (passed
-                to L2 prefetch controller).
+            layout_desc: Memory layout description.
             skip_l2: If True, skip L2 submission even if L2 adapters exist.
 
         Returns:
-            A PrefetchHandle with ``l1_found_indices`` set to the retained
-            L1 key indices and, when L2 is used, ``l2_orig_indices`` mapping
-            L2-local positions back to original positions.
+            A :class:`PrefetchHandle` tracking the L1 retained keys and any
+            outstanding L2 request.
         """
         num_groups = attn_desc.num_object_groups
         stride = num_groups * attn_desc.world_size
@@ -538,7 +537,10 @@ class StorageManager:
         if attn_desc.force_retrieve_full_kv:
             windows = [-1] * attn_desc.num_object_groups
         l1_hit_chunks, retain = fold_unfold_ranked(
-            l1_presence, num_chunks, attn_desc.world_size, windows,
+            l1_presence,
+            num_chunks,
+            attn_desc.world_size,
+            windows,
         )
         retain_set = retain.get_indices_set()
 
@@ -573,14 +575,12 @@ class StorageManager:
         l2_orig_indices: tuple[int, ...] = ()
 
         if not l1_only and remaining_keys:
-            prefetch_request_id = (
-                self._prefetch_controller.submit_prefetch_request(
-                    remaining_keys,
-                    layout_desc,
-                    extra_count=extra_count,
-                    attn_desc=attn_desc,
-                    policy=TrimPolicy.PREFIX,
-                )
+            prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
+                remaining_keys,
+                layout_desc,
+                extra_count=extra_count,
+                attn_desc=attn_desc,
+                policy=TrimPolicy.PREFIX,
             )
             l2_orig_indices = tuple(range(l1_key_boundary, len(keys)))
 
@@ -603,6 +603,7 @@ class StorageManager:
             prefetch_request_id=prefetch_request_id,
             external_request_id=external_request_id,
             l1_found_indices=tuple(retained_indices),
+            l1_hit_chunks=l1_hit_chunks,
             total_requested_keys=len(keys),
             submit_time=submit_time,
             l2_orig_indices=l2_orig_indices,
@@ -651,18 +652,14 @@ class StorageManager:
             Therefore, it's the caller’s responsibility to make sure not calling
             this function after the prefetch task is done.
         """
-        # Prefix-path only: l1_found_indices is contiguous, so len() == prefix hits.
-        l1_hits = len(handle.l1_found_indices)
         if handle.prefetch_request_id == -1:
-            # No L2 request: the L1 prefix hit count is final.
-            return l1_hits
+            return handle.l1_hit_chunks
 
         l2_r = self._prefetch_controller.query_lookup_result(handle.prefetch_request_id)
         if l2_r is None:
-            # Still in progress, or already consumed by query_prefetch_status.
             return None
-        # L2 lookup done: total prefix hits are L1 plus the L2 continuation.
-        return l1_hits + l2_r
+        # Both l1_hit_chunks and l2_r are chunk-level counts.
+        return handle.l1_hit_chunks + l2_r
 
     def wait_prefetch_status(
         self,

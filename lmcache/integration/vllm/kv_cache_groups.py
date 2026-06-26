@@ -28,6 +28,14 @@ def _is_sliding_window_spec(spec: Any) -> bool:
     return any(cls.__name__ == "SlidingWindowSpec" for cls in type(spec).__mro__)
 
 
+def _is_mamba_spec(spec: Any) -> bool:
+    """Return whether the KV cache spec is a vLLM Mamba spec.
+
+    Checked by class name so this module stays importable without vLLM.
+    """
+    return any(cls.__name__ == "MambaSpec" for cls in type(spec).__mro__)
+
+
 def _resolve_per_layer_sw_sizes(
     vllm_groups: Sequence[Any],
     layer_to_idx: Mapping[str, int],
@@ -35,7 +43,12 @@ def _resolve_per_layer_sw_sizes(
 ) -> list[int]:
     """Resolve the sliding window size in tokens for each registered KV tensor.
 
-    Will resolve -1 for non-sliding-window layers.
+    Resolves ``-1`` for full-attention layers, ``0`` for Mamba (linear
+    attention) layers, and the spec's ``sliding_window`` for sliding-window
+    attention layers.  Mamba layers carry fixed-size recurrent state that is
+    fully summarized by the most recent chunk, so they need zero historical
+    tokens.  The ``0`` sentinel is converted to ``sw_size_chunks=1`` (one
+    chunk) downstream by :meth:`_detect_object_groups`.
 
     Args:
         vllm_groups: vLLM ``KVCacheGroupSpec`` instances.
@@ -44,8 +57,8 @@ def _resolve_per_layer_sw_sizes(
 
     Returns:
         A list of length ``num_layers`` mapping each registered tensor index
-        to its sliding window size in tokens, or ``-1`` for
-        non-sliding-window layers.
+        to its window size in tokens: ``-1`` (full attention), ``0`` (Mamba),
+        or a positive value (sliding-window attention).
     """
     per_layer_sw_size = [-1] * num_layers
     for group in vllm_groups:
@@ -59,6 +72,8 @@ def _resolve_per_layer_sw_sizes(
             layer_spec = per_layer_specs[name] if per_layer_specs else spec
             if _is_sliding_window_spec(layer_spec):
                 per_layer_sw_size[layer_to_idx[name]] = layer_spec.sliding_window
+            elif _is_mamba_spec(layer_spec):
+                per_layer_sw_size[layer_to_idx[name]] = 0
     return per_layer_sw_size
 
 

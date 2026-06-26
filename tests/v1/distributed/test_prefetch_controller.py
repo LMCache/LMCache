@@ -1272,26 +1272,20 @@ class TestBuildTrimMask:
 
     def test_prefix_trims_at_first_gap(self):
         found = self._bm(5, [0, 1, 3, 4])  # gap at index 2
-        assert build_trim_mask(found, 5, TrimPolicy.PREFIX).get_indices_list() == [
-            0,
-            1,
-        ]
+        _hit, retained = build_trim_mask(found, 5, TrimPolicy.PREFIX)
+        assert retained.get_indices_list() == [0, 1]
 
     def test_segmented_prefix_keeps_gaps(self):
         # Models an L2 hit whose L1 load failed mid-prefix (e.g. OOM at index
         # 2): the keys that did load are kept, not trimmed to the first gap.
         found = self._bm(5, [0, 1, 3, 4])
-        assert build_trim_mask(
-            found, 5, TrimPolicy.SEGMENTED_PREFIX
-        ).get_indices_list() == [0, 1, 3, 4]
+        _hit, retained = build_trim_mask(found, 5, TrimPolicy.SEGMENTED_PREFIX)
+        assert retained.get_indices_list() == [0, 1, 3, 4]
 
     def test_sparse_keeps_all_found(self):
         found = self._bm(5, [0, 2, 4])
-        assert build_trim_mask(found, 5, TrimPolicy.SPARSE).get_indices_list() == [
-            0,
-            2,
-            4,
-        ]
+        _hit, retained = build_trim_mask(found, 5, TrimPolicy.SPARSE)
+        assert retained.get_indices_list() == [0, 2, 4]
 
     def test_prefix_sliding_window_retains_window(self):
         """With a sliding-window group (w=2) and a full-attention group, the
@@ -1302,8 +1296,11 @@ class TestBuildTrimMask:
         attn_desc = AttnWindowDesc(num_chunks_in_sw=[-1, 2])
         # All present
         found = self._bm(num_keys, range(num_keys))
-        retained = build_trim_mask(
-            found, num_keys, TrimPolicy.PREFIX, attn_desc,
+        hit_length, retained = build_trim_mask(
+            found,
+            num_keys,
+            TrimPolicy.PREFIX,
+            attn_desc,
         )
         indices = retained.get_indices_list()
         # full-attn group (even indices): all 4 chunks retained
@@ -1313,15 +1310,20 @@ class TestBuildTrimMask:
         assert 3 not in indices  # chunk 1 out of window
         assert 5 in indices  # chunk 2 in window
         assert 7 in indices  # chunk 3 in window
+        assert hit_length == 4
 
     def test_prefix_full_attention_only_matches_leading_ones(self):
         """With all-full-attention groups, fold reduces to count_leading_ones."""
         attn_desc = AttnWindowDesc(num_chunks_in_sw=[-1])
         found = self._bm(5, [0, 1, 3, 4])  # gap at index 2
-        retained = build_trim_mask(
-            found, 5, TrimPolicy.PREFIX, attn_desc,
+        hit_length, retained = build_trim_mask(
+            found,
+            5,
+            TrimPolicy.PREFIX,
+            attn_desc,
         )
         assert retained.get_indices_list() == [0, 1]
+        assert hit_length == 2
 
     def test_prefix_sw_gap_in_full_attn_trims_correctly(self):
         """A gap in a full-attention group limits the hit length for all groups
@@ -1333,13 +1335,17 @@ class TestBuildTrimMask:
         # SW group: all chunks present
         # Chunk-major: g0c0=1, g1c0=1, g0c1=0, g1c1=1, g0c2=1, g1c2=1
         found = self._bm(6, [0, 1, 3, 4, 5])  # missing index 2 (g0c1)
-        retained = build_trim_mask(
-            found, 6, TrimPolicy.PREFIX, attn_desc,
+        hit_length, retained = build_trim_mask(
+            found,
+            6,
+            TrimPolicy.PREFIX,
+            attn_desc,
         )
         # Full-attn gap at chunk 1 means hit_length=1
         # Only chunk 0 retained: g0c0 and g1c0
         indices = retained.get_indices_list()
         assert indices == [0, 1]
+        assert hit_length == 1
 
 
 class TestMergeBitmaps:

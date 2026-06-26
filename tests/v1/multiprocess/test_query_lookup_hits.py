@@ -128,6 +128,7 @@ def _make_module_with_job(
         prefetch_request_id=0,
         external_request_id="req-0",
         l1_found_indices=(),
+        l1_hit_chunks=0,
         total_requested_keys=10,
         submit_time=time.monotonic(),
     )
@@ -157,24 +158,24 @@ def test_server_lookup_hits_returns_count():
     module.context.storage_manager.query_prefetch_lookup_hits.assert_called_once()
 
 
-def test_server_lookup_hits_divides_by_world_size():
-    """Result should be divided by world_size for tensor parallelism."""
-    module, request_id = _make_module_with_job(world_size=2, storage_return=10)
+def test_server_lookup_hits_passes_through_chunk_count():
+    """Storage manager now returns chunk-level counts directly."""
+    module, request_id = _make_module_with_job(world_size=2, storage_return=5)
 
     result = module.query_prefetch_lookup_hits(request_id)
 
-    assert result == 5  # 10 // 2
+    assert result == 5
 
 
-def test_server_lookup_hits_divides_by_world_size_times_num_groups():
-    """Chunk-major layout packs world_size * num_object_groups keys per chunk."""
+def test_server_lookup_hits_passes_through_with_multiple_groups():
+    """Storage manager returns chunk-level counts regardless of num_object_groups."""
     module, request_id = _make_module_with_job(
-        world_size=2, storage_return=12, num_object_groups=3
+        world_size=2, storage_return=2, num_object_groups=3
     )
 
     result = module.query_prefetch_lookup_hits(request_id)
 
-    assert result == 2  # 12 // (2 * 3)
+    assert result == 2
 
 
 def test_server_lookup_hits_returns_none_when_in_progress():

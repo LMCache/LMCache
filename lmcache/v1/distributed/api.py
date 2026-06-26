@@ -252,8 +252,13 @@ class AttnWindowDesc:
     """
 
     num_chunks_in_sw: list[int]
+    """Per-object-group window sizes in chunks."""
+
     world_size: int = 1
+    """Number of kv_rank shards per chunk (tensor-parallel world size)."""
+
     force_retrieve_full_kv: bool = False
+    """When True, treat every object group as full-attention during prefetch."""
 
     def __post_init__(self) -> None:
         if self.world_size < 1:
@@ -279,8 +284,8 @@ class AttnWindowDesc:
             object_group_idx: 0-based object group index.
 
         Returns:
-            True if ``force_retrieve_full_kv`` is set or the group's window
-            is ``-1``.
+            True if the group attends to the whole prefix, False if it uses a
+            bounded sliding window.
         """
         if self.force_retrieve_full_kv:
             return True
@@ -309,6 +314,9 @@ class PrefetchHandle:
 
     l1_found_indices: tuple[int, ...]
     """Original-key indices found (read-locked) in L1 at submission time."""
+
+    l1_hit_chunks: int
+    """Chunk-level prefix hit count from L1 (via fold_unfold_ranked)."""
 
     total_requested_keys: int
     """Total number of keys originally requested (the result-bitmap size)."""

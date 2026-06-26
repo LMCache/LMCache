@@ -502,11 +502,12 @@ class KVLayerGroupsManager:
 
         Returns:
             The sub-chunk sliding window size. Will be the same as the
-            chunk size for non-slding-window models or big-sliding-
-            window models.
+            chunk size for non-sliding-window models, big-sliding-window
+            models, and Mamba (``sw_size_tokens=0``) groups whose
+            recurrent state always occupies a full chunk.
         """
         sw_size_tokens = self._kernel_groups[kernel_group_idx].sw_size_tokens
-        if sw_size_tokens == -1 or sw_size_tokens >= self._lmcache_tokens_per_chunk:
+        if sw_size_tokens <= 0 or sw_size_tokens >= self._lmcache_tokens_per_chunk:
             return self._lmcache_tokens_per_chunk
         return sw_size_tokens
 
@@ -561,6 +562,10 @@ class KVLayerGroupsManager:
         separation is disabled (the default). Otherwise groups the kernel groups
         by sliding-window size measured in number of chunks.
 
+        ``sw_size_tokens=0`` (Mamba sentinel) maps to ``sw_size_chunks=1``:
+        Mamba recurrent state is fully summarized by the most recent chunk,
+        so only that chunk needs to be retained from L2.
+
         Args:
             engine_group_infos: LMCache-owned engine KV cache group metadata.
 
@@ -579,6 +584,8 @@ class KVLayerGroupsManager:
         for kernel_group_idx, group in enumerate(self._kernel_groups):
             if group.sw_size_tokens == -1:
                 sw_size_chunks = -1
+            elif group.sw_size_tokens == 0:
+                sw_size_chunks = 1
             else:
                 sw_size_chunks = (group.sw_size_tokens + chunk_size - 1) // chunk_size
             groups_by_sw_size[sw_size_chunks].append(kernel_group_idx)

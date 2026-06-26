@@ -10,10 +10,13 @@ import time
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
+    DEFAULT_ATTN_WINDOW_DESC,
+    AttnWindowDesc,
     ObjectKey,
     PrefetchHandle,
     ipc_key_to_object_keys,
 )
+from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_ranked
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
@@ -117,6 +120,7 @@ class _PrefetchJob:
     # emission time in ``query_prefetch_status``.
     requested_tokens: int
     num_object_groups: int = 1
+    attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
     # Captured at lookup time so the ``MP_LOOKUP_PREFETCH_END`` event can
     # carry them as labels.  ``model_name`` lets dashboards slice hit rate
     # per model in multi-model deployments; ``cache_salt`` slices per
@@ -245,6 +249,7 @@ class LookupModule:
                         prefetch_request_id=-1,
                         external_request_id=key.request_id,
                         l1_found_indices=(),
+                        l1_hit_chunks=0,
                         total_requested_keys=0,
                         submit_time=time.monotonic(),
                     ),
@@ -267,6 +272,7 @@ class LookupModule:
                         prefetch_request_id=-1,
                         external_request_id=key.request_id,
                         l1_found_indices=(),
+                        l1_hit_chunks=0,
                         total_requested_keys=0,
                         submit_time=time.monotonic(),
                     ),
@@ -331,6 +337,7 @@ class LookupModule:
                 request_id=key.request_id,
                 requested_tokens=requested_tokens,
                 num_object_groups=attn_desc.num_object_groups,
+                attn_desc=attn_desc,
                 model_name=model_name,
                 cache_salt=key.cache_salt,
             )
@@ -360,11 +367,8 @@ class LookupModule:
             )
             return 0
 
-        found = self._ctx.storage_manager.query_prefetch_lookup_hits(job.handle)
-        if found is None:
-            return None
-
-        return _get_prefix_hit_length(found, job.world_size, job.num_object_groups)
+        # Result is already in chunk-level units (l1_hit_chunks + l2_hit_chunks).
+        return self._ctx.storage_manager.query_prefetch_lookup_hits(job.handle)
 
     def query_prefetch_status(
         self,
@@ -398,12 +402,16 @@ class LookupModule:
         if found is None:
             return None
 
-        # NOTE(Kuntai): this assumes two things:
-        # 1. the world size is the same between keys
-        # 2. the lookup sort the keys in prefix order and breaks at the
-        #    first failure
-        found_count = _get_prefix_hit_length(
-            found.count_leading_ones(), job.world_size, job.num_object_groups
+        stride = job.attn_desc.num_object_groups * job.world_size
+        num_chunks = job.handle.total_requested_keys // stride if stride else 0
+        windows = job.attn_desc.num_chunks_in_sw
+        if job.attn_desc.force_retrieve_full_kv:
+            windows = [-1] * job.attn_desc.num_object_groups
+        found_count, _retain = fold_unfold_ranked(
+            found,
+            num_chunks,
+            job.world_size,
+            windows,
         )
 
         self._ctx.event_bus.publish(

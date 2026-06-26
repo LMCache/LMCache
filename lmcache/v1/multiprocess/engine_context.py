@@ -59,8 +59,8 @@ class LayoutDescRegistry:
     Args:
         force_retrieve_full_kv: When True, every registered
             :class:`AttnWindowDesc` has its ``force_retrieve_full_kv`` flag set,
-            so the fold/unfold pipeline treats all object groups as
-            full-attention (prefetches every prefix chunk).
+            causing all object groups to be treated as full-attention during
+            prefetch.
     """
 
     def __init__(self, force_retrieve_full_kv: bool = False) -> None:

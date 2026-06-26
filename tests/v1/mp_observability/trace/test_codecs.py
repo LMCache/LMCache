@@ -86,6 +86,7 @@ class TestPrefetchHandle:
             prefetch_request_id=7,
             external_request_id="req-1",
             l1_found_indices=(0, 1, 2),
+            l1_hit_chunks=3,
             total_requested_keys=10,
             submit_time=12345.6,
             l2_orig_indices=(3, 4, 5),
