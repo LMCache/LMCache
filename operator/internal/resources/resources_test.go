@@ -1136,6 +1136,22 @@ func TestBuildDaemonSet_GPUVendorAMD(t *testing.T) {
 	}
 }
 
+func TestBuildDaemonSet_HostNetworkEnabled(t *testing.T) {
+	engine := minimalEngine()
+	engine.Spec.HostNetwork = ptr(true)
+	engine.SetDefaults()
+
+	ds := BuildDaemonSet(engine)
+	podSpec := ds.Spec.Template.Spec
+
+	if !podSpec.HostNetwork {
+		t.Fatal("expected HostNetwork=true")
+	}
+	if podSpec.DNSPolicy != corev1.DNSClusterFirstWithHostNet {
+		t.Fatalf("expected DNSPolicy=ClusterFirstWithHostNet, got %s", podSpec.DNSPolicy)
+	}
+}
+
 // hasEnvAll reports whether envs contains an env var named name set to the
 // literal "all" (the value the GPU passthrough vars are always set to).
 func hasEnvAll(envs []corev1.EnvVar, name string) bool {

@@ -348,6 +348,7 @@ def run_cache_server(
         storage_manager_config=storage_manager_config,
         chunk_size=mp_config.chunk_size,
         hash_algorithm=mp_config.hash_algorithm,
+        separate_object_groups=mp_config.separate_object_groups,
     )
 
     modules = _build_modules(ctx, mp_config, coordinator_config)

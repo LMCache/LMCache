@@ -45,12 +45,12 @@ import json
 import time
 
 # First Party
-from lmcache.cli.commands.trace.dispatch import (
+from lmcache.cli.commands.trace._dispatch import (
     CallDispatcher,
     ReplayContext,
     build_default_dispatcher,
 )
-from lmcache.cli.commands.trace.stats import ReplayStatsCollector
+from lmcache.cli.commands.trace._stats import ReplayStatsCollector
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.storage_manager import StorageManager

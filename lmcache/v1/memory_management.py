@@ -77,6 +77,14 @@ class MemoryFormat(Enum):
     """[num_tokens, hidden_dim]
     """
 
+    # Hidden-state store (HS) tensor format. Same logical shape as EC_TD
+    # ([num_tokens, hidden_dim]) but tagged separately so the allocator and
+    # any future mp/serialization paths can distinguish encoder-cache entries
+    # from hidden-state entries.
+    HS_TD = auto()
+    """[num_tokens, hidden_dim]
+    """
+
     def token_dim(self) -> int:
         if self == MemoryFormat.KV_2LTD:
             return 2
@@ -91,6 +99,8 @@ class MemoryFormat(Enum):
         elif self == MemoryFormat.KV_MLA_FMT:
             return 2
         elif self == MemoryFormat.EC_TD:
+            return 0
+        elif self == MemoryFormat.HS_TD:
             return 0
         return 0
 
@@ -1806,15 +1816,15 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         """
         clear = True
         logger.info("Checking memory allocator consistency")
-        logger.info(f" - Total active allocations: {self.num_active_allocations}")
+        logger.info(" - Total active allocations: %d", self.num_active_allocations)
         logger.info(
-            f" - Total allocated size: "
-            f"{self.address_manager.total_allocated_size / 1048576} MB"
+            " - Total allocated size: %f MB",
+            self.address_manager.total_allocated_size / 1048576,
         )
 
         # Check the real total free size
         total_free_size = self.address_manager.get_free_size()
-        logger.info(f" - Total free size: {total_free_size / 1048576} MB")
+        logger.info(" - Total free size: %f MB", total_free_size / 1048576)
 
         # Check if the numbers are consistent
         if (
@@ -2100,14 +2110,14 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         """
 
         logger.info("Checking memory allocator consistency")
-        logger.info(f" - Total active allocations: {self.num_active_allocations}")
+        logger.info(" - Total active allocations: %d", self.num_active_allocations)
         logger.info(
-            f" - Total allocated size: {self.total_allocated_size / 1048576} MB"
+            " - Total allocated size: %f MB", self.total_allocated_size / 1048576
         )
 
         # Check the real total free size
         total_free_size = len(self.free_blocks) * self.align_bytes
-        logger.info(f" - Total free size: {total_free_size / 1048576} MB")
+        logger.info(" - Total free size: %f MB", total_free_size / 1048576)
 
         # Check if the numbers are consistent
         if total_free_size + self.total_allocated_size != self.buffer.numel():
@@ -2434,6 +2444,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_T2D,
             MemoryFormat.KV_MLA_FMT,
             MemoryFormat.EC_TD,
+            MemoryFormat.HS_TD,
         ]:
             with self.host_mem_lock:
                 obj = self.pin_allocator.allocate(shapes, dtypes, fmt, str(self))
@@ -2462,6 +2473,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_T2D,
             MemoryFormat.KV_MLA_FMT,
             MemoryFormat.EC_TD,
+            MemoryFormat.HS_TD,
         ]:
             with self.host_mem_lock:
                 objs = self.pin_allocator.batched_allocate(
@@ -2486,6 +2498,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_T2D,
             MemoryFormat.KV_MLA_FMT,
             MemoryFormat.EC_TD,
+            MemoryFormat.HS_TD,
         ]:
             with self.host_mem_lock:
                 self.pin_allocator.free(memory_obj)
@@ -2512,6 +2525,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_T2D,
             MemoryFormat.KV_MLA_FMT,
             MemoryFormat.EC_TD,
+            MemoryFormat.HS_TD,
         ]:
             with self.host_mem_lock:
                 self.pin_allocator.batched_free(memory_objs)
@@ -2600,9 +2614,8 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         self._fd: int | None = None
         self._mmap_obj: mmap.mmap | None = None
         self._mmap_buffer: Any | None = None
-        self._cuda_registered_ptr: int | None = None
-        self._cuda_runtime: Any | None = None
         self._unregistered = False
+        self._host_memory_pinned_ptr: int | None = None
 
         self.devdax_buffer = self._map_devdax()
         self.devdax_allocator = TensorMemoryAllocator(
@@ -2674,60 +2687,21 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             self._fd = None
 
     def _register_cuda_host_memory(self) -> None:
-        if torch_device_type != "cuda" or not torch_dev.is_available():
+        if not torch_dev.ext.is_pin_supported:
             return
-        if not hasattr(torch_dev, "cudart"):
+        if not torch_dev.ext.pin_memory(self.devdax_buffer.data_ptr(), self.size):
             logger.warning(
-                "Skipping cudaHostRegister for Device-DAX L1 mapping: "
-                "torch CUDA runtime is unavailable"
+                "pin_memory failed for Device-DAX L1 mapping; "
+                "falling back to pageable host copies"
             )
             return
-
-        ptr = self.devdax_buffer.data_ptr()
-        runtime = torch_dev.cudart()
-        try:
-            err = runtime.cudaHostRegister(ptr, self.size, 0)
-        except Exception as e:
-            logger.warning(
-                "cudaHostRegister failed for Device-DAX L1 mapping; "
-                "falling back to pageable host copies: %s",
-                e,
-            )
-            return
-
-        if err != 0:
-            logger.warning(
-                "cudaHostRegister failed for Device-DAX L1 mapping with "
-                "error code %s; falling back to pageable host copies",
-                err,
-            )
-            return
-
-        self._cuda_registered_ptr = ptr
-        self._cuda_runtime = runtime
+        self._host_memory_pinned_ptr = self.devdax_buffer.data_ptr()
 
     def _unregister_cuda_host_memory(self) -> None:
-        if self._cuda_registered_ptr is None:
+        if self._host_memory_pinned_ptr is None:
             return
-
-        assert self._cuda_runtime is not None
-        ptr = self._cuda_registered_ptr
-        try:
-            err = self._cuda_runtime.cudaHostUnregister(ptr)
-            if err != 0:
-                logger.warning(
-                    "cudaHostUnregister failed for Device-DAX L1 mapping "
-                    "with error code %s",
-                    err,
-                )
-        except Exception as e:
-            logger.warning(
-                "cudaHostUnregister failed for Device-DAX L1 mapping: %s",
-                e,
-            )
-        finally:
-            self._cuda_registered_ptr = None
-            self._cuda_runtime = None
+        torch_dev.ext.unpin_memory(self._host_memory_pinned_ptr)
+        self._host_memory_pinned_ptr = None
 
     def _is_local_obj(self, memory_obj: MemoryObj) -> bool:
         return (

@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """``lmcache bench l2`` subcommand implementation.
 
-This module owns the full registration + execution flow for the L2
-adapter benchmark. ``BenchCommand`` only forwards CLI dispatch to
-:func:`run_l2_adapter_bench` and parser registration to
-:func:`register_l2_parser`.
+This module provides argument registration via :func:`add_l2_arguments`
+and the execution orchestrator :func:`run_l2_adapter_bench` for the L2
+adapter benchmark.
 """
 
 # Future
@@ -15,15 +14,6 @@ from typing import TYPE_CHECKING
 import argparse
 import os
 import sys
-
-# First Party
-# Reuse the common helper that wires up ``--format / --output /
-# --quiet`` onto a subparser. ``BenchCommand.register`` is overridden
-# and creates inner subparsers manually, bypassing the auto-wiring
-# that ``BaseCommand.register`` normally performs, so we attach those
-# common flags ourselves only on the L2 subparser. The ``engine`` and
-# ``kvcache`` subparsers intentionally stay untouched.
-from lmcache.cli.commands.base import _add_output_args
 
 if TYPE_CHECKING:
     # First Party
@@ -36,32 +26,12 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-def register_l2_parser(
-    subparsers: argparse._SubParsersAction,
-    dispatch_func,
-) -> argparse.ArgumentParser:
-    """Register the ``lmcache bench l2`` subcommand parser.
+def add_l2_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add ``lmcache bench l2`` arguments to *parser*.
 
     Args:
-        subparsers: The ``bench`` subparsers action.
-        dispatch_func: Function to bind via ``set_defaults(func=...)``.
-            Typically ``BenchCommand.execute`` so that the outer
-            dispatcher can route the call back into
-            :func:`run_l2_adapter_bench`.
-
-    Returns:
-        The created ``ArgumentParser`` (mostly for testing).
+        parser: The ``ArgumentParser`` for the L2 bench subcommand.
     """
-    parser = subparsers.add_parser(
-        "l2",
-        help="Benchmark an L2 adapter (store / lookup / load).",
-        description=(
-            "Benchmark L2 adapters using the standard LMCache adapter "
-            "configuration mechanism (parse_args_to_l2_adapters_config "
-            "+ create_l2_adapter). Any registered adapter type can be "
-            "tested without code changes."
-        ),
-    )
 
     parser.add_argument(
         "--l2-adapter",
@@ -152,14 +122,6 @@ def register_l2_parser(
         default=None,
         help="Run only the specified operation (default: run all).",
     )
-
-    # Common ``--format / --output / --quiet`` flags. Attached only
-    # to the L2 subparser; the ``engine`` and ``kvcache`` subparsers
-    # intentionally keep their existing arguments unchanged.
-    _add_output_args(parser)
-
-    parser.set_defaults(func=dispatch_func)
-    return parser
 
 
 # ---------------------------------------------------------------------------

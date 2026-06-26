@@ -336,3 +336,47 @@ class BlendMatchResponse(BaseModel):
     """
 
     matches: list[GlobalMatchModel]
+
+
+class PrefetchRequest(BaseModel):
+    """Body of ``POST /l2/prefetch`` on the coordinator.
+
+    Asks the coordinator to warm one MP server's L1 with the chunks of a token
+    sequence. The caller describes content by ``token_ids`` -- the unit the
+    cache speaks -- not by internal cache keys, which it cannot construct. The
+    coordinator forwards the request verbatim to that server's own
+    ``POST /l2/prefetch``, which hashes the tokens and expands them into the
+    per-rank keys.
+
+    Attributes:
+        instance_id: Identifier of the target MP server (must be registered).
+        model_name: Model whose layout the target uses to allocate L1 buffers.
+        world_size: World size selecting the layout and the per-rank fan-out.
+        token_ids: Prompt tokens whose complete chunks should be warmed.
+        cache_salt: Per-tenant isolation salt applied to the produced keys.
+    """
+
+    instance_id: str
+    model_name: str
+    world_size: int = Field(ge=1)
+    token_ids: list[int] = Field(default_factory=list)
+    cache_salt: str = ""
+
+
+class PrefetchResponse(BaseModel):
+    """Reply to ``POST /l2/prefetch`` on the coordinator.
+
+    Attributes:
+        instance_id: The target MP server the prefetch was submitted to.
+        request_id: The server's job id to poll via
+            ``GET /l2/prefetch/{instance_id}/{request_id}``. Empty when
+            ``status`` is ``"noop"`` (nothing to warm).
+        chunks: Number of whole chunks submitted to warm.
+        status: ``"submitted"`` (a job is in flight) or ``"noop"`` (the
+            sequence was shorter than one chunk).
+    """
+
+    instance_id: str
+    request_id: str = ""
+    chunks: int = 0
+    status: str

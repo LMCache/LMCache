@@ -61,6 +61,55 @@ class TestBitmapSetClearTest:
         assert not b.test(0)
 
 
+class TestBitmapSetRange:
+    """set_range([start, end)) must match the equivalent per-bit set, including
+    single-byte, head/middle/tail spans, clamping, and empty ranges."""
+
+    @pytest.mark.parametrize(
+        "size,start,end",
+        [
+            (16, 3, 3),  # empty range -> no-op
+            (16, 0, 0),  # empty at 0
+            (16, 2, 5),  # within one byte
+            (16, 0, 8),  # exactly one full byte
+            (16, 0, 16),  # whole bitmap
+            (24, 3, 20),  # head + middle byte + tail
+            (24, 8, 16),  # exactly the middle byte
+            (10, 5, 100),  # end clamped to size
+            (10, 9, 10),  # last bit only
+            (10, 100, 200),  # fully out of range -> no-op
+        ],
+    )
+    def test_set_range_matches_per_bit(self, size, start, end):
+        ranged = Bitmap(size)
+        ranged.set_range(start, end)
+
+        per_bit = Bitmap(size)
+        for i in range(start, min(end, size)):
+            per_bit.set(i)
+
+        assert ranged.get_indices_list() == per_bit.get_indices_list()
+
+    def test_set_range_accumulates(self):
+        b = Bitmap(32)
+        b.set_range(2, 6)
+        b.set_range(10, 12)
+        assert b.get_indices_list() == [2, 3, 4, 5, 10, 11]
+
+    def test_set_range_random_against_per_bit(self):
+        rng = random.Random(0)
+        for _ in range(500):
+            size = rng.randint(0, 40)
+            start = rng.randint(0, size + 4)
+            end = rng.randint(0, size + 4)
+            ranged = Bitmap(size)
+            ranged.set_range(start, end)
+            per_bit = Bitmap(size)
+            for i in range(start, min(end, size)):
+                per_bit.set(i)
+            assert ranged.get_indices_list() == per_bit.get_indices_list()
+
+
 class TestBitmapPopcount:
     """Test popcount (count of set bits), especially for size not multiple of 8."""
 

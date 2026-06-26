@@ -238,6 +238,9 @@ Server
    * - ``server.hashAlgorithm``
      - ``blake3``
      - ``builtin``, ``sha256_cbor``, or ``blake3``.
+   * - ``server.httpPort``
+     - ``8080``
+     - HTTP frontend port for health checks and cache admin (1024--65535).
 
 L1 Cache
 ~~~~~~~~
@@ -265,7 +268,8 @@ Eviction
      - Description
    * - ``eviction.policy``
      - ``LRU``
-     - Only ``LRU`` is supported.
+     - ``LRU`` or ``noop``.  Use ``noop`` with ``l2Backend.storePolicy: skip_l1``
+       for buffer-only mode.
    * - ``eviction.triggerWatermark``
      - ``0.8``
      - Usage ratio (0.0--1.0] to trigger eviction.
@@ -309,10 +313,25 @@ L2 Storage
    * - Field
      - Default
      - Description
-   * - ``l2Backends``
+   * - ``l2Backend``
      - --
      - List of L2 backends (``type`` + ``config``).
        See :doc:`l2_storage/index`.
+
+GPU Vendor
+~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 20 45
+
+   * - Field
+     - Default
+     - Description
+   * - ``gpuVendor``
+     - ``nvidia``
+     - GPU vendor: ``nvidia`` (uses the ``nvidia`` RuntimeClass) or ``amd``
+       (runs on the default runtime with ``privileged: true``).
 
 Scheduling
 ~~~~~~~~~~
@@ -398,6 +417,8 @@ via the CRD):
   Service can route to it.
 - **NVIDIA_VISIBLE_DEVICES=all** -- Ensures GPU access for IPC-based memory
   transfers.
+- **NVIDIA_DRIVER_CAPABILITIES=all** -- Exposes all driver capabilities
+  (compute, utility, etc.) to the container.
 - **TCP socket probes** -- Startup (5s initial, 30 failures), liveness (10s),
   and readiness (5s) probes on the server port.
 
@@ -480,7 +501,7 @@ The operator validates the CR spec at apply time:
    * - ``l1.sizeGB``
      - Required, must be > 0.
    * - ``eviction.policy``
-     - Must be ``LRU`` (if set).
+     - Must be ``LRU`` or ``noop`` (if set).
    * - ``eviction.triggerWatermark``
      - Must be in (0.0, 1.0].
    * - ``eviction.evictionRatio``

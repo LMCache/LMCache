@@ -55,8 +55,8 @@ try:
         KVLayerGroupInfo,
     )
     from lmcache.v1.multiprocess.custom_types import (
-        CudaIPCWrapper,
         IPCCacheServerKey,
+        KVCache,
         RegisterEngineDrivenContextPayload,
     )
     from lmcache.v1.multiprocess.futures import MessagingFuture
@@ -321,7 +321,7 @@ def _send_register_kv_cache(
     model_name: str = _MODEL_NAME,
     world_size: int = _WORLD_SIZE,
     layout_hints: dict | None = None,
-    kv_caches: list[CudaIPCWrapper] | None = None,
+    kv_caches: KVCache | None = None,
     use_gpu: bool = True,
     use_handle: bool | None = None,
     engine_group_infos: "list[EngineGroupInfo] | None" = None,

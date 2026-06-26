@@ -764,7 +764,7 @@ def start_loop_in_thread_with_exceptions(loop: asyncio.AbstractEventLoop):
     def loop_excepthook(loop, context):
         msg = context.get("message", "Unhandled exception in event loop")
         exc = context.get("exception")
-        logger.error(f"[asyncio] {msg}")
+        logger.error("[asyncio] %s", msg)
         if exc:
             traceback.print_exception(type(exc), exc, exc.__traceback__)
 

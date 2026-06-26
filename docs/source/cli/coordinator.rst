@@ -57,6 +57,12 @@ Options
    * - ``--blend-probe-stride N``
      - Positions between CacheBlend match probes; ``1`` probes every offset
        for full recall (default: ``1``).
+   * - ``--timeout-keep-alive SECS``
+     - Seconds the HTTP server keeps idle connections open before closing
+       them. Must be greater than the MP servers' heartbeat interval
+       (default ``5``), otherwise heartbeat requests may hit a closing
+       connection and fail with ``Server disconnected without sending a
+       response`` (default: ``10``).
 
 Configuration
 -------------
@@ -65,9 +71,9 @@ Every flag is optional. Unset flags fall back to the
 ``LMCACHE_MP_COORDINATOR_*`` environment variables (``HOST``, ``PORT``,
 ``INSTANCE_TIMEOUT``, ``HEALTH_CHECK_INTERVAL``, ``EVICTION_CHECK_INTERVAL``,
 ``EVICTION_RATIO``, ``TRIGGER_WATERMARK``, ``BLEND_CHUNK_SIZE``,
-``BLEND_PROBE_STRIDE``), and then to the built-in defaults. A supplied flag
-always overrides the matching env-derived value, so env-only deployments keep
-working unchanged.
+``BLEND_PROBE_STRIDE``, ``TIMEOUT_KEEP_ALIVE``), and then to the built-in
+defaults. A supplied flag always overrides the matching env-derived value, so
+env-only deployments keep working unchanged.
 
 A second set of env-only knobs controls the startup L2 resync —
 ``LMCACHE_MP_COORDINATOR_ENABLE_STARTUP_RESYNC`` (default ``True``),
