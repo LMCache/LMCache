@@ -32,9 +32,10 @@ from lmcache import utils
 from lmcache.banner import print_banner_once
 from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
-    apply_mm_hashes_to_token_ids,
     extract_mm_features,
+    has_mm_metadata,
     lmcache_get_or_create_config,
+    try_get_mm_aware_token_ids,
 )
 from lmcache.integration.vllm.vllm_service_factory import VllmServiceFactory
 from lmcache.logging import init_logger
@@ -294,6 +295,8 @@ class ReqMeta:
     disagg_spec: Optional[DisaggSpec] = None
     # the configs of the request
     request_configs: Optional[dict] = None
+    # True when the request must not write raw-token KV into LMCache.
+    skip_lmcache_store: bool = False
 
     @staticmethod
     def from_request_tracker(
@@ -338,6 +341,7 @@ class ReqMeta:
         # NOTE(vladnosiv): for disagg, you cannot skip saving, as saving is a transfer
         # Check if request_configs has lmcache.skip_save set to True
         request_skip = (tracker.request_configs or {}).get("lmcache.skip_save", False)
+        skip_cache_for_mm = bool(tracker.mm_hashes or tracker.mm_positions)
 
         skip_save = tracker.disagg_spec is None and (
             tracker.skip_save
@@ -363,24 +367,14 @@ class ReqMeta:
             num_tokens_to_save = input_token_len
 
         # If we need to save, update the number of saved tokens
-        if not skip_save:
+        if not skip_save and not skip_cache_for_mm:
             tracker.num_saved_tokens = num_tokens_to_save
-        save_spec = SaveSpec(skip_leading_tokens, not skip_save)
+        save_spec = SaveSpec(
+            skip_leading_tokens, not skip_save and not skip_cache_for_mm
+        )
 
         # Calculate the token ids and slot mappings for load and save
         token_ids = input_token_ids[:num_tokens_to_save]
-
-        # If the request has multimodal hashes, apply them to the token ids
-        if tracker.mm_hashes:
-            # TODO: Optimize this
-            token_ids = torch.tensor(token_ids)
-            assert tracker.mm_positions is not None, (
-                "tracker got mm_hashes but no mm_positions"
-            )
-            apply_mm_hashes_to_token_ids(
-                token_ids, tracker.mm_hashes, tracker.mm_positions
-            )
-            token_ids = token_ids.tolist()
 
         num_blocks = len(tracker.allocated_block_ids)
 
@@ -433,6 +427,7 @@ class ReqMeta:
             load_spec=load_spec,
             disagg_spec=tracker.disagg_spec,
             request_configs=tracker.request_configs,
+            skip_lmcache_store=skip_cache_for_mm,
         )
 
 
@@ -1032,6 +1027,9 @@ class LMCacheConnectorV1Impl:
         is_first = True
 
         for request in connector_metadata.requests:
+            if getattr(request, "skip_lmcache_store", False):
+                continue
+
             save_spec = request.save_spec
             if (
                 save_spec is None or not save_spec.can_save
@@ -1115,6 +1113,9 @@ class LMCacheConnectorV1Impl:
 
         if self.use_layerwise:
             for request in connector_metadata.requests:
+                if getattr(request, "skip_lmcache_store", False):
+                    self.lmcache_engine.lookup_unpin(request.req_id)
+                    continue
                 layerwise_storer = self._layerwise_save_storers.pop(
                     request.req_id, None
                 )
@@ -1135,6 +1136,9 @@ class LMCacheConnectorV1Impl:
         for request in connector_metadata.requests:
             # unpin the kv caches according to req_id
             self.lmcache_engine.lookup_unpin(request.req_id)
+
+            if getattr(request, "skip_lmcache_store", False):
+                continue
 
             save_spec = request.save_spec
             if (
@@ -1378,6 +1382,8 @@ class LMCacheConnectorV1Impl:
             self.lookup_client, "supports_producer_reuse"
         ):
             return 0
+        if has_mm_metadata(request):
+            return 0
 
         req_id = request.request_id
 
@@ -1397,17 +1403,10 @@ class LMCacheConnectorV1Impl:
             logger.debug(f"Looking up cache for the first time for request {req_id}!")
             self._requests_priority[req_id] = getattr(request, "priority", 0)
 
-            # token_ids = request.prompt_token_ids
             # all token ids covers the preemption case
-            token_ids = request.all_token_ids
-
-            # If the request has multimodal hashes, apply them to the token ids
-            mm_hashes, mm_positions = extract_mm_features(request)
-            if mm_hashes and mm_positions:
-                # TODO(Jiayi): Optimize this
-                token_ids = torch.tensor(request.prompt_token_ids)
-                apply_mm_hashes_to_token_ids(token_ids, mm_hashes, mm_positions)
-                token_ids = token_ids.tolist()
+            token_ids = try_get_mm_aware_token_ids(request)
+            if token_ids is None:
+                return 0
 
             request_configs = extract_request_configs(request.sampling_params)
             if self.skip_last_n_tokens > 0:
