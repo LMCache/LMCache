@@ -321,7 +321,7 @@ class KVLayerGroupsManager:
                 homogeneous models repeat one shared format.
             engine_group_infos: Engine KV cache group metadata, one info per
                 kernel group in kernel-group order, or empty.
-            lmcache_logical_chunk_size: Tokens per LMCache chunk
+            lmcache_tokens_per_chunk: Tokens per LMCache chunk
             separate_object_groups: When True (default), split kernel groups
                 into one object group per sliding-window size; when False, all
                 kernel groups share a single full-attention object group.
