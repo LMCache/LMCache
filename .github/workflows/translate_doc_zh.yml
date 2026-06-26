@@ -47,10 +47,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Only reuse the automation branch while its PR is still open. A
-          # closed (un-merged) PR's branch holds stale translations that would
-          # otherwise overwrite human edits already merged to dev, so in that
-          # case fall back to dev as the translation base.
+          # Reuse the automation branch only while its PR is open; a closed PR's
+          # branch is stale and would overwrite human edits merged to dev.
           open_prs=$(gh pr list --repo "$GITHUB_REPOSITORY" \
             --head automation/update-chinese-docs --state open \
             --json number --jq 'length' || echo 0)
