@@ -123,6 +123,7 @@ class _BatchedWriteCall:
     offsets: list[int]
     buffer_byte_lens: list[int]
     total_lens: list[int]
+    payload_lens: list[int]
 
 
 @dataclass
@@ -152,25 +153,34 @@ class _FakeRawDevice:
         offsets: Sequence[int],
         buffers: Sequence[Any],
         total_lens: Sequence[int],
+        payload_lens: Sequence[int] | None = None,
     ) -> int:
+        resolved_payload_lens = (
+            [int(p) for p in payload_lens]
+            if payload_lens is not None
+            else [int(total) for total in total_lens]
+        )
         self.batched_write_calls.append(
             _BatchedWriteCall(
                 offsets=[int(off) for off in offsets],
                 buffer_byte_lens=[len(bytes(buf)) for buf in buffers],
                 total_lens=[int(total) for total in total_lens],
+                payload_lens=resolved_payload_lens,
             )
         )
         if self.fail_batched_write:
             raise RuntimeError("injected batched_write failure")
-        for i, (off, buf, total) in enumerate(
-            zip(offsets, buffers, total_lens, strict=True)
+        for i, (off, buf, total, payload) in enumerate(
+            zip(offsets, buffers, total_lens, resolved_payload_lens, strict=True)
         ):
             if (
                 self.fail_after_write_entries is not None
                 and i >= self.fail_after_write_entries
             ):
                 raise RuntimeError("injected partial batched_write failure")
-            self.store[int(off)] = bytes(buf)[: int(total)]
+            # Mirror the Rust bounce: store only the valid payload, zero-padded
+            # up to total so round-trip reads observe the padded transfer.
+            self.store[int(off)] = bytes(buf)[: int(payload)].ljust(int(total), b"\x00")
         return len(self.batched_write_calls)
 
     def wait_iouring(self, batch_id: int) -> None:
@@ -203,6 +213,11 @@ class _FakeRawDevice:
     ) -> None:
         self._copy_into(int(offset), buf, int(total_len))
 
+    def read_uring(
+        self, offset: int, buf: Any, payload_len: int, total_len: int
+    ) -> None:
+        self._copy_into(int(offset), buf, int(total_len))
+
     def close(self) -> None:
         pass
 
@@ -213,13 +228,16 @@ class _FakeRawDevice:
             buf[:n] = data[:n]
 
 
-def _make_core_with_fake(path, fake, io_engine, capacity_bytes=None):
+def _make_core_with_fake(path, fake, io_engine, capacity_bytes=None, use_odirect=False):
     """Build a RawBlockCore wired to a fake raw device for a given engine.
 
     When ``capacity_bytes`` is given it overrides the config capacity so a
-    test can constrain the number of allocatable slots.
+    test can constrain the number of allocatable slots. When ``use_odirect``
+    is set, writes are padded to ``block_align`` so payload_len < total_len.
     """
-    overrides = dict(io_engine=io_engine, load_checkpoint_on_init=False)
+    overrides = dict(
+        io_engine=io_engine, load_checkpoint_on_init=False, use_odirect=use_odirect
+    )
     if capacity_bytes is not None:
         overrides["capacity_bytes"] = capacity_bytes
     config = replace(make_raw_block_core_config(path), **overrides)
@@ -322,6 +340,60 @@ def test_raw_block_core_io_uring_put_many_round_trip(tmp_path):
 
         assert load_result == [True] * 10
         assert [memory_obj_bytes(obj) for obj in loaded] == payloads
+    finally:
+        core.close()
+
+
+def test_raw_block_core_io_uring_padded_odirect_uses_batched_write(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    fake = _FakeRawDevice(size=128 * 1024 * 1024)
+    core = _make_core_with_fake(path, fake, io_engine="io_uring", use_odirect=True)
+
+    try:
+        specs = [encode_object_key(make_object_key(i)) for i in range(4)]
+        # Non-block-aligned payloads force O_DIRECT padding: payload_len < total_len.
+        payloads = [bytes([i + 1]) * (1000 + i * 37) for i in range(4)]
+        objects = [make_memory_obj(payload) for payload in payloads]
+
+        assert core.put_many(specs, objects).results == [True] * 4
+
+        # Padded O_DIRECT writes go through batched_write, not the per-entry
+        # write_uring fallback.
+        assert len(fake.batched_write_calls) == 1
+        assert fake.write_uring_count == 0
+        call = fake.batched_write_calls[0]
+        # payload_lens are forwarded and at least one payload entry is padded.
+        assert call.payload_lens != call.total_lens
+        for payload_len, total_len in zip(
+            call.payload_lens, call.total_lens, strict=True
+        ):
+            assert payload_len <= total_len
+
+        loaded = [make_empty_memory_obj(len(payload)) for payload in payloads]
+        load_result = core.load_many_into([spec.encoded for spec in specs], loaded)
+        assert load_result == [True] * 4
+        assert [memory_obj_bytes(obj) for obj in loaded] == payloads
+    finally:
+        core.close()
+
+
+def test_raw_block_core_io_uring_non_padded_forwards_payload_lens(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    fake = _FakeRawDevice(size=128 * 1024 * 1024)
+    core = _make_core_with_fake(path, fake, io_engine="io_uring")
+
+    try:
+        specs = [encode_object_key(make_object_key(i)) for i in range(3)]
+        objects = [make_memory_obj(bytes([i + 1]) * 1024) for i in range(3)]
+
+        assert core.put_many(specs, objects).results == [True] * 3
+
+        assert len(fake.batched_write_calls) == 1
+        assert fake.write_uring_count == 0
+        call = fake.batched_write_calls[0]
+        # No padding required, so payload_lens equals total_lens but is still
+        # forwarded explicitly.
+        assert call.payload_lens == call.total_lens
     finally:
         core.close()
 

@@ -1291,26 +1291,16 @@ class RawBlockCore:
             )
             return
 
-        can_batch = all(
-            int(payload_len) == int(total_len)
-            for payload_len, total_len in zip(payload_lens, total_lens, strict=True)
+        # batched_write takes payload_lens and total_lens separately, so it
+        # handles O_DIRECT padding (payload_len < total_len) by bouncing and
+        # zero-filling internally. All io_uring writes go through one batch.
+        batch_id = raw_dev.batched_write(
+            [int(offset) for offset in offsets],
+            list(buffers),
+            [int(total_len) for total_len in total_lens],
+            [int(payload_len) for payload_len in payload_lens],
         )
-        # batched_write currently accepts only total_lens. When O_DIRECT padding
-        # is required, payload_len < total_len, so fall back to write_uring; it
-        # carries both lengths and lets Rust build the aligned padded transfer.
-        if can_batch:
-            batch_id = raw_dev.batched_write(
-                [int(offset) for offset in offsets],
-                list(buffers),
-                [int(total_len) for total_len in total_lens],
-            )
-            raw_dev.wait_iouring(batch_id)
-            return
-
-        for offset, buf, payload_len, total_len in zip(
-            offsets, buffers, payload_lens, total_lens, strict=True
-        ):
-            raw_dev.write_uring(int(offset), buf, int(payload_len), int(total_len))
+        raw_dev.wait_iouring(batch_id)
 
     def _read_buffers(
         self,
