@@ -8,6 +8,7 @@ routes PUT/GET/HEAD/DELETE against a shared dict.  No network required.
 
 # Standard
 from concurrent.futures import Future as ConcurrentFuture
+from urllib.parse import quote as url_quote
 import select
 import threading
 import time
@@ -900,3 +901,130 @@ class TestS3L2AdapterListKeys:
             page.entries[0].key
             == create_object_key(0, model_name="m").to_encoded_object_key()
         )
+
+
+# =============================================================================
+# Addressing: virtual-hosted vs path-style + key prefix (issue #3344)
+# =============================================================================
+
+
+class TestS3Addressing:
+    def test_virtual_hosted_default(self) -> None:
+        host, bucket_path, key_prefix = s3mod._compute_s3_addressing(
+            "s3://my-bucket.s3.example.com", None, None
+        )
+        assert host == "my-bucket.s3.example.com"
+        assert bucket_path == ""
+        assert key_prefix == ""
+
+    def test_path_style_with_bucket(self) -> None:
+        host, bucket_path, key_prefix = s3mod._compute_s3_addressing(
+            "s3://minio.internal:9000", "my-bucket", None
+        )
+        assert host == "minio.internal:9000"
+        assert bucket_path == "/my-bucket"
+        assert key_prefix == ""
+
+    def test_prefix_is_normalized(self) -> None:
+        host, bucket_path, key_prefix = s3mod._compute_s3_addressing(
+            "s3://host", "bkt", "/lmcache/kv/"
+        )
+        assert host == "host"
+        assert bucket_path == "/bkt"
+        assert key_prefix == "lmcache/kv/"
+
+    def test_scheme_optional_and_trailing_slash_stripped(self) -> None:
+        host, _, _ = s3mod._compute_s3_addressing("host.example.com/", None, None)
+        assert host == "host.example.com"
+
+    def test_format_object_path_virtual_host_matches_legacy(self) -> None:
+        # No bucket/prefix: byte-identical to the previous "/" + quote(key).
+        assert s3mod._format_object_path("", "", "a@b@c@d") == "/a%40b%40c%40d"
+
+    def test_format_object_path_path_style_with_prefix(self) -> None:
+        path = s3mod._format_object_path("/bkt", "pre/", "a@b@c@d")
+        assert path == "/bkt/pre/a%40b%40c%40d"
+
+
+class TestS3ListPrefixStripping:
+    def test_parse_strips_key_prefix(self) -> None:
+        key = create_object_key(7)
+        name = _object_key_to_string(key)
+        xml = (
+            "<?xml version='1.0' encoding='UTF-8'?>"
+            "<ListBucketResult>"
+            f"<Contents><Key>pre/{name}</Key><Size>123</Size></Contents>"
+            "</ListBucketResult>"
+        ).encode()
+        entries, token = s3mod._parse_list_response_xml(xml, "pre/")
+        assert token is None
+        assert len(entries) == 1
+        parsed_key, size = entries[0]
+        assert _object_key_to_string(parsed_key) == name
+        assert size == 123
+
+    def test_parse_skips_objects_outside_prefix(self) -> None:
+        key = create_object_key(7)
+        name = _object_key_to_string(key)
+        xml = (
+            "<?xml version='1.0' encoding='UTF-8'?>"
+            "<ListBucketResult>"
+            f"<Contents><Key>{name}</Key><Size>123</Size></Contents>"
+            "</ListBucketResult>"
+        ).encode()
+        # The object lacks the configured prefix → foreign, skipped.
+        entries, _ = s3mod._parse_list_response_xml(xml, "pre/")
+        assert entries == []
+
+
+def _make_path_style_adapter() -> S3L2Adapter:
+    config = S3L2AdapterConfig(
+        s3_endpoint="s3://minio.internal:9000",
+        s3_bucket="kvbucket",
+        s3_prefix="lmcache",
+        s3_region="us-east-1",
+        s3_prefer_http2=False,
+        s3_num_io_threads=1,
+        max_capacity_gb=0.001,
+    )
+    return S3L2Adapter(config)
+
+
+class TestS3PathStyleRequests:
+    def test_make_request_uses_path_style_and_prefix(self) -> None:
+        adapter = _make_path_style_adapter()
+        try:
+            key_str = _object_key_to_string(create_object_key(1))
+            req = adapter._make_request("PUT", key_str)
+            assert req.path == f"/kvbucket/lmcache/{url_quote(key_str)}"
+            assert req.headers.get("Host") == "minio.internal:9000"
+        finally:
+            adapter.close()
+
+    def test_roundtrip_path_style_and_prefix(self) -> None:
+        # Store/lookup/load must round-trip with path-style + prefix keys.
+        adapter = _make_path_style_adapter()
+        try:
+            key = create_object_key(1)
+            obj = create_memory_obj(fill_value=2.5)
+
+            tid = adapter.submit_store_task([key], [obj])
+            assert wait_for_event_fd(adapter.get_store_event_fd())
+            assert adapter.pop_completed_store_tasks()[tid].is_successful()
+
+            # The object is stored under the bucket + prefix namespace.
+            assert _BACKEND.contains(f"kvbucket/lmcache/{_object_key_to_string(key)}")
+
+            tid = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+            assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
+            bm = adapter.query_lookup_and_lock_result(tid)
+            assert bm is not None and bm.test(0) is True
+
+            dst = create_memory_obj(fill_value=0.0)
+            tid = adapter.submit_load_task([key], [dst])
+            assert wait_for_event_fd(adapter.get_load_event_fd())
+            bm = adapter.query_load_result(tid)
+            assert bm is not None and bm.test(0) is True
+            assert torch.allclose(dst.tensor, torch.full((16,), 2.5))
+        finally:
+            adapter.close()
