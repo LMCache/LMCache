@@ -6,6 +6,7 @@
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/util/Exception.h>
+#include <vector>
 #include "kv_transfer_types.h"
 
 void multi_layer_kv_transfer(
@@ -40,6 +41,20 @@ void lmcache_memcpy_async(uintptr_t dest, uintptr_t src, size_t nbytes,
                           TransferDirection direction,
                           size_t host_buffer_offset,
                           size_t host_buffer_alignments);
+
+// Enqueue one alignment-aware async copy on `stream`. Shared building block for
+// the single/batched memcpy entry points and the object-group transfer
+// executor (mp_mem_kernels.cu).
+void lmcache_memcpy_async_one(uintptr_t dest, uintptr_t src, size_t nbytes,
+                              cudaMemcpyKind kind, size_t host_buffer_offset,
+                              size_t host_buffer_alignments,
+                              cudaStream_t stream);
+
+void lmcache_memcpy_async_batched(
+    const std::vector<uintptr_t>& dests, const std::vector<uintptr_t>& srcs,
+    const std::vector<size_t>& nbytes, TransferDirection direction,
+    const std::vector<size_t>& host_buffer_offsets,
+    size_t host_buffer_alignments);
 
 // deprecated / unused except in unit tests
 void load_and_reshape_flash(torch::Tensor& key_value, torch::Tensor& key_cache,

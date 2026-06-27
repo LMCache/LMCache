@@ -55,6 +55,11 @@ PYBIND11_MODULE(c_ops, m) {
   m.def("reshape_and_cache_back_flash", &reshape_and_cache_back_flash);
   m.def("lmcache_memcpy_async", &lmcache_memcpy_async,
         py::call_guard<py::gil_scoped_release>());
+  m.def("lmcache_memcpy_async_batched", &lmcache_memcpy_async_batched,
+        py::arg("dests"), py::arg("srcs"), py::arg("nbytes"),
+        py::arg("direction"), py::arg("host_buffer_offsets"),
+        py::arg("host_buffer_alignments"),
+        py::call_guard<py::gil_scoped_release>());
   m.def("encode_fast_new", &encode_cuda_new);
   m.def("decode_fast_new", &decode_cuda_new);
   m.def("decode_fast_prefsum", &decode_cuda_prefsum);
@@ -100,6 +105,49 @@ PYBIND11_MODULE(c_ops, m) {
       .def_readwrite("element_size", &PageBufferShapeDesc::element_size)
       .def_readwrite("block_stride_elems",
                      &PageBufferShapeDesc::block_stride_elems);
+  // Object-group transfer plan types (see mp_mem_kernels.cuh). Built on the
+  // Python side and consumed by execute_object_group_transfer.
+  py::class_<StagingCopy>(m, "StagingCopy")
+      .def(py::init([](uintptr_t dest, uintptr_t src, size_t nbytes,
+                       size_t host_offset) {
+             return StagingCopy{dest, src, nbytes, host_offset};
+           }),
+           py::arg("dest"), py::arg("src"), py::arg("nbytes"),
+           py::arg("host_offset"));
+  py::class_<LaunchVar>(m, "LaunchVar")
+      .def(
+          py::init([](int group_idx, int64_t block_ids_offset, int total_blocks,
+                      int num_objects, int skip_prefix_n_blocks) {
+            return LaunchVar{group_idx, block_ids_offset, total_blocks,
+                             num_objects, skip_prefix_n_blocks};
+          }),
+          py::arg("group_idx"), py::arg("block_ids_offset"),
+          py::arg("total_blocks"), py::arg("num_objects"),
+          py::arg("skip_prefix_n_blocks"));
+  py::class_<BatchStep>(m, "BatchStep")
+      .def(py::init([](std::vector<StagingCopy> staging,
+                       std::vector<LaunchVar> launches) {
+             return BatchStep{std::move(staging), std::move(launches)};
+           }),
+           py::arg("staging"), py::arg("launches"));
+  py::class_<KernelGroupSpec>(m, "KernelGroupSpec")
+      .def(py::init([](uintptr_t paged_buffer_ptrs,
+                       std::vector<int64_t> lmcache_objects_ptrs,
+                       PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
+                       EngineKVFormat engine_kv_format,
+                       uintptr_t block_ids_base) {
+             return KernelGroupSpec{
+                 paged_buffer_ptrs, std::move(lmcache_objects_ptrs),
+                 shape_desc,        lmcache_chunk_size,
+                 engine_kv_format,  block_ids_base};
+           }),
+           py::arg("paged_buffer_ptrs"), py::arg("lmcache_objects_ptrs"),
+           py::arg("shape_desc"), py::arg("lmcache_chunk_size"),
+           py::arg("engine_kv_format"), py::arg("block_ids_base"));
+  m.def("execute_object_group_transfer", &execute_object_group_transfer,
+        py::arg("direction"), py::arg("device"),
+        py::arg("host_buffer_alignment"), py::arg("kernel_group_specs"),
+        py::arg("batch_steps"), py::call_guard<py::gil_scoped_release>());
   m.def("record_event_on_stream", &record_event_on_stream,
         py::arg("cuda_stream_ptr"), py::arg("event_type_name"),
         py::arg("session_id"), py::arg("str_metadata"), py::arg("int_metadata"),
