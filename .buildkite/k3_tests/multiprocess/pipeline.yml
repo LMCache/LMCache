@@ -16,6 +16,7 @@ x-flaky-retry: &flaky-retry
 
 steps:
   - group: ":compression: Multiprocess (2-GPU)"
+    if: build.env("TEST_ONLY") !~ /true/
     steps:
       - label: ":compression: vllm_bench"
         command: .buildkite/k3_tests/multiprocess/run.sh vllm_bench
@@ -69,6 +70,7 @@ steps:
         artifact_paths: ["*.log"]
 
   - group: ":compression: Multiprocess (1-GPU)"
+    if: build.env("TEST_ONLY") !~ /true/
     steps:
       - label: ":compression: lm_eval"
         command: .buildkite/k3_tests/multiprocess/run.sh lm_eval
@@ -198,6 +200,7 @@ steps:
         artifact_paths: ["*.log"]
 
   - group: ":compression: Multiprocess (CPU-only)"
+    if: build.env("TEST_ONLY") !~ /true/
     steps:
       - label: ":compression: cpu_e2e_validation (shm)"
         command: bash .github/scripts/run-cpu-e2e-validation.sh
@@ -277,3 +280,11 @@ steps:
                 volumes:
                   - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
                   - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 4Gi } }
+
+  # Dummy step for TEST_ONLY=true: skips all real test steps above (each
+  # group's `if` evaluates to false) and runs this lightweight echo instead.
+  # Useful for verifying the pipeline plumbing without burning GPU time.
+  - label: ":wave: hello"
+    if: build.env("TEST_ONLY") =~ /true/
+    command: echo "hello"
+    agents: { queue: "k8s" }
