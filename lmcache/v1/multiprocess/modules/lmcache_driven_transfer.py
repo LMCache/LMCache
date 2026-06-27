@@ -126,6 +126,7 @@ def batched_iteration_with_skip(
 def downsample_and_stage_block_ids(
     cache_context: BaseCacheContext,
     block_ids: list[list[int]],
+    num_chunks: int,
 ) -> list[torch.Tensor]:
     """Cut the block id lists to skip the unneeded blocks in a chunk and
     stage it into GPU tensors for later use.
@@ -138,6 +139,9 @@ def downsample_and_stage_block_ids(
     Args:
         cache_context: The cache context containing the KV cache information.
         block_ids: The original block id lists, indexed by LMCache KV group index.
+        num_chunks: Number of whole chunks the keys cover. Block ids beyond
+            ``num_chunks`` whole chunks (a trailing partial chunk) are trimmed
+            off before downsampling.
 
     Returns:
         The cut block id lists, indexed by LMCache KV group index.
@@ -183,11 +187,20 @@ def downsample_and_stage_block_ids(
 
         new_block_ids = []
         old_block_ids = block_ids[kernel_group_id]
-        assert len(old_block_ids) % total_blocks_per_chunk == 0, (
-            f"len(block_ids[{kernel_group_id}]) should be a multiple "
-            f"of total_blocks_per_chunk ({total_blocks_per_chunk}), but got "
-            f"{len(old_block_ids)}"
-        )
+        # The engine's block list covers every prompt token. With
+        # save_unfull_chunk=False it can include a trailing PARTIAL chunk
+        # that has no key (num_chunks counts whole chunks only); trim it so
+        # the per-chunk loop below only sees whole chunks. For
+        # save_unfull_chunk=True the keys cover full alignment and a real
+        # partial is skipped upstream by the store/retrieve underflow check,
+        # so this is a no-op there.
+        if len(old_block_ids) < num_chunks * total_blocks_per_chunk:
+            raise ValueError(
+                f"block_ids[{kernel_group_id}] has {len(old_block_ids)} blocks, "
+                f"fewer than num_chunks * total_blocks_per_chunk "
+                f"({num_chunks} * {total_blocks_per_chunk})"
+            )
+        old_block_ids = old_block_ids[: num_chunks * total_blocks_per_chunk]
 
         for i in range(0, len(old_block_ids), total_blocks_per_chunk):
             chunk_block_ids = old_block_ids[i : i + total_blocks_per_chunk]
@@ -804,7 +817,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 return event.ipc_handle(), False
 
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
-                cache_context, gpu_block_ids
+                cache_context, gpu_block_ids, num_chunks
             )
 
             if not hasattr(torch_dev.Event, "from_ipc_handle"):
@@ -1028,7 +1041,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
 
             # Cut and stage all block_ids to GPU once before the transfer
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
-                cache_context, gpu_block_ids
+                cache_context, gpu_block_ids, num_chunks
             )
 
             prefetched_keys: list[ObjectKey] = []
