@@ -1022,7 +1022,9 @@ class S3L2Adapter(L2AdapterInterface):
         if self._checkpoint_thread is not None:
             self._checkpoint_stop.set()
             try:
-                self._checkpoint_lru_index()
+                # Short timeout: don't let a slow S3 block shutdown past the
+                # container's termination grace period (-> SIGKILL).
+                self._checkpoint_lru_index(timeout=5.0)
             except Exception:
                 logger.exception("S3L2Adapter final LRU checkpoint failed")
             self._checkpoint_thread.join(timeout=5)
@@ -1675,28 +1677,53 @@ class S3L2Adapter(L2AdapterInterface):
         ``ordered`` is ``[(ObjectKey, size), ...]`` with the **least
         recently used key first**. The eviction policy is populated via
         ``_notify_keys_stored`` (base class -> ``L2EvictionPolicy`` ->
-        ``policy.on_keys_created``); ``on_keys_created`` reverses keys
-        within a single call, so we notify one key at a time to make the
-        final OrderedDict ordering match ``ordered`` exactly (oldest at
-        the front == first eviction victim). ``_key_sizes`` is also
-        seeded so a later ``delete`` of a seeded key balances the
-        base-class byte accounting.
+        ``policy.on_keys_created``). ``on_keys_created`` reverses keys
+        within a single call, so a single batch notify of the
+        **reversed** list reconstructs ``ordered`` exactly in the policy's
+        OrderedDict (oldest at the front == first eviction victim) — same
+        result as one notify per key, but O(1) lock/listener traffic
+        instead of O(N) (a 100k-object bucket would otherwise thrash on
+        startup). ``_key_sizes`` is also seeded so a later ``delete`` of a
+        seeded key balances the base-class byte accounting.
 
         Returns the number of keys seeded.
         """
-        seeded = 0
-        for key, size in ordered:
-            with self._lock:
+        to_seed_keys: list[ObjectKey] = []
+        to_seed_sizes: list[int] = []
+        with self._lock:
+            for key, size in ordered:
                 if key in self._key_sizes:
                     # Already known from a store in this process — don't
                     # double-count or reorder it.
                     continue
                 self._key_sizes[key] = size
                 self._object_size_cache[_object_key_to_string(key)] = size
-            # Single-key notify preserves global ordering across the loop.
-            self._notify_keys_stored([key], [size])
-            seeded += 1
-        return seeded
+                to_seed_keys.append(key)
+                to_seed_sizes.append(size)
+        if not to_seed_keys:
+            return 0
+
+        # Single batch notify. Suppress per-key tick tracking during the
+        # batch (it would stamp the reversed order); seed ticks explicitly
+        # afterwards in true oldest->newest order.
+        was_tracking = self._track_access_order
+        self._track_access_order = False
+        try:
+            self._notify_keys_stored(
+                list(reversed(to_seed_keys)), list(reversed(to_seed_sizes))
+            )
+        finally:
+            self._track_access_order = was_tracking
+
+        if was_tracking:
+            with self._lock:
+                for key, size in zip(to_seed_keys, to_seed_sizes, strict=True):
+                    self._access_tick_counter += 1
+                    self._access_ticks[_object_key_to_string(key)] = (
+                        size,
+                        self._access_tick_counter,
+                    )
+        return len(to_seed_keys)
 
     def _seed_from_bucket(self) -> None:
         """Seed usage + eviction index from the bucket on startup.
@@ -1833,11 +1860,13 @@ class S3L2Adapter(L2AdapterInterface):
         items.sort(key=lambda t: t[2])
         return items
 
-    def _checkpoint_lru_index(self) -> bool:
+    def _checkpoint_lru_index(self, timeout: float = 60.0) -> bool:
         """Serialize the access-order index and PUT it to the sidecar.
 
         Best-effort: returns ``False`` (logged) on any failure so the
-        checkpoint loop keeps running.
+        checkpoint loop keeps running. ``timeout`` bounds the PUT wait;
+        ``close()`` passes a short one so a slow/unresponsive S3 can't
+        block shutdown past the container's termination grace period.
         """
         snapshot = self._snapshot_lru_index()
         if not snapshot:
@@ -1852,7 +1881,7 @@ class S3L2Adapter(L2AdapterInterface):
             self._loop,
         )
         try:
-            ok = fut.result(timeout=60.0)
+            ok = fut.result(timeout=timeout)
         except Exception as exc:
             logger.warning("S3L2Adapter LRU checkpoint PUT failed: %s", exc)
             return False
