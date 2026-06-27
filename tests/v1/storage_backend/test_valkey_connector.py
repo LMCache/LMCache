@@ -29,6 +29,13 @@ from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.connector import CreateConnector
 
+# Captured at import time (before the autouse mock_thread_worker_pool fixture
+# patches valkey_connector._ThreadWorkerPool) so tests can exercise the real
+# worker-pool methods directly.
+from lmcache.v1.storage_backend.connector.valkey_connector import (  # noqa: E402
+    _ThreadWorkerPool as _RealThreadWorkerPool,
+)
+
 # Local
 from ...conftest import MockSyncGlideClient
 from ..utils import (
@@ -50,6 +57,12 @@ class MockThreadWorkerPool:
     # Class-level record of the last __init__ kwargs for config assertions.
     last_init_kwargs: dict = {}
 
+    #: When True, ``_do_get_into`` mirrors the real buffer-GET branch: it stages
+    #: into a scratch buffer and relies on the client returning an int byte
+    #: count (``n = int(result)``), exercising the same control flow as the real
+    #: ``_ThreadWorkerPool``. Default False uses the simpler legacy GET branch.
+    simulate_buffer_get: bool = False
+
     def __init__(self, *args, **kwargs):
         MockThreadWorkerPool.last_init_kwargs = {
             "args": args,
@@ -58,19 +71,38 @@ class MockThreadWorkerPool:
         self.num_workers = kwargs.get("num_workers", 8)
         if len(args) > 2 and isinstance(args[2], int):
             self.num_workers = args[2]
+        self._ttl_seconds = kwargs.get("ttl_seconds", None)
         self._client = MockSyncGlideClient()
         self._executor = ThreadPoolExecutor(max_workers=self.num_workers)
 
     def _do_set(self, key_str: str, data: bytes) -> None:
-        """SET a key."""
-        self._client.set(key_str.encode(), bytes(data))
+        """SET a key, mirroring the real pool's TTL handling."""
+        # ("EX", ttl) is a stand-in for glide_sync.ExpirySet, which isn't
+        # importable in the test env.
+        expiry = ("EX", self._ttl_seconds) if self._ttl_seconds is not None else None
+        self._client.set(key_str.encode(), bytes(data), expiry=expiry)
 
     def _do_get_into(self, key_str: str, buf: memoryview) -> bool:
-        """GET a key into a buffer."""
+        """GET a key into a buffer.
+
+        Mirrors the real ``_ThreadWorkerPool._do_get_into``: when
+        ``simulate_buffer_get`` is set, take the buffer-GET branch (stage into
+        a scratch buffer, rely on an int byte count); otherwise use the legacy
+        GET branch that returns the full bytes.
+        """
+        flat = buf.cast("B") if buf.format != "B" else buf
+        if type(self).simulate_buffer_get:
+            size = flat.nbytes
+            scratch = memoryview(bytearray(size))
+            result = self._client.get(key_str.encode(), buffer=scratch)
+            if result is None:
+                return False
+            n = int(result)
+            flat[:n] = scratch[:n]
+            return True
         data = self._client.get(key_str.encode())
         if data is None:
             return False
-        flat = buf.cast("B") if buf.format != "B" else buf
         flat[: len(data)] = data
         return True
 
@@ -148,6 +180,7 @@ def mock_thread_worker_pool():
     glide_sync or a real Valkey server."""
     MockSyncGlideClient.reset_store()
     MockThreadWorkerPool.last_init_kwargs = {}
+    MockThreadWorkerPool.simulate_buffer_get = False
     with patch(
         "lmcache.v1.storage_backend.connector.valkey_connector._ThreadWorkerPool",
         MockThreadWorkerPool,
@@ -785,6 +818,36 @@ def test_valkey_cluster_mode_config(local_backend, autorelease_v1):
         close_asyncio_loop(async_loop, async_thread)
 
 
+@pytest.mark.parametrize(
+    "raw_value,expected",
+    [("true", True), ("True", True), ("1", True), ("false", False), ("0", False)],
+)
+def test_valkey_tls_enable_string_coercion(
+    local_backend, autorelease_v1, raw_value, expected
+):
+    """tls_enable from free-form extra_config may be a string; it must be
+    coerced (a bare bool("false") would wrongly enable TLS)."""
+    async_loop, async_thread = init_asyncio_loop()
+
+    config = LMCacheEngineConfig.from_defaults(
+        extra_config={"valkey_num_workers": 2, "tls_enable": raw_value}
+    )
+
+    try:
+        autorelease_v1(
+            CreateConnector(
+                "valkey://tlsstr.local:6380",
+                async_loop,
+                local_backend,
+                config,
+            )
+        )
+        init_info = MockThreadWorkerPool.last_init_kwargs
+        assert init_info["kwargs"].get("tls_enable") is expected
+    finally:
+        close_asyncio_loop(async_loop, async_thread)
+
+
 def test_valkey_tls_config(local_backend, autorelease_v1):
     """Test that tls_enable is passed through to the pool."""
     async_loop, async_thread = init_asyncio_loop()
@@ -808,6 +871,435 @@ def test_valkey_tls_config(local_backend, autorelease_v1):
 
         init_info = MockThreadWorkerPool.last_init_kwargs
         assert init_info["kwargs"].get("tls_enable") is True
+
+    finally:
+        close_asyncio_loop(async_loop, async_thread)
+
+
+# ── TTL feature flag (volatile-* eviction support) ──────────────────────
+
+
+def test_valkey_ttl_sec_disabled_by_default(local_backend, autorelease_v1):
+    """By default (no valkey_enable_ttl) no TTL is passed to the pool."""
+    async_loop, async_thread = init_asyncio_loop()
+
+    config = LMCacheEngineConfig.from_defaults(extra_config={"valkey_num_workers": 2})
+
+    try:
+        autorelease_v1(
+            CreateConnector(
+                "valkey://ttl.local:6379", async_loop, local_backend, config
+            )
+        )
+        init_info = MockThreadWorkerPool.last_init_kwargs
+        assert init_info["kwargs"].get("ttl_seconds") is None
+
+    finally:
+        close_asyncio_loop(async_loop, async_thread)
+
+
+def test_valkey_ttl_sec_enabled_passthrough(local_backend, autorelease_v1):
+    """valkey_enable_ttl + valkey_ttl_sec flow through to the pool as ttl_seconds."""
+    async_loop, async_thread = init_asyncio_loop()
+
+    config = LMCacheEngineConfig.from_defaults(
+        extra_config={
+            "valkey_num_workers": 2,
+            "valkey_enable_ttl": True,
+            "valkey_ttl_sec": 3600,
+        }
+    )
+
+    try:
+        autorelease_v1(
+            CreateConnector(
+                "valkey://ttl.local:6379", async_loop, local_backend, config
+            )
+        )
+        init_info = MockThreadWorkerPool.last_init_kwargs
+        assert init_info["kwargs"].get("ttl_seconds") == 3600
+
+    finally:
+        close_asyncio_loop(async_loop, async_thread)
+
+
+def test_valkey_ttl_sec_enabled_without_value_uses_default(
+    local_backend, autorelease_v1
+):
+    """Enabling the flag without valkey_ttl_sec falls back to DEFAULT_TTL_SECS."""
+    # First Party
+    from lmcache.v1.storage_backend.connector.valkey_connector import (
+        DEFAULT_TTL_SECS,
+    )
+
+    async_loop, async_thread = init_asyncio_loop()
+
+    config = LMCacheEngineConfig.from_defaults(
+        extra_config={
+            "valkey_num_workers": 2,
+            "valkey_enable_ttl": True,
+        }
+    )
+
+    try:
+        autorelease_v1(
+            CreateConnector(
+                "valkey://ttl.local:6379", async_loop, local_backend, config
+            )
+        )
+        init_info = MockThreadWorkerPool.last_init_kwargs
+        assert init_info["kwargs"].get("ttl_seconds") == DEFAULT_TTL_SECS
+
+    finally:
+        close_asyncio_loop(async_loop, async_thread)
+
+
+@pytest.mark.parametrize("raw_ttl", [0, -1, -100, "-100", "0.5", "-0.5"])
+def test_valkey_ttl_sec_invalid_value_raises(raw_ttl, local_backend, autorelease_v1):
+    """A non-positive valkey_ttl_sec is rejected when the flag is enabled.
+
+    Covers zero, negative ints/strings, and sub-second values that truncate
+    to zero.
+    """
+    async_loop, async_thread = init_asyncio_loop()
+
+    config = LMCacheEngineConfig.from_defaults(
+        extra_config={
+            "valkey_num_workers": 2,
+            "valkey_enable_ttl": True,
+            "valkey_ttl_sec": raw_ttl,
+        }
+    )
+
+    try:
+        with pytest.raises(ValueError, match="valkey_ttl_sec must be a positive"):
+            CreateConnector(
+                "valkey://ttl.local:6379", async_loop, local_backend, config
+            )
+    finally:
+        close_asyncio_loop(async_loop, async_thread)
+
+
+@pytest.mark.parametrize(
+    "raw_ttl,expected",
+    [("1800", 1800), ("1800.0", 1800), (1800.0, 1800), (1800, 1800)],
+)
+def test_valkey_ttl_sec_numeric_coercion(
+    raw_ttl, expected, local_backend, autorelease_v1
+):
+    """valkey_ttl_sec may arrive as an int/float or an int/float-like string
+    from free-form extra_config; all coerce to a positive int TTL."""
+    async_loop, async_thread = init_asyncio_loop()
+
+    config = LMCacheEngineConfig.from_defaults(
+        extra_config={
+            "valkey_num_workers": 2,
+            "valkey_enable_ttl": True,
+            "valkey_ttl_sec": raw_ttl,
+        }
+    )
+
+    try:
+        autorelease_v1(
+            CreateConnector(
+                "valkey://ttl.local:6379", async_loop, local_backend, config
+            )
+        )
+        init_info = MockThreadWorkerPool.last_init_kwargs
+        assert init_info["kwargs"].get("ttl_seconds") == expected
+
+    finally:
+        close_asyncio_loop(async_loop, async_thread)
+
+
+def test_valkey_ttl_sec_non_numeric_raises(local_backend, autorelease_v1):
+    """A non-numeric valkey_ttl_sec is rejected with a clear ValueError."""
+    async_loop, async_thread = init_asyncio_loop()
+
+    config = LMCacheEngineConfig.from_defaults(
+        extra_config={
+            "valkey_num_workers": 2,
+            "valkey_enable_ttl": True,
+            "valkey_ttl_sec": "not-a-number",
+        }
+    )
+
+    try:
+        with pytest.raises(ValueError, match="valkey_ttl_sec must be a positive"):
+            CreateConnector(
+                "valkey://ttl.local:6379", async_loop, local_backend, config
+            )
+    finally:
+        close_asyncio_loop(async_loop, async_thread)
+
+
+@pytest.mark.parametrize("raw_ttl", [True, False])
+def test_valkey_ttl_sec_bool_raises(raw_ttl, local_backend, autorelease_v1):
+    """A boolean valkey_ttl_sec is rejected (bool is an int subclass, so it
+    would otherwise silently coerce to a 1-second TTL)."""
+    async_loop, async_thread = init_asyncio_loop()
+
+    config = LMCacheEngineConfig.from_defaults(
+        extra_config={
+            "valkey_num_workers": 2,
+            "valkey_enable_ttl": True,
+            "valkey_ttl_sec": raw_ttl,
+        }
+    )
+
+    try:
+        with pytest.raises(ValueError, match="valkey_ttl_sec must be a positive"):
+            CreateConnector(
+                "valkey://ttl.local:6379", async_loop, local_backend, config
+            )
+    finally:
+        close_asyncio_loop(async_loop, async_thread)
+
+
+def test_valkey_ttl_sec_applied_on_put(local_backend, autorelease_v1):
+    """When TTL is enabled, SET carries an expiry; otherwise it does not."""
+    async_loop, async_thread = init_asyncio_loop()
+
+    config = LMCacheEngineConfig.from_defaults(
+        extra_config={
+            "valkey_num_workers": 2,
+            "valkey_enable_ttl": True,
+            "valkey_ttl_sec": 1800,
+        }
+    )
+
+    try:
+        connector = autorelease_v1(
+            CreateConnector(
+                "valkey://ttl.local:6379", async_loop, local_backend, config
+            )
+        )
+
+        key = dumb_cache_engine_key()
+        memory_obj = _create_test_memory_obj(local_backend, seed=11)
+        future = asyncio.run_coroutine_threadsafe(
+            connector.put(key, memory_obj), async_loop
+        )
+        future.result()
+
+        # The mock client records the expiry passed to the last SET.
+        assert MockSyncGlideClient.last_expiry == ("EX", 1800)
+
+    finally:
+        close_asyncio_loop(async_loop, async_thread)
+
+
+def test_valkey_no_ttl_on_put_when_disabled(
+    valkey_url, local_backend, valkey_config, autorelease_v1
+):
+    """With TTL disabled, SET passes no expiry (legacy behavior)."""
+    async_loop, async_thread = init_asyncio_loop()
+
+    try:
+        connector = autorelease_v1(
+            CreateConnector(valkey_url, async_loop, local_backend, valkey_config)
+        )
+
+        key = dumb_cache_engine_key()
+        memory_obj = _create_test_memory_obj(local_backend, seed=12)
+        future = asyncio.run_coroutine_threadsafe(
+            connector.put(key, memory_obj), async_loop
+        )
+        future.result()
+
+        assert MockSyncGlideClient.last_expiry is None
+
+    finally:
+        close_asyncio_loop(async_loop, async_thread)
+
+
+def test_valkey_rejects_save_unfull_chunk(local_backend, autorelease_v1):
+    """Valkey uses single-key fixed-size storage with no per-chunk metadata,
+    so partial/unfull chunks are not allowed (same as RESP)."""
+    async_loop, async_thread = init_asyncio_loop()
+
+    config = LMCacheEngineConfig.from_defaults(
+        extra_config={"valkey_num_workers": 2},
+    )
+    # Force the partial-chunk flag on after construction so we exercise the
+    # adapter's guard rather than any config auto-adjust logic.
+    config.save_unfull_chunk = True
+
+    try:
+        with pytest.raises(ValueError, match="save_unfull_chunk must be False"):
+            autorelease_v1(
+                CreateConnector(
+                    "valkey://nopartial.local:6379",
+                    async_loop,
+                    local_backend,
+                    config,
+                )
+            )
+    finally:
+        close_asyncio_loop(async_loop, async_thread)
+
+
+def test_valkey_rejects_save_chunk_meta(local_backend, autorelease_v1):
+    """Valkey does not persist per-chunk metadata, so save_chunk_meta must be
+    False (same as RESP)."""
+    async_loop, async_thread = init_asyncio_loop()
+
+    config = LMCacheEngineConfig.from_defaults(
+        extra_config={
+            "valkey_num_workers": 2,
+            "save_chunk_meta": True,
+        },
+    )
+
+    try:
+        with pytest.raises(ValueError, match="save_chunk_meta must be False"):
+            autorelease_v1(
+                CreateConnector(
+                    "valkey://nometa.local:6379",
+                    async_loop,
+                    local_backend,
+                    config,
+                )
+            )
+    finally:
+        close_asyncio_loop(async_loop, async_thread)
+
+
+@pytest.mark.parametrize(
+    "raw_value,should_reject",
+    [
+        ("true", True),
+        ("True", True),
+        ("1", True),
+        ("false", False),
+        ("0", False),
+    ],
+)
+def test_valkey_save_chunk_meta_string_coercion(
+    local_backend, autorelease_v1, raw_value, should_reject
+):
+    """save_chunk_meta from free-form extra_config may be a string; it must be
+    coerced (a bare truthiness check would treat "false" as True)."""
+    async_loop, async_thread = init_asyncio_loop()
+
+    config = LMCacheEngineConfig.from_defaults(
+        extra_config={
+            "valkey_num_workers": 2,
+            "save_chunk_meta": raw_value,
+        },
+    )
+
+    try:
+        if should_reject:
+            with pytest.raises(ValueError, match="save_chunk_meta must be False"):
+                autorelease_v1(
+                    CreateConnector(
+                        "valkey://strmeta.local:6379",
+                        async_loop,
+                        local_backend,
+                        config,
+                    )
+                )
+        else:
+            autorelease_v1(
+                CreateConnector(
+                    "valkey://strmeta.local:6379",
+                    async_loop,
+                    local_backend,
+                    config,
+                )
+            )
+    finally:
+        close_asyncio_loop(async_loop, async_thread)
+
+
+def test_valkey_do_get_into_rejects_short_read():
+    """_do_get_into must not silently accept a short read: fixed-size chunks
+    require an exact round-trip, so a partial fill is treated as a miss
+    (returns False) instead of leaving stale tail bytes in the buffer."""
+    # Standard
+    from types import SimpleNamespace
+
+    class _FakeClient:
+        def __init__(self, payload: bytes):
+            self._payload = payload
+
+        def get(self, key, buffer=None):
+            if buffer is not None:
+                n = len(self._payload)
+                buffer[:n] = self._payload
+                return n
+            return self._payload
+
+    def _make_self(payload, has_buffer_get):
+        return SimpleNamespace(
+            _get_client=lambda: _FakeClient(payload),
+            _has_buffer_get=has_buffer_get,
+            _get_scratch=lambda size: bytearray(size),
+        )
+
+    expected = 8
+
+    # Short read (buffer-get path) → treated as miss
+    buf = memoryview(bytearray(expected))
+    fake = _make_self(b"\xaa" * 4, has_buffer_get=True)
+    assert _RealThreadWorkerPool._do_get_into(fake, "k", buf) is False
+
+    # Short read (non-buffer path) → treated as miss
+    buf = memoryview(bytearray(expected))
+    fake = _make_self(b"\xaa" * 4, has_buffer_get=False)
+    assert _RealThreadWorkerPool._do_get_into(fake, "k", buf) is False
+
+    # Exact read (buffer-get path) → hit, buffer fully populated
+    buf = memoryview(bytearray(expected))
+    fake = _make_self(b"\xbb" * expected, has_buffer_get=True)
+    assert _RealThreadWorkerPool._do_get_into(fake, "k", buf) is True
+    assert bytes(buf) == b"\xbb" * expected
+
+    # Exact read (non-buffer path) → hit, buffer fully populated
+    buf = memoryview(bytearray(expected))
+    fake = _make_self(b"\xcc" * expected, has_buffer_get=False)
+    assert _RealThreadWorkerPool._do_get_into(fake, "k", buf) is True
+    assert bytes(buf) == b"\xcc" * expected
+
+
+@pytest.mark.parametrize("simulate_buffer_get", [False, True])
+def test_valkey_get_round_trip_both_get_modes(
+    valkey_url, local_backend, valkey_config, autorelease_v1, simulate_buffer_get
+):
+    """get/batched_get must round-trip correctly on both worker-pool GET paths:
+    the legacy GET (returns full bytes) and the buffer-GET branch (returns an
+    int byte count). This closes the gap where the mock only exercised the
+    non-buffer branch, leaving the connector's buffer-GET handling untested."""
+    MockThreadWorkerPool.simulate_buffer_get = simulate_buffer_get
+    async_loop, async_thread = init_asyncio_loop()
+
+    try:
+        connector = autorelease_v1(
+            CreateConnector(valkey_url, async_loop, local_backend, valkey_config)
+        )
+
+        # Single get round-trip
+        key = dumb_cache_engine_key()
+        mem = _create_test_memory_obj(local_backend, seed=7)
+        asyncio.run_coroutine_threadsafe(connector.put(key, mem), async_loop).result()
+        retrieved = asyncio.run_coroutine_threadsafe(
+            connector.get(key), async_loop
+        ).result()
+        assert retrieved is not None
+        check_mem_obj_equal([retrieved], [mem])
+
+        # Batched get round-trip
+        keys = [dumb_cache_engine_key(i) for i in range(3)]
+        mems = [_create_test_memory_obj(local_backend, seed=100 + i) for i in range(3)]
+        asyncio.run_coroutine_threadsafe(
+            connector.batched_put(keys, mems), async_loop
+        ).result()
+        retrieved_batch = asyncio.run_coroutine_threadsafe(
+            connector.batched_get(keys), async_loop
+        ).result()
+        assert all(r is not None for r in retrieved_batch)
+        check_mem_obj_equal(retrieved_batch, mems)
 
     finally:
         close_asyncio_loop(async_loop, async_thread)
