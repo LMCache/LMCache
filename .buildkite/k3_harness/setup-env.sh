@@ -12,6 +12,12 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
 check_gpu_health 80
 
+# Resolve which vLLM nightly to install. Sets PINNED_VLLM_VERSION (empty
+# string means "use latest nightly", any other value means
+# "install vllm==<that exact version>"). See script header for the full
+# resolution order and override knobs.
+source "${REPO_ROOT}/.buildkite/k3_harness/resolve-pinned-vllm.sh"
+
 echo "--- :broom: Pre-install bytecode/cache eviction"
 # The CI base image pre-installs packages from requirements/*.txt at image
 # build time. We've observed k3 jobs (integration + correctness) fail with
@@ -48,7 +54,19 @@ echo "--- :python: Installing vLLM nightly (pinned to cu130 index)"
 # minimum set to put the full `vllm serve` import chain on a freshly
 # extracted wheel, which bypasses whatever filesystem-level mismatch in
 # the base image was causing the GenerationConfig ImportError.
-uv pip install -U "vllm[runai,tensorizer,flashinfer]" --pre \
+#
+# When PINNED_VLLM_VERSION is non-empty (resolved by resolve-pinned-vllm.sh
+# from the `buildkite_latest_tested_vllm` branch), pin to that exact wheel
+# so every CI job matches the version most recently verified by the
+# canary build. Empty falls back to "latest nightly".
+if [[ -n "${PINNED_VLLM_VERSION:-}" ]]; then
+    VLLM_INSTALL_SPEC="vllm[runai,tensorizer,flashinfer]==${PINNED_VLLM_VERSION}"
+    echo "Installing vLLM pinned: ${VLLM_INSTALL_SPEC}"
+else
+    VLLM_INSTALL_SPEC="vllm[runai,tensorizer,flashinfer]"
+    echo "Installing latest vLLM nightly (no pin)"
+fi
+uv pip install -U "${VLLM_INSTALL_SPEC}" --pre \
     --reinstall-package transformers \
     --reinstall-package tokenizers \
     --reinstall-package huggingface-hub \

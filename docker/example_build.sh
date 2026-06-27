@@ -3,7 +3,16 @@
 # Update the following variables accordingly
 CUDA_VERSION=13.0
 DOCKERFILE_NAME='Dockerfile'
-VLLM_VERSION="nightly"
+# VLLM_VERSION resolution order:
+#   1. Pre-set VLLM_VERSION env var (overrides everything).
+#   2. PINNED_VLLM_VERSION resolved from the
+#      `buildkite_latest_tested_vllm` branch (the most recent vLLM nightly
+#      verified by the canary build). Empty when offline / first run.
+#   3. Fallback to "nightly" so behaviour matches the previous default.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=../.buildkite/k3_harness/resolve-pinned-vllm.sh
+source "${SCRIPT_DIR}/../.buildkite/k3_harness/resolve-pinned-vllm.sh"
+VLLM_VERSION="${VLLM_VERSION:-${PINNED_VLLM_VERSION:-nightly}}"
 DOCKER_BUILD_PATH='../' # This path should point to the LMCache root for access to 'requirements' directory
 UBUNTU_VERSION=24.04
 
