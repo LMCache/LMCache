@@ -27,6 +27,53 @@ if [[ -z "${VLLM_VERSION}" ]]; then
 fi
 echo "Verified vLLM version: ${VLLM_VERSION}"
 
+# ── Resolve commit SHAs so consumers don't need to call any external API ─
+# The PEP 440 local version after `+g` is the short commit SHA, e.g.
+# 0.23.1rc1.dev508+gc6dd32a81 -> c6dd32a81. Expand it to the full 40-char
+# SHA via the public GitHub commits API; we already have GITHUB_TOKEN in
+# the env (5000 req/h). The full SHA gives us the permanent
+# wheels.vllm.ai/<full-sha>/<cuda>/ archive URL, which keeps working even
+# after the rolling nightly index has dropped the wheel.
+VLLM_SHORT_SHA="${VLLM_VERSION##*+g}"
+if [[ "${VLLM_SHORT_SHA}" == "${VLLM_VERSION}" \
+        || ! "${VLLM_SHORT_SHA}" =~ ^[0-9a-f]+$ ]]; then
+    VLLM_SHORT_SHA=""
+fi
+
+VLLM_FULL_SHA=""
+if [[ -n "${VLLM_SHORT_SHA}" ]]; then
+    gh_auth_args=()
+    if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+        gh_auth_args=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+    fi
+    for attempt in 1 2 3; do
+        VLLM_FULL_SHA="$(curl -fsSL --connect-timeout 5 --max-time 10 \
+            -H "Accept: application/vnd.github+json" \
+            "${gh_auth_args[@]+"${gh_auth_args[@]}"}" \
+            "https://api.github.com/repos/vllm-project/vllm/commits/${VLLM_SHORT_SHA}" \
+            2>/dev/null \
+            | awk -F'"' '/"sha":/ {print $4; exit}')" || true
+        if [[ "${VLLM_FULL_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            break
+        fi
+        VLLM_FULL_SHA=""
+        echo "[INFO] GitHub commit lookup attempt ${attempt} for" \
+             "${VLLM_SHORT_SHA} returned no SHA; retrying..." >&2
+        sleep 2
+    done
+fi
+
+if [[ -n "${VLLM_FULL_SHA}" ]]; then
+    VLLM_ARCHIVE_INDEX="https://wheels.vllm.ai/${VLLM_FULL_SHA}/cu130"
+    echo "Resolved full SHA: ${VLLM_FULL_SHA}"
+    echo "Archive index:     ${VLLM_ARCHIVE_INDEX}"
+else
+    VLLM_ARCHIVE_INDEX=""
+    echo "[WARN] could not resolve full SHA for short SHA" \
+         "'${VLLM_SHORT_SHA:-<none>}'; archive_index_url will be empty" \
+         "and consumers will fall back to live API lookup" >&2
+fi
+
 CI_REPO="LMCache/LMCache"
 CI_BRANCH="buildkite_latest_tested_vllm"
 
@@ -71,6 +118,9 @@ path = sys.argv[1]
 record = {
     "timestamp": "${TIMESTAMP}",
     "vllm_version": "${VLLM_VERSION}",
+    "vllm_short_sha": "${VLLM_SHORT_SHA}",
+    "vllm_full_sha": "${VLLM_FULL_SHA}",
+    "archive_index_url": "${VLLM_ARCHIVE_INDEX}",
     "build_number": "${BUILD_NUMBER}",
     "build_url": "${BUILD_URL}",
     "commit": "${COMMIT_SHA}",
@@ -79,8 +129,15 @@ with open(path, "a", encoding="utf-8") as f:
     f.write(json.dumps(record) + "\n")
 PY
 
-# Latest pointer (overwrite).
-printf '%s\n' "${VLLM_VERSION}" > "${LATEST_FILE}"
+# Latest pointer. The first line is the bare version so older consumers
+# that just `head -n1` keep working; the trailing key=value lines let new
+# consumers skip the live GitHub API lookup entirely.
+{
+    printf '%s\n' "${VLLM_VERSION}"
+    printf 'short_sha=%s\n' "${VLLM_SHORT_SHA}"
+    printf 'full_sha=%s\n' "${VLLM_FULL_SHA}"
+    printf 'archive_index_url=%s\n' "${VLLM_ARCHIVE_INDEX}"
+} > "${LATEST_FILE}"
 
 # ── Commit + push ───────────────────────────────────────────────────────
 cd "${WORK_DIR}"
