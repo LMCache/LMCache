@@ -31,9 +31,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
 	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
@@ -249,36 +247,6 @@ func setImageSpec(spec **lmcachev1alpha1.ImageSpec, ref string) {
 	(*spec).Tag = &tag
 }
 
-// firstPodForDeployment returns the first non-terminating pod selected by the
-// Deployment's pod selector, or nil if none exist yet. Returns the typed Pod
-// so callers can read both annotations (injection stamp) and container args.
-func firstPodForDeployment(ctx context.Context, ns string, dep *appsv1.Deployment) *corev1.Pod {
-	pods := &corev1.PodList{}
-	if err := k8sClient.List(ctx, pods,
-		client.InNamespace(ns),
-		client.MatchingLabels(dep.Spec.Selector.MatchLabels),
-	); err != nil {
-		return nil
-	}
-	for i := range pods.Items {
-		if pods.Items[i].DeletionTimestamp == nil {
-			return &pods.Items[i]
-		}
-	}
-	return nil
-}
-
-// vllmContainerArgs returns the args of the vLLM container in the pod (the one
-// named "vllm", falling back to the first container). The mutating webhook
-// appends the CacheBlend flags to this container's args.
-func vllmContainerArgs(pod *corev1.Pod) []string {
-	for i := range pod.Spec.Containers {
-		if pod.Spec.Containers[i].Name == "vllm" {
-			return pod.Spec.Containers[i].Args
-		}
-	}
-	if len(pod.Spec.Containers) > 0 {
-		return pod.Spec.Containers[0].Args
-	}
-	return nil
-}
+// firstPodForDeployment and vllmContainerArgs live in smoke_helpers_test.go so
+// the CPU-only LMCache injection smoke (build tag e2e, no e2e_gpu) can share
+// them.
