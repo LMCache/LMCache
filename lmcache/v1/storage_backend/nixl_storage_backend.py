@@ -476,8 +476,8 @@ class NixlStorageAgent(ABC):
 
     def init_mem_handlers(self, device, buffer_ptr, buffer_size, page_size, device_id):
         if self.backend != "INFINIA":
-            # Break the registration into page size chunks to ensure the maximum buffer size
-            # of the underlying plugin is not exceeded
+            # Break the registration into page size chunks to ensure the
+            # maximum buffer size of the underlying plugin is not exceeded
             reg_list = [
                 (base_addr, page_size, device_id, "")
                 for base_addr in range(buffer_ptr, buffer_ptr + buffer_size, page_size)
