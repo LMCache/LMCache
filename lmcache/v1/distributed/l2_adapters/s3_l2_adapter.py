@@ -1557,11 +1557,13 @@ class S3L2Adapter(L2AdapterInterface):
             captured["status"] = status_code
 
         def on_done(error=None, status_code=None, **kwargs):
+            # Do NOT raise here. A missing sidecar (HTTP 404) is an expected,
+            # benign case the caller handles by falling back to a full scan.
+            # Raising inside this CRT callback logs a noisy traceback even though
+            # finished_future already surfaces any genuine error — so just record
+            # the outcome and let the awaiter decide.
             captured["status"] = status_code or captured["status"]
-            if error or captured["status"] not in (200, 206):
-                raise RuntimeError(
-                    f"S3 GET failed for {key_str}: {error or captured['status']}"
-                )
+            captured["error"] = error
 
         s3_req = s3.S3Request(
             client=self._s3_client,
@@ -1577,7 +1579,16 @@ class S3L2Adapter(L2AdapterInterface):
         try:
             await asyncio.wrap_future(s3_req.finished_future)
         except Exception as exc:
-            logger.debug("S3 GET for sidecar %s failed: %s", key_str, exc)
+            # CRT raises AWS_ERROR_S3_INVALID_RESPONSE_STATUS for a 404 — that's a
+            # missing sidecar, not a failure. Return None quietly; caller scans.
+            logger.debug("sidecar %s absent/unreadable (%s); will scan", key_str, exc)
+            return None
+        if captured.get("error") or captured["status"] not in (200, 206):
+            logger.debug(
+                "sidecar %s status %s; treating as absent",
+                key_str,
+                captured.get("error") or captured["status"],
+            )
             return None
         return b"".join(body_chunks)
 
