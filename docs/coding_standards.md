@@ -374,3 +374,19 @@ Use this checklist before submitting a PR or during review:
 - [ ] Thread safety maintained for shared state
 - [ ] No unnecessary memory copies in hot paths
 - [ ] CUDA/GPU resources properly managed
+
+### 7.7 Log Format Specifiers
+
+Use the correct `printf`-style format specifier based on the **type annotation**, not neighboring log calls:
+
+| Type | Specifier | Example |
+|------|-----------|---------|
+| `int` (counts, numeric IDs) | `%d` | `logger.info("Retrieved %d chunks", chunk_count)` |
+| `str` (string IDs, names) | `%s` | `logger.info("Dropped instance %s", instance_id)` |
+| `bool` | `%s` (prints `True`/`False`) | `logger.info("Cache hit: %s", hit)` |
+| `float` | `%s` or `%r` | `logger.info("Score: %s", score)` |
+| Objects / exceptions | `%s` (calls `__str__`) | `logger.info("Error: %s", exc)` |
+
+**Why this matters**: `instance_id` is typed as `str` in the cache engine layer (UUID) and `int` in the multiprocess layer (GPU/worker index). A mechanical f-string→`%`-style conversion can silently pick the wrong specifier unless the type annotation is checked. Always verify the type before choosing `%d` vs `%s`.
+
+**Naming note**: When a variable represents a GPU/worker index number, prefer `gpu_instance_id` or `worker_id` over bare `instance_id` to distinguish it from the string `instance_id` used in the engine layer.
