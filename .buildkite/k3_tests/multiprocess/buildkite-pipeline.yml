@@ -8,4 +8,9 @@ env:
 
 steps:
   - label: ":pipeline: Upload pipeline"
+    if: build.env("TEST_ONLY") != "true"
     command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/multiprocess/pipeline.yml
+
+  - label: ":wave: hello"
+    if: build.env("TEST_ONLY") == "true"
+    command: echo "hello"
