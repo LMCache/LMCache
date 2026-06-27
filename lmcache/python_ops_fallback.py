@@ -758,20 +758,53 @@ def multi_layer_kv_transfer_unilateral(
                 key_value[kv_idx, layer_id, valid_mask_kv, :] = gathered.to(kv_device)
 
 
-def _is_cross_layer_format(engine_kv_format: EngineKVFormat) -> bool:
-    """Return True when a KV format uses a single cross-layer tensor."""
+# Pure-Python mirrors of the c_ops predicates (csrc/engine_kv_format.h); the
+# parity test pins these to the same names and signatures.
+def is_cross_layer(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True when all layers live in one fused tensor."""
     return int(engine_kv_format) in (
         int(EngineKVFormat.NB_NL_TWO_BS_NH_HS),
         int(EngineKVFormat.NB_NL_TWO_NH_BS_HS),
     )
 
 
-def _is_sglang_mha_format(engine_kv_format: EngineKVFormat) -> bool:
-    """Return True when a KV format uses SGLang MHA layout (2*NL tensors)."""
+def is_kv_list(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True when keys and values are two separate top-level lists."""
     return int(engine_kv_format) in (
         int(EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS),
         int(EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS),
     )
+
+
+def is_layer_list(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True when the structure is one list entry per layer."""
+    return int(engine_kv_format) in (
+        int(EngineKVFormat.NL_X_TWO_NB_BS_NH_HS),
+        int(EngineKVFormat.NL_X_NB_TWO_BS_NH_HS),
+        int(EngineKVFormat.NL_X_NB_BS_HS),
+        int(EngineKVFormat.NL_X_NBBS_ONE_HS),
+        int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS),
+        int(EngineKVFormat.NL_X_NB_TWO_NH_BS_HS),
+        int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
+    )
+
+
+def is_mla(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True when a KV format uses MLA paged layout."""
+    return int(engine_kv_format) in (
+        int(EngineKVFormat.NL_X_NB_BS_HS),
+        int(EngineKVFormat.NL_X_NBBS_ONE_HS),
+    )
+
+
+def _is_cross_layer_format(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True when a KV format uses a single cross-layer tensor."""
+    return is_cross_layer(engine_kv_format)
+
+
+def _is_sglang_mha_format(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True when a KV format uses SGLang MHA layout (2*NL tensors)."""
+    return is_kv_list(engine_kv_format)
 
 
 def _is_hnd_format(engine_kv_format: EngineKVFormat) -> bool:
@@ -785,10 +818,7 @@ def _is_hnd_format(engine_kv_format: EngineKVFormat) -> bool:
 
 def _is_mla_format(engine_kv_format: EngineKVFormat) -> bool:
     """Return True when a KV format uses MLA paged layout."""
-    return int(engine_kv_format) in (
-        int(EngineKVFormat.NL_X_NB_BS_HS),
-        int(EngineKVFormat.NL_X_NBBS_ONE_HS),
-    )
+    return is_mla(engine_kv_format)
 
 
 _ELEMENT_SIZE_TO_DTYPE: dict[int, torch.dtype] = {
