@@ -59,9 +59,53 @@ echo "--- :python: Installing vLLM nightly (pinned to cu130 index)"
 # from the `buildkite_latest_tested_vllm` branch), pin to that exact wheel
 # so every CI job matches the version most recently verified by the
 # canary build. Empty falls back to "latest nightly".
+#
+# vLLM's nightly index (wheels.vllm.ai/nightly/<cuda>/) only keeps the
+# *latest* wheel; older versions get rolled off within a day or two and
+# pinning them there fails with "no version of vllm==X". Historical
+# wheels are still served at wheels.vllm.ai/<full-commit-sha>/<cuda>/,
+# which is a PEP 503 simple index. The PEP 440 local version after `+g`
+# is the short commit SHA (e.g. 0.23.1rc1.dev508+gc6dd32a81 -> c6dd32a81),
+# which we expand to the full SHA via the public GitHub commits API and
+# add as an extra-index-url so pip can resolve the pinned version.
+# A GITHUB_TOKEN in the env (already provided to the canary push step)
+# raises the API rate limit from 60 to 5000 req/h, but is optional --
+# the unauthenticated path is fine for normal traffic.
+PINNED_VLLM_INDEX_ARGS=()
 if [[ -n "${PINNED_VLLM_VERSION:-}" ]]; then
     VLLM_INSTALL_SPEC="vllm[runai,tensorizer,flashinfer]==${PINNED_VLLM_VERSION}"
     echo "Installing vLLM pinned: ${VLLM_INSTALL_SPEC}"
+    short_sha="${PINNED_VLLM_VERSION##*+g}"
+    if [[ "${short_sha}" != "${PINNED_VLLM_VERSION}" \
+            && "${short_sha}" =~ ^[0-9a-f]+$ ]]; then
+        gh_auth_args=()
+        if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+            gh_auth_args=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+        fi
+        full_sha=""
+        for attempt in 1 2 3; do
+            full_sha="$(curl -fsSL --connect-timeout 5 --max-time 10 \
+                -H "Accept: application/vnd.github+json" \
+                "${gh_auth_args[@]+"${gh_auth_args[@]}"}" \
+                "https://api.github.com/repos/vllm-project/vllm/commits/${short_sha}" \
+                2>/dev/null \
+                | awk -F'"' '/"sha":/ {print $4; exit}')" || true
+            if [[ "${full_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+                break
+            fi
+            echo "[INFO] GitHub commit lookup attempt ${attempt} for" \
+                 "${short_sha} returned no SHA; retrying..." >&2
+            sleep 2
+        done
+        if [[ "${full_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+            archive_url="https://wheels.vllm.ai/${full_sha}/cu130"
+            echo "Adding commit-archived index: ${archive_url}"
+            PINNED_VLLM_INDEX_ARGS+=(--extra-index-url "${archive_url}")
+        else
+            echo "[WARN] could not resolve full SHA for ${short_sha}; pip" \
+                 "may fail if the wheel has rolled off the nightly index" >&2
+        fi
+    fi
 else
     VLLM_INSTALL_SPEC="vllm[runai,tensorizer,flashinfer]"
     echo "Installing latest vLLM nightly (no pin)"
@@ -72,6 +116,7 @@ uv pip install -U "${VLLM_INSTALL_SPEC}" --pre \
     --reinstall-package huggingface-hub \
     --reinstall-package safetensors \
     --reinstall-package vllm \
+    "${PINNED_VLLM_INDEX_ARGS[@]+"${PINNED_VLLM_INDEX_ARGS[@]}"}" \
     --extra-index-url https://wheels.vllm.ai/nightly/cu130 \
     --extra-index-url https://download.pytorch.org/whl/cu130 \
     --index-strategy unsafe-best-match
