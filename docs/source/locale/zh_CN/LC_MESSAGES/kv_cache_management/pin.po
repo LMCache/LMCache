@@ -46,7 +46,7 @@ msgstr "首先，创建一个 yaml 文件 ``example.yaml`` 来配置 lmcache 实
 
 #: ../../source/kv_cache_management/pin.rst:38
 msgid "Start the vllm/lmcache instance at port 8000:"
-msgstr "在 8000 端口启动 vllm/lmcache 实例："
+msgstr "在端口 8000 启动 vllm/lmcache 实例："
 
 #: ../../source/kv_cache_management/pin.rst:45
 msgid "Start the lmcache controller at port 9000 and the monitor at port 9001:"

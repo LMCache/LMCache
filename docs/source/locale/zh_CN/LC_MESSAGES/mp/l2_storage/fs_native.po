@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/mp/l2_storage/fs_native.rst:2
 msgid "FS (native)"
-msgstr "本地文件系统 (FS)"
+msgstr "FS（原生）"
 
 #: ../../source/mp/l2_storage/fs_native.rst:4
 msgid ""
@@ -48,32 +48,32 @@ msgid ""
 "``num_workers`` (int, default ``4``, > 0): Number of C++ worker threads "
 "inside the connector.  This is the real I/O queue depth -- raise to push "
 "throughput on filesystems whose aggregate BW exceeds per-stream BW."
-msgstr "``num_workers``（int，默认值 ``4``，> 0）：连接器内部的 C++ 工作线程数量。这是真正的 I/O 队列深度——提高此值以在总带宽超过每个流带宽的文件系统上提升吞吐量。"
+msgstr "``num_workers``\\ （int，默认值 ``4``\\ ，> 0）：连接器内部的 C++ 工作线程数量。这是真正的 I/O 队列深度——提高此值以在总带宽超过每个流带宽的文件系统上提升吞吐量。"
 
 #: ../../source/mp/l2_storage/fs_native.rst:19
 msgid ""
 "``relative_tmp_dir`` (str, default ``\"\"``): Relative sub-directory for "
 "temporary files during writes (atomic rename on completion)."
-msgstr "``relative_tmp_dir`` (str, default ``\"\"``): 写入期间临时文件的相对子目录（完成时原子重命名）。"
+msgstr "``relative_tmp_dir``\\ （str，默认值 ``\"\"``\\ ）：写入临时文件所使用的相对子目录，写入完成后执行原子重命名。"
 
 #: ../../source/mp/l2_storage/fs_native.rst:21
 msgid ""
 "``use_odirect`` (bool, default ``false``): Bypass the page cache via "
 "``O_DIRECT``.  Required to measure real disk bandwidth.  See alignment "
 "caveat below."
-msgstr "``use_odirect`` (bool, default ``false``): 通过 ``O_DIRECT`` 绕过页面缓存。 需要测量真实的磁盘带宽。 请参阅下面的对齐注意事项。"
+msgstr "``use_odirect``\\ （bool，默认值 ``false``\\ ）：通过 ``O_DIRECT`` 绕过页面缓存，启用后方可测量真实的磁盘带宽。请参阅下方的对齐注意事项。"
 
 #: ../../source/mp/l2_storage/fs_native.rst:24
 msgid ""
 "``read_ahead_size`` (int, optional): Trigger filesystem readahead by "
 "issuing a warm-up read of this many bytes at open time."
-msgstr "``read_ahead_size`` (int, optional): 在打开时通过发出此字节数的预热读取来触发文件系统的预读取。"
+msgstr "``read_ahead_size``\\ （int，可选）：打开文件时预读指定字节数以触发文件系统的预读机制。"
 
 #: ../../source/mp/l2_storage/fs_native.rst:26
 msgid ""
 "``max_capacity_gb`` (float, default ``0``): Maximum L2 capacity in GB for"
 " client-side usage tracking.  Default ``0`` disables tracking."
-msgstr "``max_capacity_gb`` (float, default ``0``): 客户端使用跟踪的最大 L2 容量（以 GB 为单位）。默认值 ``0`` 禁用跟踪。"
+msgstr "``max_capacity_gb``\\ （float，默认值 ``0``\\ ）：用于客户端使用量跟踪的最大 L2 容量（单位：GB）。默认值 ``0`` 表示禁用跟踪。"
 
 #: ../../source/mp/l2_storage/fs_native.rst:31
 msgid "``O_DIRECT`` has two independent alignment requirements:"
@@ -92,7 +92,7 @@ msgid ""
 "that the resulting per-chunk byte size is a multiple of the FS block "
 "size.  GPFS and similar parallel filesystems often use large blocks (e.g."
 " several MiB)."
-msgstr "**长度对齐。**  传输长度必须是文件系统块大小的倍数。连接器在构造时查询磁盘块大小，并在每次操作时检查 ``len % disk_block_size``。如果长度 **不是** 倍数，连接器会默默回退到缓冲打开（不使用 ``O_DIRECT``）进行该操作——正确性得以保留，但您无法获得真正的直接 I/O。为了确保实际使用 ``O_DIRECT``，选择 ``--chunk-size`` 使得每块的字节大小是文件系统块大小的倍数。GPFS 和类似的并行文件系统通常使用较大的块（例如几个 MiB）。"
+msgstr "**长度对齐。**  传输长度必须是文件系统块大小的倍数。连接器在构造时查询磁盘块大小，并在每次操作时检查 ``len % disk_block_size``\\ 。如果长度 **不是** 倍数，连接器会默默回退到缓冲打开（不使用 ``O_DIRECT``\\ ）进行该操作——正确性得以保留，但您无法获得真正的直接 I/O。为了确保实际使用 ``O_DIRECT``\\ ，选择 ``--chunk-size`` 使得每块的字节大小是文件系统块大小的倍数。GPFS 和类似的并行文件系统通常使用较大的块（例如几个 MiB）。"
 
 #: ../../source/mp/l2_storage/fs_native.rst:45
 msgid ""
@@ -104,13 +104,13 @@ msgid ""
 "underlying ``read``/``write`` syscall returns ``EINVAL`` (this is **not**"
 " caught by the length-fallback path above and will surface as a runtime "
 "error)."
-msgstr "**内存缓冲对齐。** I/O 缓冲区指针本身也必须对齐（通常在本地磁盘上对齐到 4096 字节，或在并行文件系统上对齐到 FS 块大小）。这由 ``--l1-align-bytes`` 控制（默认值为 ``4096``）——在使用较大块的文件系统时，将其提高以匹配 FS 块大小。如果缓冲区未对齐，底层的 ``read``/``write`` 系统调用将返回 ``EINVAL``（这不会被上面的长度回退路径捕获，并将作为运行时错误出现）。"
+msgstr "**内存缓冲区对齐。** I/O 缓冲区指针本身也必须对齐（本地磁盘通常要求对齐到 4096 字节，并行文件系统则要求对齐到 FS 块大小）。这由 ``--l1-align-bytes`` 控制（默认值为 ``4096``\\ ）——在块较大的文件系统上运行时，请相应调高此值以匹配 FS 块大小。若缓冲区未对齐，底层 ``read``/``write`` 系统调用将返回 ``EINVAL``\\ （该错误不会被上述长度回退路径捕获，会直接以运行时错误的形式抛出）。"
 
 #: ../../source/mp/l2_storage/fs_native.rst:54
 msgid ""
 "If unsure, start with ``use_odirect: false`` and confirm correctness "
 "before enabling ``O_DIRECT``."
-msgstr "如果不确定，请先使用 ``use_odirect: false`` 并确认正确性，然后再启用 ``O_DIRECT``。"
+msgstr "如果不确定，请先使用 ``use_odirect: false`` 并确认正确性，然后再启用 ``O_DIRECT``\\ 。"
 
 #: ../../source/mp/l2_storage/fs_native.rst:57
 msgid "**Configuration examples:**"
@@ -121,5 +121,5 @@ msgid ""
 "**Buffer-only mode example.**  L1 acts as a pure write buffer that "
 "absorbs the peak burst of in-flight chunks while the C++ worker pool "
 "drains them to disk; nothing is retained in L1 once a store completes:"
-msgstr "**仅缓冲区模式示例。** L1 充当一个纯写缓冲区，吸收在飞行块的峰值突发，同时 C++ 工作池将它们写入磁盘；一旦存储完成，L1 中不会保留任何内容："
+msgstr "**仅缓冲区模式示例。** L1 充当纯写缓冲区，吸收待处理数据块的峰值突发，同时 C++ 工作线程池将其排空至磁盘；存储完成后 L1 中不保留任何内容："
 

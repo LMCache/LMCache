@@ -100,7 +100,7 @@ msgstr "**前提条件：**"
 
 #: ../../source/kv_cache/storage_backends/infinistore.rst:42
 msgid "Machine with at least one GPU for vLLM inference"
-msgstr "具有至少一个 GPU 以进行 vLLM 推理的机器"
+msgstr "具有至少一个 GPU 的机器用于 vLLM 推理"
 
 #: ../../source/kv_cache/storage_backends/infinistore.rst:43
 msgid "RDMA-capable network hardware and drivers"
@@ -108,7 +108,7 @@ msgstr "支持 RDMA 的网络硬件和驱动程序"
 
 #: ../../source/kv_cache/storage_backends/infinistore.rst:44
 msgid "Python 3.8+ with pip"
-msgstr "支持 pip 的 Python 3.8 及以上版本"
+msgstr "Python 3.8+ 和 pip"
 
 #: ../../source/kv_cache/storage_backends/infinistore.rst:45
 msgid "vLLM and LMCache installed"
