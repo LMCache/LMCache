@@ -29,7 +29,7 @@ msgid ""
 "modes: **metrics** (Prometheus counters via OTel), **logging** (Python "
 "logging with optional OTel log forwarding), and **tracing** (OTel spans "
 "for per-request latency)."
-msgstr "LMCache 多进程模式提供三种互补的可观察性模式：**指标**（通过 OTel 的 Prometheus 计数器）、**日志**（带有可选 OTel 日志转发的 Python 日志）和 **追踪**（OTel 跨度用于每个请求的延迟）。"
+msgstr "LMCache MP 模式（多进程）提供三种互补的可观察性模式：\\ **指标**\\ （通过 OTel 的 Prometheus 计数器）、\\ **日志**\\ （带有可选 OTel 日志转发的 Python 日志记录）和 **追踪**\\ （OTel span，用于每个请求的延迟分析）。"
 
 #: ../../source/mp/observability/index.rst:9
 msgid ""
@@ -45,7 +45,7 @@ msgstr "快速开始"
 msgid ""
 "By default, **metrics** and **logging** are enabled; **tracing** is "
 "disabled. No extra flags are needed:"
-msgstr "默认情况下，**指标**和**日志记录**是启用的；**追踪**是禁用的。无需额外的标志："
+msgstr "默认情况下，\\ **指标**\\ 和\\ **日志记录**\\ 是启用的；\\ **追踪**\\ 是禁用的。无需额外的标志："
 
 #: ../../source/mp/observability/index.rst:27
 msgid "To enable tracing, supply an OTLP endpoint:"
@@ -78,13 +78,13 @@ msgstr "``--disable-observability``"
 #: ../../source/mp/observability/index.rst:53
 #: ../../source/mp/observability/index.rst:56
 msgid "off"
-msgstr "关掉"
+msgstr "关闭"
 
 #: ../../source/mp/observability/index.rst:47
 msgid ""
 "Master switch: disable the EventBus entirely (no metrics, logging, or "
 "tracing subscribers are registered)."
-msgstr "主开关：完全禁用 EventBus（没有注册任何指标、日志或跟踪订阅者）。"
+msgstr "主开关：完全禁用 EventBus（不注册任何指标、日志记录或追踪订阅者）。"
 
 #: ../../source/mp/observability/index.rst:49
 msgid "``--disable-metrics``"
@@ -108,7 +108,7 @@ msgstr "``--enable-tracing``"
 
 #: ../../source/mp/observability/index.rst:57
 msgid "Register tracing subscribers. Requires ``--otlp-endpoint``."
-msgstr "注册追踪订阅者。需要 ``--otlp-endpoint``。"
+msgstr "注册追踪订阅者。需要 ``--otlp-endpoint``\\ 。"
 
 #: ../../source/mp/observability/index.rst:58
 msgid "``--event-bus-queue-size``"
@@ -130,13 +130,13 @@ msgstr "``--otlp-endpoint``"
 #: ../../source/mp/observability/index.rst:73
 #: ../../source/mp/observability/index.rst:79
 msgid "*(none)*"
-msgstr "*(无)*"
+msgstr "(无)"
 
 #: ../../source/mp/observability/index.rst:63
 msgid ""
 "OTLP gRPC endpoint (e.g. ``http://localhost:4317``). Used for exporting "
 "metrics (push mode) and traces."
-msgstr "OTLP gRPC 端点（例如 ``http://localhost:4317``）。用于导出指标（推送模式）和跟踪。"
+msgstr "OTLP gRPC 端点（例如 ``http://localhost:4317``\\ ）。用于导出指标（推送模式）和追踪数据。"
 
 #: ../../source/mp/observability/index.rst:65
 msgid "``--prometheus-port``"
@@ -162,7 +162,7 @@ msgstr "``0.01``"
 msgid ""
 "Fraction of chunks/blocks to track for lifecycle histograms (0, 1.0]. "
 "Counters always count all events. Default is 1%."
-msgstr "用于生命周期直方图的块/块的跟踪比例 (0, 1.0]。计数器始终计算所有事件。默认值为 1%。"
+msgstr "用于生命周期直方图的 chunk/block 采样比例 (0, 1.0]。计数器始终统计所有事件。默认值为 1%。"
 
 #: ../../source/mp/observability/index.rst:72
 msgid "``--trace-level``"
@@ -174,7 +174,7 @@ msgid ""
 "supported (records ``StorageManager`` public-API calls for offline "
 "replay). When unset, trace recording is off. See :ref:`trace-recording` "
 "for details."
-msgstr "在给定级别启用跟踪记录。目前仅支持 ``storage``（记录 ``StorageManager`` 公共 API 调用以便离线重放）。未设置时，跟踪记录关闭。有关详细信息，请参见 :ref:`trace-recording`。"
+msgstr "在指定级别启用追踪录制。目前仅支持 ``storage``\\ （记录 ``StorageManager`` 公共 API 调用以便离线回放）。未设置时，追踪录制关闭。详情请参见 :ref:`trace-recording`。"
 
 #: ../../source/mp/observability/index.rst:78
 msgid "``--trace-output``"
@@ -185,7 +185,7 @@ msgid ""
 "Path to write the trace file. If omitted while ``--trace-level`` is set, "
 "a timestamped file under ``$TMPDIR`` is minted (``lmcache-"
 "trace-<pid>-<UTC>.lct``) and its path is logged at INFO."
-msgstr "写入跟踪文件的路径。如果在设置了 ``--trace-level`` 的情况下省略此项，则会在 ``$TMPDIR`` 下生成一个带时间戳的文件（``lmcache-trace-<pid>-<UTC>.lct``），并在 INFO 级别记录其路径。"
+msgstr "追踪文件的写入路径。若设置了 ``--trace-level`` 但省略此项，将在 ``$TMPDIR`` 下自动生成一个带时间戳的文件（\\ ``lmcache-trace-<pid>-<UTC>.lct``\\ ），并以 INFO 级别记录其路径。"
 
 #: ../../source/mp/observability/index.rst:84
 msgid "**Environment variables:**"
@@ -207,5 +207,5 @@ msgstr "``INFO``"
 msgid ""
 "Controls the log level for all LMCache loggers. Valid values: ``DEBUG``, "
 "``INFO``, ``WARNING``, ``ERROR``, ``CRITICAL``."
-msgstr "控制所有 LMCache 日志记录器的日志级别。有效值：``DEBUG``、``INFO``、``WARNING``、``ERROR``、``CRITICAL``。"
+msgstr "控制所有 LMCache 日志记录器的日志级别。有效值：\\ ``DEBUG``\\ 、\\ ``INFO``\\ 、\\ ``WARNING``\\ 、\\ ``ERROR``\\ 、\\ ``CRITICAL``\\ 。"
 

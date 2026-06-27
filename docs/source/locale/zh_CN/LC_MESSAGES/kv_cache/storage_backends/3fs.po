@@ -48,7 +48,7 @@ msgstr "通过 ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml`` 传入"
 
 #: ../../source/kv_cache/storage_backends/3fs.rst:20
 msgid "Example ``config.yaml``:"
-msgstr "示例 ``config.yaml``："
+msgstr "示例 ``config.yaml``:"
 
 #: ../../source/kv_cache/storage_backends/3fs.rst:66
 msgid "There are 2 methods to config hf3fs remote backend:"
@@ -91,13 +91,13 @@ msgstr "安装"
 
 #: ../../source/kv_cache/storage_backends/3fs.rst:80
 msgid "**Prerequisites:**"
-msgstr "**先决条件：**"
+msgstr "**前提条件：**"
 
 #: ../../source/kv_cache/storage_backends/3fs.rst:82
 msgid ""
 "A Machine with at least one GPU. You can adjust the max model length of "
 "your vllm instance depending on your GPU memory."
-msgstr "一台至少配备一块 GPU 的机器。您可以根据您的显存调整 vllm 实例的最大模型长度。"
+msgstr "一台至少配备一个 GPU 的机器。您可以根据您的显存调整 vllm 实例的最大模型长度。"
 
 #: ../../source/kv_cache/storage_backends/3fs.rst:84
 msgid "vllm and lmcache installed"

@@ -33,7 +33,7 @@ Requires ``valkey-glide`` with PRs #5492 (zero-copy SET) and #5493 (buffer GET).
 # Standard
 from concurrent.futures import Future, ThreadPoolExecutor
 from enum import IntEnum, auto
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 import asyncio
 import inspect
 import threading
@@ -46,12 +46,19 @@ from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 from lmcache.v1.storage_backend.job_executor.pq_executor import AsyncPQExecutor
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
+if TYPE_CHECKING:
+    # Third Party
+    import glide_sync  # type: ignore[import-untyped]
+
 logger = init_logger(__name__)
 
 #: Default request timeout (seconds).
 DEFAULT_REQUEST_TIMEOUT_SECS: float = 5.0
 #: Default connection timeout (seconds).
 DEFAULT_CONNECTION_TIMEOUT_SECS: float = 10.0
+#: Default key TTL (seconds) used when the TTL feature flag is enabled but no
+#: explicit ``valkey_ttl_sec`` is configured (24 hours).
+DEFAULT_TTL_SECS: int = 86400
 
 
 class Priorities(IntEnum):
@@ -88,6 +95,10 @@ class _ThreadWorkerPool:
         tls_enable: Whether to use TLS for Valkey connections.
         cluster_mode: If True, use GlideClusterClient; else GlideClient.
         database_id: Database ID for standalone mode (ignored in cluster).
+        ttl_seconds: If set, every key is written with this expiry (in
+            seconds) so Valkey/Redis ``volatile-*`` eviction policies can
+            reclaim L2 cache keys under memory pressure. ``None`` (default)
+            disables TTL — keys are persisted without expiry.
     """
 
     def __init__(
@@ -102,6 +113,7 @@ class _ThreadWorkerPool:
         tls_enable: bool = False,
         cluster_mode: bool = False,
         database_id: Optional[int] = None,
+        ttl_seconds: Optional[int] = None,
     ):
         self.num_workers = num_workers
         self._host = host
@@ -114,6 +126,8 @@ class _ThreadWorkerPool:
         self._tls_enable = tls_enable
         self._cluster_mode = cluster_mode
         self._database_id = database_id
+        self._ttl_seconds = ttl_seconds
+        self._expiry_obj = None  # lazily built ExpirySet (see _do_set)
         self._local = threading.local()
         self._has_buffer_get: Optional[bool] = None
 
@@ -128,10 +142,11 @@ class _ThreadWorkerPool:
         mode_str = "cluster" if cluster_mode else "standalone"
         logger.info(
             "Valkey thread pool: %d threads, mode=%s, per-thread clients, "
-            "buffer_get=%s",
+            "buffer_get=%s, ttl_seconds=%s",
             num_workers,
             mode_str,
             self._has_buffer_get,
+            ttl_seconds,
         )
 
     def _get_client(self):  # type: ignore[no-untyped-def]
@@ -201,9 +216,35 @@ class _ThreadWorkerPool:
             )
         return bool(self._has_buffer_get)
 
+    def _build_expiry(self) -> "glide_sync.ExpirySet":
+        """Lazily build (and cache) the GLIDE ``ExpirySet`` for SET calls.
+
+        Built lazily so ``glide_sync`` is only imported on worker threads
+        (matching ``_get_client``). The resulting ``ExpirySet`` is an
+        immutable value object, so it is safe to share across threads; a
+        benign race during lazy init just rebuilds an equivalent object.
+        """
+        exp = self._expiry_obj
+        if exp is None:
+            if self._ttl_seconds is None:
+                raise ValueError("ttl_seconds must be set to build an ExpirySet")
+            # Third Party
+            import glide_sync  # type: ignore[import-untyped]
+
+            exp = glide_sync.ExpirySet(glide_sync.ExpiryType.SEC, self._ttl_seconds)
+            self._expiry_obj = exp
+        return exp
+
     def _do_set(self, key_str: str, data: bytes) -> None:
-        """SET a key (runs on a worker thread)."""
-        self._get_client().set(key_str.encode(), data)
+        """SET a key (runs on a worker thread).
+
+        When a TTL is configured (``ttl_seconds`` is not None), the key is
+        written with an expiry so that Valkey/Redis ``volatile-*`` eviction
+        policies can reclaim it once the node reaches ``maxmemory``. Without
+        a TTL the key is persisted indefinitely (legacy behavior).
+        """
+        expiry = self._build_expiry() if self._ttl_seconds is not None else None
+        self._get_client().set(key_str.encode(), data, expiry=expiry)
 
     def _get_scratch(self, size: int) -> bytearray:
         """Per-thread reusable staging buffer for buffer-GET (issue #6215).
@@ -238,11 +279,33 @@ class _ThreadWorkerPool:
             if result is None:
                 return False
             n = int(result)
+            if n != size:
+                # Fixed-size KV chunks must round-trip exactly. A short read
+                # signals a size mismatch / corrupt or stale-format entry;
+                # treat it as a miss rather than leaving stale tail bytes in
+                # buf[n:] and reporting success.
+                logger.warning(
+                    "Valkey GET size mismatch for key %s: read %d bytes, "
+                    "expected %d; treating as miss.",
+                    key_str,
+                    n,
+                    size,
+                )
+                return False
             buf[:n] = scratch_view[:n]
             return True
         else:
             data = client.get(key_str.encode())
             if data is None:
+                return False
+            if len(data) != buf.nbytes:
+                logger.warning(
+                    "Valkey GET size mismatch for key %s: read %d bytes, "
+                    "expected %d; treating as miss.",
+                    key_str,
+                    len(data),
+                    buf.nbytes,
+                )
                 return False
             buf[: len(data)] = data
             return True
@@ -314,6 +377,9 @@ class ValkeyConnector(RemoteConnector):
         tls_enable: Whether to use TLS for Valkey connections.
         cluster_mode: If True, use GlideClusterClient; else GlideClient.
         database_id: Database ID for standalone mode (ignored in cluster).
+        ttl_seconds: If set, keys are written with this expiry (seconds) so
+            ``volatile-*`` eviction policies can reclaim them. ``None``
+            (default) disables TTL.
     """
 
     def __init__(
@@ -330,6 +396,7 @@ class ValkeyConnector(RemoteConnector):
         tls_enable: bool = False,
         cluster_mode: bool = False,
         database_id: Optional[int] = None,
+        ttl_seconds: Optional[int] = None,
     ):
         super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
 
@@ -351,6 +418,7 @@ class ValkeyConnector(RemoteConnector):
             tls_enable=tls_enable,
             cluster_mode=cluster_mode,
             database_id=database_id,
+            ttl_seconds=ttl_seconds,
         )
         self._pq_executor = AsyncPQExecutor(loop)
 

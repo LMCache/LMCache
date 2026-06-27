@@ -40,7 +40,7 @@ msgstr ""
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:13
 msgid "Prerequisites"
-msgstr "前提条件"
+msgstr "先决条件"
 
 #: ../../source/getting_started/quickstart/offload_kv_cache.rst:15
 msgid "Before you begin, make sure you have:"

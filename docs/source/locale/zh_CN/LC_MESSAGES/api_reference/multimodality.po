@@ -48,7 +48,7 @@ msgstr "不同多模态类型的 TTFT 加速示例"
 
 #: ../../source/api_reference/multimodality.rst:15
 msgid "Prerequisites"
-msgstr "前提条件"
+msgstr "先决条件"
 
 #: ../../source/api_reference/multimodality.rst:17
 msgid ""
