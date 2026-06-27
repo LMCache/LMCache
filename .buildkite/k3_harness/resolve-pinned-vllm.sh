@@ -36,12 +36,11 @@ if [[ -z "${PINNED_VLLM_VERSION}" && "${USE_PINNED_VLLM}" == "true" ]]; then
         fetched="$(curl -fsSL --connect-timeout 5 --max-time 10 \
             "${LMCACHE_VLLM_PIN_URL}" 2>/dev/null || true)"
         # Strip whitespace/comments; keep the first non-empty, non-comment
-        # line as the version string.
+        # line as the version string. A single awk command avoids the
+        # SIGPIPE that `set -o pipefail` would catch if `head` exited
+        # early, and avoids GNU-only sed regex (e.g. `\+`) on macOS/BSD.
         PINNED_VLLM_VERSION="$(printf '%s\n' "${fetched}" \
-            | sed -e 's/[[:space:]]\+$//' \
-                  -e '/^[[:space:]]*$/d' \
-                  -e '/^[[:space:]]*#/d' \
-            | head -n1 || true)"
+            | awk '!/^[[:space:]]*(#|$)/ {sub(/[[:space:]]+$/, ""); print; exit}')"
     fi
 fi
 

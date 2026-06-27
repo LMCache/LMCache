@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # Example script to build the LMCache integrated with vLLM container image
 
 # Update the following variables accordingly
