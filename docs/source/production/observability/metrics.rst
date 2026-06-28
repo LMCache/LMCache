@@ -46,6 +46,15 @@ Token Metrics
    * - ``lmcache:num_hit_tokens``
      - Counter
      - Total number of tokens hit in LMCache during retrieval.
+   * - ``lmcache:num_l2_hit_tokens``
+     - Counter
+     - Hit tokens served from the L2 (CPU RAM) tier during retrieval.
+   * - ``lmcache:num_l3_hit_tokens``
+     - Counter
+     - Hit tokens served from the L3 (local disk / NVMe) tier during retrieval.
+   * - ``lmcache:num_remote_hit_tokens``
+     - Counter
+     - Hit tokens served from a remote tier during retrieval.
    * - ``lmcache:num_stored_tokens``
      - Counter
      - Total number of tokens stored in LMCache.

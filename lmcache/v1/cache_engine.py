@@ -30,7 +30,11 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
-from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
+from lmcache.observability import (
+    LMCacheStatsLogger,
+    LMCStatsMonitor,
+    classify_hit_tokens_by_tier,
+)
 from lmcache.usage_context import InitializeUsageContext
 from lmcache.utils import (
     CacheEngineKey,
@@ -1746,6 +1750,9 @@ class LMCacheEngine:
             block_mapping = self.storage_manager.get_block_mapping(chunk_infos)
 
         last_failed_block_start = None
+        # (backend_name, start, end) per successfully read chunk, used to attribute
+        # hit tokens to their storage tier after prefix truncation below.
+        hit_records: list[tuple[str, int, int]] = []
         for location, blocks in block_mapping.items():
             keys = [key for key, _, _ in blocks]
             memory_objs = self.storage_manager.batched_get(
@@ -1771,6 +1778,7 @@ class LMCacheEngine:
                 tot_kv_size += memory_obj.get_size()
                 ret_mask[start:end] = True
                 used_keys.add(key)
+                hit_records.append((location, start, end))
 
             for (key, _, _), memory_obj in zip(blocks, memory_objs, strict=False):
                 if memory_obj is not None and key not in used_keys:
@@ -1806,6 +1814,10 @@ class LMCacheEngine:
                     else:
                         memory_obj.ref_count_down()
             reordered_chunks = kept_chunks
+
+        self.stats_monitor.record_tier_hits(
+            classify_hit_tokens_by_tier(hit_records, last_failed_block_start)
+        )
         return reordered_chunks, tot_kv_size
 
     def _broadcast_or_receive_memory_objs(

@@ -9,10 +9,12 @@ from typing import (
     Dict,
     Iterable,
     List,
+    Mapping,
     Optional,
     Sequence,
     Union,
 )
+import enum
 import os
 import threading
 import time
@@ -34,6 +36,80 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+class CacheTier(enum.Enum):
+    """Storage tier a cache hit was served from."""
+
+    L2 = "L2"  # CPU RAM
+    L3 = "L3"  # local disk / NVMe / GDS / PD
+    REMOTE = "remote"  # remote backends (Redis, P2P, Maru, ...)
+
+
+_BACKEND_NAME_TO_TIER = {
+    "LocalCPUBackend": CacheTier.L2,
+    "LocalDiskBackend": CacheTier.L3,
+    "GdsBackend": CacheTier.L3,
+    "PDBackend": CacheTier.L3,
+}
+_warned_unknown_backends: set[str] = set()
+
+
+def backend_name_to_tier(backend_name: str) -> CacheTier:
+    """Map a storage-backend name to its cache tier.
+
+    Unknown names (for example config-named remote backends) map to
+    ``CacheTier.REMOTE`` so that metric classification never raises on the
+    retrieve hot path. Each unrecognized name is logged once at debug level.
+
+    Args:
+        backend_name: The storage backend's registered name (the
+            ``StorageManager.storage_backends`` key), such as ``LocalCPUBackend``.
+
+    Returns:
+        The :class:`CacheTier` the backend belongs to.
+    """
+    tier = _BACKEND_NAME_TO_TIER.get(backend_name)
+    if tier is None:
+        if backend_name not in _warned_unknown_backends:
+            _warned_unknown_backends.add(backend_name)
+            logger.debug(
+                "Unknown storage backend %s; counting its hits as the REMOTE tier",
+                backend_name,
+            )
+        return CacheTier.REMOTE
+    return tier
+
+
+def classify_hit_tokens_by_tier(
+    hit_records: list[tuple[str, int, int]],
+    last_failed_block_start: int | None,
+) -> dict[CacheTier, int]:
+    """Sum retrieved hit tokens per cache tier, honoring prefix truncation.
+
+    Each record is a ``(backend_name, start, end)`` triple describing a chunk
+    that was read from a backend. A record contributes ``end - start`` tokens to
+    its tier only if the chunk survives prefix truncation: when
+    ``last_failed_block_start`` is not ``None``, only chunks with
+    ``end <= last_failed_block_start`` are actually returned to the caller, so
+    chunks past that point are excluded (they would otherwise be overcounted).
+
+    Args:
+        hit_records: The ``(backend_name, start, end)`` triples for successfully
+            read chunks, in retrieval order.
+        last_failed_block_start: The start offset of the first chunk that failed
+            to be retrieved, or ``None`` if every chunk succeeded.
+
+    Returns:
+        A mapping from every :class:`CacheTier` to its retrieved hit-token count
+        (tiers with no hits map to ``0``).
+    """
+    result = {tier: 0 for tier in CacheTier}
+    for backend_name, start, end in hit_records:
+        if last_failed_block_start is not None and end > last_failed_block_start:
+            continue
+        result[backend_name_to_tier(backend_name)] += end - start
+    return result
+
+
 @dataclass
 class LMCacheStats:
     # Counter (Note that these are incremental values,
@@ -43,6 +119,9 @@ class LMCacheStats:
     interval_lookup_requests: int
     interval_requested_tokens: int
     interval_hit_tokens: int
+    interval_l2_hit_tokens: int
+    interval_l3_hit_tokens: int
+    interval_remote_hit_tokens: int
     interval_stored_tokens: int
     interval_lookup_tokens: int
     interval_lookup_hits: int
@@ -256,6 +335,9 @@ class LMCStatsMonitor:
         self.interval_lookup_requests = 0
         self.interval_requested_tokens = 0  # total requested tokens retrieve
         self.interval_hit_tokens = 0  # total hit tokens retrieve
+        self.interval_l2_hit_tokens = 0  # hit tokens served from L2 (CPU RAM)
+        self.interval_l3_hit_tokens = 0  # hit tokens served from L3 (local disk)
+        self.interval_remote_hit_tokens = 0  # hit tokens served from a remote tier
         self.interval_stored_tokens = 0  # total tokens tored in LMCache
         self.interval_lookup_tokens = 0  # total requested tokens lookup
         self.interval_lookup_hits = 0  # total hit tokens lookup
@@ -394,6 +476,18 @@ class LMCStatsMonitor:
         self.retrieve_request_id += 1
         self.set_current_retrieve_stats(retrieve_stats)
         return retrieve_stats
+
+    @thread_safe
+    def record_tier_hits(self, tier_hit_tokens: Mapping[CacheTier, int]) -> None:
+        """Accumulate per-tier hit-token counts from a single retrieve.
+
+        Args:
+            tier_hit_tokens: Hit-token counts keyed by :class:`CacheTier`. Missing
+                tiers are treated as zero.
+        """
+        self.interval_l2_hit_tokens += tier_hit_tokens.get(CacheTier.L2, 0)
+        self.interval_l3_hit_tokens += tier_hit_tokens.get(CacheTier.L3, 0)
+        self.interval_remote_hit_tokens += tier_hit_tokens.get(CacheTier.REMOTE, 0)
 
     @thread_safe
     def on_retrieve_finished(
@@ -601,6 +695,9 @@ class LMCStatsMonitor:
 
         self.interval_requested_tokens = 0
         self.interval_hit_tokens = 0
+        self.interval_l2_hit_tokens = 0
+        self.interval_l3_hit_tokens = 0
+        self.interval_remote_hit_tokens = 0
         self.interval_stored_tokens = 0
         self.interval_lookup_tokens = 0
         self.interval_lookup_hits = 0
@@ -773,6 +870,9 @@ class LMCStatsMonitor:
             interval_lookup_requests=self.interval_lookup_requests,
             interval_requested_tokens=self.interval_requested_tokens,
             interval_hit_tokens=self.interval_hit_tokens,
+            interval_l2_hit_tokens=self.interval_l2_hit_tokens,
+            interval_l3_hit_tokens=self.interval_l3_hit_tokens,
+            interval_remote_hit_tokens=self.interval_remote_hit_tokens,
             interval_stored_tokens=self.interval_stored_tokens,
             interval_lookup_tokens=self.interval_lookup_tokens,
             interval_lookup_hits=self.interval_lookup_hits,
@@ -959,6 +1059,24 @@ class PrometheusLogger:
         self.counter_num_hit_tokens = self._create_counter(
             name="lmcache:num_hit_tokens",
             documentation="Total number of tokens hit in lmcache",
+            labelnames=labelnames,
+        )
+
+        self.counter_num_l2_hit_tokens = self._create_counter(
+            name="lmcache:num_l2_hit_tokens",
+            documentation="Total hit tokens served from the L2 (CPU RAM) tier",
+            labelnames=labelnames,
+        )
+
+        self.counter_num_l3_hit_tokens = self._create_counter(
+            name="lmcache:num_l3_hit_tokens",
+            documentation="Total hit tokens served from the L3 (local disk) tier",
+            labelnames=labelnames,
+        )
+
+        self.counter_num_remote_hit_tokens = self._create_counter(
+            name="lmcache:num_remote_hit_tokens",
+            documentation="Total hit tokens served from a remote tier",
             labelnames=labelnames,
         )
 
@@ -1705,6 +1823,11 @@ class PrometheusLogger:
             self.counter_num_requested_tokens, stats.interval_requested_tokens
         )
         self._log_counter(self.counter_num_hit_tokens, stats.interval_hit_tokens)
+        self._log_counter(self.counter_num_l2_hit_tokens, stats.interval_l2_hit_tokens)
+        self._log_counter(self.counter_num_l3_hit_tokens, stats.interval_l3_hit_tokens)
+        self._log_counter(
+            self.counter_num_remote_hit_tokens, stats.interval_remote_hit_tokens
+        )
         self._log_counter(self.counter_num_stored_tokens, stats.interval_stored_tokens)
         self._log_counter(self.counter_num_lookup_tokens, stats.interval_lookup_tokens)
         self._log_counter(self.counter_num_lookup_hits, stats.interval_lookup_hits)
