@@ -12,6 +12,7 @@ so callers can check ``is_available("cuda")`` at import time.
 
 # First Party
 from lmcache.v1.platform._registry import register_availability
+from lmcache.v1.platform.base_device_info import DeviceInfo
 from lmcache.v1.platform.cuda.pin_memory import CudaPinMemoryBackend
 from lmcache.v1.platform.device_ext import register_pin_memory_backend
 
@@ -26,3 +27,33 @@ def _cuda_is_available() -> bool:
 
 register_availability("cuda", _cuda_is_available)
 register_pin_memory_backend("cuda", CudaPinMemoryBackend)
+
+# ---------------------------------------------------------------------------
+# Device detection registry entry
+# ---------------------------------------------------------------------------
+
+
+class CudaDeviceInfo(DeviceInfo):
+    """CUDA device information for the detection registry."""
+
+    @property
+    def device_type(self) -> str:
+        return "cuda"
+
+    @property
+    def torch_module_name(self) -> str:
+        return "cuda"
+
+    @property
+    def ops_module(self) -> str | None:
+        return "lmcache.c_ops"
+
+    def is_available(self) -> bool:
+        """Check CUDA availability without importing lmcache.__init__."""
+        try:
+            # Third Party
+            import torch
+
+            return torch.cuda.is_available()
+        except Exception:
+            return False

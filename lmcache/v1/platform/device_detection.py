@@ -3,18 +3,27 @@
 
 This module detects the available hardware accelerator and exposes
 :data:`torch_dev` and :data:`torch_device_type` as module-level
-singletons.  It also provides :func:`get_backend` which selects the
-appropriate compiled ops module (MUSA / XPU / CUDA) and merges it on
-top of :mod:`lmcache.python_ops_fallback` so that any op not provided
-by the hardware-specific module falls back to the pure-Python
-implementation.
+singletons.  It also provides :func:`get_backend` which is called by
+``lmcache.__init__`` to select the appropriate ops backend.
 
-It is intentionally a leaf module -- it does NOT import from
+Detection and backend selection are **registry-driven**: each platform
+sub-package (``platform/cuda``, ``platform/musa``, ...) defines a
+concrete :class:`~lmcache.v1.platform.base_device_info.DeviceInfo`
+subclass in its ``__init__.py``.  This module auto-discovers those
+subclasses via ``pkgutil.iter_modules``, instantiates them, and uses
+the resulting objects for detection and backend selection.
+
+The detection order is determined by ``pkgutil.iter_modules`` scan
+order (alphabetical by sub-package name).  If a specific ordering is
+needed, name the sub-packages accordingly (e.g. prefix with a digit).
+
+Adding a new accelerator (e.g. MLU) requires **zero** edits to this
+module -- just drop a new ``platform/<backend>/`` package with a
+:class:`~lmcache.v1.platform.base_device_info.DeviceInfo` subclass.
+
+This module is intentionally a leaf module -- it does NOT import from
 ``lmcache.__init__`` or ``lmcache.v1.platform.__init__`` to avoid
 circular dependencies.
-
-Other modules should import from here (or from the re-export in
-``lmcache.__init__``) rather than performing their own detection.
 """
 
 # Standard
@@ -24,57 +33,67 @@ import types
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.platform.base_device_info import DeviceInfo
+from lmcache.v1.utils.subclass_discovery import discover_subclasses
 
 logger = init_logger(__name__)
 
+# ---------------------------------------------------------------------------
+# Device info registry
+# ---------------------------------------------------------------------------
+
+_DEVICE_REGISTRY: list[DeviceInfo] = [
+    cls()
+    for cls in discover_subclasses(
+        "lmcache.v1.platform",
+        DeviceInfo,  # type: ignore[type-abstract]
+        module_filter=lambda name: not name.startswith(("_", "base")),
+        require_defined_in_module=True,
+        on_import_error=lambda name, exc: None,
+    )
+]
+
+# ---------------------------------------------------------------------------
+# Device detection
+# ---------------------------------------------------------------------------
+
 
 def _detect_device() -> tuple[Any, str]:
-    """Detect the available accelerator and return the torch device module.
+    """Detect the available accelerator via the device registry.
 
     Returns:
-        tuple[Any, str]: A tuple of (torch_device_module, device_type_string),
-            e.g. ``(torch.cuda, "cuda")``, ``(torch.musa, "musa")``, or
-            ``(torch.xpu, "xpu")``.  When torch is not installed (CLI-only
-            mode), returns ``(None, "cpu")``.
+        tuple[Any, str]: A tuple of (torch_device_module, device_type_string).
+            When torch is not installed (CLI-only mode), returns
+            ``(None, "cpu")``.
     """
     try:
         # Third Party
         import torch
-    except ImportError:
+    except ImportError as e:
+        logger.warning("load torch failed, error is %s", e)
         return None, "cpu"  # fallback for CLI-only environments
 
-    if hasattr(torch, "musa") and torch.musa.is_available():  # type: ignore[attr-defined]
-        logger.info("MUSA device is available. Using MUSA for LMCache engine.")
-        return torch.musa, "musa"  # type: ignore[attr-defined]
-    elif hasattr(torch, "xpu") and torch.xpu.is_available():
-        return torch.xpu, "xpu"
-    elif hasattr(torch, "hpu") and torch.hpu.is_available():
-        return torch.hpu, "hpu"
-    elif torch.cuda.is_available():
-        return torch.cuda, "cuda"
-    else:
-        # First Party
-        from lmcache.v1.platform.cpu.stub_cpu_device import StubCPUDevice
+    for info in _DEVICE_REGISTRY:
+        try:
+            if not info.is_available():
+                continue
+        except Exception:
+            continue
 
-        # Fallback: return a stub that mimics a torch device module
-        return StubCPUDevice("cpu"), "cpu"
+        torch_module = getattr(torch, info.torch_module_name, None)
+        if torch_module is not None:
+            logger.info(
+                "%s device is available. Using %s for LMCache engine.",
+                info.device_type.upper(),
+                info.device_type.upper(),
+            )
+            return torch_module, info.device_type
 
-
-torch_dev, torch_device_type = _detect_device()
-
-logger.info("torch_dev=%s, torch_device_type=%s", torch_dev, torch_device_type)
-
-# Attach the DeviceExt instance as ``torch_dev.ext``.  This monkey-patches a
-# standard torch module (e.g. ``torch.cuda``) with a custom attribute that does
-# not exist in the original module.  The ``# type: ignore[attr-defined]``
-# suppresses the expected mypy/pyright "attr-defined" error.
-if torch_dev is not None:
+    # No accelerator found -- fall back to CPU stub
     # First Party
-    from lmcache.v1.platform.device_ext import DeviceExt
+    from lmcache.v1.platform.cpu.stub_cpu_device import StubCPUDevice
 
-    torch_dev.ext = DeviceExt(torch_device_type)  # type: ignore[attr-defined]
-else:
-    logger.warning("torch_dev is None, skipping DeviceExt initialization.")
+    return StubCPUDevice("cpu"), "cpu"
 
 
 # ---------------------------------------------------------------------------
@@ -82,77 +101,61 @@ else:
 # ---------------------------------------------------------------------------
 
 
-def _get_backend() -> Any | None:
-    """Try backends in order; first successful import wins.
+def get_backend() -> Any | None:
+    """Select the ops backend for the detected device via the registry.
 
     Returns:
-        A :class:`types.ModuleType` that merges
-        ``lmcache.python_ops_fallback`` (base) with the first
-        successfully loaded hardware backend, or ``None`` if torch
-        is not installed or dependencies are missing (CLI-only mode).
+        A merged :class:`types.ModuleType` (fallback + hw-specific ops),
+        or ``None`` if torch / dependencies are unavailable.
     """
     try:
         # Third Party
-        import torch
-    except (ImportError, ModuleNotFoundError):
+        import torch  # noqa: F401
+    except (ImportError, ModuleNotFoundError) as e:
+        logger.warning("load torch failed, error is %s", e)
         return None
 
     try:
         default_module = importlib.import_module("lmcache.python_ops_fallback")
     except (ImportError, ModuleNotFoundError) as e:
-        logger.debug("Cannot load python_ops_fallback: %s", e)
+        logger.warning("Cannot load python_ops_fallback: %s", e)
         return None
 
-    backend_candidates = [
-        # Keep backend priority aligned with _detect_device().
-        # MUSA currently uses a Python adapter under the platform package,
-        # unlike the compiled XPU/CUDA extension modules.
-        (
-            "lmcache.v1.platform.musa.ops",
-            "musa_ops",
-            lambda: hasattr(torch, "musa") and torch.musa.is_available(),  # type: ignore[attr-defined]
-        ),
-        (
-            "lmcache.xpu_ops",
-            "xpu_ops",
-            lambda: torch.xpu.is_available(),
-        ),
-        (
-            "lmcache.c_ops",
-            "cuda_ops",
-            lambda: torch.cuda.is_available(),
-        ),
-        # should extend to more HWs..
-    ]
-
-    for module_name, backend_name, predicate in backend_candidates:
-        # 1. Check whether the backend is available before importing
+    # Find the ops module for the detected device type from the registry
+    for info in _DEVICE_REGISTRY:
         try:
-            if not predicate():
-                logger.info(
-                    "Skipping backend %s: predicate returned False",
-                    module_name,
-                )
+            if not info.is_available():
                 continue
-        except Exception as e:
-            logger.warning(
-                "Skipping backend %s: predicate raised error: %s",
-                module_name,
-                e,
-            )
+        except Exception:
             continue
-        # 2. Try to import and merge the backend module
+
+        if not info.ops_module:
+            # Device is available but has no custom ops -- use fallback
+            logger.info("Using fallback ops for device: %s", info.device_type)
+            return default_module
+
         try:
-            backend_module = importlib.import_module(module_name)
+            backend_module = importlib.import_module(info.ops_module)
             merged_module = types.ModuleType("lmcache.c_ops")
             merged_module.__dict__.update(default_module.__dict__)
             merged_module.__dict__.update(backend_module.__dict__)
-            logger.info("Using backend: %s", module_name)
+            logger.info("Using backend: %s", info.ops_module)
             return merged_module
         except Exception as e:
-            logger.warning("Failed to import backend %s: %s", module_name, e)
+            logger.warning("Failed to import backend %s: %s", info.ops_module, e)
 
     return default_module
 
 
-backend_ops = _get_backend()
+torch_dev, torch_device_type = _detect_device()
+
+logger.info("torch_dev=%s, torch_device_type=%s", torch_dev, torch_device_type)
+
+# Attach the DeviceExt instance as ``torch_dev.ext``.
+if torch_dev is not None:
+    # First Party
+    from lmcache.v1.platform.device_ext import DeviceExt
+
+    torch_dev.ext = DeviceExt(torch_device_type)  # type: ignore[attr-defined]
+else:
+    logger.warning("torch_dev is None, skipping DeviceExt initialization.")

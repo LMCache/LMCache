@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""MUSA-specific platform primitives.
-"""
+"""HPU (Habana Gaudi) platform helpers."""
 
 # First Party
 from lmcache.v1.platform.base_device_info import DeviceInfo
@@ -10,27 +9,27 @@ from lmcache.v1.platform.base_device_info import DeviceInfo
 # ---------------------------------------------------------------------------
 
 
-class MusaDeviceInfo(DeviceInfo):
-    """MUSA device information for the detection registry."""
+class HpuDeviceInfo(DeviceInfo):
+    """HPU device information for the detection registry."""
 
     @property
     def device_type(self) -> str:
-        return "musa"
+        return "hpu"
 
     @property
     def torch_module_name(self) -> str:
-        return "musa"
+        return "hpu"
 
     @property
     def ops_module(self) -> str | None:
-        return "lmcache.v1.platform.musa.ops"
+        return None
 
     def is_available(self) -> bool:
-        """Check MUSA availability without importing lmcache.__init__."""
+        """Check HPU availability without importing lmcache.__init__."""
         try:
             # Third Party
             import torch
 
-            return hasattr(torch, "musa") and torch.musa.is_available()  # type: ignore[attr-defined]
+            return hasattr(torch, "hpu") and torch.hpu.is_available()
         except Exception:
             return False

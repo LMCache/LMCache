@@ -7,12 +7,9 @@ import sys
 from lmcache.logging import init_logger
 
 # --------------------------
-# Backend instance
+# Backend instance & Device detection
 # --------------------------
-# --------------------------
-# Device detection
-# --------------------------
-from lmcache.v1.platform.device_detection import backend_ops as _ops
+from lmcache.v1.platform.device_detection import get_backend
 from lmcache.v1.platform.device_detection import torch_dev as torch_dev
 from lmcache.v1.platform.device_detection import torch_device_type as torch_device_type
 
@@ -26,7 +23,7 @@ logger = init_logger(__name__)
 
 __all__ = ["__version__", "torch_dev", "torch_device_type"]
 
-
+_ops = get_backend()
 if _ops is not None:
     # Override lmcache.c_ops with merged module,
     # in which:
@@ -34,4 +31,6 @@ if _ops is not None:
     #     use backend implementation if exists
     sys.modules["lmcache.c_ops"] = _ops
 else:
-    logger.debug("No compute backend loaded; CLI-only mode (torch/numba not installed)")
+    logger.warning(
+        "No compute backend loaded; CLI-only mode (torch/numba not installed)"
+    )

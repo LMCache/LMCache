@@ -5,7 +5,8 @@ MUSA support unit tests that do not require MUSA hardware.
 These tests cover the design contract documented in
 ``docs/source/developer_guide/musa_support_design.rst``:
 
-- Device detection precedence in :func:`lmcache._detect_device`.
+- Device detection via the registry-driven
+  :func:`lmcache.v1.platform.device_detection._detect_device`.
 - Factory dispatch in :func:`lmcache.v1.gpu_connector.CreateGPUConnector`,
   including fail-fast validation when device-scoped features are requested on
   accelerators without connector support.
@@ -97,11 +98,12 @@ class _StubTorch:
         has_musa: bool = False,
         has_xpu: bool = False,
         has_hpu: bool = False,
+        cuda_available: bool = True,
         musa_available: bool = False,
         xpu_available: bool = False,
         hpu_available: bool = False,
     ) -> None:
-        self.cuda = SimpleNamespace(is_available=lambda: True)
+        self.cuda = SimpleNamespace(is_available=lambda: cuda_available)
         if has_musa:
             self.musa = SimpleNamespace(is_available=lambda: musa_available)
         if has_xpu:
@@ -112,19 +114,28 @@ class _StubTorch:
 
 def _detect_with_stub(stub: _StubTorch) -> tuple[Any, str]:
     """Run ``_detect_device`` with ``torch`` swapped for the stub."""
+    # First Party
+    from lmcache.v1.platform.device_detection import _detect_device
+
     with patch.dict("sys.modules", {"torch": stub}):
-        return lmc._detect_device()
+        return _detect_device()
 
 
 def test_detect_device_prefers_musa_when_available() -> None:
-    """``_detect_device`` returns MUSA whenever ``torch.musa.is_available()``."""
+    """``_detect_device`` returns MUSA when it is the first available device.
+
+    In the registry-driven architecture, detection order follows
+    alphabetical sub-package scan order (cuda < hpu < musa < xpu).
+    MUSA is selected when CUDA and HPU are unavailable.
+    """
     stub = _StubTorch(
         has_musa=True,
         has_xpu=True,
         has_hpu=True,
+        cuda_available=False,
         musa_available=True,
         xpu_available=True,
-        hpu_available=True,
+        hpu_available=False,
     )
     dev, name = _detect_with_stub(stub)
     assert name == "musa"
@@ -132,10 +143,11 @@ def test_detect_device_prefers_musa_when_available() -> None:
 
 
 def test_detect_device_falls_back_past_unavailable_musa() -> None:
-    """Falls through MUSA when ``torch.musa.is_available()`` is False."""
+    """Falls through to XPU when both CUDA and MUSA are unavailable."""
     stub = _StubTorch(
         has_musa=True,
         has_xpu=True,
+        cuda_available=False,
         musa_available=False,
         xpu_available=True,
     )
