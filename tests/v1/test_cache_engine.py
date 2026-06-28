@@ -23,6 +23,7 @@ from lmcache.utils import (
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventStatus, EventType
+from lmcache.v1.token_database import ChunkedTokenDatabase
 
 # Local
 from .utils import (
@@ -1673,6 +1674,132 @@ def _make_mock_memory_obj(size: int = 1024) -> MagicMock:
     mock = MagicMock()
     mock.get_size.return_value = size
     return mock
+
+
+def _make_store_engine() -> tuple[LMCacheEngine, MagicMock, MagicMock]:
+    """Create a minimal engine and mocks for testing the public store() path."""
+    cfg = LMCacheEngineConfig.from_legacy(
+        chunk_size=4,
+        remote_url=None,
+        save_unfull_chunk=True,
+    )
+    metadata = dumb_metadata(kv_shape=(2, 2, 4, 1, 8))
+    metadata.chunk_size = 4
+
+    gpu_connector = MagicMock()
+    gpu_connector.batched_from_gpu.return_value = None
+
+    engine = LMCacheEngine(
+        cfg,
+        metadata,
+        ChunkedTokenDatabase(cfg, metadata),
+        gpu_connector,
+        mock_up_broadcast_fn,
+        mock_up_broadcast_object_fn,
+    )
+    storage_manager = MagicMock()
+    storage_manager.is_frozen.return_value = False
+    engine.storage_manager = storage_manager
+    return engine, storage_manager, gpu_connector
+
+
+def test_store_uses_batched_allocate_for_uniform_chunks() -> None:
+    """Store should batch allocations for contiguous equal-shape chunks."""
+    engine, storage_manager, gpu_connector = _make_store_engine()
+    memory_objs = [_make_mock_memory_obj(), _make_mock_memory_obj()]
+    storage_manager.batched_allocate.return_value = memory_objs
+
+    tokens = torch.arange(8)
+    kvcaches = MagicMock()
+    engine.store(tokens=tokens, kvcaches=kvcaches, slot_mapping=list(range(8)))
+
+    expected_shapes = engine.metadata.get_shapes(4)
+    expected_dtypes = engine.metadata.get_dtypes()
+    storage_manager.batched_allocate.assert_called_once_with(
+        expected_shapes,
+        expected_dtypes,
+        batch_size=2,
+        busy_loop=False,
+        eviction=False,
+        fmt=engine.fmt,
+    )
+    storage_manager.allocate.assert_not_called()
+    gpu_connector.batched_from_gpu.assert_called_once()
+    storage_manager.batched_put.assert_called_once()
+    assert storage_manager.batched_put.call_args.args[1] == memory_objs
+
+
+def test_store_falls_back_to_single_allocate_when_batched_allocate_fails() -> None:
+    """Store should preserve partial-store behavior when batch allocation fails."""
+    engine, storage_manager, gpu_connector = _make_store_engine()
+    memory_obj = _make_mock_memory_obj()
+    storage_manager.batched_allocate.return_value = None
+    storage_manager.allocate.side_effect = [memory_obj, None]
+
+    tokens = torch.arange(8)
+    kvcaches = MagicMock()
+    engine.store(tokens=tokens, kvcaches=kvcaches, slot_mapping=list(range(8)))
+
+    assert storage_manager.allocate.call_count == 2
+    gpu_connector.batched_from_gpu.assert_called_once_with(
+        [memory_obj],
+        [0],
+        [4],
+        kvcaches=kvcaches,
+        slot_mapping=list(range(8)),
+    )
+    storage_manager.batched_put.assert_called_once()
+    assert storage_manager.batched_put.call_args.args[1] == [memory_obj]
+
+
+def test_store_keeps_successful_prefix_from_partial_batched_allocate() -> None:
+    """Store should release objects after the first failed batch allocation slot."""
+    engine, storage_manager, gpu_connector = _make_store_engine()
+    kept_obj = _make_mock_memory_obj()
+    extra_obj = _make_mock_memory_obj()
+    storage_manager.batched_allocate.return_value = [
+        kept_obj,
+        None,
+        extra_obj,
+    ]
+
+    tokens = torch.arange(12)
+    kvcaches = MagicMock()
+    engine.store(tokens=tokens, kvcaches=kvcaches, slot_mapping=list(range(12)))
+
+    storage_manager.allocate.assert_not_called()
+    gpu_connector.batched_from_gpu.assert_called_once()
+    assert gpu_connector.batched_from_gpu.call_args.args[:3] == (
+        [kept_obj],
+        [0],
+        [4],
+    )
+    storage_manager.batched_put.assert_called_once()
+    assert storage_manager.batched_put.call_args.args[1] == [kept_obj]
+    extra_obj.ref_count_down.assert_called_once()
+
+
+def test_store_batches_only_chunks_with_matching_shapes() -> None:
+    """Store should flush a batch before a differently sized tail chunk."""
+    engine, storage_manager, _ = _make_store_engine()
+    memory_objs = [
+        [_make_mock_memory_obj(), _make_mock_memory_obj()],
+        [_make_mock_memory_obj()],
+    ]
+    storage_manager.batched_allocate.side_effect = memory_objs
+
+    tokens = torch.arange(10)
+    engine.store(tokens=tokens, kvcaches=MagicMock(), slot_mapping=list(range(10)))
+
+    assert storage_manager.batched_allocate.call_count == 2
+    first_call, second_call = storage_manager.batched_allocate.call_args_list
+    assert first_call.kwargs["batch_size"] == 2
+    assert first_call.args[0] == engine.metadata.get_shapes(4)
+    assert second_call.kwargs["batch_size"] == 1
+    assert second_call.args[0] == engine.metadata.get_shapes(2)
+    assert storage_manager.batched_put.call_args.args[1] == (
+        memory_objs[0] + memory_objs[1]
+    )
 
 
 def _make_mock_engine(
