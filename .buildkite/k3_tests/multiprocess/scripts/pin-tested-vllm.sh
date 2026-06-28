@@ -52,7 +52,7 @@ if [[ -n "${VLLM_SHORT_SHA}" ]]; then
             "${gh_auth_args[@]+"${gh_auth_args[@]}"}" \
             "https://api.github.com/repos/vllm-project/vllm/commits/${VLLM_SHORT_SHA}" \
             2>/dev/null \
-            | awk -F'"' '/"sha":/ {print $4; exit}')" || true
+            | jq -r '.sha // empty')" || true
         if [[ "${VLLM_FULL_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
             break
         fi
@@ -112,18 +112,29 @@ BUILD_NUMBER="${BUILDKITE_BUILD_NUMBER:-}"
 COMMIT_SHA="${BUILDKITE_COMMIT:-}"
 
 # Append-only history (JSON Lines). Built via python so quoting is safe.
-python - "$HISTORY_FILE" <<PY
+# Use a quoted heredoc (<<'PY') to disable Bash expansion inside the script,
+# and pass variables via the environment to avoid syntax errors from special
+# characters in values like BUILD_URL.
+TIMESTAMP="${TIMESTAMP}" \
+VLLM_VERSION="${VLLM_VERSION}" \
+VLLM_SHORT_SHA="${VLLM_SHORT_SHA}" \
+VLLM_FULL_SHA="${VLLM_FULL_SHA}" \
+VLLM_ARCHIVE_INDEX="${VLLM_ARCHIVE_INDEX}" \
+BUILD_NUMBER="${BUILD_NUMBER}" \
+BUILD_URL="${BUILD_URL}" \
+COMMIT_SHA="${COMMIT_SHA}" \
+python - "$HISTORY_FILE" <<'PY'
 import json, os, sys
 path = sys.argv[1]
 record = {
-    "timestamp": "${TIMESTAMP}",
-    "vllm_version": "${VLLM_VERSION}",
-    "vllm_short_sha": "${VLLM_SHORT_SHA}",
-    "vllm_full_sha": "${VLLM_FULL_SHA}",
-    "archive_index_url": "${VLLM_ARCHIVE_INDEX}",
-    "build_number": "${BUILD_NUMBER}",
-    "build_url": "${BUILD_URL}",
-    "commit": "${COMMIT_SHA}",
+    "timestamp": os.environ.get("TIMESTAMP", ""),
+    "vllm_version": os.environ.get("VLLM_VERSION", ""),
+    "vllm_short_sha": os.environ.get("VLLM_SHORT_SHA", ""),
+    "vllm_full_sha": os.environ.get("VLLM_FULL_SHA", ""),
+    "archive_index_url": os.environ.get("VLLM_ARCHIVE_INDEX", ""),
+    "build_number": os.environ.get("BUILD_NUMBER", ""),
+    "build_url": os.environ.get("BUILD_URL", ""),
+    "commit": os.environ.get("COMMIT_SHA", ""),
 }
 with open(path, "a", encoding="utf-8") as f:
     f.write(json.dumps(record) + "\n")
@@ -149,7 +160,7 @@ if git diff --cached --quiet 2>/dev/null; then
 fi
 
 git -c user.email="ci@lmcache.ai" -c user.name="LMCache CI" \
-    commit -m "Pin verified vLLM nightly: ${VLLM_VERSION}" || true
+    commit -m "Pin verified vLLM nightly: ${VLLM_VERSION}"
 
 echo "--- Pushing to ${CI_REPO} ${CI_BRANCH}"
 if ! git push origin "HEAD:${CI_BRANCH}" 2>/dev/null; then
