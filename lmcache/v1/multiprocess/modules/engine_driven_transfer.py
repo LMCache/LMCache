@@ -16,6 +16,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
 )
+from lmcache.v1.mp_observability.dynamo.store_hook import publish_store_from_key
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     RegisterEngineDrivenContextPayload,
@@ -472,6 +473,13 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 "Stored %d tokens in %.3f seconds",
                 num_tokens,
                 time.perf_counter() - st,
+            )
+        # Bypass: publish a Dynamo BlockStored for the committed range.
+        if result and self._ctx.dynamo_kv_publisher is not None:
+            publish_store_from_key(
+                self._ctx.dynamo_kv_publisher,
+                key,
+                self._resolve_single_group_obj_keys(key),
             )
         return result
 

@@ -31,6 +31,7 @@ from lmcache.v1.gpu_connector.gpu_ops import (
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
+from lmcache.v1.mp_observability.dynamo.store_hook import publish_store_from_key
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
@@ -1111,6 +1112,15 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 num_chunks * self._ctx.chunk_size,
                 ed - st,
             )
+            # Bypass: publish a Dynamo BlockStored for the committed range.
+            # chunk_hash is per-chunk (identical across object groups), so
+            # group 0's keys carry the token-ordered hashes.
+            if self._ctx.dynamo_kv_publisher is not None:
+                publish_store_from_key(
+                    self._ctx.dynamo_kv_publisher,
+                    key,
+                    obj_keys_per_obj_group[0],
+                )
         return event.ipc_handle(), True
 
     @_lmcache_nvtx_annotate

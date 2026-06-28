@@ -3,7 +3,7 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
 import threading
 
 # First Party
@@ -25,6 +25,10 @@ from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.mp_observability.dynamo.publisher import DynamoKvPublisher
 
 logger = init_logger(__name__)
 
@@ -198,6 +202,8 @@ class MPCacheServerContext:
         self._session_manager = SessionManager(self._token_hasher)
         self._event_bus = get_event_bus()
         self._layout_desc_registry = LayoutDescRegistry()
+        # Set by run_cache_server when --enable-dynamo-kv-events is on.
+        self._dynamo_kv_publisher: DynamoKvPublisher | None = None
 
     def close(self) -> None:
         """
@@ -243,6 +249,16 @@ class MPCacheServerContext:
     def layout_desc_registry(self) -> LayoutDescRegistry:
         """Registry mapping (model_name, world_size) to MemoryLayoutDesc."""
         return self._layout_desc_registry
+
+    @property
+    def dynamo_kv_publisher(self) -> "DynamoKvPublisher | None":
+        """Dynamo KV event publisher, or ``None`` when the feature is off."""
+        return self._dynamo_kv_publisher
+
+    @dynamo_kv_publisher.setter
+    def dynamo_kv_publisher(self, publisher: "DynamoKvPublisher | None") -> None:
+        """Install the Dynamo KV event publisher (called at server startup)."""
+        self._dynamo_kv_publisher = publisher
 
     def resolve_obj_keys(
         self, key: IPCCacheServerKey, object_group_ids: list[int]
