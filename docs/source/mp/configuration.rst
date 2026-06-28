@@ -472,10 +472,12 @@ All connector-level options are passed through
    * - ``lmcache.mp.mp_transfer_mode``
      - ``auto``
      - Routing mode for the worker -> server transfer context. One of
-       ``auto`` (CUDA -> engine_driven, others -> lmcache_driven),
-       ``engine_driven`` (force IPC / SHM zero-copy), or
-       ``lmcache_driven`` (force worker-side gather/scatter copy).
-       Overrides the ``LMCACHE_MP_TRANSFER_MODE`` env var when set.
+       ``auto`` (CUDA -> lmcache_driven, others -> engine_driven),
+       ``lmcache_driven`` (force the IPC / SHM zero-copy handle path —
+       LMCache server pulls data via device handles), or
+       ``engine_driven`` (force the worker-side gather/scatter copy
+       path). Overrides the ``LMCACHE_MP_TRANSFER_MODE`` env var when
+       set.
 
 Environment Variables
 ---------------------
