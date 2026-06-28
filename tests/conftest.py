@@ -152,12 +152,25 @@ class MockSyncGlideClient:
     """In-memory mock of a synchronous Glide (Valkey) client."""
 
     _store: dict[bytes, bytes] = {}
+    #: Records the ``expiry`` argument from the most recent ``set`` call so
+    #: tests can assert TTL behavior. ``None`` means no expiry was passed.
+    last_expiry = None
 
-    def set(self, key: bytes, value) -> None:
+    def set(self, key: bytes, value, expiry=None) -> None:
         self._store[key] = bytes(value)
+        type(self).last_expiry = expiry
 
-    def get(self, key: bytes):
-        return self._store.get(key)
+    def get(self, key: bytes, buffer=None):
+        data = self._store.get(key)
+        if buffer is None:
+            return data
+        # Mirror glide's native buffer-GET: write into the caller's buffer and
+        # return the number of bytes read (an int count), or None on miss.
+        if data is None:
+            return None
+        n = len(data)
+        buffer[:n] = data
+        return n
 
     def exists(self, keys: list[bytes]) -> int:
         return sum(1 for k in keys if k in self._store)
@@ -165,6 +178,7 @@ class MockSyncGlideClient:
     @classmethod
     def reset_store(cls) -> None:
         cls._store.clear()
+        cls.last_expiry = None
 
 
 class MockRedis:

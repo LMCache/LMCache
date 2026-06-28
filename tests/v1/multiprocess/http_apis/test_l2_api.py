@@ -452,3 +452,186 @@ class TestListEndpoint:
         client = TestClient(_make_app(sm))
         resp = client.get("/l2/keys", params={"page_token": "garbage"})
         assert resp.status_code == 400
+
+
+# =============================================================================
+# Prefetch (warm L1 from L2)
+# =============================================================================
+
+
+@dataclass
+class _FakeLayoutRegistry:
+    """Minimal layout registry: ``find`` returns ``layout`` and records calls."""
+
+    layout: Optional[object] = None
+    find_calls: list[tuple[str, int]] = field(default_factory=list)
+
+    def find(self, model_name: str, world_size: int) -> Optional[object]:
+        self.find_calls.append((model_name, world_size))
+        return self.layout
+
+
+class _PrefetchHandle:
+    """Minimal stand-in for ``PrefetchHandle`` (only the queried field)."""
+
+    def __init__(self, total: int) -> None:
+        self.total_requested_keys = total
+
+
+class _PrefetchBitmap:
+    """Stands in for the found-key Bitmap; ``popcount`` is the loaded count."""
+
+    def __init__(self, n: int) -> None:
+        self._n = n
+
+    def popcount(self) -> int:
+        return self._n
+
+
+@dataclass
+class _PrefetchStorageManager:
+    """Records ``submit_prefetch_task`` calls and serves canned poll results."""
+
+    submit_calls: list[dict] = field(default_factory=list)
+
+    def submit_prefetch_task(
+        self,
+        keys,
+        layout_desc,
+        mode=None,
+        **_,
+    ) -> _PrefetchHandle:
+        self.submit_calls.append({"keys": list(keys), "mode": mode})
+        return _PrefetchHandle(len(keys))
+
+    def query_prefetch_status(self, handle) -> _PrefetchBitmap:
+        # Report all keys loaded.
+        return _PrefetchBitmap(handle.total_requested_keys)
+
+
+@dataclass
+class _FakeTokenHasher:
+    """Hashes ``chunk_size`` tokens into one opaque chunk hash each."""
+
+    chunk_size: int = 4
+
+    def compute_chunk_hashes(self, token_ids: list[int]) -> list[bytes]:
+        n = len(token_ids) // self.chunk_size
+        return [i.to_bytes(4, "big") for i in range(n)]
+
+
+@dataclass
+class _FakeContext:
+    layout_desc_registry: _FakeLayoutRegistry
+    storage_manager: _PrefetchStorageManager
+    token_hasher: _FakeTokenHasher = field(default_factory=_FakeTokenHasher)
+
+
+class _PrefetchEngine:
+    def __init__(self, ctx: _FakeContext):
+        self.context = ctx
+        self.storage_manager = ctx.storage_manager
+
+
+def _make_prefetch_app(ctx: Optional[_FakeContext]) -> FastAPI:
+    app = FastAPI()
+    app.include_router(l2_keys_router)
+    if ctx is not None:
+        app.state.engine = _PrefetchEngine(ctx)
+    return app
+
+
+def _ctx(layout: Optional[object]) -> _FakeContext:
+    return _FakeContext(
+        layout_desc_registry=_FakeLayoutRegistry(layout=layout),
+        storage_manager=_PrefetchStorageManager(),
+    )
+
+
+def _prefetch_body(token_ids: list[int], world_size: int = 2, salt: str = "") -> dict:
+    return {
+        "model_name": "m",
+        "world_size": world_size,
+        "token_ids": token_ids,
+        "cache_salt": salt,
+    }
+
+
+class TestPrefetchEndpoint:
+    def test_submit_returns_request_id_and_resolves_layout(self):
+        ctx = _ctx(layout=object())
+        client = TestClient(_make_prefetch_app(ctx))
+
+        # 8 tokens at chunk_size 4 -> 2 chunks.
+        resp = client.post(
+            "/l2/prefetch",
+            json=_prefetch_body([1, 2, 3, 4, 5, 6, 7, 8], world_size=2),
+        )
+        assert resp.status_code == 202, resp.text
+        body = resp.json()
+        assert body["status"] == "submitted"
+        assert body["chunks"] == 2
+        assert body["request_id"]  # non-empty id to poll
+        # Layout was resolved for the requested (model_name, world_size).
+        assert ("m", 2) in ctx.layout_desc_registry.find_calls
+
+    def test_status_poll_completes_then_404(self):
+        # The fake reports the load done on the first poll: status completes
+        # (releasing the lock), and a second poll for the same id is 404.
+        ctx = _ctx(layout=object())
+        client = TestClient(_make_prefetch_app(ctx))
+
+        rid = client.post(
+            "/l2/prefetch", json=_prefetch_body([1, 2, 3, 4, 5, 6, 7, 8], world_size=2)
+        ).json()["request_id"]
+
+        resp = client.get(f"/l2/prefetch/{rid}")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["status"] == "completed"
+        # 2 chunks x world_size 2 = 4 per-rank keys warmed.
+        assert body["found_keys"] == 4
+        assert body["total_keys"] == 4
+
+        # Exactly-once: the job was consumed by the completing poll.
+        assert client.get(f"/l2/prefetch/{rid}").status_code == 404
+
+    def test_status_unknown_request_id_404(self):
+        ctx = _ctx(layout=object())
+        client = TestClient(_make_prefetch_app(ctx))
+        assert client.get("/l2/prefetch/nope").status_code == 404
+
+    def test_short_sequence_is_noop(self):
+        # Fewer than one full chunk -> nothing submitted, no request_id.
+        ctx = _ctx(layout=object())
+        client = TestClient(_make_prefetch_app(ctx))
+
+        resp = client.post("/l2/prefetch", json=_prefetch_body([1, 2]))
+        assert resp.status_code == 202, resp.text
+        assert resp.json() == {"chunks": 0, "status": "noop"}
+
+    def test_409_when_layout_not_registered(self):
+        ctx = _ctx(layout=None)
+        client = TestClient(_make_prefetch_app(ctx))
+
+        resp = client.post(
+            "/l2/prefetch",
+            json=_prefetch_body([1, 2, 3, 4], world_size=99),
+        )
+        assert resp.status_code == 409
+
+    def test_400_on_invalid_cache_salt(self):
+        ctx = _ctx(layout=object())
+        client = TestClient(_make_prefetch_app(ctx))
+
+        # "@" is forbidden in cache_salt (ObjectKey/IPC key invariant).
+        resp = client.post(
+            "/l2/prefetch",
+            json=_prefetch_body([1, 2, 3, 4], salt="bad@salt"),
+        )
+        assert resp.status_code == 400
+
+    def test_503_when_engine_not_initialized(self):
+        client = TestClient(_make_prefetch_app(None))
+        resp = client.post("/l2/prefetch", json=_prefetch_body([1, 2, 3, 4]))
+        assert resp.status_code == 503

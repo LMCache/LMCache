@@ -13,6 +13,18 @@ Three endpoints:
   keys currently locked by in-flight store/load tasks (S3) are skipped
   so deletion never corrupts an active transfer.
 
+- ``POST /l2/prefetch`` — submit a warm prefetch of a token sequence's
+  chunks from L2 into L1. The caller sends ``token_ids`` (not keys); the
+  server hashes them, expands them across the node's ranks, submits a retain
+  prefetch that loads them **unlocked** (no read lock), and returns a
+  ``request_id`` immediately. The loaded chunks are retained (permanent) and
+  immediately a normal, evictable L1 entry. Coalesces across all configured
+  L2 adapters (no selector).
+
+- ``GET /l2/prefetch/{request_id}`` — poll a submitted warm prefetch
+  (``pending`` / ``completed``). Reactive: the caller drives completion;
+  there is no server-side polling loop and nothing to release.
+
 - ``GET /l2/keys`` — paginate keys resident in the selected adapter,
   optionally filtered by ``model_name``. Returns 501 when the selected
   adapter does not implement listing (in v1 only ``S3L2Adapter`` does).
@@ -38,7 +50,13 @@ import asyncio
 from fastapi import APIRouter, HTTPException, Query, Request
 
 # First Party
-from lmcache.v1.distributed.api import EncodedObjectKey
+from lmcache.v1.distributed.api import EncodedObjectKey, ipc_key_to_object_keys
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.warm_prefetch import (
+    COMPLETED,
+    UNKNOWN,
+    WarmPrefetchJobs,
+)
 
 router = APIRouter()
 
@@ -49,6 +67,21 @@ _DEFAULT_PAGE_SIZE = 500
 # target. Keeps the request body bounded and prevents a single call
 # from monopolizing the adapter's I/O loop for an unbounded interval.
 _MAX_DELETE_BATCH = 10_000
+# Hard cap on how many token ids a single ``POST /l2/prefetch`` request may
+# carry. Keeps the request body bounded and the synchronous hashing /
+# key-construction work in the handler proportionate.
+_MAX_PREFETCH_TOKENS = 1_000_000
+
+
+def _get_engine(request: Request) -> Any:
+    """Resolve the shared engine (``MPCacheServer``) or raise ``HTTPException``.
+
+    Raises ``HTTPException(503)`` when the engine isn't initialized yet.
+    """
+    engine = getattr(request.app.state, "engine", None)
+    if engine is None:
+        raise HTTPException(status_code=503, detail="engine not initialized")
+    return engine
 
 
 def _get_storage_manager(request: Request) -> Any:
@@ -59,10 +92,20 @@ def _get_storage_manager(request: Request) -> Any:
     which FastAPI turns into a ``{"detail": "engine not initialized"}``
     JSON response.
     """
-    engine = getattr(request.app.state, "engine", None)
-    if engine is None:
-        raise HTTPException(status_code=503, detail="engine not initialized")
-    return engine.storage_manager
+    return _get_engine(request).storage_manager
+
+
+def _warm_jobs(request: Request) -> WarmPrefetchJobs:
+    """Return the per-app warm-prefetch job table, created lazily.
+
+    Holds the in-flight ``submit`` handles so a later status poll can report
+    completion. The warm holds no lock, so there is nothing to release.
+    """
+    jobs = getattr(request.app.state, "warm_prefetch_jobs", None)
+    if jobs is None:
+        jobs = WarmPrefetchJobs()
+        request.app.state.warm_prefetch_jobs = jobs
+    return jobs
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +126,27 @@ class DeleteRequest:
     """
 
     keys: list[EncodedObjectKey]
+
+
+@dataclass(frozen=True)
+class PrefetchRequest:
+    """Wire body for :py:func:`prefetch_to_l1`.
+
+    Callers describe content by ``token_ids`` -- the same unit the lookup
+    path speaks -- never by internal cache keys, which they cannot construct
+    (a key is a content hash plus a per-rank layout bitmap). The server hashes
+    the tokens and expands them into the per-rank :class:`ObjectKey`s itself.
+
+    ``model_name`` / ``world_size`` select the registered
+    :class:`MemoryLayoutDesc` and the rank fan-out; ``cache_salt`` isolates
+    the keys per tenant. FastAPI validates field types (422); the token cap
+    and ``cache_salt`` invariants raise ``HTTPException(400)`` in the handler.
+    """
+
+    model_name: str
+    world_size: int
+    token_ids: list[int]
+    cache_salt: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +252,120 @@ async def delete_from_l2(
         return response
     response["ok"] = True
     return response
+
+
+@router.post("/l2/prefetch", response_model=None, status_code=202)
+async def prefetch_to_l1(
+    body: PrefetchRequest,
+    request: Request,
+) -> dict[str, object]:
+    """Submit a warm prefetch of a token sequence's chunks from L2 into L1.
+
+    Hashes ``body.token_ids`` into chunk keys (the same path the lookup handler
+    uses), expands them across the node's ranks, and submits a retain prefetch
+    that loads them **unlocked** (no read lock). Returns immediately with a
+    ``request_id``; the load runs in the storage manager's own thread. Poll
+    ``GET /l2/prefetch/{request_id}`` to observe completion. The loaded chunks
+    are resident, retained, and immediately re-lookupable/evictable -- there is
+    no lock to release and no server-side polling loop. Coalesces across all
+    configured L2 adapters, so there is no ``?adapter=`` selector (unlike
+    ``DELETE /l2``).
+
+    Body: ``{"model_name", "world_size", "token_ids": [int, ...], "cache_salt"}``.
+
+    Responses:
+        202: ``{"request_id", "chunks", "status": "submitted"}``, or
+            ``{"chunks": 0, "status": "noop"}`` when the sequence is shorter
+            than one chunk (nothing submitted; no ``request_id`` to poll).
+        400: token count exceeds ``_MAX_PREFETCH_TOKENS`` or ``cache_salt``
+            violates its invariants.
+        409: no layout registered for ``(model_name, world_size)`` -- the
+            model has not allocated KV cache on this node yet.
+        422: request body fails field-level validation.
+        503: engine not initialized.
+    """
+    if len(body.token_ids) > _MAX_PREFETCH_TOKENS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"too many token_ids in a single request "
+                f"(limit={_MAX_PREFETCH_TOKENS}, got={len(body.token_ids)})"
+            ),
+        )
+
+    ctx = _get_engine(request).context
+    layout_desc = ctx.layout_desc_registry.find(body.model_name, body.world_size)
+    if layout_desc is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"no layout registered for model_name={body.model_name!r} "
+                f"world_size={body.world_size}; the model has not allocated "
+                f"KV cache on this node yet"
+            ),
+        )
+
+    # worker_id=None expands each chunk to one key per rank, warming the whole
+    # node's L1 (mirrors how the lookup path fans a chunk across workers).
+    try:
+        ipc_key = IPCCacheServerKey(
+            model_name=body.model_name,
+            world_size=body.world_size,
+            worker_id=None,
+            token_ids=tuple(body.token_ids),
+            start=0,
+            end=len(body.token_ids),
+            request_id="",
+            cache_salt=body.cache_salt,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    chunk_hashes = ctx.token_hasher.compute_chunk_hashes(list(body.token_ids))
+    if not chunk_hashes:
+        # Fewer than one full chunk of tokens -- nothing to warm.
+        return {"chunks": 0, "status": "noop"}
+
+    obj_keys = ipc_key_to_object_keys(ipc_key, chunk_hashes, [0])[0]
+    request_id = _warm_jobs(request).submit(ctx.storage_manager, obj_keys, layout_desc)
+    return {
+        "request_id": request_id,
+        "chunks": len(chunk_hashes),
+        "status": "submitted",
+    }
+
+
+@router.get("/l2/prefetch/{request_id}", response_model=None)
+async def prefetch_status(request_id: str, request: Request) -> dict[str, object]:
+    """Report a warm-prefetch job's status and finalize it on completion.
+
+    The first poll that observes completion drops the job (and pops the
+    controller's result bookkeeping), so a later poll for the same id returns
+    404 (exactly-once). The warm holds no lock, so there is nothing to release.
+
+    Responses:
+        200: ``{"status": "pending"}`` while the load runs, or
+            ``{"status": "completed", "found_keys", "total_keys"}`` once done.
+        404: unknown ``request_id`` (already completed-and-consumed, or never
+            submitted).
+        503: engine not initialized.
+    """
+    status = _warm_jobs(request).poll(_get_storage_manager(request), request_id)
+    if status.state == UNKNOWN:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"unknown prefetch request_id={request_id!r} "
+                f"(already completed or never submitted)"
+            ),
+        )
+    if status.state == COMPLETED:
+        return {
+            "status": COMPLETED,
+            "found_keys": status.found_keys,
+            "total_keys": status.total_keys,
+        }
+    return {"status": status.state}
 
 
 @router.get("/l2/keys", response_model=None)

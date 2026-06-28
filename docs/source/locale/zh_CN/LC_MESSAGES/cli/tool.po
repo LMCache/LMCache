@@ -31,8 +31,7 @@ msgstr "``lmcache tool`` 命令将与 LMCache 捆绑在一起的离线分析工�
 
 #: ../../source/cli/tool.rst:11
 msgid "Currently one tool is available: ``cache-simulator``."
-msgstr ""
-"目前可用的工具有一个：\\ ``cache-simulator``\\ 。"
+msgstr "目前可用的工具有一个：\\ ``cache-simulator``\\ 。"
 
 #: ../../source/cli/tool.rst:15
 msgid ""
@@ -40,8 +39,7 @@ msgid ""
 "(``sortedcontainers`` / ``matplotlib``). If they are not installed, the "
 "sub-command is silently omitted from the CLI. Install the extras to "
 "enable it."
-msgstr ""
-"``cache-simulator`` 依赖于可选的 ``plot`` 附加组件（\\ ``sortedcontainers`` / ``matplotlib``\\ ）。如果它们未安装，子命令将会在 CLI 中静默省略。安装附加组件以启用它。"
+msgstr "``cache-simulator`` 依赖于可选的 ``plot`` 附加组件（\\ ``sortedcontainers`` / ``matplotlib``\\ ）。如果它们未安装，子命令将会在 CLI 中静默省略。安装附加组件以启用它。"
 
 #: ../../source/cli/tool.rst:22
 msgid "cache-simulator"

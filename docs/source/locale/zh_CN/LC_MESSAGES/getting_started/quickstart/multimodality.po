@@ -65,7 +65,7 @@ msgstr "首次请求后："
 #: ../../source/getting_started/quickstart/multimodality.rst:191
 #: ../../source/getting_started/quickstart/multimodality.rst:213
 msgid "*Example Output:*"
-msgstr "*示例输出:*"
+msgstr "示例输出:"
 
 #: ../../source/getting_started/quickstart/multimodality.rst:204
 msgid "After Second Request:"

@@ -72,8 +72,7 @@ msgstr "**响应**: ``application/json`` — 所有环境变量的 JSON 对象�
 #: ../../source/internal_api_server/common_apis.rst:188
 #: ../../source/internal_api_server/common_apis.rst:334
 msgid "**Example Response**:"
-msgstr ""
-"**示例响应**\\ ："
+msgstr "**示例响应**:"
 
 #: ../../source/internal_api_server/common_apis.rst:39
 msgid "``GET /loglevel`` — Log Level Management"
@@ -87,8 +86,7 @@ msgstr "获取或设置 Python 日志记录器的日志级别。行为取决于�
 
 #: ../../source/internal_api_server/common_apis.rst:43
 msgid "**No parameters**: List all loggers and their levels."
-msgstr ""
-"**无参数**\\ ：列出所有记录器及其级别。"
+msgstr "**无参数**\\ ：列出所有记录器及其级别。"
 
 #: ../../source/internal_api_server/common_apis.rst:44
 msgid "**``logger_name`` only**: Get the level of the specified logger."
@@ -168,13 +166,11 @@ msgstr "**响应**: ``text/plain``"
 
 #: ../../source/internal_api_server/common_apis.rst:71
 msgid "**Example Response** (list all):"
-msgstr ""
-"**示例响应**\\ （列出所有）："
+msgstr "**示例响应**\\ （列出所有）："
 
 #: ../../source/internal_api_server/common_apis.rst:79
 msgid "**Example Response** (get):"
-msgstr ""
-"**示例响应**\\ （获取）："
+msgstr "**示例响应**\\ （获取）："
 
 #: ../../source/internal_api_server/common_apis.rst:85
 msgid "**Example Response** (set):"
@@ -183,8 +179,7 @@ msgstr "**示例响应** (设置):"
 #: ../../source/internal_api_server/common_apis.rst:91
 #: ../../source/internal_api_server/common_apis.rst:214
 msgid "**Error Response** (invalid level, HTTP 400):"
-msgstr ""
-"**错误响应**\\ （无效级别，HTTP 400）："
+msgstr "**错误响应**\\ （无效级别，HTTP 400）："
 
 #: ../../source/internal_api_server/common_apis.rst:99
 msgid "``GET /metrics`` — Prometheus Metrics"
@@ -275,8 +270,7 @@ msgstr "**路径**: ``/periodic-threads``"
 msgid ""
 "(Optional) Filter by thread level: ``critical``, ``high``, ``medium``, "
 "``low``"
-msgstr ""
-"(可选) 按线程级别过滤：\\ ``critical``\\ 、\\ ``high``\\ 、\\ ``medium``\\ 、\\ ``low``"
+msgstr "(可选) 按线程级别过滤：\\ ``critical``\\ 、\\ ``high``\\ 、\\ ``medium``\\ 、\\ ``low``"
 
 #: ../../source/internal_api_server/common_apis.rst:171
 msgid "``running_only``"
@@ -289,8 +283,7 @@ msgstr "布尔值"
 
 #: ../../source/internal_api_server/common_apis.rst:171
 msgid "(Optional) Only show running threads (default: ``false``)"
-msgstr ""
-"(可选) 仅显示正在运行的线程（默认值：\\ ``false``\\ ）"
+msgstr "(可选) 仅显示正在运行的线程（默认值：\\ ``false``\\ ）"
 
 #: ../../source/internal_api_server/common_apis.rst:172
 msgid "``active_only``"
@@ -298,8 +291,7 @@ msgstr "``active_only``"
 
 #: ../../source/internal_api_server/common_apis.rst:172
 msgid "(Optional) Only show active threads (default: ``false``)"
-msgstr ""
-"(可选) 仅显示活动线程（默认值：\\ ``false``\\ ）"
+msgstr "(可选) 仅显示活动线程（默认值：\\ ``false``\\ ）"
 
 #: ../../source/internal_api_server/common_apis.rst:175
 #: ../../source/internal_api_server/common_apis.rst:238
@@ -323,8 +315,7 @@ msgstr "**路径**: ``/periodic-threads/{thread_name}``"
 
 #: ../../source/internal_api_server/common_apis.rst:230
 msgid "**Path Parameters**:"
-msgstr ""
-"**路径参数**\\ ："
+msgstr "**路径参数**\\ ："
 
 #: ../../source/internal_api_server/common_apis.rst:235
 msgid "``thread_name``"
@@ -336,8 +327,7 @@ msgstr "周期性线程的名称"
 
 #: ../../source/internal_api_server/common_apis.rst:244
 msgid "**Error Response** (not found, HTTP 404):"
-msgstr ""
-"**错误响应**\\ （未找到，HTTP 404）："
+msgstr "**错误响应**\\ （未找到，HTTP 404）："
 
 #: ../../source/internal_api_server/common_apis.rst:254
 msgid "``GET /periodic-threads-health`` — Periodic Thread Health Check"
@@ -355,13 +345,11 @@ msgstr "**路径**: ``/periodic-threads-health``"
 
 #: ../../source/internal_api_server/common_apis.rst:268
 msgid "**Example Response** (healthy):"
-msgstr ""
-"**示例响应**\\ （健康）："
+msgstr "**示例响应**\\ （健康）："
 
 #: ../../source/internal_api_server/common_apis.rst:278
 msgid "**Example Response** (unhealthy):"
-msgstr ""
-"**示例响应**\\ （不健康）："
+msgstr "**示例响应**\\ （不健康）："
 
 #: ../../source/internal_api_server/common_apis.rst:297
 msgid "``POST /run_script`` — Run Script"
@@ -373,8 +361,7 @@ msgid ""
 "The script has access to ``app`` (the FastAPI application instance) and a"
 " limited set of builtins. Import is restricted to modules configured in "
 "``script_allowed_imports``."
-msgstr ""
-"在受限的沙箱环境中上传并执行 Python 脚本。该脚本可以访问 ``app``\\ （FastAPI 应用实例）和有限的内置函数。导入仅限于在 ``script_allowed_imports`` 中配置的模块。"
+msgstr "在受限的沙箱环境中上传并执行 Python 脚本。该脚本可以访问 ``app``\\ （FastAPI 应用实例）和有限的内置函数。导入仅限于在 ``script_allowed_imports`` 中配置的模块。"
 
 #: ../../source/internal_api_server/common_apis.rst:305
 msgid "**Path**: ``/run_script``"
@@ -400,8 +387,7 @@ msgstr "要执行的 Python 脚本文件"
 msgid ""
 "**Response**: ``text/plain`` — The ``result`` variable from the script, "
 "or ``\"Script executed successfully\"`` if no ``result`` is set."
-msgstr ""
-"**响应**: ``text/plain`` — 脚本中的 ``result`` 变量，或者如果没有设置 ``result`` 则为 ``\"脚本执行成功\"``\\ 。"
+msgstr "**响应**: ``text/plain`` — 脚本中的 ``result`` 变量，或者如果没有设置 ``result`` 则为 ``\"脚本执行成功\"``\\ 。"
 
 #: ../../source/internal_api_server/common_apis.rst:323
 msgid "**Example Script** (``scratch.py``):"
@@ -409,11 +395,9 @@ msgstr "**示例脚本** (``scratch.py``):"
 
 #: ../../source/internal_api_server/common_apis.rst:340
 msgid "**Error Response** (no script, HTTP 400):"
-msgstr ""
-"**错误响应**\\ （无脚本，HTTP 400）："
+msgstr "**错误响应**\\ （无脚本，HTTP 400）："
 
 #: ../../source/internal_api_server/common_apis.rst:346
 msgid "**Error Response** (execution error, HTTP 500):"
-msgstr ""
-"**错误响应**\\ （执行错误，HTTP 500）："
+msgstr "**错误响应**\\ （执行错误，HTTP 500）："
 

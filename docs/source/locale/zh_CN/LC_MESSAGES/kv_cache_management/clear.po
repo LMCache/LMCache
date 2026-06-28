@@ -46,7 +46,7 @@ msgstr "首先，创建一个 yaml 文件 ``example.yaml`` 来配置 lmcache 实
 
 #: ../../source/kv_cache_management/clear.rst:37
 msgid "Start the vllm/lmcache instance at port 8000:"
-msgstr "在 8000 端口启动 vllm/lmcache 实例："
+msgstr "在端口 8000 启动 vllm/lmcache 实例："
 
 #: ../../source/kv_cache_management/clear.rst:44
 msgid "Start the lmcache controller at port 9000 and the monitor at port 9001:"
@@ -62,7 +62,7 @@ msgstr "清除系统中的 KV Cache："
 
 #: ../../source/kv_cache_management/clear.rst:74
 msgid "The controller responds with a message similar to:"
-msgstr "控制器会回复类似于以下消息："
+msgstr "控制器会回复类似于以下内容的消息："
 
 #: ../../source/kv_cache_management/clear.rst:80
 msgid ""

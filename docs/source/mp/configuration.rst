@@ -120,6 +120,14 @@ Source: ``lmcache/v1/multiprocess/config.py``
        L1-resident and only the dropped gap is recomputed, instead of
        truncating the prefix at the gap. No effect for other engines. See
        :doc:`/mp/l2_storage/fault_inject` for a way to exercise it.
+   * - ``--separate-object-groups`` / ``--no-separate-object-groups``
+     - ``True``
+     - Split a hybrid model's kernel groups into one object group per
+       cross-chunk attention window (full attention, each sliding-window
+       size, mamba/GDN) at KV-cache registration. On by default; pass
+       ``--no-separate-object-groups`` to keep all layers in a single
+       full-attention object group. Transparent to correctness; a non-hybrid
+       model always resolves to one object group. See :doc:`/mp/hybrid_models`.
 
 Lookup Hash Logging
 -------------------
@@ -223,10 +231,23 @@ GDS L1 Tier
 Source: ``lmcache/v1/distributed/config.py``
 
 Opt-in. Setting ``--gds-l1-path`` switches the L1 medium from pinned DRAM to
-an NVMe slab file accessed via GPUDirect Storage (cuFile DMA). The CPU
-pinned-DRAM tier is then disabled, and ``--l1-size-gb`` sizes the slab.
-Disable byte-array L2 adapters when this is on (the GDS tier exposes no L1
-memory buffer for them to register).
+an NVMe slab file accessed via GPUDirect Storage DMA. The CPU pinned-DRAM tier
+is then disabled, and ``--l1-size-gb`` sizes the slab. Disable byte-array L2
+adapters when this is on (the GDS tier exposes no L1 memory buffer for them to
+register).
+
+The DMA path is selected automatically by platform: **cuFile**
+(``libcufile.so``) on NVIDIA and **hipFile** (``libhipfile.so``,
+`ROCm/hipFile <https://github.com/ROCm/hipFile>`_) on AMD ROCm. The same
+flags apply to both; no configuration change is needed to switch vendors.
+
+.. note::
+
+   AMD hipFile requires ROCm >= 7.2.0. The zero-copy GPUDirect fast path
+   additionally needs a kernel built with ``CONFIG_PCI_P2PDMA``,
+   ``amdgpu-dkms >= 30.20.1``, and the slab on a local NVMe ext4/xfs
+   filesystem; where those are unavailable hipFile transparently falls back to
+   a host-bounce compatibility path (correct, but not zero-copy).
 
 .. list-table::
    :header-rows: 1

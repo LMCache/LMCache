@@ -119,6 +119,15 @@ class CoordinatorCommand(BaseCommand):
                 "offset for full recall (default: 1)."
             ),
         )
+        parser.add_argument(
+            "--timeout-keep-alive",
+            type=int,
+            default=None,
+            help=(
+                "Seconds the HTTP server keeps idle connections open "
+                "before closing them (default: 10)."
+            ),
+        )
 
     def execute(self, args: argparse.Namespace) -> None:
         """Build the coordinator config and serve the app with uvicorn.
@@ -165,6 +174,7 @@ class CoordinatorCommand(BaseCommand):
                 ("trigger_watermark", args.trigger_watermark),
                 ("blend_chunk_size", args.blend_chunk_size),
                 ("blend_probe_stride", args.blend_probe_stride),
+                ("timeout_keep_alive", args.timeout_keep_alive),
             )
             if value is not None
         }
@@ -172,4 +182,10 @@ class CoordinatorCommand(BaseCommand):
             config = dataclasses.replace(config, **overrides)
 
         app = create_app(config)
-        uvicorn.run(app, host=config.host, port=config.port, log_level="info")
+        uvicorn.run(
+            app,
+            host=config.host,
+            port=config.port,
+            log_level="info",
+            timeout_keep_alive=config.timeout_keep_alive,
+        )

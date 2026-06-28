@@ -54,22 +54,16 @@ class BaseCacheContext(ABC):
     def __init__(
         self,
         *,
-        engine_kv_format: Any,
         kv_caches: list[torch.Tensor],
         device: torch.device,
         num_layers: int,
-        num_blocks: int,
-        is_mla: bool,
         kv_layer_groups_manager: KVLayerGroupsManager,
         block_ids_buffer: torch.Tensor,
         lmcache_tokens_per_chunk: int,
     ) -> None:
-        self.engine_kv_format_ = engine_kv_format
         self.kv_caches_ = kv_caches
         self.device_ = device
         self.num_layers_ = num_layers
-        self.num_blocks_ = num_blocks
-        self.is_mla_ = is_mla
         self.kv_layer_groups_manager_ = kv_layer_groups_manager
         self.block_ids_buffer_ = block_ids_buffer
         self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
@@ -77,12 +71,6 @@ class BaseCacheContext(ABC):
     # ------------------------------------------------------------------
     # Abstract -- subclasses MUST implement
     # ------------------------------------------------------------------
-
-    @property
-    @abstractmethod
-    def dtype(self) -> torch.dtype:
-        """Returns the dtype of the KV cache tensors."""
-        ...
 
     @property
     @abstractmethod
@@ -147,11 +135,6 @@ class BaseCacheContext(ABC):
     # ------------------------------------------------------------------
 
     @property
-    def engine_kv_format(self) -> Any:
-        """Returns the EngineKVFormat enum value."""
-        return self.engine_kv_format_
-
-    @property
     def device(self) -> torch.device:
         """Returns the device where KV-cache tensors live."""
         return self.device_
@@ -168,13 +151,12 @@ class BaseCacheContext(ABC):
 
     @property
     def num_blocks(self) -> int:
-        """Returns the number of blocks in the KV cache."""
-        return self.num_blocks_
+        """Returns the number of blocks in the KV cache.
 
-    @property
-    def is_mla(self) -> bool:
-        """Returns whether the model uses MLA."""
-        return self.is_mla_
+        Sourced from the kernel groups (one shared block-id space), not a
+        representative-format computation.
+        """
+        return self.kv_layer_groups_manager_.num_blocks
 
     @property
     def hidden_dim_sizes(self) -> list[int]:
@@ -199,6 +181,43 @@ class BaseCacheContext(ABC):
     def get_shape_desc(self, group_idx: int) -> "lmc_ops.PageBufferShapeDesc":
         """Returns the PageBufferShapeDesc for *group_idx*."""
         return self.kv_layer_groups_manager.get_shape_desc(group_idx)
+
+    def get_engine_kv_format(self, kernel_group_idx: int) -> "lmc_ops.EngineKVFormat":
+        """Returns the Engine KV format of kernel *kernel_group_idx*.
+
+        Raises:
+            ValueError: If the group has no format (a bookkeeping group built by
+                ``parse_kvcache_shape_spec`` should never reach the transfer
+                path; detection-built groups always carry one).
+        """
+        groups = self.kv_layer_groups_manager.kv_layer_groups
+        engine_kv_format = groups[kernel_group_idx].engine_kv_format
+        if engine_kv_format is None:
+            raise ValueError(
+                f"kernel group {kernel_group_idx} has no engine_kv_format; a "
+                "formatless bookkeeping group reached the transfer path"
+            )
+        return engine_kv_format
+
+    def engine_kv_formats(self) -> list["lmc_ops.EngineKVFormat"]:
+        """Returns the Engine KV format of each kernel group, in group order."""
+        num_groups = len(self.kv_layer_groups_manager.kernel_groups)
+        return [self.get_engine_kv_format(idx) for idx in range(num_groups)]
+
+    def engine_kv_format_per_layer(self) -> list["lmc_ops.EngineKVFormat | None"]:
+        """Returns each layer's Engine KV format, indexed by layer index.
+
+        Formats differ across layers for a mixed-format model. ``None`` marks a
+        layer in no kernel group (a cross-layer KV-sharing layer).
+        """
+        formats: list["lmc_ops.EngineKVFormat | None"] = [None] * len(self.kv_caches_)
+        for kernel_group_idx, group in enumerate(
+            self.kv_layer_groups_manager.kernel_groups
+        ):
+            fmt = self.get_engine_kv_format(kernel_group_idx)
+            for layer_idx in group.layer_indices:
+                formats[layer_idx] = fmt
+        return formats
 
     def get_slots_per_chunk_in_sw(self, kernel_group_idx: int) -> int:
         """Returns the number of slots per lmcache chunk for D/H
@@ -256,21 +275,11 @@ class BaseCacheContext(ABC):
     # ------------------------------------------------------------------
 
     @property
-    def engine_kv_shape(self) -> str:
-        """Returns the symbolic KV cache layout description."""
-        return get_engine_kv_shape_description(self.engine_kv_format)
-
-    @property
-    def attention_backend(self) -> str:
-        """Returns the attention backend name."""
-        return get_attention_backend(self.engine_kv_format)
-
-    @property
     def concrete_engine_kv_shape(self) -> str:
         """Returns the engine KV shape with actual numeric values."""
         group = self.kv_layer_groups_manager.kv_layer_groups[0]
         return get_concrete_engine_kv_shape_from_shape_desc(
-            group.shape_desc, self.engine_kv_format
+            group.shape_desc, group.engine_kv_format
         )
 
     # ------------------------------------------------------------------
@@ -289,7 +298,6 @@ class BaseCacheContext(ABC):
         self,
         kernel_group_idx: int,
         group: Any,
-        engine_kv_format: Any,
         group_map: dict[int, int],
     ) -> dict:
         """Build a status dict for a single kernel group.
@@ -297,6 +305,7 @@ class BaseCacheContext(ABC):
         Override this in subclasses to inject extra per-group fields
         without duplicating the whole :meth:`report_status` method.
         """
+        engine_kv_format = self.get_engine_kv_format(kernel_group_idx)
         return {
             "kernel_group_idx": kernel_group_idx,
             "engine_group_idx": group.engine_group_idx,
@@ -321,13 +330,10 @@ class BaseCacheContext(ABC):
         """Return this context's KV cache layout metadata."""
         manager = self.kv_layer_groups_manager
         kernel_groups = manager.kernel_groups
-        engine_kv_format = self.engine_kv_format
         group_map = self._build_group_report_map()
 
         group_reports = [
-            self._build_single_group_report(
-                kernel_group_idx, group, engine_kv_format, group_map
-            )
+            self._build_single_group_report(kernel_group_idx, group, group_map)
             for kernel_group_idx, group in enumerate(kernel_groups)
         ]
 

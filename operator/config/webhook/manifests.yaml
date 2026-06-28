@@ -12,7 +12,27 @@ webhooks:
       namespace: system
       path: /mutate--v1-pod
   failurePolicy: Ignore
-  name: mpod.lmcache.ai
+  name: mcacheblendpod.lmcache.ai
+  reinvocationPolicy: Never
+  rules:
+  - apiGroups:
+    - ""
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    resources:
+    - pods
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-lmcache--v1-pod
+  failurePolicy: Ignore
+  name: mlmcachepod.lmcache.ai
   reinvocationPolicy: Never
   rules:
   - apiGroups:
