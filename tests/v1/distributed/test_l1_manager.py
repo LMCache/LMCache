@@ -150,6 +150,29 @@ def make_object_key(chunk_hash: int, model_name: str = "test_model", kv_rank: in
     return ObjectKey(chunk_hash=hash_bytes, model_name=model_name, kv_rank=kv_rank)
 
 
+class RecordingReadLock:
+    """Read-lock test double that records batch calls from L1Manager."""
+
+    def __init__(self, locked: bool = False) -> None:
+        self.locked = locked
+        self.lock_count_calls: list[int] = []
+        self.unlock_count_calls: list[int] = []
+
+    def lock_count(self, count: int) -> None:
+        """Record a batch lock acquisition."""
+        self.lock_count_calls.append(count)
+        self.locked = True
+
+    def unlock_count(self, count: int) -> None:
+        """Record a batch lock release."""
+        self.unlock_count_calls.append(count)
+        self.locked = False
+
+    def is_locked(self) -> bool:
+        """Return whether this test double is locked."""
+        return self.locked
+
+
 # =============================================================================
 # Tests for L1Manager.reserve_read()
 # =============================================================================
@@ -311,6 +334,28 @@ class TestReserveRead:
         state = manager.get_object_state(key)
         assert state is not None
         assert not state.read_lock.is_locked()
+
+        manager.close()
+
+    def test_reserve_read_uses_batch_lock_count(
+        self, basic_l1_config, basic_layout
+    ) -> None:
+        """reserve_read should acquire all extra counts in one TTLLock call."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+
+        manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+        state = manager.get_object_state(key)
+        assert state is not None
+        read_lock = RecordingReadLock()
+        state.read_lock = read_lock  # type: ignore[assignment]
+
+        result = manager.reserve_read([key], extra_count=2)
+
+        assert result[key][0] == L1Error.SUCCESS
+        assert read_lock.lock_count_calls == [3]
+        assert read_lock.unlock_count_calls == []
 
         manager.close()
 
@@ -701,6 +746,28 @@ class TestFinishRead:
 
         manager.close()
 
+    def test_finish_read_uses_batch_unlock_count(
+        self, basic_l1_config, basic_layout
+    ) -> None:
+        """finish_read should release all extra counts in one TTLLock call."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+
+        manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+        state = manager.get_object_state(key)
+        assert state is not None
+        read_lock = RecordingReadLock(locked=True)
+        state.read_lock = read_lock  # type: ignore[assignment]
+
+        result = manager.finish_read([key], extra_count=2)
+
+        assert result[key] == L1Error.SUCCESS
+        assert read_lock.lock_count_calls == []
+        assert read_lock.unlock_count_calls == [3]
+
+        manager.close()
+
     def test_finish_read_extra_count_partial_release(
         self, basic_l1_config, basic_layout
     ):
@@ -1072,6 +1139,27 @@ class TestFinishWriteAndReserveRead:
 
         # Clean up read lock
         manager.finish_read([key])
+        manager.close()
+
+    def test_transition_uses_batch_lock_count(
+        self, basic_l1_config, basic_layout
+    ) -> None:
+        """finish_write_and_reserve_read should acquire read locks in one call."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+
+        manager.reserve_write([key], [False], basic_layout)
+        state = manager.get_object_state(key)
+        assert state is not None
+        read_lock = RecordingReadLock()
+        state.read_lock = read_lock  # type: ignore[assignment]
+
+        result = manager.finish_write_and_reserve_read([key], extra_count=2)
+
+        assert result[key][0] == L1Error.SUCCESS
+        assert read_lock.lock_count_calls == [3]
+        assert read_lock.unlock_count_calls == []
+
         manager.close()
 
     def test_key_not_exist(self, basic_l1_config, basic_layout):

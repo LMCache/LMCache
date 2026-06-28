@@ -40,11 +40,36 @@ class TTLLock {
   void lock();
 
   /**
+   * @brief Increment the lock counter by count and update the TTL.
+   *
+   * If the previous TTL has expired, the counter is reset to count.
+   * Otherwise, the counter is incremented by count.
+   * The TTL is always refreshed to the current time + TTL duration.
+   *
+   * @param count Number of lock counts to acquire. Must be positive.
+   *
+   * @throws std::invalid_argument if count is not positive.
+   * @throws std::overflow_error if the counter would overflow.
+   */
+  void lock_count(int64_t count);
+
+  /**
    * @brief Decrement the lock counter by 1.
    *
    * The counter will not go below 0.
    */
   void unlock();
+
+  /**
+   * @brief Decrement the lock counter by count.
+   *
+   * The counter will not go below 0.
+   *
+   * @param count Number of lock counts to release. Must be positive.
+   *
+   * @throws std::invalid_argument if count is not positive.
+   */
+  void unlock_count(int64_t count);
 
   /**
    * @brief Check if the lock is currently held.

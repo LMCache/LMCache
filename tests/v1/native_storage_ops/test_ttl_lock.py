@@ -106,6 +106,56 @@ class TestTTLLockBasicSemantics:
         lock.lock()
         assert lock.is_locked()
 
+    def test_lock_count_increments_counter_by_count(self) -> None:
+        """Test that lock_count() acquires multiple lock counts at once."""
+        lock = TTLLock()
+
+        lock.lock_count(3)
+        assert lock.is_locked()
+
+        lock.unlock()
+        assert lock.is_locked()
+
+        lock.unlock_count(2)
+        assert not lock.is_locked()
+
+    def test_lock_count_rejects_non_positive_count(self) -> None:
+        """Test that lock_count() requires a positive count."""
+        lock = TTLLock()
+
+        with pytest.raises(ValueError):
+            lock.lock_count(0)
+
+        with pytest.raises(ValueError):
+            lock.lock_count(-1)
+
+    def test_unlock_count_rejects_non_positive_count(self) -> None:
+        """Test that unlock_count() requires a positive count."""
+        lock = TTLLock()
+
+        with pytest.raises(ValueError):
+            lock.unlock_count(0)
+
+        with pytest.raises(ValueError):
+            lock.unlock_count(-1)
+
+    def test_unlock_count_does_not_go_below_zero(self) -> None:
+        """Test that unlock_count() clamps the counter at zero."""
+        lock = TTLLock()
+
+        lock.lock_count(2)
+        lock.unlock_count(3)
+
+        assert not lock.is_locked()
+
+    def test_lock_count_rejects_counter_overflow(self) -> None:
+        """Test that lock_count() rejects counters beyond int64 capacity."""
+        lock = TTLLock()
+
+        lock.lock_count((2**63) - 1)
+        with pytest.raises(OverflowError):
+            lock.lock_count(1)
+
 
 class TestTTLLockTTLSemantics:
     """Test TTL (Time-To-Live) semantics of TTLLock."""
@@ -163,6 +213,23 @@ class TestTTLLockTTLSemantics:
         assert lock.is_locked()
 
         # Verify counter was reset by unlocking once
+        lock.unlock()
+        assert not lock.is_locked()
+
+    def test_lock_count_after_ttl_expired_resets_counter_to_count(self) -> None:
+        """Test lock_count() resets expired counters to the requested count."""
+        lock = TTLLock(ttl_second=1)
+
+        lock.lock_count(3)
+        time.sleep(1.5)
+        assert not lock.is_locked()
+
+        lock.lock_count(2)
+        assert lock.is_locked()
+
+        lock.unlock()
+        assert lock.is_locked()
+
         lock.unlock()
         assert not lock.is_locked()
 
@@ -252,6 +319,80 @@ class TestTTLLockThreadSafety:
             t.join()
 
         # Should be at 0
+        assert not lock.is_locked()
+
+    def test_concurrent_lock_count_operations(self) -> None:
+        """Test that concurrent lock_count() operations are thread-safe."""
+        lock = TTLLock()
+        num_threads = 50
+        count_per_thread = 20
+
+        def do_lock_count() -> None:
+            lock.lock_count(count_per_thread)
+
+        threads = [threading.Thread(target=do_lock_count) for _ in range(num_threads)]
+
+        for t in threads:
+            t.start()
+
+        for t in threads:
+            t.join()
+
+        remaining = 0
+        while lock.is_locked():
+            lock.unlock()
+            remaining += 1
+
+        assert remaining == num_threads * count_per_thread
+
+    def test_concurrent_lock_count_after_expiration_preserves_all_counts(self) -> None:
+        """Test expired counter reset does not lose concurrent lock_count calls."""
+        lock = TTLLock(ttl_second=1)
+        num_threads = 50
+        count_per_thread = 3
+
+        lock.lock_count(10)
+        time.sleep(1.5)
+        assert not lock.is_locked()
+
+        def do_lock_count() -> None:
+            lock.lock_count(count_per_thread)
+
+        threads = [threading.Thread(target=do_lock_count) for _ in range(num_threads)]
+
+        for t in threads:
+            t.start()
+
+        for t in threads:
+            t.join()
+
+        remaining = 0
+        while lock.is_locked():
+            lock.unlock()
+            remaining += 1
+
+        assert remaining == num_threads * count_per_thread
+
+    def test_concurrent_unlock_count_operations(self) -> None:
+        """Test that concurrent unlock_count() operations are thread-safe."""
+        lock = TTLLock()
+        total_locks = 1000
+        num_threads = 50
+        count_per_thread = total_locks // num_threads
+
+        lock.lock_count(total_locks)
+
+        def do_unlock_count() -> None:
+            lock.unlock_count(count_per_thread)
+
+        threads = [threading.Thread(target=do_unlock_count) for _ in range(num_threads)]
+
+        for t in threads:
+            t.start()
+
+        for t in threads:
+            t.join()
+
         assert not lock.is_locked()
 
     def test_concurrent_lock_unlock(self):

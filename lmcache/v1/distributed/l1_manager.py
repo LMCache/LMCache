@@ -274,11 +274,7 @@ class L1Manager:
                 ret[key] = (L1Error.KEY_NOT_READABLE, None)
                 continue
 
-            # TODO(perf): support a count argument in
-            # TTLLock.lock() to avoid Python for-loop
-            # overhead (TTLLock is C++ std::atomic).
-            for _ in range(total):
-                entry.read_lock.lock()
+            entry.read_lock.lock_count(total)
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
             successful_keys.append(key)
 
@@ -395,11 +391,7 @@ class L1Manager:
                 ret[key] = L1Error.KEY_IN_WRONG_STATE
                 continue
 
-            # TODO(perf): support a count argument in
-            # TTLLock.unlock() to avoid Python for-loop
-            # overhead (TTLLock is C++ std::atomic).
-            for _ in range(total):
-                entry.read_lock.unlock()
+            entry.read_lock.unlock_count(total)
             if entry.is_temporary and not entry.read_lock.is_locked():
                 # NOTE: temporary objects shouldn't have write-locks
                 need_to_free.append(entry.memory_obj)
@@ -643,8 +635,7 @@ class L1Manager:
                 continue
 
             entry.write_lock.unlock()
-            for _ in range(total):
-                entry.read_lock.lock()
+            entry.read_lock.lock_count(total)
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
             successful_keys.append(key)
 

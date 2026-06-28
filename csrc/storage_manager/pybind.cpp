@@ -37,8 +37,13 @@ PYBIND11_MODULE(native_storage_ops, m) {
       .def("lock", &TTLLock::lock,
            "Increment the lock counter by 1 and update the TTL. "
            "If the previous TTL has expired, reset counter to 1.")
+      .def("lock_count", &TTLLock::lock_count, py::arg("count"),
+           "Increment the lock counter by count and update the TTL. "
+           "If the previous TTL has expired, reset counter to count.")
       .def("unlock", &TTLLock::unlock,
            "Decrement the lock counter by 1 (minimum 0).")
+      .def("unlock_count", &TTLLock::unlock_count, py::arg("count"),
+           "Decrement the lock counter by count (minimum 0).")
       .def("is_locked", &TTLLock::is_locked,
            "Check if the lock is held (counter > 0 and TTL not expired).")
       .def("reset", &TTLLock::reset,
