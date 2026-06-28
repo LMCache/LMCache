@@ -20,11 +20,13 @@ class LookupRequestMsg(AsyncLookupMsg):
     hashes: list[int]
     offsets: list[int]
     request_configs: Optional[Dict[str, str]] = None
+    num_computed_tokens: int = 0
 
     def describe(self) -> str:
         return (
             f"Async lookup request for lookup_id={self.lookup_id} "
-            f"with {len(self.hashes)} hashes"
+            f"with {len(self.hashes)} hashes "
+            f"num_computed_tokens={self.num_computed_tokens}"
         )
 
 

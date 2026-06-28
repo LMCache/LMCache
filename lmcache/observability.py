@@ -48,6 +48,7 @@ class LMCacheStats:
     interval_lookup_hits: int
     interval_vllm_hit_tokens: int
     interval_prompt_tokens: int
+    interval_async_prefetch_skipped_tokens: int
 
     interval_num_slow_retrieval_by_time: int
     interval_num_slow_retrieval_by_speed: int
@@ -261,6 +262,7 @@ class LMCStatsMonitor:
         self.interval_lookup_hits = 0  # total hit tokens lookup
         self.interval_vllm_hit_tokens = 0  # total hit tokens in vllm
         self.interval_prompt_tokens = 0  # total prompt tokens
+        self.interval_async_prefetch_skipped_tokens = 0
         self.interval_lookup_0_hit_requests = 0
 
         self.interval_num_slow_retrieval_by_time = 0
@@ -591,6 +593,15 @@ class LMCStatsMonitor:
     def update_interval_prompt_tokens(self, delta: int):
         self.interval_prompt_tokens += delta
 
+    @thread_safe
+    def update_interval_async_prefetch_skipped_tokens(self, delta: int) -> None:
+        """Increment the count of async-prefetch tokens skipped this interval.
+
+        Args:
+            delta: Number of tokens to add to the skipped-token counter.
+        """
+        self.interval_async_prefetch_skipped_tokens += delta
+
     def _clear(self):
         """
         Clear all the distribution stats
@@ -606,6 +617,7 @@ class LMCStatsMonitor:
         self.interval_lookup_hits = 0
         self.interval_vllm_hit_tokens = 0
         self.interval_prompt_tokens = 0
+        self.interval_async_prefetch_skipped_tokens = 0
 
         self.interval_num_slow_retrieval_by_time = 0
         self.interval_num_slow_retrieval_by_speed = 0
@@ -822,6 +834,7 @@ class LMCStatsMonitor:
             interval_request_cache_lifespan=request_lifespan,
             interval_prompt_tokens=self.interval_prompt_tokens,
             interval_lookup_0_hit_requests=self.interval_lookup_0_hit_requests,
+            interval_async_prefetch_skipped_tokens=self.interval_async_prefetch_skipped_tokens,
         )
         self._clear()
         return ret
@@ -985,6 +998,13 @@ class PrometheusLogger:
         self.counter_num_vllm_hit_tokens = self._create_counter(
             name="lmcache:num_vllm_hit_tokens",
             documentation="Number of hit tokens in vllm",
+            labelnames=labelnames,
+        )
+
+        self.counter_num_async_prefetch_skipped_tokens = self._create_counter(
+            name="lmcache:num_async_prefetch_skipped_tokens",
+            documentation="Number of tokens skipped during async prefetch "
+            "because they were already resident in GPU memory",
             labelnames=labelnames,
         )
 
@@ -1711,6 +1731,10 @@ class PrometheusLogger:
         self._log_counter(self.counter_num_prompt_tokens, stats.interval_prompt_tokens)
         self._log_counter(
             self.counter_num_vllm_hit_tokens, stats.interval_vllm_hit_tokens
+        )
+        self._log_counter(
+            self.counter_num_async_prefetch_skipped_tokens,
+            stats.interval_async_prefetch_skipped_tokens,
         )
 
         self._log_counter(

@@ -25,7 +25,7 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
-from lmcache.observability import PrometheusLogger
+from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import (
     CacheEngineKey,
     _lmcache_nvtx_annotate,
@@ -558,6 +558,7 @@ class StorageManager:
         cum_chunk_lengths_total: list[int],
         tier_expected_chunks: list[int],
         keys_per_chunk: int = 1,
+        num_skip_tokens: int = 0,
     ) -> None:
         """
         Callback function when all prefetch tasks
@@ -641,10 +642,11 @@ class StorageManager:
                         mem_obj.ref_count_down()
                 break
 
-        retrieved_length = cum_chunk_lengths_total[total_retrieved_chunks]
+        retrieved_length = cum_chunk_lengths_total[total_retrieved_chunks] + num_skip_tokens
         logger.info(
             f"Responding to scheduler for lookup id {lookup_id}"
-            f" with retrieved length {retrieved_length}"
+            f" with retrieved length {retrieved_length} "
+            f"including num_skip_tokens {num_skip_tokens}"
         )
         self.async_lookup_server.send_response_to_scheduler(lookup_id, retrieved_length)
 
@@ -656,6 +658,7 @@ class StorageManager:
         search_range: Optional[list[str]] = None,
         pin: bool = False,
         keys_per_chunk: int = 1,
+        num_skip_tokens: int = 0,
     ) -> None:
         """
         Perform asynchronous lookup and prefetching across all storage backends.
@@ -708,6 +711,16 @@ class StorageManager:
             raise ValueError(
                 f"len(keys)={len(keys)} is not a multiple of "
                 f"keys_per_chunk={keys_per_chunk}"
+            )
+        if num_skip_tokens > 0:
+            logger.info(
+                "Async prefetch: skipping %d already-GPU-resident tokens "
+                "for lookup_id=%s",
+                num_skip_tokens,
+                lookup_id,
+            )
+            LMCStatsMonitor.GetOrCreate().update_interval_async_prefetch_skipped_tokens(
+                num_skip_tokens
             )
         num_total_chunks = len(keys) // keys_per_chunk
         num_total_hit_chunks = 0
@@ -786,7 +799,9 @@ class StorageManager:
         # If no chunks were hit across all backends, respond immediately and return.
         if num_total_hit_chunks == 0:
             if self.async_lookup_server is not None:
-                self.async_lookup_server.send_response_to_scheduler(lookup_id, 0)
+                self.async_lookup_server.send_response_to_scheduler(
+                    lookup_id, num_skip_tokens
+                )
             return
 
         # gather_with_keys() here make a pair of (key, memory_obj) for each chunk
@@ -822,6 +837,7 @@ class StorageManager:
                 cum_chunk_lengths_total,
                 tier_expected_chunks,
                 keys_per_chunk=keys_per_chunk,
+                num_skip_tokens=num_skip_tokens,
             )
         )
 

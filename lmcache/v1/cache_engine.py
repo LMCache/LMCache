@@ -1323,6 +1323,7 @@ class LMCacheEngine:
         search_range: Optional[List[str]] = None,
         pin: bool = False,
         request_configs: Optional[dict] = None,
+        num_computed_tokens: int = 0,
     ) -> None:
         """
         An async version of lookup + prefetch.
@@ -1346,6 +1347,7 @@ class LMCacheEngine:
         # storage backend hot_cache lookups match the same key type.
         keys_per_chunk = self.num_layers if self.use_layerwise else 1
 
+        num_skip_tokens = 0
         # TODO(Jiayi): make token database able to return list.
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
@@ -1354,11 +1356,17 @@ class LMCacheEngine:
             request_configs=request_configs,
         ):
             assert isinstance(key, CacheEngineKey)
+            if end <= num_computed_tokens:
+                # This chunk is already resident in GPU memory; skip loading it
+                # from storage but track how many tokens we are skipping so the
+                # scheduler response still reflects the full prefix coverage.
+                num_skip_tokens = end
+                continue
             if self.use_layerwise:
                 keys.extend(key.split_layers(self.num_layers))
             else:
                 keys.append(key)
-            cum_chunk_lengths.append(end)
+            cum_chunk_lengths.append(end - num_skip_tokens)
 
         asyncio.run_coroutine_threadsafe(
             self.storage_manager.async_lookup_and_prefetch(
@@ -1368,6 +1376,7 @@ class LMCacheEngine:
                 search_range,
                 pin,
                 keys_per_chunk=keys_per_chunk,
+                num_skip_tokens=num_skip_tokens,
             ),
             self.storage_manager.loop,
         )
