@@ -1,11 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Device detection logic for LMCache.
+"""Device detection and backend selection for LMCache.
 
 This module detects the available hardware accelerator and exposes
 :data:`torch_dev` and :data:`torch_device_type` as module-level
-singletons.  It is intentionally a leaf module -- it does NOT import
-from ``lmcache.__init__`` or ``lmcache.v1.platform.__init__`` to
-avoid circular dependencies.
+singletons.  It also provides :func:`get_backend` which selects the
+appropriate compiled ops module (MUSA / XPU / CUDA) and merges it on
+top of :mod:`lmcache.python_ops_fallback` so that any op not provided
+by the hardware-specific module falls back to the pure-Python
+implementation.
+
+It is intentionally a leaf module -- it does NOT import from
+``lmcache.__init__`` or ``lmcache.v1.platform.__init__`` to avoid
+circular dependencies.
 
 Other modules should import from here (or from the re-export in
 ``lmcache.__init__``) rather than performing their own detection.
@@ -13,6 +19,8 @@ Other modules should import from here (or from the re-export in
 
 # Standard
 from typing import Any
+import importlib
+import types
 
 # First Party
 from lmcache.logging import init_logger
@@ -67,3 +75,84 @@ if torch_dev is not None:
     torch_dev.ext = DeviceExt(torch_device_type)  # type: ignore[attr-defined]
 else:
     logger.warning("torch_dev is None, skipping DeviceExt initialization.")
+
+
+# ---------------------------------------------------------------------------
+# Dynamic backend selection
+# ---------------------------------------------------------------------------
+
+
+def _get_backend() -> Any | None:
+    """Try backends in order; first successful import wins.
+
+    Returns:
+        A :class:`types.ModuleType` that merges
+        ``lmcache.python_ops_fallback`` (base) with the first
+        successfully loaded hardware backend, or ``None`` if torch
+        is not installed or dependencies are missing (CLI-only mode).
+    """
+    try:
+        # Third Party
+        import torch
+    except (ImportError, ModuleNotFoundError):
+        return None
+
+    try:
+        default_module = importlib.import_module("lmcache.python_ops_fallback")
+    except (ImportError, ModuleNotFoundError) as e:
+        logger.debug("Cannot load python_ops_fallback: %s", e)
+        return None
+
+    backend_candidates = [
+        # Keep backend priority aligned with _detect_device().
+        # MUSA currently uses a Python adapter under the platform package,
+        # unlike the compiled XPU/CUDA extension modules.
+        (
+            "lmcache.v1.platform.musa.ops",
+            "musa_ops",
+            lambda: hasattr(torch, "musa") and torch.musa.is_available(),  # type: ignore[attr-defined]
+        ),
+        (
+            "lmcache.xpu_ops",
+            "xpu_ops",
+            lambda: torch.xpu.is_available(),
+        ),
+        (
+            "lmcache.c_ops",
+            "cuda_ops",
+            lambda: torch.cuda.is_available(),
+        ),
+        # should extend to more HWs..
+    ]
+
+    for module_name, backend_name, predicate in backend_candidates:
+        # 1. Check whether the backend is available before importing
+        try:
+            if not predicate():
+                logger.info(
+                    "Skipping backend %s: predicate returned False",
+                    module_name,
+                )
+                continue
+        except Exception as e:
+            logger.warning(
+                "Skipping backend %s: predicate raised error: %s",
+                module_name,
+                e,
+            )
+            continue
+        # 2. Try to import and merge the backend module
+        try:
+            backend_module = importlib.import_module(module_name)
+            merged_module = types.ModuleType("lmcache.c_ops")
+            merged_module.__dict__.update(default_module.__dict__)
+            merged_module.__dict__.update(backend_module.__dict__)
+            logger.info("Using backend: %s", module_name)
+            return merged_module
+        except Exception as e:
+            logger.warning("Failed to import backend %s: %s", module_name, e)
+
+    return default_module
+
+
+backend_ops = _get_backend()
