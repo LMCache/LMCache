@@ -38,12 +38,15 @@ from lmcache.v1.distributed.l2_adapters.factory import (
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import EventNotifier, create_event_notifier
 from lmcache.v1.storage_backend.raw_block import (
+    DEFAULT_CHECKPOINT_COMPRESSION,
     DEFAULT_IOURING_QUEUE_DEPTH,
+    RawBlockCheckpointCompression,
     RawBlockCore,
     RawBlockCoreConfig,
     decode_object_key,
     encode_object_key,
     normalize_raw_block_io_engine,
+    validate_checkpoint_compression,
     validate_raw_block_io_options,
 )
 
@@ -88,6 +91,9 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         iouring_queue_depth: int = DEFAULT_IOURING_QUEUE_DEPTH,
         use_uring_cmd: bool = False,
         max_data_transfer_size: int = 0,
+        meta_checkpoint_compression: RawBlockCheckpointCompression = (
+            DEFAULT_CHECKPOINT_COMPRESSION
+        ),
         num_store_workers: int = 2,
         num_lookup_workers: int = 1,
         num_load_workers: int = 4,
@@ -114,6 +120,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             iouring_queue_depth: Queue depth for the Rust io_uring engine.
             use_uring_cmd: Whether to use NVMe io_uring_cmd passthrough.
             max_data_transfer_size: Max data transfer size for a single request.
+            meta_checkpoint_compression: Checkpoint payload codec, ``"none"`` or
+                ``"zlib"``.
             num_store_workers: Number of store worker threads.
             num_lookup_workers: Number of lookup worker threads.
             num_load_workers: Number of load worker threads.
@@ -136,6 +144,9 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         self.enable_zero_copy = bool(enable_zero_copy)
         self.io_engine = normalize_raw_block_io_engine(io_engine)
         self.iouring_queue_depth = int(iouring_queue_depth)
+        self.meta_checkpoint_compression = validate_checkpoint_compression(
+            str(meta_checkpoint_compression)
+        )
         validate_raw_block_io_options(
             iouring_queue_depth=self.iouring_queue_depth,
         )
@@ -227,6 +238,11 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             iouring_queue_depth=iouring_queue_depth,
             use_uring_cmd=use_uring_cmd,
             max_data_transfer_size=max_data_transfer_size,
+            meta_checkpoint_compression=validate_checkpoint_compression(
+                str(
+                    d.get("meta_checkpoint_compression", DEFAULT_CHECKPOINT_COMPRESSION)
+                )
+            ),
             num_store_workers=worker_counts["num_store_workers"],
             num_lookup_workers=worker_counts["num_lookup_workers"],
             num_load_workers=worker_counts["num_load_workers"],
@@ -268,6 +284,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             "- max_data_transfer_size (int): for a single I/O request "
             "(0: (default) auto detect limit splitting, > 0: explicit split, "
             "< 0: auto detect limit splitting)\n"
+            "- meta_checkpoint_compression (str): checkpoint payload codec, "
+            f"none or zlib (default {DEFAULT_CHECKPOINT_COMPRESSION})\n"
             "- num_store_workers (int): store worker threads (default 2)\n"
             "- num_lookup_workers (int): lookup worker threads (default 1)\n"
             "- num_load_workers (int): load worker threads (default 4)"
@@ -295,6 +313,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             iouring_queue_depth=self.iouring_queue_depth,
             use_uring_cmd=self.use_uring_cmd,
             max_data_transfer_size=self.max_data_transfer_size,
+            meta_checkpoint_compression=self.meta_checkpoint_compression,
         )
 
 

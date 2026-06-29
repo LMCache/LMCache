@@ -5,6 +5,7 @@ from __future__ import annotations
 
 # Standard
 from concurrent.futures import Future
+from typing import cast
 from unittest.mock import MagicMock, patch
 import asyncio
 import os
@@ -36,10 +37,14 @@ from lmcache.v1.storage_backend.plugins.rust_raw_block_backend import (
     RustRawBlockBackend,
 )
 from lmcache.v1.storage_backend.raw_block import (
+    DEFAULT_CHECKPOINT_COMPRESSION,
+    RawBlockCheckpointCompression,
     RawBlockCore,
     RawBlockCoreConfig,
     RawBlockKeySpec,
+    slot_identity_from_encoded_key,
 )
+from lmcache.v1.storage_backend.raw_block.core import _CHECKPOINT_COMPRESS_MAGIC
 
 
 def _has_ext() -> bool:
@@ -84,26 +89,39 @@ def _install_fake_raw_block_device(monkeypatch, *, size_bytes: int = 64 * 1024):
     )
 
 
-def _make_raw_block_core(*, use_odirect: bool = False) -> RawBlockCore:
+def _make_raw_block_core(
+    *,
+    use_odirect: bool = False,
+    device_path: str = "/tmp/raw-block-boundary-test",
+    capacity_bytes: int = 64 * 1024,
+    meta_total_bytes: int = 16 * 1024,
+    load_checkpoint_on_init: bool = True,
+    meta_checkpoint_compression: str = DEFAULT_CHECKPOINT_COMPRESSION,
+) -> RawBlockCore:
     return RawBlockCore(
         RawBlockCoreConfig(
-            device_path="/tmp/raw-block-boundary-test",
-            capacity_bytes=64 * 1024,
+            device_path=device_path,
+            capacity_bytes=capacity_bytes,
             block_align=4096,
             header_bytes=4096,
             slot_bytes=8192,
             use_odirect=use_odirect,
             enable_zero_copy=True,
-            meta_total_bytes=16 * 1024,
+            meta_total_bytes=meta_total_bytes,
             meta_magic=b"LMCIDX01",
             meta_version=1,
             meta_checkpoint_interval_sec=60,
             meta_idle_quiet_ms=100,
             meta_enable_periodic=False,
-            load_checkpoint_on_init=True,
+            load_checkpoint_on_init=load_checkpoint_on_init,
             meta_verify_on_load=True,
             io_engine="posix",
             iouring_queue_depth=256,
+            # cast: the helper intentionally accepts arbitrary strings so the
+            # invalid-codec test can exercise RawBlockCore's runtime validation.
+            meta_checkpoint_compression=cast(
+                RawBlockCheckpointCompression, meta_checkpoint_compression
+            ),
         ),
         key_namespace="object",
     )
@@ -2270,3 +2288,223 @@ def test_rust_raw_block_backend_batched_get_with_uring(
 
         finally:
             backend.close()
+
+
+# --------------------------------------------------------------------------- #
+# Checkpoint payload compression (meta_checkpoint_compression)
+# --------------------------------------------------------------------------- #
+
+
+class _SharedFakeRawBlockDevice(_FakeRawBlockDevice):
+    """Fake raw device whose bytes persist across cores opening the same path.
+
+    Behaves exactly like ``_FakeRawBlockDevice`` except the backing buffer is
+    keyed by path in a class-level store, so a core reopening the same device
+    sees what a previous core wrote (needed for checkpoint recovery tests).
+    """
+
+    _STORES: dict[str, bytearray] = {}
+
+    def __init__(self, path: str, *, size_bytes: int, **kwargs):
+        del kwargs
+        self._data = self._STORES.setdefault(path, bytearray(size_bytes))
+
+
+def _install_shared_fake_device(monkeypatch, *, size_bytes: int) -> None:
+    _SharedFakeRawBlockDevice._STORES.clear()
+
+    def create(path: str, **kwargs):
+        return _SharedFakeRawBlockDevice(path, size_bytes=size_bytes, **kwargs)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "lmcache_rust_raw_block_io",
+        types.SimpleNamespace(RawBlockDevice=create),
+    )
+
+
+def _object_spec(encoded: str) -> RawBlockKeySpec:
+    return RawBlockKeySpec(
+        encoded=encoded,
+        slot_identity=slot_identity_from_encoded_key(encoded, "object"),
+    )
+
+
+def _object_keys(count: int) -> list[str]:
+    base = "meta-llama%2FLlama-3.1-8B-Instruct"
+    return [f"{base}@{i:#010x}@{i:064x}" for i in range(count)]
+
+
+def test_raw_block_core_compression_roundtrip(monkeypatch):
+    _install_shared_fake_device(monkeypatch, size_bytes=512 * 1024)
+    path = "/tmp/raw-block-compress-roundtrip"
+    payload_size = 4096
+    keys = _object_keys(3)
+
+    core1 = _make_raw_block_core(
+        device_path=path,
+        meta_checkpoint_compression="zlib",
+        capacity_bytes=512 * 1024,
+        meta_total_bytes=64 * 1024,
+    )
+    try:
+        result = core1.put_many(
+            [_object_spec(k) for k in keys],
+            [_make_byte_obj(payload_size) for _ in keys],
+        )
+        assert result.results == [True, True, True]
+        core1.checkpoint_now()
+    finally:
+        core1.close()
+
+    core2 = _make_raw_block_core(
+        device_path=path,
+        meta_checkpoint_compression="zlib",
+        capacity_bytes=512 * 1024,
+        meta_total_bytes=64 * 1024,
+    )
+    try:
+        assert core2.indexed_key_count() == 3
+        assert core2.exists_many(keys) == [True, True, True]
+        metas = core2.get_metadata_many(keys)
+        assert all(m is not None and m.size == payload_size for m in metas)
+    finally:
+        core2.close()
+
+
+def test_raw_block_core_loads_uncompressed_checkpoint(monkeypatch):
+    """A zlib-enabled core recovers a checkpoint written without compression."""
+    _install_shared_fake_device(monkeypatch, size_bytes=512 * 1024)
+    path = "/tmp/raw-block-compress-backcompat"
+    keys = _object_keys(2)
+
+    core1 = _make_raw_block_core(
+        device_path=path,
+        meta_checkpoint_compression="none",
+        capacity_bytes=512 * 1024,
+        meta_total_bytes=64 * 1024,
+    )
+    try:
+        core1.put_many(
+            [_object_spec(k) for k in keys],
+            [_make_byte_obj(4096) for _ in keys],
+        )
+        core1.checkpoint_now()
+    finally:
+        core1.close()
+
+    core2 = _make_raw_block_core(
+        device_path=path,
+        meta_checkpoint_compression="zlib",
+        capacity_bytes=512 * 1024,
+        meta_total_bytes=64 * 1024,
+    )
+    try:
+        assert core2.exists_many(keys) == [True, True]
+    finally:
+        core2.close()
+
+
+def test_raw_block_core_compression_fits_more_entries(monkeypatch):
+    """Compression keeps a checkpoint that would overflow the container raw."""
+    size = 4 * 1024 * 1024
+    meta_total = 16 * 1024  # container 8KiB, payload capacity ~4KiB
+    keys = _object_keys(25)
+
+    # Without compression the JSON exceeds the container -> checkpoint skipped.
+    _install_shared_fake_device(monkeypatch, size_bytes=size)
+    path_none = "/tmp/raw-block-compress-oversize-none"
+    core_none = _make_raw_block_core(
+        device_path=path_none,
+        meta_checkpoint_compression="none",
+        capacity_bytes=size,
+        meta_total_bytes=meta_total,
+    )
+    try:
+        core_none.put_many(
+            [_object_spec(k) for k in keys],
+            [_make_byte_obj(64) for _ in keys],
+        )
+        core_none.checkpoint_now()
+    finally:
+        core_none.close()
+    reopened_none = _make_raw_block_core(
+        device_path=path_none,
+        meta_checkpoint_compression="none",
+        capacity_bytes=size,
+        meta_total_bytes=meta_total,
+    )
+    try:
+        assert reopened_none.indexed_key_count() == 0  # oversize -> nothing persisted
+    finally:
+        reopened_none.close()
+
+    # With zlib the same index compresses under the cap and is recovered.
+    _install_shared_fake_device(monkeypatch, size_bytes=size)
+    path_zlib = "/tmp/raw-block-compress-oversize-zlib"
+    core_zlib = _make_raw_block_core(
+        device_path=path_zlib,
+        meta_checkpoint_compression="zlib",
+        capacity_bytes=size,
+        meta_total_bytes=meta_total,
+    )
+    try:
+        core_zlib.put_many(
+            [_object_spec(k) for k in keys],
+            [_make_byte_obj(64) for _ in keys],
+        )
+        core_zlib.checkpoint_now()
+    finally:
+        core_zlib.close()
+    reopened_zlib = _make_raw_block_core(
+        device_path=path_zlib,
+        meta_checkpoint_compression="zlib",
+        capacity_bytes=size,
+        meta_total_bytes=meta_total,
+    )
+    try:
+        assert reopened_zlib.indexed_key_count() == len(keys)
+    finally:
+        reopened_zlib.close()
+
+
+def test_raw_block_core_rejects_invalid_compression(monkeypatch):
+    _install_shared_fake_device(monkeypatch, size_bytes=64 * 1024)
+    with pytest.raises(ValueError, match="meta_checkpoint_compression"):
+        _make_raw_block_core(
+            device_path="/tmp/raw-block-compress-invalid",
+            meta_checkpoint_compression="gzip",
+            capacity_bytes=64 * 1024,
+            meta_total_bytes=16 * 1024,
+        )
+
+
+def test_raw_block_core_decode_rejects_corrupt_compressed_payload(monkeypatch):
+    """A CRC-valid but undecompressable payload loads gracefully as empty."""
+    _install_shared_fake_device(monkeypatch, size_bytes=64 * 1024)
+    path = "/tmp/raw-block-compress-corrupt"
+    core1 = _make_raw_block_core(
+        device_path=path,
+        meta_checkpoint_compression="zlib",
+        capacity_bytes=64 * 1024,
+        meta_total_bytes=16 * 1024,
+        load_checkpoint_on_init=False,
+    )
+    try:
+        # _write_checkpoint is the only way to plant a payload that passes CRC
+        # (computed over the stored bytes) yet has a tagged body that cannot be
+        # inflated; there is no public API for injecting a corrupt checkpoint.
+        core1._write_checkpoint(_CHECKPOINT_COMPRESS_MAGIC + b"garbage", 1)
+    finally:
+        core1.close()
+
+    core2 = _make_raw_block_core(
+        device_path=path,
+        meta_checkpoint_compression="zlib",
+        capacity_bytes=64 * 1024,
+        meta_total_bytes=16 * 1024,
+    )
+    try:
+        assert core2.indexed_key_count() == 0
+    finally:
+        core2.close()

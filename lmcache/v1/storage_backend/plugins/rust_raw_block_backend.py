@@ -20,6 +20,7 @@ from lmcache.v1.storage_backend.abstract_backend import (
     StoragePluginInterface,
 )
 from lmcache.v1.storage_backend.raw_block import (
+    DEFAULT_CHECKPOINT_COMPRESSION,
     DEFAULT_IOURING_QUEUE_DEPTH,
     RawBlockCore,
     RawBlockCoreConfig,
@@ -28,6 +29,7 @@ from lmcache.v1.storage_backend.raw_block import (
     encode_legacy_key,
     normalize_raw_block_io_engine,
     round_up,
+    validate_checkpoint_compression,
     validate_raw_block_io_options,
 )
 
@@ -314,6 +316,14 @@ class RustRawBlockBackend(StoragePluginInterface):
             io_engine=io_engine,
             iouring_queue_depth=iouring_queue_depth,
             use_uring_cmd=use_uring_cmd,
+            meta_checkpoint_compression=validate_checkpoint_compression(
+                str(
+                    extra.get(
+                        "rust_raw_block.meta_checkpoint_compression",
+                        DEFAULT_CHECKPOINT_COMPRESSION,
+                    )
+                )
+            ),
         )
 
     def _warn_if_loaded_metadata_looks_cross_rank(self) -> None:
