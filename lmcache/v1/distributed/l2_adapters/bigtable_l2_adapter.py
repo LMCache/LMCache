@@ -76,7 +76,7 @@ def _object_key_to_string(key: ObjectKey) -> str:
     return base
 
 
-def _is_connection_error(exc: Exception) -> bool:
+def _is_connection_error(exc: BaseException) -> bool:
     """Check if the given exception is a connection-class error."""
     return isinstance(
         exc,
@@ -634,7 +634,7 @@ class BigtableL2Adapter(L2AdapterInterface):
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
-    def _record_connection_outcome(self, exc: Optional[Exception]) -> None:
+    def _record_connection_outcome(self, exc: Optional[BaseException]) -> None:
         """Update circuit breaker status based on operation outcome."""
         with self._lock:
             if exc is None:
@@ -681,7 +681,7 @@ class BigtableL2Adapter(L2AdapterInterface):
         bytes_transferred = 0
         newly_stored_keys = []
         newly_stored_sizes = []
-        last_error: Optional[Exception] = None
+        last_error: Optional[BaseException] = None
 
         try:
             table = await self._get_table()
@@ -940,7 +940,7 @@ class BigtableL2Adapter(L2AdapterInterface):
 
             if futures:
                 results = await asyncio.gather(*futures, return_exceptions=True)
-                last_error = None
+                last_error: Optional[BaseException] = None
                 any_success = False
 
                 for (idx, key, key_str), result in zip(indexed, results, strict=True):
@@ -1041,7 +1041,7 @@ class BigtableL2Adapter(L2AdapterInterface):
 
             if futures:
                 results = await asyncio.gather(*futures, return_exceptions=True)
-                last_error = None
+                last_error: Optional[BaseException] = None
                 any_success = False
 
                 for (idx, key, key_str, obj), result in zip(

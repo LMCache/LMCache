@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, List, Optional, cast
-
 # Standard
 from enum import IntEnum, auto
+from typing import Any, List, Optional, cast
 import asyncio
 import inspect
 

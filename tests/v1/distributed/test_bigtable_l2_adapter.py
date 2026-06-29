@@ -4,9 +4,9 @@ Unit tests for BigtableL2Adapter.
 """
 
 # Standard
-import asyncio
 from contextvars import ContextVar
 from unittest import mock
+import asyncio
 import threading
 import time
 
