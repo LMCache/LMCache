@@ -70,6 +70,12 @@ spec:
   # -- Logging --
   # logLevel: INFO                # DEBUG | INFO | WARNING | ERROR
 
+  # -- Security --
+  # Run the engine container in privileged mode. Defaults to false. Set to true
+  # only on clusters where the engine cannot see the node GPUs otherwise
+  # (runtimeClassName: nvidia + NVIDIA_VISIBLE_DEVICES=all is enough on most).
+  # privileged: false
+
 # ---------------------------------------------------------------------------
 # To enable CacheBlend on a vLLM pod, label it for the webhook and annotate it
 # with this engine's name. The pod (and this engine) must run in a namespace
