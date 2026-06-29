@@ -123,7 +123,8 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
             ValueError: If slot_mapping is missing from kwargs.
             AssertionError: If memory_obj has no tensor.
         """
-        assert memory_obj.tensor is not None
+        tensor = memory_obj.tensor
+        assert tensor is not None
 
         self.initialize_kvcaches_ptr(**kwargs)
         assert self.kvcaches is not None
@@ -143,7 +144,7 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
             return
         if try_native_to_gpu(
             use_mla=self.use_mla,
-            memory_tensor=memory_obj.tensor,
+            memory_tensor=tensor,
             kvcaches=self.kvcaches,
             slot_mapping=slot_mapping,
             start=start,
@@ -160,15 +161,15 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
         )
 
         if self.use_mla:
-            tmp = memory_obj.tensor[0].to(self.device, non_blocking=True)
+            tmp = tensor[0].to(self.device, non_blocking=True)
             total_blocks = self.num_blocks * self.block_size
             for i, kvcache in enumerate(self.kvcaches):
                 kvcache.view(total_blocks, self.head_size).index_copy_(
                     0, slices, tmp[i, skip_prefix_n_tokens:]
                 )
         else:
-            tmp_k = memory_obj.tensor[0].to(self.device, non_blocking=True)
-            tmp_v = memory_obj.tensor[1].to(self.device, non_blocking=True)
+            tmp_k = tensor[0].to(self.device, non_blocking=True)
+            tmp_v = tensor[1].to(self.device, non_blocking=True)
             total_blocks = self.num_blocks * self.block_size
             d = self.num_heads * self.head_size
             for i, (kcache, vcache) in enumerate(self.kvcaches):
@@ -197,7 +198,8 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
             ValueError: If slot_mapping is missing from kwargs.
             AssertionError: If memory_obj has no tensor.
         """
-        assert memory_obj.tensor is not None
+        tensor = memory_obj.tensor
+        assert tensor is not None
 
         self.initialize_kvcaches_ptr(**kwargs)
         assert self.kvcaches is not None
@@ -215,7 +217,7 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
             return
         if try_native_from_gpu(
             use_mla=self.use_mla,
-            memory_tensor=memory_obj.tensor,
+            memory_tensor=tensor,
             kvcaches=self.kvcaches,
             slot_mapping=slot_mapping,
             start=start,
@@ -224,7 +226,7 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
             num_heads=self.num_heads,
             head_size=self.head_size,
         ):
-            if memory_obj.tensor.device.type != "musa" and hasattr(torch, "musa"):
+            if tensor.device.type != "musa" and hasattr(torch, "musa"):
                 torch.musa.synchronize()  # type: ignore[attr-defined]
             if self.use_mla:
                 memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
@@ -258,9 +260,9 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
                 ]
             )
             tmp = torch.stack([tmp_k, tmp_v])
-        memory_obj.tensor.copy_(tmp, non_blocking=True)
+        tensor.copy_(tmp, non_blocking=True)
 
-        if memory_obj.tensor.device.type != "musa":
+        if tensor.device.type != "musa":
             torch.musa.synchronize()  # type: ignore[attr-defined]
 
         if self.use_mla:
