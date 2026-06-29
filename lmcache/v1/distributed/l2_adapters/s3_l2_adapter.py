@@ -114,12 +114,20 @@ def _string_to_object_key(name: str) -> ObjectKey:
 
 def _parse_list_response_xml(
     body: bytes,
+    key_prefix: str = "",
 ) -> tuple[list[tuple[ObjectKey, int]], Optional[str]]:
     """Parse a ListObjectsV2 XML response into ``(entries, next_token)``.
 
     Entries this adapter can't parse (foreign objects in the bucket)
     are skipped silently. ``next_token`` is ``None`` when the listing
     is not truncated.
+
+    Args:
+        body: The raw ListObjectsV2 XML response.
+        key_prefix: The configured object-name prefix (e.g. ``'myprefix/'``).
+            S3 returns keys with this prefix attached; it is stripped before
+            decoding so the listing yields the original object names. Keys that
+            do not carry the prefix are treated as foreign and skipped.
 
     Raises:
         ValueError: the response body is not valid XML.
@@ -141,8 +149,14 @@ def _parse_list_response_xml(
         size_elem = contents.find("Size")
         if key_elem is None or key_elem.text is None:
             continue
+        name = key_elem.text
+        if key_prefix:
+            if not name.startswith(key_prefix):
+                # Outside this adapter's prefix namespace — foreign object.
+                continue
+            name = name[len(key_prefix) :]
         try:
-            obj_key = _string_to_object_key(key_elem.text)
+            obj_key = _string_to_object_key(name)
         except ValueError as exc:
             logger.debug(
                 "Skipping unparsable S3 object %r in listing: %s", key_elem.text, exc
@@ -188,9 +202,60 @@ def _object_key_to_string(key: ObjectKey) -> str:
     return base
 
 
-def _format_safe_path(key_str: str) -> str:
-    """URL-encode the object name to form a safe HTTP path."""
-    return "/" + url_quote(key_str)
+def _compute_s3_addressing(
+    endpoint: str, bucket: Optional[str], prefix: Optional[str]
+) -> tuple[str, str, str]:
+    """Resolve the S3 host, bucket path segment, and object-name prefix.
+
+    Two addressing styles are supported:
+
+    - **Virtual-hosted** (``bucket`` unset): the bucket is part of the host,
+      e.g. ``endpoint='s3://<bucket>.<host>'``. Requests target
+      ``Host: <bucket>.<host>`` with object path ``/<object>``.
+    - **Path-style** (``bucket`` set): the bucket is the first path segment,
+      e.g. ``endpoint='s3://<host>'`` with ``bucket='<bucket>'``. Requests
+      target ``Host: <host>`` with object path ``/<bucket>/<object>``. This is
+      required by most self-hosted / S3-compatible endpoints (MinIO, Dell ECS),
+      which cannot resolve a bucket folded into a custom host.
+
+    ``prefix`` (optional) nests every object under a sub-directory and applies
+    to both styles, so the object path becomes ``.../<prefix>/<object>``.
+
+    Args:
+        endpoint: The configured ``s3_endpoint`` (with or without the
+            ``s3://`` scheme).
+        bucket: Optional bucket name for path-style addressing.
+        prefix: Optional key prefix (sub-directory) for stored objects.
+
+    Returns:
+        ``(host, bucket_path, key_prefix)`` where ``host`` is the bare host for
+        the ``Host`` header, ``bucket_path`` is ``''`` or ``'/<bucket>'``
+        (URL-encoded, no trailing slash), and ``key_prefix`` is ``''`` or
+        ``'<prefix>/'`` (raw, trailing slash) to prepend to object names.
+    """
+    host = endpoint
+    if host.startswith("s3://"):
+        host = host[len("s3://") :]
+    host = host.rstrip("/")
+
+    bucket_path = ""
+    if bucket:
+        bucket_path = "/" + url_quote(bucket.strip("/"), safe="/")
+
+    key_prefix = ""
+    if prefix:
+        key_prefix = prefix.strip("/") + "/"
+
+    return host, bucket_path, key_prefix
+
+
+def _format_object_path(bucket_path: str, key_prefix: str, key_str: str) -> str:
+    """Build the request path for an object given addressing components.
+
+    The object name is URL-encoded; ``bucket_path`` and ``key_prefix`` slashes
+    are preserved so path-style and prefixed layouts stay valid.
+    """
+    return bucket_path + "/" + url_quote(key_prefix + key_str)
 
 
 def _make_credentials_provider(
@@ -309,11 +374,21 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
     """Config for the S3 L2 adapter.
 
     Fields:
-    - s3_endpoint (str, required): bucket URL using **virtual-hosted**
-      style; accepts either ``"s3://<bucket>.<host>"`` or the bare
-      ``"<bucket>.<host>"`` form. The bucket name must be part of the
-      host because requests are signed and routed against this Host
-      header (path-style addressing is not supported).
+    - s3_endpoint (str, required): bucket/host URL, with or without the
+      ``s3://`` scheme. Two addressing styles are supported:
+      * **Virtual-hosted** (default, ``s3_bucket`` unset): the bucket is
+        part of the host, e.g. ``"s3://<bucket>.<host>"``.
+      * **Path-style** (``s3_bucket`` set): the endpoint is the bare host,
+        e.g. ``"s3://<host>"``, and the bucket is sent as the first path
+        segment. Required by most self-hosted / S3-compatible endpoints
+        (MinIO, Dell ECS) that cannot resolve a bucket folded into a custom
+        host.
+    - s3_bucket (str, optional): bucket name for path-style addressing.
+      When set, requests target ``Host: <host>`` with path
+      ``/<bucket>/<object>``.
+    - s3_prefix (str, optional): key prefix (sub-directory) under which all
+      objects are stored, e.g. ``"lmcache"`` → ``.../<prefix>/<object>``.
+      Applies to both addressing styles.
     - s3_region (str, required): AWS region used for SigV4.
     - s3_num_io_threads (int): CRT IO threads.
     - s3_prefer_http2 (bool): ALPN negotiate to HTTP/2.
@@ -333,6 +408,8 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         self,
         s3_endpoint: str,
         s3_region: str,
+        s3_bucket: Optional[str] = None,
+        s3_prefix: Optional[str] = None,
         s3_num_io_threads: int = 64,
         s3_prefer_http2: bool = True,
         s3_enable_s3express: bool = False,
@@ -342,6 +419,8 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         max_capacity_gb: float = 0.0,
     ):
         self.s3_endpoint = s3_endpoint
+        self.s3_bucket = s3_bucket
+        self.s3_prefix = s3_prefix
         self.s3_region = s3_region
         self.s3_num_io_threads = s3_num_io_threads
         self.s3_prefer_http2 = s3_prefer_http2
@@ -386,6 +465,8 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
 
         cfg = cls(
             s3_endpoint=endpoint,
+            s3_bucket=_opt_str("s3_bucket"),
+            s3_prefix=_opt_str("s3_prefix"),
             s3_region=region,
             s3_num_io_threads=_int("s3_num_io_threads", 64),
             s3_prefer_http2=_bool("s3_prefer_http2", True),
@@ -402,8 +483,12 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
     def help(cls) -> str:
         return (
             "S3 L2 adapter config fields:\n"
-            "- s3_endpoint (str, required): virtual-hosted bucket URL "
-            "('s3://<bucket>.<host>' or '<bucket>.<host>')\n"
+            "- s3_endpoint (str, required): bucket/host URL. Virtual-hosted "
+            "('s3://<bucket>.<host>') by default, or the bare host "
+            "('s3://<host>') when s3_bucket is set for path-style addressing\n"
+            "- s3_bucket (str): bucket name for path-style addressing "
+            "(self-hosted S3 such as MinIO / Dell ECS)\n"
+            "- s3_prefix (str): key prefix (sub-directory) for stored objects\n"
             "- s3_region (str, required): AWS region for SigV4\n"
             "- s3_num_io_threads (int): CRT IO threads (default 64)\n"
             "- s3_prefer_http2 (bool): try HTTP/2 via ALPN (default true)\n"
@@ -446,10 +531,12 @@ class S3L2Adapter(L2AdapterInterface):
         super().__init__(max_capacity_bytes=int(config.max_capacity_gb * (1024**3)))
         self._config = config
 
-        endpoint = config.s3_endpoint
-        if endpoint.startswith("s3://"):
-            endpoint = endpoint[len("s3://") :]
-        self._endpoint = endpoint
+        # Resolve host / bucket-path / object-prefix for the configured
+        # addressing style (virtual-hosted by default, path-style when
+        # ``s3_bucket`` is set). See ``_compute_s3_addressing``.
+        self._endpoint, self._bucket_path, self._key_prefix = _compute_s3_addressing(
+            config.s3_endpoint, config.s3_bucket, config.s3_prefix
+        )
         self._region = config.s3_region
         self._enable_s3express = config.s3_enable_s3express
 
@@ -838,7 +925,7 @@ class S3L2Adapter(L2AdapterInterface):
                 headers.add(k, v)
         return HttpRequest(
             method,
-            _format_safe_path(key_str),
+            _format_object_path(self._bucket_path, self._key_prefix, key_str),
             headers,
             body_stream=body_stream,
         )
@@ -967,13 +1054,16 @@ class S3L2Adapter(L2AdapterInterface):
             ("list-type", "2"),
             ("max-keys", str(max_keys)),
         ]
-        if prefix:
-            params.append(("prefix", prefix))
+        # Restrict the listing to this adapter's object-name prefix so a
+        # shared/path-style bucket only returns our keys.
+        effective_prefix = self._key_prefix + (prefix or "")
+        if effective_prefix:
+            params.append(("prefix", effective_prefix))
         if continuation_token:
             params.append(("continuation-token", continuation_token))
         # urlencode handles percent-escaping of values (continuation
         # tokens are typically base64 with ``+``/``/``/``=`` chars).
-        path = "/?" + urlencode(params, quote_via=url_quote)
+        path = self._bucket_path + "/?" + urlencode(params, quote_via=url_quote)
 
         headers = HttpHeaders()
         headers.add("Host", self._endpoint)
@@ -1238,7 +1328,7 @@ class S3L2Adapter(L2AdapterInterface):
             prefix, max_keys, continuation_token
         )
         await asyncio.wrap_future(s3_req.finished_future)
-        return _parse_list_response_xml(b"".join(body_chunks))
+        return _parse_list_response_xml(b"".join(body_chunks), self._key_prefix)
 
     async def _execute_delete(
         self, keys: list[ObjectKey]

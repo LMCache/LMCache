@@ -263,8 +263,9 @@ Costs:
 ### Filtering
 
 The only supported filter is **`model_name`**, pushed down as
-`prefix=<flattened_model_name>@`. Flattening (`/` → `_`) is applied
-so the prefix matches the form `_format_safe_path` stored on S3.
+`prefix=<key_prefix><flattened_model_name>@`, where `<key_prefix>` is the
+optional configured `s3_prefix` (empty by default). Flattening (`/` → `_`)
+is applied so the prefix matches the form `_format_object_path` stores on S3.
 `cache_salt` is intentionally NOT a filter parameter — it sits at the
 *end* of the key and can't be expressed as an S3 prefix, so filtering
 it would only narrow client-side without reducing the RTTs. If a
@@ -292,10 +293,24 @@ parser skips entries it can't decode.
 ### `/` in `model_name` is stored verbatim
 
 The adapter stores objects under their literal `_object_key_to_string`
-output — no path-flattening. `_format_safe_path` only URL-encodes the
-HTTP path (`/` stays as `/` in the URL, `@` becomes `%40`). S3 accepts
+output — no path-flattening. `_format_object_path` only URL-encodes the
+HTTP path (`/` stays as `/` in the URL, `@` becomes `%40`), optionally
+prepending the configured `s3_prefix` and, for path-style addressing
+(`s3_bucket` set), the bucket as the leading path segment. S3 accepts
 `/` in object keys as a legal character (it's only the AWS console
 that treats `/` as a virtual-folder delimiter — purely cosmetic).
+
+### Addressing styles (virtual-hosted vs path-style)
+
+By default the adapter uses **virtual-hosted** addressing: the bucket is
+part of the host (`s3_endpoint="s3://<bucket>.<host>"`), and the object
+path is `/<object>`. Setting **`s3_bucket`** switches to **path-style**
+addressing: `s3_endpoint` is the bare host, `Host:` is that host, and the
+bucket rides as the first path segment (`/<bucket>/<object>`). Path-style
+is required by most self-hosted / S3-compatible endpoints (MinIO, Dell ECS)
+that cannot resolve a bucket folded into a custom host. `s3_prefix` nests
+all objects under a sub-directory in either style. The resolution lives in
+`_compute_s3_addressing`.
 
 Round-trip example:
 
