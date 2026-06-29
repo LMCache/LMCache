@@ -7,6 +7,7 @@ Usage::
 """
 
 # Standard
+from typing import TYPE_CHECKING
 import argparse
 import json
 import sys
@@ -15,7 +16,10 @@ import urllib.request
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
-from lmcache.cli.metrics import Metrics
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.cli.metrics import Metrics
 
 # -------------------------------------------------------------------
 # Shared helpers
@@ -102,7 +106,7 @@ class KVCacheDescriber:
     about it.
     """
 
-    def __init__(self, metrics: Metrics, data: dict, base_url: str) -> None:
+    def __init__(self, metrics: "Metrics", data: dict, base_url: str) -> None:
         self.metrics = metrics
         self.data = data
         self.base_url = base_url
