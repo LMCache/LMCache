@@ -1450,8 +1450,9 @@ class BlendV3Module(InstanceLivenessTarget):
                 ``old_st`` to new position ``cur_st``.
 
         Raises:
-            RuntimeError: On a compressed (compress_ratio != 1) or MLA
-                (kv_size != 2) layout, or a head_size/hidden_dim mismatch.
+            RuntimeError: On a compressed (compress_ratio != 1) layout, a
+                kv_size other than 2 (K/V) or 1 (key-only index), or a
+                head_size/hidden_dim mismatch.
         """
         if not slots_to_rope:
             return
@@ -1472,15 +1473,19 @@ class BlendV3Module(InstanceLivenessTarget):
             kv_size = all_slots[0].shape[0]
             # Fused blocks-first K/V pack K+V into a doubled head dim
             # (kv_size==1); detect so only the K half is re-RoPE'd in place.
+            # kv_size==1 without fused packing is the M3 key-only index side
+            # cache; kv_size==2 is main K/V. In every case only the K plane
+            # (tmp[0]) is re-RoPE'd below.
             _ekf = getattr(group, "engine_kv_format", None)
             fused_packed = _ekf is not None and int(_ekf) in (
                 int(lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
                 int(lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS),
             )
-            if kv_size != 2 and not fused_packed:
+            if kv_size not in (1, 2):
                 raise RuntimeError(
-                    f"CB v3: group {group_idx} has kv_size={kv_size}; only K/V (2) "
-                    "and fused-packed K/V layouts are supported (MLA unsupported)."
+                    f"CB v3: group {group_idx} has kv_size={kv_size}; only K/V "
+                    "(2), fused-packed K/V, and key-only (1) layouts are "
+                    "supported (MLA unsupported)."
                 )
             num_layers, slots, hidden_dim = all_slots[0].shape[1:]
             # Fused-packed: per-head width is 2*head_size; only K is rotated.
