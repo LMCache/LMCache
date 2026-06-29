@@ -379,3 +379,26 @@ flag as needed.
 
 Commands print errors to stderr and return exit code 1. The dispatcher catches
 exceptions from `args.func(args)` and prints a clean error message.
+
+### Shared HTTP helper (`lmcache/cli/http.py`)
+
+Client commands that talk to an LMCache-side HTTP server share one module
+instead of each re-implementing the same `urllib` boilerplate (which had
+drifted across commands and coupled `ping` to `describe`). It provides:
+
+- `normalize_url(url)` — add an `http://` scheme if missing and strip trailing
+  slashes. (`describe` and `quota._helpers` re-export it for backward
+  compatibility.)
+- `DEFAULT_URLS` — default base URLs keyed by target (`kvcache`, `engine`).
+- `request_json(method, url, *, data=None, timeout=10.0)` — send a request with
+  an optional JSON body and return the parsed JSON response.
+- `CliHttpError` — raised by `request_json` on any HTTP/connection failure,
+  carrying `status` (`None` for connection-level errors), `reason`, and the
+  decoded error `body`.
+
+Each command keeps its own *presentation* of failures (e.g. `describe` raises
+`DescribeError`; `kvcache`/`quota` log and `sys.exit(1)`) by catching
+`CliHttpError` and mapping it; only the transport is shared. `ping` keeps its
+own status-based (non-JSON) probe but uses the shared `normalize_url` /
+`DEFAULT_URLS`. The bench `_normalize_url` (which also appends `/v1`) is left
+separate by design.

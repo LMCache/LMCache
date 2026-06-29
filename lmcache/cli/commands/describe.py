@@ -10,11 +10,13 @@ Usage::
 import argparse
 import json
 import sys
-import urllib.error
-import urllib.request
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
+
+# ``normalize_url`` is imported (and thus still importable from this module
+# for backward compatibility); it now lives in the shared CLI HTTP module.
+from lmcache.cli.http import CliHttpError, normalize_url, request_json
 from lmcache.cli.metrics import Metrics
 
 # -------------------------------------------------------------------
@@ -26,36 +28,24 @@ class DescribeError(Exception):
     """Raised when the describe command cannot fetch or parse status data."""
 
 
-def normalize_url(url: str) -> str:
-    """Ensure *url* has an ``http://`` or ``https://`` scheme."""
-    if not url.startswith(("http://", "https://")):
-        url = f"http://{url}"
-    return url.rstrip("/")
-
-
 def fetch_json(url: str, timeout: int = 10) -> dict:
     """GET *url* and return the parsed JSON body.
 
     Raises:
         DescribeError: On network/HTTP errors.
     """
-    req = urllib.request.Request(url)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as exc:
-        if exc.code == 503:
-            body = exc.read().decode()
+        return request_json("GET", url, timeout=timeout)
+    except CliHttpError as exc:
+        if exc.status == 503 and exc.body is not None:
             try:
-                detail = json.loads(body).get("error", body)
+                detail = json.loads(exc.body).get("error", exc.body)
             except (json.JSONDecodeError, AttributeError):
-                detail = body
+                detail = exc.body
             raise DescribeError(f"Server unhealthy: {detail}") from exc
-        raise DescribeError(f"HTTP {exc.code} from {url}: {exc.reason}") from exc
-    except urllib.error.URLError as exc:
+        if exc.status is not None:
+            raise DescribeError(f"HTTP {exc.status} from {url}: {exc.reason}") from exc
         raise DescribeError(f"Cannot connect to {url}: {exc.reason}") from exc
-    except OSError as exc:
-        raise DescribeError(f"Cannot connect to {url}: {exc}") from exc
 
 
 def fmt_bytes(n: int) -> str:
