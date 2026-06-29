@@ -72,11 +72,7 @@ msgid ""
 "path. Currently only ``\"by_gpu\"`` is supported (the default), which "
 "selects a path based on the device index (``device_id % num_paths``), so "
 "traffic is spread evenly across the drives without any manual pinning."
-msgstr ""
-"当系统有多个 NVMe 驱动器时，可以通过在 ``gds_path`` 中指定以逗号分隔的路径列表来分配 GDS "
-"I/O。``gds_path_sharding`` 选项控制每个 GPU 工作线程如何选择其路径。目前仅支持 "
-"``\"by_gpu\"``（默认），该选项根据设备索引（``device_id % "
-"num_paths``）选择路径，因此流量在驱动器之间均匀分配，无需手动固定。"
+msgstr "当系统有多个 NVMe 驱动器时，可以通过在 ``gds_path`` 中指定以逗号分隔的路径列表来分配 GDS I/O。\\ ``gds_path_sharding`` 选项控制每个 GPU 工作线程如何选择其路径。目前仅支持 ``\"by_gpu\"``\\ （默认），该选项根据设备索引（\\ ``device_id % num_paths``\\ ）选择路径，因此流量在驱动器之间均匀分配，无需手动固定。"
 
 #: ../../source/kv_cache/storage_backends/gds.rst:61
 msgid ""
@@ -120,9 +116,7 @@ msgid ""
 "If there are more GPUs than paths, the assignment wraps around (e.g. "
 "``cuda:4`` maps back to ``/mnt/nvme0/cache``). A single path (no commas) "
 "works exactly as before."
-msgstr ""
-"如果 GPU 的数量超过路径数量，则分配会循环（例如，``cuda:4`` 映射回 "
-"``/mnt/nvme0/cache``）。单个路径（没有逗号）与之前的工作方式完全相同。"
+msgstr "如果 GPU 的数量超过路径数量，则分配会循环（例如，\\ ``cuda:4`` 映射回 ``/mnt/nvme0/cache``\\ ）。单个路径（没有逗号）与之前的工作方式完全相同。"
 
 #: ../../source/kv_cache/storage_backends/gds.rst:90
 msgid ""
@@ -159,10 +153,7 @@ msgid ""
 "has 80GiBs of VRAM would be to start with 8GiB and set ``--gpu-memory-"
 "utilization 0.85`` and depending on your workflow fine-tune it from "
 "there."
-msgstr ""
-"后端目前预先注册缓冲区空间以加速 GDS 操作。此缓冲区空间在显存中注册，因此在设置时应考虑 ``--gpu-memory-"
-"utilization`` 等来自 ``vllm`` 的选项。例如，对于通常具有 80GiB 显存的 H100，一个好的经验法则是从 8GiB "
-"开始，并设置 ``--gpu-memory-utilization 0.85``，然后根据您的工作流程进行微调。"
+msgstr "后端目前预先注册缓冲区空间以加速 GDS 操作。此缓冲区空间在显存中注册，因此在设置时应考虑 ``--gpu-memory-utilization`` 选项，例如来自 ``vllm`` 的选项。例如，对于通常具有 80GiB 显存的 H100，一个好的经验法则是从 8GiB 开始，并设置 ``--gpu-memory-utilization 0.85``，然后根据您的工作流程进行微调。"
 
 #: ../../source/kv_cache/storage_backends/gds.rst:120
 msgid "Using AMD hipFile"
@@ -179,7 +170,7 @@ msgstr "hipFile 是 alpha 版软件，仅在有限的硬件上进行了测试。
 #: ../../source/kv_cache/storage_backends/gds.rst:128
 #: ../../source/kv_cache/storage_backends/gds.rst:179
 msgid "**Prerequisites:**"
-msgstr "**先决条件：**"
+msgstr "**前提条件：**"
 
 #: ../../source/kv_cache/storage_backends/gds.rst:130
 msgid ""
@@ -217,9 +208,7 @@ msgstr "您可以通过运行以下命令来验证 HIP 库和内核是否支持 
 msgid ""
 "Successful output will show ``True`` for ``Kernel P2PDMA support``, ``HIP"
 " runtime``, and ``amdgpu``."
-msgstr ""
-"成功的输出将显示 ``Kernel P2PDMA support``、``HIP runtime`` 和 ``amdgpu`` 的值为 "
-"``True``。"
+msgstr "成功的输出将显示 ``Kernel P2PDMA support``\\ 、\\ ``HIP runtime`` 和 ``amdgpu`` 的值为 ``True``\\ 。"
 
 #: ../../source/kv_cache/storage_backends/gds.rst:155
 msgid "**LMCache configuration:**"
@@ -241,7 +230,7 @@ msgstr "**配置文件：**"
 msgid ""
 "Note: The ``gds_buffer_size`` configuration is used for both cuFile and "
 "hipFile buffers."
-msgstr "注意：``gds_buffer_size`` 配置用于 cuFile 和 hipFile 缓冲区。"
+msgstr "注意：\\ ``gds_buffer_size`` 配置用于 cuFile 和 hipFile 缓冲区。"
 
 #: ../../source/kv_cache/storage_backends/gds.rst:175
 msgid "Setup Example"
@@ -251,7 +240,7 @@ msgstr "设置示例"
 msgid ""
 "A Machine with at least one GPU. You can adjust the max model length of "
 "your vllm instance depending on your GPU memory."
-msgstr "一台至少配备一块 GPU 的机器。您可以根据您的显存调整 vllm 实例的最大模型长度。"
+msgstr "一台至少配备一个 GPU 的机器。您可以根据您的显存调整 vllm 实例的最大模型长度。"
 
 #: ../../source/kv_cache/storage_backends/gds.rst:183
 msgid "A mounted file system. A file system supportings GDS will work best."
@@ -346,9 +335,7 @@ msgid ""
 "The ``gds_backend`` field (default: ``cufile``) selects which GDS library"
 " to use. Supported backends are ``cufile`` (NVIDIA cuFile) and "
 "``hipfile`` (AMD hipFile):"
-msgstr ""
-"``gds_backend`` 字段（默认值：``cufile``）用于选择使用哪个 GDS 库。支持的后端有 ``cufile``（NVIDIA"
-" cuFile）和 ``hipfile``（AMD hipFile）："
+msgstr "``gds_backend`` 字段（默认值：\\ ``cufile``\\ ）用于选择使用哪个 GDS 库。支持的后端有 ``cufile``\\ （NVIDIA cuFile）和 ``hipfile``\\ （AMD hipFile）："
 
 #: ../../source/kv_cache/storage_backends/gds.rst:270
 msgid ""

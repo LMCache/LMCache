@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/recipes/index.rst:4
 msgid "Recipes"
-msgstr "使用指南"
+msgstr "配置示例"
 
 #: ../../source/recipes/index.rst:6
 msgid ""
@@ -30,18 +30,18 @@ msgid ""
 "configuration that diverges from defaults. Engine-side documentation (how"
 " to serve the model itself) lives with the serving engine; recipe pages "
 "link out rather than duplicate."
-msgstr "本节列出了通过 LMCache 验证的端到端模型架构，每个架构都有一个食谱页面，仅涵盖与默认值不同的 LMCache 特定配置。引擎端文档（如何提供模型本身）与服务引擎一起存在；食谱页面链接到外部，而不是重复内容。"
+msgstr "本节列出了通过 LMCache 端到端验证的模型架构，每个架构均有一个对应的配置示例页面，仅涵盖与默认值不同的 LMCache 特定配置。引擎端文档（如何部署模型本身）随服务引擎维护；配置示例页面提供外部链接，不重复已有内容。"
 
 #: ../../source/recipes/index.rst:12
 msgid ""
 "For the generic LMCache + engine wiring (ports, remote hosts, sending a "
 "first request), see :doc:`../getting_started/quickstart` -- recipes "
 "assume that page as a prerequisite."
-msgstr "有关通用的 LMCache + 引擎连接（端口、远程主机、发送第一个请求），请参见 :doc:`../getting_started/quickstart` -- 配方假设该页面为前提条件。"
+msgstr "有关通用的 LMCache + 引擎连接配置（端口、远程主机、发送第一个请求），请参见 :doc:`../getting_started/quickstart` —— 各配置示例页面均以该文档为前提。"
 
 #: ../../source/recipes/index.rst:16
 msgid "Recipes are grouped by attention architecture:"
-msgstr "食谱按注意力架构分组："
+msgstr "配置示例按注意力架构分组："
 
 #~ msgid ""
 #~ "Engine-side documentation (how to serve"

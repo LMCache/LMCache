@@ -91,7 +91,7 @@ msgstr "有关更多详细信息，请参阅 :ref:`share_kv_cache`。"
 
 #: ../../source/getting_started/quickstart/index.rst:33
 msgid "Disaggregated Prefill"
-msgstr "分离式 Prefill"
+msgstr "分离式预填充"
 
 #: ../../source/getting_started/quickstart/index.rst:35
 msgid ""
@@ -133,7 +133,7 @@ msgid ""
 "The LMCache Standalone Starter allows you to run LMCacheEngine as a "
 "standalone service without vLLM or GPU dependencies. This is particularly"
 " useful for:"
-msgstr "LMCache 独立启动器允许您将 LMCacheEngine 作为独立服务运行，而无需 vLLM 或 GPU 依赖。这在以下情况下特别有用："
+msgstr "LMCache 独立启动器允许您将 LMCacheEngine 作为独立服务运行，而无需 vLLM 或 GPU 依赖。这对于以下情况特别有用："
 
 #: ../../source/getting_started/quickstart/index.rst:50
 msgid "Testing and development environments"

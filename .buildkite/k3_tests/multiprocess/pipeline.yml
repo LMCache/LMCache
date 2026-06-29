@@ -16,6 +16,7 @@ x-flaky-retry: &flaky-retry
 
 steps:
   - group: ":compression: Multiprocess (2-GPU)"
+    if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
     steps:
       - label: ":compression: vllm_bench"
         command: .buildkite/k3_tests/multiprocess/run.sh vllm_bench
@@ -69,6 +70,7 @@ steps:
         artifact_paths: ["*.log"]
 
   - group: ":compression: Multiprocess (1-GPU)"
+    if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
     steps:
       - label: ":compression: lm_eval"
         command: .buildkite/k3_tests/multiprocess/run.sh lm_eval
@@ -198,6 +200,7 @@ steps:
         artifact_paths: ["*.log"]
 
   - group: ":compression: Multiprocess (CPU-only)"
+    if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
     steps:
       - label: ":compression: cpu_e2e_validation (shm)"
         command: bash .github/scripts/run-cpu-e2e-validation.sh
@@ -277,3 +280,36 @@ steps:
                 volumes:
                   - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
                   - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 4Gi } }
+
+  # Canary path for VERIFY_AND_PIN_VLLM=true: skips every real test group
+  # above (each group's `if` evaluates to false) and instead runs a single
+  # vllm_bench step that proves the freshly-installed vLLM nightly works
+  # with LMCache. On success, the verified vllm wheel version is pushed to
+  # the `buildkite_latest_tested_vllm` branch so downstream builds can pin
+  # to a known-good nightly instead of resolving "latest" again.
+  - label: ":pushpin: Verify & pin vLLM nightly"
+    if: build.env("VERIFY_AND_PIN_VLLM") =~ /true/
+    command: |
+      .buildkite/k3_tests/multiprocess/run.sh vllm_bench
+      bash .buildkite/k3_tests/multiprocess/scripts/pin-tested-vllm.sh
+    timeout_in_minutes: 30
+    agents: { queue: "k8s" }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - name: container-0
+                image: lmcache/ci-base:latest
+                imagePullPolicy: Never
+                resources: { limits: { "nvidia.com/gpu": "2" } }
+                env:
+                  - name: GITHUB_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: buildkite-git-creds
+                        key: GITHUB_TOKEN
+                volumeMounts:
+                  - { name: hf-cache, mountPath: /root/.cache/huggingface }
+            volumes:
+              - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+    artifact_paths: ["*.log"]
