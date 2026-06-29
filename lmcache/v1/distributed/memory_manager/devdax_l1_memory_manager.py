@@ -63,6 +63,9 @@ class DevDaxL1MemoryManager(L1MemoryManager):
         Existing callers expect Device-DAX L1 to expose the mapped buffer here.
         Hybrid DRAM + Device-DAX L1 is still rejected by transfer paths that
         require one registerable L1 region via ``l1_exposes_single_memory_region``.
+
+        Returns:
+            The descriptor for the primary L1 buffer.
         """
         allocator = cast(DevDaxMemoryAllocator, self._allocator)
         buffer = allocator.buffer
