@@ -324,6 +324,7 @@ def _run_object_group_transfer_plan(
                 cache_context.get_slots_per_chunk_in_sw(kernel_group_id),
                 cache_context.get_engine_kv_format(kernel_group_id),
                 block_ids_tensor.data_ptr(),
+                block_ids_tensor.numel(),
             )
         )
 

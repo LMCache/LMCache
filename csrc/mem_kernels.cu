@@ -1072,6 +1072,15 @@ void lmcache_memcpy_async_one(uintptr_t dest, uintptr_t src, size_t nbytes,
                               cudaMemcpyKind kind, size_t host_buffer_offset,
                               size_t host_buffer_alignments,
                               cudaStream_t stream) {
+  // Validate alignment here -- the single chokepoint every copy path funnels
+  // through (lmcache_memcpy_async, its batched variant, and
+  // execute_object_group_transfer). The `> 0` guard is essential: for an
+  // unsigned 0, `(0 & (0 - 1)) == 0` passes the power-of-two test, but then
+  // `mask` becomes SIZE_MAX and `max_nbytes` underflows below -- an infinite
+  // loop or an out-of-bounds cudaMemcpyAsync.
+  TORCH_CHECK(host_buffer_alignments > 0 &&
+                  (host_buffer_alignments & (host_buffer_alignments - 1)) == 0,
+              "host_buffer_alignments must be a positive power of two");
   size_t offset = 0;
   const size_t mask = host_buffer_alignments - 1;
 
@@ -1099,10 +1108,7 @@ void lmcache_memcpy_async(uintptr_t dest, uintptr_t src, size_t nbytes,
                           TransferDirection direction,
                           size_t host_buffer_offset,
                           size_t host_buffer_alignments) {
-  // Check that host_buffer_alignments is power of two
-  TORCH_CHECK((host_buffer_alignments & (host_buffer_alignments - 1)) == 0,
-              "host_buffer_alignments must be power of two");
-
+  // host_buffer_alignments is validated in lmcache_memcpy_async_one.
   cudaMemcpyKind kind = (direction == TransferDirection::H2D)
                             ? cudaMemcpyHostToDevice
                             : cudaMemcpyDeviceToHost;
@@ -1139,8 +1145,7 @@ void lmcache_memcpy_async_batched(
     const std::vector<size_t>& nbytes, TransferDirection direction,
     const std::vector<size_t>& host_buffer_offsets,
     size_t host_buffer_alignments) {
-  TORCH_CHECK((host_buffer_alignments & (host_buffer_alignments - 1)) == 0,
-              "host_buffer_alignments must be power of two");
+  // host_buffer_alignments is validated per copy in lmcache_memcpy_async_one.
   const size_t n = dests.size();
   TORCH_CHECK(
       srcs.size() == n && nbytes.size() == n && host_buffer_offsets.size() == n,

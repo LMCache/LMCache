@@ -476,6 +476,21 @@ void execute_object_group_transfer(
                   "LaunchVar.num_objects (", launch.num_objects,
                   ") exceeds available temp buffers (",
                   group.lmcache_objects_ptrs.size(), ")");
+      // Bounds-check the block_ids slice before the kernel dereferences it on
+      // device: an out-of-range offset/length would otherwise be a silent
+      // out-of-bounds device read (CUDA fault or garbage), not a clean error.
+      TORCH_CHECK(launch.block_ids_offset >= 0,
+                  "LaunchVar.block_ids_offset must be non-negative, got ",
+                  launch.block_ids_offset);
+      TORCH_CHECK(launch.total_blocks >= 0,
+                  "LaunchVar.total_blocks must be non-negative, got ",
+                  launch.total_blocks);
+      TORCH_CHECK(
+          launch.block_ids_offset + launch.total_blocks <=
+              group.block_ids_capacity,
+          "LaunchVar block_ids slice [", launch.block_ids_offset, ", ",
+          launch.block_ids_offset + launch.total_blocks,
+          ") exceeds block_ids capacity ", group.block_ids_capacity);
       const uintptr_t block_ids_addr =
           group.block_ids_base +
           static_cast<uintptr_t>(launch.block_ids_offset) * sizeof(int64_t);

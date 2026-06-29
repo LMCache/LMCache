@@ -110,7 +110,9 @@ struct KernelGroupSpec {
   PageBufferShapeDesc shape_desc;
   int lmcache_chunk_size;
   EngineKVFormat engine_kv_format;
-  uintptr_t block_ids_base;  // device int64* base; sliced via block_ids_offset
+  uintptr_t block_ids_base;    // device int64* base; sliced via block_ids_offset
+  int64_t block_ids_capacity;  // total int64 elements behind block_ids_base;
+                               // bounds-checks each slice in the executor
 };
 
 /**
