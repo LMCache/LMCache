@@ -1196,6 +1196,8 @@ class NixlStaticStorageBackend(NixlStorageBackend):
 
         :return: True if the key exists, False otherwise
         """
+        if self.exists_in_put_tasks(key):
+            return False
 
         with self.key_lock:
             if key in self.key_dict:
