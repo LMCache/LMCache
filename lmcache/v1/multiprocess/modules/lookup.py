@@ -71,42 +71,6 @@ def compute_extra_count(
     return tp - 1 if tp > world_size else 0
 
 
-def _get_prefix_hit_length(
-    found_prefix_len: int,
-    world_size: int,
-    num_object_groups: int,
-) -> int:
-    """Return the prefix hit length in chunks.
-
-    The chunk-major key layout packs ``world_size * num_object_groups`` keys per
-    chunk, so a fully-present prefix of ``found_prefix_len`` keys hits
-    ``found_prefix_len // (world_size * num_object_groups)`` chunks.
-
-    Args:
-        found_prefix_len: Length, in keys, of the contiguous found-key prefix.
-        world_size: Number of kv_rank shards per chunk.
-        num_object_groups: Number of object groups in the chunk-major layout.
-
-    Returns:
-        The prefix hit length in chunks (fully-present chunks of the prefix).
-
-    Example (2 object groups ``g0,g1``; 2 kv_ranks ``r0,r1`` -> 4 keys per
-    chunk). A found-key prefix of 6 keys covers one full chunk plus half the
-    next::
-
-        [c0g0r0, c0g0r1, c0g1r0, c0g1r1,   # chunk 0: fully present
-         c1g0r0, c1g0r1]                    # chunk 1: 2 of 4 -> partial, dropped
-
-    so ``found_prefix_len=6`` hits ``6 // (2 * 2) = 1`` whole chunk.
-
-    Note:
-        Correct only under full attention -- every object group present for
-        every hit chunk. Once sliding-window prefetch lands, the hit is no
-        longer a uniform contiguous key prefix and the hit length must come
-        from the fold's reported hit length instead.
-    """
-    return found_prefix_len // (world_size * num_object_groups)
-
 
 @dataclass
 class _PrefetchJob:
@@ -323,12 +287,16 @@ class LookupModule:
         )
         obj_keys = self._chunk_major_object_keys(key, chunk_hashes)
 
+        group_layout_descs = self._ctx.layout_desc_registry.find_group_layout_descs(
+            model_name, world_size
+        )
         handle = self._ctx.storage_manager.submit_prefetch_task(
             obj_keys,
             layout_desc,
             extra_count=extra_count,
             external_request_id=key.request_id,
             attn_desc=attn_desc,
+            group_layout_descs=group_layout_descs,
         )
         self._register_prefetch_job(
             _PrefetchJob(

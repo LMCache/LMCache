@@ -898,12 +898,10 @@ class TestFailureEventProduction:
 
             # Allow drain thread to deliver the event.
             assert wait_for_condition(
-                lambda: (
-                    len(
-                        _events_of_type(captured_events, EventType.L1_ALLOCATION_FAILED)
-                    )
-                    >= 1
-                ),
+                lambda: len(
+                    _events_of_type(captured_events, EventType.L1_ALLOCATION_FAILED)
+                )
+                >= 1,
                 timeout=2.0,
             )
 
@@ -951,9 +949,8 @@ class TestFailureEventProduction:
                 assert objs is None  # all_good=False because middle key is gone
 
             assert wait_for_condition(
-                lambda: (
-                    len(_events_of_type(captured_events, EventType.L1_READ_FAILED)) >= 1
-                ),
+                lambda: len(_events_of_type(captured_events, EventType.L1_READ_FAILED))
+                >= 1,
                 timeout=2.0,
             )
 

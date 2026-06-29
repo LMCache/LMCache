@@ -247,7 +247,7 @@ def _dec_trim_policy(name: str) -> TrimPolicy:
     return TrimPolicy[name]
 
 
-def _enc_attn_window(d: AttnWindowDesc) -> dict:
+def _enc_attn_window(d: AttnWindowDesc) -> dict[str, object]:
     return {
         "num_chunks_in_sw": list(d.num_chunks_in_sw),
         "world_size": d.world_size,
@@ -255,7 +255,7 @@ def _enc_attn_window(d: AttnWindowDesc) -> dict:
     }
 
 
-def _dec_attn_window(raw: dict | list) -> AttnWindowDesc:
+def _dec_attn_window(raw: dict[str, object] | list[int]) -> AttnWindowDesc:
     if isinstance(raw, list):
         return AttnWindowDesc(num_chunks_in_sw=list(raw))
     return AttnWindowDesc(

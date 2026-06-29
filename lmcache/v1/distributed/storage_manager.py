@@ -404,6 +404,7 @@ class StorageManager:
         policy: TrimPolicy = TrimPolicy.PREFIX,
         attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
         skip_l2: bool = False,
+        group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
     ) -> PrefetchHandle:
         """Prefetch objects into L1 asynchronously.
 
@@ -422,6 +423,9 @@ class StorageManager:
                 object-group order.  The embedded ``world_size`` determines the
                 number of kv_rank shards per chunk.
             skip_l2: If True, only check L1 and return without submitting to L2.
+            group_layout_descs: Per-object-group layout descriptors. When
+                separate object groups have different tensor shapes, each
+                group's keys must be allocated with its own layout.
 
         Returns:
             PrefetchHandle to track the task.
@@ -467,6 +471,7 @@ class StorageManager:
                     extra_count=extra_count,
                     policy=TrimPolicy.SPARSE,
                     attn_desc=attn_desc,
+                    group_layout_descs=group_layout_descs,
                 )
             return PrefetchHandle(
                 prefetch_request_id=prefetch_request_id,
@@ -491,6 +496,7 @@ class StorageManager:
                 external_request_id,
                 layout_desc,
                 skip_l2,
+                group_layout_descs=group_layout_descs,
             )
 
     def _submit_prefix_fold(
@@ -502,6 +508,7 @@ class StorageManager:
         external_request_id: str,
         layout_desc: MemoryLayoutDesc,
         skip_l2: bool,
+        group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
     ) -> PrefetchHandle:
         """PREFIX-policy path of :meth:`submit_prefetch_task`.
 
@@ -518,6 +525,7 @@ class StorageManager:
             external_request_id: Caller request id for tracing.
             layout_desc: Memory layout description.
             skip_l2: If True, skip L2 submission even if L2 adapters exist.
+            group_layout_descs: Per-object-group layout descriptors.
 
         Returns:
             A :class:`PrefetchHandle` tracking the L1 retained keys and any
@@ -581,6 +589,7 @@ class StorageManager:
                 extra_count=extra_count,
                 attn_desc=attn_desc,
                 policy=TrimPolicy.PREFIX,
+                group_layout_descs=group_layout_descs,
             )
             l2_orig_indices = tuple(range(l1_key_boundary, len(keys)))
 

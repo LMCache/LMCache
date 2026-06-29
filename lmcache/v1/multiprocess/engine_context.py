@@ -45,6 +45,10 @@ class _LayoutDescEntry:
     attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
     """Cross-chunk attention windows of all object groups, in object-group
     order. Defaults to a single full-attention group."""
+    group_layout_descs: dict[int, MemoryLayoutDesc] | None = None
+    """Per-object-group layout descriptors. When separate object groups are
+    enabled, each group has its own tensor shapes/dtypes.  ``None`` means
+    all groups share the same layout (``layout_desc``)."""
 
 
 class LayoutDescRegistry:
@@ -75,6 +79,7 @@ class LayoutDescRegistry:
         world_size: int,
         layout_desc: MemoryLayoutDesc,
         attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
+        group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
     ) -> None:
         """Register a layout descriptor for a (model_name, world_size) pair.
 
@@ -87,6 +92,10 @@ class LayoutDescRegistry:
             layout_desc: The memory layout descriptor.
             attn_desc: Cross-chunk attention windows of all object groups, in
                 object-group order. Defaults to a single full-attention group.
+            group_layout_descs: Per-object-group layout descriptors. When
+                separate object groups are enabled, each group may have
+                different tensor shapes/dtypes. Pass ``None`` when all groups
+                share the same layout.
         """
         key = (model_name, world_size)
         attn_desc = replace(
@@ -101,11 +110,13 @@ class LayoutDescRegistry:
                     layout_desc=layout_desc,
                     ref_count=1,
                     attn_desc=attn_desc,
+                    group_layout_descs=group_layout_descs,
                 )
                 return
 
             entry.layout_desc = layout_desc
             entry.attn_desc = attn_desc
+            entry.group_layout_descs = group_layout_descs
             entry.ref_count += 1
 
     def unregister(self, model_name: str, world_size: int) -> None:
@@ -145,6 +156,25 @@ class LayoutDescRegistry:
             if entry is None:
                 return None
             return entry.layout_desc
+
+    def find_group_layout_descs(
+        self, model_name: str, world_size: int
+    ) -> dict[int, MemoryLayoutDesc] | None:
+        """Look up per-object-group layout descriptors.
+
+        Args:
+            model_name: The model name.
+            world_size: The world size.
+
+        Returns:
+            Mapping from object-group ID to its layout descriptor, or
+            ``None`` if no per-group layouts were registered.
+        """
+        with self._lock:
+            entry = self._registry.get((model_name, world_size))
+            if entry is None:
+                return None
+            return entry.group_layout_descs
 
     def find_attn_desc(self, model_name: str, world_size: int) -> AttnWindowDesc:
         """Look up the attention-window descriptor for a pair.
