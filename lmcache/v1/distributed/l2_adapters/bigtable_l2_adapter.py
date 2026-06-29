@@ -944,7 +944,9 @@ class BigtableL2Adapter(L2AdapterInterface):
                 any_success = False
 
                 for (idx, key, key_str), result in zip(indexed, results, strict=True):
-                    if isinstance(result, BaseException):
+                    if isinstance(result, asyncio.CancelledError):
+                        raise result
+                    elif isinstance(result, BaseException):
                         last_error = result
                         logger.error(
                             "BigtableL2Adapter lookup failed for %s: %s",
@@ -1045,7 +1047,9 @@ class BigtableL2Adapter(L2AdapterInterface):
                 for (idx, key, key_str, obj), result in zip(
                     indexed, results, strict=True
                 ):
-                    if isinstance(result, BaseException):
+                    if isinstance(result, asyncio.CancelledError):
+                        raise result
+                    elif isinstance(result, BaseException):
                         last_error = result
                         logger.error(
                             "BigtableL2Adapter load failed for %s: %s",
