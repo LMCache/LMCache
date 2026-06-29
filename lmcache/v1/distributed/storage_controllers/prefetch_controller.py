@@ -77,33 +77,22 @@ def build_trim_mask(
     policy: TrimPolicy = TrimPolicy.PREFIX,
     attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
 ) -> tuple[int, Bitmap]:
-    """Subset of ``found`` to keep (load + read-lock + report); the rest is
-    released.
-
-    PREFIX uses the fold/unfold pipeline to compute the sliding-window-aware
-    retain set.  For all-full-attention models this reduces to the contiguous
-    leading-ones prefix.  The non-PREFIX policies keep every set bit, gaps
-    included, and differ only in intent: SEGMENTED_PREFIX keeps the keys that
-    loaded when an L2 hit fails to load into L1 (e.g. OOM) mid-prefix; SPARSE
-    keeps an intentionally scattered set.
+    """Compute the retained subset of found keys and the prefix hit length.
 
     Args:
-        found: Bitmap of found keys, over key indices ``0..num_keys-1``.
+        found: Bitmap of found keys.
         num_keys: Total number of requested keys.
-        policy: Trim policy to apply (see :class:`TrimPolicy`).
-        attn_desc: Per-object-group attention windows for the fold.  The
-            embedded ``world_size`` determines the number of kv_rank shards
-            per chunk.
+        policy: Trim policy to apply.
+        attn_desc: Per-object-group attention windows and world_size.
 
     Returns:
-        ``(hit_length, retain_mask)`` where ``hit_length`` is the prefix hit
-        length in chunks and ``retain_mask`` is the bitmap of retained key
-        indices.
+        ``(hit_length, retain_mask)`` — prefix hit in chunks and retained bitmap.
     """
     if policy is TrimPolicy.PREFIX:
         stride = attn_desc.num_object_groups * attn_desc.world_size
-        num_chunks = num_keys // stride if stride else 0
+        num_chunks = num_keys // stride
         windows = attn_desc.num_chunks_in_sw
+        # Benchmarking flag: treat every group as full-attention.
         if attn_desc.force_retrieve_full_kv:
             windows = [-1] * attn_desc.num_object_groups
         hit_length, retain = fold_unfold_ranked(
@@ -114,7 +103,7 @@ def build_trim_mask(
         )
         return hit_length, retain
     stride = attn_desc.num_object_groups * attn_desc.world_size
-    hit_chunks = found.count_leading_ones() // stride if stride else 0
+    hit_chunks = found.count_leading_ones() // stride
     return hit_chunks, found
 
 
@@ -168,9 +157,7 @@ class InFlightPrefetchRequest:
     """Which retained-subset policy to apply (see :class:`TrimPolicy`)."""
 
     attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
-    """Cross-chunk attention windows of all object groups, in object-group
-    order.  The embedded ``world_size`` gives the number of kv_rank shards
-    per chunk."""
+    """Per-object-group attention windows and world_size."""
     mode: PrefetchMode = PrefetchMode.LOOKUP
     """The prefetch intent (see :class:`PrefetchMode`).  ``WARM`` forces all
     loaded keys permanent and acquires no read lock; ``LOOKUP`` defers
@@ -383,41 +370,17 @@ class PrefetchController(StorageControllerInterface):
         group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
         mode: PrefetchMode = PrefetchMode.LOOKUP,
     ) -> PrefetchRequestId:
-        """
-        Submit a prefetch request for the given keys.
-
-        Thread-safe. Can be called from any thread.
-
-        The retained subset of found keys is chosen by ``policy`` (see
-        :class:`TrimPolicy`).  With the default ``PREFIX`` policy, only the
-        sliding-window-aware prefix of found keys is loaded from L2 (see
-        :func:`fold_unfold_ranked`).  For all-full-attention models this
-        reduces to the contiguous leading-ones prefix.  Keys outside the
-        retained set are never transferred, saving I/O bandwidth and L1
-        memory.  Use :meth:`query_prefetch_result` to retrieve the retained
-        set once the request completes.
+        """Submit a prefetch request for the given keys. Thread-safe.
 
         Args:
-            keys: List of object keys to prefetch from L2 into L1.
-                The ordering defines the prefix: index 0 is the first key.
+            keys: Object keys to prefetch from L2 into L1.
             layout_desc: Memory layout for L1 write buffer allocation.
-            extra_count: Extra read locks per key (on top of the default 1)
-                to acquire when transitioning loaded keys from write-locked
-                to read-locked.  Must match the ``extra_count`` used in the
-                corresponding ``submit_prefetch_task`` call so that all TP
-                workers can each consume one read lock.
-            policy: Which retained-subset policy to apply (see
-                :class:`TrimPolicy`).  Defaults to ``PREFIX``.
-            attn_desc: Cross-chunk attention windows of all object groups, in
-                object-group order.  The embedded ``world_size`` determines
-                the number of kv_rank shards per chunk.
-            group_layout_descs: Per-object-group layout descriptors. When
-                separate object groups have different tensor shapes, each
-                group's keys must be allocated with its own layout.
-            mode: The prefetch intent (see :class:`PrefetchMode`).  ``WARM``
-                forces every loaded key permanent and acquires no read lock;
-                ``LOOKUP`` defers retention to the configured
-                :class:`PrefetchPolicy` and read-locks loaded keys.
+            extra_count: Extra read locks per key for TP workers.
+            policy: Retained-subset policy. Defaults to ``PREFIX``.
+            attn_desc: Per-object-group attention windows and world_size.
+            group_layout_descs: Per-object-group layout descriptors for
+                groups with different tensor shapes.
+            mode: Prefetch intent (``WARM`` or ``LOOKUP``).
 
         Returns:
             A request ID for tracking via query_prefetch_result.

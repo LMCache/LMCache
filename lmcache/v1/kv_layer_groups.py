@@ -537,10 +537,7 @@ class KVLayerGroupsManager:
             kernel_group_idx: 0-based kernel group index.
 
         Returns:
-            The sub-chunk sliding window size. Will be the same as the
-            chunk size for non-sliding-window models, big-sliding-window
-            models, and Mamba (``sw_size_tokens=0``) groups whose
-            recurrent state always occupies a full chunk.
+            The sub-chunk sliding window size in tokens.
         """
         sw_size_tokens = self._kernel_groups[kernel_group_idx].sw_size_tokens
         if sw_size_tokens == -1 or sw_size_tokens >= self._lmcache_tokens_per_chunk:
@@ -595,15 +592,7 @@ class KVLayerGroupsManager:
     def _detect_object_groups(
         self, engine_group_infos: "Sequence[EngineGroupInfo]"
     ) -> list[ObjectGroupInfo]:
-        """Bucket kernel groups into object groups.
-
-        Puts all kernel groups into a single object group when object-group
-        separation is disabled (the default). Otherwise groups the kernel groups
-        by sliding-window size measured in number of chunks.
-
-        ``sw_size_tokens=0`` (Mamba sentinel) maps to ``sw_size_chunks=1``:
-        Mamba recurrent state is fully summarized by the most recent chunk,
-        so only that chunk needs to be retained from L2.
+        """Bucket kernel groups into object groups by sliding-window size.
 
         Args:
             engine_group_infos: LMCache-owned engine KV cache group metadata.

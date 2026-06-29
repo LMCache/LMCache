@@ -43,28 +43,17 @@ class _LayoutDescEntry:
     layout_desc: MemoryLayoutDesc
     ref_count: int
     attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
-    """Cross-chunk attention windows of all object groups, in object-group
-    order. Defaults to a single full-attention group."""
+    """Per-object-group attention windows and world_size."""
     group_layout_descs: dict[int, MemoryLayoutDesc] | None = None
-    """Per-object-group layout descriptors. When separate object groups are
-    enabled, each group has its own tensor shapes/dtypes.  ``None`` means
-    all groups share the same layout (``layout_desc``)."""
+    """Per-group layout descriptors, or ``None`` if all share ``layout_desc``."""
 
 
 class LayoutDescRegistry:
-    """Thread-safe registry mapping (model_name, world_size) to MemoryLayoutDesc.
-
-    Modules write to this registry when KV caches are registered.
-    Consumers (e.g. LookupModule) read from it to find layout descriptors
-    for prefetch tasks. Multiple worker instances can share the same
-    ``(model_name, world_size)`` entry, so the registry keeps the descriptor
-    until the last matching registration is unregistered.
+    """Thread-safe registry mapping (model_name, world_size) to layout descriptors.
 
     Args:
-        force_retrieve_full_kv: When True, every registered
-            :class:`AttnWindowDesc` has its ``force_retrieve_full_kv`` flag set,
-            causing all object groups to be treated as full-attention during
-            prefetch.
+        force_retrieve_full_kv: When True, all registered AttnWindowDescs
+            treat every group as full-attention during prefetch.
     """
 
     def __init__(self, force_retrieve_full_kv: bool = False) -> None:
@@ -83,19 +72,13 @@ class LayoutDescRegistry:
     ) -> None:
         """Register a layout descriptor for a (model_name, world_size) pair.
 
-        Re-registering the same pair increments the active registration
-        count. The latest descriptor is retained for lookups.
-
         Args:
             model_name: The model name.
             world_size: The world size.
             layout_desc: The memory layout descriptor.
-            attn_desc: Cross-chunk attention windows of all object groups, in
-                object-group order. Defaults to a single full-attention group.
-            group_layout_descs: Per-object-group layout descriptors. When
-                separate object groups are enabled, each group may have
-                different tensor shapes/dtypes. Pass ``None`` when all groups
-                share the same layout.
+            attn_desc: Per-object-group attention windows and world_size.
+            group_layout_descs: Per-object-group layout descriptors, or
+                ``None`` when all groups share ``layout_desc``.
         """
         key = (model_name, world_size)
         attn_desc = replace(
@@ -160,16 +143,7 @@ class LayoutDescRegistry:
     def find_group_layout_descs(
         self, model_name: str, world_size: int
     ) -> dict[int, MemoryLayoutDesc] | None:
-        """Look up per-object-group layout descriptors.
-
-        Args:
-            model_name: The model name.
-            world_size: The world size.
-
-        Returns:
-            Mapping from object-group ID to its layout descriptor, or
-            ``None`` if no per-group layouts were registered.
-        """
+        """Look up per-object-group layout descriptors, or ``None``."""
         with self._lock:
             entry = self._registry.get((model_name, world_size))
             if entry is None:
@@ -202,21 +176,7 @@ class LayoutDescRegistry:
 
 
 class MPCacheServerContext:
-    """Shared infrastructure for all engine modules.
-
-    Holds the storage manager, token hasher, session manager, event bus,
-    and layout descriptor registry. Modules receive this context at init
-    and use it for shared operations.
-
-    Args:
-        storage_manager_config: Configuration for the storage manager.
-        chunk_size: Chunk size for KV cache operations.
-        hash_algorithm: Hash algorithm for token hashing.
-        separate_object_groups: Whether to split kernel groups into one object
-            group per sliding-window size at KV-cache registration. Default True.
-        force_retrieve_full_kv: When True, treat all object groups as
-            full-attention during prefetch, ignoring sliding-window sizes.
-    """
+    """Shared infrastructure for all engine modules."""
 
     def __init__(
         self,

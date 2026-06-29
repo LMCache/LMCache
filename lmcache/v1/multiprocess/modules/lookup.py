@@ -71,7 +71,6 @@ def compute_extra_count(
     return tp - 1 if tp > world_size else 0
 
 
-
 @dataclass
 class _PrefetchJob:
     handle: PrefetchHandle
@@ -371,7 +370,7 @@ class LookupModule:
             return None
 
         stride = job.attn_desc.num_object_groups * job.world_size
-        num_chunks = job.handle.total_requested_keys // stride if stride else 0
+        num_chunks = job.handle.total_requested_keys // stride
         windows = job.attn_desc.num_chunks_in_sw
         if job.attn_desc.force_retrieve_full_kv:
             windows = [-1] * job.attn_desc.num_object_groups

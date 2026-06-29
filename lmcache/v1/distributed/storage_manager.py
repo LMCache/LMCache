@@ -413,26 +413,14 @@ class StorageManager:
         Args:
             keys: Object keys to prefetch.
             layout_desc: Memory layout description.
-            extra_count: Extra workers (on top of the default
-                1) that will independently retrieve the same
-                key.  Total locks = 1 + extra_count.
-            external_request_id: Request ID from the caller
-                for end-to-end log tracing.
-            policy: Which retained-subset policy to apply (see
-                :class:`TrimPolicy`).  ``PREFIX`` keeps the contiguous prefix;
-                ``SPARSE`` keeps every found key (gap-tolerant).
-            attn_desc: Cross-chunk attention windows of all object groups, in
-                object-group order.  The embedded ``world_size`` determines the
-                number of kv_rank shards per chunk.
-            skip_l2: If True, do not load from L2. For ``LOOKUP`` only
-                already-resident L1 keys are returned; for ``WARM`` nothing is
-                loaded and an empty handle is returned.
-            group_layout_descs: Per-object-group layout descriptors. When
-                separate object groups have different tensor shapes, each
-                group's keys must be allocated with its own layout.
-            mode: The prefetch intent (see :class:`PrefetchMode`).  ``WARM``
-                retains loaded keys and pins none; ``LOOKUP`` (default) pins
-                them for an imminent reader and follows the policy.
+            extra_count: Extra read locks per key for TP workers.
+            external_request_id: Request ID for tracing.
+            policy: Retained-subset policy (``PREFIX`` or ``SPARSE``).
+            attn_desc: Per-object-group attention windows and world_size.
+            skip_l2: If True, only return already-resident L1 keys.
+            group_layout_descs: Per-object-group layout descriptors for
+                groups with different tensor shapes.
+            mode: Prefetch intent (``WARM`` or ``LOOKUP``).
 
         Returns:
             PrefetchHandle to track the task.
@@ -543,30 +531,10 @@ class StorageManager:
         group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
         mode: PrefetchMode = PrefetchMode.LOOKUP,
     ) -> PrefetchHandle:
-        """PREFIX-policy path of :meth:`submit_prefetch_task`.
-
-        Computes the sliding-window-aware L1 prefix hit, retains only the
-        in-window keys, releases read locks on non-retained L1 keys, and
-        submits remaining keys to L2.
-
-        Args:
-            keys: All requested object keys, in chunk-major order.
-            l1_read_result: Per-key result from :meth:`L1Manager.reserve_read`.
-            attn_desc: Per-object-group attention windows for ``keys``.
-            extra_count: Extra read locks per key (must match the
-                ``reserve_read`` call).
-            external_request_id: Caller request id for tracing.
-            layout_desc: Memory layout description.
-            skip_l2: If True, skip L2 submission even if L2 adapters exist.
-            group_layout_descs: Per-object-group layout descriptors.
-
-        Returns:
-            A :class:`PrefetchHandle` tracking the L1 retained keys and any
-            outstanding L2 request.
-        """
+        """PREFIX path: fold L1 presence, retain in-window keys, submit rest to L2."""
         num_groups = attn_desc.num_object_groups
         stride = num_groups * attn_desc.world_size
-        num_chunks = len(keys) // stride if stride else 0
+        num_chunks = len(keys) // stride
 
         l1_presence = Bitmap(len(keys))
         for i, key in enumerate(keys):

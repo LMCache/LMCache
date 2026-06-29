@@ -29,10 +29,7 @@ def _is_sliding_window_spec(spec: Any) -> bool:
 
 
 def _is_mamba_spec(spec: Any) -> bool:
-    """Return whether the KV cache spec is a vLLM Mamba spec.
-
-    Checked by class name so this module stays importable without vLLM.
-    """
+    """Return whether the KV cache spec is a vLLM Mamba spec."""
     return any(cls.__name__ == "MambaSpec" for cls in type(spec).__mro__)
 
 
@@ -41,14 +38,7 @@ def _resolve_per_layer_sw_sizes(
     layer_to_idx: Mapping[str, int],
     num_layers: int,
 ) -> list[int]:
-    """Resolve the sliding window size in tokens for each registered KV tensor.
-
-    Resolves ``-1`` for full-attention layers, ``0`` for Mamba (linear
-    attention) layers, and the spec's ``sliding_window`` for sliding-window
-    attention layers.  Mamba layers carry fixed-size recurrent state that is
-    fully summarized by the most recent chunk, so they need zero historical
-    tokens.  The ``0`` sentinel is converted to ``sw_size_chunks=1`` (one
-    chunk) downstream by :meth:`_detect_object_groups`.
+    """Per-layer window size in tokens: -1 (full), 0 (Mamba), or positive (SW).
 
     Args:
         vllm_groups: vLLM ``KVCacheGroupSpec`` instances.
@@ -56,9 +46,7 @@ def _resolve_per_layer_sw_sizes(
         num_layers: Number of registered KV tensors.
 
     Returns:
-        A list of length ``num_layers`` mapping each registered tensor index
-        to its window size in tokens: ``-1`` (full attention), ``0`` (Mamba),
-        or a positive value (sliding-window attention).
+        List of length ``num_layers`` with per-tensor window sizes.
     """
     per_layer_sw_size = [-1] * num_layers
     for group in vllm_groups:
