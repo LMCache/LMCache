@@ -47,7 +47,7 @@ curl -sf "http://localhost:$LMCACHE_HTTP_PORT/healthcheck" >/dev/null 2>&1 || {
 
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
-python -m dynamo.frontend &
+python3 -m dynamo.frontend &
 
 # run decode worker on GPU 0
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
