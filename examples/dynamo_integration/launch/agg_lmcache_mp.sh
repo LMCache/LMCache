@@ -32,9 +32,14 @@ print_launch_banner "Launching Aggregated Serving (1 GPU) + LMCache" "$MODEL" "$
 lmcache server \
   --l1-size-gb "${LMCACHE_L1_SIZE_GB:-16}" --eviction-policy LRU \
   --port "$LMCACHE_PORT" --http-port "$LMCACHE_HTTP_PORT" &
+SERVER_PID=$!
 
 # Wait until the server's HTTP admin endpoint is healthy before launching workers.
 for _ in $(seq 1 60); do
+  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    echo "LMCache server process died unexpectedly" >&2
+    exit 1
+  fi
   curl -sf "http://localhost:$LMCACHE_HTTP_PORT/healthcheck" >/dev/null 2>&1 && break
   sleep 1
 done
