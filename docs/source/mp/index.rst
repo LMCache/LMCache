@@ -77,7 +77,7 @@ High-Level Architecture
          |
          |--- L1Manager (l1_manager.py)
          |       |--- L1MemoryManager (CPU DRAM) or
-         |       |    GDSL1MemoryManager (NVMe slab via cuFile)
+         |       |    GDSL1MemoryManager (NVMe slab via cuFile / hipFile)
          |       |--- TTLLock per object (read/write)
          |
          |--- StoreController  -----> L2 Adapter(s) (async L1->L2 push)
@@ -292,9 +292,10 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
      - (P2P) Look up the given keys and read-lock the locally cached
        prefix. Returns a task id which the caller passes to
        ``P2P_QUERY_LOOKUP_RESULTS`` to poll for the transfer addresses.
-       Part of the peer-to-peer KV cache sharing surface; the handler
-       module is not yet wired into the default
-       ``_build_modules()`` path -- see :doc:`p2p`.
+       Served by ``P2PController`` (loaded unconditionally by
+       ``_build_modules()``); whether this server also acts as a P2P
+       client is controlled by ``--p2p-advertise-url`` -- see
+       :doc:`p2p`.
    * - ``P2P_QUERY_LOOKUP_RESULTS``
      - BLOCKING
      - (P2P) Poll the transfer addresses for a lookup task. Returns a
@@ -354,7 +355,13 @@ methods:
 
 - ``reserve_write()`` / ``finish_write()`` -- Two-phase write into L1.
 - ``submit_prefetch_task()`` / ``query_prefetch_status()`` -- Async lookup +
-  L2 prefetch.
+  L2 prefetch. ``query_prefetch_status()`` is non-blocking and returns
+  ``None`` while the L2 prefetch is still in flight.
+- ``wait_prefetch_status()`` -- Blocking alternative to polling
+  ``query_prefetch_status()``: waits on a controller condition variable
+  until the prefetch result is published (or a timeout expires).
+  L1-only prefetches return immediately. Used by the
+  ``WAIT_PREFETCH_STATUS`` RPC to avoid busy-polling on the load path.
 - ``read_prefetched_results()`` / ``finish_read_prefetched()`` -- Read
   prefetched data from L1 with automatic lock management.
 
@@ -383,9 +390,12 @@ tiers selected at startup (both satisfy ``L1ManagerProtocol``):
   ``--l1-size-gb``.
 - ``GDSL1MemoryManager`` -- an NVMe slab file when ``--gds-l1-path`` is set.
   The bytes live on disk; reads/writes DMA directly between the GPU staging
-  buffer and the slab via cuFile, driven by the process-global ``GDSContext``
-  (``gpu_connector/gds_context.py``) and dispatched from ``gpu_ops``. The CPU
-  tier is disabled in this mode.
+  buffer and the slab, driven by the process-global ``GDSContext``
+  (``gpu_connector/gds_context.py``) and dispatched from ``gpu_ops``. The DMA
+  backend is selected by platform via ``gpu_connector/_gds_async.py`` --
+  cuFile (``libcufile.so``) on NVIDIA and hipFile (``libhipfile.so``) on AMD
+  ROCm; see the *GDS L1 Tier* section of :doc:`configuration` for the
+  vendor-specific requirements. The CPU tier is disabled in this mode.
 
 L2 Adapters
 ~~~~~~~~~~~
@@ -554,7 +564,7 @@ Adding a new request type
 1. Add a new member to ``RequestType`` in ``protocols/base.py``.
 2. Create a ``ProtocolDefinition`` in the appropriate ``protocols/*.py`` file
    (``engine``, ``controller``, ``observability``, ``debug``, ``blend``,
-   ``blend_v2``, or ``blend_v3``) and add the request name to that
+   ``blend_v2``, ``blend_v3``, or ``p2p``) and add the request name to that
    module's ``REQUEST_NAMES``.
 3. Implement the handler method on the appropriate ``EngineModule``
    (e.g. ``LookupModule``, ``LMCacheDrivenTransferModule``, ``BlendV3Module``) and
