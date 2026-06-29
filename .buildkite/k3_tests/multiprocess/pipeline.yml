@@ -5,8 +5,18 @@
 #   2-GPU: LMCache+vLLM on GPU 0, baseline on GPU 1 (or TP=2 across both).
 #   1-GPU: LMCache+vLLM on GPU 0 only (no baseline server).
 
+# Retry policy for known-flaky long-running multiprocess steps.
+# Note: exit_status "*" matches 1-255 only; -1 (agent lost) needs a separate rule.
+x-flaky-retry: &flaky-retry
+  automatic:
+    - exit_status: -1
+      limit: 2
+    - exit_status: "*"
+      limit: 2
+
 steps:
   - group: ":compression: Multiprocess (2-GPU)"
+    if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
     steps:
       - label: ":compression: vllm_bench"
         command: .buildkite/k3_tests/multiprocess/run.sh vllm_bench
@@ -29,6 +39,7 @@ steps:
       - label: ":compression: long_doc_qa"
         command: .buildkite/k3_tests/multiprocess/run.sh long_doc_qa
         timeout_in_minutes: 30
+        retry: *flaky-retry
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
@@ -36,6 +47,7 @@ steps:
       - label: ":compression: long_doc_qa_l2"
         command: .buildkite/k3_tests/multiprocess/run.sh long_doc_qa_l2
         timeout_in_minutes: 30
+        retry: *flaky-retry
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
@@ -58,10 +70,12 @@ steps:
         artifact_paths: ["*.log"]
 
   - group: ":compression: Multiprocess (1-GPU)"
+    if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
     steps:
       - label: ":compression: lm_eval"
         command: .buildkite/k3_tests/multiprocess/run.sh lm_eval
         timeout_in_minutes: 30
+        retry: *flaky-retry
         agents: { queue: "k8s" }
         plugins:
           - kubernetes:
@@ -75,6 +89,41 @@ steps:
                 volumes: *vols
         artifact_paths: ["*.log"]
 
+      # Engine-driven transfer mode correctness on GPU (SHM transport).
+      # Default CUDA dispatch is lmcache_driven (server-side IPC handle);
+      # this step forces engine_driven (worker-side gather/scatter via SHM)
+      # and verifies gsm8k outputs are still bit-exact across cache-population
+      # and cache-hit runs.
+      #
+      # To enable SHM transport:
+      #   - L1_USE_LAZY=false disables lazy allocation so L1 is backed by a
+      #     POSIX SHM segment that the worker can mmap.
+      #   - CPU_BUFFER_SIZE=20 caps L1 at 20GB (needs /dev/shm >= 20GB).
+      #   - dshm volume provides a 24Gi tmpfs mount at /dev/shm.
+      - label: ":compression: lm_eval_engine_driven"
+        command: .buildkite/k3_tests/multiprocess/run.sh lm_eval
+        timeout_in_minutes: 30
+        env:
+          LMCACHE_MP_TRANSFER_MODE: "engine_driven"
+          L1_USE_LAZY: "false"
+          CPU_BUFFER_SIZE: "80"
+        agents: { queue: "k8s" }
+        plugins:
+          - kubernetes:
+              podSpec:
+                containers:
+                  - name: container-0
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
+                    resources: { limits: { "nvidia.com/gpu": "1" } }
+                    volumeMounts:
+                      - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                      - { name: dshm, mountPath: /dev/shm }
+                volumes:
+                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+                  - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 128Gi } }
+        artifact_paths: ["*.log"]
+
       # HMA correctness check on google/gemma-4-31B-it (a hybrid model whose KV
       # cache groups get different block sizes). Runs gsm8k, resets vLLM's prefix
       # cache (LMCache preserved), reruns served by LMCache, and asserts the two
@@ -82,6 +131,7 @@ steps:
       - label: ":compression: hma_lm_eval_gemma4"
         command: .buildkite/k3_tests/multiprocess/run.sh hma_lm_eval_gemma4
         timeout_in_minutes: 60
+        retry: *flaky-retry
         env:
           MODEL: "google/gemma-4-31B-it"
           # Allow a small score difference between the two runs.
@@ -150,6 +200,7 @@ steps:
         artifact_paths: ["*.log"]
 
   - group: ":compression: Multiprocess (CPU-only)"
+    if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
     steps:
       - label: ":compression: cpu_e2e_validation (shm)"
         command: bash .github/scripts/run-cpu-e2e-validation.sh
@@ -229,3 +280,36 @@ steps:
                 volumes:
                   - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
                   - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 4Gi } }
+
+  # Canary path for VERIFY_AND_PIN_VLLM=true: skips every real test group
+  # above (each group's `if` evaluates to false) and instead runs a single
+  # vllm_bench step that proves the freshly-installed vLLM nightly works
+  # with LMCache. On success, the verified vllm wheel version is pushed to
+  # the `buildkite_latest_tested_vllm` branch so downstream builds can pin
+  # to a known-good nightly instead of resolving "latest" again.
+  - label: ":pushpin: Verify & pin vLLM nightly"
+    if: build.env("VERIFY_AND_PIN_VLLM") =~ /true/
+    command: |
+      .buildkite/k3_tests/multiprocess/run.sh vllm_bench
+      bash .buildkite/k3_tests/multiprocess/scripts/pin-tested-vllm.sh
+    timeout_in_minutes: 30
+    agents: { queue: "k8s" }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - name: container-0
+                image: lmcache/ci-base:latest
+                imagePullPolicy: Never
+                resources: { limits: { "nvidia.com/gpu": "2" } }
+                env:
+                  - name: GITHUB_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: buildkite-git-creds
+                        key: GITHUB_TOKEN
+                volumeMounts:
+                  - { name: hf-cache, mountPath: /root/.cache/huggingface }
+            volumes:
+              - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+    artifact_paths: ["*.log"]

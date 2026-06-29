@@ -29,7 +29,8 @@ All of them live behind a single msgspec ext code 1 and a single `KVCache = list
 
 ## What the base class owns
 
-`DeviceIPCWrapper` (in `custom_types.py`) provides the parts that every transport shares:
+`DeviceIPCWrapper` (in `platform/base_ipc_wrapper.py`) provides the parts that every
+transport shares:
 
 - **Interface fields** — `dtype`, `shape`, `stride`, `storage_offset`, `device_uuid`. Subclasses populate these in `__init__`; the base uses them for equality and the receiving side uses them to rebuild the logical view.
 - **Device discovery** — `_get_device_uuid`, `_discover_devices`,`_get_device_index_from_uuid`. These are `@classmethod`s (not static) and route through the `torch_dev` abstraction, so they work across device backends, and a subclass can override `_get_device_uuid` if its backend needs a different identity source.
@@ -53,12 +54,21 @@ All of them live behind a single msgspec ext code 1 and a single `KVCache = list
 
 ## Platform registration
 
-The factory lookup (`platform/_registry.py`) keys on `tensor.device.type`, so the integration adapter never has an if/elif chain. Each platform sub-package self-registers at import time:
+The factory lookup (`platform/_registry.py`) keys on `tensor.device.type`, so
+the integration adapter never has an if/elif chain.  Concrete wrappers are
+discovered automatically at runtime — no static `register_kv_wrapper` calls
+needed:
 
-```text
-platform/cuda/__init__.py  ->  register_kv_wrapper("cuda", CudaIPCWrapper)
-platform/cpu/__init__.py   ->  register_kv_wrapper("cpu",  migrate_to_shm_and_wrap)
-```
+- Each concrete subclass sets a ``device_type`` ClassVar (e.g. ``"cuda"``)
+  and exposes a ``wrap`` factory classmethod.
+- :func:`~lmcache.v1.platform._registry._discover_wrappers_once` scans
+  ``lmcache.v1.platform`` two levels deep for ``DeviceIPCWrapper`` subclasses
+  on first use, indexes them by ``device_type``, and skips any subclass where
+  ``_is_default_wrapper`` is ``False`` (so ``RawCudaIPCWrapper`` coexists with
+  ``CudaIPCWrapper`` without colliding).
+- Adding a new accelerator backend only requires shipping a sub-package under
+  ``platform/<device>/`` with a ``DeviceIPCWrapper`` subclass — zero changes
+  to the dispatcher or the registry.
 
 ## Backward compatibility
 

@@ -3,5 +3,8 @@
 # The cu12 analogue lives in cuda12_core.txt.
 
 cupy-cuda13x
-# nixl meta-package pulls nixl-cu13 and exposes the top-level `nixl` namespace.
-nixl>=1.1.0; python_version < "3.13"
+# Depend on nixl-cu13 directly: it provides the top-level `nixl` namespace.
+# The `nixl` meta-package lists both nixl-cu12 and nixl-cu13 as unconditional
+# (unmarked) deps, so it drags the cu12 backend in too; pinning the backend
+# package avoids that double install.
+nixl-cu13>=1.1.0; python_version < "3.13"

@@ -2,22 +2,117 @@
 
 ## Overview
 
-Two HTTP endpoints, both auto-discovered out of
+HTTP endpoints auto-discovered out of
 `lmcache/v1/multiprocess/http_apis/l2_api.py`:
 
 - `DELETE /l2` — delete the KV cache for a caller-supplied list of
   keys (the keys are addresses; the cached bytes are what gets removed).
 - `GET /l2/keys` — paginate keys currently resident in L2, optionally
   filtered by `model_name`.
+- `POST /l2/prefetch` — submit a **warm** L1 load of a token sequence's
+  chunks from L2. The caller sends `token_ids`, not keys; returns a
+  `request_id`.
+- `GET /l2/prefetch/{request_id}` — poll a submitted warm prefetch; status is
+  reported reactively and completion releases nothing (the warm holds no lock).
 
-Both endpoints operate on the **primary** L2 adapter — the first
-adapter configured in the storage manager's adapter list. There is no
-adapter selector on the wire. A deployment that wants these endpoints
-to target a specific adapter must configure that adapter first.
+`DELETE /l2` and `GET /l2/keys` operate on the **primary** L2 adapter —
+the first adapter configured in the storage manager's adapter list (an
+optional `?adapter=<type_name>` selector targets another). `POST
+/l2/prefetch` coalesces across **all** configured L2 adapters via the
+prefetch controller, so it has no adapter selector.
 
 These endpoints serve operator + admin workflows: "purge this user's
-keys," "show me what's resident in L2," "garbage-collect orphans after
-a deployment rename." They are NOT in the hot-path read/write flow.
+keys," "show me what's resident in L2," "pre-warm this node before a
+traffic shift." They are NOT in the hot-path read/write flow.
+
+### Warm prefetch (`POST /l2/prefetch`)
+
+Body: `{"model_name": str, "world_size": int, "token_ids": [int, ...],
+"cache_salt": str}`. The caller describes content by **tokens**, never by
+internal cache keys — a key is a content hash plus a per-rank layout bitmap,
+which callers cannot construct. The server hashes the tokens
+(`ctx.token_hasher.compute_chunk_hashes`) and expands each chunk across the
+node's ranks (`ipc_key_to_object_keys` with `worker_id=None`), exactly as the
+lookup path does. `model_name` / `world_size` also select the registered
+`MemoryLayoutDesc` (`ctx.layout_desc_registry.find`) for the L1 write buffers.
+
+`POST` returns **202** `{"request_id", "chunks", "status": "submitted"}` (or
+`{"chunks": 0, "status": "noop"}` when the sequence is shorter than one chunk);
+**409** if no layout is registered for `(model_name, world_size)` (the model
+has not allocated KV cache on this node yet); **400** if the token count
+exceeds the cap or `cache_salt` violates its invariants. The submit is
+non-blocking — the load runs in the `PrefetchController`'s thread.
+
+`GET /l2/prefetch/{request_id}` reports `{"status": "pending"}` or
+`{"status": "completed", "found_keys", "total_keys"}`, and **404** for an
+unknown id. The poll that first observes completion drops the job
+(exactly-once) — the warm holds no read-lock, so there is nothing to release —
+so a later poll for the same id is 404.
+
+`found_keys`/`total_keys` count only chunks **this request loaded from L2**;
+chunks already resident in L1 are skipped at `reserve_write` and not counted, so
+a partially-resident warm undercounts by the resident chunk count (a cold
+request loads and counts everything). Not counting the resident chunks is
+deliberate: an already-resident entry may be a transient temporary from another
+lookup, so claiming it as warmed could mislead.
+
+The warm submits with the gap-tolerant `TrimPolicy.SPARSE`, **not** the default
+`PREFIX`. This matters because the warm skips the L1-hit `reserve_read`, so the
+controller sees an already-resident chunk only as "not reserved" — indistinguishable
+from an L2 miss. Under `PREFIX` (`count_leading_ones`) a resident **leading**
+chunk would read as a gap at index 0 and trim the entire remainder, so warming a
+sequence whose prefix is already cached would load **nothing**. `SPARSE` keeps
+every not-yet-resident key regardless of gaps, so the trailing chunks still load.
+The trade-off: on a genuine mid-sequence L2 *miss* `SPARSE` also loads the
+post-gap chunks, which a contiguous-prefix lookup cannot reuse — harmless
+best-effort waste (the extra keys are retained-but-unlocked and evictable). The
+fully correct alternative (bridge only the resident prefix, still stop at real
+L2 gaps) would need the warm to feed an L1-residency probe into the prefix; that
+is deferred.
+
+> Keeping key construction server-side is deliberate: hashing scheme,
+> `chunk_size`, and per-rank layout are all engine-context concerns the caller
+> (and even the coordinator) does not have. The coordinator forwards
+> `token_ids` verbatim.
+
+**Node scope.** One MP server is one node; its L1 is shared with that node's
+workers via intra-node CUDA IPC, so it holds only the shards for the
+`global_rank`s served locally. Warming a single node fully covers a
+**single-node** deployment (all `world_size` workers on one box). On a
+**multi-node** deployment each node holds only its slice — the caller must warm
+each node, and the all-rank fan-out here also loads foreign-rank keys that no
+local worker reads (harmless best-effort waste). Fleet-wide fan-out and
+local-rank restriction are owned by the (separate) KV cache directory; this
+endpoint is the per-node primitive.
+
+State lives in a `WarmPrefetchJobs` table
+(`lmcache/v1/multiprocess/warm_prefetch.py`) on `app.state`: `submit` starts
+the prefetch and registers its handle under a `request_id`; `poll` reports
+status and, on completion, drops the job. The table is **handle-only** — the
+warm holds no lock, so there is nothing to release and no keys need to be kept
+around for a release step. There is **no server-side polling loop** — the
+caller drives completion via the status endpoint, and every `StorageManager`
+call here is non-blocking (the load runs in the controller's thread), so no
+asyncio is involved.
+
+A warm prefetch differs from the lookup-path prefetch through
+`PrefetchMode.WARM` (threaded `StorageManager.submit_prefetch_task` →
+`PrefetchController`), which is **warm-only** and redefines the load to:
+
+1. **Retain (permanent), not temporary.** Loaded chunks survive instead of
+   being deleted when a read-lock is released — and since there is no read-lock
+   here (below), without forced retention they would never persist.
+2. **Acquire no read-lock.** A lookup-path prefetch read-locks the loaded and
+   already-resident keys to pin them for the imminent TP reader; a warm has no
+   such reader, so it transitions loaded keys to *ready* via `finish_write`
+   (not `finish_write_and_reserve_read`), and `submit_prefetch_task` skips the
+   L1-hit `reserve_read` pass entirely. The chunks are left resident, retained,
+   unlocked, evictable, and re-lookupable — a later lookup takes its own lock.
+
+A job whose status is never polled to completion lingers in the table (and in
+the controller's small completed-result bookkeeping). Since **no lock is held,
+no L1 is pinned** — only a dict entry leaks; a TTL sweep that queries stale
+handles to drop them is a possible future addition.
 
 ---
 

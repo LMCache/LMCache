@@ -15,10 +15,12 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeVar
-import argparse
 import json
 
 if TYPE_CHECKING:
+    # Standard
+    import argparse
+
     # First Party
     from lmcache.v1.distributed.config import EvictionConfig
 

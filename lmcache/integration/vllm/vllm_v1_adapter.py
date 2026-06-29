@@ -1845,17 +1845,43 @@ class LMCacheConnectorV1Impl:
 
         # Cleanup if request was aborted
         if request.status == RequestStatus.FINISHED_ABORTED:
-            # Notify storage backends of aborted requests
-            assert self.lmcache_engine is not None
-            sm = self.lmcache_engine.storage_manager
-            if sm is not None:
-                sm.cancel_request(request.request_id)
+            # ``request_finished`` is a Scheduler-side connector API.
+            # The Scheduler typically does not initialize the storage
+            # engine (unless ``enable_scheduler_bypass_lookup`` is set);
+            # only the Worker role builds it by default. The Scheduler
+            # *does* own the lookup_client though, so the async lookup
+            # cancel below must run independently of the engine check
+            # to avoid leaking in-flight async lookups on Scheduler-side
+            # aborts. See LMCache#3337.
+            if self.lmcache_engine is None:
+                logger.warning(
+                    "Skipping abort-time backend cleanup for request %s: "
+                    "lmcache_engine is not initialized (Scheduler role "
+                    "without enable_scheduler_bypass_lookup).",
+                    request.request_id,
+                )
+            else:
+                # Notify storage backends of aborted requests
+                sm = self.lmcache_engine.storage_manager
+                if sm is not None:
+                    sm.cancel_request(request.request_id)
 
             if self.async_loading:
-                # Cancel any ongoing async lookup and prefetch tasks on workers
+                # Cancel any ongoing async lookup and prefetch tasks on
+                # workers. Independent of ``lmcache_engine`` because the
+                # Scheduler owns ``lookup_client`` even when it does not
+                # build an engine.
                 lookup_id = request.request_id
-                assert self.lookup_client is not None
-                self.lookup_client.cancel_lookup(lookup_id)  # type: ignore[attr-defined]
+                if self.lookup_client is None:
+                    logger.warning(
+                        "Skipping abort-time async lookup cancel for "
+                        "request %s: lookup_client is not initialized "
+                        "while async_loading is enabled. Engine stays "
+                        "alive; this request's lookup is dropped.",
+                        request.request_id,
+                    )
+                else:
+                    self.lookup_client.cancel_lookup(lookup_id)  # type: ignore[attr-defined]
 
         params = (
             request.kv_transfer_params

@@ -29,11 +29,11 @@ import (
 )
 
 // These specs exercise the FULL admission pipeline: a pod CREATE goes to the
-// envtest API server, which calls the registered PodInjector webhook over TLS,
+// envtest API server, which calls the registered CacheBlendPodInjector webhook over TLS,
 // and we read the persisted (mutated) pod back. This validates the wiring the
 // fake-client unit tests cannot: the generated webhook manifest path, the
 // decoder, and PatchResponseFromRaw round-tripping through the API server.
-var _ = Describe("PodInjector webhook (envtest)", Ordered, func() {
+var _ = Describe("CacheBlendPodInjector webhook (envtest)", Ordered, func() {
 	BeforeAll(func() {
 		By("creating the target namespace")
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNamespace}}

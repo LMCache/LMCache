@@ -94,20 +94,17 @@ msgstr "``slot_bytes``: 所需的固定槽大小（以字节为单位）。它�
 
 #: ../../source/kv_cache/storage_backends/dax.rst:71
 msgid "``num_store_workers``: optional store worker count, default ``1``."
-msgstr ""
-"``num_store_workers``: 可选的存储工作线程数量，默认值为 ``1``\\ 。"
+msgstr "``num_store_workers``: 可选的存储工作线程数量，默认值为 ``1``\\ 。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:72
 msgid "``num_lookup_workers``: optional lookup worker count, default ``1``."
-msgstr ""
-"``num_lookup_workers``: 可选查找工作线程数量，默认为 ``1``\\ 。"
+msgstr "``num_lookup_workers``: 可选查找工作线程数量，默认为 ``1``\\ 。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:73
 msgid ""
 "``num_load_workers``: optional load worker count, default ``min(4, "
 "os.cpu_count())``."
-msgstr ""
-"``num_load_workers``: 可选的加载工作线程数量，默认 ``min(4, os.cpu_count())``\\ 。"
+msgstr "``num_load_workers``: 可选的加载工作线程数量，默认 ``min(4, os.cpu_count())``\\ 。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:75
 msgid ""
@@ -119,8 +116,7 @@ msgstr "``persist_enabled``: 被通用 MP L2 解析接受，但在此版本中�
 msgid ""
 "Runtime hotplug uses the multi-device form. The ``devices`` list may also"
 " be empty when ``hotplug_enabled`` is ``true``."
-msgstr ""
-"运行时热插拔使用多设备形式。当 ``hotplug_enabled`` 为 ``true`` 时，\\ ``devices`` 列表也可以为空。"
+msgstr "运行时热插拔使用多设备形式。当 ``hotplug_enabled`` 为 ``true`` 时，\\ ``devices`` 列表也可以为空。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:99
 msgid ""
@@ -141,8 +137,7 @@ msgid ""
 " metadata, or restart recovery. Capacity accounting and eviction are "
 "slot-based: a stored object occupies one slot even if its payload is "
 "smaller than ``slot_bytes``."
-msgstr ""
-"MP DAX 每个 LMCache 服务器使用一个稳定的适配器外观。该外观拥有稳定的事件文件描述符和工作池，运行时的添加/删除/调整大小仅更改该外观后面的映射 DAX 核心。它不添加内核级 CXL 或 DAX 重新配置、每个 TP 的 DAX 分区、设备上的元数据或重启恢复。容量核算和逐出基于插槽：即使存储对象的有效负载小于 ``slot_bytes``\\ ，它也占用一个插槽。"
+msgstr "MP DAX 每个 LMCache 服务器使用一个稳定的适配器外观。该外观拥有稳定的事件文件描述符和工作池，运行时的添加/删除/调整大小仅更改该外观后面的映射 DAX 核心。它不添加内核级 CXL 或 DAX 重新配置、每个 TP 的 DAX 分区、设备上的元数据或重启恢复。容量核算和逐出基于插槽：即使存储对象的有效负载小于 ``slot_bytes``\\ ，它也占用一个插槽。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:113
 msgid "Runtime Hotplug API"
@@ -159,15 +154,13 @@ msgid ""
 "selected adapter. DAX owns the path, mode, migration, and resize "
 "semantics; the generic interface is reusable by other adapters such as "
 "P2P. Use JSON bodies because DAX paths contain slashes:"
-msgstr ""
-"运行时热插拔在 ``hotplug_enabled`` 为 ``true`` 时才会启用。该 API 仅更改 LMCache 的运行时映射和元数据；\\ ``/dev/dax*`` 设备必须已经存在，并且 LMCache 服务器进程必须具有可读写权限。运行时端点通过 StorageManager 的通用 L2 适配器重新配置接口实现，该接口将后端、操作名称和适配器特定有效负载路由到所选适配器。DAX 拥有路径、模式、迁移和调整大小的语义；通用接口可被其他适配器（如 P2P）重用。使用 JSON 主体，因为 DAX 路径包含斜杠："
+msgstr "运行时热插拔在 ``hotplug_enabled`` 为 ``true`` 时才会启用。该 API 仅更改 LMCache 的运行时映射和元数据；\\ ``/dev/dax*`` 设备必须已经存在，并且 LMCache 服务器进程必须具有可读写权限。运行时端点通过 StorageManager 的通用 L2 适配器重新配置接口实现，该接口将后端、操作名称和适配器特定有效负载路由到所选适配器。DAX 拥有路径、模式、迁移和调整大小的语义；通用接口可被其他适配器（如 P2P）重用。使用 JSON 主体，因为 DAX 路径包含斜杠："
 
 #: ../../source/kv_cache/storage_backends/dax.rst:138
 msgid ""
 "``size`` is required for add and resize. Use an integer byte count or a "
 "string such as ``\"100GiB\"``. ``remove`` supports these modes:"
-msgstr ""
-"``size`` 是添加和调整大小所必需的。使用整数字节数或字符串，例如 ``\"100GiB\"``\\ 。\\ ``remove`` 支持以下模式："
+msgstr "``size`` 是添加和调整大小所必需的。使用整数字节数或字符串，例如 ``\"100GiB\"``\\ 。\\ ``remove`` 支持以下模式："
 
 #: ../../source/kv_cache/storage_backends/dax.rst:141
 msgid ""
@@ -191,8 +184,7 @@ msgstr "``drain``: 停止对源设备的新写入，并保持现有的 KV 可读
 msgid ""
 "``resize`` supports ``migrate`` and ``evict`` modes. It does not support "
 "``drain`` because resize completes synchronously."
-msgstr ""
-"``resize`` 支持 ``migrate`` 和 ``evict`` 模式。它不支持 ``drain``\\ ，因为 resize 是同步完成的。"
+msgstr "``resize`` 支持 ``migrate`` 和 ``evict`` 模式。它不支持 ``drain``\\ ，因为 resize 是同步完成的。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:151
 msgid ""
@@ -203,8 +195,7 @@ msgid ""
 "in-memory key index and does not move KV payloads. Resize shrink never "
 "silently drops keys; entries outside the new slot range must migrate "
 "first, or the request fails."
-msgstr ""
-"热插拔操作默认是安全的。删除或缩小会删除外部锁定或借用的槽位时，除非设置了 ``force``\\ ，否则返回 ``409 Conflict``\\ 。没有活动目标容量的迁移返回 ``507 Insufficient Storage``\\ 。扩展的调整大小保留内存中的键索引，并且不移动 KV 负载。缩小的调整大小绝不会静默丢弃键；新槽范围外的条目必须先迁移，否则请求将失败。"
+msgstr "热插拔操作默认是安全的。删除或缩小会删除外部锁定或借用的槽位时，除非设置了 ``force``\\ ，否则返回 ``409 Conflict``\\ 。没有活动目标容量的迁移返回 ``507 Insufficient Storage``\\ 。扩展的调整大小保留内存中的键索引，并且不移动 KV 负载。缩小的调整大小绝不会静默丢弃键；新槽范围外的条目必须先迁移，否则请求将失败。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:160
 msgid "Hardware Validation Flow"
@@ -217,8 +208,7 @@ msgid ""
 "``/reconfigure/dax/status`` and ``/reconfigure/dax/add`` are not "
 "available; changing the DAX device set requires restarting LMCache with a"
 " new ``--l2-adapter`` value, which drops the volatile DAX key index."
-msgstr ""
-"在运行时容量更改之前和之后使用相同的 Qwen 8B 或 14B 长上下文工作负载。如果没有热插拔支持，\\ ``/reconfigure/dax/status`` 和 ``/reconfigure/dax/add`` 将不可用；更改 DAX 设备集需要使用新的 ``--l2-adapter`` 值重新启动 LMCache，这将丢弃易失性的 DAX 密钥索引。"
+msgstr "在运行时容量更改之前和之后使用相同的 Qwen 8B 或 14B 长上下文工作负载。如果没有热插拔支持，\\ ``/reconfigure/dax/status`` 和 ``/reconfigure/dax/add`` 将不可用；更改 DAX 设备集需要使用新的 ``--l2-adapter`` 值重新启动 LMCache，这将丢弃易失性的 DAX 密钥索引。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:181
 msgid "Record these fields for the comparison:"
@@ -330,16 +320,14 @@ msgid ""
 "``dax.retrieve_staging_slab_bytes`` at least ``dax.restore_max_regions * "
 "full_chunk_size``, then scale upward if larger batched restores are "
 "common"
-msgstr ""
-"``dax.retrieve_staging_slab_bytes`` 至少为 ``dax.restore_max_regions * full_chunk_size``\\ ，如果批量恢复较大，则向上调整。"
+msgstr "``dax.retrieve_staging_slab_bytes`` 至少为 ``dax.restore_max_regions * full_chunk_size``\\ ，如果批量恢复较大，则向上调整。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:226
 msgid ""
 "If retrieve throughput is low, increase the slab size first, then "
 "increase worker and region counts together. If CPU pressure is high, "
 "reduce ``dax.restore_workers`` and ``dax.restore_max_regions``."
-msgstr ""
-"如果提取吞吐量较低，首先增加块大小，然后一起增加工作线程和区域数量。如果 CPU 压力较高，减少 ``dax.restore_workers`` 和 ``dax.restore_max_regions``\\ 。"
+msgstr "如果提取吞吐量较低，首先增加块大小，然后一起增加工作线程和区域数量。如果 CPU 压力较高，减少 ``dax.restore_workers`` 和 ``dax.restore_max_regions``\\ 。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:232
 msgid "Runtime Requirements"
@@ -385,8 +373,7 @@ msgid ""
 " restore executors. The slab and region count can be tuned with "
 "``dax.restore_workers``, ``dax.restore_max_regions``, and "
 "``dax.retrieve_staging_slab_bytes``."
-msgstr ""
-"批量恢复使用后端拥有的检索暂存块和持久恢复执行器。可以通过 ``dax.restore_workers``\\ 、\\ ``dax.restore_max_regions`` 和 ``dax.retrieve_staging_slab_bytes`` 调整暂存块和区域数量。"
+msgstr "批量恢复使用后端拥有的检索暂存块和持久恢复执行器。可以通过 ``dax.restore_workers``\\ 、\\ ``dax.restore_max_regions`` 和 ``dax.retrieve_staging_slab_bytes`` 调整暂存块和区域数量。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:253
 msgid ""
