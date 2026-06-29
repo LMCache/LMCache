@@ -1,0 +1,60 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Single source of truth for the EngineKVFormat enum members.
+//
+// This is an X-macro list: it is intentionally NOT guarded (no #pragma once)
+// and contains no includes, so it can be #included multiple times with a
+// different definition of X(name, value):
+//
+//   - csrc/kv_transfer_types.h    -> generates the `enum class EngineKVFormat`
+//   - csrc/pybind.cpp             -> generates pybind11 .value() calls (CUDA)
+//   - csrc/sycl/pybind_sycl.cpp   -> generates pybind11 .value() calls (SYCL/XPU)
+//
+// Each consumer does:
+//     #define X(name, value) ...
+//     #include "engine_kv_format.def"   // "../engine_kv_format.def" from csrc/sycl/
+//     #undef X
+//
+// To add a new KV layout, add one X(...) line here (and nothing else on the
+// C++ side). Keep the integer values stable and contiguous.
+
+// used by: vLLM CROSS_LAYER mode
+X(NB_NL_TWO_BS_NH_HS, 0)
+
+// used by: vLLM non-MLA flash attention
+X(NL_X_TWO_NB_BS_NH_HS, 1)
+
+// used by: vLLM non-MLA flash infer
+X(NL_X_NB_TWO_BS_NH_HS, 2)
+
+// used by: vLLM MLA
+X(NL_X_NB_BS_HS, 3)
+
+// used by: SGLang MHA (flash attention and flash infer)
+X(TWO_X_NL_X_NBBS_NH_HS, 4)
+
+// used by: SGLang MLA
+X(NL_X_NBBS_ONE_HS, 5)
+
+// used by: vLLM non-MLA flash attention (HND layout)
+// physical shape per layer: [2, num_blocks, num_heads, block_size, head_size]
+X(NL_X_TWO_NB_NH_BS_HS, 6)
+
+// used by: vLLM non-MLA flash infer (HND layout)
+// physical shape per layer: [num_blocks, 2, num_heads, block_size, head_size]
+X(NL_X_NB_TWO_NH_BS_HS, 7)
+
+// used by: TRT-LLM cross-layer (HND layout)
+// physical shape: [num_blocks, num_layers, 2, num_heads, block_size, head_size]
+X(NB_NL_TWO_NH_BS_HS, 8)
+
+// used by: SGLang MHA via the MP daemon path
+// physical shape per layer: [num_blocks, block_size, num_heads, head_size]
+X(TWO_X_NL_X_NB_BS_NH_HS, 9)
+
+// used by: vLLM non-MLA blocks-first attention with K/V fused into the trailing
+// dim. physical shape per layer: [num_blocks, num_heads, block_size, 2,
+// head_size] (recovered by splitting the fused trailing [block_size,
+// 2 * head_size]). Currently only reached via the host gather/scatter path,
+// not the device transfer kernels.
+X(NL_X_NB_NH_BS_TWO_HS, 10)

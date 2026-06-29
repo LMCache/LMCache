@@ -7,6 +7,12 @@ repos:
     entry: python tools/check_spdx_header.py
     language: python
     types: [python]
+  - id: gen-engine-kv-format
+    name: Generate EngineKVFormat from engine_kv_format.def
+    entry: python tools/gen_engine_kv_format.py
+    language: python
+    pass_filenames: false
+    files: ^(csrc/engine_kv_format\.def|tools/gen_engine_kv_format\.py|lmcache/_engine_kv_format\.py)$
   - id: ban-torch-device
     name: Ban direct torch device usage
     entry: >-

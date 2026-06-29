@@ -96,10 +96,13 @@ kv_format/
 
 ## Adding a new format
 
-1. Add the enum value in `csrc/kv_transfer_types.h` (the single
-   backend-agnostic definition shared by every accelerator backend), then
-   register it in each backend's pybind module — `csrc/pybind.cpp` (CUDA)
-   and `csrc/sycl/pybind_sycl.cpp` (SYCL/XPU).
+1. Add one `X(NAME, VALUE)` line in `csrc/engine_kv_format.def` — the single
+   source of truth. The C++ `enum class` (`csrc/kv_transfer_types.h`) and both
+   pybind modules (`csrc/pybind.cpp`, `csrc/sycl/pybind_sycl.cpp`) generate
+   their members from it via the preprocessor; the Python fallback enum
+   (`lmcache/_engine_kv_format.py`) is regenerated from it by
+   `tools/gen_engine_kv_format.py` (run via the `gen-engine-kv-format`
+   pre-commit hook). No other enum definition needs editing.
 2. Add a branch in the engine's `detectors/<engine>.py` `discover()`. It keys
    off `(list_depth, tensor_ndim)` from `measure_list_depth_until_tensor`,
    returning `(format, kv)`; any reshape-via-hints (e.g. TRT-LLM's 4-D `view`'d

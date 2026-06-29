@@ -21,6 +21,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev
+from lmcache._engine_kv_format import EngineKVFormat
 
 # Store the tensor objects in memory so that they can be accessed
 # outside the scope of this file
@@ -256,46 +257,6 @@ class TransferDirection(IntEnum):
 
     H2D = 0
     D2H = 1
-
-
-class EngineKVFormat(IntEnum):
-    """Enumeration of different engine KV cache memory layouts."""
-
-    # used by: vLLM CROSS_LAYER mode
-    NB_NL_TWO_BS_NH_HS = 0
-
-    # used by: vLLM non-MLA flash attention
-    NL_X_TWO_NB_BS_NH_HS = 1
-
-    # used by: vLLM non-MLA flash infer
-    NL_X_NB_TWO_BS_NH_HS = 2
-
-    # used by: vLLM MLA
-    NL_X_NB_BS_HS = 3
-
-    # used by: SGLang MHA (flash attention and flash infer)
-    TWO_X_NL_X_NBBS_NH_HS = 4
-
-    # used by: SGLang MLA
-    NL_X_NBBS_ONE_HS = 5
-
-    # used by: vLLM non-MLA flash attention (HND layout)
-    NL_X_TWO_NB_NH_BS_HS = 6
-
-    # used by: vLLM non-MLA flash infer (HND layout)
-    NL_X_NB_TWO_NH_BS_HS = 7
-
-    # used by: TRT-LLM cross-layer (HND layout)
-    NB_NL_TWO_NH_BS_HS = 8
-
-    # used by: SGLang MHA via the MP daemon path
-    TWO_X_NL_X_NB_BS_NH_HS = 9
-
-    # used by: vLLM non-MLA blocks-first attention with K/V fused into the
-    # trailing dim. Per-layer physical shape
-    # [num_blocks, num_heads, block_size, 2, head_size] -- the K/V "2" axis is
-    # second-to-last, recovered by splitting the fused [..., 2 * head_size].
-    NL_X_NB_NH_BS_TWO_HS = 10
 
 
 # Backward-compat alias
