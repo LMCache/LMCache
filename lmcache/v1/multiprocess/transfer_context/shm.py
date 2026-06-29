@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Shared-memory EngineDrivenContext implementation for multiprocess mode."""
+"""Shared-memory TransferBackend implementation for multiprocess mode."""
 
 # Standard
 from dataclasses import dataclass
@@ -18,8 +18,8 @@ from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transfer_context.base import (
-    EngineDrivenContext,
     EngineDrivenContextMetadata,
+    TransferBackend,
 )
 
 logger = init_logger(__name__)
@@ -78,8 +78,8 @@ class ShmSlotDescriptor:
         )
 
 
-class EngineDrivenContextShm(EngineDrivenContext):
-    """Shared-memory implementation of :class:`EngineDrivenContext`."""
+class ShmTransferBackend(TransferBackend):
+    """Shared-memory implementation of :class:`TransferBackend`."""
 
     def __init__(
         self,

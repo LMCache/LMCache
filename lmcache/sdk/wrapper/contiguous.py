@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""EngineDrivenContext to store/retrieve a contiguous KV tensor for SDK use."""
+"""TransferBackend wrapper to store/retrieve a contiguous KV tensor for SDK use."""
 
 # Future
 from __future__ import annotations
@@ -9,18 +9,18 @@ import torch
 
 # First Party
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContext
+from lmcache.v1.multiprocess.transfer_context.base import TransferBackend
 
 
 class ContiguousTransferWrapper:
-    """Store/retrieve a contiguous KV tensor through an ``EngineDrivenContext``.
+    """Store/retrieve a contiguous KV tensor through a ``TransferBackend``.
 
     Args:
         context: The engine-driven (SHM or pickle) transport.
         chunk_size: Number of tokens per LMCache chunk.
     """
 
-    def __init__(self, context: EngineDrivenContext, chunk_size: int) -> None:
+    def __init__(self, context: TransferBackend, chunk_size: int) -> None:
         self._context = context
         self._chunk_size = chunk_size
 

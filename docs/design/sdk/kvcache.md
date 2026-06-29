@@ -36,7 +36,7 @@ SDK process                                  LMCache MP server
 -----------                                  -----------------
 LMCacheKVCacheContext
   ├ ContiguousTransferWrapper
-  │   └ EngineDrivenContext{Shm,Pickle} ──MQ──▶ EngineDrivenTransferModule
+  │   └ {Shm,Pickle}TransferBackend ──MQ──▶ EngineDrivenTransferModule
   │                                             └ StorageManager (L1 pool, locks, prefetch)
   └ MessageQueueClient ──────────────────ZMQ──▶ LookupModule (LOOKUP / QUERY_PREFETCH_STATUS)
   SharedMemory(name) ◀────────────────────────  L1 POSIX segment (SHM transport only)
@@ -44,7 +44,7 @@ LMCacheKVCacheContext
 
 - **Control plane (ZMQ):** lookup/prefetch, slot reservation, lock release, session end.
 - **Data plane:** **SHM** when the server exposes an L1 pool, otherwise **pickle** over the
-  MQ — both driven through one `EngineDrivenContext`, so the SDK never branches on transport.
+  MQ — both driven through one `TransferBackend`, so the SDK never branches on transport.
 - **`ContiguousTransferWrapper`** ([wrapper/contiguous.py](../../../lmcache/sdk/wrapper/contiguous.py))
   bridges a contiguous `[2, L, T, D]` tensor to the per-chunk `prepare`/`commit` protocol and
   masks the SHM-vs-pickle difference.
@@ -64,7 +64,7 @@ LMCacheKVCacheContext
    only to register the layout; the data plane never touches it.
 5. `create_transfer_context(buffer)` → `EngineDrivenTransferContext.register(...)`, which sends
    `REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT` (server reserves the SHM pool / picks SHM vs pickle).
-6. Wrap `transfer_ctx.engine_driven_context` in a `ContiguousTransferWrapper`.
+6. Wrap `transfer_ctx.backend` in a `ContiguousTransferWrapper`.
 
 `instance_id` is the SDK process PID.
 

@@ -23,10 +23,10 @@ from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.protocols.engine import RegisterEngineDrivenContextResponse
 from lmcache.v1.multiprocess.transfer_context.base import (
-    EngineDrivenContext,
     EngineDrivenContextMetadata,
+    TransferBackend,
     compute_kv_layout,
-    create_engine_driven_context,
+    create_transfer_backend,
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )
@@ -320,22 +320,23 @@ class EngineDrivenTransferContext(TransferContext):
     """
 
     def __init__(self) -> None:
-        self._engine_driven_context: EngineDrivenContext | None = None
+        self._backend: TransferBackend | None = None
         self._layout_hints: LayoutHints | None = None
         self._engine_kv_format: Any = None
 
     @property
-    def engine_driven_context(self) -> EngineDrivenContext:
-        """Return the underlying SHM/pickle context created by ``register``.
+    def backend(self) -> TransferBackend:
+        """Return the underlying :class:`TransferBackend`.
 
         Raises:
-            RuntimeError: If accessed before ``register`` has run.
+            RuntimeError: If :meth:`register` has not been called yet.
         """
-        if self._engine_driven_context is None:
+        if self._backend is None:
             raise RuntimeError(
-                "EngineDrivenTransferContext is not registered, call register() first."
+                "Engine-driven transfer context is not registered. "
+                "Call register() before accessing backend."
             )
-        return self._engine_driven_context
+        return self._backend
 
     def register(
         self,
@@ -409,18 +410,17 @@ class EngineDrivenTransferContext(TransferContext):
             block_size=block_size,
             use_mla=use_mla_flag,
         )
-        self._engine_driven_context = create_engine_driven_context(
+        self._backend = create_transfer_backend(
             metadata,
             mq_client,
             mq_timeout,
             shm_name=shm_name,
             pool_size=pool_size,
         )
-        supported_transfer_mode = "SHM" if shm_name and pool_size > 0 else "pickle"
         logger.info(
-            "Worker non-GPU transfer context registered (instance_id=%d, mode=%s)",
+            "Worker non-GPU transfer context registered (instance_id=%d, backend=%s)",
             instance_id,
-            supported_transfer_mode,
+            type(self._backend).__name__,
         )
 
     def submit_store(
@@ -433,14 +433,14 @@ class EngineDrivenTransferContext(TransferContext):
         _event: IPCEvent,
         blocks_in_chunk: int,
     ) -> MessagingFuture:
-        if self._engine_driven_context is None:
+        if self._backend is None:
             raise RuntimeError(
                 "Engine-driven transfer context is not registered. "
                 "Call register() before submit_store()."
             )
 
         torch_dev.synchronize()
-        result = self._engine_driven_context.prepare_store(key, instance_id)
+        result = self._backend.prepare_store(key, instance_id)
         out_buffers, chunk_indices = result if result is not None else (None, None)
         # All chunks already in cache — nothing to gather or commit.
         if chunk_indices is not None and len(chunk_indices) == 0:
@@ -459,7 +459,7 @@ class EngineDrivenTransferContext(TransferContext):
         if out_buffers is not None:
             # SHM path uses async device->CPU copies; complete them before commit.
             torch_dev.synchronize()
-        ok = self._engine_driven_context.commit_store(key, instance_id, cpu_chunks)
+        ok = self._backend.commit_store(key, instance_id, cpu_chunks)
 
         future = MessagingFuture()
         future.set_result(ok)
@@ -476,13 +476,13 @@ class EngineDrivenTransferContext(TransferContext):
         blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
     ) -> MessagingFuture:
-        if self._engine_driven_context is None:
+        if self._backend is None:
             raise RuntimeError(
                 "Engine-driven transfer context is not registered. "
                 "Call register() before submit_retrieve()."
             )
 
-        src_buffers = self._engine_driven_context.prepare_retrieve(key, instance_id)
+        src_buffers = self._backend.prepare_retrieve(key, instance_id)
         ok = src_buffers is not None
         if src_buffers is not None:
             try:
@@ -501,16 +501,16 @@ class EngineDrivenTransferContext(TransferContext):
             # SHM path: ensure all device writes are complete before releasing
             # the SHM slot (server may immediately reuse it after commit_retrieve).
             torch_dev.synchronize()
-        self._engine_driven_context.commit_retrieve(key, instance_id)
+        self._backend.commit_retrieve(key, instance_id)
 
         future: MessagingFuture[bool] = MessagingFuture()
         future.set_result(ok)
         return future
 
     def close(self) -> None:
-        if self._engine_driven_context is not None:
-            self._engine_driven_context.close()
-            self._engine_driven_context = None
+        if self._backend is not None:
+            self._backend.close()
+            self._backend = None
 
 
 def create_transfer_context(

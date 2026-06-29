@@ -216,7 +216,7 @@ class LMCacheKVCacheContext:
                 f"{type(transfer_ctx).__name__}."
             )
         self._transfer_ctx = ContiguousTransferWrapper(
-            transfer_ctx.engine_driven_context, self._chunk_size
+            transfer_ctx.backend, self._chunk_size
         )
 
     @property
