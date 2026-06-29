@@ -144,7 +144,7 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
             return
         if try_native_to_gpu(
             use_mla=self.use_mla,
-            memory_tensor=memory_obj.tensor,
+            memory_tensor=tensor,
             kvcaches=self.kvcaches,
             slot_mapping=slot_mapping,
             start=start,
@@ -217,7 +217,7 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
             return
         if try_native_from_gpu(
             use_mla=self.use_mla,
-            memory_tensor=memory_obj.tensor,
+            memory_tensor=tensor,
             kvcaches=self.kvcaches,
             slot_mapping=slot_mapping,
             start=start,
@@ -226,7 +226,7 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
             num_heads=self.num_heads,
             head_size=self.head_size,
         ):
-            if memory_obj.tensor.device.type != "musa" and hasattr(torch, "musa"):
+            if tensor.device.type != "musa" and hasattr(torch, "musa"):
                 torch.musa.synchronize()  # type: ignore[attr-defined]
             if self.use_mla:
                 memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
