@@ -550,17 +550,12 @@ class StorageManager:
             attn_desc.world_size,
             windows,
         )
-        retain_set = retain.get_indices_set()
+        retained_indices = retain.get_indices_list()
 
-        released = [
-            keys[i]
-            for i in range(len(keys))
-            if l1_presence.test(i) and i not in retain_set
-        ]
+        released_bitmap = l1_presence & (~retain)
+        released = released_bitmap.gather(keys)
         if released:
             self._l1_manager.finish_read(released, extra_count=extra_count)
-
-        retained_indices = sorted(retain_set)
 
         # Keys from chunk l1_hit_chunks onwards are candidates for L2.
         l1_key_boundary = l1_hit_chunks * stride
@@ -570,10 +565,8 @@ class StorageManager:
             Event(
                 event_type=EventType.SM_READ_PREFETCHED,
                 metadata={
-                    "succeeded_keys": [keys[i] for i in retained_indices],
-                    "failed_keys": [
-                        keys[i] for i in range(len(keys)) if i not in retain_set
-                    ],
+                    "succeeded_keys": retain.gather(keys),
+                    "failed_keys": (~retain).gather(keys),
                 },
             )
         )

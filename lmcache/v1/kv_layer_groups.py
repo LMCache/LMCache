@@ -507,7 +507,10 @@ class KVLayerGroupsManager:
             recurrent state always occupies a full chunk.
         """
         sw_size_tokens = self._kernel_groups[kernel_group_idx].sw_size_tokens
-        if sw_size_tokens <= 0 or sw_size_tokens >= self._lmcache_tokens_per_chunk:
+        if sw_size_tokens == -1 or sw_size_tokens >= self._lmcache_tokens_per_chunk:
+            return self._lmcache_tokens_per_chunk
+        # Mamba layers: recurrent state is fully summarized by one chunk.
+        elif sw_size_tokens == 0:
             return self._lmcache_tokens_per_chunk
         return sw_size_tokens
 
@@ -584,6 +587,7 @@ class KVLayerGroupsManager:
         for kernel_group_idx, group in enumerate(self._kernel_groups):
             if group.sw_size_tokens == -1:
                 sw_size_chunks = -1
+            # Mamba layers: recurrent state needs only the most recent chunk.
             elif group.sw_size_tokens == 0:
                 sw_size_chunks = 1
             else:
