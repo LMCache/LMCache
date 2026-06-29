@@ -89,7 +89,6 @@ def _make_kv_tensors(
 
 def _build_manager(
     tensors: list[torch.Tensor],
-    num_blocks: int = 4,
     engine_kv_format: "lmc_ops.EngineKVFormat" = (
         lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
     ),
@@ -99,8 +98,7 @@ def _build_manager(
     """Build a real :class:`KVLayerGroupsManager` from synthetic tensors."""
     return KVLayerGroupsManager(
         tensors,
-        engine_kv_format=engine_kv_format,
-        num_blocks=num_blocks,
+        engine_kv_formats=[engine_kv_format] * len(tensors),
         engine_group_infos=engine_group_infos,
         lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
     )
@@ -117,7 +115,6 @@ def _make_temp_buffer(
     tensors = _make_kv_tensors(specs, num_blocks=num_blocks)
     manager = _build_manager(
         tensors,
-        num_blocks=num_blocks,
         engine_group_infos=engine_group_infos,
         lmcache_tokens_per_chunk=chunk_size,
     )
@@ -526,7 +523,7 @@ class TestGPUCacheContextReportStatus:
         assert group["layer_indices"] == [0, 1, 2, 3]
         assert group["is_mla"] is False
         assert group["engine_kv_format"] == "NL_X_TWO_NB_BS_NH_HS"
-        assert group["dtype"] == str(ctx.dtype)
+        assert group["dtype"] == str(ctx.kv_tensors[0].dtype)
 
     def test_report_status_multi_group(self) -> None:
         ctx = _make_context(_MULTI_GROUP)

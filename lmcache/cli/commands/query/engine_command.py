@@ -86,11 +86,12 @@ class EngineCommand(BaseCommand):
                 completions_only=args.completions,
                 chat_first=args.chat_first,
             )
-            engine_stats = sender.send_request(prompt_builder.complete_prompt)
+            answer, engine_stats = sender.send_request(prompt_builder.complete_prompt)
 
             model_id = args.model or str(engine_stats["model"][1])
             metrics = self.create_metrics("Query Engine", args)
             metrics.add("model", "Model", model_id)
+            metrics.add("answer", "Answer", answer)
             prompt_name, prompt_value = engine_stats["prompt_tokens"]
             metrics.add("prompt_tokens", prompt_name, int(prompt_value))
             output_name, output_value = engine_stats["output_tokens"]

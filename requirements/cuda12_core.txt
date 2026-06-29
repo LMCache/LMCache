@@ -2,5 +2,8 @@
 # LMCACHE_CUDA_MAJOR=12. The cu13 default lives in cuda13_core.txt.
 
 cupy-cuda12x
-# nixl on PyPI is a meta-package that pulls nixl-cu12 (CUDA-only).
-nixl; python_version < "3.13"
+# Depend on nixl-cu12 directly: it provides the top-level `nixl` namespace.
+# The `nixl` meta-package lists both nixl-cu12 and nixl-cu13 as unconditional
+# (unmarked) deps, so it drags the cu13 backend in too; pinning the backend
+# package avoids that double install.
+nixl-cu12; python_version < "3.13"

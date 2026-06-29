@@ -27,16 +27,15 @@ from lmcache.v1.gpu_connector.gds_context import get_gds_context
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
     get_device,
-    get_dtype,
     get_group_data_ptrs,
-    get_num_blocks,
-    get_num_layers,
-    is_mla,
-    normalize_kv_and_discover_format,
+    normalize_and_discover_per_layer_formats,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.multiprocess.custom_types import KVCache
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.multiprocess.group_view import (
+    EngineGroupInfo,
+    engine_group_layer_indices,
+)
 from lmcache.v1.platform.base_cache_context import BaseCacheContext
 
 logger = init_logger(__name__)
@@ -357,20 +356,18 @@ class GPUCacheContext(BaseCacheContext):
         separate_object_groups: bool = True,
     ):
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
-        engine_kv_format, kv_caches_norm = normalize_kv_and_discover_format(
+        kv_caches_norm, engine_kv_formats = normalize_and_discover_per_layer_formats(
             unwrapped,
+            engine_group_layer_indices(engine_group_infos),
             engine_type,
-            layout_hints=layout_hints,
+            layout_hints,
         )
         self.device_ = get_device(kv_caches_norm)
-        is_mla_val = is_mla(engine_kv_format)
-        num_layers_val = get_num_layers(kv_caches_norm, engine_kv_format)
-        num_blocks_val = get_num_blocks(kv_caches_norm, engine_kv_format)
+        num_layers_val = len(engine_kv_formats)
 
         kv_layer_groups_manager = KVLayerGroupsManager(
             kv_caches_norm,
-            engine_kv_format=engine_kv_format,
-            num_blocks=num_blocks_val,
+            engine_kv_formats=engine_kv_formats,
             engine_group_infos=engine_group_infos,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
             separate_object_groups=separate_object_groups,
@@ -385,21 +382,18 @@ class GPUCacheContext(BaseCacheContext):
         )
 
         super().__init__(
-            engine_kv_format=engine_kv_format,
             kv_caches=kv_caches_norm,
             device=self.device_,
             num_layers=num_layers_val,
-            num_blocks=num_blocks_val,
-            is_mla=is_mla_val,
             kv_layer_groups_manager=kv_layer_groups_manager,
             block_ids_buffer=block_ids_buffer,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
         )
 
         self.group_kv_pointers_: list[torch.Tensor] = []
-        for group in self.kv_layer_groups_manager_.kv_layer_groups:
+        for idx, group in enumerate(self.kv_layer_groups_manager_.kv_layer_groups):
             ptrs = get_group_data_ptrs(
-                self.kv_caches_, self.engine_kv_format, group.layer_indices
+                self.kv_caches_, self.get_engine_kv_format(idx), group.layer_indices
             )
             self.group_kv_pointers_.append(list_to_gpu_tensor(ptrs, self.device_))
 
@@ -440,10 +434,6 @@ class GPUCacheContext(BaseCacheContext):
         """
         with torch_dev.stream(self.cuda_stream_):
             get_gds_context().deregister_gpu_buffer(self._temp_buffer.buffer)
-
-    @property
-    def dtype(self) -> torch.dtype:
-        return get_dtype(self.kv_caches_, self.engine_kv_format)
 
     @property
     def stream(self) -> Any:

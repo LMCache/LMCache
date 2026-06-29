@@ -44,6 +44,9 @@ Recipe pages for the validated hybrid-attention architectures:
    * - GLM 5.1/5.2
      - Dynamic Sparse Attention (multiple KV groups)
      - :doc:`/recipes/glm5_2`
+   * - MiniMax-M3
+     - Sparse attention + lightning indexer (mixed KV formats in one group)
+     - :doc:`/recipes/minimax_m3`
 
 .. toctree::
    :hidden:
@@ -55,6 +58,7 @@ Recipe pages for the validated hybrid-attention architectures:
    /recipes/qwen3_5
    /recipes/deepseek_v4_flash
    /recipes/glm5_2
+   /recipes/minimax_m3
 
 What Works
 ----------

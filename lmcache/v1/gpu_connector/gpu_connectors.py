@@ -28,6 +28,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_num_layers,
     get_page_buffer_size,
     get_tokens_per_layer,
+    normalize_and_discover_per_layer_formats,
     normalize_kv_and_discover_format,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
@@ -463,9 +464,11 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         if self.init:
             return
 
-        self.engine_kv_format, self.kvcaches = normalize_kv_and_discover_format(
-            self.kvcaches, EngineType.VLLM, layout_hints=self.layout_hints
+        empty_layer_index_groups: list[list[int]] = []
+        self.kvcaches, engine_kv_formats = normalize_and_discover_per_layer_formats(
+            self.kvcaches, empty_layer_index_groups, EngineType.VLLM, self.layout_hints
         )
+        self.engine_kv_format = engine_kv_formats[0]
         self.num_blocks = get_num_blocks(self.kvcaches, self.engine_kv_format)
         self.block_size = get_block_size(self.kvcaches, self.engine_kv_format)
         self.page_buffer_size = self.num_blocks * self.block_size
@@ -474,8 +477,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         if self.metadata.kv_layer_groups_manager is None:
             self.metadata.kv_layer_groups_manager = KVLayerGroupsManager(
                 self.kvcaches,
-                engine_kv_format=self.engine_kv_format,
-                num_blocks=self.num_blocks,
+                engine_kv_formats=engine_kv_formats,
             )
         klg_manager = self.metadata.kv_layer_groups_manager
 

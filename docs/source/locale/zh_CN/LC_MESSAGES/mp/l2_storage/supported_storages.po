@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"POT-Creation-Date: 2026-06-22 11:07+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -154,6 +154,15 @@ msgid "``mock``"
 msgstr "``mock``"
 
 #: ../../source/mp/l2_storage/supported_storages.rst:48
+#: ../../source/mp/l2_storage/supported_storages.rst:51
 msgid "Testing"
 msgstr "测试"
+
+#: ../../source/mp/l2_storage/supported_storages.rst:49
+msgid ":doc:`Fault Inject <fault_inject>`"
+msgstr "`:doc:`故障注入 <fault_inject>` `"
+
+#: ../../source/mp/l2_storage/supported_storages.rst:50
+msgid "``fault_inject``"
+msgstr "``fault_inject``"
 

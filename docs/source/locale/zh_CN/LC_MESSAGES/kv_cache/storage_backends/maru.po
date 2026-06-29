@@ -87,7 +87,7 @@ msgstr "配置"
 
 #: ../../source/kv_cache/storage_backends/maru.rst:68
 msgid "**LMCache Parameters:**"
-msgstr "**LMCache 参数:**"
+msgstr "**LMCache 参数：**"
 
 #: ../../source/kv_cache/storage_backends/maru.rst:74
 #: ../../source/kv_cache/storage_backends/maru.rst:90
@@ -110,7 +110,7 @@ msgstr "``maru_path``"
 
 #: ../../source/kv_cache/storage_backends/maru.rst:78
 msgid "Required"
-msgstr "必需"
+msgstr "必需的"
 
 #: ../../source/kv_cache/storage_backends/maru.rst:79
 msgid "Maru server URL (format: ``maru://host:port``)"

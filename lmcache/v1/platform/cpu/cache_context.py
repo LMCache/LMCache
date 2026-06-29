@@ -30,13 +30,11 @@ from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
     get_group_data_ptrs,
-    get_num_blocks,
-    get_num_layers,
-    is_mla,
-    normalize_kv_and_discover_format,
+    normalize_and_discover_per_layer_formats,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.multiprocess.custom_types import KVCache
+from lmcache.v1.multiprocess.group_view import engine_group_layer_indices
 from lmcache.v1.platform.base_cache_context import BaseCacheContext
 from lmcache.v1.platform.cpu.stub_cpu_device import StubStream
 
@@ -94,21 +92,19 @@ class CPUCacheContext(BaseCacheContext):
         # PageBufferShapeDesc here. ``layout_hints`` / ``engine_type``
         # are forwarded so the signature matches GPUCacheContext.
         (
-            engine_kv_format,
             kv_caches_normalized,
-        ) = normalize_kv_and_discover_format(
+            engine_kv_formats,
+        ) = normalize_and_discover_per_layer_formats(
             unwrapped,
+            engine_group_layer_indices(engine_group_infos),
             engine_type,
-            layout_hints=layout_hints,
+            layout_hints,
         )
         kv_caches_list: list[torch.Tensor] = list(kv_caches_normalized)
-        is_mla_val = is_mla(engine_kv_format)
-        num_layers_val = get_num_layers(kv_caches_list, engine_kv_format)
-        num_blocks_val = get_num_blocks(kv_caches_list, engine_kv_format)
+        num_layers_val = len(engine_kv_formats)
         kv_layer_groups_manager = KVLayerGroupsManager(
             kv_caches_list,
-            engine_kv_format=engine_kv_format,
-            num_blocks=num_blocks_val,
+            engine_kv_formats=engine_kv_formats,
             engine_group_infos=engine_group_infos,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
             separate_object_groups=separate_object_groups,
@@ -119,12 +115,9 @@ class CPUCacheContext(BaseCacheContext):
         block_ids_buffer = torch.empty(_MAX_BLOCK_IDS, dtype=torch.long)
 
         super().__init__(
-            engine_kv_format=engine_kv_format,
             kv_caches=kv_caches_list,
             device=self.device_,
             num_layers=num_layers_val,
-            num_blocks=num_blocks_val,
-            is_mla=is_mla_val,
             kv_layer_groups_manager=kv_layer_groups_manager,
             block_ids_buffer=block_ids_buffer,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
@@ -136,12 +129,12 @@ class CPUCacheContext(BaseCacheContext):
             torch.tensor(
                 get_group_data_ptrs(
                     self.kv_caches_,
-                    self.engine_kv_format,
+                    self.get_engine_kv_format(idx),
                     group.layer_indices,
                 ),
                 dtype=torch.long,
             )
-            for group in self.kv_layer_groups_manager_.kv_layer_groups
+            for idx, group in enumerate(self.kv_layer_groups_manager_.kv_layer_groups)
         ]
 
         self.kv_cache_pointers_ = torch.tensor(
@@ -189,7 +182,7 @@ class CPUCacheContext(BaseCacheContext):
         logger.info(
             "CPUCacheContext: %d layers, %d blocks, dtype=%s (shm-backed)",
             self.num_layers_,
-            self.num_blocks_,
+            self.num_blocks,
             self.kv_caches_[0].dtype,
         )
 
@@ -222,11 +215,6 @@ class CPUCacheContext(BaseCacheContext):
         pass
 
     # -- Properties (same API as GPUCacheContext) --
-
-    @property
-    def dtype(self) -> torch.dtype:
-        """Returns the dtype of the KV cache tensors."""
-        return self.kv_caches_[0].dtype
 
     @property
     def max_batch_size(self) -> int:

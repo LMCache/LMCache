@@ -16,6 +16,7 @@ from lmcache.v1.kv_layer_groups import (
     LayerGroupIdentity,
     ObjectGroupInfo,
     format_kvcache_shape_spec,
+    group_layers_by_identity,
     parse_kvcache_shape_spec,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
@@ -28,7 +29,6 @@ pytestmark = pytest.mark.skipif(
 def _build_manager(
     tensors: list[torch.Tensor],
     *,
-    num_blocks: int,
     engine_group_infos: Sequence[EngineGroupInfo] = (),
     separate_object_groups: bool = False,
 ) -> KVLayerGroupsManager:
@@ -36,16 +36,15 @@ def _build_manager(
 
     Tensors in these tests have shape ``[2, NB, BS, NH, HS]`` — the
     canonical vLLM flash-attention per-layer NHD layout matched by
-    ``GPUKVFormat.NL_X_TWO_NB_BS_NH_HS``. ``bs`` is discovered
-    per-layer from the tensor shapes, so callers no longer pass it.
+    ``GPUKVFormat.NL_X_TWO_NB_BS_NH_HS``. ``bs`` and ``nb`` are discovered
+    per-layer from the tensor shapes, so callers pass neither.
     """
     # First Party
     import lmcache.c_ops as lmc_ops
 
     return KVLayerGroupsManager(
         tensors,
-        engine_kv_format=lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
-        num_blocks=num_blocks,
+        engine_kv_formats=[lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS] * len(tensors),
         engine_group_infos=engine_group_infos,
         separate_object_groups=separate_object_groups,
     )
@@ -55,12 +54,12 @@ class TestKVLayerGroupsManager:
     """Tests for KVLayerGroupsManager construction and lookups."""
 
     def test_build_empty(self):
-        manager = _build_manager([], num_blocks=32)
+        manager = _build_manager([])
         assert manager.kernel_groups == []
 
     def test_build_single_layer(self):
         tensors = [torch.randn(2, 32, 256, 8, 64, dtype=torch.float16)]
-        manager = _build_manager(tensors, num_blocks=32)
+        manager = _build_manager(tensors)
 
         assert len(manager.kernel_groups) == 1
         group = manager.kernel_groups[0]
@@ -74,11 +73,48 @@ class TestKVLayerGroupsManager:
         assert group.shape_desc.bs == 256
         assert group.dtype == torch.float16
 
+    def test_build_mixed_formats_per_group(self):
+        """Mixed-format shape: a K+V group and a key-only MLA group are shaped
+        with their own per-layer formats (kv_size 2 and 1), not one shared
+        format -- the server-side per-group path."""
+        # First Party
+        import lmcache.c_ops as lmc_ops
+
+        tensors = [
+            torch.randn(2, 32, 256, 8, 64, dtype=torch.bfloat16),  # K+V (rank-5)
+            torch.randn(32, 256, 128, dtype=torch.bfloat16),  # MLA key-only (rank-3)
+        ]
+        manager = KVLayerGroupsManager(
+            tensors,
+            engine_kv_formats=[
+                lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+                lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
+            ],
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,)),
+                EngineGroupInfo(1, (1,)),
+            ],
+        )
+
+        groups = manager.kernel_groups
+        assert len(groups) == 2
+        by_group = {g.engine_group_idx: g for g in groups}
+        assert by_group[0].shape_desc.kv_size == 2  # K+V main cache
+        assert by_group[0].shape_desc.nh == 8
+        assert by_group[1].shape_desc.kv_size == 1  # key-only MLA index cache
+        assert by_group[1].shape_desc.nh == 1
+        assert by_group[1].shape_desc.hs == 128
+        # Each kernel group persists its own format for the transfer path.
+        assert (
+            by_group[0].engine_kv_format == lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+        )
+        assert by_group[1].engine_kv_format == lmc_ops.EngineKVFormat.NL_X_NB_BS_HS
+
     def test_build_multiple_layers_same_shape(self):
         tensors = [
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16) for _ in range(3)
         ]
-        manager = _build_manager(tensors, num_blocks=32)
+        manager = _build_manager(tensors)
 
         assert len(manager.kernel_groups) == 1
         group = manager.kernel_groups[0]
@@ -93,7 +129,6 @@ class TestKVLayerGroupsManager:
         ]
         manager = _build_manager(
             tensors,
-            num_blocks=32,
             engine_group_infos=[
                 EngineGroupInfo(0, (0, 2)),
                 EngineGroupInfo(1, (1, 3)),
@@ -114,7 +149,6 @@ class TestKVLayerGroupsManager:
         with pytest.raises(ValueError, match="outside registered layer"):
             _build_manager(
                 tensors,
-                num_blocks=32,
                 engine_group_infos=[EngineGroupInfo(0, (2,))],
             )
 
@@ -129,7 +163,6 @@ class TestKVLayerGroupsManager:
         with pytest.raises(ValueError, match="engine group info"):
             _build_manager(
                 tensors,
-                num_blocks=32,
                 engine_group_infos=[EngineGroupInfo(0, (0, 1))],
             )
 
@@ -139,7 +172,7 @@ class TestKVLayerGroupsManager:
             torch.randn(2, 32, 256, 16, 64, dtype=torch.float16),
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
         ]
-        manager = _build_manager(tensors, num_blocks=32)
+        manager = _build_manager(tensors)
         assert len(manager.kernel_groups) == 2
         group1, group2 = manager.kernel_groups
         assert group1.layer_indices == [0, 2]
@@ -153,7 +186,7 @@ class TestKVLayerGroupsManager:
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float32),
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
         ]
-        manager = _build_manager(tensors, num_blocks=32)
+        manager = _build_manager(tensors)
         assert len(manager.kernel_groups) == 2
         group1, group2 = manager.kernel_groups
         assert group1.layer_indices == [0, 2]
@@ -169,7 +202,7 @@ class TestKVLayerGroupsManager:
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),  # nh=8, f16
             torch.randn(2, 32, 256, 16, 64, dtype=torch.float32),  # nh=16, f32
         ]
-        manager = _build_manager(tensors, num_blocks=32)
+        manager = _build_manager(tensors)
         assert len(manager.kernel_groups) == 4
 
         groups_by_key = {(g.shape_desc.nh, g.dtype): g for g in manager.kernel_groups}
@@ -183,7 +216,7 @@ class TestKVLayerGroupsManager:
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
             torch.randn(2, 32, 256, 16, 64, dtype=torch.float16),
         ]
-        manager = _build_manager(tensors, num_blocks=32)
+        manager = _build_manager(tensors)
 
         sd0 = manager.get_shape_desc(0)
         assert sd0.nh == 8
@@ -212,6 +245,9 @@ class TestParseKvcacheShapeSpec:
         assert g.shape_desc.nl == 32
         assert g.dtype == torch.float16
         assert g.layer_indices == list(range(32))
+        # Bench bookkeeping groups carry no format (the server re-detects); the
+        # spec has no format enum and these never drive a transfer.
+        assert g.engine_kv_format is None
 
     def test_multiple_groups(self):
         """Test parsing multiple groups separated by semicolons."""
@@ -344,6 +380,10 @@ class TestKernelGroupIdentity:
     """The grouping key is a named tuple; ``LayerGroupIdentity`` is its alias."""
 
     def test_fields_and_alias(self):
+        # First Party
+        import lmcache.c_ops as lmc_ops
+
+        fmt = lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
         ident = KernelGroupIdentity(
             kv_size=2,
             num_heads=8,
@@ -351,6 +391,7 @@ class TestKernelGroupIdentity:
             block_size=16,
             engine_group_idx=0,
             dtype=torch.float16,
+            engine_kv_format=fmt,
         )
         assert ident.kv_size == 2
         assert ident.num_heads == 8
@@ -358,14 +399,46 @@ class TestKernelGroupIdentity:
         assert ident.block_size == 16
         assert ident.engine_group_idx == 0
         assert ident.dtype == torch.float16
+        assert ident.engine_kv_format == fmt
         assert LayerGroupIdentity is KernelGroupIdentity
 
     def test_hashable_as_dict_key(self):
-        ident = KernelGroupIdentity(2, 8, 64, 16, 0, torch.float16)
+        # First Party
+        import lmcache.c_ops as lmc_ops
+
+        fmt = lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+        ident = KernelGroupIdentity(2, 8, 64, 16, 0, torch.float16, fmt)
         assert {ident: "x"}[ident] == "x"
 
     def test_excluded_engine_group_sentinel(self):
         assert EXCLUDED_ENGINE_GROUP == -1
+
+    def test_format_in_identity_splits_same_geometry(self):
+        """Two layers with identical geometry but different layouts (NHD vs HND,
+        num_heads == block_size) must not merge into one kernel group: format is
+        part of the identity, so each gets its own kernel with the correct
+        layout instead of one transferring the other with the wrong axis order.
+        """
+        # First Party
+        import lmcache.c_ops as lmc_ops
+
+        # NH == BS == 16, so NHD [.., BS, NH, ..] and HND [.., NH, BS, ..] yield
+        # the same kv_size/num_heads/head_size/block_size; only axis order differs.
+        tensors = [
+            torch.randn(2, 32, 16, 16, 64, dtype=torch.float16),
+            torch.randn(2, 32, 16, 16, 64, dtype=torch.float16),
+        ]
+        groups = group_layers_by_identity(
+            tensors,
+            [
+                lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,  # NHD
+                lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,  # HND
+            ],
+        )
+        # Without the format in the identity these share one geometry and would
+        # have merged into a single group; with it they split into two.
+        assert len(groups) == 2
+        assert {idxs[0] for _, idxs in groups} == {0, 1}
 
 
 class TestKernelAndObjectGroups:
@@ -376,7 +449,7 @@ class TestKernelAndObjectGroups:
         tensors = [
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16) for _ in range(3)
         ]
-        manager = _build_manager(tensors, num_blocks=32)
+        manager = _build_manager(tensors)
         # The deprecated alias must still return the live list, not a bound
         # method (regression guard for the @property/@deprecate ordering).
         assert isinstance(manager.kv_layer_groups, list)
@@ -392,7 +465,7 @@ class TestKernelAndObjectGroups:
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
             torch.randn(2, 32, 256, 16, 64, dtype=torch.float16),
         ]
-        manager = _build_manager(tensors, num_blocks=32)
+        manager = _build_manager(tensors)
         assert manager.num_kernel_groups == 2
         assert manager.num_object_groups == 1
         obj = manager.object_groups[0]
@@ -408,7 +481,6 @@ class TestKernelAndObjectGroups:
         tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(2)]
         manager = _build_manager(
             tensors,
-            num_blocks=32,
             engine_group_infos=[
                 EngineGroupInfo(0, (0,)),
                 EngineGroupInfo(1, (1,), sw_size_tokens=64),
@@ -427,7 +499,6 @@ class TestKernelAndObjectGroups:
         tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(2)]
         manager = _build_manager(
             tensors,
-            num_blocks=32,
             engine_group_infos=[
                 EngineGroupInfo(0, (0,)),
                 EngineGroupInfo(1, (1,), sw_size_tokens=64),
@@ -452,7 +523,7 @@ class TestKernelAndObjectGroups:
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
             torch.randn(2, 32, 256, 16, 64, dtype=torch.float16),
         ]
-        manager = _build_manager(tensors, num_blocks=32, separate_object_groups=True)
+        manager = _build_manager(tensors, separate_object_groups=True)
         assert manager.num_object_groups == 1
         assert manager.get_attn_desc().num_chunks_in_sw == [-1]
 
@@ -462,7 +533,6 @@ class TestKernelAndObjectGroups:
         tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(2)]
         manager = _build_manager(
             tensors,
-            num_blocks=32,
             engine_group_infos=[
                 EngineGroupInfo(0, (0,)),
                 EngineGroupInfo(1, (1,), sw_size_tokens=64),
@@ -477,7 +547,6 @@ class TestKernelAndObjectGroups:
         with pytest.raises(ValueError, match="sliding window"):
             _build_manager(
                 tensors,
-                num_blocks=32,
                 engine_group_infos=[EngineGroupInfo(0, (0,), sw_size_tokens=64)],
             )
 
@@ -492,7 +561,6 @@ class TestKernelAndObjectGroups:
         ]
         manager = _build_manager(
             tensors,
-            num_blocks=32,
             engine_group_infos=[
                 EngineGroupInfo(0, (0,)),
                 EngineGroupInfo(0, (1,), sw_size_tokens=64),
@@ -518,7 +586,6 @@ class TestKernelAndObjectGroups:
         ]
         manager = _build_manager(
             tensors,
-            num_blocks=32,
             engine_group_infos=[
                 EngineGroupInfo(0, (0,)),
                 EngineGroupInfo(0, (1,), sw_size_tokens=64),
@@ -534,7 +601,7 @@ class TestKernelAndObjectGroups:
     def test_empty_manager_has_no_groups(self):
         # Empty registration returns early in __init__; both group lists must
         # still be initialized (regression guard for missing _object_groups).
-        manager = _build_manager([], num_blocks=32)
+        manager = _build_manager([])
         assert manager.kernel_groups == []
         assert manager.num_kernel_groups == 0
         assert manager.object_groups == []
@@ -547,7 +614,6 @@ class TestKernelAndObjectGroups:
         ]
         manager = _build_manager(
             tensors,
-            num_blocks=32,
             engine_group_infos=[EngineGroupInfo(0, (0, 1))],
         )
         grouped = sorted(
@@ -558,7 +624,7 @@ class TestKernelAndObjectGroups:
     def test_calculate_num_blocks_uncompressed(self):
         # bs=16, compress_ratio=1 -> 256 tokens span 16 blocks.
         tensors = [torch.randn(2, 32, 16, 8, 64, dtype=torch.float16) for _ in range(2)]
-        manager = _build_manager(tensors, num_blocks=32)
+        manager = _build_manager(tensors)
         assert manager.calculate_num_blocks(0, 256) == 16
 
     def test_dsv4_flash_style_mixed_compression(self):
@@ -573,7 +639,6 @@ class TestKernelAndObjectGroups:
         ]
         manager = _build_manager(
             tensors,
-            num_blocks=8,
             engine_group_infos=[
                 EngineGroupInfo(0, (0,), tokens_per_block=256),
                 EngineGroupInfo(0, (1,), tokens_per_block=256),
@@ -597,7 +662,6 @@ class TestKernelAndObjectGroups:
         tensors = [torch.randn(2, 32, 8, 8, 64, dtype=torch.float16) for _ in range(2)]
         manager = _build_manager(
             tensors,
-            num_blocks=32,
             engine_group_infos=[
                 EngineGroupInfo(0, (0, 1), tokens_per_block=16),
             ],

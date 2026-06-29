@@ -368,7 +368,7 @@ def transfer_kv_per_object_group(
                 direction,
                 cache_context.get_shape_desc(kernel_group_id),
                 group_lmcache_chunk_size,
-                cache_context.engine_kv_format,
+                cache_context.get_engine_kv_format(kernel_group_id),
                 recalculated_skip_blocks,
             )
 
