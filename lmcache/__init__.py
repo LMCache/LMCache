@@ -23,7 +23,7 @@ logger = init_logger(__name__)
 
 __all__ = ["__version__", "torch_dev", "torch_device_type"]
 
-_ops = get_backend()
+_ops = get_backend(torch_device_type)
 if _ops is not None:
     # Override lmcache.c_ops with merged module,
     # in which:

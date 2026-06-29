@@ -42,16 +42,23 @@ logger = init_logger(__name__)
 # Device info registry
 # ---------------------------------------------------------------------------
 
-_DEVICE_REGISTRY: list[DeviceInfo] = [
-    cls()
-    for cls in discover_subclasses(
-        "lmcache.v1.platform",
-        DeviceInfo,  # type: ignore[type-abstract]
-        module_filter=lambda name: not name.startswith(("_", "base")),
-        require_defined_in_module=True,
-        on_import_error=lambda name, exc: None,
+# the device order now is: musa > xpu > hpu > cuda > cpu
+_DEVICE_REGISTRY: dict[str, DeviceInfo] = {
+    info.device_type: info
+    for info in sorted(
+        (
+            cls()
+            for cls in discover_subclasses(
+                "lmcache.v1.platform",
+                DeviceInfo,  # type: ignore[type-abstract]
+                module_filter=lambda name: not name.startswith(("_", "base")),
+                require_defined_in_module=True,
+                on_import_error=lambda name, exc: None,
+            )
+        ),
+        key=lambda info: info.priority,
     )
-]
+}
 
 # ---------------------------------------------------------------------------
 # Device detection
@@ -73,21 +80,19 @@ def _detect_device() -> tuple[Any, str]:
         logger.warning("load torch failed, error is %s", e)
         return None, "cpu"  # fallback for CLI-only environments
 
-    for info in _DEVICE_REGISTRY:
-        try:
-            if not info.is_available():
-                continue
-        except Exception:
+    for info in _DEVICE_REGISTRY.values():
+        if not info.is_available():
             continue
 
         torch_module = getattr(torch, info.torch_module_name, None)
         if torch_module is not None:
-            logger.info(
-                "%s device is available. Using %s for LMCache engine.",
-                info.device_type.upper(),
-                info.device_type.upper(),
-            )
             return torch_module, info.device_type
+        else:
+            logger.warning(
+                "device [%s] is available, but torch module [%s] is not found.",
+                info.device_type,
+                info.torch_module_name,
+            )
 
     # No accelerator found -- fall back to CPU stub
     # First Party
@@ -101,8 +106,14 @@ def _detect_device() -> tuple[Any, str]:
 # ---------------------------------------------------------------------------
 
 
-def get_backend() -> Any | None:
-    """Select the ops backend for the detected device via the registry.
+def get_backend(device_type: str) -> Any | None:
+    """Select the ops backend for the given device type.
+
+    Looks up the :class:`DeviceInfo` for *device_type* in the registry
+    and loads/merges its ops module on top of the Python fallback.
+
+    Args:
+        device_type: The detected device type string (e.g. ``"cuda"``).
 
     Returns:
         A merged :class:`types.ModuleType` (fallback + hw-specific ops),
@@ -121,28 +132,31 @@ def get_backend() -> Any | None:
         logger.warning("Cannot load python_ops_fallback: %s", e)
         return None
 
-    # Find the ops module for the detected device type from the registry
-    for info in _DEVICE_REGISTRY:
-        try:
-            if not info.is_available():
-                continue
-        except Exception:
-            continue
+    info = _DEVICE_REGISTRY.get(device_type)
+    if info is None:
+        logger.info("No DeviceInfo registered for %r, using fallback ops.", device_type)
+        return default_module
 
-        if not info.ops_module:
-            # Device is available but has no custom ops -- use fallback
-            logger.info("Using fallback ops for device: %s", info.device_type)
-            return default_module
+    if not info.is_available():
+        logger.warning("Device %s is not available, using fallback ops.", device_type)
+        return default_module
 
-        try:
-            backend_module = importlib.import_module(info.ops_module)
-            merged_module = types.ModuleType("lmcache.c_ops")
-            merged_module.__dict__.update(default_module.__dict__)
-            merged_module.__dict__.update(backend_module.__dict__)
-            logger.info("Using backend: %s", info.ops_module)
-            return merged_module
-        except Exception as e:
-            logger.warning("Failed to import backend %s: %s", info.ops_module, e)
+    if not info.ops_module:
+        # Device has no custom ops -- use fallback
+        logger.info(
+            "Custom ops not supported for device: %s, using fallback ops.", device_type
+        )
+        return default_module
+
+    try:
+        backend_module = importlib.import_module(info.ops_module)
+        merged_module = types.ModuleType("lmcache.c_ops")
+        merged_module.__dict__.update(default_module.__dict__)
+        merged_module.__dict__.update(backend_module.__dict__)
+        logger.info("Using backend: %s", info.ops_module)
+        return merged_module
+    except Exception as e:
+        logger.warning("Failed to import backend %s: %s", info.ops_module, e)
 
     return default_module
 

@@ -98,12 +98,11 @@ class _StubTorch:
         has_musa: bool = False,
         has_xpu: bool = False,
         has_hpu: bool = False,
-        cuda_available: bool = True,
         musa_available: bool = False,
         xpu_available: bool = False,
         hpu_available: bool = False,
     ) -> None:
-        self.cuda = SimpleNamespace(is_available=lambda: cuda_available)
+        self.cuda = SimpleNamespace(is_available=lambda: True)
         if has_musa:
             self.musa = SimpleNamespace(is_available=lambda: musa_available)
         if has_xpu:
@@ -122,20 +121,14 @@ def _detect_with_stub(stub: _StubTorch) -> tuple[Any, str]:
 
 
 def test_detect_device_prefers_musa_when_available() -> None:
-    """``_detect_device`` returns MUSA when it is the first available device.
-
-    In the registry-driven architecture, detection order follows
-    alphabetical sub-package scan order (cuda < hpu < musa < xpu).
-    MUSA is selected when CUDA and HPU are unavailable.
-    """
+    """``_detect_device`` returns MUSA whenever ``torch.musa.is_available()``."""
     stub = _StubTorch(
         has_musa=True,
         has_xpu=True,
         has_hpu=True,
-        cuda_available=False,
         musa_available=True,
         xpu_available=True,
-        hpu_available=False,
+        hpu_available=True,
     )
     dev, name = _detect_with_stub(stub)
     assert name == "musa"
@@ -143,11 +136,10 @@ def test_detect_device_prefers_musa_when_available() -> None:
 
 
 def test_detect_device_falls_back_past_unavailable_musa() -> None:
-    """Falls through to XPU when both CUDA and MUSA are unavailable."""
+    """Falls through MUSA when ``torch.musa.is_available()`` is False."""
     stub = _StubTorch(
         has_musa=True,
         has_xpu=True,
-        cuda_available=False,
         musa_available=False,
         xpu_available=True,
     )

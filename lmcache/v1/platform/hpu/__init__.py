@@ -33,3 +33,7 @@ class HpuDeviceInfo(DeviceInfo):
             return hasattr(torch, "hpu") and torch.hpu.is_available()
         except Exception:
             return False
+
+    @property
+    def priority(self) -> int:
+        return 2

@@ -30,29 +30,8 @@ class DeviceInfo(abc.ABC):
     Defining a concrete subclass in a platform sub-package's
     ``__init__.py`` is sufficient for auto-discovery.
 
-    Example usage in ``platform/mlu/__init__.py``::
-
-        from lmcache.v1.platform.base_device_info import DeviceInfo
-
-        class MluDeviceInfo(DeviceInfo):
-            @property
-            def device_type(self) -> str:
-                return "mlu"
-
-            @property
-            def torch_module_name(self) -> str:
-                return "mlu"
-
-            @property
-            def ops_module(self) -> str | None:
-                return "lmcache.mlu_ops"
-
-            def is_available(self) -> bool:
-                try:
-                    import torch
-                    return hasattr(torch, "mlu") and torch.mlu.is_available()
-                except Exception:
-                    return False
+    NOTE: the cpu is a default device, and it is not a real device.
+    The cpu is used to provide a default device for the device detection.
     """
 
     @property
@@ -83,3 +62,8 @@ class DeviceInfo(abc.ABC):
         This method must NOT import from ``lmcache.__init__`` to avoid
         circular dependencies.  Use ``import torch`` directly instead.
         """
+
+    @property
+    def priority(self) -> int:
+        """Precedence priority for device detection (lower values checked first)."""
+        return 10
