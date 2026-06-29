@@ -4,6 +4,7 @@ Unit tests for BigtableL2Adapter.
 """
 
 # Standard
+import asyncio
 from contextvars import ContextVar
 from unittest import mock
 import threading
@@ -531,12 +532,15 @@ class TestBigtableL2Adapter:
         key = create_test_key(1)
         obj = create_test_memory_obj(42, 64)
 
-        mock_data = mock.MagicMock()
-        mock_data.__len__.return_value = 250 * 1024 * 1024  # 250 MB
+        class FakeBytes(bytes):
+            def __len__(self):
+                return 95 * 1024 * 1024
+
+        fake_shards = {"shard1": FakeBytes()}
 
         with mock.patch(
-            "lmcache.v1.distributed.l2_adapters.bigtable_l2_adapter.bytes",
-            return_value=mock_data,
+            "lmcache.v1.distributed.l2_adapters.bigtable_l2_adapter._prepare_and_shard",
+            return_value=(FakeBytes(), fake_shards),
         ):
             adapter.submit_store_task([key], [obj])
             assert wait_for_event(adapter.get_store_event_fd())
@@ -584,22 +588,21 @@ class TestBigtableL2Adapter:
         key_large = create_test_key(2)
         obj_large = create_test_memory_obj(42, 64)
 
-        adapter._sharder = mock.MagicMock()
-        adapter._sharder.shard.return_value = {
-            "layers_0_1": b"fake_1",
-            "layers_2_3": b"fake_2",
-        }
-
         class FakeBytes(bytes):
             def __len__(self):
                 return 160 * 1024 * 1024
 
         fake_bytes_obj = FakeBytes(b"fake")
+        fake_shards = {
+            "layers_0_1": b"fake_1",
+            "layers_2_3": b"fake_2",
+        }
 
         with (
             mock.patch(
-                "lmcache.v1.distributed.l2_adapters.bigtable_l2_adapter.bytes",
-                return_value=fake_bytes_obj,
+                "lmcache.v1.distributed.l2_adapters.bigtable_l2_adapter."
+                "_prepare_and_shard",
+                return_value=(fake_bytes_obj, fake_shards),
             ),
             mock.patch.object(FakeTable, "mutate_row", spy_mutate_row),
         ):
@@ -612,6 +615,168 @@ class TestBigtableL2Adapter:
             if not isinstance(mutations, list):
                 mutations = [mutations]
             assert len(mutations) == 1
+
+        adapter.pop_completed_store_tasks()
+        adapter.close()
+
+    def test_circuit_breaker_resets_on_clean_cache_misses(self):
+        cfg = create_test_config()
+        adapter = BigtableL2Adapter(cfg)
+
+        # Set connection failures
+        with adapter._lock:
+            adapter._connection_failures = 2
+
+        key = create_test_key(1)
+        # Lookup key that doesn't exist
+        lookup_task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        assert wait_for_event(adapter.get_lookup_and_lock_event_fd())
+        adapter.query_lookup_and_lock_result(lookup_task_id)
+
+        # Verify failures reset to 0
+        with adapter._lock:
+            assert adapter._connection_failures == 0
+
+        adapter.close()
+
+    def test_lookup_rollback_on_cancellation(self):
+        cfg = create_test_config()
+        adapter = BigtableL2Adapter(cfg)
+
+        key1 = create_test_key(1)
+        key2 = create_test_key(2)
+
+        # Pre-set existence cache to True for key1 so it gets pre-acquired
+        adapter._exists_cache.put(
+            adapter._key_encoder.encode_row_key(key1).decode("utf-8"), True
+        )
+        # Pre-set existence cache to None for key2 so it goes to read_row
+        adapter._exists_cache.invalidate(
+            adapter._key_encoder.encode_row_key(key2).decode("utf-8")
+        )
+
+        async_block = asyncio.Event()
+
+        # We mock read_row to block indefinitely
+        async def mock_read_row(*args, **kwargs):
+            await async_block.wait()
+            return None
+
+        def cancel_lookup():
+            for task in asyncio.all_tasks(adapter._loop):
+                if "_execute_lookup" in str(task):
+                    task.cancel()
+
+        with mock.patch.object(FakeTable, "read_row", mock_read_row):
+            lookup_task_id = adapter.submit_lookup_and_lock_task(
+                [key1, key2], _EMPTY_LAYOUT
+            )
+            # Allow task to run and block on read_row
+            time.sleep(0.1)
+
+            # Trigger cancellation from event loop thread
+            adapter._loop.call_soon_threadsafe(cancel_lookup)
+
+            # Wait for task completion notification on eventfd
+            assert wait_for_event(adapter.get_lookup_and_lock_event_fd())
+            adapter.query_lookup_and_lock_result(lookup_task_id)
+
+        # Refcounts should be rolled back to 0
+        with adapter._lock:
+            assert adapter._locked_keys[key1] == 0
+            assert adapter._locked_keys[key2] == 0
+
+        adapter.close()
+
+    def test_lookup_reconciles_accounting_on_cache_miss(self):
+        cfg = create_test_config()
+        adapter = BigtableL2Adapter(cfg)
+
+        key = create_test_key(1)
+        # Manually store size in adapter size accounting to simulate ghost bytes
+        with adapter._lock:
+            adapter._key_sizes[key] = 1024
+            adapter._object_size_cache[
+                adapter._key_encoder.encode_row_key(key).decode("utf-8")
+            ] = 1024
+
+        class TestListener(L2AdapterListener):
+            def __init__(self):
+                self.deleted = []
+
+            def on_l2_keys_stored(self, keys):
+                pass
+
+            def on_l2_keys_accessed(self, keys):
+                pass
+
+            def on_l2_keys_deleted(self, keys):
+                self.deleted.extend(keys)
+
+        listener = TestListener()
+        adapter.register_listener(listener)
+
+        # Lookup key that doesn't exist in backend
+        lookup_task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
+        assert wait_for_event(adapter.get_lookup_and_lock_event_fd())
+        adapter.query_lookup_and_lock_result(lookup_task_id)
+
+        # Allow background threads to run callback
+        time.sleep(0.1)
+
+        # Verify key was popped and listener notified
+        assert key in listener.deleted
+        with adapter._lock:
+            assert key not in adapter._key_sizes
+
+        adapter.close()
+
+    def test_unsharded_bulk_store_size_chunking(self):
+        cfg = create_test_config()
+        cfg.layer_group_size = 0  # unsharded
+        cfg.max_chunk_size_mb = 50.0
+
+        adapter = BigtableL2Adapter(cfg)
+
+        key1 = create_test_key(1)
+        key2 = create_test_key(2)
+        key3 = create_test_key(3)
+
+        class FakeBytes(bytes):
+            def __new__(cls, *args, **kwargs):
+                return bytes.__new__(cls, *args, **kwargs)
+
+            def __len__(self):
+                return 12 * 1024 * 1024
+
+        # Submit store task with 3 objects
+        obj1 = create_test_memory_obj(42, 64)
+        obj2 = create_test_memory_obj(42, 64)
+        obj3 = create_test_memory_obj(42, 64)
+
+        bulk_mutate_calls = []
+        original_bulk_mutate_rows = FakeTable.bulk_mutate_rows
+
+        async def spy_bulk_mutate_rows(self_table, entries, **kwargs):
+            bulk_mutate_calls.append(list(entries))
+            return await original_bulk_mutate_rows(self_table, entries, **kwargs)
+
+        with (
+            mock.patch(
+                "lmcache.v1.distributed.l2_adapters.bigtable_l2_adapter._prepare_bytes",
+                side_effect=[FakeBytes(b"1"), FakeBytes(b"2"), FakeBytes(b"3")],
+            ),
+            mock.patch.object(FakeTable, "bulk_mutate_rows", spy_bulk_mutate_rows),
+        ):
+            adapter.submit_store_task([key1, key2, key3], [obj1, obj2, obj3])
+            assert wait_for_event(adapter.get_store_event_fd())
+
+        # With 12 MiB each, first 2 objects = 24 MiB fits in first batch.
+        # Adding third object = 36 MiB > 30 MiB.
+        # So first batch has 2 entries, second batch has 1 entry.
+        assert len(bulk_mutate_calls) == 2
+        assert len(bulk_mutate_calls[0]) == 2
+        assert len(bulk_mutate_calls[1]) == 1
 
         adapter.pop_completed_store_tasks()
         adapter.close()

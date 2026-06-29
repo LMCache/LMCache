@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from typing import Any, List, Optional, cast
+
 # Standard
 from enum import IntEnum, auto
-from typing import Any, List, Optional
 import asyncio
 import inspect
 
@@ -92,6 +93,19 @@ def _extract_shards_from_row(row: Any, family_name: str) -> dict[str, bytes]:
             )
 
     return shards
+
+
+def _prepare_bytes(blob: Any) -> bytes:
+    if isinstance(blob, (bytes, bytearray)):
+        return cast(bytes, blob)
+    return bytes(blob)
+
+
+def _prepare_and_shard(
+    sharder: BigtablePayloadSharder, blob: Any
+) -> tuple[bytes, dict[str, bytes]]:
+    data_bytes = blob if isinstance(blob, (bytes, bytearray)) else bytes(blob)
+    return cast(bytes, data_bytes), sharder.shard(cast(bytes, data_bytes))
 
 
 class BigtableConnector(RemoteConnector):
@@ -449,14 +463,15 @@ class BigtableConnector(RemoteConnector):
             return
 
         row_key = self.schema.get_row_key(key)
-        data_bytes = bytes(blob) if not isinstance(blob, (bytes, bytearray)) else blob
+        loop = asyncio.get_running_loop()
 
         # Third Party
         from google.cloud.bigtable.data import SetCell
 
         if self.sharder is not None:
-            loop = asyncio.get_running_loop()
-            shards = await loop.run_in_executor(None, self.sharder.shard, data_bytes)
+            data_bytes, shards = await loop.run_in_executor(
+                None, _prepare_and_shard, self.sharder, blob
+            )
             if max(len(s) for s in shards.values()) > 90 * 1024 * 1024:
                 rk_str = row_key.decode("utf-8", errors="ignore")
                 logger.warning(
@@ -485,6 +500,7 @@ class BigtableConnector(RemoteConnector):
             else:
                 use_combined = False
         else:
+            data_bytes = await loop.run_in_executor(None, _prepare_bytes, blob)
             mutations = [
                 SetCell(self.cfg.family_name, self.cfg.column_name, data_bytes)
             ]
@@ -811,14 +827,11 @@ class BigtableConnector(RemoteConnector):
                 current_batch_size = 0
 
             row_key = self.schema.get_row_key(key)
-            data_bytes = (
-                bytes(blob) if not isinstance(blob, (bytes, bytearray)) else blob
-            )
+            loop = asyncio.get_running_loop()
 
             if self.sharder is not None:
-                loop = asyncio.get_running_loop()
-                shards = await loop.run_in_executor(
-                    None, self.sharder.shard, data_bytes
+                data_bytes, shards = await loop.run_in_executor(
+                    None, _prepare_and_shard, self.sharder, blob
                 )
                 if max(len(s) for s in shards.values()) > 90 * 1024 * 1024:
                     logger.warning(
@@ -872,6 +885,7 @@ class BigtableConnector(RemoteConnector):
                         current_batch_keys.append(key.to_string())
                         current_batch_size += len(shard_data)
             else:
+                data_bytes = await loop.run_in_executor(None, _prepare_bytes, blob)
                 entry = RowMutationEntry(
                     row_key,
                     [

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, cast
 import asyncio
 import threading
 
@@ -151,6 +151,19 @@ def _extract_shards_from_row(row: Any, family_name: str) -> dict[str, bytes]:
             )
 
     return shards
+
+
+def _prepare_bytes(blob: Any) -> bytes:
+    if isinstance(blob, (bytes, bytearray)):
+        return cast(bytes, blob)
+    return bytes(blob)
+
+
+def _prepare_and_shard(
+    sharder: BigtablePayloadSharder, blob: Any
+) -> tuple[bytes, dict[str, bytes]]:
+    data_bytes = blob if isinstance(blob, (bytes, bytearray)) else bytes(blob)
+    return cast(bytes, data_bytes), sharder.shard(cast(bytes, data_bytes))
 
 
 class BigtableL2AdapterConfig(L2AdapterConfigBase):
@@ -684,8 +697,7 @@ class BigtableL2Adapter(L2AdapterInterface):
             for key, obj in zip(keys, objects, strict=True):
                 row_key = self._key_encoder.encode_row_key(key)
                 key_str = row_key.decode("utf-8")
-                data = bytes(obj.byte_array)
-                size = len(data)
+                size = len(obj.byte_array)
 
                 # Skip if already exists on-disk/remote
                 if self._exists_cache.get(key_str):
@@ -711,16 +723,19 @@ class BigtableL2Adapter(L2AdapterInterface):
                         continue
 
                 indexed.append((key, key_str, size))
-                valid_keys_data.append((row_key, data))
+                valid_keys_data.append((row_key, obj.byte_array))
 
             if indexed:
                 if sharding_enabled:
 
-                    async def write_sharded_key(rk, d):
-                        total_size = len(d)
-                        shards = await self._loop.run_in_executor(
-                            None, self._sharder.shard, d
-                        )
+                    async def write_sharded_key(rk, byte_array):
+                        try:
+                            data_bytes, shards = await self._loop.run_in_executor(
+                                None, _prepare_and_shard, self._sharder, byte_array
+                            )
+                        except Exception as e:
+                            return e
+                        total_size = len(data_bytes)
                         if max(len(s) for s in shards.values()) > 90 * 1024 * 1024:
                             rk_str = rk.decode("utf-8", errors="ignore")
                             logger.warning(
@@ -779,36 +794,68 @@ class BigtableL2Adapter(L2AdapterInterface):
                                 *tasks, return_exceptions=True
                             )
                             for res in results:
-                                if isinstance(res, Exception):
+                                if isinstance(res, BaseException):
                                     return res
                             return None
 
-                    # Run all sharded keys concurrently
-                    key_tasks = [write_sharded_key(rk, d) for rk, d in valid_keys_data]
+                    key_tasks = [
+                        write_sharded_key(rk, ba) for rk, ba in valid_keys_data
+                    ]
                     results = await asyncio.gather(*key_tasks, return_exceptions=True)
                 else:
-                    entries = []
-                    for rk, d in valid_keys_data:
+                    prepared_data = await asyncio.gather(
+                        *[
+                            self._loop.run_in_executor(None, _prepare_bytes, ba)
+                            for _, ba in valid_keys_data
+                        ]
+                    )
+
+                    MAX_BATCH_SIZE_BYTES = 30 * 1024 * 1024
+                    current_batch: list[RowMutationEntry] = []
+                    current_batch_size = 0
+                    results = []
+
+                    async def flush_unsharded_batch(batch):
+                        if not batch:
+                            return []
+                        try:
+                            res = await table.bulk_mutate_rows(
+                                batch,
+                                operation_timeout=self._config.write_timeout_sec,
+                                **kwargs,
+                            )
+                            return res if res is not None else [None] * len(batch)
+                        except Exception as e:
+                            return [e] * len(batch)
+
+                    for (rk, _), d in zip(valid_keys_data, prepared_data, strict=True):
+                        blob_size = len(d)
+                        if (
+                            current_batch_size + blob_size > MAX_BATCH_SIZE_BYTES
+                            and current_batch
+                        ):
+                            batch_results = await flush_unsharded_batch(current_batch)
+                            results.extend(batch_results)
+                            current_batch = []
+                            current_batch_size = 0
+
                         entry = RowMutationEntry(
                             rk,
                             [SetCell(self._family_name, self._column_name_bytes, d)],
                         )
-                        entries.append(entry)
+                        current_batch.append(entry)
+                        current_batch_size += blob_size
 
-                    results = await table.bulk_mutate_rows(
-                        entries,
-                        operation_timeout=self._config.write_timeout_sec,
-                        **kwargs,
-                    )
-                    if results is None:
-                        results = [None] * len(entries)
+                    if current_batch:
+                        batch_results = await flush_unsharded_batch(current_batch)
+                        results.extend(batch_results)
 
                 for (key, key_str, size), result in zip(indexed, results, strict=True):
                     if result is not None:
                         success = False
                         last_error = (
                             result
-                            if isinstance(result, Exception)
+                            if isinstance(result, BaseException)
                             else Exception(str(result))
                         )
                         logger.error(
@@ -861,6 +908,9 @@ class BigtableL2Adapter(L2AdapterInterface):
         bitmap = Bitmap(len(keys))
         futures = []
         indexed = []
+        locked_by_me = []
+        ghost_keys = []
+        ghost_sizes = []
 
         try:
             table = await self._get_table()
@@ -873,6 +923,7 @@ class BigtableL2Adapter(L2AdapterInterface):
                     bitmap.set(i)
                     with self._lock:
                         self._locked_keys[key] += 1
+                        locked_by_me.append(key)
                     continue
                 elif cached is False:
                     continue
@@ -893,7 +944,7 @@ class BigtableL2Adapter(L2AdapterInterface):
                 any_success = False
 
                 for (idx, key, key_str), result in zip(indexed, results, strict=True):
-                    if isinstance(result, Exception):
+                    if isinstance(result, BaseException):
                         last_error = result
                         logger.error(
                             "BigtableL2Adapter lookup failed for %s: %s",
@@ -909,17 +960,35 @@ class BigtableL2Adapter(L2AdapterInterface):
                         self._exists_cache.put(key_str, True)
                         with self._lock:
                             self._locked_keys[key] += 1
+                            locked_by_me.append(key)
                     else:
                         self._exists_cache.put(key_str, False)
+                        with self._lock:
+                            size = self._key_sizes.pop(key, None)
+                            self._object_size_cache.pop(key_str, None)
+                        if size is not None:
+                            ghost_keys.append(key)
+                            ghost_sizes.append(size)
 
-                if any_success:
+                if last_error is None:
                     self._record_connection_outcome(None)
-                elif last_error is not None:
+                elif not any_success:
                     self._record_connection_outcome(last_error)
 
-        except Exception as e:
-            logger.exception("BigtableL2Adapter lookup failed: %s", e)
-            self._record_connection_outcome(e)
+        except (asyncio.CancelledError, Exception) as e:
+            with self._lock:
+                for key in locked_by_me:
+                    if key in self._locked_keys:
+                        if self._locked_keys[key] <= 1:
+                            del self._locked_keys[key]
+                        else:
+                            self._locked_keys[key] -= 1
+                self._completed_lookup_tasks[task_id] = bitmap
+            self._lookup_efd.notify()
+            if not isinstance(e, asyncio.CancelledError):
+                logger.exception("BigtableL2Adapter lookup failed: %s", e)
+                self._record_connection_outcome(e)
+            raise e
 
         with self._lock:
             self._completed_lookup_tasks[task_id] = bitmap
@@ -929,6 +998,8 @@ class BigtableL2Adapter(L2AdapterInterface):
         accessed = [keys[i] for i in range(len(keys)) if bitmap.test(i)]
         if accessed:
             self._notify_keys_accessed(accessed)
+        if ghost_keys:
+            self._notify_keys_deleted(ghost_keys, ghost_sizes)
 
     async def _execute_load(
         self,
@@ -948,6 +1019,8 @@ class BigtableL2Adapter(L2AdapterInterface):
         bitmap = Bitmap(len(keys))
         futures = []
         indexed = []
+        ghost_keys = []
+        ghost_sizes = []
 
         try:
             table = await self._get_table()
@@ -972,7 +1045,7 @@ class BigtableL2Adapter(L2AdapterInterface):
                 for (idx, key, key_str, obj), result in zip(
                     indexed, results, strict=True
                 ):
-                    if isinstance(result, Exception):
+                    if isinstance(result, BaseException):
                         last_error = result
                         logger.error(
                             "BigtableL2Adapter load failed for %s: %s",
@@ -982,6 +1055,12 @@ class BigtableL2Adapter(L2AdapterInterface):
                         continue
 
                     if result is None:
+                        with self._lock:
+                            size = self._key_sizes.pop(key, None)
+                            self._object_size_cache.pop(key_str, None)
+                        if size is not None:
+                            ghost_keys.append(key)
+                            ghost_sizes.append(size)
                         continue
 
                     shards = _extract_shards_from_row(result, self._family_name)
@@ -999,6 +1078,12 @@ class BigtableL2Adapter(L2AdapterInterface):
                                 key_str,
                                 e,
                             )
+                            with self._lock:
+                                size = self._key_sizes.pop(key, None)
+                                self._object_size_cache.pop(key_str, None)
+                            if size is not None:
+                                ghost_keys.append(key)
+                                ghost_sizes.append(size)
                             continue
                     else:
                         val = shards.get(self._config.column_name)
@@ -1008,6 +1093,12 @@ class BigtableL2Adapter(L2AdapterInterface):
                             f"Column {self._config.column_name} not "
                             f"found in row {key_str}"
                         )
+                        with self._lock:
+                            size = self._key_sizes.pop(key, None)
+                            self._object_size_cache.pop(key_str, None)
+                        if size is not None:
+                            ghost_keys.append(key)
+                            ghost_sizes.append(size)
                         continue
 
                     view = memoryview(obj.byte_array)
@@ -1022,6 +1113,12 @@ class BigtableL2Adapter(L2AdapterInterface):
                             expected,
                             num_read,
                         )
+                        with self._lock:
+                            size = self._key_sizes.pop(key, None)
+                            self._object_size_cache.pop(key_str, None)
+                        if size is not None:
+                            ghost_keys.append(key)
+                            ghost_sizes.append(size)
                         continue
 
                     # Safe and optimized memory copy
@@ -1034,9 +1131,9 @@ class BigtableL2Adapter(L2AdapterInterface):
                         self._key_sizes[key] = num_read
                         self._object_size_cache[key_str] = num_read
 
-                if any_success:
+                if last_error is None:
                     self._record_connection_outcome(None)
-                elif last_error is not None:
+                elif not any_success:
                     self._record_connection_outcome(last_error)
 
         except Exception as e:
@@ -1046,6 +1143,8 @@ class BigtableL2Adapter(L2AdapterInterface):
         with self._lock:
             self._completed_load_tasks[task_id] = bitmap
         self._load_efd.notify()
+        if ghost_keys:
+            self._notify_keys_deleted(ghost_keys, ghost_sizes)
 
     async def _execute_delete(
         self, keys: list[ObjectKey]
