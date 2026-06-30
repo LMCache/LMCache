@@ -5,6 +5,7 @@ import threading
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 
 T = TypeVar("T")
 
@@ -48,11 +49,11 @@ class MessagingFuture(Generic[T]):
             T: The result of the future.
 
         Raises:
-            TimeoutError: If the future is not done within the timeout.
+            LMCacheTimeoutError: If the future is not done within the timeout.
         """
         flag = self.wait(timeout)
         if not flag:
-            raise TimeoutError("Future result not available within timeout")
+            raise LMCacheTimeoutError("Future result not available within timeout")
         return self.result_
 
     def set_result(self, result: T) -> None:
@@ -161,11 +162,11 @@ class CUDAMessagingFuture(MessagingFuture[T]):
             T: The result of the future.
 
         Raises:
-            TimeoutError: If the future is not done within the timeout.
+            LMCacheTimeoutError: If the future is not done within the timeout.
         """
         flag = self.wait(timeout)
         if not flag:
-            raise TimeoutError(
+            raise LMCacheTimeoutError(
                 "CUDAMessagingFuture result not available within timeout"
             )
 

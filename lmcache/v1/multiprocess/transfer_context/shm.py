@@ -14,6 +14,7 @@ import torch
 # First Party
 from lmcache import torch_dev
 from lmcache.logging import init_logger
+from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
@@ -166,9 +167,10 @@ class EngineDrivenContextShm(EngineDrivenContext):
         try:
             response = future.result(timeout=self.mq_timeout)
         except TimeoutError as err:
-            raise TimeoutError(
+            raise LMCacheTimeoutError(
                 f"PREPARE_STORE timed out for instance_id={instance_id} "
-                f"after {self.mq_timeout}s"
+                f"after {self.mq_timeout}s",
+                session_id=key.request_id,
             ) from err
         context = response.context if isinstance(response.context, dict) else {}
         slots = context.get("slots")

@@ -50,6 +50,7 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     create_store_policy,
 )
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
@@ -911,9 +912,9 @@ class StorageManager:
 
         Raises:
             ValueError: If no adapter with ``adapter_id`` is active.
-            TimeoutError: If draining did not complete within ``timeout``;
-                the adapter is left active (draining) so the caller can
-                retry.
+            LMCacheTimeoutError: If draining did not complete within
+                ``timeout``; the adapter is left active (draining) so the
+                caller can retry.
         """
         with self._lifecycle_lock:
             if adapter_id not in self._l2_adapters:
@@ -923,11 +924,11 @@ class StorageManager:
             store_done = self._store_controller.request_remove_adapter(adapter_id)
             prefetch_done = self._prefetch_controller.request_remove_adapter(adapter_id)
             if not store_done.wait(timeout=max(0.0, deadline - time.monotonic())):
-                raise TimeoutError(
+                raise LMCacheTimeoutError(
                     f"Timed out draining adapter {adapter_id} from store controller"
                 )
             if not prefetch_done.wait(timeout=max(0.0, deadline - time.monotonic())):
-                raise TimeoutError(
+                raise LMCacheTimeoutError(
                     f"Timed out draining adapter {adapter_id} from prefetch controller"
                 )
 
