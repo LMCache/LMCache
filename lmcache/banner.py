@@ -9,12 +9,11 @@ only, so tensor-parallel deployments print a single banner). Setting the
 
 # Standard
 from typing import TYPE_CHECKING
+import os
 
 if TYPE_CHECKING:
+    # Standard
     from typing import TextIO
-
-# Standard
-import os
 
 try:
     # First Party
