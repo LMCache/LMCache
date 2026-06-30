@@ -264,6 +264,7 @@ class PrefetchController(StorageControllerInterface):
                 int,
                 TrimPolicy,
                 AttnWindowDesc,
+                dict[int, MemoryLayoutDesc] | None,
                 PrefetchMode,
             ]
         ] = []

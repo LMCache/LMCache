@@ -520,6 +520,8 @@ class StorageManager:
                 mode=mode,
             )
 
+        raise ValueError(f"Unsupported trim policy: {policy}")
+
     def _submit_prefix_fold(
         self,
         keys: list[ObjectKey],
