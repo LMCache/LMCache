@@ -45,7 +45,7 @@ logger = init_logger(__name__)
 
 """
 The kv controller use `(instance_id, worker_id)` -> [location -> set[chunk_hash]] 
-as kv_pool. When the the number of instance is small and stable, the time complexity 
+as kv_pool. When the number of instances is small and stable, the time complexity 
 of `lookup` in kv controller is O(n). If the number of instance is large or unknown, 
 the time complexity will degrade to O(n^2), and the ReverseIndexKVController is a 
 better choice.

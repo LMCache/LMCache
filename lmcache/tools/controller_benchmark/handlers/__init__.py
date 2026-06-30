@@ -4,9 +4,9 @@
 
 # Standard
 from typing import Dict
-import importlib
-import inspect
-import pkgutil
+
+# First Party
+from lmcache.v1.utils.subclass_discovery import discover_subclasses
 
 # Local
 from .base import OperationHandler
@@ -17,29 +17,14 @@ OPERATION_HANDLERS: Dict[str, OperationHandler] = {}
 
 def _discover_and_register_handlers():
     """Dynamically discover and register all operation handlers"""
-    # Get the current package
-    package = __package__
-    package_path = __path__
-
-    # Iterate through all modules in the handlers package
-    for _, module_name, _ in pkgutil.iter_modules(package_path):
-        # Skip base module
-        if module_name == "base":
-            continue
-
-        # Import the module
-        module = importlib.import_module("." + module_name, package=package)
-
-        # Find all classes that inherit from OperationHandler
-        for name, obj in inspect.getmembers(module, inspect.isclass):
-            if (
-                issubclass(obj, OperationHandler)
-                and obj is not OperationHandler
-                and not inspect.isabstract(obj)
-            ):
-                # Instantiate and register the handler
-                handler = obj()
-                OPERATION_HANDLERS[handler.operation_name] = handler
+    for cls in discover_subclasses(
+        __name__,
+        OperationHandler,
+        module_filter=lambda name: name != "base",
+        require_defined_in_module=False,
+    ):
+        handler = cls()
+        OPERATION_HANDLERS[handler.operation_name] = handler
 
 
 # Auto-discover and register handlers on import

@@ -1,0 +1,10 @@
+# Vendor-specific runtime deps for CUDA 13 wheels. Selected by setup.py when
+# LMCACHE_CUDA_MAJOR is unset or "13" (the default, matching the PyPI build).
+# The cu12 analogue lives in cuda12_core.txt.
+
+cupy-cuda13x
+# Depend on nixl-cu13 directly: it provides the top-level `nixl` namespace.
+# The `nixl` meta-package lists both nixl-cu12 and nixl-cu13 as unconditional
+# (unmarked) deps, so it drags the cu12 backend in too; pinning the backend
+# package avoids that double install.
+nixl-cu13>=1.1.0; python_version < "3.13"

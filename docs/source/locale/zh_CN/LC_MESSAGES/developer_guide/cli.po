@@ -1,0 +1,120 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/cli.rst:2
+msgid "Extending the CLI"
+msgstr "扩展 CLI"
+
+#: ../../source/developer_guide/cli.rst:4
+msgid "This guide explains how to add new subcommands to the ``lmcache`` CLI."
+msgstr "本指南介绍如何为 ``lmcache`` CLI 添加新子命令。"
+
+#: ../../source/developer_guide/cli.rst:7
+msgid "Architecture Overview"
+msgstr "架构概述"
+
+#: ../../source/developer_guide/cli.rst:9
+msgid "The CLI uses explicit command registration:"
+msgstr "CLI 使用显式命令注册："
+
+#: ../../source/developer_guide/cli.rst:11
+msgid "Each command is a class inheriting from ``BaseCommand``."
+msgstr "每个命令都是一个继承自 ``BaseCommand`` 的类。"
+
+#: ../../source/developer_guide/cli.rst:12
+msgid ""
+"Commands are instantiated and listed in a central ``ALL_COMMANDS`` "
+"registry."
+msgstr "所有命令均在中央 ``ALL_COMMANDS`` 注册表中实例化并列出。"
+
+#: ../../source/developer_guide/cli.rst:13
+msgid ""
+"At startup, the entry point iterates ``ALL_COMMANDS`` and calls "
+"``cmd.register(subparsers)`` to wire up argparse."
+msgstr "启动时，入口点遍历 ``ALL_COMMANDS`` 并调用 ``cmd.register(subparsers)``，将各子命令注册到 argparse。"
+
+#: ../../source/developer_guide/cli.rst:16
+msgid ""
+"``BaseCommand`` is an abstract class with a small set of required methods"
+" (name, help, argument registration, and execute). Forgetting any of them"
+" raises ``TypeError`` at instantiation time."
+msgstr "``BaseCommand`` 是一个抽象类，包含少量必需方法（名称、帮助、参数注册及执行）。若遗漏其中任一方法，实例化时将引发 ``TypeError``。"
+
+#: ../../source/developer_guide/cli.rst:21
+msgid "Step-by-Step: Adding a New Command"
+msgstr "逐步指南：添加新命令"
+
+#: ../../source/developer_guide/cli.rst:23
+msgid "**Step 1.** Create a new command class that subclasses ``BaseCommand``:"
+msgstr "**步骤 1.** 创建一个继承自 ``BaseCommand`` 的新命令类："
+
+#: ../../source/developer_guide/cli.rst:51
+msgid "**Step 2.** Add an instance of it to the ``ALL_COMMANDS`` registry:"
+msgstr "**步骤 2.** 将其实例添加到 ``ALL_COMMANDS`` 注册表中："
+
+#: ../../source/developer_guide/cli.rst:62
+msgid ""
+"That's it --- ``lmcache describe --url http://localhost:8000`` is now "
+"available."
+msgstr "至此，``lmcache describe --url http://localhost:8000`` 即可正常使用。"
+
+#: ../../source/developer_guide/cli.rst:65
+msgid "Using the Metrics System"
+msgstr "使用指标系统"
+
+#: ../../source/developer_guide/cli.rst:67
+msgid "The metrics system uses a **handler + formatter** architecture:"
+msgstr "指标系统使用 **处理器 + 格式化器** 架构："
+
+#: ../../source/developer_guide/cli.rst:69
+msgid "**Metrics** — the collector. Holds sections and entries."
+msgstr "**指标** — 收集器。包含部分和条目。"
+
+#: ../../source/developer_guide/cli.rst:70
+msgid "**Handler** — the destination (stdout, file, etc.)."
+msgstr "**处理器** — 目标（标准输出、文件等）。"
+
+#: ../../source/developer_guide/cli.rst:71
+msgid "**Formatter** — the rendering (ASCII table, JSON, etc.)."
+msgstr "**格式化器** — 渲染（ASCII 表格、JSON 等）。"
+
+#: ../../source/developer_guide/cli.rst:73
+msgid ""
+"``BaseCommand.create_metrics()`` sets up default handlers automatically, "
+"so command authors just build metrics and call ``emit()``:"
+msgstr "``BaseCommand.create_metrics()`` 会自动配置默认处理器，命令开发者只需构建指标数据并调用 ``emit()`` 即可："
+
+#: ../../source/developer_guide/cli.rst:95
+msgid ""
+"The ``--format`` and ``--output`` flags are added automatically by "
+"``BaseCommand.register()`` — subcommands do not need to add them "
+"manually."
+msgstr "``--format`` 和 ``--output`` 标志由 ``BaseCommand.register()`` 自动添加 — 子命令无需手动添加。"
+
+#~ msgid "File Layout"
+#~ msgstr "文件布局"
+
+#~ msgid "**Step 1.** Create ``lmcache/cli/commands/describe.py``:"
+#~ msgstr "**第 1 步。** 创建 ``lmcache/cli/commands/describe.py``："
+
+#~ msgid "**Step 2.** Register it in ``lmcache/cli/commands/__init__.py``:"
+#~ msgstr "**步骤 2.** 在 ``lmcache/cli/commands/__init__.py`` 中注册它："
+

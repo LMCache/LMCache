@@ -151,5 +151,5 @@ while the MP adapter uses the core's full-bitmap lookup/load API.
 
 - Implementation: `lmcache/v1/distributed/l2_adapters/raw_block_l2_adapter.py`
 - Shared core: `lmcache/v1/storage_backend/raw_block/core.py`
-- User docs: `docs/source/mp/l2_storage.rst`
+- User docs: `docs/source/mp/l2_storage/raw_block.rst`
 - Rust device layer: `rust/raw_block/README.md`

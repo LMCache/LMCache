@@ -7,7 +7,6 @@ from urllib.parse import parse_qs, urlparse
 import asyncio
 import importlib
 import inspect
-import pkgutil
 
 # First Party
 from lmcache.logging import init_logger
@@ -18,6 +17,7 @@ from lmcache.v1.storage_backend.connector.instrumented_connector import (
     InstrumentedRemoteConnector,
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+from lmcache.v1.utils.subclass_discovery import discover_subclasses
 
 logger = init_logger(__name__)
 
@@ -243,39 +243,19 @@ class ConnectorManager:
 
     def _remote_adapters_builtin_launcher(self) -> None:
         """Automatically load all builtin remote connector adapters."""
-        # Import current package to ensure all modules are loaded
-        # First Party
-        import lmcache.v1.storage_backend.connector as connector_pkg
-
-        # Discover all modules in the connector package
-        for _, module_name, _ in pkgutil.iter_modules(connector_pkg.__path__):
-            # Skip private modules and non-adapter modules
-            if module_name.startswith("_") or not module_name.endswith("_adapter"):
-                continue
-
+        for cls in discover_subclasses(
+            "lmcache.v1.storage_backend.connector",
+            ConnectorAdapter,  # type: ignore[type-abstract]
+            module_filter=lambda name: (
+                not name.startswith("_") and name.endswith("_adapter")
+            ),
+            require_defined_in_module=False,
+        ):
             try:
-                module = importlib.import_module(
-                    f"{connector_pkg.__name__}.{module_name}"
-                )
-
-                # Find all ConnectorAdapter subclasses in the module
-                for _, obj in inspect.getmembers(module):
-                    if (
-                        inspect.isclass(obj)
-                        and issubclass(obj, ConnectorAdapter)
-                        and obj != ConnectorAdapter
-                    ):
-                        try:
-                            adapter_instance = obj()
-                            self.adapters.append(adapter_instance)
-                            logger.info(f"Discovered adapter: {obj.__name__}")
-                        except Exception as e:
-                            logger.error(
-                                "Failed to instantiate adapter "
-                                f"{obj.__name__}: {str(e)}"
-                            )
-            except ImportError as e:
-                logger.warning(f"Failed to import module {module_name}: {e}")
+                self.adapters.append(cls())
+                logger.info(f"Discovered adapter: {cls.__name__}")
+            except Exception as e:
+                logger.error(f"Failed to instantiate adapter {cls.__name__}: {str(e)}")
 
     def _remote_adapters_plugin_launcher(self, config: LMCacheEngineConfig) -> None:
         """Automatically load all plug and play remote connector adapters."""

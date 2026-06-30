@@ -65,10 +65,13 @@ class InternalAPIServer:
             include_index_list and port_offset not in include_index_list
         ):
             logger.info(
-                f"Internal API server disabled. internal_api_server_enabled="
-                f"{config.internal_api_server_enabled}, port_offset={port_offset}, "
-                f"port={self.port}, socket_path={self.socket_path}, "
-                f"include_index_list={include_index_list}"
+                "Internal API server disabled. internal_api_server_enabled=%s, "
+                "port_offset=%s, port=%s, socket_path=%s, include_index_list=%s",
+                config.internal_api_server_enabled,
+                port_offset,
+                self.port,
+                self.socket_path,
+                include_index_list,
             )
             self.enable = False
             return
@@ -90,7 +93,7 @@ class InternalAPIServer:
 
         if self.socket_path:
             self.server_log_info = f"socket {self.socket_path}"
-            logger.info(f"Init internal API server on {self.server_log_info}")
+            logger.info("Init internal API server on %s", self.server_log_info)
             uvicorn_config["uds"] = self.socket_path
             # Ensure socket directory exists
             os.makedirs(os.path.dirname(self.socket_path), exist_ok=True)
@@ -99,21 +102,21 @@ class InternalAPIServer:
                 os.unlink(self.socket_path)
         else:
             self.server_log_info = f"port {self.port}"
-            logger.info(f"Init internal API server on {self.server_log_info}")
+            logger.info("Init internal API server on %s", self.server_log_info)
             uvicorn_config["port"] = self.port
 
         self.server = uvicorn.Server(uvicorn.Config(**uvicorn_config))
         self.app.state.lmcache_adapter = lmcache_manager
 
     async def run(self):
-        logger.info(f"Running LMCache internal API server on {self.server_log_info}")
+        logger.info("Running LMCache internal API server on %s", self.server_log_info)
         if self.server:
             await self.server.serve()
 
     def start(self):
         if not self.enable:
             return
-        logger.info(f"Starting LMCache internal API server on {self.server_log_info}")
+        logger.info("Starting LMCache internal API server on %s", self.server_log_info)
         threading.Thread(
             target=asyncio.run,
             args=(self.run(),),

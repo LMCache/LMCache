@@ -22,8 +22,8 @@ from lmcache.v1.mp_observability.subscribers.metrics.l0_l1_throughput import (
 from tests.v1.mp_observability.subscribers.metrics.otel_setup import reader as _reader
 
 _DRAIN_WAIT = 0.15
-_STORE_METRIC = "lmcache_mp.l0_l1_store_throughput_gbs"
-_LOAD_METRIC = "lmcache_mp.l0_l1_load_throughput_gbs"
+_STORE_METRIC = "lmcache_mp.l0_l1_store_throughput"
+_LOAD_METRIC = "lmcache_mp.l0_l1_load_throughput"
 
 
 # ---------------------------------------------------------------------------

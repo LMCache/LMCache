@@ -27,9 +27,11 @@ SHUFFLE_SEED="${SHUFFLE_SEED:-0}"
 MAX_INFLIGHT_REQUESTS="${MAX_INFLIGHT_REQUESTS:-5}"
 
 # Relative performance thresholds (compared against baseline run in same job)
-# Allow at most 10% slower than baseline for both metrics
-MAX_TTFT_SLOWDOWN_PCT="${MAX_TTFT_SLOWDOWN_PCT:-10}"
-MAX_ROUND_TIME_SLOWDOWN_PCT="${MAX_ROUND_TIME_SLOWDOWN_PCT:-10}"
+# Negative values mean LMCache must be *faster* than baseline by at least that %.
+# Recent CI runs show ~77-84% TTFT improvement and ~27-40% round-time improvement,
+# so requiring 60% and 15% respectively leaves comfortable headroom.
+MAX_TTFT_SLOWDOWN_PCT="${MAX_TTFT_SLOWDOWN_PCT:--60}"
+MAX_ROUND_TIME_SLOWDOWN_PCT="${MAX_ROUND_TIME_SLOWDOWN_PCT:--15}"
 
 # Output directory
 LONG_DOC_QA_DIR="$RESULTS_DIR/long_doc_qa"
@@ -43,9 +45,9 @@ echo "Number of documents: $NUM_DOCUMENTS"
 echo "Output length: $OUTPUT_LEN"
 echo "Results dir: $LONG_DOC_QA_DIR"
 echo ""
-echo "Performance thresholds (relative to baseline):"
-echo "  Max TTFT slowdown: ${MAX_TTFT_SLOWDOWN_PCT}%"
-echo "  Max query round time slowdown: ${MAX_ROUND_TIME_SLOWDOWN_PCT}%"
+echo "Performance thresholds (relative to baseline, negative = must be faster):"
+echo "  Max TTFT slowdown: ${MAX_TTFT_SLOWDOWN_PCT}% (LMCache must be >= $(echo "$MAX_TTFT_SLOWDOWN_PCT" | tr -d '-')% faster)"
+echo "  Max round time slowdown: ${MAX_ROUND_TIME_SLOWDOWN_PCT}% (LMCache must be >= $(echo "$MAX_ROUND_TIME_SLOWDOWN_PCT" | tr -d '-')% faster)"
 echo ""
 
 mkdir -p "$LONG_DOC_QA_DIR"
@@ -196,12 +198,16 @@ def check_metric(name, lmcache_val, baseline_val, max_slowdown_pct):
         print(f"{name}: unable to compare (lmcache={lmcache_val}, baseline={baseline_val}) -- FAIL")
         return False
     pct = ((lmc - base) / base) * 100
+    label = f"{abs(pct):.1f}% faster" if pct < 0 else f"{pct:.1f}% slower"
+    if max_slowdown_pct < 0:
+        threshold_label = f"need >= {abs(max_slowdown_pct):.0f}% faster"
+    else:
+        threshold_label = f"max {max_slowdown_pct}% slower"
     if pct <= max_slowdown_pct:
-        label = f"{abs(pct):.1f}% faster" if pct < 0 else f"{pct:.1f}% slower"
-        print(f"{name}: {lmc:.4f}s vs baseline {base:.4f}s ({label}, max {max_slowdown_pct}% slower) -- PASS")
+        print(f"{name}: {lmc:.4f}s vs baseline {base:.4f}s ({label}, {threshold_label}) -- PASS")
         return True
     else:
-        print(f"{name}: {lmc:.4f}s vs baseline {base:.4f}s ({pct:.1f}% slower, max {max_slowdown_pct}% slower) -- FAIL")
+        print(f"{name}: {lmc:.4f}s vs baseline {base:.4f}s ({label}, {threshold_label}) -- FAIL")
         return False
 
 failed = False

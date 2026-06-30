@@ -16,12 +16,12 @@ import threading
 if TYPE_CHECKING:
     # First Party
     from lmcache.native_storage_ops import Bitmap
+    from lmcache.v1.distributed.api import KeyListPage, MemoryLayoutDesc, ObjectKey
+    from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
+    from lmcache.v1.memory_management import MemoryObj
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.distributed.internal_api import L2AdapterListener
-from lmcache.v1.memory_management import MemoryObj
 
 logger = init_logger(__name__)
 
@@ -219,38 +219,17 @@ class L2AdapterInterface(ABC):
         pass
 
     @abstractmethod
-    def pop_completed_store_tasks(self) -> dict[L2TaskId, bool]:
-        """
-        Pop all the completed store tasks with a flag indicating
-        whether the task is successful or not.
+    def pop_completed_store_tasks(self) -> dict[L2TaskId, L2StoreResult]:
+        """Pop all completed store tasks.
 
         Returns:
-            dict[L2TaskId, bool]: a dictionary mapping the task id to a boolean flag
-            indicating whether the task is successful or not. True means
-            successful, and False means failed.
+            dict[L2TaskId, L2StoreResult]: a dictionary mapping the task
+            id to an ``L2StoreResult`` that encodes both the success flag
+            and the bytes actually transferred. Use
+            ``result.is_successful()`` and ``result.bytes_transferred()``
+            to inspect the outcome.
         """
         pass
-
-    def pop_completed_store_task_bytes(self) -> dict[L2TaskId, int]:
-        """Report bytes actually transferred per completed store task.
-
-        Optional. Default returns ``{}``, which leaves the L2 throughput
-        subscriber to fall back on submitted-bytes accounting.
-
-        Adapters that fast-path duplicate keys (e.g. skip the write when
-        the key already exists in the backend) SHOULD override this so
-        the throughput histogram reflects real work, not skipped no-ops.
-        A task with all keys fast-pathed reports ``0`` here, which the
-        subscriber treats as "no useful sample" and skips.
-
-        Returns:
-            dict[L2TaskId, int]: task id -> bytes actually written. Keys
-            present here MUST also appear in the next
-            ``pop_completed_store_tasks`` call (they share the same
-            per-task completion record), and the returned dict should be
-            cleared on read, mirroring ``pop_completed_store_tasks``.
-        """
-        return {}
 
     #####################
     # Lookup and Lock Interface
@@ -260,6 +239,7 @@ class L2AdapterInterface(ABC):
     def submit_lookup_and_lock_task(
         self,
         keys: list[ObjectKey],
+        layout_desc: MemoryLayoutDesc,
     ) -> L2TaskId:
         """
         Submit a lookup and lock task to look up and lock a batch of objects
@@ -267,6 +247,9 @@ class L2AdapterInterface(ABC):
 
         Args:
             keys (list[ObjectKey]): the list of keys to be looked up and locked.
+            layout_desc (MemoryLayoutDesc): the memory layout of the objects.
+                This is an advisory hint; most adapters ignore it. The P2P
+                adapter forwards it to the peer cache server.
 
         Returns:
             L2TaskId: the task id of the submitted lookup and lock task.
@@ -395,7 +378,7 @@ class L2AdapterInterface(ABC):
                     self._bytes_by_cache_salt.get(salt, 0) + d
                 )
         for listener in self._listeners:
-            listener.on_l2_keys_stored(keys)
+            listener.on_l2_keys_stored(keys, sizes)
 
     def _notify_keys_accessed(self, keys: list[ObjectKey]) -> None:
         # ``_notify_keys_accessed`` carries no byte impact — only LRU
@@ -488,6 +471,30 @@ class L2AdapterInterface(ABC):
             eviction should override this method.
         """
         return None
+
+    def list_l2_keys(
+        self,
+        model_name: str | None = None,
+        page_size: int = 500,
+        cursor: str | None = None,
+    ) -> KeyListPage:
+        """List keys currently resident in this adapter, paginated.
+
+        Args:
+            model_name: if set, restrict to keys with this
+                ``ObjectKey.model_name``.
+            page_size: maximum entries to return in this page.
+            cursor: opaque cursor from the previous page; ``None`` on
+                the first call.
+
+        Raises:
+            NotImplementedError: the adapter does not support listing.
+            ValueError: ``page_size`` is non-positive or ``cursor`` is
+                malformed.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement list_l2_keys"
+        )
 
     def get_usage(self) -> AdapterUsage:
         """

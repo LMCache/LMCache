@@ -15,7 +15,11 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerListener
-from lmcache.v1.distributed.memory_manager import L1MemoryManager
+from lmcache.v1.distributed.memory_manager import (
+    GDSL1MemoryManager,
+    L1ManagerProtocol,
+    L1MemoryManager,
+)
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
@@ -184,7 +188,15 @@ class L1Manager:
 
         self._objects: dict[ObjectKey, L1ObjectState] = {}
 
-        self._memory_manager = L1MemoryManager(config.memory_config)
+        # GDS and CPU L1 are mutually exclusive tiers, each driven by its own
+        # config: the GDS tier reads only ``gds_l1_config`` (slab size +
+        # alignment), the CPU tier only ``memory_config``.
+        self._memory_manager: L1ManagerProtocol
+        if config.gds_l1_config is not None:
+            self._memory_manager = GDSL1MemoryManager(config.gds_l1_config)
+            logger.info("L1Manager: GDS L1 tier enabled; CPU pinned-DRAM L1 disabled")
+        else:
+            self._memory_manager = L1MemoryManager(config.memory_config)
 
         self._write_ttl_seconds = config.write_ttl_seconds
         self._read_ttl_seconds = config.read_ttl_seconds

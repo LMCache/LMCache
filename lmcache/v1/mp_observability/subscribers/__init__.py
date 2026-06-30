@@ -10,7 +10,6 @@ from lmcache.v1.mp_observability.subscribers.metrics import (
     L0LifecycleSubscriber,
     L1LifecycleSubscriber,
     L1MetricsSubscriber,
-    SMMetricsSubscriber,
 )
 from lmcache.v1.mp_observability.subscribers.tracing import (
     MPServerTracingSubscriber,
@@ -24,5 +23,4 @@ __all__ = [
     "MPServerLoggingSubscriber",
     "MPServerTracingSubscriber",
     "SMLoggingSubscriber",
-    "SMMetricsSubscriber",
 ]

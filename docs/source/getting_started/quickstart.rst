@@ -46,9 +46,8 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
 
             The ZMQ port (default **5555**) accepts connections from vLLM;
             the HTTP frontend (default **8080**) serves the management and
-            metrics endpoints. See :doc:`../mp/quickstart` and
-            :doc:`../mp/configuration` for the full list of
-            ``lmcache server`` and connector options.
+            metrics endpoints. See :doc:`../mp/configuration` for the full
+            list of ``lmcache server`` and connector options.
 
             Start vLLM with the MP connector in a separate terminal:
 
@@ -57,6 +56,30 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
                vllm serve Qwen/Qwen3-8B \
                    --port 8000 --kv-transfer-config \
                    '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
+
+            .. note::
+               **Where does** ``LMCacheMPConnector`` **resolve to?** This depends on your vLLM version:
+
+               - **vLLM < 0.20.0** -- ``"kv_connector":"LMCacheMPConnector"`` always
+                 resolves to vLLM's built-in
+                 ``vllm.distributed.kv_transfer.kv_connector.v1.LMCacheMPConnector``;
+                 there is no way to redirect it to the LMCache-shipped implementation.
+
+               - **vLLM >= 0.20.0** -- ``"kv_connector":"LMCacheMPConnector"`` still
+                 defaults to vLLM's built-in connector, but you can opt in to the
+                 LMCache-shipped implementation
+                 (:mod:`lmcache.integration.vllm.lmcache_mp_connector`) by adding
+                 ``kv_connector_module_path``:
+
+                 .. code-block:: bash
+
+                    vllm serve Qwen/Qwen3-8B \
+                        --port 8000 --kv-transfer-config \
+                        '{"kv_connector":"LMCacheMPConnector", "kv_connector_module_path":"lmcache.integration.vllm.lmcache_mp_connector", "kv_role":"kv_both"}'
+
+                 The LMCache-shipped connector tracks the latest LMCache server
+                 protocol and ships fixes/features ahead of the version vendored
+                 into vLLM, so prefer it whenever you are on vLLM 0.20.0 or newer.
 
             **Test** -- open a new terminal and send two requests whose
             prompts share a prefix:
@@ -112,7 +135,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
                ...
 
             For request-level statistics (hit ratio, bytes transferred) see
-            :doc:`../mp/observability`.
+            :doc:`../mp/observability/index`.
 
          .. tab-item:: In-process mode
             :sync: inproc
@@ -410,8 +433,36 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
 
 🎉 **You now have LMCache caching and reusing KV caches across all three engines.**
 
+More MP server options
+----------------------
+
+The vLLM MP example above runs ``lmcache server`` locally on the default
+ports. Common variations:
+
+**Custom port or remote host** -- by default the connector talks to
+``localhost:5555``. To use a different port, or a server on another host,
+pass ``lmcache.mp.host`` / ``lmcache.mp.port`` in
+``kv_connector_extra_config``:
+
+.. code-block:: bash
+
+   vllm serve Qwen/Qwen3-8B --kv-transfer-config \
+     '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "10.0.0.1", "lmcache.mp.port": 6555}}'
+
+**CPU-only (no GPU)** -- the server runs with a ``StubCPUDevice`` and shares
+KV tensors with vLLM over POSIX shared memory. Start ``lmcache server``
+normally, then set ``lmcache.mp.mp_transfer_mode=lmcache_driven`` on the vLLM
+side to enable the zero-copy SHM handle path (the default ``auto`` routing
+maps non-CUDA devices to ``engine_driven``, which uses the worker-side
+gather/scatter copy path instead).
+
+**Docker** -- see :doc:`../production/docker_deployment`.
+
+**HTTP management endpoints** (health, clear-cache, status) -- see
+:doc:`../mp/http_api`.
+
 Next Steps
 ----------
 
 - **Performance Testing**: Try the :doc:`benchmarking` section to experience LMCache's performance benefits with more comprehensive examples
-- **More Examples**: Explore the :doc:`quickstart/index` section for detailed examples including KV cache sharing across instances and disaggregated prefill
+- **Production**: Deploy LMCache with Docker or Kubernetes, plus observability and tuning -- see :doc:`../mp/deployment`

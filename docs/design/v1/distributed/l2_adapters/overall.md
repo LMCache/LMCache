@@ -65,13 +65,21 @@ silently misroute events.
 
 ```
 submit_store_task(keys, objects) -> L2TaskId
-pop_completed_store_tasks() -> dict[L2TaskId, bool]
+pop_completed_store_tasks() -> dict[L2TaskId, L2StoreResult]
 ```
 
 - **Caller provides buffers:** The `objects` list contains `MemoryObj` references
   managed by the caller (StoreController holds L1 read locks on them).
 - **Coarse-grained errors:** A store task either fully succeeds or fully fails.
-  The bool in the completion dict is `True` for success, `False` for failure.
+  The completion dict maps each task id to an `L2StoreResult`
+  (`lmcache.v1.distributed.internal_api.L2StoreResult`) that encodes both
+  the success flag and the bytes actually transferred. Use
+  `result.is_successful()` to check the outcome and
+  `result.bytes_transferred()` to read the real byte count written to L2
+  (always `0` on failure). Adapters that fast-path duplicate keys (e.g.
+  skip the write when the key already exists in the backend) should
+  report the real, non-skipped byte count here so the L2 throughput
+  histogram reflects actual work — not submitted-but-skipped bytes.
 - **Pop semantics:** `pop_completed_store_tasks()` drains all completed tasks.
   Each task appears exactly once.
 
@@ -172,8 +180,8 @@ _process_new_keys(keys)
   │
   ▼ (later, for each adapter whose store_efd signaled)
 _drain_l2_store_completions(signaled_adapters)
-  │  adapter.pop_completed_store_tasks() → deposit success/failure
-  │  on each InFlightStoreTask.l2_store_result
+  │  adapter.pop_completed_store_tasks() → deposit L2StoreResult
+  │  (success flag + bytes_transferred) on each InFlightStoreTask
   │
   ▼
 _advance_request(task_key, task)  [state transition]

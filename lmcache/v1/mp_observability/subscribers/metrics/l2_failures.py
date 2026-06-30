@@ -44,6 +44,7 @@ class L2FailureMetricsSubscriber(EventSubscriber):
                 "into L1. Tagged by ``reason`` = l1_oom | not_found and "
                 "``model_name``."
             ),
+            unit="chunks",
         )
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:

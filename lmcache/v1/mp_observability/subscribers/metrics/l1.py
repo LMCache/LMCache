@@ -11,30 +11,37 @@ from opentelemetry import metrics
 # First Party
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
+from lmcache.v1.mp_observability.subscribers.metrics.utils import (
+    emit_salt_counts,
+    group_by_salt,
+)
 
 
 class L1MetricsSubscriber(EventSubscriber):
     """Maintains OTel counters for L1Manager operations.
 
     Metric parity with the old ``L1ManagerStatsLogger``:
-    - ``lmcache_mp.l1_read_keys``  — keys read from L1
-    - ``lmcache_mp.l1_write_keys`` — keys written to L1
-    - ``lmcache_mp.l1_evicted_keys`` — keys evicted from L1
+    - ``lmcache_mp.l1_read``    — chunks read from L1
+    - ``lmcache_mp.l1_write``   — chunks written to L1
+    - ``lmcache_mp.l1_evicted`` — chunks evicted from L1
     """
 
     def __init__(self) -> None:
         meter = metrics.get_meter("lmcache.l1")
         self._read_counter = meter.create_counter(
-            "lmcache_mp.l1_read_keys",
-            description="Total keys read from L1",
+            "lmcache_mp.l1_read",
+            description="Total chunks read from L1",
+            unit="chunks",
         )
         self._write_counter = meter.create_counter(
-            "lmcache_mp.l1_write_keys",
-            description="Total keys written to L1",
+            "lmcache_mp.l1_write",
+            description="Total chunks written to L1",
+            unit="chunks",
         )
         self._evicted_counter = meter.create_counter(
-            "lmcache_mp.l1_evicted_keys",
-            description="Total keys evicted from L1",
+            "lmcache_mp.l1_evicted",
+            description="Total chunks evicted from L1",
+            unit="chunks",
         )
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
@@ -46,10 +53,10 @@ class L1MetricsSubscriber(EventSubscriber):
         }
 
     def _on_read_finished(self, event: Event) -> None:
-        self._read_counter.add(len(event.metadata["keys"]))
+        emit_salt_counts(self._read_counter, group_by_salt(event.metadata["keys"]))
 
     def _on_write_finished(self, event: Event) -> None:
-        self._write_counter.add(len(event.metadata["keys"]))
+        emit_salt_counts(self._write_counter, group_by_salt(event.metadata["keys"]))
 
     def _on_evicted(self, event: Event) -> None:
-        self._evicted_counter.add(len(event.metadata["keys"]))
+        emit_salt_counts(self._evicted_counter, group_by_salt(event.metadata["keys"]))

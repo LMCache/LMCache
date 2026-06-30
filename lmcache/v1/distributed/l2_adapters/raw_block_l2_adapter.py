@@ -22,7 +22,8 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
@@ -85,6 +86,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         enable_zero_copy: bool = True,
         io_engine: str = "posix",
         iouring_queue_depth: int = DEFAULT_IOURING_QUEUE_DEPTH,
+        use_uring_cmd: bool = False,
+        max_data_transfer_size: int = 0,
         num_store_workers: int = 2,
         num_lookup_workers: int = 1,
         num_load_workers: int = 4,
@@ -109,6 +112,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             enable_zero_copy: Whether to use aligned direct-buffer I/O.
             io_engine: Raw-block I/O engine: ``"posix"`` or ``"io_uring"``.
             iouring_queue_depth: Queue depth for the Rust io_uring engine.
+            use_uring_cmd: Whether to use NVMe io_uring_cmd passthrough.
+            max_data_transfer_size: Max data transfer size for a single request.
             num_store_workers: Number of store worker threads.
             num_lookup_workers: Number of lookup worker threads.
             num_load_workers: Number of load worker threads.
@@ -134,6 +139,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         validate_raw_block_io_options(
             iouring_queue_depth=self.iouring_queue_depth,
         )
+        self.use_uring_cmd = bool(use_uring_cmd)
+        self.max_data_transfer_size = int(max_data_transfer_size)
         self.num_store_workers = int(num_store_workers)
         self.num_lookup_workers = int(num_lookup_workers)
         self.num_load_workers = int(num_load_workers)
@@ -167,6 +174,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         iouring_queue_depth = int(
             d.get("iouring_queue_depth", DEFAULT_IOURING_QUEUE_DEPTH)
         )
+        use_uring_cmd = bool(d.get("use_uring_cmd", False))
+        max_data_transfer_size = int(d.get("max_data_transfer_size", 0))
 
         if block_align <= 0:
             raise ValueError("block_align must be > 0")
@@ -183,6 +192,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         validate_raw_block_io_options(
             iouring_queue_depth=iouring_queue_depth,
         )
+        if use_uring_cmd and io_engine != "io_uring":
+            raise ValueError("use_uring_cmd requires io_uring io_engine")
 
         worker_defaults = {
             "num_store_workers": 2,
@@ -214,6 +225,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             enable_zero_copy=bool(d.get("enable_zero_copy", True)),
             io_engine=io_engine,
             iouring_queue_depth=iouring_queue_depth,
+            use_uring_cmd=use_uring_cmd,
+            max_data_transfer_size=max_data_transfer_size,
             num_store_workers=worker_counts["num_store_workers"],
             num_lookup_workers=worker_counts["num_lookup_workers"],
             num_load_workers=worker_counts["num_load_workers"],
@@ -250,6 +263,11 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             "- io_engine (str): posix or io_uring (default posix)\n"
             "- iouring_queue_depth (int): Rust io_uring queue depth "
             f"(default {DEFAULT_IOURING_QUEUE_DEPTH})\n"
+            "- use_uring_cmd (bool): enable NVMe io_uring_cmd path "
+            "(default false, requires io_uring as the io_engine)\n"
+            "- max_data_transfer_size (int): for a single I/O request "
+            "(0: (default) auto detect limit splitting, > 0: explicit split, "
+            "< 0: auto detect limit splitting)\n"
             "- num_store_workers (int): store worker threads (default 2)\n"
             "- num_lookup_workers (int): lookup worker threads (default 1)\n"
             "- num_load_workers (int): load worker threads (default 4)"
@@ -275,6 +293,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             meta_verify_on_load=self.meta_verify_on_load,
             io_engine=self.io_engine,
             iouring_queue_depth=self.iouring_queue_depth,
+            use_uring_cmd=self.use_uring_cmd,
+            max_data_transfer_size=self.max_data_transfer_size,
         )
 
 
@@ -304,12 +324,13 @@ class RawBlockL2Adapter(L2AdapterInterface):
         """
         super().__init__()
         if (
-            config.use_odirect
+            (config.use_odirect or config.io_engine == "io_uring")
             and l1_memory_desc is not None
             and l1_memory_desc.align_bytes < config.block_align
         ):
             raise ValueError(
-                "raw_block requires l1_align_bytes >= block_align when use_odirect=true"
+                "raw_block requires l1_align_bytes >= block_align when "
+                "use_odirect=true or io_engine=io_uring"
             )
 
         self._closed = False
@@ -323,6 +344,12 @@ class RawBlockL2Adapter(L2AdapterInterface):
 
         try:
             self._core = RawBlockCore(config.to_core_config(), key_namespace="object")
+            if config.io_engine == "io_uring":
+                logger.warning(
+                    "RawBlockL2Adapter: MP raw_block uses io_uring without "
+                    "fixed-buffer registration; zero-copy fixed buffers are "
+                    "disabled unless registered by a future MP allocator path"
+                )
             self._max_capacity_bytes = int(
                 self._core.report_status().get("usable_capacity_bytes", 0)
             )
@@ -351,7 +378,7 @@ class RawBlockL2Adapter(L2AdapterInterface):
         self._lock = threading.Lock()
         self._next_task_id: L2TaskId = 0
 
-        self._completed_store_tasks: dict[L2TaskId, bool] = {}
+        self._completed_store_tasks: dict[L2TaskId, L2StoreResult] = {}
         self._completed_lookup_tasks: dict[L2TaskId, Bitmap] = {}
         self._completed_load_tasks: dict[L2TaskId, Bitmap] = {}
 
@@ -414,14 +441,16 @@ class RawBlockL2Adapter(L2AdapterInterface):
         future.add_done_callback(partial(self._finish_store_task, task_id))
         return task_id
 
-    def pop_completed_store_tasks(self) -> dict[L2TaskId, bool]:
+    def pop_completed_store_tasks(self) -> dict[L2TaskId, L2StoreResult]:
         """Drain and return completed store task results."""
         with self._lock:
             completed = self._completed_store_tasks
             self._completed_store_tasks = {}
         return completed
 
-    def submit_lookup_and_lock_task(self, keys: list[ObjectKey]) -> L2TaskId:
+    def submit_lookup_and_lock_task(
+        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+    ) -> L2TaskId:
         """Submit a non-blocking lookup-and-lock task.
 
         Args:
@@ -526,7 +555,7 @@ class RawBlockL2Adapter(L2AdapterInterface):
         if not keys:
             return
         try:
-            listener.on_l2_keys_stored(keys)
+            listener.on_l2_keys_stored(keys, [0] * len(keys))
         except Exception as e:
             logger.warning(
                 "RawBlockL2Adapter listener recovery bootstrap failed: %s", e
@@ -657,13 +686,17 @@ class RawBlockL2Adapter(L2AdapterInterface):
         success = False
         stored_keys: list[ObjectKey] = []
         stored_sizes: list[int] = []
+        bytes_transferred = 0
         try:
             success, stored_keys, stored_sizes = future.result()
+            bytes_transferred = sum(stored_sizes)
         except Exception as e:
             logger.error("RawBlockL2Adapter store task %d failed: %s", task_id, e)
         with self._lock:
             self._store_inflight_tasks -= 1
-            self._completed_store_tasks[task_id] = success
+            self._completed_store_tasks[task_id] = L2StoreResult(
+                success, bytes_transferred
+            )
             event_fd = self._store_efd
         if stored_keys:
             try:

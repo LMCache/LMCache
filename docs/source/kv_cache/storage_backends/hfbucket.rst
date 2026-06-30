@@ -91,6 +91,90 @@ either ``hfbucket`` or an instance-qualified name such as ``hfbucket.prod``.
   existence and size metadata.
 
 
+MP Mode Configuration
+---------------------
+
+In multi-process (MP) mode, Hugging Face Buckets are configured as an L2
+adapter through a JSON spec passed to the LMCache server. This is separate from
+the non-MP ``remote_storage_plugins`` configuration above. Each
+``--l2-adapter`` argument takes a JSON object whose ``"type": "hfbucket"``
+field selects the HFBucket adapter.
+
+.. code-block:: json
+
+   {
+     "type": "hfbucket",
+     "bucket_handle": "hf://buckets/my-org/lmcache-kv/prod",
+     "token_env": "HF_TOKEN",
+     "create_bucket_if_missing": false,
+     "download_tmp_dir": "/tmp/lmcache-hfbucket-mp",
+     "metadata_cache_ttl_secs": 30,
+     "num_workers": 4,
+     "max_capacity_gb": 500,
+     "eviction": {
+       "eviction_policy": "LRU",
+       "trigger_watermark": 0.85,
+       "eviction_ratio": 0.2
+     }
+   }
+
+HFBucket L2 Adapter Fields
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* **type** (required): must be ``"hfbucket"``.
+* **bucket_handle** (required): Hugging Face Bucket handle in
+  ``hf://buckets/<namespace>/<bucket>[/<prefix>]`` format.
+* **token_env**: environment variable used to resolve the Hugging Face access
+  token (default ``"HF_TOKEN"``).
+* **token**: optional direct token fallback. ``token_env`` takes precedence
+  when the environment variable is set. Prefer ``token_env`` for production
+  deployments so secrets do not live in adapter JSON.
+* **create_bucket_if_missing**: lazily create the bucket on the first store
+  operation (default ``false``). This only helps when the bucket is missing and
+  the token has permission to create it; it does not fix invalid credentials,
+  invalid handles, or network failures.
+* **download_tmp_dir**: root directory for temporary load downloads (default
+  ``/tmp/lmcache-hfbucket-mp``). The MP adapter downloads bucket files into
+  per-task temporary files and then copies their bytes into the destination
+  ``MemoryObj`` buffers supplied by the MP controller.
+* **metadata_cache_ttl_secs**: TTL for cached exact path-size metadata (default
+  ``30``). Set this lower when another process may modify the same bucket
+  prefix outside LMCache and fresher metadata is more important than reducing
+  Hugging Face metadata calls.
+* **num_workers**: number of worker threads used for blocking Hugging Face Hub
+  bucket API calls (default ``4``). The HFBucket Python APIs are synchronous,
+  so MP mode runs upload, lookup, load, and delete work on a bounded thread
+  pool behind the adapter's eventfd-based completion interface.
+* **max_capacity_gb**: capacity used by ``get_usage()`` for watermark-based L2
+  eviction. Set to ``0`` (default) to disable aggregate capacity tracking;
+  ``get_usage()`` then reports the adapter as not providing an eviction signal.
+* **eviction**: optional sub-dict enabling the L2 eviction controller for this
+  adapter. When present, keys that are currently being loaded are protected by
+  the lookup-and-lock path and skipped by ``delete()`` until they are unlocked.
+
+Differences vs Non-MP HFBucket
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* Hugging Face bucket operations are synchronous but the adapter makes submission
+  non-blocking by running the blocking calls on worker threads.
+* MP loads do not allocate and return new memory. The MP controller provides
+  destination ``MemoryObj`` buffers, and the adapter copies downloaded bytes
+  into those buffers.
+* Keys are identified by ``ObjectKey`` (``model_name`` + ``kv_rank`` +
+  ``chunk_hash`` + optional ``cache_salt``) rather than ``CacheEngineKey``.
+  The serialized MP object name is
+  ``<model>@<kv_rank_hex>@<chunk_hash_hex>[@<cache_salt>]`` and is then
+  encoded for the bucket path. This naming is not compatible with the non-MP
+  HFBucket connector's ``CacheEngineKey`` object names, so a bucket prefix
+  populated by non-MP LMCache cannot be read directly by MP LMCache and vice
+  versa.
+* Full object writes are batch based. Hugging Face batch writes are not
+  transactional, so a failed store task may still leave some objects in the
+  bucket. The MP adapter reconciles backend metadata after such failures so
+  any objects that actually landed are counted for usage and later deletion 
+  (submitted store task is still reported as failed).
+
+
 Notes
 -----
 

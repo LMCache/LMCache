@@ -26,13 +26,13 @@ async def get_or_set_log_level(
         result = "=== Loggers and Levels ===\n"
         for name, logger_obj in loggers.items():
             if isinstance(logger_obj, logging.Logger):
-                result += f"{name}: {logging.getLevelName(logger_obj.level)}\n"
+                result += "%s: %s\n" % (name, logging.getLevelName(logger_obj.level))
         return PlainTextResponse(content=result, media_type="text/plain")
     elif logger_name and not level:
         # Get the level of the specified logger
         target_logger = logging.getLogger(logger_name)
         return PlainTextResponse(
-            content=f"{logger_name}: {logging.getLevelName(target_logger.level)}",
+            content="%s: %s" % (logger_name, logging.getLevelName(target_logger.level)),
             media_type="text/plain",
         )
     elif logger_name and level:
@@ -45,13 +45,13 @@ async def get_or_set_log_level(
             for handler in target_logger.handlers:
                 handler.setLevel(level_value)
             return PlainTextResponse(
-                content=f"Set {logger_name} level to {level.upper()} "
-                "(including all handlers)",
+                content="Set %s level to %s (including all handlers)"
+                % (logger_name, level.upper()),
                 media_type="text/plain",
             )
         except AttributeError:
             return PlainTextResponse(
-                content=f"Invalid log level: {level}",
+                content="Invalid log level: %s" % level,
                 media_type="text/plain",
                 status_code=400,
             )

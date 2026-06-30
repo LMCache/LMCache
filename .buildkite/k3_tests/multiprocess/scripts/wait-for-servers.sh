@@ -59,9 +59,13 @@ if ! wait_for_vllm_server "$VLLM_PORT" "vLLM with LMCache" \
     exit 1
 fi
 
-if ! wait_for_vllm_server "$VLLM_BASELINE_PORT" "vLLM baseline (without LMCache)" \
-        "/tmp/build_${BUILD_ID}_vllm_baseline.log"; then
-    exit 1
+# The baseline server only exists for 2-GPU tests; 1-GPU tests set
+# LAUNCH_BASELINE=false in launch-processes.sh and never start it.
+if [[ "${LAUNCH_BASELINE:-true}" == "true" ]]; then
+    if ! wait_for_vllm_server "$VLLM_BASELINE_PORT" "vLLM baseline (without LMCache)" \
+            "/tmp/build_${BUILD_ID}_vllm_baseline.log"; then
+        exit 1
+    fi
 fi
 
 echo ""

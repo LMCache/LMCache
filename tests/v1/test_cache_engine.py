@@ -2,7 +2,7 @@
 # Standard
 from collections import OrderedDict
 from copy import deepcopy
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import os
 import random
 import shlex
@@ -29,6 +29,7 @@ from .utils import (
     DummyLMCacheAsyncLookupServer,
     check_paged_kv_cache_equal,
     create_gpu_connector,
+    create_test_memory_obj,
     dumb_metadata,
     generate_kv_cache_paged_list_tensors,
     generate_tokens,
@@ -978,6 +979,154 @@ def test_paged_prefetch_retrieve(
         subprocess.run(shlex.split("rm -rf local/disk_test/local_disk/"))
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+)
+def test_async_lookup_and_prefetch_layerwise(autorelease_v1):
+    # Regression: before the fix, async_lookup_and_prefetch sent chunk-level
+    # CacheEngineKey objects into batched_async_contains, but store_layer
+    # populates hot_cache with per-layer LayerCacheEngineKey objects, so every
+    # lookup reported 0 hits. We stage hot_cache the way store_layer would and
+    # assert async_lookup_and_prefetch reports the full token count.
+    chunk_size = 256
+    num_layers = 4
+    num_chunks = 3
+    num_tokens = chunk_size * num_chunks
+    kv_shape = (num_layers, 2, chunk_size, 8, 128)
+    lookup_id = "layerwise-async-1"
+
+    captured: dict[str, int] = {}
+
+    class _RecordingAsyncLookupServer:
+        def send_response_to_scheduler(
+            self, lookup_id: str, retrieved_length: int
+        ) -> None:
+            captured[lookup_id] = retrieved_length
+
+    cfg = LMCacheEngineConfig.from_legacy(
+        chunk_size=chunk_size,
+        backend="cpu",
+        enable_async_loading=True,
+    )
+    cfg.use_layerwise = True
+
+    connector = create_gpu_connector(1024, num_layers)
+    engine = autorelease_v1(
+        LMCacheEngineBuilder.get_or_create(
+            "test",
+            cfg,
+            dumb_metadata(kv_shape),
+            connector,
+            mock_up_broadcast_fn,
+            mock_up_broadcast_object_fn,
+        ),
+        async_lookup_server=_RecordingAsyncLookupServer(),
+    )
+
+    tokens = generate_tokens(num_tokens, "cuda")
+    chunk_keys = [
+        key for _, _, key in engine.token_database.process_tokens(tokens=tokens)
+    ]
+    assert len(chunk_keys) == num_chunks
+
+    # Populate LocalCPUBackend.hot_cache the way store_layer would: one entry
+    # per (chunk, layer) keyed by LayerCacheEngineKey.
+    cpu_backend = engine.storage_manager.storage_backends["LocalCPUBackend"]
+    for chunk_key in chunk_keys:
+        for layer_key in chunk_key.split_layers(num_layers):
+            cpu_backend.submit_put_task(layer_key, create_test_memory_obj())
+
+    engine.async_lookup_and_prefetch(lookup_id=lookup_id, tokens=tokens)
+
+    deadline = time.time() + 10
+    while (
+        engine.event_manager.get_event_status(EventType.LOADING, lookup_id)
+        != EventStatus.DONE
+    ):
+        if time.time() > deadline:
+            raise TimeoutError("layerwise async lookup did not finish in time")
+        time.sleep(0.01)
+
+    assert captured.get(lookup_id) == num_tokens, (
+        f"Expected retrieved_length={num_tokens}, got {captured.get(lookup_id)}"
+    )
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="TODO: Add non-CUDA implementation to VLLMPagedMemGPUConnectorV2",
+)
+def test_async_lookup_and_prefetch_layerwise_partial_layer_missing(autorelease_v1):
+    # When a single per-layer key is missing for one chunk, that chunk must be
+    # rounded down to a miss (the `// keys_per_chunk` round-down path).
+    chunk_size = 256
+    num_layers = 4
+    num_chunks = 3
+    num_tokens = chunk_size * num_chunks
+    kv_shape = (num_layers, 2, chunk_size, 8, 128)
+    lookup_id = "layerwise-async-2"
+
+    captured: dict[str, int] = {}
+
+    class _RecordingAsyncLookupServer:
+        def send_response_to_scheduler(
+            self, lookup_id: str, retrieved_length: int
+        ) -> None:
+            captured[lookup_id] = retrieved_length
+
+    cfg = LMCacheEngineConfig.from_legacy(
+        chunk_size=chunk_size,
+        backend="cpu",
+        enable_async_loading=True,
+    )
+    cfg.use_layerwise = True
+
+    connector = create_gpu_connector(1024, num_layers)
+    engine = autorelease_v1(
+        LMCacheEngineBuilder.get_or_create(
+            "test",
+            cfg,
+            dumb_metadata(kv_shape),
+            connector,
+            mock_up_broadcast_fn,
+            mock_up_broadcast_object_fn,
+        ),
+        async_lookup_server=_RecordingAsyncLookupServer(),
+    )
+
+    tokens = generate_tokens(num_tokens, "cuda")
+    chunk_keys = [
+        key for _, _, key in engine.token_database.process_tokens(tokens=tokens)
+    ]
+
+    # Stage chunks 0 and 1 fully; drop the last per-layer key of chunk 2.
+    cpu_backend = engine.storage_manager.storage_backends["LocalCPUBackend"]
+    for i, chunk_key in enumerate(chunk_keys):
+        per_layer_keys = chunk_key.split_layers(num_layers)
+        if i == len(chunk_keys) - 1:
+            per_layer_keys = per_layer_keys[:-1]
+        for layer_key in per_layer_keys:
+            cpu_backend.submit_put_task(layer_key, create_test_memory_obj())
+
+    engine.async_lookup_and_prefetch(lookup_id=lookup_id, tokens=tokens)
+
+    deadline = time.time() + 10
+    while (
+        engine.event_manager.get_event_status(EventType.LOADING, lookup_id)
+        != EventStatus.DONE
+    ):
+        if time.time() > deadline:
+            raise TimeoutError("layerwise async lookup did not finish in time")
+        time.sleep(0.01)
+
+    # First two chunks are complete; the partially-evicted third chunk is a
+    # miss, so the prefix-match retrieval pattern reports 2 chunks worth.
+    assert captured.get(lookup_id) == 2 * chunk_size, (
+        f"Expected retrieved_length={2 * chunk_size}, got {captured.get(lookup_id)}"
+    )
+
+
 @pytest.mark.parametrize("chunk_size", [256])
 @pytest.mark.parametrize(
     "backend",
@@ -1755,3 +1904,154 @@ def test_process_tokens_first_block_fails():
     assert tot_kv_size == 0
     assert not ret_mask.any()
     mem1.ref_count_down.assert_called_once()
+
+
+def test_compress_decompress_unpin_not_pinned() -> None:
+    """Verify that compress and decompress check is_pinned before calling unpin()
+
+    This prevents negative pin counts and double unpin warnings on backends like
+    Remote/S3.
+    """
+    # Create mock memory objects
+    mock_mem_obj = MagicMock()
+    mock_mem_obj.is_pinned = False  # Not pinned (e.g. from Remote/S3 backend)
+
+    mock_compressed_mem_obj = MagicMock()
+    mock_compressed_mem_obj.is_pinned = False  # Not pinned
+
+    # Mock serializer and deserializer
+    mock_serializer = MagicMock()
+    mock_serializer.serialize.return_value = mock_compressed_mem_obj
+    mock_deserializer = MagicMock()
+    mock_deserializer.deserialize.return_value = mock_mem_obj
+
+    # Create a mock engine
+    engine = MagicMock(spec=LMCacheEngine)
+    engine.metadata = MagicMock()
+    engine.config = MagicMock()
+    engine.lookup_pins = {"event_123": {"remote": ["key1"]}}
+
+    # Mock engine.lookup to return number of tokens (non-zero)
+    engine.lookup.return_value = 100
+
+    # Mock storage_manager methods
+    engine.storage_manager = MagicMock()
+    # For compress: batched_get returns mock_mem_obj
+    engine.storage_manager.batched_get.return_value = [mock_mem_obj]
+
+    with patch(
+        "lmcache.v1.storage_backend.naive_serde.CreateSerde",
+        return_value=(mock_serializer, mock_deserializer),
+    ):
+        # Call compress on the engine
+        res = LMCacheEngine.compress(
+            engine,
+            tokens=[1, 2, 3],
+            method="cachegen",
+            location="remote",
+            event_id="event_123",
+        )
+
+        assert res == 100
+        # Verify that serialize was called
+        mock_serializer.serialize.assert_called_once_with(mock_mem_obj)
+        # Verify that unpin was NOT called since is_pinned = False
+        mock_mem_obj.unpin.assert_not_called()
+
+        # Verify batched_remove and batched_put were called on storage_manager
+        engine.storage_manager.batched_remove.assert_called_once_with(
+            ["key1"], locations=["remote"]
+        )
+        engine.storage_manager.batched_put.assert_called_once_with(
+            keys=["key1"],
+            memory_objs=[mock_compressed_mem_obj],
+            location="remote",
+        )
+
+    # Reset storage_manager mock
+    engine.storage_manager.reset_mock()
+    # For decompress: batched_get returns mock_compressed_mem_obj
+    engine.storage_manager.batched_get.return_value = [mock_compressed_mem_obj]
+
+    with patch(
+        "lmcache.v1.storage_backend.naive_serde.CreateSerde",
+        return_value=(mock_serializer, mock_deserializer),
+    ):
+        res_decomp = LMCacheEngine.decompress(
+            engine,
+            tokens=[1, 2, 3],
+            method="cachegen",
+            location="remote",
+            event_id="event_123",
+        )
+
+        assert res_decomp == 100
+        # Verify that deserialize was called
+        mock_deserializer.deserialize.assert_called_once_with(mock_compressed_mem_obj)
+        # Verify that unpin was NOT called since is_pinned = False
+        mock_compressed_mem_obj.unpin.assert_not_called()
+
+        # Verify batched_remove and batched_put were called on storage_manager
+        engine.storage_manager.batched_remove.assert_called_once_with(
+            ["key1"], locations=["remote"]
+        )
+        engine.storage_manager.batched_put.assert_called_once_with(
+            keys=["key1"],
+            memory_objs=[mock_mem_obj],
+            location="remote",
+        )
+
+
+def test_compress_decompress_unpin_when_pinned() -> None:
+    """Verify that compress and decompress call unpin() if is_pinned is True"""
+    # Create mock memory objects
+    mock_mem_obj = MagicMock()
+    mock_mem_obj.is_pinned = True
+
+    mock_compressed_mem_obj = MagicMock()
+    mock_compressed_mem_obj.is_pinned = True
+
+    # Mock serializer and deserializer
+    mock_serializer = MagicMock()
+    mock_serializer.serialize.return_value = mock_compressed_mem_obj
+    mock_deserializer = MagicMock()
+    mock_deserializer.deserialize.return_value = mock_mem_obj
+
+    # Create a mock engine
+    engine = MagicMock(spec=LMCacheEngine)
+    engine.metadata = MagicMock()
+    engine.config = MagicMock()
+    engine.lookup_pins = {"event_123": {"local_cpu": ["key1"]}}
+    engine.lookup.return_value = 100
+    engine.storage_manager = MagicMock()
+
+    # Test compress
+    engine.storage_manager.batched_get.return_value = [mock_mem_obj]
+    with patch(
+        "lmcache.v1.storage_backend.naive_serde.CreateSerde",
+        return_value=(mock_serializer, mock_deserializer),
+    ):
+        LMCacheEngine.compress(
+            engine,
+            tokens=[1, 2, 3],
+            method="cachegen",
+            location="local_cpu",
+            event_id="event_123",
+        )
+        mock_mem_obj.unpin.assert_called_once()
+
+    # Test decompress
+    engine.storage_manager.reset_mock()
+    engine.storage_manager.batched_get.return_value = [mock_compressed_mem_obj]
+    with patch(
+        "lmcache.v1.storage_backend.naive_serde.CreateSerde",
+        return_value=(mock_serializer, mock_deserializer),
+    ):
+        LMCacheEngine.decompress(
+            engine,
+            tokens=[1, 2, 3],
+            method="cachegen",
+            location="local_cpu",
+            event_id="event_123",
+        )
+        mock_compressed_mem_obj.unpin.assert_called_once()

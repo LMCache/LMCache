@@ -123,7 +123,7 @@ Using AMD hipFile
 
    hipFile is alpha software and has been tested on limited hardware.
    For full installation details, see the
-   `hipFile install guide <https://github.com/ROCm/hipFile/blob/develop/INSTALL.md>`__.
+   `hipFile install guide <https://github.com/ROCm/rocm-systems/blob/develop/projects/hipfile/INSTALL.md>`__.
 
 **Prerequisites:**
 

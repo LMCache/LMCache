@@ -114,12 +114,13 @@ class L2AdapterListener(EventListener):
     """Listener for L2 adapter events, analogous to L1ManagerListener."""
 
     @abstractmethod
-    def on_l2_keys_stored(self, keys: list[ObjectKey]):
+    def on_l2_keys_stored(self, keys: list[ObjectKey], sizes: list[int]):
         """
         Notify the listener that keys have been successfully stored in L2.
 
         Args:
             keys (list[ObjectKey]): The keys that have been stored.
+            sizes (list[int]): The byte size of each stored key.
         """
         pass
 
@@ -168,6 +169,36 @@ class EvictionAction:
 
     keys: list[ObjectKey] = field(default_factory=list)
     """The key of the object to be evicted"""
+
+
+class L2StoreResult(int):
+    """Immutable result of a completed L2 store task.
+
+    Encodes both the success flag and bytes transferred in the int
+    value: ``>= 0`` means success (value = bytes transferred);
+    ``-1`` means failure.
+
+    Args:
+        success: Whether the store task succeeded.
+        bytes_transferred: Bytes actually written to L2. Must be >= 0.
+
+    Raises:
+        ValueError: If ``bytes_transferred`` is negative.
+    """
+
+    def __new__(cls, success: bool, bytes_transferred: int) -> "L2StoreResult":
+        if bytes_transferred < 0:
+            raise ValueError(f"bytes_transferred must be >= 0, got {bytes_transferred}")
+        return super().__new__(cls, bytes_transferred if success else -1)
+
+    def is_successful(self) -> bool:
+        """Return ``True`` when the store task succeeded."""
+        return int(self) >= 0
+
+    def bytes_transferred(self) -> int:
+        """Return the number of bytes actually written, or 0 on failure."""
+        value = int(self)
+        return value if value >= 0 else 0
 
 
 @dataclass(frozen=True)

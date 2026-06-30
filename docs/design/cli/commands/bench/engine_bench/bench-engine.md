@@ -269,7 +269,7 @@ instance, and returns it ready to `run()`.
 
 ## 3. End-to-End Flow
 
-The orchestrator in `BenchCommand._bench_engine()` wires everything together:
+The orchestrator in `engine_bench.command.run_engine_bench()` wires everything together:
 
 ```
 0. _resolve_args(args)            → argparse.Namespace
@@ -628,7 +628,7 @@ def create_workload(...):
 
 ### Step 3: Add CLI args
 
-In `bench/__init__.py`, inside `_register_engine()`:
+In `engine_bench/command.py`, inside `register_engine_parser()`:
 
 1. Add `"my-workload"` to the `--workload` choices list.
 2. Add a new argument group with **prefixed** arg names:

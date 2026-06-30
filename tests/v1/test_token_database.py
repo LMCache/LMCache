@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+import hashlib
 import os
 
 # Third Party
@@ -132,3 +133,25 @@ def test_segment_token_database(prefix_length, chunk_lengths):
         assert key.chunk_hash == hashes[i]
         # print(st, starts[i])
         # print(ed, ends[i])
+
+
+def test_process_tokens_returns_int_keys_for_bytes_hash_func() -> None:
+    """process_tokens must produce int chunk_hash keys even when the underlying
+    hash function returns bytes (e.g. sha256_cbor). This ensures downstream
+    code such as msgpack serialisation always receives plain ints.
+    """
+    cfg = LMCacheEngineConfig.from_legacy(chunk_size=16, backend="cpu")
+    metadata = dumb_metadata()
+    db = ChunkedTokenDatabase(cfg, metadata)
+
+    # Stub that returns bytes, mimicking sha256_cbor without requiring cbor2.
+    db.hash_func = lambda x: hashlib.sha256(str(x).encode()).digest()
+
+    tokens = generate_tokens(32, "cpu")
+    results = list(db.process_tokens(tokens=tokens, make_key=False))
+
+    assert len(results) > 0
+    for _, _, hash_val in results:
+        assert isinstance(hash_val, int), f"Expected int, got {type(hash_val)}"
+        # Must fit in uint64 (msgpack range: 0 to 2**64 - 1)
+        assert 0 <= hash_val <= 2**64 - 1

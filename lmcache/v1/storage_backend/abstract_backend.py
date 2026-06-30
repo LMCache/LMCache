@@ -165,11 +165,11 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         transfer_spec: Any = None,
     ) -> list[MemoryObj]:
         """
-        A non-blcocking function to get the kv cache from the storage backend.
+        A non-blocking function to get the kv cache from the storage backend.
 
         :param list[CacheEngineKey] keys: The keys of the list of MemoryObjs.
 
-        :return: a list of Memoryobjs.
+        :return: a list of MemoryObj.
         """
         raise NotImplementedError
 

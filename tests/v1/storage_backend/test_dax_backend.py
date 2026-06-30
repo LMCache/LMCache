@@ -63,9 +63,7 @@ def _create_multi_group_metadata(chunk_size: int = 16) -> LMCacheMetadata:
     ]
     metadata.kv_layer_groups_manager = KVLayerGroupsManager(
         kv_caches,
-        lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
-        num_blocks=1,
-        block_size=chunk_size,
+        [lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS] * len(kv_caches),
     )
     return metadata
 

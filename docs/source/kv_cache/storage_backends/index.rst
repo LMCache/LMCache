@@ -14,6 +14,7 @@ Supported Backends
    custom_backend
    dax
    eic
+   fs
    gds
    hfbucket
    infinistore
@@ -23,11 +24,13 @@ Supported Backends
    mooncake
    nixl
    redis
+   bigtable
    resp
    s3
    sagemaker_hyperpod
    valkey
    weka
+   3fs
    
    
   

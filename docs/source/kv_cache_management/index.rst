@@ -101,7 +101,7 @@ Expected output:
 
     # p2p configuration
     p2p_host: localhost
-    p2p_init_port: [11, 12, 13]
+    p2p_init_ports: [11, 12, 13]
 
 .. toctree::
    :maxdepth: 1

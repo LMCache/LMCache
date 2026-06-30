@@ -127,8 +127,8 @@ class TestLookupHitRateCounters:
         bus.stop()
 
         delta = snapshot()
-        assert delta["lmcache_mp.lookup_requested_tokens"] == 1024
-        assert delta["lmcache_mp.lookup_hit_tokens"] == 1024
+        assert delta["lmcache_mp.lookup_requested"] == 1024
+        assert delta["lmcache_mp.lookup_hit"] == 1024
 
     def test_partial_hit(self, bus, subscriber, snapshot):
         """A prefix of the requested tokens is served from cache."""
@@ -148,8 +148,8 @@ class TestLookupHitRateCounters:
         bus.stop()
 
         delta = snapshot()
-        assert delta["lmcache_mp.lookup_requested_tokens"] == 1024
-        assert delta["lmcache_mp.lookup_hit_tokens"] == 512
+        assert delta["lmcache_mp.lookup_requested"] == 1024
+        assert delta["lmcache_mp.lookup_hit"] == 512
 
     def test_full_miss(self, bus, subscriber, snapshot):
         """Nothing is cached; both counters still receive the denominator."""
@@ -169,8 +169,8 @@ class TestLookupHitRateCounters:
         bus.stop()
 
         delta = snapshot()
-        assert delta["lmcache_mp.lookup_requested_tokens"] == 1024
-        assert delta.get("lmcache_mp.lookup_hit_tokens", 0) == 0
+        assert delta["lmcache_mp.lookup_requested"] == 1024
+        assert delta.get("lmcache_mp.lookup_hit", 0) == 0
 
     def test_early_exit_contributes_zero(self, bus, subscriber, snapshot):
         """Early-exit lookups (no layout_desc or empty chunk_hashes) emit
@@ -192,8 +192,8 @@ class TestLookupHitRateCounters:
         bus.stop()
 
         delta = snapshot()
-        assert delta.get("lmcache_mp.lookup_requested_tokens", 0) == 0
-        assert delta.get("lmcache_mp.lookup_hit_tokens", 0) == 0
+        assert delta.get("lmcache_mp.lookup_requested", 0) == 0
+        assert delta.get("lmcache_mp.lookup_hit", 0) == 0
 
     def test_multiple_lookups_accumulate(self, bus, subscriber, snapshot):
         """Counters should accumulate across multiple completed lookups."""
@@ -229,9 +229,9 @@ class TestLookupHitRateCounters:
 
         delta = snapshot()
         # 3*512 + 2*1024 = 1536 + 2048 = 3584
-        assert delta["lmcache_mp.lookup_requested_tokens"] == 3584
+        assert delta["lmcache_mp.lookup_requested"] == 3584
         # 3*512 + 2*256 = 1536 + 512 = 2048
-        assert delta["lmcache_mp.lookup_hit_tokens"] == 2048
+        assert delta["lmcache_mp.lookup_hit"] == 2048
 
 
 # ---------------------------------------------------------------------------
@@ -279,12 +279,10 @@ class TestLookupAttributeLabels:
             ("cache_salt", "tenant-A"),
             ("model_name", "llama-3.1-8b"),
         )
-        before_req = before.get("lmcache_mp.lookup_requested_tokens", {}).get(
-            attr_key, 0
-        )
-        before_hit = before.get("lmcache_mp.lookup_hit_tokens", {}).get(attr_key, 0)
-        after_req = after.get("lmcache_mp.lookup_requested_tokens", {}).get(attr_key, 0)
-        after_hit = after.get("lmcache_mp.lookup_hit_tokens", {}).get(attr_key, 0)
+        before_req = before.get("lmcache_mp.lookup_requested", {}).get(attr_key, 0)
+        before_hit = before.get("lmcache_mp.lookup_hit", {}).get(attr_key, 0)
+        after_req = after.get("lmcache_mp.lookup_requested", {}).get(attr_key, 0)
+        after_hit = after.get("lmcache_mp.lookup_hit", {}).get(attr_key, 0)
         assert after_req == before_req + 1024
         assert after_hit == before_hit + 768
 
@@ -325,7 +323,7 @@ class TestLookupAttributeLabels:
         after = _read_counters_by_attrs()
         a_key = (("cache_salt", "salt-1"), ("model_name", "model-A"))
         b_key = (("cache_salt", "salt-1"), ("model_name", "model-B"))
-        req = "lmcache_mp.lookup_requested_tokens"
+        req = "lmcache_mp.lookup_requested"
         assert (
             after.get(req, {}).get(a_key, 0) == before.get(req, {}).get(a_key, 0) + 512
         )
@@ -355,7 +353,7 @@ class TestLookupAttributeLabels:
 
         after = _read_counters_by_attrs()
         empty_key: tuple = ()
-        req = "lmcache_mp.lookup_requested_tokens"
+        req = "lmcache_mp.lookup_requested"
         assert (
             after.get(req, {}).get(empty_key, 0)
             == before.get(req, {}).get(empty_key, 0) + 128

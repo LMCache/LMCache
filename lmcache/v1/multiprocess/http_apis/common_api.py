@@ -33,7 +33,7 @@ router = APIRouter()
 
 # Modules that depend on vLLM-specific ``app.state`` attributes and
 # therefore cannot run on the multiprocess HTTP server.
-_MP_INCOMPATIBLE_MODULES = frozenset({"run_script_api"})
+_MP_INCOMPATIBLE_MODULES: frozenset[str] = frozenset()
 
 _common_path = Path(internal_api_server.__file__).parent / "common"
 _common_package = f"{internal_api_server.__name__}.common"

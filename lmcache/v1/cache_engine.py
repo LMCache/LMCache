@@ -43,6 +43,7 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventStatus, EventType
 from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
 from lmcache.v1.gpu_connector.utils import assert_layerwise_gpu_connector
+from lmcache.v1.hidden_state_store import HiddenStateStore
 from lmcache.v1.memory_management import CuFileMemoryAllocator  # noqa: E501
 from lmcache.v1.memory_management import (  # noqa: E501
     MemoryAllocatorInterface,
@@ -102,7 +103,7 @@ class LMCacheEngine:
         broadcast_fn: Callable[[torch.Tensor, int], None],
         broadcast_object_fn: Callable[[Any, int], Any],
     ):
-        logger.info(f"Creating LMCacheEngine with config: {config}")
+        logger.info("Creating LMCacheEngine with config: %s", config)
         self.config = config
         self.metadata = metadata
         self.token_database = token_database
@@ -121,6 +122,14 @@ class LMCacheEngine:
                 if hasattr(self.gpu_connector, "load_stream")
                 else torch_dev.Stream()
             )
+
+        # Holds GPU-resident copies of the broadcast send buffers on the
+        # leader rank so the subsequent batched_to_gpu can read from HBM
+        # rather than re-reading the same L1 bytes over PCIe. Always empty
+        # on non-leader ranks and outside the broadcast critical section.
+        # Typed as List[MemoryObj] (the supertype) so the list can be
+        # passed directly to batched_to_gpu without an invariance cast.
+        self._leader_gpu_substitute_objs: List[MemoryObj] = []
 
         self.enable_controller = config.enable_controller
 
@@ -146,7 +155,7 @@ class LMCacheEngine:
             self.lmcache_worker = None
             logger.info(
                 "LMCacheWorker is not initialized (related configs: "
-                "enable_controller: %s, role: %s, worker_id: %s, worker_ids: %s).",
+                "enable_controller: %s, role: %s, worker_id: %d, worker_ids: %s).",
                 self.enable_controller,
                 self.metadata.role,
                 self.metadata.worker_id,
@@ -209,7 +218,7 @@ class LMCacheEngine:
         InitializeUsageContext(config, metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
         # Initialize PinMonitor singleton with config
-        PinMonitor.GetOrCreate(config)
+        PinMonitor.GetOrCreate(config, metadata)
 
         self.post_inited = False
 
@@ -225,6 +234,13 @@ class LMCacheEngine:
 
         # Flag to indicate if initialization failed (irrecoverable error)
         self._init_failed = False
+
+        # Hidden-state cache (logically separate from KV; lives on its own
+        # pinned pool). Bound to storage_manager in post_init for coupled
+        # eviction. None when disabled in config.
+        self.hidden_state_store: Optional[HiddenStateStore] = None
+        if config.enable_hidden_state_cache:
+            self.hidden_state_store = HiddenStateStore(config, token_database)
 
     def set_health_monitor(self, health_monitor: "HealthMonitor") -> None:
         """
@@ -294,9 +310,12 @@ class LMCacheEngine:
                 or self.metadata.worker_id in lookup_server_worker_ids
             ):
                 logger.info(
-                    f"Initialize storage manager on rank {self.metadata.worker_id}, "
-                    f"use layerwise: {self.use_layerwise},"
-                    f"save only first rank: {self.save_only_first_rank}"
+                    "Initialize storage manager on rank %d, "
+                    "use layerwise: %s,"
+                    "save only first rank: %s",
+                    self.metadata.worker_id,
+                    self.use_layerwise,
+                    self.save_only_first_rank,
                 )
                 async_lookup_server = kwargs.get("async_lookup_server", None)
                 self.storage_manager = StorageManager(
@@ -306,6 +325,8 @@ class LMCacheEngine:
                     lmcache_worker=self.lmcache_worker,
                     async_lookup_server=async_lookup_server,
                 )
+                if self.hidden_state_store is not None:
+                    self.hidden_state_store.bind_storage_manager(self.storage_manager)
             self.post_inited = True
 
     def freeze(self, enabled: bool) -> None:
@@ -398,7 +419,7 @@ class LMCacheEngine:
         )
 
         if self._is_passive():
-            logger.debug(f"rank={self.metadata.worker_id} ignore store")
+            logger.debug("rank=%d ignore store", self.metadata.worker_id)
             return
 
         assert self.storage_manager is not None
@@ -484,8 +505,8 @@ class LMCacheEngine:
                     logger.warning(
                         "Local cpu memory under pressure so"
                         " choosing to store only "
-                        f" {len(memory_objs)}"
-                        " total chunks of KV cache."
+                        " %d total chunks of KV cache.",
+                        len(memory_objs),
                     )
                     break
 
@@ -699,7 +720,8 @@ class LMCacheEngine:
                     if isinstance(tokens, torch.Tensor):
                         stored_event.medium = tokens.device
                 logger.debug(
-                    f"Added kv cache event '{stored_event}' to kv cache events queue"
+                    "Added kv cache event '%s' to kv cache events queue",
+                    stored_event,
                 )
                 self.kv_events.append(stored_event)
                 prev_key = key.chunk_hash
@@ -852,9 +874,48 @@ class LMCacheEngine:
         if len(reordered_chunks) > 0:
             with retrieve_stats.profile_to_gpu():
                 _, memory_objs, starts, ends = zip(*reordered_chunks, strict=False)
-                self.gpu_connector.batched_to_gpu(
-                    list(memory_objs), list(starts), list(ends), **kwargs
-                )
+                # When save_only_first_rank is enabled, the leader rank's
+                # memory_objs from L1 are CPU-resident. The broadcast above
+                # already created GPU-resident copies on the leader to use as
+                # the NCCL send buffer. Substitute those here so this kernel
+                # reads from HBM rather than re-reading the same L1 bytes
+                # over PCIe via zero-copy mapped pinned memory. Without this
+                # swap, batched_to_gpu on the leader takes ~9 ms (PCIe-bound)
+                # while passive ranks take ~0.5 ms (HBM-bound) — a structural
+                # asymmetry on the critical path of every retrieve.
+                if self.save_only_first_rank and self.metadata.is_first_rank():
+                    if len(self._leader_gpu_substitute_objs) == len(memory_objs):
+                        memory_objs_for_togpu = self._leader_gpu_substitute_objs
+                    else:
+                        # Substitute list should always match memory_objs after
+                        # _broadcast_or_receive_memory_objs has run on the
+                        # leader.  A mismatch indicates a bug or stale state;
+                        # fall back to the CPU L1 source so retrieval is still
+                        # correct, but warn so the issue is visible.
+                        logger.warning(
+                            "Leader rank: GPU substitute count (%d) does not "
+                            "match memory_objs count (%d); falling back to "
+                            "CPU L1 source for batched_to_gpu (PCIe-bound, "
+                            "~9 ms slower).",
+                            len(self._leader_gpu_substitute_objs),
+                            len(memory_objs),
+                        )
+                        memory_objs_for_togpu = list(memory_objs)
+                else:
+                    memory_objs_for_togpu = list(memory_objs)
+                try:
+                    self.gpu_connector.batched_to_gpu(
+                        memory_objs_for_togpu, list(starts), list(ends), **kwargs
+                    )
+                finally:
+                    # Release GPU substitute references so the temporary
+                    # buffers can be freed; original memory_objs in
+                    # reordered_chunks are still tracked for the cleanup
+                    # loop below. Done in `finally` so a raise from
+                    # batched_to_gpu (e.g. CUDA OOM) does not leave the
+                    # references dangling on this long-lived engine.
+                    if self.save_only_first_rank and self.metadata.is_first_rank():
+                        self._leader_gpu_substitute_objs = []
 
         # TODO(Jiayi): Remove the following for loop with batched operations
         # TODO(Jiayi): Need to refactor the `remove_after_retrieve` logic.
@@ -1246,7 +1307,9 @@ class LMCacheEngine:
         if not do_copy:
             self.storage_manager.batched_remove(keys, locations=[old_position])
 
-        logger.debug(f"Moving {num_tokens} token from {old_position} to {new_position}")
+        logger.debug(
+            "Moving %d token from %s to %s", num_tokens, old_position, new_position
+        )
         return num_tokens
 
     # TODO(Jiayi): Add layerwise support.
@@ -1277,6 +1340,12 @@ class LMCacheEngine:
         if search_range is None:
             search_range = self.retrieve_locations
 
+        # When layerwise is enabled, store_layer writes per-layer keys
+        # (LayerCacheEngineKey, chunk_hash + layer_id). Async lookup must
+        # split each chunk key into num_layers per-layer keys so the
+        # storage backend hot_cache lookups match the same key type.
+        keys_per_chunk = self.num_layers if self.use_layerwise else 1
+
         # TODO(Jiayi): make token database able to return list.
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
@@ -1285,12 +1354,20 @@ class LMCacheEngine:
             request_configs=request_configs,
         ):
             assert isinstance(key, CacheEngineKey)
-            keys.append(key)
+            if self.use_layerwise:
+                keys.extend(key.split_layers(self.num_layers))
+            else:
+                keys.append(key)
             cum_chunk_lengths.append(end)
 
         asyncio.run_coroutine_threadsafe(
             self.storage_manager.async_lookup_and_prefetch(
-                lookup_id, keys, cum_chunk_lengths, search_range, pin
+                lookup_id,
+                keys,
+                cum_chunk_lengths,
+                search_range,
+                pin,
+                keys_per_chunk=keys_per_chunk,
             ),
             self.storage_manager.loop,
         )
@@ -1323,13 +1400,16 @@ class LMCacheEngine:
             for key, memory_obj in memory_objs_flat:
                 try:
                     logger.debug("Releasing memory object for lookup_id=%s", lookup_id)
-                    memory_obj.unpin()
+                    if memory_obj.is_pinned:
+                        memory_obj.unpin()
                     memory_obj.ref_count_down()
                 except Exception as e:
-                    logger.error(f"Error releasing memory object: {e}")
+                    logger.error("Error releasing memory object: %s", e)
         except Exception as e:
             logger.error(
-                f"Error during cleanup_memory_objs for lookup_id={lookup_id}: {e}"
+                "Error during cleanup_memory_objs for lookup_id=%s: %s",
+                lookup_id,
+                e,
             )
 
     # TODO(Jiayi): Need to handle the case where `tokens=None`.
@@ -1345,7 +1425,7 @@ class LMCacheEngine:
     ) -> int:
         assert self.storage_manager is not None
         if method not in ["cachegen"]:
-            logger.warning(f"Unsupported compression method: {method}.")
+            logger.warning("Unsupported compression method: %s.", method)
             return 0
 
         # First Party
@@ -1380,7 +1460,8 @@ class LMCacheEngine:
         for memory_obj in memory_objs:
             assert memory_obj is not None
             compressed_memory_obj = serializer.serialize(memory_obj)
-            memory_obj.unpin()
+            if memory_obj.is_pinned:
+                memory_obj.unpin()
             compressed_memory_objs.append(compressed_memory_obj)
 
         self.storage_manager.batched_remove(keys, locations=[location])
@@ -1403,7 +1484,7 @@ class LMCacheEngine:
     ) -> int:
         assert self.storage_manager is not None
         if method not in ["cachegen"]:
-            logger.warning(f"Unsupported decompression method: {method}.")
+            logger.warning("Unsupported decompression method: %s.", method)
             return 0
 
         # First Party
@@ -1440,7 +1521,8 @@ class LMCacheEngine:
         for compressed_memory_obj in compressed_memory_objs:
             assert compressed_memory_obj is not None
             memory_obj = deserializer.deserialize(compressed_memory_obj)
-            compressed_memory_obj.unpin()
+            if compressed_memory_obj.is_pinned:
+                compressed_memory_obj.unpin()
             memory_objs.append(memory_obj)
 
         self.storage_manager.batched_remove(keys, locations=[location])
@@ -1528,13 +1610,20 @@ class LMCacheEngine:
         """Close the cache engine and free all the resources"""
         logger.info("Closing LMCacheEngine...")
 
+        if self.hidden_state_store is not None:
+            try:
+                logger.info("Closing hidden_state_store...")
+                self.hidden_state_store.close()
+            except Exception as e:
+                logger.error(f"Error closing hidden_state_store: {e}")
+
         if self.lmcache_worker is not None:
             try:
                 logger.info("Closing lmcache_worker...")
                 self.lmcache_worker.close()
                 logger.info("lmcache_worker closed successfully")
             except Exception as e:
-                logger.error(f"Error closing lmcache_worker: {e}")
+                logger.error("Error closing lmcache_worker: %s", e)
 
         try:
             logger.info("Closing storage_manager...")
@@ -1542,7 +1631,7 @@ class LMCacheEngine:
                 self.storage_manager.close()
             logger.info("storage_manager closed successfully")
         except Exception as e:
-            logger.error(f"Error closing storage_manager: {e}")
+            logger.error("Error closing storage_manager: %s", e)
 
         logger.info("LMCacheEngine closed.")
 
@@ -1579,7 +1668,7 @@ class LMCacheEngine:
             keyed_memory_objs = future.result()
             memory_obj_map: dict[CacheEngineKey, MemoryObj] = {}
         except Exception as e:
-            logger.error(f"Error popping event for request {kwargs['req_id']}: {e}")
+            logger.error("Error popping event for request %s: %s", kwargs["req_id"], e)
             return [], 0
 
         for backend_results in keyed_memory_objs:
@@ -1748,6 +1837,14 @@ class LMCacheEngine:
             chunk_count = len(reordered_chunks)
             self.broadcast_object_fn(chunk_count, self.metadata.first_rank)
 
+            # Reset the GPU-resident copy list. We populate it during this
+            # broadcast loop so the caller's subsequent batched_to_gpu can
+            # read from HBM instead of re-reading the same CPU L1 buffer
+            # over PCIe. (Declared in __init__; reassigning to a fresh list
+            # rather than .clear() to drop any references the caller's
+            # finally block missed if a previous retrieve raised.)
+            self._leader_gpu_substitute_objs = []
+
             # Broadcast each chunk's data
             for key, memory_obj, start, end in reordered_chunks:
                 # Combine (start, end) and metadata into single broadcast
@@ -1762,12 +1859,22 @@ class LMCacheEngine:
                     f"{torch_device_type}:{self.metadata.worker_id}"
                 )
                 self.broadcast_fn(tensor_to_broadcast, self.metadata.first_rank)
+
+                # Keep this GPU-resident copy alive so the subsequent
+                # batched_to_gpu can read from HBM rather than re-reading
+                # the L1 buffer over PCIe.
+                gpu_mo = TensorMemoryObj(
+                    raw_data=tensor_to_broadcast,
+                    metadata=memory_obj.metadata,
+                    parent_allocator=None,
+                )
+                self._leader_gpu_substitute_objs.append(gpu_mo)
         else:
             # Receive total chunk count
             chunk_count = self.broadcast_object_fn(None, self.metadata.first_rank)
             if chunk_count is None:
                 logger.warning(
-                    f"rank={self.metadata.worker_id} received None chunk_count"
+                    "rank=%d received None chunk_count", self.metadata.worker_id
                 )
                 return
 
@@ -1779,8 +1886,8 @@ class LMCacheEngine:
                 )
                 if combined_metadata is None:
                     logger.warning(
-                        f"rank={self.metadata.worker_id} "
-                        "received None combined_metadata"
+                        "rank=%d received None combined_metadata",
+                        self.metadata.worker_id,
                     )
                     break
                 start, end, metadata_dict = combined_metadata
@@ -1924,20 +2031,12 @@ class LMCacheEngineBuilder:
             )
 
             if corrected_device == "cpu":
-                # Not all backends support cudart() for host memory pinning
-                if not hasattr(torch_dev, "cudart"):
-                    raise RuntimeError(
-                        f"Backend '{torch_device_type}' does not support "
-                        "cudart(). NIXL storage CPU buffer requires "
-                        "pinned memory via cudaHostRegister, which is "
-                        "not available on this backend."
-                    )
-                else:
-                    torch_dev.cudart().cudaHostRegister(
-                        buffer.data_ptr(), config.nixl_buffer_size, 0
-                    )
+                if not torch_dev.ext.pin_memory(
+                    buffer.data_ptr(), config.nixl_buffer_size
+                ):
+                    raise RuntimeError("Failed to pin NIXL CPU buffer for DMA access")
             else:
-                logger.info(f"Setting device to {corrected_device} ")
+                logger.info("Setting device to %s", corrected_device)
                 torch_dev.set_device(corrected_device)
 
             return PagedTensorMemoryAllocator(
@@ -2002,10 +2101,10 @@ class LMCacheEngineBuilder:
         raises: ValueError if the instance already exists with a different
             configuration.
         """
-        logger.info(f"Creating LMCacheEngine instance {instance_id}")
+        logger.info("Creating LMCacheEngine instance %s", instance_id)
         if instance_id not in cls._instances:
             numa_mapping = NUMADetector.get_numa_mapping(config)
-            logger.info(f"NUMA mapping for instance {instance_id}: {numa_mapping}")
+            logger.info("NUMA mapping for instance %s: %s", instance_id, numa_mapping)
             token_database = cls._Create_token_database(config, metadata)
             stat_logger = LMCacheStatsLogger(
                 metadata,
@@ -2048,7 +2147,7 @@ class LMCacheEngineBuilder:
     def destroy(cls, instance_id: str) -> None:
         """Close and delete the LMCacheEngine instance by the instance ID"""
         # TODO: unit test for this
-        logger.info(f"Destroying LMCacheEngine instance: {instance_id}")
+        logger.info("Destroying LMCacheEngine instance: %s", instance_id)
 
         if instance_id in cls._instances:
             stat_logger = cls._stat_loggers[instance_id]
@@ -2057,7 +2156,7 @@ class LMCacheEngineBuilder:
                 stat_logger.shutdown()
                 logger.info("Stats logger shut down successfully")
             except Exception as e:
-                logger.error(f"Error shutting down stats logger: {e}")
+                logger.error("Error shutting down stats logger: %s", e)
 
             engine = cls._instances[instance_id]
             try:
@@ -2065,7 +2164,7 @@ class LMCacheEngineBuilder:
                 engine.close()
                 logger.info("Cache engine closed successfully")
             except Exception as e:
-                logger.error(f"Error closing cache engine: {e}")
+                logger.error("Error closing cache engine: %s", e)
 
             try:
                 logger.info("Cleaning up instance dictionaries...")
@@ -2075,15 +2174,15 @@ class LMCacheEngineBuilder:
                 cls._stat_loggers.pop(instance_id, None)
                 logger.info("Instance dictionaries cleaned up")
             except Exception as e:
-                logger.error(f"Error cleaning up instances: {e}")
+                logger.error("Error cleaning up instances: %s", e)
 
             try:
                 logger.info("Destroying stats monitor...")
                 LMCStatsMonitor.DestroyInstance()
                 logger.info("Stats monitor destroyed successfully")
             except Exception as e:
-                logger.error(f"Error destroying stats monitor: {e}")
+                logger.error("Error destroying stats monitor: %s", e)
 
-            logger.info(f"LMCacheEngine instance {instance_id} destroyed")
+            logger.info("LMCacheEngine instance %s destroyed", instance_id)
         else:
-            logger.warning(f"Instance {instance_id} not found for destruction")
+            logger.warning("Instance %s not found for destruction", instance_id)

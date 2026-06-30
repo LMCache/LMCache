@@ -5,7 +5,7 @@ Per-cache_salt quota registry.
 Holds the authoritative map from ``cache_salt`` to a byte budget.
 Consumed by the L2 eviction controller each cycle to decide which
 users are over their quota, and by the HTTP API for runtime
-administration (CRUD endpoints at ``/api/quota/...``).
+administration (CRUD endpoints at ``/quota/...``).
 
 Allowlist semantics: a ``cache_salt`` with no entry has an effective
 limit of ``0`` bytes — stores are still permitted on the hot path,

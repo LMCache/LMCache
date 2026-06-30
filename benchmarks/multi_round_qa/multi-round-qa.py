@@ -153,6 +153,9 @@ class RequestExecutor:
         tokens_out = tok.usage.completion_tokens
         tokens_prefill = tok.usage.prompt_tokens
 
+        if first_token_time is None:
+            first_token_time = time.time()
+
         return Response(
             body=words,
             ttft=first_token_time - start_time,

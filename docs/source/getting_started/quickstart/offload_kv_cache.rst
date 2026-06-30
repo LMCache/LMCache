@@ -167,8 +167,17 @@ This section demonstrates the performance benefits of using CPU offloading with 
 Prerequisites (Setup)
 ~~~~~~~~~~~~~~~~~~~~~~
 
-- At least 24GB GPU memory
-- Sufficient CPU memory (LMCache will use 15 GB by default in this example).
+- A CUDA GPU. The example picks a model that fits the GPU automatically:
+
+  - ``Qwen/Qwen3-8B`` (bf16) when the GPU has ~36 GiB or more (e.g. A100-80G, H100).
+  - ``Qwen/Qwen3-8B-FP8`` with ``kv_cache_dtype="fp8"`` when the GPU has ~24 GiB
+    and supports native FP8 (Ada Lovelace / Hopper, ``sm_89+``; e.g. L4, L40, RTX 4090).
+  - ``Qwen/Qwen3-1.7B`` as the fallback for smaller GPUs (~10 GiB and up),
+    including Ampere 24 GiB cards (RTX A5000, RTX 3090) where FP8 is unsupported.
+
+- Sufficient CPU memory. The example clamps the LMCache pinned host buffer to
+  fit your system RAM and ``RLIMIT_MEMLOCK`` (``ulimit -l``), so it also works
+  on smaller hosts without manual tuning.
 
 Example script
 ~~~~~~~~~~~~~~
@@ -194,7 +203,7 @@ Save the following script as ``cpu-offloading.py``:
     from vllm import LLM, SamplingParams
     from vllm.config import KVTransferConfig
 
-    def parse_arguments():
+    def parse_arguments() -> argparse.Namespace:
         """Parse command line arguments."""
         parser = argparse.ArgumentParser(description="CPU offloading example with LMCache")
         parser.add_argument("--num-prompts", type=int, default=10,
@@ -205,43 +214,89 @@ Save the following script as ``cpu-offloading.py``:
                           help="Enable LMCache for CPU offloading (default: True)")
         return parser.parse_args()
 
-    def setup_lmcache_environment(num_prompts, num_tokens):
+    def pick_cpu_size_gb(workload_gb: float) -> float:
+        """
+        Clamp the LMCache pinned host buffer to fit system RAM and RLIMIT_MEMLOCK.
+
+        cudaHostAlloc pins pages, so the buffer cannot exceed total RAM nor the
+        per-process memlock limit (`ulimit -l`). On hosts where either is small,
+        the original "1.5 GB per 10k tokens" formula fails with cudaErrorMemoryAllocation.
+
+        Args:
+            workload_gb: Desired buffer size for the workload, in GiB.
+        Returns:
+            float: A buffer size in GiB that fits both caps, never below 1.0.
+        """
+        import psutil
+
+        ram_gib = psutil.virtual_memory().total / (1024 ** 3)
+        try:
+            import resource
+            memlock_soft, _ = resource.getrlimit(resource.RLIMIT_MEMLOCK)
+            memlock_gib = (
+                float("inf")
+                if memlock_soft == resource.RLIM_INFINITY
+                else memlock_soft / (1024 ** 3)
+            )
+        except ImportError:
+            # `resource` is POSIX-only; on Windows treat memlock as unbounded.
+            memlock_gib = float("inf")
+        return max(min(workload_gb, ram_gib * 0.5, memlock_gib * 0.9), 1.0)
+
+    def setup_lmcache_environment(num_prompts: int, num_tokens: int) -> None:
         """
         Configure LMCache environment variables.
         Args:
             num_prompts: Number of prompts to process
             num_tokens: Number of tokens per prompt
         """
-        cpu_size = num_prompts * num_tokens * 1.5 / 10000  # 1.5GB per 10000 tokens
-        
+        workload_gb = num_prompts * num_tokens * 1.5 / 10000  # 1.5 GB per 10k tokens
+        cpu_size = pick_cpu_size_gb(workload_gb)
+
         env_vars = {
             "LMCACHE_CHUNK_SIZE": "256",         # Set tokens per chunk
             "LMCACHE_LOCAL_CPU": "True",         # Enable local CPU backend
-            "LMCACHE_MAX_LOCAL_CPU_SIZE": str(cpu_size)  # Dynamic CPU memory limit (GB)
+            "LMCACHE_MAX_LOCAL_CPU_SIZE": str(cpu_size)  # CPU memory limit (GB)
         }
         for key, value in env_vars.items():
             os.environ[key] = value
 
-    def calculate_gpu_utilization(target_memory_gb=24):
+    def pick_model_and_kwargs() -> tuple[str, dict]:
         """
-        Calculate GPU memory utilization to use exactly target_memory_gb of GPU memory.
-        Args:
-            target_memory_gb: Target GPU memory usage in gigabytes
+        Pick a Qwen model that fits the current GPU's memory and compute capability.
+
+        Tiers:
+            - >= 36 GiB                    -> Qwen/Qwen3-8B (bf16)
+            - >= 20 GiB and sm >= 89       -> Qwen/Qwen3-8B-FP8 (native FP8)
+            - >= 10 GiB                    -> Qwen/Qwen3-1.7B
+            - otherwise                    -> RuntimeError
+
         Returns:
-            float: GPU memory utilization ratio (0.0 to 1.0)
+            tuple[str, dict]: (model id, extra kwargs to pass to ``LLM``).
         Raises:
-            RuntimeError: If GPU memory is less than target_memory_gb
+            RuntimeError: If no CUDA GPU is visible or it is too small.
         """
         if not torch.cuda.is_available():
             raise RuntimeError("No GPU available")
-        
-        total_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # Convert to GB
-        if total_memory < target_memory_gb:
-            raise RuntimeError(f"GPU memory ({total_memory:.1f}GB) is less than required memory ({target_memory_gb}GB)")
-        
-        return target_memory_gb / total_memory
 
-    def create_test_prompts(num_prompts=10, num_tokens=1000):
+        total_gib = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+        major, minor = torch.cuda.get_device_capability(0)
+        sm = major * 10 + minor
+        has_fp8 = sm >= 89  # Ada Lovelace / Hopper
+
+        if total_gib >= 36:
+            return "Qwen/Qwen3-8B", {}
+        if total_gib >= 20 and has_fp8:
+            print(f"[fallback] GPU {total_gib:.1f} GiB sm_{sm}: using Qwen3-8B-FP8")
+            return "Qwen/Qwen3-8B-FP8", {"kv_cache_dtype": "fp8"}
+        if total_gib >= 10:
+            print(f"[fallback] GPU {total_gib:.1f} GiB sm_{sm}: using Qwen3-1.7B")
+            return "Qwen/Qwen3-1.7B", {}
+        raise RuntimeError(
+            f"GPU has {total_gib:.1f} GiB; need at least 10 GiB for Qwen3-1.7B"
+        )
+
+    def create_test_prompts(num_prompts: int = 10, num_tokens: int = 1000) -> list[str]:
         """
         Create test prompts with index prefix and dummy body.
         Args:
@@ -252,36 +307,43 @@ Save the following script as ``cpu-offloading.py``:
         """
         prompts = []
         dummy_text = "Hi " * num_tokens
-        
+
         for i in range(num_prompts):
             prompt = f"[Prompt {i}] {dummy_text} how are you?"
             prompts.append(prompt)
-        
+
         return prompts
 
-    def initialize_llm(model_name="Qwen/Qwen3-8B", max_len=16384, enable_lmcache=True):
+    def initialize_llm(max_len: int = 16384, enable_lmcache: bool = True) -> LLM:
         """
-        Initialize the LLM with appropriate configurations.
+        Initialize the LLM with a model auto-selected for the current GPU.
         Args:
-            model_name: Name of the model to load
             max_len: Maximum sequence length
+            enable_lmcache: Whether to wire up the LMCache KV connector
         Returns:
             LLM: Configured LLM instance
         """
+        model_name, extra_kwargs = pick_model_and_kwargs()
+
         ktc = KVTransferConfig(
             kv_connector="LMCacheConnectorV1",
             kv_role="kv_both",
         ) if enable_lmcache else None
-        
+
         return LLM(
             model=model_name,
             kv_transfer_config=ktc,
             max_model_len=max_len,
             enable_prefix_caching=False,
-            gpu_memory_utilization=calculate_gpu_utilization()
+            gpu_memory_utilization=0.9,
+            **extra_kwargs,
         )
 
-    def generate_and_print_output(llm, prompts, sampling_params):
+    def generate_and_print_output(
+        llm: LLM,
+        prompts: list[str],
+        sampling_params: SamplingParams,
+    ) -> float:
         """
         Generate text and print the results.
         Args:
@@ -294,14 +356,14 @@ Save the following script as ``cpu-offloading.py``:
         start_time = time.time()
         outputs = llm.generate(prompts, sampling_params)
         end_time = time.time()
-        
+
         for output in outputs:
             generated_text = output.outputs[0].text
             print(f"Generated text: {generated_text!r}")
-        
+
         return end_time - start_time
 
-    def main():
+    def main() -> None:
         """Main execution function."""
         # Parse command line arguments
         args = parse_arguments()
