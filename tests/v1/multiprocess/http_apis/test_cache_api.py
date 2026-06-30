@@ -525,10 +525,12 @@ class TestPrefetchEndpoint:
 @dataclass
 class _ClearEngine:
     clear_calls: int = 0
+    last_force: Optional[bool] = None
     cache_contexts: Optional[dict] = None
 
-    def clear(self) -> None:
+    def clear(self, force: bool = True) -> None:
         self.clear_calls += 1
+        self.last_force = force
 
 
 def _make_clear_app(engine: Optional[_ClearEngine]) -> FastAPI:
@@ -548,6 +550,16 @@ class TestClearEndpoint:
         assert resp.status_code == 200, resp.text
         assert resp.json() == {"status": "ok", "cleared": {"tier": "l1"}}
         assert engine.clear_calls == 1
+        # ``force`` defaults to True when the body omits it.
+        assert engine.last_force is True
+
+    def test_clear_force_false(self):
+        """The endpoint forwards ``force`` from the request body."""
+        engine = _ClearEngine()
+        client = TestClient(_make_clear_app(engine))
+        resp = client.post("/cache/clear", json={"tier": "l1", "force": False})
+        assert resp.status_code == 200, resp.text
+        assert engine.last_force is False
 
     def test_clear_unsupported_tier(self):
         client = TestClient(_make_clear_app(_ClearEngine()))

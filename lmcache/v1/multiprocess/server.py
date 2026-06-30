@@ -130,11 +130,16 @@ class MPCacheServer:
                 }
         return None
 
-    def clear(self) -> None:
-        """Used by ``/cache/clear``; delegates to :class:`ManagementModule`."""
+    def clear(self, force: bool = True) -> None:
+        """Used by ``/cache/clear``; delegates to :class:`ManagementModule`.
+
+        Args:
+            force: When ``True`` (default), also clear objects with active
+                locks; ``False`` keeps locked objects intact.
+        """
         for module in self._modules:
             if isinstance(module, ManagementModule):
-                module.clear()
+                module.clear(force=force)
                 return
         raise RuntimeError("MPCacheServer.clear: no ManagementModule registered")
 

@@ -153,10 +153,11 @@ _BLOCK_AXIS_BY_FORMAT: dict[Any, int] = {
 
 @router.post("/cache/clear", response_model=None)
 async def clear_cache(body: ClearRequest, request: Request) -> dict[str, object]:
-    """Force-clear a tier's resident cache.
+    """Clear a tier's resident cache.
 
-    Clears all objects in the tier, including those with active read/write
-    locks; in-flight store/prefetch operations may be corrupted.
+    With ``force=true`` (the default) this also clears objects with active
+    read/write locks, which may corrupt in-flight store/prefetch operations;
+    ``force=false`` leaves locked objects intact.
 
     Responses:
         200: ``{"status": "ok", "cleared": {"tier": "l1"}}``.
@@ -169,8 +170,8 @@ async def clear_cache(body: ClearRequest, request: Request) -> dict[str, object]
                 f"tier {body.tier.value!r} not supported; only {_CLEAR_TIER.value!r}"
             ),
         )
-    get_context(request).engine.clear()
-    logger.info("Cache cleared via HTTP API")
+    get_context(request).engine.clear(force=body.force)
+    logger.info("Cache cleared via HTTP API (force=%s)", body.force)
     return {"status": "ok", "cleared": {"tier": _CLEAR_TIER.value}}
 
 

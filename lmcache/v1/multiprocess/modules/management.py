@@ -168,11 +168,16 @@ class ManagementModule:
         """
         return self._ctx.chunk_size
 
-    def clear(self) -> None:
-        """Clear all stored KV cache data from the storage manager."""
+    def clear(self, force: bool = True) -> None:
+        """Clear stored KV cache data from the storage manager.
+
+        Args:
+            force: When ``True`` (default), also clear objects with active
+                read/write locks; ``False`` keeps locked objects intact.
+        """
         with self._clear_lock:
             self._ctx.storage_manager.memcheck()
-            self._ctx.storage_manager.clear(force=True)
+            self._ctx.storage_manager.clear(force=force)
             self._ctx.storage_manager.memcheck()
 
     def debug(self) -> str:

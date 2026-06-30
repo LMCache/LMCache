@@ -9,8 +9,11 @@ allocated KV cache on this node yet) or :class:`InvalidRequest` (an invalid key
 field).
 """
 
+# Future
+from __future__ import annotations
+
 # Standard
-from typing import Any
+from typing import TYPE_CHECKING
 
 # First Party
 from lmcache.v1.distributed.api import (
@@ -21,6 +24,10 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.multiprocess.cache_control.errors import InvalidRequest, Unavailable
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.server import MPCacheServer
+
 # Hard cap on how many token ids a single token-addressed request may carry.
 # Keeps the request body bounded and the synchronous hashing / key-construction
 # work proportionate.
@@ -28,7 +35,7 @@ MAX_TOKEN_IDS = 1_000_000
 
 
 def resolve_l1_keys(
-    engine: Any,
+    engine: MPCacheServer,
     model_name: str,
     world_size: int,
     token_ids: list[int],
