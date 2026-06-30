@@ -831,6 +831,21 @@ class StorageManager:
             "adapters": adapters,
         }
 
+    def reconfigurable_l2_backends(self) -> set[str]:
+        """Return the ``type_name`` of every L2 adapter that supports runtime
+        reconfiguration.
+
+        Returns:
+            The set of reconfigurable adapter ``type_name`` strings (empty when
+            none are reconfigurable). The ``{backend}`` path parameter the
+            ``/reconfigure`` routes expect is the adapter's ``type_name``.
+        """
+        return {
+            desc.type_name
+            for _adapter_id, desc, adapter in self._snapshot_adapters()
+            if self._unwrap_reconfigurable_l2_adapter(adapter) is not None
+        }
+
     def reconfigure_l2_adapter(
         self,
         adapter_index: int,
