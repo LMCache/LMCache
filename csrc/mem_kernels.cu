@@ -28,13 +28,6 @@
 
 namespace lmc {
 
-// inline helper to check MLA (callable from device and host)
-__host__ __device__ __forceinline__ bool is_mla(
-    const EngineKVFormat engine_kv_format) {
-  return engine_kv_format == EngineKVFormat::NL_X_NB_BS_HS ||   // vllm MLA
-         engine_kv_format == EngineKVFormat::NL_X_NBBS_ONE_HS;  // SGLang MLA
-}
-
 // inline helper to check HND layout (callable from device and host)
 __host__ __device__ __forceinline__ bool is_hnd(
     const EngineKVFormat engine_kv_format) {
@@ -550,7 +543,7 @@ void multi_layer_kv_transfer_templated(
   lmc::check_block_size(engine_kv_format, block_size);
   lmc::check_head_size(engine_kv_format, head_size_xword);
 
-  int k_or_v_size = lmc::is_mla(engine_kv_format) ? 1 : 2;
+  int k_or_v_size = ::is_mla(engine_kv_format) ? 1 : 2;
 
   dim3 grid(num_transfer_tokens, num_layers, k_or_v_size);
   dim3 block(std::min(num_xwords, 128));
@@ -690,7 +683,7 @@ void multi_layer_kv_transfer_unilateral(
     const torch::Tensor& slot_mapping,    // [num_tokens],
     const torch::Device& paged_memory_device, const int page_buffer_size,
     const TransferDirection direction, const EngineKVFormat engine_kv_format) {
-  const bool use_mla = lmc::is_mla(engine_kv_format);
+  const bool use_mla = ::is_mla(engine_kv_format);
   // MLA case collapses back to multi_layer_kv_transfer
   // (vLLM and SGLang indexing are compatible)
   if (use_mla) {
@@ -789,7 +782,7 @@ void single_layer_kv_transfer(
   int head_size_in_64bit;
   int block_size;
 
-  const bool use_mla = lmc::is_mla(engine_kv_format);
+  const bool use_mla = ::is_mla(engine_kv_format);
   const bool hnd_layout = lmc::is_hnd(engine_kv_format);
 
   if (use_mla) {

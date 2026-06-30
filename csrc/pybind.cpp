@@ -34,6 +34,19 @@ PYBIND11_MODULE(c_ops, m) {
       .value("TWO_X_NL_X_NB_BS_NH_HS", EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS)
       .value("NL_X_NB_NH_BS_TWO_HS", EngineKVFormat::NL_X_NB_NH_BS_TWO_HS)
       .export_values();
+  // Format classification, shared with the device kernels (engine_kv_format.h).
+  m.def(
+      "is_cross_layer", [](EngineKVFormat f) { return is_cross_layer(f); },
+      py::arg("engine_kv_format"));
+  m.def(
+      "is_kv_list", [](EngineKVFormat f) { return is_kv_list(f); },
+      py::arg("engine_kv_format"));
+  m.def(
+      "is_layer_list", [](EngineKVFormat f) { return is_layer_list(f); },
+      py::arg("engine_kv_format"));
+  m.def(
+      "is_mla", [](EngineKVFormat f) { return is_mla(f); },
+      py::arg("engine_kv_format"));
   m.def("multi_layer_kv_transfer", &multi_layer_kv_transfer,
         py::arg("key_value"), py::arg("key_value_ptrs"),
         py::arg("slot_mapping"), py::arg("paged_memory_device"),

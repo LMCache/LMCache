@@ -113,7 +113,7 @@ class L2EventListener(L2AdapterListener):
         )
         try:
             resp = await self._client.post(
-                f"{self._base_url}/l2/events",
+                f"{self._base_url}/quota/events",
                 json=body.model_dump(),
             )
             resp.raise_for_status()
