@@ -3,9 +3,14 @@
 """Tests for io_uring command (passthrough) support in Rust raw block backend."""
 
 # Standard
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 import asyncio
 import os
+
+if TYPE_CHECKING:
+    # Third Party
+    from lmcache_rust_raw_block_io import RawBlockDevice
 
 # Third Party
 import pytest
@@ -223,6 +228,8 @@ def test_uring_cmd_get_nvme_info(loop_in_thread):
         assert lba_size > 0, f"Expected positive lba_size, got {lba_size}"
         logger.info(f"NVMe LBA size: {lba_size} bytes")
 
+    except PermissionError as e:
+        pytest.skip(f"Test device {device_path} cannot be opened: {e}")
     except Exception as e:
         pytest.fail(f"Failed to get NVMe info: {e}")
 
@@ -308,11 +315,111 @@ def test_uring_cmd_explicit_transfer_limit_must_be_block_aligned():
     with pytest.raises(
         ValueError,
         match=r"max_data_transfer_size \(5000\) must be a multiple of "
-        "block_align \(4096\)",
+        r"block_align \(4096\)",
     ):
         _build_transfer_limit_backend(
             TEST_DEVICES["char_device"], max_data_transfer_size=5000
         )
+
+
+def _open_raw_device(
+    device_path: str, *, use_uring_cmd: bool = True
+) -> "RawBlockDevice":
+    """Open the Rust raw block device for manual smoke tests."""
+    if not os.path.exists(device_path):
+        pytest.skip(f"Test device {device_path} not found.")
+
+    # Third Party
+    from lmcache_rust_raw_block_io import RawBlockDevice  # type: ignore
+
+    return RawBlockDevice(
+        device_path,
+        writable=True,
+        use_odirect=False,
+        alignment=4096,
+        io_engine="io_uring",
+        iouring_queue_depth=256,
+        use_uring_cmd=use_uring_cmd,
+    )
+
+
+def _manual_uring_cmd_write_smoke_offset() -> int:
+    """Return the scratch-device offset for destructive manual write smoke."""
+    if os.environ.get("LMCACHE_RUN_URING_CMD_WRITE_SMOKE") != "1":
+        pytest.skip("Set LMCACHE_RUN_URING_CMD_WRITE_SMOKE=1 for write smoke.")
+    if "LMCACHE_TEST_CHAR_DEVICE" not in os.environ:
+        pytest.skip("Set LMCACHE_TEST_CHAR_DEVICE to an explicit scratch device.")
+    offset_str = os.environ.get("LMCACHE_URING_CMD_WRITE_SMOKE_OFFSET")
+    if offset_str is None:
+        pytest.skip("Set LMCACHE_URING_CMD_WRITE_SMOKE_OFFSET on scratch space.")
+    else:
+        offset = int(offset_str, 0)
+    if offset % 4096 != 0:
+        pytest.skip("LMCACHE_URING_CMD_WRITE_SMOKE_OFFSET must be 4096-aligned.")
+    return offset
+
+
+def _unaligned_memoryview(data: bytes, align: int = 4096) -> memoryview:
+    """Return a memoryview whose start is offset from the backing bytearray."""
+    backing = bytearray(len(data) + align)
+    backing[1 : 1 + len(data)] = data
+    return memoryview(backing)[1 : 1 + len(data)]
+
+
+def _read_uring_cmd_bytes(
+    raw_dev: "RawBlockDevice", offset: int, total_len: int
+) -> bytes:
+    """Read back bytes in single-page chunks to avoid depending on read bounce."""
+    out = bytearray(total_len)
+    page = 4096
+    for chunk_offset in range(0, total_len, page):
+        chunk_len = min(page, total_len - chunk_offset)
+        raw_dev.read_uring(
+            offset + chunk_offset,
+            memoryview(out)[chunk_offset : chunk_offset + chunk_len],
+            chunk_len,
+            chunk_len,
+        )
+    return bytes(out)
+
+
+def test_uring_cmd_manual_write_smoke_handles_unaligned_buffers() -> None:
+    """Manually verify unaligned uring_cmd writes on a scratch NVMe namespace.
+
+    This test is destructive. It writes 24 KiB starting at
+    ``LMCACHE_URING_CMD_WRITE_SMOKE_OFFSET`` on ``LMCACHE_TEST_CHAR_DEVICE`` and
+    is skipped unless ``LMCACHE_RUN_URING_CMD_WRITE_SMOKE=1`` is set.
+    """
+    device_path = TEST_DEVICES["char_device"]
+    base_offset = _manual_uring_cmd_write_smoke_offset()
+    raw_dev = _open_raw_device(device_path, use_uring_cmd=True)
+
+    try:
+        total_len = 8192
+        first_payload = bytes((i % 251 for i in range(total_len)))
+        first_buffer = _unaligned_memoryview(first_payload)
+
+        raw_dev.write_uring(base_offset, first_buffer, total_len, total_len)
+        assert _read_uring_cmd_bytes(raw_dev, base_offset, total_len) == first_payload
+
+        batch_payloads = [
+            bytes(((i + 17) % 251 for i in range(total_len))),
+            bytes(((i + 43) % 251 for i in range(total_len))),
+        ]
+        batch_buffers = [_unaligned_memoryview(payload) for payload in batch_payloads]
+        batch_offsets = [base_offset + total_len, base_offset + 2 * total_len]
+        batch_id = raw_dev.batched_write(
+            batch_offsets,
+            batch_buffers,
+            [total_len] * len(batch_buffers),
+            [total_len] * len(batch_buffers),
+        )
+        raw_dev.wait_iouring(batch_id)
+
+        for offset, payload in zip(batch_offsets, batch_payloads, strict=True):
+            assert _read_uring_cmd_bytes(raw_dev, offset, total_len) == payload
+    finally:
+        raw_dev.close()
 
 
 if __name__ == "__main__":

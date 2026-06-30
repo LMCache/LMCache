@@ -594,7 +594,7 @@ fn prepare_iouring_write_buffer(
     cap: usize,
     payload_len: usize,
     total_len: usize,
-    use_odirect: bool,
+    needs_alignment: bool,
     alignment: usize,
     fixed_buffer_idx: Option<u16>,
 ) -> PyResult<PreparedWriteBuffer> {
@@ -607,7 +607,7 @@ fn prepare_iouring_write_buffer(
         return Err(PyValueError::new_err("total_len must be >= payload_len"));
     }
 
-    let needs_alignment_bounce = use_odirect && !ptr_addr.is_multiple_of(alignment);
+    let needs_alignment_bounce = needs_alignment && !ptr_addr.is_multiple_of(alignment);
     let needs_capacity_bounce = cap < total_len;
     let has_padding = payload_len < total_len;
     let tail_is_zero = !has_padding
@@ -640,6 +640,134 @@ fn prepare_iouring_write_buffer(
         bounce: Some(bounce_arc),
         fixed_buffer_idx: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pyo3::types::{PyByteArray, PyBytes};
+
+    fn raw_device_with_missing_nvme_metadata() -> RawBlockDevice {
+        RawBlockDevice {
+            fd: -1,
+            size: 0,
+            closed: AtomicBool::new(false),
+            use_odirect: false,
+            alignment: 4096,
+            use_iouring: true,
+            use_uring_cmd: true,
+            nvme_nsid: None,
+            nvme_lba_shift: None,
+            nvme_lba_size: None,
+            ring: None,
+            queue: Some(Arc::new(Mutex::new(Vec::new()))),
+            worker: None,
+            shutdown: None,
+            fixed_buffer_map: Arc::new(Mutex::new(HashMap::new())),
+            fixed_buffers_registered: Arc::new(AtomicBool::new(false)),
+            in_flight_count: Arc::new(AtomicU64::new(0)),
+            in_flight_cvar: Arc::new(Condvar::new()),
+            batch_in_flight: Arc::new(Mutex::new(HashMap::new())),
+            batch_ready: None,
+            batched_buffer_objs: Arc::new(Mutex::new(HashMap::new())),
+            batched_completions: Arc::new(Mutex::new(HashMap::new())),
+            next_batch_id: Arc::new(AtomicU64::new(1)),
+        }
+    }
+
+    fn unaligned_buffer(total_len: usize, alignment: usize) -> PyResult<AlignedBuf> {
+        AlignedBuf::new(total_len + 1, alignment)
+    }
+
+    #[test]
+    fn prepare_write_buffer_keeps_unaligned_buffer_without_alignment_requirement() -> PyResult<()> {
+        let alignment = 4096;
+        let total_len = 8192;
+        let buf = unaligned_buffer(total_len, alignment)?;
+        let ptr_addr = unsafe { buf.as_ptr().add(1) as usize };
+        let fixed_buffer_idx = Some(7);
+
+        let prepared = prepare_iouring_write_buffer(
+            ptr_addr,
+            total_len,
+            total_len,
+            total_len,
+            false,
+            alignment,
+            fixed_buffer_idx,
+        )?;
+
+        assert_eq!(prepared.ptr_addr, ptr_addr);
+        assert!(prepared.bounce.is_none());
+        assert_eq!(prepared.fixed_buffer_idx, fixed_buffer_idx);
+        Ok(())
+    }
+
+    #[test]
+    fn prepare_write_buffer_bounces_unaligned_buffer_when_alignment_required() -> PyResult<()> {
+        let alignment = 4096;
+        let total_len = 8192;
+        let buf = unaligned_buffer(total_len, alignment)?;
+        let ptr_addr = unsafe { buf.as_ptr().add(1) as usize };
+        let payload = unsafe { slice::from_raw_parts_mut(ptr_addr as *mut u8, total_len) };
+        for (idx, byte) in payload.iter_mut().enumerate() {
+            *byte = (idx % 251) as u8;
+        }
+
+        let prepared = prepare_iouring_write_buffer(
+            ptr_addr,
+            total_len,
+            total_len,
+            total_len,
+            true,
+            alignment,
+            Some(7),
+        )?;
+
+        assert_ne!(prepared.ptr_addr, ptr_addr);
+        assert!(prepared.ptr_addr.is_multiple_of(alignment));
+        assert!(prepared.fixed_buffer_idx.is_none());
+
+        let bounce = prepared
+            .bounce
+            .as_ref()
+            .expect("unaligned buffer should bounce");
+        let bounced = unsafe { slice::from_raw_parts(bounce.as_ptr(), total_len) };
+        assert_eq!(bounced, payload);
+        Ok(())
+    }
+
+    #[test]
+    fn read_uring_nvme_metadata_error_does_not_leak_in_flight() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let device = raw_device_with_missing_nvme_metadata();
+            let data = PyByteArray::new(py, &[0; 4096]);
+
+            let result = device.read_uring(py, 0, data.as_any(), 4096, None);
+            let in_flight = device.in_flight_count.load(Ordering::Relaxed);
+            device.closed.store(true, Ordering::Relaxed);
+
+            assert!(result.is_err());
+            assert_eq!(in_flight, 0);
+        });
+    }
+
+    #[test]
+    fn write_uring_nvme_metadata_error_does_not_leak_in_flight() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let device = raw_device_with_missing_nvme_metadata();
+            let data = PyBytes::new(py, &[0; 4096]);
+
+            let result = device.write_uring(py, 0, data.as_any(), 4096, None);
+            let in_flight = device.in_flight_count.load(Ordering::Relaxed);
+            device.closed.store(true, Ordering::Relaxed);
+
+            assert!(result.is_err());
+            assert_eq!(in_flight, 0);
+        });
+    }
 }
 
 // Acquire a Python buffer view with the requested mutability.
@@ -2201,6 +2329,7 @@ impl RawBlockDevice {
         // Release the GIL while submitting I/O operations
         let res = py.allow_threads(move || {
             let mut submissions: Vec<(IoSubmission, Arc<IoCompletion>)> = Vec::with_capacity(n);
+            let needs_align = use_odirect || use_uring_cmd;
 
             // Prepare all requests, bounce buffers (if needed) and collect submission data.
             for i in 0..n {
@@ -2219,7 +2348,7 @@ impl RawBlockDevice {
                     cap,
                     payload_len,
                     total_len,
-                    use_odirect,
+                    needs_align,
                     alignment,
                     fixed_idx,
                 )?;
@@ -2407,6 +2536,7 @@ impl RawBlockDevice {
         if self.closed.load(Ordering::Relaxed) {
             return Err(PyRuntimeError::new_err("device is closed"));
         }
+        let nvme_cmd_data = self._build_nvme_cmd_data(0, 0)?;
 
         let view = get_pybuffer(py, data, true)?;
         if view.readonly != 0 {
@@ -2467,7 +2597,6 @@ impl RawBlockDevice {
         // Buffer is not aligned (O_DIRECT requirement)
         // Buffer capacity is less than total_len
         let use_bounce = !ptr_aligned || cap < total_len;
-
         let res = if !use_bounce {
             self.in_flight_count.fetch_add(1, Ordering::Relaxed);
             let comp = Arc::new(IoCompletion::new());
@@ -2483,7 +2612,7 @@ impl RawBlockDevice {
                 original_ptr: None,
                 payload_len: None,
                 batch_id: 0,
-                nvme_cmd_data: self._build_nvme_cmd_data(0, 0)?,
+                nvme_cmd_data: nvme_cmd_data.clone(),
             };
             {
                 let q = self.queue.as_ref().expect("queue must exist");
@@ -2512,7 +2641,7 @@ impl RawBlockDevice {
                 original_ptr: Some(ptr as usize),
                 payload_len: Some(payload_len),
                 batch_id: 0,
-                nvme_cmd_data: self._build_nvme_cmd_data(0, 0)?,
+                nvme_cmd_data,
             };
             {
                 let q = self.queue.as_ref().expect("queue must exist");
@@ -2546,6 +2675,7 @@ impl RawBlockDevice {
         if self.closed.load(Ordering::Relaxed) {
             return Err(PyRuntimeError::new_err("device is closed"));
         }
+        let nvme_cmd_data = self._build_nvme_cmd_data(0, 0)?;
 
         let view = get_pybuffer(py, data, false)?;
         let ptr = view.buf as *const u8;
@@ -2581,8 +2711,8 @@ impl RawBlockDevice {
             }
         }
 
-        // Check if the buffer is aligned for O_DIRECT
-        let ptr_aligned = if self.use_odirect {
+        let needs_align = self.use_odirect || self.use_uring_cmd;
+        let ptr_aligned = if needs_align {
             (ptr as usize).is_multiple_of(align)
         } else {
             true
@@ -2603,11 +2733,10 @@ impl RawBlockDevice {
             cap,
             payload_len,
             total_len,
-            self.use_odirect,
+            needs_align,
             align,
             fixed_idx,
         )?;
-
         let res = if prepared.bounce.is_none() {
             self.in_flight_count.fetch_add(1, Ordering::Relaxed);
             let comp = Arc::new(IoCompletion::new());
@@ -2623,7 +2752,7 @@ impl RawBlockDevice {
                 original_ptr: None,
                 payload_len: None,
                 batch_id: 0,
-                nvme_cmd_data: self._build_nvme_cmd_data(0, 0)?,
+                nvme_cmd_data: nvme_cmd_data.clone(),
             };
             {
                 let q = self.queue.as_ref().expect("queue must exist");
@@ -2650,7 +2779,7 @@ impl RawBlockDevice {
                 original_ptr: None,
                 payload_len: Some(payload_len),
                 batch_id: 0,
-                nvme_cmd_data: self._build_nvme_cmd_data(0, 0)?,
+                nvme_cmd_data,
             };
             {
                 let q = self.queue.as_ref().expect("queue must exist");

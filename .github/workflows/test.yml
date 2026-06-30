@@ -149,6 +149,10 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Run raw-block Rust unit tests
+        run: |
+          cargo test --manifest-path rust/raw_block/Cargo.toml --no-default-features
+
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
