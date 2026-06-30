@@ -186,7 +186,10 @@ class InFlightPrefetchRequest:
     l1_existing_keys: set[ObjectKey] = field(default_factory=set)
 
     group_layout_descs: dict[int, MemoryLayoutDesc] | None = None
-    """Per-object-group layout descriptors for correct L1 buffer allocation."""
+    """Maps object_group_id to that group's layout. Each object group is a
+    separate keyed L1 allocation, so each needs its own descriptor (one
+    ``MemoryLayoutDesc`` describes a single group's MemoryObj). ``None`` when
+    all keys share ``layout_desc`` (a single / merged object group)."""
 
     def all_lookups_done(self) -> bool:
         return len(self.pending_lookup_tasks) == 0
@@ -378,8 +381,9 @@ class PrefetchController(StorageControllerInterface):
             extra_count: Extra read locks per key for TP workers.
             policy: Retained-subset policy. Defaults to ``PREFIX``.
             attn_desc: Per-object-group attention windows and world_size.
-            group_layout_descs: Per-object-group layout descriptors for
-                groups with different tensor shapes.
+            group_layout_descs: Maps object_group_id to that group's layout
+                (each group is a separate keyed allocation, possibly with
+                different tensor shapes); ``None`` when all share ``layout_desc``.
             mode: Prefetch intent (``WARM`` or ``LOOKUP``).
 
         Returns:

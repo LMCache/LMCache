@@ -77,8 +77,9 @@ class LayoutDescRegistry:
             world_size: The world size.
             layout_desc: The memory layout descriptor.
             attn_desc: Per-object-group attention windows and world_size.
-            group_layout_descs: Per-object-group layout descriptors, or
-                ``None`` when all groups share ``layout_desc``.
+            group_layout_descs: Maps object_group_id to that group's layout
+                (each group is a separate keyed allocation); ``None`` when all
+                groups share ``layout_desc``.
         """
         key = (model_name, world_size)
         attn_desc = replace(

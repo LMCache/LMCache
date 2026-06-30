@@ -335,6 +335,10 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 "'bfloat16' for torch.bfloat16, 'float32' for torch.float32)."
             )
 
+        # TODO(engine-driven HMA): assumes one uniform object group (this dense
+        # shape; transfer resolves only group 0). Hybrid / multi-group models
+        # are unsupported here; guard on the connector side where the KV spec
+        # is known. Needs a device with the engine-driven path to test.
         shape = (
             torch.Size(
                 [payload.num_layers, self._ctx.chunk_size, payload.hidden_dim_size]

@@ -418,8 +418,9 @@ class StorageManager:
             policy: Retained-subset policy (``PREFIX`` or ``SPARSE``).
             attn_desc: Per-object-group attention windows and world_size.
             skip_l2: If True, only return already-resident L1 keys.
-            group_layout_descs: Per-object-group layout descriptors for
-                groups with different tensor shapes.
+            group_layout_descs: Maps object_group_id to that group's layout
+                (each group is a separate keyed allocation, possibly with
+                different tensor shapes); ``None`` when all share ``layout_desc``.
             mode: Prefetch intent (``WARM`` or ``LOOKUP``).
 
         Returns:
