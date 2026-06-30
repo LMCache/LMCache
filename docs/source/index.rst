@@ -37,11 +37,17 @@ Welcome to LMCache!
 
    LMCache is **vendor-neutral**. It can be used as a KV cache layer for a range of mainstream open-source serving engines, inference frameworks, hardware vendors, storage systems, and infrastructure providers. The vendor neutrality allows users to freely switch between serving engines and storage vendors, while reusing the stored KV caches.
 
-.. figure:: ./assets/deployment_modes_light.png
+.. image:: ./assets/deployment_modes_light.png
   :width: 90%
   :align: center
   :alt: LMCache Deployment Modes
-  :class: no-scaled-link
+  :class: only-light no-scaled-link
+
+.. image:: ./assets/deployment_modes_dark.png
+  :width: 90%
+  :align: center
+  :alt: LMCache Deployment Modes
+  :class: only-dark no-scaled-link
 
 :raw-html:`<br />`
 
@@ -75,6 +81,7 @@ LMCache is becoming an integral layer in the LLM inference *ecosystem*, with *co
 Updates
 -------
 
+- [2026/06] 🔥 LMCache multi-platform development support with no GPU required (`blog <https://blog.lmcache.ai/en/2026/06/23/vllm-lmcache-a-starter-guide-no-gpu-required/>`__, `blog <https://blog.lmcache.ai/en/2026/06/15/understanding-lmcache-mp-mode-transfer-paths-a-beginners-guide/>`__).
 - [2026/05] 🔥 Agentic workload benchmark on AMD MI300X (`blog <https://blog.lmcache.ai/en/2026/05/12/benchmarking-lmcache-for-multi-turn-agentic-workloads-on-amd-mi300x/>`__).
 - [2026/04] 🔥 LMCache's new multiprocess (MP) architecture release (`blog <https://blog.lmcache.ai/en/2026/04/03/lmcaches-new-architecture-boosts-moe-inference-performance-by-10x/>`__).
 - [2026/03] LMCache at GTC 2026 (`post <https://www.linkedin.com/posts/lmcache-lab_llm-opensource-nvidiagtc-activity-7442721875664826369-pMAu>`__).

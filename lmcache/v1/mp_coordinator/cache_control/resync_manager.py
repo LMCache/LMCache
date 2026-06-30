@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Coordinator-side L2 resync.
 
-On boot, paginates an MP server's ``GET /l2/keys`` and seeds the
+On boot, paginates an MP server's ``GET /cache/objects`` and seeds the
 coordinator's usage + eviction trackers so quota enforcement starts
 from a representative baseline rather than zero. Best-effort: failures
 are logged and the manager gives up; the ongoing event stream corrects
@@ -20,8 +20,8 @@ import httpx
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import EncodedObjectKey
-from lmcache.v1.mp_coordinator.l2.eviction_manager import L2EvictionManager
-from lmcache.v1.mp_coordinator.l2.usage_manager import L2UsageManager
+from lmcache.v1.mp_coordinator.cache_control.eviction_manager import L2EvictionManager
+from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry, MPInstance
 
 logger = init_logger(__name__)
@@ -35,7 +35,7 @@ class L2ResyncManager:
         usage_manager: Shared usage manager.
         eviction_manager: Shared eviction manager.
         page_size: ``page_size`` forwarded to the MP server's
-            ``/l2/keys`` endpoint.
+            ``/cache/objects`` endpoint.
     """
 
     def __init__(
@@ -61,7 +61,7 @@ class L2ResyncManager:
         Returns the number of keys recorded; stops early on HTTP
         failure and returns the partial count.
         """
-        url = f"http://{instance.ip}:{instance.http_port}/l2/keys"
+        url = f"http://{instance.ip}:{instance.http_port}/cache/objects"
         page_token: str | None = None
         total = 0
         pages = 0

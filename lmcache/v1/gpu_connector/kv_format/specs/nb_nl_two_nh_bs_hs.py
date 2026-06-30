@@ -21,8 +21,6 @@ import lmcache.c_ops as lmc_ops
 
 class NB_NL_TWO_NH_BS_HS_Spec(KVFormatSpec):
     engine_kv_format = lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS
-    is_cross_layer = True
-    is_hnd = True
     attention_backends = ("TRT-LLM cross-layer (HND layout)",)
 
     def num_layers(self) -> int:

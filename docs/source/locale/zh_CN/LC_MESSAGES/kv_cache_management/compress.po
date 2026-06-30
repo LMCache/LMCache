@@ -53,7 +53,7 @@ msgstr "第二，我们需要在 8000 端口启动 vllm/lmcache 实例："
 msgid ""
 "Third, we need to start the lmcache controller at port 9000 and the "
 "monitor at port 9001:"
-msgstr "第三，我们需要在 9000 端口启动 lmcache 控制器，在 9001 端口启动监控器："
+msgstr "第三，我们需要在 9000 端口启动 lmcache 控制器，在 9001 端口启动监视器："
 
 #: ../../source/kv_cache_management/compress.rst:49
 msgid "Then we can send a request to vllm to see if it works properly:"
@@ -61,7 +61,7 @@ msgstr "然后我们可以向 vllm 发送请求，以查看它是否正常工作
 
 #: ../../source/kv_cache_management/compress.rst:61
 msgid "Now we send a request to tokenize the prompt:"
-msgstr "现在我们发送请求以对提示进行标记："
+msgstr "现在我们发送请求以对提示进行标记化："
 
 #: ../../source/kv_cache_management/compress.rst:72
 msgid "We should be able to see token ids in response:"
@@ -74,7 +74,7 @@ msgstr "毕竟，我们发出了一个 ``compress`` 请求："
 #: ../../source/kv_cache_management/compress.rst:91
 #: ../../source/kv_cache_management/compress.rst:112
 msgid "The controller responds with a message similar to:"
-msgstr "控制器的响应消息类似于："
+msgstr "控制器会回复类似于以下内容的消息："
 
 #: ../../source/kv_cache_management/compress.rst:97
 msgid ""

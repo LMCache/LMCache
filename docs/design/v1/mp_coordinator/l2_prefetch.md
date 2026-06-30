@@ -15,23 +15,24 @@ sequenceDiagram
     participant Co as coordinator
     participant M as mp server
 
-    Cl->>Co: POST /l2/prefetch {instance_id, model_name, world_size, token_ids, cache_salt}
-    Co->>M: POST /l2/prefetch (tokens forwarded verbatim)
+    Cl->>Co: POST /cache/prefetches {instance_id, model_name, world_size, token_ids, cache_salt}
+    Co->>M: POST /cache/prefetches (tokens forwarded verbatim)
     M-->>Co: {request_id, chunks, status: "submitted"}
     Co-->>Cl: {instance_id, request_id, chunks, status}
     loop until completed
-        Cl->>Co: GET /l2/prefetch/{instance_id}/{request_id}
-        Co->>M: GET /l2/prefetch/{request_id}
+        Cl->>Co: GET /cache/prefetches/{instance_id}/{request_id}
+        Co->>M: GET /cache/prefetches/{request_id}
         M-->>Co: {status: pending | completed}
         Co-->>Cl: (relayed verbatim)
     end
 ```
 
 A client names **one** registered MP server and a **token sequence** (plus the
-model/world_size and tenant salt). The coordinator resolves the target's
-address from the registry, `POST`s to its `/l2/prefetch`, and relays the
-server's `request_id` back. The client then polls
-`GET /l2/prefetch/{instance_id}/{request_id}` on the coordinator, which proxies
+model/world_size and tenant salt, and the optional `source_tier`=`l2` /
+`target_tier`=`l1`). The coordinator resolves the target's address from the
+registry, `POST`s to its `/cache/prefetches`, and relays the server's
+`request_id` back. The client then polls
+`GET /cache/prefetches/{instance_id}/{request_id}` on the coordinator, which proxies
 the server's status. The warm holds **no read-lock** — completion is reported
 reactively and releases nothing; see `docs/design/v1/multiprocess/l2_apis.md`
 for the warm-prefetch lifecycle (retain-permanent, no-lock load). There is no
@@ -41,24 +42,24 @@ the client drives completion on demand.
 ## Components
 
 - **`schemas.py`** — `PrefetchRequest {instance_id, model_name, world_size,
-  token_ids, cache_salt}` and `PrefetchResponse {instance_id, request_id,
-  chunks, status}`.
-- **`l2/prefetch_manager.py`** — `L2PrefetchManager`. `submit_prefetch` awaits
-  the target's `POST /l2/prefetch` and returns its reply; `get_status` proxies
-  `GET /l2/prefetch/{request_id}` and relays `(status_code, body)`. No
-  fire-and-forget tasks — both calls are quick.
-- **`http_apis/l2_api.py`** — `POST /l2/prefetch` and
-  `GET /l2/prefetch/{instance_id}/{request_id}`. Each resolves the target via
-  `registry.get(instance_id)` (**404** if unknown) and uses the shared outbound
-  `httpx.AsyncClient` on `app.state.outbound_client`; a transport error to the
-  target surfaces as **502**.
+  token_ids, cache_salt, source_tier=l2, target_tier=l1}` and
+  `PrefetchResponse {instance_id, request_id, chunks, status}`.
+- **`cache_control/prefetch_manager.py`** — `PrefetchManager`. `submit_prefetch`
+  awaits the target's `POST /cache/prefetches` and returns its reply;
+  `get_status` proxies `GET /cache/prefetches/{request_id}` and relays
+  `(status_code, body)`. No fire-and-forget tasks — both calls are quick.
+- **`http_apis/cache_api.py`** — `POST /cache/prefetches` and
+  `GET /cache/prefetches/{instance_id}/{request_id}`. Each resolves the target
+  via `get_context(request).registry.get(instance_id)` (**404** if unknown) and
+  uses the shared outbound `httpx.AsyncClient` (`get_outbound_client(request)`);
+  a transport error to the target surfaces as **502**.
 
 ## Wiring (`app.py`)
 
-`create_app` instantiates `L2PrefetchManager` and puts it on
-`app.state.prefetch_manager`. The lifespan stashes the outbound client on
-`app.state.outbound_client` (it previously reached only the background loops)
-so request handlers can issue outbound calls.
+`create_app` builds the `CoordinatorContext` (carrying `prefetch_manager`) and
+puts it on `app.state.ctx`. The lifespan stashes the outbound client on
+`app.state.ctx.outbound_client` (it previously reached only the background
+loops) so request handlers can issue outbound calls.
 
 ## Failure modes
 
@@ -66,7 +67,7 @@ so request handlers can issue outbound calls.
 - **Target unreachable / non-2xx submit** → 502 from the coordinator (the
   caller learns the submit failed, unlike a fire-and-forget dispatch).
 - **Target has no layout for `(model_name, world_size)`** → the server returns
-  409, surfaced to the caller via the 502/proxy path.
+  503 (`Unavailable`), surfaced to the caller via the 502/proxy path.
 - **Client abandons polling** → the server's job lingers as a small handle
   entry (no lock held, no L1 pinned) until polled or swept — see the no-lock
   lifecycle in `l2_apis.md`.
@@ -86,7 +87,7 @@ node's workers via intra-node CUDA IPC — so it holds only the KV shards for th
 `global_rank`s served on that node. Concretely:
 
 - **Single-node deployment** (all `world_size` workers on one box, e.g. TP=8 on
-  one node): one instance holds every shard. A single `POST /l2/prefetch`
+  one node): one instance holds every shard. A single `POST /cache/prefetches`
   warms the whole model's KV for the prompt. **This is the supported case.**
 - **Multi-node deployment** (TP/PP spanning nodes): each node holds only its
   slice. A single dispatch warms one node; the caller must warm *each* node's

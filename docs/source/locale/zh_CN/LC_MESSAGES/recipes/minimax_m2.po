@@ -63,7 +63,7 @@ msgstr "启动 LMCache MP 服务器："
 
 #: ../../source/recipes/minimax_m2.rst:33
 msgid "Start vLLM with the LMCache MP connector:"
-msgstr "启动 vLLM 与 LMCache MP 连接器："
+msgstr "使用 LMCache MP 连接器启动 vLLM："
 
 #: ../../source/recipes/minimax_m2.rst:35
 msgid "**MiniMax-M2** (8 GPUs):"
@@ -113,7 +113,7 @@ msgstr ""
 
 #: ../../source/recipes/minimax_m2.rst:93
 msgid "**Status:** Not validated with LMCache."
-msgstr "**状态:** 未通过 LMCache 验证。"
+msgstr "**状态：** 未通过 LMCache 验证。"
 
 #: ../../source/recipes/minimax_m2.rst
 msgid "TRT-LLM"
@@ -123,9 +123,7 @@ msgstr "TRT-LLM"
 msgid ""
 "**Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-"
 "LLM + LMCache setup."
-msgstr ""
-"**状态：** 支持。有关 TRT-LLM + KV Cache 设置，请参见 "
-":doc:`../getting_started/quickstart`。"
+msgstr "**状态：** 支持。TRT-LLM + LMCache 的配置方式，请参阅 :doc:`../getting_started/quickstart`。"
 
 #: ../../source/recipes/minimax_m2.rst:100
 msgid "CacheBlend support"
@@ -145,7 +143,7 @@ msgstr "状态"
 
 #: ../../source/recipes/minimax_m2.rst:111
 msgid "Notes"
-msgstr "笔记"
+msgstr "备注"
 
 #: ../../source/recipes/minimax_m2.rst:112
 msgid ":doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`"

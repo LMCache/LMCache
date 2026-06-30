@@ -27,5 +27,5 @@ msgstr "KV Cache 操作"
 msgid ""
 "Ways to inspect, manage, and observe a running ``lmcache server`` -- from"
 " the command line, over HTTP, or through the web frontend."
-msgstr "检查、管理和观察正在运行的 ``lmcache server`` 的方法——通过命令行、HTTP 或通过网页前端。"
+msgstr "检查、管理和观察正在运行的 ``lmcache server`` 的方法——通过命令行、HTTP 或 Web 前端。"
 

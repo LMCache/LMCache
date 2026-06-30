@@ -2,9 +2,9 @@
 """Coordinator-side per-``cache_salt`` LRU eviction.
 
 Periodically compares per-salt usage against ``watermark * quota``;
-when over threshold, dispatches a ``DELETE /l2`` to one registered MP
+when over threshold, dispatches a ``DELETE /cache/objects`` to one registered MP
 server. LRU bookkeeping is updated when the corresponding ``delete``
-event arrives back via ``POST /l2/events``.
+event arrives back via ``POST /quota/events``.
 """
 
 # Future
@@ -24,7 +24,7 @@ from lmcache.v1.distributed.eviction_policy.isolated_lru import (
     IsolatedLRUEvictionPolicy,
 )
 from lmcache.v1.distributed.quota_manager import QuotaManager
-from lmcache.v1.mp_coordinator.l2.usage_manager import L2UsageManager
+from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry
 
 logger = init_logger(__name__)
@@ -124,13 +124,13 @@ class L2EvictionManager:
         registry: InstanceRegistry,
         http_client: httpx.AsyncClient,
     ) -> dict[str, list[ObjectKey]]:
-        """Compute the plan and fire-and-forget a ``DELETE /l2`` to
+        """Compute the plan and fire-and-forget a ``DELETE /cache/objects`` to
         one random registered MP server.
 
         Returns the scheduled plan as soon as the background dispatch
         task is spawned. The LRU is not cleared here — that happens
         when the corresponding ``delete`` event arrives at
-        ``POST /l2/events``. At-least-once semantics; safe because the
+        ``POST /quota/events``. At-least-once semantics; safe because the
         underlying delete is idempotent.
         """
         plan = self.compute_eviction_plan()
@@ -146,7 +146,7 @@ class L2EvictionManager:
             )
             return plan
 
-        url = f"http://{target.ip}:{target.http_port}/l2"
+        url = f"http://{target.ip}:{target.http_port}/cache/objects"
         all_keys: list[ObjectKey] = [k for keys in plan.values() for k in keys]
         body = {"keys": [asdict(k.to_encoded_object_key()) for k in all_keys]}
 
