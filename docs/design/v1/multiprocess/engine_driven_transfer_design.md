@@ -148,8 +148,6 @@ and async capability:
     `AsyncEngineDrivenTransferContext`
   - otherwise → `EngineDrivenTransferContext` (synchronous fallback)
 
-The routing can be overridden via the `mode` argument or `LMCACHE_MP_TRANSFER_MODE`
-environment variable (`MPTransferMode.AUTO` / `LMCACHE_DRIVEN` / `ENGINE_DRIVEN`).
 It also validates that all KV cache tensors share one device type and rejects
 mixed-device configurations by raising an error.
 
