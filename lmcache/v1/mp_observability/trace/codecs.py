@@ -264,7 +264,7 @@ def _enc_attn_window(d: AttnWindowDesc) -> dict[str, object]:
     }
 
 
-def _dec_attn_window(raw: dict[str, object] | list[int]) -> AttnWindowDesc:
+def _dec_attn_window(raw: dict[str, Any] | list[int]) -> AttnWindowDesc:
     if isinstance(raw, list):
         return AttnWindowDesc(num_chunks_in_sw=list(raw))
     return AttnWindowDesc(
