@@ -49,11 +49,7 @@ msgid ""
 "<https://docs.vllm.ai/en/latest/models/supported_models.html#multimodal-"
 "language-models>`_ (architectures ``Gemma4ForConditionalGeneration`` for "
 "31B/E4B and ``Gemma4UnifiedForConditionalGeneration`` for 12B)."
-msgstr ""
-"**引擎文档:** `Gemma 4 在 vLLM 支持的模型 "
-"<https://docs.vllm.ai/en/latest/models/supported_models.html#multimodal-"
-"language-models>`_ (架构 ``Gemma4ForConditionalGeneration`` 用于 31B/E4B 和 "
-"``Gemma4UnifiedForConditionalGeneration`` 用于 12B)。"
+msgstr "**引擎文档:** `vLLM 支持模型中的 Gemma 4 <https://docs.vllm.ai/en/latest/models/supported_models.html#multimodal-language-models>`_\\ （架构 ``Gemma4ForConditionalGeneration`` 适用于 31B/E4B，\\ ``Gemma4UnifiedForConditionalGeneration`` 适用于 12B）。"
 
 #: ../../source/recipes/gemma4.rst:24
 msgid "**Status:** Validated with LMCache."
@@ -65,7 +61,7 @@ msgstr "启动 LMCache MP 服务器："
 
 #: ../../source/recipes/gemma4.rst:34
 msgid "Start vLLM with the LMCache MP connector:"
-msgstr "启动 vLLM 与 LMCache MP 连接器："
+msgstr "使用 LMCache MP 连接器启动 vLLM："
 
 #: ../../source/recipes/gemma4.rst:45
 msgid ""
@@ -78,7 +74,7 @@ msgid ""
 "Adjust ``--tensor-parallel-size`` to match your hardware. For the generic"
 " LMCache + vLLM wiring (ports, remote hosts), see "
 ":doc:`../getting_started/quickstart`."
-msgstr "调整 ``--tensor-parallel-size`` 以匹配您的硬件。有关通用 LMCache + vLLM 连接（端口、远程主机）的更多信息，请参见 :doc:`../getting_started/quickstart`。"
+msgstr "调整 ``--tensor-parallel-size`` 以匹配您的硬件。有关通用 LMCache + vLLM 连接（端口、远程主机），请参见 :doc:`../getting_started/quickstart`。"
 
 #: ../../source/recipes/gemma4.rst:60
 msgid ""
@@ -105,7 +101,7 @@ msgstr "TRT-LLM"
 msgid ""
 "**Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-"
 "LLM + LMCache setup."
-msgstr "**状态：** 支持。请参阅 :doc:`../getting_started/quickstart` 以获取 TRT-LLM + LMCache 的设置。"
+msgstr "**状态：** 支持。TRT-LLM + LMCache 的配置方式，请参阅 :doc:`../getting_started/quickstart`。"
 
 #: ../../source/recipes/gemma4.rst:73
 msgid "CacheBlend support"
@@ -125,7 +121,7 @@ msgstr "状态"
 
 #: ../../source/recipes/gemma4.rst:84
 msgid "Notes"
-msgstr "笔记"
+msgstr "备注"
 
 #: ../../source/recipes/gemma4.rst:85
 msgid ":doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`"
@@ -148,10 +144,7 @@ msgid ""
 "``google/gemma-4-E4B-it``: sliding 32, full 16). LMCache stores and "
 "retrieves each KV cache group in its own block size; no extra flags are "
 "required."
-msgstr ""
-"**混合 KV Cache，具有异构块大小。** Gemma 4 交错了滑动窗口和全注意力层，其头部维度不同（滑动 256，全 512），因此 "
-"vLLM 通过为这两种注意力类型提供不同的 ``block_size``\\\\ s（例如 ``google/gemma-4-E4B-"
-"it``：滑动 32，全 16）来统一物理页面大小。LMCache 在其自己的块大小中存储和检索每个 KV Cache 组；不需要额外的标志。"
+msgstr "**混合 KV Cache，具有异构块大小。** Gemma 4 交错了 sliding window 和 full attention 层，两者的头维度不同（sliding window 层为 256，full attention 层为 512），因此 vLLM 通过为这两种注意力类型分配不同的 ``block_size``\\\\ s（例如 ``google/gemma-4-E4B-it``\\ ：sliding window 层为 32，full attention 层为 16）来统一物理页面大小。LMCache 按各自的块大小存储和检索每个 KV Cache 组，无需额外配置。"
 
 #: ../../source/recipes/gemma4.rst:98
 msgid ""

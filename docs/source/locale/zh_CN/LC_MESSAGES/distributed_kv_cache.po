@@ -28,5 +28,5 @@ msgid ""
 "Sharing and coordinating KV cache across multiple LMCache servers and "
 "inference instances -- disaggregated prefill, peer-to-peer sharing, "
 "multi-server coordination, and cache management."
-msgstr "在多个 LMCache 服务器和推理实例之间共享和协调 KV Cache -- 分离式 Prefill、点对点共享、多服务器协调和缓存管理。"
+msgstr "在多个 LMCache 服务器和推理实例之间共享和协调 KV Cache——分离式预填充、点对点共享、多服务器协调与缓存管理。"
 

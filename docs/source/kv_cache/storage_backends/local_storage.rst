@@ -30,7 +30,8 @@ Two ways to configure LMCache Disk Offloading:
 
     # Disable page cache
     # This should be turned on for better performance if most local CPU memory is used
-    export LMCACHE_EXTRA_CONFIG='{'use_odirect': True}'
+    # Optionally tune the number of I/O worker threads (default: 4)
+    export LMCACHE_EXTRA_CONFIG='{"use_odirect": true, "disk_io_threads": 8}'
 
 **2. Configuration File**:
 
@@ -47,7 +48,10 @@ Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``
 
     # Disable page cache
     # This should be turned on for better performance if most local CPU memory is used
-    extra_config: {'use_odirect': True}
+    # Optionally tune the number of I/O worker threads (default: 4)
+    extra_config:
+      use_odirect: true
+      disk_io_threads: 8
 
 
 Multi-Path (Multi-Device) Disk Offloading
@@ -143,7 +147,7 @@ The following diagram shows the overall architecture of the Local Disk Backend:
             end
             
             subgraph Worker["<b>LocalDiskWorker</b>"]
-                PQ["<b>Priority Queue Executor (4 workers)</b>"]
+                PQ["<b>Priority Queue Executor (configurable workers, default 4)</b>"]
                 P0["<b>Priority 0: PREFETCH</b>"]
                 P1["<b>Priority 1: DELETE</b>"]
                 P2["<b>Priority 2: PUT</b>"]
@@ -172,7 +176,7 @@ The following diagram shows the overall architecture of the Local Disk Backend:
 
 - **Metadata Dictionary**: Maps each ``CacheEngineKey`` to its disk metadata (file path, size, shape, dtype, pin status)
 - **Cache Policy**: Configurable eviction policy (LRU, LFU, FIFO, or MRU) that tracks access patterns and decides which entries to evict when space is needed
-- **LocalDiskWorker**: Async task executor with priority queue - prefetch tasks run first (priority 0), then deletes (priority 1), then saves (priority 2)
+- **LocalDiskWorker**: Async task executor with priority queue - prefetch tasks run first (priority 0), then deletes (priority 1), then saves (priority 2). The number of I/O worker threads is configurable via ``extra_config.disk_io_threads`` (default: 4).
 - **Local Disk**: Filesystem where KV cache chunks are stored as individual ``.pt`` files
 
 

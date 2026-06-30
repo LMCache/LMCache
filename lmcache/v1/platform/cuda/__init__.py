@@ -12,6 +12,8 @@ so callers can check ``is_available("cuda")`` at import time.
 
 # First Party
 from lmcache.v1.platform._registry import register_availability
+from lmcache.v1.platform.cuda.pin_memory import CudaPinMemoryBackend
+from lmcache.v1.platform.device_ext import register_pin_memory_backend
 
 
 def _cuda_is_available() -> bool:
@@ -23,3 +25,4 @@ def _cuda_is_available() -> bool:
 
 
 register_availability("cuda", _cuda_is_available)
+register_pin_memory_backend("cuda", CudaPinMemoryBackend)
