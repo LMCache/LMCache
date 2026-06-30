@@ -485,12 +485,11 @@ void execute_object_group_transfer(
       TORCH_CHECK(launch.total_blocks >= 0,
                   "LaunchVar.total_blocks must be non-negative, got ",
                   launch.total_blocks);
-      TORCH_CHECK(
-          launch.block_ids_offset + launch.total_blocks <=
-              group.block_ids_capacity,
-          "LaunchVar block_ids slice [", launch.block_ids_offset, ", ",
-          launch.block_ids_offset + launch.total_blocks,
-          ") exceeds block_ids capacity ", group.block_ids_capacity);
+      TORCH_CHECK(launch.block_ids_offset + launch.total_blocks <=
+                      group.block_ids_capacity,
+                  "LaunchVar block_ids slice [", launch.block_ids_offset, ", ",
+                  launch.block_ids_offset + launch.total_blocks,
+                  ") exceeds block_ids capacity ", group.block_ids_capacity);
       const uintptr_t block_ids_addr =
           group.block_ids_base +
           static_cast<uintptr_t>(launch.block_ids_offset) * sizeof(int64_t);

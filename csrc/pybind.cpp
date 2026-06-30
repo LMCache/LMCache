@@ -136,13 +136,11 @@ PYBIND11_MODULE(c_ops, m) {
                        PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
                        EngineKVFormat engine_kv_format,
                        uintptr_t block_ids_base, int64_t block_ids_capacity) {
-             return KernelGroupSpec{paged_buffer_ptrs,
-                                    std::move(lmcache_objects_ptrs),
-                                    shape_desc,
-                                    lmcache_chunk_size,
-                                    engine_kv_format,
-                                    block_ids_base,
-                                    block_ids_capacity};
+             return KernelGroupSpec{
+                 paged_buffer_ptrs, std::move(lmcache_objects_ptrs),
+                 shape_desc,        lmcache_chunk_size,
+                 engine_kv_format,  block_ids_base,
+                 block_ids_capacity};
            }),
            py::arg("paged_buffer_ptrs"), py::arg("lmcache_objects_ptrs"),
            py::arg("shape_desc"), py::arg("lmcache_chunk_size"),
