@@ -57,7 +57,7 @@ msgstr "启动两个 vllm 引擎："
 
 #: ../../source/kv_cache_management/move.rst:82
 msgid "Start the lmcache controller at port 9000 and the monitor at port 9001:"
-msgstr "在9000端口启动 lmcache 控制器，在9001端口启动监视器："
+msgstr "在9000端口启动lmcache控制器，在9001端口启动监视器："
 
 #: ../../source/kv_cache_management/move.rst:88
 msgid "Send a request to vllm engine 1:"
@@ -75,7 +75,7 @@ msgstr "将 KV Cache 从引擎 1 的 CPU 移动到引擎 2 的 CPU，使用的 t
 
 #: ../../source/kv_cache_management/move.rst:123
 msgid "The controller responds with a message similar to:"
-msgstr "控制器会返回类似于以下内容的消息："
+msgstr "控制器会回复类似于以下内容的消息："
 
 #: ../../source/kv_cache_management/move.rst:129
 msgid ""
