@@ -90,9 +90,6 @@ def _validate_dim0_padded_layout(tensor: torch.Tensor) -> int:
     * Every interior dim ``i`` satisfies
       ``stride[i] == prod(shape[i+1:])`` -- only dim-0 may carry
       padding, with ``stride[0] >= prod(shape[1:])``.
-    * ``storage_offset`` may be non-zero (slice/narrow view): the IPC
-      wrapper carries it verbatim and downstream uses ``data_ptr()``, so
-      the padded layout is read from the correct base.
 
     Callers must pass the stride-sorted permuted view (not the original
     tensor): for tensors that are both permuted and dim-0-padded, the
@@ -131,13 +128,6 @@ def _validate_dim0_padded_layout(tensor: torch.Tensor) -> int:
         _fail("stride[-1] != 1 (inner dim not contiguous)")
     if stride[-2] != shape[-1]:
         _fail("stride[-2] != shape[-1] (last-two dims not tightly packed)")
-    # A non-zero storage_offset (slice/narrow view -- e.g. an MTP draft's shared
-    # KV, or per-layer slices of a unified KV pool) is safe here: CudaIPCWrapper
-    # round-trips storage_offset verbatim and get_group_data_ptrs hands the
-    # transfer kernel tensor.data_ptr() (offset already baked in), so the dim-0
-    # padding (block_stride_elems) is applied from the correct base. The CPU/SHM
-    # tier keeps its own storage_offset == 0 assert, so this stays GPU-path only.
-    # See https://github.com/LMCache/LMCache/issues/3821
     inner_tight = 1
     for i in range(ndim - 1, 0, -1):
         if i < ndim - 1 and stride[i] != inner_tight:
