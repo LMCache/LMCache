@@ -3,6 +3,11 @@
 Usage Stats Collection
 ======================
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance.
+
+
 LMCache collects anonymous usage data by default to help the engineering team understand real-world workloads, prioritize optimizations, and improve reliability. All collected data is aggregated and contains no sensitive user information.
 
 A sanitized subset of the aggregated data may be publicly released for the community’s benefit (for example, see a daily usage report `here <https://github.com/Hanchenli/OSS_Growth_Toolkit/tree/main/usage_tracker/report>`_).

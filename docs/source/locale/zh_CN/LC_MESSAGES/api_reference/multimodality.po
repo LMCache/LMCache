@@ -169,3 +169,7 @@ msgid ""
 "project/vllm/blob/main/examples/online_serving/openai_chat_completion_client_for_multimodal.py"
 msgstr "源: https://github.com/vllm-project/vllm/blob/main/examples/online_serving/openai_chat_completion_client_for_multimodal.py"
 
+
+#: ../../source/api_reference/multimodality.rst:1
+msgid "This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance."
+msgstr "本页面介绍 LMCache 进程内模式（不推荐使用）的行为。建议改用 :doc:`LMCache MP 模式 </mp/index>`\\ 以获得更好的功能支持与性能。"

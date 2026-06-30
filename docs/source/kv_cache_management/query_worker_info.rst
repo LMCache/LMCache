@@ -3,6 +3,11 @@
 Query Worker Info
 =================================
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/kv_cache_management`.
+
+
 The ``query_worker_info`` interface is defined as the following:
 
 .. code-block:: python
