@@ -1044,19 +1044,39 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 cache_context, gpu_block_ids
             )
 
+            # A windowed group only retains its trailing window of chunks in
+            # L1; read-lock that same subset (matching the prefetch path and
+            # transfer_kv_per_object_group's skip). Reading the dropped prefix
+            # would hit KEY_NOT_READABLE on chunks left unlocked.
+            attn_desc = cache_context.kv_layer_groups_manager.get_attn_desc()
+
             prefetched_keys: list[ObjectKey] = []
             total_bytes = 0
             try:
                 for obj_group_id in range(num_object_groups):
                     obj_keys = obj_keys_per_obj_group[obj_group_id]
+                    if attn_desc.is_full_attention(obj_group_id):
+                        num_skip = 0
+                    else:
+                        sw_size_chunks = attn_desc.num_chunks_in_sw[obj_group_id]
+                        num_skip = max(0, len(obj_keys) - sw_size_chunks)
+                    in_window_keys = obj_keys[num_skip:]
+
                     with self._ctx.storage_manager.read_prefetched_results(
-                        obj_keys
-                    ) as memory_objs:
-                        if not memory_objs or len(memory_objs) != len(obj_keys):
+                        in_window_keys
+                    ) as in_window_objs:
+                        if not in_window_objs or len(in_window_objs) != len(
+                            in_window_keys
+                        ):
                             logger.error("Some keys not found during retrieve!")
                             return event.ipc_handle(), False
 
-                        total_bytes += sum(mo.get_size() for mo in memory_objs)
+                        total_bytes += sum(mo.get_size() for mo in in_window_objs)
+
+                        # Pad the dropped prefix with None: the transfer skips
+                        # it but indexes block ids by full-list position.
+                        memory_objs: list[MemoryObj | None] = [None] * num_skip
+                        memory_objs.extend(in_window_objs)
 
                         transfer_kv_per_object_group(
                             cache_context,
@@ -1070,7 +1090,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         # Extend only after the copy is enqueued: on exception,
                         # read_prefetched_results releases this group's locks
                         # itself, and a key must not be released twice.
-                        prefetched_keys.extend(obj_keys)
+                        prefetched_keys.extend(in_window_keys)
             except Exception:
                 logger.exception("Cannot retrieve keys due to exception")
                 return event.ipc_handle(), False
