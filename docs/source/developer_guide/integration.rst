@@ -1,11 +1,6 @@
 Integration
 ===========
 
-.. warning::
-
-   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance.
-
-
 LMCache acts as a caching middleware that sits between LLM inference engines and storage systems, enabling:
 
 - **Transparent Cache Reuse**: Automatic detection and reuse of previously computed KV caches

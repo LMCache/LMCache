@@ -121,7 +121,3 @@ msgid ""
 "file logging."
 msgstr "省略 ``local_log`` 参数（或传递 ``None``\\ ）将禁用本地文件日志记录。"
 
-
-#: ../../source/developer_guide/usage/usage_stats_collection.rst:1
-msgid "This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance."
-msgstr "本页面介绍 LMCache 进程内模式（不推荐使用）的行为。建议改用 :doc:`LMCache MP 模式 </mp/index>`\\ 以获得更好的功能支持与性能。"

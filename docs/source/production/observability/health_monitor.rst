@@ -3,11 +3,6 @@
 Health Monitor
 ==============
 
-.. warning::
-
-   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance.
-
-
 LMCache includes a comprehensive health monitoring framework that continuously monitors the health of the cache engine and its components. This feature is essential for production deployments to detect and respond to failures in remote storage backends.
 
 Overview

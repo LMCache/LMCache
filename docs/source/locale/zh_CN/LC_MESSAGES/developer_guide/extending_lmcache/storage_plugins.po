@@ -377,7 +377,3 @@ msgstr "设计文档：\\ ``lmcache/v1/distributed/l2_adapters/design_docs/plugi
 msgid "L2 adapter base interface: ``lmcache/v1/distributed/l2_adapters/base.py``"
 msgstr "L2 适配器基础接口: ``lmcache/v1/distributed/l2_adapters/base.py``"
 
-
-#: ../../source/developer_guide/extending_lmcache/storage_plugins.rst:1
-msgid "This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance."
-msgstr "本页面介绍 LMCache 进程内模式（不推荐使用）的行为。建议改用 :doc:`LMCache MP 模式 </mp/index>`\\ 以获得更好的功能支持与性能。"
