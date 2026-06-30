@@ -45,12 +45,12 @@ def test_affinity_routing():
     pool.shutdown()
 
 
-def test_dense_keys_get_distinct_workers():
-    """Dense keys 0..N-1 each land on their own worker (1:1, no collision).
+def test_distinct_keys_get_distinct_workers():
+    """Up to ``max_workers`` distinct keys each land on their own worker.
 
-    This is the property that fixes the hash-collision bug: with a dense rank
-    key and ``max_workers >= world_size``, every rank gets a dedicated thread
-    rather than colliding onto a shared slot while others sit idle.
+    Dynamic assignment binds each new key to the next free slot, so any set of
+    keys (dense or not) within the worker count gets a 1:1 spread across
+    threads -- no key collides onto a shared slot while another sits idle.
     """
     num_workers = 8
     pool = AffinityThreadPool(max_workers=num_workers, thread_name_prefix="dense")
@@ -66,15 +66,37 @@ def test_dense_keys_get_distinct_workers():
 
     # Every rank ran on a distinct worker thread -> no idle workers, no sharing.
     assert len(set(threads.values())) == num_workers
-    # And each rank lands on the slot equal to its index.
+    # Keys are assigned slots in arrival order, so rank N lands on slot N here.
     for rank in range(num_workers):
         assert threads[rank] == f"dense-{rank}"
 
     pool.shutdown()
 
 
-def test_collision_warning_on_shared_slot():
-    """Two distinct keys mapping to one slot logs a single WARNING.
+def test_modulo_colliding_keys_get_distinct_workers():
+    """Keys that would collide under ``key % num_workers`` still get their own
+    worker under dynamic assignment.
+
+    With 4 workers the keys ``0, 4, 8, 12`` all map to slot 0 under a modulo
+    scheme -- the bug this pool avoids. Dynamic assignment instead binds them to
+    slots 0, 1, 2, 3, so each gets a dedicated thread.
+    """
+    pool = AffinityThreadPool(max_workers=4, thread_name_prefix="collide")
+
+    def record_thread() -> str:
+        return threading.current_thread().name
+
+    keys = [0, 4, 8, 12]  # all == 0 (mod 4)
+    threads = {
+        k: pool.submit(record_thread, affinity_key=k).result(timeout=5) for k in keys
+    }
+
+    assert len(set(threads.values())) == 4, threads
+    pool.shutdown()
+
+
+def test_overflow_warning_on_shared_slot():
+    """More distinct keys than workers wraps onto shared slots and warns once.
 
     LMCache loggers set ``propagate = False``, so assert on the module logger
     directly rather than via the ``caplog`` (root-logger) fixture.
@@ -85,32 +107,51 @@ def test_collision_warning_on_shared_slot():
     # First Party
     from lmcache.v1.multiprocess import affinity_pool as affinity_pool_mod
 
-    pool = AffinityThreadPool(max_workers=2, thread_name_prefix="collide")
+    pool = AffinityThreadPool(max_workers=2, thread_name_prefix="overflow")
     with patch.object(affinity_pool_mod.logger, "warning") as mock_warning:
-        # keys 0 and 2 both map to slot 0 (2 workers) -> collision.
-        pool.submit(lambda: None, affinity_key=0).result(timeout=5)
-        pool.submit(lambda: None, affinity_key=2).result(timeout=5)
-        # A third colliding key must not produce a second warning.
-        pool.submit(lambda: None, affinity_key=4).result(timeout=5)
+        # Keys 0 and 1 fill the two slots; key 2 is the first overflow (wraps
+        # onto slot 0), and key 3 wraps too but must not warn a second time.
+        for key in [0, 1, 2, 3]:
+            pool.submit(lambda: None, affinity_key=key).result(timeout=5)
 
     assert mock_warning.call_count == 1
-    assert "both map to" in mock_warning.call_args.args[0]
+    assert "wrapped onto worker slot" in mock_warning.call_args.args[0]
     pool.shutdown()
 
 
-def test_no_collision_warning_for_dense_keys():
-    """Dense keys within the worker count never warn."""
+def test_overflow_keys_share_a_slot():
+    """When keys outnumber workers, overflow keys reuse earlier slots."""
+    pool = AffinityThreadPool(max_workers=2, thread_name_prefix="share")
+
+    def record_thread() -> str:
+        return threading.current_thread().name
+
+    threads = {
+        key: pool.submit(record_thread, affinity_key=key).result(timeout=5)
+        for key in [0, 1, 2, 3]
+    }
+
+    # Only two threads exist, so the four keys collapse onto two threads, and
+    # the wrap is deterministic (key 2 shares key 0's slot, key 3 shares key 1's).
+    assert len(set(threads.values())) == 2
+    assert threads[0] == threads[2]
+    assert threads[1] == threads[3]
+    pool.shutdown()
+
+
+def test_no_overflow_warning_within_worker_count():
+    """Distinct keys within the worker count never warn, even when re-submitted."""
     # Standard
     from unittest.mock import patch
 
     # First Party
     from lmcache.v1.multiprocess import affinity_pool as affinity_pool_mod
 
-    pool = AffinityThreadPool(max_workers=4, thread_name_prefix="nocollide")
+    pool = AffinityThreadPool(max_workers=4, thread_name_prefix="nooverflow")
     with patch.object(affinity_pool_mod.logger, "warning") as mock_warning:
         for rank in range(4):
             pool.submit(lambda: None, affinity_key=rank).result(timeout=5)
-        # Re-submitting the same keys reuses their slots -> still no collision.
+        # Re-submitting the same keys reuses their slots -> still no overflow.
         for rank in range(4):
             pool.submit(lambda: None, affinity_key=rank).result(timeout=5)
 
