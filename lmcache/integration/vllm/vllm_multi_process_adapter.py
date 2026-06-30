@@ -1105,14 +1105,7 @@ class LMCacheMPWorkerAdapter:
         # Masked to 63 bits to stay signed-int64-safe for any msgpack peer.
         self.instance_id: int = uuid.uuid4().int & ((1 << 63) - 1)
         logger.info(
-            "LMCache MP worker adapter created: vllm_worker_id=%d of "
-            "vllm_world_size=%d (n_servers=%d), server_url=%s, instance_id=%d. "
-            "Each worker opens one MQ client, so this server's affinity pool "
-            "should bind one key per distinct worker that connects to it.",
-            parallel_strategy.vllm_worker_id,
-            parallel_strategy.vllm_world_size,
-            parallel_strategy.n_servers,
-            server_url,
+            "LMCache MP worker adapter created with instance_id=%d",
             self.instance_id,
         )
 
