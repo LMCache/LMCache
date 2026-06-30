@@ -86,9 +86,7 @@ class ManagementModule:
             their handler callables and thread pool assignments.
         """
         return [
-            HandlerSpec(
-                RequestType.CLEAR, self._handle_clear_request, ThreadPoolType.NORMAL
-            ),
+            HandlerSpec(RequestType.CLEAR, self.clear, ThreadPoolType.NORMAL),
             HandlerSpec(
                 RequestType.GET_CHUNK_SIZE,
                 self.get_chunk_size,
@@ -170,24 +168,11 @@ class ManagementModule:
         """
         return self._ctx.chunk_size
 
-    def _handle_clear_request(self) -> None:
-        """Handle the ``RequestType.CLEAR`` ZMQ request (carries no payload).
-
-        The wire handler must take zero arguments, so it delegates to
-        :meth:`clear` with ``force=True`` -- the historical CLEAR behavior.
-        """
-        self.clear(force=True)
-
-    def clear(self, force: bool = True) -> None:
-        """Clear stored KV cache data from the storage manager.
-
-        Args:
-            force: When ``True`` (default), also clear objects with active
-                read/write locks; ``False`` keeps locked objects intact.
-        """
+    def clear(self) -> None:
+        """Clear all stored KV cache data from the storage manager."""
         with self._clear_lock:
             self._ctx.storage_manager.memcheck()
-            self._ctx.storage_manager.clear(force=force)
+            self._ctx.storage_manager.clear(force=True)
             self._ctx.storage_manager.memcheck()
 
     def debug(self) -> str:

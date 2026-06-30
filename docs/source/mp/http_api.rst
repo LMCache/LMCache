@@ -551,7 +551,7 @@ Force-clears **all** KV cache data currently held in a tier (today ``l1``).
    store or prefetch operations may be corrupted. Use only when the
    server is idle, or when recovering from a known-bad cache state.
 
-**Request body:**
+**Request body:** optional -- an absent (or empty) body uses the defaults below.
 
 .. list-table::
    :header-rows: 1
@@ -566,8 +566,9 @@ Force-clears **all** KV cache data currently held in a tier (today ``l1``).
        supported. Any other value returns ``400``.
    * - ``force``
      - bool
-     - Optional (default ``true``). When ``true``, active read/write locks may
-       be ignored if the implementation supports forced cleanup.
+     - Optional (default ``true``). Currently accepted but **not honored** --
+       the clear always force-clears (active locks are ignored) regardless of
+       this value.
 
 **Response** (``200 OK``):
 
@@ -585,8 +586,8 @@ Force-clears **all** KV cache data currently held in a tier (today ``l1``).
 
 .. code-block:: bash
 
-    curl -s -X POST http://localhost:8080/cache/clear \
-        -H 'Content-Type: application/json' -d '{"tier": "l1"}'
+    # the body is optional; this clears the default tier (l1)
+    curl -s -X POST http://localhost:8080/cache/clear
 
 ``POST /cache/checksums``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
