@@ -220,14 +220,16 @@ class TransferContext(ABC):
     def close(self) -> None:
         """Release resources held by this context."""
 
+    @abstractmethod
     def flush_inflight_stores(self) -> None:
         """Synchronize any in-flight gather operations.
 
-        The default implementation is a no-op. Engine-driven async contexts
-        can override this to make preemption handling block until deferred
-        reads of vLLM paged KV data are complete.
+        Subclasses must implement this method. Contexts with no deferred
+        operations should implement it as a no-op. Async contexts that
+        defer GPU->CPU gather work must block until all in-flight stores
+        have completed, so that vLLM cannot overwrite paged KV blocks
+        before they are read.
         """
-        return None
 
 
 class LMCacheDrivenTransferContext(TransferContext):
@@ -321,6 +323,9 @@ class LMCacheDrivenTransferContext(TransferContext):
     def close(self) -> None:
         self._mq_client = None
         self._send_request = None
+
+    def flush_inflight_stores(self) -> None:
+        pass
 
 
 class EngineDrivenTransferContext(TransferContext):
@@ -523,6 +528,9 @@ class EngineDrivenTransferContext(TransferContext):
         if self._engine_driven_context is not None:
             self._engine_driven_context.close()
             self._engine_driven_context = None
+
+    def flush_inflight_stores(self) -> None:
+        pass
 
 
 def create_transfer_context(
