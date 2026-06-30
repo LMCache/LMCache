@@ -110,6 +110,15 @@ class MockThreadWorkerPool:
         """Check if a key exists."""
         return bool(self._client.exists([key_str.encode()]))
 
+    def _do_batch_exists(self, key_strs: list[str]) -> list[bool]:
+        """EXISTS many keys, mirroring the real pool's pipelined path.
+
+        The real pool runs a single glide ``Batch`` and gets back one result
+        per key in order; the mock reproduces that result list via the mock
+        client so ``_count_consecutive_exists`` sees the same shape.
+        """
+        return [bool(self._client.exists([k.encode()])) for k in key_strs]
+
     def submit_set(self, key_str: str, data: bytes) -> Future:
         """Submit a SET operation."""
         return self._executor.submit(self._do_set, key_str, data)
@@ -121,6 +130,10 @@ class MockThreadWorkerPool:
     def submit_exists(self, key_str: str) -> Future:
         """Submit an EXISTS check."""
         return self._executor.submit(self._do_exists, key_str)
+
+    def submit_batch_exists(self, key_strs: list[str]) -> Future:
+        """Submit a pipelined EXISTS check for many keys."""
+        return self._executor.submit(self._do_batch_exists, key_strs)
 
     def close(self) -> None:
         """Shut down the thread pool."""
