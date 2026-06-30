@@ -216,7 +216,7 @@ def test_commit_failure_sets_false_and_logs(
     ctx.close()
 
 
-def test_flush_inflight_gathers_no_inflight_is_noop(
+def test_flush_inflight_stores_no_inflight_is_noop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     gather_gate = threading.Event()
@@ -225,7 +225,7 @@ def test_flush_inflight_gathers_no_inflight_is_noop(
         monkeypatch, gather_gate=gather_gate, commit_impl=lambda _c: True
     )
     # No in-flight events: flush is a cheap no-op and must not raise.
-    ctx.flush_inflight_gathers()
+    ctx.flush_inflight_stores()
     ctx.close()
 
 
@@ -261,8 +261,8 @@ def test_sync_engine_driven_context_returns_resolved_future(
     assert future.query()
     assert future.result(timeout=1) is True
     assert fake.synchronize_calls >= 1
-    # flush_inflight_gathers is the inherited base no-op; must not raise.
-    ctx.flush_inflight_gathers()
+    # flush_inflight_stores is the inherited base no-op; must not raise.
+    ctx.flush_inflight_stores()
     ctx.close()
 
 
@@ -303,10 +303,10 @@ def test_supports_async_primitives_false_without_stream(
     assert worker_transfer._supports_async_primitives() is False
 
 
-def test_flush_inflight_gathers_waits_for_pending_gather(
+def test_flush_inflight_stores_waits_for_pending_gather(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """flush_inflight_gathers must not return before a submitted-but-not-yet-
+    """flush_inflight_stores must not return before a submitted-but-not-yet-
     launched gather has recorded its CUDA event (preemption race condition)."""
     gather_gate = threading.Event()
     flush_returned = threading.Event()
@@ -341,21 +341,21 @@ def test_flush_inflight_gathers_waits_for_pending_gather(
     assert gather_started.wait(timeout=1), "background thread never started"
 
     def _flush() -> None:
-        ctx.flush_inflight_gathers()
+        ctx.flush_inflight_stores()
         flush_returned.set()
 
     t = threading.Thread(target=_flush, daemon=True)
     t.start()
 
-    # flush_inflight_gathers must NOT return while the gather is still pending.
+    # flush_inflight_stores must NOT return while the gather is still pending.
     assert not flush_returned.wait(timeout=0.05), (
-        "flush_inflight_gathers returned before gather launched — race condition!"
+        "flush_inflight_stores returned before gather launched — race condition!"
     )
 
     # Now let the background gather proceed; flush should complete shortly.
     gather_gate.set()
     t.join(timeout=2)
-    assert flush_returned.is_set(), "flush_inflight_gathers did not complete"
+    assert flush_returned.is_set(), "flush_inflight_stores did not complete"
     ctx.close()
 
 

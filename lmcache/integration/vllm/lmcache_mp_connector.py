@@ -816,7 +816,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
     # TODO: How does lmcache driven path handle preemption?
     def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
-        """Flush async engine-driven gathers only when scheduler metadata requests it.
+        """Flush async engine-driven stores only when scheduler metadata requests it.
 
         Args:
             kv_connector_metadata: Connector metadata produced by the scheduler;
@@ -1111,7 +1111,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if cached_reqs is not None and not hasattr(cached_reqs, "resumed_req_ids"):
             logger.warning(
                 "Unrecognized scheduled_cached_reqs schema (%s); conservatively "
-                "flushing in-flight async gathers to avoid KV block corruption.",
+                "flushing in-flight async stores to avoid KV block corruption.",
                 type(cached_reqs).__name__,
             )
             return True

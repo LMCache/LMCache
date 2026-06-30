@@ -1712,7 +1712,7 @@ class LMCacheMPWorkerAdapter:
             return
         if not self.is_healthy or self.transfer_ctx is None:
             return
-        self.transfer_ctx.flush_inflight_gathers()
+        self.transfer_ctx.flush_inflight_stores()
         # Force device sync here, compare to preemption, perf panelty is trivial
         torch_dev.synchronize()
 

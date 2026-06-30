@@ -220,7 +220,7 @@ class TransferContext(ABC):
     def close(self) -> None:
         """Release resources held by this context."""
 
-    def flush_inflight_gathers(self) -> None:
+    def flush_inflight_stores(self) -> None:
         """Synchronize any in-flight gather operations.
 
         The default implementation is a no-op. Engine-driven async contexts

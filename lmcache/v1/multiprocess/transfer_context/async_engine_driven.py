@@ -85,11 +85,11 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         self._inflight_lock = threading.Lock()
         self._inflight_gather_events: set[Any] = set()
         # Tracks gather tasks that have been submitted to _commit_executor but
-        # have not yet recorded their CUDA event. flush_inflight_gathers waits
+        # have not yet recorded their CUDA event. flush_inflight_stores waits
         # on all of these before synchronizing _inflight_gather_events, closing
         # the window where preemption could overwrite paged KV blocks before an
         # in-flight gather has had a chance to record its CUDA event.
-        self._pending_gathers: set[threading.Event] = set()
+        self._pending_stores: set[threading.Event] = set()
         # Serializes commit_store calls across worker threads, since the
         # underlying ZMQ socket is not thread-safe and commit_workers defaults
         # to >1.
@@ -195,14 +195,14 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         commit_executor = self._commit_executor
 
         # Signals when this task has recorded its CUDA event (or exited early),
-        # allowing flush_inflight_gathers to safely proceed.
+        # allowing flush_inflight_stores to safely proceed.
         gather_launched = threading.Event()
         try:
             with self._inflight_lock:
                 if self._is_closing:
                     completion.set_result(False)
                     return completion
-                self._pending_gathers.add(gather_launched)
+                self._pending_stores.add(gather_launched)
 
             full_block_ids = _single_group_block_ids(block_ids)
 
@@ -276,7 +276,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                     with self._inflight_lock:
                         if gather_done is not None:
                             self._inflight_gather_events.add(gather_done)
-                        self._pending_gathers.discard(gather_launched)
+                        self._pending_stores.discard(gather_launched)
                     gather_launched.set()
 
                     if gather_done is not None:
@@ -305,7 +305,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                     with self._inflight_lock:
                         if gather_done is not None:
                             self._inflight_gather_events.discard(gather_done)
-                        self._pending_gathers.discard(gather_launched)
+                        self._pending_stores.discard(gather_launched)
                     gather_launched.set()
                     completion.set_result(ok)
 
@@ -317,26 +317,26 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         except Exception:
             logger.exception("Failed to submit async engine-driven store")
             with self._inflight_lock:
-                self._pending_gathers.discard(gather_launched)
+                self._pending_stores.discard(gather_launched)
             gather_launched.set()
             completion.set_result(False)
             return completion
 
         return completion
 
-    def flush_inflight_gathers(self) -> None:
+    def flush_inflight_stores(self) -> None:
         """Synchronize all in-flight gather (GPU->CPU) events.
 
         Called at preemption/eviction time so that vLLM cannot overwrite
         paged KV blocks before a deferred gather has finished reading them.
 
-        Waits for all submitted-but-not-yet-launched gathers to record their
+        Waits for all submitted-but-not-yet-launched stores to record their
         CUDA events before synchronizing those events, preventing a race where
-        ``flush_inflight_gathers`` returns before a background gather has
+        ``flush_inflight_stores`` returns before a background gather has
         started.
         """
         with self._inflight_lock:
-            pending = list(self._pending_gathers)
+            pending = list(self._pending_stores)
         for ev in pending:
             ev.wait()
         self._sync_gather_events(suppress_errors=False)
@@ -345,7 +345,7 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
         """Drain in-flight gather/commit work before closing the base context."""
         with self._inflight_lock:
             self._is_closing = True
-            pending = list(self._pending_gathers)
+            pending = list(self._pending_stores)
         for ev in pending:
             ev.wait()
         self._sync_gather_events(suppress_errors=True)
