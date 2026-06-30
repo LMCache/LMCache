@@ -84,28 +84,25 @@ def reformat_block_ids(block_ids: tuple[list[int], ...] | None) -> list[int]:
     return block_ids[0]
 
 
-def extract_world_size_and_kv_rank(
-    world_size: int,
-    rank: int,
-    vllm_config: VllmConfig,
-) -> tuple[int, int]:
+def _build_parallel_strategy(vllm_config: VllmConfig) -> ParallelStrategy:
+    """Build a single-server ParallelStrategy for the vLLM 0.20.1 connector.
+
+    Mirrors ``lmcache_mp_connector.build_parallel_strategy_from_vllm_config``,
+    but is duplicated here so this version-pinned module stays importable on
+    vLLM 0.20.1 (the generic connector imports ``KVCacheSpecKind``, which only
+    exists on vLLM 0.23.0+). The MLA TP-exclusion this module used to compute
+    inline now lives in ``ParallelStrategy.kv_world_size`` / ``kv_worker_id``,
+    so the raw vLLM world size / rank are passed through unchanged. See #3957.
     """
-    Convert the rank for the MLA.
-    """
-    use_mla = mla_enabled(vllm_config.model_config)
-    if not use_mla:
-        return world_size, rank
-    else:
-        # Tensor parallel does not change the KV caches for MLA models.
-        # So we need to "exclude" the effect of TP on rank and world size
-        tp_size = vllm_config.parallel_config.tensor_parallel_size
-        # vLLM constructs TP groups first, and then construct other
-        # parallel groups on top of TP groups.
-        # for example, TP=4, PP=2,
-        # PP group: [0, 1, 2, 3], [4, 5, 6, 7]
-        # TP group: [0, 4], [1, 5], [2, 6], [3, 7]
-        # So we can "exclude" the effect of TP by rank // tp_size.
-        return world_size // tp_size, rank // tp_size
+    pc = vllm_config.parallel_config
+    return ParallelStrategy(
+        use_mla=mla_enabled(vllm_config.model_config),
+        vllm_world_size=pc.world_size,
+        vllm_worker_id=pc.rank,
+        tp_size=pc.tensor_parallel_size,
+        pp_size=pc.pipeline_parallel_size,
+        n_servers=1,
+    )
 
 
 def create_scheduler_adapter(
@@ -115,29 +112,17 @@ def create_scheduler_adapter(
     mq_timeout: float,
     heartbeat_interval: float,
 ) -> LMCacheMPSchedulerAdapter:
-    world_size, kv_rank = extract_world_size_and_kv_rank(
-        vllm_config.parallel_config.world_size,
-        vllm_config.parallel_config.rank,
-        vllm_config,
-    )
-    parallel_strategy = ParallelStrategy(
-        mla_enabled(vllm_config.model_config),
-        world_size,
-        kv_rank,
-        vllm_config.parallel_config.world_size,
-        vllm_config.parallel_config.rank,
-        vllm_config.parallel_config.tensor_parallel_size,
-        vllm_config.parallel_config.pipeline_parallel_size,
-    )
+    parallel_strategy = _build_parallel_strategy(vllm_config)
 
     return LMCacheMPSchedulerAdapter(
-        server_url=server_url,
+        server_urls=[server_url],
         context=zmq_context,
         model_name=vllm_config.model_config.model,
         vllm_block_size=vllm_config.cache_config.block_size,
         parallel_strategy=parallel_strategy,
         mq_timeout=mq_timeout,
         heartbeat_interval=heartbeat_interval,
+        extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
     )
 
 
@@ -148,20 +133,7 @@ def create_worker_adapter(
     mq_timeout: float,
     heartbeat_interval: float,
 ) -> LMCacheMPWorkerAdapter:
-    world_size, kv_rank = extract_world_size_and_kv_rank(
-        vllm_config.parallel_config.world_size,
-        vllm_config.parallel_config.rank,
-        vllm_config,
-    )
-    parallel_strategy = ParallelStrategy(
-        mla_enabled(vllm_config.model_config),
-        world_size,
-        kv_rank,
-        vllm_config.parallel_config.world_size,
-        vllm_config.parallel_config.rank,
-        vllm_config.parallel_config.tensor_parallel_size,
-        vllm_config.parallel_config.pipeline_parallel_size,
-    )
+    parallel_strategy = _build_parallel_strategy(vllm_config)
 
     return LMCacheMPWorkerAdapter(
         server_url=server_url,
