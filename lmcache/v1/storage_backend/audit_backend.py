@@ -44,12 +44,13 @@ class AuditBackend(StorageBackendInterface):
         if error:
             self.logger.error(
                 "[AUDIT_BACKEND][%s]:%s|FAILED|Key:%s|Error:%s",
-                backend_name, op_name, key, str(error),
+                backend_name,
+                op_name,
+                key,
+                str(error),
             )
         elif success:
-            log_msg = (
-                "[AUDIT_BACKEND][%s]:%s|SUCCESS|Cost:%.2fms"
-            )
+            log_msg = "[AUDIT_BACKEND][%s]:%s|SUCCESS|Cost:%.2fms"
             log_args = [backend_name, op_name, cost]
             if key:
                 log_msg += "|Key:%s"
