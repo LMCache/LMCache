@@ -122,6 +122,10 @@ def _detect_with_stub(stub: _StubTorch) -> tuple[Any, str]:
 
 def test_detect_device_prefers_musa_when_available() -> None:
     """``_detect_device`` returns MUSA whenever ``torch.musa.is_available()``."""
+    # Standard
+    import os
+
+    os.environ["DEVICE_TYPE"] = "musa"
     stub = _StubTorch(
         has_musa=True,
         has_xpu=True,
@@ -133,10 +137,15 @@ def test_detect_device_prefers_musa_when_available() -> None:
     dev, name = _detect_with_stub(stub)
     assert name == "musa"
     assert dev is stub.musa
+    del os.environ["DEVICE_TYPE"]
 
 
 def test_detect_device_falls_back_past_unavailable_musa() -> None:
     """Falls through MUSA when ``torch.musa.is_available()`` is False."""
+    # Standard
+    import os
+
+    os.environ["DEVICE_TYPE"] = "musa"
     stub = _StubTorch(
         has_musa=True,
         has_xpu=True,
@@ -145,6 +154,7 @@ def test_detect_device_falls_back_past_unavailable_musa() -> None:
     )
     _, name = _detect_with_stub(stub)
     assert name == "xpu"
+    del os.environ["DEVICE_TYPE"]
 
 
 def test_detect_device_cuda_fallback_when_no_alt_accelerator() -> None:
