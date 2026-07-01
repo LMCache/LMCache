@@ -573,7 +573,7 @@ class BlendV3Module(InstanceLivenessTarget):
                     position_offset=position_offset,
                 )
                 # NOTE (Jiayi): instrumentation — confirm fingerprint registration
-                logger.info(
+                logger.debug(
                     "CB fp-register: ntok=%d nhashes=%d skip=%d pos_off=%d",
                     len(tokens_in_range),
                     len(chunk_hashes),
@@ -967,7 +967,7 @@ class BlendV3Module(InstanceLivenessTarget):
                 )
                 matches = self._match_fingerprints(key)
                 # NOTE (Jiayi): instrumentation — confirm CB unified lookup match
-                logger.info(
+                logger.debug(
                     "CB unified_lookup rid=%s ntok=%d local_matches=%d",
                     rid,
                     len(key.token_ids),
@@ -1213,7 +1213,7 @@ class BlendV3Module(InstanceLivenessTarget):
             tokens_in_range = list(key.token_ids)[key.start : key.end]
             start_chunk_idx = 1 if key.start == 0 else 0
             # NOTE (Jiayi): instrumentation — confirm fingerprint enqueue on store
-            logger.info(
+            logger.debug(
                 "CB store fp-enqueue rid=%s wid=%s start=%d end=%d nhashes=%d skip=%d",
                 key.request_id,
                 key.worker_id,

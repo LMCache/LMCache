@@ -367,7 +367,7 @@ class LMCacheMPRequestMetadata:
         # NOTE (Jiayi): qwen35 per-request store-range telemetry (token counts +
         # per-group tokens-per-block); confirms the store advances past one chunk
         # once _project_kept_groups aligns block ids to the mamba-skipped order.
-        logger.info(
+        logger.debug(
             "CB[store-range] req=%s all_tok=%d alloc=%d computed=%d "
             "(sched=%d vhit=%d lhit=%d) stored=%d staging=%d chunk=%d nchunks=%d "
             "| ngroups=%d tpb=%s alloc_blocks=%s",
