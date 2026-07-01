@@ -9,6 +9,7 @@ from __future__ import annotations
 # Standard
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any
 import time
 
 # Third Party
@@ -72,7 +73,7 @@ class LMCacheBatchedStream:
         return self.streams[stream_id]
 
     def run_streams(
-        self, sampling_params: dict[str, float], stream_ids: list[str] | None = None
+        self, sampling_params: dict[str, Any], stream_ids: list[str] | None = None
     ) -> float:
         """Decode every selected stream concurrently and store their metrics.
 
@@ -100,6 +101,7 @@ class LMCacheBatchedStream:
         if not stream_ids:
             return 0.0
 
+        self.perf_metrics.clear()
         start_time = time.perf_counter()
         with ThreadPoolExecutor(max_workers=len(stream_ids)) as executor:
             futures = {}
@@ -321,7 +323,7 @@ class LMCacheBatchedStream:
 
     def prefill(
         self,
-        sampling_params: dict[str, float],
+        sampling_params: dict[str, Any],
         fmt: str = "terminal",
         width: int = 80,
         stream_ids: list[str] | None = None,
@@ -378,7 +380,7 @@ class LMCacheBatchedStream:
 
     def decode(
         self,
-        sampling_params: dict[str, float],
+        sampling_params: dict[str, Any],
         fmt: str = "terminal",
         width: int = 80,
         stream_ids: list[str] | None = None,

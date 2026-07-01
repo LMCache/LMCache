@@ -10,6 +10,9 @@ from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 import httpx
 import torch
 
+# First Party
+import lmcache.sdk.stream as lmc_stream
+
 
 def _rotate_half_neox(x: torch.Tensor) -> torch.Tensor:
     """Rotate pairs using GPT-NeoX/Llama-style half layout."""
@@ -134,7 +137,17 @@ def rerotate_k_cache(
     new_positions: torch.Tensor,
     model_config: AutoConfig,
 ) -> torch.Tensor:
-    """Move key cache RoPE from old positions to new positions."""
+    """Move key cache RoPE from old positions to new positions.
+    Args:
+        kv_tensor: The KV cache tensor of shape [2, L, T, D].
+        old_positions: The old token positions.
+        new_positions: The new token positions.
+        model_config: The model configuration.
+    Returns:
+        The rerotated KV cache tensor.
+    Raises:
+        ValueError: If the input tensor shape or dimensions are invalid.
+    """
     if kv_tensor.ndim != 4:
         raise ValueError(f"kv_tensor must be 4D [2, L, T, D], got {kv_tensor.ndim}D")
 
@@ -175,10 +188,19 @@ def _extract_token_id(choice: dict) -> int:
     return int(last.split(":")[-1]) if ":" in last else -1
 
 
-def make_post_completion(vllm_url: str, model_name: str, timeout: float):
-    """Build a streaming post_completion callable for lmcache.sdk.stream."""
-    # First Party
-    import lmcache.sdk.stream as lmc_stream
+def make_post_completion(
+    vllm_url: str, model_name: str, timeout: float
+) -> lmc_stream.PostCompletion:
+    """Build a streaming post_completion callable for lmcache.sdk.stream.
+
+    Args:
+        vllm_url: The URL of the vLLM server.
+        model_name: The name of the model.
+        timeout: Timeout in seconds for HTTP requests.
+
+    Returns:
+        A streaming post_completion callable.
+    """
 
     def post_completion(prompt_token_ids, sampling_params, cache_salt):
         payload = {

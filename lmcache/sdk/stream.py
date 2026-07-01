@@ -9,7 +9,7 @@ from __future__ import annotations
 # Standard
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 import time
 import uuid
 
@@ -18,7 +18,6 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.sdk.kvcache import LMCacheKVCacheContext
 import lmcache.sdk.kvcache as lmc_sdk
 
 logger = init_logger(__name__)
@@ -70,7 +69,7 @@ class PostCompletion(Protocol):
     def __call__(
         self,
         prompt_token_ids: list[int],
-        sampling_params: dict[str, float],
+        sampling_params: dict[str, Any],
         cache_salt: str,
     ) -> Iterable[TokenEvent]:
         """Stream decoded tokens for the given prompt.
@@ -86,6 +85,56 @@ class PostCompletion(Protocol):
         ...
 
 
+def create_request(
+    ctx: lmc_sdk.LMCacheKVCacheContext,
+    post_completion: PostCompletion,
+    prompt_token_ids: Sequence[int],
+    cache_salt: str = "",
+) -> LMCacheStream:
+    """Create an LMCacheStream for a new request.
+
+    Args:
+        ctx: The LMCache SDK context used for retrieve/store.
+        post_completion: Callable that submits a request to the engine.
+        prompt_token_ids: Initial prompt token ids.
+        cache_salt: Per-user isolation salt, or empty string.
+
+    Returns:
+        A new LMCacheStream.
+    """
+    return LMCacheStream(
+        ctx=ctx,
+        post_completion=post_completion,
+        prompt_token_ids=prompt_token_ids,
+        cache_salt=cache_salt,
+    )
+
+
+def generate(
+    stream: LMCacheStream,
+    sampling_params: dict[str, Any],
+    suffix_tokens: Sequence[int] = (),
+) -> StreamPerfMetrics:
+    """Run/continue a stream's generate. See LMCacheStream.generate."""
+    return stream.generate(sampling_params, suffix_tokens)
+
+
+def get(
+    stream: LMCacheStream, timeout: float = 30.0, poll_interval: float = 0.2
+) -> torch.Tensor:
+    """Retrieve the cached KV for a stream. See LMCacheStream.retrieve_kv."""
+    return stream.retrieve_kv(timeout=timeout, poll_interval=poll_interval)
+
+
+def update(
+    stream: LMCacheStream,
+    kv: torch.Tensor,
+    tokens: Sequence[int],
+) -> None:
+    """Store edited KV into a stream. See LMCacheStream.update_kv."""
+    stream.update_kv(kv, tokens)
+
+
 class LMCacheStream:
     """Handle for one logical request spanning multiple inference passes.
 
@@ -98,7 +147,7 @@ class LMCacheStream:
 
     def __init__(
         self,
-        ctx: LMCacheKVCacheContext,
+        ctx: lmc_sdk.LMCacheKVCacheContext,
         post_completion: PostCompletion,
         prompt_token_ids: Sequence[int],
         cache_salt: str = "",
@@ -144,7 +193,7 @@ class LMCacheStream:
         return self.done
 
     def generate(
-        self, sampling_params: dict[str, float], suffix_tokens: Sequence[int] = ()
+        self, sampling_params: dict[str, Any], suffix_tokens: Sequence[int] = ()
     ) -> StreamPerfMetrics:
         """Run one inference pass and append the result to the stream history.
 
@@ -275,53 +324,3 @@ class LMCacheStream:
         self._suffix_tokens = list(self.tokens[cached_len:]) + self._suffix_tokens
         new_kv, new_tokens = fn(kv, self.tokens[:cached_len])
         self.update_kv(new_kv, new_tokens)
-
-
-def create_request(
-    ctx: LMCacheKVCacheContext,
-    post_completion: PostCompletion,
-    prompt_token_ids: Sequence[int],
-    cache_salt: str = "",
-) -> LMCacheStream:
-    """Create an LMCacheStream for a new request.
-
-    Args:
-        ctx: The LMCache SDK context used for retrieve/store.
-        post_completion: Callable that submits a request to the engine.
-        prompt_token_ids: Initial prompt token ids.
-        cache_salt: Per-user isolation salt, or empty string.
-
-    Returns:
-        A new LMCacheStream.
-    """
-    return LMCacheStream(
-        ctx=ctx,
-        post_completion=post_completion,
-        prompt_token_ids=prompt_token_ids,
-        cache_salt=cache_salt,
-    )
-
-
-def generate(
-    stream: LMCacheStream,
-    sampling_params: dict[str, float],
-    suffix_tokens: Sequence[int] = (),
-) -> StreamPerfMetrics:
-    """Run/continue a stream's generate."""
-    return stream.generate(sampling_params, suffix_tokens)
-
-
-def get(
-    stream: LMCacheStream, timeout: float = 30.0, poll_interval: float = 0.2
-) -> torch.Tensor:
-    """Retrieve the cached KV for a stream."""
-    return stream.retrieve_kv(timeout=timeout, poll_interval=poll_interval)
-
-
-def update(
-    stream: LMCacheStream,
-    kv: torch.Tensor,
-    tokens: Sequence[int],
-) -> None:
-    """Store edited KV into a stream. See LMCacheStream.update_kv."""
-    stream.update_kv(kv, tokens)
