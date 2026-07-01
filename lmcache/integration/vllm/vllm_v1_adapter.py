@@ -1864,12 +1864,12 @@ class LMCacheConnectorV1Impl:
         ):
             self._layerwise_save_storers.pop(request.request_id, None)
 
-        # Degraded mode (LMCache init failed): no engine/lookup client to notify
-        # and nothing to stream back, so report no transfer params.
-        if self.lmcache_engine is None or self.lookup_client is None:
-            return False, None
-
-        # Cleanup if request was aborted
+        # Cleanup if request was aborted. The per-branch logic below already
+        # degrades gracefully when ``lmcache_engine`` and/or ``lookup_client``
+        # are missing (it warns and skips only the unavailable backend), so we
+        # must not short-circuit the whole method here -- doing so would drop
+        # the storage/lookup cancels that still need to run when just one of
+        # the two is present. See LMCache#3337.
         if request.status == RequestStatus.FINISHED_ABORTED:
             # ``request_finished`` is a Scheduler-side connector API.
             # The Scheduler typically does not initialize the storage
