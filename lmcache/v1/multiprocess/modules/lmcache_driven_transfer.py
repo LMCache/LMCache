@@ -274,12 +274,6 @@ def _run_object_group_transfer_plan(
     is_h2d = direction == lmc_ops.TransferDirection.H2D
     max_batch_size = cache_context.max_batch_size
 
-    # Keep every tensor whose data_ptr the native call dereferences referenced
-    # for the duration of this function. (The underlying storage is owned by the
-    # cache context / caller and outlives the async copies; this is belt-and-
-    # suspenders against the temporary view objects being collected early.)
-    keep_alive: list[torch.Tensor] = []
-
     # --- Per-kernel-group invariants, resolved once (vs. every batch before) ---
     kernel_group_specs: list["lmc_ops.KernelGroupSpec"] = []
     spec_index_by_kg: dict[int, int] = {}
@@ -305,9 +299,6 @@ def _run_object_group_transfer_plan(
             cache_context.get_temp_kernel_group_buffer(slot, kernel_group_id)
             for slot in range(max_batch_size)
         ]
-        keep_alive.append(paged_ptrs)
-        keep_alive.append(block_ids_tensor)
-        keep_alive.extend(temp_buffers)
 
         spec_index_by_kg[kernel_group_id] = len(kernel_group_specs)
         kernel_group_specs.append(
@@ -327,7 +318,6 @@ def _run_object_group_transfer_plan(
         cache_context.get_temp_object_group_buffer(slot, object_group_id)
         for slot in range(max_batch_size)
     ]
-    keep_alive.extend(object_group_buffers)
 
     attn_desc = kv_groups_manager.get_attn_desc()
     num_objects_to_skip = 0
