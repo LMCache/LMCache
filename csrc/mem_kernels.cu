@@ -1062,27 +1062,20 @@ void single_layer_kv_transfer_sgl(
  * @param host_buffer_alignments the alignment (i.e., cudaHostRegister
  * granularity) requirement of the host buffer. Must be power of two.
  */
-// Enqueue one alignment-aware asynchronous copy on the given stream. The copy
-// is split into smaller copies so each stays within a single host-buffer
-// alignment window (cudaHostRegister granularity), matching the host buffer's
-// registration layout. Shared by lmcache_memcpy_async, its batched variant, and
-// the object-group transfer executor so they all produce byte-for-byte
-// identical stream work.
-void lmcache_memcpy_async_one(uintptr_t dest, uintptr_t src, size_t nbytes,
-                              cudaMemcpyKind kind, size_t host_buffer_offset,
-                              size_t host_buffer_alignments,
-                              cudaStream_t stream) {
-  // Validate alignment here -- the single chokepoint every copy path funnels
-  // through (lmcache_memcpy_async, its batched variant, and
-  // execute_object_group_transfer). The `> 0` guard is essential: for an
-  // unsigned 0, `(0 & (0 - 1)) == 0` passes the power-of-two test, but then
-  // `mask` becomes SIZE_MAX and `max_nbytes` underflows below -- an infinite
-  // loop or an out-of-bounds cudaMemcpyAsync.
-  TORCH_CHECK(host_buffer_alignments > 0 &&
-                  (host_buffer_alignments & (host_buffer_alignments - 1)) == 0,
-              "host_buffer_alignments must be a positive power of two");
+void lmcache_memcpy_async(uintptr_t dest, uintptr_t src, size_t nbytes,
+                          TransferDirection direction,
+                          size_t host_buffer_offset,
+                          size_t host_buffer_alignments) {
+  // Check that host_buffer_alignments is power of two
+  TORCH_CHECK((host_buffer_alignments & (host_buffer_alignments - 1)) == 0,
+              "host_buffer_alignments must be power of two");
+
   size_t offset = 0;
   const size_t mask = host_buffer_alignments - 1;
+  cudaMemcpyKind kind = (direction == TransferDirection::H2D)
+                            ? cudaMemcpyHostToDevice
+                            : cudaMemcpyDeviceToHost;
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   while (offset < nbytes) {
     size_t current_src = src + offset;
@@ -1101,64 +1094,5 @@ void lmcache_memcpy_async_one(uintptr_t dest, uintptr_t src, size_t nbytes,
                                     max_nbytes, kind, stream));
 
     offset += max_nbytes;
-  }
-}
-
-void lmcache_memcpy_async(uintptr_t dest, uintptr_t src, size_t nbytes,
-                          TransferDirection direction,
-                          size_t host_buffer_offset,
-                          size_t host_buffer_alignments) {
-  // host_buffer_alignments is validated in lmcache_memcpy_async_one.
-  cudaMemcpyKind kind = (direction == TransferDirection::H2D)
-                            ? cudaMemcpyHostToDevice
-                            : cudaMemcpyDeviceToHost;
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  lmcache_memcpy_async_one(dest, src, nbytes, kind, host_buffer_offset,
-                           host_buffer_alignments, stream);
-}
-
-/**
- * Batched variant of lmcache_memcpy_async.
- *
- * Enqueue a list of asynchronous copies on the current CUDA stream within a
- * single GIL release (the release is configured at the pybind layer). The
- * stream work is identical to calling lmcache_memcpy_async once per element,
- * but the orchestrating Python thread only releases and re-acquires the GIL
- * once for the whole batch instead of once per copy -- this removes the
- * per-copy GIL handoff points that otherwise let sibling threads starve it.
- *
- * Element i copies nbytes[i] bytes from srcs[i] to dests[i], using
- * host_buffer_offsets[i] for the host-side alignment window. All copies share
- * one direction and one host_buffer_alignments value.
- *
- * @param dests Destination pointers (device or host), one per copy.
- * @param srcs Source pointers (device or host), one per copy.
- * @param nbytes Number of bytes to copy, one per copy.
- * @param direction H2D or D2H (applies to every copy).
- * @param host_buffer_offsets Per-copy virtual offset in the lmcache memory
- *   allocator (the host side of each copy).
- * @param host_buffer_alignments Alignment (cudaHostRegister granularity)
- *   requirement of the host buffers. Must be a power of two.
- */
-void lmcache_memcpy_async_batched(
-    const std::vector<uintptr_t>& dests, const std::vector<uintptr_t>& srcs,
-    const std::vector<size_t>& nbytes, TransferDirection direction,
-    const std::vector<size_t>& host_buffer_offsets,
-    size_t host_buffer_alignments) {
-  // host_buffer_alignments is validated per copy in lmcache_memcpy_async_one.
-  const size_t n = dests.size();
-  TORCH_CHECK(
-      srcs.size() == n && nbytes.size() == n && host_buffer_offsets.size() == n,
-      "lmcache_memcpy_async_batched expects dests, srcs, nbytes, and "
-      "host_buffer_offsets of equal length");
-
-  cudaMemcpyKind kind = (direction == TransferDirection::H2D)
-                            ? cudaMemcpyHostToDevice
-                            : cudaMemcpyDeviceToHost;
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  for (size_t i = 0; i < n; ++i) {
-    lmcache_memcpy_async_one(dests[i], srcs[i], nbytes[i], kind,
-                             host_buffer_offsets[i], host_buffer_alignments,
-                             stream);
   }
 }

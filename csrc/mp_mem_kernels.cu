@@ -447,13 +447,14 @@ void execute_object_group_transfer(
   const at::cuda::OptionalCUDAGuard device_guard(device);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const bool is_h2d = (direction == TransferDirection::H2D);
-  const cudaMemcpyKind kind =
-      is_h2d ? cudaMemcpyHostToDevice : cudaMemcpyDeviceToHost;
 
   const auto do_staging = [&](const std::vector<StagingCopy>& staging) {
     for (const auto& copy : staging) {
-      lmcache_memcpy_async_one(copy.dest, copy.src, copy.nbytes, kind,
-                               copy.host_offset, host_buffer_alignment, stream);
+      // lmcache_memcpy_async resolves the current CUDA stream itself; under the
+      // device guard set above that is the same stream the kernel launches below
+      // run on, so the per-step staging/launch ordering is preserved.
+      lmcache_memcpy_async(copy.dest, copy.src, copy.nbytes, direction,
+                           copy.host_offset, host_buffer_alignment);
     }
   };
 

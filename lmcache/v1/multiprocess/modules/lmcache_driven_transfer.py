@@ -25,13 +25,12 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.gpu_connector.gpu_ops import (
     build_staging_copies,
-    lmcache_memcpy_async_d2h_batched,
-    lmcache_memcpy_async_h2d_batched,
-    objects_all_lazy,
+    lmcache_memcpy_async_d2h,
+    lmcache_memcpy_async_h2d,
 )
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
-from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
@@ -54,11 +53,6 @@ from lmcache.v1.platform.cache_context import create_cache_context
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
-
-# Whether the native extension can execute a whole object-group transfer plan in
-# one GIL-released call. Older c_ops builds lack it; transfer_kv_per_object_group
-# then falls back to the per-op Python path.
-_CAN_PLAN_OBJECT_GROUP_TRANSFER = hasattr(lmc_ops, "execute_object_group_transfer")
 
 
 def get_layout_desc(
@@ -256,8 +250,8 @@ def _run_object_group_transfer_plan(
     throughout) and hands the whole plan to ``execute_object_group_transfer``,
     which issues all of it on the stream within a single GIL release.
 
-    Requires every object to be lazy-allocator-backed; the caller gates this
-    with :func:`objects_all_lazy`.
+    Requires every object to be non-GDS (staged through the lazy-allocator
+    path); the caller skips groups that contain any GDS-backed object.
 
     Args:
         cache_context: The GPU cache context containing the KV cache information.
@@ -454,13 +448,14 @@ def transfer_kv_per_object_group(
         This function expects the caller to stage the block ids (list[list[int]])
         into GPU tensors and pass them in as `block_ids_gpu`.
 
-        When the native extension supports it and every object is
-        lazy-allocator-backed, the whole group is issued through a single
-        ``execute_object_group_transfer`` call (one GIL release for all staging
-        copies and kernel launches). Otherwise it falls back to the per-op
-        Python path below (GDS / plain-tensor objects, or an older c_ops build).
+        Unless the group contains GDS-backed objects, the whole group is issued
+        through a single ``execute_object_group_transfer`` call (one GIL release
+        for all staging copies and kernel launches). GDS groups fall back to the
+        per-op Python path below, which handles their dedicated copy mechanism.
     """
-    if _CAN_PLAN_OBJECT_GROUP_TRANSFER and objects_all_lazy(memory_objs):
+    # GDS-backed objects need their own copy mechanism and cannot be staged
+    # through the plan; route those groups to the per-op path below instead.
+    if not any(isinstance(mo, GDSMemoryObject) for mo in memory_objs):
         _run_object_group_transfer_plan(
             cache_context,
             block_ids_gpu,
@@ -513,19 +508,15 @@ def transfer_kv_per_object_group(
 
         skip_tokens_in_chunk = effective_start - batch_start_token
 
-        # For H2D, copy from CPU to GPU tmp buffers before the kernel launch.
-        # Issue the whole batch in one native call so the GIL is released once
-        # for all chunks, not once per chunk (see lmcache_memcpy_async_h2d_batched).
+        # For H2D, copy from CPU to GPU tmp buffers before the kernel launch
         if is_h2d:
-            lmcache_memcpy_async_h2d_batched(
-                memory_object_batch,
-                [
+            for chunk_idx, memory_obj in enumerate(memory_object_batch):
+                lmcache_memcpy_async_h2d(
+                    memory_obj,
                     cache_context.get_temp_object_group_buffer(
                         chunk_idx, object_group_id
-                    )
-                    for chunk_idx in range(batch_len)
-                ],
-            )
+                    ),
+                )
 
         # Do paged KV copy
         for kernel_group_id in kernel_group_ids:
@@ -583,19 +574,15 @@ def transfer_kv_per_object_group(
                 recalculated_skip_blocks,
             )
 
-        # For D2H, copy from GPU tmp buffers to CPU after the kernel launch.
-        # Issue the whole batch in one native call so the GIL is released once
-        # for all chunks, not once per chunk (see lmcache_memcpy_async_d2h_batched).
+        # For D2H, copy from GPU tmp buffers to CPU after the kernel launch
         if not is_h2d:
-            lmcache_memcpy_async_d2h_batched(
-                [
+            for chunk_idx, memory_obj in enumerate(memory_object_batch):
+                lmcache_memcpy_async_d2h(
                     cache_context.get_temp_object_group_buffer(
                         chunk_idx, object_group_id
-                    )
-                    for chunk_idx in range(batch_len)
-                ],
-                memory_object_batch,
-            )
+                    ),
+                    memory_obj,
+                )
 
 
 @dataclass

@@ -55,11 +55,6 @@ PYBIND11_MODULE(c_ops, m) {
   m.def("reshape_and_cache_back_flash", &reshape_and_cache_back_flash);
   m.def("lmcache_memcpy_async", &lmcache_memcpy_async,
         py::call_guard<py::gil_scoped_release>());
-  m.def("lmcache_memcpy_async_batched", &lmcache_memcpy_async_batched,
-        py::arg("dests"), py::arg("srcs"), py::arg("nbytes"),
-        py::arg("direction"), py::arg("host_buffer_offsets"),
-        py::arg("host_buffer_alignments"),
-        py::call_guard<py::gil_scoped_release>());
   m.def("encode_fast_new", &encode_cuda_new);
   m.def("decode_fast_new", &decode_cuda_new);
   m.def("decode_fast_prefsum", &decode_cuda_prefsum);
