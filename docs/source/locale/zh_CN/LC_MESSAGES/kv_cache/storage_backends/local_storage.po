@@ -361,3 +361,7 @@ msgid ""
 "increases!"
 msgstr "这里的最大模型长度是通过仅使用 23GB 显存的 L4 运行决定的。如果您有更多内存，可以增加最大模型长度并修改 ``query-twice.py`` 以使用更多的长上下文。随着上下文长度的增加，LMCache 的 TTFT 改进变得更加明显！"
 
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:1
+msgid "This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/l2_storage/index`."
+msgstr "本页面介绍 LMCache 进程内模式（不推荐使用）的行为。建议改用 :doc:`LMCache MP 模式 </mp/index>`\\ 以获得更好的功能支持与性能。本页面对应的 MP 模式文档请参见 :doc:`/mp/l2_storage/index`\\ 。"

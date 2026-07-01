@@ -66,3 +66,7 @@ msgid ""
 "``event_id`` can be used to query the status of the operation."
 msgstr "``worker_infos`` 包含查询到的工作者信息。返回的 ``event_id`` 可用于查询操作的状态。"
 
+
+#: ../../source/kv_cache_management/query_worker_info.rst:1
+msgid "This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance."
+msgstr "本页面介绍 LMCache 进程内模式（不推荐使用）的行为。建议改用 :doc:`LMCache MP 模式 </mp/index>`\\ 以获得更好的功能支持与性能。"
