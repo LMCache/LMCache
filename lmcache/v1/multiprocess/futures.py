@@ -49,7 +49,7 @@ class MessagingFuture(Generic[T]):
             T: The result of the future.
 
         Raises:
-            LMCacheTimeoutError: If the future is not done within the timeout.
+            TimeoutError: If the future is not done within the timeout.
         """
         flag = self.wait(timeout)
         if not flag:
@@ -162,7 +162,7 @@ class CUDAMessagingFuture(MessagingFuture[T]):
             T: The result of the future.
 
         Raises:
-            LMCacheTimeoutError: If the future is not done within the timeout.
+            TimeoutError: If the future is not done within the timeout.
         """
         flag = self.wait(timeout)
         if not flag:

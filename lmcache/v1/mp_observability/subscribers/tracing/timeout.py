@@ -1,19 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""OTel tracing subscriber for timeout errors.
+"""OTel span for timeout errors.
 
-Records each :class:`~lmcache.v1.mp_observability.errors.LMCacheTimeoutError`
-as a zero-duration OTel span named ``"timeout"``.  The span carries the OTel
-exception semantic-convention attributes (``exception.type`` /
-``exception.message`` / ``exception.stacktrace``) as an ``"exception"`` span
-event and is marked with ERROR status — the same shape OTel's
-``Span.record_exception`` produces, but driven from the EventBus drain thread
-where the original exception object is no longer available.
-
-When the event carries a ``session_id`` that matches an open ``"request"`` span
-in the shared :class:`~lmcache.v1.mp_observability.subscribers.tracing\
-.span_registry.SpanRegistry`, the timeout span is nested under that request;
-otherwise it is emitted as a standalone root span.
+Records each ``TIMEOUT_RAISED`` as a zero-duration ``timeout`` span with an
+``exception`` event (type/message/stacktrace) and ERROR status, nested under
+the request span when ``session_id`` matches an open one.
 """
 
 # Future
@@ -39,14 +30,11 @@ except ImportError:
 
 
 class TimeoutTracingSubscriber(EventSubscriber):
-    """Creates an OTel span recording each timeout error.
+    """Records each ``TIMEOUT_RAISED`` event as an OTel span.
 
     Args:
-        registry: Shared span registry used to look up the open ``"request"``
-            span to nest the timeout span under.  When ``None`` a private
-            registry is created, so the subscriber is usable standalone (the
-            timeout span then has no parent to find and is emitted as a root
-            span).
+        registry: Shared span registry for finding the request span to nest
+            under; a private one is used when omitted (spans are then roots).
     """
 
     def __init__(self, registry: SpanRegistry | None = None) -> None:
@@ -56,12 +44,6 @@ class TimeoutTracingSubscriber(EventSubscriber):
         return {EventType.TIMEOUT_RAISED: self._on_timeout}
 
     def _on_timeout(self, event: Event) -> None:
-        """Emit a zero-duration ``"timeout"`` span recording the exception.
-
-        Args:
-            event: ``TIMEOUT_RAISED`` event with ``message``,
-                ``exception_type``, and ``stacktrace`` in its metadata.
-        """
         if not _HAS_OTEL:
             return
         parent_ctx = (

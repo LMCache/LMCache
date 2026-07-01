@@ -1,13 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""Timeout metrics subscriber — an OTel counter for timeout errors.
-
-Increments ``lmcache_mp.timeouts`` once per :class:`~lmcache.v1\
-.mp_observability.errors.LMCacheTimeoutError` constructed, tagged by
-``exception_type`` so operators can alert on the timeout rate per class on the
-Prometheus ``/metrics`` endpoint.  This is an anomaly counter: it should stay
-near zero in healthy operation.
-"""
+"""OTel counter for timeout errors: ``lmcache_mp.timeouts`` by ``exception_type``."""
 
 # Future
 from __future__ import annotations
@@ -27,11 +20,7 @@ class TimeoutMetricsSubscriber(EventSubscriber):
         meter = metrics.get_meter("lmcache_mp.health")
         self._timeout_counter = meter.create_counter(
             "lmcache_mp.timeouts",
-            description=(
-                "Count of LMCacheTimeoutError instances constructed, tagged by "
-                "``exception_type`` (the timeout class name). Anomaly counter; "
-                "should stay near zero in healthy operation."
-            ),
+            description="Timeouts raised, tagged by exception_type.",
         )
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:

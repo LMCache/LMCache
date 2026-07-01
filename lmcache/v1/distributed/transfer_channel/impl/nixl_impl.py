@@ -531,9 +531,8 @@ class NixlTransferChannelContext(TransferChannelContext):
             The raw reply bytes.
 
         Raises:
-            LMCacheTimeoutError: If no reply arrives within the handshake
-                timeout (e.g. the url is wrong/unreachable or the port is
-                blocked).
+            TimeoutError: If no reply arrives within the handshake timeout
+                (e.g. the url is wrong/unreachable or the port is blocked).
         """
         try:
             return socket.recv()

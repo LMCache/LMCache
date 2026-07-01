@@ -1,13 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""Timeout logging subscriber — warning logs for timeout errors.
-
-Logs each :class:`~lmcache.v1.mp_observability.errors.LMCacheTimeoutError`
-with its message and construction stack trace.  Logs are emitted via Python's
-standard logging module; when OpenTelemetry is installed, ``init_logger``
-attaches an OTel ``LoggingHandler`` so records are forwarded to OTel when a
-``LoggerProvider`` is configured at startup.
-"""
+"""Warning log for timeout errors (message + stack trace)."""
 
 # Future
 from __future__ import annotations

@@ -912,9 +912,9 @@ class StorageManager:
 
         Raises:
             ValueError: If no adapter with ``adapter_id`` is active.
-            LMCacheTimeoutError: If draining did not complete within
-                ``timeout``; the adapter is left active (draining) so the
-                caller can retry.
+            TimeoutError: If draining did not complete within ``timeout``;
+                the adapter is left active (draining) so the caller can
+                retry.
         """
         with self._lifecycle_lock:
             if adapter_id not in self._l2_adapters:

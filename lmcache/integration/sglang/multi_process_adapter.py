@@ -251,7 +251,8 @@ class LMCacheMPConnector:
         ).result(timeout=self._mq_timeout + _WAIT_LOOKUP_RESPONSE_BUFFER_S)
         if matched_chunks is None:
             raise LMCacheTimeoutError(
-                "Timed out waiting for LMCache prefetch to finish"
+                "Timed out waiting for LMCache prefetch to finish",
+                session_id=request_id,
             )
         return matched_chunks * self._lmcache_chunk_size
 

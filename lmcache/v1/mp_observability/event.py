@@ -81,15 +81,9 @@ class EventType(Enum):
     # vLLM end session events
     MP_VLLM_END_SESSION = "mp.vllm.end_session"
 
-    # Timeout events (cross-component) — published by ``LMCacheTimeoutError``
-    # on construction (see :mod:`lmcache.v1.mp_observability.errors`).  Fired
-    # from any layer that raises a timeout, so it does not belong to a single
-    # component namespace.  Metadata layout:
-    #   ``message``        (str): the timeout exception's message string
-    #   ``exception_type`` (str): the exception class name (``LMCacheTimeoutError``
-    #                             or a subclass)
-    #   ``stacktrace``     (str): formatted construction stack, surfaced as the
-    #                             OTel ``exception.stacktrace`` span attribute
+    # Published by LMCacheTimeoutError on construction (see errors.py).
+    # Metadata: message (str), exception_type (str), stacktrace (str, mapped
+    # to the OTel exception.stacktrace span attribute).
     TIMEOUT_RAISED = "timeout.raised"
 
     # Trace recording — unified function-call entry event used by the
