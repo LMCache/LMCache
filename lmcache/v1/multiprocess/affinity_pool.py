@@ -39,6 +39,10 @@ _SHUTDOWN = object()
 class AffinityThreadPool:
     """Thread pool that routes tasks to workers by affinity key.
 
+    Not thread-safe: ``submit()`` must be called from a single thread (the
+    ``MessageQueueServer`` main loop). The routing state is unsynchronized, so
+    dispatching submits from multiple threads would race on slot assignment.
+
     Args:
         max_workers: Number of worker threads.
         thread_name_prefix: Prefix for worker thread names.
@@ -52,15 +56,7 @@ class AffinityThreadPool:
         self._num_workers = max_workers
         self._queues: list[queue.Queue] = [queue.Queue() for _ in range(max_workers)]
         self._threads: list[threading.Thread] = []
-        # Dynamic ``affinity_key -> worker slot`` assignment. The first time a
-        # key is submitted it is bound to the next free slot (round-robin) and
-        # cached here so all later tasks for that key reuse the same worker
-        # thread. ``_next_slot`` is the monotonically increasing arrival
-        # counter; ``slot = _next_slot % _num_workers``. Guarded by
-        # ``_assign_lock`` because submit() may be called concurrently from
-        # multiple threads; ``_overflow_warned`` makes the overflow warning
-        # fire at most once.
-        self._assign_lock = threading.Lock()
+        # Maps an affinity_key -> the worker slot (thread index) bound to it.
         self._key_to_slot: dict[int, int] = {}
         self._next_slot = 0
         self._overflow_warned = False
@@ -117,54 +113,46 @@ class AffinityThreadPool:
         around and share a slot with an earlier key; the first such overflow is
         logged once at WARNING level.
 
+        Called only from the single ``submit()`` caller thread, so the routing
+        state is read and mutated without locking.
+
         Args:
             affinity_key: The routing key for the current submission.
 
         Returns:
             The worker slot (an index in ``[0, _num_workers)``) for the key.
         """
-        # Fast path: the binding already exists. Dict reads are atomic under the
-        # GIL, so the common already-assigned case stays lock-free; the GPU work
-        # this pool serializes dwarfs any contention here anyway.
         slot = self._key_to_slot.get(affinity_key)
         if slot is not None:
             return slot
 
-        # Slow path: first time we see this key -- assign a slot under the lock.
-        with self._assign_lock:
-            # Re-check: another thread may have assigned it while we waited.
-            slot = self._key_to_slot.get(affinity_key)
-            if slot is not None:
-                return slot
+        # First time we see this key -- bind it to the next free slot.
+        slot = self._next_slot % self._num_workers
+        is_overflow = self._next_slot >= self._num_workers
+        self._key_to_slot[affinity_key] = slot
+        self._next_slot += 1
 
-            slot = self._next_slot % self._num_workers
-            is_overflow = self._next_slot >= self._num_workers
-            self._key_to_slot[affinity_key] = slot
-            self._next_slot += 1
-
-            logger.info(
-                "AffinityThreadPool: affinity_key=%d assigned to worker "
-                "slot %d of %d (thread %s); %d distinct key(s) now bound",
+        logger.info(
+            "AffinityThreadPool: affinity_key=%d assigned to worker "
+            "slot %d of %d (thread %s); %d distinct key(s) now bound",
+            affinity_key,
+            slot,
+            self._num_workers,
+            self._threads[slot].name,
+            len(self._key_to_slot),
+        )
+        if is_overflow and not self._overflow_warned:
+            self._overflow_warned = True
+            logger.warning(
+                "AffinityThreadPool: affinity_key=%d wrapped onto worker slot "
+                "%d (only %d workers), so it shares a thread with an earlier "
+                "key and their tasks are serialized. Increase the worker count "
+                "to give each client its own thread.",
                 affinity_key,
                 slot,
                 self._num_workers,
-                self._threads[slot].name,
-                len(self._key_to_slot),
             )
-            if is_overflow and not self._overflow_warned:
-                self._overflow_warned = True
-                logger.warning(
-                    "AffinityThreadPool: more distinct affinity keys than "
-                    "workers (%d) -- key %d wrapped onto worker slot %d, which "
-                    "is already bound to an earlier key, so these clients share "
-                    "one thread and are serialized. Increase the worker count "
-                    "(e.g. --max-gpu-workers) to >= the number of distinct "
-                    "clients for one worker per client.",
-                    self._num_workers,
-                    affinity_key,
-                    slot,
-                )
-            return slot
+        return slot
 
     # ------------------------------------------------------------------
     # Public API
@@ -172,16 +160,6 @@ class AffinityThreadPool:
 
     def submit(self, fn, *args, affinity_key: int = 0, **kwargs) -> Future:
         """Submit *fn* for execution on the worker bound to *affinity_key*.
-
-        The first ``max_workers`` distinct keys each get their own worker
-        thread regardless of their numeric values; further distinct keys wrap
-        around and share a worker (logged once at WARNING level). Tasks sharing
-        a key -- and tasks whose keys share a slot -- execute sequentially in
-        FIFO order on that one thread.
-
-        The first time each key is routed, its ``key -> worker slot (thread)``
-        assignment is logged once at INFO level, so a run's log positively
-        shows which worker thread each client was bound to.
 
         Returns a :class:`concurrent.futures.Future`.
         """
