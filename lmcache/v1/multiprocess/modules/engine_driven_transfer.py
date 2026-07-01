@@ -16,7 +16,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
 )
-from lmcache.v1.mp_observability.dynamo.store_hook import publish_store_from_key
+from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     RegisterEngineDrivenContextPayload,
@@ -474,12 +474,19 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 num_tokens,
                 time.perf_counter() - st,
             )
-        # Bypass: publish a Dynamo BlockStored for the committed range.
+        # Bypass: publish an MP_KEYS_STORED for the committed range; the Dynamo
+        # store subscriber turns it into a BlockStored. Gated on the publisher
+        # so a disabled feature emits no event at all.
         if result and self._ctx.dynamo_kv_publisher is not None:
-            publish_store_from_key(
-                self._ctx.dynamo_kv_publisher,
-                key,
-                self._resolve_single_group_obj_keys(key),
+            self._ctx.event_bus.publish(
+                Event(
+                    event_type=EventType.MP_KEYS_STORED,
+                    session_id=key.request_id,
+                    metadata={
+                        "key": key,
+                        "object_keys": self._resolve_single_group_obj_keys(key),
+                    },
+                )
             )
         return result
 

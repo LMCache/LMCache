@@ -13,7 +13,8 @@ server management, ``ClientContext`` GPU tensors, ``REGISTER_KV_CACHE`` +
 single-key ``STORE``), shrunk to a minimal KV geometry so it stays lightweight.
 
 This test exercises real native/CUDA paths; it requires a GPU host with the
-native extension built. It deliberately adds no environment skips.
+native extension built. It skips collection when vLLM is unavailable (its event
+structs are needed to decode the wire), but adds no other environment skips.
 """
 
 # Standard
@@ -21,19 +22,31 @@ import os
 import time
 
 # Third Party
-from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVEventBatch
-import msgspec
-import torch
-import zmq
+import pytest
+
+pytest.importorskip("vllm.distributed.kv_events", reason="vllm required")
+
+# Third Party
+from vllm.distributed.kv_events import (  # noqa: E402
+    BlockRemoved,
+    BlockStored,
+    KVEventBatch,
+)
+import msgspec  # noqa: E402
+import torch  # noqa: E402
+import zmq  # noqa: E402
 
 # First Party
-from lmcache.utils import EngineType
-from lmcache.v1.multiprocess.mq import MessageQueueClient
-from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+from lmcache.utils import EngineType  # noqa: E402
+from lmcache.v1.multiprocess.mq import MessageQueueClient  # noqa: E402
+from lmcache.v1.multiprocess.protocol import (  # noqa: E402
+    RequestType,
+    get_response_class,
+)
 
 # Local
 # Local (shared harness)
-from .dynamo_e2e_harness import (  # noqa: F401  -- pytest fixture used by the test below
+from .dynamo_e2e_harness import (  # noqa: E402, F401  -- pytest fixture used below
     BLOCKS_PER_KEY,
     DEFAULT_TIMEOUT,
     KV_BLOCK_SIZE,

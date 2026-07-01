@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the two store-path trigger points of the Dynamo store hook.
+"""Tests for the two store-path trigger points of the Dynamo store event.
 
 Verifies that ``EngineDrivenTransferModule.commit_store`` and
-``LMCacheDrivenTransferModule.store`` invoke ``publish_store_from_key`` with the
-committed ``(key, object_keys)`` on their success branch when a publisher is
-installed, and skip it when none is.
+``LMCacheDrivenTransferModule.store`` publish an ``MP_KEYS_STORED`` event
+carrying the committed ``(key, object_keys)`` on their success branch when a
+publisher is installed, and publish no such event when none is.
 
 The heavy storage/GPU dependencies are mocked so the success branch is reached
 without real hardware; the modules themselves are imported normally.
@@ -14,12 +14,14 @@ without real hardware; the modules themselves are imported normally.
 # Standard
 from collections import namedtuple
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, Mock, patch
 
 # Third Party
 import pytest  # noqa: F401  (kept for parity / future fixtures)
 
 # First Party
+from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
 )
@@ -35,8 +37,18 @@ _LD_MOD = "lmcache.v1.multiprocess.modules.lmcache_driven_transfer"
 
 
 def _make_key() -> SimpleNamespace:
-    """A synthetic IPCCacheServerKey (only the fields the hook reads)."""
+    """A synthetic IPCCacheServerKey (only the fields the event carries)."""
     return SimpleNamespace(request_id="req-1", token_ids=(0, 1, 2, 3), start=0, end=4)
+
+
+def _stored_events(bus: MagicMock) -> list[Event]:
+    """Return every ``MP_KEYS_STORED`` Event published on ``bus``."""
+    return [
+        call.args[0]
+        for call in bus.publish.call_args_list
+        if call.args
+        and getattr(call.args[0], "event_type", None) == EventType.MP_KEYS_STORED
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -51,6 +63,7 @@ def _make_engine_module(publisher: object) -> EngineDrivenTransferModule:
     module._ctx = SimpleNamespace(  # type: ignore[assignment]
         session_manager=SimpleNamespace(get_or_create=lambda _rid: session),
         chunk_size=16,
+        event_bus=MagicMock(),
         dynamo_kv_publisher=publisher,
     )
     strategy = Mock()
@@ -61,7 +74,7 @@ def _make_engine_module(publisher: object) -> EngineDrivenTransferModule:
     return module
 
 
-def test_engine_driven_commit_store_triggers_hook() -> None:
+def test_engine_driven_commit_store_publishes_event() -> None:
     publisher = Mock()
     module = _make_engine_module(publisher)
     key = _make_key()
@@ -70,24 +83,28 @@ def test_engine_driven_commit_store_triggers_hook() -> None:
         return_value=object_keys
     )
 
-    with patch(f"{_ED_MOD}.publish_store_from_key") as hook:
-        result = module.commit_store(key, instance_id=1, cpu_data=b"")
+    result = module.commit_store(key, instance_id=1, cpu_data=b"")
 
     assert result is True
-    hook.assert_called_once_with(publisher, key, object_keys)
+    events = _stored_events(cast(MagicMock, module._ctx.event_bus))
+    assert len(events) == 1
+    event = events[0]
+    assert event.event_type == EventType.MP_KEYS_STORED
+    assert event.session_id == key.request_id
+    assert event.metadata["key"] is key
+    assert event.metadata["object_keys"] == object_keys
 
 
-def test_engine_driven_commit_store_no_publisher_skips_hook() -> None:
+def test_engine_driven_commit_store_no_publisher_skips_event() -> None:
     module = _make_engine_module(publisher=None)
     module._resolve_single_group_obj_keys = Mock(  # type: ignore[method-assign]
         return_value=[_ObjKey(b"c0")]
     )
 
-    with patch(f"{_ED_MOD}.publish_store_from_key") as hook:
-        result = module.commit_store(_make_key(), instance_id=1, cpu_data=b"")
+    result = module.commit_store(_make_key(), instance_id=1, cpu_data=b"")
 
     assert result is True
-    hook.assert_not_called()
+    assert _stored_events(cast(MagicMock, module._ctx.event_bus)) == []
 
 
 # --------------------------------------------------------------------------- #
@@ -129,7 +146,7 @@ def _make_lmcache_module(
 
 def _run_lmcache_store(
     module: LMCacheDrivenTransferModule,
-) -> tuple[object, tuple[bytes, bool], MagicMock]:
+) -> tuple[object, tuple[bytes, bool]]:
     """Call store() with all heavy collaborators patched out."""
     key = _make_key()
     with (
@@ -139,7 +156,6 @@ def _run_lmcache_store(
         patch(f"{_LD_MOD}.get_layout_desc", return_value=MagicMock()),
         patch(f"{_LD_MOD}.transfer_kv_per_object_group"),
         patch(f"{_LD_MOD}.submit_callback_to_stream"),
-        patch(f"{_LD_MOD}.publish_store_from_key") as hook,
     ):
         result = module.store(
             key,
@@ -147,20 +163,26 @@ def _run_lmcache_store(
             gpu_block_ids=[[0]],
             event_ipc_handle=b"",
         )
-    return key, result, hook
+    return key, result
 
 
-def test_lmcache_driven_store_triggers_hook() -> None:
+def test_lmcache_driven_store_publishes_event() -> None:
     module, obj_key = _make_lmcache_module(publisher=Mock())
-    key, result, hook = _run_lmcache_store(module)
+    key, result = _run_lmcache_store(module)
 
     assert result[1] is True
-    hook.assert_called_once_with(module._ctx.dynamo_kv_publisher, key, [obj_key])
+    events = _stored_events(cast(MagicMock, module._ctx.event_bus))
+    assert len(events) == 1
+    event = events[0]
+    assert event.event_type == EventType.MP_KEYS_STORED
+    assert event.session_id == key.request_id  # type: ignore[attr-defined]
+    assert event.metadata["key"] is key
+    assert event.metadata["object_keys"] == [obj_key]
 
 
-def test_lmcache_driven_store_no_publisher_skips_hook() -> None:
+def test_lmcache_driven_store_no_publisher_skips_event() -> None:
     module, _obj_key = _make_lmcache_module(publisher=None)
-    _key, result, hook = _run_lmcache_store(module)
+    _key, result = _run_lmcache_store(module)
 
     assert result[1] is True
-    hook.assert_not_called()
+    assert _stored_events(cast(MagicMock, module._ctx.event_bus)) == []

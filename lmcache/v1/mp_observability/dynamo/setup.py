@@ -37,14 +37,14 @@ def setup_dynamo_kv_publishing(
     When :attr:`ObservabilityConfig.enable_dynamo_kv_events` is off, this is a
     no-op returning ``None``. When on, it builds the emitter and publisher
     (reusing the context's real token hasher and chunk size), registers the
-    evict subscriber on ``bus``, attaches the publisher to ``ctx`` so the store
-    paths can reach it, and returns the publisher.
+    store and evict subscribers on ``bus``, attaches the publisher to ``ctx`` so
+    the store paths can reach it, and returns the publisher.
 
     Args:
         ctx: Server context. Supplies ``token_hasher`` and ``chunk_size``, and
             receives the built publisher via its ``dynamo_kv_publisher`` slot.
         obs_config: Observability configuration carrying the Dynamo settings.
-        bus: The EventBus to register the evict subscriber on. The subscriber
+        bus: The EventBus to register the store and evict subscribers on. They
             may be registered after ``bus.start()`` -- the drain loop reads its
             subscriber map fresh each cycle.
 
@@ -60,6 +60,9 @@ def setup_dynamo_kv_publishing(
         DynamoEvictSubscriber,
     )
     from lmcache.v1.mp_observability.dynamo.publisher import DynamoKvPublisher
+    from lmcache.v1.mp_observability.dynamo.store_subscriber import (
+        DynamoStoreSubscriber,
+    )
 
     emitter = DynamoKvEventEmitter(
         zmq_bind=obs_config.dynamo_zmq_bind,
@@ -72,6 +75,7 @@ def setup_dynamo_kv_publishing(
         obs_config.dynamo_kv_block_size,
         ctx.chunk_size,
     )
+    bus.register_subscriber(DynamoStoreSubscriber(publisher))
     bus.register_subscriber(DynamoEvictSubscriber(publisher))
     ctx.dynamo_kv_publisher = publisher
     logger.info(

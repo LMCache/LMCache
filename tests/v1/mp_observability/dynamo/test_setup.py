@@ -82,6 +82,7 @@ def test_disabled_returns_none_and_touches_nothing(bus: EventBus) -> None:
     assert result is None
     assert ctx.dynamo_kv_publisher is None
     assert not bus.has_subscribers(EventType.L1_KEYS_EVICTED)
+    assert not bus.has_subscribers(EventType.MP_KEYS_STORED)
 
 
 def test_enabled_builds_chain_and_evict_round_trips(bus: EventBus) -> None:
@@ -104,6 +105,7 @@ def test_enabled_builds_chain_and_evict_round_trips(bus: EventBus) -> None:
     assert publisher is not None
     assert ctx.dynamo_kv_publisher is publisher
     assert bus.has_subscribers(EventType.L1_KEYS_EVICTED)
+    assert bus.has_subscribers(EventType.MP_KEYS_STORED)
 
     # Connect a SUB peer to the publisher's bound PUB and settle slow-joiner
     # by recording+publishing a throwaway store until the SUB sees traffic.

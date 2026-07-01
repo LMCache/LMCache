@@ -20,6 +20,7 @@ minimal GPU KV geometry, ``REGISTER_KV_CACHE`` + single-key ``STORE``,
 """
 
 # Standard
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Generator, cast
 import itertools
@@ -141,7 +142,9 @@ def _query_score(query: dict[str, object], instance_id: int) -> int:
     return int(per_instance.get(str(DP_RANK), 0))
 
 
-def _poll_until(predicate, timeout_s: float = 5.0, interval_s: float = 0.2) -> bool:
+def _poll_until(
+    predicate: Callable[[], bool], timeout_s: float = 5.0, interval_s: float = 0.2
+) -> bool:
     """Poll ``predicate`` until it is truthy or ``timeout_s`` elapses."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
