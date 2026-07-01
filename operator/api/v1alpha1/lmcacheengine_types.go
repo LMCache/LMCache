@@ -61,6 +61,48 @@ type ImageSpec struct {
 	PullPolicy *string `json:"pullPolicy,omitempty"`
 }
 
+// LMCacheInjectionSpec defines the defaults the LMCache mutating webhook reads
+// when it stages an lmcache code payload into vLLM pods bound to this engine. It
+// mirrors the CacheBlend InjectionSpec's payload-staging fields but omits the
+// CacheBlend-only cudagraph knob: the standard LMCache path only stages an
+// lmcache package tree and otherwise wires the connection (--kv-transfer-config).
+//
+// Payload staging is optional and additive: when payloadImage is unset the
+// webhook wires only the connection (the historical behavior); when it is set
+// the webhook also copies the payload tree into the vLLM container and prepends
+// PYTHONPATH so vLLM imports that lmcache instead of the one baked into its
+// image — keeping the vLLM client and the engine server on one lmcache build.
+type LMCacheInjectionSpec struct {
+	// payloadImage is the init-container image (repository/tag/pullPolicy, like
+	// spec.image) that stages an unpacked lmcache package tree into a shared
+	// emptyDir, which the vLLM container then imports via PYTHONPATH.
+	//
+	// It is a SEPARATE, purpose-built image: it must ship the unpacked lmcache
+	// tree under /payload and copy it to $SHARED_DIR on start (a busybox
+	// `cp -a /payload/. $SHARED_DIR` ENTRYPOINT, no command override) — the same
+	// contract as the CacheBlend payload image. The repository default inherited
+	// from ImageSpec (lmcache/vllm-openai) is NOT a valid payload, so
+	// payloadImage.repository must be set explicitly; when payloadImage is unset
+	// the webhook stages nothing and only wires the connection. For private
+	// registries, imagePullSecrets must reference Secret(s) that exist in the
+	// vLLM pod's namespace.
+	// +optional
+	PayloadImage *ImageSpec `json:"payloadImage,omitempty"`
+
+	// imagePullSecrets are appended to the vLLM pod's spec.imagePullSecrets so a
+	// PRIVATE payload init-container image can pull. The referenced Secret(s)
+	// must already exist in the vLLM pod's namespace; the operator does not copy
+	// them cross-namespace.
+	// +optional
+	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
+
+	// targetContainer is the name of the vLLM container to inject into. Empty
+	// (the default) selects the first container; a per-pod annotation may
+	// override it.
+	// +optional
+	TargetContainer *string `json:"targetContainer,omitempty"`
+}
+
 // ServerSpec defines server configuration mapping to server.py argparse.
 type ServerSpec struct {
 	// port is the server listening port.
@@ -337,6 +379,12 @@ type LMCacheEngineSpec struct {
 	// the server does not register with any coordinator.
 	// +optional
 	Coordinator *CoordinatorConnectionSpec `json:"coordinator,omitempty"`
+
+	// injection defines the defaults the LMCache mutating webhook reads for pods
+	// bound to this engine. When unset, the webhook wires only the connection;
+	// set injection.payloadImage to also stage an lmcache code payload.
+	// +optional
+	Injection *LMCacheInjectionSpec `json:"injection,omitempty"`
 
 	// resourceOverrides allows overriding auto-computed resource requirements.
 	// +optional

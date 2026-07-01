@@ -11,6 +11,13 @@
 #     inline, so no volume mount is needed);
 #   - PYTHONHASHSEED=0 env (deterministic prefix hashing, set only if you didn't).
 #
+# If the LMCacheEngine sets spec.injection.payloadImage, the webhook ALSO stages
+# that lmcache build into this container: a `lmcache-payload` emptyDir + a payload
+# init container, a readOnly mount, and PYTHONPATH=/lmcache-payload so vLLM imports
+# the staged lmcache instead of the one baked into this image. Override the
+# payload pull secrets per-pod with the lmcache.ai/lmcache-image-pull-secrets
+# annotation. With no injection sub-spec, only the connection above is wired.
+#
 # PREREQUISITES (else injection silently no-ops or the pod is rejected):
 #   1. An LMCacheEngine named below exists IN THIS NAMESPACE and is reconciled
 #      (its `<name>-connection` ConfigMap exists — the webhook reads it).
@@ -23,7 +30,7 @@
 #      `vllm serve`); it stamps lmcache.ai/lmcache-skip-reason=command-override.
 #
 # Verify after creation (the webhook mutates the POD, not the Deployment):
-#   kubectl get pod -l app=vllm-lmcache -o yaml | grep -E "hostIPC|kv-transfer-config|lmcache-injected"
+#   kubectl get pod -l app=vllm-lmcache -o yaml | grep -E "hostIPC|kv-transfer-config|lmcache-injected|lmcache-payload|PYTHONPATH"
 # If nothing was injected, check lmcache.ai/lmcache-skip-reason on the pod
 # (command-override, kv-transfer-config-present, engine-not-found, or
 # target-container-not-found).
