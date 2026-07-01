@@ -472,7 +472,7 @@ def run_server_bench(
         # hash, so we self-check on the client: cold pass captures
         # ground truth, warm pass zero-fills + re-hashes after
         # RETRIEVE. Handle mode keeps the legacy server-side
-        # ``/kvcache/check`` path.
+        # ``/cache/checksums`` path.
         client_tensors = None if use_handle else client_kv_tensors
 
         for seq_no in seq_iter:

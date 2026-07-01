@@ -39,6 +39,9 @@ from lmcache.v1.mp_observability.subscribers.metrics.lookup import (
 from lmcache.v1.mp_observability.subscribers.metrics.sm_lifecycle import (
     SMLifecycleSubscriber,
 )
+from lmcache.v1.mp_observability.subscribers.metrics.timeout import (
+    TimeoutMetricsSubscriber,
+)
 
 __all__ = [
     "BlendMetricsSubscriber",
@@ -55,4 +58,5 @@ __all__ = [
     "L2ThroughputSubscriber",
     "LookupMetricsSubscriber",
     "SMLifecycleSubscriber",
+    "TimeoutMetricsSubscriber",
 ]

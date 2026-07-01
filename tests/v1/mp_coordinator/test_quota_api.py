@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the coordinator L2 REST API (quota, usage, status)."""
+"""Tests for the coordinator ``/quota`` REST API (quota writes, combined
+quota+usage status, and usage-event ingestion)."""
 
 # Third Party
 from fastapi.testclient import TestClient
-import httpx
 
 # First Party
 from lmcache.v1.mp_coordinator.app import create_app
@@ -50,7 +50,7 @@ def _events_body(events: list[dict], instance_id: str = "test-server") -> dict:
 
 def test_set_quota():
     with _client() as client:
-        resp = client.put("/l2/quota/user-a", json={"limit_gb": 2.5})
+        resp = client.put("/quota/user-a", json={"limit_gb": 2.5})
         assert resp.status_code == 200
         data = resp.json()
         assert data["cache_salt"] == "user-a"
@@ -60,47 +60,47 @@ def test_set_quota():
 
 def test_update_quota():
     with _client() as client:
-        client.put("/l2/quota/user-a", json={"limit_gb": 1.0})
-        client.put("/l2/quota/user-a", json={"limit_gb": 5.0})
-        data = client.get("/l2/status/user-a").json()
+        client.put("/quota/user-a", json={"limit_gb": 1.0})
+        client.put("/quota/user-a", json={"limit_gb": 5.0})
+        data = client.get("/quota/user-a").json()
         assert abs(data["quota_limit_gb"] - 5.0) < 1e-6
 
 
 def test_delete_quota():
     with _client() as client:
-        client.put("/l2/quota/user-a", json={"limit_gb": 1.0})
-        resp = client.delete("/l2/quota/user-a")
+        client.put("/quota/user-a", json={"limit_gb": 1.0})
+        resp = client.delete("/quota/user-a")
         assert resp.status_code == 200
         assert resp.json()["status"] == "removed"
 
-        data = client.get("/l2/status/user-a").json()
+        data = client.get("/quota/user-a").json()
         assert data["quota_exists"] is False
 
 
 def test_delete_nonexistent_quota():
     with _client() as client:
-        resp = client.delete("/l2/quota/unknown")
+        resp = client.delete("/quota/unknown")
         assert resp.status_code == 200
         assert resp.json()["status"] == "not_found"
 
 
 def test_negative_limit_rejected():
     with _client() as client:
-        resp = client.put("/l2/quota/user-a", json={"limit_gb": -1.0})
+        resp = client.put("/quota/user-a", json={"limit_gb": -1.0})
         assert resp.status_code == 422
 
 
 def test_missing_body_rejected():
     with _client() as client:
-        resp = client.put("/l2/quota/user-a")
+        resp = client.put("/quota/user-a")
         assert resp.status_code == 422
 
 
 def test_zero_limit_accepted():
     with _client() as client:
-        resp = client.put("/l2/quota/user-a", json={"limit_gb": 0.0})
+        resp = client.put("/quota/user-a", json={"limit_gb": 0.0})
         assert resp.status_code == 200
-        data = client.get("/l2/status/user-a").json()
+        data = client.get("/quota/user-a").json()
         assert data["quota_exists"] is True
         assert data["quota_limit_gb"] == 0.0
 
@@ -111,7 +111,7 @@ def test_zero_limit_accepted():
 def test_report_store_events():
     with _client() as client:
         resp = client.post(
-            "/l2/events",
+            "/quota/events",
             json=_events_body(
                 [
                     _store("user-a", 1000, h="01"),
@@ -123,17 +123,17 @@ def test_report_store_events():
         assert resp.status_code == 200
         assert resp.json()["recorded"] == 3
 
-        data = client.get("/l2/status/user-a").json()
+        data = client.get("/quota/user-a").json()
         assert abs(data["usage_gb"] - 1500 / 1024**3) < 1e-12
 
-        data = client.get("/l2/status/user-b").json()
+        data = client.get("/quota/user-b").json()
         assert abs(data["usage_gb"] - 2000 / 1024**3) < 1e-12
 
 
 def test_report_lookup_events_accepted():
     with _client() as client:
         resp = client.post(
-            "/l2/events",
+            "/quota/events",
             json=_events_body([_lookup("user-a")]),
         )
         assert resp.status_code == 200
@@ -143,7 +143,7 @@ def test_report_lookup_events_accepted():
 def test_empty_events_batch():
     with _client() as client:
         resp = client.post(
-            "/l2/events",
+            "/quota/events",
             json=_events_body([]),
         )
         assert resp.status_code == 200
@@ -153,7 +153,7 @@ def test_empty_events_batch():
 def test_invalid_event_type_rejected():
     with _client() as client:
         resp = client.post(
-            "/l2/events",
+            "/quota/events",
             json=_events_body([{"type": "purge", "key": _key("a"), "bytes": 100}]),
         )
         assert resp.status_code == 422
@@ -166,7 +166,7 @@ def test_delete_event_drops_key_from_tracking():
     with _client() as client:
         # Seed two keys for "user-a".
         client.post(
-            "/l2/events",
+            "/quota/events",
             json=_events_body(
                 [
                     _store("user-a", 1000, h="01"),
@@ -174,19 +174,19 @@ def test_delete_event_drops_key_from_tracking():
                 ]
             ),
         )
-        data = client.get("/l2/status/user-a").json()
+        data = client.get("/quota/user-a").json()
         assert abs(data["usage_gb"] - 1500 / 1024**3) < 1e-12
 
         # Delete one of them — usage shrinks by exactly that key's
         # recorded size (1000), not the wire ``bytes=0``.
         resp = client.post(
-            "/l2/events",
+            "/quota/events",
             json=_events_body([_delete("user-a", h="01")]),
         )
         assert resp.status_code == 200
         assert resp.json()["recorded"] == 1
 
-        data = client.get("/l2/status/user-a").json()
+        data = client.get("/quota/user-a").json()
         assert abs(data["usage_gb"] - 500 / 1024**3) < 1e-12
 
 
@@ -195,19 +195,19 @@ def test_delete_event_for_unknown_key_is_noop():
     accepted but has no observable effect (no usage to subtract from)."""
     with _client() as client:
         resp = client.post(
-            "/l2/events",
+            "/quota/events",
             json=_events_body([_delete("user-a", h="ff")]),
         )
         assert resp.status_code == 200
         assert resp.json()["recorded"] == 1
-        data = client.get("/l2/status/user-a").json()
+        data = client.get("/quota/user-a").json()
         assert data["usage_gb"] == 0.0
 
 
 def test_negative_bytes_rejected():
     with _client() as client:
         resp = client.post(
-            "/l2/events",
+            "/quota/events",
             json=_events_body([{"type": "store", "key": _key("a"), "bytes": -1}]),
         )
         assert resp.status_code == 422
@@ -218,12 +218,12 @@ def test_negative_bytes_rejected():
 
 def test_status_single_salt():
     with _client() as client:
-        client.put("/l2/quota/user-a", json={"limit_gb": 2.5})
+        client.put("/quota/user-a", json={"limit_gb": 2.5})
         client.post(
-            "/l2/events",
+            "/quota/events",
             json=_events_body([_store("user-a", 1000)]),
         )
-        data = client.get("/l2/status/user-a").json()
+        data = client.get("/quota/user-a").json()
         assert data["cache_salt"] == "user-a"
         assert abs(data["quota_limit_gb"] - 2.5) < 1e-6
         assert data["quota_exists"] is True
@@ -232,7 +232,7 @@ def test_status_single_salt():
 
 def test_status_unknown_salt():
     with _client() as client:
-        data = client.get("/l2/status/unknown").json()
+        data = client.get("/quota/unknown").json()
         assert data["usage_gb"] == 0.0
         assert data["quota_exists"] is False
         assert data["quota_limit_gb"] == 0.0
@@ -240,9 +240,9 @@ def test_status_unknown_salt():
 
 def test_status_list():
     with _client() as client:
-        client.put("/l2/quota/a", json={"limit_gb": 1.0})
+        client.put("/quota/a", json={"limit_gb": 1.0})
         client.post(
-            "/l2/events",
+            "/quota/events",
             json=_events_body(
                 [
                     _store("a", 100, h="01"),
@@ -250,7 +250,7 @@ def test_status_list():
                 ]
             ),
         )
-        data = client.get("/l2/status").json()
+        data = client.get("/quota").json()
         assert abs(data["total_gb"] - 300 / 1024**3) < 1e-12
         by_salt = {e["cache_salt"]: e for e in data["by_cache_salt"]}
         assert abs(by_salt["a"]["usage_gb"] - 100 / 1024**3) < 1e-12
@@ -261,7 +261,7 @@ def test_status_list():
 
 def test_status_list_empty():
     with _client() as client:
-        data = client.get("/l2/status").json()
+        data = client.get("/quota").json()
         assert data["total_gb"] == 0.0
         assert data["by_cache_salt"] == []
 
@@ -269,8 +269,8 @@ def test_status_list_empty():
 def test_status_list_includes_quota_only_salt():
     """A salt with a quota but no usage should appear in the list."""
     with _client() as client:
-        client.put("/l2/quota/q-only", json={"limit_gb": 5.0})
-        data = client.get("/l2/status").json()
+        client.put("/quota/q-only", json={"limit_gb": 5.0})
+        data = client.get("/quota").json()
         by_salt = {e["cache_salt"]: e for e in data["by_cache_salt"]}
         assert "q-only" in by_salt
         assert by_salt["q-only"]["quota_exists"] is True
@@ -280,86 +280,13 @@ def test_status_list_includes_quota_only_salt():
 def test_default_salt_sentinel():
     """``_default`` in path maps to the empty-string salt."""
     with _client() as client:
-        client.put("/l2/quota/_default", json={"limit_gb": 3.0})
+        client.put("/quota/_default", json={"limit_gb": 3.0})
         client.post(
-            "/l2/events",
+            "/quota/events",
             json=_events_body([_store("", 500)]),
         )
-        data = client.get("/l2/status/_default").json()
+        data = client.get("/quota/_default").json()
         assert data["cache_salt"] == ""
         assert data["quota_exists"] is True
         assert abs(data["quota_limit_gb"] - 3.0) < 1e-6
         assert abs(data["usage_gb"] - 500 / 1024**3) < 1e-12
-
-
-# -- Prefetch dispatch -------------------------------------------------------
-
-
-def _prefetch_body(instance_id: str, salt: str = "alice") -> dict:
-    return {
-        "instance_id": instance_id,
-        "model_name": "m",
-        "world_size": 1,
-        "token_ids": [1, 2, 3, 4],
-        "cache_salt": salt,
-    }
-
-
-def _mock_mp_server() -> httpx.AsyncClient:
-    """An outbound client that emulates the target MP server's prefetch API."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "POST" and request.url.path == "/l2/prefetch":
-            return httpx.Response(
-                202, json={"request_id": "abc", "chunks": 2, "status": "submitted"}
-            )
-        if request.method == "GET" and request.url.path == "/l2/prefetch/abc":
-            return httpx.Response(
-                200, json={"status": "completed", "found_keys": 2, "total_keys": 2}
-            )
-        return httpx.Response(404, json={"detail": "not found"})
-
-    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
-
-
-def test_prefetch_unknown_instance_returns_404():
-    """Targeting an unregistered instance must 404 (before any dispatch)."""
-    with _client() as client:
-        resp = client.post("/l2/prefetch", json=_prefetch_body("does-not-exist"))
-        assert resp.status_code == 404
-
-
-def test_prefetch_submit_then_status_proxy():
-    """A registered target: submit relays the server's request_id, and the
-    status GET proxies the server's completion body."""
-    with _client() as client:
-        client.post(
-            "/instances",
-            json={"instance_id": "mp-1", "ip": "127.0.0.1", "http_port": 8080},
-        )
-        # Replace the lifespan's real outbound client with a mock MP server.
-        client.app.state.outbound_client = _mock_mp_server()
-
-        resp = client.post("/l2/prefetch", json=_prefetch_body("mp-1"))
-        assert resp.status_code == 200, resp.text
-        assert resp.json() == {
-            "instance_id": "mp-1",
-            "request_id": "abc",
-            "chunks": 2,
-            "status": "submitted",
-        }
-
-        status = client.get("/l2/prefetch/mp-1/abc")
-        assert status.status_code == 200, status.text
-        assert status.json() == {
-            "status": "completed",
-            "found_keys": 2,
-            "total_keys": 2,
-        }
-
-
-def test_prefetch_status_unknown_instance_returns_404():
-    """Status for an unregistered instance must 404."""
-    with _client() as client:
-        resp = client.get("/l2/prefetch/does-not-exist/abc")
-        assert resp.status_code == 404

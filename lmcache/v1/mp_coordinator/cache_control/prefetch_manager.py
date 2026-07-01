@@ -2,10 +2,10 @@
 """Coordinator-side warm-prefetch dispatch.
 
 Forwards a client's warm-prefetch request to one named MP server and proxies
-its status. The MP server's ``POST /l2/prefetch`` submits the load and returns
+its status. The MP server's ``POST /cache/prefetches`` submits the load and returns
 a ``request_id`` immediately (the load runs in the server's storage-manager
 thread); the coordinator relays that id back to the client, which then polls
-``GET /l2/prefetch/{instance_id}/{request_id}`` on the coordinator until the
+``GET /cache/prefetches/{instance_id}/{request_id}`` on the coordinator until the
 server reports completion. There is no background polling on either side -- the
 submit and status calls are quick and the client drives completion on demand.
 """
@@ -26,7 +26,7 @@ from lmcache.v1.mp_coordinator.registry import MPInstance
 logger = init_logger(__name__)
 
 
-class L2PrefetchManager:
+class PrefetchManager:
     """Submit warm-prefetch requests to MP servers and proxy their status."""
 
     async def submit_prefetch(
@@ -38,7 +38,7 @@ class L2PrefetchManager:
         token_ids: list[int],
         cache_salt: str,
     ) -> dict[str, Any]:
-        """``POST /l2/prefetch`` to ``target`` and return its JSON reply.
+        """``POST /cache/prefetches`` to ``target`` and return its JSON reply.
 
         Args:
             target: The MP server to warm.
@@ -55,7 +55,7 @@ class L2PrefetchManager:
         Raises:
             httpx.HTTPError: If the target is unreachable or returns non-2xx.
         """
-        url = f"http://{target.ip}:{target.http_port}/l2/prefetch"
+        url = f"http://{target.ip}:{target.http_port}/cache/prefetches"
         body = {
             "model_name": model_name,
             "world_size": world_size,
@@ -75,7 +75,7 @@ class L2PrefetchManager:
         http_client: httpx.AsyncClient,
         request_id: str,
     ) -> tuple[int, dict[str, Any]]:
-        """Proxy ``GET /l2/prefetch/{request_id}`` on ``target``.
+        """Proxy ``GET /cache/prefetches/{request_id}`` on ``target``.
 
         Args:
             target: The MP server holding the job.
@@ -89,7 +89,7 @@ class L2PrefetchManager:
         Raises:
             httpx.HTTPError: If the target is unreachable (transport error).
         """
-        url = f"http://{target.ip}:{target.http_port}/l2/prefetch/{request_id}"
+        url = f"http://{target.ip}:{target.http_port}/cache/prefetches/{request_id}"
         resp = await http_client.get(url)
         try:
             body = resp.json()

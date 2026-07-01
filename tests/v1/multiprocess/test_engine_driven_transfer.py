@@ -1371,6 +1371,9 @@ class _CompletedFuture:
     def __init__(self, value):
         self._value = value
 
+    def wait(self, timeout=None):  # noqa: ARG002
+        return True
+
     def result(self, timeout=None):  # noqa: ARG002
         return self._value
 

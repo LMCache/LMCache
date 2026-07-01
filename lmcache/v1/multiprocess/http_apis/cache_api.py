@@ -1,19 +1,42 @@
 # SPDX-License-Identifier: Apache-2.0
+"""Cache-management HTTP endpoints on the MP server (node-local).
+
+A single ``/cache/*`` surface, thin over the typed services in
+``lmcache/v1/multiprocess/cache_control/`` (resolved via :func:`get_context`):
+
+- Objects   -- ``GET /cache/objects``, ``DELETE /cache/objects``
+  (:class:`ObjectService`). Adapter listing lives in the config group
+  (``GET /config/adapters``).
+- Prefetch  -- ``POST /cache/prefetches``, ``GET /cache/prefetches/{id}``
+  (:class:`PrefetchService`).
+- Diagnostics -- ``POST /cache/clear``, ``POST /cache/checksums`` (engine-local).
+
+The object / prefetch routes are pass-throughs: the services validate and raise
+domain errors, which the central handler in :mod:`error_handlers` maps to status
+codes -- so there is no per-route ``try/except``. The diagnostics routes reach
+engine internals directly (no service) and validate inline.
+"""
+
 # Standard
+from http import HTTPStatus
 from typing import Any, Optional
 import asyncio
 import hashlib
 
 # Third Party
-from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, HTTPException, Query, Request
 import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.utils import (
-    compress_slot_mapping,
-    parse_mixed_slot_mapping,
+from lmcache.utils import compress_slot_mapping
+from lmcache.v1.distributed.tiers import Tier
+from lmcache.v1.multiprocess.http_apis.dependencies import get_context
+from lmcache.v1.multiprocess.http_apis.schemas import (
+    ChecksumRequest,
+    ClearRequest,
+    DeleteObjectsRequest,
+    PrefetchRequest,
 )
 import lmcache.c_ops as lmc_ops
 
@@ -21,17 +44,104 @@ logger = init_logger(__name__)
 
 router = APIRouter()
 
+_MAX_PAGE_SIZE = 5000
+_DEFAULT_PAGE_SIZE = 500
+_CLEAR_TIER = Tier.L1
+
+
+# ---------------------------------------------------------------------------
+# Objects -- pass-throughs to ObjectService
+# ---------------------------------------------------------------------------
+
+
+@router.get("/cache/objects", response_model=None)
+async def list_cache_objects(
+    request: Request,
+    tier: Tier = Tier.L2,
+    adapter: str | None = Query(default=None),
+    model_name: str | None = Query(default=None),
+    page_size: int = Query(default=_DEFAULT_PAGE_SIZE, ge=1, le=_MAX_PAGE_SIZE),
+    page_token: str | None = Query(default=None),
+) -> dict[str, object]:
+    """List cache objects resident in one tier/adapter, paginated.
+
+    Responses:
+        200: ``{"adapter", "entries", "next_page_token"}``.
+        400: ``tier`` unsupported or malformed ``page_token``. 404: adapter
+            matches none.
+        503: server not initialized, no adapters configured, or the adapter does
+            not support listing.
+    """
+    return await get_context(request).object_service.list_objects(
+        tier, adapter, model_name, page_size, page_token
+    )
+
+
+@router.delete("/cache/objects", response_model=None)
+async def delete_cache_objects(
+    body: DeleteObjectsRequest, request: Request
+) -> dict[str, object]:
+    """Delete a caller-supplied list of object keys from one tier/adapter.
+
+    Responses:
+        200: ``{"requested", "adapter", "ok"[, "error"]}``.
+        400: batch too large, ``ObjectKey`` invariant violation, or unsupported
+            tier. 404: adapter matches none. 422: body validation.
+        503: server not initialized, or no adapters configured.
+    """
+    return await get_context(request).object_service.delete_objects(
+        body.tier, body.adapter, body.keys
+    )
+
+
+# ---------------------------------------------------------------------------
+# Prefetch -- pass-throughs to PrefetchService
+# ---------------------------------------------------------------------------
+
+
+@router.post("/cache/prefetches", response_model=None, status_code=202)
+async def submit_prefetch(body: PrefetchRequest, request: Request) -> dict[str, object]:
+    """Submit a warm prefetch of a token sequence from L2 into L1.
+
+    Responses:
+        202: ``{"request_id", "chunks", "status": "submitted"}``, or
+            ``{"chunks": 0, "status": "noop"}`` for a sub-chunk sequence.
+        400: token cap exceeded, invalid ``cache_salt``, or unsupported tiers.
+        422: body validation.
+        503: not initialized, or no layout registered for the model.
+    """
+    return get_context(request).prefetch_service.submit(
+        body.model_name,
+        body.world_size,
+        body.token_ids,
+        body.cache_salt,
+        body.source_tier,
+        body.target_tier,
+    )
+
+
+@router.get("/cache/prefetches/{request_id}", response_model=None)
+async def get_prefetch(request_id: str, request: Request) -> dict[str, object]:
+    """Poll a submitted warm prefetch.
+
+    Responses:
+        200: ``{"request_id", "status": "pending"}`` or ``{"request_id",
+            "status": "completed", "found_keys", "total_keys"}``.
+        404: unknown id. 503: server not initialized.
+    """
+    return get_context(request).prefetch_service.status(request_id)
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics (clear, checksums) -- engine-local; validated inline
+# ---------------------------------------------------------------------------
 
 # Per-format axis of the ``num_blocks`` dimension inside a per-layer KV tensor.
-# The MP /kvcache/check endpoint gathers KV data by block IDs along this
-# axis, which preserves the block_size dimension verbatim so chunking is a
-# clean slice on a known axis.
-#
-# Formats that fuse num_blocks and block_size into a single page-buffer
-# dimension (TWO_X_NL_X_NBBS_NH_HS, NL_X_NBBS_ONE_HS) and the cross-layer
-# NB_NL_TWO_BS_NH_HS layout are intentionally not listed: the block-level
-# semantics don't map cleanly onto a single layer tensor, and the diagnostic
-# API declines them with HTTP 501 until a real need appears.
+# The checksum endpoint gathers KV data by block IDs along this axis, which
+# preserves the block_size dimension verbatim so chunking is a clean slice on a
+# known axis. Formats that fuse num_blocks and block_size into a single
+# page-buffer dimension are intentionally not listed: the block-level semantics
+# don't map cleanly, and the endpoint declines them with 501.
 _BLOCK_AXIS_BY_FORMAT: dict[Any, int] = {
     lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS: 1,  # [2, NB, BS, NH, HS]
     lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS: 0,  # [NB, 2, BS, NH, HS]
@@ -41,140 +151,38 @@ _BLOCK_AXIS_BY_FORMAT: dict[Any, int] = {
 }
 
 
-@router.post("/clear-cache")
-async def clear_cache(request: Request) -> Any:
-    """Force-clear all KV cache data stored in L1 (CPU) memory.
+@router.post("/cache/clear", response_model=None)
+async def clear_cache(
+    request: Request, body: ClearRequest | None = None
+) -> dict[str, object]:
+    """Force-clear a tier's resident cache.
 
-    This clears all objects including those with active read/write locks.
-    In-flight store or prefetch operations may be corrupted.
+    Clears all objects in the tier, including those with active read/write
+    locks; in-flight store/prefetch operations may be corrupted.
+
+    The body is optional: an absent (or empty) body defaults to
+    ``{"tier": "l1", "force": true}``.
+
+    Responses:
+        200: ``{"status": "ok", "cleared": {"tier": "l1"}}``.
+        400: unsupported tier. 503: server not initialized.
     """
-    engine = getattr(request.app.state, "engine", None)
-    if engine is None:
-        return JSONResponse(
-            status_code=503,
-            content={"status": "error", "reason": "engine not initialized"},
+    if body is None:
+        body = ClearRequest()
+    if body.tier != _CLEAR_TIER:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail=(
+                f"tier {body.tier.value!r} not supported; only {_CLEAR_TIER.value!r}"
+            ),
         )
-
-    engine.clear()
+    # TODO(cache-control): ``body.force`` is accepted for API forward-compat but
+    # not honored -- the engine's CLEAR path always force-clears. Wiring it
+    # through would require extending the ZMQ ``RequestType.CLEAR`` payload
+    # (which currently carries no fields) so the cross-process op can pass force.
+    get_context(request).engine.clear()
     logger.info("Cache cleared via HTTP API")
-    return {"status": "ok"}
-
-
-@router.get("/kvcache/check")
-async def kvcache_check(
-    request: Request,
-    block_ids: Optional[str] = None,
-    chunk_size: Optional[int] = None,
-    instance_id: int = 0,
-    layerwise: bool = False,
-) -> JSONResponse:
-    """Compute MD5 checksums for KV cache blocks, grouped ``chunk_size``
-    blocks at a time.
-
-    MP mode addresses KV storage by block IDs natively (same as
-    ``STORE``/``RETRIEVE``), so this endpoint is fully block-centric:
-    ``block_ids`` enumerates the target blocks and ``chunk_size`` counts
-    blocks per hashed chunk. Intended for diagnostics / round-trip
-    integrity checks from ``lmcache bench server``.
-
-    Args:
-        request: FastAPI request.
-        block_ids: GPU block IDs in mixed format (e.g. ``"0,[2,5],8"``).
-        chunk_size: Positive integer — number of blocks per hashed chunk.
-        instance_id: GPU context ID on the engine (default 0).
-        layerwise: If True, return per-layer checksums keyed by
-            ``"layer_<idx>"``; otherwise a single aggregated digest per
-            chunk (all layers combined).
-
-    Returns:
-        JSON body on success::
-
-            {
-                "status": "success",
-                "chunk_size": <int>,          # blocks per chunk
-                "num_chunks": <int>,
-                "chunk_checksums": <list[str] | dict[str, list[str]]>,
-                "layerwise": <bool>,
-                "block_id_ranges": "<compressed block id ranges>",
-            }
-
-        ``chunk_checksums`` is ``list[str]`` when ``layerwise=False`` and
-        ``dict[str, list[str]]`` when ``layerwise=True``.
-
-    HTTP status codes:
-        200: success.
-        400: ``block_ids`` missing/malformed, or ``chunk_size``
-            missing/non-positive.
-        404: ``instance_id`` not registered, or KV tensors empty.
-        501: engine has no ``cache_contexts``, or the KV format is
-            not supported by this endpoint.
-        503: engine not yet initialised on ``app.state``.
-    """
-    engine = getattr(request.app.state, "engine", None)
-    if engine is None:
-        return JSONResponse(
-            status_code=503,
-            content={"error": "engine not initialized"},
-        )
-
-    cache_ctxs = getattr(engine, "cache_contexts", None)
-    if cache_ctxs is None:
-        return JSONResponse(
-            status_code=501,
-            content={"error": "checksum not supported for this engine type"},
-        )
-
-    ctx = cache_ctxs.get(instance_id)
-    if ctx is None:
-        return JSONResponse(
-            status_code=404,
-            content={"error": "instance_id %d not registered" % instance_id},
-        )
-
-    if not block_ids:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "block_ids is required"},
-        )
-
-    parsed_blocks, block_err = parse_mixed_slot_mapping(block_ids)
-    if block_err or parsed_blocks is None:
-        if block_err:
-            logger.warning("Invalid block_ids from client: %s", block_err)
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Invalid block_ids format"},
-        )
-
-    if chunk_size is None or chunk_size <= 0:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "chunk_size must be positive"},
-        )
-
-    kv_tensors = ctx.kv_tensors
-    if not kv_tensors:
-        return JSONResponse(
-            status_code=404,
-            content={"error": "kv_caches empty"},
-        )
-
-    # Per-layer block axis, so mixed-format models gather per layer.
-    block_axes, axis_err = _resolve_per_layer_block_axes(
-        ctx.engine_kv_format_per_layer()
-    )
-    if block_axes is None:
-        return JSONResponse(status_code=501, content={"error": axis_err})
-
-    loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(
-        None,
-        lambda: _compute_block_checksums(
-            kv_tensors, parsed_blocks, block_axes, chunk_size, layerwise
-        ),
-    )
-    result["block_id_ranges"] = compress_slot_mapping(parsed_blocks)
-    return JSONResponse(content=result)
+    return {"status": "ok", "cleared": {"tier": _CLEAR_TIER.value}}
 
 
 def _resolve_per_layer_block_axes(
@@ -222,32 +230,23 @@ def _compute_block_checksums(
     chunk_size: int,
     layerwise: bool,
 ) -> dict[str, Any]:
-    """Compute MD5 checksums over KV cache blocks, grouped ``chunk_size``
-    blocks per chunk.
+    """Compute MD5 checksums over KV cache blocks, grouped ``chunk_size`` blocks
+    per chunk.
 
-    The gather is performed in block space on each layer's own block axis
-    (``block_axes[layer]``) via :func:`torch.index_select`, so mixed-format
-    models gather each layer correctly. Per-format axes come from
-    :data:`_BLOCK_AXIS_BY_FORMAT`, so adding a new KV format is a single dict
-    entry.
-
-    Each layer's gathered tensor is moved to CPU once, then chunk-level
+    The gather is performed in block space on each layer's own block axis via
+    :func:`torch.index_select`, so mixed-format models gather each layer
+    correctly. Each layer's gathered tensor is moved to CPU once, then chunk
     checksums slice it along its block axis in steps of ``chunk_size`` blocks.
-    ``bfloat16`` is upcast to ``float32`` only if present, since
-    :meth:`torch.Tensor.numpy` does not support it.
+    ``bfloat16`` is upcast to ``float32`` only if present.
     """
     num_blocks = len(block_ids)
     num_chunks = (num_blocks + chunk_size - 1) // chunk_size
 
-    # Build the block index tensor on CPU once, memoise per KV device to
-    # avoid an implicit H2D copy (and mixed-device indexing) per layer.
     block_idx_cpu = torch.tensor(block_ids, dtype=torch.long)
     block_idx_by_device: dict[torch.device, torch.Tensor] = {
         block_idx_cpu.device: block_idx_cpu,
     }
 
-    # Pre-gather each layer's blocks to CPU (one H2D→D2H transfer per
-    # layer), then all chunking is CPU-only below.
     layer_blocks: list[torch.Tensor] = []
     for li, kv in enumerate(kv_tensors):
         idx = block_idx_by_device.get(kv.device)
@@ -297,3 +296,56 @@ def _compute_block_checksums(
         "chunk_checksums": aggregated,
         "layerwise": False,
     }
+
+
+@router.post("/cache/checksums", response_model=None)
+async def cache_checksums(body: ChecksumRequest, request: Request) -> dict[str, Any]:
+    """Compute MD5 checksums over KV cache blocks, ``chunk_size`` blocks/chunk.
+
+    Responses:
+        200: ``{"status": "success", "chunk_size", "num_chunks",
+            "chunk_checksums", "layerwise", "block_id_ranges"}``.
+        400: no ``block_ids`` or non-positive ``chunk_size``.
+        404: unknown ``instance_id`` or empty KV. 501: unsupported engine/format.
+        503: server not initialized.
+    """
+    engine = get_context(request).engine
+    cache_ctxs = getattr(engine, "cache_contexts", None)
+    if cache_ctxs is None:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_IMPLEMENTED,
+            detail="checksum not supported for this engine type",
+        )
+    ctx = cache_ctxs.get(body.instance_id)
+    if ctx is None:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail="instance_id %d not registered" % body.instance_id,
+        )
+    if not body.block_ids:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST, detail="block_ids is required"
+        )
+    if body.chunk_size <= 0:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST, detail="chunk_size must be positive"
+        )
+    kv_tensors = ctx.kv_tensors
+    if not kv_tensors:
+        raise HTTPException(status_code=HTTPStatus.NOT_FOUND, detail="kv_caches empty")
+
+    block_axes, axis_err = _resolve_per_layer_block_axes(
+        ctx.engine_kv_format_per_layer()
+    )
+    if block_axes is None:
+        raise HTTPException(status_code=HTTPStatus.NOT_IMPLEMENTED, detail=axis_err)
+
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None,
+        lambda: _compute_block_checksums(
+            kv_tensors, body.block_ids, block_axes, body.chunk_size, body.layerwise
+        ),
+    )
+    result["block_id_ranges"] = compress_slot_mapping(body.block_ids)
+    return result
