@@ -1552,9 +1552,23 @@ class BlendV3Module(InstanceLivenessTarget):
             check_interprocess_event_support()
             event = torch_dev.Event(interprocess=True)
 
-            # One staged block-id tensor per engine (kernel) group, indexed by
-            # group. A single shared mapping corrupts all but group 0 under HMA
+            # One staged block-id tensor per engine group, indexed by group.
             block_ids_per_group_gpu = gpu_context.stage_block_ids(gpu_block_ids)
+
+            # Resolve each kernel group's block table + block size once. Select
+            # by engine_group_idx (kernel groups may share one, e.g. MiniMax-M3).
+            kgm = gpu_context.kv_layer_groups_manager
+            resolved_groups: list[tuple[torch.Tensor, int]] = []
+            for group_idx in range(num_groups):
+                eg_idx = kgm.kernel_groups[group_idx].engine_group_idx
+                if eg_idx >= len(block_ids_per_group_gpu):
+                    eg_idx = 0
+                resolved_groups.append(
+                    (
+                        block_ids_per_group_gpu[eg_idx],
+                        kgm.kernel_groups[group_idx].tokens_per_block,
+                    )
+                )
 
             self._event_bus.publish_on_stream(
                 gpu_context.cupy_stream,
@@ -1589,8 +1603,11 @@ class BlendV3Module(InstanceLivenessTarget):
                     # Per-token scatter handles any cur_st; just bound the
                     # matched range to the allocated slots.
                     pairs: list[tuple[CBMatchResult, Any]] = []
-                    num_slots = (
-                        int(block_ids_per_group_gpu[0].numel()) * tokens_per_block
+                    # Bound by the smallest group: under HMA the sliding group
+                    # has fewer blocks than the full group, so [0] isn't safe.
+                    num_slots = min(
+                        int(block_ids.numel()) * group_bs
+                        for block_ids, group_bs in resolved_groups
                     )
                     for r, memory_obj in zip(cb_match_result, memory_objs, strict=True):
                         if r.cur_ed > num_slots:
@@ -1675,26 +1692,8 @@ class BlendV3Module(InstanceLivenessTarget):
                                 ]
                             )
                             for group_idx in range(num_groups):
-                                # Index the per-engine-group block table by the
-                                # kernel group's engine_group_idx: kernel groups can
-                                # share one engine group (e.g. MiniMax-M3), so the
-                                # kernel index would target the wrong group.
-                                eg_idx = (
-                                    gpu_context.kv_layer_groups_manager.kernel_groups[
-                                        group_idx
-                                    ].engine_group_idx
-                                )
-                                if eg_idx >= len(block_ids_per_group_gpu):
-                                    eg_idx = 0
-                                group_block_ids = block_ids_per_group_gpu[eg_idx]
-                                # Per-group block size: groups can differ in
-                                # tokens_per_block, so slot_mapping / page_buffer_size
-                                # / the transfer block_size all use this group's value.
-                                group_bs = (
-                                    gpu_context.kv_layer_groups_manager.kernel_groups[
-                                        group_idx
-                                    ].tokens_per_block
-                                )
+                                # This group's block table + size (resolved above).
+                                group_block_ids, group_bs = resolved_groups[group_idx]
                                 page_buffer_size = gpu_context.num_blocks * group_bs
                                 slot_mapping = group_block_ids[
                                     pos // group_bs
