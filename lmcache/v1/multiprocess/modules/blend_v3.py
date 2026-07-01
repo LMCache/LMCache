@@ -1679,9 +1679,11 @@ class BlendV3Module(InstanceLivenessTarget):
                                 # kernel group's engine_group_idx: kernel groups can
                                 # share one engine group (e.g. MiniMax-M3), so the
                                 # kernel index would target the wrong group.
-                                eg_idx = gpu_context.kv_layer_groups_manager.kernel_groups[
-                                    group_idx
-                                ].engine_group_idx
+                                eg_idx = (
+                                    gpu_context.kv_layer_groups_manager.kernel_groups[
+                                        group_idx
+                                    ].engine_group_idx
+                                )
                                 if eg_idx >= len(block_ids_per_group_gpu):
                                     eg_idx = 0
                                 group_block_ids = block_ids_per_group_gpu[eg_idx]
@@ -1694,10 +1696,9 @@ class BlendV3Module(InstanceLivenessTarget):
                                     ].tokens_per_block
                                 )
                                 page_buffer_size = gpu_context.num_blocks * group_bs
-                                slot_mapping = (
-                                    group_block_ids[pos // group_bs] * group_bs
-                                    + (pos % group_bs)
-                                )
+                                slot_mapping = group_block_ids[
+                                    pos // group_bs
+                                ] * group_bs + (pos % group_bs)
                                 tmp_buffers = [
                                     gpu_context.get_temp_kernel_group_buffer(
                                         slot_idx, group_idx

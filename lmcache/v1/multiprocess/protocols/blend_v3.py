@@ -39,7 +39,6 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Retrieve pre-computed chunks into the request's paged blocks.
         # Payload: (key, cb_match_result, gpu_block_ids, instance_id,
         #           event_ipc_handle).
-
         # gpu_block_ids is per engine group (list[list[int]]).
         "CB_RETRIEVE_PRE_COMPUTED_V3": ProtocolDefinition(
             payload_classes=[
