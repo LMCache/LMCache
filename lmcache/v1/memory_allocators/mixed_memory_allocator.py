@@ -34,7 +34,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
     def __init__(
         self, size: int, use_paging: bool = False, use_hugepages: bool = False, **kwargs
-    ):
+    ) -> None:
         """
         :param int size: The size of the pinned memory in bytes.
         :param bool use_hugepages: Whether to use hugepages.
@@ -95,6 +95,20 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         allocator_type: Optional[str] = None,
     ) -> Optional[MemoryObj]:
+        """Allocate one object from the mixed pinned/buffer allocator.
+
+        Args:
+            shapes: Logical tensor shape or shapes to allocate.
+            dtypes: Logical tensor dtype or dtypes to allocate.
+            fmt: Memory format to allocate.
+            allocator_type: Optional allocator type string.
+
+        Returns:
+            A memory object, or ``None`` if the selected allocator is full.
+
+        Raises:
+            ValueError: If ``fmt`` is unsupported.
+        """
         if fmt == MemoryFormat.BINARY_BUFFER:
             return self.buffer_allocator.allocate(shapes, dtypes, fmt)
         elif fmt in [
@@ -122,6 +136,21 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         allocator_type: Optional[str] = None,
     ) -> Optional[List[MemoryObj]]:
+        """Allocate multiple objects from the mixed pinned/buffer allocator.
+
+        Args:
+            shapes: Logical tensor shape or shapes for each allocation.
+            dtypes: Logical tensor dtype or dtypes for each allocation.
+            batch_size: Number of memory objects to allocate.
+            fmt: Memory format to allocate.
+            allocator_type: Optional allocator type string.
+
+        Returns:
+            Memory objects, or ``None`` if the selected allocator is full.
+
+        Raises:
+            ValueError: If ``fmt`` is unsupported.
+        """
         if fmt == MemoryFormat.BINARY_BUFFER:
             return self.buffer_allocator.batched_allocate(
                 shapes, dtypes, batch_size, fmt
@@ -147,7 +176,16 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             raise ValueError(f"Unsupported memory format: {fmt}")
 
     @_lmcache_nvtx_annotate
-    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
+    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None) -> None:
+        """Free one mixed-format memory object.
+
+        Args:
+            memory_obj: Memory object to release.
+            allocator_type: Optional allocator type string.
+
+        Raises:
+            ValueError: If the object's memory format is unsupported.
+        """
         fmt = memory_obj.meta.fmt
         if fmt == MemoryFormat.BINARY_BUFFER:
             self.buffer_allocator.free(memory_obj)
@@ -170,7 +208,17 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         memory_objs: List[MemoryObj],
         allocator_type: Optional[str] = None,
         update_stats: bool = True,
-    ):
+    ) -> None:
+        """Free multiple mixed-format memory objects.
+
+        Args:
+            memory_objs: Memory objects to release.
+            allocator_type: Optional allocator type string.
+            update_stats: Whether to update allocator statistics.
+
+        Raises:
+            ValueError: If the objects' memory format is unsupported.
+        """
         if not memory_objs:
             return
 
@@ -191,11 +239,13 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
-    def memcheck(self):
+    def memcheck(self) -> bool:
+        """Return whether allocator state is consistent."""
         with self.host_mem_lock:
             return self.pin_allocator.memcheck()
 
-    def close(self):
+    def close(self) -> None:
+        """Release the owned pinned CPU arena."""
         if not self._unregistered:
             if torch_dev.is_available():
                 torch_dev.synchronize()
@@ -222,5 +272,5 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             return self.pin_allocator.get_paged_buffers()
         return None
 
-    def __str__(self):
+    def __str__(self) -> str:
         return "MixedMemoryAllocator"

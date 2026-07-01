@@ -6,7 +6,7 @@ from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
 
 
 class HipFileMemoryAllocator(GPUMemoryAllocator):
-    def __init__(self, size: int, device=None):
+    def __init__(self, size: int, device=None) -> None:
         # HACK: hipfile import is placed here to avoid import errors on
         # hardware without GPUDirect Storage / hipFile support.
         # Third Party
@@ -24,11 +24,11 @@ class HipFileMemoryAllocator(GPUMemoryAllocator):
         self.hipfile_buffer = Buffer(self.base_pointer, size, flags=0)
         self.hipfile_buffer.register()
 
-    def __del__(self):
+    def __del__(self) -> None:
         try:
             self.hipfile_buffer.deregister()
         except Exception:
             pass
 
-    def __str__(self):
+    def __str__(self) -> str:
         return "HipFileMemoryAllocator"

@@ -39,7 +39,16 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
         dtypes: list[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         device: str = torch_device_type,
-    ):
+    ) -> None:
+        """Initialize the GPU paged allocator.
+
+        Args:
+            size: GPU arena size in bytes.
+            shapes: Logical tensor shapes served by each page.
+            dtypes: Logical tensor dtypes served by each page.
+            fmt: Memory format served by each page.
+            device: Torch device string for the GPU arena.
+        """
         self.gpu_buffer = torch.empty(
             size,
             dtype=torch.uint8,
@@ -60,6 +69,15 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         numa_mapping: Optional[NUMAMapping] = None,
     ) -> None:
+        """Initialize the CPU paged allocator.
+
+        Args:
+            size: CPU arena size in bytes.
+            shapes: Logical tensor shapes served by each page.
+            dtypes: Logical tensor dtypes served by each page.
+            fmt: Memory format served by each page.
+            numa_mapping: Optional NUMA placement for pinned CPU allocation.
+        """
         self.cpu_buffer = memory_management._allocate_cpu_memory(size, numa_mapping)
         self.cpu_size = size
         self.cpu_numa_mapping = numa_mapping
@@ -78,6 +96,20 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.UNDEFINED,
         allocator_type: Optional[str] = "cpu",
     ) -> Optional[MemoryObj]:
+        """Allocate from the selected CPU or GPU paged allocator.
+
+        Args:
+            shapes: Logical tensor shape or shapes to allocate.
+            dtypes: Logical tensor dtype or dtypes to allocate.
+            fmt: Memory format stored in the returned metadata.
+            allocator_type: ``"cpu"`` or ``"gpu"``.
+
+        Returns:
+            A memory object, or ``None`` when the selected allocator is full.
+
+        Raises:
+            ValueError: If ``allocator_type`` is unsupported.
+        """
         if allocator_type == "gpu":
             return self.gpu_allocator.allocate(shapes, dtypes, fmt)
         elif allocator_type == "cpu":
@@ -93,6 +125,21 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.UNDEFINED,
         allocator_type: Optional[str] = "gpu",
     ) -> Optional[List[MemoryObj]]:
+        """Allocate a batch from the selected CPU or GPU paged allocator.
+
+        Args:
+            shapes: Logical tensor shape or shapes for each allocation.
+            dtypes: Logical tensor dtype or dtypes for each allocation.
+            batch_size: Number of memory objects to allocate.
+            fmt: Memory format stored in each returned object's metadata.
+            allocator_type: ``"cpu"`` or ``"gpu"``.
+
+        Returns:
+            Memory objects, or ``None`` when the selected allocator is full.
+
+        Raises:
+            ValueError: If ``allocator_type`` is unsupported.
+        """
         if allocator_type == "gpu":
             return self.gpu_allocator.batched_allocate(shapes, dtypes, batch_size, fmt)
         elif allocator_type == "cpu":
@@ -100,7 +147,18 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
         else:
             raise ValueError(f"Unsupported allocator type: {allocator_type}")
 
-    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = "cpu"):
+    def free(
+        self, memory_obj: MemoryObj, allocator_type: Optional[str] = "cpu"
+    ) -> None:
+        """Free one CPU or GPU paged memory object.
+
+        Args:
+            memory_obj: Memory object to release.
+            allocator_type: ``"cpu"`` or ``"gpu"``.
+
+        Raises:
+            ValueError: If ``allocator_type`` is unsupported.
+        """
         if allocator_type == "gpu":
             self.gpu_allocator.free(memory_obj)
         elif allocator_type == "cpu":
@@ -113,7 +171,17 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
         memory_objs: List[MemoryObj],
         allocator_type: Optional[str] = None,
         update_stats: bool = True,
-    ):
+    ) -> None:
+        """Free multiple CPU or GPU paged memory objects.
+
+        Args:
+            memory_objs: Memory objects to release.
+            allocator_type: ``"cpu"`` or ``"gpu"``.
+            update_stats: Whether to update allocator statistics.
+
+        Raises:
+            ValueError: If ``allocator_type`` is unsupported.
+        """
         if allocator_type == "gpu":
             self.gpu_allocator.batched_free(memory_objs, update_stats=update_stats)
         elif allocator_type == "cpu":
@@ -122,6 +190,7 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
             raise ValueError(f"Unsupported allocator type: {allocator_type}")
 
     def close(self) -> None:
+        """Release the owned pinned CPU arena, if initialized."""
         if self.cpu_buffer is not None and self.cpu_buffer.numel() > 0:
             memory_management._free_cpu_memory(
                 self.cpu_buffer,
@@ -132,5 +201,5 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
             self.cpu_size = 0
             self.cpu_numa_mapping = None
 
-    def __str__(self):
+    def __str__(self) -> str:
         return "PDMemoryAllocator"

@@ -27,7 +27,7 @@ class PagedAddressManager:
     paged allocator's state.
     """
 
-    def __init__(self, paged_allocator: "PagedTensorMemoryAllocator"):
+    def __init__(self, paged_allocator: "PagedTensorMemoryAllocator") -> None:
         self._allocator = paged_allocator
 
     def get_heap_size(self) -> int:
@@ -50,7 +50,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         shapes: list[torch.Size],
         dtypes: list[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-    ):
+    ) -> None:
         self.buffer = tensor.view(torch.uint8).flatten()
         self.buffer_size = self.buffer.numel() * self.buffer.element_size()
         self.buffer_ptr = self.buffer.data_ptr()
@@ -121,6 +121,17 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         allocator_type: Optional[str] = None,
     ) -> Optional[TensorMemoryObj]:
+        """Allocate one page-backed memory object.
+
+        Args:
+            shapes: Logical tensor shape or shapes to allocate.
+            dtypes: Logical tensor dtype or dtypes to allocate.
+            fmt: Memory format stored in the returned metadata.
+            allocator_type: Optional allocator type string.
+
+        Returns:
+            A page-backed tensor memory object, or ``None`` if no page is free.
+        """
         shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
 
         try:
@@ -218,7 +229,15 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         return allocated_blocks
 
     @_lmcache_nvtx_annotate
-    def free(self, memory_obj: TensorMemoryObj, allocator_type: Optional[str] = None):
+    def free(
+        self, memory_obj: TensorMemoryObj, allocator_type: Optional[str] = None
+    ) -> None:
+        """Free one page-backed memory object.
+
+        Args:
+            memory_obj: Memory object to return to the free-page pool.
+            allocator_type: Optional allocator type string.
+        """
         if not memory_obj.is_valid():
             return
         if memory_obj.meta.shapes != self.shapes:
@@ -244,11 +263,16 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         memory_objs: List[TensorMemoryObj],
         allocator_type: Optional[str] = None,
         update_stats: bool = True,
-    ):
-        """
-        Batched free memory objs.
+    ) -> None:
+        """Free multiple page-backed memory objects.
+
         Unlike `batched_allocate`, this function does not
         assume that the memory objs are equal-sized.
+
+        Args:
+            memory_objs: Memory objects to return to the free-page pool.
+            allocator_type: Optional allocator type string.
+            update_stats: Whether to update allocator statistics.
         """
         if not memory_objs:
             return
@@ -277,9 +301,12 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
                 self.num_active_allocations
             )
 
-    def memcheck(self):
-        """For debug purposes.
-        Returns True is everything is fine, otherwise False.
+    def memcheck(self) -> bool:
+        """Check allocator consistency for debugging.
+
+        Returns:
+            True if allocator accounting is internally consistent, otherwise
+            False.
         """
 
         logger.info("Checking memory allocator consistency")
@@ -300,7 +327,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
 
         return True
 
-    def __str__(self):
+    def __str__(self) -> str:
         return "PagedTensorMemoryAllocator"
 
     def get_paged_buffers(self) -> tuple[torch.Tensor, ...]:
@@ -313,6 +340,6 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         """
         return self.paged_buffers
 
-    def __del__(self):
+    def __del__(self) -> None:
         # FIXME: NIXL-related memory leak should be handled somewhere (else).
         del self.buffer

@@ -24,7 +24,7 @@ from lmcache.v1.memory_management import (
 class HostMemoryAllocator(MemoryAllocatorInterface):
     """Allocates memory in the pre-allocated Host memory."""
 
-    def __init__(self, size: int, use_paging: bool = False, **kwargs):
+    def __init__(self, size: int, use_paging: bool = False, **kwargs) -> None:
         """
         :param int size: The size of the pinned memory in bytes.
         """
@@ -58,6 +58,17 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         allocator_type: Optional[str] = None,
     ) -> Optional[MemoryObj]:
+        """Allocate one host-backed memory object.
+
+        Args:
+            shapes: Logical tensor shape or shapes to allocate.
+            dtypes: Logical tensor dtype or dtypes to allocate.
+            fmt: Memory format stored in the returned metadata.
+            allocator_type: Optional allocator type string.
+
+        Returns:
+            A memory object, or ``None`` if the inner allocator is full.
+        """
         with self.host_mem_lock:
             return self.allocator.allocate(shapes, dtypes, fmt, str(self))
 
@@ -70,13 +81,31 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         allocator_type: Optional[str] = None,
     ) -> Optional[List[MemoryObj]]:
+        """Allocate multiple host-backed memory objects.
+
+        Args:
+            shapes: Logical tensor shape or shapes for each allocation.
+            dtypes: Logical tensor dtype or dtypes for each allocation.
+            batch_size: Number of memory objects to allocate.
+            fmt: Memory format stored in each returned object's metadata.
+            allocator_type: Optional allocator type string.
+
+        Returns:
+            Memory objects, or ``None`` if the inner allocator is full.
+        """
         with self.host_mem_lock:
             return self.allocator.batched_allocate(
                 shapes, dtypes, batch_size, fmt, str(self)
             )
 
     @_lmcache_nvtx_annotate
-    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
+    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None) -> None:
+        """Free one host-backed memory object.
+
+        Args:
+            memory_obj: Memory object to release.
+            allocator_type: Optional allocator type string.
+        """
         with self.host_mem_lock:
             self.allocator.free(memory_obj)
 
@@ -86,13 +115,21 @@ class HostMemoryAllocator(MemoryAllocatorInterface):
         memory_objs: List[MemoryObj],
         allocator_type: Optional[str] = None,
         update_stats: bool = True,
-    ):
+    ) -> None:
+        """Free multiple host-backed memory objects.
+
+        Args:
+            memory_objs: Memory objects to release.
+            allocator_type: Optional allocator type string.
+            update_stats: Whether to update allocator statistics.
+        """
         with self.host_mem_lock:
             self.allocator.batched_free(memory_objs)
 
-    def memcheck(self):
+    def memcheck(self) -> bool:
+        """Return whether allocator state is consistent."""
         with self.host_mem_lock:
             return self.allocator.memcheck()
 
-    def __str__(self):
+    def __str__(self) -> str:
         return "HostMemoryAllocator"

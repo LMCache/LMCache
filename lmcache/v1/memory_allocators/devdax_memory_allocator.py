@@ -86,6 +86,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
 
     @property
     def buffer(self) -> torch.Tensor:
+        """Return the primary L1 buffer exposed by this allocator."""
         if self.local_allocator is not None:
             return self.local_allocator.buffer
         return self.devdax_buffer
@@ -257,6 +258,20 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         allocator_type: Optional[str] = None,
     ) -> Optional[MemoryObj]:
+        """Allocate one object from local DRAM first, then Device-DAX.
+
+        Args:
+            shapes: Logical tensor shape or shapes to allocate.
+            dtypes: Logical tensor dtype or dtypes to allocate.
+            fmt: Memory format to allocate.
+            allocator_type: Optional allocator type string.
+
+        Returns:
+            A memory object, or ``None`` if both tiers are full.
+
+        Raises:
+            ValueError: If ``fmt`` is unsupported.
+        """
         if fmt == MemoryFormat.BINARY_BUFFER:
             return self.buffer_allocator.allocate(shapes, dtypes, fmt)
         elif fmt in [
@@ -285,6 +300,21 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         allocator_type: Optional[str] = None,
     ) -> Optional[List[MemoryObj]]:
+        """Allocate multiple objects from local DRAM first, then Device-DAX.
+
+        Args:
+            shapes: Logical tensor shape or shapes for each allocation.
+            dtypes: Logical tensor dtype or dtypes for each allocation.
+            batch_size: Number of memory objects to allocate.
+            fmt: Memory format to allocate.
+            allocator_type: Optional allocator type string.
+
+        Returns:
+            Memory objects, or ``None`` if the full batch cannot be allocated.
+
+        Raises:
+            ValueError: If ``fmt`` is unsupported.
+        """
         if fmt == MemoryFormat.BINARY_BUFFER:
             return self.buffer_allocator.batched_allocate(
                 shapes, dtypes, batch_size, fmt
@@ -331,6 +361,16 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
 
     @_lmcache_nvtx_annotate
     def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None) -> None:
+        """Free one Device-DAX allocator memory object.
+
+        Args:
+            memory_obj: Memory object to release.
+            allocator_type: Optional allocator type string.
+
+        Raises:
+            ValueError: If the object format is unsupported or the object does
+                not belong to this allocator.
+        """
         fmt = memory_obj.meta.fmt
         if fmt == MemoryFormat.BINARY_BUFFER:
             self.buffer_allocator.free(memory_obj)
@@ -359,6 +399,17 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         allocator_type: Optional[str] = None,
         update_stats: bool = True,
     ) -> None:
+        """Free multiple Device-DAX allocator memory objects.
+
+        Args:
+            memory_objs: Memory objects to release.
+            allocator_type: Optional allocator type string.
+            update_stats: Whether to update allocator statistics.
+
+        Raises:
+            ValueError: If the object format is unsupported or any object does
+                not belong to this allocator.
+        """
         if not memory_objs:
             return
 
@@ -395,6 +446,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             raise ValueError(f"Unsupported memory format: {fmt}")
 
     def memcheck(self) -> bool:
+        """Return whether local and Device-DAX allocator state is consistent."""
         local_ok = True
         if self.local_allocator is not None:
             local_ok = self.local_allocator.memcheck()
@@ -404,6 +456,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             return local_ok and self.devdax_allocator.memcheck()
 
     def get_memory_usage(self) -> tuple[int, int]:
+        """Return used and total bytes across local and Device-DAX tiers."""
         local_used, local_total = self._local_memory_usage()
 
         if self.devdax_allocator is None:
@@ -413,6 +466,11 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         return local_used + dax_used, local_total + dax_total
 
     def close(self) -> None:
+        """Release mapped Device-DAX and optional local DRAM resources.
+
+        Raises:
+            BufferError: If Device-DAX allocations are still active.
+        """
         if self._unregistered:
             return
         if memory_management.torch_dev.is_available():

@@ -25,7 +25,7 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
     allocate memory. It is used for testing purposes only.
     """
 
-    def __init__(self, device: str = "cpu"):
+    def __init__(self, device: str = "cpu") -> None:
         """
         :param str device: The device of the ad hoc memory allocator.
         """
@@ -76,11 +76,30 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         allocator_type: Optional[str] = None,
     ) -> Optional[List[MemoryObj]]:
+        """Allocate a batch of test memory objects.
+
+        Args:
+            shapes: Logical tensor shape or shapes for each allocation.
+            dtypes: Logical tensor dtype or dtypes for each allocation.
+            batch_size: Number of memory objects to allocate.
+            fmt: Memory format stored in each object's metadata.
+            allocator_type: Optional allocator type string.
+
+        Raises:
+            NotImplementedError: Always raised because ad-hoc batched
+                allocation is not supported.
+        """
         raise NotImplementedError(
             "Batched allocation is not supported in AdHocMemoryAllocator"
         )
 
-    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
+    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None) -> None:
+        """Release a test memory object.
+
+        Args:
+            memory_obj: Memory object to release.
+            allocator_type: Optional allocator type string.
+        """
         pass
 
     def batched_free(
@@ -88,20 +107,46 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
         memory_objs: List[MemoryObj],
         allocator_type: Optional[str] = None,
         update_stats: bool = True,
-    ):
+    ) -> None:
+        """Release a batch of test memory objects.
+
+        Args:
+            memory_objs: Memory objects to release.
+            allocator_type: Optional allocator type string.
+            update_stats: Whether to update allocator statistics.
+        """
         pass
 
-    def ref_count_up(self, memory_obj: MemoryObj):
+    def ref_count_up(self, memory_obj: MemoryObj) -> None:
+        """Increment the reference count for a test memory object.
+
+        Args:
+            memory_obj: Memory object whose reference count would be incremented.
+        """
         pass
 
-    def ref_count_down(self, memory_obj: MemoryObj):
+    def ref_count_down(self, memory_obj: MemoryObj) -> None:
+        """Decrement the reference count for a test memory object.
+
+        Args:
+            memory_obj: Memory object whose reference count would be decremented.
+        """
         pass
 
-    def get_ref_count(self, memory_obj: MemoryObj):
+    def get_ref_count(self, memory_obj: MemoryObj) -> int:
+        """Return the reference count for a test memory object.
+
+        Args:
+            memory_obj: Memory object to inspect.
+
+        Returns:
+            Always returns 0 because this test allocator does not track counts.
+        """
         return 0
 
-    def memcheck(self):
+    def memcheck(self) -> bool:
+        """Return whether allocator state is consistent."""
         return True
 
-    def __str__(self):
+    def __str__(self) -> str:
         return "AdHocMemoryAllocator"

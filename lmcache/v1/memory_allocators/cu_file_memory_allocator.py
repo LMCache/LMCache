@@ -9,7 +9,7 @@ from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
 
 
 class CuFileMemoryAllocator(GPUMemoryAllocator):
-    def __init__(self, size: int, device=None):
+    def __init__(self, size: int, device=None) -> None:
         # HACK(Jiayi): cufile import is buggy on some hardware
         # (e.g., without GPUDirect), so it's temporarily put here.
         # Third Party
@@ -34,5 +34,5 @@ class CuFileMemoryAllocator(GPUMemoryAllocator):
             except Exception:
                 pass
 
-    def __str__(self):
+    def __str__(self) -> str:
         return "CuFileMemoryAllocator"

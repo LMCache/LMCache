@@ -32,7 +32,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         tensor: torch.Tensor,
         align_bytes: int = AddressManager.ALIGN_BYTES,
         init_address_space: int | None = None,
-    ):
+    ) -> None:
         """
         Args:
             tensor: The pre-allocated flat tensor to use as the memory pool.
@@ -60,6 +60,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
 
     @property
     def total_allocated_size(self) -> int:
+        """Return the total currently allocated bytes."""
         return self.address_manager.total_allocated_size
 
     @_lmcache_nvtx_annotate
@@ -70,6 +71,17 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         allocator_type: Optional[str] = None,
     ) -> Optional[TensorMemoryObj]:
+        """Allocate one tensor-backed memory object.
+
+        Args:
+            shapes: Logical tensor shape or shapes to allocate.
+            dtypes: Logical tensor dtype or dtypes to allocate.
+            fmt: Memory format stored in the returned metadata.
+            allocator_type: Optional parent allocator identifier.
+
+        Returns:
+            A tensor-backed memory object, or ``None`` if no block is available.
+        """
         shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
 
         # Calculate the size of the tensor
@@ -122,8 +134,18 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         allocator_type: Optional[str] = None,
     ) -> Optional[List[TensorMemoryObj]]:
-        """
-        Batched allocate tensor memory objs with equal sizes.
+        """Allocate multiple equal-sized tensor-backed memory objects.
+
+        Args:
+            shapes: Logical tensor shape or shapes for each allocation.
+            dtypes: Logical tensor dtype or dtypes for each allocation.
+            batch_size: Number of memory objects to allocate.
+            fmt: Memory format stored in each returned object's metadata.
+            allocator_type: Optional parent allocator identifier.
+
+        Returns:
+            A list of tensor-backed memory objects, or ``None`` if there is
+            not enough contiguous free space for the full batch.
         """
         shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
 
@@ -174,7 +196,13 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         return tensor_mem_objs
 
     @_lmcache_nvtx_annotate
-    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
+    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None) -> None:
+        """Free one tensor-backed memory object.
+
+        Args:
+            memory_obj: Memory object to release back to the allocator.
+            allocator_type: Optional allocator type string.
+        """
         if not memory_obj.is_valid():
             return
 
@@ -196,11 +224,16 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
         memory_objs: List[MemoryObj],
         allocator_type: Optional[str] = None,
         update_stats: bool = True,
-    ):
-        """
-        Batched free memory objs.
+    ) -> None:
+        """Free multiple tensor-backed memory objects.
+
         Unlike `batched_allocate`, this function does not
         assume that the memory objs are equal-sized.
+
+        Args:
+            memory_objs: Memory objects to release back to the allocator.
+            allocator_type: Optional allocator type string.
+            update_stats: Whether to update allocator statistics.
         """
         if not memory_objs:
             return
@@ -254,9 +287,12 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
                 self.num_active_allocations
             )
 
-    def memcheck(self):
-        """For debug purposes.
-        Returns True is everything is fine, otherwise False.
+    def memcheck(self) -> bool:
+        """Check allocator consistency for debugging.
+
+        Returns:
+            True if allocator accounting is internally consistent, otherwise
+            False.
         """
         clear = True
         logger.info("Checking memory allocator consistency")
@@ -287,5 +323,6 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
 
         return clear
 
-    def __str__(self):
+    def __str__(self) -> str:
+        """Return the allocator name."""
         return "TensorMemoryAllocator"
