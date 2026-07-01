@@ -8,18 +8,6 @@ worker thread.  Within each worker, tasks execute sequentially in FIFO order.
 This is used for GPU-bound request handlers (STORE / RETRIEVE) so that all
 operations for a given vLLM instance land on one thread, eliminating the need
 for per-instance locks on the shared temporary GPU buffer.
-
-Worker assignment is *dynamic*: the first time a key is submitted it is bound
-to the next free worker slot (round-robin over arrival order) and that binding
-is remembered for the lifetime of the pool, so every later task for that key
-reuses the same thread. There is no ``key % num_workers`` hashing, so the
-numeric value of the key is irrelevant -- as long as the number of *distinct*
-keys does not exceed ``max_workers``, each key gets its own dedicated worker
-thread and distinct keys never collide onto one slot while another sits idle.
-When there are more distinct keys than workers, the surplus keys wrap around
-and share slots with earlier keys (their tasks are then serialized); the first
-such overflow is logged once at WARNING level. Increase ``max_workers`` to
-``>=`` the number of distinct clients to restore one worker per client.
 """
 
 # Standard
