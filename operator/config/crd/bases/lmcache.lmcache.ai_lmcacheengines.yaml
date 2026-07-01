@@ -1188,10 +1188,10 @@ spec:
                     type: number
                   policy:
                     default: LRU
-                    description: policy is the eviction policy. Currently only LRU
-                      is supported.
+                    description: policy is the eviction policy. LRU or noop.
                     enum:
                     - LRU
+                    - noop
                     type: string
                   triggerWatermark:
                     default: 0.8
@@ -1211,7 +1211,7 @@ spec:
                 description: |-
                   gpuVendor selects the GPU vendor. "nvidia" (default) requires the NVIDIA
                   GPU Operator's "nvidia" RuntimeClass; "amd" runs on the default container
-                  runtime with privileged: true.
+                  runtime.
                 enum:
                 - nvidia
                 - amd
@@ -1298,6 +1298,7 @@ spec:
                       cache misses. "default" picks the first adapter that has the key.
                     enum:
                     - default
+                    - retain
                     type: string
                   raw:
                     description: |-
@@ -1408,6 +1409,20 @@ spec:
               priorityClassName:
                 description: priorityClassName is the priority class for the pods.
                 type: string
+              privileged:
+                default: false
+                description: |-
+                  privileged runs the engine container in privileged mode. On some clusters
+                  this is required for the engine to see all node GPUs (for CUDA IPC) without
+                  claiming any via the nvidia.com/gpu device plugin; on many clusters
+                  NVIDIA_VISIBLE_DEVICES=all already grants that visibility without it, so it
+                  defaults to false. Set it to true only on clusters where the engine cannot
+                  otherwise see the GPUs. For gpuVendor "amd" this is effectively required:
+                  there is no NVIDIA-style RuntimeClass device injection, so privileged mode
+                  is the only way the engine reaches /dev/kfd and /dev/dri. Clusters using Pod
+                  Security Standards must allow the privileged profile for this namespace when
+                  it is enabled. Default: false.
+                type: boolean
               prometheus:
                 description: prometheus defines Prometheus monitoring configuration.
                 properties:
