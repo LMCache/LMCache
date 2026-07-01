@@ -28,8 +28,7 @@ class AffinityThreadPool:
     """Thread pool that routes tasks to workers by affinity key.
 
     Not thread-safe: ``submit()`` must be called from a single thread (the
-    ``MessageQueueServer`` main loop). The routing state is unsynchronized, so
-    dispatching submits from multiple threads would race on slot assignment.
+    ``MessageQueueServer`` main loop).
 
     Args:
         max_workers: Number of worker threads.
@@ -92,20 +91,6 @@ class AffinityThreadPool:
 
     def _slot_for_key(self, affinity_key: int) -> int:
         """Return the worker slot bound to ``affinity_key``, assigning on first use.
-
-        The first time a key is seen it is bound to the next free slot
-        (``_next_slot % _num_workers``) and the binding is cached, so the
-        mapping is independent of the key's numeric value: any set of up to
-        ``_num_workers`` distinct keys lands on distinct worker threads. Once
-        more than ``_num_workers`` distinct keys have been seen, later keys wrap
-        around and share a slot with an earlier key; the first such overflow is
-        logged once at WARNING level.
-
-        Called only from the single ``submit()`` caller thread, so the routing
-        state is read and mutated without locking.
-
-        Args:
-            affinity_key: The routing key for the current submission.
 
         Returns:
             The worker slot (an index in ``[0, _num_workers)``) for the key.
