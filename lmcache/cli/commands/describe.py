@@ -390,7 +390,7 @@ class EngineDescriber:
 
     def __init__(
         self,
-        metrics: Metrics,
+        metrics: "Metrics",
         models_data: dict,
         is_healthy: bool,
         running_requests: int | None,
