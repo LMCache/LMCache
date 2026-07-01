@@ -64,11 +64,6 @@ class DeviceInfo(abc.ABC):
         """
 
     @property
-    def priority(self) -> int:
-        """Precedence priority for device detection (lower values checked first)."""
-        return 10
-
-    @property
     def pin_memory_backend(self) -> type[PinMemoryBackend] | None:
         """PinMemoryBackend subclass for this device, or None for default.
 

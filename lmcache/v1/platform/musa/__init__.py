@@ -34,7 +34,3 @@ class MusaDeviceInfo(DeviceInfo):
             return hasattr(torch, "musa") and torch.musa.is_available()  # type: ignore[attr-defined]
         except Exception:
             return False
-
-    @property
-    def priority(self) -> int:
-        return 0

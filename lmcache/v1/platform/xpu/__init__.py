@@ -33,7 +33,3 @@ class XpuDeviceInfo(DeviceInfo):
             return hasattr(torch, "xpu") and torch.xpu.is_available()
         except Exception:
             return False
-
-    @property
-    def priority(self) -> int:
-        return 1

@@ -28,6 +28,7 @@ automatically.
 # Standard
 from typing import Any
 import importlib
+import os
 import types
 
 # First Party
@@ -51,22 +52,18 @@ logger = init_logger(__name__)
 # ---------------------------------------------------------------------------
 
 
-# the device order now is: musa > xpu > hpu > cuda > cpu
 _DEVICE_REGISTRY: dict[str, DeviceInfo] = {
     info.device_type: info
-    for info in sorted(
-        (
-            cls()
-            for cls in discover_subclasses(
-                "lmcache.v1.platform",
-                DeviceInfo,  # type: ignore[type-abstract]
-                module_filter=lambda name: not name.startswith(("_", "base")),
-                require_defined_in_module=True,
-                on_import_error=lambda name, exc: None,
-            )
-        ),
-        key=lambda info: info.priority,
-    )
+    for info in [
+        cls()
+        for cls in discover_subclasses(
+            "lmcache.v1.platform",
+            DeviceInfo,  # type: ignore[type-abstract]
+            module_filter=lambda name: not name.startswith(("_", "base")),
+            require_defined_in_module=True,
+            on_import_error=lambda name, exc: None,
+        )
+    ]
 }
 
 
@@ -89,6 +86,29 @@ def _detect_device() -> tuple[Any, str]:
     except ImportError as e:
         logger.warning("load torch failed, error is %s", e)
         return None, "cpu"  # fallback for CLI-only environments
+
+    # Check DEVICE_TYPE environment variable for forced device selection.
+    env_device_type = os.environ.get("DEVICE_TYPE")
+    if env_device_type is not None:
+        env_device_type = env_device_type.strip().lower()
+        info = _DEVICE_REGISTRY.get(env_device_type)
+        if info is not None and info.is_available():
+            torch_module = getattr(torch, info.torch_module_name, None)
+            if torch_module is not None:
+                return torch_module, info.device_type
+            else:
+                logger.warning(
+                    "DEVICE_TYPE=%r is available but torch module [%s] not found, "
+                    "falling back to auto-detection.",
+                    env_device_type,
+                    info.torch_module_name,
+                )
+        else:
+            logger.warning(
+                "DEVICE_TYPE=%r is not available or not registered, "
+                "falling back to auto-detection.",
+                env_device_type,
+            )
 
     for info in _DEVICE_REGISTRY.values():
         if not info.is_available():
