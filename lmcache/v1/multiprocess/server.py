@@ -121,7 +121,7 @@ class MPCacheServer:
 
     @property
     def cache_contexts(self) -> dict[int, BaseCacheContext] | None:
-        """Used by ``/kvcache/check``; unwraps :class:`ContextEntry`."""
+        """Used by ``/cache/checksums``; unwraps :class:`ContextEntry`."""
         for module in self._modules:
             if isinstance(module, LMCacheDrivenTransferModule):
                 return {
@@ -131,7 +131,7 @@ class MPCacheServer:
         return None
 
     def clear(self) -> None:
-        """Used by ``/clear-cache``; delegates to :class:`ManagementModule`."""
+        """Used by ``/cache/clear``; delegates to :class:`ManagementModule`."""
         for module in self._modules:
             if isinstance(module, ManagementModule):
                 module.clear()

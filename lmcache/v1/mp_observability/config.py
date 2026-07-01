@@ -338,6 +338,7 @@ def init_observability(
             L2ThroughputSubscriber,
             LookupMetricsSubscriber,
             SMLifecycleSubscriber,
+            TimeoutMetricsSubscriber,
         )
 
         sample_rate = obs_config.metrics_sample_rate
@@ -355,6 +356,7 @@ def init_observability(
         bus.register_subscriber(BlendMetricsSubscriber())
         bus.register_subscriber(EngineMetricsSubscriber())
         bus.register_subscriber(EventBusSelfMetricsSubscriber(bus))
+        bus.register_subscriber(TimeoutMetricsSubscriber())
 
     if obs_config.logging_enabled:
         # First Party
@@ -364,6 +366,7 @@ def init_observability(
             L2LoggingSubscriber,
             MPServerLoggingSubscriber,
             SMLoggingSubscriber,
+            TimeoutLoggingSubscriber,
         )
 
         bus.register_subscriber(MPServerLoggingSubscriber())
@@ -371,18 +374,21 @@ def init_observability(
         bus.register_subscriber(L2LoggingSubscriber())
         bus.register_subscriber(SMLoggingSubscriber())
         bus.register_subscriber(BlendLoggingSubscriber())
+        bus.register_subscriber(TimeoutLoggingSubscriber())
 
     if obs_config.tracing_enabled:
         # First Party
         from lmcache.v1.mp_observability.subscribers.tracing import (
             BlendTracingSubscriber,
             MPServerTracingSubscriber,
+            TimeoutTracingSubscriber,
             get_span_registry,
         )
 
         registry = get_span_registry()
         bus.register_subscriber(MPServerTracingSubscriber(registry))
         bus.register_subscriber(BlendTracingSubscriber(registry))
+        bus.register_subscriber(TimeoutTracingSubscriber(registry))
 
     # Lookup hash file logging (independent of the logging_enabled flag —
     # it has its own enable gate via output_dir).

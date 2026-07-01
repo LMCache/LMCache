@@ -1,14 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""
-HTTP-level tests for ``l2_api`` — the ``DELETE /l2``,
-``GET /l2/keys``, and ``GET /l2/adapters`` endpoints.
+"""HTTP-level tests for the MP server's ``/cache/*`` surface (``cache_api``).
 
-The endpoints reach into ``request.app.state.engine.storage_manager``
-and call ``storage_manager.l2_adapters()`` to obtain the configured
-``(descriptor, adapter)`` pairs, then invoke the adapter's own
-methods. These tests inject a fake storage manager that returns
-``_FakeAdapter`` instances, so the HTTP layer can be exercised without
-spinning up a real cache engine.
+Covers the object endpoints (``/cache/objects``), the
+prefetch endpoints (``/cache/prefetches``), and the diagnostics endpoints
+(``/cache/clear``, ``/cache/checksums``). Handlers are thin over the typed
+services resolved from the app context, so these inject a fake engine via
+``build_context`` and exercise the HTTP layer without a real cache engine.
 """
 
 # Standard
@@ -22,12 +19,15 @@ import pytest
 
 # First Party
 from lmcache.v1.distributed.api import KeyEntry, KeyListPage, ObjectKey
-from lmcache.v1.multiprocess.http_apis.l2_api import router as l2_keys_router
+from lmcache.v1.multiprocess.cache_control.object_service import MAX_DELETE_BATCH
+from lmcache.v1.multiprocess.http_apis.cache_api import router as cache_router
+from lmcache.v1.multiprocess.http_apis.dependencies import build_context
+from lmcache.v1.multiprocess.http_apis.error_handlers import register_error_handlers
 
 
 @dataclass
 class _FakeDescriptor:
-    """Minimal descriptor — only ``type_name`` is read by the handler."""
+    """Minimal descriptor — only ``type_name`` is read."""
 
     type_name: str = "s3"
 
@@ -66,9 +66,8 @@ class _FakeAdapter:
 
 @dataclass
 class _FakeStorageManager:
-    """Implements ``l2_adapters()``. Pass a list of
-    ``(type_name, _FakeAdapter)`` tuples; an empty list reproduces the
-    "no L2 adapters configured" condition."""
+    """Implements ``l2_adapters()``. An empty list reproduces the "no L2 adapters
+    configured" condition."""
 
     adapters: list[tuple[str, _FakeAdapter]] = field(default_factory=list)
 
@@ -82,12 +81,13 @@ class _FakeEngine:
 
 
 def _make_app(sm: Optional[_FakeStorageManager]) -> FastAPI:
-    """Build a FastAPI app with only the l2_keys router mounted and the
-    fake engine bolted onto ``app.state``."""
+    """Build an app with the cache router and a context wrapping a fake engine
+    (or no context, reproducing the not-initialized condition)."""
     app = FastAPI()
-    app.include_router(l2_keys_router)
+    app.include_router(cache_router)
+    register_error_handlers(app)
     if sm is not None:
-        app.state.engine = _FakeEngine(sm)
+        app.state.context = build_context(_FakeEngine(sm))
     return app
 
 
@@ -100,45 +100,11 @@ def _sm_with(*entries: tuple[str, _FakeAdapter]) -> _FakeStorageManager:
 
 
 # =============================================================================
-# Adapter listing
+# Delete objects
 # =============================================================================
 
 
-class TestAdaptersEndpoint:
-    def test_empty_adapter_list_returns_empty_array(self):
-        # An engine with no L2 backends is still initialized — return
-        # 200 with an empty list, not 503. The empty case is operational
-        # signal, not an error.
-        sm = _sm_with()
-        client = TestClient(_make_app(sm))
-        resp = client.get("/l2/adapters")
-        assert resp.status_code == 200, resp.text
-        assert resp.json() == {"adapters": []}
-
-    def test_lists_all_adapters_with_primary_flag(self):
-        sm = _sm_with(("s3", _FakeAdapter()), ("fs", _FakeAdapter()))
-        client = TestClient(_make_app(sm))
-        resp = client.get("/l2/adapters")
-        assert resp.status_code == 200, resp.text
-        assert resp.json() == {
-            "adapters": [
-                {"index": 0, "type_name": "s3", "primary": True},
-                {"index": 1, "type_name": "fs", "primary": False},
-            ]
-        }
-
-    def test_503_when_engine_not_initialized(self):
-        client = TestClient(_make_app(None))
-        resp = client.get("/l2/adapters")
-        assert resp.status_code == 503
-
-
-# =============================================================================
-# Delete
-# =============================================================================
-
-
-class TestDeleteEndpoint:
+class TestDeleteObjectsEndpoint:
     def test_happy_path_defaults_to_primary(self):
         primary = _FakeAdapter()
         secondary = _FakeAdapter()
@@ -147,7 +113,7 @@ class TestDeleteEndpoint:
 
         resp = client.request(
             "DELETE",
-            "/l2",
+            "/cache/objects",
             json={
                 "keys": [
                     {
@@ -156,18 +122,12 @@ class TestDeleteEndpoint:
                         "kv_rank": 0,
                         "cache_salt": "alice",
                     },
-                    {
-                        "chunk_hash_hex": _hex(2),
-                        "model_name": "llama",
-                        "kv_rank": 0,
-                    },
+                    {"chunk_hash_hex": _hex(2), "model_name": "llama", "kv_rank": 0},
                 ],
             },
         )
         assert resp.status_code == 200, resp.text
-        body = resp.json()
-        assert body == {"requested": 2, "adapter": "s3", "ok": True}
-        # Only the primary adapter saw the call.
+        assert resp.json() == {"requested": 2, "adapter": "s3", "ok": True}
         assert len(primary.delete_calls) == 1
         assert secondary.delete_calls == []
         forwarded = primary.delete_calls[0]
@@ -179,7 +139,7 @@ class TestDeleteEndpoint:
         )
         assert forwarded[1].cache_salt == ""
 
-    def test_adapter_query_param_selects_non_primary(self):
+    def test_adapter_in_body_selects_non_primary(self):
         primary = _FakeAdapter()
         secondary = _FakeAdapter()
         sm = _sm_with(("s3", primary), ("fs", secondary))
@@ -187,9 +147,10 @@ class TestDeleteEndpoint:
 
         resp = client.request(
             "DELETE",
-            "/l2?adapter=fs",
+            "/cache/objects",
             json={
-                "keys": [{"chunk_hash_hex": _hex(1), "model_name": "m", "kv_rank": 0}]
+                "adapter": "fs",
+                "keys": [{"chunk_hash_hex": _hex(1), "model_name": "m", "kv_rank": 0}],
             },
         )
         assert resp.status_code == 200, resp.text
@@ -197,133 +158,107 @@ class TestDeleteEndpoint:
         assert primary.delete_calls == []
         assert len(secondary.delete_calls) == 1
 
-    def test_404_when_adapter_selector_no_match(self):
-        sm = _sm_with(("s3", _FakeAdapter()))
-        client = TestClient(_make_app(sm))
+    def test_404_when_adapter_no_match(self):
+        client = TestClient(_make_app(_sm_with(("s3", _FakeAdapter()))))
         resp = client.request(
-            "DELETE",
-            "/l2?adapter=nope",
-            json={"keys": []},
+            "DELETE", "/cache/objects", json={"adapter": "nope", "keys": []}
         )
         assert resp.status_code == 404
         assert "nope" in resp.json()["detail"]
 
     def test_propagates_adapter_failure_in_body(self):
         adapter = _FakeAdapter(delete_raises=RuntimeError("s3 down"))
-        sm = _sm_with(("s3", adapter))
-        client = TestClient(_make_app(sm))
-
-        resp = client.request("DELETE", "/l2", json={"keys": []})
-        # Adapter exceptions are surfaced as a 200 body with ok=false +
-        # error, NOT as a 500 — operators want a structured failure.
+        client = TestClient(_make_app(_sm_with(("s3", adapter))))
+        resp = client.request("DELETE", "/cache/objects", json={"keys": []})
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["adapter"] == "s3"
         assert body["ok"] is False
         assert "s3 down" in body["error"]
 
+    def test_400_on_unsupported_tier(self):
+        client = TestClient(_make_app(_sm_with(("s3", _FakeAdapter()))))
+        resp = client.request(
+            "DELETE", "/cache/objects", json={"tier": "l1", "keys": []}
+        )
+        assert resp.status_code == 400
+        assert "tier" in resp.json()["detail"]
+
     def test_503_when_no_adapters_configured(self):
-        sm = _sm_with()
-        client = TestClient(_make_app(sm))
-        resp = client.request("DELETE", "/l2", json={"keys": []})
+        client = TestClient(_make_app(_sm_with()))
+        resp = client.request("DELETE", "/cache/objects", json={"keys": []})
         assert resp.status_code == 503
         assert "no L2 adapters" in resp.json()["detail"]
 
-    def test_503_when_engine_not_initialized(self):
+    def test_503_when_not_initialized(self):
         client = TestClient(_make_app(None))
-        resp = client.request("DELETE", "/l2", json={"keys": []})
-        assert resp.status_code == 503
+        assert (
+            client.request("DELETE", "/cache/objects", json={"keys": []}).status_code
+            == 503
+        )
 
     @pytest.mark.parametrize(
         "body",
         [
-            "not-json-text",  # invalid JSON → 422
-            {},  # missing 'keys' → 422
-            {"keys": "not-a-list"},  # wrong type → 422
-            {"keys": [{"chunk_hash_hex": _hex(1), "kv_rank": 0}]},  # no model → 422
-            {
-                "keys": [
-                    {
-                        "chunk_hash_hex": _hex(1),
-                        "model_name": "m",
-                        "kv_rank": "not-int",
-                    }
-                ]
-            },  # → 422
+            "not-json-text",
+            {},
+            {"keys": "not-a-list"},
+            {"keys": [{"chunk_hash_hex": _hex(1), "kv_rank": 0}]},
+            {"keys": [{"chunk_hash_hex": _hex(1), "model_name": "m", "kv_rank": "x"}]},
         ],
     )
-    def test_422_on_pydantic_validation_failure(self, body):
-        """Pydantic-level body-shape errors surface as 422 (FastAPI's
-        default for request validation)."""
+    def test_422_on_validation_failure(self, body):
         adapter = _FakeAdapter()
-        sm = _sm_with(("s3", adapter))
-        client = TestClient(_make_app(sm))
+        client = TestClient(_make_app(_sm_with(("s3", adapter))))
         if isinstance(body, str):
             resp = client.request(
                 "DELETE",
-                "/l2",
+                "/cache/objects",
                 content=body,
                 headers={"content-type": "application/json"},
             )
         else:
-            resp = client.request("DELETE", "/l2", json=body)
+            resp = client.request("DELETE", "/cache/objects", json=body)
         assert resp.status_code == 422, resp.text
         assert adapter.delete_calls == []
 
     @pytest.mark.parametrize(
         "body",
         [
-            # Bad hex — survives Pydantic typing but fails bytes.fromhex.
             {"keys": [{"chunk_hash_hex": "zz", "model_name": "m", "kv_rank": 0}]},
-            # @ in model_name — survives Pydantic typing but violates the
-            # ObjectKey invariant.
             {
                 "keys": [
-                    {
-                        "chunk_hash_hex": _hex(1),
-                        "model_name": "bad@name",
-                        "kv_rank": 0,
-                    }
+                    {"chunk_hash_hex": _hex(1), "model_name": "bad@name", "kv_rank": 0}
                 ]
             },
         ],
     )
     def test_400_on_object_key_invariant_violation(self, body):
-        """Bodies that type-check but violate ``ObjectKey`` invariants
-        surface as 400 from our handler."""
         adapter = _FakeAdapter()
-        sm = _sm_with(("s3", adapter))
-        client = TestClient(_make_app(sm))
-        resp = client.request("DELETE", "/l2", json=body)
+        client = TestClient(_make_app(_sm_with(("s3", adapter))))
+        resp = client.request("DELETE", "/cache/objects", json=body)
         assert resp.status_code == 400, resp.text
         assert adapter.delete_calls == []
 
     def test_400_when_batch_exceeds_cap(self):
-        """The handler enforces the ``_MAX_DELETE_BATCH`` cap (the
-        dataclass body type no longer carries a Pydantic Field
-        constraint)."""
-        # First Party
-        from lmcache.v1.multiprocess.http_apis.l2_api import _MAX_DELETE_BATCH
-
         adapter = _FakeAdapter()
-        sm = _sm_with(("s3", adapter))
-        client = TestClient(_make_app(sm))
+        client = TestClient(_make_app(_sm_with(("s3", adapter))))
         oversized = [
             {"chunk_hash_hex": _hex(i), "model_name": "m", "kv_rank": 0}
-            for i in range(_MAX_DELETE_BATCH + 1)
+            for i in range(MAX_DELETE_BATCH + 1)
         ]
-        resp = client.request("DELETE", "/l2", json={"keys": oversized})
+        resp = client.request("DELETE", "/cache/objects", json={"keys": oversized})
         assert resp.status_code == 400, resp.text
         assert "too many keys" in resp.json()["detail"]
         assert adapter.delete_calls == []
 
 
 # =============================================================================
-# List
+# List objects
 # =============================================================================
 
 
-class TestListEndpoint:
+class TestListObjectsEndpoint:
     def test_happy_path_defaults_to_primary(self):
         k1 = ObjectKey(
             chunk_hash=b"\xde\xad\xbe\xef",
@@ -342,11 +277,7 @@ class TestListEndpoint:
         client = TestClient(_make_app(sm))
 
         resp = client.get(
-            "/l2/keys",
-            params={
-                "model_name": "llama",
-                "page_size": 100,
-            },
+            "/cache/objects", params={"model_name": "llama", "page_size": 100}
         )
         assert resp.status_code == 200, resp.text
         body = resp.json()
@@ -369,100 +300,69 @@ class TestListEndpoint:
             "page_size": 100,
             "cursor": None,
         }
-        # Secondary not consulted.
         assert secondary.last_list_kwargs == {}
 
-    def test_adapter_query_param_selects_non_primary(self):
+    def test_adapter_param_selects_non_primary(self):
         primary = _FakeAdapter()
         secondary = _FakeAdapter(
             list_page=KeyListPage(entries=(), next_page_token="from-fs")
         )
         sm = _sm_with(("s3", primary), ("fs", secondary))
         client = TestClient(_make_app(sm))
-
-        resp = client.get("/l2/keys", params={"adapter": "fs"})
+        resp = client.get("/cache/objects", params={"adapter": "fs"})
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["adapter"] == "fs"
         assert body["next_page_token"] == "from-fs"
         assert primary.last_list_kwargs == {}
 
-    def test_404_when_adapter_selector_no_match(self):
-        sm = _sm_with(("s3", _FakeAdapter()))
-        client = TestClient(_make_app(sm))
-        resp = client.get("/l2/keys", params={"adapter": "nope"})
-        assert resp.status_code == 404
-
-    def test_no_filter_passes_none_to_adapter(self):
-        adapter = _FakeAdapter()
-        sm = _sm_with(("s3", adapter))
-        client = TestClient(_make_app(sm))
-        client.get("/l2/keys")
-        assert adapter.last_list_kwargs["model_name"] is None
+    def test_404_when_adapter_no_match(self):
+        client = TestClient(_make_app(_sm_with(("s3", _FakeAdapter()))))
+        assert (
+            client.get("/cache/objects", params={"adapter": "nope"}).status_code == 404
+        )
 
     def test_page_token_threads_through_as_cursor(self):
         adapter = _FakeAdapter()
-        sm = _sm_with(("s3", adapter))
-        client = TestClient(_make_app(sm))
-        client.get("/l2/keys", params={"page_token": "abc"})
-        # The HTTP query param ``page_token`` is forwarded to the
-        # adapter under its native name ``cursor``.
+        client = TestClient(_make_app(_sm_with(("s3", adapter))))
+        client.get("/cache/objects", params={"page_token": "abc"})
         assert adapter.last_list_kwargs["cursor"] == "abc"
 
-    def test_503_when_no_adapters_configured(self):
-        sm = _sm_with()
-        client = TestClient(_make_app(sm))
-        resp = client.get("/l2/keys")
-        assert resp.status_code == 503
+    def test_400_on_unsupported_tier(self):
+        client = TestClient(_make_app(_sm_with(("s3", _FakeAdapter()))))
+        resp = client.get("/cache/objects", params={"tier": "l1"})
+        assert resp.status_code == 400
 
-    def test_501_when_selected_adapter_does_not_support_listing(self):
-        adapter = _FakeAdapter(
-            list_raises=NotImplementedError("FsL2Adapter has no listing")
-        )
-        sm = _sm_with(("fs", adapter))
-        client = TestClient(_make_app(sm))
-        resp = client.get("/l2/keys")
-        assert resp.status_code == 501
+    def test_503_when_no_adapters_configured(self):
+        client = TestClient(_make_app(_sm_with()))
+        assert client.get("/cache/objects").status_code == 503
+
+    def test_503_when_listing_unsupported(self):
+        adapter = _FakeAdapter(list_raises=NotImplementedError("no listing"))
+        client = TestClient(_make_app(_sm_with(("fs", adapter))))
+        resp = client.get("/cache/objects")
+        assert resp.status_code == 503
         assert "does not support listing" in resp.json()["detail"]
 
-    def test_400_on_invalid_page_size(self):
-        adapter = _FakeAdapter()
-        sm = _sm_with(("s3", adapter))
-        client = TestClient(_make_app(sm))
-        # Below floor — FastAPI Query ge=1 → 422 from validation layer.
-        resp = client.get("/l2/keys", params={"page_size": 0})
-        assert resp.status_code in (400, 422)
-        # Above ceiling.
-        resp = client.get("/l2/keys", params={"page_size": 999_999_999})
-        assert resp.status_code in (400, 422)
-
-    def test_503_when_engine_not_initialized(self):
-        client = TestClient(_make_app(None))
-        resp = client.get("/l2/keys")
-        assert resp.status_code == 503
-
-    def test_400_on_malformed_page_token_from_adapter(self):
-        # Adapter-level "malformed cursor" ValueError → 400 (distinct
-        # path from "no adapters" which the HTTP helper owns and maps
-        # to 503).
-        adapter = _FakeAdapter(
-            list_raises=ValueError("malformed S3 list cursor: invalid literal")
+    def test_400_on_malformed_page_token(self):
+        adapter = _FakeAdapter(list_raises=ValueError("malformed cursor"))
+        client = TestClient(_make_app(_sm_with(("s3", adapter))))
+        assert (
+            client.get("/cache/objects", params={"page_token": "garbage"}).status_code
+            == 400
         )
-        sm = _sm_with(("s3", adapter))
-        client = TestClient(_make_app(sm))
-        resp = client.get("/l2/keys", params={"page_token": "garbage"})
-        assert resp.status_code == 400
+
+    def test_503_when_not_initialized(self):
+        assert TestClient(_make_app(None)).get("/cache/objects").status_code == 503
 
 
 # =============================================================================
-# Prefetch (warm L1 from L2)
+# Prefetch
 # =============================================================================
 
 
 @dataclass
 class _FakeLayoutRegistry:
-    """Minimal layout registry: ``find`` returns ``layout`` and records calls."""
-
     layout: Optional[object] = None
     find_calls: list[tuple[str, int]] = field(default_factory=list)
 
@@ -472,15 +372,11 @@ class _FakeLayoutRegistry:
 
 
 class _PrefetchHandle:
-    """Minimal stand-in for ``PrefetchHandle`` (only the queried field)."""
-
     def __init__(self, total: int) -> None:
         self.total_requested_keys = total
 
 
 class _PrefetchBitmap:
-    """Stands in for the found-key Bitmap; ``popcount`` is the loaded count."""
-
     def __init__(self, n: int) -> None:
         self._n = n
 
@@ -490,29 +386,20 @@ class _PrefetchBitmap:
 
 @dataclass
 class _PrefetchStorageManager:
-    """Records ``submit_prefetch_task`` calls and serves canned poll results."""
-
     submit_calls: list[dict] = field(default_factory=list)
 
     def submit_prefetch_task(
-        self,
-        keys,
-        layout_desc,
-        mode=None,
-        **_,
+        self, keys, layout_desc, mode=None, **_
     ) -> _PrefetchHandle:
         self.submit_calls.append({"keys": list(keys), "mode": mode})
         return _PrefetchHandle(len(keys))
 
     def query_prefetch_status(self, handle) -> _PrefetchBitmap:
-        # Report all keys loaded.
         return _PrefetchBitmap(handle.total_requested_keys)
 
 
 @dataclass
 class _FakeTokenHasher:
-    """Hashes ``chunk_size`` tokens into one opaque chunk hash each."""
-
     chunk_size: int = 4
 
     def compute_chunk_hashes(self, token_ids: list[int]) -> list[bytes]:
@@ -535,9 +422,10 @@ class _PrefetchEngine:
 
 def _make_prefetch_app(ctx: Optional[_FakeContext]) -> FastAPI:
     app = FastAPI()
-    app.include_router(l2_keys_router)
+    app.include_router(cache_router)
+    register_error_handlers(app)
     if ctx is not None:
-        app.state.engine = _PrefetchEngine(ctx)
+        app.state.context = build_context(_PrefetchEngine(ctx))
     return app
 
 
@@ -561,77 +449,134 @@ class TestPrefetchEndpoint:
     def test_submit_returns_request_id_and_resolves_layout(self):
         ctx = _ctx(layout=object())
         client = TestClient(_make_prefetch_app(ctx))
-
-        # 8 tokens at chunk_size 4 -> 2 chunks.
         resp = client.post(
-            "/l2/prefetch",
+            "/cache/prefetches",
             json=_prefetch_body([1, 2, 3, 4, 5, 6, 7, 8], world_size=2),
         )
         assert resp.status_code == 202, resp.text
         body = resp.json()
         assert body["status"] == "submitted"
         assert body["chunks"] == 2
-        assert body["request_id"]  # non-empty id to poll
-        # Layout was resolved for the requested (model_name, world_size).
+        assert body["request_id"]
         assert ("m", 2) in ctx.layout_desc_registry.find_calls
 
     def test_status_poll_completes_then_404(self):
-        # The fake reports the load done on the first poll: status completes
-        # (releasing the lock), and a second poll for the same id is 404.
         ctx = _ctx(layout=object())
         client = TestClient(_make_prefetch_app(ctx))
-
         rid = client.post(
-            "/l2/prefetch", json=_prefetch_body([1, 2, 3, 4, 5, 6, 7, 8], world_size=2)
+            "/cache/prefetches",
+            json=_prefetch_body([1, 2, 3, 4, 5, 6, 7, 8], world_size=2),
         ).json()["request_id"]
 
-        resp = client.get(f"/l2/prefetch/{rid}")
+        resp = client.get(f"/cache/prefetches/{rid}")
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["status"] == "completed"
-        # 2 chunks x world_size 2 = 4 per-rank keys warmed.
         assert body["found_keys"] == 4
         assert body["total_keys"] == 4
-
-        # Exactly-once: the job was consumed by the completing poll.
-        assert client.get(f"/l2/prefetch/{rid}").status_code == 404
+        assert client.get(f"/cache/prefetches/{rid}").status_code == 404
 
     def test_status_unknown_request_id_404(self):
-        ctx = _ctx(layout=object())
-        client = TestClient(_make_prefetch_app(ctx))
-        assert client.get("/l2/prefetch/nope").status_code == 404
+        client = TestClient(_make_prefetch_app(_ctx(layout=object())))
+        assert client.get("/cache/prefetches/nope").status_code == 404
 
     def test_short_sequence_is_noop(self):
-        # Fewer than one full chunk -> nothing submitted, no request_id.
-        ctx = _ctx(layout=object())
-        client = TestClient(_make_prefetch_app(ctx))
-
-        resp = client.post("/l2/prefetch", json=_prefetch_body([1, 2]))
+        client = TestClient(_make_prefetch_app(_ctx(layout=object())))
+        resp = client.post("/cache/prefetches", json=_prefetch_body([1, 2]))
         assert resp.status_code == 202, resp.text
         assert resp.json() == {"chunks": 0, "status": "noop"}
 
-    def test_409_when_layout_not_registered(self):
-        ctx = _ctx(layout=None)
-        client = TestClient(_make_prefetch_app(ctx))
-
+    def test_503_when_layout_not_registered(self):
+        client = TestClient(_make_prefetch_app(_ctx(layout=None)))
         resp = client.post(
-            "/l2/prefetch",
-            json=_prefetch_body([1, 2, 3, 4], world_size=99),
+            "/cache/prefetches", json=_prefetch_body([1, 2, 3, 4], world_size=99)
         )
-        assert resp.status_code == 409
+        assert resp.status_code == 503
 
     def test_400_on_invalid_cache_salt(self):
-        ctx = _ctx(layout=object())
-        client = TestClient(_make_prefetch_app(ctx))
-
-        # "@" is forbidden in cache_salt (ObjectKey/IPC key invariant).
+        client = TestClient(_make_prefetch_app(_ctx(layout=object())))
         resp = client.post(
-            "/l2/prefetch",
-            json=_prefetch_body([1, 2, 3, 4], salt="bad@salt"),
+            "/cache/prefetches", json=_prefetch_body([1, 2, 3, 4], salt="bad@salt")
         )
         assert resp.status_code == 400
 
-    def test_503_when_engine_not_initialized(self):
+    def test_400_on_unsupported_direction(self):
+        client = TestClient(_make_prefetch_app(_ctx(layout=object())))
+        body = _prefetch_body([1, 2, 3, 4])
+        body["target_tier"] = "l2"
+        resp = client.post("/cache/prefetches", json=body)
+        assert resp.status_code == 400
+
+    def test_503_when_not_initialized(self):
         client = TestClient(_make_prefetch_app(None))
-        resp = client.post("/l2/prefetch", json=_prefetch_body([1, 2, 3, 4]))
+        assert (
+            client.post(
+                "/cache/prefetches", json=_prefetch_body([1, 2, 3, 4])
+            ).status_code
+            == 503
+        )
+
+
+# =============================================================================
+# Diagnostics (clear)
+# =============================================================================
+
+
+@dataclass
+class _ClearEngine:
+    clear_calls: int = 0
+    cache_contexts: Optional[dict] = None
+
+    def clear(self) -> None:
+        self.clear_calls += 1
+
+
+def _make_clear_app(engine: Optional[_ClearEngine]) -> FastAPI:
+    app = FastAPI()
+    app.include_router(cache_router)
+    register_error_handlers(app)
+    if engine is not None:
+        app.state.context = build_context(engine)
+    return app
+
+
+class TestClearEndpoint:
+    def test_clear_l1(self):
+        engine = _ClearEngine()
+        client = TestClient(_make_clear_app(engine))
+        resp = client.post("/cache/clear", json={"tier": "l1"})
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"status": "ok", "cleared": {"tier": "l1"}}
+        assert engine.clear_calls == 1
+
+    def test_clear_no_body_defaults_to_l1(self):
+        """The body is optional; an absent body defaults to tier l1."""
+        engine = _ClearEngine()
+        client = TestClient(_make_clear_app(engine))
+        resp = client.post("/cache/clear")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"status": "ok", "cleared": {"tier": "l1"}}
+        assert engine.clear_calls == 1
+
+    def test_clear_unsupported_tier(self):
+        client = TestClient(_make_clear_app(_ClearEngine()))
+        resp = client.post("/cache/clear", json={"tier": "l2"})
+        assert resp.status_code == 400
+
+    def test_clear_503_when_not_initialized(self):
+        assert (
+            TestClient(_make_clear_app(None)).post("/cache/clear", json={}).status_code
+            == 503
+        )
+
+    def test_checksums_503_when_not_initialized(self):
+        resp = TestClient(_make_clear_app(None)).post(
+            "/cache/checksums", json={"block_ids": [0], "chunk_size": 1}
+        )
         assert resp.status_code == 503
+
+    def test_checksums_501_when_engine_unsupported(self):
+        # _ClearEngine has cache_contexts=None -> 501.
+        client = TestClient(_make_clear_app(_ClearEngine()))
+        resp = client.post("/cache/checksums", json={"block_ids": [0], "chunk_size": 1})
+        assert resp.status_code == 501

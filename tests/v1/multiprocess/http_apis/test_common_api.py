@@ -54,11 +54,11 @@ class TestCommonApiAggregation:
         paths = set(app.openapi()["paths"])
         assert "/loglevel" in paths
 
-    def test_conf_endpoint_present(self):
-        """/conf from conf_api should be registered."""
+    def test_config_endpoint_present(self):
+        """/config from config_api should be registered."""
         app = _app_with_all_apis()
         paths = set(app.openapi()["paths"])
-        assert "/conf" in paths
+        assert "/config" in paths
 
 
 @dataclass

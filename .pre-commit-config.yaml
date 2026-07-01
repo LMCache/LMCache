@@ -31,6 +31,26 @@ repos:
         lmcache/.*/gpu_connector/.*|
         lmcache/v1/platform/.*
       )$
+  - id: ban-raw-timeout-error
+    name: Ban raw raise of builtin TimeoutError
+    entry: >-
+      bash -c '
+      matches=$(grep -rHnE "raise[[:space:]]+(asyncio\.)?TimeoutError\b" "$@");
+      if [ -n "$matches" ]; then
+        echo "";
+        echo "========================================";
+        echo "  BANNED: raw raise of builtin TimeoutError";
+        echo "  Fix: raise LMCacheTimeoutError from";
+        echo "       lmcache.v1.mp_observability.errors so the timeout";
+        echo "       is reported to MP observability (OTel).";
+        echo "========================================";
+        echo "";
+        echo "$matches";
+        exit 1;
+      fi' --
+    language: system
+    types: [python]
+    files: ^lmcache/
 - repo: https://github.com/PyCQA/isort
   rev: 6.0.1
   hooks:

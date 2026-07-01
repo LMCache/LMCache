@@ -137,6 +137,31 @@ needed when that happens.
 
 ---
 
+## Timeout Events
+
+Cross-component health event. Published by `LMCacheTimeoutError.__init__`
+(see `lmcache/v1/mp_observability/errors.py`) every time the exception is
+constructed, gated by `is_observability_enabled()` so it is a no-op outside
+the MP server process. The `session_id` on the `Event` dataclass correlates
+the timeout with the originating request when the raise site has it; it is
+empty otherwise.
+
+| EventType | Metadata keys | Types |
+|---|---|---|
+| `TIMEOUT_RAISED` | `message`, `exception_type`, `stacktrace` | `str`, `str`, `str` |
+
+- `message` — the exception's message string (`str(exc)`).
+- `exception_type` — the class name (`LMCacheTimeoutError` or a subclass).
+- `stacktrace` — the formatted construction stack (`traceback.format_stack()`
+  minus the `__init__` frame), surfaced as the OTel `exception.stacktrace`
+  attribute by the tracing subscriber.
+
+Consumed by `TimeoutMetricsSubscriber` (counter), `TimeoutLoggingSubscriber`
+(warning log), and `TimeoutTracingSubscriber` (OTel span with an `exception`
+event + ERROR status).
+
+---
+
 ## MP Server Lifecycle Sentinels
 
 CPU-synchronous sentinels published by `server.py` to bracket request scope.

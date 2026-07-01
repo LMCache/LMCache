@@ -8,8 +8,8 @@ when a tenant exceeds its quota. It is **opt-in** (gated by
 ``l2_event_reporting`` in ``CoordinatorConfig``) and **additive** (the existing
 per-server eviction is unchanged).
 
-Code: `lmcache/v1/mp_coordinator/l2/` (coordinator side),
-`lmcache/v1/mp_coordinator/http_apis/l2_api.py` (REST endpoints),
+Code: `lmcache/v1/mp_coordinator/cache_control/` (coordinator side),
+`lmcache/v1/mp_coordinator/http_apis/cache_api.py` (REST endpoints),
 `lmcache/v1/mp_coordinator/schemas.py` (wire types),
 `lmcache/v1/multiprocess/http_server.py` (MP-server wiring).
 
@@ -30,11 +30,11 @@ MP server (store/lookup)
         │
         ▼
   L2EventListener (L2AdapterListener)
-    converts ObjectKey → CacheKey, buffers UsageEvents
+    converts ObjectKey → EncodedObjectKey, buffers UsageEvents
         │  flush every l2_event_flush_interval (default 1s)
         │
         ▼
-  POST /l2/events ──▶ Coordinator
+  POST /quota/events ──▶ Coordinator
                         ├─ L2UsageManager: per-salt byte accounting
                         ├─ L2EvictionManager: per-salt LRU
                         └─ QuotaManager: per-salt byte limits
@@ -45,23 +45,27 @@ MP server (store/lookup)
   execute_evictions():
     for each tracked salt:
       limit = quota (default 0 → evict all)
-      if usage > limit → select LRU keys, log eviction plan
+      if usage ≥ watermark·limit → select LRU keys,
+        fire-and-forget DELETE /cache/objects to a holder
 ```
 
 ## Wire types (`schemas.py`)
 
-- **``CacheKey``** — frozen dataclass: ``chunk_hash_hex``, ``model_name``,
-  ``kv_rank``, ``cache_salt``. Torch-free equivalent of ``ObjectKey``;
-  ``chunk_hash`` is hex-encoded instead of raw bytes.
-- **``EventType``** — ``str`` enum: ``STORE``, ``LOOKUP``.
-- **``UsageEvent``** — ``type: EventType``, ``key: CacheKey``, ``bytes: int``.
-- **``ReportUsageRequest``** — batch of ``UsageEvent``s.
+- **``EncodedObjectKey``** — torch-free wire shape of ``ObjectKey`` (owned by
+  ``lmcache.v1.distributed.api``); ``chunk_hash`` is hex-encoded instead of raw
+  bytes. The coordinator rebuilds the canonical ``ObjectKey`` via
+  ``key.to_object_key()``.
+- **``EventType``** — ``str`` enum: ``STORE``, ``LOOKUP``, ``DELETE``.
+- **``UsageEvent``** — ``type: EventType``, ``key: EncodedObjectKey``,
+  ``bytes: int``.
+- **``ReportUsageRequest``** — ``instance_id``, ``seq``, ``events:
+  list[UsageEvent]``, ``tier`` (data, default ``l2``).
 
-The ``ObjectKey`` → ``CacheKey`` conversion happens at the MP-server boundary
-(``_object_key_to_cache_key`` in ``event_listener.py``), so the coordinator
-never imports ``torch``.
+The ``ObjectKey`` → ``EncodedObjectKey`` conversion happens at the MP-server
+boundary (``obj.to_encoded_object_key()`` in ``event_listener.py``), so the
+coordinator never imports ``torch``.
 
-## Coordinator components (`l2/`)
+## Coordinator components (`cache_control/`)
 
 ### L2UsageManager (`usage_manager.py`)
 
@@ -81,55 +85,57 @@ Unregistered salts default to a 0-byte limit (allowlist semantics).
 
 ### L2EvictionManager (`eviction_manager.py`)
 
-Per-``cache_salt`` LRU, mirroring ``IsolatedLRUEvictionPolicy`` but using
-``CacheKey`` and running in the coordinator process.
+Per-``cache_salt`` LRU for the coordinator process. It delegates the ordering to
+a coordinator-side ``IsolatedLRUEvictionPolicy`` instance, keyed by the canonical
+``ObjectKey`` (rebuilt from the wire ``EncodedObjectKey``). Per-salt byte
+accounting lives in ``L2UsageManager``; the eviction manager only tracks order.
 
-Data structures:
+- ``on_store(key)`` — register the key in the LRU
+  (``policy.on_keys_created``). The paired byte increment is the caller's job
+  (``L2UsageManager.record_stored``).
+- ``on_lookup(key)`` — touch (``policy.on_keys_touched``, move to MRU end).
+- ``on_remove(key)`` — drop from the LRU (``policy.on_keys_removed``); the paired
+  byte decrement is the caller's job (``L2UsageManager.record_evicted``).
+- ``compute_eviction_plan() -> dict[str, list[ObjectKey]]`` — **pure**: for each
+  tracked salt, fire when ``usage ≥ trigger_watermark · quota`` (quota 0 ⇒ evict
+  all), selecting ``eviction_ratio`` of the salt's LRU keys via
+  ``policy.get_eviction_actions``. No network, no mutation.
+- ``execute_evictions(registry, http_client)`` — computes the plan and
+  **fire-and-forget** ``DELETE /cache/objects`` to a holder MP server for each
+  salt's victims; on confirmed deletion ``on_remove`` drops them from tracking.
 
-```
-_per_salt_order : dict[str, OrderedDict[CacheKey, None]]   # LRU per salt
-_key_sizes      : dict[CacheKey, int]                       # byte size per key
-```
-
-- ``on_store(key, size_bytes)`` — insert/refresh in LRU, record size.
-- ``on_lookup(key)`` — touch (move to MRU end).
-- ``on_remove(keys)`` — remove from LRU tracking after confirmed deletion.
-- ``execute_evictions()`` — for each tracked salt, compare usage (from
-  ``L2UsageManager``) against quota (from ``QuotaManager``, default 0). If over
-  quota, select LRU keys targeting ``eviction_ratio`` of the overage. No quota
-  or zero quota means evict all keys for that salt.
-
-Eviction is currently **log-only**: ``execute_evictions`` returns the plan but
-does not issue deletes. Once wired end-to-end, ``on_remove`` will be called
-after the MP server confirms deletion.
-
-## REST endpoints (`l2_api.py`)
+## REST endpoints (`quota_api.py`)
 
 | Method | Path | Description |
 | --- | --- | --- |
-| ``PUT`` | ``/l2/quota/{cache_salt}`` | Set quota (GiB) |
-| ``DELETE`` | ``/l2/quota/{cache_salt}`` | Remove quota |
-| ``POST`` | ``/l2/events`` | Ingest batch of store/lookup events |
-| ``GET`` | ``/l2/status/{cache_salt}`` | Quota + usage for one salt |
-| ``GET`` | ``/l2/status`` | Quota + usage for all salts |
+| ``PUT`` | ``/quota/{cache_salt}`` | Set quota (GiB) |
+| ``DELETE`` | ``/quota/{cache_salt}`` | Remove quota |
+| ``GET`` | ``/quota/{cache_salt}`` | Quota + usage for one salt |
+| ``GET`` | ``/quota`` | Quota + usage for all salts |
+| ``POST`` | ``/quota/events`` | Ingest batch of store/lookup/delete events |
 
-Status responses report usage in GiB only (no raw bytes in the API).
+These quota/usage-accounting endpoints live in the ``/quota`` group (mirroring
+the MP server's node-local ``/quota``); warm-prefetch dispatch is the only thing
+left on the coordinator's ``/cache/*`` surface (``cache_api.py``). Paths are
+tier-neutral; the tier is request data (`tier`, default `l2`). Status responses
+report usage in GiB only (no raw bytes in the API).
 
 ## MP-server event listener (`event_listener.py`)
 
 ``L2EventListener`` implements ``L2AdapterListener`` and is registered
 on all L2 adapters via ``StorageManager.register_l2_listener()``. It:
 
-1. Receives ``on_l2_keys_stored(keys, sizes)`` and ``on_l2_keys_accessed(keys)``
-   callbacks from the L2 adapter (any thread).
-2. Converts each ``ObjectKey`` to ``CacheKey`` (hex-encodes ``chunk_hash``).
+1. Receives ``on_l2_keys_stored(keys, sizes)``, ``on_l2_keys_accessed(keys)``,
+   and ``on_l2_keys_deleted(keys)`` callbacks from the L2 adapter (any thread).
+2. Converts each ``ObjectKey`` to ``EncodedObjectKey`` (hex-encodes
+   ``chunk_hash``).
 3. Buffers ``UsageEvent``s under a lock.
-4. Flushes the buffer to ``POST /l2/events`` on a timer
+4. Flushes the buffer to ``POST /quota/events`` on a timer
    (``l2_event_flush_interval``, default 1s). Failures are logged and the
    batch is dropped to prevent unbounded growth.
 
-``on_l2_keys_deleted`` is a no-op — the coordinator handles deletion via its
-own eviction loop.
+``on_l2_keys_deleted`` buffers a ``DELETE`` event so the coordinator can drop
+the key from its usage accounting and LRU tracking.
 
 ## Configuration
 
@@ -138,7 +144,8 @@ own eviction loop.
 | Field | Default | Description |
 | --- | --- | --- |
 | ``eviction_check_interval`` | ``5.0`` | Seconds between eviction cycles (0 disables) |
-| ``eviction_ratio`` | ``0.5`` | Fraction of over-quota bytes to target per cycle |
+| ``eviction_ratio`` | ``0.2`` | Fraction of a salt's LRU keys (by count) to evict per cycle |
+| ``trigger_watermark`` | ``1.0`` | Eviction fires when usage reaches this fraction of the quota |
 
 ### MP-server side (`CoordinatorConfig`)
 
