@@ -27,8 +27,10 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
     when NIXL is enabled as NIXL relies on the paging abstraction.
     """
 
-    def __init__(self):
-        pass
+    def __init__(self) -> None:
+        self.cpu_buffer: torch.Tensor | None = None
+        self.cpu_size = 0
+        self.cpu_numa_mapping: Optional[NUMAMapping] = None
 
     def init_gpu_memory_allocator(
         self,
@@ -57,8 +59,10 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
         dtypes: list[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         numa_mapping: Optional[NUMAMapping] = None,
-    ):
+    ) -> None:
         self.cpu_buffer = memory_management._allocate_cpu_memory(size, numa_mapping)
+        self.cpu_size = size
+        self.cpu_numa_mapping = numa_mapping
         self.cpu_allocator = PagedTensorMemoryAllocator(
             self.cpu_buffer,
             shapes,
@@ -116,6 +120,17 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
             self.cpu_allocator.batched_free(memory_objs, update_stats=update_stats)
         else:
             raise ValueError(f"Unsupported allocator type: {allocator_type}")
+
+    def close(self) -> None:
+        if self.cpu_buffer is not None and self.cpu_buffer.numel() > 0:
+            memory_management._free_cpu_memory(
+                self.cpu_buffer,
+                self.cpu_size,
+                self.cpu_numa_mapping,
+            )
+            self.cpu_buffer = torch.empty(0, dtype=torch.uint8)
+            self.cpu_size = 0
+            self.cpu_numa_mapping = None
 
     def __str__(self):
         return "PDMemoryAllocator"
