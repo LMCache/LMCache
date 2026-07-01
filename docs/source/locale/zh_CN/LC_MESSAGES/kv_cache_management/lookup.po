@@ -83,3 +83,7 @@ msgid ""
 "an identifier of the controller operation and can typically be ignored."
 msgstr "字段 ``lmcache_default_instance`` 显示实例 ID，后面是一个元组 ``(location, matched_prefix_length)``，指示该实例内的缓存位置和匹配前缀长度。 ``event_id`` 是控制器操作的标识符，通常可以忽略。"
 
+
+#: ../../source/kv_cache_management/lookup.rst:1
+msgid "This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance."
+msgstr "本页面介绍 LMCache 进程内模式（不推荐使用）的行为。建议改用 :doc:`LMCache MP 模式 </mp/index>`\\ 以获得更好的功能支持与性能。"

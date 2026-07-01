@@ -212,3 +212,7 @@ msgid ""
 "that async lookup can skip loading parts already hit in vLLM."
 msgstr "通过传递 vLLM 前缀缓存命中令牌来改进查找框架，以便异步查找可以跳过已在 vLLM 中命中的部分加载。"
 
+
+#: ../../source/kv_cache/async_loading.rst:1
+msgid "This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance."
+msgstr "本页面介绍 LMCache 进程内模式（不推荐使用）的行为。建议改用 :doc:`LMCache MP 模式 </mp/index>`\\ 以获得更好的功能支持与性能。"

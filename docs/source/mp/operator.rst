@@ -445,8 +445,8 @@ L2 Storage
      - List of L2 backends (``type`` + ``config``).
        See :doc:`l2_storage/index`.
 
-GPU Vendor
-~~~~~~~~~~
+GPU & Security
+~~~~~~~~~~~~~~
 
 .. list-table::
    :header-rows: 1
@@ -458,7 +458,16 @@ GPU Vendor
    * - ``gpuVendor``
      - ``nvidia``
      - GPU vendor: ``nvidia`` (uses the ``nvidia`` RuntimeClass) or ``amd``
-       (runs on the default runtime with ``privileged: true``).
+       (runs on the default runtime).
+   * - ``privileged``
+     - ``false``
+     - Run the engine container in privileged mode. On most clusters
+       ``runtimeClassName: nvidia`` + ``NVIDIA_VISIBLE_DEVICES=all`` already
+       grant GPU visibility without it; set ``true`` only where the engine
+       cannot otherwise see the GPUs. Required for ``gpuVendor: amd`` (no
+       RuntimeClass device injection, so privileged is the only path to
+       ``/dev/kfd``/``/dev/dri``). Enabling it requires the namespace to allow
+       the ``privileged`` Pod Security Standard.
 
 Scheduling
 ~~~~~~~~~~
@@ -755,9 +764,10 @@ It has two halves the operator runs together:
 
 - a GPU-resident CacheBlend V3 engine (``lmcache server --engine-type blend``),
   deployed as a DaemonSet with the **same GPU model as** ``LMCacheEngine``
-  (``privileged`` + ``runtimeClassName: nvidia`` + ``NVIDIA_VISIBLE_DEVICES=all``
-  + ``hostIPC``, and **no** ``nvidia.com/gpu`` claim) so it shares the vLLM GPU
-  for same-device CUDA IPC; and
+  (``runtimeClassName: nvidia`` + ``NVIDIA_VISIBLE_DEVICES=all`` + ``hostIPC``,
+  plus ``privileged`` when ``spec.privileged`` is set, and **no**
+  ``nvidia.com/gpu`` claim) so it shares the vLLM GPU for same-device CUDA IPC;
+  and
 - the vLLM-side plugin, injected into opted-in pods by the webhook.
 
 Additional Prerequisites
@@ -1211,6 +1221,10 @@ resources from other processes on the same host.
 - Clusters using Pod Security Standards must allow the ``privileged`` profile
   for the LMCache namespace -- the ``baseline`` and ``restricted`` profiles
   reject ``hostIPC``.
+- ``spec.privileged`` defaults to ``false``. When enabled (required for
+  ``gpuVendor: amd``), the engine container additionally runs privileged,
+  granting it full device access -- enable it only where GPU visibility
+  requires it.
 
 Development
 -----------

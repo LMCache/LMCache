@@ -116,3 +116,7 @@ msgstr ":doc:`../kv_cache_management/index` - KV Cache 管理指南"
 msgid ":doc:`freeze_mode` - Freeze Mode safety mechanism guide"
 msgstr ":doc:`freeze_mode` - 冻结模式安全机制指南"
 
+
+#: ../../source/controller/index.rst:1
+msgid "This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/coordinator`."
+msgstr "本页面介绍 LMCache 进程内模式（不推荐使用）的行为。建议改用 :doc:`LMCache MP 模式 </mp/index>`\\ 以获得更好的功能支持与性能。本页面对应的 MP 模式文档请参见 :doc:`/mp/coordinator`\\ 。"
