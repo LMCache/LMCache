@@ -62,7 +62,7 @@ def test_get_backend_prefers_musa_ops_over_cuda_when_musa_is_available(
 ) -> None:
     """Backend composition follows device detection priority when MUSA is active."""
     # First Party
-    from lmcache.v1.platform.device_detection import _detect_device, get_backend
+    from lmcache.v1.platform import _detect_device, get_backend
     from lmcache.v1.platform.musa import ops as musa_ops
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)

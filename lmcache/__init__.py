@@ -9,9 +9,9 @@ from lmcache.logging import init_logger
 # --------------------------
 # Backend instance & Device detection
 # --------------------------
-from lmcache.v1.platform.device_detection import get_backend
-from lmcache.v1.platform.device_detection import torch_dev as torch_dev
-from lmcache.v1.platform.device_detection import torch_device_type as torch_device_type
+from lmcache.v1.platform import get_backend
+from lmcache.v1.platform import torch_dev as torch_dev
+from lmcache.v1.platform import torch_device_type as torch_device_type
 
 try:
     # First Party

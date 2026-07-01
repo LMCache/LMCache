@@ -6,7 +6,7 @@ These tests cover the design contract documented in
 ``docs/source/developer_guide/musa_support_design.rst``:
 
 - Device detection via the registry-driven
-  :func:`lmcache.v1.platform.device_detection._detect_device`.
+  :func:`lmcache.v1.platform._detect_device`.
 - Factory dispatch in :func:`lmcache.v1.gpu_connector.CreateGPUConnector`,
   including fail-fast validation when device-scoped features are requested on
   accelerators without connector support.
@@ -114,7 +114,7 @@ class _StubTorch:
 def _detect_with_stub(stub: _StubTorch) -> tuple[Any, str]:
     """Run ``_detect_device`` with ``torch`` swapped for the stub."""
     # First Party
-    from lmcache.v1.platform.device_detection import _detect_device
+    from lmcache.v1.platform import _detect_device
 
     with patch.dict("sys.modules", {"torch": stub}):
         return _detect_device()

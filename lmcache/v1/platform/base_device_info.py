@@ -5,7 +5,7 @@ Each accelerator sub-package (``platform/cuda``, ``platform/musa``, ...)
 provides a concrete :class:`DeviceInfo` subclass that describes how to
 detect the device and which ops backend to load.
 
-The :mod:`~lmcache.v1.platform.device_detection` module discovers these
+The :mod:`~lmcache.v1.platform` module discovers these
 subclasses automatically at import time via ``pkgutil.iter_modules``:
 it imports each sub-package, inspects its module namespace for
 :class:`DeviceInfo` subclasses, instantiates them, and uses the
@@ -16,11 +16,11 @@ simply defining the subclass in the sub-package's ``__init__.py`` is
 enough.
 """
 
-# Future
-from __future__ import annotations
-
 # Standard
 import abc
+
+# First Party
+from lmcache.v1.platform.base_pin_memory import PinMemoryBackend
 
 
 class DeviceInfo(abc.ABC):
@@ -67,3 +67,14 @@ class DeviceInfo(abc.ABC):
     def priority(self) -> int:
         """Precedence priority for device detection (lower values checked first)."""
         return 10
+
+    @property
+    def pin_memory_backend(self) -> type[PinMemoryBackend] | None:
+        """PinMemoryBackend subclass for this device, or None for default.
+
+        Subclasses that support host-memory pinning should override this
+        property and return the appropriate backend class.  Use a lazy
+        import inside the property body to avoid heavy imports at class
+        definition time.
+        """
+        return None

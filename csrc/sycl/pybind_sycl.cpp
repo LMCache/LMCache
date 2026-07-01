@@ -59,7 +59,7 @@ PYBIND11_MODULE(xpu_ops, m) {
 
   // CacheGen / RoPE kernels (Intel XPU).  Names match the
   // lmcache.python_ops_fallback module so the backend selection in
-  // lmcache.v1.platform.device_detection can transparently override.
+  // lmcache.v1.platform can transparently override.
   m.def("calculate_cdf", &calculate_cdf_xpu, py::arg("input"),
         py::arg("max_bins"));
   m.def("rotary_embedding_k_fused", &rotary_embedding_k_fused_xpu,
