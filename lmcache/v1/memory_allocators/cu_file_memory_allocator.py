@@ -27,8 +27,12 @@ class CuFileMemoryAllocator(GPUMemoryAllocator):
         self.base_pointer = self.tensor.data_ptr()
         cuFileBufRegister(ctypes.c_void_p(self.base_pointer), size, flags=0)
 
-    def __del__(self):
-        self.cuFileBufDeregister(ctypes.c_void_p(self.base_pointer))
+    def __del__(self) -> None:
+        if hasattr(self, "base_pointer") and hasattr(self, "cuFileBufDeregister"):
+            try:
+                self.cuFileBufDeregister(ctypes.c_void_p(self.base_pointer))
+            except Exception:
+                pass
 
     def __str__(self):
         return "CuFileMemoryAllocator"
