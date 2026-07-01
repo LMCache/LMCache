@@ -73,7 +73,9 @@ def _object_key_to_filename(key: ObjectKey) -> str:
     """
     safe_model_name = key.model_name.replace("/", "--")
     chunk_hex = key.chunk_hash.hex()
-    return f"{safe_model_name}_{key.kv_rank:08x}_{chunk_hex}.bin"
+    return (
+        f"{safe_model_name}_{key.kv_rank:08x}_{key.object_group_id:x}_{chunk_hex}.bin"
+    )
 
 
 # ---------------------------------------------------------------
@@ -101,6 +103,7 @@ class DynamicNixlStorageAgent:
         self.backend_params = backend_params
         self.l1_align_bytes = l1_memory_desc.align_bytes
         self.file_path = backend_params["file_path"]
+        os.makedirs(self.file_path, exist_ok=True)
         self.use_direct_io = (
             str(backend_params.get("use_direct_io", "false")).lower() == "true"
         )
@@ -418,7 +421,9 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
     # Lookup and Lock Interface
     #####################
 
-    def submit_lookup_and_lock_task(self, keys: list[ObjectKey]) -> L2TaskId:
+    def submit_lookup_and_lock_task(
+        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+    ) -> L2TaskId:
         with self._lock:
             task_id = self._get_next_task_id()
 

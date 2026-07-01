@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# Future
+from __future__ import annotations
+
 # Standard
 from dataclasses import dataclass
 from typing import Optional
 import os
 import threading
-import time
 
 # Third Party
 from sglang.srt.configs.model_config import ModelConfig
@@ -27,30 +29,37 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
 )
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
+from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.multiprocess.custom_types import (
-    CudaIPCWrapper,
-    IPCCacheEngineKey,
+    IPCCacheServerKey,
+    KVCache,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
 
 logger = init_logger(__name__)
+
+# Extra seconds the WAIT_PREFETCH_STATUS response is allowed beyond the daemon's
+# own blocking-wait budget, to cover the request/response round trip.
+_WAIT_LOOKUP_RESPONSE_BUFFER_S = 5.0
 
 
 def _wrap_sglang_kv_caches(
     k_pool: list[torch.Tensor],
     v_pool: list[torch.Tensor],
-) -> list[CudaIPCWrapper]:
+) -> KVCache:
     """Flatten SGLang's depth-2 ``[K_layers, V_layers]`` KV layout into a
-    single flat ``list[CudaIPCWrapper]`` so it fits upstream's wire
+    single flat ``KVCache`` so it fits upstream's wire
     ``KVCache`` payload type. The daemon's
     :func:`normalize_kv_and_discover_format` recognizes this shape from
     ``EngineType.SGLANG`` plus a ``tokens_per_block`` ``LayoutHints`` field
     and splits it back at its midpoint before format detection.
     """
-    return [CudaIPCWrapper(tensor) for tensor in k_pool] + [
-        CudaIPCWrapper(tensor) for tensor in v_pool
-    ]
+    wrapped: KVCache = []
+    wrapped.extend(CudaIPCWrapper(tensor) for tensor in k_pool)
+    wrapped.extend(CudaIPCWrapper(tensor) for tensor in v_pool)
+    return wrapped
 
 
 @dataclass
@@ -135,11 +144,14 @@ class LMCacheMPConnector:
 
         # Upstream's REGISTER_KV_CACHE protocol takes flat positional args:
         # (instance_id, kv_cache, model_name, world_size, engine_type,
-        # layout_hints). SGLang's natural KV layout is depth-2
+        # layout_hints, engine_group_infos). SGLang's natural KV layout is depth-2
         # ([K_layers, V_layers]); we flatten it on the wire to fit
-        # ``KVCache = list[CudaIPCWrapper]``. The daemon recognizes the
+        # ``KVCache = list[DeviceIPCWrapper]``. The daemon recognizes the
         # SGLang-MHA flat-of-2NL pattern from ``EngineType.SGLANG`` plus the
         # ``tokens_per_block`` hint and un-flattens + reshapes per layer.
+        # SGLang is non-hybrid (a single KV cache group), so engine_group_infos is the
+        # empty list -- which the server treats as one group spanning all layers
+        # (matching the vLLM non-hybrid and TensorRT-LLM register paths).
         send_lmcache_request(
             self.mq_client,
             RequestType.REGISTER_KV_CACHE,
@@ -150,6 +162,7 @@ class LMCacheMPConnector:
                 self.tp_size,
                 EngineType.SGLANG,
                 {"tokens_per_block": self.page_size},
+                [],
             ],
         ).result(timeout=self._mq_timeout)
         self._registered = True
@@ -162,6 +175,7 @@ class LMCacheMPConnector:
             mq_client=self.mq_client,
             health_event=self._health_event,
             interval=self._heartbeat_interval,
+            instance_id=self.instance_id,
         )
         self._heartbeat.start()
 
@@ -187,8 +201,8 @@ class LMCacheMPConnector:
         end: int,
         request_id: str,
         no_worker_id: bool = False,
-    ) -> IPCCacheEngineKey:
-        return IPCCacheEngineKey(
+    ) -> IPCCacheServerKey:
+        return IPCCacheServerKey(
             model_name=self.model_name,
             world_size=self.tp_size,
             worker_id=None if no_worker_id else self.worker_id,
@@ -220,26 +234,27 @@ class LMCacheMPConnector:
         return (starts // self.page_size).tolist()
 
     def _wait_for_lookup(self, request_id: str) -> int:
-        """Poll QUERY_PREFETCH_STATUS with the LOOKUP's request_id until the
-        daemon reports a chunk count. Upstream switched LOOKUP to a fire-
-        and-forget call and keys the prefetch job by request_id (a string);
-        the result is the number of matched chunks once available.
+        """Wait for the LOOKUP's prefetch to finish and return the matched bytes.
+
+        Sends a single blocking WAIT_PREFETCH_STATUS request so the daemon
+        blocks until the prefetch result is published (or its wait times out),
+        instead of the client busy-polling QUERY_PREFETCH_STATUS. Upstream keys
+        the prefetch job by request_id (a string); the result is the number of
+        matched chunks once available.
         """
-        # TODO(Shaoting): busy poll. No effect when using L1 only. A real fix
-        # needs a blocking QUERY_PREFETCH_STATUS variant on the daemon side
-        # (new RequestType + PrefetchController completion Event).
-        deadline = time.monotonic() + self._mq_timeout
-        while True:
-            matched_chunks = send_lmcache_request(
-                self.mq_client,
-                RequestType.QUERY_PREFETCH_STATUS,
-                [request_id],
-            ).result(timeout=self._mq_timeout)
-            if matched_chunks is not None:
-                return matched_chunks * self._lmcache_chunk_size
-            if time.monotonic() >= deadline:
-                raise TimeoutError("Timed out waiting for LMCache prefetch to finish")
-            time.sleep(0.001)
+        # The daemon blocks up to ``self._mq_timeout`` for the result, so give
+        # the response itself a little longer than that to cover the round trip.
+        matched_chunks = send_lmcache_request(
+            self.mq_client,
+            RequestType.WAIT_PREFETCH_STATUS,
+            [request_id, self._mq_timeout],
+        ).result(timeout=self._mq_timeout + _WAIT_LOOKUP_RESPONSE_BUFFER_S)
+        if matched_chunks is None:
+            raise LMCacheTimeoutError(
+                "Timed out waiting for LMCache prefetch to finish",
+                session_id=request_id,
+            )
+        return matched_chunks * self._lmcache_chunk_size
 
     def _free_lookup_locks(
         self,
@@ -388,7 +403,9 @@ class LMCacheMPConnector:
                     request_id=request_id,
                 ),
                 self.instance_id,
-                block_ids,
+                # RETRIEVE takes per-group block IDs (list[list[int]]); SGLang is
+                # non-hybrid, so wrap the flat list as a single group.
+                [block_ids],
                 event.ipc_handle(),
                 skip_prefix_n_blocks,
             ],
@@ -502,7 +519,9 @@ class LMCacheMPConnector:
                         request_id=request_id,
                     ),
                     self.instance_id,
-                    block_ids,
+                    # STORE takes per-group block IDs (list[list[int]]); SGLang is
+                    # non-hybrid, so wrap the flat list as a single group.
+                    [block_ids],
                     event.ipc_handle(),
                 ],
             )

@@ -2348,7 +2348,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "description": "CacheBlend token-level hit rate and chunk throughput for store and retrieve paths.",
+          "description": "Overall blend token hit rate (left, %) and chunk throughput (right, ops/s). Prometheus.",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -2389,6 +2389,8 @@
                 }
               },
               "mappings": [],
+              "min": 0,
+              "unit": "percentunit",
               "thresholds": {
                 "mode": "absolute",
                 "steps": [
@@ -2397,14 +2399,13 @@
                     "value": null
                   }
                 ]
-              },
-              "unit": "percentunit"
+              }
             },
             "overrides": [
               {
                 "matcher": {
-                  "id": "byRegexp",
-                  "options": "/chunks/"
+                  "id": "byFrameRefID",
+                  "options": "B"
                 },
                 "properties": [
                   {
@@ -2414,6 +2415,90 @@
                   {
                     "id": "custom.axisPlacement",
                     "value": "right"
+                  },
+                  {
+                    "id": "custom.axisLabel",
+                    "value": "chunks/s"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "C"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "ops"
+                  },
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "right"
+                  },
+                  {
+                    "id": "custom.axisLabel",
+                    "value": "chunks/s"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "D"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "ops"
+                  },
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "right"
+                  },
+                  {
+                    "id": "custom.axisLabel",
+                    "value": "chunks/s"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "E"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "ops"
+                  },
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "right"
+                  },
+                  {
+                    "id": "custom.axisLabel",
+                    "value": "chunks/s"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "F"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "ops"
+                  },
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "right"
+                  },
+                  {
+                    "id": "custom.axisLabel",
+                    "value": "chunks/s"
                   }
                 ]
               }
@@ -2482,6 +2567,154 @@
           ],
           "title": "CacheBlend Hit Rate & Chunks",
           "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "description": "Prefix vs non-prefix token hit rate (each / requested tokens; they sum to the overall hit rate). Prometheus.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "showValues": false,
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "min": 0,
+              "unit": "percentunit",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 92
+          },
+          "id": 34,
+          "options": {
+            "legend": {
+              "calcs": [
+                "mean",
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "editorMode": "code",
+              "refId": "A",
+              "expr": "rate(lmcache_blend_lookup_prefix_hit_tokens_total[$__rate_interval]) / rate(lmcache_blend_lookup_requested_tokens_total[$__rate_interval])",
+              "legendFormat": "prefix hit rate"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "editorMode": "code",
+              "refId": "B",
+              "expr": "rate(lmcache_blend_lookup_non_prefix_hit_tokens_total[$__rate_interval]) / rate(lmcache_blend_lookup_requested_tokens_total[$__rate_interval])",
+              "legendFormat": "non-prefix hit rate"
+            }
+          ],
+          "title": "CacheBlend prefix vs non-prefix hit rate",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "uid": "tempo"
+          },
+          "description": "Waterfall of CacheBlend (blend server) request spans: cb.request \u2192 cb.lookup {cb.fingerprint_match, cb.sparse_prefetch}, cb.retrieve {cb.scatter}, cb.store_pre_computed, cb.store_final. Click a row for the full Tempo waterfall.",
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 12,
+            "w": 24,
+            "x": 0,
+            "y": 100
+          },
+          "id": 51,
+          "options": {
+            "dedupStrategy": "none",
+            "sortBy": [
+              {
+                "desc": true,
+                "displayName": "Start time"
+              }
+            ],
+            "spanFilters": {
+              "criticalPathOnly": false,
+              "matchesOnly": false
+            }
+          },
+          "targets": [
+            {
+              "limit": 20,
+              "query": "{ name = \"cb.request\" }",
+              "queryType": "traceql",
+              "refId": "A"
+            }
+          ],
+          "title": "CacheBlend Request Traces",
+          "type": "traces"
         }
       ]
     },
@@ -2553,6 +2786,6 @@
   "timezone": "browser",
   "title": "LMCache",
   "uid": "lmcache-standard",
-  "version": 2,
+  "version": 8,
   "weekStart": ""
 }

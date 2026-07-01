@@ -15,8 +15,7 @@ import zmq
 from lmcache.utils import EngineType
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
-    CudaIPCWrapper,
-    IPCCacheEngineKey,
+    IPCCacheServerKey,
 )
 from lmcache.v1.multiprocess.mq import (
     BlockingRequestHandler,
@@ -29,6 +28,7 @@ from lmcache.v1.multiprocess.protocol import (
     get_payload_classes,
 )
 from lmcache.v1.multiprocess.server import add_handler_helper
+from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
 
 # Test helpers
 from tests.v1.multiprocess import test_mq_handler_helpers
@@ -38,13 +38,13 @@ from tests.v1.multiprocess import test_mq_handler_helpers
 # ==============================================================================
 
 
-def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheEngineKey:
+def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheServerKey:
     """
     Create a cache key for testing.
     """
     chunk_size = 256
     token_ids = [index] * chunk_size
-    return IPCCacheEngineKey.from_token_ids(
+    return IPCCacheServerKey.from_token_ids(
         model,
         1,
         0,
@@ -392,6 +392,7 @@ def test_mq_register_kv_cache():
             1,
             EngineType.VLLM,
             {"vllm_block_size": 16},
+            [],
         ],
         expected_response=None,
         num_requests=1,
@@ -448,13 +449,13 @@ def test_mq_unregister_kv_cache_multiple_clients():
 def test_mq_store():
     """
     Test MessageQueue with STORE request type.
-    STORE takes (key: KeyType, gpu_id: int, gpu_block_ids: list[int],
+    STORE takes (key: KeyType, gpu_id: int, gpu_block_ids: list[list[int]],
     event_ipc_handle: bytes) and returns (bytes, bool).
     """
     # Create test key
     key = create_cache_key(0)
     gpu_id = 0
-    gpu_block_ids = [0, 1, 2]
+    gpu_block_ids = [[0, 1, 2]]
     test_handle = b"\x00" * 64
 
     # Create test helper and register handler
@@ -473,13 +474,13 @@ def test_mq_store():
 def test_mq_retrieve():
     """
     Test MessageQueue with RETRIEVE request type.
-    RETRIEVE takes (key: KeyType, gpu_id: int, gpu_block_ids: list[int],
+    RETRIEVE takes (key: KeyType, gpu_id: int, gpu_block_ids: list[list[int]],
     event_ipc_handle: bytes) and returns (bytes, bool).
     """
     # Create test key
     key = create_cache_key(0)
     gpu_id = 0
-    gpu_block_ids = [0, 1, 2]
+    gpu_block_ids = [[0, 1, 2]]
     test_handle = b"\x00" * 64
 
     # Create test helper and register handler

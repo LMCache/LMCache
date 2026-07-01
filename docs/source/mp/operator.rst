@@ -103,7 +103,13 @@ Connecting vLLM
 ---------------
 
 The operator creates a ConfigMap named ``<engine-name>-connection`` containing
-the ``kv-transfer-config`` JSON.  Mount it in your vLLM Deployment:
+the ``kv-transfer-config`` JSON.  You can either let the operator's mutating
+webhook inject it for you (recommended -- keeps your vLLM manifest clean) or
+mount it by hand.  See :ref:`mp-operator-connection-injection` below for the
+webhook flow; the rest of this section describes the manual mount that is its
+equivalent.
+
+Mount it in your vLLM Deployment:
 
 .. code-block:: yaml
 
@@ -163,6 +169,127 @@ Key requirements for vLLM pods:
   inline.  The ConfigMap name is always ``<LMCacheEngine name>-connection``.
 - **No hostNetwork needed** -- The operator's node-local Service handles
   routing via ``internalTrafficPolicy=Local``.
+
+.. _mp-operator-connection-injection:
+
+Connection Injection (Webhook)
+-------------------------------
+
+Hand-wiring the ConfigMap mount and the ``$(cat ...)`` argument substitution
+above is repetitive across vLLM Deployments.  A **mutating admission webhook**
+shipped with the operator can do it for you so the vLLM manifest stays clean.
+It mirrors the CacheBlend webhook (see :ref:`mp-operator-cacheblend`) with an
+``lmcache-`` annotation/label discriminator so the two injectors never
+cross-fire on the same pod.
+
+When invoked on an opted-in pod whose ``<engine>-connection`` ConfigMap exists,
+the webhook mutates the pod at admission time to add:
+
+- ``--kv-transfer-config <JSON>`` -- the ``LMCacheMPConnector`` config, read
+  verbatim from the engine's ``<engine>-connection`` ConfigMap and inlined onto
+  the vLLM container's ``args`` (no volume mount needed);
+- ``hostIPC: true`` on the pod spec (CUDA IPC with the node-local server);
+- ``PYTHONHASHSEED=0`` on the vLLM container env, **set-if-absent** -- it
+  preserves a value you already set.
+
+Unlike the CacheBlend injector it does **not** consult the engine CR: the
+entire connector config lives in the connection ConfigMap, and
+``LMCacheEngine`` has no injection sub-spec.  It fails open
+(``failurePolicy: Ignore``) and is idempotent (re-admitted pods carrying the
+``lmcache.ai/lmcache-injected`` stamp are allowed unchanged).
+
+Prerequisites
+~~~~~~~~~~~~~
+
+- **cert-manager** + ``make deploy`` (not ``make run``, which is
+  controller-only and disables the webhook via ``ENABLE_WEBHOOKS=false``) --
+  same as the CacheBlend webhook; install once per cluster (see
+  :ref:`mp-operator-cacheblend` "Additional Prerequisites").
+- **Pod Security Standards** -- the injected ``hostIPC`` is rejected by the
+  ``baseline`` / ``restricted`` PSS profiles, so the vLLM pod's namespace must
+  be labeled ``pod-security.kubernetes.io/enforce=privileged``.
+- **Engine reconciled in the same namespace** -- the webhook reads the
+  ``<engine>-connection`` ConfigMap directly, so the ``LMCacheEngine`` must
+  already exist in the vLLM pod's namespace.
+
+Opting a vLLM Pod In
+~~~~~~~~~~~~~~~~~~~~
+
+Add the opt-in label and the engine-binding annotation to the pod template, and
+launch vLLM via the image **ENTRYPOINT** (args only) -- a
+``command: ["/bin/sh", "-c", ...]`` wrapper is skipped (the webhook stamps
+``lmcache.ai/lmcache-skip-reason=command-override`` because appended args would
+not reach ``vllm serve``):
+
+.. code-block:: yaml
+
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: vllm-lmcache
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: vllm-lmcache
+      template:
+        metadata:
+          labels:
+            app: vllm-lmcache
+            lmcache.ai/lmcache-inject: "true"        # opt-in (webhook objectSelector)
+          annotations:
+            lmcache.ai/lmcache-engine: "my-cache"    # bind to the engine (same namespace)
+            # Optional -- name the vLLM container if it is not the first one:
+            # lmcache.ai/lmcache-container: "vllm"
+        spec:
+          runtimeClassName: nvidia
+          # Do NOT set hostIPC here or mount an emptyDir at /dev/shm -- the
+          # webhook injects hostIPC=true; an emptyDir would shadow the host's
+          # /dev/shm and break cudaIpcOpenMemHandle.
+          containers:
+            - name: vllm
+              image: lmcache/vllm-openai:latest
+              # Args-only launch (image ENTRYPOINT is ["vllm", "serve"]). The
+              # webhook appends --kv-transfer-config; do NOT add it yourself
+              # (a user-supplied one stamps skip-reason=kv-transfer-config-present).
+              args: ["<your-model>", "--port", "8000", "--gpu-memory-utilization", "0.8"]
+              ports:
+                - name: http
+                  containerPort: 8000
+              resources:
+                limits:
+                  nvidia.com/gpu: "1"
+
+A ready-to-edit manifest lives at
+``operator/config/samples/vllm_lmcache_deployment.yaml``.
+
+Verifying Injection
+~~~~~~~~~~~~~~~~~~~
+
+The webhook mutates **Pods**, not the Deployment, so inspect a pod (not the
+Deployment spec):
+
+.. code-block:: bash
+
+    kubectl get pod -l app=vllm-lmcache -o yaml | \
+      grep -E "hostIPC|kv-transfer-config|lmcache-injected|lmcache-skip-reason"
+
+If nothing was injected, check the pod's ``lmcache.ai/lmcache-skip-reason``
+annotation:
+
+- ``command-override`` -- the pod uses a ``sh -c`` wrapper, so injected args
+  would not reach ``vllm serve``.
+- ``kv-transfer-config-present`` -- the user already supplied
+  ``--kv-transfer-config``; the webhook does not clobber it.
+- ``engine-not-found`` -- the ``<engine>-connection`` ConfigMap is missing
+  (engine not yet reconciled, or wrong namespace, or wrong name).
+- ``target-container-not-found`` -- the
+  ``lmcache.ai/lmcache-container`` annotation names a container the pod does
+  not have.
+
+With ``failurePolicy: Ignore`` a webhook / cert problem also leaves the pod
+un-mutated silently -- confirm the operator pod is ``Running`` and the
+``MutatingWebhookConfiguration`` exists.
 
 Verifying the Deployment
 ------------------------
@@ -238,6 +365,9 @@ Server
    * - ``server.hashAlgorithm``
      - ``blake3``
      - ``builtin``, ``sha256_cbor``, or ``blake3``.
+   * - ``server.httpPort``
+     - ``8080``
+     - HTTP frontend port for health checks and cache admin (1024--65535).
 
 L1 Cache
 ~~~~~~~~
@@ -265,7 +395,8 @@ Eviction
      - Description
    * - ``eviction.policy``
      - ``LRU``
-     - Only ``LRU`` is supported.
+     - ``LRU`` or ``noop``.  Use ``noop`` with ``l2Backend.storePolicy: skip_l1``
+       for buffer-only mode.
    * - ``eviction.triggerWatermark``
      - ``0.8``
      - Usage ratio (0.0--1.0] to trigger eviction.
@@ -309,10 +440,34 @@ L2 Storage
    * - Field
      - Default
      - Description
-   * - ``l2Backends``
+   * - ``l2Backend``
      - --
      - List of L2 backends (``type`` + ``config``).
-       See :doc:`l2_storage`.
+       See :doc:`l2_storage/index`.
+
+GPU & Security
+~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 20 45
+
+   * - Field
+     - Default
+     - Description
+   * - ``gpuVendor``
+     - ``nvidia``
+     - GPU vendor: ``nvidia`` (uses the ``nvidia`` RuntimeClass) or ``amd``
+       (runs on the default runtime).
+   * - ``privileged``
+     - ``false``
+     - Run the engine container in privileged mode. On most clusters
+       ``runtimeClassName: nvidia`` + ``NVIDIA_VISIBLE_DEVICES=all`` already
+       grant GPU visibility without it; set ``true`` only where the engine
+       cannot otherwise see the GPUs. Required for ``gpuVendor: amd`` (no
+       RuntimeClass device injection, so privileged is the only path to
+       ``/dev/kfd``/``/dev/dri``). Enabling it requires the namespace to allow
+       the ``privileged`` Pod Security Standard.
 
 Scheduling
 ~~~~~~~~~~
@@ -398,6 +553,8 @@ via the CRD):
   Service can route to it.
 - **NVIDIA_VISIBLE_DEVICES=all** -- Ensures GPU access for IPC-based memory
   transfers.
+- **NVIDIA_DRIVER_CAPABILITIES=all** -- Exposes all driver capabilities
+  (compute, utility, etc.) to the container.
 - **TCP socket probes** -- Startup (5s initial, 30 failures), liveness (10s),
   and readiness (5s) probes on the server port.
 
@@ -480,7 +637,7 @@ The operator validates the CR spec at apply time:
    * - ``l1.sizeGB``
      - Required, must be > 0.
    * - ``eviction.policy``
-     - Must be ``LRU`` (if set).
+     - Must be ``LRU`` or ``noop`` (if set).
    * - ``eviction.triggerWatermark``
      - Must be in (0.0, 1.0].
    * - ``eviction.evictionRatio``
@@ -570,7 +727,7 @@ Production with Prometheus Monitoring
         prometheus.io/port: "9090"
       priorityClassName: system-node-critical
 
-See :doc:`observability` for metric names and Grafana configuration.
+See :doc:`observability/index` for metric names and Grafana configuration.
 
 Override Auto-Computed Resources
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -590,6 +747,433 @@ Override Auto-Computed Resources
           cpu: "8"
         limits:
           memory: "100Gi"
+
+.. _mp-operator-cacheblend:
+
+CacheBlend
+----------
+
+CacheBlend reuses cached KV at shifted (non-prefix) positions by recomputing a
+small subset of tokens.  The operator manages it as a second CRD,
+``CacheBlendEngine``, plus a **mutating admission webhook** that injects the
+pure-Python ``lmcache-cacheblend`` vLLM plugin into your serving pods -- so you
+do **not** rebuild the vLLM image.  See :doc:`/kv_cache_optimizations/blending`
+for the technique itself.
+
+It has two halves the operator runs together:
+
+- a GPU-resident CacheBlend V3 engine (``lmcache server --engine-type blend``),
+  deployed as a DaemonSet with the **same GPU model as** ``LMCacheEngine``
+  (``runtimeClassName: nvidia`` + ``NVIDIA_VISIBLE_DEVICES=all`` + ``hostIPC``,
+  plus ``privileged`` when ``spec.privileged`` is set, and **no**
+  ``nvidia.com/gpu`` claim) so it shares the vLLM GPU for same-device CUDA IPC;
+  and
+- the vLLM-side plugin, injected into opted-in pods by the webhook.
+
+Additional Prerequisites
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Beyond the operator prerequisites above:
+
+- **cert-manager** -- the webhook's serving certificate is issued by a
+  cert-manager ``Issuer`` + ``Certificate``.  Install it before ``make deploy``:
+
+  .. code-block:: bash
+
+      kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
+      kubectl -n cert-manager wait --for=condition=Available deploy --all --timeout=180s
+
+- **Deploy with the webhook** -- use ``make deploy`` (not ``make run``, which is
+  controller-only and disables the webhook via ``ENABLE_WEBHOOKS=false``).
+- **Pod Security Standards** -- the webhook injects ``hostIPC``/``privileged``,
+  which the ``baseline``/``restricted`` profiles reject, so label the engine's
+  and the vLLM pod's namespaces ``pod-security.kubernetes.io/enforce=privileged``.
+
+Deploying a CacheBlendEngine
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: yaml
+
+    apiVersion: lmcache.lmcache.ai/v1alpha1
+    kind: CacheBlendEngine
+    metadata:
+      name: my-cacheblend
+    spec:
+      l1:
+        sizeGB: 60
+      injection:
+        # The (private) cacheblend-plugin init-container image -- repository/tag/
+        # pullPolicy, like spec.image.  Set repository to YOUR image; the
+        # inherited engine-image default is not a valid payload.
+        payloadImage:
+          repository: <registry>/cacheblend-plugin
+          tag: <tag>
+        # Appended to the vLLM pod so the private payload image can pull; the
+        # Secret must exist in the vLLM pod's namespace.
+        imagePullSecrets:
+          - name: my-registry-secret
+
+The engine runs ``lmcache server --engine-type blend`` as a DaemonSet and
+emits a ``my-cacheblend-connection`` ConfigMap with the ``CBKVConnector``
+``kv-transfer-config`` (the operator wires the node-local Service host/port and
+the ``cb.*`` tunables).
+
+Opting a vLLM Pod In
+~~~~~~~~~~~~~~~~~~~~~
+
+Label the pod template for the webhook and bind it to an engine by name.  Launch
+vLLM via the image **ENTRYPOINT** (args only) -- a
+``command: ["/bin/sh", "-c", ...]`` wrapper is skipped, since appended args would
+not reach ``vllm serve``:
+
+.. code-block:: yaml
+
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: vllm-cacheblend
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: vllm-cacheblend
+      template:
+        metadata:
+          labels:
+            app: vllm-cacheblend
+            lmcache.ai/cacheblend-inject: "true"          # opt-in (webhook objectSelector)
+          annotations:
+            lmcache.ai/cacheblend-engine: "my-cacheblend" # bind to the engine
+        spec:
+          runtimeClassName: nvidia
+          containers:
+            - name: vllm
+              image: lmcache/vllm-openai:<pinned-tag>
+              args: ["<your-model>", "--port", "8000", "--gpu-memory-utilization", "0.8"]
+              resources:
+                limits:
+                  nvidia.com/gpu: "1"
+
+The webhook injects the plugin init container, ``PYTHONPATH``, ``hostIPC``, the
+private-image pull secret, and the required CacheBlend vLLM flags
+(``--attention-backend CUSTOM``, ``--kv-transfer-config`` from the engine's
+connection ConfigMap, ``--block-size 64``, ``--pipeline-parallel-size 1``,
+``--no-enable-chunked-prefill``, ``--no-async-scheduling``, ``--enforce-eager``).
+You supply only the model and your non-CacheBlend flags.
+
+Verifying Injection
+~~~~~~~~~~~~~~~~~~~~~
+
+The webhook mutates **Pods**, not the Deployment, so inspect a pod:
+
+.. code-block:: bash
+
+    kubectl get pod -l app=vllm-cacheblend -o yaml | \
+      grep -E "initContainers|cb-plugin|PYTHONPATH|attention-backend|cacheblend-injected|skip-reason"
+
+If nothing was injected, check the pod's ``lmcache.ai/cacheblend-skip-reason``
+annotation: ``command-override`` (a ``sh -c`` wrapper was used),
+``kv-transfer-config-present`` (you set your own), ``engine-not-found`` (the
+``<name>-connection`` ConfigMap is missing), ``payload-image-unset`` (the
+engine's ``injection.payloadImage`` has no repository), or
+``target-container-not-found`` (the requested ``targetContainer`` /
+``cacheblend-container`` annotation names a container the pod does not have).
+With ``failurePolicy: Ignore`` a
+webhook/cert problem also leaves the pod un-mutated silently -- confirm the
+operator pod is ``Running`` and the ``MutatingWebhookConfiguration`` exists.
+
+CacheBlendEngine Fields
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``CacheBlendEngineSpec`` mirrors ``LMCacheEngineSpec`` (every field in the CRD
+Spec Reference above) and adds:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 20 45
+
+   * - Field
+     - Default
+     - Description
+   * - ``blend.checkLayer``
+     - ``1``
+     - Layer at which token importance is scored (``cb.check_layer``).
+   * - ``blend.recompRatio``
+     - ``0.15``
+     - Fraction of non-prefix-hit tokens recomputed (``cb.recomp_ratio``).
+   * - ``injection.payloadImage``
+     - *required*
+     - The (private) cacheblend-plugin init-container image
+       (``repository`` / ``tag`` / ``pullPolicy``).  Set ``repository`` -- the
+       inherited engine-image default is not a valid payload.
+   * - ``injection.imagePullSecrets``
+     - --
+     - Pull secrets appended to the vLLM pod for the private payload image.
+   * - ``injection.targetContainer``
+     - first container
+     - Name of the vLLM container to inject into.
+   * - ``injection.cudagraph``
+     - ``eager``
+     - ``eager`` | ``piecewise`` | ``full_decode_only`` (never ``full``).
+
+``server.chunkSize`` defaults to ``256`` and must equal 256 (the blend matcher
+requires ``chunk_size == vLLM --block-size * 4``).
+
+LMCacheCoordinator
+------------------
+
+The ``LMCacheCoordinator`` CRD runs the **mp coordinator** -- a fleet-wide HTTP
+service that tracks mp server instances, evicts those whose heartbeats lapse,
+performs L2 quota eviction, and hosts the global CacheBlend fingerprint
+directory.  It is a plain (non-GPU) ``Deployment`` exposed through a ClusterIP
+Service; engines reach it via ``coordinator.ref`` or ``coordinator.url``.
+
+Deploying a Coordinator
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A ready-to-edit manifest lives at
+``config/samples/lmcache_v1alpha1_lmcachecoordinator.yaml`` in the operator
+repo.  A minimal coordinator:
+
+.. code-block:: yaml
+
+    apiVersion: lmcache.lmcache.ai/v1alpha1
+    kind: LMCacheCoordinator
+    metadata:
+      name: my-coordinator
+    spec:
+      port: 9300
+
+.. code-block:: bash
+
+    kubectl get lmcc my-coordinator   # shortName: lmcc
+
+Connecting an Engine
+~~~~~~~~~~~~~~~~~~~~~
+
+Point an ``LMCacheEngine`` / ``CacheBlendEngine`` at the coordinator through its
+``coordinator`` block.  Use ``ref`` to name a coordinator in the same namespace
+(the operator resolves it to the in-cluster Service URL), or ``url`` for an
+explicit endpoint:
+
+.. code-block:: yaml
+
+    spec:
+      coordinator:
+        ref:
+          name: my-coordinator       # or: url: http://my-coordinator.default.svc:9300
+        heartbeatInterval: 5          # seconds; must be > 0
+        l2EventReporting: false       # report L2 store/lookup events for fleet eviction
+
+Coordinator CRD Spec Reference
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Topology
+^^^^^^^^
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 20 45
+
+   * - Field
+     - Default
+     - Description
+   * - ``replicas``
+     - ``1``
+     - Coordinator pods.  The registry is per-process in-memory, so >1 only
+       makes sense behind a shared durable backend.  Must be >= 0.
+   * - ``image.repository`` / ``image.tag`` / ``image.pullPolicy``
+     - shared engine image
+     - Runs the same lmcache binary as the engines.
+   * - ``imagePullSecrets``
+     - --
+     - Image pull secret references.
+
+HTTP Server
+^^^^^^^^^^^
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 20 45
+
+   * - Field
+     - Default
+     - Description
+   * - ``host``
+     - ``0.0.0.0``
+     - Address the coordinator's HTTP server binds to.
+   * - ``port``
+     - ``9300``
+     - HTTP port (1--65535).
+
+Membership & Health
+^^^^^^^^^^^^^^^^^^^^
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 20 45
+
+   * - Field
+     - Default
+     - Description
+   * - ``instanceTimeout``
+     - ``30``
+     - Seconds without a heartbeat after which an instance is evicted.  Set
+       comfortably above the engines' ``coordinator.heartbeatInterval``.
+   * - ``healthCheckInterval``
+     - ``10``
+     - Seconds between health-check sweeps; ``0`` disables the loop.
+
+L2 Quota Eviction
+^^^^^^^^^^^^^^^^^
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 20 45
+
+   * - Field
+     - Default
+     - Description
+   * - ``evictionCheckInterval``
+     - ``5``
+     - Seconds between L2 eviction sweeps; ``0`` disables the loop.
+   * - ``evictionRatio``
+     - ``0.2``
+     - Fraction of tracked keys (by count) to evict per cycle, [0.0, 1.0].
+   * - ``triggerWatermark``
+     - ``1.0``
+     - Usage fraction of the quota that fires eviction, (0.0, 1.0].
+
+Global CacheBlend Directory
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 20 45
+
+   * - Field
+     - Default
+     - Description
+   * - ``blendChunkSize``
+     - ``256``
+     - Tokens per chunk for the global CacheBlend directory (the match unit).
+       **Must equal** the LMCache chunk size the blend servers use.  Must be > 0.
+   * - ``blendProbeStride``
+     - ``1``
+     - Positions between match probes.  ``1`` probes every offset for full
+       recall; raise it to trade recall for coordinator CPU.  Must be > 0.
+
+Prometheus, Scheduling & Overrides
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 20 45
+
+   * - Field
+     - Default
+     - Description
+   * - ``prometheus.enabled``
+     - ``true``
+     - Expose the metrics container port.  See the note below.
+   * - ``prometheus.port``
+     - ``9090``
+     - Metrics port.
+   * - ``prometheus.serviceMonitor.enabled``
+     - ``false``
+     - Create a ServiceMonitor CR (and headless metrics Service).
+   * - ``prometheus.serviceMonitor.interval``
+     - ``30s``
+     - Scrape interval.
+   * - ``logLevel``
+     - ``INFO``
+     - ``DEBUG`` | ``INFO`` | ``WARNING`` | ``ERROR``.
+   * - ``resourceOverrides``
+     - --
+     - Pod resource requests/limits (no auto-compute; the coordinator is
+       CPU/memory light).
+   * - ``nodeSelector`` / ``affinity`` / ``tolerations`` / ``priorityClassName``
+     - --
+     - Pod scheduling controls.
+   * - ``env`` / ``volumes`` / ``volumeMounts`` / ``podAnnotations`` / ``podLabels`` / ``serviceAccountName``
+     - --
+     - Standard pod-shaping fields.
+   * - ``extraArgs``
+     - --
+     - Extra CLI flags (appended last, can override any auto-generated flag).
+
+.. note::
+   The coordinator process does **not** yet expose a ``/metrics`` endpoint.  The
+   Prometheus wiring is present for parity but is only useful once metrics are
+   added; ``serviceMonitor.enabled`` defaults to ``false``.
+
+Coordinator Resources Created
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For an ``LMCacheCoordinator`` named ``my-coordinator``:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 25 50
+
+   * - Resource
+     - Name
+     - Purpose
+   * - Deployment
+     - ``my-coordinator``
+     - Runs the coordinator HTTP server pods.
+   * - Service (ClusterIP)
+     - ``my-coordinator``
+     - Fleet-wide discovery on the HTTP port.
+   * - Service (headless)
+     - ``my-coordinator-metrics``
+     - Prometheus scrape target (when ``serviceMonitor.enabled``).
+   * - ServiceMonitor
+     - ``my-coordinator``
+     - Prometheus Operator integration (when ``serviceMonitor.enabled``).
+
+The status ``endpoint`` other components use to reach the coordinator is
+``http://<name>.<namespace>.svc:<port>`` (e.g.
+``http://my-coordinator.default.svc:9300``).
+
+Coordinator Status & Conditions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The status section includes:
+
+- **phase**: ``Pending``, ``Running``, ``Degraded``, or ``Failed``.
+- **replicas** / **readyReplicas**: Pod counts from the Deployment.
+- **endpoint**: In-cluster URL for reaching the coordinator.
+- **observedGeneration**: Most recent reconciled generation.
+- **conditions**:
+
+  - ``Available`` -- At least one replica is ready.
+  - ``AllInstancesReady`` -- All desired replicas are ready.
+  - ``ConfigValid`` -- Spec validation passed.
+
+Coordinator Validation Rules
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Field
+     - Rule
+   * - ``port``
+     - Must be in [1, 65535].
+   * - ``replicas``
+     - Must be >= 0.
+   * - ``instanceTimeout``
+     - Must be > 0.
+   * - ``healthCheckInterval`` / ``evictionCheckInterval``
+     - Must be >= 0.
+   * - ``evictionRatio``
+     - Must be in [0.0, 1.0].
+   * - ``triggerWatermark``
+     - Must be in (0.0, 1.0].
+   * - ``blendChunkSize`` / ``blendProbeStride``
+     - Must be > 0.
 
 Operator vs Manual Deployment
 -----------------------------
@@ -637,6 +1221,10 @@ resources from other processes on the same host.
 - Clusters using Pod Security Standards must allow the ``privileged`` profile
   for the LMCache namespace -- the ``baseline`` and ``restricted`` profiles
   reject ``hostIPC``.
+- ``spec.privileged`` defaults to ``false``. When enabled (required for
+  ``gpuVendor: amd``), the engine container additionally runs privileged,
+  granting it full device access -- enable it only where GPU visibility
+  requires it.
 
 Development
 -----------

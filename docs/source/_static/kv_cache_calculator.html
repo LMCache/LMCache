@@ -138,11 +138,11 @@
         <div id="calculator-form" style="display: none;">
             <div class="form-group">
                 <label for="model">Model:</label>
-                <select id="model">
+                <select id="model" onchange="updatePrecisionVisibility('')">
                     <!-- Options will be populated dynamically -->
                 </select>
             </div>
-            
+
             <div class="form-group">
                 <label for="dtype">Data Type:</label>
                 <select id="dtype">
@@ -152,7 +152,23 @@
                     <option value="int8">int8 (INT8)</option>
                 </select>
             </div>
-            
+
+            <div class="form-group" id="precision-group" style="display: none;">
+                <label for="precision-mode">DeepSeek V4 KV Precision (bytes / dimension):</label>
+                <select id="precision-mode" onchange="togglePrecisionInputs('')">
+                    <option value="default" selected>Paper default — FP8 NoPE / BF16 RoPE / FP4 indexer</option>
+                    <option value="custom">Custom…</option>
+                </select>
+                <div id="precision-custom" style="display: none; margin-top: 10px;">
+                    <label for="nope-bytes">NoPE bytes/dim:</label>
+                    <input type="number" id="nope-bytes" min="0" step="0.1" value="1">
+                    <label for="rope-bytes">RoPE bytes/dim:</label>
+                    <input type="number" id="rope-bytes" min="0" step="0.1" value="2">
+                    <label for="indexer-bytes">Indexer bytes/dim:</label>
+                    <input type="number" id="indexer-bytes" min="0" step="0.1" value="0.5">
+                </div>
+            </div>
+
             <div class="form-group">
                 <label for="tokens">Number of Tokens:</label>
                 <input type="number" id="tokens" placeholder="e.g., 1000" min="1" value="1000">
@@ -168,11 +184,11 @@
             
             <div class="form-group">
                 <label for="model-reverse">Model:</label>
-                <select id="model-reverse">
+                <select id="model-reverse" onchange="updatePrecisionVisibility('-reverse')">
                     <!-- Options will be populated dynamically -->
                 </select>
             </div>
-            
+
             <div class="form-group">
                 <label for="dtype-reverse">Data Type:</label>
                 <select id="dtype-reverse">
@@ -182,7 +198,23 @@
                     <option value="int8">int8 (INT8)</option>
                 </select>
             </div>
-            
+
+            <div class="form-group" id="precision-group-reverse" style="display: none;">
+                <label for="precision-mode-reverse">DeepSeek V4 KV Precision (bytes / dimension):</label>
+                <select id="precision-mode-reverse" onchange="togglePrecisionInputs('-reverse')">
+                    <option value="default" selected>Paper default — FP8 NoPE / BF16 RoPE / FP4 indexer</option>
+                    <option value="custom">Custom…</option>
+                </select>
+                <div id="precision-custom-reverse" style="display: none; margin-top: 10px;">
+                    <label for="nope-bytes-reverse">NoPE bytes/dim:</label>
+                    <input type="number" id="nope-bytes-reverse" min="0" step="0.1" value="1">
+                    <label for="rope-bytes-reverse">RoPE bytes/dim:</label>
+                    <input type="number" id="rope-bytes-reverse" min="0" step="0.1" value="2">
+                    <label for="indexer-bytes-reverse">Indexer bytes/dim:</label>
+                    <input type="number" id="indexer-bytes-reverse" min="0" step="0.1" value="0.5">
+                </div>
+            </div>
+
             <div class="form-group">
                 <label for="gpu-ram">GPU RAM Size (GB):</label>
                 <input type="number" id="gpu-ram" placeholder="e.g., 20" min="0.1" step="0.1" value="20">
@@ -253,8 +285,61 @@
                 }
                 selectReverse.appendChild(optionReverse);
             }
+
+            updatePrecisionVisibility('');
+            updatePrecisionVisibility('-reverse');
         }
-        
+
+        // Show the V4 precision controls only for DSA (compress_ratios) models, and
+        // seed the custom inputs with the selected model's paper-default byte widths.
+        function updatePrecisionVisibility(suffix) {
+            const model = document.getElementById('model' + suffix).value;
+            const config = modelConfigs[model] || {};
+            const isDSA = Array.isArray(config.compress_ratios)
+                && Number.isFinite(config.head_dim);
+            document.getElementById('precision-group' + suffix).style.display =
+                isDSA ? 'block' : 'none';
+            if (isDSA) {
+                document.getElementById('nope-bytes' + suffix).value =
+                    Number.isFinite(config.nope_bytes) ? config.nope_bytes : 1;
+                document.getElementById('rope-bytes' + suffix).value =
+                    Number.isFinite(config.rope_bytes) ? config.rope_bytes : 2;
+                document.getElementById('indexer-bytes' + suffix).value =
+                    Number.isFinite(config.indexer_bytes) ? config.indexer_bytes : 0.5;
+            }
+        }
+
+        // Reveal the custom byte inputs only when "Custom" is selected.
+        function togglePrecisionInputs(suffix) {
+            const mode = document.getElementById('precision-mode' + suffix).value;
+            document.getElementById('precision-custom' + suffix).style.display =
+                mode === 'custom' ? 'block' : 'none';
+        }
+
+        // Resolve the per-dimension byte widths for a DSA model: paper defaults from
+        // the config (nope/rope/indexer_bytes), overridden by the custom inputs when
+        // the precision mode is "custom". Returns bytes/dim for each component + mode.
+        function getDSAPrecision(suffix, config) {
+            const def = {
+                nope: Number.isFinite(config.nope_bytes) ? config.nope_bytes : 1,
+                rope: Number.isFinite(config.rope_bytes) ? config.rope_bytes : 2,
+                indexer: Number.isFinite(config.indexer_bytes) ? config.indexer_bytes : 0.5,
+                mode: 'default',
+            };
+            if (document.getElementById('precision-mode' + suffix).value !== 'custom') {
+                return def;
+            }
+            const nope = parseFloat(document.getElementById('nope-bytes' + suffix).value);
+            const rope = parseFloat(document.getElementById('rope-bytes' + suffix).value);
+            const indexer = parseFloat(document.getElementById('indexer-bytes' + suffix).value);
+            return {
+                nope: Number.isFinite(nope) ? nope : def.nope,
+                rope: Number.isFinite(rope) ? rope : def.rope,
+                indexer: Number.isFinite(indexer) ? indexer : def.indexer,
+                mode: 'custom',
+            };
+        }
+
         // Calculate KV cache size
         function calculateKVCache() {
             const model = document.getElementById('model').value;
@@ -286,27 +371,201 @@
             const dtypeSize = dtypeSizes[dtype];
             
             // Calculate based on model architecture
-            const isDeepSeek = model.includes('DeepSeek');
+            // DeepSeek V4 sparse attention: per-layer compression schedule.
+            const isDSA = Array.isArray(config.compress_ratios)
+                && Number.isFinite(config.head_dim);
+            // Multi-head Latent Attention (DeepSeek V3/R1, GLM-5.x DSA): a single
+            // latent KV vector per layer per token. Feature-gated on kv_lora_rank
+            // rather than the model name, so non-DeepSeek MLA models are caught too.
+            const isMLA = Number.isFinite(config.kv_lora_rank)
+                && Number.isFinite(config.qk_rope_head_dim);
+            // Interleaved sliding-window / full attention (Gemma 2/3/4): the sliding
+            // layers cap their KV cache at the window, only the full layers grow.
+            const isHybridSWA = Number.isFinite(config.full_attention_layers)
+                && Number.isFinite(config.sliding_attention_layers)
+                && Number.isFinite(config.sliding_window)
+                && Number.isFinite(config.num_key_value_heads)
+                && Number.isFinite(config.head_dim);
+            // Linear/full hybrid (Qwen3-Next / Qwen3.5): Gated DeltaNet layers keep a
+            // fixed-size recurrent state (no per-token KV); only full layers grow.
+            const isHybridLinear = Number.isFinite(config.full_attention_layers)
+                && Number.isFinite(config.linear_attention_layers)
+                && Number.isFinite(config.num_key_value_heads)
+                && Number.isFinite(config.head_dim);
             const hasHeadDim = Number.isFinite(config.head_dim)
                 && Number.isFinite(config.num_key_value_heads);
-            
+
             let totalElements;
             let totalBytes;
             let sizeGB;
             let details = '';
-            
-            if (isDeepSeek && config.kv_lora_rank && config.qk_rope_head_dim) {
-                // DeepSeek V3/R1 architecture
-                totalElements = config.num_hidden_layers * tokens * (config.kv_lora_rank + config.qk_rope_head_dim);
+
+            if (isDSA) {
+                // DeepSeek V4 hybrid attention: Compressed Sparse Attention (CSA)
+                // + Heavily Compressed Attention (HCA). This is NOT MLA — V4 has no
+                // kv_lora_rank; head_dim (512) is the width of one shared compressed
+                // KV entry (per the paper's CSA/HCA shared-KV MQA). Each layer
+                // compresses every `r` tokens into one entry, so the amortized
+                // per-token KV cost is head_dim × Σ(1/r) over layers with r > 0.
+                // (r == 0 layers are pure sliding-window; no compressed entries.)
+                //
+                // This branch MUST come before the head_dim/GQA branch below:
+                // V4 configs carry num_key_value_heads == 1 and head_dim == 512,
+                // which would otherwise (incorrectly) match the standard
+                // 2 × layers × kv_heads × head_dim formula and overestimate wildly.
+                //
+                // Lightning-indexer keys: the paper compresses them at the SAME
+                // ratio as the KV entries (K_IComp ∈ R^{(n/m)×c_I}), so the indexer
+                // key cache is index_head_dim × Σ(1/r) — NOT full-rate. It is a
+                // ~25% addition to the compressed KV term, not ~2×. (Only CSA
+                // layers run the indexer; HCA keeps dense attention, but HCA's
+                // large r contributes negligibly to Σ(1/r), so summing over all
+                // r > 0 overcounts by <1%.) Net per-token: (head_dim + c_I) × Σ(1/r).
+                //
+                // Plus a constant sliding-window floor (numLayers × sliding_window
+                // × head_dim): ~50% of the total below ~1K tokens, <3% above ~32K.
+                //
+                // V4 uses its NATIVE mixed precision (paper §2.3.4), so this branch
+                // computes bytes directly and the dtype dropdown does NOT apply. The
+                // per-dimension byte widths come from getDSAPrecision(): the model's
+                // nope_bytes / rope_bytes / indexer_bytes config defaults (the paper
+                // values below), overridable live via the "Custom" precision control.
+                //  - KV entry (head_dim dims): RoPE dims (qk_rope_head_dim) in BF16
+                //    (2 B), the rest in FP8 (1 B) -> bytes/entry = (head_dim - rope)
+                //    ·nope + rope·rope_bytes. Paper V4: (512-64)·1 + 64·2 = 576 B
+                //    ("nearly half" of the 1024 B a pure-BF16 entry would take).
+                //  - Indexer keys: FP4 (0.5 B/dim), compressed at the same ratio.
+                //  - Sliding-window entries are uncompressed KV -> same 576 B/entry.
+                // Only remaining simplification: amortized Σ(1/r), not Σ ceil(tokens/r)
+                // (<1% at long context). Absolute check: V4-Pro ≈ 4.8 GB @ 1M ctx,
+                // ~10-12% of a same-precision V3.2 estimate — matching the paper's
+                // "~10% of V3.2 KV cache". (The V4/V3.2 ratio is ~8.7× / ~12.4× for
+                // Pro/Flash; precision cancels in the ratio, so the small gap to the
+                // paper's 9.5× / 13.7× is V3.2-side modeling detail, not V4.)
+                const activeRatios = config.compress_ratios.filter(r => r > 0);
+                const compressFactor = activeRatios.reduce((sum, r) => sum + 1 / r, 0);
+                const ropeDim = Number.isFinite(config.qk_rope_head_dim) ? config.qk_rope_head_dim : 0;
+                const indexerDim = Number.isFinite(config.index_head_dim) ? config.index_head_dim : 0;
+                const prec = getDSAPrecision('', config);
+                const kvBytesPerEntry = (config.head_dim - ropeDim) * prec.nope + ropeDim * prec.rope;
+                const indexerBytesPerEntry = indexerDim * prec.indexer;
+                const bytesPerToken = (kvBytesPerEntry + indexerBytesPerEntry) * compressFactor;
+                const numLayers = config.compress_ratios.length;
+                const windowBytes = numLayers * config.sliding_window * kvBytesPerEntry;
+                totalBytes = bytesPerToken * tokens + windowBytes;
+                totalElements = totalBytes; // unused downstream; bytes are authoritative for V4
+                sizeGB = totalBytes / (1024 ** 3);
+                const precLabel = prec.mode === 'custom'
+                    ? `custom (NoPE ${prec.nope} / RoPE ${prec.rope} / indexer ${prec.indexer} B/dim)`
+                    : `paper default (NoPE ${prec.nope}=FP8 / RoPE ${prec.rope}=BF16 / indexer ${prec.indexer}=FP4); dtype selector not applied`;
+                const indexerLine = indexerDim
+                    ? `<strong>Indexer Key (CSA, compressed):</strong> ${indexerDim} × ${prec.indexer} × Σ(1/r) = ${(indexerBytesPerEntry * compressFactor).toFixed(1)} B/token<br>`
+                    : '';
+                details = `
+                    <strong>Selected Model:</strong> ${model}<br>
+                    <strong>Number of Hidden Layers:</strong> ${config.num_hidden_layers}<br>
+                    <strong>Head Dimension:</strong> ${config.head_dim} (RoPE ${ropeDim} @ ${prec.rope} B, NoPE ${config.head_dim - ropeDim} @ ${prec.nope} B)<br>
+                    <strong>Compressed Layers (ratio &gt; 0):</strong> ${activeRatios.length} of ${numLayers}<br>
+                    <strong>Sliding Window:</strong> ${config.sliding_window} (per layer)<br>
+                    <strong>KV Bytes / Entry:</strong> (${config.head_dim} − ${ropeDim}) × ${prec.nope} + ${ropeDim} × ${prec.rope} = ${kvBytesPerEntry} B<br>
+                    ${indexerLine}<strong>Precision:</strong> ${precLabel}<br>
+                    <strong>Bytes per Token:</strong> (${kvBytesPerEntry} + ${indexerBytesPerEntry}) × Σ(1/r) = ${bytesPerToken.toFixed(1)} B<br>
+                    <strong>Sliding-Window Floor:</strong> ${numLayers} × ${config.sliding_window} × ${kvBytesPerEntry} = ${windowBytes} B<br>
+                    <strong>Total Bytes:</strong> ${bytesPerToken.toFixed(1)} × ${tokens} + ${windowBytes} = ${totalBytes.toFixed(0)} bytes<br>
+                    <strong>KV Cache Size:</strong> ${totalBytes.toFixed(0)} / (1024³) ≈ ${sizeGB.toFixed(4)} GB
+                `;
+            } else if (isMLA) {
+                // Multi-head Latent Attention (DeepSeek V3/R1, GLM-5.x). Each layer
+                // caches one latent KV vector of (kv_lora_rank + qk_rope_head_dim)
+                // per token. DSA models (e.g. GLM-5.x) additionally cache a
+                // lightning-indexer key of index_head_dim per token; LMCache stores
+                // that indexer group in the same KV pool, so we fold it in whenever
+                // index_head_dim is present. The indexer key is often kept at lower
+                // precision than the latent cache, so at one uniform dtype this is a
+                // slight over-estimate (the safe direction for capacity planning).
+                const latentDim = config.kv_lora_rank + config.qk_rope_head_dim;
+                const indexerDim = Number.isFinite(config.index_head_dim) ? config.index_head_dim : 0;
+                const elementsPerToken = config.num_hidden_layers * (latentDim + indexerDim);
+                totalElements = elementsPerToken * tokens;
                 totalBytes = totalElements * dtypeSize;
                 sizeGB = totalBytes / (1024 ** 3);
+                const indexerLine = indexerDim
+                    ? `<strong>Indexer Head Dim (DSA):</strong> ${indexerDim}<br>`
+                    : '';
+                const latentExpr = indexerDim
+                    ? `(${config.kv_lora_rank} + ${config.qk_rope_head_dim} + ${indexerDim})`
+                    : `(${config.kv_lora_rank} + ${config.qk_rope_head_dim})`;
                 details = `
                     <strong>Selected Model:</strong> ${model}<br>
                     <strong>Number of Hidden Layers:</strong> ${config.num_hidden_layers}<br>
                     <strong>KV LoRA Rank:</strong> ${config.kv_lora_rank}<br>
                     <strong>QK RoPE Head Dim:</strong> ${config.qk_rope_head_dim}<br>
+                    ${indexerLine}<strong>Data Type Size:</strong> ${dtypeSize} bytes<br>
+                    <strong>Total Elements:</strong> ${config.num_hidden_layers} × ${tokens} × ${latentExpr} = ${totalElements}<br>
+                    <strong>Total Bytes:</strong> ${totalElements} × ${dtypeSize} = ${totalBytes} bytes<br>
+                    <strong>KV Cache Size:</strong> ${totalBytes} / (1024³) ≈ ${sizeGB.toFixed(4)} GB
+                `;
+            } else if (isHybridLinear) {
+                // Attention/recurrent hybrid (Qwen3-Next / Qwen3.5 Gated DeltaNet;
+                // Nemotron-H Mamba2 SSM). The recurrent (linear) layers keep a
+                // fixed-size state (no per-token KV growth); only the full-attention
+                // layers grow with the sequence:
+                //   2 × kv_heads × head_dim × n_full × tokens  (growing KV)
+                //
+                // TODO(SSM): the recurrent layers also hold a constant SSM/conv state.
+                // We are holding off on counting it until LMCache decides how it stores
+                // linear-attention layers (whether the state lives in the KV-cache pool
+                // at all, and at what precision / layout). The model's linear_* dims are
+                // kept in the config so we can wire in the exact constant once that's
+                // settled. For now we report only the full-attention KV cache.
+                //
+                // linear_attention_layers counts only the recurrent layers; any
+                // remaining layers (e.g. Nemotron's pure-MLP/MoE layers) hold no cache,
+                // so n_full + n_linear need not equal num_hidden_layers.
+                const linType = typeof config.linear_attention_type === 'string'
+                    ? config.linear_attention_type : 'Gated DeltaNet';
+                const perLayer = 2 * config.num_key_value_heads * config.head_dim;
+                const nFull = config.full_attention_layers;
+                const nLin = config.linear_attention_layers;
+                totalElements = perLayer * nFull * tokens;
+                totalBytes = totalElements * dtypeSize;
+                sizeGB = totalBytes / (1024 ** 3);
+                details = `
+                    <strong>Selected Model:</strong> ${model}<br>
+                    <strong>Number of Hidden Layers:</strong> ${config.num_hidden_layers}<br>
+                    <strong>Number of Key-Value Heads:</strong> ${config.num_key_value_heads}<br>
+                    <strong>Head Dimension:</strong> ${config.head_dim}<br>
+                    <strong>Full-Attention Layers:</strong> ${nFull} (growing KV)<br>
+                    <strong>Linear (${linType}) Layers:</strong> ${nLin} (recurrent state — not yet counted, TODO pending LMCache storage decision)<br>
                     <strong>Data Type Size:</strong> ${dtypeSize} bytes<br>
-                    <strong>Total Elements:</strong> ${config.num_hidden_layers} × ${tokens} × (${config.kv_lora_rank} + ${config.qk_rope_head_dim}) = ${totalElements}<br>
+                    <strong>Elements / Token / Layer:</strong> 2 × ${config.num_key_value_heads} × ${config.head_dim} = ${perLayer}<br>
+                    <strong>Total Elements:</strong> ${perLayer} × ${nFull} × ${tokens} = ${totalElements}<br>
+                    <strong>Total Bytes:</strong> ${totalElements} × ${dtypeSize} = ${totalBytes} bytes<br>
+                    <strong>KV Cache Size (full-attention layers only):</strong> ${totalBytes} / (1024³) ≈ ${sizeGB.toFixed(4)} GB
+                `;
+            } else if (isHybridSWA) {
+                // Gemma-style interleaved attention: full-attention layers cache the
+                // whole sequence; sliding-attention layers cap their KV at the window.
+                // So the cache grows only with the full layers once tokens > window:
+                //   2 × kv_heads × head_dim × (n_full × tokens + n_sliding × min(tokens, window)).
+                const perLayer = 2 * config.num_key_value_heads * config.head_dim;
+                const nFull = config.full_attention_layers;
+                const nSwa = config.sliding_attention_layers;
+                const win = config.sliding_window;
+                const swaTokens = Math.min(tokens, win);
+                totalElements = perLayer * (nFull * tokens + nSwa * swaTokens);
+                totalBytes = totalElements * dtypeSize;
+                sizeGB = totalBytes / (1024 ** 3);
+                details = `
+                    <strong>Selected Model:</strong> ${model}<br>
+                    <strong>Number of Hidden Layers:</strong> ${config.num_hidden_layers}<br>
+                    <strong>Number of Key-Value Heads:</strong> ${config.num_key_value_heads}<br>
+                    <strong>Head Dimension:</strong> ${config.head_dim}<br>
+                    <strong>Full-Attention Layers:</strong> ${nFull} (cache full sequence)<br>
+                    <strong>Sliding-Attention Layers:</strong> ${nSwa} (cap at window ${win}; using ${swaTokens} tokens)<br>
+                    <strong>Data Type Size:</strong> ${dtypeSize} bytes<br>
+                    <strong>Elements / Token / Layer:</strong> 2 × ${config.num_key_value_heads} × ${config.head_dim} = ${perLayer}<br>
+                    <strong>Total Elements:</strong> ${perLayer} × (${nFull} × ${tokens} + ${nSwa} × ${swaTokens}) = ${totalElements}<br>
                     <strong>Total Bytes:</strong> ${totalElements} × ${dtypeSize} = ${totalBytes} bytes<br>
                     <strong>KV Cache Size:</strong> ${totalBytes} / (1024³) ≈ ${sizeGB.toFixed(4)} GB
                 `;
@@ -389,36 +648,161 @@
             const totalBytes = gpuRamGB * (1024 ** 3);
             
             // Calculate based on model architecture
-            const isDeepSeek = model.includes('DeepSeek');
+            // DeepSeek V4 sparse attention: per-layer compression schedule.
+            const isDSA = Array.isArray(config.compress_ratios)
+                && Number.isFinite(config.head_dim);
+            // Multi-head Latent Attention (DeepSeek V3/R1, GLM-5.x DSA): feature-gated
+            // on kv_lora_rank rather than the model name.
+            const isMLA = Number.isFinite(config.kv_lora_rank)
+                && Number.isFinite(config.qk_rope_head_dim);
+            // Interleaved sliding-window / full attention (Gemma 2/3/4): the sliding
+            // layers cap their KV cache at the window, only the full layers grow.
+            const isHybridSWA = Number.isFinite(config.full_attention_layers)
+                && Number.isFinite(config.sliding_attention_layers)
+                && Number.isFinite(config.sliding_window)
+                && Number.isFinite(config.num_key_value_heads)
+                && Number.isFinite(config.head_dim);
+            // Linear/full hybrid (Qwen3-Next / Qwen3.5): Gated DeltaNet layers keep a
+            // fixed-size recurrent state (no per-token KV); only full layers grow.
+            const isHybridLinear = Number.isFinite(config.full_attention_layers)
+                && Number.isFinite(config.linear_attention_layers)
+                && Number.isFinite(config.num_key_value_heads)
+                && Number.isFinite(config.head_dim);
             const hasHeadDim = Number.isFinite(config.head_dim)
                 && Number.isFinite(config.num_key_value_heads);
-            
+
             let maxTokens;
             let details = '';
-            
-            if (isDeepSeek && config.kv_lora_rank && config.qk_rope_head_dim) {
-                // DeepSeek V3/R1 architecture: tokens = total_bytes / (layers × (kv_lora_rank + qk_rope_head_dim) × dtype_size)
-                const elementsPerToken = config.num_hidden_layers * (config.kv_lora_rank + config.qk_rope_head_dim);
+
+            if (isDSA) {
+                // DeepSeek V4 (CSA + HCA hybrid; NOT MLA). Bytes are computed in V4's
+                // native mixed precision (paper §2.3.4) — the dtype dropdown does NOT
+                // apply. KV entry = (head_dim - rope) FP8 + rope BF16; indexer keys
+                // FP4; both compressed at Σ(1/r). Sliding-window floor uses the same
+                // KV byte width and must be covered by the available RAM first.
+                const activeRatios = config.compress_ratios.filter(r => r > 0);
+                const compressFactor = activeRatios.reduce((sum, r) => sum + 1 / r, 0);
+                const ropeDim = Number.isFinite(config.qk_rope_head_dim) ? config.qk_rope_head_dim : 0;
+                const indexerDim = Number.isFinite(config.index_head_dim) ? config.index_head_dim : 0;
+                const prec = getDSAPrecision('-reverse', config);
+                const kvBytesPerEntry = (config.head_dim - ropeDim) * prec.nope + ropeDim * prec.rope;
+                const indexerBytesPerEntry = indexerDim * prec.indexer;
+                const bytesPerToken = (kvBytesPerEntry + indexerBytesPerEntry) * compressFactor;
+                const numLayers = config.compress_ratios.length;
+                const windowBytes = numLayers * config.sliding_window * kvBytesPerEntry;
+                maxTokens = Math.max(0, Math.floor((totalBytes - windowBytes) / bytesPerToken));
+
+                const precLabel = prec.mode === 'custom'
+                    ? `custom (NoPE ${prec.nope} / RoPE ${prec.rope} / indexer ${prec.indexer} B/dim)`
+                    : `paper default (NoPE ${prec.nope}=FP8 / RoPE ${prec.rope}=BF16 / indexer ${prec.indexer}=FP4); dtype selector not applied`;
+                const indexerLine = indexerDim
+                    ? `<strong>Indexer Key (CSA, compressed):</strong> ${indexerDim} × ${prec.indexer} × Σ(1/r) = ${(indexerBytesPerEntry * compressFactor).toFixed(1)} B/token<br>`
+                    : '';
+                details = `
+                    <strong>Selected Model:</strong> ${model}<br>
+                    <strong>GPU RAM Size:</strong> ${gpuRamGB} GB<br>
+                    <strong>Number of Hidden Layers:</strong> ${config.num_hidden_layers}<br>
+                    <strong>Head Dimension:</strong> ${config.head_dim} (RoPE ${ropeDim} @ ${prec.rope} B, NoPE ${config.head_dim - ropeDim} @ ${prec.nope} B)<br>
+                    <strong>Compressed Layers (ratio &gt; 0):</strong> ${activeRatios.length} of ${numLayers}<br>
+                    <strong>Sliding Window:</strong> ${config.sliding_window} (per layer)<br>
+                    <strong>KV Bytes / Entry:</strong> (${config.head_dim} − ${ropeDim}) × ${prec.nope} + ${ropeDim} × ${prec.rope} = ${kvBytesPerEntry} B<br>
+                    ${indexerLine}<strong>Precision:</strong> ${precLabel}<br>
+                    <strong>Bytes per Token:</strong> (${kvBytesPerEntry} + ${indexerBytesPerEntry}) × Σ(1/r) = ${bytesPerToken.toFixed(1)} B<br>
+                    <strong>Sliding-Window Floor:</strong> ${numLayers} × ${config.sliding_window} × ${kvBytesPerEntry} = ${windowBytes} B<br>
+                    <strong>Maximum Tokens:</strong> (${totalBytes} − ${windowBytes}) / ${bytesPerToken.toFixed(1)} = ${maxTokens} tokens
+                `;
+            } else if (isMLA) {
+                // Multi-head Latent Attention (DeepSeek V3/R1, GLM-5.x): per-token
+                // cost is layers × (kv_lora_rank + qk_rope_head_dim), plus a DSA
+                // lightning-indexer key of index_head_dim per layer per token when
+                // present (LMCache stores the indexer group in the same KV pool).
+                const latentDim = config.kv_lora_rank + config.qk_rope_head_dim;
+                const indexerDim = Number.isFinite(config.index_head_dim) ? config.index_head_dim : 0;
+                const elementsPerToken = config.num_hidden_layers * (latentDim + indexerDim);
                 const bytesPerToken = elementsPerToken * dtypeSize;
                 maxTokens = Math.floor(totalBytes / bytesPerToken);
-                
+
+                const indexerLine = indexerDim
+                    ? `<strong>Indexer Head Dim (DSA):</strong> ${indexerDim}<br>`
+                    : '';
+                const latentExpr = indexerDim
+                    ? `(${config.kv_lora_rank} + ${config.qk_rope_head_dim} + ${indexerDim})`
+                    : `(${config.kv_lora_rank} + ${config.qk_rope_head_dim})`;
                 details = `
                     <strong>Selected Model:</strong> ${model}<br>
                     <strong>GPU RAM Size:</strong> ${gpuRamGB} GB<br>
                     <strong>Number of Hidden Layers:</strong> ${config.num_hidden_layers}<br>
                     <strong>KV LoRA Rank:</strong> ${config.kv_lora_rank}<br>
                     <strong>QK RoPE Head Dim:</strong> ${config.qk_rope_head_dim}<br>
-                    <strong>Data Type Size:</strong> ${dtypeSize} bytes<br>
-                    <strong>Elements per Token:</strong> ${config.num_hidden_layers} × (${config.kv_lora_rank} + ${config.qk_rope_head_dim}) = ${elementsPerToken}<br>
+                    ${indexerLine}<strong>Data Type Size:</strong> ${dtypeSize} bytes<br>
+                    <strong>Elements per Token:</strong> ${config.num_hidden_layers} × ${latentExpr} = ${elementsPerToken}<br>
                     <strong>Bytes per Token:</strong> ${elementsPerToken} × ${dtypeSize} = ${bytesPerToken} bytes<br>
                     <strong>Maximum Tokens:</strong> ${totalBytes} / ${bytesPerToken} = ${maxTokens} tokens
+                `;
+            } else if (isHybridLinear) {
+                // Attention/recurrent hybrid: only the full-attention layers grow.
+                // TODO(SSM): the recurrent (Gated DeltaNet / Mamba2 SSM) layers' constant
+                // state is NOT subtracted yet — holding off until LMCache decides how it
+                // stores linear-attention layers. For now max tokens is computed from the
+                // full-attention KV cache alone.
+                const linType = typeof config.linear_attention_type === 'string'
+                    ? config.linear_attention_type : 'Gated DeltaNet';
+                const perLayer = 2 * config.num_key_value_heads * config.head_dim;
+                const nFull = config.full_attention_layers;
+                const nLin = config.linear_attention_layers;
+                const availElements = totalBytes / dtypeSize;
+                maxTokens = Math.max(0, Math.floor(availElements / (perLayer * nFull)));
+
+                details = `
+                    <strong>Selected Model:</strong> ${model}<br>
+                    <strong>GPU RAM Size:</strong> ${gpuRamGB} GB<br>
+                    <strong>Number of Hidden Layers:</strong> ${config.num_hidden_layers}<br>
+                    <strong>Number of Key-Value Heads:</strong> ${config.num_key_value_heads}<br>
+                    <strong>Head Dimension:</strong> ${config.head_dim}<br>
+                    <strong>Full-Attention Layers:</strong> ${nFull} (growing KV)<br>
+                    <strong>Linear (${linType}) Layers:</strong> ${nLin} (recurrent state — not yet counted, TODO pending LMCache storage decision)<br>
+                    <strong>Data Type Size:</strong> ${dtypeSize} bytes<br>
+                    <strong>Elements / Token / Layer:</strong> 2 × ${config.num_key_value_heads} × ${config.head_dim} = ${perLayer}<br>
+                    <strong>Maximum Tokens (full-attention layers only):</strong> ${availElements} / (${perLayer} × ${nFull}) = ${maxTokens} tokens
+                `;
+            } else if (isHybridSWA) {
+                // Gemma-style interleaved attention. Sliding layers cap at the window,
+                // so the token count is piecewise: below the window all layers count
+                // as full; above it only the full layers keep growing.
+                const perLayer = 2 * config.num_key_value_heads * config.head_dim;
+                const nFull = config.full_attention_layers;
+                const nSwa = config.sliding_attention_layers;
+                const win = config.sliding_window;
+                const availElements = totalBytes / dtypeSize;
+                // First assume tokens <= window (every layer caches the full sequence).
+                let n = Math.floor(availElements / (perLayer * (nFull + nSwa)));
+                let regime = 'tokens ≤ window (all layers full)';
+                if (n > win) {
+                    // tokens > window: sliding layers are pinned at `win` tokens.
+                    n = Math.floor((availElements / perLayer - nSwa * win) / nFull);
+                    regime = 'tokens &gt; window (sliding layers capped)';
+                }
+                maxTokens = Math.max(0, n);
+
+                details = `
+                    <strong>Selected Model:</strong> ${model}<br>
+                    <strong>GPU RAM Size:</strong> ${gpuRamGB} GB<br>
+                    <strong>Number of Hidden Layers:</strong> ${config.num_hidden_layers}<br>
+                    <strong>Number of Key-Value Heads:</strong> ${config.num_key_value_heads}<br>
+                    <strong>Head Dimension:</strong> ${config.head_dim}<br>
+                    <strong>Full-Attention Layers:</strong> ${nFull}<br>
+                    <strong>Sliding-Attention Layers:</strong> ${nSwa} (window ${win})<br>
+                    <strong>Data Type Size:</strong> ${dtypeSize} bytes<br>
+                    <strong>Elements / Token / Layer:</strong> 2 × ${config.num_key_value_heads} × ${config.head_dim} = ${perLayer}<br>
+                    <strong>Regime:</strong> ${regime}<br>
+                    <strong>Maximum Tokens:</strong> ${maxTokens} tokens
                 `;
             } else if (hasHeadDim) {
                 // Explicit head_dim: tokens = total_bytes / (2 × layers × kv_heads × head_dim × dtype_size)
                 const elementsPerToken = 2 * config.num_hidden_layers * config.num_key_value_heads * config.head_dim;
                 const bytesPerToken = elementsPerToken * dtypeSize;
                 maxTokens = Math.floor(totalBytes / bytesPerToken);
-                
+
                 details = `
                     <strong>Selected Model:</strong> ${model}<br>
                     <strong>GPU RAM Size:</strong> ${gpuRamGB} GB<br>

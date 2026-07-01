@@ -24,6 +24,7 @@ from lmcache.v1.storage_backend.nixl_storage_backend import (
     NixlStorageBackend,
     NixlStorageConfig,
 )
+from lmcache.v1.transfer_channel.transfer_utils import get_correct_device
 
 logger = init_logger(__name__)
 
@@ -103,10 +104,19 @@ def test_nixl_storage_config():
     metadata = create_test_metadata()
 
     nixl_config = NixlStorageConfig.from_cache_engine_config(config, metadata)
-    assert nixl_config.buffer_size == config.nixl_buffer_size
-    assert nixl_config.buffer_device == config.nixl_buffer_device
+    if config.nixl_buffer_device == "cpu":
+        # CPU mode shares LocalCPUBackend's pool (sized by max_local_cpu_size),
+        # so the NIXL buffer_size is left at 0.
+        assert nixl_config.buffer_size == 0
+    else:
+        assert nixl_config.buffer_size == config.nixl_buffer_size
+    # buffer_device is normalized to include the worker's device id
+    # (e.g. "cuda" -> "cuda:0"); "cpu" stays "cpu".
+    assert nixl_config.buffer_device == get_correct_device(
+        config.nixl_buffer_device, metadata.worker_id
+    )
     assert nixl_config.backend == config.extra_config["nixl_backend"]
-    assert nixl_config.file_pool_size == config.extra_config["nixl_file_pool_size"]
+    assert nixl_config.pool_size == config.extra_config["nixl_pool_size"]
     assert nixl_config.path == config.extra_config["nixl_path"]
 
     # Test validation
@@ -124,7 +134,7 @@ def _make_obj_config(
 ) -> LMCacheEngineConfig:
     """Create a minimal OBJ-backend config for endpoint-list tests."""
     config = LMCacheEngineConfig()
-    config.nixl_buffer_size = 2**30  # 1 GB
+    # CPU mode: nixl_buffer_size is rejected; the pool comes from LocalCPUBackend.
     config.nixl_buffer_device = "cpu"
     config.extra_config = {
         "enable_nixl_storage": True,

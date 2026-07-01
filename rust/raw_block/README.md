@@ -21,6 +21,21 @@ checkpointing, recovery, and MP task orchestration all live in Python.
 `use_iouring=True` remains accepted for backward compatibility. If `io_engine`
 is explicitly set, it wins over the legacy flag.
 
+## io_uring_cmd (NVMe Passthrough)
+
+When `io_engine="io_uring"`, you can optionally enable `use_uring_cmd=True` to
+use NVMe passthrough via the io_uring command interface for direct device access.
+
+**io_uring_cmd notes:**
+
+- Requires NVMe character device node (`/dev/ngXnY`) instead of the block device
+  node (`/dev/nvmeXnY`) for direct NVMe passthrough command.
+- Requires `io_engine="io_uring"` to be set.
+- Supports `max_data_transfer_size` parameter to split large transfers into
+  smaller chunks that fit within device limits.
+- When `use_uring_cmd=True`, `use_odirect` is ignored for NVMe namespace
+  character devices.
+
 ## MP Mode Integration
 
 In MP mode, the stack looks like this:
@@ -112,6 +127,21 @@ dev = RawBlockDevice(
 )
 ```
 
+io_uring with io_uring_cmd (NVMe passthrough):
+
+```python
+dev = RawBlockDevice(
+    "/dev/ng0n1",  # Note: NVMe character device node
+    True,
+    use_odirect=False,
+    alignment=4096,
+    io_engine="io_uring",
+    use_uring_cmd=True,
+    iouring_queue_depth=256,
+    max_data_transfer_size=131072,  # Optional: split large transfers
+)
+```
+
 ## MP Adapter Example
 
 To use the MP adapter from `lmcache server`, pass a `raw_block` L2 adapter
@@ -141,9 +171,11 @@ Notes:
 
 - `device_path` should point to an unmounted raw block device or a dedicated
   file used only by LMCache.
+- For `use_uring_cmd=true`, `device_path` must use the NVMe character
+  device node (e.g., `/dev/ng0n1`) instead of the block device node.
 - With `use_odirect=true`, LMCache MP L1 alignment must be at least
   `block_align`.
 - Restart recovery uses the metadata checkpoint region on the same device.
 - Raw-block slot reclamation is driven by the shared/global L2 eviction
   controller or explicit `delete()` calls.
-- `raw_block` remains the adapter type for both supported engines.
+- `raw_block` remains the adapter type for all supported engines.

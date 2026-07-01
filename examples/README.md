@@ -39,6 +39,7 @@ Focus: separating prefill from decode, and sharing KV cache across vLLM instance
 | [`disagg_prefill/1p1d/`](disagg_prefill/1p1d/) | PD disaggregation with direct NIXL transfer: 1 prefill server + 1 decode server + a FastAPI proxy. Includes a benchmark script with expected latency numbers. High-bandwidth interconnect (NVLink or PCIe Gen4/5) is strongly recommended — without it, KV transfer overhead may negate the gains. | 2 GPUs + [NIXL](https://github.com/ai-dynamo/nixl) |
 | [`kv_cache_reuse/share_across_instances/centralized_sharing/`](kv_cache_reuse/share_across_instances/centralized_sharing/) | Two vLLM instances share one LMCache server. A prefix computed by instance A is reused by instance B. ⚠️ Requires `PYTHONHASHSEED=0` in all processes — without this, hashes differ across processes and cache lookups silently miss. | 2 GPUs (same node) |
 | [`kv_cache_reuse/share_across_instances/p2p_sharing/`](kv_cache_reuse/share_across_instances/p2p_sharing/) | Two vLLM instances transfer KV directly peer-to-peer using NIXL and UCX RDMA (`UCX_TLS=rc`). | 2 GPUs + NIXL + UCX |
+| [`p2p/`](p2p/) | P2P KV cache sharing in multiprocess mode: each node runs an LMCache server, and a server reads a prefix it lacks directly from the peer that holds it over RDMA. A coordinator handles peer discovery. Includes single-node (debug) and multi-node setups and the logs to expect. | 2+ GPUs (single- or multi-node) + RDMA fabric |
 
 ---
 

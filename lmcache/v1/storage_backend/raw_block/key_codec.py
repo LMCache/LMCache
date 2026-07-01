@@ -34,14 +34,17 @@ def object_key_to_string(key: ObjectKey) -> str:
         key: Object key supplied by the MP storage layer.
 
     Returns:
-        A stable string containing model name, KV rank, chunk hash, and
-        optional cache salt.
+        A stable string containing model name, KV rank, object group id,
+        chunk hash, and optional cache salt.
 
     Raises:
         AttributeError: If ``key`` does not expose the ObjectKey fields.
     """
     safe_model = urllib.parse.quote(key.model_name, safe="")
-    base = f"{safe_model}{_KEY_SEP}{key.kv_rank:#010x}{_KEY_SEP}{key.chunk_hash.hex()}"
+    base = (
+        f"{safe_model}{_KEY_SEP}{key.kv_rank:#010x}"
+        f"{_KEY_SEP}{key.object_group_id:x}{_KEY_SEP}{key.chunk_hash.hex()}"
+    )
     if key.cache_salt:
         return f"{base}{_KEY_SEP}{key.cache_salt}"
     return base
@@ -61,11 +64,11 @@ def decode_object_key(encoded: str) -> ObjectKey:
             hexadecimal chunk hash.
     """
     parts = encoded.split(_KEY_SEP)
-    if len(parts) == 3:
-        safe_model, kv_rank_str, chunk_hash_hex = parts
+    if len(parts) == 4:
+        safe_model, kv_rank_str, object_group_str, chunk_hash_hex = parts
         cache_salt = ""
-    elif len(parts) == 4:
-        safe_model, kv_rank_str, chunk_hash_hex, cache_salt = parts
+    elif len(parts) == 5:
+        safe_model, kv_rank_str, object_group_str, chunk_hash_hex, cache_salt = parts
     else:
         raise ValueError(f"Invalid raw-block ObjectKey encoding: {encoded!r}")
 
@@ -73,6 +76,7 @@ def decode_object_key(encoded: str) -> ObjectKey:
         chunk_hash=bytes.fromhex(chunk_hash_hex),
         model_name=urllib.parse.unquote(safe_model),
         kv_rank=int(kv_rank_str, 16),
+        object_group_id=int(object_group_str, 16),
         cache_salt=cache_salt,
     )
 

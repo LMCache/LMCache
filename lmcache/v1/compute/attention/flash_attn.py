@@ -2,16 +2,22 @@
 # Standard
 from typing import TYPE_CHECKING
 
+try:
+    # Third Party
+    from vllm.attention import Attention
+except ImportError:
+    # vLLM >= 0.17 moved the Attention class.
+    from vllm.model_executor.layers.attention.attention import Attention
+
 # Third Party
-from vllm.attention import Attention
 from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
-from vllm.vllm_flash_attn import flash_attn_varlen_func, get_scheduler_metadata
 import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.compute.attention.abstract import AttentionInterface
 from lmcache.v1.compute.attention.metadata import LMCFlashAttnMetadata
+from lmcache.v1.compute.attention.utils import infer_attn_func_from_vllm
 
 if TYPE_CHECKING:
     # First Party
@@ -37,6 +43,9 @@ class LMCFlashAttnBackend(AttentionInterface):
 
         idx = torch_dev.current_device()
         self.device = torch.device(f"{torch_device_type}:{idx}")
+        self.flash_attn_varlen_func, self.get_scheduler_metadata = (
+            infer_attn_func_from_vllm(torch_device_type)
+        )
 
     def forward_contiguous(
         self,
@@ -68,7 +77,7 @@ class LMCFlashAttnBackend(AttentionInterface):
             causal=True,  # Assuming causal attention
         )
 
-        flash_attn_varlen_func(
+        self.flash_attn_varlen_func(
             q=query,  # contiguous
             k=key,  # contiguous
             v=value,  # contiguous
@@ -97,7 +106,7 @@ class LMCFlashAttnBackend(AttentionInterface):
         self, batch_size, cu_query_lens, max_query_len, seqlens, max_seq_len, causal
     ):
         if self.aot_schedule:
-            return get_scheduler_metadata(
+            return self.get_scheduler_metadata(
                 batch_size=batch_size,
                 max_seqlen_q=max_query_len,
                 max_seqlen_k=max_seq_len,

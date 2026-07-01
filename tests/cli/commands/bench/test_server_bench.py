@@ -22,12 +22,13 @@ import zmq
 # First Party
 from lmcache.cli.commands.bench import BenchCommand
 from lmcache.cli.commands.bench.server_bench.helpers import (
-    _allocate_gpu_kv_cache,
+    _allocate_kv_cache,
     _build_token_ids,
     _make_key,
     _poll_prefetch_status,
     _query_checksum,
     _send_lookup,
+    _send_unregister_kv_cache,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocols.base import RequestType
@@ -76,7 +77,7 @@ class TestCommandMetadata:
             "lmcache.cli.commands.bench.server_bench.helpers"
         )
         # Public command surface mirrors the sibling subpackages.
-        assert callable(sv_cmd.register_server_parser)
+        assert callable(sv_cmd.add_server_arguments)
         assert callable(sv_cmd.run_server_bench)
 
 
@@ -237,23 +238,31 @@ class TestMakeKey:
 
 
 class _ChecksumHandler(BaseHTTPRequestHandler):
-    """Tiny HTTP handler that returns fake checksums."""
+    """Tiny HTTP handler that records the POST body and returns fake checksums.
 
-    def do_GET(self):
-        if "/kvcache/check" in self.path:
-            body = json.dumps(
-                {
-                    "status": "success",
-                    "chunk_checksums": ["a" * 32, "b" * 32],
-                }
-            ).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(body)
-        else:
+    Mirrors the MP server's ``POST /cache/checksums`` (the old ``GET
+    /kvcache/check`` was removed). The received JSON is stored on the server so
+    the test can assert the request shape ``_query_checksum`` sends.
+    """
+
+    def do_POST(self):
+        if "/cache/checksums" not in self.path:
             self.send_response(404)
             self.end_headers()
+            return
+        length = int(self.headers.get("Content-Length", 0))
+        payload = json.loads(self.rfile.read(length).decode())
+        self.server.received_payloads.append(payload)
+        body = json.dumps(
+            {
+                "status": "success",
+                "chunk_checksums": ["a" * 32, "b" * 32],
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
 
     def log_message(self, format, *args):
         pass  # suppress logs
@@ -267,6 +276,7 @@ class TestQueryChecksum:
             ("127.0.0.1", 0),
             _ChecksumHandler,
         )
+        self.server.received_payloads = []
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(
             target=self.server.serve_forever,
@@ -288,6 +298,13 @@ class TestQueryChecksum:
         assert result is not None
         assert len(result) == 2
         assert result[0] == "a" * 32
+        # The POST body matches the MP /cache/checksums contract: block-native
+        # ids and a block-level chunk_size (token chunk_size 2 / block_size 2).
+        assert len(self.server.received_payloads) == 1
+        sent = self.server.received_payloads[0]
+        assert sent["block_ids"] == [0, 1]
+        assert sent["chunk_size"] == 1
+        assert sent["layerwise"] is False
 
     def test_unreachable_returns_none(self):
         result = _query_checksum(
@@ -318,12 +335,12 @@ def router_endpoint() -> str:
 
 
 # ------------------------------------------------------------------ #
-#  _allocate_gpu_kv_cache (dtype branching)
+#  _allocate_kv_cache (dtype branching)
 # ------------------------------------------------------------------ #
 
 
 class TestAllocateKVCache:
-    """Regression tests for ``_allocate_gpu_kv_cache`` dtype handling.
+    """Regression tests for ``_allocate_kv_cache`` dtype handling.
 
     ``torch.randn`` only supports floating-point dtypes, so integer
     dtypes in ``DTYPE_MAP`` (e.g. ``uint8`` used by FP8 quantized
@@ -333,7 +350,7 @@ class TestAllocateKVCache:
 
     @staticmethod
     def _alloc(dtype: torch.dtype) -> list[torch.Tensor]:
-        return _allocate_gpu_kv_cache(
+        return _allocate_kv_cache(
             num_layers=1,
             num_heads=2,
             head_size=4,
@@ -389,7 +406,7 @@ class TestAllocateKVCache:
             shape_desc=SimpleNamespace(kv_size=1, nb=2, bs=2, nh=4, hs=32, nl=2),
             dtype=torch.bfloat16,
         )
-        tensors = _allocate_gpu_kv_cache(
+        tensors = _allocate_kv_cache(
             device="cpu",
             groups=[group_a, group_b],
         )
@@ -506,6 +523,103 @@ class TestLookupProtocol:
             )
             assert hit == 5
             assert router.last_query_request_id == "req-42"
+            client.close()
+        finally:
+            router.stop()
+
+
+# ------------------------------------------------------------------ #
+#  _send_unregister_kv_cache (deregister on shutdown)                  #
+# ------------------------------------------------------------------ #
+
+
+class _UnregisterRouter:
+    """Fake ROUTER that records UNREGISTER requests and replies void.
+
+    Both ``UNREGISTER_KV_CACHE`` and
+    ``UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT`` carry a single
+    ``instance_id`` payload and return ``None`` (void). This fake
+    records the request type and decoded ``instance_id`` of the last
+    UNREGISTER it saw so the test can assert the bench sends the
+    correct protocol for each transfer mode.
+    """
+
+    def __init__(self, endpoint: str) -> None:
+        self.last_request_type: RequestType | None = None
+        self.last_instance_id: int | None = None
+        self._ctx = zmq.Context.instance()
+        self._router = self._ctx.socket(zmq.ROUTER)
+        self._router.bind(endpoint)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2)
+        self._router.close(linger=0)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            if not self._router.poll(100, zmq.POLLIN):
+                continue
+            frames = self._router.recv_multipart()
+            identity, uid_f, type_f, *payload = frames
+            req_type = msgspec.msgpack.decode(type_f, type=RequestType)
+            if req_type in (
+                RequestType.UNREGISTER_KV_CACHE,
+                RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
+            ):
+                self.last_request_type = req_type
+                self.last_instance_id = msgspec.msgpack.decode(payload[0], type=int)
+                # Void reply: no payload frame.
+                self._router.send_multipart([identity, uid_f, type_f])
+
+
+class TestUnregisterKVCache:
+    def _make_client(self, endpoint: str) -> MessageQueueClient:
+        ctx = zmq.Context.instance()
+        return MessageQueueClient(endpoint, ctx)
+
+    def test_handle_mode_sends_unregister_kv_cache(
+        self,
+        router_endpoint: str,
+    ) -> None:
+        """Handle mode uses the GPU/SHM ``UNREGISTER_KV_CACHE`` protocol."""
+        router = _UnregisterRouter(router_endpoint)
+        router.start()
+        try:
+            client = self._make_client(router_endpoint)
+            assert (
+                _send_unregister_kv_cache(client, instance_id=7, use_handle=True)
+                is True
+            )
+            assert router.last_request_type == RequestType.UNREGISTER_KV_CACHE
+            assert router.last_instance_id == 7
+            client.close()
+        finally:
+            router.stop()
+
+    def test_data_mode_sends_engine_driven_unregister(
+        self,
+        router_endpoint: str,
+    ) -> None:
+        """Data mode uses the engine-driven context unregister protocol."""
+        router = _UnregisterRouter(router_endpoint)
+        router.start()
+        try:
+            client = self._make_client(router_endpoint)
+            assert (
+                _send_unregister_kv_cache(client, instance_id=0, use_handle=False)
+                is True
+            )
+            assert (
+                router.last_request_type
+                == RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
+            )
+            assert router.last_instance_id == 0
             client.close()
         finally:
             router.stop()

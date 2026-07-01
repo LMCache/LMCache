@@ -74,14 +74,16 @@ class ObservabilityConfig:
     minted and logged at INFO."""
 
     service_instance_id: str | None = None
-    """Identifier for this MP server instance.  Attached as the OTel
-    Resource attribute ``service.instance.id`` on every metric and span.
-    One MP server has exactly one instance id.
+    """OTel ``service.instance.id`` resource attribute, attached to every
+    metric and span. There is no CLI flag for it: the operator-facing id is
+    ``--instance-id`` (``MPServerConfig.instance_id``), which ``run_cache_server``
+    projects onto this attribute so telemetry and coordinator membership share
+    one id.
 
-    ``None`` (the default, also the state when the CLI flag is not
-    passed) falls back to a random UUID v4 at ``init_observability``
-    time.  An explicit empty string is preserved verbatim so operators
-    who want the attribute to report ``""`` can ask for it."""
+    ``None`` (the default) means "not set": standalone callers that build an
+    ``ObservabilityConfig`` directly (e.g. the trace CLI driver) fall back to a
+    random UUID v4 at ``init_observability`` time. An explicit value is
+    preserved verbatim."""
 
 
 DEFAULT_OBSERVABILITY_CONFIG = ObservabilityConfig(enabled=False)
@@ -160,18 +162,6 @@ def add_observability_args(
         help=(
             "Fraction of chunks/blocks to track for lifecycle histograms "
             "(0, 1.0]. Counters always count all events. Default is 0.01 (1%%)."
-        ),
-    )
-    group.add_argument(
-        "--service-instance-id",
-        type=str,
-        default=None,
-        help=(
-            "Identifier for this MP server instance. Attached as the OTel "
-            "Resource attribute 'service.instance.id' on every metric and "
-            "span. When the flag is not passed, defaults to a random "
-            "UUID v4 minted at startup. Pass --service-instance-id='' to "
-            "force an empty attribute value."
         ),
     )
 
@@ -262,7 +252,6 @@ def parse_args_to_observability_config(
         ),
         trace_level=args.trace_level,
         trace_output=args.trace_output,
-        service_instance_id=args.service_instance_id,
     )
 
     if config.tracing_enabled and config.otlp_endpoint is None:
@@ -349,6 +338,7 @@ def init_observability(
             L2ThroughputSubscriber,
             LookupMetricsSubscriber,
             SMLifecycleSubscriber,
+            TimeoutMetricsSubscriber,
         )
 
         sample_rate = obs_config.metrics_sample_rate
@@ -366,6 +356,7 @@ def init_observability(
         bus.register_subscriber(BlendMetricsSubscriber())
         bus.register_subscriber(EngineMetricsSubscriber())
         bus.register_subscriber(EventBusSelfMetricsSubscriber(bus))
+        bus.register_subscriber(TimeoutMetricsSubscriber())
 
     if obs_config.logging_enabled:
         # First Party
@@ -375,6 +366,7 @@ def init_observability(
             L2LoggingSubscriber,
             MPServerLoggingSubscriber,
             SMLoggingSubscriber,
+            TimeoutLoggingSubscriber,
         )
 
         bus.register_subscriber(MPServerLoggingSubscriber())
@@ -382,18 +374,21 @@ def init_observability(
         bus.register_subscriber(L2LoggingSubscriber())
         bus.register_subscriber(SMLoggingSubscriber())
         bus.register_subscriber(BlendLoggingSubscriber())
+        bus.register_subscriber(TimeoutLoggingSubscriber())
 
     if obs_config.tracing_enabled:
         # First Party
         from lmcache.v1.mp_observability.subscribers.tracing import (
             BlendTracingSubscriber,
             MPServerTracingSubscriber,
+            TimeoutTracingSubscriber,
             get_span_registry,
         )
 
         registry = get_span_registry()
         bus.register_subscriber(MPServerTracingSubscriber(registry))
         bus.register_subscriber(BlendTracingSubscriber(registry))
+        bus.register_subscriber(TimeoutTracingSubscriber(registry))
 
     # Lookup hash file logging (independent of the logging_enabled flag —
     # it has its own enable gate via output_dir).

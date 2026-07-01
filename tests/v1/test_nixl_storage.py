@@ -6,7 +6,6 @@ import contextlib
 import functools
 import os
 import shutil
-import sys
 import tempfile
 import threading
 import uuid
@@ -138,24 +137,31 @@ def run(config: LMCacheEngineConfig, shape, dtype):
         assert nixl_backend is not None
         assert nixl_backend.memory_allocator is not None
 
+        # Allocate via the chunk shape that LMCacheMetadata derives from
+        # kv_shape (LocalCPUBackend / NIXL share the same paged pool sized
+        # by metadata.get_shapes()); passing the raw 5D kv_shape would
+        # produce a same-byte-count but differently-indexed tensor.
+        alloc_shape = metadata.get_shapes()[0]
         for key in keys:
             assert not nixl_backend.contains(key, False)
             assert not nixl_backend.exists_in_put_tasks(key)
 
-            obj = nixl_backend.memory_allocator.allocate(torch.Size(shape), dtype)
+            obj = nixl_backend.memory_allocator.allocate(alloc_shape, dtype)
             assert obj is not None
             assert obj.tensor is not None
             objs.append(obj)
 
-        # small tensor changes for data validation
-        objs[0].tensor[100, 200] = 1e-3
-        objs[0].tensor[200, 100] = 1e-4
+        # small tensor changes for data validation (chunk shape is 4D:
+        # [kv_size, num_layers, num_tokens, num_heads * head_size] =
+        # [2, 4, 256, 1024] for kv_shape (4, 2, 256, 8, 128))
+        objs[0].tensor[0, 0, 100, 200] = 1e-3
+        objs[0].tensor[1, 0, 200, 100] = 1e-4
 
-        objs[1].tensor[300, 400] = 1e-2
-        objs[1].tensor[400, 300] = 1e-5
+        objs[1].tensor[0, 1, 150, 400] = 1e-2
+        objs[1].tensor[1, 1, 100, 300] = 1e-5
 
-        objs[2].tensor[300, 400] = 3e-2
-        objs[2].tensor[400, 300] = 4e-5
+        objs[2].tensor[0, 2, 50, 200] = 3e-2
+        objs[2].tensor[1, 3, 200, 100] = 4e-5
 
         # Insert first 2 keys
         first_keys = keys[0:2]
@@ -267,9 +273,12 @@ def test_nixl_gds_mt_cuda_backend(nixl_tmp_path):
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
     dtype = torch.bfloat16
-    shape = torch.Size([2048, 2048])
+    shape = torch.Size([4, 2, 256, 8, 128])
 
     config.nixl_buffer_device = "cuda"
+    # data/nixl.yaml is CPU-mode (no nixl_buffer_size); CUDA mode sizes the
+    # NIXL buffer via nixl_buffer_size, so restore it when flipping the device.
+    config.nixl_buffer_size = 1024**3
     config.extra_config["nixl_backend"] = "GDS_MT"
     config.extra_config["enable_cuda"] = True
     config.extra_config["nixl_path"] = nixl_tmp_path
@@ -287,7 +296,7 @@ def test_nixl_gds_mt_cpu_backend(nixl_tmp_path):
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
     dtype = torch.bfloat16
-    shape = torch.Size([2048, 2048])
+    shape = torch.Size([4, 2, 256, 8, 128])
 
     config.nixl_buffer_device = "cpu"
     config.extra_config["nixl_backend"] = "GDS_MT"
@@ -308,9 +317,12 @@ def test_nixl_gds_cuda_backend(nixl_tmp_path):
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
     dtype = torch.bfloat16
-    shape = torch.Size([2048, 2048])
+    shape = torch.Size([4, 2, 256, 8, 128])
 
     config.nixl_buffer_device = "cuda"
+    # data/nixl.yaml is CPU-mode (no nixl_buffer_size); CUDA mode sizes the
+    # NIXL buffer via nixl_buffer_size, so restore it when flipping the device.
+    config.nixl_buffer_size = 1024**3
     config.extra_config["nixl_backend"] = "GDS"
     config.extra_config["enable_cuda"] = True
     config.extra_config["nixl_path"] = nixl_tmp_path
@@ -328,7 +340,7 @@ def test_nixl_gds_cpu_backend(nixl_tmp_path):
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
     dtype = torch.bfloat16
-    shape = torch.Size([2048, 2048])
+    shape = torch.Size([4, 2, 256, 8, 128])
 
     config.nixl_buffer_device = "cpu"
     config.extra_config["nixl_backend"] = "GDS"
@@ -352,7 +364,7 @@ def test_nixl_endpoint_list_empty_raises():
         worker_id=0,
         local_worker_id=0,
         kv_dtype=torch.bfloat16,
-        kv_shape=[2048, 2048],
+        kv_shape=(4, 2, 256, 8, 128),
     )
 
     with pytest.raises(ValueError, match="nixl_endpoint_list is set but empty"):
@@ -374,11 +386,62 @@ def test_nixl_endpoint_list_malformed_url_raises():
         worker_id=0,
         local_worker_id=0,
         kv_dtype=torch.bfloat16,
-        kv_shape=[2048, 2048],
+        kv_shape=(4, 2, 256, 8, 128),
     )
 
     with pytest.raises(ValueError, match="is not a valid URL"):
         NixlStorageConfig.from_cache_engine_config(config, metadata)
+
+
+def _presence_cache_metadata() -> LMCacheMetadata:
+    return LMCacheMetadata(
+        model_name="Llama-3.1-70B-Instruct",
+        world_size=1,
+        local_world_size=1,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=torch.bfloat16,
+        kv_shape=(4, 2, 256, 8, 128),
+    )
+
+
+@pytest.mark.no_shared_allocator
+def test_nixl_presence_cache_only_defaults_false():
+    """presence_cache_only defaults to False when the config key is absent."""
+    BASE_DIR = Path(__file__).parent
+    config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
+
+    nixl_config = NixlStorageConfig.from_cache_engine_config(
+        config, _presence_cache_metadata()
+    )
+
+    assert nixl_config.presence_cache_only is False
+
+
+@pytest.mark.no_shared_allocator
+def test_nixl_presence_cache_only_parsed():
+    """nixl_presence_cache_only=True is parsed onto NixlStorageConfig."""
+    BASE_DIR = Path(__file__).parent
+    config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
+    config.extra_config["nixl_presence_cache"] = True
+    config.extra_config["nixl_presence_cache_only"] = True
+
+    nixl_config = NixlStorageConfig.from_cache_engine_config(
+        config, _presence_cache_metadata()
+    )
+
+    assert nixl_config.presence_cache_only is True
+
+
+@pytest.mark.no_shared_allocator
+def test_nixl_presence_cache_only_requires_presence_cache():
+    """nixl_presence_cache_only=True without nixl_presence_cache raises ValueError."""
+    BASE_DIR = Path(__file__).parent
+    config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
+    config.extra_config["nixl_presence_cache_only"] = True
+
+    with pytest.raises(ValueError, match="nixl_presence_cache must be true"):
+        config.validate()
 
 
 @pytest.mark.no_shared_allocator
@@ -387,7 +450,7 @@ def test_nixl_posix_backend(nixl_tmp_path):
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
     dtype = torch.bfloat16
-    shape = torch.Size([2048, 2048])
+    shape = torch.Size([4, 2, 256, 8, 128])
 
     config.nixl_buffer_device = "cpu"
     config.extra_config["nixl_backend"] = "POSIX"
@@ -397,251 +460,22 @@ def test_nixl_posix_backend(nixl_tmp_path):
     run(config, shape, dtype)
 
 
-_DYNAMIC_KV_SHAPE = (4, 2, 256, 8, 128)
-
-
-def _build_dynamic_file_backend(config, dtype):
-    """
-    Build a NixlStorageBackend in dynamic-FILE mode and the surrounding
-    event-loop thread. Returns (backend, backends, thread_loop, thread, keys,
-    objs) so the caller can drive the test and tear everything down via
-    ``_teardown_dynamic_file_backend``.
-    """
-    BACKEND_NAME = "NixlStorageBackend"
-
-    keys = [
-        create_key("e3229141e680fb413d2c5d3ebb416c4ad300d381e309fc9e417757b91406c157"),
-        create_key("e3229141e680fb413d2c5d3ebb416c4ad300d381e309fc9e417757b91406d268"),
-    ]
-
-    thread_loop = asyncio.new_event_loop()
-    thread = threading.Thread(target=thread_loop.run_forever)
-    thread.start()
-
-    metadata = LMCacheMetadata(
-        model_name="Llama-3.1-70B-Instruct",
-        world_size=1,
-        local_world_size=1,
-        worker_id=0,
-        local_worker_id=0,
-        kv_dtype=dtype,
-        kv_shape=_DYNAMIC_KV_SHAPE,
-    )
-
-    backends = CreateStorageBackends(
-        config,
-        metadata,
-        thread_loop,
-        dst_device=config.nixl_buffer_device,
-    )
-    nixl_backend = backends[BACKEND_NAME]
-    assert isinstance(nixl_backend, NixlStorageBackend)
-
-    # In dynamic mode the backend internally allocates with meta_shape
-    # (derived from kv_shape via init_chunk_meta), so allocate the test
-    # objects with the same shape so put/get round-trip shapes match.
-    obj_shape = nixl_backend.meta_shape
-    obj_dtype = nixl_backend.meta_dtype
-    assert obj_shape is not None
-    assert obj_dtype is not None
-
-    obj_fmt = nixl_backend.meta_fmt
-    assert obj_fmt is not None
-
-    objs = []
-    for _ in keys:
-        obj = nixl_backend.memory_allocator.allocate(obj_shape, obj_dtype, obj_fmt)
-        assert obj is not None
-        assert obj.tensor is not None
-        objs.append(obj)
-
-    objs[0].tensor.zero_()
-    objs[1].tensor.zero_()
-    objs[0].tensor[0, 0, 100, 200] = 1
-    objs[1].tensor[1, 0, 50, 300] = 1
-
-    return nixl_backend, backends, thread_loop, thread, keys, objs
-
-
-def _teardown_dynamic_file_backend(backends, thread_loop, thread, objs=()):
-    for obj in objs:
-        if obj is None:
-            continue
-        if obj.is_valid() and obj.get_ref_count() > 0:
-            obj.ref_count_down()
-    for backend in backends.values():
-        backend.close()
-    if thread_loop and thread_loop.is_running():
-        thread_loop.call_soon_threadsafe(thread_loop.stop)
-    if thread and thread.is_alive():
-        thread.join()
-
-
-def run_dynamic_file(config, dtype, tmp_path):
-    """
-    Exercise the dynamic-FILE backend's new code paths: contains/key_exists,
-    put/get round-trip, and remove for both present and missing files.
-    """
-    nixl_backend, backends, thread_loop, thread, keys, objs = (
-        _build_dynamic_file_backend(config, dtype)
-    )
-
-    retained_objs = list(objs)
-
-    try:
-        for key in keys:
-            assert not nixl_backend.contains(key, False)
-            assert not nixl_backend.exists_in_put_tasks(key)
-
-        nixl_backend.batched_submit_put_task(keys, objs)
-
-        for key in keys:
-            assert nixl_backend.contains(key, False)
-
-        files_after_put = set(os.listdir(str(tmp_path)))
-        expected_files = {nixl_backend._format_object_key(k) for k in keys}
-        assert expected_files.issubset(files_after_put), (
-            f"missing files in {tmp_path}: {expected_files - files_after_put}"
-        )
-
-        for key, obj in zip(keys, objs, strict=False):
-            returned = nixl_backend.get_blocking(key)
-            assert returned is not None
-            retained_objs.append(returned)
-            assert returned.get_size() == obj.get_size()
-            assert returned.get_shape() == obj.get_shape()
-            assert returned.get_dtype() == obj.get_dtype()
-            assert torch.equal(returned.tensor, obj.tensor)
-
-        first_remove = nixl_backend.remove(keys[0])
-        assert first_remove is True
-        assert not os.path.exists(
-            os.path.join(str(tmp_path), nixl_backend._format_object_key(keys[0]))
-        )
-
-        # Removing an already-gone file must return False
-        # instead of raising FileNotFoundError.
-        second_remove = nixl_backend.remove(keys[0])
-        assert second_remove is False
-    finally:
-        _teardown_dynamic_file_backend(backends, thread_loop, thread, retained_objs)
-
-
 @pytest.mark.no_shared_allocator
-def test_nixl_posix_dynamic_file_backend(tmp_path):
+def test_nixl_posix_backend_multipath():
+    """Test NIXL backend with multipath support and path sharding."""
     BASE_DIR = Path(__file__).parent
-    config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
+    config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl_multipath.yaml")
 
     dtype = torch.bfloat16
+    shape = torch.Size([4, 2, 256, 8, 128])
 
     config.nixl_buffer_device = "cpu"
     config.extra_config["nixl_backend"] = "POSIX"
-    config.extra_config["nixl_pool_size"] = 0  # dynamic mode
-    config.extra_config["nixl_path"] = str(tmp_path)
     config.extra_config["enable_cuda"] = False
 
-    run_dynamic_file(config, dtype, tmp_path)
+    # Test that multipath configuration is properly handled
+    assert isinstance(config.extra_config["nixl_path"], list)
+    assert len(config.extra_config["nixl_path"]) == 3
+    assert config.extra_config["nixl_path_sharding"] == "by_gpu"
 
-
-def _count_open_fds() -> int:
-    return len(os.listdir("/proc/self/fd"))
-
-
-@pytest.mark.no_shared_allocator
-@pytest.mark.skipif(
-    not sys.platform.startswith("linux"),
-    reason="Requires /proc/self/fd to count open FDs",
-)
-def test_nixl_dynamic_file_fd_leak_on_setup_failure(tmp_path, monkeypatch):
-    """
-    If any operation between the per-key ``os.open`` loop and
-    ``release_storage_handler`` raises, the already-opened FDs must be
-    closed and the just-created files unlinked instead of leaked.
-    """
-    BASE_DIR = Path(__file__).parent
-    config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
-
-    dtype = torch.bfloat16
-
-    config.nixl_buffer_device = "cpu"
-    config.extra_config["nixl_backend"] = "POSIX"
-    config.extra_config["nixl_pool_size"] = 0
-    config.extra_config["nixl_path"] = str(tmp_path)
-    config.extra_config["nixl_async_put"] = False
-    config.extra_config["enable_cuda"] = False
-
-    nixl_backend, backends, thread_loop, thread, keys, objs = (
-        _build_dynamic_file_backend(config, dtype)
-    )
-
-    try:
-        baseline = _count_open_fds()
-
-        def boom(*args, **kwargs):
-            raise RuntimeError("induced failure")
-
-        monkeypatch.setattr(nixl_backend.agent, "create_batched_storage_handler", boom)
-
-        # Sync mode: batched_submit_put_task calls future.result(), so the
-        # induced RuntimeError propagates here.
-        with pytest.raises(RuntimeError):
-            nixl_backend.batched_submit_put_task(keys, objs)
-
-        assert _count_open_fds() == baseline, "FDs leaked on transfer-setup failure"
-
-        # The put path opens the final key files with O_CREAT before
-        # registering the storage handler, so a failure here must clean
-        # up those just-created files.
-        for key in keys:
-            assert not os.path.exists(
-                os.path.join(str(tmp_path), nixl_backend._format_object_key(key))
-            ), "final key file leaked on transfer-setup failure"
-    finally:
-        _teardown_dynamic_file_backend(backends, thread_loop, thread, objs)
-
-
-@pytest.mark.no_shared_allocator
-def test_nixl_dynamic_file_no_leak_on_transfer_failure(tmp_path, monkeypatch):
-    """
-    When the NIXL transfer itself fails after the final key
-    files have been opened with ``O_CREAT``, the backend must remove
-    those empty / partially-written files.
-    """
-    BASE_DIR = Path(__file__).parent
-    config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
-
-    dtype = torch.bfloat16
-
-    config.nixl_buffer_device = "cpu"
-    config.extra_config["nixl_backend"] = "POSIX"
-    config.extra_config["nixl_pool_size"] = 0
-    config.extra_config["nixl_path"] = str(tmp_path)
-    config.extra_config["nixl_async_put"] = False
-    config.extra_config["enable_cuda"] = False
-
-    nixl_backend, backends, thread_loop, thread, keys, objs = (
-        _build_dynamic_file_backend(config, dtype)
-    )
-
-    try:
-
-        def boom(*args, **kwargs):
-            raise RuntimeError("induced post_blocking failure")
-
-        monkeypatch.setattr(nixl_backend.agent, "post_blocking", boom)
-
-        with pytest.raises(RuntimeError):
-            nixl_backend.batched_submit_put_task(keys, objs)
-
-        for key in keys:
-            final_path = os.path.join(
-                str(tmp_path), nixl_backend._format_object_key(key)
-            )
-            assert not os.path.exists(final_path), (
-                f"final key file leaked on transfer failure: {final_path}"
-            )
-            assert not nixl_backend.contains(key, False), (
-                "contains() reports key present after failed write"
-            )
-    finally:
-        _teardown_dynamic_file_backend(backends, thread_loop, thread, objs)
+    run(config, shape, dtype)

@@ -4,3 +4,4 @@ include requirements/common.txt
 include requirements/cuda.txt
 
 recursive-include csrc *
+recursive-include lmcache/lmcache_frontend *

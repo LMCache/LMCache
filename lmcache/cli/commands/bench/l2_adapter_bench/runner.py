@@ -20,7 +20,7 @@ import time
 
 # First Party
 from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.memory_management import MemoryObj
 
@@ -36,6 +36,10 @@ LogFn = Callable[[str], None]
 # in-flight submit, of length ``num_keys`` each.
 KeyProvider = Callable[[int], list[list[ObjectKey]]]
 ObjProvider = Callable[[int], list[list[MemoryObj]]]
+
+# TODO: bench passes a placeholder layout_desc; a real layout may be
+# required here in the future (e.g. when benchmarking the P2P adapter).
+_PLACEHOLDER_LAYOUT_DESC = MemoryLayoutDesc(shapes=[], dtypes=[])
 
 
 def _bitmap_count(bitmap: Bitmap | None) -> int:
@@ -217,6 +221,11 @@ def bench_lookup(
         expected_hit_count=expected_hit_count,
     )
 
+    log(
+        "bench_lookup uses a placeholder MemoryLayoutDesc; this may need a "
+        "real layout for layout-sensitive adapters"
+    )
+
     for r in range(rounds):
         keys_batches = keys_for_round(r)
         assert len(keys_batches) == in_flight
@@ -224,7 +233,11 @@ def bench_lookup(
         t0 = time.perf_counter()
         task_ids: list[int] = []
         for i in range(in_flight):
-            task_ids.append(adapter.submit_lookup_and_lock_task(keys_batches[i]))
+            task_ids.append(
+                adapter.submit_lookup_and_lock_task(
+                    keys_batches[i], _PLACEHOLDER_LAYOUT_DESC
+                )
+            )
 
         results = _wait_lookup_finished(adapter, task_ids, 60.0)
         t1 = time.perf_counter()

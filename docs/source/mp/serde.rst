@@ -1,5 +1,5 @@
-L2 Serde (Serialization / Deserialization)
-==========================================
+KV Cache Compression
+====================
 
 LMCache supports a **per-adapter serde** that transforms KV cache data on
 its way to and from an L2 adapter. Typical uses: quantization (shrink
@@ -58,6 +58,57 @@ serde factory.
      - ``fp8_dtype`` (default ``float8_e4m3fn``; also accepts
        ``float8_e5m2``), ``max_workers`` (thread pool size,
        default 1)
+   * - ``turboquant``
+     - Compress KV tensors with TurboQuant presets before L2 store and
+       reconstruct them on load.
+     - ``preset`` (default ``turboquant_k8v4``), ``head_dim`` (optional,
+       default 128), ``block_size`` (default 16), ``max_workers`` (thread
+       pool size, default 1)
+
+
+TurboQuant serde
+----------------
+
+TurboQuant serde can be enabled by setting ``"type": "turboquant"`` in the
+adapter serde config. If ``preset`` is omitted, TurboQuant serde defaults to
+``turboquant_k8v4``.
+
+.. code-block:: bash
+
+    lmcache server \
+        --l1-size-gb 100 \
+        --eviction-policy LRU \
+        --l2-adapter '{
+            "type": "fs",
+            "base_path": "/data/lmcache/l2",
+            "serde": {
+                "type": "turboquant",
+                "preset": "turboquant_k8v4",
+                "block_size": 16
+            }
+        }'
+
+Supported presets:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 35 35
+
+   * - Preset
+     - Key path
+     - Value path
+   * - ``turboquant_k8v4``
+     - FP8 key
+     - 4-bit value quantization
+   * - ``turboquant_4bit_nc``
+     - 4-bit MSE key with norm correction
+     - 4-bit value quantization
+   * - ``turboquant_k3v4_nc``
+     - 3-bit MSE key with norm correction
+     - 4-bit value quantization
+   * - ``turboquant_3bit_nc``
+     - 3-bit MSE key with norm correction
+     - 3-bit value quantization
 
 
 Writing a custom serde
@@ -127,3 +178,14 @@ the L2 prefetch + fp8 deserialize path lives at
 :file:`examples/serde/fp8/`. A pytest-based filesystem round-trip test
 (no vLLM required) is at
 :file:`tests/v1/distributed/serde/test_serde_fs_e2e.py`.
+
+Compression methods
+-------------------
+
+Higher-level KV cache compression methods layered on top of the per-adapter
+serde mechanism:
+
+.. toctree::
+   :maxdepth: 1
+
+   cachegen

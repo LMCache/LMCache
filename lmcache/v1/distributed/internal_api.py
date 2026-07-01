@@ -114,12 +114,13 @@ class L2AdapterListener(EventListener):
     """Listener for L2 adapter events, analogous to L1ManagerListener."""
 
     @abstractmethod
-    def on_l2_keys_stored(self, keys: list[ObjectKey]):
+    def on_l2_keys_stored(self, keys: list[ObjectKey], sizes: list[int]):
         """
         Notify the listener that keys have been successfully stored in L2.
 
         Args:
             keys (list[ObjectKey]): The keys that have been stored.
+            sizes (list[int]): The byte size of each stored key.
         """
         pass
 

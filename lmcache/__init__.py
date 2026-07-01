@@ -8,6 +8,7 @@ import types
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.platform.device_ext import DeviceExt
 
 try:
     # First Party
@@ -31,8 +32,8 @@ def _detect_device() -> tuple[Any, str]:
 
     Returns:
         tuple[Any, str]: A tuple of (torch_device_module, device_type_string),
-            e.g. ``(torch.cuda, "cuda")`` or ``(torch.xpu, "xpu")``.
-
+            e.g. ``(torch.cuda, "cuda")``, ``(torch.musa, "musa")``, or
+            ``(torch.xpu, "xpu")``.
     """
     try:
         # Third Party
@@ -40,7 +41,10 @@ def _detect_device() -> tuple[Any, str]:
     except ImportError:
         return None, "cpu"  # fallback，CLI-only
 
-    if hasattr(torch, "xpu") and torch.xpu.is_available():
+    if hasattr(torch, "musa") and torch.musa.is_available():  # type: ignore[attr-defined]
+        logger.info("MUSA device is available. Using MUSA for LMCache engine.")
+        return torch.musa, "musa"  # type: ignore[attr-defined]
+    elif hasattr(torch, "xpu") and torch.xpu.is_available():
         return torch.xpu, "xpu"
     elif hasattr(torch, "hpu") and torch.hpu.is_available():
         return torch.hpu, "hpu"
@@ -59,6 +63,17 @@ torch_dev, torch_device_type = _detect_device()
 logger.info(" torch_dev=%s, torch_device_type=%s", torch_dev, torch_device_type)
 
 
+# Attach the DeviceExt instance as ``torch_dev.ext``.  This monkey-patches a
+# standard torch module (e.g. ``torch.cuda``) with a custom attribute that does
+# not exist in the original module.  The ``# type: ignore[attr-defined]`` suppresses
+# the expected mypy/pyright "attr-defined" error from this intentional extension.
+if torch_dev is not None:
+    torch_dev.ext = DeviceExt(torch_device_type)  # type: ignore[attr-defined]
+else:
+    logger.warning("torch_dev is None, skipping DeviceExt initialization.")
+    pass
+
+
 # --------------------------
 # Dynamic backend selection
 # --------------------------
@@ -71,6 +86,14 @@ def _get_backend() -> Any:
     import torch
 
     backend_candidates = [
+        # Keep backend priority aligned with _detect_device().
+        # MUSA currently uses a Python adapter under the platform package,
+        # unlike the compiled XPU/CUDA extension modules.
+        (
+            "lmcache.v1.platform.musa.ops",
+            "musa_ops",
+            lambda: hasattr(torch, "musa") and torch.musa.is_available(),  # type: ignore[attr-defined]
+        ),
         (
             "lmcache.xpu_ops",
             "xpu_ops",

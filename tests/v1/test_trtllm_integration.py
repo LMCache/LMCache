@@ -73,24 +73,7 @@ class TestGPUKVFormatEnum:
         # First Party
         import lmcache.c_ops as lmc_ops
 
-        assert hasattr(lmc_ops.GPUKVFormat, "NB_NL_TWO_NH_BS_HS")
-
-    def test_is_cross_layer_format(self) -> None:
-        # First Party
-        from lmcache.v1.gpu_connector.utils import is_cross_layer_format
-        import lmcache.c_ops as lmc_ops
-
-        assert is_cross_layer_format(lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS)
-        assert is_cross_layer_format(lmc_ops.GPUKVFormat.NB_NL_TWO_NH_BS_HS)
-        assert not is_cross_layer_format(lmc_ops.GPUKVFormat.NL_X_NB_BS_HS)
-
-    def test_is_hnd(self) -> None:
-        # First Party
-        from lmcache.v1.gpu_connector.utils import is_hnd
-        import lmcache.c_ops as lmc_ops
-
-        assert is_hnd(lmc_ops.GPUKVFormat.NB_NL_TWO_NH_BS_HS)
-        assert not is_hnd(lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS)
+        assert hasattr(lmc_ops.EngineKVFormat, "NB_NL_TWO_NH_BS_HS")
 
 
 @pytest.mark.skipif(not _has_lmc_ops(), reason="lmcache C ops not built")
@@ -121,7 +104,7 @@ class TestNormalizeTRTLLM:
             t, EngineType.TRTLLM, layout_hints=layout_hints
         )
 
-        assert fmt == lmc_ops.GPUKVFormat.NB_NL_TWO_NH_BS_HS
+        assert fmt == lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS
         assert isinstance(normalized, torch.Tensor)
         assert tuple(normalized.shape) == (nb, nl, kv, nh, bs, hs)
 
@@ -144,7 +127,7 @@ class TestNormalizeTRTLLM:
         fmt, normalized = normalize_kv_and_discover_format(
             [t], EngineType.TRTLLM, layout_hints=layout_hints
         )
-        assert fmt == lmc_ops.GPUKVFormat.NB_NL_TWO_NH_BS_HS
+        assert fmt == lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS
         assert isinstance(normalized, torch.Tensor)
         assert normalized.shape == (nb, nl, kv, nh, bs, hs)
 
@@ -197,7 +180,7 @@ class TestAccessorsTRTLLM:
         import lmcache.c_ops as lmc_ops
 
         t = self._tensor()
-        assert get_num_layers(t, lmc_ops.GPUKVFormat.NB_NL_TWO_NH_BS_HS) == 3
+        assert get_num_layers(t, lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS) == 3
 
     def test_get_num_blocks(self) -> None:
         # First Party
@@ -205,7 +188,7 @@ class TestAccessorsTRTLLM:
         import lmcache.c_ops as lmc_ops
 
         t = self._tensor()
-        assert get_num_blocks(t, lmc_ops.GPUKVFormat.NB_NL_TWO_NH_BS_HS) == 4
+        assert get_num_blocks(t, lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS) == 4
 
     def test_get_block_size(self) -> None:
         # First Party
@@ -213,7 +196,7 @@ class TestAccessorsTRTLLM:
         import lmcache.c_ops as lmc_ops
 
         t = self._tensor()
-        assert get_block_size(t, lmc_ops.GPUKVFormat.NB_NL_TWO_NH_BS_HS) == 16
+        assert get_block_size(t, lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS) == 16
 
     def test_get_num_heads(self) -> None:
         # First Party
@@ -221,7 +204,7 @@ class TestAccessorsTRTLLM:
         import lmcache.c_ops as lmc_ops
 
         t = self._tensor()
-        assert get_num_heads(t, lmc_ops.GPUKVFormat.NB_NL_TWO_NH_BS_HS) == 8
+        assert get_num_heads(t, lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS) == 8
 
     def test_get_head_size(self) -> None:
         # First Party
@@ -229,7 +212,7 @@ class TestAccessorsTRTLLM:
         import lmcache.c_ops as lmc_ops
 
         t = self._tensor()
-        assert get_head_size(t, lmc_ops.GPUKVFormat.NB_NL_TWO_NH_BS_HS) == 64
+        assert get_head_size(t, lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS) == 64
 
     def test_get_hidden_dim_size(self) -> None:
         # First Party
@@ -237,7 +220,9 @@ class TestAccessorsTRTLLM:
         import lmcache.c_ops as lmc_ops
 
         t = self._tensor()
-        assert get_hidden_dim_size(t, lmc_ops.GPUKVFormat.NB_NL_TWO_NH_BS_HS) == 8 * 64
+        assert (
+            get_hidden_dim_size(t, lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS) == 8 * 64
+        )
 
     def test_get_page_buffer_size(self) -> None:
         # First Party
@@ -245,7 +230,9 @@ class TestAccessorsTRTLLM:
         import lmcache.c_ops as lmc_ops
 
         t = self._tensor()
-        assert get_page_buffer_size(t, lmc_ops.GPUKVFormat.NB_NL_TWO_NH_BS_HS) == 4 * 16
+        assert (
+            get_page_buffer_size(t, lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS) == 4 * 16
+        )
 
     def test_get_dtype(self) -> None:
         # First Party
@@ -253,7 +240,7 @@ class TestAccessorsTRTLLM:
         import lmcache.c_ops as lmc_ops
 
         t = self._tensor()
-        assert get_dtype(t, lmc_ops.GPUKVFormat.NB_NL_TWO_NH_BS_HS) == torch.bfloat16
+        assert get_dtype(t, lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS) == torch.bfloat16
 
     def test_get_group_data_ptrs_returns_single_base_pointer(self) -> None:
         # First Party
@@ -262,7 +249,7 @@ class TestAccessorsTRTLLM:
 
         t = self._tensor()
         ptrs = get_group_data_ptrs(
-            t, lmc_ops.GPUKVFormat.NB_NL_TWO_NH_BS_HS, list(range(3))
+            t, lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS, list(range(3))
         )
         assert len(ptrs) == 1
         assert ptrs[0] == t.data_ptr()
@@ -271,15 +258,15 @@ class TestAccessorsTRTLLM:
         # First Party
         from lmcache.v1.gpu_connector.utils import (
             get_attention_backend,
-            get_concrete_gpu_kv_shape,
-            get_gpu_kv_shape_description,
+            get_concrete_engine_kv_shape,
+            get_engine_kv_shape_description,
         )
         import lmcache.c_ops as lmc_ops
 
-        fmt = lmc_ops.GPUKVFormat.NB_NL_TWO_NH_BS_HS
-        assert get_gpu_kv_shape_description(fmt) == "[NB, NL, 2, NH, BS, HS]"
+        fmt = lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS
+        assert get_engine_kv_shape_description(fmt) == "[NB, NL, 2, NH, BS, HS]"
         assert "TRT-LLM" in get_attention_backend(fmt)
-        assert get_concrete_gpu_kv_shape(self._tensor(), fmt) == (
+        assert get_concrete_engine_kv_shape(self._tensor(), fmt) == (
             "[4, 3, 2, 8, 16, 64]"
         )
 
@@ -359,32 +346,32 @@ class TestRawCudaIPCWrapperType:
     def test_is_subclass(self) -> None:
         # First Party
         from lmcache.v1.multiprocess.custom_types import (
-            CudaIPCWrapper,
-            RawCudaIPCWrapper,
+            DeviceIPCWrapper,
         )
+        from lmcache.v1.platform.cuda.ipc_wrapper import RawCudaIPCWrapper
 
-        assert issubclass(RawCudaIPCWrapper, CudaIPCWrapper)
+        assert issubclass(RawCudaIPCWrapper, DeviceIPCWrapper)
 
     def test_kvcache_typing_unchanged(self) -> None:
-        """``KVCache = list[CudaIPCWrapper]`` should accept subclass items
+        """``KVCache = list[DeviceIPCWrapper]`` should accept concrete wrappers
         — load-bearing for msgspec ext-code reuse over ZMQ.
         """
         # First Party
         from lmcache.v1.multiprocess.custom_types import (
-            CudaIPCWrapper,
+            DeviceIPCWrapper,
             KVCache,
-            RawCudaIPCWrapper,
         )
+        from lmcache.v1.platform.cuda.ipc_wrapper import RawCudaIPCWrapper
 
-        assert KVCache == list[CudaIPCWrapper]
-        # Static check substitute: a Raw* instance fits the list type.
-        assert issubclass(RawCudaIPCWrapper, CudaIPCWrapper)
+        assert KVCache == list[DeviceIPCWrapper]
+        # Static check substitute: a concrete wrapper fits the list type.
+        assert issubclass(RawCudaIPCWrapper, DeviceIPCWrapper)
 
     def test_serde_uses_shared_ext_code(self) -> None:
-        """Ext code 1 dispatches to ``CudaIPCWrapper`` (shared with subclass)."""
+        """Ext code 1 dispatches via ``DeviceIPCWrapper`` for all wrappers."""
         # First Party
         from lmcache.v1.multiprocess import custom_types
 
         registry = custom_types._CUSTOMERIZED_SERIALIZERS  # noqa: PLC2701
-        assert custom_types.CudaIPCWrapper in registry
-        assert registry[custom_types.CudaIPCWrapper].code == 1
+        assert custom_types.DeviceIPCWrapper in registry
+        assert registry[custom_types.DeviceIPCWrapper].code == 1

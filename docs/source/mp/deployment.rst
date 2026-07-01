@@ -181,7 +181,7 @@ Monitoring Integration
 
 Prometheus metrics are enabled by default on port 9090.  Add a
 ``ServiceMonitor`` or Prometheus scrape annotation to collect metrics from the
-LMCache DaemonSet pods.  See :doc:`observability` for metric details.
+LMCache DaemonSet pods.  See :doc:`observability/index` for metric details.
 
 Cleanup
 ~~~~~~~
@@ -219,12 +219,28 @@ A larger L1 cache means fewer L2 round-trips.
 Use ``LMCACHE_LOG_LEVEL=DEBUG`` during initial setup to verify L2 store/load
 activity.  Switch to ``INFO`` (default) for production to reduce log volume.
 
-Non-GPU Transfer Mode (``--shm-name``)
---------------------------------------
+Transfer Mode (``--supported-transfer-mode``, ``--shm-name``)
+-------------------------------------------------------------
 
-By default, LMCache creates a shared-memory (SHM) pool for non-GPU KV
-transfers between the server and vLLM workers.  The ``--shm-name`` option
-lets you control this behavior:
+LMCache supports two worker → server transfer paths: an
+**lmcache-driven** path (server pulls/pushes via CUDA IPC or CPU SHM,
+used for STORE/RETRIEVE) and an **engine-driven** path
+(PREPARE/COMMIT, used by CPU-only or non-CUDA accelerator workers).
+The server picks which paths to load via ``--supported-transfer-mode``:
+
+- ``auto`` *(default)* -- load both paths.  Workers of either device
+  type can connect without manual configuration; the server has no
+  upfront knowledge of the connecting worker's device.
+- ``lmcache_driven`` -- load only the server-driven transfer path.
+  Supports CUDA devices (IPC) and CPU devices (SHM).  Use to skip
+  allocating the engine-driven prepare/commit resources (pickle codec).
+- ``engine_driven`` -- load only the engine-driven path.  Use when
+  serving CPU-only or non-CUDA accelerator workers.
+
+When the engine-driven path is loaded (``auto`` or ``engine_driven``),
+LMCache by default creates a shared-memory (SHM) pool for KV transfers
+between the server and vLLM workers.  The ``--shm-name`` option lets
+you control this behavior:
 
 .. list-table::
    :header-rows: 1
