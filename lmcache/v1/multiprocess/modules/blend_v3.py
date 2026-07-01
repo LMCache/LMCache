@@ -1675,11 +1675,19 @@ class BlendV3Module(InstanceLivenessTarget):
                                 ]
                             )
                             for group_idx in range(num_groups):
-                                # Per-group block table and block size: groups can differ in
-                                # tokens_per_block, so slot_mapping / page_buffer_size / the
-                                # transfer block_size all use this group's value (a global one
-                                # would index the block table out of bounds).
-                                group_block_ids = block_ids_per_group_gpu[group_idx]
+                                # Index the per-engine-group block table by the
+                                # kernel group's engine_group_idx: kernel groups can
+                                # share one engine group (e.g. MiniMax-M3), so the
+                                # kernel index would target the wrong group.
+                                eg_idx = gpu_context.kv_layer_groups_manager.kernel_groups[
+                                    group_idx
+                                ].engine_group_idx
+                                if eg_idx >= len(block_ids_per_group_gpu):
+                                    eg_idx = 0
+                                group_block_ids = block_ids_per_group_gpu[eg_idx]
+                                # Per-group block size: groups can differ in
+                                # tokens_per_block, so slot_mapping / page_buffer_size
+                                # / the transfer block_size all use this group's value.
                                 group_bs = (
                                     gpu_context.kv_layer_groups_manager.kernel_groups[
                                         group_idx
