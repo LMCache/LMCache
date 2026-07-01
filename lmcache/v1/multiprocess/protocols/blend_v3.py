@@ -15,6 +15,10 @@ REQUEST_NAMES = [
     "CB_UNREGISTER_ROPE_V3",
     "CB_RETRIEVE_PRE_COMPUTED_V3",
     "CB_UNIFIED_LOOKUP",
+    # NOTE (Jiayi): qwen35 modification starts
+    "AUX_PUT",
+    "AUX_GET_BY_HASH_IPC",
+    # NOTE (Jiayi): qwen35 modification ends
 ]
 
 
@@ -66,4 +70,43 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             response_class=CBUnifiedLookupResult | None,
             handler_type=HandlerType.BLOCKING,
         ),
+        # NOTE (Jiayi): qwen35 modification starts
+        # Generic opaque per-chunk blob store. One blob per cacheable chunk of
+        # the request range, stored under the chunk's content hash in object
+        # group ``group`` (disjoint from KV groups) so it is reusable across
+        # requests. The server NEVER interprets the bytes: the caller packs
+        # whatever it wants per chunk (e.g. all layers' compressed projections),
+        # so one call covers all chunks (hence all layers) at once. ``sizes``
+        # gives the per-chunk byte length used to split ``blob`` and to lay out
+        # the read. Payload: (key, group, sizes, blob_ipc). Returns: success.
+        "AUX_PUT": ProtocolDefinition(
+            payload_classes=[
+                IPCCacheServerKey,
+                int,
+                list[int],
+                DeviceIPCWrapper,
+            ],
+            response_class=bool,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # GPU-IPC retrieve: the worker exports a GPU receive buffer
+        # (dst_ipc) and a forward-fence CUDA event; the server copies each
+        # matched chunk straight into that buffer on its stream (same physical
+        # GPU, no D2H/H2D/ZMQ bytes), then returns its completion-event handle.
+        # Payload: (key, group, chunk_hashes, sizes, dst_ipc, instance_id,
+        #           event_ipc_handle). Returns: (event_ipc_handle, ok).
+        "AUX_GET_BY_HASH_IPC": ProtocolDefinition(
+            payload_classes=[
+                IPCCacheServerKey,
+                int,
+                list[bytes],
+                list[int],
+                DeviceIPCWrapper,
+                int,
+                bytes,
+            ],
+            response_class=tuple[bytes, bool],
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # NOTE (Jiayi): qwen35 modification ends
     }

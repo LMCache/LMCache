@@ -40,6 +40,12 @@ import zmq
 from lmcache import torch_dev
 from lmcache.banner import print_banner_once
 from lmcache.integration.vllm.kv_cache_group_edits import (
+    cb_kept_group_indices,  # NOTE (Jiayi): qwen35 kept vLLM group indices
+)
+from lmcache.integration.vllm.kv_cache_group_edits import (
+    cb_skip_mamba_groups,  # NOTE (Jiayi): qwen35 CacheBlend-on-GDN gated mamba-skip
+)
+from lmcache.integration.vllm.kv_cache_group_edits import (
     apply_kv_cache_group_edits,
     validate_kv_cache_groups,
 )
@@ -358,6 +364,27 @@ class LMCacheMPRequestMetadata:
         num_staging_tokens = min_available_tokens - tracker.num_stored_tokens
         num_chunks = num_staging_tokens // lmcache_tokens_per_chunk
 
+        # NOTE (Jiayi): qwen35 instrumentation — why is the store capped to 1 chunk?
+        logger.info(
+            "CB[store-range] req=%s all_tok=%d alloc=%d computed=%d "
+            "(sched=%d vhit=%d lhit=%d) stored=%d staging=%d chunk=%d nchunks=%d "
+            "| ngroups=%d tpb=%s alloc_blocks=%s",
+            tracker.request_id,
+            len(tracker.all_token_ids),
+            allocated_tokens,
+            computed_tokens,
+            tracker.num_scheduled_tokens,
+            tracker.num_vllm_hit_tokens,
+            tracker.num_lmcache_hit_tokens,
+            tracker.num_stored_tokens,
+            num_staging_tokens,
+            lmcache_tokens_per_chunk,
+            num_chunks,
+            num_engine_groups,
+            group_tokens_per_block,
+            dict(allocated_lengths),
+        )
+
         if num_chunks >= 1:
             start_token_idx = tracker.num_stored_tokens
             end_token_idx = start_token_idx + num_chunks * lmcache_tokens_per_chunk
@@ -620,6 +647,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             if kv_cache_config is not None
             else ()
         )
+        # NOTE (Jiayi): qwen35 CacheBlend-on-GDN (gated) — serve only full-attention
+        # groups for per-group token/block accounting; GDN groups are owned by
+        # the aux store. Matches the filter in create_engine_group_infos.
+        # Capture the kept groups' ORIGINAL vLLM indices BEFORE compacting, so
+        # block-id structures (indexed by vLLM's full group order) can be
+        # projected onto the compacted order — otherwise allocated_block_ids
+        # (keyed by vLLM index, e.g. {0,1,2 mamba, 3 full-attn}) is read with
+        # the compacted index 0 and picks a 1-block mamba group, capping the
+        # store at one chunk. Identity when the gate is off.
+        self._kept_group_indices: list[int] = cb_kept_group_indices(vllm_groups)
+        vllm_groups = cb_skip_mamba_groups(vllm_groups)
         # Tokens covered by one paged chunk (one block ID) of each engine
         # group, from the group's KV cache spec. Hybrid models can mix
         # different values (e.g. gemma-4: sliding-window groups 32,
@@ -970,7 +1008,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # We must only append the NEW blocks beyond what's already tracked
         # to avoid duplication, which would corrupt the store path's block indexing.
         tracker = self._get_request_tracker(request.request_id)
-        block_ids = blocks.get_block_ids() or ()
+        # NOTE (Jiayi): qwen35 project vLLM's full-group block ids onto the compacted,
+        # mamba-skipped group order so per-group accounting stays aligned.
+        block_ids = self._project_kept_groups(blocks.get_block_ids() or ())
 
         # Only append blocks beyond what's already tracked, per engine group.
         existing_counts = tracker.num_allocated_blocks()
@@ -1230,7 +1270,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             request_tracker = self._get_request_tracker(request_id)
 
             # Update block ids
-            new_block_ids = cached_reqs.new_block_ids[idx] or ()
+            # NOTE (Jiayi): qwen35 project onto compacted (mamba-skipped) group order.
+            new_block_ids = self._project_kept_groups(
+                cached_reqs.new_block_ids[idx] or ()
+            )
             if request_id not in cached_reqs.resumed_req_ids:
                 request_tracker.append_block_ids(new_block_ids)
 
@@ -1247,6 +1290,37 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
             if r_meta is not None:
                 metadata.add_request_metadata(r_meta)
+
+    # NOTE (Jiayi): qwen35 modification starts
+    def _project_kept_groups(self, group_block_ids):
+        """Select only the kept (non-Mamba) vLLM groups, in compacted order.
+
+        vLLM hands block-id structures indexed by its FULL kv_cache_groups order
+        (e.g. ``{0,1,2: mamba, 3: full-attn}`` for Qwen3.5). Our per-group token
+        accounting (``_group_tokens_per_block``) is the mamba-SKIPPED, compacted
+        order, so block ids must be re-projected to match — otherwise group 0 of
+        the accounting resolves to a 1-block mamba group and the store caps at
+        one chunk. Identity when the gate is off (``_kept_group_indices`` covers
+        all groups).
+
+        Args:
+            group_block_ids (Sequence[list[int]]): Per-vLLM-group block-id
+                lists (tuple/list, indexed by vLLM's full group order).
+
+        Returns:
+            tuple[list[int], ...]: Per-group block-id lists for the kept groups
+            only, in compacted order aligned to ``_group_tokens_per_block``.
+        """
+        kept = getattr(self, "_kept_group_indices", None)
+        # Empty/None => no group metadata (non-hybrid fallback) or gate off with
+        # no groups: pass through unchanged so single-group accounting is intact.
+        if not kept:
+            return tuple(group_block_ids)
+        return tuple(
+            list(group_block_ids[i]) if i < len(group_block_ids) else [] for i in kept
+        )
+
+    # NOTE (Jiayi): qwen35 modification ends
 
     def _report_block_allocation_deltas(
         self,
@@ -1285,7 +1359,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for idx, request_id in enumerate(cached_reqs.req_ids):
             # The L0 subscriber works on the primary (group 0) block-id list.
-            new_group_block_ids = cached_reqs.new_block_ids[idx]
+            # NOTE (Jiayi): qwen35 project so "group 0" is the kept primary (full-attn),
+            # not vLLM's group 0 (a mamba group under the skip).
+            new_group_block_ids = self._project_kept_groups(
+                cached_reqs.new_block_ids[idx] or ()
+            )
             new_block_ids = new_group_block_ids[0] if new_group_block_ids else []
             if not new_block_ids:
                 continue

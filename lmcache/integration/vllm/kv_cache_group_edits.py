@@ -94,6 +94,82 @@ def _leaf_specs(spec: KVCacheSpec) -> list[KVCacheSpec]:
     return [spec]
 
 
+# NOTE (Jiayi): qwen35 modification starts
+def cb_skip_mamba_groups(groups):
+    """Drop Mamba/GDN groups when the CacheBlend-on-GDN gate is set.
+
+    HACKY env gate (``LMCACHE_CB_SKIP_MAMBA``, temporary): the CacheBlend-on-GDN
+    path owns the GDN groups via its aux store (per-token projections), so
+    LMCache should serve only the full-attention groups. Returns ``groups``
+    unchanged when the gate is off.
+
+    Args:
+        groups: Iterable of vLLM ``KVCacheGroupSpec`` (each has
+            ``kv_cache_spec`` with possibly nested leaf specs).
+
+    Returns:
+        tuple: The groups with Mamba/GDN groups removed (gate on), else the
+        input groups unchanged.
+    """
+    # Standard
+    import os
+
+    if os.environ.get("LMCACHE_CB_SKIP_MAMBA", "0").lower() not in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return groups
+    return tuple(
+        g
+        for g in groups
+        if not any(
+            getattr(s, "mamba_cache_mode", None) is not None
+            for s in _leaf_specs(g.kv_cache_spec)
+        )
+    )
+
+
+def cb_kept_group_indices(groups) -> list[int]:
+    """Indices of the groups :func:`cb_skip_mamba_groups` keeps, in order.
+
+    The companion to :func:`cb_skip_mamba_groups`: it returns the *kept* groups,
+    this returns their ORIGINAL positional indices in ``groups``. Callers use
+    it to project a vLLM-group-indexed structure (e.g. ``new_block_ids``, which
+    is indexed by vLLM's full kv_cache_groups order) onto the compacted,
+    mamba-skipped group order so per-group accounting stays aligned. When the
+    gate is off this is the identity ``list(range(len(groups)))``.
+
+    Args:
+        groups: Iterable of vLLM ``KVCacheGroupSpec`` (vLLM's full group order).
+
+    Returns:
+        list[int]: Original indices of the kept (non-Mamba) groups, in order.
+        Identity over all groups when the gate is off.
+    """
+    # Standard
+    import os
+
+    all_idx = list(range(len(groups)))
+    if os.environ.get("LMCACHE_CB_SKIP_MAMBA", "0").lower() not in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return all_idx
+    return [
+        i
+        for i, g in enumerate(groups)
+        if not any(
+            getattr(s, "mamba_cache_mode", None) is not None
+            for s in _leaf_specs(g.kv_cache_spec)
+        )
+    ]
+
+
+# NOTE (Jiayi): qwen35 modification ends
+
+
 def validate_kv_cache_groups(kv_cache_config: KVCacheConfig | None) -> None:
     """Reject KV cache group specs the transfer path cannot serve correctly.
 
@@ -117,6 +193,20 @@ def validate_kv_cache_groups(kv_cache_config: KVCacheConfig | None) -> None:
     """
     if kv_cache_config is None:
         return
+    # NOTE (Jiayi): qwen35 modification starts
+    # HACKY env gate (temporary, pending a config-driven flag): when
+    # LMCACHE_CB_SKIP_MAMBA is set, do NOT reject Mamba/GDN groups in non-align
+    # modes. The CacheBlend-on-GDN path manages GDN itself via the aux store
+    # (per-token projections), not LMCache's opaque align-mode state snapshots.
+    # Standard
+    import os
+
+    _skip_mamba = os.environ.get("LMCACHE_CB_SKIP_MAMBA", "0").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    # NOTE (Jiayi): qwen35 modification ends
     unsupported: list[str] = []
     for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
         for spec in _leaf_specs(group.kv_cache_spec):
@@ -125,6 +215,7 @@ def validate_kv_cache_groups(kv_cache_config: KVCacheConfig | None) -> None:
                 unsupported.append(f"group {group_idx}: CrossAttentionSpec")
             elif (
                 kind == KVCacheSpecKind.MAMBA
+                and not _skip_mamba  # NOTE (Jiayi): qwen35 CacheBlend-on-GDN gate
                 and getattr(spec, "mamba_cache_mode", "none") != "align"
             ):
                 unsupported.append(
@@ -387,7 +478,12 @@ def apply_kv_cache_group_edits(
 
     edited = dict(kv_caches)
     counts: Counter[str] = Counter()
-    for group in kv_cache_config.kv_cache_groups:
+    # NOTE (Jiayi): qwen35 CacheBlend-on-GDN (gated) — don't transform GDN/Mamba
+    # groups (the aux store owns them); they pass through unedited and are
+    # excluded from LMCache's engine groups downstream. Computed once + reused
+    # by the drop step below.
+    kept = cb_skip_mamba_groups(kv_cache_config.kv_cache_groups)
+    for group in kept:
         spec = group.kv_cache_spec
         for name in group.layer_names:
             for edit in _EDITS:
@@ -399,4 +495,16 @@ def apply_kv_cache_group_edits(
         "KV cache group edits applied: %s",
         dict(counts) if counts else "none",
     )
+    # NOTE (Jiayi): qwen35 modification starts
+    # CacheBlend-on-GDN (gated) — drop the skipped GDN/Mamba groups' layers from
+    # the registered set entirely, so LMCache's transfer context and store never
+    # see them (their tensors are [conv_state, ssm_state] lists, not paged KV).
+    # The aux store owns GDN. No-op when the gate is off (kept == all groups).
+    if len(kept) != len(kv_cache_config.kv_cache_groups):
+        kept_names = {n for g in kept for n in g.layer_names}
+        for group in kv_cache_config.kv_cache_groups:
+            for name in group.layer_names:
+                if name not in kept_names:
+                    edited.pop(name, None)
+    # NOTE (Jiayi): qwen35 modification ends
     return edited
