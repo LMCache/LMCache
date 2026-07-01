@@ -34,8 +34,6 @@ spec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
-          securityContext:
-            runAsUser: 0
           env:
             - name: PYTHONHASHSEED
               value: "0"
@@ -75,8 +73,6 @@ spec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
-          securityContext:
-            runAsUser: 0
           env:
             - name: PYTHONHASHSEED
               value: "0"
