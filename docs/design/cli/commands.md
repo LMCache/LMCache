@@ -397,7 +397,7 @@ lmcache/cli/
 |-------|-------|
 | **0** | CLI framework (explicit registration, `Metrics`), `mock` example command, entry point — see [framework-and-metrics.md](framework-and-metrics.md) |
 | **1** | **`server`** (done), `ping kvcache`, `kvcache clear`, `kvcache end-session`, `describe kvcache` |
-| **2** | `ping engine`, `query engine`, `query kvcache`, `bench engine`, `bench server`, `bench l2`, `describe engine`, corpora |
+| **2** | `ping engine`, `query engine` (done), `query kvcache` (done, lookup-mode subset), `bench engine`, `bench server`, `bench l2`, `describe engine` (done), corpora |
 | **3** | `kvcache evict` (future) |
 
 Existing `lmcache_server` entry point kept as a deprecated alias for 2 minor releases.

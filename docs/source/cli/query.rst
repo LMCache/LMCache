@@ -1,15 +1,15 @@
 lmcache query
 =============
 
-The ``lmcache query`` command sends a single OpenAI-compatible inference
-request and reports token and latency metrics. It has two targets:
+The ``lmcache query`` command runs a single, metrics-first query. It has two
+targets:
 
 .. code-block:: bash
 
    lmcache query {engine,kvcache} [options]
 
 * ``engine`` — send one request to a serving engine's HTTP API.
-* ``kvcache`` — query KV-cache endpoints (not implemented yet).
+* ``kvcache`` — report how much of a prompt is already in the KV cache.
 
 
 query engine
@@ -79,6 +79,88 @@ Options
      - No
      - Try ``/v1/chat/completions`` first, then fall back to
        ``/v1/completions``.
+   * - ``--format``
+     - No
+     - Output format: ``terminal`` (default) or ``json``.
+   * - ``--output PATH``
+     - No
+     - Save metrics to a file (format follows ``--format``).
+   * - ``-q`` / ``--quiet``
+     - No
+     - Suppress stdout output. Exit code only.
+
+
+query kvcache
+-------------
+
+The ``query kvcache`` subcommand reports how much of a prompt is already stored
+in the KV cache. It tokenizes the prompt locally with the model's tokenizer,
+posts the token IDs to the controller's ``POST /lookup`` endpoint, and
+summarizes the coverage. ``--prompt`` supports the same ``{name}`` placeholders
+as ``query engine``: bind one to a file with ``--documents NAME=PATH``, pass a
+bare ``--documents PATH`` to fill the next unnamed placeholder (or append to the
+prompt if none remain), and ``{lmcache}`` resolves to the bundled sample
+document with no ``--documents`` needed.
+
+.. code-block:: bash
+
+   lmcache query kvcache --url http://localhost:5555 \
+     --prompt "{ctx} What is the example usage of lmcache?" \
+     --documents ctx=lmcache/cli/documents/lmcache.txt \
+     --model meta-llama/Llama-3.1-8B-Instruct
+
+.. code-block:: text
+
+   =============== Query KV Cache ================
+   Model:            meta-llama/Llama-3.1-8B-Instruct
+   Prompt tokens:                             8192
+   Cached tokens:                        7680/8192
+   Cached chunks:                            30/32
+   Cache locations:                  [cpu@inst-0]
+   Cache status:                     HIT (partial)
+   ==============================================
+
+Cache status is ``HIT`` when the whole prompt is cached, ``MISS`` when nothing
+is, and ``HIT (partial)`` otherwise.
+
+.. note::
+
+   Coverage is **prefix-based**: it reports the longest cached prefix and stops
+   at the first uncached chunk. ``Cache locations`` lists the instance holding
+   that prefix (``location@instance_id``), not a per-tier chunk histogram.
+   ``Cached chunks`` is derived from ``--chunk-size`` and is exact only when
+   that value matches the server's configured chunk size. Token IDs must come
+   from the same tokenizer the engine uses, or coverage will read low.
+
+Options
+~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 55
+
+   * - Flag
+     - Required
+     - Description
+   * - ``--url URL``
+     - Yes
+     - Controller HTTP endpoint (e.g. ``http://localhost:5555``).
+   * - ``--prompt TEXT``
+     - Yes
+     - Prompt text with optional ``{name}`` placeholders.
+   * - ``--model ID``
+     - Yes
+     - Tokenizer/model ID used to derive token IDs. For gated models, run
+       ``huggingface-cli login`` first.
+   * - ``--documents NAME=PATH``
+     - No
+     - Load file text for ``{NAME}`` in ``--prompt``. Accepts one or more
+       ``NAME=PATH`` or bare ``PATH`` values; a bare ``PATH`` fills the next
+       unnamed placeholder or is appended to the prompt.
+   * - ``--chunk-size N``
+     - No
+     - Tokens per cache chunk for the chunk-count display (default: 256). Must
+       match the server's configured chunk size to be exact.
    * - ``--format``
      - No
      - Output format: ``terminal`` (default) or ``json``.
