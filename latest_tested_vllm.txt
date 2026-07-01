@@ -1,4 +1,4 @@
-0.23.1rc1.dev552+g4559c43a9
-short_sha=4559c43a9
-full_sha=4559c43a9526597c00cbcc4f59979496500268d1
-archive_index_url=https://wheels.vllm.ai/4559c43a9526597c00cbcc4f59979496500268d1/cu130
+0.24.0
+short_sha=
+full_sha=
+archive_index_url=
