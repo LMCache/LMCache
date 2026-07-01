@@ -43,12 +43,12 @@ class MPCoordinatorConfig:
             recall; raise only to trade recall for coordinator CPU.
         enable_startup_resync: When ``True``, run a one-shot L2 resync
             on startup to backfill trackers from an MP server's
-            ``GET /l2/keys``.
+            ``GET /cache/objects``.
         resync_poll_interval: Seconds between registry checks while
             waiting for the first MP server to register.
         resync_max_wait: Maximum seconds startup resync waits for an MP
             server before giving up.
-        resync_page_size: ``page_size`` forwarded to ``GET /l2/keys``
+        resync_page_size: ``page_size`` forwarded to ``GET /cache/objects``
             during resync.
         timeout_keep_alive: Seconds the HTTP server keeps idle connections
             open before closing them. Must be greater than the heartbeat

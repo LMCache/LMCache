@@ -84,12 +84,12 @@ class LMCacheKVCacheContext:
 
         mp_conf = {}
         try:
-            response = requests.get(f"{self._http_url}/conf", timeout=timeout)
+            response = requests.get(f"{self._http_url}/config", timeout=timeout)
             response.raise_for_status()
             mp_conf = response.json()["mp"]
         except (requests.RequestException, KeyError, ValueError) as err:
             raise KVCacheSDKError(
-                f"failed to fetch server config from {self._http_url}/conf"
+                f"failed to fetch server config from {self._http_url}/config"
             ) from err
         self._chunk_size: int = int(mp_conf["chunk_size"])
         self.shm_name: str = str(mp_conf.get("shm_name", "")).lstrip("/")

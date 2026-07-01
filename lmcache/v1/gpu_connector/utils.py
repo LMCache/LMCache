@@ -86,25 +86,9 @@ def assert_layerwise_gpu_connector(gpu_connector: "GPUConnectorInterface"):
     assert isinstance(gpu_connector, valid_connectors)
 
 
-def is_cross_layer_format(engine_kv_format: "lmc_ops.EngineKVFormat") -> bool:
-    """Return ``True`` if *engine_kv_format* stores all layers in one tensor.
-
-    Cross-layer formats -- ``NB_NL_TWO_BS_NH_HS`` (vLLM, NHD) and
-    ``NB_NL_TWO_NH_BS_HS`` (TRT-LLM, HND) -- are represented as a single
-    bare :class:`torch.Tensor` rather than a list-of-tensors keyed by
-    layer index.
-    """
-    return get_spec_class(engine_kv_format).is_cross_layer
-
-
-def is_hnd(engine_kv_format: "lmc_ops.EngineKVFormat") -> bool:
-    """Return ``True`` if the Engine KV Format uses an HND physical layout."""
-    return get_spec_class(engine_kv_format).is_hnd
-
-
 def is_mla(engine_kv_format: "lmc_ops.EngineKVFormat") -> bool:
     """Return ``True`` for a Multi-head Latent Attention (MLA) layout."""
-    return get_spec_class(engine_kv_format).is_mla
+    return lmc_ops.is_mla(engine_kv_format)
 
 
 def get_engine_kv_shape_description(engine_kv_format: "lmc_ops.EngineKVFormat") -> str:
@@ -250,20 +234,22 @@ def normalize_and_discover_per_layer_formats(
         structure and one format per layer (length equals the layer count),
         ready for :func:`lmcache.v1.kv_layer_groups.group_layers_by_identity`.
     """
-    # A single fused tensor is single-format by construction and cannot be indexed
-    # by layer; detect it directly and repeat the format for every layer.
-    if not isinstance(kv_caches, list):
-        engine_kv_format, normalized = detect_format(
-            kv_caches, serving_engine, layout_hints
-        )
-        return normalized, [engine_kv_format] * get_num_layers(
-            normalized, engine_kv_format
+
+    # Detect the whole structure once. A format that isn't a per-layer list (a
+    # cross-layer tensor, or a K/V-split) is single-format -- return it whole.
+    whole_format, whole_normalized = detect_format(
+        kv_caches, serving_engine, layout_hints
+    )
+    if not lmc_ops.is_layer_list(whole_format):
+        return whole_normalized, [whole_format] * get_num_layers(
+            whole_normalized, whole_format
         )
 
+    # Per-layer list: re-detect per engine group, split by tensor shape so a group
+    # that mixes layouts gets the right format per layer.
     groups = layer_index_groups or [range(len(kv_caches))]
     detected: dict[int, tuple[DiscoverableKVCache, "lmc_ops.EngineKVFormat"]] = {}
     for indices in groups:
-        # One engine group can still mix layouts
         layers_by_shape: dict[Hashable, list[int]] = {}
         for i in indices:
             shape = getattr(kv_caches[i], "shape", None)
@@ -538,20 +524,14 @@ def resolve_block_stride_and_log_layout(
         # - SGL MHA: outer list is K/V (length 2), inner list is
         #   per-layer; K & V share shape/stride by construction.
         # - Other formats: ``kv_caches`` is already a per-layer list.
-        if engine_kv_format in (
-            lmc_ops.EngineKVFormat.NB_NL_TWO_BS_NH_HS,
-            lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS,
-        ):
+        if lmc_ops.is_cross_layer(engine_kv_format):
             if not isinstance(kv_caches, torch.Tensor):
                 raise TypeError(
                     "Cross-layer EngineKVFormat expects a single backing "
                     f"torch.Tensor, got {type(kv_caches).__name__}."
                 )
             return kv_caches
-        if engine_kv_format in (
-            lmc_ops.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS,
-            lmc_ops.EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS,
-        ):
+        if lmc_ops.is_kv_list(engine_kv_format):
             return kv_caches[0][layer_idx]  # type: ignore[index,return-value]
         return kv_caches[layer_idx]  # type: ignore[index,return-value]
 
