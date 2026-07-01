@@ -364,7 +364,9 @@ class LMCacheMPRequestMetadata:
         num_staging_tokens = min_available_tokens - tracker.num_stored_tokens
         num_chunks = num_staging_tokens // lmcache_tokens_per_chunk
 
-        # NOTE (Jiayi): qwen35 instrumentation — why is the store capped to 1 chunk?
+        # NOTE (Jiayi): qwen35 per-request store-range telemetry (token counts +
+        # per-group tokens-per-block); confirms the store advances past one chunk
+        # once _project_kept_groups aligns block ids to the mamba-skipped order.
         logger.info(
             "CB[store-range] req=%s all_tok=%d alloc=%d computed=%d "
             "(sched=%d vhit=%d lhit=%d) stored=%d staging=%d chunk=%d nchunks=%d "

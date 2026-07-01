@@ -10,10 +10,11 @@ chunk), so a single store/retrieve covers all chunks (hence all layers) at
 once. Per-chunk byte sizes are supplied by the caller, so blobs may be any size
 and reads need no separate size lookup.
 
-Copy discipline: ``store`` moves the caller's payload to the L1 device once
-(not per chunk); ``retrieve`` gathers the prefetched chunks on their own device
-once (no GPU round-trip when L1 is on CPU). The inline-bytes return in
-``retrieve`` is the one spot earmarked for a future GPU-IPC hand-back.
+Copy discipline: ``store`` moves the caller's packed payload to the L1 device
+in one transfer, then writes each chunk in place. ``fetch_into_ipc`` prefetches
+the chunks and copies each straight into a caller-provided GPU buffer (a
+same-GPU device-to-device copy when L1 is GPU-resident), synchronizing before it
+releases the prefetch read locks.
 """
 
 # Future
@@ -177,15 +178,17 @@ class AuxBlobStore:
         sizes: list[int],
         dst: torch.Tensor,
     ) -> bool:
-        """Copy the per-chunk blobs straight into an IPC-mapped GPU buffer.
+        """Copy the requested chunks' blobs into a caller-provided GPU buffer.
 
-        The GPU-IPC fast path: instead of gathering + ``.cpu().tobytes()``
-        (D2H + ZMQ + worker H2D), copy each prefetched L1 chunk directly into
-        ``dst`` (a worker-exported GPU receive buffer mapped into this process
-        via ``CudaIPCWrapper.to_tensor``). When L1 is GPU-resident this is a
-        same-device D2D copy on the caller's stream. The caller is responsible
-        for stream selection and for recording a completion event AFTER this
-        returns (the copies are issued, async, inside the read-lock window).
+        Prefetches the per-chunk objects into L1, then copies each chunk directly
+        into ``dst`` at its byte offset. ``dst`` is a GPU buffer the caller has
+        mapped into this process (e.g. a worker-exported receive buffer via
+        ``CudaIPCWrapper.to_tensor``), so when L1 is GPU-resident each copy is a
+        same-device (D2D) transfer on the current stream — the data never leaves
+        the GPU. The current stream is synchronized before the prefetch read
+        locks are released, so the L1 source cannot be evicted while a copy is
+        still reading it. The caller selects the stream/device (enter the desired
+        CUDA stream context before calling) and owns ``dst``'s lifetime.
 
         Args:
             obj_keys (list[ObjectKey]): Resolved per-chunk object keys.
