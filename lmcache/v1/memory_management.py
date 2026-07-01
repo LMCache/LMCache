@@ -3,7 +3,8 @@
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import cache, wraps
-from typing import Any, List, Optional, Tuple, Union
+from importlib import import_module
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 import abc
 import ctypes
 import os
@@ -14,7 +15,8 @@ from sortedcontainers import SortedList
 import torch
 
 # First Party
-from lmcache import torch_dev, torch_device_type
+from lmcache import torch_dev
+from lmcache import torch_device_type as torch_device_type  # noqa: F401
 from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
@@ -22,6 +24,48 @@ from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.system_detection import NUMAMapping
 import lmcache.c_ops as lmc_ops
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import (
+        AdHocMemoryAllocator as AdHocMemoryAllocator,
+    )
+    from lmcache.v1.memory_allocators.buffer_allocator import (
+        BufferAllocator as BufferAllocator,
+    )
+    from lmcache.v1.memory_allocators.cu_file_memory_allocator import (
+        CuFileMemoryAllocator as CuFileMemoryAllocator,
+    )
+    from lmcache.v1.memory_allocators.devdax_memory_allocator import (
+        DevDaxMemoryAllocator as DevDaxMemoryAllocator,
+    )
+    from lmcache.v1.memory_allocators.gpu_memory_allocator import (
+        GPUMemoryAllocator as GPUMemoryAllocator,
+    )
+    from lmcache.v1.memory_allocators.hip_file_memory_allocator import (
+        HipFileMemoryAllocator as HipFileMemoryAllocator,
+    )
+    from lmcache.v1.memory_allocators.host_memory_allocator import (
+        HostMemoryAllocator as HostMemoryAllocator,
+    )
+    from lmcache.v1.memory_allocators.mixed_memory_allocator import (
+        MixedMemoryAllocator as MixedMemoryAllocator,
+    )
+    from lmcache.v1.memory_allocators.paged_cpu_gpu_memory_allocator import (
+        PagedCpuGpuMemoryAllocator as PagedCpuGpuMemoryAllocator,
+    )
+    from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
+        PagedAddressManager as PagedAddressManager,
+    )
+    from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
+        PagedTensorMemoryAllocator as PagedTensorMemoryAllocator,
+    )
+    from lmcache.v1.memory_allocators.pin_memory_allocator import (
+        PinMemoryAllocator as PinMemoryAllocator,
+    )
+    from lmcache.v1.memory_allocators.tensor_memory_allocator import (
+        TensorMemoryAllocator as TensorMemoryAllocator,
+    )
 
 logger = init_logger(__name__)
 
@@ -1608,43 +1652,62 @@ class AddressManager:
         return True
 
 
-# First Party
-from lmcache.v1.memory_allocators import (  # noqa: E402
-    AdHocMemoryAllocator,
-    BufferAllocator,
-    CuFileMemoryAllocator,
-    DevDaxMemoryAllocator,
-    GPUMemoryAllocator,
-    HipFileMemoryAllocator,
-    HostMemoryAllocator,
-    MixedMemoryAllocator,
-    PagedCpuGpuMemoryAllocator,
-    PagedTensorMemoryAllocator,
-    PinMemoryAllocator,
-    TensorMemoryAllocator,
-)
+_ALLOCATOR_EXPORT_TO_MODULE = {
+    "AdHocMemoryAllocator": "lmcache.v1.memory_allocators.ad_hoc_memory_allocator",
+    "BufferAllocator": "lmcache.v1.memory_allocators.buffer_allocator",
+    "CuFileMemoryAllocator": "lmcache.v1.memory_allocators.cu_file_memory_allocator",
+    "DevDaxMemoryAllocator": "lmcache.v1.memory_allocators.devdax_memory_allocator",
+    "GPUMemoryAllocator": "lmcache.v1.memory_allocators.gpu_memory_allocator",
+    "HipFileMemoryAllocator": "lmcache.v1.memory_allocators.hip_file_memory_allocator",
+    "HostMemoryAllocator": "lmcache.v1.memory_allocators.host_memory_allocator",
+    "MixedMemoryAllocator": "lmcache.v1.memory_allocators.mixed_memory_allocator",
+    "PagedAddressManager": (
+        "lmcache.v1.memory_allocators.paged_tensor_memory_allocator"
+    ),
+    "PagedCpuGpuMemoryAllocator": (
+        "lmcache.v1.memory_allocators.paged_cpu_gpu_memory_allocator"
+    ),
+    "PagedTensorMemoryAllocator": (
+        "lmcache.v1.memory_allocators.paged_tensor_memory_allocator"
+    ),
+    "PinMemoryAllocator": "lmcache.v1.memory_allocators.pin_memory_allocator",
+    "TensorMemoryAllocator": "lmcache.v1.memory_allocators.tensor_memory_allocator",
+}
 
-__all__ = [
-    "AdHocMemoryAllocator",
+
+def __getattr__(name: str) -> object:
+    """Lazily preserve allocator imports from ``memory_management``.
+
+    Args:
+        name: Exported allocator or helper name.
+
+    Returns:
+        The requested object from its concrete allocator module.
+
+    Raises:
+        AttributeError: If ``name`` is not exported by this module.
+    """
+    module_name = _ALLOCATOR_EXPORT_TO_MODULE.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    module = import_module(module_name)
+    value = getattr(module, name)
+    globals()[name] = value
+    return value
+
+
+_CORE_EXPORTS = [
     "AddressManager",
-    "BufferAllocator",
     "BytesBufferMemoryObj",
-    "CuFileMemoryAllocator",
-    "DevDaxMemoryAllocator",
     "FreeBlock",
     "GDSMemoryObject",
-    "GPUMemoryAllocator",
-    "HipFileMemoryAllocator",
-    "HostMemoryAllocator",
     "MemoryAllocatorInterface",
     "MemoryFormat",
     "MemoryObj",
     "MemoryObjMetadata",
-    "MixedMemoryAllocator",
-    "PagedCpuGpuMemoryAllocator",
-    "PagedTensorMemoryAllocator",
-    "PinMemoryAllocator",
-    "TensorMemoryAllocator",
     "TensorMemoryObj",
     "torch_device_type",
 ]
+
+__all__ = [*_ALLOCATOR_EXPORT_TO_MODULE, *_CORE_EXPORTS]
