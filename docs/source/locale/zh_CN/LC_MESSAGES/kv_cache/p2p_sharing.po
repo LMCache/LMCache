@@ -191,3 +191,7 @@ msgid ""
 "reduction in total inference time (37.957 s → 13.814 s)."
 msgstr "在这个例子中，long_doc_qa 中的预热轮次指标被使用，因为在一个实例内没有重用现有的 KV Cache 以仅从 P2P 共享中受益。启用 LMCache P2P 共享后，首次令牌时间 (TTFT) 减少了 54.7%，从 2.286 秒降至 1.036 秒，总推理时间减少了 63.6%（37.957 秒 → 13.814 秒）。"
 
+
+#: ../../source/kv_cache/p2p_sharing.rst:1
+msgid "This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/p2p`."
+msgstr "本页面介绍 LMCache 进程内模式（不推荐使用）的行为。建议改用 :doc:`LMCache MP 模式 </mp/index>`\\ 以获得更好的功能支持与性能。本页面对应的 MP 模式文档请参见 :doc:`/mp/p2p`\\ 。"

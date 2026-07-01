@@ -1,6 +1,11 @@
 Layerwise KV Transfer
 =====================
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance.
+
+
 The storage and loading of KV Cache on a layer granularity is a key optimization that allows for forward pass to "stagger" through its computation as each layer's KV Cache is received instead of only waiting to begin after the entire loading
 
 CacheBlend is implemented on top of the layerwise codepath in order to pipeline recompute and loading to mask the latency of loading KV Cache.
