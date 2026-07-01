@@ -1152,6 +1152,29 @@ func TestBuildDaemonSet_HostNetworkEnabled(t *testing.T) {
 	}
 }
 
+func TestBuildDaemonSet_PrivilegedDefaultFalse(t *testing.T) {
+	// minimalEngine leaves spec.Privileged nil; the operator must not run the
+	// container privileged unless explicitly opted in.
+	ds := BuildDaemonSet(minimalEngine())
+	c := ds.Spec.Template.Spec.Containers[0]
+
+	if c.SecurityContext == nil || c.SecurityContext.Privileged == nil || *c.SecurityContext.Privileged {
+		t.Fatal("expected privileged=false by default")
+	}
+}
+
+func TestBuildDaemonSet_PrivilegedEnabled(t *testing.T) {
+	engine := minimalEngine()
+	engine.Spec.Privileged = ptr(true)
+
+	ds := BuildDaemonSet(engine)
+	c := ds.Spec.Template.Spec.Containers[0]
+
+	if c.SecurityContext == nil || c.SecurityContext.Privileged == nil || !*c.SecurityContext.Privileged {
+		t.Fatal("expected privileged=true when spec.privileged=true")
+	}
+}
+
 // hasEnvAll reports whether envs contains an env var named name set to the
 // literal "all" (the value the GPU passthrough vars are always set to).
 func hasEnvAll(envs []corev1.EnvVar, name string) bool {

@@ -51,3 +51,7 @@ msgid ""
 "``remote_serde`` in the configuration yaml:"
 msgstr "要在在线推理中启用 CacheGen，我们需要在配置 yaml 中设置 ``remote_serde``："
 
+
+#: ../../source/kv_cache_optimizations/compression/cachegen.rst:1
+msgid "This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/cachegen`."
+msgstr "本页面介绍 LMCache 进程内模式（不推荐使用）的行为。建议改用 :doc:`LMCache MP 模式 </mp/index>`\\ 以获得更好的功能支持与性能。本页面对应的 MP 模式文档请参见 :doc:`/mp/cachegen`\\ 。"

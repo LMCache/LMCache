@@ -14,9 +14,12 @@ See [DESIGN.md](DESIGN.md) for architecture details, reconciliation logic, and C
 - (CacheBlend only) [cert-manager](https://cert-manager.io) for the injection webhook's serving cert — see [CacheBlend](#cacheblend) below
 
 > [!IMPORTANT]
-> By default the operator runs LMCache pods with `runtimeClassName: nvidia` and `privileged: true` to gain GPU visibility without consuming GPU resources via the device plugin. This allows the serving engine (e.g., vLLM) to claim all GPUs on the node. Clusters using Pod Security Standards must allow the `privileged` profile for the LMCache namespace.
+> By default the operator runs LMCache pods with `runtimeClassName: nvidia` and `NVIDIA_VISIBLE_DEVICES=all` to gain GPU visibility without consuming GPU resources via the device plugin. This allows the serving engine (e.g., vLLM) to claim all GPUs on the node. On most clusters that is enough; on some, the engine cannot see the GPUs unless the pod is also privileged. Set `spec.privileged: true` to run the engine container in privileged mode (default `false`). When it is enabled, clusters using Pod Security Standards must allow the `privileged` profile for the LMCache namespace.
 >
 > On AMD ROCm clusters, `spec.gpuVendor: amd` omits `runtimeClassName` and skips NVIDIA-specific env vars.
+
+> [!WARNING]
+> **Upgrade note:** earlier operator versions always ran the engine container privileged. `spec.privileged` now defaults to `false`. Upgrading rewrites the DaemonSet pod template (forcing a rolling pod replacement), and on any cluster where privileged was load-bearing for GPU visibility the engine pods will come back up **without** GPU access. If your cluster relied on privileged mode (always the case for `gpuVendor: amd`), set `spec.privileged: true` on existing CRs before upgrading.
 
 ## Quick Start
 
@@ -53,7 +56,7 @@ The minimal CR just needs `l1.sizeGB`. Apply the sample (a fully-commented field
 kubectl apply -f config/samples/lmcache_v1alpha1_lmcacheengine.yaml
 ```
 
-The operator automatically handles `hostIPC`, GPU visibility (`runtimeClassName: nvidia`, `privileged: true`), node-local service routing, resource sizing, and Prometheus metrics — see [DESIGN.md](DESIGN.md) for details.
+The operator automatically handles `hostIPC`, GPU visibility (`runtimeClassName: nvidia`, `NVIDIA_VISIBLE_DEVICES=all`; set `spec.privileged: true` if your cluster also needs privileged mode), node-local service routing, resource sizing, and Prometheus metrics — see [DESIGN.md](DESIGN.md) for details.
 
 ### 3. Connect vLLM to LMCache
 
@@ -112,7 +115,7 @@ Every scenario has a ready-to-edit manifest under [`config/samples/`](config/sam
 Notes:
 
 - **GPU targeting** — `nodeSelector: {nvidia.com/gpu.present: "true"}` runs LMCache only on GPU nodes; new GPU nodes auto-get a pod.
-- **AMD (ROCm)** — `spec.gpuVendor: amd` omits `runtimeClassName` and the NVIDIA env vars; vLLM connects via HIP IPC over `hostIPC` the same way (`PYTHONHASHSEED=0` still required). Supply a `nodeSelector` matching your platform's AMD label and a ROCm-built `spec.image`.
+- **AMD (ROCm)** — `spec.gpuVendor: amd` omits `runtimeClassName` and the NVIDIA env vars; vLLM connects via HIP IPC over `hostIPC` the same way (`PYTHONHASHSEED=0` still required). Supply a `nodeSelector` matching your platform's AMD label and a ROCm-built `spec.image`. AMD has no RuntimeClass-based device injection, so set `spec.privileged: true` to let the engine reach `/dev/kfd`/`/dev/dri` (see the [AMD sample](config/samples/lmcache_v1alpha1_lmcacheengine_amd.yaml)).
 - **Custom port** — set `server.port`; the connection ConfigMap updates automatically and vLLM picks it up on restart.
 - **L2 adapters** — only one at a time today. Redis/Valkey is natively typed; cross-namespace auth Secrets are copied automatically and injected via env (never in args or `kubectl describe`). Other types (`nixl_store`, `fs`, `mock`, `raw_block`) use the `raw` escape hatch — see the commented blocks in the minimal sample. For `raw_block` with `use_odirect: true`, `--l1-align-bytes` must be ≥ `block_align`.
 - **Resources** auto-compute from `l1.sizeGB`; override with `resourceOverrides`.

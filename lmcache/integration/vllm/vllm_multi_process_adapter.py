@@ -187,11 +187,10 @@ def _release_partial_kv_wrappers(wrappers: list[Any]) -> None:
 def wrap_one_kv_cache(tensor: torch.Tensor) -> Any:
     """Dispatch by ``tensor.device.type`` via the platform registry.
 
-    Concrete factories self-register at import time (CUDA in
-    ``lmcache.v1.platform.cuda``, CPU SHM in
-    ``lmcache.v1.platform.cpu``), so this call site stays free of
-    if/elif chains and new accelerators plug in by registering a
-    sibling factory.
+    Concrete factories are auto-discovered from
+    ``DeviceIPCWrapper`` subclasses under ``lmcache.v1.platform``, so
+    this call site stays free of if/elif chains and new accelerators
+    plug in by shipping a sibling wrapper class.
     """
     return platform_registry.get_kv_wrapper_factory(tensor.device.type)(tensor)
 

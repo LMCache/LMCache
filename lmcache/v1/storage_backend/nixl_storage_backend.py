@@ -1196,6 +1196,8 @@ class NixlStaticStorageBackend(NixlStorageBackend):
 
         :return: True if the key exists, False otherwise
         """
+        if self.exists_in_put_tasks(key):
+            return False
 
         with self.key_lock:
             if key in self.key_dict:
@@ -1226,7 +1228,20 @@ class NixlStaticStorageBackend(NixlStorageBackend):
         :param on_complete_callback: Optional callback (not yet supported for
             NixlCacheBackend async operations).
         """
-        with self.key_lock:
+        # contains() reports in-flight puts as absent, so the store path can
+        # re-submit a key whose put is still running.
+        with self.key_lock, self.progress_lock:
+            if not self.progress_set.isdisjoint(keys):
+                kept_keys = []
+                kept_objs = []
+                for key, obj in zip(keys, memory_objs, strict=False):
+                    if key not in self.progress_set:
+                        kept_keys.append(key)
+                        kept_objs.append(obj)
+                if not kept_keys:
+                    return
+                keys, memory_objs = kept_keys, kept_objs
+
             available_descs = self.pool.get_num_available_descs()
             num_evict = len(keys) - available_descs
             if num_evict > 0:
@@ -1242,9 +1257,7 @@ class NixlStaticStorageBackend(NixlStorageBackend):
 
                 self.batched_remove(evict_keys, force=False)
 
-        with self.progress_lock:
-            for key in keys:
-                self.progress_set.add(key)
+            self.progress_set.update(keys)
 
         asyncio.run_coroutine_threadsafe(
             self.mem_to_storage(keys, memory_objs), self.loop
