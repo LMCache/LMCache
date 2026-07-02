@@ -546,6 +546,55 @@ class TestUnsafeRead:
 
 
 # =============================================================================
+# Tests for L1Manager.peek_keys()
+# =============================================================================
+
+
+class TestPeekKeys:
+    """
+    Tests for L1Manager.peek_keys() method.
+
+    Per the docstring:
+    - True iff the key is currently present and readable (not write-locked).
+    - Acquires no locks: a peeked key remains deletable/evictable.
+    """
+
+    def test_peek_absent_present_and_write_locked(self, basic_l1_config, basic_layout):
+        """Peek reports False for absent, True for ready, False for
+        write-locked, True for read-locked keys, in input order."""
+        manager = L1Manager(basic_l1_config)
+        absent = make_object_key(1)
+        ready = make_object_key(2)
+        writing = make_object_key(3)
+        reading = make_object_key(4)
+
+        manager.reserve_write([ready, reading], [False, False], basic_layout)
+        manager.finish_write([ready, reading])
+        manager.reserve_write([writing], [False], basic_layout)  # stays locked
+        manager.reserve_read([reading])
+
+        result = manager.peek_keys([absent, ready, writing, reading])
+        assert result == [False, True, False, True]
+
+        manager.finish_read([reading])
+        manager.finish_write([writing])
+        manager.close()
+
+    def test_peek_takes_no_locks(self, basic_l1_config, basic_layout):
+        """A peeked key stays deletable — peeking must not pin it."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+        manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+
+        assert manager.peek_keys([key]) == [True]
+        assert manager.delete([key])[key] == L1Error.SUCCESS
+        assert manager.peek_keys([key]) == [False]
+
+        manager.close()
+
+
+# =============================================================================
 # Tests for L1Manager.finish_read()
 # =============================================================================
 

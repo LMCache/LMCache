@@ -1553,3 +1553,257 @@ class TestPrefetchMode:
 
         ctrl.stop()
         adapter.close()
+
+
+# =============================================================================
+# Concurrent-eviction race
+# =============================================================================
+
+
+class EvictionRacingL1Manager:
+    """L1Manager wrapper emulating a concurrent evictor, deterministically.
+
+    L1Manager methods are individually synchronized, so a concurrent
+    eviction thread can run exactly at the boundaries *between* two
+    manager calls.  This wrapper makes one such schedule deterministic:
+    after every delegated call returns, it attempts to evict
+    ``target_key`` via the public ``delete`` API (which, like real
+    eviction, only succeeds while the key holds no read or write lock).
+    The evictor stops after its first successful eviction.
+
+    Only the controller under test holds this wrapper, so eviction
+    attempts interleave with controller-issued calls only.
+    """
+
+    def __init__(self, inner: L1Manager, target_key: ObjectKey) -> None:
+        self._inner = inner
+        self._target_key = target_key
+        self._evicted = False
+        self.eviction_attempts: list[tuple[str, L1Error]] = []
+        """Per-attempt log of (l1_call_name, delete_result)."""
+
+    def _run_evictor(self, after_call: str) -> None:
+        if self._evicted:
+            return
+        result = self._inner.delete([self._target_key])[self._target_key]
+        self.eviction_attempts.append((after_call, result))
+        if result == L1Error.SUCCESS:
+            self._evicted = True
+
+    def __getattr__(self, name: str):
+        attr = getattr(self._inner, name)
+        if not callable(attr):
+            return attr
+
+        def wrapped(*args, **kwargs):
+            result = attr(*args, **kwargs)
+            self._run_evictor(name)
+            return result
+
+        return wrapped
+
+
+class TestConcurrentEvictionRace:
+    """A key present in both L1 and L2 must survive a racing evictor.
+
+    Setup: all keys are in L2 (and get L2-locked for the duration of the
+    request by the lookup phase); one key additionally already exists in
+    L1, unlocked.  Contract: the prefetch must retain the full prefix —
+    every key is durably available throughout the request, from L1 or,
+    failing that, from the still-locked L2 copy.
+
+    The controller currently discovers the L1-existing key with
+    ``reserve_write(mode="new")`` (KEY_NOT_WRITABLE) and read-locks it
+    with a separate ``reserve_read`` call.  An eviction between those two
+    calls deletes the key; the failed ``reserve_read`` then leaves a gap
+    that truncates the whole prefix behind it.
+    """
+
+    def test_eviction_between_reserve_write_and_reserve_read(self, l1_manager):
+        """Evictor racing the reservation must not shrink the prefix hit."""
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(5)]
+        store_keys_in_l2(adapter, keys, layout)
+
+        # keys[1] already exists in L1, unlocked (a prior request stored it).
+        existing = l1_manager.reserve_write(
+            [keys[1]], is_temporary=[False], layout_desc=layout, mode="new"
+        )
+        assert existing[keys[1]][0] == L1Error.SUCCESS
+        l1_manager.finish_write([keys[1]])
+
+        racing_l1 = EvictionRacingL1Manager(l1_manager, target_key=keys[1])
+        ctrl = PrefetchController(
+            l1_manager=racing_l1,  # type: ignore[arg-type]
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(keys, layout)
+        result = wait_for_prefetch_result_bitmap(ctrl, req_id)
+
+        ctrl.stop()
+        adapter.close()
+
+        assert result is not None
+        # The evictor must have gotten at least one chance to run.
+        assert racing_l1.eviction_attempts, "evictor never interleaved"
+        # Contract: full prefix retained despite the racing evictor.
+        assert result.count_leading_ones() == 5, (
+            f"prefix truncated to {result.count_leading_ones()} by racing "
+            f"eviction; attempts={racing_l1.eviction_attempts}"
+        )
+        # All keys must be present and read-locked in L1 for the retriever.
+        read_results = l1_manager.unsafe_read(keys)
+        for key in keys:
+            assert read_results[key][0] == L1Error.SUCCESS
+        l1_manager.finish_read(keys)
+
+    def test_l1_suffix_extends_l2_prefix(self, l1_manager):
+        """L1 has chunks 2-4, L2 has chunks 0-1 → the union prefix (5) wins.
+
+        The retained set must cover all five keys: 0-1 loaded from L2,
+        2-4 served from L1, every retained key read-locked for the
+        retriever.
+        """
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(5)]
+
+        # L2 has only the first two chunks.
+        store_keys_in_l2(adapter, keys[:2], layout)
+
+        # L1 already holds the tail (chunks 2-4), unlocked.
+        existing = l1_manager.reserve_write(
+            keys[2:], is_temporary=[False] * 3, layout_desc=layout, mode="new"
+        )
+        for key in keys[2:]:
+            assert existing[key][0] == L1Error.SUCCESS
+        l1_manager.finish_write(keys[2:])
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(keys, layout)
+        result = wait_for_prefetch_result_bitmap(ctrl, req_id)
+
+        ctrl.stop()
+        adapter.close()
+
+        assert result is not None
+        assert result.count_leading_ones() == 5, (
+            f"union prefix is 5 (L2 has 0-1, L1 has 2-4) but only "
+            f"{result.count_leading_ones()} keys were retained"
+        )
+        read_results = l1_manager.unsafe_read(keys)
+        for key in keys:
+            assert read_results[key][0] == L1Error.SUCCESS
+        l1_manager.finish_read(keys)
+
+    def test_l1_existing_key_without_race(self, l1_manager):
+        """Control: same setup, no evictor — the full prefix is retained."""
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(5)]
+        store_keys_in_l2(adapter, keys, layout)
+
+        existing = l1_manager.reserve_write(
+            [keys[1]], is_temporary=[False], layout_desc=layout, mode="new"
+        )
+        assert existing[keys[1]][0] == L1Error.SUCCESS
+        l1_manager.finish_write([keys[1]])
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(keys, layout)
+        result = wait_for_prefetch_result_bitmap(ctrl, req_id)
+
+        ctrl.stop()
+        adapter.close()
+
+        assert result is not None
+        assert result.count_leading_ones() == 5
+        read_results = l1_manager.unsafe_read(keys)
+        for key in keys:
+            assert read_results[key][0] == L1Error.SUCCESS
+        l1_manager.finish_read(keys)
+
+
+class TestSlidingWindowClaims:
+    """The L1 claim must not lock out-of-window sliding-window chunks.
+
+    Layout (chunk-major, groups [full=-1, sw=2], 4 chunks, 8 keys): even
+    indices are the full-attention group, odd indices the sliding-window
+    group. The SW window covers chunks 2-3 (indices 5 and 7), leaving the
+    SW chunks at indices 1 and 3 dead — they can never enter the retained
+    set, so a prefetch must leave them evictable.
+    """
+
+    def test_dead_sw_chunks_stay_evictable(self, l1_manager):
+        """An evictor can delete a dead SW chunk at its first opportunity
+        during a prefetch, without affecting the hit."""
+        adapter = make_adapter()
+        layout = make_layout()
+        attn_desc = AttnWindowDesc(num_chunks_in_sw=[-1, 2])
+        keys = [make_object_key(i) for i in range(8)]
+
+        # All keys resident in L1, unlocked; L2 has nothing.
+        existing = l1_manager.reserve_write(
+            keys, is_temporary=[False] * 8, layout_desc=layout, mode="new"
+        )
+        for key in keys:
+            assert existing[key][0] == L1Error.SUCCESS
+        l1_manager.finish_write(keys)
+
+        # Evictor races for the dead SW chunk 0 (index 1).
+        racing_l1 = EvictionRacingL1Manager(l1_manager, target_key=keys[1])
+        ctrl = PrefetchController(
+            l1_manager=racing_l1,  # type: ignore[arg-type]
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(keys, layout, attn_desc=attn_desc)
+        # query_prefetch_result pops the lookup result, so read the hit first.
+        hit = wait_for_lookup_result(ctrl, req_id)
+        result = wait_for_prefetch_result_bitmap(ctrl, req_id)
+
+        ctrl.stop()
+        adapter.close()
+
+        # The dead chunk was evictable at the evictor's FIRST opportunity —
+        # the prefetch never held a lock on it.
+        assert racing_l1.eviction_attempts
+        assert racing_l1.eviction_attempts[0][1] == L1Error.SUCCESS
+
+        # The eviction did not affect the hit: full-attn chunks 0-3 plus the
+        # SW window (chunks 2-3) are retained and read-locked.
+        assert hit == 4
+        assert result is not None
+        retained_keys = [keys[i] for i in (0, 2, 4, 5, 6, 7)]
+        assert result.gather(keys) == retained_keys
+        read_results = l1_manager.unsafe_read(retained_keys)
+        for key in retained_keys:
+            assert read_results[key][0] == L1Error.SUCCESS
+
+        # The other dead SW chunk was never locked either: it is deletable
+        # the moment the request completes.
+        assert l1_manager.delete([keys[3]])[keys[3]] == L1Error.SUCCESS
+
+        l1_manager.finish_read(retained_keys)

@@ -331,6 +331,28 @@ class L1Manager:
         return ret
 
     @l1_mgr_synchronized
+    def peek_keys(self, keys: list[ObjectKey]) -> list[bool]:
+        """Point-in-time readability check, without locking or touching.
+
+        Acquires no locks and notifies no listeners, so peeking does not
+        refresh a key's eviction recency. The answer can be stale by the
+        time the caller acts on it: callers must re-validate through
+        ``reserve_read`` / ``reserve_write`` before relying on a key.
+
+        Args:
+            keys: The list of object keys to check.
+
+        Returns:
+            One boolean per key, in order: True if the key is currently
+            present and readable (not write-locked), False otherwise.
+        """
+        result: list[bool] = []
+        for key in keys:
+            entry = self._objects.get(key, None)
+            result.append(entry is not None and entry.available_for_read())
+        return result
+
+    @l1_mgr_synchronized
     def finish_read(
         self,
         keys: list[ObjectKey],
