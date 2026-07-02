@@ -39,11 +39,13 @@ def _get_copy_lib() -> Optional[ctypes.CDLL]:
     """Lazily load and cache the CUDA/ROCm runtime library, or None for CPU fallback."""
     global _copy_lib
     if _copy_lib is _copy_lib_NOT_LOADED:
-        # Try to load GPU runtime libraries in priority order: CUDA first, then ROCm
+        # Try to load GPU runtime libraries in priority order: CUDA first,
+        # then ROCm, then MUSA.
         # TODO: ROCm path to be validated on real device
         for name, fallback in [
             ("cudart", "libcudart.so"),  # NVIDIA CUDA Runtime
             ("amdhip64", "libamdhip64.so"),  # AMD ROCm HIP Runtime
+            ("musa", "libmusa.so"),  # MUSA Runtime
         ]:
             try:
                 path = ctypes.util.find_library(name)
@@ -60,32 +62,6 @@ def _get_copy_lib() -> Optional[ctypes.CDLL]:
     return _copy_lib
 
 
-_MUSA_COPY_LIB_NOT_LOADED = object()
-_musa_copy_lib: Optional[ctypes.CDLL] = _MUSA_COPY_LIB_NOT_LOADED  # type: ignore[assignment]
-
-
-def _get_musa_copy_lib() -> Optional[ctypes.CDLL]:
-    """Lazily load and cache the MUSA runtime library, or None when unavailable."""
-    global _musa_copy_lib
-    if _musa_copy_lib is _MUSA_COPY_LIB_NOT_LOADED:
-        for name, fallback in [
-            ("musa", "libmusa.so"),
-            ("musart", "libmusart.so"),
-        ]:
-            try:
-                path = ctypes.util.find_library(name)
-                if path:
-                    _musa_copy_lib = ctypes.CDLL(path)
-                else:
-                    _musa_copy_lib = ctypes.CDLL(fallback)
-                break
-            except OSError:
-                continue
-        else:
-            _musa_copy_lib = None
-    return _musa_copy_lib
-
-
 def _tensor_from_ptr(
     ptr: int,
     shape: tuple[int, ...],
@@ -95,7 +71,7 @@ def _tensor_from_ptr(
     """
     Create a tensor view over a raw pointer (zero-copy where possible).
 
-    Supports CPU (pinned or regular), CUDA, and MUSA device pointers.
+    Supports CPU, CUDA, and MUSA device pointers.
 
     Args:
         ptr:    Raw memory pointer as int (must be non-zero).
@@ -105,16 +81,14 @@ def _tensor_from_ptr(
                 - None / "cpu" / torch.device("cpu")  → CPU pointer
                 - "cuda" / "cuda:N" / torch.device("cuda", N) → CUDA pointer
                 - "musa" / "musa:N" / torch.device("musa", N) → MUSA pointer
-                  If None and ptr looks like a CUDA ptr, pass device explicitly.
+                  If None and ptr looks like a CUDA/MUSA ptr, pass device explicitly.
 
     Returns:
         A tensor that shares memory with the original pointer.
         For CPU: always zero-copy via ctypes + torch.frombuffer.
-        For CUDA: zero-copy via torch._C._construct_storage_from_data_pointer
+        For CUDA/MUSA: zero-copy via torch._C._construct_storage_from_data_pointer
                   (PyTorch >= 2.0) or __cuda_array_interface__, with a
-                  cudaMemcpy D2D fallback.
-        For MUSA: zero-copy via torch._C._construct_storage_from_data_pointer
-                  when supported, with a muMemcpy D2D fallback.
+                  runtime D2D memcpy fallback.
 
     Raises:
         ValueError: if ptr is 0.
@@ -276,7 +250,7 @@ def _tensor_from_musa_ptr(
     numel: int,
     total_bytes: int,
 ) -> torch.Tensor:
-    """Zero-copy MUSA tensor from a raw device pointer."""
+    """Create a MUSA tensor from a raw device pointer."""
 
     try:
         storage = torch._C._construct_storage_from_data_pointer(
@@ -290,9 +264,9 @@ def _tensor_from_musa_ptr(
     except Exception:
         pass
 
-    libmusa = _get_musa_copy_lib()
-    if libmusa is None:
-        raise RuntimeError("Failed to load libmusa/libmusart")
+    libmusa = _get_copy_lib()
+    if libmusa is None or not hasattr(libmusa, "muMemcpy"):
+        raise RuntimeError("Failed to load libmusa or muMemcpy")
 
     muMemcpy = libmusa.muMemcpy
     muMemcpy.restype = ctypes.c_int
@@ -300,20 +274,16 @@ def _tensor_from_musa_ptr(
         ctypes.c_void_p,
         ctypes.c_void_p,
         ctypes.c_size_t,
-        ctypes.c_int,
     ]
-    _MEMCPY_D2D = 3
 
     dst = torch.empty(numel, dtype=dtype, device=device)
-
     err = muMemcpy(
         ctypes.c_void_p(dst.data_ptr()),
         ctypes.c_void_p(ptr),
         ctypes.c_size_t(total_bytes),
-        ctypes.c_int(_MEMCPY_D2D),
     )
     if err != 0:
-        raise RuntimeError(f"muMemcpy D2D failed with error code {err}.")
+        raise RuntimeError(f"muMemcpy failed with error code {err}.")
 
     return dst.view(*shape)
 

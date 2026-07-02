@@ -2867,29 +2867,218 @@ def test_alloc_pinned_ptr_is_page_aligned(size: int) -> None:
         _py_ops.free_pinned_ptr(ptr)
 
 
-def test_tensor_from_ptr_routes_musa_device(monkeypatch: pytest.MonkeyPatch) -> None:
-    """MUSA device pointers must not be rejected at dispatch time."""
-    try:
-        torch.device("musa")
-    except RuntimeError:
-        pytest.skip("MUSA device type is not supported by PyTorch")
+@pytest.mark.parametrize(
+    ("device_name", "helper_name"),
+    [
+        ("cuda", "_tensor_from_cuda_ptr"),
+        ("musa", "_tensor_from_musa_ptr"),
+    ],
+)
+def test_tensor_from_ptr_routes_device_pointer(
+    monkeypatch: pytest.MonkeyPatch, device_name: str, helper_name: str
+) -> None:
+    """Device pointers are routed through the backend-specific pointer helper."""
 
-    def _fake_musa_ptr(
+    class FakeDevice:
+        """Minimal fake device type for hosts without TorchMUSA installed."""
+
+        def __init__(self, value: object) -> None:
+            self.type = str(value).split(":", maxsplit=1)[0]
+
+    captured: dict[str, object] = {}
+
+    def _fake_device_ptr(
         ptr: int,
         shape: tuple[int, ...],
         dtype: torch.dtype,
-        device: torch.device,
+        device: Any,
         numel: int,
         total_bytes: int,
     ) -> torch.Tensor:
-        assert device.type == "musa"
-        assert ptr == 0x1000
-        assert shape == (2, 3)
-        assert dtype is torch.float16
-        assert numel == 6
-        assert total_bytes == 12
+        captured.update(
+            ptr=ptr,
+            shape=shape,
+            dtype=dtype,
+            device_type=device.type,
+            numel=numel,
+            total_bytes=total_bytes,
+        )
         return torch.empty(shape, dtype=dtype)
 
-    monkeypatch.setattr(_py_ops, "_tensor_from_musa_ptr", _fake_musa_ptr)
-    tensor = _py_ops._tensor_from_ptr(0x1000, (2, 3), torch.float16, "musa:0")
+    monkeypatch.setattr(_py_ops.torch, "device", FakeDevice)
+    monkeypatch.setattr(_py_ops, helper_name, _fake_device_ptr)
+
+    tensor = _py_ops._tensor_from_ptr(0x1000, (2, 3), torch.float16, f"{device_name}:0")
+
     assert tensor.shape == (2, 3)
+    assert captured == {
+        "ptr": 0x1000,
+        "shape": (2, 3),
+        "dtype": torch.float16,
+        "device_type": device_name,
+        "numel": 6,
+        "total_bytes": 12,
+    }
+
+
+def test_get_copy_lib_falls_back_to_musa_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shared runtime loader tries the MUSA runtime after CUDA/HIP."""
+
+    class FakeCDLL:
+        def __init__(self, path: str) -> None:
+            attempted_paths.append(path)
+            if path != "libmusa.so":
+                raise OSError(path)
+
+    attempted_paths: list[str] = []
+
+    monkeypatch.setattr(_py_ops.ctypes.util, "find_library", lambda _name: None)
+    monkeypatch.setattr(_py_ops.ctypes, "CDLL", FakeCDLL)
+    monkeypatch.setattr(_py_ops, "_copy_lib", _py_ops._copy_lib_NOT_LOADED)
+
+    lib = _py_ops._get_copy_lib()
+
+    assert isinstance(lib, FakeCDLL)
+    assert attempted_paths == ["libcudart.so", "libamdhip64.so", "libmusa.so"]
+
+
+def test_tensor_from_musa_ptr_uses_storage_constructor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MUSA pointer reconstruction first tries PyTorch storage construction."""
+
+    class FakeDevice:
+        type = "musa"
+
+    class FakeTensor:
+        def set_(self, storage: object, offset: int, shape: tuple[int, ...]) -> None:
+            captured["set_storage"] = storage
+            captured["set_offset"] = offset
+            captured["set_shape"] = shape
+
+    fake_device = FakeDevice()
+    fake_storage = object()
+    fake_tensor = FakeTensor()
+    captured: dict[str, object] = {}
+
+    def fake_construct_storage(ptr: int, device: object, total_bytes: int) -> object:
+        captured["ptr"] = ptr
+        captured["device"] = device
+        captured["total_bytes"] = total_bytes
+        return fake_storage
+
+    def fake_empty(
+        shape: tuple[()],
+        *,
+        dtype: torch.dtype,
+        device: object,
+    ) -> FakeTensor:
+        captured["empty_shape"] = shape
+        captured["empty_dtype"] = dtype
+        captured["empty_device"] = device
+        return fake_tensor
+
+    monkeypatch.setattr(
+        _py_ops.torch._C,
+        "_construct_storage_from_data_pointer",
+        fake_construct_storage,
+        raising=False,
+    )
+    monkeypatch.setattr(_py_ops.torch, "empty", fake_empty)
+
+    result = _py_ops._tensor_from_musa_ptr(
+        0x1000, (2, 3), torch.float16, fake_device, 6, 12
+    )
+
+    assert result is fake_tensor
+    assert captured == {
+        "ptr": 0x1000,
+        "device": fake_device,
+        "total_bytes": 12,
+        "empty_shape": (),
+        "empty_dtype": torch.float16,
+        "empty_device": fake_device,
+        "set_storage": fake_storage,
+        "set_offset": 0,
+        "set_shape": (2, 3),
+    }
+
+
+def test_tensor_from_musa_ptr_falls_back_to_mu_memcpy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MUSA pointer reconstruction falls back to muMemcpy when storage fails."""
+
+    class FakeDevice:
+        type = "musa"
+
+    class FakeTensor:
+        def data_ptr(self) -> int:
+            return 0x2000
+
+        def view(self, *shape: int) -> object:
+            captured["view_shape"] = shape
+            return copied_view
+
+    class FakeMuMemcpy:
+        restype: object = None
+        argtypes: object = None
+
+        def __call__(
+            self,
+            dst: ctypes.c_void_p,
+            src: ctypes.c_void_p,
+            nbytes: ctypes.c_size_t,
+        ) -> int:
+            captured["dst"] = dst.value
+            captured["src"] = src.value
+            captured["nbytes"] = nbytes.value
+            return 0
+
+    class FakeLibMusa:
+        muMemcpy = FakeMuMemcpy()
+
+    fake_device = FakeDevice()
+    fake_tensor = FakeTensor()
+    copied_view = object()
+    captured: dict[str, object] = {}
+
+    def fake_construct_storage(_ptr: int, _device: object, _total_bytes: int) -> object:
+        raise RuntimeError("storage construction unavailable")
+
+    def fake_empty(
+        numel: int,
+        *,
+        dtype: torch.dtype,
+        device: object,
+    ) -> FakeTensor:
+        captured["empty_numel"] = numel
+        captured["empty_dtype"] = dtype
+        captured["empty_device"] = device
+        return fake_tensor
+
+    monkeypatch.setattr(
+        _py_ops.torch._C,
+        "_construct_storage_from_data_pointer",
+        fake_construct_storage,
+        raising=False,
+    )
+    monkeypatch.setattr(_py_ops.torch, "empty", fake_empty)
+    monkeypatch.setattr(_py_ops, "_get_copy_lib", lambda: FakeLibMusa())
+
+    result = _py_ops._tensor_from_musa_ptr(
+        0x1000, (2, 3), torch.float16, fake_device, 6, 12
+    )
+
+    assert result is copied_view
+    assert captured == {
+        "empty_numel": 6,
+        "empty_dtype": torch.float16,
+        "empty_device": fake_device,
+        "dst": 0x2000,
+        "src": 0x1000,
+        "nbytes": 12,
+        "view_shape": (2, 3),
+    }
