@@ -437,11 +437,6 @@ def transfer_kv_per_object_group(
     Note:
         This function expects the caller to stage the block ids (list[list[int]])
         into GPU tensors and pass them in as `block_ids_gpu`.
-
-        Unless the group contains GDS-backed objects, the whole group is issued
-        through a single ``execute_object_group_transfer`` call (one GIL release
-        for all staging copies and kernel launches). GDS groups fall back to the
-        per-op Python path below, which handles their dedicated copy mechanism.
     """
     # GDS-backed objects need their own copy mechanism and cannot be staged
     # through the plan; route those groups to the per-op path below instead.
