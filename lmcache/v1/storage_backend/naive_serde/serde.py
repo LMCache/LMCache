@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from typing import TYPE_CHECKING
 import abc
 
-# First Party
-from lmcache.v1.memory_management import MemoryObj
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.memory_management import MemoryObj
 
 
 class Serializer(metaclass=abc.ABCMeta):
     @abc.abstractmethod
-    def serialize(self, memory_obj: MemoryObj) -> MemoryObj:
+    def serialize(self, memory_obj: "MemoryObj") -> "MemoryObj":
         """
         Serialize/compress the memory object.
 
@@ -23,7 +25,7 @@ class Serializer(metaclass=abc.ABCMeta):
 
 class Deserializer(metaclass=abc.ABCMeta):
     @abc.abstractmethod
-    def deserialize(self, memory_obj: MemoryObj) -> MemoryObj:
+    def deserialize(self, memory_obj: "MemoryObj") -> "MemoryObj":
         """
         Deserialize/decompress the memory object.
 
