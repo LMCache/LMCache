@@ -202,62 +202,22 @@ steps:
   - group: ":compression: Multiprocess (CPU-only)"
     if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
     steps:
-      - label: ":compression: cpu_e2e_validation (shm)"
+      # Note: LMCACHE_SHM_NAME uses `${VAR-default}` (not `:-`) in the
+      # runner script, so an empty string ("") is meaningful and differs
+      # from unset. `__default__` is the sentinel meaning "shm mode".
+      - label: ":compression: cpu_e2e_validation ({{matrix}})"
         command: bash .github/scripts/run-cpu-e2e-validation.sh
-        timeout_in_minutes: 30
-        agents: { queue: "k8s" }
-        plugins:
-          - kubernetes:
-              podSpec:
-                containers:
-                  - name: container-0
-                    image: lmcache/ci-base:latest
-                    imagePullPolicy: Never
-                    resources:
-                      requests:
-                        cpu: "8"
-                        memory: "256Gi"
-                      limits:
-                        cpu: "8"
-                        memory: "256Gi"
-                    volumeMounts:
-                      - { name: hf-cache, mountPath: /root/.cache/huggingface }
-                      - { name: dshm, mountPath: /dev/shm }
-                volumes:
-                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
-                  - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 4Gi } }
-
-      - label: ":compression: cpu_e2e_validation (pickle)"
-        command: bash .github/scripts/run-cpu-e2e-validation.sh
-        env:
-          LMCACHE_SHM_NAME: ""
-        timeout_in_minutes: 30
-        agents: { queue: "k8s" }
-        plugins:
-          - kubernetes:
-              podSpec:
-                containers:
-                  - name: container-0
-                    image: lmcache/ci-base:latest
-                    imagePullPolicy: Never
-                    resources:
-                      requests:
-                        cpu: "8"
-                        memory: "256Gi"
-                      limits:
-                        cpu: "8"
-                        memory: "256Gi"
-                    volumeMounts:
-                      - { name: hf-cache, mountPath: /root/.cache/huggingface }
-                      - { name: dshm, mountPath: /dev/shm }
-                volumes:
-                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
-                  - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 4Gi } }
-
-      - label: ":compression: cpu_e2e_validation (server-side copy)"
-        command: bash .github/scripts/run-cpu-e2e-validation.sh
-        env:
-          LMCACHE_MP_TRANSFER_MODE: "lmcache_driven"
+        matrix:
+          setup: ["shm", "pickle", "server-side copy"]
+          adjustments:
+            - with: "shm"
+              # shm: rely on script defaults (engine-driven + shm transport)
+            - with: "pickle"
+              env:
+                LMCACHE_SHM_NAME: ""
+            - with: "server-side copy"
+              env:
+                LMCACHE_MP_TRANSFER_MODE: "lmcache_driven"
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins:
