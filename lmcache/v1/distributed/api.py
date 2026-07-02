@@ -272,7 +272,6 @@ class AttnWindowDesc:
     """
 
     num_chunks_in_sw: list[int]
-    """Per-object-group window sizes in chunks."""
 
     world_size: int = 1
     """Number of kv_rank shards per chunk (tensor-parallel world size)."""

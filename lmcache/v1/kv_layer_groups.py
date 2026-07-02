@@ -537,7 +537,9 @@ class KVLayerGroupsManager:
             kernel_group_idx: 0-based kernel group index.
 
         Returns:
-            The sub-chunk sliding window size in tokens.
+            The sub-chunk sliding window size. Will be the same as the
+            chunk size for non-slding-window models or big-sliding-
+            window models.
         """
         sw_size_tokens = self._kernel_groups[kernel_group_idx].sw_size_tokens
         if sw_size_tokens == -1 or sw_size_tokens >= self._lmcache_tokens_per_chunk:
@@ -592,7 +594,11 @@ class KVLayerGroupsManager:
     def _detect_object_groups(
         self, engine_group_infos: "Sequence[EngineGroupInfo]"
     ) -> list[ObjectGroupInfo]:
-        """Bucket kernel groups into object groups by sliding-window size.
+        """Bucket kernel groups into object groups.
+
+        Puts all kernel groups into a single object group when object-group
+        separation is disabled (the default). Otherwise groups the kernel groups
+        by sliding-window size measured in number of chunks.
 
         Args:
             engine_group_infos: LMCache-owned engine KV cache group metadata.

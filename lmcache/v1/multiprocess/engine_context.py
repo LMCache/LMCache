@@ -43,13 +43,20 @@ class _LayoutDescEntry:
     layout_desc: MemoryLayoutDesc
     ref_count: int
     attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
-    """Per-object-group attention windows and world_size."""
+    """Cross-chunk attention windows of all object groups, in object-group
+    order. Defaults to a single full-attention group."""
     group_layout_descs: dict[int, MemoryLayoutDesc] | None = None
     """Per-group layout descriptors, or ``None`` if all share ``layout_desc``."""
 
 
 class LayoutDescRegistry:
-    """Thread-safe registry mapping (model_name, world_size) to layout descriptors.
+    """Thread-safe registry mapping (model_name, world_size) to MemoryLayoutDesc.
+
+    Modules write to this registry when KV caches are registered.
+    Consumers (e.g. LookupModule) read from it to find layout descriptors
+    for prefetch tasks. Multiple worker instances can share the same
+    ``(model_name, world_size)`` entry, so the registry keeps the descriptor
+    until the last matching registration is unregistered.
 
     Args:
         force_retrieve_full_kv: When True, all registered AttnWindowDescs
@@ -72,11 +79,15 @@ class LayoutDescRegistry:
     ) -> None:
         """Register a layout descriptor for a (model_name, world_size) pair.
 
+        Re-registering the same pair increments the active registration
+        count. The latest descriptor is retained for lookups.
+
         Args:
             model_name: The model name.
             world_size: The world size.
             layout_desc: The memory layout descriptor.
-            attn_desc: Per-object-group attention windows and world_size.
+            attn_desc: Cross-chunk attention windows of all object groups, in
+                object-group order. Defaults to a single full-attention group.
             group_layout_descs: Maps object_group_id to that group's layout
                 (each group is a separate keyed allocation); ``None`` when all
                 groups share ``layout_desc``.
@@ -177,7 +188,21 @@ class LayoutDescRegistry:
 
 
 class MPCacheServerContext:
-    """Shared infrastructure for all engine modules."""
+    """Shared infrastructure for all engine modules.
+
+    Holds the storage manager, token hasher, session manager, event bus,
+    and layout descriptor registry. Modules receive this context at init
+    and use it for shared operations.
+
+    Args:
+        storage_manager_config: Configuration for the storage manager.
+        chunk_size: Chunk size for KV cache operations.
+        hash_algorithm: Hash algorithm for token hashing.
+        separate_object_groups: Whether to split kernel groups into one object
+            group per sliding-window size at KV-cache registration. Default True.
+        force_retrieve_full_kv: When True, prefetch treats every object group
+            as full-attention (ignores sliding-window bounds). Default False.
+    """
 
     def __init__(
         self,

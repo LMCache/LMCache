@@ -80,10 +80,11 @@ def build_trim_mask(
     """Compute the retained subset of found keys and the prefix hit length.
 
     Args:
-        found: Bitmap of found keys.
+        found: Bitmap of found keys, over key indices ``0..num_keys-1``.
         num_keys: Total number of requested keys.
-        policy: Trim policy to apply.
-        attn_desc: Per-object-group attention windows and world_size.
+        policy: Trim policy to apply (see :class:`TrimPolicy`).
+        attn_desc: Cross-chunk attention windows of all object groups, in
+            object-group order.
 
     Returns:
         ``(hit_length, retain_mask)`` — prefix hit in chunks and retained bitmap.
@@ -157,7 +158,8 @@ class InFlightPrefetchRequest:
     """Which retained-subset policy to apply (see :class:`TrimPolicy`)."""
 
     attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
-    """Per-object-group attention windows and world_size."""
+    """Cross-chunk attention windows of all object groups, in object-group
+    order."""
     mode: PrefetchMode = PrefetchMode.LOOKUP
     """The prefetch intent (see :class:`PrefetchMode`).  ``WARM`` forces all
     loaded keys permanent and acquires no read lock; ``LOOKUP`` defers
@@ -374,18 +376,40 @@ class PrefetchController(StorageControllerInterface):
         group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
         mode: PrefetchMode = PrefetchMode.LOOKUP,
     ) -> PrefetchRequestId:
-        """Submit a prefetch request for the given keys. Thread-safe.
+        """
+        Submit a prefetch request for the given keys.
+
+        Thread-safe. Can be called from any thread.
+
+        The retained subset of found keys is chosen by ``policy`` (see
+        :class:`TrimPolicy`).  With the default ``PREFIX`` policy, only the
+        **contiguous prefix** of found keys is loaded from L2: if L2 has keys
+        {0, 1, 3, 4} but not key 2, only keys {0, 1} are loaded because the gap
+        at index 2 breaks the prefix.  Keys outside the retained set are never
+        transferred, saving I/O bandwidth and L1 memory.  Use
+        :meth:`query_prefetch_result` to retrieve the retained set once the
+        request completes.
 
         Args:
-            keys: Object keys to prefetch from L2 into L1.
+            keys: List of object keys to prefetch from L2 into L1.
+                The ordering defines the prefix: index 0 is the first key.
             layout_desc: Memory layout for L1 write buffer allocation.
-            extra_count: Extra read locks per key for TP workers.
-            policy: Retained-subset policy. Defaults to ``PREFIX``.
-            attn_desc: Per-object-group attention windows and world_size.
+            extra_count: Extra read locks per key (on top of the default 1)
+                to acquire when transitioning loaded keys from write-locked
+                to read-locked.  Must match the ``extra_count`` used in the
+                corresponding ``submit_prefetch_task`` call so that all TP
+                workers can each consume one read lock.
+            policy: Which retained-subset policy to apply (see
+                :class:`TrimPolicy`).  Defaults to ``PREFIX``.
+            attn_desc: Cross-chunk attention windows of all object groups, in
+                object-group order.
             group_layout_descs: Maps object_group_id to that group's layout
                 (each group is a separate keyed allocation, possibly with
                 different tensor shapes); ``None`` when all share ``layout_desc``.
-            mode: Prefetch intent (``WARM`` or ``LOOKUP``).
+            mode: The prefetch intent (see :class:`PrefetchMode`).  ``WARM``
+                forces every loaded key permanent and acquires no read lock;
+                ``LOOKUP`` defers retention to the configured
+                :class:`PrefetchPolicy` and read-locks loaded keys.
 
         Returns:
             A request ID for tracking via query_prefetch_result.

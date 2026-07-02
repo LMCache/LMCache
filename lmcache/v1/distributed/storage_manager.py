@@ -413,15 +413,25 @@ class StorageManager:
         Args:
             keys: Object keys to prefetch.
             layout_desc: Memory layout description.
-            extra_count: Extra read locks per key for TP workers.
-            external_request_id: Request ID for tracing.
-            policy: Retained-subset policy (``PREFIX`` or ``SPARSE``).
-            attn_desc: Per-object-group attention windows and world_size.
-            skip_l2: If True, only return already-resident L1 keys.
+            extra_count: Extra workers (on top of the default
+                1) that will independently retrieve the same
+                key.  Total locks = 1 + extra_count.
+            external_request_id: Request ID from the caller
+                for end-to-end log tracing.
+            policy: Which retained-subset policy to apply (see
+                :class:`TrimPolicy`).  ``PREFIX`` keeps the contiguous prefix;
+                ``SPARSE`` keeps every found key (gap-tolerant).
+            attn_desc: Cross-chunk attention windows of all object groups, in
+                object-group order.
+            skip_l2: If True, do not load from L2. For ``LOOKUP`` only
+                already-resident L1 keys are returned; for ``WARM`` nothing is
+                loaded and an empty handle is returned.
             group_layout_descs: Maps object_group_id to that group's layout
                 (each group is a separate keyed allocation, possibly with
                 different tensor shapes); ``None`` when all share ``layout_desc``.
-            mode: Prefetch intent (``WARM`` or ``LOOKUP``).
+            mode: The prefetch intent (see :class:`PrefetchMode`).  ``WARM``
+                retains loaded keys and pins none; ``LOOKUP`` (default) pins
+                them for an imminent reader and follows the policy.
 
         Returns:
             PrefetchHandle to track the task.
@@ -664,6 +674,7 @@ class StorageManager:
 
         l2_r = self._prefetch_controller.query_lookup_result(handle.prefetch_request_id)
         if l2_r is None:
+            # Still in progress, or already consumed by query_prefetch_status.
             return None
         # Both l1_hit_chunks and l2_r are chunk-level counts.
         return handle.l1_hit_chunks + l2_r
