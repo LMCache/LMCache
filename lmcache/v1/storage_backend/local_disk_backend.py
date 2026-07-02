@@ -431,7 +431,7 @@ class LocalDiskBackend(StorageBackendInterface):
         if memory_obj is not None:
             # Re-acquire the lock to update the eviction policy.  The key
             # membership check guards against the entry being evicted between
-            # the two lock regions — in that case the policy state is already
+            # the two lock regions � in that case the policy state is already
             # consistent and no update is needed.
             with self.disk_lock:
                 if key in self.dict:
@@ -634,11 +634,14 @@ class LocalDiskBackend(StorageBackendInterface):
             os.write(fd, buffer)
             os.close(fd)
         disk_write_time = time.time() - start_time
-        logger.debug(
-            "Disk write size: %s bytes, Bandwidth: %.2f MB/s",
-            size,
-            size / disk_write_time / 1e6,
-        )
+        if disk_write_time > 0:
+            logger.debug(
+                "Disk write size: %s bytes, Bandwidth: %.2f MB/s",
+                size,
+                size / disk_write_time / 1e6,
+            )
+        else:
+            logger.debug("Disk write size: %s bytes", size)
 
     @_lmcache_nvtx_annotate
     def read_file(self, key, buffer, path):
@@ -666,11 +669,14 @@ class LocalDiskBackend(StorageBackendInterface):
             return
 
         disk_read_time = time.time() - start_time
-        logger.debug(
-            "Disk read size: %s bytes, Bandwidth: %.2f MB/s",
-            size,
-            size / disk_read_time / 1e6,
-        )
+        if disk_read_time > 0:
+            logger.debug(
+                "Disk read size: %s bytes, Bandwidth: %.2f MB/s",
+                size,
+                size / disk_read_time / 1e6,
+            )
+        else:
+            logger.debug("Disk read size: %s bytes", size)
 
     def get_allocator_backend(self) -> LocalCPUBackend:
         return self.local_cpu_backend
@@ -679,3 +685,4 @@ class LocalDiskBackend(StorageBackendInterface):
         if self.batched_msg_sender is not None:
             self.batched_msg_sender.close()
         self.disk_worker.close()
+
