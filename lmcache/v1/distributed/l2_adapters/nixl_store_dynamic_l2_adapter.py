@@ -732,23 +732,27 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         objects: list[MemoryObj],
         task_id: L2TaskId,
     ) -> None:
-        """Load all found keys from their files via dynamic DMA reads.
+        """Execute a queued load task for ``task_id``.
 
-        The per-key reads are issued **concurrently** (``asyncio.gather``)
-        rather than awaited one at a time. Each ``dynamic_load_file`` still
-        registers/transfers/deregisters its own file, but the transfers now
-        overlap instead of serializing, so a single multi-chunk request no
-        longer pays (chunks x per-file latency) in series. This is the
-        dominant cost of single-request KV loads.
-
-        TODO: register a request's files in a single ``register_memory``
-        call (one transfer / one deregister), like the static adapter's
-        flat-index path. The consideration is one large per-request
-        registration list instead of many small ones.
+        For each requested key present in this adapter, read its stored
+        data into the caller-provided ``objects[i]`` and set bit ``i`` of
+        the result bitmap; keys that are missing or fail to load are left
+        unset. The bitmap is recorded under ``task_id`` (retrieve via
+        ``query_load_result``) and the load event fd is signaled.
         """
         bitmap = Bitmap(len(keys))
         accessed_keys: list[ObjectKey] = []
         try:
+            # Read every present key's file concurrently (asyncio.gather
+            # below) so a multi-chunk request does not pay per-file NIXL
+            # latency serially -- the dominant cost of a single-request load.
+            #
+            # TODO(perf): batch a request's files into one NIXL
+            # ``register_memory`` (a single transfer + single deregister),
+            # like the static adapter's pre-registered flat-index pool,
+            # instead of the current per-file register/transfer/deregister.
+            # Trade-off: one large per-request registration list vs. many
+            # small ones.
             coros = []
             found_positions: list[int] = []
             for i, key in enumerate(keys):
