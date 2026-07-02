@@ -19,12 +19,15 @@ Example usage::
 """
 
 # Standard
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 # First Party
-from lmcache.cli.metrics.handler import FileHandler, MetricsHandler
+from lmcache.cli.metrics.handler import FileHandler
 from lmcache.cli.metrics.section import Section, sections_to_dict
 from lmcache.logging import init_logger
+
+if TYPE_CHECKING:
+    from lmcache.cli.metrics.handler import MetricsHandler
 
 logger = init_logger(__name__)
 
@@ -45,7 +48,7 @@ class Metrics:
         self._title = title
         self._sections: list[Section] = []
         self._section_map: dict[Optional[str], Section] = {}
-        self._handlers: list[MetricsHandler] = []
+        self._handlers: list["MetricsHandler"] = []
 
     def title(self, title: str) -> None:
         """Set the report title.
@@ -57,7 +60,7 @@ class Metrics:
 
     # -- Handler management -------------------------------------------------
 
-    def add_handler(self, handler: MetricsHandler) -> None:
+    def add_handler(self, handler: "MetricsHandler") -> None:
         """Register a handler.
 
         Args:

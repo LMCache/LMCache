@@ -6,20 +6,23 @@ Formatters are attached to handlers, separating rendering from destination.
 """
 
 # Standard
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import abc
 import inspect
 import json
 
 # First Party
-from lmcache.cli.metrics.section import Section, sections_to_dict
+from lmcache.cli.metrics.section import sections_to_dict
+
+if TYPE_CHECKING:
+    from lmcache.cli.metrics.section import Section
 
 
 class MetricsFormatter(abc.ABC):
     """Base class for metrics formatters."""
 
     @abc.abstractmethod
-    def format(self, title: str, sections: list[Section]) -> str:
+    def format(self, title: str, sections: list["Section"]) -> str:
         """Render metrics into a string.
 
         Args:
@@ -107,7 +110,7 @@ class TerminalFormatter(MetricsFormatter):
     def __init__(self, width: int = 48) -> None:
         self._width = width
 
-    def format(self, title: str, sections: list[Section]) -> str:
+    def format(self, title: str, sections: list["Section"]) -> str:
         """Render metrics as an ASCII table.
 
         Args:
@@ -155,7 +158,7 @@ class JsonFormatter(MetricsFormatter):
     def __init__(self, indent: int = 2) -> None:
         self._indent = indent
 
-    def format(self, title: str, sections: list[Section]) -> str:
+    def format(self, title: str, sections: list["Section"]) -> str:
         """Render metrics as indented JSON.
 
         Args:

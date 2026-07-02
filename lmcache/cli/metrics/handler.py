@@ -7,7 +7,7 @@ the rendering.
 """
 
 # Standard
-from typing import IO, Optional, Union
+from typing import IO, TYPE_CHECKING, Optional, Union
 import abc
 import os
 import sys
@@ -15,20 +15,22 @@ import sys
 # First Party
 from lmcache.cli.metrics.formatter import (
     JsonFormatter,
-    MetricsFormatter,
     TerminalFormatter,
 )
-from lmcache.cli.metrics.section import Section
+
+if TYPE_CHECKING:
+    from lmcache.cli.metrics.formatter import MetricsFormatter
+    from lmcache.cli.metrics.section import Section
 
 
 class MetricsHandler(abc.ABC):
     """Base class for metrics handlers."""
 
-    def __init__(self, formatter: MetricsFormatter) -> None:
+    def __init__(self, formatter: "MetricsFormatter") -> None:
         self.formatter = formatter
 
     @abc.abstractmethod
-    def emit(self, title: str, sections: list[Section]) -> None:
+    def emit(self, title: str, sections: list["Section"]) -> None:
         """Format and write metrics to the destination.
 
         Args:
@@ -47,13 +49,13 @@ class StreamHandler(MetricsHandler):
 
     def __init__(
         self,
-        formatter: Optional[MetricsFormatter] = None,
+        formatter: Optional["MetricsFormatter"] = None,
         stream: Optional[IO[str]] = None,
     ) -> None:
         super().__init__(formatter or TerminalFormatter())
         self._stream = stream
 
-    def emit(self, title: str, sections: list[Section]) -> None:
+    def emit(self, title: str, sections: list["Section"]) -> None:
         """Format and write metrics to the stream.
 
         Args:
@@ -77,12 +79,12 @@ class FileHandler(MetricsHandler):
     def __init__(
         self,
         path: Union[str, os.PathLike],
-        formatter: Optional[MetricsFormatter] = None,
+        formatter: Optional["MetricsFormatter"] = None,
     ) -> None:
         super().__init__(formatter or JsonFormatter())
         self.path = path
 
-    def emit(self, title: str, sections: list[Section]) -> None:
+    def emit(self, title: str, sections: list["Section"]) -> None:
         """Format and write metrics to the file.
 
         Args:
