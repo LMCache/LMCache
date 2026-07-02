@@ -101,6 +101,42 @@ logger = lmcache_init_logger(__name__)
 
 
 # Helper functions
+def _is_preempted(scheduler_output: SchedulerOutput) -> bool:
+    """Return whether this scheduler step must flush pending KV-block operations.
+
+    Under-syncing risks KV-block corruption (as a paged block may be
+    overwritten before a deferred async gather reads it), while
+    over-syncing only costs performance. We prioritize safety over
+    efficiency.
+
+    A flush is required if:
+    - ``scheduled_cached_reqs.resumed_req_ids``: Requests resumed from
+      preemption this step.
+    - ``scheduler_output.preempted_req_ids``: Requests preempted this step.
+
+    Args:
+        scheduler_output: The vLLM scheduler output for this step.
+
+    Returns:
+        True if a flush is needed, False otherwise.
+    """
+    cached_reqs = getattr(scheduler_output, "scheduled_cached_reqs", None)
+
+    # Primary signal: requests resumed from preemption this step.
+    resumed_ids = getattr(cached_reqs, "resumed_req_ids", None)
+    if resumed_ids:
+        logger.warning("<preempted> by resumed requests: %s", resumed_ids)
+        return True
+
+    # Primary signal: requests preempted this step.
+    preempted_ids = getattr(scheduler_output, "preempted_req_ids", None)
+    if preempted_ids:
+        logger.warning("<preempted> by preempted requests: %s", preempted_ids)
+        return True
+
+    return False
+
+
 def validate_mamba_step_alignment(vllm_config: VllmConfig) -> None:
     """Reject scheduler configs that can skip Mamba state snapshots.
 
@@ -815,6 +851,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
     # TODO: How does lmcache driven path handle preemption?
+    # NOTE1: handle_preemptions is called by vllm each step regardless
+    #        preemption really happens or not.
+    # NOTE2: preemption hint is managed by KVConnectorRole.SCHEDULER,
+    #        that's why here we have to judge preemption by need_flush flag
+    #        which is set by SCHEDULER.
     def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
         """Flush async engine-driven stores only when scheduler metadata requests it.
 
@@ -1059,7 +1100,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
         metadata = LMCacheMPConnectorMetadata()
-        metadata.need_flush = self._scheduler_step_needs_flush(scheduler_output)
+        metadata.need_flush = _is_preempted(scheduler_output)
 
         self._process_retrieve_requests(metadata)
         self._process_new_requests(scheduler_output, metadata)
@@ -1072,50 +1113,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self._report_block_allocation_deltas(scheduler_output)
 
         return metadata
-
-    def _scheduler_step_needs_flush(self, scheduler_output: SchedulerOutput) -> bool:
-        """Return whether this scheduler step can overwrite preempted blocks.
-
-        Under-syncing here risks KV-block corruption (a paged block may be
-        overwritten before a deferred async gather reads it), while over-syncing
-        only costs performance, so we prefer a spurious flush over a missed one.
-
-        Signal fields are verified against vLLM main:
-
-        - ``CachedRequestData.resumed_req_ids``: requests resumed from
-          preemption this step. Their blocks are replaced (not appended), so
-          an in-flight gather against the old blocks must be flushed first.
-        - ``SchedulerOutput.preempted_req_ids``: requests preempted this step.
-          Their blocks are freed and may be reused, so the same applies.
-
-        Args:
-            scheduler_output: The vLLM scheduler output for this step.
-
-        Returns:
-            True if a flush is needed, False if the step is preemption-free.
-        """
-        cached_reqs = getattr(scheduler_output, "scheduled_cached_reqs", None)
-
-        # Primary signal: requests resumed from preemption this step.
-        if getattr(cached_reqs, "resumed_req_ids", None):
-            return True
-
-        # Primary signal: requests preempted this step.
-        if getattr(scheduler_output, "preempted_req_ids", None):
-            return True
-
-        # Conservative fallback: if cached requests are present but the schema
-        # exposes no recognized ``resumed_req_ids`` field (e.g. a much older or
-        # forked vLLM), we cannot prove the step is preemption-free, so flush
-        # rather than risk corruption.
-        if cached_reqs is not None and not hasattr(cached_reqs, "resumed_req_ids"):
-            logger.warning(
-                "Unrecognized scheduled_cached_reqs schema (%s); conservatively "
-                "flushing in-flight async stores to avoid KV block corruption.",
-                type(cached_reqs).__name__,
-            )
-            return True
-        return False
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """
