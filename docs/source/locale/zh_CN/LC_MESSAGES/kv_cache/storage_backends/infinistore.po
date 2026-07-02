@@ -100,7 +100,7 @@ msgstr "**前提条件：**"
 
 #: ../../source/kv_cache/storage_backends/infinistore.rst:42
 msgid "Machine with at least one GPU for vLLM inference"
-msgstr "具有至少一个 GPU 以进行 vLLM 推理的机器"
+msgstr "具有至少一个 GPU 的机器用于 vLLM 推理"
 
 #: ../../source/kv_cache/storage_backends/infinistore.rst:43
 msgid "RDMA-capable network hardware and drivers"
@@ -108,7 +108,7 @@ msgstr "支持 RDMA 的网络硬件和驱动程序"
 
 #: ../../source/kv_cache/storage_backends/infinistore.rst:44
 msgid "Python 3.8+ with pip"
-msgstr "支持 pip 的 Python 3.8 及以上版本"
+msgstr "Python 3.8+ 和 pip"
 
 #: ../../source/kv_cache/storage_backends/infinistore.rst:45
 msgid "vLLM and LMCache installed"
@@ -230,3 +230,7 @@ msgstr "`InfiniStore 文档 <https://bytedance.github.io/InfiniStore/index.html>
 msgid "`GitHub Repository <https://github.com/bytedance/InfiniStore>`_"
 msgstr "`GitHub 仓库 <https://github.com/bytedance/InfiniStore>`_"
 
+
+#: ../../source/kv_cache/storage_backends/infinistore.rst:1
+msgid "This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/l2_storage/index`."
+msgstr "本页面介绍 LMCache 进程内模式（不推荐使用）的行为。建议改用 :doc:`LMCache MP 模式 </mp/index>`\\ 以获得更好的功能支持与性能。本页面对应的 MP 模式文档请参见 :doc:`/mp/l2_storage/index`\\ 。"

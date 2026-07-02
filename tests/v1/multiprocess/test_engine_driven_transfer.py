@@ -1027,7 +1027,14 @@ def test_engine_context_shm_pool_info(
 
     with patch(
         "lmcache.v1.distributed.config.torch_dev",
-        type("TorchDevStub", (), {"cudart": object()})(),
+        type(
+            "TorchDevStub",
+            (),
+            {
+                "cudart": object(),
+                "ext": type("_Ext", (), {"is_pin_supported": True})(),
+            },
+        )(),
     ):
         config = _make_storage_manager_config(**config_kwargs)
 
@@ -1363,6 +1370,9 @@ def test_server_prepare_store_includes_chunk_indices(
 class _CompletedFuture:
     def __init__(self, value):
         self._value = value
+
+    def wait(self, timeout=None):  # noqa: ARG002
+        return True
 
     def result(self, timeout=None):  # noqa: ARG002
         return self._value

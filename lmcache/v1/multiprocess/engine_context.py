@@ -201,8 +201,10 @@ class MPCacheServerContext:
 
     def close(self) -> None:
         """
-        Tear down the storage manager and the process-global GDS context.
+        Tear down the session manager, storage manager, and the process-global
+        GDS context.
         """
+        self._session_manager.close()
         self._storage_manager.close()
         # Tear down the GDS cuFile context (the shared slab + its handle).
         get_gds_context().close()

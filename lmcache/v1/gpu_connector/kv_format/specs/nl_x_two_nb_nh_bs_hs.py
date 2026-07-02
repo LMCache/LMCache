@@ -21,7 +21,6 @@ import lmcache.c_ops as lmc_ops
 
 class NL_X_TWO_NB_NH_BS_HS_Spec(KVFormatSpec):
     engine_kv_format = lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS
-    is_hnd = True
     attention_backends = ("vLLM non-MLA flash attention (HND layout)",)
 
     def num_layers(self) -> int:

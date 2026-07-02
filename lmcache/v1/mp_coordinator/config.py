@@ -43,13 +43,16 @@ class MPCoordinatorConfig:
             recall; raise only to trade recall for coordinator CPU.
         enable_startup_resync: When ``True``, run a one-shot L2 resync
             on startup to backfill trackers from an MP server's
-            ``GET /l2/keys``.
+            ``GET /cache/objects``.
         resync_poll_interval: Seconds between registry checks while
             waiting for the first MP server to register.
         resync_max_wait: Maximum seconds startup resync waits for an MP
             server before giving up.
-        resync_page_size: ``page_size`` forwarded to ``GET /l2/keys``
+        resync_page_size: ``page_size`` forwarded to ``GET /cache/objects``
             during resync.
+        timeout_keep_alive: Seconds the HTTP server keeps idle connections
+            open before closing them. Must be greater than the heartbeat
+            interval of MP servers to avoid race-condition disconnects.
     """
 
     host: str = "0.0.0.0"
@@ -65,6 +68,7 @@ class MPCoordinatorConfig:
     resync_poll_interval: float = 1.0
     resync_max_wait: float = 60.0
     resync_page_size: int = 1000
+    timeout_keep_alive: int = 10
 
     def __post_init__(self) -> None:
         """Validate timing parameters.
@@ -94,6 +98,8 @@ class MPCoordinatorConfig:
             raise ValueError("blend_chunk_size must be positive")
         if self.blend_probe_stride < 1:
             raise ValueError("blend_probe_stride must be positive")
+        if self.timeout_keep_alive <= 0:
+            raise ValueError("timeout_keep_alive must be positive")
 
     @classmethod
     def from_env(cls) -> "MPCoordinatorConfig":
@@ -150,4 +156,7 @@ class MPCoordinatorConfig:
             ),
             resync_max_wait=_num("RESYNC_MAX_WAIT", cls.resync_max_wait, float),
             resync_page_size=int(_num("RESYNC_PAGE_SIZE", cls.resync_page_size, int)),
+            timeout_keep_alive=int(
+                _num("TIMEOUT_KEEP_ALIVE", cls.timeout_keep_alive, int)
+            ),
         )

@@ -67,7 +67,7 @@ msgstr "启动 LMCache MP 服务器："
 
 #: ../../source/recipes/phi3.rst:32
 msgid "Start vLLM with the LMCache MP connector:"
-msgstr "启动 vLLM 与 LMCache MP 连接器："
+msgstr "使用 LMCache MP 连接器启动 vLLM："
 
 #: ../../source/recipes/phi3.rst:34
 msgid "**Phi-4-mini-instruct** (1 GPU):"
@@ -102,9 +102,7 @@ msgstr "TRT-LLM"
 msgid ""
 "**Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-"
 "LLM + LMCache setup."
-msgstr ""
-"**状态：** 支持。请参见 :doc:`../getting_started/quickstart` 以获取 TRT-LLM + LMCache"
-" 的设置。"
+msgstr "**状态：** 支持。TRT-LLM + LMCache 的配置方式，请参阅 :doc:`../getting_started/quickstart`。"
 
 #: ../../source/recipes/phi3.rst:71
 msgid "CacheBlend support"

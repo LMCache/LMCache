@@ -34,7 +34,9 @@ from lmcache.v1.distributed.l2_adapters.config import (
     L2AdaptersConfig,
     get_type_name_for_config,
 )
-from lmcache.v1.distributed.memory_manager import L1MemoryManager
+from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
+    DevDaxL1MemoryManager,
+)
 from lmcache.v1.memory_management import DevDaxMemoryAllocator
 from lmcache.v1.multiprocess.config import add_mp_server_args
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
@@ -74,12 +76,28 @@ class _FakeMooncakeL2Config:
         self.setup_config = setup_config
 
 
+class _FakeExt:
+    is_pin_supported = True
+
+    def __init__(self, fake_runtime: "_FakeCudaRuntime") -> None:
+        self._runtime = fake_runtime
+
+    def pin_memory(self, ptr: int, size: int) -> bool:
+        self._runtime.register_calls.append((ptr, size, 0))
+        return self._runtime.register_error == 0
+
+    def unpin_memory(self, ptr: int) -> bool:
+        self._runtime.unregister_calls.append(ptr)
+        return True
+
+
 class _FakeCudaRuntime:
     def __init__(self, register_error: int = 0) -> None:
         self.register_error = register_error
         self.register_calls: list[tuple[int, int, int]] = []
         self.unregister_calls: list[int] = []
         self.synchronize_calls = 0
+        self.ext = _FakeExt(self)
 
     def is_available(self) -> bool:
         return True
@@ -321,9 +339,9 @@ def test_l1_manager_round_trip_on_devdax_mapping(tmp_path):
         assert f.read(1) == bytes([0x23])
 
 
-def test_l1_memory_manager_spills_from_dram_to_devdax(tmp_path):
+def test_devdax_l1_memory_manager_spills_from_dram_to_devdax(tmp_path):
     path = _make_mmap_file(tmp_path, size=8192)
-    manager = L1MemoryManager(
+    manager = DevDaxL1MemoryManager(
         L1MemoryManagerConfig(
             size_in_bytes=8192,
             use_lazy=False,
@@ -363,9 +381,9 @@ def test_l1_memory_manager_spills_from_dram_to_devdax(tmp_path):
         assert f.read(4096) == bytes([0x6D]) * 4096
 
 
-def test_l1_memory_manager_reports_devdax_desc(tmp_path):
+def test_devdax_l1_memory_manager_reports_devdax_desc(tmp_path):
     path = _make_mmap_file(tmp_path)
-    manager = L1MemoryManager(
+    manager = DevDaxL1MemoryManager(
         L1MemoryManagerConfig(
             size_in_bytes=1024 * 1024,
             use_lazy=False,

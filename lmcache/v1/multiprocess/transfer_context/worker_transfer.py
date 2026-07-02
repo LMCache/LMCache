@@ -87,6 +87,12 @@ def _build_lmcache_driven_context(device_type: str) -> "TransferContext":
             "%r: no KV-cache wrapper factory is registered. "
             "Use mode 'engine_driven' or 'auto' instead." % device_type
         ) from exc
+    if not platform_registry.is_available(device_type):
+        raise ValueError(
+            "MP transfer mode 'lmcache_driven' is not available for device type "
+            "%r: required platform capability checks failed. "
+            "Use mode 'engine_driven' or 'auto' instead." % device_type
+        )
     return LMCacheDrivenTransferContext()
 
 

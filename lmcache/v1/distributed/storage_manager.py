@@ -18,6 +18,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
+    PrefetchMode,
     TrimPolicy,
 )
 from lmcache.v1.distributed.config import EvictionConfig, StorageManagerConfig
@@ -49,6 +50,7 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     create_store_policy,
 )
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
@@ -403,6 +405,7 @@ class StorageManager:
         policy: TrimPolicy = TrimPolicy.PREFIX,
         attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
         skip_l2: bool = False,
+        mode: PrefetchMode = PrefetchMode.LOOKUP,
     ) -> PrefetchHandle:
         """Prefetch objects into L1 asynchronously.
 
@@ -419,11 +422,38 @@ class StorageManager:
                 ``SPARSE`` keeps every found key (gap-tolerant).
             attn_desc: Cross-chunk attention windows of all object groups, in
                 object-group order.
-            skip_l2: If True, only check L1 and return without submitting to L2.
+            skip_l2: If True, do not load from L2. For ``LOOKUP`` only
+                already-resident L1 keys are returned; for ``WARM`` nothing is
+                loaded and an empty handle is returned.
+            mode: The prefetch intent (see :class:`PrefetchMode`).  ``WARM``
+                retains loaded keys and pins none; ``LOOKUP`` (default) pins
+                them for an imminent reader and follows the policy.
 
         Returns:
             PrefetchHandle to track the task.
         """
+        if mode is PrefetchMode.WARM:
+            # Warm path: load all keys, pin none. skip_l2 makes it a no-op.
+            prefetch_request_id = -1
+            if not skip_l2 and keys and self._l2_adapters:
+                prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
+                    keys,
+                    layout_desc,
+                    extra_count=extra_count,
+                    policy=policy,
+                    mode=mode,
+                )
+            return PrefetchHandle(
+                prefetch_request_id=prefetch_request_id,
+                external_request_id=external_request_id,
+                l1_found_indices=(),
+                total_requested_keys=len(keys),
+                submit_time=time.monotonic(),
+                l2_orig_indices=(
+                    tuple(range(len(keys))) if prefetch_request_id != -1 else ()
+                ),
+            )
+
         # NOTE: now we only have L1, so the prefetch is essentially checking how many
         # objects are already in L1, and adding read locks to them.
 
@@ -465,6 +495,7 @@ class StorageManager:
                     extra_count=extra_count,
                     policy=TrimPolicy.SPARSE,
                     attn_desc=attn_desc,
+                    mode=mode,
                 )
             return PrefetchHandle(
                 prefetch_request_id=prefetch_request_id,
@@ -530,6 +561,7 @@ class StorageManager:
                 extra_count=extra_count,
                 attn_desc=attn_desc,
                 policy=policy,
+                mode=mode,
             )
             # The controller indexes its result bitmap over remaining_keys
             # (0-based); map those local indices back to original positions.
@@ -800,6 +832,21 @@ class StorageManager:
             "adapters": adapters,
         }
 
+    def reconfigurable_l2_backends(self) -> set[str]:
+        """Return the ``type_name`` of every L2 adapter that supports runtime
+        reconfiguration.
+
+        Returns:
+            The set of reconfigurable adapter ``type_name`` strings (empty when
+            none are reconfigurable). The ``{backend}`` path parameter the
+            ``/reconfigure`` routes expect is the adapter's ``type_name``.
+        """
+        return {
+            desc.type_name
+            for _adapter_id, desc, adapter in self._snapshot_adapters()
+            if self._unwrap_reconfigurable_l2_adapter(adapter) is not None
+        }
+
     def reconfigure_l2_adapter(
         self,
         adapter_index: int,
@@ -877,11 +924,11 @@ class StorageManager:
             store_done = self._store_controller.request_remove_adapter(adapter_id)
             prefetch_done = self._prefetch_controller.request_remove_adapter(adapter_id)
             if not store_done.wait(timeout=max(0.0, deadline - time.monotonic())):
-                raise TimeoutError(
+                raise LMCacheTimeoutError(
                     f"Timed out draining adapter {adapter_id} from store controller"
                 )
             if not prefetch_done.wait(timeout=max(0.0, deadline - time.monotonic())):
-                raise TimeoutError(
+                raise LMCacheTimeoutError(
                     f"Timed out draining adapter {adapter_id} from prefetch controller"
                 )
 

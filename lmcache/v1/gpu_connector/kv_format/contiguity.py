@@ -90,7 +90,6 @@ def _validate_dim0_padded_layout(tensor: torch.Tensor) -> int:
     * Every interior dim ``i`` satisfies
       ``stride[i] == prod(shape[i+1:])`` -- only dim-0 may carry
       padding, with ``stride[0] >= prod(shape[1:])``.
-    * ``storage_offset == 0`` -- no slice/narrow base shift.
 
     Callers must pass the stride-sorted permuted view (not the original
     tensor): for tensors that are both permuted and dim-0-padded, the
@@ -129,8 +128,6 @@ def _validate_dim0_padded_layout(tensor: torch.Tensor) -> int:
         _fail("stride[-1] != 1 (inner dim not contiguous)")
     if stride[-2] != shape[-1]:
         _fail("stride[-2] != shape[-1] (last-two dims not tightly packed)")
-    if storage_offset != 0:
-        _fail("storage_offset != 0 (slice/narrow view, base address shifted)")
     inner_tight = 1
     for i in range(ndim - 1, 0, -1):
         if i < ndim - 1 and stride[i] != inner_tight:

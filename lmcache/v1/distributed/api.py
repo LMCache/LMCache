@@ -8,6 +8,7 @@ Could be implemented by native code in the future
 
 # Standard
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 import enum
 
 # Third Party
@@ -15,7 +16,10 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
 logger = init_logger(__name__)
 
@@ -31,6 +35,22 @@ class TrimPolicy(enum.Enum):
     PREFIX = enum.auto()
     SEGMENTED_PREFIX = enum.auto()
     SPARSE = enum.auto()
+
+
+class PrefetchMode(enum.Enum):
+    """The intent of a prefetch request.
+
+    ``LOOKUP`` -- prefetch for an imminent reader: loaded keys are pinned for
+    the requesting workers, and whether they persist or are dropped after use
+    follows the configured prefetch policy.
+
+    ``WARM`` -- speculative pre-warm with no imminent reader: loaded keys are
+    retained and left unpinned (immediately resident and evictable), so a later
+    lookup can hit them.
+    """
+
+    LOOKUP = enum.auto()
+    WARM = enum.auto()
 
 
 @dataclass(frozen=True)
@@ -314,7 +334,7 @@ class PrefetchHandle:
 
 
 def ipc_key_to_object_keys(
-    ipc_key: IPCCacheServerKey,
+    ipc_key: "IPCCacheServerKey",
     chunk_hashes: list[bytes],
     object_group_ids: list[int],
 ) -> list[list[ObjectKey]]:
