@@ -29,6 +29,7 @@ import lmcache.python_ops_fallback as fallback
 try:
     # First Party
     import lmcache.c_ops as c_ops
+
     HAS_C_OPS = c_ops is not fallback
 except ImportError:
     HAS_C_OPS = False
