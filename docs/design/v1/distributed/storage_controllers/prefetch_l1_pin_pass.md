@@ -43,17 +43,19 @@ Actions per segment at each step:
                             |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
                                                           ^ L1 hit length               ^ L1+L2 hit length
 
-pin pass    (SW in L1)      |      skip      |    pin     |  pin if in L1  |pin if in L1|pin if in L1|
-step 1 plan (SW not in L1)  |       -        |     -      |   candidate    | candidate  | candidate  |
-step 2 fold (SW in L1)      |      skip      |   unpin    |     unpin      |    pin     |   unpin    |
-step 3 rsrv (SW not in L1)  |       -        |     -      |       -        |  loading*  |     -      |
-step 4      (SW in L1)      |      skip      |   unpin    |     unpin      |    pin     |   unpin    |
-step 5 plan                 |       -        |     -      |       -        | load these |     -      |
-step 6      (L2 locks)      |      free      |    free    |      free      | keep plan  |    free    |
-step 7+final(SW not in L1)  |       -        |     -      |       -        |load→pinned |     -      |
+pin pass    (SW in L1)        |      skip      |    pin     |  pin if in L1  |pin if in L1|pin if in L1|
+step 1 plan (L2 candidates)   |       -        |     -      |   candidate    | candidate  | candidate  |
+step 2 fold (SW in L1)        |      skip      |unpin@finish|  unpin@finish  |  keep pin  |unpin@finish|
+step 3 rsrv (SW in L2 ∖ L1)   |       -        |     -      |       -        |  loading*  |     -      |
+step 4      (SW in L1)        |      skip      |unpin@finish|  unpin@finish  |  keep pin  |unpin@finish|
+step 5 plan                   |       -        |     -      |       -        | load these |     -      |
+step 6      (L2 locks)        |      free      |    free    |      free      | keep plan  |    free    |
+step 7 load (SW in L2 ∖ L1)   |       -        |     -      |       -        |  loading   |     -      |
+finish      (SW in L2 ∖ L1)   |       -        |     -      |       -        |load→pinned |     -      |
+finish      (SW in L1)        |      skip      |   unpin    |     unpin      |   pinned   |   unpin    |
 
-(pin pass: the L1+L2 hit is unknown, so everything L1-resident beyond
- the L1 hit is pinned; the step-2 fold unpins what fell outside.
+(pins are held from the pin pass until finish — the folds only decide
+ the retained set; every read lock outside it is released at finish.
  step 4 = step 2 against the smaller post-drop hit.)
 (*) dropped on OOM or contention.
 ```
@@ -66,11 +68,12 @@ Notes:
   (monotonicity). They keep aging for eviction, which is what frees the heads
   of multi-round conversations.
 - **Step 2** is where the window moves: if L2 extends the hit, the final
-  window (in L2-hit sw) sits right of the L1-hit window, and pins now behind
-  it are unpinned.
-- **Failed loads** (finalize) delete their buffer and re-fold; anything left
-  outside the final retained set is unpinned. The result is the retained
-  bitmap: every key in it is pinned for the retriever.
+  window (in L2-hit sw) sits right of the L1-hit window, and pins left behind
+  it fall out of the retained set (released at finish).
+- **Finish is the single completion path** (`_finish_request`), with or
+  without an L2 load: failed loads delete their buffer, the final fold
+  decides the retained set, and every read lock outside it is released. The
+  result is the retained bitmap: every key in it is pinned for the retriever.
 - **WARM mode**: the pin pass only peeks (existence hint, no locks — WARM
   promises nothing to a retriever), and finalize leaves loaded keys unlocked
   (`finish_write` only).
