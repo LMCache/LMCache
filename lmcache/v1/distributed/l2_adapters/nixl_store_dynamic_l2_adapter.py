@@ -103,6 +103,7 @@ class DynamicNixlStorageAgent:
         self.backend_params = backend_params
         self.l1_align_bytes = l1_memory_desc.align_bytes
         self.file_path = backend_params["file_path"]
+        self.devId = 0
         os.makedirs(self.file_path, exist_ok=True)
         self.use_direct_io = (
             str(backend_params.get("use_direct_io", "false")).lower() == "true"
@@ -143,27 +144,55 @@ class DynamicNixlStorageAgent:
 
     # ---- Per-operation file helpers ----
 
-    def _open_flags(self, create: bool) -> int:
-        """Return os.open flags for storage files."""
-        flags = os.O_RDWR
+    def _generate_file_path_string(self, file_path: str, create: bool) -> str:
+        """Return the NIXL path-mode string for a storage file."""
+        flags = ["rw"]
         if create:
-            # O_TRUNC ensures any orphaned file from a previous crash
-            # is truncated, avoiding stale trailing bytes on disk.
-            flags |= os.O_CREAT | os.O_TRUNC
-        if self.use_direct_io and hasattr(os, "O_DIRECT"):
-            flags |= os.O_DIRECT
-        return flags
+            flags.append("create")
+        if self.use_direct_io:
+            flags.append("direct")
+        return f"{','.join(flags)}:{file_path}"
 
-    def _register_single_file(self, fd: int, file_size: int, page_size: int):
+    def _register_files(self, file_info_tuples: list[tuple[str, int]], page_size: int):
+        """Register files with nixl and return (reg_descs, xfer_handler).
+
+        Returns:
+            Tuple of (reg_descs, xfer_handler) for later cleanup.
+        """
+        reg_list = []
+        xfer_desc = []
+        
+        for file_path_mode, file_size in file_info_tuples:
+            self.devId += 1  # unique device ID for each file registration
+            num_pages = file_size // page_size
+            
+            reg_list.append((0, file_size, self.devId, file_path_mode))
+            xfer_desc.extend([
+                (offset * page_size, page_size, self.devId) for offset in range(num_pages)
+            ])
+
+        reg_descs = self.nixl_agent.register_memory(reg_list, mem_type="FILE")
+        xfer_descs = self.nixl_agent.get_xfer_descs(xfer_desc, mem_type="FILE")
+        xfer_handler = self.nixl_agent.prep_xfer_dlist(
+            self.agent_name, xfer_descs, mem_type="FILE"
+        )
+        return reg_descs, xfer_handler
+
+    def _register_single_file(
+        self, file_path_mode: str, file_size: int, page_size: int
+    ):
         """Register a single file with nixl and return (reg_descs, xfer_handler).
 
         Returns:
             Tuple of (reg_descs, xfer_handler) for later cleanup.
         """
         num_pages = file_size // page_size
+        self.devId += 1  # unique device ID for each file registration
 
-        reg_list = [(0, file_size, fd, "")]
-        xfer_desc = [(offset * page_size, page_size, fd) for offset in range(num_pages)]
+        reg_list = [(0, file_size, self.devId, file_path_mode)]
+        xfer_desc = [
+            (offset * page_size, page_size, self.devId) for offset in range(num_pages)
+        ]
 
         reg_descs = self.nixl_agent.register_memory(reg_list, mem_type="FILE")
         xfer_descs = self.nixl_agent.get_xfer_descs(xfer_desc, mem_type="FILE")
@@ -193,66 +222,56 @@ class DynamicNixlStorageAgent:
         """
         file_size = len(mem_indices) * page_size
         tmp_path = f"{file_path}.tmp.{uuid.uuid4().hex}"
-        fd = os.open(tmp_path, self._open_flags(create=True))
+        file_path_mode = self._generate_file_path_string(tmp_path, create=True)
+        reg_descs, xfer_handler = self._register_single_file(
+            file_path_mode, file_size, page_size
+        )
         try:
-            reg_descs, xfer_handler = self._register_single_file(
-                fd, file_size, page_size
+            storage_indices = list(range(len(mem_indices)))
+            handle = self.nixl_agent.make_prepped_xfer(
+                "WRITE",
+                self.mem_xfer_handler,
+                mem_indices,
+                xfer_handler,
+                storage_indices,
             )
-            try:
-                storage_indices = list(range(len(mem_indices)))
-                handle = self.nixl_agent.make_prepped_xfer(
-                    "WRITE",
-                    self.mem_xfer_handler,
-                    mem_indices,
-                    xfer_handler,
-                    storage_indices,
-                )
-                await self._post_non_blocking(handle)
-                self.nixl_agent.release_xfer_handle(handle)
-            finally:
-                self._deregister_file(reg_descs, xfer_handler)
-        except BaseException:
-            # Best-effort cleanup of the temp file on failure.
-            try:
-                os.unlink(tmp_path)
-            except FileNotFoundError:
-                pass
-            raise
+            await self._post_non_blocking(handle)
+            self.nixl_agent.release_xfer_handle(handle)
         finally:
-            os.close(fd)
+            self._deregister_file(reg_descs, xfer_handler)
 
         # Atomic publish: readers only ever see a complete file at file_path.
         # TODO(Jiayi): Only guaranteed to be atomic within the local posix filesystems.
         os.rename(tmp_path, file_path)
 
-    async def dynamic_load_file(
+    async def dynamic_load_files(
         self,
-        mem_indices: list[int],
-        file_path: str,
+        file_mem_indices_tuples: list[tuple[str, list[int]]],
         page_size: int,
     ) -> None:
         """Open an existing file, DMA read into L1 memory, then clean up."""
-        file_size = len(mem_indices) * page_size
-        fd = os.open(file_path, self._open_flags(create=False))
+        file_info_tuples = []
+
+        for file_path, mem_indices in file_mem_indices_tuples:
+            file_size = len(mem_indices) * page_size
+            file_path_mode = self._generate_file_path_string(file_path, create=False)
+            file_info_tuples.append((file_path_mode, file_size))
+
+        reg_descs, xfer_handler = self._register_files(file_info_tuples, page_size)
         try:
-            reg_descs, xfer_handler = self._register_single_file(
-                fd, file_size, page_size
+            aggregate_mem_indices = [idx for _, mem_indices in file_mem_indices_tuples for idx in mem_indices]
+            storage_indices = list(range(sum(len(mem_indices) for _, mem_indices in file_mem_indices_tuples)))
+            handle = self.nixl_agent.make_prepped_xfer(
+                "READ",
+                self.mem_xfer_handler,
+                aggregate_mem_indices,
+                xfer_handler,
+                storage_indices,
             )
-            try:
-                storage_indices = list(range(len(mem_indices)))
-                handle = self.nixl_agent.make_prepped_xfer(
-                    "READ",
-                    self.mem_xfer_handler,
-                    mem_indices,
-                    xfer_handler,
-                    storage_indices,
-                )
-                await self._post_non_blocking(handle)
-                self.nixl_agent.release_xfer_handle(handle)
-            finally:
-                self._deregister_file(reg_descs, xfer_handler)
+            await self._post_non_blocking(handle)
+            self.nixl_agent.release_xfer_handle(handle)
         finally:
-            os.close(fd)
+            self._deregister_file(reg_descs, xfer_handler)
 
     def dynamic_delete_file(self, file_path: str) -> None:
         """Delete a storage file from disk."""
@@ -735,6 +754,8 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         """Load each found key from its file via dynamic DMA read."""
         bitmap = Bitmap(len(keys))
         accessed_keys: list[ObjectKey] = []
+        file_mem_indices_tuples: list[tuple[str, list[int]]] = []
+        
         try:
             for i, key in enumerate(keys):
                 with self._lock:
@@ -747,15 +768,17 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                 mem_indices = self.nixl_agent.get_memory_indices(mem_addr, mem_size)
                 file_path = self.nixl_agent.get_file_path_for_key(key)
 
-                await self.nixl_agent.dynamic_load_file(
-                    mem_indices, file_path, self.nixl_agent.l1_align_bytes
-                )
-
+                file_mem_indices_tuples.append((file_path, mem_indices))
                 bitmap.set(i)
                 accessed_keys.append(key)
 
         except Exception:
             logger.exception("Dynamic NIXL load task %d failed", task_id)
+
+        await self.nixl_agent.dynamic_load_files(
+            file_mem_indices_tuples, self.nixl_agent.l1_align_bytes
+        )
+
 
         if accessed_keys:
             self._notify_keys_accessed(accessed_keys)
