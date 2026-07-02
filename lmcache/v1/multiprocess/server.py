@@ -349,7 +349,7 @@ def run_cache_server(
         chunk_size=mp_config.chunk_size,
         hash_algorithm=mp_config.hash_algorithm,
         separate_object_groups=mp_config.separate_object_groups,
-        force_retrieve_full_kv=mp_config.force_retrieve_full_kv,
+        force_retrieve_full_kv_benchmark_only=mp_config.force_retrieve_full_kv_benchmark_only,
     )
 
     modules = _build_modules(ctx, mp_config, coordinator_config)

@@ -136,7 +136,7 @@ def build_trim_mask(
         num_chunks = num_keys // stride
         windows = attn_desc.num_chunks_in_sw
         # Benchmarking flag: treat every group as full-attention.
-        if attn_desc.force_retrieve_full_kv:
+        if attn_desc.force_retrieve_full_kv_benchmark_only:
             windows = [-1] * attn_desc.num_object_groups
         hit_length, retain = fold_unfold_ranked(
             found,
@@ -437,13 +437,13 @@ class PrefetchController(StorageControllerInterface):
         Thread-safe. Can be called from any thread.
 
         A key counts as found if it is already resident in L1 or any L2
-        adapter reports it; the retained subset of found keys is chosen by
-        ``policy`` (see :class:`TrimPolicy`).  With the default ``PREFIX``
-        policy, only the **contiguous prefix** of found keys is retained: if
-        the caches hold keys {0, 1, 3, 4} but not key 2, only keys {0, 1}
-        are retained because the gap at index 2 breaks the prefix.  Retained
-        keys missing from L1 are loaded from L2; keys outside the retained
-        set are never transferred, saving I/O bandwidth and L1 memory.  Use
+        adapter reports it.
+        The retained subset of found keys is chosen by ``policy`` (see
+        :class:`TrimPolicy`).  With the default ``PREFIX`` policy, only the
+        **contiguous prefix** of found keys is loaded from L2: if L2 has keys
+        {0, 1, 3, 4} but not key 2, only keys {0, 1} are loaded because the gap
+        at index 2 breaks the prefix.  Keys outside the retained set are never
+        transferred, saving I/O bandwidth and L1 memory.  Use
         :meth:`query_prefetch_result` to retrieve the retained set once the
         request completes.
 
@@ -1085,63 +1085,32 @@ class PrefetchController(StorageControllerInterface):
             self._finish_request(request)
             return
 
-        # Step 3 — reserve L1 write buffers for the plan keys; any
-        # reservation failure drops its key.
+        # Step 3 — reserve L1 write buffers for the plan keys, all or
+        # nothing: any reservation failure (OOM or contention) abandons the
+        # L2 load; finish returns every reserved buffer and serves the L1
+        # hit. The engine recomputes the rest and re-stores it within one
+        # round.
         # SW keys in L2 (and not in L1):
         # |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
         #                               ^ L1 hit length               ^ L1+L2 hit length
-        # |       -        |     -      |       -        |  loading*  |     -      |
-        # (*) dropped on OOM or contention.
-        plan_bitmap = merge_bitmaps(trimmed_plan.values(), num_keys)
-        keys_to_reserve = plan_bitmap.gather(request.keys)
-        reserved = self._reserve_load_buffers(request, keys_to_reserve)
-        reserved_bitmap = Bitmap(num_keys)
-        plan_indices = plan_bitmap.get_indices_list()
-        for idx, key in zip(plan_indices, keys_to_reserve, strict=True):
-            if key in reserved:
-                reserved_bitmap.set(idx)
-
-        # Step 4 — drops move the hit length left: re-fold so the reported
-        # hit matches (same row as step 2, against the smaller hit).
-        if len(reserved) < len(keys_to_reserve):
-            hit_length, retained = build_trim_mask(
-                reserved_bitmap | request.l1_bitmap,
-                num_keys,
-                request.policy,
-                request.attn_desc,
-            )
-
-        # Step 5 — plan = loading keys inside the final hit.
-        # SW plan:
-        # |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
-        #                               ^ L1 hit length               ^ L1+L2 hit length
-        # |       -        |     -      |       -        | load these |     -      |
-        # The plan covers only keys holding a write buffer (keys
-        # served from L1 need no transfer; unreserved keys have nowhere to
-        # load into).
-        trimmed_plan = trim_load_plan_with_mask(
-            trimmed_plan, reserved_bitmap & retained
+        # |       -        |     -      |       -        |  loading   |     -      |
+        keys_to_reserve = merge_bitmaps(trimmed_plan.values(), num_keys).gather(
+            request.keys
         )
-        request.load_plan = trimmed_plan
-
-        if not trimmed_plan:
-            # Nothing left to load after reservation failures; finish
-            # returns the reserved buffers and reconciles all locks.
+        reserved = self._reserve_load_buffers(request, keys_to_reserve)
+        if len(reserved) < len(keys_to_reserve):
             self._finish_request(request)
             return
+        request.load_plan = trimmed_plan
 
-        # Step 6 — free L2 lookup locks for keys outside the plan.
+        # Step 4 — free L2 lookup locks for keys outside the plan.
         # L2 lookup locks:
         # |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
         #                               ^ L1 hit length               ^ L1+L2 hit length
         # |      free      |    free    |      free      | keep plan  |    free    |
         self._release_l2_locks(request, keep=request.load_plan)
 
-        # Step 7 — submit loads; report the hit.
-        # SW keys in L2 (and not in L1):
-        # |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
-        #                               ^ L1 hit length               ^ L1+L2 hit length
-        # |       -        |     -      |       -        |  loading   |     -      |
+        # Step 5 — submit loads; report the hit.
         self._submit_load_tasks(request, trimmed_plan)
         self._report_lookup_hit(request, hit_length)
 
@@ -1154,9 +1123,10 @@ class PrefetchController(StorageControllerInterface):
 
         Successful reservations are recorded on
         ``request.write_reserved_keys`` / ``request.write_reserved_objs``.
-        Any failure drops its key (with an ``L2_PREFETCH_FAILED`` event) —
-        no lock is ever acquired through a failure result, so a concurrent
-        eviction between manager calls cannot invalidate the reported hit.
+        Failures publish an ``L2_PREFETCH_FAILED`` event; the caller
+        abandons the L2 load if any key failed (all-or-nothing). No lock is
+        ever acquired through a failure result, so a concurrent eviction
+        between manager calls cannot invalidate the reported hit.
 
         Args:
             request: The in-flight request the buffers belong to.
@@ -1400,15 +1370,22 @@ class PrefetchController(StorageControllerInterface):
             )
 
     def _finish_request(self, request: InFlightPrefetchRequest) -> None:
-        """
-        Finish a request — the single completion path, with or without an
-        L2 load: build the result bitmap, transition loaded keys, return
-        failed/unused write buffers, release every read lock outside the
-        final retained set, and report the retained-key bitmap.
+        """Finish a request and free all unnecessary locks.
 
-        Callable with an empty load plan (pure L1 hit, no hit at all, or
-        all reservations dropped): the load-specific steps degenerate to
-        no-ops and every write-reserved buffer is returned as failed.
+        The single completion path, with or without an L2 load (with an
+        empty load plan the load steps degenerate to no-ops and every
+        write-reserved buffer is returned).
+
+        Workflow:
+
+        1. Collect per-adapter load results; split loaded vs failed keys.
+        2. Release every L2 lookup lock still held (idempotent).
+        3. Loaded keys become read-locked (WARM: unlocked); failed keys'
+           buffers are deleted.
+        4. Fold loaded ∪ pinned keys to the final hit length / retained set.
+        5. Free all read locks outside the retained set (e.g. not in the
+           sliding window of the final hit).
+        6. Report the hit if no earlier step did, then the retained bitmap.
         """
         num_keys = len(request.keys)
 

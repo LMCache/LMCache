@@ -1031,32 +1031,23 @@ class TestExtraCountPrefetch:
 
     def test_extra_count_non_prefix_loaded_keys_fully_released(self, l1_manager):
         """Keys loaded beyond the prefix (due to partial load failure) must
-        have ALL extra locks released by _finalize_load so they can be evicted.
+        have ALL extra locks released by the finish so they can be evicted.
 
-        We simulate this by storing keys {0, 1, 2} in L2 but making key 1
-        fail to reserve in L1 (by pre-occupying it), creating a gap so that
-        key 2 is loaded but lies beyond the prefix.  _finalize_load must
-        release 1 + extra_count locks for key 2.
+        Keys {0, 1, 2} are in L2 and all reserve fine, but the *load* of
+        key 1 fails (fault-injected), creating a gap so that key 2 is loaded
+        but lies beyond the prefix.  The finish must release 1 + extra_count
+        locks for key 2.
         """
-        adapter = make_adapter()
         layout = make_layout()
         keys = [make_object_key(i) for i in range(3)]
-        store_keys_in_l2(adapter, keys, layout)
-
-        # Pre-occupy key[1] in L1 with a write lock so reserve_write fails for it.
-        # This forces a gap: key 0 is prefix (hit), key 1 fails reservation
-        # (gap), key 2 is loaded but beyond the prefix.
-        pre_write_results = l1_manager.reserve_write(
-            keys=[keys[1]],
-            is_temporary=[False],
-            layout_desc=layout,
-            mode="new",
-        )
-        assert pre_write_results[keys[1]][0] == L1Error.SUCCESS
+        inner = make_adapter()
+        store_keys_in_l2(inner, keys, layout)
+        # Drop task-position 1 at load -> a mid-prefix L2 retrieve failure.
+        fault = FaultInjectL2Adapter(inner, rate=0.0, seed=0, gap_indices=(1,))
 
         ctrl = PrefetchController(
             l1_manager=l1_manager,
-            l2_adapters=[adapter],
+            l2_adapters=[fault],
             adapter_descriptors=[make_descriptor(0)],
             policy=DefaultPrefetchPolicy(),
         )
@@ -1064,14 +1055,14 @@ class TestExtraCountPrefetch:
 
         req_id = ctrl.submit_prefetch_request(keys, layout, extra_count=1)
         result = wait_for_prefetch_result(ctrl, req_id)
-        # Only key 0 is in the prefix (key 1 reservation failed → gap)
+        # Only key 0 is in the prefix (key 1 load failed → gap)
         assert result == 1, f"Expected 1 prefix hit, got {result}"
 
         # key[0] should be in L1 with 2 read locks (1 + extra_count=1)
         read_results = l1_manager.unsafe_read([keys[0]])
         assert read_results[keys[0]][0] == L1Error.SUCCESS
 
-        # key[2] was loaded but is beyond the prefix; _finalize_load must have
+        # key[2] was loaded but is beyond the prefix; the finish must have
         # released all 1 + extra_count=2 locks, so it should be gone from L1
         # (it's a temporary object and its lock count should be 0).
         reserve_results = l1_manager.reserve_read([keys[2]])
@@ -1080,14 +1071,11 @@ class TestExtraCountPrefetch:
             "evicted from L1"
         )
 
-        # Clean up: release key[0]'s 2 locks and key[1]'s write lock
+        # Clean up: release key[0]'s 2 locks
         l1_manager.finish_read([keys[0]], extra_count=0)
         l1_manager.finish_read([keys[0]], extra_count=0)
-        l1_manager.finish_write([keys[1]])
-        l1_manager.delete([keys[1]])
-
         ctrl.stop()
-        adapter.close()
+        fault.close()
 
 
 # =============================================================================
@@ -1481,11 +1469,10 @@ class TestPrefetchMode:
         ctrl.stop()
         adapter.close()
 
-    def test_warm_sparse_skips_write_locked_prefix_and_loads_later_keys(
-        self, l1_manager
-    ):
-        """SPARSE WARM does not let a write-locked earlier key suppress later
-        keys that can be reserved and loaded."""
+    def test_warm_aborts_when_any_key_contended(self, l1_manager):
+        """Reservation is all-or-nothing: a contended key (write-locked by a
+        concurrent request) abandons the whole L2 load; nothing is loaded
+        and no lock leaks."""
         adapter = make_adapter()
         layout = make_layout()
         keys = [make_object_key(i) for i in range(3)]
@@ -1512,14 +1499,14 @@ class TestPrefetchMode:
         )
         result = wait_for_prefetch_result_bitmap(ctrl, req_id)
         assert result is not None
-        assert result.get_indices_list() == [1, 2]
+        assert result.get_indices_list() == []
 
+        # Nothing was loaded; the abandoned buffers were returned.
         l1_manager.finish_write([keys[0]])
         read_results = l1_manager.reserve_read(keys[1:])
         for key in keys[1:]:
-            assert read_results[key][0] == L1Error.SUCCESS
+            assert read_results[key][0] == L1Error.KEY_NOT_EXIST
 
-        l1_manager.finish_read(keys[1:])
         l1_manager.delete(keys)
         ctrl.stop()
         adapter.close()

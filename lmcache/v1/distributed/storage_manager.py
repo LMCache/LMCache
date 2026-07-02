@@ -544,7 +544,27 @@ class StorageManager:
         group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
         mode: PrefetchMode = PrefetchMode.LOOKUP,
     ) -> PrefetchHandle:
-        """PREFIX path: fold L1 presence, retain in-window keys, submit rest to L2."""
+        """PREFIX path: fold L1 presence, retain in-window keys, submit rest to L2.
+
+        Args:
+            keys: All requested keys, chunk-major, in prefix order.
+            l1_read_result: Per-key ``reserve_read`` results from the L1
+                probe; SUCCESS entries count as L1-present and stay
+                read-locked until the fold releases the out-of-window ones.
+            attn_desc: Cross-chunk attention windows of all object groups.
+            extra_count: Extra read locks per key (one per extra TP worker).
+            external_request_id: Engine-side request id, for logging/trace.
+            layout_desc: Memory layout for the L1 write buffers of L2 loads.
+            skip_l2: When True, serve from L1 only (no L2 prefetch).
+            group_layout_descs: Maps object_group_id to that group's layout;
+                ``None`` when all keys share ``layout_desc``.
+            mode: The prefetch intent (see :class:`PrefetchMode`).
+
+        Returns:
+            A :class:`PrefetchHandle` carrying the L1 hit (retained indices
+            and hit chunks) and the pending L2 prefetch request id (``-1``
+            when nothing was submitted to L2).
+        """
         num_groups = attn_desc.num_object_groups
         stride = num_groups * attn_desc.world_size
         num_chunks = len(keys) // stride
@@ -556,7 +576,7 @@ class StorageManager:
                 l1_presence.set(i)
 
         windows = attn_desc.num_chunks_in_sw
-        if attn_desc.force_retrieve_full_kv:
+        if attn_desc.force_retrieve_full_kv_benchmark_only:
             windows = [-1] * attn_desc.num_object_groups
         l1_hit_chunks, retain = fold_unfold_ranked(
             l1_presence,

@@ -770,7 +770,8 @@ class TestStorageManagerL2Prefetch:
     def test_prefetch_l2_force_retrieve_full_kv(
         self, l2_storage_manager_config, basic_layout
     ):
-        """force_retrieve_full_kv overrides sliding windows: all keys retained."""
+        """force_retrieve_full_kv_benchmark_only overrides sliding windows:
+        all keys retained."""
         sm = StorageManager(l2_storage_manager_config)
 
         # Same setup as test_prefetch_l2_with_sliding_window:
@@ -779,7 +780,7 @@ class TestStorageManagerL2Prefetch:
         num_groups = 2
         num_keys = num_chunks * num_groups
         attn_desc = AttnWindowDesc(
-            num_chunks_in_sw=[-1, 2], force_retrieve_full_kv=True
+            num_chunks_in_sw=[-1, 2], force_retrieve_full_kv_benchmark_only=True
         )
 
         all_keys = [make_object_key(i) for i in range(num_keys)]
@@ -803,11 +804,11 @@ class TestStorageManagerL2Prefetch:
         assert result is not None, "L2 prefetch should complete"
 
         indices = set(result.get_indices_list())
-        # With force_retrieve_full_kv, ALL keys should be retained —
+        # With force_retrieve_full_kv_benchmark_only, ALL keys should be retained —
         # the SW group's out-of-window chunks (indices 1, 3) are kept
         # unlike the non-forced test where they are trimmed.
         assert indices == set(range(num_keys)), (
-            f"force_retrieve_full_kv should retain all {num_keys} keys, "
+            f"force_retrieve_full_kv_benchmark_only should retain all {num_keys} keys, "
             f"got {sorted(indices)}"
         )
 

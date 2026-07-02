@@ -372,7 +372,7 @@ class LookupModule:
         stride = job.attn_desc.num_object_groups * job.world_size
         num_chunks = job.handle.total_requested_keys // stride
         windows = job.attn_desc.num_chunks_in_sw
-        if job.attn_desc.force_retrieve_full_kv:
+        if job.attn_desc.force_retrieve_full_kv_benchmark_only:
             windows = [-1] * job.attn_desc.num_object_groups
         found_count, _retain = fold_unfold_ranked(
             found,

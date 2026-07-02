@@ -276,7 +276,7 @@ class AttnWindowDesc:
     world_size: int = 1
     """Number of kv_rank shards per chunk (tensor-parallel world size)."""
 
-    force_retrieve_full_kv: bool = False
+    force_retrieve_full_kv_benchmark_only: bool = False
     """When True, treat every object group as full-attention during prefetch."""
 
     def __post_init__(self) -> None:
@@ -306,7 +306,7 @@ class AttnWindowDesc:
             True if the group attends to the whole prefix, False if it uses a
             bounded sliding window.
         """
-        if self.force_retrieve_full_kv:
+        if self.force_retrieve_full_kv_benchmark_only:
             return True
         return self.num_chunks_in_sw[object_group_idx] < 0
 

@@ -47,17 +47,15 @@ pin pass    (SW in L1)        |      skip      |    pin     |  pin if in L1  |pi
 step 1 plan (L2 candidates)   |       -        |     -      |   candidate    | candidate  | candidate  |
 step 2 fold (SW in L1)        |      skip      |unpin@finish|  unpin@finish  |  keep pin  |unpin@finish|
 step 3 rsrv (SW in L2 ∖ L1)   |       -        |     -      |       -        |  loading*  |     -      |
-step 4      (SW in L1)        |      skip      |unpin@finish|  unpin@finish  |  keep pin  |unpin@finish|
-step 5 plan                   |       -        |     -      |       -        | load these |     -      |
-step 6      (L2 locks)        |      free      |    free    |      free      | keep plan  |    free    |
-step 7 load (SW in L2 ∖ L1)   |       -        |     -      |       -        |  loading   |     -      |
+step 4      (L2 locks)        |      free      |    free    |      free      | keep plan  |    free    |
+step 5 load (SW in L2 ∖ L1)   |       -        |     -      |       -        |  loading   |     -      |
 finish      (SW in L2 ∖ L1)   |       -        |     -      |       -        |load→pinned |     -      |
 finish      (SW in L1)        |      skip      |   unpin    |     unpin      |   pinned   |   unpin    |
 
 (pins are held from the pin pass until finish — the folds only decide
- the retained set; every read lock outside it is released at finish.
- step 4 = step 2 against the smaller post-drop hit.)
-(*) dropped on OOM or contention.
+ the retained set; every read lock outside it is released at finish.)
+(*) all-or-nothing: any reservation failure (OOM or contention)
+    abandons the whole L2 load and finishes with the L1 hit.
 ```
 
 Notes:
@@ -84,18 +82,21 @@ Notes:
   promises nothing to a retriever), and finalize leaves loaded keys unlocked
   (`finish_write` only).
 
-## Why drop-only on reservation failure
+## Why all-or-nothing on reservation failure
 
-`reserve_write(mode="new")` returning KEY_NOT_WRITABLE means the key appeared
-in L1 after the pin pass (typically a concurrent request loading a shared
-prefix). Pinning it with a follow-up `reserve_read` would be *safe*
-(lock-then-count preserves the invariant) but was rejected: it reopens
-mid-phase mutation of the pinned set for a narrow win — upstream
-wait-prefetch serializes overlapping lookups, and a truncated hit self-heals
-in one round (the engine recomputes and re-stores the gap). Dropping keeps
-`l1_pinned_keys` immutable after the pin pass. The `l1_contended` failure
-reason makes the trade observable; pin-on-contention can return later as a
-pure optimization with no API change.
+A reservation failure is either OOM (no L1 room for the load buffers) or
+KEY_NOT_WRITABLE — the key appeared in L1 after the pin pass (typically a
+concurrent request loading a shared prefix). Either way, the request
+abandons the entire L2 load and finishes with the L1 hit: no re-fold, no
+plan re-trim, no partial salvage. Promotion of a contended key
+(``reserve_read`` after the failure) would be *safe* (lock-then-count
+preserves the invariant) but reopens mid-flight mutation of the pinned set;
+partial salvage kept three extra reconciliation steps alive for a marginal
+win. Both were rejected for simplicity: the engine recomputes the unserved
+suffix and re-stores it, so a truncated hit self-heals in one round.
+Failures stay observable via the ``l1_oom`` / ``l1_contended`` reasons on
+``L2_PREFETCH_FAILED``. Note the trade: a WARM request also aborts on first
+contention, and partial-OOM no longer loads the pre-OOM prefix.
 
 ## Contract-anchoring tests
 
