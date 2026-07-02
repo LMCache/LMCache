@@ -70,10 +70,16 @@ Notes:
 - **Step 2** is where the window moves: if L2 extends the hit, the final
   window (in L2-hit sw) sits right of the L1-hit window, and pins left behind
   it fall out of the retained set (released at finish).
-- **Finish is the single completion path** (`_finish_request`), with or
-  without an L2 load: failed loads delete their buffer, the final fold
-  decides the retained set, and every read lock outside it is released. The
-  result is the retained bitmap: every key in it is pinned for the retriever.
+- **Finish is the single reconciler** (`_finish_request`), reached by every
+  path — normal load completion, pure L1 hit, no adapters, all reservations
+  dropped: failed loads delete their buffer, the final fold decides the
+  retained set, every read lock outside it is released, all remaining L2
+  lookup locks are returned, and the hit is reported if no earlier step did.
+  The result is the retained bitmap: every key in it is pinned for the
+  retriever. This works because lock state is *tracked on the request*
+  (``l2_locked``, ``l1_pinned_keys``, ``write_reserved_keys``,
+  ``hit_reported``) and releases subtract from it, so reconciliation is
+  idempotent from any intermediate state.
 - **WARM mode**: the pin pass only peeks (existence hint, no locks — WARM
   promises nothing to a retriever), and finalize leaves loaded keys unlocked
   (`finish_write` only).
