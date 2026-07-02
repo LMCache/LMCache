@@ -51,8 +51,13 @@ from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.platform.base_cache_context import BaseCacheContext
 from lmcache.v1.platform.cache_context import create_cache_context
 import lmcache.c_ops as lmc_ops
+import lmcache.python_ops_fallback as _python_ops_fallback
 
 logger = init_logger(__name__)
+_HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = (
+    lmc_ops.execute_object_group_transfer
+    is not _python_ops_fallback.execute_object_group_transfer
+)
 
 
 def get_layout_desc(
@@ -438,9 +443,9 @@ def transfer_kv_per_object_group(
         This function expects the caller to stage the block ids (list[list[int]])
         into GPU tensors and pass them in as `block_ids_gpu`.
     """
-    # GDS-backed objects need their own copy mechanism and cannot be staged
-    # through the plan; route those groups to the per-op path below instead.
-    if not any(isinstance(mo, GDSMemoryObject) for mo in memory_objs):
+    if _HAS_NATIVE_OBJECT_GROUP_TRANSFER and not any(
+        isinstance(mo, GDSMemoryObject) for mo in memory_objs
+    ):
         _run_object_group_transfer_plan(
             cache_context,
             block_ids_gpu,
