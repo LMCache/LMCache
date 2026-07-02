@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Blend (context-blend / cross-request KV reuse) module for MPCacheEngine."""
+"""Blend (context-blend / cross-request KV reuse) module for MPCacheServer."""
 
 # Standard
 from typing import Any
@@ -26,15 +26,14 @@ from lmcache.v1.gpu_connector.gpu_ops import (
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
     CBMatchResult,
-    IPCCacheEngineKey,
+    IPCCacheServerKey,
     KVCache,
 )
-from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
+from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
     HandlerSpec,
     ThreadPoolType,
 )
-from lmcache.v1.multiprocess.gpu_context import PlainGPUCacheContext
 from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.token_hasher import (
     chunk_hash_windows_numba,
@@ -42,6 +41,7 @@ from lmcache.v1.multiprocess.token_hasher import (
     unique_hits_direct_id_numba,
     update_table_id_numba,
 )
+from lmcache.v1.platform.cuda.cache_context import PlainGPUCacheContext
 
 logger = init_logger(__name__)
 
@@ -321,7 +321,7 @@ class BlendModule:
         ctx: The shared engine context.
     """
 
-    def __init__(self, ctx: MPCacheEngineContext) -> None:
+    def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx
         self._cb_gpu_contexts: dict[int, PlainGPUCacheContext] = {}
         self._cb_gpu_context_meta: dict[int, tuple[str, int]] = {}
@@ -329,7 +329,7 @@ class BlendModule:
         self._gpu_copy_lock = threading.Lock()
 
     @property
-    def context(self) -> MPCacheEngineContext:
+    def context(self) -> MPCacheServerContext:
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
 
@@ -453,8 +453,10 @@ class BlendModule:
                 to unregister.
         """
         if instance_id in self._cb_gpu_contexts:
+            model_name, world_size = self._cb_gpu_context_meta[instance_id]
             del self._cb_gpu_contexts[instance_id]
             del self._cb_gpu_context_meta[instance_id]
+            self._ctx.layout_desc_registry.unregister(model_name, world_size)
             logger.info("Unregistered CB KV cache for instance_id %d", instance_id)
         else:
             logger.warning(
@@ -462,7 +464,7 @@ class BlendModule:
                 instance_id,
             )
 
-    def cb_lookup_pre_computed(self, key: IPCCacheEngineKey) -> list[CBMatchResult]:
+    def cb_lookup_pre_computed(self, key: IPCCacheServerKey) -> list[CBMatchResult]:
         """Lookup the pre-computed chunks in the underlying storage.
 
         Uses BlendTokenRangeMatcher for a fast local pre-filter, then submits
@@ -471,7 +473,7 @@ class BlendModule:
         storage are lazily evicted from the matcher via remove_chunks.
 
         Args:
-            key: IPCCacheEngineKey containing the token ids to lookup.
+            key: IPCCacheServerKey containing the token ids to lookup.
 
         Returns:
             List of CBMatchResult for chunks that were actually found in storage,
@@ -595,7 +597,7 @@ class BlendModule:
         # time, so ipc_key_to_object_keys resolves correctly.
         for group in groups:
             chunk_hashes = [r.hash for r in group]
-            obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+            obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
             handle = self._ctx.storage_manager.submit_prefetch_task(
                 obj_keys,
                 layout_desc,
@@ -612,15 +614,15 @@ class BlendModule:
         # Collect only the CBMatchResults for chunks actually found in storage
         stale_hashes: list[bytes] = []
         for handle, group in zip(prefetch_handles, groups, strict=False):
-            found_count = None
+            found = None
             while True:
-                found_count = self._ctx.storage_manager.query_prefetch_status(handle)
-                if found_count is not None:
+                found = self._ctx.storage_manager.query_prefetch_status(handle)
+                if found is not None:
                     break
                 time.sleep(0.001)
 
             # Real found count after dedup the TP
-            found_count = found_count // world_size
+            found_count = found.count_leading_ones() // world_size
 
             start = group[0].cur_st
             end = group[-1].cur_ed
@@ -765,7 +767,7 @@ class BlendModule:
 
     def cb_store_pre_computed(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         offset: int,
         instance_id: int,
         event_ipc_handle: bytes,
@@ -773,7 +775,7 @@ class BlendModule:
         """Store the pre-computed chunks in the underlying storage for later retrieval.
 
         Args:
-            key: IPCCacheEngineKey containing the token ids for which the
+            key: IPCCacheServerKey containing the token ids for which the
                 pre-computed chunks are stored.
             offset: The starting offset in the CB KV cache buffer where the
                 pre-computed chunks begin.
@@ -825,7 +827,7 @@ class BlendModule:
         # the CB lookup path and via the standard lookup/retrieve path.
         chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(list(key.token_ids))
         # convert to object key
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
 
         reserved_dict: dict = {}
         try:
@@ -892,7 +894,7 @@ class BlendModule:
 
     def cb_retrieve_pre_computed(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         cb_match_result: list[CBMatchResult],
         offset: int,
         instance_id: int,
@@ -901,7 +903,7 @@ class BlendModule:
         """Retrieve pre-computed chunks from storage and copy them to the CB KV buffer.
 
         Args:
-            key: IPCCacheEngineKey containing the token ids for which the
+            key: IPCCacheServerKey containing the token ids for which the
                 pre-computed chunks are retrieved.
             cb_match_result: List of CBMatchResult returned by
                 cb_lookup_pre_computed, containing the per-chunk hashes and
@@ -935,7 +937,7 @@ class BlendModule:
         cb_match_result = sorted(cb_match_result, key=lambda r: r.cur_st)
         num_chunks = len(cb_match_result)
         chunk_hashes = [r.hash for r in cb_match_result]
-        all_obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+        all_obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
 
         # CPU-synchronous sentinel: GPU retrieve is about to be enqueued.
         self._ctx.event_bus.publish(
@@ -1051,7 +1053,7 @@ class BlendModule:
 
     def cb_store_final(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         offset: int,
         instance_id: int,
         event_ipc_handle: bytes,
@@ -1061,7 +1063,7 @@ class BlendModule:
         The stored chunks should be accessible for normal mode LLMs.
 
         Args:
-            key: IPCCacheEngineKey containing the token ids for which the
+            key: IPCCacheServerKey containing the token ids for which the
                 final chunks are stored.
             offset: The starting offset in the CB KV cache buffer where the
                 final chunks are stored.
@@ -1108,7 +1110,7 @@ class BlendModule:
         chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(list(key.token_ids))
 
         # convert to object key
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
 
         reserved_dict: dict = {}
         try:

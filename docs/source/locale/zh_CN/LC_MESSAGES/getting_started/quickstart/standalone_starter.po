@@ -70,21 +70,21 @@ msgstr "独立启动器支持多个配置源，优先级顺序如下："
 
 #: ../../source/getting_started/quickstart/standalone_starter.rst:49
 msgid "**Command-line arguments** (highest priority)"
-msgstr "**命令行参数**（最高优先级）"
+msgstr "**命令行参数**\\ （最高优先级）"
 
 #: ../../source/getting_started/quickstart/standalone_starter.rst:50
 msgid ""
 "**Configuration file** (specified by ``--config`` or "
 "``LMCACHE_CONFIG_FILE``)"
-msgstr "**配置文件**（由 ``--config`` 或 ``LMCACHE_CONFIG_FILE`` 指定）"
+msgstr "**配置文件**\\ （由 ``--config`` 或 ``LMCACHE_CONFIG_FILE`` 指定）"
 
 #: ../../source/getting_started/quickstart/standalone_starter.rst:51
 msgid "**Environment variables** (e.g., ``LMCACHE_CHUNK_SIZE=512``)"
-msgstr "**环境变量**（例如，``LMCACHE_CHUNK_SIZE=512``）"
+msgstr "**环境变量**\\ （例如，\\ ``LMCACHE_CHUNK_SIZE=512``\\ ）"
 
 #: ../../source/getting_started/quickstart/standalone_starter.rst:52
 msgid "**Default values** (lowest priority)"
-msgstr "**默认值**（最低优先级）"
+msgstr "**默认值**\\ （最低优先级）"
 
 #: ../../source/getting_started/quickstart/standalone_starter.rst:55
 msgid "Parameter Details"
@@ -112,7 +112,7 @@ msgstr "shape_string: 以逗号分隔的形状（例如，'2,2,256,4,16'）"
 msgid ""
 "Examples: - Single group: ``(2,2,256,4,16):float16:2`` - Multiple groups:"
 " ``(2,2,256,4,16):float16:2;(3,2,256,4,4):float32:3``"
-msgstr "示例： - 单个组：``(2,2,256,4,16):float16:2`` - 多个组：``(2,2,256,4,16):float16:2;(3,2,256,4,4):float32:3``"
+msgstr "示例： - 单个组：\\ ``(2,2,256,4,16):float16:2`` - 多个组：\\ ``(2,2,256,4,16):float16:2;(3,2,256,4,4):float32:3``"
 
 #: ../../source/getting_started/quickstart/standalone_starter.rst:67
 msgid "**Device Support**"
@@ -216,7 +216,7 @@ msgstr "**问题**: “无法连接到控制器” **解决方案**: 首先启�
 msgid ""
 "**Issue**: \"Invalid KV shape specification\" **Solution**: Check format:"
 " ``(shape):dtype:layer_count``, e.g., ``(2,2,256,4,16):float16:2``"
-msgstr "**问题**: \\\"无效的 KV 形状规范\\\" **解决方案**: 检查格式: ``(shape):dtype:layer_count``，例如，``(2,2,256,4,16):float16:2``"
+msgstr "**问题**: \\\"无效的 KV 形状规范\\\" **解决方案**: 检查格式: ``(shape):dtype:layer_count``\\ ，例如，\\ ``(2,2,256,4,16):float16:2``"
 
 #: ../../source/getting_started/quickstart/standalone_starter.rst:186
 msgid ""
@@ -284,7 +284,7 @@ msgstr "**启用内部 API** 以进行监控和管理"
 
 #: ../../source/getting_started/quickstart/standalone_starter.rst:268
 msgid "**Monitor logs** for performance and error tracking"
-msgstr "**监控日志**以进行性能和错误跟踪"
+msgstr "**监控日志**\\ 以进行性能和错误跟踪"
 
 #: ../../source/getting_started/quickstart/standalone_starter.rst:269
 msgid "**Use multi-layer group configurations** for complex model architectures"
@@ -304,7 +304,7 @@ msgstr "**在部署之前** 验证 KV 形状规范"
 
 #: ../../source/getting_started/quickstart/standalone_starter.rst:273
 msgid "**Test with debug logging** when configuring new layer groups"
-msgstr "**在配置新层组时**进行调试日志测试"
+msgstr "**在配置新层组时**\\ 进行调试日志测试"
 
 #: ../../source/getting_started/quickstart/standalone_starter.rst:274
 msgid "**Optimize chunk sizes** for specific hardware configurations"
@@ -370,3 +370,7 @@ msgstr ":doc:`../../kv_cache/storage_backends/index`"
 msgid ":doc:`../../kv_cache_management/index`"
 msgstr ":doc:`../../kv_cache_management/index`"
 
+
+#: ../../source/getting_started/quickstart/standalone_starter.rst:1
+msgid "This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance."
+msgstr "本页面介绍 LMCache 进程内模式（不推荐使用）的行为。建议改用 :doc:`LMCache MP 模式 </mp/index>`\\ 以获得更好的功能支持与性能。"

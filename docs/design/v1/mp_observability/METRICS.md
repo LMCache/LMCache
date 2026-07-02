@@ -5,7 +5,7 @@
 The observability system uses an **EventBus with pub/sub dispatch** and
 **OpenTelemetry** for metrics instrumentation.
 
-- **Producers** (`L1Manager`, `StorageManager`, `MPCacheEngine`) publish `Event` objects
+- **Producers** (`L1Manager`, `StorageManager`, `MPCacheServer`) publish `Event` objects
   to the EventBus.
 - **Metrics subscribers** (e.g. `L1MetricsSubscriber`, `L2MetricsSubscriber`) subscribe to
   specific event types and update OTel counters.
@@ -28,7 +28,7 @@ attributes built at startup:
 
 | Attribute | CLI flag | Source | Applies to |
 |---|---|---|---|
-| `service.instance.id` | `--service-instance-id` | `ObservabilityConfig.service_instance_id` (`None` defaults to a random UUID v4; explicit `""` preserved) | All metrics + spans |
+| `service.instance.id` | `--instance-id` | `MPServerConfig.instance_id` (defaults to a random UUID v4 at startup; projected onto `ObservabilityConfig.service_instance_id` by `run_cache_server` so telemetry and coordinator membership share one id) | All metrics + spans |
 
 Resource attributes are attached to the `MeterProvider` / `TracerProvider`
 in `otel_init.py` and therefore appear on every datapoint exported via
@@ -44,7 +44,7 @@ datapoints and are orthogonal to these Resource attributes.
 
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `lmcache_mp.l1_read` | `lmcache_mp_l1_read_chunks_total` | Counter | `L1_READ_FINISHED` | `+len(keys)` |
+| `lmcache_mp.l1_read` | `lmcache_mp_l1_read_chunks_total` | Counter (attr: `cache_salt`) | `L1_READ_FINISHED` | `+len(keys)` per `cache_salt` |
 
 **What it answers:** How many chunks are being read from L1?
 
@@ -57,8 +57,8 @@ datapoints and are orthogonal to these Resource attributes.
 
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `lmcache_mp.l1_write` | `lmcache_mp_l1_write_chunks_total` | Counter | `L1_WRITE_FINISHED` | `+len(keys)` |
-| *(same counter)* | *(same)* | Counter | `L1_WRITE_FINISHED_AND_READ_RESERVED` | `+len(keys)` |
+| `lmcache_mp.l1_write` | `lmcache_mp_l1_write_chunks_total` | Counter (attr: `cache_salt`) | `L1_WRITE_FINISHED` | `+len(keys)` per `cache_salt` |
+| *(same counter)* | *(same)* | Counter (attr: `cache_salt`) | `L1_WRITE_FINISHED_AND_READ_RESERVED` | `+len(keys)` per `cache_salt` |
 
 **What it answers:** How many chunks are being written to L1?
 
@@ -72,7 +72,7 @@ datapoints and are orthogonal to these Resource attributes.
 
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `lmcache_mp.l1_evicted` | `lmcache_mp_l1_evicted_chunks_total` | Counter | `L1_KEYS_EVICTED` | `+len(keys)` |
+| `lmcache_mp.l1_evicted` | `lmcache_mp_l1_evicted_chunks_total` | Counter (attr: `cache_salt`) | `L1_KEYS_EVICTED` | `+len(keys)` per `cache_salt` |
 | `lmcache_mp.l1_eviction_loop_ticks` | `lmcache_mp_l1_eviction_loop_ticks_total` | Counter | `L1_EVICTION_LOOP_TICK` | +1 per loop iteration |
 | `lmcache_mp.l1_eviction_loop_triggered` | `lmcache_mp_l1_eviction_loop_triggered_total` | Counter | `L1_EVICTION_LOOP_TICK` | +1 when `triggered=True` |
 | `lmcache_mp.l1_usage_ratio` | `lmcache_mp_l1_usage_ratio` | Observable Gauge | (callback on `L1Manager`) | `used / total` at scrape time |
@@ -105,6 +105,23 @@ require a cross-cutting API change out of scope for this PR.
 
 ---
 
+## Timeout Metrics
+
+Cross-component anomaly counter. Incremented once per `LMCacheTimeoutError`
+constructed (see `errors.py` and the `TIMEOUT_RAISED` event in
+[EVENTS.md](EVENTS.md)), tagged by `exception_type` so operators can alert on
+the timeout rate per class.
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation | Tags |
+|---|---|---|---|---|---|
+| `lmcache_mp.timeouts` | `lmcache_mp_timeouts_total` | Counter | `TIMEOUT_RAISED` | `+1` per event | `exception_type` |
+
+**What it answers:** how often are operations timing out, and of which kind?
+Should stay near zero in healthy operation; a rising rate signals an
+overloaded or stuck MQ/transfer/adapter path.
+
+---
+
 ## L1 Chunk Lifecycle Histograms
 
 Sampled (default 1%) chunk-level lifecycle tracking.  Only sampled chunks
@@ -129,9 +146,9 @@ contribute to histograms; counters above always count all events.
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
 | `lmcache_mp.l2_store_submitted` | `lmcache_mp_l2_store_submitted_requests_total` | Counter | `L2_STORE_SUBMITTED` | +1 per event |
-| `lmcache_mp.l2_store_submitted_objects` | `lmcache_mp_l2_store_submitted_objects_chunks_total` | Counter | `L2_STORE_SUBMITTED` | `+key_count` |
+| `lmcache_mp.l2_store_submitted_objects` | `lmcache_mp_l2_store_submitted_objects_chunks_total` | Counter (attr: `cache_salt`) | `L2_STORE_SUBMITTED` | `+count` per `cache_salt` via `key_count_per_salt` |
 | `lmcache_mp.l2_store_completed` | `lmcache_mp_l2_store_completed_requests_total` | Counter (attr: `l2_name`) | `L2_STORE_COMPLETED` | +1 per event |
-| `lmcache_mp.l2_store_completed_objects` | `lmcache_mp_l2_store_completed_objects_chunks_total` | Counter | `L2_STORE_COMPLETED` | `+succeeded_count` |
+| `lmcache_mp.l2_store_completed_objects` | `lmcache_mp_l2_store_completed_objects_chunks_total` | Counter (attr: `cache_salt`) | `L2_STORE_COMPLETED` | `+count` per `cache_salt` via `key_count_per_salt` |
 
 **What it answers:** How many chunks are being pushed to L2? What fraction fail?
 
@@ -142,11 +159,11 @@ contribute to histograms; counters above always count all events.
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
 | `lmcache_mp.l2_prefetch_lookup` | `lmcache_mp_l2_prefetch_lookup_requests_total` | Counter | `L2_PREFETCH_LOOKUP_SUBMITTED` | +1 per event |
-| `lmcache_mp.l2_prefetch_lookup_objects` | `lmcache_mp_l2_prefetch_lookup_objects_chunks_total` | Counter | `L2_PREFETCH_LOOKUP_SUBMITTED` | `+key_count` |
+| `lmcache_mp.l2_prefetch_lookup_objects` | `lmcache_mp_l2_prefetch_lookup_objects_chunks_total` | Counter (attr: `cache_salt`) | `L2_PREFETCH_LOOKUP_SUBMITTED` | `+count` per `cache_salt` via `key_count_per_salt` |
 | `lmcache_mp.l2_prefetch_hit` | `lmcache_mp_l2_prefetch_hit_chunks_total` | Counter | `L2_PREFETCH_LOOKUP_COMPLETED` | `+prefix_hit_count` |
 | `lmcache_mp.l2_prefetch_load_submitted` | `lmcache_mp_l2_prefetch_load_submitted_requests_total` | Counter | `L2_PREFETCH_LOAD_SUBMITTED` | `+adapter_count` (per-adapter task count) |
-| `lmcache_mp.l2_prefetch_load_submitted_objects` | `lmcache_mp_l2_prefetch_load_submitted_objects_chunks_total` | Counter | `L2_PREFETCH_LOAD_SUBMITTED` | `+key_count` |
-| `lmcache_mp.l2_prefetch_load_completed` | `lmcache_mp_l2_prefetch_load_completed_chunks_total` | Counter | `L2_PREFETCH_LOAD_COMPLETED` | `+loaded_count` |
+| `lmcache_mp.l2_prefetch_load_submitted_objects` | `lmcache_mp_l2_prefetch_load_submitted_objects_chunks_total` | Counter (attr: `cache_salt`) | `L2_PREFETCH_LOAD_SUBMITTED` | `+count` per `cache_salt` via `key_count_per_salt` |
+| `lmcache_mp.l2_prefetch_load_completed` | `lmcache_mp_l2_prefetch_load_completed_chunks_total` | Counter (attr: `cache_salt`) | `L2_PREFETCH_LOAD_COMPLETED` | `+count` per `cache_salt` via `key_count_per_salt` |
 | `lmcache_mp.l2_load_completed` | `lmcache_mp_l2_load_completed_requests_total` | Counter (attr: `l2_name`) | `L2_LOAD_TASK_COMPLETED` | +1 per event |
 
 **What it answers:** How effective is L2 prefetching? What is the L2 hit rate?
@@ -161,6 +178,16 @@ raw counter keeps the window choice in the dashboard.
 
 ---
 
+## L2 Eviction Metrics
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.l2_evicted_objects` | `lmcache_mp_l2_evicted_chunks_total` | Counter (attr: `cache_salt`) | `L2_KEYS_EVICTED` | `+count` per `cache_salt` via `key_count_per_salt` |
+
+**What it answers:** How many chunks are being evicted from L2? Which tenants are losing data?
+
+---
+
 ## Lookup Hit-Rate Metrics (L1 + L2 combined)
 
 Token-level counters derived from the `MP_LOOKUP_PREFETCH_END` event.  Their
@@ -169,7 +196,7 @@ either L1 or L2.  L0 (GPU prefix cache) is intentionally excluded — it is
 vLLM-owned and not observable from LMCache.
 
 Both counters carry `model_name` and `cache_salt` OTel attributes (captured
-at lookup time from `IPCCacheEngineKey`), enabling per-model and per-tenant
+at lookup time from `IPCCacheServerKey`), enabling per-model and per-tenant
 slicing of the hit rate.  `cache_salt` can be high-cardinality; drop it at
 scrape time with `metric_relabel_configs` if storage cost matters.
 
@@ -343,7 +370,7 @@ scrape.
 
 ---
 
-## MPCacheEngine Observable Gauges
+## MPCacheServer Observable Gauges
 
 These metrics are registered directly via `register_gauge` (pull-based OTel
 observable gauges) rather than through the EventBus, because they represent
@@ -351,7 +378,7 @@ point-in-time state snapshots that do not correspond to discrete events.
 
 | OTel metric name | Prometheus name | Type | Source | Calculation |
 |---|---|---|---|---|
-| `lmcache_mp.active_prefetch_jobs` | `lmcache_mp_active_prefetch_jobs` | ObservableGauge | `MPCacheEngine._prefetch_jobs` | `len(_prefetch_jobs)` at scrape time |
+| `lmcache_mp.active_prefetch_jobs` | `lmcache_mp_active_prefetch_jobs` | ObservableGauge | `MPCacheServer._prefetch_jobs` | `len(_prefetch_jobs)` at scrape time |
 
 **What it answers:** How many prefetch jobs are currently in-flight? A sustained high value may indicate slow L2 backends or client-side polling delays.
 

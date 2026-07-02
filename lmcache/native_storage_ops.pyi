@@ -4,6 +4,7 @@
 """Native storage operations for LMCache."""
 
 # Standard
+from collections.abc import Sequence
 from typing import Any, Set, overload
 
 class TTLLock:
@@ -79,6 +80,18 @@ class Bitmap:
         """Set the bit at the specified index to 1."""
         ...
 
+    def batched_set(self, indices: Sequence[int]) -> None:
+        """Set every bit in ``indices`` to 1 (positions >= size ignored)."""
+        ...
+
+    def set_range(self, start: int, end: int) -> None:
+        """Set every bit in the half-open range ``[start, end)`` to 1.
+
+        ``end`` is clamped to the bitmap size. Fills whole bytes, so far cheaper
+        than per-bit ``set`` for a contiguous span.
+        """
+        ...
+
     def clear(self, index: int) -> None:
         """Clear the bit at the specified index to 0."""
         ...
@@ -102,6 +115,14 @@ class Bitmap:
 
     def count_leading_ones(self) -> int:
         """Return the number of leading ones."""
+        ...
+
+    def highest_set_bit(self) -> int:
+        """Index of the highest set bit, or ``-1`` if no bit is set.
+
+        The value is signed so the empty bitmap is representable (an unsigned
+        index could not encode it).
+        """
         ...
 
     def __and__(self, other: Bitmap) -> Bitmap:
@@ -130,12 +151,12 @@ class Bitmap:
         """Return a set of indices where the bit is set to 1."""
         ...
 
-    def gather(self, items: list[Any]) -> list[Any]:
+    def gather(self, items: Sequence[Any]) -> list[Any]:
         """
         Return elements from items at indices where the bit is set to 1.
 
         Args:
-            items: A list of objects. Length should match the bitmap size.
+            items: A sequence of objects. Length should match the bitmap size.
 
         Returns:
             A list of objects from items at positions where the bitmap bit is 1.
@@ -145,6 +166,50 @@ class Bitmap:
     def __repr__(self) -> str:
         """String representation: '1' for set bits, '0' for clear bits."""
         ...
+
+def fold(
+    found: Bitmap,
+    num_chunks: int,
+    num_ranks: int,
+    group_windows: Sequence[int],
+) -> Bitmap:
+    """Fold per-(group, chunk, rank) presence into servable prefix lengths.
+
+    Args:
+        found: Group-major / chunk-major / rank-minor presence bitmap of length
+            ``len(group_windows) * num_chunks * num_ranks``.
+        num_chunks: Number of LMCache chunks in the request.
+        num_ranks: Number of kv_rank shards per chunk.
+        group_windows: Per-object-group cross-chunk window size in chunks;
+            ``<= 0`` means full attention.
+
+    Returns:
+        A bitmap of size ``num_chunks + 1``; bit ``L`` set iff every object
+        group can serve a length-``L`` prefix. Bit 0 is always set.
+    """
+    ...
+
+def unfold(
+    hit_length: int,
+    num_chunks: int,
+    num_ranks: int,
+    group_windows: Sequence[int],
+) -> Bitmap:
+    """Expand a model-wide hit length into the per-group retain mask.
+
+    Args:
+        hit_length: Model-wide prefix hit length in chunks (clamped to
+            ``num_chunks``).
+        num_chunks: Number of LMCache chunks in the request.
+        num_ranks: Number of kv_rank shards per chunk.
+        group_windows: Per-object-group cross-chunk window size in chunks;
+            ``<= 0`` means full attention.
+
+    Returns:
+        Retain mask of length ``len(group_windows) * num_chunks * num_ranks``
+        (all ranks of each retained ``(group, chunk)`` set).
+    """
+    ...
 
 class ParallelPatternMatcher:
     """
@@ -176,6 +241,60 @@ class ParallelPatternMatcher:
         Returns:
             A sorted list of positions where the pattern starts.
             Returns an empty list if no matches are found.
+        """
+        ...
+
+class PeriodicEventNotifier:
+    """Singleton that periodically signals registered file descriptors.
+
+    A background thread writes to every registered fd at a configurable
+    interval.  The thread sleeps when no fds are registered and wakes
+    automatically when the first fd is added.
+    """
+
+    @staticmethod
+    def create(interval_ms: int, use_eventfd: bool) -> None:
+        """Create the singleton. Idempotent -- second call is a no-op.
+
+        Args:
+            interval_ms: Notification interval in milliseconds.
+            use_eventfd: True to write as eventfd (8-byte uint64),
+                False to write as pipe (1-byte).
+        """
+        ...
+
+    @staticmethod
+    def get() -> PeriodicEventNotifier | None:
+        """Return the singleton instance, or None if not created."""
+        ...
+
+    @staticmethod
+    def shutdown() -> None:
+        """Shut down the singleton and join its thread. Idempotent."""
+        ...
+
+    def register_fd(self, fd: int) -> None:
+        """Register a file descriptor for periodic signaling.
+
+        Args:
+            fd: The file descriptor to signal. For eventfd, pass the
+                eventfd itself. For pipes, pass the write end.
+        """
+        ...
+
+    def unregister_fd(self, fd: int) -> None:
+        """Unregister a file descriptor. No-op if not registered.
+
+        Args:
+            fd: The file descriptor to stop signaling.
+        """
+        ...
+
+    def set_interval_ms(self, interval_ms: int) -> None:
+        """Change the notification interval. Clamped to >= 1ms.
+
+        Args:
+            interval_ms: New interval in milliseconds.
         """
         ...
 

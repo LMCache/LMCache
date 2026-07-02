@@ -31,7 +31,7 @@ msgid ""
 "between different storage configurations on the fly — for example, "
 "migrating from a ``LocalDiskBackend`` to a ``GdsBackend``, or changing "
 "the remote connector from a filesystem connector to Redis."
-msgstr "LMCache 提供了一组内部 API 端点，允许您在运行时 **列出**、**关闭** 和 **创建** 存储后端，而无需重启服务引擎。当您需要动态切换不同的存储配置时，这非常有用——例如，从 ``LocalDiskBackend`` 迁移到 ``GdsBackend``，或将远程连接器从文件系统连接器更改为 Redis。"
+msgstr "LMCache 提供了一组内部 API 端点，允许您在运行时 **列出**\\ 、\\ **关闭** 和 **创建** 存储后端，而无需重启服务引擎。当您需要动态切换不同的存储配置时，这非常有用——例如，从 ``LocalDiskBackend`` 迁移到 ``GdsBackend``\\ ，或将远程连接器从文件系统连接器更改为 Redis。"
 
 #: ../../source/internal_api_server/dynamic_backend_management.rst:14
 msgid "Overview"
@@ -43,11 +43,11 @@ msgstr "动态切换存储后端的工作流程是："
 
 #: ../../source/internal_api_server/dynamic_backend_management.rst:18
 msgid "**Close** the backend you want to replace."
-msgstr "**关闭**您想要替换的后端。"
+msgstr "**关闭**\\ 您想要替换的后端。"
 
 #: ../../source/internal_api_server/dynamic_backend_management.rst:19
 msgid "**Update** the relevant configuration via the ``POST /conf`` API."
-msgstr "**更新**相关配置通过 ``POST /conf`` API。"
+msgstr "**更新**\\ 相关配置通过 ``POST /conf`` API。"
 
 #: ../../source/internal_api_server/dynamic_backend_management.rst:20
 msgid ""
@@ -59,7 +59,7 @@ msgstr "**创建** 新的后端 — 只有尚不存在的后端才会被创建�
 msgid ""
 "Any backend that was **not** closed will be skipped during creation, so "
 "the operation is safe and idempotent."
-msgstr "任何**未**关闭的后端在创建过程中将被跳过，因此该操作是安全且幂等的。"
+msgstr "任何\\ **未**\\ 关闭的后端在创建过程中将被跳过，因此该操作是安全且幂等的。"
 
 #: ../../source/internal_api_server/dynamic_backend_management.rst:27
 msgid "API Endpoints"
@@ -135,7 +135,7 @@ msgstr "如果只需要更新 ``RemoteBackend`` 而 ``LocalCPUBackend`` 应保�
 
 #: ../../source/internal_api_server/dynamic_backend_management.rst:166
 msgid "Notes"
-msgstr "注意事项"
+msgstr "备注"
 
 #: ../../source/internal_api_server/dynamic_backend_management.rst:168
 msgid ""
@@ -155,5 +155,9 @@ msgid ""
 "After creating backends, the ``StorageManager`` automatically refreshes "
 "its internal references (``non_allocator_backends``, "
 "``local_cpu_backend``, etc.)."
-msgstr "创建后端后，``StorageManager`` 会自动刷新其内部引用（``non_allocator_backends``、``local_cpu_backend`` 等）。"
+msgstr "创建后端后，\\ ``StorageManager`` 会自动刷新其内部引用（\\ ``non_allocator_backends``\\ 、\\ ``local_cpu_backend`` 等）。"
 
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:1
+msgid "This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/http_api`."
+msgstr "本页面介绍 LMCache 进程内模式（不推荐使用）的行为。建议改用 :doc:`LMCache MP 模式 </mp/index>`\\ 以获得更好的功能支持与性能。本页面对应的 MP 模式文档请参见 :doc:`/mp/http_api`\\ 。"

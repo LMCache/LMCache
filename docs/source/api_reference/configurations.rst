@@ -1,6 +1,11 @@
 Configuring LMCache
 ===================
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/configuration`.
+
+
 LMCache supports two types of configurations:
 
 1. **Configuration file**: a YAML (recommended) or JSON file that contains the configuration items.
@@ -322,6 +327,31 @@ Settings for P2P (peer-to-peer) backend timeout behavior. These configurations a
      - 10000
      - Timeout in milliseconds for socket send operations
 
+Disk I/O Backend Configurations
+---------------------------------
+
+Settings shared by disk-based storage backends (local disk and GDS). These configurations are specified through ``extra_config``.
+
+.. code-block:: yaml
+
+    extra_config:
+      use_odirect: true
+      disk_io_threads: 8
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 55
+
+   * - Configuration Key
+     - Default
+     - Description
+   * - use_odirect
+     - false
+     - Enable O_DIRECT for disk I/O, bypassing the kernel page cache. Recommended when most local CPU memory is already used for KV cache offloading.
+   * - disk_io_threads
+     - 4
+     - Number of worker threads in the disk I/O thread pool. Applies to both the local disk backend and the GDS backend. Increase for higher parallelism on fast NVMe drives. (Replaces the deprecated ``gds_io_threads`` key.)
+
 Nixl (as a storage backend) Configurations
 ------------------------------------------
 
@@ -358,7 +388,7 @@ Settings for using Nixl as a storage backend instead of disaggregated prefill. T
    * - nixl_endpoint_list
      - List of object-storage endpoint URLs for per-worker distribution. Each TP worker selects an entry round-robin by ``local_worker_id``, overriding ``nixl_backend_params.endpoint_override``. Only applied when ``nixl_backend`` is ``"OBJ"`` (silently ignored otherwise). Each entry must start with ``http://`` or ``https://``; an empty list raises ``ValueError`` at engine init.
    * - nixl_use_hugepages
-     - Whether to use Linux hugepages (2 MiB) for the NIXL CPU buffer. Requires pre-allocated hugepages (``sysctl vm.nr_hugepages``). Values: true/false. Default: false
+     - **Deprecated.** Use ``local_cpu_use_hugepages`` instead. When set, the value is copied into ``local_cpu_use_hugepages`` (a warning is logged) and the key is dropped. Hugepages have never applied to GPU buffers; in CPU mode the NIXL pool is now owned by ``LocalCPUBackend``.
 
 
 Additional Storage Configurations

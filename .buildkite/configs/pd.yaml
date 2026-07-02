@@ -11,6 +11,11 @@ feature:
 
 docker-prefiller:
   env:
+    # Force vLLM Model Runner V1: MRV2 (enabled by default for Llama/Mistral
+    # dense models in vLLM nightly, see vllm-project/vllm#43458) is incompatible
+    # with KV cache connectors and hangs the PD path. Remove once MRV2 supports
+    # connectors / auto-falls back to MRV1.
+    - "VLLM_USE_V2_MODEL_RUNNER=0"
     - "LMCACHE_LOCAL_CPU=False"
     - "LMCACHE_MAX_LOCAL_CPU_SIZE=5"
     - "LMCACHE_ENABLE_PD=True"
@@ -27,6 +32,11 @@ docker-prefiller:
 
 docker-decoder:
   env:
+    # Force vLLM Model Runner V1: MRV2 (enabled by default for Llama/Mistral
+    # dense models in vLLM nightly, see vllm-project/vllm#43458) is incompatible
+    # with KV cache connectors and hangs the PD path. Remove once MRV2 supports
+    # connectors / auto-falls back to MRV1.
+    - "VLLM_USE_V2_MODEL_RUNNER=0"
     - "LMCACHE_LOCAL_CPU=False"
     - "LMCACHE_MAX_LOCAL_CPU_SIZE=0"
     - "LMCACHE_ENABLE_PD=True"

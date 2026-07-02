@@ -13,6 +13,7 @@ from lmcache.cli.commands.bench.engine_bench.config import EngineBenchConfig
 from lmcache.cli.commands.bench.engine_bench.workloads import (
     BaseWorkload,
     create_workload,
+    validate_max_output_length_supported,
 )
 from lmcache.cli.commands.bench.engine_bench.workloads.long_doc_qa import (
     LongDocQAWorkload,
@@ -52,6 +53,7 @@ def _make_args(**overrides) -> argparse.Namespace:
         ldqa_query_per_document=2,
         ldqa_shuffle_policy="random",
         ldqa_num_inflight_requests=3,
+        ldqa_max_output_length=128,
         # random-prefill defaults
         rp_request_length=10000,
         rp_num_requests=50,
@@ -76,6 +78,20 @@ def _make_deps() -> tuple[MagicMock, MagicMock, MagicMock]:
     collector = MagicMock()
     monitor = MagicMock()
     return sender, collector, monitor
+
+
+class TestValidateMaxOutputLengthSupported:
+    @pytest.mark.parametrize("workload", ["long-doc-qa", "multi-round-chat"])
+    def test_allowed_for_workloads_with_the_parameter(self, workload: str) -> None:
+        validate_max_output_length_supported(workload)
+
+    @pytest.mark.parametrize(
+        "workload",
+        ["long-doc-permutator", "random-prefill", "prefix-suffix-tuner"],
+    )
+    def test_rejected_for_workloads_without_the_parameter(self, workload: str) -> None:
+        with pytest.raises(ValueError, match="max output length cannot be specified"):
+            validate_max_output_length_supported(workload)
 
 
 class TestCreateWorkload:
@@ -105,6 +121,7 @@ class TestCreateWorkload:
             ldqa_document_length=5000,
             ldqa_query_per_document=4,
             ldqa_shuffle_policy="tile",
+            ldqa_max_output_length=1024,
         )
         sender, collector, monitor = _make_deps()
         result = create_workload(
@@ -118,6 +135,7 @@ class TestCreateWorkload:
         assert result._config.document_length == 5000
         assert result._config.query_per_document == 4
         assert result._config.shuffle_policy == "tile"
+        assert result._config.max_output_length == 1024
         assert result._config.num_documents == 20  # 10 * 10000 / 5000
 
     def test_multi_round_chat(self) -> None:

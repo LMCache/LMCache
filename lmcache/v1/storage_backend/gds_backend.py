@@ -21,7 +21,12 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
+from lmcache.utils import (
+    CacheEngineKey,
+    DiskCacheMetadata,
+    _lmcache_nvtx_annotate,
+    parse_cache_key,
+)
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
     CuFileMemoryAllocator,
@@ -266,9 +271,14 @@ class GdsBackend(AllocatorBackendInterface):
         if self.use_thread_pool:
             thread_count = _DEFAULT_THREAD_COUNT
             if config.extra_config is not None:
-                thread_count = config.extra_config.get(
-                    "gds_io_threads", _DEFAULT_THREAD_COUNT
-                )
+                if "disk_io_threads" in config.extra_config:
+                    thread_count = config.extra_config["disk_io_threads"]
+                elif "gds_io_threads" in config.extra_config:
+                    logger.warning(
+                        "extra_config.gds_io_threads is deprecated; "
+                        "use disk_io_threads instead."
+                    )
+                    thread_count = config.extra_config["gds_io_threads"]
             self._thread_pool = ThreadPoolExecutor(
                 max_workers=thread_count, thread_name_prefix="gds-io"
             )
@@ -391,7 +401,7 @@ class GdsBackend(AllocatorBackendInterface):
                         filename = os.path.basename(fentry.name)
                         key_str = urllib.parse.unquote(filename[: -len(target_suffix)])
                         try:
-                            key = CacheEngineKey.from_string(key_str)
+                            key = parse_cache_key(key_str)
                         except ValueError as e:
                             logger.error(
                                 f"Filename {filename} can't be converted "

@@ -34,16 +34,32 @@ def main():
             "num_key_value_heads": getattr(config, "num_key_value_heads", None),
         }
 
-        if args.model == "deepseek-ai/DeepSeek-V3":
+        # DeepSeek MLA models (V3, V3.1, V3.2, … and R1) store
+        # KV in latent space
+        if (
+            args.model.lower().startswith("deepseek-ai/deepseek-v3")
+            or args.model == "deepseek-ai/DeepSeek-R1"
+        ):
             config_data["kv_lora_rank"] = getattr(config, "kv_lora_rank", None)
             config_data["qk_rope_head_dim"] = getattr(config, "qk_rope_head_dim", None)
 
-        # Check for Qwen3 models (fuzzy matching) or GLM4 models
+        # Models whose head_dim is explicit in config and may
+        # differ from hidden_size / num_heads:
+        # Qwen3, GLM4, and Hunyuan dense variants.
         if (
             "qwen/qwen3-" in args.model.lower()
             or "zai-org/glm-4." in args.model.lower()
+            or (
+                args.model.lower().startswith("tencent/hunyuan-")
+                and args.model.lower() != "tencent/hunyuan-large"
+            )
         ):
             config_data["head_dim"] = getattr(config, "head_dim", None)
+
+        # Hunyuan-Large uses CLA (Cross-Layer Attention):
+        # KV layers = num_hidden_layers / cla_share_factor
+        if args.model.lower() == "tencent/hunyuan-large":
+            config_data["cla_share_factor"] = getattr(config, "cla_share_factor", None)
 
         # Convert to JSON and print
         string = json.dumps(config_data, indent=4)

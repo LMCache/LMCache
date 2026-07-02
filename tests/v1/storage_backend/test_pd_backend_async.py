@@ -67,7 +67,20 @@ def _make_mem_obj(idx: int = 0) -> MemoryObj:
         shape=torch.Size(_DEFAULT_SHAPE),
         dtype=torch.bfloat16,
     )
-    obj.get_ref_count.return_value = 1
+    obj._ref_count = 1
+
+    def _ref_up():
+        obj._ref_count += 1
+
+    def _ref_down():
+        obj._ref_count -= 1
+
+    def _get_ref_count():
+        return obj._ref_count
+
+    obj.ref_count_up.side_effect = _ref_up
+    obj.ref_count_down.side_effect = _ref_down
+    obj.get_ref_count.side_effect = _get_ref_count
     return obj
 
 
@@ -1079,3 +1092,206 @@ def test_receiver_reservation_released_unblocks_waiting_request(async_receiver):
         assert -1 not in result[0].remote_indexes
 
     asyncio.run(run())
+
+
+# ── ref-count call verification for already_sent_indexes (dedup path) ─────
+
+
+def test_receiver_dedup_pins_existing_key_via_ref_count_up(async_receiver):
+    """
+    _async_allocate_and_put calls ref_count_up
+    on pre-existing key (via contains(pin=True)).
+    """
+    existing_key = _make_key(11000)
+    existing_obj = _make_mem_obj(idx=42)
+    async_receiver.data[existing_key] = existing_obj
+
+    new_key = _make_key(11001)
+    new_obj = _make_mem_obj(idx=99)
+    async_receiver.allocate = lambda *a, **kw: new_obj
+
+    req = _make_alloc_req(
+        [existing_key, new_key],
+        req_id="req-dedup-pin",
+        total_chunks=2,
+        is_last_batch=True,
+    )
+    resp = asyncio.run(async_receiver._async_allocate_and_put(req))
+
+    assert resp.already_sent_indexes == [0]
+    assert len(resp.remote_indexes) == 1
+    # The critical assertion: production code called ref_count_up exactly once
+    # on the existing object (via contains(pin=True)).
+    existing_obj.ref_count_up.assert_called_once()
+    # New object should NOT have ref_count_up called by dedup logic.
+    new_obj.ref_count_up.assert_not_called()
+
+
+def test_receiver_dedup_multiple_existing_keys_each_pinned_once(async_receiver):
+    """Each pre-existing key gets exactly one ref_count_up call."""
+    keys = [_make_key(12000 + i) for i in range(4)]
+    objs = [_make_mem_obj(idx=i) for i in range(4)]
+
+    # Index 0, 2 pre-exist.
+    async_receiver.data[keys[0]] = objs[0]
+    async_receiver.data[keys[2]] = objs[2]
+
+    alloc_counter = itertools.count(start=500)
+
+    def counting_alloc(*a, **kw):
+        return _make_mem_obj(idx=next(alloc_counter))
+
+    async_receiver.allocate = counting_alloc
+
+    req = _make_alloc_req(
+        keys,
+        req_id="req-multi-dedup",
+        total_chunks=4,
+        is_last_batch=True,
+    )
+    resp = asyncio.run(async_receiver._async_allocate_and_put(req))
+
+    assert sorted(resp.already_sent_indexes) == [0, 2]
+    assert len(resp.remote_indexes) == 2
+    objs[0].ref_count_up.assert_called_once()
+    objs[2].ref_count_up.assert_called_once()
+
+
+def test_remove_calls_ref_count_down_and_conditional_delete(async_receiver):
+    """remove() calls ref_count_down; deletes from data only when get_ref_count()==0."""
+    key = _make_key(13000)
+    obj = _make_mem_obj(idx=50)
+    obj._ref_count = 3
+    async_receiver.data[key] = obj
+
+    # First remove: ref_count_down called, but get_ref_count() returns 2 → not deleted
+    async_receiver.remove(key)
+    assert obj.ref_count_down.call_count == 1
+    assert key in async_receiver.data
+
+    # Second remove
+    async_receiver.remove(key)
+    assert obj.ref_count_down.call_count == 2
+    assert key in async_receiver.data
+
+    # Third remove: get_ref_count() will return 0 → deleted
+    async_receiver.remove(key)
+    assert obj.ref_count_down.call_count == 3
+    assert key not in async_receiver.data
+
+
+def test_put_duplicate_calls_ref_count_down_on_new_obj(async_receiver):
+    """Duplicate put() calls ref_count_down on the *new* (rejected) object."""
+    key = _make_key(14000)
+    first_obj = _make_mem_obj(idx=60)
+    second_obj = _make_mem_obj(idx=61)
+
+    async_receiver.put(key, first_obj)
+    first_obj.ref_count_down.assert_not_called()
+
+    async_receiver.put(key, second_obj)
+    # Production code drops the new obj:
+    second_obj.ref_count_down.assert_called_once()
+    # Original untouched:
+    first_obj.ref_count_down.assert_not_called()
+    assert async_receiver.data[key] is first_obj
+
+
+def test_sender_dedup_calls_ref_count_down_on_skipped_chunks():
+    """Sender calls ref_count_down on dedup'd chunks without RDMA write."""
+    p1, p2, p3 = _pd_backend_patches()
+    with p1, p2 as mock_create_tc, p3:
+        alloc_response = AsyncAllocResponse(
+            remote_indexes=[100],
+            already_sent_indexes=[0],
+        )
+        alloc_socket = MagicMock()
+        alloc_socket.recv_multipart = AsyncMock(
+            return_value=[b"", msgspec.msgpack.encode(alloc_response)]
+        )
+        alloc_socket.send_multipart = AsyncMock()
+
+        tc = MagicMock()
+        tc.async_batched_write = AsyncMock(return_value=1)
+        mock_create_tc.return_value = tc
+
+        # First Party
+        from lmcache.v1.config import LMCacheEngineConfig
+        from lmcache.v1.metadata import LMCacheMetadata
+
+        config = LMCacheEngineConfig.from_defaults(
+            chunk_size=16,
+            pd_role="sender",
+            pd_proxy_host="127.0.0.1",
+            pd_proxy_port=5555,
+            pd_buffer_size=64 * 1024 * 1024,
+            pd_buffer_device="cpu",
+        )
+        metadata = LMCacheMetadata(
+            model_name="test",
+            world_size=1,
+            local_world_size=1,
+            worker_id=0,
+            local_worker_id=0,
+            kv_dtype=torch.bfloat16,
+            kv_shape=(4, 2, 16, 8, 128),
+        )
+        sender = PDBackendAsync(config, metadata)
+        sender._async_proxy_socket = AsyncMock()
+
+        receiver_id = "127.0.0.1" + str(9100)
+        sender.initialized_peers.add(receiver_id)
+        sender._async_alloc_sockets[receiver_id] = alloc_socket
+
+        mem_obj_0 = _make_mem_obj(idx=0)
+        mem_obj_0._ref_count = 2  # post ref_count_up
+        mem_obj_1 = _make_mem_obj(idx=1)
+        mem_obj_1._ref_count = 2
+
+        keys = [_make_key(15000), _make_key(15001)]
+
+        async def run():
+            await sender._async_transfer_task(
+                keys=keys,
+                memory_objs=[mem_obj_0, mem_obj_1],
+                receiver_id=receiver_id,
+                on_complete_callback=None,
+                transfer_spec=_make_transfer_spec(
+                    req_id="req-sender-dedup",
+                    total_chunks=2,
+                ),
+            )
+
+        asyncio.run(run())
+
+        # mem_obj_0 (dedup'd): ref_count_down called exactly once (skip RDMA path)
+        mem_obj_0.ref_count_down.assert_called_once()
+        # mem_obj_1 (sent): ref_count_down called exactly once (after RDMA write)
+        mem_obj_1.ref_count_down.assert_called_once()
+        # Only mem_obj_1 was sent via RDMA
+        tc.async_batched_write.assert_called_once()
+        call_kw = tc.async_batched_write.call_args[1]
+        assert call_kw["objects"] == [mem_obj_1]
+
+        sender.close()
+
+
+def test_dedup_pin_then_remove_verifies_call_sequence(async_receiver):
+    """Full lifecycle: verify ref_count_up/down call counts through dedup + removes."""
+    key = _make_key(16000)
+    obj = _make_mem_obj(idx=70)
+    async_receiver.data[key] = obj
+
+    # Dedup pin via contains(pin=True)
+    async_receiver.contains(key, pin=True)
+    obj.ref_count_up.assert_called_once()
+
+    # First remove
+    async_receiver.remove(key)
+    assert obj.ref_count_down.call_count == 1
+    assert key in async_receiver.data  # ref_count=1 after mock side_effect
+
+    # Second remove
+    async_receiver.remove(key)
+    assert obj.ref_count_down.call_count == 2
+    assert key not in async_receiver.data  # ref_count=0 → deleted

@@ -672,8 +672,9 @@ the HTTP API.
 
 Unlike :ref:`lmcache bench engine <lmcache-bench-engine>`, this command does
 **not** require an inference engine. It only needs a running LMCache MP
-server (ZMQ + HTTP) and a GPU. It also requires the full ``lmcache`` install
-(not the lightweight ``lmcache-cli`` package).
+server (ZMQ + HTTP). GPU mode additionally requires a CUDA-capable device.
+It also requires the full ``lmcache`` install (not the lightweight
+``lmcache-cli`` package).
 
 
 What it does
@@ -740,10 +741,19 @@ Options
      - ``http://localhost:8080``
      - HTTP base URL of the server's checksum API. Used to
        verify per-chunk checksums end-to-end.
-   * - ``--mode {gpu}``
+   * - ``--mode {gpu,cpu}``
      - ``gpu``
-     - Run mode. Only ``gpu`` is supported today; CPU mode is a
-       planned follow-up.
+     - Run mode. ``gpu`` allocates real CUDA tensors and uses CUDA IPC
+       (lmcache-driven handle path). ``cpu`` allocates POSIX-SHM-backed tensors
+       and uses the engine-driven (worker-side gather/scatter) path by default.
+   * - ``--transfer-mode {auto,engine_driven,lmcache_driven}``
+     - ``auto``
+     - Transport routing for STORE/RETRIEVE. ``lmcache_driven`` forces the
+       single-shot handle path (``REGISTER_KV_CACHE`` + ``STORE``/``RETRIEVE``),
+       which supports both CUDA IPC and CPU SHM zero-copy transfers.
+       ``engine_driven`` forces the worker-side gather/scatter path
+       (``REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT`` + ``PREPARE``/``COMMIT``).
+       ``auto`` maps gpu→lmcache_driven and cpu→engine_driven.
    * - ``--num-tokens N``
      - ``512``
      - Tokens per synthetic request.
@@ -766,6 +776,45 @@ Options
    * - ``--kvcache-shape-spec SPEC``
      - ``(2,1024,16,8,128):float16:32``
      - KV cache shape spec (see below).
+   * - ``--format FORMAT``
+     - ``terminal``
+     - Stdout output format for the final metrics summary. Available:
+       ``terminal``, ``json``.
+   * - ``--output PATH``
+     - *(unset)*
+     - Save the final metrics summary to a file at PATH (format chosen
+       by ``--format``).
+   * - ``-q`` / ``--quiet``
+     - *(unset)*
+     - Suppress all progress messages during the run. Only the final
+       structured metrics summary is emitted (unless also redirected
+       via ``--output``).
+
+
+CPU mode (no GPU)
+~~~~~~~~~~~~~~~~~
+
+``--mode cpu`` runs the same end-to-end path without a GPU. The server
+runs on a CPU-only host (``StubCPUDevice``); the bench tool allocates
+POSIX-SHM-backed KV tensors and exercises the full RPC path.
+
+By default ``--mode cpu`` uses the engine-driven gather/scatter path
+(``auto`` → ``cpu→engine_driven``). To use the zero-copy SHM
+handle path instead, pass ``--transfer-mode lmcache_driven``:
+
+.. code-block:: bash
+
+   # Terminal 1 -- start the LMCache server (no GPU required)
+   lmcache server \
+       --host localhost --port 5555 \
+       --l1-size-gb 2 --eviction-policy LRU
+
+   # Terminal 2 -- run bench in CPU + lmcache_driven mode
+   lmcache bench server \
+       --rpc-url tcp://localhost:5555 \
+       --url http://localhost:8080 \
+       --mode cpu --transfer-mode lmcache_driven \
+       --start 0 --end 2
 
 
 KV cache shape spec
@@ -807,8 +856,72 @@ See ``parse_kvcache_shape_spec`` in ``lmcache/v1/kv_layer_groups.py``
 for the authoritative parsing rules and validation errors.
 
 
-Example output
-~~~~~~~~~~~~~~
+Output
+~~~~~~
+
+After the run completes (or is interrupted with ``Ctrl-C``), a structured
+metrics summary is printed. The summary includes:
+
+* **Configuration** -- RPC URL, mode, transfer mode, tokens per request,
+  interval.
+* **Results** -- total requests, checksum OK / FAIL counts, pass rate.
+* **Latency sections** -- per-operation latency statistics (count, mean,
+  min, max, p50, p99) for cold lookup, cold store, warm lookup, and warm
+  retrieve.
+
+Use ``--format json`` to get machine-readable output, or ``--output FILE``
+to save the summary to a file.
+
+.. code-block:: text
+
+   ================ Server Bench Result =================
+   ---------------------- Configuration -----------------
+   RPC URL:                          tcp://localhost:15556
+   Mode:                             gpu
+   Transfer mode:                    auto
+   Tokens / request:                 512
+   Interval (s):                     0.5
+   ------------------------- Results --------------------
+   Total requests:                   3
+   Checksum OK:                      3
+   Checksum FAIL:                    0
+   Pass rate (%):                    100.0
+   -------------------- Cold Lookup (ms) ---------------
+   count:                            3
+   mean:                             1.647
+   min:                              1.312
+   max:                              1.823
+   p50:                              1.647
+   p99:                              1.823
+   --------------------- Cold Store (ms) ---------------
+   count:                            3
+   mean:                             1.740
+   min:                              1.521
+   max:                              1.982
+   p50:                              1.740
+   p99:                              1.982
+   -------------------- Warm Lookup (ms) ---------------
+   count:                            3
+   mean:                             1.310
+   min:                              1.102
+   max:                              1.512
+   p50:                              1.310
+   p99:                              1.512
+   ------------------- Warm Retrieve (ms) --------------
+   count:                            3
+   mean:                             1.480
+   min:                              1.321
+   max:                              1.612
+   p50:                              1.480
+   p99:                              1.612
+   =====================================================
+
+
+Example output (progress)
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+During the run, progress messages are printed to stdout (suppressed by
+``-q`` / ``--quiet``):
 
 .. code-block:: text
 
@@ -841,7 +954,6 @@ Exit codes
    * - ``1``
      - Fatal error (for example, CUDA unavailable in ``--mode gpu``,
        server unreachable, or a checksum mismatch).
-
 
 .. _lmcache-bench-l2:
 
@@ -915,6 +1027,12 @@ support a clean store -> load round-trip.
    ``"use_odirect": true``) or that talk to a remote service without
    a local cache, the default combined run is usually fine.
 
+   O_DIRECT adapters may also require the benchmark L1 buffer to
+   satisfy the adapter's block alignment. Use ``--l1-align-bytes`` to
+   set that alignment, commonly ``4096`` for local block devices. The
+   payload size (``--data-size-kb * 1024``) must be a multiple of the
+   selected alignment.
+
 
 Quick start
 ~~~~~~~~~~~
@@ -938,6 +1056,15 @@ Stress the adapter with more in-flight submits and larger payloads:
        --num-keys 32 --in-flight 4 \
        --data-size-kb 512 \
        --rounds 5 --warmup-rounds 1
+
+Benchmark an O_DIRECT adapter with aligned L1 buffers:
+
+.. code-block:: bash
+
+   lmcache bench l2 \
+       --l2-adapter '{"type":"raw_block","device_path":"/dev/nvme0n1","slot_bytes":4194304,"use_odirect":true,"block_align":4096}' \
+       --data-size-kb 1024 \
+       --l1-align-bytes 4096
 
 Run only one operation (useful to isolate store vs. load throughput):
 
@@ -1005,6 +1132,13 @@ Options
    * - ``--data-size-kb N``
      - ``256``
      - Data size per key, in KiB.
+   * - ``--l1-align-bytes N``
+     - ``1``
+     - Alignment in bytes for benchmark L1 buffers. Use a value
+       at least as large as the adapter's block alignment when
+       benchmarking O_DIRECT backends, for example ``4096`` for local
+       block devices. ``--data-size-kb * 1024`` must be a multiple of
+       this value.
    * - ``--rounds N``
      - ``1``
      - Measurement rounds per operation.
@@ -1152,9 +1286,8 @@ round against the byte pattern that ``store`` wrote (see
    [Verify] OK
 
 Verification is **off** by default because the stricter byte pattern
-also forces every key to allocate its own ``data_size`` buffer
-(otherwise the runner is free to reuse a single shared buffer across
-keys to keep the memory footprint small).
+requires both the store and load object batches to stay resident so the
+loaded data can be compared against the original store pattern.
 
 
 Exit codes

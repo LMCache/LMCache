@@ -15,9 +15,10 @@ import zmq
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.custom_types import (
-    CudaIPCWrapper,
+    DeviceIPCWrapper,
     get_customized_decoder,
     get_customized_encoder,
 )
@@ -63,13 +64,17 @@ def unwrap_request_payloads(
 
 
 _SPECIAL_ENCODER_DECODERS = {
-    CudaIPCWrapper: (
-        get_customized_encoder(CudaIPCWrapper),
-        get_customized_decoder(CudaIPCWrapper),
+    DeviceIPCWrapper: (
+        get_customized_encoder(DeviceIPCWrapper),
+        get_customized_decoder(DeviceIPCWrapper),
     ),
-    list[CudaIPCWrapper]: (
-        get_customized_encoder(list[CudaIPCWrapper]),
-        get_customized_decoder(list[CudaIPCWrapper]),
+    list[DeviceIPCWrapper]: (
+        get_customized_encoder(list[DeviceIPCWrapper]),
+        get_customized_decoder(list[DeviceIPCWrapper]),
+    ),
+    MemoryLayoutDesc: (
+        get_customized_encoder(MemoryLayoutDesc),
+        get_customized_decoder(MemoryLayoutDesc),
     ),
 }
 
@@ -79,6 +84,11 @@ def msgspec_encode(obj: Any, cls: Any) -> bytes:
     if cls in _SPECIAL_ENCODER_DECODERS:
         encoder, _ = _SPECIAL_ENCODER_DECODERS[cls]
         return encoder.encode(obj)
+    # Defensive guard: coerce obj to the declared cls so that
+    # e.g. a bool passed as int (or vice-versa) is encoded in the
+    # wire format that msgspec_decode expects for that cls.
+    if cls in (bool, int):
+        obj = cls(obj)
     return msgspec.msgpack.encode(obj)
 
 
@@ -87,6 +97,11 @@ def msgspec_decode(b_obj: bytes, cls: Any) -> Any:
     if cls in _SPECIAL_ENCODER_DECODERS:
         _, decoder = _SPECIAL_ENCODER_DECODERS[cls]
         return decoder.decode(b_obj)
+    # Defensive guard: msgspec strict-validates wire format
+    # (bool ≠ int in msgpack), but runtime type may not match
+    # declared cls. Decode untyped, then coerce.
+    if cls in (bool, int):
+        return cls(msgspec.msgpack.decode(b_obj))
     return msgspec.msgpack.decode(b_obj, type=cls)
 
 

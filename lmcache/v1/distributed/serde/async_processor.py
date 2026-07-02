@@ -173,7 +173,22 @@ class AsyncSerdeProcessor(SerdeProcessor):
         try:
             if task_type == _TaskType.SERIALIZE:
                 for src, dst in zip(src_objs, dst_objs, strict=True):
-                    self._serializer.serialize(src, dst)
+                    # ``serialize`` returns the actual number of bytes
+                    # written, which may be smaller than the destination
+                    # buffer (since the destination is sized from
+                    # ``estimate_serialized_size``, an upper bound).
+                    # Narrow the destination's logical size to ``n`` so
+                    # downstream L2 adapters that read the size via
+                    # ``obj.get_size()`` / ``obj.byte_array`` store
+                    # exactly ``n`` bytes -- not the over-allocated
+                    # estimate.  Guarded so duck-typed test fakes that
+                    # don't implement the interface still work, and so a
+                    # serializer that does not honor the ``-> int``
+                    # contract (returns ``None``) is skipped rather than
+                    # tripping set_used_size's range check.
+                    n = self._serializer.serialize(src, dst)
+                    if isinstance(n, int) and hasattr(dst, "set_used_size"):
+                        dst.set_used_size(n)
             else:
                 for src, dst in zip(src_objs, dst_objs, strict=True):
                     self._deserializer.deserialize(src, dst)

@@ -1,19 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
+# Future
+from __future__ import annotations
+
 # Standard
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 # Third Party
 import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.python_ops_fallback import set_shape_desc_dtype
+from lmcache.utils import lmcache_deprecate
+from lmcache.v1.distributed.api import AttnWindowDesc
 import lmcache.c_ops as lmc_ops
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.gpu_connector.utils import DiscoverableKVCache, LayoutHints
+    from lmcache.v1.gpu_connector.utils import DiscoverableKVCache
+    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 
 logger = init_logger(__name__)
 
@@ -35,22 +43,126 @@ DTYPE_MAP: dict[str, torch.dtype] = {
 }
 
 
-# The 4-tuple that uniquely identifies a set of kernel-equivalent layers:
-# ``(kv_size, num_heads, head_size, block_size, dtype)``. Two layers share a transfer-
-# kernel launch iff they share this identity — see the grouping loop in
-# :meth:`KVLayerGroupsManager.__init__` for the derivation.
-LayerGroupIdentity = tuple[int, int, int, int, torch.dtype]
+# The tuple that uniquely identifies a set of kernel-equivalent layers; one
+# distinct identity becomes one LMCache KV group:
+# ``(kv_size, num_heads, head_size, block_size, engine_group_idx, dtype,
+# engine_kv_format)``.
+# ``engine_group_idx`` is the engine group id (one paged-block address space):
+# block IDs are only meaningful within one group, so layers from different
+# groups must not share an LMCache group even if shape and dtype match.
+# ``engine_kv_format`` keeps layouts that share an engine group from merging --
+# load-bearing when one ``engine_group_idx`` mixes layouts (a rank-5 K/V group
+# alongside a rank-3 key-only indexer cache): this field is what splits them
+# into separate kernel groups, each transferred with its own layout.
+class KernelGroupIdentity(NamedTuple):
+    kv_size: int
+    num_heads: int
+    head_size: int
+    block_size: int
+    engine_group_idx: int
+    dtype: torch.dtype
+    engine_kv_format: "lmc_ops.EngineKVFormat"
+
+
+LayerGroupIdentity = KernelGroupIdentity  # Alias for compatibility
+
+
+# Sentinel ``per_layer_engine_group_idx`` value: a KV tensor tagged with it is
+# excluded from every LMCache group (used for cross-layer KV-sharing layers; see
+# ``create_engine_group_infos_from_vllm``).
+EXCLUDED_ENGINE_GROUP = -1
+
+
+def group_layers_by_identity(
+    kv_caches: "DiscoverableKVCache",
+    engine_kv_formats: "Sequence[lmc_ops.EngineKVFormat]",
+    per_layer_engine_group_idx: Sequence[int] | None = None,
+) -> list[tuple[LayerGroupIdentity, list[int]]]:
+    """Partition layer indices by :data:`LayerGroupIdentity`.
+
+    Args:
+        kv_caches: Registered KV cache structure, one entry per layer.
+        engine_kv_formats: One Engine KV format per registered tensor; its length
+            is the layer count. Homogeneous models repeat one shared format; a
+            model that mixes formats across engine groups -- e.g. a K+V main cache
+            (``kv_size=2``) plus a key-only MLA index cache (``kv_size=1``) --
+            supplies the differing per-layer formats.
+        per_layer_engine_group_idx: Optional engine block group id per layer.
+            When ``None`` every layer is treated as block group 0 (non-hybrid);
+            when present, layers from different engine block groups never share an
+            identity even if their tensor shapes match. Layers whose value is
+            ``EXCLUDED_ENGINE_GROUP`` are left out of all groups (e.g. cross-layer
+            KV-sharing layers whose KV lives in their target owner's blocks).
+
+    Returns:
+        A list of ``(identity, layer_indices)`` pairs sorted by each group's
+        first layer index, so the group order is deterministic.
+
+    Raises:
+        ValueError: If ``per_layer_engine_group_idx`` is given but its length
+            does not match ``engine_kv_formats``.
+    """
+    # First Party
+    from lmcache.v1.gpu_connector.utils import (
+        get_block_size,
+        get_dtype,
+        get_head_size,
+        get_num_heads,
+        is_mla,
+    )
+
+    num_layers = len(engine_kv_formats)
+    if (
+        per_layer_engine_group_idx is not None
+        and len(per_layer_engine_group_idx) != num_layers
+    ):
+        raise ValueError(
+            f"per_layer_engine_group_idx has {len(per_layer_engine_group_idx)} "
+            f"entries but engine_kv_formats has {num_layers} layers"
+        )
+
+    groups_dict: dict[LayerGroupIdentity, list[int]] = defaultdict(list)
+    for idx in range(num_layers):
+        engine_group_idx = (
+            per_layer_engine_group_idx[idx]
+            if per_layer_engine_group_idx is not None
+            else 0
+        )
+        # Skip layers explicitly excluded from grouping (e.g. cross-layer
+        # KV-sharing layers, whose KV lives in their target owner's blocks).
+        if engine_group_idx == EXCLUDED_ENGINE_GROUP:
+            continue
+        layer_format = engine_kv_formats[idx]
+        mla = is_mla(layer_format)
+        kv_size = 1 if mla else 2
+        nh = 1 if mla else get_num_heads(kv_caches, layer_format, idx)
+        hs = get_head_size(kv_caches, layer_format, idx)
+        dt = get_dtype(kv_caches, layer_format, idx)
+        bs = get_block_size(kv_caches, layer_format, idx)
+
+        identity = LayerGroupIdentity(
+            kv_size=kv_size,
+            num_heads=nh,
+            head_size=hs,
+            block_size=bs,
+            engine_group_idx=engine_group_idx,
+            dtype=dt,
+            engine_kv_format=layer_format,
+        )
+        groups_dict[identity].append(idx)
+    return sorted(groups_dict.items(), key=lambda kv: kv[1][0])
 
 
 @dataclass
-class KVLayerGroupInfo:
+class KernelGroupInfo:
     """A single transfer-kernel dispatch unit: a set of KV layers that can
     ride one kernel launch with one ``PageBufferShapeDesc``.
 
     Membership is decided by :class:`KVLayerGroupsManager` according to
     :data:`LayerGroupIdentity`; every layer referenced by
     ``layer_indices`` shares the same
-    ``(kv_size, num_heads, head_size, block_size, dtype)`` signature.
+    ``(kv_size, num_heads, head_size, block_size, engine_group_idx,
+    dtype, engine_kv_format)`` signature.
     Consumers use ``layer_indices`` to pull the matching device pointers
     out of ``kv_caches`` (via
     :func:`~lmcache.v1.gpu_connector.utils.get_group_data_ptrs`) and
@@ -78,22 +190,23 @@ class KVLayerGroupInfo:
     """Torch dtype of the KV cache tensors for this group. Used for
     kernel template instantiation; see class docstring for why we keep
     this alongside ``shape_desc.element_size``."""
-    compress_ratio: int = 1
-    """Logical-tokens-per-physical-slot for this group. ``1`` for
-    non-compressed groups (one logical token per physical slot);
-    greater than ``1`` for compressed groups where each physical slot
-    packs ``compress_ratio`` logical tokens (e.g. DeepSeek V4
-    compressor / indexer caches). Derived from
-    ``inference_engine_logical_block_size`` carried in ``layout_hints``
-    at :class:`KVLayerGroupsManager` construction time."""
-    physical_chunk_size: int = 0
-    """Number of *physical* slots in one LMCache chunk for this group
-    (= ``lmcache_logical_chunk_size // compress_ratio``). This is what
-    the block-level transfer kernel must be told, not the logical
-    ``lmcache_logical_chunk_size`` which counts vLLM tokens. ``0``
-    means the field has not been populated yet; ``GPUCacheContext``
-    fills it in after construction once ``lmcache_logical_chunk_size``
-    is known."""
+    engine_kv_format: "lmc_ops.EngineKVFormat | None" = None
+    """Per-group Engine KV format, read via
+    ``BaseCacheContext.get_engine_kv_format`` so mixed-format models dispatch each
+    group with its own. ``None`` only for bench bookkeeping groups from
+    :func:`parse_kvcache_shape_spec`, which have no detected format and never
+    transfer; detection-built groups always set it."""
+    tokens_per_block: int = 0
+    """Logical engine tokens covered by one paged chunk (one engine block
+    ID) of this group, as declared by the engine's KV cache spec at
+    initialization time (carried in ``EngineGroupInfo.tokens_per_block``).
+    ``0`` means the engine did not report it; the group is then treated as
+    uncompressed (``compress_ratio == 1``)."""
+    engine_group_idx: int = 0
+    """Engine group index (paged-block address space). 0 for non-hybrid."""
+    sw_size_tokens: int = -1
+    """Sliding window size in logical tokens for this group's layers.
+    ``-1`` means the layers are not sliding-window attention."""
 
     def __repr__(self) -> str:
         if not self.layer_indices:
@@ -102,15 +215,17 @@ class KVLayerGroupInfo:
             indices_repr = f"{self.layer_indices[0]}-{self.layer_indices[-1]}"
         sd = self.shape_desc
         return (
-            f"KVLayerGroupInfo(layers={len(self.layer_indices)}, "
+            f"KernelGroupInfo(layers={len(self.layer_indices)}, "
             f"indices={indices_repr}, "
             f"shape_desc=(kv={sd.kv_size}, nl={sd.nl}, nb={sd.nb}, "
             f"bs={sd.bs}, nh={sd.nh}, hs={sd.hs}, "
             f"element_size={sd.element_size}, "
             f"block_stride_elems={sd.block_stride_elems}), "
             f"dtype={self.dtype}, "
-            f"compress_ratio={self.compress_ratio}, "
-            f"physical_chunk_size={self.physical_chunk_size})"
+            f"tokens_per_block={self.tokens_per_block}, "
+            f"slots_per_block={self.slots_per_block}, "
+            f"engine_group_idx={self.engine_group_idx}, "
+            f"sw_size_tokens={self.sw_size_tokens})"
         )
 
     @property
@@ -123,19 +238,58 @@ class KVLayerGroupInfo:
         """Hidden dimension size (``num_heads * head_size``)."""
         return self.shape_desc.nh * self.shape_desc.hs
 
+    @property
+    def slots_per_block(self) -> int:
+        """Physical slots in one paged chunk of this group, detected from
+        the registered KV tensors at registration time (the batch-size
+        dimension, ``shape_desc.bs``)."""
+        return self.shape_desc.bs
+
+    def calculate_slots(self, num_tokens: int) -> int:
+        """Calculate the number of slots for the specified number of
+        tokens. Assuming the number of tokens are already aligned.
+        """
+        return num_tokens * self.slots_per_block // self.tokens_per_block
+
+
+KVLayerGroupInfo = KernelGroupInfo  # Alias for compatibility
+
+
+@dataclass
+class ObjectGroupInfo:
+    """Metadata for an 'object group'.
+
+    An object group contains one or more kernel groups whose
+    KV caches will be stored in the same memory object.
+
+    This will be useful for dealing with sliding window or mamba
+    KV caches that needs a different prefix matching logic from
+    the full attention KV caches.
+    """
+
+    kernel_group_indices: list[int]
+    """Indices of the kernel groups belonging to this object group, in the
+    order they should be laid out in memory."""
+
+    sw_size_chunks: int = -1
+    """Cross-chunk sliding window size in LMCache chunks shared by every
+    kernel group in this object group. ``-1`` means the kernel groups are
+    not sliding-window attention."""
+
 
 class KVLayerGroupsManager:
     """Partition a model's KV layers into transfer-kernel dispatch units.
 
     At construction time, every layer in ``kv_caches`` is bucketed by its
     :data:`LayerGroupIdentity` (``(kv_size, num_heads, head_size,
-    dtype)``). Each bucket becomes one :class:`KVLayerGroupInfo` holding
-    the layer indices, a shared :class:`PageBufferShapeDesc`, and the
-    group's torch dtype.
+    block_size, engine_group_idx, dtype, engine_kv_format)``). Each bucket
+    becomes one
+    :class:`KernelGroupInfo` holding the layer indices, a shared
+    :class:`PageBufferShapeDesc`, and the group's torch dtype.
 
     Downstream consumers (``VLLMPagedMemGPUConnectorV3``,
     ``GPUCacheContext``, the multiprocess server) iterate
-    ``self.kv_layer_groups`` and issue one transfer-kernel launch per
+    ``self._kernel_groups`` and issue one transfer-kernel launch per
     group. The manager itself is a pure metadata object — it does not
     own any GPU buffers or perform any transfers.
 
@@ -147,259 +301,380 @@ class KVLayerGroupsManager:
     def __init__(
         self,
         kv_caches: "DiscoverableKVCache",
-        gpu_kv_format: "lmc_ops.GPUKVFormat",
-        num_blocks: int,
-        layout_hints: "LayoutHints | None" = None,
-        lmcache_logical_chunk_size: int = 256,
+        engine_kv_formats: "Sequence[lmc_ops.EngineKVFormat]",
+        engine_group_infos: "Sequence[EngineGroupInfo]" = (),
+        lmcache_tokens_per_chunk: int = 256,
+        separate_object_groups: bool = True,
     ) -> None:
-        """Partition layers into groups keyed by
-        :data:`LayerGroupIdentity`.
+        """Partition the layers into kernel groups for this set of KV caches.
 
-        For each layer ``i`` in ``kv_caches``, read
-        ``(kv_size, num_heads, head_size, dtype)`` via the format-aware
-        accessors in ``utils.py``. Layers with identical identities are
-        bucketed together; each bucket becomes one
-        :class:`KVLayerGroupInfo`.
-
-        Groups are emitted in the order of their first-appearing layer,
-        so group indices are deterministic across runs.
+        Group order is deterministic across runs.
 
         Args:
             kv_caches: KV cache structure accepted by
-                :func:`normalize_kv_and_discover_format`.
-            gpu_kv_format: Format returned by
-                :func:`normalize_kv_and_discover_format`.
-            num_blocks: Number of paged blocks. Stamped into every
-                ``shape_desc.nb``. Each group's ``shape_desc.bs`` is
-                discovered per-layer via :func:`get_block_size`, so
-                compressed and non-compressed groups can coexist.
-            layout_hints: Engine-provided hints. The manager only reads
-                ``inference_engine_logical_block_size`` (logical tokens
-                per inference-engine block) from it to derive each
-                group's ``compress_ratio`` and ``physical_chunk_size``.
-                ``None`` (or a hints dict without that key — e.g.
-                non-vLLM engines, or vLLM deployments with no mixed
-                compression) means every group is treated as
-                non-compressed (``compress_ratio == 1``).
-            lmcache_logical_chunk_size: Logical tokens per LMCache chunk
-                (one logical token = one inference-engine token).
-                Together with ``compress_ratio`` it determines each
-                group's ``physical_chunk_size =
-                lmcache_logical_chunk_size // compress_ratio``, the
-                number of *physical* slots per chunk fed to the
-                block-level transfer kernel.
+                :func:`normalize_and_discover_per_layer_formats`.
+            engine_kv_formats: One Engine KV format per layer (its length is the
+                layer count), from
+                :func:`normalize_and_discover_per_layer_formats`. A model that
+                mixes formats across engine groups supplies the differing
+                per-layer formats so each group is shaped with its own;
+                homogeneous models repeat one shared format.
+            engine_group_infos: Engine KV cache group metadata, one info per
+                kernel group in kernel-group order, or empty.
+            lmcache_logical_chunk_size: Tokens per LMCache chunk
+            separate_object_groups: When True (default), split kernel groups
+                into one object group per sliding-window size; when False, all
+                kernel groups share a single full-attention object group.
         """
         # Import here to break a circular import via
         # lmcache.v1.gpu_connector.__init__ → metadata → kv_layer_groups.
         # First Party
         from lmcache.v1.gpu_connector.utils import (
-            get_num_layers,
+            get_num_blocks,
             make_page_buffer_shape_desc,
             resolve_block_stride_and_log_layout,
         )
+        from lmcache.v1.multiprocess.group_view import get_engine_group_indices
 
-        # Pull the inference-engine logical block size out of
-        # ``layout_hints`` once; ``None`` means no compression info
-        # available and every group is treated as non-compressed below.
-        # The attribute is finalised after the group-building loop
-        # below, where ``None`` is replaced by the first group's
-        # physical ``bs`` so the public ``int`` contract holds.
-        self.inference_engine_logical_block_size_: "int | None" = (
-            layout_hints.get("inference_engine_logical_block_size")
-            if layout_hints
-            else None
-        )
-        self.kv_layer_groups: list[KVLayerGroupInfo] = []
+        self._kernel_groups: list[KernelGroupInfo] = []
+        self._object_groups: list[ObjectGroupInfo] = []
 
-        num_layers = get_num_layers(kv_caches, gpu_kv_format)
+        num_layers = len(engine_kv_formats)
         if num_layers == 0:
             logger.debug("No KV caches available, skipping KV layer groups building")
             return
 
-        groups_dict = self._group_layers_by_identity(
-            kv_caches, gpu_kv_format, num_layers
+        per_layer_engine_group_idx = get_engine_group_indices(
+            engine_group_infos, num_layers
         )
+        groups_by_identity = group_layers_by_identity(
+            kv_caches, engine_kv_formats, per_layer_engine_group_idx
+        )
+
+        # Engine group infos are produced by the same group_layers_by_identity
+        # bucketing on the engine side, so they correspond 1:1, in order, to
+        # the kernel groups built below.
+        if engine_group_infos and len(engine_group_infos) != len(groups_by_identity):
+            raise ValueError(
+                f"Got {len(engine_group_infos)} engine group infos for "
+                f"{len(groups_by_identity)} kernel groups; expecting one "
+                "engine group info per kernel group"
+            )
 
         # Emit groups in order of their first-appearing layer so that group
         # indices remain deterministic across runs.
-        for group_idx, ((_, _, _, bs, dt), indices) in enumerate(
-            sorted(groups_dict.items(), key=lambda kv: kv[1][0])
-        ):
+        for group_idx, (identity, indices) in enumerate(groups_by_identity):
+            bs = identity.block_size
+            engine_group_idx = identity.engine_group_idx
+            dt = identity.dtype
+            # Format is part of the identity, so every layer in the group shares
+            # it -- this is the whole group's format, by construction.
+            group_format = identity.engine_kv_format
+            # Block count is per engine group (each is its own block-id space), so
+            # read it from this group's own tensor rather than a context-wide value.
+            group_num_blocks = get_num_blocks([kv_caches[indices[0]]], group_format)
             block_stride_elems = resolve_block_stride_and_log_layout(
                 kv_caches,
-                gpu_kv_format,
+                group_format,
                 layer_idx=indices[0],
                 group_idx=group_idx,
             )
             shape_desc = make_page_buffer_shape_desc(
                 kv_caches,
-                gpu_kv_format,
+                group_format,
                 layer_idx=indices[0],
                 num_layers_in_group=len(indices),
-                num_blocks=num_blocks,
+                num_blocks=group_num_blocks,
                 block_size=bs,
                 block_stride_elems=block_stride_elems,
             )
 
-            compress_ratio, physical_chunk_size = self._derive_compression_metadata(
-                group_idx=group_idx,
-                bs=bs,
-                ie_logical_block_size=self.inference_engine_logical_block_size_,
-                lmcache_logical_chunk_size=lmcache_logical_chunk_size,
+            info = engine_group_infos[group_idx] if engine_group_infos else None
+            if info is not None and tuple(indices) != tuple(info.layer_indices):
+                raise ValueError(
+                    f"group {group_idx}: engine group info covers layers "
+                    f"{info.layer_indices}, but the kernel group covers "
+                    f"layers {indices}"
+                )
+
+            # tokens_per_block comes from the engine's KV cache spec; when
+            # absent, fall back to the physical slot count so the group is
+            # treated as non-compressed (compress_ratio == 1).
+            tokens_per_block = (
+                info.tokens_per_block
+                if info is not None and info.tokens_per_block > 0
+                else bs
+            )
+            sw_size_tokens = info.sw_size_tokens if info is not None else -1
+
+            self._validate_block_chunk_size_config(
+                group_idx,
+                slots_per_block=bs,
+                tokens_per_block=tokens_per_block,
+                lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
+                sw_size_tokens=sw_size_tokens,
             )
 
-            self.kv_layer_groups.append(
-                KVLayerGroupInfo(
+            self._kernel_groups.append(
+                KernelGroupInfo(
                     layer_indices=indices,
                     shape_desc=shape_desc,
                     dtype=dt,
-                    compress_ratio=compress_ratio,
-                    physical_chunk_size=physical_chunk_size,
+                    engine_kv_format=group_format,
+                    tokens_per_block=tokens_per_block,
+                    engine_group_idx=engine_group_idx,
+                    sw_size_tokens=sw_size_tokens,
                 )
             )
 
-        self.inference_engine_logical_block_size_ = (
-            self.inference_engine_logical_block_size_
-            or self.kv_layer_groups[0].shape_desc.bs
+        self._lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
+        self._separate_object_groups = separate_object_groups
+
+        logger.info(
+            "KV layer groups: ---\n%s\n---",
+            "\n".join(repr(g) for g in self._kernel_groups),
         )
 
-        logger.info("KV layer groups: %s", self.kv_layer_groups)
-
-    @staticmethod
-    def _derive_compression_metadata(
-        group_idx: int,
-        bs: int,
-        ie_logical_block_size: "int | None",
-        lmcache_logical_chunk_size: int,
-    ) -> tuple[int, int]:
-        """Resolve ``(compress_ratio, physical_chunk_size)`` for one group.
-
-        ``compress_ratio`` falls back to ``1`` when
-        ``ie_logical_block_size`` is absent (no compression info
-        available); otherwise it equals
-        ``ie_logical_block_size // bs`` and the divisibility invariants
-        are enforced loudly. ``physical_chunk_size`` is then
-        ``lmcache_logical_chunk_size // compress_ratio``, the per-chunk
-        physical slot count fed to the block-level transfer kernel.
-        """
-        if ie_logical_block_size is None:
-            compress_ratio = 1
-        else:
-            if ie_logical_block_size % bs != 0:
-                raise ValueError(
-                    f"inference engine logical block size "
-                    f"{ie_logical_block_size} must be a multiple of "
-                    f"group {group_idx} physical slot count {bs}"
-                )
-            compress_ratio = ie_logical_block_size // bs
-        if lmcache_logical_chunk_size % compress_ratio != 0:
-            raise ValueError(
-                f"lmcache_logical_chunk_size {lmcache_logical_chunk_size} "
-                f"must be a multiple of compress_ratio {compress_ratio} "
-                f"(group {group_idx})"
-            )
-        physical_chunk_size = lmcache_logical_chunk_size // compress_ratio
-        if compress_ratio != 1:
-            logger.info(
-                "group %d: compressed "
-                "(inference_engine_logical_block_size=%d -> "
-                "slots=%d, compress_ratio=%d, physical_chunk_size=%d)",
-                group_idx,
-                ie_logical_block_size,
-                bs,
-                compress_ratio,
-                physical_chunk_size,
-            )
-        return compress_ratio, physical_chunk_size
-
-    @staticmethod
-    def _group_layers_by_identity(
-        kv_caches: "DiscoverableKVCache",
-        gpu_kv_format: "lmc_ops.GPUKVFormat",
-        num_layers: int,
-    ) -> dict[LayerGroupIdentity, list[int]]:
-        """Partition layer indices by :data:`LayerGroupIdentity`.
-
-        Linear single pass over ``kv_caches``; layers sharing the same
-        ``(kv_size, num_heads, head_size, block_size, dtype)`` signature
-        land in the same bucket. The returned dict's value lists are
-        later passed by reference into :class:`KVLayerGroupInfo`
-        instances, so the dict itself is garbage-collected after
-        ``__init__`` returns while the lists stay alive on each group.
-        """
-        # First Party
-        from lmcache.v1.gpu_connector.utils import (
-            get_block_size,
-            get_dtype,
-            get_head_size,
-            get_num_heads,
-            is_mla,
-        )
-
-        mla = is_mla(gpu_kv_format)
-        kv_size = 1 if mla else 2
-        groups_dict: dict[LayerGroupIdentity, list[int]] = defaultdict(list)
-        for idx in range(num_layers):
-            nh = 1 if mla else get_num_heads(kv_caches, gpu_kv_format, idx)
-            hs = get_head_size(kv_caches, gpu_kv_format, idx)
-            dt = get_dtype(kv_caches, gpu_kv_format, idx)
-            bs = get_block_size(kv_caches, gpu_kv_format, idx)
-            groups_dict[(kv_size, nh, hs, bs, dt)].append(idx)
-        return groups_dict
+        # Detect the object groups
+        self._object_groups = self._detect_object_groups(engine_group_infos)
 
     @property
-    def num_groups(self) -> int:
-        """Number of :class:`KVLayerGroupInfo` entries.
+    def kernel_groups(self) -> list[KernelGroupInfo]:
+        """List of :class:`KernelGroupInfo`, one per kernel group."""
+        return self._kernel_groups
+
+    @property
+    def num_blocks(self) -> int:
+        """Paged block count, shared across kernel groups (one block-id space).
+
+        Read from the first kernel group's ``shape_desc.nb``, which was computed
+        from that group's own tensor and format -- not a guessed representative.
+        Returns ``0`` when there are no kernel groups.
+        """
+        if not self._kernel_groups:
+            return 0
+        return self._kernel_groups[0].shape_desc.nb
+
+    @property
+    @lmcache_deprecate("`kv_layer_groups` is an outdated alias for `kernel_groups`")
+    def kv_layer_groups(self) -> list[KernelGroupInfo]:
+        """List of :class:`KernelGroupInfo`, one per kernel group."""
+        return self._kernel_groups
+
+    @property
+    def num_kernel_groups(self) -> int:
+        """Number of :class:`KernelGroupInfo` entries.
 
         Zero if ``kv_caches`` had no layers at construction time.
         """
-        return len(self.kv_layer_groups)
+        return len(self._kernel_groups)
 
     @property
-    def inference_engine_logical_block_size(self):
-        """Inference-engine-side logical block size.
+    def object_groups(self) -> list[ObjectGroupInfo]:
+        """List of :class:`ObjectGroupInfo`, one per object group."""
+        return self._object_groups
 
-        Taken from ``layout_hints`` at construction time, or falls back
-        to the first group's physical ``bs`` when no hint is provided
-        (non-vLLM engines, or vLLM without mixed-compression KV groups),
-        in which case every group is treated as non-compressed.
+    @property
+    def num_object_groups(self) -> int:
+        """Number of :class:`ObjectGroupInfo` entries."""
+        return len(self._object_groups)
+
+    @property
+    @lmcache_deprecate("`num_groups` is an outdated alias for `num_kernel_groups`")
+    def num_groups(self) -> int:
+        """Number of :class:`KernelGroupInfo` entries.
+
+        Zero if ``kv_caches`` had no layers at construction time.
         """
-        return (
-            self.inference_engine_logical_block_size_
-            or self.kv_layer_groups[0].shape_desc.bs
+        return len(self._kernel_groups)
+
+    def get_shape_desc(self, kernel_group_idx: int) -> "lmc_ops.PageBufferShapeDesc":
+        """Return the :class:`PageBufferShapeDesc` for *kernel_group_idx*.
+
+        Args:
+            kernel_group_idx: 0-based kernel group index.
+
+        Raises:
+            IndexError: If *kernel_group_idx* is out of range.
+        """
+        return self._kernel_groups[kernel_group_idx].shape_desc
+
+    @lmcache_deprecate("It does not have hybrid model support")
+    def get_slots_per_chunk(self, kernel_group_idx: int) -> int:
+        """Return the per-chunk slot count for *kernel_group_idx*.
+
+        Args:
+            kernel_group_idx: 0-based kernel group index.
+
+        Note:
+            This is a deprecated function because it does not have
+            hybrid model support
+        """
+        group = self._kernel_groups[kernel_group_idx]
+        return group.calculate_slots(self._lmcache_tokens_per_chunk)
+
+    def get_slots_per_chunk_in_sw(self, kernel_group_idx: int) -> int:
+        """Return the per-chunk *transfer* slot count for *kernel_group_idx*.
+
+        For sub-chunk sliding window groups, the transfer slots is smaller
+        than the physical slots in a chunk.
+
+        Args:
+            kernel_group_idx: 0-based kernel group index.
+        """
+        group = self._kernel_groups[kernel_group_idx]
+        sw_size = self.get_subchunk_sw_size_tokens(kernel_group_idx)
+        return group.calculate_slots(sw_size)
+
+    def get_subchunk_sw_size_tokens(self, kernel_group_idx: int) -> int:
+        """Return the sub-chunk sliding window size of a given kernel group.
+        The size is measured in the number of tokens.
+
+        This is for the models like DSV4 where the sliding window size is
+        smaller than the tokens in a single lmcache chunk.
+
+        Args:
+            kernel_group_idx: 0-based kernel group index.
+
+        Returns:
+            The sub-chunk sliding window size. Will be the same as the
+            chunk size for non-slding-window models or big-sliding-
+            window models.
+        """
+        sw_size_tokens = self._kernel_groups[kernel_group_idx].sw_size_tokens
+        if sw_size_tokens == -1 or sw_size_tokens >= self._lmcache_tokens_per_chunk:
+            return self._lmcache_tokens_per_chunk
+        return sw_size_tokens
+
+    def get_attn_desc(self) -> AttnWindowDesc:
+        """Return the cross-chunk attention windows of all object groups.
+
+        Returns:
+            An :class:`AttnWindowDesc` with one entry per object group, in
+            object-group order; the entry is ``-1`` for a non-sliding-window
+            group.
+
+        Note:
+            With object-group separation disabled (the default), the result
+            has a single full-attention entry.
+        """
+        return AttnWindowDesc(
+            num_chunks_in_sw=[
+                w if w >= 1 else -1
+                for w in (g.sw_size_chunks for g in self._object_groups)
+            ]
         )
 
-    def get_shape_desc(self, group_idx: int) -> "lmc_ops.PageBufferShapeDesc":
-        """Return the :class:`PageBufferShapeDesc` for *group_idx*.
-
-        Equivalent to ``self.kv_layer_groups[group_idx].shape_desc``.
-
-        Args:
-            group_idx: 0-based group index.
-
-        Raises:
-            IndexError: If *group_idx* is out of range.
-        """
-        return self.kv_layer_groups[group_idx].shape_desc
-
-    def get_physical_chunk_size(self, group_idx: int) -> int:
-        """Return the per-chunk *physical* slot count for *group_idx*.
-
-        Equivalent to
-        ``self.kv_layer_groups[group_idx].physical_chunk_size``.
-        For non-compressed groups this equals
-        ``lmcache_logical_chunk_size``; for compressed groups it equals
-        ``lmcache_logical_chunk_size // compress_ratio`` and is what the
-        block-level transfer kernel must be told (the logical chunk size
-        in *vLLM tokens* is not what the kernel addresses).
+    def calculate_num_blocks(self, kernel_group_idx: int, num_tokens: int) -> int:
+        """Calculate the number of blocks for a given number of tokens in a
+        specified kernel group.
 
         Args:
-            group_idx: 0-based group index.
+            kernel_group_idx: 0-based index of the kernel group.
+            num_tokens: The total number of tokens to be processed for the group.
+
+        Returns:
+            The number of blocks.
 
         Raises:
-            IndexError: If *group_idx* is out of range.
+            IndexError: If *kernel_group_idx* is out of range.
         """
-        return self.kv_layer_groups[group_idx].physical_chunk_size
+        group = self._kernel_groups[kernel_group_idx]
+        # Physical slots for num_tokens, derived from the per-block geometry
+        # (slots_per_block / tokens_per_block) rather than a compress ratio.
+        num_physical_slots = (
+            num_tokens * group.slots_per_block // group.tokens_per_block
+        )
+        return num_physical_slots // group.shape_desc.bs
+
+    ### Helper methods
+    def _detect_object_groups(
+        self, engine_group_infos: "Sequence[EngineGroupInfo]"
+    ) -> list[ObjectGroupInfo]:
+        """Bucket kernel groups into object groups.
+
+        Puts all kernel groups into a single object group when object-group
+        separation is disabled (the default). Otherwise groups the kernel groups
+        by sliding-window size measured in number of chunks.
+
+        Args:
+            engine_group_infos: LMCache-owned engine KV cache group metadata.
+
+        Returns:
+            One :class:`ObjectGroupInfo` per object group.
+        """
+        if not self._separate_object_groups:
+            return [
+                ObjectGroupInfo(
+                    kernel_group_indices=list(range(len(self._kernel_groups)))
+                )
+            ]
+
+        chunk_size = self._lmcache_tokens_per_chunk
+        groups_by_sw_size: dict[int, list[int]] = defaultdict(list)
+        for kernel_group_idx, group in enumerate(self._kernel_groups):
+            if group.sw_size_tokens == -1:
+                sw_size_chunks = -1
+            else:
+                sw_size_chunks = (group.sw_size_tokens + chunk_size - 1) // chunk_size
+            groups_by_sw_size[sw_size_chunks].append(kernel_group_idx)
+        return [
+            ObjectGroupInfo(
+                kernel_group_indices=kernel_group_indices,
+                sw_size_chunks=sw_size_chunks,
+            )
+            for sw_size_chunks, kernel_group_indices in sorted(
+                groups_by_sw_size.items(), key=lambda kv: kv[1][0]
+            )
+        ]
+
+    @staticmethod
+    def _validate_block_chunk_size_config(
+        group_idx: int,
+        slots_per_block: int,
+        tokens_per_block: int,
+        lmcache_tokens_per_chunk: int,
+        sw_size_tokens: int = -1,
+    ) -> None:
+        """Validate the chunk size configuration against the slot and
+        tokens block detected from the serving engine.
+
+        Raises:
+            ValueError: If one of the following conditions is met:
+                - ``tokens_per_block`` is not a whole multiple of
+                  ``slots_per_block``
+                - ``lmcache_tokens_per_chunk`` is not a whole multiple of
+                  ``tokens_per_block``
+                - a sub-chunk sliding window is not a whole multiple of
+                  ``tokens_per_block``
+        """
+        if tokens_per_block % slots_per_block != 0:
+            raise ValueError(
+                f"group {group_idx}: tokens_per_block {tokens_per_block} "
+                f"must be a multiple of slots_per_block {slots_per_block}"
+            )
+        if lmcache_tokens_per_chunk % tokens_per_block != 0:
+            raise ValueError(
+                f"group {group_idx}: lmcache_tokens_per_chunk "
+                f"{lmcache_tokens_per_chunk} must be a multiple of "
+                f"tokens_per_block {tokens_per_block}"
+            )
+        if (
+            0 < sw_size_tokens < lmcache_tokens_per_chunk
+            and sw_size_tokens % tokens_per_block != 0
+        ):
+            raise ValueError(
+                f"group {group_idx}: sub-chunk sliding window size "
+                f"{sw_size_tokens} must be a multiple of tokens_per_block "
+                f"{tokens_per_block}"
+            )
+        if slots_per_block != tokens_per_block:
+            logger.info(
+                "group %d: compressed (tokens_per_block=%d, slots_per_block=%d)",
+                group_idx,
+                tokens_per_block,
+                slots_per_block,
+            )
 
 
 # ------------------------------------------------------------------ #
@@ -409,7 +684,7 @@ class KVLayerGroupsManager:
 
 def parse_kvcache_shape_spec(
     spec_str: str,
-) -> list[KVLayerGroupInfo]:
+) -> list[KernelGroupInfo]:
     """Parse a ``--kvcache-shape-spec`` string into layer groups.
 
     **Grammar** (EBNF-ish)::
@@ -420,8 +695,8 @@ def parse_kvcache_shape_spec(
         dtype       := "float16" | "float32" | "bfloat16" | "uint8"
         layer_count := positive integer
 
-    **Field semantics** (names aligned with ``GPUKVFormat``; see
-    :func:`lmcache.v1.gpu_connector.utils.get_gpu_kv_shape_description`):
+    **Field semantics** (names aligned with ``EngineKVFormat``; see
+    :func:`lmcache.v1.gpu_connector.utils.get_engine_kv_shape_description`):
 
     * ``kv_size`` -- leading dim (``2`` for standard K/V, ``1`` for MLA).
     * ``NB`` -- ``num_blocks``: paged-KV block count.
@@ -454,7 +729,7 @@ def parse_kvcache_shape_spec(
     (handy for CLI echo-back / debug logging).
 
     Returns:
-        A list of :class:`KVLayerGroupInfo`, one per group.
+        A list of :class:`KernelGroupInfo`, one per group.
 
     Raises:
         ValueError: Malformed spec, unknown dtype, or a shape with a
@@ -463,7 +738,7 @@ def parse_kvcache_shape_spec(
     if not spec_str:
         raise ValueError("KV shape specification cannot be empty")
 
-    groups: list[KVLayerGroupInfo] = []
+    groups: list[KernelGroupInfo] = []
     layer_offset = 0
 
     for group_spec in spec_str.split(";"):
@@ -511,10 +786,11 @@ def parse_kvcache_shape_spec(
         shape_desc.nh = nh
         shape_desc.hs = hs
         shape_desc.element_size = dtype.itemsize
+        set_shape_desc_dtype(shape_desc, dtype)
 
         indices = list(range(layer_offset, layer_offset + layer_count))
         groups.append(
-            KVLayerGroupInfo(
+            KernelGroupInfo(
                 layer_indices=indices,
                 shape_desc=shape_desc,
                 dtype=dtype,
@@ -528,7 +804,7 @@ def parse_kvcache_shape_spec(
     return groups
 
 
-def format_kvcache_shape_spec(groups: list[KVLayerGroupInfo]) -> str:
+def format_kvcache_shape_spec(groups: list[KernelGroupInfo]) -> str:
     """Format layer groups back into a ``--kvcache-shape-spec`` string.
 
     This is the inverse of :func:`parse_kvcache_shape_spec`; the

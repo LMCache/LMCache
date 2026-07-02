@@ -9,7 +9,8 @@ and entry point are all working. The next step (Phase 1 per
 [commands.md](../commands.md)) is to implement `lmcache describe kvcache`, which
 provides a rich status dashboard of a running LMCache KV cache service.
 
-`describe engine` is Phase 2 scope and stubbed but not implemented here.
+`describe engine` (Phase 2) is now implemented — see the
+[`describe engine`](#lmcache-describe-engine) section below.
 
 ---
 
@@ -33,15 +34,20 @@ Uptime:                                  2h 14m 32s
 ------ Model: meta-llama/Llama-3.1-70B-Instruct ---
 World size:                              4
 GPU IDs:                                 0, 1, 2, 3
-Attention backend:         vLLM non-MLA flash attention
-GPU KV shape:              NL x [2, NB, BS, NH, HS]
-GPU KV tensor shape:       80 x [2, 2048, 128, 8, 128]
 Num layers:                              80
-Block size:                              128
-Hidden dim size:                         1024
+Num blocks:                              2048
+Cache size per token (bytes):            327680
+--- Kernel group 0 (meta-llama/Llama-3.1-70B-Instruct) ---
+Kernel group index:                      0
+Engine group index:                      0
+Object group index:                      0
+Num layers:                              80
+Slots per block:                         128
 Dtype:                                   torch.float16
 MLA:                                     False
-Num blocks:                              2048
+Attention backend:         vLLM non-MLA flash attention
+Engine KV shape:           NL x [2, NB, BS, NH, HS]
+Engine KV tensor shape:    80 x [2, 2048, 128, 8, 128]
 ----------- L2: NixlStoreL2Adapter ------------
 Type:                          NixlStoreL2Adapter
 Health:                                  OK
@@ -67,15 +73,24 @@ programmatic access:
         "model": "meta-llama/Llama-3.1-70B-Instruct",
         "world_size": 4,
         "gpu_ids": "0, 1, 2, 3",
-        "attention_backend": "vLLM non-MLA flash attention",
-        "gpu_kv_shape": "NL x [2, NB, BS, NH, HS]",
-        "gpu_kv_concrete_shape": "80 x [2, 2048, 128, 8, 128]",
         "num_layers": 80,
-        "block_size": 128,
-        "hidden_dim_size": 1024,
+        "num_blocks": 2048,
+        "cache_size_per_token": 327680
+      }
+    ],
+    "kernel_groups": [
+      {
+        "model": "meta-llama/Llama-3.1-70B-Instruct",
+        "kernel_group_idx": 0,
+        "engine_group_idx": 0,
+        "object_group_idx": 0,
+        "num_layers": 80,
+        "slots_per_block": 128,
         "dtype": "torch.float16",
         "is_mla": false,
-        "num_blocks": 2048
+        "attention_backend": "vLLM non-MLA flash attention",
+        "engine_kv_shape": "NL x [2, NB, BS, NH, HS]",
+        "engine_kv_concrete_shape": "80 x [2, 2048, 128, 8, 128]"
       }
     ],
     "l2_adapters": [
@@ -92,18 +107,29 @@ programmatic access:
 ```
 
 Per-model sections are generated for each unique `(model_name, world_size)` pair
-registered with the engine. The section includes:
+registered with the engine. The model section carries the context-wide fields —
+`num_layers`, `num_blocks`, and `cache_size_per_token` — and is followed by one
+**kernel group** section per kernel group, since a hybrid model's groups can
+differ in geometry.
 
+Each kernel group section includes:
+
+- **Kernel / engine / object group index** — the group's identity:
+  `kernel_group_idx` enumerates the manager's kernel groups, `engine_group_idx`
+  is the paged-block address space (0 for non-hybrid), and `object_group_idx` is
+  the owning object group.
+- **Num layers** and **Slots per block** — the group's layer count and
+  `shape_desc.bs`.
+- **Dtype** and **MLA** — the group's torch dtype and MLA flag.
 - **Attention backend** — which attention implementation is active (e.g.,
   `vLLM non-MLA flash attention`, `vLLM MLA`, `SGLang MHA`), derived from the
-  `GPUKVFormat` enum.
-- **GPU KV shape** — the symbolic tensor layout using short names matching the
-  `GPUKVFormat` enum (NB=num_blocks, NL=num_layers, BS=block_size, NH=num_heads,
+  `EngineKVFormat` enum.
+- **Engine KV shape** — the symbolic tensor layout using short names matching the
+  `EngineKVFormat` enum (NB=num_blocks, NL=num_layers, BS=block_size, NH=num_heads,
   HS=head_size, PBS=page_buffer_size). E.g., `NL x [2, NB, BS, NH, HS]`.
-- **GPU KV tensor shape** — the same layout with actual numeric values substituted
-  (e.g., `80 x [2, 2048, 128, 8, 128]`).
-- **Layout details** — num_layers, block_size, hidden_dim_size, dtype, MLA flag,
-  num_blocks.
+- **Engine KV tensor shape** — the same layout with actual numeric values substituted
+  from the group's `shape_desc` (e.g., `80 x [2, 2048, 128, 8, 128]`), so it is
+  group-accurate.
 
 L2 adapter sections are generated for each adapter in
 `storage_manager.l2_adapters`. Fields shown depend on the adapter type:
@@ -117,18 +143,80 @@ L2 adapter sections are generated for each adapter in
 
 ---
 
+## `lmcache describe engine`
+
+`describe engine` is the engine-side counterpart to `describe kvcache`. Where
+`kvcache` inspects the LMCache service, `engine` inspects the **inference
+engine** (vLLM) that LMCache is paired with, reading only the engine's own HTTP
+surface.
+
+```bash
+$ lmcache describe engine --url http://localhost:8000
+
+================ Inference Engine ================
+Model:                  meta-llama/Llama-3.1-8B-Instruct
+Max context (tokens):   131072
+Status:                 OK
+Running requests:       3
+==================================================
+```
+
+```json
+{
+  "title": "Inference Engine",
+  "metrics": {
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "max_context": 131072,
+    "status": "OK",
+    "running_requests": 3
+  }
+}
+```
+
+### Data sources
+
+Unlike `kvcache` (a single `/status` call), `engine` composes three vLLM
+endpoints, so no LMCache-server cooperation is required:
+
+| Display label | Machine key | Source |
+|---|---|---|
+| Model | `model` | `/v1/models` → `data[0].id` |
+| Max context (tokens) | `max_context` | `/v1/models` → `data[0].max_model_len` |
+| Status | `status` | `/health` HTTP 200 → `"OK"` / `"UNHEALTHY"` |
+| Running requests | `running_requests` | `/metrics` → sum of `vllm:num_requests_running` series |
+
+`--url` defaults to `http://localhost:8000` (the engine default; `kvcache`
+defaults to `http://localhost:8080`).
+
+### Error handling
+
+| Condition | Behavior |
+|---|---|
+| `/v1/models` unreachable / errors | Print error to stderr, exit 1 (same as `kvcache`) |
+| `/health` not reachable or non-200 | `Status: UNHEALTHY` (does not fail the command) |
+| `/metrics` unreachable or metric absent | `Running requests: N/A` (best-effort; metric is informational) |
+| Empty model list | `Model` / `Max context` render as `N/A` |
+
+The `/health` and `/metrics` lookups are intentionally non-fatal: an engine that
+is up but has metrics disabled, or is momentarily unhealthy, still yields a
+useful report rather than a hard failure. Only the primary `/v1/models` fetch
+exits non-zero on failure.
+
+---
+
 ## Design Decisions
 
 ### 1. Sub-target as positional argument
 
 ```
 lmcache describe kvcache --url http://localhost:8000
-lmcache describe engine  --url http://localhost:8000   # (Phase 2)
+lmcache describe engine  --url http://localhost:8000
 ```
 
-Uses a positional `target` argument with `choices=["kvcache"]` (extend to
-`"engine"` in Phase 2). Matches the `describe {kvcache,engine}` pattern in
-[commands.md](../commands.md).
+Uses a positional `target` argument with `choices=["kvcache", "engine"]`,
+matching the `describe {kvcache,engine}` pattern in
+[commands.md](../commands.md). Each target resolves its own default `--url`
+(`8080` for `kvcache`, `8000` for `engine`) via the `DEFAULT_URLS` map.
 
 ### 2. `--url` points to the HTTP endpoint
 
@@ -177,11 +265,11 @@ existing `lmcache/tools/mp_status_viewer/__main__.py`.
 Three fields in the design doc's `describe kvcache` output are **not currently
 available** from `/status`. The following changes surface them.
 
-### 1. Add `start_time` to `MPCacheEngine` → expose `uptime_seconds`
+### 1. Add `start_time` to `MPCacheServer` → expose `uptime_seconds`
 
 **File:** `lmcache/v1/multiprocess/server.py`
 
-`MPCacheEngine.__init__()` (line 147) records `self._start_time = time.monotonic()`
+`MPCacheServer.__init__()` (line 147) records `self._start_time = time.monotonic()`
 at construction. `report_status()` (line 696) includes a new field:
 
 ```python
@@ -190,16 +278,16 @@ at construction. `report_status()` (line 696) includes a new field:
 
 The CLI formats this as a human-readable string (e.g., `2h 14m 32s`).
 
-### 2. Pass endpoint addresses into `MPCacheEngine` → expose in status
+### 2. Pass endpoint addresses into `MPCacheServer` → expose in status
 
 **File:** `lmcache/v1/multiprocess/server.py`
 
-Currently `MPCacheEngine` does not know the ZMQ or HTTP addresses — those live in
+Currently `MPCacheServer` does not know the ZMQ or HTTP addresses — those live in
 `MPServerConfig` and `HTTPFrontendConfig`, which are only available in
 `run_cache_server()` / `run_http_server()`.
 
 **Option A — engine constructor params:** Add optional `zmq_endpoint: str | None`
-and `http_endpoint: str | None` kwargs to `MPCacheEngine.__init__()`. Callers
+and `http_endpoint: str | None` kwargs to `MPCacheServer.__init__()`. Callers
 (`run_cache_server` at line 787, and the blend variant) pass these when available.
 `report_status()` includes them.
 
@@ -211,7 +299,7 @@ returning it. This avoids changing the constructor signature.
 
 ```python
 # In run_cache_server() (line 787):
-engine = MPCacheEngine(
+engine = MPCacheServer(
     storage_manager_config=storage_manager_config,
     chunk_size=mp_config.chunk_size,
     hash_algorithm=mp_config.hash_algorithm,
@@ -244,36 +332,54 @@ endpoint is only known in `run_http_server()`. Since `run_http_server()` calls
 
 Mirror the same `start_time`, `zmq_endpoint`, and `http_endpoint` additions if
 `BlendCacheEngine` has its own `report_status()`. If it delegates to
-`MPCacheEngine`, no separate change is needed.
+`MPCacheServer`, no separate change is needed.
 
 ### Summary of server-side changes
 
 | Field | Where | Change |
 |---|---|---|
-| `uptime_seconds` | `MPCacheEngine.__init__` + `report_status()` | Record `time.monotonic()` at init, compute delta in status |
-| `zmq_endpoint` | `MPCacheEngine.__init__` + `run_cache_server()` | New constructor kwarg, passed from `MPServerConfig` |
+| `uptime_seconds` | `MPCacheServer.__init__` + `report_status()` | Record `time.monotonic()` at init, compute delta in status |
+| `zmq_endpoint` | `MPCacheServer.__init__` + `run_cache_server()` | New constructor kwarg, passed from `MPServerConfig` |
 | `http_endpoint` | `run_http_server()` lifespan + `report_status()` | Set on engine after construction when HTTP is enabled |
 
-### 4. Expose GPU KV format, shape, and attention backend in `kv_cache_layout`
+### 4. Expose engine KV format, shape, and attention backend in `kv_cache_layout`
 
-**Files:** `lmcache/v1/gpu_connector/utils.py`, `lmcache/v1/multiprocess/gpu_context.py`, `lmcache/v1/multiprocess/server.py`
+**Files:** `lmcache/v1/gpu_connector/utils.py`, `lmcache/v1/platform/cuda/cache_context.py`, `lmcache/v1/multiprocess/server.py`
 
-Three new helper functions in `utils.py` (derived from `legible_print_gpu_kv_format()`):
-- `get_gpu_kv_shape_description(gpu_kv_format)` — symbolic shape (e.g., `List[num_layers] of [2, num_blocks, ...]`)
-- `get_attention_backend(gpu_kv_format)` — backend name (e.g., `vLLM non-MLA flash attention`)
-- `get_concrete_gpu_kv_shape(kv_caches, gpu_kv_format)` — shape with actual values (e.g., `List[80] of [2, 2048, 128, 8, 128]`)
+Helper functions in `utils.py` (derived from `legible_print_engine_kv_format()`):
+- `get_engine_kv_shape_description(engine_kv_format)` — symbolic shape (e.g., `NL x [2, NB, BS, NH, HS]`)
+- `get_attention_backend(engine_kv_format)` — backend name (e.g., `vLLM non-MLA flash attention`)
+- `get_concrete_engine_kv_shape(kv_caches, engine_kv_format)` — whole-context shape with actual values
+- `get_concrete_engine_kv_shape_from_shape_desc(shape_desc, engine_kv_format)` — **group-accurate** shape with actual values, read from a single kernel group's `PageBufferShapeDesc` (used by `report_status`)
 
-`GPUCacheContext` exposes these as properties: `gpu_kv_format_name`, `gpu_kv_shape`, `concrete_gpu_kv_shape`, `attention_backend`.
-
-`report_status()` includes them in the per-GPU `kv_cache_layout` dict:
+`report_status()` is organised **per kernel group**: a small set of context-wide
+fields at the top level, plus a `kernel_groups` list where each entry is
+self-describing. The format-derived fields (`engine_kv_format`, `engine_kv_shape`,
+`attention_backend`, `is_mla`) and the group-accurate `engine_kv_concrete_shape`
+live inside each group:
 
 ```python
 "kv_cache_layout": {
-    ...,
-    "gpu_kv_format": "NL_X_TWO_NB_BS_NH_HS",
-    "gpu_kv_shape": "NL x [2, NB, BS, NH, HS]",
-    "gpu_kv_concrete_shape": "80 x [2, 2048, 128, 8, 128]",
-    "attention_backend": "vLLM non-MLA flash attention",
+    "num_layers": 80,
+    "num_blocks": 2048,
+    "cache_size_per_token": 327680,
+    "kernel_groups": [
+        {
+            "kernel_group_idx": 0,
+            "engine_group_idx": 0,
+            "object_group_idx": 0,
+            "num_layers": 80,
+            "layer_indices": [0, 1, ...],
+            "tokens_per_block": 128,
+            "slots_per_block": 128,
+            "dtype": "torch.float16",
+            "engine_kv_concrete_shape": "80 x [2, 2048, 128, 8, 128]",
+            "is_mla": false,
+            "engine_kv_format": "NL_X_TWO_NB_BS_NH_HS",
+            "engine_kv_shape": "NL x [2, NB, BS, NH, HS]",
+            "attention_backend": "vLLM non-MLA flash attention",
+        },
+    ],
 }
 ```
 
@@ -289,14 +395,18 @@ class DescribeCommand(BaseCommand):
     help() → "Show detailed status of a running LMCache service."
 
     add_arguments(parser):
-        parser.add_argument("target", choices=["kvcache"],
+        parser.add_argument("target", choices=["kvcache", "engine"],
                             help="What to describe.")
-        parser.add_argument("--url", default="http://localhost:8080",
-                            help="LMCache HTTP server URL")
+        parser.add_argument("--url", default=None,
+                            help="Server URL (per-target default applied)")
 
     execute(args):
+        if args.url is None:
+            args.url = DEFAULT_URLS[args.target]
         if args.target == "kvcache":
             self._describe_kvcache(args)
+        elif args.target == "engine":
+            self._describe_engine(args)
 
     _describe_kvcache(args):
         1. Normalize URL (ensure http:// prefix)
@@ -364,10 +474,3 @@ ALL_COMMANDS: list[BaseCommand] = [
 3. **JSON output:** Verify machine keys are snake_case and values are raw types
    (not display-formatted strings), except `l1_used_gb` and `uptime` which include
    human-readable formatting.
-
----
-
-## Future Work (out of scope)
-
-- `describe engine` (Phase 2) — queries vLLM's `/v1/models` and `/health`
-  endpoints for model name, context length, running requests.
