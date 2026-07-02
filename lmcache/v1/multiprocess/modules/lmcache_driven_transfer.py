@@ -675,14 +675,14 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         layout_desc = get_layout_desc(
             cache_context, self._ctx.chunk_size, object_group_id=0
         )
-        group_layout_descs: dict[int, MemoryLayoutDesc] | None = None
-        if num_groups > 1:
-            group_layout_descs = {
-                gid: get_layout_desc(
-                    cache_context, self._ctx.chunk_size, object_group_id=gid
-                )
-                for gid in range(num_groups)
-            }
+        # One layout per object group, also in the single-group case: no
+        # None special-casing downstream (group 0 maps to the merged layout).
+        group_layout_descs = {
+            gid: get_layout_desc(
+                cache_context, self._ctx.chunk_size, object_group_id=gid
+            )
+            for gid in range(num_groups)
+        }
         attn_desc = kv_groups_manager.get_attn_desc()
         self._ctx.layout_desc_registry.register(
             model_name,

@@ -240,11 +240,11 @@ class InFlightPrefetchRequest:
     # Keys backing l1_bitmap with read locks (always empty in WARM mode).
     l1_pinned_keys: set[ObjectKey] = field(default_factory=set)
 
-    group_layout_descs: dict[int, MemoryLayoutDesc] | None = None
+    group_layout_descs: dict[int, MemoryLayoutDesc] = field(default_factory=dict)
     """Maps object_group_id to that group's layout. Each object group is a
     separate keyed L1 allocation, so each needs its own descriptor (one
-    ``MemoryLayoutDesc`` describes a single group's MemoryObj). ``None`` when
-    all keys share ``layout_desc`` (a single / merged object group)."""
+    ``MemoryLayoutDesc`` describes a single group's MemoryObj). Groups
+    missing from the map fall back to ``layout_desc``."""
 
     def all_lookups_done(self) -> bool:
         return len(self.pending_lookup_tasks) == 0
@@ -992,7 +992,7 @@ class PrefetchController(StorageControllerInterface):
             policy=policy,
             attn_desc=attn_desc,
             mode=mode,
-            group_layout_descs=group_layout_descs,
+            group_layout_descs=group_layout_descs or {},
             l1_bitmap=l1_bitmap,
             l1_pinned_keys=l1_pinned_keys,
         )
@@ -1144,30 +1144,22 @@ class PrefetchController(StorageControllerInterface):
             )
         retention_map = dict(zip(keys_to_reserve, retentions, strict=True))
 
-        # When per-group layouts are available, batch reserve_write by
-        # object_group_id so each group uses its own tensor shapes.
-        if request.group_layout_descs:
-            # Chunk-major order interleaves group ids, so sort before
-            # groupby (stable: within-group prefix order is preserved).
-            write_results: dict[ObjectKey, tuple[L1Error, MemoryObj | None]] = {}
-            by_group = sorted(keys_to_reserve, key=attrgetter("object_group_id"))
-            for gid, group_iter in groupby(by_group, key=attrgetter("object_group_id")):
-                group_keys = list(group_iter)
-                gld = request.group_layout_descs.get(gid, request.layout_desc)
-                gr = self._l1_manager.reserve_write(
-                    keys=group_keys,
-                    is_temporary=[not retention_map[k] for k in group_keys],
-                    layout_desc=gld,
-                    mode="new",
-                )
-                write_results.update(gr)
-        else:
-            write_results = self._l1_manager.reserve_write(
-                keys=keys_to_reserve,
-                is_temporary=[not r for r in retentions],
-                layout_desc=request.layout_desc,
+        # Batch reserve_write by object_group_id so each group uses its own
+        # tensor shapes (groups missing from group_layout_descs fall back to
+        # layout_desc). Chunk-major order interleaves group ids, so sort
+        # before groupby (stable: within-group prefix order is preserved).
+        write_results: dict[ObjectKey, tuple[L1Error, MemoryObj | None]] = {}
+        by_group = sorted(keys_to_reserve, key=attrgetter("object_group_id"))
+        for gid, group_iter in groupby(by_group, key=attrgetter("object_group_id")):
+            group_keys = list(group_iter)
+            gld = request.group_layout_descs.get(gid, request.layout_desc)
+            gr = self._l1_manager.reserve_write(
+                keys=group_keys,
+                is_temporary=[not retention_map[k] for k in group_keys],
+                layout_desc=gld,
                 mode="new",
             )
+            write_results.update(gr)
 
         reserved: set[ObjectKey] = set()
         oom_keys: list[ObjectKey] = []
