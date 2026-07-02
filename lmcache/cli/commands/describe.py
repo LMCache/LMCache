@@ -7,6 +7,7 @@ Usage::
 """
 
 # Standard
+from typing import TYPE_CHECKING
 import argparse
 import json
 import sys
@@ -18,7 +19,10 @@ from prometheus_client.parser import text_string_to_metric_families
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
-from lmcache.cli.metrics import Metrics
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.cli.metrics import Metrics
 
 # Default server URLs per describe target (ZMQ/HTTP semantics differ).
 DEFAULT_URLS: dict[str, str] = {
@@ -175,7 +179,7 @@ class KVCacheDescriber:
     about it.
     """
 
-    def __init__(self, metrics: Metrics, data: dict, base_url: str) -> None:
+    def __init__(self, metrics: "Metrics", data: dict, base_url: str) -> None:
         self.metrics = metrics
         self.data = data
         self.base_url = base_url
@@ -386,7 +390,7 @@ class EngineDescriber:
 
     def __init__(
         self,
-        metrics: Metrics,
+        metrics: "Metrics",
         models_data: dict,
         is_healthy: bool,
         running_requests: int | None,
