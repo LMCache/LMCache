@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
-# First Party
-from lmcache.utils import CacheEngineKey
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.utils import CacheEngineKey
 
 
 class BigtableSchema:
@@ -13,7 +14,7 @@ class BigtableSchema:
         self.family_name = family_name
         self.column_name = column_name
 
-    def get_row_key(self, key: CacheEngineKey) -> bytes:
+    def get_row_key(self, key: "CacheEngineKey") -> bytes:
         fingerprint = (
             f"{key.model_name}@{key.world_size}@{key.worker_id}@{key._dtype_str}"
         )
