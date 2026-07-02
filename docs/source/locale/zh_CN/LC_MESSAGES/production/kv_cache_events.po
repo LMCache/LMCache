@@ -184,3 +184,7 @@ msgid ""
 "and run this updated python script in a separate terminal."
 msgstr "要处理 SGLang 发布的事件，您需要一个订阅发布者消息通道并能够消费事件的客户端。vLLM 提供了这样一个客户端示例 `KV Events Subscriber <https://docs.vllm.ai/en/stable/examples/online_serving/kv_events_subscriber/>`_。要将此客户端用于 SGLang，您需要从 ``BlockStored`` 类定义中删除属性 ``medium`` 和 ``lora_name``，并从 ``BlockRemoved`` 类定义中删除 ``medium``。保存更改并在单独的终端中运行此更新的 Python 脚本。"
 
+
+#: ../../source/production/kv_cache_events.rst:1
+msgid "This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/observability/index`."
+msgstr "本页面介绍 LMCache 进程内模式（不推荐使用）的行为。建议改用 :doc:`LMCache MP 模式 </mp/index>`\\ 以获得更好的功能支持与性能。本页面对应的 MP 模式文档请参见 :doc:`/mp/observability/index`\\ 。"

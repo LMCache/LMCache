@@ -184,6 +184,42 @@ The HTTP frontend is included when running ``lmcache server``.
      - ``8080``
      - Port to bind the HTTP server.
 
+P2P
+---
+
+Source: ``lmcache/v1/multiprocess/config.py``
+
+These flags configure peer-to-peer KV cache sharing between MP servers
+(see :doc:`p2p`). They are registered by ``add_p2p_args()`` on the
+``lmcache server`` parser. P2P is enabled when ``--p2p-advertise-url``
+is set, which additionally requires a coordinator URL via
+``--coordinator-url`` (or ``LMCACHE_COORDINATOR_URL``).
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 55
+
+   * - Argument
+     - Default
+     - Description
+   * - ``--p2p-advertise-url``
+     - ``""`` (P2P disabled)
+     - Transfer-channel server ``host:port`` this instance advertises to
+       peers. Setting it enables P2P (also requires ``--coordinator-url``).
+   * - ``--p2p-listen-url``
+     - ``""``
+     - Transfer-channel server ``host:port`` to bind. Defaults to
+       ``--p2p-advertise-url``.
+   * - ``--p2p-lookup-timeout``
+     - ``30.0``
+     - Seconds before a peer lookup result counts as a miss.
+   * - ``--p2p-load-timeout``
+     - ``30.0``
+     - Seconds before a peer load counts as a failure.
+   * - ``--p2p-transfer-engine``
+     - ``nixl``
+     - Transfer-channel implementation to use.
+
 L1 Memory Manager
 ------------------
 
@@ -205,10 +241,6 @@ Source: ``lmcache/v1/distributed/config.py``
      - Enable or disable lazy allocation for L1 memory.
        Pass ``--l1-use-lazy`` to enable (default) or
        ``--no-l1-use-lazy`` to explicitly disable.
-       Lazy allocation relies on ``cudart`` host-pinned memory, so on
-       non-CUDA backends (where ``lmcache.torch_dev`` exposes no
-       ``cudart`` attribute) it is automatically downgraded to eager
-       allocation with a logged warning, regardless of the flag value.
    * - ``--l1-init-size-gb``
      - ``20``
      - Initial allocation size (GB) when using lazy allocation.
@@ -437,6 +469,23 @@ On the vLLM side, specify the LMCache server host and port via the
         --kv-transfer-config \
         '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "127.0.0.1", "lmcache.mp.port": 6000}}'
 
+To target multiple LMCache servers from a single vLLM deployment, pass a
+list (or comma-separated string) of server URLs via
+``lmcache.mp.server_urls``. When set, ``server_urls`` takes precedence
+over the single-server ``host`` / ``port`` keys; vLLM's world size must
+be divisible by the number of servers, and each worker connects only to
+its locally-assigned server (global ranks are sliced into contiguous
+blocks, one block per server). Multi-server mode currently supports
+tensor parallelism only -- pipeline parallelism (``pp_size > 1``) and
+data parallelism (``dp_size > 1``) are rejected with a clear error.
+
+.. code-block:: bash
+
+    vllm serve Qwen/Qwen3-14B \
+        --tensor-parallel-size 4 \
+        --kv-transfer-config \
+        '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.server_urls": "tcp://host1:6667,tcp://host2:6667"}}'
+
 ``LMCacheMPConnector`` reads the following keys from
 ``kv_connector_extra_config``:
 
@@ -453,12 +502,24 @@ All connector-level options are passed through
    * - Key
      - Default
      - Description
+   * - ``lmcache.mp.server_urls``
+     - *(unset)*
+     - Multi-server deployment: list (or comma-separated string) of
+       ``<transport>://<host>:<port>`` URLs, e.g.
+       ``"tcp://host1:6667,tcp://host2:6667"``. When set, takes
+       precedence over ``lmcache.mp.host`` / ``lmcache.mp.port``; the
+       vLLM world size must be divisible by the number of servers, and
+       each worker connects to its locally-assigned server.
    * - ``lmcache.mp.host``
      - ``tcp://localhost``
-     - Host (with ZMQ transport prefix) of the LMCache MP server.
+     - Single-server deployment: host (with ZMQ transport prefix) of
+       the LMCache MP server. Ignored when ``lmcache.mp.server_urls``
+       is set.
    * - ``lmcache.mp.port``
      - ``5555``
-     - Port of the LMCache MP server. Must match the server's ``--port``.
+     - Single-server deployment: port of the LMCache MP server. Must
+       match the server's ``--port``. Ignored when
+       ``lmcache.mp.server_urls`` is set.
    * - ``lmcache.mp.mq_timeout``
      - ``300.0``
      - Timeout (seconds) for blocking message-queue requests, including
@@ -472,10 +533,12 @@ All connector-level options are passed through
    * - ``lmcache.mp.mp_transfer_mode``
      - ``auto``
      - Routing mode for the worker -> server transfer context. One of
-       ``auto`` (CUDA -> engine_driven, others -> lmcache_driven),
-       ``engine_driven`` (force IPC / SHM zero-copy), or
-       ``lmcache_driven`` (force worker-side gather/scatter copy).
-       Overrides the ``LMCACHE_MP_TRANSFER_MODE`` env var when set.
+       ``auto`` (CUDA -> lmcache_driven, others -> engine_driven),
+       ``lmcache_driven`` (force the IPC / SHM zero-copy handle path —
+       LMCache server pulls data via device handles), or
+       ``engine_driven`` (force the worker-side gather/scatter copy
+       path). Overrides the ``LMCACHE_MP_TRANSFER_MODE`` env var when
+       set.
 
 Environment Variables
 ---------------------

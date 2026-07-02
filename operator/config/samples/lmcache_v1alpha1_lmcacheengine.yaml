@@ -99,5 +99,13 @@ spec:
   # serviceAccountName: ""
   # priorityClassName: ""
 
+  # -- Security --
+  # Run the engine container in privileged mode. Defaults to false. On most
+  # clusters runtimeClassName: nvidia + NVIDIA_VISIBLE_DEVICES=all is enough for
+  # the engine to see all GPUs; set this to true only on clusters where it
+  # cannot see them otherwise. Requires the namespace to allow the privileged
+  # Pod Security Standard.
+  # privileged: false
+
   # -- Extra CLI flags (appended last, can override any auto-generated flag) --
   # extraArgs: []

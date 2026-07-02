@@ -125,9 +125,9 @@ func TestBuildCBEngineDaemonSet_GPUAndSecurity(t *testing.T) {
 	}
 	c := podSpec.Containers[0]
 
-	// privileged: true.
-	if c.SecurityContext == nil || c.SecurityContext.Privileged == nil || !*c.SecurityContext.Privileged {
-		t.Fatal("expected privileged=true")
+	// privileged defaults to false (opt-in via spec.privileged).
+	if c.SecurityContext == nil || c.SecurityContext.Privileged == nil || *c.SecurityContext.Privileged {
+		t.Fatal("expected privileged=false by default")
 	}
 
 	// NVIDIA env exposes all GPUs without a device-plugin claim.
@@ -146,6 +146,18 @@ func TestBuildCBEngineDaemonSet_GPUAndSecurity(t *testing.T) {
 	// Blend args present on the container.
 	assertArg(t, c.Args, "--engine-type", "blend")
 	assertArg(t, c.Args, "--l1-align-bytes", "16777216")
+}
+
+func TestBuildCBEngineDaemonSet_PrivilegedEnabled(t *testing.T) {
+	engine := minimalCBEngine()
+	engine.Spec.Privileged = ptr(true)
+	ds := BuildCBEngineDaemonSet(engine)
+	c := ds.Spec.Template.Spec.Containers[0]
+
+	// spec.privileged=true threads through to the container security context.
+	if c.SecurityContext == nil || c.SecurityContext.Privileged == nil || !*c.SecurityContext.Privileged {
+		t.Fatal("expected privileged=true when spec.privileged=true")
+	}
 }
 
 func TestBuildCBEngineDaemonSet_NoGPUResourceClaim(t *testing.T) {
@@ -204,7 +216,8 @@ func TestBuildCBEngineDaemonSet_AMDNoRuntimeClass(t *testing.T) {
 	if podSpec.RuntimeClassName != nil {
 		t.Fatalf("expected nil RuntimeClassName for AMD, got %q", *podSpec.RuntimeClassName)
 	}
-	// Still privileged + hostIPC.
+	// hostIPC is still injected for AMD (privileged stays at its default false
+	// here since the fixture does not opt in).
 	if !podSpec.HostIPC {
 		t.Fatal("expected HostIPC=true even for AMD")
 	}

@@ -309,3 +309,7 @@ msgid ""
 "limit of ``100.0`` MB. Exceeding this will trigger hard gRPC exceptions."
 msgstr "请勿将 ``bigtable_max_chunk_size_mb`` 设置得高于 ``100.0`` MB。虽然 Cloud Bigtable 支持单行高达 ``256.0`` MB，但单个单元格值（LMCache 用于存储块负载的值）有一个硬限制为 ``100.0`` MB。超过此限制将触发硬 gRPC 异常。"
 
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:1
+msgid "This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/l2_storage/index`."
+msgstr "本页面介绍 LMCache 进程内模式（不推荐使用）的行为。建议改用 :doc:`LMCache MP 模式 </mp/index>`\\ 以获得更好的功能支持与性能。本页面对应的 MP 模式文档请参见 :doc:`/mp/l2_storage/index`\\ 。"
