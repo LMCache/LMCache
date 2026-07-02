@@ -902,7 +902,8 @@ class PrefetchController(StorageControllerInterface):
         attn_desc: AttnWindowDesc,
         mode: PrefetchMode,
     ) -> tuple[Bitmap, set[ObjectKey]]:
-        """Peek L1, then pin (read-lock) the servable subset (LOOKUP only)::
+        """Peek L1, then pin (read-lock) keys in L1. Details in the figure
+        below::
 
             SW keys in L1:
 
@@ -1146,8 +1147,7 @@ class PrefetchController(StorageControllerInterface):
 
         # Batch reserve_write by object_group_id so each group uses its own
         # tensor shapes (groups missing from group_layout_descs fall back to
-        # layout_desc). Chunk-major order interleaves group ids, so sort
-        # before groupby (stable: within-group prefix order is preserved).
+        # layout_desc).
         write_results: dict[ObjectKey, tuple[L1Error, MemoryObj | None]] = {}
         by_group = sorted(keys_to_reserve, key=attrgetter("object_group_id"))
         for gid, group_iter in groupby(by_group, key=attrgetter("object_group_id")):

@@ -380,11 +380,11 @@ def add_mp_server_args(
         "L1-resident instead of truncating at the gap. No effect otherwise.",
     )
     mp_group.add_argument(
-        "--force-retrieve-full-kvcache",
+        "--force-retrieve-full-kvcache-benchmark-only",
         action="store_true",
-        help="Retrieve the full KV cache during prefetch, ignoring per-group "
-        "sliding-window sizes. Every prefix chunk is prefetched regardless "
-        "of sliding-window bounds.",
+        help="Benchmarking only: retrieve the full KV cache during prefetch, "
+        "ignoring per-group sliding-window sizes. Every prefix chunk is "
+        "prefetched regardless of sliding-window bounds.",
     )
     return parser
 
@@ -420,7 +420,9 @@ def parse_args_to_mp_server_config(
         engine_type=args.engine_type,
         separate_object_groups=args.separate_object_groups,
         enable_segmented_prefix=args.enable_segmented_prefix,
-        force_retrieve_full_kv_benchmark_only=args.force_retrieve_full_kvcache,
+        force_retrieve_full_kv_benchmark_only=(
+            args.force_retrieve_full_kvcache_benchmark_only
+        ),
         supported_transfer_mode=args.supported_transfer_mode,
         runtime_plugin_config=RuntimePluginConfig(
             locations=(args.runtime_plugin_locations or []),

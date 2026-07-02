@@ -498,7 +498,7 @@ class StorageManager:
                     remaining_keys,
                     layout_desc,
                     extra_count=extra_count,
-                    policy=TrimPolicy.SPARSE,
+                    policy=policy,
                     attn_desc=attn_desc,
                     group_layout_descs=group_layout_descs,
                     mode=mode,
@@ -526,6 +526,7 @@ class StorageManager:
                 external_request_id,
                 layout_desc,
                 skip_l2,
+                policy=policy,
                 group_layout_descs=group_layout_descs,
                 mode=mode,
             )
@@ -541,6 +542,7 @@ class StorageManager:
         external_request_id: str,
         layout_desc: MemoryLayoutDesc,
         skip_l2: bool,
+        policy: TrimPolicy = TrimPolicy.PREFIX,
         group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
         mode: PrefetchMode = PrefetchMode.LOOKUP,
     ) -> PrefetchHandle:
@@ -556,6 +558,8 @@ class StorageManager:
             external_request_id: Engine-side request id, for logging/trace.
             layout_desc: Memory layout for the L1 write buffers of L2 loads.
             skip_l2: When True, serve from L1 only (no L2 prefetch).
+            policy: Trim policy forwarded to the L2 prefetch; the dispatcher
+                only routes ``PREFIX`` here.
             group_layout_descs: Maps object_group_id to that group's layout;
                 ``None`` when all keys share ``layout_desc``.
             mode: The prefetch intent (see :class:`PrefetchMode`).
@@ -615,7 +619,7 @@ class StorageManager:
                 layout_desc,
                 extra_count=extra_count,
                 attn_desc=attn_desc,
-                policy=TrimPolicy.PREFIX,
+                policy=policy,
                 group_layout_descs=group_layout_descs,
                 mode=mode,
             )
