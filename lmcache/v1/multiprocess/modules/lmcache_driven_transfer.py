@@ -272,6 +272,12 @@ def transfer_kv_per_object_group(
     is_h2d = direction == lmc_ops.TransferDirection.H2D
 
     attn_desc = kv_groups_manager.get_attn_desc()
+    # TODO(sliding-window): hoist num_objects_to_skip into a parameter and let
+    # the caller pass it in. The H2D caller (retrieve) already computes the
+    # same value to slice its read-locks; recomputing here from
+    # len(memory_objs) only agrees with it because the caller pads the dropped
+    # prefix with None. If the caller stops padding, this recomputes as 0 and
+    # H2D writes the trailing window into the leading chunks' GPU blocks.
     num_objects_to_skip = 0
     if not attn_desc.is_full_attention(object_group_id) and is_h2d:
         sw_size_chunks = attn_desc.num_chunks_in_sw[object_group_id]
@@ -671,7 +677,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             separate_object_groups=self._ctx.separate_object_groups,
         )
         kv_groups_manager = cache_context.kv_layer_groups_manager
-        num_groups = kv_groups_manager.num_object_groups
+        num_object_groups = kv_groups_manager.num_object_groups
         layout_desc = get_layout_desc(
             cache_context, self._ctx.chunk_size, object_group_id=0
         )
@@ -681,7 +687,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             gid: get_layout_desc(
                 cache_context, self._ctx.chunk_size, object_group_id=gid
             )
-            for gid in range(num_groups)
+            for gid in range(num_object_groups)
         }
         attn_desc = kv_groups_manager.get_attn_desc()
         self._ctx.layout_desc_registry.register(
@@ -1048,6 +1054,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             # L1; read-lock that same subset (matching the prefetch path and
             # transfer_kv_per_object_group's skip). Reading the dropped prefix
             # would hit KEY_NOT_READABLE on chunks left unlocked.
+            # TODO(sliding-window): this window-skip computation duplicates
+            # transfer_kv_per_object_group's; deduplicate by hoisting the
+            # skip into a parameter (see the TODO in that helper).
             attn_desc = cache_context.kv_layer_groups_manager.get_attn_desc()
 
             prefetched_keys: list[ObjectKey] = []

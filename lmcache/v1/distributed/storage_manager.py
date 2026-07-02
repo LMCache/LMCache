@@ -565,8 +565,8 @@ class StorageManager:
             and hit chunks) and the pending L2 prefetch request id (``-1``
             when nothing was submitted to L2).
         """
-        num_groups = attn_desc.num_object_groups
-        stride = num_groups * attn_desc.world_size
+        num_object_groups = attn_desc.num_object_groups
+        stride = num_object_groups * attn_desc.world_size
         num_chunks = len(keys) // stride
 
         l1_presence = Bitmap(len(keys))
