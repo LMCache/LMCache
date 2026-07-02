@@ -62,11 +62,6 @@ inline int round_up_to_sg(int n) {
 // ---------------------------------------------------------------------------
 namespace lmc {
 
-inline bool is_mla(const EngineKVFormat engine_kv_format) {
-  return engine_kv_format == EngineKVFormat::NL_X_NB_BS_HS ||   // vLLM MLA
-         engine_kv_format == EngineKVFormat::NL_X_NBBS_ONE_HS;  // SGLang MLA
-}
-
 template <EngineKVFormat format>
 inline int64_t page_buffer_offset(const int k_or_v, const int token_idx,
                                   const int scalar_offset,
@@ -402,7 +397,7 @@ void multi_layer_kv_transfer_templated(
   int elements_per_xword = sizeof(T) / key_value.element_size();
   int num_xwords = num_origin_elements / elements_per_xword;
 
-  int k_or_v_size = lmc::is_mla(engine_kv_format) ? 1 : 2;
+  int k_or_v_size = ::is_mla(engine_kv_format) ? 1 : 2;
 
   // Round up to a sub-group multiple so every sub-group is full.
   int wg_size = round_up_to_sg(std::min(num_xwords, MAX_WG_SIZE));
@@ -523,7 +518,7 @@ void multi_layer_kv_transfer_unilateral(
     const torch::Tensor& slot_mapping, const torch::Device& paged_memory_device,
     const int page_buffer_size, const TransferDirection direction,
     const EngineKVFormat engine_kv_format) {
-  const bool use_mla = lmc::is_mla(engine_kv_format);
+  const bool use_mla = ::is_mla(engine_kv_format);
   // MLA case collapses back to multi_layer_kv_transfer
   if (use_mla) {
     return multi_layer_kv_transfer(key_value, key_value_ptrs, slot_mapping,
@@ -646,7 +641,7 @@ void single_layer_kv_transfer(torch::Tensor& lmc_key_value_cache,
   int head_size_in_64bit;
   int block_size;
 
-  const bool use_mla = lmc::is_mla(engine_kv_format);
+  const bool use_mla = ::is_mla(engine_kv_format);
 
   if (use_mla) {
     num_heads = 1;

@@ -53,12 +53,13 @@ var nsCounter atomic.Int64
 // each spec gets per-test isolation without relying on package state.
 //
 // The namespace is pre-labeled with the `privileged` PodSecurity profile
-// because the LMCache DaemonSet's pod template sets hostIPC=true and
-// privileged=true. On clusters that enforce PodSecurity admission (OCP
-// in particular), a `restricted` namespace would reject the DaemonSet at
-// creation time, which the smokes need to succeed even though they never
-// wait for pods to schedule. The label is a no-op on clusters that don't
-// enforce PodSecurity.
+// because the LMCache DaemonSet's pod template sets hostIPC=true (and
+// privileged=true only when spec.privileged is enabled), and hostIPC alone
+// is rejected by the restricted/baseline profiles. On clusters that enforce
+// PodSecurity admission (OCP in particular), a `restricted` namespace would
+// reject the DaemonSet at creation time, which the smokes need to succeed
+// even though they never wait for pods to schedule. The label is a no-op on
+// clusters that don't enforce PodSecurity.
 func createTestNamespace(ctx context.Context) string {
 	GinkgoHelper()
 	name := uniqueNamespaceName()
@@ -264,4 +265,38 @@ func serviceMonitorCRDInstalled() bool {
 	}
 	Fail(fmt.Sprintf("unexpected error querying ServiceMonitor RESTMapping: %v", err))
 	return false // unreachable
+}
+
+// firstPodForDeployment returns the first non-terminating pod selected by the
+// Deployment's pod selector, or nil if none exist yet. Returns the typed Pod
+// so callers can read both annotations (injection stamp) and container args.
+func firstPodForDeployment(ctx context.Context, ns string, dep *appsv1.Deployment) *corev1.Pod {
+	pods := &corev1.PodList{}
+	if err := k8sClient.List(ctx, pods,
+		client.InNamespace(ns),
+		client.MatchingLabels(dep.Spec.Selector.MatchLabels),
+	); err != nil {
+		return nil
+	}
+	for i := range pods.Items {
+		if pods.Items[i].DeletionTimestamp == nil {
+			return &pods.Items[i]
+		}
+	}
+	return nil
+}
+
+// vllmContainerArgs returns the args of the vLLM container in the pod (the one
+// named "vllm", falling back to the first container). The mutating webhooks
+// append vLLM flags to this container's args.
+func vllmContainerArgs(pod *corev1.Pod) []string {
+	for i := range pod.Spec.Containers {
+		if pod.Spec.Containers[i].Name == "vllm" {
+			return pod.Spec.Containers[i].Args
+		}
+	}
+	if len(pod.Spec.Containers) > 0 {
+		return pod.Spec.Containers[0].Args
+	}
+	return nil
 }

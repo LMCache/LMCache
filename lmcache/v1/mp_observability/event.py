@@ -81,6 +81,11 @@ class EventType(Enum):
     # vLLM end session events
     MP_VLLM_END_SESSION = "mp.vllm.end_session"
 
+    # Published by LMCacheTimeoutError on construction (see errors.py).
+    # Metadata: message (str), exception_type (str), stacktrace (str, mapped
+    # to the OTel exception.stacktrace span attribute).
+    TIMEOUT_RAISED = "timeout.raised"
+
     # Trace recording — unified function-call entry event used by the
     # ``@enable_tracing`` decorator.  Metadata layout:
     #   ``qualname`` (str):   fully-qualified function name

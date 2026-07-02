@@ -25,7 +25,7 @@ lmc_sdk.close(ctx)
 See the [token-dropping example](../../../examples/kvcache_sdk/e2e_kv_edit.py).
 
 The model layout must already be registered in the server by a vLLM instance that called
-`REGISTER_KV_CACHE`; the SDK reads that layout from `/status` and `/conf` to configure itself.
+`REGISTER_KV_CACHE`; the SDK reads that layout from `/status` and `/config` to configure itself.
 
 ## Architecture
 
@@ -53,7 +53,7 @@ LMCacheKVCacheContext
 
 `connect()` builds the context, then `register_kv_caches()` runs once:
 
-1. HTTP `/conf` → `chunk_size`.
+1. HTTP `/config` → `chunk_size`.
 2. HTTP `/status` → the `cache_context_meta` entry for `model_name`: `world_size` and the GPU
    `kv_cache_layout` (`num_layers`, `dtype`, `tokens_per_block`, `engine_kv_format`,
    `engine_kv_concrete_shape`).

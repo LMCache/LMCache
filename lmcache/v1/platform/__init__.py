@@ -13,13 +13,12 @@ packages so each can evolve independently:
 * :mod:`lmcache.v1.platform.cuda` -- CUDA-backed implementations.
 * :mod:`lmcache.v1.platform.cpu`  -- CPU-only fallbacks.
 
-Backend self-registration is filesystem-driven: every direct
-sub-package below ``platform/`` is auto-imported here, which fires its
-``__init__.py`` side effects (``register_kv_wrapper`` /
-``register_availability``).  The ``BaseCacheContext`` subclass that
-each backend ships under ``platform/<backend>/cache_context.py`` is
-discovered separately on first :func:`create_cache_context` call via
-:mod:`lmcache.v1.utils.subclass_discovery`, keyed by the subclass'
+Backend availability is filesystem-driven: every direct sub-package
+below ``platform/`` is auto-imported here, which fires lightweight
+``__init__.py`` side effects such as ``register_availability``.
+KV-cache IPC wrappers and ``BaseCacheContext`` subclasses are
+discovered separately on first use via
+:mod:`lmcache.v1.utils.subclass_discovery`, keyed by each subclass'
 ``device_type`` ClassVar.  Adding a new accelerator therefore
 requires *zero* edits to this module -- drop a new
 ``platform/<backend>/`` package and it will be picked up
@@ -47,13 +46,10 @@ logger = init_logger(__name__)
 def _bootstrap_backends() -> None:
     """Import every direct sub-package under ``lmcache.v1.platform``.
 
-    Each backend sub-package self-registers with
-    :mod:`lmcache.v1.platform._registry` from its ``__init__.py``
-    (KV-cache wrapper factory, availability predicate, lazy
-    cache-context class).  Importing the sub-package is therefore
-    enough -- we deliberately do **not** force-import the heavy
-    ``cache_context`` leaf module here, so platform bootstrap stays
-    free of the circular import chain through
+    Backend ``__init__.py`` files should keep side effects lightweight
+    (for example, availability predicates). KV-cache wrapper and
+    cache-context classes are discovered from leaf modules lazily, so
+    platform bootstrap stays free of the circular import chain through
     ``lmcache.gpu_connector``.
     """
     for _, short_name, is_pkg in pkgutil.iter_modules(__path__):

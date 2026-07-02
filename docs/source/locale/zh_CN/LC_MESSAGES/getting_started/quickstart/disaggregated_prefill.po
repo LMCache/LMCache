@@ -168,7 +168,7 @@ msgid ""
 "The ``UCX_TLS`` environment variable is used to specify the transport "
 "layer for UCX (the example uses NVLink) The ``CUDA_VISIBLE_DEVICES`` "
 "environment variable is used to specify the GPUs to use for the servers."
-msgstr "``UCX_TLS`` 环境变量用于指定 UCX 的传输层（示例使用 NVLink）。``CUDA_VISIBLE_DEVICES`` 环境变量用于指定服务器使用的 GPU。"
+msgstr "``UCX_TLS`` 环境变量用于指定 UCX 的传输层（示例使用 NVLink）。\\ ``CUDA_VISIBLE_DEVICES`` 环境变量用于指定服务器使用的 GPU。"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:142
 msgid "**Verify Setup**"
@@ -192,7 +192,7 @@ msgstr "代理: ``http://localhost:9100/v1/completions``"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:151
 msgid "Usage"
-msgstr "用法"
+msgstr "使用方法"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:153
 msgid ""
@@ -248,11 +248,11 @@ msgstr "常见问题及解决方案："
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:205
 msgid "**GPU Requirements**: Ensure you have at least 2 GPUs available"
-msgstr "**GPU 要求**：确保您至少有 2 个可用的 GPU"
+msgstr "**GPU 要求**\\ ：确保您至少有 2 个可用的 GPU"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:206
 msgid "**Port Conflicts**: Check if ports used above are available"
-msgstr "**端口冲突**：检查上述使用的端口是否可用"
+msgstr "**端口冲突**\\ ：检查上述使用的端口是否可用"
 
 #: ../../source/getting_started/quickstart/disaggregated_prefill.rst:207
 msgid ""
@@ -264,5 +264,9 @@ msgstr "**HF Token**: 验证您的令牌是否以 ``hf_`` 开头，并具有必�
 msgid ""
 "**CUDA Errors**: Ensure CUDA_VISIBLE_DEVICES is set correctly for each "
 "server"
-msgstr "**CUDA 错误**：确保每个服务器的 CUDA_VISIBLE_DEVICES 设置正确"
+msgstr "**CUDA 错误**\\ ：确保每个服务器的 CUDA_VISIBLE_DEVICES 设置正确"
 
+
+#: ../../source/getting_started/quickstart/disaggregated_prefill.rst:1
+msgid "This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/disaggregated_prefill`."
+msgstr "本页面介绍 LMCache 进程内模式（不推荐使用）的行为。建议改用 :doc:`LMCache MP 模式 </mp/index>`\\ 以获得更好的功能支持与性能。本页面对应的 MP 模式文档请参见 :doc:`/mp/disaggregated_prefill`\\ 。"

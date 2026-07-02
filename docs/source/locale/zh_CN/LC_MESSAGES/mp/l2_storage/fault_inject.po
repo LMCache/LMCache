@@ -47,7 +47,7 @@ msgid ""
 "faithful \"L2 retrieve error\"); the prefetch controller releases the "
 "load-failed locks via the trim mask.  Everything else (store, lookup, "
 "unlock, delete, usage) passes straight through to the inner adapter."
-msgstr "包装的后端作为完整的适配器规范在 ``inner`` 下提供（任何注册的 ``type``），因此它保留自己的配置、逐出、持久化和序列化设置。故障仅适用于加载读取：丢失的键在查找时被报告为*存在*，但其*加载失败*（忠实的“L2 检索错误”）；预取控制器通过修剪掩码释放加载失败的锁。其他所有操作（存储、查找、解锁、删除、使用）都直接传递给内部适配器。"
+msgstr "包装的后端作为完整的适配器规范在 ``inner`` 下提供（任何注册的 ``type``），因此它保留自己的配置、逐出、持久化和序列化设置。故障仅适用于加载读取：丢失的键在查找时被报告为存在，但其加载失败（忠实的“L2 检索错误”）；预取控制器通过修剪掩码释放加载失败的锁。其他所有操作（存储、查找、解锁、删除、使用）都直接传递给内部适配器。"
 
 #: ../../source/mp/l2_storage/fault_inject.rst:23
 msgid "**Fields:**"
@@ -58,7 +58,7 @@ msgstr "**字段：**"
 msgid ""
 "``inner`` (required): full adapter spec for the wrapped backend, e.g. "
 "``{\"type\": \"fs_native\", \"base_path\": \"/dev/shm/l2\"}``."
-msgstr "``inner``（必需）：用于包装后端的完整适配器规范，例如 ``{\"type\": \"fs_native\", \"base_path\": \"/dev/shm/l2\"}``。"
+msgstr "``inner``\\ （必需）：用于包装后端的完整适配器规范，例如 ``{\"type\": \"fs_native\", \"base_path\": \"/dev/shm/l2\"}``。"
 
 #: ../../source/mp/l2_storage/fault_inject.rst:27
 msgid ""
@@ -78,7 +78,7 @@ msgstr "``gap_indices``: 始终丢弃的精确头相对任务位置。默认 ``[
 msgid ""
 "``rate``: per-key drop probability in ``[0, 1]`` via a stable seeded hash"
 " of the key.  Default ``0.0`` (pass-through)."
-msgstr "``rate``: 每个键的丢弃概率在 ``[0, 1]`` 范围内，通过键的稳定种子哈希计算。默认值为 ``0.0``（直通）。"
+msgstr "``rate``: 每个键的丢弃概率在 ``[0, 1]`` 范围内，通过键的稳定种子哈希计算。默认值为 ``0.0``\\ （直通）。"
 
 #: ../../source/mp/l2_storage/fault_inject.rst:35
 msgid ""
@@ -106,7 +106,7 @@ msgid ""
 "found-set; with segmented-prefix enabled the prefix leg **retains the "
 "post-gap chunks** (loads prefix + tail) and recomputes **only the dropped"
 " gap**, instead of truncating the prefix at the gap:"
-msgstr "要实际测试 CacheBlend 的 **分段前缀恢复**，将间隙与服务器标志 ``--enable-segmented-prefix`` 配对（仅适用于 CacheBlend — ``--engine-type blend``）。丢弃的中间块会产生一个带间隙的查找集；启用分段前缀后，前缀部分 **保留间隙后的块**（加载前缀 + 尾部）并仅重计算 **丢弃的间隙**，而不是在间隙处截断前缀："
+msgstr "要实际测试 CacheBlend 的 **分段前缀恢复**，将间隙与服务器标志 ``--enable-segmented-prefix`` 配对（仅适用于 CacheBlend — ``--engine-type blend``）。丢弃的中间块会产生一个带间隙的查找集；启用分段前缀后，前缀部分 **保留间隙后的块**\\ （加载前缀 + 尾部）并仅重计算 **丢弃的间隙**，而不是在间隙处截断前缀："
 
 #: ../../source/mp/l2_storage/fault_inject.rst:61
 #, python-format

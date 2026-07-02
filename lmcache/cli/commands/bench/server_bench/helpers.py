@@ -48,7 +48,6 @@ try:
     from lmcache.utils import (
         EngineType,
         check_interprocess_event_support,
-        compress_slot_mapping,
     )
     from lmcache.v1.kv_layer_groups import (
         DTYPE_MAP,
@@ -629,7 +628,7 @@ def _compute_client_checksums(
     expects, so a cold-pass digest can be compared with a warm-pass
     digest to verify that ``RETRIEVE`` actually wrote back the data
     we wrote during ``STORE`` -- without relying on a server-side
-    ``/kvcache/check`` endpoint (which only exists in handle mode).
+    ``/cache/checksums`` endpoint (which only exists in handle mode).
     """
     if chunk_size % block_size != 0:
         raise ValueError(
@@ -842,17 +841,9 @@ def _query_checksum(
     ``str.join`` crash.
     """
     blocks = list(range(block_offset, block_offset + num_blocks))
-    compressed = compress_slot_mapping(blocks)
-    parts: list[str] = []
-    for item in compressed:
-        if isinstance(item, list):
-            parts.append("[%d,%d]" % (item[0], item[1]))
-        else:
-            parts.append(str(item))
-    block_ids = ",".join(parts)
-    # The MP /kvcache/check endpoint is block-native: its
-    # chunk_size counts blocks per chunk, while our caller passes
-    # in the server-side token-level chunk_size. Convert here.
+    # The MP /cache/checksums endpoint is block-native: its chunk_size counts
+    # blocks per chunk, while our caller passes in the server-side token-level
+    # chunk_size. Convert here.
     if chunk_size % block_size != 0:
         print(
             "  [WARNING] chunk_size %d not a multiple of block_size %d; "
@@ -860,16 +851,17 @@ def _query_checksum(
         )
         return None
     chunk_size_blocks = chunk_size // block_size
-    url = (
-        "%s/kvcache/check?block_ids=%s&block_size=%d&chunk_size=%d&layerwise=false"
-    ) % (
-        http_base,
-        block_ids,
-        block_size,
-        chunk_size_blocks,
-    )
+    url = "%s/cache/checksums" % http_base
+    payload = json.dumps(
+        {"block_ids": blocks, "chunk_size": chunk_size_blocks, "layerwise": False}
+    ).encode()
     try:
-        req = urllib.request.Request(url)
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode())
             if data.get("status") != "success":
@@ -939,7 +931,7 @@ def _process_request(
       proves the server returned the exact bytes we sent.
 
     Handle mode keeps the historical server-side
-    ``/kvcache/check`` path; client tensors are not consulted (in
+    ``/cache/checksums`` path; client tensors are not consulted (in
     handle mode the client and server share the same SHM/IPC
     pages, so a client-side hash equals itself by construction).
     """
@@ -1104,7 +1096,7 @@ def _process_request(
     #       cold -> ground truth captured pre-STORE
     #       warm -> hash post-RETRIEVE; cold == warm proves the
     #               server returned the exact bytes we wrote.
-    #   * handle mode: query /kvcache/check on the server, which
+    #   * handle mode: query /cache/checksums on the server, which
     #     reads the shared SHM/IPC pages directly.
     checksums: list[str] | None = None
     if client_tensors is not None and num_full_tokens > 0:
