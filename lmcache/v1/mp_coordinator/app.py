@@ -34,6 +34,7 @@ from lmcache.v1.mp_coordinator.blend_directory import GlobalBlendMatcher
 from lmcache.v1.mp_coordinator.cache_control.eviction_manager import (
     L2EvictionManager,
 )
+from lmcache.v1.mp_coordinator.cache_control.pin_manager import PinManager
 from lmcache.v1.mp_coordinator.cache_control.prefetch_manager import PrefetchManager
 from lmcache.v1.mp_coordinator.cache_control.resync_manager import L2ResyncManager
 from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
@@ -90,6 +91,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         page_size=config.resync_page_size,
     )
     prefetch_manager = PrefetchManager()
+    pin_manager = PinManager()
     blend_directory = GlobalBlendMatcher(
         chunk_size=config.blend_chunk_size, probe_stride=config.blend_probe_stride
     )
@@ -101,6 +103,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         usage_manager=usage_manager,
         eviction_manager=eviction_manager,
         prefetch_manager=prefetch_manager,
+        pin_manager=pin_manager,
     )
 
     async def _health_loop() -> None:

@@ -155,6 +155,13 @@ compatibility with the vLLM-embedded API server.
      - ``/cache/prefetches/{request_id}``
      - Poll a submitted warm prefetch (``pending`` / ``completed``).
    * - POST
+     - ``/cache/pins``
+     - Pin a token sequence's L1 chunks so they are not evicted (body:
+       ``model_name``, ``world_size``, ``token_ids``, ``cache_salt``, ``tier``).
+   * - DELETE
+     - ``/cache/pins``
+     - Unpin a token sequence's L1 chunks (same body as ``POST``).
+   * - POST
      - ``/cache/clear``
      - Force-clear a tier's resident cache (body: ``tier`` = ``l1``, ``force``).
    * - POST
@@ -983,6 +990,117 @@ transient temporary from another lookup, so claiming it as warmed could mislead.
 
     curl -s http://localhost:8080/cache/prefetches/abc123
     # -> {"status": "completed", "found_keys": 1, "total_keys": 1}
+
+.. _mp-http-pins-api:
+
+Pinning
+-------
+
+Pinning protects a token sequence's cache from eviction until it is explicitly
+unpinned — useful for a hot shared system prompt you never want evicted under
+pressure. As with prefetch, you address content by **token ids**; the server
+hashes them into the same keys the store produced.
+
+A pin spans two tiers, selected by the ``tier`` field:
+
+- ``l1`` — pin this node's resident L1 objects (protected from the L1 eviction
+  controller). Does not touch L2.
+- ``l2`` — do **not** pin L1; instead the resolved keys are handed to the
+  coordinator so it excludes them from its L2 quota-eviction plan.
+- ``all`` — both.
+
+This MP-server endpoint only ever acts on **L1**; the ``resolved_keys`` it
+returns are what the coordinator uses for the L2 part. In practice you call the
+coordinator's ``instance_id``-routed variant (see :doc:`coordinator`), which
+forwards here and records the L2 pin itself.
+
+``POST /cache/pins``
+~~~~~~~~~~~~~~~~~~~~~
+
+Pin a token sequence's chunks in L1 (skipped when ``tier`` is ``l2``).
+
+**Request body:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 12 68
+
+   * - Field
+     - Type
+     - Description
+   * - ``model_name``
+     - string
+     - The served model id, exactly as registered.
+   * - ``world_size``
+     - int
+     - The value vLLM registered for the node's KV layout and rank fan-out
+       (``1`` for a single-GPU, TP=1 deployment).
+   * - ``token_ids``
+     - list[int]
+     - Prompt token ids; only complete ``chunk_size`` chunks are pinned. Must
+       match the store's tokenizer / special-token settings.
+   * - ``cache_salt``
+     - string
+     - Optional (default ``""``). Per-tenant isolation salt; must match the store.
+   * - ``tier``
+     - string
+     - Optional (default ``all``). One of ``l1`` / ``l2`` / ``all``.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {"requested": 12, "pinned": 12, "resolved_keys": ["..."], "status": "pinned"}
+
+``requested`` is the number of whole chunks the tokens resolved to; ``pinned``
+is the number of resident L1 keys pinned (``0`` when ``tier`` is ``l2``);
+``resolved_keys`` are the encoded keys for the coordinator's L2 pin. A sub-chunk
+sequence returns ``{"requested": 0, "pinned": 0, "resolved_keys": [], "status": "noop"}``.
+
+**HTTP status codes:**
+
+- ``200``: pinned (or a ``noop`` as above).
+- ``400``: ``token_ids`` exceeds the per-request cap, or ``cache_salt`` violates
+  its invariants.
+- ``422``: request body fails field-level validation (including an invalid
+  ``tier``).
+- ``503``: engine not initialized, or no layout registered for
+  ``(model_name, world_size)`` (start vLLM first).
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s -X POST http://localhost:8080/cache/pins \
+        -H 'Content-Type: application/json' \
+        -d '{"model_name": "Qwen/Qwen3-8B", "world_size": 1,
+             "token_ids": [101, 102, 103], "cache_salt": "user-a", "tier": "l1"}'
+    # -> {"requested": 1, "pinned": 1, "resolved_keys": ["..."], "status": "pinned"}
+
+``DELETE /cache/pins``
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Unpin a token sequence's chunks in L1 (skipped when ``tier`` is ``l2``). Same
+request body as ``POST /cache/pins``. The response mirrors the pin, with
+``unpinned`` in place of ``pinned``:
+
+.. code-block:: json
+
+    {"requested": 12, "unpinned": 12, "resolved_keys": ["..."], "status": "unpinned"}
+
+Pins are reference-counted: a chunk pinned *N* times needs *N* unpins before it
+becomes evictable again. Unpinning a chunk that is not pinned is a no-op.
+
+**HTTP status codes:** same as ``POST /cache/pins``.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s -X DELETE http://localhost:8080/cache/pins \
+        -H 'Content-Type: application/json' \
+        -d '{"model_name": "Qwen/Qwen3-8B", "world_size": 1,
+             "token_ids": [101, 102, 103], "cache_salt": "user-a", "tier": "l1"}'
 
 .. _mp-http-quota-api:
 

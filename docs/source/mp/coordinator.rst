@@ -162,7 +162,7 @@ The coordinator's HTTP surface (base URL ``http://localhost:9300``) groups into:
   budgets, usage accounting, and the usage-event ingest that drives fleet-wide
   eviction.
 - **Cache control** -- the ``/cache`` group: cache operations dispatched to a
-  named server (currently warm prefetch, with more to come).
+  named server (warm prefetch and pin/unpin, with more to come).
 
 Each endpoint is documented below. Success is ``200`` unless noted, and
 ``{cache_salt}`` uses the ``_default`` sentinel for the empty salt. The wire
@@ -593,9 +593,9 @@ usually called by hand.
 Cache control
 -------------
 
-The ``/cache`` group dispatches cache operations to a named MP server. Today it
-covers **warm prefetch**; further cache-control operations will be documented as
-endpoints here as they land.
+The ``/cache`` group dispatches cache operations to a named MP server. It covers
+**warm prefetch** and **pin/unpin**; further cache-control operations will be
+documented as endpoints here as they land.
 
 **Warm prefetch (pre-loading L1 from L2).** Pre-warm one MP server's L1 with the
 KV for a known prompt **before** the requests arrive, so the first request hits
@@ -737,3 +737,113 @@ verbatim with its code.
 
     curl -s http://localhost:9300/cache/prefetches/server-1/abc123
     # -> {"status": "completed", "found_keys": 12, "total_keys": 12}
+
+**Pin/unpin (protecting cache from eviction).** Pin a token sequence's cache so
+it is not evicted until unpinned. The ``tier`` field selects the tier(s), and
+they do not cross: ``l1`` pins only the named server's L1, ``l2`` records only
+the coordinator's L2 protection (excluding the keys from its quota-eviction
+plan), and ``all`` does both. The coordinator forwards the request to the named
+server (which pins its L1 and returns the resolved keys), then records the L2
+pin itself when the tier includes L2.
+
+``POST /cache/pins``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Pin a token sequence on one named server.
+
+**Request body:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 18 16 66
+
+   * - Field
+     - Type
+     - Description
+   * - ``instance_id``
+     - string
+     - Target MP server; must be registered.
+   * - ``model_name``
+     - string
+     - Model whose layout the target uses to resolve keys.
+   * - ``world_size``
+     - int
+     - World size (``>= 1``) selecting the KV layout and per-rank fan-out.
+   * - ``token_ids``
+     - list[int]
+     - Prompt tokens whose complete chunks are pinned; must match what was
+       stored. A sub-chunk sequence is a ``noop``.
+   * - ``cache_salt``
+     - string
+     - Optional (default ``""``). Per-tenant isolation salt.
+   * - ``tier``
+     - string
+     - Optional (default ``all``). One of ``l1`` / ``l2`` / ``all``.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {"instance_id": "server-1", "requested": 12, "affected": 12, "status": "pinned"}
+
+``requested`` is the number of whole chunks resolved; ``affected`` is the number
+of keys pinned in the requested tier (L1 keys for ``l1``/``all``, L2 keys for
+``l2``). A sub-chunk sequence returns ``status`` ``"noop"``.
+
+**HTTP status codes:**
+
+- ``200``: pinned (or a ``noop``).
+- ``404``: unknown ``instance_id`` (not registered).
+- ``502``: the target server was unreachable or rejected the pin.
+- ``422``: request body fails field-level validation (including an invalid
+  ``tier``).
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s -X POST http://localhost:9300/cache/pins \
+        -H 'Content-Type: application/json' \
+        -d '{
+            "instance_id": "server-1",
+            "model_name": "Qwen/Qwen3-8B",
+            "world_size": 1,
+            "token_ids": [101, 102, 103, "..."],
+            "cache_salt": "user-a",
+            "tier": "all"
+        }'
+    # -> {"instance_id": "server-1", "requested": 12, "affected": 12, "status": "pinned"}
+
+.. note::
+
+   **L2 requires event reporting.** The coordinator can only exclude L2 keys
+   from eviction for a salt it is tracking, which requires the MP server started
+   with ``--coordinator-l2-event-reporting`` (see `Connecting MP servers`_).
+   **Single-node scope:** one ``instance_id`` pins only that node's shards.
+
+``DELETE /cache/pins``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Unpin a token sequence on one named server. Same request body as
+``POST /cache/pins``; ``tier`` selects which tier(s) to release. The response
+mirrors the pin (``affected`` is the number of keys unpinned), with ``status``
+``"unpinned"``. Pins are reference-counted: a chunk pinned *N* times needs *N*
+unpins before it can be evicted.
+
+**HTTP status codes:** same as ``POST /cache/pins``.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s -X DELETE http://localhost:9300/cache/pins \
+        -H 'Content-Type: application/json' \
+        -d '{
+            "instance_id": "server-1",
+            "model_name": "Qwen/Qwen3-8B",
+            "world_size": 1,
+            "token_ids": [101, 102, 103, "..."],
+            "cache_salt": "user-a",
+            "tier": "all"
+        }'
+    # -> {"instance_id": "server-1", "requested": 12, "affected": 12, "status": "unpinned"}

@@ -18,6 +18,7 @@ import httpx
 # First Party
 from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.mp_coordinator.cache_control.eviction_manager import L2EvictionManager
+from lmcache.v1.mp_coordinator.cache_control.pin_manager import PinManager
 from lmcache.v1.mp_coordinator.cache_control.prefetch_manager import PrefetchManager
 from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry
@@ -31,8 +32,10 @@ class CoordinatorContext:
         registry: Fleet membership (``MPInstance`` by ``instance_id``).
         quota_manager: Per-``cache_salt`` L2 quota state.
         usage_manager: Per-``cache_salt`` L2 usage tracking.
-        eviction_manager: Quota/LRU L2 eviction dispatcher.
+        eviction_manager: Quota/LRU L2 eviction dispatcher; also holds the L2
+            pin set consulted when computing eviction plans.
         prefetch_manager: Warm-prefetch proxy to MP servers.
+        pin_manager: Token-based pin/unpin proxy to MP servers.
         outbound_client: Shared async client for coordinator -> MP calls. Set by
             the lifespan (bound to the running loop); ``None`` until then.
     """
@@ -42,6 +45,7 @@ class CoordinatorContext:
     usage_manager: L2UsageManager
     eviction_manager: L2EvictionManager
     prefetch_manager: PrefetchManager
+    pin_manager: PinManager
     outbound_client: httpx.AsyncClient | None = None
 
 
