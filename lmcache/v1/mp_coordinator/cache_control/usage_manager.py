@@ -5,11 +5,15 @@
 from __future__ import annotations
 
 # Standard
+from typing import TYPE_CHECKING
 import threading
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import ObjectKey
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.distributed.api import ObjectKey
 
 logger = init_logger(__name__)
 
