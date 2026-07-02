@@ -619,7 +619,7 @@ class TestGdsBackend:
             temp_gds_path, async_loop, extra_config={"disk_io_threads": 0}
         )
         try:
-            assert not backend.use_thread_pool
+            assert backend.use_thread_pool
             keys = [create_test_key(i) for i in range(3)]
             results = backend.batched_get_blocking(keys)
             assert results == [None, None, None]
@@ -1060,3 +1060,159 @@ def test_pack_unpack_metadata_multiple_dtypes():
         assert nbytes == tensor.numel() * tensor.element_size()
         assert fmt == MemoryFormat.KV_2LTD
         assert extra["tag"] == "test"
+
+
+def test_use_gds_false_uses_plain_gpu_allocator(temp_gds_path, async_loop):
+    """With use_gds=False, GdsBackend uses a plain GPUMemoryAllocator and the
+    POSIX-fallback memcpy, requiring neither cuFile nor hipFile libraries."""
+    # First Party
+    from lmcache.v1.memory_allocators.gpu_memory_allocator import (
+        GPUMemoryAllocator,
+    )
+
+    config = create_test_config(temp_gds_path)
+    config.use_gds = False
+    metadata = create_test_metadata()
+
+    fake_memcpy = mock.MagicMock()
+    with (
+        mock.patch(
+            "lmcache.v1.storage_backend.gds_backend.get_fstype",
+            return_value="ext4",
+        ),
+        mock.patch(
+            "lmcache.v1.storage_backend.gds_backend._load_gpu_memcpy",
+            return_value=fake_memcpy,
+        ) as load_rt,
+    ):
+        backend = GdsBackend(
+            config=config,
+            loop=async_loop,
+            metadata=metadata,
+            dst_device="cuda:0",
+        )
+        try:
+            load_rt.assert_called_once()
+            assert not backend.use_gds
+            assert backend.gds_module is None
+            assert isinstance(backend.memory_allocator, GPUMemoryAllocator)
+            # Plain GPU allocator has no registered base pointer, so the
+            # fallback copies straight into each tensor's data_ptr.
+            assert backend.gds_base_pointer is None
+            # The batched-I/O thread pool is enabled even when use_gds is False
+            # so batched_get_blocking fetches chunks in parallel.
+            assert backend.use_thread_pool is True
+            assert backend._thread_pool is not None
+        finally:
+            backend.close()
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="POSIX round-trip needs a GPU for host<->device memcpy",
+)
+@pytest.mark.skipif(sys.platform != "linux", reason="Runs only on Linux")
+def test_use_gds_false_save_load_roundtrip(temp_gds_path, async_loop):
+    """use_gds=false POSIX fallback round-trips KV bytes correctly.
+
+    Stores three chunks (so the 2nd and 3rd get a nonzero in-pool address) and
+    reads them back via ``batched_get_blocking`` (the parallel thread-pool
+    path, which is enabled for use_gds=false), asserting byte-for-byte
+    equality.  This guards against ``_save_gds`` copying from the raw
+    ``device_offset`` instead of the resolved ``dev_offset`` (which is 0 when
+    the plain ``GPUMemoryAllocator`` is used): with that bug the non-first
+    chunks read the wrong device region and the round-trip data mismatches.
+    """
+    config = create_test_config(temp_gds_path)
+    config.use_gds = False
+    metadata = create_test_metadata()
+    backend = GdsBackend(
+        config=config, loop=async_loop, metadata=metadata, dst_device="cuda:0"
+    )
+    try:
+        shape = torch.Size([2, 4, 8, 16])
+        dtype = torch.bfloat16
+        keys = [create_test_key(i) for i in range(3)]
+
+        # Allocate all objects up front so each keeps a distinct pool address;
+        # fill each with distinct known data.
+        objs = []
+        refs = []
+        for _ in keys:
+            obj = backend.allocate(shape, dtype)
+            assert obj is not None
+            ref = (torch.rand(tuple(shape), device="cuda") * 100).to(dtype)
+            obj.tensor.copy_(ref)
+            objs.append(obj)
+            refs.append(ref)
+
+        # The bug only manifests for chunks with a nonzero address, so make
+        # sure the fixture actually exercises that case.
+        assert any(obj.metadata.address != 0 for obj in objs[1:])
+
+        for key, obj in zip(keys, objs, strict=True):
+            future = backend.submit_put_task(key, obj)
+            future.result(timeout=15)
+
+        for key in keys:
+            assert backend.contains(key)
+
+        # Read all chunks back through the parallel thread-pool path.
+        loaded = backend.batched_get_blocking(keys)
+        assert len(loaded) == len(keys)
+        for obj, ref in zip(loaded, refs, strict=True):
+            assert obj is not None
+            torch.testing.assert_close(obj.tensor, ref)
+    finally:
+        backend.close()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Runs only on Linux")
+def test_direct_io_alignment_and_open_fallback(temp_gds_path, async_loop):
+    """O_DIRECT gating on the use_gds=false path.
+
+    ``_direct_io_aligned`` must accept only block-aligned values, and
+    ``_os_open_maybe_direct`` must never apply O_DIRECT when the caller does not
+    ask for it or when O_DIRECT has been marked unsupported — always returning a
+    usable buffered fd instead of raising.
+    """
+    # First Party
+    from lmcache.v1.storage_backend.gds_backend import _DIRECT_IO_ALIGN
+
+    config = create_test_config(temp_gds_path)
+    config.use_gds = False
+    metadata = create_test_metadata()
+    with (
+        mock.patch(
+            "lmcache.v1.storage_backend.gds_backend.get_fstype",
+            return_value="ext4",
+        ),
+        mock.patch(
+            "lmcache.v1.storage_backend.gds_backend._load_gpu_memcpy",
+            return_value=mock.MagicMock(),
+        ),
+    ):
+        backend = GdsBackend(
+            config=config, loop=async_loop, metadata=metadata, dst_device="cuda:0"
+        )
+    try:
+        # Alignment gate.
+        assert backend._direct_io_aligned(_DIRECT_IO_ALIGN, 2 * _DIRECT_IO_ALIGN)
+        assert backend._direct_io_aligned(0)
+        assert not backend._direct_io_aligned(_DIRECT_IO_ALIGN, 2048)
+
+        probe = os.path.join(temp_gds_path, "odirect_probe.bin")
+        # want_direct=False -> plain buffered open.
+        fd, is_direct = backend._os_open_maybe_direct(
+            probe, os.O_WRONLY | os.O_CREAT, False
+        )
+        os.close(fd)
+        assert is_direct is False
+
+        # O_DIRECT marked unsupported -> never applied even when requested.
+        backend._direct_io_supported = False
+        fd, is_direct = backend._os_open_maybe_direct(probe, os.O_RDONLY, True)
+        os.close(fd)
+        assert is_direct is False
+    finally:
+        backend.close()

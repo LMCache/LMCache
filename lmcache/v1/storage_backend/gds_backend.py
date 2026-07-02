@@ -6,8 +6,8 @@ from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 import asyncio
 import ctypes
 import ctypes.util
+import errno
 import json
-import mmap
 import os
 import struct
 import threading
@@ -17,7 +17,6 @@ import uuid
 
 # Third Party
 import aiofile
-import numpy as np
 import torch
 
 # First Party
@@ -30,6 +29,7 @@ from lmcache.utils import (
 )
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_allocators.cu_file_memory_allocator import CuFileMemoryAllocator
+from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
 from lmcache.v1.memory_allocators.hip_file_memory_allocator import (
     HipFileMemoryAllocator,
 )
@@ -51,6 +51,14 @@ _METADATA_MAX_SIZE = 4096  # reserve 4K for metadata.
 # TODO: It is possible to read this 4KB block without triggering read-ahead by
 # various means.
 _DEFAULT_THREAD_COUNT = 4
+
+# O_DIRECT (buffered-fallback POSIX path) alignment. O_DIRECT requires the file
+# offset, transfer length, and memory buffer to all be aligned to the block
+# size; 4096 satisfies every common Linux filesystem (and equals the metadata
+# header size, so KV data starts on an aligned boundary). getattr keeps this
+# importable on platforms without O_DIRECT (e.g. macOS), where it resolves to 0.
+_DIRECT_IO_ALIGN = 4096
+_O_DIRECT_FLAG = getattr(os, "O_DIRECT", 0)
 
 
 class UnsupportedMetadataVersion(Exception):
@@ -311,6 +319,28 @@ class GdsBackend(AllocatorBackendInterface):
                 max_workers=thread_count, thread_name_prefix="gds-io"
             )
 
+        # POSIX-fallback load-phase instrumentation. Summed (across chunks/
+        # threads) time spent in the disk read vs the host->device copy, so a
+        # batched get can report how much of the KV load is file I/O vs H2D.
+        # Reset at the start of each batched get; accumulated under the lock.
+        self._io_phase_lock = threading.Lock()
+        self._read_ns = 0
+        self._h2d_ns = 0
+
+        # POSIX-fallback GPU memcpy function, set only when use_gds is False.
+        self._gpu_memcpy: Optional[Callable[..., int]] = None
+        # POSIX-fallback pinned host bounce buffers.  Each I/O thread keeps a
+        # single reusable pinned buffer in thread-local storage and grows it
+        # on demand (see _get_pinned_buffer).  Staging disk<->GPU copies through
+        # pinned memory lets cudaMemcpy/hipMemcpy run as a full-bandwidth DMA
+        # (pageable memory forces the driver to stage through its own internal
+        # pinned buffer first).  Allocating pinned memory is expensive, so we
+        # reuse per thread rather than per read.  _pinned_buffers tracks every
+        # live buffer under _pinned_lock so close() can release them after the
+        # thread pool has shut down.
+        self._pinned_tls = threading.local()
+        self._pinned_buffers: List[torch.Tensor] = []
+        self._pinned_lock = threading.Lock()
         if self.use_gds:
             logger.info("Using GDS backend '%s'", self.gds_backend)
             if self.gds_backend == "cufile":
@@ -339,6 +369,11 @@ class GdsBackend(AllocatorBackendInterface):
             self._gpu_memcpy = _load_gpu_memcpy()
 
         self.use_direct_io = False
+        # O_DIRECT state for the POSIX fallback (use_gds=False). Set False if the
+        # filesystem rejects O_DIRECT (EINVAL) so we stop retrying it; the
+        # unaligned-warning flag keeps that log to a single line.
+        self._direct_io_supported = _O_DIRECT_FLAG != 0
+        self._direct_io_unaligned_warned = False
 
         # Values for retrying allocations and loads in case of failures potentially
         # due to memory pressure
@@ -952,6 +987,12 @@ class GdsBackend(AllocatorBackendInterface):
                 gds_read_bytes += memory_obj.get_size()
             memory_objs.append(memory_obj)
 
+        # Reset per-phase accumulators so the split reported below covers only
+        # this batched get (POSIX fallback populates them inside _load_gds).
+        with self._io_phase_lock:
+            self._read_ns = 0
+            self._h2d_ns = 0
+
         start_time = time.perf_counter()
         assert self._thread_pool is not None
         results = list(
@@ -960,9 +1001,13 @@ class GdsBackend(AllocatorBackendInterface):
             )
         )
         total_time = time.perf_counter() - start_time
+        with self._io_phase_lock:
+            read_ms = self._read_ns / 1e6
+            h2d_ms = self._h2d_ns / 1e6
         logger.info(
             f"Time taken for batched_get_blocking: {total_time:.3f}s |"
             f" {gds_read_bytes / 1024 / 1024}MiB | {gds_reads} ops."
+            f" | phase-sums: read={read_ms:.1f}ms h2d={h2d_ms:.1f}ms"
         )
         return results
 
@@ -974,9 +1019,37 @@ class GdsBackend(AllocatorBackendInterface):
         tmp: str,
         kv_chunk: torch.Tensor,
         fmt: MemoryFormat,
-        base_pointer: int,
+        base_pointer: Optional[int],
         device_offset: int,
-    ):
+    ) -> bytes:
+        """Persist one KV chunk to ``path`` (metadata header + raw bytes).
+
+        The source device address is resolved from ``base_pointer``:
+
+        - ``base_pointer is None``: the allocator has no single registered
+          buffer, so ``kv_chunk.data_ptr()`` already points at this chunk's
+          exact location and the device offset is 0.
+        - ``base_pointer`` set: all chunks live in one registered buffer, so the
+          source is ``base_pointer + device_offset`` (the chunk's byte offset in
+          that buffer).
+
+        Args:
+            path: Final destination path for the chunk file.
+            tmp: Suffix appended to ``path`` for the temporary file that is
+                atomically renamed into place on success.
+            kv_chunk: The device tensor to persist.
+            fmt: Memory format stored in the metadata header.
+            base_pointer: Registered buffer base address, or ``None`` when the
+                allocator hands out standalone tensors (POSIX fallback).
+            device_offset: Byte offset of ``kv_chunk`` within ``base_pointer``;
+                ignored when ``base_pointer`` is ``None``.
+
+        Returns:
+            The packed metadata header bytes written to the file.
+
+        Raises:
+            RuntimeError: If the device->host GPU memcpy fails.
+        """
         if base_pointer is None:
             addr = ctypes.c_void_p(kv_chunk.data_ptr())
             dev_offset = 0
@@ -991,9 +1064,9 @@ class GdsBackend(AllocatorBackendInterface):
             kv_chunk, fmt=fmt, lmcache_version=str(_METADATA_VERSION)
         )
         try:
-            with open(tmp_path, "wb") as f:
-                f.write(metadata)
             if self.gds_module:
+                with open(tmp_path, "wb") as f:
+                    f.write(metadata)
                 with self.gds_module.CuFile(
                     tmp_path, "r+", use_direct_io=self.use_direct_io
                 ) as f:
@@ -1001,36 +1074,147 @@ class GdsBackend(AllocatorBackendInterface):
                         addr, kv_chunk.nbytes, file_offset=offset, dev_offset=dev_offset
                     )
             elif self._gpu_memcpy:
-                # mmap the file
-                fd = os.open(tmp_path, os.O_RDWR)
+                # POSIX fallback: copy device memory into a *pinned* host buffer
+                # (fast pinned DMA), then persist [metadata | KV bytes] with a
+                # single buffered (or O_DIRECT) write.  We deliberately avoid a
+                # writable MAP_SHARED mmap here: parallel / network filesystems
+                # (e.g. the ufs64 PFS) reject shared writable mappings with
+                # EOPNOTSUPP ([Errno 95]).  Staging the header + data in one
+                # aligned pinned buffer lets O_DIRECT (use_direct_io) issue a
+                # single aligned write that bypasses the page cache.
                 nbytes = kv_chunk.nbytes
-                os.ftruncate(fd, nbytes + offset)
-                mm = mmap.mmap(
-                    fd, nbytes + offset, prot=mmap.PROT_WRITE, flags=mmap.MAP_SHARED
-                )
-                os.close(fd)
-
-                # get mapped file address
-                arr = np.frombuffer(mm, dtype=np.uint8)
-                buf_addr = arr.__array_interface__["data"][0]
-
-                assert addr.value is not None
+                if addr.value is None or self._gpu_memcpy is None:
+                    raise RuntimeError(
+                        "GDS POSIX fallback save invoked without a valid device "
+                        "pointer or GPU memcpy function"
+                    )
+                total = offset + nbytes
+                host_buf = self._get_pinned_buffer(total)
+                hb_mv = memoryview(host_buf.numpy())
+                # Header occupies exactly `offset` (_METADATA_MAX_SIZE) bytes.
+                hb_mv[: len(metadata)] = metadata
+                # kind=2 -> DeviceToHost (identical enum on CUDA and HIP).
+                # Copy the KV bytes right after the header. Use the resolved
+                # dev_offset (0 when base_pointer is None, since addr already
+                # points at this chunk) — not the raw parameter.
                 res = self._gpu_memcpy(
-                    ctypes.c_void_p(buf_addr + offset),
-                    ctypes.c_void_p(int(addr.value) + device_offset),
+                    ctypes.c_void_p(host_buf.data_ptr() + offset),
+                    ctypes.c_void_p(int(addr.value) + dev_offset),
                     ctypes.c_size_t(nbytes),
                     ctypes.c_int(2),
                 )
                 if res:
-                    raise RuntimeError(f"GPU memcpy failed {res}")
-                del arr
-                mm.close()
+                    raise RuntimeError(f"GPU memcpy (DeviceToHost) failed {res}")
+                out = hb_mv[:total]
+                want_direct = self.use_direct_io and self._direct_io_aligned(
+                    total, host_buf.data_ptr()
+                )
+                fd, _ = self._os_open_maybe_direct(
+                    tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, want_direct
+                )
+                try:
+                    written = 0
+                    while written < total:
+                        written += os.pwrite(fd, out[written:], written)
+                finally:
+                    os.close(fd)
 
         except Exception as e:
             logger.error(f"Error saving {tmp_path}: {e}", exc_info=True)
             raise e
         os.rename(tmp_path, path)
         return metadata
+
+    def _get_pinned_buffer(self, size_in_bytes: int) -> torch.Tensor:
+        """Return a reusable pinned host buffer of at least ``size_in_bytes``.
+
+        The POSIX fallback (``use_gds=False``) stages disk<->GPU copies through
+        a pinned host buffer so the ``cudaMemcpy``/``hipMemcpy`` runs as a fast
+        pinned DMA.  Pinning memory is expensive, so each I/O thread keeps a
+        single buffer in thread-local storage and reuses it across operations,
+        growing it only when a larger chunk is requested.
+
+        Args:
+            size_in_bytes: Minimum required size of the returned buffer.
+
+        Returns:
+            A 1-D ``uint8`` CPU tensor in pinned memory whose length is
+            ``>= size_in_bytes``.  The buffer is owned by the backend; callers
+            must not free it and must treat bytes past ``size_in_bytes`` as
+            undefined.
+        """
+        buf = getattr(self._pinned_tls, "buffer", None)
+        if buf is not None and buf.numel() >= size_in_bytes:
+            return buf
+        new_buf = torch.empty(size_in_bytes, dtype=torch.uint8, pin_memory=True)
+        self._pinned_tls.buffer = new_buf
+        with self._pinned_lock:
+            # Replace this thread's previous (too-small) buffer in the tracking
+            # list so close() releases exactly the live buffers.
+            if buf is not None:
+                try:
+                    self._pinned_buffers.remove(buf)
+                except ValueError:
+                    pass
+            self._pinned_buffers.append(new_buf)
+        return new_buf
+
+    def _direct_io_aligned(self, *values: int) -> bool:
+        """Return True if every value is a multiple of the O_DIRECT block size.
+
+        O_DIRECT requires the file offset, transfer length, and buffer address
+        to be block-aligned. Callers pass those values; if any is unaligned we
+        fall back to buffered I/O (and warn once) rather than fail the transfer.
+
+        Args:
+            values: Offsets, lengths, and/or buffer addresses to check.
+
+        Returns:
+            True when all values are ``_DIRECT_IO_ALIGN``-aligned.
+        """
+        aligned = all(v % _DIRECT_IO_ALIGN == 0 for v in values)
+        if not aligned and not self._direct_io_unaligned_warned:
+            self._direct_io_unaligned_warned = True
+            logger.warning(
+                "use_direct_io is set but an I/O is not %d-byte aligned "
+                "(values=%s); falling back to buffered I/O for unaligned ops",
+                _DIRECT_IO_ALIGN,
+                values,
+            )
+        return aligned
+
+    def _os_open_maybe_direct(
+        self, path: str, flags: int, want_direct: bool, mode: int = 0o644
+    ) -> Tuple[int, bool]:
+        """Open ``path``, adding ``O_DIRECT`` when requested and supported.
+
+        Falls back to a buffered open if the filesystem rejects O_DIRECT with
+        ``EINVAL`` (recorded so we stop retrying), or if O_DIRECT is unavailable
+        on this platform.
+
+        Args:
+            path: File to open.
+            flags: Base ``os.open`` flags (e.g. ``os.O_RDONLY``).
+            want_direct: Whether the caller wants O_DIRECT for this open.
+            mode: Creation mode for ``O_CREAT`` opens.
+
+        Returns:
+            A ``(fd, is_direct)`` tuple: the open file descriptor and whether
+            O_DIRECT was actually applied.
+        """
+        if want_direct and self._direct_io_supported and _O_DIRECT_FLAG:
+            try:
+                return os.open(path, flags | _O_DIRECT_FLAG, mode), True
+            except OSError as e:
+                if e.errno != errno.EINVAL:
+                    raise
+                self._direct_io_supported = False
+                logger.warning(
+                    "O_DIRECT rejected (EINVAL) on %s; falling back to buffered "
+                    "I/O for the POSIX GDS path",
+                    path,
+                )
+        return os.open(path, flags, mode), False
 
     def _load_gds(
         self,
@@ -1053,42 +1237,82 @@ class GdsBackend(AllocatorBackendInterface):
                         dev_offset=dev_offset,
                     )
             elif self._gpu_memcpy:
-                fd = os.open(gds_path, os.O_RDONLY)
-                file_size = os.fstat(fd).st_size
+                # POSIX fallback: read the KV bytes straight into a *pinned*
+                # host buffer with buffered I/O (os.preadv), then copy
+                # host->device.  Reading into pinned memory lets the copy run as
+                # a full-bandwidth pinned DMA and avoids the temporary-bytes copy
+                # that os.pread would incur.  We use a plain fd / `with`-style
+                # cleanup (rather than mmap) so the file descriptor is always
+                # released and the path stays portable across filesystems
+                # (mirrors the buffered write in _save_gds).
+                if gpu_pointer.value is None or self._gpu_memcpy is None:
+                    raise RuntimeError(
+                        "GDS POSIX fallback load invoked without a valid device "
+                        "pointer or GPU memcpy function"
+                    )
+                read_t0 = time.perf_counter_ns()
+                host_buf = self._get_pinned_buffer(size_in_bytes)
+                mv = memoryview(host_buf.numpy())[:size_in_bytes]
+                # O_DIRECT (use_direct_io) bypasses the page cache so reads hit
+                # the backing filesystem directly. Requires the offset, length,
+                # and buffer to be block-aligned; otherwise fall back to buffered.
+                want_direct = self.use_direct_io and self._direct_io_aligned(
+                    file_offset, size_in_bytes, host_buf.data_ptr()
+                )
+                fd, _ = self._os_open_maybe_direct(gds_path, os.O_RDONLY, want_direct)
+                try:
+                    file_size = os.fstat(fd).st_size
 
-                # Check if file is large enough for the requested read
-                if file_size < file_offset + size_in_bytes:
+                    # Check if file is large enough for the requested read
+                    if file_size < file_offset + size_in_bytes:
+                        logger.error(
+                            f"File {gds_path} is too small: size={file_size}, "
+                            f"but need at least {file_offset + size_in_bytes} "
+                            f"bytes (offset={file_offset}, "
+                            f"requested={size_in_bytes})"
+                        )
+                        return -1
+
+                    read_total = 0
+                    while read_total < size_in_bytes:
+                        n = os.preadv(
+                            fd,
+                            [mv[read_total:]],
+                            file_offset + read_total,
+                        )
+                        if n == 0:
+                            break
+                        read_total += n
+                finally:
                     os.close(fd)
+                read_ns = time.perf_counter_ns() - read_t0
+
+                if read_total != size_in_bytes:
                     logger.error(
-                        f"File {gds_path} is too small: size={file_size}, "
-                        f"but need at least {file_offset + size_in_bytes} bytes "
-                        f"(offset={file_offset}, requested={size_in_bytes})"
+                        f"Short read from {gds_path}: got {read_total} of "
+                        f"{size_in_bytes} bytes"
                     )
                     return -1
 
-                mm = mmap.mmap(
-                    fd,
-                    file_size,
-                    prot=mmap.PROT_READ,
-                    flags=mmap.MAP_PRIVATE | mmap.MAP_POPULATE,  # type: ignore [attr-defined]
-                )
-                os.close(fd)
-
-                arr = np.frombuffer(mm, dtype=np.uint8)
-                addr = arr.__array_interface__["data"][0]
-
-                assert gpu_pointer.value is not None
+                # kind=1 -> HostToDevice (identical enum on CUDA and HIP)
+                h2d_t0 = time.perf_counter_ns()
                 res = self._gpu_memcpy(
                     ctypes.c_void_p(int(gpu_pointer.value) + dev_offset),
-                    ctypes.c_void_p(addr + file_offset),
+                    ctypes.c_void_p(host_buf.data_ptr()),
                     ctypes.c_size_t(size_in_bytes),
                     ctypes.c_int(1),
                 )
+                h2d_ns = time.perf_counter_ns() - h2d_t0
 
                 if res != 0:
-                    raise RuntimeError(f"GPU memcpy failed with code {res}")
-                del arr
-                mm.close()
+                    raise RuntimeError(
+                        f"GPU memcpy (HostToDevice) failed with code {res}"
+                    )
+                # Accumulate per-phase timing so batched_get can report the
+                # disk-read vs host->device split.
+                with self._io_phase_lock:
+                    self._read_ns += read_ns
+                    self._h2d_ns += h2d_ns
                 return size_in_bytes
             else:
                 raise RuntimeError(
@@ -1116,14 +1340,21 @@ class GdsBackend(AllocatorBackendInterface):
 
     def initialize_allocator(
         self, config: LMCacheEngineConfig, metadata: LMCacheMetadata
-    ) -> Union[CuFileMemoryAllocator, HipFileMemoryAllocator]:
+    ) -> Union[CuFileMemoryAllocator, HipFileMemoryAllocator, GPUMemoryAllocator]:
         assert config.gds_buffer_size is not None
+        size_bytes = config.gds_buffer_size * 1024**2
+        # POSIX fallback (use_gds=False) does not issue any GDS API calls, so no
+        # cuFile/hipFile buffer registration is needed. Use a plain GPU
+        # allocator to avoid depending on the cufile/hipfile libraries on this
+        # path (they may be unavailable, e.g. libcufile on ROCm).
+        if not config.use_gds:
+            return GPUMemoryAllocator(size_bytes, align_bytes=4096)
         allocator_cls = (
             HipFileMemoryAllocator
             if self.gds_backend == "hipfile"
             else CuFileMemoryAllocator
         )
-        return allocator_cls(config.gds_buffer_size * 1024**2)
+        return allocator_cls(size_bytes)
 
     def allocate(
         self,
@@ -1262,4 +1493,8 @@ class GdsBackend(AllocatorBackendInterface):
         self.memory_allocator.close()
         if self._thread_pool is not None:
             self._thread_pool.shutdown(wait=True)
+        # Release pinned host bounce buffers now that the thread pool has been
+        # shut down and no I/O thread can still be referencing them.
+        with self._pinned_lock:
+            self._pinned_buffers.clear()
         logger.info("GDS backend closed.")
