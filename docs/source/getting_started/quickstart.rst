@@ -54,14 +54,16 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
 
             Start vLLM with the MP connector in a separate terminal. Point the
             connector at the server above via ``lmcache.mp.host`` /
-            ``lmcache.mp.port`` in ``kv_connector_extra_config`` -- the host
-            **must** carry a ZMQ transport prefix such as ``tcp://``:
+            ``lmcache.mp.port`` in ``kv_connector_extra_config``. The host may
+            include a ZMQ transport prefix (e.g. ``tcp://``); a bare
+            ``host``/``host:port`` is also accepted and is normalized to
+            ``tcp://`` automatically:
 
             .. code-block:: bash
 
                vllm serve Qwen/Qwen3-8B \
                    --port 8000 --kv-transfer-config \
-                   '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "tcp://localhost", "lmcache.mp.port": 5555}}'
+                   '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "localhost", "lmcache.mp.port": 5555}}'
 
             .. note::
                **Where does** ``LMCacheMPConnector`` **resolve to?** This depends on your vLLM version:
