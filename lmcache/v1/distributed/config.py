@@ -128,6 +128,10 @@ class L1MemoryManagerConfig:
     devdax_size_in_bytes: int = 0
     """ Optional Device-DAX overflow size for hybrid DRAM + DAX L1. """
 
+    maru_config: "MaruL1Config | None" = None
+    """ Optional Maru CXL L1 backend; when set the L1 medium is a shared CXL
+    pool and the other L1 sizing fields above are ignored. """
+
     def __post_init__(self):
         self.init_size_in_bytes = min(self.init_size_in_bytes, self.size_in_bytes)
 
@@ -183,6 +187,36 @@ class GdsL1Config:
 
     align_bytes: int = 4096
     """Allocation alignment; cuFile/hipFile and O_DIRECT require 4 KiB."""
+
+
+@dataclass
+class MaruL1Config:
+    """Config for the Maru CXL-backed L1 backend (mutually exclusive with the
+    pinned-DRAM / Device-DAX / GDS tiers). Defaults follow the non-MP
+    ``MaruBackend``; the allocator supplies ``chunk_size_bytes`` (from the KV
+    layout) and ``auto_connect=False``.
+    """
+
+    server_url: str
+    """MaruServer endpoint, e.g. ``maru://host:port`` or ``tcp://host:port``."""
+
+    pool_size_bytes: int
+    """CXL pool size to request from MaruServer, in bytes."""
+
+    instance_id: str | None = None
+    """Stable client id for ownership tracking; auto-generated if unset."""
+
+    timeout_ms: int = 5000
+    """RPC timeout in milliseconds."""
+
+    use_async_rpc: bool = True
+    """Whether to use the async RPC path to MaruServer."""
+
+    max_inflight: int = 64
+    """Maximum concurrent in-flight RPCs."""
+
+    eager_map: bool = True
+    """Eagerly mmap peer regions for cross-instance zero-copy reads."""
 
 
 @dataclass
@@ -421,6 +455,36 @@ def add_storage_manager_args(
         help="Open the slab file with O_DIRECT (required for the GDS DMA fast "
         "path on ext4). Default True.",
     )
+    # Maru L1 tier (optional, opt-in via --maru-server-url)
+    maru_group = parser.add_argument_group(
+        "Maru L1 tier",
+        "Optional CXL-backed shared L1 via Maru. Setting --maru-server-url "
+        "makes the L1 medium a cross-instance CXL pool instead of pinned DRAM; "
+        "the DRAM L1 settings (--l1-size-gb, --l1-use-lazy, --l1-init-size-gb) "
+        "are then ignored.",
+    )
+    maru_group.add_argument(
+        "--maru-server-url",
+        type=str,
+        default=None,
+        help="MaruServer endpoint (maru://host:port or tcp://host:port). "
+        "Enables the Maru CXL L1 backend when set.",
+    )
+    maru_group.add_argument(
+        "--maru-pool-size-gb",
+        type=float,
+        default=0.0,
+        help="CXL pool size to request from MaruServer (GB). Required (>0) "
+        "when --maru-server-url is set.",
+    )
+    maru_group.add_argument(
+        "--maru-instance-id",
+        type=str,
+        default=None,
+        help="Stable client id reported to MaruServer for ownership tracking. "
+        "Auto-generated if omitted.",
+    )
+
     # L1 Manager Config (TTL settings)
     ttl_group = parser.add_argument_group(
         "L1 Manager TTL", "TTL configuration for L1 manager locks"
@@ -549,6 +613,19 @@ def parse_args_to_config(
     Returns:
         StorageManagerConfig: The configuration object.
     """
+    maru_config: MaruL1Config | None = None
+    if getattr(args, "maru_server_url", None):
+        pool_size_gb = getattr(args, "maru_pool_size_gb", 0.0)
+        if pool_size_gb <= 0:
+            raise ValueError(
+                "--maru-pool-size-gb must be > 0 when --maru-server-url is set"
+            )
+        maru_config = MaruL1Config(
+            server_url=args.maru_server_url,
+            pool_size_bytes=int(pool_size_gb * (1 << 30)),
+            instance_id=getattr(args, "maru_instance_id", None),
+        )
+
     shm_name = getattr(args, "shm_name", None)
     if shm_name is None:
         memory_config = L1MemoryManagerConfig(
@@ -556,6 +633,7 @@ def parse_args_to_config(
             use_lazy=args.l1_use_lazy,
             init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
             align_bytes=args.l1_align_bytes,
+            maru_config=maru_config,
             devdax_path=args.l1_devdax_path,
         )
     else:
@@ -565,6 +643,7 @@ def parse_args_to_config(
             init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
             align_bytes=args.l1_align_bytes,
             shm_name=shm_name,
+            maru_config=maru_config,
             devdax_path=args.l1_devdax_path,
         )
 
