@@ -107,9 +107,7 @@ class LocalDiskWorker:
     def insert_put_task(self, key: CacheEngineKey):
         self.insert_put_tasks([key])
 
-    def insert_put_tasks(
-        self, keys: Sequence[CacheEngineKey]
-    ) -> list[CacheEngineKey]:
+    def insert_put_tasks(self, keys: Sequence[CacheEngineKey]) -> list[CacheEngineKey]:
         inserted_keys = []
         with self.put_lock:
             for key in keys:
@@ -772,8 +770,7 @@ class LocalDiskBackend(StorageBackendInterface):
                     )
                     if not evict_keys:
                         logger.warning(
-                            "No eviction candidates found. "
-                            "Disk space under pressure."
+                            "No eviction candidates found. Disk space under pressure."
                         )
                         evict_success = False
                         break
