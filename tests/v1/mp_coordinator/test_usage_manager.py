@@ -6,7 +6,7 @@ import pytest
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.mp_coordinator.l2.usage_manager import L2UsageManager
+from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
 
 
 def _key(chunk: int = 0, salt: str = "a") -> ObjectKey:

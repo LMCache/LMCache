@@ -22,7 +22,8 @@ A device-agnostic base, `DeviceIPCWrapper`, now owns everything that is not tran
 DeviceIPCWrapper                        base: contract + (de)serialize
 ├── CudaIPCWrapper                      cuda  — torch caching allocator
 ├── RawCudaIPCWrapper                   cuda — raw cudaMalloc, TRT-LLM
-└── CpuShmTensorWrapper                 cpu   — POSIX shared memory
+├── CpuShmTensorWrapper                 cpu   — POSIX shared memory
+└── MusaIPCWrapper                      musa  — TorchMUSA memory IPC
 ```
 
 All of them live behind a single msgspec ext code 1 and a single `KVCache = list[DeviceIPCWrapper]` wire type, so new device backends can be added as further siblings without touching the wire format.
@@ -51,6 +52,7 @@ transport shares:
 | `CudaIPCWrapper` | `cuda` | `UntypedStorage._share_cuda_()` | `_new_shared_cuda` + `set_()` |
 | `RawCudaIPCWrapper` | `cuda` | `cudaIpcGetMemHandle` (raw ptr) | `cudaIpcOpenMemHandle` → CuPy → DLPack |
 | `CpuShmTensorWrapper` | `cpu` | POSIX `shm_open` | `mmap` same segment |
+| `MusaIPCWrapper` | `musa` | TorchMUSA memory IPC handle | `ipc_open_mem_handle` + DLPack / tensor view |
 
 ## Platform registration
 

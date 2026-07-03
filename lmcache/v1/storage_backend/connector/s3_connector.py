@@ -211,9 +211,9 @@ class S3Connector(RemoteConnector):
         except Exception as e:
             # 404 (not found) is expected when checking if object exists
             if got["status"] == 404:
-                logger.debug(f"Object not found: {key_str}")
+                logger.debug("Object not found: %s", key_str)
             else:
-                logger.debug(f"Exception in `_get_object_size`: {e}")
+                logger.debug("Exception in `_get_object_size`: %s", e)
             return 0
         if got["err"] or got["status"] != 200:
             if got["status"] != 404:  # Don't warn for 404, it's expected
@@ -261,9 +261,9 @@ class S3Connector(RemoteConnector):
         except Exception as e:
             # 404 (not found) is expected when checking if object exists
             if got["status"] == 404:
-                logger.debug(f"Object not found: {key_str}")
+                logger.debug("Object not found: %s", key_str)
             else:
-                logger.debug(f"Exception in `_get_object_size_async`: {e}")
+                logger.debug("Exception in `_get_object_size_async`: %s", e)
             return 0
         if got["err"] or got["status"] != 200:
             if got["status"] != 404:  # Don't warn for 404, it's expected
@@ -398,7 +398,7 @@ class S3Connector(RemoteConnector):
 
             if not is_connection_error:
                 # Log non-connection errors
-                logger.error(f"Failed to download {key_str} from S3: {e}")
+                logger.error("Failed to download %s from S3: %s", key_str, e)
 
             memory_obj.ref_count_down()
             return None
@@ -558,12 +558,12 @@ class S3Connector(RemoteConnector):
             return
 
         try:
-            logger.debug(f"Uploading {key_str} to S3")
+            logger.debug("Uploading %s to S3", key_str)
             s3_req = self._s3_upload(key_str, memory_obj)
             await asyncio.wrap_future(s3_req.finished_future)
 
             self.object_size_cache[key_str] = memory_obj.get_physical_size()
-            logger.debug(f"Uploaded {key_str} to S3 successfully")
+            logger.debug("Uploaded %s to S3 successfully", key_str)
 
             # Reset failure counter on success
             self._reset_connection_failures()
@@ -575,7 +575,7 @@ class S3Connector(RemoteConnector):
 
             if not is_connection_error:
                 # Log non-connection errors
-                logger.error(f"Failed to upload {key_str} to S3: {e}")
+                logger.error("Failed to upload %s to S3: %s", key_str, e)
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         return await self.pq_executor.submit_job(
