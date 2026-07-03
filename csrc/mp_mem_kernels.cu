@@ -388,3 +388,85 @@ void multi_layer_block_kv_transfer(
 }
 
 #undef LAUNCH_TEMPLATED
+
+void execute_object_group_transfer(
+    TransferDirection direction, const torch::Device& device,
+    size_t host_buffer_alignment,
+    const std::vector<KernelGroupSpec>& kernel_group_specs,
+    const std::vector<BatchStep>& batch_steps) {
+  // Set the device guard once for the whole plan so every staging copy and
+  // kernel launch below is enqueued on this device's current stream, in order.
+  const at::cuda::OptionalCUDAGuard device_guard(device);
+  const bool is_h2d = (direction == TransferDirection::H2D);
+  const auto int64_opts = at::TensorOptions().dtype(at::kLong).device(device);
+
+  const auto do_staging = [&](const std::vector<StagingCopy>& staging) {
+    for (const auto& copy : staging) {
+      lmcache_memcpy_async(copy.dest, copy.src, copy.nbytes, direction,
+                           copy.host_offset, host_buffer_alignment);
+    }
+  };
+
+  for (const auto& step : batch_steps) {
+    // H2D stages CPU->GPU temp buffers before the kernel reads them; D2H stages
+    // GPU->CPU after the kernel writes them. The per-step ordering must be
+    // preserved because temp buffers are reused across steps.
+    if (is_h2d) {
+      do_staging(step.staging);
+    }
+    for (const auto& launch : step.launches) {
+      TORCH_CHECK(
+          launch.group_idx >= 0 &&
+              launch.group_idx < static_cast<int>(kernel_group_specs.size()),
+          "LaunchVar.group_idx out of range: ", launch.group_idx);
+      const KernelGroupSpec& group = kernel_group_specs[launch.group_idx];
+      TORCH_CHECK(launch.num_objects >= 1 &&
+                      launch.num_objects <=
+                          static_cast<int>(group.lmcache_objects_ptrs.size()),
+                  "LaunchVar.num_objects (", launch.num_objects,
+                  ") exceeds available temp buffers (",
+                  group.lmcache_objects_ptrs.size(), ")");
+      // Bounds-check the block_ids slice before the kernel dereferences it on
+      // device: an out-of-range offset/length would otherwise be a silent
+      // out-of-bounds device read (CUDA fault or garbage), not a clean error.
+      TORCH_CHECK(launch.block_ids_offset >= 0,
+                  "LaunchVar.block_ids_offset must be non-negative, got ",
+                  launch.block_ids_offset);
+      TORCH_CHECK(launch.total_blocks >= 0,
+                  "LaunchVar.total_blocks must be non-negative, got ",
+                  launch.total_blocks);
+      TORCH_CHECK(launch.block_ids_offset + launch.total_blocks <=
+                      group.block_ids_capacity,
+                  "LaunchVar block_ids slice [", launch.block_ids_offset, ", ",
+                  launch.block_ids_offset + launch.total_blocks,
+                  ") exceeds block_ids capacity ", group.block_ids_capacity);
+
+      // Wrap the plan's pre-resolved raw device addresses as non-owning tensor
+      // views so we can reuse the existing multi_layer_block_kv_transfer entry
+      // point without touching any of its code. The backing storage is owned by
+      // the caller's tensors (kept alive for the duration of this call); these
+      // views only carry the pointer/shape each launch needs. Downstream only
+      // reads paged_buffer_ptrs_tensor.data_ptr() and block_ids.{data_ptr,
+      // size(0)}.
+      const uintptr_t block_ids_addr =
+          group.block_ids_base +
+          static_cast<uintptr_t>(launch.block_ids_offset) * sizeof(int64_t);
+      const at::Tensor paged_buffer_ptrs_tensor = at::from_blob(
+          reinterpret_cast<void*>(group.paged_buffer_ptrs), {1}, int64_opts);
+      const at::Tensor block_ids = at::from_blob(
+          reinterpret_cast<void*>(block_ids_addr),
+          {static_cast<int64_t>(launch.total_blocks)}, int64_opts);
+      std::vector<int64_t> lmcache_objects_ptrs(
+          group.lmcache_objects_ptrs.begin(),
+          group.lmcache_objects_ptrs.begin() + launch.num_objects);
+
+      multi_layer_block_kv_transfer(
+          paged_buffer_ptrs_tensor, std::move(lmcache_objects_ptrs), block_ids,
+          device, direction, group.shape_desc, group.lmcache_chunk_size,
+          group.engine_kv_format, launch.skip_prefix_n_blocks);
+    }
+    if (!is_h2d) {
+      do_staging(step.staging);
+    }
+  }
+}
