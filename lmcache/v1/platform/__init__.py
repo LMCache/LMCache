@@ -13,9 +13,6 @@ packages so each can evolve independently:
 * :mod:`lmcache.v1.platform.cuda` -- CUDA-backed implementations.
 * :mod:`lmcache.v1.platform.cpu`  -- CPU-only fallbacks.
 
-Backend availability is filesystem-driven: every direct sub-package
-below ``platform/`` is auto-imported here, which fires lightweight
-``__init__.py`` side effects such as ``register_availability``.
 KV-cache IPC wrappers and ``BaseCacheContext`` subclasses are
 discovered separately on first use via
 :mod:`lmcache.v1.utils.subclass_discovery`, keyed by each subclass'
