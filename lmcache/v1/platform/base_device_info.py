@@ -23,6 +23,7 @@ import abc
 from lmcache.v1.platform.base_pin_memory import PinMemoryBackend
 
 
+# TODO(chunxiaozheng): bind `DeviceIPCWrapper` with `DeviceInfo`?
 class DeviceInfo(abc.ABC):
     """Abstract description of a hardware accelerator backend.
 
@@ -62,6 +63,11 @@ class DeviceInfo(abc.ABC):
         This method must NOT import from ``lmcache.__init__`` to avoid
         circular dependencies.  Use ``import torch`` directly instead.
         """
+
+    def is_handle_transfer_available(self) -> bool:
+        """Return ``True`` when the device is usable for handle transfer."""
+        # TODO(chunxiaozheng): implement on subclasses
+        return True
 
     @property
     def pin_memory_backend(self) -> type[PinMemoryBackend] | None:

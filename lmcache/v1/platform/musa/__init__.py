@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""MUSA-specific platform primitives.
-"""
+"""MUSA-specific platform primitives."""
 
 # First Party
 from lmcache.v1.platform.base_device_info import DeviceInfo
@@ -34,3 +33,9 @@ class MusaDeviceInfo(DeviceInfo):
             return hasattr(torch, "musa") and torch.musa.is_available()  # type: ignore[attr-defined]
         except Exception:
             return False
+
+    def is_handle_transfer_available(self) -> bool:
+        # First Party
+        from lmcache.v1.platform.musa.ipc import is_musa_handle_transfer_available
+
+        return is_musa_handle_transfer_available()

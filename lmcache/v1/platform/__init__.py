@@ -132,6 +132,21 @@ def _detect_device() -> tuple[Any, str]:
 
 
 # ---------------------------------------------------------------------------
+# Get device info
+# ---------------------------------------------------------------------------
+def get_device_info(device_type: str) -> DeviceInfo | None:
+    """Get the DeviceInfo for the given device type.
+
+    Args:
+        device_type: The device type string (e.g. ``"cuda"``).
+
+    Returns:
+        The DeviceInfo for the given device type, or None if not found.
+    """
+    return _DEVICE_REGISTRY.get(device_type)
+
+
+# ---------------------------------------------------------------------------
 # Dynamic backend selection
 # ---------------------------------------------------------------------------
 
