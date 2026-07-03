@@ -1794,3 +1794,64 @@ class TestSlidingWindowClaims:
         assert l1_manager.delete([keys[3]])[keys[3]] == L1Error.SUCCESS
 
         l1_manager.finish_read(retained_keys)
+
+    def test_load_abort_falls_back_to_l1_hit_window(self, l1_manager):
+        """If the L2 load aborts, finish falls back to the L1 hit — so the
+        L1 hit's own SW window must stay pinned even though the union fold
+        placed the final window past it.
+
+        Layout (chunk-major, groups [full=-1, sw=2], 6 chunks): L1 holds
+        chunks 0-1 (L1 hit = 2), L2 holds the rest (final hit would be 6).
+        One plan key is write-locked by a concurrent writer, so the
+        all-or-nothing reservation abandons the load; the result must be
+        the intact L1 hit, not a collapsed one.
+        """
+        adapter = make_adapter()
+        layout = make_layout()
+        attn_desc = AttnWindowDesc(num_chunks_in_sw=[-1, 2])
+        keys = [make_object_key(100 + i) for i in range(12)]
+
+        # L1: chunks 0-1, both groups (indices 0-3), unlocked.
+        existing = l1_manager.reserve_write(
+            keys[:4], is_temporary=[False] * 4, layout_desc=layout, mode="new"
+        )
+        for key in keys[:4]:
+            assert existing[key][0] == L1Error.SUCCESS
+        l1_manager.finish_write(keys[:4])
+
+        # L2: full-attn chunks 2-5 (indices 4,6,8,10) + SW window chunks
+        # 4-5 (indices 9,11) — the windowed-store layout.
+        l2_indices = [4, 6, 8, 10, 9, 11]
+        store_keys_in_l2(adapter, [keys[i] for i in l2_indices], layout)
+
+        # A concurrent writer holds one plan key -> reservation aborts.
+        contended = l1_manager.reserve_write(
+            [keys[4]], is_temporary=[False], layout_desc=layout, mode="new"
+        )
+        assert contended[keys[4]][0] == L1Error.SUCCESS  # stays write-locked
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(keys, layout, attn_desc=attn_desc)
+        hit = wait_for_lookup_result(ctrl, req_id)
+        result = wait_for_prefetch_result_bitmap(ctrl, req_id)
+
+        ctrl.stop()
+        adapter.close()
+
+        # Fallback: the intact L1 hit with its window still pinned.
+        assert hit == 2
+        assert result is not None
+        assert result.get_indices_list() == [0, 1, 2, 3]
+        read_results = l1_manager.unsafe_read(keys[:4])
+        for key in keys[:4]:
+            assert read_results[key][0] == L1Error.SUCCESS
+
+        l1_manager.finish_read(keys[:4])
+        l1_manager.finish_write([keys[4]])

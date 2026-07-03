@@ -1062,12 +1062,8 @@ class PrefetchController(StorageControllerInterface):
         )
         load_plan = trim_load_plan_with_mask(load_plan, ~request.l1_bitmap)
 
-        # Step 2 — the union fold sets the L1+L2 hit length; pins outside
-        # the retained set are released at finish.
-        # SW keys in L1:
-        # |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
-        #                               ^ L1 hit length               ^ L1+L2 hit length
-        # |      skip      |unpin@finish|  unpin@finish  |  keep pin  |unpin@finish|
+        # Step 2 — the union fold sets the L1+L2 hit length. Dead pins are
+        # unpinned just below (no-load finishes release them at finish).
         # Trim to the retained subset of the L1 ∪ L2 union, so
         # L1-resident keys extend the hit even where L2 lacks them.
         union_bitmap = merge_bitmaps(load_plan.values(), num_keys) | request.l1_bitmap
@@ -1085,6 +1081,34 @@ class PrefetchController(StorageControllerInterface):
             # reports the hit.
             self._finish_request(request)
             return
+
+        # Unpin pins that are dead whether the load lands or not: outside
+        # the final retained set AND outside the L1-only fallback (kept in
+        # case the load aborts/fails). Purely a lock-timing optimization —
+        # it gives the reservation below eviction headroom.
+        # SW keys in L1:
+        # |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
+        #                               ^ L1 hit length               ^ L1+L2 hit length
+        # |      skip      | keep pin*  |     unpin      |  keep pin  |   unpin    |
+        # (*) the L1 hit's own window: kept even when outside the final
+        # window, as the fallback promise if the L2 load never lands.
+        _l1_hit, l1_fallback_retain = build_trim_mask(
+            request.l1_bitmap,
+            num_keys,
+            request.policy,
+            request.attn_desc,
+        )
+        stale = request.l1_bitmap & (~retained) & (~l1_fallback_retain)
+        if stale.popcount() > 0:
+            request.l1_bitmap = request.l1_bitmap & (retained | l1_fallback_retain)
+            to_unpin = [
+                key
+                for key in stale.gather(request.keys)
+                if key in request.l1_pinned_keys
+            ]
+            if to_unpin:
+                self._l1_manager.finish_read(to_unpin, extra_count=request.extra_count)
+                request.l1_pinned_keys.difference_update(to_unpin)
 
         # Step 3 — reserve L1 write buffers for the plan keys, all or
         # nothing: any reservation failure (OOM or contention) abandons the

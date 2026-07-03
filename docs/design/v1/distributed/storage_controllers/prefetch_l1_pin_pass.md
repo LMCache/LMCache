@@ -45,15 +45,17 @@ Actions per segment at each step:
 
 pin pass    (SW in L1)        |      skip      |    pin     |  pin if in L1  |pin if in L1|pin if in L1|
 step 1 plan (L2 candidates)   |       -        |     -      |   candidate    | candidate  | candidate  |
-step 2 fold (SW in L1)        |      skip      |unpin@finish|  unpin@finish  |  keep pin  |unpin@finish|
+step 2 fold (SW in L1)        |      skip      |   unpin    |     unpin      |  keep pin  |   unpin    |
 step 3 rsrv (SW in L2 ∖ L1)   |       -        |     -      |       -        |  loading*  |     -      |
 step 4      (L2 locks)        |      free      |    free    |      free      | keep plan  |    free    |
 step 5 load (SW in L2 ∖ L1)   |       -        |     -      |       -        |  loading   |     -      |
 finish      (SW in L2 ∖ L1)   |       -        |     -      |       -        |load→pinned |     -      |
 finish      (SW in L1)        |      skip      |   unpin    |     unpin      |   pinned   |   unpin    |
 
-(pins are held from the pin pass until finish — the folds only decide
- the retained set; every read lock outside it is released at finish.)
+(on the load path, pins the fold leaves outside the retained set are
+ unpinned right after step 2 — before the reservation — so the allocator
+ can evict them for the load buffers; no-load finishes release them at
+ finish. Finish reconciles idempotently either way.)
 (*) all-or-nothing: any reservation failure (OOM or contention)
     abandons the whole L2 load and finishes with the L1 hit.
 ```
