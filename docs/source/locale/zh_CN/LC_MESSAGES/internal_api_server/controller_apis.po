@@ -307,3 +307,7 @@ msgstr "最后心跳的 Unix 时间戳"
 msgid "Number of KV keys held by this worker"
 msgstr "此工作线程持有的 KV 键数量"
 
+
+#: ../../source/internal_api_server/controller_apis.rst:1
+msgid "This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/http_api`."
+msgstr "本页面介绍 LMCache 进程内模式（不推荐使用）的行为。建议改用 :doc:`LMCache MP 模式 </mp/index>`\\ 以获得更好的功能支持与性能。本页面对应的 MP 模式文档请参见 :doc:`/mp/http_api`\\ 。"

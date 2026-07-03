@@ -1018,3 +1018,7 @@ msgstr "**路径**: ``/bypass/remove``"
 msgid "Name of the backend to restore (required)"
 msgstr "恢复的后端名称（必填）"
 
+
+#: ../../source/internal_api_server/vllm_apis.rst:1
+msgid "This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/http_api`."
+msgstr "本页面介绍 LMCache 进程内模式（不推荐使用）的行为。建议改用 :doc:`LMCache MP 模式 </mp/index>`\\ 以获得更好的功能支持与性能。本页面对应的 MP 模式文档请参见 :doc:`/mp/http_api`\\ 。"

@@ -18,6 +18,7 @@ import numpy as np
 
 # First Party
 from lmcache.v1.distributed.api import EncodedObjectKey  # noqa: F401  re-exported
+from lmcache.v1.distributed.tiers import Tier
 
 
 def encode_tokens(tokens: "list[int] | np.ndarray") -> str:
@@ -119,9 +120,11 @@ class SetQuotaRequest(BaseModel):
 
     Attributes:
         limit_gb: Non-negative byte budget in GiB.
+        tier: Cache tier the quota applies to (only ``l2`` is supported today).
     """
 
     limit_gb: float = Field(ge=0.0)
+    tier: Tier = Tier.L2
 
 
 class QuotaResponse(BaseModel):
@@ -138,11 +141,11 @@ class QuotaResponse(BaseModel):
     status: str
 
 
-# -- L2 usage tracking -------------------------------------------------------
+# -- Usage tracking ----------------------------------------------------------
 
 
 class EventType(str, Enum):
-    """L2 cache events reported by an MP server."""
+    """Cache events reported by an MP server."""
 
     STORE = "store"
     LOOKUP = "lookup"
@@ -150,7 +153,7 @@ class EventType(str, Enum):
 
 
 class UsageEvent(BaseModel):
-    """A single L2 event reported by an MP server.
+    """A single cache event reported by an MP server.
 
     Attributes:
         type: The event type.
@@ -164,7 +167,7 @@ class UsageEvent(BaseModel):
 
 
 class ReportUsageRequest(BaseModel):
-    """Body of ``POST /l2/events``.
+    """Body of ``POST /quota/events``.
 
     Attributes:
         instance_id: Identifier of the MP server that produced this batch.
@@ -172,15 +175,17 @@ class ReportUsageRequest(BaseModel):
             ``instance_id``. Starts at 1 for the first flush after the
             server starts.
         events: Batch of store/lookup events to record.
+        tier: Cache tier the events apply to (only ``l2`` is supported today).
     """
 
     instance_id: str
     seq: int = Field(ge=1)
     events: list[UsageEvent]
+    tier: Tier = Tier.L2
 
 
 class ReportUsageResponse(BaseModel):
-    """Reply to ``POST /l2/events``.
+    """Reply to ``POST /quota/events``.
 
     Attributes:
         recorded: Number of events processed.
@@ -189,14 +194,14 @@ class ReportUsageResponse(BaseModel):
     recorded: int
 
 
-class L2StatusResponse(BaseModel):
+class StatusResponse(BaseModel):
     """Combined quota and usage for a single ``cache_salt``.
 
     Attributes:
         cache_salt: The tenant identifier.
         quota_limit_gb: The byte budget in GiB (0.0 if no quota set).
         quota_exists: Whether an explicit quota is registered.
-        usage_gb: Current L2 usage in GiB.
+        usage_gb: Current usage in GiB.
     """
 
     cache_salt: str
@@ -205,16 +210,16 @@ class L2StatusResponse(BaseModel):
     usage_gb: float
 
 
-class L2StatusListResponse(BaseModel):
-    """Reply to ``GET /l2/status``.
+class StatusListResponse(BaseModel):
+    """Reply to ``GET /quota``.
 
     Attributes:
-        total_gb: Aggregate L2 usage in GiB.
+        total_gb: Aggregate usage in GiB.
         by_cache_salt: Per-tenant breakdown with quota and usage.
     """
 
     total_gb: float
-    by_cache_salt: list[L2StatusResponse]
+    by_cache_salt: list[StatusResponse]
 
 
 # -- Global CacheBlend fingerprint directory ------------------------------
@@ -339,13 +344,13 @@ class BlendMatchResponse(BaseModel):
 
 
 class PrefetchRequest(BaseModel):
-    """Body of ``POST /l2/prefetch`` on the coordinator.
+    """Body of ``POST /cache/prefetches`` on the coordinator.
 
     Asks the coordinator to warm one MP server's L1 with the chunks of a token
     sequence. The caller describes content by ``token_ids`` -- the unit the
     cache speaks -- not by internal cache keys, which it cannot construct. The
     coordinator forwards the request verbatim to that server's own
-    ``POST /l2/prefetch``, which hashes the tokens and expands them into the
+    ``POST /cache/prefetches``, which hashes the tokens and expands them into the
     per-rank keys.
 
     Attributes:
@@ -364,12 +369,12 @@ class PrefetchRequest(BaseModel):
 
 
 class PrefetchResponse(BaseModel):
-    """Reply to ``POST /l2/prefetch`` on the coordinator.
+    """Reply to ``POST /cache/prefetches`` on the coordinator.
 
     Attributes:
         instance_id: The target MP server the prefetch was submitted to.
         request_id: The server's job id to poll via
-            ``GET /l2/prefetch/{instance_id}/{request_id}``. Empty when
+            ``GET /cache/prefetches/{instance_id}/{request_id}``. Empty when
             ``status`` is ``"noop"`` (nothing to warm).
         chunks: Number of whole chunks submitted to warm.
         status: ``"submitted"`` (a job is in flight) or ``"noop"`` (the

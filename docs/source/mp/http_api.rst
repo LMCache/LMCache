@@ -27,10 +27,11 @@ Routes are assembled from three sources, all merged into one FastAPI app by
   ``/loglevel``, ``/metrics``, ``/threads``, ``/periodic-threads*``,
   ``/run_script``). Adding a new compatible module under
   ``internal_api_server/common`` requires no wiring changes on the MP side.
-- **Re-exported version routes** —
-  ``lmcache/v1/multiprocess/http_apis/version_api.py`` re-exports the router
+- **Re-exported version routes** — the basic-info group
+  ``lmcache/v1/multiprocess/http_apis/info_api.py`` includes the router
   from ``lmcache/v1/internal_api_server/vllm/version_api.py``, exposing
-  ``/version``, ``/lmc_version``, and ``/commit_id``.
+  ``/version``, ``/lmc_version``, and ``/commit_id`` alongside ``/``,
+  ``/healthcheck`` and ``/status``.
 
 .. contents::
    :local:
@@ -75,11 +76,11 @@ compatibility with the vLLM-embedded API server.
 .. note::
 
    Several handlers report failure in the response **body** rather than via a
-   non-200 status code (e.g. ``DELETE /l2`` returns ``200`` with ``ok=false``,
+   non-200 status code (e.g. ``DELETE /cache/objects`` returns ``200`` with ``ok=false``,
    and ``/periodic-threads-health`` returns ``200`` with ``healthy=false``).
    The error-field name is also not uniform: ``/healthcheck`` and
-   ``/clear-cache`` use ``reason`` on failure, while ``/status``, ``/conf``,
-   and ``/kvcache/check`` use ``error``. Per-endpoint details below are
+   ``/cache/clear`` use ``reason`` on failure, while ``/status``, ``/config``,
+   and ``/cache/checksums`` use ``error``. Per-endpoint details below are
    authoritative.
 
 **Liveness and health**
@@ -112,9 +113,13 @@ compatibility with the vLLM-embedded API server.
      - Detailed engine snapshot (L1, L2, registered contexts, sessions,
        prefetch jobs) for inspection and debugging.
    * - GET
-     - ``/conf``
+     - ``/config``
      - Dump the merged server configuration objects (``mp``,
        ``storage_manager``, ``observability``).
+   * - GET
+     - ``/config/adapters``
+     - Enumerate the live cache adapters (``type_name``, ``tier``, ``primary``,
+       ``reconfigurable``). Supersedes ``/reconfigure/backends``.
    * - GET
      - ``/version``
      - Combined version string (``"<version>-<commit_id>"``).
@@ -125,51 +130,37 @@ compatibility with the vLLM-embedded API server.
      - ``/commit_id``
      - Build commit id.
 
-**Cache control**
+**Cache management**
 
 .. list-table::
    :header-rows: 1
-   :widths: 10 35 55
-
-   * - Method
-     - Path
-     - Purpose
-   * - POST
-     - ``/clear-cache``
-     - Force-clear all KV data in L1 (CPU) memory.
-   * - GET
-     - ``/kvcache/check``
-     - Compute MD5 checksums over the engine KV cache for a set of block IDs
-       (diagnostics / round-trip integrity checks).
-
-**L2 storage management**
-
-.. list-table::
-   :header-rows: 1
-   :widths: 10 35 55
+   :widths: 10 38 52
 
    * - Method
      - Path
      - Purpose
    * - GET
-     - ``/l2/adapters``
-     - Enumerate every configured L2 adapter with its ``type_name`` and
-       primary flag.
+     - ``/cache/objects``
+     - Paginate objects resident in a tier/adapter (query: ``tier``,
+       ``adapter``, ``model_name``, ``page_size``, ``page_token``).
    * - DELETE
-     - ``/l2``
-     - Delete a caller-supplied list of keys from one L2 adapter (default:
-       primary; override with ``?adapter=<type_name>``).
-   * - GET
-     - ``/l2/keys``
-     - Paginate keys currently resident in one L2 adapter (optionally
-       filtered by ``model_name``).
+     - ``/cache/objects``
+     - Delete a caller-supplied list of object keys (body: ``tier``,
+       ``adapter``, ``keys``).
    * - POST
-     - ``/l2/prefetch``
-     - Warm a node's L1 by loading a token sequence's chunks from L2 ahead
-       of traffic; returns a ``request_id``.
+     - ``/cache/prefetches``
+     - Warm a node's L1 by loading a token sequence from L2 ahead of traffic;
+       returns a ``request_id``.
    * - GET
-     - ``/l2/prefetch/{request_id}``
+     - ``/cache/prefetches/{request_id}``
      - Poll a submitted warm prefetch (``pending`` / ``completed``).
+   * - POST
+     - ``/cache/clear``
+     - Force-clear a tier's resident cache (body: ``tier`` = ``l1``, ``force``).
+   * - POST
+     - ``/cache/checksums``
+     - Compute MD5 checksums over KV cache blocks (diagnostics / round-trip
+       integrity checks).
 
 **Quota management**
 
@@ -203,11 +194,10 @@ compatibility with the vLLM-embedded API server.
      - Path
      - Purpose
    * - GET
-     - ``/reconfigure/backends``
-     - List backend strings accepted by the reconfiguration routes.
-   * - GET
      - ``/reconfigure/{backend}/status``
-     - Report runtime-manageable L2 adapters for one backend type.
+     - Report runtime-manageable L2 adapters for one backend type. (To discover
+       reconfigurable backends, use ``GET /config/adapters`` and read the
+       ``reconfigurable`` flag.)
    * - POST
      - ``/reconfigure/{backend}/{operation}``
      - Apply one runtime reconfiguration operation to a backend adapter.
@@ -278,6 +268,10 @@ instead for probes that also verify the engine is initialized.
       "service": "LMCache HTTP API"
     }
 
+**HTTP status codes:**
+
+- ``200``: server is alive (unconditional; does not touch the engine).
+
 **Example:**
 
 .. code-block:: bash
@@ -310,6 +304,11 @@ not call into the engine to assert deeper liveness.
       "status": "unhealthy",
       "reason": "engine not initialized"
     }
+
+**HTTP status codes:**
+
+- ``200``: engine is wired onto ``app.state`` (healthy).
+- ``503``: engine not initialized (still starting up, or failed to initialize).
 
 **Example:**
 
@@ -404,14 +403,19 @@ been initialized:
       "error": "engine not initialized"
     }
 
+**HTTP status codes:**
+
+- ``200``: status snapshot returned.
+- ``503``: engine not yet initialized on ``app.state``.
+
 **Example:**
 
 .. code-block:: bash
 
     curl -s http://localhost:8080/status | jq
 
-``GET /conf``
-~~~~~~~~~~~~~
+``GET /config``
+~~~~~~~~~~~~~~~
 
 Returns every server-side configuration object registered on
 ``app.state.configs`` (typically ``mp``, ``storage_manager`` and
@@ -447,11 +451,55 @@ onto ``app.state`` yet:
       "error": "configs not initialized"
     }
 
+**HTTP status codes:**
+
+- ``200``: configuration document returned.
+- ``503``: configs not yet wired onto ``app.state``.
+
 **Example:**
 
 .. code-block:: bash
 
-    curl -s http://localhost:8080/conf | jq
+    curl -s http://localhost:8080/config | jq
+
+``GET /config/adapters``
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Enumerate every L2 adapter the engine has loaded, in configuration
+order. Which storage backends are loaded is a configuration-inspection
+concern, so this lives in the config group rather than under ``/cache``.
+This is the single live adapter listing; it supersedes the old
+``GET /reconfigure/backends`` (the reconfigurable backends are the
+``type_name`` values whose ``reconfigurable`` flag is ``true``).
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "adapters": [
+        {"index": 0, "type_name": "S3L2Adapter", "tier": "l2", "primary": true, "reconfigurable": false},
+        {"index": 1, "type_name": "dax", "tier": "l2", "primary": false, "reconfigurable": true}
+      ]
+    }
+
+``primary`` is ``true`` only on the first entry. ``reconfigurable`` is
+``true`` for adapters that accept ``/reconfigure`` operations — pass that
+adapter's ``type_name`` as the ``{backend}`` path parameter to
+``GET /reconfigure/{backend}/status`` and the reconfigure operations. An
+engine that has no L2 backends returns ``{"adapters": []}`` (still ``200`` —
+the engine is initialized, it just has no L2 storage).
+
+**HTTP status codes:**
+
+- ``200``: success (including the no-adapters case).
+- ``503``: engine not initialized.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s http://localhost:8080/config/adapters | jq
 
 ``GET /version``, ``GET /lmc_version``, ``GET /commit_id``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -471,6 +519,16 @@ Version descriptors. Each returns a bare JSON **string** (not an object):
 
 All three are unconditional ``200 OK``.
 
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    "0.3.1-ca79ea33"
+
+**HTTP status codes:**
+
+- ``200``: version string returned (unconditional for all three routes).
+
 **Examples:**
 
 .. code-block:: bash
@@ -479,14 +537,13 @@ All three are unconditional ``200 OK``.
     curl -s http://localhost:8080/lmc_version
     curl -s http://localhost:8080/commit_id
 
-Cache Control
--------------
+Cache Management
+----------------
 
-``POST /clear-cache``
-~~~~~~~~~~~~~~~~~~~~~
+``POST /cache/clear``
+~~~~~~~~~~~~~~~~~~~~~~
 
-Force-clears **all** KV cache data currently held in L1 (CPU) memory
-(delegates to the ``ManagementModule``).
+Force-clears **all** KV cache data currently held in a tier (today ``l1``).
 
 .. warning::
 
@@ -494,54 +551,65 @@ Force-clears **all** KV cache data currently held in L1 (CPU) memory
    store or prefetch operations may be corrupted. Use only when the
    server is idle, or when recovering from a known-bad cache state.
 
-The request body is ignored.
+**Request body:** optional -- an absent (or empty) body uses the defaults below.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 18 14 68
+
+   * - Field
+     - Type
+     - Description
+   * - ``tier``
+     - string
+     - Optional (default ``l1``). Tier to clear; today only ``l1`` is
+       supported. Any other value returns ``400``.
+   * - ``force``
+     - bool
+     - Optional (default ``true``). Currently accepted but **not honored** --
+       the clear always force-clears (active locks are ignored) regardless of
+       this value.
 
 **Response** (``200 OK``):
 
 .. code-block:: json
 
-    {
-      "status": "ok"
-    }
+    {"status": "ok", "cleared": {"tier": "l1"}}
 
-**Response** (``503 Service Unavailable``):
+**HTTP status codes:**
 
-.. code-block:: json
-
-    {
-      "status": "error",
-      "reason": "engine not initialized"
-    }
+- ``200``: tier cleared.
+- ``400``: unsupported ``tier`` (anything other than ``l1``).
+- ``503``: server not initialized (``{"detail": "server not initialized"}``).
 
 **Example:**
 
 .. code-block:: bash
 
-    curl -s -X POST http://localhost:8080/clear-cache
+    # the body is optional; this clears the default tier (l1)
+    curl -s -X POST http://localhost:8080/cache/clear
 
-``GET /kvcache/check``
-~~~~~~~~~~~~~~~~~~~~~~
+``POST /cache/checksums``
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Compute MD5 checksums over the engine KV cache, grouped ``chunk_size`` blocks
 per hashed chunk. MP mode addresses KV storage by block IDs natively (the
 same units used by ``STORE`` / ``RETRIEVE``), so the endpoint is fully
-block-centric: ``block_ids`` enumerates the target blocks and
-``chunk_size`` counts blocks per chunk. Intended for diagnostics and
-round-trip integrity checks from ``lmcache bench server`` — not for the
-inference data path.
+block-centric. Intended for diagnostics and round-trip integrity checks from
+``lmcache bench server`` -- not for the inference data path.
 
-**Query parameters:**
+**Request body:**
 
 .. list-table::
    :header-rows: 1
    :widths: 25 15 60
 
-   * - Name
+   * - Field
      - Required
      - Description
    * - ``block_ids``
      - yes
-     - Engine block IDs in mixed format, e.g. ``"0,[2,5],8"``.
+     - Engine block IDs as a JSON list of ints, e.g. ``[0, 1, 2, 3]``.
    * - ``chunk_size``
      - yes
      - Positive integer — number of blocks per hashed chunk.
@@ -572,8 +640,7 @@ When ``layerwise=true``, ``chunk_checksums`` is a dict keyed by
 **HTTP status codes:**
 
 - ``200``: success.
-- ``400``: ``block_ids`` missing/malformed, or ``chunk_size`` missing or
-  non-positive.
+- ``400``: ``block_ids`` empty, or ``chunk_size`` missing or non-positive.
 - ``404``: ``instance_id`` not registered, or the registered KV tensors
   are empty.
 - ``501``: engine has no ``cache_contexts``, or the KV format is not
@@ -585,36 +652,35 @@ When ``layerwise=true``, ``chunk_checksums`` is a dict keyed by
 
 .. code-block:: bash
 
-    curl -s "http://localhost:8080/kvcache/check?block_ids=0,1,2,3&chunk_size=2"
-
-    curl -s "http://localhost:8080/kvcache/check?block_ids=0,1,2,3&chunk_size=2&layerwise=true"
+    curl -s -X POST http://localhost:8080/cache/checksums \
+        -H 'Content-Type: application/json' \
+        -d '{"block_ids": [0, 1, 2, 3], "chunk_size": 2}'
 
 .. _mp-http-l2-keys-api:
 
-L2 Storage Management
----------------------
+Cache Objects And Prefetch
+--------------------------
 
-Three endpoints — ``GET /l2/adapters``, ``DELETE /l2``, and
-``GET /l2/keys`` — let operators enumerate the configured L2
-backends, purge keys from one, and enumerate what is currently
-resident.
+Two endpoints — ``DELETE /cache/objects`` and ``GET /cache/objects`` — let
+operators purge keys from a configured cache backend and enumerate what is
+currently resident. (To enumerate the configured backends themselves, use
+``GET /config/adapters`` in the config group.)
 
-A further pair — ``POST /l2/prefetch`` and
-``GET /l2/prefetch/{request_id}`` — lets an operator (or the
+A further pair — ``POST /cache/prefetches`` and
+``GET /cache/prefetches/{request_id}`` — lets an operator (or the
 coordinator) **pre-warm** a node's L1 from L2 ahead of traffic and poll
 the load to completion; they are documented at the end of this section.
 The coordinator exposes an ``instance_id``-routed variant of both — see
 :doc:`coordinator`.
 
-``DELETE /l2`` and ``GET /l2/keys`` accept an optional
-``?adapter=<type_name>`` query parameter to target a specific adapter.
-Omit the selector to target the **primary** (first-configured)
-adapter — the v1 behavior, preserved for clients that don't care
-about multi-adapter deployments. When multiple adapters share a
-``type_name``, the first match wins. Use ``GET /l2/adapters`` to learn
-the valid selectors.
+Both object endpoints take an optional ``adapter`` selector — a query
+parameter on ``GET /cache/objects`` (``?adapter=<type_name>``) and a body
+field on ``DELETE /cache/objects``. Omit it to target the **primary**
+(first-configured) adapter. When multiple adapters share a ``type_name``,
+the first match wins. Use ``GET /config/adapters`` to learn the valid
+selectors.
 
-All three are intended for operator / admin workflows ("purge this
+Both are intended for operator / admin workflows ("purge this
 user's keys", "show me what's resident", "garbage-collect orphans
 after a rename"). They are **not** on the inference data path.
 
@@ -623,81 +689,50 @@ from L1 until the L1 eviction controller expires them naturally;
 callers that need an L1+L2 purge should layer their own L1
 invalidation or wait for natural L1 eviction.
 
-The coordinator's eviction loop uses ``DELETE /l2`` automatically (see
+The coordinator's eviction loop uses ``DELETE /cache/objects`` automatically (see
 :doc:`coordinator` — "L2 usage tracking and eviction"); the
-``GET /l2/keys`` endpoint also powers the coordinator's startup
+``GET /cache/objects`` endpoint also powers the coordinator's startup
 resync. Manual ``curl`` usage is reserved for ad-hoc operator
 actions and debugging.
 
-For full request/response semantics, pagination, error codes, and the
-event flow back to the coordinator, see the design doc at
-``docs/design/v1/multiprocess/l2_apis.md``.
+``DELETE /cache/objects``
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``GET /l2/adapters``
-~~~~~~~~~~~~~~~~~~~~
-
-Enumerate every L2 adapter the engine has loaded, in configuration
-order.
-
-**Response** (``200 OK``):
-
-.. code-block:: json
-
-    {
-      "adapters": [
-        {"index": 0, "type_name": "S3L2Adapter", "primary": true},
-        {"index": 1, "type_name": "FSL2Adapter", "primary": false}
-      ]
-    }
-
-``primary`` is ``true`` only on the first entry. An engine that has
-no L2 backends returns ``{"adapters": []}`` (still ``200`` — the
-engine is initialized, it just has no L2 storage).
-
-**HTTP status codes:**
-
-- ``200``: success (including the no-adapters case).
-- ``503``: engine not initialized.
-
-**Example:**
-
-.. code-block:: bash
-
-    curl -s http://localhost:8080/l2/adapters | jq
-
-``DELETE /l2``
-~~~~~~~~~~~~~~
-
-Delete a caller-supplied list of keys from one L2 adapter.
+Delete a caller-supplied list of keys from one tier/adapter.
 Idempotent: keys absent from the adapter are skipped silently; keys
 currently locked by in-flight store/load tasks are skipped so the
 delete never corrupts an active transfer. The blocking adapter call is
 run off the event loop.
 
-**Query parameters:**
-
-.. list-table::
-   :header-rows: 1
-   :widths: 18 13 69
-
-   * - Name
-     - Default
-     - Description
-   * - ``adapter``
-     - primary
-     - ``type_name`` of the target adapter (see ``GET /l2/adapters``).
-       Omit to target the primary (first-configured) adapter. First
-       match wins when multiple adapters share a ``type_name``.
-
 Per-key successful deletions fire ``on_l2_keys_deleted`` on the
 adapter's listeners — when the coordinator is wired (see
 ``--coordinator-l2-event-reporting``), the deletions show up at the
-coordinator's ``POST /l2/events`` as ``"type": "delete"`` events. The
+coordinator's ``POST /quota/events`` as ``"type": "delete"`` events. The
 coordinator's eviction + usage trackers learn about the deletion from
 that event flow, not from the response of this call.
 
-**Body:** ``{"keys": [EncodedObjectKey, ...]}`` where each
-``EncodedObjectKey`` is
+**Request body:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 18 14 68
+
+   * - Field
+     - Type
+     - Description
+   * - ``keys``
+     - list[EncodedObjectKey]
+     - Required. The object keys to delete (schema below). The batch is
+       capped at ``10000`` keys per request.
+   * - ``tier``
+     - string
+     - Optional (default ``l2``). The only supported value.
+   * - ``adapter``
+     - string
+     - Optional (default: primary, first-configured adapter). The
+       ``type_name`` of the target adapter (see ``GET /config/adapters``).
+
+Each ``EncodedObjectKey`` is
 
 .. code-block:: json
 
@@ -710,8 +745,7 @@ that event flow, not from the response of this call.
     }
 
 ``object_group_id`` (default ``0``) and ``cache_salt`` (default ``""``)
-are optional for backward compatibility with older wire payloads. The
-batch is capped at ``10000`` keys per request.
+are optional for backward compatibility with older wire payloads.
 
 **Response** (``200 OK``):
 
@@ -732,7 +766,7 @@ On adapter-level failure the response is still ``200`` with
 - ``400``: batch exceeds the limit, or a key payload violates an
   ``ObjectKey`` invariant (bad hex, ``@`` in ``model_name``, forbidden
   ``cache_salt`` character).
-- ``404``: ``?adapter=<name>`` does not match any configured adapter.
+- ``404``: ``adapter`` (body) does not match any configured adapter.
 - ``422``: Pydantic-level body-shape failure (missing ``keys``,
   wrong field types).
 - ``503``: engine not initialized, or no L2 adapters configured.
@@ -741,7 +775,7 @@ On adapter-level failure the response is still ``200`` with
 
 .. code-block:: bash
 
-    curl -s -X DELETE http://localhost:8080/l2 \
+    curl -s -X DELETE http://localhost:8080/cache/objects \
         -H 'Content-Type: application/json' \
         -d '{
             "keys": [
@@ -750,8 +784,8 @@ On adapter-level failure the response is still ``200`` with
             ]
         }'
 
-``GET /l2/keys``
-~~~~~~~~~~~~~~~~
+``GET /cache/objects``
+~~~~~~~~~~~~~~~~~~~~~~
 
 Paginate keys currently resident in one L2 adapter.
 
@@ -766,7 +800,7 @@ Paginate keys currently resident in one L2 adapter.
      - Description
    * - ``adapter``
      - primary
-     - ``type_name`` of the target adapter (see ``GET /l2/adapters``).
+     - ``type_name`` of the target adapter (see ``GET /config/adapters``).
        Omit to target the primary (first-configured) adapter. First
        match wins when multiple adapters share a ``type_name``.
    * - ``model_name``
@@ -827,14 +861,14 @@ cause keys to appear, disappear, or shift between pages.
 
     next=""
     while :; do
-      page=$(curl -s "http://localhost:8080/l2/keys?model_name=meta-llama/Llama-3-8B&page_size=500&page_token=$next")
+      page=$(curl -s "http://localhost:8080/cache/objects?model_name=meta-llama/Llama-3-8B&page_size=500&page_token=$next")
       echo "$page" | jq '.entries[]'
       next=$(echo "$page" | jq -r '.next_page_token // empty')
       [ -z "$next" ] && break
     done
 
-``POST /l2/prefetch``
-~~~~~~~~~~~~~~~~~~~~~~
+``POST /cache/prefetches``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Warm one node's L1 by loading a token sequence's chunks from L2 **ahead** of
 the requests that will use them, so the first request hits L1 instead of
@@ -902,14 +936,14 @@ no ``request_id`` to poll:
 
 .. code-block:: bash
 
-    curl -s -X POST http://localhost:8080/l2/prefetch \
+    curl -s -X POST http://localhost:8080/cache/prefetches \
         -H 'Content-Type: application/json' \
         -d '{"model_name": "Qwen/Qwen3-8B", "world_size": 1,
              "token_ids": [101, 102, 103], "cache_salt": "user-a"}'
     # -> {"request_id": "abc123", "chunks": 1, "status": "submitted"}
 
-``GET /l2/prefetch/{request_id}``
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+``GET /cache/prefetches/{request_id}``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Poll a submitted warm prefetch. The warm holds no lock, so the poll only
 reports progress; the first poll that observes completion drops the job
@@ -947,7 +981,7 @@ transient temporary from another lookup, so claiming it as warmed could mislead.
 
 .. code-block:: bash
 
-    curl -s http://localhost:8080/l2/prefetch/abc123
+    curl -s http://localhost:8080/cache/prefetches/abc123
     # -> {"status": "completed", "found_keys": 1, "total_keys": 1}
 
 .. _mp-http-quota-api:
@@ -981,7 +1015,21 @@ other value (e.g. ``"default"``) to disambiguate.
 
 Create or update a quota.
 
-**Body:** ``{"limit_gb": <float>}`` (required, finite, non-negative).
+**Path parameters:** ``cache_salt`` — tenant identifier (use ``_default``
+for the empty salt; see the section intro).
+
+**Request body:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 18 14 68
+
+   * - Field
+     - Type
+     - Description
+   * - ``limit_gb``
+     - float
+     - Required. The quota in GB. Must be finite and non-negative.
 
 **Response** (``200 OK``):
 
@@ -989,9 +1037,12 @@ Create or update a quota.
 
     {"cache_salt": "alice", "limit_gb": 10.0, "status": "ok"}
 
-**Errors:** ``400`` for malformed JSON, missing ``limit_gb``, non-numeric
-``limit_gb``, ``nan`` / ``inf``, or negative values; ``503`` if the
-engine is not initialized.
+**HTTP status codes:**
+
+- ``200``: quota set or updated.
+- ``400``: malformed JSON, missing ``limit_gb``, non-numeric ``limit_gb``,
+  ``nan`` / ``inf``, or a negative value.
+- ``503``: engine not initialized.
 
 **Example:**
 
@@ -1005,6 +1056,9 @@ engine is not initialized.
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Read the current quota and live usage for one ``cache_salt``.
+
+**Path parameters:** ``cache_salt`` — tenant identifier (use ``_default``
+for the empty salt).
 
 **Response** (``200 OK``):
 
@@ -1023,12 +1077,27 @@ reflects whatever bytes are currently cached for that salt — those bytes
 will evict next cycle under ``IsolatedLRU``). This endpoint never returns
 ``404`` for an unknown salt.
 
+**HTTP status codes:**
+
+- ``200``: quota and usage returned (also when the salt has no registered
+  quota — ``exists`` is then ``false``; never ``404``).
+- ``503``: engine not initialized.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s http://localhost:8080/quota/alice | jq
+
 ``DELETE /quota/{cache_salt}``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Remove a ``cache_salt``'s quota entry. Any bytes still cached under this
 ``cache_salt`` become over-budget on the next eviction cycle (effective
 limit drops to ``0``) and will be evicted.
+
+**Path parameters:** ``cache_salt`` — tenant identifier (use ``_default``
+for the empty salt).
 
 **Response** (``200 OK``):
 
@@ -1038,6 +1107,18 @@ limit drops to ``0``) and will be evicted.
 
 When no quota was registered for the given ``cache_salt``, the response
 is ``{"cache_salt": "...", "status": "not_found"}`` (still ``200 OK``).
+
+**HTTP status codes:**
+
+- ``200``: quota entry removed (``"removed"``) or none existed
+  (``"not_found"``); never ``404``.
+- ``503``: engine not initialized.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s -X DELETE http://localhost:8080/quota/alice
 
 ``GET /quota``
 ~~~~~~~~~~~~~~~~~~
@@ -1058,6 +1139,17 @@ List every registered quota alongside its live usage.
 Only ``cache_salt`` values with a **registered** quota appear; the empty
 salt is reported under the ``_default`` key.
 
+**HTTP status codes:**
+
+- ``200``: quota listing returned (``{"users": {}}`` when none registered).
+- ``503``: engine not initialized.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s http://localhost:8080/quota | jq
+
 .. _mp-http-dax-api:
 
 Runtime L2 Reconfiguration
@@ -1076,28 +1168,11 @@ lower-cased). Within a request body, ``adapter_index`` (default ``0``) is
 engine-wide adapter list. If an L2 adapter is wrapped by serde, the backend
 string is still the configured L2 adapter type, not the serde wrapper type.
 
-``GET /reconfigure/backends``
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. note::
 
-List the backend strings that can be used in
-``/reconfigure/{backend}/status`` and
-``/reconfigure/{backend}/{operation}``.
-
-**Response** (``200 OK``):
-
-.. code-block:: json
-
-    {
-      "enabled": true,
-      "num_backends": 1,
-      "backends": ["dax"]
-    }
-
-``enabled`` is ``false`` (and ``backends`` empty) when no reconfigurable
-adapter is present.
-
-**HTTP status codes:** ``200`` on success; ``503`` if the engine is not
-initialized.
+   The backend strings accepted here are discovered via
+   ``GET /config/adapters``: each adapter whose ``reconfigurable`` flag is
+   ``true`` can be addressed by its ``type_name``.
 
 ``GET /reconfigure/{backend}/status``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1105,6 +1180,9 @@ initialized.
 Report the runtime-manageable adapters for one backend type. Each adapter
 entry's ``adapter_index`` is rewritten to its **backend-local** 0-based index
 (the value to pass back in operation request bodies).
+
+**Path parameters:** ``backend`` — adapter ``type_name`` (normalized:
+stripped and lower-cased; discover valid values via ``GET /config/adapters``).
 
 **Response** (``200 OK``):
 
@@ -1122,8 +1200,17 @@ entry's ``adapter_index`` is rewritten to its **backend-local** 0-based index
 An unknown or empty backend returns ``enabled=false``, ``num_adapters=0``,
 ``adapters=[]`` (it is **not** a ``404``).
 
-**HTTP status codes:** ``200`` on success; ``400`` if ``backend`` is empty;
-``503`` if the engine is not initialized.
+**HTTP status codes:**
+
+- ``200``: status returned (including the unknown-backend case above).
+- ``400``: ``backend`` is empty.
+- ``503``: engine not initialized.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s http://localhost:8080/reconfigure/dax/status | jq
 
 ``POST /reconfigure/{backend}/{operation}``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1132,6 +1219,10 @@ Apply one reconfiguration operation to a backend adapter. The request body is
 a JSON object whose accepted fields depend on the backend and operation. The
 ``200`` response is whatever the storage manager's
 ``reconfigure_l2_adapter`` returns (a backend-defined dict).
+
+**Path parameters:** ``backend`` (adapter ``type_name``) and ``operation``
+(e.g. ``add`` / ``remove`` / ``resize`` for ``dax``). Both are normalized
+(stripped and lower-cased).
 
 For the **generic** path (any backend other than ``dax``), the body carries
 ``adapter_index`` plus any backend-specific fields, which are forwarded
@@ -1162,6 +1253,20 @@ paths contain slashes. The accepted operations and fields are:
 suffix (``b``, ``kib``, ``mib``, ``gib``, ``tib`` and the ``k``/``m``/``g``/``t``
 aliases), e.g. ``"100GiB"``; it must resolve to a positive value.
 
+**Response** (``200 OK``):
+
+The body is the backend's ``reconfigure_l2_adapter`` result (a backend-defined
+dict). A successful DAX ``add`` looks like:
+
+.. code-block:: json
+
+    {
+      "status": "ok",
+      "operation": "add",
+      "adapter_index": 0,
+      "device": {"device_path": "/dev/dax0.0", "state": "active", "size_bytes": 107374182400}
+    }
+
 **HTTP status codes:**
 
 - ``200``: success (body is the storage manager's reconfigure result).
@@ -1171,6 +1276,14 @@ aliases), e.g. ``"100GiB"``; it must resolve to a positive value.
 - ``422``: request body fails validation (e.g. a missing required field, or
   an unknown field in a DAX body — DAX bodies reject extras).
 - ``503``: engine not initialized.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s -X POST http://localhost:8080/reconfigure/dax/add \
+        -H 'Content-Type: application/json' \
+        -d '{"device_path": "/dev/dax0.0", "size": "100GiB"}'
 
 See :doc:`/kv_cache/storage_backends/dax` for detailed request examples,
 mode semantics, and validation guidance.
@@ -1185,6 +1298,13 @@ Prometheus exposition format for every metric registered on the default
 ``prometheus_client`` registry (``Content-Type: text/plain``). Scrape this
 directly from Prometheus. See :doc:`observability/index` for the list of
 exported metrics.
+
+**Response** (``200 OK``, ``text/plain``): the Prometheus exposition-format
+metrics body.
+
+**HTTP status codes:**
+
+- ``200``: metrics returned.
 
 **Example:**
 
@@ -1204,6 +1324,10 @@ benchmarks — not for production.
 .. code-block:: text
 
     ok
+
+**HTTP status codes:**
+
+- ``200``: metrics reset.
 
 **Example:**
 
@@ -1237,6 +1361,15 @@ Inspect or mutate Python logger levels at runtime. All responses are
 
 Passing ``level`` without ``logger_name`` matches none of the modes and
 returns ``200`` with a ``null`` body.
+
+**Response** (``200 OK``, ``text/plain``): one ``<logger>: <LEVEL>`` line per
+registered logger (list mode), a single ``<logger>: <LEVEL>`` (read mode), or a
+confirmation of the updated level (set mode).
+
+**HTTP status codes:**
+
+- ``200``: levels listed, read, or set (also the ``null``-body case above).
+- ``400``: ``level`` is not a known logging level.
 
 **Examples:**
 
@@ -1274,6 +1407,13 @@ Useful for live debugging of hangs or runaway workers.
 
    The response contains live stack traces and can disclose internal code
    paths and state. Restrict network access to this endpoint in production.
+
+**Response** (``200 OK``, ``text/plain``): a total-thread-count summary followed
+by each thread's name, ``ident``, and current stack trace.
+
+**HTTP status codes:**
+
+- ``200``: thread listing returned.
 
 **Example:**
 
@@ -1333,6 +1473,11 @@ level plus per-thread status (last run timestamp, latest summary, etc.).
       ]
     }
 
+**HTTP status codes:**
+
+- ``200``: snapshot returned.
+- ``400``: unknown ``level`` filter.
+
 **Example:**
 
 .. code-block:: bash
@@ -1343,8 +1488,37 @@ level plus per-thread status (last run timestamp, latest summary, etc.).
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Detailed status for a single periodic thread (the same per-thread object
-shown in the ``threads`` list above). Returns ``404`` with
-``{"error": "Thread not found: <name>"}`` if the name is unknown.
+shown in the ``threads`` list above).
+
+**Path parameters:** ``thread_name`` — the registered periodic thread name.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "name": "storage-flush",
+      "level": "critical",
+      "interval": 5.0,
+      "is_running": true,
+      "is_active": true,
+      "last_run_ago": 1.2,
+      "total_runs": 120,
+      "failed_runs": 0,
+      "success_rate": 100.0,
+      "last_summary": {"...": "..."}
+    }
+
+**Response** (``404 Not Found``) when the name is unknown:
+
+.. code-block:: json
+
+    {"error": "Thread not found: <name>"}
+
+**HTTP status codes:**
+
+- ``200``: thread status returned.
+- ``404``: no periodic thread with that name.
 
 **Example:**
 
@@ -1387,6 +1561,11 @@ When something is lagging:
       ]
     }
 
+**HTTP status codes:**
+
+- ``200``: health reported — always ``200``, even when unhealthy
+  (the ``healthy`` boolean is ``false``).
+
 **Example:**
 
 .. code-block:: bash
@@ -1405,6 +1584,20 @@ piped directly to a terminal.
    The payload contains **every** environment variable, including any
    secrets injected via the environment. There is no redaction or auth —
    restrict network access to this endpoint in production.
+
+**Response** (``200 OK``, ``text/plain``):
+
+.. code-block:: json
+
+    {
+      "HOME": "/root",
+      "LMCACHE_LOG_LEVEL": "INFO",
+      "PATH": "/usr/local/bin:/usr/bin"
+    }
+
+**HTTP status codes:**
+
+- ``200``: environment dump returned.
 
 **Example:**
 
@@ -1425,12 +1618,18 @@ If the script assigns a variable named ``result``, its stringified value is
 returned; otherwise the body is ``"Script executed successfully"``
 (``Content-Type: text/plain``).
 
+**Request body:** multipart form data with a single ``script`` file field
+(the Python source to execute). Not a JSON body.
+
 .. danger::
 
    This endpoint runs caller-supplied code in-process. The restricted
    builtins are **not** a security sandbox — combined with the injected
    ``app`` object and any allowed imports, treat it as full remote code
    execution. Never expose it on an untrusted network.
+
+**Response** (``200 OK``, ``text/plain``): the stringified ``result`` variable if
+the script assigns one, otherwise ``Script executed successfully``.
 
 **HTTP status codes:**
 
@@ -1469,8 +1668,8 @@ module name is listed in ``_MP_INCOMPATIBLE_MODULES`` there (reserved
 for modules that require vLLM-specific ``app.state`` attributes; the
 list is currently empty). A handler that lives under
 ``internal_api_server/vllm/`` can still be surfaced on the MP server by
-adding a thin re-export shim under ``http_apis/`` (as
-``version_api.py`` does for the version endpoints).
+including its router from a group module under ``http_apis/`` (as
+``info_api.py`` does for the version endpoints).
 
 When adding a new endpoint, please also add a matching section to this
 page documenting the endpoint's purpose, request/response schema, and

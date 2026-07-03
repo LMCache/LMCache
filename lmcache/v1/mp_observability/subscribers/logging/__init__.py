@@ -12,6 +12,9 @@ from lmcache.v1.mp_observability.subscribers.logging.mp_server import (
     MPServerLoggingSubscriber,
 )
 from lmcache.v1.mp_observability.subscribers.logging.sm import SMLoggingSubscriber
+from lmcache.v1.mp_observability.subscribers.logging.timeout import (
+    TimeoutLoggingSubscriber,
+)
 
 __all__ = [
     "BlendLoggingSubscriber",
@@ -20,4 +23,5 @@ __all__ = [
     "LookupHashLoggingSubscriber",
     "MPServerLoggingSubscriber",
     "SMLoggingSubscriber",
+    "TimeoutLoggingSubscriber",
 ]

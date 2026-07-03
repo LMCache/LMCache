@@ -5,6 +5,7 @@ from __future__ import annotations
 
 # Standard
 from concurrent.futures import Future
+from typing import Any
 from unittest.mock import MagicMock, patch
 import asyncio
 import os
@@ -39,6 +40,7 @@ from lmcache.v1.storage_backend.raw_block import (
     RawBlockCore,
     RawBlockCoreConfig,
     RawBlockKeySpec,
+    RawBlockPutManyResult,
 )
 
 
@@ -2270,3 +2272,177 @@ def test_rust_raw_block_backend_batched_get_with_uring(
 
         finally:
             backend.close()
+
+
+def _make_raw_block_backend(
+    dev_path: str,
+    memory_allocator: Any,
+    loop: asyncio.AbstractEventLoop,
+    *,
+    io_engine: str = "io_uring",
+) -> RustRawBlockBackend:
+    """Build a RustRawBlockBackend over a fake raw-block device.
+
+    Args:
+        dev_path: Backing device path passed to the (faked) raw block device.
+        memory_allocator: Allocator shared with the local CPU backend.
+        loop: Running asyncio event loop for dispatched put coroutines.
+        io_engine: Raw-block I/O engine to configure.
+
+    Returns:
+        A backend whose core reports the requested I/O engine.
+    """
+    config = LMCacheEngineConfig.from_defaults(
+        chunk_size=256,
+        local_cpu=True,
+        max_local_cpu_size=0.1,
+        lmcache_instance_id="test_rust_raw_block_backend_plugin_dedup",
+    )
+    config.storage_plugins = []
+    config.extra_config = {
+        "rust_raw_block.device_path": dev_path,
+        "rust_raw_block.block_align": 4096,
+        "rust_raw_block.header_bytes": 4096,
+        "rust_raw_block.meta_total_bytes": 4 * 1024 * 1024,
+        "rust_raw_block.meta_enable_periodic": False,
+        "rust_raw_block.io_engine": io_engine,
+    }
+    metadata = LMCacheMetadata(
+        model_name="test_model",
+        world_size=1,
+        local_world_size=1,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=torch.bfloat16,
+        kv_shape=(4, 2, 256, 8, 128),
+    )
+    local_cpu = LocalCPUBackend(
+        config=config,
+        metadata=metadata,
+        dst_device="cpu",
+        memory_allocator=memory_allocator,
+    )
+    return RustRawBlockBackend(
+        config=config,
+        metadata=metadata,
+        local_cpu_backend=local_cpu,
+        loop=loop,
+        dst_device="cpu",
+    )
+
+
+def test_rust_raw_block_backend_batched_submit_rolls_back_refs_on_dispatch_failure(
+    monkeypatch, memory_allocator, loop_in_thread
+):
+    """A dispatch failure rolls back every ref_count_up and clears put_tasks.
+
+    The plugin raises the ref count for each pending object before handing the
+    batch to the event loop. If that hand-off raises (e.g. the loop is shutting
+    down), every raised ref must be returned and every key removed from the
+    in-flight put-task set so nothing leaks.
+    """
+    _install_fake_raw_block_device(monkeypatch, size_bytes=64 * 1024 * 1024)
+    backend = _make_raw_block_backend(
+        "/tmp/plugin-rollback", memory_allocator, loop_in_thread
+    )
+    try:
+        allocator = AdHocMemoryAllocator(device="cpu")
+        key1 = CacheEngineKey("test_model", 1, 0, 2001, torch.bfloat16)
+        key2 = CacheEngineKey("test_model", 1, 0, 2002, torch.bfloat16)
+        obj1 = allocator.allocate(
+            [torch.Size([2, 16, 8, 128])], [torch.bfloat16], fmt=MemoryFormat.KV_T2D
+        )
+        obj2 = allocator.allocate(
+            [torch.Size([2, 16, 8, 128])], [torch.bfloat16], fmt=MemoryFormat.KV_T2D
+        )
+        assert obj1 is not None and obj2 is not None
+        before1 = obj1.get_ref_count()
+        before2 = obj2.get_ref_count()
+
+        with patch(
+            "lmcache.v1.storage_backend.plugins.rust_raw_block_backend."
+            "asyncio.run_coroutine_threadsafe",
+            side_effect=RuntimeError("event loop is shutting down"),
+        ):
+            with pytest.raises(RuntimeError):
+                backend.batched_submit_put_task([key1, key2], [obj1, obj2])
+
+        assert obj1.get_ref_count() == before1
+        assert obj2.get_ref_count() == before2
+        assert not backend.exists_in_put_tasks(key1)
+        assert not backend.exists_in_put_tasks(key2)
+        obj1.ref_count_down()
+        obj2.ref_count_down()
+    finally:
+        backend.close()
+
+
+def test_rust_raw_block_backend_batched_submit_rolls_back_only_unscheduled_refs(
+    monkeypatch, memory_allocator, loop_in_thread
+):
+    """A partial per-key dispatch failure leaves scheduled task cleanup to task."""
+    _install_fake_raw_block_device(monkeypatch, size_bytes=64 * 1024 * 1024)
+    backend = _make_raw_block_backend(
+        "/tmp/plugin-partial-rollback",
+        memory_allocator,
+        loop_in_thread,
+        io_engine="posix",
+    )
+    try:
+        allocator = AdHocMemoryAllocator(device="cpu")
+        key1 = CacheEngineKey("test_model", 1, 0, 3001, torch.bfloat16)
+        key2 = CacheEngineKey("test_model", 1, 0, 3002, torch.bfloat16)
+        obj1 = allocator.allocate(
+            [torch.Size([2, 16, 8, 128])], [torch.bfloat16], fmt=MemoryFormat.KV_T2D
+        )
+        obj2 = allocator.allocate(
+            [torch.Size([2, 16, 8, 128])], [torch.bfloat16], fmt=MemoryFormat.KV_T2D
+        )
+        assert obj1 is not None and obj2 is not None
+        before1 = obj1.get_ref_count()
+        before2 = obj2.get_ref_count()
+        real_run_coroutine_threadsafe = asyncio.run_coroutine_threadsafe
+        first_future: Future | None = None
+
+        def fake_put_many(
+            keys: list[RawBlockKeySpec],
+            objs: list[Any],
+        ) -> RawBlockPutManyResult:
+            del objs
+            return RawBlockPutManyResult(
+                results=[True] * len(keys),
+                stored_keys=[key.encoded for key in keys],
+            )
+
+        def run_first_then_fail(
+            coro: Any,
+            loop: asyncio.AbstractEventLoop,
+        ) -> Future:
+            nonlocal first_future
+            if first_future is None:
+                first_future = real_run_coroutine_threadsafe(coro, loop)
+                return first_future
+            raise RuntimeError("event loop is shutting down")
+
+        with (
+            patch.object(backend._core, "put_many", side_effect=fake_put_many),
+            patch(
+                "lmcache.v1.storage_backend.plugins.rust_raw_block_backend."
+                "asyncio.run_coroutine_threadsafe",
+                side_effect=run_first_then_fail,
+            ),
+        ):
+            with pytest.raises(RuntimeError):
+                backend.batched_submit_put_task([key1, key2], [obj1, obj2])
+
+            assert first_future is not None
+            first_future.result(timeout=10)
+
+        assert obj1.get_ref_count() == before1
+        assert obj2.get_ref_count() == before2
+        assert not backend.exists_in_put_tasks(key1)
+        assert not backend.exists_in_put_tasks(key2)
+        obj1.ref_count_down()
+        obj2.ref_count_down()
+    finally:
+        backend.close()

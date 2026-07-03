@@ -137,7 +137,7 @@ class WeightedSemaphore:
             )
 
         async with self._cond:
-            logger.debug(f"WeightedSemaphore: Attempting to acquire {n} chunks")
+            logger.debug("WeightedSemaphore: Attempting to acquire %d chunks", n)
             if n <= self._concurrent_budget_cap:
                 await self._cond.wait_for(lambda: self._current_chunks >= n)
                 self._current_chunks -= n
@@ -149,8 +149,9 @@ class WeightedSemaphore:
                 # Reserve everything
                 self._current_chunks = 0
             logger.debug(
-                f"WeightedSemaphore: Acquired {n} chunks, "
-                f"remaining chunks: {self._current_chunks}"
+                "WeightedSemaphore: Acquired %d chunks, remaining chunks: %d",
+                n,
+                self._current_chunks,
             )
 
     async def release(self, n: int = 1) -> None:
@@ -643,8 +644,9 @@ class StorageManager:
 
         retrieved_length = cum_chunk_lengths_total[total_retrieved_chunks]
         logger.info(
-            f"Responding to scheduler for lookup id {lookup_id}"
-            f" with retrieved length {retrieved_length}"
+            "Responding to scheduler for lookup id %s with retrieved length %s",
+            lookup_id,
+            retrieved_length,
         )
         self.async_lookup_server.send_response_to_scheduler(lookup_id, retrieved_length)
 
@@ -892,12 +894,13 @@ class StorageManager:
         with self._bypass_lock:
             if bypassed:
                 self._bypassed_backends.add(backend_name)
-                logger.info(f"StorageManager: Backend {backend_name} is now bypassed")
+                logger.info("StorageManager: Backend %s is now bypassed", backend_name)
             else:
                 self._bypassed_backends.discard(backend_name)
                 logger.info(
-                    f"StorageManager: Backend {backend_name} bypass removed, "
-                    "restored to normal operation"
+                    "StorageManager: Backend %s bypass removed, "
+                    "restored to normal operation",
+                    backend_name,
                 )
 
     def is_backend_bypassed(self, backend_name: str) -> bool:
@@ -1137,8 +1140,9 @@ class StorageManager:
                     num_cleared_tokens += backend.clear()
                 else:
                     logger.warning(
-                        f"Storage backend {backend_name} does not support "
-                        "clear operation. Skipping."
+                        "Storage backend %s does not support "
+                        "clear operation. Skipping.",
+                        backend_name,
                     )
 
         return num_cleared_tokens
@@ -1388,11 +1392,11 @@ class StorageManager:
         # Close all backends
         for name, backend in self.storage_backends.items():
             try:
-                logger.info(f"Closing storage backend: {name}")
+                logger.info("Closing storage backend: %s", name)
                 backend.close()
-                logger.info(f"Storage backend {name} closed successfully")
+                logger.info("Storage backend %s closed successfully", name)
             except Exception as e:
-                logger.error(f"Error closing backend {name}: {e}")
+                logger.error("Error closing backend %s: %s", name, e)
 
         # Stop event loop
         try:
@@ -1401,7 +1405,7 @@ class StorageManager:
                 self.loop.call_soon_threadsafe(self.loop.stop)
                 logger.info("Event loop stop signaled")
         except Exception as e:
-            logger.error(f"Error stopping event loop: {e}")
+            logger.error("Error stopping event loop: %s", e)
 
         # Wait for thread with timeout
         if self.thread.is_alive():
