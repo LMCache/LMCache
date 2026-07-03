@@ -257,15 +257,16 @@ class PrefetchController(StorageControllerInterface):
     """
     Asynchronously prefetches data from L2 adapters into L1 memory.
 
-    The controller:
+    The controller (terms as in the module-docstring interval figure):
     1. Accepts prefetch requests via submit_prefetch_request (thread-safe).
     2. Runs a background thread that pins L1-resident keys (read locks)
        and submits lookup_and_lock to all adapters.
-    3. Uses PrefetchPolicy to compute a load plan from the L1 ∪ L2 union of
-       lookup results; keys served from L1 are never transferred.
-    4. Reserves L1 write buffers and submits load tasks to adapters.
-    5. On completion, transitions loaded keys to read-locked state.
-    6. Reports the number of prefix hits via query_prefetch_result.
+    3. Computes the load plan from the L1 ∪ L2 union fold: keys in L2 and
+       not in L1 inside the final window; pinned keys are never transferred.
+    4. Reserves L1 write buffers (all-or-nothing) and submits load tasks.
+    5. On completion, loaded keys become pinned for the retriever.
+    6. Reports the L1+L2 hit length via query_lookup_result and the
+       retained-key bitmap via query_prefetch_result.
 
     Args:
         l1_manager: The L1 manager instance.
@@ -437,7 +438,18 @@ class PrefetchController(StorageControllerInterface):
         Thread-safe. Can be called from any thread.
 
         A key counts as found if it is already resident in L1 or any L2
-        adapter reports it.
+        adapter reports it. In the interval-figure terms of the module
+        docstring, the request ends with (sliding-window view)::
+
+            |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
+                                          ^ L1 hit length               ^ L1+L2 hit
+            |      skip      |   pinned*  |     unpin      |   pinned   |   unpin    |
+
+        pinned keys are read-locked for the retriever until it consumes
+        them; keys in L2 but not in L1 inside the final window are loaded
+        first. (*) the final window when the L2 load lands, else the L1
+        hit's own window.
+
         The retained subset of found keys is chosen by ``policy`` (see
         :class:`TrimPolicy`).  With the default ``PREFIX`` policy, only the
         **contiguous prefix** of found keys is loaded from L2: if L2 has keys
@@ -1146,6 +1158,13 @@ class PrefetchController(StorageControllerInterface):
     ) -> set[ObjectKey]:
         """Reserve L1 write buffers for the keys to load from L2.
 
+        The keys sit in the loading segment — in L2, not in L1, inside the
+        final window::
+
+            |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
+                                          ^ L1 hit length               ^ L1+L2 hit
+            |       -        |     -      |       -        |  loading   |     -      |
+
         Successful reservations are recorded on
         ``request.write_reserved_keys`` / ``request.write_reserved_objs``.
         Failures publish an ``L2_PREFETCH_FAILED`` event; the caller
@@ -1395,13 +1414,20 @@ class PrefetchController(StorageControllerInterface):
         Workflow:
 
         1. Collect per-adapter load results; split loaded vs failed keys.
-        2. Release every L2 lookup lock still held (idempotent).
-        3. Loaded keys become read-locked (WARM: unlocked); failed keys'
-           buffers are deleted.
+        2. Return every L2 lookup lock still held (idempotent).
+        3. Loaded keys become pinned for the retriever (WARM: unlocked);
+           failed keys' buffers are deleted.
         4. Fold loaded ∪ pinned keys to the final hit length / retained set.
-        5. Free all read locks outside the retained set (e.g. not in the
-           sliding window of the final hit).
+        5. Unpin everything outside the retained set (e.g. out of the final
+           sliding window).
         6. Report the hit if no earlier step did, then the retained bitmap.
+
+        End state (sliding-window view; loaded keys in the in L2-hit sw
+        segment, pins elsewhere)::
+
+            |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
+                                          ^ L1 hit length               ^ L1+L2 hit
+            |      skip      |   unpin    |     unpin      |   pinned   |   unpin    |
         """
         num_keys = len(request.keys)
 
