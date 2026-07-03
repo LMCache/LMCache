@@ -155,6 +155,11 @@ compatibility with the vLLM-embedded API server.
      - ``/cache/prefetches/{request_id}``
      - Poll a submitted warm prefetch (``pending`` / ``completed``).
    * - POST
+     - ``/cache/delete``
+     - Delete a token sequence's L1 chunks (body: ``model_name``,
+       ``world_size``, ``token_ids``, ``cache_salt``, ``tier``, ``force``).
+       ``force`` deletes even locked/pinned keys.
+   * - POST
      - ``/cache/clear``
      - Force-clear a tier's resident cache (body: ``tier`` = ``l1``, ``force``).
    * - POST
@@ -983,6 +988,51 @@ transient temporary from another lookup, so claiming it as warmed could mislead.
 
     curl -s http://localhost:8080/cache/prefetches/abc123
     # -> {"status": "completed", "found_keys": 1, "total_keys": 1}
+
+``POST /cache/delete``
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Delete a token sequence's chunks from L1 (skipped when ``tier`` is ``l2``).
+
+**Request body:** same fields as ``POST /cache/pins`` (``model_name``,
+``world_size``, ``token_ids``, ``cache_salt``, ``tier``) plus:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 12 68
+
+   * - Field
+     - Type
+     - Description
+   * - ``force``
+     - bool
+     - Optional (default ``false``). When ``true``, delete even locked/pinned
+       keys.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {"requested": 12, "deleted": 12, "skipped": 0, "resolved_keys": ["..."], "status": "deleted"}
+
+``requested`` is the number of whole chunks the tokens resolved to; ``deleted``
+is the number of resident L1 keys removed (``0`` when ``tier`` is ``l2``);
+``skipped`` is the number refused because they were locked/pinned (non-force
+only); ``resolved_keys`` are the encoded keys for the coordinator's L2 delete. A
+sub-chunk sequence returns ``{"requested": 0, "deleted": 0, "skipped": 0, "resolved_keys": [], "status": "noop"}``.
+
+**HTTP status codes:** same as ``POST /cache/pins``.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s -X POST http://localhost:8080/cache/delete \
+        -H 'Content-Type: application/json' \
+        -d '{"model_name": "Qwen/Qwen3-8B", "world_size": 1,
+             "token_ids": [101, 102, 103], "cache_salt": "user-a",
+             "tier": "all", "force": false}'
+    # -> {"requested": 1, "deleted": 1, "skipped": 0, "resolved_keys": ["..."], "status": "deleted"}
 
 .. _mp-http-quota-api:
 

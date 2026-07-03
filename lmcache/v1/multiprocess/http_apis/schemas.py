@@ -47,6 +47,24 @@ class PrefetchRequest:
 
 
 @dataclass(frozen=True)
+class DeleteTokensRequest:
+    """Wire body for ``POST /cache/delete``.
+
+    This node only acts on L1 (``l1`` / ``all``); for ``l2`` it just resolves the
+    keys. It always returns the resolved keys for the coordinator's pin-aware L2
+    delete. ``force=true`` deletes even locked/pinned L1 keys (as in
+    :class:`ClearRequest`).
+    """
+
+    model_name: str
+    world_size: int
+    token_ids: list[int]
+    cache_salt: str = ""
+    tier: Tier = Tier.ALL
+    force: bool = False
+
+
+@dataclass(frozen=True)
 class ClearRequest:
     """Wire body for ``POST /cache/clear``.
 

@@ -36,6 +36,7 @@ from lmcache.v1.multiprocess.http_apis.schemas import (
     ChecksumRequest,
     ClearRequest,
     DeleteObjectsRequest,
+    DeleteTokensRequest,
     PrefetchRequest,
 )
 import lmcache.c_ops as lmc_ops
@@ -130,6 +131,32 @@ async def get_prefetch(request_id: str, request: Request) -> dict[str, object]:
         404: unknown id. 503: server not initialized.
     """
     return get_context(request).prefetch_service.status(request_id)
+
+
+# ---------------------------------------------------------------------------
+# Delete -- token-addressed L1 deletion, pass-through to DeleteService
+# ---------------------------------------------------------------------------
+
+
+@router.post("/cache/delete", response_model=None)
+async def delete_tokens(
+    body: DeleteTokensRequest, request: Request
+) -> dict[str, object]:
+    """Delete a token sequence's chunks from L1.
+
+    Responses:
+        200: ``{"requested", "deleted", "skipped", "resolved_keys", "status"}``.
+        400: token cap exceeded or invalid ``cache_salt``.
+        422: body validation. 503: not initialized, or no layout for the model.
+    """
+    return get_context(request).delete_service.delete(
+        body.model_name,
+        body.world_size,
+        body.token_ids,
+        body.cache_salt,
+        body.tier,
+        body.force,
+    )
 
 
 # ---------------------------------------------------------------------------

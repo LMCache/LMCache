@@ -11,17 +11,24 @@ Quota writes, combined quota+usage status, and usage-event ingestion are
 accounting concerns and live in the ``/quota`` group (:mod:`quota_api`).
 """
 
+# Standard
+from dataclasses import asdict
+
 # Third Party
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 import httpx
 
 # First Party
+from lmcache.v1.distributed.api import EncodedObjectKey
+from lmcache.v1.distributed.tiers import Tier
 from lmcache.v1.mp_coordinator.http_apis.dependencies import (
     get_context,
     get_outbound_client,
 )
 from lmcache.v1.mp_coordinator.schemas import (
+    DeleteRequest,
+    DeleteResponse,
     PinRequest,
     PinResponse,
     PrefetchRequest,
@@ -204,4 +211,103 @@ async def request_unpin(body: PinRequest, request: Request) -> PinResponse:
         requested=chunks,
         affected=len(resolved),
         status="unpinned",
+    )
+
+
+# -- Delete dispatch ---------------------------------------------------------
+
+
+@router.post("/cache/delete")
+async def request_delete(body: DeleteRequest, request: Request) -> DeleteResponse:
+    """Delete a token sequence on one MP server, per ``body.tier`` (l1 / l2 / all).
+
+    Two-phase: the node deletes its L1 and returns the resolved keys; the
+    coordinator then removes them from L2 (``l2`` / ``all``), skipping L2-pinned
+    keys unless ``force`` (which also drops those pins).
+
+    Args:
+        body: Target instance, model/world_size, token_ids, cache_salt, tier,
+            force.
+
+    Returns:
+        ``DeleteResponse`` with ``requested`` chunks, ``affected`` keys removed,
+        and ``skipped`` L1 keys refused (non-force lock/pin).
+
+    Raises:
+        HTTPException: 404 if ``instance_id`` is not registered; 502 if the
+            target server is unreachable or rejects the delete.
+    """
+    ctx = get_context(request)
+    target = ctx.registry.get(body.instance_id)
+    if target is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no MP server registered with instance_id={body.instance_id!r}",
+        )
+    client = get_outbound_client(request)
+    base = f"http://{target.ip}:{target.http_port}"
+
+    # Phase 1: delete L1 on the node and get the resolved keys.
+    try:
+        resp = await client.post(
+            f"{base}/cache/delete",
+            json={
+                "model_name": body.model_name,
+                "world_size": body.world_size,
+                "token_ids": body.token_ids,
+                "cache_salt": body.cache_salt,
+                "tier": body.tier.value,
+                "force": body.force,
+            },
+        )
+        resp.raise_for_status()
+        result = resp.json()
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"delete to {body.instance_id!r} failed: {exc}",
+        ) from None
+
+    resolved = [
+        EncodedObjectKey(**k).to_object_key() for k in result.get("resolved_keys", [])
+    ]
+
+    # Phase 2: delete L2 (coordinator-managed, pin-aware) when the tier includes
+    # it. Non-force skips L2-pinned keys; force removes them and drops the pins.
+    l2_deleted = 0
+    l2_skipped = 0
+    if body.tier in (Tier.L2, Tier.ALL):
+        if body.force:
+            l2_keys = resolved
+        else:
+            l2_keys = ctx.eviction_manager.filter_unpinned(resolved)
+            l2_skipped = len(resolved) - len(l2_keys)
+        if l2_keys:
+            body_keys = [asdict(k.to_encoded_object_key()) for k in l2_keys]
+            try:
+                # httpx ``.delete`` can't take ``json=``; use ``request(...)``.
+                resp = await client.request(
+                    "DELETE", f"{base}/cache/objects", json={"keys": body_keys}
+                )
+                resp.raise_for_status()
+            except httpx.HTTPError as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"L2 delete to {body.instance_id!r} failed: {exc}",
+                ) from None
+        l2_deleted = len(l2_keys)
+        if body.force:
+            ctx.eviction_manager.drop_pins(resolved)
+
+    # ``affected`` and ``skipped`` are totals across the tiers acted on: L1 keys
+    # from the node plus L2 keys from the coordinator. A chunk resident in both
+    # tiers therefore contributes to both counts.
+    affected = result.get("deleted", 0) + l2_deleted
+    skipped = result.get("skipped", 0) + l2_skipped
+    return DeleteResponse(
+        instance_id=body.instance_id,
+        requested=result.get("requested", 0),
+        affected=affected,
+        skipped=skipped,
+        status=result.get("status", "deleted"),
     )

@@ -97,6 +97,18 @@ class L2EvictionManager:
             else:
                 self._pin_counts[key] = count - 1
 
+    def filter_unpinned(self, keys: list[ObjectKey]) -> list[ObjectKey]:
+        """Return the subset of ``keys`` with no active L2 pin, in input order.
+
+        Used by non-force delete to skip L2-pinned keys.
+        """
+        return [key for key in keys if key not in self._pin_counts]
+
+    def drop_pins(self, keys: list[ObjectKey]) -> None:
+        """Remove each key from the L2 pin set (used by force delete; idempotent)."""
+        for key in keys:
+            self._pin_counts.pop(key, None)
+
     def compute_eviction_plan(self) -> dict[str, list[ObjectKey]]:
         """Select eviction candidates per ``cache_salt``.
 

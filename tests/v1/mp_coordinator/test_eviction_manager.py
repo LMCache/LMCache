@@ -417,3 +417,39 @@ def test_unpin_unknown_key_is_noop():
 
     ctrl.unpin([_make_key("a", h="ff")])  # never pinned
     assert ctrl.compute_eviction_plan()["a"] == [k]
+
+
+# =============================================================================
+# L2 delete helpers (filter_unpinned / drop_pins)
+# =============================================================================
+
+
+def test_filter_unpinned_returns_only_unpinned_keys():
+    """filter_unpinned keeps unpinned keys and drops pinned ones, in order."""
+    ctrl, _, _ = _setup()
+    k1 = _make_key("a", h="01")
+    k2 = _make_key("a", h="02")
+    k3 = _make_key("a", h="03")
+    ctrl.pin([k2])
+
+    assert ctrl.filter_unpinned([k1, k2, k3]) == [k1, k3]
+
+
+def test_drop_pins_purges_pin_regardless_of_count():
+    """drop_pins removes a key from the pin set even if pinned multiple times."""
+    ctrl, _, ut = _setup(eviction_ratio=1.0)
+    k = _make_key("a")
+    _store(ctrl, ut, k, 100)
+    ctrl.pin([k])
+    ctrl.pin([k])  # pinned twice
+
+    ctrl.drop_pins([k])
+    # A single drop clears all pin counts: the key is evictable again.
+    assert ctrl.compute_eviction_plan()["a"] == [k]
+    assert ctrl.filter_unpinned([k]) == [k]
+
+
+def test_drop_pins_unknown_key_is_noop():
+    """drop_pins on a never-pinned key does not raise."""
+    ctrl, _, _ = _setup()
+    ctrl.drop_pins([_make_key("a", h="ff")])  # no error
