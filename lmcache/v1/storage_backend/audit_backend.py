@@ -59,7 +59,7 @@ class AuditBackend(StorageBackendInterface):
 
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         """Check key existence with audit logging."""
-        self.logger.debug(f"[AUDIT_BACKEND] Checking contains for key: {key}")
+        self.logger.debug("[AUDIT_BACKEND] Checking contains for key: %s", key)
         start_time = time.perf_counter()
         try:
             result = self.real_backend.contains(key, pin)
@@ -71,7 +71,7 @@ class AuditBackend(StorageBackendInterface):
 
     def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """Retrieve data with audit logging."""
-        self.logger.debug(f"[AUDIT_BACKEND] Getting data for key: {key}")
+        self.logger.debug("[AUDIT_BACKEND] Getting data for key: %s", key)
         start_time = time.perf_counter()
         try:
             result = self.real_backend.get_blocking(key)
