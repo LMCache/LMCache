@@ -281,11 +281,9 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
     def from_dict(cls, d: dict) -> "ValkeyL2AdapterConfig":
         """Build a config instance from a JSON-derived dict.
 
-        Accepts ``startup_nodes`` in several forms (see
-        ``_parse_startup_nodes``), or a single ``host``/``port`` pair as
-        a shortcut for one-node configs. Environment variables provide
-        defaults for nodes / username / password when those fields are
-        absent.
+        Requires ``startup_nodes`` as a ``"host:port[,host:port...]"``
+        string (see ``_parse_startup_nodes``); every other field is
+        optional and falls back to its default.
 
         Args:
             d: Parsed JSON dict (must include ``type``: ``"valkey"``).
@@ -444,6 +442,8 @@ class ValkeyL2Adapter(L2AdapterInterface):
         self._locked_keys: dict[ObjectKey, int] = defaultdict(int)
 
         # Stored sizes, so delete can report accurate per-key byte deltas.
+        # NOTE: grows unbounded under server-side eviction (delete is never
+        # called); shared across remote adapters, best fixed in the base class.
         self._key_sizes: dict[ObjectKey, int] = {}
 
         self._next_task_id: L2TaskId = 0
@@ -609,6 +609,13 @@ class ValkeyL2Adapter(L2AdapterInterface):
     def pop_completed_store_tasks(
         self,
     ) -> dict[L2TaskId, L2StoreResult]:
+        """Drain and return all completed store-task results.
+
+        Returns:
+            A mapping of ``L2TaskId`` to its ``L2StoreResult`` for every
+            store task finished since the last call. The internal buffer is
+            cleared, so each result is returned exactly once.
+        """
         with self._lock:
             completed = self._completed_stores
             self._completed_stores = {}
@@ -707,6 +714,16 @@ class ValkeyL2Adapter(L2AdapterInterface):
         self._lookup_efd.notify()
 
     def query_lookup_and_lock_result(self, task_id: L2TaskId) -> Bitmap | None:
+        """Non-blockingly pop the result of a lookup-and-lock task.
+
+        Args:
+            task_id: Id of a previously submitted lookup-and-lock task.
+
+        Returns:
+            A ``Bitmap`` whose bits mark per-key success (key found and
+            locked), or ``None`` if the task has not completed yet or its
+            result was already retrieved (returns non-``None`` only once).
+        """
         with self._lock:
             return self._completed_lookups.pop(task_id, None)
 
@@ -835,6 +852,16 @@ class ValkeyL2Adapter(L2AdapterInterface):
         self._load_efd.notify()
 
     def query_load_result(self, task_id: L2TaskId) -> Bitmap | None:
+        """Non-blockingly pop the result of a load task.
+
+        Args:
+            task_id: Id of a previously submitted load task.
+
+        Returns:
+            A ``Bitmap`` whose bits mark per-key load success, or ``None``
+            if the task has not completed yet or its result was already
+            retrieved (returns non-``None`` only once).
+        """
         with self._lock:
             return self._completed_loads.pop(task_id, None)
 
