@@ -148,14 +148,18 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
         cluster mode.
       * ``request_timeout`` / ``connection_timeout``: Glide timeouts in
         seconds.
-      * ``max_capacity_gb``: Declared capacity for aggregate eviction.
-        ``0`` (default) disables aggregate-usage-based eviction; per
-        ``cache_salt`` quota policies still operate. Recommended: let
-        LMCache own eviction (set this ``> 0``) and disable Valkey
-        server-side eviction (``maxmemory 0`` / ``noeviction``). Enabling
-        both lets the server silently drop keys LMCache still counts,
-        drifting its byte accounting and LRU order (see the design doc's
-        "Two eviction layers" section).
+      * ``max_capacity_gb``: Declared capacity for LMCache-driven
+        eviction. ``0`` (default) disables it and defers to server-side
+        eviction (recommended); per ``cache_salt`` quota policies still
+        operate. ``> 0`` (plus an ``eviction`` block) makes LMCache own
+        eviction — trustworthy only for a single writer that privately
+        owns the cluster. Do not combine ``> 0`` with any server-side
+        eviction or TTL, which drifts LMCache's byte accounting (see the
+        design doc's eviction section).
+      * ``ttl_seconds``: Opt-in per-key TTL in seconds; ``None`` (default)
+        writes keys with no expiry. Enables server-side time-based expiry
+        (required by ``volatile-*`` policies). Do not combine with
+        ``max_capacity_gb > 0``.
     """
 
     def __init__(
@@ -171,6 +175,7 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
         request_timeout: float = DEFAULT_REQUEST_TIMEOUT_SECS,
         connection_timeout: float = DEFAULT_CONNECTION_TIMEOUT_SECS,
         max_capacity_gb: float = 0.0,
+        ttl_seconds: Optional[int] = None,
     ) -> None:
         """Initialize a ValkeyL2AdapterConfig with validated fields.
 
@@ -189,11 +194,18 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
             connection_timeout: Initial connection timeout in seconds.
             max_capacity_gb: Aggregate capacity in GB for eviction; ``0``
                 disables global eviction.
+            ttl_seconds: Opt-in per-key TTL in seconds; must be a positive
+                integer when set. ``None`` (default) writes keys with no
+                expiry. Enables server-side time-based expiry (required by
+                ``volatile-*`` policies). Do not combine with
+                ``max_capacity_gb > 0`` (logs a warning; see the design
+                doc's eviction section).
 
         Raises:
             ValueError: If any validation fails (empty
                 ``startup_nodes``, non-positive ``num_workers``,
-                negative capacity, ``@`` in ``key_prefix``, etc.).
+                negative capacity, non-positive ``ttl_seconds``, ``@`` in
+                ``key_prefix``, etc.).
         """
         super().__init__()
         if not startup_nodes:
@@ -237,6 +249,20 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
             raise ValueError("request_timeout must be > 0")
         if connection_timeout <= 0:
             raise ValueError("connection_timeout must be > 0")
+        if ttl_seconds is not None:
+            # bool is an int subclass, so reject it (True would be 1 second).
+            if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int):
+                raise ValueError("ttl_seconds must be a positive integer or None")
+            if ttl_seconds <= 0:
+                raise ValueError("ttl_seconds must be a positive integer or None")
+            if max_capacity_gb > 0:
+                # Server-side expiry is not reported to LMCache, so its byte
+                # accounting / LRU drift (see the eviction section in docs).
+                logger.warning(
+                    "Valkey: ttl_seconds set with max_capacity_gb > 0; "
+                    "server-side expiry drifts LMCache eviction accounting. "
+                    "Prefer max_capacity_gb=0 when using a TTL."
+                )
 
         self.startup_nodes: list[tuple[str, int]] = startup_nodes
         self.cluster_mode: bool = cluster_mode
@@ -249,6 +275,7 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
         self.request_timeout: float = request_timeout
         self.connection_timeout: float = connection_timeout
         self.max_capacity_gb: float = max_capacity_gb
+        self.ttl_seconds: Optional[int] = ttl_seconds
 
     @classmethod
     def from_dict(cls, d: dict) -> "ValkeyL2AdapterConfig":
@@ -299,6 +326,14 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
             raise ValueError("max_capacity_gb must be a number")
         max_capacity_gb = float(max_capacity_raw)
 
+        ttl_raw = d.get("ttl_seconds")
+        if ttl_raw is None:
+            ttl_seconds = None
+        elif isinstance(ttl_raw, bool) or not isinstance(ttl_raw, int):
+            raise ValueError("ttl_seconds must be a positive integer or omitted")
+        else:
+            ttl_seconds = ttl_raw
+
         return cls(
             startup_nodes=startup_nodes,
             cluster_mode=cluster_mode,
@@ -311,6 +346,7 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
             request_timeout=request_timeout,
             connection_timeout=connection_timeout,
             max_capacity_gb=max_capacity_gb,
+            ttl_seconds=ttl_seconds,
         )
 
     @classmethod
@@ -344,7 +380,11 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
             "- max_capacity_gb (float, default 0): aggregate capacity "
             "for eviction; 0 disables global eviction. Recommended: set "
             "this > 0 and disable Valkey server-side eviction "
-            "(maxmemory 0 / noeviction) so only LMCache evicts."
+            "(maxmemory 0 / noeviction) so only LMCache evicts.\n"
+            "- ttl_seconds (int, optional): opt-in per-key TTL in seconds; "
+            "omit (default) for no expiry. Enables server-side time-based "
+            "expiry (required by volatile-* policies). Do not combine with "
+            "max_capacity_gb > 0."
         )
 
 
@@ -421,6 +461,7 @@ class ValkeyL2Adapter(L2AdapterInterface):
             tls_enable=config.tls_enable,
             cluster_mode=config.cluster_mode,
             database_id=config.database_id,
+            ttl_seconds=config.ttl_seconds,
         )
 
         self._closed: bool = False

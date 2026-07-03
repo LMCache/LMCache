@@ -342,9 +342,11 @@ class ValkeyWorkerPool:
     def _do_get_into(self, key_str: str, buf: Any) -> int:
         """GET a key directly into ``buf``.
 
-        The caller owns the size policy: this returns the number of
-        payload bytes for the key (which the caller compares against the
-        expected length), or :data:`GET_MISS` when the key is absent.
+        Fixed-size KV chunks must round-trip exactly, so the read size is
+        validated against the destination buffer length here — the single
+        place shared by both the connector and the L2 adapter. A short,
+        truncated, or oversized value is rejected as a miss rather than
+        leaving a partially-filled buffer with stale tail bytes.
 
         ``buf`` is cast to an unsigned-byte (``"B"``) memoryview if it
         isn't already, because glide's buffer protocol rejects
@@ -357,32 +359,41 @@ class ValkeyWorkerPool:
         and copy into ``dst`` under the GIL.
 
         Returns:
-            Number of bytes available for the key (``>= 0``), or
-            :data:`GET_MISS` (``-1``) if the key does not exist.
+            The number of payload bytes copied, which always equals the
+            buffer length on a hit, or :data:`GET_MISS` (``-1``) if the
+            key is absent or its stored size does not match the buffer.
         """
         client = self._get_client()
         dst = buf if isinstance(buf, memoryview) else memoryview(buf)
         if dst.format != "B":
             dst = dst.cast("B")
+        size = len(dst)
         if self.has_buffer_get:
-            size = len(dst)
             scratch_view = memoryview(self._get_scratch(size))[:size]
             result = client.get(key_str.encode(), buffer=scratch_view)
             if result is None:
                 return GET_MISS
             # glide buffer GET returns the number of bytes written.
             n = int(result) if isinstance(result, int) else size
-            # Only copy what fits; the caller treats a size mismatch as a
-            # miss and will not use the buffer, but we must not overflow it.
-            dst[: min(n, size)] = scratch_view[: min(n, size)]
-            return n
-        data = client.get(key_str.encode())
-        if data is None:
+            source: Any = scratch_view
+        else:
+            data = client.get(key_str.encode())
+            if data is None:
+                return GET_MISS
+            n = len(data)
+            source = data
+
+        if n != size:
+            logger.warning(
+                "Valkey GET size mismatch for key %s: read %d bytes, "
+                "expected %d; treating as miss.",
+                key_str,
+                n,
+                size,
+            )
             return GET_MISS
-        n = len(data)
-        # Only copy what fits; the caller treats a size mismatch as a miss
-        # and will not use the buffer, but we must not overflow it.
-        dst[: min(n, len(dst))] = data[: min(n, len(dst))]
+        # Sizes match: copy the full payload into the destination.
+        dst[:] = source[:size]
         return n
 
     def _do_exists(self, key_str: str) -> bool:

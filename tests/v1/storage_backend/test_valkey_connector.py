@@ -28,6 +28,7 @@ from lmcache.v1.memory_management import PinMemoryAllocator
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.connector import CreateConnector
+from lmcache.v1.storage_backend.valkey.worker_pool import GET_MISS, ValkeyWorkerPool
 
 # Local
 from ...conftest import MockSyncGlideClient
@@ -1199,3 +1200,72 @@ def test_valkey_save_chunk_meta_string_coercion(
             )
     finally:
         close_asyncio_loop(async_loop, async_thread)
+
+
+class _FakeGlideClient:
+    """Minimal glide-client stand-in for ``ValkeyWorkerPool._do_get_into``.
+
+    ``payload`` of ``None`` models an absent key. The buffer-GET path writes
+    what fits into the caller-provided buffer and returns the byte count,
+    mirroring glide's native buffer protocol.
+    """
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def get(self, key, buffer=None):
+        if self._payload is None:
+            return None
+        if buffer is not None:
+            n = min(len(self._payload), len(buffer))
+            buffer[:n] = self._payload[:n]
+            return n
+        return self._payload
+
+
+def _fake_pool(payload, has_buffer_get):
+    """Build a ``SimpleNamespace`` usable as ``self`` for the unbound
+    ``ValkeyWorkerPool._do_get_into`` (no real client / server needed)."""
+    # Standard
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        _get_client=lambda: _FakeGlideClient(payload),
+        has_buffer_get=has_buffer_get,
+        _get_scratch=lambda size: bytearray(size),
+    )
+
+
+@pytest.mark.parametrize("has_buffer_get", [True, False])
+def test_worker_pool_get_into_exact_read_is_hit(has_buffer_get):
+    """An exact-size read returns the byte count and fills the buffer."""
+    expected = 8
+    buf = memoryview(bytearray(expected))
+    pool = _fake_pool(b"\xbb" * expected, has_buffer_get=has_buffer_get)
+    assert ValkeyWorkerPool._do_get_into(pool, "k", buf) == expected
+    assert bytes(buf) == b"\xbb" * expected
+
+
+@pytest.mark.parametrize("has_buffer_get", [True, False])
+def test_worker_pool_get_into_absent_is_miss(has_buffer_get):
+    """An absent key returns GET_MISS."""
+    buf = memoryview(bytearray(8))
+    pool = _fake_pool(None, has_buffer_get=has_buffer_get)
+    assert ValkeyWorkerPool._do_get_into(pool, "k", buf) == GET_MISS
+
+
+@pytest.mark.parametrize("has_buffer_get", [True, False])
+def test_worker_pool_get_into_short_read_is_miss(has_buffer_get):
+    """A short read (fewer bytes than the buffer) is rejected as a miss so
+    stale tail bytes are never surfaced to the caller."""
+    buf = memoryview(bytearray(8))
+    pool = _fake_pool(b"\xaa" * 4, has_buffer_get=has_buffer_get)
+    assert ValkeyWorkerPool._do_get_into(pool, "k", buf) == GET_MISS
+
+
+def test_worker_pool_get_into_oversized_read_is_miss():
+    """An oversized read (more bytes than the buffer) is rejected as a miss
+    (non-buffer path; the buffer path is bounded by the buffer length)."""
+    buf = memoryview(bytearray(8))
+    pool = _fake_pool(b"\xcc" * 12, has_buffer_get=False)
+    assert ValkeyWorkerPool._do_get_into(pool, "k", buf) == GET_MISS
