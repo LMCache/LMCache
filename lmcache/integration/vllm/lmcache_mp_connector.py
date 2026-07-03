@@ -101,15 +101,13 @@ logger = lmcache_init_logger(__name__)
 
 
 # Helper functions
-def _is_preempted(scheduler_output: SchedulerOutput) -> bool:
-    """Return whether this scheduler step must flush pending KV-block operations.
+def _has_preemption_reqs(scheduler_output: SchedulerOutput) -> bool:
+    """Return whether the scheduler output contains preemption-related requests.
 
-    Under-syncing risks KV-block corruption (as a paged block may be
-    overwritten before a deferred async gather reads it), while
-    over-syncing only costs performance. We prioritize safety over
-    efficiency.
+    Checks for the presence of resumed or preempted requests in the
+    scheduler output.
 
-    A flush is required if:
+    A preemption is detected if:
     - ``scheduled_cached_reqs.resumed_req_ids``: Requests resumed from
       preemption this step.
     - ``scheduler_output.preempted_req_ids``: Requests preempted this step.
@@ -118,7 +116,7 @@ def _is_preempted(scheduler_output: SchedulerOutput) -> bool:
         scheduler_output: The vLLM scheduler output for this step.
 
     Returns:
-        True if a flush is needed, False otherwise.
+        True if preemption-related requests exist, False otherwise.
     """
     cached_reqs = getattr(scheduler_output, "scheduled_cached_reqs", None)
 
@@ -1100,7 +1098,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
         metadata = LMCacheMPConnectorMetadata()
-        metadata.need_flush = _is_preempted(scheduler_output)
+        metadata.need_flush = _has_preemption_reqs(scheduler_output)
 
         self._process_retrieve_requests(metadata)
         self._process_new_requests(scheduler_output, metadata)
