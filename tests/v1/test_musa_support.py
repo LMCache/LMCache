@@ -148,12 +148,10 @@ def test_detect_device_falls_back_past_unavailable_musa() -> None:
     os.environ["DEVICE_TYPE"] = "musa"
     stub = _StubTorch(
         has_musa=True,
-        has_xpu=True,
         musa_available=False,
-        xpu_available=True,
     )
     _, name = _detect_with_stub(stub)
-    assert name == "xpu"
+    assert name == "cuda"
     del os.environ["DEVICE_TYPE"]
 
 
