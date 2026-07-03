@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from typing import Any, Callable, Optional
+from concurrent.futures import Future
 from unittest.mock import MagicMock, patch
 import asyncio
 import os
@@ -78,6 +80,41 @@ def create_test_key(key_id: int = 0) -> CacheEngineKey:
         chunk_hash=hash(key_id),
         dtype=torch.bfloat16,
     )
+
+
+def create_test_memory_obj(
+    payload: bytes,
+    physical_size: Optional[int] = None,
+) -> MagicMock:
+    """Create a MemoryObj test double with KV-like metadata."""
+    memory_obj = MagicMock(spec=MemoryObj)
+    metadata = MagicMock()
+    metadata.shape = torch.Size([len(payload)])
+    metadata.dtype = torch.uint8
+    metadata.fmt = MemoryFormat.BINARY_BUFFER
+    metadata.cached_positions = None
+
+    memory_obj.tensor = torch.empty(1)
+    memory_obj.byte_array = bytearray(payload)
+    memory_obj.metadata = metadata
+    memory_obj.get_physical_size.return_value = (
+        len(payload) if physical_size is None else physical_size
+    )
+    return memory_obj
+
+
+def run_scheduled_coroutine_now(
+    coro: Any,
+    loop: asyncio.AbstractEventLoop,
+) -> Future:
+    """Run a run_coroutine_threadsafe coroutine immediately in tests."""
+    del loop
+    future: Future = Future()
+    try:
+        future.set_result(asyncio.run(coro))
+    except Exception as e:
+        future.set_exception(e)
+    return future
 
 
 @pytest.fixture
@@ -193,6 +230,135 @@ class TestLocalDiskBackend:
         result = local_disk_backend.get_blocking(key)
 
         assert result is None
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_batched_submit_put_task_schedules_one_worker_job(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """batched_submit_put_task should enqueue one disk worker job per batch."""
+        keys = [create_test_key(i) for i in range(3)]
+        memory_objs = [
+            create_test_memory_obj(f"payload-{i}".encode()) for i in range(3)
+        ]
+
+        async def noop_submit_task(*args: Any, **kwargs: Any) -> None:
+            return None
+
+        with (
+            patch.object(
+                local_disk_backend.disk_worker,
+                "submit_task",
+                return_value=noop_submit_task(),
+            ) as mock_submit_task,
+            patch(
+                "lmcache.v1.storage_backend.local_disk_backend."
+                "asyncio.run_coroutine_threadsafe",
+                side_effect=lambda coro, loop: (coro.close(), Future())[1],
+            ) as mock_run_coroutine_threadsafe,
+        ):
+            local_disk_backend.batched_submit_put_task(keys, memory_objs)
+
+        mock_submit_task.assert_called_once()
+        args, kwargs = mock_submit_task.call_args
+        assert args == (
+            "put",
+            local_disk_backend.async_batched_save_bytes_to_disk,
+        )
+        assert [item.key for item in kwargs["put_items"]] == keys
+        assert mock_run_coroutine_threadsafe.call_count == 1
+        assert local_disk_backend.current_cache_size == sum(
+            obj.get_physical_size() for obj in memory_objs
+        )
+        for key, memory_obj in zip(keys, memory_objs, strict=True):
+            assert local_disk_backend.exists_in_put_tasks(key)
+            memory_obj.ref_count_up.assert_called_once_with()
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_batched_submit_put_task_writes_batch_and_calls_callback(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """A real batched put should persist every accepted key in one task."""
+        keys = [create_test_key(i) for i in range(10, 13)]
+        payloads = [f"payload-{i}".encode() for i in range(3)]
+        memory_objs = [
+            create_test_memory_obj(payload, physical_size=len(payload))
+            for payload in payloads
+        ]
+        completed_keys = []
+
+        async def immediate_submit_task(
+            task_type: str,
+            task: Callable[..., Any],
+            *args: Any,
+            **kwargs: Any,
+        ) -> None:
+            assert task_type == "put"
+            task(*args, **kwargs)
+            return None
+
+        with (
+            patch.object(
+                local_disk_backend.disk_worker,
+                "submit_task",
+                side_effect=immediate_submit_task,
+            ) as mock_submit_task,
+            patch(
+                "lmcache.v1.storage_backend.local_disk_backend."
+                "asyncio.run_coroutine_threadsafe",
+                side_effect=run_scheduled_coroutine_now,
+            ),
+        ):
+            local_disk_backend.batched_submit_put_task(
+                keys,
+                memory_objs,
+                on_complete_callback=completed_keys.append,
+            )
+
+        mock_submit_task.assert_called_once()
+        assert completed_keys == keys
+        for key, payload, memory_obj in zip(keys, payloads, memory_objs, strict=True):
+            assert local_disk_backend.contains(key)
+            assert not local_disk_backend.exists_in_put_tasks(key)
+            with open(local_disk_backend._key_to_path(key), "rb") as f:
+                assert f.read() == payload
+            memory_obj.ref_count_up.assert_called_once_with()
+            memory_obj.ref_count_down.assert_called_once_with()
+
+        assert local_disk_backend.usage == sum(len(payload) for payload in payloads)
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_batched_submit_put_task_capacity_failure_clears_inflight(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """Rejected batch items must not leak put_tasks entries or ref counts."""
+        key = create_test_key(20)
+        memory_obj = create_test_memory_obj(b"too-large", physical_size=10)
+        local_disk_backend.max_cache_size = 1
+
+        with patch(
+            "lmcache.v1.storage_backend.local_disk_backend."
+            "asyncio.run_coroutine_threadsafe"
+        ) as mock_run_coroutine_threadsafe:
+            local_disk_backend.batched_submit_put_task([key], [memory_obj])
+
+        mock_run_coroutine_threadsafe.assert_not_called()
+        assert not local_disk_backend.exists_in_put_tasks(key)
+        assert local_disk_backend.current_cache_size == 0
+        memory_obj.ref_count_up.assert_not_called()
+        memory_obj.ref_count_down.assert_not_called()
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_batched_submit_put_task_rejects_mismatched_lengths(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """Batch keys and MemoryObjs must be paired one-to-one."""
+        with pytest.raises(ValueError, match="same length"):
+            local_disk_backend.batched_submit_put_task(
+                [create_test_key(30), create_test_key(31)],
+                [create_test_memory_obj(b"payload")],
+            )
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 

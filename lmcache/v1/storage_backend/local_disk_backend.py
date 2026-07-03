@@ -2,6 +2,7 @@
 # Standard
 from concurrent.futures import Future
 from contextlib import nullcontext
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence
 import asyncio
 import os
@@ -36,6 +37,17 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _DEFAULT_THREAD_COUNT = 4
+
+
+@dataclass(frozen=True)
+class _DiskPutItem:
+    key: CacheEngineKey
+    memory_obj: MemoryObj
+    size: int
+    shape: torch.Size
+    dtype: torch.dtype
+    fmt: MemoryFormat
+    cached_positions: Optional[torch.Tensor]
 
 
 # TODO(Jiayi): handle cases where cache is repetitvely prefetched.
@@ -78,15 +90,34 @@ class LocalDiskWorker:
         )
 
     def remove_put_task(self, key: CacheEngineKey):
+        self.remove_put_tasks([key])
+
+    def remove_put_tasks(self, keys: Sequence[CacheEngineKey]) -> None:
+        missing_keys = []
         with self.put_lock:
-            if key in self.put_tasks:
-                self.put_tasks.remove(key)
-            else:
-                logger.warning(f"Key {key} not found in put tasks.")
+            for key in keys:
+                if key in self.put_tasks:
+                    self.put_tasks.remove(key)
+                else:
+                    missing_keys.append(key)
+
+        for key in missing_keys:
+            logger.warning(f"Key {key} not found in put tasks.")
 
     def insert_put_task(self, key: CacheEngineKey):
+        self.insert_put_tasks([key])
+
+    def insert_put_tasks(
+        self, keys: Sequence[CacheEngineKey]
+    ) -> list[CacheEngineKey]:
+        inserted_keys = []
         with self.put_lock:
-            self.put_tasks.append(key)
+            for key in keys:
+                if key in self.put_tasks:
+                    continue
+                self.put_tasks.append(key)
+                inserted_keys.append(key)
+        return inserted_keys
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         with self.put_lock:
@@ -330,7 +361,6 @@ class LocalDiskBackend(StorageBackendInterface):
 
         # TODO(Jiayi): Fragmentation is not considered here.
         required_size = memory_obj.get_physical_size()
-        all_evict_keys = []
         evict_success = True
         with self.disk_lock:
             while self.current_cache_size + required_size > self.max_cache_size:
@@ -349,12 +379,12 @@ class LocalDiskBackend(StorageBackendInterface):
 
                 self.batched_remove(evict_keys, force=False)
 
-                all_evict_keys.extend(evict_keys)
             if evict_success:
                 self.current_cache_size += required_size
                 self.cache_policy.update_on_put(key)
 
         if not evict_success:
+            self.disk_worker.remove_put_task(key)
             return None
 
         memory_obj.ref_count_up()
@@ -370,7 +400,6 @@ class LocalDiskBackend(StorageBackendInterface):
             self.loop,
         )
 
-    # TODO(Jiayi): enable real batching
     def batched_submit_put_task(
         self,
         keys: Sequence[CacheEngineKey],
@@ -387,11 +416,32 @@ class LocalDiskBackend(StorageBackendInterface):
         :param on_complete_callback: Optional callback invoked once per key
             after that key's disk write completes (not once per batch).
             Callback exceptions are caught and logged.
+
+        Raises:
+            ValueError: If ``keys`` and ``memory_objs`` do not have the same
+                length.
         """
-        for key, memory_obj in zip(keys, memory_objs, strict=False):
-            self.submit_put_task(
-                key, memory_obj, on_complete_callback=on_complete_callback
-            )
+        put_items = self._prepare_batched_put_items(keys, memory_objs)
+        if not put_items:
+            return None
+
+        for item in put_items:
+            item.memory_obj.ref_count_up()
+
+        coro = self.disk_worker.submit_task(
+            "put",
+            self.async_batched_save_bytes_to_disk,
+            put_items=put_items,
+            on_complete_callback=on_complete_callback,
+        )
+        try:
+            asyncio.run_coroutine_threadsafe(coro, self.loop)
+        except Exception:
+            coro.close()
+            self._rollback_batched_put_reservation(put_items)
+            raise
+
+        return None
 
     def get_blocking(
         self,
@@ -534,39 +584,42 @@ class LocalDiskBackend(StorageBackendInterface):
         """
         kv_chunk = memory_obj.tensor
         assert kv_chunk is not None
-        buffer = memory_obj.byte_array
-        path = self._key_to_path(key)
+        put_item = self._build_disk_put_item(key, memory_obj)
+        self._save_disk_put_item(
+            put_item,
+            on_complete_callback=on_complete_callback,
+        )
 
-        size = len(buffer)
-        self.usage += size
-        self.stats_monitor.update_local_storage_usage(self.usage)
+    @_lmcache_nvtx_annotate
+    @torch.inference_mode()
+    def async_batched_save_bytes_to_disk(
+        self,
+        put_items: list[_DiskPutItem],
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
+    ) -> None:
+        """
+        Convert a batch of KV chunks to bytes and store them in one worker job.
 
-        # TODO(Jiayi): need to add ref count in disk memory object
-        self.write_file(buffer, path)
-
-        # ref count down here because there's a ref_count_up in
-        # `submit_put_task` above.
-        # Ref count down better be before `insert_key` for testing
-        # purposes (e.g., testing mem_leak).
-        # TODO(Jiayi): This could be problematic if the
-        # freed memory object is immediately reused.
-        size = memory_obj.get_physical_size()
-        shape = memory_obj.metadata.shape
-        dtype = memory_obj.metadata.dtype
-        fmt = memory_obj.metadata.fmt
-        cached_positions = memory_obj.metadata.cached_positions
-        memory_obj.ref_count_down()
-
-        self.insert_key(key, size, shape, dtype, fmt, cached_positions=cached_positions)
-
-        self.disk_worker.remove_put_task(key)
-
-        # Call the completion callback if provided
-        if on_complete_callback is not None:
+        Args:
+            put_items: Prepared disk put items whose capacity and in-flight
+                task slots have already been reserved.
+            on_complete_callback: Optional callback invoked once for each key
+                after that key's disk write completes.
+        """
+        errors: list[Exception] = []
+        for put_item in put_items:
             try:
-                on_complete_callback(key)
+                self._save_disk_put_item(
+                    put_item,
+                    on_complete_callback=on_complete_callback,
+                )
             except Exception as e:
-                logger.warning(f"on_complete_callback failed for key {key}: {e}")
+                errors.append(e)
+
+        if errors:
+            raise RuntimeError(
+                f"Failed to write {len(errors)} local disk cache item(s)"
+            ) from errors[0]
 
     @_lmcache_nvtx_annotate
     def batched_async_load_bytes_from_disk(
@@ -675,3 +728,162 @@ class LocalDiskBackend(StorageBackendInterface):
         if self.batched_msg_sender is not None:
             self.batched_msg_sender.close()
         self.disk_worker.close()
+
+    def _prepare_batched_put_items(
+        self,
+        keys: Sequence[CacheEngineKey],
+        memory_objs: List[MemoryObj],
+    ) -> list[_DiskPutItem]:
+        if len(keys) != len(memory_objs):
+            raise ValueError("keys and memory_objs must have the same length")
+
+        indexed_items = []
+        skipped_keys = []
+        seen_keys = set()
+        for key, memory_obj in zip(keys, memory_objs, strict=True):
+            if key in seen_keys:
+                skipped_keys.append(key)
+                continue
+            seen_keys.add(key)
+            indexed_items.append((key, self._build_disk_put_item(key, memory_obj)))
+
+        inserted_keys = self.disk_worker.insert_put_tasks(
+            [key for key, _ in indexed_items]
+        )
+        inserted_key_set = set(inserted_keys)
+        put_items = [
+            put_item for key, put_item in indexed_items if key in inserted_key_set
+        ]
+        skipped_keys.extend(
+            [key for key, _ in indexed_items if key not in inserted_key_set]
+        )
+
+        for key in skipped_keys:
+            logger.debug(f"Put task for {key} is already in progress.")
+
+        reserved_items = []
+        failed_keys = []
+        with self.disk_lock:
+            for put_item in put_items:
+                evict_success = True
+                while self.current_cache_size + put_item.size > self.max_cache_size:
+                    evict_keys = self.cache_policy.get_evict_candidates(
+                        self.dict, num_candidates=1
+                    )
+                    if not evict_keys:
+                        logger.warning(
+                            "No eviction candidates found. "
+                            "Disk space under pressure."
+                        )
+                        evict_success = False
+                        break
+
+                    for evict_key in evict_keys:
+                        self.current_cache_size -= self.dict[evict_key].size
+
+                    self.batched_remove(evict_keys, force=False)
+
+                if evict_success:
+                    self.current_cache_size += put_item.size
+                    self.cache_policy.update_on_put(put_item.key)
+                    reserved_items.append(put_item)
+                else:
+                    failed_keys.append(put_item.key)
+
+        if failed_keys:
+            self.disk_worker.remove_put_tasks(failed_keys)
+
+        return reserved_items
+
+    def _rollback_batched_put_reservation(
+        self,
+        put_items: list[_DiskPutItem],
+    ) -> None:
+        with self.disk_lock:
+            for put_item in put_items:
+                self.current_cache_size -= put_item.size
+            if self.current_cache_size < 0:
+                self.current_cache_size = 0
+
+        for put_item in put_items:
+            put_item.memory_obj.ref_count_down()
+
+        self.disk_worker.remove_put_tasks([put_item.key for put_item in put_items])
+
+    def _build_disk_put_item(
+        self,
+        key: CacheEngineKey,
+        memory_obj: MemoryObj,
+    ) -> _DiskPutItem:
+        assert memory_obj.tensor is not None
+        size = memory_obj.get_physical_size()
+        shape = memory_obj.metadata.shape
+        dtype = memory_obj.metadata.dtype
+        fmt = memory_obj.metadata.fmt
+        cached_positions = memory_obj.metadata.cached_positions
+        assert shape is not None
+        assert dtype is not None
+        return _DiskPutItem(
+            key=key,
+            memory_obj=memory_obj,
+            size=size,
+            shape=shape,
+            dtype=dtype,
+            fmt=fmt,
+            cached_positions=cached_positions,
+        )
+
+    def _save_disk_put_item(
+        self,
+        put_item: _DiskPutItem,
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
+    ) -> None:
+        key = put_item.key
+        memory_obj = put_item.memory_obj
+        buffer = memory_obj.byte_array
+        path = self._key_to_path(key)
+        inserted = False
+
+        try:
+            # TODO(Jiayi): need to add ref count in disk memory object
+            self.write_file(buffer, path)
+
+            with self.disk_lock:
+                self.usage += len(buffer)
+                self.stats_monitor.update_local_storage_usage(self.usage)
+
+            # Ref count down before insert_key for mem-leak regression tests.
+            # TODO(Jiayi): This could be problematic if the freed memory object
+            # is immediately reused.
+            memory_obj.ref_count_down()
+            inserted = True
+
+            self.insert_key(
+                key,
+                put_item.size,
+                put_item.shape,
+                put_item.dtype,
+                put_item.fmt,
+                cached_positions=put_item.cached_positions,
+            )
+
+            if on_complete_callback is not None:
+                try:
+                    on_complete_callback(key)
+                except Exception as e:
+                    logger.warning(
+                        "on_complete_callback failed for key %s: %s",
+                        key,
+                        e,
+                    )
+        except Exception:
+            if not inserted:
+                memory_obj.ref_count_down()
+            with self.disk_lock:
+                self.current_cache_size -= put_item.size
+                if self.current_cache_size < 0:
+                    self.current_cache_size = 0
+            logger.exception("Failed to write key %s to local disk", key)
+            raise
+        finally:
+            self.disk_worker.remove_put_task(key)
