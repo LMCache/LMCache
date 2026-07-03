@@ -37,8 +37,10 @@ Docker
 Required Docker flags:
 
 - ``--network host`` -- Allows the vLLM container to reach LMCache on localhost.
-- ``--ipc host`` -- Required for CUDA IPC shared memory transfers between
-  containers.
+- ``--ipc host`` -- Required for CUDA IPC shared memory transfers between the
+  vLLM container and the LMCache server, whether the server runs in another
+  container or as a host process. Without it the connector hangs at
+  ``Creating transfer context``.
 - ``--runtime nvidia --gpus all`` -- GPU access via the NVIDIA container
   runtime.
 

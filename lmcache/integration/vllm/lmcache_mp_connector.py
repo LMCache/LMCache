@@ -520,7 +520,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       e.g. "tcp://host1:6667,tcp://host2:6667".
 
     Single-server deployment:
-    - lmcache.mp.host: the host of the LMCache server.
+    - lmcache.mp.host: the host of the LMCache server, including the transport
+      scheme, e.g. "tcp://127.0.0.1" (default "tcp://localhost"). The final
+      URL is "{host}:{port}", so a bare host without a scheme produces an
+      invalid ZMQ address; prefer lmcache.mp.server_urls for full control.
     - lmcache.mp.port: the port of the LMCache server.
 
     - lmcache.mp.mq_timeout: timeout (seconds) for message queue requests.

@@ -249,8 +249,19 @@ end-to-end commands and the per-model block sizes.
 What Is Not Supported Yet
 -------------------------
 
-- **DeepSeek-V4-style compressed / indexer caches** are not yet handled by the
-  multiprocess connector.
+At registration the connector rejects only the group specs the transfer path
+cannot serve correctly (``validate_kv_cache_groups`` in
+``lmcache/integration/vllm/kv_cache_group_edits.py``):
+
+- **Encoder-decoder cross-attention caches** (``CrossAttentionSpec``).
+- **Mamba groups not in** ``align`` **mode** (``mamba_cache_mode != "align"``):
+  other modes keep no reusable per-block state snapshots.
+
+DeepSeek-V4-style **compressed / indexer caches are supported** — specs that
+declare slot compression (``compress_ratio > 1`` / ``tq_slot_size > 0``) are
+served by the compression path in ``lmcache.v1.kv_layer_groups`` and are *not*
+rejected. See the :doc:`DeepSeek-V4-Flash <../recipes/deepseek_v4_flash>` and
+:doc:`GLM 5.2 <../recipes/glm5_2>` recipes for validated end-to-end commands.
 
 Verifying Correctness
 ---------------------
