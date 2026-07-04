@@ -2,8 +2,8 @@
 """CUDA-specific platform primitives."""
 
 # First Party
+from lmcache.v1.platform.base.pin_memory import PinMemoryBackend
 from lmcache.v1.platform.base_device_info import DeviceInfo
-from lmcache.v1.platform.base_pin_memory import PinMemoryBackend
 from lmcache.v1.platform.cuda.pin_memory import CudaPinMemoryBackend
 
 # ---------------------------------------------------------------------------

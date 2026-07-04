@@ -20,7 +20,7 @@ enough.
 import abc
 
 # First Party
-from lmcache.v1.platform.base_pin_memory import PinMemoryBackend
+from lmcache.v1.platform.base.pin_memory import PinMemoryBackend
 
 
 # TODO(chunxiaozheng): bind `DeviceIPCWrapper` with `DeviceInfo`?

@@ -1,21 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 """Platform backend registry.
 
-Each accelerator sub-package (``platform/cuda``, ``platform/cpu``,
-future ``platform/xpu`` ...) ships a concrete
-:class:`~lmcache.v1.platform.base_ipc_wrapper.DeviceIPCWrapper`
-subclass with a ``device_type`` ClassVar and a ``wrap`` factory
-classmethod.  :func:`_discover_wrappers_once` scans the ``platform``
-package for those subclasses at run-time and populates the factory
-table -- no static ``register_kv_wrapper`` calls needed.
+Two independent registries live here:
 
-The :func:`get_kv_wrapper_factory` lookup keys on
-``tensor.device.type`` so the call site in
-:mod:`lmcache.integration.vllm.vllm_multi_process_adapter` stays free
-of any if/elif chain.  Adding a new accelerator therefore requires
-*zero* changes to the dispatcher; it only needs to ship its own
-sub-package with a ``DeviceIPCWrapper`` subclass that sets
-``device_type`` and ``wrap``.
+**Universal 3-D registry** (``get_impl`` / ``resolve_impl``)
+    Each accelerator sub-package ships concrete subclasses of the ABC
+    base classes defined under ``lmcache/v1/platform/base/``.
+    :func:`_discover_all_once` auto-discovers those base classes and
+    their implementations and indexes them by
+    ``(base_class, device_type, impl_key)``.
+
+    * :func:`get_impl` performs a strict lookup and raises ``ValueError``
+      when nothing is registered for the requested triple.
+    * :func:`resolve_impl` is the policy-aware lookup: it re-raises for
+      abstract base classes (required capabilities) and falls back to the
+      base class itself only when the base class is concrete.
+
+**IPC wrapper registry** (``get_kv_wrapper_factory``)
+    Legacy path retained for backward compatibility.  Concrete
+    :class:`~lmcache.v1.platform.base_ipc_wrapper.DeviceIPCWrapper`
+    subclasses are discovered via :func:`_discover_wrappers_once` and
+    indexed by ``device_type``.
 """
 
 # Future
@@ -23,6 +28,7 @@ from __future__ import annotations
 
 # Standard
 from typing import Any, Callable, Dict
+import abc
 import threading
 
 # First Party
@@ -34,6 +40,277 @@ logger = init_logger(__name__)
 # fall-back regardless of the running ``torch_device_type``.
 DEFAULT_BACKEND: str = "cpu"
 
+
+# ---------------------------------------------------------------------------
+# Universal 3-D registry
+# ---------------------------------------------------------------------------
+
+# _REGISTRY[base_class][device_type][impl_key] = concrete_class
+# Populated lazily by _discover_all_once().
+_REGISTRY: Dict[type, Dict[str, Dict[str, type]]] = {}
+
+_ALL_DISCOVERED: bool = False
+_ALL_DISCOVERY_LOCK = threading.Lock()
+
+
+def _discover_base_classes() -> list[type[abc.ABC]]:
+    """Return all registry base classes from ``lmcache.v1.platform.base``.
+
+    A class qualifies when it is **directly defined** in a non-private
+    module directly under the ``base`` sub-package **and** subclasses
+    :class:`abc.ABC`.
+
+    Returns:
+        List of discovered base classes (all subclass abc.ABC).
+    """
+    # Standard
+    import importlib
+    import inspect
+    import pkgutil
+
+    base_pkg = importlib.import_module("lmcache.v1.platform.base")
+    base_classes: list[type[abc.ABC]] = []
+
+    for _, short_name, is_pkg in pkgutil.iter_modules(base_pkg.__path__):  # type: ignore[attr-defined]
+        if is_pkg or short_name.startswith("_"):
+            continue
+        full_name = "lmcache.v1.platform.base.%s" % short_name
+        try:
+            module = importlib.import_module(full_name)
+        except Exception as exc:
+            logger.warning(
+                "Failed to import %s during base-class discovery: %s", full_name, exc
+            )
+            continue
+
+        for _, obj in inspect.getmembers(module, inspect.isclass):
+            if (
+                obj.__module__ == module.__name__
+                and issubclass(obj, abc.ABC)
+                and obj is not abc.ABC
+            ):
+                base_classes.append(obj)
+
+    return base_classes
+
+
+def _discover_all_once() -> None:
+    """Populate :data:`_REGISTRY` on first use.
+
+    Walks ``lmcache.v1.platform.base`` for ABC base classes, then scans
+    each device sub-package (depth 2) for concrete implementations.
+    Each implementation must set ``device_type`` (a non-empty string
+    ClassVar) to be indexed; ``impl_key`` is optional and defaults to
+    ``"default"``.
+
+    Multiple implementations claiming the same
+    ``(base_class, device_type, impl_key)`` triple trigger a warning;
+    the first one wins.
+    """
+    global _ALL_DISCOVERED
+    if _ALL_DISCOVERED:
+        return
+
+    with _ALL_DISCOVERY_LOCK:
+        if _ALL_DISCOVERED:
+            return
+
+        # First Party
+        from lmcache.v1.utils.subclass_discovery import discover_subclasses
+        import lmcache.v1.platform as platform_pkg
+
+        base_classes = _discover_base_classes()
+        if not base_classes:
+            logger.warning(
+                "No registry base classes found under lmcache.v1.platform.base; "
+                "universal registry will be empty."
+            )
+
+        for base_cls in base_classes:
+            _REGISTRY.setdefault(base_cls, {})
+            for impl_cls in discover_subclasses(
+                platform_pkg,
+                base_cls,  # type: ignore[type-abstract]
+                module_filter=lambda name: not name.startswith(("_", "base")),
+                require_defined_in_module=True,
+                on_import_error=lambda name, exc: logger.warning(
+                    "Failed to import %s during registry discovery: %s", name, exc
+                ),
+                levels=[2, 2],
+            ):
+                _register_impl(base_cls, impl_cls)
+
+        _ALL_DISCOVERED = True
+
+
+def _register_impl(base_cls: type, impl_cls: type) -> None:
+    """Register *impl_cls* in the 3-D table under *base_cls*.
+
+    The implementation must carry a non-empty ``device_type`` ClassVar.
+    ``impl_key`` defaults to ``"default"`` when absent.  Duplicate
+    ``(device_type, impl_key)`` entries trigger a warning; the first
+    registration wins.
+
+    Args:
+        base_cls: The registry base class this implementation belongs to.
+        impl_cls: The concrete implementation class to register.
+    """
+    device_type: str = getattr(impl_cls, "device_type", "")
+    if not device_type:
+        logger.warning(
+            "Skipping %s: empty device_type ClassVar; concrete subclasses of "
+            "%s must set device_type.",
+            impl_cls.__name__,
+            base_cls.__name__,
+        )
+        return
+
+    impl_key: str = getattr(impl_cls, "impl_key", "default") or "default"
+
+    device_table = _REGISTRY.setdefault(base_cls, {})
+    key_table = device_table.setdefault(device_type, {})
+
+    existing = key_table.get(impl_key)
+    if existing is not None and existing is not impl_cls:
+        logger.warning(
+            "Multiple %s subclasses registered for (device_type=%r, impl_key=%r): "
+            "%s vs %s; keeping the first.",
+            base_cls.__name__,
+            device_type,
+            impl_key,
+            existing.__name__,
+            impl_cls.__name__,
+        )
+        return
+
+    key_table[impl_key] = impl_cls
+
+
+def get_impl(base_class: type, device_type: str, impl_key: str = "default") -> type:
+    """Return the registered implementation for the given triple.
+
+    Triggers lazy auto-discovery on the first call.  Raises
+    ``ValueError`` when nothing is registered for the requested
+    ``(base_class, device_type, impl_key)``; it never falls back.
+
+    Args:
+        base_class: The registry base class (e.g. ``PinMemoryBackend``).
+        device_type: The device type string (e.g. ``"cuda"``).
+        impl_key: The implementation key (default: ``"default"``).
+
+    Returns:
+        The concrete implementation class.
+
+    Raises:
+        ValueError: If no implementation is registered for the triple.
+    """
+    _discover_all_once()
+
+    device_table = _REGISTRY.get(base_class)
+    if device_table is None:
+        raise ValueError(
+            "Base class %r is not registered in the universal registry. "
+            "Ensure it is defined in a module under lmcache/v1/platform/base/ "
+            "and subclasses abc.ABC." % base_class
+        )
+
+    key_table = device_table.get(device_type)
+    if key_table is None:
+        raise ValueError(
+            "No %s implementation registered for device_type=%r."
+            % (base_class.__name__, device_type)
+        )
+
+    impl = key_table.get(impl_key)
+    if impl is None:
+        raise ValueError(
+            "No %s implementation registered for (device_type=%r, impl_key=%r)."
+            % (base_class.__name__, device_type, impl_key)
+        )
+
+    return impl
+
+
+def resolve_impl(base_class: type, device_type: str, impl_key: str = "default") -> type:
+    """Resolve an implementation class for callers using fallback policy.
+
+    This API first performs strict lookup via :func:`get_impl`.
+    If strict lookup fails:
+
+    * Abstract base classes (``inspect.isabstract(base_class)``) re-raise
+      the original ``ValueError`` to preserve fail-fast semantics for
+      required capabilities.
+    * Concrete base classes fall back to ``base_class`` itself, which
+      lets optional capabilities provide a built-in default implementation.
+
+    Args:
+        base_class: The registry base class.
+        device_type: The device type string.
+        impl_key: The implementation key (default: ``"default"``).
+
+    Returns:
+        The concrete implementation class, or ``base_class`` when fallback
+        is allowed by the abstractness rule.
+
+    Raises:
+        ValueError: If no implementation is registered and ``base_class``
+            is abstract.
+    """
+    try:
+        return get_impl(base_class, device_type, impl_key)
+    except ValueError:
+        # Standard
+        import inspect
+
+        if inspect.isabstract(base_class):
+            raise
+        return base_class
+
+
+def reset_registry_for_tests() -> None:
+    """Wipe the universal 3-D registry and force re-discovery.
+
+    Intended **only** for test fixtures.  Clears every registered
+    implementation and flips :data:`_ALL_DISCOVERED` back to ``False``
+    so the next :func:`get_impl` / :func:`resolve_impl` call re-runs
+    :func:`_discover_all_once`.
+    """
+    global _ALL_DISCOVERED
+    _REGISTRY.clear()
+    _ALL_DISCOVERED = False
+
+
+def snapshot_registry() -> Dict[str, Any]:
+    """Return a copy of the universal registry state for test isolation.
+
+    Returns:
+        A dict with keys ``"registry"`` and ``"discovered"``.
+    """
+    return {
+        "registry": {
+            base: {dt: dict(key_table) for dt, key_table in device_table.items()}
+            for base, device_table in _REGISTRY.items()
+        },
+        "discovered": _ALL_DISCOVERED,
+    }
+
+
+def restore_registry(state: Dict[str, Any]) -> None:
+    """Restore the universal registry to a previously snapshotted state.
+
+    Args:
+        state: A snapshot dict as returned by :func:`snapshot_registry`.
+    """
+    global _ALL_DISCOVERED
+    _REGISTRY.clear()
+    for base, device_table in state.get("registry", {}).items():
+        _REGISTRY[base] = {dt: dict(kt) for dt, kt in device_table.items()}
+    _ALL_DISCOVERED = bool(state.get("discovered", False))
+
+
+# ---------------------------------------------------------------------------
+# IPC wrapper registry (legacy -- retained for backward compatibility)
+# ---------------------------------------------------------------------------
 
 # KV-cache IPC wrapper factory per device type.  Populated lazily on
 # first :func:`get_kv_wrapper_factory` call by scanning the

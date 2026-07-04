@@ -8,8 +8,8 @@ torch device module.
 """
 
 # First Party
+from lmcache.v1.platform.base.pin_memory import PinMemoryBackend
 from lmcache.v1.platform.base_device_info import DeviceInfo
-from lmcache.v1.platform.base_pin_memory import PinMemoryBackend
 
 
 class DeviceExt:
@@ -29,10 +29,13 @@ class DeviceExt:
     """
 
     def __init__(self, device_info: DeviceInfo | None) -> None:
-        if device_info is not None and device_info.pin_memory_backend is not None:
-            backend_cls = device_info.pin_memory_backend
-        else:
-            backend_cls = PinMemoryBackend
+        device_type = device_info.device_type if device_info is not None else "cpu"
+
+        # Lazy import to avoid circular dependencies at module load time.
+        # First Party
+        from lmcache.v1.platform._registry import resolve_impl
+
+        backend_cls = resolve_impl(PinMemoryBackend, device_type)
         self._pin: PinMemoryBackend = backend_cls()
 
     def pin_memory(self, ptr: int, size: int, flags: int = 0) -> bool:

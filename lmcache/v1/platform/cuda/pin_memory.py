@@ -2,12 +2,13 @@
 """CUDA memory pinning: try torch cudart first, then libcudart via ctypes."""
 
 # Standard
+from typing import ClassVar
 import ctypes
 import ctypes.util
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.platform.base_pin_memory import PinMemoryBackend
+from lmcache.v1.platform.base.pin_memory import PinMemoryBackend
 
 logger = init_logger(__name__)
 
@@ -52,10 +53,17 @@ class CudaPinMemoryBackend(PinMemoryBackend):
     unavailable, the backend falls back to loading ``libcudart`` directly.
 
     Attributes:
+        device_type: Device type string used by the universal registry.
+        impl_key: Implementation key used by the universal registry.
         _cudart: Torch cudart binding when ``torch.cuda.cudart()`` succeeds.
         _libcudart: ``ctypes``-loaded CUDA runtime when torch cudart is
             unavailable.
     """
+
+    #: ``torch.device.type`` this backend handles (used by auto-discovery).
+    device_type: ClassVar[str] = "cuda"
+    #: Implementation key (used by auto-discovery).
+    impl_key: ClassVar[str] = "default"
 
     def __init__(self) -> None:
         """Initialize the backend with torch-first, libcudart-second fallback.
