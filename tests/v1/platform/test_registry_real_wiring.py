@@ -85,6 +85,7 @@ def _resolve(dotted: str) -> type:
             {
                 "cpu": "lmcache.v1.platform.cpu.shm.CpuShmTensorWrapper",
                 "cuda": "lmcache.v1.platform.cuda.ipc_wrapper.CudaIPCWrapper",
+                "musa": "lmcache.v1.platform.musa.ipc.MusaIPCWrapper",
             },
             id="ipc_wrapper",
         ),
