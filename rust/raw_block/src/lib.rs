@@ -15,7 +15,7 @@
 //!   submission/completion loop. All alignment checks are performed before
 //!   enqueuing; violations result in an immediate Python `ValueError`.
 
-use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyMemoryError, PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use std::collections::HashMap;
@@ -135,6 +135,7 @@ const NVME_IDENTIFY_CNS_NS: u32 = 0x00;
 // NVMe I/O opcodes
 const NVME_IO_READ: u8 = 0x02;
 const NVME_IO_WRITE: u8 = 0x01;
+const NVME_IO_MGMT_RECV: u8 = 0x12;
 
 // NVMe uring command structure (80 bytes)
 #[repr(C)]
@@ -164,7 +165,7 @@ struct NvmeUringCmd {
 const NVME_IOCTL_ADMIN_CMD: libc::c_ulong = 0xC048_4E41;
 
 // Defined in <linux/nvme_ioctl.h>: NVME_IOCTL_IO_CMD _IOWR ('N', 0x43)
-// const NVME_IOCTL_IO_CMD: libc::c_ulong = 0xC048_4E43;
+const NVME_IOCTL_IO_CMD: libc::c_ulong = 0xC048_4E43;
 
 // NVMe io_uring_cmd opcodes
 const NVME_URING_CMD_IO: u32 = 0xC048_4E80;
@@ -401,6 +402,25 @@ struct NvmePassthruCmd {
     result: u32,
 }
 
+// NVMe FDP (Flexible Data Placement) reclaim unit handle status descriptor.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct NvmeFdpRuhStatusDesc {
+    pid: u16,
+    ruhid: u16,
+    earutr: u32,
+    ruamw: u64,
+    rsvd16: [u8; 16],
+}
+
+// NVMe FDP reclaim unit handle status header.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct NvmeFdpRuhStatus {
+    rsvd0: [u8; 14],
+    nruhsd: u16,
+}
+
 /// Send NVMe identify namespace command via ioctl
 fn nvme_identify_ns(fd: RawFd, nsid: u32) -> Result<NvmeIdNs, PyErr> {
     let mut id_ns: NvmeIdNs = unsafe { std::mem::zeroed() };
@@ -423,6 +443,85 @@ fn nvme_identify_ns(fd: RawFd, nsid: u32) -> Result<NvmeIdNs, PyErr> {
     }
 
     Ok(id_ns)
+}
+
+/// Send NVMe I/O management receive command to fetch FDP RUH status.
+fn nvme_fdp_reclaim_unit_handle_status(
+    fd: RawFd,
+    nsid: u32,
+    data_len: u32,
+    data: *mut u8,
+) -> Result<(), PyErr> {
+    let mut cmd = NvmePassthruCmd {
+        opcode: NVME_IO_MGMT_RECV,
+        nsid,
+        addr: data as u64,
+        data_len,
+        cdw10: 1,
+        cdw11: (data_len >> 2) - 1,
+        timeout_ms: 0,
+        result: 0,
+        ..unsafe { std::mem::zeroed() }
+    };
+
+    // SAFETY: ioctl with properly initialized command structure.
+    let rc = unsafe { libc::ioctl(fd, NVME_IOCTL_IO_CMD, &mut cmd as *mut NvmePassthruCmd) };
+
+    if rc < 0 {
+        return Err(os_err("NVMe FDP reclaim unit handle status ioctl failed"));
+    }
+
+    Ok(())
+}
+
+/// Fetch FDP status descriptors as (placement identifier, RUH identifier).
+fn fetch_fdp_status(fd: RawFd, nsid: u32) -> Result<Vec<(u16, u16)>, PyErr> {
+    let header_size = std::mem::size_of::<NvmeFdpRuhStatus>();
+    let desc_size = std::mem::size_of::<NvmeFdpRuhStatusDesc>();
+    let mut header: NvmeFdpRuhStatus = unsafe { std::mem::zeroed() };
+
+    // Header-first query matches nvme-cli behavior and avoids assuming a
+    // controller-specific descriptor count.
+    nvme_fdp_reclaim_unit_handle_status(
+        fd,
+        nsid,
+        header_size as u32,
+        (&mut header as *mut NvmeFdpRuhStatus).cast::<u8>(),
+    )?;
+
+    let actual_ruhs = u16::from_le(header.nruhsd) as usize;
+    let desc_bytes = actual_ruhs
+        .checked_mul(desc_size)
+        .ok_or_else(|| PyRuntimeError::new_err("NVMe FDP status descriptor size overflow"))?;
+    let bytes = header_size
+        .checked_add(desc_bytes)
+        .ok_or_else(|| PyRuntimeError::new_err("NVMe FDP status payload size overflow"))?;
+    let data_len = u32::try_from(bytes)
+        .map_err(|_| PyRuntimeError::new_err("NVMe FDP status payload too large"))?;
+
+    let mut buffer: Vec<u8> = Vec::new();
+    buffer.try_reserve_exact(bytes).map_err(|e| {
+        PyMemoryError::new_err(format!("failed to allocate NVMe FDP status buffer: {e}"))
+    })?;
+    buffer.resize(bytes, 0);
+    nvme_fdp_reclaim_unit_handle_status(fd, nsid, data_len, buffer.as_mut_ptr())?;
+
+    let mut status: Vec<(u16, u16)> = Vec::new();
+    status.try_reserve_exact(actual_ruhs).map_err(|e| {
+        PyMemoryError::new_err(format!("failed to allocate NVMe FDP status entries: {e}"))
+    })?;
+    for i in 0..actual_ruhs {
+        let desc_ptr = unsafe {
+            buffer
+                .as_ptr()
+                .add(header_size + i * desc_size)
+                .cast::<NvmeFdpRuhStatusDesc>()
+        };
+        let desc = unsafe { std::ptr::read_unaligned(desc_ptr) };
+        status.push((u16::from_le(desc.pid), u16::from_le(desc.ruhid)));
+    }
+
+    Ok(status)
 }
 
 /// Prepare NVMe uring command for read/write operations
@@ -1888,6 +1987,19 @@ impl RawBlockDevice {
         self.nvme_lba_size.ok_or_else(|| {
             PyRuntimeError::new_err("NVMe LBA size not available (use_uring_cmd not enabled)")
         })
+    }
+
+    /// Fetch FDP status descriptors for the NVMe namespace.
+    fn fetch_fdp_status(&self) -> PyResult<Vec<(u16, u16)>> {
+        if !self.use_uring_cmd {
+            return Err(PyRuntimeError::new_err(
+                "fetch_fdp_status requires use_uring_cmd to be enabled",
+            ));
+        }
+        let nsid = self
+            .nvme_nsid
+            .ok_or_else(|| PyRuntimeError::new_err("NVMe namespace ID not available"))?;
+        fetch_fdp_status(self.fd, nsid)
     }
 
     /// Register fixed buffers for zero-copy io_uring operations.
