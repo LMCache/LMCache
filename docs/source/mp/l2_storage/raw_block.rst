@@ -38,6 +38,15 @@ caller-provided load buffers during prefetch.
 - ``max_data_transfer_size``: Maximum data transfer size for
   ``use_uring_cmd=true``. Large transfers are split into smaller chunks
   that fit within device limits.
+- ``fdp_enabled``: Enables NVMe Flexible Data Placement (FDP) discovery
+  and non-zero placement identifier registration. The KV data placement
+  policy is not active yet. Requires ``io_engine="io_uring"`` and
+  ``use_uring_cmd=true``.
+- ``fdp_placement_ids``: Optional exact non-zero placement identifier list
+  to register for future KV data placement.
+- ``meta_checkpoint_placement_id``: Optional non-zero placement identifier for
+  metadata checkpoint payload/header writes. Omit it to keep checkpoint writes
+  on default NVMe placement.
 - ``num_store_workers`` / ``num_lookup_workers`` / ``num_load_workers``:
   Worker-thread counts for each operation type.
 
@@ -63,7 +72,15 @@ caller-provided load buffers during prefetch.
   command passthrough.
 - ``use_uring_cmd`` requires ``io_engine="io_uring"`` to be set.
 - When ``use_uring_cmd=true``, ``use_odirect`` is ignored for NVMe namespace
-  character devices.
+  character devices. FDP examples set ``use_odirect=false`` because
+  ``io_uring_cmd`` uses NVMe passthrough rather than the POSIX write path.
+- FDP registers only non-zero placement identifiers. If ``fdp_placement_ids`` is
+  omitted, all discovered non-zero identifiers are used; if provided, the list
+  must exactly match the device's non-zero identifier set and must not contain
+  0. Current KV data writes still omit FDP placement identifiers until the
+  placement policy is added. Metadata checkpoint writes use
+  ``meta_checkpoint_placement_id`` when configured, otherwise they use default
+  NVMe placement with no directive.
 
 **Configuration examples:**
 
@@ -77,6 +94,9 @@ caller-provided load buffers during prefetch.
 
     # With io_uring_cmd (NVMe passthrough)
     --l2-adapter '{"type": "raw_block", "device_path": "/dev/ng0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "use_uring_cmd": true, "iouring_queue_depth": 256, "max_data_transfer_size": 131072, "use_odirect": false}'
+
+    # With FDP discovery enabled, registering all non-zero device identifiers
+    --l2-adapter '{"type": "raw_block", "device_path": "/dev/ng0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "use_uring_cmd": true, "fdp_enabled": true, "use_odirect": false}'
 
     # With eviction
     --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "load_checkpoint_on_init": false, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
