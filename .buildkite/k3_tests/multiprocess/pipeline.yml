@@ -205,17 +205,18 @@ steps:
       # Note: LMCACHE_SHM_NAME uses `${VAR-default}` (not `:-`) in the
       # runner script, so an empty string ("") is meaningful and differs
       # from unset. `__default__` is the sentinel meaning "shm mode".
-      - label: ":compression: cpu_e2e_validation ({{matrix}})"
+      - label: ":compression: cpu_e2e_validation ({{matrix.mode}})"
         command: bash .github/scripts/run-cpu-e2e-validation.sh
         matrix:
-          setup: ["shm", "pickle", "server-side copy"]
+          setup:
+            mode: ["shm", "pickle", "server-side copy"]
           adjustments:
-            - with: "shm"
+            - with: { mode: "shm" }
               # shm: rely on script defaults (engine-driven + shm transport)
-            - with: "pickle"
+            - with: { mode: "pickle" }
               env:
                 LMCACHE_SHM_NAME: ""
-            - with: "server-side copy"
+            - with: { mode: "server-side copy" }
               env:
                 LMCACHE_MP_TRANSFER_MODE: "lmcache_driven"
         timeout_in_minutes: 30
