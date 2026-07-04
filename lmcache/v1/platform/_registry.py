@@ -24,7 +24,7 @@ core :func:`get_impl` / :func:`get_all_impls` lookups.
 from __future__ import annotations
 
 # Standard
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, TypeVar
 import importlib
 import inspect
 import pkgutil
