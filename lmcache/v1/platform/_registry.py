@@ -202,7 +202,7 @@ def get_impl(base_class: type, device_type: str) -> type:
     return cls
 
 
-def get_all_impls(base_class: type) -> Dict[str, type]:
+def get_all_impls(base_class: type[T]) -> dict[str, type[T]]:
     """Return all registered implementations for *base_class*.
 
     Args:
