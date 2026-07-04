@@ -100,3 +100,22 @@ caller-provided load buffers during prefetch.
 
     # With eviction
     --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "load_checkpoint_on_init": false, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
+
+**Hardware-gated FDP status validation:**
+
+FDP live-device validation is opt-in because it requires an FDP-capable NVMe
+namespace character device. The status probe opens the character device through
+the Rust raw-block binding and calls ``fetch_fdp_status()`` with a read-only file
+descriptor. It does not issue writes, initialize the MP adapter layout, write KV
+data, or verify a future FDP placement policy.
+
+.. code-block:: bash
+
+    LMCACHE_TEST_FDP_CHAR_DEVICE=/dev/ng0n1 \
+      pytest -q tests/v1/storage_backend/test_raw_block_fdp_status_probe.py
+
+When the variable is not set, the test skips. If the configured device, kernel,
+or controller does not support the FDP status query, the test skips with the
+underlying capability error. A passing status probe only confirms that the live
+device can answer the FDP status query; full adapter initialization on hardware
+and KV write placement are separate follow-ups.
