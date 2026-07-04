@@ -46,13 +46,13 @@ DEFAULT_IOURING_QUEUE_DEPTH = 256
 _MAX_FDP_PLACEMENT_ID = 0xFFFF
 
 # FDP placement ID semantics are shared by design across raw-block write paths.
-# None omits the directive. Explicit handles must be positive because default
-# writes already use the RUH mapping associated with Placement Handle 0.
-# RawBlockCore rejects explicit handle 0 so KV data never sends an FDP directive
-# for the default placement handle. Non-zero handles are encoded as 16-bit
-# NVMe directive-specific values.
-# Metadata checkpoints are not KV cache data and follow a small periodic/recovery
-# write pattern, so they use default NVMe writes.
+# None omits the directive. Explicit identifiers must be positive because
+# default writes already use the RUH mapping associated with Placement
+# Identifier 0. RawBlockCore rejects explicit identifier 0 so KV data never sends
+# an FDP directive for the default placement identifier. Non-zero identifiers are
+# encoded as 16-bit NVMe directive-specific values.
+# Metadata checkpoint placement is optional. ``None`` keeps the historical
+# default NVMe write behavior; a positive identifier emits an FDP directive.
 PlacementId = int | None
 
 
@@ -109,7 +109,7 @@ def normalize_raw_block_placement_ids(
     field_name: str = "placement_ids",
     allow_none: bool = True,
 ) -> list[PlacementId]:
-    """Validate FDP placement handles and preserve omitted directives."""
+    """Validate FDP placement identifiers and preserve omitted directives."""
     if placement_ids is None:
         return [None] * expected_len
     if len(placement_ids) != expected_len:
@@ -125,7 +125,7 @@ def normalize_raw_block_placement_ids(
         if not isinstance(placement_id, int) or isinstance(placement_id, bool):
             raise ValueError(f"{field_name} must contain integers or None")
         if placement_id == 0:
-            raise ValueError(f"{field_name} must not contain placement handle 0")
+            raise ValueError(f"{field_name} must not contain placement identifier 0")
         if placement_id < 0:
             raise ValueError(f"{field_name} must contain positive integers or None")
         if placement_id > _MAX_FDP_PLACEMENT_ID:
@@ -196,6 +196,7 @@ class RawBlockCoreConfig:
     io_engine: str = "posix"
     iouring_queue_depth: int = DEFAULT_IOURING_QUEUE_DEPTH
     use_uring_cmd: bool = False
+    meta_checkpoint_placement_id: PlacementId = None
 
 
 @dataclass
@@ -269,6 +270,18 @@ class RawBlockCore:
         self.io_engine = normalize_raw_block_io_engine(config.io_engine)
         self.iouring_queue_depth = int(config.iouring_queue_depth)
         self.use_uring_cmd = bool(config.use_uring_cmd)
+        self.meta_checkpoint_placement_id = normalize_raw_block_placement_ids(
+            [config.meta_checkpoint_placement_id],
+            1,
+            field_name="meta_checkpoint_placement_id",
+        )[0]
+        if self.meta_checkpoint_placement_id is not None and (
+            self.io_engine != "io_uring" or not self.use_uring_cmd
+        ):
+            raise ValueError(
+                "meta_checkpoint_placement_id requires "
+                "io_engine='io_uring' and use_uring_cmd=true"
+            )
         if self.use_uring_cmd and self.use_odirect:
             logger.warning(
                 "RawBlockCore: use_odirect is ignored for NVMe namespace "
@@ -678,12 +691,16 @@ class RawBlockCore:
         self,
         keys: Sequence[RawBlockKeySpec],
         objs: Sequence[MemoryObj],
+        placement_ids: Sequence[PlacementId] | None = None,
     ) -> RawBlockPutManyResult:
         """Persist a batch of memory objects into raw-block slots.
 
         Args:
             keys: Ordered raw-block key specs corresponding to ``objs``.
             objs: Memory objects whose byte buffers should be written.
+            placement_ids: Optional per-key FDP placement identifiers for
+                raw-block writes. ``None`` omits the directive; explicit identifier
+                0 is rejected because default writes already use that mapping.
 
         Returns:
             Per-key success results and newly stored encoded keys. If no free
@@ -692,18 +709,24 @@ class RawBlockCore:
             ``delete_many``.
 
         Raises:
-            ValueError: If either sequence is empty or the sequence lengths do
-                not match.
+            ValueError: If either sequence is empty, sequence lengths do not
+                match, or a placement identifier is 0.
         """
         if not keys or not objs:
             raise ValueError("keys and objs must be non-empty")
         if len(keys) != len(objs):
             raise ValueError("keys and objs must have the same length")
+        per_key_placement_ids = normalize_raw_block_placement_ids(
+            placement_ids,
+            len(keys),
+            field_name="placement_ids",
+        )
 
         results = [False] * len(keys)
         stored_keys: list[str] = []
 
         for i, (key, obj) in enumerate(zip(keys, objs, strict=False)):
+            placement_id = per_key_placement_ids[i]
             if self._closed:
                 break
 
@@ -734,7 +757,7 @@ class RawBlockCore:
                 )
                 self._inflight[key.encoded] = _Inflight(offset=offset, meta=meta)
 
-            success = self._write_one(key, obj, offset)
+            success = self._write_one(key, obj, offset, placement_id=placement_id)
 
             with self._lock:
                 inflight = self._inflight.pop(key.encoded, None)
@@ -1193,6 +1216,7 @@ class RawBlockCore:
         buffers: Sequence[Any],
         payload_lens: Sequence[int],
         total_lens: Sequence[int],
+        placement_ids: Sequence[PlacementId] | None = None,
     ) -> None:
         """Write buffers as bounded NVMe raw-command chunks.
 
@@ -1201,6 +1225,9 @@ class RawBlockCore:
             buffers: Source buffers.
             payload_lens: Logical source byte counts.
             total_lens: Physical transfer sizes, including padding.
+            placement_ids: Optional FDP placement identifiers for each logical
+                write. ``None`` omits the directive; explicit identifier 0 is
+                rejected.
 
         Raises:
             ValueError: If lengths are inconsistent or unaligned.
@@ -1210,10 +1237,21 @@ class RawBlockCore:
         chunk_offsets: list[int] = []
         chunk_buffers: list[memoryview] = []
         chunk_lens: list[int] = []
+        chunk_placement_ids: list[PlacementId] = []
         keepalive: list[memoryview] = []
+        per_write_placement_ids = normalize_raw_block_placement_ids(
+            placement_ids,
+            len(offsets),
+            field_name="placement_ids",
+        )
 
-        for offset, buf, payload_len, total_len in zip(
-            offsets, buffers, payload_lens, total_lens, strict=True
+        for offset, buf, payload_len, total_len, placement_id in zip(
+            offsets,
+            buffers,
+            payload_lens,
+            total_lens,
+            per_write_placement_ids,
+            strict=True,
         ):
             offset = int(offset)
             payload_len = int(payload_len)
@@ -1238,6 +1276,7 @@ class RawBlockCore:
                 chunk_offsets.append(offset + cursor)
                 chunk_buffers.append(view[cursor : cursor + chunk_len])
                 chunk_lens.append(chunk_len)
+                chunk_placement_ids.append(placement_id)
                 cursor += chunk_len
 
         if not chunk_offsets:
@@ -1246,6 +1285,7 @@ class RawBlockCore:
             chunk_offsets,
             chunk_buffers,
             chunk_lens,
+            chunk_placement_ids,
         )
         raw_dev.wait_iouring(batch_id)
         keepalive.clear()
@@ -1311,6 +1351,7 @@ class RawBlockCore:
         buffers: Sequence[Any],
         payload_lens: Sequence[int],
         total_lens: Sequence[int],
+        placement_ids: Sequence[PlacementId] | None = None,
     ) -> None:
         """Write one or more buffers through the configured Rust I/O path.
 
@@ -1319,12 +1360,20 @@ class RawBlockCore:
             buffers: Python buffers to write.
             payload_lens: Logical payload lengths for each buffer.
             total_lens: Physical I/O lengths for each buffer.
+            placement_ids: Optional FDP placement identifiers for raw-block writes.
+                ``None`` omits the directive; explicit identifier 0 is rejected.
 
         Raises:
             RuntimeError: If the requested io_uring mode is unavailable.
             Exception: Propagates Rust raw-device write errors.
         """
         raw_dev = self._rawdev()
+        per_write_placement_ids = normalize_raw_block_placement_ids(
+            placement_ids,
+            len(offsets),
+            field_name="placement_ids",
+        )
+
         if self.io_engine != "io_uring":
             for offset, buf, payload_len, total_len in zip(
                 offsets, buffers, payload_lens, total_lens, strict=True
@@ -1338,6 +1387,7 @@ class RawBlockCore:
                 buffers,
                 payload_lens,
                 total_lens,
+                per_write_placement_ids,
             )
             return
 
@@ -1350,14 +1400,22 @@ class RawBlockCore:
                 [int(offset) for offset in offsets],
                 list(buffers),
                 [int(total_len) for total_len in total_lens],
+                per_write_placement_ids,
             )
             raw_dev.wait_iouring(batch_id)
             return
 
-        for offset, buf, payload_len, total_len in zip(
-            offsets, buffers, payload_lens, total_lens, strict=True
+        for offset, buf, payload_len, total_len, placement_id in zip(
+            offsets,
+            buffers,
+            payload_lens,
+            total_lens,
+            per_write_placement_ids,
+            strict=True,
         ):
-            raw_dev.write_uring(int(offset), buf, int(payload_len), int(total_len))
+            raw_dev.write_uring(
+                int(offset), buf, int(payload_len), int(total_len), placement_id
+            )
 
     def _read_buffers(
         self,
@@ -1411,7 +1469,12 @@ class RawBlockCore:
             raw_dev.read_uring(int(offset), buf, int(payload_len), int(total_len))
 
     def _write_one(
-        self, key: RawBlockKeySpec, memory_obj: MemoryObj, offset: int
+        self,
+        key: RawBlockKeySpec,
+        memory_obj: MemoryObj,
+        offset: int,
+        *,
+        placement_id: PlacementId = None,
     ) -> bool:
         """Write one object header and payload into a raw-block slot.
 
@@ -1419,6 +1482,8 @@ class RawBlockCore:
             key: Raw-block key spec with the slot-header identity.
             memory_obj: Source object to write.
             offset: Slot byte offset on the raw device.
+            placement_id: FDP placement identifier for this raw-block write.
+                ``None`` omits the directive; explicit identifier 0 is rejected.
 
         Returns:
             True when both header and payload writes complete; false otherwise.
@@ -1440,6 +1505,8 @@ class RawBlockCore:
                     padded_header = bytearray(header)
                     padded_header.extend(b"\x00" * (hdr_total - len(header)))
                     header_buf = padded_header
+                # Keep each slot header on the same placement identifier as its
+                # payload; future policy can split them if needed.
                 self._write_buffers(
                     [offset, offset + self.header_bytes],
                     [header_buf, buf],
@@ -1448,6 +1515,7 @@ class RawBlockCore:
                         payload_len,
                     ],
                     [hdr_total, total_len],
+                    [placement_id, placement_id],
                 )
             finally:
                 with self._lock:
@@ -1716,11 +1784,13 @@ class RawBlockCore:
             int(crc),
         )
 
+        placement_id = self.meta_checkpoint_placement_id
         self._write_buffers(
             [payload_off, target],
             [payload, header_block],
             [payload_len, self.block_align],
             [payload_total_len, self.block_align],
+            [placement_id, placement_id],
         )
 
         with self._lock:
