@@ -13,7 +13,7 @@ from __future__ import annotations
 
 # Standard
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any
 import array
 
 # Third Party
@@ -27,29 +27,26 @@ from lmcache.v1.gpu_connector.utils import (
     is_mla,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+from lmcache.v1.platform.base._base import PlatformBase
 
 if TYPE_CHECKING:
     # First Party
     import lmcache.c_ops as lmc_ops
 
 
-class BaseCacheContext(ABC):
+class BaseCacheContext(PlatformBase, ABC):
     """Abstract base for GPU and CPU cache contexts.
 
     Subclasses call :meth:`__init__` after computing the common
     layout parameters and before setting up device-specific state.
     All keyword arguments are required so the contract is explicit.
 
-    Concrete subclasses MUST set :attr:`device_type` to the
+    Concrete subclasses MUST set a ``device_type`` ClassVar to the
     ``torch.device.type`` string they handle (``"cuda"``, ``"cpu"``,
     ...). The platform-agnostic :func:`create_cache_context` factory
-    uses this attribute (via the platform registry) to pick the right
+    uses that attribute (via the platform registry) to pick the right
     subclass without any ``isinstance`` / ``if-elif`` chain.
     """
-
-    #: ``torch.device.type`` string the subclass handles. Concrete
-    #: subclasses MUST override this.
-    device_type: ClassVar[str] = ""
 
     def __init__(
         self,

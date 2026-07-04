@@ -22,9 +22,10 @@ import torch
 
 # First Party
 from lmcache import torch_dev
+from lmcache.v1.platform.base._base import PlatformBase
 
 
-class DeviceIPCWrapper:
+class DeviceIPCWrapper(PlatformBase):
     """Base class for KV-cache IPC wrapper.
 
     Holds the device-agnostic mechanism shared by all transports: the
@@ -39,6 +40,10 @@ class DeviceIPCWrapper:
 
     Subclasses implement ``__init__`` (populate the interface fields from a
     tensor) and ``to_tensor`` (reconstruct the tensor from the handle).
+
+    Concrete subclasses MUST set a ``device_type`` ClassVar to the
+    ``torch.device.type`` string they handle (``"cuda"``, ``"cpu"``, ...)
+    so the universal platform registry can discover and index them.
 
     Concrete subclasses set ``_is_default_wrapper = True`` (a ``ClassVar``)
     to mark themselves as the default factory for their ``device_type``;

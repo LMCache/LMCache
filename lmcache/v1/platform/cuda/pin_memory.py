@@ -2,12 +2,13 @@
 """CUDA memory pinning: try torch cudart first, then libcudart via ctypes."""
 
 # Standard
+from typing import ClassVar
 import ctypes
 import ctypes.util
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.platform.base_pin_memory import PinMemoryBackend
+from lmcache.v1.platform.base.pin_memory import PinMemoryBackend
 
 logger = init_logger(__name__)
 
@@ -56,6 +57,9 @@ class CudaPinMemoryBackend(PinMemoryBackend):
         _libcudart: ``ctypes``-loaded CUDA runtime when torch cudart is
             unavailable.
     """
+
+    #: ``torch.device.type`` this backend handles (used by auto-discovery).
+    device_type: ClassVar[str] = "cuda"
 
     def __init__(self) -> None:
         """Initialize the backend with torch-first, libcudart-second fallback.

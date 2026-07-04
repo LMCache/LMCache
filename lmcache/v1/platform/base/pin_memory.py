@@ -1,17 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Platform-abstraction base classes.
+"""Platform-abstraction base class for host-memory pinning.
 
-This module defines abstract base classes for platform-specific capabilities.
-:class:`PinMemoryBackend` is the first; future platform abstractions should
-be added here as well.
+Concrete subclasses live in the device sub-packages (e.g.
+:class:`~lmcache.v1.platform.cuda.pin_memory.CudaPinMemoryBackend`).
+The universal registry discovers them automatically by scanning for
+subclasses that define a ``device_type`` ClassVar.
 """
 
+# First Party
+from lmcache.v1.platform.base._base import PlatformBase
 
-class PinMemoryBackend:
+
+class PinMemoryBackend(PlatformBase):
     """Base class for host-memory pinning per platform.
 
     The default implementation is a no-op that always returns ``False``,
     so platforms that do not support pinning do not need to subclass this.
+
+    Concrete subclasses MUST set a ``device_type`` ClassVar to the
+    ``torch.device.type`` string they handle (``"cuda"``, ...).  The
+    universal platform registry uses that attribute to discover and
+    index them automatically.
     """
 
     def pin_memory(self, ptr: int, size: int, flags: int = 0) -> bool:

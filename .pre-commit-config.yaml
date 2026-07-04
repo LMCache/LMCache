@@ -11,7 +11,7 @@ repos:
     name: Ban direct torch device usage
     entry: >-
       bash -c '
-      matches=$(grep -rHnE "torch\.(cuda|xpu|hpu)" "$@");
+      matches=$(grep -rHnE "torch\.(cuda|xpu|hpu|musa)" "$@");
       if [ -n "$matches" ]; then
         echo "";
         echo "========================================";
@@ -28,6 +28,30 @@ repos:
     exclude: |
       (?x)^(
         lmcache/__init__\.py|
+        lmcache/.*/gpu_connector/.*|
+        lmcache/v1/platform/.*
+      )$
+  - id: ban-cuda-host-register
+    name: Ban cudaHostRegister/Unregister outside platform
+    entry: >-
+      bash -c '
+      matches=$(grep -rHnE "\.cudaHost(Register|Unregister)" "$@");
+      if [ -n "$matches" ]; then
+        echo "";
+        echo "=======================================================================";
+        echo "  BANNED: .cudaHostRegister/Unregister usage found outside platform dir";
+        echo "  Fix 1: They are only allowed in the platform directory";
+        echo "  Fix 2: use torch_dev.ext.pin_memory/unpin_memory instead";
+        echo "=======================================================================";
+        echo "";
+        echo "$matches";
+        exit 1;
+      fi' --
+    language: system
+    types: [python]
+    files: ^lmcache/
+    exclude: |
+      (?x)^(
         lmcache/.*/gpu_connector/.*|
         lmcache/v1/platform/.*
       )$

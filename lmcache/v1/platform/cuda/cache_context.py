@@ -36,7 +36,7 @@ from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     engine_group_layer_indices,
 )
-from lmcache.v1.platform.base_cache_context import BaseCacheContext
+from lmcache.v1.platform.base.cache_context import BaseCacheContext
 
 logger = init_logger(__name__)
 

@@ -21,7 +21,7 @@ import torch
 
 # First Party
 from lmcache.v1.platform import cache_context as cache_context_module
-from lmcache.v1.platform.base_cache_context import BaseCacheContext
+from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.cache_context import create_cache_context
 
 

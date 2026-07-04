@@ -11,16 +11,14 @@ The concrete implementations live in their respective sub-packages:
 :func:`create_cache_context` keeps the dispatch out of the call site
 in :mod:`lmcache.v1.multiprocess.server`. Selection is data-driven:
 each backend sub-package ships its own
-:class:`~lmcache.v1.platform.base_cache_context.BaseCacheContext`
+:class:`~lmcache.v1.platform.base.cache_context.BaseCacheContext`
 subclass under ``platform/<backend>/cache_context.py`` and declares
 the ``torch.device.type`` it handles via the
-:attr:`BaseCacheContext.device_type` ClassVar. The first
-:func:`create_cache_context` call discovers those subclasses with
-:func:`lmcache.v1.utils.subclass_discovery.discover_subclasses` and
-memoises the resulting ``device_type -> class`` map. Adding a new
-accelerator therefore requires *zero* edits to this module -- just
-drop a new ``platform/<backend>/cache_context.py`` whose subclass
-sets ``device_type``.
+:attr:`BaseCacheContext.device_type` ClassVar.  The universal registry
+in :mod:`lmcache.v1.platform._registry` discovers those subclasses on
+first use.  Adding a new accelerator therefore requires *zero* edits to
+this module -- just drop a new ``platform/<backend>/cache_context.py``
+whose subclass sets ``device_type``.
 """
 
 # Future
@@ -35,8 +33,8 @@ from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import KVCache
-from lmcache.v1.platform.base_cache_context import BaseCacheContext
-from lmcache.v1.utils.subclass_discovery import discover_subclasses
+from lmcache.v1.platform._registry import get_all_impls
+from lmcache.v1.platform.base.cache_context import BaseCacheContext
 
 if TYPE_CHECKING:
     # First Party
@@ -45,10 +43,9 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 # ``device_type -> BaseCacheContext`` subclass.  Populated lazily on
-# the first :func:`create_cache_context` call by scanning the
-# ``platform`` package for ``cache_context`` leaf modules at depth 2
-# (i.e. ``platform/<backend>/cache_context.py``).  Tests substitute
-# entries via :func:`snapshot_backends` / :func:`restore_backends`.
+# the first :func:`create_cache_context` call via the universal registry.
+# Tests substitute entries via :func:`snapshot_backends` /
+# :func:`restore_backends`.
 #
 # The value type is the loose ``type`` (rather than
 # ``type[BaseCacheContext]``) so callers can instantiate it with the
@@ -61,46 +58,16 @@ _BACKENDS_DISCOVERED: bool = False
 def _discover_backends_once() -> None:
     """Populate :data:`_BACKENDS` on first use.
 
-    Walks ``lmcache.v1.platform`` two levels deep (``platform`` ->
-    ``<backend>`` -> ``cache_context``) and indexes every concrete
-    :class:`BaseCacheContext` subclass by its ``device_type``
-    ClassVar.  Subclasses with an empty ``device_type`` are skipped
-    with a warning so a missing override surfaces loudly instead of
-    silently shadowing a real backend.
+    Delegates to the universal registry in
+    :mod:`lmcache.v1.platform._registry` to discover all concrete
+    :class:`BaseCacheContext` subclasses indexed by their ``device_type``
+    ClassVar.
     """
     global _BACKENDS_DISCOVERED
     if _BACKENDS_DISCOVERED:
         return
 
-    # First Party
-    import lmcache.v1.platform as platform_pkg
-
-    for cls in discover_subclasses(
-        platform_pkg,
-        BaseCacheContext,  # type: ignore[type-abstract]
-        module_filter=lambda short_name: short_name == "cache_context",
-        levels=[2, 2],
-    ):
-        device_type = getattr(cls, "device_type", "")
-        if not device_type:
-            logger.warning(
-                "Skipping %s: empty device_type ClassVar; concrete "
-                "BaseCacheContext subclasses must override it.",
-                cls.__name__,
-            )
-            continue
-        existing = _BACKENDS.get(device_type)
-        if existing is not None and existing is not cls:
-            logger.warning(
-                "Multiple cache-context classes claim device_type=%r "
-                "(%s vs %s); keeping the first.",
-                device_type,
-                existing.__name__,
-                cls.__name__,
-            )
-            continue
-        _BACKENDS[device_type] = cls
-
+    _BACKENDS.update(get_all_impls(BaseCacheContext))
     _BACKENDS_DISCOVERED = True
 
 

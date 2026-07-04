@@ -230,21 +230,28 @@ def test_wrap_kv_caches_wraps_all_tensors() -> None:
     # First Party
     from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod
     from lmcache.v1.platform import _registry as platform_registry
+    from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
     kv_caches = _make_kv_caches()
+
     # ``wrap_kv_caches`` dispatches through ``platform_registry``: each
-    # accelerator self-registers a wrapper factory keyed by
-    # ``tensor.device.type``. Override the relevant entries through the
-    # registry's documented API (snapshot + register + restore on
-    # teardown) instead of poking the adapter's private helper.
+    # accelerator self-registers a ``DeviceIPCWrapper`` subclass keyed by
+    # its ``device_type`` ClassVar. Install a fake wrapper subclass for the
+    # relevant device types via the registry snapshot/restore API so the
+    # fake does not leak into other tests.
+    class _FakeWrapper(DeviceIPCWrapper):
+        @staticmethod
+        def wrap(tensor: Any) -> tuple[str, Any]:
+            return ("wrapped", tensor)
+
     saved = platform_registry.snapshot()
-
-    def _fake_factory(tensor: Any) -> tuple[str, Any]:
-        return ("wrapped", tensor)
-
     try:
+        state = platform_registry.snapshot()
         for device_type in {t.device.type for t in kv_caches.values()}:
-            platform_registry.register_kv_wrapper(device_type, _fake_factory)
+            state["registry"].setdefault(DeviceIPCWrapper, {})[device_type] = (
+                _FakeWrapper
+            )
+        platform_registry.restore(state)
         wrapped = adapter_mod.wrap_kv_caches(kv_caches)
     finally:
         platform_registry.restore(saved)
@@ -386,7 +393,7 @@ def test_create_transfer_context_handle_mode_unsupported_device_raises(
         # immediately re-register the auto-discovered backends and
         # defeat the empty-table fixture.
         platform_registry.restore(
-            {"kv_wrapper": {}, "availability": {}, "discovered": True}
+            {"registry": {}, "availability": {}, "discovered": True}
         )
         with pytest.raises(ValueError, match="not supported for device type"):
             create_transfer_context(

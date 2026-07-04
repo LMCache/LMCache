@@ -8,36 +8,27 @@ torch device module.
 """
 
 # First Party
-from lmcache.v1.platform.base_pin_memory import PinMemoryBackend
+from lmcache.v1.platform._registry import get_impl
+from lmcache.v1.platform.base.pin_memory import PinMemoryBackend
 
-_PIN_MEMORY_BACKENDS: dict[str, type[PinMemoryBackend]] = {}
 
+def _get_pin_memory_backend(device_type: str) -> type[PinMemoryBackend]:
+    """Resolve the pin-memory backend class for *device_type*.
 
-def register_pin_memory_backend(device_type: str, cls: type[PinMemoryBackend]) -> None:
-    """Register a pin-memory backend implementation for a device type.
+    Looks up a concrete backend in the universal registry and falls back
+    to the no-op base class.
 
     Args:
-        device_type: The device type string (for example, ``"cuda"``).
-        cls: A :class:`PinMemoryBackend` subclass (or the base class
-            itself) to instantiate for ``device_type``.
+        device_type: The ``torch.device.type`` string.
 
-    Notes:
-        Re-registering the same ``device_type`` overwrites the previous
-        backend class. Registration is expected to happen during module
-        import, so this helper does not add extra synchronization for
-        concurrent writes. Existing :class:`DeviceExt` instances keep the
-        backend object they already created; later registrations affect
-        only newly constructed instances.
-
-    Raises:
-        TypeError: If ``cls`` is not a :class:`PinMemoryBackend`
-            subclass.
+    Returns:
+        A :class:`PinMemoryBackend` subclass (or the base class itself as
+        a no-op fallback).
     """
-    if not isinstance(cls, type) or not issubclass(cls, PinMemoryBackend):
-        raise TypeError(
-            "register_pin_memory_backend expects a PinMemoryBackend subclass"
-        )
-    _PIN_MEMORY_BACKENDS[device_type] = cls
+    try:
+        return get_impl(PinMemoryBackend, device_type)  # type: ignore[return-value]
+    except ValueError:
+        return PinMemoryBackend
 
 
 class DeviceExt:
@@ -57,7 +48,7 @@ class DeviceExt:
     """
 
     def __init__(self, device_type: str) -> None:
-        backend_cls = _PIN_MEMORY_BACKENDS.get(device_type, PinMemoryBackend)
+        backend_cls = _get_pin_memory_backend(device_type)
         self._pin: PinMemoryBackend = backend_cls()
 
     def pin_memory(self, ptr: int, size: int, flags: int = 0) -> bool:
