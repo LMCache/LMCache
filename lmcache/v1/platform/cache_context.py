@@ -67,7 +67,7 @@ def _discover_backends_once() -> None:
     if _BACKENDS_DISCOVERED:
         return
 
-    _BACKENDS.update(get_all_impls(BaseCacheContext))
+    _BACKENDS.update(get_all_impls(BaseCacheContext))  # type: ignore[type-abstract]
     _BACKENDS_DISCOVERED = True
 
 

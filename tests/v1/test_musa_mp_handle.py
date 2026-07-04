@@ -200,10 +200,17 @@ def test_create_transfer_context_musa_handle_allowed_when_available(
         create_transfer_context,
     )
     from lmcache.v1.platform import _registry as platform_registry
+    import lmcache.v1.platform.musa as musa_platform
 
     snapshot = platform_registry.snapshot()
     try:
-        platform_registry.register_kv_wrapper("musa", lambda tensor: tensor)
+        # reset_for_tests() clears wrapper registrations, so reload is needed
+        # to re-run lmcache.v1.platform.musa import-time auto-registration.
+        platform_registry.reset_for_tests()
+        importlib.reload(musa_platform)
+        musa_factory = platform_registry.get_kv_wrapper_factory("musa")
+        if not callable(musa_factory):
+            pytest.fail("MUSA KV wrapper factory was not auto-registered")
         platform_registry.register_availability("musa", lambda: True)
 
         context = create_transfer_context(
