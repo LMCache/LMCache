@@ -20,12 +20,6 @@ import array
 import torch
 
 # First Party
-from lmcache.v1.gpu_connector.utils import (
-    get_attention_backend,
-    get_concrete_engine_kv_shape_from_shape_desc,
-    get_engine_kv_shape_description,
-    is_mla,
-)
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.platform.base._base import PlatformBase
 
@@ -274,6 +268,11 @@ class BaseCacheContext(PlatformBase, ABC):
     @property
     def concrete_engine_kv_shape(self) -> str:
         """Returns the engine KV shape with actual numeric values."""
+        # First Party
+        from lmcache.v1.gpu_connector.utils import (
+            get_concrete_engine_kv_shape_from_shape_desc,
+        )
+
         group = self.kv_layer_groups_manager.kv_layer_groups[0]
         return get_concrete_engine_kv_shape_from_shape_desc(
             group.shape_desc, group.engine_kv_format
@@ -302,6 +301,14 @@ class BaseCacheContext(PlatformBase, ABC):
         Override this in subclasses to inject extra per-group fields
         without duplicating the whole :meth:`report_status` method.
         """
+        # First Party
+        from lmcache.v1.gpu_connector.utils import (
+            get_attention_backend,
+            get_concrete_engine_kv_shape_from_shape_desc,
+            get_engine_kv_shape_description,
+            is_mla,
+        )
+
         engine_kv_format = self.get_engine_kv_format(kernel_group_idx)
         return {
             "kernel_group_idx": kernel_group_idx,
