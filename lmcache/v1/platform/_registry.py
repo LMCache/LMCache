@@ -49,6 +49,8 @@ _AVAILABILITY: Dict[str, Callable[[], bool]] = {}
 _DISCOVERED: bool = False
 _DISCOVERY_LOCK = threading.Lock()
 
+T = TypeVar("T")
+
 
 def _collect_base_classes() -> list[type]:
     """Scan ``platform/base/`` and collect marker-declared base classes.
@@ -164,7 +166,7 @@ def _discover_all_once() -> None:
         _DISCOVERED = True
 
 
-def get_impl(base_class: type, device_type: str) -> type:
+def get_impl(base_class: type[T], device_type: str) -> type[T]:
     """Get the concrete implementation of *base_class* for *device_type*.
 
     This is the primary lookup API.  Example::
