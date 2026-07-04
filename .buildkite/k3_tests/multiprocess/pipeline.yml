@@ -209,14 +209,20 @@ steps:
         command: bash .github/scripts/run-cpu-e2e-validation.sh
         matrix:
           setup:
-            mode: ["shm", "pickle", "server-side copy"]
+            mode:
+              - "shm"
+              - "pickle"
+              - "server_copy"
           adjustments:
-            - with: { mode: "shm" }
+            - with:
+                mode: "shm"
               # shm: rely on script defaults (engine-driven + shm transport)
-            - with: { mode: "pickle" }
+            - with:
+                mode: "pickle"
               env:
                 LMCACHE_SHM_NAME: ""
-            - with: { mode: "server-side copy" }
+            - with:
+                mode: "server_copy"
               env:
                 LMCACHE_MP_TRANSFER_MODE: "lmcache_driven"
         timeout_in_minutes: 30
