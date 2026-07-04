@@ -524,6 +524,33 @@ fn fetch_fdp_status(fd: RawFd, nsid: u32) -> Result<Vec<(u16, u16)>, PyErr> {
     Ok(status)
 }
 
+fn placement_id_to_u16(pid: i32) -> PyResult<u16> {
+    if pid == 0 {
+        return Err(PyValueError::new_err(
+            "placement_id must not be 0; use None to omit the FDP directive",
+        ));
+    }
+    u16::try_from(pid).map_err(|_| PyValueError::new_err("placement_id must be in range 1..=65535"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn placement_id_to_u16_accepts_valid_bounds() {
+        assert_eq!(placement_id_to_u16(1).unwrap(), 1);
+        assert_eq!(placement_id_to_u16(65535).unwrap(), 65535);
+    }
+
+    #[test]
+    fn placement_id_to_u16_rejects_reserved_and_out_of_range_values() {
+        assert!(placement_id_to_u16(0).is_err());
+        assert!(placement_id_to_u16(-1).is_err());
+        assert!(placement_id_to_u16(65536).is_err());
+    }
+}
+
 /// Prepare NVMe uring command for read/write operations
 #[allow(clippy::too_many_arguments)]
 fn nvme_uring_cmd_prep(
@@ -2083,13 +2110,14 @@ impl RawBlockDevice {
     ///
     /// Returns a batch_id that must be passed to wait_iouring() to wait
     /// for completions for that batch.
-    #[pyo3(signature = (offsets, buffers, total_lens))]
+    #[pyo3(signature = (offsets, buffers, total_lens, placement_ids = None))]
     fn batched_write(
         &self,
         py: Python<'_>,
         offsets: Vec<u64>,
         buffers: Vec<Bound<'_, PyAny>>,
         total_lens: Vec<usize>,
+        placement_ids: Option<Vec<Option<i32>>>,
     ) -> PyResult<u64> {
         if !self.use_iouring {
             return Err(PyRuntimeError::new_err("io_uring not enabled"));
@@ -2106,6 +2134,18 @@ impl RawBlockDevice {
         if buffers.len() != n || total_lens.len() != n {
             return Err(PyValueError::new_err("All vectors must have same length"));
         }
+        let placement_ids = if let Some(pids) = placement_ids {
+            if pids.len() != n {
+                return Err(PyValueError::new_err(
+                    "placement_ids must have same length as offsets",
+                ));
+            }
+            pids.into_iter()
+                .map(|pid| pid.map(placement_id_to_u16).transpose())
+                .collect::<PyResult<Vec<_>>>()?
+        } else {
+            vec![None; n]
+        };
 
         // Acquire buffer views to keep them alive until wait_iouring() completes
         let mut views = Vec::with_capacity(n);
@@ -2235,12 +2275,17 @@ impl RawBlockDevice {
                 };
 
                 // Build NVMe command data
+                let placement_id_u16 = placement_ids[i];
+
+                // None means no directive. Some(pid) sets the FDP directive.
+                // Placement identifier 0 is reserved for default writes and is
+                // rejected by placement_id_to_u16().
                 let nvme_cmd_data = if let Some((nsid, lba_shift)) = nvme_cmd_data_base {
                     Some(NvmeCmdData {
                         nsid,
                         lba_shift,
-                        dtype: 0,
-                        dspec: 0,
+                        dtype: if placement_id_u16.is_some() { 0x2 } else { 0x0 },
+                        dspec: placement_id_u16.unwrap_or(0),
                     })
                 } else {
                     None
@@ -2541,7 +2586,7 @@ impl RawBlockDevice {
     }
 
     /// Synchronous write using io_uring.
-    #[pyo3(signature = (offset, data, payload_len, total_len = None))]
+    #[pyo3(signature = (offset, data, payload_len, total_len = None, placement_id = None))]
     fn write_uring(
         &self,
         py: Python<'_>,
@@ -2549,6 +2594,7 @@ impl RawBlockDevice {
         data: &Bound<'_, PyAny>,
         payload_len: usize,
         total_len: Option<usize>,
+        placement_id: Option<i32>,
     ) -> PyResult<()> {
         if !self.use_iouring {
             return Err(PyRuntimeError::new_err("io_uring not enabled"));
@@ -2608,6 +2654,8 @@ impl RawBlockDevice {
             None
         };
 
+        let placement_id_u16 = placement_id.map(placement_id_to_u16).transpose()?;
+
         // Use bounce buffer if:
         // Buffer is not aligned (O_DIRECT requirement)
         // Buffer capacity is less than total_len
@@ -2628,7 +2676,10 @@ impl RawBlockDevice {
                 original_ptr: None,
                 payload_len: None,
                 batch_id: 0,
-                nvme_cmd_data: self._build_nvme_cmd_data(0, 0)?,
+                nvme_cmd_data: self._build_nvme_cmd_data(
+                    if placement_id_u16.is_some() { 0x2 } else { 0x0 },
+                    placement_id_u16.unwrap_or(0),
+                )?,
             };
             {
                 let q = self.queue.as_ref().expect("queue must exist");
@@ -2661,7 +2712,10 @@ impl RawBlockDevice {
                 original_ptr: None,
                 payload_len: Some(payload_len),
                 batch_id: 0,
-                nvme_cmd_data: self._build_nvme_cmd_data(0, 0)?,
+                nvme_cmd_data: self._build_nvme_cmd_data(
+                    if placement_id_u16.is_some() { 0x2 } else { 0x0 },
+                    placement_id_u16.unwrap_or(0),
+                )?,
             };
             {
                 let q = self.queue.as_ref().expect("queue must exist");
