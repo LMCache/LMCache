@@ -43,6 +43,17 @@ _DEFAULT_META_VERSION = 1
 _META_HEADER_STRUCT = struct.Struct("<8sIQQI")
 RAW_BLOCK_IO_ENGINES = frozenset({"posix", "io_uring"})
 DEFAULT_IOURING_QUEUE_DEPTH = 256
+_MAX_FDP_PLACEMENT_ID = 0xFFFF
+
+# FDP placement ID semantics are shared by design across raw-block write paths.
+# None omits the directive. Explicit handles must be positive because default
+# writes already use the RUH mapping associated with Placement Handle 0.
+# RawBlockCore rejects explicit handle 0 so KV data never sends an FDP directive
+# for the default placement handle. Non-zero handles are encoded as 16-bit
+# NVMe directive-specific values.
+# Metadata checkpoints are not KV cache data and follow a small periodic/recovery
+# write pattern, so they use default NVMe writes.
+PlacementId = int | None
 
 
 def round_up(x: int, align: int) -> int:
@@ -88,6 +99,42 @@ def normalize_raw_block_io_engine(
     if normalized not in RAW_BLOCK_IO_ENGINES:
         allowed = ", ".join(sorted(RAW_BLOCK_IO_ENGINES))
         raise ValueError(f"io_engine must be one of: {allowed}")
+    return normalized
+
+
+def normalize_raw_block_placement_ids(
+    placement_ids: Sequence[PlacementId] | None,
+    expected_len: int,
+    *,
+    field_name: str = "placement_ids",
+    allow_none: bool = True,
+) -> list[PlacementId]:
+    """Validate FDP placement handles and preserve omitted directives."""
+    if placement_ids is None:
+        return [None] * expected_len
+    if len(placement_ids) != expected_len:
+        raise ValueError(f"{field_name} must have length {expected_len}")
+
+    normalized: list[PlacementId] = []
+    for placement_id in placement_ids:
+        if placement_id is None:
+            if not allow_none:
+                raise ValueError(f"{field_name} must contain integers")
+            normalized.append(None)
+            continue
+        if not isinstance(placement_id, int) or isinstance(placement_id, bool):
+            raise ValueError(f"{field_name} must contain integers or None")
+        if placement_id == 0:
+            raise ValueError(f"{field_name} must not contain placement handle 0")
+        if placement_id < 0:
+            raise ValueError(f"{field_name} must contain positive integers or None")
+        if placement_id > _MAX_FDP_PLACEMENT_ID:
+            raise ValueError(
+                f"{field_name} must contain placement identifiers in range "
+                f"1..={_MAX_FDP_PLACEMENT_ID}"
+                f"{' or None' if allow_none else ''}"
+            )
+        normalized.append(int(placement_id))
     return normalized
 
 
@@ -437,6 +484,20 @@ class RawBlockCore:
             Exception: Propagates raw-device open errors from the Rust binding.
         """
         return self._rawdev()
+
+    def fetch_fdp_status(self) -> list[tuple[int, int]]:
+        """Fetch NVMe FDP placement/RUH status from the raw device.
+
+        Returns:
+            List of ``(placement_id, ruh_id)`` tuples.
+
+        Raises:
+            RuntimeError: If the raw device binding or target device cannot
+                provide FDP status.
+        """
+        return [
+            (int(pid), int(ruhid)) for pid, ruhid in self._rawdev().fetch_fdp_status()
+        ]
 
     def set_raw_device_for_testing(self, raw_device: Any) -> None:
         """Replace the raw device handle used by this core.

@@ -7,7 +7,11 @@ from __future__ import annotations
 import pytest
 
 # First Party
-from lmcache.v1.storage_backend.raw_block import RawBlockCore, encode_object_key
+from lmcache.v1.storage_backend.raw_block import (
+    RawBlockCore,
+    encode_object_key,
+    normalize_raw_block_placement_ids,
+)
 from tests.v1.storage_backend.raw_block_test_utils import (
     make_empty_memory_obj,
     make_memory_obj,
@@ -18,6 +22,13 @@ from tests.v1.storage_backend.raw_block_test_utils import (
 )
 
 pytest.importorskip("lmcache_rust_raw_block_io")
+
+
+def test_normalize_raw_block_placement_ids_rejects_out_of_range() -> None:
+    assert normalize_raw_block_placement_ids([65535], 1) == [65535]
+
+    with pytest.raises(ValueError, match="range 1..=65535"):
+        normalize_raw_block_placement_ids([65536], 1)
 
 
 def test_raw_block_core_store_load_and_exists(tmp_path):
