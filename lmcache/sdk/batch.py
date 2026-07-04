@@ -209,21 +209,10 @@ class LMCacheBatchedStream:
 
         input_tokens = 0
         output_tokens = 0
-        ttft_list: list[float] = []
-        tpot_list: list[float] = []
-        decode_speed: list[float] = []
         for stream_id, perf_metrics in self.perf_metrics.items():
             if stream_id in stream_ids:
                 input_tokens += perf_metrics.input_tokens
                 output_tokens += perf_metrics.output_tokens
-                ttft_list.append(perf_metrics.ttft)
-                tpot_list.extend(perf_metrics.tpot)
-                duration_excl_ttft = perf_metrics.duration - perf_metrics.ttft
-                decode_speed.append(
-                    perf_metrics.output_tokens / (duration_excl_ttft)
-                    if perf_metrics.duration > 0 and duration_excl_ttft > 0
-                    else 0.0
-                )
 
         if mode == "prefill":
             result_section.add("input_tokens", "Total Input Tokens", input_tokens)
@@ -233,90 +222,12 @@ class LMCacheBatchedStream:
                 input_tokens / duration if duration > 0 else 0.0,
             )
 
-            ttft = metrics.add_section("ttft", "Time to First Token (TTFT)")
-            ttft.add(
-                "mean",
-                "Mean TTFT (ms)",
-                sum(ttft_list) / len(ttft_list) * 1000 if ttft_list else 0.0,
-            )
-            ttft.add(
-                "p50",
-                "P50 TTFT (ms)",
-                sorted(ttft_list)[len(ttft_list) // 2] * 1000 if ttft_list else 0.0,
-            )
-            ttft.add(
-                "p90",
-                "P90 TTFT (ms)",
-                sorted(ttft_list)[int(len(ttft_list) * 0.9)] * 1000
-                if ttft_list
-                else 0.0,
-            )
-            ttft.add(
-                "p99",
-                "P99 TTFT (ms)",
-                sorted(ttft_list)[int(len(ttft_list) * 0.99)] * 1000
-                if ttft_list
-                else 0.0,
-            )
-
         if mode == "decode":
             result_section.add("output_tokens", "Total Output Tokens", output_tokens)
             result_section.add(
                 "output_tput",
-                "Output Throughput (tokens/s)",
+                "Decode Throughput (tokens/s)",
                 output_tokens / duration if duration > 0 else 0.0,
-            )
-
-            tpot = metrics.add_section("tpot", "Time per Token (TPOT)")
-            tpot.add(
-                "mean",
-                "Mean TPOT (ms)",
-                sum(tpot_list) / len(tpot_list) * 1000 if tpot_list else 0.0,
-            )
-            tpot.add(
-                "p50",
-                "P50 TPOT (ms)",
-                sorted(tpot_list)[len(tpot_list) // 2] * 1000 if tpot_list else 0.0,
-            )
-            tpot.add(
-                "p90",
-                "P90 TPOT (ms)",
-                sorted(tpot_list)[int(len(tpot_list) * 0.9)] * 1000
-                if tpot_list
-                else 0.0,
-            )
-            tpot.add(
-                "p99",
-                "P99 TPOT (ms)",
-                sorted(tpot_list)[int(len(tpot_list) * 0.99)] * 1000
-                if tpot_list
-                else 0.0,
-            )
-
-            decode = metrics.add_section("decode", "Decoding Speed")
-            decode.add(
-                "mean",
-                "Mean Decoding Speed (tokens/s)",
-                sum(decode_speed) / len(decode_speed) if decode_speed else 0.0,
-            )
-            decode.add(
-                "p50",
-                "P50 Decoding Speed (tokens/s)",
-                sorted(decode_speed)[len(decode_speed) // 2] if decode_speed else 0.0,
-            )
-            decode.add(
-                "p90",
-                "P90 Decoding Speed (tokens/s)",
-                sorted(decode_speed)[int(len(decode_speed) * 0.9)]
-                if decode_speed
-                else 0.0,
-            )
-            decode.add(
-                "p99",
-                "P99 Decoding Speed (tokens/s)",
-                sorted(decode_speed)[int(len(decode_speed) * 0.99)]
-                if decode_speed
-                else 0.0,
             )
 
         return metrics
