@@ -136,3 +136,7 @@ msgid ""
 "practices."
 msgstr "有关全面的测试和配置选项，请参阅 :ref:`testing_internal_api_server` 以获取详细示例和最佳实践。"
 
+
+#: ../../source/production/observability/internal_api_server.rst:1
+msgid "This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance."
+msgstr "本页面介绍 LMCache 进程内模式（不推荐使用）的行为。建议改用 :doc:`LMCache MP 模式 </mp/index>`\\ 以获得更好的功能支持与性能。"
