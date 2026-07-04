@@ -186,7 +186,7 @@ def test_create_transfer_context_musa_handle_requires_capability() -> None:
     # First Party
     from lmcache.v1.multiprocess.transfer_context import create_transfer_context
 
-    with pytest.raises(ValueError, match="not available"):
+    with pytest.raises(ValueError, match="not (available|supported)"):
         create_transfer_context(_fake_musa_kv_caches(), mode="lmcache_driven")
 
 

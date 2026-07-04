@@ -20,11 +20,11 @@ import array
 import torch
 
 # First Party
-from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.platform.base._base import PlatformBase
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
     import lmcache.c_ops as lmc_ops
 
 
