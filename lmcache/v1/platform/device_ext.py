@@ -26,7 +26,7 @@ def _get_pin_memory_backend(device_type: str) -> type[PinMemoryBackend]:
         a no-op fallback).
     """
     try:
-        return get_impl(PinMemoryBackend, device_type)  # type: ignore[return-value]
+        return get_impl(PinMemoryBackend, device_type)
     except ValueError:
         return PinMemoryBackend
 
