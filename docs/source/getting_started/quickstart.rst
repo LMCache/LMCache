@@ -230,9 +230,9 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
 
       .. note::
          The SGLang integration now defaults to MP (multi-process) mode.
-         Please refer to `examples/sgl_integration/README.md
-         <https://github.com/LMCache/LMCache/blob/dev/examples/sgl_integration/README.md>`_
-         for the current setup instructions.
+         Please refer to `examples/sgl_integration/README.md`_ for the current setup instructions.
+
+      .. _examples/sgl_integration/README.md: https://github.com/LMCache/LMCache/blob/dev/examples/sgl_integration/README.md
 
       **Install SGLang**
 
