@@ -3,9 +3,10 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      lmcache/__init__.py                        │
+│               lmcache/v1/platform/__init__.py                   │
 │                                                                 │
 │  torch_dev, torch_device_type = _detect_device()                │
+│  (re-exported from lmcache/__init__.py as `lmcache.torch_dev`)  │
 │                                                                 │
 │  ┌───────────┐     ┌───────────┐     ┌───────────┐              │
 │  │ torch.cuda│     │ torch.xpu │     │ torch.hpu │  ...         │
@@ -13,11 +14,18 @@
 │        └──────────────────┴──────────────────┘                  │
 │                           │                                     │
 │                     torch_dev (unified entry)                   │
-│                  torch_device_type ("cuda"/"xpu"/"hpu"/"cpu")   │
+│              torch_device_type ("cuda"/"musa"/"xpu"/            │
+│                                 "hpu"/"cpu")                    │
 │                                                                 │
-│  [Monkey Patch Point]                                           │
-│  New hardware can be added by extending _detect_device()        │
-│  and providing a gpu_connector implementation.                  │
+│  [Registry-driven]                                              │
+│  Backends are discovered by scanning `lmcache.v1.platform`      │
+│  for `DeviceInfo` subclasses (see `base_device_info.py`).       │
+│  Adding a new hardware requires:                                │
+│    - a `DeviceInfo` subclass in a `platform/<backend>/`         │
+│      sub-package `__init__.py`,                                 │
+│    - a gpu_connector implementation.                            │
+│  The `DEVICE_TYPE` env var forces the detector to prefer        │
+│  one registered device_type when multiple are available.        │
 └──────────────────────────────┬──────────────────────────────────┘
                                │
               ┌────────────────┼──────────────────┐
@@ -82,7 +90,7 @@
 
 | Layer | Device Reference | Notes |
 |-------|-----------------|-------|
-| **Entry** `__init__.py` | `_detect_device()` -> `torch_dev` | Monkey patch point. Detect once, reuse globally. |
+| **Entry** `lmcache/v1/platform/__init__.py` | `_detect_device()` -> `torch_dev` (re-exported from `lmcache/__init__.py`) | Registry-driven detection over `DeviceInfo` subclasses. Detect once, reuse globally. |
 | **Middle** engine / storage / multiprocess | `from lmcache import torch_dev` | Hardware-agnostic unified code |
 | **Middle** CUDA-only APIs | `hasattr(torch_dev, 'xxx')` guard | Graceful runtime degradation |
 | **Bottom** GPU Connector | Direct `torch.cuda` / `torch.xpu` / `torch.hpu` | Per-hardware impl, no abstraction |
@@ -98,8 +106,9 @@ torch_device_type == "cpu"   -->  (no GPU connector; raises RuntimeError)
 
 ## CPU-Only Stub Fallback
 
-`_detect_device()` also accepts a CPU-only environment where none of the
-supported accelerators (CUDA, XPU, HPU) is available. In that case
+`_detect_device()` (defined in `lmcache/v1/platform/__init__.py`) also
+accepts a CPU-only environment where none of the supported accelerators
+(CUDA, MUSA, XPU, HPU) is available. In that case
 `torch_device_type` is `"cpu"` and `torch_dev` is either:
 
 - `lmcache.v1.platform.cpu.stub_cpu_device.StubCPUDevice` — when `torch`
@@ -129,8 +138,21 @@ which is wrong for that backend's actual KV cache layout.
 
 ## Adding New Hardware
 
-1. Add detection branch in `__init__.py` `_detect_device()`
+1. Create a `lmcache/v1/platform/<backend>/` sub-package and define a
+   concrete `DeviceInfo` subclass in its `__init__.py`. Fill in the
+   abstract properties (`device_type`, `torch_module_name`,
+   `ops_module`) and `is_available()`; optionally override
+   `pin_memory_backend` and `is_handle_transfer_available`. The
+   sub-package is picked up automatically by `discover_subclasses` in
+   `lmcache.v1.platform` -- no manual registration is required. See the
+   existing `platform/cuda/`, `platform/musa/`, `platform/xpu/`,
+   `platform/hpu/` entries for reference. Optionally: users can set
+   `DEVICE_TYPE=<device_type>` at runtime to force selection when
+   multiple registered devices are available.
 2. Create `gpu_connector/xxx_connectors.py`, implement `GPUConnectorInterface`
 3. Add routing branch in `gpu_connector/__init__.py`
-4. Add kernels in `c_ops/` or fallback in `python_ops_fallback.py`
+4. Add kernels in `c_ops/` or fallback in `python_ops_fallback.py`; if
+   the new backend ships its own compiled ops, point the `DeviceInfo`
+   subclass' `ops_module` at the correct fully-qualified module path so
+   `get_backend()` merges it on top of `python_ops_fallback`.
 5. No changes needed in middle layer code
