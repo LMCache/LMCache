@@ -323,6 +323,7 @@ class DaxL2Adapter(L2AdapterInterface):
         self._store_executor: Optional[ThreadPoolExecutor] = None
         self._lookup_executor: Optional[ThreadPoolExecutor] = None
         self._load_executor: Optional[ThreadPoolExecutor] = None
+        self._copy_executor: Optional[ThreadPoolExecutor] = None
 
         self._next_task_id: L2TaskId = 0
         self._completed_store_tasks: dict[L2TaskId, L2StoreResult] = {}
@@ -354,6 +355,10 @@ class DaxL2Adapter(L2AdapterInterface):
             self._load_executor = ThreadPoolExecutor(
                 max_workers=config.num_load_workers,
                 thread_name_prefix="dax-l2-load",
+            )
+            self._copy_executor = ThreadPoolExecutor(
+                max_workers=8,
+                thread_name_prefix="dax-l2-copy",
             )
         except Exception:
             self.close()
@@ -604,9 +609,11 @@ class DaxL2Adapter(L2AdapterInterface):
             store_executor = self._store_executor
             lookup_executor = self._lookup_executor
             load_executor = self._load_executor
+            copy_executor = self._copy_executor
             self._store_executor = None
             self._lookup_executor = None
             self._load_executor = None
+            self._copy_executor = None
 
         if store_executor is not None:
             store_executor.shutdown(wait=True)
@@ -614,6 +621,8 @@ class DaxL2Adapter(L2AdapterInterface):
             lookup_executor.shutdown(wait=True)
         if load_executor is not None:
             load_executor.shutdown(wait=True)
+        if copy_executor is not None:
+            copy_executor.shutdown(wait=True)
 
         with self._device_lock:
             entries = list(self._devices)
@@ -1143,7 +1152,7 @@ class DaxL2Adapter(L2AdapterInterface):
                     entry = self._find_device_for_key_locked(key, lock=False)
                     if entry is None:
                         continue
-                    groups.setdefault(id(entry), (entry, []))[1].append(i)
+                    groups.setdefault(entry.device_id, (entry, []))[1].append(i)
 
             sub_batches: list[tuple[DaxDeviceEntry, list[int]]] = []
             _SUB = 8  # chunks per copy task (~0.5 GiB at 64 MiB chunks)
@@ -1157,13 +1166,17 @@ class DaxL2Adapter(L2AdapterInterface):
                 entry, idxs = batch
                 gkeys = [keys[i] for i in idxs]
                 gobjs = [objects[i] for i in idxs]
-                return idxs, entry.core.load_many_into(gkeys, gobjs)
+                try:
+                    return idxs, entry.core.load_many_into(gkeys, gobjs)
+                except Exception:
+                    logger.exception("Sub-batch DAX load failed")
+                    return idxs, [False] * len(idxs)
 
-            if len(sub_batches) <= 1:
+            copy_pool = self._copy_executor
+            if len(sub_batches) <= 1 or copy_pool is None:
                 results = [_load_sub(b) for b in sub_batches]
             else:
-                with ThreadPoolExecutor(max_workers=min(len(sub_batches), 8)) as _pool:
-                    results = list(_pool.map(_load_sub, sub_batches))
+                results = list(copy_pool.map(_load_sub, sub_batches))
 
             for idxs, flags in results:
                 for i, ok in zip(idxs, flags, strict=True):
