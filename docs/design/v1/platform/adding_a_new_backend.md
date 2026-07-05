@@ -300,7 +300,7 @@ dispatch scaffold in place from the start makes the Phase-2 upgrade a drop-in.
 After these three steps, the engine-driven path (pickle and SHM) runs
 end-to-end on the new device using the Python fallback for KV transfer.
 
-## 5. Optional: Native KV-Transfer Acceleration
+## 5. Native KV-Transfer Acceleration
 
 The Python fallback copies the full KV between host and device on the worker
 side, which becomes a throughput bottleneck for long prompts. It is a safe
