@@ -77,7 +77,7 @@ Notes:
   lookup locks are returned, and the hit is reported if no earlier step did.
   The result is the retained bitmap: every key in it is pinned for the
   retriever. This works because lock state is *tracked on the request*
-  (``l2_locked``, ``l1_pinned_keys``, ``write_reserved_keys``,
+  (``l2_adapter2readlocks``, ``l1_readlocks``, ``write_reserved_keys``,
   ``hit_reported``) and releases subtract from it, so reconciliation is
   idempotent from any intermediate state.
 - **WARM mode**: the pin pass only peeks (existence hint, no locks — WARM
