@@ -1133,15 +1133,43 @@ class DaxL2Adapter(L2AdapterInterface):
         loaded_keys: list[ObjectKey] = []
 
         try:
+            # coalesced DAX load path: group by device under the lock, copy
+            # outside it (device cores take their own reservation locks), and
+            # parallelize sub-batches across an inline pool — ctypes.memmove
+            # releases the GIL, so copies genuinely overlap.
+            groups: dict[int, tuple[DaxDeviceEntry, list[int]]] = {}
             with self._device_lock:
-                for i, (key, obj) in enumerate(zip(keys, objects, strict=True)):
+                for i, key in enumerate(keys):
                     entry = self._find_device_for_key_locked(key, lock=False)
                     if entry is None:
                         continue
-                    loaded = entry.core.load_many_into([key], [obj])[0]
-                    if loaded:
+                    groups.setdefault(id(entry), (entry, []))[1].append(i)
+
+            sub_batches: list[tuple[DaxDeviceEntry, list[int]]] = []
+            _SUB = 8  # chunks per copy task (~0.5 GiB at 64 MiB chunks)
+            for entry, idxs in groups.values():
+                for s in range(0, len(idxs), _SUB):
+                    sub_batches.append((entry, idxs[s : s + _SUB]))
+
+            def _load_sub(
+                batch: tuple[DaxDeviceEntry, list[int]],
+            ) -> tuple[list[int], list[bool]]:
+                entry, idxs = batch
+                gkeys = [keys[i] for i in idxs]
+                gobjs = [objects[i] for i in idxs]
+                return idxs, entry.core.load_many_into(gkeys, gobjs)
+
+            if len(sub_batches) <= 1:
+                results = [_load_sub(b) for b in sub_batches]
+            else:
+                with ThreadPoolExecutor(max_workers=min(len(sub_batches), 8)) as _pool:
+                    results = list(_pool.map(_load_sub, sub_batches))
+
+            for idxs, flags in results:
+                for i, ok in zip(idxs, flags, strict=True):
+                    if ok:
                         bitmap.set(i)
-                        loaded_keys.append(key)
+                        loaded_keys.append(keys[i])
         except Exception:
             logger.exception("DAX L2 load failed")
         finally:
