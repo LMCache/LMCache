@@ -48,6 +48,7 @@ def test_memory_allocators_package_import_is_lazy() -> None:
             "gpu_memory_allocator",
             "hip_file_memory_allocator",
             "host_memory_allocator",
+            "lazy_memory_allocator",
             "mixed_memory_allocator",
             "paged_cpu_gpu_memory_allocator",
             "paged_tensor_memory_allocator",
@@ -61,6 +62,7 @@ def test_memory_allocators_package_import_is_lazy() -> None:
             and name.rsplit(".", 1)[-1] in allocator_modules
         )
         assert loaded == [], loaded
+        assert "LazyMemoryAllocator" in allocators.__all__
         assert "TensorMemoryAllocator" in allocators.__all__
         """
     )
@@ -105,6 +107,26 @@ def test_allocator_package_first_import_preserves_old_surface() -> None:
 
         assert DevDaxMemoryAllocator is OldDevDaxMemoryAllocator
         assert TensorMemoryAllocator is OldTensorMemoryAllocator
+        """
+    )
+
+
+def test_lazy_allocator_new_and_old_import_paths_match() -> None:
+    """The moved lazy allocator remains available from both import paths."""
+    _run_import_script(
+        """
+        from lmcache.v1.lazy_memory_allocator import (
+            LazyMemoryAllocator as OldLazyMemoryAllocator,
+        )
+        from lmcache.v1.memory_allocators import (
+            LazyMemoryAllocator as PackageLazyMemoryAllocator,
+        )
+        from lmcache.v1.memory_allocators.lazy_memory_allocator import (
+            LazyMemoryAllocator,
+        )
+
+        assert LazyMemoryAllocator is OldLazyMemoryAllocator
+        assert LazyMemoryAllocator is PackageLazyMemoryAllocator
         """
     )
 

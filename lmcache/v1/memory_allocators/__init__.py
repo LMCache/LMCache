@@ -11,6 +11,7 @@ _EXPORT_TO_MODULE = {
     "GPUMemoryAllocator": "gpu_memory_allocator",
     "HipFileMemoryAllocator": "hip_file_memory_allocator",
     "HostMemoryAllocator": "host_memory_allocator",
+    "LazyMemoryAllocator": "lazy_memory_allocator",
     "MixedMemoryAllocator": "mixed_memory_allocator",
     "PagedCpuGpuMemoryAllocator": "paged_cpu_gpu_memory_allocator",
     "PagedTensorMemoryAllocator": "paged_tensor_memory_allocator",
