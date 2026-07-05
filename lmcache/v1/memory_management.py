@@ -1589,6 +1589,22 @@ class AddressManager:
         """
         return self._size - self.total_allocated_size
 
+    @synchronized("_lock")
+    def size_snapshot(self) -> tuple[int, int]:
+        """
+        Return a consistent (heap_size, allocated_size) snapshot under the lock.
+
+        Taking heap_size and allocated_size in a single critical section prevents
+        sbrk() from interleaving between the two reads, which would otherwise
+        cause memcheck() to observe a transient inconsistency during lazy
+        expansion even when the allocator is healthy.
+
+        Returns:
+            A tuple (heap_size, allocated_size).
+        """
+        return self._size, self.total_allocated_size
+
+    @synchronized("_lock")
     def check_consistency(self) -> bool:
         """
         Check if the address manager is consistent.
@@ -1856,15 +1872,14 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
             self.address_manager.total_allocated_size / 1048576,
         )
 
-        # Check the real total free size
-        total_free_size = self.address_manager.get_free_size()
+        # Take a consistent snapshot under the lock so that a concurrent sbrk()
+        # cannot interleave between the two reads and produce a false positive.
+        heap_size, allocated_size = self.address_manager.size_snapshot()
+        total_free_size = heap_size - allocated_size
         logger.info(" - Total free size: %f MB", total_free_size / 1048576)
 
         # Check if the numbers are consistent
-        if (
-            total_free_size + self.address_manager.total_allocated_size
-            != self.address_manager.get_heap_size()
-        ):
+        if total_free_size + allocated_size != heap_size:
             logger.error("Memory allocator size is inconsistent")
             logger.error("This implies a bug in the memory allocator")
             clear = False
