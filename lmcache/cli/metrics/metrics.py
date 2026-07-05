@@ -27,6 +27,7 @@ from lmcache.cli.metrics.section import Section, sections_to_dict
 from lmcache.logging import init_logger
 
 if TYPE_CHECKING:
+    # First Party
     from lmcache.cli.metrics.handler import MetricsHandler
 
 logger = init_logger(__name__)
