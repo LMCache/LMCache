@@ -236,24 +236,39 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
          source .venv/bin/activate
          uv pip install --prerelease=allow lmcache "sglang"
 
-      **Start SGLang with LMCache**
+      LMCache's MP (multi-process) connector is the default. SGLang dials a
+      standalone ``lmcache server`` daemon over ZMQ.
+
+      Create a config file with the server address:
 
       .. code-block:: bash
 
          cat > lmc_config.yaml <<'EOF'
-         chunk_size: 8  # demo only; use 256 for production
-         local_cpu: true
-         use_layerwise: true
-         max_local_cpu_size: 10  # GB
+         # MP mode: SGLang dials the standalone `lmcache server` at this host/port.
+         mp_host: 127.0.0.1
+         mp_port: 5556
          EOF
 
-         export LMCACHE_CONFIG_FILE=$PWD/lmc_config.yaml
+      Start the LMCache daemon (host/port must match ``mp_host`` / ``mp_port``
+      above). ``--chunk-size 16`` is an illustrative demo value so a short
+      prompt produces visible cache traffic; use the default (256) in
+      production:
+
+      .. code-block:: bash
+
+         lmcache server --host 127.0.0.1 --port 5556 \
+             --l1-size-gb 20 --eviction-policy LRU --chunk-size 16
+
+      Start SGLang with LMCache in a separate terminal:
+
+      .. code-block:: bash
 
          python -m sglang.launch_server \
            --model-path Qwen/Qwen3-8B \
            --host 0.0.0.0 \
            --port 30000 \
-           --enable-lmcache
+           --enable-lmcache \
+           --lmcache-config-file $PWD/lmc_config.yaml
 
       .. note::
          Configure LMCache via the config file. See :doc:`../api_reference/configurations` for the full list.
@@ -287,32 +302,32 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
              "temperature": 0.7
            }'
 
-      **You should see LMCache logs like this:**
+      **You should see LMCache logs like this** -- in MP mode the
+      store/retrieve logs come from the standalone ``lmcache server``
+      process, one entry per chunk.
 
-      **First request** -- prompt plus generated tokens are stored:
-
-      .. code-block:: text
-
-         Prefill batch, #new-seq: 1, #new-token: 35, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0,
-         Decode batch, #running-req: 1, #token: 74, token usage: 0.00, cuda graph: True, gen throughput (token/s): 1.63, #queue-req: 0,
-         Decode batch, #running-req: 1, #token: 114, token usage: 0.00, cuda graph: True, gen throughput (token/s): 87.95, #queue-req: 0,
-         LMCache INFO: Stored 128 out of total 135 tokens. size: 0.0195 GB, cost 12.8890 ms, throughput: 1.5153 GB/s (cache_engine.py:623:lmcache.v1.cache_engine)
-
-      **Second request** -- Radix Cache and LMCache share the prefix; only the new portion is stored:
+      **First request** -- cache is empty, so every aligned chunk is
+      offloaded:
 
       .. code-block:: text
 
-         Prefill batch, #new-seq: 1, #new-token: 10, #cached-token: 30, token usage: 0.00, #running-req: 0, #queue-req: 0,
-         Decode batch, #running-req: 1, #token: 64, token usage: 0.00, cuda graph: True, gen throughput (token/s): 8.29, #queue-req: 0,
-         Decode batch, #running-req: 1, #token: 104, token usage: 0.00, cuda graph: True, gen throughput (token/s): 87.95, #queue-req: 0,
-         Decode batch, #running-req: 1, #token: 144, token usage: 0.00, cuda graph: True, gen throughput (token/s): 87.89, #queue-req: 0,
-         LMCache INFO: Stored 112 out of total 140 tokens. size: 0.0171 GB, cost 11.1986 ms, throughput: 1.5261 GB/s (cache_engine.py:623:lmcache.v1.cache_engine)
+         [2026-04-22 19:49:56,316] LMCache INFO: Stored 16 tokens in 0.023 seconds (server.py:390:lmcache.v1.multiprocess.server)
+         [2026-04-22 19:49:56,555] LMCache INFO: Stored 16 tokens in 0.005 seconds (server.py:390:lmcache.v1.multiprocess.server)
+         [2026-04-22 19:49:56,691] LMCache INFO: Stored 16 tokens in 0.005 seconds (server.py:390:lmcache.v1.multiprocess.server)
+         ...
 
-      - **Total tokens 140**: SGLang stores KV cache for both prefill and decode tokens together, so total = 40 prompt + 100 generated = 140 tokens.
-      - **Cached tokens: 30**: SGLang's Radix Attention Cache reused 30 tokens from the first request.
-      - **LMCache hit tokens: 24**: LMCache detected 24 tokens (3 full 8-token chunks) stored from the first request. Since Radix Cache already provides 30 tokens in GPU memory, these 24 tokens don't need to be loaded from LMCache or stored again.
-      - **New tokens: 10**: Only 10 prompt tokens need prefill computation (40 prompt - 30 cached = 10).
-      - **Stored 112 out of 140**: 24 tokens (3 full chunks) are already in LMCache and skipped. Of the remaining 116 tokens, 112 (14 full 8-token chunks) are stored.
+      **Second request** -- the shared prefix is retrieved from CPU
+      RAM; only the new tail is stored:
+
+      .. code-block:: text
+
+         [2026-04-22 19:50:04,686] LMCache INFO: Retrieved 16 tokens in 0.003 seconds (server.py:573:lmcache.v1.multiprocess.server)
+         [2026-04-22 19:50:04,832] LMCache INFO: Stored 16 tokens in 0.005 seconds (server.py:390:lmcache.v1.multiprocess.server)
+         [2026-04-22 19:50:04,968] LMCache INFO: Stored 16 tokens in 0.005 seconds (server.py:390:lmcache.v1.multiprocess.server)
+         ...
+
+      For request-level statistics (hit ratio, bytes transferred) see
+      :doc:`../mp/observability/index`.
 
    .. tab-item:: TensorRT-LLM
 
