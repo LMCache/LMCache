@@ -19,6 +19,7 @@ from lmcache.cli.metrics.formatter import (
 )
 
 if TYPE_CHECKING:
+    # First Party
     from lmcache.cli.metrics.formatter import MetricsFormatter
     from lmcache.cli.metrics.section import Section
 
