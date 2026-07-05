@@ -148,9 +148,9 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             self._fd = None
 
     def _register_cuda_host_memory(self) -> None:
-        if not memory_management.torch_dev.ext.is_pin_supported:
+        if not memory_management.current_device_spec.is_pin_supported:
             return
-        if not memory_management.torch_dev.ext.pin_memory(
+        if not memory_management.current_device_spec.pin_memory(
             self.devdax_buffer.data_ptr(), self.size
         ):
             logger.warning(
@@ -163,7 +163,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
     def _unregister_cuda_host_memory(self) -> None:
         if self._host_memory_pinned_ptr is None:
             return
-        memory_management.torch_dev.ext.unpin_memory(self._host_memory_pinned_ptr)
+        memory_management.current_device_spec.unpin_memory(self._host_memory_pinned_ptr)
         self._host_memory_pinned_ptr = None
 
     def _is_local_obj(self, memory_obj: MemoryObj) -> bool:
