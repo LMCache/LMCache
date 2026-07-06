@@ -24,7 +24,7 @@ try:
     from lmcache.v1.distributed.l1_manager import L1Manager
 
     # Local
-    from .maru_fakes import make_maru_manager
+    from .maru_fakes import RecordingListener, make_maru_manager
 except ImportError:
     pytest.skip("L1 manager deps unavailable", allow_module_level=True)
 
@@ -166,3 +166,32 @@ def test_is_key_evictable_gates_on_read_hold(manager):
     assert not manager.is_key_evictable(k)
     manager.finish_read([k])
     assert manager.is_key_evictable(k)
+
+
+def test_listener_fires_across_lifecycle(manager):
+    """Both backends fire the same on_l1_keys_* events across a lifecycle.
+
+    The eviction LRU and the store controller depend on this contract, so it
+    must hold identically for stock and maru.
+    """
+    rec = RecordingListener()
+    manager.register_listener(rec)
+    k = _key(9)
+
+    manager.reserve_write([k], [False], _LAYOUT, mode="new")
+    assert [k] in rec.kinds("reserved_write")
+
+    manager.finish_write([k])
+    assert [k] in rec.kinds("write_finished")
+
+    manager.reserve_read([k])
+    assert [k] in rec.kinds("reserved_read")
+
+    manager.touch_keys([k])
+    assert [k] in rec.kinds("accessed")
+
+    manager.finish_read([k])
+    assert [k] in rec.kinds("read_finished")
+
+    assert manager.delete([k])[k] == L1Error.SUCCESS
+    assert [k] in rec.kinds("deleted_by_manager")

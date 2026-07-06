@@ -13,11 +13,12 @@ try:
     from lmcache.v1.distributed.l1_protocol import L1ManagerInterface
     from lmcache.v1.distributed.maru_l1_manager import (
         MaruL1Manager,
+        _PendingRead,
         object_key_to_string,
     )
 
     # Local
-    from .maru_fakes import make_maru_manager
+    from .maru_fakes import RecordingListener, make_maru_manager
     from .test_l1_protocol import _interface_methods, _params, _unwrap
 except ImportError:
     pytest.skip("maru manager deps unavailable", allow_module_level=True)
@@ -400,3 +401,132 @@ def test_report_status_keys():
     assert status["read_locked_count"] == 1
     assert status["is_healthy"] is True
     assert status["memory_total_bytes"] > 0
+
+
+# =========================================================================
+# listener firing (C4): feeds the eviction LRU + store controller
+# =========================================================================
+
+
+def test_reserve_read_fires_only_for_hits():
+    """A miss must not be reported as a reserved-read hold."""
+    manager, handler, _ = make_maru_manager()
+    hit, miss = _key(1), _key(2)
+    _seed(handler, hit)
+    rec = RecordingListener()
+    manager.register_listener(rec)
+
+    manager.reserve_read([hit, miss])
+    assert rec.kinds("reserved_read") == [[hit]]
+
+
+def test_reserve_and_finish_write_fire_with_registered_keys():
+    manager, handler, _ = make_maru_manager()
+    k = _key(1)
+    rec = RecordingListener()
+    manager.register_listener(rec)
+
+    manager.reserve_write([k], [False], _LAYOUT, mode="new")
+    assert rec.kinds("reserved_write") == [[k]]
+    manager.finish_write([k])
+    assert rec.kinds("write_finished") == [[k]]
+
+
+def test_finish_write_store_failure_is_not_fired():
+    """A page that never registered must not notify write-finished."""
+    manager, handler, _ = make_maru_manager()
+    k = _key(1)
+    handler.fail_store_keys.add(object_key_to_string(k))
+    rec = RecordingListener()
+    manager.register_listener(rec)
+
+    manager.reserve_write([k], [False], _LAYOUT, mode="new")
+    manager.finish_write([k])
+    assert rec.kinds("write_finished") == [[]]  # fired once, empty
+
+
+def test_finish_read_normal_fires_read_finished_without_delete():
+    """A directory-backed read unpins; it is never a manager delete."""
+    manager, handler, _ = make_maru_manager()
+    k = _key(1)
+    _seed(handler, k)
+    manager.reserve_read([k])
+    rec = RecordingListener()
+    manager.register_listener(rec)
+
+    manager.finish_read([k])
+    assert rec.kinds("read_finished") == [[k]]
+    assert all(ks == [] for ks in rec.kinds("deleted_by_manager"))
+
+
+def test_finish_read_temporary_frees_page_and_fires_delete():
+    """A temporary read (local staging) reclaims its page at refcount zero.
+
+    The promote path that creates temporary reads lands in C5; here the entry
+    is staged white-box to exercise C4's refcount-zero reclaim branch.
+    """
+    manager, handler, adapter = make_maru_manager()
+    k = _key(1)
+    page = adapter.batched_allocate(_LAYOUT.shapes, _LAYOUT.dtypes, 1)[0]
+    manager._pending_read[k] = _PendingRead(mem_obj=page, refcount=1, is_temporary=True)
+    rec = RecordingListener()
+    manager.register_listener(rec)
+
+    assert manager.finish_read([k])[k] == L1Error.SUCCESS
+    # Temporary pages hold no server pin -- reclaimed, not unpinned.
+    assert page.metadata.address in adapter.freed
+    assert not handler.unpin_log
+    assert rec.kinds("read_finished") == [[k]]
+    assert rec.kinds("deleted_by_manager") == [[k]]
+    assert k not in manager._pending_read
+
+
+def test_delete_fires_only_for_removed_keys():
+    """Locked / absent keys are not reported as manager deletes."""
+    manager, handler, _ = make_maru_manager()
+    removed, absent, locked = _key(1), _key(2), _key(3)
+    _seed(handler, removed)
+    _seed(handler, locked)
+    handler.pins[object_key_to_string(locked)] = 1  # pinned elsewhere
+    rec = RecordingListener()
+    manager.register_listener(rec)
+
+    manager.delete([removed, absent, locked])
+    assert rec.kinds("deleted_by_manager") == [[removed]]
+
+
+def test_touch_keys_fires_accessed():
+    manager, _, _ = make_maru_manager()
+    rec = RecordingListener()
+    manager.register_listener(rec)
+
+    keys = [_key(1), _key(2)]
+    manager.touch_keys(keys)
+    assert rec.kinds("accessed") == [keys]
+
+
+def test_clear_force_fires_deleted_for_dropped_staging():
+    manager, handler, _ = make_maru_manager()
+    rk, wk = _key(1), _key(2)
+    _seed(handler, rk)
+    manager.reserve_read([rk])
+    manager.reserve_write([wk], [False], _LAYOUT, mode="new")
+    rec = RecordingListener()
+    manager.register_listener(rec)
+
+    manager.clear(force=True)
+    fired = rec.kinds("deleted_by_manager")
+    assert len(fired) == 1
+    assert set(fired[0]) == {rk, wk}
+
+
+def test_clear_non_force_fires_nothing():
+    manager, handler, _ = make_maru_manager()
+    rk = _key(1)
+    _seed(handler, rk)
+    manager.reserve_read([rk])
+    rec = RecordingListener()
+    manager.register_listener(rec)
+
+    manager.clear()  # keeps locked staging -> no drops
+    assert rec.events == []

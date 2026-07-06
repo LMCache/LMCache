@@ -14,10 +14,10 @@ Provenance convention: ``PARITY(L1Manager.X)`` marks behavior mirrored from
 the stock manager (keep in sync with ``l1_manager.py``); ``MARU:`` marks
 maru-specific logic.
 
-Not implemented yet (later commits in this series): listener firing, the
-L2->L1 promote transition, and the TTL orphan sweeper. Known gap: a pin whose
-RPC reply is lost leaks server-side; reconciliation (per-instance pin ledger)
-is a maru-side design item.
+Not implemented yet (later commits in this series): the L2->L1 promote
+transition (finish_write_and_reserve_read) and the TTL orphan sweeper. Known
+gap: a pin whose RPC reply is lost leaks server-side; reconciliation
+(per-instance pin ledger) is a maru-side design item.
 """
 
 # Standard
@@ -157,8 +157,6 @@ class MaruL1Manager:
     def register_listener(self, listener: L1ManagerListener) -> None:
         """Register a listener for ``on_l1_keys_*`` events.
 
-        NOTE: events are not fired yet; firing lands with the tiering wiring.
-
         Args:
             listener: The listener to register.
         """
@@ -270,6 +268,7 @@ class MaruL1Manager:
             mem_infos = list(mem_infos[: len(hits)])
             mem_infos += [None] * (len(hits) - len(mem_infos))
 
+        successful_keys: list[ObjectKey] = []
         for i, mi in zip(hits, mem_infos, strict=False):
             mem_obj = (
                 self._allocator.get_by_location(
@@ -293,8 +292,13 @@ class MaruL1Manager:
             else:
                 self._pending_read[k] = _PendingRead(mem_obj=mem_obj, refcount=total)
                 ret[k] = (L1Error.SUCCESS, mem_obj)
+            successful_keys.append(k)
 
         self._safe_unpin(handler, rollback)
+        # PARITY(L1Manager.reserve_read): notify listeners of the new read
+        # holds (feeds the eviction LRU and the store controller).
+        for listener in self._registered_listeners:
+            listener.on_l1_keys_reserved_read(successful_keys)
         return ret
 
     @_maru_l1_synchronized
@@ -347,6 +351,9 @@ class MaruL1Manager:
         total = 1 + _clamp_extra_count(extra_count)
         ret: dict[ObjectKey, L1Error] = {}
         to_unpin: list[str] = []
+        need_to_free: list[MemoryObj] = []
+        need_to_free_keys: list[ObjectKey] = []
+        successful_keys: list[ObjectKey] = []
         for k in keys:
             entry = self._pending_read.get(k)
             if entry is None:
@@ -364,12 +371,30 @@ class MaruL1Manager:
                     k,
                 )
             entry.refcount -= released
-            to_unpin.extend([object_key_to_string(k)] * released)
-            if entry.refcount <= 0:
-                del self._pending_read[k]
+            # MARU: temporary reads are local staging (never directory-pinned),
+            # so at refcount zero the page is reclaimed, not unpinned. Normal
+            # reads release the server pins taken by reserve_read.
+            if entry.is_temporary:
+                if entry.refcount <= 0:
+                    need_to_free.append(entry.mem_obj)
+                    need_to_free_keys.append(k)
+                    del self._pending_read[k]
+            else:
+                to_unpin.extend([object_key_to_string(k)] * released)
+                if entry.refcount <= 0:
+                    del self._pending_read[k]
             ret[k] = L1Error.SUCCESS
+            successful_keys.append(k)
         if to_unpin:
             self._safe_unpin(self._allocator.handler, to_unpin)
+        for obj in need_to_free:
+            # MARU: unregistered local page -> discard through the allocator.
+            self._allocator.abort_alloc(obj)
+        # PARITY(L1Manager.finish_read): read_finished for every release;
+        # deleted_by_manager for temporary pages dropped at refcount zero.
+        for listener in self._registered_listeners:
+            listener.on_l1_keys_read_finished(successful_keys)
+            listener.on_l1_keys_deleted_by_manager(need_to_free_keys)
         return ret
 
     @_maru_l1_synchronized
@@ -450,9 +475,15 @@ class MaruL1Manager:
             for k, _ in need_allocate:
                 ret[k] = (L1Error.OUT_OF_MEMORY, None)
             return ret
+        successful_keys: list[ObjectKey] = []
         for (k, is_temp), obj in zip(need_allocate, objs, strict=False):
             self._pending_write[k] = _PendingWrite(mem_obj=obj, is_temporary=is_temp)
             ret[k] = (L1Error.SUCCESS, obj)
+            successful_keys.append(k)
+        # PARITY(L1Manager.reserve_write): notify listeners of the new write
+        # holds (the eviction LRU treats them as unevictable).
+        for listener in self._registered_listeners:
+            listener.on_l1_keys_reserved_write(successful_keys)
         return ret
 
     @_maru_l1_synchronized
@@ -509,11 +540,13 @@ class MaruL1Manager:
                 ret[k] = L1Error.KEY_IN_WRONG_STATE
             return ret
 
+        successful_keys: list[ObjectKey] = []
         for i, (k, entry) in enumerate(staged):
             ok = results[i] if i < len(results) else None
             if ok:
                 # True covers newly-registered and dup-skip (page auto-freed).
                 ret[k] = L1Error.SUCCESS
+                successful_keys.append(k)
             elif ok is None:
                 # Missing reply entry: state unknown -- do not recycle.
                 ret[k] = L1Error.KEY_IN_WRONG_STATE
@@ -521,6 +554,11 @@ class MaruL1Manager:
                 # Definitively not registered -- reclaim the page.
                 self._allocator.abort_alloc(entry.mem_obj)
                 ret[k] = L1Error.KEY_IN_WRONG_STATE
+        # PARITY(L1Manager.finish_write): notify listeners of registered pages
+        # (the store controller stops re-storing them; must NOT be the promote
+        # event -- that is on_l1_keys_finish_write_and_reserve_read in C5).
+        for listener in self._registered_listeners:
+            listener.on_l1_keys_write_finished(successful_keys)
         return ret
 
     @_maru_l1_synchronized
@@ -557,6 +595,7 @@ class MaruL1Manager:
                 or the delete RPC failed (retryable).
         """
         ret: dict[ObjectKey, L1Error] = {}
+        successful_keys: list[ObjectKey] = []
         handler = self._allocator.handler
         for k in keys:
             # MARU: locally staged keys are pinned/write-held by construction.
@@ -567,6 +606,7 @@ class MaruL1Manager:
             try:
                 if handler.delete(ks):
                     ret[k] = L1Error.SUCCESS
+                    successful_keys.append(k)
                     continue
                 # MARU: handler.delete conflates pinned and missing; one
                 # exists() round-trip disambiguates so pinned keys retry.
@@ -579,16 +619,23 @@ class MaruL1Manager:
             except Exception:
                 logger.exception("MaruL1Manager: delete failed for key %s", ks)
                 ret[k] = L1Error.KEY_IS_LOCKED
+        # PARITY(L1Manager.delete): notify listeners of the keys actually
+        # removed from the directory (the eviction LRU drops them).
+        for listener in self._registered_listeners:
+            listener.on_l1_keys_deleted_by_manager(successful_keys)
         return ret
 
     def touch_keys(self, keys: list[ObjectKey]) -> None:
-        """Mark keys as accessed.
+        """Mark keys as accessed, feeding the eviction LRU recency.
 
-        NOTE: no-op until listener firing lands with the tiering wiring.
+        PARITY(L1Manager.touch_keys): fires ``on_l1_keys_accessed`` without the
+        manager lock (matching stock); recency lives in the eviction policy.
 
         Args:
             keys: The list of object keys touched.
         """
+        for listener in self._registered_listeners:
+            listener.on_l1_keys_accessed(keys)
 
     @_maru_l1_synchronized
     def clear(self, force: bool = False) -> None:
@@ -609,13 +656,27 @@ class MaruL1Manager:
                     len(self._pending_write),
                 )
             return
-        self._drain_staging(force=True)
+        dropped = self._drain_staging(force=True)
+        # PARITY(L1Manager.clear): a force-clear notifies listeners of the drops.
+        for listener in self._registered_listeners:
+            listener.on_l1_keys_deleted_by_manager(dropped)
 
-    def _drain_staging(self, force: bool) -> None:
-        """Unpin all staged reads (refcount times) and abort staged writes."""
+    def _drain_staging(self, force: bool) -> list[ObjectKey]:
+        """Unpin staged reads (refcount times) and abort staged writes.
+
+        Args:
+            force: If True, log the dropped in-flight staging as a warning.
+
+        Returns:
+            The keys dropped from staging (staged reads then staged writes).
+        """
         to_unpin: list[str] = []
         for k, entry in self._pending_read.items():
-            to_unpin.extend([object_key_to_string(k)] * entry.refcount)
+            # MARU: temporary reads hold no server pin -- reclaim the page.
+            if entry.is_temporary:
+                self._allocator.abort_alloc(entry.mem_obj)
+            else:
+                to_unpin.extend([object_key_to_string(k)] * entry.refcount)
         if force and (self._pending_read or self._pending_write):
             logger.warning(
                 "MaruL1Manager: force-clear drops %d staged reads "
@@ -628,8 +689,10 @@ class MaruL1Manager:
             self._safe_unpin(self._allocator.handler, to_unpin)
         for write_entry in self._pending_write.values():
             self._allocator.abort_alloc(write_entry.mem_obj)
+        dropped = list(self._pending_read.keys()) + list(self._pending_write.keys())
         self._pending_read.clear()
         self._pending_write.clear()
+        return dropped
 
     def is_key_evictable(self, key: ObjectKey) -> bool:
         """Return whether ``key`` has no local hold (lock-free view).

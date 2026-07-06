@@ -14,12 +14,51 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 # First Party
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.config import (
     L1ManagerConfig,
     L1MemoryManagerConfig,
     MaruL1Config,
 )
+from lmcache.v1.distributed.internal_api import L1ManagerListener
 from lmcache.v1.distributed.maru_l1_manager import MaruL1Manager
+
+
+class RecordingListener(L1ManagerListener):
+    """Records every ``on_l1_keys_*`` firing as ``(event, keys)``.
+
+    Shared by the maru-specific and the cross-backend conformance suites so
+    both assert the same listener contract. ``kinds()`` returns the key lists
+    of each firing of one event, in order.
+    """
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, list[ObjectKey]]] = []
+
+    def on_l1_keys_reserved_read(self, keys: list[ObjectKey]) -> None:
+        self.events.append(("reserved_read", list(keys)))
+
+    def on_l1_keys_read_finished(self, keys: list[ObjectKey]) -> None:
+        self.events.append(("read_finished", list(keys)))
+
+    def on_l1_keys_reserved_write(self, keys: list[ObjectKey]) -> None:
+        self.events.append(("reserved_write", list(keys)))
+
+    def on_l1_keys_write_finished(self, keys: list[ObjectKey]) -> None:
+        self.events.append(("write_finished", list(keys)))
+
+    def on_l1_keys_finish_write_and_reserve_read(self, keys: list[ObjectKey]) -> None:
+        self.events.append(("finish_write_and_reserve_read", list(keys)))
+
+    def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]) -> None:
+        self.events.append(("deleted_by_manager", list(keys)))
+
+    def on_l1_keys_accessed(self, keys: list[ObjectKey]) -> None:
+        self.events.append(("accessed", list(keys)))
+
+    def kinds(self, name: str) -> list[list[ObjectKey]]:
+        """Return the key list of every recorded firing of event ``name``."""
+        return [keys for event, keys in self.events if event == name]
 
 
 @dataclass
