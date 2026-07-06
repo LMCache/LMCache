@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Non-GPU context abstractions and utilities for multiprocess transport.
+"""Non-GPU transfer-backend abstractions and utilities for multiprocess transport.
 
 This module provides:
 - ``EngineDrivenContextMetadata``: layout metadata dataclass for non-CUDA workers.
-- ``EngineDrivenContext``: abstract base class with a two-phase prepare/commit
+- ``TransferBackend``: abstract base class with a two-phase prepare/commit
   interface for CPU-side KV data transfer. Concrete implementations (e.g.
-  ``EngineDrivenContextPickle``) each decide *how* data is serialised and transported.
-- ``create_engine_driven_context()``: factory that returns the appropriate
-  ``EngineDrivenContext`` subclass.
+  ``PickleTransferBackend``) each decide *how* data is serialised and transported.
+- ``create_transfer_backend()``: factory that returns the appropriate
+  ``TransferBackend`` subclass.
 - ``compute_kv_layout``, ``gather_paged_kv_to_cpu``, ``scatter_cpu_to_paged_kv``:
   shared gather/scatter utilities used by all concrete implementations.
 """
@@ -120,8 +120,8 @@ class EngineDrivenContextMetadata:
     use_mla: bool
 
 
-class EngineDrivenContext(ABC):
-    """Abstract base class for CPU-side KV data transfer contexts.
+class TransferBackend(ABC):
+    """Abstract base class for CPU-side KV data transfer backends.
 
     All concrete implementations share a common message-queue client and
     expose a uniform two-phase ``prepare/commit`` interface so that the
@@ -145,7 +145,7 @@ class EngineDrivenContext(ABC):
 
     @property
     def layout_desc(self) -> MemoryLayoutDesc:
-        """The memory layout descriptor for this context."""
+        """The memory layout descriptor for this backend."""
         return self.metadata.layout_desc
 
     @abstractmethod
@@ -195,7 +195,7 @@ class EngineDrivenContext(ABC):
         ...
 
 
-def create_engine_driven_context(
+def create_transfer_backend(
     metadata: EngineDrivenContextMetadata,
     mq_client: MessageQueueClient,
     mq_timeout: float,
@@ -203,8 +203,8 @@ def create_engine_driven_context(
     pool_size: int,
     *,
     use_pickle: bool = False,
-) -> EngineDrivenContext:
-    """Factory that returns the appropriate :class:`EngineDrivenContext` implementation.
+) -> TransferBackend:
+    """Factory that returns the appropriate :class:`TransferBackend` implementation.
 
     Returns SHM-based implementation when shared-memory pool information is
     available; otherwise falls back to the pickle-based implementation.
@@ -212,7 +212,7 @@ def create_engine_driven_context(
     permission error), gracefully falls back to pickle transport.
 
     Args:
-        metadata: Layout metadata for the non-GPU context.
+        metadata: Layout metadata for the non-GPU transfer backend.
         mq_client: Message-queue client for server communication.
         mq_timeout: Timeout in seconds for blocking MQ requests.
         shm_name: Shared-memory segment name. Empty values force pickle mode.
@@ -222,37 +222,37 @@ def create_engine_driven_context(
             available.
 
     Returns:
-        A concrete :class:`EngineDrivenContext` instance.
+        A concrete :class:`TransferBackend` instance.
     """
     if not shm_name or pool_size <= 0:
         use_pickle = True
 
     if not use_pickle:
         # Local
-        from .shm import EngineDrivenContextShm
+        from .shm import ShmTransferBackend
 
         try:
             logger.info(
-                "Creating EngineDrivenContextShm (shm_name=%s, pool_size=%d)",
+                "Creating ShmTransferBackend (shm_name=%s, pool_size=%d)",
                 shm_name,
                 pool_size,
             )
-            return EngineDrivenContextShm(
+            return ShmTransferBackend(
                 metadata, mq_client, mq_timeout, shm_name, pool_size
             )
         except Exception:
             logger.warning(
-                "Failed to initialize SHM context (shm_name=%s), "
+                "Failed to initialize SHM transfer backend (shm_name=%s), "
                 "falling back to pickle transport",
                 shm_name,
                 exc_info=True,
             )
 
     # Local
-    from .pickle import EngineDrivenContextPickle
+    from .pickle import PickleTransferBackend
 
-    logger.info("Creating EngineDrivenContextPickle (pickle transport)")
-    return EngineDrivenContextPickle(metadata, mq_client, mq_timeout)
+    logger.info("Creating PickleTransferBackend (pickle transport)")
+    return PickleTransferBackend(metadata, mq_client, mq_timeout)
 
 
 # ---------------------------------------------------------------------------

@@ -25,9 +25,9 @@ Worker adapter (vLLM MP adapter)
   └─ TransferContext (transfer_context/worker_transfer.py)
       ├─ LMCacheDrivenTransferContext  (IPC path via stream/event)
       └─ EngineDrivenTransferContext    (data path via data copying in adapter)
-          └─ EngineDrivenContext (transfer_context/base.py)
-             ├─ EngineDrivenContextPickle (transfer_context/pickle.py)
-             └─ EngineDrivenContextShm    (transfer_context/shm.py)
+          └─ TransferBackend (transfer_context/base.py)
+             ├─ PickleTransferBackend (transfer_context/pickle.py)
+             └─ ShmTransferBackend    (transfer_context/shm.py)
 
 MPCacheServer (server)
 ├─ MPCacheServerContext (engine_context.py)
@@ -92,7 +92,7 @@ Overall data flow:
 - **lmcache-driven path** (CUDA IPC): worker sends a handle, server pulls/pushes
   data directly via device memory.
 - **engine-driven path** (CPU/SHM/pickle): worker gathers/scatters paged KV and
-  exchanges CPU-side data via a transport-specific `EngineDrivenContext`
+  exchanges CPU-side data via a transport-specific `TransferBackend`
   implementation.
 
 ### 2.2 Worker Side: TransferContext
@@ -105,15 +105,15 @@ four lifecycle and transfer operations.
 - **LMCacheDrivenTransferContext** keeps the original CUDA IPC behavior:
   worker sends a handle and server performs direct GPU-side transfer.
 - **EngineDrivenTransferContext** is the engine-driven (non-CUDA) path:
-  worker transfers actual data chunks through `EngineDrivenContext`.
+  worker transfers actual data chunks through a `TransferBackend`.
 
 `EngineDrivenTransferContext` flows:
 - **submit_store**: `prepare_store` → `gather_paged_kv_to_cpu` → `commit_store`
 - **submit_retrieve**: `prepare_retrieve` → `scatter_cpu_to_paged_kv` → `commit_retrieve`
 
 During `register`, worker receives `RegisterEngineDrivenContextResponse(shm_name, pool_size)`
-from server and then calls `create_engine_driven_context(...)` to construct
-`EngineDrivenContextPickle` or `EngineDrivenContextShm`.
+from server and then calls `create_transfer_backend(...)` to construct
+`PickleTransferBackend` or `ShmTransferBackend`.
 
 Why `prepare → data operation → commit`:
 - `prepare_*`: set up transport state (for SHM this allocates/returns shared buffers;
@@ -145,7 +145,7 @@ Server transfer strategy implementations:
 - **ShmTransferStrategy**: SHM slot-based prepare/commit behavior, with pickle
   fallback when inline bytes are provided.
 
-This mirrors the worker split (`EngineDrivenContextPickle` / `EngineDrivenContextShm`):
+This mirrors the worker split (`PickleTransferBackend` / `ShmTransferBackend`):
 both sides keep common request flow while isolating transport-specific logic.
 
 `MPCacheServerContext` is the shared container injected into modules at init.
@@ -183,9 +183,9 @@ It also computes `shm_pool_info` once from `StorageManagerConfig`:
 - `lmcache/v1/multiprocess/modules/engine_driven_transfer.py`: `EngineDrivenTransferModule`
 - `lmcache/v1/multiprocess/modules/server_transfer.py`: `TransferStrategy`, `PickleTransferStrategy`, `ShmTransferStrategy`
 - `lmcache/v1/multiprocess/transfer_context/worker_transfer.py`: `EngineDrivenTransferContext`, `LMCacheDrivenTransferContext`
-- `lmcache/v1/multiprocess/transfer_context/base.py`: `EngineDrivenContext`, `gather_paged_kv_to_cpu`, `scatter_cpu_to_paged_kv`, `compute_kv_layout`
-- `lmcache/v1/multiprocess/transfer_context/pickle.py`: `EngineDrivenContextPickle`
-- `lmcache/v1/multiprocess/transfer_context/shm.py`: `EngineDrivenContextShm`
+- `lmcache/v1/multiprocess/transfer_context/base.py`: `TransferBackend`, `gather_paged_kv_to_cpu`, `scatter_cpu_to_paged_kv`, `compute_kv_layout`
+- `lmcache/v1/multiprocess/transfer_context/pickle.py`: `PickleTransferBackend`
+- `lmcache/v1/multiprocess/transfer_context/shm.py`: `ShmTransferBackend`
 
 ## 3. Protocol & Data Flow
 
@@ -198,7 +198,7 @@ The engine-driven path uses five request types:
    - stores `EngineDrivenContextEntry` (metadata + model/world info)
    - registers `MemoryLayoutDesc` in `LayoutDescRegistry`
    - creates `TransferStrategy` from engine-level `shm_pool_info`
-   - returns `shm_name/pool_size` so worker creates matching `EngineDrivenContext`
+   - returns `shm_name/pool_size` so worker creates matching `TransferBackend`
 
 2. `PREPARE_STORE`  
    Worker asks server/transport to prepare store-side transfer state.

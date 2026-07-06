@@ -29,10 +29,10 @@ from lmcache.v1.multiprocess.protocols.engine import (
 )
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContextMetadata,
-    create_engine_driven_context,
+    create_transfer_backend,
 )
-from lmcache.v1.multiprocess.transfer_context.pickle import EngineDrivenContextPickle
-from lmcache.v1.multiprocess.transfer_context.shm import EngineDrivenContextShm
+from lmcache.v1.multiprocess.transfer_context.pickle import PickleTransferBackend
+from lmcache.v1.multiprocess.transfer_context.shm import ShmTransferBackend
 
 if TYPE_CHECKING:
     # First Party
@@ -421,7 +421,7 @@ def test_musa_data_context_keeps_layout_validation_device_agnostic(
     monkeypatch.setattr(worker_transfer, "compute_kv_layout", _fake_compute_kv_layout)
     monkeypatch.setattr(
         worker_transfer,
-        "create_engine_driven_context",
+        "create_transfer_backend",
         lambda *_args, **_kwargs: MagicMock(),
     )
     future = MagicMock()
@@ -477,7 +477,7 @@ def test_musa_data_context_store_uses_device_agnostic_gather(
     )
     monkeypatch.setattr(
         worker_transfer,
-        "create_engine_driven_context",
+        "create_transfer_backend",
         lambda *_args, **_kwargs: _FakeEngineDrivenContext(),
     )
 
@@ -549,7 +549,7 @@ def test_musa_data_context_retrieve_uses_device_agnostic_scatter(
     )
     monkeypatch.setattr(
         worker_transfer,
-        "create_engine_driven_context",
+        "create_transfer_backend",
         lambda *_args, **_kwargs: _FakeEngineDrivenContext(),
     )
 
@@ -1399,7 +1399,7 @@ def test_engine_driven_context_shm_tensor_view_from_buffer() -> None:
         finally:
             mm.close()
 
-        context = EngineDrivenContextShm(
+        context = ShmTransferBackend(
             metadata=EngineDrivenContextMetadata(
                 layout_desc=MemoryLayoutDesc(
                     shapes=[torch.Size([2, 4])],
@@ -1463,7 +1463,7 @@ def test_engine_driven_context_shm_store_retrieve_flow_with_mocked_mq() -> None:
 
     mq_client.submit_request.side_effect = _submit_request
 
-    context = EngineDrivenContextShm(
+    context = ShmTransferBackend(
         metadata=EngineDrivenContextMetadata(
             layout_desc=MemoryLayoutDesc(
                 shapes=[torch.Size([2, 2])],
@@ -1502,7 +1502,7 @@ def test_engine_driven_context_shm_store_retrieve_flow_with_mocked_mq() -> None:
 
 def test_engine_driven_context_shm_init_raises_when_segment_missing() -> None:
     with pytest.raises(FileNotFoundError, match="No such file or directory"):
-        EngineDrivenContextShm(
+        ShmTransferBackend(
             metadata=EngineDrivenContextMetadata(
                 layout_desc=MemoryLayoutDesc(
                     shapes=[torch.Size([2, 2])],
@@ -1519,7 +1519,7 @@ def test_engine_driven_context_shm_init_raises_when_segment_missing() -> None:
 
 
 def test_create_engine_driven_context_falls_back_to_pickle_without_shm_info() -> None:
-    context = create_engine_driven_context(
+    context = create_transfer_backend(
         metadata=EngineDrivenContextMetadata(
             layout_desc=MemoryLayoutDesc(
                 shapes=[torch.Size([2, 2])],
@@ -1533,11 +1533,11 @@ def test_create_engine_driven_context_falls_back_to_pickle_without_shm_info() ->
         shm_name="",
         pool_size=0,
     )
-    assert isinstance(context, EngineDrivenContextPickle)
+    assert isinstance(context, PickleTransferBackend)
 
 
 def test_create_engine_driven_context_use_pickle_ignores_valid_shm_info() -> None:
-    context = create_engine_driven_context(
+    context = create_transfer_backend(
         metadata=EngineDrivenContextMetadata(
             layout_desc=MemoryLayoutDesc(
                 shapes=[torch.Size([2, 2])],
@@ -1552,14 +1552,14 @@ def test_create_engine_driven_context_use_pickle_ignores_valid_shm_info() -> Non
         pool_size=4096,
         use_pickle=True,
     )
-    assert isinstance(context, EngineDrivenContextPickle)
+    assert isinstance(context, PickleTransferBackend)
 
 
 def test_engine_driven_context_shm_close_is_idempotent() -> None:
     shm_name = f"lmcache_test_close_{os.getpid()}"
     addr = _create_shm_segment(shm_name, 4096)
     try:
-        context = EngineDrivenContextShm(
+        context = ShmTransferBackend(
             metadata=EngineDrivenContextMetadata(
                 layout_desc=MemoryLayoutDesc(
                     shapes=[torch.Size([2, 2])],

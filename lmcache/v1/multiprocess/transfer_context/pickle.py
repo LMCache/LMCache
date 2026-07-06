@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Pickle-based EngineDrivenContext implementation for multiprocess mode."""
+"""Pickle-based TransferBackend implementation for multiprocess mode."""
 
 # Standard
 import pickle
@@ -12,13 +12,13 @@ from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transfer_context.base import (
-    EngineDrivenContext,
     EngineDrivenContextMetadata,
+    TransferBackend,
 )
 
 
-class EngineDrivenContextPickle(EngineDrivenContext):
-    """Pickle-based implementation of :class:`EngineDrivenContext`.
+class PickleTransferBackend(TransferBackend):
+    """Pickle-based implementation of :class:`TransferBackend`.
 
     Transport mechanism:
     - **Store**: ``prepare_store`` sends ``PREPARE_STORE`` (returns empty slots

@@ -8,15 +8,15 @@ sub-module.
 
 # Local
 from .base import (
-    EngineDrivenContext,
     EngineDrivenContextMetadata,
+    TransferBackend,
     compute_kv_layout,
-    create_engine_driven_context,
+    create_transfer_backend,
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )
-from .pickle import EngineDrivenContextPickle
-from .shm import EngineDrivenContextShm, ShmSlotDescriptor
+from .pickle import PickleTransferBackend
+from .shm import ShmSlotDescriptor, ShmTransferBackend
 from .worker_transfer import (
     EngineDrivenTransferContext,
     LMCacheDrivenTransferContext,
@@ -29,14 +29,14 @@ __all__ = [
     "EngineDrivenTransferContext",
     "LMCacheDrivenTransferContext",
     "MPTransferMode",
-    "EngineDrivenContext",
+    "TransferBackend",
     "EngineDrivenContextMetadata",
-    "EngineDrivenContextPickle",
-    "EngineDrivenContextShm",
+    "PickleTransferBackend",
+    "ShmTransferBackend",
     "ShmSlotDescriptor",
     "TransferContext",
     "compute_kv_layout",
-    "create_engine_driven_context",
+    "create_transfer_backend",
     "create_transfer_context",
     "gather_paged_kv_to_cpu",
     "scatter_cpu_to_paged_kv",
