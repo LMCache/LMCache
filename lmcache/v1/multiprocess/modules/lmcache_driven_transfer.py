@@ -534,24 +534,46 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             for iid in stale_ids:
                 reaped.append((iid, self._cache_contexts.pop(iid)))
         reaped_ids: list[int] = []
-        for iid, entry in reaped:
-            self._release_entry(entry)
+        entries: list[ContextEntry] = []
+        for iid, e in reaped:
             logger.warning(
                 "Reaped GPU instance %d: silent for %.1fs (pinged=%s)",
                 iid,
-                now - entry.last_seen,
-                entry.has_liveness_signal,
+                now - e.last_seen,
+                e.has_liveness_signal,
             )
             reaped_ids.append(iid)
+            entries.append(e)
         if reaped:
-            # Drop the last ContextEntry references BEFORE reclaiming: the
-            # entries' cache contexts hold the CUDA-IPC-imported KV tensors,
-            # and ipc_collect() only frees segments whose refcount reached
-            # zero (see _reclaim_device_memory).
-            del entry  # noqa: F821 — loop var still pins the final entry
+            del e  # a bound name would pin the final entry (see _release_entries)
             reaped.clear()
-            self._reclaim_device_memory()
+            self._release_entries(entries)
         return reaped_ids
+
+    def _release_entries(self, entries: list[ContextEntry]) -> None:
+        """Release a batch of entries and reclaim their device memory.
+
+        Owns the load-bearing ordering for LMCache#4014: release each
+        entry's resources, drop EVERY reference to the entries, then run
+        one ``empty_cache()`` + ``ipc_collect()`` pass. A CUDA-IPC-imported
+        segment is only unmapped once its last tensor reference is gone, so
+        a single live reference turns the collect into a silent no-op for
+        that entry -- which is also why this takes the caller's container
+        and clears it: call sites must pass the ONLY container holding the
+        entries and must not bind them to local names (index the list for
+        any field access instead).
+
+        Args:
+            entries: The only remaining references to the released entries.
+                Cleared before the reclaim pass.
+        """
+        if not entries:
+            return
+        for entry in entries:
+            self._release_entry(entry)
+        del entry  # the loop variable would pin the final entry
+        entries.clear()
+        self._reclaim_device_memory()
 
     def _release_entry(self, entry: ContextEntry) -> None:
         """Release resources for a popped entry (run outside the lock).
@@ -648,15 +670,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         with self._lock:
             entries = list(self._cache_contexts.values())
             self._cache_contexts.clear()
-        released = bool(entries)
-        for entry in entries:
-            entry.cache_context.close()
-        if released:
-            # Drop the tensor-holding references before reclaiming (see
-            # _reclaim_device_memory — ipc_collect needs refcount zero).
-            del entry  # noqa: F821 — loop var pins the final entry
-            entries.clear()
-            self._reclaim_device_memory()
+        self._release_entries(entries)
 
     def register_kv_cache(
         self,
@@ -738,16 +752,16 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             instance_id: The GPU instance ID (such as PID).
         """
         with self._lock:
-            entry = self._cache_contexts.pop(instance_id, None)
-        if entry is None:
+            popped = [self._cache_contexts.pop(instance_id, None)]
+        if popped[0] is None:
             logger.warning(
                 "No registered GPU context found for instance ID %d", instance_id
             )
             return
 
-        self._release_entry(entry)
-        del entry  # last reference — required for ipc_collect to reclaim
-        self._reclaim_device_memory()
+        # No scalar binding: `popped` must stay the only reference so
+        # _release_entries' reclaim actually unmaps the IPC segments.
+        self._release_entries(popped)
         logger.info("Unregistered KV cache for GPU ID %d", instance_id)
 
     @_lmcache_nvtx_annotate
