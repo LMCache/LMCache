@@ -125,6 +125,38 @@ var _ = Describe("CacheBlendPodInjector webhook (envtest)", Ordered, func() {
 		Expect(got.Annotations).NotTo(HaveKey(AnnotationInjected))
 		Expect(hasVolume(got, "cb-plugin")).To(BeFalse())
 	})
+
+	It("injects across namespaces via a namespace-qualified engine reference", func() {
+		const consumerNS = "cb-consumer"
+		By("creating the consumer namespace")
+		Expect(client.IgnoreAlreadyExists(k8sClient.Create(envtestCtx,
+			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: consumerNS}}))).To(Succeed())
+
+		// Pod in another namespace, namespace-qualified ref to the engine in
+		// testNamespace. Cross-namespace binds need no engine-side config: the
+		// webhook resolves the engine + connection ConfigMap from the engine's
+		// namespace and injects.
+		pod := vllmPod(func(p *corev1.Pod) {
+			p.Name = "vllm-xns"
+			p.Namespace = consumerNS
+			p.Annotations[AnnotationEngine] = testNamespace + "/" + testEngineName
+		})
+		Expect(k8sClient.Create(envtestCtx, pod)).To(Succeed())
+
+		got := &corev1.Pod{}
+		Expect(k8sClient.Get(envtestCtx,
+			types.NamespacedName{Name: "vllm-xns", Namespace: consumerNS}, got)).To(Succeed())
+
+		By("the pod is injected using the engine + ConfigMap from the engine's namespace")
+		Expect(got.Annotations).To(HaveKeyWithValue(AnnotationInjected, valueTrue))
+		Expect(got.Spec.HostIPC).To(BeTrue())
+		Expect(hasVolume(got, "cb-plugin")).To(BeTrue())
+		Expect(got.Spec.InitContainers).NotTo(BeEmpty())
+		c := findContainer(got, "vllm")
+		Expect(c).NotTo(BeNil())
+		kv := argsFlagValue(c.Args, "--kv-transfer-config")
+		Expect(kv).To(ContainSubstring("tcp://" + testEngineName + "." + testNamespace + ".svc"))
+	})
 })
 
 func hasVolume(pod *corev1.Pod, name string) bool {
