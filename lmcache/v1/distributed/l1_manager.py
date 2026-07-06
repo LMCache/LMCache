@@ -10,7 +10,7 @@ import threading
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import Bitmap, TTLLock
+from lmcache.native_storage_ops import TTLLock
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig
 from lmcache.v1.distributed.error import L1Error
@@ -329,29 +329,6 @@ class L1Manager:
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
 
         return ret
-
-    @l1_mgr_synchronized
-    def peek_keys(self, keys: list[ObjectKey]) -> Bitmap:
-        """Point-in-time readability check, without locking or touching.
-
-        Acquires no locks and notifies no listeners, so peeking does not
-        refresh a key's eviction recency. The answer can be stale by the
-        time the caller acts on it: callers must re-validate through
-        ``reserve_read`` / ``reserve_write`` before relying on a key.
-
-        Args:
-            keys: The list of object keys to check.
-
-        Returns:
-            A ``len(keys)``-sized bitmap: bit ``i`` is set iff ``keys[i]``
-            is currently present and readable (not write-locked).
-        """
-        result = Bitmap(len(keys))
-        for i, key in enumerate(keys):
-            entry = self._objects.get(key, None)
-            if entry is not None and entry.available_for_read():
-                result.set(i)
-        return result
 
     @l1_mgr_synchronized
     def finish_read(

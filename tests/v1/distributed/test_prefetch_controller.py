@@ -1740,9 +1740,9 @@ class TestSlidingWindowClaims:
     set, so a prefetch must leave them evictable.
     """
 
-    def test_dead_sw_chunks_stay_evictable(self, l1_manager):
-        """An evictor can delete a dead SW chunk at its first opportunity
-        during a prefetch, without affecting the hit."""
+    def test_dead_sw_chunks_released_by_the_fold(self, l1_manager):
+        """Dead SW chunks are pinned at the start, released once the fold
+        rules them out, and never enter the result."""
         adapter = make_adapter()
         layout = make_layout()
         attn_desc = AttnWindowDesc(num_chunks_in_sw=[-1, 2])
@@ -1774,10 +1774,14 @@ class TestSlidingWindowClaims:
         ctrl.stop()
         adapter.close()
 
-        # The dead chunk was evictable at the evictor's FIRST opportunity —
-        # the prefetch never held a lock on it.
+        # The dead chunk is pinned while the request decides (first
+        # eviction attempt bounces), then released once the fold rules it
+        # out (a later attempt succeeds).
         assert racing_l1.eviction_attempts
-        assert racing_l1.eviction_attempts[0][1] == L1Error.SUCCESS
+        assert racing_l1.eviction_attempts[0][1] == L1Error.KEY_IS_LOCKED
+        assert any(
+            err == L1Error.SUCCESS for _, err in racing_l1.eviction_attempts
+        )
 
         # The eviction did not affect the hit: full-attn chunks 0-3 plus the
         # SW window (chunks 2-3) are retained and read-locked.

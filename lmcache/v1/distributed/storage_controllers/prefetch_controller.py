@@ -38,9 +38,11 @@ docs/design/v1/distributed/storage_controllers/prefetch_l1_pin_pass.md::
 
 Each step in the load phase repeats this figure with its per-segment
 actions aligned below it.
-Vocabulary: pin = take an L1 read lock; skip = never lock (stays evictable);
-loading = L1 write reservation carrying an L2 lookup lock; unpin = return
-the read lock.
+Vocabulary: pin = take an L1 read lock; unpin = return the read lock;
+loading = L1 write reservation carrying an L2 lookup lock. Locking never
+refreshes eviction recency: _finish_request explicitly touches the
+retained keys (L1Manager.touch_keys), the ones the request actually
+serves.
 """
 
 # Standard
@@ -230,10 +232,9 @@ class InFlightPrefetchRequest:
     # Load phase: keys that were write-reserved in L1
     write_reserved_keys: list[ObjectKey] = field(default_factory=list)
     write_reserved_objs: dict[ObjectKey, MemoryObj] = field(default_factory=dict)
-    # Key indices served from L1: read-locked in LOOKUP mode, a
-    # point-in-time peek in WARM mode. Set when the request starts.
+    # Key indices found (and read-locked) in L1 when the request starts.
     l1_lookup_result: Bitmap = field(default_factory=lambda: Bitmap(0))
-    # Keys backing l1_lookup_result with read locks (empty in WARM mode).
+    # Keys backing l1_lookup_result with read locks.
     l1_readlocks: set[ObjectKey] = field(default_factory=set)
 
     group_layout_descs: dict[int, MemoryLayoutDesc] = field(default_factory=dict)
@@ -439,7 +440,7 @@ class PrefetchController(StorageControllerInterface):
 
             |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
                                           ^ L1 hit length               ^ L1+L2 hit
-            |      skip      |   pinned*  |     unpin      |   pinned   |   unpin    |
+            |      unpin     |   pinned*  |     unpin      |   pinned   |   unpin    |
 
         pinned keys are read-locked for the retriever until it consumes
         them; keys in L2 but not in L1 inside the final window are loaded
@@ -903,70 +904,28 @@ class PrefetchController(StorageControllerInterface):
     # =========================================================================
 
     def _pin_l1_keys(
-        self,
-        keys: list[ObjectKey],
-        extra_count: int,
-        policy: TrimPolicy,
-        attn_desc: AttnWindowDesc,
-        mode: PrefetchMode,
+        self, keys: list[ObjectKey], extra_count: int
     ) -> tuple[Bitmap, set[ObjectKey]]:
-        """Peek L1, then pin (read-lock) keys in L1. Details in the figure
-        below::
+        """Pin (read-lock) every key already readable in L1.
 
-            SW keys in L1:
-
-            |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
-                                          ^ L1 hit length               ^ (unknown yet)
-            |      skip      |    pin     |  pin if in L1  |pin if in L1|pin if in L1|
-
-        A lock-free peek estimates the L1 hit length. The pin pass then
-        read-locks the window of that hit and every L1-resident key beyond
-        it — the final window position is unknown until L2 results arrive.
-
-        Keys out of the L1-hit window are never locked nor touched (L2
-        results only extend the hit rightward, so they can never enter the
-        final retained set); their eviction recency stays untouched across
-        multi-round conversations.
+        Pinning does not refresh eviction recency: the LRU signal is sent
+        explicitly by ``_finish_request`` for the retained keys only.
 
         Args:
             keys: The request's object keys, in prefix order.
             extra_count: Extra read locks per pinned key.
-            policy: Trim policy for the L1-only fold.
-            attn_desc: Cross-chunk attention windows of all object groups.
-            mode: WARM returns the peek with no locks taken.
 
         Returns:
-            ``(l1_lookup_result, l1_readlocks)`` — key indices served by L1 and
-            the read-locked keys backing them (empty in WARM mode, where the
-            bitmap is the unlocked point-in-time peek).
+            ``(l1_lookup_result, l1_readlocks)`` — key indices found in L1
+            and the read-locked keys backing them.
         """
-        num_keys = len(keys)
-        peek_bitmap = self._l1_manager.peek_keys(keys)
-
-        if mode is PrefetchMode.WARM or peek_bitmap.popcount() == 0:
-            return peek_bitmap, set()
-
-        l1_hit, l1_retain = build_trim_mask(peek_bitmap, num_keys, policy, attn_desc)
-        stride = attn_desc.num_object_groups * attn_desc.world_size
-        l1_hit_mask = Bitmap(num_keys, l1_hit * stride)
-        pin_bitmap = l1_retain | (peek_bitmap & (~l1_hit_mask))
-
-        keys_to_pin = pin_bitmap.gather(keys)
-        if not keys_to_pin:
-            return Bitmap(num_keys), set()
-
-        pin_results = self._l1_manager.reserve_read(
-            keys_to_pin, extra_count=extra_count
-        )
-        # Record the keys reserve_read locked; keys that failed (e.g.
-        # evicted since the peek) are left out of the L1 lookup result.
-        l1_lookup_result = Bitmap(num_keys)
+        pin_results = self._l1_manager.reserve_read(keys, extra_count=extra_count)
+        l1_lookup_result = Bitmap(len(keys))
         l1_readlocks: set[ObjectKey] = set()
-        pin_indices = pin_bitmap.get_indices_list()
-        for idx, key in zip(pin_indices, keys_to_pin, strict=True):
+        for i, key in enumerate(keys):
             err, _obj = pin_results[key]
             if err == L1Error.SUCCESS:
-                l1_lookup_result.set(idx)
+                l1_lookup_result.set(i)
                 l1_readlocks.add(key)
         return l1_lookup_result, l1_readlocks
 
@@ -983,9 +942,7 @@ class PrefetchController(StorageControllerInterface):
     ) -> None:
         """Pin L1-resident keys, then submit lookup_and_lock to all live
         (non-draining) adapters for a new request."""
-        l1_lookup_result, l1_readlocks = self._pin_l1_keys(
-            keys, extra_count, policy, attn_desc, mode
-        )
+        l1_lookup_result, l1_readlocks = self._pin_l1_keys(keys, extra_count)
         request = InFlightPrefetchRequest(
             request_id=request_id,
             keys=keys,
@@ -1091,7 +1048,7 @@ class PrefetchController(StorageControllerInterface):
         # SW keys in L1:
         # |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
         #                               ^ L1 hit length               ^ L1+L2 hit length
-        # |      skip      | keep pin*  |     unpin      |  keep pin  |   unpin    |
+        # |     unpin      | keep pin*  |     unpin      |  keep pin  |   unpin    |
         # (*) the L1 hit's own window: kept even when outside the final
         # window, as the fallback promise if the L2 load never lands.
         _l1_hit, l1_fallback_retain = build_trim_mask(
@@ -1415,7 +1372,7 @@ class PrefetchController(StorageControllerInterface):
 
             |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
                                           ^ L1 hit length               ^ L1+L2 hit
-            |      skip      |   unpin    |     unpin      |   pinned   |   unpin    |
+            |     unpin      |   unpin    |     unpin      |   pinned   |   unpin    |
         """
         num_keys = len(request.keys)
 
@@ -1449,7 +1406,7 @@ class PrefetchController(StorageControllerInterface):
         #                               ^ L1 hit length               ^ L1+L2 hit length
         # |       -        |     -      |       -        |load→pinned |     -      |
         # SW keys in L1:
-        # |      skip      |   unpin    |     unpin      |   pinned   |   unpin    |
+        # |     unpin      |   unpin    |     unpin      |   pinned   |   unpin    |
         if loaded_keys:
             if request.mode is PrefetchMode.WARM:
                 # Warm: make ready, pin nothing.
@@ -1496,17 +1453,30 @@ class PrefetchController(StorageControllerInterface):
         result_bitmap = result_bitmap | request.l1_lookup_result
 
         # Release read locks for any key outside the retained set (partial
-        # load failures can create gaps). WARM requests hold no read locks.
+        # load failures can create gaps). WARM has no retriever to release
+        # the retained keys later, so it releases everything it holds.
         hit_length, retained = build_trim_mask(
             result_bitmap,
             num_keys,
             request.policy,
             request.attn_desc,
         )
-        if request.mode is not PrefetchMode.WARM:
+        if request.mode is PrefetchMode.WARM:
+            if request.l1_readlocks:
+                l1_mgr.finish_read(
+                    list(request.l1_readlocks), extra_count=request.extra_count
+                )
+                request.l1_readlocks.clear()
+        else:
             released = (result_bitmap & (~retained)).gather(request.keys)
             if released:
                 l1_mgr.finish_read(released, extra_count=request.extra_count)
+
+        # LRU: the retained keys are the ones this request actually serves;
+        # touch them (locking/unlocking never refreshes recency).
+        retained_keys = retained.gather(request.keys)
+        if retained_keys:
+            l1_mgr.touch_keys(retained_keys)
 
         # No-load finishes reach here without a reported hit; the load path
         # already reported at submit time (so the engine never waits on the
