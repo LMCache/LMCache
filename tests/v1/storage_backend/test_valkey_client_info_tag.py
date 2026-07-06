@@ -26,9 +26,9 @@ import pytest
 # First Party
 from lmcache.v1.storage_backend.connector.valkey_connector import (
     CLIENT_INFO_TAG_MIN_GLIDE_VERSION,
-    _ThreadWorkerPool,
     _glide_config_supports_client_info_tag,
     _lmcache_client_info_tag,
+    _ThreadWorkerPool,
 )
 
 
