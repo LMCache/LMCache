@@ -467,7 +467,7 @@ On the vLLM side, specify the LMCache server host and port via the
 
     vllm serve Qwen/Qwen3-14B \
         --kv-transfer-config \
-        '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "127.0.0.1", "lmcache.mp.port": 6000}}'
+        '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "tcp://127.0.0.1", "lmcache.mp.port": 6000}}'
 
 To target multiple LMCache servers from a single vLLM deployment, pass a
 list (or comma-separated string) of server URLs via
