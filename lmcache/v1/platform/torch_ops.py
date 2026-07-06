@@ -1484,7 +1484,7 @@ def _transfer_sglang_mha(
 
 
 def _transfer_per_layer_kv_tuple(
-    paged_tensors: list[tuple[torch.Tensor, torch.Tensor]],
+    paged_tensors: list[list[torch.Tensor]],
     object_tensors: list[torch.Tensor],
     block_ids: torch.Tensor | list[int],
     n_block_ids: int,
@@ -1502,8 +1502,8 @@ def _transfer_per_layer_kv_tuple(
     target_device = paged_tensors[0][0].device
 
     # H2D stages objects on the paged tensors' device once, up front.
-    objs_on_device = (
-        None if is_d2h else [obj.to(target_device) for obj in object_tensors]
+    objs_on_device: list[torch.Tensor] = (
+        [] if is_d2h else [obj.to(target_device) for obj in object_tensors]
     )
     block_ids_dev = torch.as_tensor(block_ids, dtype=torch.long, device=target_device)
 

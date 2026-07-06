@@ -852,8 +852,8 @@ def test_compute_kv_layout_empty_raises_value_error() -> None:
 def test_compute_kv_layout_per_layer_kv_tuples() -> None:
     """compute_kv_layout must accept per-layer ``(K, V)`` tuples."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context.base import compute_kv_layout
     import lmcache.lmcache_native as lmc_ops
+    from lmcache.v1.multiprocess.transfer_context.base import compute_kv_layout
 
     source = _make_per_layer_kv_tuple_caches(
         num_layers=2, num_blocks=8, block_size=4, num_heads=2, head_size=8
@@ -876,10 +876,10 @@ def test_compute_kv_layout_per_layer_kv_tuples() -> None:
 
 def test_per_layer_kv_tuple_format_accessors_and_grouping() -> None:
     # First Party
+    import lmcache.lmcache_native as lmc_ops
+    from lmcache.utils import EngineType
     from lmcache.v1.gpu_connector import utils as U
     from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-    from lmcache.utils import EngineType
-    import lmcache.lmcache_native as lmc_ops
 
     F = lmc_ops.EngineKVFormat
     num_layers, num_blocks, block_size, num_heads, head_size = 3, 8, 4, 2, 8
