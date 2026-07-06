@@ -3,6 +3,7 @@
 """Tests for MaruL1Manager (fake maru runtime, no CXL required)."""
 
 # Standard
+from unittest.mock import MagicMock
 import time
 
 # Third Party
@@ -19,6 +20,7 @@ try:
         _PendingRead,
         object_key_to_string,
     )
+    from lmcache.v1.mp_observability.event import EventType
 
     # Local
     from .maru_fakes import RecordingListener, make_maru_manager
@@ -599,6 +601,72 @@ def test_finish_read_after_sweep_is_not_exist():
     manager._sweep_once()
 
     assert manager.finish_read([k])[k] == L1Error.KEY_NOT_EXIST
+
+
+# =========================================================================
+# event_bus observability parity (C11a): mirrors stock L1Manager publishes
+# =========================================================================
+
+
+def _keys_for(bus, event_type):
+    """Return the ``keys`` metadata of every publish of ``event_type``."""
+    return [
+        c.args[0].metadata["keys"]
+        for c in bus.publish.call_args_list
+        if c.args[0].event_type == event_type
+    ]
+
+
+def test_event_bus_write_read_delete_lifecycle():
+    manager, handler, _ = make_maru_manager()
+    manager._event_bus = MagicMock()
+    k = _key(1)
+
+    manager.reserve_write([k], [False], _LAYOUT, mode="new")
+    manager.finish_write([k])
+    manager.reserve_read([k])
+    manager.finish_read([k])
+    manager.delete([k])
+
+    assert _keys_for(manager._event_bus, EventType.L1_WRITE_RESERVED) == [[k]]
+    assert _keys_for(manager._event_bus, EventType.L1_WRITE_FINISHED) == [[k]]
+    assert _keys_for(manager._event_bus, EventType.L1_READ_RESERVED) == [[k]]
+    assert _keys_for(manager._event_bus, EventType.L1_READ_FINISHED) == [[k]]
+    assert [k] in _keys_for(manager._event_bus, EventType.L1_KEYS_EVICTED)  # delete
+
+
+def test_event_bus_promote_publishes_promote_event_not_write_finished():
+    manager, _, _ = make_maru_manager()
+    manager._event_bus = MagicMock()
+    k = _key(1)
+    manager.reserve_write([k], [False], _LAYOUT, mode="new")
+
+    manager.finish_write_and_reserve_read([k])
+    assert _keys_for(
+        manager._event_bus, EventType.L1_WRITE_FINISHED_AND_READ_RESERVED
+    ) == [[k]]
+    # anti re-store at the event-bus level too.
+    assert _keys_for(manager._event_bus, EventType.L1_WRITE_FINISHED) == []
+
+
+def test_event_bus_temporary_finish_read_publishes_evicted():
+    manager, _, _ = make_maru_manager()
+    manager._event_bus = MagicMock()
+    k = _key(1)
+    manager.reserve_write([k], [True], _LAYOUT, mode="new")
+    manager.finish_write_and_reserve_read([k])  # temporary read staged
+
+    manager.finish_read([k])
+    assert _keys_for(manager._event_bus, EventType.L1_READ_FINISHED) == [[k]]
+    assert [k] in _keys_for(manager._event_bus, EventType.L1_KEYS_EVICTED)
+
+
+def test_event_bus_touch_keys_does_not_publish():
+    manager, _, _ = make_maru_manager()
+    manager._event_bus = MagicMock()
+
+    manager.touch_keys([_key(1)])
+    manager._event_bus.publish.assert_not_called()
 
 
 def test_report_status_keys():

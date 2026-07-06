@@ -59,6 +59,8 @@ from lmcache.v1.distributed.memory_manager.maru_memory_allocator import (
     MaruMemoryAllocator,
 )
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import get_event_bus
 
 if TYPE_CHECKING:
     # Third Party
@@ -171,6 +173,9 @@ class MaruL1Manager:
         self._pending_read: dict[ObjectKey, _PendingRead] = {}
         self._pending_write: dict[ObjectKey, _PendingWrite] = {}
         self._registered_listeners: list[L1ManagerListener] = []
+        # PARITY(L1Manager): observability events go to the shared event bus
+        # alongside the listener notifications.
+        self._event_bus = get_event_bus()
         # MARU: W1+R1 orphan sweeper -- a crashed/abandoned client leaves write
         # pages or read pins behind; reclaim them once their TTL elapses.
         self._sweep_interval = max(
@@ -191,6 +196,15 @@ class MaruL1Manager:
         # PARITY(L1Manager.register_listener): inline lock, append only.
         with self._lock:
             self._registered_listeners.append(listener)
+
+    def _publish(self, event_type: EventType, keys: list[ObjectKey]) -> None:
+        """Publish an L1 observability event (PARITY with stock L1Manager).
+
+        Args:
+            event_type: The L1 event type to publish.
+            keys: The affected object keys (event metadata).
+        """
+        self._event_bus.publish(Event(event_type=event_type, metadata={"keys": keys}))
 
     def _safe_unpin(self, handler: "MaruHandler", key_strs: list[str]) -> None:
         """Release server pins, logging (not raising) on RPC failure."""
@@ -479,6 +493,7 @@ class MaruL1Manager:
         # holds (feeds the eviction LRU and the store controller).
         for listener in self._registered_listeners:
             listener.on_l1_keys_reserved_read(successful_keys)
+        self._publish(EventType.L1_READ_RESERVED, successful_keys)
         return ret
 
     @_maru_l1_synchronized
@@ -575,6 +590,8 @@ class MaruL1Manager:
         for listener in self._registered_listeners:
             listener.on_l1_keys_read_finished(successful_keys)
             listener.on_l1_keys_deleted_by_manager(need_to_free_keys)
+        self._publish(EventType.L1_READ_FINISHED, successful_keys)
+        self._publish(EventType.L1_KEYS_EVICTED, need_to_free_keys)
         return ret
 
     @_maru_l1_synchronized
@@ -667,6 +684,7 @@ class MaruL1Manager:
         # holds (the eviction LRU treats them as unevictable).
         for listener in self._registered_listeners:
             listener.on_l1_keys_reserved_write(successful_keys)
+        self._publish(EventType.L1_WRITE_RESERVED, successful_keys)
         return ret
 
     @_maru_l1_synchronized
@@ -701,6 +719,7 @@ class MaruL1Manager:
         # event -- that is on_l1_keys_finish_write_and_reserve_read).
         for listener in self._registered_listeners:
             listener.on_l1_keys_write_finished(registered)
+        self._publish(EventType.L1_WRITE_FINISHED, registered)
         return ret
 
     @_maru_l1_synchronized
@@ -778,6 +797,7 @@ class MaruL1Manager:
 
         for listener in self._registered_listeners:
             listener.on_l1_keys_finish_write_and_reserve_read(successful_keys)
+        self._publish(EventType.L1_WRITE_FINISHED_AND_READ_RESERVED, successful_keys)
         return ret
 
     def _promote_retained(
@@ -860,6 +880,7 @@ class MaruL1Manager:
         # removed from the directory (the eviction LRU drops them).
         for listener in self._registered_listeners:
             listener.on_l1_keys_deleted_by_manager(successful_keys)
+        self._publish(EventType.L1_KEYS_EVICTED, successful_keys)
         return ret
 
     def touch_keys(self, keys: list[ObjectKey]) -> None:
@@ -897,6 +918,7 @@ class MaruL1Manager:
         # PARITY(L1Manager.clear): a force-clear notifies listeners of the drops.
         for listener in self._registered_listeners:
             listener.on_l1_keys_deleted_by_manager(dropped)
+        self._publish(EventType.L1_KEYS_EVICTED, dropped)
 
     def _drain_staging(self, force: bool) -> list[ObjectKey]:
         """Unpin staged reads (refcount times) and abort staged writes.
