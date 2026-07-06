@@ -170,6 +170,11 @@ class MaruL1Manager:
         self._read_ttl_seconds = config.read_ttl_seconds
         self._lock = threading.Lock()
         self._allocator = MaruMemoryAllocator(maru_config)
+        # MARU: last-known CXL device free (from get_stats ``cxl_pool``). Reused
+        # when a get_stats RPC fails to deliver it (e.g. a transient timeout) so
+        # the eviction watermark's ``total`` does not momentarily collapse to the
+        # owned pool and trip a spurious eviction. Stays 0 until the first read.
+        self._last_cxl_free: int = 0
         self._pending_read: dict[ObjectKey, _PendingRead] = {}
         self._pending_write: dict[ObjectKey, _PendingWrite] = {}
         self._registered_listeners: list[L1ManagerListener] = []
@@ -970,11 +975,24 @@ class MaruL1Manager:
         return key not in self._pending_read and key not in self._pending_write
 
     def get_memory_usage(self) -> tuple[int, int]:
-        """Return (used, total) bytes of this instance's owned CXL regions.
+        """Return (used, total) bytes for the eviction watermark.
 
-        MARU: usage is the owned-region allocation pressure -- the basis the
-        stock eviction watermark expects. Before the pool is up, reports the
-        configured capacity so watermark math stays sane.
+        MARU: ``used`` is this instance's owned-region allocation; ``total`` is
+        that owned pool **plus the CXL device's free space**
+        (``cxl_pool.free_size`` from the shared resource manager). Anchoring
+        ``total`` to "owned pool + free" -- not just the owned pool -- keeps the
+        stock watermark from tripping while the device still has room: with free
+        CXL left the pool auto-expands instead of evicting, and only once the
+        device is full (``free_size`` 0 -> ``total`` collapses to the owned pool)
+        does eviction engage on this instance's own pages. Before the pool is up,
+        reports the configured capacity so watermark math stays sane.
+
+        ``free`` is cached across calls (``_last_cxl_free``): a get_stats RPC that
+        does not deliver ``cxl_pool`` -- a transient timeout, or an older server
+        that never sends it -- reuses the last-known free instead of dropping to
+        0, so a momentary RPC failure does not collapse ``total`` to the owned
+        pool and fire a spurious eviction. It stays 0 until the first successful
+        read (older servers therefore keep the prior owned-pool behavior).
 
         Returns:
             A tuple of (used_bytes, total_bytes).
@@ -983,11 +1001,20 @@ class MaruL1Manager:
             return 0, self._config.pool_size_bytes
         try:
             handler = self._allocator.handler
-            regions = handler.get_stats().get("store_regions")
+            stats = handler.get_stats()
+            regions = stats.get("store_regions")
             if not regions:
                 return 0, self._config.pool_size_bytes
             used = regions["total_allocated_pages"] * handler.get_chunk_size()
-            return used, regions["total_pool_size"]
+            own_pool = regions["total_pool_size"]
+            # A present cxl_pool (incl. free_size 0 when the device is genuinely
+            # full) updates the cache; a missing one reuses the last-known free.
+            free = stats.get("cxl_pool", {}).get("free_size")
+            if free is None:
+                free = self._last_cxl_free
+            else:
+                self._last_cxl_free = free
+            return used, own_pool + free
         except Exception:
             logger.exception("MaruL1Manager: get_stats failed")
             return 0, self._config.pool_size_bytes
