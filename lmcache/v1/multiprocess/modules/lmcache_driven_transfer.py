@@ -533,6 +533,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             ]
             for iid in stale_ids:
                 reaped.append((iid, self._cache_contexts.pop(iid)))
+        reaped_ids: list[int] = []
         for iid, entry in reaped:
             self._release_entry(entry)
             logger.warning(
@@ -541,17 +542,48 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 now - entry.last_seen,
                 entry.has_liveness_signal,
             )
-        return [iid for iid, _ in reaped]
+            reaped_ids.append(iid)
+        if reaped:
+            # Drop the last ContextEntry references BEFORE reclaiming: the
+            # entries' cache contexts hold the CUDA-IPC-imported KV tensors,
+            # and ipc_collect() only frees segments whose refcount reached
+            # zero (see _reclaim_device_memory).
+            del entry  # noqa: F821 — loop var still pins the final entry
+            reaped.clear()
+            self._reclaim_device_memory()
+        return reaped_ids
 
     def _release_entry(self, entry: ContextEntry) -> None:
         """Release resources for a popped entry (run outside the lock).
+
+        NOTE: does NOT return device memory by itself — the caller must drop
+        every reference to *entry* and then call
+        :meth:`_reclaim_device_memory`, otherwise the CUDA-IPC-imported KV
+        segments stay mapped in this process (observed as ~112 GB/GPU
+        retained by the server after a vLLM client died, LMCache#4014).
 
         Args:
             entry: The entry removed from the registry.
         """
         entry.cache_context.close()
         self._ctx.layout_desc_registry.unregister(entry.model_name, entry.world_size)
+
+    def _reclaim_device_memory(self) -> None:
+        """Return the device memory of released entries to the system.
+
+        ``empty_cache()`` alone does NOT release CUDA-IPC-*imported*
+        segments: they live in the caching allocator's IPC cache and are
+        only unmapped by ``torch.cuda.ipc_collect()`` — and only once the
+        last tensor referencing them is gone. Callers must therefore drop
+        all ``ContextEntry`` references BEFORE calling this; a live
+        reference turns ``ipc_collect()`` into a no-op for that entry's
+        segments. Guarded ``getattr``: non-CUDA device modules (xpu / musa)
+        do not expose ``ipc_collect``.
+        """
         torch_dev.empty_cache()
+        ipc_collect = getattr(torch_dev, "ipc_collect", None)
+        if ipc_collect is not None:
+            ipc_collect()
 
     def get_handlers(self) -> list[HandlerSpec]:
         """Return handler specs for all request types this module serves.
@@ -616,10 +648,15 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         with self._lock:
             entries = list(self._cache_contexts.values())
             self._cache_contexts.clear()
+        released = bool(entries)
         for entry in entries:
             entry.cache_context.close()
-        if entries:
-            torch_dev.empty_cache()
+        if released:
+            # Drop the tensor-holding references before reclaiming (see
+            # _reclaim_device_memory — ipc_collect needs refcount zero).
+            del entry  # noqa: F821 — loop var pins the final entry
+            entries.clear()
+            self._reclaim_device_memory()
 
     def register_kv_cache(
         self,
@@ -709,6 +746,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             return
 
         self._release_entry(entry)
+        del entry  # last reference — required for ipc_collect to reclaim
+        self._reclaim_device_memory()
         logger.info("Unregistered KV cache for GPU ID %d", instance_id)
 
     @_lmcache_nvtx_annotate
