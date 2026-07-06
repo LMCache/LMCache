@@ -25,6 +25,7 @@ from lmcache.v1.distributed.config import EvictionConfig, StorageManagerConfig
 from lmcache.v1.distributed.error import L1Error, strerror
 from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2AdapterListener
 from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l1_protocol import L1ManagerInterface
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.config import L2AdapterConfigBase
@@ -33,6 +34,7 @@ from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2ReconfigureError,
 )
 from lmcache.v1.distributed.l2_adapters.serde_wrapper import SerdeL2AdapterWrapper
+from lmcache.v1.distributed.maru_l1_manager import MaruL1Manager
 from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.distributed.serde import create_serde_processor
 from lmcache.v1.distributed.storage_controllers import (
@@ -49,7 +51,7 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
     create_store_policy,
 )
-from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
@@ -66,7 +68,15 @@ logger = init_logger(__name__)
 
 class StorageManager:
     def __init__(self, config: StorageManagerConfig):
-        self._l1_manager = L1Manager(config.l1_manager_config)
+        # Select the L1 backend: the maru shared CXL tier when configured,
+        # otherwise the stock local-DRAM manager. Both satisfy
+        # L1ManagerInterface, so the controllers below drive either unchanged.
+        l1_config = config.l1_manager_config
+        self._l1_manager: L1ManagerInterface = (
+            MaruL1Manager(l1_config)
+            if l1_config.memory_config.maru_config is not None
+            else L1Manager(l1_config)
+        )
         self._event_bus = get_event_bus()
 
         # L1 eviction controller
@@ -80,7 +90,9 @@ class StorageManager:
         # a ``serde_config``, the adapter is wrapped with
         # ``SerdeL2AdapterWrapper`` so controllers see a plain L2 adapter
         # and serde is transparent.
-        self._l1_memory_desc = self._l1_manager.get_l1_memory_desc()
+        self._l1_memory_desc: L1MemoryDesc | None = (
+            self._l1_manager.get_l1_memory_desc()
+        )
         self._next_adapter_id = 0
         # Serializes add_l2_adapter / delete_l2_adapter against each other.
         self._lifecycle_lock = threading.Lock()
@@ -167,6 +179,40 @@ class StorageManager:
         )
 
     # External APIs for serving engine integration code to call
+    def register_kv_layout(
+        self,
+        layout_desc: MemoryLayoutDesc,
+        fmt: MemoryFormat,
+        chunk_size_in_tokens: int,
+        num_object_groups: int,
+    ) -> None:
+        """Bind the KV layout to the L1 backend (maru CXL pool bring-up).
+
+        Stock L1 sizes its pool from config at construction and ignores this;
+        the maru L1 tier defers pool creation until the layout is known, so the
+        engine calls this once the KV cache is registered. A no-op for stock.
+
+        Args:
+            layout_desc: Per-group chunk shapes and dtypes.
+            fmt: The KV memory format.
+            chunk_size_in_tokens: Tokens per chunk.
+            num_object_groups: Number of KV object groups in the layout.
+
+        Raises:
+            ValueError: The maru L1 tier supports a single object group only
+                (multi-model support is a maru TODO).
+        """
+        if not isinstance(self._l1_manager, MaruL1Manager):
+            return
+        if num_object_groups > 1:
+            raise ValueError(
+                "maru L1 supports a single object group only, got "
+                f"{num_object_groups} (multi-model support is a maru TODO)"
+            )
+        self._l1_manager.register_kv_layout(
+            layout_desc.shapes, layout_desc.dtypes, fmt, chunk_size_in_tokens
+        )
+
     @enable_tracing()
     def reserve_write(
         self,
@@ -757,7 +803,19 @@ class StorageManager:
 
     @property
     def l1_memory_desc(self) -> L1MemoryDesc:
-        """Descriptor of the L1 memory buffer backing this storage manager."""
+        """Descriptor of the L1 memory buffer backing this storage manager.
+
+        Raises:
+            RuntimeError: The maru L1 tier exposes no single registerable
+                region (``get_l1_memory_desc`` is None). The only consumer is
+                p2p, which is rejected at startup for maru, so this never
+                fires in practice.
+        """
+        if self._l1_memory_desc is None:
+            raise RuntimeError(
+                "L1 memory descriptor is unavailable (the maru L1 tier has no "
+                "single registerable region)"
+            )
         return self._l1_memory_desc
 
     def get_l2_usages(
