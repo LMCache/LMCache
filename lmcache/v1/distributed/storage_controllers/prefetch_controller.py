@@ -904,20 +904,30 @@ class PrefetchController(StorageControllerInterface):
     # =========================================================================
 
     def _pin_l1_keys(
-        self, keys: list[ObjectKey], extra_count: int
+        self,
+        keys: list[ObjectKey],
+        extra_count: int,
+        policy: TrimPolicy,
+        attn_desc: AttnWindowDesc,
     ) -> tuple[Bitmap, set[ObjectKey]]:
-        """Pin (read-lock) every key already readable in L1.
+        """Read-lock the L1-resident keys the request will hold.
 
-        Pinning does not refresh eviction recency: the LRU signal is sent
-        explicitly by ``_finish_request`` for the retained keys only.
+        Pins every key readable in L1, then, for windowed ``PREFIX``
+        retention, releases the read locks on sliding-window chunks behind
+        the L1 hit's own window. Pinning does not refresh eviction recency;
+        the LRU signal is sent by ``_finish_request`` for the retained keys
+        only.
 
         Args:
             keys: The request's object keys, in prefix order.
             extra_count: Extra read locks per pinned key.
+            policy: The request's retained-subset policy.
+            attn_desc: Per-group cross-chunk attention windows.
 
         Returns:
-            ``(l1_lookup_result, l1_readlocks)`` — key indices found in L1
-            and the read-locked keys backing them.
+            ``(l1_lookup_result, l1_readlocks)`` — the key indices held in L1
+            and the keys backing them, after releasing out-of-window
+            sliding-window chunks.
         """
         pin_results = self._l1_manager.reserve_read(keys, extra_count=extra_count)
         l1_lookup_result = Bitmap(len(keys))
@@ -927,6 +937,22 @@ class PrefetchController(StorageControllerInterface):
             if err == L1Error.SUCCESS:
                 l1_lookup_result.set(i)
                 l1_readlocks.add(key)
+        if policy is not TrimPolicy.PREFIX:
+            return l1_lookup_result, l1_readlocks
+        hit_length, l1_window = build_trim_mask(
+            l1_lookup_result, len(keys), policy, attn_desc
+        )
+        stride = attn_desc.num_object_groups * attn_desc.world_size
+        within_l1_hit = Bitmap(len(keys), hit_length * stride)
+        # evictable: pinned SW chunks behind the window, within the L1 prefix
+        # hit -- won't be read again, so release their locks.
+        evictable = l1_lookup_result & ~l1_window & within_l1_hit
+        if evictable.popcount() > 0:
+            to_unpin = [key for key in evictable.gather(keys) if key in l1_readlocks]
+            if to_unpin:
+                self._l1_manager.finish_read(to_unpin, extra_count=extra_count)
+                l1_readlocks.difference_update(to_unpin)
+            l1_lookup_result = l1_lookup_result & ~evictable
         return l1_lookup_result, l1_readlocks
 
     def _start_lookup_phase(
@@ -942,7 +968,9 @@ class PrefetchController(StorageControllerInterface):
     ) -> None:
         """Pin L1-resident keys, then submit lookup_and_lock to all live
         (non-draining) adapters for a new request."""
-        l1_lookup_result, l1_readlocks = self._pin_l1_keys(keys, extra_count)
+        l1_lookup_result, l1_readlocks = self._pin_l1_keys(
+            keys, extra_count, policy, attn_desc
+        )
         request = InFlightPrefetchRequest(
             request_id=request_id,
             keys=keys,
@@ -1021,8 +1049,8 @@ class PrefetchController(StorageControllerInterface):
         )
         load_plan = trim_load_plan_with_mask(load_plan, ~request.l1_lookup_result)
 
-        # Step 2 — the union fold sets the L1+L2 hit length. Dead pins are
-        # unpinned just below (no-load finishes release them at finish).
+        # Step 2 — the union fold sets the L1+L2 hit length. Evictable pins
+        # are unpinned just below (no-load finishes release them at finish).
         # Trim to the retained subset of the L1 ∪ L2 union, so
         # L1-resident keys extend the hit even where L2 lacks them.
         union_bitmap = (

@@ -1731,18 +1731,19 @@ class TestConcurrentEvictionRace:
 
 
 class TestSlidingWindowClaims:
-    """The L1 claim must not lock out-of-window sliding-window chunks.
+    """The pin pass must release out-of-window sliding-window chunks.
 
     Layout (chunk-major, groups [full=-1, sw=2], 4 chunks, 8 keys): even
     indices are the full-attention group, odd indices the sliding-window
     group. The SW window covers chunks 2-3 (indices 5 and 7), leaving the
-    SW chunks at indices 1 and 3 dead — they can never enter the retained
-    set, so a prefetch must leave them evictable.
+    SW chunks at indices 1 and 3 out of the window — they can never enter
+    the retained set, so a prefetch must leave them evictable.
     """
 
-    def test_dead_sw_chunks_released_by_the_fold(self, l1_manager):
-        """Dead SW chunks are pinned at the start, released once the fold
-        rules them out, and never enter the result."""
+    def test_dead_sw_chunks_released_at_pin_time(self, l1_manager):
+        """Out-of-window SW chunks are pinned by the pin pass, released in
+        that same pass (before the L2 lookup) once the L1-only fold rules them
+        out, so they stay evictable and never enter the result."""
         adapter = make_adapter()
         layout = make_layout()
         attn_desc = AttnWindowDesc(num_chunks_in_sw=[-1, 2])
@@ -1756,7 +1757,7 @@ class TestSlidingWindowClaims:
             assert existing[key][0] == L1Error.SUCCESS
         l1_manager.finish_write(keys)
 
-        # Evictor races for the dead SW chunk 0 (index 1).
+        # Evictor races for the evictable SW chunk 0 (index 1).
         racing_l1 = EvictionRacingL1Manager(l1_manager, target_key=keys[1])
         ctrl = PrefetchController(
             l1_manager=racing_l1,  # type: ignore[arg-type]
@@ -1774,14 +1775,12 @@ class TestSlidingWindowClaims:
         ctrl.stop()
         adapter.close()
 
-        # The dead chunk is pinned while the request decides (first
-        # eviction attempt bounces), then released once the fold rules it
-        # out (a later attempt succeeds).
+        # The evictable chunk is pinned by the pin pass (first eviction
+        # attempt bounces), then released in that same pass (a later
+        # attempt succeeds).
         assert racing_l1.eviction_attempts
         assert racing_l1.eviction_attempts[0][1] == L1Error.KEY_IS_LOCKED
-        assert any(
-            err == L1Error.SUCCESS for _, err in racing_l1.eviction_attempts
-        )
+        assert any(err == L1Error.SUCCESS for _, err in racing_l1.eviction_attempts)
 
         # The eviction did not affect the hit: full-attn chunks 0-3 plus the
         # SW window (chunks 2-3) are retained and read-locked.
@@ -1793,8 +1792,8 @@ class TestSlidingWindowClaims:
         for key in retained_keys:
             assert read_results[key][0] == L1Error.SUCCESS
 
-        # The other dead SW chunk was never locked either: it is deletable
-        # the moment the request completes.
+        # The other evictable SW chunk is released in the pin pass too: it
+        # is deletable the moment the request completes.
         assert l1_manager.delete([keys[3]])[keys[3]] == L1Error.SUCCESS
 
         l1_manager.finish_read(retained_keys)

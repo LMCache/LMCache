@@ -5,11 +5,22 @@ Design of the prefetch flow in
 
 ## Invariant
 
-> Every key counted toward the reported hit is **lock-held from the moment it
-> is discovered** (L1 read lock, or L2 lookup lock carried by an L1 write
+> Every key **required for** the reported hit is **lock-held from the moment
+> it is discovered** (L1 read lock, or L2 lookup lock carried by an L1 write
 > reservation) until the request completes. There is never an
-> observed-but-unlocked instant, so a concurrent eviction can shrink what gets
-> discovered but can never invalidate a hit already reported.
+> observed-but-unlocked instant for a required key, so a concurrent eviction
+> can shrink what gets discovered but can never invalidate a hit already
+> reported.
+
+Sliding-window carve-out: chunks behind the L1 prefix hit's own window are
+released during the pin pass, before the L2 lookup. L2 only extends the hit
+(`H >= H1`), so the final window's left edge `H - w >= H1 - w` never moves
+left — a chunk behind the L1 window can never re-enter any window, so it is
+never required. Releasing it early lets the allocator reclaim it while a slow
+L2 lookup (RDMA today, a remote/network adapter later) is outstanding. The
+release is restricted to the L1 prefix hit (`Bitmap(num_keys, H1 * stride)`):
+an L1 *suffix* that L2 later connects into the hit is out of the L1-only hit,
+not behind its window, so it stays pinned.
 
 Corollary: every fold (`build_trim_mask`) consumes **lock-acquisition
 results** — the pin pass observes L1 by locking it (`reserve_read`), so
@@ -21,7 +32,7 @@ lock; **loading** = L1 write reservation carrying an L2 lookup lock.
 **LRU is decoupled from locking**: pinning and unpinning never refresh
 eviction recency (`on_l1_keys_read_finished` is a no-op for the eviction
 policy). `_finish_request` explicitly touches the retained keys — the ones
-the request actually serves — via `L1Manager.touch_keys`. Dead keys are pinned while
+the request actually serves — via `L1Manager.touch_keys`. Evictable keys are pinned while
 the request decides, released once the folds rule them out, and their
 recency is never refreshed, so multi-round conversations age out their
 heads naturally.
@@ -51,19 +62,21 @@ Actions per segment at each step:
                             |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
                                                           ^ L1 hit length               ^ L1+L2 hit length
 
-pin pass    (SW in L1)        |      pin       |    pin     |      pin       |    pin     |    pin     |
+pin pass    (SW in L1)        |     unpin      |    pin     |      pin       |    pin     |    pin     |
 step 1 plan (L2 candidates)   |       -        |     -      |   candidate    | candidate  | candidate  |
-step 2 fold (SW in L1)        |     unpin      | keep pin** |     unpin      |  keep pin  |   unpin    |
+step 2 fold (SW in L1)        |    (unpinned)  | keep pin** |     unpin      |  keep pin  |   unpin    |
 step 3 rsrv (SW in L2 ∖ L1)   |       -        |     -      |       -        |  loading*  |     -      |
 step 4      (L2 locks)        |      free      |    free    |      free      | keep plan  |    free    |
 step 5 load (SW in L2 ∖ L1)   |       -        |     -      |       -        |  loading   |     -      |
 finish      (SW in L2 ∖ L1)   |       -        |     -      |       -        |load→pinned |     -      |
 finish      (SW in L1)        |     unpin      |   unpin    |     unpin      |   pinned   |   unpin    |
 
-(on the load path, pins the fold leaves outside the retained set are
- unpinned right after step 2 — before the reservation — so the allocator
- can evict them for the load buffers; no-load finishes release them at
- finish. Finish reconciles idempotently either way.)
+(out-of-L1-hit-sw chunks are released during the pin pass, before the L2
+ lookup — step 2's unpin of that segment is then a no-op. Other pins the
+ fold leaves outside the retained set are unpinned right after step 2 —
+ before the reservation — so the allocator can evict them for the load
+ buffers; no-load finishes release them at finish. Finish reconciles
+ idempotently from any of these.)
 (*) all-or-nothing: any reservation failure (OOM or contention)
     abandons the whole L2 load and finishes with the L1 hit.
 (**) the L1 hit's own window: kept as the fallback promise if the
@@ -97,13 +110,20 @@ Notes:
 ## Why pin-all + explicit touch
 
 An earlier revision peeked L1 lock-free and pinned selectively, to avoid
-LRU-bumping dead chunks every round. That rationale was wrong on the
+LRU-bumping evictable chunks every round. That rationale was wrong on the
 facts: `reserve_read` never refreshed recency — `finish_read`'s touch on
 release did. Decoupling LRU from locking entirely (release is
 recency-neutral; `_finish_request` touches the retained set, the moment
 usefulness is actually decided) makes pin-all correct and deletes the
-peek API, the L1-hit pre-fold, the selective-claim math, and the
-peek-to-pin misalignment corner.
+peek API, the selective-claim math, and the peek-to-pin misalignment corner.
+
+`_pin_l1_keys` still observes L1 by locking it (`reserve_read` over every
+key), preserving observation-is-acquisition. It then runs one L1-only
+`build_trim_mask` and releases just the out-of-L1-hit-sw segment — the
+provably-evictable subset guaranteed by the monotonicity carve-out above, bounded
+to the L1 prefix hit. This is not the deleted lock-free selective claim: keys
+are pinned first, then a safe subset is released; nothing is counted while
+unlocked.
 
 ## Why all-or-nothing on reservation failure
 
