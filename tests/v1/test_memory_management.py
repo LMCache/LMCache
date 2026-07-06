@@ -636,7 +636,9 @@ class TestLazyMemoryAllocator:
         on CPU-only builds.
         """
         # First Party
-        from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
+        from lmcache.v1.memory_allocators.lazy_memory_allocator import (
+            LazyMemoryAllocator,
+        )
 
         return LazyMemoryAllocator
 
