@@ -8,7 +8,7 @@ torch device module.
 """
 
 # First Party
-from lmcache.v1.platform.base_device_info import DeviceInfo
+from lmcache.v1.platform.base_device_spec import DeviceSpec
 from lmcache.v1.platform.base_pin_memory import PinMemoryBackend
 
 
@@ -28,9 +28,9 @@ class DeviceExt:
             raise RuntimeError(...)
     """
 
-    def __init__(self, device_info: DeviceInfo | None) -> None:
-        if device_info is not None and device_info.pin_memory_backend is not None:
-            backend_cls = device_info.pin_memory_backend
+    def __init__(self, device_spec: DeviceSpec | None) -> None:
+        if device_spec is not None and device_spec.pin_memory_backend is not None:
+            backend_cls = device_spec.pin_memory_backend
         else:
             backend_cls = PinMemoryBackend
         self._pin: PinMemoryBackend = backend_cls()

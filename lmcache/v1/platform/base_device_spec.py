@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Abstract base class for platform device information.
+"""Abstract base class for platform device specification.
 
 Each accelerator sub-package (``platform/cuda``, ``platform/musa``, ...)
-provides a concrete :class:`DeviceInfo` subclass that describes how to
+provides a concrete :class:`DeviceSpec` subclass that describes how to
 detect the device and which ops backend to load.
 
 The :mod:`~lmcache.v1.platform` module discovers these
 subclasses automatically at import time via ``pkgutil.iter_modules``:
 it imports each sub-package, inspects its module namespace for
-:class:`DeviceInfo` subclasses, instantiates them, and uses the
+:class:`DeviceSpec` subclasses, instantiates them, and uses the
 resulting objects for device detection and backend selection.
 
-No manual registration (e.g. ``DEVICE_INFO = ...``) is required --
+No manual registration (e.g. ``DEVICE_SPEC = ...``) is required --
 simply defining the subclass in the sub-package's ``__init__.py`` is
 enough.
 """
@@ -23,8 +23,8 @@ import abc
 from lmcache.v1.platform.base_pin_memory import PinMemoryBackend
 
 
-# TODO(chunxiaozheng): bind `DeviceIPCWrapper` with `DeviceInfo`?
-class DeviceInfo(abc.ABC):
+# TODO(chunxiaozheng): bind `DeviceIPCWrapper` with `DeviceSpec`?
+class DeviceSpec(abc.ABC):
     """Abstract description of a hardware accelerator backend.
 
     Subclasses must override the abstract properties / methods below.
