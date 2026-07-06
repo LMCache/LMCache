@@ -14,10 +14,15 @@ Provenance convention: ``PARITY(L1Manager.X)`` marks behavior mirrored from
 the stock manager (keep in sync with ``l1_manager.py``); ``MARU:`` marks
 maru-specific logic.
 
-Not implemented yet (later commits in this series): the L2->L1 promote
-transition (finish_write_and_reserve_read) and the TTL orphan sweeper. Known
-gap: a pin whose RPC reply is lost leaks server-side; reconciliation
-(per-instance pin ledger) is a maru-side design item.
+Not implemented yet (later commits in this series): the TTL orphan sweeper.
+Known gaps: (1) a pin whose RPC reply is lost leaks server-side; reconciliation
+(per-instance pin ledger) is a maru-side design item. (2) the prefetch
+controller's load-failure cleanup calls ``finish_write`` then ``delete`` on the
+failed keys -- ``finish_write`` publishes the page to the shared directory, so a
+peer that pins it in the window before ``delete`` makes ``delete`` refuse
+(KEY_IS_LOCKED, which the caller ignores) and the key lingers. Rare (L2-load
+failure + concurrent same-key lookup); a caller-side batch-abort is the clean
+future fix.
 """
 
 # Standard
@@ -184,6 +189,168 @@ class MaruL1Manager:
                 len(key_strs),
             )
 
+    def _pin_retrieve_stage(
+        self,
+        keys: list[ObjectKey],
+        total: int,
+        ret: dict[ObjectKey, L1OperationResult],
+        successful_keys: list[ObjectKey],
+    ) -> None:
+        """Pin ``total`` units per key, resolve the page, and stage a read.
+
+        Shared by ``reserve_read`` and the retained-promote re-resolve. On a
+        hit sets ``ret[k] = (SUCCESS, obj)`` and appends ``k`` to
+        ``successful_keys``; overlapping reads accumulate the refcount. Partial
+        or unresolvable pins are rolled back; non-hit keys keep whatever value
+        the caller pre-set in ``ret``.
+
+        Args:
+            keys: Keys to pin and stage (all pinned; misses roll back).
+            total: Protection units (pins) to take per key.
+            ret: Result map, mutated in place for hits.
+            successful_keys: List extended in place with each staged key.
+        """
+        if not keys:
+            return
+        handler = self._allocator.handler
+        key_strs = [object_key_to_string(k) for k in keys]
+
+        # MARU: one RPC takes `total` pins per key (repeat-encoding); a key
+        # is a hit only if all its pins landed.
+        pin_list = [ks for ks in key_strs for _ in range(total)]
+        try:
+            pin_results = handler.batch_pin(pin_list)
+        except Exception:
+            logger.exception("MaruL1Manager: batch_pin failed for %d keys", len(keys))
+            return
+        if len(pin_results) != len(pin_list):
+            # Malformed reply: release whatever was reported taken.
+            logger.error(
+                "MaruL1Manager: batch_pin returned %d/%d results; rolling back",
+                len(pin_results),
+                len(pin_list),
+            )
+            self._safe_unpin(
+                handler,
+                [ks for ks, ok in zip(pin_list, pin_results, strict=False) if ok],
+            )
+            return
+
+        hits: list[int] = []
+        rollback: list[str] = []  # partial pins to release
+        for i, ks in enumerate(key_strs):
+            got = sum(1 for ok in pin_results[i * total : (i + 1) * total] if ok)
+            if got == total:
+                hits.append(i)
+            elif got:
+                rollback.extend([ks] * got)
+
+        mem_infos: list["MemoryInfo | None"] = []
+        if hits:
+            try:
+                mem_infos = handler.batch_retrieve([key_strs[i] for i in hits])
+            except Exception:
+                logger.exception(
+                    "MaruL1Manager: batch_retrieve failed for %d keys", len(hits)
+                )
+                for i in hits:
+                    rollback.extend([key_strs[i]] * total)
+                self._safe_unpin(handler, rollback)
+                return
+            # Normalize a malformed reply; missing tails roll back below.
+            mem_infos = list(mem_infos[: len(hits)])
+            mem_infos += [None] * (len(hits) - len(mem_infos))
+
+        for i, mi in zip(hits, mem_infos, strict=False):
+            mem_obj = (
+                self._allocator.get_by_location(
+                    region_id=mi.region_id,
+                    page_index=mi.page_index,
+                    actual_size=len(mi.view),
+                )
+                if mi is not None
+                else None
+            )
+            if mem_obj is None:
+                # MARU: pinned but unresolvable (raced delete / pool miss).
+                rollback.extend([key_strs[i]] * total)
+                continue
+            k = keys[i]
+            staged = self._pending_read.get(k)
+            if staged is not None:
+                # Overlapping reserve: same CXL page, one staged object.
+                staged.refcount += total
+                ret[k] = (L1Error.SUCCESS, staged.mem_obj)
+            else:
+                self._pending_read[k] = _PendingRead(mem_obj=mem_obj, refcount=total)
+                ret[k] = (L1Error.SUCCESS, mem_obj)
+            successful_keys.append(k)
+
+        self._safe_unpin(handler, rollback)
+
+    def _store_staged(
+        self, staged: list[tuple[ObjectKey, _PendingWrite]]
+    ) -> tuple[list[ObjectKey], dict[ObjectKey, L1Error]]:
+        """Register staged write pages in the directory and classify the result.
+
+        Shared by ``finish_write`` and the retained-promote path.
+
+        Args:
+            staged: (key, pending write) pairs whose pages to register.
+
+        Returns:
+            ``(registered, errors)``: ``registered`` are keys the server stored
+            or dup-skipped (the directory page is authoritative); ``errors``
+            maps every other key to KEY_IN_WRONG_STATE. A handle-build failure
+            reclaims the pages; a store RPC failure leaves them (unknown server
+            state must never be recycled).
+        """
+        errors: dict[ObjectKey, L1Error] = {}
+        if not staged:
+            return [], errors
+        try:
+            handles = [
+                self._allocator.create_store_handle(e.mem_obj) for _, e in staged
+            ]
+        except Exception:
+            # Pages never reached the server -- safe to reclaim now.
+            logger.exception(
+                "MaruL1Manager: create_store_handle failed for %d keys", len(staged)
+            )
+            for k, entry in staged:
+                self._allocator.abort_alloc(entry.mem_obj)
+                errors[k] = L1Error.KEY_IN_WRONG_STATE
+            return [], errors
+
+        try:
+            results = self._allocator.handler.batch_store(
+                [object_key_to_string(k) for k, _ in staged], handles
+            )
+        except Exception:
+            # MARU: server state unknown -- the pages must NOT be recycled
+            # (a registered page must never return to the free list).
+            logger.exception(
+                "MaruL1Manager: batch_store failed for %d keys", len(staged)
+            )
+            for k, _ in staged:
+                errors[k] = L1Error.KEY_IN_WRONG_STATE
+            return [], errors
+
+        registered: list[ObjectKey] = []
+        for i, (k, entry) in enumerate(staged):
+            ok = results[i] if i < len(results) else None
+            if ok:
+                # True covers newly-registered and dup-skip (page auto-freed).
+                registered.append(k)
+            elif ok is None:
+                # Missing reply entry: state unknown -- do not recycle.
+                errors[k] = L1Error.KEY_IN_WRONG_STATE
+            else:
+                # Definitively not registered -- reclaim the page.
+                self._allocator.abort_alloc(entry.mem_obj)
+                errors[k] = L1Error.KEY_IN_WRONG_STATE
+        return registered, errors
+
     @_maru_l1_synchronized
     def reserve_read(
         self, keys: list[ObjectKey], extra_count: int = 0
@@ -219,82 +386,9 @@ class MaruL1Manager:
                 ret[k] = (L1Error.KEY_NOT_READABLE, None)
         if not keys:
             return ret
-        handler = self._allocator.handler
-        key_strs = [object_key_to_string(k) for k in keys]
-
-        # MARU: one RPC takes `total` pins per key (repeat-encoding); a key
-        # is a hit only if all its pins landed.
-        pin_list = [ks for ks in key_strs for _ in range(total)]
-        try:
-            pin_results = handler.batch_pin(pin_list)
-        except Exception:
-            logger.exception("MaruL1Manager: batch_pin failed for %d keys", len(keys))
-            return ret
-        if len(pin_results) != len(pin_list):
-            # Malformed reply: release whatever was reported taken.
-            logger.error(
-                "MaruL1Manager: batch_pin returned %d/%d results; rolling back",
-                len(pin_results),
-                len(pin_list),
-            )
-            self._safe_unpin(
-                handler,
-                [ks for ks, ok in zip(pin_list, pin_results, strict=False) if ok],
-            )
-            return ret
-
-        hits: list[int] = []
-        rollback: list[str] = []  # partial pins to release
-        for i, ks in enumerate(key_strs):
-            got = sum(1 for ok in pin_results[i * total : (i + 1) * total] if ok)
-            if got == total:
-                hits.append(i)
-            elif got:
-                rollback.extend([ks] * got)
-
-        mem_infos: list["MemoryInfo | None"] = []
-        if hits:
-            try:
-                mem_infos = handler.batch_retrieve([key_strs[i] for i in hits])
-            except Exception:
-                logger.exception(
-                    "MaruL1Manager: batch_retrieve failed for %d keys", len(hits)
-                )
-                for i in hits:
-                    rollback.extend([key_strs[i]] * total)
-                self._safe_unpin(handler, rollback)
-                return ret
-            # Normalize a malformed reply; missing tails roll back below.
-            mem_infos = list(mem_infos[: len(hits)])
-            mem_infos += [None] * (len(hits) - len(mem_infos))
-
         successful_keys: list[ObjectKey] = []
-        for i, mi in zip(hits, mem_infos, strict=False):
-            mem_obj = (
-                self._allocator.get_by_location(
-                    region_id=mi.region_id,
-                    page_index=mi.page_index,
-                    actual_size=len(mi.view),
-                )
-                if mi is not None
-                else None
-            )
-            if mem_obj is None:
-                # MARU: pinned but unresolvable (raced delete / pool miss).
-                rollback.extend([key_strs[i]] * total)
-                continue
-            k = keys[i]
-            staged = self._pending_read.get(k)
-            if staged is not None:
-                # Overlapping reserve: same CXL page, one staged object.
-                staged.refcount += total
-                ret[k] = (L1Error.SUCCESS, staged.mem_obj)
-            else:
-                self._pending_read[k] = _PendingRead(mem_obj=mem_obj, refcount=total)
-                ret[k] = (L1Error.SUCCESS, mem_obj)
-            successful_keys.append(k)
-
-        self._safe_unpin(handler, rollback)
+        # MARU: pin + retrieve + resolve + stage (shared with retained promote).
+        self._pin_retrieve_stage(keys, total, ret, successful_keys)
         # PARITY(L1Manager.reserve_read): notify listeners of the new read
         # holds (feeds the eviction LRU and the store controller).
         for listener in self._registered_listeners:
@@ -509,72 +603,123 @@ class MaruL1Manager:
                 ret[k] = L1Error.KEY_NOT_EXIST
             else:
                 staged.append((k, entry))
-        if not staged:
-            return ret
-
-        try:
-            handles = [
-                self._allocator.create_store_handle(e.mem_obj) for _, e in staged
-            ]
-        except Exception:
-            # Pages never reached the server -- safe to reclaim now.
-            logger.exception(
-                "MaruL1Manager: create_store_handle failed for %d keys", len(staged)
-            )
-            for k, entry in staged:
-                self._allocator.abort_alloc(entry.mem_obj)
-                ret[k] = L1Error.KEY_IN_WRONG_STATE
-            return ret
-
-        try:
-            results = self._allocator.handler.batch_store(
-                [object_key_to_string(k) for k, _ in staged], handles
-            )
-        except Exception:
-            # MARU: server state unknown -- the pages must NOT be recycled
-            # (a registered page must never return to the free list).
-            logger.exception(
-                "MaruL1Manager: batch_store failed for %d keys", len(staged)
-            )
-            for k, _ in staged:
-                ret[k] = L1Error.KEY_IN_WRONG_STATE
-            return ret
-
-        successful_keys: list[ObjectKey] = []
-        for i, (k, entry) in enumerate(staged):
-            ok = results[i] if i < len(results) else None
-            if ok:
-                # True covers newly-registered and dup-skip (page auto-freed).
-                ret[k] = L1Error.SUCCESS
-                successful_keys.append(k)
-            elif ok is None:
-                # Missing reply entry: state unknown -- do not recycle.
-                ret[k] = L1Error.KEY_IN_WRONG_STATE
-            else:
-                # Definitively not registered -- reclaim the page.
-                self._allocator.abort_alloc(entry.mem_obj)
-                ret[k] = L1Error.KEY_IN_WRONG_STATE
+        registered, errors = self._store_staged(staged)
+        ret.update(errors)
+        for k in registered:
+            ret[k] = L1Error.SUCCESS
         # PARITY(L1Manager.finish_write): notify listeners of registered pages
         # (the store controller stops re-storing them; must NOT be the promote
-        # event -- that is on_l1_keys_finish_write_and_reserve_read in C5).
+        # event -- that is on_l1_keys_finish_write_and_reserve_read).
         for listener in self._registered_listeners:
-            listener.on_l1_keys_write_finished(successful_keys)
+            listener.on_l1_keys_write_finished(registered)
         return ret
 
     @_maru_l1_synchronized
     def finish_write_and_reserve_read(
         self, keys: list[ObjectKey], extra_count: int = 0
     ) -> dict[ObjectKey, L1OperationResult]:
-        """Atomically finish a write and take read holds (L2->L1 promote).
+        """Finish a write and take read holds in one step (L2->L1 promote).
 
-        Raises:
-            NotImplementedError: The promote transition lands in a later
-                commit of this series; no MP flow reaches it until the
-                tiering stack is wired.
+        Called by the prefetch controller after loading L2 bytes into a
+        write-reserved page. Branches on the staged ``is_temporary`` flag
+        (Decision A):
+
+        - temporary (the default prefetch policy): the loaded page is private
+          staging -- moved straight to read staging without touching the shared
+          directory; finish_read reclaims it at refcount zero.
+        - retained (``prefetch_policy: retain``): the page is registered in the
+          directory (batch_store) and the authoritative page is re-resolved
+          with pins, so a dup-skip that auto-freed our page still yields the
+          winning shared page.
+
+        Fires ``on_l1_keys_finish_write_and_reserve_read`` -- never
+        ``on_l1_keys_write_finished`` (that would make the store controller
+        re-store the promoted key to L2).
+
+        Args:
+            keys: Keys to transition from write-staged to read-staged.
+            extra_count: Extra read holds on top of the default 1 (one per TP
+                worker for MLA models with TP > 1).
+
+        Returns:
+            A dictionary mapping each key to (L1Error, MemoryObj | None).
+
+        Errors:
+            KEY_NOT_EXIST: The key is not write-staged on this instance.
+            KEY_IN_WRONG_STATE: The key is already read-staged, or registration
+                or re-resolve failed.
         """
-        raise NotImplementedError(
-            "MaruL1Manager: finish_write_and_reserve_read is not wired yet"
-        )
+        total = 1 + _clamp_extra_count(extra_count)
+        ret: dict[ObjectKey, L1OperationResult] = {
+            k: (L1Error.KEY_NOT_EXIST, None) for k in keys
+        }
+        temp_staged: list[tuple[ObjectKey, _PendingWrite]] = []
+        retain_staged: list[tuple[ObjectKey, _PendingWrite]] = []
+        for k in keys:
+            entry = self._pending_write.get(k)
+            if entry is None:
+                # PARITY(L1Manager): a key not write-held cannot be promoted.
+                logger.warning("MaruL1Manager: promote on non-write-staged key %s", k)
+                continue
+            if k in self._pending_read:
+                # PARITY(L1Manager): a key already read-held is in wrong state.
+                ret[k] = (L1Error.KEY_IN_WRONG_STATE, None)
+                continue
+            if entry.is_temporary:
+                temp_staged.append((k, entry))
+            else:
+                retain_staged.append((k, entry))
+
+        successful_keys: list[ObjectKey] = []
+        # MARU temporary promote: private staging -- no batch_store, no pin.
+        # The loaded local page is authoritative; move it to read staging.
+        for k, entry in temp_staged:
+            del self._pending_write[k]
+            self._pending_read[k] = _PendingRead(
+                mem_obj=entry.mem_obj, refcount=total, is_temporary=True
+            )
+            ret[k] = (L1Error.SUCCESS, entry.mem_obj)
+            successful_keys.append(k)
+        # MARU retained promote: register then re-resolve the authoritative page.
+        if retain_staged:
+            self._promote_retained(retain_staged, total, ret, successful_keys)
+
+        for listener in self._registered_listeners:
+            listener.on_l1_keys_finish_write_and_reserve_read(successful_keys)
+        return ret
+
+    def _promote_retained(
+        self,
+        retain_staged: list[tuple[ObjectKey, _PendingWrite]],
+        total: int,
+        ret: dict[ObjectKey, L1OperationResult],
+        successful_keys: list[ObjectKey],
+    ) -> None:
+        """Register retained-promote pages and stage authoritative reads.
+
+        Pops the write staging, registers via ``_store_staged``, then pins and
+        re-resolves the directory page (a dup-skip auto-freed our own page, so
+        the pinned+retrieved page is the winning one). Keys that fail to
+        register or re-resolve are left at KEY_IN_WRONG_STATE.
+
+        Args:
+            retain_staged: (key, pending write) pairs to register and stage.
+            total: Read holds (pins) to take per key.
+            ret: Result map, mutated in place.
+            successful_keys: List extended in place with each staged key.
+        """
+        for k, _ in retain_staged:
+            self._pending_write.pop(k, None)
+        registered, errors = self._store_staged(retain_staged)
+        for k, err in errors.items():
+            ret[k] = (err, None)
+        if not registered:
+            return
+        # A store that cannot be re-resolved to a read view is a wrong-state
+        # promote (the page is registered but this instance holds no read).
+        for k in registered:
+            ret[k] = (L1Error.KEY_IN_WRONG_STATE, None)
+        self._pin_retrieve_stage(registered, total, ret, successful_keys)
 
     @_maru_l1_synchronized
     def delete(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1Error]:

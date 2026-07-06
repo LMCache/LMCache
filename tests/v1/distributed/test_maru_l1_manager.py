@@ -384,10 +384,132 @@ def test_is_key_evictable_tracks_local_staging():
     assert manager.is_key_evictable(k)
 
 
-def test_promote_not_implemented_yet():
+# =========================================================================
+# finish_write_and_reserve_read (C5): L2->L1 promote
+# =========================================================================
+
+
+def test_temporary_promote_stages_read_without_registering():
+    """Default prefetch: private staging -- no batch_store, no server pin."""
+    manager, handler, _ = make_maru_manager()
+    k = _key(1)
+    page = manager.reserve_write([k], [True], _LAYOUT, mode="new")[k][1]
+
+    err, obj = manager.finish_write_and_reserve_read([k])[k]
+    assert err == L1Error.SUCCESS and obj is page
+    assert object_key_to_string(k) not in handler.store_map  # never registered
+    assert not handler.pins  # temporary reads hold no pin
+    assert manager.unsafe_read([k])[k] == (L1Error.SUCCESS, page)
+
+
+def test_temporary_promote_page_reclaimed_after_read():
+    manager, handler, adapter = make_maru_manager()
+    k = _key(1)
+    page = manager.reserve_write([k], [True], _LAYOUT, mode="new")[k][1]
+    manager.finish_write_and_reserve_read([k])
+
+    assert manager.finish_read([k])[k] == L1Error.SUCCESS
+    assert page.metadata.address in adapter.freed  # local page reclaimed
+    assert not handler.unpin_log  # nothing was pinned
+    assert manager.unsafe_read([k])[k] == (L1Error.KEY_NOT_EXIST, None)
+
+
+def test_retained_promote_registers_and_pins():
+    """retain policy: batch_store + authoritative re-resolve with pins."""
+    manager, handler, adapter = make_maru_manager()
+    k = _key(1)
+    ks = object_key_to_string(k)
+    manager.reserve_write([k], [False], _LAYOUT, mode="new")
+
+    assert manager.finish_write_and_reserve_read([k])[k][0] == L1Error.SUCCESS
+    assert ks in handler.store_map  # registered in the shared directory
+    assert handler.pins[ks] == 1  # read hold pinned
+
+    assert manager.finish_read([k])[k] == L1Error.SUCCESS
+    assert handler.pins[ks] == 0  # unpinned, not freed
+    assert not adapter.freed
+    assert ks in handler.store_map  # retained page survives the read
+
+
+def test_retained_promote_extra_count_pins_n():
+    manager, handler, _ = make_maru_manager()
+    k = _key(1)
+    manager.reserve_write([k], [False], _LAYOUT, mode="new")
+
+    manager.finish_write_and_reserve_read([k], extra_count=2)
+    assert handler.pins[object_key_to_string(k)] == 3  # 1 + extra_count
+
+
+def test_retained_promote_dup_skip_resolves_winner():
+    """A peer registered the key first: re-resolve pins the winning page."""
+    manager, handler, _ = make_maru_manager()
+    k = _key(1)
+    manager.reserve_write([k], [False], _LAYOUT, mode="new")
+    _seed(handler, k, rid=9, pid=5)  # peer registered it meanwhile
+
+    assert manager.finish_write_and_reserve_read([k])[k][0] == L1Error.SUCCESS
+    assert handler.pins[object_key_to_string(k)] == 1
+
+
+def test_promote_unstaged_key_is_not_exist():
     manager, _, _ = make_maru_manager()
-    with pytest.raises(NotImplementedError):
-        manager.finish_write_and_reserve_read([_key(1)])
+    assert manager.finish_write_and_reserve_read([_key(1)])[_key(1)] == (
+        L1Error.KEY_NOT_EXIST,
+        None,
+    )
+
+
+def test_promote_already_read_staged_is_wrong_state():
+    """The both-staged race the read-staged guard defends against."""
+    manager, _, adapter = make_maru_manager()
+    k = _key(1)
+    manager.reserve_write([k], [False], _LAYOUT, mode="new")
+    rpage = adapter.batched_allocate(_LAYOUT.shapes, _LAYOUT.dtypes, 1)[0]
+    manager._pending_read[k] = _PendingRead(mem_obj=rpage, refcount=1)
+
+    assert manager.finish_write_and_reserve_read([k])[k] == (
+        L1Error.KEY_IN_WRONG_STATE,
+        None,
+    )
+    assert k in manager._pending_write  # guard returned before popping
+
+
+def test_retained_promote_store_failure_is_wrong_state():
+    manager, handler, _ = make_maru_manager()
+    k = _key(1)
+    handler.fail_store_keys.add(object_key_to_string(k))
+    manager.reserve_write([k], [False], _LAYOUT, mode="new")
+
+    assert manager.finish_write_and_reserve_read([k])[k] == (
+        L1Error.KEY_IN_WRONG_STATE,
+        None,
+    )
+    assert k not in manager._pending_write  # write staging drained
+
+
+def test_promote_fires_promote_event_not_write_finished():
+    """Anti-#2744: promote must never fire write_finished (would re-store L2)."""
+    manager, handler, _ = make_maru_manager()
+    k = _key(1)
+    manager.reserve_write([k], [False], _LAYOUT, mode="new")
+    rec = RecordingListener()
+    manager.register_listener(rec)
+
+    manager.finish_write_and_reserve_read([k])
+    assert rec.kinds("finish_write_and_reserve_read") == [[k]]
+    assert rec.kinds("write_finished") == []
+
+
+def test_temporary_promote_fires_promote_event():
+    manager, _, _ = make_maru_manager()
+    k = _key(1)
+    manager.reserve_write([k], [True], _LAYOUT, mode="new")
+    rec = RecordingListener()
+    manager.register_listener(rec)
+
+    manager.finish_write_and_reserve_read([k])
+    assert rec.kinds("finish_write_and_reserve_read") == [[k]]
+    assert rec.kinds("write_finished") == []
 
 
 def test_report_status_keys():

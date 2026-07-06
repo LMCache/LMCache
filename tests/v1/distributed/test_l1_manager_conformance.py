@@ -168,6 +168,44 @@ def test_is_key_evictable_gates_on_read_hold(manager):
     assert manager.is_key_evictable(k)
 
 
+def test_retained_promote_transitions_write_to_read(manager):
+    """Both backends: reserve_write -> promote -> read-held -> release."""
+    k = _key(10)
+    assert manager.reserve_write([k], [False], _LAYOUT, mode="new")[k][0] == (
+        L1Error.SUCCESS
+    )
+    assert manager.finish_write_and_reserve_read([k])[k][0] == L1Error.SUCCESS
+    assert manager.unsafe_read([k])[k][0] == L1Error.SUCCESS
+    assert manager.delete([k])[k] == L1Error.KEY_IS_LOCKED  # read-held
+    manager.finish_read([k])
+    assert manager.delete([k])[k] == L1Error.SUCCESS
+
+
+def test_temporary_promote_dropped_after_read(manager):
+    """Both backends: a temporary promote is gone after its read finishes."""
+    k = _key(11)
+    assert manager.reserve_write([k], [True], _LAYOUT, mode="new")[k][0] == (
+        L1Error.SUCCESS
+    )
+    assert manager.finish_write_and_reserve_read([k])[k][0] == L1Error.SUCCESS
+    assert manager.unsafe_read([k])[k][0] == L1Error.SUCCESS
+    assert manager.finish_read([k])[k] == L1Error.SUCCESS
+    assert manager.unsafe_read([k])[k] == (L1Error.KEY_NOT_EXIST, None)
+
+
+def test_promote_fires_promote_event(manager):
+    """Both backends fire finish_write_and_reserve_read, never write_finished."""
+    k = _key(12)
+    manager.reserve_write([k], [False], _LAYOUT, mode="new")
+    rec = RecordingListener()
+    manager.register_listener(rec)
+
+    manager.finish_write_and_reserve_read([k])
+    assert [k] in rec.kinds("finish_write_and_reserve_read")
+    assert rec.kinds("write_finished") == []
+    manager.finish_read([k])
+
+
 def test_listener_fires_across_lifecycle(manager):
     """Both backends fire the same on_l1_keys_* events across a lifecycle.
 
