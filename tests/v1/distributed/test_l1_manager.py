@@ -574,7 +574,7 @@ class TestPeekKeys:
         manager.reserve_read([reading])
 
         result = manager.peek_keys([absent, ready, writing, reading])
-        assert result == [False, True, False, True]
+        assert result.get_indices_list() == [1, 3]
 
         manager.finish_read([reading])
         manager.finish_write([writing])
@@ -587,9 +587,9 @@ class TestPeekKeys:
         manager.reserve_write([key], [False], basic_layout)
         manager.finish_write([key])
 
-        assert manager.peek_keys([key]) == [True]
+        assert manager.peek_keys([key]).get_indices_list() == [0]
         assert manager.delete([key])[key] == L1Error.SUCCESS
-        assert manager.peek_keys([key]) == [False]
+        assert manager.peek_keys([key]).get_indices_list() == []
 
         manager.close()
 

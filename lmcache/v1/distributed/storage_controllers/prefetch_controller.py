@@ -941,11 +941,7 @@ class PrefetchController(StorageControllerInterface):
             bitmap is the unlocked point-in-time peek).
         """
         num_keys = len(keys)
-        peek = self._l1_manager.peek_keys(keys)
-        peek_bitmap = Bitmap(num_keys)
-        for i, present in enumerate(peek):
-            if present:
-                peek_bitmap.set(i)
+        peek_bitmap = self._l1_manager.peek_keys(keys)
 
         if mode is PrefetchMode.WARM or peek_bitmap.popcount() == 0:
             return peek_bitmap, set()
