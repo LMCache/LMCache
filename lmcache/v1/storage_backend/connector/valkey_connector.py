@@ -60,6 +60,52 @@ DEFAULT_CONNECTION_TIMEOUT_SECS: float = 10.0
 #: explicit ``valkey_ttl_sec`` is configured (24 hours).
 DEFAULT_TTL_SECS: int = 86400
 
+#: valkey-glide release that introduced the ``client_info_tag`` client-config
+#: option (appends ``(lmcache:<version>)`` to the GLIDE library name reported
+#: via ``CLIENT SETINFO LIB-NAME``). Builds older than this do not accept the
+#: kwarg, so it is applied only when feature-detected — see
+#: ``_glide_config_supports_client_info_tag``. Ref: valkey-io/valkey-glide#6389.
+CLIENT_INFO_TAG_MIN_GLIDE_VERSION: str = "2.5.0"
+
+
+def _lmcache_client_info_tag() -> str:
+    """Return the LMCache attribution tag for GLIDE's ``client_info_tag``.
+
+    Produces ``lmcache:<version>`` (e.g. ``lmcache:0.3.9``) so LMCache
+    connections are attributable in ``CLIENT INFO`` / ``CLIENT LIST`` as
+    ``GlidePySync(lmcache:<version>)``, preserving GLIDE's own library
+    identity / adoption metrics while breaking usage down per framework.
+
+    ``client_info_tag`` forbids whitespace (GLIDE raises ``ValueError``
+    otherwise), so if the resolved version string is unexpectedly odd we
+    fall back to a bare ``lmcache`` tag rather than risk failing every
+    connection.
+    """
+    # First Party
+    from lmcache import __version__
+
+    tag = f"lmcache:{__version__}"
+    if any(ch.isspace() for ch in tag):
+        return "lmcache"
+    return tag
+
+
+def _glide_config_supports_client_info_tag(config_cls: type) -> bool:
+    """Whether this glide build's client config accepts ``client_info_tag``.
+
+    Feature-detected from the constructor signature rather than by comparing
+    version strings: ``client_info_tag`` was added in valkey-glide
+    ``2.5.0`` (see ``CLIENT_INFO_TAG_MIN_GLIDE_VERSION``), and older clients
+    — including custom sync builds that predate it — would raise
+    ``TypeError`` on the unexpected kwarg. Detecting the parameter directly
+    is both the gate the feature needs (only apply the tag once the client
+    supports it) and robust to non-standard/absent version strings.
+    """
+    try:
+        return "client_info_tag" in inspect.signature(config_cls).parameters
+    except (TypeError, ValueError):
+        return False
+
 
 class Priorities(IntEnum):
     """Operation priorities for the ``AsyncPQExecutor``.
@@ -180,6 +226,14 @@ class _ThreadWorkerPool:
             }
             if credentials is not None:
                 config_kwargs["credentials"] = credentials
+            # Attribute LMCache in CLIENT INFO/LIST as
+            # ``GlidePySync(lmcache:<version>)`` — only when the installed
+            # glide client supports it (valkey-glide >= 2.5.0); older builds
+            # would reject the unknown kwarg.
+            if _glide_config_supports_client_info_tag(
+                glide_sync.GlideClusterClientConfiguration
+            ):
+                config_kwargs["client_info_tag"] = _lmcache_client_info_tag()
             config = glide_sync.GlideClusterClientConfiguration(**config_kwargs)
             client = glide_sync.GlideClusterClient.create(config)
         else:
@@ -197,6 +251,14 @@ class _ThreadWorkerPool:
                 config_kwargs["credentials"] = credentials
             if self._database_id is not None:
                 config_kwargs["database_id"] = self._database_id
+            # Attribute LMCache in CLIENT INFO/LIST as
+            # ``GlidePySync(lmcache:<version>)`` — only when the installed
+            # glide client supports it (valkey-glide >= 2.5.0); older builds
+            # would reject the unknown kwarg.
+            if _glide_config_supports_client_info_tag(
+                glide_sync.GlideClientConfiguration
+            ):
+                config_kwargs["client_info_tag"] = _lmcache_client_info_tag()
             config = glide_sync.GlideClientConfiguration(**config_kwargs)
             client = glide_sync.GlideClient.create(config)
 
