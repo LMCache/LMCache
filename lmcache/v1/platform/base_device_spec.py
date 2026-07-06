@@ -59,14 +59,6 @@ class DeviceSpec:
         """
         return "cpu"
 
-    @property
-    def ops_module(self) -> str | None:
-        """Fully-qualified module path for the compiled ops backend.
-
-        Return ``None`` if no custom ops are available (fallback only).
-        """
-        return None
-
     def is_available(self) -> bool:
         """Return ``True`` when the device is usable on this system.
 

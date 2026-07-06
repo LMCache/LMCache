@@ -20,10 +20,6 @@ class XpuDeviceSpec(DeviceSpec):
     def torch_module_name(self) -> str:
         return "xpu"
 
-    @property
-    def ops_module(self) -> str | None:
-        return "lmcache.xpu_ops"
-
     def is_available(self) -> bool:
         """Check XPU availability without importing lmcache.__init__."""
         try:

@@ -24,9 +24,7 @@ automatically.
 
 # Standard
 from typing import Any
-import importlib
 import os
-import types
 
 # First Party
 from lmcache.logging import init_logger
@@ -141,66 +139,6 @@ def get_device_spec(device_type: str) -> DeviceSpec | None:
         The DeviceSpec for the given device type, or None if not found.
     """
     return _DEVICE_REGISTRY.get(device_type)
-
-
-# ---------------------------------------------------------------------------
-# Dynamic backend selection
-# ---------------------------------------------------------------------------
-
-
-def get_backend(device_type: str) -> Any | None:
-    """Select the ops backend for the given device type.
-
-    Looks up the :class:`DeviceSpec` for *device_type* in the registry
-    and loads/merges its ops module on top of the Python fallback.
-
-    Args:
-        device_type: The detected device type string (e.g. ``"cuda"``).
-
-    Returns:
-        A merged :class:`types.ModuleType` (fallback + hw-specific ops),
-        or ``None`` if torch / dependencies are unavailable.
-    """
-    try:
-        # Third Party
-        import torch  # noqa: F401
-    except (ImportError, ModuleNotFoundError) as e:
-        logger.warning("load torch failed, error is %s", e)
-        return None
-
-    try:
-        default_module = importlib.import_module("lmcache.python_ops_fallback")
-    except (ImportError, ModuleNotFoundError) as e:
-        logger.warning("Cannot load python_ops_fallback: %s", e)
-        return None
-
-    spec = _DEVICE_REGISTRY.get(device_type)
-    if spec is None:
-        logger.info("No DeviceSpec registered for %r, using fallback ops.", device_type)
-        return default_module
-
-    if not spec.is_available():
-        logger.warning("Device %s is not available, using fallback ops.", device_type)
-        return default_module
-
-    if not spec.ops_module:
-        # Device has no custom ops -- use fallback
-        logger.info(
-            "Custom ops not supported for device: %s, using fallback ops.", device_type
-        )
-        return default_module
-
-    try:
-        backend_module = importlib.import_module(spec.ops_module)
-        merged_module = types.ModuleType("lmcache.c_ops")
-        merged_module.__dict__.update(default_module.__dict__)
-        merged_module.__dict__.update(backend_module.__dict__)
-        logger.info("Using backend: %s", spec.ops_module)
-        return merged_module
-    except Exception as e:
-        logger.warning("Failed to import backend %s: %s", spec.ops_module, e)
-
-    return default_module
 
 
 torch_dev, torch_device_type = _detect_device()
