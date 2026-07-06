@@ -206,6 +206,25 @@ def test_promote_fires_promote_event(manager):
     manager.finish_read([k])
 
 
+def test_reserve_read_mid_write_is_not_readable(manager):
+    """A key reserved-but-not-finished for write is not readable (not a miss)."""
+    k = _key(13)
+    manager.reserve_write([k], [False], _LAYOUT, mode="new")
+    assert manager.reserve_read([k])[k] == (L1Error.KEY_NOT_READABLE, None)
+
+
+def test_finish_on_unstaged_key_is_not_exist(manager):
+    """finish_read / finish_write on a never-reserved key report KEY_NOT_EXIST."""
+    k = _key(14)
+    assert manager.finish_read([k])[k] == L1Error.KEY_NOT_EXIST
+    assert manager.finish_write([k])[k] == L1Error.KEY_NOT_EXIST
+
+
+def test_delete_missing_key_is_not_exist(manager):
+    k = _key(15)
+    assert manager.delete([k])[k] == L1Error.KEY_NOT_EXIST
+
+
 def test_listener_fires_across_lifecycle(manager):
     """Both backends fire the same on_l1_keys_* events across a lifecycle.
 
