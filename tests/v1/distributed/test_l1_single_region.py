@@ -7,6 +7,7 @@ from lmcache.v1.distributed.config import (
     GdsL1Config,
     L1ManagerConfig,
     L1MemoryManagerConfig,
+    MaruL1Config,
     StorageManagerConfig,
     l1_exposes_single_memory_region,
 )
@@ -51,6 +52,21 @@ def test_devdax_l1_is_not_single_region():
             use_lazy=False,
             devdax_path="/dev/dax0.0",
             shm_name="",
+        )
+    )
+    assert l1_exposes_single_memory_region(config) is False
+
+
+def test_maru_l1_is_not_single_region():
+    config = _config(
+        L1MemoryManagerConfig(
+            size_in_bytes=0,
+            use_lazy=False,
+            maru_config=MaruL1Config(
+                server_url="maru://localhost:5555",
+                pool_size_bytes=1 << 20,
+                instance_id="t",
+            ),
         )
     )
     assert l1_exposes_single_memory_region(config) is False

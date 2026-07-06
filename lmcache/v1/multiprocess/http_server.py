@@ -236,9 +236,20 @@ def run_http_server(
         if not l1_exposes_single_memory_region(storage_manager_config):
             raise ValueError(
                 "P2P requires a single L1 memory region the transfer channel "
-                "can register; it is incompatible with GDS L1 (--gds-l1-path) "
-                "and Device-DAX L1 (--l1-devdax-path)."
+                "can register; it is incompatible with GDS L1 (--gds-l1-path), "
+                "Device-DAX L1 (--l1-devdax-path), and maru L1 (--maru-*)."
             )
+    # maru drives KV transfer through the LMCache-driven path only; engine-
+    # driven / auto transfer assumes engine-side buffers the shared CXL pool
+    # does not provide.
+    if (
+        storage_manager_config.l1_manager_config.memory_config.maru_config is not None
+        and mp_config.supported_transfer_mode != "lmcache_driven"
+    ):
+        raise ValueError(
+            "maru L1 requires --supported-transfer-mode lmcache_driven (got "
+            f"{mp_config.supported_transfer_mode!r})."
+        )
     _configs["mp"] = mp_config
     _configs["storage_manager"] = storage_manager_config
     _configs["observability"] = obs_config

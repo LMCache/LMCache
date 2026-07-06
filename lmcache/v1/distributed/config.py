@@ -324,6 +324,33 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
         ValueError: If mutually exclusive L1 tiers are both configured, or
             hybrid L1 is paired with incompatible L2 adapters.
     """
+    l1_config = config.l1_manager_config
+    if l1_config.memory_config.maru_config is not None:
+        # maru is a standalone shared-CXL L1 tier. It cannot coexist with the
+        # other L1 backends, and -- exposing no single registerable region --
+        # cannot serve L2 adapters or store policies that need one.
+        if l1_config.gds_l1_config is not None:
+            raise ValueError("maru L1 cannot be combined with gds-l1-path")
+        if l1_config.memory_config.devdax_path:
+            raise ValueError("maru L1 cannot be combined with l1-devdax-path")
+        if config.store_policy == "skip_l1":
+            raise ValueError(
+                "maru L1 does not support store_policy='skip_l1': the shared "
+                "pool is the store target, not a bypass buffer"
+            )
+        registered_adapters = [
+            name
+            for adapter_config in config.l2_adapter_config.adapters
+            if (name := _requires_single_l1_memory_region(adapter_config)) is not None
+        ]
+        if registered_adapters:
+            raise ValueError(
+                "maru L1 has no single registerable memory region, so it "
+                "cannot be used with L2 adapters that require one: "
+                f"{', '.join(registered_adapters)}"
+            )
+        return
+
     if (
         config.l1_manager_config.gds_l1_config is not None
         and config.l1_manager_config.memory_config.devdax_path
@@ -356,9 +383,12 @@ def l1_exposes_single_memory_region(config: StorageManagerConfig) -> bool:
 
     Returns:
         ``True`` if L1 is a single registerable memory region, ``False`` for
-        GDS L1 or Device-DAX L1.
+        GDS L1, Device-DAX L1, or maru L1 (a shared CXL pool with no single
+        registerable region).
     """
     l1_config = config.l1_manager_config
+    if l1_config.memory_config.maru_config is not None:
+        return False
     if l1_config.gds_l1_config is not None:
         return False
     if l1_config.memory_config.devdax_path:
