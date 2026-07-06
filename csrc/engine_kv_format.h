@@ -145,6 +145,14 @@ enum class EngineKVFormat : int {
   NL_X_NB_BSV_BSS = 14,
 
   NL_X_TWO_NB_NH_ONE_BS_HS = 15,
+
+  /*
+  used by:
+  - vLLM per-layer (K, V) tuples
+  physical shape per layer: [num_blocks, block_size, num_heads, head_size]
+  One list entry per layer; each entry is a (K, V) pair of paged tensors.
+  */
+  NL_X_TWO_X_NB_BS_NH_HS = 16,
 };
 
 // __host__ __device__ under CUDA/HIP so the kernels can call these; the guard
@@ -182,6 +190,7 @@ struct FormatFacts {
   bool is_fused_packed = false;  // K/V packed in trailing dim (kv_size == 1)
   bool is_two_major = false;     // size-2 K/V axis precedes the block axis
   bool is_pbs_fused = false;     // paged buffer size fused into one axis
+  bool is_kv_second_tuple = false;  // each per-layer entry is a (K, V) pair
 };
 
 // Return facts by value rather than indexing a global table. This keeps the
@@ -256,6 +265,10 @@ LMC_KV_FORMAT_HD constexpr FormatFacts format_facts(EngineKVFormat f) {
       facts.is_hnd = true;
       facts.is_two_major = true;
       break;
+    case EngineKVFormat::NL_X_TWO_X_NB_BS_NH_HS:
+      facts.is_layer_list = true;
+      facts.is_kv_second_tuple = true;
+      break;
     default:
       unsupported_engine_kv_format();
   }
@@ -288,4 +301,9 @@ LMC_KV_FORMAT_HD constexpr bool is_mla(EngineKVFormat f) {
 // separate K/V axis — transferred as one k_or_v == 0 pass (like MLA).
 LMC_KV_FORMAT_HD constexpr bool is_fused_packed(EngineKVFormat f) {
   return format_facts(f).is_fused_packed;
+}
+
+// One list entry per layer, each entry is a tuple of paged tensors.
+LMC_KV_FORMAT_HD constexpr bool is_kv_second_tuple(EngineKVFormat f) {
+  return format_facts(f).is_kv_second_tuple;
 }

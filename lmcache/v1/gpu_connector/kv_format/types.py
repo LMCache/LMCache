@@ -20,7 +20,9 @@ import torch
 # two-list MHA, deeper nesting). Engine adapters that hand us other
 # containers (e.g. vLLM's ``dict[str, torch.Tensor]``) are responsible
 # for unwrapping to this form before calling the helpers.
-DiscoverableKVCache = Union[torch.Tensor, list["DiscoverableKVCache"]]
+DiscoverableKVCache = Union[
+    torch.Tensor, list["DiscoverableKVCache"], tuple["DiscoverableKVCache", ...]
+]
 
 
 class LayoutHints(TypedDict, total=False):

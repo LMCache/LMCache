@@ -781,6 +781,11 @@ def _is_pbs_fused_format(engine_kv_format: EngineKVFormat) -> bool:
     return _format_spec(engine_kv_format).is_pbs_fused
 
 
+def _is_kv_second_tuple_format(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True when each per-layer entry is a (K, V) tuple."""
+    return _format_spec(engine_kv_format).is_kv_second_tuple
+
+
 _ELEMENT_SIZE_TO_DTYPE: dict[int, torch.dtype] = {
     # Maps the byte width of a KV-cache element to a representative torch dtype.
     # Only widths that commonly appear in KV caches are listed; 1-byte entries
@@ -916,6 +921,8 @@ def _normalize_paged_layers(
     Returns:
         - Single ``torch.Tensor`` for cross-layer formats.
         - ``list[list[torch.Tensor]]`` (2 x NL) for SGLang MHA formats.
+        - ``list[(torch.Tensor, torch.Tensor)]`` (NL ``(K, V)`` pairs) for the
+          per-layer tuple format (``NL_X_TWO_X_NB_BS_NH_HS``).
         - ``list[torch.Tensor]`` (per-layer) for all other formats.
     """
     if is_cross_layer(engine_kv_format):
@@ -998,6 +1005,18 @@ def _normalize_paged_layers(
             "list[torch.Tensor] (2*NL entries), or a 1-D pointer tensor; "
             "got: " + type(paged_buffer_ptrs_tensor).__name__
         )
+    if _is_kv_second_tuple_format(engine_kv_format):
+        if isinstance(paged_buffer_ptrs_tensor, list) and all(
+            isinstance(t, (list, tuple))
+            and len(t) == 2
+            and all(isinstance(x, torch.Tensor) for x in t)
+            for t in paged_buffer_ptrs_tensor
+        ):
+            return paged_buffer_ptrs_tensor
+        raise TypeError(
+            "Per-layer (K, V) tuple format requires a list of (K, V) tensor "
+            "pairs; got: " + type(paged_buffer_ptrs_tensor).__name__
+        )
     # Per-layer formats
     if _is_ptr_tensor(paged_buffer_ptrs_tensor):
         # 1-D pointer tensor [ptr_L0, ..., ptr_LN-1] → list of per-layer tensors.
@@ -1016,11 +1035,11 @@ def _normalize_paged_layers(
             for p in paged_buffer_ptrs_tensor
         ]
     if isinstance(paged_buffer_ptrs_tensor, list):
-        if not all(isinstance(t, torch.Tensor) for t in paged_buffer_ptrs_tensor):
-            raise TypeError(
-                "paged_buffer_ptrs_tensor list must contain torch.Tensor entries"
-            )
-        return paged_buffer_ptrs_tensor
+        if all(isinstance(t, torch.Tensor) for t in paged_buffer_ptrs_tensor):
+            return paged_buffer_ptrs_tensor
+        raise TypeError(
+            "paged_buffer_ptrs_tensor list must contain torch.Tensor entries"
+        )
     raise TypeError(
         "paged_buffer_ptrs_tensor must be a list[torch.Tensor] or 1-D pointer tensor; "
         "got: " + type(paged_buffer_ptrs_tensor).__name__
@@ -1219,6 +1238,18 @@ def multi_layer_block_kv_transfer(
         )
     elif _is_hnd_format(engine_kv_format):
         _transfer_per_layer_hnd(
+            normalized,
+            object_tensors,
+            block_ids,
+            n_block_ids,
+            blocks_per_object,
+            block_size,
+            engine_kv_format,
+            is_d2h,
+            skip_prefix_n_blocks,
+        )
+    elif _is_kv_second_tuple_format(engine_kv_format):
+        _transfer_per_layer_kv_tuple(
             normalized,
             object_tensors,
             block_ids,
@@ -1450,6 +1481,67 @@ def _transfer_sglang_mha(
                         # [N*BS, NH, HS] -> [N, BS, NH, HS]
                         src_blocks = src_shaped.reshape(n_valid, block_size, nh, hs)
                         layer_t.index_copy_(0, eff_idx, src_blocks)
+
+
+def _transfer_per_layer_kv_tuple(
+    paged_tensors: list[tuple[torch.Tensor, torch.Tensor]],
+    object_tensors: list[torch.Tensor],
+    block_ids: torch.Tensor | list[int],
+    n_block_ids: int,
+    blocks_per_object: int,
+    block_size: int,
+    engine_kv_format: EngineKVFormat,
+    is_d2h: bool,
+    skip_prefix_n_blocks: int,
+) -> None:
+    """Transfer the per-layer ``(K, V)`` tuple format."""
+    if not paged_tensors or not object_tensors:
+        return
+
+    num_layers = len(paged_tensors)
+    target_device = paged_tensors[0][0].device
+
+    # H2D stages objects on the paged tensors' device once, up front.
+    objs_on_device = (
+        None if is_d2h else [obj.to(target_device) for obj in object_tensors]
+    )
+    block_ids_dev = torch.as_tensor(block_ids, dtype=torch.long, device=target_device)
+
+    for object_idx, obj in enumerate(object_tensors):
+        valid = _valid_block_range_indices(
+            object_idx,
+            n_block_ids,
+            blocks_per_object,
+            block_size,
+            skip_prefix_n_blocks,
+        )
+        if valid is None:
+            continue
+        idx_start, idx_end, offset_in_object = valid
+        n_valid = idx_end - idx_start
+        token_end = offset_in_object + n_valid * block_size
+        eff_idx = block_ids_dev[idx_start:idx_end]
+
+        for layer_idx in range(num_layers):
+            k_t, v_t = paged_tensors[layer_idx]
+            for kv, layer_t in enumerate((k_t, v_t)):
+                nh = layer_t.shape[-2]
+                hs = layer_t.shape[-1]
+                if is_d2h:
+                    # [NB, BS, NH, HS] -> [n_valid * BS, NH * HS]
+                    flat = layer_t.index_select(0, eff_idx).reshape(
+                        n_valid * block_size, nh * hs
+                    )
+                    obj[kv, layer_idx, offset_in_object:token_end].copy_(
+                        flat, non_blocking=True
+                    )
+                else:
+                    src = objs_on_device[object_idx][
+                        kv, layer_idx, offset_in_object:token_end
+                    ]
+                    # [n_valid * BS, NH * HS] -> [n_valid, BS, NH, HS]
+                    src_blocks = src.reshape(n_valid, block_size, nh, hs)
+                    layer_t.index_copy_(0, eff_idx, src_blocks)
 
 
 def _transfer_per_layer_mla(

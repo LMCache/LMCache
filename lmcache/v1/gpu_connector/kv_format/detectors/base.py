@@ -27,9 +27,9 @@ def measure_list_depth_until_tensor(
     """
     list_depth = 0
     node = kv_caches
-    while isinstance(node, list):
+    while isinstance(node, (list, tuple)):
         if not node:
-            raise ValueError("encountered an empty kv_caches list")
+            raise ValueError("encountered an empty kv_caches list or tuple")
         list_depth += 1
         node = node[0]
     return list_depth, node.ndim, node
