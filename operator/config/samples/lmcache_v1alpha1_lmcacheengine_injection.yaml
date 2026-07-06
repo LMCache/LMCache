@@ -1,0 +1,49 @@
+# LMCacheEngine that pins injected vLLM pods to a specific lmcache build.
+#
+# On top of the usual connection wiring (--kv-transfer-config, hostIPC,
+# PYTHONHASHSEED), spec.injection.payloadImage makes the mutating webhook also
+# STAGE an lmcache code payload into every opted-in vLLM pod: an emptyDir + an
+# init container that copies the payload image's lmcache tree into it, a
+# read-only mount, and PYTHONPATH=/lmcache-payload. vLLM then imports THAT
+# lmcache instead of the one baked into its image — so an older vLLM image can
+# run the newest lmcache, and the vLLM client stays on the same build as the
+# engine server.
+#
+# The payload image must ship the unpacked lmcache tree under /payload and copy
+# it to $SHARED_DIR on start (see docker/Dockerfile.payload). Its lmcache must be
+# ABI-compatible (Python minor + torch) with the vLLM image that imports it.
+#
+# Pair this with an opted-in vLLM Deployment — see
+# config/samples/vllm_lmcache_deployment.yaml. Opt in with the pod-template
+# label `lmcache.ai/lmcache-inject: "true"` and annotation
+# `lmcache.ai/lmcache-engine: "my-cache-versioned"`.
+#
+# Verify on the mutated POD (not the Deployment):
+#   kubectl get pod -l app=vllm-lmcache -o yaml \
+#     | grep -E "lmcache-payload-stage|/lmcache-payload|PYTHONPATH|lmcache-injected"
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: LMCacheEngine
+metadata:
+  name: my-cache-versioned
+  namespace: default
+spec:
+  # -- L1 cache (REQUIRED) --
+  l1:
+    sizeGB: 60
+  image:
+    repository: lmcache/vllm-openai # default
+    tag: dev # default
+    pullPolicy: IfNotPresent # Always | Never | IfNotPresent
+
+  # -- Code-payload injection --
+  injection:
+    payloadImage:
+      repository: lmcache/lmcache-payload
+      tag: dev
+      pullPolicy: IfNotPresent
+    # Private payload registry only — the Secret(s) must exist in the vLLM pod's
+    # namespace (the operator does not copy them cross-namespace):
+    # imagePullSecrets:
+    #   - name: my-registry-secret
+    # Name the vLLM container if it is not the first one in the pod:
+    # targetContainer: vllm
