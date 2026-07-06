@@ -2,6 +2,9 @@
 
 """Tests for MaruL1Manager (fake maru runtime, no CXL required)."""
 
+# Standard
+import time
+
 # Third Party
 import pytest
 import torch
@@ -510,6 +513,92 @@ def test_temporary_promote_fires_promote_event():
     manager.finish_write_and_reserve_read([k])
     assert rec.kinds("finish_write_and_reserve_read") == [[k]]
     assert rec.kinds("write_finished") == []
+
+
+# =========================================================================
+# TTL sweeper (C6): reclaim orphan write pages / read pins
+# =========================================================================
+
+
+def test_sweeper_thread_starts_and_stops():
+    manager, _, _ = make_maru_manager()
+    assert manager._sweeper.is_alive()
+    manager.close()
+    manager._sweeper.join(timeout=2)
+    assert not manager._sweeper.is_alive()
+
+
+def test_sweep_reclaims_expired_write():
+    manager, _, adapter = make_maru_manager()
+    k = _key(1)
+    page = manager.reserve_write([k], [False], _LAYOUT, mode="new")[k][1]
+    manager._pending_write[k].deadline = time.monotonic() - 1  # force expiry
+
+    manager._sweep_once()
+    assert k not in manager._pending_write
+    assert page.metadata.address in adapter.freed  # returned to the owner
+
+
+def test_sweep_reclaims_expired_read_unpins():
+    manager, handler, adapter = make_maru_manager()
+    k = _key(1)
+    ks = object_key_to_string(k)
+    _seed(handler, k)
+    manager.reserve_read([k], extra_count=1)  # two pins
+    manager._pending_read[k].deadline = time.monotonic() - 1
+
+    manager._sweep_once()
+    assert k not in manager._pending_read
+    assert handler.pins[ks] == 0  # both pins released
+    assert not adapter.freed  # registered page is not freed
+
+
+def test_sweep_reclaims_expired_temporary_read():
+    manager, handler, adapter = make_maru_manager()
+    k = _key(1)
+    page = manager.reserve_write([k], [True], _LAYOUT, mode="new")[k][1]
+    manager.finish_write_and_reserve_read([k])  # temporary read staged
+    manager._pending_read[k].deadline = time.monotonic() - 1
+
+    manager._sweep_once()
+    assert k not in manager._pending_read
+    assert page.metadata.address in adapter.freed  # private page reclaimed
+    assert not handler.unpin_log  # temporary reads hold no pin
+
+
+def test_sweep_leaves_live_staging():
+    manager, handler, adapter = make_maru_manager()
+    k = _key(1)
+    _seed(handler, k)
+    manager.reserve_read([k])  # deadline ~ now + read_ttl (300s)
+
+    manager._sweep_once()
+    assert k in manager._pending_read  # not expired
+    assert handler.pins[object_key_to_string(k)] == 1
+    assert not adapter.freed
+
+
+def test_overlapping_reserve_refreshes_read_deadline():
+    manager, handler, _ = make_maru_manager()
+    k = _key(1)
+    _seed(handler, k)
+    manager.reserve_read([k])
+    manager._pending_read[k].deadline = time.monotonic() - 1  # go stale
+
+    manager.reserve_read([k])  # overlap -> refresh
+    assert manager._pending_read[k].deadline > time.monotonic()
+
+
+def test_finish_read_after_sweep_is_not_exist():
+    """A late finish after a sweep behaves like a stock TTL expiry."""
+    manager, handler, _ = make_maru_manager()
+    k = _key(1)
+    _seed(handler, k)
+    manager.reserve_read([k])
+    manager._pending_read[k].deadline = time.monotonic() - 1
+    manager._sweep_once()
+
+    assert manager.finish_read([k])[k] == L1Error.KEY_NOT_EXIST
 
 
 def test_report_status_keys():

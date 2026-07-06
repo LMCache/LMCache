@@ -14,9 +14,10 @@ Provenance convention: ``PARITY(L1Manager.X)`` marks behavior mirrored from
 the stock manager (keep in sync with ``l1_manager.py``); ``MARU:`` marks
 maru-specific logic.
 
-Not implemented yet (later commits in this series): the TTL orphan sweeper.
-Known gaps: (1) a pin whose RPC reply is lost leaks server-side; reconciliation
-(per-instance pin ledger) is a maru-side design item. (2) the prefetch
+A background sweeper reclaims staging whose TTL elapses (an abandoned client's
+orphan write pages / read pins). Known gaps: (1) a pin whose RPC reply is lost
+leaks server-side; reconciliation (per-instance pin ledger) is a maru-side
+design item. (2) the prefetch
 controller's load-failure cleanup calls ``finish_write`` then ``delete`` on the
 failed keys -- ``finish_write`` publishes the page to the shared directory, so a
 peer that pins it in the window before ``delete`` makes ``delete`` refuse
@@ -38,6 +39,7 @@ from typing import (
 )
 import functools
 import threading
+import time
 
 # Third Party
 import torch
@@ -123,19 +125,30 @@ def _clamp_extra_count(extra_count: int) -> int:
 
 @dataclass
 class _PendingRead:
-    """A pinned read staged between reserve_read and the last finish_read."""
+    """A pinned read staged between reserve_read and the last finish_read.
+
+    ``deadline`` is the monotonic time after which the sweeper treats the read
+    as orphaned; it defaults to never (the real reserve path sets a finite
+    value and refreshes it on overlapping reserves).
+    """
 
     mem_obj: MemoryObj
     refcount: int
     is_temporary: bool = False
+    deadline: float = float("inf")
 
 
 @dataclass
 class _PendingWrite:
-    """A reserved page staged between reserve_write and finish_write."""
+    """A reserved page staged between reserve_write and finish_write.
+
+    ``deadline`` is the monotonic time after which the sweeper reclaims the
+    orphaned page (defaults to never; the reserve path sets a finite value).
+    """
 
     mem_obj: MemoryObj
     is_temporary: bool
+    deadline: float = float("inf")
 
 
 class MaruL1Manager:
@@ -158,6 +171,16 @@ class MaruL1Manager:
         self._pending_read: dict[ObjectKey, _PendingRead] = {}
         self._pending_write: dict[ObjectKey, _PendingWrite] = {}
         self._registered_listeners: list[L1ManagerListener] = []
+        # MARU: W1+R1 orphan sweeper -- a crashed/abandoned client leaves write
+        # pages or read pins behind; reclaim them once their TTL elapses.
+        self._sweep_interval = max(
+            1.0, min(self._write_ttl_seconds, self._read_ttl_seconds) / 4
+        )
+        self._stop_event = threading.Event()
+        self._sweeper = threading.Thread(
+            target=self._sweep_loop, name="maru-l1-sweeper", daemon=True
+        )
+        self._sweeper.start()
 
     def register_listener(self, listener: L1ManagerListener) -> None:
         """Register a listener for ``on_l1_keys_*`` events.
@@ -276,13 +299,18 @@ class MaruL1Manager:
                 rollback.extend([key_strs[i]] * total)
                 continue
             k = keys[i]
+            deadline = time.monotonic() + self._read_ttl_seconds
             staged = self._pending_read.get(k)
             if staged is not None:
                 # Overlapping reserve: same CXL page, one staged object.
+                # Refresh the TTL (mirrors a stock re-lock extending it).
                 staged.refcount += total
+                staged.deadline = deadline
                 ret[k] = (L1Error.SUCCESS, staged.mem_obj)
             else:
-                self._pending_read[k] = _PendingRead(mem_obj=mem_obj, refcount=total)
+                self._pending_read[k] = _PendingRead(
+                    mem_obj=mem_obj, refcount=total, deadline=deadline
+                )
                 ret[k] = (L1Error.SUCCESS, mem_obj)
             successful_keys.append(k)
 
@@ -350,6 +378,64 @@ class MaruL1Manager:
                 self._allocator.abort_alloc(entry.mem_obj)
                 errors[k] = L1Error.KEY_IN_WRONG_STATE
         return registered, errors
+
+    def _sweep_loop(self) -> None:
+        """Daemon loop: sweep expired staging until ``close`` stops it."""
+        while not self._stop_event.wait(self._sweep_interval):
+            try:
+                self._sweep_once()
+            except Exception:
+                logger.exception("MaruL1Manager: sweep iteration failed")
+
+    def _sweep_once(self) -> None:
+        """Reclaim staging whose TTL elapsed (orphan write pages / read pins).
+
+        MARU: abandonment can only be judged by time -- a refcount says how
+        many holds exist, not whether they will ever be released. Mirrors the
+        stock write_lock/read_lock TTL: an expired write page is returned to
+        the owner (abort_alloc) and an expired read releases its pins (a
+        temporary read reclaims its private page instead). No listener fires --
+        a late finish_read/unsafe_read then sees KEY_NOT_EXIST and recomputes
+        (the same failure path as a stock TTL expiry), and firing across the
+        daemon thread would be a novel hazard for the stock listeners.
+        """
+        now = time.monotonic()
+        with self._lock:
+            expired_writes = [
+                k for k, e in self._pending_write.items() if e.deadline <= now
+            ]
+            expired_reads = [
+                k for k, e in self._pending_read.items() if e.deadline <= now
+            ]
+            if not expired_writes and not expired_reads:
+                return
+            for k in expired_writes:
+                write_entry = self._pending_write.pop(k)
+                try:
+                    self._allocator.abort_alloc(write_entry.mem_obj)
+                except Exception:
+                    logger.exception(
+                        "MaruL1Manager: sweep failed to reclaim write page %s", k
+                    )
+            to_unpin: list[str] = []
+            for k in expired_reads:
+                read_entry = self._pending_read.pop(k)
+                if read_entry.is_temporary:
+                    try:
+                        self._allocator.abort_alloc(read_entry.mem_obj)
+                    except Exception:
+                        logger.exception(
+                            "MaruL1Manager: sweep failed to reclaim read page %s", k
+                        )
+                else:
+                    to_unpin.extend([object_key_to_string(k)] * read_entry.refcount)
+            if to_unpin:
+                self._safe_unpin(self._allocator.handler, to_unpin)
+            logger.warning(
+                "MaruL1Manager: swept %d orphan write(s) / %d orphan read(s)",
+                len(expired_writes),
+                len(expired_reads),
+            )
 
     @_maru_l1_synchronized
     def reserve_read(
@@ -570,8 +656,11 @@ class MaruL1Manager:
                 ret[k] = (L1Error.OUT_OF_MEMORY, None)
             return ret
         successful_keys: list[ObjectKey] = []
+        deadline = time.monotonic() + self._write_ttl_seconds
         for (k, is_temp), obj in zip(need_allocate, objs, strict=False):
-            self._pending_write[k] = _PendingWrite(mem_obj=obj, is_temporary=is_temp)
+            self._pending_write[k] = _PendingWrite(
+                mem_obj=obj, is_temporary=is_temp, deadline=deadline
+            )
             ret[k] = (L1Error.SUCCESS, obj)
             successful_keys.append(k)
         # PARITY(L1Manager.reserve_write): notify listeners of the new write
@@ -676,7 +765,10 @@ class MaruL1Manager:
         for k, entry in temp_staged:
             del self._pending_write[k]
             self._pending_read[k] = _PendingRead(
-                mem_obj=entry.mem_obj, refcount=total, is_temporary=True
+                mem_obj=entry.mem_obj,
+                refcount=total,
+                is_temporary=True,
+                deadline=time.monotonic() + self._read_ttl_seconds,
             )
             ret[k] = (L1Error.SUCCESS, entry.mem_obj)
             successful_keys.append(k)
@@ -883,7 +975,9 @@ class MaruL1Manager:
         return None
 
     def close(self) -> None:
-        """Release staged state and tear down the allocator."""
+        """Stop the sweeper, release staged state, and tear down the allocator."""
+        self._stop_event.set()
+        self._sweeper.join(timeout=self._sweep_interval + 5.0)
         with self._lock:
             self._drain_staging(force=False)
         # PARITY(L1Manager.close): backing teardown outside the lock.
