@@ -221,8 +221,8 @@ func resolveInjectedPullSecrets(
 // "/name") also falls back to defaultNS. Returns (namespace, name).
 func parseEngineRef(ref, defaultNS string) (namespace, name string) {
 	namespace, name = defaultNS, strings.TrimSpace(ref)
-	if i := strings.IndexByte(name, '/'); i >= 0 {
-		namespace, name = strings.TrimSpace(name[:i]), strings.TrimSpace(name[i+1:])
+	if ns, n, found := strings.Cut(name, "/"); found {
+		namespace, name = strings.TrimSpace(ns), strings.TrimSpace(n)
 	}
 	if namespace == "" {
 		namespace = defaultNS
