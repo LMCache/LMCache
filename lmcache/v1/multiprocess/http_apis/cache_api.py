@@ -36,7 +36,6 @@ from lmcache.v1.multiprocess.http_apis.schemas import (
     ChecksumRequest,
     ClearRequest,
     DeleteObjectsRequest,
-    PinRequest,
     PrefetchRequest,
 )
 import lmcache.c_ops as lmc_ops
@@ -131,47 +130,6 @@ async def get_prefetch(request_id: str, request: Request) -> dict[str, object]:
         404: unknown id. 503: server not initialized.
     """
     return get_context(request).prefetch_service.status(request_id)
-
-
-# ---------------------------------------------------------------------------
-# Pins -- pass-throughs to PinService
-# ---------------------------------------------------------------------------
-
-
-@router.post("/cache/pins", response_model=None)
-async def pin_tokens(body: PinRequest, request: Request) -> dict[str, object]:
-    """Pin a token sequence's chunks in L1.
-
-    Responses:
-        200: ``{"requested", "pinned", "resolved_keys", "status"}``.
-        400: token cap exceeded or invalid ``cache_salt``.
-        422: body validation. 503: not initialized, or no layout for the model.
-    """
-    return get_context(request).pin_service.pin(
-        body.model_name,
-        body.world_size,
-        body.token_ids,
-        body.cache_salt,
-        body.tier,
-    )
-
-
-@router.delete("/cache/pins", response_model=None)
-async def unpin_tokens(body: PinRequest, request: Request) -> dict[str, object]:
-    """Unpin a token sequence's chunks in L1.
-
-    Responses:
-        200: ``{"requested", "unpinned", "resolved_keys", "status"}``.
-        400: token cap exceeded or invalid ``cache_salt``.
-        422: body validation. 503: not initialized, or no layout for the model.
-    """
-    return get_context(request).pin_service.unpin(
-        body.model_name,
-        body.world_size,
-        body.token_ids,
-        body.cache_salt,
-        body.tier,
-    )
 
 
 # ---------------------------------------------------------------------------

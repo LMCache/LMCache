@@ -34,13 +34,13 @@ from lmcache.v1.mp_coordinator.blend_directory import GlobalBlendMatcher
 from lmcache.v1.mp_coordinator.cache_control.eviction_manager import (
     L2EvictionManager,
 )
-from lmcache.v1.mp_coordinator.cache_control.pin_manager import PinManager
 from lmcache.v1.mp_coordinator.cache_control.prefetch_manager import PrefetchManager
 from lmcache.v1.mp_coordinator.cache_control.resync_manager import L2ResyncManager
 from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.http_apis.dependencies import CoordinatorContext
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry
+from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.utils.router_discovery import discover_api_routers
 
 logger = init_logger(__name__)
@@ -91,9 +91,13 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         page_size=config.resync_page_size,
     )
     prefetch_manager = PrefetchManager()
-    pin_manager = PinManager()
+    # Resolves pin requests' token_ids to object keys; must match the fleet's
+    # chunk size and hash algorithm (see MPCoordinatorConfig).
+    token_hasher = TokenHasher(
+        chunk_size=config.chunk_size, hash_algorithm=config.hash_algorithm
+    )
     blend_directory = GlobalBlendMatcher(
-        chunk_size=config.blend_chunk_size, probe_stride=config.blend_probe_stride
+        chunk_size=config.chunk_size, probe_stride=config.blend_probe_stride
     )
     # Typed context the cache handlers resolve via ``get_context``;
     # ``outbound_client`` is filled in by the lifespan (bound to the loop).
@@ -103,7 +107,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         usage_manager=usage_manager,
         eviction_manager=eviction_manager,
         prefetch_manager=prefetch_manager,
-        pin_manager=pin_manager,
+        token_hasher=token_hasher,
     )
 
     async def _health_loop() -> None:

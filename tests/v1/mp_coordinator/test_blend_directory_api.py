@@ -14,7 +14,7 @@ SCOPE = "model-a"
 
 
 def _client() -> TestClient:
-    config = MPCoordinatorConfig(health_check_interval=0.0, blend_chunk_size=CHUNK)
+    config = MPCoordinatorConfig(health_check_interval=0.0, chunk_size=CHUNK)
     return TestClient(create_app(config))
 
 

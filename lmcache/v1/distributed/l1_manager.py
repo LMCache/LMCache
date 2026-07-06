@@ -50,9 +50,6 @@ class L1ObjectState:
     is_temporary: bool
     """ Whether the object is temporary (need to be deleted after read). """
 
-    pin_count: int = 0
-    """ Number of outstanding pins; when > 0 the object is not evictable. """
-
     def available_for_read(self) -> bool:
         """Check if the object is available for read.
 
@@ -678,8 +675,8 @@ class L1Manager:
 
         Errors:
             KEY_NOT_EXIST: The key does not exist.
-            KEY_IS_LOCKED: The key is write-locked, read-locked, or pinned and
-                cannot be deleted.
+            KEY_IS_LOCKED: The key is locked (either write-locked or read-locked
+                and cannot be deleted).
         """
         need_to_free: list[MemoryObj] = []
         ret: dict[ObjectKey, L1Error] = {}
@@ -691,13 +688,7 @@ class L1Manager:
                 ret[key] = L1Error.KEY_NOT_EXIST
                 continue
 
-            # Re-check pin_count under the lock so a key pinned after the
-            # eviction controller's is_key_evictable() check is not deleted.
-            if (
-                entry.read_lock.is_locked()
-                or entry.write_lock.is_locked()
-                or entry.pin_count > 0
-            ):
+            if entry.read_lock.is_locked() or entry.write_lock.is_locked():
                 ret[key] = L1Error.KEY_IS_LOCKED
                 continue
 
@@ -716,61 +707,6 @@ class L1Manager:
                 metadata={"keys": successful_keys},
             )
         )
-        return ret
-
-    @l1_mgr_synchronized
-    def pin(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1Error]:
-        """Increment the pin counter of each resident key.
-
-        Args:
-            keys: The list of object keys to pin.
-
-        Returns:
-            A dictionary mapping each object key to an L1Error.
-
-        Errors:
-            KEY_NOT_EXIST: The key does not exist.
-        """
-        ret: dict[ObjectKey, L1Error] = {}
-        for key in keys:
-            entry = self._objects.get(key, None)
-            if entry is None:
-                ret[key] = L1Error.KEY_NOT_EXIST
-                continue
-            entry.pin_count += 1
-            ret[key] = L1Error.SUCCESS
-        return ret
-
-    @l1_mgr_synchronized
-    def unpin(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1Error]:
-        """Decrement the pin counter of each resident key (floored at 0).
-
-        Args:
-            keys: The list of object keys to unpin.
-
-        Returns:
-            A dictionary mapping each object key to an L1Error.
-
-        Errors:
-            KEY_NOT_EXIST: The key does not exist.
-            KEY_IN_WRONG_STATE: The key exists but is not pinned.
-        """
-        ret: dict[ObjectKey, L1Error] = {}
-        for key in keys:
-            entry = self._objects.get(key, None)
-            if entry is None:
-                ret[key] = L1Error.KEY_NOT_EXIST
-                continue
-            if entry.pin_count <= 0:
-                logger.warning(
-                    "L1Manager: unpin on non-pinned key %s; ignoring",
-                    key,
-                )
-                entry.pin_count = 0
-                ret[key] = L1Error.KEY_IN_WRONG_STATE
-                continue
-            entry.pin_count -= 1
-            ret[key] = L1Error.SUCCESS
         return ret
 
     def touch_keys(self, keys: list[ObjectKey]):
@@ -822,11 +758,7 @@ class L1Manager:
         locked_count = 0
 
         for key, entry in list(self._objects.items()):
-            if (
-                entry.write_lock.is_locked()
-                or entry.read_lock.is_locked()
-                or entry.pin_count > 0
-            ):
+            if entry.write_lock.is_locked() or entry.read_lock.is_locked():
                 locked_count += 1
                 continue
             keys_to_clear.append(key)
@@ -865,16 +797,12 @@ class L1Manager:
 
         Returns:
             True if the key exists and is not locked (neither read-locked
-            nor write-locked) and not pinned, False otherwise.
+            nor write-locked), False otherwise.
         """
         entry = self._objects.get(key, None)
         if entry is None:
             return False
-        return (
-            not entry.read_lock.is_locked()
-            and not entry.write_lock.is_locked()
-            and entry.pin_count == 0
-        )
+        return not entry.read_lock.is_locked() and not entry.write_lock.is_locked()
 
     def get_memory_usage(self) -> tuple[int, int]:
         """Get the current memory usage of L1 cache.
@@ -908,7 +836,6 @@ class L1Manager:
         write_locked = 0
         read_locked = 0
         temporary = 0
-        pinned = 0
         for entry in self._objects.values():
             if entry.write_lock.is_locked():
                 write_locked += 1
@@ -916,8 +843,6 @@ class L1Manager:
                 read_locked += 1
             if entry.is_temporary:
                 temporary += 1
-            if entry.pin_count > 0:
-                pinned += 1
         used, total = self._memory_manager.get_memory_usage()
         return {
             "is_healthy": self._memory_manager.memcheck(),
@@ -925,7 +850,6 @@ class L1Manager:
             "write_locked_count": write_locked,
             "read_locked_count": read_locked,
             "temporary_count": temporary,
-            "pinned_count": pinned,
             "memory_used_bytes": used,
             "memory_total_bytes": total,
             "memory_usage_ratio": used / total if total > 0 else 0.0,

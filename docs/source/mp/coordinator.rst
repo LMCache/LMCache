@@ -27,9 +27,10 @@ Expected log output:
 
 The CLI accepts ``--host``, ``--port``, ``--instance-timeout``,
 ``--health-check-interval``, ``--eviction-check-interval``,
-``--eviction-ratio``, ``--trigger-watermark``, ``--blend-chunk-size``,
-``--blend-probe-stride``, and ``--timeout-keep-alive``; any flag overrides the
-matching environment variable below. See :doc:`/cli/coordinator` for details.
+``--eviction-ratio``, ``--trigger-watermark``, ``--chunk-size``,
+``--hash-algorithm``, ``--blend-probe-stride``, and ``--timeout-keep-alive``;
+any flag overrides the matching environment variable below. See
+:doc:`/cli/coordinator` for details.
 Equivalently, the coordinator can still be launched as a module with
 ``python3 -m lmcache.v1.mp_coordinator``.
 
@@ -69,10 +70,16 @@ variables:
      - ``1.0``
      - Eviction fires when usage reaches this fraction of the quota
        (0.0 exclusive to 1.0).
-   * - ``LMCACHE_MP_COORDINATOR_BLEND_CHUNK_SIZE``
+   * - ``LMCACHE_MP_COORDINATOR_CHUNK_SIZE``
      - ``256``
-     - Tokens per chunk for the global CacheBlend directory. Must equal the
-       LMCache chunk size the blend servers use.
+     - Tokens per KV chunk: the CacheBlend match unit and the unit used to
+       resolve pin ``token_ids`` to keys. Must equal the MP servers'
+       ``--chunk-size``.
+   * - ``LMCACHE_MP_COORDINATOR_HASH_ALGORITHM``
+     - ``blake3``
+     - Token hash algorithm for pin key resolution. Must equal the MP servers'
+       ``--hash-algorithm``. ``blake3`` is self-contained; other algorithms
+       require vLLM importable in the coordinator process.
    * - ``LMCACHE_MP_COORDINATOR_BLEND_PROBE_STRIDE``
      - ``1``
      - Positions between CacheBlend match probes. ``1`` probes every offset
@@ -739,17 +746,21 @@ verbatim with its code.
     # -> {"status": "completed", "found_keys": 12, "total_keys": 12}
 
 **Pin/unpin (protecting cache from eviction).** Pin a token sequence's cache so
-it is not evicted until unpinned. The ``tier`` field selects the tier(s), and
-they do not cross: ``l1`` pins only the named server's L1, ``l2`` records only
-the coordinator's L2 protection (excluding the keys from its quota-eviction
-plan), and ``all`` does both. The coordinator forwards the request to the named
-server (which pins its L1 and returns the resolved keys), then records the L2
-pin itself when the tier includes L2.
+it is not evicted from L2 until unpinned. The coordinator resolves the token
+sequence to its object keys **locally** (no MP-server round-trip) and records
+them in its L2 eviction plan (``POST``) or releases them (``DELETE``), excluding
+pinned keys from quota-based eviction. L2 pins are fleet-wide (per
+``cache_salt``), so no target instance is named.
+
+Local resolution requires the coordinator's ``chunk_size`` and
+``hash_algorithm`` (see `Configuration`_) to match the MP servers' ``--chunk-size``
+/ ``--hash-algorithm``; otherwise the resolved keys will not match what was
+stored and the pin protects nothing.
 
 ``POST /cache/pins``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Pin a token sequence on one named server.
+Pin a token sequence's keys in the L2 eviction plan.
 
 **Request body:**
 
@@ -760,43 +771,35 @@ Pin a token sequence on one named server.
    * - Field
      - Type
      - Description
-   * - ``instance_id``
-     - string
-     - Target MP server; must be registered.
    * - ``model_name``
      - string
-     - Model whose layout the target uses to resolve keys.
+     - Model whose rank fan-out to use when resolving keys.
    * - ``world_size``
      - int
-     - World size (``>= 1``) selecting the KV layout and per-rank fan-out.
+     - World size (``>= 1``) selecting the per-rank fan-out.
    * - ``token_ids``
      - list[int]
      - Prompt tokens whose complete chunks are pinned; must match what was
-       stored. A sub-chunk sequence is a ``noop``.
+       stored. A sub-chunk sequence pins nothing (``affected`` 0).
    * - ``cache_salt``
      - string
      - Optional (default ``""``). Per-tenant isolation salt.
-   * - ``tier``
-     - string
-     - Optional (default ``all``). One of ``l1`` / ``l2`` / ``all``.
 
 **Response** (``200 OK``):
 
 .. code-block:: json
 
-    {"instance_id": "server-1", "requested": 12, "affected": 12, "status": "pinned"}
+    {"requested": 12, "affected": 12, "status": "pinned"}
 
 ``requested`` is the number of whole chunks resolved; ``affected`` is the number
-of keys pinned in the requested tier (L1 keys for ``l1``/``all``, L2 keys for
-``l2``). A sub-chunk sequence returns ``status`` ``"noop"``.
+of L2 keys pinned (chunks times the per-rank fan-out).
 
 **HTTP status codes:**
 
-- ``200``: pinned (or a ``noop``).
-- ``404``: unknown ``instance_id`` (not registered).
-- ``502``: the target server was unreachable or rejected the pin.
-- ``422``: request body fails field-level validation (including an invalid
-  ``tier``).
+- ``200``: pinned.
+- ``400``: ``token_ids`` exceeds the per-request cap, or ``cache_salt`` violates
+  its invariants.
+- ``422``: request body fails field-level validation.
 
 **Example:**
 
@@ -805,30 +808,26 @@ of keys pinned in the requested tier (L1 keys for ``l1``/``all``, L2 keys for
     curl -s -X POST http://localhost:9300/cache/pins \
         -H 'Content-Type: application/json' \
         -d '{
-            "instance_id": "server-1",
             "model_name": "Qwen/Qwen3-8B",
             "world_size": 1,
             "token_ids": [101, 102, 103, "..."],
-            "cache_salt": "user-a",
-            "tier": "all"
+            "cache_salt": "user-a"
         }'
-    # -> {"instance_id": "server-1", "requested": 12, "affected": 12, "status": "pinned"}
+    # -> {"requested": 12, "affected": 12, "status": "pinned"}
 
 .. note::
 
-   **L2 requires event reporting.** The coordinator can only exclude L2 keys
-   from eviction for a salt it is tracking, which requires the MP server started
-   with ``--coordinator-l2-event-reporting`` (see `Connecting MP servers`_).
-   **Single-node scope:** one ``instance_id`` pins only that node's shards.
+   **Requires L2 event reporting.** The coordinator can only exclude keys from
+   eviction for a salt it is tracking, which requires the MP servers started with
+   ``--coordinator-l2-event-reporting`` (see `Connecting MP servers`_).
 
 ``DELETE /cache/pins``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Unpin a token sequence on one named server. Same request body as
-``POST /cache/pins``; ``tier`` selects which tier(s) to release. The response
-mirrors the pin (``affected`` is the number of keys unpinned), with ``status``
-``"unpinned"``. Pins are reference-counted: a chunk pinned *N* times needs *N*
-unpins before it can be evicted.
+Unpin a token sequence's keys from the L2 eviction plan. Same request body as
+``POST /cache/pins``. The response mirrors the pin (``affected`` is the number
+of keys unpinned), with ``status`` ``"unpinned"``. Pins are reference-counted: a
+chunk pinned *N* times needs *N* unpins before it can be evicted.
 
 **HTTP status codes:** same as ``POST /cache/pins``.
 
@@ -839,11 +838,9 @@ unpins before it can be evicted.
     curl -s -X DELETE http://localhost:9300/cache/pins \
         -H 'Content-Type: application/json' \
         -d '{
-            "instance_id": "server-1",
             "model_name": "Qwen/Qwen3-8B",
             "world_size": 1,
             "token_ids": [101, 102, 103, "..."],
-            "cache_salt": "user-a",
-            "tier": "all"
+            "cache_salt": "user-a"
         }'
-    # -> {"instance_id": "server-1", "requested": 12, "affected": 12, "status": "unpinned"}
+    # -> {"requested": 12, "affected": 12, "status": "unpinned"}

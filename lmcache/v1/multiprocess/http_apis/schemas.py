@@ -47,22 +47,6 @@ class PrefetchRequest:
 
 
 @dataclass(frozen=True)
-class PinRequest:
-    """Wire body for ``POST`` / ``DELETE /cache/pins``.
-
-    This node only ever acts on L1: it pins its resident L1 when ``tier`` is
-    ``l1`` or ``all``, and skips L1 (just resolves keys) when ``tier`` is ``l2``.
-    It always returns the resolved keys for the coordinator's L2 pin.
-    """
-
-    model_name: str
-    world_size: int
-    token_ids: list[int]
-    cache_salt: str = ""
-    tier: Tier = Tier.ALL
-
-
-@dataclass(frozen=True)
 class ClearRequest:
     """Wire body for ``POST /cache/clear``.
 

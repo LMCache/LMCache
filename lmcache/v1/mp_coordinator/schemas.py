@@ -390,36 +390,33 @@ class PrefetchResponse(BaseModel):
 class PinRequest(BaseModel):
     """Body of ``POST`` / ``DELETE /cache/pins`` on the coordinator.
 
+    Pinning protects the resolved keys from L2 eviction until unpinned. The
+    coordinator resolves ``token_ids`` to keys locally; L2 pins are fleet-wide
+    (per ``cache_salt``), so no target instance is needed.
+
     Attributes:
-        instance_id: Identifier of the target MP server (must be registered).
-        model_name: Model whose layout the target uses to resolve keys.
-        world_size: World size selecting the layout and the per-rank fan-out.
+        model_name: Model whose rank fan-out to use when resolving keys.
+        world_size: World size selecting the per-rank fan-out.
         token_ids: Prompt tokens whose complete chunks should be (un)pinned.
         cache_salt: Per-tenant isolation salt applied to the produced keys.
-        tier: Which tier(s) to pin: ``l1`` (L1 only), ``l2`` (L2 only), or
-            ``all`` (both). ``l1`` never touches L2 and vice versa.
     """
 
-    instance_id: str
     model_name: str
     world_size: int = Field(ge=1)
     token_ids: list[int] = Field(default_factory=list)
     cache_salt: str = ""
-    tier: Tier = Tier.ALL
 
 
 class PinResponse(BaseModel):
     """Reply to ``POST`` / ``DELETE /cache/pins`` on the coordinator.
 
     Attributes:
-        instance_id: The target MP server the request was dispatched to.
         requested: Number of whole chunks the token sequence resolved to.
-        affected: Number of L1 keys pinned (on pin) or unpinned (on unpin);
+        affected: Number of L2 keys pinned (on pin) or unpinned (on unpin);
             disambiguated by ``status``.
-        status: ``"pinned"`` / ``"unpinned"`` / ``"noop"``.
+        status: ``"pinned"`` / ``"unpinned"``.
     """
 
-    instance_id: str
     requested: int = 0
     affected: int = 0
     status: str

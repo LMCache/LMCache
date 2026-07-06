@@ -730,30 +730,6 @@ class StorageManager:
         """
         self._l1_manager.touch_keys(keys)
 
-    def pin_l1_keys(self, keys: list[ObjectKey]) -> int:
-        """Pin the given keys in L1.
-
-        Args:
-            keys (list[ObjectKey]): List of object keys to pin.
-
-        Returns:
-            int: The number of keys successfully pinned.
-        """
-        results = self._l1_manager.pin(keys)
-        return sum(1 for err in results.values() if err == L1Error.SUCCESS)
-
-    def unpin_l1_keys(self, keys: list[ObjectKey]) -> int:
-        """Unpin the given keys in L1.
-
-        Args:
-            keys (list[ObjectKey]): List of object keys to unpin.
-
-        Returns:
-            int: The number of keys successfully unpinned.
-        """
-        results = self._l1_manager.unpin(keys)
-        return sum(1 for err in results.values() if err == L1Error.SUCCESS)
-
     def unsafe_read(
         self, keys: list[ObjectKey]
     ) -> tuple[list[ObjectKey], list[MemoryObj]]:

@@ -902,27 +902,3 @@ class TestStorageManagerSparsePrefetch:
 
         sm.finish_read_prefetched(existing)
         sm.close()
-
-
-class TestStorageManagerPin:
-    """Tests for StorageManager.pin_l1_keys() / unpin_l1_keys()."""
-
-    def test_pin_unpin_counts_resident_keys(
-        self, basic_storage_manager_config, basic_layout
-    ):
-        """pin/unpin return the count of resident keys and protect from eviction."""
-        storage_manager = StorageManager(basic_storage_manager_config)
-
-        resident = make_object_key(1)
-        missing = make_object_key(2)
-        storage_manager.reserve_write([resident], basic_layout, mode="new")
-        storage_manager.finish_write([resident])
-
-        # Only the resident key is pinned (best-effort).
-        assert storage_manager.pin_l1_keys([resident, missing]) == 1
-        assert storage_manager._l1_manager.is_key_evictable(resident) is False
-
-        assert storage_manager.unpin_l1_keys([resident, missing]) == 1
-        assert storage_manager._l1_manager.is_key_evictable(resident) is True
-
-        storage_manager.close()
