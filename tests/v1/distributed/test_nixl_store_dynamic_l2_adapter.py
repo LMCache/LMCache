@@ -369,6 +369,92 @@ class TestLoadInterface:
 
         adpt.submit_unlock([key])
 
+    def test_load_multiple_keys_concurrent(self, adapter):
+        """A multi-key load task reads every chunk correctly.
+
+        Exercises the concurrent (gather-based) load loop: store several
+        keys, then load them all in a single task and verify each landed in
+        its own page with the right data.
+        """
+        adpt, buf, _ = adapter
+        keys = [create_object_key(i) for i in range(1, 4)]
+        fills = [11.0, 22.0, 33.0]
+        store_objs = [
+            create_memory_obj(buf, page_index=i, fill_value=fills[i]) for i in range(3)
+        ]
+
+        # Store all three
+        adpt.submit_store_task(keys, store_objs)
+        wait_for_event_fd(adpt.get_store_event_fd())
+        adpt.pop_completed_store_tasks()
+
+        # Lookup and lock
+        task_id = adpt.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+        wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
+        adpt.query_lookup_and_lock_result(task_id)
+
+        # Load all three into separate pages (3, 4, 5) in ONE task
+        load_objs = [
+            create_memory_obj(buf, page_index=3 + i, fill_value=0.0) for i in range(3)
+        ]
+        task_id = adpt.submit_load_task(keys, load_objs)
+        wait_for_event_fd(adpt.get_load_event_fd())
+
+        bitmap = adpt.query_load_result(task_id)
+        assert bitmap is not None
+        for i in range(3):
+            assert bitmap.test(i)
+            page = 3 + i
+            loaded = buf[page * PAGE_SIZE : (page + 1) * PAGE_SIZE].view(torch.float32)
+            assert torch.all(loaded == fills[i])
+
+        adpt.submit_unlock(keys)
+
+    def test_load_partial_failure_marks_only_successful(self, adapter):
+        """One chunk's failure must not discard the others in the same task.
+
+        With ``asyncio.gather(..., return_exceptions=True)``, a single failed
+        load (here: its backing file is removed) is reported as failed for
+        that key while the sibling keys still load successfully.
+        """
+        adpt, buf, tmp_dir = adapter
+        keys = [create_object_key(i) for i in range(1, 4)]
+        fills = [11.0, 22.0, 33.0]
+        store_objs = [
+            create_memory_obj(buf, page_index=i, fill_value=fills[i]) for i in range(3)
+        ]
+
+        adpt.submit_store_task(keys, store_objs)
+        wait_for_event_fd(adpt.get_store_event_fd())
+        adpt.pop_completed_store_tasks()
+
+        task_id = adpt.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+        wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
+        adpt.query_lookup_and_lock_result(task_id)
+
+        # Sabotage the middle key's backing file so its load raises.
+        os.remove(os.path.join(tmp_dir, _object_key_to_filename(keys[1])))
+
+        load_objs = [
+            create_memory_obj(buf, page_index=3 + i, fill_value=0.0) for i in range(3)
+        ]
+        task_id = adpt.submit_load_task(keys, load_objs)
+        wait_for_event_fd(adpt.get_load_event_fd())
+
+        bitmap = adpt.query_load_result(task_id)
+        assert bitmap is not None
+        assert bitmap.test(0)  # loaded ok
+        assert not bitmap.test(1)  # file removed -> failed, not crashed
+        assert bitmap.test(2)  # loaded ok despite sibling failure
+
+        # The two successful loads landed correct data.
+        for i in (0, 2):
+            page = 3 + i
+            loaded = buf[page * PAGE_SIZE : (page + 1) * PAGE_SIZE].view(torch.float32)
+            assert torch.all(loaded == fills[i])
+
+        adpt.submit_unlock(keys)
+
     def test_query_load_result_clears_result(self, adapter):
         adpt, buf, _ = adapter
         key = create_object_key(1)
