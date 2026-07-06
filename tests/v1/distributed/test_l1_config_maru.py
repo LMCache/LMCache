@@ -129,8 +129,22 @@ def test_maru_rejects_registered_l2(monkeypatch):
         )
 
 
-# NOTE: the maru transfer-mode guard (maru requires supported_transfer_mode
-# == "lmcache_driven") is an inline check in run_http_server, alongside the
-# existing p2p startup guards there. Those startup guards are not unit-tested
-# (importing run_http_server pulls the full server chain); this one follows
-# the same precedent.
+def test_maru_rejects_non_lmcache_driven_transfer():
+    """maru requires the LMCache-driven transfer path (rejects engine/auto)."""
+    # First Party
+    from lmcache.v1.mp_observability.config import ObservabilityConfig
+    from lmcache.v1.multiprocess.config import (
+        CoordinatorConfig,
+        HTTPFrontendConfig,
+        MPServerConfig,
+    )
+    from lmcache.v1.multiprocess.http_server import run_http_server
+
+    with pytest.raises(ValueError, match="lmcache_driven"):
+        run_http_server(
+            http_config=HTTPFrontendConfig(),
+            mp_config=MPServerConfig(supported_transfer_mode="engine_driven"),
+            storage_manager_config=_maru_sm_config(),
+            obs_config=ObservabilityConfig(),
+            coordinator_config=CoordinatorConfig(url=""),
+        )
