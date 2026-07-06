@@ -1,41 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CUDA-specific platform primitives."""
+"""HPU (Habana Gaudi) platform helpers."""
 
 # First Party
 from lmcache.v1.platform.base_device_info import DeviceInfo
-from lmcache.v1.platform.base_pin_memory import PinMemoryBackend
-from lmcache.v1.platform.cuda.pin_memory import CudaPinMemoryBackend
 
 # ---------------------------------------------------------------------------
 # Device detection registry entry
 # ---------------------------------------------------------------------------
 
 
-class CudaDeviceInfo(DeviceInfo):
-    """CUDA device information for the detection registry."""
+class HpuDeviceInfo(DeviceInfo):
+    """HPU device information for the detection registry."""
 
     @property
     def device_type(self) -> str:
-        return "cuda"
+        return "hpu"
 
     @property
     def torch_module_name(self) -> str:
-        return "cuda"
+        return "hpu"
 
     @property
     def ops_module(self) -> str | None:
-        return "lmcache.c_ops"
-
-    @property
-    def pin_memory_backend(self) -> type[PinMemoryBackend] | None:
-        return CudaPinMemoryBackend
+        return None
 
     def is_available(self) -> bool:
-        """Check CUDA availability without importing lmcache.__init__."""
+        """Check HPU availability without importing lmcache.__init__."""
         try:
             # Third Party
             import torch
 
-            return torch.cuda.is_available()
+            return hasattr(torch, "hpu") and torch.hpu.is_available()
         except Exception:
             return False
