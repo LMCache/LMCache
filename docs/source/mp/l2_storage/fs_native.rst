@@ -6,6 +6,14 @@ wrapped with ``NativeConnectorL2Adapter``.  I/O is dispatched through a
 C++ worker-thread pool with eventfd-driven completions, giving a true
 I/O queue depth on a single Python thread.
 
+This is the recommended MP-mode replacement for in-process ``local_disk``
+offload when the L2 tier is a POSIX filesystem or local NVMe path.  MP store
+controllers submit same-layout objects as a batch, and ``fs_native`` forwards
+that batch as one native ``submit_batch_set(keys, memoryviews)`` request.  The
+C++ connector then tiles the batch across its worker threads, so increasing
+``num_workers`` increases the real write queue depth without adding Python
+worker jobs per chunk.
+
 **Required fields:**
 
 - ``base_path``: Directory for storing KV cache files.

@@ -27,22 +27,22 @@ std::string FSConnector::replace_all(const std::string& str,
 
 std::string FSConnector::key_to_filename(const std::string& key) {
   // Input key format (from _object_key_to_string):
-  //   Unsalted: <model_name>@<kv_rank_hex>@<chunk_hash_hex>
-  //   Salted  : <model_name>@<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>
+  //   Unsalted:
+  //   <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>
+  //   Salted:
+  //   <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>
   //
   // Output filename (matching fs_l2_adapter.py._object_key_to_filename):
-  //   Unsalted: <model_name_safe>@0x<kv_rank_hex>@<chunk_hash_hex>.data
+  //   Unsalted:
+  //   <model_name_safe>@0x<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>.data
   //   Salted  :
-  //   <model_name_safe>@0x<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>.data
-  //
-  // The unsalted 3-field shape is bit-identical to the pre-cache_salt
-  // format, so existing cache directories remain valid.
+  //   <model_name_safe>@0x<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>.data
   //
   // NOTE: both model_name and cache_salt are forbidden from containing
   // '@' (invariant enforced on the Python side), so splitting on '@'
   // is unambiguous — no marker, no rsplit.
 
-  // Split on '@' — must yield 3 (unsalted) or 4 (salted) fields.
+  // Split on '@' — must yield 4 (unsalted) or 5 (salted) fields.
   std::vector<std::string> parts;
   size_t start = 0;
   for (size_t pos = 0; pos <= key.size(); ++pos) {
@@ -51,16 +51,17 @@ std::string FSConnector::key_to_filename(const std::string& key) {
       start = pos + 1;
     }
   }
-  if (parts.size() != 3 && parts.size() != 4) {
+  if (parts.size() != 4 && parts.size() != 5) {
     throw std::runtime_error(
-        "FSConnector: malformed key (expected 3 or 4 '@'-separated fields): " +
+        "FSConnector: malformed key (expected 4 or 5 '@'-separated fields): " +
         key);
   }
 
   const std::string& model_name = parts[0];
   const std::string& kv_rank_hex = parts[1];
-  const std::string& chunk_hash = parts[2];
-  const std::string cache_salt = parts.size() == 4 ? parts[3] : std::string();
+  const std::string& object_group_id_hex = parts[2];
+  const std::string& chunk_hash = parts[3];
+  const std::string cache_salt = parts.size() == 5 ? parts[4] : std::string();
 
   // Replace '/' with '-SEP-' for filesystem safety
   std::string safe_model = replace_all(model_name, "/", PATH_SLASH_REPLACEMENT);
@@ -74,6 +75,8 @@ std::string FSConnector::key_to_filename(const std::string& key) {
   result += KEY_SEP;
   result += "0x";
   result += kv_rank_hex;
+  result += KEY_SEP;
+  result += object_group_id_hex;
   result += KEY_SEP;
   result += chunk_hash;
   if (!cache_salt.empty()) {

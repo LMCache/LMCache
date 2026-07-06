@@ -52,6 +52,7 @@ class MockNativeConnector:
     def __init__(self):
         self._efd = create_event_notifier()
         self._store: dict[str, bytes] = {}
+        self.submitted_batch_sets: list[list[str]] = []
         self._next_id = 1
         self._completions: list[tuple[int, bool, str, list[bool] | None]] = []
         self._lock = threading.Lock()
@@ -64,6 +65,7 @@ class MockNativeConnector:
         with self._lock:
             fid = self._next_id
             self._next_id += 1
+            self.submitted_batch_sets.append(list(keys))
 
         try:
             for key, mv in zip(keys, memoryviews, strict=False):
@@ -138,6 +140,10 @@ class MockNativeConnector:
             self._completions.clear()
         return completions
 
+    def stored_key_count(self) -> int:
+        with self._lock:
+            return len(self._store)
+
     def close(self):
         if not self._closed:
             self._closed = True
@@ -200,6 +206,14 @@ def adapter():
     mock_client = MockNativeConnector()
     adp = NativeConnectorL2Adapter(mock_client)
     yield adp
+    adp.close()
+
+
+@pytest.fixture
+def adapter_and_client():
+    mock_client = MockNativeConnector()
+    adp = NativeConnectorL2Adapter(mock_client)
+    yield adp, mock_client
     adp.close()
 
 
@@ -488,6 +502,48 @@ class TestStoreInterface:
 
         completed = adapter.pop_completed_store_tasks()
         assert completed[task_id].is_successful()
+
+    def test_batch_store_uses_one_native_submit(self, adapter_and_client):
+        adapter, client = adapter_and_client
+        keys = [create_object_key(i) for i in range(3)]
+        objs = [create_memory_obj(fill_value=float(i)) for i in range(3)]
+        store_fd = adapter.get_store_event_fd()
+
+        task_id = adapter.submit_store_task(keys, objs)
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+
+        completed = adapter.pop_completed_store_tasks()
+        assert completed[task_id].is_successful()
+        assert client.submitted_batch_sets == [
+            [_object_key_to_string(key) for key in keys]
+        ]
+
+    def test_batch_store_preserves_object_group_id(self, adapter_and_client):
+        adapter, client = adapter_and_client
+        shared = {
+            "chunk_hash": b"\x00\x01\x02\x03",
+            "model_name": "llama",
+            "kv_rank": 255,
+        }
+        keys = [
+            ObjectKey(**shared, object_group_id=0),
+            ObjectKey(**shared, object_group_id=5),
+        ]
+        objs = [
+            create_memory_obj(fill_value=1.0),
+            create_memory_obj(fill_value=2.0),
+        ]
+        store_fd = adapter.get_store_event_fd()
+
+        task_id = adapter.submit_store_task(keys, objs)
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+
+        completed = adapter.pop_completed_store_tasks()
+        assert completed[task_id].is_successful()
+        assert client.submitted_batch_sets == [
+            ["llama@000000ff@0@00010203", "llama@000000ff@5@00010203"]
+        ]
+        assert client.stored_key_count() == 2
 
 
 # =============================================================================
