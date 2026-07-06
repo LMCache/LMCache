@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Verify that every public function/enum in python_ops_fallback that also
+Verify that every public function/enum in _torch_ops that also
 exists in c_ops has a matching signature.
 
-Does NOT require python_ops_fallback to implement everything in c_ops —
+Does NOT require _torch_ops to implement everything in c_ops —
 only checks the intersection. If you implement a function in the fallback,
 its signature must match c_ops exactly.
 
@@ -24,7 +24,8 @@ import re
 import pytest
 
 # First Party
-import lmcache.python_ops_fallback as fallback
+from lmcache.v1.platform import _torch_ops as fallback
+from lmcache.v1.platform import ops_types
 
 try:
     # First Party
@@ -45,7 +46,7 @@ def _public_callables(module):
         for name, obj in inspect.getmembers(module)
         if not name.startswith("_")
         and callable(obj)
-        and not (inspect.isclass(obj) and issubclass(obj, enum.Enum))
+        and not inspect.isclass(obj)  # classes tested by descriptor/enum tests
         and not hasattr(obj, "__members__")  # exclude pybind11 enums
         and getattr(obj, "__module__", None) == getattr(module, "__name__", None)
     }
@@ -62,7 +63,6 @@ def _public_enums(module):
         for name, obj in inspect.getmembers(module, inspect.isclass)
         if not name.startswith("_")
         and (issubclass(obj, enum.Enum) or hasattr(obj, "__members__"))
-        and getattr(obj, "__module__", None) == getattr(module, "__name__", None)
     }
 
 
@@ -86,7 +86,6 @@ def _public_descriptor_classes(module: object) -> dict[str, type]:
         if not name.startswith("_")
         and not (issubclass(obj, enum.Enum) or hasattr(obj, "__members__"))
         and callable(obj)
-        and getattr(obj, "__module__", None) == getattr(module, "__name__", None)
     }
 
 
@@ -214,6 +213,18 @@ def _has_real_names(params):
 # Functions intentionally excluded from parity checks.
 _EXCLUDED_FUNCS: set[str] = set()
 
+# Plan types are native-only (no torch fallback); stubs in ops_types exist
+# only to expose the names on CPU builds.  Cross-check against ops_types so
+# any typo or removal is caught immediately.
+_EXCLUDED_DESCS: set[str] = {"StagingCopy", "LaunchVar", "BatchStep", "KernelGroupSpec"}
+
+# First Party
+# Validate that every excluded descriptor actually exists in ops_types.
+for _name in _EXCLUDED_DESCS:
+    assert hasattr(ops_types, _name), (
+        f"_EXCLUDED_DESCS contains {_name!r} but it does not exist in ops_types"
+    )
+
 _fallback_callables = _public_callables(fallback)
 _c_ops_callables = _public_callables(c_ops) if HAS_C_OPS else {}
 _shared_func_names = sorted(
@@ -238,7 +249,7 @@ _shared_desc_names = sorted(set(_fallback_descs) & set(_c_ops_descs))
     _shared_func_names if _shared_func_names else ["__placeholder__"],
 )
 def test_function_signature_parity(func_name):
-    """For every function that python_ops_fallback chose to implement,
+    """For every function that _torch_ops chose to implement,
     its signature must match c_ops exactly.
 
     When c_ops has real py::arg() names  → check names, count, defaults.
@@ -317,7 +328,7 @@ def test_function_signature_parity(func_name):
     _shared_enum_names if _shared_enum_names else ["__placeholder__"],
 )
 def test_enum_parity(enum_name):
-    """For every enum that python_ops_fallback defines,
+    """For every enum that _torch_ops defines,
     its members and values must match c_ops."""
     if enum_name == "__placeholder__":
         pytest.skip("No shared enums found between c_ops and fallback")
@@ -336,27 +347,25 @@ def test_enum_parity(enum_name):
 @pytest.mark.skipif(not HAS_C_OPS, reason="c_ops not available (no CUDA)")
 def test_all_c_ops_callables_have_fallback() -> None:
     """Every public callable in c_ops must exist in
-    python_ops_fallback."""
+    _torch_ops."""
     missing = sorted(set(_c_ops_callables) - set(_fallback_callables) - _EXCLUDED_FUNCS)
-    assert not missing, f"c_ops callables missing from python_ops_fallback: {missing}"
+    assert not missing, f"c_ops callables missing from _torch_ops: {missing}"
 
 
 @pytest.mark.skipif(not HAS_C_OPS, reason="c_ops not available (no CUDA)")
 def test_all_c_ops_enums_have_fallback() -> None:
     """Every public enum in c_ops must exist in
-    python_ops_fallback."""
+    _torch_ops."""
     missing = sorted(set(_c_ops_enums) - set(_fallback_enums))
-    assert not missing, f"c_ops enums missing from python_ops_fallback: {missing}"
+    assert not missing, f"c_ops enums missing from _torch_ops: {missing}"
 
 
 @pytest.mark.skipif(not HAS_C_OPS, reason="c_ops not available (no CUDA)")
 def test_all_c_ops_descriptors_have_fallback() -> None:
     """Every public descriptor class in c_ops must exist in
-    python_ops_fallback."""
-    missing = sorted(set(_c_ops_descs) - set(_fallback_descs))
-    assert not missing, (
-        f"c_ops descriptor classes missing from python_ops_fallback: {missing}"
-    )
+    _torch_ops."""
+    missing = sorted(set(_c_ops_descs) - set(_fallback_descs) - _EXCLUDED_DESCS)
+    assert not missing, f"c_ops descriptor classes missing from _torch_ops: {missing}"
 
 
 @pytest.mark.skipif(not HAS_C_OPS, reason="c_ops not available (no CUDA)")

@@ -8,7 +8,6 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.python_ops_fallback import set_shape_desc_dtype
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate
 from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
 from lmcache.v1.gpu_connector.kv_format.contiguity import (
@@ -35,6 +34,7 @@ from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.v1.platform.ops_types import set_shape_desc_dtype
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)

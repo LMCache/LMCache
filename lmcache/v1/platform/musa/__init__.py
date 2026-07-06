@@ -30,17 +30,6 @@ class MusaDeviceSpec(DeviceSpec):
     def torch_module_name(self) -> str:
         return "musa"
 
-    @property
-    def ops_module(self) -> str | None:
-        return "lmcache.v1.platform.musa.ops"
-
-    @property
-    def ipc_wrapper_cls(self) -> type[DeviceIPCWrapper] | None:
-        # First Party
-        from lmcache.v1.platform.musa.ipc_wrapper import MusaIPCWrapper
-
-        return MusaIPCWrapper
-
     def is_available(self) -> bool:
         """Check MUSA availability without importing lmcache.__init__."""
         try:

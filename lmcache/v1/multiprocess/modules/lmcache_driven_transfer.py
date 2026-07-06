@@ -48,15 +48,24 @@ from lmcache.v1.multiprocess.native_completion import (
     submit_callback_to_stream,
 )
 from lmcache.v1.multiprocess.protocols.base import RequestType
+from lmcache.v1.platform import _torch_ops
 from lmcache.v1.platform.base_cache_context import BaseCacheContext
 from lmcache.v1.platform.cache_context import create_cache_context
 import lmcache.c_ops as lmc_ops
-import lmcache.python_ops_fallback as _python_ops_fallback
 
 logger = init_logger(__name__)
+# ``lmc_ops.execute_object_group_transfer`` is either a native callable (bound
+# by ``DeviceOps._bind_native``) or the torch-baseline thin method, which wraps
+# ``_torch_ops.execute_object_group_transfer`` and exposes it via ``__wrapped__``.
+# Unwrap before the identity check so the torch baseline is correctly detected as
+# "no native impl" (the baseline op is a native-only stub that raises).
+_active_object_group_transfer = getattr(
+    lmc_ops.execute_object_group_transfer,
+    "__wrapped__",
+    lmc_ops.execute_object_group_transfer,
+)
 _HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = (
-    lmc_ops.execute_object_group_transfer
-    is not _python_ops_fallback.execute_object_group_transfer
+    _active_object_group_transfer is not _torch_ops.execute_object_group_transfer
 )
 
 

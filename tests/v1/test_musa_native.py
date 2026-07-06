@@ -10,8 +10,8 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.platform import _torch_ops as py_ops
 from lmcache.v1.platform.musa import native_kv_transfer as musa_native
-import lmcache.python_ops_fallback as py_ops
 
 
 def _make_native_module() -> ModuleType:
@@ -57,35 +57,21 @@ def test_native_transfer_module_lives_under_musa_platform() -> None:
     assert musa_native.__name__ == "lmcache.v1.platform.musa.native_kv_transfer"
 
 
-def test_get_backend_prefers_musa_ops_over_cuda_when_musa_is_available(
+def test_musa_device_ops_overrides_multi_layer_block_kv_transfer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Backend composition follows device detection priority when MUSA is active."""
-    # Standard
-    import os
-
+    """MusaDeviceOps overrides multi_layer_block_kv_transfer (not the base)."""
     # First Party
-    from lmcache.v1.platform import _detect_device, get_backend
-    from lmcache.v1.platform.musa import ops as musa_ops
+    from lmcache.v1.platform.base_device_ops import DeviceOps
+    from lmcache.v1.platform.musa.device_ops import MusaDeviceOps
 
-    os.environ["DEVICE_TYPE"] = "musa"
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(
-        torch,
-        "musa",
-        SimpleNamespace(is_available=lambda: True),
-        raising=False,
+    assert MusaDeviceOps.device_type == "musa"
+    # The override is defined on the subclass, not inherited from the base
+    assert "multi_layer_block_kv_transfer" in vars(MusaDeviceOps)
+    assert (
+        MusaDeviceOps.multi_layer_block_kv_transfer
+        is not DeviceOps.multi_layer_block_kv_transfer
     )
-
-    dev, dev_type = _detect_device()
-
-    assert dev_type == "musa"
-    backend = get_backend(dev_type)
-    assert backend is not None
-    assert backend.multi_layer_block_kv_transfer is (
-        musa_ops.multi_layer_block_kv_transfer
-    )
-    del os.environ["DEVICE_TYPE"]
 
 
 def test_native_transfer_enabled_by_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -422,9 +408,11 @@ def test_native_block_transfer_rejects_unvalidated_layout(
 def test_musa_ops_block_transfer_entry_dispatches_to_musa_platform(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """MUSA ops backend hides native dispatch behind the c_ops-compatible API."""
+    """MusaDeviceOps dispatches to native transfer when tensor-backed."""
     # First Party
-    from lmcache.v1.platform.musa import ops as musa_ops
+    from lmcache.v1.platform.musa.device_ops import MusaDeviceOps
+
+    ops = MusaDeviceOps()
 
     captured: dict[str, Any] = {}
 
@@ -440,7 +428,7 @@ def test_musa_ops_block_transfer_entry_dispatches_to_musa_platform(
 
     paged_layers = [torch.zeros(4, 4, 16) for _ in range(2)]
     object_tensors = [torch.zeros(2, 8, 16)]
-    musa_ops.multi_layer_block_kv_transfer(
+    ops.multi_layer_block_kv_transfer(
         paged_layers,
         object_tensors,
         [0, 1],

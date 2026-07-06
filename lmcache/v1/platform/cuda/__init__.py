@@ -34,10 +34,6 @@ class CudaDeviceSpec(DeviceSpec):
         return "cuda"
 
     @property
-    def ops_module(self) -> str | None:
-        return "lmcache.c_ops"
-
-    @property
     def pin_memory_backend(self) -> type[PinMemoryBackend] | None:
         return CudaPinMemoryBackend
 
