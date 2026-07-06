@@ -944,8 +944,15 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             instance_id: The GPU instance ID (such as PID).
         """
         with self._lock:
-            popped = [self._cache_contexts.pop(instance_id, None)]
-        if popped[0] is None:
+            # Comprehension keeps the popped entry OUT of any local name: `popped`
+            # must remain the only reference so _release_entries' reclaim actually
+            # unmaps the IPC segments (and mypy sees a clean list[ContextEntry]).
+            popped = [
+                e
+                for e in (self._cache_contexts.pop(instance_id, None),)
+                if e is not None
+            ]
+        if not popped:
             logger.warning(
                 "No registered GPU context found for instance ID %d", instance_id
             )

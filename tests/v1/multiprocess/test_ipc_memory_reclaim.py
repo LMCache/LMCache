@@ -18,29 +18,39 @@ that entry's segments), and that device modules without ``ipc_collect``
 (xpu / musa) degrade gracefully.
 """
 
+# Standard
+from types import SimpleNamespace
+from typing import Any, cast
+from unittest.mock import MagicMock
+
 # Standard Library
 import threading
 import time
 import weakref
-from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 # First Party
-import lmcache.v1.multiprocess.modules.lmcache_driven_transfer as gpu_mod
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     ContextEntry,
     LMCacheDrivenTransferModule,
 )
+import lmcache.v1.multiprocess.modules.lmcache_driven_transfer as gpu_mod
 
 
 class _FakeTorchDev:
     """Records the reclaim-call sequence; optionally omits ipc_collect."""
 
+    empty_cache: MagicMock
+    ipc_collect: MagicMock
+
     def __init__(self, with_ipc_collect: bool = True):
         self.calls: list[str] = []
-        self.empty_cache = lambda: self.calls.append("empty_cache")
+        self.empty_cache = MagicMock(
+            side_effect=lambda: self.calls.append("empty_cache")
+        )
         if with_ipc_collect:
-            self.ipc_collect = lambda: self.calls.append("ipc_collect")
+            self.ipc_collect = MagicMock(
+                side_effect=lambda: self.calls.append("ipc_collect")
+            )
 
 
 def _bare_module() -> LMCacheDrivenTransferModule:
@@ -69,7 +79,7 @@ def test_unregister_reclaims_ipc_memory(monkeypatch) -> None:
     monkeypatch.setattr(gpu_mod, "torch_dev", dev)
     module = _bare_module()
     entry = _entry()
-    ctx = entry.cache_context
+    ctx = cast(MagicMock, entry.cache_context)
     module._cache_contexts[7] = entry
     del entry
 
@@ -123,9 +133,9 @@ def test_reaper_reclaims_once_per_batch(monkeypatch) -> None:
     stale_a, stale_b, fresh = _entry("a"), _entry("b"), _entry("c")
     stale_a.last_seen = stale_b.last_seen = time.monotonic() - 1000.0
     ctx_a, ctx_b, ctx_fresh = (
-        stale_a.cache_context,
-        stale_b.cache_context,
-        fresh.cache_context,
+        cast(MagicMock, stale_a.cache_context),
+        cast(MagicMock, stale_b.cache_context),
+        cast(MagicMock, fresh.cache_context),
     )
     module._cache_contexts.update({1: stale_a, 2: stale_b, 3: fresh})
     del stale_a, stale_b, fresh
@@ -195,9 +205,9 @@ def test_close_releases_all_and_reclaims_once(monkeypatch) -> None:
     monkeypatch.setattr(gpu_mod, "torch_dev", dev)
     module = _bare_module()
     module._device_host_func_dispatcher = MagicMock()
-    module._ctx.storage_manager = MagicMock()
+    cast(Any, module._ctx).storage_manager = MagicMock()
     e1, e2 = _entry("a"), _entry("b")
-    c1, c2 = e1.cache_context, e2.cache_context
+    c1, c2 = cast(MagicMock, e1.cache_context), cast(MagicMock, e2.cache_context)
     module._cache_contexts.update({1: e1, 2: e2})
     del e1, e2
 
@@ -215,7 +225,7 @@ def test_close_with_empty_registry_does_not_reclaim(monkeypatch) -> None:
     monkeypatch.setattr(gpu_mod, "torch_dev", dev)
     module = _bare_module()
     module._device_host_func_dispatcher = MagicMock()
-    module._ctx.storage_manager = MagicMock()
+    cast(Any, module._ctx).storage_manager = MagicMock()
 
     module.close()
 
