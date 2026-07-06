@@ -5,12 +5,13 @@
 from typing import List, Tuple
 import concurrent.futures
 import threading
+import time
 
 # Third Party
 import pytest
 
 # First Party
-from lmcache.v1.memory_management import AddressManager
+from lmcache.v1.memory_management import AddressManager, AddressSizeSnapshot
 
 
 class TestAddressManagerBasic:
@@ -1182,6 +1183,86 @@ class TestAddressManagerEdgeCases:
 
         assert manager.get_free_size() == size
         assert manager.total_allocated_size == 0
+
+
+class TestAddressSizeSnapshot:
+    """Test AddressManager.get_size_snapshot atomic size reads (#3768)."""
+
+    def test_snapshot_matches_individual_reads(self):
+        """Snapshot fields match the individual accessors on a quiescent
+        allocator."""
+        size = 4096 * 10
+        manager = AddressManager(size)
+        manager.allocate(4096 * 3)
+
+        snapshot = manager.get_size_snapshot()
+        assert isinstance(snapshot, AddressSizeSnapshot)
+        assert snapshot.heap == manager.get_heap_size()
+        assert snapshot.allocated == manager.total_allocated_size
+        assert snapshot.free == manager.get_free_size()
+
+    def test_snapshot_invariant_holds(self):
+        """free + allocated == heap holds within a single snapshot after
+        allocate / free / sbrk."""
+        size = 4096 * 10
+        manager = AddressManager(size)
+
+        addr, alloc_size = manager.allocate(4096 * 2)
+        snap = manager.get_size_snapshot()
+        assert snap.free + snap.allocated == snap.heap
+
+        manager.sbrk(4096 * 5)
+        snap = manager.get_size_snapshot()
+        assert snap.free + snap.allocated == snap.heap
+        assert snap.heap == size + 4096 * 5
+
+        manager.free(addr, alloc_size)
+        snap = manager.get_size_snapshot()
+        assert snap.free + snap.allocated == snap.heap
+        assert snap.allocated == 0
+
+    def test_snapshot_consistent_during_concurrent_sbrk(self):
+        """The snapshot invariant must never break even while sbrk() grows the
+        address space concurrently.
+
+        With the old split reads (get_free_size() then get_heap_size()) an
+        interleaved sbrk() could mix a stale free size with a newer heap size,
+        making memcheck() report a false inconsistency. The locked snapshot
+        rules that out.
+        """
+        manager = AddressManager(4096 * 4)
+        stop = threading.Event()
+        errors: list[str] = []
+
+        def grow():
+            while not stop.is_set():
+                manager.sbrk(4096)
+                # Yield briefly so the grower does not starve the observer
+                # threads (and pin a core) in constrained CI environments.
+                time.sleep(0.001)
+
+        def observe():
+            for _ in range(20000):
+                snap = manager.get_size_snapshot()
+                if snap.free + snap.allocated != snap.heap:
+                    errors.append(
+                        f"inconsistent snapshot: {snap.free} + "
+                        f"{snap.allocated} != {snap.heap}"
+                    )
+                    return
+
+        grower = threading.Thread(target=grow)
+        grower.start()
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+                futures = [ex.submit(observe) for _ in range(4)]
+                for f in concurrent.futures.as_completed(futures):
+                    f.result()
+        finally:
+            stop.set()
+            grower.join()
+
+        assert not errors, errors[0]
 
 
 def _no_overlap(allocations: List[Tuple[int, int]]) -> bool:

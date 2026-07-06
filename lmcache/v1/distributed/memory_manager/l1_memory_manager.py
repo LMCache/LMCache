@@ -174,10 +174,10 @@ class L1MemoryManager:
             )
 
         address_manager = get_address_manager(self._allocator)
-        free_size = address_manager.get_free_size()
-        total_size = address_manager.get_heap_size()
-        used_size = total_size - free_size
-        return used_size, total_size
+        # Single locked snapshot so used/total can't be computed from reads
+        # taken across a concurrent sbrk() growth (see #3768).
+        snapshot = address_manager.get_size_snapshot()
+        return snapshot.allocated, snapshot.heap
 
     def get_l1_memory_desc(self) -> L1MemoryDesc:
         """
