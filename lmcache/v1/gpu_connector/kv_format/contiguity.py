@@ -90,7 +90,17 @@ def _validate_dim0_padded_layout(tensor: torch.Tensor) -> int:
     * Every interior dim ``i`` satisfies
       ``stride[i] == prod(shape[i+1:])`` -- only dim-0 may carry
       padding, with ``stride[0] >= prod(shape[1:])``.
-    * ``storage_offset == 0`` -- no slice/narrow base shift.
+    * ``storage_offset`` may be nonzero (slice/narrow base shift). This
+      is safe because every consumer addresses the tensor through
+      ``Tensor.data_ptr()`` -- which already includes the storage
+      offset -- and steps blocks via
+      :class:`PageBufferShapeDesc.block_stride_elems`; the CUDA-IPC
+      path likewise transports ``(shape, stride, storage_offset)``
+      verbatim, and PyTorch validates offset + extent against the
+      storage at view construction. DeepSeek V4 hits this: the engine
+      packs the fp8 KV and the fp4 indexer caches into ONE pool
+      buffer, so a group's KV is a base-shifted slice of that buffer
+      (dim-0-padded AND ``storage_offset != 0``).
 
     Callers must pass the stride-sorted permuted view (not the original
     tensor): for tensors that are both permuted and dim-0-padded, the
@@ -129,8 +139,6 @@ def _validate_dim0_padded_layout(tensor: torch.Tensor) -> int:
         _fail("stride[-1] != 1 (inner dim not contiguous)")
     if stride[-2] != shape[-1]:
         _fail("stride[-2] != shape[-1] (last-two dims not tightly packed)")
-    if storage_offset != 0:
-        _fail("storage_offset != 0 (slice/narrow view, base address shifted)")
     inner_tight = 1
     for i in range(ndim - 1, 0, -1):
         if i < ndim - 1 and stride[i] != inner_tight:
@@ -144,4 +152,10 @@ def _validate_dim0_padded_layout(tensor: torch.Tensor) -> int:
             f"dim-0 stride {stride[0]} < prod(shape[1:])={inner_tight} "
             "(overlapping blocks)"
         )
+    # NOTE: a base-shifted slice (storage_offset != 0) needs no extra
+    # bounds check here -- PyTorch already validates offset + extent
+    # against the storage when the view is CONSTRUCTED (both
+    # ``as_strided`` and ``Tensor.set_`` raise "setStorage: ... out of
+    # bounds" for over-reaching views), so any tensor that reaches this
+    # function is in-bounds by construction.
     return stride[0] - inner_tight

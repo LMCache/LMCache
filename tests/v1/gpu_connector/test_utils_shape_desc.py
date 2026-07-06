@@ -236,3 +236,47 @@ def test_get_device_handles_every_kvcaches_shape():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_attempt_permute_accepts_dim0_padded_slice_with_storage_offset():
+    """A dim-0-padded view at a NONZERO storage offset must be accepted.
+
+    This is the DeepSeek V4 mixed-compression layout: the engine packs the
+    fp8 KV cache and the fp4 Lightning-Indexer cache into ONE pool buffer,
+    so a group's KV tensor is a base-shifted slice of that buffer -- dim-0
+    block padding AND storage_offset != 0. Consumers address via
+    Tensor.data_ptr() (offset-inclusive) and step blocks via
+    PageBufferShapeDesc.block_stride_elems, so the offset is transparent.
+    (CPU tensors: the check is pure metadata.)
+    """
+    nb, bs, hs = 7, 4, 6
+    pool_row = 40  # > bs*hs = 24 -> dim-0 padding of 16 elems/block
+    offset = 24  # group's slice starts mid-buffer
+    pool = torch.zeros(offset + nb * pool_row, dtype=torch.uint8)
+    view = pool.as_strided((nb, bs, hs), (pool_row, hs, 1), offset)
+    assert not view.is_contiguous()
+    assert view.storage_offset() == offset
+
+    out = attempt_permute_to_contiguous_view(view)
+    # zero-copy: the (identity-)permuted view aliases the same storage at
+    # the same base address -- never a .contiguous() copy
+    assert isinstance(out, torch.Tensor)
+    assert out.data_ptr() == view.data_ptr()
+    assert out.untyped_storage().data_ptr() == pool.untyped_storage().data_ptr()
+    assert tuple(out.shape) == (nb, bs, hs)
+    assert out.storage_offset() == offset
+
+
+def test_attempt_permute_still_rejects_interior_dim_padding():
+    """Interior-dim padding stays unsupported regardless of the offset
+    relaxation -- only dim-0 may carry padding. 4-D so the padding lands on
+    a TRUE interior dim; on 3-D it would trip the earlier last-two-dims
+    tight-packing check (different message) instead of the interior loop."""
+    nb, g, bs, hs = 5, 3, 4, 6
+    padded_g_row = bs * hs + 8  # interior (dim-1) padding
+    pool = torch.zeros(nb * g * padded_g_row, dtype=torch.uint8)
+    view = pool.as_strided(
+        (nb, g, bs, hs), (g * padded_g_row, padded_g_row, hs, 1), 0
+    )
+    with pytest.raises(ValueError, match="interior-dim padding"):
+        attempt_permute_to_contiguous_view(view)
