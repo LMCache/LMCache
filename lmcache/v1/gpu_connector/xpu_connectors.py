@@ -20,7 +20,7 @@ from lmcache.v1.gpu_connector.utils import (
     get_tokens_per_layer,
     normalize_kv_and_discover_format,
 )
-from lmcache.v1.memory_management import GPUMemoryAllocator  # noqa: E501
+from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
 import lmcache.c_ops as lmc_ops
