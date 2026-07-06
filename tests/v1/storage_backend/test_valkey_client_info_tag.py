@@ -16,9 +16,10 @@ These tests inject a fake ``glide_sync`` module so the real
 """
 
 # Standard
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 import sys
-import types
 
 # Third Party
 import pytest
@@ -31,125 +32,151 @@ from lmcache.v1.storage_backend.connector.valkey_connector import (
     _ThreadWorkerPool,
 )
 
+# ── Fake glide_sync building blocks ─────────────────────────────────────
+#
+# Config classes come in two flavours whose constructor signatures differ:
+# the *Tagged* variants accept ``client_info_tag`` (glide >= 2.5.0), the
+# *Untagged* ones do not (older builds). Defining them as distinct top-level
+# classes — rather than redefining one name under if/else — keeps mypy happy
+# and lets ``_make_fake_glide_sync`` pick the right pair. Each records the
+# kwargs it cares about so tests can assert what the connector threaded in.
 
-def _make_fake_glide_sync(supports_tag: bool) -> types.ModuleType:
-    """Build a fake ``glide_sync`` module for ``_get_client``.
 
-    The config classes accept ``client_info_tag`` only when
-    ``supports_tag`` is True, mirroring pre- and post-2.5.0 glide builds.
-    Each config records the kwargs it was constructed with, and each client
-    records the last config passed to ``create`` so tests can assert what
-    the connector threaded through.
+class _FakeNodeAddress:
+    def __init__(self, host: str, port: int) -> None:
+        self.host = host
+        self.port = port
+
+
+class _FakeServerCredentials:
+    def __init__(self, username: str, password: str) -> None:
+        self.username = username
+        self.password = password
+
+
+class _FakeAdvancedClientConfig:
+    def __init__(self, connection_timeout: Any = None) -> None:
+        self.connection_timeout = connection_timeout
+
+
+class _FakeAdvancedClusterConfig:
+    def __init__(self, connection_timeout: Any = None) -> None:
+        self.connection_timeout = connection_timeout
+
+
+class _TaggedClientConfiguration:
+    def __init__(
+        self,
+        addresses: Any,
+        request_timeout: Any = None,
+        use_tls: bool = False,
+        advanced_config: Any = None,
+        credentials: Any = None,
+        database_id: Any = None,
+        client_info_tag: Any = None,
+    ) -> None:
+        self.kwargs = {"database_id": database_id, "client_info_tag": client_info_tag}
+
+
+class _UntaggedClientConfiguration:
+    def __init__(
+        self,
+        addresses: Any,
+        request_timeout: Any = None,
+        use_tls: bool = False,
+        advanced_config: Any = None,
+        credentials: Any = None,
+        database_id: Any = None,
+    ) -> None:
+        self.kwargs = {"database_id": database_id}
+
+
+class _TaggedClusterConfiguration:
+    def __init__(
+        self,
+        addresses: Any,
+        request_timeout: Any = None,
+        use_tls: bool = False,
+        advanced_config: Any = None,
+        credentials: Any = None,
+        client_info_tag: Any = None,
+    ) -> None:
+        self.kwargs = {"client_info_tag": client_info_tag}
+
+
+class _UntaggedClusterConfiguration:
+    def __init__(
+        self,
+        addresses: Any,
+        request_timeout: Any = None,
+        use_tls: bool = False,
+        advanced_config: Any = None,
+        credentials: Any = None,
+    ) -> None:
+        self.kwargs: dict = {}
+
+
+def _make_fake_glide_sync(supports_tag: bool) -> SimpleNamespace:
+    """Build a fake ``glide_sync`` namespace for ``_get_client``.
+
+    When ``supports_tag`` is True the config classes accept
+    ``client_info_tag`` (glide >= 2.5.0); otherwise they don't, mirroring
+    older builds. Fresh client classes are created per call so the recorded
+    ``last_config`` never leaks between tests.
     """
-    mod = types.ModuleType("glide_sync")
 
-    class NodeAddress:
-        def __init__(self, host, port):
-            self.host = host
-            self.port = port
+    class GlideClient:
+        last_config: Any = None
 
-    class ServerCredentials:
-        def __init__(self, username, password):
-            self.username = username
-            self.password = password
-
-    class AdvancedGlideClientConfiguration:
-        def __init__(self, connection_timeout=None):
-            self.connection_timeout = connection_timeout
-
-    class AdvancedGlideClusterClientConfiguration:
-        def __init__(self, connection_timeout=None):
-            self.connection_timeout = connection_timeout
-
-    if supports_tag:
-
-        class GlideClientConfiguration:
-            def __init__(
-                self,
-                addresses,
-                request_timeout=None,
-                use_tls=False,
-                advanced_config=None,
-                credentials=None,
-                database_id=None,
-                client_info_tag=None,
-            ):
-                self.kwargs = {
-                    "database_id": database_id,
-                    "client_info_tag": client_info_tag,
-                }
-
-        class GlideClusterClientConfiguration:
-            def __init__(
-                self,
-                addresses,
-                request_timeout=None,
-                use_tls=False,
-                advanced_config=None,
-                credentials=None,
-                client_info_tag=None,
-            ):
-                self.kwargs = {"client_info_tag": client_info_tag}
-
-    else:
-
-        class GlideClientConfiguration:
-            def __init__(
-                self,
-                addresses,
-                request_timeout=None,
-                use_tls=False,
-                advanced_config=None,
-                credentials=None,
-                database_id=None,
-            ):
-                self.kwargs = {"database_id": database_id}
-
-        class GlideClusterClientConfiguration:
-            def __init__(
-                self,
-                addresses,
-                request_timeout=None,
-                use_tls=False,
-                advanced_config=None,
-                credentials=None,
-            ):
-                self.kwargs = {}
-
-    class _FakeClientBase:
-        last_config = None
-
-        def __init__(self, config):
+        def __init__(self, config: Any) -> None:
             self.config = config
 
-        def get(self, key, buffer=None):  # signature drives has_buffer_get
+        def get(self, key: Any, buffer: Any = None) -> Any:
+            # ``buffer`` param presence drives has_buffer_get detection.
             return None
 
-        def close(self):
+        def close(self) -> None:
             pass
 
         @classmethod
-        def create(cls, config):
+        def create(cls, config: Any) -> "GlideClient":
             cls.last_config = config
             return cls(config)
 
-    class GlideClient(_FakeClientBase):
-        last_config = None
+    class GlideClusterClient:
+        last_config: Any = None
 
-    class GlideClusterClient(_FakeClientBase):
-        last_config = None
+        def __init__(self, config: Any) -> None:
+            self.config = config
 
-    mod.NodeAddress = NodeAddress
-    mod.ServerCredentials = ServerCredentials
-    mod.AdvancedGlideClientConfiguration = AdvancedGlideClientConfiguration
-    mod.AdvancedGlideClusterClientConfiguration = (
-        AdvancedGlideClusterClientConfiguration
+        def get(self, key: Any, buffer: Any = None) -> Any:
+            return None
+
+        def close(self) -> None:
+            pass
+
+        @classmethod
+        def create(cls, config: Any) -> "GlideClusterClient":
+            cls.last_config = config
+            return cls(config)
+
+    client_cfg = (
+        _TaggedClientConfiguration if supports_tag else _UntaggedClientConfiguration
     )
-    mod.GlideClientConfiguration = GlideClientConfiguration
-    mod.GlideClusterClientConfiguration = GlideClusterClientConfiguration
-    mod.GlideClient = GlideClient
-    mod.GlideClusterClient = GlideClusterClient
-    return mod
+    cluster_cfg = (
+        _TaggedClusterConfiguration if supports_tag else _UntaggedClusterConfiguration
+    )
+
+    return SimpleNamespace(
+        NodeAddress=_FakeNodeAddress,
+        ServerCredentials=_FakeServerCredentials,
+        AdvancedGlideClientConfiguration=_FakeAdvancedClientConfig,
+        AdvancedGlideClusterClientConfiguration=_FakeAdvancedClusterConfig,
+        GlideClientConfiguration=client_cfg,
+        GlideClusterClientConfiguration=cluster_cfg,
+        GlideClient=GlideClient,
+        GlideClusterClient=GlideClusterClient,
+    )
 
 
 # ── _lmcache_client_info_tag ────────────────────────────────────────────
