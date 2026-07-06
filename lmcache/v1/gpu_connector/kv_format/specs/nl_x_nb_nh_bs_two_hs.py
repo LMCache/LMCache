@@ -23,7 +23,6 @@ import lmcache.c_ops as lmc_ops
 
 class NL_X_NB_NH_BS_TWO_HS_Spec(KVFormatSpec):
     engine_kv_format = lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS
-    is_hnd = True
     attention_backends = ("vLLM non-MLA blocks-first, fused K/V",)
 
     def num_layers(self) -> int:

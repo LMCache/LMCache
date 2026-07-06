@@ -59,7 +59,7 @@ msgstr "启动 LMCache MP 服务器："
 
 #: ../../source/recipes/devstral.rst:31
 msgid "Start vLLM with the LMCache MP connector:"
-msgstr "启动带有 LMCache MP 连接器的 vLLM："
+msgstr "使用 LMCache MP 连接器启动 vLLM："
 
 #: ../../source/recipes/devstral.rst:44
 msgid ""
@@ -75,9 +75,7 @@ msgid ""
 "If there are any issues with vLLM setup, please refer to the `vLLM "
 "Recipes <https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_ "
 "for more details."
-msgstr ""
-"如果在 vLLM 设置中遇到任何问题，请参考 `vLLM Recipes "
-"<https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_ 获取更多详细信息。"
+msgstr "如果在 vLLM 设置中遇到任何问题，请参考 `vLLM Recipes <https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_ 以获取更多详细信息。"
 
 #: ../../source/recipes/devstral.rst
 msgid "SGLang"
@@ -95,9 +93,7 @@ msgstr "TRT-LLM"
 msgid ""
 "**Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-"
 "LLM + LMCache setup."
-msgstr ""
-"**状态：** 支持。有关 TRT-LLM + LMCache 设置，请参见 "
-":doc:`../getting_started/quickstart`。"
+msgstr "**状态：** 支持。TRT-LLM + LMCache 的配置方式，请参阅 :doc:`../getting_started/quickstart`。"
 
 #: ../../source/recipes/devstral.rst:61
 msgid "CacheBlend support"

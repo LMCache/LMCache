@@ -27,5 +27,5 @@ msgstr "Dynamo 集成"
 msgid ""
 "Integration with `NVIDIA Dynamo <https://github.com/ai-dynamo/dynamo>`_ "
 "is **coming soon**."
-msgstr "与 `NVIDIA Dynamo <https://github.com/ai-dynamo/dynamo>`_ 的集成将于 **即将推出**。"
+msgstr "与 `NVIDIA Dynamo <https://github.com/ai-dynamo/dynamo>`_ 的集成\\ **即将推出**\\ 。"
 

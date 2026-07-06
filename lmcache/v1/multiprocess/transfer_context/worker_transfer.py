@@ -31,6 +31,7 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     scatter_cpu_to_paged_kv,
 )
 from lmcache.v1.platform import _registry as platform_registry
+from lmcache.v1.platform import get_device_info
 
 logger = init_logger(__name__)
 
@@ -87,6 +88,13 @@ def _build_lmcache_driven_context(device_type: str) -> "TransferContext":
             "%r: no KV-cache wrapper factory is registered. "
             "Use mode 'engine_driven' or 'auto' instead." % device_type
         ) from exc
+    device_info = get_device_info(device_type)
+    if device_info and not device_info.is_handle_transfer_available():
+        raise ValueError(
+            "MP transfer mode 'lmcache_driven' is not available for device type "
+            "%r: required platform capability checks failed. "
+            "Use mode 'engine_driven' or 'auto' instead." % device_type
+        )
     return LMCacheDrivenTransferContext()
 
 

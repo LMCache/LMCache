@@ -1,28 +1,41 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CUDA-specific platform primitives.
-
-:class:`~lmcache.v1.platform.cuda.ipc_wrapper.CudaIPCWrapper` carries
-a ``device_type`` ClassVar and a ``wrap`` factory classmethod, which
-:func:`~lmcache.v1.platform._registry._discover_wrappers_once` picks
-up at run-time -- no static ``register_kv_wrapper`` needed.
-
-The CUDA availability predicate is still registered statically here
-so callers can check ``is_available("cuda")`` at import time.
-"""
+"""CUDA-specific platform primitives."""
 
 # First Party
-from lmcache.v1.platform._registry import register_availability
+from lmcache.v1.platform.base_device_info import DeviceInfo
+from lmcache.v1.platform.base_pin_memory import PinMemoryBackend
 from lmcache.v1.platform.cuda.pin_memory import CudaPinMemoryBackend
-from lmcache.v1.platform.device_ext import register_pin_memory_backend
+
+# ---------------------------------------------------------------------------
+# Device detection registry entry
+# ---------------------------------------------------------------------------
 
 
-def _cuda_is_available() -> bool:
-    """Lazy availability check to avoid circular import at module load."""
-    # First Party
-    from lmcache import torch_dev
+class CudaDeviceInfo(DeviceInfo):
+    """CUDA device information for the detection registry."""
 
-    return torch_dev.is_available()
+    @property
+    def device_type(self) -> str:
+        return "cuda"
 
+    @property
+    def torch_module_name(self) -> str:
+        return "cuda"
 
-register_availability("cuda", _cuda_is_available)
-register_pin_memory_backend("cuda", CudaPinMemoryBackend)
+    @property
+    def ops_module(self) -> str | None:
+        return "lmcache.c_ops"
+
+    @property
+    def pin_memory_backend(self) -> type[PinMemoryBackend] | None:
+        return CudaPinMemoryBackend
+
+    def is_available(self) -> bool:
+        """Check CUDA availability without importing lmcache.__init__."""
+        try:
+            # Third Party
+            import torch
+
+            return torch.cuda.is_available()
+        except Exception:
+            return False

@@ -75,23 +75,6 @@ class TestGPUKVFormatEnum:
 
         assert hasattr(lmc_ops.EngineKVFormat, "NB_NL_TWO_NH_BS_HS")
 
-    def test_is_cross_layer_format(self) -> None:
-        # First Party
-        from lmcache.v1.gpu_connector.utils import is_cross_layer_format
-        import lmcache.c_ops as lmc_ops
-
-        assert is_cross_layer_format(lmc_ops.EngineKVFormat.NB_NL_TWO_BS_NH_HS)
-        assert is_cross_layer_format(lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS)
-        assert not is_cross_layer_format(lmc_ops.EngineKVFormat.NL_X_NB_BS_HS)
-
-    def test_is_hnd(self) -> None:
-        # First Party
-        from lmcache.v1.gpu_connector.utils import is_hnd
-        import lmcache.c_ops as lmc_ops
-
-        assert is_hnd(lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS)
-        assert not is_hnd(lmc_ops.EngineKVFormat.NB_NL_TWO_BS_NH_HS)
-
 
 @pytest.mark.skipif(not _has_lmc_ops(), reason="lmcache C ops not built")
 class TestNormalizeTRTLLM:

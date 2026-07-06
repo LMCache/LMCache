@@ -1,14 +1,37 @@
 Metrics
 =======
 
-Metrics are collected via OpenTelemetry counters and exported through an
-in-process **Prometheus** ``/metrics`` HTTP endpoint (default port 9090).
-When ``--otlp-endpoint`` is set, metrics are also pushed to the OTel
-collector.
+Metrics are collected via OpenTelemetry and made available to Prometheus in
+one of two ways, depending on whether ``--otlp-endpoint`` is set:
+
+- **Pull mode (default, no collector).** When ``--otlp-endpoint`` is *not*
+  set, the server publishes a Prometheus ``/metrics`` endpoint that Prometheus
+  scrapes directly.
+
+  .. important::
+
+     For ``lmcache server``, ``/metrics`` is served by the **HTTP frontend**
+     on ``--http-port`` (default **8080**), e.g.
+     ``http://<host>:8080/metrics`` — **not** on ``--prometheus-port``.
+     ``--prometheus-port`` is *ignored* by ``lmcache server``: the standalone
+     Prometheus HTTP server is disabled because the HTTP frontend already
+     serves ``/metrics``. The frontend-less entrypoints
+     (``python -m lmcache.v1.multiprocess.server`` and ``lmcache trace
+     replay``) have no HTTP frontend, so *they* serve ``/metrics`` on
+     ``--prometheus-port`` (default 9090). See
+     :ref:`mp-obs-metrics-endpoint` for the full breakdown. Either way,
+     ``/metrics`` is empty until the first store/retrieve — drive some
+     traffic before you go looking.
+
+- **Push mode (OTLP).** When ``--otlp-endpoint`` is set, metrics are pushed to
+  an OpenTelemetry Collector, which re-exposes them for Prometheus to scrape.
+  See :doc:`index` for the bundled Collector + Prometheus + Grafana stack.
 
 All metrics use the ``lmcache_mp.`` prefix (multiprocess). On Prometheus,
 dots are converted to underscores and counters get a ``_total`` suffix
-(e.g. ``lmcache_mp_l1_read_chunks_total``).
+(e.g. ``lmcache_mp_l1_read_chunks_total``); histograms gain a unit suffix
+plus ``_sum`` / ``_count`` / ``_bucket`` (e.g.
+``lmcache_mp_l2_store_throughput_GB_per_second_sum``).
 
 .. _mp-observability-resource:
 
@@ -378,6 +401,29 @@ attribute — the registered adapter type (e.g. ``"fs"``, ``"nixl_store"``,
      - Histogram
      - L2→L1 load throughput in GB/s per (request, adapter) pair.
 
+**PromQL for average throughput (GB/s), per backend:**
+
+.. code-block:: promql
+
+    # L1 -> L2 store throughput, averaged over the last minute, per l2_name:
+    sum by (l2_name) (rate(lmcache_mp_l2_store_throughput_GB_per_second_sum[1m]))
+    / sum by (l2_name) (rate(lmcache_mp_l2_store_throughput_GB_per_second_count[1m]))
+
+    # L2 -> L1 load throughput (same shape):
+    sum by (l2_name) (rate(lmcache_mp_l2_load_throughput_GB_per_second_sum[1m]))
+    / sum by (l2_name) (rate(lmcache_mp_l2_load_throughput_GB_per_second_count[1m]))
+
+.. note::
+
+   ``l2_store_throughput`` populates whenever chunks are written to L2.
+   ``l2_load_throughput`` only populates when chunks are read **from L2 into
+   L1** — i.e. on a prefetch load after the entry has aged out of L1. If your
+   working set fits entirely in L1 (common with small models or a large
+   ``--l1-size-gb``), lookups are served from L1 and the load histogram stays
+   empty even though store throughput is non-zero. Drive enough distinct data
+   to force L1 eviction, or restart the server between store and load passes,
+   to exercise the L2 load path.
+
 Engine Counters
 ~~~~~~~~~~~~~~~
 
@@ -521,12 +567,19 @@ each metric see ``docs/design/v1/mp_observability/METRICS.md`` and
 Prometheus Scrape Configuration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Add the LMCache server as a Prometheus scrape target:
+In **pull mode** (no ``--otlp-endpoint``), point Prometheus at the server's
+HTTP-frontend port — ``--http-port``, default **8080** — not at
+``--prometheus-port``:
 
 .. code-block:: yaml
 
     scrape_configs:
       - job_name: "lmcache-mp"
         static_configs:
-          - targets: ["<lmcache-host>:9090"]
+          - targets: ["<lmcache-host>:8080"]   # --http-port, NOT --prometheus-port
+
+In **push mode** (``--otlp-endpoint`` set), the server does not expose
+``/metrics`` itself; scrape the OpenTelemetry Collector's Prometheus exporter
+instead. The bundled stack in ``examples/observability/`` wires this up for
+you — see :doc:`index`.
 

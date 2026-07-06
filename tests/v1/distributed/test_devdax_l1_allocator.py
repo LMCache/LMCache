@@ -34,7 +34,9 @@ from lmcache.v1.distributed.l2_adapters.config import (
     L2AdaptersConfig,
     get_type_name_for_config,
 )
-from lmcache.v1.distributed.memory_manager import L1MemoryManager
+from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
+    DevDaxL1MemoryManager,
+)
 from lmcache.v1.memory_management import DevDaxMemoryAllocator
 from lmcache.v1.multiprocess.config import add_mp_server_args
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
@@ -337,9 +339,9 @@ def test_l1_manager_round_trip_on_devdax_mapping(tmp_path):
         assert f.read(1) == bytes([0x23])
 
 
-def test_l1_memory_manager_spills_from_dram_to_devdax(tmp_path):
+def test_devdax_l1_memory_manager_spills_from_dram_to_devdax(tmp_path):
     path = _make_mmap_file(tmp_path, size=8192)
-    manager = L1MemoryManager(
+    manager = DevDaxL1MemoryManager(
         L1MemoryManagerConfig(
             size_in_bytes=8192,
             use_lazy=False,
@@ -379,9 +381,9 @@ def test_l1_memory_manager_spills_from_dram_to_devdax(tmp_path):
         assert f.read(4096) == bytes([0x6D]) * 4096
 
 
-def test_l1_memory_manager_reports_devdax_desc(tmp_path):
+def test_devdax_l1_memory_manager_reports_devdax_desc(tmp_path):
     path = _make_mmap_file(tmp_path)
-    manager = L1MemoryManager(
+    manager = DevDaxL1MemoryManager(
         L1MemoryManagerConfig(
             size_in_bytes=1024 * 1024,
             use_lazy=False,
