@@ -270,6 +270,44 @@ class TestStoreInterface:
         expected_file = os.path.join(tmp_dir, _object_key_to_filename(key))
         assert os.path.exists(expected_file)
 
+    def test_store_multiple_objects_in_one_task(self, adapter):
+        adpt, buf, tmp_dir = adapter
+        keys = [create_object_key(1), create_object_key(2)]
+        objects = [
+            create_memory_obj(buf, page_index=0, fill_value=11.0),
+            create_memory_obj(buf, page_index=1, fill_value=22.0),
+        ]
+
+        task_id = adpt.submit_store_task(keys, objects)
+        assert wait_for_event_fd(adpt.get_store_event_fd())
+
+        completed = adpt.pop_completed_store_tasks()
+        assert completed[task_id].is_successful()
+        assert completed[task_id].bytes_transferred() == 2 * PAGE_SIZE
+        for key in keys:
+            expected_file = os.path.join(tmp_dir, _object_key_to_filename(key))
+            assert os.path.getsize(expected_file) == PAGE_SIZE
+
+        lookup_task = adpt.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+        assert wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
+        lookup_result = adpt.query_lookup_and_lock_result(lookup_task)
+        assert lookup_result is not None
+        assert all(lookup_result.test(i) for i in range(len(keys)))
+
+        load_objects = [
+            create_memory_obj(buf, page_index=2, fill_value=0.0),
+            create_memory_obj(buf, page_index=3, fill_value=0.0),
+        ]
+        load_task = adpt.submit_load_task(keys, load_objects)
+        assert wait_for_event_fd(adpt.get_load_event_fd())
+        load_result = adpt.query_load_result(load_task)
+        assert load_result is not None
+        assert all(load_result.test(i) for i in range(len(keys)))
+        assert torch.all(buf[2 * PAGE_SIZE : 3 * PAGE_SIZE].view(torch.float32) == 11.0)
+        assert torch.all(buf[3 * PAGE_SIZE : 4 * PAGE_SIZE].view(torch.float32) == 22.0)
+
+        adpt.submit_unlock(keys)
+
     def test_submit_multiple_store_tasks_unique_ids(self, adapter):
         adpt, buf, _ = adapter
         key1 = create_object_key(1)
@@ -392,6 +430,27 @@ class TestLoadInterface:
         assert result2 is None
 
         adpt.submit_unlock([key])
+
+    def test_load_missing_file_does_not_recreate_it(self, adapter):
+        adpt, buf, tmp_dir = adapter
+        key = create_object_key(1)
+        store_obj = create_memory_obj(buf, page_index=0)
+
+        adpt.submit_store_task([key], [store_obj])
+        wait_for_event_fd(adpt.get_store_event_fd())
+        adpt.pop_completed_store_tasks()
+
+        data_file = os.path.join(tmp_dir, _object_key_to_filename(key))
+        os.unlink(data_file)
+
+        load_obj = create_memory_obj(buf, page_index=1)
+        task_id = adpt.submit_load_task([key], [load_obj])
+        wait_for_event_fd(adpt.get_load_event_fd())
+
+        bitmap = adpt.query_load_result(task_id)
+        assert bitmap is not None
+        assert not bitmap.test(0)
+        assert not os.path.exists(data_file)
 
 
 # =============================================================================
