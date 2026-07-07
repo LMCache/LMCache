@@ -900,3 +900,50 @@ class TestS3L2AdapterListKeys:
             page.entries[0].key
             == create_object_key(0, model_name="m").to_encoded_object_key()
         )
+
+
+# =============================================================================
+# resolve_s3_endpoint
+# =============================================================================
+
+
+class TestResolveS3Endpoint:
+    def test_bare_bucket_expands_to_virtual_hosted(self):
+        assert (
+            s3mod.resolve_s3_endpoint("s3://my-bucket", "us-west-2")
+            == "my-bucket.s3.us-west-2.amazonaws.com"
+        )
+
+    def test_scheme_with_full_hostname_is_stripped_only(self):
+        assert (
+            s3mod.resolve_s3_endpoint(
+                "s3://my-bucket.s3.us-west-2.amazonaws.com", "us-west-2"
+            )
+            == "my-bucket.s3.us-west-2.amazonaws.com"
+        )
+
+    def test_full_hostname_passthrough(self):
+        assert (
+            s3mod.resolve_s3_endpoint(
+                "my-bucket.s3express-usw2-az1.us-west-2.amazonaws.com",
+                "us-west-2",
+                enable_s3express=True,
+            )
+            == "my-bucket.s3express-usw2-az1.us-west-2.amazonaws.com"
+        )
+
+    def test_host_port_passthrough(self):
+        assert (
+            s3mod.resolve_s3_endpoint("minio.local:9000", "us-east-1")
+            == "minio.local:9000"
+        )
+
+    def test_bare_host_with_port_passthrough(self):
+        # no dots, but the port marks it as a host, not a bucket name
+        assert s3mod.resolve_s3_endpoint("s3://minio:9000", "us-east-1") == "minio:9000"
+
+    def test_bare_bucket_with_s3express_rejected(self):
+        with pytest.raises(ValueError, match="S3 Express One Zone"):
+            s3mod.resolve_s3_endpoint(
+                "s3://my-bucket", "us-west-2", enable_s3express=True
+            )
