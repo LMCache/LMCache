@@ -12,6 +12,9 @@ maru package is not installed, so upstream CI never runs (or breaks on) the
 maru side.
 """
 
+# Standard
+import inspect
+
 # Third Party
 import pytest
 import torch
@@ -22,6 +25,8 @@ try:
     from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
     from lmcache.v1.distributed.error import L1Error
     from lmcache.v1.distributed.l1_manager import L1Manager
+    from lmcache.v1.distributed.l1_protocol import L1ManagerInterface
+    from lmcache.v1.distributed.maru_l1_manager import MaruL1Manager
 
     # Local
     from .maru_fakes import RecordingListener, make_maru_manager
@@ -252,3 +257,100 @@ def test_listener_fires_across_lifecycle(manager):
 
     assert manager.delete([k])[k] == L1Error.SUCCESS
     assert [k] in rec.kinds("deleted_by_manager")
+
+
+# =========================================================================
+# structural conformance: Protocol method-set / signature drift guards
+#
+# A ``runtime_checkable`` ``issubclass`` only checks method *names*; these bind
+# the Protocol's method set and call shapes to both concrete backends so
+# signature drift fails CI. (Absorbed from the former protocol structural
+# tests and the maru unit file's two interface tests.)
+# =========================================================================
+
+
+def _interface_methods() -> set[str]:
+    """Public method names declared on the Protocol."""
+    return {
+        name
+        for name, val in vars(L1ManagerInterface).items()
+        if callable(val) and not name.startswith("_")
+    }
+
+
+def _l1_manager_methods() -> set[str]:
+    """Public method names on the concrete L1Manager."""
+    return {
+        name
+        for name in dir(L1Manager)
+        if not name.startswith("_") and callable(getattr(L1Manager, name))
+    }
+
+
+def _unwrap(fn):
+    """Recover the wrapped function from ``l1_mgr_synchronized``.
+
+    That decorator is a plain closure without ``functools.wraps``, so
+    ``inspect.signature`` would otherwise see ``(self, *args, **kwargs)``. The
+    original function is the ``func`` free variable of the wrapper closure.
+    """
+    code = getattr(fn, "__code__", None)
+    while code is not None and fn.__closure__ and "func" in code.co_freevars:
+        fn = fn.__closure__[code.co_freevars.index("func")].cell_contents
+        code = getattr(fn, "__code__", None)
+    return fn
+
+
+def _params(fn) -> list[tuple[str, object, object]]:
+    """Parameter (name, kind, default) list excluding ``self``.
+
+    Annotations are excluded on purpose: L1Manager leaves some param/return
+    annotations off, so only the call shape (names/kinds/defaults) is compared.
+    """
+    return [
+        (p.name, p.kind, p.default)
+        for p in inspect.signature(fn).parameters.values()
+        if p.name != "self"
+    ]
+
+
+def test_interface_matches_l1_manager_surface():
+    """The Protocol declares exactly L1Manager's public method set."""
+    methods = _interface_methods()
+    assert methods == _l1_manager_methods()
+    assert len(methods) == 17  # tripwire against wholesale drift
+
+
+def test_signatures_match_l1_manager():
+    """Each Protocol method's call shape matches L1Manager's."""
+    for name in _interface_methods():
+        proto = _params(getattr(L1ManagerInterface, name))
+        impl = _params(_unwrap(getattr(L1Manager, name)))
+        assert proto == impl, name
+
+
+def test_l1_manager_conforms_to_interface():
+    """The stock L1Manager satisfies the interface (structural, no instance)."""
+    assert issubclass(L1Manager, L1ManagerInterface)
+
+
+def test_incomplete_class_does_not_conform():
+    """A class missing interface methods is rejected (negative control)."""
+
+    class Partial:
+        def close(self) -> None: ...
+
+    assert not issubclass(Partial, L1ManagerInterface)
+
+
+def test_maru_conforms_to_l1_manager_interface():
+    """MaruL1Manager satisfies the interface (structural, binds the sibling)."""
+    assert issubclass(MaruL1Manager, L1ManagerInterface)
+
+
+def test_maru_signatures_match_interface():
+    """Each Protocol method's call shape matches MaruL1Manager's."""
+    for name in _interface_methods():
+        proto = _params(getattr(L1ManagerInterface, name))
+        impl = _params(_unwrap(getattr(MaruL1Manager, name)))
+        assert proto == impl, name
