@@ -27,9 +27,10 @@ Expected log output:
 
 The CLI accepts ``--host``, ``--port``, ``--instance-timeout``,
 ``--health-check-interval``, ``--eviction-check-interval``,
-``--eviction-ratio``, ``--trigger-watermark``, ``--blend-chunk-size``,
-``--blend-probe-stride``, and ``--timeout-keep-alive``; any flag overrides the
-matching environment variable below. See :doc:`/cli/coordinator` for details.
+``--eviction-ratio``, ``--trigger-watermark``, ``--chunk-size``,
+``--hash-algorithm``, ``--blend-probe-stride``, and ``--timeout-keep-alive``;
+any flag overrides the matching environment variable below. See
+:doc:`/cli/coordinator` for details.
 Equivalently, the coordinator can still be launched as a module with
 ``python3 -m lmcache.v1.mp_coordinator``.
 
@@ -69,10 +70,16 @@ variables:
      - ``1.0``
      - Eviction fires when usage reaches this fraction of the quota
        (0.0 exclusive to 1.0).
-   * - ``LMCACHE_MP_COORDINATOR_BLEND_CHUNK_SIZE``
+   * - ``LMCACHE_MP_COORDINATOR_CHUNK_SIZE``
      - ``256``
-     - Tokens per chunk for the global CacheBlend directory. Must equal the
-       LMCache chunk size the blend servers use.
+     - Tokens per KV chunk: the CacheBlend match unit and the unit used to
+       resolve pin ``token_ids`` to keys. Must equal the MP servers'
+       ``--chunk-size``.
+   * - ``LMCACHE_MP_COORDINATOR_HASH_ALGORITHM``
+     - ``blake3``
+     - Token hash algorithm for pin key resolution. Must equal the MP servers'
+       ``--hash-algorithm``. ``blake3`` is self-contained; other algorithms
+       require vLLM importable in the coordinator process.
    * - ``LMCACHE_MP_COORDINATOR_BLEND_PROBE_STRIDE``
      - ``1``
      - Positions between CacheBlend match probes. ``1`` probes every offset
@@ -162,7 +169,7 @@ The coordinator's HTTP surface (base URL ``http://localhost:9300``) groups into:
   budgets, usage accounting, and the usage-event ingest that drives fleet-wide
   eviction.
 - **Cache control** -- the ``/cache`` group: cache operations dispatched to a
-  named server (currently warm prefetch, with more to come).
+  named server (warm prefetch and pin/unpin, with more to come).
 
 Each endpoint is documented below. Success is ``200`` unless noted, and
 ``{cache_salt}`` uses the ``_default`` sentinel for the empty salt. The wire
@@ -593,9 +600,9 @@ usually called by hand.
 Cache control
 -------------
 
-The ``/cache`` group dispatches cache operations to a named MP server. Today it
-covers **warm prefetch**; further cache-control operations will be documented as
-endpoints here as they land.
+The ``/cache`` group dispatches cache operations to a named MP server. It covers
+**warm prefetch** and **pin/unpin**; further cache-control operations will be
+documented as endpoints here as they land.
 
 **Warm prefetch (pre-loading L1 from L2).** Pre-warm one MP server's L1 with the
 KV for a known prompt **before** the requests arrive, so the first request hits
@@ -737,3 +744,105 @@ verbatim with its code.
 
     curl -s http://localhost:9300/cache/prefetches/server-1/abc123
     # -> {"status": "completed", "found_keys": 12, "total_keys": 12}
+
+**Pin/unpin (protecting cache from eviction).** Pin a token sequence's cache so
+it is not evicted from L2 until unpinned. The coordinator resolves the token
+sequence to its object keys **locally** (no MP-server round-trip) and records
+them in its L2 eviction plan (``POST``) or releases them (``DELETE``), excluding
+pinned keys from quota-based eviction. L2 pins are fleet-wide (per
+``cache_salt``), so no target instance is named.
+
+Local resolution requires the coordinator's ``chunk_size`` and
+``hash_algorithm`` (see `Configuration`_) to match the MP servers' ``--chunk-size``
+/ ``--hash-algorithm``; otherwise the resolved keys will not match what was
+stored and the pin protects nothing. It also requires the MP servers to be
+launched with ``--no-separate-object-groups`` (the coordinator resolves keys in
+a single object group).
+
+``POST /cache/pins``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Pin a token sequence's keys in the L2 eviction plan.
+
+**Request body:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 18 16 66
+
+   * - Field
+     - Type
+     - Description
+   * - ``model_name``
+     - string
+     - Model whose rank fan-out to use when resolving keys.
+   * - ``world_size``
+     - int
+     - World size (``>= 1``) selecting the per-rank fan-out.
+   * - ``token_ids``
+     - list[int]
+     - Prompt tokens whose complete chunks are pinned; must match what was
+       stored. A sub-chunk sequence pins nothing (``affected`` 0).
+   * - ``cache_salt``
+     - string
+     - Optional (default ``""``). Per-tenant isolation salt.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {"requested": 12, "affected": 12, "status": "pinned"}
+
+``requested`` is the number of whole chunks resolved; ``affected`` is the number
+of L2 keys pinned (chunks times the per-rank fan-out).
+
+**HTTP status codes:**
+
+- ``200``: pinned.
+- ``400``: ``token_ids`` exceeds the per-request cap, or ``cache_salt`` violates
+  its invariants.
+- ``422``: request body fails field-level validation.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s -X POST http://localhost:9300/cache/pins \
+        -H 'Content-Type: application/json' \
+        -d '{
+            "model_name": "Qwen/Qwen3-8B",
+            "world_size": 1,
+            "token_ids": [101, 102, 103, "..."],
+            "cache_salt": "user-a"
+        }'
+    # -> {"requested": 12, "affected": 12, "status": "pinned"}
+
+.. note::
+
+   **Requires L2 event reporting.** The coordinator can only exclude keys from
+   eviction for a salt it is tracking, which requires the MP servers started with
+   ``--coordinator-l2-event-reporting`` (see `Connecting MP servers`_).
+
+``DELETE /cache/pins``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Unpin a token sequence's keys from the L2 eviction plan. Same request body as
+``POST /cache/pins``. The response mirrors the pin (``affected`` is the number
+of keys unpinned), with ``status`` ``"unpinned"``. Pins are reference-counted: a
+chunk pinned *N* times needs *N* unpins before it can be evicted.
+
+**HTTP status codes:** same as ``POST /cache/pins``.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s -X DELETE http://localhost:9300/cache/pins \
+        -H 'Content-Type: application/json' \
+        -d '{
+            "model_name": "Qwen/Qwen3-8B",
+            "world_size": 1,
+            "token_ids": [101, 102, 103, "..."],
+            "cache_salt": "user-a"
+        }'
+    # -> {"requested": 12, "affected": 12, "status": "unpinned"}
