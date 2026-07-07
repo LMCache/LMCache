@@ -1208,6 +1208,28 @@ func TestBuildDaemonSet_SecurityContextPassthrough(t *testing.T) {
 	}
 }
 
+func TestBuildDaemonSet_SecurityContextPrivilegedFallsBackToSpecPrivileged(t *testing.T) {
+	engine := minimalEngine()
+	engine.Spec.Privileged = ptr(true)
+	engine.Spec.SecurityContext = &corev1.SecurityContext{
+		AllowPrivilegeEscalation: ptr(false),
+		RunAsUser:                ptr(int64(1000)),
+	}
+
+	ds := BuildDaemonSet(engine)
+	c := ds.Spec.Template.Spec.Containers[0]
+
+	if c.SecurityContext == nil {
+		t.Fatal("expected securityContext to be set")
+	}
+	if c.SecurityContext.Privileged == nil || !*c.SecurityContext.Privileged {
+		t.Fatal("expected securityContext.privileged to fall back to spec.privileged=true")
+	}
+	if c.SecurityContext.RunAsUser == nil || *c.SecurityContext.RunAsUser != 1000 {
+		t.Fatal("expected other securityContext fields to be preserved")
+	}
+}
+
 // hasEnvAll reports whether envs contains an env var named name set to the
 // literal "all" (the value the GPU passthrough vars are always set to).
 func hasEnvAll(envs []corev1.EnvVar, name string) bool {

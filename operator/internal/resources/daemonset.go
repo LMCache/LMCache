@@ -88,6 +88,10 @@ func buildDaemonSetCore(
 		containerSecurityContext = &corev1.SecurityContext{Privileged: &privileged}
 	} else {
 		containerSecurityContext = containerSecurityContext.DeepCopy()
+		if containerSecurityContext.Privileged == nil {
+			privileged := derefBool(spec.Privileged, false)
+			containerSecurityContext.Privileged = &privileged
+		}
 	}
 
 	serverPort := derefInt32(getServerPort(spec), 5555)
