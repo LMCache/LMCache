@@ -86,7 +86,7 @@ High-Level Architecture
          |
          |--- StoreController  -----> L2 Adapter(s) (async L1->L2 push)
          |--- PrefetchController ---> L2 Adapter(s) (async L2->L1 load)
-         |--- EvictionController ----> L1Manager / MaruL1Manager (watermark eviction)
+         |--- EvictionController ----> L1Manager / MaruL1Manager (watermark-triggered eviction)
          |
          v
     EventBus + OTel providers (observability)
