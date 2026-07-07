@@ -805,7 +805,10 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             tracker.append_block_ids(new_block_ids)
 
         # Update the state of the tracker
-        condition = tracker.needs_retrieve()
+        # Skip retrieve when this connector is not the chosen one in a
+        # MultiConnector (num_external_tokens == 0). Otherwise the state
+        # would erroneously enter WAITING_FOR_LOAD and leak lookup locks.
+        condition = tracker.needs_retrieve() and num_external_tokens > 0
         if tracker.state == LMCacheMPRequestState.PREFETCHING:
             # If need to retrieve, change to WAITING_FOR_LOAD
             # Otherwise, change to READY
