@@ -304,7 +304,7 @@ Maru CXL Shared L1
 Source: ``lmcache/v1/distributed/config.py``
 
 Opt-in. Setting ``--maru-server-url`` switches the L1 medium from pinned DRAM to
-a **cross-instance shared CXL pool** managed by `Maru
+a **cross-node shared CXL pool** managed by `Maru
 <https://github.com/xcena-dev/maru>`_. Every LMCache server on the same pool
 ``mmap``\ s the same physical memory, so an L1 entry produced by one instance is
 a zero-copy read for the others. The pinned-DRAM L1 options
@@ -347,8 +347,11 @@ path:
    * - ``--maru-pool-size-gb``
      - ``0.0``
      - CXL pool size to request from MaruServer, in GB. Required (> 0) when
-       ``--maru-server-url`` is set. **Must fit within a single CXL device** —
-       see the note below.
+       ``--maru-server-url`` is set. Bounded by a single CXL device (see note).
+   * - ``--maru-auto-expand`` / ``--no-maru-auto-expand``
+     - ``True``
+     - Grow the owned pool into free CXL space when it fills. ``--no-`` hard-caps
+       the pool at ``--maru-pool-size-gb`` for deterministic eviction.
    * - ``--maru-instance-id``
      - auto UUID
      - Stable client id reported to MaruServer for ownership tracking.
@@ -356,18 +359,11 @@ path:
 
 .. note::
 
-   **``--maru-pool-size-gb`` is bounded by a single CXL device.** MaruServer
-   allocates each region as **one contiguous extent within a single DAX
-   device** — regions do not span devices. This value sizes both the initial
-   region and every auto-expand step, so it must be ≤ one device's usable
-   capacity (raw device size minus MaruServer metadata / WAL / alignment
-   overhead; e.g. a 256 GiB device holds somewhat less). Requesting more than
-   any device can satisfy fails the MaruServer allocation, and the LMCache
-   server then **fails to start** (the initial ``MaruHandler.connect()`` returns
-   an error). With multiple CXL devices, auto-expand can claim additional
-   regions from other devices, so total capacity is the sum across devices —
-   but no single region (hence no single ``--maru-pool-size-gb``) may exceed
-   one device.
+   ``--maru-pool-size-gb`` (and each auto-expand step) is one contiguous extent
+   within a single CXL device — regions do not span devices, so it must be ≤ one
+   device's usable capacity; a larger request fails MaruServer allocation and the
+   server does not start. Multiple devices raise total capacity (auto-expand
+   claims regions from others), but no single region may exceed one device.
 
 L1 Manager TTLs
 ----------------
