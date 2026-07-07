@@ -156,6 +156,25 @@ class MaruMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.UNDEFINED,
         allocator_type: Optional[str] = None,
     ) -> Optional[MemoryObj]:
+        """Allocate a single CXL page for one KV chunk.
+
+        Delegates to the maru ``CxlMemoryAdapter`` once the pool is bound.
+
+        Args:
+            shapes: Tensor shape (or per-object-group shapes) of the KV chunk.
+            dtypes: Tensor dtype (or per-object-group dtypes) of the KV chunk.
+            fmt: Memory format tag recorded on the returned object.
+            allocator_type: Optional allocator selector; unused by the CXL pool
+                (accepted for interface parity).
+
+        Returns:
+            A ``MemoryObj`` viewing the allocated CXL page, or ``None`` when the
+            pool cannot fit the request (out of memory). Callers treat ``None``
+            as OUT_OF_MEMORY.
+
+        Raises:
+            RuntimeError: If called before ``init_layout()`` binds the pool.
+        """
         return self._require_init("allocate").allocate(
             shapes, dtypes, fmt, allocator_type
         )
@@ -168,6 +187,29 @@ class MaruMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.UNDEFINED,
         allocator_type: Optional[str] = None,
     ) -> Optional[List[MemoryObj]]:
+        """Allocate ``batch_size`` CXL pages in one call (all-or-nothing).
+
+        Delegates to the maru ``CxlMemoryAdapter`` once the pool is bound.
+
+        Args:
+            shapes: Tensor shape (or per-object-group shapes) shared by every
+                page in the batch.
+            dtypes: Tensor dtype (or per-object-group dtypes) shared by every
+                page in the batch.
+            batch_size: Number of pages to allocate.
+            fmt: Memory format tag recorded on each returned object.
+            allocator_type: Optional allocator selector; unused by the CXL pool
+                (accepted for interface parity).
+
+        Returns:
+            A list of ``batch_size`` ``MemoryObj`` views, or ``None`` when the
+            whole batch cannot fit (out of memory) -- the allocation is
+            all-or-nothing, never a partial list. Callers treat ``None`` as
+            OUT_OF_MEMORY.
+
+        Raises:
+            RuntimeError: If called before ``init_layout()`` binds the pool.
+        """
         return self._require_init("batched_allocate").batched_allocate(
             shapes, dtypes, batch_size, fmt, allocator_type
         )
@@ -232,6 +274,12 @@ class MaruMemoryAllocator(MemoryAllocatorInterface):
     # lifecycle
 
     def close(self) -> None:
+        """Tear down the CXL adapter and disconnect the MaruHandler.
+
+        Idempotent: safe to call when the pool was never brought up. Both the
+        adapter and handler are cleared, so any later use raises. Shared CXL
+        pages are not freed here -- their lifecycle is owned by MaruServer.
+        """
         if self._cxl_adapter is not None:
             self._cxl_adapter.close()
             self._cxl_adapter = None
@@ -240,4 +288,11 @@ class MaruMemoryAllocator(MemoryAllocatorInterface):
             self._handler = None
 
     def memcheck(self) -> bool:
+        """Report memory-consistency health.
+
+        Returns:
+            Always ``True``. The CXL pool's page accounting is owned by
+            MaruServer, so there is no local invariant to verify (no-op parity
+            with the stock allocator's memcheck).
+        """
         return True
