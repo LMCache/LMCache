@@ -459,6 +459,12 @@ GPU & Security
      - ``nvidia``
      - GPU vendor: ``nvidia`` (uses the ``nvidia`` RuntimeClass) or ``amd``
        (runs on the default runtime).
+   * - ``securityContext``
+     - --
+     - Container-level Kubernetes ``SecurityContext`` for the LMCache
+       container. When unset, the operator runs with
+       ``securityContext.privileged: false``. When set, the value is used
+       as-is.
    * - ``securityContext.privileged``
      - ``false`` (if unset)
      - Run the engine container in privileged mode. On most clusters
@@ -468,6 +474,35 @@ GPU & Security
        RuntimeClass device injection, so privileged is the only path to
        ``/dev/kfd``/``/dev/dri``). Enabling it requires the namespace to allow
        the ``privileged`` Pod Security Standard.
+   * - ``securityContext.allowPrivilegeEscalation``
+     - --
+     - Controls whether a process can gain more privileges than its parent
+       process (``no_new_privs`` behavior).
+   * - ``securityContext.capabilities``
+     - --
+     - Linux capabilities to add/drop for the LMCache container.
+   * - ``securityContext.readOnlyRootFilesystem``
+     - ``false``
+     - Make the container root filesystem read-only.
+   * - ``securityContext.runAsUser`` / ``securityContext.runAsGroup`` /
+       ``securityContext.runAsNonRoot``
+     - --
+     - Run the LMCache process with explicit UID/GID or enforce non-root
+       execution.
+   * - ``securityContext.seccompProfile`` / ``securityContext.appArmorProfile``
+     - --
+     - Container-level seccomp/AppArmor profiles. Container-level settings
+       override pod-level defaults when both are provided.
+   * - ``securityContext.seLinuxOptions``
+     - --
+     - SELinux labels applied to the container process.
+   * - ``securityContext.procMount``
+     - ``Default``
+     - Proc mount mode (requires the Kubernetes ``ProcMountType`` feature).
+   * - ``securityContext.windowsOptions``
+     - --
+     - Windows-specific container security options (Linux-only fields above do
+       not apply on Windows).
 
 Scheduling
 ~~~~~~~~~~
