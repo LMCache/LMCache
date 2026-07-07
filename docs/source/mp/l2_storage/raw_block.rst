@@ -39,12 +39,16 @@ caller-provided load buffers during prefetch.
   ``use_uring_cmd=true``. Large transfers are split into smaller chunks
   that fit within device limits.
 - ``fdp_enabled``: Enables NVMe Flexible Data Placement (FDP) discovery
-  and non-zero placement identifier registration. The KV data placement
-  policy is not active yet. Requires ``io_engine="io_uring"`` and
-  ``use_uring_cmd=true``.
+  and non-zero placement identifier registration. ``cache_salt`` values with
+  ``":"`` bucket prefixes use FDP placement by default. Requires
+  ``io_engine="io_uring"`` and ``use_uring_cmd=true``.
 - ``fdp_placement_ids``: Optional non-zero placement identifier list for KV
   data placement. If omitted, the adapter uses all device-reported non-zero
   identifiers except ``meta_checkpoint_placement_id``.
+- ``fdp_data_placement_policy``: KV data placement policy. ``"none"`` omits
+  FDP directives for KV data writes. ``"cache_salt_prefix"`` assigns
+  case-insensitive ``cache_salt`` prefixes to FDP placement identifiers and is
+  the default when ``fdp_enabled=true``.
 - ``meta_checkpoint_placement_id``: Optional non-zero placement identifier for
   metadata checkpoint payload/header writes. Omit it to keep checkpoint writes
   on default NVMe placement.
@@ -75,17 +79,33 @@ caller-provided load buffers during prefetch.
 - When ``use_uring_cmd=true``, ``use_odirect`` is ignored for NVMe namespace
   character devices. FDP examples set ``use_odirect=false`` because
   ``io_uring_cmd`` uses NVMe passthrough rather than the POSIX write path.
-- FDP registers only non-zero placement identifiers. If ``fdp_placement_ids`` is
+- FDP registers only non-zero placement identifiers. ``fdp_placement_ids`` is
   the KV data placement pool: if omitted, all discovered non-zero identifiers
   except ``meta_checkpoint_placement_id`` are used; if provided, every
   identifier must be reported by the device and must not contain 0.
 - ``meta_checkpoint_placement_id`` must not overlap with ``fdp_placement_ids``.
   Keeping metadata checkpoints and KV data on separate placement identifiers
   avoids mixing long-lived raw-block metadata with cache data buckets.
-- Current KV data writes still omit FDP placement identifiers until the
-  placement policy is added. Metadata checkpoint writes use
-  ``meta_checkpoint_placement_id`` when configured, otherwise they use default
+- With ``fdp_data_placement_policy="cache_salt_prefix"``, ``cache_salt`` values
+  containing ``":"`` are bucketed by the prefix before ``":"``. The bucket name
+  is case-insensitive, so ``RAG:app1``, ``rag:app2``, and ``rag:`` share the
+  same bucket. Values without ``":"`` and values with an empty prefix use no
+  FDP directive. Buckets are assigned exclusive FDP placement identifiers in
+  first-seen order while identifiers are available.
+- If the number of discovered cache-salt buckets exceeds the number of
+  registered FDP placement identifiers, additional buckets continue to store
+  with no FDP directive and the adapter emits one warning. ``report_status()``
+  exposes a fallback count and a bounded bucket sample instead of retaining the
+  complete fallback bucket set. Empty ``cache_salt`` values also use default
   NVMe placement with no directive.
+- Bucket-to-placement assignments are process-local. Restart recovery does not
+  need them for correctness because ``cache_salt`` is part of the object key,
+  but first-seen FDP placement assignments may change after adapter restart.
+- Store and retrieve requests must use the same ``cache_salt`` to address the
+  same object. This is the normal LMCache key identity rule; FDP placement is a
+  write directive and is not used to locate data on reads.
+- Metadata checkpoint writes use ``meta_checkpoint_placement_id`` when
+  configured, otherwise they use default NVMe placement with no directive.
 
 **Configuration examples:**
 
@@ -100,8 +120,11 @@ caller-provided load buffers during prefetch.
     # With io_uring_cmd (NVMe passthrough)
     --l2-adapter '{"type": "raw_block", "device_path": "/dev/ng0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "use_uring_cmd": true, "iouring_queue_depth": 256, "max_data_transfer_size": 131072, "use_odirect": false}'
 
-    # With FDP discovery enabled, registering all non-zero device identifiers
+    # With FDP discovery and cache_salt prefix placement enabled
     --l2-adapter '{"type": "raw_block", "device_path": "/dev/ng0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "use_uring_cmd": true, "fdp_enabled": true, "use_odirect": false}'
+
+    # With FDP discovery only, keeping KV data writes on default NVMe placement
+    --l2-adapter '{"type": "raw_block", "device_path": "/dev/ng0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "use_uring_cmd": true, "fdp_enabled": true, "fdp_data_placement_policy": "none", "use_odirect": false}'
 
     # With eviction
     --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "load_checkpoint_on_init": false, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
@@ -112,7 +135,7 @@ FDP live-device validation is opt-in because it requires an FDP-capable NVMe
 namespace character device. The status probe opens the character device through
 the Rust raw-block binding and calls ``fetch_fdp_status()`` with a read-only file
 descriptor. It does not issue writes, initialize the MP adapter layout, write KV
-data, or verify a future FDP placement policy.
+data, or verify the MP adapter's cache-salt placement policy.
 
 .. code-block:: bash
 
@@ -122,5 +145,5 @@ data, or verify a future FDP placement policy.
 When the variable is not set, the test skips. If the configured device, kernel,
 or controller does not support the FDP status query, the test skips with the
 underlying capability error. A passing status probe only confirms that the live
-device can answer the FDP status query; full adapter initialization on hardware
-and KV write placement are separate follow-ups.
+device can answer the FDP status query; full adapter initialization and KV write
+placement on hardware are separate validations.

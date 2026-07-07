@@ -128,7 +128,7 @@ class _FakeFdpCore:
         self.status = status if status is not None else [(0, 10), (7, 17)]
         self.slot_bytes = RAW_BLOCK_CI_SLOT_BYTES
         self.meta_checkpoint_placement_id: int | None = None
-        self.put_many_calls: list[list[int] | None] = []
+        self.put_many_calls: list[list[int | None] | None] = []
 
     def fetch_fdp_status(self) -> list[tuple[int, int]]:
         return self.status
@@ -143,7 +143,7 @@ class _FakeFdpCore:
         self,
         specs: list[Any],
         objects: list[Any],
-        placement_ids: list[int] | None = None,
+        placement_ids: list[int | None] | None = None,
     ) -> RawBlockPutManyResult:
         self.put_many_calls.append(
             None if placement_ids is None else list(placement_ids)
@@ -163,6 +163,7 @@ class _FakeFdpCore:
 def _make_fdp_config(
     *,
     placement_ids: list[int] | None = None,
+    data_placement_policy: str | None = None,
     meta_checkpoint_placement_id: int | None = None,
 ) -> RawBlockL2AdapterConfig:
     return RawBlockL2AdapterConfig(
@@ -181,6 +182,7 @@ def _make_fdp_config(
         iouring_queue_depth=8,
         fdp_enabled=True,
         fdp_placement_ids=placement_ids,
+        fdp_data_placement_policy=data_placement_policy,
         meta_checkpoint_placement_id=meta_checkpoint_placement_id,
         num_store_workers=1,
         num_lookup_workers=1,
@@ -261,6 +263,22 @@ def test_raw_block_fdp_disabled_ignores_placement_ids() -> None:
 
     assert config.fdp_enabled is False
     assert config.fdp_placement_ids is None
+    assert config.fdp_data_placement_policy == "none"
+
+
+def test_raw_block_fdp_data_placement_policy_requires_fdp_enabled() -> None:
+    with pytest.raises(ValueError, match="requires fdp_enabled=true"):
+        RawBlockL2AdapterConfig(
+            device_path="/tmp/raw-block",
+            slot_bytes=RAW_BLOCK_CI_SLOT_BYTES,
+            fdp_enabled=False,
+            fdp_data_placement_policy="cache_salt_prefix",
+        )
+
+
+def test_raw_block_fdp_data_placement_policy_rejects_unknown_value() -> None:
+    with pytest.raises(ValueError, match="fdp_data_placement_policy"):
+        _make_fdp_config(data_placement_policy="bucket_shuffle")
 
 
 def test_raw_block_fdp_from_dict_validates_enabled_id_elements() -> None:
@@ -297,7 +315,7 @@ def test_raw_block_fdp_status_reports_registered_nonzero_ids() -> None:
         adapter.close()
 
 
-def test_raw_block_fdp_store_does_not_assign_placement_ids_yet() -> None:
+def test_raw_block_fdp_store_empty_salt_omits_placement_ids() -> None:
     fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17)])
     adapter = _make_fdp_adapter(fake_core, _make_fdp_config())
     try:
@@ -310,6 +328,151 @@ def test_raw_block_fdp_store_does_not_assign_placement_ids_yet() -> None:
 
         assert result.is_successful()
         assert fake_core.put_many_calls == [None]
+    finally:
+        adapter.close()
+
+
+def test_raw_block_fdp_store_can_disable_data_placement_policy() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17)])
+    adapter = _make_fdp_adapter(
+        fake_core,
+        _make_fdp_config(data_placement_policy="none"),
+    )
+    try:
+        keys = [make_object_key(i, cache_salt="rag:app1") for i in range(2)]
+        objects: list[Any] = [make_memory_obj(bytes([i + 1])) for i in range(2)]
+
+        task_id = adapter.submit_store_task(keys, objects)
+        assert wait_for_event_fd(adapter.get_store_event_fd())
+        result = adapter.pop_completed_store_tasks()[task_id]
+
+        assert result.is_successful()
+        assert fake_core.put_many_calls == [None]
+    finally:
+        adapter.close()
+
+
+def test_raw_block_fdp_store_requires_cache_salt_separator() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17)])
+    adapter = _make_fdp_adapter(fake_core, _make_fdp_config())
+    try:
+        keys = [
+            make_object_key(1, cache_salt="rag"),
+            make_object_key(2, cache_salt=":app1"),
+        ]
+        objects: list[Any] = [make_memory_obj(bytes([i + 1])) for i in range(2)]
+
+        task_id = adapter.submit_store_task(keys, objects)
+        assert wait_for_event_fd(adapter.get_store_event_fd())
+        result = adapter.pop_completed_store_tasks()[task_id]
+
+        assert result.is_successful()
+        assert fake_core.put_many_calls == [None]
+        status = adapter.report_status()
+        assert status["fdp_cache_salt_bucket_placements"] == {}
+    finally:
+        adapter.close()
+
+
+def test_raw_block_fdp_store_assigns_cache_salt_prefix_buckets() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17)])
+    adapter = _make_fdp_adapter(fake_core, _make_fdp_config())
+    try:
+        keys = [
+            make_object_key(1, cache_salt="RAG:app1"),
+            make_object_key(2, cache_salt="rag:app2"),
+            make_object_key(3, cache_salt="rag:"),
+            make_object_key(4, cache_salt="coding_agent:app1"),
+        ]
+        objects: list[Any] = [make_memory_obj(bytes([i + 1])) for i in range(4)]
+
+        task_id = adapter.submit_store_task(keys, objects)
+        assert wait_for_event_fd(adapter.get_store_event_fd())
+        result = adapter.pop_completed_store_tasks()[task_id]
+
+        assert result.is_successful()
+        assert fake_core.put_many_calls == [[1, 1, 1, 7]]
+        status = adapter.report_status()
+        assert status["fdp_data_placement_policy"] == "cache_salt_prefix"
+        assert status["fdp_cache_salt_bucket_separator"] == ":"
+        assert status["fdp_cache_salt_bucket_placements"] == {
+            "rag": 1,
+            "coding_agent": 7,
+        }
+        assert status["fdp_cache_salt_fallback_buckets"] == []
+    finally:
+        adapter.close()
+
+
+def test_raw_block_fdp_store_falls_back_when_bucket_ids_are_exhausted() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (7, 17)])
+    adapter = _make_fdp_adapter(fake_core, _make_fdp_config())
+    try:
+        with patch(
+            "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter.logger.warning"
+        ) as warning:
+            keys = [
+                make_object_key(1, cache_salt="rag:app1"),
+                make_object_key(2, cache_salt="chat:app1"),
+                make_object_key(3, cache_salt="coding_agent:app1"),
+            ]
+            objects: list[Any] = [make_memory_obj(bytes([i + 1])) for i in range(3)]
+
+            task_id = adapter.submit_store_task(keys, objects)
+            assert wait_for_event_fd(adapter.get_store_event_fd())
+            result = adapter.pop_completed_store_tasks()[task_id]
+
+            keys = [make_object_key(4, cache_salt="search:app1")]
+            objects = [make_memory_obj(b"\x04")]
+            task_id = adapter.submit_store_task(keys, objects)
+            assert wait_for_event_fd(adapter.get_store_event_fd())
+            second_result = adapter.pop_completed_store_tasks()[task_id]
+
+        assert result.is_successful()
+        assert second_result.is_successful()
+        assert fake_core.put_many_calls == [[7, None, None], None]
+        assert warning.call_count == 1
+        assert "more cache_salt FDP buckets" in warning.call_args.args[0]
+        status = adapter.report_status()
+        assert status["fdp_cache_salt_bucket_placements"] == {"rag": 7}
+        assert status["fdp_cache_salt_fallback_count"] == 3
+        assert status["fdp_cache_salt_fallback_buckets"] == [
+            "chat",
+            "coding_agent",
+            "search",
+        ]
+    finally:
+        adapter.close()
+
+
+def test_raw_block_fdp_fallback_bucket_status_is_bounded() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (7, 17)])
+    adapter = _make_fdp_adapter(fake_core, _make_fdp_config())
+    try:
+        sample_limit = 64
+        fallback_count = sample_limit + 3
+        keys = [make_object_key(1, cache_salt="primary:app")]
+        keys.extend(
+            make_object_key(i + 2, cache_salt=f"overflow{i}:app")
+            for i in range(fallback_count)
+        )
+        objects: list[Any] = [
+            make_memory_obj(bytes([i % 255])) for i in range(len(keys))
+        ]
+
+        task_id = adapter.submit_store_task(keys, objects)
+        assert wait_for_event_fd(adapter.get_store_event_fd())
+        result = adapter.pop_completed_store_tasks()[task_id]
+
+        assert result.is_successful()
+        assert fake_core.put_many_calls == [[7, *([None] * fallback_count)]]
+        status = adapter.report_status()
+        assert status["fdp_cache_salt_fallback_count"] == fallback_count
+        assert len(status["fdp_cache_salt_fallback_buckets"]) == sample_limit
+        assert all(
+            bucket.startswith("overflow")
+            for bucket in status["fdp_cache_salt_fallback_buckets"]
+        )
     finally:
         adapter.close()
 

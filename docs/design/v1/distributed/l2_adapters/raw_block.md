@@ -54,10 +54,21 @@ explicit data identifiers are rejected if they overlap with
 `fdp_placement_ids` is omitted, the adapter registers all device-reported
 non-zero identifiers except the metadata checkpoint identifier.
 
-The placement policy that assigns identifiers to KV writes is a follow-up; for
-now KV data omits placement identifiers. Metadata checkpoint writes can use an
-explicit configured placement identifier while defaulting to no directive when
-unset. User-facing FDP configuration rules live in
+The adapter maps KV data writes onto FDP placement identifiers with a
+cache-salt prefix policy. It derives a case-insensitive bucket from the part of
+`ObjectKey.cache_salt` before `:` only when the separator is present, assigns
+buckets to placement identifiers in first-seen order, and reuses the same
+identifier for later writes in that bucket. Values without `:` or with an empty
+prefix omit the directive; `rag:` is a valid opt-in to the `rag` bucket. The
+mapping is availability-first: if the number of buckets exceeds the number of
+registered data placement identifiers, extra buckets fall back to no directive
+and the adapter emits one warning. Status reporting tracks a fallback count and
+a bounded bucket sample rather than retaining all fallback bucket names. Empty
+`cache_salt` values also omit the directive. The mapping is process-local and
+may change after restart; read correctness is unaffected because `cache_salt` is
+part of the object key rather than the read path's FDP directive. Metadata
+checkpoint writes can use an explicit configured placement identifier while
+defaulting to no directive when unset. User-facing FDP configuration rules live in
 `docs/source/mp/l2_storage/raw_block.rst`; low-level NVMe command encoding
 details live in `rust/raw_block/README.md`.
 
