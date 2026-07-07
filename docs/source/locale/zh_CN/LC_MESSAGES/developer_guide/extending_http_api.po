@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"POT-Creation-Date: 2026-07-06 10:41+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -31,7 +31,11 @@ msgid ""
 "FastAPI ``APIRouter``; ``HTTPAPIRegistry`` auto-discovers and mounts it "
 "at startup -- the same zero-modification pattern used by the :doc:`L2 "
 "adapters </mp/l2_storage/index>`."
-msgstr "您可以向 ``lmcache server`` HTTP 前端添加新端点，\\ **无需修改任何现有代码**\\ 。端点只需是放置在 ``lmcache/v1/multiprocess/http_apis/`` 中的 Python 模块，并公开一个 FastAPI ``APIRouter``\\ ；\\ ``HTTPAPIRegistry`` 会在启动时自动发现并挂载它——与 :doc:`L2 adapters </mp/l2_storage/index>` 所采用的零修改模式相同。"
+msgstr ""
+"您可以向 ``lmcache server`` HTTP 前端添加新端点，\\ **无需修改任何现有代码**\\ 。端点只需是放置在 "
+"``lmcache/v1/multiprocess/http_apis/`` 中的 Python 模块，并公开一个 FastAPI "
+"``APIRouter``\\ ；\\ ``HTTPAPIRegistry`` 会在启动时自动发现并挂载它——与 :doc:`L2 "
+"adapters </mp/l2_storage/index>` 所采用的零修改模式相同。"
 
 #: ../../source/developer_guide/extending_http_api.rst:12
 msgid "How discovery works"
@@ -44,7 +48,11 @@ msgid ""
 "which scans the ``http_apis/`` directory with ``pkgutil``, imports every "
 "module whose name ends with ``_api``, and includes any module-level "
 "``router``. The built-in modules follow this pattern:"
-msgstr "启动时，\\ ``http_server.py`` 将 FastAPI 应用实例传递给 ``HTTPAPIRegistry``\\ （\\ ``lmcache/v1/multiprocess/http_api_registry.py``\\ ）。该注册器使用 ``pkgutil`` 扫描 ``http_apis/`` 目录，导入所有名称以 ``_api`` 结尾的模块，并将其中定义的模块级 ``router`` 注册到应用中。内置模块均遵循此模式："
+msgstr ""
+"启动时，\\ ``http_server.py`` 将 FastAPI 应用实例传递给 ``HTTPAPIRegistry``\\ （\\ "
+"``lmcache/v1/multiprocess/http_api_registry.py``\\ ）。该注册器使用 ``pkgutil`` "
+"扫描 ``http_apis/`` 目录，导入所有名称以 ``_api`` 结尾的模块，并将其中定义的模块级 ``router`` "
+"注册到应用中。内置模块均遵循此模式："
 
 #: ../../source/developer_guide/extending_http_api.rst:24
 msgid "Module"
@@ -63,8 +71,10 @@ msgid "Description"
 msgstr "描述"
 
 #: ../../source/developer_guide/extending_http_api.rst:28
-msgid "``root_api.py``"
-msgstr "``root_api.py``"
+#: ../../source/developer_guide/extending_http_api.rst:32
+#: ../../source/developer_guide/extending_http_api.rst:40
+msgid "``info_api.py``"
+msgstr "``info_api.py``"
 
 #: ../../source/developer_guide/extending_http_api.rst:29
 msgid "``/``"
@@ -80,10 +90,6 @@ msgstr "GET"
 msgid "Basic liveness check"
 msgstr "基本存活检查"
 
-#: ../../source/developer_guide/extending_http_api.rst:32
-msgid "``healthcheck_api.py``"
-msgstr "``healthcheck_api.py``"
-
 #: ../../source/developer_guide/extending_http_api.rst:33
 msgid "``/healthcheck``"
 msgstr "``/healthcheck``"
@@ -97,8 +103,8 @@ msgid "``cache_api.py``"
 msgstr "``cache_api.py``"
 
 #: ../../source/developer_guide/extending_http_api.rst:37
-msgid "``/clear-cache``"
-msgstr "``/clear-cache``"
+msgid "``/cache/clear``"
+msgstr "``/cache/clear``"
 
 #: ../../source/developer_guide/extending_http_api.rst:38
 msgid "POST"
@@ -107,10 +113,6 @@ msgstr "POST"
 #: ../../source/developer_guide/extending_http_api.rst:39
 msgid "Force-clear the L1 cache"
 msgstr "强制清除 L1 缓存"
-
-#: ../../source/developer_guide/extending_http_api.rst:40
-msgid "``status_api.py``"
-msgstr "``status_api.py``"
 
 #: ../../source/developer_guide/extending_http_api.rst:41
 msgid "``/status``"
@@ -128,7 +130,9 @@ msgstr "添加端点"
 msgid ""
 "Create a file in ``lmcache/v1/multiprocess/http_apis/`` whose name ends "
 "with ``_api.py`` and expose a ``router``:"
-msgstr "在 ``lmcache/v1/multiprocess/http_apis/`` 中创建一个文件，文件名以 ``_api.py`` 结尾，并公开一个 ``router``\\ ："
+msgstr ""
+"在 ``lmcache/v1/multiprocess/http_apis/`` 中创建一个文件，文件名以 ``_api.py`` "
+"结尾，并公开一个 ``router``\\ ："
 
 #: ../../source/developer_guide/extending_http_api.rst:72
 msgid ""
@@ -162,7 +166,9 @@ msgstr "API 模块 **应该**\\ ："
 msgid ""
 "guard against uninitialized state by checking "
 "``request.app.state.engine`` and returning ``503`` when it is ``None``;"
-msgstr "通过检查 ``request.app.state.engine`` 防范引擎未初始化的情况，并在其为 ``None`` 时返回 ``503``\\ ；"
+msgstr ""
+"通过检查 ``request.app.state.engine`` 防范引擎未初始化的情况，并在其为 ``None`` 时返回 ``503``\\"
+" ；"
 
 #: ../../source/developer_guide/extending_http_api.rst:88
 msgid "use ``lmcache.logging.init_logger(__name__)`` for logging;"
@@ -193,4 +199,13 @@ msgid ""
 "For the full design rationale see "
 "``docs/design/v1/multiprocess/http_api_extension.md`` in the source tree."
 msgstr "完整的设计说明请参见源码树中的 ``docs/design/v1/multiprocess/http_api_extension.md``\\ 。"
+
+#~ msgid "``healthcheck_api.py``"
+#~ msgstr "``healthcheck_api.py``"
+
+#~ msgid "``/clear-cache``"
+#~ msgstr "``/clear-cache``"
+
+#~ msgid "``status_api.py``"
+#~ msgstr "``status_api.py``"
 

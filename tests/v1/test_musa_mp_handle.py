@@ -151,6 +151,7 @@ def test_musa_platform_discovers_factory_and_registers_capability_predicate() ->
     """The MUSA wrapper is auto-discovered while availability stays explicit."""
     # First Party
     from lmcache.v1.platform import _registry as platform_registry
+    from lmcache.v1.platform import get_device_spec
     import lmcache.v1.platform.musa as musa_platform
 
     snapshot = platform_registry.snapshot()
@@ -160,7 +161,9 @@ def test_musa_platform_discovers_factory_and_registers_capability_predicate() ->
 
         factory = platform_registry.get_kv_wrapper_factory("musa")
 
-        assert platform_registry.is_available("musa") is False
+        device_spec = get_device_spec("musa")
+        assert device_spec is not None
+        assert device_spec.is_handle_transfer_available() is False
         assert callable(factory)
         with pytest.raises(ValueError, match="expected a MUSA tensor"):
             factory(torch.empty(1))
@@ -200,11 +203,14 @@ def test_create_transfer_context_musa_handle_allowed_when_available(
         create_transfer_context,
     )
     from lmcache.v1.platform import _registry as platform_registry
+    from lmcache.v1.platform import get_device_spec
 
     snapshot = platform_registry.snapshot()
     try:
         platform_registry.register_kv_wrapper("musa", lambda tensor: tensor)
-        platform_registry.register_availability("musa", lambda: True)
+        musa_spec = get_device_spec("musa")
+        if musa_spec:
+            monkeypatch.setattr(musa_spec, "is_handle_transfer_available", lambda: True)
 
         context = create_transfer_context(
             _fake_musa_kv_caches(),

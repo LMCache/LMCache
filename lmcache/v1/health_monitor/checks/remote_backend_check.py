@@ -289,7 +289,11 @@ class RemoteBackendHealthCheck(HealthCheck):
             future = self.backend.submit_put_task(key, put_obj)
             future.result(timeout=self._get_ping_timeout())
             # get
-            get_obj = self.backend.get_blocking(key)
+            if connector.support_batched_get():
+                get_objs = self.backend.batched_get_blocking([key])
+                get_obj = get_objs[0] if get_objs else None
+            else:
+                get_obj = self.backend.get_blocking(key)
             yield put_obj, get_obj
         except asyncio.TimeoutError:
             logger.warning("Put timeout, check failed.")
