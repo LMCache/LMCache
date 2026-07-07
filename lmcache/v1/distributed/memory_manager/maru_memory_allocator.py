@@ -111,6 +111,7 @@ class MaruMemoryAllocator(MemoryAllocatorInterface):
             use_async_rpc=self._config.use_async_rpc,
             max_inflight=self._config.max_inflight,
             eager_map=self._config.eager_map,
+            auto_expand=self._config.auto_expand,
         )
         handler = MaruHandler(maru_config)
         if not handler.connect():

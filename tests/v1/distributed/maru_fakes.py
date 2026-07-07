@@ -90,6 +90,7 @@ class FakeMaruHandler:
         self.fail_exists = False
         self.fail_store = False
         self.fail_delete = False
+        self.cxl_free = 0  # device free bytes reported in get_stats' cxl_pool
 
     def batch_pin(self, keys: list[str]) -> list[bool]:
         if self.fail_pin:
@@ -166,7 +167,8 @@ class FakeMaruHandler:
             "store_regions": {
                 "total_pool_size": 16 * self.chunk_size,
                 "total_allocated_pages": len(self.store_map),
-            }
+            },
+            "cxl_pool": {"free_size": self.cxl_free},
         }
 
     def close(self) -> None:
@@ -234,6 +236,7 @@ class FakeCxlAdapter:
 
 def make_maru_manager(
     chunk_size: int = 64,
+    auto_expand: bool = True,
 ) -> tuple[MaruL1Manager, FakeMaruHandler, FakeCxlAdapter]:
     """Build a MaruL1Manager wired to fresh fakes (post-init_layout state)."""
     cfg = L1ManagerConfig(
@@ -244,6 +247,7 @@ def make_maru_manager(
                 server_url="maru://localhost:5555",
                 pool_size_bytes=1 << 20,
                 instance_id="test",
+                auto_expand=auto_expand,
             ),
         ),
         write_ttl_seconds=600,

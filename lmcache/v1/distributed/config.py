@@ -218,6 +218,14 @@ class MaruL1Config:
     eager_map: bool = True
     """Eagerly mmap peer regions for cross-instance zero-copy reads."""
 
+    auto_expand: bool = True
+    """Whether the owned pool auto-expands into free CXL device space when it
+    fills. When True (default), the pool grows toward the device capacity and
+    the eviction watermark is anchored to device fill (owned pool + device
+    free); when False, the pool is hard-capped at ``pool_size_bytes`` and the
+    watermark is anchored to that pool, so eviction engages before the pool is
+    exhausted (see ``MaruL1Manager.get_memory_usage``)."""
+
 
 @dataclass
 class L1ManagerConfig:
@@ -514,6 +522,16 @@ def add_storage_manager_args(
         help="Stable client id reported to MaruServer for ownership tracking. "
         "Auto-generated if omitted.",
     )
+    maru_group.add_argument(
+        "--maru-auto-expand",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Whether the owned CXL pool auto-expands into free device space "
+        "when full. Default True: the pool grows toward device capacity and "
+        "eviction is anchored to device fill. Use --no-maru-auto-expand to "
+        "hard-cap the pool at --maru-pool-size-gb and evict before it is "
+        "exhausted.",
+    )
 
     # L1 Manager Config (TTL settings)
     ttl_group = parser.add_argument_group(
@@ -654,6 +672,7 @@ def parse_args_to_config(
             server_url=args.maru_server_url,
             pool_size_bytes=int(pool_size_gb * (1 << 30)),
             instance_id=getattr(args, "maru_instance_id", None),
+            auto_expand=getattr(args, "maru_auto_expand", True),
         )
 
     shm_name = getattr(args, "shm_name", None)

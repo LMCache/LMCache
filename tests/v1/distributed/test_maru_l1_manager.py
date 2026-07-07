@@ -444,6 +444,27 @@ def test_get_memory_usage_before_init_reports_pool_size():
     assert (used, total) == (0, 1 << 20)
 
 
+def test_get_memory_usage_watermark_tracks_auto_expand():
+    """total anchors to device fill when auto_expand is on, to the owned pool
+    when off -- so a hard-capped pool evicts before it is exhausted instead of
+    OOMing while the device still has (unusable) free space."""
+    chunk = 64
+    own_pool = 16 * chunk  # FakeMaruHandler.get_stats total_pool_size
+    free = 100 * chunk
+
+    # auto_expand on (default): total = owned pool + device free.
+    mgr_on, handler_on, _ = make_maru_manager(chunk_size=chunk)
+    handler_on.cxl_free = free
+    _seed(handler_on, _key(1))  # one allocated page
+    assert mgr_on.get_memory_usage() == (chunk, own_pool + free)
+
+    # auto_expand off: device free is ignored; total is the owned pool alone.
+    mgr_off, handler_off, _ = make_maru_manager(chunk_size=chunk, auto_expand=False)
+    handler_off.cxl_free = free
+    _seed(handler_off, _key(1))
+    assert mgr_off.get_memory_usage() == (chunk, own_pool)
+
+
 def test_is_key_evictable_tracks_local_staging():
     manager, handler, _ = make_maru_manager()
     k = _key(1)

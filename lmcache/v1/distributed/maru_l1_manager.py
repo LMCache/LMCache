@@ -1002,15 +1002,22 @@ class MaruL1Manager:
     def get_memory_usage(self) -> tuple[int, int]:
         """Return (used, total) bytes for the eviction watermark.
 
-        MARU: ``used`` is this instance's owned-region allocation; ``total`` is
-        that owned pool **plus the CXL device's free space**
-        (``cxl_pool.free_size`` from the shared resource manager). Anchoring
-        ``total`` to "owned pool + free" -- not just the owned pool -- keeps the
-        stock watermark from tripping while the device still has room: with free
-        CXL left the pool auto-expands instead of evicting, and only once the
-        device is full (``free_size`` 0 -> ``total`` collapses to the owned pool)
-        does eviction engage on this instance's own pages. Before the pool is up,
-        reports the configured capacity so watermark math stays sane.
+        MARU: ``used`` is this instance's owned-region allocation. ``total``
+        depends on whether the pool may ``auto_expand``:
+
+        - ``auto_expand`` (default): ``total`` is the owned pool **plus the CXL
+          device's free space** (``cxl_pool.free_size`` from the shared resource
+          manager). Anchoring to "owned pool + free" keeps the watermark from
+          tripping while the device still has room -- the pool auto-expands into
+          free CXL instead of evicting, and only once the device fills
+          (``free_size`` 0 -> ``total`` collapses to the owned pool) does
+          eviction engage on this instance's own pages.
+        - ``auto_expand`` off: the pool is hard-capped at ``pool_size_bytes``, so
+          ``total`` is the owned pool alone and eviction engages before it is
+          exhausted (device free is irrelevant -- the pool cannot grow into it).
+
+        Before the pool is up, reports the configured capacity so watermark math
+        stays sane.
 
         ``free`` is cached across calls (``_last_cxl_free``): a get_stats RPC that
         does not deliver ``cxl_pool`` -- a transient timeout, or an older server
@@ -1032,6 +1039,11 @@ class MaruL1Manager:
                 return 0, self._config.pool_size_bytes
             used = regions["total_allocated_pages"] * handler.get_chunk_size()
             own_pool = regions["total_pool_size"]
+            if not self._config.auto_expand:
+                # Pool is hard-capped (no expansion): anchor the watermark to the
+                # owned pool so eviction engages before it is exhausted. Device
+                # free is irrelevant here -- the pool cannot grow into it.
+                return used, own_pool
             # A present cxl_pool (incl. free_size 0 when the device is genuinely
             # full) updates the cache; a missing one reuses the last-known free.
             free = stats.get("cxl_pool", {}).get("free_size")
