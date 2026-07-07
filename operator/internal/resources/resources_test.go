@@ -1153,8 +1153,7 @@ func TestBuildDaemonSet_HostNetworkEnabled(t *testing.T) {
 }
 
 func TestBuildDaemonSet_PrivilegedDefaultFalse(t *testing.T) {
-	// minimalEngine leaves spec.Privileged nil; the operator must not run the
-	// container privileged unless explicitly opted in.
+	// The container must run privileged=false by default.
 	ds := BuildDaemonSet(minimalEngine())
 	c := ds.Spec.Template.Spec.Containers[0]
 
@@ -1163,15 +1162,15 @@ func TestBuildDaemonSet_PrivilegedDefaultFalse(t *testing.T) {
 	}
 }
 
-func TestBuildDaemonSet_PrivilegedEnabled(t *testing.T) {
+func TestBuildDaemonSet_ExplicitSecurityContextPrivilegedEnabled(t *testing.T) {
 	engine := minimalEngine()
-	engine.Spec.Privileged = ptr(true)
+	engine.Spec.SecurityContext = &corev1.SecurityContext{Privileged: ptr(true)}
 
 	ds := BuildDaemonSet(engine)
 	c := ds.Spec.Template.Spec.Containers[0]
 
 	if c.SecurityContext == nil || c.SecurityContext.Privileged == nil || !*c.SecurityContext.Privileged {
-		t.Fatal("expected privileged=true when spec.privileged=true")
+		t.Fatal("expected privileged=true when spec.securityContext.privileged=true")
 	}
 }
 
@@ -1208,9 +1207,8 @@ func TestBuildDaemonSet_SecurityContextPassthrough(t *testing.T) {
 	}
 }
 
-func TestBuildDaemonSet_SecurityContextPrivilegedFallsBackToSpecPrivileged(t *testing.T) {
+func TestBuildDaemonSet_SecurityContextWithoutPrivilegedKeepsNil(t *testing.T) {
 	engine := minimalEngine()
-	engine.Spec.Privileged = ptr(true)
 	engine.Spec.SecurityContext = &corev1.SecurityContext{
 		AllowPrivilegeEscalation: ptr(false),
 		RunAsUser:                ptr(int64(1000)),
@@ -1222,8 +1220,8 @@ func TestBuildDaemonSet_SecurityContextPrivilegedFallsBackToSpecPrivileged(t *te
 	if c.SecurityContext == nil {
 		t.Fatal("expected securityContext to be set")
 	}
-	if c.SecurityContext.Privileged == nil || !*c.SecurityContext.Privileged {
-		t.Fatal("expected securityContext.privileged to fall back to spec.privileged=true")
+	if c.SecurityContext.Privileged != nil {
+		t.Fatal("expected securityContext.privileged to remain unset when not provided in spec.securityContext")
 	}
 	if c.SecurityContext.RunAsUser == nil || *c.SecurityContext.RunAsUser != 1000 {
 		t.Fatal("expected other securityContext fields to be preserved")

@@ -459,8 +459,8 @@ GPU & Security
      - ``nvidia``
      - GPU vendor: ``nvidia`` (uses the ``nvidia`` RuntimeClass) or ``amd``
        (runs on the default runtime).
-   * - ``privileged``
-     - ``false``
+   * - ``securityContext.privileged``
+     - ``false`` (if unset)
      - Run the engine container in privileged mode. On most clusters
        ``runtimeClassName: nvidia`` + ``NVIDIA_VISIBLE_DEVICES=all`` already
        grant GPU visibility without it; set ``true`` only where the engine
@@ -765,7 +765,7 @@ It has two halves the operator runs together:
 - a GPU-resident CacheBlend V3 engine (``lmcache server --engine-type blend``),
   deployed as a DaemonSet with the **same GPU model as** ``LMCacheEngine``
   (``runtimeClassName: nvidia`` + ``NVIDIA_VISIBLE_DEVICES=all`` + ``hostIPC``,
-  plus ``privileged`` when ``spec.privileged`` is set, and **no**
+  plus ``privileged`` when ``spec.securityContext.privileged`` is set, and **no**
   ``nvidia.com/gpu`` claim) so it shares the vLLM GPU for same-device CUDA IPC;
   and
 - the vLLM-side plugin, injected into opted-in pods by the webhook.
@@ -1221,7 +1221,7 @@ resources from other processes on the same host.
 - Clusters using Pod Security Standards must allow the ``privileged`` profile
   for the LMCache namespace -- the ``baseline`` and ``restricted`` profiles
   reject ``hostIPC``.
-- ``spec.privileged`` defaults to ``false``. When enabled (required for
+- ``spec.securityContext.privileged`` defaults to ``false``. When enabled (required for
   ``gpuVendor: amd``), the engine container additionally runs privileged,
   granting it full device access -- enable it only where GPU visibility
   requires it.

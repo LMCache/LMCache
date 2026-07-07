@@ -102,7 +102,7 @@ Both names point at the same image; only the hostnames differ.
 - **PodSecurity admission**: test namespaces are pre-labeled
   `pod-security.kubernetes.io/enforce=privileged` so the operator's
   DaemonSet (which always sets `hostIPC=true`, and `privileged=true` only
-  when `spec.privileged` is enabled) is accepted at admission time.
+  when `spec.securityContext.privileged` is enabled) is accepted at admission time.
   `hostIPC=true` alone is rejected by the `baseline`/`restricted` profiles,
   so the label is required regardless of `privileged`. Harmless on clusters
   that don't enforce PodSecurity.

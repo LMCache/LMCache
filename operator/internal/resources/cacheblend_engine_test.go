@@ -125,7 +125,7 @@ func TestBuildCBEngineDaemonSet_GPUAndSecurity(t *testing.T) {
 	}
 	c := podSpec.Containers[0]
 
-	// privileged defaults to false (opt-in via spec.privileged).
+	// privileged defaults to false (opt-in via spec.securityContext.privileged).
 	if c.SecurityContext == nil || c.SecurityContext.Privileged == nil || *c.SecurityContext.Privileged {
 		t.Fatal("expected privileged=false by default")
 	}
@@ -148,15 +148,15 @@ func TestBuildCBEngineDaemonSet_GPUAndSecurity(t *testing.T) {
 	assertArg(t, c.Args, "--l1-align-bytes", "16777216")
 }
 
-func TestBuildCBEngineDaemonSet_PrivilegedEnabled(t *testing.T) {
+func TestBuildCBEngineDaemonSet_SecurityContextPrivilegedEnabled(t *testing.T) {
 	engine := minimalCBEngine()
-	engine.Spec.Privileged = ptr(true)
+	engine.Spec.SecurityContext = &corev1.SecurityContext{Privileged: ptr(true)}
 	ds := BuildCBEngineDaemonSet(engine)
 	c := ds.Spec.Template.Spec.Containers[0]
 
-	// spec.privileged=true threads through to the container security context.
+	// spec.securityContext.privileged=true threads through to container security context.
 	if c.SecurityContext == nil || c.SecurityContext.Privileged == nil || !*c.SecurityContext.Privileged {
-		t.Fatal("expected privileged=true when spec.privileged=true")
+		t.Fatal("expected privileged=true when spec.securityContext.privileged=true")
 	}
 }
 

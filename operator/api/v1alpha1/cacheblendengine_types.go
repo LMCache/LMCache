@@ -196,15 +196,13 @@ type CacheBlendEngineSpec struct {
 	// +optional
 	PriorityClassName string `json:"priorityClassName,omitempty"`
 
-	// privileged runs the engine container in privileged mode. On some clusters
-	// this is required for the engine to see all node GPUs (for CUDA IPC) without
-	// claiming any via the nvidia.com/gpu device plugin; on many clusters
-	// NVIDIA_VISIBLE_DEVICES=all already grants that visibility without it, so it
-	// defaults to false. Set it to true only on clusters where the engine cannot
-	// otherwise see the GPUs.
+	// securityContext defines the container-level security context for the
+	// LMCache container.
+	//
+	// When unset, the operator runs the container with privileged: false.
+	// When set, this field is used as-is.
 	// +optional
-	// +kubebuilder:default=false
-	Privileged *bool `json:"privileged,omitempty"`
+	SecurityContext *corev1.SecurityContext `json:"securityContext,omitempty"`
 
 	// extraArgs are additional CLI flags appended to the server command.
 	// They are appended last and can override any auto-generated flag.
