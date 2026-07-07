@@ -7,18 +7,21 @@ Public API for LMCacheStream, a wrapper of a logical request going through the S
 from __future__ import annotations
 
 # Standard
-from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 import time
 import uuid
-
-# Third Party
-import torch
 
 # First Party
 from lmcache.logging import init_logger
 import lmcache.sdk.kvcache as lmc_sdk
+
+if TYPE_CHECKING:
+    # Standard
+    from collections.abc import Callable, Iterable, Sequence
+
+    # Third Party
+    import torch
 
 logger = init_logger(__name__)
 

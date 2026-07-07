@@ -7,17 +7,22 @@ Public API for Batched Stream, a wrapper of Streams that are batched together.
 from __future__ import annotations
 
 # Standard
-from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import time
-
-# Third Party
-import torch
 
 # First Party
 from lmcache.cli.metrics import Metrics, StreamHandler, get_formatter
-import lmcache.sdk.stream as lmc_stream
+
+if TYPE_CHECKING:
+    # Standard
+    from collections.abc import Callable, Sequence
+
+    # Third Party
+    import torch
+
+    # First Party
+    import lmcache.sdk.stream as lmc_stream
 
 
 class LMCacheBatchedStreamError(RuntimeError):

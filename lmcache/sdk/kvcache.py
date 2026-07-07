@@ -7,7 +7,7 @@ SDK for retrieving and storing KV cache tensors.
 from __future__ import annotations
 
 # Standard
-from collections.abc import Sequence
+from typing import TYPE_CHECKING
 import os
 import time
 import uuid
@@ -35,6 +35,10 @@ from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     create_transfer_context,
 )
 import lmcache.c_ops as lmc_ops
+
+if TYPE_CHECKING:
+    # Standard
+    from collections.abc import Sequence
 
 logger = init_logger(__name__)
 
