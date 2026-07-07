@@ -343,6 +343,46 @@ async def test_execute_evictions_http_failure_keeps_lru():
 
 
 @pytest.mark.asyncio
+async def test_execute_evictions_chunks_large_plan(monkeypatch):
+    """A plan larger than ``MAX_KEYS_PER_DELETE`` is split into multiple DELETE
+    requests, each within the cap, together covering every key. Guards against
+    the MP endpoint's per-request key limit (object_service.MAX_DELETE_BATCH),
+    which rejects an oversized single request with HTTP 400."""
+    # First Party
+    import lmcache.v1.mp_coordinator.cache_control.eviction_manager as em
+
+    monkeypatch.setattr(em, "MAX_DELETE_BATCH", 2)
+
+    ctrl, qs, ut = _setup(eviction_ratio=1.0)
+    keys = [_make_key("alice", h=f"{i:02x}") for i in range(5)]
+    for k in keys:
+        _store(ctrl, ut, k, 100)
+    qs.set_quota("alice", 0)  # ratio=1.0 → full eviction of all 5 keys
+
+    registry = _make_registry(_instance("mp-1"))
+
+    # Standard
+    import json as _json
+
+    batch_sizes: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = _json.loads((request.read() or b"").decode())
+        batch_sizes.append(len(body["keys"]))
+        return httpx.Response(200, json={"requested": len(body["keys"]), "ok": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        plan = await ctrl.execute_evictions(registry, client)
+        await ctrl.wait_for_in_flight_dispatches()
+
+    assert plan == {"alice": keys}
+    # 5 keys, cap 2 → three requests of 2, 2, 1; none exceeds the cap.
+    assert sum(batch_sizes) == 5
+    assert all(n <= 2 for n in batch_sizes)
+    assert sorted(batch_sizes, reverse=True) == [2, 2, 1]
+
+
+@pytest.mark.asyncio
 async def test_execute_evictions_empty_plan_is_noop():
     """No salts over threshold ⇒ no HTTP dispatch."""
     ctrl, _, _ = _setup()

@@ -24,6 +24,22 @@ def test_non_positive_intervals_rejected():
         MPCoordinatorConfig(health_check_interval=-1.0)
 
 
+def test_eviction_startup_delay_defaults_to_zero():
+    assert MPCoordinatorConfig().eviction_startup_delay == 0.0
+
+
+def test_negative_eviction_startup_delay_rejected():
+    with pytest.raises(ValueError):
+        MPCoordinatorConfig(eviction_startup_delay=-1.0)
+
+
+def test_eviction_startup_delay_from_env():
+    env = {"LMCACHE_MP_COORDINATOR_EVICTION_STARTUP_DELAY": "30"}
+    with patch.dict(os.environ, env, clear=False):
+        config = MPCoordinatorConfig.from_env()
+    assert config.eviction_startup_delay == 30.0
+
+
 def test_from_env_overrides_and_falls_back():
     env = {
         "LMCACHE_MP_COORDINATOR_HOST": "127.0.0.1",

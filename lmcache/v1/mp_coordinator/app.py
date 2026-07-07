@@ -111,7 +111,13 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
 
     async def _eviction_loop(http_client: httpx.AsyncClient) -> None:
         """Periodically check usage against quotas and dispatch
-        eviction RPCs to any one registered MP server."""
+        eviction RPCs to any one registered MP server.
+
+        Waits ``eviction_startup_delay`` seconds before the first sweep so
+        the startup resync can backfill trackers first (avoids evicting
+        against cold, incomplete state right after boot)."""
+        if config.eviction_startup_delay > 0:
+            await asyncio.sleep(config.eviction_startup_delay)
         while True:
             await asyncio.sleep(config.eviction_check_interval)
             await eviction_manager.execute_evictions(registry, http_client)

@@ -69,6 +69,13 @@ variables:
      - ``1.0``
      - Eviction fires when usage reaches this fraction of the quota
        (0.0 exclusive to 1.0).
+   * - ``LMCACHE_MP_COORDINATOR_EVICTION_STARTUP_DELAY``
+     - ``0``
+     - Seconds to wait after startup before the eviction loop runs its
+       first sweep. ``0`` starts immediately; a non-zero value lets the
+       startup resync backfill usage/eviction trackers first, so eviction
+       decisions aren't made against cold, incomplete state right after
+       boot.
    * - ``LMCACHE_MP_COORDINATOR_BLEND_CHUNK_SIZE``
      - ``256``
      - Tokens per chunk for the global CacheBlend directory. Must equal the

@@ -26,6 +26,9 @@ from lmcache.v1.distributed.eviction_policy.isolated_lru import (
 from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry
+from lmcache.v1.multiprocess.cache_control.object_service import (
+    MAX_DELETE_BATCH,
+)
 
 logger = init_logger(__name__)
 
@@ -124,11 +127,16 @@ class L2EvictionManager:
         registry: InstanceRegistry,
         http_client: httpx.AsyncClient,
     ) -> dict[str, list[ObjectKey]]:
-        """Compute the plan and fire-and-forget a ``DELETE /cache/objects`` to
-        one random registered MP server.
+        """Compute the plan and fire-and-forget one or more
+        ``DELETE /cache/objects`` requests to one random registered MP server.
+
+        The plan's keys are split into chunks of at most
+        ``MAX_DELETE_BATCH`` and each chunk is dispatched as its own
+        DELETE, because the MP endpoint rejects any single request over that
+        cap with HTTP 400.
 
         Returns the scheduled plan as soon as the background dispatch
-        task is spawned. The LRU is not cleared here — that happens
+        tasks are spawned. The LRU is not cleared here — that happens
         when the corresponding ``delete`` event arrives at
         ``POST /quota/events``. At-least-once semantics; safe because the
         underlying delete is idempotent.
@@ -148,20 +156,22 @@ class L2EvictionManager:
 
         url = f"http://{target.ip}:{target.http_port}/cache/objects"
         all_keys: list[ObjectKey] = [k for keys in plan.values() for k in keys]
-        body = {"keys": [asdict(k.to_encoded_object_key()) for k in all_keys]}
 
-        task = asyncio.create_task(
-            self._dispatch_eviction(
-                http_client=http_client,
-                url=url,
-                body=body,
-                instance_id=target.instance_id,
-                key_count=len(all_keys),
-                salt_count=len(plan),
+        for start in range(0, len(all_keys), MAX_DELETE_BATCH):
+            chunk = all_keys[start : start + MAX_DELETE_BATCH]
+            body = {"keys": [asdict(k.to_encoded_object_key()) for k in chunk]}
+            task = asyncio.create_task(
+                self._dispatch_eviction(
+                    http_client=http_client,
+                    url=url,
+                    body=body,
+                    instance_id=target.instance_id,
+                    key_count=len(chunk),
+                    salt_count=len({k.cache_salt for k in chunk}),
+                )
             )
-        )
-        self._in_flight_dispatches.add(task)
-        task.add_done_callback(self._in_flight_dispatches.discard)
+            self._in_flight_dispatches.add(task)
+            task.add_done_callback(self._in_flight_dispatches.discard)
         return plan
 
     async def wait_for_in_flight_dispatches(self) -> None:

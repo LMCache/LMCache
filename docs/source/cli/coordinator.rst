@@ -51,6 +51,9 @@ Options
    * - ``--trigger-watermark RATIO``
      - Eviction fires when usage reaches this fraction of the quota, ``0.0``
        (exclusive) to ``1.0`` (default: ``1.0``).
+   * - ``--eviction-startup-delay SECS``
+     - Seconds to wait after startup before the first eviction sweep; lets
+       startup resync backfill trackers first (default: ``0``).
    * - ``--blend-chunk-size N``
      - Tokens per chunk for the global CacheBlend directory; must equal the
        LMCache chunk size the blend servers use (default: ``256``).

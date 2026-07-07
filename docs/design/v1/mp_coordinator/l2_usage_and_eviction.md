@@ -103,6 +103,10 @@ accounting lives in ``L2UsageManager``; the eviction manager only tracks order.
 - ``execute_evictions(registry, http_client)`` — computes the plan and
   **fire-and-forget** ``DELETE /cache/objects`` to a holder MP server for each
   salt's victims; on confirmed deletion ``on_remove`` drops them from tracking.
+  The plan's keys are split into chunks of at most ``MAX_DELETE_BATCH`` (imported
+  from the MP server's ``object_service``) and each chunk is dispatched as its
+  own request, because the endpoint rejects any single delete over that cap with
+  HTTP 400 — a full-salt eviction (quota dropped to 0) routinely exceeds it.
 
 ## REST endpoints (`quota_api.py`)
 
@@ -146,6 +150,7 @@ the key from its usage accounting and LRU tracking.
 | ``eviction_check_interval`` | ``5.0`` | Seconds between eviction cycles (0 disables) |
 | ``eviction_ratio`` | ``0.2`` | Fraction of a salt's LRU keys (by count) to evict per cycle |
 | ``trigger_watermark`` | ``1.0`` | Eviction fires when usage reaches this fraction of the quota |
+| ``eviction_startup_delay`` | ``0.0`` | Seconds to wait after startup before the first eviction sweep (lets startup resync backfill trackers first) |
 
 ### MP-server side (`CoordinatorConfig`)
 
