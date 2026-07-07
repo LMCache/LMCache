@@ -47,14 +47,19 @@ discovered mapping. Startup fails if the query fails or the device reports no
 placement identifiers.
 
 FDP plumbing is split by layer: `RawBlockL2Adapter` discovers and registers
-non-zero placement identifiers for future KV data placement, while
-`RawBlockCore` enforces that explicit
-identifier 0 is never used. The placement policy that assigns identifiers to KV
-writes is a follow-up; for now KV data omits placement identifiers. Metadata
-checkpoint writes can use an explicit configured placement identifier while
-defaulting to no directive when unset. User-facing FDP
-configuration rules live in `docs/source/mp/l2_storage/raw_block.rst`;
-low-level NVMe command encoding details live in `rust/raw_block/README.md`.
+non-zero placement identifiers, while `RawBlockCore` enforces that explicit
+identifier 0 is never used. `fdp_placement_ids` is the KV data placement pool:
+explicit data identifiers are rejected if they overlap with
+`meta_checkpoint_placement_id` or are not reported by the device. If
+`fdp_placement_ids` is omitted, the adapter registers all device-reported
+non-zero identifiers except the metadata checkpoint identifier.
+
+The placement policy that assigns identifiers to KV writes is a follow-up; for
+now KV data omits placement identifiers. Metadata checkpoint writes can use an
+explicit configured placement identifier while defaulting to no directive when
+unset. User-facing FDP configuration rules live in
+`docs/source/mp/l2_storage/raw_block.rst`; low-level NVMe command encoding
+details live in `rust/raw_block/README.md`.
 
 ## Key Design Choice
 

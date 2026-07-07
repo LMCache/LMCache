@@ -88,6 +88,30 @@ def _normalize_fdp_placement_ids(
     return normalized
 
 
+def _exclude_meta_checkpoint_placement_id(
+    placement_ids: list[int],
+    meta_checkpoint_placement_id: int | None,
+) -> list[int]:
+    """Return data placement IDs that exclude the metadata checkpoint ID."""
+    if meta_checkpoint_placement_id is None:
+        return placement_ids
+    return [pid for pid in placement_ids if pid != meta_checkpoint_placement_id]
+
+
+def _validate_disjoint_fdp_placement_ids(
+    *,
+    fdp_placement_ids: Optional[list[int]],
+    meta_checkpoint_placement_id: int | None,
+) -> None:
+    """Validate that metadata and KV data FDP placement IDs do not overlap."""
+    if meta_checkpoint_placement_id is None or fdp_placement_ids is None:
+        return
+    if meta_checkpoint_placement_id in fdp_placement_ids:
+        raise ValueError(
+            "meta_checkpoint_placement_id must not overlap with fdp_placement_ids"
+        )
+
+
 def _make_bitmap(size: int) -> "Bitmap":
     # First Party
     from lmcache.native_storage_ops import Bitmap
@@ -152,9 +176,9 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             fdp_enabled: Enable NVMe Flexible Data Placement discovery and
                 non-zero placement-identifier registration. KV data placement
                 policy is not active yet.
-            fdp_placement_ids: Optional exact non-zero FDP placement identifier
-                list to register. If omitted, all device-reported identifiers
-                except 0 are registered.
+            fdp_placement_ids: Optional non-zero FDP placement identifier list
+                for KV data writes. If omitted, all device-reported identifiers
+                except 0 and the metadata checkpoint identifier are registered.
             meta_checkpoint_placement_id: Optional non-zero placement identifier
                 for metadata checkpoint writes.
             num_store_workers: Number of store worker threads.
@@ -208,6 +232,10 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             1,
             field_name="meta_checkpoint_placement_id",
         )[0]
+        _validate_disjoint_fdp_placement_ids(
+            fdp_placement_ids=self.fdp_placement_ids,
+            meta_checkpoint_placement_id=self.meta_checkpoint_placement_id,
+        )
         self.num_store_workers = int(num_store_workers)
         self.num_lookup_workers = int(num_lookup_workers)
         self.num_load_workers = int(num_load_workers)
@@ -360,9 +388,10 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             "< 0: auto detect limit splitting)\n"
             "- fdp_enabled (bool): enable FDP discovery/registration; "
             "KV data placement policy is not active yet (default false)\n"
-            "- fdp_placement_ids (list[int]): exact non-zero FDP placement "
-            "identifiers to register; omitted registers all device-reported "
-            "non-zero identifiers\n"
+            "- fdp_placement_ids (list[int]): non-zero FDP placement "
+            "identifiers for KV data writes; omitted registers all "
+            "device-reported non-zero identifiers except the metadata "
+            "checkpoint identifier\n"
             "- meta_checkpoint_placement_id (int): non-zero FDP placement "
             "identifier for metadata checkpoints; requires io_uring_cmd\n"
             "- num_store_workers (int): store worker threads (default 2)\n"
@@ -727,24 +756,46 @@ class RawBlockL2Adapter(L2AdapterInterface):
             (int(pid), int(ruhid)) for pid, ruhid in discovered
         ]
         discovered_ids = [pid for pid, _ in self._fdp_discovered_status]
-        usable_ids = [pid for pid in discovered_ids if pid != 0]
-        if not usable_ids:
+        device_nonzero_ids = [pid for pid in discovered_ids if pid != 0]
+        if not device_nonzero_ids:
             raise RuntimeError(
                 "raw_block FDP enabled but device returned no non-zero identifiers"
             )
 
+        meta_checkpoint_placement_id = self._core.meta_checkpoint_placement_id
+        device_nonzero_set = set(device_nonzero_ids)
+        if (
+            meta_checkpoint_placement_id is not None
+            and meta_checkpoint_placement_id not in device_nonzero_set
+        ):
+            raise RuntimeError(
+                "raw_block metadata checkpoint placement identifier is not "
+                "reported by device identifiers: "
+                f"configured={meta_checkpoint_placement_id} "
+                f"device={device_nonzero_ids}"
+            )
+
         if configured_ids is not None:
             configured_set = set(configured_ids)
-            usable_set = set(usable_ids)
-            if configured_set != usable_set:
+            if not configured_set.issubset(device_nonzero_set):
                 raise RuntimeError(
-                    "raw_block FDP placement identifier list does not match device "
+                    "raw_block FDP placement identifier list is not reported by "
+                    "device "
                     f"identifiers: configured={configured_ids} "
-                    f"device={usable_ids}"
+                    f"device={device_nonzero_ids}"
                 )
             self._fdp_placement_ids = list(configured_ids)
         else:
-            self._fdp_placement_ids = usable_ids
+            self._fdp_placement_ids = _exclude_meta_checkpoint_placement_id(
+                device_nonzero_ids,
+                meta_checkpoint_placement_id,
+            )
+
+        if not self._fdp_placement_ids:
+            raise RuntimeError(
+                "raw_block FDP enabled but no non-zero data placement "
+                "identifiers remain after excluding metadata checkpoint placement"
+            )
 
         logger.info(
             "RawBlockL2Adapter registered FDP placement identifiers: %s",

@@ -42,8 +42,9 @@ caller-provided load buffers during prefetch.
   and non-zero placement identifier registration. The KV data placement
   policy is not active yet. Requires ``io_engine="io_uring"`` and
   ``use_uring_cmd=true``.
-- ``fdp_placement_ids``: Optional exact non-zero placement identifier list
-  to register for future KV data placement.
+- ``fdp_placement_ids``: Optional non-zero placement identifier list for KV
+  data placement. If omitted, the adapter uses all device-reported non-zero
+  identifiers except ``meta_checkpoint_placement_id``.
 - ``meta_checkpoint_placement_id``: Optional non-zero placement identifier for
   metadata checkpoint payload/header writes. Omit it to keep checkpoint writes
   on default NVMe placement.
@@ -75,9 +76,13 @@ caller-provided load buffers during prefetch.
   character devices. FDP examples set ``use_odirect=false`` because
   ``io_uring_cmd`` uses NVMe passthrough rather than the POSIX write path.
 - FDP registers only non-zero placement identifiers. If ``fdp_placement_ids`` is
-  omitted, all discovered non-zero identifiers are used; if provided, the list
-  must exactly match the device's non-zero identifier set and must not contain
-  0. Current KV data writes still omit FDP placement identifiers until the
+  the KV data placement pool: if omitted, all discovered non-zero identifiers
+  except ``meta_checkpoint_placement_id`` are used; if provided, every
+  identifier must be reported by the device and must not contain 0.
+- ``meta_checkpoint_placement_id`` must not overlap with ``fdp_placement_ids``.
+  Keeping metadata checkpoints and KV data on separate placement identifiers
+  avoids mixing long-lived raw-block metadata with cache data buckets.
+- Current KV data writes still omit FDP placement identifiers until the
   placement policy is added. Metadata checkpoint writes use
   ``meta_checkpoint_placement_id`` when configured, otherwise they use default
   NVMe placement with no directive.

@@ -127,6 +127,7 @@ class _FakeFdpCore:
     def __init__(self, status: list[tuple[int, int]] | None = None) -> None:
         self.status = status if status is not None else [(0, 10), (7, 17)]
         self.slot_bytes = RAW_BLOCK_CI_SLOT_BYTES
+        self.meta_checkpoint_placement_id: int | None = None
         self.put_many_calls: list[list[int] | None] = []
 
     def fetch_fdp_status(self) -> list[tuple[int, int]]:
@@ -191,6 +192,7 @@ def _make_fdp_adapter(
     fake_core: _FakeFdpCore,
     config: RawBlockL2AdapterConfig,
 ) -> RawBlockL2Adapter:
+    fake_core.meta_checkpoint_placement_id = config.meta_checkpoint_placement_id
     with patch(
         "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter.RawBlockCore",
         return_value=fake_core,
@@ -228,6 +230,14 @@ def test_raw_block_meta_checkpoint_placement_id_requires_uring_cmd() -> None:
 def test_raw_block_meta_checkpoint_placement_id_rejects_zero() -> None:
     with pytest.raises(ValueError, match="placement identifier 0"):
         _make_fdp_config(meta_checkpoint_placement_id=0)
+
+
+def test_raw_block_meta_checkpoint_placement_id_must_not_overlap_data_ids() -> None:
+    with pytest.raises(ValueError, match="must not overlap"):
+        _make_fdp_config(
+            placement_ids=[1, 7],
+            meta_checkpoint_placement_id=7,
+        )
 
 
 def test_raw_block_fdp_requires_uring_cmd_config():
@@ -328,11 +338,41 @@ def test_raw_block_fdp_rejects_user_placement_id_zero() -> None:
     assert "placement identifier 0" in warning.call_args.args[0]
 
 
-def test_raw_block_fdp_user_ids_must_match_device_identifiers() -> None:
+def test_raw_block_fdp_configured_ids_may_be_device_subset() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17)])
+    adapter = _make_fdp_adapter(fake_core, _make_fdp_config(placement_ids=[1]))
+    try:
+        status = adapter.report_status()
+        assert status["fdp_placement_ids"] == [1]
+    finally:
+        adapter.close()
+
+
+def test_raw_block_fdp_user_ids_must_be_reported_by_device() -> None:
     fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17)])
 
-    with pytest.raises(RuntimeError, match="does not match device"):
-        _make_fdp_adapter(fake_core, _make_fdp_config(placement_ids=[1]))
+    with pytest.raises(RuntimeError, match="not reported by device"):
+        _make_fdp_adapter(fake_core, _make_fdp_config(placement_ids=[1, 9]))
+
+
+def test_raw_block_fdp_default_data_ids_exclude_metadata_checkpoint_id() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17), (9, 19)])
+    adapter = _make_fdp_adapter(
+        fake_core,
+        _make_fdp_config(meta_checkpoint_placement_id=7),
+    )
+    try:
+        status = adapter.report_status()
+        assert status["fdp_placement_ids"] == [1, 9]
+    finally:
+        adapter.close()
+
+
+def test_raw_block_fdp_meta_checkpoint_id_must_be_reported_by_device() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17)])
+
+    with pytest.raises(RuntimeError, match="metadata checkpoint"):
+        _make_fdp_adapter(fake_core, _make_fdp_config(meta_checkpoint_placement_id=9))
 
 
 def test_raw_block_fdp_requires_nonzero_device_ids() -> None:
