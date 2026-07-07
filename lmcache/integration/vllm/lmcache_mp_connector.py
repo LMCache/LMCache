@@ -562,11 +562,11 @@ def get_tensor(
 
 @dataclass
 class _QLayerStore:
-    """One request's query drain scheduled for the current forward step.
+    """One request's query tensor store for the current forward step.
 
     Attributes:
-        request_id: The request whose query is being drained.
-        op: The store op whose ``[start, end)`` token range was captured.
+        request_id: The request ID of the stored query tensor.
+        op: The store op whose ``[start, end)`` token range is stored.
         ring_block_ids: Ring blocks (in token order) holding this op's query.
         cache_salt: Per-user isolation salt for the query key.
     """
@@ -579,18 +579,13 @@ class _QLayerStore:
 
 @dataclass
 class _QStepState:
-    """Per-forward-step query capture plan.
-
-    Built on the first ``save_kv_layer`` call of a step and consumed by
-    ``wait_for_save``. The token->slot mapping is layer-independent, so it is
-    computed once and reused by every layer's scatter.
+    """Plan to store query tensors for the current forward step, built on the
+    first layer's save_kv_layer call and reused by every layer in the step.
 
     Attributes:
-        ring_slots: ``int64`` tensor of shape ``[num_query_rows]`` mapping each
-            query row to an absolute ring slot (``block_id * block_size +
-            offset``), or ``-1`` to drop the row.
-        stores: One entry per STORE request whose query was captured; drives
-            the per-request Q drain submissions in ``wait_for_save``.
+        ring_slots: ``int64`` tensor of shape ``[num_tokens]`` mapping each
+            token to ring slot ID, or ``-1`` to drop the row.
+        stores: one ``_QLayerStore`` per store request in the step.
     """
 
     ring_slots: torch.Tensor
@@ -601,6 +596,15 @@ def attention_layer_names_from_vllm(
     kv_cache_config: Any,
     kv_caches: Mapping[str, Any],
 ) -> list[str]:
+    """Return the attention layers' names.
+
+    Args:
+        kv_cache_config: vLLM ``KVCacheConfig``, or ``None``.
+        kv_caches: Registered tensors keyed by layer name.
+
+    Returns:
+        Attention layer names, ordered as in ``kv_caches``.
+    """
     vllm_groups = (
         getattr(kv_cache_config, "kv_cache_groups", ()) or ()
         if kv_cache_config is not None
@@ -841,6 +845,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         return
 
     def _register_q_ring(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        """Allocate and register the paged-Q ring for the attention layers.
+        Builds the mapping between layer names and ring indices (for attention layers).
+        Calls the register_q_ring method of the worker adapter to allocate the ring.
+
+        Args:
+            kv_caches: Registered KV caches.
+        """
         if not kv_caches:
             logger.warning("No KV caches registered; skipping Q ring setup.")
             return
@@ -961,6 +972,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         to the connector. This is called from within attention layer to
         enable async copying during execution.
 
+        This is a no-op in MP connector, so is used for scattering this layer's
+        query tensor to the paged-Q ring, before the Q is then saved to LMCache
+        in wait_for_save().
+
         Args:
             layer_name (str): the name of the layer.
             kv_layer (torch.Tensor): the paged KV buffer of the current
@@ -988,12 +1003,25 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 self._q_step_disabled = True
                 return
 
+        logger.info(
+            "Saving query for layer %s (index %d) to LMCache", layer_name, layer_index
+        )
         self.worker_adapter.scatter_q_layer(
             layer_index, query, self._q_step_state.ring_slots
         )
-        return
 
     def _build_q_step_state(self, query: torch.Tensor) -> "_QStepState | None":
+        """Build the per-step query store plan for the current forward step.
+        Done only on the first layer's save_kv_layer call of the step.
+
+        Args:
+            query: The query tensor of shape [num_tokens, num_q_heads, head_size].
+
+        Returns:
+            _QStepState: the query capture plan (containing ring slot mapping
+                         and per-request store ops).
+            None if not storing any query tensors.
+        """
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
 
@@ -1071,6 +1099,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         return _QStepState(ring_slots=ring_slots, stores=stores)
 
     def _free_partial_ring_blocks(self, stores: list[_QLayerStore]) -> None:
+        """Free allocated ring blocks when a full allocation is unsuccessful"""
         q_ring = self.worker_adapter.q_ring
         if q_ring is None:
             return

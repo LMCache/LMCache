@@ -967,6 +967,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         """
         st = time.perf_counter()
 
+        logger.info("%s %s %d STORE start", key.model_name, key.request_id, instance_id)
+
         entry = self.get_and_touch_context_entry(instance_id)
         if entry is None:
             raise ValueError(f"No GPU context registered for instance ID {instance_id}")
