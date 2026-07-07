@@ -575,7 +575,15 @@ def get_tensor(
     args: dict[str, Any],
     arg_names: list[str],
 ) -> torch.Tensor | None:
-    """Return the first matching tensor argument, or None."""
+    """Return the first matching tensor argument, or None.
+
+    Args:
+        args: A dictionary of argument names to values.
+        arg_names: A list of argument names to search for.
+
+    Returns:
+        The first matching tensor argument, None if none found.
+    """
     for name in arg_names:
         if name in args:
             return args[name]
@@ -1062,11 +1070,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         stores: list[_QLayerStore] = []
         row_cursor = 0
         for meta in metadata.requests:
-            if meta.direction != "STORE":
-                continue
             op = meta.op
             num_tokens = op.end - op.start
             if num_tokens <= 0:
+                continue
+            if meta.direction != "STORE":
+                row_cursor += num_tokens
                 continue
 
             if row_cursor + num_tokens > num_query_rows:
@@ -1081,11 +1090,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
             if num_tokens % block_size != 0:
                 logger.warning(
-                    "Skip query for request %s: tokens (%d) not divisible by ",
-                    "block_size (%d)",
+                    "Skip query for %s: tokens (%d) undivisible by block size",
                     meta.request_id,
                     num_tokens,
-                    block_size,
                 )
                 self._free_partial_ring_blocks(stores)
                 return None

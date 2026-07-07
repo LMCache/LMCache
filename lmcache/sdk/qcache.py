@@ -24,6 +24,12 @@ def q_model_name(model_name: str) -> str:
     """Replace model name with a query-specific model name for Q cache.
     The Q cache is stored in the same LMCache server, differentiated by
     the model name (see vllm_multi_process_adapter.py).
+
+    Args:
+        model_name: The original model name.
+
+    Returns:
+        The model name used to identify the Query from KV.
     """
     return f"__lmc_query__{model_name}"
 
@@ -34,6 +40,12 @@ def connect(
     """Connect to the LMCache server and return a context for Q cache.
     The technique to get the query tensors are the same as KV cache,
     however, specific model name prefix needs to be used.
+
+    Args:
+        url: The MQ URL of the LMCache server.
+        http_url: The HTTP URL of the LMCache server.
+        model_name: The original model name.
+        timeout: The timeout for the connection.
     """
     ctx = LMCacheKVCacheContext(
         url=url,
@@ -51,5 +63,10 @@ def retrieve_query(
     """Return the stored query for `tokens`. The underlying machinery is
     similar to KV cache, hence only needs to wrap the `retrieve` function
     with the Q cache context and model name.
+
+    Args:
+        ctx: The context for Q cache.
+        tokens: The tokens to retrieve the query for.
+        cache_salt: The cache salt to use for the retrieval.
     """
     return _retrieve(ctx, tokens, cache_salt=cache_salt)
