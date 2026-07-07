@@ -395,6 +395,15 @@ type LMCacheEngineSpec struct {
 	// +kubebuilder:default=false
 	HostNetwork *bool `json:"hostNetwork,omitempty"`
 
+	// securityContext defines the container-level security context for the
+	// LMCache container.
+	//
+	// When unset, the operator preserves the existing default behavior and runs
+	// the container with privileged: false (unless spec.privileged is explicitly
+	// set to true).
+	// +optional
+	SecurityContext *corev1.SecurityContext `json:"securityContext,omitempty"`
+
 	// privileged runs the engine container in privileged mode. On some clusters
 	// this is required for the engine to see all node GPUs (for CUDA IPC) without
 	// claiming any via the nvidia.com/gpu device plugin; on many clusters

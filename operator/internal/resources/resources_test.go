@@ -1175,6 +1175,39 @@ func TestBuildDaemonSet_PrivilegedEnabled(t *testing.T) {
 	}
 }
 
+func TestBuildDaemonSet_SecurityContextPassthrough(t *testing.T) {
+	engine := minimalEngine()
+	engine.Spec.SecurityContext = &corev1.SecurityContext{
+		AllowPrivilegeEscalation: ptr(false),
+		Privileged:               ptr(false),
+		RunAsNonRoot:             ptr(true),
+		RunAsUser:                ptr(int64(1000)),
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+		},
+	}
+
+	ds := BuildDaemonSet(engine)
+	c := ds.Spec.Template.Spec.Containers[0]
+
+	if c.SecurityContext == nil {
+		t.Fatal("expected securityContext to be set from spec.securityContext")
+	}
+	if c.SecurityContext.Privileged == nil || *c.SecurityContext.Privileged {
+		t.Fatal("expected securityContext.privileged=false from spec.securityContext")
+	}
+	if c.SecurityContext.RunAsUser == nil || *c.SecurityContext.RunAsUser != 1000 {
+		t.Fatal("expected securityContext.runAsUser=1000")
+	}
+	if c.SecurityContext.AllowPrivilegeEscalation == nil || *c.SecurityContext.AllowPrivilegeEscalation {
+		t.Fatal("expected securityContext.allowPrivilegeEscalation=false")
+	}
+	if c.SecurityContext.Capabilities == nil || len(c.SecurityContext.Capabilities.Drop) != 1 ||
+		c.SecurityContext.Capabilities.Drop[0] != corev1.Capability("ALL") {
+		t.Fatal("expected securityContext.capabilities.drop=[ALL]")
+	}
+}
+
 // hasEnvAll reports whether envs contains an env var named name set to the
 // literal "all" (the value the GPU passthrough vars are always set to).
 func hasEnvAll(envs []corev1.EnvVar, name string) bool {

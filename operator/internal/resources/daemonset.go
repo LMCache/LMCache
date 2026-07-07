@@ -52,7 +52,8 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 // buildDaemonSetCore constructs the DaemonSet shared by the LMCacheEngine and
 // CacheBlendEngine controllers. It is the single source of truth for the
 // GPU/security pod-template scaffolding (hostIPC, runtimeClassName, optional
-// privileged (default false, via spec.Privileged), NVIDIA_VISIBLE_DEVICES,
+// privileged (default false, overridable via
+// spec.Privileged when spec.SecurityContext is unset), NVIDIA_VISIBLE_DEVICES,
 // resources without a device-plugin GPU claim) so those settings cannot drift
 // between the two engines.
 //
@@ -81,7 +82,13 @@ func buildDaemonSetCore(
 		rc := nvidiaRuntimeClass
 		runtimeClassName = &rc
 	}
-	privileged := derefBool(spec.Privileged, false)
+	containerSecurityContext := spec.SecurityContext
+	if containerSecurityContext == nil {
+		privileged := derefBool(spec.Privileged, false)
+		containerSecurityContext = &corev1.SecurityContext{Privileged: &privileged}
+	} else {
+		containerSecurityContext = containerSecurityContext.DeepCopy()
+	}
 
 	serverPort := derefInt32(getServerPort(spec), 5555)
 	imgRepo := defaultImageRepo
@@ -277,13 +284,11 @@ func buildDaemonSetCore(
 							Ports:           containerPorts,
 							Env:             envVars,
 							Resources:       ComputeResources(spec),
-							SecurityContext: &corev1.SecurityContext{
-								Privileged: &privileged,
-							},
-							VolumeMounts:   volumeMounts,
-							StartupProbe:   startupProbe,
-							LivenessProbe:  livenessProbe,
-							ReadinessProbe: readinessProbe,
+							SecurityContext: containerSecurityContext,
+							VolumeMounts:    volumeMounts,
+							StartupProbe:    startupProbe,
+							LivenessProbe:   livenessProbe,
+							ReadinessProbe:  readinessProbe,
 						},
 					},
 					Volumes: volumes,
