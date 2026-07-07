@@ -70,7 +70,7 @@ class CPUCacheContext(BaseCacheContext):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: "Sequence[EngineGroupInfo]" = (),
         engine_type: EngineType = EngineType.VLLM,
-        separate_object_groups: bool = True,
+        separate_object_groups: bool = False,
     ) -> None:
         if not kv_caches:
             raise ValueError(

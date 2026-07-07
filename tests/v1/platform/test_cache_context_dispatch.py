@@ -57,7 +57,7 @@ class _FakeContext(BaseCacheContext):
         layout_hints: Any,
         engine_group_infos: Any,
         engine_type: Any,
-        separate_object_groups: bool = True,
+        separate_object_groups: bool = False,
     ) -> None:
         # Skip ``BaseCacheContext.__init__`` -- it requires real
         # KVLayerGroupsManager / shape descriptors that are out of
