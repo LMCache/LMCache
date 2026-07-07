@@ -402,7 +402,7 @@ The order of ``--l2-adapter`` arguments determines the adapter order (cascade).
 
 Registered adapter types: ``nixl_store``, ``nixl_store_dynamic``, ``fs``,
 ``fs_native``, ``mock``, ``mooncake_store``, ``aerospike``, ``s3``, ``resp``,
-``plugin``, ``native_plugin``, ``raw_block``, ``dax``.
+``plugin``, ``native_plugin``, ``raw_block``, ``dax``, ``fault_inject``.
 
 Each adapter type's required and optional fields, plus per-backend examples, are
 documented on its own page under :doc:`Secondary KV Storage <l2_storage/index>`
@@ -456,6 +456,21 @@ logging, tracing).
    * - ``--prometheus-port``
      - ``9090``
      - Port for the Prometheus ``/metrics`` endpoint.
+   * - ``--metrics-sample-rate``
+     - ``0.01``
+     - Fraction of chunks/blocks (in ``(0.0, 1.0]``) to sample for
+       lifecycle histograms. Counters always count every event
+       regardless of this value.
+   * - ``--trace-level``
+     - *(unset)*
+     - Enable trace recording at the given level. Only ``storage`` is
+       supported today (records ``StorageManager`` public-API calls).
+       See :mod:`lmcache.v1.mp_observability.trace` for details.
+   * - ``--trace-output``
+     - *(unset)*
+     - Path to write the trace file. When ``--trace-level`` is set but
+       this is unset, a timestamped path under ``$TMPDIR`` is minted
+       at startup and logged at INFO.
 
 vLLM Client Configuration
 --------------------------
