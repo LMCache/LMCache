@@ -22,6 +22,7 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
+from lmcache.v1.platform import current_device_spec
 
 # Store the tensor objects in memory so that they can be accessed
 # outside the scope of this file
@@ -347,6 +348,39 @@ class PageBufferShapeDesc:
         self.dtype: torch.dtype | None = None
 
 
+class _NativePlanType:
+    """Base for object-group transfer plan types that only exist natively.
+
+    The plan value structs (see ``csrc/mp_mem_kernels.cuh``) are built on the
+    Python side and consumed by the native ``execute_object_group_transfer``.
+    They have no pure-Python fallback, so constructing one without the compiled
+    ``c_ops`` extension is unsupported. Subclasses exist only so the CPU-only
+    build exposes the same names as ``c_ops``.
+    """
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        raise NotImplementedError(
+            f"{type(self).__name__} requires the c_ops native extension; "
+            "no pure-Python fallback exists."
+        )
+
+
+class StagingCopy(_NativePlanType):
+    """Fallback stub for the native ``StagingCopy`` plan type."""
+
+
+class LaunchVar(_NativePlanType):
+    """Fallback stub for the native ``LaunchVar`` plan type."""
+
+
+class BatchStep(_NativePlanType):
+    """Fallback stub for the native ``BatchStep`` plan type."""
+
+
+class KernelGroupSpec(_NativePlanType):
+    """Fallback stub for the native ``KernelGroupSpec`` plan type."""
+
+
 def set_shape_desc_dtype(shape_desc: Any, dtype: torch.dtype) -> None:
     """Best-effort ``shape_desc.dtype = dtype``.
 
@@ -512,7 +546,7 @@ def alloc_shm_pinned_ptr(size: int, shm_name: str = "") -> int:
     _shm_registry[ptr] = shm
 
     # Try to pin the SHM buffer for async D2H copies
-    if torch_dev.ext.pin_memory(ptr, size):
+    if current_device_spec.pin_memory(ptr, size):
         _pinned_ptr_registry[ptr] = size
 
     return ptr
@@ -524,7 +558,7 @@ def free_shm_pinned_ptr(ptr: int, size: int = 0, shm_name: str = "") -> None:
 
     # Unpin if previously registered
     if ptr in _pinned_ptr_registry:
-        torch_dev.ext.unpin_memory(ptr)
+        current_device_spec.unpin_memory(ptr)
         _pinned_ptr_registry.pop(ptr, None)
 
     # Release in order: tensor -> ctypes buf -> shm
@@ -1299,6 +1333,36 @@ def multi_layer_block_kv_transfer(
             is_d2h,
             skip_prefix_n_blocks,
         )
+
+
+def execute_object_group_transfer(
+    direction: TransferDirection,
+    device: torch.device | str,
+    host_buffer_alignment: int,
+    kernel_group_specs: list,
+    batch_steps: list,
+) -> None:
+    """Python fallback for the native object-group transfer plan executor.
+
+    The planned/batched object-group transfer (see ``csrc/mp_mem_kernels.cuh``
+    and ``execute_object_group_transfer``) is only implemented in the compiled
+    ``c_ops`` extension. The signature mirrors the C++ binding so callers can
+    dispatch uniformly, but there is no pure-Python equivalent.
+
+    Args:
+        direction: Transfer direction (H2D or D2H).
+        device: CUDA device of the transfer.
+        host_buffer_alignment: Host buffer alignment for staging copies.
+        kernel_group_specs: Per-kernel-group invariants (native ``KernelGroupSpec``).
+        batch_steps: Ordered per-batch staging + launch work (native ``BatchStep``).
+
+    Raises:
+        NotImplementedError: Always; requires the c_ops native extension.
+    """
+    raise NotImplementedError(
+        "execute_object_group_transfer requires the c_ops native extension; "
+        "no pure-Python fallback exists."
+    )
 
 
 def _valid_block_range(

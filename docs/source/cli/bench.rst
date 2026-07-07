@@ -1164,6 +1164,26 @@ Options
      - *(unset)*
      - Run only the specified operation. When omitted, all three
        operations are run in the order ``store -> lookup -> load``.
+   * - ``--flamegraph {on,off}``
+     - ``off``
+     - Capture a flame graph of the measured phases (``on``) or run the
+       benchmark normally (``off``). When ``on``, the benchmark profiles
+       itself and renders an SVG. Default ``off`` leaves benchmark
+       behavior unchanged. See
+       :ref:`Profiling / flame charts <lmcache-bench-l2-profiling>`.
+   * - ``--flamegraph-mode {on-cpu,off-cpu}``
+     - ``on-cpu``
+     - Flame-graph mode for ``--flamegraph on``. ``on-cpu`` shows
+       where CPU time goes; ``off-cpu`` shows time blocked on I/O /
+       locks (best for I/O-bound adapters).
+   * - ``--flamegraph-output PATH``
+     - *(auto)*
+     - SVG output path. Default:
+       ``/tmp/lmcache_bench_flames/<adapter>.<mode>.svg``.
+   * - ``--flamegraph-dir DIR``
+     - *($FLAMEGRAPH_DIR or ~/FlameGraph)*
+     - Directory with the FlameGraph scripts (``flamegraph.pl``,
+       ``stackcollapse-perf.pl``).
 
 
 Adapter JSON spec
@@ -1290,6 +1310,56 @@ requires both the store and load object batches to stay resident so the
 loaded data can be compared against the original store pattern.
 
 
+.. _lmcache-bench-l2-profiling:
+
+Profiling / flame charts
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When ``--flamegraph on`` is passed, the benchmark profiles the L2
+adapter's performance and renders a flame graph of the measured phases:
+
+.. code-block:: bash
+
+   lmcache bench l2 \
+       --l2-adapter '{"type":"fs","base_path":"/data/lmcache-bench"}' \
+       --rounds 300 --flamegraph on --flamegraph-mode on-cpu
+   #   [Profile] on-cpu recording started (pid=12345) -> .../FSL2Adapter.oncpu.svg
+   #   [Profile] wrote /tmp/lmcache_bench_flames/FSL2Adapter.oncpu.svg
+
+The recorder samples every thread of the process (including native
+worker threads). Two modes are available via ``--flamegraph-mode``:
+
+* **on-cpu** (default) -- ``perf record``; where CPU cycles go
+  (serialization, copies, hashing).
+* **off-cpu** -- ``offcputime-bpfcc`` (bcc); time spent blocked
+  (waiting on I/O, locks, eventfds). Often the more informative view
+  for I/O-bound adapters such as ``fs`` and ``s3``.
+
+Recording covers only the measured store/lookup/load work, so make the
+run long enough to collect samples (a few seconds is plenty -- use a
+large ``--rounds``). The SVG is written to ``--flamegraph-output``
+(default ``/tmp/lmcache_bench_flames/<adapter>.<mode>.svg``).
+
+**Requirements.** Rendering needs Brendan Gregg's
+`FlameGraph <https://github.com/brendangregg/FlameGraph>`__ scripts
+(``--flamegraph-dir`` or ``FLAMEGRAPH_DIR``, default ``~/FlameGraph``;
+auto-cloned to a temp directory when absent). ``on-cpu`` needs ``perf``
+(and ``kernel.perf_event_paranoid`` low enough to profile non-root, or
+run as root); ``off-cpu`` needs ``bcc`` (``offcputime-bpfcc``) and
+``sudo``. The required tools are checked up front: when ``--flamegraph
+on`` is requested but a tool is missing, the benchmark exits with a
+non-zero status and an actionable message naming the missing tool
+instead of running unprofiled. The default ``--flamegraph off`` skips
+all of this and leaves benchmark behavior unchanged.
+
+.. note::
+
+   When comparing a change, profile each variant with the same
+   ``--rounds`` and ``--flamegraph-mode`` and distinct
+   ``--flamegraph-output`` paths (e.g. ``baseline.svg`` vs
+   ``after.svg``) so the two flame graphs are directly comparable.
+
+
 Exit codes
 ~~~~~~~~~~
 
@@ -1306,5 +1376,7 @@ Exit codes
      - Adapter creation failed, round-trip verification failed, or
        an operation hit a fatal error (e.g. all rounds timed out).
    * - ``2``
-     - The ``--l2-adapter`` JSON / ``L2_ADAPTER_JSON`` env var was
-       missing or could not be parsed.
+     - Invalid invocation: the ``--l2-adapter`` JSON / ``L2_ADAPTER_JSON``
+       env var was missing or could not be parsed, an option value was
+       invalid, or ``--flamegraph on`` was requested but the profiling
+       toolchain is unavailable.

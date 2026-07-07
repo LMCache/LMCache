@@ -61,10 +61,14 @@ def test_get_backend_prefers_musa_ops_over_cuda_when_musa_is_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Backend composition follows device detection priority when MUSA is active."""
-    # First Party
-    from lmcache.v1.platform.musa import ops as musa_ops
-    import lmcache
+    # Standard
+    import os
 
+    # First Party
+    from lmcache.v1.platform import _detect_device, get_backend
+    from lmcache.v1.platform.musa import ops as musa_ops
+
+    os.environ["DEVICE_TYPE"] = "musa"
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(
         torch,
@@ -73,11 +77,15 @@ def test_get_backend_prefers_musa_ops_over_cuda_when_musa_is_available(
         raising=False,
     )
 
-    backend = lmcache._get_backend()
+    dev, dev_type = _detect_device()
 
+    assert dev_type == "musa"
+    backend = get_backend(dev_type)
+    assert backend is not None
     assert backend.multi_layer_block_kv_transfer is (
         musa_ops.multi_layer_block_kv_transfer
     )
+    del os.environ["DEVICE_TYPE"]
 
 
 def test_native_transfer_enabled_by_env(monkeypatch: pytest.MonkeyPatch) -> None:
