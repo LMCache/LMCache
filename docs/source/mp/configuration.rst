@@ -320,8 +320,14 @@ path:
     lmcache server \
         --maru-server-url maru://localhost:5555 \
         --maru-pool-size-gb 4 \
+        --l1-size-gb 0 \
         --supported-transfer-mode lmcache_driven \
         --eviction-policy LRU --max-workers 4 --port 6555
+
+``--l1-size-gb`` is required by the parser but ignored under Maru (pass ``0``, as
+the CXL pool replaces the DRAM L1). This assumes a MaruServer is already running
+at ``--maru-server-url``; higher-level launchers typically start the MaruServer
+and derive this URL for you.
 
 .. note::
 
