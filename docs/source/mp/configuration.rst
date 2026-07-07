@@ -298,6 +298,77 @@ flags apply to both; no configuration change is needed to switch vendors.
      - Open the slab with ``O_DIRECT`` (required for the GDS DMA fast path on
        ext4).
 
+Maru CXL Shared L1
+------------------
+
+Source: ``lmcache/v1/distributed/config.py``
+
+Opt-in. Setting ``--maru-server-url`` switches the L1 medium from pinned DRAM to
+a **cross-instance shared CXL pool** managed by `Maru
+<https://github.com/xcena-dev/maru>`_. Every LMCache server on the same pool
+``mmap``\ s the same physical memory, so an L1 entry produced by one instance is
+a zero-copy read for the others. The pinned-DRAM L1 options
+(``--l1-size-gb`` / ``--l1-use-lazy`` / ``--l1-init-size-gb``) are then ignored;
+the stock L1↔L2 tiering, controllers, and eviction run unchanged on top.
+
+Requires a running MaruServer and the ``maru`` package (``git clone`` the Maru
+repo and run ``./install.sh``). Enable it alongside the lmcache-driven transfer
+path:
+
+.. code-block:: bash
+
+    lmcache server \
+        --maru-server-url maru://localhost:5555 \
+        --maru-pool-size-gb 4 \
+        --supported-transfer-mode lmcache_driven \
+        --eviction-policy LRU --max-workers 4 --port 6555
+
+.. note::
+
+   Maru L1 constraints (rejected at startup otherwise): **lmcache-driven**
+   transfer mode only; mutually exclusive with GDS (``--gds-l1-path``) and
+   Device-DAX (``--l1-devdax-path``) L1; default store policy only (not
+   ``skip_l1``); **copy-type L2 adapters only** (``s3`` / ``fs`` / ``raw_block``
+   / ``mock`` …; registered/RDMA adapters such as ``nixl`` and P2P are refused);
+   and **one model / object group per pool** (the pool binds to the first KV
+   layout it sees). Recency (LRU) is tracked per instance.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 55
+
+   * - Argument
+     - Default
+     - Description
+   * - ``--maru-server-url``
+     - Not set
+     - MaruServer endpoint (``maru://host:port`` or ``tcp://host:port``).
+       Setting this enables the Maru CXL shared L1 tier.
+   * - ``--maru-pool-size-gb``
+     - ``0.0``
+     - CXL pool size to request from MaruServer, in GB. Required (> 0) when
+       ``--maru-server-url`` is set. **Must fit within a single CXL device** —
+       see the note below.
+   * - ``--maru-instance-id``
+     - auto UUID
+     - Stable client id reported to MaruServer for ownership tracking.
+       Auto-generated if omitted.
+
+.. note::
+
+   **``--maru-pool-size-gb`` is bounded by a single CXL device.** MaruServer
+   allocates each region as **one contiguous extent within a single DAX
+   device** — regions do not span devices. This value sizes both the initial
+   region and every auto-expand step, so it must be ≤ one device's usable
+   capacity (raw device size minus MaruServer metadata / WAL / alignment
+   overhead; e.g. a 256 GiB device holds somewhat less). Requesting more than
+   any device can satisfy fails the MaruServer allocation, and the LMCache
+   server then **fails to start** (the initial ``MaruHandler.connect()`` returns
+   an error). With multiple CXL devices, auto-expand can claim additional
+   regions from other devices, so total capacity is the sum across devices —
+   but no single region (hence no single ``--maru-pool-size-gb``) may exceed
+   one device.
+
 L1 Manager TTLs
 ----------------
 

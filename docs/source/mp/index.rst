@@ -22,9 +22,9 @@ Key Benefits
   share a single L1 cache, maximizing KV reuse.
 - **Independent resource scaling** -- Allocate CPU memory for caching
   independently of GPU memory for inference.
-- **Multi-tier storage (L1 + L2)** -- An L1 cache (in CPU DRAM, or an NVMe
-  slab via GPUDirect Storage) backed by persistent L2 storage via NIXL (GDS,
-  POSIX, HF3FS, and more).
+- **Multi-tier storage (L1 + L2)** -- An L1 cache (in CPU DRAM, an NVMe
+  slab via GPUDirect Storage, or a cross-instance shared CXL pool via Maru)
+  backed by persistent L2 storage via NIXL (GDS, POSIX, HF3FS, and more).
 - **Built-in observability** -- Prometheus metrics and a telemetry event system
   out of the box.
 
@@ -75,14 +75,18 @@ High-Level Architecture
          v
     StorageManager (distributed/storage_manager.py)
          |
-         |--- L1Manager (l1_manager.py)
+         |--- L1Manager (l1_manager.py)                  [default]
          |       |--- L1MemoryManager (CPU DRAM) or
          |       |    GDSL1MemoryManager (NVMe slab via cuFile / hipFile)
          |       |--- TTLLock per object (read/write)
+         |    -- or, when --maru-server-url is set --
+         |--- MaruL1Manager (maru_l1_manager.py)          [shared CXL L1]
+         |       |--- MaruMemoryAllocator (cross-instance shared CXL pool)
+         |       |--- MaruServer directory (key->region/offset, cross-node pin_count)
          |
          |--- StoreController  -----> L2 Adapter(s) (async L1->L2 push)
          |--- PrefetchController ---> L2 Adapter(s) (async L2->L1 load)
-         |--- EvictionController ----> L1Manager (watermark-triggered eviction)
+         |--- EvictionController ----> L1Manager / MaruL1Manager (watermark eviction)
          |
          v
     EventBus + OTel providers (observability)
@@ -396,6 +400,16 @@ tiers selected at startup (both satisfy ``L1ManagerProtocol``):
   cuFile (``libcufile.so``) on NVIDIA and hipFile (``libhipfile.so``) on AMD
   ROCm; see the *GDS L1 Tier* section of :doc:`configuration` for the
   vendor-specific requirements. The CPU tier is disabled in this mode.
+
+When ``--maru-server-url`` is set, ``L1Manager`` *itself* is replaced by
+``MaruL1Manager`` (``distributed/maru_l1_manager.py``) -- a sibling that
+satisfies the manager-level ``L1ManagerInterface``. Unlike the DRAM/GDS tiers
+above (allocator swaps *under* ``L1Manager``), Maru makes L1 a cross-instance
+*shared* CXL pool: membership and pins live in a remote ``MaruServer`` directory
+rather than a local dict, so the control state machine is re-implemented over
+RPC. The stock controllers and L2 tiering drive it unchanged through
+``L1ManagerInterface``. See the *Maru CXL Shared L1* section of
+:doc:`configuration`.
 
 L2 Adapters
 ~~~~~~~~~~~
