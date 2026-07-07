@@ -158,6 +158,72 @@ def test_finish_read_never_over_releases():
     assert handler.pins[object_key_to_string(k)] == 0
 
 
+def test_temporary_read_absorbing_overlapping_pins_releases_them():
+    """A peer-registered key read while temporary-staged must not leak pins.
+
+    A temporary promote stages ``k`` locally with no server pin. If a peer has
+    registered ``k`` in the directory, a later ``reserve_read`` pins the shared
+    copy and folds those pins into the temporary entry. Draining the reads must
+    release every absorbed pin -- regression: the temporary release path used to
+    reclaim the page without unpinning, leaking the pin permanently (the page
+    became un-evictable on MaruServer).
+    """
+    manager, handler, _ = make_maru_manager()
+    k = _key(1)
+    ks = object_key_to_string(k)
+
+    # Temporary promote: staged in _pending_read, no directory pin.
+    manager.reserve_write([k], [True], _LAYOUT, mode="new")
+    manager.finish_write_and_reserve_read([k])
+    assert handler.pins.get(ks, 0) == 0  # temporary -> no server pin
+
+    # A peer registers k; an overlapping reserve_read pins the shared copy and
+    # absorbs that pin onto the temporary entry.
+    _seed(handler, k)
+    manager.reserve_read([k])
+    assert handler.pins[ks] == 1
+
+    # Drain both holds (temporary hold + absorbed read): every pin released.
+    manager.finish_read([k])
+    manager.finish_read([k])
+    assert handler.pins[ks] == 0  # was 1 (leaked) before the fix
+    assert ks not in manager._pending_read
+
+
+def test_reserve_read_excludes_mid_write_key_no_double_staging():
+    """A key mid-write on this instance stays KEY_NOT_READABLE even if a peer
+    registered it -- it must not be pinned or read-staged.
+
+    A local write reserves ``k`` (staged in _pending_write); before it finishes,
+    a peer registers ``k`` in the shared directory. A reserve_read that slips in
+    must refuse ``k``, not serve the peer copy: staging it would leave ``k`` in
+    both _pending_write and _pending_read (double staging) and strand the write
+    -- its promote would then return KEY_IN_WRONG_STATE and never pop
+    _pending_write, orphaning the page until the write-TTL sweeper.
+    """
+    manager, handler, _ = make_maru_manager()
+    k = _key(1)
+    ks = object_key_to_string(k)
+
+    # Local write in flight: k staged for write, not yet registered by us.
+    manager.reserve_write([k], [True], _LAYOUT, mode="new")
+    # A peer registers the same key in the shared directory mid-write.
+    _seed(handler, k)
+
+    # A read racing the in-flight write is refused, not served from the peer.
+    res = manager.reserve_read([k])
+    assert res[k] == (L1Error.KEY_NOT_READABLE, None)
+    assert handler.pins.get(ks, 0) == 0  # no pin taken on the peer copy
+    assert k not in manager._pending_read  # no double staging
+    assert k in manager._pending_write  # write still in flight
+
+    # The write still completes cleanly: promote pops _pending_write and stages
+    # the read (no orphan, no KEY_IN_WRONG_STATE).
+    fin = manager.finish_write_and_reserve_read([k])
+    assert fin[k][0] == L1Error.SUCCESS
+    assert k not in manager._pending_write
+
+
 # =========================================================================
 # reserve_write / finish_write
 # =========================================================================

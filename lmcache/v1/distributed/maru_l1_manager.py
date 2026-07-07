@@ -136,6 +136,13 @@ class _PendingRead:
 
     mem_obj: MemoryObj
     refcount: int
+    # Real MaruServer pins held for this entry (0 <= pinned <= refcount). A
+    # temporary promote stages a local page with no pin (pinned=0); an
+    # overlapping reserve_read that pins the directory copy adds to both counts.
+    # Release paths unpin ``pinned`` -- not ``refcount`` -- so pins absorbed onto
+    # a temporary entry are never leaked and pin-less holds are never
+    # over-unpinned.
+    pinned: int = 0
     is_temporary: bool = False
     deadline: float = float("inf")
 
@@ -322,13 +329,17 @@ class MaruL1Manager:
             staged = self._pending_read.get(k)
             if staged is not None:
                 # Overlapping reserve: same CXL page, one staged object.
-                # Refresh the TTL (mirrors a stock re-lock extending it).
+                # The pins just taken are real, so track them on ``pinned`` even
+                # when the existing entry is a temporary (pin-less) stage --
+                # otherwise those pins would never be released. Refresh the TTL
+                # (mirrors a stock re-lock extending it).
                 staged.refcount += total
+                staged.pinned += total
                 staged.deadline = deadline
                 ret[k] = (L1Error.SUCCESS, staged.mem_obj)
             else:
                 self._pending_read[k] = _PendingRead(
-                    mem_obj=mem_obj, refcount=total, deadline=deadline
+                    mem_obj=mem_obj, refcount=total, pinned=total, deadline=deadline
                 )
                 ret[k] = (L1Error.SUCCESS, mem_obj)
             successful_keys.append(k)
@@ -439,6 +450,11 @@ class MaruL1Manager:
             to_unpin: list[str] = []
             for k in expired_reads:
                 read_entry = self._pending_read.pop(k)
+                # MARU: release real server pins (pinned); a temporary stage
+                # (pinned 0) reclaims its private page instead. A temporary that
+                # absorbed pins does both.
+                if read_entry.pinned:
+                    to_unpin.extend([object_key_to_string(k)] * read_entry.pinned)
                 if read_entry.is_temporary:
                     try:
                         self._allocator.abort_alloc(read_entry.mem_obj)
@@ -446,8 +462,6 @@ class MaruL1Manager:
                         logger.exception(
                             "MaruL1Manager: sweep failed to reclaim read page %s", k
                         )
-                else:
-                    to_unpin.extend([object_key_to_string(k)] * read_entry.refcount)
             if to_unpin:
                 self._safe_unpin(self._allocator.handler, to_unpin)
             logger.warning(
@@ -483,17 +497,24 @@ class MaruL1Manager:
         ret: dict[ObjectKey, L1OperationResult] = {
             k: (L1Error.KEY_NOT_EXIST, None) for k in keys
         }
+        # PARITY(L1Manager.reserve_read): a key mid-write on this instance is
+        # not readable (distinct from a plain miss), mirroring stock's per-key
+        # write/read lock exclusion. A peer may have already registered the same
+        # key in the shared directory, so mid-write keys are excluded from the
+        # pin/stage below -- otherwise the pin would succeed and stage a
+        # _pending_read entry for a key still in _pending_write (double staging),
+        # stranding the in-flight write (its promote then returns
+        # KEY_IN_WRONG_STATE and never pops _pending_write).
+        readable: list[ObjectKey] = []
         for k in keys:
-            # PARITY(L1Manager.reserve_read): a mid-write key is not readable
-            # (distinct from a plain miss). It is unregistered, so the pin
-            # below misses and this pre-marked result stands.
             if k in self._pending_write:
                 ret[k] = (L1Error.KEY_NOT_READABLE, None)
-        if not keys:
-            return ret
+            else:
+                readable.append(k)
         successful_keys: list[ObjectKey] = []
-        # MARU: pin + retrieve + resolve + stage (shared with retained promote).
-        self._pin_retrieve_stage(keys, total, ret, successful_keys)
+        if readable:
+            # MARU: pin + retrieve + resolve + stage (shared w/ retained promote).
+            self._pin_retrieve_stage(readable, total, ret, successful_keys)
         # PARITY(L1Manager.reserve_read): notify listeners of the new read
         # holds (feeds the eviction LRU and the store controller).
         for listener in self._registered_listeners:
@@ -571,18 +592,20 @@ class MaruL1Manager:
                     k,
                 )
             entry.refcount -= released
-            # MARU: temporary reads are local staging (never directory-pinned),
-            # so at refcount zero the page is reclaimed, not unpinned. Normal
-            # reads release the server pins taken by reserve_read.
-            if entry.is_temporary:
-                if entry.refcount <= 0:
+            # MARU: release real server pins up to what we still hold. A pure
+            # temporary stage has pinned=0 (nothing to unpin); a temporary that
+            # absorbed an overlapping reserve's pins releases those here.
+            unpin_now = min(released, entry.pinned)
+            if unpin_now:
+                entry.pinned -= unpin_now
+                to_unpin.extend([object_key_to_string(k)] * unpin_now)
+            if entry.refcount <= 0:
+                # MARU: a temporary stage is an unregistered local page ->
+                # reclaim it through the allocator (a directory read is not).
+                if entry.is_temporary:
                     need_to_free.append(entry.mem_obj)
                     need_to_free_keys.append(k)
-                    del self._pending_read[k]
-            else:
-                to_unpin.extend([object_key_to_string(k)] * released)
-                if entry.refcount <= 0:
-                    del self._pending_read[k]
+                del self._pending_read[k]
             ret[k] = L1Error.SUCCESS
             successful_keys.append(k)
         if to_unpin:
@@ -791,6 +814,7 @@ class MaruL1Manager:
             self._pending_read[k] = _PendingRead(
                 mem_obj=entry.mem_obj,
                 refcount=total,
+                pinned=0,  # local page: not directory-pinned
                 is_temporary=True,
                 deadline=time.monotonic() + self._read_ttl_seconds,
             )
@@ -926,7 +950,7 @@ class MaruL1Manager:
         self._publish(EventType.L1_KEYS_EVICTED, dropped)
 
     def _drain_staging(self, force: bool) -> list[ObjectKey]:
-        """Unpin staged reads (refcount times) and abort staged writes.
+        """Unpin staged reads (``pinned`` times) and abort staged writes.
 
         Args:
             force: If True, log the dropped in-flight staging as a warning.
@@ -936,11 +960,12 @@ class MaruL1Manager:
         """
         to_unpin: list[str] = []
         for k, entry in self._pending_read.items():
-            # MARU: temporary reads hold no server pin -- reclaim the page.
+            # MARU: release real server pins (pinned); a temporary stage holds a
+            # private page (pinned may be 0) that is reclaimed instead.
+            if entry.pinned:
+                to_unpin.extend([object_key_to_string(k)] * entry.pinned)
             if entry.is_temporary:
                 self._allocator.abort_alloc(entry.mem_obj)
-            else:
-                to_unpin.extend([object_key_to_string(k)] * entry.refcount)
         if force and (self._pending_read or self._pending_write):
             logger.warning(
                 "MaruL1Manager: force-clear drops %d staged reads "
