@@ -1,23 +1,41 @@
 # SPDX-License-Identifier: Apache-2.0
-"""MUSA-specific platform primitives.
-
-The MUSA IPC wrapper is discovered from
-:mod:`lmcache.v1.platform.musa.ipc` by the platform registry. Importing this
-package only registers the explicit availability predicate so MUSA workers keep
-using the Stage3 data path unless the Stage4 handle path is fully available and
-explicitly enabled.
-"""
+"""MUSA-specific platform primitives."""
 
 # First Party
-from lmcache.v1.platform._registry import register_availability
+from lmcache.v1.platform.base_device_spec import DeviceSpec
+
+# ---------------------------------------------------------------------------
+# Device detection registry entry
+# ---------------------------------------------------------------------------
 
 
-def _musa_handle_transfer_is_available() -> bool:
-    """Return whether the optional MUSA handle path can be selected."""
-    # First Party
-    from lmcache.v1.platform.musa.ipc import is_musa_handle_transfer_available
+class MusaDeviceSpec(DeviceSpec):
+    """MUSA device specification for the detection registry."""
 
-    return is_musa_handle_transfer_available()
+    @property
+    def device_type(self) -> str:
+        return "musa"
 
+    @property
+    def torch_module_name(self) -> str:
+        return "musa"
 
-register_availability("musa", _musa_handle_transfer_is_available)
+    @property
+    def ops_module(self) -> str | None:
+        return "lmcache.v1.platform.musa.ops"
+
+    def is_available(self) -> bool:
+        """Check MUSA availability without importing lmcache.__init__."""
+        try:
+            # Third Party
+            import torch
+
+            return hasattr(torch, "musa") and torch.musa.is_available()  # type: ignore[attr-defined]
+        except Exception:
+            return False
+
+    def is_handle_transfer_available(self) -> bool:
+        # First Party
+        from lmcache.v1.platform.musa.ipc import is_musa_handle_transfer_available
+
+        return is_musa_handle_transfer_available()

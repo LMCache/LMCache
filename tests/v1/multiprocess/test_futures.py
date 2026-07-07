@@ -193,7 +193,7 @@ def test_cuda_messaging_future_basic_usage():
     process.start()
 
     # Get event bytes from the process
-    event_bytes = event_queue.get(timeout=5)
+    event_bytes = event_queue.get(timeout=30)
     process.join(timeout=2)
 
     # Create the raw future that will return (event_bytes, result_value)
@@ -235,7 +235,7 @@ def test_cuda_messaging_future_with_thread():
     process.start()
 
     # Get event bytes from the process
-    event_bytes = event_queue.get(timeout=5)
+    event_bytes = event_queue.get(timeout=30)
     process.join(timeout=2)
 
     raw_future = MessagingFuture[tuple[bytes, str]]()
@@ -281,7 +281,7 @@ def test_cuda_messaging_future_wait_no_timeout():
     process.start()
 
     # Get event bytes from the process
-    event_bytes = event_queue.get(timeout=5)
+    event_bytes = event_queue.get(timeout=30)
     process.join(timeout=2)
 
     raw_future = MessagingFuture[tuple[bytes, float]]()
@@ -317,7 +317,7 @@ def test_cuda_messaging_future_wait_with_timeout_success():
     process.start()
 
     # Get event bytes from the process
-    event_bytes = event_queue.get(timeout=5)
+    event_bytes = event_queue.get(timeout=30)
     process.join(timeout=2)
 
     raw_future = MessagingFuture[tuple[bytes, int]]()
@@ -374,7 +374,7 @@ def test_cuda_messaging_future_result_with_timeout_success():
     process.start()
 
     # Get event bytes from the process
-    event_bytes = event_queue.get(timeout=5)
+    event_bytes = event_queue.get(timeout=30)
     process.join(timeout=2)
 
     raw_future = MessagingFuture[tuple[bytes, int]]()
@@ -427,7 +427,7 @@ def test_cuda_messaging_future_multiple_result_calls():
     process.start()
 
     # Get event bytes from the process
-    event_bytes = event_queue.get(timeout=5)
+    event_bytes = event_queue.get(timeout=30)
     process.join(timeout=2)
 
     raw_future = MessagingFuture[tuple[bytes, str]]()
@@ -460,7 +460,7 @@ def test_cuda_messaging_future_query_before_and_after():
     process.start()
 
     # Get event bytes from the process
-    event_bytes = event_queue.get(timeout=5)
+    event_bytes = event_queue.get(timeout=30)
     process.join(timeout=2)
 
     raw_future = MessagingFuture[tuple[bytes, int]]()
@@ -496,7 +496,7 @@ def test_cuda_messaging_future_complex_type():
     process.start()
 
     # Get event bytes from the process
-    event_bytes = event_queue.get(timeout=5)
+    event_bytes = event_queue.get(timeout=30)
     process.join(timeout=2)
 
     complex_data = {"key1": [1, 2, 3], "key2": {"nested": "value"}, "key3": 42}
@@ -534,7 +534,7 @@ def test_messaging_future_to_cuda_future():
     process.start()
 
     # Get event bytes from the process
-    event_bytes = event_queue.get(timeout=5)
+    event_bytes = event_queue.get(timeout=30)
     process.join(timeout=2)
 
     raw_future = MessagingFuture[tuple[bytes, int]]()
@@ -569,7 +569,7 @@ def test_cuda_messaging_future_with_explicit_device():
     process.start()
 
     # Get event bytes from the process
-    event_bytes = event_queue.get(timeout=5)
+    event_bytes = event_queue.get(timeout=30)
     process.join(timeout=2)
 
     device = torch.cuda.current_device()

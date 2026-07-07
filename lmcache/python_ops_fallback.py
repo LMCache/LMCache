@@ -347,6 +347,39 @@ class PageBufferShapeDesc:
         self.dtype: torch.dtype | None = None
 
 
+class _NativePlanType:
+    """Base for object-group transfer plan types that only exist natively.
+
+    The plan value structs (see ``csrc/mp_mem_kernels.cuh``) are built on the
+    Python side and consumed by the native ``execute_object_group_transfer``.
+    They have no pure-Python fallback, so constructing one without the compiled
+    ``c_ops`` extension is unsupported. Subclasses exist only so the CPU-only
+    build exposes the same names as ``c_ops``.
+    """
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        raise NotImplementedError(
+            f"{type(self).__name__} requires the c_ops native extension; "
+            "no pure-Python fallback exists."
+        )
+
+
+class StagingCopy(_NativePlanType):
+    """Fallback stub for the native ``StagingCopy`` plan type."""
+
+
+class LaunchVar(_NativePlanType):
+    """Fallback stub for the native ``LaunchVar`` plan type."""
+
+
+class BatchStep(_NativePlanType):
+    """Fallback stub for the native ``BatchStep`` plan type."""
+
+
+class KernelGroupSpec(_NativePlanType):
+    """Fallback stub for the native ``KernelGroupSpec`` plan type."""
+
+
 def set_shape_desc_dtype(shape_desc: Any, dtype: torch.dtype) -> None:
     """Best-effort ``shape_desc.dtype = dtype``.
 
@@ -1299,6 +1332,36 @@ def multi_layer_block_kv_transfer(
             is_d2h,
             skip_prefix_n_blocks,
         )
+
+
+def execute_object_group_transfer(
+    direction: TransferDirection,
+    device: torch.device | str,
+    host_buffer_alignment: int,
+    kernel_group_specs: list,
+    batch_steps: list,
+) -> None:
+    """Python fallback for the native object-group transfer plan executor.
+
+    The planned/batched object-group transfer (see ``csrc/mp_mem_kernels.cuh``
+    and ``execute_object_group_transfer``) is only implemented in the compiled
+    ``c_ops`` extension. The signature mirrors the C++ binding so callers can
+    dispatch uniformly, but there is no pure-Python equivalent.
+
+    Args:
+        direction: Transfer direction (H2D or D2H).
+        device: CUDA device of the transfer.
+        host_buffer_alignment: Host buffer alignment for staging copies.
+        kernel_group_specs: Per-kernel-group invariants (native ``KernelGroupSpec``).
+        batch_steps: Ordered per-batch staging + launch work (native ``BatchStep``).
+
+    Raises:
+        NotImplementedError: Always; requires the c_ops native extension.
+    """
+    raise NotImplementedError(
+        "execute_object_group_transfer requires the c_ops native extension; "
+        "no pure-Python fallback exists."
+    )
 
 
 def _valid_block_range(

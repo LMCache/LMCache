@@ -49,6 +49,9 @@ target.
    * - :doc:`Fault Inject <fault_inject>`
      - ``fault_inject``
      - Testing
+   * - :doc:`Plugin <plugin>`
+     - ``plugin`` / ``native_plugin``
+     - Custom / External
 
 .. toctree::
    :maxdepth: 1
@@ -59,3 +62,4 @@ target.
    dax
    mock
    fault_inject
+   plugin

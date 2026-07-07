@@ -5,7 +5,8 @@ MUSA support unit tests that do not require MUSA hardware.
 These tests cover the design contract documented in
 ``docs/source/developer_guide/musa_support_design.rst``:
 
-- Device detection precedence in :func:`lmcache._detect_device`.
+- Device detection via the registry-driven
+  :func:`lmcache.v1.platform._detect_device`.
 - Factory dispatch in :func:`lmcache.v1.gpu_connector.CreateGPUConnector`,
   including fail-fast validation when device-scoped features are requested on
   accelerators without connector support.
@@ -112,12 +113,19 @@ class _StubTorch:
 
 def _detect_with_stub(stub: _StubTorch) -> tuple[Any, str]:
     """Run ``_detect_device`` with ``torch`` swapped for the stub."""
+    # First Party
+    from lmcache.v1.platform import _detect_device
+
     with patch.dict("sys.modules", {"torch": stub}):
-        return lmc._detect_device()
+        return _detect_device()
 
 
 def test_detect_device_prefers_musa_when_available() -> None:
     """``_detect_device`` returns MUSA whenever ``torch.musa.is_available()``."""
+    # Standard
+    import os
+
+    os.environ["DEVICE_TYPE"] = "musa"
     stub = _StubTorch(
         has_musa=True,
         has_xpu=True,
@@ -129,18 +137,22 @@ def test_detect_device_prefers_musa_when_available() -> None:
     dev, name = _detect_with_stub(stub)
     assert name == "musa"
     assert dev is stub.musa
+    del os.environ["DEVICE_TYPE"]
 
 
 def test_detect_device_falls_back_past_unavailable_musa() -> None:
     """Falls through MUSA when ``torch.musa.is_available()`` is False."""
+    # Standard
+    import os
+
+    os.environ["DEVICE_TYPE"] = "musa"
     stub = _StubTorch(
         has_musa=True,
-        has_xpu=True,
         musa_available=False,
-        xpu_available=True,
     )
     _, name = _detect_with_stub(stub)
-    assert name == "xpu"
+    assert name == "cuda"
+    del os.environ["DEVICE_TYPE"]
 
 
 def test_detect_device_cuda_fallback_when_no_alt_accelerator() -> None:
