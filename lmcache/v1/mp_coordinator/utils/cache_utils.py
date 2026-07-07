@@ -7,7 +7,8 @@ expands each complete chunk into its object keys (the same fan-out the lookup
 path uses), so it can pin/unpin those keys in its L2 eviction plan. The token
 hasher must be configured to match the fleet's ``chunk_size`` /
 ``hash_algorithm`` (see :class:`MPCoordinatorConfig`), or the resolved keys will
-not match what the servers stored.
+not match what the servers stored. Keys are resolved in a single object group,
+so the MP servers must run with ``--no-separate-object-groups``.
 """
 
 # First Party
