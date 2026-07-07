@@ -6,8 +6,10 @@ A thin wrapper over ``maru_lmcache.CxlMemoryAdapter``. The maru packages are
 imported lazily in :meth:`init_layout` so this module stays importable without
 the maru runtime. Two-phase init: the CXL pool is typed by the KV layout, so
 the ``MaruHandler`` / ``CxlMemoryAdapter`` are built on the first layout
-registration, not at construction. ``free`` is a no-op -- page lifecycle is
-owned by MaruServer (pin/unpin/delete), not LMCache refcounts.
+registration, not at construction. ``free`` is a no-op -- a CXL page is not
+reclaimed through the allocator or by dropping a local ``MemoryObj``; reclamation
+is driven by ``MaruL1Manager`` (``delete`` for a registered page, ``abort_alloc``
+for an unregistered one).
 
 Single-model per instance: the pool is fixed to the first layout; a different
 layout is rejected. TODO(maru-multi-model): partition the pool per layout key.
@@ -216,7 +218,13 @@ class MaruMemoryAllocator(MemoryAllocatorInterface):
         )
 
     def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None) -> None:
-        """No-op: CXL page lifecycle is owned by MaruServer."""
+        """No-op: a CXL page is not reclaimed through the allocator.
+
+        Reclamation is driven explicitly by ``MaruL1Manager``: ``delete`` for a
+        registered page (eviction; the shared directory drops the key and the
+        page returns to its owner), ``abort_alloc`` for a page allocated but
+        never registered.
+        """
 
     def batched_free(
         self,
@@ -224,7 +232,11 @@ class MaruMemoryAllocator(MemoryAllocatorInterface):
         allocator_type: Optional[str] = None,
         update_stats: bool = True,
     ) -> None:
-        """No-op: CXL page lifecycle is owned by MaruServer."""
+        """No-op: CXL pages are not reclaimed through the allocator.
+
+        See :meth:`free`; reclamation is driven by ``MaruL1Manager``
+        (``delete`` / ``abort_alloc``), not by dropping the local ``MemoryObj``.
+        """
 
     # maru-specific surface (called by MaruL1Manager)
 
@@ -279,7 +291,8 @@ class MaruMemoryAllocator(MemoryAllocatorInterface):
 
         Idempotent: safe to call when the pool was never brought up. Both the
         adapter and handler are cleared, so any later use raises. Shared CXL
-        pages are not freed here -- their lifecycle is owned by MaruServer.
+        pages are not freed here -- they belong to the shared pool and are
+        reclaimed via ``MaruL1Manager.delete``, not by local teardown.
         """
         if self._cxl_adapter is not None:
             self._cxl_adapter.close()
