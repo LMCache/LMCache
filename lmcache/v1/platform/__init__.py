@@ -45,7 +45,7 @@ logger = init_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Device info registry
+# Device spec registry
 # ---------------------------------------------------------------------------
 
 
@@ -207,11 +207,19 @@ torch_dev, torch_device_type = _detect_device()
 
 logger.info("torch_dev=%s, torch_device_type=%s", torch_dev, torch_device_type)
 
-# Attach the DeviceExt instance as ``torch_dev.ext``.
-if torch_dev is not None:
-    # First Party
-    from lmcache.v1.platform.device_ext import DeviceExt
 
-    torch_dev.ext = DeviceExt(_DEVICE_REGISTRY.get(torch_device_type))
+# Resolve the DeviceSpec for the detected device so callers can use
+# platform-specific capabilities (e.g. ``current_device_spec.pin_memory(...)``)
+# without touching the torch device module.  When no accelerator sub-
+# package matches, fall back to a bare ``DeviceSpec()`` -- its default
+# implementation provides "no-op / all False" semantics.
+_registered_device_spec = _DEVICE_REGISTRY.get(torch_device_type)
+if _registered_device_spec is None:
+    if torch_device_type != "cpu":
+        logger.warning(
+            "No DeviceSpec registered for %r; using fallback with no-op capabilities.",
+            torch_device_type,
+        )
+    current_device_spec: DeviceSpec = DeviceSpec()
 else:
-    logger.warning("torch_dev is None, skipping DeviceExt initialization.")
+    current_device_spec = _registered_device_spec
