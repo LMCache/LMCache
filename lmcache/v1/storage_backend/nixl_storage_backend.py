@@ -710,20 +710,40 @@ class NixlDynamicStorageAgent(NixlStorageAgent):
             return False
 
     def batched_nixl_desc_exists(
-        self, reg_list: List[tuple[int, int, int, str]]
+        self, reg_list: List[tuple[int, int, int, str]], path: Optional[str] = None
     ) -> int:
-        """Check if multiple descriptors exist via a single ``query_memory`` call.
+        """Check if multiple descriptors exist from the start of ``reg_list``.
 
         :param reg_list: List of tuples ``(0, 0, 0, meta_info)`` where
             *meta_info* is the formatted object-key string.
+        :param path: Directory for FILE backends (required for FILE; ignored
+            for OBJ). FILE existence is resolved on the filesystem, since NIXL
+            ``query_memory`` only answers for object stores.
         :return: Number of consecutive descriptors that exist from the
             start of the list.
-        :raises: No exceptions are raised. Errors from the underlying
-            ``query_memory`` call are caught internally and logged as
-            warnings; the method returns ``0`` in that case.
+        :raises ValueError: If ``path`` is ``None`` for a FILE backend.
+        :raises: Errors from the underlying ``query_memory`` call (OBJ
+            backends) are caught internally and logged as warnings; the
+            method returns ``0`` in that case.
         """
         if not reg_list:
             return 0
+
+        # FILE backends are not resolvable via NIXL ``query_memory`` (it only
+        # answers for object stores), so reuse the single-key
+        # ``nixl_desc_exists`` -- which already handles FILE via os.path.exists.
+        # Without this, FILE/POSIX dynamic backends always return 0 here, so
+        # every batched lookup misses and the cache is never reused.
+        if self.mem_type == "FILE":
+            if path is None:
+                raise ValueError("path must be provided for FILE backends")
+            consecutive_count = 0
+            for _, _, _, meta_info in reg_list:
+                if self.nixl_desc_exists(meta_info, path):
+                    consecutive_count += 1
+                else:
+                    break
+            return consecutive_count
 
         try:
             resp = self.nixl_agent.query_memory(
@@ -1196,6 +1216,8 @@ class NixlStaticStorageBackend(NixlStorageBackend):
 
         :return: True if the key exists, False otherwise
         """
+        if self.exists_in_put_tasks(key):
+            return False
 
         with self.key_lock:
             if key in self.key_dict:
@@ -1226,7 +1248,20 @@ class NixlStaticStorageBackend(NixlStorageBackend):
         :param on_complete_callback: Optional callback (not yet supported for
             NixlCacheBackend async operations).
         """
-        with self.key_lock:
+        # contains() reports in-flight puts as absent, so the store path can
+        # re-submit a key whose put is still running.
+        with self.key_lock, self.progress_lock:
+            if not self.progress_set.isdisjoint(keys):
+                kept_keys = []
+                kept_objs = []
+                for key, obj in zip(keys, memory_objs, strict=False):
+                    if key not in self.progress_set:
+                        kept_keys.append(key)
+                        kept_objs.append(obj)
+                if not kept_keys:
+                    return
+                keys, memory_objs = kept_keys, kept_objs
+
             available_descs = self.pool.get_num_available_descs()
             num_evict = len(keys) - available_descs
             if num_evict > 0:
@@ -1242,9 +1277,7 @@ class NixlStaticStorageBackend(NixlStorageBackend):
 
                 self.batched_remove(evict_keys, force=False)
 
-        with self.progress_lock:
-            for key in keys:
-                self.progress_set.add(key)
+            self.progress_set.update(keys)
 
         asyncio.run_coroutine_threadsafe(
             self.mem_to_storage(keys, memory_objs), self.loop
@@ -1979,7 +2012,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         reg_list = [(0, 0, 0, self._format_object_key(key)) for key in remaining_keys]
 
         # Use the agent's batched_nixl_desc_exists method
-        consecutive_hits = self.agent.batched_nixl_desc_exists(reg_list)
+        consecutive_hits = self.agent.batched_nixl_desc_exists(reg_list, self.path)
 
         # Update cache for the hits and return total count
         for i in range(consecutive_hits):

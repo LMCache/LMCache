@@ -238,23 +238,31 @@ class TestMakeKey:
 
 
 class _ChecksumHandler(BaseHTTPRequestHandler):
-    """Tiny HTTP handler that returns fake checksums."""
+    """Tiny HTTP handler that records the POST body and returns fake checksums.
 
-    def do_GET(self):
-        if "/kvcache/check" in self.path:
-            body = json.dumps(
-                {
-                    "status": "success",
-                    "chunk_checksums": ["a" * 32, "b" * 32],
-                }
-            ).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(body)
-        else:
+    Mirrors the MP server's ``POST /cache/checksums`` (the old ``GET
+    /kvcache/check`` was removed). The received JSON is stored on the server so
+    the test can assert the request shape ``_query_checksum`` sends.
+    """
+
+    def do_POST(self):
+        if "/cache/checksums" not in self.path:
             self.send_response(404)
             self.end_headers()
+            return
+        length = int(self.headers.get("Content-Length", 0))
+        payload = json.loads(self.rfile.read(length).decode())
+        self.server.received_payloads.append(payload)
+        body = json.dumps(
+            {
+                "status": "success",
+                "chunk_checksums": ["a" * 32, "b" * 32],
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
 
     def log_message(self, format, *args):
         pass  # suppress logs
@@ -268,6 +276,7 @@ class TestQueryChecksum:
             ("127.0.0.1", 0),
             _ChecksumHandler,
         )
+        self.server.received_payloads = []
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(
             target=self.server.serve_forever,
@@ -289,6 +298,13 @@ class TestQueryChecksum:
         assert result is not None
         assert len(result) == 2
         assert result[0] == "a" * 32
+        # The POST body matches the MP /cache/checksums contract: block-native
+        # ids and a block-level chunk_size (token chunk_size 2 / block_size 2).
+        assert len(self.server.received_payloads) == 1
+        sent = self.server.received_payloads[0]
+        assert sent["block_ids"] == [0, 1]
+        assert sent["chunk_size"] == 1
+        assert sent["layerwise"] is False
 
     def test_unreachable_returns_none(self):
         result = _query_checksum(
