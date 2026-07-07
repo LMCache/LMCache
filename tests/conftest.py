@@ -90,11 +90,12 @@ def patch_mixed_allocator():
 
     with (
         patch(
-            "lmcache.v1.memory_allocators.MixedMemoryAllocator.__init__",
+            "lmcache.v1.memory_allocators.mixed_memory_allocator.MixedMemoryAllocator.__init__",
             fake_mixed_init,
         ),
         patch(
-            "lmcache.v1.memory_allocators.MixedMemoryAllocator.close", fake_mixed_close
+            "lmcache.v1.memory_allocators.mixed_memory_allocator.MixedMemoryAllocator.close",
+            fake_mixed_close,
         ),
     ):
         yield
@@ -140,9 +141,13 @@ def patch_pin_allocator():
 
     with (
         patch(
-            "lmcache.v1.memory_allocators.PinMemoryAllocator.__init__", fake_pin_init
+            "lmcache.v1.memory_allocators.pin_memory_allocator.PinMemoryAllocator.__init__",
+            fake_pin_init,
         ),
-        patch("lmcache.v1.memory_allocators.PinMemoryAllocator.close", fake_pin_close),
+        patch(
+            "lmcache.v1.memory_allocators.pin_memory_allocator.PinMemoryAllocator.close",
+            fake_pin_close,
+        ),
     ):
         yield
 """

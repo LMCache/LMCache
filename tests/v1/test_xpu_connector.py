@@ -94,9 +94,13 @@ def patch_pin_allocator():
 
     with (
         patch(
-            "lmcache.v1.memory_allocators.PinMemoryAllocator.__init__", fake_pin_init
+            "lmcache.v1.memory_allocators.pin_memory_allocator.PinMemoryAllocator.__init__",
+            fake_pin_init,
         ),
-        patch("lmcache.v1.memory_allocators.PinMemoryAllocator.close", fake_pin_close),
+        patch(
+            "lmcache.v1.memory_allocators.pin_memory_allocator.PinMemoryAllocator.close",
+            fake_pin_close,
+        ),
     ):
         yield
 
