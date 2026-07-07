@@ -947,3 +947,15 @@ class TestResolveS3Endpoint:
             s3mod.resolve_s3_endpoint(
                 "s3://my-bucket", "us-west-2", enable_s3express=True
             )
+
+    def test_trailing_slash_stripped_before_resolution(self):
+        assert (
+            s3mod.resolve_s3_endpoint("s3://my-bucket/", "us-west-2")
+            == "my-bucket.s3.us-west-2.amazonaws.com"
+        )
+        assert (
+            s3mod.resolve_s3_endpoint(
+                "my-bucket.s3.us-west-2.amazonaws.com/", "us-west-2"
+            )
+            == "my-bucket.s3.us-west-2.amazonaws.com"
+        )

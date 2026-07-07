@@ -340,6 +340,7 @@ def resolve_s3_endpoint(
             hostname embeds the availability-zone id and cannot be
             derived from the region alone.
     """
+    endpoint = endpoint.rstrip("/")
     if endpoint.startswith("s3://"):
         endpoint = endpoint[len("s3://") :]
         if "." not in endpoint and ":" not in endpoint:
