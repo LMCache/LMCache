@@ -1048,6 +1048,12 @@ class LMCacheMPSchedulerAdapter:
 
 
 class QRingBuffer:
+    """A ring buffer for storing query tensors in LMCache.
+    The buffer has shape [num_layers, num_blocks, block_size, hidden_dim].
+    The buffer is paged in blocks to use existing LMCache machinery for
+    transferring paged KV tensors.
+    """
+
     def __init__(
         self,
         num_layers: int,
@@ -1057,6 +1063,7 @@ class QRingBuffer:
         dtype: torch.dtype,
         device: torch.device,
     ) -> None:
+        """Initialize the QRingBuffer."""
         if num_layers <= 0 or num_blocks <= 0 or block_size <= 0 or hidden_dim <= 0:
             raise ValueError(
                 "QRingBuffer requires positive num_layers, num_blocks, "
@@ -1082,19 +1089,20 @@ class QRingBuffer:
         }
         self._free_blocks: list[int] = list(range(num_blocks))
 
-    def nbytes(self) -> int:
-        return (
-            self.num_layers
-            * self.num_blocks
-            * self.block_size
-            * self.hidden_dim
-            * self._layer_tensors[0].element_size()
-        )
-
     def num_free_blocks(self) -> int:
+        """The number of free blocks in the ring buffer."""
         return len(self._free_blocks)
 
     def allocate(self, n: int) -> list[int] | None:
+        """Allocating n blocks from the ring buffer.
+
+        Returns:
+            A list of allocated block IDs if successful.
+            None if not enough free blocks are available.
+
+        Raises:
+            ValueError: If number of blocks requested is invalid.
+        """
         if n < 0:
             raise ValueError(f"cannot allocate a negative block count: {n}")
         if n > len(self._free_blocks):
@@ -1104,6 +1112,7 @@ class QRingBuffer:
         return reserved
 
     def free(self, block_ids: list[int]) -> None:
+        """Free the given block IDs back to the ring buffer."""
         self._free_blocks.extend(block_ids)
 
     def scatter(
@@ -1112,6 +1121,7 @@ class QRingBuffer:
         query: torch.Tensor,
         ring_slots: torch.Tensor,
     ) -> None:
+        """Scatter the query tensor into the ring buffer at the given layer."""
         if layer_index < 0 or layer_index >= self.num_layers:
             raise ValueError(
                 f"layer_index {layer_index} out of range [0, {self.num_layers})"
@@ -1223,6 +1233,7 @@ class LMCacheMPWorkerAdapter:
         self.store_events: dict[str, _IpcEvent] = {}
         self.retrieve_events: dict[str, _IpcEvent] = {}
 
+        # For Query transfer
         self.q_instance_id: int = uuid.uuid4().int & ((1 << 63) - 1)
         self.q_ring: QRingBuffer | None = None
         self.q_engine_group_infos: list[EngineGroupInfo] = []
@@ -1373,6 +1384,19 @@ class LMCacheMPWorkerAdapter:
         num_ring_blocks: int,
         device: torch.device,
     ) -> None:
+        """Register the paged Q ring with LMCache server.
+
+        Args:
+            num_layers: The number of layers in the model.
+            num_q_heads: The number of query heads in the model.
+            head_size: The size of each query head.
+            dtype: The data type of the query tensor.
+            num_ring_blocks: The number of ring blocks to allocate.
+            device: The device to allocate the query tensor on.
+
+        Raises:
+            RuntimeError: if the transfer context is not established.
+        """
         logger.info("Registering paged-Q ring")
         if self.transfer_ctx is None:
             raise RuntimeError(
@@ -1400,8 +1424,15 @@ class LMCacheMPWorkerAdapter:
         self._send_register_q_ring_request()
 
     def _send_register_q_ring_request(self) -> None:
+        """Registers the paged Q ring alongside the KV caches via the same
+        transfer context so both Q and KV uses the same LMCache storage buffer.
+
+        Raises:
+            RuntimeError: if the Q ring or transfer context is not initialized.
+            ConnectionError: if the server does not respond within mq_timeout.
+        """
         if self.q_ring is None or self.transfer_ctx is None:
-            raise RuntimeError("Q ring is not initialized. Call register_q_ring().")
+            raise RuntimeError("Q ring is not initialized yet.")
         try:
             self.transfer_ctx.register(
                 self.q_instance_id,
@@ -1427,6 +1458,13 @@ class LMCacheMPWorkerAdapter:
         query: torch.Tensor,
         ring_slots: torch.Tensor,
     ) -> None:
+        """Scatter query tensor to QRingBuffer for layer_index at ring_slots.
+
+        Args:
+            layer_index: The index of the layer to scatter the query tensor.
+            query: The query tensor to scatter [T, num_q_heads, head_size].
+            ring_slots: The ring slot IDs for each token in the query tensor.
+        """
         if self.q_ring is None:
             return
         self.q_ring.scatter(layer_index, query, ring_slots)
@@ -1439,6 +1477,17 @@ class LMCacheMPWorkerAdapter:
         event: _IpcEvent,
         cache_salt: str = "",
     ) -> None:
+        """Submit a store request for QRingBuffer content at ring_block_ids
+        to LMCache. This is called after the query tensor is scattered, every
+        time wait_for_save is called.
+
+        Args:
+            request_id: The ID of the request which query belongs to.
+            op: The LoadStoreOp with the token_ids, start and end indices.
+            ring_block_ids: The ring block IDs to store.
+            event: The IPC event to signal when the store is complete.
+            cache_salt: Per-user isolation salt.
+        """
         if self.q_ring is None or self.transfer_ctx is None:
             return
         self._ensure_heartbeat_started()
@@ -1469,6 +1518,8 @@ class LMCacheMPWorkerAdapter:
         self.q_store_events[seq] = event
 
     def _reclaim_finished_q_stores(self) -> None:
+        """Reclaim ring blocks when query has been saved to LMCache.
+        This is called in get_finished()."""
         if self.q_ring is None or not self.q_store_futures:
             return
         if not self.is_healthy:
@@ -2011,6 +2062,7 @@ class LMCacheMPWorkerAdapter:
         self.request_telemetry.close()
 
     def _shutdown_q_ring(self) -> None:
+        """Unregister the paged Q ring from LMCache server."""
         if self.q_ring is None:
             return
         try:
