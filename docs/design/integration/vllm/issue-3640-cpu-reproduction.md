@@ -11,7 +11,7 @@ reproduce this issue.
 
 ## Required connector path
 
-Use the built-in vLLM connector:
+Use vLLM's `LMCacheMPConnector` registry name:
 
 ```json
 {
@@ -36,6 +36,27 @@ LMCache checkout:
 }
 ```
 
+Important: in recent vLLM builds, the built-in
+`vllm.distributed.kv_transfer.kv_connector.v1.lmcache_mp_connector` module is
+also a resolver. At module import time it first tries to import the external
+connector shipped by the installed `lmcache` package:
+
+```text
+lmcache.integration.vllm.lmcache_mp_connector
+```
+
+If that import succeeds, vLLM logs:
+
+```text
+Using external LMCacheMPConnector from lmcache.integration.vllm.lmcache_mp_connector
+```
+
+That is not the strict built-in connector path. For this reproduction, make the
+external connector import unavailable in the vLLM environment, or explicitly set
+`LMCACHE_USE_UPSTREAM_MP=1` while starting vLLM. The stricter check is to make
+the external import unavailable, so accidental fallback to the LMCache checkout
+cannot happen.
+
 If the vLLM package is installed from `/home/hanqiu/vllm`, the built-in
 connector should resolve to:
 
@@ -49,22 +70,60 @@ under that environment's `site-packages/vllm/` directory.
 Verify the imported connector before running the workload:
 
 ```bash
-.venv-vllm-cpu/bin/python - <<'PY'
+cd /tmp
+
+/home/hanqiu/LMCache/.venv-vllm-cpu/bin/python - <<'PY'
+import importlib.util
 import inspect
+
+for name in [
+    "lmcache.integration.vllm.lmcache_mp_connector",
+    "lmcache.integration.vllm.vllm_multi_process_adapter",
+]:
+    print(name, importlib.util.find_spec(name))
 
 from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_mp_connector import (
     LMCacheMPConnector,
 )
 
+print(LMCacheMPConnector.__name__)
+print(LMCacheMPConnector.__module__)
 print(inspect.getfile(LMCacheMPConnector))
 PY
 ```
 
-The printed path must be a vLLM path, not:
+Expected strict built-in output:
+
+```text
+lmcache.integration.vllm.lmcache_mp_connector None
+lmcache.integration.vllm.vllm_multi_process_adapter None
+LMCacheMPConnectorUpstream
+vllm.distributed.kv_transfer.kv_connector.v1.lmcache_mp_connector
+.../site-packages/vllm/distributed/kv_transfer/kv_connector/v1/lmcache_mp_connector.py
+```
+
+The printed connector file must be a vLLM path, not:
 
 ```text
 /home/hanqiu/LMCache/lmcache/integration/vllm/lmcache_mp_connector.py
 ```
+
+After startup, check the vLLM log:
+
+```bash
+rg -n \
+  'Using external LMCacheMPConnector|External LMCacheMPConnector is not available|LMCacheMPConnectorUpstream|Creating v1 connector' \
+  /path/to/vllm.log
+```
+
+A strict built-in run should show:
+
+```text
+External LMCacheMPConnector is not available (...), falling back to builtin implementation in vLLM.
+Creating v1 connector with name: LMCacheMPConnectorUpstream
+```
+
+It should not show `Using external LMCacheMPConnector`.
 
 ## CPU vLLM environment
 
@@ -134,6 +193,56 @@ NO_GPU_EXT=1 uv pip install \
   --python .venv-vllm-cpu/bin/python \
   -e . \
   --no-build-isolation
+```
+
+For a strict built-in connector test, avoid installing LMCache editable in the
+same environment that runs vLLM. An editable install exposes the checkout's
+external connector on `sys.path`, which lets vLLM choose the external connector.
+Use a separate, isolated vLLM environment with a non-editable LMCache install
+instead:
+
+```bash
+VLLM_ENV=/home/hanqiu/.cache/lmcache-issue-3640/.venv-vllm-builtin-wheel-cpu
+
+NO_GPU_EXT=1 SETUPTOOLS_SCM_PRETEND_VERSION=0.5.1rc3.dev3 \
+  "$VLLM_ENV/bin/python" -m pip install \
+  /home/hanqiu/LMCache \
+  --no-build-isolation
+```
+
+Then disable only the external LMCache vLLM connector modules inside that
+isolated environment:
+
+```bash
+SITE="$(
+  "$VLLM_ENV/bin/python" - <<'PY'
+import sysconfig
+print(sysconfig.get_paths()["purelib"])
+PY
+)"
+
+mkdir -p "$SITE/lmcache/integration/vllm/_disabled_for_builtin_repro"
+
+for file in lmcache_mp_connector.py vllm_multi_process_adapter.py; do
+  if [ -f "$SITE/lmcache/integration/vllm/$file" ]; then
+    mv \
+      "$SITE/lmcache/integration/vllm/$file" \
+      "$SITE/lmcache/integration/vllm/_disabled_for_builtin_repro/$file.disabled"
+  fi
+done
+
+rm -rf "$SITE/lmcache/integration/vllm/__pycache__"
+```
+
+Run the import verification from `/tmp`, not from `/home/hanqiu/LMCache`, so
+the checkout is not accidentally added to `sys.path`.
+
+If this environment was cloned from another virtualenv, the copied `bin/vllm`
+script may still have the old interpreter in its shebang. In that case start
+vLLM through the isolated interpreter directly:
+
+```bash
+"$VLLM_ENV/bin/python" -m vllm.entrypoints.cli.main serve ...
 ```
 
 Find the CPU runtime libraries that should be preloaded for vLLM CPU:
@@ -217,6 +326,10 @@ device_config=cpu
 Also confirm that LMCache registers a non-CUDA vLLM worker and that the
 transfer context is CPU `engine_driven`.
 
+For the strict built-in path, also confirm the vLLM log contains
+`LMCacheMPConnectorUpstream` and does not contain `Using external
+LMCacheMPConnector`.
+
 ## Smoke workload
 
 Send one cold request followed by two warm requests with the same prompt:
@@ -275,6 +388,75 @@ total:       640 / 960 hit tokens
 
 That `640 / 960` result is expected for a healthy smoke test. It is not the
 issue signature.
+
+## Known local strict built-in smoke result
+
+On 2026-07-08, the strict built-in CPU smoke test used an isolated vLLM
+environment:
+
+```text
+/home/hanqiu/.cache/lmcache-issue-3640/.venv-vllm-builtin-wheel-cpu
+```
+
+The external LMCache vLLM connector modules were disabled in that environment,
+and vLLM was started through:
+
+```bash
+/home/hanqiu/.cache/lmcache-issue-3640/.venv-vllm-builtin-wheel-cpu/bin/python \
+  -m vllm.entrypoints.cli.main serve facebook/opt-125m ...
+```
+
+The confirming vLLM log was:
+
+```text
+/home/hanqiu/LMCache/.codex_runs/issue-3640/logs/vllm-cpu-builtin-wheel-20260708_121410.log
+```
+
+It showed:
+
+```text
+External LMCacheMPConnector is not available (...), falling back to builtin implementation in vLLM.
+Creating v1 connector with name: LMCacheMPConnectorUpstream
+```
+
+The successful smoke workload artifacts were written to:
+
+```text
+/home/hanqiu/LMCache/.codex_runs/issue-3640/requests/20260708_121459-builtin-smoke
+```
+
+Metrics after `POST /cache/clear`, `POST /metrics/reset`, and three identical
+requests:
+
+```text
+lmcache_mp_l1_write_chunks_total 20.0
+lmcache_mp_l1_read_chunks_total 40.0
+lmcache_mp_lookup_requested_tokens_total{cache_salt="",model_name="facebook/opt-125m"} 960.0
+lmcache_mp_lookup_hit_tokens_total{cache_salt="",model_name="facebook/opt-125m"} 640.0
+```
+
+That run confirms the CPU harness can exercise vLLM's built-in
+`LMCacheMPConnectorUpstream` path and produce the expected cold/warm smoke
+metrics.
+
+## Version-drift notes
+
+The strict built-in path may expose version drift between the vLLM CPU wheel's
+bundled `lmcache_integration` adapter and the current LMCache multiprocess
+server protocol. Symptoms include:
+
+```text
+LMCacheMPWorkerAdapter.__init__() got an unexpected keyword argument 'mq_timeout'
+Payload count mismatch for request RequestType.REGISTER_KV_CACHE
+Payload count mismatch for request RequestType.LOOKUP
+LMCacheMPWorkerAdapter object has no attribute get_block_ids_with_load_errors
+```
+
+For the 2026-07-08 local run, these were handled as venv-only compatibility
+shims inside the isolated environment. Do not treat those site-packages edits as
+LMCache source changes. If the reproduction needs to become permanent, move the
+compatibility work into the appropriate vLLM/LMCache integration source and add
+tests there.
 
 ## Issue-sized workload
 
