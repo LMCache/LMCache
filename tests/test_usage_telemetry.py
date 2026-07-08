@@ -3,6 +3,9 @@
 
 # Standard
 from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import threading
 import time
 
 # Third Party
@@ -28,6 +31,7 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.distributed.api import AttnWindowDesc, MemoryLayoutDesc
 from lmcache.v1.distributed.config import (
     EvictionConfig,
+    GdsL1Config,
     L1ManagerConfig,
     L1MemoryManagerConfig,
     StorageManagerConfig,
@@ -62,6 +66,35 @@ class StubStats:
     interval_request_cache_lifespan: list[float] = field(default_factory=list)
 
 
+class UsageSink(ThreadingHTTPServer):
+    """In-process HTTP server recording every POSTed usage payload."""
+
+    def __init__(self) -> None:
+        super().__init__(("127.0.0.1", 0), _UsageSinkHandler)
+        self.received: list[tuple[str, dict[str, object]]] = []
+
+    def wait_for(
+        self, count: int, timeout: float = 15.0
+    ) -> list[tuple[str, dict[str, object]]]:
+        """Return received (path, payload) pairs once *count* arrived."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and len(self.received) < count:
+            time.sleep(0.01)
+        return list(self.received)
+
+
+class _UsageSinkHandler(BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(length))
+        self.server.received.append((self.path, body))  # type: ignore[attr-defined]
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
 @pytest.fixture
 def usage_env(monkeypatch, tmp_path):
     """Isolate usage-telemetry state: HOME, env vars, and singletons."""
@@ -74,6 +107,19 @@ def usage_env(monkeypatch, tmp_path):
     monkeypatch.setattr("lmcache.usage_telemetry.mp._mp_usage_context", None)
     monkeypatch.setattr(ContinuousUsageContext, "_instance", None)
     return tmp_path
+
+
+@pytest.fixture
+def usage_sink(usage_env, monkeypatch):
+    """Local HTTP sink; points LMCACHE_USAGE_TRACK_URL at it."""
+    sink = UsageSink()
+    thread = threading.Thread(target=sink.serve_forever, daemon=True)
+    thread.start()
+    port = sink.server_address[1]
+    monkeypatch.setenv("LMCACHE_USAGE_TRACK_URL", f"http://127.0.0.1:{port}")
+    yield sink
+    sink.shutdown()
+    sink.server_close()
 
 
 def make_storage_manager_config() -> StorageManagerConfig:
@@ -304,6 +350,25 @@ class TestMPUsage:
         assert message.l2_adapter_types == get_type_name_for_config(fs_config)
         assert message.l2_serde_types == "fp8"
 
+    def test_mp_server_message_gds_l1(self, usage_env, tmp_path):
+        storage_config = StorageManagerConfig(
+            l1_manager_config=L1ManagerConfig(
+                memory_config=L1MemoryManagerConfig(
+                    size_in_bytes=1 << 30,
+                    use_lazy=False,
+                    shm_name="",
+                ),
+                gds_l1_config=GdsL1Config(
+                    file_location=str(tmp_path), size_in_bytes=2 << 30
+                ),
+            ),
+            eviction_config=EvictionConfig(eviction_policy="LRU"),
+        )
+        message = MPServerMessage.from_configs(MPServerConfig(), storage_config)
+        assert message.l1_medium == "gds"
+        assert message.l1_size_bytes == 2 << 30
+        assert not message.l1_shm_enabled
+
     def test_mp_usage_context_sends_messages(self, usage_env):
         sender = RecordingSender()
         context = MPUsageContext(
@@ -424,3 +489,106 @@ class TestFailureIsolation:
         monkeypatch.setenv("LMCACHE_USAGE_TRACK_INTERVAL", "0")
         context = ContinuousUsageContext(make_metadata(), sender=RaisingSender())
         context.incr_or_send_stats(StubStats(interval_hit_tokens=1))
+
+    def test_unwritable_local_log_does_not_break_report(self, usage_env, tmp_path):
+        context = UsageContext(
+            LMCacheEngineConfig.from_defaults(),
+            make_metadata(),
+            local_log=str(tmp_path),  # a directory: open() for append fails
+            sender=RecordingSender(),
+        )
+        context.report_once()
+
+    def test_default_sender_swallows_unreachable_server(self, usage_env):
+        # Port 1 is never listening; the send must not raise.
+        UsageMessageSender().send("http://127.0.0.1:1/context", {"k": "v"})
+
+    def test_nonstandard_kv_shape_degrades_to_zero_bytes(self, usage_env, monkeypatch):
+        monkeypatch.setenv("LMCACHE_USAGE_TRACK_INTERVAL", "0")
+        metadata = make_metadata()
+        metadata.kv_shape = ()
+        sender = RecordingSender()
+        context = ContinuousUsageContext(metadata, sender=sender)
+        context.incr_or_send_stats(StubStats(interval_stored_tokens=100))
+        assert sender.sent[0][1]["interval_stored_kv_size"] == 0
+
+
+class TestSingletons:
+    def test_get_or_create_returns_same_instance(self, usage_env):
+        metadata = make_metadata()
+        first = ContinuousUsageContext.GetOrCreate(metadata)
+        second = ContinuousUsageContext.GetOrCreate(metadata)
+        assert first is second
+
+    def test_get_or_create_keeps_first_instance_on_metadata_mismatch(self, usage_env):
+        first = ContinuousUsageContext.GetOrCreate(make_metadata())
+        other_metadata = make_metadata()
+        other_metadata.model_name = "another_model"
+        assert ContinuousUsageContext.GetOrCreate(other_metadata) is first
+
+
+class TestEndToEnd:
+    """Exercise the real HTTP transport against a local sink (no stubs)."""
+
+    def test_single_process_report(self, usage_sink):
+        context = InitializeUsageContext(
+            LMCacheEngineConfig.from_defaults(), make_metadata()
+        )
+        assert context is not None
+        received = usage_sink.wait_for(3)
+        assert len(received) == 3
+        assert {path for path, _ in received} == {"/context"}
+        assert [payload["message_type"] for _, payload in received] == [
+            "EnvMessage",
+            "EngineMessage",
+            "MetadataMessage",
+        ]
+        for _, payload in received:
+            assert payload["deployment_mode"] == "single_process"
+
+    def test_mp_report_and_registration(self, usage_sink):
+        context = InitializeMPUsageContext(
+            MPServerConfig(), make_storage_manager_config()
+        )
+        assert context is not None
+        startup = usage_sink.wait_for(2)
+        assert [payload["message_type"] for _, payload in startup] == [
+            "EnvMessage",
+            "MPServerMessage",
+        ]
+
+        registry = LayoutDescRegistry()
+        registry.register(
+            "test_model",
+            2,
+            MemoryLayoutDesc(
+                shapes=[torch.Size([2, 32, 256, 1024])], dtypes=[torch.bfloat16]
+            ),
+            AttnWindowDesc([-1]),
+        )
+        received = usage_sink.wait_for(3)
+        assert len(received) == 3
+        instance_path, instance_payload = received[2]
+        assert instance_path == "/context"
+        assert instance_payload["message_type"] == "MPInstanceMessage"
+        assert instance_payload["model_name"] == "test_model"
+        assert instance_payload["deployment_mode"] == "mp_server"
+        # All three messages belong to the same session.
+        assert len({payload["session_id"] for _, payload in received}) == 1
+
+    def test_continuous_report(self, usage_sink, monkeypatch):
+        monkeypatch.setenv("LMCACHE_USAGE_TRACK_INTERVAL", "0")
+        context = ContinuousUsageContext(make_metadata())
+        context.incr_or_send_stats(
+            StubStats(
+                interval_hit_tokens=7,
+                interval_stored_tokens=9,
+                interval_request_cache_lifespan=[1.0],
+            )
+        )
+        received = usage_sink.wait_for(2)
+        assert [path for path, _ in received] == ["/cache-usage", "/cache-lifespan"]
+        assert received[0][1]["interval_num_hit_tokens"] == 7
+        # Histogram keys are bucket bounds (stringified by JSON); the 1.0 s
+        # sample falls in the [1, 5) bin, keyed "5".
+        assert received[1][1]["cache_lifespan_histogram"]["5"] == 1
