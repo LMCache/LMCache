@@ -47,8 +47,10 @@ caller-provided load buffers during prefetch.
   identifiers except ``meta_checkpoint_placement_id``.
 - ``fdp_data_placement_policy``: KV data placement policy. ``"none"`` omits
   FDP directives for KV data writes. ``"cache_salt_prefix"`` assigns
-  case-insensitive ``cache_salt`` prefixes to FDP placement identifiers and is
-  the default when ``fdp_enabled=true``.
+  case-insensitive ``cache_salt`` prefixes to FDP placement identifiers.
+  ``"cache_salt_rank"`` keeps that bucket isolation and further separates
+  rank-local write streams within each bucket when identifiers are available.
+  The default is ``"cache_salt_prefix"`` when ``fdp_enabled=true``.
 - ``meta_checkpoint_placement_id``: Optional non-zero placement identifier for
   metadata checkpoint payload/header writes. Omit it to keep checkpoint writes
   on default NVMe placement.
@@ -98,6 +100,18 @@ caller-provided load buffers during prefetch.
   exposes a fallback count and a bounded bucket sample instead of retaining the
   complete fallback bucket set. Empty ``cache_salt`` values also use default
   NVMe placement with no directive.
+- With ``fdp_data_placement_policy="cache_salt_rank"``, ``cache_salt`` uses the
+  same ``bucket:suffix`` interpretation as ``cache_salt_prefix``. The policy
+  preserves tenant bucket isolation and lazily assigns separate placement
+  identifiers to ``kv_rank`` streams inside each bucket, up to the visible node
+  GPU count. Applications using fewer GPUs consume fewer identifiers. Extra
+  ranks, or new buckets that cannot obtain an identifier, store with no FDP
+  directive rather than sharing another bucket's identifiers.
+- ``cache_salt_rank`` is intended for multi-tenant GPU nodes backed by FDP SSDs
+  with many usable placement identifiers, typically 128 or more. On 8-GPU nodes
+  with large-memory accelerators, multiple applications may share the node by
+  using different GPU subsets; 128 identifiers can cover up to 16 applications
+  with eight rank streams each, while 256 identifiers can cover up to 32.
 - Bucket-to-placement assignments are process-local. Restart recovery does not
   need them for correctness because ``cache_salt`` is part of the object key,
   but first-seen FDP placement assignments may change after adapter restart.
@@ -122,6 +136,9 @@ caller-provided load buffers during prefetch.
 
     # With FDP discovery and cache_salt prefix placement enabled
     --l2-adapter '{"type": "raw_block", "device_path": "/dev/ng0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "use_uring_cmd": true, "fdp_enabled": true, "use_odirect": false}'
+
+    # With FDP discovery and cache_salt/rank placement enabled
+    --l2-adapter '{"type": "raw_block", "device_path": "/dev/ng0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "use_uring_cmd": true, "fdp_enabled": true, "fdp_data_placement_policy": "cache_salt_rank", "use_odirect": false}'
 
     # With FDP discovery only, keeping KV data writes on default NVMe placement
     --l2-adapter '{"type": "raw_block", "device_path": "/dev/ng0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "use_uring_cmd": true, "fdp_enabled": true, "fdp_data_placement_policy": "none", "use_odirect": false}'
