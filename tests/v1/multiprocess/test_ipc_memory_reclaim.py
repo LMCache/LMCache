@@ -1,36 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CUDA-IPC memory reclamation on instance release (LMCache#4014).
+"""CUDA-IPC memory reclaim on instance release (LMCache#4014).
 
-The MP server imports every client's KV cache via CUDA IPC. When a client
-dies (reaper) or unregisters, dropping the tensor references and calling
-``empty_cache()`` is NOT enough: IPC-imported segments live in the caching
-allocator's IPC cache and are only unmapped by ``torch.cuda.ipc_collect()``
-— and only once the last tensor reference is gone. Without it the server
-retains the client's whole KV pool (observed: ~112 GB/GPU held after
-``docker rm -f`` of the vLLM container, until a server restart).
+The server imports each client's KV pool over CUDA IPC; when an instance is
+released (unregister / reaper / close) those imported segments are only
+returned to the driver by an ``empty_cache()`` + ``ipc_collect()`` pass run
+AFTER every reference to the released entry is gone.
 
-These tests run the REAL registry/release flow with the device layer
-stubbed: they assert every release path (explicit unregister, reaper,
-server close) calls ``ipc_collect`` exactly once per batch, that the
-entry references are actually dead by the time it fires (the load-bearing
-ordering — a live reference turns ``ipc_collect`` into a silent no-op for
-that entry's segments), and that device modules without ``ipc_collect``
-(xpu / musa) degrade gracefully.
+All tests drive the module through its public surface: the real constructor,
+``register_kv_cache`` (with the module-level context factory stubbed),
+``unregister_kv_cache`` / ``reap_stale_instances`` / ``close``, and
+``context_entries_snapshot`` for reads. The stubbed boundaries are external
+by nature: the GPU context factory and the device module (``torch_dev``).
 """
 
-# Standard
-from types import SimpleNamespace
-from typing import Any, cast
-from unittest.mock import MagicMock
-
 # Standard Library
-import threading
+from types import SimpleNamespace
 import time
 import weakref
 
+# Third Party
+from unittest.mock import MagicMock
+
 # First Party
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
-    ContextEntry,
     LMCacheDrivenTransferModule,
 )
 import lmcache.v1.multiprocess.modules.lmcache_driven_transfer as gpu_mod
@@ -53,23 +45,53 @@ class _FakeTorchDev:
             )
 
 
-def _bare_module() -> LMCacheDrivenTransferModule:
-    """Module with only the registry state initialized (no GPU, no __init__)."""
-    module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
-    module._ctx = MagicMock(name="ctx")
-    module._cache_contexts = {}
-    module._lock = threading.Lock()
-    return module
+def _module(monkeypatch) -> LMCacheDrivenTransferModule:
+    """Construct the module through the real __init__ with stubbed deps."""
+    monkeypatch.setattr(gpu_mod, "DeviceHostFuncDispatcher", MagicMock())
+    return LMCacheDrivenTransferModule(MagicMock(name="ctx"))
 
 
-def _entry(model: str = "m") -> ContextEntry:
-    return ContextEntry(
-        cache_context=MagicMock(name="cache_context"),
-        model_name=model,
-        world_size=1,
-        last_seen=time.monotonic(),
-        has_liveness_signal=True,
+def _register(
+    module: LMCacheDrivenTransferModule,
+    monkeypatch,
+    instance_id: int,
+    model: str = "m",
+    age_s: float = 0.0,
+) -> MagicMock:
+    """Register an instance via the public API; return its cache context.
+
+    ``age_s`` back-dates the registration (by stubbing the clock for the
+    duration of the call) so reaper tests can create already-stale entries
+    without touching module internals.
+
+    Returns:
+        The MagicMock standing in for the created cache context.
+    """
+    cache_context = MagicMock(name=f"cache_context-{instance_id}")
+    cache_context.num_layers = 1
+    monkeypatch.setattr(
+        gpu_mod, "create_cache_context", lambda *a, **kw: cache_context
     )
+    monkeypatch.setattr(gpu_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
+    real_monotonic = time.monotonic
+    if age_s:
+        monkeypatch.setattr(
+            gpu_mod.time, "monotonic", lambda: real_monotonic() - age_s
+        )
+    try:
+        module.register_kv_cache(
+            instance_id,
+            kv_caches=MagicMock(name="kv_caches"),
+            model_name=model,
+            world_size=1,
+            engine_type=MagicMock(name="engine_type"),
+            layout_hints=MagicMock(name="layout_hints"),
+            engine_group_infos=[],
+        )
+    finally:
+        if age_s:
+            monkeypatch.setattr(gpu_mod.time, "monotonic", real_monotonic)
+    return cache_context
 
 
 def test_unregister_reclaims_ipc_memory(monkeypatch) -> None:
@@ -77,17 +99,14 @@ def test_unregister_reclaims_ipc_memory(monkeypatch) -> None:
     ipc_collect (in that order)."""
     dev = _FakeTorchDev()
     monkeypatch.setattr(gpu_mod, "torch_dev", dev)
-    module = _bare_module()
-    entry = _entry()
-    ctx = cast(MagicMock, entry.cache_context)
-    module._cache_contexts[7] = entry
-    del entry
+    module = _module(monkeypatch)
+    ctx = _register(module, monkeypatch, 7)
 
     module.unregister_kv_cache(7)
 
     ctx.close.assert_called_once()
     assert dev.calls == ["empty_cache", "ipc_collect"]
-    assert module._cache_contexts == {}
+    assert module.context_entries_snapshot() == {}
 
 
 def test_unregister_unknown_instance_does_not_reclaim(monkeypatch) -> None:
@@ -95,7 +114,7 @@ def test_unregister_unknown_instance_does_not_reclaim(monkeypatch) -> None:
     the allocator — reclaim is tied to an actual release."""
     dev = _FakeTorchDev()
     monkeypatch.setattr(gpu_mod, "torch_dev", dev)
-    module = _bare_module()
+    module = _module(monkeypatch)
 
     module.unregister_kv_cache(404)
 
@@ -106,11 +125,9 @@ def test_unregister_entry_refs_dead_before_ipc_collect(monkeypatch) -> None:
     """THE load-bearing ordering: ipc_collect only frees segments whose
     tensors are unreferenced, so the entry must be garbage by the time it
     fires. Verified with a weakref probed from inside the fake collector."""
-    module = _bare_module()
-    entry = _entry()
-    module._cache_contexts[1] = entry
-    ref = weakref.ref(entry)
-    del entry
+    module = _module(monkeypatch)
+    _register(module, monkeypatch, 1)
+    ref = weakref.ref(module.context_entries_snapshot()[1])
 
     seen: dict = {}
     dev = SimpleNamespace(
@@ -129,33 +146,29 @@ def test_reaper_reclaims_once_per_batch(monkeypatch) -> None:
     allocator reclaim into ONE empty_cache + ipc_collect."""
     dev = _FakeTorchDev()
     monkeypatch.setattr(gpu_mod, "torch_dev", dev)
-    module = _bare_module()
-    stale_a, stale_b, fresh = _entry("a"), _entry("b"), _entry("c")
-    stale_a.last_seen = stale_b.last_seen = time.monotonic() - 1000.0
-    ctx_a, ctx_b, ctx_fresh = (
-        cast(MagicMock, stale_a.cache_context),
-        cast(MagicMock, stale_b.cache_context),
-        cast(MagicMock, fresh.cache_context),
-    )
-    module._cache_contexts.update({1: stale_a, 2: stale_b, 3: fresh})
-    del stale_a, stale_b, fresh
+    module = _module(monkeypatch)
+    ctx_a = _register(module, monkeypatch, 1, model="a", age_s=1000.0)
+    ctx_b = _register(module, monkeypatch, 2, model="b", age_s=1000.0)
+    ctx_fresh = _register(module, monkeypatch, 3, model="c")
 
-    reaped = module.reap_stale_instances(reap_timeout_s=60.0, registration_grace_s=60.0)
+    reaped = module.reap_stale_instances(
+        reap_timeout_s=60.0, registration_grace_s=60.0
+    )
 
     assert sorted(reaped) == [1, 2]
     ctx_a.close.assert_called_once()
     ctx_b.close.assert_called_once()
     ctx_fresh.close.assert_not_called()
     assert dev.calls == ["empty_cache", "ipc_collect"]
-    assert list(module._cache_contexts) == [3]
+    assert list(module.context_entries_snapshot()) == [3]
 
 
 def test_reaper_noop_scan_does_not_reclaim(monkeypatch) -> None:
     """A scan that reaps nothing must not thrash the allocator."""
     dev = _FakeTorchDev()
     monkeypatch.setattr(gpu_mod, "torch_dev", dev)
-    module = _bare_module()
-    module._cache_contexts[1] = _entry()
+    module = _module(monkeypatch)
+    _register(module, monkeypatch, 1)
 
     reaped = module.reap_stale_instances(
         reap_timeout_s=3600.0, registration_grace_s=3600.0
@@ -167,12 +180,9 @@ def test_reaper_noop_scan_does_not_reclaim(monkeypatch) -> None:
 
 def test_reaper_entry_refs_dead_before_ipc_collect(monkeypatch) -> None:
     """Same ref-lifetime invariant on the reaper path."""
-    module = _bare_module()
-    entry = _entry()
-    entry.last_seen = time.monotonic() - 1000.0
-    module._cache_contexts[1] = entry
-    ref = weakref.ref(entry)
-    del entry
+    module = _module(monkeypatch)
+    _register(module, monkeypatch, 1, age_s=1000.0)
+    ref = weakref.ref(module.context_entries_snapshot()[1])
 
     seen: dict = {}
     dev = SimpleNamespace(
@@ -191,8 +201,8 @@ def test_reclaim_degrades_without_ipc_collect(monkeypatch) -> None:
     empty_cache still runs, the collect step is skipped."""
     dev = _FakeTorchDev(with_ipc_collect=False)
     monkeypatch.setattr(gpu_mod, "torch_dev", dev)
-    module = _bare_module()
-    module._cache_contexts[9] = _entry()
+    module = _module(monkeypatch)
+    _register(module, monkeypatch, 9)
 
     module.unregister_kv_cache(9)
 
@@ -203,29 +213,23 @@ def test_close_releases_all_and_reclaims_once(monkeypatch) -> None:
     """Server close() releases every remaining context and reclaims once."""
     dev = _FakeTorchDev()
     monkeypatch.setattr(gpu_mod, "torch_dev", dev)
-    module = _bare_module()
-    module._device_host_func_dispatcher = MagicMock()
-    cast(Any, module._ctx).storage_manager = MagicMock()
-    e1, e2 = _entry("a"), _entry("b")
-    c1, c2 = cast(MagicMock, e1.cache_context), cast(MagicMock, e2.cache_context)
-    module._cache_contexts.update({1: e1, 2: e2})
-    del e1, e2
+    module = _module(monkeypatch)
+    c1 = _register(module, monkeypatch, 1, model="a")
+    c2 = _register(module, monkeypatch, 2, model="b")
 
     module.close()
 
     c1.close.assert_called_once()
     c2.close.assert_called_once()
     assert dev.calls == ["empty_cache", "ipc_collect"]
-    assert module._cache_contexts == {}
+    assert module.context_entries_snapshot() == {}
 
 
 def test_close_with_empty_registry_does_not_reclaim(monkeypatch) -> None:
     """close() on a server that never had clients skips the allocator."""
     dev = _FakeTorchDev()
     monkeypatch.setattr(gpu_mod, "torch_dev", dev)
-    module = _bare_module()
-    module._device_host_func_dispatcher = MagicMock()
-    cast(Any, module._ctx).storage_manager = MagicMock()
+    module = _module(monkeypatch)
 
     module.close()
 
