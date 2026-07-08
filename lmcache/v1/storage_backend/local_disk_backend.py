@@ -326,12 +326,13 @@ class LocalDiskBackend(StorageBackendInterface):
             logger.debug(f"Put task for {key} is already in progress.")
             return None
 
-        self.disk_worker.insert_put_task(key)
-
         # TODO(Jiayi): Fragmentation is not considered here.
         required_size = memory_obj.get_physical_size()
+        self.disk_worker.insert_put_task(key)
+
         all_evict_keys = []
         evict_success = True
+        reserved_new_key = False
         with self.disk_lock:
             while self.current_cache_size + required_size > self.max_cache_size:
                 evict_keys = self.cache_policy.get_evict_candidates(
@@ -351,10 +352,13 @@ class LocalDiskBackend(StorageBackendInterface):
 
                 all_evict_keys.extend(evict_keys)
             if evict_success:
-                self.current_cache_size += required_size
-                self.cache_policy.update_on_put(key)
+                if key not in self.dict:
+                    self.current_cache_size += required_size
+                    self.cache_policy.update_on_put(key)
+                    reserved_new_key = True
 
         if not evict_success:
+            self.disk_worker.remove_put_task(key)
             return None
 
         memory_obj.ref_count_up()
@@ -366,6 +370,8 @@ class LocalDiskBackend(StorageBackendInterface):
                 key=key,
                 memory_obj=memory_obj,
                 on_complete_callback=on_complete_callback,
+                reserved_new_key=reserved_new_key,
+                reserved_size=required_size,
             ),
             self.loop,
         )
@@ -447,56 +453,62 @@ class LocalDiskBackend(StorageBackendInterface):
     ) -> list[MemoryObj]:
         mem_objs: list[MemoryObj] = []
         paths: list[str] = []
+        load_keys: list[CacheEngineKey] = []
 
         logger.debug(f"lookup_id: {lookup_id}; Prefetching {len(keys)} keys from disk.")
         for key in keys:
-            self.disk_lock.acquire()
-            assert key in self.dict, f"Key {key} not found in disk cache after pinning"
-
-            path = self.dict[key].path
-            dtype = self.dict[key].dtype
-            shape = self.dict[key].shape
-            fmt = self.dict[key].fmt
-
-            assert dtype is not None
-            assert shape is not None
-
-            # busy_loop=False prevents spinning on the event loop thread;
-            # if staging memory is exhausted the caller will get a logged
-            # error rather than a silent deadlock.
-            memory_obj = self.local_cpu_backend.allocate(
-                shape,
-                dtype,
-                fmt,
-                busy_loop=False,
-            )
-
-            if memory_obj is None:
-                logger.error(
-                    "Memory allocation failed during async disk load for key %s. "
-                    "CPU staging pool may be exhausted (unpin() not called after "
-                    "a previous retrieve). Returning partial results.",
-                    key,
+            with self.disk_lock:
+                assert key in self.dict, (
+                    f"Key {key} not found in disk cache after pinning"
                 )
-                return mem_objs
 
-            self.dict[key].pin()
+                path = self.dict[key].path
+                dtype = self.dict[key].dtype
+                shape = self.dict[key].shape
+                fmt = self.dict[key].fmt
 
-            # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
-            # Update cache recency
-            self.cache_policy.update_on_hit(key, self.dict)
+                assert dtype is not None
+                assert shape is not None
 
-            self.disk_lock.release()
+                # busy_loop=False prevents spinning on the event loop thread;
+                # if staging memory is exhausted the caller will get a logged
+                # error rather than a silent deadlock.
+                memory_obj = self.local_cpu_backend.allocate(
+                    shape,
+                    dtype,
+                    fmt,
+                    busy_loop=False,
+                )
+
+                if memory_obj is None:
+                    logger.error(
+                        "Memory allocation failed during async disk load for key %s. "
+                        "CPU staging pool may be exhausted (unpin() not called after "
+                        "a previous retrieve). Returning partial results.",
+                        key,
+                    )
+                    break
+
+                self.dict[key].pin()
+
+                # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
+                # Update cache recency
+                self.cache_policy.update_on_hit(key, self.dict)
+
             logger.debug(f"Prefetching {key} from disk.")
             memory_obj.pin()
             mem_objs.append(memory_obj)
             paths.append(path)
+            load_keys.append(key)
+
+        if not mem_objs:
+            return []
 
         return await self.disk_worker.submit_task(
             "prefetch",
             self.batched_async_load_bytes_from_disk,
             paths=paths,
-            keys=keys,
+            keys=load_keys,
             memory_objs=mem_objs,
         )
 
@@ -524,6 +536,8 @@ class LocalDiskBackend(StorageBackendInterface):
         key: CacheEngineKey,
         memory_obj: MemoryObj,
         on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
+        reserved_new_key: bool = True,
+        reserved_size: Optional[int] = None,
     ) -> None:
         """
         Convert KV to bytes and async store bytes to disk.
@@ -531,35 +545,44 @@ class LocalDiskBackend(StorageBackendInterface):
         :param on_complete_callback: Optional callback invoked after the disk
             write completes for this key. Callback exceptions are caught and
             logged.
+        :param reserved_new_key: Whether submit_put_task reserved capacity and
+            cache policy state for a newly stored key.
+        :param reserved_size: Physical size reserved by submit_put_task.
         """
-        kv_chunk = memory_obj.tensor
-        assert kv_chunk is not None
-        buffer = memory_obj.byte_array
-        path = self._key_to_path(key)
+        size = reserved_size
+        try:
+            if size is None:
+                size = memory_obj.get_physical_size()
+            kv_chunk = memory_obj.tensor
+            assert kv_chunk is not None
+            buffer = memory_obj.byte_array
+            path = self._key_to_path(key)
 
-        size = len(buffer)
-        self.usage += size
-        self.stats_monitor.update_local_storage_usage(self.usage)
+            # TODO(Jiayi): need to add ref count in disk memory object
+            self.write_file(buffer, path)
+            shape = memory_obj.metadata.shape
+            dtype = memory_obj.metadata.dtype
+            fmt = memory_obj.metadata.fmt
+            cached_positions = memory_obj.metadata.cached_positions
 
-        # TODO(Jiayi): need to add ref count in disk memory object
-        self.write_file(buffer, path)
-
-        # ref count down here because there's a ref_count_up in
-        # `submit_put_task` above.
-        # Ref count down better be before `insert_key` for testing
-        # purposes (e.g., testing mem_leak).
-        # TODO(Jiayi): This could be problematic if the
-        # freed memory object is immediately reused.
-        size = memory_obj.get_physical_size()
-        shape = memory_obj.metadata.shape
-        dtype = memory_obj.metadata.dtype
-        fmt = memory_obj.metadata.fmt
-        cached_positions = memory_obj.metadata.cached_positions
-        memory_obj.ref_count_down()
-
-        self.insert_key(key, size, shape, dtype, fmt, cached_positions=cached_positions)
-
-        self.disk_worker.remove_put_task(key)
+            if reserved_new_key:
+                with self.disk_lock:
+                    self.usage += size
+                    self.stats_monitor.update_local_storage_usage(self.usage)
+            self.insert_key(
+                key, size, shape, dtype, fmt, cached_positions=cached_positions
+            )
+        except Exception:
+            if reserved_new_key and size is not None:
+                with self.disk_lock:
+                    self.current_cache_size = max(0.0, self.current_cache_size - size)
+                    self.cache_policy.update_on_force_evict(key)
+            raise
+        finally:
+            # ref count down here because there's a ref_count_up in
+            # `submit_put_task` above.
+            memory_obj.ref_count_down()
+            self.disk_worker.remove_put_task(key)
 
         # Call the completion callback if provided
         if on_complete_callback is not None:

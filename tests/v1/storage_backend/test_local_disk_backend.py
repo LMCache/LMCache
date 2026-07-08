@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from unittest.mock import MagicMock, patch
+from typing import Any, Callable
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 import asyncio
 import os
 import shutil
@@ -14,7 +15,7 @@ import torch
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import _parse_local_disk
-from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj, MemoryObjMetadata
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
@@ -195,6 +196,265 @@ class TestLocalDiskBackend:
         assert result is None
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+
+class TestAsyncSaveBytesToDiskExceptionSafety:
+    """Regression tests for LocalDiskBackend write failure cleanup."""
+
+    def test_write_failure_releases_memory_obj_and_put_task(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """A failed disk write must not leak refcounts or in-flight put tasks."""
+        key = create_test_key(201)
+        physical_size = 4096
+        memory_obj = MagicMock(spec=MemoryObj)
+        memory_obj.tensor = torch.empty(1)
+        memory_obj.byte_array = b"0" * 16
+        memory_obj.get_physical_size.return_value = physical_size
+        memory_obj.metadata = MemoryObjMetadata(
+            shape=torch.Size([1]),
+            dtype=torch.bfloat16,
+            address=0,
+            phy_size=physical_size,
+            fmt=MemoryFormat.KV_2LTD,
+            ref_count=1,
+        )
+        on_complete_callback = MagicMock()
+
+        local_disk_backend.disk_worker.insert_put_task(key)
+        local_disk_backend.current_cache_size = physical_size
+        local_disk_backend.cache_policy.update_on_put(key)
+
+        with patch.object(
+            local_disk_backend,
+            "write_file",
+            side_effect=OSError("disk full"),
+        ):
+            with pytest.raises(OSError, match="disk full"):
+                local_disk_backend.async_save_bytes_to_disk(
+                    key,
+                    memory_obj,
+                    on_complete_callback=on_complete_callback,
+                )
+
+        memory_obj.ref_count_down.assert_called_once_with()
+        assert not local_disk_backend.exists_in_put_tasks(key)
+        assert key not in local_disk_backend.dict
+        assert local_disk_backend.current_cache_size == 0.0
+        assert local_disk_backend.usage == 0
+        on_complete_callback.assert_not_called()
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_pre_write_failure_releases_memory_obj_and_put_task(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """Cleanup must run even when byte-array conversion fails before I/O."""
+        key = create_test_key(202)
+        physical_size = 4096
+        memory_obj = MagicMock(spec=MemoryObj)
+        memory_obj.tensor = torch.empty(1)
+        memory_obj.get_physical_size.return_value = physical_size
+
+        local_disk_backend.disk_worker.insert_put_task(key)
+        local_disk_backend.current_cache_size = physical_size
+        local_disk_backend.cache_policy.update_on_put(key)
+
+        with patch.object(
+            type(memory_obj),
+            "byte_array",
+            new_callable=PropertyMock,
+            create=True,
+            side_effect=OSError("conversion failed"),
+        ):
+            with pytest.raises(OSError, match="conversion failed"):
+                local_disk_backend.async_save_bytes_to_disk(key, memory_obj)
+
+        memory_obj.ref_count_down.assert_called_once_with()
+        assert not local_disk_backend.exists_in_put_tasks(key)
+        assert key not in local_disk_backend.dict
+        assert local_disk_backend.current_cache_size == 0.0
+        assert local_disk_backend.usage == 0
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_existing_key_write_failure_keeps_old_cache_state(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """A failed rewrite must not evict bookkeeping for an existing key."""
+        key = create_test_key(203)
+        physical_size = 4096
+        shape = torch.Size([28, 2, 256, 8, 128])
+        metadata = DiskCacheMetadata(
+            path="/old/path.pt",
+            size=physical_size,
+            shape=shape,
+            dtype=torch.bfloat16,
+            cached_positions=None,
+            fmt=MemoryFormat.KV_2LTD,
+            pin_count=0,
+        )
+        memory_obj = MagicMock(spec=MemoryObj)
+        memory_obj.tensor = torch.empty(1)
+        memory_obj.byte_array = b"0" * 16
+        memory_obj.get_physical_size.return_value = physical_size
+
+        local_disk_backend.dict[key] = metadata
+        local_disk_backend.current_cache_size = physical_size
+        local_disk_backend.usage = physical_size
+        local_disk_backend.disk_worker.insert_put_task(key)
+
+        with patch.object(
+            local_disk_backend,
+            "write_file",
+            side_effect=OSError("disk full"),
+        ):
+            with patch.object(
+                local_disk_backend.cache_policy, "update_on_force_evict"
+            ) as mock_force_evict:
+                with pytest.raises(OSError, match="disk full"):
+                    local_disk_backend.async_save_bytes_to_disk(
+                        key,
+                        memory_obj,
+                        reserved_new_key=False,
+                    )
+
+        memory_obj.ref_count_down.assert_called_once_with()
+        assert not local_disk_backend.exists_in_put_tasks(key)
+        assert local_disk_backend.dict[key] is metadata
+        assert local_disk_backend.current_cache_size == physical_size
+        assert local_disk_backend.usage == physical_size
+        mock_force_evict.assert_not_called()
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+
+class TestBatchedGetNonBlockingAllocationFailure:
+    """Regression tests for async disk-load staging allocation failures."""
+
+    async def _run_prefetch_task(
+        self,
+        task_type: str,
+        task: Callable[..., Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """Run the submitted prefetch task inline for deterministic assertions."""
+        assert task_type == "prefetch"
+        return task(*args, **kwargs)
+
+    def _insert_disk_key(
+        self,
+        backend: LocalDiskBackend,
+        key: CacheEngineKey,
+        path: str,
+    ) -> None:
+        """Insert disk metadata and matching cache policy state."""
+        backend.dict[key] = DiskCacheMetadata(
+            path=path,
+            size=16,
+            shape=torch.Size([1]),
+            dtype=torch.bfloat16,
+            cached_positions=None,
+            fmt=MemoryFormat.KV_2LTD,
+            pin_count=0,
+        )
+        backend.cache_policy.update_on_put(key)
+
+    def _make_memory_obj(self) -> MagicMock:
+        """Create a staged memory object mock for disk-load tests."""
+        memory_obj = MagicMock(spec=MemoryObj)
+        memory_obj.byte_array = bytearray(16)
+        memory_obj.metadata = MemoryObjMetadata(
+            shape=torch.Size([1]),
+            dtype=torch.bfloat16,
+            address=0,
+            phy_size=16,
+            fmt=MemoryFormat.KV_2LTD,
+            ref_count=1,
+        )
+        return memory_obj
+
+    def _close_backend(
+        self,
+        backend: LocalDiskBackend,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        """Close the disk worker without blocking on a stopped event loop."""
+        loop.run_until_complete(backend.disk_worker.executor.shutdown_async(wait=True))
+        backend.local_cpu_backend.memory_allocator.close()
+
+    def test_first_allocation_failure_releases_disk_lock(
+        self,
+        local_disk_backend: LocalDiskBackend,
+        async_loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        """A first-key staging allocation miss must not leave disk_lock held."""
+        key = create_test_key(301)
+        self._insert_disk_key(local_disk_backend, key, "/tmp/key-301.pt")
+
+        try:
+            with patch.object(
+                local_disk_backend.local_cpu_backend,
+                "allocate",
+                return_value=None,
+            ):
+                with patch.object(
+                    local_disk_backend.disk_worker,
+                    "submit_task",
+                    new=AsyncMock(side_effect=self._run_prefetch_task),
+                ) as mock_submit:
+                    result = async_loop.run_until_complete(
+                        local_disk_backend.batched_get_non_blocking("lookup", [key])
+                    )
+
+            assert result == []
+            mock_submit.assert_not_awaited()
+            assert local_disk_backend.dict[key].pin_count == 0
+            assert local_disk_backend.disk_lock.acquire(blocking=False)
+            local_disk_backend.disk_lock.release()
+        finally:
+            self._close_backend(local_disk_backend, async_loop)
+
+    def test_later_allocation_failure_loads_only_collected_prefix(
+        self,
+        local_disk_backend: LocalDiskBackend,
+        async_loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        """A later allocation miss returns a loaded prefix, not raw staging buffers."""
+        key1 = create_test_key(302)
+        key2 = create_test_key(303)
+        path1 = "/tmp/key-302.pt"
+        path2 = "/tmp/key-303.pt"
+        self._insert_disk_key(local_disk_backend, key1, path1)
+        self._insert_disk_key(local_disk_backend, key2, path2)
+        memory_obj = self._make_memory_obj()
+
+        try:
+            with patch.object(
+                local_disk_backend.local_cpu_backend,
+                "allocate",
+                side_effect=[memory_obj, None],
+            ):
+                with patch.object(local_disk_backend, "read_file") as mock_read:
+                    with patch.object(
+                        local_disk_backend.disk_worker,
+                        "submit_task",
+                        new=AsyncMock(side_effect=self._run_prefetch_task),
+                    ) as mock_submit:
+                        result = async_loop.run_until_complete(
+                            local_disk_backend.batched_get_non_blocking(
+                                "lookup", [key1, key2]
+                            )
+                        )
+
+            assert result == [memory_obj]
+            mock_submit.assert_awaited_once()
+            mock_read.assert_called_once_with(key1, memory_obj.byte_array, path1)
+            memory_obj.pin.assert_called_once_with()
+            assert local_disk_backend.dict[key1].pin_count == 0
+            assert local_disk_backend.dict[key2].pin_count == 0
+            assert local_disk_backend.disk_lock.acquire(blocking=False)
+            local_disk_backend.disk_lock.release()
+        finally:
+            self._close_backend(local_disk_backend, async_loop)
 
 
 class TestMultiPathDiskBackend:
