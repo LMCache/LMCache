@@ -24,6 +24,7 @@ from lmcache.usage_telemetry.env_probe import collect_env_message
 from lmcache.usage_telemetry.guard import swallow_telemetry_errors
 from lmcache.usage_telemetry.identity import is_usage_tracking_enabled
 from lmcache.usage_telemetry.messages import (
+    DeploymentMode,
     MPInstanceMessage,
     MPServerMessage,
     UsageMessage,
@@ -67,7 +68,7 @@ class MPUsageContext(UsageContextBase):
             sender: Message transport; ``None`` selects the default HTTP
                 sender.
         """
-        super().__init__(local_log, sender)
+        super().__init__(DeploymentMode.MP_SERVER, local_log, sender)
         self._mp_config = mp_config
         self._storage_manager_config = storage_manager_config
         self._reported_instances: set[tuple[str, int]] = set()
@@ -95,7 +96,7 @@ class MPUsageContext(UsageContextBase):
             if key in self._reported_instances:
                 return
             self._reported_instances.add(key)
-        payload = build_usage_payload(message, self._identity)
+        payload = build_usage_payload(message, self._identity, self._mode)
         self._sender.send(usage_server_url(message.ENDPOINT), payload)
         self._write_local(payload)
 

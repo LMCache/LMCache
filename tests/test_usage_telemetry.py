@@ -169,6 +169,7 @@ class TestUsageContext:
             assert payload["schema_version"] == USAGE_SCHEMA_VERSION
             assert payload["session_id"] == identity.session_id
             assert payload["machine_id"] == identity.machine_id
+            assert payload["deployment_mode"] == "single_process"
 
         engine_payload = sender.sent[1][1]
         assert engine_payload["model_name"] == "test_model"
@@ -231,6 +232,7 @@ class TestContinuousUsageContext:
         assert usage_payload["interval_num_stored_tokens"] == 200
         assert usage_payload["sequence_number"] == 1
         assert usage_payload["session_id"] == get_usage_identity().session_id
+        assert usage_payload["deployment_mode"] == "single_process"
 
         lifespan_url, lifespan_payload = sender.sent[1]
         assert lifespan_url.endswith("cache-lifespan")
@@ -318,6 +320,7 @@ class TestMPUsage:
         for _, payload in sender.sent:
             assert payload["schema_version"] == USAGE_SCHEMA_VERSION
             assert payload["session_id"] == identity.session_id
+            assert payload["deployment_mode"] == "mp_server"
 
         mp_payload = sender.sent[1][1]
         assert mp_payload["chunk_size"] == 256
@@ -373,6 +376,7 @@ class TestKVCacheRegistrationHook:
             assert payload["kv_shapes"] == "2x32x256x1024"
             assert payload["attn_windows"] == "-1,8"
             assert payload["session_id"] == get_usage_identity().session_id
+            assert payload["deployment_mode"] == "mp_server"
 
     def test_hook_noop_when_disabled(self, usage_env, monkeypatch):
         monkeypatch.setenv("DO_NOT_TRACK", "1")

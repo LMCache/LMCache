@@ -13,9 +13,10 @@ protobuf-style: one dataclass per message, whose
 an *existing* field changes meaning — adding a message or field is not a
 schema bump.
 
-Identity fields (``session_id``, ``machine_id``) are stamped by
-:func:`lmcache.usage_telemetry.transport.build_usage_payload`, not declared
-here. See ``README.md`` for the full schema contract and extension guide.
+Identity fields (``session_id``, ``machine_id``) and ``deployment_mode``
+are stamped by :func:`lmcache.usage_telemetry.transport.build_usage_payload`,
+not declared here. See ``README.md`` for the full schema contract and
+extension guide.
 """
 
 # Future
@@ -23,6 +24,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, ClassVar
 
 # Third Party
@@ -41,6 +43,20 @@ if TYPE_CHECKING:
 
 USAGE_SCHEMA_VERSION = 1
 """Version stamped on every usage payload; bump when fields change meaning."""
+
+
+class DeploymentMode(Enum):
+    """Which LMCache deployment mode produced a payload.
+
+    Stamped on every payload as the ``deployment_mode`` key.
+    """
+
+    SINGLE_PROCESS = "single_process"
+    """LMCache runs inside the serving engine (vLLM/SGLang/TRT-LLM
+    integrations)."""
+
+    MP_SERVER = "mp_server"
+    """LMCache runs as a standalone multiprocess cache server."""
 
 
 @dataclass

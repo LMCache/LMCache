@@ -16,7 +16,11 @@ import torch
 from lmcache.connections import global_http_connection
 from lmcache.logging import init_logger
 from lmcache.usage_telemetry.identity import UsageIdentity
-from lmcache.usage_telemetry.messages import USAGE_SCHEMA_VERSION, UsageMessage
+from lmcache.usage_telemetry.messages import (
+    USAGE_SCHEMA_VERSION,
+    DeploymentMode,
+    UsageMessage,
+)
 
 logger = init_logger(__name__)
 
@@ -66,7 +70,7 @@ DEFAULT_SENDER = UsageMessageSender()
 
 
 def build_usage_payload(
-    message: UsageMessage, identity: UsageIdentity
+    message: UsageMessage, identity: UsageIdentity, mode: DeploymentMode
 ) -> dict[str, object]:
     """Flatten *message* into a payload stamped with identity and schema info.
 
@@ -76,6 +80,7 @@ def build_usage_payload(
     Args:
         message: The message to serialize; its fields become payload keys.
         identity: Identifiers stamped on the payload.
+        mode: Deployment mode stamped as the ``deployment_mode`` key.
 
     Returns:
         A flat JSON-serializable dict (``torch.dtype`` values stringified).
@@ -85,6 +90,7 @@ def build_usage_payload(
         "schema_version": USAGE_SCHEMA_VERSION,
         "session_id": identity.session_id,
         "machine_id": identity.machine_id,
+        "deployment_mode": mode.value,
     }
     for key, value in vars(message).items():
         payload[key] = str(value) if isinstance(value, torch.dtype) else value

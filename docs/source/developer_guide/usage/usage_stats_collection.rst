@@ -56,7 +56,7 @@ stored KV bytes in the interval) and a cache-lifespan histogram
 (**CacheLifespanMessage**). The flush interval is controlled by
 ``LMCACHE_USAGE_TRACK_INTERVAL`` (seconds, default 600).
 
-Every payload carries three correlation fields:
+Every payload carries four common fields:
 
 - ``session_id`` -- a random UUID minted once per process, joining the
   one-shot context with the continuous messages of the same run.
@@ -64,6 +64,8 @@ Every payload carries three correlation fields:
   ``~/.config/lmcache/machine_id``, grouping sessions from the same machine.
   It is never derived from hardware identifiers (MAC address, hostname).
 - ``schema_version`` -- the version of the message schema.
+- ``deployment_mode`` -- ``single_process`` (LMCache inside the serving
+  engine) or ``mp_server`` (standalone MP cache server).
 
 These messages are serialized to JSON and POSTed to the LMCache usage server.
 

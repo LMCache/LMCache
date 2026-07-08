@@ -90,6 +90,9 @@ Every payload — one-shot, hook, or continuous — is stamped with:
   dedup, restart cadence). Empty string when the file cannot be created.
 - `schema_version`: bump `USAGE_SCHEMA_VERSION` whenever a field changes
   meaning so backend analysis can partition by schema.
+- `deployment_mode`: `single_process` or `mp_server` — which deployment
+  mode produced the payload. Needed because `EnvMessage` and the continuous
+  messages are shared between modes and are otherwise ambiguous.
 
 Continuous messages additionally carry `sequence_number` (monotonic per
 session). Send failures drop the interval's data rather than retrying —

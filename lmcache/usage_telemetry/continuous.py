@@ -22,6 +22,7 @@ from lmcache.usage_telemetry.identity import (
 from lmcache.usage_telemetry.messages import (
     CacheLifespanMessage,
     ContinuousContextMessage,
+    DeploymentMode,
 )
 from lmcache.usage_telemetry.transport import (
     DEFAULT_SENDER,
@@ -54,6 +55,7 @@ class ContinuousUsageContext:
         self,
         metadata: LMCacheMetadata,
         sender: UsageMessageSender | None = None,
+        mode: DeploymentMode = DeploymentMode.SINGLE_PROCESS,
     ) -> None:
         """Initialize the reporter.
 
@@ -62,6 +64,8 @@ class ContinuousUsageContext:
                 stored-bytes estimate.
             sender: Message transport; ``None`` selects the default HTTP
                 sender.
+            mode: Deployment mode stamped on every payload this reporter
+                sends.
         """
         self.cache_lifespan_buckets: list[float] = [
             0,
@@ -103,6 +107,7 @@ class ContinuousUsageContext:
             self.kv_sz_per_token_bytes = 0
         self.cache_lifespan_data: list[float] = []
         self._sender = sender if sender is not None else DEFAULT_SENDER
+        self._mode = mode
         self._sequence_number: int = 0
 
     @staticmethod
@@ -140,7 +145,7 @@ class ContinuousUsageContext:
         )
         self._sender.send(
             self.cache_usage_url,
-            build_usage_payload(usage_message, identity),
+            build_usage_payload(usage_message, identity, self._mode),
         )
         self.interval_num_hit_tokens = 0
         self.interval_num_stored_tokens = 0
@@ -153,7 +158,7 @@ class ContinuousUsageContext:
         )
         self._sender.send(
             self.cache_lifespan_url,
-            build_usage_payload(lifespan_message, identity),
+            build_usage_payload(lifespan_message, identity, self._mode),
         )
         self.cache_lifespan_data = []
 

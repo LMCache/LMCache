@@ -24,6 +24,7 @@ from lmcache.usage_telemetry.identity import (
     is_usage_tracking_enabled,
 )
 from lmcache.usage_telemetry.messages import (
+    DeploymentMode,
     EngineMessage,
     MetadataMessage,
     UsageMessage,
@@ -54,17 +55,21 @@ class UsageContextBase(ABC):
 
     def __init__(
         self,
+        mode: DeploymentMode,
         local_log: str | None,
         sender: UsageMessageSender | None,
     ) -> None:
         """Initialize shared reporting state.
 
         Args:
+            mode: Deployment mode stamped on every payload this reporter
+                sends.
             local_log: Path of a human-readable local log of every sent
                 payload; ``None`` disables local logging.
             sender: Message transport; ``None`` selects the default HTTP
                 sender.
         """
+        self._mode = mode
         self._local_log = local_log
         self._sender = sender if sender is not None else DEFAULT_SENDER
         self._identity = get_usage_identity()
@@ -82,7 +87,7 @@ class UsageContextBase(ABC):
         Failures are swallowed; never raises.
         """
         for message in self._collect_messages():
-            payload = build_usage_payload(message, self._identity)
+            payload = build_usage_payload(message, self._identity, self._mode)
             self._sender.send(usage_server_url(message.ENDPOINT), payload)
             self._write_local(payload)
 
@@ -122,7 +127,7 @@ class UsageContext(UsageContextBase):
             sender: Message transport; ``None`` selects the default HTTP
                 sender.
         """
-        super().__init__(local_log, sender)
+        super().__init__(DeploymentMode.SINGLE_PROCESS, local_log, sender)
         self._config = config
         self._metadata = metadata
 
