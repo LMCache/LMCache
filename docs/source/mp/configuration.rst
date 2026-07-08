@@ -575,8 +575,7 @@ reports are correlated only through random UUIDs. Reporting runs on
 background threads, never delays startup or registration, and a failure
 anywhere in reporting never affects serving.
 
-To opt out, set ``LMCACHE_TRACK_USAGE=false`` or ``DO_NOT_TRACK=1``, or
-create the marker file ``~/.config/lmcache/do_not_track``. See
+To opt out, set ``LMCACHE_TRACK_USAGE=false`` or ``DO_NOT_TRACK=1``. See
 :ref:`usage-stats-collection` for the full list of collected fields and
 configuration options.
 

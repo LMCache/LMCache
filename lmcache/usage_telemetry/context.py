@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""One-shot usage reporting: a startup snapshot of environment and config."""
+"""Context reporting: snapshot messages describing a deployment.
+
+Context reports are sent once each (at startup, or at KV-cache registration
+for the MP path in :mod:`.mp`), in contrast to the periodic interval
+counters in :mod:`.continuous`.
+"""
 
 # Future
 from __future__ import annotations

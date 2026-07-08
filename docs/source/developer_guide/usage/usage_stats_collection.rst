@@ -110,9 +110,6 @@ disables all usage stats collection:
    # The cross-tool "do not track" convention (1/true/yes)
    export DO_NOT_TRACK=1
 
-   # Or a persistent marker file, no environment needed
-   mkdir -p ~/.config/lmcache && touch ~/.config/lmcache/do_not_track
-
 When tracking is disabled, ``InitializeUsageContext`` will return ``None`` and
 no data will be sent or logged, and no state files (such as ``machine_id``)
 will be created.
@@ -134,10 +131,6 @@ Reference
      - unset
      - Set to ``1``/``true``/``yes`` to disable collection (cross-tool
        convention).
-   * - ``~/.config/lmcache/do_not_track``
-     - absent
-     - If this file exists, collection is disabled. Survives environment
-       changes.
    * - ``LMCACHE_USAGE_TRACK_URL``
      - ``http://stats.lmcache.ai:8080``
      - Override the stats server endpoint (e.g. for a private sink).

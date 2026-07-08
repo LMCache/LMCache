@@ -25,13 +25,12 @@ def usage_config_dir() -> Path:
 def is_usage_tracking_enabled() -> bool:
     """Whether anonymous usage telemetry may be collected and sent.
 
-    Tracking is enabled by default and disabled when any of the following
-    opt-outs is present:
+    Tracking is enabled by default and disabled when either opt-out is
+    present:
 
     - Environment variable ``LMCACHE_TRACK_USAGE=false``.
     - Environment variable ``DO_NOT_TRACK`` set to ``1``/``true``/``yes``
       (the cross-tool "do not track" console convention).
-    - The file ``~/.config/lmcache/do_not_track`` exists.
 
     Returns:
         True when usage telemetry may be sent, False otherwise.
@@ -39,8 +38,6 @@ def is_usage_tracking_enabled() -> bool:
     if os.getenv("LMCACHE_TRACK_USAGE") == "false":
         return False
     if os.getenv("DO_NOT_TRACK", "").lower() in ("1", "true", "yes"):
-        return False
-    if (usage_config_dir() / "do_not_track").exists():
         return False
     return True
 

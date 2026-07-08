@@ -120,12 +120,6 @@ class TestOptOut:
         monkeypatch.setenv("DO_NOT_TRACK", "0")
         assert is_usage_tracking_enabled()
 
-    def test_do_not_track_file(self, usage_env):
-        marker = usage_env / ".config" / "lmcache" / "do_not_track"
-        marker.parent.mkdir(parents=True)
-        marker.touch()
-        assert not is_usage_tracking_enabled()
-
 
 class TestIdentity:
     def test_identity_is_process_singleton(self, usage_env):

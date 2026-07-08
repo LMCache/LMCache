@@ -5,7 +5,7 @@ Phone-home usage statistics, described in this package's ``README.md``.
 
 - The wire schema of every message lives in :mod:`.messages` — the single
   source of truth for what LMCache can phone home.
-- One-shot context reporting (:mod:`.one_shot`, :mod:`.mp`) sends a
+- Context reporting (:mod:`.context`, :mod:`.mp`) sends a
   snapshot of the environment and configuration at startup; the MP server
   additionally reports model/KV info when engines register KV caches.
 - Continuous reporting (:mod:`.continuous`) flushes interval counters
@@ -23,6 +23,11 @@ Users can opt out at any time; see :func:`is_usage_tracking_enabled`.
 """
 
 # First Party
+from lmcache.usage_telemetry.context import (
+    InitializeUsageContext,
+    UsageContext,
+    UsageContextBase,
+)
 from lmcache.usage_telemetry.continuous import ContinuousUsageContext
 from lmcache.usage_telemetry.env_probe import collect_env_message
 from lmcache.usage_telemetry.identity import (
@@ -45,11 +50,6 @@ from lmcache.usage_telemetry.mp import (
     InitializeMPUsageContext,
     MPUsageContext,
     report_kv_cache_registered,
-)
-from lmcache.usage_telemetry.one_shot import (
-    InitializeUsageContext,
-    UsageContext,
-    UsageContextBase,
 )
 from lmcache.usage_telemetry.transport import UsageMessageSender
 

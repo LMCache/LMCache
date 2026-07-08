@@ -16,7 +16,7 @@ deployment operators), different transports, and independent opt-outs.
 | `identity.py` | Opt-out gate (`is_usage_tracking_enabled`), `UsageIdentity` (session/machine ids) |
 | `transport.py` | `UsageMessageSender` (HTTP), `build_usage_payload` (identity + schema stamping) |
 | `env_probe.py` | Hardware/platform/cloud detection feeding `EnvMessage` |
-| `one_shot.py` | `UsageContextBase`, single-process `UsageContext`, `InitializeUsageContext` |
+| `context.py` | `UsageContextBase`, single-process `UsageContext`, `InitializeUsageContext` — the `/context` snapshot reporters |
 | `continuous.py` | `ContinuousUsageContext` interval counters and lifespan histogram |
 | `mp.py` | MP server `MPUsageContext`, `InitializeMPUsageContext`, and the `report_kv_cache_registered` hook |
 
@@ -111,8 +111,7 @@ Privacy rules:
 `is_usage_tracking_enabled()` is the single gate, checked by every path:
 
 1. `LMCACHE_TRACK_USAGE=false` (LMCache-specific),
-2. `DO_NOT_TRACK` in `1`/`true`/`yes` (cross-tool convention),
-3. presence of `~/.config/lmcache/do_not_track`.
+2. `DO_NOT_TRACK` in `1`/`true`/`yes` (cross-tool convention).
 
 When disabled, the factory functions return `None`, the continuous reporter
 and the registration hook no-op, and no state files (`machine_id`) are
