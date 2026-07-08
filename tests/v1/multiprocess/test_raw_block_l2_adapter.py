@@ -31,7 +31,7 @@ install_native_storage_ops_fallback()
 pytest.importorskip("lmcache_rust_raw_block_io")
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc  # noqa: E402
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey  # noqa: E402
 from lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter import (  # noqa: E402
     RawBlockL2Adapter,
     RawBlockL2AdapterConfig,
@@ -473,6 +473,198 @@ def test_raw_block_fdp_fallback_bucket_status_is_bounded() -> None:
             bucket.startswith("overflow")
             for bucket in status["fdp_cache_salt_fallback_buckets"]
         )
+    finally:
+        adapter.close()
+
+
+def test_raw_block_fdp_cache_salt_rank_separates_ranks_within_bucket() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17), (9, 19)])
+    config = _make_fdp_config(data_placement_policy="cache_salt_rank")
+    with patch(
+        "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter."
+        "_detect_node_gpu_count",
+        return_value=2,
+    ):
+        adapter = _make_fdp_adapter(fake_core, config)
+    try:
+        keys = [
+            make_object_key(1, cache_salt="RAG:app1", kv_rank=0),
+            make_object_key(2, cache_salt="rag:app2", kv_rank=1),
+            make_object_key(3, cache_salt="rag:app3", kv_rank=0),
+            make_object_key(4, cache_salt="chat:app1", kv_rank=0),
+        ]
+        objects: list[Any] = [make_memory_obj(bytes([i + 1])) for i in range(4)]
+
+        task_id = adapter.submit_store_task(keys, objects)
+        assert wait_for_event_fd(adapter.get_store_event_fd())
+        result = adapter.pop_completed_store_tasks()[task_id]
+
+        assert result.is_successful()
+        assert fake_core.put_many_calls == [[1, 7, 1, 9]]
+        status = adapter.report_status()
+        assert status["fdp_data_placement_policy"] == "cache_salt_rank"
+        assert status["fdp_cache_salt_rank_max_placements_per_bucket"] == 2
+        assert status["fdp_cache_salt_rank_placements"] == {
+            "rag": {0: 1, 1: 7},
+            "chat": {0: 9},
+        }
+        assert status["fdp_cache_salt_fallback_buckets"] == []
+    finally:
+        adapter.close()
+
+
+def test_raw_block_fdp_cache_salt_rank_uses_local_rank_from_kv_rank() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17), (9, 19)])
+    config = _make_fdp_config(data_placement_policy="cache_salt_rank")
+    with patch(
+        "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter."
+        "_detect_node_gpu_count",
+        return_value=2,
+    ):
+        adapter = _make_fdp_adapter(fake_core, config)
+    try:
+        same_local_rank = ObjectKey.ComputeKVRank(
+            world_size=8,
+            global_rank=5,
+            local_world_size=4,
+            local_rank=1,
+        )
+        same_local_rank_different_global = ObjectKey.ComputeKVRank(
+            world_size=16,
+            global_rank=9,
+            local_world_size=8,
+            local_rank=1,
+        )
+        different_local_rank = ObjectKey.ComputeKVRank(
+            world_size=8,
+            global_rank=6,
+            local_world_size=4,
+            local_rank=2,
+        )
+        keys = [
+            make_object_key(1, cache_salt="rag:app1", kv_rank=same_local_rank),
+            make_object_key(
+                2,
+                cache_salt="rag:app1",
+                kv_rank=same_local_rank_different_global,
+            ),
+            make_object_key(3, cache_salt="rag:app1", kv_rank=different_local_rank),
+        ]
+        objects: list[Any] = [make_memory_obj(bytes([i + 1])) for i in range(3)]
+
+        task_id = adapter.submit_store_task(keys, objects)
+        assert wait_for_event_fd(adapter.get_store_event_fd())
+        result = adapter.pop_completed_store_tasks()[task_id]
+
+        assert result.is_successful()
+        assert fake_core.put_many_calls == [[1, 1, 7]]
+        status = adapter.report_status()
+        assert status["fdp_cache_salt_rank_placements"] == {"rag": {1: 1, 2: 7}}
+    finally:
+        adapter.close()
+
+
+def test_raw_block_fdp_cache_salt_rank_zero_quota_falls_back_for_new_bucket() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17)])
+    config = _make_fdp_config(data_placement_policy="cache_salt_rank")
+    with patch(
+        "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter."
+        "_detect_node_gpu_count",
+        return_value=0,
+    ):
+        adapter = _make_fdp_adapter(fake_core, config)
+    try:
+        with patch(
+            "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter.logger.warning"
+        ) as warning:
+            keys = [make_object_key(1, cache_salt="rag:app1", kv_rank=0)]
+            objects: list[Any] = [make_memory_obj(b"\x01")]
+
+            task_id = adapter.submit_store_task(keys, objects)
+            assert wait_for_event_fd(adapter.get_store_event_fd())
+            result = adapter.pop_completed_store_tasks()[task_id]
+
+        assert result.is_successful()
+        assert fake_core.put_many_calls == [None]
+        assert warning.call_count == 1
+        assert "node GPU count placement quota" in warning.call_args.args[0]
+        status = adapter.report_status()
+        assert status["fdp_cache_salt_rank_max_placements_per_bucket"] == 0
+        assert status["fdp_cache_salt_rank_placements"] == {}
+        assert status["fdp_cache_salt_fallback_count"] == 1
+        assert status["fdp_cache_salt_fallback_buckets"] == ["rag"]
+    finally:
+        adapter.close()
+
+
+def test_raw_block_fdp_cache_salt_rank_enforces_gpu_count_bucket_quota() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17), (9, 19)])
+    config = _make_fdp_config(data_placement_policy="cache_salt_rank")
+    with patch(
+        "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter."
+        "_detect_node_gpu_count",
+        return_value=2,
+    ):
+        adapter = _make_fdp_adapter(fake_core, config)
+    try:
+        with patch(
+            "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter.logger.warning"
+        ) as warning:
+            keys = [
+                make_object_key(1, cache_salt="rag:app1", kv_rank=0),
+                make_object_key(2, cache_salt="rag:app1", kv_rank=1),
+                make_object_key(3, cache_salt="rag:app1", kv_rank=2),
+            ]
+            objects: list[Any] = [make_memory_obj(bytes([i + 1])) for i in range(3)]
+
+            task_id = adapter.submit_store_task(keys, objects)
+            assert wait_for_event_fd(adapter.get_store_event_fd())
+            result = adapter.pop_completed_store_tasks()[task_id]
+
+        assert result.is_successful()
+        assert fake_core.put_many_calls == [[1, 7, None]]
+        assert warning.call_count == 1
+        assert "node GPU count placement quota" in warning.call_args.args[0]
+        status = adapter.report_status()
+        assert status["fdp_cache_salt_rank_placements"] == {"rag": {0: 1, 1: 7}}
+        assert status["fdp_cache_salt_fallback_count"] == 1
+        assert status["fdp_cache_salt_fallback_buckets"] == ["rag"]
+    finally:
+        adapter.close()
+
+
+def test_raw_block_fdp_cache_salt_rank_falls_back_when_ids_exhausted() -> None:
+    fake_core = _FakeFdpCore(status=[(0, 10), (1, 11), (7, 17)])
+    config = _make_fdp_config(data_placement_policy="cache_salt_rank")
+    with patch(
+        "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter."
+        "_detect_node_gpu_count",
+        return_value=2,
+    ):
+        adapter = _make_fdp_adapter(fake_core, config)
+    try:
+        with patch(
+            "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter.logger.warning"
+        ) as warning:
+            keys = [
+                make_object_key(1, cache_salt="rag:app1", kv_rank=0),
+                make_object_key(2, cache_salt="rag:app1", kv_rank=1),
+                make_object_key(3, cache_salt="chat:app1", kv_rank=0),
+            ]
+            objects: list[Any] = [make_memory_obj(bytes([i + 1])) for i in range(3)]
+
+            task_id = adapter.submit_store_task(keys, objects)
+            assert wait_for_event_fd(adapter.get_store_event_fd())
+            result = adapter.pop_completed_store_tasks()[task_id]
+
+        assert result.is_successful()
+        assert fake_core.put_many_calls == [[1, 7, None]]
+        assert warning.call_count == 1
+        assert "more cache_salt FDP buckets/ranks" in warning.call_args.args[0]
+        status = adapter.report_status()
+        assert status["fdp_cache_salt_rank_placements"] == {"rag": {0: 1, 1: 7}}
+        assert status["fdp_cache_salt_fallback_count"] == 1
+        assert status["fdp_cache_salt_fallback_buckets"] == ["chat"]
     finally:
         adapter.close()
 

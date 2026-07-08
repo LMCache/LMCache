@@ -93,6 +93,7 @@ def make_object_key(
     chunk_id: int,
     model_name: str = "raw_block_ci",
     cache_salt: str = "",
+    kv_rank: int = 0,
 ) -> ObjectKey:
     """Create a deterministic object key for raw block tests.
 
@@ -100,6 +101,7 @@ def make_object_key(
         chunk_id: Integer chunk identifier encoded into the object key hash.
         model_name: Model name stored in the object key.
         cache_salt: Optional cache isolation salt stored in the object key.
+        kv_rank: KV rank stored in the object key.
 
     Returns:
         Object key with a stable hash, model name, and KV rank.
@@ -107,7 +109,7 @@ def make_object_key(
     return ObjectKey(
         chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
         model_name=model_name,
-        kv_rank=0,
+        kv_rank=kv_rank,
         cache_salt=cache_salt,
     )
 

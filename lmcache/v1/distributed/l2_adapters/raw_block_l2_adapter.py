@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2AdapterListener
 
 # First Party
+from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
@@ -58,10 +59,12 @@ RawBlockStoreTaskResult = tuple[
 
 _FDP_DATA_PLACEMENT_POLICY_NONE = "none"
 _FDP_DATA_PLACEMENT_POLICY_CACHE_SALT_PREFIX = "cache_salt_prefix"
+_FDP_DATA_PLACEMENT_POLICY_CACHE_SALT_RANK = "cache_salt_rank"
 _FDP_DATA_PLACEMENT_POLICIES = frozenset(
     {
         _FDP_DATA_PLACEMENT_POLICY_NONE,
         _FDP_DATA_PLACEMENT_POLICY_CACHE_SALT_PREFIX,
+        _FDP_DATA_PLACEMENT_POLICY_CACHE_SALT_RANK,
     }
 )
 _FDP_CACHE_SALT_BUCKET_SEPARATOR = ":"
@@ -154,6 +157,22 @@ def _cache_salt_to_fdp_bucket(cache_salt: str) -> str | None:
         return None
     bucket = cache_salt.split(_FDP_CACHE_SALT_BUCKET_SEPARATOR, 1)[0].casefold()
     return bucket or None
+
+
+def _detect_node_gpu_count() -> int:
+    """Return the visible GPU count for cache-salt rank placement quotas."""
+    try:
+        if not torch_dev.is_available():
+            return 0
+        return max(0, int(torch_dev.device_count()))
+    except Exception as e:
+        logger.warning("RawBlockL2Adapter could not detect GPU count: %s", e)
+        return 0
+
+
+def _local_rank_from_kv_rank(kv_rank: int) -> int:
+    """Extract the local rank encoded in an ObjectKey KV rank."""
+    return int(kv_rank) & 0xFF
 
 
 def _make_bitmap(size: int) -> "Bitmap":
@@ -448,8 +467,9 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             "identifiers for KV data writes; omitted registers all "
             "device-reported non-zero identifiers except the metadata "
             "checkpoint identifier\n"
-            "- fdp_data_placement_policy (str): none or cache_salt_prefix; "
-            "defaults to cache_salt_prefix when fdp_enabled=true\n"
+            "- fdp_data_placement_policy (str): none, cache_salt_prefix, or "
+            "cache_salt_rank; defaults to cache_salt_prefix when "
+            "fdp_enabled=true\n"
             "- meta_checkpoint_placement_id (int): non-zero FDP placement "
             "identifier for metadata checkpoints; requires io_uring_cmd\n"
             "- num_store_workers (int): store worker threads (default 2)\n"
@@ -529,6 +549,9 @@ class RawBlockL2Adapter(L2AdapterInterface):
         self._fdp_lock = threading.Lock()
         self._fdp_data_placement_policy = config.fdp_data_placement_policy
         self._fdp_cache_salt_bucket_placements: dict[str, int] = {}
+        self._fdp_cache_salt_rank_placements: dict[str, dict[int, int]] = {}
+        self._fdp_cache_salt_rank_fallback_buckets: set[str] = set()
+        self._fdp_cache_salt_rank_max_placements_per_bucket = _detect_node_gpu_count()
         self._fdp_cache_salt_fallback_count = 0
         self._fdp_cache_salt_fallback_bucket_samples: set[str] = set()
         self._fdp_fallback_warning_emitted = False
@@ -793,6 +816,12 @@ class RawBlockL2Adapter(L2AdapterInterface):
             fdp_cache_salt_bucket_placements = dict(
                 self._fdp_cache_salt_bucket_placements
             )
+            fdp_cache_salt_rank_placements = {
+                bucket: dict(rank_placements)
+                for bucket, rank_placements in (
+                    self._fdp_cache_salt_rank_placements.items()
+                )
+            }
             fdp_cache_salt_fallback_count = self._fdp_cache_salt_fallback_count
             fdp_cache_salt_fallback_buckets = sorted(
                 self._fdp_cache_salt_fallback_bucket_samples
@@ -810,6 +839,10 @@ class RawBlockL2Adapter(L2AdapterInterface):
                 "fdp_data_placement_policy": self._fdp_data_placement_policy,
                 "fdp_cache_salt_bucket_separator": _FDP_CACHE_SALT_BUCKET_SEPARATOR,
                 "fdp_cache_salt_bucket_placements": (fdp_cache_salt_bucket_placements),
+                "fdp_cache_salt_rank_placements": fdp_cache_salt_rank_placements,
+                "fdp_cache_salt_rank_max_placements_per_bucket": (
+                    self._fdp_cache_salt_rank_max_placements_per_bucket
+                ),
                 "fdp_cache_salt_fallback_count": fdp_cache_salt_fallback_count,
                 "fdp_cache_salt_fallback_buckets": fdp_cache_salt_fallback_buckets,
                 "completed_store_task_count": len(self._completed_store_tasks),
@@ -909,6 +942,11 @@ class RawBlockL2Adapter(L2AdapterInterface):
             raise RuntimeError("raw_block FDP placement identifiers are not configured")
         if (
             self._fdp_data_placement_policy
+            == _FDP_DATA_PLACEMENT_POLICY_CACHE_SALT_RANK
+        ):
+            return self._assign_fdp_cache_salt_rank_placement_ids(keys)
+        if (
+            self._fdp_data_placement_policy
             != _FDP_DATA_PLACEMENT_POLICY_CACHE_SALT_PREFIX
         ):
             raise RuntimeError(
@@ -923,6 +961,28 @@ class RawBlockL2Adapter(L2AdapterInterface):
                 placement_ids.append(None)
                 continue
             placement_ids.append(self._get_or_assign_fdp_bucket_placement_id(bucket))
+
+        if all(placement_id is None for placement_id in placement_ids):
+            return None
+        return placement_ids
+
+    def _assign_fdp_cache_salt_rank_placement_ids(
+        self,
+        keys: list[ObjectKey],
+    ) -> list[int | None] | None:
+        """Return per-rank FDP placement IDs inside each cache_salt bucket."""
+        placement_ids: list[int | None] = []
+        for key in keys:
+            bucket = _cache_salt_to_fdp_bucket(key.cache_salt)
+            if bucket is None:
+                placement_ids.append(None)
+                continue
+            placement_ids.append(
+                self._get_or_assign_fdp_rank_placement_id(
+                    bucket,
+                    _local_rank_from_kv_rank(key.kv_rank),
+                )
+            )
 
         if all(placement_id is None for placement_id in placement_ids):
             return None
@@ -959,6 +1019,96 @@ class RawBlockL2Adapter(L2AdapterInterface):
                 )
                 self._fdp_fallback_warning_emitted = True
             return None
+
+    def _get_or_assign_fdp_rank_placement_id(
+        self,
+        bucket: str,
+        rank: int,
+    ) -> int | None:
+        """Return an exclusive placement identifier for a bucket/rank stream."""
+        with self._fdp_lock:
+            if bucket in self._fdp_cache_salt_rank_fallback_buckets:
+                self._record_fdp_fallback_bucket_locked(bucket)
+                return None
+
+            rank_placements = self._fdp_cache_salt_rank_placements.get(bucket)
+            if rank_placements is not None:
+                placement_id = rank_placements.get(rank)
+                if placement_id is not None:
+                    return placement_id
+                if (
+                    len(rank_placements)
+                    >= self._fdp_cache_salt_rank_max_placements_per_bucket
+                ):
+                    self._record_fdp_fallback_bucket_locked(bucket)
+                    self._emit_fdp_rank_quota_warning_locked()
+                    return None
+            elif self._fdp_cache_salt_rank_max_placements_per_bucket <= 0:
+                self._fdp_cache_salt_rank_fallback_buckets.add(bucket)
+                self._record_fdp_fallback_bucket_locked(bucket)
+                self._emit_fdp_rank_quota_warning_locked()
+                return None
+            elif not self._has_available_fdp_placement_id_locked():
+                self._fdp_cache_salt_rank_fallback_buckets.add(bucket)
+                self._record_fdp_fallback_bucket_locked(bucket)
+                self._emit_fdp_exhausted_warning_locked()
+                return None
+            else:
+                rank_placements = {}
+                self._fdp_cache_salt_rank_placements[bucket] = rank_placements
+
+            if not self._has_available_fdp_placement_id_locked():
+                self._record_fdp_fallback_bucket_locked(bucket)
+                self._emit_fdp_exhausted_warning_locked()
+                return None
+
+            placement_id = self._fdp_placement_ids[
+                self._fdp_assigned_rank_placement_count_locked()
+            ]
+            rank_placements[rank] = placement_id
+            logger.info(
+                "RawBlockL2Adapter assigned FDP placement identifier %d to "
+                "cache_salt bucket %r rank %d",
+                placement_id,
+                bucket,
+                rank,
+            )
+            return placement_id
+
+    def _fdp_assigned_rank_placement_count_locked(self) -> int:
+        """Return assigned cache_salt_rank placement count under FDP lock."""
+        return sum(
+            len(rank_placements)
+            for rank_placements in self._fdp_cache_salt_rank_placements.values()
+        )
+
+    def _has_available_fdp_placement_id_locked(self) -> bool:
+        """Return whether cache_salt_rank can allocate another placement ID."""
+        return self._fdp_assigned_rank_placement_count_locked() < len(
+            self._fdp_placement_ids
+        )
+
+    def _emit_fdp_exhausted_warning_locked(self) -> None:
+        """Emit the shared FDP exhaustion warning once under FDP lock."""
+        if self._fdp_fallback_warning_emitted:
+            return
+        logger.warning(
+            "RawBlockL2Adapter has more cache_salt FDP buckets/ranks than "
+            "registered placement identifiers; writes without assigned "
+            "identifiers will use default NVMe placement without an FDP directive"
+        )
+        self._fdp_fallback_warning_emitted = True
+
+    def _emit_fdp_rank_quota_warning_locked(self) -> None:
+        """Emit the cache_salt_rank per-bucket quota warning once under FDP lock."""
+        if self._fdp_fallback_warning_emitted:
+            return
+        logger.warning(
+            "RawBlockL2Adapter cache_salt_rank bucket reached the node GPU "
+            "count placement quota; extra ranks will use default NVMe placement "
+            "without an FDP directive"
+        )
+        self._fdp_fallback_warning_emitted = True
 
     def _record_fdp_fallback_bucket_locked(self, bucket: str) -> None:
         """Record fallback telemetry while holding ``self._fdp_lock``."""
