@@ -496,20 +496,40 @@ class BlendV3Module(InstanceLivenessTarget):
         Raises:
             ValueError: If ``instance_id`` has no registered KV cache, the
                 cache list is empty, or ``group_to_cache`` references a
-                missing cache.
+                missing cache or does not cover every engine group of the
+                registered model.
         """
-        if self._transfer_module.get_and_touch_context_entry(instance_id) is None:
+        entry = self._transfer_module.get_and_touch_context_entry(instance_id)
+        if entry is None:
             raise ValueError(
                 f"Instance {instance_id} has no paged KV cache registered; "
                 "send REGISTER_KV_CACHE before CB_REGISTER_ROPE_V3."
             )
         if not cos_sin_caches_ipc:
             raise ValueError("CB_REGISTER_ROPE_V3 requires >=1 cos/sin cache.")
-        if group_to_cache and max(group_to_cache) >= len(cos_sin_caches_ipc):
-            raise ValueError(
-                f"group_to_cache references cache {max(group_to_cache)} but "
-                f"only {len(cos_sin_caches_ipc)} cache(s) were sent."
+        if group_to_cache:
+            if min(group_to_cache) < 0 or max(group_to_cache) >= len(
+                cos_sin_caches_ipc
+            ):
+                raise ValueError(
+                    f"group_to_cache {group_to_cache} contains indices outside "
+                    f"[0, {len(cos_sin_caches_ipc)}) for the sent cache(s)."
+                )
+            # Fail at registration, not mid-retrieve: every engine group of
+            # the registered model must have a cache mapping.
+            max_eg_idx = max(
+                (
+                    g.engine_group_idx
+                    for g in entry.cache_context.kv_layer_groups_manager.kernel_groups
+                ),
+                default=-1,
             )
+            if len(group_to_cache) <= max_eg_idx:
+                raise ValueError(
+                    f"group_to_cache covers {len(group_to_cache)} engine "
+                    f"group(s) but the registered model has engine groups up "
+                    f"to index {max_eg_idx}."
+                )
 
         cos_sin_caches: list[torch.Tensor] = []
         for cache_idx, cache_ipc in enumerate(cos_sin_caches_ipc):
@@ -1622,7 +1642,15 @@ class BlendV3Module(InstanceLivenessTarget):
             for group_idx in range(num_groups):
                 eg_idx = kgm.kernel_groups[group_idx].engine_group_idx
                 if eg_idx >= len(block_ids_per_group_gpu):
-                    eg_idx = 0
+                    # Engine groups have independent block tables under HMA;
+                    # substituting another group's table would scatter KV into
+                    # the wrong physical blocks (silent corruption).
+                    raise ValueError(
+                        f"CB retrieve: kernel group {group_idx} maps to engine "
+                        f"group {eg_idx}, but only "
+                        f"{len(block_ids_per_group_gpu)} block table(s) were "
+                        "provided."
+                    )
                 resolved_groups.append(
                     (
                         block_ids_per_group_gpu[eg_idx],
@@ -1754,7 +1782,14 @@ class BlendV3Module(InstanceLivenessTarget):
                             for group_idx in range(num_groups):
                                 # This group's block table + size (resolved above).
                                 group_block_ids, group_bs = resolved_groups[group_idx]
-                                page_buffer_size = gpu_context.num_blocks * group_bs
+                                # Per-group block count: under HMA the sliding
+                                # group has fewer blocks than the full group, so
+                                # gpu_context.num_blocks (group 0's) would
+                                # truncate the other groups' bounds check.
+                                page_buffer_size = (
+                                    kgm.kernel_groups[group_idx].shape_desc.nb
+                                    * group_bs
+                                )
                                 slot_mapping = group_block_ids[
                                     pos // group_bs
                                 ] * group_bs + (pos % group_bs)
