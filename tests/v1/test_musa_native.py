@@ -62,15 +62,15 @@ def test_musa_device_ops_overrides_multi_layer_block_kv_transfer(
 ) -> None:
     """MusaDeviceOps overrides multi_layer_block_kv_transfer (not the base)."""
     # First Party
-    from lmcache.v1.platform.base_device_ops import DeviceOps
+    from lmcache.v1.platform import _torch_ops
     from lmcache.v1.platform.musa.device_ops import MusaDeviceOps
 
     assert MusaDeviceOps.device_type == "musa"
-    # The override is defined on the subclass, not inherited from the base
+    # The override is defined on the subclass, not the torch baseline
     assert "multi_layer_block_kv_transfer" in vars(MusaDeviceOps)
     assert (
         MusaDeviceOps.multi_layer_block_kv_transfer
-        is not DeviceOps.multi_layer_block_kv_transfer
+        is not _torch_ops.multi_layer_block_kv_transfer
     )
 
 

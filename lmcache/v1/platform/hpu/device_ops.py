@@ -2,10 +2,8 @@
 """HPU ops backend: inherit the torch baseline unchanged.
 
 :class:`HpuDeviceOps` is an empty subclass that gives the registry a
-``device_type="hpu"`` entry. All ops inherit the torch baseline, matching
-today's HPU path (which has no ``backend_candidates`` entry and runs every op on
-the Python fallback). Add overrides later if profiling or pointer-mode callers
-require them.
+``device_type="hpu"`` entry. All ops inherit the torch baseline via
+:meth:`DeviceOps.populate_module`.
 """
 
 # Future
