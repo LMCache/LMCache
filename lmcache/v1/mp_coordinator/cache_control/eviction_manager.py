@@ -12,6 +12,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import asdict
+from typing import TYPE_CHECKING
 import asyncio
 
 # Third Party
@@ -19,13 +20,16 @@ import httpx
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.eviction_policy.isolated_lru import (
     IsolatedLRUEvictionPolicy,
 )
-from lmcache.v1.distributed.quota_manager import QuotaManager
-from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
-from lmcache.v1.mp_coordinator.registry import InstanceRegistry
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.distributed.api import ObjectKey
+    from lmcache.v1.distributed.quota_manager import QuotaManager
+    from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
+    from lmcache.v1.mp_coordinator.registry import InstanceRegistry
 
 logger = init_logger(__name__)
 
@@ -57,6 +61,9 @@ class L2EvictionManager:
         self._trigger_watermark = trigger_watermark
         self._policy = IsolatedLRUEvictionPolicy()
         self._in_flight_dispatches: set[asyncio.Task] = set()
+        # Reference-counted L2 pins: a key is excluded from eviction plans while
+        # its count is > 0. Not persisted across coordinator restarts.
+        self._pin_counts: dict[ObjectKey, int] = {}
 
     def on_store(self, key: ObjectKey) -> None:
         """Register a stored key in the LRU. Per-salt bytes are the
@@ -72,12 +79,35 @@ class L2EvictionManager:
         responsibility (see :meth:`L2UsageManager.record_evicted`)."""
         self._policy.on_keys_removed([key])
 
+    def pin(self, keys: list[ObjectKey]) -> None:
+        """Increment the L2 pin count of each key (excludes it from eviction).
+
+        Args:
+            keys: The object keys to pin.
+        """
+        for key in keys:
+            self._pin_counts[key] = self._pin_counts.get(key, 0) + 1
+
+    def unpin(self, keys: list[ObjectKey]) -> None:
+        """Decrement the L2 pin count of each key (floored at 0).
+
+        Args:
+            keys: The object keys to unpin.
+        """
+        for key in keys:
+            count = self._pin_counts.get(key, 0)
+            if count <= 1:
+                self._pin_counts.pop(key, None)
+            else:
+                self._pin_counts[key] = count - 1
+
     def compute_eviction_plan(self) -> dict[str, list[ObjectKey]]:
         """Select eviction candidates per ``cache_salt``.
 
         Salts over ``watermark * quota`` get ``eviction_ratio`` of
         their LRU keys; salts with no quota (or quota 0) get full
-        eviction. Pure — no network calls, no state mutation.
+        eviction. Pinned keys are always excluded. Pure — no network
+        calls, no state mutation.
         """
         tracked_salts = self._policy.get_tracked_salts()
         eviction_plan: dict[str, list[ObjectKey]] = {}
@@ -92,7 +122,9 @@ class L2EvictionManager:
 
             effective_ratio = 1.0 if limit == 0 else self._eviction_ratio
             actions = self._policy.get_eviction_actions(
-                effective_ratio, cache_salt=cache_salt
+                effective_ratio,
+                cache_salt=cache_salt,
+                key_eligible_filter=lambda key: key not in self._pin_counts,
             )
             keys_to_evict: list[ObjectKey] = []
             for action in actions:
