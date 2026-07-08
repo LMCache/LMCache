@@ -1,18 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Integration test for the AzureConnector against the Azurite emulator.
 
-TEST TYPE: integration against a REAL azure-storage-blob client + the official
-Azurite Blob emulator over a real socket — but NO cloud account and NO GPU. It
-uses the real SDK (not mocks), so it exercises the true serialization / API
-contract. Skips automatically if Azurite is not running on 127.0.0.1:10000.
-This is the level that actually catches real-SDK bugs the unit mocks cannot.
-
-Doing so surfaced a real bug the mock-only tests hide (see
-``test_put_memoryview_bug_and_read_path``): ``AzureConnector.put`` hands a raw
-``memoryview`` (``memory_obj.byte_array``) to ``upload_blob``, which the real
-``azure-storage-blob`` SDK rejects — so every write silently fails (best-effort)
-and the cache never populates on real Blob. The fix is one line: upload
-``bytes(memory_obj.byte_array)`` (or ``.cast('B')`` first).
+Uses the real ``azure-storage-blob`` client against the Azurite Blob emulator
+(no cloud account, no GPU). Skips automatically if Azurite is not running on
+127.0.0.1:10000.
 
 Start Azurite first:
     azurite-blob --silent --location /tmp/azurite_data --blobPort 10000 --blobHost 127.0.0.1
@@ -122,27 +113,10 @@ def _make_connector(container, async_loop, local_cpu_backend):
 
 
 def test_real_blob_roundtrip_against_azurite(async_loop, local_cpu_backend):
-    """Full write->read round-trip of AzureConnector against REAL Blob (Azurite).
+    """Full write->read round-trip of AzureConnector against real Blob (Azurite).
 
-    This is the regression test for the two bugs that mock-only tests hid, which
-    were found by running against Azurite:
-      * put() used to hand a raw ``memoryview`` to ``upload_blob`` -> the SDK
-        raised "memoryview: unsupported format ...", and because writes are
-        best-effort the error was swallowed, so nothing was ever stored.
-      * get() used to call ``downloader.readinto(byte_array)`` -> the aio SDK's
-        ``readinto`` writes to a *stream* (``.write``), not a buffer, so it raised
-        AttributeError and returned None even when the blob was present.
-    The connector now uploads ``bytes(...)`` and reads via ``readall()`` + copy.
-
-    What each step verifies against the real Blob API:
-      1. exists() before write  -> False   (real HEAD / get_blob_properties)
-      2. put()                  -> actually stores the chunk (fix #1)
-      3. exists() after write   -> True     (positive HEAD)
-      4. get()                  -> byte-identical MemoryObj (fix #2, real download)
-      5. list()                 -> the one blob we wrote (real list_blobs)
-      6. close()                -> clean client shutdown
-    Auth is exercised too: the connector authenticates via the Azurite connection
-    string to reach any of these endpoints.
+    Steps: exists (miss) -> put -> exists (hit) -> get (byte-identical) ->
+    list -> close.
     """
     sync = SyncBlobServiceClient.from_connection_string(AZURITE_CONN)
     container = f"kvtest{int(time.time())}"
@@ -151,7 +125,6 @@ def test_real_blob_roundtrip_against_azurite(async_loop, local_cpu_backend):
     connector = _make_connector(container, async_loop, local_cpu_backend)
     key = create_test_key(1)
 
-    # Allocate a full KV chunk and fill it with a known byte pattern.
     memory_obj = local_cpu_backend.allocate(
         connector.meta_shapes, connector.meta_dtypes, connector.meta_fmt
     )
@@ -160,30 +133,23 @@ def test_real_blob_roundtrip_against_azurite(async_loop, local_cpu_backend):
     buf[:] = pattern
     original = bytes(buf)
 
-    # 1. miss before any write
     assert run(async_loop, connector.exists(key)) is False
 
-    # 2. put -> real upload (previously a silent no-op; now actually stores bytes)
     run(async_loop, connector.put(key, memory_obj))
     memory_obj.ref_count_down()
-    # Confirm at the raw-SDK level that the blob really exists now.
     blob_name = connector._blob_name(key.to_string())
     assert sync.get_container_client(container).get_blob_client(blob_name).exists()
 
-    # 3. exists after write (use a fresh connector so we test a real HEAD, not the
-    #    in-process size cache populated by put()).
+    # fresh connector to bypass the in-process size cache
     reader = _make_connector(container, async_loop, local_cpu_backend)
     assert run(async_loop, reader.exists(key)) is True
 
-    # 4. get -> real download, byte-identical to what we wrote (previously None)
     res = run(async_loop, reader.get(key))
     assert res is not None
     assert bytes(memoryview(res.byte_array).cast("B")) == original
     res.ref_count_down()
 
-    # 5. list -> exactly the one blob we stored
     assert len(run(async_loop, reader.list())) == 1
 
-    # 6. close both clients cleanly
     run(async_loop, reader.close())
     run(async_loop, connector.close())

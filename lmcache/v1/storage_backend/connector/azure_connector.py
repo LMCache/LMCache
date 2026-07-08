@@ -242,10 +242,7 @@ class AzureConnector(RemoteConnector):
         try:
             blob = self.container_client.get_blob_client(self._blob_name(key_str))
             downloader = await blob.download_blob()
-            # NOTE: the aio SDK's ``readinto`` writes to a file-like *stream* (it
-            # calls ``.write``); it cannot target a raw buffer, so passing
-            # ``memory_obj.byte_array`` raises AttributeError. Download the bytes
-            # and copy them into the preallocated buffer instead.
+            # Read the whole blob into bytes, then copy into the buffer.
             data = await downloader.readall()
             dst = memoryview(memory_obj.byte_array).cast("B")
             if len(data) != len(dst):
@@ -295,9 +292,7 @@ class AzureConnector(RemoteConnector):
 
         try:
             blob = self.container_client.get_blob_client(self._blob_name(key_str))
-            # NOTE: the aio SDK's ``upload_blob`` cannot consume a raw
-            # ``memoryview`` (it raises "memoryview: unsupported format ..."); it
-            # needs ``bytes``. This copy is required for correctness.
+            # upload_blob cannot consume a raw memoryview; it needs bytes.
             data = bytes(memoryview(memory_obj.byte_array).cast("B"))
             await blob.upload_blob(
                 data,

@@ -1,13 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for the native Azure Blob Storage connector.
 
-TEST TYPE: unit / smoke. The ``azure-storage-blob`` / ``azure-identity`` SDKs are
-MOCKED at the ``sys.modules`` level, so these run anywhere (CPU-only, no network,
-no cloud account) and are the CI regression guard. NOTE: mocks guard the code
-path but cannot reproduce real SDK behavior — an incorrect mock is precisely what
-hid the memoryview put/get bugs. The real-API coverage lives in
-``test_azure_connector_azurite.py`` (emulator) and
-``test_azure_connector_realaccount.py`` (real cloud).
+The ``azure-storage-blob`` / ``azure-identity`` SDKs are mocked at the
+``sys.modules`` level so these tests run anywhere (including CPU-only / M1
+machines) without the real packages installed.
 """
 
 # Standard
@@ -231,10 +227,6 @@ class TestAzureConnector:
         payload = bytes(range(256)) * (size // 256) + bytes(size % 256)
         blob_client.get_blob_properties = AsyncMock(return_value=MagicMock(size=size))
 
-        # NOTE: the real aio SDK downloader exposes ``readall()`` (returns bytes);
-        # its ``readinto`` writes to a *stream*, not a buffer. The connector uses
-        # ``readall()`` + copy, so mock that — mocking ``readinto`` as a
-        # buffer-filler (the old mock) hid a real bug that failed on live Azure.
         downloader = MagicMock()
         downloader.readall = AsyncMock(return_value=payload)
         blob_client.download_blob = AsyncMock(return_value=downloader)
