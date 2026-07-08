@@ -40,8 +40,7 @@ def resolve_object_keys(
 
     Hashes ``token_ids`` and expands each complete chunk into one key per rank
     (a single object group, so MP servers must run with
-    ``--no-separate-object-groups``). Pure -- no engine or network access -- so
-    both the MP server and the coordinator can call it; the ``token_hasher``
+    ``--no-separate-object-groups``). The ``token_hasher``
     must be configured to match the fleet's ``chunk_size`` / ``hash_algorithm``
     or the resolved keys will not match what the servers stored.
 
