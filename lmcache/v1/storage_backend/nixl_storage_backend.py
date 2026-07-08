@@ -1111,21 +1111,27 @@ class NixlStaticStorageBackend(NixlStorageBackend):
     async def mem_to_storage(
         self, keys: Sequence[CacheEngineKey], mem_objs: List[MemoryObj]
     ) -> None:
-        mem_indices = [mem_obj.meta.address for mem_obj in mem_objs]
+        try:
+            mem_indices = [mem_obj.meta.address for mem_obj in mem_objs]
 
-        storage_indices = []
-        for i in range(len(keys)):
-            index = self.pool.pop()
-            storage_indices.append(index)
-            self.add_key_to_dict(keys[i], mem_objs[i].meta, index)
+            storage_indices = []
+            for i in range(len(keys)):
+                index = self.pool.pop()
+                storage_indices.append(index)
+                self.add_key_to_dict(keys[i], mem_objs[i].meta, index)
 
-        handle = self.agent.get_mem_to_storage_handle(mem_indices, storage_indices)
-        self.agent.post_blocking(handle)
-        self.agent.release_handle(handle)
+            handle = self.agent.get_mem_to_storage_handle(mem_indices, storage_indices)
+            self.agent.post_blocking(handle)
+            self.agent.release_handle(handle)
 
-        for key in keys:
-            with self.progress_lock:
-                self.progress_set.discard(key)
+            for key in keys:
+                with self.progress_lock:
+                    self.progress_set.discard(key)
+        finally:
+            # Release the reference taken in batched_submit_put_task; the
+            # source buffer may be recycled from here on.
+            for mem_obj in mem_objs:
+                mem_obj.ref_count_down()
 
     def _collect_metadata_with_lock(
         self, keys: list[CacheEngineKey]
@@ -1280,6 +1286,13 @@ class NixlStaticStorageBackend(NixlStorageBackend):
                 self.batched_remove(evict_keys, force=False)
 
             self.progress_set.update(keys)
+
+        # Hold a reference on each source buffer for the duration of the
+        # transfer: the caller drops its reference as soon as this method
+        # returns, and without ours the allocator could recycle the page
+        # while NIXL is still reading it. Released in mem_to_storage.
+        for memory_obj in memory_objs:
+            memory_obj.ref_count_up()
 
         asyncio.run_coroutine_threadsafe(
             self.mem_to_storage(keys, memory_objs), self.loop
