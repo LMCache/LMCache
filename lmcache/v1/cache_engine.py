@@ -929,7 +929,9 @@ class LMCacheEngine:
                 # See pd_backend.py line 605 TODO comment.
                 if self._is_sync_pd_backend():
                     memory_obj.ref_count_down()
-            elif not self.async_loading:
+            else:
+                if memory_obj.is_pinned:
+                    memory_obj.unpin()
                 memory_obj.ref_count_down()
 
         retrieved_tokens = torch.sum(ret_mask)
