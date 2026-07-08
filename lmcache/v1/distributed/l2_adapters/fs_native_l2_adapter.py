@@ -81,7 +81,7 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
         if not isinstance(use_odirect, bool):
             raise ValueError("use_odirect must be a boolean")
 
-        read_ahead_size = d.get("read_ahead_size", None)
+        read_ahead_size = d.get("read_ahead_size")
         if read_ahead_size is not None:
             if not isinstance(read_ahead_size, int) or read_ahead_size <= 0:
                 raise ValueError("read_ahead_size must be a positive integer")

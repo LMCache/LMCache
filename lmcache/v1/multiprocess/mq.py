@@ -598,8 +598,8 @@ class MessageQueueServer:
         output_fd = self._output_efd.fileno()
         while not self.is_finished.is_set():
             socks = dict(self.poller.poll(1000))
-            inbound_state = socks.get(self.socket, None)
-            outbound_state = socks.get(output_fd, None)
+            inbound_state = socks.get(self.socket)
+            outbound_state = socks.get(output_fd)
 
             # Process the incoming requests
             if inbound_state and inbound_state & zmq.POLLIN:

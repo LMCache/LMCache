@@ -318,7 +318,7 @@ class LMCacheEngine:
                     self.use_layerwise,
                     self.save_only_first_rank,
                 )
-                async_lookup_server = kwargs.get("async_lookup_server", None)
+                async_lookup_server = kwargs.get("async_lookup_server")
                 self.storage_manager = StorageManager(
                     self.config,
                     self.metadata,
@@ -556,7 +556,7 @@ class LMCacheEngine:
             self.gpu_connector.batched_from_gpu(memory_objs, starts, ends, **kwargs)
 
         with store_stats.profile_put():
-            transfer_spec = kwargs.get("transfer_spec", None)
+            transfer_spec = kwargs.get("transfer_spec")
             # TODO: we implicitly rely on batched_put to call ref_count_down
             # this management should be done in a cleaner way
             self.storage_manager.batched_put(

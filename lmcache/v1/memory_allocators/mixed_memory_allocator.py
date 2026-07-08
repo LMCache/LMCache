@@ -40,20 +40,20 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         :param bool use_hugepages: Whether to use hugepages.
         """
 
-        self.numa_mapping = kwargs.get("numa_mapping", None)
+        self.numa_mapping = kwargs.get("numa_mapping")
         self.use_hugepages = use_hugepages
         self.align_bytes = kwargs.get("align_bytes", AddressManager.ALIGN_BYTES)
         if self.align_bytes <= 0 or self.align_bytes & (self.align_bytes - 1) != 0:
             raise ValueError("align_bytes must be a positive power of two")
 
         # Extract shm_name from config.extra_config if available
-        config = kwargs.get("config", None)
+        config = kwargs.get("config")
         if config is not None:
             self.shm_name: Optional[str] = config.get_extra_config_value(
                 "shm_name", None
             )
         else:
-            self.shm_name = kwargs.get("shm_name", None)
+            self.shm_name = kwargs.get("shm_name")
 
         self.size = size
 

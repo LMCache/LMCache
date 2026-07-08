@@ -33,7 +33,7 @@ class FastAPIRequestTelemetry(RequestTelemetry):
     """
 
     def __init__(self, config: dict[str, Any]) -> None:
-        endpoint = config.get("endpoint", None)
+        endpoint = config.get("endpoint")
         if endpoint is None:
             raise ValueError(
                 "FastAPIRequestTelemetry requires setting endpoint. "

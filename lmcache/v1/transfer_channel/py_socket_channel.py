@@ -80,7 +80,7 @@ class PySocketChannel(BaseTransferChannel):
         self.align_bytes = kwargs["align_bytes"]
         self.tp_rank = kwargs["tp_rank"]
 
-        self.peer_lookup_url = kwargs.get("peer_lookup_url", None)
+        self.peer_lookup_url = kwargs.get("peer_lookup_url")
 
         self.running = True
         self.remote_connections: dict[str, dict] = {}
@@ -94,7 +94,7 @@ class PySocketChannel(BaseTransferChannel):
         else:
             self.zmq_context = get_zmq_context(use_asyncio=False)
         self.peer_init_url = kwargs["peer_init_url"]
-        self.event_loop = kwargs.get("event_loop", None)
+        self.event_loop = kwargs.get("event_loop")
 
         self._init_side_channels()
 

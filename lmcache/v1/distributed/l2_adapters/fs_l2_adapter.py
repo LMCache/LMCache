@@ -205,11 +205,11 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
         base_path = d.get("base_path")
         if not isinstance(base_path, str) or not base_path:
             raise ValueError("base_path must be a non-empty string")
-        relative_tmp_dir = d.get("relative_tmp_dir", None)
+        relative_tmp_dir = d.get("relative_tmp_dir")
         if relative_tmp_dir is not None:
             if not isinstance(relative_tmp_dir, str):
                 raise ValueError("relative_tmp_dir must be a string")
-        read_ahead_size = d.get("read_ahead_size", None)
+        read_ahead_size = d.get("read_ahead_size")
         if read_ahead_size is not None:
             if not isinstance(read_ahead_size, int) or read_ahead_size <= 0:
                 raise ValueError("read_ahead_size must be a positive integer")

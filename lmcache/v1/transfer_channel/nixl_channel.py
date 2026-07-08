@@ -95,7 +95,7 @@ class NixlChannel(BaseTransferChannel):
         self.nixl_agent = self.nixl_wrapper.agent
 
         # Used for P2P
-        self.peer_lookup_url = kwargs.get("peer_lookup_url", None)
+        self.peer_lookup_url = kwargs.get("peer_lookup_url")
 
         self.running = True
         self.remote_xfer_handlers_dict: dict[
@@ -111,7 +111,7 @@ class NixlChannel(BaseTransferChannel):
         else:
             self.zmq_context = get_zmq_context(use_asyncio=False)
         self.peer_init_url = kwargs["peer_init_url"]
-        self.event_loop = kwargs.get("event_loop", None)
+        self.event_loop = kwargs.get("event_loop")
 
         self._init_side_channels()
 

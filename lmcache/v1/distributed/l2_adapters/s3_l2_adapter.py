@@ -373,7 +373,7 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
             return v
 
         def _opt_str(key):
-            v = d.get(key, None)
+            v = d.get(key)
             if v is None:
                 return None
             if not isinstance(v, str):
