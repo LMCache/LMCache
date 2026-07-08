@@ -35,13 +35,20 @@ When LMCache runs as a **standalone multiprocess (MP) cache server**
   Records the server configuration: LMCache version, chunk size, hash
   algorithm, engine type, transfer mode, worker pool sizes, whether P2P is
   enabled, L1 size and medium (DRAM / GDS / DRAM+DevDAX), eviction policy,
-  the list of configured L2 adapter types, and the L2 store/prefetch
+  the configured L2 adapter and serde types, and the L2 store/prefetch
   policies.
 
   The MP server's ``--instance-id`` is **never** sent: it can be
-  operator-chosen and therefore identifying. Model names are not known at
-  server startup (vLLM instances register later) and are not part of this
-  message.
+  operator-chosen and therefore identifying.
+
+Additionally, when a serving engine registers its KV caches with the MP
+server, one message is sent per ``(model name, world size)`` pair:
+
+- **MPInstanceMessage**
+  Records the model name, world size, KV dtypes and tensor shapes, and the
+  per-group attention windows (full attention vs. sliding window). Repeat
+  registrations (multiple workers of one engine, restarts) are
+  deduplicated.
 
 In addition to the one-shot messages above, a continuous reporter periodically
 sends interval counters (**ContinuousContextMessage**: tokens stored/hit and

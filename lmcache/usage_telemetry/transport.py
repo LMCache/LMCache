@@ -16,12 +16,9 @@ import torch
 from lmcache.connections import global_http_connection
 from lmcache.logging import init_logger
 from lmcache.usage_telemetry.identity import UsageIdentity
+from lmcache.usage_telemetry.messages import USAGE_SCHEMA_VERSION, UsageMessage
 
 logger = init_logger(__name__)
-
-
-USAGE_SCHEMA_VERSION = 1
-"""Version stamped on every usage payload; bump when fields change meaning."""
 
 
 def usage_server_url(endpoint: str) -> str:
@@ -69,20 +66,22 @@ DEFAULT_SENDER = UsageMessageSender()
 
 
 def build_usage_payload(
-    message: object, message_type: str, identity: UsageIdentity
+    message: UsageMessage, identity: UsageIdentity
 ) -> dict[str, object]:
     """Flatten *message* into a payload stamped with identity and schema info.
 
+    The wire ``message_type`` is the message's class name, per the schema
+    contract in :mod:`lmcache.usage_telemetry.messages`.
+
     Args:
-        message: A message dataclass instance; its fields become payload keys.
-        message_type: Discriminator stored under the ``message_type`` key.
+        message: The message to serialize; its fields become payload keys.
         identity: Identifiers stamped on the payload.
 
     Returns:
         A flat JSON-serializable dict (``torch.dtype`` values stringified).
     """
     payload: dict[str, object] = {
-        "message_type": message_type,
+        "message_type": type(message).__name__,
         "schema_version": USAGE_SCHEMA_VERSION,
         "session_id": identity.session_id,
         "machine_id": identity.machine_id,

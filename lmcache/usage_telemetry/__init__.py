@@ -2,48 +2,56 @@
 """Anonymous usage telemetry for LMCache.
 
 Phone-home usage statistics, described in this package's ``README.md``.
-Two reporting paths:
 
-- One-shot context reporting (:mod:`.one_shot`): a snapshot of the
-  environment and engine configuration sent once at startup.
-- Continuous reporting (:mod:`.continuous`): interval counters
-  (hit/stored tokens) and a cache-lifespan histogram flushed periodically.
+- The wire schema of every message lives in :mod:`.messages` — the single
+  source of truth for what LMCache can phone home.
+- One-shot context reporting (:mod:`.one_shot`, :mod:`.mp`) sends a
+  snapshot of the environment and configuration at startup; the MP server
+  additionally reports model/KV info when engines register KV caches.
+- Continuous reporting (:mod:`.continuous`) flushes interval counters
+  (hit/stored tokens) and a cache-lifespan histogram periodically.
 
 Every outgoing payload is stamped with a :class:`UsageIdentity` (per-process
 ``session_id`` plus persistent ``machine_id``) so the stats backend can join
 continuous messages with the one-shot context that describes the deployment.
 
+Every entry point called from serving code is wrapped with
+:func:`lmcache.usage_telemetry.guard.swallow_telemetry_errors`: a failure
+anywhere in telemetry can never affect caching or serving functionality.
+
 Users can opt out at any time; see :func:`is_usage_tracking_enabled`.
 """
 
 # First Party
-from lmcache.usage_telemetry.continuous import (
-    CacheLifespanMessage,
-    ContinuousContextMessage,
-    ContinuousUsageContext,
-)
-from lmcache.usage_telemetry.env_probe import EnvMessage, collect_env_message
+from lmcache.usage_telemetry.continuous import ContinuousUsageContext
+from lmcache.usage_telemetry.env_probe import collect_env_message
 from lmcache.usage_telemetry.identity import (
     UsageIdentity,
     get_usage_identity,
     is_usage_tracking_enabled,
 )
+from lmcache.usage_telemetry.messages import (
+    USAGE_SCHEMA_VERSION,
+    CacheLifespanMessage,
+    ContinuousContextMessage,
+    EngineMessage,
+    EnvMessage,
+    MetadataMessage,
+    MPInstanceMessage,
+    MPServerMessage,
+    UsageMessage,
+)
 from lmcache.usage_telemetry.mp import (
     InitializeMPUsageContext,
-    MPServerMessage,
     MPUsageContext,
+    report_kv_cache_registered,
 )
 from lmcache.usage_telemetry.one_shot import (
-    EngineMessage,
     InitializeUsageContext,
-    MetadataMessage,
     UsageContext,
     UsageContextBase,
 )
-from lmcache.usage_telemetry.transport import (
-    USAGE_SCHEMA_VERSION,
-    UsageMessageSender,
-)
+from lmcache.usage_telemetry.transport import UsageMessageSender
 
 __all__ = [
     "USAGE_SCHEMA_VERSION",
@@ -54,14 +62,17 @@ __all__ = [
     "EnvMessage",
     "InitializeMPUsageContext",
     "InitializeUsageContext",
+    "MPInstanceMessage",
     "MPServerMessage",
     "MPUsageContext",
     "MetadataMessage",
     "UsageContext",
     "UsageContextBase",
     "UsageIdentity",
+    "UsageMessage",
     "UsageMessageSender",
     "collect_env_message",
     "get_usage_identity",
     "is_usage_tracking_enabled",
+    "report_kv_cache_registered",
 ]

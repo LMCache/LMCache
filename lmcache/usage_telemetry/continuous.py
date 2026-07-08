@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 import os
 import time
@@ -15,9 +14,14 @@ import numpy as np
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.usage_telemetry.guard import swallow_telemetry_errors
 from lmcache.usage_telemetry.identity import (
     get_usage_identity,
     is_usage_tracking_enabled,
+)
+from lmcache.usage_telemetry.messages import (
+    CacheLifespanMessage,
+    ContinuousContextMessage,
 )
 from lmcache.usage_telemetry.transport import (
     DEFAULT_SENDER,
@@ -32,24 +36,6 @@ if TYPE_CHECKING:
     from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class ContinuousContextMessage:
-    """Interval counters flushed periodically by the continuous reporter."""
-
-    interval_num_stored_tokens: int
-    interval_num_hit_tokens: int
-    interval_stored_kv_size: int
-    sequence_number: int
-
-
-@dataclass
-class CacheLifespanMessage:
-    """Cache-entry lifespan histogram flushed with each continuous report."""
-
-    cache_lifespan_histogram: dict[float, int]
-    sequence_number: int
 
 
 class ContinuousUsageContext:
@@ -95,8 +81,8 @@ class ContinuousUsageContext:
             5000,
         ]
         self.metadata: LMCacheMetadata = metadata
-        self.cache_usage_url: str = usage_server_url("cache-usage")
-        self.cache_lifespan_url: str = usage_server_url("cache-lifespan")
+        self.cache_usage_url: str = usage_server_url(ContinuousContextMessage.ENDPOINT)
+        self.cache_lifespan_url: str = usage_server_url(CacheLifespanMessage.ENDPOINT)
         self.min_logging_interval: int = int(
             os.getenv("LMCACHE_USAGE_TRACK_INTERVAL", "600")
         )
@@ -105,11 +91,16 @@ class ContinuousUsageContext:
 
         self.interval_num_hit_tokens: int = 0
         self.interval_num_stored_tokens: int = 0
-        self.kv_sz_per_token_bytes: int = int(
-            np.prod(self.metadata.kv_shape)
-            * self.metadata.kv_dtype.itemsize
-            / self.metadata.kv_shape[2]
-        )
+        try:
+            self.kv_sz_per_token_bytes: int = int(
+                np.prod(self.metadata.kv_shape)
+                * self.metadata.kv_dtype.itemsize
+                / self.metadata.kv_shape[2]
+            )
+        except Exception:
+            # 0 marks the stored-bytes estimate as unavailable.
+            logger.debug("Cannot derive kv bytes per token", exc_info=True)
+            self.kv_sz_per_token_bytes = 0
         self.cache_lifespan_data: list[float] = []
         self._sender = sender if sender is not None else DEFAULT_SENDER
         self._sequence_number: int = 0
@@ -149,7 +140,7 @@ class ContinuousUsageContext:
         )
         self._sender.send(
             self.cache_usage_url,
-            build_usage_payload(usage_message, "ContinuousContextMessage", identity),
+            build_usage_payload(usage_message, identity),
         )
         self.interval_num_hit_tokens = 0
         self.interval_num_stored_tokens = 0
@@ -162,7 +153,7 @@ class ContinuousUsageContext:
         )
         self._sender.send(
             self.cache_lifespan_url,
-            build_usage_payload(lifespan_message, "CacheLifespanMessage", identity),
+            build_usage_payload(lifespan_message, identity),
         )
         self.cache_lifespan_data = []
 
@@ -179,13 +170,18 @@ class ContinuousUsageContext:
             Mapping from each bucket boundary to the sample count in it.
         """
         histogram, _ = np.histogram(data, bins=buckets)
-        counts = [0] + [int(count) for count in histogram]
-        return {bucket: count for bucket, count in zip(buckets, counts, strict=False)}
+        counts = list(histogram)
+        counts.insert(0, 0)
+        return {
+            bucket: int(count) for bucket, count in zip(buckets, counts, strict=False)
+        }
 
+    @swallow_telemetry_errors
     def incr_or_send_stats(self, stats: LMCacheStats) -> None:
         """Accumulate interval stats and flush when the interval elapsed.
 
-        No-op when usage tracking is disabled.
+        No-op when usage tracking is disabled; never raises into the
+        stats-logger loop.
 
         Args:
             stats: The stats snapshot of the elapsed logging tick.

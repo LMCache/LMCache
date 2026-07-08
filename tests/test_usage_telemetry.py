@@ -21,16 +21,26 @@ from lmcache.usage_telemetry import (
     UsageMessageSender,
     get_usage_identity,
     is_usage_tracking_enabled,
+    report_kv_cache_registered,
 )
+from lmcache.usage_telemetry.guard import swallow_telemetry_errors
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.distributed.api import AttnWindowDesc, MemoryLayoutDesc
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
+from lmcache.v1.distributed.l2_adapters.config import (
+    L2AdaptersConfig,
+    get_type_name_for_config,
+)
+from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import FSL2AdapterConfig
+from lmcache.v1.distributed.serde import SerdeConfig
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.multiprocess.config import MPServerConfig
+from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 
 
 class RecordingSender(UsageMessageSender):
@@ -56,10 +66,12 @@ class StubStats:
 def usage_env(monkeypatch, tmp_path):
     """Isolate usage-telemetry state: HOME, env vars, and singletons."""
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LMCACHE_USAGE_TRACK_URL", "http://stats.test")
     monkeypatch.delenv("LMCACHE_TRACK_USAGE", raising=False)
     monkeypatch.delenv("DO_NOT_TRACK", raising=False)
     monkeypatch.delenv("LMCACHE_USAGE_TRACK_INTERVAL", raising=False)
     monkeypatch.setattr("lmcache.usage_telemetry.identity._usage_identity", None)
+    monkeypatch.setattr("lmcache.usage_telemetry.mp._mp_usage_context", None)
     monkeypatch.setattr(ContinuousUsageContext, "_instance", None)
     return tmp_path
 
@@ -148,7 +160,6 @@ class TestUsageContext:
     def test_report_once_sends_all_messages(self, usage_env):
         sender = RecordingSender()
         context = UsageContext(
-            "http://stats.test/context",
             LMCacheEngineConfig.from_defaults(),
             make_metadata(),
             sender=sender,
@@ -172,7 +183,6 @@ class TestUsageContext:
     def test_local_log_written(self, usage_env, tmp_path):
         log_path = tmp_path / "usage.log"
         context = UsageContext(
-            "http://stats.test/context",
             LMCacheEngineConfig.from_defaults(),
             make_metadata(),
             local_log=str(log_path),
@@ -274,14 +284,33 @@ class TestMPUsage:
         assert message.l1_shm_enabled
         assert message.eviction_policy == "LRU"
         assert message.l2_adapter_types == ""
+        assert message.l2_serde_types == ""
         assert message.l2_store_policy == "default"
         assert message.l2_prefetch_policy == "default"
+        assert not message.enable_segmented_prefix
         assert message.lmcache_version
+
+    def test_mp_server_message_serde_and_segmented_prefix(self, usage_env, tmp_path):
+        fs_config = FSL2AdapterConfig(
+            base_path=str(tmp_path),
+            relative_tmp_dir=None,
+            read_ahead_size=None,
+            use_odirect=False,
+        )
+        fs_config.serde_config = SerdeConfig(type="fp8", kwargs={})
+        storage_config = make_storage_manager_config()
+        storage_config.l2_adapter_config = L2AdaptersConfig([fs_config])
+
+        message = MPServerMessage.from_configs(
+            MPServerConfig(enable_segmented_prefix=True), storage_config
+        )
+        assert message.enable_segmented_prefix
+        assert message.l2_adapter_types == get_type_name_for_config(fs_config)
+        assert message.l2_serde_types == "fp8"
 
     def test_mp_usage_context_sends_messages(self, usage_env):
         sender = RecordingSender()
         context = MPUsageContext(
-            "http://stats.test/context",
             MPServerConfig(),
             make_storage_manager_config(),
             sender=sender,
@@ -306,3 +335,94 @@ class TestMPUsage:
             MPServerConfig(), make_storage_manager_config()
         )
         assert context is None
+
+
+class TestKVCacheRegistrationHook:
+    @staticmethod
+    def _instance_payloads(sender: RecordingSender) -> list[dict[str, object]]:
+        return [
+            payload
+            for _, payload in sender.sent
+            if payload["message_type"] == "MPInstanceMessage"
+        ]
+
+    def test_registry_register_reports_once_per_pair(self, usage_env):
+        sender = RecordingSender()
+        context = InitializeMPUsageContext(
+            MPServerConfig(), make_storage_manager_config(), sender=sender
+        )
+        assert context is not None
+
+        registry = LayoutDescRegistry()
+        layout = MemoryLayoutDesc(
+            shapes=[torch.Size([2, 32, 256, 1024])], dtypes=[torch.bfloat16]
+        )
+        attn = AttnWindowDesc(num_chunks_in_sw=[-1, 8])
+        registry.register("test_model", 2, layout, attn)
+        # Second worker of the same engine: deduplicated.
+        registry.register("test_model", 2, layout, attn)
+        # Different world size: reported separately.
+        registry.register("test_model", 4, layout, attn)
+
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and len(self._instance_payloads(sender)) < 2:
+            time.sleep(0.01)
+        # Grace period to catch an (incorrect) third message from the
+        # deduplicated registration.
+        time.sleep(0.2)
+        payloads = self._instance_payloads(sender)
+        assert len(payloads) == 2
+        assert {payload["world_size"] for payload in payloads} == {2, 4}
+        for payload in payloads:
+            assert payload["model_name"] == "test_model"
+            assert payload["kv_dtypes"] == "torch.bfloat16"
+            assert payload["kv_shapes"] == "2x32x256x1024"
+            assert payload["attn_windows"] == "-1,8"
+            assert payload["session_id"] == get_usage_identity().session_id
+
+    def test_hook_noop_when_disabled(self, usage_env, monkeypatch):
+        monkeypatch.setenv("DO_NOT_TRACK", "1")
+        context = InitializeMPUsageContext(
+            MPServerConfig(), make_storage_manager_config()
+        )
+        assert context is None
+        report_kv_cache_registered(
+            "test_model", 1, ["torch.float16"], [[2, 2, 256, 8]], [-1]
+        )
+
+
+class RaisingSender(UsageMessageSender):
+    """Transport stub whose every send raises."""
+
+    def send(self, url: str, payload: dict[str, object]) -> None:
+        raise RuntimeError("telemetry transport failure")
+
+
+class TestFailureIsolation:
+    def test_swallow_telemetry_errors_returns_none(self):
+        @swallow_telemetry_errors
+        def boom() -> int:
+            raise ValueError("telemetry bug")
+
+        assert boom() is None
+
+    def test_raising_sender_does_not_break_registration(self, usage_env):
+        context = InitializeMPUsageContext(
+            MPServerConfig(), make_storage_manager_config(), sender=RaisingSender()
+        )
+        assert context is not None
+
+        registry = LayoutDescRegistry()
+        layout = MemoryLayoutDesc(
+            shapes=[torch.Size([2, 2, 256, 8])], dtypes=[torch.float16]
+        )
+        registry.register("test_model", 1, layout, AttnWindowDesc([-1]))
+        # The registration itself must succeed regardless of telemetry.
+        assert registry.find("test_model", 1) is layout
+
+    def test_raising_sender_does_not_break_continuous_flush(
+        self, usage_env, monkeypatch
+    ):
+        monkeypatch.setenv("LMCACHE_USAGE_TRACK_INTERVAL", "0")
+        context = ContinuousUsageContext(make_metadata(), sender=RaisingSender())
+        context.incr_or_send_stats(StubStats(interval_hit_tokens=1))

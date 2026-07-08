@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass
 from pathlib import Path
 import importlib.metadata
 import os
@@ -18,26 +17,7 @@ import psutil
 
 # First Party
 from lmcache import torch_dev
-
-
-@dataclass
-class EnvMessage:
-    """Hardware and platform environment of the reporting process.
-
-    Integer fields use ``0`` for "unknown" (e.g. CPU count unavailable).
-    """
-
-    provider: str
-    num_cpu: int
-    cpu_type: str
-    cpu_family_model_stepping: str
-    total_memory: int
-    architecture: tuple[str, str]
-    platforms: str
-    gpu_count: int
-    gpu_type: str
-    gpu_memory_per_device: int
-    source: str
+from lmcache.usage_telemetry.messages import EnvMessage
 
 
 def _get_provider() -> str:
