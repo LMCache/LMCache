@@ -28,7 +28,7 @@ attributes built at startup:
 
 | Attribute | CLI flag | Source | Applies to |
 |---|---|---|---|
-| `service.instance.id` | `--service-instance-id` | `ObservabilityConfig.service_instance_id` (`None` defaults to a random UUID v4; explicit `""` preserved) | All metrics + spans |
+| `service.instance.id` | `--instance-id` | `MPServerConfig.instance_id` (defaults to a random UUID v4 at startup; projected onto `ObservabilityConfig.service_instance_id` by `run_cache_server` so telemetry and coordinator membership share one id) | All metrics + spans |
 
 Resource attributes are attached to the `MeterProvider` / `TracerProvider`
 in `otel_init.py` and therefore appear on every datapoint exported via
@@ -102,6 +102,23 @@ require a cross-cutting API change out of scope for this PR.
 **What it answers:**
 - `l1_allocation_failure` — how often is L1 rejecting writes for lack of memory, split by whether the pressure is user stores or L2 prefetch?
 - `l1_read_failure` — a **post-lookup anomaly counter**, not a cache-miss counter. Should stay near zero in healthy operation; any non-zero value indicates a lookup/reserve race or unexpected eviction in MP mode.
+
+---
+
+## Timeout Metrics
+
+Cross-component anomaly counter. Incremented once per `LMCacheTimeoutError`
+constructed (see `errors.py` and the `TIMEOUT_RAISED` event in
+[EVENTS.md](EVENTS.md)), tagged by `exception_type` so operators can alert on
+the timeout rate per class.
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation | Tags |
+|---|---|---|---|---|---|
+| `lmcache_mp.timeouts` | `lmcache_mp_timeouts_total` | Counter | `TIMEOUT_RAISED` | `+1` per event | `exception_type` |
+
+**What it answers:** how often are operations timing out, and of which kind?
+Should stay near zero in healthy operation; a rising rate signals an
+overloaded or stuck MQ/transfer/adapter path.
 
 ---
 

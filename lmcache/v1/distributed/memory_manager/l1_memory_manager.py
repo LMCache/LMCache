@@ -10,7 +10,7 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.distributed.config import L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
-from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
+from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryObj,
@@ -159,19 +159,19 @@ class L1MemoryManager:
             trigger eviction when the memory usage reaches a watermark.
         """
 
-        # HACK: now trying to read this from the address manager in a ad-hoc
-        # manner
+        if hasattr(self._allocator, "get_memory_usage"):
+            return self._allocator.get_memory_usage()
+
         def get_address_manager(allocator: MemoryAllocatorInterface):
             if isinstance(allocator, MixedMemoryAllocator) and hasattr(
                 allocator.pin_allocator, "address_manager"
             ):
                 return allocator.pin_allocator.address_manager
-            elif isinstance(allocator, LazyMemoryAllocator):
+            if isinstance(allocator, LazyMemoryAllocator):
                 return allocator.get_address_manager()
-            else:
-                raise NotImplementedError(
-                    "get_memory_usage is not implemented for this allocator type."
-                )
+            raise NotImplementedError(
+                "get_memory_usage is not implemented for this allocator type."
+            )
 
         address_manager = get_address_manager(self._allocator)
         free_size = address_manager.get_free_size()

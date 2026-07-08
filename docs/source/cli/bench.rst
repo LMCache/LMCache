@@ -744,15 +744,16 @@ Options
    * - ``--mode {gpu,cpu}``
      - ``gpu``
      - Run mode. ``gpu`` allocates real CUDA tensors and uses CUDA IPC
-       (handle path). ``cpu`` allocates POSIX-SHM-backed tensors and
-       uses the data-transfer path (gather/scatter via slot descriptors).
-   * - ``--transfer-mode {auto,handle,data}``
+       (lmcache-driven handle path). ``cpu`` allocates POSIX-SHM-backed tensors
+       and uses the engine-driven (worker-side gather/scatter) path by default.
+   * - ``--transfer-mode {auto,engine_driven,lmcache_driven}``
      - ``auto``
-     - Transport routing for STORE/RETRIEVE. ``handle`` forces the
-       single-shot path (``REGISTER_KV_CACHE`` + ``STORE``/``RETRIEVE``).
-       ``data`` forces the two-phase gather/scatter path
-       (``REGISTER_KV_CACHE_NON_GPU_CONTEXT`` + ``PREPARE``/``COMMIT``).
-       ``auto`` maps gpu→handle and cpu→data.
+     - Transport routing for STORE/RETRIEVE. ``lmcache_driven`` forces the
+       single-shot handle path (``REGISTER_KV_CACHE`` + ``STORE``/``RETRIEVE``),
+       which supports both CUDA IPC and CPU SHM zero-copy transfers.
+       ``engine_driven`` forces the worker-side gather/scatter path
+       (``REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT`` + ``PREPARE``/``COMMIT``).
+       ``auto`` maps gpu→lmcache_driven and cpu→engine_driven.
    * - ``--num-tokens N``
      - ``512``
      - Tokens per synthetic request.
@@ -775,6 +776,19 @@ Options
    * - ``--kvcache-shape-spec SPEC``
      - ``(2,1024,16,8,128):float16:32``
      - KV cache shape spec (see below).
+   * - ``--format FORMAT``
+     - ``terminal``
+     - Stdout output format for the final metrics summary. Available:
+       ``terminal``, ``json``.
+   * - ``--output PATH``
+     - *(unset)*
+     - Save the final metrics summary to a file at PATH (format chosen
+       by ``--format``).
+   * - ``-q`` / ``--quiet``
+     - *(unset)*
+     - Suppress all progress messages during the run. Only the final
+       structured metrics summary is emitted (unless also redirected
+       via ``--output``).
 
 
 CPU mode (no GPU)
@@ -784,9 +798,9 @@ CPU mode (no GPU)
 runs on a CPU-only host (``StubCPUDevice``); the bench tool allocates
 POSIX-SHM-backed KV tensors and exercises the full RPC path.
 
-By default ``--mode cpu`` uses the data-transfer path (``auto`` →
-``cpu→data``). To use the zero-copy SHM handle path instead, pass
-``--transfer-mode handle``:
+By default ``--mode cpu`` uses the engine-driven gather/scatter path
+(``auto`` → ``cpu→engine_driven``). To use the zero-copy SHM
+handle path instead, pass ``--transfer-mode lmcache_driven``:
 
 .. code-block:: bash
 
@@ -795,11 +809,11 @@ By default ``--mode cpu`` uses the data-transfer path (``auto`` →
        --host localhost --port 5555 \
        --l1-size-gb 2 --eviction-policy LRU
 
-   # Terminal 2 -- run bench in CPU + handle mode
+   # Terminal 2 -- run bench in CPU + lmcache_driven mode
    lmcache bench server \
        --rpc-url tcp://localhost:5555 \
        --url http://localhost:8080 \
-       --mode cpu --transfer-mode handle \
+       --mode cpu --transfer-mode lmcache_driven \
        --start 0 --end 2
 
 
@@ -842,12 +856,76 @@ See ``parse_kvcache_shape_spec`` in ``lmcache/v1/kv_layer_groups.py``
 for the authoritative parsing rules and validation errors.
 
 
-Example output
-~~~~~~~~~~~~~~
+Output
+~~~~~~
+
+After the run completes (or is interrupted with ``Ctrl-C``), a structured
+metrics summary is printed. The summary includes:
+
+* **Configuration** -- RPC URL, mode, transfer mode, tokens per request,
+  interval.
+* **Results** -- total requests, checksum OK / FAIL counts, pass rate.
+* **Latency sections** -- per-operation latency statistics (count, mean,
+  min, max, p50, p99) for cold lookup, cold store, warm lookup, and warm
+  retrieve.
+
+Use ``--format json`` to get machine-readable output, or ``--output FILE``
+to save the summary to a file.
 
 .. code-block:: text
 
-   Connecting to LMCache MP Server at tcp://localhost:15556 (mode=gpu, transfer=auto) ...
+   ================ Server Bench Result =================
+   ---------------------- Configuration -----------------
+   RPC URL:                          tcp://localhost:15556
+   Mode:                             gpu
+   Transfer mode:                    auto
+   Tokens / request:                 512
+   Interval (s):                     0.5
+   ------------------------- Results --------------------
+   Total requests:                   3
+   Checksum OK:                      3
+   Checksum FAIL:                    0
+   Pass rate (%):                    100.0
+   -------------------- Cold Lookup (ms) ---------------
+   count:                            3
+   mean:                             1.647
+   min:                              1.312
+   max:                              1.823
+   p50:                              1.647
+   p99:                              1.823
+   --------------------- Cold Store (ms) ---------------
+   count:                            3
+   mean:                             1.740
+   min:                              1.521
+   max:                              1.982
+   p50:                              1.740
+   p99:                              1.982
+   -------------------- Warm Lookup (ms) ---------------
+   count:                            3
+   mean:                             1.310
+   min:                              1.102
+   max:                              1.512
+   p50:                              1.310
+   p99:                              1.512
+   ------------------- Warm Retrieve (ms) --------------
+   count:                            3
+   mean:                             1.480
+   min:                              1.321
+   max:                              1.612
+   p50:                              1.480
+   p99:                              1.612
+   =====================================================
+
+
+Example output (progress)
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+During the run, progress messages are printed to stdout (suppressed by
+``-q`` / ``--quiet``):
+
+.. code-block:: text
+
+   Connecting to LMCache MP Server at tcp://localhost:15556 (mode=gpu) ...
    Server chunk_size = 256
    Resolved KV shape spec: (2,1024,16,8,128):float16:32
    [seq=0] LOOKUP cold:  0/2 chunks hit (1.82 ms)
@@ -1086,6 +1164,26 @@ Options
      - *(unset)*
      - Run only the specified operation. When omitted, all three
        operations are run in the order ``store -> lookup -> load``.
+   * - ``--flamegraph {on,off}``
+     - ``off``
+     - Capture a flame graph of the measured phases (``on``) or run the
+       benchmark normally (``off``). When ``on``, the benchmark profiles
+       itself and renders an SVG. Default ``off`` leaves benchmark
+       behavior unchanged. See
+       :ref:`Profiling / flame charts <lmcache-bench-l2-profiling>`.
+   * - ``--flamegraph-mode {on-cpu,off-cpu}``
+     - ``on-cpu``
+     - Flame-graph mode for ``--flamegraph on``. ``on-cpu`` shows
+       where CPU time goes; ``off-cpu`` shows time blocked on I/O /
+       locks (best for I/O-bound adapters).
+   * - ``--flamegraph-output PATH``
+     - *(auto)*
+     - SVG output path. Default:
+       ``/tmp/lmcache_bench_flames/<adapter>.<mode>.svg``.
+   * - ``--flamegraph-dir DIR``
+     - *($FLAMEGRAPH_DIR or ~/FlameGraph)*
+     - Directory with the FlameGraph scripts (``flamegraph.pl``,
+       ``stackcollapse-perf.pl``).
 
 
 Adapter JSON spec
@@ -1212,6 +1310,56 @@ requires both the store and load object batches to stay resident so the
 loaded data can be compared against the original store pattern.
 
 
+.. _lmcache-bench-l2-profiling:
+
+Profiling / flame charts
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When ``--flamegraph on`` is passed, the benchmark profiles the L2
+adapter's performance and renders a flame graph of the measured phases:
+
+.. code-block:: bash
+
+   lmcache bench l2 \
+       --l2-adapter '{"type":"fs","base_path":"/data/lmcache-bench"}' \
+       --rounds 300 --flamegraph on --flamegraph-mode on-cpu
+   #   [Profile] on-cpu recording started (pid=12345) -> .../FSL2Adapter.oncpu.svg
+   #   [Profile] wrote /tmp/lmcache_bench_flames/FSL2Adapter.oncpu.svg
+
+The recorder samples every thread of the process (including native
+worker threads). Two modes are available via ``--flamegraph-mode``:
+
+* **on-cpu** (default) -- ``perf record``; where CPU cycles go
+  (serialization, copies, hashing).
+* **off-cpu** -- ``offcputime-bpfcc`` (bcc); time spent blocked
+  (waiting on I/O, locks, eventfds). Often the more informative view
+  for I/O-bound adapters such as ``fs`` and ``s3``.
+
+Recording covers only the measured store/lookup/load work, so make the
+run long enough to collect samples (a few seconds is plenty -- use a
+large ``--rounds``). The SVG is written to ``--flamegraph-output``
+(default ``/tmp/lmcache_bench_flames/<adapter>.<mode>.svg``).
+
+**Requirements.** Rendering needs Brendan Gregg's
+`FlameGraph <https://github.com/brendangregg/FlameGraph>`__ scripts
+(``--flamegraph-dir`` or ``FLAMEGRAPH_DIR``, default ``~/FlameGraph``;
+auto-cloned to a temp directory when absent). ``on-cpu`` needs ``perf``
+(and ``kernel.perf_event_paranoid`` low enough to profile non-root, or
+run as root); ``off-cpu`` needs ``bcc`` (``offcputime-bpfcc``) and
+``sudo``. The required tools are checked up front: when ``--flamegraph
+on`` is requested but a tool is missing, the benchmark exits with a
+non-zero status and an actionable message naming the missing tool
+instead of running unprofiled. The default ``--flamegraph off`` skips
+all of this and leaves benchmark behavior unchanged.
+
+.. note::
+
+   When comparing a change, profile each variant with the same
+   ``--rounds`` and ``--flamegraph-mode`` and distinct
+   ``--flamegraph-output`` paths (e.g. ``baseline.svg`` vs
+   ``after.svg``) so the two flame graphs are directly comparable.
+
+
 Exit codes
 ~~~~~~~~~~
 
@@ -1228,5 +1376,7 @@ Exit codes
      - Adapter creation failed, round-trip verification failed, or
        an operation hit a fatal error (e.g. all rounds timed out).
    * - ``2``
-     - The ``--l2-adapter`` JSON / ``L2_ADAPTER_JSON`` env var was
-       missing or could not be parsed.
+     - Invalid invocation: the ``--l2-adapter`` JSON / ``L2_ADAPTER_JSON``
+       env var was missing or could not be parsed, an option value was
+       invalid, or ``--flamegraph on`` was requested but the profiling
+       toolchain is unavailable.

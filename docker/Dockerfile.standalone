@@ -70,6 +70,7 @@ RUN --mount=type=cache,target=/root/.cache/uv,id=uv-resolver \
         uv pip compile /tmp/req.in --quiet --prerelease=allow \
             --extra-index-url https://wheels.vllm.ai/nightly/${CUDA_TAG} \
             --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
+            --index-strategy unsafe-best-match \
             > /tmp/resolved.txt ; \
     else \
         echo "vllm==${VLLM_VERSION}" > /tmp/req.in && \

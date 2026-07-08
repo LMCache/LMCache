@@ -19,7 +19,7 @@ from lmcache.v1.multiprocess.protocols.engine import (
     PrepareRetrieveResponse,
     PrepareStoreResponse,
 )
-from lmcache.v1.multiprocess.transfer_context.base import NonGpuContextMetadata
+from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContextMetadata
 from lmcache.v1.multiprocess.transfer_context.shm import ShmSlotDescriptor
 
 if TYPE_CHECKING:
@@ -90,7 +90,7 @@ class TransferStrategy(abc.ABC):
         self,
         key: IPCCacheServerKey,
         instance_id: int,
-        context: NonGpuContextMetadata,
+        context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
     ) -> PrepareStoreResponse:
         """Prepare destination resources for a store request.
@@ -111,7 +111,7 @@ class TransferStrategy(abc.ABC):
         key: IPCCacheServerKey,
         instance_id: int,
         cpu_data: bytes,
-        context: NonGpuContextMetadata,
+        context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
     ) -> bool:
         """Finalize a store request.
@@ -186,7 +186,7 @@ class PickleTransferStrategy(TransferStrategy):
         self,
         key: IPCCacheServerKey,
         instance_id: int,
-        context: NonGpuContextMetadata,
+        context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
     ) -> PrepareStoreResponse:
         """Return empty store context for pickle mode.
@@ -200,7 +200,7 @@ class PickleTransferStrategy(TransferStrategy):
         key: IPCCacheServerKey,
         instance_id: int,
         cpu_data: bytes,
-        context: NonGpuContextMetadata,
+        context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
     ) -> bool:
         """Deserialize and write pickled chunks into reserved objects.
@@ -313,7 +313,7 @@ class ShmTransferStrategy(TransferStrategy):
         self,
         key: IPCCacheServerKey,
         instance_id: int,
-        context: NonGpuContextMetadata,
+        context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
     ) -> PrepareStoreResponse:
         """Reserve SHM-backed objects and return slot descriptors.
@@ -364,7 +364,7 @@ class ShmTransferStrategy(TransferStrategy):
         key: IPCCacheServerKey,
         instance_id: int,
         cpu_data: bytes,
-        context: NonGpuContextMetadata,
+        context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
     ) -> bool:
         """Finalize SHM store write locks or fallback to pickle commit.

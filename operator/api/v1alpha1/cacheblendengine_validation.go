@@ -86,6 +86,7 @@ func (e *CacheBlendEngine) ValidateSpec() field.ErrorList {
 	}
 
 	errs = append(errs, validateL2BackendSpec(spec.L2Backend)...)
+	errs = append(errs, validateCoordinatorConnectionSpec(spec.Coordinator)...)
 
 	return errs
 }

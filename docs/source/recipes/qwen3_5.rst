@@ -1,7 +1,7 @@
 .. _recipe_qwen3_5:
 
-Qwen3_5ForConditionalGeneration
-===============================
+Qwen3.5 / Qwen3.6 series
+========================
 
 A hybrid architecture interleaving Mamba / Gated-DeltaNet (GDN) linear-attention
 layers with full-attention layers, shared by the **Qwen3.5 and Qwen3.6**
@@ -47,9 +47,11 @@ Validated models
            - 1
 
       Set the LMCache server's ``--chunk-size`` to that ``N`` (or a multiple of
-      it) and vLLM's ``--max-num-batched-tokens`` to ``N``.
+      it), and vLLM's ``--max-num-batched-tokens`` to ``2N-1`` (the largest value
+      below ``2N``). ``N`` is also valid but serializes prefill under load — see
+      the note below.
 
-      **Qwen3.6-27B** (1 GPU, ``N = 784``):
+      **Qwen3.6-27B** (1 GPU, ``N = 784`` → ``2N-1 = 1567``):
 
       .. code-block:: bash
 
@@ -60,25 +62,36 @@ Validated models
          vllm serve Qwen/Qwen3.6-27B \
              --enable-prefix-caching \
              --mamba-cache-mode align \
-             --max-num-batched-tokens 784 \
+             --max-num-batched-tokens 1567 \
              --kv-transfer-config \
              '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 
       |
 
-      **Qwen3.5-0.8B** (1 GPU, ``N = 544``): identical to the above, with
-      ``784`` replaced by ``544`` in both ``--chunk-size`` and
-      ``--max-num-batched-tokens``.
+      **Qwen3.5-0.8B** (1 GPU, ``N = 544`` → ``2N-1 = 1087``): identical to the
+      above, with ``--chunk-size 544`` and ``--max-num-batched-tokens 1087``.
 
       ``--mamba-cache-mode align`` is required (GDN does not support the
-      ``all`` mode). ``--max-num-batched-tokens`` must be at least the unified
-      block size and below twice it — LMCache raises at engine startup
-      otherwise. ``align`` snapshots the Mamba state only at scheduler-step
-      ends, so each prefill step must advance exactly one block for every
-      block boundary to hold a reusable snapshot.
+      ``all`` mode). ``--max-num-batched-tokens`` must be in ``[N, 2N)`` (at
+      least the unified block size and below twice it) — LMCache raises at
+      engine startup otherwise. ``align`` snapshots the Mamba state at
+      scheduler-step ends on a block boundary, and the scheduler splits prefills
+      into whole ``N``-token blocks. **Prefer the maximum, ``2N-1``:** a single
+      request still advances exactly one block per step (``2N-1 < 2N``), so the
+      per-block snapshot LMCache stores is preserved, *and* the spare ``N-1``
+      budget lets decodes co-schedule with a prefill block. Setting it to exactly
+      ``N`` makes the per-step budget equal to one block, so once any request is
+      decoding (consuming ≥1 token of the budget) no new request can start
+      prefill — execution serializes to one request at a time. (Benchmarked on
+      Qwen3.6-27B: at ``N`` a cold / low-hit run ran ~7× slower with GPU batch
+      stuck at 1; ``2N-1`` restored full batching. With a warm LMCache cache
+      (~97 % hit) the gap is small since little prefill remains, but ``2N-1`` is
+      the safe default.) If vLLM reports *"max_num_seqs exceeds available Mamba
+      cache blocks"* at ``2N-1``, lower ``--max-num-seqs`` to ≤ that count (each
+      decode sequence needs one Mamba block) or raise ``--gpu-memory-utilization``.
 
       For the generic LMCache + vLLM wiring (ports, remote hosts), see
-      :doc:`../mp/quickstart`.
+      :doc:`../getting_started/quickstart`.
 
    .. tab-item:: SGLang
 
@@ -86,7 +99,7 @@ Validated models
 
    .. tab-item:: TRT-LLM
 
-      **Status:** Not supported. LMCache TRT-LLM integration is in progress.
+      **Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-LLM + LMCache setup.
 
 CacheBlend support
 ------------------

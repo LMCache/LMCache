@@ -2,8 +2,15 @@ lmcache describe
 ================
 
 The ``lmcache describe`` command shows the detailed status of a running
-LMCache service, including cache health, L1 storage, registered models, and
-L2 adapters.
+service. Two targets are supported:
+
+- ``kvcache`` — the LMCache KV cache service (health, L1 storage, registered
+  models, L2 adapters).
+- ``engine`` — the inference engine (vLLM) LMCache is paired with (model,
+  context window, health, in-flight requests).
+
+KV Cache Service (``kvcache``)
+------------------------------
 
 .. code-block:: bash
 
@@ -37,8 +44,8 @@ L2 adapters.
    Dtype:                               torch.float16
    MLA:                                         False
    Attention backend:    vLLM non-MLA flash attention
-   GPU KV shape:             NL x [2, NB, BS, NH, HS]
-   GPU KV tensor shape:   80 x [2, 2048, 128, 8, 128]
+   Engine KV shape:          NL x [2, NB, BS, NH, HS]
+   Engine KV tensor shape: 80 x [2, 2048, 128, 8, 128]
    ------------- L2: NixlStoreL2Adapter -------------
    Type:                           NixlStoreL2Adapter
    Health:                                         OK
@@ -52,9 +59,57 @@ The output shows:
 - **Overview** — health status, engine type, chunk size.
 - **L1 storage** — capacity, usage, eviction policy, cached object count.
 - **Registered models** — per-model KV cache layout: a context-wide summary
-  followed by one kernel group section per kernel group, each with the GPU KV
-  tensor shape (symbolic and concrete), attention backend, and group geometry.
+  followed by one kernel group section per kernel group, each with the engine
+  KV tensor shape (symbolic and concrete), attention backend, and group geometry.
 - **L2 adapters** — type, health, backend, stored objects, and utilization.
+
+Inference Engine (``engine``)
+-----------------------------
+
+``describe engine`` inspects the vLLM inference engine instead of the LMCache
+service, reading only the engine's own HTTP endpoints (``/v1/models``,
+``/health``, ``/metrics``).
+
+.. code-block:: bash
+
+   lmcache describe engine --url http://localhost:8000
+
+.. code-block:: text
+
+   ================ Inference Engine ================
+   Model:                  meta-llama/Llama-3.1-8B-Instruct
+   Max context (tokens):   131072
+   Status:                 OK
+   Running requests:       3
+   ==================================================
+
+The output shows:
+
+- **Model** and **Max context** — the served model id and its maximum context
+  length, from ``/v1/models``.
+- **Status** — ``OK`` / ``UNHEALTHY`` from the engine's ``/health`` probe.
+- **Running requests** — in-flight requests, summed from the
+  ``vllm:num_requests_running`` metric. Shows ``N/A`` if metrics are disabled
+  or unreachable.
+
+Only the ``/v1/models`` fetch is required: if ``/health`` or ``/metrics`` is
+unavailable the command still reports what it can rather than failing.
+
+.. code-block:: bash
+
+   lmcache describe engine --url http://localhost:8000 --format json
+
+.. code-block:: json
+
+   {
+     "title": "Inference Engine",
+     "metrics": {
+       "model": "meta-llama/Llama-3.1-8B-Instruct",
+       "max_context": 131072,
+       "status": "OK",
+       "running_requests": 3
+     }
+   }
 
 Options
 -------
@@ -65,11 +120,11 @@ Options
 
    * - Flag
      - Description
-   * - ``kvcache``
-     - Target to describe (positional, required; currently only
-       ``kvcache`` is supported).
+   * - ``target``
+     - What to describe (positional, required): ``kvcache`` or ``engine``.
    * - ``--url``
-     - LMCache HTTP server URL (default: ``http://localhost:8080``).
+     - Server URL. Defaults per target: ``http://localhost:8080`` for
+       ``kvcache``, ``http://localhost:8000`` for ``engine``.
    * - ``--format``
      - Output format: ``terminal`` (default) or ``json``.
    * - ``--output PATH``
@@ -122,8 +177,8 @@ L2 adapters are collected into lists for easy programmatic access:
            "dtype": "torch.float16",
            "is_mla": false,
            "attention_backend": "vLLM non-MLA flash attention",
-           "gpu_kv_shape": "NL x [2, NB, BS, NH, HS]",
-           "gpu_kv_concrete_shape": "80 x [2, 2048, 128, 8, 128]"
+           "engine_kv_shape": "NL x [2, NB, BS, NH, HS]",
+           "engine_kv_concrete_shape": "80 x [2, 2048, 128, 8, 128]"
          }
        ],
        "l2_adapters": [
@@ -138,10 +193,10 @@ L2 adapters are collected into lists for easy programmatic access:
      }
    }
 
-GPU KV Shape Abbreviations
---------------------------
+Engine KV Shape Abbreviations
+-----------------------------
 
-The ``gpu_kv_shape`` field uses short names from the ``GPUKVFormat`` enum:
+The ``engine_kv_shape`` field uses short names from the ``EngineKVFormat`` enum:
 
 .. list-table::
    :header-rows: 1

@@ -7,16 +7,17 @@ sub-module.
 """
 
 # Local
+from .async_engine_driven import AsyncEngineDrivenTransferContext
 from .base import (
-    NonGpuContext,
-    NonGpuContextMetadata,
+    EngineDrivenContext,
+    EngineDrivenContextMetadata,
     compute_kv_layout,
-    create_non_gpu_context,
+    create_engine_driven_context,
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )
-from .pickle import NonGpuContextPickle
-from .shm import NonGpuContextShm, ShmSlotDescriptor
+from .pickle import EngineDrivenContextPickle
+from .shm import EngineDrivenContextShm, ShmSlotDescriptor
 from .worker_transfer import (
     EngineDrivenTransferContext,
     LMCacheDrivenTransferContext,
@@ -26,17 +27,18 @@ from .worker_transfer import (
 )
 
 __all__ = [
+    "AsyncEngineDrivenTransferContext",
     "EngineDrivenTransferContext",
     "LMCacheDrivenTransferContext",
     "MPTransferMode",
-    "NonGpuContext",
-    "NonGpuContextMetadata",
-    "NonGpuContextPickle",
-    "NonGpuContextShm",
+    "EngineDrivenContext",
+    "EngineDrivenContextMetadata",
+    "EngineDrivenContextPickle",
+    "EngineDrivenContextShm",
     "ShmSlotDescriptor",
     "TransferContext",
     "compute_kv_layout",
-    "create_non_gpu_context",
+    "create_engine_driven_context",
     "create_transfer_context",
     "gather_paged_kv_to_cpu",
     "scatter_cpu_to_paged_kv",

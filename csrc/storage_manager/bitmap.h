@@ -48,6 +48,18 @@ class Bitmap {
   void batched_set(const std::vector<size_t>& indices);
 
   /**
+   * @brief set every bit in the half-open range ``[start, end)`` to 1.
+   *
+   * Fills whole bytes at once, so setting a contiguous span is far cheaper than
+   * the equivalent per-bit ``set`` calls. ``end`` is clamped to the bitmap
+   * size; an empty or out-of-range range is a no-op.
+   *
+   * @param start First bit position to set (inclusive).
+   * @param end One past the last bit position to set (exclusive).
+   */
+  void set_range(size_t start, size_t end);
+
+  /**
    * @brief clear the bit at the specified index to 0.
    */
   void clear(size_t index);
@@ -79,6 +91,16 @@ class Bitmap {
    * @return the number of leading ones.
    */
   size_t clo() const;
+
+  /**
+   * @brief index of the highest set bit.
+   *
+   * The return type is signed (``int64_t``) so the empty bitmap can be reported
+   * as ``-1`` (an unsigned index has no spare value for "no bit set").
+   *
+   * @return the largest index whose bit is set, or ``-1`` if no bit is set.
+   */
+  int64_t highest_set_bit() const;
 
   /**
    * @brief bitwise AND operation between two bitmaps.

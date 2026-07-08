@@ -1,6 +1,11 @@
 Remote Storage Plugins
 ========================
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance.
+
+
 LMCache supports built-in remote storage connectors for Redis, InfiniStore,
 MooncakeStore, S3, Hugging Face Buckets, and more.
 The remote storage plugin system provides the ability to add custom storage connectors through dynamic loading. This enables extending remote storage capabilities without modifying core code.

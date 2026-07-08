@@ -23,11 +23,22 @@ import threading
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, TrimPolicy
+from lmcache.v1.distributed.api import (
+    DEFAULT_ATTN_WINDOW_DESC,
+    AttnWindowDesc,
+    MemoryLayoutDesc,
+    ObjectKey,
+    PrefetchMode,
+    TrimPolicy,
+)
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.storage_controller import StorageControllerInterface
+from lmcache.v1.distributed.storage_controllers.adapter_lifecycle import (
+    AddAdapterOp,
+    RemoveAdapterOp,
+)
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     PrefetchPolicy,
 )
@@ -134,6 +145,14 @@ class InFlightPrefetchRequest:
     policy: TrimPolicy = TrimPolicy.PREFIX
     """Which retained-subset policy to apply (see :class:`TrimPolicy`)."""
 
+    attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
+    """Cross-chunk attention windows of all object groups, in object-group
+    order."""
+    mode: PrefetchMode = PrefetchMode.LOOKUP
+    """The prefetch intent (see :class:`PrefetchMode`).  ``WARM`` forces all
+    loaded keys permanent and acquires no read lock; ``LOOKUP`` defers
+    retention to the policy and read-locks loaded keys."""
+
     # Lookup phase: adapter_idx -> task_id (removed as results arrive)
     pending_lookup_tasks: dict[int, L2TaskId] = field(default_factory=dict)
     # Lookup phase: adapter_idx -> bitmap (populated as results arrive)
@@ -195,10 +214,25 @@ class PrefetchController(StorageControllerInterface):
         max_in_flight: int = 8,
     ) -> None:
         self._l1_manager = l1_manager
-        self._l2_adapters = l2_adapters
-        self._adapter_descriptors = adapter_descriptors
+        self._l2_adapters: dict[int, L2AdapterInterface] = {
+            desc.index: adapter
+            for desc, adapter in zip(adapter_descriptors, l2_adapters, strict=True)
+        }
+        self._adapter_descriptors: dict[int, AdapterDescriptor] = {
+            desc.index: desc for desc in adapter_descriptors
+        }
         self._policy = policy
         self._max_in_flight = max_in_flight
+
+        # Adapters that are being drained and will be removed after all
+        # the in-flight operations are done.
+        self._draining: dict[int, threading.Event] = {}
+
+        # Control-plane queue for runtime add/remove, used by the internal
+        # loop thread
+        self._adapter_ops_lock = threading.Lock()
+        self._pending_adapter_ops: list[AddAdapterOp | RemoveAdapterOp] = []
+        self._adapter_ctrl_efd = create_event_notifier()
 
         # In-flight request tracking (background thread only)
         self._in_flight_requests: dict[PrefetchRequestId, InFlightPrefetchRequest] = {}
@@ -209,6 +243,8 @@ class PrefetchController(StorageControllerInterface):
                 MemoryLayoutDesc,
                 int,
                 TrimPolicy,
+                AttnWindowDesc,
+                PrefetchMode,
             ]
         ] = []
 
@@ -227,6 +263,8 @@ class PrefetchController(StorageControllerInterface):
                 MemoryLayoutDesc,
                 int,
                 TrimPolicy,
+                AttnWindowDesc,
+                PrefetchMode,
             ]
         ] = []
         self._next_request_id: PrefetchRequestId = 0
@@ -236,8 +274,11 @@ class PrefetchController(StorageControllerInterface):
         self._lookup_results_lock = threading.Lock()
         self._completed_lookups: dict[PrefetchRequestId, int] = {}
 
-        # Thread-safe prefetch results (background -> external)
+        # Thread-safe prefetch results (background -> external).  The condition
+        # variable lets a WAIT_PREFETCH_STATUS handler block until a result is
+        # published instead of busy-polling QUERY_PREFETCH_STATUS.
         self._prefetch_results_lock = threading.Lock()
+        self._prefetch_results_cv = threading.Condition(self._prefetch_results_lock)
         self._completed_results: dict[PrefetchRequestId, Bitmap] = {}
 
         # Map eventfds to adapter indices for quick lookup in poll.
@@ -246,9 +287,11 @@ class PrefetchController(StorageControllerInterface):
         # share an fd.  See the docstrings in L2AdapterInterface.
         self._lookup_efd_to_adapter: dict[int, int] = {}
         self._load_efd_to_adapter: dict[int, int] = {}
-        for i, adapter in enumerate(self._l2_adapters):
-            self._lookup_efd_to_adapter[adapter.get_lookup_and_lock_event_fd()] = i
-            self._load_efd_to_adapter[adapter.get_load_event_fd()] = i
+        for adapter_id, adapter in self._l2_adapters.items():
+            self._lookup_efd_to_adapter[adapter.get_lookup_and_lock_event_fd()] = (
+                adapter_id
+            )
+            self._load_efd_to_adapter[adapter.get_load_event_fd()] = adapter_id
 
         self._event_bus = get_event_bus()
 
@@ -275,6 +318,19 @@ class PrefetchController(StorageControllerInterface):
                     else []
                 ),
             )
+            register_gauge(
+                "lmcache.l2_prefetch",
+                "lmcache_mp.l2_adapters",
+                (
+                    "Count of L2 adapters attached to the prefetch controller, "
+                    "tagged by ``state`` (active or draining)."
+                ),
+                lambda: (
+                    PrefetchController._gauge_target.get_adapter_state_observations()
+                    if PrefetchController._gauge_target is not None
+                    else []
+                ),
+            )
 
         self._stop_flag = threading.Event()
         self._thread = threading.Thread(
@@ -292,6 +348,8 @@ class PrefetchController(StorageControllerInterface):
         layout_desc: MemoryLayoutDesc,
         extra_count: int = 0,
         policy: TrimPolicy = TrimPolicy.PREFIX,
+        attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
+        mode: PrefetchMode = PrefetchMode.LOOKUP,
     ) -> PrefetchRequestId:
         """
         Submit a prefetch request for the given keys.
@@ -318,6 +376,12 @@ class PrefetchController(StorageControllerInterface):
                 workers can each consume one read lock.
             policy: Which retained-subset policy to apply (see
                 :class:`TrimPolicy`).  Defaults to ``PREFIX``.
+            attn_desc: Cross-chunk attention windows of all object groups, in
+                object-group order.
+            mode: The prefetch intent (see :class:`PrefetchMode`).  ``WARM``
+                forces every loaded key permanent and acquires no read lock;
+                ``LOOKUP`` defers retention to the configured
+                :class:`PrefetchPolicy` and read-locks loaded keys.
 
         Returns:
             A request ID for tracking via query_prefetch_result.
@@ -326,7 +390,7 @@ class PrefetchController(StorageControllerInterface):
             request_id = self._next_request_id
             self._next_request_id += 1
             self._submission_queue.append(
-                (request_id, keys, layout_desc, extra_count, policy)
+                (request_id, keys, layout_desc, extra_count, policy, attn_desc, mode)
             )
         self._submission_efd.notify()
         return request_id
@@ -382,6 +446,29 @@ class PrefetchController(StorageControllerInterface):
                 self._completed_lookups.pop(request_id, None)
         return result
 
+    def wait_prefetch_result(
+        self, request_id: PrefetchRequestId, timeout: float
+    ) -> bool:
+        """
+        Block until a prefetch request's result is published, or until timeout.
+
+        Thread-safe. Lets a handler wait for prefetch completion instead of
+        busy-polling query_prefetch_result. Does not consume the result; the
+        caller still retrieves it via query_prefetch_result.
+
+        Args:
+            request_id: The request ID from submit_prefetch_request.
+            timeout: Maximum number of seconds to wait for the result.
+
+        Returns:
+            True if the result became available within the timeout, False if
+            the wait timed out.
+        """
+        with self._prefetch_results_cv:
+            return self._prefetch_results_cv.wait_for(
+                lambda: request_id in self._completed_results, timeout
+            )
+
     def report_status(self) -> dict:
         """Return a status dict for the prefetch controller."""
         is_healthy = self._thread.is_alive()
@@ -400,7 +487,20 @@ class PrefetchController(StorageControllerInterface):
             "load_phase_count": self._status_load_phase_count,
             "completed_results_count": completed_results_count,
             "num_l2_adapters": len(self._l2_adapters),
+            "num_active_adapters": len(self._l2_adapters) - len(self._draining),
+            "num_draining_adapters": len(self._draining),
         }
+
+    def get_adapter_state_observations(
+        self,
+    ) -> list[tuple[int | float, dict[str, object]]]:
+        """``(count, {"state": ...})`` tuples for the ``lmcache_mp.l2_adapters``
+        gauge. ``len()`` reads are GIL-atomic, safe from the OTel thread."""
+        num_draining = len(self._draining)
+        return [
+            (len(self._l2_adapters) - num_draining, {"state": "active"}),
+            (num_draining, {"state": "draining"}),
+        ]
 
     def _snapshot_inflight_loads(self) -> dict[int, tuple[int, int]]:
         """``{adapter_idx: (count, reserved_bytes)}`` for in-flight L2 -> L1
@@ -421,32 +521,30 @@ class PrefetchController(StorageControllerInterface):
     ) -> list[tuple[int | float, dict[str, object]]]:
         """Per-adapter ``(count, attributes)`` for the
         ``lmcache_mp.num_inflight_l2_loads`` gauge."""
-        return [
-            (
-                count,
-                {
-                    "l2_name": self._adapter_descriptors[idx].type_name,
-                    "adapter_index": idx,
-                },
+        observations: list[tuple[int | float, dict[str, object]]] = []
+        for idx, (count, _) in self._snapshot_inflight_loads().items():
+            desc = self._adapter_descriptors.get(idx)
+            if desc is None:
+                continue
+            observations.append(
+                (count, {"l2_name": desc.type_name, "adapter_index": idx})
             )
-            for idx, (count, _) in self._snapshot_inflight_loads().items()
-        ]
+        return observations
 
     def get_inflight_load_bytes_observations(
         self,
     ) -> list[tuple[int | float, dict[str, object]]]:
         """Per-adapter ``(reserved_bytes, attributes)`` for the
         ``lmcache_mp.inflight_load_memory_usage_bytes`` gauge."""
-        return [
-            (
-                reserved_bytes,
-                {
-                    "l2_name": self._adapter_descriptors[idx].type_name,
-                    "adapter_index": idx,
-                },
+        observations: list[tuple[int | float, dict[str, object]]] = []
+        for idx, (_, reserved_bytes) in self._snapshot_inflight_loads().items():
+            desc = self._adapter_descriptors.get(idx)
+            if desc is None:
+                continue
+            observations.append(
+                (reserved_bytes, {"l2_name": desc.type_name, "adapter_index": idx})
             )
-            for idx, (_, reserved_bytes) in self._snapshot_inflight_loads().items()
-        ]
+        return observations
 
     # =========================================================================
     # Lifecycle
@@ -469,6 +567,59 @@ class PrefetchController(StorageControllerInterface):
         self._thread.join()
         self._cleanup_in_flight_requests()
         self._submission_efd.close()
+        self._adapter_ctrl_efd.close()
+
+    def add_adapter(
+        self,
+        adapter_id: int,
+        adapter: L2AdapterInterface,
+        descriptor: AdapterDescriptor,
+    ) -> None:
+        """Blocking function to add a new adapter into the prefetch
+        controller with the specified adapter ID and descriptor.
+
+        Args:
+            adapter_id: Stable id assigned by the StorageManager.
+            adapter: The adapter instance to attach.
+            descriptor: The adapter's descriptor (``descriptor.index`` must
+                equal ``adapter_id``).
+
+        Raises:
+            RuntimeError: If the background loop did not apply the op in
+                time (e.g. the loop is not running).
+        """
+        op = AddAdapterOp(
+            adapter_id=adapter_id,
+            adapter=adapter,
+            descriptor=descriptor,
+            done=threading.Event(),
+        )
+        with self._adapter_ops_lock:
+            self._pending_adapter_ops.append(op)
+        self._adapter_ctrl_efd.notify()
+        if not op.done.wait(timeout=PREFETCH_LOOP_POLL_TIMEOUT_MS / 1000 + 5.0):
+            raise RuntimeError(
+                f"PrefetchController did not attach adapter {adapter_id} in time"
+            )
+
+    def request_remove_adapter(self, adapter_id: int) -> threading.Event:
+        """Non-blocking function to request the removal of a L2 adapter
+        specified by the adapter ID.
+
+        New lookups stop routing to the adapter immediately; in-flight
+        requests are allowed to complete.
+
+        Args:
+            adapter_id: Stable id of the adapter to drain.
+
+        Returns:
+            An Event signaled when the adapter is fully drained.
+        """
+        op = RemoveAdapterOp(adapter_id=adapter_id, done=threading.Event())
+        with self._adapter_ops_lock:
+            self._pending_adapter_ops.append(op)
+        self._adapter_ctrl_efd.notify()
+        return op.done
 
     # =========================================================================
     # Background loop
@@ -486,12 +637,16 @@ class PrefetchController(StorageControllerInterface):
         poller = select.poll()
         submission_fd = self._submission_efd.fileno()
         poller.register(submission_fd, select.POLLIN)
+        poller.register(self._adapter_ctrl_efd.fileno(), select.POLLIN)
         for efd in self._lookup_efd_to_adapter:
             poller.register(efd, select.POLLIN)
         for efd in self._load_efd_to_adapter:
             poller.register(efd, select.POLLIN)
 
         while not self._stop_flag.is_set():
+            # First, apply runtime add/remove of the L2 adapters.
+            self._apply_pending_adapter_ops(poller)
+
             ready = poller.poll(PREFETCH_LOOP_POLL_TIMEOUT_MS)
 
             signaled_adapters: dict[PrefetchPhase, set[int]] = {
@@ -540,6 +695,71 @@ class PrefetchController(StorageControllerInterface):
                     "Unexpected error in prefetch loop while starting pending requests"
                 )
 
+            # Finalize any draining adapter no longer have any in-flight
+            # requests.
+            self._finalize_drained_adapters(poller)
+
+    def _apply_pending_adapter_ops(self, poller: "select.poll") -> None:
+        """Apply queued add/remove ops on the prefetch loop thread."""
+        with self._adapter_ops_lock:
+            ops = self._pending_adapter_ops
+            self._pending_adapter_ops = []
+        for op in ops:
+            if isinstance(op, AddAdapterOp):
+                self._l2_adapters[op.adapter_id] = op.adapter
+                self._adapter_descriptors[op.adapter_id] = op.descriptor
+                lookup_efd = op.adapter.get_lookup_and_lock_event_fd()
+                load_efd = op.adapter.get_load_event_fd()
+                self._lookup_efd_to_adapter[lookup_efd] = op.adapter_id
+                self._load_efd_to_adapter[load_efd] = op.adapter_id
+                poller.register(lookup_efd, select.POLLIN)
+                poller.register(load_efd, select.POLLIN)
+                logger.info("PrefetchController attached adapter %d", op.adapter_id)
+                op.done.set()
+            elif isinstance(op, RemoveAdapterOp):
+                if op.adapter_id not in self._l2_adapters:
+                    op.done.set()
+                    continue
+                # Mark draining; new lookups skip it. The adapter stays
+                # registered so in-flight requests can still complete.
+                self._draining[op.adapter_id] = op.done
+                logger.info(
+                    "PrefetchController draining adapter %d (no new lookups routed)",
+                    op.adapter_id,
+                )
+
+    def _adapter_in_use(self, adapter_id: int) -> bool:
+        """True if any in-flight request still references ``adapter_id``."""
+        for request in self._in_flight_requests.values():
+            if (
+                adapter_id in request.pending_lookup_tasks
+                or adapter_id in request.pending_load_tasks
+                or adapter_id in request.load_plan
+                or adapter_id in request.lookup_results
+            ):
+                return True
+        return False
+
+    def _finalize_drained_adapters(self, poller: "select.poll") -> None:
+        """Detach draining adapters no longer referenced by any request."""
+        for adapter_id in list(self._draining):
+            if self._adapter_in_use(adapter_id):
+                continue
+            adapter = self._l2_adapters.pop(adapter_id)
+            self._adapter_descriptors.pop(adapter_id, None)
+            lookup_efd = adapter.get_lookup_and_lock_event_fd()
+            load_efd = adapter.get_load_event_fd()
+            self._lookup_efd_to_adapter.pop(lookup_efd, None)
+            self._load_efd_to_adapter.pop(load_efd, None)
+            for efd in (lookup_efd, load_efd):
+                try:
+                    poller.unregister(efd)
+                except (KeyError, OSError):
+                    pass
+            done = self._draining.pop(adapter_id)
+            logger.info("PrefetchController detached adapter %d", adapter_id)
+            done.set()
+
     def _drain_submission_queue(self) -> None:
         """Move items from the thread-safe submission queue to the
         pending queue."""
@@ -554,11 +774,13 @@ class PrefetchController(StorageControllerInterface):
         while (
             self._pending_queue and len(self._in_flight_requests) < self._max_in_flight
         ):
-            request_id, keys, layout_desc, extra_count, policy = (
+            request_id, keys, layout_desc, extra_count, policy, attn_desc, mode = (
                 self._pending_queue.pop(0)
             )
             self._status_pending_count -= 1
-            self._start_lookup_phase(request_id, keys, layout_desc, extra_count, policy)
+            self._start_lookup_phase(
+                request_id, keys, layout_desc, extra_count, policy, attn_desc, mode
+            )
 
     # =========================================================================
     # Lookup phase
@@ -571,16 +793,26 @@ class PrefetchController(StorageControllerInterface):
         layout_desc: MemoryLayoutDesc,
         extra_count: int = 0,
         policy: TrimPolicy = TrimPolicy.PREFIX,
+        attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
+        mode: PrefetchMode = PrefetchMode.LOOKUP,
     ) -> None:
-        """Submit lookup_and_lock to all adapters for a new request."""
-        if not self._l2_adapters:
+        """Submit lookup_and_lock to all live (non-draining) adapters for a
+        new request."""
+        # Skip adapters being drained so a new request never locks keys on
+        # an adapter that is on its way out.
+        routing_adapters = {
+            adapter_id: adapter
+            for adapter_id, adapter in self._l2_adapters.items()
+            if adapter_id not in self._draining
+        }
+        if not routing_adapters:
             self._complete_request(request_id, Bitmap(len(keys)))
             return
 
         pending_lookup_tasks: dict[int, L2TaskId] = {}
-        for i, adapter in enumerate(self._l2_adapters):
-            task_id = adapter.submit_lookup_and_lock_task(keys)
-            pending_lookup_tasks[i] = task_id
+        for adapter_id, adapter in routing_adapters.items():
+            task_id = adapter.submit_lookup_and_lock_task(keys, layout_desc)
+            pending_lookup_tasks[adapter_id] = task_id
 
         request = InFlightPrefetchRequest(
             request_id=request_id,
@@ -589,6 +821,8 @@ class PrefetchController(StorageControllerInterface):
             phase=PrefetchPhase.LOOKUP,
             extra_count=extra_count,
             policy=policy,
+            attn_desc=attn_desc,
+            mode=mode,
             pending_lookup_tasks=pending_lookup_tasks,
         )
         self._in_flight_requests[request_id] = request
@@ -616,11 +850,18 @@ class PrefetchController(StorageControllerInterface):
         self._status_lookup_phase_count -= 1
         self._status_load_phase_count += 1
 
-        # Step 1: get load plan from policy
+        # Step 1: get load plan from policy. Exclude draining adapters so no
+        # new load targets them; any keys they locked during lookup fall
+        # outside the plan and get unlocked in _unlock_unneeded_keys.
+        routing_descriptors = [
+            desc
+            for adapter_id, desc in self._adapter_descriptors.items()
+            if adapter_id not in self._draining
+        ]
         load_plan = self._policy.select_load_plan(
             request.keys,
             request.lookup_results,
-            self._adapter_descriptors,
+            routing_descriptors,
         )
 
         # Step 2: trim the load plan to the policy's retained subset
@@ -651,9 +892,13 @@ class PrefetchController(StorageControllerInterface):
         keys_to_reserve = merged_bitmap.gather(request.keys)
         l1_mgr = self._l1_manager
 
-        retentions = self._policy.select_l1_retentions(
-            keys_to_reserve,
-        )
+        # WARM retains every loaded key; LOOKUP follows the configured policy.
+        if request.mode is PrefetchMode.WARM:
+            retentions = [True] * len(keys_to_reserve)
+        else:
+            retentions = self._policy.select_l1_retentions(
+                keys_to_reserve,
+            )
         write_results = l1_mgr.reserve_write(
             keys=keys_to_reserve,
             is_temporary=[not r for r in retentions],
@@ -898,12 +1143,17 @@ class PrefetchController(StorageControllerInterface):
 
         l1_mgr = self._l1_manager
 
-        # Transition loaded keys: write-locked -> read-locked
-        # Use extra_count so that all TP workers each get their own read lock.
+        # Transition loaded keys out of write-locked state.
         if loaded_keys:
-            l1_mgr.finish_write_and_reserve_read(
-                loaded_keys, extra_count=request.extra_count
-            )
+            if request.mode is PrefetchMode.WARM:
+                # Warm: make ready, pin nothing.
+                l1_mgr.finish_write(loaded_keys)
+            else:
+                # write-locked -> read-locked; extra_count so each TP worker
+                # gets its own read lock.
+                l1_mgr.finish_write_and_reserve_read(
+                    loaded_keys, extra_count=request.extra_count
+                )
 
         # Clean up failed keys
         if failed_keys:
@@ -979,6 +1229,8 @@ class PrefetchController(StorageControllerInterface):
         """Store the retained-key bitmap and remove from in-flight tracking."""
         with self._prefetch_results_lock:
             self._completed_results[request_id] = result
+            # Wake any WAIT_PREFETCH_STATUS handler blocked on this result.
+            self._prefetch_results_cv.notify_all()
         removed = self._in_flight_requests.pop(request_id, None)
         if removed is not None:
             self._status_in_flight_count -= 1

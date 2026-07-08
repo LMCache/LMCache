@@ -1,6 +1,11 @@
 Filesystem Backend
 ==================
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/l2_storage/fs`.
+
+
 The filesystem backend uses ``FSConnector`` to store LMCache remote chunks as
 files under one or more POSIX filesystem directories. It is useful when you want
 a simple persistent remote backend, or when multiple inference workers can see
@@ -169,7 +174,7 @@ Operational notes
 * Leave ``save_chunk_meta`` enabled when workers may infer different metadata
   for the same chunk. Disable it only when you need the lower overhead path and
   the workers share compatible cache metadata.
-* For MP mode L2 storage, see :doc:`../../mp/l2_storage`, which documents the
+* For MP mode L2 storage, see :doc:`../../mp/l2_storage/index`, which documents the
   ``fs`` and ``fs_native`` L2 adapters configured through ``--l2-adapter``.
 
 Minimal vLLM usage

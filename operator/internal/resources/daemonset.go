@@ -51,9 +51,10 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 
 // buildDaemonSetCore constructs the DaemonSet shared by the LMCacheEngine and
 // CacheBlendEngine controllers. It is the single source of truth for the
-// GPU/security pod-template scaffolding (hostIPC, runtimeClassName, privileged,
-// NVIDIA_VISIBLE_DEVICES, resources without a device-plugin GPU claim) so those
-// settings cannot drift between the two engines.
+// GPU/security pod-template scaffolding (hostIPC, runtimeClassName, optional
+// privileged (default false, via spec.Privileged), NVIDIA_VISIBLE_DEVICES,
+// resources without a device-plugin GPU claim) so those settings cannot drift
+// between the two engines.
 //
 // Parameters:
 //   - name, namespace: the owning object's identity, used for labels and metadata.
@@ -80,7 +81,7 @@ func buildDaemonSetCore(
 		rc := nvidiaRuntimeClass
 		runtimeClassName = &rc
 	}
-	privileged := true
+	privileged := derefBool(spec.Privileged, false)
 
 	serverPort := derefInt32(getServerPort(spec), 5555)
 	imgRepo := defaultImageRepo
@@ -151,6 +152,21 @@ func buildDaemonSetCore(
 				},
 			},
 		)
+	}
+	// Inject the pod IP as the coordinator advertise address (downward API)
+	// when registration is enabled and no explicit advertiseIP is set, so the
+	// coordinator can reach this server. The server's --coordinator-advertise-ip
+	// flag falls back to this env var.
+	if spec.Coordinator != nil && derefString(spec.Coordinator.URL, "") != "" &&
+		(spec.Coordinator.AdvertiseIP == nil || *spec.Coordinator.AdvertiseIP == "") {
+		envVars = append(envVars, corev1.EnvVar{
+			Name: "LMCACHE_COORDINATOR_ADVERTISE_IP",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "status.podIP",
+				},
+			},
+		})
 	}
 	envVars = append(envVars, spec.Env...)
 
@@ -243,6 +259,7 @@ func buildDaemonSetCore(
 				},
 				Spec: corev1.PodSpec{
 					HostIPC:            true,
+					HostNetwork:        derefBool(spec.HostNetwork, false),
 					RuntimeClassName:   runtimeClassName,
 					ServiceAccountName: spec.ServiceAccountName,
 					PriorityClassName:  spec.PriorityClassName,
@@ -273,6 +290,10 @@ func buildDaemonSetCore(
 				},
 			},
 		},
+	}
+
+	if derefBool(spec.HostNetwork, false) {
+		ds.Spec.Template.Spec.DNSPolicy = corev1.DNSClusterFirstWithHostNet
 	}
 
 	return ds

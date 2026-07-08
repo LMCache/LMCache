@@ -21,12 +21,12 @@ import pytest
 import torch
 
 # First Party
-from lmcache.cli.commands.trace.dispatch import (
+from lmcache.cli.commands.trace._dispatch import (
     CallDispatcher,
     ReplayContext,
     build_default_dispatcher,
 )
-from lmcache.cli.commands.trace.driver import StorageReplayDriver
+from lmcache.cli.commands.trace._driver import StorageReplayDriver
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -266,7 +266,7 @@ class TestMismatchHandling:
                 # is expected in this script but registering keeps
                 # the test robust against future decorator additions.
                 # First Party
-                from lmcache.cli.commands.trace.dispatch import (
+                from lmcache.cli.commands.trace._dispatch import (
                     _call_sm_method,
                     _enter_read_prefetched,
                     _exit_read_prefetched,

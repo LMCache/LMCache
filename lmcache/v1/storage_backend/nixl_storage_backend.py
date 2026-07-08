@@ -115,6 +115,7 @@ class NixlStorageConfig:
     use_hugepages: bool
     enable_prog_thread: bool
     sync_mode: Optional[Any]  # nixl_thread_sync_t, None if unsupported
+    presence_cache_only: bool
     path_sharding: str
 
     @staticmethod
@@ -194,6 +195,8 @@ class NixlStorageConfig:
                     f"in nixl_thread_sync_t."
                 )
             sync_mode = getattr(nixl_thread_sync_t, attr_name)
+        presence_cache_only = extra_config.get("nixl_presence_cache_only", False)
+
         path_sharding = extra_config.get("nixl_path_sharding", "by_gpu")
 
         assert pool_size is not None
@@ -253,6 +256,7 @@ class NixlStorageConfig:
             use_hugepages=use_hugepages,
             enable_prog_thread=enable_prog_thread,
             sync_mode=sync_mode,
+            presence_cache_only=presence_cache_only,
             path_sharding=path_sharding,
         )
 
@@ -706,20 +710,40 @@ class NixlDynamicStorageAgent(NixlStorageAgent):
             return False
 
     def batched_nixl_desc_exists(
-        self, reg_list: List[tuple[int, int, int, str]]
+        self, reg_list: List[tuple[int, int, int, str]], path: Optional[str] = None
     ) -> int:
-        """Check if multiple descriptors exist via a single ``query_memory`` call.
+        """Check if multiple descriptors exist from the start of ``reg_list``.
 
         :param reg_list: List of tuples ``(0, 0, 0, meta_info)`` where
             *meta_info* is the formatted object-key string.
+        :param path: Directory for FILE backends (required for FILE; ignored
+            for OBJ). FILE existence is resolved on the filesystem, since NIXL
+            ``query_memory`` only answers for object stores.
         :return: Number of consecutive descriptors that exist from the
             start of the list.
-        :raises: No exceptions are raised. Errors from the underlying
-            ``query_memory`` call are caught internally and logged as
-            warnings; the method returns ``0`` in that case.
+        :raises ValueError: If ``path`` is ``None`` for a FILE backend.
+        :raises: Errors from the underlying ``query_memory`` call (OBJ
+            backends) are caught internally and logged as warnings; the
+            method returns ``0`` in that case.
         """
         if not reg_list:
             return 0
+
+        # FILE backends are not resolvable via NIXL ``query_memory`` (it only
+        # answers for object stores), so reuse the single-key
+        # ``nixl_desc_exists`` -- which already handles FILE via os.path.exists.
+        # Without this, FILE/POSIX dynamic backends always return 0 here, so
+        # every batched lookup misses and the cache is never reused.
+        if self.mem_type == "FILE":
+            if path is None:
+                raise ValueError("path must be provided for FILE backends")
+            consecutive_count = 0
+            for _, _, _, meta_info in reg_list:
+                if self.nixl_desc_exists(meta_info, path):
+                    consecutive_count += 1
+                else:
+                    break
+            return consecutive_count
 
         try:
             resp = self.nixl_agent.query_memory(
@@ -1192,6 +1216,8 @@ class NixlStaticStorageBackend(NixlStorageBackend):
 
         :return: True if the key exists, False otherwise
         """
+        if self.exists_in_put_tasks(key):
+            return False
 
         with self.key_lock:
             if key in self.key_dict:
@@ -1222,7 +1248,20 @@ class NixlStaticStorageBackend(NixlStorageBackend):
         :param on_complete_callback: Optional callback (not yet supported for
             NixlCacheBackend async operations).
         """
-        with self.key_lock:
+        # contains() reports in-flight puts as absent, so the store path can
+        # re-submit a key whose put is still running.
+        with self.key_lock, self.progress_lock:
+            if not self.progress_set.isdisjoint(keys):
+                kept_keys = []
+                kept_objs = []
+                for key, obj in zip(keys, memory_objs, strict=False):
+                    if key not in self.progress_set:
+                        kept_keys.append(key)
+                        kept_objs.append(obj)
+                if not kept_keys:
+                    return
+                keys, memory_objs = kept_keys, kept_objs
+
             available_descs = self.pool.get_num_available_descs()
             num_evict = len(keys) - available_descs
             if num_evict > 0:
@@ -1238,9 +1277,7 @@ class NixlStaticStorageBackend(NixlStorageBackend):
 
                 self.batched_remove(evict_keys, force=False)
 
-        with self.progress_lock:
-            for key in keys:
-                self.progress_set.add(key)
+            self.progress_set.update(keys)
 
         asyncio.run_coroutine_threadsafe(
             self.mem_to_storage(keys, memory_objs), self.loop
@@ -1360,6 +1397,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
 
         self.async_mode = nixl_config.enable_async_put
         self.enable_presence_cache = nixl_config.enable_presence_cache
+        self.presence_cache_only = nixl_config.presence_cache_only
         # The dynamic backend uses ``self.path`` directly as a single directory
         # (see ``_build_descs``/``key_exists``). Path sharding across multiple
         # paths is only supported for static pools via ``PathSharder``, so reject
@@ -1384,7 +1422,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         # DOCA_MEMOS needs object names that fit into 128 bits; other OBJ
         # backends use URL-safe names. See _format_object_key.
         self._use_b128_object_keys = nixl_config.backend == "DOCA_MEMOS"
-        # Presence cache to reduce remote contains checks
+        # Presence cache to reduce query_memory contains checks
         self.hit_counter = 0
         self.total_counter = 0
         self.key_presence_cache: Optional[PresenceCache] = None
@@ -1880,7 +1918,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
             logger.debug(f"Key {key.chunk_hash:x} is in put tasks")
             return True, False
 
-        # Check presence cache before hitting remote storage if not prefetching
+        # Check presence cache before issuing a query_memory call if not prefetching
         if self._cache_contains(key.chunk_hash):
             return True, True
 
@@ -1890,8 +1928,14 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         """
         Check whether key is in the storage backend.
 
-        This method uses nixl querymem to check existence.
-        If successful, it caches the name for later use.
+        Normally this checks local put-task state and the presence cache, then
+        falls back to a NIXL ``query_memory`` (queryMem) call for keys not known
+        locally; a hit from that call is added to the presence cache.
+
+        When ``presence_cache_only`` is enabled (the ``nixl_presence_cache_only``
+        config option), local put-task state and the presence cache are treated
+        as authoritative: a key not known locally reports a miss and the queryMem
+        call is skipped (DRAM-only metadata semantics).
 
         :param key: The key to check
         :param pin: Whether to pin the object in the backend
@@ -1903,6 +1947,9 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         found, local_result = self._exists_in_put_tasks_or_cache(key)
         if found:
             return local_result
+
+        if self.presence_cache_only:
+            return False
 
         xfer_state = self.key_exists(key)
         if xfer_state:
@@ -1921,6 +1968,11 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         single batched ``query_memory`` call for the keys that cannot
         be resolved from local data structures (put-task set and
         presence cache).
+
+        When ``presence_cache_only`` is enabled (the ``nixl_presence_cache_only``
+        config option), the batched queryMem call is skipped: the method returns
+        the count of leading keys resolved from local data structures and treats
+        the first locally-unknown key as a miss (DRAM-only metadata semantics).
 
         :param List[CacheEngineKey] keys: The keys of the MemoryObj.
         :param bool pin: Whether to pin the key (not implemented).
@@ -1950,12 +2002,17 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         if true_count == len(keys):
             return true_count
 
+        # DRAM-only metadata semantics: keys not already in the presence cache
+        # are treated as misses without issuing a query_memory call.
+        if self.presence_cache_only:
+            return true_count
+
         # For remaining keys, use the new batched_nixl_desc_exists method
         remaining_keys = keys[true_count:]
         reg_list = [(0, 0, 0, self._format_object_key(key)) for key in remaining_keys]
 
         # Use the agent's batched_nixl_desc_exists method
-        consecutive_hits = self.agent.batched_nixl_desc_exists(reg_list)
+        consecutive_hits = self.agent.batched_nixl_desc_exists(reg_list, self.path)
 
         # Update cache for the hits and return total count
         for i in range(consecutive_hits):

@@ -32,12 +32,13 @@ VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-4}"
 LMCACHE_HEALTHCHECK_TIMEOUT="${LMCACHE_HEALTHCHECK_TIMEOUT:-30}"
 VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-120}"
 # Transport mode selection:
-#   LMCACHE_MP_TRANSFER_MODE=engine_driven  -> engine-driven (POSIX SHM server-side copy)
-#   LMCACHE_MP_TRANSFER_MODE=lmcache_driven -> LMCache-driven, sub-selected by LMCACHE_SHM_NAME:
+#   LMCACHE_MP_TRANSFER_MODE=engine_driven  -> engine-driven data path,
+#       sub-selected by LMCACHE_SHM_NAME:
 #       LMCACHE_SHM_NAME=""              -> pickle transport
 #       LMCACHE_SHM_NAME=__default__     -> shm transport (default)
+#   LMCACHE_MP_TRANSFER_MODE=lmcache_driven -> lmcache-driven IPC handle path
 LMCACHE_SHM_NAME="${LMCACHE_SHM_NAME-__default__}"
-LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}"
+LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE:-engine_driven}"
 # Set SKIP_INSTALL=1 to skip Phase 1 (install) — useful when the caller
 # has already installed everything (e.g. macOS CI workflow steps).
 SKIP_INSTALL="${SKIP_INSTALL:-0}"
@@ -344,9 +345,8 @@ else
   echo "✅ numpy<2 installed"
 fi
 
-echo "[Phase 2 / Step 2] Downloading facebook/opt-125m model (cache-aware)"
-HF_DOWNLOAD_FAIL_ON_ERROR=1 \
-  bash "${SHARED_SCRIPTS_DIR}/download_model.sh" facebook/opt-125m
+echo "[Phase 2 / Step 2] Downloading facebook/opt-125m model (GitHub release)"
+bash "${SHARED_SCRIPTS_DIR}/download_opt125m_github.sh"
 echo "✅ Model download/check complete"
 
 echo "[Phase 2 / Step 3] Starting LMCache server"
@@ -359,23 +359,24 @@ LMCACHE_ARGS=(
   --eviction-policy "${LMCACHE_EVICTION_POLICY}"
   --chunk-size "${LMCACHE_CHUNK_SIZE}"
 )
-# `engine_driven` / `lmcache_driven` look identical here (both leave
-# SHM_NAME at default) but resolve to different worker-side TransferContexts:
-#   engine_driven -> EngineDrivenTransferContext (server-side copy via SHM IPC)
-#   lmcache_driven -> LMCacheDrivenTransferContext on non-CUDA devices
+# `engine_driven` / `lmcache_driven` resolve to different worker-side
+# TransferContexts:
+#   engine_driven -> EngineDrivenTransferContext (worker gathers/scatters data)
+#     sub-mode: SHM (--shm-name __default__) or pickle (--shm-name "")
+#   lmcache_driven -> LMCacheDrivenTransferContext (server-side IPC handle)
 # Step 5.5 verifies which one the worker actually entered.
 if [ "${LMCACHE_MP_TRANSFER_MODE}" = "engine_driven" ]; then
-  echo "Transport mode: engine-driven (server-side copy via POSIX SHM IPC)"
-  EXPECTED_TRANSPORT="engine_driven"
-elif [ "${LMCACHE_MP_TRANSFER_MODE}" = "lmcache_driven" ]; then
   if [ "${LMCACHE_SHM_NAME}" = "__default__" ]; then
-    echo "Transport mode: LMCache-driven/shm (shared memory)"
+    echo "Transport mode: engine-driven/shm (shared memory)"
     EXPECTED_TRANSPORT="shm"
   else
-    echo "Transport mode: LMCache-driven/pickle (--shm-name '${LMCACHE_SHM_NAME}')"
+    echo "Transport mode: engine-driven/pickle (--shm-name '${LMCACHE_SHM_NAME}')"
     LMCACHE_ARGS+=(--shm-name "${LMCACHE_SHM_NAME}")
     EXPECTED_TRANSPORT="pickle"
   fi
+elif [ "${LMCACHE_MP_TRANSFER_MODE}" = "lmcache_driven" ]; then
+  echo "Transport mode: lmcache-driven (IPC handle path)"
+  EXPECTED_TRANSPORT="lmcache_driven"
 else
   echo "Transport mode: unknown '${LMCACHE_MP_TRANSFER_MODE}',"
   echo "  falling back to LMCACHE_SHM_NAME-based detection"
@@ -405,27 +406,41 @@ if ! wait_for_endpoint_contains "http://localhost:${LMCACHE_HTTP_PORT}/healthche
 fi
 echo "✅ LMCache server is healthy"
 
-echo "[Phase 2 / Step 4] Installing libnuma (Linux only) and starting vLLM server"
+echo "[Phase 2 / Step 4] Installing system libs (Linux only) and starting vLLM server"
 if [ "$(uname -s)" = "Linux" ]; then
-  # libnuma1 is required by some vLLM CPU paths. On GitHub Actions
-  # ubuntu runners apt-get must be invoked via sudo; on hardened images
-  # without passwordless sudo it may not be available at all. Skip the
-  # install if the shared object is already present, and never let an
-  # apt-get hiccup fail the whole e2e step (vLLM startup itself will
-  # surface a clearer error if libnuma is genuinely missing).
+  # System libs vLLM's CPU serve path dlopens at import time:
+  #   - libnuma1: needed by some vLLM CPU code paths.
+  #   - ffmpeg:   provides libavutil.so.{56..60} etc. that torchcodec
+  #               dlopens. Recent vLLM nightlies import torchcodec
+  #               unconditionally, so `vllm serve` aborts with
+  #               "libavutil.so.NN: cannot open shared object file"
+  #               without FFmpeg — even for text-only models.
+  # Prefer sudo if present (GitHub ubuntu runners need it). Install only
+  # what's missing and never let an apt hiccup fail the step.
+  MISSING_PKGS=()
   if [ ! -e /usr/lib/x86_64-linux-gnu/libnuma.so.1 ] \
      && [ ! -e /lib/x86_64-linux-gnu/libnuma.so.1 ]; then
+    MISSING_PKGS+=(libnuma1)
+  fi
+  # torchcodec supports FFmpeg 4-8; the distro's ffmpeg package provides a
+  # compatible libavutil. Detect via ldconfig so we match whichever
+  # soname (56..60) the runner already ships.
+  if ! ldconfig -p 2>/dev/null | grep -q 'libavutil\.so'; then
+    MISSING_PKGS+=(ffmpeg)
+  fi
+  if [ "${#MISSING_PKGS[@]}" -gt 0 ]; then
+    echo "Installing missing system packages: ${MISSING_PKGS[*]}"
     if command -v sudo >/dev/null 2>&1; then
       sudo apt-get update \
-        && sudo apt-get install -y --no-install-recommends libnuma1 \
-        || echo "⚠️  libnuma1 install via sudo apt-get failed; continuing"
+        && sudo apt-get install -y --no-install-recommends "${MISSING_PKGS[@]}" \
+        || echo "⚠️  apt-get install (${MISSING_PKGS[*]}) via sudo failed; continuing"
     else
       apt-get update \
-        && apt-get install -y --no-install-recommends libnuma1 \
-        || echo "⚠️  libnuma1 install via apt-get failed; continuing"
+        && apt-get install -y --no-install-recommends "${MISSING_PKGS[@]}" \
+        || echo "⚠️  apt-get install (${MISSING_PKGS[*]}) failed; continuing"
     fi
   else
-    echo "libnuma1 already present, skipping apt install"
+    echo "libnuma1 and FFmpeg runtime libs already present, skipping apt install"
   fi
 fi
 # VLLM_DEVICE is the modern env var (vLLM 0.8+)
@@ -458,13 +473,20 @@ echo "[Phase 2 / Step 5.5] Verifying transport mode: expecting '${EXPECTED_TRANS
 # VLLM_LOG (vllm's stdout), not in LMCACHE_LOG (lmcache server's stdout).
 # The shm/pickle branches still grep LMCACHE_LOG because the strategy
 # line is emitted by the lmcache server itself.
-if [ "${EXPECTED_TRANSPORT}" = "engine_driven" ]; then
+if [ "${EXPECTED_TRANSPORT}" = "lmcache_driven" ]; then
+  if ! grep -q "Creating transfer context.*mode=lmcache_driven" "${VLLM_LOG}" 2>/dev/null; then
+    echo "❌ Expected lmcache-driven worker context but 'mode=lmcache_driven' not found in vLLM log"
+    tail -50 "${VLLM_LOG}"
+    false
+  fi
+  echo "✅ Transport mode confirmed: lmcache-driven (IPC handle path)"
+elif [ "${EXPECTED_TRANSPORT}" = "engine_driven" ]; then
   if ! grep -q "Creating transfer context.*mode=engine_driven" "${VLLM_LOG}" 2>/dev/null; then
     echo "❌ Expected engine-driven worker context but 'mode=engine_driven' not found in vLLM log"
     tail -50 "${VLLM_LOG}"
     false
   fi
-  echo "✅ Transport mode confirmed: engine-driven (server-side copy)"
+  echo "✅ Transport mode confirmed: engine-driven"
 elif [ "${EXPECTED_TRANSPORT}" = "shm" ]; then
   if ! grep -q "Using shm non-GPU transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
     echo "❌ Expected shm transport but server strategy line not found in log"

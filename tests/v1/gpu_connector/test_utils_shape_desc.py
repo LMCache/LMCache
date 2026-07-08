@@ -14,8 +14,10 @@ pytestmark = pytest.mark.skipif(
 )
 
 # First Party
-from lmcache.v1.gpu_connector.utils import (  # noqa: E402
+from lmcache.v1.gpu_connector.kv_format.contiguity import (  # noqa: E402
     attempt_permute_to_contiguous_view,
+)
+from lmcache.v1.gpu_connector.utils import (  # noqa: E402
     get_device,
     get_dtype,
     get_group_data_ptrs,

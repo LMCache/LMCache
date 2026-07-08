@@ -20,6 +20,9 @@ from lmcache.v1.distributed.memory_manager import (
     L1ManagerProtocol,
     L1MemoryManager,
 )
+from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
+    DevDaxL1MemoryManager,
+)
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
@@ -188,13 +191,15 @@ class L1Manager:
 
         self._objects: dict[ObjectKey, L1ObjectState] = {}
 
-        # GDS and CPU L1 are mutually exclusive tiers, each driven by its own
-        # config: the GDS tier reads only ``gds_l1_config`` (slab size +
-        # alignment), the CPU tier only ``memory_config``.
+        # GDS, Device-DAX, and CPU L1 are mutually exclusive tiers. Each tier
+        # owns its backing allocator instead of branching inside the CPU path.
         self._memory_manager: L1ManagerProtocol
         if config.gds_l1_config is not None:
             self._memory_manager = GDSL1MemoryManager(config.gds_l1_config)
             logger.info("L1Manager: GDS L1 tier enabled; CPU pinned-DRAM L1 disabled")
+        elif config.memory_config.devdax_path:
+            self._memory_manager = DevDaxL1MemoryManager(config.memory_config)
+            logger.info("L1Manager: Device-DAX L1 tier enabled; CPU-only L1 disabled")
         else:
             self._memory_manager = L1MemoryManager(config.memory_config)
 

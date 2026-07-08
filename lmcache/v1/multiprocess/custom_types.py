@@ -2,15 +2,15 @@
 # Standard
 from dataclasses import dataclass, field
 from typing import Any, Callable
-import pickle
-import threading
 
 # Third Party
 import msgspec
 import torch
 
 # First Party
-from lmcache import torch_dev, torch_device_type
+from lmcache.v1.platform.base_ipc_wrapper import (  # noqa: E402,F401
+    DeviceIPCWrapper,
+)
 
 """
 Defines the types and the customized encoder/decoders for inter-process
@@ -21,201 +21,6 @@ Key Types:
   - Contains token_ids, start, end, request_id (all required)
   - Converted to ObjectKey for storage operations via ipc_key_to_object_keys()
 """
-
-
-class CudaIPCWrapper:
-    _discovered_device_mapping: dict[str, int] = {}
-    _device_mapping_lock = threading.Lock()
-
-    @staticmethod
-    def _get_device_uuid(device_index: int) -> str:
-        """Get the UUID of a GPU device given its index."""
-        return str(torch_dev.get_device_properties(device_index).uuid)
-
-    @staticmethod
-    def _discover_gpu_devices():
-        """Discover all available GPU devices and map their UUIDs to
-        the physical device ordinals.
-        """
-        if not torch_dev.is_available():
-            return
-
-        num_devices = torch_dev.device_count()
-        with CudaIPCWrapper._device_mapping_lock:
-            if CudaIPCWrapper._discovered_device_mapping:
-                return  # Already discovered
-
-            for i in range(num_devices):
-                device_uuid = CudaIPCWrapper._get_device_uuid(i)
-                CudaIPCWrapper._discovered_device_mapping[device_uuid] = i
-
-    @staticmethod
-    def _get_device_index_from_uuid(device_uuid: str) -> int:
-        """Get the physical device ordinal from its UUID."""
-        CudaIPCWrapper._discover_gpu_devices()
-
-        with CudaIPCWrapper._device_mapping_lock:
-            device_index = CudaIPCWrapper._discovered_device_mapping.get(
-                device_uuid, None
-            )
-
-        if device_index is None:
-            raise RuntimeError(
-                f"Device UUID {device_uuid} not found in the discovered devices."
-                "Please make sure the process can see all the GPU devices"
-            )
-        return device_index
-
-    def __init__(self, tensor: torch.Tensor):
-        # First Party
-        from lmcache.v1.gpu_connector.utils import attempt_permute_to_contiguous_view
-
-        # Permute any non-contiguous view (e.g. vLLM's NHD-over-HND) so the
-        # shape/stride we encode across IPC reflects the physical layout.
-        # Offset is preserved by the wrapper's storage_offset field.
-        tensor = attempt_permute_to_contiguous_view(tensor)
-
-        storage = tensor.untyped_storage()
-        handle = storage._share_cuda_()
-
-        self.handle = handle
-        self.dtype = tensor.dtype
-        self.shape = tuple(tensor.shape)
-        self.stride = tuple(tensor.stride())
-        self.storage_offset = int(tensor.storage_offset())
-
-        device_index = tensor.device.index
-        self.device_uuid = CudaIPCWrapper._get_device_uuid(device_index)
-
-    def to_tensor(self) -> torch.Tensor:
-        """
-        Note:
-            This function may break if the accelerator is not initialized.
-            We should call `torch_dev.init()` before using this function
-            (guarded by hasattr since not all backends expose init()).
-        """
-        device_index = CudaIPCWrapper._get_device_index_from_uuid(self.device_uuid)
-
-        storage = torch.UntypedStorage._new_shared_cuda(  # noqa: SLF001
-            device_index, *self.handle[1:]
-        )
-
-        t = torch.empty(
-            (), device=f"{torch_device_type}:{device_index}", dtype=self.dtype
-        )
-        t.set_(storage, self.storage_offset, self.shape, self.stride)
-        return t
-
-    def __eq__(self, other):
-        if not isinstance(other, CudaIPCWrapper):
-            return False
-        return (
-            self.handle == other.handle
-            and self.dtype == other.dtype
-            and self.shape == other.shape
-            and self.stride == other.stride
-            and self.storage_offset == other.storage_offset
-            and self.device_uuid == other.device_uuid
-        )
-
-    @staticmethod
-    def Serialize(obj: "CudaIPCWrapper") -> bytes:
-        return pickle.dumps(obj)
-
-    @staticmethod
-    def Deserialize(data: bytes) -> "CudaIPCWrapper":
-        return pickle.loads(data)
-
-
-class RawCudaIPCWrapper(CudaIPCWrapper):
-    """IPC wrapper for CUDA tensors allocated outside PyTorch's caching
-    allocator.
-
-    PyTorch's ``UntypedStorage._share_cuda_()`` only works for tensors
-    backed by its own caching allocator. TRT-LLM publishes its KV pool
-    via ``at::for_blob`` over a ``cudaMalloc``'d buffer, which raises in
-    ``_share_cuda_()``. This subclass bypasses that path: it calls
-    ``cudaIpcGetMemHandle`` on the raw data pointer, then reconstructs
-    the tensor on the receiving side via ``cudaIpcOpenMemHandle`` plus
-    a CuPy ``UnownedMemory`` → DLPack → ``torch`` round-trip.
-
-    Subclassing (rather than introducing a parallel class with its own
-    msgspec ext code) is load-bearing — msgspec does not support unions
-    of custom ext-encoded types. With subclassing, ``KVCache =
-    list[CudaIPCWrapper]`` continues to type-check, the existing ext
-    code 1 round-trips both wrappers, and pickle preserves the subclass
-    identity through the wire so ``to_tensor`` dispatches correctly.
-    """
-
-    def __init__(self, tensor: torch.Tensor) -> None:
-        # First Party
-        from lmcache.v1.gpu_connector.utils import assert_contiguous
-
-        assert_contiguous(tensor)
-
-        try:
-            # Third Party
-            from cuda.bindings import runtime as cudart
-        except ImportError:
-            # Third Party
-            from cuda import cudart
-
-        data_ptr = tensor.data_ptr()
-        err, ipc_handle = cudart.cudaIpcGetMemHandle(data_ptr)
-        if err != cudart.cudaError_t.cudaSuccess:
-            raise RuntimeError(
-                f"cudaIpcGetMemHandle failed: {err} (ptr=0x{data_ptr:x})"
-            )
-
-        # Store only what's needed for reconstruction.
-        self._ipc_handle_reserved = bytes(ipc_handle.reserved)
-        self._nbytes = tensor.untyped_storage().nbytes()
-
-        # CudaIPCWrapper interface fields. ``handle`` is unused —
-        # ``to_tensor`` is overridden to bypass it — but kept for
-        # equality/identity checks against the parent class.
-        self.handle = None
-        self.dtype = tensor.dtype
-        self.shape = tuple(tensor.shape)
-        self.stride = tuple(tensor.stride())
-        self.storage_offset = int(tensor.storage_offset())
-
-        device_index = tensor.device.index
-        self.device_uuid = CudaIPCWrapper._get_device_uuid(device_index)
-
-    def to_tensor(self) -> torch.Tensor:
-        """Reconstruct the tensor in this process via raw CUDA IPC."""
-        # Third Party
-        import cupy
-
-        try:
-            # Third Party
-            from cuda.bindings import runtime as cudart
-        except ImportError:
-            # Third Party
-            from cuda import cudart
-
-        device_index = CudaIPCWrapper._get_device_index_from_uuid(self.device_uuid)
-
-        handle = cudart.cudaIpcMemHandle_t()
-        handle.reserved = self._ipc_handle_reserved
-        err, ptr = cudart.cudaIpcOpenMemHandle(
-            handle, cudart.cudaIpcMemLazyEnablePeerAccess
-        )
-        if err != cudart.cudaError_t.cudaSuccess:
-            raise RuntimeError(f"cudaIpcOpenMemHandle failed: {err}")
-
-        # Wrap as a flat ``uint8`` CuPy array, DLPack to torch, then view
-        # as the original dtype/shape. ``uint8`` avoids dtype-conversion
-        # gaps (bfloat16, fp8 have no direct CuPy/NumPy equivalent without
-        # ml_dtypes).
-        with cupy.cuda.Device(device_index):
-            mem = cupy.cuda.UnownedMemory(ptr, self._nbytes, owner=self)
-            memptr = cupy.cuda.MemoryPointer(mem, 0)
-            cp_flat = cupy.ndarray(self._nbytes, dtype=cupy.uint8, memptr=memptr)
-
-        raw = torch.from_dlpack(cp_flat)
-        return raw.view(self.dtype).reshape(self.shape)
 
 
 @dataclass(order=True, frozen=True)
@@ -312,11 +117,11 @@ class IPCCacheServerKey:
 
 
 # Type exports
-KVCache = list[CudaIPCWrapper]
+KVCache = list[DeviceIPCWrapper]
 
 
-class RegisterNonGpuContextPayload(msgspec.Struct):
-    """Payload for the REGISTER_KV_CACHE_NON_GPU_CONTEXT protocol message.
+class RegisterEngineDrivenContextPayload(msgspec.Struct):
+    """Payload for the REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT protocol message.
 
     Attributes:
         instance_id: Worker instance identifier (typically PID).
@@ -391,16 +196,23 @@ class CBUnifiedLookupResult:
             those are merged in before the sparse prefetch -- prefix-covered and
             locally-duplicated ones dropped -- so they ride the identical
             prefetch + retrieve path and need no separate handling.
+        segmented_prefix_segments: Post-gap chunks retained by the
+            ``SEGMENTED_PREFIX`` prefix leg (beyond ``count_leading_ones``) — at
+            their original positions (``old_st == cur_st``), so the connector
+            tags them ``prefix`` (pure load, no recompute) and only the gap is
+            recomputed. Sourced from the prefix bitmap, not the fingerprint
+            matcher; empty when ``SEGMENTED_PREFIX`` is off.
     """
 
     prefix_coverage_tokens: int
     non_prefix_segments: list[CBMatchResult]
+    segmented_prefix_segments: list[CBMatchResult] = field(default_factory=list)
 
 
 _CUSTOMERIZED_SERIALIZERS = {
-    CudaIPCWrapper: CustomizedSerdeConfig(
-        serializer=CudaIPCWrapper.Serialize,
-        deserializer=CudaIPCWrapper.Deserialize,
+    DeviceIPCWrapper: CustomizedSerdeConfig(
+        serializer=DeviceIPCWrapper.Serialize,
+        deserializer=DeviceIPCWrapper.Deserialize,
         code=1,
     ),
 }
@@ -413,6 +225,10 @@ def get_customized_encoder(type: Any) -> msgspec.msgpack.Encoder:
             if isinstance(obj, supported_type):
                 data = cfg.serializer(obj)
                 return msgspec.msgpack.Ext(cfg.code, data)
+        if isinstance(obj, torch.dtype):
+            return str(obj).removeprefix("torch.")
+        if isinstance(obj, torch.Size):
+            return list(obj)
         raise TypeError(f"Unsupported type for serialization: {type(obj)}")
 
     return msgspec.msgpack.Encoder(enc_hook=enc_hook)
@@ -425,4 +241,15 @@ def get_customized_decoder(type: Any) -> msgspec.msgpack.Decoder:
                 return cfg.deserializer(data)
         raise TypeError(f"Unsupported ext code for deserialization: {code}")
 
-    return msgspec.msgpack.Decoder(ext_hook=ext_hook, type=type)
+    def dec_hook(expected_type: type, obj: Any) -> Any:
+        if expected_type is torch.dtype:
+            return getattr(torch, obj)
+        if expected_type is torch.Size:
+            return torch.Size(obj)
+        if isinstance(obj, expected_type):
+            return obj
+        raise NotImplementedError(
+            f"Unsupported type for deserialization: {expected_type}"
+        )
+
+    return msgspec.msgpack.Decoder(ext_hook=ext_hook, dec_hook=dec_hook, type=type)

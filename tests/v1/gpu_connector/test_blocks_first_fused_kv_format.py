@@ -77,7 +77,6 @@ def test_accessors():
     # get_dtype is on the register_kv_caches -> group_layers_by_identity path,
     # so it must recognize this format too.
     assert U.get_dtype(norm, fmt) == _raw_blocks_first_caches()[0].dtype
-    assert U.is_hnd(fmt) is True
     assert not U.is_mla(fmt)
 
 
@@ -116,7 +115,7 @@ def test_multi_layer_block_kv_transfer_roundtrip():
     """Server-side copy (handle mode) D2H + H2D round-trip.
 
     Regression for the CI ``cpu_e2e_validation (server-side copy)`` failure:
-    ``GPUTransferModule.store`` calls ``multi_layer_block_kv_transfer`` for
+    ``LMCacheDrivenTransferModule.store`` calls ``multi_layer_block_kv_transfer`` for
     this format, so the per-layer HND fallback must recognize it and split
     K/V at dim 3.
     """

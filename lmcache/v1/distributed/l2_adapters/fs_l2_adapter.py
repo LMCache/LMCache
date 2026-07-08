@@ -18,9 +18,11 @@ import os
 import threading
 
 if TYPE_CHECKING:
+    # First Party
     from lmcache.v1.distributed.internal_api import (
         L1MemoryDesc,
     )
+    from lmcache.v1.memory_management import MemoryObj
 
 # Third Party
 import aiofiles
@@ -29,7 +31,7 @@ import aiofiles.os
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
@@ -42,7 +44,6 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
-from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
@@ -358,7 +359,9 @@ class FSL2Adapter(L2AdapterInterface):
     # Lookup and Lock Interface
     # ------------------------------------------------------------------
 
-    def submit_lookup_and_lock_task(self, keys: list[ObjectKey]) -> L2TaskId:
+    def submit_lookup_and_lock_task(
+        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+    ) -> L2TaskId:
         with self._lock:
             task_id = self._get_next_task_id()
 

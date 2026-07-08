@@ -20,13 +20,16 @@ import numpy as np
 import torch
 
 # First Party
-from lmcache import torch_dev
+from lmcache import torch_dev, torch_device_type
+from lmcache.logging import init_logger
+from lmcache.v1.platform import current_device_spec
 
 # Store the tensor objects in memory so that they can be accessed
 # outside the scope of this file
 _tensor_registry: dict[int, torch.Tensor] = {}
 _shm_registry: dict[int, shared_memory.SharedMemory] = {}
 _buf_registry: dict[int, ctypes.Array] = {}
+_pinned_ptr_registry: dict[int, int] = {}  # ptr -> size, for cudaHostUnregister
 
 # Cached copy library for lmcache_memcpy_async (lazy-initialized)
 _copy_lib_NOT_LOADED = object()
@@ -345,6 +348,39 @@ class PageBufferShapeDesc:
         self.dtype: torch.dtype | None = None
 
 
+class _NativePlanType:
+    """Base for object-group transfer plan types that only exist natively.
+
+    The plan value structs (see ``csrc/mp_mem_kernels.cuh``) are built on the
+    Python side and consumed by the native ``execute_object_group_transfer``.
+    They have no pure-Python fallback, so constructing one without the compiled
+    ``c_ops`` extension is unsupported. Subclasses exist only so the CPU-only
+    build exposes the same names as ``c_ops``.
+    """
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        raise NotImplementedError(
+            f"{type(self).__name__} requires the c_ops native extension; "
+            "no pure-Python fallback exists."
+        )
+
+
+class StagingCopy(_NativePlanType):
+    """Fallback stub for the native ``StagingCopy`` plan type."""
+
+
+class LaunchVar(_NativePlanType):
+    """Fallback stub for the native ``LaunchVar`` plan type."""
+
+
+class BatchStep(_NativePlanType):
+    """Fallback stub for the native ``BatchStep`` plan type."""
+
+
+class KernelGroupSpec(_NativePlanType):
+    """Fallback stub for the native ``KernelGroupSpec`` plan type."""
+
+
 def set_shape_desc_dtype(shape_desc: Any, dtype: torch.dtype) -> None:
     """Best-effort ``shape_desc.dtype = dtype``.
 
@@ -376,6 +412,14 @@ try:
 except (AttributeError, ValueError, OSError):
     _PAGE_SIZE = 4096
 
+logger = init_logger(__name__)
+
+# Cached one-shot decision: pin host buffers only when an accelerator is
+# present. Probed lazily on first allocation; if a pinned allocation ever
+# fails at runtime we flip this to False permanently and fall back to
+# pageable memory for all subsequent allocations.
+_use_pinned: Optional[bool] = None
+
 
 def _alloc_page_aligned_pinned_view(size: int) -> Tuple[torch.Tensor, int]:
     """
@@ -387,7 +431,26 @@ def _alloc_page_aligned_pinned_view(size: int) -> Tuple[torch.Tensor, int]:
     backing tensor, so keeping the slice alive keeps the underlying
     memory alive (no need to track the backing tensor separately).
     """
-    backing = torch.empty(size + _PAGE_SIZE, dtype=torch.uint8, pin_memory=False)
+    # Pin the host buffer when an accelerator is present (probed once).
+    # StubCPUDevice.is_available returns False on CPU-only hosts.
+    global _use_pinned
+    if _use_pinned is None:
+        _use_pinned = torch_dev.is_available()
+    try:
+        backing = torch.empty(
+            size + _PAGE_SIZE, dtype=torch.uint8, pin_memory=_use_pinned
+        )
+    except RuntimeError:
+        if not _use_pinned:
+            # Pure host allocation failed (e.g. OOM); nothing to fall back to.
+            raise
+        logger.warning(
+            "Pinned host allocation failed on device '%s'; falling back to "
+            "unpinned allocation from now on.",
+            torch_device_type,
+        )
+        _use_pinned = False
+        backing = torch.empty(size + _PAGE_SIZE, dtype=torch.uint8, pin_memory=False)
     # First-touch initialization on the entire backing region
     backing.fill_(0)
     base = backing.data_ptr()
@@ -454,7 +517,9 @@ def batched_memcpy(src_ptrs: list[int], dst_ptrs: list[int], sizes: list[int]) -
 
 def alloc_shm_pinned_ptr(size: int, shm_name: str = "") -> int:
     """Non-CUDA equivalent of allocating shared memory pinned pointer.
-    Uses multiprocessing.shared_memory for cross-platform POSIX shm."""
+    Uses multiprocessing.shared_memory for cross-platform POSIX shm.
+    Attempts to pin the buffer via cudaHostRegister for async D2H;
+    if pinning fails, continues without pinning."""
 
     # Strip leading '/' for SharedMemory name
     name = shm_name.lstrip("/") if shm_name else None
@@ -479,12 +544,22 @@ def alloc_shm_pinned_ptr(size: int, shm_name: str = "") -> int:
     _tensor_registry[ptr] = tensor
     _buf_registry[ptr] = buf
     _shm_registry[ptr] = shm
+
+    # Try to pin the SHM buffer for async D2H copies
+    if current_device_spec.pin_memory(ptr, size):
+        _pinned_ptr_registry[ptr] = size
+
     return ptr
 
 
 def free_shm_pinned_ptr(ptr: int, size: int = 0, shm_name: str = "") -> None:
     """Non-CUDA equivalent of freeing a shared memory
-    pinned pointer."""
+    pinned pointer. Unregisters pinned memory if it was pinned."""
+
+    # Unpin if previously registered
+    if ptr in _pinned_ptr_registry:
+        current_device_spec.unpin_memory(ptr)
+        _pinned_ptr_registry.pop(ptr, None)
 
     # Release in order: tensor -> ctypes buf -> shm
     _tensor_registry.pop(ptr, None)
@@ -758,20 +833,53 @@ def multi_layer_kv_transfer_unilateral(
                 key_value[kv_idx, layer_id, valid_mask_kv, :] = gathered.to(kv_device)
 
 
-def _is_cross_layer_format(engine_kv_format: EngineKVFormat) -> bool:
-    """Return True when a KV format uses a single cross-layer tensor."""
+# Pure-Python mirrors of the c_ops predicates (csrc/engine_kv_format.h); the
+# parity test pins these to the same names and signatures.
+def is_cross_layer(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True when all layers live in one fused tensor."""
     return int(engine_kv_format) in (
         int(EngineKVFormat.NB_NL_TWO_BS_NH_HS),
         int(EngineKVFormat.NB_NL_TWO_NH_BS_HS),
     )
 
 
-def _is_sglang_mha_format(engine_kv_format: EngineKVFormat) -> bool:
-    """Return True when a KV format uses SGLang MHA layout (2*NL tensors)."""
+def is_kv_list(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True when keys and values are two separate top-level lists."""
     return int(engine_kv_format) in (
         int(EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS),
         int(EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS),
     )
+
+
+def is_layer_list(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True when the structure is one list entry per layer."""
+    return int(engine_kv_format) in (
+        int(EngineKVFormat.NL_X_TWO_NB_BS_NH_HS),
+        int(EngineKVFormat.NL_X_NB_TWO_BS_NH_HS),
+        int(EngineKVFormat.NL_X_NB_BS_HS),
+        int(EngineKVFormat.NL_X_NBBS_ONE_HS),
+        int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS),
+        int(EngineKVFormat.NL_X_NB_TWO_NH_BS_HS),
+        int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
+    )
+
+
+def is_mla(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True when a KV format uses MLA paged layout."""
+    return int(engine_kv_format) in (
+        int(EngineKVFormat.NL_X_NB_BS_HS),
+        int(EngineKVFormat.NL_X_NBBS_ONE_HS),
+    )
+
+
+def _is_cross_layer_format(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True when a KV format uses a single cross-layer tensor."""
+    return is_cross_layer(engine_kv_format)
+
+
+def _is_sglang_mha_format(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True when a KV format uses SGLang MHA layout (2*NL tensors)."""
+    return is_kv_list(engine_kv_format)
 
 
 def _is_hnd_format(engine_kv_format: EngineKVFormat) -> bool:
@@ -785,10 +893,7 @@ def _is_hnd_format(engine_kv_format: EngineKVFormat) -> bool:
 
 def _is_mla_format(engine_kv_format: EngineKVFormat) -> bool:
     """Return True when a KV format uses MLA paged layout."""
-    return int(engine_kv_format) in (
-        int(EngineKVFormat.NL_X_NB_BS_HS),
-        int(EngineKVFormat.NL_X_NBBS_ONE_HS),
-    )
+    return is_mla(engine_kv_format)
 
 
 _ELEMENT_SIZE_TO_DTYPE: dict[int, torch.dtype] = {
@@ -1228,6 +1333,36 @@ def multi_layer_block_kv_transfer(
             is_d2h,
             skip_prefix_n_blocks,
         )
+
+
+def execute_object_group_transfer(
+    direction: TransferDirection,
+    device: torch.device | str,
+    host_buffer_alignment: int,
+    kernel_group_specs: list,
+    batch_steps: list,
+) -> None:
+    """Python fallback for the native object-group transfer plan executor.
+
+    The planned/batched object-group transfer (see ``csrc/mp_mem_kernels.cuh``
+    and ``execute_object_group_transfer``) is only implemented in the compiled
+    ``c_ops`` extension. The signature mirrors the C++ binding so callers can
+    dispatch uniformly, but there is no pure-Python equivalent.
+
+    Args:
+        direction: Transfer direction (H2D or D2H).
+        device: CUDA device of the transfer.
+        host_buffer_alignment: Host buffer alignment for staging copies.
+        kernel_group_specs: Per-kernel-group invariants (native ``KernelGroupSpec``).
+        batch_steps: Ordered per-batch staging + launch work (native ``BatchStep``).
+
+    Raises:
+        NotImplementedError: Always; requires the c_ops native extension.
+    """
+    raise NotImplementedError(
+        "execute_object_group_transfer requires the c_ops native extension; "
+        "no pure-Python fallback exists."
+    )
 
 
 def _valid_block_range(

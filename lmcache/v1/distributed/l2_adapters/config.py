@@ -15,10 +15,12 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeVar
-import argparse
 import json
 
 if TYPE_CHECKING:
+    # Standard
+    import argparse
+
     # First Party
     from lmcache.v1.distributed.config import EvictionConfig
 
@@ -89,6 +91,28 @@ def _ensure_config_loaded(name: str) -> None:
     )
 
     ensure_adapter_loaded(name)
+
+
+def get_l2_adapter_config_class(type_name: str) -> type["L2AdapterConfigBase"]:
+    """Resolve a registered L2-adapter config class by type name.
+
+    Lazily imports the defining module if needed (via
+    :func:`_ensure_config_loaded`), then returns the registered config class.
+    Public accessor so callers need not reach into the private registry.
+
+    Args:
+        type_name: Registered adapter type (e.g. ``"fs_native"``, ``"mock"``).
+
+    Returns:
+        The :class:`L2AdapterConfigBase` subclass registered under *type_name*.
+
+    Raises:
+        ValueError: If *type_name* is not a registered adapter type.
+    """
+    _ensure_config_loaded(type_name)
+    if type_name not in _L2_ADAPTER_CONFIG_REGISTRY:
+        raise ValueError(f"unknown L2 adapter type {type_name!r}")
+    return _L2_ADAPTER_CONFIG_REGISTRY[type_name]
 
 
 def get_registered_l2_adapter_types() -> list[str]:

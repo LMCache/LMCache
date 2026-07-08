@@ -34,7 +34,6 @@ from lmcache.v1.multiprocess.engine_module import (
     HandlerSpec,
     ThreadPoolType,
 )
-from lmcache.v1.multiprocess.gpu_context import PlainGPUCacheContext
 from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.token_hasher import (
     chunk_hash_windows_numba,
@@ -42,6 +41,7 @@ from lmcache.v1.multiprocess.token_hasher import (
     unique_hits_direct_id_numba,
     update_table_id_numba,
 )
+from lmcache.v1.platform.cuda.cache_context import PlainGPUCacheContext
 
 logger = init_logger(__name__)
 

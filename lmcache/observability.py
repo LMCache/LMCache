@@ -2013,7 +2013,7 @@ class LMCacheStatsLogger:
                 else:
                     logger.info("Stats logger thread terminated successfully")
             except Exception as e:
-                logger.error(f"Error waiting for stats logger thread: {e}")
+                logger.error("Error waiting for stats logger thread: %s", e)
         else:
             logger.info("Stats logger thread already stopped")
 

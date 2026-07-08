@@ -8,6 +8,7 @@ Could be implemented by native code in the future
 
 # Standard
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 import enum
 
 # Third Party
@@ -15,7 +16,10 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
 logger = init_logger(__name__)
 
@@ -31,6 +35,22 @@ class TrimPolicy(enum.Enum):
     PREFIX = enum.auto()
     SEGMENTED_PREFIX = enum.auto()
     SPARSE = enum.auto()
+
+
+class PrefetchMode(enum.Enum):
+    """The intent of a prefetch request.
+
+    ``LOOKUP`` -- prefetch for an imminent reader: loaded keys are pinned for
+    the requesting workers, and whether they persist or are dropped after use
+    follows the configured prefetch policy.
+
+    ``WARM`` -- speculative pre-warm with no imminent reader: loaded keys are
+    retained and left unpinned (immediately resident and evictable), so a later
+    lookup can hit them.
+    """
+
+    LOOKUP = enum.auto()
+    WARM = enum.auto()
 
 
 @dataclass(frozen=True)
@@ -97,6 +117,16 @@ class ObjectKey:
                 f"(got {len(self.cache_salt)})"
             )
 
+    def to_encoded_object_key(self) -> "EncodedObjectKey":
+        """Return the JSON-safe :class:`EncodedObjectKey` projection."""
+        return EncodedObjectKey(
+            chunk_hash_hex=self.chunk_hash.hex(),
+            model_name=self.model_name,
+            kv_rank=self.kv_rank,
+            object_group_id=self.object_group_id,
+            cache_salt=self.cache_salt,
+        )
+
     @staticmethod
     def IntHash2Bytes(chunk_hash: int) -> bytes:
         # NOTE: this is only used by tests
@@ -162,6 +192,60 @@ class ObjectKey:
 
 
 @dataclass(frozen=True)
+class EncodedObjectKey:
+    """JSON-safe wire form of :class:`ObjectKey` — ``chunk_hash`` is
+    hex-encoded; other fields are preserved verbatim."""
+
+    chunk_hash_hex: str
+    """Hex-encoded ``ObjectKey.chunk_hash``."""
+
+    model_name: str
+    kv_rank: int
+
+    object_group_id: int = 0
+    """Defaults to ``0`` so pre-``object_group_id`` wire payloads still
+    deserialize."""
+
+    cache_salt: str = ""
+
+    def to_object_key(self) -> ObjectKey:
+        """Recover the corresponding :class:`ObjectKey`.
+
+        Raises:
+            ValueError: ``chunk_hash_hex`` is not valid hex, or one of
+                :class:`ObjectKey`'s field invariants is violated.
+        """
+        return ObjectKey(
+            chunk_hash=bytes.fromhex(self.chunk_hash_hex),
+            model_name=self.model_name,
+            kv_rank=self.kv_rank,
+            object_group_id=self.object_group_id,
+            cache_salt=self.cache_salt,
+        )
+
+
+@dataclass(frozen=True)
+class KeyEntry:
+    """One entry in a :class:`KeyListPage` including the encoded object
+    key and its object size."""
+
+    key: EncodedObjectKey
+    size_bytes: int
+
+
+@dataclass(frozen=True)
+class KeyListPage:
+    """A page of keys returned by ``L2AdapterInterface.list_l2_keys``."""
+
+    entries: tuple[KeyEntry, ...]
+    """The keys in the current page."""
+
+    next_page_token: str | None
+    """``None`` means this is the last page. Otherwise pass the token
+    verbatim to the next call to fetch the next page."""
+
+
+@dataclass(frozen=True)
 class MemoryLayoutDesc:
     """
     Describes the layout of a memory object
@@ -175,6 +259,49 @@ class MemoryLayoutDesc:
             raise ValueError(
                 "MemoryLayoutDesc: shapes and dtype must have the same length"
             )
+
+
+@dataclass(frozen=True)
+class AttnWindowDesc:
+    """Per-object-group cross-chunk attention windows, in LMCache chunks.
+
+    ``num_chunks_in_sw[g]`` is the number of trailing prefix chunks that must
+    be present for object group ``g`` to serve a cache hit. ``-1`` means full
+    attention (the whole prefix); ``w >= 1`` is a sliding window of ``w``
+    chunks (mamba is ``1``).
+    """
+
+    num_chunks_in_sw: list[int]
+
+    def __post_init__(self) -> None:
+        for w in self.num_chunks_in_sw:
+            if w == 0 or w < -1:
+                raise ValueError(
+                    "AttnWindowDesc: each window must be -1 (full attention) "
+                    f"or >= 1 chunk, got {w}"
+                )
+
+    @property
+    def num_object_groups(self) -> int:
+        """Number of object groups this descriptor covers."""
+        return len(self.num_chunks_in_sw)
+
+    def is_full_attention(self, object_group_idx: int) -> bool:
+        """Whether the object group depends on the entire prefix.
+
+        Args:
+            object_group_idx: 0-based object group index.
+
+        Returns:
+            True if the group attends to the whole prefix, False if it uses a
+            bounded sliding window.
+        """
+        return self.num_chunks_in_sw[object_group_idx] < 0
+
+
+DEFAULT_ATTN_WINDOW_DESC = AttnWindowDesc(num_chunks_in_sw=[-1])
+"""A single full-attention object group; the default when no per-object-group
+windows are supplied."""
 
 
 @dataclass(frozen=True)
@@ -207,7 +334,7 @@ class PrefetchHandle:
 
 
 def ipc_key_to_object_keys(
-    ipc_key: IPCCacheServerKey,
+    ipc_key: "IPCCacheServerKey",
     chunk_hashes: list[bytes],
     object_group_ids: list[int],
 ) -> list[list[ObjectKey]]:

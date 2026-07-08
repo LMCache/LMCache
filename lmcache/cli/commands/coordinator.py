@@ -101,6 +101,44 @@ class CoordinatorCommand(BaseCommand):
                 "quota, 0.0 (exclusive) to 1.0 (default: 1.0)."
             ),
         )
+        parser.add_argument(
+            "--chunk-size",
+            type=int,
+            default=None,
+            help=(
+                "Tokens per KV chunk: the CacheBlend match unit and the unit used "
+                "to resolve pin token_ids to keys. Must equal the MP servers' "
+                "--chunk-size (default: 256)."
+            ),
+        )
+        parser.add_argument(
+            "--hash-algorithm",
+            type=str,
+            default=None,
+            help=(
+                "Token hash algorithm for pin key resolution; must equal the MP "
+                "servers' --hash-algorithm. 'blake3' (default) is self-contained; "
+                "other algorithms require vLLM importable in the coordinator."
+            ),
+        )
+        parser.add_argument(
+            "--blend-probe-stride",
+            type=int,
+            default=None,
+            help=(
+                "Positions between CacheBlend match probes; 1 probes every "
+                "offset for full recall (default: 1)."
+            ),
+        )
+        parser.add_argument(
+            "--timeout-keep-alive",
+            type=int,
+            default=None,
+            help=(
+                "Seconds the HTTP server keeps idle connections open "
+                "before closing them (default: 10)."
+            ),
+        )
 
     def execute(self, args: argparse.Namespace) -> None:
         """Build the coordinator config and serve the app with uvicorn.
@@ -145,6 +183,10 @@ class CoordinatorCommand(BaseCommand):
                 ("eviction_check_interval", args.eviction_check_interval),
                 ("eviction_ratio", args.eviction_ratio),
                 ("trigger_watermark", args.trigger_watermark),
+                ("chunk_size", args.chunk_size),
+                ("hash_algorithm", args.hash_algorithm),
+                ("blend_probe_stride", args.blend_probe_stride),
+                ("timeout_keep_alive", args.timeout_keep_alive),
             )
             if value is not None
         }
@@ -152,4 +194,10 @@ class CoordinatorCommand(BaseCommand):
             config = dataclasses.replace(config, **overrides)
 
         app = create_app(config)
-        uvicorn.run(app, host=config.host, port=config.port, log_level="info")
+        uvicorn.run(
+            app,
+            host=config.host,
+            port=config.port,
+            log_level="info",
+            timeout_keep_alive=config.timeout_keep_alive,
+        )

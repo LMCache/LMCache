@@ -43,13 +43,13 @@ fi
 
 LMCACHE_TRANSPORT_MODE="${LMCACHE_TRANSPORT_MODE:-engine_driven}"
 
-# When LMCACHE_TRANSPORT_MODE=lmcache_driven, LMCACHE_DATA_MODE selects the
+# When LMCACHE_TRANSPORT_MODE=engine_driven, LMCACHE_DATA_MODE selects the
 # specific data transfer mechanism: shm (default) or pickle.
 LMCACHE_DATA_MODE="${LMCACHE_DATA_MODE:-shm}"
 
 # Map LMCACHE_TRANSPORT_MODE to the vars expected by the shared script.
 case "${LMCACHE_TRANSPORT_MODE}" in
-  lmcache_driven)
+  engine_driven)
     case "${LMCACHE_DATA_MODE}" in
       shm)
         export LMCACHE_SHM_NAME="__default__"
@@ -57,16 +57,11 @@ case "${LMCACHE_TRANSPORT_MODE}" in
       pickle)
         export LMCACHE_SHM_NAME=""
         ;;
-      *)
-        echo "!! Unknown LMCACHE_DATA_MODE='${LMCACHE_DATA_MODE}'"
-        echo "   Valid values: shm, pickle"
-        exit 1
-        ;;
     esac
-    export LMCACHE_MP_TRANSFER_MODE="lmcache_driven"
-    ;;
-  engine_driven)
     export LMCACHE_MP_TRANSFER_MODE="engine_driven"
+    ;;
+  lmcache_driven)
+    export LMCACHE_MP_TRANSFER_MODE="lmcache_driven"
     ;;
   *)
     echo "!! Unknown LMCACHE_TRANSPORT_MODE='${LMCACHE_TRANSPORT_MODE}'"

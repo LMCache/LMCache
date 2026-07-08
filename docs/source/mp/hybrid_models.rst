@@ -1,4 +1,4 @@
-Hybrid-Attention Models
+Hybrid Attention Models
 =======================
 
 Some models interleave more than one attention type across their layers — most
@@ -13,6 +13,52 @@ caching and KV reuse work the same way they do for plain models.
 .. contents::
    :local:
    :depth: 2
+
+Validated hybrid models
+-----------------------
+
+Recipe pages for the validated hybrid-attention architectures:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 34 34 32
+
+   * - Model
+     - Attention layout
+     - Recipe
+   * - Gemma 3
+     - Sliding-window + full
+     - :doc:`/recipes/gemma3`
+   * - Gemma 4
+     - Sliding-window + full
+     - :doc:`/recipes/gemma4`
+   * - gpt-oss
+     - Sliding-window + full
+     - :doc:`/recipes/gpt_oss`
+   * - Qwen3.5 / Qwen3.6 series
+     - Mamba / GDN + full
+     - :doc:`/recipes/qwen3_5`
+   * - DeepSeek-V4-Flash
+     - Sparse-MLA (multiple KV groups)
+     - :doc:`/recipes/deepseek_v4_flash`
+   * - GLM 5.1/5.2
+     - Dynamic Sparse Attention (multiple KV groups)
+     - :doc:`/recipes/glm5_2`
+   * - MiniMax-M3
+     - Sparse attention + lightning indexer (mixed KV formats in one group)
+     - :doc:`/recipes/minimax_m3`
+
+.. toctree::
+   :hidden:
+   :maxdepth: 1
+
+   /recipes/gemma3
+   /recipes/gemma4
+   /recipes/gpt_oss
+   /recipes/qwen3_5
+   /recipes/deepseek_v4_flash
+   /recipes/glm5_2
+   /recipes/minimax_m3
 
 What Works
 ----------
@@ -41,7 +87,7 @@ configuration. Examples:
      - Single attention type
      - Supported
 
-Just point vLLM at the LMCache server as usual (see :doc:`quickstart`); LMCache
+Just point vLLM at the LMCache server as usual (see :doc:`/getting_started/quickstart`); LMCache
 detects the model's KV cache groups automatically at registration time.
 
 .. note::
@@ -50,6 +96,31 @@ detects the model's KV cache groups automatically at registration time.
    its hybrid KV cache manager **enabled** for these models (it does not fall
    back to a single unified group). You do not need
    ``--no-disable-hybrid-kv-cache-manager`` or any related flag.
+
+Object-group separation
+-----------------------
+
+At KV-cache registration LMCache buckets a hybrid model's layers into **object
+groups** — the unit it stores and retrieves as one object. By default
+(``--separate-object-groups``, on) each distinct cross-chunk attention window
+becomes its own object group: full-attention layers form one group, and each
+sliding-window size (mamba / GDN included) forms another. Pass
+``--no-separate-object-groups`` to keep every layer in a single full-attention
+object group instead (the previous behavior).
+
+.. code-block:: bash
+
+   # default: one object group per attention window
+   lmcache server --chunk-size 256 --l1-size-gb 100
+
+   # opt out: a single full-attention object group for all layers
+   lmcache server --chunk-size 256 --l1-size-gb 100 --no-separate-object-groups
+
+The flag is transparent to correctness — prefix caching and KV reuse behave the
+same either way, and a non-hybrid model (a single attention behavior) always
+resolves to one object group regardless of the setting. Separation organizes
+storage by attention window so that each group's cross-chunk window is tracked
+independently.
 
 Mamba / Linear-Attention Hybrids
 --------------------------------
@@ -205,6 +276,6 @@ The project ships this as the ``hma_lm_eval`` continuous-integration test (see
 See Also
 --------
 
-- :doc:`quickstart` — launching the LMCache server and a vLLM client.
+- :doc:`/getting_started/quickstart` — launching the LMCache server and a vLLM client.
 - Design notes on how groups are detected and addressed:
   ``docs/design/integration/vllm/hybrid-kv-cache-groups.md`` in the source tree.
