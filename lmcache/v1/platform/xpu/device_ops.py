@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """XPU ops backend: bind the SYCL ops over the torch baseline.
 
-:class:`XpuDeviceOps` binds the existing ``lmcache.xpu_ops`` SYCL module via
-:meth:`DeviceOps._bind_native`; the remaining ops inherit the torch baseline --
-identical to today's ``__dict__.update`` merge, just resolved through the
-registry. If the SYCL extension is not built, the device stays on the torch
-baseline with no degradation (``xpu_ops`` is optional today too).
+:class:`XpuDeviceOps` overrides :meth:`populate_module` to layer the existing
+``lmcache.xpu_ops`` SYCL module on top of the torch baseline; the remaining ops
+keep the torch implementation -- identical to today's merge, just resolved
+through the registry. If the SYCL extension is not built, the device stays on
+the torch baseline with no degradation.
 """
 
 # Future
@@ -24,7 +24,9 @@ logger = init_logger(__name__)
 class XpuDeviceOps(DeviceOps):
     device_type: ClassVar[str] = "xpu"
 
-    def __init__(self) -> None:
+    @classmethod
+    def populate_module(cls, target: object) -> None:
+        super().populate_module(target)  # torch baseline
         try:
             # First Party
             import lmcache.xpu_ops as sycl
@@ -34,4 +36,4 @@ class XpuDeviceOps(DeviceOps):
                 "baseline for all ops."
             )
             return
-        self._bind_native(sycl)  # SYCL ops shadow base; the rest inherit
+        cls._bind_native(target, sycl)  # SYCL ops shadow base; the rest inherit
