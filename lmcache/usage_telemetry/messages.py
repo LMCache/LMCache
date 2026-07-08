@@ -263,26 +263,6 @@ class MPServerMessage(UsageMessage):
 
 
 @dataclass
-class MPInstanceMessage(UsageMessage):
-    """KV-cache snapshot of one serving-engine instance.
-
-    Sent once per ``(model_name, world_size)`` pair per MP server session,
-    when a serving engine registers its KV caches with the server.
-    """
-
-    model_name: str
-    world_size: int
-    kv_dtypes: str
-    """Comma-joined torch dtype names, one per KV object group."""
-    kv_shapes: str
-    """Tensor dimensions per KV object group; dimensions joined with ``x``,
-    groups joined with ``;`` (e.g. ``"2x32x256x1024;2x4x256x1024"``)."""
-    attn_windows: str
-    """Comma-joined per-object-group attention windows in chunks; ``-1``
-    means full attention."""
-
-
-@dataclass
 class ContinuousContextMessage(UsageMessage):
     """Interval counters flushed periodically by the continuous reporter."""
 

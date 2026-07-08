@@ -8,7 +8,6 @@ import threading
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.usage_telemetry.mp import report_kv_cache_registered
 from lmcache.v1.distributed.api import (
     DEFAULT_ATTN_WINDOW_DESC,
     AttnWindowDesc,
@@ -82,13 +81,6 @@ class LayoutDescRegistry:
             attn_desc: Cross-chunk attention windows of all object groups, in
                 object-group order. Defaults to a single full-attention group.
         """
-        report_kv_cache_registered(
-            model_name=model_name,
-            world_size=world_size,
-            kv_dtypes=[str(dtype) for dtype in layout_desc.dtypes],
-            kv_shapes=[list(shape) for shape in layout_desc.shapes],
-            attn_windows=attn_desc.num_chunks_in_sw,
-        )
         key = (model_name, world_size)
         with self._lock:
             entry = self._registry.get(key)

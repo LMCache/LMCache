@@ -39,16 +39,9 @@ When LMCache runs as a **standalone multiprocess (MP) cache server**
   policies.
 
   The MP server's ``--instance-id`` is **never** sent: it can be
-  operator-chosen and therefore identifying.
-
-Additionally, when a serving engine registers its KV caches with the MP
-server, one message is sent per ``(model name, world size)`` pair:
-
-- **MPInstanceMessage**
-  Records the model name, world size, KV dtypes and tensor shapes, and the
-  per-group attention windows (full attention vs. sliding window). Repeat
-  registrations (multiple workers of one engine, restarts) are
-  deduplicated.
+  operator-chosen and therefore identifying. Model names are not known at
+  server startup (vLLM instances register later) and are not part of this
+  message.
 
 In addition to the one-shot messages above, a continuous reporter periodically
 sends interval counters (**ContinuousContextMessage**: tokens stored/hit and

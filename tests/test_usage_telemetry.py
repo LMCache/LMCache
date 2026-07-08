@@ -24,11 +24,9 @@ from lmcache.usage_telemetry import (
     UsageMessageSender,
     get_usage_identity,
     is_usage_tracking_enabled,
-    report_kv_cache_registered,
 )
 from lmcache.usage_telemetry.guard import swallow_telemetry_errors
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.distributed.api import AttnWindowDesc, MemoryLayoutDesc
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     GdsL1Config,
@@ -44,7 +42,6 @@ from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import FSL2AdapterConfig
 from lmcache.v1.distributed.serde import SerdeConfig
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 
 
 class RecordingSender(UsageMessageSender):
@@ -104,7 +101,6 @@ def usage_env(monkeypatch, tmp_path):
     monkeypatch.delenv("DO_NOT_TRACK", raising=False)
     monkeypatch.delenv("LMCACHE_USAGE_TRACK_INTERVAL", raising=False)
     monkeypatch.setattr("lmcache.usage_telemetry.identity._usage_identity", None)
-    monkeypatch.setattr("lmcache.usage_telemetry.mp._mp_usage_context", None)
     monkeypatch.setattr(ContinuousUsageContext, "_instance", None)
     return tmp_path
 
@@ -399,61 +395,6 @@ class TestMPUsage:
         assert context is None
 
 
-class TestKVCacheRegistrationHook:
-    @staticmethod
-    def _instance_payloads(sender: RecordingSender) -> list[dict[str, object]]:
-        return [
-            payload
-            for _, payload in sender.sent
-            if payload["message_type"] == "MPInstanceMessage"
-        ]
-
-    def test_registry_register_reports_once_per_pair(self, usage_env):
-        sender = RecordingSender()
-        context = InitializeMPUsageContext(
-            MPServerConfig(), make_storage_manager_config(), sender=sender
-        )
-        assert context is not None
-
-        registry = LayoutDescRegistry()
-        layout = MemoryLayoutDesc(
-            shapes=[torch.Size([2, 32, 256, 1024])], dtypes=[torch.bfloat16]
-        )
-        attn = AttnWindowDesc(num_chunks_in_sw=[-1, 8])
-        registry.register("test_model", 2, layout, attn)
-        # Second worker of the same engine: deduplicated.
-        registry.register("test_model", 2, layout, attn)
-        # Different world size: reported separately.
-        registry.register("test_model", 4, layout, attn)
-
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline and len(self._instance_payloads(sender)) < 2:
-            time.sleep(0.01)
-        # Grace period to catch an (incorrect) third message from the
-        # deduplicated registration.
-        time.sleep(0.2)
-        payloads = self._instance_payloads(sender)
-        assert len(payloads) == 2
-        assert {payload["world_size"] for payload in payloads} == {2, 4}
-        for payload in payloads:
-            assert payload["model_name"] == "test_model"
-            assert payload["kv_dtypes"] == "torch.bfloat16"
-            assert payload["kv_shapes"] == "2x32x256x1024"
-            assert payload["attn_windows"] == "-1,8"
-            assert payload["session_id"] == get_usage_identity().session_id
-            assert payload["deployment_mode"] == "mp_server"
-
-    def test_hook_noop_when_disabled(self, usage_env, monkeypatch):
-        monkeypatch.setenv("DO_NOT_TRACK", "1")
-        context = InitializeMPUsageContext(
-            MPServerConfig(), make_storage_manager_config()
-        )
-        assert context is None
-        report_kv_cache_registered(
-            "test_model", 1, ["torch.float16"], [[2, 2, 256, 8]], [-1]
-        )
-
-
 class RaisingSender(UsageMessageSender):
     """Transport stub whose every send raises."""
 
@@ -469,19 +410,11 @@ class TestFailureIsolation:
 
         assert boom() is None
 
-    def test_raising_sender_does_not_break_registration(self, usage_env):
-        context = InitializeMPUsageContext(
+    def test_raising_sender_does_not_break_mp_report(self, usage_env):
+        context = MPUsageContext(
             MPServerConfig(), make_storage_manager_config(), sender=RaisingSender()
         )
-        assert context is not None
-
-        registry = LayoutDescRegistry()
-        layout = MemoryLayoutDesc(
-            shapes=[torch.Size([2, 2, 256, 8])], dtypes=[torch.float16]
-        )
-        registry.register("test_model", 1, layout, AttnWindowDesc([-1]))
-        # The registration itself must succeed regardless of telemetry.
-        assert registry.find("test_model", 1) is layout
+        context.report_once()
 
     def test_raising_sender_does_not_break_continuous_flush(
         self, usage_env, monkeypatch
@@ -546,34 +479,19 @@ class TestEndToEnd:
         for _, payload in received:
             assert payload["deployment_mode"] == "single_process"
 
-    def test_mp_report_and_registration(self, usage_sink):
+    def test_mp_report(self, usage_sink):
         context = InitializeMPUsageContext(
             MPServerConfig(), make_storage_manager_config()
         )
         assert context is not None
-        startup = usage_sink.wait_for(2)
-        assert [payload["message_type"] for _, payload in startup] == [
+        received = usage_sink.wait_for(2)
+        assert [payload["message_type"] for _, payload in received] == [
             "EnvMessage",
             "MPServerMessage",
         ]
-
-        registry = LayoutDescRegistry()
-        registry.register(
-            "test_model",
-            2,
-            MemoryLayoutDesc(
-                shapes=[torch.Size([2, 32, 256, 1024])], dtypes=[torch.bfloat16]
-            ),
-            AttnWindowDesc([-1]),
-        )
-        received = usage_sink.wait_for(3)
-        assert len(received) == 3
-        instance_path, instance_payload = received[2]
-        assert instance_path == "/context"
-        assert instance_payload["message_type"] == "MPInstanceMessage"
-        assert instance_payload["model_name"] == "test_model"
-        assert instance_payload["deployment_mode"] == "mp_server"
-        # All three messages belong to the same session.
+        for path, payload in received:
+            assert path == "/context"
+            assert payload["deployment_mode"] == "mp_server"
         assert len({payload["session_id"] for _, payload in received}) == 1
 
     def test_continuous_report(self, usage_sink, monkeypatch):

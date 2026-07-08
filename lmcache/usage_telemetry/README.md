@@ -18,7 +18,7 @@ deployment operators), different transports, and independent opt-outs.
 | `env_probe.py` | Hardware/platform/cloud detection feeding `EnvMessage` |
 | `context.py` | `UsageContextBase`, single-process `UsageContext`, `InitializeUsageContext` — the `/context` snapshot reporters |
 | `continuous.py` | `ContinuousUsageContext` interval counters and lifespan histogram |
-| `mp.py` | MP server `MPUsageContext`, `InitializeMPUsageContext`, and the `report_kv_cache_registered` hook |
+| `mp.py` | MP server `MPUsageContext`, `InitializeMPUsageContext` |
 
 `lmcache/usage_context.py` remains as a backward-compatibility shim
 re-exporting the pre-package public names.
@@ -35,8 +35,9 @@ phone home is a dataclass there, and nowhere else. The contract:
   class attribute; senders route by it.
 - Fields are **flat and JSON-serializable** (the backend stores flat
   key-value pairs; lists are joined into delimited strings).
-- `session_id`, `machine_id`, and `schema_version` are stamped onto every
-  payload by `build_usage_payload`, not declared per message.
+- `session_id`, `machine_id`, `schema_version`, and `deployment_mode` are
+  stamped onto every payload by `build_usage_payload`, not declared per
+  message.
 
 ## Reporting paths
 
@@ -44,17 +45,12 @@ phone home is a dataclass there, and nowhere else. The contract:
 |---|---|---|
 | Single-process one-shot | `LMCacheEngine.__init__` → `InitializeUsageContext` | `EnvMessage`, `EngineMessage`, `MetadataMessage` |
 | MP server one-shot | `run_cache_server` → `InitializeMPUsageContext` | `EnvMessage`, `MPServerMessage` |
-| MP registration hook | `LayoutDescRegistry.register` → `report_kv_cache_registered` | `MPInstanceMessage`, once per `(model_name, world_size)` per session |
 | Continuous (single-process) | `LMCacheStatsLogger.log_worker`, every `LMCACHE_USAGE_TRACK_INTERVAL` s (default 600) | `ContinuousContextMessage`, `CacheLifespanMessage` |
 
-The registration hook exists because model and KV-layout information only
-become visible to the MP server when a serving engine registers its KV
-caches. All three registration paths (lmcache-driven, engine-driven, legacy
-blend) funnel through `LayoutDescRegistry.register`, so the hook lives
-there; deduplication per `(model_name, world_size)` happens in
-`MPUsageContext.report_instance`, so multi-worker engines and re-registrations
-report once. MP-mode continuous reporting (an EventBus subscriber feeding
-the same endpoints) is planned but not yet implemented.
+Model and KV-layout information only become visible to the MP server when
+a serving engine registers its KV caches; a registration-time report
+(`MPInstanceMessage`) is planned for a follow-up PR, together with MP-mode
+continuous reporting (an EventBus subscriber feeding the same endpoints).
 
 ## Failure isolation (no-throw guarantee)
 
@@ -62,13 +58,12 @@ A failure anywhere in telemetry must never affect caching or serving. The
 mechanisms, outermost first:
 
 - Every entry point called from serving code — `InitializeUsageContext`,
-  `InitializeMPUsageContext`, `report_kv_cache_registered`,
-  `ContinuousUsageContext.incr_or_send_stats`, `report_once`,
-  `report_instance` — is decorated with
+  `InitializeMPUsageContext`, `ContinuousUsageContext.incr_or_send_stats`,
+  `report_once` — is decorated with
   `guard.swallow_telemetry_errors`: exceptions are logged at debug level
   and swallowed.
-- One-shot and per-registration sends run on daemon threads; startup and
-  the registration path never block on the stats server.
+- One-shot sends run on a daemon thread; startup never blocks on the
+  stats server.
 - `UsageMessageSender.send` additionally swallows all transport errors
   with a 5 s timeout.
 - `ContinuousUsageContext.__init__` degrades (kv-bytes-per-token = 0)
@@ -76,11 +71,11 @@ mechanisms, outermost first:
 
 Tests for this contract live in `TestFailureIsolation`
 (`tests/test_usage_telemetry.py`): a transport that raises must not break
-KV-cache registration or the stats-logger flush.
+the startup report or the stats-logger flush.
 
 ## Identity and association contract
 
-Every payload — one-shot, hook, or continuous — is stamped with:
+Every payload — one-shot or continuous — is stamped with:
 
 - `session_id`: random UUID minted once per process. The join key: the
   `/context` rows keyed by a `session_id` describe the deployment that
@@ -117,8 +112,7 @@ Privacy rules:
 2. `DO_NOT_TRACK` in `1`/`true`/`yes` (cross-tool convention).
 
 When disabled, the factory functions return `None`, the continuous reporter
-and the registration hook no-op, and no state files (`machine_id`) are
-created.
+no-ops, and no state files (`machine_id`) are created.
 
 ## Transport and testing
 
