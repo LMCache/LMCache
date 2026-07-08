@@ -201,7 +201,7 @@ class AzureConnector(RemoteConnector):
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """Download the chunk for ``key`` into a freshly allocated MemoryObj.
 
-        The blob is streamed directly into the preallocated buffer (zero-copy).
+        The blob bytes are downloaded and copied into the preallocated buffer.
 
         Args:
             key: The cache engine key to fetch.
@@ -242,8 +242,20 @@ class AzureConnector(RemoteConnector):
         try:
             blob = self.container_client.get_blob_client(self._blob_name(key_str))
             downloader = await blob.download_blob()
-            # Zero-copy: stream straight into the preallocated buffer.
-            await downloader.readinto(memory_obj.byte_array)
+            # NOTE: the aio SDK's ``readinto`` writes to a file-like *stream* (it
+            # calls ``.write``); it cannot target a raw buffer, so passing
+            # ``memory_obj.byte_array`` raises AttributeError. Download the bytes
+            # and copy them into the preallocated buffer instead.
+            data = await downloader.readall()
+            dst = memoryview(memory_obj.byte_array).cast("B")
+            if len(data) != len(dst):
+                logger.error(
+                    f"Downloaded {len(data)} bytes for {key_str} but the buffer is "
+                    f"{len(dst)} bytes; dropping."
+                )
+                memory_obj.ref_count_down()
+                return None
+            dst[:] = data
             return memory_obj
         except Exception as e:
             logger.error(f"Failed to download {key_str} from Azure: {e}")
@@ -283,12 +295,14 @@ class AzureConnector(RemoteConnector):
 
         try:
             blob = self.container_client.get_blob_client(self._blob_name(key_str))
-            # Pass the memoryview directly (zero-copy); bytes() would copy the
-            # whole chunk.
+            # NOTE: the aio SDK's ``upload_blob`` cannot consume a raw
+            # ``memoryview`` (it raises "memoryview: unsupported format ..."); it
+            # needs ``bytes``. This copy is required for correctness.
+            data = bytes(memoryview(memory_obj.byte_array).cast("B"))
             await blob.upload_blob(
-                memory_obj.byte_array,
+                data,
                 overwrite=True,
-                length=memory_obj.get_physical_size(),
+                length=len(data),
             )
             self.object_size_cache[key_str] = memory_obj.get_physical_size()
             logger.debug(f"Uploaded {key_str} to Azure successfully")
