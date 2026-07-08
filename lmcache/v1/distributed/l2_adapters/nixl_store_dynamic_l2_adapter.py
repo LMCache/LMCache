@@ -732,10 +732,29 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         objects: list[MemoryObj],
         task_id: L2TaskId,
     ) -> None:
-        """Load each found key from its file via dynamic DMA read."""
+        """Execute a queued load task for ``task_id``.
+
+        For each requested key present in this adapter, read its stored
+        data into the caller-provided ``objects[i]`` and set bit ``i`` of
+        the result bitmap; keys that are missing or fail to load are left
+        unset. The bitmap is recorded under ``task_id`` (retrieve via
+        ``query_load_result``) and the load event fd is signaled.
+        """
         bitmap = Bitmap(len(keys))
         accessed_keys: list[ObjectKey] = []
         try:
+            # Read every present key's file concurrently (asyncio.gather
+            # below) so a multi-chunk request does not pay per-file NIXL
+            # latency serially -- the dominant cost of a single-request load.
+            #
+            # TODO(perf): batch a request's files into one NIXL
+            # ``register_memory`` (a single transfer + single deregister),
+            # like the static adapter's pre-registered flat-index pool,
+            # instead of the current per-file register/transfer/deregister.
+            # Trade-off: one large per-request registration list vs. many
+            # small ones.
+            coros = []
+            found_positions: list[int] = []
             for i, key in enumerate(keys):
                 with self._lock:
                     storage_obj = self._memory_objects.get(key)
@@ -747,12 +766,28 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                 mem_indices = self.nixl_agent.get_memory_indices(mem_addr, mem_size)
                 file_path = self.nixl_agent.get_file_path_for_key(key)
 
-                await self.nixl_agent.dynamic_load_file(
-                    mem_indices, file_path, self.nixl_agent.l1_align_bytes
+                coros.append(
+                    self.nixl_agent.dynamic_load_file(
+                        mem_indices, file_path, self.nixl_agent.l1_align_bytes
+                    )
                 )
+                found_positions.append(i)
 
-                bitmap.set(i)
-                accessed_keys.append(key)
+            if coros:
+                # return_exceptions=True so one chunk's failure doesn't
+                # discard the chunks that loaded successfully: mark each
+                # key by its own result rather than all-or-nothing.
+                results = await asyncio.gather(*coros, return_exceptions=True)
+                for pos, result in zip(found_positions, results, strict=True):
+                    if isinstance(result, BaseException):
+                        logger.error(
+                            "Dynamic NIXL load failed for key %s: %r",
+                            keys[pos],
+                            result,
+                        )
+                        continue
+                    bitmap.set(pos)
+                    accessed_keys.append(keys[pos])
 
         except Exception:
             logger.exception("Dynamic NIXL load task %d failed", task_id)
