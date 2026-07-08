@@ -61,6 +61,7 @@ from lmcache.v1.distributed.memory_manager.maru_memory_allocator import (
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
+from lmcache.v1.mp_observability.otel_init import register_gauge
 
 if TYPE_CHECKING:
     # Third Party
@@ -125,6 +126,22 @@ def _clamp_extra_count(extra_count: int) -> int:
     return extra_count
 
 
+def _maru_l1_usage_ratio_or_zero(target: "MaruL1Manager | None") -> float:
+    """Return ``target.get_memory_usage()`` as a 0.0-1.0 ratio.
+
+    PARITY(L1Manager._l1_usage_ratio_or_zero): duplicated here rather than
+    imported so maru stays self-contained and does not reach into a private
+    upstream helper. Returns 0.0 when ``target`` is None or ``total_bytes`` is
+    zero so the observable-gauge callback never raises during scrape.
+    """
+    if target is None:
+        return 0.0
+    used, total = target.get_memory_usage()
+    if total <= 0:
+        return 0.0
+    return used / total
+
+
 @dataclass
 class _PendingRead:
     """A pinned read staged between reserve_read and the last finish_read.
@@ -168,6 +185,16 @@ class MaruL1Manager:
     them against the MaruServer directory and the CXL allocator.
     """
 
+    # PARITY(L1Manager): singleton dispatch for the L1 fullness gauges. The
+    # OTel SDK honors only the first registration of a gauge name, so register
+    # once (``_gauge_registered``) and route the callback to the most recently
+    # built instance (``_gauge_target``). A real deployment has one
+    # MaruL1Manager; the indirection just keeps multi-instance tests (which
+    # share the process-wide meter) reading a live target instead of a stale
+    # one.
+    _gauge_registered: bool = False
+    _gauge_target: "MaruL1Manager | None" = None
+
     def __init__(self, config: L1ManagerConfig) -> None:
         maru_config = config.memory_config.maru_config
         if maru_config is None:
@@ -198,6 +225,32 @@ class MaruL1Manager:
             target=self._sweep_loop, name="maru-l1-sweeper", daemon=True
         )
         self._sweeper.start()
+
+        # PARITY(L1Manager): expose the same L1 fullness gauges. Upstream these
+        # are registered in L1Manager.__init__, but on the maru path
+        # StorageManager builds a MaruL1Manager *instead of* an L1Manager
+        # (they are mutually exclusive), so without this the metric would
+        # silently vanish whenever maru is the L1 backend. Same meter/gauge
+        # names as upstream so consumers see one metric regardless of backend.
+        MaruL1Manager._gauge_target = self
+        if not MaruL1Manager._gauge_registered:
+            MaruL1Manager._gauge_registered = True
+            register_gauge(
+                "lmcache.l1_manager",
+                "lmcache_mp.l1_memory_usage_bytes",
+                "Bytes currently held in L1 cache",
+                lambda: (
+                    MaruL1Manager._gauge_target.get_memory_usage()[0]
+                    if MaruL1Manager._gauge_target is not None
+                    else 0
+                ),
+            )
+            register_gauge(
+                "lmcache.l1_manager",
+                "lmcache_mp.l1_usage_ratio",
+                "L1 used/total ratio (0.0–1.0)",
+                lambda: _maru_l1_usage_ratio_or_zero(MaruL1Manager._gauge_target),
+            )
 
     def register_listener(self, listener: L1ManagerListener) -> None:
         """Register a listener for ``on_l1_keys_*`` events.

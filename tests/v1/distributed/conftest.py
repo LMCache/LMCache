@@ -12,6 +12,9 @@ from typing import Any, cast
 import sys
 import types
 
+# Third Party
+import pytest
+
 if find_spec("lmcache.native_storage_ops") is None:
 
     class Bitmap:
@@ -89,3 +92,26 @@ if find_spec("lmcache.native_storage_ops") is None:
     fallback_module_any.Bitmap = Bitmap
     fallback_module_any.TTLLock = TTLLock
     sys.modules["lmcache.native_storage_ops"] = fallback_module
+
+
+@pytest.fixture(autouse=True)
+def _stub_maru_gauge_registration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep test-built ``MaruL1Manager``s off the process-global OTel meter.
+
+    OTel honors only the FIRST observable-gauge registration for a given
+    name; later registrations are silently dropped. Production never builds
+    both L1 backends in one process (StorageManager picks exactly one), but
+    tests build both — a ``MaruL1Manager`` constructed before the first
+    stock ``L1Manager`` would permanently claim
+    ``lmcache_mp.l1_memory_usage_bytes`` / ``lmcache_mp.l1_usage_ratio`` and
+    starve the stock gauge assertions in ``test_l1_l2_state_metrics.py``.
+    Stub the maru-side registration hook so only the stock backend registers
+    on the shared meter; tests that assert maru's gauge wiring monkeypatch
+    their own recording fake over this stub.
+    """
+    try:
+        # First Party
+        from lmcache.v1.distributed import maru_l1_manager
+    except ImportError:
+        return
+    monkeypatch.setattr(maru_l1_manager, "register_gauge", lambda *args, **kwargs: None)

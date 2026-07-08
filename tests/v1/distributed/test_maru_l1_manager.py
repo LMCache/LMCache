@@ -482,6 +482,44 @@ def test_get_memory_usage_watermark_tracks_auto_expand():
     assert mgr_off.get_memory_usage() == (chunk, own_pool)
 
 
+def test_registers_l1_fullness_gauges(monkeypatch):
+    """MaruL1Manager must register the L1 fullness gauges itself.
+
+    On the maru path StorageManager builds a MaruL1Manager instead of an
+    L1Manager (they are mutually exclusive), and the
+    ``lmcache_mp.l1_memory_usage_bytes`` / ``lmcache_mp.l1_usage_ratio`` gauges
+    live in L1Manager.__init__ upstream. Without registering them here the
+    metrics would silently vanish whenever maru is the L1 backend.
+    """
+    # First Party
+    import lmcache.v1.distributed.maru_l1_manager as maru_mod
+
+    # Reset the process-wide "registered once" guard so this construction is
+    # observed regardless of managers built earlier in the session.
+    monkeypatch.setattr(maru_mod.MaruL1Manager, "_gauge_registered", False)
+    registered: dict[str, object] = {}
+    monkeypatch.setattr(
+        maru_mod,
+        "register_gauge",
+        lambda meter, name, desc, func: registered.__setitem__(name, func),
+    )
+
+    chunk = 64
+    manager, handler, _ = make_maru_manager(chunk_size=chunk)
+    handler.cxl_free = 100 * chunk
+    _seed(handler, _key(1))  # one allocated page -> used == chunk
+
+    assert "lmcache_mp.l1_memory_usage_bytes" in registered
+    assert "lmcache_mp.l1_usage_ratio" in registered
+
+    used, total = manager.get_memory_usage()
+    assert used == chunk
+    assert total > 0
+    # Callbacks read the live manager, not the 0 fallback.
+    assert registered["lmcache_mp.l1_memory_usage_bytes"]() == used
+    assert registered["lmcache_mp.l1_usage_ratio"]() == used / total
+
+
 def test_is_key_evictable_tracks_local_staging():
     manager, handler, _ = make_maru_manager()
     k = _key(1)
