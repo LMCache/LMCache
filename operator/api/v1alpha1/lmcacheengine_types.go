@@ -107,10 +107,10 @@ type L1BackendSpec struct {
 
 // EvictionSpec defines the cache eviction configuration.
 type EvictionSpec struct {
-	// policy is the eviction policy. Currently only LRU is supported.
+	// policy is the eviction policy. LRU or noop.
 	// +optional
 	// +kubebuilder:default="LRU"
-	// +kubebuilder:validation:Enum=LRU
+	// +kubebuilder:validation:Enum=LRU;noop
 	Policy *string `json:"policy,omitempty"`
 
 	// triggerWatermark is the cache usage ratio that triggers eviction.
@@ -185,7 +185,7 @@ type L2BackendSpec struct {
 	// cache misses. "default" picks the first adapter that has the key.
 	// +optional
 	// +kubebuilder:default="default"
-	// +kubebuilder:validation:Enum=default
+	// +kubebuilder:validation:Enum=default;retain
 	PrefetchPolicy *string `json:"prefetchPolicy,omitempty"`
 
 	// prefetchMaxInFlight limits the number of concurrent prefetch
@@ -299,7 +299,7 @@ type CoordinatorConnectionSpec struct {
 type LMCacheEngineSpec struct {
 	// gpuVendor selects the GPU vendor. "nvidia" (default) requires the NVIDIA
 	// GPU Operator's "nvidia" RuntimeClass; "amd" runs on the default container
-	// runtime with privileged: true.
+	// runtime.
 	// +optional
 	// +kubebuilder:default="nvidia"
 	// +kubebuilder:validation:Enum=nvidia;amd
@@ -387,6 +387,22 @@ type LMCacheEngineSpec struct {
 	// priorityClassName is the priority class for the pods.
 	// +optional
 	PriorityClassName string `json:"priorityClassName,omitempty"`
+
+	// hostNetwork runs the pod in the host's network namespace. When true the
+	// operator also sets dnsPolicy to ClusterFirstWithHostNet so cluster DNS
+	// still works. Default: false.
+	// +optional
+	// +kubebuilder:default=false
+	HostNetwork *bool `json:"hostNetwork,omitempty"`
+
+	// privileged runs the engine container in privileged mode. On some clusters
+	// this is required for the engine to see all node GPUs (for CUDA IPC) without
+	// claiming any via the nvidia.com/gpu device plugin; on many clusters
+	// NVIDIA_VISIBLE_DEVICES=all already grants that visibility without it, so it
+	// defaults to false.
+	// +optional
+	// +kubebuilder:default=false
+	Privileged *bool `json:"privileged,omitempty"`
 
 	// extraArgs are additional CLI flags appended to the server command.
 	// They are appended last and can override any auto-generated flag.

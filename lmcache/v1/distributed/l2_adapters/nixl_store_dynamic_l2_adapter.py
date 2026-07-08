@@ -1254,7 +1254,19 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         objects: list[MemoryObj],
         task_id: L2TaskId,
     ) -> None:
-        """Load found keys using one batched NIXL transfer."""
+        """Execute a queued load task for ``task_id``.
+
+        For each requested key present in this adapter, read its stored
+        data into the caller-provided ``objects[i]`` and set bit ``i`` of
+        the result bitmap; keys that are missing or fail to load are left
+        unset. The bitmap is recorded under ``task_id`` (retrieve via
+        ``query_load_result``) and the load event fd is signaled.
+
+        Present keys are loaded with one native NIXL batched transfer so the
+        dynamic adapter follows the same transfer shape as the static adapter.
+        NIXL currently reports batched-transfer success as one aggregate status;
+        if the batch fails, this task treats all keys in that batch as failed.
+        """
         bitmap = Bitmap(len(keys))
         accessed_keys: list[ObjectKey] = []
         load_specs: list[DynamicStorageSpec] = []

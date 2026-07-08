@@ -41,7 +41,7 @@ from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
     CBMatchResult,
     CBUnifiedLookupResult,
-    CudaIPCWrapper,
+    DeviceIPCWrapper,
     IPCCacheServerKey,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
@@ -441,7 +441,7 @@ class BlendV3Module(InstanceLivenessTarget):
     def cb_register_rope(
         self,
         instance_id: int,
-        cos_sin_cache_ipc: CudaIPCWrapper,
+        cos_sin_cache_ipc: DeviceIPCWrapper,
         head_size: int,
         is_neox_style: bool,
     ) -> None:
@@ -453,7 +453,7 @@ class BlendV3Module(InstanceLivenessTarget):
 
         Args:
             instance_id (int): KV-cache instance to attach rope state to.
-            cos_sin_cache_ipc (CudaIPCWrapper): IPC handle to vLLM's cos/sin
+            cos_sin_cache_ipc (DeviceIPCWrapper): IPC handle to vLLM's cos/sin
                 rope cache.
             head_size (int): Rotary head dimension.
             is_neox_style (bool): True for NeoX (contiguous halves), else GPT-J.
@@ -1436,7 +1436,7 @@ class BlendV3Module(InstanceLivenessTarget):
         self,
         key: IPCCacheServerKey,
         cb_match_result: list[CBMatchResult],
-        gpu_block_ids: list[int],
+        gpu_block_ids: list[list[int]],
         instance_id: int,
         event_ipc_handle: bytes,
     ) -> tuple[bytes, bool]:
@@ -1453,7 +1453,9 @@ class BlendV3Module(InstanceLivenessTarget):
             key (IPCCacheServerKey): The request key.
             cb_match_result (list[CBMatchResult]): Matched ranges to scatter
                 (prefix-hit and shifted), any order.
-            gpu_block_ids (list[int]): This request's full paged block table.
+            gpu_block_ids (list[list[int]]): This request's paged block table
+                per engine (kernel) group; single-group models pass [[...]].
+                Mirrors the engine RETRIEVE/STORE per-group block-id contract.
             instance_id (int): Target KV-cache instance.
             event_ipc_handle (bytes): IPC handle to the forward's CUDA event.
 
@@ -1550,8 +1552,23 @@ class BlendV3Module(InstanceLivenessTarget):
             check_interprocess_event_support()
             event = torch_dev.Event(interprocess=True)
 
-            # Staged once (single group), sliced per chunk inside the loop.
-            all_block_ids_gpu = gpu_context.stage_block_ids([gpu_block_ids])[0]
+            # One staged block-id tensor per engine group, indexed by group.
+            block_ids_per_group_gpu = gpu_context.stage_block_ids(gpu_block_ids)
+
+            # Resolve each kernel group's block table + block size once. Select
+            # by engine_group_idx (kernel groups may share one, e.g. MiniMax-M3).
+            kgm = gpu_context.kv_layer_groups_manager
+            resolved_groups: list[tuple[torch.Tensor, int]] = []
+            for group_idx in range(num_groups):
+                eg_idx = kgm.kernel_groups[group_idx].engine_group_idx
+                if eg_idx >= len(block_ids_per_group_gpu):
+                    eg_idx = 0
+                resolved_groups.append(
+                    (
+                        block_ids_per_group_gpu[eg_idx],
+                        kgm.kernel_groups[group_idx].tokens_per_block,
+                    )
+                )
 
             self._event_bus.publish_on_stream(
                 gpu_context.cupy_stream,
@@ -1586,7 +1603,12 @@ class BlendV3Module(InstanceLivenessTarget):
                     # Per-token scatter handles any cur_st; just bound the
                     # matched range to the allocated slots.
                     pairs: list[tuple[CBMatchResult, Any]] = []
-                    num_slots = int(all_block_ids_gpu.numel()) * tokens_per_block
+                    # Bound by the smallest group: under HMA the sliding group
+                    # has fewer blocks than the full group, so [0] isn't safe.
+                    num_slots = min(
+                        int(block_ids.numel()) * group_bs
+                        for block_ids, group_bs in resolved_groups
+                    )
                     for r, memory_obj in zip(cb_match_result, memory_objs, strict=True):
                         if r.cur_ed > num_slots:
                             logger.warning(
@@ -1658,7 +1680,6 @@ class BlendV3Module(InstanceLivenessTarget):
 
                             # (c) Per-token slot scatter: partial vLLM blocks
                             # shared with recomputed tokens stay disjoint.
-                            bs = tokens_per_block
                             pos = torch.cat(
                                 [
                                     torch.arange(
@@ -1670,11 +1691,13 @@ class BlendV3Module(InstanceLivenessTarget):
                                     for (r, _) in batch
                                 ]
                             )
-                            slot_mapping = all_block_ids_gpu[pos // bs] * bs + (
-                                pos % bs
-                            )
-                            page_buffer_size = gpu_context.num_blocks * bs
                             for group_idx in range(num_groups):
+                                # This group's block table + size (resolved above).
+                                group_block_ids, group_bs = resolved_groups[group_idx]
+                                page_buffer_size = gpu_context.num_blocks * group_bs
+                                slot_mapping = group_block_ids[
+                                    pos // group_bs
+                                ] * group_bs + (pos % group_bs)
                                 tmp_buffers = [
                                     gpu_context.get_temp_kernel_group_buffer(
                                         slot_idx, group_idx
@@ -1689,8 +1712,8 @@ class BlendV3Module(InstanceLivenessTarget):
                                     gpu_context.device,
                                     page_buffer_size,
                                     lmc_ops.TransferDirection.H2D,
-                                    gpu_context.engine_kv_format,
-                                    block_size=bs,
+                                    gpu_context.get_engine_kv_format(group_idx),
+                                    block_size=group_bs,
                                     head_size=rope_state.head_size,
                                 )
 

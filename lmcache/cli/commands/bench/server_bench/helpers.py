@@ -48,15 +48,14 @@ try:
     from lmcache.utils import (
         EngineType,
         check_interprocess_event_support,
-        compress_slot_mapping,
     )
     from lmcache.v1.kv_layer_groups import (
         DTYPE_MAP,
         KVLayerGroupInfo,
     )
     from lmcache.v1.multiprocess.custom_types import (
-        CudaIPCWrapper,
         IPCCacheServerKey,
+        KVCache,
         RegisterEngineDrivenContextPayload,
     )
     from lmcache.v1.multiprocess.futures import MessagingFuture
@@ -321,7 +320,7 @@ def _send_register_kv_cache(
     model_name: str = _MODEL_NAME,
     world_size: int = _WORLD_SIZE,
     layout_hints: dict | None = None,
-    kv_caches: list[CudaIPCWrapper] | None = None,
+    kv_caches: KVCache | None = None,
     use_gpu: bool = True,
     use_handle: bool | None = None,
     engine_group_infos: "list[EngineGroupInfo] | None" = None,
@@ -404,6 +403,47 @@ def _send_register_kv_cache(
     # can mmap the same pool and exchange tensor data without going
     # through pickle.
     return result
+
+
+def _send_unregister_kv_cache(
+    client: MessageQueueClient,
+    instance_id: int = 0,
+    use_handle: bool = True,
+) -> bool:
+    """Deregister a KV cache context from the MP server.
+
+    The inverse of :func:`_send_register_kv_cache`. Without this call
+    the server keeps the bench's registration (and the CUDA-IPC / POSIX
+    SHM mappings it holds) alive forever, leaking one context entry per
+    bench run.
+
+    Dispatches to the correct protocol based on ``use_handle``, mirroring
+    the register path:
+
+    * Handle mode: ``UNREGISTER_KV_CACHE``.
+    * Data mode: ``UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT``.
+
+    Both protocols take a single ``instance_id`` payload and return a void
+    reply, so success is distinguished from an RPC timeout only.
+
+    Args:
+        client: The MP message-queue client.
+        instance_id: The instance ID used at registration time. Must match
+            the ``instance_id`` passed to :func:`_send_register_kv_cache`.
+        use_handle: ``True`` for the handle path (GPU CUDA-IPC / CPU SHM),
+            ``False`` for the engine-driven data path.
+
+    Returns:
+        ``True`` if the server acknowledged the call, ``False`` on RPC
+        timeout.
+    """
+    request_type = (
+        RequestType.UNREGISTER_KV_CACHE
+        if use_handle
+        else RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
+    )
+    result = _call(client, request_type, [instance_id])
+    return result is not _TIMEOUT
 
 
 def _send_lookup(
@@ -588,7 +628,7 @@ def _compute_client_checksums(
     expects, so a cold-pass digest can be compared with a warm-pass
     digest to verify that ``RETRIEVE`` actually wrote back the data
     we wrote during ``STORE`` -- without relying on a server-side
-    ``/kvcache/check`` endpoint (which only exists in handle mode).
+    ``/cache/checksums`` endpoint (which only exists in handle mode).
     """
     if chunk_size % block_size != 0:
         raise ValueError(
@@ -801,17 +841,9 @@ def _query_checksum(
     ``str.join`` crash.
     """
     blocks = list(range(block_offset, block_offset + num_blocks))
-    compressed = compress_slot_mapping(blocks)
-    parts: list[str] = []
-    for item in compressed:
-        if isinstance(item, list):
-            parts.append("[%d,%d]" % (item[0], item[1]))
-        else:
-            parts.append(str(item))
-    block_ids = ",".join(parts)
-    # The MP /kvcache/check endpoint is block-native: its
-    # chunk_size counts blocks per chunk, while our caller passes
-    # in the server-side token-level chunk_size. Convert here.
+    # The MP /cache/checksums endpoint is block-native: its chunk_size counts
+    # blocks per chunk, while our caller passes in the server-side token-level
+    # chunk_size. Convert here.
     if chunk_size % block_size != 0:
         print(
             "  [WARNING] chunk_size %d not a multiple of block_size %d; "
@@ -819,16 +851,17 @@ def _query_checksum(
         )
         return None
     chunk_size_blocks = chunk_size // block_size
-    url = (
-        "%s/kvcache/check?block_ids=%s&block_size=%d&chunk_size=%d&layerwise=false"
-    ) % (
-        http_base,
-        block_ids,
-        block_size,
-        chunk_size_blocks,
-    )
+    url = "%s/cache/checksums" % http_base
+    payload = json.dumps(
+        {"block_ids": blocks, "chunk_size": chunk_size_blocks, "layerwise": False}
+    ).encode()
     try:
-        req = urllib.request.Request(url)
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode())
             if data.get("status") != "success":
@@ -898,7 +931,7 @@ def _process_request(
       proves the server returned the exact bytes we sent.
 
     Handle mode keeps the historical server-side
-    ``/kvcache/check`` path; client tensors are not consulted (in
+    ``/cache/checksums`` path; client tensors are not consulted (in
     handle mode the client and server share the same SHM/IPC
     pages, so a client-side hash equals itself by construction).
     """
@@ -1063,7 +1096,7 @@ def _process_request(
     #       cold -> ground truth captured pre-STORE
     #       warm -> hash post-RETRIEVE; cold == warm proves the
     #               server returned the exact bytes we wrote.
-    #   * handle mode: query /kvcache/check on the server, which
+    #   * handle mode: query /cache/checksums on the server, which
     #     reads the shared SHM/IPC pages directly.
     checksums: list[str] | None = None
     if client_tensors is not None and num_full_tokens > 0:

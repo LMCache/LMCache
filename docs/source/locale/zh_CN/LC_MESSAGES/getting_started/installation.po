@@ -27,9 +27,7 @@ msgstr "安装"
 msgid ""
 "**Prerequisites:** Linux · Python 3.9–3.13 · NVIDIA GPU (compute 7.0+) · "
 "CUDA 12.1+ · `uv <https://astral.sh/uv>`_"
-msgstr ""
-"**前提条件：** Linux · Python 3.9–3.13 · NVIDIA GPU（算力 7.0+）· CUDA 12.1+ · "
-"`uv <https://astral.sh/uv>`_"
+msgstr "**前提条件：** Linux · Python 3.9–3.13 · NVIDIA GPU（算力 7.0+）· CUDA 12.1+ · `uv <https://astral.sh/uv>`_"
 
 #: ../../source/getting_started/installation.rst:9
 msgid "Install LMCache"
@@ -83,9 +81,7 @@ msgid ""
 "Nightly wheels are built from the latest ``dev`` branch each day at 07:30"
 " UTC and published to GitHub Releases. No version pinning required — "
 "``--pre`` picks the latest nightly automatically."
-msgstr ""
-"Nightly wheel 包每天 UTC 时间 07:30 从最新的 ``dev`` 分支构建并发布到 GitHub Releases。无需锁定版本 — "
-"``--pre`` 会自动选取最新的 nightly 版本。"
+msgstr "Nightly wheel 包每天 UTC 时间 07:30 从最新的 ``dev`` 分支构建并发布到 GitHub Releases。无需锁定版本 — ``--pre`` 会自动选取最新的 nightly 版本。"
 
 #: ../../source/getting_started/installation.rst
 msgid "From Source"

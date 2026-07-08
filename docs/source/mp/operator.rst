@@ -103,7 +103,13 @@ Connecting vLLM
 ---------------
 
 The operator creates a ConfigMap named ``<engine-name>-connection`` containing
-the ``kv-transfer-config`` JSON.  Mount it in your vLLM Deployment:
+the ``kv-transfer-config`` JSON.  You can either let the operator's mutating
+webhook inject it for you (recommended -- keeps your vLLM manifest clean) or
+mount it by hand.  See :ref:`mp-operator-connection-injection` below for the
+webhook flow; the rest of this section describes the manual mount that is its
+equivalent.
+
+Mount it in your vLLM Deployment:
 
 .. code-block:: yaml
 
@@ -163,6 +169,127 @@ Key requirements for vLLM pods:
   inline.  The ConfigMap name is always ``<LMCacheEngine name>-connection``.
 - **No hostNetwork needed** -- The operator's node-local Service handles
   routing via ``internalTrafficPolicy=Local``.
+
+.. _mp-operator-connection-injection:
+
+Connection Injection (Webhook)
+-------------------------------
+
+Hand-wiring the ConfigMap mount and the ``$(cat ...)`` argument substitution
+above is repetitive across vLLM Deployments.  A **mutating admission webhook**
+shipped with the operator can do it for you so the vLLM manifest stays clean.
+It mirrors the CacheBlend webhook (see :ref:`mp-operator-cacheblend`) with an
+``lmcache-`` annotation/label discriminator so the two injectors never
+cross-fire on the same pod.
+
+When invoked on an opted-in pod whose ``<engine>-connection`` ConfigMap exists,
+the webhook mutates the pod at admission time to add:
+
+- ``--kv-transfer-config <JSON>`` -- the ``LMCacheMPConnector`` config, read
+  verbatim from the engine's ``<engine>-connection`` ConfigMap and inlined onto
+  the vLLM container's ``args`` (no volume mount needed);
+- ``hostIPC: true`` on the pod spec (CUDA IPC with the node-local server);
+- ``PYTHONHASHSEED=0`` on the vLLM container env, **set-if-absent** -- it
+  preserves a value you already set.
+
+Unlike the CacheBlend injector it does **not** consult the engine CR: the
+entire connector config lives in the connection ConfigMap, and
+``LMCacheEngine`` has no injection sub-spec.  It fails open
+(``failurePolicy: Ignore``) and is idempotent (re-admitted pods carrying the
+``lmcache.ai/lmcache-injected`` stamp are allowed unchanged).
+
+Prerequisites
+~~~~~~~~~~~~~
+
+- **cert-manager** + ``make deploy`` (not ``make run``, which is
+  controller-only and disables the webhook via ``ENABLE_WEBHOOKS=false``) --
+  same as the CacheBlend webhook; install once per cluster (see
+  :ref:`mp-operator-cacheblend` "Additional Prerequisites").
+- **Pod Security Standards** -- the injected ``hostIPC`` is rejected by the
+  ``baseline`` / ``restricted`` PSS profiles, so the vLLM pod's namespace must
+  be labeled ``pod-security.kubernetes.io/enforce=privileged``.
+- **Engine reconciled in the same namespace** -- the webhook reads the
+  ``<engine>-connection`` ConfigMap directly, so the ``LMCacheEngine`` must
+  already exist in the vLLM pod's namespace.
+
+Opting a vLLM Pod In
+~~~~~~~~~~~~~~~~~~~~
+
+Add the opt-in label and the engine-binding annotation to the pod template, and
+launch vLLM via the image **ENTRYPOINT** (args only) -- a
+``command: ["/bin/sh", "-c", ...]`` wrapper is skipped (the webhook stamps
+``lmcache.ai/lmcache-skip-reason=command-override`` because appended args would
+not reach ``vllm serve``):
+
+.. code-block:: yaml
+
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: vllm-lmcache
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: vllm-lmcache
+      template:
+        metadata:
+          labels:
+            app: vllm-lmcache
+            lmcache.ai/lmcache-inject: "true"        # opt-in (webhook objectSelector)
+          annotations:
+            lmcache.ai/lmcache-engine: "my-cache"    # bind to the engine (same namespace)
+            # Optional -- name the vLLM container if it is not the first one:
+            # lmcache.ai/lmcache-container: "vllm"
+        spec:
+          runtimeClassName: nvidia
+          # Do NOT set hostIPC here or mount an emptyDir at /dev/shm -- the
+          # webhook injects hostIPC=true; an emptyDir would shadow the host's
+          # /dev/shm and break cudaIpcOpenMemHandle.
+          containers:
+            - name: vllm
+              image: lmcache/vllm-openai:latest
+              # Args-only launch (image ENTRYPOINT is ["vllm", "serve"]). The
+              # webhook appends --kv-transfer-config; do NOT add it yourself
+              # (a user-supplied one stamps skip-reason=kv-transfer-config-present).
+              args: ["<your-model>", "--port", "8000", "--gpu-memory-utilization", "0.8"]
+              ports:
+                - name: http
+                  containerPort: 8000
+              resources:
+                limits:
+                  nvidia.com/gpu: "1"
+
+A ready-to-edit manifest lives at
+``operator/config/samples/vllm_lmcache_deployment.yaml``.
+
+Verifying Injection
+~~~~~~~~~~~~~~~~~~~
+
+The webhook mutates **Pods**, not the Deployment, so inspect a pod (not the
+Deployment spec):
+
+.. code-block:: bash
+
+    kubectl get pod -l app=vllm-lmcache -o yaml | \
+      grep -E "hostIPC|kv-transfer-config|lmcache-injected|lmcache-skip-reason"
+
+If nothing was injected, check the pod's ``lmcache.ai/lmcache-skip-reason``
+annotation:
+
+- ``command-override`` -- the pod uses a ``sh -c`` wrapper, so injected args
+  would not reach ``vllm serve``.
+- ``kv-transfer-config-present`` -- the user already supplied
+  ``--kv-transfer-config``; the webhook does not clobber it.
+- ``engine-not-found`` -- the ``<engine>-connection`` ConfigMap is missing
+  (engine not yet reconciled, or wrong namespace, or wrong name).
+- ``target-container-not-found`` -- the
+  ``lmcache.ai/lmcache-container`` annotation names a container the pod does
+  not have.
+
+With ``failurePolicy: Ignore`` a webhook / cert problem also leaves the pod
+un-mutated silently -- confirm the operator pod is ``Running`` and the
+``MutatingWebhookConfiguration`` exists.
 
 Verifying the Deployment
 ------------------------
@@ -238,6 +365,9 @@ Server
    * - ``server.hashAlgorithm``
      - ``blake3``
      - ``builtin``, ``sha256_cbor``, or ``blake3``.
+   * - ``server.httpPort``
+     - ``8080``
+     - HTTP frontend port for health checks and cache admin (1024--65535).
 
 L1 Cache
 ~~~~~~~~
@@ -265,7 +395,8 @@ Eviction
      - Description
    * - ``eviction.policy``
      - ``LRU``
-     - Only ``LRU`` is supported.
+     - ``LRU`` or ``noop``.  Use ``noop`` with ``l2Backend.storePolicy: skip_l1``
+       for buffer-only mode.
    * - ``eviction.triggerWatermark``
      - ``0.8``
      - Usage ratio (0.0--1.0] to trigger eviction.
@@ -309,10 +440,34 @@ L2 Storage
    * - Field
      - Default
      - Description
-   * - ``l2Backends``
+   * - ``l2Backend``
      - --
      - List of L2 backends (``type`` + ``config``).
        See :doc:`l2_storage/index`.
+
+GPU & Security
+~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 20 45
+
+   * - Field
+     - Default
+     - Description
+   * - ``gpuVendor``
+     - ``nvidia``
+     - GPU vendor: ``nvidia`` (uses the ``nvidia`` RuntimeClass) or ``amd``
+       (runs on the default runtime).
+   * - ``privileged``
+     - ``false``
+     - Run the engine container in privileged mode. On most clusters
+       ``runtimeClassName: nvidia`` + ``NVIDIA_VISIBLE_DEVICES=all`` already
+       grant GPU visibility without it; set ``true`` only where the engine
+       cannot otherwise see the GPUs. Required for ``gpuVendor: amd`` (no
+       RuntimeClass device injection, so privileged is the only path to
+       ``/dev/kfd``/``/dev/dri``). Enabling it requires the namespace to allow
+       the ``privileged`` Pod Security Standard.
 
 Scheduling
 ~~~~~~~~~~
@@ -398,6 +553,8 @@ via the CRD):
   Service can route to it.
 - **NVIDIA_VISIBLE_DEVICES=all** -- Ensures GPU access for IPC-based memory
   transfers.
+- **NVIDIA_DRIVER_CAPABILITIES=all** -- Exposes all driver capabilities
+  (compute, utility, etc.) to the container.
 - **TCP socket probes** -- Startup (5s initial, 30 failures), liveness (10s),
   and readiness (5s) probes on the server port.
 
@@ -480,7 +637,7 @@ The operator validates the CR spec at apply time:
    * - ``l1.sizeGB``
      - Required, must be > 0.
    * - ``eviction.policy``
-     - Must be ``LRU`` (if set).
+     - Must be ``LRU`` or ``noop`` (if set).
    * - ``eviction.triggerWatermark``
      - Must be in (0.0, 1.0].
    * - ``eviction.evictionRatio``
@@ -591,6 +748,8 @@ Override Auto-Computed Resources
         limits:
           memory: "100Gi"
 
+.. _mp-operator-cacheblend:
+
 CacheBlend
 ----------
 
@@ -605,9 +764,10 @@ It has two halves the operator runs together:
 
 - a GPU-resident CacheBlend V3 engine (``lmcache server --engine-type blend``),
   deployed as a DaemonSet with the **same GPU model as** ``LMCacheEngine``
-  (``privileged`` + ``runtimeClassName: nvidia`` + ``NVIDIA_VISIBLE_DEVICES=all``
-  + ``hostIPC``, and **no** ``nvidia.com/gpu`` claim) so it shares the vLLM GPU
-  for same-device CUDA IPC; and
+  (``runtimeClassName: nvidia`` + ``NVIDIA_VISIBLE_DEVICES=all`` + ``hostIPC``,
+  plus ``privileged`` when ``spec.privileged`` is set, and **no**
+  ``nvidia.com/gpu`` claim) so it shares the vLLM GPU for same-device CUDA IPC;
+  and
 - the vLLM-side plugin, injected into opted-in pods by the webhook.
 
 Additional Prerequisites
@@ -1061,6 +1221,10 @@ resources from other processes on the same host.
 - Clusters using Pod Security Standards must allow the ``privileged`` profile
   for the LMCache namespace -- the ``baseline`` and ``restricted`` profiles
   reject ``hostIPC``.
+- ``spec.privileged`` defaults to ``false``. When enabled (required for
+  ``gpuVendor: amd``), the engine container additionally runs privileged,
+  granting it full device access -- enable it only where GPU visibility
+  requires it.
 
 Development
 -----------

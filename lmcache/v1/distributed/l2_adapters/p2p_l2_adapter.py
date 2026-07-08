@@ -368,6 +368,11 @@ class P2PL2Adapter(L2AdapterInterface):
 
         self._notifier.unregister_fd(self._lookup_efd.fileno())
         self._notifier.unregister_fd(self._load_efd.fileno())
+        # Release the peer's transfer-channel client now that this adapter no
+        # longer reads from it.
+        self._tc_context.remove_transfer_channel_client(
+            self._config.peer_transfer_channel_server_url
+        )
         self._mq_client.close()
         self._store_efd.close()
         self._lookup_efd.close()

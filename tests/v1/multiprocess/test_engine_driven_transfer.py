@@ -382,7 +382,12 @@ def test_create_transfer_context_handle_mode_unsupported_device_raises(
     snapshot = platform_registry.snapshot()
     try:
         # Drop every registered factory so 'cpu' can never be resolved.
-        platform_registry.restore({"kv_wrapper": {}, "availability": {}})
+        # Pass ``discovered=True`` so the lazy discovery pass does not
+        # immediately re-register the auto-discovered backends and
+        # defeat the empty-table fixture.
+        platform_registry.restore(
+            {"kv_wrapper": {}, "availability": {}, "discovered": True}
+        )
         with pytest.raises(ValueError, match="not supported for device type"):
             create_transfer_context(
                 {"layer_0": torch.randn(2, 2)}, mode="lmcache_driven"
@@ -1021,8 +1026,8 @@ def test_engine_context_shm_pool_info(
     from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 
     with patch(
-        "lmcache.v1.distributed.config.torch_dev",
-        type("TorchDevStub", (), {"cudart": object()})(),
+        "lmcache.v1.distributed.config.current_device_spec",
+        MagicMock(is_pin_supported=True),
     ):
         config = _make_storage_manager_config(**config_kwargs)
 
@@ -1358,6 +1363,9 @@ def test_server_prepare_store_includes_chunk_indices(
 class _CompletedFuture:
     def __init__(self, value):
         self._value = value
+
+    def wait(self, timeout=None):  # noqa: ARG002
+        return True
 
     def result(self, timeout=None):  # noqa: ARG002
         return self._value

@@ -15,6 +15,7 @@ any if/elif chain.
 from __future__ import annotations
 
 # Standard
+from typing import ClassVar
 import ctypes
 import itertools
 import os
@@ -26,13 +27,13 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.custom_types import CudaIPCWrapper
 from lmcache.v1.multiprocess.posix_shm import (
     shm_create_readwrite,
     shm_map_readwrite,
     shm_munmap,
     shm_unlink,
 )
+from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
 
 logger = init_logger(__name__)
 
@@ -54,7 +55,7 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
-class CpuShmTensorWrapper(CudaIPCWrapper):
+class CpuShmTensorWrapper(DeviceIPCWrapper):
     """IPC wrapper for CPU tensors backed by POSIX shared memory.
 
     Used by the ``lmcache bench kvcache --mode cpu`` path and the
@@ -62,17 +63,43 @@ class CpuShmTensorWrapper(CudaIPCWrapper):
     map the **same** physical pages for the KV cache, mirroring the
     GPU-mode CUDA-IPC zero-copy semantics.
 
-    Subclassing :class:`CudaIPCWrapper` is load-bearing for the same
+    Subclassing :class:`DeviceIPCWrapper` is load-bearing for the same
     reason :class:`RawCudaIPCWrapper` does it: msgspec does not
     support unions of custom ext-encoded types, so all wire-level
     KV-cache wrappers must share the single ext code (1) registered
-    for ``CudaIPCWrapper``. Pickle preserves the subclass identity
+    for ``DeviceIPCWrapper``. Pickle preserves the subclass identity
     so ``to_tensor`` dispatches correctly on both sides.
     """
+
+    #: ``torch.device.type`` this wrapper handles (used by auto-discovery
+    #: in :func:`~lmcache.v1.platform._registry._discover_wrappers_once`).
+    device_type: ClassVar[str] = "cpu"
+
+    #: Marked ``True`` so auto-discovery picks this as the default
+    #: factory for ``"cpu"``.
+    _is_default_wrapper: ClassVar[bool] = True
 
     # POSIX shared-memory name (``/lmcache_...``) -- leading ``/`` is
     # required by ``shm_open(3)`` on both Linux and macOS.
     SHM_NAME_PREFIX = "/lmcache_kv_"
+
+    @classmethod
+    def wrap(cls, tensor: torch.Tensor) -> "CpuShmTensorWrapper":
+        """Factory used by
+        :func:`~lmcache.v1.platform._registry._discover_wrappers_once`.
+
+        Delegates to :func:`migrate_to_shm_and_wrap`, which migrates the
+        tensor's storage to a POSIX SHM segment so the LMCache mp server
+        can map the same physical pages.
+
+        Args:
+            tensor: A contiguous CPU tensor to migrate and wrap.
+
+        Returns:
+            A new :class:`CpuShmTensorWrapper` referencing the SHM
+            segment that now backs ``tensor``.
+        """
+        return migrate_to_shm_and_wrap(tensor)
 
     def __init__(self, tensor: torch.Tensor, shm_name: str) -> None:
         if tensor.device.type != "cpu":
@@ -87,8 +114,8 @@ class CpuShmTensorWrapper(CudaIPCWrapper):
         # underlying storage may be larger when the tensor is a view.
         self.nbytes = tensor.numel() * tensor.element_size()
 
-        # CudaIPCWrapper interface fields. ``handle`` / ``device_uuid``
-        # are unused on the CPU path but kept to satisfy the parent
+        # DeviceIPCWrapper interface fields. ``handle`` / ``device_uuid``
+        # are unused on the CPU path but kept to satisfy the base
         # contract used by equality checks.
         self.handle = None
         self.dtype = tensor.dtype
@@ -201,7 +228,9 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
     when the migrated tensor is garbage-collected.
     """
     # First Party
-    from lmcache.v1.gpu_connector.utils import attempt_permute_to_contiguous_view
+    from lmcache.v1.gpu_connector.kv_format.contiguity import (
+        attempt_permute_to_contiguous_view,
+    )
 
     # Validate and normalise the tensor *before* touching the registry
     # or mutating storage, so a bad input never leaves things half-done.

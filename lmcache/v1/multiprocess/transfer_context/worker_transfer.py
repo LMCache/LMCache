@@ -31,6 +31,7 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     scatter_cpu_to_paged_kv,
 )
 from lmcache.v1.platform import _registry as platform_registry
+from lmcache.v1.platform import get_device_spec
 
 logger = init_logger(__name__)
 
@@ -40,6 +41,68 @@ logger = init_logger(__name__)
 # ``lmcache_driven``); ``auto`` reproduces the historical device-type-based
 # dispatch.
 ENV_MP_TRANSFER_MODE = "LMCACHE_MP_TRANSFER_MODE"
+
+
+# Helper functions
+def _supports_async_primitives() -> bool:
+    """Probe whether the worker device supports the async store primitives.
+
+    The async engine-driven store path needs a stream, an event exposing
+    ``record``/``synchronize``/``wait``, and pinned (page-locked) host memory.
+    When any of these is unavailable (e.g. a CPU-only backend), the factory
+    falls back to the synchronous :class:`EngineDrivenTransferContext`. This
+    dispatch is internal and capability-based; there is no user-facing
+    async/sync flag.
+
+    Returns:
+        True if all required async primitives are available, else False.
+    """
+    if not hasattr(torch_dev, "Stream") or not hasattr(torch_dev, "Event"):
+        return False
+    # CPU-only stub exposes Stream/Event but has no real async capability.
+    if hasattr(torch_dev, "is_available") and not torch_dev.is_available():
+        return False
+    try:
+        stream = torch_dev.Stream()
+        event = torch_dev.Event()
+    except Exception:
+        return False
+    for attr in ("record", "synchronize", "wait"):
+        if not callable(getattr(event, attr, None)):
+            del stream, event
+            return False
+    del stream, event
+    try:
+        probe = torch.empty(1, dtype=torch.uint8, device="cpu", pin_memory=True)
+        del probe
+    except (RuntimeError, TypeError):
+        return False
+    return True
+
+
+def _build_engine_driven_context() -> "TransferContext":
+    """Build the engine-driven context, async when device-capable else sync.
+
+    Routes the ``ENGINE_DRIVEN`` and AUTO branches through a single capability
+    check. ``AsyncEngineDrivenTransferContext`` is imported lazily to avoid an
+    import cycle and to keep the synchronous path free of stream/event
+    dependencies.
+
+    Returns:
+        ``AsyncEngineDrivenTransferContext`` when async primitives are
+        available, otherwise ``EngineDrivenTransferContext``.
+    """
+    if _supports_async_primitives():
+        # First Party
+        from lmcache.v1.multiprocess.transfer_context.async_engine_driven import (
+            AsyncEngineDrivenTransferContext,
+        )
+
+        logger.info("Using AsyncEngineDrivenTransferContext for store path")
+        return AsyncEngineDrivenTransferContext()
+
+    logger.info("Using EngineDrivenTransferContext (sync) for store path")
+    return EngineDrivenTransferContext()
 
 
 class MPTransferMode(str, Enum):
@@ -87,6 +150,13 @@ def _build_lmcache_driven_context(device_type: str) -> "TransferContext":
             "%r: no KV-cache wrapper factory is registered. "
             "Use mode 'engine_driven' or 'auto' instead." % device_type
         ) from exc
+    device_spec = get_device_spec(device_type)
+    if device_spec and not device_spec.is_handle_transfer_available():
+        raise ValueError(
+            "MP transfer mode 'lmcache_driven' is not available for device type "
+            "%r: required platform capability checks failed. "
+            "Use mode 'engine_driven' or 'auto' instead." % device_type
+        )
     return LMCacheDrivenTransferContext()
 
 
@@ -95,6 +165,9 @@ class IPCEvent(Protocol):
 
     def ipc_handle(self) -> object:
         """Return an IPC handle consumable by the multiprocess server."""
+
+    def wait(self, stream: object | None = None) -> None:
+        """Make ``stream`` wait for this event (async ordering primitive)."""
 
 
 SendRequest = Callable[[MessageQueueClient, RequestType, list[object]], MessagingFuture]
@@ -217,6 +290,17 @@ class TransferContext(ABC):
     def close(self) -> None:
         """Release resources held by this context."""
 
+    @abstractmethod
+    def flush_inflight_stores(self) -> None:
+        """Synchronize any in-flight gather operations.
+
+        Subclasses must implement this method. Contexts with no deferred
+        operations should implement it as a no-op. Async contexts that
+        defer GPU->CPU gather work must block until all in-flight stores
+        have completed, so that vLLM cannot overwrite paged KV blocks
+        before they are read.
+        """
+
 
 class LMCacheDrivenTransferContext(TransferContext):
     """LMCache-driven IPC + MQ future transport context.
@@ -310,6 +394,9 @@ class LMCacheDrivenTransferContext(TransferContext):
         self._mq_client = None
         self._send_request = None
 
+    def flush_inflight_stores(self) -> None:
+        pass
+
 
 class EngineDrivenTransferContext(TransferContext):
     """Engine-driven transfer context for non-CUDA workers.
@@ -323,6 +410,19 @@ class EngineDrivenTransferContext(TransferContext):
         self._engine_driven_context: EngineDrivenContext | None = None
         self._layout_hints: LayoutHints | None = None
         self._engine_kv_format: Any = None
+
+    @property
+    def engine_driven_context(self) -> EngineDrivenContext:
+        """Return the underlying SHM/pickle context created by ``register``.
+
+        Raises:
+            RuntimeError: If accessed before ``register`` has run.
+        """
+        if self._engine_driven_context is None:
+            raise RuntimeError(
+                "EngineDrivenTransferContext is not registered, call register() first."
+            )
+        return self._engine_driven_context
 
     def register(
         self,
@@ -499,6 +599,9 @@ class EngineDrivenTransferContext(TransferContext):
             self._engine_driven_context.close()
             self._engine_driven_context = None
 
+    def flush_inflight_stores(self) -> None:
+        pass
+
 
 def create_transfer_context(
     kv_caches: dict[str, torch.Tensor],
@@ -543,8 +646,8 @@ def create_transfer_context(
     if resolved_mode is MPTransferMode.LMCACHE_DRIVEN:
         return _build_lmcache_driven_context(device_type)
     if resolved_mode is MPTransferMode.ENGINE_DRIVEN:
-        return EngineDrivenTransferContext()
+        return _build_engine_driven_context()
     # AUTO: dispatch by device type (CUDA -> handle path, else -> data path).
     if device_type == "cuda":
         return LMCacheDrivenTransferContext()
-    return EngineDrivenTransferContext()
+    return _build_engine_driven_context()

@@ -369,6 +369,85 @@ class TestLoadInterface:
 
         adpt.submit_unlock([key])
 
+    def test_load_multiple_keys_batched(self, adapter):
+        """A multi-key load task reads every chunk correctly.
+
+        Exercises the native batched load loop: store several keys, then load
+        them all in a single task and verify each landed in its own page with
+        the right data.
+        """
+        adpt, buf, _ = adapter
+        keys = [create_object_key(i) for i in range(1, 4)]
+        fills = [11.0, 22.0, 33.0]
+        store_objs = [
+            create_memory_obj(buf, page_index=i, fill_value=fills[i]) for i in range(3)
+        ]
+
+        # Store all three
+        adpt.submit_store_task(keys, store_objs)
+        wait_for_event_fd(adpt.get_store_event_fd())
+        adpt.pop_completed_store_tasks()
+
+        # Lookup and lock
+        task_id = adpt.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+        wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
+        adpt.query_lookup_and_lock_result(task_id)
+
+        # Load all three into separate pages (3, 4, 5) in ONE task
+        load_objs = [
+            create_memory_obj(buf, page_index=3 + i, fill_value=0.0) for i in range(3)
+        ]
+        task_id = adpt.submit_load_task(keys, load_objs)
+        wait_for_event_fd(adpt.get_load_event_fd())
+
+        bitmap = adpt.query_load_result(task_id)
+        assert bitmap is not None
+        for i in range(3):
+            assert bitmap.test(i)
+            page = 3 + i
+            loaded = buf[page * PAGE_SIZE : (page + 1) * PAGE_SIZE].view(torch.float32)
+            assert torch.all(loaded == fills[i])
+
+        adpt.submit_unlock(keys)
+
+    def test_load_batch_failure_marks_all_failed(self, adapter):
+        """A native batched load failure leaves all task bits unset.
+
+        NIXL reports native batched-transfer success as one aggregate status.
+        If one backing file is removed, the adapter treats the whole batch as
+        failed rather than reporting per-key success.
+        """
+        adpt, buf, tmp_dir = adapter
+        keys = [create_object_key(i) for i in range(1, 4)]
+        fills = [11.0, 22.0, 33.0]
+        store_objs = [
+            create_memory_obj(buf, page_index=i, fill_value=fills[i]) for i in range(3)
+        ]
+
+        adpt.submit_store_task(keys, store_objs)
+        wait_for_event_fd(adpt.get_store_event_fd())
+        adpt.pop_completed_store_tasks()
+
+        task_id = adpt.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+        wait_for_event_fd(adpt.get_lookup_and_lock_event_fd())
+        adpt.query_lookup_and_lock_result(task_id)
+
+        # Sabotage the middle key's backing file so its load raises.
+        os.remove(os.path.join(tmp_dir, _object_key_to_filename(keys[1])))
+
+        load_objs = [
+            create_memory_obj(buf, page_index=3 + i, fill_value=0.0) for i in range(3)
+        ]
+        task_id = adpt.submit_load_task(keys, load_objs)
+        wait_for_event_fd(adpt.get_load_event_fd())
+
+        bitmap = adpt.query_load_result(task_id)
+        assert bitmap is not None
+        for i in range(3):
+            assert not bitmap.test(i)
+
+        adpt.submit_unlock(keys)
+
     def test_query_load_result_clears_result(self, adapter):
         adpt, buf, _ = adapter
         key = create_object_key(1)
