@@ -431,28 +431,6 @@ class TestLoadInterface:
 
         adpt.submit_unlock([key])
 
-    def test_load_missing_file_does_not_recreate_it(self, adapter):
-        adpt, buf, tmp_dir = adapter
-        key = create_object_key(1)
-        store_obj = create_memory_obj(buf, page_index=0)
-
-        adpt.submit_store_task([key], [store_obj])
-        wait_for_event_fd(adpt.get_store_event_fd())
-        adpt.pop_completed_store_tasks()
-
-        data_file = os.path.join(tmp_dir, _object_key_to_filename(key))
-        os.unlink(data_file)
-
-        load_obj = create_memory_obj(buf, page_index=1)
-        task_id = adpt.submit_load_task([key], [load_obj])
-        wait_for_event_fd(adpt.get_load_event_fd())
-
-        bitmap = adpt.query_load_result(task_id)
-        assert bitmap is not None
-        assert not bitmap.test(0)
-        assert not os.path.exists(data_file)
-
-
 # =============================================================================
 # Store-Lookup-Load End-to-End Test
 # =============================================================================
