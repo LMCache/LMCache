@@ -848,23 +848,25 @@ chunk pinned *N* times needs *N* unpins before it can be evicted.
     # -> {"requested": 12, "affected": 12, "status": "unpinned"}
 
 **Delete (removing cache by token sequence).** Delete a token sequence's cache
-on one named server, addressed by token ids. Deletion is two-phase and mirrors
-pin's node=L1 / coordinator=L2 split: the coordinator forwards to the named
-server (which deletes its L1 and returns the resolved keys), then removes the
-same keys from L2 itself — skipping any key it is protecting with an L2 pin
-unless ``force`` is set. On ``force`` it also drops those L2 pins so a
-force-deleted key is not left protected. The ``tier`` field selects the tier(s):
-``l1`` deletes only the named server's L1, ``l2`` only the coordinator-managed
-L2, ``all`` both.
+on one named server, addressed by token ids. The coordinator resolves the tokens
+to object keys locally (like pin) and issues a single key-addressed
+``DELETE /cache/objects`` to the named server, which removes them from the
+requested tier(s). The ``tier`` field selects the tier(s): ``l1`` deletes only
+the named server's L1, ``l2`` only L2, ``all`` both. When the tier includes L2,
+the coordinator first drops any key it is protecting with an L2 pin from the
+delete set unless ``force`` is set — so a pinned key is retained in every tier
+the delete would have touched; ``force`` deletes them and drops those pins.
 
 ``POST /cache/delete``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Delete a token sequence on one named server.
 
-**Request body:** same fields as ``POST /cache/pins`` plus ``force`` (bool,
-default ``false``). When ``force`` is ``true``, locked/pinned keys are deleted
-anyway (L1 locks/pins on the node and the coordinator's L2 pin set).
+**Request body:** (``model_name``,
+``world_size``, ``token_ids``, ``cache_salt``) plus ``tier`` (``l1`` / ``l2`` /
+``all``) and ``force`` (bool, default ``false``). When ``force`` is ``true``,
+locked keys are deleted anyway (L1 read/write locks on the node and the
+coordinator's L2 pin set).
 
 **Response** (``200 OK``):
 

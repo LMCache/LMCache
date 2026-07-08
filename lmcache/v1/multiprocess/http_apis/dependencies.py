@@ -17,7 +17,6 @@ from typing import Any
 from fastapi import HTTPException, Request
 
 # First Party
-from lmcache.v1.multiprocess.cache_control.delete_service import DeleteService
 from lmcache.v1.multiprocess.cache_control.object_service import ObjectService
 from lmcache.v1.multiprocess.cache_control.prefetch_service import PrefetchService
 
@@ -29,15 +28,13 @@ class MPHTTPContext:
     Attributes:
         engine: The node's cache engine (``MPCacheServer``); the diagnostics
             handlers (clear / checksums) reach engine internals directly.
-        object_service: Adapter / object listing and key-addressed deletion.
+        object_service: Key-addressed L1/L2 delete, adapter / object listing.
         prefetch_service: Warm-prefetch submit / status (owns the job table).
-        delete_service: Token-based L1 deletion (force-aware).
     """
 
     engine: Any
     object_service: ObjectService
     prefetch_service: PrefetchService
-    delete_service: DeleteService
 
 
 def build_context(engine: Any) -> MPHTTPContext:
@@ -56,7 +53,6 @@ def build_context(engine: Any) -> MPHTTPContext:
         engine=engine,
         object_service=ObjectService(engine),
         prefetch_service=PrefetchService(engine),
-        delete_service=DeleteService(engine),
     )
 
 
