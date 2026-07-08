@@ -48,7 +48,6 @@ class SyclProfile(BuildProfile):
             "csrc/sycl/pos_kernels_sycl.cpp",
             "csrc/sycl/ac_enc_sycl.cpp",
             "csrc/sycl/ac_dec_sycl.cpp",
-            "csrc/sycl/ipc_sycl.cpp",
         ]
         ext_modules = [
             cpp_extension.SyclExtension(
@@ -60,6 +59,7 @@ class SyclProfile(BuildProfile):
                     "cxx": [
                         "-std=c++17",
                         "-D_GLIBCXX_USE_CXX11_ABI=1",
+                        "-D__DPCPP_SYCL_EXTERNAL_LIBC=",
                         "-O3",
                         "-fsycl",
                         "-fno-sycl-id-queries-fit-in-int",

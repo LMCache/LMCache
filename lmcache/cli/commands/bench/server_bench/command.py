@@ -54,6 +54,7 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     DTYPE_MAP,
     _allocate_cpu_shm_kv_cache,
     _allocate_gpu_kv_cache,
+    _allocate_xpu_kv_cache,
     _get_chunk_size,
     _process_request,
     _require_full_install,
@@ -98,12 +99,12 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--mode",
-        choices=["cpu", "gpu"],
+        choices=["cpu", "gpu", "xpu"],
         default="gpu",
         help=(
-            "Run mode (default: gpu). In cpu mode the client allocates "
-            "POSIX-SHM-backed KV cache tensors and the server maps the "
-            "same physical pages."
+            "Run mode (default: gpu). `gpu` uses CUDA tensors + CUDA IPC, "
+            "`xpu` uses XPU tensors + SYCL IPC, and `cpu` allocates "
+            "POSIX-SHM-backed KV cache tensors that the server maps."
         ),
     )
     parser.add_argument(
@@ -119,7 +120,7 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
             "data path (REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT + "
             "PREPARE/COMMIT). "
             "`auto` keeps the historical mapping: "
-            "gpu->lmcache_driven, cpu->engine_driven."
+            "gpu/xpu->lmcache_driven, cpu->engine_driven."
         ),
     )
     parser.add_argument(
@@ -224,6 +225,9 @@ def run_server_bench(
     from lmcache.v1.multiprocess.group_view import EngineGroupInfo
     from lmcache.v1.multiprocess.mq import MessageQueueClient
 
+    # First Party
+    from lmcache import torch_device_type
+
     quiet = getattr(args, "quiet", False)
 
     def log(msg: str) -> None:
@@ -231,22 +235,27 @@ def run_server_bench(
         if not quiet:
             print(msg)
 
-    use_gpu = args.mode == "gpu"
-    if use_gpu and not torch_dev.is_available():
+    use_cuda = args.mode == "gpu"
+    use_xpu = args.mode == "xpu"
+    use_device = use_cuda or use_xpu
+    if use_cuda and (torch_device_type != "cuda" or not torch_dev.is_available()):
         print("ERROR: --mode gpu requires CUDA")
+        sys.exit(1)
+    if use_xpu and (torch_device_type != "xpu" or not torch_dev.is_available()):
+        print("ERROR: --mode xpu requires XPU")
         sys.exit(1)
 
     # Resolve transfer mode. ``auto`` reproduces the historical
-    # behaviour: gpu -> lmcache_driven path, cpu -> engine_driven path.
+    # behaviour: gpu/xpu -> lmcache_driven path, cpu -> engine_driven path.
     # ``lmcache_driven`` / ``engine_driven`` are explicit overrides.
     transfer_mode = getattr(args, "transfer_mode", "auto")
     if transfer_mode == "auto":
-        use_handle = use_gpu
+        use_handle = use_device
     elif transfer_mode == "lmcache_driven":
         use_handle = True
     else:
         use_handle = False
-    if use_handle and not use_gpu:
+    if use_handle and not use_device:
         log(
             "  [info] --transfer-mode=lmcache_driven on cpu mode: "
             "using REGISTER_KV_CACHE + STORE/RETRIEVE over POSIX SHM"
@@ -293,8 +302,8 @@ def run_server_bench(
         )
         # Paged KV demands identical ``NB`` / ``BS`` across all groups
         # (block_id -> slot maths is shared), but ``kv_size`` / ``NH`` /
-        # ``HS`` / ``dtype`` may vary per group. ``_allocate_gpu_kv_cache(
-        # groups=...)`` honours each group's own shape; ``_process_request``
+        # ``HS`` / ``dtype`` may vary per group. The device KV allocators
+        # honour each group's own shape; ``_process_request``
         # only needs a single ``block_size`` / ``total_blocks``.
         first = layer_groups[0]
         nb_vals = {g.shape_desc.nb for g in layer_groups}
@@ -394,22 +403,30 @@ def run_server_bench(
             )
         )
 
-        # Allocate KV tensors. GPU mode wraps real CUDA tensors
-        # via CUDA IPC; CPU mode allocates POSIX-SHM-backed
+        # Allocate KV tensors. CUDA and XPU modes wrap device tensors
+        # via their platform IPC wrappers; CPU mode allocates POSIX-SHM-backed
         # tensors so the server can map the same physical pages.
         # shm_names tracks per-layer SHM segment names allocated
         # on demand (one per layer) so we can shm_unlink on exit.
         shm_names: list[str] = []
-        if use_gpu:
+        if use_device:
             # First Party
-            from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
+            from lmcache.v1.platform import _registry as platform_registry
 
-            allocated = _allocate_gpu_kv_cache(groups=layer_groups)
-            log(
-                "Allocated %d GPU tensors on %s" % (len(allocated), allocated[0].device)
+            allocate_kv_cache = (
+                _allocate_xpu_kv_cache if use_xpu else _allocate_gpu_kv_cache
             )
-            kv_wrappers: KVCache = [CudaIPCWrapper(t) for t in allocated]
-            # Keep the CUDA tensors alive for the lifetime of the
+            device_label = "XPU" if use_xpu else "GPU"
+            allocated = allocate_kv_cache(groups=layer_groups)
+            log(
+                "Allocated %d %s tensors on %s"
+                % (len(allocated), device_label, allocated[0].device)
+            )
+            kv_wrapper_factory = platform_registry.get_kv_wrapper_factory(
+                torch_device_type
+            )
+            kv_wrappers: KVCache = [kv_wrapper_factory(t) for t in allocated]
+            # Keep the device tensors alive for the lifetime of the
             # bench process -- storage may be reclaimed otherwise --
             # and reuse the same list as the client-side data-mode
             # source/sink for the round-trip self-check.
@@ -438,7 +455,7 @@ def run_server_bench(
             client,
             layout_hints=layout_hints,
             kv_caches=kv_wrappers if use_handle else None,
-            use_gpu=use_gpu,
+            use_gpu=use_device,
             use_handle=use_handle,
             engine_group_infos=engine_group_infos,
         )
@@ -489,7 +506,7 @@ def run_server_bench(
                 block_size=block_size,
                 total_blocks=num_blocks,
                 num_engine_group_infos=num_engine_group_infos,
-                use_gpu=use_gpu,
+                use_gpu=use_device,
                 use_handle=use_handle,
                 client_tensors=client_tensors,
                 server_pool=server_pool,
@@ -513,7 +530,7 @@ def run_server_bench(
                 block_size=block_size,
                 total_blocks=num_blocks,
                 num_engine_group_infos=num_engine_group_infos,
-                use_gpu=use_gpu,
+                use_gpu=use_device,
                 use_handle=use_handle,
                 client_tensors=client_tensors,
                 server_pool=server_pool,

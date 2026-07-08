@@ -39,8 +39,6 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
-#include <type_traits>
-#include <vector>
 
 // ---------------------------------------------------------------------------
 // Tuning constants
@@ -143,82 +141,7 @@ inline int64_t key_value_base_offset(const int k_or_v, const int layer_idx,
          token_idx * scalars_per_token;
 }
 
-template <typename ScalarType, EngineKVFormat format>
-inline size_t calculate_engine_global_offset(
-    const int k_or_v, const int engine_block_idx, const int layer_idx,
-    const PageBufferShapeDesc shape_desc) {
-  const size_t scalars_per_block = shape_desc.scalars_per_block<ScalarType>();
-  if constexpr (format == EngineKVFormat::NB_NL_TWO_BS_NH_HS) {
-    return k_or_v * scalars_per_block +
-           layer_idx * shape_desc.kv_size * scalars_per_block +
-           engine_block_idx * shape_desc.kv_size * scalars_per_block *
-               shape_desc.nl;
-  } else if constexpr (format == EngineKVFormat::NL_X_TWO_NB_BS_NH_HS ||
-                       format == EngineKVFormat::NL_X_TWO_NB_NH_BS_HS) {
-    return engine_block_idx * scalars_per_block +
-           k_or_v * shape_desc.nb * scalars_per_block;
-  } else if constexpr (format == EngineKVFormat::NL_X_NB_TWO_BS_NH_HS ||
-                       format == EngineKVFormat::NL_X_NB_TWO_NH_BS_HS) {
-    return engine_block_idx * shape_desc.kv_size * scalars_per_block +
-           k_or_v * scalars_per_block;
-  } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_HS ||
-                       format == EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS ||
-                       format == EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS ||
-                       format == EngineKVFormat::NL_X_NBBS_ONE_HS) {
-    return engine_block_idx * scalars_per_block;
-  } else if constexpr (format == EngineKVFormat::NB_NL_TWO_NH_BS_HS) {
-    return k_or_v * scalars_per_block +
-           layer_idx * shape_desc.kv_size * scalars_per_block +
-           engine_block_idx * shape_desc.kv_size * scalars_per_block *
-               shape_desc.nl;
-  } else {
-    return 0;
-  }
-}
-
-template <typename ScalarType, EngineKVFormat format>
-inline size_t calculate_engine_local_offset(
-    const int token_offset, const int head_idx,
-    const PageBufferShapeDesc shape_desc) {
-  const size_t scalars_per_head = shape_desc.scalars_per_head<ScalarType>();
-  const size_t scalars_per_token = shape_desc.scalars_per_token<ScalarType>();
-  if constexpr (format == EngineKVFormat::NB_NL_TWO_NH_BS_HS ||
-                format == EngineKVFormat::NL_X_TWO_NB_NH_BS_HS ||
-                format == EngineKVFormat::NL_X_NB_TWO_NH_BS_HS) {
-    return head_idx * shape_desc.bs * scalars_per_head +
-           token_offset * scalars_per_head;
-  } else {
-    return token_offset * scalars_per_token + head_idx * scalars_per_head;
-  }
-}
-
-template <typename ScalarType>
-inline size_t calculate_lmcache_global_offset(
-    const int k_or_v, const int token_offset_in_lmcache_object,
-    const int layer_idx, const int lmcache_chunk_size,
-    const PageBufferShapeDesc shape_desc) {
-  const size_t scalars_per_token = shape_desc.scalars_per_token<ScalarType>();
-  return token_offset_in_lmcache_object * scalars_per_token +
-         layer_idx * lmcache_chunk_size * scalars_per_token +
-         k_or_v * shape_desc.nl * lmcache_chunk_size * scalars_per_token;
-}
-
-template <typename ScalarType>
-inline size_t calculate_lmcache_local_offset(
-    const int token_offset, const int head_idx,
-    const PageBufferShapeDesc shape_desc) {
-  const size_t scalars_per_head = shape_desc.scalars_per_head<ScalarType>();
-  const size_t scalars_per_token = shape_desc.scalars_per_token<ScalarType>();
-  return head_idx * scalars_per_head + token_offset * scalars_per_token;
-}
-
 }  // namespace lmc
-
-template <typename ScalarType>
-struct MemoryObj4 {
-  ScalarType* objects[4];
-  int num_objects = 0;
-};
 
 // ---------------------------------------------------------------------------
 // Pointer helper -- returns a kernel-accessible pointer of the given type.
@@ -238,6 +161,12 @@ T* get_kernel_ptr(TENSOR_TYPE& tensor) {
                 "Invalid device. Device must be xpu or cpu (USM pinned).");
   }
 }
+
+template <typename ScalarType>
+struct MemoryObj4 {
+  ScalarType* objects[4];
+  int num_objects;
+};
 
 // ---------------------------------------------------------------------------
 // Kernel-launch helpers -- multi-layer kernels
@@ -366,6 +295,64 @@ void submit_multi_layer_kernel_fused_kv(
             // LMCache → paged buffer
             paged_buffer_ptr[vllm_base_k + i] = key_value_ptr[lmc_base_k + i];
             paged_buffer_ptr[vllm_base_v + i] = key_value_ptr[lmc_base_v + i];
+          }
+        }
+      });
+}
+
+/**
+ * Submit the multi-layer unilateral kernel (SGLang MHA).
+ *
+ * DIRECTION = true  → paged buffer → LMCache (D2H)
+ * DIRECTION = false → LMCache → paged buffer (H2D)
+ *
+ * Uses `if constexpr (DIRECTION)` so the compiler can
+ * dead-strip the unused branch entirely.
+ */
+template <typename scalar_t, bool DIRECTION>
+void submit_multi_layer_unilateral_kernel(
+    sycl::queue& queue, scalar_t* key_value_ptr, scalar_t** page_buffer_ptrs,
+    const int64_t* slot_mapping_ptr, int scalars_per_token, int num_tokens,
+    int num_layers, int page_buffer_size, int k_or_v_size, int kv_num_tokens,
+    int wg_size) {
+  if (kv_num_tokens <= 0 || num_layers <= 0) return;
+
+  sycl::range<3> global_range(static_cast<size_t>(k_or_v_size),
+                              static_cast<size_t>(num_layers),
+                              static_cast<size_t>(kv_num_tokens) * wg_size);
+  sycl::range<3> local_range(1, 1, static_cast<size_t>(wg_size));
+
+  queue.parallel_for(
+      sycl::nd_range<3>(global_range, local_range),
+      [=](sycl::nd_item<3> item) [[sycl::reqd_sub_group_size(16)]] {
+        const int token_id = static_cast<int>(item.get_group(2));
+        const int layer_id = static_cast<int>(item.get_group(1));
+        const int k_or_v = static_cast<int>(item.get_group(0));
+        const int tid = static_cast<int>(item.get_local_id(2));
+        const int num_threads = static_cast<int>(item.get_local_range(2));
+
+        const int64_t slot_idx = slot_mapping_ptr[token_id];
+        scalar_t* key_ptr = page_buffer_ptrs[layer_id];
+        scalar_t* value_ptr = page_buffer_ptrs[layer_id + num_layers];
+
+        if (slot_idx < 0) return;
+
+        const int64_t lmc_base = lmc::key_value_base_offset(
+            k_or_v, layer_id, token_id, scalars_per_token, num_tokens,
+            num_layers);
+        const int64_t sgl_base = slot_idx * scalars_per_token;
+
+        for (int i = tid; i < scalars_per_token; i += num_threads) {
+          if (k_or_v == 0) {
+            if constexpr (DIRECTION)
+              key_value_ptr[lmc_base + i] = key_ptr[sgl_base + i];
+            else
+              key_ptr[sgl_base + i] = key_value_ptr[lmc_base + i];
+          } else {
+            if constexpr (DIRECTION)
+              key_value_ptr[lmc_base + i] = value_ptr[sgl_base + i];
+            else
+              value_ptr[sgl_base + i] = key_value_ptr[lmc_base + i];
           }
         }
       });
@@ -523,6 +510,285 @@ void multi_layer_kv_transfer(
 #undef LAUNCH_MULTI_LAYER_KV_TRANSFER
 }
 
+template <typename ScalarType, EngineKVFormat format>
+inline size_t calculate_block_engine_global_offset(
+    const int k_or_v, const int engine_block_idx, const int layer_idx,
+    const PageBufferShapeDesc shape_desc) {
+  const size_t scalars_per_block = shape_desc.scalars_per_block<ScalarType>();
+  if constexpr (format == EngineKVFormat::NB_NL_TWO_BS_NH_HS ||
+                format == EngineKVFormat::NB_NL_TWO_NH_BS_HS) {
+    return k_or_v * scalars_per_block +
+           layer_idx * shape_desc.kv_size * scalars_per_block +
+           engine_block_idx * shape_desc.kv_size * scalars_per_block *
+               shape_desc.nl;
+  } else if constexpr (format == EngineKVFormat::NL_X_TWO_NB_BS_NH_HS ||
+                       format == EngineKVFormat::NL_X_TWO_NB_NH_BS_HS) {
+    return engine_block_idx * scalars_per_block +
+           k_or_v * shape_desc.nb * scalars_per_block;
+  } else if constexpr (format == EngineKVFormat::NL_X_NB_TWO_BS_NH_HS ||
+                       format == EngineKVFormat::NL_X_NB_TWO_NH_BS_HS) {
+    return engine_block_idx * shape_desc.kv_size * scalars_per_block +
+           k_or_v * scalars_per_block;
+  } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_HS ||
+                       format == EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS ||
+                       format == EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS ||
+                       format == EngineKVFormat::NL_X_NBBS_ONE_HS) {
+    return engine_block_idx * scalars_per_block;
+  }
+}
+
+template <typename ScalarType, EngineKVFormat format>
+inline size_t calculate_block_engine_local_offset(
+    const int token_offset, const int head_idx,
+    const PageBufferShapeDesc shape_desc) {
+  const size_t scalars_per_head = shape_desc.scalars_per_head<ScalarType>();
+  const size_t scalars_per_token = shape_desc.scalars_per_token<ScalarType>();
+  if constexpr (format == EngineKVFormat::NB_NL_TWO_NH_BS_HS ||
+                format == EngineKVFormat::NL_X_TWO_NB_NH_BS_HS ||
+                format == EngineKVFormat::NL_X_NB_TWO_NH_BS_HS) {
+    return head_idx * shape_desc.bs * scalars_per_head +
+           token_offset * scalars_per_head;
+  } else {
+    return head_idx * scalars_per_head + token_offset * scalars_per_token;
+  }
+}
+
+template <typename ScalarType>
+inline size_t calculate_block_lmcache_global_offset(
+    const int k_or_v, const int token_offset_in_lmcache_object,
+    const int layer_idx, const int lmcache_chunk_size,
+    const PageBufferShapeDesc shape_desc) {
+  const size_t scalars_per_token = shape_desc.scalars_per_token<ScalarType>();
+  return token_offset_in_lmcache_object * scalars_per_token +
+         layer_idx * lmcache_chunk_size * scalars_per_token +
+         k_or_v * shape_desc.nl * lmcache_chunk_size * scalars_per_token;
+}
+
+template <typename ScalarType>
+inline size_t calculate_block_lmcache_local_offset(
+    const int token_offset, const int head_idx,
+    const PageBufferShapeDesc shape_desc) {
+  const size_t scalars_per_head = shape_desc.scalars_per_head<ScalarType>();
+  const size_t scalars_per_token = shape_desc.scalars_per_token<ScalarType>();
+  return head_idx * scalars_per_head + token_offset * scalars_per_token;
+}
+
+template <typename ScalarType, EngineKVFormat format>
+inline ScalarType* get_block_paged_buffer_layer_ptr(
+    const int64_t* paged_buffer_ptrs, const int k_or_v, const int layer_idx,
+    const PageBufferShapeDesc shape_desc) {
+  if constexpr (format == EngineKVFormat::NB_NL_TWO_BS_NH_HS ||
+                format == EngineKVFormat::NB_NL_TWO_NH_BS_HS) {
+    return reinterpret_cast<ScalarType*>(paged_buffer_ptrs[0]);
+  } else if constexpr (format == EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS ||
+                       format == EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS) {
+    return reinterpret_cast<ScalarType*>(
+        paged_buffer_ptrs[k_or_v * shape_desc.nl + layer_idx]);
+  } else {
+    return reinterpret_cast<ScalarType*>(paged_buffer_ptrs[layer_idx]);
+  }
+}
+
+template <typename ScalarType, bool lmcache_to_engine, EngineKVFormat format>
+void launch_multi_layer_block_transfer_kernel(
+    sycl::queue& queue, MemoryObj4<ScalarType> lmcache_objects,
+    const int64_t* paged_buffer_ptrs, const int64_t* engine_block_ids,
+    int total_blocks, int num_blocks_per_object, PageBufferShapeDesc shape_desc,
+    int lmcache_chunk_size, int skip_prefix_n_blocks, int wg_size) {
+  if (total_blocks <= 0 || shape_desc.nl <= 0 || shape_desc.nh <= 0) return;
+
+  sycl::range<3> global_range(
+      static_cast<size_t>(shape_desc.kv_size),
+      static_cast<size_t>(total_blocks),
+      static_cast<size_t>(shape_desc.nl * shape_desc.nh * wg_size));
+  sycl::range<3> local_range(1, 1, static_cast<size_t>(wg_size));
+
+  queue.parallel_for(
+      sycl::nd_range<3>(global_range, local_range),
+      [=](sycl::nd_item<3> item) [[sycl::reqd_sub_group_size(16)]] {
+        const int k_or_v = static_cast<int>(item.get_group(0));
+        const int flat_block_idx = static_cast<int>(item.get_group(1));
+        const int layer_head_group = static_cast<int>(item.get_group(2));
+        const int layer_idx = layer_head_group / shape_desc.nh;
+        const int head_idx = layer_head_group % shape_desc.nh;
+        const int tid = static_cast<int>(item.get_local_id(2));
+        const int nthreads = static_cast<int>(item.get_local_range(2));
+
+        if (flat_block_idx < skip_prefix_n_blocks) return;
+
+        const int obj_idx = flat_block_idx / num_blocks_per_object;
+        const int block_idx_in_object = flat_block_idx % num_blocks_per_object;
+        if (obj_idx >= lmcache_objects.num_objects) return;
+
+        const int engine_block_idx = static_cast<int>(
+            engine_block_ids[flat_block_idx]);
+        ScalarType* lmcache_object = lmcache_objects.objects[obj_idx];
+        ScalarType* paged_buffer_layer_ptr =
+            get_block_paged_buffer_layer_ptr<ScalarType, format>(
+                paged_buffer_ptrs, k_or_v, layer_idx, shape_desc);
+
+        const size_t engine_global_offset =
+            calculate_block_engine_global_offset<ScalarType, format>(
+                k_or_v, engine_block_idx, layer_idx, shape_desc);
+        const size_t lmcache_global_offset =
+            calculate_block_lmcache_global_offset<ScalarType>(
+                k_or_v, block_idx_in_object * shape_desc.bs, layer_idx,
+                lmcache_chunk_size, shape_desc);
+        const size_t scalars_per_head =
+            shape_desc.scalars_per_head<ScalarType>();
+
+        for (int token_offset = 0; token_offset < shape_desc.bs;
+             ++token_offset) {
+          const size_t engine_local_offset =
+              calculate_block_engine_local_offset<ScalarType, format>(
+                  token_offset, head_idx, shape_desc);
+          const size_t lmcache_local_offset =
+              calculate_block_lmcache_local_offset<ScalarType>(
+                  token_offset, head_idx, shape_desc);
+          ScalarType* engine_ptr =
+              paged_buffer_layer_ptr + engine_global_offset +
+              engine_local_offset;
+          ScalarType* lmcache_ptr =
+              lmcache_object + lmcache_global_offset + lmcache_local_offset;
+
+          for (size_t i = tid; i < scalars_per_head; i += nthreads) {
+            if constexpr (lmcache_to_engine) {
+              engine_ptr[i] = lmcache_ptr[i];
+            } else {
+              lmcache_ptr[i] = engine_ptr[i];
+            }
+          }
+        }
+      });
+}
+
+#define LAUNCH_BLOCK_KERNEL(DIRECTION, FORMAT)                              \
+  launch_multi_layer_block_transfer_kernel<ScalarType, DIRECTION, FORMAT>(  \
+      queue, lmcache_obj4, paged_buffer_ptrs, block_ids_ptr, total_blocks,  \
+      num_blocks_per_object, shape_desc, lmcache_chunk_size,                \
+      skip_prefix_n_blocks, wg_size)
+
+#define DISPATCH_BLOCK_FORMAT(DIRECTION)                                      \
+  switch (engine_kv_format) {                                                 \
+    case EngineKVFormat::NB_NL_TWO_BS_NH_HS:                                  \
+      LAUNCH_BLOCK_KERNEL(DIRECTION, EngineKVFormat::NB_NL_TWO_BS_NH_HS);     \
+      break;                                                                  \
+    case EngineKVFormat::NL_X_TWO_NB_BS_NH_HS:                                \
+      LAUNCH_BLOCK_KERNEL(DIRECTION, EngineKVFormat::NL_X_TWO_NB_BS_NH_HS);   \
+      break;                                                                  \
+    case EngineKVFormat::NL_X_TWO_NB_NH_BS_HS:                                \
+      LAUNCH_BLOCK_KERNEL(DIRECTION, EngineKVFormat::NL_X_TWO_NB_NH_BS_HS);   \
+      break;                                                                  \
+    case EngineKVFormat::NL_X_NB_TWO_BS_NH_HS:                                \
+      LAUNCH_BLOCK_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_TWO_BS_NH_HS);   \
+      break;                                                                  \
+    case EngineKVFormat::NL_X_NB_TWO_NH_BS_HS:                                \
+      LAUNCH_BLOCK_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_TWO_NH_BS_HS);   \
+      break;                                                                  \
+    case EngineKVFormat::NL_X_NB_BS_HS:                                       \
+      LAUNCH_BLOCK_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_HS);          \
+      break;                                                                  \
+    case EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS:                               \
+      LAUNCH_BLOCK_KERNEL(DIRECTION, EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS);  \
+      break;                                                                  \
+    case EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS:                              \
+      LAUNCH_BLOCK_KERNEL(DIRECTION, EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS); \
+      break;                                                                  \
+    case EngineKVFormat::NL_X_NBBS_ONE_HS:                                    \
+      LAUNCH_BLOCK_KERNEL(DIRECTION, EngineKVFormat::NL_X_NBBS_ONE_HS);       \
+      break;                                                                  \
+    case EngineKVFormat::NB_NL_TWO_NH_BS_HS:                                  \
+      LAUNCH_BLOCK_KERNEL(DIRECTION, EngineKVFormat::NB_NL_TWO_NH_BS_HS);     \
+      break;                                                                  \
+    default:                                                                  \
+      TORCH_CHECK(false, "Unsupported EngineKVFormat: ",                     \
+                  static_cast<int>(engine_kv_format));                        \
+  }
+
+template <typename ScalarType>
+void multi_layer_block_kv_transfer_templated(
+    const torch::Tensor& paged_buffer_ptrs_tensor,
+    std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
+    const torch::Device& device, TransferDirection direction,
+    PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
+    EngineKVFormat engine_kv_format, int skip_prefix_n_blocks) {
+  const int num_objects = static_cast<int>(lmcache_objects_ptrs.size());
+  TORCH_CHECK(num_objects >= 1 && num_objects <= 4,
+              "Expected 1-4 LMCache objects, got ", num_objects);
+
+  const int total_blocks = block_ids.size(0);
+  TORCH_CHECK(total_blocks % num_objects == 0, "block_ids length (",
+              total_blocks, ") must be divisible by num_objects (",
+              num_objects, ")");
+  const int num_blocks_per_object = total_blocks / num_objects;
+
+  TORCH_CHECK(num_blocks_per_object * shape_desc.bs == lmcache_chunk_size,
+              "blocks_per_object * block_size (",
+              num_blocks_per_object * shape_desc.bs,
+              ") must equal lmcache_chunk_size (", lmcache_chunk_size, ")");
+
+  MemoryObj4<ScalarType> lmcache_obj4;
+  lmcache_obj4.num_objects = num_objects;
+  for (int i = 0; i < 4; ++i) {
+    lmcache_obj4.objects[i] =
+        (i < num_objects)
+            ? reinterpret_cast<ScalarType*>(lmcache_objects_ptrs[i])
+            : nullptr;
+  }
+
+  const int64_t* paged_buffer_ptrs =
+      get_kernel_ptr<const int64_t, const torch::Tensor>(
+          paged_buffer_ptrs_tensor);
+  const int64_t* block_ids_ptr =
+      get_kernel_ptr<const int64_t, const torch::Tensor>(block_ids);
+
+  const c10::OptionalDeviceGuard device_guard(device);
+  sycl::queue& queue =
+      c10::xpu::getCurrentXPUStream(device.index()).queue();
+
+  const int scalars_per_head =
+      shape_desc.hs * shape_desc.element_size / static_cast<int>(sizeof(ScalarType));
+  const int wg_size = round_up_to_sg(std::min(scalars_per_head, MAX_WG_SIZE));
+
+  if (direction == TransferDirection::H2D) {
+    DISPATCH_BLOCK_FORMAT(true);
+  } else {
+    DISPATCH_BLOCK_FORMAT(false);
+  }
+}
+
+#undef DISPATCH_BLOCK_FORMAT
+#undef LAUNCH_BLOCK_KERNEL
+
+#define LAUNCH_BLOCK_TEMPLATED(type)                                      \
+  do {                                                                   \
+    multi_layer_block_kv_transfer_templated<type>(                       \
+        paged_buffer_ptrs_tensor, lmcache_objects_ptrs, block_ids,       \
+        device, direction, shape_desc, lmcache_chunk_size,               \
+        engine_kv_format, skip_prefix_n_blocks);                         \
+  } while (0)
+
+void multi_layer_block_kv_transfer(
+    const torch::Tensor& paged_buffer_ptrs_tensor,
+    std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
+    const torch::Device& device, TransferDirection direction,
+    PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
+    EngineKVFormat engine_kv_format, int skip_prefix_n_blocks) {
+  const int head_bytes = shape_desc.hs * shape_desc.element_size;
+  TORCH_CHECK(head_bytes % sizeof(int16_t) == 0, "head_size * element_size (",
+              head_bytes, ") must be divisible by 2 for vectorized access");
+
+  if (head_bytes % sizeof(int64_t) == 0) {
+    LAUNCH_BLOCK_TEMPLATED(int64_t);
+  } else if (head_bytes % sizeof(int32_t) == 0) {
+    LAUNCH_BLOCK_TEMPLATED(int32_t);
+  } else {
+    LAUNCH_BLOCK_TEMPLATED(int16_t);
+  }
+}
+
+#undef LAUNCH_BLOCK_TEMPLATED
+
 // ---------------------------------------------------------------------------
 // Public API: multi_layer_kv_transfer_unilateral
 // ---------------------------------------------------------------------------
@@ -570,270 +836,6 @@ void multi_layer_kv_transfer_unilateral(
         num_tokens, num_layers, page_buffer_size, k_or_v_size, kv_num_tokens,
         wg_size);
   }
-}
-
-// ---------------------------------------------------------------------------
-// Block-level multi-layer KV transfer
-// ---------------------------------------------------------------------------
-
-template <typename ScalarType, bool lmcache_to_engine, EngineKVFormat format>
-void submit_multi_layer_block_kernel(
-    sycl::queue& queue, MemoryObj4<ScalarType> lmcache_objects,
-    ScalarType** paged_buffer_ptrs, const int64_t* block_ids,
-    int total_blocks, int num_blocks_per_object,
-    PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
-    int skip_prefix_n_blocks, int wg_size) {
-  if (total_blocks <= 0 || shape_desc.nl <= 0 || shape_desc.nh <= 0) return;
-
-  sycl::range<3> global_range(
-      static_cast<size_t>(shape_desc.kv_size), static_cast<size_t>(total_blocks),
-      static_cast<size_t>(shape_desc.nl * shape_desc.nh) * wg_size);
-  sycl::range<3> local_range(1, 1, static_cast<size_t>(wg_size));
-
-  queue.parallel_for(
-      sycl::nd_range<3>(global_range, local_range),
-      [=](sycl::nd_item<3> item) [[sycl::reqd_sub_group_size(16)]] {
-        const int k_or_v = static_cast<int>(item.get_group(0));
-        const int flat_block_idx = static_cast<int>(item.get_group(1));
-        const int layer_head_idx = static_cast<int>(item.get_group(2));
-        const int layer_idx = layer_head_idx / shape_desc.nh;
-        const int head_idx = layer_head_idx % shape_desc.nh;
-        const int tid = static_cast<int>(item.get_local_id(2));
-        const int nthreads = static_cast<int>(item.get_local_range(2));
-
-        if (flat_block_idx < skip_prefix_n_blocks) return;
-
-        const int obj_idx = flat_block_idx / num_blocks_per_object;
-        if (obj_idx >= lmcache_objects.num_objects) return;
-        const int block_idx_in_object =
-            flat_block_idx - obj_idx * num_blocks_per_object;
-        const int engine_block_idx = static_cast<int>(block_ids[flat_block_idx]);
-
-        ScalarType* paged_buffer_layer_ptr;
-        if constexpr (format == EngineKVFormat::NB_NL_TWO_BS_NH_HS ||
-                      format == EngineKVFormat::NB_NL_TWO_NH_BS_HS) {
-          paged_buffer_layer_ptr = paged_buffer_ptrs[0];
-        } else if constexpr (format == EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS ||
-                             format ==
-                                 EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS) {
-          paged_buffer_layer_ptr =
-              paged_buffer_ptrs[k_or_v * shape_desc.nl + layer_idx];
-        } else {
-          paged_buffer_layer_ptr = paged_buffer_ptrs[layer_idx];
-        }
-
-        ScalarType* lmcache_object = lmcache_objects.objects[obj_idx];
-        const size_t engine_global_offset =
-            lmc::calculate_engine_global_offset<ScalarType, format>(
-                k_or_v, engine_block_idx, layer_idx, shape_desc);
-        const size_t lmcache_global_offset =
-            lmc::calculate_lmcache_global_offset<ScalarType>(
-                k_or_v, block_idx_in_object * shape_desc.bs, layer_idx,
-                lmcache_chunk_size, shape_desc);
-        const size_t scalars_per_head =
-            shape_desc.scalars_per_head<ScalarType>();
-
-        for (int token_offset = 0; token_offset < shape_desc.bs;
-             ++token_offset) {
-          const size_t engine_local_base_offset =
-              lmc::calculate_engine_local_offset<ScalarType, format>(
-                  token_offset, head_idx, shape_desc);
-          const size_t lmcache_local_base_offset =
-              lmc::calculate_lmcache_local_offset<ScalarType>(
-                  token_offset, head_idx, shape_desc);
-          for (size_t head_offset = tid; head_offset < scalars_per_head;
-               head_offset += nthreads) {
-            const size_t engine_local_offset =
-                engine_local_base_offset + head_offset;
-            const size_t lmcache_local_offset =
-                lmcache_local_base_offset + head_offset;
-
-            ScalarType* engine_ptr = paged_buffer_layer_ptr +
-                                     engine_global_offset +
-                                     engine_local_offset;
-            ScalarType* lmcache_ptr = lmcache_object + lmcache_global_offset +
-                                      lmcache_local_offset;
-            if constexpr (lmcache_to_engine) {
-              *engine_ptr = *lmcache_ptr;
-            } else {
-              *lmcache_ptr = *engine_ptr;
-            }
-          }
-        }
-      });
-}
-
-#define LAUNCH_BLOCK_KERNEL_WITH_FORMAT(T, DIRECTION, FORMAT)              \
-  submit_multi_layer_block_kernel<T, DIRECTION, FORMAT>(                   \
-      queue, lmcache_obj4, paged_buffer_ptrs, block_ids_ptr, total_blocks,  \
-      num_blocks_per_object, shape_desc, lmcache_chunk_size,                \
-      skip_prefix_n_blocks, wg_size)
-
-template <typename T>
-void multi_layer_block_kv_transfer_templated(
-    const torch::Tensor& paged_buffer_ptrs_tensor,
-    std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
-    const torch::Device& device, TransferDirection direction,
-    PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
-    EngineKVFormat engine_kv_format, int skip_prefix_n_blocks) {
-  const int num_objects = static_cast<int>(lmcache_objects_ptrs.size());
-  TORCH_CHECK(num_objects >= 1 && num_objects <= 4,
-              "Expected 1-4 LMCache objects, got ", num_objects);
-
-  const int total_blocks = static_cast<int>(block_ids.size(0));
-  TORCH_CHECK(total_blocks % num_objects == 0, "block_ids length (",
-              total_blocks, ") must be divisible by num_objects (",
-              num_objects, ")");
-  const int num_blocks_per_object = total_blocks / num_objects;
-  TORCH_CHECK(num_blocks_per_object * shape_desc.bs == lmcache_chunk_size,
-              "blocks_per_object * block_size (",
-              num_blocks_per_object * shape_desc.bs,
-              ") must equal lmcache_chunk_size (", lmcache_chunk_size, ")");
-
-  MemoryObj4<T> lmcache_obj4;
-  lmcache_obj4.num_objects = num_objects;
-  for (int i = 0; i < 4; ++i) {
-    lmcache_obj4.objects[i] =
-        i < num_objects ? reinterpret_cast<T*>(lmcache_objects_ptrs[i])
-                        : nullptr;
-  }
-
-  T** paged_buffer_ptrs = get_kernel_ptr<T*, const torch::Tensor>(
-      paged_buffer_ptrs_tensor);
-  const int64_t* block_ids_ptr =
-      get_kernel_ptr<const int64_t, const torch::Tensor>(block_ids);
-
-  const c10::OptionalDeviceGuard device_guard(device);
-  sycl::queue& queue = c10::xpu::getCurrentXPUStream(device.index()).queue();
-
-  const int head_scalars =
-      static_cast<int>(shape_desc.scalars_per_head<T>());
-  TORCH_CHECK(head_scalars > 0, "head_size * element_size is smaller than the "
-                               "selected transfer scalar type");
-  const int wg_size = round_up_to_sg(std::min(head_scalars, MAX_WG_SIZE));
-
-  if (direction == TransferDirection::H2D) {
-    switch (engine_kv_format) {
-      case EngineKVFormat::NB_NL_TWO_BS_NH_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(T, true,
-                                        EngineKVFormat::NB_NL_TWO_BS_NH_HS);
-        break;
-      case EngineKVFormat::NL_X_TWO_NB_BS_NH_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(T, true,
-                                        EngineKVFormat::NL_X_TWO_NB_BS_NH_HS);
-        break;
-      case EngineKVFormat::NL_X_TWO_NB_NH_BS_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(T, true,
-                                        EngineKVFormat::NL_X_TWO_NB_NH_BS_HS);
-        break;
-      case EngineKVFormat::NL_X_NB_TWO_BS_NH_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(T, true,
-                                        EngineKVFormat::NL_X_NB_TWO_BS_NH_HS);
-        break;
-      case EngineKVFormat::NL_X_NB_TWO_NH_BS_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(T, true,
-                                        EngineKVFormat::NL_X_NB_TWO_NH_BS_HS);
-        break;
-      case EngineKVFormat::NL_X_NB_BS_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(T, true, EngineKVFormat::NL_X_NB_BS_HS);
-        break;
-      case EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(T, true,
-                                        EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS);
-        break;
-      case EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(T, true,
-                                        EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS);
-        break;
-      case EngineKVFormat::NL_X_NBBS_ONE_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(T, true, EngineKVFormat::NL_X_NBBS_ONE_HS);
-        break;
-      case EngineKVFormat::NB_NL_TWO_NH_BS_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(T, true,
-                                        EngineKVFormat::NB_NL_TWO_NH_BS_HS);
-        break;
-      default:
-        TORCH_CHECK(false, "Unsupported EngineKVFormat: ",
-                    static_cast<int>(engine_kv_format));
-    }
-  } else {
-    switch (engine_kv_format) {
-      case EngineKVFormat::NB_NL_TWO_BS_NH_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(T, false,
-                                        EngineKVFormat::NB_NL_TWO_BS_NH_HS);
-        break;
-      case EngineKVFormat::NL_X_TWO_NB_BS_NH_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(T, false,
-                                        EngineKVFormat::NL_X_TWO_NB_BS_NH_HS);
-        break;
-      case EngineKVFormat::NL_X_TWO_NB_NH_BS_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(T, false,
-                                        EngineKVFormat::NL_X_TWO_NB_NH_BS_HS);
-        break;
-      case EngineKVFormat::NL_X_NB_TWO_BS_NH_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(T, false,
-                                        EngineKVFormat::NL_X_NB_TWO_BS_NH_HS);
-        break;
-      case EngineKVFormat::NL_X_NB_TWO_NH_BS_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(T, false,
-                                        EngineKVFormat::NL_X_NB_TWO_NH_BS_HS);
-        break;
-      case EngineKVFormat::NL_X_NB_BS_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(T, false, EngineKVFormat::NL_X_NB_BS_HS);
-        break;
-      case EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(T, false,
-                                        EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS);
-        break;
-      case EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(T, false,
-                                        EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS);
-        break;
-      case EngineKVFormat::NL_X_NBBS_ONE_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(T, false,
-                                        EngineKVFormat::NL_X_NBBS_ONE_HS);
-        break;
-      case EngineKVFormat::NB_NL_TWO_NH_BS_HS:
-        LAUNCH_BLOCK_KERNEL_WITH_FORMAT(T, false,
-                                        EngineKVFormat::NB_NL_TWO_NH_BS_HS);
-        break;
-      default:
-        TORCH_CHECK(false, "Unsupported EngineKVFormat: ",
-                    static_cast<int>(engine_kv_format));
-    }
-  }
-}
-
-#undef LAUNCH_BLOCK_KERNEL_WITH_FORMAT
-
-void multi_layer_block_kv_transfer(
-    const torch::Tensor& paged_buffer_ptrs_tensor,
-    std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
-    const torch::Device& device, TransferDirection direction,
-    PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
-    EngineKVFormat engine_kv_format, int skip_prefix_n_blocks) {
-  const int head_bytes = shape_desc.hs * shape_desc.element_size;
-  TORCH_CHECK(head_bytes % sizeof(uint16_t) == 0,
-              "head_size * element_size (", head_bytes,
-              ") must be divisible by 2 for vectorized access");
-
-#define LAUNCH_MULTI_LAYER_BLOCK_KV_TRANSFER(type)                        \
-  do {                                                                    \
-    multi_layer_block_kv_transfer_templated<type>(                        \
-        paged_buffer_ptrs_tensor, lmcache_objects_ptrs, block_ids, device, \
-        direction, shape_desc, lmcache_chunk_size, engine_kv_format,          \
-        skip_prefix_n_blocks);                                            \
-  } while (0)
-
-  if (head_bytes % 8 == 0) {
-    LAUNCH_MULTI_LAYER_BLOCK_KV_TRANSFER(int64_t);
-  } else if (head_bytes % 4 == 0) {
-    LAUNCH_MULTI_LAYER_BLOCK_KV_TRANSFER(int32_t);
-  } else {
-    LAUNCH_MULTI_LAYER_BLOCK_KV_TRANSFER(int16_t);
-  }
-
-#undef LAUNCH_MULTI_LAYER_BLOCK_KV_TRANSFER
 }
 
 // ---------------------------------------------------------------------------
@@ -953,10 +955,14 @@ void single_layer_kv_transfer(torch::Tensor& lmc_key_value_cache,
     vllm_block_key_stride_in_64bit =
         vllm_key_value_cache.stride(1) / elements_per_entry;
     vllm_value_offset = vllm_key_value_cache.stride(0) / elements_per_entry;
-  } else {  // NL_X_NB_TWO_BS_NH_HS
+  } else if (engine_kv_format == EngineKVFormat::NL_X_NB_TWO_BS_NH_HS) {
     vllm_block_key_stride_in_64bit =
         vllm_key_value_cache.stride(0) / elements_per_entry;
     vllm_value_offset = vllm_key_value_cache.stride(1) / elements_per_entry;
+  } else {
+    throw std::runtime_error(
+        "Unsupported non-MLA EngineKVFormat in single_layer_kv_transfer: " +
+        std::to_string(static_cast<int>(engine_kv_format)));
   }
 
   int n = num_heads * head_size_in_64bit;
@@ -997,6 +1003,115 @@ void single_layer_kv_transfer(torch::Tensor& lmc_key_value_cache,
           lmc_value_offset, block_size, vllm_block_key_stride_in_64bit,
           vllm_value_offset, num_heads, head_size_in_64bit, wg_size);
   }
+}
+
+// ---------------------------------------------------------------------------
+// single_layer_kv_transfer_sgl — helper template
+// ---------------------------------------------------------------------------
+template <bool IS_D2H>
+void single_layer_kv_transfer_sgl_impl(
+    sycl::queue& queue, int64_t* lmc_ptr, int64_t* sgl_k_ptr,
+    int64_t* sgl_v_ptr, const int64_t* slot_ptr, int num_tokens, int n,
+    int lmc_stride, int lmc_value_offset, int block_stride_in_64bit,
+    int block_size, int num_heads, int head_size_in_64bit, int wg_size) {
+  if (num_tokens <= 0) return;
+
+  sycl::range<1> global_range(static_cast<size_t>(num_tokens) * wg_size);
+  sycl::range<1> local_range(static_cast<size_t>(wg_size));
+
+  queue.parallel_for(
+      sycl::nd_range<1>(global_range, local_range),
+      [=](sycl::nd_item<1> item) [[sycl::reqd_sub_group_size(16)]] {
+        const int64_t token_idx = static_cast<int64_t>(item.get_group(0));
+        const int64_t slot_idx = slot_ptr[token_idx];
+        if (slot_idx < 0) return;
+
+        const int64_t block_idx = slot_idx / block_size;
+        const int64_t block_offset = slot_idx % block_size;
+
+        const int tid = static_cast<int>(item.get_local_id(0));
+        const int nthreads = static_cast<int>(item.get_local_range(0));
+
+        for (int i = tid; i < n; i += nthreads) {
+          const int64_t lmc_key_idx = token_idx * lmc_stride + i;
+          const int64_t lmc_value_idx = lmc_key_idx + lmc_value_offset;
+
+          const int head_idx = i / head_size_in_64bit;
+          const int head_offset = i % head_size_in_64bit;
+          const int64_t sgl_kv_idx =
+              block_idx * block_stride_in_64bit +
+              block_offset * num_heads * head_size_in_64bit +
+              head_idx * head_size_in_64bit + head_offset;
+
+          if constexpr (IS_D2H) {
+            lmc_ptr[lmc_key_idx] = sgl_k_ptr[sgl_kv_idx];
+            lmc_ptr[lmc_value_idx] = sgl_v_ptr[sgl_kv_idx];
+          } else {
+            sgl_k_ptr[sgl_kv_idx] = lmc_ptr[lmc_key_idx];
+            sgl_v_ptr[sgl_kv_idx] = lmc_ptr[lmc_value_idx];
+          }
+        }
+      });
+}
+
+// ---------------------------------------------------------------------------
+// Public API: single_layer_kv_transfer_sgl (SGLang)
+// ---------------------------------------------------------------------------
+void single_layer_kv_transfer_sgl(torch::Tensor& lmc_key_value_cache,
+                                  torch::Tensor& sgl_key_cache,
+                                  torch::Tensor& sgl_value_cache,
+                                  torch::Tensor& slot_mapping,
+                                  const TransferDirection direction,
+                                  const bool token_major) {
+  int64_t* lmc_key_value_cache_ptr =
+      get_kernel_ptr<int64_t, torch::Tensor>(lmc_key_value_cache);
+  int64_t* sgl_key_cache_ptr =
+      get_kernel_ptr<int64_t, torch::Tensor>(sgl_key_cache);
+  int64_t* sgl_value_cache_ptr =
+      get_kernel_ptr<int64_t, torch::Tensor>(sgl_value_cache);
+  const int64_t* slot_mapping_ptr =
+      get_kernel_ptr<const int64_t, const torch::Tensor>(slot_mapping);
+
+  int elements_per_entry = 8 / sgl_key_cache.element_size();
+
+  int num_tokens = slot_mapping.size(0);
+  int num_heads = sgl_key_cache.size(2);
+  int head_size_in_64bit = sgl_key_cache.size(3) / elements_per_entry;
+  int block_size = sgl_key_cache.size(1);
+
+  int lmc_stride;
+  int lmc_value_offset;
+  if (token_major) {
+    lmc_stride = lmc_key_value_cache.stride(0) / elements_per_entry;
+    lmc_value_offset = lmc_key_value_cache.stride(1) / elements_per_entry;
+  } else {
+    lmc_stride = lmc_key_value_cache.stride(1) / elements_per_entry;
+    lmc_value_offset = lmc_key_value_cache.stride(0) / elements_per_entry;
+  }
+
+  int block_stride_in_64bit = sgl_key_cache.stride(0) / elements_per_entry;
+  TORCH_CHECK(sgl_key_cache.stride(0) == sgl_value_cache.stride(0));
+
+  int n = num_heads * head_size_in_64bit;
+  int wg_size = round_up_to_sg(std::min(n, MAX_WG_SIZE));
+  if (num_tokens <= 0) return;
+
+  const c10::OptionalDeviceGuard device_guard(device_of(sgl_key_cache));
+  sycl::queue& queue =
+      c10::xpu::getCurrentXPUStream(sgl_key_cache.device().index()).queue();
+
+  if (direction == TransferDirection::D2H)
+    single_layer_kv_transfer_sgl_impl<true>(
+        queue, lmc_key_value_cache_ptr, sgl_key_cache_ptr, sgl_value_cache_ptr,
+        slot_mapping_ptr, num_tokens, n, lmc_stride, lmc_value_offset,
+        block_stride_in_64bit, block_size, num_heads, head_size_in_64bit,
+        wg_size);
+  else
+    single_layer_kv_transfer_sgl_impl<false>(
+        queue, lmc_key_value_cache_ptr, sgl_key_cache_ptr, sgl_value_cache_ptr,
+        slot_mapping_ptr, num_tokens, n, lmc_stride, lmc_value_offset,
+        block_stride_in_64bit, block_size, num_heads, head_size_in_64bit,
+        wg_size);
 }
 
 // ---------------------------------------------------------------------------

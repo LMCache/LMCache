@@ -6,11 +6,10 @@
 //
 #include <sycl/sycl.hpp>
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 #include <torch/torch.h>
-#include <string>
 #include "mem_kernels_sycl.h"
 #include "cachegen_kernels_sycl.h"
-#include "ipc_sycl.h"
 
 namespace py = pybind11;
 
@@ -65,20 +64,6 @@ PYBIND11_MODULE(xpu_ops, m) {
   m.def("reshape_and_cache_back_flash", &reshape_and_cache_back_flash);
   m.def("lmcache_memcpy_async", &lmcache_memcpy_async,
         py::call_guard<py::gil_scoped_release>());
-  m.def("xpu_get_ipc_handle",
-        [](uintptr_t data_ptr, int device_index) {
-          std::string handle;
-          {
-            py::gil_scoped_release release;
-            handle = xpu_get_ipc_handle(data_ptr, device_index);
-          }
-          return py::bytes(handle);
-        },
-        py::arg("data_ptr"), py::arg("device_index"));
-  m.def("xpu_open_ipc_handle", &xpu_open_ipc_handle, py::arg("handle_bytes"),
-        py::arg("nbytes"), py::arg("device_index"),
-        py::call_guard<py::gil_scoped_release>());
-
   // CacheGen / RoPE kernels (Intel XPU).  Names match the
   // lmcache.python_ops_fallback module so the backend selection in
   // lmcache.v1.platform can transparently override.

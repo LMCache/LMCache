@@ -75,6 +75,47 @@ class MessagingFuture(Generic[T]):
         # TODO: need extra type checking for the future type
         return CUDAMessagingFuture.FromMessagingFuture(self, device)  # type: ignore
 
+    def to_eventless_future(self) -> "EventlessMessagingFuture":
+        """Return a future that strips a response event handle.
+
+        This is used by device backends that use the same server response
+        shape as CUDA, ``tuple[bytes, T]``, but rely on request/response
+        ordering instead of a returned IPC event.
+        """
+        return EventlessMessagingFuture.FromMessagingFuture(self)  # type: ignore
+
+
+class EventlessMessagingFuture(MessagingFuture[T]):
+    """Future for response-ordered transfers without IPC event handles."""
+
+    def __init__(self, raw_future: MessagingFuture[tuple[bytes, T]]) -> None:
+        super().__init__()
+        self.raw_future_ = raw_future
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """Wait for the underlying MQ response."""
+        return self.raw_future_.wait(timeout)
+
+    def result(self, timeout: float | None = None) -> T:
+        """Return the response payload, ignoring the empty event handle."""
+        _event_bytes, result = self.raw_future_.result(timeout)
+        return result
+
+    def query(self) -> bool:
+        """Return whether the underlying MQ response has arrived."""
+        return self.raw_future_.query()
+
+    def set_result(self, result: T) -> None:
+        raise NotImplementedError(
+            "EventlessMessagingFuture does not support set_result directly"
+        )
+
+    @staticmethod
+    def FromMessagingFuture(
+        raw_future: MessagingFuture[tuple[bytes, T]],
+    ) -> "EventlessMessagingFuture[T]":
+        return EventlessMessagingFuture(raw_future)
+
 
 class CUDAMessagingFuture(MessagingFuture[T]):
     """

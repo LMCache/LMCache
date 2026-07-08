@@ -157,7 +157,7 @@ def _build_lmcache_driven_context(device_type: str) -> "TransferContext":
             "%r: required platform capability checks failed. "
             "Use mode 'engine_driven' or 'auto' instead." % device_type
         )
-    return LMCacheDrivenTransferContext()
+    return LMCacheDrivenTransferContext(device_type)
 
 
 class IPCEvent(Protocol):
@@ -310,9 +310,10 @@ class LMCacheDrivenTransferContext(TransferContext):
     server performs direct device-side data transfer.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, device_type: str) -> None:
         self._mq_client: MessageQueueClient | None = None
         self._send_request: SendRequest | None = None
+        self._device_type = device_type
 
     def register(
         self,
@@ -330,6 +331,9 @@ class LMCacheDrivenTransferContext(TransferContext):
         # First Party
         from lmcache.integration.vllm.vllm_multi_process_adapter import wrap_kv_caches
 
+        device_types = {tensor.device.type for tensor in kv_caches.values()}
+        if len(device_types) == 1:
+            self._device_type = next(iter(device_types))
         self._mq_client = mq_client
         self._send_request = send_request
         future = send_request(
@@ -352,7 +356,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         _request_id: str,
         key: Any,
         instance_id: int,
-        _kv_caches: dict[str, torch.Tensor],
+        kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
         event: IPCEvent,
         _blocks_in_chunk: int,
@@ -362,6 +366,13 @@ class LMCacheDrivenTransferContext(TransferContext):
                 "LMCache-driven transfer context is not registered. "
                 "Call register() before submit_store()."
             )
+        if self._request_device_type(kv_caches) == "xpu":
+            torch_dev.synchronize()
+            return self._send_request(
+                self._mq_client,
+                RequestType.STORE,
+                [key, instance_id, block_ids, b""],
+            ).to_eventless_future()
         return self._send_request(
             self._mq_client,
             RequestType.STORE,
@@ -373,7 +384,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         _request_id: str,
         key: Any,
         instance_id: int,
-        _kv_caches: dict[str, torch.Tensor],
+        kv_caches: dict[str, torch.Tensor],
         block_ids: list[list[int]],
         event: IPCEvent,
         _blocks_in_chunk: int,
@@ -384,6 +395,13 @@ class LMCacheDrivenTransferContext(TransferContext):
                 "LMCache-driven transfer context is not registered. "
                 "Call register() before submit_retrieve()."
             )
+        if self._request_device_type(kv_caches) == "xpu":
+            torch_dev.synchronize()
+            return self._send_request(
+                self._mq_client,
+                RequestType.RETRIEVE,
+                [key, instance_id, block_ids, b"", skip_first_n_tokens],
+            ).to_eventless_future()
         return self._send_request(
             self._mq_client,
             RequestType.RETRIEVE,
@@ -396,6 +414,12 @@ class LMCacheDrivenTransferContext(TransferContext):
 
     def flush_inflight_stores(self) -> None:
         pass
+
+    def _request_device_type(self, kv_caches: dict[str, torch.Tensor]) -> str:
+        device_types = {tensor.device.type for tensor in kv_caches.values()}
+        if len(device_types) == 1:
+            return next(iter(device_types))
+        return self._device_type
 
 
 class EngineDrivenTransferContext(TransferContext):
@@ -649,5 +673,5 @@ def create_transfer_context(
         return _build_engine_driven_context()
     # AUTO: dispatch by device type (CUDA -> handle path, else -> data path).
     if device_type == "cuda":
-        return LMCacheDrivenTransferContext()
+        return LMCacheDrivenTransferContext(device_type)
     return _build_engine_driven_context()
