@@ -4,12 +4,16 @@
 # Future
 from __future__ import annotations
 
+# Standard
+from typing import TYPE_CHECKING
+
 # Third Party
 import torch
 
-# First Party
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContext
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+    from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContext
 
 
 class ContiguousTransferWrapper:
