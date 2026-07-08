@@ -475,14 +475,18 @@ class HeartbeatThread(PeriodicThread):
         UNREGISTER must not re-register a ghost context.
         """
         was_healthy = self._health_event.is_set()
-        instance_ids = self._instance_ids if self._instance_ids else []
         healthy = True
-        for instance_id in instance_ids:
-            if not send_ping(
-                self._mq_client, timeout=self._interval, instance_id=instance_id
-            ):
-                healthy = False
-                break
+        if self._instance_ids:
+            for instance_id in self._instance_ids:
+                if not send_ping(
+                    self._mq_client, timeout=self._interval, instance_id=instance_id
+                ):
+                    healthy = False
+                    break
+        else:
+            healthy = send_ping(
+                self._mq_client, timeout=self._interval, instance_id=None
+            )
 
         if self.stop_requested:
             return ThreadRunSummary(

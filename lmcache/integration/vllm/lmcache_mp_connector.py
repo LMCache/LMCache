@@ -1019,15 +1019,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if not self.worker_adapter.is_kv_writer or self._q_step_disabled:
             return
 
-        layer_index = self._q_layer_index.get(layer_name)
-        if layer_index is None:
-            return
-
         intermediate_tensors = kwargs.get("intermediate_tensors", None)
         if intermediate_tensors is None:
             return
         query = get_tensor(intermediate_tensors, ["q", "query"])
         if query is None:
+            return
+
+        layer_index = self._q_layer_index.get(layer_name)
+        if layer_index is None:
             return
 
         if self._q_step_state is None:
@@ -1036,9 +1036,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 self._q_step_disabled = True
                 return
 
-        logger.info(
-            "Saving query for layer %s (index %d) to LMCache", layer_name, layer_index
-        )
         self.worker_adapter.scatter_q_layer(
             layer_index, query, self._q_step_state.ring_slots
         )
@@ -1057,6 +1054,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
+
+        if not (all(meta.direction == "STORE" for meta in metadata.requests)):
+            logger.warning(
+                "Not all requests are STORE. Skip query for requests %s...",
+                [meta.request_id for meta in metadata.requests],
+            )
+            return None
 
         q_ring = self.worker_adapter.q_ring
         if q_ring is None:
