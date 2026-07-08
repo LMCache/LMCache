@@ -10,7 +10,7 @@ A sanitized subset of the aggregated data may be publicly released for the commu
 What data is collected?
 -----------------------
 
-Usage stats are emitted as three message types, implemented in ``usage_context.py``:
+Usage stats are emitted as three message types, implemented in the ``lmcache/usage_telemetry/`` package:
 
 - **EnvMessage**  
   Captures environment details such as cloud provider, CPU info, total memory, architecture, GPU count/type, and execution source.  
@@ -20,6 +20,21 @@ Usage stats are emitted as three message types, implemented in ``usage_context.p
 
 - **MetadataMessage**  
   Reports execution metadata: the timestamp when the run started and total duration in seconds.
+
+In addition to the one-shot messages above, a continuous reporter periodically
+sends interval counters (**ContinuousContextMessage**: tokens stored/hit and
+stored KV bytes in the interval) and a cache-lifespan histogram
+(**CacheLifespanMessage**). The flush interval is controlled by
+``LMCACHE_USAGE_TRACK_INTERVAL`` (seconds, default 600).
+
+Every payload carries three correlation fields:
+
+- ``session_id`` -- a random UUID minted once per process, joining the
+  one-shot context with the continuous messages of the same run.
+- ``machine_id`` -- a random UUID persisted at
+  ``~/.config/lmcache/machine_id``, grouping sessions from the same machine.
+  It is never derived from hardware identifiers (MAC address, hostname).
+- ``schema_version`` -- the version of the message schema.
 
 These messages are serialized to JSON and POSTed to the LMCache usage server.
 
@@ -55,13 +70,23 @@ If you enable **local logging**, usage messages are appended to your specified l
 Configuration & Opt-out
 -----------------------
 
-By default, usage tracking is **enabled**. To disable all usage stats collection, set the environment variable:
+By default, usage tracking is **enabled**. Any one of the following opt-outs
+disables all usage stats collection:
 
 .. code-block:: bash
 
+   # LMCache-specific opt-out
    export LMCACHE_TRACK_USAGE=false
 
-When ``LMCACHE_TRACK_USAGE`` is set to ``false``, ``InitializeUsageContext`` will return ``None`` and no data will be sent or logged.
+   # The cross-tool "do not track" convention (1/true/yes)
+   export DO_NOT_TRACK=1
+
+   # Or a persistent marker file, no environment needed
+   mkdir -p ~/.config/lmcache && touch ~/.config/lmcache/do_not_track
+
+When tracking is disabled, ``InitializeUsageContext`` will return ``None`` and
+no data will be sent or logged, and no state files (such as ``machine_id``)
+will be created.
 
 Local logging
 ~~~~~~~~~~~~~
@@ -70,7 +95,7 @@ If you would like to log to a file in addition to (or instead of) sending data t
 
 .. code-block:: python
 
-   from lmcache.usage_context import InitializeUsageContext
+   from lmcache.usage_telemetry import InitializeUsageContext
 
    usage_ctx = InitializeUsageContext(
        config=engine_config,
