@@ -57,19 +57,18 @@ def test_native_transfer_module_lives_under_musa_platform() -> None:
     assert musa_native.__name__ == "lmcache.v1.platform.musa.native_kv_transfer"
 
 
-def test_musa_device_ops_overrides_multi_layer_block_kv_transfer(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """MusaDeviceOps overrides multi_layer_block_kv_transfer (not the base)."""
+def test_musa_device_ops_overrides_multi_layer_block_kv_transfer() -> None:
+    """MusaDeviceOps.populate_module overrides multi_layer_block_kv_transfer."""
     # First Party
     from lmcache.v1.platform import _torch_ops
     from lmcache.v1.platform.musa.device_ops import MusaDeviceOps
 
     assert MusaDeviceOps.device_type == "musa"
-    # The override is defined on the subclass, not the torch baseline
-    assert "multi_layer_block_kv_transfer" in vars(MusaDeviceOps)
+    target = ModuleType("musa_c_ops_probe")
+    MusaDeviceOps.populate_module(target)
+    # The override is installed on the populated module, not the torch baseline.
     assert (
-        MusaDeviceOps.multi_layer_block_kv_transfer
+        target.multi_layer_block_kv_transfer
         is not _torch_ops.multi_layer_block_kv_transfer
     )
 
@@ -412,7 +411,8 @@ def test_musa_ops_block_transfer_entry_dispatches_to_musa_platform(
     # First Party
     from lmcache.v1.platform.musa.device_ops import MusaDeviceOps
 
-    ops = MusaDeviceOps()
+    target = ModuleType("musa_c_ops_probe")
+    MusaDeviceOps.populate_module(target)
 
     captured: dict[str, Any] = {}
 
@@ -428,7 +428,7 @@ def test_musa_ops_block_transfer_entry_dispatches_to_musa_platform(
 
     paged_layers = [torch.zeros(4, 4, 16) for _ in range(2)]
     object_tensors = [torch.zeros(2, 8, 16)]
-    ops.multi_layer_block_kv_transfer(
+    target.multi_layer_block_kv_transfer(
         paged_layers,
         object_tensors,
         [0, 1],

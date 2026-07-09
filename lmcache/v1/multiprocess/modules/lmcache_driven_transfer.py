@@ -55,17 +55,12 @@ import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 # ``lmc_ops.execute_object_group_transfer`` is either a native callable (bound
-# by ``DeviceOps._bind_native``) or the torch-baseline thin method, which wraps
-# ``_torch_ops.execute_object_group_transfer`` and exposes it via ``__wrapped__``.
-# Unwrap before the identity check so the torch baseline is correctly detected as
-# "no native impl" (the baseline op is a native-only stub that raises).
-_active_object_group_transfer = getattr(
-    lmc_ops.execute_object_group_transfer,
-    "__wrapped__",
-    lmc_ops.execute_object_group_transfer,
-)
+# by ``DeviceOps._bind_native`` on accelerators) or the torch baseline stub
+# (a native-only op that raises). Identity against the baseline tells us whether
+# a real native implementation is present.
 _HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = (
-    _active_object_group_transfer is not _torch_ops.execute_object_group_transfer
+    lmc_ops.execute_object_group_transfer
+    is not _torch_ops.execute_object_group_transfer
 )
 
 

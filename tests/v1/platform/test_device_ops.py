@@ -15,11 +15,9 @@ import types
 import pytest
 
 # First Party
-import lmcache.v1.platform as platform_pkg
-from lmcache.v1.platform import resolve_device_ops_cls
-from lmcache.v1.platform import _torch_ops
-from lmcache.v1.platform.base_device_spec import DeviceSpec
+from lmcache.v1.platform import _torch_ops, resolve_device_ops_cls
 from lmcache.v1.platform.base_device_ops import OPS, DeviceOps
+from lmcache.v1.platform.base_device_spec import DeviceSpec
 from lmcache.v1.platform.cpu.device_ops import CpuDeviceOps
 from lmcache.v1.platform.ops_types import (
     BatchStep,
@@ -30,6 +28,7 @@ from lmcache.v1.platform.ops_types import (
     StagingCopy,
     TransferDirection,
 )
+import lmcache.v1.platform as platform_pkg
 
 
 @pytest.fixture

@@ -13,6 +13,7 @@ from lmcache.v1.platform.base_device_spec import DeviceSpec
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
+    from lmcache.v1.platform.base_device_ops import DeviceOps
 
 # ---------------------------------------------------------------------------
 # Device detection registry entry
