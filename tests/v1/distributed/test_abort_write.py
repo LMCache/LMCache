@@ -16,6 +16,7 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
 )
 from lmcache.v1.distributed.error import L1Error
+from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.server_transfer import PickleTransferStrategy
 from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContextMetadata
@@ -89,10 +90,36 @@ def test_abort_write_releases_locks_and_frees_objects(storage_manager, basic_lay
     storage_manager.abort_write(keys)
 
 
-def test_abort_write_does_not_publish_to_store_listeners(
-    storage_manager, basic_layout
-):
-    events: list[list[ObjectKey]] = []
+@pytest.fixture
+def l1_manager():
+    manager = L1Manager(
+        config=L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=128 * 1024 * 1024,
+                use_lazy=torch.cuda.is_available(),
+                init_size_in_bytes=64 * 1024 * 1024,
+                align_bytes=0x1000,
+            ),
+            write_ttl_seconds=600,
+            read_ttl_seconds=300,
+        )
+    )
+    yield manager
+    manager.close()
+
+
+def _reserve(manager: L1Manager, keys: list[ObjectKey], layout: MemoryLayoutDesc):
+    return manager.reserve_write(
+        keys=keys,
+        is_temporary=[False] * len(keys),
+        layout_desc=layout,
+        mode="new",
+    )
+
+
+def test_abort_write_does_not_publish_to_store_listeners(l1_manager, basic_layout):
+    written: list[list[ObjectKey]] = []
+    deleted: list[list[ObjectKey]] = []
 
     class _Listener:
         def on_l1_keys_reserved_read(self, keys):
@@ -105,13 +132,13 @@ def test_abort_write_does_not_publish_to_store_listeners(
             pass
 
         def on_l1_keys_write_finished(self, keys):
-            events.append(list(keys))
+            written.append(list(keys))
 
         def on_l1_keys_finish_write_and_reserve_read(self, keys):
             pass
 
         def on_l1_keys_deleted_by_manager(self, keys):
-            pass
+            deleted.append(list(keys))
 
         def on_l1_keys_accessed(self, keys):
             pass
@@ -125,24 +152,26 @@ def test_abort_write_does_not_publish_to_store_listeners(
         def on_l2_keys_deleted(self, keys):
             pass
 
-    storage_manager._l1_manager.register_listener(_Listener())
+    l1_manager.register_listener(_Listener())
     keys = [make_object_key(10)]
-    storage_manager.reserve_write(keys, basic_layout, "new")
-    storage_manager.abort_write(keys)
+    _reserve(l1_manager, keys, basic_layout)
+    result = l1_manager.abort_write(keys)
 
-    assert events == [] or all(not e for e in events)
+    assert result[keys[0]] == L1Error.SUCCESS
+    assert all(not e for e in written)
+    assert deleted == [keys]
 
 
-def test_l1_abort_write_rejects_unlocked_keys(storage_manager, basic_layout):
+def test_l1_abort_write_rejects_unlocked_keys(l1_manager, basic_layout):
     keys = [make_object_key(20)]
-    storage_manager.reserve_write(keys, basic_layout, "new")
-    storage_manager.finish_write(keys)
+    _reserve(l1_manager, keys, basic_layout)
+    l1_manager.finish_write(keys)
 
-    result = storage_manager._l1_manager.abort_write(keys)
+    result = l1_manager.abort_write(keys)
     assert result[keys[0]] == L1Error.KEY_IN_WRONG_STATE
 
     missing = [make_object_key(21)]
-    result = storage_manager._l1_manager.abort_write(missing)
+    result = l1_manager.abort_write(missing)
     assert result[missing[0]] == L1Error.KEY_NOT_EXIST
 
 
