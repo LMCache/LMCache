@@ -13,7 +13,10 @@ import torch
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.transfer_context.base import gather_paged_kv_to_cpu
+from lmcache.v1.multiprocess.transfer_context.base import (
+    ContextClosedError,
+    gather_paged_kv_to_cpu,
+)
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     EngineDrivenTransferContext,
     IPCEvent,
@@ -214,85 +217,106 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                 used_shm_direct = False
                 staged_chunks: list[torch.Tensor] = []
                 try:
-                    # --- Phase 1: prepare_store ---
-                    # In pickle mode this is the costliest step (sync RPC
-                    # round-trip).  Running it here keeps the forward thread free.
-                    result = engine_driven_context.prepare_store(key, instance_id)
-                    out_buffers, chunk_indices = (
-                        result if result is not None else (None, None)
-                    )
-
-                    if chunk_indices is not None and len(chunk_indices) == 0:
-                        # All chunks are already in cache: no gather, no commit.
-                        ok = True
-                        return
-
-                    num_chunks = (
-                        len(chunk_indices)
-                        if chunk_indices is not None
-                        else len(full_block_ids) // blocks_in_chunk
-                    )
-
-                    # Determine gather target:
-                    # - SHM path (out_buffers available): gather into SHM views
-                    # - Pickle path (no out_buffers): gather into pinned staging
-                    if out_buffers is not None:
-                        gather_target = out_buffers
-                        used_shm_direct = True
-                    else:
-                        layout_desc = engine_driven_context.layout_desc
-                        if not layout_desc.shapes:
-                            raise RuntimeError(
-                                "engine-driven layout_desc.shapes is empty"
-                            )
-                        if not layout_desc.dtypes:
-                            raise RuntimeError(
-                                "engine-driven layout_desc.dtypes is empty"
-                            )
-                        staged_chunks = self._alloc_pinned_staging(
-                            layout_desc.shapes[0],
-                            layout_desc.dtypes[0],
-                            num_chunks,
+                    # The whole prepare/gather/commit sequence dereferences
+                    # context-owned SHM views; the guard keeps a concurrent
+                    # context swap or shutdown from unmapping them mid-copy.
+                    with engine_driven_context.transfer_guard():
+                        # --- Phase 1: prepare_store ---
+                        # In pickle mode this is the costliest step (sync RPC
+                        # round-trip). Running it here keeps the forward
+                        # thread free.
+                        result = engine_driven_context.prepare_store(
+                            key, instance_id
                         )
-                        gather_target = staged_chunks
-
-                    # --- Phase 2: gather (GPU->CPU copy on copy stream) ---
-                    with torch.inference_mode(), torch_dev.stream(self._copy_stream):
-                        _event.wait(stream=self._copy_stream)
-
-                        gather_paged_kv_to_cpu(
-                            kv_caches,
-                            full_block_ids,
-                            blocks_in_chunk,
-                            layout_hints=self._layout_hints,
-                            engine_kv_format=self._engine_kv_format,
-                            out=gather_target,
-                            chunk_indices=chunk_indices,
+                        out_buffers, chunk_indices = (
+                            result if result is not None else (None, None)
                         )
 
-                        gather_done = torch_dev.Event()
-                        gather_done.record(self._copy_stream)
+                        if chunk_indices is not None and len(chunk_indices) == 0:
+                            # All chunks already in cache: no gather, no commit.
+                            ok = True
+                            return
 
-                    with self._inflight_lock:
+                        num_chunks = (
+                            len(chunk_indices)
+                            if chunk_indices is not None
+                            else len(full_block_ids) // blocks_in_chunk
+                        )
+
+                        # Determine gather target:
+                        # - SHM path (out_buffers available): gather into SHM
+                        #   views
+                        # - Pickle path (no out_buffers): gather into pinned
+                        #   staging
+                        if out_buffers is not None:
+                            gather_target = out_buffers
+                            used_shm_direct = True
+                        else:
+                            layout_desc = engine_driven_context.layout_desc
+                            if not layout_desc.shapes:
+                                raise RuntimeError(
+                                    "engine-driven layout_desc.shapes is empty"
+                                )
+                            if not layout_desc.dtypes:
+                                raise RuntimeError(
+                                    "engine-driven layout_desc.dtypes is empty"
+                                )
+                            staged_chunks = self._alloc_pinned_staging(
+                                layout_desc.shapes[0],
+                                layout_desc.dtypes[0],
+                                num_chunks,
+                            )
+                            gather_target = staged_chunks
+
+                        # --- Phase 2: gather (GPU->CPU copy on copy stream) ---
+                        with (
+                            torch.inference_mode(),
+                            torch_dev.stream(self._copy_stream),
+                        ):
+                            _event.wait(stream=self._copy_stream)
+
+                            gather_paged_kv_to_cpu(
+                                kv_caches,
+                                full_block_ids,
+                                blocks_in_chunk,
+                                layout_hints=self._layout_hints,
+                                engine_kv_format=self._engine_kv_format,
+                                out=gather_target,
+                                chunk_indices=chunk_indices,
+                            )
+
+                            gather_done = torch_dev.Event()
+                            gather_done.record(self._copy_stream)
+
+                        with self._inflight_lock:
+                            if gather_done is not None:
+                                self._inflight_gather_events.add(gather_done)
+                            self._pending_stores.discard(gather_launched)
+                        gather_launched.set()
+
                         if gather_done is not None:
-                            self._inflight_gather_events.add(gather_done)
-                        self._pending_stores.discard(gather_launched)
-                    gather_launched.set()
+                            gather_done.synchronize()
 
-                    if gather_done is not None:
-                        gather_done.synchronize()
-
-                    # --- Phase 3: commit ---
-                    with self._commit_lock:
-                        ok = engine_driven_context.commit_store(
-                            key, instance_id, gather_target
-                        )
+                        # --- Phase 3: commit ---
+                        with self._commit_lock:
+                            ok = engine_driven_context.commit_store(
+                                key, instance_id, gather_target
+                            )
 
                     if not ok:
                         logger.error(
                             "Async engine-driven commit_store failed for request_id=%s",
                             _request_id,
                         )
+                except ContextClosedError:
+                    # Context is being swapped/shut down; the store is simply
+                    # lost (same contract as a store against an unhealthy
+                    # server).
+                    logger.info(
+                        "Store for request_id=%s dropped: transfer context closing",
+                        _request_id,
+                    )
+                    ok = False
                 except Exception:
                     logger.exception(
                         "Async engine-driven store failed for request_id=%s",

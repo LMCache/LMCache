@@ -23,6 +23,7 @@ from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.protocols.engine import RegisterEngineDrivenContextResponse
 from lmcache.v1.multiprocess.transfer_context.base import (
+    ContextClosedError,
     EngineDrivenContext,
     EngineDrivenContextMetadata,
     compute_kv_layout,
@@ -526,29 +527,39 @@ class EngineDrivenTransferContext(TransferContext):
                 "Call register() before submit_store()."
             )
 
-        torch_dev.synchronize()
-        result = self._engine_driven_context.prepare_store(key, instance_id)
-        out_buffers, chunk_indices = result if result is not None else (None, None)
-        # All chunks already in cache — nothing to gather or commit.
-        if chunk_indices is not None and len(chunk_indices) == 0:
-            future: MessagingFuture[bool] = MessagingFuture()
-            future.set_result(True)
+        ctx = self._engine_driven_context
+        future: MessagingFuture[bool] = MessagingFuture()
+        try:
+            with ctx.transfer_guard():
+                torch_dev.synchronize()
+                result = ctx.prepare_store(key, instance_id)
+                out_buffers, chunk_indices = (
+                    result if result is not None else (None, None)
+                )
+                # All chunks already in cache — nothing to gather or commit.
+                if chunk_indices is not None and len(chunk_indices) == 0:
+                    future.set_result(True)
+                    return future
+                cpu_chunks = gather_paged_kv_to_cpu(
+                    kv_caches,
+                    _single_group_block_ids(block_ids),
+                    blocks_in_chunk,
+                    layout_hints=self._layout_hints,
+                    engine_kv_format=self._engine_kv_format,
+                    out=out_buffers,
+                    chunk_indices=chunk_indices,
+                )
+                if out_buffers is not None:
+                    # SHM path uses async device->CPU copies; complete them
+                    # before commit.
+                    torch_dev.synchronize()
+                ok = ctx.commit_store(key, instance_id, cpu_chunks)
+        except ContextClosedError:
+            # Context is being swapped/shut down; the store is simply lost
+            # (same contract as a store against an unhealthy server).
+            future.set_result(False)
             return future
-        cpu_chunks = gather_paged_kv_to_cpu(
-            kv_caches,
-            _single_group_block_ids(block_ids),
-            blocks_in_chunk,
-            layout_hints=self._layout_hints,
-            engine_kv_format=self._engine_kv_format,
-            out=out_buffers,
-            chunk_indices=chunk_indices,
-        )
-        if out_buffers is not None:
-            # SHM path uses async device->CPU copies; complete them before commit.
-            torch_dev.synchronize()
-        ok = self._engine_driven_context.commit_store(key, instance_id, cpu_chunks)
 
-        future = MessagingFuture()
         future.set_result(ok)
         return future
 
@@ -569,28 +580,39 @@ class EngineDrivenTransferContext(TransferContext):
                 "Call register() before submit_retrieve()."
             )
 
-        src_buffers = self._engine_driven_context.prepare_retrieve(key, instance_id)
-        ok = src_buffers is not None
-        if src_buffers is not None:
-            try:
-                scatter_cpu_to_paged_kv(
-                    kv_caches,
-                    _single_group_block_ids(block_ids),
-                    src_buffers,
-                    blocks_in_chunk,
-                    skip_first_n_tokens=skip_first_n_tokens,
-                    layout_hints=self._layout_hints,
-                    engine_kv_format=self._engine_kv_format,
-                )
-            except (RuntimeError, ValueError, TypeError, IndexError):
-                logger.exception("Failed to scatter retrieved CPU context chunks")
-                ok = False
-            # SHM path: ensure all device writes are complete before releasing
-            # the SHM slot (server may immediately reuse it after commit_retrieve).
-            torch_dev.synchronize()
-        self._engine_driven_context.commit_retrieve(key, instance_id)
-
+        ctx = self._engine_driven_context
         future: MessagingFuture[bool] = MessagingFuture()
+        try:
+            with ctx.transfer_guard():
+                src_buffers = ctx.prepare_retrieve(key, instance_id)
+                ok = src_buffers is not None
+                if src_buffers is not None:
+                    try:
+                        scatter_cpu_to_paged_kv(
+                            kv_caches,
+                            _single_group_block_ids(block_ids),
+                            src_buffers,
+                            blocks_in_chunk,
+                            skip_first_n_tokens=skip_first_n_tokens,
+                            layout_hints=self._layout_hints,
+                            engine_kv_format=self._engine_kv_format,
+                        )
+                    except (RuntimeError, ValueError, TypeError, IndexError):
+                        logger.exception(
+                            "Failed to scatter retrieved CPU context chunks"
+                        )
+                        ok = False
+                    # SHM path: ensure all device writes are complete before
+                    # releasing the SHM slot (server may immediately reuse it
+                    # after commit_retrieve).
+                    torch_dev.synchronize()
+                ctx.commit_retrieve(key, instance_id)
+        except ContextClosedError:
+            # Context is being swapped/shut down; report a miss so the
+            # engine recomputes the blocks.
+            future.set_result(False)
+            return future
+
         future.set_result(ok)
         return future
 

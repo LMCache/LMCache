@@ -228,6 +228,10 @@ class EngineDrivenContextShm(EngineDrivenContext):
     def close(self) -> None:
         if self._shm is None:
             return
+        # Unpinning and unmapping while a gather/scatter still holds tensor
+        # views into the pool is a native crash (use-after-unmap under a
+        # copy kernel); drain first, bounded so shutdown cannot hang.
+        self._drain_transfers()
         self._unpin_shm_buffer()
         try:
             self._shm.close()
