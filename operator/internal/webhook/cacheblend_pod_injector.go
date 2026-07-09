@@ -33,8 +33,10 @@ import (
 
 // CacheBlend annotation keys the webhook reads and stamps (design §8).
 const (
-	// AnnotationEngine binds a pod to a CacheBlendEngine in the same namespace.
-	// Its presence is the opt-in signal; its value is the engine name.
+	// AnnotationEngine binds a pod to a CacheBlendEngine. Its presence is the
+	// opt-in signal; its value is the engine name, optionally namespace-qualified
+	// as "<namespace>/<name>" to bind a shared engine in ANOTHER namespace. A
+	// bare name resolves in the pod's own namespace.
 	AnnotationEngine = "lmcache.ai/cacheblend-engine"
 
 	// AnnotationContainer optionally names the target vLLM container; empty or
@@ -102,27 +104,34 @@ type CacheBlendPodInjector struct {
 func (p *CacheBlendPodInjector) Handle(ctx context.Context, req admission.Request) admission.Response {
 	log := ctrl.LoggerFrom(ctx)
 
-	pod, engineName, namespace, resp, handled := cacheBlendKeys.gate(p.Decoder, req)
+	pod, engineRef, podNamespace, resp, handled := cacheBlendKeys.gate(p.Decoder, req)
 	if handled {
 		return resp
 	}
 
-	// (3a) Resolve the engine CR for its injection defaults.
+	// Resolve an optional "<namespace>/<name>" engine reference. A bare name
+	// resolves in the pod's namespace (the same-namespace default); a namespaced
+	// ref targets a shared engine in another namespace.
+	engineNamespace, engineName := parseEngineRef(engineRef, podNamespace)
+
+	// (3a) Resolve the engine CR (in the engine's namespace) for its injection
+	// defaults.
 	engine := &lmcachev1alpha1.CacheBlendEngine{}
-	if err := p.Client.Get(ctx, types.NamespacedName{Name: engineName, Namespace: namespace}, engine); err != nil {
+	if err := p.Client.Get(ctx, types.NamespacedName{Name: engineName, Namespace: engineNamespace}, engine); err != nil {
 		if apierrors.IsNotFound(err) {
 			log.Info("Skipped CacheBlend injection: engine not found",
-				"engine", engineName, "namespace", namespace)
+				"engine", engineName, "namespace", engineNamespace)
 			return cacheBlendKeys.skip(req, pod, SkipReasonEngineNotFound)
 		}
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
 	engine.SetDefaults()
 
-	// (3b/6/4) Read the connection ConfigMap, resolve the target container, and
-	// apply the command-override gate (shared with the LMCache injector).
+	// (3b/6/4) Read the connection ConfigMap (in the engine's namespace), resolve
+	// the target container, and apply the command-override gate (shared with the
+	// LMCache injector).
 	kvTransferConfigJSON, containerIdx, resp, ok := prepareInjection(
-		ctx, p.Client, req, pod, cacheBlendKeys, engineName, namespace,
+		ctx, p.Client, req, pod, cacheBlendKeys, engineName, engineNamespace,
 		engine.Spec.Injection.TargetContainer)
 	if !ok {
 		return resp
@@ -204,6 +213,21 @@ func resolveInjectedPullSecrets(
 		out = append(out, corev1.LocalObjectReference{Name: name})
 	}
 	return out
+}
+
+// parseEngineRef splits an engine reference of the form "<namespace>/<name>"
+// into its parts. A bare "<name>" (no slash) resolves in defaultNS — the pod's
+// namespace — preserving the same-namespace default. A blank namespace (e.g.
+// "/name") also falls back to defaultNS. Returns (namespace, name).
+func parseEngineRef(ref, defaultNS string) (namespace, name string) {
+	namespace, name = defaultNS, strings.TrimSpace(ref)
+	if ns, n, found := strings.Cut(name, "/"); found {
+		namespace, name = strings.TrimSpace(ns), strings.TrimSpace(n)
+	}
+	if namespace == "" {
+		namespace = defaultNS
+	}
+	return namespace, name
 }
 
 // appendVolumeIfAbsent appends v to volumes unless a volume of the same name is

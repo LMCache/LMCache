@@ -56,6 +56,7 @@ from lmcache.v1.memory_management import (  # noqa: E501
 )
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.pin_monitor import PinMonitor
+from lmcache.v1.platform import current_device_spec
 from lmcache.v1.storage_backend.storage_manager import StorageManager
 from lmcache.v1.system_detection import NUMADetector, NUMAMapping
 from lmcache.v1.token_database import (
@@ -928,7 +929,9 @@ class LMCacheEngine:
                 # See pd_backend.py line 605 TODO comment.
                 if self._is_sync_pd_backend():
                     memory_obj.ref_count_down()
-            elif not self.async_loading:
+            else:
+                if memory_obj.is_pinned:
+                    memory_obj.unpin()
                 memory_obj.ref_count_down()
 
         retrieved_tokens = torch.sum(ret_mask)
@@ -2031,7 +2034,7 @@ class LMCacheEngineBuilder:
             )
 
             if corrected_device == "cpu":
-                if not torch_dev.ext.pin_memory(
+                if not current_device_spec.pin_memory(
                     buffer.data_ptr(), config.nixl_buffer_size
                 ):
                     raise RuntimeError("Failed to pin NIXL CPU buffer for DMA access")

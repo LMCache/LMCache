@@ -101,6 +101,40 @@ logger = lmcache_init_logger(__name__)
 
 
 # Helper functions
+def _has_preemption_reqs(scheduler_output: SchedulerOutput) -> bool:
+    """Return whether the scheduler output contains preemption-related requests.
+
+    Checks for the presence of resumed or preempted requests in the
+    scheduler output.
+
+    A preemption is detected if:
+    - ``scheduled_cached_reqs.resumed_req_ids``: Requests resumed from
+      preemption this step.
+    - ``scheduler_output.preempted_req_ids``: Requests preempted this step.
+
+    Args:
+        scheduler_output: The vLLM scheduler output for this step.
+
+    Returns:
+        True if preemption-related requests exist, False otherwise.
+    """
+    cached_reqs = getattr(scheduler_output, "scheduled_cached_reqs", None)
+
+    # Primary signal: requests resumed from preemption this step.
+    resumed_ids = getattr(cached_reqs, "resumed_req_ids", None)
+    if resumed_ids:
+        logger.warning("<preempted> by resumed requests: %s", resumed_ids)
+        return True
+
+    # Primary signal: requests preempted this step.
+    preempted_ids = getattr(scheduler_output, "preempted_req_ids", None)
+    if preempted_ids:
+        logger.warning("<preempted> by preempted requests: %s", preempted_ids)
+        return True
+
+    return False
+
+
 def validate_mamba_step_alignment(vllm_config: VllmConfig) -> None:
     """Reject scheduler configs that can skip Mamba state snapshots.
 
@@ -466,6 +500,7 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         super().__init__()
         self.requests: list[LMCacheMPRequestMetadata] = []
+        self.need_flush_before_forward: bool = False
 
     def add_request_metadata(self, request_metadata: LMCacheMPRequestMetadata):
         self.requests.append(request_metadata)
@@ -483,7 +518,11 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
                 f"num_blocks={len(req_meta.op.flat_block_ids)}, "
                 f"block_ids={req_meta.op.block_ids})"
             )
-        return "[" + "\n".join(request_strs) + "]"
+        return (
+            f"need_flush_before_forward={self.need_flush_before_forward}; ["
+            + "\n".join(request_strs)
+            + "]"
+        )
 
     def __repr__(self):
         return self.__str__()
@@ -804,11 +843,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         This prevents overwrites of paged KV buffer before saving done.
         """
-        # In MLA scenario, only the first rank of the pipeline group
-        # needs to save the KV cache.
-        if not self.worker_adapter.is_kv_writer:
-            return
-
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
 
@@ -832,6 +866,29 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self.worker_adapter.batched_submit_store_requests(
             request_ids, ops, event, cache_salts=cache_salts
         )
+
+    # TODO: How does lmcache driven path handle preemption?
+    # NOTE1: handle_preemptions is called by vllm each step regardless
+    #        preemption really happens or not.
+    # NOTE2: preemption hint is managed by KVConnectorRole.SCHEDULER,
+    #        that's why here we have to judge preemption by
+    #        need_flush_before_forward flag which is set by SCHEDULER.
+    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
+        """Flush async engine-driven stores only when scheduler metadata requests it.
+
+        Args:
+            kv_connector_metadata: Connector metadata produced by the scheduler;
+                only acts when it is a :class:`LMCacheMPConnectorMetadata` with
+                ``need_flush_before_forward=True``.
+        """
+        worker_adapter = getattr(self, "worker_adapter", None)
+        if self.role != KVConnectorRole.WORKER or worker_adapter is None:
+            return
+        need_flush_before_forward = (
+            isinstance(kv_connector_metadata, LMCacheMPConnectorMetadata)
+            and kv_connector_metadata.need_flush_before_forward
+        )
+        worker_adapter.handle_preemptions(need_flush_before_forward)
 
     def get_finished(
         self, finished_req_ids: set[str]
@@ -1060,6 +1117,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
         metadata = LMCacheMPConnectorMetadata()
+        metadata.need_flush_before_forward = _has_preemption_reqs(scheduler_output)
 
         self._process_retrieve_requests(metadata)
         self._process_new_requests(scheduler_output, metadata)
