@@ -20,6 +20,7 @@ Examples::
 """
 
 # Standard
+from typing import Any
 import select
 
 # Third Party
@@ -28,6 +29,10 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.l2_adapters.valkey_l2_adapter import (
+    ValkeyL2Adapter,
+    ValkeyL2AdapterConfig,
+)
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObjMetadata,
@@ -78,13 +83,10 @@ def wait_for_event_fd(event_fd: int, timeout: float = 10.0) -> bool:
     return False
 
 
-def _build_config(cluster_mode: bool, startup_nodes: str, **extra):
+def _build_config(
+    cluster_mode: bool, startup_nodes: str, **extra: Any
+) -> ValkeyL2AdapterConfig:
     """Build a ValkeyL2AdapterConfig for the resolved target."""
-    # First Party
-    from lmcache.v1.distributed.l2_adapters.valkey_l2_adapter import (
-        ValkeyL2AdapterConfig,
-    )
-
     spec = {
         "type": "valkey",
         "startup_nodes": startup_nodes,
@@ -113,10 +115,6 @@ def _probe_reachable(cluster_mode: bool, startup_nodes: str) -> bool:
         return False
     if getattr(glide_sync, "__spec__", None) is None:
         return False
-    # First Party
-    from lmcache.v1.distributed.l2_adapters.valkey_l2_adapter import (
-        ValkeyL2Adapter,
-    )
 
     try:
         adapter = ValkeyL2Adapter(

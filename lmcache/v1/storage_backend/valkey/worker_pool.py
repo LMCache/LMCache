@@ -479,7 +479,7 @@ class ValkeyWorkerPool:
             best-effort so a slow / unreachable node never breaks status
             reporting).
         """
-        if not self._cluster_mode:
+        if not self._cluster_mode or self._closed:
             return {}
         try:
             return self._executor.submit(self._do_node_memory).result(
