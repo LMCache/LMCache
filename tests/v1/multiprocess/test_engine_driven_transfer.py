@@ -2297,10 +2297,12 @@ def test_server_prepare_store_releases_unused_reserved_write_locks(
     assert isinstance(prepare_response, PrepareStoreResponse)
     assert prepare_response.context == {"slots": [], "chunk_indices": []}
     reserved_keys = mock_storage.reserve_write.call_args[0][0]
-    mock_storage.finish_write.assert_called_once_with(
+    # Unfillable reservations are aborted, never published as written.
+    mock_storage.abort_write.assert_called_once_with(
         reserved_keys,
         l1_owners={k: memory_obj.get_l1_manager() for k in reserved_keys},
     )
+    mock_storage.finish_write.assert_not_called()
 
 
 def test_server_shm_transport_uses_engine_level_config(
@@ -2394,7 +2396,9 @@ def test_server_unregister_engine_driven_context_releases_pending_shm_locks(
 
     module.unregister_kv_cache(4)
 
-    mock_storage.finish_write.assert_called_once()
+    # Stale pending writes were never committed by the worker: abort them
+    # rather than publishing partially written objects.
+    mock_storage.abort_write.assert_called_once()
     mock_storage.finish_read_prefetched.assert_called_once()
 
 
