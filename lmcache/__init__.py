@@ -35,9 +35,9 @@ def _install_c_ops_shim() -> None:
     ``import lmcache.c_ops`` call sites keep working without change.
     """
     # First Party
-    from lmcache.v1.platform._device_ops_registry import get_device_ops_cls
+    from lmcache.v1.platform import resolve_device_ops_cls
 
-    ops_cls = get_device_ops_cls(torch_device_type)
+    ops_cls = resolve_device_ops_cls(torch_device_type)
 
     shim = types.ModuleType("lmcache.c_ops")
     # NOTE: Do NOT register the shim in sys.modules before populate_module.

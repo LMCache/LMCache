@@ -20,6 +20,13 @@ class MusaDeviceSpec(DeviceSpec):
     def torch_module_name(self) -> str:
         return "musa"
 
+    @property
+    def ops_cls(self) -> "type[DeviceOps]":
+        # First Party
+        from lmcache.v1.platform.musa.device_ops import MusaDeviceOps
+
+        return MusaDeviceOps
+
     def is_available(self) -> bool:
         """Check MUSA availability without importing lmcache.__init__."""
         try:

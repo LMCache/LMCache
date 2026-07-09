@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for the unified ``DeviceOps`` abstraction and its registry.
+"""Unit tests for the unified ``DeviceOps`` abstraction and spec-based resolution.
 
 These tests are the acceptance gate for the DeviceOps. They stay
-platform-agnostic by exercising the torch baseline, the registry dispatch, the
-``lmcache.c_ops`` shim, and the ``_bind_native`` mechanism without requiring any
-compiled accelerator module.
+platform-agnostic by exercising the torch baseline, the ``DeviceSpec``
+dispatch, the ``lmcache.c_ops`` shim, and the ``_bind_native`` mechanism
+without requiring any compiled accelerator module.
 """
 
 # Standard
@@ -15,12 +15,10 @@ import types
 import pytest
 
 # First Party
+import lmcache.v1.platform as platform_pkg
+from lmcache.v1.platform import resolve_device_ops_cls
 from lmcache.v1.platform import _torch_ops
-from lmcache.v1.platform._device_ops_registry import (
-    get_device_ops_cls,
-    restore_device_ops,
-    snapshot_device_ops,
-)
+from lmcache.v1.platform.base_device_spec import DeviceSpec
 from lmcache.v1.platform.base_device_ops import OPS, DeviceOps
 from lmcache.v1.platform.cpu.device_ops import CpuDeviceOps
 from lmcache.v1.platform.ops_types import (
@@ -36,13 +34,13 @@ from lmcache.v1.platform.ops_types import (
 
 @pytest.fixture
 def isolated_registry() -> Any:
-    """Snapshot the device-ops table so each test can install fakes without
-    polluting other tests / the production discovery result."""
-    saved = snapshot_device_ops()
+    """Snapshot the device-spec table so tests can install fakes safely."""
+    saved = dict(platform_pkg._DEVICE_REGISTRY)
     try:
         yield saved
     finally:
-        restore_device_ops(saved)
+        platform_pkg._DEVICE_REGISTRY.clear()
+        platform_pkg._DEVICE_REGISTRY.update(saved)
 
 
 @pytest.fixture
@@ -80,10 +78,10 @@ def test_base_populates_every_op_and_type(target_module: types.ModuleType) -> No
 def test_every_registered_device_populates_all_ops(
     isolated_registry: Any, target_module: types.ModuleType
 ) -> None:
-    """Each discovered DeviceOps subclass populates all ops as callables."""
-    for device_type, cls in isolated_registry.items():
+    """Each discovered DeviceSpec resolves an ops class that populates all ops."""
+    for device_type, spec in isolated_registry.items():
         m = types.ModuleType(f"test_{device_type}")
-        cls.populate_module(m)
+        spec.ops_cls.populate_module(m)
         for name in OPS:
             assert callable(getattr(m, name)), (device_type, name)
 
@@ -212,39 +210,74 @@ def test_bind_native_ignores_symbols_absent_from_ops(
     assert not hasattr(target_module, "not_in_ops")
 
 
-# -- Registry --------------------------------------------------------------
+# -- DeviceSpec resolution -------------------------------------------------
 
 
-def test_cpu_and_empty_resolve_to_baseline(isolated_registry: Any) -> None:
-    assert get_device_ops_cls("cpu") is CpuDeviceOps
-    assert get_device_ops_cls("") is DeviceOps
+def test_cpu_and_empty_string_resolve_to_expected_ops_classes() -> None:
+    """``cpu`` resolves via CpuDeviceSpec; ``""`` uses the bare fallback."""
+    assert resolve_device_ops_cls("cpu") is CpuDeviceOps
+    assert resolve_device_ops_cls("") is DeviceOps
 
 
-def test_unregistered_accelerator_fails_fast(isolated_registry: Any) -> None:
+def test_cpu_without_registered_spec_falls_back_to_base_device_ops(
+    isolated_registry: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    table = {k: v for k, v in isolated_registry.items() if k != "cpu"}
+    monkeypatch.setattr(platform_pkg, "_DEVICE_REGISTRY", table)
+    assert resolve_device_ops_cls("cpu") is DeviceOps
+
+
+def test_unregistered_accelerator_fails_fast(
+    isolated_registry: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A requested accelerator with no registered class is a hard error -- no
     silent degradation to the torch baseline."""
     table = {k: v for k, v in isolated_registry.items() if k != "cuda"}
-    restore_device_ops(table)
-    with pytest.raises(RuntimeError, match="No DeviceOps class registered"):
-        get_device_ops_cls("cuda")
+    monkeypatch.setattr(platform_pkg, "_DEVICE_REGISTRY", table)
+    with pytest.raises(
+        RuntimeError,
+        match="refusing to silently fall back to the torch baseline",
+    ):
+        resolve_device_ops_cls("cuda")
 
 
-def test_new_device_needs_zero_resolver_edits(isolated_registry: Any) -> None:
-    """Scalability: a fresh DeviceOps subclass resolves through the same
-    data-driven table with no resolver change (mirrors vLLM's dummy platform)."""
+def test_unknown_accelerator_fails_fast_without_registry_edits() -> None:
+    with pytest.raises(
+        RuntimeError,
+        match="refusing to silently fall back to the torch baseline",
+    ):
+        resolve_device_ops_cls("definitely-not-a-real-device")
+
+
+def test_new_device_needs_zero_resolver_edits(
+    isolated_registry: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scalability: a fresh DeviceSpec resolves with no resolver change."""
 
     class DummyDeviceOps(DeviceOps):
         device_type = "dummy"
 
-    restore_device_ops({**isolated_registry, "dummy": DummyDeviceOps})
-    assert get_device_ops_cls("dummy") is DummyDeviceOps
+    class DummyDeviceSpec(DeviceSpec):
+        @property
+        def device_type(self) -> str:
+            return "dummy"
+
+        @property
+        def ops_cls(self) -> "type[DeviceOps]":
+            return DummyDeviceOps
+
+    monkeypatch.setattr(
+        platform_pkg,
+        "_DEVICE_REGISTRY",
+        {**isolated_registry, "dummy": DummyDeviceSpec()},
+    )
+    assert resolve_device_ops_cls("dummy") is DummyDeviceOps
 
 
 def test_empty_device_type_is_skipped_during_discovery() -> None:
-    """The base (empty ``device_type``) is never registered as a device."""
-    table = snapshot_device_ops()
-    assert "" not in table
-    assert DeviceOps not in table.values()
+    """The fallback/base spec is never registered as a concrete device."""
+    assert "" not in platform_pkg._DEVICE_REGISTRY
+    assert all(spec.device_type for spec in platform_pkg._DEVICE_REGISTRY.values())
 
 
 # -- c_ops shim ------------------------------------------------------------
