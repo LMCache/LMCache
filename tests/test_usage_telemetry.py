@@ -38,8 +38,6 @@ from lmcache.v1.distributed.l2_adapters.config import (
     L2AdaptersConfig,
     get_type_name_for_config,
 )
-from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import FSL2AdapterConfig
-from lmcache.v1.distributed.serde import SerdeConfig
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.multiprocess.config import MPServerConfig
 
@@ -329,13 +327,23 @@ class TestMPUsage:
         assert message.lmcache_version
 
     def test_mp_server_message_serde_and_segmented_prefix(self, usage_env, tmp_path):
-        fs_config = FSL2AdapterConfig(
+        # The FS adapter needs the native storage ops extension; skip on
+        # builds without it.
+        fs_l2_adapter = pytest.importorskip(
+            "lmcache.v1.distributed.l2_adapters.fs_l2_adapter",
+            reason="requires lmcache.native_storage_ops",
+        )
+        serde = pytest.importorskip(
+            "lmcache.v1.distributed.serde",
+            reason="requires lmcache.native_storage_ops",
+        )
+        fs_config = fs_l2_adapter.FSL2AdapterConfig(
             base_path=str(tmp_path),
             relative_tmp_dir=None,
             read_ahead_size=None,
             use_odirect=False,
         )
-        fs_config.serde_config = SerdeConfig(type="fp8", kwargs={})
+        fs_config.serde_config = serde.SerdeConfig(type="fp8", kwargs={})
         storage_config = make_storage_manager_config()
         storage_config.l2_adapter_config = L2AdaptersConfig([fs_config])
 
