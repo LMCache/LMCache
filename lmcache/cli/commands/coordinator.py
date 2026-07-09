@@ -112,7 +112,7 @@ class CoordinatorCommand(BaseCommand):
             ),
         )
         parser.add_argument(
-            "--blend-chunk-size",
+            "--chunk-size",
             type=int,
             default=None,
             help=(
