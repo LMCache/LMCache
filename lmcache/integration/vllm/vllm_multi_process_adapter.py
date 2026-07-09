@@ -1399,6 +1399,9 @@ class LMCacheMPWorkerAdapter:
         """
         self._ensure_heartbeat_started()
 
+        if not self.is_kv_writer:
+            return
+
         if not self.is_healthy:
             return
 

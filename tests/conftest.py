@@ -27,7 +27,7 @@ import torch
 
 # First Party
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
-from lmcache.v1.memory_management import MixedMemoryAllocator
+from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 from lmcache.v1.metadata import LMCacheMetadata
 
 if importlib.util.find_spec("pytest_benchmark") is None:
@@ -102,11 +102,12 @@ def patch_mixed_allocator():
 
     with (
         patch(
-            "lmcache.v1.memory_management.MixedMemoryAllocator.__init__",
+            "lmcache.v1.memory_allocators.mixed_memory_allocator.MixedMemoryAllocator.__init__",
             fake_mixed_init,
         ),
         patch(
-            "lmcache.v1.memory_management.MixedMemoryAllocator.close", fake_mixed_close
+            "lmcache.v1.memory_allocators.mixed_memory_allocator.MixedMemoryAllocator.close",
+            fake_mixed_close,
         ),
     ):
         yield
@@ -152,9 +153,13 @@ def patch_pin_allocator():
 
     with (
         patch(
-            "lmcache.v1.memory_management.PinMemoryAllocator.__init__", fake_pin_init
+            "lmcache.v1.memory_allocators.pin_memory_allocator.PinMemoryAllocator.__init__",
+            fake_pin_init,
         ),
-        patch("lmcache.v1.memory_management.PinMemoryAllocator.close", fake_pin_close),
+        patch(
+            "lmcache.v1.memory_allocators.pin_memory_allocator.PinMemoryAllocator.close",
+            fake_pin_close,
+        ),
     ):
         yield
 """
