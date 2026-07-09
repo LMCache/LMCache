@@ -1242,7 +1242,7 @@ class LMCacheMPWorkerAdapter:
         self.q_store_futures = {}
         self.q_store_events: dict[int, _IpcEvent] = {}
         self._q_store_seq: int = 0
-        self.q_model_name = f"__lmc_query__{model_name}"
+        self.q_model_name = f"{model_name}##query"
 
         # Block IDs that failed due to retrieve timeout
         self.error_block_ids: set[int] = set()
