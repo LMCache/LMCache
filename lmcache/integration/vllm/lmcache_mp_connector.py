@@ -1162,7 +1162,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self.worker_adapter.batched_submit_store_requests(
             request_ids, ops, event, cache_salts=cache_salts
         )
-        if q_step_state is not None:
+        if not q_step_state:
             for q_store in q_step_state.stores:
                 self.worker_adapter.submit_q_store_request(
                     q_store.request_id,
