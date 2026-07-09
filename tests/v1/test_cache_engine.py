@@ -2055,3 +2055,64 @@ def test_compress_decompress_unpin_when_pinned() -> None:
             event_id="event_123",
         )
         mock_compressed_mem_obj.unpin.assert_called_once()
+
+
+def test_retrieve_cleanup_ref_count_and_unpin() -> None:
+    """Verify that retrieve() unpins and ref_count_downs all retrieved chunks.
+
+    Specifically in the else branch when remove_after_retrieve is False.
+    """
+    # Create mock memory objects
+    mem_obj_pinned = MagicMock()
+    mem_obj_pinned.is_pinned = True
+
+    mem_obj_not_pinned = MagicMock()
+    mem_obj_not_pinned.is_pinned = False
+
+    # Mock engine instance
+    engine = MagicMock(spec=LMCacheEngine)
+    engine.is_healthy.return_value = True
+    engine.remove_after_retrieve = False
+    engine._is_passive.return_value = False
+    engine.save_only_first_rank = False
+    engine._get_req_id.return_value = "req_123"
+
+    # We want retrieve to process chunks
+    k0 = _make_key(0)
+    k1 = _make_key(1)
+    reordered_chunks = [
+        (k0, mem_obj_pinned, 0, 10),
+        (k1, mem_obj_not_pinned, 10, 20),
+    ]
+
+    engine.async_loading = False
+    engine._process_tokens_internal.return_value = (reordered_chunks, 1024)
+    engine._is_sync_pd_backend.return_value = False
+
+    # Mock stats monitor
+    engine.stats_monitor = MagicMock()
+    mock_stats = MagicMock()
+    mock_stats.time_to_retrieve.return_value = 1.0
+    engine.stats_monitor.on_retrieve_request.return_value = mock_stats
+
+    # Mock gpu_connector
+    engine.gpu_connector = MagicMock()
+
+    # Call retrieve
+    tokens = torch.zeros(20, dtype=torch.long)
+    kvcaches = torch.zeros(20)
+    slot_mapping = torch.zeros(20, dtype=torch.long)
+
+    LMCacheEngine.retrieve(
+        engine,
+        tokens=tokens,
+        kvcaches=kvcaches,
+        slot_mapping=slot_mapping,
+    )
+
+    # Assertions
+    mem_obj_pinned.ref_count_down.assert_called_once()
+    mem_obj_pinned.unpin.assert_called_once()
+
+    mem_obj_not_pinned.ref_count_down.assert_called_once()
+    mem_obj_not_pinned.unpin.assert_not_called()
