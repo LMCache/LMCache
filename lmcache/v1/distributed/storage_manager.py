@@ -179,6 +179,18 @@ class StorageManager:
         )
 
     # External APIs for serving engine integration code to call
+    @property
+    def requires_kv_layout_registration(self) -> bool:
+        """Whether the engine must call register_kv_layout after KV registration.
+
+        True for the maru L1 tier, which defers pool creation until the KV
+        layout is known; False for stock L1, which sizes its pool from config
+        at construction. Callers should skip the register_kv_layout path
+        entirely (including any layout/format computation feeding it) when
+        this is False.
+        """
+        return isinstance(self._l1_manager, MaruL1Manager)
+
     def register_kv_layout(
         self,
         layout_desc: MemoryLayoutDesc,
@@ -202,6 +214,7 @@ class StorageManager:
             ValueError: The maru L1 tier supports a single object group only
                 (multi-model support is a maru TODO).
         """
+        # isinstance (not the property) so mypy narrows for the call below.
         if not isinstance(self._l1_manager, MaruL1Manager):
             return
         if num_object_groups > 1:

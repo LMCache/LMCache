@@ -937,6 +937,7 @@ class TestMaruL1Selection:
         sm = StorageManager(maru_storage_manager_config)
         try:
             assert isinstance(sm._l1_manager, MaruL1Manager)
+            assert sm.requires_kv_layout_registration
         finally:
             sm.close()
 
@@ -944,6 +945,7 @@ class TestMaruL1Selection:
         sm = StorageManager(basic_storage_manager_config)
         try:
             assert isinstance(sm._l1_manager, L1Manager)
+            assert not sm.requires_kv_layout_registration
         finally:
             sm.close()
 

@@ -25,6 +25,8 @@ def _bare_module() -> LMCacheDrivenTransferModule:
     """A transfer module with only the state register_kv_cache touches."""
     module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
     module._ctx = MagicMock(name="ctx")
+    # Maru L1 by default; stock tests flip this off.
+    module._ctx.storage_manager.requires_kv_layout_registration = True
     module._cache_contexts = {}
     module._lock = threading.Lock()
     return module
@@ -81,17 +83,17 @@ def test_hook_failure_closes_context_and_does_not_register(monkeypatch):
     assert 1 not in module._cache_contexts  # not left half-registered
 
 
-def test_hook_is_noop_style_for_stock_backend(monkeypatch):
-    """For stock, register_kv_layout is a no-op; the instance still registers."""
-    monkeypatch.setattr(
-        gpu_mod, "create_cache_context", lambda *a, **kw: MagicMock(num_layers=2)
-    )
+def test_hook_skipped_entirely_for_stock_backend(monkeypatch):
+    """For stock, the hook (format probe included) is skipped; registration
+    still completes."""
+    cache_ctx = MagicMock(num_layers=2, name="cache_ctx")
+    monkeypatch.setattr(gpu_mod, "create_cache_context", lambda *a, **kw: cache_ctx)
     monkeypatch.setattr(gpu_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
-    monkeypatch.setattr(gpu_mod, "is_mla", lambda fmt: False)
     module = _bare_module()
-    # Stock StorageManager.register_kv_layout returns None (no-op).
-    module._ctx.storage_manager.register_kv_layout.return_value = None
+    module._ctx.storage_manager.requires_kv_layout_registration = False
 
     _register(module)
 
+    cache_ctx.get_engine_kv_format.assert_not_called()
+    module._ctx.storage_manager.register_kv_layout.assert_not_called()
     assert 1 in module._cache_contexts  # registration completed normally

@@ -871,27 +871,28 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             model_name, world_size, layout_desc, attn_desc
         )
 
-        # Bring up the maru CXL pool now that the KV layout is known. A no-op
-        # for the stock L1 backend (StorageManager self-gates on the maru
-        # config); maru's register_kv_layout is idempotent across instances.
-        fmt = (
-            MemoryFormat.KV_MLA_FMT
-            if is_mla(cache_context.get_engine_kv_format(0))
-            else MemoryFormat.KV_2LTD
-        )
-        try:
-            self._ctx.storage_manager.register_kv_layout(
-                layout_desc,
-                fmt,
-                self._ctx.chunk_size,
-                attn_desc.num_object_groups,
+        # Bring up the maru CXL pool now that the KV layout is known. Skipped
+        # entirely (including the format probe) for the stock L1 backend;
+        # maru's register_kv_layout is idempotent across instances.
+        if self._ctx.storage_manager.requires_kv_layout_registration:
+            fmt = (
+                MemoryFormat.KV_MLA_FMT
+                if is_mla(cache_context.get_engine_kv_format(0))
+                else MemoryFormat.KV_2LTD
             )
-        except Exception:
-            # e.g. maru rejects >1 object group -- drop the context we just
-            # built so the instance is not left half-registered, then surface
-            # the error on the REGISTER path.
-            cache_context.close()
-            raise
+            try:
+                self._ctx.storage_manager.register_kv_layout(
+                    layout_desc,
+                    fmt,
+                    self._ctx.chunk_size,
+                    attn_desc.num_object_groups,
+                )
+            except Exception:
+                # e.g. maru rejects >1 object group -- drop the context we
+                # just built so the instance is not left half-registered,
+                # then surface the error on the REGISTER path.
+                cache_context.close()
+                raise
 
         with self._lock:
             self._cache_contexts[instance_id] = ContextEntry(
