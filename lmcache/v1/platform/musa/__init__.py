@@ -1,8 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """MUSA-specific platform primitives."""
 
+# Standard
+from typing import TYPE_CHECKING
+
 # First Party
 from lmcache.v1.platform.base_device_spec import DeviceSpec
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.platform.base_device_ops import DeviceOps
 
 # ---------------------------------------------------------------------------
 # Device detection registry entry
