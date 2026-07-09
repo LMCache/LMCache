@@ -458,6 +458,10 @@ def test_musa_data_context_store_uses_device_agnostic_gather(
         def commit_store(self, *_args: Any, **_kwargs: Any) -> bool:
             return True
 
+        @contextmanager
+        def transfer_guard(self) -> Iterator[None]:
+            yield
+
         def close(self) -> None:
             return None
 
@@ -529,6 +533,10 @@ def test_musa_data_context_retrieve_uses_device_agnostic_scatter(
 
         def commit_retrieve(self, *_args: Any, **_kwargs: Any) -> bool:
             return True
+
+        @contextmanager
+        def transfer_guard(self) -> Iterator[None]:
+            yield
 
         def close(self) -> None:
             return None
