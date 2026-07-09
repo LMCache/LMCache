@@ -214,23 +214,47 @@ class PickleTransferStrategy(TransferStrategy):
             obj_keys, context.layout_desc, "new"
         )
         written_keys: list[ObjectKey] = []
+        skip_reasons: dict[str, int] = {}
         try:
             for idx, obj_key in enumerate(obj_keys):
                 if obj_key not in reserved_dict:
                     continue
                 if idx >= len(chunks):
+                    skip_reasons["missing_chunk"] = (
+                        skip_reasons.get("missing_chunk", 0) + 1
+                    )
                     continue
                 memory_obj = reserved_dict[obj_key]
                 if memory_obj.tensor is None:
+                    skip_reasons["no_tensor"] = skip_reasons.get("no_tensor", 0) + 1
                     continue
                 chunk_cpu = chunks[idx]
                 if chunk_cpu.shape != memory_obj.tensor.shape:
+                    skip_reasons["shape_mismatch"] = (
+                        skip_reasons.get("shape_mismatch", 0) + 1
+                    )
                     continue
                 memory_obj.tensor.copy_(chunk_cpu)
                 written_keys.append(obj_key)
         finally:
             if written_keys:
                 self._storage_manager.finish_write(written_keys)
+            written_set = set(written_keys)
+            skipped_keys = [k for k in reserved_dict if k not in written_set]
+            if skipped_keys:
+                # Reservations that will never be filled must be aborted, not
+                # left write-locked (they would pin L1 memory and wedge future
+                # reserves) and not finish_write'd (a store listener would
+                # persist the unwritten contents).
+                self._storage_manager.abort_write(skipped_keys)
+                logger.warning(
+                    "Pickle commit_store aborted %d/%d reserved objects "
+                    "(reasons: %s) for key %s",
+                    len(skipped_keys),
+                    len(reserved_dict),
+                    skip_reasons,
+                    key,
+                )
 
         return len(written_keys) == len(reserved_dict)
 
@@ -349,7 +373,10 @@ class ShmTransferStrategy(TransferStrategy):
                 obj_key for obj_key in reserved if obj_key not in reserved_keys_set
             ]
             if unused_keys:
-                self._storage_manager.finish_write(unused_keys)
+                # These reservations never get SHM slots, so the worker will
+                # never write them: abort instead of finish_write, which would
+                # publish empty objects for lookups and L2 store listeners.
+                self._storage_manager.abort_write(unused_keys)
         if not reserved_keys:
             return PrepareStoreResponse(context={"slots": [], "chunk_indices": []})
         transfer_key = self._transfer_key_factory(key, instance_id)

@@ -279,7 +279,10 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
 
         for obj_keys in write_obj_keys:
             if obj_keys:
-                self._ctx.storage_manager.finish_write(obj_keys)
+                # The worker died between prepare and commit, so the SHM slots
+                # hold unwritten or partially written data: abort instead of
+                # publishing the objects as valid.
+                self._ctx.storage_manager.abort_write(obj_keys)
         for obj_keys in read_obj_keys:
             if obj_keys:
                 self._ctx.storage_manager.finish_read_prefetched(obj_keys)

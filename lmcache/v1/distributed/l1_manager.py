@@ -664,6 +664,59 @@ class L1Manager:
         return ret
 
     @l1_mgr_synchronized
+    def abort_write(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1Error]:
+        """Abort write access for the given keys, discarding the objects.
+
+        Unlike ``finish_write`` followed by ``delete``, the object is never
+        published as written: ``on_l1_keys_write_finished`` is not fired, so
+        no listener (e.g. an L2 store controller) can observe or persist the
+        unwritten contents. Listeners receive ``on_l1_keys_deleted_by_manager``
+        for each aborted key.
+
+        Args:
+            keys: The list of write-reserved object keys to abort.
+
+        Returns:
+            A dictionary mapping each object key to an L1Error.
+
+        Errors:
+            KEY_NOT_EXIST: The key does not exist.
+            KEY_IN_WRONG_STATE: The key is not write-locked, or it is
+                read-locked (a reader may be observing the object).
+        """
+        need_to_free: list[MemoryObj] = []
+        ret: dict[ObjectKey, L1Error] = {}
+        successful_keys: list[ObjectKey] = []
+
+        for key in keys:
+            entry = self._objects.get(key, None)
+            if entry is None:
+                ret[key] = L1Error.KEY_NOT_EXIST
+                continue
+
+            if not entry.write_lock.is_locked() or entry.read_lock.is_locked():
+                ret[key] = L1Error.KEY_IN_WRONG_STATE
+                continue
+
+            entry.write_lock.unlock()
+            need_to_free.append(entry.memory_obj)
+            del self._objects[key]
+            ret[key] = L1Error.SUCCESS
+            successful_keys.append(key)
+
+        self._memory_manager.free(need_to_free)
+
+        for listener in self._registered_listeners:
+            listener.on_l1_keys_deleted_by_manager(successful_keys)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L1_KEYS_EVICTED,
+                metadata={"keys": successful_keys},
+            )
+        )
+        return ret
+
+    @l1_mgr_synchronized
     def delete(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1Error]:
         """Delete the given keys from L1 cache.
 

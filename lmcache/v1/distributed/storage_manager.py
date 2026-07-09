@@ -250,6 +250,34 @@ class StorageManager:
 
         # TODO: global key states update
 
+    @enable_tracing()
+    def abort_write(
+        self,
+        keys: list[ObjectKey],
+    ) -> None:
+        """
+        Abort write reservations, discarding the objects without publishing.
+
+        Unlike ``finish_write``, aborted keys are never reported as written,
+        so store listeners cannot persist their unwritten contents.
+
+        Args:
+            keys (list[ObjectKey]): List of write-reserved object keys whose
+                contents will not be written.
+        """
+        abort_result = self._l1_manager.abort_write(keys)
+        successful_keys = [k for k, e in abort_result.items() if e == L1Error.SUCCESS]
+        failed_keys = [k for k, e in abort_result.items() if e != L1Error.SUCCESS]
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.SM_WRITE_ABORTED,
+                metadata={
+                    "succeeded_keys": successful_keys,
+                    "failed_keys": failed_keys,
+                },
+            )
+        )
+
     @contextmanager
     def read_prefetched_results(
         self,
