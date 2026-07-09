@@ -16,10 +16,11 @@ import zmq
 
 # First Party
 from lmcache import torch_dev
-from lmcache.integration.sglang.sglang_adapter import (
-    LoadMetadata,
-    StoreMetadata,
+from lmcache.integration.sglang.kv_cache_groups import (
+    build_sglang_layout_hints,
+    create_engine_group_infos_from_sglang,
 )
+from lmcache.integration.sglang.sglang_adapter import LoadMetadata, StoreMetadata
 from lmcache.integration.vllm.vllm_multi_process_adapter import (
     DEFAULT_HEARTBEAT_INTERVAL,
     DEFAULT_MQ_TIMEOUT,
@@ -35,6 +36,7 @@ from lmcache.v1.multiprocess.custom_types import (
     KVCache,
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo, expand_engine_block_ids
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
@@ -47,19 +49,18 @@ _WAIT_LOOKUP_RESPONSE_BUFFER_S = 5.0
 
 
 def _wrap_sglang_kv_caches(
-    k_pool: list[torch.Tensor],
-    v_pool: list[torch.Tensor],
+    kv_cache_pools: list[list[torch.Tensor]],
 ) -> KVCache:
-    """Flatten SGLang's depth-2 ``[K_layers, V_layers]`` KV layout into a
-    single flat ``KVCache`` so it fits upstream's wire
-    ``KVCache`` payload type. The daemon's
-    :func:`normalize_kv_and_discover_format` recognizes this shape from
-    ``EngineType.SGLANG`` plus a ``tokens_per_block`` ``LayoutHints`` field
-    and splits it back at its midpoint before format detection.
+    """Flatten SGLang's pool groups into a single flat ``KVCache`` so it
+    fits upstream's wire ``KVCache`` payload type.  Each element of
+    *kv_cache_pools* is a per-layer tensor list for one pool group
+    (K, V, DSA-index, …).  The daemon's
+    :func:`normalize_kv_and_discover_format` resolves the layout from
+    ``EngineType.SGLANG`` plus ``tokens_per_block``.
     """
     wrapped: KVCache = []
-    wrapped.extend(CudaIPCWrapper(tensor) for tensor in k_pool)
-    wrapped.extend(CudaIPCWrapper(tensor) for tensor in v_pool)
+    for pool in kv_cache_pools:
+        wrapped.extend(CudaIPCWrapper(tensor) for tensor in pool)
     return wrapped
 
 
@@ -132,8 +133,7 @@ class LMCacheMPConnector:
         page_size: int,
         host: str,
         port: int,
-        k_pool: list[torch.Tensor],
-        v_pool: list[torch.Tensor],
+        kv_cache_pools: list[list[torch.Tensor]],
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
@@ -141,9 +141,9 @@ class LMCacheMPConnector:
         self.tp_size = tp_size
         self.worker_id = rank
         self.page_size = page_size
-        self.device = k_pool[0].device
+        self.device = kv_cache_pools[0][0].device
         self.model_name = sgl_config.model_path
-        self.num_layers = len(k_pool)
+        self.num_layers = len(kv_cache_pools[0])
         self.tp_group = tp_group
         self.instance_id = os.getpid()
         self._mq_timeout = mq_timeout
@@ -165,27 +165,29 @@ class LMCacheMPConnector:
                 f"{self._lmcache_chunk_size} and {self.page_size}"
             )
 
+        # DSA classification is delegated to ``create_engine_group_infos_from_sglang``
+        # (uses the same ``is_deepseek_dsa(hf_config)`` check as sglang's pool init).
+        layout_hints = build_sglang_layout_hints(self.page_size)
+        self.engine_group_infos: list[EngineGroupInfo] = (
+            create_engine_group_infos_from_sglang(
+                kv_cache_pools, self.page_size, sgl_config.hf_config
+            )
+        )
+
         # Upstream's REGISTER_KV_CACHE protocol takes flat positional args:
         # (instance_id, kv_cache, model_name, world_size, engine_type,
-        # layout_hints, engine_group_infos). SGLang's natural KV layout is depth-2
-        # ([K_layers, V_layers]); we flatten it on the wire to fit
-        # ``KVCache = list[DeviceIPCWrapper]``. The daemon recognizes the
-        # SGLang-MHA flat-of-2NL pattern from ``EngineType.SGLANG`` plus the
-        # ``tokens_per_block`` hint and un-flattens + reshapes per layer.
-        # SGLang is non-hybrid (a single KV cache group), so engine_group_infos is the
-        # empty list -- which the server treats as one group spanning all layers
-        # (matching the vLLM non-hybrid and TensorRT-LLM register paths).
+        # layout_hints, engine_group_infos).
         send_lmcache_request(
             self.mq_client,
             RequestType.REGISTER_KV_CACHE,
             [
                 self.instance_id,
-                _wrap_sglang_kv_caches(k_pool, v_pool),
+                _wrap_sglang_kv_caches(kv_cache_pools),
                 self.model_name,
                 self.tp_size,
                 EngineType.SGLANG,
-                {"tokens_per_block": self.page_size},
-                [],
+                layout_hints,
+                self.engine_group_infos,
             ],
         ).result(timeout=self._mq_timeout)
         self._registered = True
@@ -210,11 +212,18 @@ class LMCacheMPConnector:
         return self._lmcache_chunk_size
 
     @torch.no_grad()
-    def _global_min_tokens(self, local_tokens: int) -> int:
+    def _broadcast_lookup_result(self, local_tokens: int) -> int:
+        """Broadcast the lookup result from rank 0 to all TP ranks.
+
+        Only rank 0 performs the daemon LOOKUP + WAIT_PREFETCH_STATUS
+        flow (see :meth:`lookup_kv`). This method broadcasts the
+        result so every rank sees the same matched-token count without
+        independently querying the daemon.
+        """
         if self.tp_size == 1:
             return local_tokens
         t = torch.tensor([local_tokens], dtype=torch.int32, device=self.device)
-        dist.all_reduce(t, op=dist.ReduceOp.MIN, group=self.tp_group)
+        dist.broadcast(t, src=0, group=self.tp_group)
         return int(t.item())
 
     def _create_key(
@@ -286,6 +295,7 @@ class LMCacheMPConnector:
         end: int,
         request_id: str,
     ) -> None:
+        """Release *this rank's* read locks in ``[start, end)``."""
         if start >= end or not self.is_healthy:
             return
         send_lmcache_request(
@@ -297,7 +307,7 @@ class LMCacheMPConnector:
                     start=start,
                     end=end,
                     request_id=request_id,
-                    no_worker_id=True,
+                    no_worker_id=False,
                 ),
                 self.tp_size,
             ],
@@ -323,9 +333,8 @@ class LMCacheMPConnector:
         if not self.is_healthy or not request_id:
             return 0
 
-        # If a previous LOOKUP for this rid is still pending (e.g., a
-        # rescheduling pass or a prior partial flow), release its locks
-        # first so we don't accumulate read-lock reservations.
+        # Release any stale locks from a prior LOOKUP for the same rid
+        # (e.g., a rescheduling pass) before firing a new one.
         with self._pending_lookups_lock:
             stale = self._pending_lookups.pop(request_id, None)
         if stale is not None and stale.locks_held:
@@ -339,20 +348,25 @@ class LMCacheMPConnector:
         if aligned_end == 0:
             return 0  # too few tokens; no chunk-aligned range to LOOKUP
 
-        lookup_key = self._create_key(
-            token_ids,
-            start=0,
-            end=aligned_end,
-            request_id=request_id,
-            no_worker_id=True,
-        )
-        send_lmcache_request(
-            self.mq_client,
-            RequestType.LOOKUP,
-            [lookup_key, self.tp_size],
-        ).result(timeout=self._mq_timeout)
-        matched = self._wait_for_lookup(request_id)
-        matched = self._global_min_tokens(matched)
+        # Only rank 0 talks to the daemon; the matched-token count is
+        # broadcast to the followers.
+        if self.worker_id == 0:
+            lookup_key = self._create_key(
+                token_ids,
+                start=0,
+                end=aligned_end,
+                request_id=request_id,
+                no_worker_id=True,
+            )
+            send_lmcache_request(
+                self.mq_client,
+                RequestType.LOOKUP,
+                [lookup_key, self.tp_size],
+            ).result(timeout=self._mq_timeout)
+            matched = self._wait_for_lookup(request_id)
+        else:
+            matched = 0
+        matched = self._broadcast_lookup_result(matched)
 
         # Daemon now holds read locks for the matched chunks. Record
         # state for the eventual retrieve_kv / release_pending /
@@ -398,11 +412,19 @@ class LMCacheMPConnector:
             pending = self._pending_lookups.pop(request_id, None)
         if pending is None:
             return
+        # Every rank frees *its own* still-held read locks. LOOKUP is
+        # rank-0-only on the wire, but the daemon reserves an
+        # independent lock per TP rank (worker_id=None expansion), so a
+        # rank-0-only release would leak the other ranks' locks until
+        # read-lock TTL expiry.
         if pending.locks_held and pending.matched_token_num > 0:
             self._free_lookup_locks(
                 pending.token_ids, 0, pending.matched_token_num, request_id
             )
-        send_lmcache_request(self.mq_client, RequestType.END_SESSION, [request_id])
+        # END_SESSION targets shared daemon-side session state, so only
+        # rank 0 sends it.
+        if self.worker_id == 0:
+            send_lmcache_request(self.mq_client, RequestType.END_SESSION, [request_id])
 
     def _submit_retrieve(
         self,
@@ -426,9 +448,15 @@ class LMCacheMPConnector:
                     request_id=request_id,
                 ),
                 self.instance_id,
-                # RETRIEVE takes per-group block IDs (list[list[int]]); SGLang is
-                # non-hybrid, so wrap the flat list as a single group.
-                [block_ids],
+                # RETRIEVE takes per-kernel-group block IDs (list[list[int]]).
+                # sglang is non-hybrid, so we always feed ONE engine-side
+                # block-id list; ``expand_engine_block_ids`` fans it out to
+                # every kernel group according to ``engine_group_infos``:
+                #   * MHA / MLA (empty engine_group_infos): returns [block_ids]
+                #   * DSA       (two infos, both engine_group_id=0):
+                #     returns [block_ids, block_ids] -- one copy per kernel
+                #     group, both pointing at the same paged pages.
+                expand_engine_block_ids(self.engine_group_infos, [block_ids]),
                 event.ipc_handle(),
                 skip_prefix_n_blocks,
             ],
@@ -478,6 +506,9 @@ class LMCacheMPConnector:
         fresh_start = offset + prefix_pad
         prefix_pad_pages = prefix_pad // self.page_size
 
+        # Free this rank's prefix read locks in ``[0, offset)``; the
+        # daemon's RETRIEVE handler only consumes the trailing suffix
+        # in ``[offset, retrieve_token_num)``.
         self._free_lookup_locks(token_ids, 0, offset, request_id)
         fresh_block_ids = self._slot_mapping_to_block_ids(
             load_metadata.slot_mapping[fresh_start:retrieve_token_num]
@@ -506,6 +537,9 @@ class LMCacheMPConnector:
             retrieve_succeeded = True
         finally:
             if not retrieve_succeeded:
+                # Free this rank's suffix read locks that the daemon
+                # would have consumed on success. Per-rank because
+                # RETRIEVEs are independent across ranks.
                 self._free_lookup_locks(
                     token_ids, offset, retrieve_token_num, request_id
                 )
@@ -570,9 +604,12 @@ class LMCacheMPConnector:
                     request_id=request_id,
                 ),
                 self.instance_id,
-                # STORE takes per-group block IDs (list[list[int]]); SGLang is
-                # non-hybrid, so wrap the flat list as a single group.
-                [block_ids],
+                # STORE takes per-kernel-group block IDs (list[list[int]]).
+                # Same story as RETRIEVE: sglang is non-hybrid, so we
+                # send ONE engine-side block-id list and let
+                # ``expand_engine_block_ids`` broadcast it to each
+                # kernel group (see ``_submit_retrieve``).
+                expand_engine_block_ids(self.engine_group_infos, [block_ids]),
                 event.ipc_handle(),
             ],
         ).to_cuda_future(device=self.device)
@@ -612,9 +649,12 @@ class LMCacheMPConnector:
                         request_id=request_id,
                     ),
                     self.instance_id,
-                    # STORE takes per-group block IDs (list[list[int]]); SGLang is
-                    # non-hybrid, so wrap the flat list as a single group.
-                    [block_ids],
+                    # STORE takes per-kernel-group block IDs (list[list[int]]).
+                    # Same story as RETRIEVE: sglang is non-hybrid, so we
+                    # send ONE engine-side block-id list and let
+                    # ``expand_engine_block_ids`` broadcast it to each
+                    # kernel group (see ``_submit_retrieve``).
+                    expand_engine_block_ids(self.engine_group_infos, [block_ids]),
                     event.ipc_handle(),
                 ],
             )
