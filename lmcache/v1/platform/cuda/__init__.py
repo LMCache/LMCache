@@ -34,6 +34,13 @@ class CudaDeviceSpec(DeviceSpec):
         return "cuda"
 
     @property
+    def ops_cls(self) -> "type[DeviceOps]":
+        # First Party
+        from lmcache.v1.platform.cuda.device_ops import CudaDeviceOps
+
+        return CudaDeviceOps
+
+    @property
     def pin_memory_backend(self) -> type[PinMemoryBackend] | None:
         return CudaPinMemoryBackend
 

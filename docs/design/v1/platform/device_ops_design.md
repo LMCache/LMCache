@@ -26,7 +26,7 @@ accelerates and inherits the torch baseline for everything else.
 | Torch/CPU reference | `python_ops_fallback.py` — 36 ops + 3 types | `lmcache/python_ops_fallback.py` |
 | MUSA ops | Python adapter: import `py_ops`, override 1 fn, optional native | `lmcache/v1/platform/musa/ops.py` (**deleted**; now `musa/device_ops.py`) |
 | HPU ops | None — uses torch baseline entirely | (via `DeviceOps` inheritance) |
-| Runtime selection | `_install_c_ops_shim()`: resolves `DeviceOps` subclass via registry | `lmcache/__init__.py` |
+| Runtime selection | `_install_c_ops_shim()`: resolves `DeviceOps` via `DeviceSpec.ops_cls` | `lmcache/__init__.py` |
 | Build selection | `BuildProfile` subclasses auto-discovered | `setup_extensions/build_profiles/` |
 | Device services registry | `DeviceIPCWrapper`/`PinMemoryBackend`/`BaseCacheContext` auto-discovered by `device_type` | `lmcache/v1/platform/` |
 
@@ -285,46 +285,44 @@ cache-context concern — out of scope here.
 
 ## 5. Registration & Discovery
 
-Mirror `BaseCacheContext`.
+`DeviceOps` resolution now reuses the existing `DeviceSpec` discovery in
+`lmcache.v1.platform._DEVICE_REGISTRY`; there is no second, dedicated ops
+registry.
 
 ```python
-# platform/_device_ops_registry.py
-from lmcache.v1.utils.subclass_discovery import discover_subclasses
-from lmcache.v1.platform.base_device_ops import DeviceOps
-import lmcache.v1.platform as platform_pkg
+# platform/base_device_spec.py
+class DeviceSpec:
+    @property
+    def ops_cls(self) -> type[DeviceOps]:
+        """DeviceOps subclass providing the ``lmcache.c_ops`` surface."""
+        from lmcache.v1.platform.base_device_ops import DeviceOps
 
-_CACHE: dict[str, type[DeviceOps]] = {}
-_DISCOVERED = False
+        return DeviceOps
 
-def get_device_ops_cls(device_type: str) -> type[DeviceOps]:
-    global _DISCOVERED
-    if not _DISCOVERED:
-        for cls in discover_subclasses(
-            platform_pkg,
-            DeviceOps,
-            module_filter=lambda short_name: short_name == "device_ops",
-            levels=[2, 2],
-        ):
-            if not cls.device_type:       # template/base helper class
-                continue
-            _CACHE.setdefault(cls.device_type, cls)
-        _DISCOVERED = True
-    if device_type in ("cpu", ""):
-        return _CACHE.get("cpu", DeviceOps)         # CpuDeviceOps; base if absent
-    cls = _CACHE.get(device_type)
-    if cls is None:                                  # backend failed to import
-        raise RuntimeError(
-            f"DeviceOps for {device_type!r} unavailable: its backend failed to "
-            f"import (missing/ABI-mismatched .so). Refusing to silently fall "
-            f"back to the torch baseline on accelerator hardware."
-        )
-    return cls
+
+# platform/cuda/__init__.py
+class CudaDeviceSpec(DeviceSpec):
+    @property
+    def ops_cls(self) -> type[DeviceOps]:
+        from lmcache.v1.platform.cuda.device_ops import CudaDeviceOps
+
+        return CudaDeviceOps
 ```
 
-Discovery mirrors `create_cache_context`: scan `platform/<backend>/device_ops.py`
-at depth 2, keyed by `device_type`. `platform/__init__.py` still bootstraps
-backend packages for existing side-effect registries, but `DeviceOps` itself is
-discovered from the leaf `device_ops` modules. XPU exposes one concrete `XpuDeviceOps` (12 SYCL + 24 torch).
+The import lives inside the property body on purpose:
+
+- It avoids reintroducing the `lmcache` / `lmcache.v1.platform` import cycle
+  that would appear if `_torch_ops` or a native `.so` were pulled into the
+  platform package at discovery time.
+- It keeps native CUDA loading deferred until `CudaDeviceOps.populate_module()`,
+  preserving the current `lmcache.c_ops` shim bootstrap ordering.
+
+Resolution is still fail-fast for accelerators. If `_install_c_ops_shim()` is
+asked for `"cuda"` / `"xpu"` / `"musa"` / `"hpu"` and no `DeviceSpec` is
+registered, it raises instead of silently falling back to the torch baseline.
+The normal CPU path resolves through `CpuDeviceSpec -> CpuDeviceOps`; only `""`
+(and a deliberately cleared CPU registry in tests / CLI-only fallback paths)
+uses the bare `DeviceSpec -> DeviceOps` baseline.
 
 ### 5.1  `platform/` tree
 
@@ -333,10 +331,10 @@ After the refactor (★ = new, ✗ = deleted):
 ```text
 lmcache/v1/platform/
   __init__.py                 # bootstraps backend pkgs; lazy c_ops shim
+  base_device_spec.py         # ★ DeviceSpec + lazy ops_cls default
   base_device_ops.py          # ★ DeviceOps base + OPS contract + _bind_native
   _torch_ops.py               # ★ migrated torch/CPU impl (was python_ops_fallback)
   ops_types.py                # ★ TransferDirection, EngineKVFormat, PageBufferShapeDesc
-  _device_ops_registry.py     # ★ device_type -> DeviceOps cls (discovery)
   base_cache_context.py       # (unchanged) sibling abstractions
   base_ipc_wrapper.py
   base_pin_memory.py
@@ -345,27 +343,27 @@ lmcache/v1/platform/
   event_notifier.py
   _registry.py
   cpu/
-    __init__.py
+    __init__.py               # ★ CpuDeviceSpec.ops_cls -> CpuDeviceOps
     device_ops.py             # ★ CpuDeviceOps (no overrides = base)
     cache_context.py
     shm.py
     stub_cpu_device.py
   cuda/
-    __init__.py
+    __init__.py               # ★ CudaDeviceSpec.ops_cls -> CudaDeviceOps
     device_ops.py             # ★ CudaDeviceOps (_bind_native c_ops; rename deferred)
     cache_context.py
     ipc_wrapper.py
     pin_memory.py
   xpu/                        # ★ new
-    __init__.py
+    __init__.py               # ★ XpuDeviceSpec.ops_cls -> XpuDeviceOps
     device_ops.py             # ★ XpuDeviceOps (12 SYCL + 24 torch)
     torch_kv_transfer.py      # ★ XPU-tuned fast paths
   musa/
-    __init__.py
+    __init__.py               # ★ MusaDeviceSpec.ops_cls -> MusaDeviceOps
     device_ops.py             # ★ MusaDeviceOps (moved from ops.py)
     native_kv_transfer.py
   hpu/                        # ★ new
-    __init__.py
+    __init__.py               # ★ HpuDeviceSpec.ops_cls -> HpuDeviceOps
     device_ops.py             # ★ HpuDeviceOps (inherits baseline)
 
 setup_extensions/build_profiles/
@@ -379,32 +377,27 @@ setup_extensions/build_profiles/
 
 ## 6. Runtime Resolution
 
-The per-device op merge is replaced by a registry lookup. The existing
+The per-device op merge is replaced by `DeviceSpec`-based lookup. The existing
 `import lmcache.c_ops` call sites keep working via a module shim built from the
-resolved `DeviceOps` instance.
+resolved `DeviceOps` class.
 
 ```python
 # lmcache/__init__.py
 def _install_c_ops_shim() -> None:
-    from lmcache.v1.platform._device_ops_registry import get_device_ops_cls
-    from lmcache.v1.platform.base_device_ops import OPS
+    from lmcache.v1.platform import get_device_spec
+    from lmcache.v1.platform.base_device_spec import DeviceSpec
 
-    ops_cls = get_device_ops_cls(torch_device_type)
-    ops = ops_cls()
+    spec = get_device_spec(torch_device_type)
+    if spec is None:
+        if torch_device_type in ("", "cpu"):
+            spec = DeviceSpec()
+        else:
+            raise RuntimeError(...)
+
+    ops_cls = spec.ops_cls
 
     shim = types.ModuleType("lmcache.c_ops")
-    for name in OPS:
-        setattr(shim, name, getattr(ops, name))   # resolves native-or-torch
-    shim.TransferDirection = ops.TransferDirection
-    shim.EngineKVFormat = ops.EngineKVFormat
-    shim.GPUKVFormat = ops.EngineKVFormat
-    shim.PageBufferShapeDesc = ops.PageBufferShapeDesc
-    shim.set_shape_desc_dtype = ops.set_shape_desc_dtype
-    # Native-only object-group transfer plan types.
-    shim.StagingCopy = ops.StagingCopy
-    shim.LaunchVar = ops.LaunchVar
-    shim.BatchStep = ops.BatchStep
-    shim.KernelGroupSpec = ops.KernelGroupSpec
+    ops_cls.populate_module(shim)
     sys.modules["lmcache.c_ops"] = shim
 ```
 
@@ -458,11 +451,20 @@ To add device `foo`:
    ```
    If `foo` ships a whole compiled `.so`, bind it: `_bind_native(foo_ops)` in
    `__init__` — same as CUDA/XPU.
-2. Ensure `platform/foo/__init__.py` exists for package bootstrap. No resolver edit
-   is needed; `_device_ops_registry.py` discovers `device_ops.py` at depth 2.
+2. Define `platform/foo/__init__.py` with a `FooDeviceSpec(DeviceSpec)` override:
+   ```python
+   class FooDeviceSpec(DeviceSpec):
+      @property
+      def ops_cls(self) -> type[DeviceOps]:
+          from lmcache.v1.platform.foo.device_ops import FooDeviceOps
+
+          return FooDeviceOps
+   ```
+   Keep the import inside the property body so spec discovery stays lazy and
+   side-effect-free.
 3. *(Optional, native kernels)* add `setup_extensions/build_profiles/foo.py`.
 
 **Zero edits** to the resolver or any other device. A torch-only device works
-immediately by inheriting the baseline.
+immediately once its `DeviceSpec` points at a `DeviceOps` subclass.
 
 ---

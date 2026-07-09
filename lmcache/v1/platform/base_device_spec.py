@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     # First Party
     from lmcache.v1.platform.base_cache_context import BaseCacheContext
     from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
+    from lmcache.v1.platform.base_device_ops import DeviceOps
 
 
 class DeviceSpec:
@@ -73,6 +74,25 @@ class DeviceSpec:
         :class:`~lmcache.v1.platform.cpu.CpuDeviceSpec`) override it.
         """
         return ""
+
+    @property
+    def ops_cls(self) -> "type[DeviceOps]":
+        """DeviceOps subclass providing the ``lmcache.c_ops`` surface.
+
+        Lazy by design: the import happens on *access*, not at class-definition
+        or DeviceSpec-discovery time, so resolving a spec never drags the torch
+        baseline (or a native .so) into the platform package's import graph.
+        The base returns the torch/CPU baseline; accelerator specs override.
+
+        Returns:
+            type[DeviceOps]: The base DeviceOps torch/CPU baseline class for the
+            fallback spec. Accelerator subclasses override this property to
+            return their backend-specific DeviceOps subclass.
+        """
+        # First Party
+        from lmcache.v1.platform.base_device_ops import DeviceOps
+
+        return DeviceOps
 
     def is_available(self) -> bool:
         """Return ``True`` when the device is usable on this system.
