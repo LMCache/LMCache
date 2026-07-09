@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 # Third Party
 import torch
@@ -22,8 +22,11 @@ from lmcache.v1.gpu_connector.utils import (
 )
 from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-from lmcache.v1.metadata import LMCacheMetadata
 import lmcache.c_ops as lmc_ops
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 
@@ -85,7 +88,7 @@ class VLLMPagedMemXPUConnectorV2(GPUConnectorInterface):
     @classmethod
     def from_metadata(
         cls,
-        metadata: LMCacheMetadata,
+        metadata: "LMCacheMetadata",
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
     ) -> "VLLMPagedMemXPUConnectorV2":
@@ -292,7 +295,7 @@ class VLLMPagedMemXPUConnectorV2(GPUConnectorInterface):
 class VLLMPagedMemXPUConnectorV3(GPUConnectorInterface):
     def __init__(
         self,
-        metadata: LMCacheMetadata,
+        metadata: "LMCacheMetadata",
         device: torch.device,
         use_gpu: bool = False,
     ):
@@ -315,7 +318,7 @@ class VLLMPagedMemXPUConnectorV3(GPUConnectorInterface):
     @classmethod
     def from_metadata(
         cls,
-        metadata: LMCacheMetadata,
+        metadata: "LMCacheMetadata",
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
     ) -> "VLLMPagedMemXPUConnectorV3":
@@ -515,7 +518,7 @@ class VLLMBufferLayerwiseXPUConnector(GPUConnectorInterface):
     @classmethod
     def from_metadata(
         cls,
-        metadata: LMCacheMetadata,
+        metadata: "LMCacheMetadata",
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
     ) -> "VLLMBufferLayerwiseXPUConnector":
@@ -913,7 +916,7 @@ class VLLMPagedMemLayerwiseXPUConnector(GPUConnectorInterface):
     @classmethod
     def from_metadata(
         cls,
-        metadata: LMCacheMetadata,
+        metadata: "LMCacheMetadata",
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
     ) -> "VLLMPagedMemLayerwiseXPUConnector":
