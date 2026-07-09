@@ -3,7 +3,7 @@
 # Standard
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Mapping
 import enum
 import math
 import sys
@@ -15,6 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
 )
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 try:
     # Third Party
@@ -548,6 +549,72 @@ def _ensure_zmq_scheme(server_url: str) -> str:
     return f"tcp://{server_url}"
 
 
+def get_tensor(
+    args: dict[str, Any],
+    arg_names: list[str],
+) -> torch.Tensor | None:
+    """Return the first matching tensor argument, or None."""
+    for name in arg_names:
+        if name in args:
+            return args[name]
+    return None
+
+
+@dataclass
+class _QLayerStore:
+    """One request's query drain scheduled for the current forward step.
+
+    Attributes:
+        request_id: The request whose query is being drained.
+        op: The store op whose ``[start, end)`` token range was captured.
+        ring_block_ids: Ring blocks (in token order) holding this op's query.
+        cache_salt: Per-user isolation salt for the query key.
+    """
+
+    request_id: str
+    op: "LoadStoreOp"
+    ring_block_ids: list[int]
+    cache_salt: str
+
+
+@dataclass
+class _QStepState:
+    """Per-forward-step query capture plan.
+
+    Built on the first ``save_kv_layer`` call of a step and consumed by
+    ``wait_for_save``. The token->slot mapping is layer-independent, so it is
+    computed once and reused by every layer's scatter.
+
+    Attributes:
+        ring_slots: ``int64`` tensor of shape ``[num_query_rows]`` mapping each
+            query row to an absolute ring slot (``block_id * block_size +
+            offset``), or ``-1`` to drop the row.
+        stores: One entry per STORE request whose query was captured; drives
+            the per-request Q drain submissions in ``wait_for_save``.
+    """
+
+    ring_slots: torch.Tensor
+    stores: list[_QLayerStore]
+
+
+def attention_layer_names_from_vllm(
+    kv_cache_config: Any,
+    kv_caches: Mapping[str, Any],
+) -> list[str]:
+    vllm_groups = (
+        getattr(kv_cache_config, "kv_cache_groups", ()) or ()
+        if kv_cache_config is not None
+        else ()
+    )
+    if not vllm_groups:
+        return list(kv_caches.keys())
+    attention_names: set[str] = set()
+    for group in vllm_groups:
+        if isinstance(group.kv_cache_spec, AttentionSpec):
+            attention_names.update(group.layer_names)
+    return [name for name in kv_caches.keys() if name in attention_names]
+
+
 class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     """
     The connector for LMCache multi-process mode.
@@ -674,6 +741,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 parallel_strategy=parallel_strategy,
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
+            self._q_layer_index: dict[str, int] = {}
+            self._q_step_state: _QStepState | None = None
+            self._q_step_disabled: bool = False
         else:
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
 
@@ -721,6 +791,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     def role(self) -> KVConnectorRole:
         return self._role
 
+    @property
+    def transfer_intermediate_tensors(self) -> bool:
+        cfg = self._vllm_config.kv_transfer_config
+        if cfg is None:
+            return False
+        return cfg.get_from_extra_config("transfer_intermediate_tensors", False)
+
     # ==============================
     # Worker-side methods
     # ==============================
@@ -759,7 +836,65 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self.worker_adapter.register_kv_caches(
             kv_caches, engine_group_infos=engine_group_infos
         )
+        if self.transfer_intermediate_tensors:
+            self._register_q_ring(kv_caches)
         return
+
+    def _register_q_ring(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        if not kv_caches:
+            logger.warning("No KV caches registered; skipping Q ring setup.")
+            return
+
+        kv_cache_config = getattr(self, "_kv_cache_config", None)
+        attn_layer_names = attention_layer_names_from_vllm(kv_cache_config, kv_caches)
+        if not attn_layer_names:
+            logger.warning("No attention layers registered. Skipping Q ring setup.")
+            return
+        num_layers = len(attn_layer_names)
+
+        self._q_layer_index = {}
+        for i, name in enumerate(attn_layer_names):
+            self._q_layer_index[name] = i
+
+        model_config = self._vllm_config.model_config
+        parallel_config = self._vllm_config.parallel_config
+        num_q_heads = model_config.get_num_attention_heads(parallel_config)
+        head_size = model_config.get_head_size()
+
+        raw_dtype = model_config.dtype
+        dtype = (
+            raw_dtype
+            if isinstance(raw_dtype, torch.dtype)
+            else getattr(torch, str(raw_dtype))
+        )
+        device = next(iter(kv_caches.values())).device
+        block_size = self._vllm_config.cache_config.block_size
+
+        cfg = self._vllm_config.kv_transfer_config
+        if cfg is None:
+            raise ValueError("kv_transfer_config is None; cannot register Q ring")
+
+        explicit = cfg.get_from_extra_config("lmcache.q.ring_blocks", None)
+        if explicit is not None:
+            num_ring_blocks = max(1, int(explicit))
+        else:
+            depth = max(1, int(cfg.get_from_extra_config("lmcache.q.ring_depth", 2)))
+            max_batched = (
+                getattr(
+                    self._vllm_config.scheduler_config, "max_num_batched_tokens", None
+                )
+                or 8192
+            )
+            num_ring_blocks = max(1, math.ceil(max_batched / block_size) * depth)
+
+        self.worker_adapter.register_q_ring(
+            num_layers=num_layers,
+            num_q_heads=num_q_heads,
+            head_size=head_size,
+            dtype=dtype,
+            num_ring_blocks=num_ring_blocks,
+            device=device,
+        )
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """
@@ -833,7 +968,114 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
         """
+        if not self.worker_adapter.is_kv_writer or self._q_step_disabled:
+            return
+
+        layer_index = self._q_layer_index.get(layer_name)
+        if layer_index is None:
+            return
+
+        intermediate_tensors = kwargs.get("intermediate_tensors", None)
+        if intermediate_tensors is None:
+            return
+        query = get_tensor(intermediate_tensors, ["q", "query"])
+        if query is None:
+            return
+
+        if self._q_step_state is None:
+            self._q_step_state = self._build_q_step_state(query)
+            if self._q_step_state is None:
+                self._q_step_disabled = True
+                return
+
+        self.worker_adapter.scatter_q_layer(
+            layer_index, query, self._q_step_state.ring_slots
+        )
         return
+
+    def _build_q_step_state(self, query: torch.Tensor) -> "_QStepState | None":
+        metadata = self._get_connector_metadata()
+        assert isinstance(metadata, LMCacheMPConnectorMetadata)
+
+        q_ring = self.worker_adapter.q_ring
+        if q_ring is None:
+            return None
+        block_size = q_ring.block_size
+        num_query_rows = query.shape[0]
+        ring_slots = torch.full(
+            (num_query_rows,), -1, dtype=torch.int64, device=query.device
+        )
+
+        stores: list[_QLayerStore] = []
+        row_cursor = 0
+        for meta in metadata.requests:
+            if meta.direction != "STORE":
+                continue
+            op = meta.op
+            num_tokens = op.end - op.start
+            if num_tokens <= 0:
+                continue
+
+            if row_cursor + num_tokens > num_query_rows:
+                logger.warning(
+                    "Skip query for request %s: query rows (%d) < %d tokens",
+                    meta.request_id,
+                    num_query_rows - row_cursor,
+                    num_tokens,
+                )
+                self._free_partial_ring_blocks(stores)
+                return None
+
+            if num_tokens % block_size != 0:
+                logger.warning(
+                    "Skip query for request %s: tokens (%d) not divisible by ",
+                    "block_size (%d)",
+                    meta.request_id,
+                    num_tokens,
+                    block_size,
+                )
+                self._free_partial_ring_blocks(stores)
+                return None
+
+            n_blocks = num_tokens // block_size
+            ring_blocks = q_ring.allocate(n_blocks)
+            if ring_blocks is None:
+                logger.warning(
+                    "Skip query for request %s: need %d Q blocks, %d free",
+                    meta.request_id,
+                    n_blocks,
+                    q_ring.num_free_blocks(),
+                )
+                self._free_partial_ring_blocks(stores)
+                return None
+
+            block_tensor = torch.tensor(
+                ring_blocks, dtype=torch.int64, device=query.device
+            )
+            rows = torch.arange(num_tokens, device=query.device)
+            slots = block_tensor[rows // block_size] * block_size + (rows % block_size)
+            ring_slots[row_cursor : row_cursor + num_tokens] = slots
+            stores.append(
+                _QLayerStore(
+                    request_id=meta.request_id,
+                    op=op,
+                    ring_block_ids=ring_blocks,
+                    cache_salt=meta.cache_salt,
+                )
+            )
+            row_cursor += num_tokens
+
+        if not stores:
+            return None
+
+        return _QStepState(ring_slots=ring_slots, stores=stores)
+
+    def _free_partial_ring_blocks(self, stores: list[_QLayerStore]) -> None:
+        q_ring = self.worker_adapter.q_ring
+        if q_ring is None:
+            return
+        for store in stores:
+            q_ring.free(store.ring_block_ids)
 
     def wait_for_save(self):
         """
@@ -843,6 +1085,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         This prevents overwrites of paged KV buffer before saving done.
         """
+        # In MLA scenario, only the first rank of the pipeline group
+        # needs to save the KV cache.
+        if not self.worker_adapter.is_kv_writer:
+            self._q_step_state = None
+            self._q_step_disabled = False
+
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
 
@@ -856,6 +1104,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             ops.append(meta.op)
             cache_salts.append(meta.cache_salt)
 
+        # Consume the per-step query capture plan built during save_kv_layer.
+        q_step_state = self._q_step_state
+        self._q_step_state = None
+        self._q_step_disabled = False
+
+        if q_step_state is None:
+            return
+
         if len(request_ids) == 0:
             return
 
@@ -866,6 +1122,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self.worker_adapter.batched_submit_store_requests(
             request_ids, ops, event, cache_salts=cache_salts
         )
+        if q_step_state is not None:
+            for q_store in q_step_state.stores:
+                self.worker_adapter.submit_q_store_request(
+                    q_store.request_id,
+                    q_store.op,
+                    q_store.ring_block_ids,
+                    event,
+                    cache_salt=q_store.cache_salt,
+                )
 
     # TODO: How does lmcache driven path handle preemption?
     # NOTE1: handle_preemptions is called by vllm each step regardless
