@@ -8,7 +8,7 @@ topologies. It uses the official `valkey-glide` Python sync client.
 ## Goals
 
 - Provide a first-class Valkey-Cluster backend for LMCache MP mode.
-- Preserve **zero-copy** SET and GET for multi-megabyte KV chunks.
+- Preserve **copy-reduced** SET and GET for multi-megabyte KV chunks.
 - Reuse the existing wire-key format so `cache_salt`-based per-tenant
   isolation works without adapter-specific code.
 - Stay within the standard `L2AdapterInterface` contract — submit,
@@ -16,17 +16,22 @@ topologies. It uses the official `valkey-glide` Python sync client.
 
 ## Why glide sync (not async)
 
-`glide-async` cannot do zero-copy for either SET or GET. The async
-client serializes commands as Protobuf messages across an in-process
-Rust-runtime boundary, which forces a `bytes` copy of every value.
-glide upstream documents this explicitly: *"zero-copy is sync-only"*
-(see [valkey-glide#5492][pr-5492] and [#5493][pr-5493]).
+`glide-async` adds an unavoidable per-value copy on both SET and GET.
+The async client serializes commands as Protobuf messages across an
+in-process Rust-runtime boundary, which forces a `bytes` copy of every
+value. glide upstream documents this explicitly: *"zero-copy is
+sync-only"* (see [valkey-glide#5492][pr-5492] and [#5493][pr-5493]).
 
 KV cache chunks are multi-megabyte (∼10 MB per chunk for a 70B model
-with TP=8) and every request touches hundreds of chunks. Paying a copy
-on every transfer would dominate the wire time. Sync glide is the only
-configuration that preserves zero-copy via CFFI (`ffi.from_buffer`), so
+with TP=8) and every request touches hundreds of chunks. Paying an
+extra copy on every transfer would dominate the wire time. Sync glide is
+the only configuration that avoids it, via CFFI (`ffi.from_buffer`), so
 this adapter standardizes on it.
+
+**"Zero-copy" is glide's term, not a literal claim.** Both paths are
+*copy-reduced*, not copy-free: on GET the value is still materialized
+inside glide-core before it is copied into the caller's buffer, and on
+SET the payload still lands in the command buffer.
 
 A sync API blocks the calling Python thread per call, so the adapter
 runs a `ThreadPoolExecutor` of independent worker threads to drive
@@ -43,7 +48,7 @@ is what unlocks batch-level parallelism.
 
 - `valkey-glide-sync >= 2.3.0` — the **sync** GLIDE client package
   (provides the `glide_sync` module), the first stable release with both
-  zero-copy SET (`#5492`) and buffer GET (`#5493`). It bundles
+  copy-reduced SET (`#5492`) and buffer GET (`#5493`). It bundles
   `glide_shared` and `glide_sync`. 
   
   It's lazy imported, won't get used unless triggered 
@@ -336,15 +341,13 @@ JSON schema (CLI `--l2-adapter`):
 }
 ```
 
-Shortcut for a single node: `{"host": "host1", "port": 6379, ...}`.
-
 ## Non-goals
 
 - **Custom MOVED/ASK parsing**: delegated to glide.
 - **Custom slot map**: delegated to glide.
 - **C++ extension**: glide's Rust runtime already runs FFI-released
   GIL; a hand-rolled C++ connector would duplicate glide.
-- **Async-glide path**: cannot do zero-copy (see *Why glide sync*).
+- **Async-glide path**: adds a per-value copy (see *Why glide sync*).
 - **EXISTS-time size check**: RESP `EXISTS` doesn't return size; the
   subsequent GET enforces it instead.
 - **Advanced TLS** (self-signed / private CA / mTLS): only the basic

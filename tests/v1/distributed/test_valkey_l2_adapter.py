@@ -12,6 +12,7 @@ from typing import Any, Optional
 import select
 import sys
 import threading
+import time
 import types
 
 # Third Party
@@ -22,11 +23,16 @@ import torch
 # In-process fake `glide_sync`
 # ---------------------------------------------------------------------------
 #
-# The worker pool imports ``glide_sync`` lazily when it creates a client.
-# We install a fake module in ``sys.modules`` *before* the adapter is
-# imported so that lazy import resolves to our fake.  All workers share
-# the same backing dict so multi-thread behavior matches a real
-# centralized server.
+# The worker pool imports ``glide_sync`` lazily when it creates a client,
+# so the fake only has to be in ``sys.modules`` while a test is running --
+# importing the adapter module does not pull glide in.  The ``_fake_glide``
+# autouse fixture below installs it per test and removes it afterwards.
+# Installing it at import time instead would leave the fake in
+# ``sys.modules`` for the rest of the session, and
+# ``test_valkey_l2_adapter_integration.py`` (collected after this file)
+# would then "connect" to the in-process fake and pass without ever
+# touching a real server.  All workers share the same backing dict so
+# multi-thread behavior matches a real centralized server.
 
 
 class MockValkeyServer:
@@ -137,8 +143,13 @@ class _FakeGlideClusterClient(_FakeGlideClient):
         return dict(_SERVER.node_info)
 
 
-def _install_fake_glide() -> types.ModuleType:
-    """Install the fake glide_sync module in ``sys.modules``."""
+def _build_fake_glide_modules() -> dict[str, types.ModuleType]:
+    """Build the fake ``glide_sync`` / ``glide_shared`` module objects.
+
+    Returns:
+        A mapping of module name to module object, ready to be spliced
+        into ``sys.modules`` for the duration of a test.
+    """
     fake = types.ModuleType("glide_sync")
 
     def _record(name):
@@ -157,7 +168,6 @@ def _install_fake_glide() -> types.ModuleType:
     fake.GlideClusterClientConfiguration = _record("cfg_cluster")  # type: ignore[attr-defined]
     fake.GlideClient = _FakeGlideClient  # type: ignore[attr-defined]
     fake.GlideClusterClient = _FakeGlideClusterClient  # type: ignore[attr-defined]
-    sys.modules["glide_sync"] = fake
 
     # Stub the glide_shared modules that `_do_node_memory` lazily imports
     # for per-node INFO routing.
@@ -169,21 +179,16 @@ def _install_fake_glide() -> types.ModuleType:
         MEMORY = "memory"
 
     core_opts_mod.InfoSection = _InfoSection  # type: ignore[attr-defined]
-    shared_pkg = types.ModuleType("glide_shared")
-    commands_pkg = types.ModuleType("glide_shared.commands")
-    sys.modules["glide_shared"] = shared_pkg
-    sys.modules["glide_shared.commands"] = commands_pkg
-    sys.modules["glide_shared.commands.core_options"] = core_opts_mod
-    sys.modules["glide_shared.routes"] = routes_mod
-    return fake
-
-
-# Install before the adapter module is imported below.
-_install_fake_glide()
+    return {
+        "glide_sync": fake,
+        "glide_shared": types.ModuleType("glide_shared"),
+        "glide_shared.commands": types.ModuleType("glide_shared.commands"),
+        "glide_shared.commands.core_options": core_opts_mod,
+        "glide_shared.routes": routes_mod,
+    }
 
 
 # First Party
-# First Party  (imported after fake glide is installed)
 from lmcache.v1.distributed.api import (  # noqa: E402
     MemoryLayoutDesc,
     ObjectKey,
@@ -277,13 +282,14 @@ def wait_for_event_fd(fd: int, timeout: float = 5.0) -> bool:
 def _wait_for_store(adapter: ValkeyL2Adapter, task_id: int, timeout: float = 5.0):
     """Poll the store event fd until ``task_id`` shows up; return its result."""
     fd = adapter.get_store_event_fd()
-    deadline = timeout
     poll = select.poll()
     poll.register(fd, select.POLLIN)
-    # Drain may report extra completions; loop until task_id appears.
-    while deadline > 0:
-        events = poll.poll(deadline * 1000)
-        if not events:
+    # Drain may report extra completions; loop until task_id appears, but
+    # never past the wall-clock deadline the caller asked for.
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not poll.poll(remaining * 1000):
             break
         try:
             consume_fd(fd)
@@ -292,8 +298,6 @@ def _wait_for_store(adapter: ValkeyL2Adapter, task_id: int, timeout: float = 5.0
         completed = adapter.pop_completed_store_tasks()
         if task_id in completed:
             return completed[task_id]
-        # Tests submit one store task at a time, so keep polling for ours.
-        deadline -= 0.05
     raise AssertionError(f"store task {task_id} did not complete in {timeout}s")
 
 
@@ -301,9 +305,10 @@ def _wait_for_lookup(adapter: ValkeyL2Adapter, task_id: int, timeout: float = 5.
     fd = adapter.get_lookup_and_lock_event_fd()
     poll = select.poll()
     poll.register(fd, select.POLLIN)
-    while timeout > 0:
-        events = poll.poll(timeout * 1000)
-        if not events:
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not poll.poll(remaining * 1000):
             break
         try:
             consume_fd(fd)
@@ -312,17 +317,17 @@ def _wait_for_lookup(adapter: ValkeyL2Adapter, task_id: int, timeout: float = 5.
         bm = adapter.query_lookup_and_lock_result(task_id)
         if bm is not None:
             return bm
-        timeout -= 0.05
-    raise AssertionError(f"lookup task {task_id} did not complete")
+    raise AssertionError(f"lookup task {task_id} did not complete in {timeout}s")
 
 
 def _wait_for_load(adapter: ValkeyL2Adapter, task_id: int, timeout: float = 5.0):
     fd = adapter.get_load_event_fd()
     poll = select.poll()
     poll.register(fd, select.POLLIN)
-    while timeout > 0:
-        events = poll.poll(timeout * 1000)
-        if not events:
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not poll.poll(remaining * 1000):
             break
         try:
             consume_fd(fd)
@@ -331,13 +336,25 @@ def _wait_for_load(adapter: ValkeyL2Adapter, task_id: int, timeout: float = 5.0)
         bm = adapter.query_load_result(task_id)
         if bm is not None:
             return bm
-        timeout -= 0.05
-    raise AssertionError(f"load task {task_id} did not complete")
+    raise AssertionError(f"load task {task_id} did not complete in {timeout}s")
 
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _fake_glide(monkeypatch):
+    """Make the worker pool's lazy ``import glide_sync`` resolve to the fake.
+
+    Scoped to a single test: ``monkeypatch.setitem`` restores (or removes)
+    each ``sys.modules`` entry on teardown, so the fake never survives into
+    the real-server integration tests in this session.
+    """
+    for name, module in _build_fake_glide_modules().items():
+        monkeypatch.setitem(sys.modules, name, module)
+    yield
 
 
 @pytest.fixture(autouse=True)

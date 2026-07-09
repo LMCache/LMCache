@@ -5,9 +5,9 @@ Valkey L2 adapter backed by the official ``valkey-glide`` sync client.
 Supports both standalone (``GlideClient``) and Valkey Cluster
 (``GlideClusterClient``) topologies via the ``cluster_mode`` field. The
 sync glide client is used (rather than async) because it is the only
-glide API that supports zero-copy SET (``bytearray``/``memoryview`` args)
-and buffer GET — async glide cannot avoid an intermediate ``bytes``
-allocation due to its Protobuf-based IPC layer.
+glide API that supports copy-reduced SET (``bytearray``/``memoryview``
+args) and buffer GET — async glide adds an unavoidable intermediate
+``bytes`` allocation on top of that, due to its Protobuf-based IPC layer.
 
 Concurrency model:
     The glide clients and worker threads live in the shared
@@ -413,6 +413,32 @@ class _SubmitTaskBatchState:
     sizes: list[int] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
+    def settle_unlaunched(self, launched: int) -> bool:
+        """Account for keys that never got a future, after a launch error.
+
+        Called when the per-key dispatch loop raised at index ``launched``:
+        keys ``[launched, len(keys))`` will never run a completion callback,
+        so their ``remaining`` share must be dropped here or the batch would
+        never finalize. They keep their initial ``per_key_ok`` of ``False``.
+
+        Takes ``lock`` and re-checks ``remaining``, so it races safely with
+        the callbacks of the keys that did launch.
+
+        Args:
+            launched: Number of keys whose future was successfully
+                submitted (i.e. the index at which dispatch raised).
+
+        Returns:
+            ``True`` if this call drove ``remaining`` to zero and the caller
+            must therefore finalize the batch.
+        """
+        unlaunched = len(self.keys) - launched
+        if unlaunched <= 0:
+            return False
+        with self.lock:
+            self.remaining -= unlaunched
+            return self.remaining == 0
+
 
 class ValkeyL2Adapter(L2AdapterInterface):
     """
@@ -449,7 +475,7 @@ class ValkeyL2Adapter(L2AdapterInterface):
         self._next_task_id: L2TaskId = 0
         self._lock: threading.Lock = threading.Lock()
 
-        # Shared glide client pool — owns clients, thread pool, zero-copy
+        # Shared glide client pool — owns clients, thread pool, copy-reduced
         # primitives, capability probing, and reliable shutdown.
         self._pool: ValkeyWorkerPool = ValkeyWorkerPool(
             addresses=config.startup_nodes,
@@ -506,6 +532,9 @@ class ValkeyL2Adapter(L2AdapterInterface):
         ``bytes_transferred`` reflects only the keys that actually
         wrote (partial failures are accounted correctly).
 
+        If the adapter is closed, or the pool rejects a dispatch, the
+        task completes immediately as a failure rather than hanging.
+
         Raises:
             ValueError: If ``keys`` and ``objects`` differ in length.
         """
@@ -517,6 +546,15 @@ class ValkeyL2Adapter(L2AdapterInterface):
 
         with self._lock:
             task_id = self._new_task_id()
+
+        if self._closed:
+            logger.warning(
+                "submit_store_task on a closed ValkeyL2Adapter; failing task"
+            )
+            with self._lock:
+                self._completed_stores[task_id] = L2StoreResult(False, 0)
+            self._store_efd.notify()
+            return task_id
 
         if not keys:
             with self._lock:
@@ -535,11 +573,24 @@ class ValkeyL2Adapter(L2AdapterInterface):
             sizes=sizes,
         )
 
-        for i in range(len(keys)):
-            fut = self._pool.submit_set(wire_keys[i], objects[i].byte_array)
-            # partial binds this key's batch+index; the future is passed
-            # last by add_done_callback.
-            fut.add_done_callback(functools.partial(self._on_store_done, batch, i))
+        launched = 0
+        try:
+            for i in range(len(keys)):
+                fut = self._pool.submit_set(wire_keys[i], objects[i].byte_array)
+                # partial binds this key's batch+index; the future is passed
+                # last by add_done_callback.
+                fut.add_done_callback(functools.partial(self._on_store_done, batch, i))
+                launched = i + 1
+        except Exception as e:
+            logger.error(
+                "Valkey SET dispatch failed after %d/%d keys (task_id=%d): %s",
+                launched,
+                len(keys),
+                task_id,
+                e,
+            )
+            if batch.settle_unlaunched(launched):
+                self._finalize_store(batch)
 
         return task_id
 
@@ -583,24 +634,27 @@ class ValkeyL2Adapter(L2AdapterInterface):
         Accounting (``_notify_keys_stored``) is fired outside
         ``self._lock`` so a slow listener cannot stall the next submit.
         """
-        bytes_transferred = sum(
-            sz for sz, ok in zip(batch.sizes, batch.per_key_ok, strict=True) if ok
-        )
         all_ok = all(batch.per_key_ok)
 
         stored_keys: list[ObjectKey] = []
         stored_sizes: list[int] = []
-        for k, sz, ok in zip(batch.keys, batch.sizes, batch.per_key_ok, strict=True):
-            if ok:
-                stored_keys.append(k)
-                stored_sizes.append(sz)
-
+        bytes_transferred = 0
         with self._lock:
+            for k, sz, ok in zip(
+                batch.keys, batch.sizes, batch.per_key_ok, strict=True
+            ):
+                if not ok:
+                    continue
+                stored_keys.append(k)
+                if k in self._key_sizes:
+                    stored_sizes.append(0)
+                else:
+                    self._key_sizes[k] = sz
+                    stored_sizes.append(sz)
+                    bytes_transferred += sz
             self._completed_stores[batch.task_id] = L2StoreResult(
                 all_ok, bytes_transferred
             )
-            for k, sz in zip(stored_keys, stored_sizes, strict=True):
-                self._key_sizes[k] = sz
 
         if stored_keys:
             self._notify_keys_stored(stored_keys, stored_sizes)
@@ -632,6 +686,10 @@ class ValkeyL2Adapter(L2AdapterInterface):
         present, and the lock refcount for each present key is
         incremented so subsequent ``submit_unlock`` calls balance.
 
+        If the adapter is closed, or the pool rejects a dispatch, the
+        task completes immediately as an all-miss bitmap rather than
+        hanging.
+
         Args:
             keys: Keys to look up and lock.
             layout_desc: The memory layout of the objects. Advisory hint,
@@ -642,6 +700,16 @@ class ValkeyL2Adapter(L2AdapterInterface):
         """
         with self._lock:
             task_id = self._new_task_id()
+
+        if self._closed:
+            logger.warning(
+                "submit_lookup_and_lock_task on a closed ValkeyL2Adapter; "
+                "reporting all keys as missing"
+            )
+            with self._lock:
+                self._completed_lookups[task_id] = Bitmap(len(keys))
+            self._lookup_efd.notify()
+            return task_id
 
         if not keys:
             with self._lock:
@@ -656,9 +724,22 @@ class ValkeyL2Adapter(L2AdapterInterface):
             per_key_ok=[False] * len(keys),
             keys=list(keys),
         )
-        for i in range(len(keys)):
-            fut = self._pool.submit_exists(wire_keys[i])
-            fut.add_done_callback(functools.partial(self._on_lookup_done, batch, i))
+        launched = 0
+        try:
+            for i in range(len(keys)):
+                fut = self._pool.submit_exists(wire_keys[i])
+                fut.add_done_callback(functools.partial(self._on_lookup_done, batch, i))
+                launched = i + 1
+        except Exception as e:
+            logger.error(
+                "Valkey EXISTS dispatch failed after %d/%d keys (task_id=%d): %s",
+                launched,
+                len(keys),
+                task_id,
+                e,
+            )
+            if batch.settle_unlaunched(launched):
+                self._finalize_lookup(batch)
         return task_id
 
     def _on_lookup_done(
@@ -748,9 +829,16 @@ class ValkeyL2Adapter(L2AdapterInterface):
     ) -> L2TaskId:
         """Submit a non-blocking batch GET into ``objects`` buffers.
 
-        Uses glide's buffer GET (zero-copy) when available; otherwise
+        Uses glide's buffer GET (copy-reduced) when available; otherwise
         falls back to copying through a ``bytes`` intermediate. In both
         paths a size mismatch is treated as a cache miss.
+
+        If the adapter is closed, or the pool rejects a dispatch, the
+        task completes immediately as an all-miss bitmap rather than
+        hanging.
+
+        Raises:
+            ValueError: If ``keys`` and ``objects`` differ in length.
         """
         if len(keys) != len(objects):
             raise ValueError(
@@ -760,6 +848,16 @@ class ValkeyL2Adapter(L2AdapterInterface):
 
         with self._lock:
             task_id = self._new_task_id()
+
+        if self._closed:
+            logger.warning(
+                "submit_load_task on a closed ValkeyL2Adapter; "
+                "reporting all keys as missing"
+            )
+            with self._lock:
+                self._completed_loads[task_id] = Bitmap(len(keys))
+            self._load_efd.notify()
+            return task_id
 
         if not keys:
             with self._lock:
@@ -779,9 +877,22 @@ class ValkeyL2Adapter(L2AdapterInterface):
             keys=list(keys),
             sizes=expected_sizes,
         )
-        for i in range(len(keys)):
-            fut = self._pool.submit_get_into(wire_keys[i], objects[i].byte_array)
-            fut.add_done_callback(functools.partial(self._on_load_done, batch, i))
+        launched = 0
+        try:
+            for i in range(len(keys)):
+                fut = self._pool.submit_get_into(wire_keys[i], objects[i].byte_array)
+                fut.add_done_callback(functools.partial(self._on_load_done, batch, i))
+                launched = i + 1
+        except Exception as e:
+            logger.error(
+                "Valkey GET dispatch failed after %d/%d keys (task_id=%d): %s",
+                launched,
+                len(keys),
+                task_id,
+                e,
+            )
+            if batch.settle_unlaunched(launched):
+                self._finalize_load(batch)
         return task_id
 
     def _on_load_done(
@@ -878,9 +989,13 @@ class ValkeyL2Adapter(L2AdapterInterface):
         ``request_timeout`` is hit. Only keys whose DEL actually removed a
         value (glide returns ``1``) are reported via
         ``_notify_keys_deleted`` with their original stored size from
-        ``_key_sizes``.
+        ``_key_sizes``. A closed adapter deletes nothing.
         """
         if not keys:
+            return
+
+        if self._closed:
+            logger.warning("delete on a closed ValkeyL2Adapter; ignoring")
             return
 
         # Skip keys currently pinned by a read; same convention as the
@@ -942,7 +1057,12 @@ class ValkeyL2Adapter(L2AdapterInterface):
         return status
 
     def close(self) -> None:
-        """Close the worker pool (and its glide clients) and event fds."""
+        """Close the worker pool (and its glide clients) and event fds.
+
+        Idempotent so a double-close never submits to a shut-down
+        executor. ``close`` is a lifecycle call from a single owner, not
+        contended with ``submit_*`` — no lock is needed.
+        """
         if self._closed:
             return
         self._closed = True

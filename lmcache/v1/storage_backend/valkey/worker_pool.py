@@ -4,11 +4,12 @@ Shared Valkey worker pool built on the ``valkey-glide`` sync client.
 
 A pool of ``num_workers`` threads, each holding its own glide client via
 ``threading.local()``. The sync glide client is used (rather than async)
-because it is the only glide API that supports **zero-copy** SET
-(``bytearray``/``memoryview`` args) and buffer GET — async glide cannot
-avoid an intermediate ``bytes`` allocation due to its Protobuf-based IPC
-layer. A sync call blocks its calling thread, so concurrency comes from
-running N worker threads each with an independent client.
+because it is the only glide API that supports **copy-reduced** SET
+(``bytearray``/``memoryview`` args) and buffer GET — async glide adds an
+unavoidable intermediate ``bytes`` allocation on top of that, due to its
+Protobuf-based IPC layer. A sync call blocks its calling thread, so
+concurrency comes from running N worker threads each with an independent
+client.
 
 Both the non-MP ``ValkeyConnector`` (``RemoteConnector``) and the MP-mode
 ``ValkeyL2Adapter`` (``L2AdapterInterface``) build on this single class,
@@ -16,7 +17,7 @@ so the glide client lifecycle, capability probing, buffer-format
 handling, and reliable shutdown live in exactly one place.
 
 Requires the ``valkey-glide-sync`` package (``>= 2.3.0``), which provides
-the ``glide_sync`` module with zero-copy SET and buffer GET. Note the
+the ``glide_sync`` module with copy-reduced SET and buffer GET. Note the
 plain ``valkey-glide`` package ships only the *async* client and is not
 sufficient. The dependency is imported lazily so installations that don't
 use Valkey never need it.
@@ -43,6 +44,12 @@ DEFAULT_CONNECTION_TIMEOUT_SECS: float = 10.0
 
 #: Sentinel returned by ``_do_get_into`` when the key is absent.
 GET_MISS: int = -1
+
+#: Upper bound on how long ``close()`` waits for all workers to gather at
+#: the shutdown barrier. Workers idle at close time gather in microseconds;
+#: this only caps the wait when a worker is stuck in a slow glide call, so
+#: close falls through to its best-effort path promptly
+CLOSE_BARRIER_TIMEOUT_SECS: float = 1.0
 
 
 def _to_str(value: Any) -> str:
@@ -268,7 +275,7 @@ class ValkeyWorkerPool:
 
     @property
     def has_buffer_get(self) -> bool:
-        """Whether the glide client supports zero-copy buffer GET.
+        """Whether the glide client supports copy-reduced buffer GET.
 
         Returns:
             ``True`` if ``client.get`` accepts a ``buffer=`` argument
@@ -314,7 +321,7 @@ class ValkeyWorkerPool:
         """SET a key. ``data`` is a memoryview / bytes / bytearray.
 
         With glide >= 2.3.0 and a memoryview/bytearray, this is a
-        zero-copy write. When ``ttl_seconds`` is configured, the key is
+        copy-reduced write. When ``ttl_seconds`` is configured, the key is
         written with an expiry so Valkey/Redis ``volatile-*`` eviction
         policies can reclaim it under memory pressure; otherwise the key
         is persisted indefinitely.
@@ -373,8 +380,33 @@ class ValkeyWorkerPool:
             result = client.get(key_str.encode(), buffer=scratch_view)
             if result is None:
                 return GET_MISS
-            # glide buffer GET returns the number of bytes written.
-            n = int(result) if isinstance(result, int) else size
+            # glide buffer GET returns the number of bytes written. Real
+            # glide sync (>= 2.3.0) reports this as an ASCII byte string
+            # (e.g. ``b'4096'``); the fake used in unit tests may report
+            # a plain ``int``. Anything else means we cannot trust the
+            # byte count, so treat it as a miss rather than assume a
+            # full-size read and defeat the size check below.
+            if isinstance(result, (bytes, bytearray, memoryview)):
+                try:
+                    n = int(bytes(result))
+                except ValueError:
+                    logger.warning(
+                        "Valkey buffer GET for key %s returned "
+                        "non-numeric byte string %r; treating as miss.",
+                        key_str,
+                        bytes(result)[:32],
+                    )
+                    return GET_MISS
+            elif isinstance(result, int) and not isinstance(result, bool):
+                n = result
+            else:
+                logger.warning(
+                    "Valkey buffer GET for key %s returned unexpected type %s; "
+                    "treating as miss.",
+                    key_str,
+                    type(result).__name__,
+                )
+                return GET_MISS
             source: Any = scratch_view
         else:
             data = client.get(key_str.encode())
@@ -491,9 +523,13 @@ class ValkeyWorkerPool:
         client exactly once. Without it, a fast thread could grab
         multiple close tasks (no-ops after the first) while another
         thread's client is never closed.
+
+        The wait is capped at :data:`CLOSE_BARRIER_TIMEOUT_SECS`: if a
+        worker is stuck in a slow glide call the barrier can never gather,
+        and a longer wait would only delay the best-effort close below.
         """
         try:
-            barrier.wait(timeout=self._request_timeout)
+            barrier.wait(timeout=CLOSE_BARRIER_TIMEOUT_SECS)
         except Exception as exc:
             # BrokenBarrierError, TimeoutError (3.12+), etc. — fall through
             # to a best-effort close of whatever this thread owns so a

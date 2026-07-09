@@ -100,11 +100,18 @@ def _probe_reachable(cluster_mode: bool, startup_nodes: str) -> bool:
     Builds a throwaway adapter and runs a tiny lookup; any exception
     (no glide_sync, connection refused, auth error) means "not
     reachable".
+
+    A ``glide_sync`` without an import spec is a hand-built stand-in (the
+    unit tests install one), not the installed package. Treat it as
+    unreachable so these tests skip rather than passing vacuously against
+    an in-process fake.
     """
     try:
         # Third Party
-        import glide_sync  # noqa: F401
+        import glide_sync
     except ImportError:
+        return False
+    if getattr(glide_sync, "__spec__", None) is None:
         return False
     # First Party
     from lmcache.v1.distributed.l2_adapters.valkey_l2_adapter import (
