@@ -1,26 +1,18 @@
 # LMCacheEngine that pins injected vLLM pods to a specific lmcache build.
 #
 # On top of the usual connection wiring (--kv-transfer-config, hostIPC,
-# PYTHONHASHSEED), spec.injection.payloadImage makes the mutating webhook also
-# STAGE an lmcache code payload into every opted-in vLLM pod: an emptyDir + an
-# init container that copies the payload image's lmcache tree into it, a
-# read-only mount, and PYTHONPATH=/lmcache-payload. vLLM then imports THAT
-# lmcache instead of the one baked into its image — so an older vLLM image can
-# run the newest lmcache, and the vLLM client stays on the same build as the
-# engine server.
+# PYTHONHASHSEED), spec.injection.payloadImage makes the webhook stage an lmcache
+# payload into every opted-in vLLM pod (emptyDir + init container + read-only
+# mount + PYTHONPATH=/lmcache-payload), so vLLM imports THAT lmcache instead of
+# the one baked into its image — an older vLLM image can run the newest lmcache,
+# and the vLLM client stays on the engine server's build. The payload's lmcache
+# must be ABI-compatible (Python minor + torch) with the vLLM image; see
+# docker/Dockerfile.payload.
 #
-# The payload image must ship the unpacked lmcache tree under /payload and copy
-# it to $SHARED_DIR on start (see docker/Dockerfile.payload). Its lmcache must be
-# ABI-compatible (Python minor + torch) with the vLLM image that imports it.
-#
-# Pair this with an opted-in vLLM Deployment — see
-# config/samples/vllm_lmcache_deployment.yaml. Opt in with the pod-template
-# label `lmcache.ai/lmcache-inject: "true"` and annotation
+# Pair with an opted-in vLLM Deployment
+# (config/samples/vllm_lmcache_injection_deployment.yaml): pod-template label
+# `lmcache.ai/lmcache-inject: "true"` + annotation
 # `lmcache.ai/lmcache-engine: "my-cache-versioned"`.
-#
-# Verify on the mutated POD (not the Deployment):
-#   kubectl get pod -l app=vllm-lmcache -o yaml \
-#     | grep -E "lmcache-payload-stage|/lmcache-payload|PYTHONPATH|lmcache-injected"
 apiVersion: lmcache.lmcache.ai/v1alpha1
 kind: LMCacheEngine
 metadata:

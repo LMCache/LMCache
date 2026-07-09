@@ -1,23 +1,16 @@
-# Sample vLLM Deployment that OPTS IN to LMCacheEngine dependency injection AND
-# receives a pinned lmcache code payload — the companion workload for
+# Sample vLLM Deployment that OPTS IN to LMCacheEngine injection AND receives a
+# pinned lmcache code payload — companion to
 # lmcache_v1alpha1_lmcacheengine_injection.yaml (engine "my-cache-versioned").
 #
-# Because that engine sets spec.injection.payloadImage, the mutating webhook does
-# TWO things to this pod at CREATE:
-#   1. Connection wiring (same as vllm_lmcache_deployment.yaml):
-#      - pod hostIPC=true (CUDA IPC with the node-local LMCache server);
-#      - --kv-transfer-config <inline JSON> on the vLLM container;
-#      - PYTHONHASHSEED=0 env (set only if you didn't).
-#   2. Code-payload staging:
-#      - a `lmcache-payload` emptyDir + an init container that copies the payload
-#        image's lmcache tree into it;
-#      - a readOnly mount of that volume on the vLLM container;
-#      - PYTHONPATH=/lmcache-payload so vLLM imports the STAGED lmcache.
-#
-# Net effect: this pod can run an OLDER vLLM image yet execute the lmcache build
-# shipped by the engine's payloadImage — so the vLLM client and the LMCache
-# engine server stay on one lmcache version. (The payload's lmcache must be
-# ABI-compatible — Python minor + torch — with this vLLM image.)
+# Because that engine sets spec.injection.payloadImage, the webhook does TWO
+# things to this pod at CREATE:
+#   1. Connection wiring (as in vllm_lmcache_deployment.yaml): hostIPC=true,
+#      --kv-transfer-config on the vLLM container, PYTHONHASHSEED=0.
+#   2. Payload staging: a `lmcache-payload` emptyDir + an init container that
+#      copies the payload image's lmcache tree in, a readOnly mount, and
+#      PYTHONPATH=/lmcache-payload so vLLM imports the STAGED lmcache.
+# Net: this pod can run an OLDER vLLM image yet execute the engine's lmcache
+# build (which must be ABI-compatible — Python minor + torch — with this image).
 #
 # PREREQUISITES (else injection silently no-ops or the pod is rejected):
 #   1. The "my-cache-versioned" LMCacheEngine exists IN THIS NAMESPACE and is

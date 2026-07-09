@@ -61,31 +61,22 @@ type ImageSpec struct {
 	PullPolicy *string `json:"pullPolicy,omitempty"`
 }
 
-// LMCacheInjectionSpec defines the defaults the LMCache mutating webhook reads
-// when it stages an lmcache code payload into vLLM pods bound to this engine. It
-// mirrors the CacheBlend InjectionSpec's payload-staging fields but omits the
-// CacheBlend-only cudagraph knob: the standard LMCache path only stages an
-// lmcache package tree and otherwise wires the connection (--kv-transfer-config).
-//
-// Payload staging is optional and additive: when payloadImage is unset the
-// webhook wires only the connection (the historical behavior); when it is set
-// the webhook also copies the payload tree into the vLLM container and prepends
-// PYTHONPATH so vLLM imports that lmcache instead of the one baked into its
-// image — keeping the vLLM client and the engine server on one lmcache build.
+// LMCacheInjectionSpec configures optional lmcache code-payload staging for vLLM
+// pods bound to this engine. When payloadImage is unset the webhook wires only
+// the connection (--kv-transfer-config); when set it also copies the payload
+// tree into the vLLM container and prepends PYTHONPATH so vLLM imports that
+// lmcache instead of the one baked into its image, keeping the vLLM client and
+// the engine server on one build.
 type LMCacheInjectionSpec struct {
-	// payloadImage is the init-container image (repository/tag/pullPolicy, like
-	// spec.image) that stages an unpacked lmcache package tree into a shared
-	// emptyDir, which the vLLM container then imports via PYTHONPATH.
+	// payloadImage is a purpose-built init-container image (repository/tag/
+	// pullPolicy, like spec.image) that ships an unpacked lmcache tree under
+	// /payload and copies it to $SHARED_DIR on start (see
+	// docker/Dockerfile.payload); the vLLM container imports it via PYTHONPATH.
 	//
-	// It is a SEPARATE, purpose-built image: it must ship the unpacked lmcache
-	// tree under /payload and copy it to $SHARED_DIR on start (a busybox
-	// `cp -a /payload/. $SHARED_DIR` ENTRYPOINT, no command override) — the same
-	// contract as the CacheBlend payload image. The repository default inherited
-	// from ImageSpec (lmcache/vllm-openai) is NOT a valid payload, so
-	// payloadImage.repository must be set explicitly; when payloadImage is unset
-	// the webhook stages nothing and only wires the connection. For private
-	// registries, imagePullSecrets must reference Secret(s) that exist in the
-	// vLLM pod's namespace.
+	// repository has no usable default — the ImageSpec default
+	// (lmcache/vllm-openai) is NOT a payload — so it must be set explicitly. For
+	// private registries, imagePullSecrets must reference Secret(s) in the vLLM
+	// pod's namespace.
 	// +optional
 	PayloadImage *ImageSpec `json:"payloadImage,omitempty"`
 

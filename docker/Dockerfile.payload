@@ -1,32 +1,29 @@
 # LMCache payload image for the operator's code-payload injection.
 #
-# The LMCacheEngine mutating webhook (operator/internal/webhook/lmcache_pod_injector.go)
-# stages an lmcache build INTO a vLLM pod when the engine sets
-# spec.injection.payloadImage. This image is that payload: it ships the unpacked
-# `lmcache` package tree under /payload and, on start, copies it into the shared
-# emptyDir the webhook mounts. The vLLM container then imports it via
-# PYTHONPATH=/lmcache-payload, overriding the lmcache baked into the vLLM image so
-# the vLLM client and the LMCache engine server run one matched lmcache build.
+# When an LMCacheEngine sets spec.injection.payloadImage, the mutating webhook
+# (operator/internal/webhook/lmcache_pod_injector.go) stages this image into a
+# vLLM pod: it ships the `lmcache` tree under /payload and, on start, copies it
+# into a shared emptyDir that the vLLM container imports via
+# PYTHONPATH=/lmcache-payload — overriding the lmcache baked into the vLLM image
+# so the vLLM client and the LMCache engine server run one matched build.
 #
-# Contract the webhook depends on (keep in lockstep):
+# Webhook contract (keep in lockstep):
 #   - the tree lives under /payload;
-#   - the image ENTRYPOINT copies /payload into $SHARED_DIR (the webhook sets
-#     SHARED_DIR=/lmcache-payload and mounts the RW emptyDir there);
-#   - NO command override is needed at inject time — the init container runs this
-#     ENTRYPOINT as-is (a command override makes the webhook skip staging).
+#   - the ENTRYPOINT copies /payload into $SHARED_DIR (the webhook sets
+#     SHARED_DIR=/lmcache-payload and mounts a RW emptyDir there);
+#   - no command override — one makes the webhook skip staging.
 #
-# lmcache ships COMPILED extensions (.so) linked against a specific Python minor
-# version + torch/CUDA ABI, so the staged tree must be ABI-compatible with the
-# vLLM runtime that imports it. This image therefore EXTRACTS the already-built
-# lmcache from an lmcache-containing source image rather than recompiling — set
-# SOURCE_IMAGE to the same image (or an ABI-compatible one) your vLLM pods run.
+# lmcache ships COMPILED extensions (.so) tied to a Python minor + torch/CUDA
+# ABI, so this image EXTRACTS the already-built lmcache from a source image
+# rather than recompiling. Set SOURCE_IMAGE to your vLLM image (or an
+# ABI-compatible one).
 #
-# Build (match your vLLM image tag):
+# Build:
 #   docker build -f docker/Dockerfile.payload \
 #     --build-arg SOURCE_IMAGE=lmcache/vllm-openai:latest-nightly \
 #     -t <registry>/lmcache-payload:latest-nightly .
 #
-# Smoke test the copy locally:
+# Smoke test:
 #   docker run --rm -e SHARED_DIR=/out -v "$PWD/out:/out" <registry>/lmcache-payload:...
 #   test -f out/lmcache/__init__.py
 
