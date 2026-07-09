@@ -29,8 +29,8 @@ from lmcache.v1.gpu_connector.utils import (
     is_mla,
     normalize_kv_and_discover_format,
 )
+from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
 from lmcache.v1.memory_management import (
-    GPUMemoryAllocator,
     MemoryFormat,
     MemoryObj,
 )

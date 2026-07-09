@@ -68,7 +68,7 @@ class CudaPinMemoryBackend(PinMemoryBackend):
         Notes:
             Import and cudart lookup failures are handled internally. When both
             the torch path and the ``libcudart`` fallback fail, the backend
-            stays in an unsupported state and ``is_pin_supported()`` returns
+            stays in an unsupported state and ``is_pin_supported`` returns
             ``False``.
         """
         self._cudart = None
@@ -160,6 +160,7 @@ class CudaPinMemoryBackend(PinMemoryBackend):
 
         return False
 
+    @property
     def is_pin_supported(self) -> bool:
         """Whether CUDA memory pinning is supported.
 

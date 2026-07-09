@@ -40,9 +40,14 @@ class MPCoordinatorConfig:
             immediately. Use a non-zero value to let the startup resync
             backfill usage/eviction trackers first, so eviction decisions
             aren't made against cold, incomplete state right after boot.
-        blend_chunk_size: Tokens per chunk for the global CacheBlend directory
-            (the match unit). Must equal the LMCache chunk size the blend servers
-            use, so the coordinator chunks published/queried tokens the same way.
+        chunk_size: Tokens per KV chunk. The single fleet chunk size: it is the
+            CacheBlend match unit *and* resolves a pin request's ``token_ids`` to
+            object keys. Must equal the MP servers' ``--chunk-size`` or blend
+            matches and resolved pin keys will not line up with what was stored.
+        hash_algorithm: Token hash algorithm for pin key resolution. Must equal
+            the MP servers' ``--hash-algorithm`` (default ``blake3``, which is
+            self-contained; other algorithms require vLLM importable in the
+            coordinator process).
         blend_probe_stride: Positions between match probes. With partial-fill
             reuse any offset is usable, so ``1`` (probe every offset) gives full
             recall; raise only to trade recall for coordinator CPU.
@@ -68,7 +73,8 @@ class MPCoordinatorConfig:
     eviction_ratio: float = 0.2
     trigger_watermark: float = 1.0
     eviction_startup_delay: float = 0.0
-    blend_chunk_size: int = 256
+    chunk_size: int = 256
+    hash_algorithm: str = "blake3"
     blend_probe_stride: int = 1
     enable_startup_resync: bool = True
     resync_poll_interval: float = 1.0
@@ -102,8 +108,10 @@ class MPCoordinatorConfig:
             raise ValueError("resync_max_wait must be non-negative")
         if self.resync_page_size <= 0:
             raise ValueError("resync_page_size must be positive")
-        if self.blend_chunk_size < 1:
-            raise ValueError("blend_chunk_size must be positive")
+        if self.chunk_size < 1:
+            raise ValueError("chunk_size must be positive")
+        if not self.hash_algorithm:
+            raise ValueError("hash_algorithm must be a non-empty string")
         if self.blend_probe_stride < 1:
             raise ValueError("blend_probe_stride must be positive")
         if self.timeout_keep_alive <= 0:
@@ -155,7 +163,8 @@ class MPCoordinatorConfig:
             eviction_startup_delay=_num(
                 "EVICTION_STARTUP_DELAY", cls.eviction_startup_delay, float
             ),
-            blend_chunk_size=int(_num("BLEND_CHUNK_SIZE", cls.blend_chunk_size, int)),
+            chunk_size=int(_num("CHUNK_SIZE", cls.chunk_size, int)),
+            hash_algorithm=_str("HASH_ALGORITHM", cls.hash_algorithm),
             blend_probe_stride=int(
                 _num("BLEND_PROBE_STRIDE", cls.blend_probe_stride, int)
             ),

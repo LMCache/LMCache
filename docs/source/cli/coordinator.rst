@@ -54,9 +54,14 @@ Options
    * - ``--eviction-startup-delay SECS``
      - Seconds to wait after startup before the first eviction sweep; lets
        startup resync backfill trackers first (default: ``0``).
-   * - ``--blend-chunk-size N``
-     - Tokens per chunk for the global CacheBlend directory; must equal the
-       LMCache chunk size the blend servers use (default: ``256``).
+   * - ``--chunk-size N``
+     - Tokens per KV chunk: the CacheBlend match unit and the unit used to
+       resolve pin ``token_ids`` to keys. Must equal the MP servers'
+       ``--chunk-size`` (default: ``256``).
+   * - ``--hash-algorithm NAME``
+     - Token hash algorithm for pin key resolution; must equal the MP servers'
+       ``--hash-algorithm``. ``blake3`` (default) is self-contained; other
+       algorithms require vLLM importable in the coordinator.
    * - ``--blend-probe-stride N``
      - Positions between CacheBlend match probes; ``1`` probes every offset
        for full recall (default: ``1``).
@@ -73,7 +78,7 @@ Configuration
 Every flag is optional. Unset flags fall back to the
 ``LMCACHE_MP_COORDINATOR_*`` environment variables (``HOST``, ``PORT``,
 ``INSTANCE_TIMEOUT``, ``HEALTH_CHECK_INTERVAL``, ``EVICTION_CHECK_INTERVAL``,
-``EVICTION_RATIO``, ``TRIGGER_WATERMARK``, ``BLEND_CHUNK_SIZE``,
+``EVICTION_RATIO``, ``TRIGGER_WATERMARK``, ``CHUNK_SIZE``, ``HASH_ALGORITHM``,
 ``BLEND_PROBE_STRIDE``, ``TIMEOUT_KEEP_ALIVE``), and then to the built-in
 defaults. A supplied flag always overrides the matching env-derived value, so
 env-only deployments keep working unchanged.

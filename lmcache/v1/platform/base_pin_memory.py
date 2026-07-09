@@ -39,6 +39,7 @@ class PinMemoryBackend:
         """
         return False
 
+    @property
     def is_pin_supported(self) -> bool:
         """Whether the current platform supports memory pinning.
 
