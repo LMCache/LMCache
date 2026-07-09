@@ -1592,6 +1592,7 @@ class LMCacheMPWorkerAdapter:
         self.kv_caches = kv_caches
         transfer_ctx = self._create_transfer_context(kv_caches)
         layout_hints = self._layout_hints
+        old_ctx = self.transfer_ctx
         self.transfer_ctx = transfer_ctx
         try:
             # Register on the local, not self.transfer_ctx: a concurrent
@@ -1614,6 +1615,15 @@ class LMCacheMPWorkerAdapter:
                 "register_kv_caches within "
                 f"{self._mq_timeout}s. Is the server running?"
             ) from None
+        if old_ctx is not None:
+            # Release the displaced context deterministically instead of at
+            # GC time: its close() drains in-flight transfers before
+            # unpinning/unmapping the old SHM pool, so a store racing the
+            # re-registration can never dereference an unmapped view.
+            try:
+                old_ctx.close()
+            except Exception:
+                logger.exception("Failed to close displaced transfer context")
 
     def _ensure_heartbeat_started(self) -> None:
         """Lazily start the heartbeat on first store, retrieve, or event poll.
