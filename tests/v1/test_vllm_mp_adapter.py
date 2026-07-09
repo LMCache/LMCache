@@ -46,14 +46,14 @@ class FakeHeartbeatThread:
         mq_client: object = None,
         health_event: threading.Event | None = None,
         interval: float = 0.0,
-        instance_id: int | None = None,
+        instance_ids: list[int] | None = None,
     ) -> None:
         self.mq_client = mq_client
         self.health_event = (
             health_event if health_event is not None else threading.Event()
         )
         self.interval = interval
-        self.instance_id = instance_id
+        self.instance_ids = instance_ids
         # Snapshot of the health event at construction time: lets tests
         # assert the adapter starts the heartbeat healthy (event still set).
         self.health_event_set_at_init = self.health_event.is_set()
