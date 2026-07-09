@@ -22,8 +22,8 @@ def measure_list_depth_until_tensor(
 ) -> tuple[int, int, DiscoverableKVCache]:
     """Return ``(list_depth, tensor_ndim, first_tensor)`` for *kv_caches*.
 
-    Descends the first element of each list down to the inner tensor, counting
-    the list-nesting depth on the way.
+    Descends the first element of each list or tuple down to the inner tensor,
+    counting the list/tuple-nesting depth on the way.
     """
     list_depth = 0
     node = kv_caches

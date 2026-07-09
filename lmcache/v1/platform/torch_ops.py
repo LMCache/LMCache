@@ -1035,11 +1035,11 @@ def _normalize_paged_layers(
             for p in paged_buffer_ptrs_tensor
         ]
     if isinstance(paged_buffer_ptrs_tensor, list):
-        if all(isinstance(t, torch.Tensor) for t in paged_buffer_ptrs_tensor):
-            return paged_buffer_ptrs_tensor
-        raise TypeError(
-            "paged_buffer_ptrs_tensor list must contain torch.Tensor entries"
-        )
+        if not all(isinstance(t, torch.Tensor) for t in paged_buffer_ptrs_tensor):
+            raise TypeError(
+                "paged_buffer_ptrs_tensor list must contain torch.Tensor entries"
+            )
+        return paged_buffer_ptrs_tensor
     raise TypeError(
         "paged_buffer_ptrs_tensor must be a list[torch.Tensor] or 1-D pointer tensor; "
         "got: " + type(paged_buffer_ptrs_tensor).__name__

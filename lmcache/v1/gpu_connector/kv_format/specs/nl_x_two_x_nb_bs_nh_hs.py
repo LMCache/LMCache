@@ -3,11 +3,7 @@
 
 Each layer's KV cache is stored as a ``(K, V)`` tuple of 4-D paged tensors
 ``[num_blocks, block_size, num_heads, head_size]``. Layers are outermost; each
-layer carries its own ``(K, V)`` pair rather than a single stacked tensor. This
-is a general per-layer tuple layout (currently produced by vLLM-Ascend), distinct
-from ``TWO_X_NL_X_NB_BS_NH_HS`` (SGLang MP), which splits K/V at the *outermost*
-level. The transfer kernels receive this native structure plus the engine's own
-``KVCacheFormat``.
+layer carries its own ``(K, V)`` pair rather than a single stacked tensor.
 """
 
 # Each spec indexes ``kv_caches`` (Tensor | nested list/tuple) per its format,
@@ -68,7 +64,7 @@ class NL_X_TWO_X_NB_BS_NH_HS_Spec(KVFormatSpec):
     def data_ptrs(self, layer_indices: list[int]) -> list[int]:
         # Interleaved [K_i, V_i, ...] per layer -- the order the
         # multi_layer_kv_transfer kernel iterates planes.
-        layers = cast(list, self.kv_caches)
+        layers = cast(list[tuple[torch.Tensor, torch.Tensor]], self.kv_caches)
         ptrs: list[int] = []
         for i in layer_indices:
             ptrs.append(layers[i][0].data_ptr())  # K

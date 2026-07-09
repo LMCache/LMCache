@@ -285,7 +285,7 @@ LMC_KV_FORMAT_HD constexpr bool is_kv_list(EngineKVFormat f) {
   return format_facts(f).is_kv_list;
 }
 
-// One list entry per layer: kv_caches[layer_idx] is that layer's tensor.
+// The outermost dimension indexes the list of layers
 LMC_KV_FORMAT_HD constexpr bool is_layer_list(EngineKVFormat f) {
   return format_facts(f).is_layer_list;
 }

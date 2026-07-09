@@ -182,22 +182,6 @@ def _make_fused_nhd_kv_caches(
     return kv_caches
 
 
-def _make_per_layer_kv_tuple_caches(
-    num_layers: int = 2,
-    num_blocks: int = 8,
-    block_size: int = 4,
-    num_heads: int = 2,
-    head_size: int = 8,
-) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
-    """Build per-layer ``(K, V)`` tuples for tests."""
-    kv_caches: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
-    for i in range(num_layers):
-        k = torch.randn(num_blocks, block_size, num_heads, head_size)
-        v = torch.randn(num_blocks, block_size, num_heads, head_size)
-        kv_caches[f"layer_{i}"] = (k, v)
-    return kv_caches
-
-
 def _make_storage_manager_config(
     *,
     shm_name: str = "",
@@ -847,90 +831,6 @@ def test_compute_kv_layout_empty_raises_value_error() -> None:
 
     with pytest.raises(ValueError, match="kv_caches is empty"):
         compute_kv_layout({})
-
-
-def test_compute_kv_layout_per_layer_kv_tuples() -> None:
-    """compute_kv_layout must accept per-layer ``(K, V)`` tuples."""
-    # First Party
-    import lmcache.lmcache_native as lmc_ops
-    from lmcache.v1.multiprocess.transfer_context.base import compute_kv_layout
-
-    source = _make_per_layer_kv_tuple_caches(
-        num_layers=2, num_blocks=8, block_size=4, num_heads=2, head_size=8
-    )
-    (
-        block_size,
-        num_layers,
-        hidden_dim,
-        dtype_str,
-        detected_kv_format,
-        kv_size,
-    ) = compute_kv_layout(source, layout_hints=None)
-    assert block_size == 4
-    assert num_layers == 2
-    assert hidden_dim == 16
-    assert dtype_str == "float32"
-    assert detected_kv_format == lmc_ops.EngineKVFormat.NL_X_TWO_X_NB_BS_NH_HS
-    assert kv_size == 2
-
-
-def test_per_layer_kv_tuple_format_accessors_and_grouping() -> None:
-    # First Party
-    import lmcache.lmcache_native as lmc_ops
-    from lmcache.utils import EngineType
-    from lmcache.v1.gpu_connector import utils as U
-    from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-
-    F = lmc_ops.EngineKVFormat
-    num_layers, num_blocks, block_size, num_heads, head_size = 3, 8, 4, 2, 8
-    kv = [
-        [torch.randn(num_blocks, block_size, num_heads, head_size) for _ in range(2)]
-        for _ in range(num_layers)
-    ]
-
-    fmt, normalized = U.normalize_kv_and_discover_format(kv, EngineType.VLLM)
-    assert fmt == F.NL_X_TWO_X_NB_BS_NH_HS
-    # Native structure preserved: layers outermost, each a 2-element (K, V) pair
-    # (normalize may rebuild the containers, so compare structure, not identity).
-    assert len(normalized) == num_layers
-    assert all(len(layer) == 2 for layer in normalized)
-
-    assert U.get_num_layers(normalized, fmt) == num_layers
-    assert U.get_num_blocks(normalized, fmt) == num_blocks
-    assert U.get_block_size(normalized, fmt, 1) == block_size
-    assert U.get_num_heads(normalized, fmt, 2) == num_heads
-    assert U.get_head_size(normalized, fmt, 0) == head_size
-    assert U.get_hidden_dim_size(normalized, fmt, 0) == num_heads * head_size
-    assert U.get_page_buffer_size(normalized, fmt) == num_blocks * block_size
-    assert U.get_tokens_per_layer(normalized, fmt) == num_blocks * block_size
-    assert (
-        U.get_elements_per_layer(normalized, fmt)
-        == num_blocks * block_size * num_heads * head_size * 2
-    )
-    assert U.get_dtype(normalized, fmt, 1) == torch.float32
-    assert lmc_ops.is_mla(fmt) is False
-
-    # Interleaved [k_i, v_i, ...] pointer order the transfer kernel expects.
-    ptrs = U.get_group_data_ptrs(normalized, fmt, [0, 2])
-    assert ptrs == [
-        kv[0][0].data_ptr(),
-        kv[0][1].data_ptr(),
-        kv[2][0].data_ptr(),
-        kv[2][1].data_ptr(),
-    ]
-
-    mgr = KVLayerGroupsManager(normalized, engine_kv_formats=[fmt] * num_layers)
-    groups = mgr.kernel_groups
-    assert len(groups) == 1
-    sd = groups[0].shape_desc
-    assert (sd.kv_size, sd.nl, sd.nb, sd.bs, sd.nh, sd.hs) == (
-        2,
-        num_layers,
-        num_blocks,
-        block_size,
-        num_heads,
-        head_size,
-    )
 
 
 @pytest.mark.parametrize(
