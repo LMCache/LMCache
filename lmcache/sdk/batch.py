@@ -7,16 +7,13 @@ Public API for Batched Stream, a wrapper of Streams that are batched together.
 from __future__ import annotations
 
 # Standard
-from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 import time
 
-# Third Party
-import torch
-
 # First Party
 from lmcache.cli.metrics import Metrics, StreamHandler, get_formatter
+from lmcache.sdk.context import ModifyFnType
 import lmcache.sdk.stream as lmc_stream
 
 
@@ -48,11 +45,11 @@ class LMCacheBatchedStream:
             LMCacheBatchedStreamError: If a stream with the same id is
                 in the batch.
         """
-        if stream.stream_id() in self.streams:
+        if stream.stream_id in self.streams:
             raise LMCacheBatchedStreamError(
-                f"Stream {stream.stream_id()} already exists."
+                f"Stream {stream.stream_id} already exists."
             )
-        self.streams[stream.stream_id()] = stream
+        self.streams[stream.stream_id] = stream
 
     def get_stream(self, stream_id: str) -> lmc_stream.LMCacheStream:
         """Return the stream registered under stream_id.
@@ -120,7 +117,7 @@ class LMCacheBatchedStream:
 
     def modify_stream(
         self,
-        fn: Callable[[torch.Tensor, Sequence[int]], tuple[torch.Tensor, Sequence[int]]],
+        fn: ModifyFnType,
         stream_ids: list[str] | None = None,
         timeout: float = 30.0,
         poll_interval: float = 0.2,
@@ -130,8 +127,7 @@ class LMCacheBatchedStream:
         Submits stream.modify_kv(fn) on a thread pool (one worker per stream).
 
         Args:
-            fn: KV editor applied to each stream. Given (kv, tokens) and
-                returning (new_kv, new_tokens). See LMCacheStream.modify_kv().
+            fn: KV editor applied to each stream. See LMCacheStream.modify_kv().
             stream_ids: Streams to modify. None means all streams in the batch.
             timeout: Max seconds to wait for the cached KV to appear.
             poll_interval: Seconds between retrieve attempts.
@@ -264,9 +260,11 @@ class LMCacheBatchedStream:
 
     def modify(
         self,
-        fn: Callable[[torch.Tensor, Sequence[int]], tuple[torch.Tensor, Sequence[int]]],
+        fn: ModifyFnType,
         fmt: str = "terminal",
         width: int = 80,
+        timeout: float = 30.0,
+        poll_interval: float = 0.2,
         stream_ids: list[str] | None = None,
     ) -> Metrics:
         """Apply a KV edit to every stream and report the time taken.
@@ -280,7 +278,9 @@ class LMCacheBatchedStream:
         Returns:
             A Metrics report containing the total modify duration.
         """
-        duration = self.modify_stream(fn, stream_ids=stream_ids)
+        duration = self.modify_stream(
+            fn, stream_ids=stream_ids, timeout=timeout, poll_interval=poll_interval
+        )
 
         metrics = Metrics(title="Batched Stream Modify Metrics")
         metrics.add_handler(StreamHandler(get_formatter(fmt, width=width)))

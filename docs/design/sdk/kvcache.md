@@ -70,7 +70,7 @@ LMCacheKVCacheContext
 
 ## Public API
 
-Module functions in `lmcache.sdk.kvcache`; `LMCacheKVCacheContext` / `KVCacheSDKError` are
+Module functions in `lmcache.sdk.kvcache`; `LMCacheKVCacheContext` / `LMCacheSDKError` are
 exported from `lmcache.sdk`.
 
 - **`connect(url, http_url, model_name, timeout=60.0)`** — open the MQ client, fetch config,
