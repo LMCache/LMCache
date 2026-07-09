@@ -51,9 +51,6 @@ Options
    * - ``--trigger-watermark RATIO``
      - Eviction fires when usage reaches this fraction of the quota, ``0.0``
        (exclusive) to ``1.0`` (default: ``1.0``).
-   * - ``--eviction-startup-delay SECS``
-     - Seconds to wait after startup before the first eviction sweep; lets
-       startup resync backfill trackers first (default: ``0``).
    * - ``--chunk-size N``
      - Tokens per KV chunk: the CacheBlend match unit and the unit used to
        resolve pin ``token_ids`` to keys. Must equal the MP servers'

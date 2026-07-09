@@ -141,6 +141,36 @@ class QuotaResponse(BaseModel):
     status: str
 
 
+class QuotaConfigRequest(BaseModel):
+    """Body of ``PUT /quota/config``.
+
+    Attributes:
+        default_limit_gb: Byte budget in GiB applied to salts with no
+            explicit quota entry. ``None`` (the coordinator's boot
+            default) exempts unquota'd salts from eviction; ``0.0``
+            activates strict allowlist enforcement — all bytes under
+            unquota'd salts become evictable next cycle. The external
+            quota controller sets this to ``0.0`` after re-syncing
+            per-salt quotas; it is the signal that arms fleet-wide
+            eviction of unquota'd data.
+        tier: Cache tier the config applies to (only ``l2`` today).
+    """
+
+    default_limit_gb: float | None = Field(default=None, ge=0.0)
+    tier: Tier = Tier.L2
+
+
+class QuotaConfigResponse(BaseModel):
+    """Reply to ``GET`` / ``PUT /quota/config``.
+
+    Attributes:
+        default_limit_gb: Current default limit in GiB, or ``None``
+            when unquota'd salts are exempt from eviction.
+    """
+
+    default_limit_gb: float | None
+
+
 # -- Usage tracking ----------------------------------------------------------
 
 

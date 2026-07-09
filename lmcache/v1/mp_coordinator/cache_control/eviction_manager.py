@@ -104,9 +104,14 @@ class L2EvictionManager:
         """Select eviction candidates per ``cache_salt``.
 
         Salts over ``watermark * quota`` get ``eviction_ratio`` of
-        their LRU keys; salts with no quota (or quota 0) get full
-        eviction. Pinned keys are always excluded. Pure — no network
-        calls, no state mutation.
+        their LRU keys; a quota of ``0`` means full eviction. Salts
+        without an explicit quota use the registry's default limit
+        (``QuotaManager.effective_limit_bytes``): until the external
+        quota controller sets one (``PUT /quota/config``), the default
+        is ``None`` and unquota'd salts are **exempt** — so a freshly
+        restarted coordinator with an empty quota table cannot
+        mass-evict unknown tenants. Pinned keys are always excluded.
+        Pure — no network calls, no state mutation.
         """
         tracked_salts = self._policy.get_tracked_salts()
         eviction_plan: dict[str, list[ObjectKey]] = {}
@@ -115,7 +120,11 @@ class L2EvictionManager:
             current_bytes = self._usage_manager.get(cache_salt)
             if current_bytes <= 0:
                 continue
-            limit = self._quota_manager.get_limit_bytes(cache_salt)
+            limit = self._quota_manager.effective_limit_bytes(cache_salt)
+            if limit is None:
+                # No explicit quota and no default configured yet —
+                # exempt until the quota controller arms enforcement.
+                continue
             if current_bytes < self._trigger_watermark * limit:
                 continue
 

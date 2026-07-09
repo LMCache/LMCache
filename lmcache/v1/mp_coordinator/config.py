@@ -35,11 +35,6 @@ class MPCoordinatorConfig:
             cycle (0.0 to 1.0).
         trigger_watermark: Eviction fires when usage reaches this fraction
             of the quota (0.0 to 1.0).
-        eviction_startup_delay: Seconds to wait after startup before the
-            eviction loop runs its first sweep. ``0`` (default) starts
-            immediately. Use a non-zero value to let the startup resync
-            backfill usage/eviction trackers first, so eviction decisions
-            aren't made against cold, incomplete state right after boot.
         chunk_size: Tokens per KV chunk. The single fleet chunk size: it is the
             CacheBlend match unit *and* resolves a pin request's ``token_ids`` to
             object keys. Must equal the MP servers' ``--chunk-size`` or blend
@@ -72,7 +67,6 @@ class MPCoordinatorConfig:
     eviction_check_interval: float = 5.0
     eviction_ratio: float = 0.2
     trigger_watermark: float = 1.0
-    eviction_startup_delay: float = 0.0
     chunk_size: int = 256
     hash_algorithm: str = "blake3"
     blend_probe_stride: int = 1
@@ -100,8 +94,6 @@ class MPCoordinatorConfig:
             raise ValueError(
                 "trigger_watermark must be between 0.0 (exclusive) and 1.0"
             )
-        if self.eviction_startup_delay < 0:
-            raise ValueError("eviction_startup_delay must be non-negative")
         if self.resync_poll_interval <= 0:
             raise ValueError("resync_poll_interval must be positive")
         if self.resync_max_wait < 0:
@@ -160,9 +152,6 @@ class MPCoordinatorConfig:
             ),
             eviction_ratio=_num("EVICTION_RATIO", cls.eviction_ratio, float),
             trigger_watermark=_num("TRIGGER_WATERMARK", cls.trigger_watermark, float),
-            eviction_startup_delay=_num(
-                "EVICTION_STARTUP_DELAY", cls.eviction_startup_delay, float
-            ),
             chunk_size=int(_num("CHUNK_SIZE", cls.chunk_size, int)),
             hash_algorithm=_str("HASH_ALGORITHM", cls.hash_algorithm),
             blend_probe_stride=int(

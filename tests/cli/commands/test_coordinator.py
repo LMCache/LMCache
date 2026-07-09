@@ -54,8 +54,6 @@ class TestCoordinatorCommandArguments:
                 "0.5",
                 "--trigger-watermark",
                 "0.9",
-                "--eviction-startup-delay",
-                "30",
                 "--chunk-size",
                 "512",
                 "--hash-algorithm",
@@ -68,7 +66,6 @@ class TestCoordinatorCommandArguments:
         )
         assert args.host == "127.0.0.1"
         assert args.port == 9999
-        assert args.eviction_startup_delay == 30
         assert args.chunk_size == 512
         assert args.hash_algorithm == "sha256"
         assert args.blend_probe_stride == 2
@@ -77,7 +74,6 @@ class TestCoordinatorCommandArguments:
     def test_flags_default_to_none(self, parser):
         """Unset flags default to None so env/config defaults win."""
         args = parser.parse_args(["coordinator"])
-        assert args.eviction_startup_delay is None
         assert args.chunk_size is None
         assert args.hash_algorithm is None
         assert args.blend_probe_stride is None
@@ -98,7 +94,6 @@ class TestCoordinatorCommandExecute:
             eviction_check_interval=None,
             eviction_ratio=None,
             trigger_watermark=None,
-            eviction_startup_delay=None,
             chunk_size=512,
             hash_algorithm="sha256",
             blend_probe_stride=2,

@@ -102,16 +102,6 @@ class CoordinatorCommand(BaseCommand):
             ),
         )
         parser.add_argument(
-            "--eviction-startup-delay",
-            type=float,
-            default=None,
-            help=(
-                "Seconds to wait after startup before the first eviction "
-                "sweep; lets startup resync backfill trackers first "
-                "(default: 0)."
-            ),
-        )
-        parser.add_argument(
             "--chunk-size",
             type=int,
             default=None,
@@ -193,7 +183,6 @@ class CoordinatorCommand(BaseCommand):
                 ("eviction_check_interval", args.eviction_check_interval),
                 ("eviction_ratio", args.eviction_ratio),
                 ("trigger_watermark", args.trigger_watermark),
-                ("eviction_startup_delay", args.eviction_startup_delay),
                 ("chunk_size", args.chunk_size),
                 ("hash_algorithm", args.hash_algorithm),
                 ("blend_probe_stride", args.blend_probe_stride),

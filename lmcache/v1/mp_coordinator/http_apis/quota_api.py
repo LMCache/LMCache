@@ -17,6 +17,8 @@ from lmcache.v1.distributed.tiers import Tier
 from lmcache.v1.mp_coordinator.http_apis.dependencies import get_context
 from lmcache.v1.mp_coordinator.schemas import (
     EventType,
+    QuotaConfigRequest,
+    QuotaConfigResponse,
     QuotaResponse,
     ReportUsageRequest,
     ReportUsageResponse,
@@ -50,6 +52,63 @@ def _require_supported_tier(tier: Tier) -> None:
 def _gb(n_bytes: int) -> float:
     """Convert bytes to GiB."""
     return n_bytes / _GB
+
+
+# -- Quota config (registry-wide) ---------------------------------------------
+#
+# NOTE: these fixed-path routes MUST be declared before the parameterized
+# ``/quota/{cache_salt}`` routes below — Starlette matches routes in
+# declaration order, so a later declaration would resolve ``config`` as a
+# ``cache_salt``.
+
+
+@router.put("/quota/config")
+async def set_quota_config(
+    body: QuotaConfigRequest, request: Request
+) -> QuotaConfigResponse:
+    """Set the default quota applied to salts with no explicit entry.
+
+    On coordinator boot the default is ``None``: salts without an
+    explicit quota are exempt from eviction, so an empty (not yet
+    re-synced) quota table cannot mass-evict unknown tenants. After
+    re-registering all per-salt quotas, the external quota controller
+    sets ``default_limit_gb`` to ``0.0`` — the signal that arms
+    allowlist enforcement (unquota'd bytes become evictable next
+    cycle). A positive value instead grants every unquota'd salt that
+    byte budget; ``null`` returns to the exempt boot state.
+
+    Args:
+        body: The default limit to apply (and the ``tier`` it applies to).
+
+    Returns:
+        The applied config.
+    """
+    _require_supported_tier(body.tier)
+    default_limit_bytes = (
+        None if body.default_limit_gb is None else int(body.default_limit_gb * _GB)
+    )
+    get_context(request).quota_manager.set_default_limit(default_limit_bytes)
+    return QuotaConfigResponse(default_limit_gb=body.default_limit_gb)
+
+
+@router.get("/quota/config")
+async def get_quota_config(
+    request: Request, tier: Tier = Tier.L2
+) -> QuotaConfigResponse:
+    """Read the default quota applied to salts with no explicit entry.
+
+    Args:
+        tier: Cache tier (only ``l2`` is supported today).
+
+    Returns:
+        The current config; ``default_limit_gb`` is ``null`` while
+        unquota'd salts are exempt from eviction (the boot default).
+    """
+    _require_supported_tier(tier)
+    default_limit = get_context(request).quota_manager.get_default_limit()
+    return QuotaConfigResponse(
+        default_limit_gb=None if default_limit is None else _gb(default_limit)
+    )
 
 
 # -- Quota writes ------------------------------------------------------------

@@ -120,11 +120,10 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         """Periodically check usage against quotas and dispatch
         eviction RPCs to any one registered MP server.
 
-        Waits ``eviction_startup_delay`` seconds before the first sweep so
-        the startup resync can backfill trackers first (avoids evicting
-        against cold, incomplete state right after boot)."""
-        if config.eviction_startup_delay > 0:
-            await asyncio.sleep(config.eviction_startup_delay)
+        Safe to start immediately: salts without an explicit quota are
+        exempt from eviction until the external quota controller sets a
+        default limit via ``PUT /quota/config`` (after re-syncing the
+        per-salt quotas), so a cold quota table cannot mass-evict."""
         while True:
             await asyncio.sleep(config.eviction_check_interval)
             await eviction_manager.execute_evictions(registry, http_client)
