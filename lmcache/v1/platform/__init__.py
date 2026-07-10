@@ -28,6 +28,14 @@ import os
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.platform._device_detect import (
+    current_device_spec as _current_device_spec_fn,
+)
+from lmcache.v1.platform._device_detect import get_device_spec as get_device_spec
+from lmcache.v1.platform._device_detect import (
+    get_torch_device,
+)
+from lmcache.v1.utils.subclass_discovery import discover_subclasses
 from lmcache.v1.platform.base_device_ops import DeviceOps
 from lmcache.v1.platform.base_device_spec import DeviceSpec
 from lmcache.v1.platform.event_notifier import HAS_EVENTFD as HAS_EVENTFD
@@ -38,13 +46,12 @@ from lmcache.v1.platform.event_notifier import consume_fd as consume_fd
 from lmcache.v1.platform.event_notifier import (
     create_event_notifier as create_event_notifier,
 )
-from lmcache.v1.utils.subclass_discovery import discover_subclasses
 
 logger = init_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Device spec registry
+# Resolve device ops
 # ---------------------------------------------------------------------------
 
 
@@ -139,27 +146,35 @@ def _detect_device() -> tuple[Any, str]:
 
 
 # ---------------------------------------------------------------------------
-# Get device spec
-# ---------------------------------------------------------------------------
-def get_device_spec(device_type: str) -> DeviceSpec | None:
-    """Get the DeviceSpec for the given device type.
-
-    Args:
-        device_type: The device type string (e.g. ``"cuda"``).
-
-    Returns:
-        The DeviceSpec for the given device type, or None if not found.
-    """
-    return _DEVICE_REGISTRY.get(device_type)
-
-
-# ---------------------------------------------------------------------------
 # KV-cache IPC wrapper resolution
 # ---------------------------------------------------------------------------
 def resolve_kv_wrapper_factory(device_type: str) -> Any:
     """Return the KV-cache IPC wrapper factory for *device_type*.
 
-def resolve_device_ops_cls(device_type: str) -> "type[DeviceOps]":
+    Reads :attr:`DeviceSpec.ipc_wrapper_cls` off the registered spec
+    and returns the class's ``wrap`` classmethod (falling back to the
+    class itself when no ``wrap`` is defined) so callers can invoke
+    ``factory(tensor)`` uniformly.
+
+    Args:
+        device_type: The device type string (e.g. ``"cuda"``).
+
+    Returns:
+        A callable that takes a single ``torch.Tensor`` and returns a
+        wrapper instance ready for the multiprocess wire.
+
+    Raises:
+        ValueError: If no spec / wrapper is registered for *device_type*.
+    """
+    spec = _DEVICE_REGISTRY.get(device_type)
+    wrapper_cls = spec.ipc_wrapper_cls if spec is not None else None
+    if wrapper_cls is None:
+        raise ValueError(
+            "No KV-cache wrapper factory registered for device type %r" % device_type
+        )
+    return getattr(wrapper_cls, "wrap", wrapper_cls)
+
+
 def resolve_device_ops_cls(device_type: str) -> type[DeviceOps]:
     """Resolve the ``DeviceOps`` class for *device_type*.
 
@@ -179,7 +194,7 @@ def resolve_device_ops_cls(device_type: str) -> type[DeviceOps]:
             :class:`DeviceSpec`, since silently falling back to the torch
             baseline on accelerator hardware would mask configuration errors.
     """
-    spec = get_device_spec(device_type)
+    spec = _DEVICE_REGISTRY.get(device_type)
     if spec is None:
         if device_type in ("", "cpu"):
             spec = DeviceSpec()
@@ -194,24 +209,9 @@ def resolve_device_ops_cls(device_type: str) -> type[DeviceOps]:
     return spec.ops_cls
 
 
-torch_dev, torch_device_type = _detect_device()
+torch_dev, torch_device_type = get_torch_device()
 
-logger.info("torch_dev=%s, torch_device_type=%s", torch_dev, torch_device_type)
+current_device_spec: DeviceSpec = _current_device_spec_fn()
 
 
-# Resolve the DeviceSpec for the detected device so callers can use
-# platform-specific capabilities (e.g. ``current_device_spec.pin_memory(...)``)
-# without touching the torch device module.  Both accelerators and CPU
-# ship a concrete spec (``CpuDeviceSpec``, ``CudaDeviceSpec``, ...), so
-# a missing entry means auto-discovery genuinely failed and always
-# warrants a warning; fall back to a bare ``DeviceSpec()`` -- its default
-# implementation provides "no-op / all False" semantics.
-_registered_device_spec = _DEVICE_REGISTRY.get(torch_device_type)
-if _registered_device_spec is None:
-    logger.warning(
-        "No DeviceSpec registered for %r; using fallback with no-op capabilities.",
-        torch_device_type,
-    )
-    current_device_spec: DeviceSpec = DeviceSpec()
-else:
-    current_device_spec = _registered_device_spec
+

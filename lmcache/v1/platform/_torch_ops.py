@@ -25,6 +25,10 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.platform._device_detect import (
+    current_device_spec,
+    get_torch_device,
+)
 from lmcache.v1.platform.ops_types import (  # noqa: F401
     EngineKVFormat,
     GPUKVFormat,
@@ -287,8 +291,7 @@ def _alloc_page_aligned_pinned_view(size: int) -> Tuple[torch.Tensor, int]:
     """
     # Pin the host buffer when an accelerator is present (probed once).
     # StubCPUDevice.is_available returns False on CPU-only hosts.
-    # First Party
-    from lmcache.v1.platform import torch_dev, torch_device_type  # noqa: F811
+    torch_dev, torch_device_type = get_torch_device()
 
     global _use_pinned
     if _use_pinned is None:
@@ -403,10 +406,7 @@ def alloc_shm_pinned_ptr(size: int, shm_name: str = "") -> int:
     _shm_registry[ptr] = shm
 
     # Try to pin the SHM buffer for async D2H copies
-    # First Party
-    from lmcache.v1.platform import current_device_spec
-
-    if current_device_spec.pin_memory(ptr, size):
+    if current_device_spec().pin_memory(ptr, size):
         _pinned_ptr_registry[ptr] = size
 
     return ptr
@@ -417,11 +417,8 @@ def free_shm_pinned_ptr(ptr: int, size: int = 0, shm_name: str = "") -> None:
     pinned pointer. Unregisters pinned memory if it was pinned."""
 
     # Unpin if previously registered
-    # First Party
-    from lmcache.v1.platform import current_device_spec
-
     if ptr in _pinned_ptr_registry:
-        current_device_spec.unpin_memory(ptr)
+        current_device_spec().unpin_memory(ptr)
         _pinned_ptr_registry.pop(ptr, None)
 
     # Release in order: tensor -> ctypes buf -> shm
@@ -2644,8 +2641,7 @@ def get_gpu_pci_bus_id(device_id: int = 0) -> str | None:
     Returns:
         str | None: PCI bus ID (e.g., "0000:29:00.0") or None if unavailable.
     """
-    # First Party
-    from lmcache.v1.platform import torch_dev
+    torch_dev, _ = get_torch_device()
 
     try:
         if torch_dev.is_available() and device_id < torch_dev.device_count():
