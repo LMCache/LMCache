@@ -8,8 +8,11 @@ import pytest
 
 # First Party
 from lmcache.observability import (
+    CacheTier,
     LMCStatsMonitor,
     PrometheusLogger,
+    backend_name_to_tier,
+    classify_hit_tokens_by_tier,
 )
 
 
@@ -464,3 +467,74 @@ def test_prometheus_logger_reset_reinitializes_all_label_views(
         )
         == 0
     )
+
+
+# ---- per-tier hit-token metrics (#3752) ----
+
+
+def test_backend_name_to_tier():
+    assert backend_name_to_tier("LocalCPUBackend") is CacheTier.L2
+    for name in ("LocalDiskBackend", "GdsBackend", "PDBackend"):
+        assert backend_name_to_tier(name) is CacheTier.L3
+    # remote and any unrecognized backend fall back to REMOTE (never raises)
+    for name in ("RemoteBackend", "MaruBackend", "P2PBackend", "SomethingBrandNew"):
+        assert backend_name_to_tier(name) is CacheTier.REMOTE
+
+
+def test_classify_hit_tokens_by_tier_no_truncation():
+    records = [
+        ("LocalCPUBackend", 0, 3),
+        ("LocalDiskBackend", 3, 5),
+        ("RemoteBackend", 5, 6),
+    ]
+    assert classify_hit_tokens_by_tier(records, None) == {
+        CacheTier.L2: 3,
+        CacheTier.L3: 2,
+        CacheTier.REMOTE: 1,
+    }
+
+
+def test_classify_hit_tokens_by_tier_truncation_drops_suffix():
+    # last_failed_block_start=3 -> only chunks with end <= 3 are returned to the caller
+    records = [
+        ("LocalCPUBackend", 0, 3),
+        ("LocalDiskBackend", 3, 5),
+        ("RemoteBackend", 5, 6),
+    ]
+    assert classify_hit_tokens_by_tier(records, 3) == {
+        CacheTier.L2: 3,
+        CacheTier.L3: 0,
+        CacheTier.REMOTE: 0,
+    }
+
+
+def test_record_tier_hits_accumulates_and_clears(stats_monitor):
+    stats_monitor.record_tier_hits(
+        {CacheTier.L2: 10, CacheTier.L3: 4, CacheTier.REMOTE: 1}
+    )
+    stats_monitor.record_tier_hits({CacheTier.L2: 5})  # missing tiers treated as zero
+    stats = stats_monitor.get_stats_and_clear()
+    assert stats.interval_l2_hit_tokens == 15
+    assert stats.interval_l3_hit_tokens == 4
+    assert stats.interval_remote_hit_tokens == 1
+    # interval counters reset after read
+    cleared = stats_monitor.get_stats_and_clear()
+    assert cleared.interval_l2_hit_tokens == 0
+    assert cleared.interval_l3_hit_tokens == 0
+    assert cleared.interval_remote_hit_tokens == 0
+
+
+def test_per_tier_hit_counters_emitted(_cleanup_prometheus_logger):
+    LMCStatsMonitor.DestroyInstance()
+    monitor = LMCStatsMonitor.GetOrCreate()
+    monitor.record_tier_hits({CacheTier.L2: 7, CacheTier.L3: 3, CacheTier.REMOTE: 2})
+    stats = monitor.get_stats_and_clear()
+
+    prom = PrometheusLogger(_make_metadata())
+    prom.log_prometheus(stats)
+    labels = _sample_labels(prom)
+
+    assert REGISTRY.get_sample_value("lmcache:num_l2_hit_tokens_total", labels) == 7
+    assert REGISTRY.get_sample_value("lmcache:num_l3_hit_tokens_total", labels) == 3
+    assert REGISTRY.get_sample_value("lmcache:num_remote_hit_tokens_total", labels) == 2
+    LMCStatsMonitor.DestroyInstance()
