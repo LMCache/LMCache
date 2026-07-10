@@ -20,10 +20,10 @@ recompute.
 Both are composed with vLLM's ``MultiConnector``, which runs two connectors per
 instance:
 
-* ``NixlConnector`` — the prefill→decode KV handoff for the current request,
-  over NIXL (UCX / RDMA).
-* ``LMCacheMPConnector`` — offload/load to the instance's LMCache server for
-  cross-request reuse.
+* ``NixlConnector`` — the prefill→decode KV handoff for the current
+  request, over NIXL (UCX / RDMA).
+* ``LMCacheMPConnector`` — offload/load to the instance's LMCache
+  server for cross-request reuse.
 
 A vLLM **router** in P/D mode sends each request to a prefill then a decode
 instance and threads the NIXL handshake between them.
