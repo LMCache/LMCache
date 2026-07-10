@@ -218,7 +218,19 @@ def test_register_timeout_rolls_back_and_closes_unregistered_ctx(
     adapter.register_kv_caches({"layer.0": fake_tensor})  # contexts[0]
     assert adapter.transfer_ctx is contexts[0]
 
-    future.result.side_effect = TimeoutError("server down")
+    # The factory mints mock contexts, so the timeout must come from the
+    # next context's own register.
+    def _create_timing_out_ctx(
+        kv_caches: dict[str, torch.Tensor], mode: str
+    ) -> MagicMock:
+        ctx = MagicMock(name=f"transfer_ctx_{len(contexts)}")
+        ctx.register.side_effect = TimeoutError("server down")
+        contexts.append(ctx)
+        return ctx
+
+    monkeypatch.setattr(
+        adapter_mod, "create_transfer_context", _create_timing_out_ctx
+    )
     with pytest.raises(ConnectionError, match="did not respond"):
         adapter.register_kv_caches({"layer.0": fake_tensor})  # contexts[1]
 
