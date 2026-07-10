@@ -1633,7 +1633,12 @@ class RawBlockCore:
         expected_count: int,
         operation: str,
     ) -> list[bool]:
-        """Wait for an io_uring batch and return a full-size success bitmap."""
+        """Wait for an io_uring batch and return a full-size success bitmap.
+
+        ``expected_count`` is the number of individual I/O entries submitted
+        in the Rust batch. For io_uring_cmd, this is the post-splitting chunk
+        count, not the number of logical reads or writes.
+        """
         results = list(raw_dev.wait_iouring(batch_id))
         if len(results) != expected_count:
             logger.error(
