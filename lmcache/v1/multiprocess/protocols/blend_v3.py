@@ -25,7 +25,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Payload: (instance_id, cos_sin_caches_ipc, head_size, is_neox_style,
         #           group_to_cache).
         # cos_sin_caches_ipc: one IPC handle per distinct rope (dual-RoPE
-        # models like Gemma 3 send two); group_to_cache maps engine group
+        # models send two); group_to_cache maps engine group
         # idx -> cache idx (empty = all groups use cache 0). Returns: None.
         "CB_REGISTER_ROPE_V3": ProtocolDefinition(
             payload_classes=[int, list[DeviceIPCWrapper], int, bool, list[int]],

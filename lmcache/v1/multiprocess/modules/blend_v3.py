@@ -71,9 +71,9 @@ logger = init_logger(__name__)
 class _CBRopeState:
     """Per-instance RoPE state IPC-shared from vLLM; dangles on reallocate.
 
-    Models with per-layer-type RoPE (e.g. Gemma 3: local theta=1e4 /
-    global theta=1e6) register one cache per distinct rope and a
-    per-layer index into ``cos_sin_caches``.
+    Models with per-layer-type RoPE (distinct local/global theta)
+    register one cache per distinct rope and a per-layer index into
+    ``cos_sin_caches``.
     """
 
     head_size: int
@@ -85,7 +85,7 @@ class _CBRopeState:
         """The cos/sin cache for one engine group.
 
         Engine groups partition layers by attention type, and rope follows
-        attention type (Gemma 3: sliding=local theta, full=global theta),
+        attention type (sliding=local theta, full=global theta),
         so each engine group has exactly one cache.
 
         Args:
@@ -486,8 +486,8 @@ class BlendV3Module(InstanceLivenessTarget):
         Args:
             instance_id (int): KV-cache instance to attach rope state to.
             cos_sin_caches_ipc (list[DeviceIPCWrapper]): IPC handles to vLLM's
-                cos/sin rope cache(s) — one per distinct rope (e.g. Gemma 3
-                local/global); single-rope models send one.
+                cos/sin rope cache(s) — one per distinct rope (dual-RoPE
+                models send local/global); single-rope models send one.
             head_size (int): Rotary head dimension.
             is_neox_style (bool): True for NeoX (contiguous halves), else GPT-J.
             group_to_cache (list[int]): Per-engine-group index into the
@@ -1481,7 +1481,7 @@ class BlendV3Module(InstanceLivenessTarget):
                     f"CB rope: group {group_idx} hidden_dim ({hidden_dim}) "
                     f"not a multiple of head_size ({rope_state.head_size})."
                 )
-            # Per-group rope cache: dual-RoPE models (Gemma 3) rotate each
+            # Per-group rope cache: dual-RoPE models rotate each
             # kernel group with its own theta's cos/sin.
             group_cos_sin = rope_state.cache_for_group(group.engine_group_idx)
             # slot ramp tiled across layers is invariant per (num_layers,
