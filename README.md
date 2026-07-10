@@ -15,10 +15,13 @@
     <a href="https://github.com/LMCache/LMCache/issues/2923">Roadmap</a>
   </h3>
 
+  [![GitHub Repo stars](https://img.shields.io/github/stars/LMCache/LMCache?style=flat&logo=github)](https://github.com/LMCache/LMCache/stargazers)
   [![PyPI](https://img.shields.io/pypi/v/lmcache)](https://pypi.org/project/lmcache/)
   [![PyPI - Downloads](https://img.shields.io/pypi/dm/lmcache)](https://pypi.org/project/lmcache/)
   [![GitHub commit activity](https://img.shields.io/github/commit-activity/w/LMCache/LMCache)](https://github.com/LMCache/LMCache/graphs/commit-activity)
   [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/LMCache/LMCache/)
+
+  ⭐ **If LMCache helps you serve LLMs faster and cheaper, [give us a star](https://github.com/LMCache/LMCache) — it helps more teams discover the project.**
 
 </div>
 
