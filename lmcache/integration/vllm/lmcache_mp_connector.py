@@ -1016,7 +1016,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
         """
-        if not self.worker_adapter.is_kv_writer or self._q_step_disabled:
+        if (
+            not self.transfer_intermediate_tensors
+            or not self.worker_adapter.is_kv_writer
+            or self._q_step_disabled
+        ):
             return
 
         intermediate_tensors = kwargs.get("intermediate_tensors", None)
@@ -1150,12 +1154,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         This prevents overwrites of paged KV buffer before saving done.
         """
-        # In MLA scenario, only the first rank of the pipeline group
-        # needs to save the KV cache.
-        if not self.worker_adapter.is_kv_writer:
-            self._q_step_state = None
-            self._q_step_disabled = False
-
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
 
@@ -1169,13 +1167,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             ops.append(meta.op)
             cache_salts.append(meta.cache_salt)
 
-        # Consume the per-step query capture plan built during save_kv_layer.
+        # Consume the per-step query capture plan built during save_kv_layer
         q_step_state = self._q_step_state
         self._q_step_state = None
         self._q_step_disabled = False
-
-        if q_step_state is None:
-            return
 
         if len(request_ids) == 0:
             return
@@ -1187,7 +1182,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self.worker_adapter.batched_submit_store_requests(
             request_ids, ops, event, cache_salts=cache_salts
         )
-        if not q_step_state:
+        if q_step_state is not None:
             for q_store in q_step_state.stores:
                 self.worker_adapter.submit_q_store_request(
                     q_store.request_id,
