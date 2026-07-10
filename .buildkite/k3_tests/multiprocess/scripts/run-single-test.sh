@@ -128,7 +128,8 @@ case "$TEST_NAME" in
         exec_script="${SCRIPT_DIR}/run-lm-eval.sh"
         ;;
     lm_eval_preemption)
-        exec_script="${SCRIPT_DIR}/run-lm-eval-preemption.sh"
+        export LM_EVAL_VERIFY_MODE=preemption
+        exec_script="${SCRIPT_DIR}/run-lm-eval.sh"
         ;;
     hma_lm_eval_gemma4)
         exec_script="${SCRIPT_DIR}/run-hma-lm-eval.sh"
