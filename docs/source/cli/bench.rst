@@ -1337,15 +1337,38 @@ worker threads). Two modes are available via ``--flamegraph-mode``:
 
 Recording covers only the measured store/lookup/load work, so make the
 run long enough to collect samples (a few seconds is plenty -- use a
-large ``--rounds``). The SVG is written to ``--flamegraph-output``
-(default ``/tmp/lmcache_bench_flames/<adapter>.<mode>.svg``).
+large ``--rounds``). A phase shorter than the recorder's own startup
+captures nothing; the benchmark then reports that no samples were
+captured instead of writing an empty SVG. The SVG is written to
+``--flamegraph-output`` (default
+``/tmp/lmcache_bench_flames/<adapter>.<mode>.svg``).
+
+**Python frames.** Most L2 adapters are written in Python, whose calls
+do not create native stack frames: the interpreter runs bytecode inside
+``_PyEval_EvalFrameDefault``, and since CPython 3.11 a chain of
+Python-to-Python calls collapses into a single native frame. Both
+recorders would otherwise render such adapters as ``[unknown]``. On
+CPython 3.12+ the benchmark enables the interpreter's perf trampolines
+for the duration of the recording, so adapter functions appear as
+``py::<qualname>`` frames in either mode. On older interpreters the
+flame graph still renders, without Python function names.
+
+Frames from *stripped* native libraries stay ``[unknown]`` regardless --
+this affects some third-party clients, not LMCache's own extensions.
+
+Trampolines cost a few percent of throughput while recording, so treat a
+profiled run's timings as indicative rather than as a benchmark result.
+They are installed only for the duration of the recording; the default
+``--flamegraph off`` is unaffected.
 
 **Requirements.** Rendering needs Brendan Gregg's
 `FlameGraph <https://github.com/brendangregg/FlameGraph>`__ scripts
 (``--flamegraph-dir`` or ``FLAMEGRAPH_DIR``, default ``~/FlameGraph``;
 auto-cloned to a temp directory when absent). ``on-cpu`` needs ``perf``
-(and ``kernel.perf_event_paranoid`` low enough to profile non-root, or
-run as root); ``off-cpu`` needs ``bcc`` (``offcputime-bpfcc``) and
+and ``kernel.perf_event_paranoid`` at ``2`` or lower -- level ``3``
+(a Debian addition) rejects sampling outright, so lower it with
+``sudo sysctl -w kernel.perf_event_paranoid=2`` or run as root;
+``off-cpu`` needs ``bcc`` (``offcputime-bpfcc``) and
 ``sudo``. The required tools are checked up front: when ``--flamegraph
 on`` is requested but a tool is missing, the benchmark exits with a
 non-zero status and an actionable message naming the missing tool

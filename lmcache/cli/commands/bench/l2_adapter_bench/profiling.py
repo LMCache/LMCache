@@ -16,6 +16,9 @@ Two modes are supported:
 Rendering uses Brendan Gregg's FlameGraph scripts (``flamegraph.pl`` and,
 for on-CPU, ``stackcollapse-perf.pl``). ``off-cpu`` additionally requires
 ``sudo`` because ``offcputime-bpfcc`` loads a BPF program.
+
+Python-implemented adapters need CPython's perf trampolines to appear in
+either flame graph; see :func:`activate_python_frames`.
 """
 
 # Future
@@ -27,6 +30,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import time
 
 # Sampling frequency for ``perf record`` (on-CPU), in Hz.
@@ -37,6 +41,13 @@ _STOP_TIMEOUT_SEC = 60
 _OFFCPU_SETTLE_SEC = 1.0
 # Rendered flame-graph width, in pixels.
 _FLAME_WIDTH_PX = 1600
+# Highest ``kernel.perf_event_paranoid`` that still allows a non-root
+# user to sample its own process with ``perf record``. Level 2 only
+# withholds kernel-symbol resolution; level 3 (a Debian addition)
+# rejects ``perf_event_open`` outright.
+_MAX_PERF_PARANOID = 2
+# Path holding the kernel's perf sampling restriction level.
+_PERF_PARANOID_PATH = "/proc/sys/kernel/perf_event_paranoid"
 
 # Per-mode tag used in default output filenames.
 _MODE_TAG = {"on-cpu": "oncpu", "off-cpu": "offcpu"}
@@ -44,6 +55,69 @@ _MODE_TAG = {"on-cpu": "oncpu", "off-cpu": "offcpu"}
 
 class ProfileError(RuntimeError):
     """Raised when the profiling toolchain is missing or misconfigured."""
+
+
+def _check_perf_paranoid() -> None:
+    """Validate that the kernel allows unprivileged ``perf record`` sampling.
+
+    ``perf record`` silently produces an empty ``perf.data`` when
+    ``kernel.perf_event_paranoid`` is above
+    :data:`_MAX_PERF_PARANOID`, which surfaces much later as an empty
+    flame graph. Fail fast instead.
+
+    Raises:
+        ProfileError: If the paranoid level forbids sampling. The message
+            names the sysctl to lower.
+    """
+    try:
+        with open(_PERF_PARANOID_PATH, encoding="utf-8") as fh:
+            level = int(fh.read().strip())
+    except (OSError, ValueError):
+        # Non-Linux or an unreadable procfs: let perf itself report.
+        return
+    if level > _MAX_PERF_PARANOID:
+        raise ProfileError(
+            f"kernel.perf_event_paranoid is {level}; perf cannot sample "
+            f"(needs <= {_MAX_PERF_PARANOID}). Lower it with "
+            f"'sudo sysctl -w kernel.perf_event_paranoid={_MAX_PERF_PARANOID}' "
+            "or use --flamegraph-mode off-cpu."
+        )
+
+
+def activate_python_frames(log: Callable[[str], None]) -> None:
+    """Emit a perf map so Python frames resolve in the flame graph.
+
+    Python calls create no native stack frame, so both recorders render
+    Python-implemented adapters as ``[unknown]``. CPython 3.12+ fixes
+    this by emitting trampolines and a ``/tmp/perf-<pid>.map`` symbol
+    file that ``perf`` and ``offcputime-bpfcc`` both consult.
+
+    Args:
+        log: Sink for a one-line status message.
+    """
+    if not hasattr(sys, "activate_stack_trampoline"):
+        log(
+            "[Profile] python frames unavailable "
+            f"(python {sys.version_info.major}.{sys.version_info.minor} "
+            "lacks perf trampolines; needs 3.12+)"
+        )
+        return
+    try:
+        sys.activate_stack_trampoline("perf")
+    except (ValueError, RuntimeError) as e:
+        log(f"[Profile] python frames unavailable: {e}")
+        return
+    log("[Profile] python frames enabled (perf trampoline)")
+
+
+def deactivate_python_frames() -> None:
+    """Turn off the perf trampoline installed by :func:`activate_python_frames`.
+
+    The ``/tmp/perf-<pid>.map`` file outlives deactivation, so rendering
+    can still resolve the recorded samples afterwards.
+    """
+    if hasattr(sys, "deactivate_stack_trampoline"):
+        sys.deactivate_stack_trampoline()
 
 
 def check_profiling_deps(mode: str) -> None:
@@ -66,12 +140,14 @@ def check_profiling_deps(mode: str) -> None:
         raise ProfileError(
             f"invalid flame-graph mode: {mode!r} (expected 'on-cpu' or 'off-cpu')"
         )
-    if mode == "on-cpu" and shutil.which("perf") is None:
-        raise ProfileError(
-            "perf not found on PATH (needed for on-cpu flame graphs). "
-            "Install it (e.g. 'apt install linux-perf' or the linux-tools "
-            "package matching your kernel) or use --flamegraph-mode off-cpu."
-        )
+    if mode == "on-cpu":
+        if shutil.which("perf") is None:
+            raise ProfileError(
+                "perf not found on PATH (needed for on-cpu flame graphs). "
+                "Install it (e.g. 'apt install linux-perf' or the linux-tools "
+                "package matching your kernel) or use --flamegraph-mode off-cpu."
+            )
+        _check_perf_paranoid()
     if mode == "off-cpu":
         if shutil.which("sudo") is None:
             raise ProfileError(
@@ -225,10 +301,13 @@ class FlameProfiler:
         self._title = title
         self._proc: subprocess.Popen[bytes] | None = None
         self._raw_fh: object = None
+        self._err_fh: object = None
         # Intermediate capture file (perf.data for on-cpu, folded
         # stacks for off-cpu); removed after a successful render.
         suffix = ".perf.data" if mode == "on-cpu" else ".folded"
         self._raw_path = output + suffix
+        # Recorder stderr, surfaced only when the recorder fails.
+        self._err_path = output + ".recorder.err"
         self._stopped = False
 
         out_dir = os.path.dirname(os.path.abspath(output))
@@ -236,7 +315,9 @@ class FlameProfiler:
 
     def start(self, log: Callable[[str], None]) -> None:
         """Start the background recorder targeting the profiled process."""
+        activate_python_frames(log)
         if self._mode == "on-cpu":
+            self._err_fh = open(self._err_path, "wb")
             self._proc = subprocess.Popen(
                 [
                     "perf",
@@ -250,7 +331,7 @@ class FlameProfiler:
                     self._raw_path,
                 ],
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=self._err_fh,
             )
         else:
             self._raw_fh = open(self._raw_path, "wb")
@@ -289,19 +370,68 @@ class FlameProfiler:
         if self._raw_fh is not None:
             self._raw_fh.close()  # type: ignore[attr-defined]
             self._raw_fh = None
+        if self._err_fh is not None:
+            self._err_fh.close()  # type: ignore[attr-defined]
+            self._err_fh = None
+
+        # The trampoline is no longer needed once sampling has stopped;
+        # /tmp/perf-<pid>.map outlives it, so rendering still resolves.
+        deactivate_python_frames()
 
         log("[Profile] rendering flame graph...")
         try:
+            self._check_samples_captured(log)
             self._render()
         except ProfileError as e:
             log(f"[Profile] render failed: {e}")
             return
-        for leftover in (self._raw_path, self._raw_path + ".old"):
+        for leftover in (self._raw_path, self._raw_path + ".old", self._err_path):
             try:
                 os.remove(leftover)
             except OSError:
                 pass
         log(f"[Profile] wrote {self._output}")
+
+    def _check_samples_captured(self, log: Callable[[str], None]) -> None:
+        """Fail with an actionable message when nothing was sampled.
+
+        The recorder exits 0 after ``SIGINT`` even when it sampled
+        nothing. An off-CPU capture is folded text, so its size settles
+        the question; a ``perf.data`` always carries a header, so only
+        decoding it does.
+
+        Args:
+            log: Sink for the recorder's stderr, echoed as context.
+
+        Raises:
+            ProfileError: If the capture holds no stacks.
+        """
+        if self._mode == "on-cpu":
+            decoded = subprocess.run(
+                ["perf", "script", "-i", self._raw_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            ).stdout
+            captured = bool(decoded)
+        else:
+            captured = os.path.isfile(self._raw_path) and (
+                os.path.getsize(self._raw_path) > 0
+            )
+        if captured:
+            return
+
+        try:
+            with open(self._err_path, encoding="utf-8", errors="replace") as fh:
+                for line in fh.read().strip().splitlines():
+                    log(f"[Profile]   {line}")
+        except OSError:
+            pass
+        raise ProfileError(
+            f"the {self._mode} recorder captured no samples. The measured "
+            "phase is likely too short to sample; raise --rounds, "
+            "--num-keys, or --data-size-kb."
+        )
 
     def _render(self) -> None:
         """Render the captured stacks into viewable flamechart at path at self._path"""
