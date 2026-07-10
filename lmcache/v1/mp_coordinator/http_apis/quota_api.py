@@ -54,12 +54,7 @@ def _gb(n_bytes: int) -> float:
     return n_bytes / _GB
 
 
-# -- Quota config (registry-wide) ---------------------------------------------
-#
-# NOTE: these fixed-path routes MUST be declared before the parameterized
-# ``/quota/{cache_salt}`` routes below — Starlette matches routes in
-# declaration order, so a later declaration would resolve ``config`` as a
-# ``cache_salt``.
+# -- Quota config  ---------------------------------------------
 
 
 @router.put("/quota/config")
