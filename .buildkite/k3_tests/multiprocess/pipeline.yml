@@ -124,7 +124,7 @@ steps:
                   - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 128Gi } }
         artifact_paths: ["*.log"]
 
-      # Preemption correctness: GPU_MEMORY_UTILIZATION=0.5 forces the KV cache
+      # Preemption correctness: GPU_MEMORY_UTILIZATION=0.4 forces the KV cache
       # pool small enough that vLLM preempts in-flight requests under concurrent
       # lm_eval load. Both steps reuse the same run.sh lm_eval_preemption
       # command; env vars select the transfer mode. Checks: no crash, score
