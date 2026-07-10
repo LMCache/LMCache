@@ -7,7 +7,7 @@ import asyncio
 import os
 import threading
 import time
-
+import mmap
 # Third Party
 import torch
 
@@ -542,24 +542,26 @@ class LocalDiskBackend(StorageBackendInterface):
         self.stats_monitor.update_local_storage_usage(self.usage)
 
         # TODO(Jiayi): need to add ref count in disk memory object
-        self.write_file(buffer, path)
+        try:
+            self.write_file(buffer, path)
+        except Exception:
+            with self.disk_lock:
+                self.usage -= size
+                self.current_cache_size -= memory_obj.get_physical_size()
+            self.stats_monitor.update_local_storage_usage(self.usage)
+            raise
+        finally:
+            memory_obj.ref_count_down()
+            self.disk_worker.remove_put_task(key)
 
-        # ref count down here because there's a ref_count_up in
-        # `submit_put_task` above.
-        # Ref count down better be before `insert_key` for testing
-        # purposes (e.g., testing mem_leak).
-        # TODO(Jiayi): This could be problematic if the
-        # freed memory object is immediately reused.
+        # Only reached if write_file succeeds
         size = memory_obj.get_physical_size()
         shape = memory_obj.metadata.shape
         dtype = memory_obj.metadata.dtype
         fmt = memory_obj.metadata.fmt
         cached_positions = memory_obj.metadata.cached_positions
-        memory_obj.ref_count_down()
 
         self.insert_key(key, size, shape, dtype, fmt, cached_positions=cached_positions)
-
-        self.disk_worker.remove_put_task(key)
 
         # Call the completion callback if provided
         if on_complete_callback is not None:
@@ -624,13 +626,59 @@ class LocalDiskBackend(StorageBackendInterface):
     def write_file(self, buffer, path):
         start_time = time.time()
         size = len(buffer)
-        if size % self.os_disk_bs != 0 or not self.use_odirect:
-            with open(path, "wb") as f:
-                f.write(buffer)
-        else:
-            fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_DIRECT, 0o644)
-            os.write(fd, buffer)
-            os.close(fd)
+        tmp_path = path + ".tmp"
+    
+        try:
+            if size % self.os_disk_bs != 0 or not self.use_odirect:
+                with open(tmp_path, "wb") as f:
+                    f.write(buffer)
+            else:
+                bs = self.os_disk_bs
+                aligned_size = ((size + bs - 1) // bs) * bs
+                aligned_buf = mmap.mmap(
+                    -1, aligned_size,
+                    mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS,
+                )
+                try:
+                    aligned_buf.write(buffer)
+                    if aligned_size > size:
+                        aligned_buf.write(b'\x00' * (aligned_size - size))
+                    aligned_buf.seek(0)
+                    fd = os.open(
+                        tmp_path,
+                        os.O_CREAT | os.O_WRONLY | os.O_TRUNC
+                        | os.O_DIRECT,
+                        0o644,
+                    )
+                    try:
+                        offset = 0
+                        remaining = aligned_size
+                        while remaining > 0:
+                            n = os.write(fd, aligned_buf[offset:offset + remaining])
+                            if n <= 0:
+                                break
+                            offset += n
+                            remaining -= n
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
+                except OSError:
+                    logger.warning(
+                        "O_DIRECT write failed for %s, "
+                        "falling back to buffered I/O",
+                        path,
+                    )
+                    with open(tmp_path, "wb") as f:
+                        f.write(buffer)
+                finally:
+                    aligned_buf.close()
+    
+            os.replace(tmp_path, path)
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
+    
         disk_write_time = time.time() - start_time
         logger.debug(
             f"Disk write size: {size} bytes, "

@@ -466,3 +466,81 @@ class TestGetBlockingCachePolicyUpdate:
         assert result is None
         mock_update.assert_not_called()
         local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+
+class TestAsyncSaveBytesToDiskExceptionSafety:
+    """Regression tests for exception safety in async_save_bytes_to_disk.
+
+    When write_file raises an I/O exception, the method must ensure:
+
+      - ref_count_down() is called (prevents MemoryObj leak → GC → deadlock)
+      - remove_put_task() is called (cleans up the worker task queue)
+      - insert_key() is NOT called (no phantom cache entry on failure)
+      - on_complete_callback is NOT called
+      - self.usage is rolled back
+      - self.current_cache_size is rolled back
+    """
+
+    def test_write_failure_triggers_cleanup(self, local_disk_backend):
+        """On write_file failure, all cleanup paths are executed."""
+        key = create_test_key(201)
+
+        buf_size = 4096
+        mem_obj = MagicMock()
+        mem_obj.tensor = MagicMock()
+        mem_obj.byte_array = bytearray(buf_size)
+        mem_obj.get_physical_size.return_value = buf_size
+        mem_obj.metadata.shape = torch.Size([28, 2, 256, 8, 128])
+        mem_obj.metadata.dtype = torch.bfloat16
+        mem_obj.metadata.fmt = MemoryFormat.KV_2LTD
+        mem_obj.metadata.cached_positions = None
+
+        # Simulate state after submit_put_task: key queued, cache size tracked
+        local_disk_backend.disk_worker.insert_put_task(key)
+        local_disk_backend.current_cache_size = buf_size
+
+        usage_before = local_disk_backend.usage
+        cache_size_before = local_disk_backend.current_cache_size
+
+        mock_callback = MagicMock()
+
+        with patch.object(
+            local_disk_backend, "write_file", side_effect=OSError("disk full")
+        ):
+            with patch.object(
+                local_disk_backend, "insert_key"
+            ) as mock_insert:
+                with pytest.raises(OSError):
+                    local_disk_backend.async_save_bytes_to_disk(
+                        key, mem_obj, on_complete_callback=mock_callback
+                    )
+
+        # ref_count_down must be called (prevents MemoryObj leak)
+        mem_obj.ref_count_down.assert_called_once()
+
+        # remove_put_task must be called (key removed from worker queue)
+        assert (
+            key not in local_disk_backend.disk_worker.put_tasks
+        ), "remove_put_task was not called"
+
+        # insert_key must NOT be called (no phantom cache entry)
+        mock_insert.assert_not_called()
+
+        # callback must NOT be called
+        mock_callback.assert_not_called()
+
+        # usage must be rolled back
+        assert (
+            local_disk_backend.usage == usage_before
+        ), f"usage {local_disk_backend.usage} != expected {usage_before}"
+
+        # current_cache_size must be rolled back to 0
+        # (submit_put_task incremented it to buf_size, except block rolls back)
+        assert (
+            local_disk_backend.current_cache_size == 0
+        ), (
+            f"current_cache_size {local_disk_backend.current_cache_size} "
+            f"!= expected 0"
+        )
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
