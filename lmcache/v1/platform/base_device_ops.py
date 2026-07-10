@@ -1,24 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 """The unified per-device ops abstraction (the ``lmcache.c_ops`` surface).
 
-:class:`DeviceOps` owns the full op contract (:data:`OPS`) with a
-device-agnostic torch baseline from :mod:`lmcache.v1.platform.torch_ops`.
-Each op is a real ``staticmethod`` on the class, resolved via normal MRO.
-Accelerator subclasses override individual ops or call :func:`bind_native`
-(usually via :meth:`_ensure_native`) to bulk-bind a compiled ``.so``.
+:class:`DeviceOps` owns the full op contract with a device-agnostic torch
+baseline from :mod:`lmcache.v1.platform.torch_ops`.  Each op is a real
+``staticmethod`` on the class, resolved via normal MRO.  Accelerator subclasses
+override individual ops or call :func:`bind_native` (usually via
+:meth:`_ensure_native`) to bulk-bind a compiled ``.so``.
+
+The class itself is the single source of truth: op names are discovered by
+iterating :meth:`DeviceOps.iter_ops` / :meth:`DeviceOps.iter_native_types`,
+so there is no parallel string list to keep in sync.
 
 :func:`bind_native` is a class-decorator factory: ``bind_native(module)(cls)``
-overwrites every OPS-listed staticmethod found in *module* onto *cls*.
+overwrites every staticmethod op found in *module* onto *cls*.
 """
 
 # Future
 from __future__ import annotations
 
 # Standard
-from typing import ClassVar
+from typing import ClassVar, Iterator
 
 # First Party
-from lmcache.v1.platform import torch_ops
+from lmcache.v1.platform import ops_types, torch_ops
 from lmcache.v1.platform.ops_types import (
     BatchStep,
     EngineKVFormat,
@@ -29,70 +33,6 @@ from lmcache.v1.platform.ops_types import (
     TransferDirection,
     set_shape_desc_dtype,
 )
-
-# ─── Contract ──────────────────────────────────────────────────────────
-
-#: Every name a device provides natively or inherits from the torch baseline.
-#: Single source of truth for the parity test, bind_native, and the c_ops shim.
-OPS: frozenset[str] = frozenset(
-    {
-        # ── Memory alloc / free ───────────────────────────────
-        "alloc_hugepage_pinned_numa_ptr",
-        "alloc_hugepage_pinned_ptr",
-        "alloc_numa_ptr",
-        "alloc_pinned_numa_ptr",
-        "alloc_pinned_ptr",
-        "alloc_shm_pinned_ptr",
-        "free_hugepage_pinned_numa_ptr",
-        "free_hugepage_pinned_ptr",
-        "free_numa_ptr",
-        "free_pinned_numa_ptr",
-        "free_pinned_ptr",
-        "free_shm_pinned_ptr",
-        # ── KV transfer ───────────────────────────────────────
-        "execute_object_group_transfer",
-        "multi_layer_block_kv_transfer",
-        "multi_layer_kv_transfer",
-        "multi_layer_kv_transfer_unilateral",
-        "single_layer_kv_transfer",
-        "single_layer_kv_transfer_sgl",
-        # ── KV reshape ────────────────────────────────────────
-        "load_and_reshape_flash",
-        "reshape_and_cache_back_flash",
-        # ── Codec ─────────────────────────────────────────────
-        "calculate_cdf",
-        "decode_fast_new",
-        "decode_fast_prefsum",
-        "encode_fast_new",
-        # ── Format query ──────────────────────────────────────
-        "is_cross_layer",
-        "is_kv_list",
-        "is_layer_list",
-        "is_mla",
-        # ── Async / event recording ───────────────────────────
-        "drain_recorded_completions",
-        "drain_recorded_events",
-        "record_completion_on_stream",
-        "record_event_on_stream",
-        # ── Misc ──────────────────────────────────────────────
-        "batched_memcpy",
-        "get_gpu_pci_bus_id",
-        "lmcache_memcpy_async",
-        "rotary_embedding_k_fused",
-    }
-)
-
-#: Types that :func:`bind_native` rebinds from the compiled module.
-_NATIVE_TYPES: tuple[str, ...] = (
-    "TransferDirection",
-    "EngineKVFormat",
-    "PageBufferShapeDesc",
-    "StagingCopy",
-    "LaunchVar",
-    "BatchStep",
-    "KernelGroupSpec",
-)
-
 
 # ─── Decorator ─────────────────────────────────────────────────────────
 
@@ -109,17 +49,19 @@ def bind_native(module: object):
 
         bind_native(native)(cls)
 
-    For each name in :data:`OPS`, if *module* exports it, the class attribute
-    is overwritten with ``staticmethod(fn)``.  Types listed in
-    :data:`_NATIVE_TYPES` are also rebound (for pybind enum identity).
+    The class itself is the SSOT: for every op name yielded by
+    :meth:`DeviceOps.iter_ops`, if *module* exports it, the class attribute
+    is overwritten with ``staticmethod(fn)``.  Types yielded by
+    :meth:`DeviceOps.iter_native_types` are also rebound (for pybind enum
+    identity).
     """
 
     def decorator(cls: type[DeviceOps]) -> type[DeviceOps]:
-        for name in OPS:
+        for name in cls.iter_ops():
             fn = getattr(module, name, None)
             if fn is not None:
                 setattr(cls, name, staticmethod(fn))
-        for type_name in _NATIVE_TYPES:
+        for type_name in cls.iter_native_types():
             t = getattr(module, type_name, None)
             if t is not None:
                 setattr(cls, type_name, t)
@@ -134,14 +76,12 @@ def bind_native(module: object):
 
 # ─── Base class ────────────────────────────────────────────────────────
 
-_ops = torch_ops  # alias for line-length compliance
-
 
 class DeviceOps:
     """Strategy base: per-device ops resolved via MRO.
 
-    Every op in :data:`OPS` is a ``staticmethod`` on the class delegating to
-    the torch baseline in :mod:`~lmcache.v1.platform.torch_ops`.
+    Every op is a ``staticmethod`` on the class delegating to the torch
+    baseline in :mod:`~lmcache.v1.platform.torch_ops`.
     Accelerator subclasses either:
 
     - Override individual ops (e.g. MUSA overrides one transfer op).
@@ -155,76 +95,127 @@ class DeviceOps:
     device_type: ClassVar[str] = ""  # base is unregistered
     _native_bound: ClassVar[bool] = False
 
-    # ── Shared types ──────────────────────────────────────────────────
+    # Names that are class metadata / non-op helpers rather than ops.
+    # ``set_shape_desc_dtype`` is a Python-only ``staticmethod`` that must not
+    # be treated as a native op (native modules do not export it).
+    _NON_OP_STATICMETHODS: ClassVar[frozenset[str]] = frozenset(
+        {"set_shape_desc_dtype"}
+    )
+    # Type attributes that are aliases; ``bind_native`` should not rebind them
+    # as native types (``GPUKVFormat`` is a back-compat alias managed manually).
+    _ALIAS_TYPES: ClassVar[frozenset[str]] = frozenset({"GPUKVFormat"})
+
+    # ── Shared types (explicit for static analysis) ────────────────────
     TransferDirection = TransferDirection
     EngineKVFormat = EngineKVFormat
     GPUKVFormat = EngineKVFormat  # back-compat alias
     PageBufferShapeDesc = PageBufferShapeDesc
-    set_shape_desc_dtype = staticmethod(set_shape_desc_dtype)
     StagingCopy = StagingCopy
     LaunchVar = LaunchVar
     BatchStep = BatchStep
     KernelGroupSpec = KernelGroupSpec
+    set_shape_desc_dtype = staticmethod(set_shape_desc_dtype)
 
-    # ── Memory alloc / free ──────────────────────────────────────────
-    alloc_hugepage_pinned_numa_ptr = staticmethod(_ops.alloc_hugepage_pinned_numa_ptr)
-    alloc_hugepage_pinned_ptr = staticmethod(_ops.alloc_hugepage_pinned_ptr)
-    alloc_numa_ptr = staticmethod(_ops.alloc_numa_ptr)
-    alloc_pinned_numa_ptr = staticmethod(_ops.alloc_pinned_numa_ptr)
-    alloc_pinned_ptr = staticmethod(_ops.alloc_pinned_ptr)
-    alloc_shm_pinned_ptr = staticmethod(_ops.alloc_shm_pinned_ptr)
-    free_hugepage_pinned_numa_ptr = staticmethod(_ops.free_hugepage_pinned_numa_ptr)
-    free_hugepage_pinned_ptr = staticmethod(_ops.free_hugepage_pinned_ptr)
-    free_numa_ptr = staticmethod(_ops.free_numa_ptr)
-    free_pinned_numa_ptr = staticmethod(_ops.free_pinned_numa_ptr)
-    free_pinned_ptr = staticmethod(_ops.free_pinned_ptr)
-    free_shm_pinned_ptr = staticmethod(_ops.free_shm_pinned_ptr)
+    # ── Introspection (SSOT for op / type names) ─────────────────────
 
-    # ── KV transfer ───────────────────────────────────────────────
-    execute_object_group_transfer = staticmethod(_ops.execute_object_group_transfer)
-    multi_layer_block_kv_transfer = staticmethod(_ops.multi_layer_block_kv_transfer)
-    multi_layer_kv_transfer = staticmethod(_ops.multi_layer_kv_transfer)
-    multi_layer_kv_transfer_unilateral = staticmethod(
-        _ops.multi_layer_kv_transfer_unilateral
-    )
-    single_layer_kv_transfer = staticmethod(_ops.single_layer_kv_transfer)
-    single_layer_kv_transfer_sgl = staticmethod(_ops.single_layer_kv_transfer_sgl)
+    @classmethod
+    def iter_ops(cls) -> Iterator[str]:
+        """Yield the names of every op defined on the class.
 
-    # ── KV reshape ────────────────────────────────────────────────
-    load_and_reshape_flash = staticmethod(_ops.load_and_reshape_flash)
-    reshape_and_cache_back_flash = staticmethod(_ops.reshape_and_cache_back_flash)
+        An op is any public ``staticmethod`` on the class, excluding helpers
+        listed in :attr:`_NON_OP_STATICMETHODS`.  The class hierarchy is the
+        single source of truth: adding a new op to :class:`DeviceOps` (or a
+        subclass) automatically exposes it here without touching any parallel
+        list.
+        """
+        seen: set[str] = set()
+        for klass in cls.__mro__:
+            for name, raw in vars(klass).items():
+                if name.startswith("_") or name in seen:
+                    continue
+                if name in cls._NON_OP_STATICMETHODS:
+                    seen.add(name)
+                    continue
+                # ``staticmethod`` in the class dict wraps the callable.
+                if isinstance(raw, staticmethod):
+                    seen.add(name)
+                    yield name
 
-    # ── Codec ─────────────────────────────────────────────────────
-    calculate_cdf = staticmethod(_ops.calculate_cdf)
-    decode_fast_new = staticmethod(_ops.decode_fast_new)
-    decode_fast_prefsum = staticmethod(_ops.decode_fast_prefsum)
-    encode_fast_new = staticmethod(_ops.encode_fast_new)
+    @classmethod
+    def iter_native_types(cls) -> Iterator[str]:
+        """Yield the names of native-rebindable type attributes on the class.
 
-    # ── Format query ──────────────────────────────────────────────
-    is_cross_layer = staticmethod(_ops.is_cross_layer)
-    is_kv_list = staticmethod(_ops.is_kv_list)
-    is_layer_list = staticmethod(_ops.is_layer_list)
-    is_mla = staticmethod(_ops.is_mla)
-
-    # ── Async / event recording ───────────────────────────────────
-    drain_recorded_completions = staticmethod(_ops.drain_recorded_completions)
-    drain_recorded_events = staticmethod(_ops.drain_recorded_events)
-    record_completion_on_stream = staticmethod(_ops.record_completion_on_stream)
-    record_event_on_stream = staticmethod(_ops.record_event_on_stream)
-
-    # ── Misc ──────────────────────────────────────────────────────
-    batched_memcpy = staticmethod(_ops.batched_memcpy)
-    get_gpu_pci_bus_id = staticmethod(_ops.get_gpu_pci_bus_id)
-    lmcache_memcpy_async = staticmethod(_ops.lmcache_memcpy_async)
-    rotary_embedding_k_fused = staticmethod(_ops.rotary_embedding_k_fused)
+        A native type is any public class attribute whose value is a ``type``,
+        excluding aliases listed in :attr:`_ALIAS_TYPES`.
+        """
+        seen: set[str] = set()
+        for klass in cls.__mro__:
+            for name, raw in vars(klass).items():
+                if name.startswith("_") or name in seen:
+                    continue
+                if name in cls._ALIAS_TYPES:
+                    seen.add(name)
+                    continue
+                if isinstance(raw, type):
+                    seen.add(name)
+                    yield name
 
     # ── Lazy native binding ───────────────────────────────────────────
 
     @classmethod
     def _ensure_native(cls) -> None:
-        """Lazily load and bind native ops. No-op on the base class.
+        """Attempt to load and bind the compiled native extension.
 
-        Subclasses override this to import their compiled extension and
+        Subclasses override this to ``importlib.import_module(...)`` then
         call ``bind_native(native)(cls)``.  Guarded by ``_native_bound``
         so it runs at most once per class.
         """
+
+
+# ─── Populate baseline from torch_ops / ops_types ──────────────────────
+# ``torch_ops`` and ``ops_types`` are the source of truth for the op /
+# type surface.  Rather than restate every name on the class, mirror them
+# once at import time: any function defined in ``torch_ops`` becomes a
+# staticmethod on ``DeviceOps``, and any class defined in ``ops_types``
+# becomes a class attribute.  Attributes already set on the class body
+# (aliases, non-op helpers) are preserved.
+
+
+def _bind_base_device_ops(
+    module: object,
+    cls: type,
+    kind: str,  # "callable" or "type"
+) -> None:
+    """Copy public members of *module* onto *cls* without clobbering existing
+    class-body definitions.
+
+    Only members whose ``__module__`` matches ``module.__name__`` are copied,
+    so re-exports (e.g. ``set_shape_desc_dtype`` re-exported by ``torch_ops``
+    from ``ops_types``) are attributed to their defining module only.
+    """
+    mod_name = getattr(module, "__name__", None)
+    for name in dir(module):
+        if name.startswith("_"):
+            continue
+        if name in vars(cls):  # respect manual class-body definitions
+            continue
+        obj = getattr(module, name)
+        if getattr(obj, "__module__", None) != mod_name:
+            continue
+        if kind == "callable":
+            if callable(obj) and not isinstance(obj, type):
+                setattr(cls, name, staticmethod(obj))
+        elif kind == "type":
+            if isinstance(obj, type):
+                setattr(cls, name, obj)
+
+
+"""
+Bind every public function from torch_ops as a staticmethod on DeviceOps
+"""
+_bind_base_device_ops(torch_ops, DeviceOps, kind="callable")
+
+"""
+Bind every public class from ops_types as a class attribute on DeviceOps
+"""
+_bind_base_device_ops(ops_types, DeviceOps, kind="type")
