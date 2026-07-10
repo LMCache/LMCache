@@ -85,7 +85,7 @@ class QuotaManager:
         with self._lock:
             return self._limits.get(cache_salt, 0)
 
-    def set_default_limit(self, limit_bytes: int | None) -> None:
+    def set_default_limit_bytes(self, limit_bytes: int | None) -> None:
         """Set the limit applied to salts with no explicit entry.
 
         Args:
@@ -103,7 +103,7 @@ class QuotaManager:
         with self._lock:
             self._default_limit_bytes = limit_bytes
 
-    def get_default_limit(self) -> int | None:
+    def get_default_limit_bytes(self) -> int | None:
         """Return the default limit for unregistered salts.
 
         ``None`` means unregistered salts are exempt from eviction (no
@@ -117,7 +117,7 @@ class QuotaManager:
 
         Explicitly registered salts return their registered limit.
         Unregistered salts return the default limit — ``None`` (exempt
-        from eviction) until :meth:`set_default_limit` configures a
+        from eviction) until :meth:`set_default_limit_bytes` configures a
         concrete value. See the module docstring for how this differs
         from :meth:`get_limit_bytes`.
         """

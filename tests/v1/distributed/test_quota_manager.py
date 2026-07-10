@@ -201,7 +201,7 @@ class TestQuotaManagerDefaultLimit:
 
     def test_default_starts_unset(self):
         qm = QuotaManager()
-        assert qm.get_default_limit() is None
+        assert qm.get_default_limit_bytes() is None
 
     def test_effective_limit_none_for_unregistered_until_default_set(self):
         """Boot state: unregistered salts are exempt (None), even though
@@ -212,18 +212,18 @@ class TestQuotaManagerDefaultLimit:
 
     def test_default_zero_applies_to_unregistered(self):
         qm = QuotaManager()
-        qm.set_default_limit(0)
-        assert qm.get_default_limit() == 0
+        qm.set_default_limit_bytes(0)
+        assert qm.get_default_limit_bytes() == 0
         assert qm.effective_limit_bytes("alice") == 0
 
     def test_positive_default_applies_to_unregistered(self):
         qm = QuotaManager()
-        qm.set_default_limit(4096)
+        qm.set_default_limit_bytes(4096)
         assert qm.effective_limit_bytes("alice") == 4096
 
     def test_explicit_quota_wins_over_default(self):
         qm = QuotaManager()
-        qm.set_default_limit(4096)
+        qm.set_default_limit_bytes(4096)
         qm.set_quota("alice", 1024)
         assert qm.effective_limit_bytes("alice") == 1024
 
@@ -236,12 +236,12 @@ class TestQuotaManagerDefaultLimit:
 
     def test_default_resettable_to_none(self):
         qm = QuotaManager()
-        qm.set_default_limit(0)
-        qm.set_default_limit(None)
-        assert qm.get_default_limit() is None
+        qm.set_default_limit_bytes(0)
+        qm.set_default_limit_bytes(None)
+        assert qm.get_default_limit_bytes() is None
         assert qm.effective_limit_bytes("alice") is None
 
     def test_negative_default_rejected(self):
         qm = QuotaManager()
         with pytest.raises(ValueError):
-            qm.set_default_limit(-1)
+            qm.set_default_limit_bytes(-1)

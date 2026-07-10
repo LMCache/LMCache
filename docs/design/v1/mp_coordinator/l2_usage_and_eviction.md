@@ -83,7 +83,7 @@ Thread-safe in-memory quota registry (``dict[str, int]`` + lock). CRUD via
 Quotas are set in GiB at the API and stored as bytes internally.
 
 Unregistered salts resolve through a configurable **default limit**
-(``set_default_limit`` / ``effective_limit_bytes``), which starts as ``None``:
+(``set_default_limit_bytes`` / ``effective_limit_bytes``), which starts as ``None``:
 
 - ``None`` (boot default) — unregistered salts are **exempt** from coordinator
   eviction. Quotas live in memory, so a restarted coordinator has an empty

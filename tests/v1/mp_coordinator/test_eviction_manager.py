@@ -41,7 +41,7 @@ def _setup(
     exempt boot state instead.
     """
     qs = QuotaManager()
-    qs.set_default_limit(default_limit_bytes)
+    qs.set_default_limit_bytes(default_limit_bytes)
     ut = L2UsageManager()
     ctrl = L2EvictionManager(
         qs,
@@ -193,7 +193,7 @@ def test_setting_default_zero_arms_allowlist_eviction():
     _store(ctrl, ut, k, 1000)
     assert ctrl.compute_eviction_plan() == {}
 
-    qs.set_default_limit(0)
+    qs.set_default_limit_bytes(0)
     result = ctrl.compute_eviction_plan()
     assert result.get("a") == [k]
 
@@ -201,7 +201,7 @@ def test_setting_default_zero_arms_allowlist_eviction():
 def test_positive_default_acts_as_budget_for_unquotad_salts():
     """A positive default gives unquota'd salts a real byte budget."""
     ctrl, qs, ut = _setup(eviction_ratio=1.0, default_limit_bytes=None)
-    qs.set_default_limit(1500)
+    qs.set_default_limit_bytes(1500)
     under = _make_key("a", h="01")
     over = _make_key("b", h="02")
     _store(ctrl, ut, under, 1000)  # under the 1500 default

@@ -146,7 +146,8 @@ class QuotaConfigRequest(BaseModel):
 
     Attributes:
         default_limit_gb: Byte budget in GiB applied to salts with no
-            explicit quota entry.
+            explicit quota entry. ``None`` (default) leaves unquota'd
+            salts exempt from eviction.
         tier: Cache tier the config applies to (only ``l2`` today).
     """
 

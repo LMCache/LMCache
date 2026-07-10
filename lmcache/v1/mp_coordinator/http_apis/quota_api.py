@@ -73,7 +73,7 @@ async def set_quota_config(
     default_limit_bytes = (
         None if body.default_limit_gb is None else int(body.default_limit_gb * _GB)
     )
-    get_context(request).quota_manager.set_default_limit(default_limit_bytes)
+    get_context(request).quota_manager.set_default_limit_bytes(default_limit_bytes)
     return QuotaConfigResponse(default_limit_gb=body.default_limit_gb)
 
 
@@ -91,7 +91,7 @@ async def get_quota_config(
         unquota'd salts are exempt from eviction (the boot default).
     """
     _require_supported_tier(tier)
-    default_limit = get_context(request).quota_manager.get_default_limit()
+    default_limit = get_context(request).quota_manager.get_default_limit_bytes()
     return QuotaConfigResponse(
         default_limit_gb=None if default_limit is None else _gb(default_limit)
     )
