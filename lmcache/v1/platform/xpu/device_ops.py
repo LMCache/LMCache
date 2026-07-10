@@ -28,7 +28,7 @@ class XpuDeviceOps(DeviceOps):
     def _ensure_native(cls) -> None:
         if cls._native_bound:
             return
-        cls._native_bound = True
+        cls._native_bound = True  # set early to prevent repeated attempts
         try:
             # First Party
             import lmcache.xpu_ops as sycl  # noqa: F401

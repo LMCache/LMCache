@@ -181,11 +181,7 @@ def resolve_device_ops_cls(device_type: str) -> type[DeviceOps]:
     """
     spec = get_device_spec(device_type)
     if spec is None:
-        if device_type == "":
-            spec = DeviceSpec()
-        elif device_type == "cpu":
-            # CpuDeviceSpec normally handles this path; keep the bare baseline as
-            # a safe fallback for tests / CLI-only contexts that clear the table.
+        if device_type in ("", "cpu"):
             spec = DeviceSpec()
         else:
             raise RuntimeError(

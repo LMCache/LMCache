@@ -90,9 +90,6 @@ class DeviceSpec:
             fallback spec. Accelerator subclasses override this property to
             return their backend-specific DeviceOps subclass.
         """
-        # First Party
-        from lmcache.v1.platform.base_device_ops import DeviceOps
-
         return DeviceOps
 
     def is_available(self) -> bool:

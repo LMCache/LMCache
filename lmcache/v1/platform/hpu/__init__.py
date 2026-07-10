@@ -7,6 +7,7 @@ from __future__ import annotations
 # First Party
 from lmcache.v1.platform.base_device_ops import DeviceOps
 from lmcache.v1.platform.base_device_spec import DeviceSpec
+from lmcache.v1.platform.hpu.device_ops import HpuDeviceOps
 
 # ---------------------------------------------------------------------------
 # Device detection registry entry
@@ -26,9 +27,6 @@ class HpuDeviceSpec(DeviceSpec):
 
     @property
     def ops_cls(self) -> type[DeviceOps]:
-        # First Party
-        from lmcache.v1.platform.hpu.device_ops import HpuDeviceOps
-
         return HpuDeviceOps
 
     def is_available(self) -> bool:

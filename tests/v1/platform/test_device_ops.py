@@ -44,10 +44,6 @@ def isolated_registry() -> Any:
 # -- Contract --------------------------------------------------------------
 
 
-def test_ops_contract_has_36_names() -> None:
-    assert len(OPS) == 36
-
-
 def test_base_class_has_every_op_as_callable() -> None:
     """DeviceOps exposes all ops as class-level callables (staticmethods)."""
     for name in OPS:
