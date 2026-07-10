@@ -82,10 +82,10 @@ _NIXL_MOCK_KEYS = _install_nixl_mock_if_absent()
 # First Party
 from lmcache.utils import CacheEngineKey  # noqa: E402
 from lmcache.v1.config import LMCacheEngineConfig  # noqa: E402
-from lmcache.v1.memory_management import (  # noqa: E402
-    MemoryFormat,
+from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (  # noqa: E402
     PagedTensorMemoryAllocator,
 )
+from lmcache.v1.memory_management import MemoryFormat  # noqa: E402
 from lmcache.v1.metadata import LMCacheMetadata  # noqa: E402
 from lmcache.v1.storage_backend import CreateStorageBackends  # noqa: E402
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend  # noqa: E402

@@ -9,7 +9,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.config import L1MemoryManagerConfig
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.memory_manager.l1_memory_manager import L1MemoryManager
-from lmcache.v1.memory_management import DevDaxMemoryAllocator
+from lmcache.v1.memory_allocators.devdax_memory_allocator import DevDaxMemoryAllocator
 
 logger = init_logger(__name__)
 

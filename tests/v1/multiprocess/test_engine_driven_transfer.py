@@ -1026,15 +1026,8 @@ def test_engine_context_shm_pool_info(
     from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 
     with patch(
-        "lmcache.v1.distributed.config.torch_dev",
-        type(
-            "TorchDevStub",
-            (),
-            {
-                "cudart": object(),
-                "ext": type("_Ext", (), {"is_pin_supported": True})(),
-            },
-        )(),
+        "lmcache.v1.distributed.config.current_device_spec",
+        MagicMock(is_pin_supported=True),
     ):
         config = _make_storage_manager_config(**config_kwargs)
 

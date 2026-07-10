@@ -11,7 +11,6 @@ import argparse
 import os
 
 # First Party
-from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
@@ -20,6 +19,7 @@ from lmcache.v1.distributed.l2_adapters.config import (
     get_type_name_for_config,
     parse_args_to_l2_adapters_config,
 )
+from lmcache.v1.platform import current_device_spec
 
 logger = init_logger(__name__)
 
@@ -155,7 +155,7 @@ class L1MemoryManagerConfig:
 
         # LazyMemoryAllocator requires pinned memory support.
         # Auto-disable on platforms that don't support it to avoid a RuntimeError.
-        if self.use_lazy and not torch_dev.ext.is_pin_supported:
+        if self.use_lazy and not current_device_spec.is_pin_supported:
             logger.warning(
                 "LazyMemoryAllocator requires memory pinning which is not "
                 "supported on the current backend. Disabling l1-use-lazy."
