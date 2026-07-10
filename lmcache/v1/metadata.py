@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 # Third Party
 import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 
 logger = init_logger(__name__)
 
@@ -63,7 +66,7 @@ class LMCacheMetadata:
     :class:`KVLayerGroupsManager`. Consumers must guard against ``None``
     when accessed before registration.
     """
-    kv_layer_groups_manager: Optional[KVLayerGroupsManager] = None
+    kv_layer_groups_manager: Optional["KVLayerGroupsManager"] = None
     """ engine_id for RPC path (used by lookup client/server) """
     engine_id: Optional[str] = None
     """ extra config from kv_connector (e.g., lmcache_rpc_port) """
