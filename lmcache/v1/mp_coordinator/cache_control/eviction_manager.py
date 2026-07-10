@@ -107,11 +107,8 @@ class L2EvictionManager:
         their LRU keys; a quota of ``0`` means full eviction. Salts
         without an explicit quota use the registry's default limit
         (``QuotaManager.effective_limit_bytes``): until the external
-        quota controller sets one (``PUT /quota/config``), the default
-        is ``None`` and unquota'd salts are **exempt** — so a freshly
-        restarted coordinator with an empty quota table cannot
-        mass-evict unknown tenants. Pinned keys are always excluded.
-        Pure — no network calls, no state mutation.
+        quota controller sets one (``PUT /quota/config``), the
+        coordinator will not start evicting unquota'd salts.
         """
         tracked_salts = self._policy.get_tracked_salts()
         eviction_plan: dict[str, list[ObjectKey]] = {}

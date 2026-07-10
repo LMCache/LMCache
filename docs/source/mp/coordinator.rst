@@ -360,6 +360,21 @@ eviction. (The MP server exposes a node-local ``/quota`` with the same shape;
 this is its fleet-wide counterpart.) Use ``_default`` as the path parameter to
 target the empty-string salt.
 
+.. warning::
+
+   Do **not** use the MP server's node-local ``/quota`` API together with the
+   coordinator's. The two are independent, unsynchronized quota registries
+   enforcing eviction on the **same shared L2**: the server-side enforcer
+   (active when the server runs a per-salt eviction policy) uses strict
+   allowlist semantics — any salt missing from *its own* table is fully
+   evicted — and it never sees quotas registered on the coordinator, and vice
+   versa. Mixing the two produces competing eviction decisions: the server can
+   wipe data the coordinator considers within quota (or still exempt before
+   the default limit is armed). Pick one owner per deployment — in
+   coordinator-managed deployments, register quotas **only** through the
+   coordinator's ``/quota`` API and leave the servers' node-local quota tables
+   untouched.
+
 Salts without an explicit quota are governed by the registry's **default
 limit** (``PUT /quota/config``). On boot the default is unset, and unquota'd
 salts are **exempt** from eviction — quotas live in memory, so a freshly

@@ -97,6 +97,11 @@ Unregistered salts resolve through a configurable **default limit**
 
 The MP server's local eviction controller keeps the legacy
 ``get_limit_bytes`` path (unregistered ⇒ 0) and is unaffected by the default.
+Because the server-local and coordinator quota registries are independent and
+never synchronized, a deployment must register quotas through **one** of the
+two ``/quota`` APIs, never both — the server-side enforcer fully evicts any
+salt missing from its own table, so it would fight quotas registered only on
+the coordinator (see the warning in ``docs/source/mp/coordinator.rst``).
 
 ### L2EvictionManager (`eviction_manager.py`)
 
