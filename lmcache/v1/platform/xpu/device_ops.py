@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """XPU ops backend: bind the SYCL ops over the torch baseline.
 
-:class:`XpuDeviceOps` overrides :meth:`populate_module` to layer the existing
-``lmcache.xpu_ops`` SYCL module on top of the torch baseline; the remaining ops
-keep the torch implementation -- identical to today's merge, just resolved
-through the registry. If the SYCL extension is not built, the device stays on
-the torch baseline with no degradation.
+:class:`XpuDeviceOps` calls :func:`~..base_device_ops.bind_native` in
+:meth:`_ensure_native` to layer the SYCL extension on top of the torch
+baseline.  If the extension is not built, a warning is logged and the class
+stays on the torch fallback.
 """
 
 # Future
@@ -16,24 +15,27 @@ from typing import ClassVar
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.platform.base_device_ops import DeviceOps
+from lmcache.v1.platform.base_device_ops import DeviceOps, bind_native
 
 logger = init_logger(__name__)
 
 
 class XpuDeviceOps(DeviceOps):
     device_type: ClassVar[str] = "xpu"
+    _native_bound: ClassVar[bool] = False
 
     @classmethod
-    def populate_module(cls, target: object) -> None:
-        super().populate_module(target)  # torch baseline
+    def _ensure_native(cls) -> None:
+        if cls._native_bound:
+            return
+        cls._native_bound = True
         try:
             # First Party
-            import lmcache.xpu_ops as sycl
+            import lmcache.xpu_ops as sycl  # noqa: F401
         except ImportError:
-            logger.info(
-                "lmcache.xpu_ops not built; XpuDeviceOps stays on the torch "
-                "baseline for all ops."
+            logger.warning(
+                "lmcache.xpu_ops not built; XpuDeviceOps stays on the "
+                "torch baseline for all ops."
             )
             return
-        cls._bind_native(target, sycl)  # SYCL ops shadow base; the rest inherit
+        bind_native(sycl)(cls)

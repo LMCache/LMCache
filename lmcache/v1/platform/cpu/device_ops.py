@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """CPU ops backend: the torch baseline, registered under ``device_type="cpu"``.
 
-:class:`CpuDeviceOps` adds no overrides -- the inherited
-:meth:`DeviceOps.populate_module` installs the torch baseline as-is.
-It exists only to give the registry a concrete ``device_type="cpu"``
-entry distinct from the unregistered :class:`DeviceOps` base.
+:class:`CpuDeviceOps` adds no overrides -- all ops are inherited from
+:class:`DeviceOps` (the torch baseline) via MRO.
 """
 
 # Future
@@ -19,4 +17,3 @@ from lmcache.v1.platform.base_device_ops import DeviceOps
 
 class CpuDeviceOps(DeviceOps):
     device_type: ClassVar[str] = "cpu"
-    # No overrides: the inherited torch baseline is the CPU backend.

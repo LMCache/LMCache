@@ -55,7 +55,7 @@ import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 # ``lmc_ops.execute_object_group_transfer`` is either a native callable (bound
-# by ``DeviceOps._bind_native`` on accelerators) or the torch baseline stub
+# by ``bind_native`` on accelerators) or the torch baseline stub
 # (a native-only op that raises). Identity against the baseline tells us whether
 # a real native implementation is present.
 _HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = (

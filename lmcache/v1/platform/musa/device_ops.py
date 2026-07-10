@@ -3,9 +3,7 @@
 
 :class:`MusaDeviceOps` overrides ``multi_layer_block_kv_transfer`` to try the
 native MUSA path first (when inputs are tensor-backed) and fall back to the
-torch baseline otherwise. Every other op inherits the baseline. This ports the
-former ``platform/musa/ops.py`` adapter into the unified :class:`DeviceOps`
-hierarchy with zero behavior change.
+torch baseline otherwise.  Every other op inherits the baseline via MRO.
 """
 
 # Future
@@ -32,15 +30,15 @@ def _tensor_list(value: object) -> list[torch.Tensor] | None:
 
 
 def _musa_multi_layer_block_kv_transfer(
-    paged_buffer_ptrs_tensor: "torch.Tensor | list",
-    lmcache_objects_ptrs: list[int] | list[torch.Tensor],
-    block_ids: torch.Tensor | list[int],
-    device: torch.device | str,
-    direction: "_torch_ops.TransferDirection",
-    shape_desc: "_torch_ops.PageBufferShapeDesc",
-    lmcache_chunk_size: int,
-    engine_kv_format: "_torch_ops.EngineKVFormat",
-    skip_prefix_n_blocks: int,
+    paged_buffer_ptrs_tensor,
+    lmcache_objects_ptrs,
+    block_ids,
+    device,
+    direction,
+    shape_desc,
+    lmcache_chunk_size,
+    engine_kv_format,
+    skip_prefix_n_blocks,
 ) -> None:
     """Native MUSA block transfer when tensor-backed; else torch baseline."""
     # First Party
@@ -77,7 +75,7 @@ def _musa_multi_layer_block_kv_transfer(
 class MusaDeviceOps(DeviceOps):
     device_type: ClassVar[str] = "musa"
 
-    @classmethod
-    def populate_module(cls, target: object) -> None:
-        super().populate_module(target)  # torch baseline
-        target.multi_layer_block_kv_transfer = _musa_multi_layer_block_kv_transfer  # type: ignore[attr-defined]
+    # Override just this one op via MRO.
+    multi_layer_block_kv_transfer = staticmethod(  # type: ignore[assignment]
+        _musa_multi_layer_block_kv_transfer
+    )

@@ -58,17 +58,15 @@ def test_native_transfer_module_lives_under_musa_platform() -> None:
 
 
 def test_musa_device_ops_overrides_multi_layer_block_kv_transfer() -> None:
-    """MusaDeviceOps.populate_module overrides multi_layer_block_kv_transfer."""
+    """MusaDeviceOps overrides multi_layer_block_kv_transfer via MRO."""
     # First Party
     from lmcache.v1.platform import _torch_ops
     from lmcache.v1.platform.musa.device_ops import MusaDeviceOps
 
     assert MusaDeviceOps.device_type == "musa"
-    target = ModuleType("musa_c_ops_probe")
-    MusaDeviceOps.populate_module(target)
-    # The override is installed on the populated module, not the torch baseline.
+    # The override is on the class itself, not the torch baseline.
     assert (
-        target.multi_layer_block_kv_transfer
+        MusaDeviceOps.multi_layer_block_kv_transfer
         is not _torch_ops.multi_layer_block_kv_transfer
     )
 
@@ -411,9 +409,6 @@ def test_musa_ops_block_transfer_entry_dispatches_to_musa_platform(
     # First Party
     from lmcache.v1.platform.musa.device_ops import MusaDeviceOps
 
-    target = ModuleType("musa_c_ops_probe")
-    MusaDeviceOps.populate_module(target)
-
     captured: dict[str, Any] = {}
 
     def _fake_musa_block_transfer(**kwargs: Any) -> bool:
@@ -428,7 +423,7 @@ def test_musa_ops_block_transfer_entry_dispatches_to_musa_platform(
 
     paged_layers = [torch.zeros(4, 4, 16) for _ in range(2)]
     object_tensors = [torch.zeros(2, 8, 16)]
-    target.multi_layer_block_kv_transfer(
+    MusaDeviceOps.multi_layer_block_kv_transfer(
         paged_layers,
         object_tensors,
         [0, 1],

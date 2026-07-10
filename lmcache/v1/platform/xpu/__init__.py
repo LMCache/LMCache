@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """XPU (Intel SYCL) platform helpers."""
 
+# Future
+from __future__ import annotations
+
 # Standard
 from typing import TYPE_CHECKING
 

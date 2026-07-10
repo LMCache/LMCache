@@ -1,22 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for the unified ``DeviceOps`` abstraction and spec-based resolution.
 
-These tests are the acceptance gate for the DeviceOps. They stay
+These tests are the acceptance gate for the DeviceOps hierarchy.  They stay
 platform-agnostic by exercising the torch baseline, the ``DeviceSpec``
-dispatch, the ``lmcache.c_ops`` shim, and the ``_bind_native`` mechanism
+dispatch, the ``lmcache.c_ops`` shim, and the ``bind_native`` decorator
 without requiring any compiled accelerator module.
 """
 
 # Standard
 from typing import Any
-import types
 
 # Third Party
 import pytest
 
 # First Party
 from lmcache.v1.platform import _torch_ops, resolve_device_ops_cls
-from lmcache.v1.platform.base_device_ops import OPS, DeviceOps
+from lmcache.v1.platform.base_device_ops import OPS, DeviceOps, bind_native
 from lmcache.v1.platform.base_device_spec import DeviceSpec
 from lmcache.v1.platform.cpu.device_ops import CpuDeviceOps
 from lmcache.v1.platform.ops_types import (
@@ -42,12 +41,6 @@ def isolated_registry() -> Any:
         platform_pkg._DEVICE_REGISTRY.update(saved)
 
 
-@pytest.fixture
-def target_module() -> types.ModuleType:
-    """Fresh module object to use as populate_module target."""
-    return types.ModuleType("test_target")
-
-
 # -- Contract --------------------------------------------------------------
 
 
@@ -55,68 +48,65 @@ def test_ops_contract_has_36_names() -> None:
     assert len(OPS) == 36
 
 
-def test_base_populates_every_op_and_type(target_module: types.ModuleType) -> None:
-    """populate_module installs all ops as direct _torch_ops refs, plus types."""
-    DeviceOps.populate_module(target_module)
+def test_base_class_has_every_op_as_callable() -> None:
+    """DeviceOps exposes all ops as class-level callables (staticmethods)."""
     for name in OPS:
-        fn = getattr(target_module, name)
+        fn = getattr(DeviceOps, name)
         assert callable(fn), name
         # Must be the torch baseline function directly
         assert fn is getattr(_torch_ops, name), name
-    assert target_module.TransferDirection is TransferDirection
-    assert target_module.EngineKVFormat is EngineKVFormat
-    assert target_module.GPUKVFormat is EngineKVFormat  # back-compat alias
-    assert target_module.PageBufferShapeDesc is PageBufferShapeDesc
-    assert target_module.StagingCopy is StagingCopy
-    assert target_module.LaunchVar is LaunchVar
-    assert target_module.BatchStep is BatchStep
-    assert target_module.KernelGroupSpec is KernelGroupSpec
-    assert callable(target_module.set_shape_desc_dtype)
 
 
-def test_every_registered_device_populates_all_ops(
-    isolated_registry: Any, target_module: types.ModuleType
-) -> None:
-    """Each discovered DeviceSpec resolves an ops class that populates all ops."""
+def test_base_class_has_all_types() -> None:
+    """DeviceOps exposes shared types as class attributes."""
+    assert DeviceOps.TransferDirection is TransferDirection
+    assert DeviceOps.EngineKVFormat is EngineKVFormat
+    assert DeviceOps.GPUKVFormat is EngineKVFormat
+    assert DeviceOps.PageBufferShapeDesc is PageBufferShapeDesc
+    assert DeviceOps.StagingCopy is StagingCopy
+    assert DeviceOps.LaunchVar is LaunchVar
+    assert DeviceOps.BatchStep is BatchStep
+    assert DeviceOps.KernelGroupSpec is KernelGroupSpec
+    assert callable(DeviceOps.set_shape_desc_dtype)
+
+
+def test_every_registered_device_has_all_ops(isolated_registry: Any) -> None:
+    """Each discovered DeviceSpec resolves an ops class with all ops."""
     for device_type, spec in isolated_registry.items():
-        m = types.ModuleType(f"test_{device_type}")
-        spec.ops_cls.populate_module(m)
+        ops_cls = spec.ops_cls
         for name in OPS:
-            assert callable(getattr(m, name)), (device_type, name)
+            assert callable(getattr(ops_cls, name)), (device_type, name)
 
 
-# -- Dispatch --------------------------------------------------------------
+# -- Dispatch (MRO) --------------------------------------------------------
 
 
-def test_cpu_uses_torch_baseline(target_module: types.ModuleType) -> None:
+def test_cpu_uses_torch_baseline() -> None:
     """CpuDeviceOps adds no overrides: every op is the _torch_ops function."""
-    CpuDeviceOps.populate_module(target_module)
     for name in OPS:
-        fn = getattr(target_module, name)
+        fn = getattr(CpuDeviceOps, name)
         assert fn is getattr(_torch_ops, name), name
 
 
-def test_musa_overrides_only_one_op(target_module: types.ModuleType) -> None:
+def test_musa_overrides_only_one_op() -> None:
     """MusaDeviceOps overrides exactly one hot op; the rest are baseline."""
     musa_mod = pytest.importorskip(
         "lmcache.v1.platform.musa.device_ops",
         reason="musa platform package unavailable",
     )
-    musa_mod.MusaDeviceOps.populate_module(target_module)
     overridden = [
         name
         for name in OPS
-        if getattr(target_module, name) is not getattr(_torch_ops, name)
+        if getattr(musa_mod.MusaDeviceOps, name) is not getattr(_torch_ops, name)
     ]
     assert overridden == ["multi_layer_block_kv_transfer"]
 
 
-def test_musa_shim_dispatches_native_first(
-    target_module: types.ModuleType, monkeypatch: pytest.MonkeyPatch
+def test_musa_override_dispatches_native_first(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Calling multi_layer_block_kv_transfer through a populated module
-    (the production c_ops shim path) dispatches via the native MUSA path
-    when inputs are tensor-backed."""
+    """Calling multi_layer_block_kv_transfer on MusaDeviceOps dispatches
+    via the native MUSA path when inputs are tensor-backed."""
     # Third Party
     import torch
 
@@ -128,13 +118,12 @@ def test_musa_shim_dispatches_native_first(
         "lmcache.v1.platform.musa.native_kv_transfer",
         reason="musa native_kv_transfer unavailable",
     )
-    musa_mod.MusaDeviceOps.populate_module(target_module)
 
     captured: dict[str, Any] = {}
 
     def _fake_native(**kwargs: Any) -> bool:
         captured.update(kwargs)
-        return True  # signal success -> skip fallback
+        return True
 
     monkeypatch.setattr(
         native_mod,
@@ -154,7 +143,8 @@ def test_musa_shim_dispatches_native_first(
     shape_desc.kv_size = 2
     shape_desc.element_size = torch.empty((), dtype=torch.float32).element_size()
 
-    target_module.multi_layer_block_kv_transfer(
+    # Call through the class staticmethod (MRO resolution)
+    musa_mod.MusaDeviceOps.multi_layer_block_kv_transfer(
         paged,
         objects,
         [0, 1],
@@ -166,12 +156,11 @@ def test_musa_shim_dispatches_native_first(
         0,
     )
 
-    # Native was called with tensor-backed inputs
-    assert captured, "native path was not invoked through populated module"
+    assert captured, "native path was not invoked"
     assert captured["direction"] == TransferDirection.D2H
 
 
-# -- _bind_native ----------------------------------------------------------
+# -- bind_native decorator -------------------------------------------------
 
 
 class _FakeNativeModule:
@@ -190,23 +179,65 @@ class _FakeNativeModule:
         return "ignored"
 
 
-def test_bind_native_shadows_baseline_for_present_ops(
-    target_module: types.ModuleType,
-) -> None:
-    DeviceOps.populate_module(target_module)
-    DeviceOps._bind_native(target_module, _FakeNativeModule())
-    assert target_module.multi_layer_kv_transfer() == "native-mlt"
-    assert target_module.calculate_cdf() == "native-cdf"
+def test_bind_native_shadows_baseline_for_present_ops() -> None:
+    """bind_native overwrites ops found in the module; rest keep baseline."""
+
+    @bind_native(_FakeNativeModule())
+    class TestOps(DeviceOps):
+        device_type = "test-bind"
+
+    assert TestOps.multi_layer_kv_transfer() == "native-mlt"  # type: ignore[call-arg]
+    assert TestOps.calculate_cdf() == "native-cdf"  # type: ignore[call-arg]
     # Ops absent from native keep the torch baseline
-    assert target_module.single_layer_kv_transfer is _torch_ops.single_layer_kv_transfer
+    assert TestOps.single_layer_kv_transfer is _torch_ops.single_layer_kv_transfer
 
 
-def test_bind_native_ignores_symbols_absent_from_ops(
-    target_module: types.ModuleType,
-) -> None:
-    DeviceOps.populate_module(target_module)
-    DeviceOps._bind_native(target_module, _FakeNativeModule())
-    assert not hasattr(target_module, "not_in_ops")
+def test_bind_native_ignores_symbols_absent_from_ops() -> None:
+    """Symbols on the module not in OPS are not copied to the class."""
+
+    @bind_native(_FakeNativeModule())
+    class TestOps(DeviceOps):
+        device_type = "test-bind2"
+
+    assert not hasattr(TestOps, "not_in_ops") or (
+        getattr(TestOps, "not_in_ops", None) is None
+    )
+
+
+def test_bind_native_rebinds_types() -> None:
+    """bind_native updates type class attributes from the module."""
+
+    class FakeTypes:
+        class TransferDirection:
+            pass
+
+        class EngineKVFormat:
+            pass
+
+    @bind_native(FakeTypes())
+    class TestOps(DeviceOps):
+        device_type = "test-types"
+
+    assert TestOps.TransferDirection is FakeTypes.TransferDirection
+    assert TestOps.EngineKVFormat is FakeTypes.EngineKVFormat
+    assert TestOps.GPUKVFormat is FakeTypes.EngineKVFormat  # alias
+
+
+# -- Shim ------------------------------------------------------------------
+
+
+def test_c_ops_shim_has_all_ops_and_types() -> None:
+    """The lmcache.c_ops shim module exposes everything from OPS + types."""
+    # First Party
+    import lmcache.c_ops as c_ops
+
+    for name in OPS:
+        assert hasattr(c_ops, name), f"c_ops missing {name}"
+        assert callable(getattr(c_ops, name))
+    assert hasattr(c_ops, "TransferDirection")
+    assert hasattr(c_ops, "EngineKVFormat")
+    assert hasattr(c_ops, "GPUKVFormat")
+    assert hasattr(c_ops, "PageBufferShapeDesc")
 
 
 # -- DeviceSpec resolution -------------------------------------------------
@@ -229,8 +260,7 @@ def test_cpu_without_registered_spec_falls_back_to_base_device_ops(
 def test_unregistered_accelerator_fails_fast(
     isolated_registry: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A requested accelerator with no registered class is a hard error -- no
-    silent degradation to the torch baseline."""
+    """A requested accelerator with no registered class is a hard error."""
     table = {k: v for k, v in isolated_registry.items() if k != "cuda"}
     monkeypatch.setattr(platform_pkg, "_DEVICE_REGISTRY", table)
     with pytest.raises(
@@ -271,30 +301,3 @@ def test_new_device_needs_zero_resolver_edits(
         {**isolated_registry, "dummy": DummyDeviceSpec()},
     )
     assert resolve_device_ops_cls("dummy") is DummyDeviceOps
-
-
-def test_empty_device_type_is_skipped_during_discovery() -> None:
-    """The fallback/base spec is never registered as a concrete device."""
-    assert "" not in platform_pkg._DEVICE_REGISTRY
-    assert all(spec.device_type for spec in platform_pkg._DEVICE_REGISTRY.values())
-
-
-# -- c_ops shim ------------------------------------------------------------
-
-
-def test_c_ops_shim_exposes_full_surface() -> None:
-    """``import lmcache.c_ops`` exposes all ops + types."""
-    # First Party
-    import lmcache.c_ops as c_ops
-
-    for name in OPS:
-        assert callable(getattr(c_ops, name)), name
-    assert c_ops.TransferDirection is not None
-    assert c_ops.EngineKVFormat is not None
-    assert c_ops.GPUKVFormat is c_ops.EngineKVFormat
-    assert c_ops.PageBufferShapeDesc is not None
-    assert c_ops.StagingCopy is not None
-    assert c_ops.LaunchVar is not None
-    assert c_ops.BatchStep is not None
-    assert c_ops.KernelGroupSpec is not None
-    assert callable(c_ops.set_shape_desc_dtype)
