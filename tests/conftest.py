@@ -36,6 +36,18 @@ if importlib.util.find_spec("pytest_benchmark") is None:
     def benchmark():
         pytest.skip("pytest-benchmark is not installed")
 
+
+@pytest.fixture(scope="session", autouse=True)
+def disable_usage_tracking():
+    """Keep the test suite from sending usage telemetry to the stats server.
+
+    Tests that exercise the telemetry itself (tests/test_usage_context.py)
+    re-enable it per-test via monkeypatch with an injected transport.
+    """
+    os.environ["LMCACHE_TRACK_USAGE"] = "false"
+    yield
+
+
 # This is to mock the constructor and destructor of
 # MixedMemoryAllocator and PinMemoryAllocator to
 # use pin_memory=True for their constructors and
