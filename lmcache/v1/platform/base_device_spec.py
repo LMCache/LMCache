@@ -30,6 +30,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 # First Party
+from lmcache.v1.platform.base_device_ops import DeviceOps
 from lmcache.v1.platform.base_pin_memory import PinMemoryBackend
 
 if TYPE_CHECKING:
@@ -76,7 +77,7 @@ class DeviceSpec:
         return ""
 
     @property
-    def ops_cls(self) -> "type[DeviceOps]":
+    def ops_cls(self) -> type[DeviceOps]:
         """DeviceOps subclass providing the ``lmcache.c_ops`` surface.
 
         Lazy by design: the import happens on *access*, not at class-definition

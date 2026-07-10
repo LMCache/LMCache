@@ -32,7 +32,7 @@ class MusaDeviceSpec(DeviceSpec):
         return "musa"
 
     @property
-    def ops_cls(self) -> "type[DeviceOps]":
+    def ops_cls(self) -> type[DeviceOps]:
         # First Party
         from lmcache.v1.platform.musa.device_ops import MusaDeviceOps
 

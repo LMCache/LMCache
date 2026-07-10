@@ -23,11 +23,12 @@ automatically.
 """
 
 # Standard
-from typing import TYPE_CHECKING, Any
+from typing import Any
 import os
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.platform.base_device_ops import DeviceOps
 from lmcache.v1.platform.base_device_spec import DeviceSpec
 from lmcache.v1.platform.event_notifier import HAS_EVENTFD as HAS_EVENTFD
 from lmcache.v1.platform.event_notifier import EventfdNotifier as EventfdNotifier
@@ -38,10 +39,6 @@ from lmcache.v1.platform.event_notifier import (
     create_event_notifier as create_event_notifier,
 )
 from lmcache.v1.utils.subclass_discovery import discover_subclasses
-
-if TYPE_CHECKING:
-    # First Party
-    from lmcache.v1.platform.base_device_ops import DeviceOps
 
 logger = init_logger(__name__)
 
@@ -163,6 +160,7 @@ def resolve_kv_wrapper_factory(device_type: str) -> Any:
     """Return the KV-cache IPC wrapper factory for *device_type*.
 
 def resolve_device_ops_cls(device_type: str) -> "type[DeviceOps]":
+def resolve_device_ops_cls(device_type: str) -> type[DeviceOps]:
     """Resolve the ``DeviceOps`` class for *device_type*.
 
     Args:
