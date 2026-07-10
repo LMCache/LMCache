@@ -68,15 +68,6 @@ async def set_quota_config(
 ) -> QuotaConfigResponse:
     """Set the default quota applied to salts with no explicit entry.
 
-    On coordinator boot the default is ``None``: salts without an
-    explicit quota are exempt from eviction, so an empty (not yet
-    re-synced) quota table cannot mass-evict unknown tenants. After
-    re-registering all per-salt quotas, the external quota controller
-    sets ``default_limit_gb`` to ``0.0`` — the signal that arms
-    allowlist enforcement (unquota'd bytes become evictable next
-    cycle). A positive value instead grants every unquota'd salt that
-    byte budget; ``null`` returns to the exempt boot state.
-
     Args:
         body: The default limit to apply (and the ``tier`` it applies to).
 

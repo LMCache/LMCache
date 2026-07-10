@@ -146,13 +146,7 @@ class QuotaConfigRequest(BaseModel):
 
     Attributes:
         default_limit_gb: Byte budget in GiB applied to salts with no
-            explicit quota entry. ``None`` (the coordinator's boot
-            default) exempts unquota'd salts from eviction; ``0.0``
-            activates strict allowlist enforcement — all bytes under
-            unquota'd salts become evictable next cycle. The external
-            quota controller sets this to ``0.0`` after re-syncing
-            per-salt quotas; it is the signal that arms fleet-wide
-            eviction of unquota'd data.
+            explicit quota entry.
         tier: Cache tier the config applies to (only ``l2`` today).
     """
 
