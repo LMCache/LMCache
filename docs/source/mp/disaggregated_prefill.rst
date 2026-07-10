@@ -170,7 +170,8 @@ and ``--http-port``, the vLLM ``--port``, and ``VLLM_NIXL_SIDE_CHANNEL_PORT``.
    lmcache server --port 6555 --http-port 8090 \
        --l1-size-gb 100 --eviction-policy LRU --chunk-size 256 --instance-id prefiller
 
-   CUDA_VISIBLE_DEVICES=6 UCX_NET_DEVICES=all NCCL_CUMEM_ENABLE=1 \
+   CUDA_VISIBLE_DEVICES=6 VLLM_NIXL_SIDE_CHANNEL_HOST=127.0.0.1 VLLM_NIXL_SIDE_CHANNEL_PORT=5600 \
+   UCX_NET_DEVICES=all NCCL_CUMEM_ENABLE=1 \
    vllm serve <model> --port 8001 --enforce-eager --max-model-len 16384 --gpu-memory-utilization 0.4 \
        --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"},{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.host":"tcp://localhost","lmcache.mp.port":6555}}]}}'
 
