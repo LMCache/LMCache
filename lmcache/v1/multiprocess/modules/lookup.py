@@ -31,6 +31,7 @@ logger = init_logger(__name__)
 def compute_extra_count(
     tp_size: int,
     world_size: int,
+    use_mla: bool = False,
 ) -> int:
     """Compute extra count for MLA multi-reader locking.
 
@@ -38,34 +39,60 @@ def compute_extra_count(
       so each ObjectKey is retrieved by exactly 1
       worker -> extra_count = 0.
     MLA: TP does not split KV caches, all TP workers
-      share the same object. vLLM passes world_size
-      already divided by tp_size (e.g. world_size=1
-      for TP=4 PP=1), so ipc_keys_to_object_keys
-      only produces 1 ObjectKey per chunk.  All TP
-      workers retrieve that same ObjectKey, hence
-      extra_count = tp_size - 1.
+      within the same rank-shard share the same
+      ObjectKey.  The wire ``tp_size`` is already the
+      per-server reader count (``min(tp_size,
+      ranks_per_node)`` on the client side, see
+      ``ParallelStrategy.kv_tp_size``), so every
+      ObjectKey is retrieved by ``tp_size`` workers
+      -> extra_count = tp_size - 1.
 
-    Detection: tp > world_size means MLA (world_size
-    was divided by tp on the vLLM side).
+    This is correct for **all** TP x PP x n_servers
+    combinations:
 
-    Fallback: old vLLM (<= 0.8.5) does not send
-    tp_size (defaults to 1); we fall back to
-    world_size which gives extra_count = 0
-    (safe but may under-lock for MLA).
+      | config                         | rpn | wire tp | readers | extra |
+      |--------------------------------|-----|---------|---------|-------|
+      | MLA, 1-server, TP=4 PP=1       |  4  |    4    |    4    |   3   |
+      | MLA, 1-server, TP=4 PP=2       |  8  |    4    |    4    |   3   |
+      | MLA, 2-server, TP=4 PP=1       |  2  |    2    |    2    |   1   |
+      | MLA, 2-server, TP=4 PP=2       |  4  |    4    |    4    |   3   |
 
-    TODO: world_size currently carries an overloaded
-    meaning (total ranks for non-MLA vs total/tp for
-    MLA). Consider a dedicated field in the future.
+    (rpn = ranks_per_node = world_size // n_servers;
+    wire tp = min(tp_size, rpn).)
+
+    Previously this function *inferred* MLA from the
+    heuristic ``tp > world_size``.  That broke under
+    pipeline parallelism: PP inflates ``world_size``
+    (e.g. MLA TP=4 PP=2 n_servers=2: the key's
+    ``world_size`` = kv_world_size = 2, and the wire
+    ``tp_size`` = 2 (old ``tp//ns``), so ``2 > 2`` is
+    False -> extra_count = 0 -> under-locking ->
+    premature KV eviction).
+    The explicit ``use_mla`` flag, carried in
+    ``IPCCacheServerKey``, eliminates the guesswork.
+
+    Fallback: old vLLM (<= 0.8.5) and old clients that
+    do not send ``use_mla`` decode it as ``False``
+    (msgspec field-default), yielding extra_count = 0
+    — safe (never over-locks) but may under-lock for
+    MLA, same as the previous fallback behaviour.
 
     Args:
-        tp_size: Tensor-parallel size from the client.
-        world_size: World size from the cache key.
+        tp_size: Per-server tensor-parallel reader count
+            from the client (``ParallelStrategy.kv_tp_size``).
+        world_size: World size from the cache key.  Retained
+            in the signature for backward compatibility but
+            no longer used to infer MLA.
+        use_mla: Whether the worker KV format is MLA, taken
+            from ``IPCCacheServerKey.use_mla``.
 
     Returns:
-        Number of extra count (0 for non-MLA).
+        Number of extra readers (``tp_size - 1`` for MLA, 0
+        otherwise), never negative.
     """
-    tp = tp_size if tp_size > 1 else world_size
-    return tp - 1 if tp > world_size else 0
+    if use_mla:
+        return max(tp_size - 1, 0)
+    return 0
 
 
 def _get_prefix_hit_length(
@@ -257,7 +284,7 @@ class LookupModule:
             )
             return
 
-        extra_count = compute_extra_count(tp_size, world_size)
+        extra_count = compute_extra_count(tp_size, world_size, use_mla=key.use_mla)
 
         chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(list(key.token_ids))
         if not chunk_hashes:
@@ -495,7 +522,7 @@ class LookupModule:
         # chunks 512..768 may leak). Revisit when sliding-window prefetch is on.
         obj_keys = self._chunk_major_object_keys(key, chunk_hashes)
 
-        extra_count = compute_extra_count(tp_size, key.world_size)
+        extra_count = compute_extra_count(tp_size, key.world_size, use_mla=key.use_mla)
 
         self._ctx.storage_manager.finish_read_prefetched(
             obj_keys, extra_count=extra_count

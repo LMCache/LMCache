@@ -109,7 +109,14 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
         tp_size = llm_args.tensor_parallel_size
         pp_size = llm_args.pipeline_parallel_size
         self._world_size = tp_size * pp_size
+        self._tp_size = tp_size
         self._model_name = str(getattr(llm_args, "model", "unknown_model"))
+        # TRT-LLM does not expose an MLA flag on llm_args.  Read it from
+        # the environment so MLA models can opt in once TRT-LLM supports
+        # them; defaults to False (safe for all current non-MLA models).
+        self._use_mla = os.environ.get("LMCACHE_USE_MLA", "").lower() in (
+            "1", "true", "yes",
+        )
 
     def _create_key(
         self,
@@ -126,6 +133,7 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
             start=start,
             end=end,
             request_id=str(request_id),
+            use_mla=self._use_mla,
         )
 
     def get_num_new_matched_tokens(
@@ -161,9 +169,9 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
         t1 = time.perf_counter()
 
         try:
-            _send_request(self._mq_client, RequestType.LOOKUP, [key, 1]).result(
-                timeout=self._mq_timeout
-            )
+            _send_request(
+                self._mq_client, RequestType.LOOKUP, [key, self._tp_size]
+            ).result(timeout=self._mq_timeout)
             result = _send_request(
                 self._mq_client,
                 RequestType.QUERY_PREFETCH_STATUS,
@@ -197,7 +205,7 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
                 _send_request(
                     self._mq_client,
                     RequestType.FREE_LOOKUP_LOCKS,
-                    [free_key, 1],
+                    [free_key, self._tp_size],
                 )
             except Exception as e:
                 logger.warning("LMCache MP scheduler: free_lookup_locks failed: %s", e)
@@ -298,7 +306,11 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         tp_size = llm_args.tensor_parallel_size
         pp_size = llm_args.pipeline_parallel_size
         self._world_size = tp_size * pp_size
+        self._tp_size = tp_size
         self._model_name = str(getattr(llm_args, "model", "unknown_model"))
+        self._use_mla = os.environ.get("LMCACHE_USE_MLA", "").lower() in (
+            "1", "true", "yes",
+        )
 
         future = _send_request(self._mq_client, RequestType.GET_CHUNK_SIZE, [])
         self._chunk_size = future.result(timeout=self._mq_timeout)
@@ -317,6 +329,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             start=0,
             end=aligned_end,
             request_id=str(request_id),
+            use_mla=self._use_mla,
         )
 
     def register_kv_caches(self, kv_cache_tensor: torch.Tensor) -> None:

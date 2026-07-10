@@ -60,6 +60,19 @@ class IPCCacheServerKey:
     # ObjectKey.cache_salt). Validated in __post_init__.
     cache_salt: str = ""
 
+    # === MLA flag (not part of cache identity) ===
+    # Whether the worker's KV format is MLA (Multi-head Latent Attention).
+    # The server uses this to compute the correct read-lock refcount
+    # (``extra_count``) instead of inferring MLA from ``tp_size`` vs
+    # ``world_size`` — that heuristic breaks under pipeline parallelism,
+    # where PP inflates ``world_size`` and causes under-locking.
+    #
+    # Same forward-compatibility semantics as ``cache_salt``: an old
+    # payload without ``use_mla`` decodes on new code as ``False``
+    # (safe fallback — non-MLA never over-locks). ``compare=False``
+    # because it does not affect cache identity.
+    use_mla: bool = field(default=False, compare=False)
+
     # Duplicated from ObjectKey — cannot import ObjectKey here due to
     # circular dependency (api.py imports IPCCacheServerKey).
     _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
@@ -89,6 +102,7 @@ class IPCCacheServerKey:
         end: int = 0,
         request_id: str = "",
         cache_salt: str = "",
+        use_mla: bool = False,
     ) -> "IPCCacheServerKey":
         """Create a key from token ids. Only used by the tests."""
         return cls(
@@ -100,6 +114,7 @@ class IPCCacheServerKey:
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
+            use_mla=use_mla,
         )
 
     def no_worker_id_version(self) -> "IPCCacheServerKey":
@@ -113,6 +128,7 @@ class IPCCacheServerKey:
             end=self.end,
             request_id=self.request_id,
             cache_salt=self.cache_salt,
+            use_mla=self.use_mla,
         )
 
 

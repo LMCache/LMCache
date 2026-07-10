@@ -114,6 +114,7 @@ class LMCacheMPConnector:
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
+        use_mla: bool = False,
     ):
         self.tp_size = tp_size
         self.worker_id = rank
@@ -122,6 +123,7 @@ class LMCacheMPConnector:
         self.model_name = sgl_config.model_path
         self.num_layers = len(k_pool)
         self.tp_group = tp_group
+        self.use_mla = use_mla
         self.instance_id = os.getpid()
         self._mq_timeout = mq_timeout
         self._heartbeat_interval = heartbeat_interval
@@ -210,6 +212,7 @@ class LMCacheMPConnector:
             start=start,
             end=end,
             request_id=request_id,
+            use_mla=self.use_mla,
         )
 
     def _slot_mapping_to_block_ids(self, slot_mapping: torch.Tensor) -> list[int]:

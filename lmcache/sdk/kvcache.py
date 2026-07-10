@@ -62,6 +62,8 @@ class LMCacheKVCacheContext:
         http_url: str,
         model_name: str,
         timeout: float = 60.0,
+        use_mla: bool = False,
+        tp_size: int = 1,
     ) -> None:
         """
         Initialize the SDK context and register the SDK transfer strategy.
@@ -71,6 +73,13 @@ class LMCacheKVCacheContext:
             http_url: HTTP endpoint URL for fetching information.
             model_name: Model name used by the running LMCache server instance.
             timeout: Timeout in seconds for blocking MQ calls. Defaults to 60.
+            use_mla: Whether the model uses MLA (Multi-head Latent
+                Attention).  Propagated into ``IPCCacheServerKey`` so the
+                server computes the correct read-lock refcount.  Defaults
+                to ``False`` (safe for non-MLA models).
+            tp_size: Tensor-parallel size of the model, sent as the
+                reader-count argument in LOOKUP/FREE_LOOKUP_LOCKS.
+                Defaults to ``1`` (the SDK is a single reader).
 
         Returns:
             LMCacheKVCacheContext instance.
@@ -79,6 +88,8 @@ class LMCacheKVCacheContext:
         self._mq_client = MessageQueueClient(url, self._zmq_context)
         self._mq_timeout = timeout
         self._model_name = model_name
+        self._use_mla = use_mla
+        self._tp_size = tp_size
         self.instance_id = os.getpid()
         self._http_url = http_url
 
@@ -270,7 +281,7 @@ class LMCacheKVCacheContext:
 
         future = self._mq_client.submit_request(
             RequestType.LOOKUP,
-            [key, self._world_size],
+            [key, self._tp_size],
             get_response_class(RequestType.LOOKUP),
         )
         try:
@@ -380,6 +391,7 @@ class LMCacheKVCacheContext:
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
+            use_mla=self._use_mla,
         )
 
 

@@ -320,13 +320,28 @@ class ParallelStrategy:
     """Number of LMCache servers backing this deployment"""
 
     @property
+    def ranks_per_node(self) -> int:
+        """Number of vLLM ranks assigned to each LMCache server.
+
+        Server blocks are contiguous in rank space (see the connector's
+        ``local_server_url = server_urls[rank // ranks_per_node]``):
+        server 0 → ranks ``[0, ranks_per_node)``, server 1 →
+        ``[ranks_per_node, 2*ranks_per_node)``, etc.
+        """
+        return self.vllm_world_size // self.n_servers
+
+    @property
     def kv_world_size(self) -> int:
         """Number of pieces a single token chunk's KV cache is split into
         on the LMCache server storage."""
         if self.use_mla:
-            # In this PR we do not support PP + TP + MLA in multi-server mode.
-            # A precondition check enforces pp_size == 1, so kv_world_size for
-            # MLA can be derived as world_size / tp_size.
+            # MLA collapses the TP dimension (all TP workers share one
+            # KV object), so the shard count is world_size / tp_size.
+            # Under PP this equals pp_size (one shard per pipeline stage),
+            # which is correct: each stage owns distinct layers and thus
+            # distinct KV objects.  Multi-server deployments replicate
+            # these shards across servers (each server can hold every
+            # stage), so n_servers does not further divide the count.
             return self.vllm_world_size // self.tp_size
         return self.vllm_world_size // self.n_servers
 
@@ -341,16 +356,59 @@ class ParallelStrategy:
 
     @property
     def kv_tp_size(self) -> int:
-        """Tensor-parallel size as seen from a single LMCache server."""
+        """Number of readers that will retrieve the same KV object from a
+        single LMCache server.
+
+        Non-MLA: each TP worker owns a distinct shard, so exactly 1 reader
+        per object → ``tp_size // n_servers`` (shards per server).
+
+        MLA: all TP workers within a pipeline stage share one KV object.
+        When ``ranks_per_node >= tp_size`` (the common case: each server
+        holds one or more complete PP stages), every ``tp_size`` rank in
+        a stage lands on the same server and reads the same object, so
+        the reader count is ``tp_size``.  When ``ranks_per_node <
+        tp_size`` (more servers than pipeline stages), the TP group is
+        split across servers and each server gets ``ranks_per_node``
+        readers.
+
+        The old formula ``tp_size // n_servers`` was correct only when
+        server blocks split TP groups evenly (PP=1).  Under PP > 1 the
+        server blocks align with PP stages, not TP groups, causing
+        under-locking (e.g. TP=4 PP=2 ns=2: locked 2, actual readers 4).
+        """
+        if self.use_mla:
+            return min(self.tp_size, self.ranks_per_node)
         return self.tp_size // self.n_servers
 
     @property
     def is_kv_writer(self) -> bool:
-        """Whether this rank is responsible for storing KV."""
+        """Whether this rank is responsible for storing KV.
+
+        Non-MLA: every rank writes its own distinct shard.
+
+        MLA: all TP workers in a (server, pipeline-stage) pair share one
+        KV object, so exactly one rank per pair should write.  The
+        writer is the first TP-local rank within the server block:
+        ``(rank % ranks_per_node) % tp_size == 0``.
+
+        This yields exactly one writer per (server, stage) for all
+        practical configurations where ``ranks_per_node >= 1`` and
+        ``ranks_per_node % tp_size == 0`` (i.e. server blocks are
+        TP-aligned, which holds for every standard TP×PP×ns layout
+        because vLLM assigns ranks TP-inner/PP-outer and the connector
+        splits them into contiguous blocks).  The old formula
+        ``rank % (tp_size // n_servers) == 0`` selected multiple
+        writers per shard when PP > 1 (double-stores).
+        """
         if not self.use_mla:
             return True
-        # MLA: only first rank per node is a writer.
-        return self.vllm_worker_id % (self.tp_size // self.n_servers) == 0
+        rpn = self.ranks_per_node
+        if rpn == 0:
+            # n_servers > world_size — degenerate, shouldn't happen
+            # (connector asserts world_size % n_servers == 0), but
+            # guard against ZeroDivisionError regardless.
+            return True
+        return (self.vllm_worker_id % rpn) % self.tp_size == 0
 
 
 def _normalize_adapter_init_args(
@@ -1036,6 +1094,7 @@ class LMCacheMPSchedulerAdapter:
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
+            use_mla=self.parallel_strategy.use_mla,
         )
 
 
@@ -1799,4 +1858,5 @@ class LMCacheMPWorkerAdapter:
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
+            use_mla=self.parallel_strategy.use_mla,
         )

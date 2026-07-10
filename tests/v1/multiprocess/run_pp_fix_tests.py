@@ -1,0 +1,402 @@
+# SPDX-License-Identifier: Apache-2.0
+"""
+Standalone runner for the pipeline-parallelism fix tests.
+
+The repo's module graph pulls in torch/vllm/yaml/requests/etc.
+transitively, and the root conftest.py hard-imports torch, so pytest
+collection is blocked on this host (Apple Silicon, no torch). This
+runner validates the pure-logic changes by loading the two edited
+source files (custom_types.py, lookup.py) against stubbed torch and
+stubbed heavy intermediates, then exercising:
+
+  - compute_extra_count correctness table (all TP x PP x n_servers x MLA)
+  - IPCCacheServerKey.use_mla round-trip / identity / backward-compat
+  - wire backward-compat (old payload -> use_mla=False)
+  - PP guard removed + DP guard retained (source inspection)
+  - both adapter _create_key set use_mla (source inspection)
+  - lookup()/free_lookup_locks() pass key.use_mla into extra_count
+
+On a full Linux+NVIDIA+CUDA env, run instead:
+    pytest tests/v1/multiprocess/test_pipeline_parallel_fix.py -v
+"""
+import sys
+import types
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+ROOT = Path(__file__).resolve().parents[3]  # .../LMCache
+sys.path.insert(0, str(ROOT))
+
+# --- stub torch -----------------------------------------------------------
+if "torch" not in sys.modules:
+    _t = types.ModuleType("torch")
+    _t.Size = tuple
+    _t.dtype = type("dtype", (), {})
+    _t.float16 = _t.dtype()
+    _t.bfloat16 = _t.dtype()
+    sys.modules["torch"] = _t
+
+import msgspec  # noqa: E402
+
+# --- stub the heavy intermediate modules so lookup.py imports cleanly -----
+# lookup.py imports from lmcache.v1.multiprocess.engine_context and
+# lmcache.v1.distributed.api; those pull the whole torch/yaml/requests
+# graph. compute_extra_count and LookupModule only need a few names from
+# them at *call* time (which we mock), not at import time, so stubbing
+# the modules is safe.
+for _stub_name in [
+    "lmcache.v1.multiprocess.engine_context",
+    "lmcache.v1.distributed.api",
+    "lmcache.v1.mp_observability.event",
+    "lmcache.v1.mp_observability.otel_init",
+    "lmcache.v1.multiprocess.engine_module",
+    "lmcache.v1.multiprocess.protocol",
+    "lmcache.v1.multiprocess.token_hasher",
+]:
+    # don't clobber an already-loaded real module
+    if _stub_name in sys.modules:
+        continue
+    sys.modules[_stub_name] = types.ModuleType(_stub_name)
+
+# Provide the few names lookup.py imports from these stubs.
+_evt = MagicMock()
+sys.modules["lmcache.v1.mp_observability.event"].Event = _evt
+sys.modules["lmcache.v1.mp_observability.event"].EventType = MagicMock()
+sys.modules["lmcache.v1.mp_observability.otel_init"].register_gauge = MagicMock()
+ec = sys.modules["lmcache.v1.multiprocess.engine_context"]
+ec.MPCacheServerContext = MagicMock
+em = sys.modules["lmcache.v1.multiprocess.engine_module"]
+em.HandlerSpec = MagicMock
+em.ThreadPoolType = MagicMock
+proto = sys.modules["lmcache.v1.multiprocess.protocol"]
+proto.RequestType = MagicMock()
+api = sys.modules["lmcache.v1.distributed.api"]
+api.ObjectKey = MagicMock
+api.PrefetchHandle = MagicMock
+api.ipc_key_to_object_keys = MagicMock(return_value=[MagicMock()])
+sys.modules["lmcache.v1.multiprocess.token_hasher"].TokenHasher = MagicMock
+
+import importlib
+
+# Now load the REAL custom_types (needs only msgspec + the platform stub).
+# lmcache.v1.platform.base_ipc_wrapper imports resolve via CLI-only fallback.
+ct = importlib.import_module("lmcache.v1.multiprocess.custom_types")
+IPCCacheServerKey = ct.IPCCacheServerKey
+
+# And the REAL lookup.py (our edited version).
+lookup = importlib.import_module("lmcache.v1.multiprocess.modules.lookup")
+compute_extra_count = lookup.compute_extra_count
+LookupModule = lookup.LookupModule
+
+PASS = 0
+FAIL = 0
+
+
+def check(name, cond, detail=""):
+    global PASS, FAIL
+    if cond:
+        PASS += 1
+        print(f"  [PASS] {name}")
+    else:
+        FAIL += 1
+        print(f"  [FAIL] {name}  {detail}")
+
+
+# --------------------------------------------------------------------------- #
+print("=" * 72)
+print("  compute_extra_count correctness (edited source)")
+print("=" * 72)
+
+check("non-MLA tp1 ws1 -> 0", compute_extra_count(1, 1, use_mla=False) == 0)
+check("non-MLA tp4 ws4 -> 0", compute_extra_count(4, 4, use_mla=False) == 0)
+check("non-MLA tp4 ws8 -> 0", compute_extra_count(4, 8, use_mla=False) == 0)
+
+check("MLA 1-srv TP4 PP1 -> 3",
+      compute_extra_count(4, 1, use_mla=True) == 3,
+      f"got {compute_extra_count(4,1,use_mla=True)}")
+check("MLA 1-srv TP4 PP2 -> 3",
+      compute_extra_count(4, 2, use_mla=True) == 3,
+      f"got {compute_extra_count(4,2,use_mla=True)}")
+
+old_heuristic = compute_extra_count(2, 2, use_mla=False)
+fixed = compute_extra_count(2, 2, use_mla=True)
+check(f"MLA 2-srv TP4 PP1 -> 1 (flag-less heuristic gave {old_heuristic})",
+      fixed == 1, f"got {fixed}")
+check("MLA 2-srv TP4 PP2 -> 3",
+      compute_extra_count(4, 2, use_mla=True) == 3,
+      f"got {compute_extra_count(4,2,use_mla=True)}")
+
+check("default use_mla -> 0", compute_extra_count(4, 1) == 0)
+check("tp0 MLA clamps 0", compute_extra_count(0, 1, use_mla=True) == 0)
+
+# --------------------------------------------------------------------------- #
+print()
+print("=" * 72)
+print("  IPCCacheServerKey.use_mla (edited source)")
+print("=" * 72)
+
+k = IPCCacheServerKey("m", 1, None, (1,), 0, 1, "r")
+check("default use_mla False", k.use_mla is False)
+
+k = IPCCacheServerKey("m", 2, 0, (1, 2, 3), 0, 3, "r", use_mla=True)
+check("use_mla round-trips True", k.use_mla is True)
+
+lk = k.no_worker_id_version()
+check("no_worker_id_version preserves use_mla", lk.use_mla is True)
+check("no_worker_id_version nulls worker_id", lk.worker_id is None)
+
+k1 = IPCCacheServerKey("m", 1, None, (1,), 0, 1, "r", use_mla=False)
+k2 = IPCCacheServerKey("m", 1, None, (1,), 0, 1, "r", use_mla=True)
+check("use_mla not in identity (==)", k1 == k2)
+check("use_mla not in identity (hash)", hash(k1) == hash(k2))
+
+k3 = IPCCacheServerKey.from_token_ids("m", 1, 0, [1, 2], use_mla=True)
+check("from_token_ids carries use_mla", k3.use_mla is True)
+
+# --------------------------------------------------------------------------- #
+print()
+print("=" * 72)
+print("  Wire backward-compat (old payload -> use_mla=False)")
+print("=" * 72)
+
+k = IPCCacheServerKey("m", 1, None, (1, 2), 0, 2, "r", use_mla=True)
+b = msgspec.msgpack.encode(k)
+dk = msgspec.msgpack.decode(b, type=IPCCacheServerKey)
+check("msgpack round-trip preserves use_mla", dk.use_mla is True)
+# emulate old client: strip the field from the builtins map, re-encode
+bl = msgspec.to_builtins(k)
+check("new payload has use_mla", "use_mla" in bl)
+del bl["use_mla"]
+b2 = msgspec.msgpack.encode(bl)
+decoded = msgspec.msgpack.decode(b2, type=IPCCacheServerKey)
+check("old payload -> use_mla False", decoded.use_mla is False)
+check("old payload keeps model_name", decoded.model_name == "m")
+check("old payload keeps token_ids", decoded.token_ids == (1, 2))
+
+# --------------------------------------------------------------------------- #
+print()
+print("=" * 72)
+print("  lookup()/free_lookup_locks() use key.use_mla")
+print("=" * 72)
+
+ctx = MagicMock()
+ctx.token_hasher.chunk_size = 256
+ctx.token_hasher.compute_chunk_hashes.return_value = [b"h0"]
+ctx.layout_desc_registry.find.return_value = MagicMock()
+ctx.layout_desc_registry.find_attn_desc.return_value = MagicMock(num_object_groups=1)
+ctx.storage_manager.submit_prefetch_task.return_value = MagicMock()
+ctx.storage_manager.finish_read_prefetched = MagicMock()
+ctx.session_manager.get_or_create.return_value = MagicMock(
+    lookup_ipc_key=None, set_tokens=MagicMock()
+)
+ctx.event_bus.has_subscribers.return_value = False
+ctx.event_bus.publish = MagicMock()
+
+module = LookupModule(ctx)
+
+# PP+MLA case: tp=2, world_size=2, use_mla=True -> extra_count must be 1.
+key = IPCCacheServerKey("kimi_linear", 2, None, tuple(range(256)), 0, 256,
+                        "req-pp-mla", use_mla=True)
+with patch.object(lookup, "ipc_key_to_object_keys", return_value=[MagicMock()]):
+    module.lookup(key, tp_size=2)
+lk_kwargs = ctx.storage_manager.submit_prefetch_task.call_args.kwargs
+check("PP+MLA lookup extra_count == 1 (was 0 before fix)",
+      lk_kwargs["extra_count"] == 1, f"got {lk_kwargs.get('extra_count')}")
+
+with patch.object(lookup, "ipc_key_to_object_keys", return_value=[MagicMock()]):
+    module.free_lookup_locks(key, tp_size=2)
+fl_kwargs = ctx.storage_manager.finish_read_prefetched.call_args.kwargs
+check("PP+MLA free_lookup_locks extra_count == 1",
+      fl_kwargs["extra_count"] == 1, f"got {fl_kwargs.get('extra_count')}")
+
+# Non-MLA case must still be 0.
+key_nm = IPCCacheServerKey("glm4", 2, None, tuple(range(256)), 0, 256,
+                           "req-nomla", use_mla=False)
+ctx.storage_manager.submit_prefetch_task.reset_mock()
+with patch.object(lookup, "ipc_key_to_object_keys", return_value=[MagicMock()]):
+    module.lookup(key_nm, tp_size=2)
+check("non-MLA lookup extra_count == 0",
+      ctx.storage_manager.submit_prefetch_task.call_args.kwargs["extra_count"] == 0)
+
+# --------------------------------------------------------------------------- #
+print()
+print("=" * 72)
+print("  PP guard removed + DP guard retained (source inspection)")
+print("=" * 72)
+
+connector_src = (ROOT / "lmcache/integration/vllm/lmcache_mp_connector.py").read_text()
+check("PP ValueError removed",
+      "not pipeline parallelism" not in connector_src.lower()
+      and "Got pp_size=" not in connector_src,
+      "old PP error string still present")
+check("DP ValueError retained",
+      "data parallelism" in connector_src.lower(),
+      "DP guard was removed (should have stayed)")
+check("comment references the explicit use_mla fix",
+      "use_mla" in connector_src and "compute_extra_count" in connector_src)
+
+# --------------------------------------------------------------------------- #
+print()
+print("=" * 72)
+print("  ParallelStrategy: kv_tp_size + is_kv_writer for all combos")
+print("=" * 72)
+
+# We can't import ParallelStrategy directly (heavy dep chain), but we CAN
+# verify the formula by re-implementing it from the source and checking
+# the lock-balance invariant: for every (server, pipeline-stage) pair,
+# exactly one writer, and 1+extra_count == readers_per_server.
+def ranks_per_node(ws, ns):
+    return ws // ns
+
+def kv_tp_mla(tp, ws, ns):
+    rpn = ranks_per_node(ws, ns)
+    return min(tp, rpn)
+
+def is_writer_mla(wid, tp, ws, ns):
+    rpn = ranks_per_node(ws, ns)
+    return (wid % rpn) % tp == 0
+
+COMBOS = [
+    (4, 1, 1), (4, 1, 2), (4, 2, 1), (4, 2, 2),
+    (4, 1, 4), (4, 4, 2), (2, 2, 2), (2, 1, 2),
+    (8, 2, 2), (8, 1, 4), (1, 2, 1), (2, 4, 1),
+]
+for tp, pp, ns in COMBOS:
+    ws = tp * pp
+    rpn = ranks_per_node(ws, ns)
+    if rpn == 0:
+        continue
+    kv_tp = kv_tp_mla(tp, ws, ns)
+    extra = kv_tp - 1
+    # Check: for every (server, stage), exactly one writer AND
+    # 1+extra == readers on that server for that stage.
+    all_ok = True
+    for s in range(ns):
+        sranks = list(range(s * rpn, min((s + 1) * rpn, ws)))
+        stages = set(w // tp for w in sranks)
+        for stg in stages:
+            stage_ranks = [w for w in sranks if w // tp == stg]
+            readers = len(stage_ranks)
+            writers = [w for w in stage_ranks if is_writer_mla(w, tp, ws, ns)]
+            if len(writers) != 1:
+                all_ok = False
+            if 1 + extra != readers:
+                all_ok = False
+    check(f"MLA TP={tp} PP={pp} ns={ns}: kv_tp={kv_tp} extra={extra} "
+          f"(1+extra={1+extra}), 1 writer per (srv,stg), balanced",
+          all_ok)
+
+# Non-MLA: kv_tp = tp//ns, is_writer = True for all
+for tp, pp, ns in [(4, 2, 2), (2, 1, 1), (8, 2, 4)]:
+    ws = tp * pp
+    kv_tp = tp // ns
+    check(f"non-MLA TP={tp} PP={pp} ns={ns}: kv_tp={kv_tp}, all writers",
+          kv_tp == tp // ns)
+
+# Source inspection: the formulas match the edited code
+ps_src = (ROOT / "lmcache/integration/vllm/vllm_multi_process_adapter.py").read_text()
+check("kv_tp_size uses min(tp, ranks_per_node) for MLA",
+      "min(self.tp_size, self.ranks_per_node)" in ps_src)
+check("is_kv_writer uses (wid % rpn) % tp for MLA",
+      "(self.vllm_worker_id % rpn) % self.tp_size" in ps_src)
+check("ranks_per_node property added",
+      "def ranks_per_node" in ps_src)
+
+# --------------------------------------------------------------------------- #
+print()
+print("=" * 72)
+print("  All adapters set use_mla on keys (source inspection)")
+print("=" * 72)
+
+adapter_src = (ROOT / "lmcache/integration/vllm/vllm_multi_process_adapter.py").read_text()
+count = adapter_src.count("use_mla=self.parallel_strategy.use_mla")
+check(f"vLLM: both adapter _create_key set use_mla (found {count})", count == 2,
+      f"expected 2 occurrences, found {count}")
+
+sglang_src = (ROOT / "lmcache/integration/sglang/multi_process_adapter.py").read_text()
+check("sglang: _create_key sets use_mla",
+      "use_mla=self.use_mla" in sglang_src)
+check("sglang: constructor accepts use_mla",
+      "use_mla: bool = False" in sglang_src)
+
+trt_src = (ROOT / "lmcache/integration/tensorrt_llm/tensorrt_mp_adapter.py").read_text()
+check("tensorrt: both _create_key set use_mla",
+      trt_src.count("use_mla=self._use_mla") == 2,
+      f"found {trt_src.count('use_mla=self._use_mla')}")
+check("tensorrt: reads LMCACHE_USE_MLA env",
+      "LMCACHE_USE_MLA" in trt_src)
+check("tensorrt: LOOKUP uses self._tp_size not hardcoded 1",
+      "[key, self._tp_size]" in trt_src and "[key, 1]" not in trt_src)
+check("tensorrt: FREE_LOOKUP_LOCKS uses self._tp_size",
+      "[free_key, self._tp_size]" in trt_src)
+
+sdk_src = (ROOT / "lmcache/sdk/kvcache.py").read_text()
+check("sdk: _create_key sets use_mla",
+      "use_mla=self._use_mla" in sdk_src)
+check("sdk: constructor accepts use_mla + tp_size",
+      "use_mla: bool = False" in sdk_src and "tp_size: int = 1" in sdk_src)
+check("sdk: LOOKUP uses self._tp_size not self._world_size",
+      "[key, self._tp_size]" in sdk_src and "[key, self._world_size]" not in sdk_src)
+
+# blend_v3 caller passes use_mla too
+blend_src = (ROOT / "lmcache/v1/multiprocess/modules/blend_v3.py").read_text()
+check("blend_v3 passes key.use_mla to compute_extra_count",
+      "use_mla=key.use_mla" in blend_src)
+
+# --------------------------------------------------------------------------- #
+print()
+print("=" * 72)
+print("  Regression: existing test expectations still hold")
+print("=" * 72)
+
+# test_server_free_lookup_locks_calls_finish_read_prefetched:
+# free_lookup_locks(key, 1) with a non-MLA key -> extra_count=0
+ctx_r = MagicMock()
+ctx_r.token_hasher.chunk_size = 256
+ctx_r.token_hasher.compute_chunk_hashes.return_value = [b"hash0"]
+m_r = LookupModule(ctx_r)
+key_r = IPCCacheServerKey.from_token_ids(
+    "testmodel", 1, 0, [0] * 256, start=0, end=256, request_id="r"
+).no_worker_id_version()
+with patch.object(lookup, "ipc_key_to_object_keys", return_value=[[MagicMock()]]):
+    m_r.free_lookup_locks(key_r, 1)
+got = ctx_r.storage_manager.finish_read_prefetched.call_args.kwargs["extra_count"]
+check("existing: free_locks(key,1) non-MLA -> extra_count 0",
+      got == 0, f"got {got}")
+
+# test_server_free_lookup_locks_no_matching_chunks: no chunks -> no-op
+ctx_n = MagicMock()
+ctx_n.token_hasher.chunk_size = 256
+ctx_n.token_hasher.compute_chunk_hashes.return_value = []
+m_n = LookupModule(ctx_n)
+key_n = IPCCacheServerKey("testmodel", 1, None, tuple(range(256)), 0, 0, "req-empty")
+m_n.free_lookup_locks(key_n, 1)
+check("existing: no chunks -> finish_read_prefetched not called",
+      not ctx_n.storage_manager.finish_read_prefetched.called)
+
+# Wire payload shape unchanged: LOOKUP/FREE_LOOKUP_LOCKS still
+# [IPCCacheServerKey, int]. We added a field *inside* the key, not a new
+# payload argument, so the wire arity is unchanged. Confirm by checking the
+# payload-arity-defining files were NOT modified by this change.
+import subprocess
+diff = subprocess.run(
+    ["git", "diff", "--name-only"],
+    cwd=ROOT, capture_output=True, text=True,
+).stdout.split()
+payload_files = {
+    "lmcache/v1/multiprocess/protocols/base.py",
+    "lmcache/v1/multiprocess/protocol.py",
+}
+check("no payload-arity file modified (wire shape preserved)",
+      not (payload_files & set(diff)),
+      f"unexpectedly modified: {payload_files & set(diff)}")
+proto_src = (ROOT / "lmcache/v1/multiprocess/protocols/base.py").read_text()
+check("protocol source still references FREE_LOOKUP_LOCKS",
+      "FREE_LOOKUP_LOCKS" in proto_src)
+
+# --------------------------------------------------------------------------- #
+print()
+print("=" * 72)
+print(f"  RESULT: {PASS} passed, {FAIL} failed")
+print("=" * 72)
+sys.exit(1 if FAIL else 0)

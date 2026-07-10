@@ -813,7 +813,7 @@ class BlendV3Module(InstanceLivenessTarget):
         session.set_tokens(list(key.token_ids))
         session.lookup_ipc_key = key
 
-        extra_count = compute_extra_count(tp_size, world_size)
+        extra_count = compute_extra_count(tp_size, world_size, use_mla=key.use_mla)
         obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
         handle = self._ctx.storage_manager.submit_prefetch_task(
             obj_keys,

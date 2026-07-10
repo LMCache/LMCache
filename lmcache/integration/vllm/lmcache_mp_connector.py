@@ -625,19 +625,27 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "supported in a follow-up PR."
             )
 
-        # Multi-server + MLA: only TP is supported (no PP).
-        # PP splits layers across nodes, which would cause per-piece
-        # reader counts to vary per (server, pp_stage) pair and break
-        # the single-``tp_size`` LOOKUP / FREE_LOOKUP_LOCKS protocol.
-        # Non-MLA mode is not affected by this restriction.
-        if n_servers > 1:
-            pp_size = vllm_config.parallel_config.pipeline_parallel_size
-            if pp_size > 1:
-                raise ValueError(
-                    "LMCacheMPConnector multi-server mode only supports "
-                    "tensor parallelism (TP), not pipeline parallelism (PP). "
-                    f"Got pp_size={pp_size}."
-                )
+        # Pipeline parallelism (PP) is now supported in all modes.
+        #
+        # Previously this block raised ValueError for any multi-server
+        # deployment with pp_size > 1.  The root cause was that
+        # ``compute_extra_count`` inferred MLA from the heuristic
+        # ``tp > world_size``; under PP that heuristic misfires (PP
+        # inflates ``world_size``) and produces extra_count = 0,
+        # causing under-locking and premature KV eviction.
+        #
+        # The fix: ``IPCCacheServerKey`` now carries an explicit
+        # ``use_mla`` flag (set by the adapter from
+        # ``ParallelStrategy.use_mla``), and ``compute_extra_count``
+        # uses it directly.  The correct reader count is
+        # ``tp_size - 1`` for MLA and ``0`` for non-MLA, which holds
+        # for every TP x PP x n_servers combination because the wire
+        # ``tp_size`` is already the per-server reader count
+        # (``ParallelStrategy.kv_tp_size = min(tp_size, ranks_per_node)``
+        # where ``ranks_per_node = world_size // n_servers``).
+        #
+        # See compute_extra_count() in lookup.py for the full
+        # correctness table.
 
         zmq_context = zmq.Context.instance()
         parallel_strategy = build_parallel_strategy_from_vllm_config(
