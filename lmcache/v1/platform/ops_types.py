@@ -6,7 +6,7 @@ These types (``TransferDirection``, ``EngineKVFormat``, ``GPUKVFormat``,
 the former ``lmcache.python_ops_fallback`` module. They are deliberately
 self-contained (only ``torch`` + ``enum``) so call sites can import them
 without pulling in the heavier torch-baseline op implementations in
-:mod:`lmcache.v1.platform._torch_ops`.
+:mod:`lmcache.v1.platform.torch_ops`.
 
 The object-group transfer plan types (``_NativePlanType`` and its
 ``StagingCopy`` / ``LaunchVar`` / ``BatchStep`` / ``KernelGroupSpec``

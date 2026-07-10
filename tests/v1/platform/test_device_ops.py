@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 # First Party
-from lmcache.v1.platform import _torch_ops, resolve_device_ops_cls
+from lmcache.v1.platform import resolve_device_ops_cls, torch_ops
 from lmcache.v1.platform.base_device_ops import OPS, DeviceOps, bind_native
 from lmcache.v1.platform.base_device_spec import DeviceSpec
 from lmcache.v1.platform.cpu.device_ops import CpuDeviceOps
@@ -50,7 +50,7 @@ def test_base_class_has_every_op_as_callable() -> None:
         fn = getattr(DeviceOps, name)
         assert callable(fn), name
         # Must be the torch baseline function directly
-        assert fn is getattr(_torch_ops, name), name
+        assert fn is getattr(torch_ops, name), name
 
 
 def test_base_class_has_all_types() -> None:
@@ -78,10 +78,10 @@ def test_every_registered_device_has_all_ops(isolated_registry: Any) -> None:
 
 
 def test_cpu_uses_torch_baseline() -> None:
-    """CpuDeviceOps adds no overrides: every op is the _torch_ops function."""
+    """CpuDeviceOps adds no overrides: every op is the torch_ops function."""
     for name in OPS:
         fn = getattr(CpuDeviceOps, name)
-        assert fn is getattr(_torch_ops, name), name
+        assert fn is getattr(torch_ops, name), name
 
 
 def test_musa_overrides_only_one_op() -> None:
@@ -93,7 +93,7 @@ def test_musa_overrides_only_one_op() -> None:
     overridden = [
         name
         for name in OPS
-        if getattr(musa_mod.MusaDeviceOps, name) is not getattr(_torch_ops, name)
+        if getattr(musa_mod.MusaDeviceOps, name) is not getattr(torch_ops, name)
     ]
     assert overridden == ["multi_layer_block_kv_transfer"]
 
@@ -185,7 +185,7 @@ def test_bind_native_shadows_baseline_for_present_ops() -> None:
     assert TestOps.multi_layer_kv_transfer() == "native-mlt"  # type: ignore[call-arg]
     assert TestOps.calculate_cdf() == "native-cdf"  # type: ignore[call-arg]
     # Ops absent from native keep the torch baseline
-    assert TestOps.single_layer_kv_transfer is _torch_ops.single_layer_kv_transfer
+    assert TestOps.single_layer_kv_transfer is torch_ops.single_layer_kv_transfer
 
 
 def test_bind_native_ignores_symbols_absent_from_ops() -> None:

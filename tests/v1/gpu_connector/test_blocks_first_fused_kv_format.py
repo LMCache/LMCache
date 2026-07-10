@@ -23,11 +23,11 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )
-from lmcache.v1.platform._torch_ops import (
-    multi_layer_block_kv_transfer as fallback_multi_layer_block_kv_transfer,
-)
 from lmcache.v1.platform.ops_types import (
     set_shape_desc_dtype,
+)
+from lmcache.v1.platform.torch_ops import (
+    multi_layer_block_kv_transfer as fallback_multi_layer_block_kv_transfer,
 )
 import lmcache.c_ops as lmc_ops
 

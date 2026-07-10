@@ -2,11 +2,11 @@
 """Device detection helpers, decoupled from ``lmcache.v1.platform``.
 
 Kept in its own module (rather than in ``platform/__init__.py``) so that
-peers such as :mod:`lmcache.v1.platform._torch_ops` can import the
+peers such as :mod:`lmcache.v1.platform.torch_ops` can import the
 detection primitives at the top of the file without introducing an
 import cycle -- ``platform/__init__.py`` itself pulls in
-``base_device_ops``, which in turn pulls in ``_torch_ops``, so any name
-that ``_torch_ops`` needs from the platform package must live *outside*
+``base_device_ops``, which in turn pulls in ``torch_ops``, so any name
+that ``torch_ops`` needs from the platform package must live *outside*
 that init chain.
 
 The registry of :class:`DeviceSpec` subclasses and the detected torch
@@ -125,7 +125,7 @@ def _detect_device() -> tuple[Any, str]:
 def get_torch_device() -> tuple[Any, str]:
     """Return the cached ``(torch_dev, torch_device_type)`` pair.
 
-    Lazy + memoized so that peers like :mod:`_torch_ops` can safely
+    Lazy + memoized so that peers like :mod:`torch_ops` can safely
     import this helper at module top level: no work is performed until
     the tuple is actually needed.
     """

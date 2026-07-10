@@ -10,7 +10,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.platform import _torch_ops as py_ops
+from lmcache.v1.platform import torch_ops as py_ops
 from lmcache.v1.platform.musa import native_kv_transfer as musa_native
 
 
@@ -60,14 +60,14 @@ def test_native_transfer_module_lives_under_musa_platform() -> None:
 def test_musa_device_ops_overrides_multi_layer_block_kv_transfer() -> None:
     """MusaDeviceOps overrides multi_layer_block_kv_transfer via MRO."""
     # First Party
-    from lmcache.v1.platform import _torch_ops
+    from lmcache.v1.platform import torch_ops
     from lmcache.v1.platform.musa.device_ops import MusaDeviceOps
 
     assert MusaDeviceOps.device_type == "musa"
     # The override is on the class itself, not the torch baseline.
     assert (
         MusaDeviceOps.multi_layer_block_kv_transfer
-        is not _torch_ops.multi_layer_block_kv_transfer
+        is not torch_ops.multi_layer_block_kv_transfer
     )
 
 

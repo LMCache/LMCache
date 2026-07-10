@@ -15,7 +15,7 @@ from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
 )
-from lmcache.v1.platform import _torch_ops as _py_ops
+from lmcache.v1.platform import torch_ops as _py_ops
 
 # ==========================================
 # 0. utils functions.
@@ -55,10 +55,10 @@ def _build_backend_params() -> list:
 
     Returns one entry per available backend configuration:
     - cuda_c_ops: uses lmcache.c_ops (requires CUDA and the CUDA extension)
-    - cuda_py_ops: uses lmcache.v1.platform._torch_ops with GPU visible
-    - cpy_py_ops: uses lmcache.v1.platform._torch_ops with GPU mocked away
+    - cuda_py_ops: uses lmcache.v1.platform.torch_ops with GPU visible
+    - cpy_py_ops: uses lmcache.v1.platform.torch_ops with GPU mocked away
     - xpu_sycl_ops: uses lmcache.xpu_ops (requires XPU and the SYCL extension)
-    - xpu_py_ops: uses lmcache.v1.platform._torch_ops with XPU visible
+    - xpu_py_ops: uses lmcache.v1.platform.torch_ops with XPU visible
     """
     params = []
     cuda_available = torch.cuda.is_available()

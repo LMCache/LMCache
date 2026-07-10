@@ -16,7 +16,7 @@ from typing import ClassVar
 import torch
 
 # First Party
-from lmcache.v1.platform import _torch_ops
+from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.base_device_ops import DeviceOps
 
 
@@ -59,7 +59,7 @@ def _musa_multi_layer_block_kv_transfer(
     ):
         return
 
-    return _torch_ops.multi_layer_block_kv_transfer(
+    return torch_ops.multi_layer_block_kv_transfer(
         paged_buffer_ptrs_tensor,
         lmcache_objects_ptrs,
         block_ids,

@@ -2,7 +2,7 @@
 """The unified per-device ops abstraction (the ``lmcache.c_ops`` surface).
 
 :class:`DeviceOps` owns the full op contract (:data:`OPS`) with a
-device-agnostic torch baseline from :mod:`lmcache.v1.platform._torch_ops`.
+device-agnostic torch baseline from :mod:`lmcache.v1.platform.torch_ops`.
 Each op is a real ``staticmethod`` on the class, resolved via normal MRO.
 Accelerator subclasses override individual ops or call :func:`bind_native`
 (usually via :meth:`_ensure_native`) to bulk-bind a compiled ``.so``.
@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 # First Party
-from lmcache.v1.platform import _torch_ops
+from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.ops_types import (
     BatchStep,
     EngineKVFormat,
@@ -134,14 +134,14 @@ def bind_native(module: object):
 
 # ─── Base class ────────────────────────────────────────────────────────
 
-_ops = _torch_ops  # alias for line-length compliance
+_ops = torch_ops  # alias for line-length compliance
 
 
 class DeviceOps:
     """Strategy base: per-device ops resolved via MRO.
 
     Every op in :data:`OPS` is a ``staticmethod`` on the class delegating to
-    the torch baseline in :mod:`~lmcache.v1.platform._torch_ops`.
+    the torch baseline in :mod:`~lmcache.v1.platform.torch_ops`.
     Accelerator subclasses either:
 
     - Override individual ops (e.g. MUSA overrides one transfer op).
