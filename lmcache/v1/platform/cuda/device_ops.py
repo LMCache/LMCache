@@ -2,7 +2,7 @@
 """CUDA ops backend: bulk-bind the compiled ``lmcache.c_ops`` extension.
 
 :class:`CudaDeviceOps` calls :func:`~..base_device_ops.bind_native` in
-:meth:`_ensure_native` to layer the compiled CUDA extension on top of the
+:meth:`ensure_native` to layer the compiled CUDA extension on top of the
 torch baseline.  If the extension is missing, a warning is logged and the
 class stays on the torch fallback (soft-fail, same as XPU).
 """
@@ -25,7 +25,7 @@ class CudaDeviceOps(DeviceOps):
     _native_bound: ClassVar[bool] = False
 
     @classmethod
-    def _ensure_native(cls) -> None:
+    def ensure_native(cls) -> None:
         if cls._native_bound:
             return
         cls._native_bound = True  # set early to prevent repeated attempts

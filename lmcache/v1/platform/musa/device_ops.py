@@ -18,6 +18,11 @@ import torch
 # First Party
 from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.base_device_ops import DeviceOps
+from lmcache.v1.platform.ops_types import (
+    EngineKVFormat,
+    PageBufferShapeDesc,
+    TransferDirection,
+)
 
 
 def _tensor_list(value: object) -> list[torch.Tensor] | None:
@@ -30,15 +35,15 @@ def _tensor_list(value: object) -> list[torch.Tensor] | None:
 
 
 def _musa_multi_layer_block_kv_transfer(
-    paged_buffer_ptrs_tensor,
-    lmcache_objects_ptrs,
-    block_ids,
-    device,
-    direction,
-    shape_desc,
-    lmcache_chunk_size,
-    engine_kv_format,
-    skip_prefix_n_blocks,
+    paged_buffer_ptrs_tensor: torch.Tensor | list,
+    lmcache_objects_ptrs: list[int] | list[torch.Tensor],
+    block_ids: torch.Tensor | list[int],
+    device: torch.device | str,
+    direction: TransferDirection,
+    shape_desc: PageBufferShapeDesc,
+    lmcache_chunk_size: int,
+    engine_kv_format: EngineKVFormat,
+    skip_prefix_n_blocks: int,
 ) -> None:
     """Native MUSA block transfer when tensor-backed; else torch baseline."""
     # First Party

@@ -2,7 +2,7 @@
 """XPU ops backend: bind the SYCL ops over the torch baseline.
 
 :class:`XpuDeviceOps` calls :func:`~..base_device_ops.bind_native` in
-:meth:`_ensure_native` to layer the SYCL extension on top of the torch
+:meth:`ensure_native` to layer the SYCL extension on top of the torch
 baseline.  If the extension is not built, a warning is logged and the class
 stays on the torch fallback.
 """
@@ -25,7 +25,7 @@ class XpuDeviceOps(DeviceOps):
     _native_bound: ClassVar[bool] = False
 
     @classmethod
-    def _ensure_native(cls) -> None:
+    def ensure_native(cls) -> None:
         if cls._native_bound:
             return
         cls._native_bound = True  # set early to prevent repeated attempts

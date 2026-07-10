@@ -30,7 +30,7 @@ __all__ = ["__version__", "torch_dev", "torch_device_type"]
 def _install_c_ops_shim() -> None:
     """Register ``lmcache.c_ops`` as the resolved :class:`DeviceOps` class.
 
-    Calls :meth:`DeviceOps._ensure_native` to lazily bind the compiled
+    Calls :meth:`DeviceOps.ensure_native` to lazily bind the compiled
     extension, then registers the class itself as the ``lmcache.c_ops``
     module.  Since all ops are staticmethods and types are class attrs,
     ``c_ops.multi_layer_kv_transfer(...)`` resolves with zero overhead.
@@ -39,7 +39,7 @@ def _install_c_ops_shim() -> None:
     from lmcache.v1.platform import resolve_device_ops_cls
 
     ops_cls = resolve_device_ops_cls(torch_device_type)
-    ops_cls._ensure_native()
+    ops_cls.ensure_native()
 
     shim = types.ModuleType("lmcache.c_ops")
     shim.__getattr__ = lambda name: getattr(ops_cls, name)  # type: ignore[method-assign]

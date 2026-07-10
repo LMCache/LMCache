@@ -5,7 +5,7 @@
 baseline from :mod:`lmcache.v1.platform.torch_ops`.  Each op is a real
 ``staticmethod`` on the class, resolved via normal MRO.  Accelerator subclasses
 override individual ops or call :func:`bind_native` (usually via
-:meth:`_ensure_native`) to bulk-bind a compiled ``.so``.
+:meth:`ensure_native`) to bulk-bind a compiled ``.so``.
 
 The class itself is the single source of truth: op names are discovered by
 iterating :meth:`DeviceOps.iter_ops` / :meth:`DeviceOps.iter_native_types`,
@@ -19,7 +19,7 @@ overwrites every staticmethod op found in *module* onto *cls*.
 from __future__ import annotations
 
 # Standard
-from typing import ClassVar, Iterator
+from typing import Callable, ClassVar, Iterator
 
 # First Party
 from lmcache.v1.platform import ops_types, torch_ops
@@ -37,7 +37,7 @@ from lmcache.v1.platform.ops_types import (
 # ─── Decorator ─────────────────────────────────────────────────────────
 
 
-def bind_native(module: object):
+def bind_native(module: object) -> Callable[[type[DeviceOps]], type[DeviceOps]]:
     """Class-decorator factory: bulk-bind native ops from *module* onto a class.
 
     Usage::
@@ -45,7 +45,7 @@ def bind_native(module: object):
         @bind_native(compiled_module)
         class MyDeviceOps(DeviceOps): ...
 
-    Or applied lazily inside ``_ensure_native()``::
+    Or applied lazily inside ``ensure_native()``::
 
         bind_native(native)(cls)
 
@@ -54,6 +54,13 @@ def bind_native(module: object):
     is overwritten with ``staticmethod(fn)``.  Types yielded by
     :meth:`DeviceOps.iter_native_types` are also rebound (for pybind enum
     identity).
+
+    Args:
+    module: The compiled native module or object containing the native ops.
+
+    Returns:
+    A decorator function that takes a DeviceOps subclass and returns it
+    with native ops bound.
     """
 
     def decorator(cls: type[DeviceOps]) -> type[DeviceOps]:
@@ -85,11 +92,11 @@ class DeviceOps:
     Accelerator subclasses either:
 
     - Override individual ops (e.g. MUSA overrides one transfer op).
-    - Call ``bind_native(module)(cls)`` in :meth:`_ensure_native` to
+    - Call ``bind_native(module)(cls)`` in :meth:`ensure_native` to
       bulk-overwrite all ops the compiled extension exports.
 
     The ``lmcache.c_ops`` shim reads attributes directly off the resolved
-    class after :meth:`_ensure_native` has been called.
+    class after :meth:`ensure_native` has been called.
     """
 
     device_type: ClassVar[str] = ""  # base is unregistered
@@ -163,7 +170,7 @@ class DeviceOps:
     # ── Lazy native binding ───────────────────────────────────────────
 
     @classmethod
-    def _ensure_native(cls) -> None:
+    def ensure_native(cls) -> None:
         """Attempt to load and bind the compiled native extension.
 
         Subclasses override this to ``importlib.import_module(...)`` then
