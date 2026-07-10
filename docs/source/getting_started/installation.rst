@@ -31,6 +31,15 @@ Install LMCache
                             You're all set! You can now start using LMCache. For hands-on guides and more
                             usage examples, see the :ref:`quickstart_examples` section.
 
+                        .. note::
+
+                            NIXL support (e.g. for disaggregated prefill and P2P KV
+                            sharing) is an optional extra:
+
+                            .. code-block:: bash
+
+                                uv pip install lmcache[nixl]
+
                     .. tab-item:: CUDA 12.9
 
                         The CUDA 12.9 wheel is published to a dedicated
@@ -118,8 +127,8 @@ Install LMCache
                             uv pip install vllm \
                                 --extra-index-url https://download.pytorch.org/whl/cu129 \
                                 --index-strategy unsafe-best-match
-                            # LMCACHE_CUDA_MAJOR=12 makes setup.py pick cupy-cuda12x / nixl-cu12
-                            # for install_requires instead of the cu13 defaults.
+                            # LMCACHE_CUDA_MAJOR=12 makes setup.py pick cupy-cuda12x
+                            # for install_requires instead of the cu13 default.
                             LMCACHE_CUDA_MAJOR=12 \
                                 uv pip install -e . --no-build-isolation
 

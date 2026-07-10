@@ -358,3 +358,62 @@ async def test_execute_evictions_empty_plan_is_noop():
         await ctrl.wait_for_in_flight_dispatches()
 
     assert plan == {}
+
+
+# =============================================================================
+# L2 pin / unpin (eviction exclusion)
+# =============================================================================
+
+
+def test_pin_excludes_key_from_eviction_plan():
+    """A pinned key is never selected for eviction, even over-quota."""
+    ctrl, _, ut = _setup(eviction_ratio=1.0)
+    k1 = _make_key("a", h="01")
+    k2 = _make_key("a", h="02")
+    _store(ctrl, ut, k1, 100)
+    _store(ctrl, ut, k2, 100)
+
+    ctrl.pin([k1])
+    plan = ctrl.compute_eviction_plan()
+    assert k1 not in plan.get("a", [])
+    assert k2 in plan["a"]
+
+
+def test_unpin_restores_eviction_eligibility():
+    """After unpin, a previously pinned key can be evicted again."""
+    ctrl, _, ut = _setup(eviction_ratio=1.0)
+    k = _make_key("a")
+    _store(ctrl, ut, k, 100)
+
+    ctrl.pin([k])
+    assert ctrl.compute_eviction_plan() == {}
+
+    ctrl.unpin([k])
+    assert ctrl.compute_eviction_plan()["a"] == [k]
+
+
+def test_pin_is_reference_counted():
+    """Two pins require two unpins before the key can be evicted."""
+    ctrl, _, ut = _setup(eviction_ratio=1.0)
+    k = _make_key("a")
+    _store(ctrl, ut, k, 100)
+
+    ctrl.pin([k])
+    ctrl.pin([k])
+    assert ctrl.compute_eviction_plan() == {}
+
+    ctrl.unpin([k])
+    assert ctrl.compute_eviction_plan() == {}  # still pinned once
+
+    ctrl.unpin([k])
+    assert ctrl.compute_eviction_plan()["a"] == [k]
+
+
+def test_unpin_unknown_key_is_noop():
+    """Unpinning a key that was never pinned does not go negative."""
+    ctrl, _, ut = _setup(eviction_ratio=1.0)
+    k = _make_key("a")
+    _store(ctrl, ut, k, 100)
+
+    ctrl.unpin([_make_key("a", h="ff")])  # never pinned
+    assert ctrl.compute_eviction_plan()["a"] == [k]

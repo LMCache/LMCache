@@ -18,13 +18,13 @@ from lmcache.v1.gpu_connector.gpu_connectors import (
     VLLMPagedMemLayerwiseGPUConnector,
 )
 from lmcache.v1.gpu_connector.utils import get_dtype
-from lmcache.v1.memory_management import (
-    GPUMemoryAllocator,
-    MemoryFormat,
+from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
+from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
     PagedTensorMemoryAllocator,
-    PinMemoryAllocator,
-    TensorMemoryAllocator,
 )
+from lmcache.v1.memory_allocators.pin_memory_allocator import PinMemoryAllocator
+from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
+from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.metadata import LMCacheMetadata
 
 if torch.cuda.is_available():
@@ -104,9 +104,13 @@ def patch_pin_allocator():
 
     with (
         patch(
-            "lmcache.v1.memory_management.PinMemoryAllocator.__init__", fake_pin_init
+            "lmcache.v1.memory_allocators.pin_memory_allocator.PinMemoryAllocator.__init__",
+            fake_pin_init,
         ),
-        patch("lmcache.v1.memory_management.PinMemoryAllocator.close", fake_pin_close),
+        patch(
+            "lmcache.v1.memory_allocators.pin_memory_allocator.PinMemoryAllocator.close",
+            fake_pin_close,
+        ),
     ):
         yield
 
