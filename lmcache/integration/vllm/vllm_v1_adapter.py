@@ -537,6 +537,13 @@ class LMCacheConnectorV1Impl:
         else:
             self.use_layerwise = config.use_layerwise
             self.enable_blending = config.enable_blending
+            # Worker-local PD transfer watermark. Scheduler→worker metadata is
+            # one-way, so mutations to DisaggSpec.num_transferred_tokens on the
+            # worker are lost on the next chunked-prefill step. Keep a durable
+            # map keyed by vLLM request id and restore it before the skip gate.
+            # This must never be seeded from SaveSpec.skip_leading_tokens /
+            # LocalCPU hits: local cache progress ≠ peer PD progress.
+            self._pd_transferred_tokens: dict[str, int] = {}
 
             if self.enable_blending:
                 assert self.lmcache_engine is not None
@@ -1173,6 +1180,10 @@ class LMCacheConnectorV1Impl:
             skip_leading_tokens = save_spec.skip_leading_tokens
             # shared storage disaggregation will not have a disagg_spec passed in
             if self.kv_role == "kv_producer" and request.disagg_spec:
+                # Restore worker-local PD progress lost across metadata rebuilds.
+                remembered = self._pd_transferred_tokens.get(request.req_id, 0)
+                if remembered > request.disagg_spec.num_transferred_tokens:
+                    request.disagg_spec.num_transferred_tokens = remembered
                 skip_leading_tokens = min(
                     skip_leading_tokens, request.disagg_spec.num_transferred_tokens
                 )
@@ -1256,6 +1267,7 @@ class LMCacheConnectorV1Impl:
                 save_spec.skip_leading_tokens = len(token_ids)
                 if request.disagg_spec:
                     request.disagg_spec.num_transferred_tokens = len(token_ids)
+                    self._pd_transferred_tokens[request.req_id] = len(token_ids)
 
     def _probe_decoder_cache(self, request: ReqMeta, token_ids: list[int]) -> None:
         """Query the decoder's cache to check which blocks are already cached.
@@ -1338,6 +1350,11 @@ class LMCacheConnectorV1Impl:
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        # Drop worker-local PD watermarks for finished requests.
+        pd_transferred = getattr(self, "_pd_transferred_tokens", None)
+        if pd_transferred is not None:
+            for req_id in finished_req_ids:
+                pd_transferred.pop(req_id, None)
         return None, None
 
     def get_block_ids_with_load_errors(self) -> set[int]:
