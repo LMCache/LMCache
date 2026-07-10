@@ -248,7 +248,7 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			Expect(mount.MountPath).To(Equal(cbPluginMountPath))
 
 			By("M4: PYTHONPATH on the container")
-			Expect(envValue(c, pythonPathEnvName)).To(Equal(cbPythonPath))
+			Expect(envValue(c, pythonPathEnvName)).To(Equal(cbPluginMountPath))
 
 			By("M5: required vLLM args asserted individually")
 			Expect(argsHasFlagValue(c.Args, cbFlagAttentionBackend, cbValAttentionBackend)).To(BeTrue(),
@@ -469,7 +469,7 @@ var _ = Describe("CacheBlendPodInjector", func() {
 
 			By("the vLLM container is mutated")
 			vllm := findContainer(out, "vllm")
-			Expect(envValue(vllm, pythonPathEnvName)).To(Equal(cbPythonPath))
+			Expect(envValue(vllm, pythonPathEnvName)).To(Equal(cbPluginMountPath))
 			Expect(argsHasFlagValue(vllm.Args, cbFlagAttentionBackend, cbValAttentionBackend)).To(BeTrue())
 
 			By("the sidecar container is untouched")

@@ -137,6 +137,27 @@ CREATE the webhook injects, reading the engine's `<engine>-connection` ConfigMap
 - `hostIPC: true` — CUDA IPC with the node-local LMCache server;
 - `PYTHONHASHSEED=0` — deterministic prefix hashing (only if you didn't set it).
 
+### Optional: code-payload staging
+
+By default the webhook only wires the connection — vLLM runs whatever `lmcache`
+is baked into its image. To instead pin the vLLM pod to a specific `lmcache`
+build (so the vLLM client and the engine server share one version), set
+`spec.injection.payloadImage` on the `LMCacheEngine`. The webhook then also
+stages that image's `lmcache` tree into the vLLM container, mirroring CacheBlend:
+
+- a shared `emptyDir` (`lmcache-payload`) + a payload **init container** that
+  copies the image's `/payload` tree into it (busybox `cp -a`, no command
+  override);
+- a read-only mount of that volume on the vLLM container;
+- `PYTHONPATH=/lmcache-payload` prepended so vLLM imports the staged `lmcache`;
+- the engine's `injection.imagePullSecrets` merged onto the pod (override per-pod
+  with the `lmcache.ai/lmcache-image-pull-secrets` annotation) for private images.
+
+`payloadImage` is a **separate, purpose-built** image: it must ship the unpacked
+`lmcache` tree under `/payload` and copy it to `$SHARED_DIR` on start (the same
+contract as the CacheBlend payload image). Its `repository` has no valid default,
+so you must set it explicitly; leave `injection` unset for connection-only wiring.
+
 Editable sample: [`config/samples/vllm_lmcache_deployment.yaml`](config/samples/vllm_lmcache_deployment.yaml).
 
 > [!IMPORTANT]
