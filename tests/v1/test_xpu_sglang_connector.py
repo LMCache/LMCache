@@ -15,7 +15,8 @@ from lmcache.v1.gpu_connector.xpu_connectors import (
     SGLangLayerwiseXPUConnector,
     SGLangXPUConnector,
 )
-from lmcache.v1.memory_management import MemoryFormat, PinMemoryAllocator
+from lmcache.v1.memory_allocators.pin_memory_allocator import PinMemoryAllocator
+from lmcache.v1.memory_management import MemoryFormat
 from tests.v1.utils import (
     check_paged_kv_cache_equal_with_mla,
     check_sglang_paged_kv_cache_equal,

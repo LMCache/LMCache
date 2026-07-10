@@ -1,15 +1,16 @@
 # Sample vLLM Deployment that OPTS IN to LMCacheEngine dependency injection.
 #
-# This is the webhook-injected alternative to vllm_deployment.yaml (which wires
-# vLLM to the engine by hand: a ConfigMap volume mount + a `sh -c` wrapper that
-# cats the kv-transfer-config). Here the mutating webhook does it for you at pod
-# CREATE — you supply only the opt-in label + the engine annotation and a normal,
-# args-only vLLM launch. After admission the webhook adds:
+# The webhook-injected alternative to vllm_deployment.yaml (which wires vLLM to
+# the engine by hand). You supply only the opt-in label + engine annotation and a
+# normal, args-only vLLM launch; at pod CREATE the webhook adds:
 #   - pod hostIPC=true (CUDA IPC with the node-local LMCache server);
-#   - --kv-transfer-config <inline JSON> on the vLLM container (the LMCacheMPConnector
-#     config read verbatim from the engine's <name>-connection ConfigMap — injected
-#     inline, so no volume mount is needed);
+#   - --kv-transfer-config <inline JSON> on the vLLM container (read verbatim from
+#     the engine's <name>-connection ConfigMap — injected inline, no volume mount);
 #   - PYTHONHASHSEED=0 env (deterministic prefix hashing, set only if you didn't).
+#
+# If the LMCacheEngine sets spec.injection.payloadImage, the webhook ALSO stages
+# that lmcache build into this container — see
+# vllm_lmcache_injection_deployment.yaml.
 #
 # PREREQUISITES (else injection silently no-ops or the pod is rejected):
 #   1. An LMCacheEngine named below exists IN THIS NAMESPACE and is reconciled
@@ -23,7 +24,7 @@
 #      `vllm serve`); it stamps lmcache.ai/lmcache-skip-reason=command-override.
 #
 # Verify after creation (the webhook mutates the POD, not the Deployment):
-#   kubectl get pod -l app=vllm-lmcache -o yaml | grep -E "hostIPC|kv-transfer-config|lmcache-injected"
+#   kubectl get pod -l app=vllm-lmcache -o yaml | grep -E "hostIPC|kv-transfer-config|lmcache-injected|lmcache-payload|PYTHONPATH"
 # If nothing was injected, check lmcache.ai/lmcache-skip-reason on the pod
 # (command-override, kv-transfer-config-present, engine-not-found, or
 # target-container-not-found).
