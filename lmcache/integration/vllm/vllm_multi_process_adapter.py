@@ -1302,6 +1302,15 @@ class LMCacheMPWorkerAdapter:
                 engine_group_infos=self.engine_group_infos,
             )
         except TimeoutError:
+            # Roll back: the new context never registered, so close it (it
+            # holds an SHM mapping but has no transfers) and keep the old
+            # context current — the next recovery attempt displaces and
+            # closes it through the success path below.
+            self.transfer_ctx = old_ctx
+            try:
+                transfer_ctx.close()
+            except Exception:
+                logger.exception("Failed to close unregistered transfer context")
             raise ConnectionError(
                 "LMCache server did not respond to "
                 "register_kv_caches within "

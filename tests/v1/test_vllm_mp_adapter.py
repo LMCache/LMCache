@@ -204,6 +204,31 @@ def test_register_kv_caches_raises_connection_error_on_timeout(fake_adapter):
         adapter.register_kv_caches({"layer.0": fake_tensor})
 
 
+def test_register_timeout_rolls_back_and_closes_unregistered_ctx(
+    fake_adapter, monkeypatch
+):
+    """A failed re-registration closes the never-registered context and
+    keeps the previous context current (the next successful recovery
+    displaces and closes it through the normal path)."""
+    adapter, _send_mock, future = fake_adapter
+    contexts = _patch_transfer_context_factory(monkeypatch)
+
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    adapter.register_kv_caches({"layer.0": fake_tensor})  # contexts[0]
+    assert adapter.transfer_ctx is contexts[0]
+
+    future.result.side_effect = TimeoutError("server down")
+    with pytest.raises(ConnectionError, match="did not respond"):
+        adapter.register_kv_caches({"layer.0": fake_tensor})  # contexts[1]
+
+    assert len(contexts) == 2
+    # Old context stays current and open; the unregistered one is closed.
+    assert adapter.transfer_ctx is contexts[0]
+    contexts[0].close.assert_not_called()
+    contexts[1].close.assert_called_once()
+
+
 def test_register_kv_caches_cpu_submits_engine_driven_context_registration(
     fake_adapter, monkeypatch
 ):
