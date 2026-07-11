@@ -287,4 +287,4 @@ Related docs
 - Engine-driven transfer design:
   ``docs/design/v1/multiprocess/engine_driven_transfer_design.md``
 - Event notifier design: ``docs/design/v1/platform/event_notifier.md``
-- MP protocol docs: ``docs/lmcache/v1/multiprocess/protocols/README.md``
+- MP protocol docs: ``docs/design/v1/multiprocess/protocols/README.md``
