@@ -3,9 +3,10 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      lmcache/__init__.py                        │
+│                 lmcache/v1/platform/__init__.py                │
 │                                                                 │
 │  torch_dev, torch_device_type = _detect_device()                │
+│  _ops = get_backend(torch_device_type)                          │
 │                                                                 │
 │  ┌───────────┐     ┌───────────┐     ┌───────────┐              │
 │  │ torch.cuda│     │ torch.xpu │     │ torch.hpu │  ...         │
@@ -15,9 +16,9 @@
 │                     torch_dev (unified entry)                   │
 │                  torch_device_type ("cuda"/"xpu"/"hpu"/"cpu")   │
 │                                                                 │
-│  [Monkey Patch Point]                                           │
-│  New hardware can be added by extending _detect_device()        │
-│  and providing a gpu_connector implementation.                  │
+│  [Registry Discovery Point]                                     │
+│  DeviceSpec subclasses are auto-discovered under                │
+│  lmcache.v1.platform and selected by availability.              │
 └──────────────────────────────┬──────────────────────────────────┘
                                │
               ┌────────────────┼──────────────────┐
@@ -82,7 +83,7 @@
 
 | Layer | Device Reference | Notes |
 |-------|-----------------|-------|
-| **Entry** `__init__.py` | `_detect_device()` -> `torch_dev` | Monkey patch point. Detect once, reuse globally. |
+| **Entry** `v1/platform/__init__.py` | `_detect_device()` + `get_backend()` | Registry-driven detection and backend composition. |
 | **Middle** engine / storage / multiprocess | `from lmcache import torch_dev` | Hardware-agnostic unified code |
 | **Middle** CUDA-only APIs | `hasattr(torch_dev, 'xxx')` guard | Graceful runtime degradation |
 | **Bottom** GPU Connector | Direct `torch.cuda` / `torch.xpu` / `torch.hpu` | Per-hardware impl, no abstraction |
@@ -129,8 +130,10 @@ which is wrong for that backend's actual KV cache layout.
 
 ## Adding New Hardware
 
-1. Add detection branch in `__init__.py` `_detect_device()`
-2. Create `gpu_connector/xxx_connectors.py`, implement `GPUConnectorInterface`
-3. Add routing branch in `gpu_connector/__init__.py`
-4. Add kernels in `c_ops/` or fallback in `python_ops_fallback.py`
-5. No changes needed in middle layer code
+1. Add a `DeviceSpec` subclass under `lmcache/v1/platform/<device>/__init__.py`
+2. Point `ops_module` to `lmcache.v1.platform.<device>.ops`
+3. Implement `multi_layer_block_kv_transfer` in `ops.py` with Python fallback
+4. Add `native_kv_transfer.py` with ABI checks and fail-closed behavior
+5. Use MP `engine_driven` mode for validation and rollout
+
+No edits to `lmcache/__init__.py` or global backend candidate lists are required.
