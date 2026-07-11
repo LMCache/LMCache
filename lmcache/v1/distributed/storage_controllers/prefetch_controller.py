@@ -173,7 +173,7 @@ class InFlightPrefetchRequest:
     load_results: dict[int, Bitmap] = field(default_factory=dict)
     # Load phase: keys that were write-reserved in L1
     write_reserved_keys: list[ObjectKey] = field(default_factory=list)
-    write_reserved_objs: dict[ObjectKey, MemoryObj] = field(default_factory=dict)
+    write_reserved_objs: dict[ObjectKey, "MemoryObj"] = field(default_factory=dict)
 
     def all_lookups_done(self) -> bool:
         return len(self.pending_lookup_tasks) == 0
