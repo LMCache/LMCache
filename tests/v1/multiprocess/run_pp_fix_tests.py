@@ -221,19 +221,57 @@ check("non-MLA lookup extra_count == 0",
 # --------------------------------------------------------------------------- #
 print()
 print("=" * 72)
-print("  PP guard removed + DP guard retained (source inspection)")
+print("  Multi-server config validation (public interface)")
 print("=" * 72)
 
-connector_src = (ROOT / "lmcache/integration/vllm/lmcache_mp_connector.py").read_text()
-check("PP ValueError removed",
-      "not pipeline parallelism" not in connector_src.lower()
-      and "Got pp_size=" not in connector_src,
-      "old PP error string still present")
-check("DP ValueError retained",
-      "data parallelism" in connector_src.lower(),
-      "DP guard was removed (should have stayed)")
-check("comment references the explicit use_mla fix",
-      "use_mla" in connector_src and "compute_extra_count" in connector_src)
+from lmcache.integration.vllm.multi_server_config import (  # noqa: E402
+    _validate_multi_server_config,
+)
+
+
+def _fake_cfg(tp=1, pp=1, dp=1, world_size=None, use_mla=False, model="kimi_linear"):
+    if world_size is None:
+        world_size = tp * pp
+    cfg = MagicMock()
+    cfg.parallel_config.tensor_parallel_size = tp
+    cfg.parallel_config.pipeline_parallel_size = pp
+    cfg.parallel_config.data_parallel_size = dp
+    cfg.parallel_config.world_size = world_size
+    cfg.parallel_config.rank = 0
+    cfg.model_config.use_mla = use_mla
+    cfg.model_config.model = model
+    return cfg
+
+
+# PP + MLA multi-server: must NOT raise
+try:
+    _validate_multi_server_config(_fake_cfg(tp=4, pp=2, world_size=8, use_mla=True), n_servers=2)
+    check("PP+MLA multi-server validation passes", True)
+except (ValueError, AssertionError) as e:
+    check("PP+MLA multi-server validation passes", False, f"raised: {e}")
+
+# DP + multi-server: MUST raise ValueError
+try:
+    _validate_multi_server_config(_fake_cfg(tp=2, pp=1, dp=2, world_size=4), n_servers=2)
+    check("DP multi-server raises ValueError", False, "did not raise")
+except ValueError as e:
+    check("DP multi-server raises ValueError", "data parallelism" in str(e), str(e))
+except AssertionError:
+    check("DP multi-server raises ValueError", False, "raised AssertionError not ValueError")
+
+# Non-divisible world_size: MUST raise AssertionError
+try:
+    _validate_multi_server_config(_fake_cfg(tp=4, pp=1, world_size=4), n_servers=3)
+    check("Non-divisible world_size raises", False, "did not raise")
+except AssertionError:
+    check("Non-divisible world_size raises", True)
+
+# Single-server with PP: must NOT raise
+try:
+    _validate_multi_server_config(_fake_cfg(tp=2, pp=2, world_size=4, use_mla=True), n_servers=1)
+    check("Single-server PP validation passes", True)
+except (ValueError, AssertionError) as e:
+    check("Single-server PP validation passes", False, f"raised: {e}")
 
 # --------------------------------------------------------------------------- #
 print()
@@ -393,6 +431,18 @@ check("no payload-arity file modified (wire shape preserved)",
 proto_src = (ROOT / "lmcache/v1/multiprocess/protocols/base.py").read_text()
 check("protocol source still references FREE_LOOKUP_LOCKS",
       "FREE_LOOKUP_LOCKS" in proto_src)
+
+# --------------------------------------------------------------------------- #
+print()
+print("=" * 72)
+print("  ROCm platform detection")
+print("=" * 72)
+
+cuda_spec_src = (ROOT / "lmcache/v1/platform/cuda/__init__.py").read_text()
+check("CudaDeviceSpec has is_rocm property",
+      "def is_rocm" in cuda_spec_src and "torch.version.hip" in cuda_spec_src)
+check("CudaDeviceSpec docstring mentions ROCm",
+      "ROCm" in cuda_spec_src and "HIP" in cuda_spec_src)
 
 # --------------------------------------------------------------------------- #
 print()

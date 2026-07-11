@@ -128,25 +128,47 @@ def test_single_server_pp_mla_no_longer_raises():
 
 
 def test_multi_server_dp_still_blocked():
-    """The DP guard is unrelated to the PP fix and must stay in place.
+    """Multi-server + DP must still raise ValueError.
 
-    The DP check lives in ``LMCacheMPConnector.__init__`` (not in
-    ``build_parallel_strategy_from_vllm_config``), so we verify by
-    source inspection rather than calling the strategy builder.
+    Tests the extracted ``_validate_multi_server_config`` function
+    directly (public interface), not source strings.
     """
-    from pathlib import Path
+    from lmcache.integration.vllm.lmcache_mp_connector import (
+        _validate_multi_server_config,
+    )
 
-    connector_src = Path(
-        __file__).resolve().parents[4] / (
-        "lmcache/integration/vllm/lmcache_mp_connector.py"
+    cfg = _fake_vllm_config(tp=2, pp=1, dp=2, world_size=4)
+    try:
+        _validate_multi_server_config(cfg, n_servers=2)
+    except ValueError as e:
+        assert "data parallelism" in str(e)
+        return
+    raise AssertionError("expected ValueError for multi-server + DP")
+
+
+def test_multi_server_config_world_size_divisibility():
+    """world_size must be divisible by n_servers."""
+    from lmcache.integration.vllm.lmcache_mp_connector import (
+        _validate_multi_server_config,
     )
-    src = connector_src.read_text()
-    assert "data parallelism" in src.lower(), (
-        "DP guard was removed — multi-server + DP must still raise"
+
+    cfg = _fake_vllm_config(tp=4, pp=1, world_size=4)
+    # 4 % 3 != 0 → should raise AssertionError
+    try:
+        _validate_multi_server_config(cfg, n_servers=3)
+    except AssertionError:
+        return
+    raise AssertionError("expected AssertionError for non-divisible world_size")
+
+
+def test_multi_server_config_valid():
+    """A valid multi-server + PP config should pass validation."""
+    from lmcache.integration.vllm.lmcache_mp_connector import (
+        _validate_multi_server_config,
     )
-    assert "n_servers > 1" in src and "dp_size > 1" in src, (
-        "DP guard condition not found"
-    )
+
+    cfg = _fake_vllm_config(tp=4, pp=2, dp=1, world_size=8, use_mla=True)
+    _validate_multi_server_config(cfg, n_servers=2)  # must not raise
 
 
 # ============================================================================

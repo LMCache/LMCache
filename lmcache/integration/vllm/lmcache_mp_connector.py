@@ -548,6 +548,21 @@ def _ensure_zmq_scheme(server_url: str) -> str:
     return f"tcp://{server_url}"
 
 
+def _validate_multi_server_config(
+    vllm_config: "VllmConfig", n_servers: int
+) -> None:
+    """Validate parallelism constraints for a multi-server deployment.
+
+    .. deprecated::
+        Re-exported from :mod:`lmcache.integration.vllm.multi_server_config`
+        for backward compatibility.  Import from there directly.
+    """
+    from lmcache.integration.vllm.multi_server_config import (
+        _validate_multi_server_config as _impl,
+    )
+    _impl(vllm_config, n_servers)
+
+
 class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     """
     The connector for LMCache multi-process mode.
@@ -610,42 +625,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # The server count is derived from lmcache.mp.server_urls.
         n_servers = len(server_urls)
 
-        assert vllm_config.parallel_config.world_size % n_servers == 0, (
-            f"world_size ({vllm_config.parallel_config.world_size}) must be "
-            f"divisible by n_servers ({n_servers})"
-        )
-
-        # Multi-server + DP is not supported yet.
-        dp_size = getattr(vllm_config.parallel_config, "data_parallel_size", 1)
-        if n_servers > 1 and dp_size > 1:
-            raise ValueError(
-                "LMCacheMPConnector multi-server mode (n_servers > 1) does not "
-                f"support data parallelism yet; got dp_size={dp_size}. "
-                "DP across multiple LMCache servers will be "
-                "supported in a follow-up PR."
-            )
-
-        # Pipeline parallelism (PP) is now supported in all modes.
-        #
-        # Previously this block raised ValueError for any multi-server
-        # deployment with pp_size > 1.  The root cause was that
-        # ``compute_extra_count`` inferred MLA from the heuristic
-        # ``tp > world_size``; under PP that heuristic misfires (PP
-        # inflates ``world_size``) and produces extra_count = 0,
-        # causing under-locking and premature KV eviction.
-        #
-        # The fix: ``IPCCacheServerKey`` now carries an explicit
-        # ``use_mla`` flag (set by the adapter from
-        # ``ParallelStrategy.use_mla``), and ``compute_extra_count``
-        # uses it directly.  The correct reader count is
-        # ``tp_size - 1`` for MLA and ``0`` for non-MLA, which holds
-        # for every TP x PP x n_servers combination because the wire
-        # ``tp_size`` is already the per-server reader count
-        # (``ParallelStrategy.kv_tp_size = min(tp_size, ranks_per_node)``
-        # where ``ranks_per_node = world_size // n_servers``).
-        #
-        # See compute_extra_count() in lookup.py for the full
-        # correctness table.
+        _validate_multi_server_config(vllm_config, n_servers)
 
         zmq_context = zmq.Context.instance()
         parallel_strategy = build_parallel_strategy_from_vllm_config(
