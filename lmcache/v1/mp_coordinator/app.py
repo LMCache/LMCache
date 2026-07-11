@@ -118,7 +118,12 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
 
     async def _eviction_loop(http_client: httpx.AsyncClient) -> None:
         """Periodically check usage against quotas and dispatch
-        eviction RPCs to any one registered MP server."""
+        eviction RPCs to any one registered MP server.
+
+        Safe to start immediately: salts without an explicit quota are
+        exempt from eviction until the external quota controller sets a
+        default limit via ``PUT /quota/config`` (after re-syncing the
+        per-salt quotas), so a cold quota table cannot mass-evict."""
         while True:
             await asyncio.sleep(config.eviction_check_interval)
             await eviction_manager.execute_evictions(registry, http_client)
