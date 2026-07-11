@@ -6,7 +6,7 @@ AMD ROCm GPUs.  On ROCm, PyTorch exposes the HIP runtime through the
 ``torch.cuda`` API (``torch.cuda.is_available()`` returns ``True``,
 ``tensor.device.type`` is ``"cuda"``), so the existing
 :class:`CudaIPCWrapper` and :class:`CudaPinMemoryBackend` work on ROCm
-without modification.  ``is_available`` additionally checks
+without modification.  The ``is_rocm`` property additionally checks
 ``torch.version.hip`` to distinguish the two platforms for logging.
 """
 
