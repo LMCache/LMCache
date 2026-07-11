@@ -7,7 +7,7 @@ import torch
 
 # First Party
 from lmcache.v1.gpu_connector.gds_context import SlabDirection, get_gds_context
-from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
+from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
 import lmcache.c_ops as lmc_ops
 
