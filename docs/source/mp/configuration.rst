@@ -456,6 +456,22 @@ logging, tracing).
    * - ``--prometheus-port``
      - ``9090``
      - Port for the Prometheus ``/metrics`` endpoint.
+   * - ``--metrics-sample-rate``
+     - ``0.01``
+     - Fraction of chunks/blocks to track for lifecycle histograms
+       (``(0, 1.0]``). Counters always count every event regardless of this
+       setting.
+   * - ``--trace-level``
+     - *(none)*
+     - Enable trace recording at the given level. Currently only
+       ``storage`` is supported (records ``StorageManager`` public-API calls
+       for offline replay via ``lmcache trace``). When unset, trace recording
+       is off. Choices: ``storage``.
+   * - ``--trace-output``
+     - *(none)*
+     - Path to write the trace file. If omitted while ``--trace-level`` is
+       set, a timestamped file under ``$TMPDIR`` is minted
+       (``lmcache-trace-<pid>-<UTC>.lct``) and its path is logged at INFO.
 
 vLLM Client Configuration
 --------------------------
