@@ -22,6 +22,7 @@ from __future__ import annotations
 from typing import Callable, ClassVar, Iterator
 
 # First Party
+from lmcache.logging import init_logger
 from lmcache.v1.platform import ops_types, torch_ops
 from lmcache.v1.platform.ops_types import (
     BatchStep,
@@ -33,6 +34,8 @@ from lmcache.v1.platform.ops_types import (
     TransferDirection,
     set_shape_desc_dtype,
 )
+
+logger = init_logger(__name__)
 
 # ─── Decorator ─────────────────────────────────────────────────────────
 
@@ -64,18 +67,29 @@ def bind_native(module: object) -> Callable[[type[DeviceOps]], type[DeviceOps]]:
     """
 
     def decorator(cls: type[DeviceOps]) -> type[DeviceOps]:
+        bound_ops = 0
+        bound_types = 0
         for name in cls.iter_ops():
             fn = getattr(module, name, None)
             if fn is not None:
                 setattr(cls, name, staticmethod(fn))
+                bound_ops += 1
         for type_name in cls.iter_native_types():
             t = getattr(module, type_name, None)
             if t is not None:
                 setattr(cls, type_name, t)
+                bound_types += 1
         # Maintain GPUKVFormat alias
         ekf = getattr(module, "EngineKVFormat", None)
         if ekf is not None:
             cls.GPUKVFormat = ekf  # type: ignore[attr-defined]
+        logger.debug(
+            "bind_native: %s <- %s (%d ops, %d types)",
+            cls.__name__,
+            getattr(module, "__name__", repr(module)),
+            bound_ops,
+            bound_types,
+        )
         return cls
 
     return decorator
@@ -173,8 +187,8 @@ class DeviceOps:
     def ensure_native(cls) -> None:
         """Attempt to load and bind the compiled native extension.
 
-        Subclasses override this to ``importlib.import_module(...)`` then
-        call ``bind_native(native)(cls)``.  Guarded by ``_native_bound``
+        Subclasses override this to ``lmcache.c_ops`` then call
+        ``bind_native(native)(cls)``.  Guarded by ``_native_bound``
         so it runs at most once per class.
         """
 
