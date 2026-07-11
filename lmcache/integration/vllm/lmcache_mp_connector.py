@@ -548,19 +548,9 @@ def _ensure_zmq_scheme(server_url: str) -> str:
     return f"tcp://{server_url}"
 
 
-def _validate_multi_server_config(
-    vllm_config: "VllmConfig", n_servers: int
-) -> None:
-    """Validate parallelism constraints for a multi-server deployment.
-
-    .. deprecated::
-        Re-exported from :mod:`lmcache.integration.vllm.multi_server_config`
-        for backward compatibility.  Import from there directly.
-    """
-    from lmcache.integration.vllm.multi_server_config import (
-        _validate_multi_server_config as _impl,
-    )
-    _impl(vllm_config, n_servers)
+from lmcache.integration.vllm.multi_server_config import (
+    _validate_multi_server_config,
+)
 
 
 class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):

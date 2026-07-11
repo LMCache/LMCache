@@ -171,6 +171,72 @@ def test_multi_server_config_valid():
     _validate_multi_server_config(cfg, n_servers=2)  # must not raise
 
 
+def test_mla_misaligned_multi_server_rejected():
+    """MLA multi-server with rpn%tp!=0 must be rejected."""
+    from lmcache.integration.vllm.multi_server_config import (
+        _validate_multi_server_config,
+    )
+    # TP=4 PP=3 ns=2: rpn=6, 6%4!=0 → must raise
+    cfg = _fake_vllm_config(tp=4, pp=3, dp=1, world_size=12, use_mla=True)
+    try:
+        _validate_multi_server_config(cfg, n_servers=2)
+    except ValueError as e:
+        assert "misaligned" in str(e).lower() or "ranks_per_node" in str(e)
+        return
+    raise AssertionError("expected ValueError for misaligned MLA multi-server")
+
+
+def test_is_kv_writer_real_property_pp():
+    """Test the REAL ParallelStrategy.is_kv_writer for PP>1 configs.
+
+    This is the only test that constructs a real ParallelStrategy and
+    calls the actual property (not a re-implementation).
+    """
+    from lmcache.integration.vllm.vllm_multi_process_adapter import (
+        ParallelStrategy,
+    )
+
+    # TP=4 PP=2 ns=2: rpn=4, writers = ranks where (rank%4)%4==0 → {0,4}
+    s = ParallelStrategy(
+        use_mla=True, vllm_world_size=8, vllm_worker_id=0,
+        tp_size=4, pp_size=2, n_servers=2,
+    )
+    assert s.is_kv_writer is True  # rank 0: (0%4)%4 = 0
+    assert s.kv_tp_size == 4  # min(4, 4)
+
+    s = ParallelStrategy(
+        use_mla=True, vllm_world_size=8, vllm_worker_id=1,
+        tp_size=4, pp_size=2, n_servers=2,
+    )
+    assert s.is_kv_writer is False  # rank 1: (1%4)%4 = 1
+
+    s = ParallelStrategy(
+        use_mla=True, vllm_world_size=8, vllm_worker_id=4,
+        tp_size=4, pp_size=2, n_servers=2,
+    )
+    assert s.is_kv_writer is True  # rank 4: (4%4)%4 = 0
+
+    # TP=4 PP=1 ns=1: rpn=4, writer = rank 0 only
+    s = ParallelStrategy(
+        use_mla=True, vllm_world_size=4, vllm_worker_id=0,
+        tp_size=4, pp_size=1, n_servers=1,
+    )
+    assert s.is_kv_writer is True
+
+    s = ParallelStrategy(
+        use_mla=True, vllm_world_size=4, vllm_worker_id=2,
+        tp_size=4, pp_size=1, n_servers=1,
+    )
+    assert s.is_kv_writer is False
+
+    # Non-MLA: all writers
+    s = ParallelStrategy(
+        use_mla=False, vllm_world_size=8, vllm_worker_id=3,
+        tp_size=4, pp_size=2, n_servers=2,
+    )
+    assert s.is_kv_writer is True
+
+
 # ============================================================================
 # 3. IPCCacheServerKey round-trips use_mla
 # ============================================================================
@@ -304,13 +370,19 @@ def test_old_payload_without_use_mla_decodes_false():
 
 def test_lookup_uses_explicit_use_mla_for_pp_mla():
     """The multi-server + PP + MLA case: lookup() must compute the correct
-    extra_count from key.use_mla, not the old tp>world_size heuristic."""
+    extra_count from key.use_mla, not the old tp>world_size heuristic.
+
+    Config: TP=4 PP=2 n_servers=2.
+      - ranks_per_node = 8//2 = 4
+      - kv_tp_size = min(4, 4) = 4  (wire tp_size sent to server)
+      - key.world_size = kv_world_size = 8//4 = 2
+      - extra_count = 4-1 = 3
+    """
     from lmcache.v1.multiprocess.modules.lookup import LookupModule
 
     ctx = MagicMock()
     ctx.token_hasher.chunk_size = 256
     ctx.token_hasher.compute_chunk_hashes.return_value = [b"h0"]
-    # layout registry returns a real-ish attn_desc with num_object_groups.
     ctx.layout_desc_registry.find.return_value = MagicMock()
     ctx.layout_desc_registry.find_attn_desc.return_value = MagicMock(
         num_object_groups=1
@@ -319,9 +391,8 @@ def test_lookup_uses_explicit_use_mla_for_pp_mla():
 
     module = LookupModule(ctx)
 
-    # TP=4 PP=2 n_servers=2 -> wire tp=2, world_size=2.
-    # OLD behaviour: extra_count=0 (heuristic 2>2 False). BUG.
-    # NEW behaviour: extra_count=1 (use_mla True -> tp-1). CORRECT.
+    # The wire tp_size is kv_tp_size = 4 (not 2).
+    # The key's world_size is kv_world_size = 2.
     key = IPCCacheServerKey(
         model_name="kimi_linear", world_size=2, worker_id=None,
         token_ids=tuple(range(256)), start=0, end=256,
@@ -332,10 +403,10 @@ def test_lookup_uses_explicit_use_mla_for_pp_mla():
         "lmcache.v1.multiprocess.modules.lookup.ipc_key_to_object_keys",
         return_value=[MagicMock()],
     ):
-        module.lookup(key, tp_size=2)
+        module.lookup(key, tp_size=4)
 
     ctx.storage_manager.submit_prefetch_task.assert_called_once()
     kwargs = ctx.storage_manager.submit_prefetch_task.call_args.kwargs
-    assert kwargs["extra_count"] == 1, (
-        "PP+MLA must lock tp_size-1=1 extra readers, not 0"
+    assert kwargs["extra_count"] == 3, (
+        "PP+MLA TP=4 must lock tp_size-1=3 extra readers"
     )

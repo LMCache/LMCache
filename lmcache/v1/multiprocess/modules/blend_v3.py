@@ -623,6 +623,7 @@ class BlendV3Module(InstanceLivenessTarget):
         key: IPCCacheServerKey,
         layout_desc: "MemoryLayoutDesc",
         matches: list[CBMatchResult],
+        tp_size: int,
     ) -> "tuple[PrefetchHandle, dict[bytes, list], list[int]]":
         """Coalesce all matches into one sparse L2->L1 prefetch and submit it.
 
@@ -663,11 +664,18 @@ class BlendV3Module(InstanceLivenessTarget):
                 uniq_keys.append(k)
             expanded_uidx.append(uidx)
 
+        # MLA: all TP workers in a stage share the same KV object, so
+        # the sparse (non-prefix) chunks need the same extra_count as
+        # the prefix leg to prevent premature eviction between the
+        # sparse prefetch landing and the retrieve.
+        extra_count = compute_extra_count(tp_size, key.world_size, use_mla=key.use_mla)
+
         handle: PrefetchHandle = self._ctx.storage_manager.submit_prefetch_task(
             uniq_keys,
             layout_desc,
             external_request_id=key.request_id,
             policy=TrimPolicy.SPARSE,
+            extra_count=extra_count,
         )
         return handle, per_hash_obj_keys, expanded_uidx
 
@@ -1017,7 +1025,7 @@ class BlendV3Module(InstanceLivenessTarget):
                         job.handle,
                         job.per_hash_obj_keys,
                         job.expanded_uidx,
-                    ) = self._sparse_prefetch_submit(key, layout_desc, job.non_prefix)
+                    ) = self._sparse_prefetch_submit(key, layout_desc, job.non_prefix, tp_size)
                     # Only trace the span when the prefetch actually reads L2;
                     # all-L1-resident matches do no L2 work worth a span.
                     job.l2_keys = len(job.handle.l2_orig_indices)

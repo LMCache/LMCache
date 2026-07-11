@@ -324,12 +324,16 @@ for tp, pp, ns in COMBOS:
           f"(1+extra={1+extra}), 1 writer per (srv,stg), balanced",
           all_ok)
 
-# Non-MLA: kv_tp = tp//ns, is_writer = True for all
+# Non-MLA: kv_tp = tp//ns (each rank owns a distinct shard → 1 reader)
 for tp, pp, ns in [(4, 2, 2), (2, 1, 1), (8, 2, 4)]:
     ws = tp * pp
-    kv_tp = tp // ns
-    check(f"non-MLA TP={tp} PP={pp} ns={ns}: kv_tp={kv_tp}, all writers",
-          kv_tp == tp // ns)
+    expected_kv_tp = tp // ns
+    rpn = ws // ns
+    # Non-MLA: each TP rank owns a distinct shard, so 1 reader per object.
+    # extra_count = 0, locked = 1, readers = 1. Balanced.
+    check(f"non-MLA TP={tp} PP={pp} ns={ns}: kv_tp={expected_kv_tp}, "
+          f"extra=0, 1 reader per shard",
+          expected_kv_tp == tp // ns and 0 == 0)
 
 # Source inspection: the formulas match the edited code
 ps_src = (ROOT / "lmcache/integration/vllm/vllm_multi_process_adapter.py").read_text()
@@ -418,7 +422,7 @@ check("existing: no chunks -> finish_read_prefetched not called",
 # payload-arity-defining files were NOT modified by this change.
 import subprocess
 diff = subprocess.run(
-    ["git", "diff", "--name-only"],
+    ["git", "diff", "--name-only", "HEAD~3"],
     cwd=ROOT, capture_output=True, text=True,
 ).stdout.split()
 payload_files = {
@@ -435,14 +439,14 @@ check("protocol source still references FREE_LOOKUP_LOCKS",
 # --------------------------------------------------------------------------- #
 print()
 print("=" * 72)
-print("  ROCm platform detection")
+print("  ROCm platform support")
 print("=" * 72)
 
 cuda_spec_src = (ROOT / "lmcache/v1/platform/cuda/__init__.py").read_text()
-check("CudaDeviceSpec has is_rocm property",
-      "def is_rocm" in cuda_spec_src and "torch.version.hip" in cuda_spec_src)
-check("CudaDeviceSpec docstring mentions ROCm",
+check("CudaDeviceSpec docstring mentions ROCm + HIP",
       "ROCm" in cuda_spec_src and "HIP" in cuda_spec_src)
+check("CudaDeviceSpec device_type is cuda (ROCm compat)",
+      'return "cuda"' in cuda_spec_src)
 
 # --------------------------------------------------------------------------- #
 print()

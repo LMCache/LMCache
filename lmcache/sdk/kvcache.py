@@ -90,6 +90,7 @@ class LMCacheKVCacheContext:
         self._model_name = model_name
         self._use_mla = use_mla
         self._tp_size = tp_size
+        self._world_size = 1  # overwritten by register_kv_caches()
         self.instance_id = os.getpid()
         self._http_url = http_url
 

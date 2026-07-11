@@ -157,7 +157,7 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
     num_layers: int
     hidden_dim_size: int
     dtype_str: str
-    use_mla: bool
+    use_mla: bool = False
 
 
 @dataclass

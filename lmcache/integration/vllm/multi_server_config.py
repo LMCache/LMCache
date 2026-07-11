@@ -31,7 +31,9 @@ def _validate_multi_server_config(
 
     Raises:
         AssertionError: If ``world_size`` is not divisible by ``n_servers``.
-        ValueError: If multi-server + DP is requested.
+        ValueError: If multi-server + DP is requested, or if the MLA
+            multi-server geometry is misaligned (``ranks_per_node`` is
+            not a multiple of ``tp_size``).
     """
     pc = vllm_config.parallel_config
     assert pc.world_size % n_servers == 0, (
@@ -47,3 +49,25 @@ def _validate_multi_server_config(
             "DP across multiple LMCache servers will be "
             "supported in a follow-up PR."
         )
+
+    # MLA multi-server alignment: the is_kv_writer formula
+    # ``(rank % ranks_per_node) % tp_size == 0`` yields exactly one
+    # writer per (server, pipeline-stage) only when
+    # ``ranks_per_node % tp_size == 0``.  When it doesn't, some
+    # (server, stage) pairs get zero writers (missing stores) and
+    # others get multiple (double-stores).  Reject this config early
+    # rather than silently corrupting the cache.
+    use_mla = getattr(
+        getattr(vllm_config, "model_config", None), "use_mla", False
+    )
+    if use_mla and n_servers > 1:
+        ranks_per_node = pc.world_size // n_servers
+        tp_size = pc.tensor_parallel_size
+        if tp_size > 0 and ranks_per_node % tp_size != 0:
+            raise ValueError(
+                "LMCacheMPConnector multi-server MLA mode requires "
+                f"ranks_per_node ({ranks_per_node}) to be a multiple of "
+                f"tp_size ({tp_size}); got world_size={pc.world_size}, "
+                f"n_servers={n_servers}.  This layout would cause "
+                "misaligned store-writer selection."
+            )
