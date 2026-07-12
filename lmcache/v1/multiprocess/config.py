@@ -124,8 +124,7 @@ class MPServerConfig:
             )
         if not math.isfinite(self.session_ttl) or self.session_ttl <= 0:
             raise ValueError(
-                "session TTL must be a finite number > 0, "
-                f"got {self.session_ttl}"
+                f"session TTL must be a finite number > 0, got {self.session_ttl}"
             )
 
 
