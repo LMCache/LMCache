@@ -99,6 +99,9 @@ jobs:
             **/pyproject.toml
             **/requirements/*.txt
 
+      - name: Install FFmpeg
+        uses: ./.github/actions/install-ffmpeg
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip

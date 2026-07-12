@@ -1,0 +1,21 @@
+name: 'Install FFmpeg'
+description: 'Install FFmpeg on Linux (apt) or macOS (brew)'
+runs:
+  using: "composite"
+  steps:
+    - name: Install FFmpeg (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y ffmpeg
+      shell: bash
+
+    - name: Install FFmpeg (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        if ! command -v ffmpeg >/dev/null 2>&1; then
+          brew install ffmpeg
+        else
+          echo "ffmpeg already installed: $(ffmpeg -version | head -n1)"
+        fi
+      shell: bash
