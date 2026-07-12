@@ -188,12 +188,18 @@ def _check_ptrace_scope() -> None:
     Under Yama ``ptrace_scope`` 1 (the Ubuntu default) a process may only
     trace its own descendants, and py-spy's target never is one: when
     self-profiling it is a *child* of the target, and when attaching it
-    aims at an unrelated pid. Either way, scope 1 denies it.
+    aims at an unrelated pid. Either way, scope 1 denies it -- unless we
+    are root, for which Yama's restrictions do not apply.
 
     Raises:
         ProfileError: If the scope forbids the attach. The message names
             the sysctl to lower.
     """
+    # Root can ptrace regardless of the Yama scope, so the check would be
+    # a false failure. (``geteuid`` is Unix-only; treat its absence as
+    # non-root and fall through to the scope check.)
+    if getattr(os, "geteuid", lambda: 1)() == 0:
+        return
     try:
         with open(_YAMA_PTRACE_PATH, encoding="utf-8") as fh:
             scope = int(fh.read().strip())
@@ -778,32 +784,54 @@ class FlameProfiler:
             svg: Open binary sink for the rendered SVG.
 
         Raises:
-            ProfileError: If any pipeline stage exits non-zero.
+            ProfileError: If a stage fails to start or exits non-zero.
         """
         collapse_pl = os.path.join(self._flamegraph_dir, "stackcollapse-perf.pl")
-        script = subprocess.Popen(
-            ["perf", "script", "-i", self._raw_path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
-        collapse = subprocess.Popen(
-            [collapse_pl], stdin=script.stdout, stdout=subprocess.PIPE
-        )
-        flame = subprocess.Popen(
-            [flamegraph_pl, "--title", self._title, "--width", str(_FLAME_WIDTH_PX)],
-            stdin=collapse.stdout,
-            stdout=svg,
-        )
+        started: list[tuple[str, subprocess.Popen[bytes]]] = []
+        try:
+            script = subprocess.Popen(
+                ["perf", "script", "-i", self._raw_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+            started.append(("perf script", script))
+            collapse = subprocess.Popen(
+                [collapse_pl], stdin=script.stdout, stdout=subprocess.PIPE
+            )
+            started.append(("stackcollapse", collapse))
+            flame = subprocess.Popen(
+                [
+                    flamegraph_pl,
+                    "--title",
+                    self._title,
+                    "--width",
+                    str(_FLAME_WIDTH_PX),
+                ],
+                stdin=collapse.stdout,
+                stdout=svg,
+            )
+            started.append(("flamegraph.pl", flame))
+        except OSError as e:
+            # A later stage failed to spawn; tear down any that did so
+            # they are not orphaned, then surface the error.
+            for _name, proc in started:
+                if proc.stdout is not None:
+                    proc.stdout.close()
+                proc.kill()
+                proc.wait()
+            raise ProfileError(f"failed to start render pipeline: {e}") from e
+
         # Drop the parent's copies so EOF/SIGPIPE flows through the pipe.
         for pipe in (script.stdout, collapse.stdout):
             if pipe is not None:
                 pipe.close()
-        flame.wait()
-        collapse.wait()
-        script.wait()
-        for stage, proc in (("flamegraph.pl", flame), ("stackcollapse", collapse)):
+        for _name, proc in reversed(started):
+            proc.wait()
+        # Check every stage, including ``perf script``: a silent decode
+        # failure there would otherwise pass unnoticed.
+        for name, proc in started:
             if proc.returncode != 0:
-                raise ProfileError(f"{stage} exited with code {proc.returncode}")
+                raise ProfileError(f"{name} exited with code {proc.returncode}")
 
     def _render_folded(self, flamegraph_pl: str, svg: IO[bytes]) -> None:
         """Render folded bcc stacks straight through ``flamegraph.pl``.

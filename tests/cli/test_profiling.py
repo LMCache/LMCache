@@ -85,6 +85,10 @@ def test_check_profiling_deps_reports_restrictive_ptrace_scope(
 ) -> None:
     """py-spy cannot trace a non-descendant, so scope > 0 fails fast."""
     monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/py-spy")
+    # Force non-root: root bypasses the scope check, and CI often runs as
+    # root, which would otherwise make this assertion spuriously fail.
+    if hasattr(profiling.os, "geteuid"):
+        monkeypatch.setattr(profiling.os, "geteuid", lambda: 9999)
     scope = tmp_path / "ptrace_scope"
     scope.write_text("1\n")
     monkeypatch.setattr(profiling, "_YAMA_PTRACE_PATH", str(scope))

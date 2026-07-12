@@ -193,6 +193,11 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         make_object_keys,
         verify_round_trip,
     )
+    from lmcache.cli.commands.bench.l2_adapter_bench.runner import (
+        bench_load,
+        bench_lookup,
+        bench_store,
+    )
     from lmcache.cli.profiling import (
         PY_SPY_MODES,
         FlameProfiler,
@@ -200,11 +205,6 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         check_profiling_deps,
         default_output_path,
         resolve_flamegraph_dir,
-    )
-    from lmcache.cli.commands.bench.l2_adapter_bench.runner import (
-        bench_load,
-        bench_lookup,
-        bench_store,
     )
     from lmcache.v1.distributed.l2_adapters import create_l2_adapter
     from lmcache.v1.distributed.l2_adapters.config import (
