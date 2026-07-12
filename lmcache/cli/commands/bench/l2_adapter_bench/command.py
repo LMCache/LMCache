@@ -133,13 +133,18 @@ def add_l2_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--flamegraph-mode",
-        choices=["on-cpu", "off-cpu"],
+        choices=["on-cpu", "off-cpu", "offwake", "wakeup", "wall", "gil"],
         default="on-cpu",
         help=(
-            "Flame-graph mode if enabled flame graph profiling. 'on-cpu' (perf "
-            "record) shows where CPU time goes; 'off-cpu' (perf off-CPU "
-            "via offcputime-bpfcc) shows time blocked on I/O / locks and "
-            "is best for I/O-bound adapters. Default: on-cpu."
+            "Flame-graph mode if flame-graph profiling is on. 'on-cpu' "
+            "(perf) shows where CPU time goes; 'off-cpu' (offcputime-bpfcc) "
+            "shows time blocked on I/O / locks and is best for I/O-bound "
+            "adapters; 'offwake' (offwaketime-bpfcc) adds the waker stack to "
+            "each blocked stack; 'wakeup' (wakeuptime-bpfcc) shows the stacks "
+            "doing the waking. 'wall' and 'gil' (py-spy) give one root per "
+            "thread instead of merging them: 'wall' is wall-clock time per "
+            "thread, 'gil' counts only threads holding the interpreter lock. "
+            "Default: on-cpu."
         ),
     )
     parser.add_argument(
@@ -152,13 +157,15 @@ def add_l2_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
-        "--flamegraph-dir",
+        "--flamegraph-scripts-dir",
         default="",
         metavar="DIR",
         help=(
             "Directory with the FlameGraph scripts (flamegraph.pl, "
             "stackcollapse-perf.pl). Default: $FLAMEGRAPH_DIR or "
-            "~/FlameGraph, else auto-cloned into a temp directory."
+            "~/FlameGraph, else auto-cloned into a temp directory. "
+            "Unused by --flamegraph-mode wall / gil, which render "
+            "their own SVG."
         ),
     )
 
@@ -186,7 +193,8 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         make_object_keys,
         verify_round_trip,
     )
-    from lmcache.cli.commands.bench.l2_adapter_bench.profiling import (
+    from lmcache.cli.profiling import (
+        PY_SPY_MODES,
         FlameProfiler,
         ProfileError,
         check_profiling_deps,
@@ -281,7 +289,12 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
     if flamegraph_on:
         try:
             check_profiling_deps(args.flamegraph_mode)
-            flamegraph_dir = resolve_flamegraph_dir(args.flamegraph_dir, log)
+            # py-spy renders its own SVG; only the perf/bcc modes need
+            # the FlameGraph scripts, so do not clone them otherwise.
+            if args.flamegraph_mode not in PY_SPY_MODES:
+                flamegraph_dir = resolve_flamegraph_dir(
+                    args.flamegraph_scripts_dir, log
+                )
         except ProfileError as e:
             print(
                 "Error: --flamegraph on was requested but the profiling "
@@ -318,6 +331,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
                 flamegraph_dir=flamegraph_dir,
                 pid=os.getpid(),
                 title=f"{args.flamegraph_mode} ({adapter_name})",
+                short_run_hint="raise --rounds, --num-keys, or --data-size-kb",
             )
         except ProfileError as e:
             print(

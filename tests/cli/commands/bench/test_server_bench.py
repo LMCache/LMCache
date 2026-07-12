@@ -168,6 +168,87 @@ class TestCommandArguments:
 
 
 # ------------------------------------------------------------------ #
+#  _build_server_profiler
+# ------------------------------------------------------------------ #
+
+
+class TestBuildServerProfiler:
+    """``_build_server_profiler`` gates profiling before any load is sent."""
+
+    @staticmethod
+    def _args(**overrides: object) -> argparse.Namespace:
+        base = {
+            "flamegraph": "off",
+            "profile_server_pid": 0,
+            "flamegraph_mode": "gil",
+            "flamegraph_output": "",
+            "flamegraph_scripts_dir": "",
+        }
+        base.update(overrides)
+        return argparse.Namespace(**base)
+
+    def test_returns_none_when_disabled(self) -> None:
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.command import (
+            _build_server_profiler,
+        )
+
+        assert _build_server_profiler(self._args(), lambda _m: None) is None
+
+    def test_missing_pid_exits(self) -> None:
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.command import (
+            _build_server_profiler,
+        )
+
+        with pytest.raises(SystemExit) as excinfo:
+            _build_server_profiler(
+                self._args(flamegraph="on", profile_server_pid=0),
+                lambda _m: None,
+            )
+        assert excinfo.value.code == 2
+
+    def test_dead_pid_exits(self) -> None:
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.command import (
+            _build_server_profiler,
+        )
+
+        with pytest.raises(SystemExit) as excinfo:
+            _build_server_profiler(
+                self._args(flamegraph="on", profile_server_pid=2_000_000_000),
+                lambda _m: None,
+            )
+        assert excinfo.value.code == 2
+
+    def test_live_pid_builds_profiler(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Standard
+        import os
+
+        # First Party
+        from lmcache.cli import profiling
+        from lmcache.cli.commands.bench.server_bench.command import (
+            _build_server_profiler,
+        )
+
+        # gil needs py-spy + a permissive ptrace scope; fake both so the
+        # test asserts on the builder, not on the host toolchain.
+        monkeypatch.setattr(profiling.shutil, "which", lambda _name: "/usr/bin/py-spy")
+        monkeypatch.setattr(profiling, "_YAMA_PTRACE_PATH", "/dev/null")
+
+        prof = _build_server_profiler(
+            self._args(flamegraph="on", profile_server_pid=os.getpid()),
+            lambda _m: None,
+        )
+        assert prof is not None
+        assert prof._pid == os.getpid()
+        assert prof._mode == "gil"
+
+
+# ------------------------------------------------------------------ #
 #  _build_token_ids
 # ------------------------------------------------------------------ #
 
