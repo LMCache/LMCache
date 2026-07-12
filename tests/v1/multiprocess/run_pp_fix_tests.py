@@ -514,6 +514,45 @@ check("TRT env var has .strip()",
 # --------------------------------------------------------------------------- #
 print()
 print("=" * 72)
+print("  Device-spec registry (no collision)")
+print("=" * 72)
+
+platform_src = (ROOT / "lmcache/v1/platform/__init__.py").read_text()
+check("registry is a list (not dict — no collision)",
+      "_DEVICE_REGISTRY: list" in platform_src)
+check("registry sorted by class name (ROCm before CUDA)",
+      ".sort(key=" in platform_src and "__class__.__name__" in platform_src)
+check("_detect_device iterates list (not .values())",
+      "for spec in _DEVICE_REGISTRY:" in platform_src and ".values()" not in platform_src)
+check("get_device_spec iterates list",
+      "def get_device_spec" in platform_src and "for spec in _DEVICE_REGISTRY:" in platform_src)
+check("no .get() on _DEVICE_REGISTRY",
+      "_DEVICE_REGISTRY.get(" not in platform_src)
+
+# Verify blend_v3 stashes tp_size on session
+blend_src = (ROOT / "lmcache/v1/multiprocess/modules/blend_v3.py").read_text()
+check("blend_v3 stashes tp_size on session.extras",
+      'session.extras["tp_size"]' in blend_src)
+check("blend_v3 orphan release reads tp_size from session",
+      'session.extras.get("tp_size"' in blend_src)
+
+# Verify rocm pin_memory has no MIOpen
+rocm_pin_src = (ROOT / "lmcache/v1/platform/rocm/pin_memory.py").read_text()
+check("rocm pin_memory has no MIOpen dead candidate",
+      "MIOpen" not in rocm_pin_src)
+
+# Verify rocm ipc_wrapper has no unused torch_device_type import
+rocm_ipc_src = (ROOT / "lmcache/v1/platform/rocm/ipc_wrapper.py").read_text()
+check("rocm ipc_wrapper does not import torch_device_type",
+      "from lmcache import torch_device_type" not in rocm_ipc_src)
+
+# Verify TRT worker_id uses rank // tp_size for MLA
+check("TRT worker _create_key uses rank // tp_size for MLA",
+      "self._rank // self._tp_size" in trt_src)
+
+# --------------------------------------------------------------------------- #
+print()
+print("=" * 72)
 print(f"  RESULT: {PASS} passed, {FAIL} failed")
 print("=" * 72)
 sys.exit(1 if FAIL else 0)

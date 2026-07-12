@@ -45,7 +45,6 @@ def _load_libamdhip64() -> ctypes.CDLL | None:
     for lib_name, fallback_path in [
         ("amdhip64", "libamdhip64.so"),
         ("amdhip64", "libamdhip64.so.1"),
-        ("MIOpen", "libMIOpen.so"),  # some ROCm installs use this
     ]:
         path = ctypes.util.find_library(lib_name) or fallback_path
         try:

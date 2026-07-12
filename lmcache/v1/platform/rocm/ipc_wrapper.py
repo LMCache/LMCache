@@ -33,7 +33,6 @@ from typing import ClassVar
 import torch
 
 # First Party
-from lmcache import torch_device_type
 from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
 
 # ---------------------------------------------------------------------------

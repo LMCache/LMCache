@@ -333,10 +333,14 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         request_id: int,
     ) -> IPCCacheServerKey:
         aligned_end = (len(token_ids) // self._chunk_size) * self._chunk_size
+        # For MLA, worker_id must be kv_worker_id (rank // tp_size),
+        # matching vLLM's ParallelStrategy.kv_worker_id, so the server
+        # routes to the correct GPU context.
+        wid = self._rank // self._tp_size if self._use_mla and self._tp_size > 0 else self._rank
         return IPCCacheServerKey(
             model_name=self._model_name,
             world_size=self._kv_world_size,
-            worker_id=self._rank,
+            worker_id=wid,
             token_ids=tuple(token_ids),
             start=0,
             end=aligned_end,

@@ -821,6 +821,7 @@ class BlendV3Module(InstanceLivenessTarget):
         session = self._ctx.session_manager.get_or_create(rid)
         session.set_tokens(list(key.token_ids))
         session.lookup_ipc_key = key
+        session.extras["tp_size"] = tp_size
 
         extra_count = compute_extra_count(tp_size, world_size, use_mla=key.use_mla)
         obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
@@ -1523,6 +1524,11 @@ class BlendV3Module(InstanceLivenessTarget):
                 # Release with the same extra_count used at acquire time
                 # (_sparse_prefetch_submit).  Using the default 0 would only
                 # release 1 lock per key, leaking tp_size-1 locks for MLA.
+                # tp_size is stashed on the session during cb_unified_lookup.
+                session = self._ctx.session_manager.get_or_create(
+                    key.request_id
+                )
+                tp_size = session.extras.get("tp_size", 1)
                 orphan_extra = compute_extra_count(
                     tp_size, key.world_size, use_mla=key.use_mla
                 )

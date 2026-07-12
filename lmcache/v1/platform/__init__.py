@@ -49,19 +49,22 @@ logger = init_logger(__name__)
 # ---------------------------------------------------------------------------
 
 
-_DEVICE_REGISTRY: dict[str, DeviceSpec] = {
-    spec.device_type: spec
-    for spec in [
-        cls()
-        for cls in discover_subclasses(
-            "lmcache.v1.platform",
-            DeviceSpec,  # type: ignore[type-abstract]
-            module_filter=lambda name: not name.startswith(("_", "base")),
-            require_defined_in_module=True,
-            on_import_error=lambda name, exc: None,
-        )
-    ]
-}
+_DEVICE_REGISTRY: list[DeviceSpec] = [
+    cls()
+    for cls in discover_subclasses(
+        "lmcache.v1.platform",
+        DeviceSpec,  # type: ignore[type-abstract]
+        module_filter=lambda name: not name.startswith(("_", "base")),
+        require_defined_in_module=True,
+        on_import_error=lambda name, exc: None,
+    )
+]
+# Sort so that more-specific specs (e.g. RocmDeviceSpec, whose
+# is_available checks torch.version.hip) are tried before less-specific
+# ones (e.g. CudaDeviceSpec, whose is_available checks only
+# torch.cuda.is_available).  This ensures ROCm is selected on AMD and
+# CUDA is selected on NVIDIA, even though both report device_type="cuda".
+_DEVICE_REGISTRY.sort(key=lambda s: s.__class__.__name__, reverse=True)
 
 
 # ---------------------------------------------------------------------------
@@ -88,18 +91,19 @@ def _detect_device() -> tuple[Any, str]:
     env_device_type = os.environ.get("DEVICE_TYPE")
     if env_device_type is not None:
         env_device_type = env_device_type.strip().lower()
-        spec = _DEVICE_REGISTRY.get(env_device_type)
-        if spec is not None and spec.is_available():
-            torch_module = getattr(torch, spec.torch_module_name, None)
-            if torch_module is not None:
-                return torch_module, spec.device_type
-            else:
-                logger.warning(
-                    "DEVICE_TYPE=%r is available but torch module [%s] not found, "
-                    "falling back to auto-detection.",
-                    env_device_type,
-                    spec.torch_module_name,
-                )
+        for spec in _DEVICE_REGISTRY:
+            if spec.device_type == env_device_type and spec.is_available():
+                torch_module = getattr(torch, spec.torch_module_name, None)
+                if torch_module is not None:
+                    return torch_module, spec.device_type
+                else:
+                    logger.warning(
+                        "DEVICE_TYPE=%r is available but torch module [%s] not found, "
+                        "falling back to auto-detection.",
+                        env_device_type,
+                        spec.torch_module_name,
+                    )
+                    break
         else:
             logger.warning(
                 "DEVICE_TYPE=%r is not available or not registered, "
@@ -107,7 +111,7 @@ def _detect_device() -> tuple[Any, str]:
                 env_device_type,
             )
 
-    for spec in _DEVICE_REGISTRY.values():
+    for spec in _DEVICE_REGISTRY:
         if not spec.is_available():
             continue
 
@@ -134,13 +138,26 @@ def _detect_device() -> tuple[Any, str]:
 def get_device_spec(device_type: str) -> DeviceSpec | None:
     """Get the DeviceSpec for the given device type.
 
+    When multiple specs share the same ``device_type`` (e.g. both
+    ``CudaDeviceSpec`` and ``RocmDeviceSpec`` report ``"cuda"``), the
+    first available one is returned (ROCm is tried before CUDA due to
+    the registry sort order).
+
     Args:
         device_type: The device type string (e.g. ``"cuda"``).
 
     Returns:
         The DeviceSpec for the given device type, or None if not found.
     """
-    return _DEVICE_REGISTRY.get(device_type)
+    for spec in _DEVICE_REGISTRY:
+        if spec.device_type == device_type and spec.is_available():
+            return spec
+    # Fallback: return the first matching spec even if not available
+    # (e.g. for inspection in CLI-only mode).
+    for spec in _DEVICE_REGISTRY:
+        if spec.device_type == device_type:
+            return spec
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +191,7 @@ def get_backend(device_type: str) -> Any | None:
         logger.warning("Cannot load python_ops_fallback: %s", e)
         return None
 
-    spec = _DEVICE_REGISTRY.get(device_type)
+    spec = get_device_spec(device_type)
     if spec is None:
         logger.info("No DeviceSpec registered for %r, using fallback ops.", device_type)
         return default_module
@@ -213,7 +230,7 @@ logger.info("torch_dev=%s, torch_device_type=%s", torch_dev, torch_device_type)
 # without touching the torch device module.  When no accelerator sub-
 # package matches, fall back to a bare ``DeviceSpec()`` -- its default
 # implementation provides "no-op / all False" semantics.
-_registered_device_spec = _DEVICE_REGISTRY.get(torch_device_type)
+_registered_device_spec = get_device_spec(torch_device_type) if torch_device_type != "cpu" else None
 if _registered_device_spec is None:
     if torch_device_type != "cpu":
         logger.warning(
