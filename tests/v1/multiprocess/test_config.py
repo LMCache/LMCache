@@ -127,3 +127,21 @@ def test_instance_id_defaults_are_distinct():
 def test_instance_id_dataclass_default_is_distinct():
     # Direct construction (no CLI) also mints a fresh id per instance.
     assert MPServerConfig().instance_id != MPServerConfig().instance_id
+
+
+@pytest.mark.parametrize("ttl", [0.0, -1.0, float("nan"), float("inf")])
+def test_config_rejects_bad_session_ttl(ttl: float) -> None:
+    """Validation rejects non-positive and non-finite session_ttl."""
+    with pytest.raises(ValueError, match="session TTL"):
+        MPServerConfig(session_ttl=ttl)
+
+
+def test_session_ttl_default() -> None:
+    """Default session_ttl is 600 (10 minutes)."""
+    assert MPServerConfig().session_ttl == 600.0
+
+
+def test_session_ttl_cli_flag() -> None:
+    """--session-ttl flag is parsed correctly."""
+    config = _parse_mp(["--session-ttl", "1800"])
+    assert config.session_ttl == 1800.0

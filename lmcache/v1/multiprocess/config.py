@@ -101,12 +101,13 @@ class MPServerConfig:
     thread. Default is 600 (10 minutes)."""
 
     def __post_init__(self) -> None:
-        """Validate the worker-reaping timeouts.
+        """Validate the worker-reaping timeouts and session TTL.
 
         Raises:
             ValueError: If a timeout is non-finite, the reap timeout is
-                negative or a non-zero value below the 30 s floor, or the
-                registration grace is below the reap timeout.
+                negative or a non-zero value below the 30 s floor, the
+                registration grace is below the reap timeout, or session_ttl
+                is non-finite or non-positive.
         """
         reap = self.worker_reap_timeout_seconds
         grace = self.worker_registration_grace_seconds
@@ -120,6 +121,11 @@ class MPServerConfig:
             raise ValueError(
                 "worker registration grace must be >= the worker reap timeout "
                 f"({reap}s); got {grace}"
+            )
+        if not math.isfinite(self.session_ttl) or self.session_ttl <= 0:
+            raise ValueError(
+                "session TTL must be a finite number > 0, "
+                f"got {self.session_ttl}"
             )
 
 
