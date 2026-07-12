@@ -95,6 +95,11 @@ class MPServerConfig:
     sent a PING (model warmup, or death before its first request). Must be
     >= worker_reap_timeout_seconds."""
 
+    session_ttl: float = 600.0
+    """Time-to-live (seconds) for sessions in the SessionManager.
+    Sessions that exceed this TTL are cleaned up by the background
+    thread. Default is 600 (10 minutes)."""
+
     def __post_init__(self) -> None:
         """Validate the worker-reaping timeouts.
 
@@ -374,6 +379,14 @@ def add_mp_server_args(
         "retrieve failure, retain the gapped prefix so post-gap chunks stay "
         "L1-resident instead of truncating at the gap. No effect otherwise.",
     )
+    mp_group.add_argument(
+        "--session-ttl",
+        type=float,
+        default=600.0,
+        help="Session time-to-live in seconds. Sessions exceeding this TTL "
+        "are cleaned up by the background thread. "
+        "Default is 600 (10 minutes).",
+    )
     return parser
 
 
@@ -418,6 +431,7 @@ def parse_args_to_mp_server_config(
         script_allowed_imports=args.script_allowed_imports or [],
         worker_reap_timeout_seconds=args.worker_reap_timeout_seconds,
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
+        session_ttl=args.session_ttl,
     )
 
 

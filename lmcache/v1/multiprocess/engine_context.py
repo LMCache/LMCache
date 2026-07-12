@@ -172,6 +172,10 @@ class MPCacheServerContext:
         hash_algorithm: Hash algorithm for token hashing.
         separate_object_groups: Whether to split kernel groups into one object
             group per sliding-window size at KV-cache registration. Default True.
+        full_sw_kv: Whether sliding-window groups cache full per-chunk KV
+            (no window cutting). Default False.
+        session_ttl: Time-to-live in seconds for sessions in SessionManager.
+            Default 600 (10 minutes).
     """
 
     def __init__(
@@ -181,6 +185,7 @@ class MPCacheServerContext:
         hash_algorithm: str = "blake3",
         separate_object_groups: bool = True,
         full_sw_kv: bool = False,
+        session_ttl: float = 600.0,
     ) -> None:
         self._chunk_size = chunk_size
         self._separate_object_groups = separate_object_groups
@@ -197,7 +202,7 @@ class MPCacheServerContext:
         self._token_hasher = TokenHasher(
             chunk_size=chunk_size, hash_algorithm=hash_algorithm
         )
-        self._session_manager = SessionManager(self._token_hasher)
+        self._session_manager = SessionManager(self._token_hasher, ttl=session_ttl)
         self._event_bus = get_event_bus()
         self._layout_desc_registry = LayoutDescRegistry()
 
