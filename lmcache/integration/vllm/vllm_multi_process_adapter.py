@@ -335,14 +335,11 @@ class ParallelStrategy:
         """Number of pieces a single token chunk's KV cache is split into
         on the LMCache server storage."""
         if self.use_mla:
-            # MLA collapses the TP dimension (all TP workers share one
-            # KV object), so the shard count is world_size / tp_size.
-            # Under PP this equals pp_size (one shard per pipeline stage),
-            # which is correct: each stage owns distinct layers and thus
-            # distinct KV objects.  Multi-server deployments replicate
-            # these shards across servers (each server can hold every
-            # stage), so n_servers does not further divide the count.
+            if self.tp_size == 0:
+                return 0
             return self.vllm_world_size // self.tp_size
+        if self.n_servers == 0:
+            return 0
         return self.vllm_world_size // self.n_servers
 
     @property
@@ -351,8 +348,13 @@ class ParallelStrategy:
         that the current worker is responsible for,
         in ``[0, kv_world_size)``."""
         if self.use_mla:
+            if self.tp_size == 0:
+                return 0
             return self.vllm_worker_id // self.tp_size
-        return self.vllm_worker_id % (self.vllm_world_size // self.n_servers)
+        rpn = self.ranks_per_node
+        if rpn == 0:
+            return 0
+        return self.vllm_worker_id % rpn
 
     @property
     def kv_tp_size(self) -> int:

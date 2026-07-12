@@ -174,6 +174,16 @@ class LMCacheKVCacheContext:
             ]
 
             fmt = getattr(lmc_ops.EngineKVFormat, kernel_group["engine_kv_format"])
+            # Auto-detect MLA from the engine KV format.  If the user
+            # passed use_mla=True explicitly, respect that; otherwise
+            # derive it from the registered layout so MLA models get
+            # the correct read-lock refcount without manual config.
+            if not self._use_mla:
+                try:
+                    from lmcache.v1.gpu_connector.utils import is_mla
+                    self._use_mla = is_mla(fmt)
+                except Exception:
+                    pass  # keep default False if detection fails
             probe: list[DiscoverableKVCache] = [torch.empty(inner, device="meta")]
             num_kv_heads = get_num_heads(probe, fmt)
             block_size = get_block_size(probe, fmt)

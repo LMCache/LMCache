@@ -686,6 +686,7 @@ class BlendV3Module(InstanceLivenessTarget):
         found_uidx: set[int],
         per_hash_obj_keys: dict[bytes, list],
         expanded_uidx: list[int],
+        tp_size: int,
     ) -> list[CBMatchResult]:
         """Classify each prefetched chunk as found or stale, and finalize state.
 
@@ -1077,6 +1078,7 @@ class BlendV3Module(InstanceLivenessTarget):
                 job.found_uidx or set(),
                 job.per_hash_obj_keys or {},
                 job.expanded_uidx or [],
+                tp_size,
             )
         else:
             found = []
@@ -1518,7 +1520,15 @@ class BlendV3Module(InstanceLivenessTarget):
                 k for h, ks in cached.items() if h not in retrieved_hashes for k in ks
             ]
             if orphan_keys:
-                self._ctx.storage_manager.finish_read_prefetched(orphan_keys)
+                # Release with the same extra_count used at acquire time
+                # (_sparse_prefetch_submit).  Using the default 0 would only
+                # release 1 lock per key, leaking tp_size-1 locks for MLA.
+                orphan_extra = compute_extra_count(
+                    tp_size, key.world_size, use_mla=key.use_mla
+                )
+                self._ctx.storage_manager.finish_read_prefetched(
+                    orphan_keys, extra_count=orphan_extra
+                )
                 logger.debug(
                     "CB V3 released %d prefetched-but-unretrieved keys (req=%s)",
                     len(orphan_keys),

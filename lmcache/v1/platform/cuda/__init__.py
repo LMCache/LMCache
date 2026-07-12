@@ -7,6 +7,15 @@ AMD ROCm GPUs.  On ROCm, PyTorch exposes the HIP runtime through the
 ``tensor.device.type`` is ``"cuda"``), so the existing
 :class:`CudaIPCWrapper` and :class:`CudaPinMemoryBackend` work on ROCm
 without modification.
+
+ROCm note: the ``CudaPinMemoryBackend`` falls back to
+``libcudart.so`` / ``torch.cuda.cudart()`` for host-memory pinning.
+On ROCm, ``torch.cuda.cudart()`` is unavailable and ``libcudart.so``
+does not exist (ROCm ships ``libamdhip64.so``, which exports the
+same ``cudaHostRegister`` symbols but under a different library
+name).  When neither is found, pinning silently degrades to a no-op
+(slower H2D/D2H copies, no crash).  Build with ``BUILD_WITH_HIP=1``
+to compile ``lmcache.c_ops`` against the HIP runtime.
 """
 
 # First Party

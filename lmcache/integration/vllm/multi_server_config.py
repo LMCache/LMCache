@@ -36,6 +36,11 @@ def _validate_multi_server_config(
             not a multiple of ``tp_size``).
     """
     pc = vllm_config.parallel_config
+    if n_servers <= 0:
+        raise ValueError(
+            f"n_servers must be >= 1, got {n_servers}. "
+            "Check lmcache.mp.server_urls configuration."
+        )
     assert pc.world_size % n_servers == 0, (
         f"world_size ({pc.world_size}) must be "
         f"divisible by n_servers ({n_servers})"

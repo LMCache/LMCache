@@ -114,7 +114,7 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
         # TRT-LLM does not expose an MLA flag on llm_args.  Read it from
         # the environment so MLA models can opt in once TRT-LLM supports
         # them; defaults to False (safe for all current non-MLA models).
-        self._use_mla = os.environ.get("LMCACHE_USE_MLA", "").lower() in (
+        self._use_mla = os.environ.get("LMCACHE_USE_MLA", "").strip().lower() in (
             "1", "true", "yes",
         )
 
@@ -308,7 +308,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         self._world_size = tp_size * pp_size
         self._tp_size = tp_size
         self._model_name = str(getattr(llm_args, "model", "unknown_model"))
-        self._use_mla = os.environ.get("LMCACHE_USE_MLA", "").lower() in (
+        self._use_mla = os.environ.get("LMCACHE_USE_MLA", "").strip().lower() in (
             "1", "true", "yes",
         )
 
