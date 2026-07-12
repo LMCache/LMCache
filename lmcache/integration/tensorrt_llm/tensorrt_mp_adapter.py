@@ -117,6 +117,14 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
         self._use_mla = os.environ.get("LMCACHE_USE_MLA", "").strip().lower() in (
             "1", "true", "yes",
         )
+        # For MLA, the key's world_size must be kv_world_size
+        # (world_size // tp_size), not the full vLLM world_size.
+        # This matches the vLLM adapter's ParallelStrategy.kv_world_size
+        # for MLA, ensuring cross-engine cache compatibility.
+        if self._use_mla and tp_size > 0:
+            self._kv_world_size = self._world_size // tp_size
+        else:
+            self._kv_world_size = self._world_size
 
     def _create_key(
         self,
@@ -127,7 +135,7 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
     ) -> IPCCacheServerKey:
         return IPCCacheServerKey(
             model_name=self._model_name,
-            world_size=self._world_size,
+            world_size=self._kv_world_size,
             worker_id=None,
             token_ids=tuple(token_ids),
             start=start,
@@ -311,6 +319,10 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         self._use_mla = os.environ.get("LMCACHE_USE_MLA", "").strip().lower() in (
             "1", "true", "yes",
         )
+        if self._use_mla and tp_size > 0:
+            self._kv_world_size = self._world_size // tp_size
+        else:
+            self._kv_world_size = self._world_size
 
         future = _send_request(self._mq_client, RequestType.GET_CHUNK_SIZE, [])
         self._chunk_size = future.result(timeout=self._mq_timeout)
@@ -323,7 +335,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         aligned_end = (len(token_ids) // self._chunk_size) * self._chunk_size
         return IPCCacheServerKey(
             model_name=self._model_name,
-            world_size=self._world_size,
+            world_size=self._kv_world_size,
             worker_id=self._rank,
             token_ids=tuple(token_ids),
             start=0,

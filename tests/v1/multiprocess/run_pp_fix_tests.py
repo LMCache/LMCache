@@ -448,6 +448,69 @@ check("CudaDeviceSpec docstring mentions ROCm + HIP",
 check("CudaDeviceSpec device_type is cuda (ROCm compat)",
       'return "cuda"' in cuda_spec_src)
 
+# ROCm platform package
+rocm_init = ROOT / "lmcache/v1/platform/rocm/__init__.py"
+check("rocm/ platform package exists", rocm_init.is_file())
+if rocm_init.is_file():
+    rocm_src = rocm_init.read_text()
+    check("RocmDeviceSpec class defined",
+          "class RocmDeviceSpec" in rocm_src)
+    check("RocmDeviceSpec.is_available checks torch.version.hip",
+          "torch.version.hip" in rocm_src and "is_available" in rocm_src)
+    check("RocmDeviceSpec.device_type is cuda",
+          'return "cuda"' in rocm_src)
+    check("RocmDeviceSpec uses RocmPinMemoryBackend",
+          "RocmPinMemoryBackend" in rocm_src)
+
+# ROCm pin memory backend
+rocm_pin = ROOT / "lmcache/v1/platform/rocm/pin_memory.py"
+check("rocm/pin_memory.py exists", rocm_pin.is_file())
+if rocm_pin.is_file():
+    pin_src = rocm_pin.read_text()
+    check("RocmPinMemoryBackend class defined",
+          "class RocmPinMemoryBackend" in pin_src)
+    check("_load_libamdhip64 function defined",
+          "def _load_libamdhip64" in pin_src)
+    check("binds hipHostRegister",
+          "hipHostRegister" in pin_src and "argtypes" in pin_src)
+    check("binds hipHostUnregister",
+          "hipHostUnregister" in pin_src)
+    check("tries libamdhip64.so",
+          "libamdhip64.so" in pin_src)
+    check("is_pin_supported checks _libhip",
+          "_libhip is not None" in pin_src)
+
+# ROCm raw IPC wrapper
+rocm_ipc = ROOT / "lmcache/v1/platform/rocm/ipc_wrapper.py"
+check("rocm/ipc_wrapper.py exists", rocm_ipc.is_file())
+if rocm_ipc.is_file():
+    ipc_src = rocm_ipc.read_text()
+    check("RocmRawIPCWrapper class defined",
+          "class RocmRawIPCWrapper" in ipc_src)
+    check("_HipIpcMemHandle ctypes Structure defined",
+          "_HipIpcMemHandle" in ipc_src and "ctypes.Structure" in ipc_src)
+    check("binds hipIpcGetMemHandle",
+          "hipIpcGetMemHandle" in ipc_src and "argtypes" in ipc_src)
+    check("binds hipIpcOpenMemHandle",
+          "hipIpcOpenMemHandle" in ipc_src and "argtypes" in ipc_src)
+    check("handle is 64-byte buffer",
+          "c_char * 64" in ipc_src)
+    check("_is_default_wrapper is False",
+          "_is_default_wrapper: ClassVar[bool] = False" in ipc_src)
+    check("to_tensor uses cupy + DLPack",
+          "cupy" in ipc_src and "from_dlpack" in ipc_src)
+    check("_load_libhip lazy loader defined",
+          "def _load_libhip" in ipc_src)
+
+# TRT world_size fix for MLA
+trt_src = (ROOT / "lmcache/integration/tensorrt_llm/tensorrt_mp_adapter.py").read_text()
+check("TRT uses _kv_world_size for MLA",
+      "_kv_world_size" in trt_src and "self._world_size // tp_size" in trt_src)
+check("TRT scheduler _create_key uses _kv_world_size",
+      trt_src.count("world_size=self._kv_world_size") == 2)
+check("TRT env var has .strip()",
+      ".strip().lower()" in trt_src)
+
 # --------------------------------------------------------------------------- #
 print()
 print("=" * 72)
