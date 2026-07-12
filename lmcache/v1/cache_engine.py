@@ -31,7 +31,7 @@ import torch
 from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
 from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
-from lmcache.usage_context import InitializeUsageContext
+from lmcache.usage_telemetry import InitializeUsageContext
 from lmcache.utils import (
     CacheEngineKey,
     CacheStoreEvent,
@@ -44,14 +44,16 @@ from lmcache.v1.event_manager import EventManager, EventStatus, EventType
 from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
 from lmcache.v1.gpu_connector.utils import assert_layerwise_gpu_connector
 from lmcache.v1.hidden_state_store import HiddenStateStore
-from lmcache.v1.memory_management import CuFileMemoryAllocator  # noqa: E501
-from lmcache.v1.memory_management import (  # noqa: E501
+from lmcache.v1.memory_allocators.cu_file_memory_allocator import CuFileMemoryAllocator
+from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
+from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
+    PagedTensorMemoryAllocator,
+)
+from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
     MemoryObj,
     MemoryObjMetadata,
-    MixedMemoryAllocator,
-    PagedTensorMemoryAllocator,
     TensorMemoryObj,
 )
 from lmcache.v1.metadata import LMCacheMetadata
@@ -929,7 +931,9 @@ class LMCacheEngine:
                 # See pd_backend.py line 605 TODO comment.
                 if self._is_sync_pd_backend():
                     memory_obj.ref_count_down()
-            elif not self.async_loading:
+            else:
+                if memory_obj.is_pinned:
+                    memory_obj.unpin()
                 memory_obj.ref_count_down()
 
         retrieved_tokens = torch.sum(ret_mask)

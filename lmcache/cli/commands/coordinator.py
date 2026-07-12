@@ -102,12 +102,23 @@ class CoordinatorCommand(BaseCommand):
             ),
         )
         parser.add_argument(
-            "--blend-chunk-size",
+            "--chunk-size",
             type=int,
             default=None,
             help=(
-                "Tokens per chunk for the global CacheBlend directory; must "
-                "equal the LMCache chunk size the blend servers use (default: 256)."
+                "Tokens per KV chunk: the CacheBlend match unit and the unit used "
+                "to resolve pin token_ids to keys. Must equal the MP servers' "
+                "--chunk-size (default: 256)."
+            ),
+        )
+        parser.add_argument(
+            "--hash-algorithm",
+            type=str,
+            default=None,
+            help=(
+                "Token hash algorithm for pin key resolution; must equal the MP "
+                "servers' --hash-algorithm. 'blake3' (default) is self-contained; "
+                "other algorithms require vLLM importable in the coordinator."
             ),
         )
         parser.add_argument(
@@ -172,7 +183,8 @@ class CoordinatorCommand(BaseCommand):
                 ("eviction_check_interval", args.eviction_check_interval),
                 ("eviction_ratio", args.eviction_ratio),
                 ("trigger_watermark", args.trigger_watermark),
-                ("blend_chunk_size", args.blend_chunk_size),
+                ("chunk_size", args.chunk_size),
+                ("hash_algorithm", args.hash_algorithm),
                 ("blend_probe_stride", args.blend_probe_stride),
                 ("timeout_keep_alive", args.timeout_keep_alive),
             )

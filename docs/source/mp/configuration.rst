@@ -555,6 +555,27 @@ Environment Variables
    * - ``PYTHONHASHSEED``
      - Set to a fixed value for reproducible hashing across processes
        (relevant when using ``--hash-algorithm builtin``).
+   * - ``LMCACHE_TRACK_USAGE``
+     - Set to ``false`` to disable anonymous usage statistics (see below).
+   * - ``DO_NOT_TRACK``
+     - Set to ``1`` to disable anonymous usage statistics (cross-tool
+       convention).
+
+Anonymous Usage Statistics
+--------------------------
+
+At startup the MP server sends a one-time anonymous usage report to the
+LMCache stats server: an environment snapshot (cloud provider, CPU/GPU,
+memory) and a configuration snapshot (chunk size, transfer mode, L1
+size/medium, L2 adapter types, policies). No prompts, keys, KV-cache data,
+model names, or the server's ``--instance-id`` are ever sent; reports are
+correlated only through random UUIDs. Reporting runs on a background
+thread, never delays startup, and a failure anywhere in reporting never
+affects serving.
+
+To opt out, set ``LMCACHE_TRACK_USAGE=false`` or ``DO_NOT_TRACK=1``. See
+:ref:`usage-stats-collection` for the full list of collected fields and
+configuration options.
 
 Full Example
 ------------
