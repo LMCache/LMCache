@@ -873,21 +873,25 @@ flame graph of the server -- not of the client.
        --flamegraph on --flamegraph-mode gil \
        --profile-server-pid "$(pgrep -f 'lmcache server')"
 
-``--flamegraph-mode`` takes the same six values as
-:ref:`bench l2 <lmcache-bench-l2-profiling>`. Because the server is a
-process you did not launch, prefer ``wall`` or ``gil`` (``py-spy``): they
-attach to an unmodified server and split the chart by thread, so an
-overloaded ``affinity-pool`` thread or GIL contention on the hash path is
-visible at a glance. The perf/bcc modes resolve kernel frames but only
-name Python functions when the server was started with
-``PYTHONPERFSUPPORT=1`` -- which slows every Python call for the server's
-whole lifetime (tens of percent on a call-heavy hot path), so enable it
-only on a server you are dedicating to a profiling session, not in
-production.
+``--flamegraph-mode`` takes the same six values documented under
+:ref:`lmcache tool flamegraph <lmcache-flamegraph-modes>`. Because the
+target is a separate, already-running server -- not a process this
+benchmark spawns --
+it profiles by *attaching*, so the same attach-mode caveats documented for
+:doc:`lmcache tool flamegraph </cli/tool>` apply here: what each mode
+shows, the ``PYTHONPERFSUPPORT=1`` requirement for naming Python frames in
+the perf/bcc modes, the container privileges each mode needs, and the fact
+that recording a live process is never free. See
+:ref:`Choosing a profiling entry point
+<lmcache-flamegraph-entry-points>` for those details and for how the two
+``bench`` commands and the standalone tool differ.
 
-For a standalone profile not tied to a benchmark run -- recording an idle
-or production server for a fixed duration -- use
-:doc:`lmcache tool flamegraph </cli/tool>` instead.
+.. note::
+
+   The one thing unique to ``bench server``: it records *while* it drives
+   load, so the recording overhead lands on the very throughput/latency
+   this benchmark reports. Keep the profiled run short and read those
+   numbers as indicative, not a clean baseline.
 
 
 Output
@@ -1353,8 +1357,11 @@ loaded data can be compared against the original store pattern.
 Profiling / flame charts
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-When ``--flamegraph on`` is passed, the benchmark profiles the L2
-adapter's performance and renders a flame graph of the measured phases:
+When ``--flamegraph on`` is passed, the benchmark profiles **its own
+process** -- the L2 adapter driven by this microbenchmark's synthetic load
+-- and renders a flame graph of the measured phases (to profile a separate
+server or a real process instead, see
+:ref:`Choosing a profiling entry point <lmcache-flamegraph-entry-points>`):
 
 .. code-block:: bash
 
@@ -1364,115 +1371,39 @@ adapter's performance and renders a flame graph of the measured phases:
    #   [Profile] on-cpu recording started (pid=12345) -> .../FSL2Adapter.oncpu.svg
    #   [Profile] wrote /tmp/lmcache_bench_flames/FSL2Adapter.oncpu.svg
 
-Four modes are available via ``--flamegraph-mode``, in two families.
-Pick by what you want to see.
+The six ``--flamegraph-mode`` values -- what each shows (``on-cpu``,
+``off-cpu``, ``offwake``, ``wakeup``, ``wall``, ``gil``), the cost of
+recording, the frame-pointer caveat, and the tool / sysctl requirements --
+are documented once under
+:ref:`lmcache tool flamegraph <lmcache-flamegraph-modes>`. Only the points
+below are specific to ``bench l2``:
 
-**To profile Python execution or GIL contention**, use the *Python*
-modes ``gil`` / ``wall`` (``py-spy``). They give one root frame per
-thread and attribute the interpreter lock, but see no kernel frames and
-work only on a CPython process:
+* **It self-profiles.** Most L2 adapters are written in Python, whose calls
+  collapse into a single native ``_PyEval_EvalFrameDefault`` frame, so the
+  whole-process recorders would render them as ``[unknown]``. On CPython
+  3.12+ the benchmark **activates the interpreter's perf trampolines
+  itself** for the duration of the recording, so adapter functions appear
+  as ``py::<qualname>`` in the ``on-cpu`` / ``off-cpu`` charts -- with no
+  ``PYTHONPERFSUPPORT`` needed (unlike attaching to a server, which cannot
+  turn them on after the fact). Older interpreters still render, without
+  Python names; ``wall`` / ``gil`` read interpreter state directly and need
+  no trampoline. Trampolines cost a few percent of throughput while
+  recording, so treat a profiled run's timings as indicative, not as a
+  benchmark result.
+* **Because it runs as a child of the benchmark**, the ``wall`` / ``gil``
+  modes need ``kernel.yama.ptrace_scope`` at ``0`` (scope ``1``, the Ubuntu
+  default, lets a process trace only its own descendants) rather than the
+  attach-mode permissions in the tool docs.
+* **Recording covers only the measured work**, so make the run long enough
+  to collect samples -- use a large ``--rounds``. A phase shorter than the
+  recorder's own startup captures nothing; the benchmark then reports that
+  no samples were captured instead of writing an empty SVG.
 
-* **gil** -- samples only threads holding the GIL, so interpreter-lock
-  contention inside a Python adapter is directly visible.
-* **wall** -- wall-clock time per thread, blocked threads included.
-  Separates a worker pool that the whole-process modes superimpose.
-
-**To look at CPU/IO time, kernel frames, or a non-Python process**, use
-the *whole-process* modes (``perf`` / bcc). They sample every thread
-(including native worker threads), resolve kernel frames, and profile
-any process, but merge all threads into one chart:
-
-* **on-cpu** (default) -- ``perf record``; where CPU cycles go
-  (serialization, copies, hashing).
-* **off-cpu** -- ``offcputime-bpfcc`` (bcc); time spent blocked
-  (waiting on I/O, locks, eventfds). Often the more informative view
-  for I/O-bound adapters such as ``fs`` and ``s3``.
-* **offwake** -- ``offwaketime-bpfcc`` (bcc); like ``off-cpu``, but each
-  blocked stack is joined to the stack of the thread that woke it, so
-  you see *what unblocked* a waiter, not just where it waited.
-* **wakeup** -- ``wakeuptime-bpfcc`` (bcc); the mirror image, the stacks
-  that spend time *doing* the waking.
-
-Comparing the two py-spy modes answers "is this adapter GIL-bound?".
-Profiling ``fs`` this way shows the GIL held during only 4% of sampled
-thread-time, 89% of that by the event-loop thread -- an adapter waiting
-on I/O, not on the interpreter.
-
-Recording covers only the measured store/lookup/load work, so make the
-run long enough to collect samples (a few seconds is plenty -- use a
-large ``--rounds``). A phase shorter than the recorder's own startup
-captures nothing; the benchmark then reports that no samples were
-captured instead of writing an empty SVG. The SVG is written to
-``--flamegraph-output`` (default
-``/tmp/lmcache_bench_flames/<adapter>.<mode>.svg``).
-
-**Python frames.** Most L2 adapters are written in Python, whose calls
-do not create native stack frames: the interpreter runs bytecode inside
-``_PyEval_EvalFrameDefault``, and since CPython 3.11 a chain of
-Python-to-Python calls collapses into a single native frame. The
-whole-process recorders would otherwise render such adapters as
-``[unknown]``. On CPython 3.12+ the benchmark enables the interpreter's
-perf trampolines for the duration of the recording, so adapter functions
-appear as ``py::<qualname>`` frames in ``on-cpu`` and ``off-cpu``. On
-older interpreters the flame graph still renders, without Python
-function names. The ``wall`` and ``gil`` modes read interpreter state
-directly and need no trampoline.
-
-Frames from *stripped* native libraries stay ``[unknown]`` regardless --
-this affects some third-party clients, not LMCache's own extensions.
-
-Trampolines cost a few percent of throughput while recording, so treat a
-profiled run's timings as indicative rather than as a benchmark result.
-They are installed only for the duration of the recording; the default
-``--flamegraph off`` is unaffected.
-
-**Cost of recording.** Sampling is not free, and the cost differs by
-mode. ``on-cpu`` (``perf``) samples at 99 Hz (the flame-graph
-convention) and streams a ``perf.data`` to disk that grows with recording
-length and thread count (removed after the SVG renders, but present
-during the run). The bcc modes (``off-cpu`` /
-``offwake`` / ``wakeup``) attach BPF probes that fire on every scheduler
-switch or wakeup, so their CPU cost rises with how *busy* the target is
--- ``wakeup`` on a high-wakeup workload is the heaviest; their output is
-small folded text. ``wall`` / ``gil`` (``py-spy``, ``--nonblocking``) are
-the lightest. On a production server keep recordings short and prefer the
-py-spy modes.
-
-**Native stacks need frame pointers.** ``on-cpu`` records with
-``perf record -g``, which walks native stacks through frame pointers. Code
-compiled with ``-fomit-frame-pointer`` (the default in many optimized
-builds, including some Python C extensions and system libraries) has none,
-so its native frames appear broken or truncated in the chart -- an
-``on-cpu`` graph of a server whose extensions were built without frame
-pointers will show shallow or missing C stacks. Rebuild the target with
-``-fno-omit-frame-pointer`` for full native stacks, or use ``off-cpu`` /
-``offwake`` / ``wakeup`` (bcc walks stacks differently) when you only need
-the blocked/wakeup view. The py-spy modes are unaffected: they read Python
-frames from the interpreter, not the native stack.
-
-**Requirements.** The whole-process modes render with Brendan Gregg's
-`FlameGraph <https://github.com/brendangregg/FlameGraph>`__ scripts
-(``--flamegraph-scripts-dir`` or ``FLAMEGRAPH_DIR``, default ``~/FlameGraph``;
-auto-cloned to a temp directory when absent). ``on-cpu`` needs ``perf``
-and ``kernel.perf_event_paranoid`` at ``2`` or lower -- level ``3``
-(a Debian addition) rejects sampling outright, so lower it with
-``sudo sysctl -w kernel.perf_event_paranoid=2`` or run as root;
-``off-cpu`` / ``offwake`` / ``wakeup`` need ``bcc``
-(``offcputime-bpfcc`` / ``offwaketime-bpfcc`` / ``wakeuptime-bpfcc``,
-respectively) and ``sudo``.
-
-``wall`` and ``gil`` need ``py-spy`` (``pip install py-spy``) and render
-their own SVG, so the FlameGraph scripts are not fetched. They also need
-``kernel.yama.ptrace_scope`` at ``0``: the recorder runs as a *child* of
-the benchmark, and scope ``1`` (the Ubuntu default) lets a process trace
-only its own descendants. Lower it with
-``sudo sysctl -w kernel.yama.ptrace_scope=0`` or run as root.
-
-The required tools are checked up front: when ``--flamegraph
-on`` is requested but a tool is missing, the benchmark exits with a
-non-zero status and an actionable message naming the missing tool
-instead of running unprofiled. The default ``--flamegraph off`` skips
-all of this and leaves benchmark behavior unchanged.
+The SVG is written to ``--flamegraph-output`` (default
+``/tmp/lmcache_bench_flames/<adapter>.<mode>.svg``). Comparing the two
+py-spy modes answers "is this adapter GIL-bound?" -- profiling ``fs`` this
+way shows the GIL held during only 4% of sampled thread-time, 89% of that
+by the event-loop thread: an adapter waiting on I/O, not the interpreter.
 
 .. note::
 
