@@ -92,15 +92,21 @@ class DeviceOps:
     def _bind_native(self, module: object) -> None:
         """Rebind every op / native type on *self* to the *module*'s export.
 
-        Op names are discovered by reflecting the class body (every public
-        callable declared on :class:`DeviceOps` except :meth:`ensure_native`),
-        so the class body is the single source of truth: add a method here
-        and it is automatically eligible for native rebinding. If *module*
-        exports a symbol with the same name, the instance attribute is
-        overwritten with the module's callable (bound as a plain attribute,
-        not a method -- native functions have no ``self`` argument). Native
-        types (``EngineKVFormat``, ...) are rebound too for pybind enum
-        identity.
+        Both ops and types are discovered by reflecting the class body:
+
+        * ``inspect.isfunction(member)`` -> op method; if *module* exports
+          a same-named symbol, bind it as an instance attribute (native
+          functions have no ``self`` argument).
+        * ``isinstance(member, type)`` -> class-level type alias
+          (``TransferDirection``, ``EngineKVFormat``, ...); rebind to the
+          module's export so pybind enum / class identity matches when
+          instances cross the Python/native boundary.
+
+        This means the class body is the single source of truth: add a
+        method or a type alias here and it is automatically eligible for
+        native rebinding -- no separate registry to keep in sync.
+        ``GPUKVFormat`` is handled explicitly because it renames to
+        ``EngineKVFormat`` on the native side.
         """
         bound_ops = 0
         bound_types = 0
@@ -108,31 +114,26 @@ class DeviceOps:
         for name, member in vars(DeviceOps).items():
             if name.startswith("_") or name in skip:
                 continue
-            # Only rebind real methods declared in the class body; skip
-            # class-level type aliases (``EngineKVFormat`` etc.) and
-            # ``staticmethod`` wrappers -- those are handled below.
-            if not inspect.isfunction(member):
-                continue
-            fn = getattr(module, name, None)
-            if fn is not None:
-                setattr(self, name, fn)
-                bound_ops += 1
-        for type_name in (
-            "TransferDirection",
-            "EngineKVFormat",
-            "PageBufferShapeDesc",
-            "StagingCopy",
-            "LaunchVar",
-            "BatchStep",
-            "KernelGroupSpec",
-        ):
-            t = getattr(module, type_name, None)
-            if t is not None:
-                setattr(self, type_name, t)
-                bound_types += 1
+            # Real methods -> native callables; class-level type aliases
+            # (``isinstance(member, type)``) -> native pybind classes /
+            # enums for identity. ``staticmethod`` wrappers and other
+            # descriptors are ignored.
+            if inspect.isfunction(member):
+                fn = getattr(module, name, None)
+                if fn is not None:
+                    setattr(self, name, fn)
+                    bound_ops += 1
+            elif isinstance(member, type):
+                t = getattr(module, name, None)
+                if t is not None:
+                    setattr(self, name, t)
+                    bound_types += 1
+        # ``GPUKVFormat`` is a back-compat alias that maps to native
+        # ``EngineKVFormat`` (different name on the native side), so it
+        # needs an explicit rename that reflection can't infer.
         ekf = getattr(module, "EngineKVFormat", None)
         if ekf is not None:
-            self.GPUKVFormat = ekf  # back-compat alias
+            self.GPUKVFormat = ekf
         logger.debug(
             "_bind_native: %s <- %s (%d ops, %d types)",
             type(self).__name__,
