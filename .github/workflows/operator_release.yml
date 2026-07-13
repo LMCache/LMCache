@@ -68,7 +68,7 @@ jobs:
             ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.FLOATING_TAG }}
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: operator/go.mod
 
