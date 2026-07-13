@@ -722,9 +722,16 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         all_obj_keys = self._resolve_all_group_obj_keys(key, num_groups)
         g_obj_keys = all_obj_keys[group_idx]
         offset_obj_keys = g_obj_keys[skip_count:]
+        if skip_count < 0:
+            logger.error(
+                "commit_store_group_delta: negative skip_count %d (group=%d)",
+                skip_count,
+                group_idx,
+            )
+            return False
         # Fast path: full-prefix hit (skip_count covers all chunks for
         # this group) -- no deserialize, no storage write.
-        if not cpu_data or skip_count >= len(g_obj_keys):
+        if skip_count >= len(g_obj_keys):
             logger.debug(
                 "commit_store_group_delta: full-prefix skip "
                 "(group=%d, skip_count=%d, total=%d)",
@@ -733,6 +740,20 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 len(g_obj_keys),
             )
             return True
+        # From here on chunks ARE required: skip_count does not cover
+        # all object keys for this group. Empty cpu_data would silently
+        # drop the remaining chunks, so treat it as an error instead of
+        # acknowledging success.
+        if not cpu_data:
+            logger.error(
+                "commit_store_group_delta: empty cpu_data but skip_count "
+                "%d < total chunks %d (group=%d) -- refusing to ack a "
+                "partial store as success",
+                skip_count,
+                len(g_obj_keys),
+                group_idx,
+            )
+            return False
         deserialized = _deserialize_multi_group_chunks(cpu_data)
         if len(deserialized) != 1:
             logger.error(
@@ -741,8 +762,20 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             )
             return False
         group_chunk_list = deserialized[0]
-        if not group_chunk_list:
-            return True
+        # The provided chunks must exactly cover the object keys after
+        # skip_count; any other count would misalign chunk[i] with
+        # offset_obj_keys[i] (the strategy silently skips mismatches).
+        if len(group_chunk_list) != len(offset_obj_keys):
+            logger.error(
+                "commit_store_group_delta: got %d chunks but %d object "
+                "keys remain after skip_count=%d (group=%d, total=%d)",
+                len(group_chunk_list),
+                len(offset_obj_keys),
+                skip_count,
+                group_idx,
+                len(g_obj_keys),
+            )
+            return False
         storage_payload = pickle.dumps(
             group_chunk_list,
             protocol=pickle.HIGHEST_PROTOCOL,
