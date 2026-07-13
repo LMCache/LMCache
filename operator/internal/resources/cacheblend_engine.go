@@ -62,6 +62,11 @@ const (
 // surfaced separately (Blend via BuildCBConnectionConfigMap, Injection via the
 // admission webhook).
 func cbSpecToEngineSpec(spec *lmcachev1alpha1.CacheBlendEngineSpec) *lmcachev1alpha1.LMCacheEngineSpec {
+	var securityContext *corev1.SecurityContext
+	if spec.SecurityContext != nil {
+		securityContext = spec.SecurityContext.DeepCopy()
+	}
+
 	return &lmcachev1alpha1.LMCacheEngineSpec{
 		GPUVendor:          spec.GPUVendor,
 		Image:              spec.Image,
@@ -84,7 +89,7 @@ func cbSpecToEngineSpec(spec *lmcachev1alpha1.CacheBlendEngineSpec) *lmcachev1al
 		PodLabels:          spec.PodLabels,
 		ServiceAccountName: spec.ServiceAccountName,
 		PriorityClassName:  spec.PriorityClassName,
-		Privileged:         spec.Privileged,
+		SecurityContext:    securityContext,
 		ExtraArgs:          spec.ExtraArgs,
 	}
 }
@@ -111,7 +116,8 @@ func BuildCBEngineArgs(spec *lmcachev1alpha1.CacheBlendEngineSpec) []string {
 // BuildCBEngineDaemonSet constructs the DaemonSet for the blend_v3 engine of the
 // given CacheBlendEngine. It reuses the shared GPU/security pod-template
 // scaffolding (hostIPC, runtimeClassName=nvidia, NVIDIA_VISIBLE_DEVICES=all,
-// privileged only when spec.privileged=true (default false), CPU+memory-only
+// privileged only when spec.securityContext.privileged=true (default false),
+// CPU+memory-only
 // resources with no nvidia.com/gpu claim) so the engine shares the node's GPU
 // via CUDA IPC, and adds the blend-specific server args.
 func BuildCBEngineDaemonSet(engine *lmcachev1alpha1.CacheBlendEngine) *appsv1.DaemonSet {

@@ -54,12 +54,12 @@ var nsCounter atomic.Int64
 //
 // The namespace is pre-labeled with the `privileged` PodSecurity profile
 // because the LMCache DaemonSet's pod template sets hostIPC=true (and
-// privileged=true only when spec.privileged is enabled), and hostIPC alone
-// is rejected by the restricted/baseline profiles. On clusters that enforce
-// PodSecurity admission (OCP in particular), a `restricted` namespace would
-// reject the DaemonSet at creation time, which the smokes need to succeed
-// even though they never wait for pods to schedule. The label is a no-op on
-// clusters that don't enforce PodSecurity.
+// privileged=true only when spec.securityContext.privileged is enabled), and
+// hostIPC alone is rejected by the restricted/baseline profiles. On clusters
+// that enforce PodSecurity admission (OCP in particular), a `restricted`
+// namespace would reject the DaemonSet at creation time, which the smokes need
+// to succeed even though they never wait for pods to schedule. The label is a
+// no-op on clusters that don't enforce PodSecurity.
 func createTestNamespace(ctx context.Context) string {
 	GinkgoHelper()
 	name := uniqueNamespaceName()

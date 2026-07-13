@@ -1115,9 +1115,9 @@ msgid ""
 "blend``), deployed as a DaemonSet with the **same GPU model as** "
 "``LMCacheEngine`` (``runtimeClassName: nvidia`` + "
 "``NVIDIA_VISIBLE_DEVICES=all`` + ``hostIPC``, plus ``privileged`` when "
-"``spec.privileged`` is set, and **no** ``nvidia.com/gpu`` claim) so it "
+"``spec.securityContext.privileged`` is set, and **no** ``nvidia.com/gpu`` claim) so it "
 "shares the vLLM GPU for same-device CUDA IPC; and"
-msgstr "一个驻留在 GPU 上的 CacheBlend V3 引擎 (``lmcache server --engine-type blend``)，作为 DaemonSet 部署，**与** ``LMCacheEngine`` **相同的 GPU 型号** (``runtimeClassName: nvidia`` + ``NVIDIA_VISIBLE_DEVICES=all`` + ``hostIPC``，当设置了 ``spec.privileged`` 时加上 ``privileged``，并且**没有** ``nvidia.com/gpu`` 声明)，以便共享同设备的 CUDA IPC 的 vLLM GPU；并且"
+msgstr "一个驻留在 GPU 上的 CacheBlend V3 引擎 (``lmcache server --engine-type blend``)，作为 DaemonSet 部署，**与** ``LMCacheEngine`` **相同的 GPU 型号** (``runtimeClassName: nvidia`` + ``NVIDIA_VISIBLE_DEVICES=all`` + ``hostIPC``，当设置了 ``spec.securityContext.privileged`` 时加上 ``privileged``，并且**没有** ``nvidia.com/gpu`` 声明)，以便共享同设备的 CUDA IPC 的 vLLM GPU；并且"
 
 #: ../../source/mp/operator.rst:771
 msgid "the vLLM-side plugin, injected into opted-in pods by the webhook."
@@ -1794,11 +1794,11 @@ msgstr ""
 
 #: ../../source/mp/operator.rst:1224
 msgid ""
-"``spec.privileged`` defaults to ``false``. When enabled (required for "
+"``spec.securityContext.privileged`` defaults to ``false``. When enabled (required for "
 "``gpuVendor: amd``), the engine container additionally runs privileged, "
 "granting it full device access -- enable it only where GPU visibility "
 "requires it."
-msgstr "``spec.privileged`` 默认为 ``false``。启用后（对于 ``gpuVendor: amd`` 是必需的），引擎容器将以特权模式运行，授予其完全的设备访问权限——仅在 GPU 可见性需要时启用。"
+msgstr "``spec.securityContext.privileged`` 默认为 ``false``。启用后（对于 ``gpuVendor: amd`` 是必需的），引擎容器将以特权模式运行，授予其完全的设备访问权限——仅在 GPU 可见性需要时启用。"
 
 #: ../../source/mp/operator.rst:1230
 msgid "Development"

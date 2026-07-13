@@ -534,8 +534,14 @@ GPU & Security
      - ``nvidia``
      - GPU vendor: ``nvidia`` (uses the ``nvidia`` RuntimeClass) or ``amd``
        (runs on the default runtime).
-   * - ``privileged``
-     - ``false``
+   * - ``securityContext``
+     - --
+     - Container-level Kubernetes ``SecurityContext`` for the LMCache
+       container. When unset, the operator runs with
+       ``securityContext.privileged: false``. When set, the value is used
+       as-is.
+   * - ``securityContext.privileged``
+     - ``false`` (if unset)
      - Run the engine container in privileged mode. On most clusters
        ``runtimeClassName: nvidia`` + ``NVIDIA_VISIBLE_DEVICES=all`` already
        grant GPU visibility without it; set ``true`` only where the engine
@@ -543,6 +549,35 @@ GPU & Security
        RuntimeClass device injection, so privileged is the only path to
        ``/dev/kfd``/``/dev/dri``). Enabling it requires the namespace to allow
        the ``privileged`` Pod Security Standard.
+   * - ``securityContext.allowPrivilegeEscalation``
+     - --
+     - Controls whether a process can gain more privileges than its parent
+       process (``no_new_privs`` behavior).
+   * - ``securityContext.capabilities``
+     - --
+     - Linux capabilities to add/drop for the LMCache container.
+   * - ``securityContext.readOnlyRootFilesystem``
+     - ``false``
+     - Make the container root filesystem read-only.
+   * - ``securityContext.runAsUser`` / ``securityContext.runAsGroup`` /
+       ``securityContext.runAsNonRoot``
+     - --
+     - Run the LMCache process with explicit UID/GID or enforce non-root
+       execution.
+   * - ``securityContext.seccompProfile`` / ``securityContext.appArmorProfile``
+     - --
+     - Container-level seccomp/AppArmor profiles. Container-level settings
+       override pod-level defaults when both are provided.
+   * - ``securityContext.seLinuxOptions``
+     - --
+     - SELinux labels applied to the container process.
+   * - ``securityContext.procMount``
+     - ``Default``
+     - Proc mount mode (requires the Kubernetes ``ProcMountType`` feature).
+   * - ``securityContext.windowsOptions``
+     - --
+     - Windows-specific container security options (Linux-only fields above do
+       not apply on Windows).
 
 Scheduling
 ~~~~~~~~~~
@@ -840,7 +875,7 @@ It has two halves the operator runs together:
 - a GPU-resident CacheBlend V3 engine (``lmcache server --engine-type blend``),
   deployed as a DaemonSet with the **same GPU model as** ``LMCacheEngine``
   (``runtimeClassName: nvidia`` + ``NVIDIA_VISIBLE_DEVICES=all`` + ``hostIPC``,
-  plus ``privileged`` when ``spec.privileged`` is set, and **no**
+  plus ``privileged`` when ``spec.securityContext.privileged`` is set, and **no**
   ``nvidia.com/gpu`` claim) so it shares the vLLM GPU for same-device CUDA IPC;
   and
 - the vLLM-side plugin, injected into opted-in pods by the webhook.
@@ -1296,7 +1331,7 @@ resources from other processes on the same host.
 - Clusters using Pod Security Standards must allow the ``privileged`` profile
   for the LMCache namespace -- the ``baseline`` and ``restricted`` profiles
   reject ``hostIPC``.
-- ``spec.privileged`` defaults to ``false``. When enabled (required for
+- ``spec.securityContext.privileged`` defaults to ``false``. When enabled (required for
   ``gpuVendor: amd``), the engine container additionally runs privileged,
   granting it full device access -- enable it only where GPU visibility
   requires it.
