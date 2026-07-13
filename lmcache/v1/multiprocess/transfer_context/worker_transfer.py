@@ -774,7 +774,19 @@ class EngineDrivenTransferContext(TransferContext):
                     # combined PREPARE_RETRIEVE path).
                     ok = False
                     continue
-                decoded = _deserialize_multi_group_chunks(response.data)
+                try:
+                    decoded = _deserialize_multi_group_chunks(response.data)
+                except Exception:
+                    # A corrupt or wrong-format blob must degrade to a
+                    # cache miss, not kill the worker (and with it the
+                    # whole engine core).
+                    logger.exception(
+                        "Failed to deserialize retrieved group %d; "
+                        "treating retrieve as a miss",
+                        g_idx,
+                    )
+                    ok = False
+                    continue
                 if len(decoded) != 1:
                     logger.error(
                         "PREPARE_RETRIEVE_GROUP: expected 1 group in "
@@ -786,19 +798,45 @@ class EngineDrivenTransferContext(TransferContext):
                     continue
                 group_chunks.append(decoded[0])
             if ok:
-                scatter_cpu_multi_group_to_paged_kv(
-                    kv_caches,
-                    block_ids,
-                    group_chunks,
-                    self._engine_group_infos,
-                    lmcache_tokens_per_chunk=self._lmcache_tokens_per_chunk,
-                    skip_first_n_tokens=skip_first_n_tokens,
-                    layout_hints=self._layout_hints,
-                )
-                torch_dev.current_stream().synchronize()
+                # A retrieve failure must NEVER propagate out of
+                # submit_retrieve: an exception here would tear down the
+                # vLLM worker and the engine core. Any inconsistency
+                # (e.g. a block-grain mismatch between the stored chunks
+                # and the request's block IDs) degrades to a cache miss;
+                # vLLM then recomputes the tokens and overwrites whatever
+                # was partially scattered. The length validation in
+                # scatter_cpu_to_paged_kv runs before any copy, so the
+                # common mismatch case leaves the blocks untouched.
+                try:
+                    scatter_cpu_multi_group_to_paged_kv(
+                        kv_caches,
+                        block_ids,
+                        group_chunks,
+                        self._engine_group_infos,
+                        lmcache_tokens_per_chunk=self._lmcache_tokens_per_chunk,
+                        skip_first_n_tokens=skip_first_n_tokens,
+                        layout_hints=self._layout_hints,
+                    )
+                    torch_dev.current_stream().synchronize()
+                except Exception:
+                    logger.exception(
+                        "Failed to scatter retrieved multi-group chunks; "
+                        "treating retrieve as a miss"
+                    )
+                    ok = False
             self._engine_driven_context.commit_retrieve(key, instance_id)
         else:
-            src_buffers = self._engine_driven_context.prepare_retrieve(key, instance_id)
+            try:
+                src_buffers = self._engine_driven_context.prepare_retrieve(
+                    key, instance_id
+                )
+            except Exception:
+                # E.g. a corrupt pickle blob from storage. Degrade to a
+                # miss instead of killing the worker.
+                logger.exception(
+                    "prepare_retrieve failed; treating retrieve as a miss"
+                )
+                src_buffers = None
             ok = src_buffers is not None
             if src_buffers is not None:
                 try:
