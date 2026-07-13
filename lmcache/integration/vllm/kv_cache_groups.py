@@ -87,10 +87,103 @@ def _merge_layer_sw_sizes(per_layer_sw_size: list[int], indices: list[int]) -> i
     return sw_sizes.pop()
 
 
+def _cp_token_split_factor(vllm_config: Any) -> int:
+    """Token-split factor of one scheduler block under context parallelism.
+
+    Mirrors vLLM's ``cp_token_split_factor``: under (uneven) DCP/PCP one
+    "virtual" scheduler block of a token-split group spans this many
+    ``block_size`` units (``dcp * pcp`` for the even split, ``sum(ratios)``
+    under uneven DCP). Returns 1 when context parallelism is off or the
+    parallel config is unavailable.
+
+    Prefers vLLM's own helper (authoritative: it reads the installed CP
+    token vectors, which under uneven DCP v4 need not equal
+    ``--rank-tp-ratio``); falls back to a config-derived approximation for
+    vLLM builds without the helper.
+    """
+    pc = getattr(vllm_config, "parallel_config", None)
+    dcp = getattr(pc, "decode_context_parallel_size", 1) or 1
+    pcp = getattr(pc, "prefill_context_parallel_size", 1) or 1
+    if dcp * pcp <= 1:
+        return 1
+    try:
+        # Third Party
+        from vllm.distributed.utils import cp_token_split_factor
+
+        return int(cp_token_split_factor(dcp, pcp))
+    except (ImportError, AttributeError):
+        ratios = getattr(pc, "rank_tp_ratio", None)
+        if ratios and dcp > 1 and len(ratios) == dcp and len(set(ratios)) > 1:
+            return int(sum(ratios)) * pcp
+        return dcp * pcp
+
+
+def _is_token_split_spec(spec: Any) -> bool:
+    """True if this group's KV is split along the token axis under CP.
+
+    Mamba / linear-attention groups keep the FULL per-sequence state on
+    every rank (no token-axis split), so their allocated block IDs always
+    span the raw ``block_size``. Duck-typed on the spec class name to
+    avoid importing vLLM here; mirrors vLLM's
+    ``isinstance(spec, MambaSpec)`` checks (kv_cache_utils, coordinator,
+    gpu_model_runner all special-case exactly MambaSpec).
+    """
+    return "mamba" not in type(spec).__name__.lower()
+
+
+def resolve_group_token_spans(
+    kv_cache_config: Any,
+    vllm_config: Any,
+) -> list[int]:
+    """Tokens of the GLOBAL sequence covered by ONE allocated block ID,
+    per engine group.
+
+    This is the grain of the block IDs vLLM's scheduler hands to the
+    connector, and therefore the ONLY correct ``tokens_per_block`` for
+    slicing token ranges into per-group block IDs and for deriving
+    blocks-per-chunk on the worker. It mirrors vLLM's
+    ``KVCacheCoordinator._group_token_span``:
+
+    - Mamba groups: raw ``spec.block_size`` (full per-sequence state on
+      every rank; the align solver may have inflated this).
+    - Token-split (attention) groups: ``spec.block_size`` when context
+      parallelism is off; ``spec.block_size * cp_token_split_factor``
+      under (uneven) DCP/PCP -- the scheduler manages these groups in
+      "virtual" blocks and the block IDs it reports are virtual.
+
+    Using the raw ``spec.block_size`` for token-split groups under CP
+    (the previous behaviour) mis-slices block IDs and mis-computes
+    blocks-per-chunk: stores silently write mis-keyed chunk data and
+    retrieves crash in scatter with a block-count mismatch.
+
+    Args:
+        kv_cache_config: vLLM ``KVCacheConfig`` (or ``None`` -> single
+            non-hybrid group from ``cache_config.block_size``).
+        vllm_config: vLLM ``VllmConfig`` used for the parallel geometry.
+
+    Returns:
+        One token span per engine group, in engine-group order.
+    """
+    vllm_groups = (
+        getattr(kv_cache_config, "kv_cache_groups", ()) or ()
+        if kv_cache_config is not None
+        else ()
+    )
+    factor = _cp_token_split_factor(vllm_config)
+    if not vllm_groups:
+        return [vllm_config.cache_config.block_size * factor]
+    return [
+        group.kv_cache_spec.block_size
+        * (factor if _is_token_split_spec(group.kv_cache_spec) else 1)
+        for group in vllm_groups
+    ]
+
+
 def create_engine_group_infos_from_vllm(
     kv_cache_config: Any,
     kv_caches: Mapping[str, Any],
     layout_hints: "LayoutHints | None" = None,
+    vllm_config: Any = None,
 ) -> list[EngineGroupInfo]:
     """Build the LMCache engine group infos from vLLM metadata and registered tensors.
 
@@ -156,11 +249,18 @@ def create_engine_group_infos_from_vllm(
     per_layer_sw_size = [-1] * num_layers
     if vllm_groups:
         per_layer_group_idx = [EXCLUDED_ENGINE_GROUP] * num_layers
+        # Tokens of the global sequence covered by one allocated block ID
+        # of each group. When the vllm_config is available this is the
+        # CP-aware scheduler grain (virtual blocks for token-split groups
+        # under DCP/PCP); the raw spec block_size is only correct without
+        # context parallelism. The physical slot count per chunk is
+        # discovered later from the registered tensors.
+        if vllm_config is not None:
+            group_spans = resolve_group_token_spans(kv_cache_config, vllm_config)
+        else:
+            group_spans = [g.kv_cache_spec.block_size for g in vllm_groups]
         for engine_group_id, group in enumerate(vllm_groups):
-            # The spec's block_size is the logical tokens covered by one of
-            # this group's paged chunks (block IDs); the physical slot count
-            # per chunk is discovered later from the registered tensors.
-            group_tokens_per_block[engine_group_id] = group.kv_cache_spec.block_size
+            group_tokens_per_block[engine_group_id] = group_spans[engine_group_id]
             for name in group.layer_names:
                 per_layer_group_idx[layer_to_idx[name]] = engine_group_id
         per_layer_sw_size = _resolve_per_layer_sw_sizes(

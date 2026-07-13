@@ -45,6 +45,7 @@ from lmcache.integration.vllm.kv_cache_group_edits import (
 )
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
+    resolve_group_token_spans,
 )
 from lmcache.integration.vllm.utils import mla_enabled, vllm_layout_hints
 from lmcache.utils import init_logger as lmcache_init_logger
@@ -568,21 +569,25 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         else:
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
 
+        # Keep the vllm_config for worker-side group-info creation
+        # (register_kv_caches) -- the CP-aware token spans need the
+        # parallel geometry.
+        self._vllm_config = vllm_config
         kv_cache_config = getattr(self, "_kv_cache_config", None)
-        vllm_groups = (
-            getattr(kv_cache_config, "kv_cache_groups", ()) or ()
-            if kv_cache_config is not None
-            else ()
-        )
-        # Tokens covered by one paged chunk (one block ID) of each engine
-        # group, from the group's KV cache spec. Hybrid models can mix
+        # Tokens of the GLOBAL sequence covered by one allocated block ID
+        # of each engine group -- the grain of the block IDs the vLLM
+        # scheduler hands to this connector. Hybrid models can mix
         # different values (e.g. gemma-4: sliding-window groups 32,
-        # full-attention groups 16; DeepSeek V4: 256/64/8/4). Falls back to
-        # the engine's base block size when no group metadata is available
-        # (single non-hybrid group).
-        self._group_tokens_per_block: list[int] = [
-            group.kv_cache_spec.block_size for group in vllm_groups
-        ] or [vllm_config.cache_config.block_size]
+        # full-attention groups 16; DeepSeek V4: 256/64/8/4). Under
+        # (uneven) DCP/PCP the token-split groups use VIRTUAL scheduler
+        # blocks (spec.block_size * cp_token_split_factor) while Mamba
+        # groups keep their raw block_size -- resolve_group_token_spans
+        # mirrors vLLM's KVCacheCoordinator._group_token_span. Falls back
+        # to the engine's base block size (CP-adjusted) when no group
+        # metadata is available (single non-hybrid group).
+        self._group_tokens_per_block: list[int] = resolve_group_token_spans(
+            kv_cache_config, vllm_config
+        )
         for engine_group_idx, tokens_per_block in enumerate(
             self._group_tokens_per_block
         ):
@@ -646,6 +651,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             kv_cache_config,
             kv_caches,
             layout_hints=vllm_layout_hints(),
+            # CP-aware: EngineGroupInfo.tokens_per_block must be the
+            # scheduler's block-ID grain (virtual blocks under DCP/PCP),
+            # matching the scheduler-side _group_tokens_per_block.
+            vllm_config=self._vllm_config,
         )
         self.worker_adapter.register_kv_caches(
             kv_caches, engine_group_infos=engine_group_infos
