@@ -387,14 +387,45 @@ class EngineDrivenContext(ABC):
         )
 
 
+# Maximum amount of idle page-locked host RAM the PinnedBufferPool
+# retains, in GiB.  Buffers beyond the cap are dropped (oldest first) on
+# release so their pages get unpinned by the allocator.  A value <= 0
+# disables the cap (old unbounded behaviour).
+ENV_PINNED_POOL_GB = "LMCACHE_MP_PINNED_POOL_GB"
+_DEFAULT_PINNED_POOL_GB = 12.0
+
+
+def _pinned_pool_capacity_bytes() -> int:
+    """Resolve the pinned-pool capacity from the environment (once per pool)."""
+    # Standard
+    import os
+
+    raw = os.environ.get(ENV_PINNED_POOL_GB, "")
+    try:
+        gb = float(raw) if raw else _DEFAULT_PINNED_POOL_GB
+    except ValueError:
+        logger.warning(
+            "Invalid %s=%r; using default %.1f GiB",
+            ENV_PINNED_POOL_GB,
+            raw,
+            _DEFAULT_PINNED_POOL_GB,
+        )
+        gb = _DEFAULT_PINNED_POOL_GB
+    if gb <= 0:
+        return 0  # 0 = unlimited
+    return int(gb * (1 << 30))
+
+
 class PinnedBufferPool:
     """Pool of pinned (page-locked) CPU tensors keyed by (shape, dtype).
 
     Pinned memory is allocated in **system RAM** (via ``cudaHostAlloc``
     / ``mlock`` on Linux) -- it does **not** consume any GPU VRAM.  The
-    pool is grown lazily on first ``acquire`` and never shrinks: the OS
-    reclaims pinned pages only when the underlying physical pages are
-    unpinned, so retaining them keeps the allocator cost amortised.
+    pool is grown lazily on first ``acquire``.  Idle buffers held by the
+    pool are capped at ``LMCACHE_MP_PINNED_POOL_GB`` (default 12 GiB);
+    on release, the oldest idle buffers are dropped until the pool is
+    under the cap, so a single huge store does not permanently reserve
+    tens of GiB of unswappable host RAM.
 
     Used by ``EngineDrivenTransferContext.submit_store`` to avoid per-
     chunk ``torch.empty(pin_memory=True)`` calls inside
@@ -402,10 +433,22 @@ class PinnedBufferPool:
     the pool itself holds them in a FIFO deque per (shape, dtype).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, capacity_bytes: int | None = None) -> None:
         self._pools: dict[tuple[tuple[int, ...], torch.dtype], deque[torch.Tensor]] = {}
         self._acquired_count = 0
         self._lock = threading.Lock()
+        # Bytes of idle buffers currently held by the pool (in-flight
+        # buffers handed out via acquire() are not counted).
+        self._idle_bytes = 0
+        self._capacity_bytes = (
+            capacity_bytes
+            if capacity_bytes is not None
+            else _pinned_pool_capacity_bytes()
+        )
+
+    @staticmethod
+    def _nbytes(buf: torch.Tensor) -> int:
+        return buf.numel() * buf.element_size()
 
     def acquire(
         self,
@@ -422,7 +465,9 @@ class PinnedBufferPool:
             out: list[torch.Tensor] = []
             for _ in range(count):
                 if pool:
-                    out.append(pool.popleft())
+                    buf = pool.popleft()
+                    self._idle_bytes -= self._nbytes(buf)
+                    out.append(buf)
                 else:
                     out.append(
                         torch.empty(
@@ -436,40 +481,46 @@ class PinnedBufferPool:
         return out
 
     def release(self, buffers: list[torch.Tensor]) -> None:
-        """Return buffers to the pool for reuse on the next acquire."""
+        """Return buffers to the pool for reuse on the next acquire.
+
+        Trims the pool (oldest idle buffers first) when the retained
+        idle bytes exceed the configured capacity.
+        """
         with self._lock:
             for buf in buffers:
                 key = (tuple(buf.shape), buf.dtype)
                 self._pools.setdefault(key, deque()).append(buf)
+                self._idle_bytes += self._nbytes(buf)
+            self._trim_locked()
+
+    def _trim_locked(self) -> None:
+        """Drop oldest idle buffers until under capacity (lock held)."""
+        if self._capacity_bytes <= 0:
+            return
+        while self._idle_bytes > self._capacity_bytes:
+            # Pop the oldest buffer from the fullest shape-pool.
+            fullest = max(self._pools.values(), key=len, default=None)
+            if not fullest:
+                break
+            dropped = fullest.popleft()
+            self._idle_bytes -= self._nbytes(dropped)
 
     def clear(self) -> None:
         """Release all pinned memory.  Call on context destruction."""
         with self._lock:
             self._pools.clear()
             self._acquired_count = 0
+            self._idle_bytes = 0
 
     def stats(self) -> dict:
         """Snapshot of pool state (for diagnostics / benchmarks)."""
-        return {
-            "shapes": [(k[0], k[1], len(v)) for k, v in self._pools.items()],
-            "acquired_total": self._acquired_count,
-        }
-
-
-def _pool() -> "PinnedBufferPool":
-    """Module-level pool singleton.  Use ``_POOL`` directly if needed.
-
-    Lifetime is the Python process: pinned memory grows with the process
-    and is freed on interpreter shutdown.  Multi-group paths that
-    benefit from per-context isolation can create their own
-    ``PinnedBufferPool()`` and pass it through ``gather_paged_kv_*``.
-    """
-    global _POOL
-    try:
-        return _POOL
-    except NameError:
-        _POOL = PinnedBufferPool()
-        return _POOL
+        with self._lock:
+            return {
+                "shapes": [(k[0], k[1], len(v)) for k, v in self._pools.items()],
+                "acquired_total": self._acquired_count,
+                "idle_bytes": self._idle_bytes,
+                "capacity_bytes": self._capacity_bytes,
+            }
 
 
 def create_engine_driven_context(
