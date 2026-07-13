@@ -314,6 +314,34 @@ class _ThreadWorkerPool:
         """Check if a key exists (runs on a worker thread)."""
         return bool(self._get_client().exists([key_str.encode()]))
 
+    def _do_batch_exists(self, key_strs: List[str]) -> List[bool]:
+        """EXISTS many keys in a single pipelined round-trip (worker thread).
+
+        Builds a non-atomic GLIDE ``Batch`` of one EXISTS per key and runs it
+        with ``exec``, so N keys cost one round-trip instead of N individual
+        submissions fanned across the pool.
+
+        ``exec`` returns command results in submission order (the Redis
+        pipeline ordering guarantee), so ``results[i]`` is the EXISTS result
+        for ``key_strs[i]``.  EXISTS has no per-key logical failure mode, so
+        ``raise_on_error=True`` only surfaces a genuine batch/transport error
+        — which should propagate, matching the per-key path's
+        ``Future.result()``.
+        """
+        if not key_strs:
+            return []
+        # Third Party
+        import glide_sync  # type: ignore[import-untyped]
+
+        client = self._get_client()
+        batch = glide_sync.Batch(is_atomic=False)
+        for key_str in key_strs:
+            batch.exists([key_str.encode()])
+        results = client.exec(batch, raise_on_error=True)
+        if results is None:
+            raise RuntimeError("GLIDE Batch.exec returned no results for EXISTS")
+        return [bool(r) for r in results]
+
     def submit_set(self, key_str: str, data: bytes) -> Future:
         """Submit a SET operation."""
         return self._executor.submit(self._do_set, key_str, data)
@@ -325,6 +353,10 @@ class _ThreadWorkerPool:
     def submit_exists(self, key_str: str) -> Future:
         """Submit an EXISTS check."""
         return self._executor.submit(self._do_exists, key_str)
+
+    def submit_batch_exists(self, key_strs: List[str]) -> Future:
+        """Submit a pipelined EXISTS check for many keys (one round-trip)."""
+        return self._executor.submit(self._do_batch_exists, key_strs)
 
     def _close_client(self) -> None:
         """Close the per-thread GLIDE client (runs on a worker thread)."""
@@ -622,16 +654,19 @@ class ValkeyConnector(RemoteConnector):
     def _count_consecutive_exists(self, keys: List[CacheEngineKey]) -> int:
         """Check how many consecutive keys exist (prefix match).
 
-        Fans out individual EXISTS checks across the thread pool for
-        parallel round-trips: wall-clock time is roughly
-        ``ceil(N / num_workers) * RTT`` instead of ``N * RTT``.
+        Pipelines all EXISTS checks into a single round-trip via a GLIDE
+        ``Batch`` (one ``exec``), then counts the consecutive prefix.  This
+        replaces a per-key fan-out across the thread pool: one round-trip
+        instead of ``ceil(N / num_workers)``.
         """
         key_strs = [k.to_string() for k in keys]
-        futures = [self._pool.submit_exists(k) for k in key_strs]
-        for i, fut in enumerate(futures):
-            if not fut.result(timeout=self._request_timeout):
+        results = self._pool.submit_batch_exists(key_strs).result(
+            timeout=self._request_timeout
+        )
+        for i, present in enumerate(results):
+            if not present:
                 return i
-        return len(futures)
+        return len(results)
 
     def batched_contains(self, keys: List[CacheEngineKey]) -> int:
         """Synchronously check how many consecutive keys exist."""
@@ -647,13 +682,13 @@ class ValkeyConnector(RemoteConnector):
     ) -> int:
         """Internal: asynchronously check how many consecutive keys exist.
 
-        Fans out individual EXISTS checks across the thread pool.
+        Pipelines all EXISTS checks into a single round-trip via a GLIDE
+        ``Batch`` and counts the consecutive prefix.
         """
         key_strs = [k.to_string() for k in keys]
-        wrapped = [asyncio.wrap_future(self._pool.submit_exists(k)) for k in key_strs]
-        results = await asyncio.gather(*wrapped)
-        for i, r in enumerate(results):
-            if not r:
+        results = await asyncio.wrap_future(self._pool.submit_batch_exists(key_strs))
+        for i, present in enumerate(results):
+            if not present:
                 return i
         return len(results)
 
