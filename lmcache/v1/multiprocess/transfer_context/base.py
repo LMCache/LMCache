@@ -1165,26 +1165,36 @@ def gather_paged_kv_multi_group_to_cpu_streams(
     import threading
 
     streams = [torch.cuda.Stream() for _ in engine_group_infos]
+    # The KV cache blocks were written by the forward pass on the
+    # producer stream (the caller's current stream).  Each gather
+    # stream must wait on it, otherwise the D2H copies may read stale
+    # or half-written KV data.
+    ready_event = torch.cuda.Event()
+    ready_event.record(torch.cuda.current_stream())
     # Launch each group's gather on its own stream
     results: list[list[torch.Tensor] | None] = [None] * len(engine_group_infos)
+    errors: list[BaseException | None] = [None] * len(engine_group_infos)
 
     def _do(g_idx: int) -> None:
-        with torch.cuda.stream(streams[g_idx]):
-            results[g_idx] = gather_paged_kv_to_cpu(
-                slice_kv_caches_for_group(
-                    kv_caches, engine_group_infos[g_idx].layer_indices
-                ),
-                block_ids[g_idx],
-                # blocks_in_chunk computed inside, pass engine_group_infos
-                _blocks_in_chunk_for(
-                    kv_caches,
-                    engine_group_infos[g_idx],
-                    lmcache_tokens_per_chunk,
-                    layout_hints,
-                ),
-                layout_hints=layout_hints,
-                pinned_pool=pinned_pool,
-            )
+        try:
+            streams[g_idx].wait_event(ready_event)
+            with torch.cuda.stream(streams[g_idx]):
+                results[g_idx] = gather_paged_kv_to_cpu(
+                    slice_kv_caches_for_group(
+                        kv_caches, engine_group_infos[g_idx].layer_indices
+                    ),
+                    block_ids[g_idx],
+                    _blocks_in_chunk_for(
+                        kv_caches,
+                        engine_group_infos[g_idx],
+                        lmcache_tokens_per_chunk,
+                        layout_hints,
+                    ),
+                    layout_hints=layout_hints,
+                    pinned_pool=pinned_pool,
+                )
+        except BaseException as exc:  # noqa: BLE001 - re-raised below
+            errors[g_idx] = exc
 
     threads = [
         threading.Thread(target=_do, args=(i,)) for i in range(len(engine_group_infos))
@@ -1196,7 +1206,17 @@ def gather_paged_kv_multi_group_to_cpu_streams(
     # Final sync: each stream + main
     for s in streams:
         s.synchronize()
-    return [r for r in results if r is not None]
+    # Propagate worker-thread failures instead of silently dropping the
+    # failed group: filtering out None entries would shift the group
+    # indices of every following group and commit chunks under the
+    # wrong group_idx (silent data corruption).
+    for g_idx, exc in enumerate(errors):
+        if exc is not None:
+            raise RuntimeError(
+                f"multi-stream gather failed for group {g_idx}"
+            ) from exc
+    assert all(r is not None for r in results)
+    return results  # type: ignore[return-value]
 
 
 def _blocks_in_chunk_for(
@@ -1205,13 +1225,25 @@ def _blocks_in_chunk_for(
     lmcache_tokens_per_chunk: int,
     layout_hints: LayoutHints | None,
 ) -> int:
-    g_kv = slice_kv_caches_for_group(kv_caches, info.layer_indices)
-    tpb = info.tokens_per_block if info.tokens_per_block > 0 else 1
-    if info.tokens_per_block <= 0:
-        # tokens_per_block unknown; fall back to vLLM block_size from layout
-        _, _, _, _, _ = compute_kv_layout(g_kv, layout_hints=layout_hints)
-        tpb = 1
-    return lmcache_tokens_per_chunk // tpb
+    """Canonical blocks-per-chunk for one group.
+
+    Same computation as :func:`gather_paged_kv_multi_group_to_cpu`:
+    ``tokens_per_block`` comes from the group info, falling back to the
+    vLLM ``block_size`` derived from the KV layout when unknown.
+    """
+    tpb = info.tokens_per_block
+    if tpb <= 0:
+        g_kv = slice_kv_caches_for_group(kv_caches, info.layer_indices)
+        block_size, _, _, _, _ = compute_kv_layout(g_kv, layout_hints=layout_hints)
+        tpb = block_size
+    blocks_in_chunk = lmcache_tokens_per_chunk // tpb
+    if blocks_in_chunk == 0:
+        raise ValueError(
+            f"tokens_per_block ({tpb}) > lmcache_tokens_per_chunk "
+            f"({lmcache_tokens_per_chunk}). Each block is larger than "
+            "the chunk size."
+        )
+    return blocks_in_chunk
 
 
 def gather_paged_kv_multi_group_to_cpu(
