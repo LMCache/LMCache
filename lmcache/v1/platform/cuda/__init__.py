@@ -4,11 +4,18 @@
 # Future
 from __future__ import annotations
 
+# Standard
+from typing import TYPE_CHECKING
+
 # First Party
-from lmcache.v1.platform.base_device_ops import DeviceOps
 from lmcache.v1.platform.base_device_spec import DeviceSpec
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.platform.base_device_ops import DeviceOps
+
+# First Party
 from lmcache.v1.platform.base_pin_memory import PinMemoryBackend
-from lmcache.v1.platform.cuda.device_ops import CudaDeviceOps
 from lmcache.v1.platform.cuda.pin_memory import CudaPinMemoryBackend
 
 # ---------------------------------------------------------------------------
@@ -29,6 +36,9 @@ class CudaDeviceSpec(DeviceSpec):
 
     @property
     def ops_cls(self) -> type[DeviceOps]:
+        # First Party
+        from lmcache.v1.platform.cuda.device_ops import CudaDeviceOps
+
         return CudaDeviceOps
 
     @property

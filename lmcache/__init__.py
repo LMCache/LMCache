@@ -49,6 +49,7 @@ def _install_c_ops_shim() -> None:
 
     shim = types.ModuleType("lmcache.c_ops")
     shim.__getattr__ = lambda name: getattr(ops, name)  # type: ignore[method-assign]
+    shim.__dir__ = lambda: dir(ops)  # type: ignore[method-assign]
     sys.modules["lmcache.c_ops"] = shim
     globals()["c_ops"] = shim  # parent attr for IMPORT_FROM bytecode
 

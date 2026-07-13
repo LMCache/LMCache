@@ -28,7 +28,7 @@ from lmcache.v1.platform.ops_types import (
 
 def _tensor_list(value: object) -> list[torch.Tensor] | None:
     """Return ``value`` as ``list[torch.Tensor]`` when it is tensor-backed."""
-    if not isinstance(value, list):
+    if not isinstance(value, list) or not value:
         return None
     if not all(isinstance(item, torch.Tensor) for item in value):
         return None

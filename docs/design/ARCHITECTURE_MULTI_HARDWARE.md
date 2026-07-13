@@ -132,5 +132,5 @@ which is wrong for that backend's actual KV cache layout.
 1. Add detection branch in `__init__.py` `_detect_device()`
 2. Create `gpu_connector/xxx_connectors.py`, implement `GPUConnectorInterface`
 3. Add routing branch in `gpu_connector/__init__.py`
-4. Add kernels in `c_ops/` or torch baseline in `lmcache/v1/platform/_torch_ops.py`
+4. Add kernels in `c_ops/` or torch baseline in `lmcache/v1/platform/_torch_impl.py`
 5. No changes needed in middle layer code

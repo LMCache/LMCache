@@ -60,7 +60,7 @@ accelerates and inherits the torch baseline for everything else.
 Plain methods + inheritance:
 
 - The base defines all ops as **explicit thin methods** that delegate to
-  `_torch_ops` (the migrated torch/CPU baseline). This is the composite/CPU
+  `_torch_impl` (the migrated torch/CPU baseline). This is the composite/CPU
   fallback.
 - A subclass overrides only what it accelerates with a normal method; everything
   else inherits the baseline.
@@ -90,7 +90,7 @@ unbound op keeps the torch implementation.
 from __future__ import annotations
 from typing import Any, Callable, ClassVar
 
-from lmcache.v1.platform import _torch_ops      # migrated impl (functions)
+from lmcache.v1.platform import _torch_impl      # migrated impl (functions)
 from lmcache.v1.platform.ops_types import (      # migrated shared types
     TransferDirection, EngineKVFormat, PageBufferShapeDesc, set_shape_desc_dtype,
 )
@@ -118,11 +118,11 @@ class DeviceOps:
 
     # --- explicit thin methods delegating to the torch baseline ---
     def multi_layer_kv_transfer(self, *a, **k):
-        return _torch_ops.multi_layer_kv_transfer(*a, **k)
+        return _torch_impl.multi_layer_kv_transfer(*a, **k)
     def multi_layer_block_kv_transfer(self, *a, **k):
-        return _torch_ops.multi_layer_block_kv_transfer(*a, **k)
+        return _torch_impl.multi_layer_block_kv_transfer(*a, **k)
     def lmcache_memcpy_async(self, *a, **k):
-        return _torch_ops.lmcache_memcpy_async(*a, **k)
+        return _torch_impl.lmcache_memcpy_async(*a, **k)
     # ...  more, one line each (mechanical, generatable from OPS) ...
 
     def _bind_native(self, module) -> None:
@@ -134,7 +134,7 @@ class DeviceOps:
                 setattr(self, name, fn)
 ```
 
-> `_torch_ops` holds the migrated implementation as module-level functions. It
+> `_torch_impl` holds the migrated implementation as module-level functions. It
 > is **internal** to the platform package. The stubs are typed and visible to
 > IDEs; `OPS` is the contract for the parity test (and `_bind_native`).
 
@@ -142,12 +142,12 @@ class DeviceOps:
 
 | Old | New |
 |-----|-----|
-| `lmcache/python_ops_fallback.py` | **deleted** — all consumers import `_torch_ops` / `ops_types` directly |
-| — its 36 public ops | → `platform/_torch_ops.py` (module functions) |
-| — its private helpers (`_transfer_*`, `_tensor_from_ptr`, …) | → `platform/_torch_ops.py` (private) |
+| `lmcache/python_ops_fallback.py` | **deleted** — all consumers import `_torch_impl` / `ops_types` directly |
+| — its 36 public ops | → `platform/_torch_impl.py` (module functions) |
+| — its private helpers (`_transfer_*`, `_tensor_from_ptr`, …) | → `platform/_torch_impl.py` (private) |
 | — its types (`TransferDirection`, `EngineKVFormat`, `PageBufferShapeDesc`, `set_shape_desc_dtype`) | → `platform/ops_types.py` |
 | `import lmcache.python_ops_fallback` (3 call sites) | → import from `platform.ops_types` (types) |
-| back-compat shim `python_ops_fallback.py` | **removed** — every importer now targets `_torch_ops` + `ops_types` directly |
+| back-compat shim `python_ops_fallback.py` | **removed** — every importer now targets `_torch_impl` + `ops_types` directly |
 
 ---
 
@@ -187,7 +187,7 @@ overrides 1, HPU binds nothing. One mechanism; the torch baseline fills the rest
 # platform/cpu/device_ops.py
 class CpuDeviceOps(DeviceOps):
     device_type = "cpu"            # the only registered torch-baseline device
-    # No overrides. Inherited base methods -> _torch_ops ARE the CPU backend.
+    # No overrides. Inherited base methods -> _torch_impl ARE the CPU backend.
 ```
 
 ### 4.2 CUDA (& ROCm) — bulk-bind the whole module
@@ -312,7 +312,7 @@ class CudaDeviceSpec(DeviceSpec):
 The import lives inside the property body on purpose:
 
 - It avoids reintroducing the `lmcache` / `lmcache.v1.platform` import cycle
-  that would appear if `_torch_ops` or a native `.so` were pulled into the
+  that would appear if `_torch_impl` or a native `.so` were pulled into the
   platform package at discovery time.
 - It keeps native CUDA loading deferred until `CudaDeviceOps.populate_module()`,
   preserving the current `lmcache.c_ops` shim bootstrap ordering.
@@ -333,7 +333,7 @@ lmcache/v1/platform/
   __init__.py                 # bootstraps backend pkgs; lazy c_ops shim
   base_device_spec.py         # ★ DeviceSpec + lazy ops_cls default
   base_device_ops.py          # ★ DeviceOps base + OPS contract + _bind_native
-  _torch_ops.py               # ★ migrated torch/CPU impl (was python_ops_fallback)
+  _torch_impl.py               # ★ migrated torch/CPU impl (was python_ops_fallback)
   ops_types.py                # ★ TransferDirection, EngineKVFormat, PageBufferShapeDesc
   base_cache_context.py       # (unchanged) sibling abstractions
   base_ipc_wrapper.py
@@ -430,7 +430,7 @@ phase). All profiles (`cuda.py`, `sycl.py`, `rocm.py`, `musa.py`) are untouched.
 
 | Device | DeviceOps subclass | Overrides | Native work | Total effort |
 |--------|-------------------|-----------|-------------|--------------|
-| CPU | `CpuDeviceOps(DeviceOps)` | none (base = torch) | none | migrate `python_ops_fallback` → `_torch_ops` |
+| CPU | `CpuDeviceOps(DeviceOps)` | none (base = torch) | none | migrate `python_ops_fallback` → `_torch_impl` |
 | CUDA | `CudaDeviceOps(DeviceOps)` | 36 via `_bind_native(c_ops)` | none (keep `.cu`) | **low** |
 | HIP/ROCm | handled by `CudaDeviceOps` | (same as CUDA; ROCm builds `c_ops` via hipify, PyTorch masquerades as `torch.cuda`) | hipify profile exists | N/A |
 | XPU | `XpuDeviceOps(DeviceOps)` | 12 via `_bind_native(xpu_ops)` + 24 torch | existing SYCL build | **low** |

@@ -22,9 +22,18 @@ behaviour, and ``device_type`` / ``torch_module_name`` default to
 ``"cpu"``.
 """
 
+# Future
+from __future__ import annotations
+
+# Standard
+from typing import TYPE_CHECKING
+
 # First Party
-from lmcache.v1.platform.base_device_ops import DeviceOps
 from lmcache.v1.platform.base_pin_memory import PinMemoryBackend
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.platform.base_device_ops import DeviceOps
 
 
 # TODO(chunxiaozheng): bind `DeviceIPCWrapper` with `DeviceSpec`?
@@ -74,6 +83,9 @@ class DeviceSpec:
             fallback spec. Accelerator subclasses override this property to
             return their backend-specific DeviceOps subclass.
         """
+        # First Party
+        from lmcache.v1.platform.base_device_ops import DeviceOps
+
         return DeviceOps
 
     def is_available(self) -> bool:

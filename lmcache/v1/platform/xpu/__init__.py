@@ -4,10 +4,15 @@
 # Future
 from __future__ import annotations
 
+# Standard
+from typing import TYPE_CHECKING
+
 # First Party
-from lmcache.v1.platform.base_device_ops import DeviceOps
 from lmcache.v1.platform.base_device_spec import DeviceSpec
-from lmcache.v1.platform.xpu.device_ops import XpuDeviceOps
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.platform.base_device_ops import DeviceOps
 
 # ---------------------------------------------------------------------------
 # Device detection registry entry
@@ -27,6 +32,9 @@ class XpuDeviceSpec(DeviceSpec):
 
     @property
     def ops_cls(self) -> type[DeviceOps]:
+        # First Party
+        from lmcache.v1.platform.xpu.device_ops import XpuDeviceOps
+
         return XpuDeviceOps
 
     def is_available(self) -> bool:

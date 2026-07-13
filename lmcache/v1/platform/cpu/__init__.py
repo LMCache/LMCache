@@ -10,10 +10,15 @@ up at run-time -- no static ``register_kv_wrapper`` needed.
 # Future
 from __future__ import annotations
 
+# Standard
+from typing import TYPE_CHECKING
+
 # First Party
-from lmcache.v1.platform.base_device_ops import DeviceOps
 from lmcache.v1.platform.base_device_spec import DeviceSpec
-from lmcache.v1.platform.cpu.device_ops import CpuDeviceOps
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.platform.base_device_ops import DeviceOps
 
 
 class CpuDeviceSpec(DeviceSpec):
@@ -36,4 +41,7 @@ class CpuDeviceSpec(DeviceSpec):
 
     @property
     def ops_cls(self) -> type[DeviceOps]:
+        # First Party
+        from lmcache.v1.platform.cpu.device_ops import CpuDeviceOps
+
         return CpuDeviceOps
