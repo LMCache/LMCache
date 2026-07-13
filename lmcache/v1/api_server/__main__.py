@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import os
+import secrets
 import sys
 import uuid
 
@@ -18,7 +19,7 @@ sys.path.insert(
 )
 
 # Third Party
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -80,6 +81,33 @@ def parse_extra_params(extra_args: list) -> Dict[str, Any]:
                 params[key] = value
             logger.info(f"Extra parameter: {key} = {params[key]}")
     return params
+
+
+async def verify_admin_key(request: Request) -> None:
+    """
+    FastAPI dependency that enforces admin authentication via the x-admin-key header.
+
+    Reads the expected key from the LMCACHE_ADMIN_KEY environment variable and
+    performs a constant-time comparison to prevent timing attacks.
+
+    Raises:
+        HTTPException 503: if LMCACHE_ADMIN_KEY is not configured.
+        HTTPException 403: if the provided key is missing or incorrect.
+    """
+    expected_admin_key = os.environ.get("LMCACHE_ADMIN_KEY")
+
+    if not expected_admin_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Admin authentication not configured. Set LMCACHE_ADMIN_KEY environment variable.",
+        )
+
+    provided_admin_key = request.headers.get("x-admin-key")
+    if not provided_admin_key or not secrets.compare_digest(provided_admin_key, expected_admin_key):
+        raise HTTPException(
+            status_code=403,
+            detail="Forbidden: Administrative privileges required for this operation",
+        )
 
 
 def create_app(
@@ -208,7 +236,14 @@ def create_app(
         num_tokens: int
 
     @app.post("/clear", response_model=ClearResponse)
-    async def clear(req: ClearRequest):
+    async def clear(
+        req: ClearRequest, _: None = Depends(verify_admin_key)
+    ) -> ClearResponse:
+        """
+        Clear cache entries for a specific instance and location.
+
+        Requires administrative privileges verified via the x-admin-key request header.
+        """
         try:
             event_id = "Clear" + str(uuid.uuid4())
             msg = ClearMsg(
