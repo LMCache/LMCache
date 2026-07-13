@@ -36,12 +36,19 @@ from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.mq import MessageQueueClient
+
 if TYPE_CHECKING:
     # First Party
     import lmcache.c_ops as lmc_ops
+
+# First Party
 from lmcache.v1.multiprocess.transfer_context.wire_format import (
     deserialize_group_chunks_maybe as _wire_decode,
+)
+from lmcache.v1.multiprocess.transfer_context.wire_format import (
     is_lmcache_blob as _is_lmcache_blob,
+)
+from lmcache.v1.multiprocess.transfer_context.wire_format import (
     serialize_group_chunks_torchsave as _wire_encode,
 )
 
@@ -139,6 +146,7 @@ class EngineDrivenContextMetadata:
         """Return True if this metadata describes a hybrid multi-group model."""
         return len(self.group_layout_descs) > 1
 
+
 class EngineDrivenContext(ABC):
     """Abstract base class for CPU-side KV data transfer contexts.
 
@@ -151,6 +159,7 @@ class EngineDrivenContext(ABC):
         mq_client: Message-queue client used for server communication.
         mq_timeout: Timeout in seconds for blocking MQ requests.
     """
+
     def __init__(
         self,
         metadata: EngineDrivenContextMetadata,
@@ -206,6 +215,7 @@ class EngineDrivenContext(ABC):
     def close(self) -> None:
         """Release any resources held by this context."""
         ...
+
     def commit_store_raw(
         self, key: IPCCacheServerKey, instance_id: int, cpu_data: bytes
     ) -> bool:
@@ -214,8 +224,8 @@ class EngineDrivenContext(ABC):
         Used by multi-group transfers where the caller has already serialized
         the chunks. No additional pickle.dumps() is performed.
         """
-        from lmcache.v1.multiprocess.protocol import RequestType
-        from lmcache.v1.multiprocess.protocol import get_response_class
+        # First Party
+        from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 
         future = self.mq_client.submit_request(
             RequestType.COMMIT_STORE,
@@ -236,8 +246,8 @@ class EngineDrivenContext(ABC):
         COMMIT_STORE_GROUP message per group so that each individual
         ``cpu_data`` blob stays under the msgspec msgpack bin limit (4 GiB).
         """
-        from lmcache.v1.multiprocess.protocol import RequestType
-        from lmcache.v1.multiprocess.protocol import get_response_class
+        # First Party
+        from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 
         future = self.mq_client.submit_request(
             RequestType.COMMIT_STORE_GROUP,
@@ -264,8 +274,8 @@ class EngineDrivenContext(ABC):
         practice this hides ~5-30 ms of latency per group on top of the
         CPU-side serialize cost.
         """
-        from lmcache.v1.multiprocess.protocol import RequestType
-        from lmcache.v1.multiprocess.protocol import get_response_class
+        # First Party
+        from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 
         return self.mq_client.submit_request(
             RequestType.COMMIT_STORE_GROUP,
@@ -289,10 +299,12 @@ class EngineDrivenContext(ABC):
         the prior lookup). The server writes only the chunks provided
         in ``cpu_data`` at offset ``skip_count``.
         """
+        # First Party
         from lmcache.v1.multiprocess.protocol import (
             RequestType,
             get_response_class,
         )
+
         return self.mq_client.submit_request(
             RequestType.COMMIT_STORE_GROUP_DELTA,
             [key, instance_id, group_idx, skip_count, cpu_data],
@@ -309,7 +321,11 @@ class EngineDrivenContext(ABC):
     ) -> bool:
         """Synchronous delta-store commit (waits for server response)."""
         future = self.commit_store_group_delta_raw_async(
-            key, instance_id, group_idx, skip_count, cpu_data,
+            key,
+            instance_id,
+            group_idx,
+            skip_count,
+            cpu_data,
         )
         try:
             return bool(future.result(timeout=self.mq_timeout))
@@ -317,7 +333,9 @@ class EngineDrivenContext(ABC):
             logger.error(
                 "commit_store_group_delta timed out after %ss "
                 "(group=%d, skip_count=%d)",
-                self.mq_timeout, group_idx, skip_count,
+                self.mq_timeout,
+                group_idx,
+                skip_count,
             )
             return False
 
@@ -330,8 +348,8 @@ class EngineDrivenContext(ABC):
         ``_deserialize_multi_group_chunks``. Returns ``None`` on cache-miss
         or timeout.
         """
-        from lmcache.v1.multiprocess.protocol import RequestType
-        from lmcache.v1.multiprocess.protocol import get_response_class
+        # First Party
+        from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 
         future = self.mq_client.submit_request(
             RequestType.PREPARE_RETRIEVE,
@@ -385,9 +403,12 @@ class PinnedBufferPool:
                     out.append(pool.popleft())
                 else:
                     out.append(
-                        torch.empty(shape, dtype=dtype,
-                                    device=torch.device("cpu"),
-                                    pin_memory=True)
+                        torch.empty(
+                            shape,
+                            dtype=dtype,
+                            device=torch.device("cpu"),
+                            pin_memory=True,
+                        )
                     )
                 self._acquired_count += 1
         return out
@@ -971,6 +992,7 @@ def scatter_cpu_to_paged_kv(
     # WARNING: The caller MUST explicitly call `torch_dev.synchronize()`
     # before consuming these chunks to ensure data validity.
 
+
 # ---------------------------------------------------------------------------
 # Multi-group serialization helpers (dev31+: torch.save wire format)
 # ---------------------------------------------------------------------------
@@ -1000,11 +1022,6 @@ def _serialize_multi_group_chunks(
     return _wire_encode(group_chunks)
 
 
-
-
-
-
-
 def _deserialize_multi_group_chunks(
     cpu_data: bytes,
 ) -> list[list[torch.Tensor]]:
@@ -1031,7 +1048,9 @@ def _deserialize_multi_group_chunks(
             return [decoded]
         return decoded
     # Legacy format: list of groups, each group is list of tagged tuples
+    # Standard
     import pickle
+
     raw = pickle.loads(cpu_data)
     result = []
     for group_items in raw:
@@ -1068,15 +1087,27 @@ def _classify_chunk(item: object) -> tuple[str, object]:
     """
     # Use type-checked string comparison -- `item[0]` may be a numpy array
     # (legacy format), where `==` returns an array of bools and breaks `if`.
-    if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str) and item[0] == "tensor":
+    if (
+        isinstance(item, tuple)
+        and len(item) == 2
+        and isinstance(item[0], str)
+        and item[0] == "tensor"
+    ):
         return "tensor_new", item[1]
-    if isinstance(item, tuple) and len(item) == 3 and isinstance(item[0], str) and item[0] == "fp8":
+    if (
+        isinstance(item, tuple)
+        and len(item) == 3
+        and isinstance(item[0], str)
+        and item[0] == "fp8"
+    ):
         return "fp8_new", (item[1], item[2])
     if isinstance(item, tuple) and len(item) == 2:
         # Legacy: (ndarray, dtype_str)
         return "old", item
     # Bare tensor (defensive fallback)
     return "tensor_new", item
+
+
 def slice_kv_caches_for_group(
     kv_caches: dict[str, torch.Tensor],
     layer_indices: tuple[int, ...],
@@ -1090,6 +1121,7 @@ def slice_kv_caches_for_group(
     """
     all_values = list(kv_caches.values())
     return {str(i): all_values[idx] for i, idx in enumerate(sorted(layer_indices))}
+
 
 def gather_paged_kv_multi_group_to_cpu_streams(
     kv_caches: dict[str, torch.Tensor],
@@ -1107,7 +1139,9 @@ def gather_paged_kv_multi_group_to_cpu_streams(
     synchronisation overhead dominates the small overlap win.  See
     ``LMCACHE_MP_MULTI_STREAM_D2D`` env var.
     """
+    # Standard
     import threading
+
     streams = [torch.cuda.Stream() for _ in engine_group_infos]
     # Launch each group's gather on its own stream
     results: list[list[torch.Tensor] | None] = [None] * len(engine_group_infos)
@@ -1115,17 +1149,24 @@ def gather_paged_kv_multi_group_to_cpu_streams(
     def _do(g_idx: int) -> None:
         with torch.cuda.stream(streams[g_idx]):
             results[g_idx] = gather_paged_kv_to_cpu(
-                slice_kv_caches_for_group(kv_caches, engine_group_infos[g_idx].layer_indices),
+                slice_kv_caches_for_group(
+                    kv_caches, engine_group_infos[g_idx].layer_indices
+                ),
                 block_ids[g_idx],
                 # blocks_in_chunk computed inside, pass engine_group_infos
                 _blocks_in_chunk_for(
-                    kv_caches, engine_group_infos[g_idx], lmcache_tokens_per_chunk, layout_hints,
+                    kv_caches,
+                    engine_group_infos[g_idx],
+                    lmcache_tokens_per_chunk,
+                    layout_hints,
                 ),
                 layout_hints=layout_hints,
                 pinned_pool=pinned_pool,
             )
 
-    threads = [threading.Thread(target=_do, args=(i,)) for i in range(len(engine_group_infos))]
+    threads = [
+        threading.Thread(target=_do, args=(i,)) for i in range(len(engine_group_infos))
+    ]
     for t in threads:
         t.start()
     for t in threads:

@@ -5,6 +5,7 @@
 from dataclasses import dataclass
 import pickle
 import threading
+import time
 
 # Third Party
 import torch
@@ -50,6 +51,7 @@ logger = init_logger(__name__)
 class _Counter:
     """Tiny thread-safe counter (used for the F. batched-append
     observability hook)."""
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._value = 0
@@ -408,7 +410,9 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                         [2, gl.num_layers, self._ctx.chunk_size, gl.hidden_dim_size]
                     )
                 )
-                group_layout_descs.append(MemoryLayoutDesc(shapes=[g_shape], dtypes=[g_dtype]))
+                group_layout_descs.append(
+                    MemoryLayoutDesc(shapes=[g_shape], dtypes=[g_dtype])
+                )
                 group_block_sizes.append(gl.block_size)
                 group_use_mla.append(gl.use_mla)
                 tpb = gl.tokens_per_block if gl.tokens_per_block > 0 else gl.block_size
@@ -432,7 +436,12 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 )
                 if payload.use_mla
                 else torch.Size(
-                    [2, payload.num_layers, self._ctx.chunk_size, payload.hidden_dim_size]
+                    [
+                        2,
+                        payload.num_layers,
+                        self._ctx.chunk_size,
+                        payload.hidden_dim_size,
+                    ]
                 )
             )
             layout_desc = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
@@ -629,7 +638,8 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         # Storage backend format: pickled list of CPU tensors (no extra
         # tag wrapping). Use HIGHEST_PROTOCOL for faster storage I/O.
         storage_payload = pickle.dumps(
-            group_chunk_list, protocol=pickle.HIGHEST_PROTOCOL,
+            group_chunk_list,
+            protocol=pickle.HIGHEST_PROTOCOL,
         )
         all_obj_keys = self._resolve_all_group_obj_keys(key, num_groups)
         g_layout_desc = entry.metadata.group_layout_descs[group_idx]
@@ -652,12 +662,12 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         )
         _STATS_FILE_OPS.inc()
         if result and st is not None and group_idx == num_groups - 1:
-            total_tokens = sum(
-                len(ok) for ok in all_obj_keys
-            ) * self._ctx.chunk_size
+            total_tokens = sum(len(ok) for ok in all_obj_keys) * self._ctx.chunk_size
             logger.info(
                 "Stored %d tokens (%d groups) in %.3f seconds",
-                total_tokens, num_groups, time.perf_counter() - st,
+                total_tokens,
+                num_groups,
+                time.perf_counter() - st,
             )
             session.extras.pop("store_start_time", None)
         return result
@@ -696,7 +706,8 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         if group_idx < 0 or group_idx >= num_groups:
             logger.error(
                 "commit_store_group_delta: group_idx %d out of range [0, %d)",
-                group_idx, num_groups,
+                group_idx,
+                num_groups,
             )
             return False
         # Resolve object keys for the offset range only.  Keys before
@@ -711,7 +722,9 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             logger.debug(
                 "commit_store_group_delta: full-prefix skip "
                 "(group=%d, skip_count=%d, total=%d)",
-                group_idx, skip_count, len(g_obj_keys),
+                group_idx,
+                skip_count,
+                len(g_obj_keys),
             )
             return True
         deserialized = _deserialize_multi_group_chunks(cpu_data)
@@ -725,7 +738,8 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         if not group_chunk_list:
             return True
         storage_payload = pickle.dumps(
-            group_chunk_list, protocol=pickle.HIGHEST_PROTOCOL,
+            group_chunk_list,
+            protocol=pickle.HIGHEST_PROTOCOL,
         )
         g_layout_desc = entry.metadata.group_layout_descs[group_idx]
         g_block_size = entry.metadata.group_block_sizes[group_idx]
@@ -782,7 +796,8 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 use_mla=g_use_mla,
             )
             group_cpu_data = pickle.dumps(
-                group_chunk_list, protocol=pickle.HIGHEST_PROTOCOL,
+                group_chunk_list,
+                protocol=pickle.HIGHEST_PROTOCOL,
             )
             result = strategy.commit_store(
                 key=key,
@@ -795,12 +810,12 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             if not result:
                 all_ok = False
         if all_ok and st is not None:
-            total_tokens = sum(
-                len(ok) for ok in all_obj_keys
-            ) * self._ctx.chunk_size
+            total_tokens = sum(len(ok) for ok in all_obj_keys) * self._ctx.chunk_size
             logger.info(
                 "Stored %d tokens (%d groups) in %.3f seconds",
-                total_tokens, num_groups, time.perf_counter() - st,
+                total_tokens,
+                num_groups,
+                time.perf_counter() - st,
             )
         return all_ok
 
@@ -818,9 +833,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         is_multi_group = entry.metadata.is_multi_group
 
         if is_multi_group:
-            return self._prepare_retrieve_multi_group(
-                key, instance_id, entry, strategy
-            )
+            return self._prepare_retrieve_multi_group(key, instance_id, entry, strategy)
 
         response = strategy.prepare_retrieve(
             key=key,
@@ -886,9 +899,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             if entry.metadata.is_multi_group:
                 num_groups = len(entry.metadata.group_layout_descs)
                 all_obj_keys = self._resolve_all_group_obj_keys(key, num_groups)
-                num_tokens = (
-                    sum(len(ok) for ok in all_obj_keys) * self._ctx.chunk_size
-                )
+                num_tokens = sum(len(ok) for ok in all_obj_keys) * self._ctx.chunk_size
             else:
                 num_tokens = (
                     len(self._resolve_single_group_obj_keys(key)) * self._ctx.chunk_size

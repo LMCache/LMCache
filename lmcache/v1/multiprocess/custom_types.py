@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
+# Standard
 from dataclasses import dataclass, field
 from typing import Any, Callable
 import pickle
 import threading
+
 # Third Party
-import msgspec
 from msgspec import field as msgspec_field
+import msgspec
 import torch
+
+# First Party
 from lmcache import torch_dev, torch_device_type
 
 """
@@ -331,6 +335,7 @@ class GroupLayoutInfo(msgspec.Struct):
     use_mla: bool
     tokens_per_block: int = 0
 
+
 class RegisterEngineDrivenContextPayload(msgspec.Struct):
     """Payload for the REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT protocol message.
     Attributes:
@@ -345,6 +350,7 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
         group_layouts: Per-group layout info for hybrid models. Empty list
             means single-group (backward compatible).
     """
+
     instance_id: int
     model_name: str
     world_size: int
@@ -354,11 +360,15 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
     dtype_str: str
     use_mla: bool
     group_layouts: list["GroupLayoutInfo"] = msgspec_field(default_factory=list)
+
+
 @dataclass
 class CustomizedSerdeConfig:
     serializer: Callable[[Any], bytes]
     deserializer: Callable[[bytes], Any]
     code: int = 0
+
+
 @dataclass
 class BlockAllocationRecord:
     """A single per-request GPU block allocation delta from vLLM."""

@@ -9,6 +9,7 @@ Covers:
   - Single-group backward compatibility
   - (Optional GPU) gather/scatter multi-group roundtrip
 """
+
 # Standard
 import pickle
 
@@ -26,13 +27,10 @@ from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContextMetadata,
     MemoryLayoutDesc,
-    slice_kv_caches_for_group,
-)
-from lmcache.v1.multiprocess.transfer_context.base import (
     _deserialize_multi_group_chunks,
     _serialize_multi_group_chunks,
+    slice_kv_caches_for_group,
 )
-
 
 # ─── Test 1: GroupLayoutInfo msgspec roundtrip ───────────────────────────────
 
@@ -284,6 +282,7 @@ def test_slice_kv_caches_for_group_unsorted_indices():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Needs GPU")
 def test_engine_driven_multi_group_store_retrieve():
     """End-to-end CPU gather -> serialize -> deserialize -> scatter on GPU."""
+    # First Party
     from lmcache.v1.multiprocess.transfer_context.base import (
         gather_paged_kv_multi_group_to_cpu,
         scatter_cpu_multi_group_to_paged_kv,
@@ -361,7 +360,7 @@ def test_commit_store_multi_group_format():
     # Simulate worker serialization
     group_chunks = [
         [torch.randn(2, 4, 16, 128, dtype=torch.bfloat16)],  # Group 0
-        [torch.randn(1, 2, 784, 64)],                         # Group 1
+        [torch.randn(1, 2, 784, 64)],  # Group 1
     ]
     cpu_data = _serialize_multi_group_chunks(group_chunks)
 

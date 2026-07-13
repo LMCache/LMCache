@@ -24,16 +24,15 @@ from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.protocols.engine import RegisterEngineDrivenContextResponse
 from lmcache.v1.multiprocess.transfer_context.base import (
-    gather_paged_kv_multi_group_to_cpu_streams,
     EngineDrivenContext,
     EngineDrivenContextMetadata,
     PinnedBufferPool,
     _deserialize_multi_group_chunks,
-    _serialize_multi_group_chunks,
     _serialize_single_group_chunks,
     compute_kv_layout,
     create_engine_driven_context,
     gather_paged_kv_multi_group_to_cpu,
+    gather_paged_kv_multi_group_to_cpu_streams,
     gather_paged_kv_to_cpu,
     scatter_cpu_multi_group_to_paged_kv,
     scatter_cpu_to_paged_kv,
@@ -341,6 +340,7 @@ class EngineDrivenTransferContext(TransferContext):
     message-queue, and the server side persists/rehydrates from storage.
     Supports hybrid multi-group KV cache models (e.g. GDN + Attention).
     """
+
     def __init__(self) -> None:
         self._engine_driven_context: EngineDrivenContext | None = None
         self._layout_hints: LayoutHints | None = None
@@ -357,7 +357,7 @@ class EngineDrivenTransferContext(TransferContext):
         # runs ``_serialize_single_group_chunks`` on a different
         # group's chunks, then immediately submits the resulting
         # ``COMMIT_STORE_GROUP`` message -- so the LMCache server's
- # D2D commit and the worker's next group's serialisation overlap
+        # D2D commit and the worker's next group's serialisation overlap
         # instead of running serially.  This is the dominant TTFT
         # win for cache-warm requests with hybrid multi-group models.
         self._serialize_pool: ThreadPoolExecutor = ThreadPoolExecutor(
@@ -370,9 +370,11 @@ class EngineDrivenTransferContext(TransferContext):
         # L1 cache already covers the same-prompt re-run case; useful
         # only for chat-session style workloads with overlapping
         # prefixes.  See ``PrefetchPredictor`` for the heuristic.
+        # First Party
         from lmcache.v1.multiprocess.transfer_context.prefetch_predictor import (
             PrefetchPredictor,
         )
+
         self._prefetch_predictor: PrefetchPredictor = PrefetchPredictor(
             max_entries=8,
         )
@@ -396,6 +398,7 @@ class EngineDrivenTransferContext(TransferContext):
         When multiple groups are provided, the multi-group path is used
         for hybrid KV cache models (e.g. GDN + Attention).
         """
+        # First Party
         from lmcache.v1.multiprocess.custom_types import GroupLayoutInfo
 
         self._layout_hints = layout_hints
@@ -434,7 +437,9 @@ class EngineDrivenTransferContext(TransferContext):
             group_blocks_in_chunk: list[int] = []
 
             for group_info in engine_group_infos:
-                group_kv = slice_kv_caches_for_group(kv_caches, group_info.layer_indices)
+                group_kv = slice_kv_caches_for_group(
+                    kv_caches, group_info.layer_indices
+                )
                 (
                     g_block_size,
                     g_num_layers,
@@ -443,7 +448,11 @@ class EngineDrivenTransferContext(TransferContext):
                     g_fmt,
                 ) = compute_kv_layout(group_kv, layout_hints=layout_hints)
 
-                tpb = group_info.tokens_per_block if group_info.tokens_per_block > 0 else g_block_size
+                tpb = (
+                    group_info.tokens_per_block
+                    if group_info.tokens_per_block > 0
+                    else g_block_size
+                )
                 g_use_mla = is_mla(g_fmt)
                 g_dtype = getattr(torch, g_dtype_str)
 
@@ -468,14 +477,16 @@ class EngineDrivenTransferContext(TransferContext):
                 group_block_sizes.append(g_block_size)
                 group_use_mla_flags.append(g_use_mla)
                 group_blocks_in_chunk.append(g_blocks_in_chunk)
-                group_layouts_list.append(GroupLayoutInfo(
-                    block_size=g_block_size,
-                    num_layers=g_num_layers,
-                    hidden_dim_size=g_hidden_dim,
-                    dtype_str=g_dtype_str,
-                    use_mla=g_use_mla,
-                    tokens_per_block=tpb,
-                ))
+                group_layouts_list.append(
+                    GroupLayoutInfo(
+                        block_size=g_block_size,
+                        num_layers=g_num_layers,
+                        hidden_dim_size=g_hidden_dim,
+                        dtype_str=g_dtype_str,
+                        use_mla=g_use_mla,
+                        tokens_per_block=tpb,
+                    )
+                )
 
             # For single-group fields: use first group's values
             block_size = group_block_sizes[0]
@@ -613,20 +624,25 @@ class EngineDrivenTransferContext(TransferContext):
                     # supply the per-group skip_count via a future
                     # LoadStoreOp field; for now we use 0 which is
                     # semantically identical to the legacy full send.
-                    fut = self._engine_driven_context.commit_store_group_delta_raw_async(
-                        key, instance_id, g_idx, skip_count, data,
+                    fut = (
+                        self._engine_driven_context.commit_store_group_delta_raw_async(
+                            key,
+                            instance_id,
+                            g_idx,
+                            skip_count,
+                            data,
+                        )
                     )
                 else:
                     fut = self._engine_driven_context.commit_store_group_raw_async(
-                        key, instance_id, g_idx, data,
+                        key,
+                        instance_id,
+                        g_idx,
+                        data,
                     )
                 return g_idx, fut
 
-            active = [
-                (g_idx, gc)
-                for g_idx, gc in enumerate(group_chunks)
-                if gc
-            ]
+            active = [(g_idx, gc) for g_idx, gc in enumerate(group_chunks) if gc]
             # ``submit`` is portable across Python versions where
             # ``starmap`` may not exist.  Each worker thread calls
             # ``_serialize_and_submit(g_idx, chunks)`` and returns
@@ -635,7 +651,9 @@ class EngineDrivenTransferContext(TransferContext):
             serialized_futs: dict[int, "Future"] = {}
             for g_idx, chunks in active:
                 serialized_futs[g_idx] = self._serialize_pool.submit(
-                    _serialize_and_submit, g_idx, chunks,
+                    _serialize_and_submit,
+                    g_idx,
+                    chunks,
                 )
             for g_idx, fut in serialized_futs.items():
                 _, mq_fut = fut.result()
@@ -646,7 +664,9 @@ class EngineDrivenTransferContext(TransferContext):
                 if fut is None:
                     continue
                 try:
-                    group_ok = bool(fut.result(timeout=self._engine_driven_context.mq_timeout))
+                    group_ok = bool(
+                        fut.result(timeout=self._engine_driven_context.mq_timeout)
+                    )
                 except TimeoutError:
                     group_ok = False
                 ok = ok and group_ok
