@@ -58,17 +58,22 @@ MAGIC_LEN: int = 1
 def _torch_save_to_bytes(chunks: list[torch.Tensor]) -> bytes:
     """Run ``torch.save`` on a list of CPU tensors, return the bytes."""
     buf = io.BytesIO()
-    # ``weights_only=False`` is required because we are saving plain
-    # ``list[Tensor]``, not a state-dict.  The CPU tensors carry no
-    # arbitrary Python objects, so the security risk is the same as
-    # for ``pickle.dumps``.
     torch.save(chunks, buf)
     return buf.getvalue()
 
 
 def _torch_load_from_bytes(blob: bytes) -> list[torch.Tensor]:
-    """Inverse of :func:`_torch_save_to_bytes`."""
-    return torch.load(io.BytesIO(blob), weights_only=False)
+    """Inverse of :func:`_torch_save_to_bytes`.
+
+    - ``weights_only=True``: the payload is a plain (possibly nested)
+      ``list[Tensor]``, which the weights-only unpickler fully supports.
+      This closes the arbitrary-code-execution hole that a full
+      unpickle would open to anyone who can reach the MP server socket.
+    - ``map_location="cpu"``: the server may run CPU-only (no CUDA
+      initialization, no VRAM); a blob that accidentally contains
+      device tensors must deserialize to CPU instead of crashing.
+    """
+    return torch.load(io.BytesIO(blob), map_location="cpu", weights_only=True)
 
 
 def serialize_group_chunks_torchsave(chunks: list[torch.Tensor]) -> bytes:
