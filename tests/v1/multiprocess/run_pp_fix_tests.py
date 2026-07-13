@@ -422,7 +422,7 @@ check("existing: no chunks -> finish_read_prefetched not called",
 # payload-arity-defining files were NOT modified by this change.
 import subprocess
 diff = subprocess.run(
-    ["git", "diff", "--name-only", "HEAD~3"],
+    ["git", "diff", "--name-only", "HEAD~6"],
     cwd=ROOT, capture_output=True, text=True,
 ).stdout.split()
 payload_files = {

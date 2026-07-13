@@ -3,30 +3,32 @@
 
 On ROCm, PyTorch exposes the HIP runtime through the ``torch.cuda`` API
 (``torch.cuda.is_available()`` returns ``True``, ``tensor.device.type``
-is ``"cuda"``).  This means the existing :class:`CudaIPCWrapper` and
-:class:`CudaPinMemoryBackend` in :mod:`lmcache.v1.platform.cuda` already
-handle the common path (PyTorch-allocator-backed tensors).
+is ``"cuda"``).  This means :class:`CudaIPCWrapper` in
+:mod:`lmcache.v1.platform.cuda` already handles the common path
+(PyTorch-allocator-backed tensors) on both NVIDIA and AMD.
 
 This module provides a dedicated :class:`RocmDeviceSpec` so that:
 
-* ROCm is detected **explicitly** (via ``torch.version.hip``) rather than
-  silently falling through to the generic CUDA path.
-* ``DEVICE_TYPE=rocm`` can be used to force selection.
-* Log messages and metrics distinguish NVIDIA CUDA from AMD ROCm.
+* ROCm is detected **explicitly** (via ``torch.version.hip``) rather
+  than silently falling through to the generic CUDA path.
 * The :class:`RocmPinMemoryBackend` loads ``libamdhip64.so`` directly
   (the CUDA backend's ``libcudart.so`` fallback does not exist on ROCm).
+* Log messages and metrics distinguish NVIDIA CUDA from AMD ROCm.
 
-The ``device_type`` is ``"cuda"`` (matching what PyTorch reports on ROCm)
-so the IPC-wrapper auto-discovery and tensor-device lookups are
+The ``device_type`` is ``"cuda"`` (matching what PyTorch reports on
+ROCm) so the IPC-wrapper auto-discovery and tensor-device lookups are
 unaffected — :class:`CudaIPCWrapper` is still selected for
-``tensor.device.type == "cuda"``.  However, because the device-spec
-registry keys on ``device_type`` and both ``CudaDeviceSpec`` and
-``RocmDeviceSpec`` report ``"cuda"``, the registry first-wins ordering
-matters.  :class:`RocmDeviceSpec` overrides :meth:`is_available` to
-return ``True`` **only** when ``torch.version.hip`` is set, so on an
-NVIDIA system the CUDA spec is selected and on an AMD system the ROCm
-spec is selected (alphabetically ``rocm`` > ``cuda``, so ROCm wins on
-AMD hardware — which is what we want).
+``tensor.device.type == "cuda"``.
+
+The device-spec registry is a **list** (not a dict) sorted by class
+name in reverse, so :class:`RocmDeviceSpec` is tried before
+:class:`CudaDeviceSpec`.  :meth:`is_available` returns ``True`` only
+when ``torch.version.hip`` is set, so on NVIDIA the ROCm spec is
+skipped and :class:`CudaDeviceSpec` is selected, while on AMD the ROCm
+spec wins.  ``DEVICE_TYPE=cuda`` selects the first available spec with
+``device_type == "cuda"`` (ROCm on AMD, CUDA on NVIDIA); there is no
+``DEVICE_TYPE=rocm`` override because no spec reports
+``device_type == "rocm"``.
 """
 
 # First Party

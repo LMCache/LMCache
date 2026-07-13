@@ -686,7 +686,6 @@ class BlendV3Module(InstanceLivenessTarget):
         found_uidx: set[int],
         per_hash_obj_keys: dict[bytes, list],
         expanded_uidx: list[int],
-        tp_size: int,
     ) -> list[CBMatchResult]:
         """Classify each prefetched chunk as found or stale, and finalize state.
 
@@ -1079,7 +1078,6 @@ class BlendV3Module(InstanceLivenessTarget):
                 job.found_uidx or set(),
                 job.per_hash_obj_keys or {},
                 job.expanded_uidx or [],
-                tp_size,
             )
         else:
             found = []

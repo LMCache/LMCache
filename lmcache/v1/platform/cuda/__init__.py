@@ -1,21 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CUDA / ROCm platform primitives.
+"""NVIDIA CUDA platform primitives.
 
-This module provides the device specification for both NVIDIA CUDA and
-AMD ROCm GPUs.  On ROCm, PyTorch exposes the HIP runtime through the
-``torch.cuda`` API (``torch.cuda.is_available()`` returns ``True``,
-``tensor.device.type`` is ``"cuda"``), so the existing
-:class:`CudaIPCWrapper` and :class:`CudaPinMemoryBackend` work on ROCm
-without modification.
+This module provides the device specification for NVIDIA CUDA GPUs.
+On ROCm, a separate :class:`RocmDeviceSpec` (in
+:mod:`lmcache.v1.platform.rocm`) is selected instead, which uses
+:class:`RocmPinMemoryBackend` (loading ``libamdhip64.so`` directly).
 
-ROCm note: the ``CudaPinMemoryBackend`` falls back to
-``libcudart.so`` / ``torch.cuda.cudart()`` for host-memory pinning.
-On ROCm, ``torch.cuda.cudart()`` is unavailable and ``libcudart.so``
-does not exist (ROCm ships ``libamdhip64.so``, which exports the
-same ``cudaHostRegister`` symbols but under a different library
-name).  When neither is found, pinning silently degrades to a no-op
-(slower H2D/D2H copies, no crash).  Build with ``BUILD_WITH_HIP=1``
-to compile ``lmcache.c_ops`` against the HIP runtime.
+:class:`CudaIPCWrapper` is shared across both platforms because
+PyTorch on ROCm uses the ``torch.cuda`` API (HIP compatibility layer),
+so ``tensor.device.type == "cuda"`` and the IPC wrapper auto-discovery
+selects :class:`CudaIPCWrapper` for both.
+
+Build with ``BUILD_WITH_HIP=1`` to compile ``lmcache.c_ops`` against
+the HIP runtime for ROCm.
 """
 
 # First Party
@@ -29,10 +26,10 @@ from lmcache.v1.platform.cuda.pin_memory import CudaPinMemoryBackend
 
 
 class CudaDeviceSpec(DeviceSpec):
-    """CUDA / ROCm device specification for the detection registry.
+    """NVIDIA CUDA device specification for the detection registry.
 
-    Handles both NVIDIA CUDA and AMD ROCm, since PyTorch on ROCm uses
-    the ``torch.cuda`` API (HIP compatibility layer).
+    Selected on NVIDIA systems (where ``torch.version.hip`` is ``None``).
+    On AMD ROCm, :class:`RocmDeviceSpec` is selected instead.
     """
 
     @property
