@@ -170,10 +170,11 @@ for a live server.
 * **wall** -- wall-clock time per thread, blocked threads included;
   separates a worker pool that the whole-process modes superimpose.
 
-**CPU/IO time, kernel frames, or a non-Python process** -- the
-*whole-process* modes (``perf`` / bcc). They sample every thread (including
-native workers), resolve kernel frames, and profile any process, but merge
-all threads into one chart.
+**CPU/IO time, kernel frames, context switches, or a non-Python process**
+-- the *whole-process* modes (``perf`` / bcc). They sample every thread
+(including native workers), resolve kernel frames, see scheduler activity
+(blocking and wakeups) that the Python modes cannot, and profile any
+process, but merge all threads into one chart.
 
 * **on-cpu** (``perf record``) -- where CPU *cycles* go (serialization,
   copies, hashing).
@@ -195,7 +196,7 @@ inside the kernel (``perf``, bcc) or by reading the target's user-space
 memory (``py-spy``):
 
 * **perf** (``on-cpu``) -- the *kernel* samples the CPU at a fixed rate
-  (99 Hz here); on each tick it records the stack of whatever thread is
+  (99 Hz by default); on each tick it records the stack of whatever thread is
   *currently running* into a buffer the ``perf`` process drains. It
   therefore sees only on-CPU work -- a sleeping or blocked thread
   contributes nothing -- and walks native stacks through frame pointers.
@@ -208,14 +209,15 @@ memory (``py-spy``):
   ``offwake``, tie a sleeper to its waker -- that ``perf`` cannot see, and
   why its overhead grows with how many context switches the target makes.
   Loading an eBPF program needs privilege (``sudo`` / ``CAP_BPF``).
-* **py-spy** (``wall`` / ``gil``) -- does its work entirely in user space:
-  it reads the target's memory (``process_vm_readv``) and walks CPython's
-  own interpreter structures to reconstruct Python stacks, with no kernel
-  instrumentation and without pausing or modifying the target. It samples
-  at an interval, sees only Python frames (never kernel/native ones), and
-  for ``gil`` inspects the interpreter-lock state to count only GIL-holding
-  threads. Reading another process's memory is why it needs ``ptrace``
-  permission.
+* **py-spy** (``wall`` / ``gil``) -- does its work entirely in user space,
+  in its *own* process: it reads the target's memory (``process_vm_readv``)
+  and walks CPython's own interpreter structures to reconstruct Python
+  stacks, with no kernel instrumentation and -- because this command always
+  runs it with ``--nonblocking`` -- without pausing or modifying the
+  target. It samples at an interval, sees only Python frames (never
+  kernel/native ones), and for ``gil`` inspects the interpreter-lock state
+  to count only GIL-holding threads. Reading another process's memory is
+  why it needs ``ptrace`` permission.
 
 This also explains the Python-frame gap below: ``perf`` and bcc walk
 *native* stacks, where a chain of CPython calls collapses into one
@@ -291,11 +293,29 @@ non-zero with the sysctl to run.
      Because eBPF is not namespaced, running these directly on the host is
      usually simpler than containerizing them.
 
-Recording a live process is not free: ``on-cpu`` writes a ``perf.data``
-that grows with ``--duration`` and thread count, the bcc modes add BPF
-probes whose cost rises with how busy the target is, and even ``py-spy``
-reads target memory each sample. On a production server keep ``--duration``
-short and prefer ``wall`` / ``gil``.
+**Cost of recording.** Those mechanisms give each mode a different cost
+*shape*:
+
+* **perf** (``on-cpu``) -- *bounded*. Sampling at a fixed rate makes the
+  overhead roughly constant however busy the target is; the main cost is
+  disk, as ``perf.data`` grows with ``--duration`` × rate × thread count ×
+  stack depth (deep stacks and many threads enlarge it, the workload's
+  event rate does not). It is deleted once the SVG renders.
+* **bcc** (``off-cpu`` / ``offwake`` / ``wakeup``) -- *unbounded*. Firing on
+  every scheduler event ties the cost to the target's *event rate*, not to
+  wall-clock: a service doing millions of tiny I/Os or contending on locks
+  fires the probe constantly, and ``wakeup`` on a wakeup-heavy workload is
+  the heaviest. Its output is tiny (aggregated in-kernel), so disk cost is
+  negligible.
+* **py-spy** (``wall`` / ``gil``) -- lightest *on the target*: its sampling
+  runs in its own process, off the target's CPUs, whereas perf's interrupt
+  and bcc's probe run on the target's CPUs and steal its cycles. The target
+  pays only for one ``process_vm_readv`` per sample.
+
+On a production server, prefer ``wall`` / ``gil`` and keep ``--duration``
+short. If you need a whole-process mode, ``on-cpu``'s bounded cost is safer
+on a busy target than the bcc modes, whose cost climbs with the very event
+rate a busy server has most of.
 
 **Native stacks need frame pointers.** All four whole-process modes unwind
 user-space native stacks through frame pointers -- ``perf`` (``on-cpu``)
@@ -310,14 +330,22 @@ target with ``-fno-omit-frame-pointer`` for full native stacks. The py-spy
 modes (``wall`` / ``gil``) are unaffected -- they read Python frames from
 the interpreter, not the native stack -- but they see only Python, never C.
 
-**Tooling.** The whole-process modes render with Brendan Gregg's
-`FlameGraph <https://github.com/brendangregg/FlameGraph>`__ scripts
-(``--flamegraph-scripts-dir`` or ``FLAMEGRAPH_DIR``, default
-``~/FlameGraph``; auto-cloned to a temp directory when absent). ``on-cpu``
-needs ``perf``; ``off-cpu`` / ``offwake`` / ``wakeup`` need
-`bcc <https://github.com/iovisor/bcc>`__
-(``offcputime-bpfcc`` / ``offwaketime-bpfcc`` / ``wakeuptime-bpfcc``);
-``wall`` / ``gil`` need `py-spy <https://github.com/benfred/py-spy>`__
-(``pip install py-spy``) and render their own SVG, so the FlameGraph
-scripts are not fetched. A missing tool fails fast with a message naming
-what to install.
+**Built on.** These modes are thin wrappers around three excellent
+open-source profilers, plus Linux ``perf``. When a required tool is
+missing, the command fails fast with a message naming what to install.
+
+`py-spy <https://github.com/benfred/py-spy>`__, by Ben Frederickson, powers
+the ``wall`` and ``gil`` modes. It reads the interpreter directly and
+renders its own SVG (so the FlameGraph scripts below are not needed for
+these modes). Install it with ``pip install py-spy``.
+
+`bcc <https://github.com/iovisor/bcc>`__, the IO Visor project's BPF
+Compiler Collection, powers the ``off-cpu``, ``offwake``, and ``wakeup``
+modes through its ``offcputime-bpfcc``, ``offwaketime-bpfcc``, and
+``wakeuptime-bpfcc`` tools. (The ``on-cpu`` mode instead uses Linux
+``perf``.)
+
+`FlameGraph <https://github.com/brendangregg/FlameGraph>`__, by Brendan
+Gregg, folds and renders the SVG for the ``perf`` and bcc modes. Point
+``--flamegraph-scripts-dir`` (or ``FLAMEGRAPH_DIR``) at a checkout; the
+default is ``~/FlameGraph``, auto-cloned to a temp directory when absent.
