@@ -23,6 +23,10 @@ from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.batched_message_sender import BatchedMessageSender
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
+from lmcache.v1.storage_backend.exceptions import (
+    StagingAllocationError,
+    StorageBackendError,
+)
 from lmcache.v1.storage_backend.job_executor.pq_executor import (
     AsyncPQThreadPoolExecutor,
 )
@@ -449,6 +453,24 @@ class LocalDiskBackend(StorageBackendInterface):
 
         return memory_obj
 
+    def _rollback_prefetch(self, mem_objs: Sequence[MemoryObj]) -> None:
+        """
+        Release the CPU staging buffers acquired by an aborted
+        ``batched_get_non_blocking`` call.
+
+        Each object in ``mem_objs`` was allocated and pinned in the CPU staging
+        pool before the abort; this unpins and frees them so a failed retrieve
+        leaks no staging memory. Disk-index pins are taken only after every
+        allocation has succeeded, so the allocation-failure path never has dict
+        pins to undo.
+
+        :param mem_objs: The staging objects allocated and pinned so far.
+        """
+        for mem_obj in mem_objs:
+            if mem_obj.is_pinned:
+                mem_obj.unpin()
+            mem_obj.ref_count_down()
+
     def batched_get_blocking(
         self,
         keys: List[CacheEngineKey],
@@ -541,25 +563,65 @@ class LocalDiskBackend(StorageBackendInterface):
         keys: list[CacheEngineKey],
         transfer_spec: Any = None,
     ) -> list[MemoryObj]:
+        """
+        Allocate CPU staging buffers and schedule an async disk read for a
+        batch of pinned keys.
+
+        The keys are expected to have been pinned by a preceding lookup, so
+        every key must be present in the on-disk index. Metadata for the whole
+        batch is snapshotted under a single ``disk_lock`` acquisition, so a
+        missing key fails fast -- before any staging allocation -- and there is
+        nothing to roll back.
+
+        Staging allocation uses ``busy_loop=False`` so an exhausted CPU staging
+        pool fails fast instead of spinning on the event loop thread, and runs
+        outside ``disk_lock`` (mirroring ``get_blocking``) so it neither stalls
+        concurrent disk operations nor leaks the lock. Because the caller
+        (layerwise retrieval) has already committed to retrieving all of these
+        keys, a partial result cannot be represented safely: on allocation
+        failure the staging buffers acquired so far are freed and
+        :class:`StagingAllocationError` is raised.
+
+        :param lookup_id: Identifier of the originating lookup, used for logging.
+        :param keys: Ordered cache keys to load; all must be present on disk.
+        :param transfer_spec: Unused; accepted for interface compatibility.
+        :returns: The list of staging ``MemoryObj`` s, one per key, once the
+            batched disk read has been scheduled.
+        :raises StorageBackendError: If any key is absent from the on-disk index
+            (checked up front, before any allocation).
+        :raises StagingAllocationError: If a staging buffer cannot be allocated
+            for any key. Buffers acquired so far are freed before it propagates.
+        """
+        logger.debug(f"lookup_id: {lookup_id}; Prefetching {len(keys)} keys from disk.")
+
+        # Snapshot all metadata up front under a single lock acquisition. This
+        # lets us fail fast if any key is missing before performing any slow
+        # staging allocation -- and thus with nothing to roll back.
+        disk_metas: list[DiskCacheMetadata] = []
+        with self.disk_lock:
+            for key in keys:
+                disk_meta = self.dict.get(key)
+                if disk_meta is None:
+                    raise StorageBackendError(
+                        f"Key {key} missing from disk index during prefetch for "
+                        f"lookup_id={lookup_id}"
+                    )
+                disk_metas.append(disk_meta)
+
+        # Allocate a staging buffer for every key outside the lock. On failure,
+        # free the buffers allocated so far and abort the whole retrieve.
         mem_objs: list[MemoryObj] = []
         paths: list[str] = []
-
-        logger.debug(f"lookup_id: {lookup_id}; Prefetching {len(keys)} keys from disk.")
-        for key in keys:
-            self.disk_lock.acquire()
-            assert key in self.dict, f"Key {key} not found in disk cache after pinning"
-
-            path = self.dict[key].path
-            dtype = self.dict[key].dtype
-            shape = self.dict[key].shape
-            fmt = self.dict[key].fmt
-
+        for key, disk_meta in zip(keys, disk_metas, strict=False):
+            path = disk_meta.path
+            dtype = disk_meta.dtype
+            shape = disk_meta.shape
+            fmt = disk_meta.fmt
             assert dtype is not None
             assert shape is not None
 
-            # busy_loop=False prevents spinning on the event loop thread;
-            # if staging memory is exhausted the caller will get a logged
-            # error rather than a silent deadlock.
+            # busy_loop=False: fail fast instead of spinning on the event loop
+            # thread when the CPU staging pool is under pressure.
             memory_obj = self.local_cpu_backend.allocate(
                 shape,
                 dtype,
@@ -569,24 +631,51 @@ class LocalDiskBackend(StorageBackendInterface):
 
             if memory_obj is None:
                 logger.error(
-                    "Memory allocation failed during async disk load for key %s. "
-                    "CPU staging pool may be exhausted (unpin() not called after "
-                    "a previous retrieve). Returning partial results.",
+                    "CPU staging allocation failed during async disk load for "
+                    "key %s (lookup_id=%s). Freeing %d partially-acquired "
+                    "buffer(s) and aborting the retrieve.",
                     key,
+                    lookup_id,
+                    len(mem_objs),
                 )
-                return mem_objs
+                self._rollback_prefetch(mem_objs)
+                raise StagingAllocationError(
+                    f"CPU staging pool exhausted while prefetching key {key} "
+                    f"for lookup_id={lookup_id}"
+                )
 
-            self.dict[key].pin()
-
-            # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
-            # Update cache recency
-            self.cache_policy.update_on_hit(key, self.dict)
-
-            self.disk_lock.release()
             logger.debug(f"Prefetching {key} from disk.")
             memory_obj.pin()
             mem_objs.append(memory_obj)
             paths.append(path)
+
+        # Every buffer is allocated: pin the disk entries and record the cache
+        # hits under a single lock acquisition. The keys are pinned by the
+        # preceding lookup so eviction cannot remove them here, but a concurrent
+        # forced remove() still can -- guard against it and abort cleanly rather
+        # than raising KeyError.
+        removed_key: Optional[CacheEngineKey] = None
+        with self.disk_lock:
+            for idx, key in enumerate(keys):
+                disk_meta = self.dict.get(key)
+                if disk_meta is None:
+                    removed_key = key
+                    # Undo the prefetch pins taken so far in this loop.
+                    for prior_key in keys[:idx]:
+                        prior_meta = self.dict.get(prior_key)
+                        if prior_meta is not None:
+                            prior_meta.unpin()
+                    break
+                disk_meta.pin()
+                # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
+                # Update cache recency
+                self.cache_policy.update_on_hit(key, self.dict)
+
+        if removed_key is not None:
+            self._rollback_prefetch(mem_objs)
+            raise StorageBackendError(
+                f"Key {removed_key} removed during prefetch for lookup_id={lookup_id}"
+            )
 
         return await self.disk_worker.submit_task(
             "prefetch",

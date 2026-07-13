@@ -23,6 +23,7 @@ from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector import CreateGPUConnector
 from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.v1.storage_backend.exceptions import StorageBackendError
 
 logger = init_logger(__name__)
 
@@ -243,11 +244,33 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
 
         indices_to_remove = []
         for i in range(len(self.layerwise_retrievers)):
-            if self.layer_load_layer[i] == layer_id + 1:
+            if self.layer_load_layer[i] != layer_id + 1:
+                continue
+            try:
                 next(self.layerwise_retrievers[i])
-                self.layer_load_layer[i] += 1
-                if self.layer_load_layer[i] == self.sgl_config.num_hidden_layers:
-                    indices_to_remove.append(i)
+            except StorageBackendError as e:
+                # The retrieve was aborted partway through this request's
+                # layerwise load (typically the CPU staging pool was exhausted).
+                # retrieve_layer has already released the buffers it acquired;
+                # drop this retriever so its remaining layers are not driven and
+                # the engine keeps serving other requests instead of hanging.
+                # NOTE: layers already loaded for this request stay in place
+                # while later layers are skipped -- a known correctness gap for
+                # the affected request under sustained memory pressure. A full
+                # fix requires reserving the whole retrieve's staging up front
+                # so failures surface in start_load_kv (see module design doc).
+                logger.error(
+                    "LMCache layerwise load aborted at layer %d (%s): %s. "
+                    "Dropping retriever for this request.",
+                    layer_id,
+                    type(e).__name__,
+                    e,
+                )
+                indices_to_remove.append(i)
+                continue
+            self.layer_load_layer[i] += 1
+            if self.layer_load_layer[i] == self.sgl_config.num_hidden_layers:
+                indices_to_remove.append(i)
 
         for i in sorted(indices_to_remove, reverse=True):
             del self.layerwise_retrievers[i]
@@ -299,9 +322,26 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
             sync=False,
         )
 
-        next(layerwise_retriever)
-        # Load First Layer
-        next(layerwise_retriever)
+        try:
+            next(layerwise_retriever)
+            # Load First Layer
+            next(layerwise_retriever)
+        except StorageBackendError as e:
+            # The retrieve was aborted before the first layer could be loaded
+            # (typically the CPU staging pool was exhausted). retrieve_layer has
+            # already released every buffer it acquired, so unpin the lookup and
+            # report zero retrieved tokens. SGLang then recomputes this prefix
+            # instead of reading uninitialized KV, which avoids both the
+            # previous deadlock and silent data corruption.
+            self.lmcache_engine.lookup_unpin(lookup_id)
+            logger.error(
+                "LMCache retrieve aborted (%s): %s. "
+                "Falling back to recompute for %d tokens.",
+                type(e).__name__,
+                e,
+                retrieve_token_num,
+            )
+            return 0
 
         self.layerwise_retrievers.append(layerwise_retriever)
         self.layer_load_layer.append(1)
