@@ -101,7 +101,9 @@ logger = lmcache_init_logger(__name__)
 
 
 # Helper functions
-def validate_mamba_step_alignment(vllm_config: VllmConfig) -> None:
+def validate_mamba_step_alignment(
+    vllm_config: VllmConfig, kv_cache_config: "KVCacheConfig | None" = None
+) -> None:
     """Reject scheduler configs that can skip Mamba state snapshots.
 
     In ``mamba_cache_mode="align"`` vLLM snapshots the recurrent state only at
@@ -126,6 +128,23 @@ def validate_mamba_step_alignment(vllm_config: VllmConfig) -> None:
     if getattr(vllm_config.cache_config, "mamba_cache_mode", "none") != "align":
         return
     block_size = vllm_config.cache_config.block_size
+    if kv_cache_config is not None:
+        try:
+            # Under context parallelism / uneven DCP the scheduler aligns
+            # steps to a VIRTUAL block (cache block x token-split factor,
+            # e.g. 32 x sum(token vector), possibly inflated by the align
+            # solver) — state snapshots happen at that grain, so validate
+            # against it. Older vLLMs without the resolver keep the raw
+            # cache block.
+            from vllm.v1.core.kv_cache_utils import (
+                resolve_kv_cache_block_sizes,
+            )
+
+            block_size, _ = resolve_kv_cache_block_sizes(
+                kv_cache_config, vllm_config
+            )
+        except (ImportError, AttributeError):
+            pass
     max_batched = vllm_config.scheduler_config.max_num_batched_tokens
     if not (block_size <= max_batched < 2 * block_size):
         raise ValueError(
@@ -507,7 +526,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         super().__init__(vllm_config, role, kv_cache_config)
 
         # Fail fast, before the server handshake below.
-        validate_mamba_step_alignment(vllm_config)
+        validate_mamba_step_alignment(
+            vllm_config, getattr(self, "_kv_cache_config", None)
+        )
         validate_kv_cache_groups(getattr(self, "_kv_cache_config", None))
 
         assert vllm_config.kv_transfer_config is not None
