@@ -13,12 +13,12 @@ import torch
 
 # First Party
 from lmcache.v1.gpu_connector.musa_connectors import VLLMPagedMemMUSAConnectorV2
+from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
+from lmcache.v1.memory_allocators.pin_memory_allocator import PinMemoryAllocator
 from lmcache.v1.memory_management import (
-    GPUMemoryAllocator,
     MemoryAllocatorInterface,
     MemoryFormat,
     MemoryObj,
-    PinMemoryAllocator,
 )
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.platform.musa.native_kv_transfer import ENV_MUSA_NATIVE_KV_TRANSFER

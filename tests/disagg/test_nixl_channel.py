@@ -11,7 +11,11 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.memory_management import AdHocMemoryAllocator, MemoryFormat, MemoryObj
+from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
+from lmcache.v1.memory_management import (
+    MemoryFormat,
+    MemoryObj,
+)
 from lmcache.v1.transfer_channel.nixl_channel import NixlChannel
 from lmcache.v1.transfer_channel.transfer_utils import get_correct_device
 

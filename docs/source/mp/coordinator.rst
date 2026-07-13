@@ -357,9 +357,45 @@ Quota, usage, and eviction
 The ``/quota`` group owns per-``cache_salt`` byte budgets, the live usage
 accounting behind them, and the usage-event stream that drives fleet-wide
 eviction. (The MP server exposes a node-local ``/quota`` with the same shape;
-this is its fleet-wide counterpart.) Salts without a quota default to a 0-byte
-limit (allowlist semantics); use ``_default`` as the path parameter to target
-the empty-string salt.
+this is its fleet-wide counterpart.) Use ``_default`` as the path parameter to
+target the empty-string salt.
+
+.. warning::
+
+   Do **not** use the MP server's node-local ``/quota`` API together with the
+   coordinator's. The two are independent, unsynchronized quota registries
+   enforcing eviction on the **same shared L2**: the server-side enforcer
+   (active when the server runs a per-salt eviction policy) uses strict
+   allowlist semantics — any salt missing from *its own* table is fully
+   evicted — and it never sees quotas registered on the coordinator, and vice
+   versa. Mixing the two produces competing eviction decisions: the server can
+   wipe data the coordinator considers within quota (or still exempt before
+   the default limit is armed). Pick one owner per deployment — in
+   coordinator-managed deployments, register quotas **only** through the
+   coordinator's ``/quota`` API and leave the servers' node-local quota tables
+   untouched.
+
+Salts without an explicit quota are governed by the registry's **default
+limit** (``PUT /quota/config``). On boot the default is unset, and unquota'd
+salts are **exempt** from eviction — quotas live in memory, so a freshly
+(re)started coordinator has an empty quota table until the external quota
+controller re-syncs it, and the exempt default keeps that window from
+mass-evicting unknown tenants. After re-registering every per-salt quota, the
+controller sets the default to ``0`` — the signal that arms strict allowlist
+enforcement (all bytes under unquota'd salts become evictable on the next
+cycle):
+
+.. code-block:: bash
+
+    # 1. re-register every tenant quota
+    curl -s -X PUT http://localhost:9300/quota/user-a \
+        -H 'Content-Type: application/json' -d '{"limit_gb": 10.0}'
+    # ... one PUT per tenant ...
+
+    # 2. arm eviction of everything else
+    curl -s -X PUT http://localhost:9300/quota/config \
+        -H 'Content-Type: application/json' -d '{"default_limit_gb": 0}'
+    # -> {"default_limit_gb": 0.0}
 
 When MP servers enable ``--coordinator-l2-event-reporting``, they stream L2
 ``store``, ``lookup``, and ``delete`` events to the coordinator, which aggregates
@@ -391,6 +427,47 @@ does not start from zero usage. Set
 phase. Best-effort: resync failures are logged and the manager gives
 up; the ongoing usage-event stream from MP servers eventually corrects
 any initial blind spots.
+
+``PUT /quota/config`` / ``GET /quota/config``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Set / read the default limit applied to salts with no explicit quota entry.
+
+**Request body** (``PUT``):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 14 64
+
+   * - Field
+     - Type
+     - Description
+   * - ``default_limit_gb``
+     - float or null
+     - ``null`` (the boot default) exempts unquota'd salts from eviction;
+       ``0`` arms strict allowlist enforcement (all unquota'd bytes become
+       evictable next cycle); a positive value grants every unquota'd salt
+       that byte budget.
+   * - ``tier``
+     - string
+     - Optional (default ``l2``). Only ``l2`` is supported today.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {"default_limit_gb": 0.0}
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s http://localhost:9300/quota/config
+    # -> {"default_limit_gb": null}          (boot state: unquota'd exempt)
+
+    curl -s -X PUT http://localhost:9300/quota/config \
+        -H 'Content-Type: application/json' -d '{"default_limit_gb": 0}'
+    # -> {"default_limit_gb": 0.0}           (allowlist enforcement armed)
 
 ``PUT /quota/{cache_salt}``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

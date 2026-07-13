@@ -99,6 +99,10 @@ jobs:
             **/pyproject.toml
             **/requirements/*.txt
 
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y ffmpeg
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
