@@ -6,6 +6,10 @@ thread; a dedicated flush thread sends a ``ContinuousContextMessage``
 every ``LMCACHE_USAGE_TRACK_INTERVAL`` seconds (default 600). Empty
 intervals are still sent and double as session heartbeats.
 
+This module is not re-exported from the package root so that importing
+:mod:`lmcache.usage_telemetry` (done by the single-process engine path)
+never pulls in :mod:`lmcache.v1.mp_observability`.
+
 Note:
     Counters are sourced from ``MP_RETRIEVE_END`` / ``MP_STORE_END``,
     which only the lmcache-driven transfer path emits; engine-driven
@@ -129,9 +133,7 @@ class MPContinuousUsageReporter(EventSubscriber):
         payload = build_usage_payload(
             message, get_usage_identity(), DeploymentMode.MP_SERVER
         )
-        self._sender.send(
-            usage_server_url(message.ENDPOINT, DeploymentMode.MP_SERVER), payload
-        )
+        self._sender.send(usage_server_url(message.ENDPOINT), payload)
 
     def _flush_loop(self) -> None:
         while not self._stop_event.wait(self._flush_interval):

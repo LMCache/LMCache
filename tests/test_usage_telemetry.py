@@ -15,23 +15,22 @@ import torch
 # First Party
 from lmcache.usage_telemetry import (
     USAGE_SCHEMA_VERSION,
+    ContinuousUsageContext,
+    InitializeMPUsageContext,
+    InitializeUsageContext,
     MPServerMessage,
+    MPUsageContext,
+    UsageContext,
     UsageMessageSender,
     get_usage_identity,
     is_usage_tracking_enabled,
 )
 from lmcache.usage_telemetry.guard import swallow_telemetry_errors
-from lmcache.usage_telemetry.mp import (
+from lmcache.usage_telemetry.mp_continuous import (
     InitializeMPContinuousUsage,
-    InitializeMPUsageContext,
     MPContinuousUsageReporter,
-    MPUsageContext,
 )
-from lmcache.usage_telemetry.non_mp import (
-    ContinuousUsageContext,
-    InitializeUsageContext,
-    UsageContext,
-)
+from lmcache.usage_telemetry.transport import usage_server_url
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -149,6 +148,20 @@ def make_metadata() -> LMCacheMetadata:
         use_mla=False,
         role="worker",
     )
+
+
+class TestUsageServerUrl:
+    @pytest.mark.parametrize(
+        "base,expected",
+        [
+            ("http://stats.test", "http://stats.test/context"),
+            ("http://stats.test/", "http://stats.test/context"),
+            ("http://stats.test/api/v1", "http://stats.test/api/v1/context"),
+        ],
+    )
+    def test_base_url_path_preserved(self, usage_env, monkeypatch, base, expected):
+        monkeypatch.setenv("LMCACHE_USAGE_TRACK_URL", base)
+        assert usage_server_url("context") == expected
 
 
 class TestOptOut:
@@ -359,7 +372,7 @@ class TestMPContinuous:
 
         assert len(sender.sent) == 1
         url, payload = sender.sent[0]
-        assert url == "http://stats.test/mp/cache-usage"
+        assert url == "http://stats.test/cache-usage"
         assert payload["message_type"] == "ContinuousContextMessage"
         assert payload["deployment_mode"] == "mp_server"
         assert payload["interval_num_hit_tokens"] == 4 * 256
@@ -486,7 +499,7 @@ class TestMPUsage:
 
         identity = get_usage_identity()
         for url, payload in sender.sent:
-            assert url == "http://stats.test/mp/context"
+            assert url == "http://stats.test/context"
             assert payload["schema_version"] == USAGE_SCHEMA_VERSION
             assert payload["session_id"] == identity.session_id
             assert payload["deployment_mode"] == "mp_server"
@@ -598,7 +611,7 @@ class TestEndToEnd:
             "MPServerMessage",
         ]
         for path, payload in received:
-            assert path == "/mp/context"
+            assert path == "/context"
             assert payload["deployment_mode"] == "mp_server"
         assert len({payload["session_id"] for _, payload in received}) == 1
 

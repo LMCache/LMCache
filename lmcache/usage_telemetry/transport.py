@@ -25,23 +25,23 @@ from lmcache.usage_telemetry.messages import (
 logger = init_logger(__name__)
 
 
-def usage_server_url(endpoint: str, mode: DeploymentMode) -> str:
-    """Build the stats-server URL for *endpoint* in *mode*.
-
-    MP-server payloads always go under the ``/mp/`` path prefix (e.g.
-    ``/mp/context``, ``/mp/cache-usage``); single-process payloads use the
-    bare endpoint. This is the only place the prefix is applied.
+def usage_server_url(endpoint: str) -> str:
+    """Build the stats-server URL for *endpoint*.
 
     Args:
         endpoint: Path component on the stats server, e.g. ``"context"``.
-        mode: Deployment mode sending the payload; selects the prefix.
 
     Returns:
         The full URL, honoring the ``LMCACHE_USAGE_TRACK_URL`` override.
+        Any path on the override is preserved (e.g. base
+        ``http://host/api/v1`` yields ``http://host/api/v1/context``).
     """
     base = os.getenv("LMCACHE_USAGE_TRACK_URL", "http://stats.lmcache.ai:8080")
-    prefix = "mp/" if mode is DeploymentMode.MP_SERVER else ""
-    return urljoin(base, prefix + endpoint)
+    # urljoin drops the last path segment of a base without a trailing
+    # slash (http://host/api/v1 + context -> http://host/api/context).
+    if not base.endswith("/"):
+        base += "/"
+    return urljoin(base, endpoint)
 
 
 class UsageMessageSender:

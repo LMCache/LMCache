@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Continuous usage reporting for the single-process LMCacheEngine path."""
+"""Continuous usage reporting: periodic interval counters and histograms."""
 
 # Future
 from __future__ import annotations
@@ -55,6 +55,7 @@ class ContinuousUsageContext:
         self,
         metadata: LMCacheMetadata,
         sender: UsageMessageSender | None = None,
+        mode: DeploymentMode = DeploymentMode.SINGLE_PROCESS,
     ) -> None:
         """Initialize the reporter.
 
@@ -63,6 +64,8 @@ class ContinuousUsageContext:
                 stored-bytes estimate.
             sender: Message transport; ``None`` selects the default HTTP
                 sender.
+            mode: Deployment mode stamped on every payload this reporter
+                sends.
         """
         self.cache_lifespan_buckets: list[float] = [
             0,
@@ -82,13 +85,8 @@ class ContinuousUsageContext:
             5000,
         ]
         self.metadata: LMCacheMetadata = metadata
-        self._mode = DeploymentMode.SINGLE_PROCESS
-        self.cache_usage_url: str = usage_server_url(
-            ContinuousContextMessage.ENDPOINT, self._mode
-        )
-        self.cache_lifespan_url: str = usage_server_url(
-            CacheLifespanMessage.ENDPOINT, self._mode
-        )
+        self.cache_usage_url: str = usage_server_url(ContinuousContextMessage.ENDPOINT)
+        self.cache_lifespan_url: str = usage_server_url(CacheLifespanMessage.ENDPOINT)
         self.min_logging_interval: int = int(
             os.getenv("LMCACHE_USAGE_TRACK_INTERVAL", "600")
         )
@@ -109,6 +107,7 @@ class ContinuousUsageContext:
             self.kv_sz_per_token_bytes = 0
         self.cache_lifespan_data: list[float] = []
         self._sender = sender if sender is not None else DEFAULT_SENDER
+        self._mode = mode
         self._sequence_number: int = 0
         self._start_monotonic: float = time.monotonic()
 

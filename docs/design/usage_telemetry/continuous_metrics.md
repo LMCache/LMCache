@@ -53,18 +53,14 @@ supersedes it. MP's `interval_stored_kv_size` uses exact bytes from
 definition), so it is sourced from `MP_RETRIEVE_END`, not lookup hits;
 engine-driven transfer coverage must be verified during implementation.
 
-**Message organization**: MP reuses the shared message *types*
-(`ContinuousContextMessage` etc.) but POSTs to mode-specific endpoints —
-every MP payload goes under the `/mp/` prefix (`/mp/context`,
-`/mp/cache-usage`). Rationale: MP and non-MP code paths are fully
-separated (`usage_telemetry/mp/` vs `usage_telemetry/non_mp/`) because
-the non-MP path is scheduled for removal within months; separate
-endpoints let the backend drop the legacy handlers with it. The ingest
-layer should still write both endpoints into one Influx measurement per
-`message_type` (with the `deployment_mode` tag) so fleet-wide panels
-never union across measurements. MP-only additions (evictions,
-per-model counters) are new message types in later PRs, not new fields
-on the shared class.
+**Message organization**: MP reuses the existing message types and
+endpoints — same `ContinuousContextMessage` to `/cache-usage`,
+distinguished by the `deployment_mode` header tag. A fuller MP/non-MP
+separation (split code paths `usage_telemetry/mp/` vs
+`usage_telemetry/non_mp/`, MP payloads under an `/mp/` endpoint prefix)
+is planned as its own future PR, motivated by the scheduled removal of
+the non-MP path. MP-only additions (evictions, per-model counters) are
+new message types in later PRs, not new fields on the shared class.
 
 **Data availability**: `MP_LOOKUP` emission is `has_subscribers`-gated —
 zero cost until a telemetry subscriber registers. KV-cache registration

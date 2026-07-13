@@ -1,91 +1,85 @@
 # SPDX-License-Identifier: Apache-2.0
-"""One-shot context reporting for the single-process LMCacheEngine path."""
+"""Usage reporting for the multiprocess (MP) cache server."""
 
 # Future
 from __future__ import annotations
 
 # Standard
-from datetime import datetime
 from typing import TYPE_CHECKING
 import threading
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.usage_telemetry.base import UsageContextBase
+from lmcache.usage_telemetry.context import UsageContextBase
 from lmcache.usage_telemetry.env_probe import collect_env_message
 from lmcache.usage_telemetry.guard import swallow_telemetry_errors
 from lmcache.usage_telemetry.identity import is_usage_tracking_enabled
 from lmcache.usage_telemetry.messages import (
     DeploymentMode,
-    EngineMessage,
-    MetadataMessage,
+    MPServerMessage,
     UsageMessage,
 )
 from lmcache.usage_telemetry.transport import UsageMessageSender
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.config import LMCacheEngineConfig
-    from lmcache.v1.metadata import LMCacheMetadata
+    from lmcache.v1.distributed.config import StorageManagerConfig
+    from lmcache.v1.multiprocess.config import MPServerConfig
 
 logger = init_logger(__name__)
 
 
-class UsageContext(UsageContextBase):
-    """One-shot usage reporter for the single-process LMCacheEngine path.
+class MPUsageContext(UsageContextBase):
+    """Usage reporter for the multiprocess cache server.
 
-    Sends an ``EnvMessage``, an ``EngineMessage``, and a
-    ``MetadataMessage`` to the stats server.
+    Sends an ``EnvMessage`` and an ``MPServerMessage`` at startup.
     """
 
     def __init__(
         self,
-        config: LMCacheEngineConfig,
-        metadata: LMCacheMetadata,
+        mp_config: MPServerConfig,
+        storage_manager_config: StorageManagerConfig,
         local_log: str | None = None,
         sender: UsageMessageSender | None = None,
     ) -> None:
         """Initialize the reporter.
 
         Args:
-            config: The engine configuration to snapshot.
-            metadata: The engine metadata (model, world size, kv layout).
+            mp_config: The MP server configuration to snapshot.
+            storage_manager_config: The storage manager configuration to
+                snapshot.
             local_log: Path of a local log of sent payloads; ``None``
                 disables local logging.
             sender: Message transport; ``None`` selects the default HTTP
                 sender.
         """
-        super().__init__(DeploymentMode.SINGLE_PROCESS, local_log, sender)
-        self._config = config
-        self._metadata = metadata
+        super().__init__(DeploymentMode.MP_SERVER, local_log, sender)
+        self._mp_config = mp_config
+        self._storage_manager_config = storage_manager_config
 
     def _collect_messages(self) -> list[UsageMessage]:
-        metadata_message = MetadataMessage(
-            start_time=self._start_time.strftime("%Y-%m-%d %H:%M:%S"),
-            duration=(datetime.now() - self._start_time).total_seconds(),
-        )
         return [
             collect_env_message(),
-            EngineMessage.from_config(self._config, self._metadata),
-            metadata_message,
+            MPServerMessage.from_configs(self._mp_config, self._storage_manager_config),
         ]
 
 
 @swallow_telemetry_errors
-def InitializeUsageContext(
-    config: LMCacheEngineConfig,
-    metadata: LMCacheMetadata,
+def InitializeMPUsageContext(
+    mp_config: MPServerConfig,
+    storage_manager_config: StorageManagerConfig,
     local_log: str | None = None,
     sender: UsageMessageSender | None = None,
-) -> UsageContext | None:
-    """Start one-shot usage reporting for a single-process engine.
+) -> MPUsageContext | None:
+    """Start usage reporting for a multiprocess cache server.
 
-    Returns immediately; the report is sent in the background. Never
-    blocks or raises.
+    Returns immediately; the startup report is sent in the background.
+    Never blocks or raises.
 
     Args:
-        config: The engine configuration to snapshot.
-        metadata: The engine metadata (model, world size, kv layout).
+        mp_config: The MP server configuration to snapshot.
+        storage_manager_config: The storage manager configuration to
+            snapshot.
         local_log: Path of a local log of sent payloads; ``None`` disables
             local logging.
         sender: Message transport; ``None`` selects the default HTTP sender.
@@ -96,8 +90,8 @@ def InitializeUsageContext(
     """
     if not is_usage_tracking_enabled():
         return None
-    logger.info("Initializing usage context.")
-    context = UsageContext(config, metadata, local_log, sender)
+    logger.info("Initializing MP usage context.")
+    context = MPUsageContext(mp_config, storage_manager_config, local_log, sender)
     threading.Thread(
         target=context.report_once, daemon=True, name="lmcache-usage-report"
     ).start()

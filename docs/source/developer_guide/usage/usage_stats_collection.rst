@@ -146,7 +146,7 @@ If you would like to log to a file in addition to (or instead of) sending data t
 
 .. code-block:: python
 
-   from lmcache.usage_telemetry.non_mp import InitializeUsageContext
+   from lmcache.usage_telemetry import InitializeUsageContext
 
    usage_ctx = InitializeUsageContext(
        config=engine_config,

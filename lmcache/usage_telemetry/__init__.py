@@ -3,17 +3,16 @@
 
 Phone-home usage statistics, described in this package's ``README.md``.
 
-This root package holds only what both deployment modes share: the wire
-schema (:mod:`.messages` — the single source of truth for what LMCache
-can phone home), identity and opt-out (:mod:`.identity`), transport
-(:mod:`.transport`), the no-throw guard (:mod:`.guard`), environment
-probing (:mod:`.env_probe`), and the one-shot reporter base
-(:mod:`.base`).
+- The wire schema of every message lives in :mod:`.messages` — the single
+  source of truth for what LMCache can phone home.
+- Context reporting (:mod:`.context`, :mod:`.mp`) sends a
+  snapshot of the environment and configuration at startup.
+- Continuous reporting (:mod:`.continuous`) flushes interval counters
+  (hit/stored tokens) and a cache-lifespan histogram periodically.
 
-Mode-specific reporters are fully separated: MP-server reporting lives in
-:mod:`.mp` (payloads POST under the ``/mp/`` endpoint prefix);
-single-process reporting lives in :mod:`.non_mp` and is scheduled for
-removal together with that code path.
+Every outgoing payload is stamped with a :class:`UsageIdentity` (per-process
+``session_id`` plus persistent ``machine_id``) so the stats backend can join
+continuous messages with the one-shot context that describes the deployment.
 
 Every entry point called from serving code is wrapped with
 :func:`lmcache.usage_telemetry.guard.swallow_telemetry_errors`: a failure
@@ -23,7 +22,12 @@ Users can opt out at any time; see :func:`is_usage_tracking_enabled`.
 """
 
 # First Party
-from lmcache.usage_telemetry.base import UsageContextBase
+from lmcache.usage_telemetry.context import (
+    InitializeUsageContext,
+    UsageContext,
+    UsageContextBase,
+)
+from lmcache.usage_telemetry.continuous import ContinuousUsageContext
 from lmcache.usage_telemetry.env_probe import collect_env_message
 from lmcache.usage_telemetry.identity import (
     UsageIdentity,
@@ -41,17 +45,23 @@ from lmcache.usage_telemetry.messages import (
     MPServerMessage,
     UsageMessage,
 )
+from lmcache.usage_telemetry.mp import InitializeMPUsageContext, MPUsageContext
 from lmcache.usage_telemetry.transport import UsageMessageSender
 
 __all__ = [
     "USAGE_SCHEMA_VERSION",
     "CacheLifespanMessage",
     "ContinuousContextMessage",
+    "ContinuousUsageContext",
     "DeploymentMode",
     "EngineMessage",
     "EnvMessage",
+    "InitializeMPUsageContext",
+    "InitializeUsageContext",
     "MPServerMessage",
+    "MPUsageContext",
     "MetadataMessage",
+    "UsageContext",
     "UsageContextBase",
     "UsageIdentity",
     "UsageMessage",

@@ -9,21 +9,17 @@ deployment operators), different transports, and independent opt-outs.
 
 ## Package layout
 
-MP and single-process (non-MP) reporting are fully separated: shared
-schema and infrastructure live at the package root; each mode has its
-own subpackage and its own endpoints. The `non_mp/` subpackage is
-scheduled for removal together with the single-process code path.
-
 | Module | Contents |
 |---|---|
 | `messages.py` | **Wire schema — single source of truth.** Every message dataclass, `USAGE_SCHEMA_VERSION`, per-message `ENDPOINT` |
 | `guard.py` | `swallow_telemetry_errors` decorator — the no-throw guarantee |
 | `identity.py` | Opt-out gate (`is_usage_tracking_enabled`), `UsageIdentity` (session/machine ids) |
-| `transport.py` | `UsageMessageSender` (HTTP), `build_usage_payload`, `usage_server_url` (mode → endpoint prefix) |
+| `transport.py` | `UsageMessageSender` (HTTP), `build_usage_payload` (identity + schema stamping) |
 | `env_probe.py` | Hardware/platform/cloud detection feeding `EnvMessage` |
-| `base.py` | `UsageContextBase` — shared one-shot reporter plumbing |
-| `mp/` | MP server: `MPUsageContext` (startup) + `MPContinuousUsageReporter` (EventBus-fed interval counters). Importing it pulls in `mp_observability` |
-| `non_mp/` | Single-process: `UsageContext` (startup) + `ContinuousUsageContext` (stats-logger-fed). **Scheduled for removal** |
+| `context.py` | `UsageContextBase`, single-process `UsageContext`, `InitializeUsageContext` — the `/context` snapshot reporters |
+| `continuous.py` | `ContinuousUsageContext` interval counters and lifespan histogram |
+| `mp_continuous.py` | `MPContinuousUsageReporter` — EventBus-fed interval counters for the MP server (not re-exported from the package root) |
+| `mp.py` | MP server `MPUsageContext`, `InitializeMPUsageContext` |
 
 `lmcache/usage_context.py` remains as a backward-compatibility shim
 re-exporting the pre-package public names.
@@ -37,9 +33,7 @@ phone home is a dataclass there, and nowhere else. The contract:
   `build_usage_payload` derives it, so senders cannot disagree with the
   schema.
 - Each message declares the stats-server **`ENDPOINT`** it POSTs to as a
-  class attribute; senders route by it. **MP payloads always POST under
-  the `/mp/` prefix** (`/mp/context`, `/mp/cache-usage`), applied in
-  exactly one place — `usage_server_url`, keyed on `DeploymentMode`.
+  class attribute; senders route by it.
 - Fields are **flat and JSON-serializable** (the backend stores flat
   key-value pairs; lists are joined into delimited strings).
 - `session_id`, `machine_id`, `schema_version`, and `deployment_mode` are

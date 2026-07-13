@@ -1,18 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Backward-compatibility shim; the implementation lives in
-:mod:`lmcache.usage_telemetry` (single-process reporters in
-:mod:`lmcache.usage_telemetry.non_mp`)."""
+:mod:`lmcache.usage_telemetry`."""
 
 # First Party
 from lmcache.usage_telemetry import (
     ContinuousContextMessage,
+    ContinuousUsageContext,
     EngineMessage,
     EnvMessage,
-    MetadataMessage,
-)
-from lmcache.usage_telemetry.non_mp import (
-    ContinuousUsageContext,
     InitializeUsageContext,
+    MetadataMessage,
     UsageContext,
 )
 

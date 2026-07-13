@@ -115,7 +115,7 @@ def test_server_startup_emits_usage_report(monkeypatch, tmp_path):
             for path, payload in received
             if payload["message_type"] in ("EnvMessage", "MPServerMessage")
         }
-        assert startup_paths == {"/mp/context"}
+        assert startup_paths == {"/context"}
 
         mp_payload = payloads["MPServerMessage"]
         assert mp_payload["deployment_mode"] == "mp_server"
@@ -139,7 +139,7 @@ def test_server_startup_emits_usage_report(monkeypatch, tmp_path):
         ]
         assert continuous, "no ContinuousContextMessage received"
         path, payload = continuous[0]
-        assert path == "/mp/cache-usage"
+        assert path == "/cache-usage"
         assert payload["deployment_mode"] == "mp_server"
         assert payload["sequence_number"] >= 1
         assert payload["uptime_seconds"] >= 0
