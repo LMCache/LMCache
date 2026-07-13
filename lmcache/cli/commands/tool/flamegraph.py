@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``lmcache tool flamegraph`` — profile a running LMCache process.
+"""``lmcache tool flamegraph`` — profile any already-running process.
 
-Attaches a recorder to an already-running process for a set
-duration (or until interrupted) and renders a flame graph. This is the
-standalone counterpart to the ``--flamegraph`` option on ``lmcache bench
-l2`` and ``lmcache bench server`` here the target is one you did not launch.
+Attaches a recorder to a live process -- an MP cache server, a vLLM worker,
+or any Python process -- for a set duration (or until interrupted) and
+renders a flame graph. Unlike the ``--flamegraph`` option on ``lmcache
+bench l2`` / ``lmcache bench server``, it drives no synthetic load: it
+profiles the target under whatever real work it is already doing.
 
 The recorder, modes, and rendering all live in the shared
 :mod:`lmcache.cli.profiling`; this module only maps CLI arguments onto
@@ -50,17 +51,11 @@ class FlamegraphCommand(BaseCommand):
             choices=["on-cpu", "off-cpu", "offwake", "wakeup", "wall", "gil"],
             default="gil",
             help=(
-                "What to sample. To profile Python or GIL contention, use "
-                "'gil' (threads holding the interpreter lock) or 'wall' "
-                "(wall-clock time per thread); both are py-spy, need no "
-                "change to the target, but work only on a CPython process. "
-                "To look at CPU/IO time, kernel frames, or a non-Python "
-                "process, use one of the perf/bcc modes (they merge all "
-                "threads and name Python functions only when the target was "
-                "launched with PYTHONPERFSUPPORT=1): 'on-cpu' (where cycles "
-                "go), 'off-cpu' (time blocked on IO/locks), 'offwake' "
-                "(blocked time plus the stack that woke the thread), or "
-                "'wakeup' (the stacks doing the waking). Default: gil."
+                "What to sample (default: gil). 'gil' / 'wall' use py-spy "
+                "(Python/GIL, CPython only, no target change); 'on-cpu' / "
+                "'off-cpu' / 'offwake' / 'wakeup' use perf/bcc (CPU/IO/kernel, "
+                "any process, Python names need PYTHONPERFSUPPORT=1). See the "
+                "'lmcache tool flamegraph' docs for what each shows."
             ),
         )
         parser.add_argument(
@@ -87,10 +82,9 @@ class FlamegraphCommand(BaseCommand):
             default="",
             metavar="DIR",
             help=(
-                "Directory with the FlameGraph scripts (flamegraph.pl, "
-                "stackcollapse-perf.pl). Default: $FLAMEGRAPH_DIR or "
-                "~/FlameGraph, else auto-cloned into a temp directory. "
-                "Unused by --mode wall / gil, which render their own SVG."
+                "Directory with the FlameGraph scripts (perf/bcc modes only). "
+                "If omitted, resolved from $FLAMEGRAPH_DIR / ~/FlameGraph or "
+                "auto-cloned to a temp directory."
             ),
         )
 

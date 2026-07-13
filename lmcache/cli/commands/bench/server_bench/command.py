@@ -325,7 +325,6 @@ def _build_server_profiler(
             flamegraph_dir=flamegraph_dir,
             pid=pid,
             title=f"{args.flamegraph_mode} (server pid {pid})",
-            short_run_hint="lengthen the run with --end, or lower --interval",
         )
     except ProfileError as e:
         print(

@@ -331,7 +331,6 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
                 flamegraph_dir=flamegraph_dir,
                 pid=os.getpid(),
                 title=f"{args.flamegraph_mode} ({adapter_name})",
-                short_run_hint="raise --rounds, --num-keys, or --data-size-kb",
             )
         except ProfileError as e:
             print(

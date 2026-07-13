@@ -141,13 +141,11 @@ three commands. They share the same ``--mode`` machinery but differ in
      - Any running process, under whatever **real** work it is already
        doing.
 
-The two ``bench`` commands generate a controlled, synthetic workload; this
-one does not. Reach for it when you want to see a **real, unmodified
-process** -- a production or vLLM-driven server under actual traffic, an
-idle server, or any arbitrary PID -- without standing up a benchmark
-harness. Its request paths (for example, vLLM driving the
-``LMCacheMPConnector``) are the real ones, not the synthetic requests
-``bench server`` injects.
+The two ``bench`` commands drive synthetic load; this one drives none.
+Reach for it to profile a **real, unmodified process** -- a production or
+vLLM-driven server under actual traffic (real ``LMCacheMPConnector`` paths,
+not synthetic requests), an idle server, or any arbitrary PID -- without
+standing up a benchmark harness.
 
 .. code-block:: bash
 
@@ -264,34 +262,102 @@ interpreter state directly, so it needs none of that.
      - *(auto)*
      - FlameGraph scripts directory; unused by ``wall`` / ``gil``.
 
-Attaching needs permission to trace the target: ``wall`` / ``gil`` require
-``kernel.yama.ptrace_scope`` at ``0`` (or root); ``on-cpu`` requires
-``kernel.perf_event_paranoid`` at ``2`` or lower; ``off-cpu`` / ``offwake``
-/ ``wakeup`` load a BPF program and need ``sudo``. A blocked attach exits
-non-zero with the sysctl to run.
+**On a VM or bare-metal host**, attaching needs permission to trace the
+target: ``wall`` / ``gil`` require ``kernel.yama.ptrace_scope`` at ``0`` (or
+``CAP_SYS_PTRACE``); ``on-cpu`` requires ``kernel.perf_event_paranoid`` at
+``2`` or lower; the bcc modes load a BPF program and need ``sudo``. A
+blocked attach exits non-zero naming the sysctl to run. **Inside a
+container this works differently -- see below.**
 
 .. note::
 
-   **Inside a container**, every mode attaches by PID, so the profiler must
-   share the target's PID namespace: run it in the **same container** as
-   the target, or start its container with ``--pid=container:<target>`` (or
-   ``--pid=host``). Otherwise the target's PID is not visible. Each mode
-   then needs privileges the container drops by default:
+   **Profiling inside a container.** Nothing here edits the host kernel. It
+   comes down to three separable things -- what you **install** in the
+   container, which **flags** you pass to ``docker run``, and the **host
+   sysctls** those flags exist to bypass. Keeping them apart:
 
-   * ``wall`` / ``gil`` (``py-spy``) -- add ``--cap-add SYS_PTRACE`` so it
-     can read the target's memory. This is usually all that is required,
-     and is the least intrusive way to profile a containerized server.
-   * ``on-cpu`` (``perf``) -- additionally add
-     ``--security-opt seccomp=unconfined`` (the default seccomp profile
-     blocks ``perf_event_open``) and lower ``kernel.perf_event_paranoid``
-     on the **host** -- that sysctl is not namespaced and cannot be set
-     from inside the container.
-   * ``off-cpu`` / ``offwake`` / ``wakeup`` (bcc / eBPF) -- the heaviest:
-     they load eBPF host-wide and need ``CAP_BPF`` + ``CAP_PERFMON`` (or
-     ``--privileged``), ``seccomp=unconfined``, a mounted
-     ``/sys/kernel/debug``, and host-matching kernel headers (or BTF).
-     Because eBPF is not namespaced, running these directly on the host is
-     usually simpler than containerizing them.
+   **PID visibility -- a** ``docker run`` **flag.** Every mode attaches by
+   PID, so the profiler must share the target's PID namespace: run it in the
+   **same container** as the target, or launch its container with
+   ``--pid=container:<target>`` (or ``--pid=host``). Otherwise the target's
+   PID is not visible.
+
+   **Install (in the container) vs.** ``docker run`` **flags.** The official
+   images (``lmcache/vllm-openai``) ship none of the profilers, and the
+   default container drops the privileges each needs. These are independent:
+   the install goes *inside* the container, the flags are set *at launch*.
+
+   .. list-table::
+      :header-rows: 1
+      :widths: 20 40 40
+
+      * - Mode
+        - Install (in the container)
+        - ``docker run`` flags (at launch)
+      * - ``wall`` / ``gil`` (py-spy)
+        - ``pip install py-spy`` -- a self-contained binary, the easy case.
+        - ``--cap-add SYS_PTRACE``. Usually all that is needed; root alone is
+          *not* enough -- without the cap the attach is denied even to uid 0.
+      * - ``on-cpu`` (perf)
+        - ``linux-tools-generic``; if the wrapper says ``perf not found for
+          kernel <ver>`` call ``/usr/lib/linux-tools/*/perf`` directly (it
+          records fine across minor-version gaps).
+        - ``--security-opt seccomp=unconfined`` (default seccomp blocks
+          ``perf_event_open``) **and** ``--cap-add PERFMON`` (older Docker
+          rejects it -- use ``--cap-add SYS_ADMIN`` or ``--privileged``).
+      * - ``off-cpu`` / ``offwake`` / ``wakeup`` (bcc)
+        - ``bpfcc-tools`` **plus** the running kernel's headers
+          (``/lib/modules/$(uname -r)/build``); ``*-bpfcc`` compiles at
+          runtime, and on-disk ``/sys/kernel/btf/vmlinux`` alone does *not*
+          satisfy it (that serves the separate ``libbpf-tools``).
+        - ``--security-opt seccomp=unconfined``, ``--cap-add BPF --cap-add
+          PERFMON`` (or ``SYS_ADMIN`` / ``--privileged``), and
+          ``-v /sys/kernel/debug:/sys/kernel/debug``. eBPF is host-wide, so
+          running these on the host is often simpler.
+
+   **Host sysctls -- read-only inside, but bypassed by the flags.**
+   ``kernel.yama.ptrace_scope`` and ``kernel.perf_event_paranoid`` are
+   host-wide, not namespaced, and cannot be changed from inside a container.
+   You do **not** need to change them if you can pass the capabilities:
+   ``CAP_SYS_PTRACE`` bypasses ``ptrace_scope``, and ``CAP_PERFMON`` /
+   ``CAP_SYS_ADMIN`` bypasses ``perf_event_paranoid`` (verified: at
+   ``perf_event_paranoid=3``, ``perf_event_open`` fails with no cap and
+   succeeds with ``--cap-add SYS_ADMIN``). The host sysctl only becomes the
+   gate when you can pass *no* flags at all -- see below.
+
+   **If you cannot re-launch the container** (RunPod, many Kubernetes
+   setups): the container is started *for* you, so you cannot add
+   ``--cap-add`` / ``--privileged`` and cannot change host sysctls
+   (``perf_event_paranoid`` / ``ptrace_scope`` are read-only from inside).
+   That leaves:
+
+   * ``on-cpu`` (``perf``) and ``off-cpu`` / ``offwake`` / ``wakeup`` (bcc)
+     are effectively **unavailable** -- their gate is
+     ``perf_event_paranoid`` / ``CAP_BPF`` / ``CAP_PERFMON`` / a mounted
+     ``/sys/kernel/debug``, none grantable from inside and none tied to *who
+     launched the target*, so no in-container trick helps. (Only exception:
+     if the platform runs with a low host ``perf_event_paranoid`` and
+     permissive seccomp, ``on-cpu`` may work -- test with ``perf record -F99
+     -g -o /tmp/t -- true``; an ``Operation not permitted`` means no.)
+   * ``wall`` / ``gil`` (``py-spy``) still work **if** the pod was given
+     ``CAP_SYS_PTRACE`` (check with ``py-spy dump --pid <target>``). If it
+     was **not**, you can still profile *a process you start yourself*:
+     ``ptrace_scope`` only blocks attaching to non-descendants, so tracing
+     your own child needs no capability. Launch the target **under** py-spy
+     instead of attaching to it:
+
+     .. code-block:: bash
+
+        # equivalent of `--mode gil`, but py-spy launches (and so may trace)
+        # the target as its own child; --subprocesses follows forked workers
+        py-spy record --rate 200 --format flamegraph --threads --idle --gil \
+            --subprocesses --duration 30 -o /workspace/flame.svg \
+            -- <the target launch command>
+
+     Drop ``--gil`` for the ``wall`` view, or use ``--format speedscope`` to
+     open the run as an interactive flame *chart* at
+     https://www.speedscope.app. Note ``lmcache tool flamegraph --pid`` is
+     attach-only and cannot use this path; run ``py-spy`` directly.
 
 **Cost of recording.** Those mechanisms give each mode a different cost
 *shape*:
@@ -318,17 +384,13 @@ on a busy target than the bcc modes, whose cost climbs with the very event
 rate a busy server has most of.
 
 **Native stacks need frame pointers.** All four whole-process modes unwind
-user-space native stacks through frame pointers -- ``perf`` (``on-cpu``)
-via ``perf record -g``, and bcc (``off-cpu`` / ``offwake`` / ``wakeup``)
-via the kernel's ``bpf_get_stackid`` helper. Code built with
-``-fomit-frame-pointer`` (the default in many optimized builds, including
-some Python C extensions and system libraries) has none, so its native
-frames appear broken or truncated in *any* of these modes -- a graph of a
-server whose extensions lack frame pointers shows shallow or missing C
-stacks. Switching between ``perf`` and bcc does not help; rebuild the
-target with ``-fno-omit-frame-pointer`` for full native stacks. The py-spy
-modes (``wall`` / ``gil``) are unaffected -- they read Python frames from
-the interpreter, not the native stack -- but they see only Python, never C.
+native stacks through frame pointers -- ``perf`` via ``perf record -g``,
+bcc via ``bpf_get_stackid`` -- so a target built with
+``-fomit-frame-pointer`` (common in optimized builds and some C extensions)
+shows broken or shallow C stacks in *any* of them, and switching perf↔bcc
+does not help. Rebuild with ``-fno-omit-frame-pointer`` for full native
+stacks. The py-spy modes are unaffected -- they read the interpreter, not
+the native stack -- but see only Python.
 
 **Built on.** These modes are thin wrappers around three excellent
 open-source profilers, plus Linux ``perf``. When a required tool is
