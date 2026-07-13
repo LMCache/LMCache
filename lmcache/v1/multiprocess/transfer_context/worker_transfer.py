@@ -649,32 +649,42 @@ class EngineDrivenTransferContext(TransferContext):
             # ``(g_idx, mq_future)``.  We dispatch all 4 groups in
             # parallel, then collect MQ futures for the final join.
             serialized_futs: dict[int, "Future"] = {}
-            for g_idx, chunks in active:
-                serialized_futs[g_idx] = self._serialize_pool.submit(
-                    _serialize_and_submit,
-                    g_idx,
-                    chunks,
-                )
-            for g_idx, fut in serialized_futs.items():
-                _, mq_fut = fut.result()
-                mq_futures[g_idx] = mq_fut
-            # Now collect all responses -- any per-group failure marks the
-            # overall store as failed, but the rest still complete.
-            for fut in mq_futures:
-                if fut is None:
-                    continue
-                try:
-                    group_ok = bool(
-                        fut.result(timeout=self._engine_driven_context.mq_timeout)
+            try:
+                for g_idx, chunks in active:
+                    serialized_futs[g_idx] = self._serialize_pool.submit(
+                        _serialize_and_submit,
+                        g_idx,
+                        chunks,
                     )
-                except TimeoutError:
-                    group_ok = False
-                ok = ok and group_ok
-            # Return pinned buffers to the pool now that serialize+send is
-            # done -- subsequent calls reuse them without re-locking pages.
-            for group_chunks_list in group_chunks:
-                if group_chunks_list:
-                    self._pinned_pool.release(group_chunks_list)
+                for g_idx, fut in serialized_futs.items():
+                    _, mq_fut = fut.result()
+                    mq_futures[g_idx] = mq_fut
+                # Now collect all responses -- any per-group failure marks
+                # the overall store as failed, but the rest still complete.
+                for fut in mq_futures:
+                    if fut is None:
+                        continue
+                    try:
+                        group_ok = bool(
+                            fut.result(timeout=self._engine_driven_context.mq_timeout)
+                        )
+                    except TimeoutError:
+                        group_ok = False
+                    ok = ok and group_ok
+            finally:
+                # Always return pinned buffers to the pool -- even when a
+                # serialize thread raised.  Otherwise every failed store
+                # permanently strips the pool of the full chunk set
+                # (potentially many GiB of page-locked host RAM).
+                # First make sure no serialize thread is still reading the
+                # buffers; Future.exception() blocks until done without
+                # re-raising.
+                for fut in serialized_futs.values():
+                    if not fut.done():
+                        fut.exception()
+                for group_chunks_list in group_chunks:
+                    if group_chunks_list:
+                        self._pinned_pool.release(group_chunks_list)
         else:
             # ── Single-group path (backward compatible) ──────────────────
             result = self._engine_driven_context.prepare_store(key, instance_id)
