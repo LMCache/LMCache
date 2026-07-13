@@ -52,16 +52,6 @@ class RequestType(enum.Enum):
     UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT = enum.auto()
     PREPARE_STORE = enum.auto()
     COMMIT_STORE = enum.auto()
-    # Multi-group engine-driven store: one message per group to avoid
-    # the 4 GiB msgspec msgpack bin limit when groups are large.
-    # Payload: [key, instance_id, group_idx, cpu_data]
-    COMMIT_STORE_GROUP = enum.auto()
-    # Delta-store: like COMMIT_STORE_GROUP, but the worker already knows
-    # that the first ``skip_count`` chunks for this group are in L2
-    # (from the prior ``lookup``). The server writes only the chunks
-    # provided in ``cpu_data`` at offset ``skip_count``.
-    # Payload: [key, instance_id, group_idx, skip_count, cpu_data]
-    COMMIT_STORE_GROUP_DELTA = enum.auto()
     PREPARE_RETRIEVE = enum.auto()
     COMMIT_RETRIEVE = enum.auto()
 
@@ -93,6 +83,26 @@ class RequestType(enum.Enum):
     CB_UNREGISTER_ROPE_V3 = enum.auto()
     CB_RETRIEVE_PRE_COMPUTED_V3 = enum.auto()
     CB_UNIFIED_LOOKUP = enum.auto()
+
+    # ---------------------------------------------------------------
+    # Multi-group engine-driven transfer.
+    #
+    # IMPORTANT: RequestType is msgspec-encoded BY VALUE on the wire.
+    # New members must always be appended at the END of this enum;
+    # inserting them in the middle renumbers every following member
+    # and silently breaks wire compatibility between client and
+    # server builds of different versions.
+    # ---------------------------------------------------------------
+    # Multi-group engine-driven store: one message per group to avoid
+    # the 4 GiB msgspec msgpack bin limit when groups are large.
+    # Payload: [key, instance_id, group_idx, cpu_data]
+    COMMIT_STORE_GROUP = enum.auto()
+    # Delta-store: like COMMIT_STORE_GROUP, but the worker already knows
+    # that the first ``skip_count`` chunks for this group are in L2
+    # (from the prior ``lookup``). The server writes only the chunks
+    # provided in ``cpu_data`` at offset ``skip_count``.
+    # Payload: [key, instance_id, group_idx, skip_count, cpu_data]
+    COMMIT_STORE_GROUP_DELTA = enum.auto()
 
 
 @dataclass
