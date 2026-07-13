@@ -51,6 +51,8 @@ class DeviceSpec:
 
     # Cached pin-memory backend instance (lazy-initialized).
     _pin_backend_cache: PinMemoryBackend | None = None
+    # Cached DeviceOps instance (lazy-initialized).
+    _ops_cache: DeviceOps | None = None
 
     @property
     def device_type(self) -> str:
@@ -87,6 +89,20 @@ class DeviceSpec:
         from lmcache.v1.platform.base_device_ops import DeviceOps
 
         return DeviceOps
+
+    def get_ops(self) -> DeviceOps:
+        """Return the cached :class:`DeviceOps` instance for this spec.
+
+        Lazy-initialized on first access, mirroring :meth:`_get_pin_backend`.
+        The instance is cached on the spec so callers hitting the same spec
+        always get the same singleton, and any state set on it (native
+        handles, cached lookups) is shared across the process.
+        """
+        ops = self._ops_cache
+        if ops is None:
+            ops = self.ops_cls()
+            self._ops_cache = ops
+        return ops
 
     def is_available(self) -> bool:
         """Return ``True`` when the device is usable on this system.

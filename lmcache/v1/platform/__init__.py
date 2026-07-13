@@ -57,24 +57,19 @@ logger = init_logger(__name__)
 # ---------------------------------------------------------------------------
 # Resolve device ops
 # ---------------------------------------------------------------------------
-def resolve_device_ops_cls(device_type: str) -> type[DeviceOps]:
-    """Resolve the ``DeviceOps`` class for *device_type*.
+def _resolve_spec(device_type: str) -> DeviceSpec:
+    """Resolve the :class:`DeviceSpec` for *device_type*.
 
-    Args:
-        device_type: Device type string such as ``"cuda"`` or ``"cpu"``.
-
-    Returns:
-        The resolved :class:`DeviceOps` subclass for the requested device.
-        ``"cpu"`` normally resolves through :class:`CpuDeviceSpec`, while
-        ``""`` uses the bare :class:`DeviceSpec` fallback. If tests or
-        CLI-only fallback paths deliberately remove the CPU spec from the
-        registry to exercise or simulate the minimal baseline path, ``"cpu"``
-        also falls back to the bare baseline.
+    ``"cpu"`` normally resolves through :class:`CpuDeviceSpec`, while
+    ``""`` uses the bare :class:`DeviceSpec` fallback. If tests or CLI-only
+    fallback paths deliberately remove the CPU spec from the registry to
+    exercise or simulate the minimal baseline path, ``"cpu"`` also falls
+    back to the bare baseline.
 
     Raises:
-        RuntimeError: If an accelerator device has no registered
-            :class:`DeviceSpec`, since silently falling back to the torch
-            baseline on accelerator hardware would mask configuration errors.
+        RuntimeError: If an accelerator device has no registered spec,
+            since silently falling back to the torch baseline on accelerator
+            hardware would mask configuration errors.
     """
     spec = _DEVICE_REGISTRY.get(device_type)
     if spec is None:
@@ -87,28 +82,33 @@ def resolve_device_ops_cls(device_type: str) -> type[DeviceOps]:
                 "accelerator hardware. Ensure the platform sub-package for this "
                 "device is importable and defines a DeviceSpec with ops_cls."
             )
+    return spec
 
-    return spec.ops_cls
 
+def resolve_device_ops_cls(device_type: str) -> type[DeviceOps]:
+    """Resolve the ``DeviceOps`` class for *device_type*.
 
-# Per-device singleton :class:`DeviceOps` instance cache.
-_DEVICE_OPS_INSTANCES: dict[str, DeviceOps] = {}
+    Args:
+        device_type: Device type string such as ``"cuda"`` or ``"cpu"``.
+
+    Returns:
+        The resolved :class:`DeviceOps` subclass for the requested device.
+        See :func:`_resolve_spec` for resolution / error semantics.
+    """
+    return _resolve_spec(device_type).ops_cls
 
 
 def resolve_device_ops(device_type: str) -> DeviceOps:
     """Resolve the :class:`DeviceOps` **instance** for *device_type*.
 
-    Returns a cached singleton. Callers hitting the same *device_type*
-    twice always get the same instance, so any state set on it (native
-    handles, cached lookups) is shared across the process.
+    Returns a cached singleton via :meth:`DeviceSpec.get_ops`. Callers
+    hitting the same *device_type* twice always get the same instance, so
+    any state set on it (native handles, cached lookups) is shared across
+    the process.
 
-    See :func:`resolve_device_ops_cls` for parameter / error semantics.
+    See :func:`_resolve_spec` for resolution / error semantics.
     """
-    ops = _DEVICE_OPS_INSTANCES.get(device_type)
-    if ops is None:
-        ops = resolve_device_ops_cls(device_type)()
-        _DEVICE_OPS_INSTANCES[device_type] = ops
-    return ops
+    return _resolve_spec(device_type).get_ops()
 
 
 torch_dev, torch_device_type = get_torch_device()
