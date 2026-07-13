@@ -642,6 +642,13 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         group_chunk_list = deserialized[0]
         # Storage backend format: pickled list of CPU tensors (no extra
         # tag wrapping). Use HIGHEST_PROTOCOL for faster storage I/O.
+        #
+        # TODO(perf/P1): this dumps + the strategy's immediate
+        # pickle.loads are two full in-process serialization passes over
+        # up to 4 GiB per group. A TransferStrategy API that accepts
+        # ``list[torch.Tensor]`` directly (e.g. commit_store_tensors)
+        # would eliminate both; same applies to commit_store_group_delta
+        # and _commit_store_multi_group below.
         storage_payload = pickle.dumps(
             group_chunk_list,
             protocol=pickle.HIGHEST_PROTOCOL,
