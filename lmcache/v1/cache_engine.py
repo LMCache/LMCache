@@ -31,7 +31,7 @@ import torch
 from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
 from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
-from lmcache.usage_telemetry import InitializeUsageContext
+from lmcache.usage_telemetry.non_mp import InitializeUsageContext
 from lmcache.utils import (
     CacheEngineKey,
     CacheStoreEvent,

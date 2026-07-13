@@ -567,10 +567,13 @@ Anonymous Usage Statistics
 At startup the MP server sends a one-time anonymous usage report to the
 LMCache stats server: an environment snapshot (cloud provider, CPU/GPU,
 memory) and a configuration snapshot (chunk size, transfer mode, L1
-size/medium, L2 adapter types, policies). No prompts, keys, KV-cache data,
-model names, or the server's ``--instance-id`` are ever sent; reports are
-correlated only through random UUIDs. Reporting runs on a background
-thread, never delays startup, and a failure anywhere in reporting never
+size/medium, L2 adapter types, policies). While running, it also sends
+anonymous interval counters (tokens retrieved/stored and bytes stored in
+the last interval, plus uptime) every ``LMCACHE_USAGE_TRACK_INTERVAL``
+seconds (default 600). No prompts, keys, KV-cache data, model names, or
+the server's ``--instance-id`` are ever sent; reports are correlated only
+through random UUIDs. Reporting runs on background threads, never delays
+startup or request handling, and a failure anywhere in reporting never
 affects serving.
 
 To opt out, set ``LMCACHE_TRACK_USAGE=false`` or ``DO_NOT_TRACK=1``. See
