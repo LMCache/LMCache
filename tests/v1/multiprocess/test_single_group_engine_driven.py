@@ -317,6 +317,54 @@ def test_multi_group_retrieve_partial_miss_is_overall_miss(monkeypatch):
     assert fake.count("commit_retrieve") == 1
 
 
+def test_multi_group_retrieve_scatter_failure_degrades_to_miss(monkeypatch):
+    """A grain mismatch in scatter must degrade to a cache miss, never
+    propagate (an exception here would tear down the vLLM engine core)."""
+    ctx, fake = _make_ctx(num_groups=2)
+    fake.retrieve_groups = {
+        0: [torch.randn(2, 1, 16, 8)],
+        1: [torch.randn(1, 1, 32, 4)],
+    }
+
+    def raising_scatter(*args, **kwargs):
+        raise ValueError(
+            "block_ids length (2) must be at least len(chunks) (2) "
+            "* blocks_per_chunk (4)"
+        )
+
+    monkeypatch.setattr(wt, "scatter_cpu_multi_group_to_paged_kv", raising_scatter)
+    future = ctx.submit_retrieve(
+        "req-8",
+        key="key-8",
+        instance_id=7,
+        kv_caches={"0": torch.zeros(2, 4, 16, 8), "1": torch.zeros(2, 4, 32, 4)},
+        block_ids=[[0, 1], [0, 1]],
+        _event=None,
+        blocks_in_chunk=2,
+    )
+    assert future.result(timeout=1.0) is False  # miss, no crash
+    assert fake.count("commit_retrieve") == 1
+
+
+def test_single_group_prepare_retrieve_failure_degrades_to_miss():
+    ctx, fake = _make_ctx(num_groups=1)
+
+    def raising_prepare(key, instance_id):
+        raise RuntimeError("corrupt pickle blob")
+
+    fake.prepare_retrieve = raising_prepare  # type: ignore[method-assign]
+    future = ctx.submit_retrieve(
+        "req-9",
+        key="key-9",
+        instance_id=7,
+        kv_caches={"0": torch.zeros(2, 4, 16, 8)},
+        block_ids=[[0, 1]],
+        _event=None,
+        blocks_in_chunk=2,
+    )
+    assert future.result(timeout=1.0) is False
+
+
 # ─── Test 4: multi-group store releases pinned buffers on failure ────────────
 
 
