@@ -182,13 +182,26 @@ def slice_block_ids_per_group(
                 f"{tokens_per_block}"
             )
         group_block_ids = allocated_block_ids.get(engine_group_idx, [])
-        sliced.append(
-            list(
-                group_block_ids[
-                    start_token_idx // tokens_per_block : end_token_idx
-                    // tokens_per_block
-                ]
+        end_block = end_token_idx // tokens_per_block
+        if len(group_block_ids) < end_block:
+            # A silently short slice is exactly what masks a grain
+            # mismatch (tokens_per_block not matching the scheduler's
+            # block-ID grain, e.g. raw spec block_size under context
+            # parallelism where the scheduler reports virtual blocks).
+            # It later detonates far away in gather/scatter with a
+            # confusing block-count error -- or worse, silently stores
+            # mis-keyed chunk data. Fail loudly at the source instead.
+            raise ValueError(
+                f"group {engine_group_idx}: token range "
+                f"[{start_token_idx}, {end_token_idx}) needs {end_block} "
+                f"block IDs at tokens_per_block {tokens_per_block}, but "
+                f"only {len(group_block_ids)} are allocated. The group's "
+                f"tokens_per_block likely does not match the scheduler's "
+                f"block-ID grain (virtual blocks under context "
+                f"parallelism?)."
             )
+        sliced.append(
+            list(group_block_ids[start_token_idx // tokens_per_block : end_block])
         )
     return sliced
 
