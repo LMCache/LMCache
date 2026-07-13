@@ -611,7 +611,6 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         by ``dev23`` stay readable).
         """
         entry, strategy = self._resolve_for_transfer(instance_id)
-        entry, strategy = self._resolve_for_transfer(instance_id)
         if not entry.metadata.is_multi_group:
             logger.error(
                 "commit_store_group called for non-multi-group context "
@@ -699,7 +698,6 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         the server just no-ops the storage write -- saving 14 GiB of
         zmq traffic on the re-run of a cached prompt.
         """
-        entry, strategy = self._resolve_for_transfer(instance_id)
         entry, strategy = self._resolve_for_transfer(instance_id)
         if not entry.metadata.is_multi_group:
             logger.error(

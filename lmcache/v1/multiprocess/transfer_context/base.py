@@ -552,7 +552,6 @@ def create_engine_driven_context(
     Returns:
     A concrete :class:`EngineDrivenContext` instance.
     """
-    use_pickle = use_pickle  # re-bind so local assignment below doesn't raise
     if metadata.is_multi_group:
         use_pickle = True
         logger.info(
