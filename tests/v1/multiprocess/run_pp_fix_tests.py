@@ -668,7 +668,25 @@ check("p2p_controller documents extra_count=0 is correct (single-reader)",
       "P2P transfers are single-reader" in p2p_src)
 blend_v2_src = (ROOT / "lmcache/v1/multiprocess/modules/blend.py").read_text()
 check("blend v2 documents extra_count limitation",
-      "v2 blend does not carry tp_size" in blend_v2_src)
+      "v2 blend" in blend_v2_src and "extra_count" in blend_v2_src)
+
+# Verify e2e GPU test script exists
+e2e_script = ROOT / "tests/v1/multiprocess/test_e2e_gpu_pp_mla.sh"
+check("e2e GPU test script exists", e2e_script.is_file())
+if e2e_script.is_file():
+    e2e_src = e2e_script.read_text()
+    check("e2e script tests TP=2 PP=2",
+          "--tensor-parallel-size 2" in e2e_src and "--pipeline-parallel-size 2" in e2e_src)
+    check("e2e script tests Kimi K2 (MLA)",
+          "Kimi-K2" in e2e_src)
+    check("e2e script tests GLM-4.6 (MLA)",
+          "GLM-4.6" in e2e_src)
+    check("e2e script detects ROCm",
+          "torch.version.hip" in e2e_src)
+    check("e2e script detects NVIDIA CUDA",
+          "torch.cuda.is_available" in e2e_src)
+    check("e2e script uses LMCacheMPConnector",
+          "LMCacheMPConnector" in e2e_src)
 
 # --------------------------------------------------------------------------- #
 print()
