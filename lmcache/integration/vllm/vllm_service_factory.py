@@ -198,13 +198,19 @@ class VllmServiceFactory(BaseServiceFactory):
 
             tpg = get_tp_group()
             # First Party
-            from lmcache.integration.vllm.utils import vllm_layout_hints
+            from lmcache.integration.vllm.utils import (
+                read_explicit_kv_layout_from_config,
+                vllm_layout_hints,
+            )
 
+            explicit_kv_layout = read_explicit_kv_layout_from_config(
+                getattr(self.vllm_config, "kv_transfer_config", None)
+            )
             vllm_gpu_connector = CreateGPUConnector(
                 self.lmcache_config,
                 self.metadata,
                 EngineType.VLLM,
-                layout_hints=vllm_layout_hints(),
+                layout_hints=vllm_layout_hints(explicit_kv_layout),
             )
 
         engine = LMCacheEngineBuilder.get_or_create(

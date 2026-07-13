@@ -108,13 +108,16 @@ class VLLM_Detector(EngineDetector):
             kv_caches
         )
 
-        # vLLM's CPU attention backend stores KV in HND but misreports it, so
-        # force HND there; otherwise honor the hint, defaulting to NHD.
+        # vLLM's x86 CPU attention backend stores KV in HND but misreports it,
+        # so CPU defaults to HND. However, other host-memory backends that also
+        # present as the "cpu" torch device -- notably vLLM's Apple Metal
+        # (vllm-metal) plugin, whose MLX unified-memory KV cache is NHD -- must
+        # be able to override that. An explicit ``layout_hints["kv_layout"]``
+        # therefore always wins; only when no hint is supplied does CPU fall
+        # back to HND (and every other device to NHD).
         kv_layout = layout_hints.get("kv_layout")
-        if torch_device_type == "cpu":
-            kv_layout = "HND"
-        elif kv_layout is None:
-            kv_layout = "NHD"
+        if kv_layout is None:
+            kv_layout = "HND" if torch_device_type == "cpu" else "NHD"
         is_hnd = kv_layout == "HND"
 
         if list_depth == 0:
