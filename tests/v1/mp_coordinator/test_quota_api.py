@@ -105,6 +105,82 @@ def test_zero_limit_accepted():
         assert data["quota_limit_gb"] == 0.0
 
 
+# -- Quota config (default limit for unquota'd salts) --------------------------
+
+
+def test_quota_config_defaults_to_null():
+    """Boot state: no default configured — unquota'd salts are exempt."""
+    with _client() as client:
+        resp = client.get("/quota/config")
+        assert resp.status_code == 200
+        assert resp.json() == {"default_limit_gb": None}
+
+
+def test_quota_config_set_and_read_back():
+    with _client() as client:
+        resp = client.put("/quota/config", json={"default_limit_gb": 0})
+        assert resp.status_code == 200
+        assert resp.json() == {"default_limit_gb": 0.0}
+        assert client.get("/quota/config").json() == {"default_limit_gb": 0.0}
+
+
+def test_quota_config_positive_value_round_trips():
+    with _client() as client:
+        client.put("/quota/config", json={"default_limit_gb": 2.5})
+        data = client.get("/quota/config").json()
+        assert abs(data["default_limit_gb"] - 2.5) < 1e-6
+
+
+def test_quota_config_resettable_to_null():
+    with _client() as client:
+        client.put("/quota/config", json={"default_limit_gb": 0})
+        resp = client.put("/quota/config", json={"default_limit_gb": None})
+        assert resp.status_code == 200
+        assert resp.json() == {"default_limit_gb": None}
+
+
+def test_quota_config_negative_rejected():
+    with _client() as client:
+        resp = client.put("/quota/config", json={"default_limit_gb": -1.0})
+        assert resp.status_code == 422
+
+
+def test_quota_config_path_not_captured_as_salt():
+    """``config`` is a fixed route, not a ``cache_salt`` — setting the
+    default must not create a quota entry named ``config``."""
+    with _client() as client:
+        client.put("/quota/config", json={"default_limit_gb": 1.0})
+        assert client.get("/quota/config").json() == {"default_limit_gb": 1.0}
+        salts = {e["cache_salt"] for e in client.get("/quota").json()["by_cache_salt"]}
+        assert "config" not in salts
+
+
+def test_quota_config_arms_unquotad_eviction_flow():
+    """End-to-end controller flow: unquota'd usage is exempt until the
+    default flips to 0, while explicit quotas work throughout."""
+    with _client() as client:
+        # Usage arrives for two tenants; only user-a gets a quota.
+        client.post(
+            "/quota/events",
+            json=_events_body(
+                [
+                    _store("user-a", 1000, h="01"),
+                    _store("user-b", 2000, h="02"),
+                ]
+            ),
+        )
+        client.put("/quota/user-a", json={"limit_gb": 10.0})
+
+        # Boot state: default null — user-b is exempt (nothing to assert
+        # via HTTP beyond config state; eviction-plan behavior is covered
+        # in test_eviction_manager.py).
+        assert client.get("/quota/config").json() == {"default_limit_gb": None}
+
+        # Controller arms allowlist enforcement.
+        resp = client.put("/quota/config", json={"default_limit_gb": 0})
+        assert resp.json() == {"default_limit_gb": 0.0}
+
+
 # -- Usage event ingestion ---------------------------------------------------
 
 

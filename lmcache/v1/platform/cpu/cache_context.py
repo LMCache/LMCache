@@ -71,6 +71,7 @@ class CPUCacheContext(BaseCacheContext):
         engine_group_infos: "Sequence[EngineGroupInfo]" = (),
         engine_type: EngineType = EngineType.VLLM,
         separate_object_groups: bool = True,
+        full_sw_kv: bool = False,
     ) -> None:
         if not kv_caches:
             raise ValueError(
@@ -109,6 +110,11 @@ class CPUCacheContext(BaseCacheContext):
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
             separate_object_groups=separate_object_groups,
         )
+        # Set full_sw_kv before the temp buffer / object groups are sized so
+        # both use the full (un-windowed) per-chunk geometry (mirrors
+        # GPUCacheContext).
+        if full_sw_kv:
+            kv_layer_groups_manager.enable_full_sw_kv()
 
         # Pre-allocated block IDs buffer (CPU).
         _MAX_BLOCK_IDS = 1_000_000

@@ -2,15 +2,15 @@
 """XPU (Intel SYCL) platform helpers."""
 
 # First Party
-from lmcache.v1.platform.base_device_info import DeviceInfo
+from lmcache.v1.platform.base_device_spec import DeviceSpec
 
 # ---------------------------------------------------------------------------
 # Device detection registry entry
 # ---------------------------------------------------------------------------
 
 
-class XpuDeviceInfo(DeviceInfo):
-    """XPU device information for the detection registry."""
+class XpuDeviceSpec(DeviceSpec):
+    """XPU device specification for the detection registry."""
 
     @property
     def device_type(self) -> str:

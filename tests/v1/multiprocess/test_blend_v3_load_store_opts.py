@@ -233,8 +233,8 @@ def _build_fake_gpu_context(batch_size: int, num_groups: int):
     gpu_context.kv_layer_groups_manager.num_kernel_groups = num_groups
     # All groups: uncompressed (tokens_per_block == slots_per_block), kv_size=2.
     groups = [
-        SimpleNamespace(tokens_per_block=4, slots_per_block=4)
-        for _ in range(num_groups)
+        SimpleNamespace(tokens_per_block=4, slots_per_block=4, engine_group_idx=idx)
+        for idx in range(num_groups)
     ]
     gpu_context.kv_layer_groups_manager.kernel_groups = groups
 
@@ -258,8 +258,11 @@ def test_batched_rope_calls_kernel_per_group_per_slot():
     from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
 
     gpu_context, head_size = _build_fake_gpu_context(batch_size=4, num_groups=2)
-    rope_state = SimpleNamespace(
-        head_size=head_size, cos_sin_cache=MagicMock(), is_neox_style=True
+    rope_state = v3_mod._CBRopeState(
+        head_size=head_size,
+        is_neox_style=True,
+        cos_sin_caches=[MagicMock()],
+        group_to_cache=[],
     )
 
     eng = MagicMock(spec=v3_mod.BlendV3Module)
@@ -304,8 +307,11 @@ def test_batched_rope_noop_on_empty_slots():
     from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
 
     gpu_context, head_size = _build_fake_gpu_context(batch_size=2, num_groups=2)
-    rope_state = SimpleNamespace(
-        head_size=head_size, cos_sin_cache=MagicMock(), is_neox_style=False
+    rope_state = v3_mod._CBRopeState(
+        head_size=head_size,
+        is_neox_style=False,
+        cos_sin_caches=[MagicMock()],
+        group_to_cache=[],
     )
     eng = MagicMock(spec=v3_mod.BlendV3Module)
     eng._apply_cb_rope_batched = v3_mod.BlendV3Module._apply_cb_rope_batched.__get__(
@@ -448,3 +454,115 @@ def test_non_overlapping_after_prefix():
     # usable 10-18 in the greedy pass (dedup-first would drop both -> []).
     out = f([m(5, 13), m(10, 18)], 8)
     assert [r.cur_st for r in out] == [10]
+
+
+# ---------------------------------------------------------------------------
+# Dual-RoPE: per-group cache selection + registration validation
+# ---------------------------------------------------------------------------
+
+
+def test_cache_for_group_uniform_and_mapped():
+    """Empty map -> every group uses cache 0; a map indexes per group;
+    a group past the map's end raises instead of guessing."""
+    # First Party
+    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+
+    local, global_ = MagicMock(), MagicMock()
+
+    uniform = v3_mod._CBRopeState(
+        head_size=32, is_neox_style=True, cos_sin_caches=[local], group_to_cache=[]
+    )
+    assert uniform.cache_for_group(0) is local
+    assert uniform.cache_for_group(5) is local
+
+    mapped = v3_mod._CBRopeState(
+        head_size=32,
+        is_neox_style=True,
+        cos_sin_caches=[local, global_],
+        group_to_cache=[0, 1],
+    )
+    assert mapped.cache_for_group(0) is local
+    assert mapped.cache_for_group(1) is global_
+    with pytest.raises(RuntimeError, match="no rope cache mapping"):
+        mapped.cache_for_group(2)
+
+
+def _rope_registration_engine(engine_group_indices: list[int]):
+    """A BlendV3Module mock with ``cb_register_rope`` bound and a registered
+    instance whose kernel groups span the given engine group indices."""
+    # First Party
+    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+
+    eng = MagicMock(spec=v3_mod.BlendV3Module)
+    eng._cb_rope_state = {}
+    eng._transfer_module = MagicMock()
+    entry = SimpleNamespace(
+        cache_context=SimpleNamespace(
+            kv_layer_groups_manager=SimpleNamespace(
+                kernel_groups=[
+                    SimpleNamespace(engine_group_idx=idx)
+                    for idx in engine_group_indices
+                ]
+            )
+        )
+    )
+    eng._transfer_module.get_and_touch_context_entry.return_value = entry
+    eng.cb_register_rope = v3_mod.BlendV3Module.cb_register_rope.__get__(eng)
+    return eng
+
+
+def _unit_rope_cache_ipc():
+    """An IPC-wrapper mock whose tensor has unit magnitude (cos=1, sin=0),
+    so registration skips mscale normalization."""
+    # Third Party
+    import torch
+
+    cache = torch.zeros(4, 8)
+    cache[:, :4] = 1.0
+    ipc = MagicMock()
+    ipc.to_tensor.return_value = cache
+    return ipc
+
+
+def test_register_rope_dual_cache_round_trip():
+    """Two caches + a full engine-group map register and land in rope state."""
+    eng = _rope_registration_engine(engine_group_indices=[0, 1])
+
+    eng.cb_register_rope(
+        instance_id=7,
+        cos_sin_caches_ipc=[_unit_rope_cache_ipc(), _unit_rope_cache_ipc()],
+        head_size=8,
+        is_neox_style=True,
+        group_to_cache=[0, 1],
+    )
+
+    state = eng._cb_rope_state[7]
+    assert len(state.cos_sin_caches) == 2
+    assert state.group_to_cache == [0, 1]
+    assert state.cache_for_group(1) is state.cos_sin_caches[1]
+
+
+def test_register_rope_rejects_invalid_group_to_cache():
+    """Out-of-range / negative cache indices and a map that does not cover
+    every engine group of the registered model are rejected."""
+    eng = _rope_registration_engine(engine_group_indices=[0, 1])
+    caches = [_unit_rope_cache_ipc(), _unit_rope_cache_ipc()]
+
+    with pytest.raises(ValueError, match="outside"):
+        eng.cb_register_rope(1, caches, 8, True, group_to_cache=[0, 2])
+    with pytest.raises(ValueError, match="outside"):
+        eng.cb_register_rope(1, caches, 8, True, group_to_cache=[-1, 0])
+    # Model has engine groups {0, 1} but the map only covers group 0.
+    with pytest.raises(ValueError, match="engine groups up to index 1"):
+        eng.cb_register_rope(1, caches, 8, True, group_to_cache=[0])
+    with pytest.raises(ValueError, match=">=1 cos/sin cache"):
+        eng.cb_register_rope(1, [], 8, True, group_to_cache=[])
+
+
+def test_register_rope_requires_registered_instance():
+    """CB_REGISTER_ROPE_V3 before REGISTER_KV_CACHE is rejected."""
+    eng = _rope_registration_engine(engine_group_indices=[0])
+    eng._transfer_module.get_and_touch_context_entry.return_value = None
+
+    with pytest.raises(ValueError, match="no paged KV cache registered"):
+        eng.cb_register_rope(1, [_unit_rope_cache_ipc()], 8, True, group_to_cache=[])

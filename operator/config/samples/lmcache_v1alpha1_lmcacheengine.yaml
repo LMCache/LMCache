@@ -67,6 +67,21 @@ spec:
   #   prefetchPolicy: default     # default
   #   prefetchMaxInFlight: 8      # default, max concurrent L2->L1 loads
 
+  # -- Connection-injection webhook defaults (optional) --
+  # The mutating webhook always wires opted-in vLLM pods to this engine
+  # (--kv-transfer-config, hostIPC, PYTHONHASHSEED). Set injection.payloadImage to
+  # ALSO stage an lmcache code tree into the vLLM container (emptyDir + init
+  # container + read-only mount + PYTHONPATH), pinning vLLM's lmcache to a
+  # specific build so client and server match. Leave unset for connection-only.
+  # injection:
+  #   payloadImage:                 # SEPARATE image: ships lmcache under /payload,
+  #     repository: registry.example.com/lmcache/lmcache-payload  # REQUIRED (no default)
+  #     tag: pinned                 # default: latest
+  #     pullPolicy: IfNotPresent    # Always | Never | IfNotPresent
+  #   imagePullSecrets:             # for a private payload image
+  #     - name: lmcache-payload-pull
+  #   targetContainer: vllm         # default: first container
+
   # -- Resource overrides (auto-computed from l1.sizeGB if omitted) --
   # resourceOverrides:
   #   requests:

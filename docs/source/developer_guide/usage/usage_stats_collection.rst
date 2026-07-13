@@ -10,16 +10,55 @@ A sanitized subset of the aggregated data may be publicly released for the commu
 What data is collected?
 -----------------------
 
-Usage stats are emitted as three message types, implemented in ``usage_context.py``:
+Usage stats are implemented in the ``lmcache/usage_telemetry/`` package. The
+one-shot messages sent at startup depend on how LMCache runs.
 
-- **EnvMessage**  
-  Captures environment details such as cloud provider, CPU info, total memory, architecture, GPU count/type, and execution source.  
+When LMCache runs **inside the serving engine** (the single-process
+integrations for vLLM, SGLang, and TensorRT-LLM), engine startup sends:
 
-- **EngineMessage**  
-  Records engine configuration and metadata, including cache settings (chunk size, local device, cache limits), remote backend parameters, blending settings, model name, world size, and KV-cache dtype/shape.  
+- **EnvMessage**
+  Captures environment details such as cloud provider, CPU info, total memory, architecture, GPU count/type, and execution source.
 
-- **MetadataMessage**  
+- **EngineMessage**
+  Records engine configuration and metadata, including cache settings (chunk size, local device, cache limits), remote backend parameters, blending settings, model name, world size, and KV-cache dtype/shape.
+
+- **MetadataMessage**
   Reports execution metadata: the timestamp when the run started and total duration in seconds.
+
+When LMCache runs as a **standalone multiprocess (MP) cache server**
+(``lmcache server``), server startup sends:
+
+- **EnvMessage**
+  Same environment snapshot as above, taken on the cache-server host.
+
+- **MPServerMessage**
+  Records the server configuration: LMCache version, chunk size, hash
+  algorithm, engine type, transfer mode, worker pool sizes, whether P2P is
+  enabled, L1 size and medium (DRAM / GDS / DRAM+DevDAX), eviction policy,
+  the configured L2 adapter and serde types, and the L2 store/prefetch
+  policies.
+
+  The MP server's ``--instance-id`` is **never** sent: it can be
+  operator-chosen and therefore identifying. Model names are not known at
+  server startup (vLLM instances register later) and are not part of this
+  message.
+
+In addition to the one-shot messages above, a continuous reporter periodically
+sends interval counters (**ContinuousContextMessage**: tokens stored/hit and
+stored KV bytes in the interval) and a cache-lifespan histogram
+(**CacheLifespanMessage**). The flush interval is controlled by
+``LMCACHE_USAGE_TRACK_INTERVAL`` (seconds, default 600).
+
+Every payload carries four common fields:
+
+- ``session_id`` -- a random UUID minted once per process, joining the
+  one-shot context with the continuous messages of the same run.
+- ``machine_id`` -- a random UUID persisted at
+  ``~/.config/lmcache/machine_id``, grouping sessions from the same machine.
+  It is never derived from hardware identifiers (MAC address, hostname).
+- ``schema_version`` -- the version of the message schema.
+- ``deployment_mode`` -- ``single_process`` (LMCache inside the serving
+  engine) or ``mp_server`` (standalone MP cache server).
 
 These messages are serialized to JSON and POSTed to the LMCache usage server.
 
@@ -55,13 +94,48 @@ If you enable **local logging**, usage messages are appended to your specified l
 Configuration & Opt-out
 -----------------------
 
-By default, usage tracking is **enabled**. To disable all usage stats collection, set the environment variable:
+By default, usage tracking is **enabled**. Any one of the following opt-outs
+disables all usage stats collection:
 
 .. code-block:: bash
 
+   # LMCache-specific opt-out
    export LMCACHE_TRACK_USAGE=false
 
-When ``LMCACHE_TRACK_USAGE`` is set to ``false``, ``InitializeUsageContext`` will return ``None`` and no data will be sent or logged.
+   # The cross-tool "do not track" convention (1/true/yes)
+   export DO_NOT_TRACK=1
+
+When tracking is disabled, ``InitializeUsageContext`` will return ``None`` and
+no data will be sent or logged, and no state files (such as ``machine_id``)
+will be created.
+
+Reference
+~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 34 14 52
+
+   * - Environment variable / file
+     - Default
+     - Effect
+   * - ``LMCACHE_TRACK_USAGE``
+     - unset
+     - Set to ``false`` to disable all usage stats collection.
+   * - ``DO_NOT_TRACK``
+     - unset
+     - Set to ``1``/``true``/``yes`` to disable collection (cross-tool
+       convention).
+   * - ``LMCACHE_USAGE_TRACK_URL``
+     - ``http://stats.lmcache.ai:8080``
+     - Override the stats server endpoint (e.g. for a private sink).
+   * - ``LMCACHE_USAGE_TRACK_INTERVAL``
+     - ``600``
+     - Seconds between continuous-message flushes.
+   * - ``~/.config/lmcache/machine_id``
+     - created on first send
+     - Holds the random anonymous machine UUID. Delete it to rotate the
+       identifier.
 
 Local logging
 ~~~~~~~~~~~~~
@@ -70,7 +144,7 @@ If you would like to log to a file in addition to (or instead of) sending data t
 
 .. code-block:: python
 
-   from lmcache.usage_context import InitializeUsageContext
+   from lmcache.usage_telemetry import InitializeUsageContext
 
    usage_ctx = InitializeUsageContext(
        config=engine_config,
