@@ -102,6 +102,31 @@ def _tensors_to_ptrs(tensors: list[torch.Tensor]) -> list[int]:
     return [t.data_ptr() for t in tensors]
 
 
+def _first_leaf_tensor(structure: object) -> torch.Tensor:
+    """Return the first ``torch.Tensor`` reachable in a possibly-nested value.
+
+    The registered/normalized KV structure may be a flat per-layer list of
+    tensors (fused), a nested ``[key_layers, value_layers]`` (split K/V), or a
+    per-layer list of ``(key, value)`` pairs. dtype/device are uniform across
+    the structure, so the first leaf is representative. Used instead of
+    ``tensors[0]`` so split representations (whose first element is a
+    list/tuple, not a tensor) work unchanged.
+    """
+    cur: object = structure
+    # Descend through lists/tuples until we hit a tensor.
+    for _ in range(8):  # bounded; KV nesting is at most a few levels deep
+        if isinstance(cur, torch.Tensor):
+            return cur
+        if isinstance(cur, (list, tuple)) and cur:
+            cur = cur[0]
+            continue
+        break
+    raise ValueError(
+        f"could not find a leaf torch.Tensor in KV structure of type "
+        f"{type(structure).__name__}"
+    )
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -295,7 +320,7 @@ def compute_kv_layout(
     block_size = get_block_size(normalized, engine_kv_format)
     num_layers = get_num_layers(normalized, engine_kv_format)
     hidden_dim_size = get_hidden_dim_size(normalized, engine_kv_format)
-    dtype_str = str(tensors[0].dtype).replace("torch.", "")
+    dtype_str = str(_first_leaf_tensor(normalized).dtype).replace("torch.", "")
     return block_size, num_layers, hidden_dim_size, dtype_str, engine_kv_format
 
 
@@ -341,6 +366,7 @@ def gather_paged_kv_to_cpu(
         get_block_size,
         get_hidden_dim_size,
         get_num_blocks,
+        get_group_data_ptrs,
         get_num_layers,
         is_mla,
         make_page_buffer_shape_desc,
@@ -395,7 +421,7 @@ def gather_paged_kv_to_cpu(
             chunks = [
                 torch.empty(
                     (num_layers, chunk_tokens, hidden_dim_size),
-                    dtype=tensors[0].dtype,
+                    dtype=_first_leaf_tensor(normalized).dtype,
                     device=torch.device("cpu"),
                     pin_memory=requires_pinned,
                 )
@@ -405,7 +431,7 @@ def gather_paged_kv_to_cpu(
             chunks = [
                 torch.empty(
                     (2, num_layers, chunk_tokens, hidden_dim_size),
-                    dtype=tensors[0].dtype,
+                    dtype=_first_leaf_tensor(normalized).dtype,
                     device=torch.device("cpu"),
                     pin_memory=requires_pinned,
                 )
@@ -460,7 +486,7 @@ def gather_paged_kv_to_cpu(
                 paged_arg,
                 objs_arg,
                 block_ids_arg,
-                tensors[0].device,
+                _first_leaf_tensor(normalized).device,
                 lmc_ops.TransferDirection.D2H,
                 shape_desc,
                 chunk_tokens,
@@ -470,18 +496,21 @@ def gather_paged_kv_to_cpu(
 
         else:
             # Compiled C++/CUDA/XPU: requires int64 pointer tensor and list[int].
+            leaf_device = _first_leaf_tensor(normalized).device
             _ptrs_np = np.array(
-                [t.data_ptr() for t in normalized],  # type: ignore[union-attr]
+                get_group_data_ptrs(
+                    normalized, engine_kv_format, list(range(num_layers))
+                ),
                 dtype=np.uint64,
             ).view(np.int64)
-            paged_arg = torch.from_numpy(_ptrs_np).to(device=tensors[0].device)
+            paged_arg = torch.from_numpy(_ptrs_np).to(device=leaf_device)
 
             # This safely points to either the pre-pinned chunks
             # OR the temporary staged_chunks
             objs_arg = _tensors_to_ptrs(chunks)
 
             block_ids_arg = torch.tensor(
-                selected_block_ids, dtype=torch.int64, device=tensors[0].device
+                selected_block_ids, dtype=torch.int64, device=leaf_device
             )
 
             # Split transfer to respect CUDA kernel's object count limitation
@@ -504,7 +533,7 @@ def gather_paged_kv_to_cpu(
                     paged_arg,
                     batch_objs_ptrs,
                     batch_blocks,
-                    tensors[0].device,
+                    leaf_device,
                     lmc_ops.TransferDirection.D2H,
                     shape_desc,
                     chunk_tokens,
@@ -572,6 +601,7 @@ def scatter_cpu_to_paged_kv(
     from lmcache.v1.gpu_connector.utils import (
         get_block_size,
         get_num_blocks,
+        get_group_data_ptrs,
         get_num_layers,
         make_page_buffer_shape_desc,
         normalize_kv_and_discover_format,
@@ -644,7 +674,7 @@ def scatter_cpu_to_paged_kv(
             paged_arg,
             objs_arg,
             block_ids_arg,
-            tensors[0].device,
+            _first_leaf_tensor(normalized).device,
             lmc_ops.TransferDirection.H2D,
             shape_desc,
             chunk_tokens,
@@ -669,14 +699,17 @@ def scatter_cpu_to_paged_kv(
             ]
 
         # Compiled C++/CUDA/XPU: requires int64 pointer tensor and list[int].
+        leaf_device = _first_leaf_tensor(normalized).device
         _ptrs_np = np.array(
-            [t.data_ptr() for t in normalized],  # type: ignore[union-attr]
+            get_group_data_ptrs(
+                normalized, engine_kv_format, list(range(num_layers))
+            ),
             dtype=np.uint64,
         ).view(np.int64)
-        paged_arg = torch.from_numpy(_ptrs_np).to(device=tensors[0].device)
+        paged_arg = torch.from_numpy(_ptrs_np).to(device=leaf_device)
         objs_arg = _tensors_to_ptrs(chunks)
         block_ids_arg = torch.tensor(
-            selected_block_ids, dtype=torch.int64, device=tensors[0].device
+            selected_block_ids, dtype=torch.int64, device=leaf_device
         )
 
         # Batched transfer to satisfy cuda's limitation (max 4 objects)
@@ -701,7 +734,7 @@ def scatter_cpu_to_paged_kv(
                 paged_arg,
                 batch_objs_ptrs,
                 batch_blocks,
-                tensors[0].device,
+                leaf_device,
                 lmc_ops.TransferDirection.H2D,
                 shape_desc,
                 chunk_tokens,
