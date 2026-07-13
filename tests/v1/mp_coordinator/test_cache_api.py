@@ -129,8 +129,13 @@ def test_pin_then_unpin_tracks_l2_eviction():
         keys = _resolve(ctx)
         assert keys  # 2 chunks x world_size 1
 
-        # Track the keys in the L2 eviction LRU with no quota (evict-all), so the
-        # plan would evict them unless pinned.
+        # Arm allowlist enforcement (unquota'd salts are exempt until the
+        # default limit is set), then track the keys in the L2 eviction LRU
+        # with no quota (evict-all), so the plan would evict them unless
+        # pinned.
+        assert (
+            client.put("/quota/config", json={"default_limit_gb": 0}).status_code == 200
+        )
         for k in keys:
             ctx.usage_manager.record_stored(k, 1000)
             ctx.eviction_manager.on_store(k)
