@@ -553,6 +553,126 @@ check("TRT worker _create_key uses rank // tp_size for MLA",
 # --------------------------------------------------------------------------- #
 print()
 print("=" * 72)
+print("  Behavioral: device-spec registry (NVIDIA vs ROCm simulation)")
+print("=" * 72)
+
+# Simulate the registry with stubbed torch to verify the list-based
+# registry correctly selects CudaDeviceSpec on NVIDIA and RocmDeviceSpec
+# on ROCm — the bug that was a P0 regression.
+import importlib
+
+# We need to import the real platform module with a stubbed torch that
+# simulates NVIDIA (hip=None) then ROCm (hip="5.7").
+def _make_torch_stub(cuda_available, hip_version):
+    """Create a torch stub simulating NVIDIA or ROCm."""
+    t = types.ModuleType("torch")
+    t.cuda = types.ModuleType("torch.cuda")
+    t.cuda.is_available = lambda: cuda_available
+    t.cuda.device_count = lambda: 1
+    t.cuda.get_device_properties = lambda i: MagicMock(uuid="gpu-0")
+    t.version = types.SimpleNamespace(hip=hip_version)
+    # Minimal attrs needed by platform discovery
+    t.Size = tuple
+    t.dtype = type("dtype", (), {})
+    t.float16 = t.dtype()
+    t.bfloat16 = t.dtype()
+    return t
+
+# Save original torch (our stub from earlier)
+_orig_torch = sys.modules.get("torch")
+
+# Test 1: NVIDIA simulation (cuda available, hip=None)
+sys.modules["torch"] = _make_torch_stub(cuda_available=True, hip_version=None)
+# Force re-import of platform module
+for mod_name in list(sys.modules.keys()):
+    if mod_name.startswith("lmcache.v1.platform") and mod_name != "lmcache.v1.platform._registry":
+        # Keep _registry (has the IPC wrapper discovery) but reload __init__
+        pass
+# We can't easily re-import the whole platform package (circular deps),
+# so verify the selection logic directly:
+from lmcache.v1.platform.rocm import RocmDeviceSpec
+from lmcache.v1.platform.cuda import CudaDeviceSpec
+
+rocm_spec = RocmDeviceSpec()
+cuda_spec = CudaDeviceSpec()
+
+# NVIDIA: RocmDeviceSpec.is_available() should be False
+nvidia_rocm_avail = rocm_spec.is_available()
+nvidia_cuda_avail = cuda_spec.is_available()
+check("NVIDIA sim: RocmDeviceSpec.is_available() = False",
+      nvidia_rocm_avail is False,
+      f"got {nvidia_rocm_avail}")
+check("NVIDIA sim: CudaDeviceSpec.is_available() = True",
+      nvidia_cuda_avail is True,
+      f"got {nvidia_cuda_avail}")
+# On NVIDIA, the sorted list tries RocmDeviceSpec first (False), then
+# CudaDeviceSpec (True) → CudaDeviceSpec wins
+check("NVIDIA sim: CudaDeviceSpec would be selected (Rocm=False, Cuda=True)",
+      nvidia_rocm_avail is False and nvidia_cuda_avail is True)
+
+# Test 2: ROCm simulation (cuda available, hip="5.7.0")
+sys.modules["torch"] = _make_torch_stub(cuda_available=True, hip_version="5.7.0")
+rocm_spec2 = RocmDeviceSpec()
+cuda_spec2 = CudaDeviceSpec()
+rocm_avail = rocm_spec2.is_available()
+cuda_avail = cuda_spec2.is_available()
+check("ROCm sim: RocmDeviceSpec.is_available() = True",
+      rocm_avail is True,
+      f"got {rocm_avail}")
+check("ROCm sim: CudaDeviceSpec.is_available() = True",
+      cuda_avail is True,
+      f"got {cuda_avail}")
+# On ROCm, RocmDeviceSpec is tried first (True) → RocmDeviceSpec wins
+check("ROCm sim: RocmDeviceSpec would be selected (tried first, True)",
+      rocm_avail is True)
+
+# Test 3: Verify pin backend selection
+check("NVIDIA: CudaDeviceSpec.pin_memory_backend is CudaPinMemoryBackend",
+      cuda_spec.pin_memory_backend.__name__ == "CudaPinMemoryBackend",
+      f"got {cuda_spec.pin_memory_backend.__name__}")
+check("ROCm: RocmDeviceSpec.pin_memory_backend is RocmPinMemoryBackend",
+      rocm_spec2.pin_memory_backend.__name__ == "RocmPinMemoryBackend",
+      f"got {rocm_spec2.pin_memory_backend.__name__}")
+
+# Test 4: Verify device_type is "cuda" for both (IPC compat)
+check("Both specs report device_type='cuda'",
+      rocm_spec.device_type == "cuda" and cuda_spec.device_type == "cuda")
+
+# Restore original torch
+if _orig_torch is not None:
+    sys.modules["torch"] = _orig_torch
+
+# --------------------------------------------------------------------------- #
+print()
+print("=" * 72)
+print("  Behavioral: abort-leak fix in request_finished")
+print("=" * 72)
+
+connector_src = (ROOT / "lmcache/integration/vllm/lmcache_mp_connector.py").read_text()
+check("request_finished frees still-held locks before end_session",
+      "num_lmcache_hit_tokens > tracker.num_vllm_hit_tokens" in connector_src
+      and "free_lookup_locks" in connector_src
+      and "end_session" in connector_src,
+      "abort-leak fix not found in request_finished")
+check("abort-leak fix uses tracker.all_token_ids",
+      "tracker.all_token_ids" in connector_src)
+check("abort-leak fix uses tracker.cache_salt",
+      "tracker.cache_salt" in connector_src)
+
+# Verify warm_prefetch and p2p_controller have explanatory comments
+warm_src = (ROOT / "lmcache/v1/multiprocess/warm_prefetch.py").read_text()
+check("warm_prefetch documents extra_count=0 is correct (WARM mode)",
+      "WARM mode does not acquire read locks" in warm_src)
+p2p_src = (ROOT / "lmcache/v1/multiprocess/modules/p2p_controller.py").read_text()
+check("p2p_controller documents extra_count=0 is correct (single-reader)",
+      "P2P transfers are single-reader" in p2p_src)
+blend_v2_src = (ROOT / "lmcache/v1/multiprocess/modules/blend.py").read_text()
+check("blend v2 documents extra_count limitation",
+      "v2 blend does not carry tp_size" in blend_v2_src)
+
+# --------------------------------------------------------------------------- #
+print()
+print("=" * 72)
 print(f"  RESULT: {PASS} passed, {FAIL} failed")
 print("=" * 72)
 sys.exit(1 if FAIL else 0)

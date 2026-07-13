@@ -241,6 +241,9 @@ class P2PController:
             self._next_task_id += 1
 
         # NOTE: skip_l2=True -- only objects already resident in L1 are locked.
+        # P2P transfers are single-reader (one worker retrieves from another),
+        # so extra_count=0 (default) is correct — the MLA multi-reader locking
+        # is handled in the LOOKUP path (lookup.py) and CB v3 (blend_v3.py).
         handle = self._ctx.storage_manager.submit_prefetch_task(
             keys,
             layout_desc,

@@ -88,6 +88,10 @@ class WarmPrefetchJobs:
         Returns:
             An opaque request id to pass to :meth:`poll`.
         """
+        # WARM mode does not acquire read locks (no-lock retain), so
+        # extra_count is irrelevant here.  The MLA-aware extra_count is
+        # only needed in the LOOKUP/free_lookup_locks path (lookup.py)
+        # and the CB v3 prefix/sparse paths (blend_v3.py).
         handle = storage_manager.submit_prefetch_task(
             keys,
             layout_desc,

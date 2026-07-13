@@ -1156,6 +1156,27 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "num_lmcache_extra_cached_tokens": max(0, num_lmcache - num_vllm),
             }
 
+        # Free any still-held read locks before ending the session.
+        # If the request was aborted (or the connector dropped matches
+        # before retrieve), the LMCache-hit chunks' read locks were
+        # acquired at LOOKUP but never consumed by retrieve.  Without
+        # this, the locks persist until TTL expiry — a slow memory leak
+        # on abort-heavy workloads.  Mirrors SGLang's end_session which
+        # frees pending locks before END_SESSION.
+        tracker = self._get_request_tracker(request.request_id)
+        if (
+            tracker is not None
+            and tracker.num_lmcache_hit_tokens > tracker.num_vllm_hit_tokens
+        ):
+            free_end = tracker.num_lmcache_hit_tokens
+            self.scheduler_adapter.free_lookup_locks(
+                token_ids=list(tracker.all_token_ids),
+                start=0,
+                end=free_end,
+                request_id=request.request_id,
+                cache_salt=tracker.cache_salt,
+            )
+
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
         # Notify LMCache to end the session for this request

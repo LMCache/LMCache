@@ -1027,6 +1027,11 @@ class BlendModule:
                 # double-unlock if error happens during read_prefetched_results.
                 # We should consider not unlocking objects in read_prefetched_results
                 # if error happens.
+                # NOTE: v2 blend does not carry tp_size over the wire, so
+                # extra_count defaults to 0.  For MLA models this means
+                # each worker releases only 1 lock per key (not 1+extra),
+                # which is correct IF every reader releases its own lock.
+                # The v3 path (blend_v3.py) correctly threads extra_count.
                 gpu_context.cupy_stream.launch_host_func(
                     self._ctx.storage_manager.finish_read_prefetched,
                     all_obj_keys,
