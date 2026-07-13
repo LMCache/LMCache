@@ -56,10 +56,14 @@ ENV_MP_TRANSFER_MODE = "LMCACHE_MP_TRANSFER_MODE"
 ENV_MULTI_STREAM_D2D = "LMCACHE_MP_MULTI_STREAM_D2D"
 
 # Opt-in: delta-store. Worker passes ``skip_count`` per group derived
-# from the prior lookup's prefix hit count. Saves 14 GiB of wire on
-# the re-run of a cached prompt (60k-token Qwen3-27B-AWQ).
-# Default is ON -- the lookup is a no-op when no STORE direction is
-# requested, and the savings on hot-cache rebuilds are large.
+# from the prior lookup's prefix hit count, so the wire carries only
+# the chunks that are not already in L2.
+#
+# Default is OFF: the worker currently always sends skip_count=0 (the
+# lookup-derived skip count is not implemented yet), which makes the
+# delta path semantically identical to COMMIT_STORE_GROUP while
+# depending on an additional protocol message type. Flip the default
+# only once the worker actually derives a non-zero skip_count.
 ENV_DELTA_STORE = "LMCACHE_MP_DELTA_STORE"
 
 
@@ -619,8 +623,8 @@ class EngineDrivenTransferContext(TransferContext):
                 g_idx: int, chunks, skip_count: int = 0
             ) -> tuple[int, "Future"]:
                 data = _serialize_single_group_chunks(chunks)
-                if os.environ.get(ENV_DELTA_STORE, "1") == "1":
-                    # Use the delta-store variant. The connector can
+                if os.environ.get(ENV_DELTA_STORE, "0") == "1":
+                    # Opt-in delta-store variant. The connector can
                     # supply the per-group skip_count via a future
                     # LoadStoreOp field; for now we use 0 which is
                     # semantically identical to the legacy full send.
