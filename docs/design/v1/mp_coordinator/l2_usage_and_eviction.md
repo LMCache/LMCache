@@ -81,7 +81,27 @@ Exposes ``get(salt)``, ``get_all()``, ``get_total()`` for the status endpoints.
 Thread-safe in-memory quota registry (``dict[str, int]`` + lock). CRUD via
 ``set_quota``, ``get_limit_bytes``, ``delete_quota``, ``list_quotas``.
 Quotas are set in GiB at the API and stored as bytes internally.
-Unregistered salts default to a 0-byte limit (allowlist semantics).
+
+Unregistered salts resolve through a configurable **default limit**
+(``set_default_limit_bytes`` / ``effective_limit_bytes``), which starts as ``None``:
+
+- ``None`` (boot default) — unregistered salts are **exempt** from coordinator
+  eviction. Quotas live in memory, so a restarted coordinator has an empty
+  table until the external quota controller re-syncs it; the exempt default
+  makes that window safe (an empty table cannot mass-evict unknown tenants).
+- ``0`` — strict allowlist: all bytes under unregistered salts become
+  evictable next cycle. The external controller sets this via
+  ``PUT /quota/config`` **after** re-registering every per-salt quota — it is
+  the explicit signal that arms fleet-wide eviction of unquota'd data.
+- ``> 0`` — every unregistered salt gets that byte budget.
+
+The MP server's local eviction controller keeps the legacy
+``get_limit_bytes`` path (unregistered ⇒ 0) and is unaffected by the default.
+Because the server-local and coordinator quota registries are independent and
+never synchronized, a deployment must register quotas through **one** of the
+two ``/quota`` APIs, never both — the server-side enforcer fully evicts any
+salt missing from its own table, so it would fight quotas registered only on
+the coordinator (see the warning in ``docs/source/mp/coordinator.rst``).
 
 ### L2EvictionManager (`eviction_manager.py`)
 
@@ -99,20 +119,34 @@ accounting lives in ``L2UsageManager``; the eviction manager only tracks order.
 - ``compute_eviction_plan() -> dict[str, list[ObjectKey]]`` — **pure**: for each
   tracked salt, fire when ``usage ≥ trigger_watermark · quota`` (quota 0 ⇒ evict
   all), selecting ``eviction_ratio`` of the salt's LRU keys via
-  ``policy.get_eviction_actions``. No network, no mutation.
+  ``policy.get_eviction_actions``. Salts without an explicit quota use the
+  registry's default limit; while it is unset (``None``) they are skipped
+  entirely — see QuotaManager above. No network, no mutation.
 - ``execute_evictions(registry, http_client)`` — computes the plan and
   **fire-and-forget** ``DELETE /cache/objects`` to a holder MP server for each
   salt's victims; on confirmed deletion ``on_remove`` drops them from tracking.
+  The plan's keys are split into chunks of at most ``MAX_DELETE_BATCH`` (imported
+  from the MP server's ``object_service``) and each chunk is dispatched as its
+  own request, because the endpoint rejects any single delete over that cap with
+  HTTP 400 — a full-salt eviction (quota dropped to 0) routinely exceeds it.
 
 ## REST endpoints (`quota_api.py`)
 
 | Method | Path | Description |
 | --- | --- | --- |
+| ``PUT`` | ``/quota/config`` | Set the default limit for unquota'd salts (``null`` ⇒ exempt; ``0`` arms allowlist eviction) |
+| ``GET`` | ``/quota/config`` | Read the default limit |
 | ``PUT`` | ``/quota/{cache_salt}`` | Set quota (GiB) |
 | ``DELETE`` | ``/quota/{cache_salt}`` | Remove quota |
 | ``GET`` | ``/quota/{cache_salt}`` | Quota + usage for one salt |
 | ``GET`` | ``/quota`` | Quota + usage for all salts |
 | ``POST`` | ``/quota/events`` | Ingest batch of store/lookup/delete events |
+
+The ``/quota/config`` routes are declared before ``/quota/{cache_salt}`` so the
+literal ``config`` segment is not captured as a salt. Expected controller flow
+after a coordinator (re)start: ``PUT /quota/{salt}`` for every tenant, then
+``PUT /quota/config {"default_limit_gb": 0}`` to arm eviction of everything
+else.
 
 These quota/usage-accounting endpoints live in the ``/quota`` group (mirroring
 the MP server's node-local ``/quota``); warm-prefetch dispatch is the only thing

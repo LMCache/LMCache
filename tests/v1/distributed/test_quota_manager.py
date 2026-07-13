@@ -15,7 +15,7 @@ from lmcache.v1.distributed.quota_manager import QuotaEntry, QuotaManager
 
 class TestQuotaManagerBasics:
     def test_unregistered_salt_limit_is_zero(self):
-        """Allowlist semantics — anything unregistered has limit 0."""
+        """Legacy allowlist semantics — anything unregistered has limit 0."""
         qm = QuotaManager()
         assert qm.get_limit_bytes("alice") == 0
         assert not qm.has_quota("alice")
@@ -192,3 +192,56 @@ class TestQuotaManagerEdgeCases:
             qm.set_quota(f"user-{i}", i)
         assert len(qm.list_quotas()) == 10_000
         assert qm.get_limit_bytes("user-9999") == 9999
+
+
+class TestQuotaManagerDefaultLimit:
+    """Default-quota semantics used by the coordinator's eviction manager
+    (``effective_limit_bytes``); ``get_limit_bytes`` keeps the legacy
+    allowlist behavior for the MP server's local eviction controller."""
+
+    def test_default_starts_unset(self):
+        qm = QuotaManager()
+        assert qm.get_default_limit_bytes() is None
+
+    def test_effective_limit_none_for_unregistered_until_default_set(self):
+        """Boot state: unregistered salts are exempt (None), even though
+        the legacy ``get_limit_bytes`` still reports 0."""
+        qm = QuotaManager()
+        assert qm.effective_limit_bytes("alice") is None
+        assert qm.get_limit_bytes("alice") == 0
+
+    def test_default_zero_applies_to_unregistered(self):
+        qm = QuotaManager()
+        qm.set_default_limit_bytes(0)
+        assert qm.get_default_limit_bytes() == 0
+        assert qm.effective_limit_bytes("alice") == 0
+
+    def test_positive_default_applies_to_unregistered(self):
+        qm = QuotaManager()
+        qm.set_default_limit_bytes(4096)
+        assert qm.effective_limit_bytes("alice") == 4096
+
+    def test_explicit_quota_wins_over_default(self):
+        qm = QuotaManager()
+        qm.set_default_limit_bytes(4096)
+        qm.set_quota("alice", 1024)
+        assert qm.effective_limit_bytes("alice") == 1024
+
+    def test_explicit_zero_quota_wins_over_unset_default(self):
+        """An explicit 0 is enforceable even while the default is None."""
+        qm = QuotaManager()
+        qm.set_quota("alice", 0)
+        assert qm.effective_limit_bytes("alice") == 0
+        assert qm.effective_limit_bytes("bob") is None
+
+    def test_default_resettable_to_none(self):
+        qm = QuotaManager()
+        qm.set_default_limit_bytes(0)
+        qm.set_default_limit_bytes(None)
+        assert qm.get_default_limit_bytes() is None
+        assert qm.effective_limit_bytes("alice") is None
+
+    def test_negative_default_rejected(self):
+        qm = QuotaManager()
+        with pytest.raises(ValueError):
+            qm.set_default_limit_bytes(-1)
