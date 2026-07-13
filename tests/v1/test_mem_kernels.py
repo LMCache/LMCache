@@ -8,7 +8,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.memory_management import PinMemoryAllocator
+from lmcache.v1.memory_allocators.pin_memory_allocator import PinMemoryAllocator
 
 if not torch.cuda.is_available():
     pytest.skip(

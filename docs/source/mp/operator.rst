@@ -291,6 +291,81 @@ With ``failurePolicy: Ignore`` a webhook / cert problem also leaves the pod
 un-mutated silently -- confirm the operator pod is ``Running`` and the
 ``MutatingWebhookConfiguration`` exists.
 
+Using the Latest (or a Pinned) lmcache
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+By default a vLLM pod runs whatever ``lmcache`` is baked into its image.  To run
+a **different** lmcache build instead -- e.g. ship the latest lmcache onto an
+older, stable vLLM image, or keep the vLLM client on the exact build its
+``LMCacheEngine`` server runs -- set ``spec.injection.payloadImage`` on the
+engine.  The webhook then additionally stages that image's ``lmcache`` tree into
+each opted-in pod: an ``emptyDir`` + an init container that copies the tree in, a
+read-only mount, and ``PYTHONPATH=/lmcache-payload`` so vLLM imports the staged
+``lmcache`` instead of the baked-in one.  No vLLM image rebuild.
+
+**1. Build the payload image.** It ships the unpacked ``lmcache`` tree under
+``/payload`` and copies it to ``$SHARED_DIR`` on start.  ``docker/Dockerfile.payload``
+builds it by extracting an ABI-matched ``lmcache`` from an lmcache image (the
+``SOURCE_IMAGE`` build-arg selects the version):
+
+.. code-block:: bash
+
+    docker build -f docker/Dockerfile.payload \
+      --build-arg SOURCE_IMAGE=lmcache/vllm-openai:latest-nightly \
+      -t <registry>/lmcache-payload:latest .
+    docker push <registry>/lmcache-payload:latest
+
+**2. Point the engine at it.** ``payloadImage.repository`` has no valid default
+(the inherited image default is not a payload), so set it explicitly; leaving
+``injection`` unset keeps connection-only wiring.
+
+.. code-block:: yaml
+
+    apiVersion: lmcache.lmcache.ai/v1alpha1
+    kind: LMCacheEngine
+    metadata:
+      name: my-cache-versioned
+    spec:
+      l1:
+        sizeGB: 60
+      injection:
+        payloadImage:
+          repository: <registry>/lmcache-payload
+          tag: latest
+          pullPolicy: Always          # :latest moves -- re-pull for the current build
+        # imagePullSecrets:            # private payload registry only
+        #   - name: my-registry-secret
+
+Opted-in pods bound to this engine (label + annotation as above) need no
+changes -- the webhook stages the payload automatically.  Ready-to-apply
+samples: ``config/samples/lmcache_v1alpha1_lmcacheengine_injection.yaml`` and
+``config/samples/vllm_lmcache_injection_deployment.yaml``.
+
+.. note::
+   The payload's ``lmcache`` must be **ABI-compatible** (same Python minor
+   version and a compatible torch) with the vLLM image that imports it -- it
+   ships compiled extensions.  If they differ, ``import lmcache`` fails with an
+   ``undefined symbol`` error in the vLLM pod.  Building the payload from an
+   lmcache image close to your vLLM image keeps them compatible.
+
+**3. Verify the swap** on a running pod -- contrast the normal import with one
+that ignores the injected ``PYTHONPATH``:
+
+.. code-block:: bash
+
+    POD=$(kubectl get pod -l app=vllm-lmcache-versioned -o name | head -1)
+
+    # imports the STAGED build (from /lmcache-payload):
+    kubectl exec $POD -c vllm -- python3 -c \
+      "import lmcache; print(lmcache.__version__, lmcache.__file__)"
+
+    # PYTHONPATH stripped -> the image's baked-in build (site-packages):
+    kubectl exec $POD -c vllm -- env -u PYTHONPATH python3 -c \
+      "import lmcache; print(lmcache.__version__, lmcache.__file__)"
+
+Two different sources for the same module confirms the swap.  If nothing was
+staged, check ``lmcache.ai/lmcache-skip-reason`` on the pod.
+
 Verifying the Deployment
 ------------------------
 

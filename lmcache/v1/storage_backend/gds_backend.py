@@ -29,9 +29,11 @@ from lmcache.utils import (
     parse_cache_key,
 )
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import (
-    CuFileMemoryAllocator,
+from lmcache.v1.memory_allocators.cu_file_memory_allocator import CuFileMemoryAllocator
+from lmcache.v1.memory_allocators.hip_file_memory_allocator import (
     HipFileMemoryAllocator,
+)
+from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )

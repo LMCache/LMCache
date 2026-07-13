@@ -10,16 +10,18 @@ import torch
 # First Party
 from lmcache.observability import LMCStatsMonitor
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
+from lmcache.v1.memory_allocators.host_memory_allocator import HostMemoryAllocator
+from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
+from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
+    PagedTensorMemoryAllocator,
+)
+from lmcache.v1.memory_allocators.pin_memory_allocator import PinMemoryAllocator
+from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
 from lmcache.v1.memory_management import (
     BytesBufferMemoryObj,
-    GPUMemoryAllocator,
-    HostMemoryAllocator,
     MemoryFormat,
     MemoryObjMetadata,
-    MixedMemoryAllocator,
-    PagedTensorMemoryAllocator,
-    PinMemoryAllocator,
-    TensorMemoryAllocator,
     TensorMemoryObj,
     _allocate_cpu_memory,
     _free_cpu_memory,
@@ -634,7 +636,9 @@ class TestLazyMemoryAllocator:
         on CPU-only builds.
         """
         # First Party
-        from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
+        from lmcache.v1.memory_allocators.lazy_memory_allocator import (
+            LazyMemoryAllocator,
+        )
 
         return LazyMemoryAllocator
 
