@@ -23,6 +23,7 @@ behaviour, and ``device_type`` / ``torch_module_name`` default to
 """
 
 # First Party
+from lmcache.v1.platform.base_device_ops import DeviceOps
 from lmcache.v1.platform.base_pin_memory import PinMemoryBackend
 
 
@@ -60,12 +61,20 @@ class DeviceSpec:
         return "cpu"
 
     @property
-    def ops_module(self) -> str | None:
-        """Fully-qualified module path for the compiled ops backend.
+    def ops_cls(self) -> type[DeviceOps]:
+        """DeviceOps subclass providing the ``lmcache.c_ops`` surface.
 
-        Return ``None`` if no custom ops are available (fallback only).
+        Lazy by design: the import happens on *access*, not at class-definition
+        or DeviceSpec-discovery time, so resolving a spec never drags the torch
+        baseline (or a native .so) into the platform package's import graph.
+        The base returns the torch/CPU baseline; accelerator specs override.
+
+        Returns:
+            type[DeviceOps]: The base DeviceOps torch/CPU baseline class for the
+            fallback spec. Accelerator subclasses override this property to
+            return their backend-specific DeviceOps subclass.
         """
-        return None
+        return DeviceOps
 
     def is_available(self) -> bool:
         """Return ``True`` when the device is usable on this system.

@@ -1,4 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# TODO(baoloongmao): renamed from ``tests/v1/test_python_ops_fallback.py``.
+# Test cases still reflect the old flat-module world (they poke `_py_ops`
+# free functions directly); a follow-up should rework them to exercise the
+# ``DeviceOps`` API surface instead.
 # Standard
 from typing import Any, Union
 import ctypes
@@ -15,7 +19,7 @@ from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
 )
-import lmcache.python_ops_fallback as _py_ops
+from lmcache.v1.platform import _torch_impl as _py_ops
 
 # ==========================================
 # 0. utils functions.
@@ -55,10 +59,10 @@ def _build_backend_params() -> list:
 
     Returns one entry per available backend configuration:
     - cuda_c_ops: uses lmcache.c_ops (requires CUDA and the CUDA extension)
-    - cuda_py_ops: uses lmcache.python_ops_fallback with GPU visible
-    - cpy_py_ops: uses lmcache.python_ops_fallback with GPU mocked away
+    - cuda_py_ops: uses lmcache.v1.platform._torch_impl with GPU visible
+    - cpy_py_ops: uses lmcache.v1.platform._torch_impl with GPU mocked away
     - xpu_sycl_ops: uses lmcache.xpu_ops (requires XPU and the SYCL extension)
-    - xpu_py_ops: uses lmcache.python_ops_fallback with XPU visible
+    - xpu_py_ops: uses lmcache.v1.platform._torch_impl with XPU visible
     """
     params = []
     cuda_available = torch.cuda.is_available()
