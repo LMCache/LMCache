@@ -1269,6 +1269,41 @@ def gather_paged_kv_multi_group_to_cpu_streams(
     return results  # type: ignore[return-value]
 
 
+# Group indices for which a shape-guessed tokens_per_block warning was
+# already emitted (warn once per group per process, not per transfer).
+_GRAIN_GUESS_WARNED: set[int] = set()
+
+
+def _guess_tokens_per_block(
+    group_idx: int,
+    group_kv: dict[str, torch.Tensor],
+    layout_hints: LayoutHints | None,
+) -> int:
+    """Fallback grain when the engine did not report tokens_per_block.
+
+    Derives a block size from the registered tensor SHAPES. This is only
+    safe for the legacy single-group case without context parallelism:
+    for hybrid models the physical slot count of e.g. a Mamba state
+    tensor has nothing to do with the scheduler's block-ID grain, and
+    under (uneven) DCP the per-rank physical page differs from the
+    virtual scheduler block. A wrong grain silently stores mis-keyed
+    chunk data, so warn loudly.
+    """
+    block_size, _, _, _, _ = compute_kv_layout(group_kv, layout_hints=layout_hints)
+    if group_idx not in _GRAIN_GUESS_WARNED:
+        _GRAIN_GUESS_WARNED.add(group_idx)
+        logger.warning(
+            "Group %d has no tokens_per_block from the engine; guessing "
+            "%d from the registered tensor shapes. This is unreliable "
+            "for hybrid models and under context parallelism -- the "
+            "engine should report the scheduler's block-ID grain "
+            "(EngineGroupInfo.tokens_per_block).",
+            group_idx,
+            block_size,
+        )
+    return block_size
+
+
 def _blocks_in_chunk_for(
     kv_caches: dict[str, torch.Tensor],
     info: EngineGroupInfo,
@@ -1284,8 +1319,7 @@ def _blocks_in_chunk_for(
     tpb = info.tokens_per_block
     if tpb <= 0:
         g_kv = slice_kv_caches_for_group(kv_caches, info.layer_indices)
-        block_size, _, _, _, _ = compute_kv_layout(g_kv, layout_hints=layout_hints)
-        tpb = block_size
+        tpb = _guess_tokens_per_block(info.engine_group_id, g_kv, layout_hints)
     blocks_in_chunk = lmcache_tokens_per_chunk // tpb
     if blocks_in_chunk == 0:
         raise ValueError(
@@ -1320,19 +1354,9 @@ def gather_paged_kv_multi_group_to_cpu(
     result: list[list[torch.Tensor]] = []
     for group_idx, group_info in enumerate(engine_group_infos):
         group_kv = slice_kv_caches_for_group(kv_caches, group_info.layer_indices)
-        tokens_per_block = group_info.tokens_per_block
-        if tokens_per_block <= 0:
-            block_size, _, _, _, _ = compute_kv_layout(
-                group_kv, layout_hints=layout_hints
-            )
-            tokens_per_block = block_size
-        blocks_in_chunk = lmcache_tokens_per_chunk // tokens_per_block
-        if blocks_in_chunk == 0:
-            raise ValueError(
-                f"Group {group_idx}: tokens_per_block ({tokens_per_block}) > "
-                f"lmcache_tokens_per_chunk ({lmcache_tokens_per_chunk}). "
-                "Each block is larger than the chunk size."
-            )
+        blocks_in_chunk = _blocks_in_chunk_for(
+            kv_caches, group_info, lmcache_tokens_per_chunk, layout_hints
+        )
         group_chunks = gather_paged_kv_to_cpu(
             group_kv,
             block_ids[group_idx],
@@ -1366,19 +1390,9 @@ def scatter_cpu_multi_group_to_paged_kv(
     """
     for group_idx, group_info in enumerate(engine_group_infos):
         group_kv = slice_kv_caches_for_group(kv_caches, group_info.layer_indices)
-        tokens_per_block = group_info.tokens_per_block
-        if tokens_per_block <= 0:
-            block_size, _, _, _, _ = compute_kv_layout(
-                group_kv, layout_hints=layout_hints
-            )
-            tokens_per_block = block_size
-        blocks_in_chunk = lmcache_tokens_per_chunk // tokens_per_block
-        if blocks_in_chunk == 0:
-            raise ValueError(
-                f"Group {group_idx}: tokens_per_block ({tokens_per_block}) > "
-                f"lmcache_tokens_per_chunk ({lmcache_tokens_per_chunk}). "
-                "Each block is larger than the chunk size."
-            )
+        blocks_in_chunk = _blocks_in_chunk_for(
+            kv_caches, group_info, lmcache_tokens_per_chunk, layout_hints
+        )
         scatter_cpu_to_paged_kv(
             group_kv,
             block_ids[group_idx],
