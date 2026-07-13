@@ -757,6 +757,12 @@ class EngineDrivenTransferContext(TransferContext):
                     logger.exception("Failed to scatter retrieved CPU context chunks")
                     ok = False
                 torch_dev.current_stream().synchronize()
+            # COMMIT_RETRIEVE releases the server-side pending SHM read
+            # locks reserved by prepare_retrieve (ShmTransferStrategy.
+            # commit_retrieve -> finish_read_prefetched).  Without it,
+            # every retrieve leaks a read refcount and the SHM pool
+            # eventually fills up with unfreeable objects.
+            self._engine_driven_context.commit_retrieve(key, instance_id)
         future = MessagingFuture()
         future.set_result(ok)
         return future
