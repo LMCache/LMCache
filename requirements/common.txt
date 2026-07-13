@@ -3,7 +3,10 @@ aiofiles
 blake3
 aiohttp
 awscrt
-cufile-python
+# cufile-python (CUDA GPUDirect Storage) has no macOS wheels and is imported
+# lazily by the GDS backend; gate it off Darwin so `pip install lmcache` works
+# on Apple-Silicon dev hosts.
+cufile-python; platform_system != "Darwin"
 fastapi
 httpx
 huggingface_hub>=1.5.0
@@ -11,7 +14,10 @@ msgspec
 # nixl uses numba which requires numpy<=2.2.6
 numpy<=2.2.6
 numba
-nvtx
+# nvtx (NVIDIA Tools Extension) is CUDA-profiling only and fails to build on
+# arm64 macOS; LMCache imports it under try/except and degrades to a no-op
+# decorator, so gate it off Darwin.
+nvtx; platform_system != "Darwin"
 opentelemetry-api >= 1.20.0, <= 1.40.0
 opentelemetry-sdk >= 1.20.0
 opentelemetry-exporter-otlp >= 1.20.0
