@@ -5,6 +5,9 @@ import threading
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.logging import init_logger
+
+logger = init_logger(__name__)
 
 T = TypeVar("T")
 
@@ -17,6 +20,10 @@ class MessagingFuture(Generic[T]):
         # blocking the MQ polling thread or worker thread on
         # ``future.result(timeout=...)``.  See ``add_done_callback``.
         self._callbacks: list = []
+        # Guards the is_done_/callback-list transition so a callback
+        # registered concurrently with set_result() is either appended
+        # before the drain or run synchronously -- never lost.
+        self._callback_lock = threading.Lock()
 
     def add_done_callback(self, fn) -> None:
         """Register a callback to run once ``set_result`` is called.
@@ -26,15 +33,17 @@ class MessagingFuture(Generic[T]):
         that calls ``set_result`` (the shared polling loop).  Keeps the
         callback chain short to avoid stalling the loop.
         """
-        if self.is_done_.is_set():
-            try:
-                fn(self.result_)
-            except Exception:
-                # Do not propagate from callback -- one bad callback
-                # would otherwise kill the polling loop.
-                pass
-            return
-        self._callbacks.append(fn)
+        with self._callback_lock:
+            if not self.is_done_.is_set():
+                self._callbacks.append(fn)
+                return
+        # Already done: run synchronously, outside the lock.
+        try:
+            fn(self.result_)
+        except Exception:
+            # Do not propagate from callback -- one bad callback
+            # would otherwise kill the polling loop.
+            logger.exception("MessagingFuture done-callback raised")
 
     def query(self) -> bool:
         """
@@ -83,18 +92,22 @@ class MessagingFuture(Generic[T]):
         NOT to be called by users directly -- only the messaging
         system should set results.
         """
-        self.result_ = result
-        self.is_done_.set()
-        # Drain callbacks in registration order.  Snapshot first so a
-        # callback that re-registers does not mutate during iteration.
-        for fn in list(self._callbacks):
+        with self._callback_lock:
+            self.result_ = result
+            self.is_done_.set()
+            # Snapshot-and-swap under the lock: callbacks registered
+            # after this point see is_done_ set and run synchronously
+            # in their own thread; callbacks in the snapshot run below,
+            # outside the lock (a callback may itself call
+            # add_done_callback without deadlocking).
+            callbacks, self._callbacks = self._callbacks, []
+        for fn in callbacks:
             try:
                 fn(result)
             except Exception:
                 # Do not propagate from callback -- one bad callback
                 # would otherwise kill the polling loop.
-                pass
-        self._callbacks.clear()
+                logger.exception("MessagingFuture done-callback raised")
 
     def to_cuda_future(
         self,
