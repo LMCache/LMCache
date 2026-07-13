@@ -103,6 +103,12 @@ class RequestType(enum.Enum):
     # provided in ``cpu_data`` at offset ``skip_count``.
     # Payload: [key, instance_id, group_idx, skip_count, cpu_data]
     COMMIT_STORE_GROUP_DELTA = enum.auto()
+    # Multi-group engine-driven retrieve: one message per group, so the
+    # response for a single group stays under the 4 GiB msgspec msgpack
+    # bin limit (mirror of COMMIT_STORE_GROUP on the retrieve side) and
+    # the server only materializes one group at a time.
+    # Payload: [key, instance_id, group_idx]
+    PREPARE_RETRIEVE_GROUP = enum.auto()
 
 
 @dataclass

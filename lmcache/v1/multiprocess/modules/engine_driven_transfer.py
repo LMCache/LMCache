@@ -37,6 +37,7 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContextMetadata,
     _deserialize_multi_group_chunks,
     _serialize_multi_group_chunks,
+    _serialize_single_group_chunks,
 )
 
 # Local
@@ -168,6 +169,11 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             HandlerSpec(
                 RequestType.PREPARE_RETRIEVE,
                 self.prepare_retrieve,
+                ThreadPoolType.AFFINITY,
+            ),
+            HandlerSpec(
+                RequestType.PREPARE_RETRIEVE_GROUP,
+                self.prepare_retrieve_group,
                 ThreadPoolType.AFFINITY,
             ),
             HandlerSpec(
@@ -882,6 +888,61 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             num_groups,
             time.perf_counter() - st,
         )
+        return PrepareRetrieveResponse(success=True, data=cpu_data)
+
+    @_lmcache_nvtx_annotate
+    def prepare_retrieve_group(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        group_idx: int,
+    ) -> PrepareRetrieveResponse:
+        """Retrieve ONE group's chunks and return the wire-format blob.
+
+        Mirror of :meth:`commit_store_group` on the retrieve side: the
+        worker sends one ``PREPARE_RETRIEVE_GROUP`` per group so that
+        each response stays under the msgspec msgpack bin limit (4 GiB)
+        and the server only materializes a single group at a time
+        (instead of all groups plus the combined blob, ~3x the data
+        size, as the legacy ``PREPARE_RETRIEVE`` multi-group path does).
+
+        TODO(perf/P1): strategy.prepare_retrieve returns a pickle blob
+        which we immediately deserialize and re-encode in the wire
+        format. A strategy-level API returning ``list[torch.Tensor]``
+        directly would remove one full decode+encode pass per group.
+        """
+        entry, strategy = self._resolve_for_transfer(instance_id)
+        if not entry.metadata.is_multi_group:
+            logger.error(
+                "prepare_retrieve_group called for non-multi-group context "
+                "(instance_id=%d)",
+                instance_id,
+            )
+            return PrepareRetrieveResponse(success=False, data=b"")
+        num_groups = len(entry.metadata.group_layout_descs)
+        if group_idx < 0 or group_idx >= num_groups:
+            logger.error(
+                "prepare_retrieve_group: group_idx %d out of range [0, %d)",
+                group_idx,
+                num_groups,
+            )
+            return PrepareRetrieveResponse(success=False, data=b"")
+        all_obj_keys = self._resolve_all_group_obj_keys(key, num_groups)
+        response = strategy.prepare_retrieve(
+            key=key,
+            instance_id=instance_id,
+            resolve_obj_keys=lambda k, gi=group_idx: all_obj_keys[gi],
+        )
+        if response is None or not response.success or not response.data:
+            return PrepareRetrieveResponse(success=False, data=b"")
+        group_tensors: list[torch.Tensor] = pickle.loads(response.data)
+        cpu_data = _serialize_single_group_chunks(group_tensors)
+        # Start the retrieve timer on the first group so the
+        # COMMIT_RETRIEVE summary log covers the whole multi-group
+        # retrieve.
+        if group_idx == 0:
+            session = self._ctx.session_manager.get_or_create(key.request_id)
+            session.extras["retrieve_start_time"] = time.perf_counter()
         return PrepareRetrieveResponse(success=True, data=cpu_data)
 
     @_lmcache_nvtx_annotate

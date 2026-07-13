@@ -364,6 +364,28 @@ class EngineDrivenContext(ABC):
             return None
         return response.data
 
+    def prepare_retrieve_group_raw_async(
+        self, key: IPCCacheServerKey, instance_id: int, group_idx: int
+    ) -> "MessagingFuture":
+        """Send PREPARE_RETRIEVE_GROUP for one group, return the future.
+
+        Mirror of :meth:`commit_store_group_raw_async` on the retrieve
+        side: the caller pipelines one request per group so each
+        response stays under the msgspec msgpack bin limit (4 GiB) and
+        the server materializes only one group at a time.  The future
+        resolves to a ``PrepareRetrieveResponse`` whose ``data`` is the
+        wire-format blob for this group (decode with
+        ``_deserialize_multi_group_chunks``).
+        """
+        # First Party
+        from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+
+        return self.mq_client.submit_request(
+            RequestType.PREPARE_RETRIEVE_GROUP,
+            [key, instance_id, group_idx],
+            get_response_class(RequestType.PREPARE_RETRIEVE_GROUP),
+        )
+
 
 class PinnedBufferPool:
     """Pool of pinned (page-locked) CPU tensors keyed by (shape, dtype).

@@ -74,6 +74,7 @@ REQUEST_NAMES = [
     "COMMIT_STORE_GROUP",
     "COMMIT_STORE_GROUP_DELTA",
     "PREPARE_RETRIEVE",
+    "PREPARE_RETRIEVE_GROUP",
     "COMMIT_RETRIEVE",
 ]
 
@@ -255,6 +256,22 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         ),
         "PREPARE_RETRIEVE": ProtocolDefinition(
             payload_classes=[KeyType, int],
+            response_class=PrepareRetrieveResponse,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Per-group retrieve (multi-group engine-driven transfer).
+        # Mirror of COMMIT_STORE_GROUP on the retrieve side: keeps each
+        # response under the msgspec msgpack bin limit (4 GiB) and lets
+        # the server materialize one group at a time instead of holding
+        # all groups plus the combined blob in memory.
+        # Payload:
+        #   - key: KeyType - Cache key
+        #   - instance_id: int - Engine instance id
+        #   - group_idx: int - Which object group to read from
+        # Returns: PrepareRetrieveResponse (data = wire-format blob of
+        #   this group's chunks; success=False on miss)
+        "PREPARE_RETRIEVE_GROUP": ProtocolDefinition(
+            payload_classes=[KeyType, int, int],
             response_class=PrepareRetrieveResponse,
             handler_type=HandlerType.BLOCKING,
         ),

@@ -724,10 +724,54 @@ class EngineDrivenTransferContext(TransferContext):
                     f"block_ids has {len(block_ids)} groups, "
                     f"but {len(self._engine_group_infos)} engine_group_infos registered"
                 )
-            raw = self._engine_driven_context.prepare_retrieve_raw(key, instance_id)
-            ok = raw is not None
-            if raw:
-                group_chunks = _deserialize_multi_group_chunks(raw)
+            # ── Pipelined per-group retrieve ─────────────────────────────
+            # One PREPARE_RETRIEVE_GROUP per group (mirror of the
+            # per-group COMMIT_STORE_GROUP on the store side): each
+            # response stays under the msgspec msgpack bin limit
+            # (4 GiB) and the server materializes only one group at a
+            # time.  All requests are submitted up front so the server
+            # can overlap storage reads with the wire transfer of the
+            # previous group.
+            num_groups = len(self._engine_group_infos)
+            retrieve_futs = [
+                self._engine_driven_context.prepare_retrieve_group_raw_async(
+                    key, instance_id, g_idx
+                )
+                for g_idx in range(num_groups)
+            ]
+            group_chunks: list[list[torch.Tensor]] = []
+            ok = True
+            for g_idx, fut in enumerate(retrieve_futs):
+                # Keep draining all futures even after a failure so no
+                # response is left unconsumed.
+                try:
+                    response = fut.result(
+                        timeout=self._engine_driven_context.mq_timeout
+                    )
+                except TimeoutError:
+                    logger.error(
+                        "PREPARE_RETRIEVE_GROUP timed out (group=%d)", g_idx
+                    )
+                    ok = False
+                    continue
+                if response is None or not response.success or not response.data:
+                    # Cache miss for this group -> whole retrieve misses
+                    # (all-or-nothing, same semantics as the legacy
+                    # combined PREPARE_RETRIEVE path).
+                    ok = False
+                    continue
+                decoded = _deserialize_multi_group_chunks(response.data)
+                if len(decoded) != 1:
+                    logger.error(
+                        "PREPARE_RETRIEVE_GROUP: expected 1 group in "
+                        "response, got %d (group=%d)",
+                        len(decoded),
+                        g_idx,
+                    )
+                    ok = False
+                    continue
+                group_chunks.append(decoded[0])
+            if ok:
                 scatter_cpu_multi_group_to_paged_kv(
                     kv_caches,
                     block_ids,
