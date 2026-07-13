@@ -29,7 +29,7 @@ from lmcache.v1.gpu_connector.gpu_ops import (
     lmcache_memcpy_async_h2d,
 )
 from lmcache.v1.gpu_connector.utils import LayoutHints
-from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
+from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
@@ -879,6 +879,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             engine_group_infos=engine_group_infos,
             engine_type=engine_type,
             separate_object_groups=self._ctx.separate_object_groups,
+            full_sw_kv=self._ctx.full_sw_kv,
         )
         layout_desc = get_layout_desc(
             cache_context, self._ctx.chunk_size, object_group_id=0

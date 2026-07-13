@@ -22,6 +22,7 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
+from lmcache.v1.platform import current_device_spec
 
 # Store the tensor objects in memory so that they can be accessed
 # outside the scope of this file
@@ -545,7 +546,7 @@ def alloc_shm_pinned_ptr(size: int, shm_name: str = "") -> int:
     _shm_registry[ptr] = shm
 
     # Try to pin the SHM buffer for async D2H copies
-    if torch_dev.ext.pin_memory(ptr, size):
+    if current_device_spec.pin_memory(ptr, size):
         _pinned_ptr_registry[ptr] = size
 
     return ptr
@@ -557,7 +558,7 @@ def free_shm_pinned_ptr(ptr: int, size: int = 0, shm_name: str = "") -> None:
 
     # Unpin if previously registered
     if ptr in _pinned_ptr_registry:
-        torch_dev.ext.unpin_memory(ptr)
+        current_device_spec.unpin_memory(ptr)
         _pinned_ptr_registry.pop(ptr, None)
 
     # Release in order: tensor -> ctypes buf -> shm
