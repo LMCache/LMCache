@@ -22,6 +22,12 @@ requires *zero* edits to this module -- drop a new
 automatically.
 """
 
+# Future
+from __future__ import annotations
+
+# Standard
+from typing import TYPE_CHECKING
+
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.platform._device_detect import (
@@ -31,7 +37,6 @@ from lmcache.v1.platform._device_detect import get_device_spec as get_device_spe
 from lmcache.v1.platform._device_detect import (
     get_torch_device,
 )
-from lmcache.v1.platform.base_device_ops import DeviceOps
 from lmcache.v1.platform.base_device_spec import DeviceSpec
 from lmcache.v1.platform.event_notifier import HAS_EVENTFD as HAS_EVENTFD
 from lmcache.v1.platform.event_notifier import EventfdNotifier as EventfdNotifier
@@ -41,6 +46,10 @@ from lmcache.v1.platform.event_notifier import consume_fd as consume_fd
 from lmcache.v1.platform.event_notifier import (
     create_event_notifier as create_event_notifier,
 )
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.platform.base_device_ops import DeviceOps
 
 logger = init_logger(__name__)
 
