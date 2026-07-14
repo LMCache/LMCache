@@ -1,29 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 """The unified per-device ops abstraction (the ``lmcache.c_ops`` surface).
 
-:class:`DeviceOps` owns the full op contract with a device-agnostic torch
-baseline from :mod:`lmcache.v1.platform.torch_ops`.  Each op is a real
-``staticmethod`` on the class, resolved via normal MRO.  Accelerator subclasses
-override individual ops or call :func:`bind_native` (usually via
-:meth:`ensure_native`) to bulk-bind a compiled ``.so``.
-
-The class itself is the single source of truth: op names are discovered by
-iterating :meth:`DeviceOps.iter_ops` / :meth:`DeviceOps.iter_native_types`,
-so there is no parallel string list to keep in sync.
-
-:func:`bind_native` is a class-decorator factory: ``bind_native(module)(cls)``
-overwrites every staticmethod op found in *module* onto *cls*.
+:class:`DeviceOps` is a strategy base class whose every op is an instance
+method delegating to :mod:`lmcache.v1.platform.torch_ops`.  Accelerator
+subclasses override individual methods with native kernels via normal OO
+polymorphism, or bulk-rebind via :meth:`DeviceOps.bind_native`.
 """
 
 # Future
 from __future__ import annotations
 
 # Standard
-from typing import Callable, ClassVar, Iterator
+from typing import TYPE_CHECKING, ClassVar
+
+if TYPE_CHECKING:
+    # Third Party
+    import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.platform import torch_ops as _ops
+from lmcache.v1.platform import ops_types, torch_ops
 from lmcache.v1.platform.ops_types import (
     BatchStep,
     EngineKVFormat,
@@ -37,99 +33,23 @@ from lmcache.v1.platform.ops_types import (
 
 logger = init_logger(__name__)
 
-# ─── Decorator ─────────────────────────────────────────────────────────
-
-
-def bind_native(module: object) -> Callable[[type[DeviceOps]], type[DeviceOps]]:
-    """Class-decorator factory: bulk-bind native ops from *module* onto a class.
-
-    Usage::
-
-        @bind_native(compiled_module)
-        class MyDeviceOps(DeviceOps): ...
-
-    Or applied lazily inside ``ensure_native()``::
-
-        bind_native(native)(cls)
-
-    The class itself is the SSOT: for every op name yielded by
-    :meth:`DeviceOps.iter_ops`, if *module* exports it, the class attribute
-    is overwritten with ``staticmethod(fn)``.  Types yielded by
-    :meth:`DeviceOps.iter_native_types` are also rebound (for pybind enum
-    identity).
-
-    Args:
-        module: The compiled native module or object containing the native ops.
-
-    Returns:
-        A decorator function that takes a DeviceOps subclass and returns it
-        with native ops bound.
-    """
-
-    def decorator(cls: type[DeviceOps]) -> type[DeviceOps]:
-        bound_ops = 0
-        bound_types = 0
-        for name in cls.iter_ops():
-            fn = getattr(module, name, None)
-            if fn is not None:
-                setattr(cls, name, staticmethod(fn))
-                bound_ops += 1
-        for type_name in cls.iter_native_types():
-            t = getattr(module, type_name, None)
-            if t is not None:
-                setattr(cls, type_name, t)
-                bound_types += 1
-        # Maintain GPUKVFormat alias
-        ekf = getattr(module, "EngineKVFormat", None)
-        if ekf is not None:
-            cls.GPUKVFormat = ekf  # type: ignore[attr-defined]
-        logger.debug(
-            "bind_native: %s <- %s (%d ops, %d types)",
-            cls.__name__,
-            getattr(module, "__name__", repr(module)),
-            bound_ops,
-            bound_types,
-        )
-        return cls
-
-    return decorator
-
-
-# ─── Base class ────────────────────────────────────────────────────────
-
 
 class DeviceOps:
-    """Strategy base: per-device ops resolved via MRO.
+    """Strategy base: per-device ops resolved via normal instance MRO.
 
-    Every op is a ``staticmethod`` on the class delegating to the torch
-    baseline in :mod:`~lmcache.v1.platform.torch_ops`.
-    Accelerator subclasses either:
+    Every op is an instance method delegating to the torch baseline in
+    :mod:`~lmcache.v1.platform.torch_ops`.  Accelerator subclasses either:
 
-    - Override individual ops (e.g. MUSA overrides one transfer op).
-    - Call ``bind_native(module)(cls)`` in :meth:`ensure_native` to
-      bulk-overwrite all ops the compiled extension exports.
+    - Override individual methods (e.g. MUSA overrides
+      :meth:`multi_layer_block_kv_transfer`).
+    - Call :meth:`bind_native` in :meth:`ensure_native` to bulk-rebind
+      all ops the compiled extension exports.
 
-    The ``lmcache.c_ops`` shim reads attributes directly off the resolved
-    class after :meth:`ensure_native` has been called.
+    The ``lmcache.c_ops`` shim forwards attribute access to a resolved
+    singleton instance so module-level call sites keep working.
     """
 
     device_type: ClassVar[str] = ""  # base is unregistered
-    _native_bound: ClassVar[bool] = False
-
-    # Names that are class metadata / non-op helpers rather than ops.
-    # ``set_shape_desc_dtype`` is a Python-only ``staticmethod`` that must not
-    # be treated as a native op (native modules do not export it).
-    _NON_OP_STATICMETHODS: ClassVar[frozenset[str]] = frozenset(
-        {"set_shape_desc_dtype"}
-    )
-    # Type attributes that are aliases; ``bind_native`` should not rebind them
-    # as native types (``GPUKVFormat`` is a back-compat alias managed manually).
-    _ALIAS_TYPES: ClassVar[frozenset[str]] = frozenset({"GPUKVFormat"})
-
-    #: All op names on this class (auto-populated at end of module).
-    OPS: ClassVar[frozenset[str]]
-    #: All native type names on this class (auto-populated at end of module).
-    NATIVE_TYPES: ClassVar[frozenset[str]]
 
     # ── Shared types (explicit for static analysis) ────────────────────
     TransferDirection = TransferDirection
@@ -142,112 +62,195 @@ class DeviceOps:
     KernelGroupSpec = KernelGroupSpec
     set_shape_desc_dtype = staticmethod(set_shape_desc_dtype)
 
-    # ── Ops: memory alloc / free ─────────────────────────────────────
-    alloc_hugepage_pinned_numa_ptr = staticmethod(_ops.alloc_hugepage_pinned_numa_ptr)
-    alloc_hugepage_pinned_ptr = staticmethod(_ops.alloc_hugepage_pinned_ptr)
-    alloc_numa_ptr = staticmethod(_ops.alloc_numa_ptr)
-    alloc_pinned_numa_ptr = staticmethod(_ops.alloc_pinned_numa_ptr)
-    alloc_pinned_ptr = staticmethod(_ops.alloc_pinned_ptr)
-    alloc_shm_pinned_ptr = staticmethod(_ops.alloc_shm_pinned_ptr)
-    free_hugepage_pinned_numa_ptr = staticmethod(_ops.free_hugepage_pinned_numa_ptr)
-    free_hugepage_pinned_ptr = staticmethod(_ops.free_hugepage_pinned_ptr)
-    free_numa_ptr = staticmethod(_ops.free_numa_ptr)
-    free_pinned_numa_ptr = staticmethod(_ops.free_pinned_numa_ptr)
-    free_pinned_ptr = staticmethod(_ops.free_pinned_ptr)
-    free_shm_pinned_ptr = staticmethod(_ops.free_shm_pinned_ptr)
-
-    # ── Ops: KV transfer ─────────────────────────────────────────────
-    execute_object_group_transfer = staticmethod(_ops.execute_object_group_transfer)
-    multi_layer_block_kv_transfer = staticmethod(_ops.multi_layer_block_kv_transfer)
-    multi_layer_kv_transfer = staticmethod(_ops.multi_layer_kv_transfer)
-    multi_layer_kv_transfer_unilateral = staticmethod(_ops.multi_layer_kv_transfer_unilateral)
-    single_layer_kv_transfer = staticmethod(_ops.single_layer_kv_transfer)
-    single_layer_kv_transfer_sgl = staticmethod(_ops.single_layer_kv_transfer_sgl)
-
-    # ── Ops: KV reshape ──────────────────────────────────────────────
-    load_and_reshape_flash = staticmethod(_ops.load_and_reshape_flash)
-    reshape_and_cache_back_flash = staticmethod(_ops.reshape_and_cache_back_flash)
-
-    # ── Ops: codec ───────────────────────────────────────────────────
-    calculate_cdf = staticmethod(_ops.calculate_cdf)
-    decode_fast_new = staticmethod(_ops.decode_fast_new)
-    decode_fast_prefsum = staticmethod(_ops.decode_fast_prefsum)
-    encode_fast_new = staticmethod(_ops.encode_fast_new)
-
-    # ── Ops: format query ────────────────────────────────────────────
-    is_cross_layer = staticmethod(_ops.is_cross_layer)
-    is_kv_list = staticmethod(_ops.is_kv_list)
-    is_layer_list = staticmethod(_ops.is_layer_list)
-    is_mla = staticmethod(_ops.is_mla)
-
-    # ── Ops: async / event recording ─────────────────────────────────
-    drain_recorded_completions = staticmethod(_ops.drain_recorded_completions)
-    drain_recorded_events = staticmethod(_ops.drain_recorded_events)
-    record_completion_on_stream = staticmethod(_ops.record_completion_on_stream)
-    record_event_on_stream = staticmethod(_ops.record_event_on_stream)
-
-    # ── Ops: misc ────────────────────────────────────────────────────
-    batched_memcpy = staticmethod(_ops.batched_memcpy)
-    get_gpu_pci_bus_id = staticmethod(_ops.get_gpu_pci_bus_id)
-    lmcache_memcpy_async = staticmethod(_ops.lmcache_memcpy_async)
-    rotary_embedding_k_fused = staticmethod(_ops.rotary_embedding_k_fused)
-
-    # ── Introspection (SSOT for op / type names) ─────────────────────
-
-    @classmethod
-    def iter_ops(cls) -> Iterator[str]:
-        """Yield the names of every op defined on the class.
-
-        An op is any public ``staticmethod`` on the class, excluding helpers
-        listed in :attr:`_NON_OP_STATICMETHODS`.  The class hierarchy is the
-        single source of truth: adding a new op to :class:`DeviceOps` (or a
-        subclass) automatically exposes it here without touching any parallel
-        list.
-        """
-        seen: set[str] = set()
-        for klass in cls.__mro__:
-            for name, raw in vars(klass).items():
-                if name.startswith("_") or name in seen:
-                    continue
-                if name in cls._NON_OP_STATICMETHODS:
-                    seen.add(name)
-                    continue
-                # ``staticmethod`` in the class dict wraps the callable.
-                if isinstance(raw, staticmethod):
-                    seen.add(name)
-                    yield name
-
-    @classmethod
-    def iter_native_types(cls) -> Iterator[str]:
-        """Yield the names of native-rebindable type attributes on the class.
-
-        A native type is any public class attribute whose value is a ``type``,
-        excluding aliases listed in :attr:`_ALIAS_TYPES`.
-        """
-        seen: set[str] = set()
-        for klass in cls.__mro__:
-            for name, raw in vars(klass).items():
-                if name.startswith("_") or name in seen:
-                    continue
-                if name in cls._ALIAS_TYPES:
-                    seen.add(name)
-                    continue
-                if isinstance(raw, type):
-                    seen.add(name)
-                    yield name
+    def __init__(self) -> None:
+        self._native_bound: bool = False
 
     # ── Lazy native binding ───────────────────────────────────────────
 
-    @classmethod
-    def ensure_native(cls) -> None:
+    def ensure_native(self) -> None:
         """Attempt to load and bind the compiled native extension.
 
-        Subclasses override this to ``lmcache.c_ops`` then call
-        ``bind_native(native)(cls)``.  Guarded by ``_native_bound``
-        so it runs at most once per class.
+        Subclasses override this to import their compiled module and call
+        :meth:`bind_native`.  The base class is a no-op (pure torch).
+        Guarded by ``_native_bound`` so it runs at most once per instance.
         """
 
+    def bind_native(self, module: object) -> None:
+        """Rebind ops and types on this instance from a compiled native module.
 
-# Freeze the op/type name sets for visibility and fast membership checks.
-DeviceOps.OPS = frozenset(DeviceOps.iter_ops())
-DeviceOps.NATIVE_TYPES = frozenset(DeviceOps.iter_native_types())
+        Walks ``vars(DeviceOps)`` once.  For each public name:
+
+        - function → rebind as native callable on self
+        - type → rebind for pybind enum/class identity
+
+        The class body is the SSOT: add a method here and it is
+        automatically eligible for native rebinding.
+        """
+        bound_ops = 0
+        bound_types = 0
+        for name, member in vars(DeviceOps).items():
+            if name.startswith("_") or name == "ensure_native":
+                continue
+            native_sym = getattr(module, name, None)
+            if native_sym is None:
+                continue
+            if isinstance(member, type):
+                setattr(self, name, native_sym)
+                bound_types += 1
+            elif callable(member):
+                setattr(self, name, native_sym)
+                bound_ops += 1
+        # GPUKVFormat alias → EngineKVFormat on native side
+        ekf = getattr(module, "EngineKVFormat", None)
+        if ekf is not None:
+            self.GPUKVFormat = ekf
+        logger.debug(
+            "bind_native: %s <- %s (%d ops, %d types)",
+            type(self).__name__,
+            getattr(module, "__name__", repr(module)),
+            bound_ops,
+            bound_types,
+        )
+
+    # ── Ops: memory alloc / free ─────────────────────────────────────
+
+    def alloc_hugepage_pinned_numa_ptr(self, size, numa_id=0):
+        return torch_ops.alloc_hugepage_pinned_numa_ptr(size, numa_id)
+
+    def alloc_hugepage_pinned_ptr(self, size, device_id=0):
+        return torch_ops.alloc_hugepage_pinned_ptr(size, device_id)
+
+    def alloc_numa_ptr(self, size, numa_id=0):
+        return torch_ops.alloc_numa_ptr(size, numa_id)
+
+    def alloc_pinned_numa_ptr(self, size, numa_id=0):
+        return torch_ops.alloc_pinned_numa_ptr(size, numa_id)
+
+    def alloc_pinned_ptr(self, size, device_id=0):
+        return torch_ops.alloc_pinned_ptr(size, device_id)
+
+    def alloc_shm_pinned_ptr(self, size, shm_name=""):
+        return torch_ops.alloc_shm_pinned_ptr(size, shm_name)
+
+    def free_hugepage_pinned_numa_ptr(self, ptr, size=0):
+        return torch_ops.free_hugepage_pinned_numa_ptr(ptr, size)
+
+    def free_hugepage_pinned_ptr(self, ptr, size=0):
+        return torch_ops.free_hugepage_pinned_ptr(ptr, size)
+
+    def free_numa_ptr(self, ptr, size=None):
+        return torch_ops.free_numa_ptr(ptr, size)
+
+    def free_pinned_numa_ptr(self, ptr, size=None):
+        return torch_ops.free_pinned_numa_ptr(ptr, size)
+
+    def free_pinned_ptr(self, ptr):
+        return torch_ops.free_pinned_ptr(ptr)
+
+    def free_shm_pinned_ptr(self, ptr, size=0, shm_name=""):
+        return torch_ops.free_shm_pinned_ptr(ptr, size, shm_name)
+
+    # ── Ops: KV transfer ─────────────────────────────────────────────
+
+    def execute_object_group_transfer(self, *args, **kwargs):
+        return torch_ops.execute_object_group_transfer(*args, **kwargs)
+
+    def multi_layer_block_kv_transfer(
+        self,
+        paged_buffer_ptrs_tensor: "torch.Tensor | list",
+        lmcache_objects_ptrs: "list[int] | list[torch.Tensor]",
+        block_ids: "torch.Tensor | list[int]",
+        device: "torch.device | str",
+        direction: ops_types.TransferDirection,
+        shape_desc: ops_types.PageBufferShapeDesc,
+        lmcache_chunk_size: int,
+        engine_kv_format: ops_types.EngineKVFormat,
+        skip_prefix_n_blocks: int,
+    ) -> None:
+        return torch_ops.multi_layer_block_kv_transfer(
+            paged_buffer_ptrs_tensor,
+            lmcache_objects_ptrs,
+            block_ids,
+            device,
+            direction,
+            shape_desc,
+            lmcache_chunk_size,
+            engine_kv_format,
+            skip_prefix_n_blocks,
+        )
+
+    def multi_layer_kv_transfer(self, *args, **kwargs):
+        return torch_ops.multi_layer_kv_transfer(*args, **kwargs)
+
+    def multi_layer_kv_transfer_unilateral(self, *args, **kwargs):
+        return torch_ops.multi_layer_kv_transfer_unilateral(*args, **kwargs)
+
+    def single_layer_kv_transfer(self, *args, **kwargs):
+        return torch_ops.single_layer_kv_transfer(*args, **kwargs)
+
+    def single_layer_kv_transfer_sgl(self, *args, **kwargs):
+        return torch_ops.single_layer_kv_transfer_sgl(*args, **kwargs)
+
+    # ── Ops: KV reshape ──────────────────────────────────────────────
+
+    def load_and_reshape_flash(self, *args, **kwargs):
+        return torch_ops.load_and_reshape_flash(*args, **kwargs)
+
+    def reshape_and_cache_back_flash(self, *args, **kwargs):
+        return torch_ops.reshape_and_cache_back_flash(*args, **kwargs)
+
+    # ── Ops: codec ───────────────────────────────────────────────────
+
+    def calculate_cdf(self, input_tensor, num_bins):
+        return torch_ops.calculate_cdf(input_tensor, num_bins)
+
+    def decode_fast_new(self, cdf, bytestreams, lengths, output):
+        return torch_ops.decode_fast_new(cdf, bytestreams, lengths, output)
+
+    def decode_fast_prefsum(self, cdf, bytestreams, lengths_prefsum, output):
+        return torch_ops.decode_fast_prefsum(cdf, bytestreams, lengths_prefsum, output)
+
+    def encode_fast_new(self, cdf, input_sym, output_buffer, output_lengths):
+        return torch_ops.encode_fast_new(cdf, input_sym, output_buffer, output_lengths)
+
+    # ── Ops: format query ────────────────────────────────────────────
+
+    def is_cross_layer(self, engine_kv_format):
+        return torch_ops.is_cross_layer(engine_kv_format)
+
+    def is_kv_list(self, engine_kv_format):
+        return torch_ops.is_kv_list(engine_kv_format)
+
+    def is_layer_list(self, engine_kv_format):
+        return torch_ops.is_layer_list(engine_kv_format)
+
+    def is_mla(self, engine_kv_format):
+        return torch_ops.is_mla(engine_kv_format)
+
+    # ── Ops: async / event recording ─────────────────────────────────
+
+    def drain_recorded_completions(self):
+        return torch_ops.drain_recorded_completions()
+
+    def drain_recorded_events(self):
+        return torch_ops.drain_recorded_events()
+
+    def record_completion_on_stream(self, *args, **kwargs):
+        return torch_ops.record_completion_on_stream(*args, **kwargs)
+
+    def record_event_on_stream(self, *args, **kwargs):
+        return torch_ops.record_event_on_stream(*args, **kwargs)
+
+    # ── Ops: misc ────────────────────────────────────────────────────
+
+    def batched_memcpy(self, src_ptrs, dst_ptrs, sizes):
+        return torch_ops.batched_memcpy(src_ptrs, dst_ptrs, sizes)
+
+    def get_gpu_pci_bus_id(self, device_id=0):
+        return torch_ops.get_gpu_pci_bus_id(device_id)
+
+    def lmcache_memcpy_async(self, *args, **kwargs):
+        return torch_ops.lmcache_memcpy_async(*args, **kwargs)
+
+    def rotary_embedding_k_fused(self, *args, **kwargs):
+        return torch_ops.rotary_embedding_k_fused(*args, **kwargs)

@@ -423,7 +423,7 @@ def test_musa_ops_block_transfer_entry_dispatches_to_musa_platform(
 
     paged_layers = [torch.zeros(4, 4, 16) for _ in range(2)]
     object_tensors = [torch.zeros(2, 8, 16)]
-    MusaDeviceOps.multi_layer_block_kv_transfer(
+    MusaDeviceOps().multi_layer_block_kv_transfer(
         paged_layers,
         object_tensors,
         [0, 1],

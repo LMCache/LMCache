@@ -30,7 +30,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 # First Party
-from lmcache.v1.platform.base_device_ops import DeviceOps
 from lmcache.v1.platform.base_pin_memory import PinMemoryBackend
 
 if TYPE_CHECKING:
@@ -54,6 +53,8 @@ class DeviceSpec:
 
     # Cached pin-memory backend instance (lazy-initialized).
     _pin_backend_cache: PinMemoryBackend | None = None
+    # Cached DeviceOps singleton instance (lazy-initialized).
+    _ops_cache: DeviceOps | None = None
 
     @property
     def device_type(self) -> str:
@@ -90,7 +91,24 @@ class DeviceSpec:
             fallback spec. Accelerator subclasses override this property to
             return their backend-specific DeviceOps subclass.
         """
+        # First Party
+        from lmcache.v1.platform.base_device_ops import DeviceOps
+
         return DeviceOps
+
+    def get_ops(self) -> DeviceOps:
+        """Return the cached :class:`DeviceOps` singleton for this spec.
+
+        Lazy-initialized on first access.  Calls :meth:`ensure_native`
+        so native ops are bound before the instance is used.  The same
+        instance is reused process-wide for a given spec.
+        """
+        ops = self._ops_cache
+        if ops is None:
+            ops = self.ops_cls()
+            ops.ensure_native()
+            self._ops_cache = ops
+        return ops
 
     def is_available(self) -> bool:
         """Return ``True`` when the device is usable on this system.

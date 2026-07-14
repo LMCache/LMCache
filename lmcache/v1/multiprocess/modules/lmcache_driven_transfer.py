@@ -48,18 +48,21 @@ from lmcache.v1.multiprocess.native_completion import (
     submit_callback_to_stream,
 )
 from lmcache.v1.multiprocess.protocols.base import RequestType
-from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.base_cache_context import BaseCacheContext
 from lmcache.v1.platform.cache_context import create_cache_context
+from lmcache.v1.platform.ops_types import _NativePlanType
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
-# ``lmc_ops.execute_object_group_transfer`` is either a native callable (bound
-# by ``bind_native`` on accelerators) or the torch baseline stub
-# (a native-only op that raises). Identity against the baseline tells us whether
-# a real native implementation is present.
-_HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = (
-    lmc_ops.execute_object_group_transfer is not torch_ops.execute_object_group_transfer
+# The object-group transfer path requires the compiled c_ops extension:
+# it constructs pybind plan types (``KernelGroupSpec`` etc.) and calls
+# ``execute_object_group_transfer`` on them.  If ``KernelGroupSpec`` on
+# the ``lmcache.c_ops`` shim is still the pure-Python ``_NativePlanType``
+# stub, native binding didn't happen and we must fall back to the
+# per-object copy path instead of building an unusable plan.
+_HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = not (
+    isinstance(lmc_ops.KernelGroupSpec, type)
+    and issubclass(lmc_ops.KernelGroupSpec, _NativePlanType)
 )
 
 

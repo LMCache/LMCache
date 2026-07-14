@@ -59,7 +59,7 @@ PYBIND11_MODULE(xpu_ops, m) {
         py::call_guard<py::gil_scoped_release>());
 
   // CacheGen / RoPE kernels (Intel XPU).  Names match the
-  // lmcache.v1.platform._torch_ops baseline so the backend selection in
+  // lmcache.v1.platform.torch_ops baseline so the backend selection in
   // lmcache.v1.platform can transparently override.
   m.def("calculate_cdf", &calculate_cdf_xpu, py::arg("input"),
         py::arg("max_bins"));

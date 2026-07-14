@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """MUSA ops backend: the torch baseline with one native override.
 
-:class:`MusaDeviceOps` overrides ``multi_layer_block_kv_transfer`` to try the
-native MUSA path first (when inputs are tensor-backed) and fall back to the
-torch baseline otherwise.  Every other op inherits the baseline via MRO.
+:class:`MusaDeviceOps` overrides :meth:`multi_layer_block_kv_transfer` to
+try the native MUSA path first (when inputs are tensor-backed) and fall
+back to the torch baseline otherwise.  Every other op inherits the
+baseline via MRO.
 """
 
 # Future
@@ -64,7 +65,7 @@ def _musa_multi_layer_block_kv_transfer(
     ):
         return
 
-    return torch_ops.multi_layer_block_kv_transfer(
+    torch_ops.multi_layer_block_kv_transfer(
         paged_buffer_ptrs_tensor,
         lmcache_objects_ptrs,
         block_ids,
@@ -80,7 +81,5 @@ def _musa_multi_layer_block_kv_transfer(
 class MusaDeviceOps(DeviceOps):
     device_type: ClassVar[str] = "musa"
 
-    # Override just this one op via MRO.
-    multi_layer_block_kv_transfer = staticmethod(  # type: ignore[assignment]
-        _musa_multi_layer_block_kv_transfer
-    )
+    def multi_layer_block_kv_transfer(self, *args, **kwargs) -> None:
+        _musa_multi_layer_block_kv_transfer(*args, **kwargs)

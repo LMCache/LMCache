@@ -22,8 +22,11 @@ requires *zero* edits to this module -- drop a new
 automatically.
 """
 
+# Future
+from __future__ import annotations
+
 # Standard
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import os
 
 # First Party
@@ -36,8 +39,12 @@ from lmcache.v1.platform._device_detect import (
     get_torch_device,
 )
 from lmcache.v1.utils.subclass_discovery import discover_subclasses
-from lmcache.v1.platform.base_device_ops import DeviceOps
 from lmcache.v1.platform.base_device_spec import DeviceSpec
+
+if TYPE_CHECKING:
+    from lmcache.v1.platform.base_device_ops import DeviceOps
+
+# First Party
 from lmcache.v1.platform.event_notifier import HAS_EVENTFD as HAS_EVENTFD
 from lmcache.v1.platform.event_notifier import EventfdNotifier as EventfdNotifier
 from lmcache.v1.platform.event_notifier import EventNotifier as EventNotifier
@@ -175,6 +182,34 @@ def resolve_kv_wrapper_factory(device_type: str) -> Any:
     return getattr(wrapper_cls, "wrap", wrapper_cls)
 
 
+# Fallback device spec for "" / "cpu" when not in registry (cached to preserve
+# singleton semantics on get_ops()).
+_FALLBACK_CPU_SPEC: DeviceSpec = DeviceSpec()
+
+
+def _resolve_device_spec(device_type: str) -> DeviceSpec:
+    """Resolve the :class:`DeviceSpec` for *device_type*.
+
+    ``"cpu"`` normally resolves through the registry; ``""`` uses the bare
+    :class:`DeviceSpec` fallback.  If ``"cpu"`` is absent from the registry
+    (e.g. tests strip it), it also falls back.
+
+    Raises:
+        RuntimeError: If an accelerator device has no registered spec.
+    """
+    dev_spec = _DEVICE_REGISTRY.get(device_type)
+    if dev_spec is not None:
+        return dev_spec
+    if device_type in ("", "cpu"):
+        return _FALLBACK_CPU_SPEC
+    raise RuntimeError(
+        f"No DeviceSpec registered for accelerator {device_type!r}; "
+        "refusing to silently fall back to the torch baseline on "
+        "accelerator hardware. Ensure the platform sub-package for this "
+        "device is importable and defines a DeviceSpec."
+    )
+
+
 def resolve_device_ops_cls(device_type: str) -> type[DeviceOps]:
     """Resolve the ``DeviceOps`` class for *device_type*.
 
@@ -183,30 +218,19 @@ def resolve_device_ops_cls(device_type: str) -> type[DeviceOps]:
 
     Returns:
         The resolved :class:`DeviceOps` subclass for the requested device.
-        ``"cpu"`` normally resolves through :class:`CpuDeviceSpec`, while
-        ``""`` uses the bare :class:`DeviceSpec` fallback. If tests or
-        CLI-only fallback paths deliberately remove the CPU spec from the
-        registry to exercise or simulate the minimal baseline path, ``"cpu"``
-        also falls back to the bare baseline.
-
-    Raises:
-        RuntimeError: If an accelerator device has no registered
-            :class:`DeviceSpec`, since silently falling back to the torch
-            baseline on accelerator hardware would mask configuration errors.
     """
-    spec = _DEVICE_REGISTRY.get(device_type)
-    if spec is None:
-        if device_type in ("", "cpu"):
-            spec = DeviceSpec()
-        else:
-            raise RuntimeError(
-                f"No DeviceSpec registered for accelerator {device_type!r}; "
-                "refusing to silently fall back to the torch baseline on "
-                "accelerator hardware. Ensure the platform sub-package for this "
-                "device is importable and defines a DeviceSpec with ops_cls."
-            )
+    return _resolve_device_spec(device_type).ops_cls
 
-    return spec.ops_cls
+
+def resolve_device_ops(device_type: str) -> DeviceOps:
+    """Resolve the :class:`DeviceOps` **instance** for *device_type*.
+
+    Returns a cached singleton via :meth:`DeviceSpec.get_ops`.  Callers
+    hitting the same *device_type* twice always get the same instance, so
+    any state set on it (native handles, cached lookups) is shared across
+    the process.
+    """
+    return _resolve_device_spec(device_type).get_ops()
 
 
 torch_dev, torch_device_type = get_torch_device()

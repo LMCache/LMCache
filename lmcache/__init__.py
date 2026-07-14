@@ -28,28 +28,25 @@ __all__ = ["__version__", "torch_dev", "torch_device_type"]
 # Backward-compat ``lmcache.c_ops`` shim
 # --------------------------
 def _install_c_ops_shim() -> None:
-    """Register ``lmcache.c_ops`` as the resolved :class:`DeviceOps` class.
+    """Register ``lmcache.c_ops`` as the resolved :class:`DeviceOps` instance.
 
-    Calls :meth:`DeviceOps.ensure_native` to lazily bind the compiled
-    extension, then registers the class itself as the ``lmcache.c_ops``
-    module.  Since all ops are staticmethods and types are class attrs,
+    Resolves the singleton :class:`DeviceOps` instance for the detected
+    device (which calls :meth:`ensure_native` internally), then registers
+    a PEP 562 shim module that forwards attribute access to it.
+
+    Since all ops are instance methods and types are instance/class attrs,
     ``c_ops.multi_layer_kv_transfer(...)`` resolves with zero overhead.
-
-    The installed ``shim`` uses the PEP 562 module-level ``__getattr__``
-    hook: Python only calls it when an attribute is NOT already present
-    on the module's own namespace, and it forwards the lookup live to
-    ``ops_cls``. This gives ``lmcache.c_ops.foo`` MRO-based resolution
-    with no dict snapshot, so later ``setattr(ops_cls, ...)`` patches
-    (e.g. from tests) remain visible.
+    Later ``setattr(ops_instance, ...)`` patches (e.g. from tests) remain
+    visible through the live ``__getattr__`` forwarding.
     """
     # First Party
-    from lmcache.v1.platform import resolve_device_ops_cls
+    from lmcache.v1.platform import resolve_device_ops
 
-    ops_cls = resolve_device_ops_cls(torch_device_type)
-    ops_cls.ensure_native()
+    ops = resolve_device_ops(torch_device_type)
 
     shim = types.ModuleType("lmcache.c_ops")
-    shim.__getattr__ = lambda name: getattr(ops_cls, name)  # type: ignore[method-assign]
+    shim.__getattr__ = lambda name: getattr(ops, name)  # type: ignore[method-assign]
+    shim.__dir__ = lambda: dir(ops)  # type: ignore[method-assign]
     sys.modules["lmcache.c_ops"] = shim
     globals()["c_ops"] = shim  # parent attr for IMPORT_FROM bytecode
 

@@ -20,10 +20,11 @@ from __future__ import annotations
 
 # Standard
 from enum import IntEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-# Third Party
-import torch
+if TYPE_CHECKING:
+    # Third Party
+    import torch
 
 
 class TransferDirection(IntEnum):

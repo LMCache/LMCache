@@ -3,19 +3,20 @@
 
 These tests are the acceptance gate for the DeviceOps hierarchy.  They stay
 platform-agnostic by exercising the torch baseline, the ``DeviceSpec``
-dispatch, the ``lmcache.c_ops`` shim, and the ``bind_native`` decorator
+dispatch, the ``lmcache.c_ops`` shim, and instance-level ``bind_native``
 without requiring any compiled accelerator module.
 """
 
 # Standard
 from typing import Any
+import inspect
 
 # Third Party
 import pytest
 
 # First Party
-from lmcache.v1.platform import resolve_device_ops_cls, torch_ops
-from lmcache.v1.platform.base_device_ops import DeviceOps, bind_native
+from lmcache.v1.platform import resolve_device_ops, resolve_device_ops_cls
+from lmcache.v1.platform.base_device_ops import DeviceOps
 from lmcache.v1.platform.base_device_spec import DeviceSpec
 from lmcache.v1.platform.cpu.device_ops import CpuDeviceOps
 from lmcache.v1.platform.ops_types import (
@@ -28,6 +29,18 @@ from lmcache.v1.platform.ops_types import (
     TransferDirection,
 )
 import lmcache.v1.platform as platform_pkg
+
+# Derive op names from the class body: regular instance-method functions,
+# excluding infrastructure helpers.
+_OP_NAMES: tuple[str, ...] = tuple(
+    sorted(
+        name
+        for name, member in vars(DeviceOps).items()
+        if not name.startswith("_")
+        and name not in ("ensure_native", "bind_native")
+        and inspect.isfunction(member)
+    )
+)
 
 
 @pytest.fixture
@@ -44,13 +57,16 @@ def isolated_registry() -> Any:
 # -- Contract --------------------------------------------------------------
 
 
-def test_base_class_has_every_op_as_callable() -> None:
-    """DeviceOps exposes all ops as class-level callables (staticmethods)."""
-    for name in DeviceOps.iter_ops():
-        fn = getattr(DeviceOps, name)
-        assert callable(fn), name
-        # Must be the torch baseline function directly
-        assert fn is getattr(torch_ops, name), name
+def test_base_class_declares_every_op_as_instance_method() -> None:
+    """DeviceOps declares every op as a real instance method."""
+    ops = DeviceOps()
+    for name in _OP_NAMES:
+        bound = getattr(ops, name)
+        assert callable(bound), name
+        # Must be declared on the class body
+        assert name in vars(DeviceOps), (
+            f"{name} is not declared on the DeviceOps class body"
+        )
 
 
 def test_base_class_has_all_types() -> None:
@@ -67,33 +83,32 @@ def test_base_class_has_all_types() -> None:
 
 
 def test_every_registered_device_has_all_ops(isolated_registry: Any) -> None:
-    """Each discovered DeviceSpec resolves an ops class with all ops."""
+    """Each discovered DeviceSpec resolves an ops instance with all ops."""
     for device_type, spec in isolated_registry.items():
-        ops_cls = spec.ops_cls
-        for name in DeviceOps.iter_ops():
-            assert callable(getattr(ops_cls, name)), (device_type, name)
+        ops = spec.ops_cls()
+        for name in _OP_NAMES:
+            assert callable(getattr(ops, name)), (device_type, name)
 
 
 # -- Dispatch (MRO) --------------------------------------------------------
 
 
-def test_cpu_uses_torch_baseline() -> None:
-    """CpuDeviceOps adds no overrides: every op is the torch_ops function."""
-    for name in DeviceOps.iter_ops():
-        fn = getattr(CpuDeviceOps, name)
-        assert fn is getattr(torch_ops, name), name
+def test_cpu_inherits_baseline_verbatim() -> None:
+    """CpuDeviceOps adds no overrides: every method resolves to the base."""
+    for name in _OP_NAMES:
+        assert getattr(CpuDeviceOps, name) is getattr(DeviceOps, name), name
 
 
 def test_musa_overrides_only_one_op() -> None:
-    """MusaDeviceOps overrides exactly one hot op; the rest are baseline."""
+    """MusaDeviceOps overrides exactly one hot op; the rest inherit base."""
     musa_mod = pytest.importorskip(
         "lmcache.v1.platform.musa.device_ops",
         reason="musa platform package unavailable",
     )
     overridden = [
         name
-        for name in DeviceOps.iter_ops()
-        if getattr(musa_mod.MusaDeviceOps, name) is not getattr(torch_ops, name)
+        for name in _OP_NAMES
+        if getattr(musa_mod.MusaDeviceOps, name) is not getattr(DeviceOps, name)
     ]
     assert overridden == ["multi_layer_block_kv_transfer"]
 
@@ -101,8 +116,8 @@ def test_musa_overrides_only_one_op() -> None:
 def test_musa_override_dispatches_native_first(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Calling multi_layer_block_kv_transfer on MusaDeviceOps dispatches
-    via the native MUSA path when inputs are tensor-backed."""
+    """Calling multi_layer_block_kv_transfer on a MusaDeviceOps instance
+    dispatches via the native MUSA path when inputs are tensor-backed."""
     # Third Party
     import torch
 
@@ -139,8 +154,8 @@ def test_musa_override_dispatches_native_first(
     shape_desc.kv_size = 2
     shape_desc.element_size = torch.empty((), dtype=torch.float32).element_size()
 
-    # Call through the class staticmethod (MRO resolution)
-    musa_mod.MusaDeviceOps.multi_layer_block_kv_transfer(
+    # Call through a fresh instance (regular OO polymorphism).
+    musa_mod.MusaDeviceOps().multi_layer_block_kv_transfer(
         paged,
         objects,
         [0, 1],
@@ -156,7 +171,7 @@ def test_musa_override_dispatches_native_first(
     assert captured["direction"] == TransferDirection.D2H
 
 
-# -- bind_native decorator -------------------------------------------------
+# -- bind_native -----------------------------------------------------------
 
 
 class _FakeNativeModule:
@@ -176,32 +191,27 @@ class _FakeNativeModule:
 
 
 def test_bind_native_shadows_baseline_for_present_ops() -> None:
-    """bind_native overwrites ops found in the module; rest keep baseline."""
+    """bind_native rebinds ops found in the module on that instance only."""
+    ops = DeviceOps()
+    ops.bind_native(_FakeNativeModule())
 
-    @bind_native(_FakeNativeModule())
-    class TestOps(DeviceOps):
-        device_type = "test-bind"
+    assert ops.multi_layer_kv_transfer() == "native-mlt"  # type: ignore[call-arg]
+    assert ops.calculate_cdf(None, 0) == "native-cdf"  # type: ignore[call-arg]
 
-    assert TestOps.multi_layer_kv_transfer() == "native-mlt"  # type: ignore[attr-defined, call-arg]
-    assert TestOps.calculate_cdf() == "native-cdf"  # type: ignore[attr-defined, call-arg]
-    # Ops absent from native keep the torch baseline
-    assert TestOps.single_layer_kv_transfer is torch_ops.single_layer_kv_transfer  # type: ignore[attr-defined]
+    # Other instances still see the torch baseline.
+    other = DeviceOps()
+    assert other.multi_layer_kv_transfer is not ops.multi_layer_kv_transfer  # type: ignore[attr-defined]
 
 
 def test_bind_native_ignores_symbols_absent_from_ops() -> None:
-    """Symbols on the module not in OPS are not copied to the class."""
-
-    @bind_native(_FakeNativeModule())
-    class TestOps(DeviceOps):
-        device_type = "test-bind2"
-
-    assert not hasattr(TestOps, "not_in_ops") or (
-        getattr(TestOps, "not_in_ops", None) is None
-    )
+    """Symbols on the module not in _OP_NAMES are not copied to the instance."""
+    ops = DeviceOps()
+    ops.bind_native(_FakeNativeModule())
+    assert "not_in_ops" not in vars(ops)
 
 
 def test_bind_native_rebinds_types() -> None:
-    """bind_native updates type class attributes from the module."""
+    """bind_native updates type instance attributes from the module."""
 
     class FakeTypes:
         class TransferDirection:
@@ -210,30 +220,39 @@ def test_bind_native_rebinds_types() -> None:
         class EngineKVFormat:
             pass
 
-    @bind_native(FakeTypes())
-    class TestOps(DeviceOps):
-        device_type = "test-types"
+    ops = DeviceOps()
+    ops.bind_native(FakeTypes())
 
-    assert TestOps.TransferDirection is FakeTypes.TransferDirection  # type: ignore[attr-defined]
-    assert TestOps.EngineKVFormat is FakeTypes.EngineKVFormat  # type: ignore[attr-defined]
-    assert TestOps.GPUKVFormat is FakeTypes.EngineKVFormat  # alias
+    assert ops.TransferDirection is FakeTypes.TransferDirection
+    assert ops.EngineKVFormat is FakeTypes.EngineKVFormat
+    assert ops.GPUKVFormat is FakeTypes.EngineKVFormat  # alias
 
 
 # -- Shim ------------------------------------------------------------------
 
 
 def test_c_ops_shim_has_all_ops_and_types() -> None:
-    """The lmcache.c_ops shim module exposes everything from OPS + types."""
+    """The lmcache.c_ops shim module exposes everything from _OP_NAMES + types."""
     # First Party
     import lmcache.c_ops as c_ops
 
-    for name in DeviceOps.iter_ops():
+    for name in _OP_NAMES:
         assert hasattr(c_ops, name), f"c_ops missing {name}"
         assert callable(getattr(c_ops, name))
     assert hasattr(c_ops, "TransferDirection")
     assert hasattr(c_ops, "EngineKVFormat")
     assert hasattr(c_ops, "GPUKVFormat")
     assert hasattr(c_ops, "PageBufferShapeDesc")
+
+
+def test_c_ops_shim_dir() -> None:
+    """The shim supports dir() for discoverability."""
+    # First Party
+    import lmcache.c_ops as c_ops
+
+    names = dir(c_ops)
+    assert "multi_layer_kv_transfer" in names
+    assert "TransferDirection" in names
 
 
 # -- DeviceSpec resolution -------------------------------------------------
@@ -243,6 +262,14 @@ def test_cpu_and_empty_string_resolve_to_expected_ops_classes() -> None:
     """``cpu`` resolves via CpuDeviceSpec; ``""`` uses the bare fallback."""
     assert resolve_device_ops_cls("cpu") is CpuDeviceOps
     assert resolve_device_ops_cls("") is DeviceOps
+
+
+def test_resolve_device_ops_returns_cached_singleton() -> None:
+    """Two lookups for the same device_type return the same instance."""
+    a = resolve_device_ops("cpu")
+    b = resolve_device_ops("cpu")
+    assert a is b
+    assert isinstance(a, CpuDeviceOps)
 
 
 def test_cpu_without_registered_spec_falls_back_to_base_device_ops(
