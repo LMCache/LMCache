@@ -417,6 +417,20 @@ class TestMPContinuous:
         reporter.flush()
         reporter.shutdown()
 
+    def test_malformed_interval_env_does_not_raise(self, usage_env, monkeypatch):
+        monkeypatch.setenv("LMCACHE_USAGE_TRACK_INTERVAL", "10m")
+        # Non-MP: constructed unguarded inside LMCacheStatsLogger.__init__,
+        # so the constructor itself must not raise.
+        context = ContinuousUsageContext.GetOrCreate(make_metadata())
+        assert context.min_logging_interval == 600
+        context.incr_or_send_stats(StubStats(interval_hit_tokens=1))
+        # MP: falls back to the default interval instead of losing telemetry.
+        sender = RecordingSender()
+        reporter = MPContinuousUsageReporter(chunk_size=256, sender=sender)
+        reporter.flush()
+        assert sender.sent
+        reporter.shutdown()
+
     def test_specs_must_cover_message_fields(self, usage_env):
         incomplete = [
             MetricSpec(

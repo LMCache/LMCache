@@ -113,10 +113,14 @@ class MPContinuousUsageReporter(EventSubscriber):
         self._sender = sender if sender is not None else DEFAULT_SENDER
         self._max_buffered_samples = max_buffered_samples
         # Clamp to >= 1 s: Event.wait(0) would turn the flush loop into a
-        # busy spin.
-        self._flush_interval: float = max(
-            float(os.getenv("LMCACHE_USAGE_TRACK_INTERVAL", "600")), 1.0
-        )
+        # busy spin. A malformed env value falls back to the default
+        # instead of disabling telemetry.
+        try:
+            flush_interval = float(os.getenv("LMCACHE_USAGE_TRACK_INTERVAL", "600"))
+        except ValueError:
+            logger.debug("Invalid LMCACHE_USAGE_TRACK_INTERVAL", exc_info=True)
+            flush_interval = 600.0
+        self._flush_interval: float = max(flush_interval, 1.0)
         self._lock = threading.Lock()
         self._buffers: dict[str, list[int | float]] = {
             spec.field: [] for spec in self._specs

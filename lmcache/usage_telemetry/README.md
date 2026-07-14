@@ -74,8 +74,12 @@ mechanisms, outermost first:
   stats server.
 - `UsageMessageSender.send` additionally swallows all transport errors
   with a 5 s timeout.
-- `ContinuousUsageContext.__init__` degrades (kv-bytes-per-token = 0)
-  rather than raising on nonstandard kv shapes.
+- Constructors reachable from serving code never raise on bad inputs:
+  nonstandard kv shapes degrade (kv-bytes-per-token = 0) and malformed
+  `LMCACHE_USAGE_TRACK_INTERVAL` values fall back to the default —
+  necessary because `ContinuousUsageContext.GetOrCreate` is called
+  unguarded inside `LMCacheStatsLogger.__init__` on the engine startup
+  path.
 
 Tests for this contract live in `TestFailureIsolation`
 (`tests/test_usage_telemetry.py`): a transport that raises must not break

@@ -87,9 +87,14 @@ class ContinuousUsageContext:
         self.metadata: LMCacheMetadata = metadata
         self.cache_usage_url: str = usage_server_url(ContinuousContextMessage.ENDPOINT)
         self.cache_lifespan_url: str = usage_server_url(CacheLifespanMessage.ENDPOINT)
-        self.min_logging_interval: int = int(
-            os.getenv("LMCACHE_USAGE_TRACK_INTERVAL", "600")
-        )
+        try:
+            self.min_logging_interval: int = int(
+                os.getenv("LMCACHE_USAGE_TRACK_INTERVAL", "600")
+            )
+        except ValueError:
+            # A malformed env value must not raise into engine startup.
+            logger.debug("Invalid LMCACHE_USAGE_TRACK_INTERVAL", exc_info=True)
+            self.min_logging_interval = 600
         # send the first message immediately after init
         self.last_logged_ts: float = -1
 
