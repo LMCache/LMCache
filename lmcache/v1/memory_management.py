@@ -937,7 +937,7 @@ class BytesBufferMemoryObj(MemoryObj):
                 shape=bytes_shape,
                 dtype=None,
                 address=0,
-                phy_size=0,
+                phy_size=len(self.raw_data),
                 ref_count=1,
                 pin_count=0,
                 fmt=MemoryFormat.BINARY_BUFFER,
