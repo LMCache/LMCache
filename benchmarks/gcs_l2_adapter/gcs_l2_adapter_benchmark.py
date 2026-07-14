@@ -70,8 +70,8 @@ from lmcache.v1.distributed.l2_adapters.gcs_l2_adapter import (
     GCSL2Adapter,
     GCSL2AdapterConfig,
 )
+from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
 from lmcache.v1.memory_management import (
-    AdHocMemoryAllocator,
     MemoryFormat,
     MemoryObj,
 )
