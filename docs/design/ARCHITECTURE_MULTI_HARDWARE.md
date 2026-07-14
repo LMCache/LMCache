@@ -139,7 +139,7 @@ which is wrong for that backend's actual KV cache layout.
 1. Add a `DeviceSpec` subclass under `lmcache/v1/platform/<device>/__init__.py`
 2. Point `ops_module` to `lmcache.v1.platform.<device>.ops`
 3. Implement `multi_layer_block_kv_transfer` in `ops.py` with Python fallback
-4. Add `native_kv_transfer.py` with ABI checks and fail-closed behavior
+4. Add `kv_transfer_adapter.py` with ABI checks and fail-closed behavior
 5. Use MP `engine_driven` mode for validation and rollout
 
 No edits to `lmcache/__init__.py` or global backend candidate lists are required.

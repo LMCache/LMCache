@@ -10,7 +10,7 @@ The integration is intentionally small and self-contained:
 
 - Add one ``DeviceSpec`` under ``lmcache/v1/platform/<device>/__init__.py``
 - Add one ops backend module ``lmcache/v1/platform/<device>/ops.py``
-- Add a native fast path adapter ``native_kv_transfer.py``
+- Add a KV transfer adapter ``kv_transfer_adapter.py``
 
 You do **not** need to modify global dispatch code.
 
@@ -24,7 +24,7 @@ The integration is intentionally small and self-contained:
 
 - Add one ``DeviceSpec`` under ``lmcache/v1/platform/<device>/__init__.py``
 - Add one ops backend module ``lmcache/v1/platform/<device>/ops.py``
-- Add a native fast path adapter ``native_kv_transfer.py``
+- Add a KV transfer adapter ``kv_transfer_adapter.py``
 
 You do **not** need to modify global dispatch code.
 
@@ -146,7 +146,7 @@ This module is merged over ``lmcache.python_ops_fallback`` by
         skip_prefix_n_blocks: int,
     ) -> None:
         """Block-based multi-layer KV transfer for <device>."""
-        from lmcache.v1.platform.<device>.native_kv_transfer import (
+        from lmcache.v1.platform.<device>.kv_transfer_adapter import (
             try_native_multi_layer_block_kv_transfer,
         )
 
@@ -178,10 +178,10 @@ This module is merged over ``lmcache.python_ops_fallback`` by
 Initial bring-up can use Python fallback for validation, but native path
 is required for production performance.
 
-Step 3 — Native fast path adapter
----------------------------------
+Step 3 — KV transfer adapter
+----------------------------
 
-Add ``lmcache/v1/platform/<device>/native_kv_transfer.py`` as a
+Add ``lmcache/v1/platform/<device>/kv_transfer_adapter.py`` as a
 fail-closed adapter. Native performance is the standard expectation for new
 hardware.
 
@@ -253,7 +253,7 @@ Checklist:
 - [ ] Engine-driven SHM transfer works end-to-end.
 - [ ] Store/retrieve correctness is verified.
 - [ ] TP>1 / multi-worker behavior is verified.
-- [ ] Native adapter path is hit and bit-exact.
+- [ ] KV transfer adapter path is hit and bit-exact.
 
 References
 ----------
@@ -271,7 +271,7 @@ References
      - ``lmcache/v1/platform/musa/__init__.py``
    * - Ops backend example
      - ``lmcache/v1/platform/musa/ops.py``
-   * - Native adapter example
+   * - KV transfer adapter example
      - ``lmcache/v1/platform/musa/native_kv_transfer.py``
    * - Engine-driven gather/scatter call site
      - ``lmcache/v1/multiprocess/transfer_context/base.py``
