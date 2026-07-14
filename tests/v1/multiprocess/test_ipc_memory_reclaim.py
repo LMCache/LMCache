@@ -13,13 +13,12 @@ All tests drive the module through its public surface: the real constructor,
 by nature: the GPU context factory and the device module (``torch_dev``).
 """
 
+# Standard
 # Standard Library
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 import time
 import weakref
-
-# Third Party
-from unittest.mock import MagicMock
 
 # First Party
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
@@ -69,15 +68,11 @@ def _register(
     """
     cache_context = MagicMock(name=f"cache_context-{instance_id}")
     cache_context.num_layers = 1
-    monkeypatch.setattr(
-        gpu_mod, "create_cache_context", lambda *a, **kw: cache_context
-    )
+    monkeypatch.setattr(gpu_mod, "create_cache_context", lambda *a, **kw: cache_context)
     monkeypatch.setattr(gpu_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
     real_monotonic = time.monotonic
     if age_s:
-        monkeypatch.setattr(
-            gpu_mod.time, "monotonic", lambda: real_monotonic() - age_s
-        )
+        monkeypatch.setattr(gpu_mod.time, "monotonic", lambda: real_monotonic() - age_s)
     try:
         module.register_kv_cache(
             instance_id,
@@ -151,9 +146,7 @@ def test_reaper_reclaims_once_per_batch(monkeypatch) -> None:
     ctx_b = _register(module, monkeypatch, 2, model="b", age_s=1000.0)
     ctx_fresh = _register(module, monkeypatch, 3, model="c")
 
-    reaped = module.reap_stale_instances(
-        reap_timeout_s=60.0, registration_grace_s=60.0
-    )
+    reaped = module.reap_stale_instances(reap_timeout_s=60.0, registration_grace_s=60.0)
 
     assert sorted(reaped) == [1, 2]
     ctx_a.close.assert_called_once()
