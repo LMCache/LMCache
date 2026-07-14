@@ -1263,6 +1263,71 @@ spec:
                   type: object
                   x-kubernetes-map-type: atomic
                 type: array
+              injection:
+                description: |-
+                  injection defines the defaults the LMCache mutating webhook reads for pods
+                  bound to this engine. When unset, the webhook wires only the connection;
+                  set injection.payloadImage to also stage an lmcache code payload.
+                properties:
+                  imagePullSecrets:
+                    description: |-
+                      imagePullSecrets are appended to the vLLM pod's spec.imagePullSecrets so a
+                      PRIVATE payload init-container image can pull. The referenced Secret(s)
+                      must already exist in the vLLM pod's namespace; the operator does not copy
+                      them cross-namespace.
+                    items:
+                      description: |-
+                        LocalObjectReference contains enough information to let you locate the
+                        referenced object inside the same namespace.
+                      properties:
+                        name:
+                          default: ""
+                          description: |-
+                            Name of the referent.
+                            This field is effectively required, but due to backwards compatibility is
+                            allowed to be empty. Instances of this type with an empty value here are
+                            almost certainly wrong.
+                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                          type: string
+                      type: object
+                      x-kubernetes-map-type: atomic
+                    type: array
+                  payloadImage:
+                    description: |-
+                      payloadImage is a purpose-built init-container image (repository/tag/
+                      pullPolicy, like spec.image) that ships an unpacked lmcache tree under
+                      /payload and copies it to $SHARED_DIR on start (see
+                      docker/Dockerfile.payload); the vLLM container imports it via PYTHONPATH.
+
+                      repository has no usable default — the ImageSpec default
+                      (lmcache/vllm-openai) is NOT a payload — so it must be set explicitly. For
+                      private registries, imagePullSecrets must reference Secret(s) in the vLLM
+                      pod's namespace.
+                    properties:
+                      pullPolicy:
+                        default: IfNotPresent
+                        description: pullPolicy is the image pull policy.
+                        enum:
+                        - Always
+                        - Never
+                        - IfNotPresent
+                        type: string
+                      repository:
+                        default: lmcache/vllm-openai
+                        description: repository is the container image repository.
+                        type: string
+                      tag:
+                        default: latest
+                        description: tag is the container image tag.
+                        type: string
+                    type: object
+                  targetContainer:
+                    description: |-
+                      targetContainer is the name of the vLLM container to inject into. Empty
+                      (the default) selects the first container; a per-pod annotation may
+                      override it.
+                    type: string
+                type: object
               l1:
                 description: l1 defines the L1 memory cache configuration.
                 properties:

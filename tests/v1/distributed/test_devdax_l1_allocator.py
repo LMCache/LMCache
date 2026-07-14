@@ -37,7 +37,7 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
     DevDaxL1MemoryManager,
 )
-from lmcache.v1.memory_management import DevDaxMemoryAllocator
+from lmcache.v1.memory_allocators.devdax_memory_allocator import DevDaxMemoryAllocator
 from lmcache.v1.multiprocess.config import add_mp_server_args
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 import lmcache.v1.memory_management as memory_management
