@@ -13,7 +13,6 @@ from lmcache.logging import init_logger
 from lmcache.utils import parse_cache_key
 from lmcache.v1.memory_management import MemoryFormat
 
-
 if TYPE_CHECKING:
     # First Party
     from lmcache.utils import CacheEngineKey, LayerCacheEngineKey
