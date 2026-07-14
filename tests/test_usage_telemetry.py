@@ -28,6 +28,7 @@ from lmcache.usage_telemetry import (
 from lmcache.usage_telemetry.guard import swallow_telemetry_errors
 from lmcache.usage_telemetry.mp_continuous import (
     InitializeMPContinuousUsage,
+    MetricSpec,
     MPContinuousUsageReporter,
 )
 from lmcache.usage_telemetry.transport import usage_server_url
@@ -415,6 +416,78 @@ class TestMPContinuous:
         reporter = MPContinuousUsageReporter(chunk_size=256, sender=RaisingSender())
         reporter.flush()
         reporter.shutdown()
+
+    def test_specs_must_cover_message_fields(self, usage_env):
+        incomplete = [
+            MetricSpec(
+                event_type=EventType.MP_STORE_END,
+                field="interval_stored_kv_size",
+                extract=lambda e: int(e.metadata["total_bytes"]),
+                reduce=sum,
+            )
+        ]
+        with pytest.raises(ValueError, match="exactly once"):
+            MPContinuousUsageReporter(chunk_size=256, specs=incomplete)
+
+    def test_custom_reduce_function(self, usage_env):
+        def max_or_zero(samples):
+            return max(samples, default=0)
+
+        specs = [
+            MetricSpec(
+                event_type=EventType.MP_RETRIEVE_END,
+                field="interval_num_hit_tokens",
+                extract=lambda e: int(e.metadata["retrieved_count"]),
+                reduce=sum,
+            ),
+            MetricSpec(
+                event_type=EventType.MP_STORE_END,
+                field="interval_num_stored_tokens",
+                extract=lambda e: int(e.metadata["stored_count"]),
+                reduce=sum,
+            ),
+            # Largest single store of the interval instead of the total.
+            MetricSpec(
+                event_type=EventType.MP_STORE_END,
+                field="interval_stored_kv_size",
+                extract=lambda e: int(e.metadata["total_bytes"]),
+                reduce=max_or_zero,
+            ),
+        ]
+        sender = RecordingSender()
+        bus = EventBus(EventBusConfig(enabled=True))
+        bus.start()
+        reporter = MPContinuousUsageReporter(chunk_size=256, sender=sender, specs=specs)
+        bus.register_subscriber(reporter)
+        publish_mp_traffic(bus)
+        publish_mp_traffic(bus)
+        bus.stop()
+
+        assert len(sender.sent) == 1
+        payload = sender.sent[0][1]
+        assert payload["interval_num_hit_tokens"] == 8
+        assert payload["interval_num_stored_tokens"] == 4
+        assert payload["interval_stored_kv_size"] == 1000  # max, not 2000
+
+    def test_buffer_overflow_triggers_early_flush(self, usage_env):
+        sender = RecordingSender()
+        bus = EventBus(EventBusConfig(enabled=True))
+        bus.start()
+        reporter = MPContinuousUsageReporter(
+            chunk_size=256, sender=sender, max_buffered_samples=2
+        )
+        bus.register_subscriber(reporter)
+        # 2 store events fill the 2-sample stored-tokens buffer and wake
+        # the flush thread well before the 600 s interval.
+        publish_mp_traffic(bus)
+        publish_mp_traffic(bus)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not sender.sent:
+            time.sleep(0.01)
+        assert sender.sent, "overflow did not trigger an early flush"
+        payload = sender.sent[0][1]
+        assert payload["interval_num_stored_tokens"] == 2 * 2 * 256
+        bus.stop()
 
 
 class TestMPUsage:

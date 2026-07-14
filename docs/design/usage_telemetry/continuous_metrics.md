@@ -30,10 +30,19 @@ carry the common header (`session_id`, `machine_id`, `schema_version`,
 
 ## Metric sources (MP mode)
 
-All runtime metrics come from an EventBus subscriber. Drain-thread callbacks
-only increment in-memory state; a dedicated flush thread sends every
-`LMCACHE_USAGE_TRACK_INTERVAL` (default 600 s). Registered in
-`run_cache_server`, gated by `is_usage_tracking_enabled()`.
+All runtime metrics come from an EventBus subscriber, defined map-reduce
+style: a `MetricSpec` maps one event to a numeric sample
+(`extract: Event -> number | None`) and reduces the interval's buffered
+samples into one message field (`reduce: Sequence[number] -> number`,
+e.g. `sum`; must accept an empty sequence for idle heartbeats). Spec
+fields must cover the message's metric fields exactly (validated at
+construction), so the wire schema in `messages.py` stays the single
+source of truth. A full buffer triggers an early flush to bound memory.
+Sophisticated metrics that need cross-interval state (the chunk reuse
+tracker) do not fit a stateless reduce and get their own subscriber.
+Drain-thread callbacks only buffer samples; a dedicated flush thread
+reduces and sends every `LMCACHE_USAGE_TRACK_INTERVAL` (default 600 s).
+Registered in `run_cache_server`, gated by `is_usage_tracking_enabled()`.
 
 | Metric | Event source |
 |---|---|

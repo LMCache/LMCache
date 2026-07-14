@@ -18,7 +18,7 @@ deployment operators), different transports, and independent opt-outs.
 | `env_probe.py` | Hardware/platform/cloud detection feeding `EnvMessage` |
 | `context.py` | `UsageContextBase`, single-process `UsageContext`, `InitializeUsageContext` — the `/context` snapshot reporters |
 | `continuous.py` | `ContinuousUsageContext` interval counters and lifespan histogram |
-| `mp_continuous.py` | `MPContinuousUsageReporter` — EventBus-fed interval counters for the MP server (not re-exported from the package root) |
+| `mp_continuous.py` | `MPContinuousUsageReporter` — map-reduce `MetricSpec`s over EventBus events for the MP server (not re-exported from the package root) |
 | `mp.py` | MP server `MPUsageContext`, `InitializeMPUsageContext` |
 
 `lmcache/usage_context.py` remains as a backward-compatibility shim

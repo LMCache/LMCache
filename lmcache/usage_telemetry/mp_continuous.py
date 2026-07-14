@@ -1,25 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 """Continuous usage reporting for the multiprocess (MP) cache server.
 
-An EventBus subscriber accumulates interval counters on the bus's drain
-thread; a dedicated flush thread sends a ``ContinuousContextMessage``
-every ``LMCACHE_USAGE_TRACK_INTERVAL`` seconds (default 600). Empty
-intervals are still sent and double as session heartbeats.
+Metrics are defined map-reduce style: each :class:`MetricSpec` maps an
+EventBus event to a numeric sample and reduces the samples buffered in
+the current interval to one value of a ``ContinuousContextMessage``
+field. An EventBus subscriber buffers samples on the bus's drain thread;
+a dedicated flush thread reduces and sends every
+``LMCACHE_USAGE_TRACK_INTERVAL`` seconds (default 600). Empty intervals
+are still sent and double as session heartbeats.
 
 This module is not re-exported from the package root so that importing
 :mod:`lmcache.usage_telemetry` (done by the single-process engine path)
 never pulls in :mod:`lmcache.v1.mp_observability`.
 
 Note:
-    Counters are sourced from ``MP_RETRIEVE_END`` / ``MP_STORE_END``,
-    which only the lmcache-driven transfer path emits; engine-driven
-    transfers are not counted.
+    The default metrics are sourced from ``MP_RETRIEVE_END`` /
+    ``MP_STORE_END``, which only the lmcache-driven transfer path emits;
+    engine-driven transfers are not counted.
 """
 
 # Future
 from __future__ import annotations
 
 # Standard
+from dataclasses import dataclass, fields
+from typing import Callable, Sequence
 import os
 import threading
 import time
@@ -48,12 +53,72 @@ from lmcache.v1.mp_observability.event_bus import (
 logger = init_logger(__name__)
 
 
+_NON_METRIC_FIELDS = frozenset({"sequence_number", "uptime_seconds"})
+"""``ContinuousContextMessage`` fields filled by the reporter itself."""
+
+
+@dataclass(frozen=True)
+class MetricSpec:
+    """Map-reduce definition of one continuous usage metric.
+
+    Attributes:
+        event_type: The EventBus event the metric is sampled from.
+        field: The ``ContinuousContextMessage`` field receiving the
+            reduced value. The reduced value is cast to ``int``.
+        extract: Map step — turns one event into a numeric sample, or
+            ``None`` to skip the event. May rely on the event metadata
+            keys documented in ``docs/design/v1/mp_observability/EVENTS.md``.
+        reduce: Reduce step — folds all samples buffered in one flush
+            interval into the field value. Must accept an empty sequence
+            (idle intervals are flushed as heartbeats); ``sum`` is the
+            common case.
+    """
+
+    event_type: EventType
+    field: str
+    extract: Callable[[Event], int | float | None]
+    reduce: Callable[[Sequence[int | float]], int | float]
+
+
+def _default_metric_specs(chunk_size: int) -> list[MetricSpec]:
+    """Build the parity metrics matching the single-process reporter.
+
+    Args:
+        chunk_size: The server chunk size in tokens; converts the chunk
+            counts carried by store/retrieve events to tokens.
+
+    Returns:
+        Specs covering every metric field of ``ContinuousContextMessage``.
+    """
+    return [
+        MetricSpec(
+            event_type=EventType.MP_RETRIEVE_END,
+            field="interval_num_hit_tokens",
+            extract=lambda e: int(e.metadata["retrieved_count"]) * chunk_size,
+            reduce=sum,
+        ),
+        MetricSpec(
+            event_type=EventType.MP_STORE_END,
+            field="interval_num_stored_tokens",
+            extract=lambda e: int(e.metadata["stored_count"]) * chunk_size,
+            reduce=sum,
+        ),
+        MetricSpec(
+            event_type=EventType.MP_STORE_END,
+            field="interval_stored_kv_size",
+            extract=lambda e: int(e.metadata["total_bytes"]),
+            reduce=sum,
+        ),
+    ]
+
+
 class MPContinuousUsageReporter(EventSubscriber):
     """Continuous usage reporter for the multiprocess cache server.
 
-    Sends a ``ContinuousContextMessage`` (retrieved/stored tokens, stored
-    bytes) every ``LMCACHE_USAGE_TRACK_INTERVAL`` seconds. Interval data
-    is dropped, not retried, when a send fails; gaps in
+    Buffers one sample per spec-matched event and, every
+    ``LMCACHE_USAGE_TRACK_INTERVAL`` seconds, reduces each buffer into
+    its ``ContinuousContextMessage`` field and sends the message.
+    Interval data is dropped, not retried, when a send fails; gaps in
     ``sequence_number`` mark lost intervals. A final flush is sent when
     the owning EventBus stops.
     """
@@ -62,38 +127,72 @@ class MPContinuousUsageReporter(EventSubscriber):
         self,
         chunk_size: int,
         sender: UsageMessageSender | None = None,
+        specs: list[MetricSpec] | None = None,
+        max_buffered_samples: int = 65536,
     ) -> None:
         """Initialize the reporter and start its flush thread.
 
         Args:
-            chunk_size: The server chunk size in tokens; converts the
-                chunk counts carried by store/retrieve events to tokens.
+            chunk_size: The server chunk size in tokens, used by the
+                default metric specs.
             sender: Message transport; ``None`` selects the default HTTP
                 sender.
+            specs: Metric definitions; ``None`` selects the defaults.
+                Fields must map one-to-one onto the metric fields of
+                ``ContinuousContextMessage``.
+            max_buffered_samples: Per-metric buffer size that triggers an
+                early flush, bounding memory between flushes.
+
+        Raises:
+            ValueError: If the spec fields do not cover exactly the
+                metric fields of ``ContinuousContextMessage``, or
+                ``max_buffered_samples`` is not positive.
         """
-        self._chunk_size = chunk_size
+        if max_buffered_samples <= 0:
+            raise ValueError(
+                f"max_buffered_samples must be positive, got {max_buffered_samples}"
+            )
+        self._specs = specs if specs is not None else _default_metric_specs(chunk_size)
+        spec_fields = [spec.field for spec in self._specs]
+        message_fields = {
+            f.name for f in fields(ContinuousContextMessage)
+        } - _NON_METRIC_FIELDS
+        if (
+            len(set(spec_fields)) != len(spec_fields)
+            or set(spec_fields) != message_fields
+        ):
+            raise ValueError(
+                f"Metric specs must cover the ContinuousContextMessage metric "
+                f"fields {sorted(message_fields)} exactly once each, got "
+                f"{sorted(spec_fields)}"
+            )
         self._sender = sender if sender is not None else DEFAULT_SENDER
+        self._max_buffered_samples = max_buffered_samples
         # Clamp to >= 1 s: Event.wait(0) would turn the flush loop into a
         # busy spin.
         self._flush_interval: float = max(
             float(os.getenv("LMCACHE_USAGE_TRACK_INTERVAL", "600")), 1.0
         )
         self._lock = threading.Lock()
-        self._interval_hit_tokens = 0
-        self._interval_stored_tokens = 0
-        self._interval_stored_bytes = 0
+        self._buffers: dict[str, list[int | float]] = {
+            spec.field: [] for spec in self._specs
+        }
         self._sequence_number = 0
         self._start_monotonic = time.monotonic()
         self._stop_event = threading.Event()
+        self._wake = threading.Event()
         self._flush_thread = threading.Thread(
             target=self._flush_loop, daemon=True, name="lmcache-usage-report"
         )
         self._flush_thread.start()
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
+        subscriptions: dict[EventType, list[MetricSpec]] = {}
+        for spec in self._specs:
+            subscriptions.setdefault(spec.event_type, []).append(spec)
         return {
-            EventType.MP_RETRIEVE_END: self._on_retrieve_end,
-            EventType.MP_STORE_END: self._on_store_end,
+            event_type: self._make_callback(event_specs)
+            for event_type, event_specs in subscriptions.items()
         }
 
     def shutdown(self) -> None:
@@ -102,31 +201,29 @@ class MPContinuousUsageReporter(EventSubscriber):
         Called by ``EventBus.stop()``.
         """
         self._stop_event.set()
+        self._wake.set()
         self.flush()
 
     @swallow_telemetry_errors
     def flush(self) -> None:
-        """Send the current interval counters and reset them.
+        """Reduce the buffered samples, send them, and reset the buffers.
 
         Called periodically by the internal flush thread; safe to call
-        from any thread. When usage tracking is disabled the counters are
+        from any thread. When usage tracking is disabled the samples are
         dropped without sending. Never raises.
         """
         with self._lock:
-            hit_tokens = self._interval_hit_tokens
-            stored_tokens = self._interval_stored_tokens
-            stored_bytes = self._interval_stored_bytes
-            self._interval_hit_tokens = 0
-            self._interval_stored_tokens = 0
-            self._interval_stored_bytes = 0
+            buffers = self._buffers
+            self._buffers = {spec.field: [] for spec in self._specs}
             self._sequence_number += 1
             sequence_number = self._sequence_number
         if not is_usage_tracking_enabled():
             return
+        metric_fields = {
+            spec.field: int(spec.reduce(buffers[spec.field])) for spec in self._specs
+        }
         message = ContinuousContextMessage(
-            interval_num_stored_tokens=stored_tokens,
-            interval_num_hit_tokens=hit_tokens,
-            interval_stored_kv_size=stored_bytes,
+            **metric_fields,
             sequence_number=sequence_number,
             uptime_seconds=time.monotonic() - self._start_monotonic,
         )
@@ -136,22 +233,37 @@ class MPContinuousUsageReporter(EventSubscriber):
         self._sender.send(usage_server_url(message.ENDPOINT), payload)
 
     def _flush_loop(self) -> None:
-        while not self._stop_event.wait(self._flush_interval):
+        while True:
+            self._wake.wait(timeout=self._flush_interval)
+            self._wake.clear()
+            if self._stop_event.is_set():
+                return
             self.flush()
 
-    @swallow_telemetry_errors
-    def _on_retrieve_end(self, event: Event) -> None:
-        retrieved_tokens = int(event.metadata["retrieved_count"]) * self._chunk_size
-        with self._lock:
-            self._interval_hit_tokens += retrieved_tokens
+    def _make_callback(self, event_specs: list[MetricSpec]) -> EventCallback:
+        """Build the drain-thread callback for one event type.
 
-    @swallow_telemetry_errors
-    def _on_store_end(self, event: Event) -> None:
-        stored_tokens = int(event.metadata["stored_count"]) * self._chunk_size
-        stored_bytes = int(event.metadata["total_bytes"])
-        with self._lock:
-            self._interval_stored_tokens += stored_tokens
-            self._interval_stored_bytes += stored_bytes
+        The callback only buffers samples; a full buffer wakes the flush
+        thread early so memory stays bounded between flushes (the extra
+        message is harmless — the backend sums interval deltas).
+        """
+
+        @swallow_telemetry_errors
+        def _on_event(event: Event) -> None:
+            overflow = False
+            with self._lock:
+                for spec in event_specs:
+                    sample = spec.extract(event)
+                    if sample is None:
+                        continue
+                    buffer = self._buffers[spec.field]
+                    buffer.append(sample)
+                    if len(buffer) >= self._max_buffered_samples:
+                        overflow = True
+            if overflow:
+                self._wake.set()
+
+        return _on_event
 
 
 @swallow_telemetry_errors
