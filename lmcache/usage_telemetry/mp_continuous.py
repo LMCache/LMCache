@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Continuous usage reporting for the multiprocess (MP) cache server.
 
-Metrics are defined map-reduce style: each :class:`MetricSpec` maps an
-EventBus event to a numeric sample and reduces the samples buffered in
-the current interval to one value of a ``ContinuousContextMessage``
-field. An EventBus subscriber buffers samples on the bus's drain thread;
+Metrics are defined map-reduce style; the :class:`MetricSpec` contract
+and the default metric registry live in :mod:`.metric_specs`. An
+EventBus subscriber buffers samples on the bus's drain thread;
 a dedicated flush thread reduces and sends every
 ``LMCACHE_USAGE_TRACK_INTERVAL`` seconds (default 600). Empty intervals
 are still sent and double as session heartbeats.
@@ -23,8 +22,7 @@ Note:
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass, fields
-from typing import Callable, Sequence
+from dataclasses import fields
 import os
 import threading
 import time
@@ -37,6 +35,7 @@ from lmcache.usage_telemetry.identity import (
     is_usage_tracking_enabled,
 )
 from lmcache.usage_telemetry.messages import ContinuousContextMessage, DeploymentMode
+from lmcache.usage_telemetry.metric_specs import MetricSpec, default_metric_specs
 from lmcache.usage_telemetry.transport import (
     DEFAULT_SENDER,
     UsageMessageSender,
@@ -55,61 +54,6 @@ logger = init_logger(__name__)
 
 _NON_METRIC_FIELDS = frozenset({"sequence_number", "uptime_seconds"})
 """``ContinuousContextMessage`` fields filled by the reporter itself."""
-
-
-@dataclass(frozen=True)
-class MetricSpec:
-    """Map-reduce definition of one continuous usage metric.
-
-    Attributes:
-        event_type: The EventBus event the metric is sampled from.
-        field: The ``ContinuousContextMessage`` field receiving the
-            reduced value. The reduced value is cast to ``int``.
-        extract: Map step — turns one event into a numeric sample, or
-            ``None`` to skip the event. May rely on the event metadata
-            keys documented in ``docs/design/v1/mp_observability/EVENTS.md``.
-        reduce: Reduce step — folds all samples buffered in one flush
-            interval into the field value. Must accept an empty sequence
-            (idle intervals are flushed as heartbeats); ``sum`` is the
-            common case.
-    """
-
-    event_type: EventType
-    field: str
-    extract: Callable[[Event], int | float | None]
-    reduce: Callable[[Sequence[int | float]], int | float]
-
-
-def _default_metric_specs(chunk_size: int) -> list[MetricSpec]:
-    """Build the parity metrics matching the single-process reporter.
-
-    Args:
-        chunk_size: The server chunk size in tokens; converts the chunk
-            counts carried by store/retrieve events to tokens.
-
-    Returns:
-        Specs covering every metric field of ``ContinuousContextMessage``.
-    """
-    return [
-        MetricSpec(
-            event_type=EventType.MP_RETRIEVE_END,
-            field="interval_num_hit_tokens",
-            extract=lambda e: int(e.metadata["retrieved_count"]) * chunk_size,
-            reduce=sum,
-        ),
-        MetricSpec(
-            event_type=EventType.MP_STORE_END,
-            field="interval_num_stored_tokens",
-            extract=lambda e: int(e.metadata["stored_count"]) * chunk_size,
-            reduce=sum,
-        ),
-        MetricSpec(
-            event_type=EventType.MP_STORE_END,
-            field="interval_stored_kv_size",
-            extract=lambda e: int(e.metadata["total_bytes"]),
-            reduce=sum,
-        ),
-    ]
 
 
 class MPContinuousUsageReporter(EventSubscriber):
@@ -152,7 +96,7 @@ class MPContinuousUsageReporter(EventSubscriber):
             raise ValueError(
                 f"max_buffered_samples must be positive, got {max_buffered_samples}"
             )
-        self._specs = specs if specs is not None else _default_metric_specs(chunk_size)
+        self._specs = specs if specs is not None else default_metric_specs(chunk_size)
         spec_fields = [spec.field for spec in self._specs]
         message_fields = {
             f.name for f in fields(ContinuousContextMessage)

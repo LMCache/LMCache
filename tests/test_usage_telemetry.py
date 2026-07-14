@@ -26,9 +26,9 @@ from lmcache.usage_telemetry import (
     is_usage_tracking_enabled,
 )
 from lmcache.usage_telemetry.guard import swallow_telemetry_errors
+from lmcache.usage_telemetry.metric_specs import MetricSpec
 from lmcache.usage_telemetry.mp_continuous import (
     InitializeMPContinuousUsage,
-    MetricSpec,
     MPContinuousUsageReporter,
 )
 from lmcache.usage_telemetry.transport import usage_server_url

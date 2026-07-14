@@ -15,8 +15,8 @@ Status: PR 1 shipped (#4098). Extends init-time telemetry
 
 ## Architecture
 
-Metrics are map-reduce `MetricSpec`s over EventBus events (see
-`mp_continuous.py` docstrings for the contract): drain-thread callbacks
+Metrics are map-reduce `MetricSpec`s over EventBus events (contract and
+default registry in `metric_specs.py`): drain-thread callbacks
 buffer samples, a flush thread reduces and sends every
 `LMCACHE_USAGE_TRACK_INTERVAL` (600 s); idle intervals are heartbeats.
 Spec fields must cover the message's metric fields exactly, so
