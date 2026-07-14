@@ -201,14 +201,20 @@ def patch_gcs(monkeypatch):
         gc_mod = types.ModuleType("google.cloud")
         monkeypatch.setitem(sys.modules, "google.cloud", gc_mod)
     # Ensure `from google.cloud import storage` resolves to our fake.
-    monkeypatch.setattr(sys.modules["google.cloud"], "storage", fake_storage)
+    # raising=False: google.cloud may be a real namespace pkg with no
+    # storage attr when google-cloud-storage is not installed.
+    monkeypatch.setattr(
+        sys.modules["google.cloud"], "storage", fake_storage, raising=False
+    )
     monkeypatch.setitem(sys.modules, "google.cloud.storage", fake_storage)
 
     if "google.oauth2" not in sys.modules:
         monkeypatch.setitem(
             sys.modules, "google.oauth2", types.ModuleType("google.oauth2")
         )
-    monkeypatch.setattr(sys.modules["google.oauth2"], "service_account", fake_sa)
+    monkeypatch.setattr(
+        sys.modules["google.oauth2"], "service_account", fake_sa, raising=False
+    )
     monkeypatch.setitem(sys.modules, "google.oauth2.service_account", fake_sa)
 
     yield
