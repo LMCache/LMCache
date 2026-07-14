@@ -7,6 +7,7 @@ sharing cache across nodes.
 .. toctree::
    :maxdepth: 1
 
+   bigtable
    s3
    hfbucket
    mooncake_store
