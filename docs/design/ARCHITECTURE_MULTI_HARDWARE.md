@@ -1,4 +1,3 @@
-
 # LMCache Multi-Hardware Architecture
 
 ```
@@ -37,9 +36,10 @@
 │                  │ │  device()    │ │ .Event()                 │
 │                  │ │ .device_     │ │ .Stream()                │
 │                  │ │  count()     │ │                          │
-│                  │ │              │ │ CUDA-only (hasattr):     │
+│                  │ │              │ │ IPC-capable (hasattr):   │
 │                  │ │              │ │ .Event(interprocess)     │
 │                  │ │              │ │ .from_ipc_handle()       │
+│                  │ │              │ │ CUDA-only (hasattr):     │
 │                  │ │              │ │ .cudart()                │
 └────────┬─────────┘ └──────┬───────┘ └─────────────┬────────────┘
          │                  │                       │
@@ -53,10 +53,10 @@
 │ │ MixedMemory  │  │ PinMemory    │  │ LazyMemory   │            │
 │ │ Allocator    │  │ Allocator    │  │ Allocator    │            │
 │ └──────────────┘  └──────────────┘  └──────────────┘            │
-│ ┌──────────────┐  ┌──────────────┐                              │
-│ │ XPUMemory    │  │ PagedTensor  │   uses torch_dev:            │
-│ │ Allocator    │  │ MemAllocator │   .synchronize()             │
-│ └──────────────┘  └──────────────┘   .cudart() (hasattr)        │
+│ ┌──────────────────────┐                                        │
+│ │ PagedTensorMemory    │   uses torch_dev:                      │
+│ │ Allocator            │   .synchronize()                       │
+│ └──────────────────────┘   .cudart() (hasattr)                  │
 └───────────────────────────┬─────────────────────────────────────┘
                             │
                             ▼
@@ -85,7 +85,7 @@
 |-------|-----------------|-------|
 | **Entry** `v1/platform/__init__.py` | `_detect_device()` + `get_backend()` | Registry-driven detection and backend composition. |
 | **Middle** engine / storage / multiprocess | `from lmcache import torch_dev` | Hardware-agnostic unified code |
-| **Middle** CUDA-only APIs | `hasattr(torch_dev, 'xxx')` guard | Graceful runtime degradation |
+| **Middle** IPC-capable / device-specific APIs | `hasattr(torch_dev, 'xxx')` guard | Graceful runtime degradation |
 | **Bottom** GPU Connector | Direct `torch.cuda` / `torch.xpu` / `torch.hpu` | Per-hardware impl, no abstraction |
 
 ## Connector Routing (`gpu_connector/__init__.py`)

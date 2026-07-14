@@ -3,7 +3,7 @@
 Adding a New Device Backend
 ===========================
 
-This guide explains how to add a **new non-CUDA accelerator** to LMCache in
+This guide explains how to add a **new accelerator** to LMCache in
 **Multiprocess (MP) engine-driven mode**.
 
 The integration is intentionally small and self-contained:
@@ -17,7 +17,7 @@ You do **not** need to modify global dispatch code.
 Scope
 -----
 
-This guide explains how to add a **new non-CUDA accelerator** to LMCache in
+This guide explains how to add a **new accelerator** to LMCache in
 **Multiprocess (MP) engine-driven mode**.
 
 The integration is intentionally small and self-contained:
