@@ -40,8 +40,17 @@ if __name__ == "__main__":
     ext_modules, cmdclass, req_file = policy.collect_extensions(profile)
 
     install_requires = _read_requirements(ROOT_DIR / "requirements" / "common.txt")
-    if not BuildProfile.is_gpu_ext_disabled() and req_file is not None:
+    extras_require: dict[str, list[str]] = {}
+    if (
+        not BuildProfile.is_gpu_ext_disabled()
+        and req_file is not None
+        and profile is not None
+    ):
         install_requires += _read_requirements(ROOT_DIR / "requirements" / req_file)
+        for extra_name, extra_req_file in profile.extras_requirements().items():
+            extras_require[extra_name] = _read_requirements(
+                ROOT_DIR / "requirements" / extra_req_file
+            )
 
     setup(
         packages=find_packages(exclude=("csrc",)),
@@ -49,4 +58,5 @@ if __name__ == "__main__":
         cmdclass=cmdclass,
         include_package_data=True,
         install_requires=install_requires,
+        extras_require=extras_require,
     )

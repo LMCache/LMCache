@@ -1,17 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Unit tests for the version-gated ``client_info_tag`` support in
-``ValkeyConnector`` / ``_ThreadWorkerPool``.
+Unit tests for the version-gated ``client_info_tag`` support in the shared
+``ValkeyWorkerPool`` (used by both ``ValkeyConnector`` and the MP-mode
+``ValkeyL2Adapter``).
 
-The connector tags LMCache's GLIDE connections as
+The pool tags LMCache's GLIDE connections as
 ``GlidePySync(lmcache:<version>)`` via GLIDE's ``client_info_tag`` client
 config option, but only when the installed ``valkey-glide`` build supports
 it (>= 2.5.0, valkey-io/valkey-glide#6389). Older builds would raise
-``TypeError`` on the unknown kwarg, so the connector feature-detects support
+``TypeError`` on the unknown kwarg, so the pool feature-detects support
 from the config constructor signature and applies the tag behind that gate.
 
 These tests inject a fake ``glide_sync`` module so the real
-``_ThreadWorkerPool._get_client`` config-building path is exercised without
+``ValkeyWorkerPool._get_client`` config-building path is exercised without
 ``glide_sync`` or a real Valkey server.
 """
 
@@ -25,11 +26,11 @@ import sys
 import pytest
 
 # First Party
-from lmcache.v1.storage_backend.connector.valkey_connector import (
+from lmcache.v1.storage_backend.valkey.worker_pool import (
     CLIENT_INFO_TAG_MIN_GLIDE_VERSION,
+    ValkeyWorkerPool,
     _glide_config_supports_client_info_tag,
     _lmcache_client_info_tag,
-    _ThreadWorkerPool,
 )
 
 # ── Fake glide_sync building blocks ─────────────────────────────────────
@@ -230,7 +231,7 @@ def test_min_version_constant():
     assert CLIENT_INFO_TAG_MIN_GLIDE_VERSION == "2.5.0"
 
 
-# ── _get_client config passthrough (real _ThreadWorkerPool) ─────────────
+# ── _get_client config passthrough (real ValkeyWorkerPool) ──────────────
 
 
 @pytest.mark.parametrize("cluster_mode", [False, True])
@@ -239,9 +240,8 @@ def test_get_client_sets_tag_when_supported(cluster_mode):
     tag through to the client config (standalone and cluster)."""
     fake = _make_fake_glide_sync(supports_tag=True)
     with patch.dict(sys.modules, {"glide_sync": fake}):
-        pool = _ThreadWorkerPool(
-            host="h",
-            port=1,
+        pool = ValkeyWorkerPool(
+            addresses=[("h", 1)],
             num_workers=1,
             username="",
             password="",
@@ -262,9 +262,8 @@ def test_get_client_omits_tag_when_unsupported(cluster_mode):
     must NOT pass the kwarg — doing so would raise ``TypeError``."""
     fake = _make_fake_glide_sync(supports_tag=False)
     with patch.dict(sys.modules, {"glide_sync": fake}):
-        pool = _ThreadWorkerPool(
-            host="h",
-            port=1,
+        pool = ValkeyWorkerPool(
+            addresses=[("h", 1)],
             num_workers=1,
             username="",
             password="",
@@ -284,9 +283,8 @@ def test_get_client_standalone_still_passes_database_id_with_tag():
     the new client_info_tag."""
     fake = _make_fake_glide_sync(supports_tag=True)
     with patch.dict(sys.modules, {"glide_sync": fake}):
-        pool = _ThreadWorkerPool(
-            host="h",
-            port=1,
+        pool = ValkeyWorkerPool(
+            addresses=[("h", 1)],
             num_workers=1,
             username="",
             password="",

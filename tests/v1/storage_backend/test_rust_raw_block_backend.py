@@ -23,8 +23,8 @@ import torch
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
 from lmcache.v1.memory_management import (
-    AdHocMemoryAllocator,
     MemoryFormat,
     MemoryObjMetadata,
     TensorMemoryObj,
