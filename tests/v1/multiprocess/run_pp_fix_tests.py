@@ -298,6 +298,13 @@ COMBOS = [
     (4, 1, 1), (4, 1, 2), (4, 2, 1), (4, 2, 2),
     (4, 1, 4), (4, 4, 2), (2, 2, 2), (2, 1, 2),
     (8, 2, 2), (8, 1, 4), (1, 2, 1), (2, 4, 1),
+    # PP=3 specific combos
+    (1, 3, 1), (1, 3, 3),
+    (2, 3, 1), (2, 3, 3), (2, 3, 6),
+    (4, 3, 1), (4, 3, 3), (4, 3, 6), (4, 3, 12),
+    (8, 3, 1), (8, 3, 3), (8, 3, 6),
+    (3, 3, 1), (3, 3, 3), (3, 3, 9),
+    (6, 3, 1), (6, 3, 3), (6, 3, 6),
 ]
 for tp, pp, ns in COMBOS:
     ws = tp * pp
@@ -675,8 +682,9 @@ e2e_script = ROOT / "tests/v1/multiprocess/test_e2e_gpu_pp_mla.sh"
 check("e2e GPU test script exists", e2e_script.is_file())
 if e2e_script.is_file():
     e2e_src = e2e_script.read_text()
-    check("e2e script tests TP=2 PP=2",
-          "--tensor-parallel-size 2" in e2e_src and "--pipeline-parallel-size 2" in e2e_src)
+    check("e2e script supports configurable TP/PP (including PP=3)",
+          "--tensor-parallel-size" in e2e_src and "--pipeline-parallel-size" in e2e_src
+          and 'PP="${2:-2}"' in e2e_src and 'TP="${3:-2}"' in e2e_src)
     check("e2e script tests Kimi K2 (MLA)",
           "Kimi-K2" in e2e_src)
     check("e2e script tests GLM-4.6 (MLA)",

@@ -186,6 +186,58 @@ def test_mla_misaligned_multi_server_rejected():
     raise AssertionError("expected ValueError for misaligned MLA multi-server")
 
 
+def test_pp3_misaligned_configs_rejected():
+    """PP=3 with misaligned multi-server MLA must be rejected."""
+    from lmcache.integration.vllm.multi_server_config import (
+        _validate_multi_server_config,
+    )
+    # All these have rpn % tp != 0 → must raise
+    misaligned = [
+        (2, 3, 2),   # rpn=3, 3%2=1
+        (4, 3, 2),   # rpn=6, 6%4=2
+        (4, 3, 4),   # rpn=3, 3%4=3
+        (8, 3, 2),   # rpn=12, 12%8=4
+        (8, 3, 4),   # rpn=6, 6%8=6
+        (6, 3, 2),   # rpn=9, 9%6=3
+    ]
+    for tp, pp, ns in misaligned:
+        cfg = _fake_vllm_config(tp=tp, pp=pp, dp=1, world_size=tp*pp, use_mla=True)
+        try:
+            _validate_multi_server_config(cfg, n_servers=ns)
+        except ValueError:
+            continue
+        raise AssertionError(
+            f"expected ValueError for misaligned TP={tp} PP={pp} ns={ns}"
+        )
+
+
+def test_pp3_aligned_configs_pass():
+    """PP=3 with aligned multi-server MLA must pass validation."""
+    from lmcache.integration.vllm.multi_server_config import (
+        _validate_multi_server_config,
+    )
+    # All these have rpn % tp == 0 → must pass
+    aligned = [
+        (2, 3, 1),   # rpn=6, 6%2=0
+        (2, 3, 3),   # rpn=2, 2%2=0
+        (2, 3, 6),   # rpn=1, 1%2=1... but kv_tp=min(2,1)=1, extra=0 → balanced
+        (4, 3, 1),   # rpn=12, 12%4=0
+        (4, 3, 3),   # rpn=4, 4%4=0
+        (4, 3, 6),   # rpn=2, 2%4=2... but kv_tp=min(4,2)=2 → balanced
+        (4, 3, 12),  # rpn=1, kv_tp=1 → balanced
+        (8, 3, 1),   # rpn=24, 24%8=0
+        (8, 3, 3),   # rpn=8, 8%8=0
+        (8, 3, 6),   # rpn=4, kv_tp=4 → balanced
+        (3, 3, 1),   # rpn=9, 9%3=0
+        (3, 3, 3),   # rpn=3, 3%3=0
+        (6, 3, 1),   # rpn=18, 18%6=0
+        (6, 3, 3),   # rpn=6, 6%6=0
+    ]
+    for tp, pp, ns in aligned:
+        cfg = _fake_vllm_config(tp=tp, pp=pp, dp=1, world_size=tp*pp, use_mla=True)
+        _validate_multi_server_config(cfg, n_servers=ns)  # must not raise
+
+
 def test_is_kv_writer_real_property_pp():
     """Test the REAL ParallelStrategy.is_kv_writer for PP>1 configs.
 

@@ -18,13 +18,15 @@
 set -euo pipefail
 
 MODEL="${1:-moonshotai/Kimi-K2-Instruct}"
+PP="${2:-2}"
+TP="${3:-2}"
 PORT=8000
 LMCACHE_PORT=5555
 
 echo "============================================================"
 echo "  E2E GPU Test: LMCache + PP + MLA"
 echo "  Model: ${MODEL}"
-echo "  Config: TP=2 PP=2, single LMCache server"
+echo "  Config: TP=${TP} PP=${PP}, single LMCache server"
 echo "============================================================"
 
 # Detect GPU vendor
@@ -57,8 +59,8 @@ echo ""
 echo "[2/4] Starting vLLM with TP=2 PP=2 + LMCache..."
 vllm serve "${MODEL}" \
     --port ${PORT} \
-    --tensor-parallel-size 2 \
-    --pipeline-parallel-size 2 \
+    --tensor-parallel-size ${TP} \
+    --pipeline-parallel-size ${PP} \
     --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.host\":\"tcp://localhost\",\"lmcache.mp.port\":${LMCACHE_PORT}}}" \
     --trust-remote-code \
     --dtype bfloat16 &
@@ -122,7 +124,7 @@ fi
 echo ""
 echo "============================================================"
 echo "  E2E TEST PASSED"
-echo "  - vLLM started with TP=2 PP=2"
+echo "  - vLLM started with TP=${TP} PP=${PP}"
 echo "  - LMCache MP connector connected"
 echo "  - Requests completed successfully"
 echo "  - Model: ${MODEL} (MLA)"
