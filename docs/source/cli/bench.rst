@@ -863,7 +863,7 @@ Profiling the server
 (hashing, allocation, gather, D2H) runs inside the **server** process, not
 this benchmark. ``--flamegraph on`` therefore attaches the profiler to a
 server pid you supply, records for the duration of the load, and renders a
-flame graph of the server -- not of the client.
+flame graph of the server, not of the client.
 
 .. code-block:: bash
 
@@ -875,9 +875,9 @@ flame graph of the server -- not of the client.
 
 ``--flamegraph-mode`` takes the same six values documented under
 :ref:`lmcache tool flamegraph <lmcache-flamegraph-modes>`. Because the
-target is a separate, already-running server -- not a process this
-benchmark spawns --
-it profiles by *attaching*, so the same attach-mode caveats documented for
+target is a separate, already-running server (not a process this benchmark
+spawns), it profiles by *attaching*, so the same attach-mode caveats
+documented for
 :doc:`lmcache tool flamegraph </cli/tool>` apply here: what each mode
 shows, the ``PYTHONPERFSUPPORT=1`` requirement for naming Python frames in
 the perf/bcc modes, the container privileges each mode needs, and the fact
@@ -1358,8 +1358,8 @@ Profiling / flame charts
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 When ``--flamegraph on`` is passed, the benchmark profiles **its own
-process** -- the L2 adapter driven by this microbenchmark's synthetic load
--- and renders a flame graph of the measured phases (to profile a separate
+process** (the L2 adapter driven by this microbenchmark's synthetic load)
+and renders a flame graph of the measured phases (to profile a separate
 server or a real process instead, see
 :ref:`Choosing a profiling entry point <lmcache-flamegraph-entry-points>`):
 
@@ -1371,19 +1371,18 @@ server or a real process instead, see
    #   [Profile] on-cpu recording started (pid=12345) -> .../FSL2Adapter.oncpu.svg
    #   [Profile] wrote /tmp/lmcache_bench_flames/FSL2Adapter.oncpu.svg
 
-The six ``--flamegraph-mode`` values -- what each shows (``on-cpu``,
-``off-cpu``, ``offwake``, ``wakeup``, ``wall``, ``gil``), the cost of
-recording, the frame-pointer caveat, and the tool / sysctl requirements --
-are documented once under
-:ref:`lmcache tool flamegraph <lmcache-flamegraph-modes>`. Only the points
-below are specific to ``bench l2``:
+What the six ``--flamegraph-mode`` values show (``on-cpu``, ``off-cpu``,
+``offwake``, ``wakeup``, ``wall``, ``gil``), the cost of recording, the
+frame-pointer caveat, and the tool / sysctl requirements are documented once
+under :ref:`lmcache tool flamegraph <lmcache-flamegraph-modes>`. Only the
+points below are specific to ``bench l2``:
 
 * **It self-profiles.** Most L2 adapters are written in Python, whose calls
   collapse into a single native ``_PyEval_EvalFrameDefault`` frame, so the
   whole-process recorders would render them as ``[unknown]``. On CPython
   3.12+ the benchmark **activates the interpreter's perf trampolines
   itself** for the duration of the recording, so adapter functions appear
-  as ``py::<qualname>`` in the ``on-cpu`` / ``off-cpu`` charts -- with no
+  as ``py::<qualname>`` in the ``on-cpu`` / ``off-cpu`` charts, with no
   ``PYTHONPERFSUPPORT`` needed (unlike attaching to a server, which cannot
   turn them on after the fact). Older interpreters still render, without
   Python names; ``wall`` / ``gil`` read interpreter state directly and need
@@ -1395,13 +1394,13 @@ below are specific to ``bench l2``:
   default, lets a process trace only its own descendants) rather than the
   attach-mode permissions in the tool docs.
 * **Recording covers only the measured work**, so make the run long enough
-  to collect samples -- use a large ``--rounds``. A phase shorter than the
+  to collect samples; use a large ``--rounds``. A phase shorter than the
   recorder's own startup captures nothing; the benchmark then reports that
   no samples were captured instead of writing an empty SVG.
 
 The SVG is written to ``--flamegraph-output`` (default
 ``/tmp/lmcache_bench_flames/<adapter>.<mode>.svg``). Comparing the two
-py-spy modes answers "is this adapter GIL-bound?" -- profiling ``fs`` this
+py-spy modes answers "is this adapter GIL-bound?"; profiling ``fs`` this
 way shows the GIL held during only 4% of sampled thread-time, 89% of that
 by the event-loop thread: an adapter waiting on I/O, not the interpreter.
 

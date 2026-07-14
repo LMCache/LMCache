@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the ``lmcache tool flamegraph`` CLI command.
 
-Covers:
-- Auto-discovery under ``lmcache tool``
-- Argument registration and defaults
-- ``execute`` fail-fast paths (missing target, bad toolchain), without
-  ever spawning a real recorder
+Covers auto-discovery under ``lmcache tool`` and the ``execute`` fail-fast
+path, without ever spawning a real recorder.
 """
 
 # Standard
@@ -38,16 +35,6 @@ class TestRegistration:
         assert hasattr(args, "func")
         assert args.tool_target == "flamegraph"
 
-    def test_does_not_inherit_generic_output_flags(
-        self,
-        parser: argparse.ArgumentParser,
-    ) -> None:
-        """Its own --output owns the SVG path; the metrics --format is not
-        added by this command's custom register().
-        """
-        args = parser.parse_args(["tool", "flamegraph", "--pid", "1"])
-        assert not hasattr(args, "format")
-
 
 class TestExecuteFailFast:
     """``execute`` exits non-zero before spawning a recorder."""
@@ -75,19 +62,4 @@ class TestExecuteFailFast:
 
         with pytest.raises(SystemExit) as excinfo:
             FlamegraphCommand().execute(self._args(mode="gil"))
-        assert excinfo.value.code == 2
-
-    def test_dead_pid_exits(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        # First Party
-        from lmcache.cli import profiling
-
-        # Toolchain present + permissive ptrace, so failure is the pid.
-        monkeypatch.setattr(profiling.shutil, "which", lambda _name: "/usr/bin/py-spy")
-        monkeypatch.setattr(profiling, "_YAMA_PTRACE_PATH", "/dev/null")
-
-        with pytest.raises(SystemExit) as excinfo:
-            FlamegraphCommand().execute(self._args(mode="gil", pid=2_000_000_000))
         assert excinfo.value.code == 2

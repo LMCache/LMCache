@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """``lmcache tool flamegraph`` — profile any already-running process.
 
-Attaches a recorder to a live process -- an MP cache server, a vLLM worker,
-or any Python process -- for a set duration (or until interrupted) and
+Attaches a recorder to a live process (an MP cache server, a vLLM worker, or
+any Python process) for a set duration (or until interrupted) and
 renders a flame graph. Unlike the ``--flamegraph`` option on ``lmcache
 bench l2`` / ``lmcache bench server``, it drives no synthetic load: it
 profiles the target under whatever real work it is already doing.

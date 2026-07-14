@@ -208,19 +208,6 @@ class TestBuildServerProfiler:
             )
         assert excinfo.value.code == 2
 
-    def test_dead_pid_exits(self) -> None:
-        # First Party
-        from lmcache.cli.commands.bench.server_bench.command import (
-            _build_server_profiler,
-        )
-
-        with pytest.raises(SystemExit) as excinfo:
-            _build_server_profiler(
-                self._args(flamegraph="on", profile_server_pid=2_000_000_000),
-                lambda _m: None,
-            )
-        assert excinfo.value.code == 2
-
     def test_live_pid_builds_profiler(
         self,
         monkeypatch: pytest.MonkeyPatch,

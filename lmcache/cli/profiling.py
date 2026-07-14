@@ -1,16 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 """Flame-graph profiling shared by the LMCache CLI.
 
-Backs three commands: ``lmcache bench l2 --flamegraph on`` and
-``lmcache bench server --flamegraph on`` (profiling a benchmark's own
-process or the MP server it drives), and ``lmcache tool flamegraph --pid``
-(attaching to any already-running process).
+Dependency: py-spy (``gil`` / ``wall``), Linux perf (``on-cpu``), or the bcc
+``*-bpfcc`` tools (``off-cpu`` / ``offwake`` / ``wakeup``), validated at
+runtime by :func:`check_profiling_deps`.
 
-Six ``--mode`` values: ``gil`` / ``wall`` (``py-spy``), ``on-cpu``
-(``perf``), and ``off-cpu`` / ``offwake`` / ``wakeup`` (bcc). The
-``lmcache tool flamegraph`` CLI docs are the reference for what each shows,
-tooling, permissions, and the ``PYTHONPERFSUPPORT=1`` requirement for naming
-Python frames in the perf/bcc modes.
+Usage: construct a :class:`FlameProfiler` and start/stop it around a
+workload, or call :func:`record_attached` to profile a pid for a duration.
+
+Principle: py-spy reads the interpreter's memory from outside the target;
+perf and bcc sample or hook the kernel, and name Python frames only when the
+target ran with ``PYTHONPERFSUPPORT=1`` (its perf trampoline map).
+
+Cost: py-spy is lightest (its work runs off the target's CPUs), perf is a
+bounded 99 Hz sample, bcc scales with the target's event rate. The ``lmcache
+tool flamegraph`` CLI docs cover per-mode detail.
 """
 
 # Future
@@ -26,9 +30,7 @@ import subprocess
 import sys
 import time
 
-# ---------------------------------------------------------------------------
-# Recording tunables: sampling rates, timeouts, and render size.
-# ---------------------------------------------------------------------------
+# --- Recording tunables: sampling rates, timeouts, render size ---
 # Sampling frequency for ``perf record`` (on-CPU), in Hz. 99 is the
 # flame-graph convention: enough samples to see proportions, ~10x less
 # overhead and perf.data than 1 kHz, and off-100 to avoid beating against
@@ -45,10 +47,7 @@ _ATTACH_POLL_SEC = 0.5
 # Rendered flame-graph width, in pixels.
 _FLAME_WIDTH_PX = 1600
 
-# ---------------------------------------------------------------------------
-# Kernel permission gates: sysctl paths and thresholds checked before a
-# recording starts, plus the capability that overrides the ptrace gate.
-# ---------------------------------------------------------------------------
+# --- Kernel permission gates (checked before recording) ---
 # Highest ``kernel.perf_event_paranoid`` that still allows a non-root
 # user to sample its own process with ``perf record``. Level 2 only
 # withholds kernel-symbol resolution; level 3 (a Debian addition)
@@ -62,22 +61,18 @@ _PERF_PARANOID_PATH = "/proc/sys/kernel/perf_event_paranoid"
 _YAMA_PTRACE_PATH = "/proc/sys/kernel/yama/ptrace_scope"
 _MAX_YAMA_PTRACE_SCOPE = 0
 # Effective-capability set (the "CapEff:" line of /proc/self/status) and the
-# bit for CAP_SYS_PTRACE. Holding that capability -- not being uid 0 --
-# bypasses the ptrace scope; see _has_cap_sys_ptrace.
+# bit for CAP_SYS_PTRACE. Holding it (not being uid 0) bypasses the ptrace
+# scope; see _has_cap_sys_ptrace.
 _PROC_STATUS_PATH = "/proc/self/status"
 _CAP_SYS_PTRACE_BIT = 19
 
-# ---------------------------------------------------------------------------
-# Python-frame resolution: the CPython perf trampoline map.
-# ---------------------------------------------------------------------------
+# --- Python-frame resolution: the CPython perf trampoline map ---
 # CPython writes its perf trampoline map here (one per pid) when the
 # process runs with PYTHONPERFSUPPORT=1. Its presence is how we tell
 # whether an attached target's Python frames will resolve.
 _PERF_MAP_DIR = "/tmp"
 
-# ---------------------------------------------------------------------------
-# Mode registry: the six modes and their per-mode tool configuration.
-# ---------------------------------------------------------------------------
+# --- Mode registry: the six modes and their per-mode tool config ---
 # Per-mode tag used in default output filenames.
 _MODE_TAG = {
     "on-cpu": "oncpu",
@@ -90,25 +85,17 @@ _MODE_TAG = {
 # Modes recorded by py-spy, which writes its own SVG and needs no
 # FlameGraph scripts, no trampoline, and no perf.
 PY_SPY_MODES = frozenset({"wall", "gil"})
-# bcc mode -> (tool binary, argv flags before ``-p <pid>``). All three
-# emit folded stacks (``-f``) rendered through ``flamegraph.pl``, load a
-# BPF program (so need ``sudo``), and consult ``/tmp/perf-<pid>.map`` for
-# the target's Python frames just as perf does.
-#
-# * off-cpu  -- where a thread was blocked.
-# * offwake  -- where it was blocked *and* the stack of whoever woke it.
-# * wakeup   -- the stacks doing the waking (no ``-d``: it has none).
+# bcc mode -> (tool binary, argv flags before ``-p <pid>``). All emit folded
+# stacks and load a BPF program (so need ``sudo``); wakeup has no delimiter,
+# hence ``-f`` rather than ``-df``.
 _BCC_MODES = {
     "off-cpu": ("offcputime-bpfcc", ["-df"]),
     "offwake": ("offwaketime-bpfcc", ["-df"]),
     "wakeup": ("wakeuptime-bpfcc", ["-f"]),
 }
-# flamegraph.pl ``--colors`` palette per bcc mode, so the three read
-# apart at a glance and offwake's two halves are distinguishable:
-#   off-cpu -> io    : one blue tower, purely "where it blocked".
-#   offwake -> chain : blocked stack blue, waker stack (past the ``;--;``
-#                      delimiter, tagged ``_[w]``) aqua -- two colors.
-#   wakeup  -> wakeup: the wakers, aqua.
+# flamegraph.pl ``--colors`` palette per bcc mode, so the three read apart
+# and offwake's blocked (blue) and waker (aqua, past the ``;--;`` delimiter)
+# halves are distinguishable.
 _BCC_PALETTE = {"off-cpu": "io", "offwake": "chain", "wakeup": "wakeup"}
 
 
@@ -146,7 +133,7 @@ def _check_perf_paranoid() -> None:
 def _has_cap_sys_ptrace() -> bool:
     """Return whether the effective set holds CAP_SYS_PTRACE.
 
-    That capability -- not being uid 0 -- is what bypasses the Yama ptrace
+    That capability (not being uid 0) is what bypasses the Yama ptrace
     scope, and a container can run as root while dropping it, so this reads
     ``CapEff`` from ``/proc/self/status`` rather than checking the uid.
     Returns False when it is absent or unreadable (e.g. non-Linux).
@@ -168,7 +155,7 @@ def _check_ptrace_scope() -> None:
     Above :data:`_MAX_YAMA_PTRACE_SCOPE` a process may trace only its
     descendants, and py-spy's target never is one; CAP_SYS_PTRACE bypasses
     this, so the check is skipped when the process holds it (uid 0 alone is
-    not enough -- a container can be root without the capability).
+    not enough, since a container can be root without the capability).
     """
     if _has_cap_sys_ptrace():
         return
@@ -323,7 +310,7 @@ def resolve_flamegraph_dir(explicit: str, log: Callable[[str], None]) -> str:
     return _MANAGED_FLAMEGRAPH_DIR
 
 
-def _folded_has_stacks(path: str) -> bool:
+def _bcc_capture_has_stacks(path: str) -> bool:
     """Return whether *path* holds a folded-stack line (``frame;... <count>``).
 
     A non-empty file is not proof of samples: the ``*-bpfcc`` tools also
@@ -378,12 +365,9 @@ class FlameProfiler:
         self._proc: subprocess.Popen[bytes] | None = None
         self._raw_fh: object = None
         self._err_fh: object = None
-        # Trampolines can only be installed from inside the interpreter
-        # being profiled, so they are available only when self-profiling.
-        # True when the target is this very process (``bench l2``). Only then
-        # can we activate CPython's perf trampolines -- they install from
-        # inside the target interpreter -- and only then is the resulting
-        # /tmp/perf-<pid>.map ours to clean up.
+        # True when the target is this process (``bench l2``). Only then can
+        # we activate CPython's perf trampolines (they install from inside the
+        # target interpreter) and own the resulting /tmp/perf-<pid>.map.
         self._self_profiling = pid == os.getpid()
         # Intermediate capture file (perf.data for on-cpu, folded stacks
         # for off-cpu); removed after a successful render. py-spy writes
@@ -416,6 +400,8 @@ class FlameProfiler:
         throttled), trading the occasional dropped mid-unwind stack.
         """
         self._err_fh = open(self._err_path, "wb")
+        # Equivalent to: py-spy record --pid P --rate 200 --format flamegraph
+        #   --threads --idle --nonblocking [--gil] --output OUT
         argv = [
             "py-spy",
             "record",
@@ -467,14 +453,15 @@ class FlameProfiler:
             print(
                 "[Profile] WARNING: python frames will be [unknown]: pid "
                 f"{self._pid} has no perf map. Use --mode wall / gil (py-spy "
-                "needs no map and adds no standing overhead), or -- only for "
-                "a session you dedicate to profiling, since it slows every "
-                "call -- relaunch the target with PYTHONPERFSUPPORT=1.",
+                "needs no map and adds no standing overhead), or (only for a "
+                "session you dedicate to profiling, since it slows every "
+                "call) relaunch the target with PYTHONPERFSUPPORT=1.",
                 file=sys.stderr,
                 flush=True,
             )
         if self._mode == "on-cpu":
             self._err_fh = open(self._err_path, "wb")
+            # Equivalent to: perf record -F 99 -g -p P -o <perf.data>
             self._proc = subprocess.Popen(
                 [
                     "perf",
@@ -493,12 +480,10 @@ class FlameProfiler:
         else:
             tool, flags = _BCC_MODES[self._mode]
             self._raw_fh = open(self._raw_path, "wb")
-            # Capture stderr rather than discard it: when the BPF program
-            # fails to load (commonly missing kernel headers or insufficient
-            # privileges) the tool prints the reason here, and surfacing it
-            # is the difference between an actionable message and a downstream
-            # "no stacks" error from the renderer.
+            # Capture stderr, not discard: a failed BPF load prints its reason
+            # (missing kernel headers, no privilege) here, surfaced on error.
             self._err_fh = open(self._err_path, "wb")
+            # Equivalent to: sudo <tool> <flags> -p P
             self._proc = subprocess.Popen(
                 ["sudo", tool, *flags, "-p", str(self._pid)],
                 stdout=self._raw_fh,  # type: ignore[arg-type]
@@ -615,12 +600,12 @@ class FlameProfiler:
 
         The recorder exits 0 after ``SIGINT`` even when empty, so the capture
         is inspected: on-cpu by decoding its ``perf.data`` header, bcc by
-        :func:`_folded_has_stacks` (a non-empty folded file is not proof).
+        :func:`_bcc_capture_has_stacks` (a non-empty folded file is not proof).
         """
         if self._mode == "on-cpu":
             captured = self._perf_capture_has_stacks()
         else:
-            captured = _folded_has_stacks(self._raw_path)
+            captured = _bcc_capture_has_stacks(self._raw_path)
         if captured:
             return
 
@@ -643,7 +628,7 @@ class FlameProfiler:
             raise ProfileError(
                 f"the {self._mode} recorder produced no stacks. Either the "
                 "recording window was too short (record for longer), or "
-                "the bcc program failed to load -- see the recorder output "
+                "the bcc program failed to load; see the recorder output "
                 "above (commonly missing kernel headers or insufficient "
                 "privileges)."
             )
@@ -691,7 +676,7 @@ class FlameProfiler:
         Three stages piped together: ``perf script`` | ``stackcollapse-perf.pl``
         | ``flamegraph.pl``. Each read end is closed once handed downstream so
         an early death propagates ``SIGPIPE`` upstream, and every stage's exit
-        code is checked -- a silent ``perf script`` decode failure would
+        code is checked, since a silent ``perf script`` decode failure would
         otherwise pass unnoticed.
         """
         collapse_pl = os.path.join(self._flamegraph_dir, "stackcollapse-perf.pl")
@@ -730,7 +715,7 @@ class FlameProfiler:
         off-cpu / offwake / wakeup read apart and offwake's blocked and waker
         halves get distinct colors.
         """
-        palette = _BCC_PALETTE.get(self._mode, "io")
+        palette = _BCC_PALETTE[self._mode]
         with open(self._raw_path, "rb") as folded:
             flame = subprocess.Popen(
                 [
