@@ -26,7 +26,7 @@ accelerates and inherits the torch baseline for everything else.
 | Torch/CPU reference | `python_ops_fallback.py` — 36 ops + 3 types | `lmcache/python_ops_fallback.py` |
 | MUSA ops | Python adapter: import `py_ops`, override 1 fn, optional native | `lmcache/v1/platform/musa/ops.py` (**deleted**; now `musa/device_ops.py`) |
 | HPU ops | None — uses torch baseline entirely | (via `DeviceOps` inheritance) |
-| Runtime selection | `_install_c_ops_shim()`: resolves `DeviceOps` via `DeviceSpec.ops_cls` | `lmcache/__init__.py` |
+| Runtime selection | `build_c_ops_shim()` builds a shim over the resolved `DeviceOps` instance; `lmcache/__init__.py` registers it | `lmcache/v1/platform/c_ops_shim.py`, `lmcache/__init__.py` |
 | Build selection | `BuildProfile` subclasses auto-discovered | `setup_extensions/build_profiles/` |
 | Device services registry | `DeviceIPCWrapper`/`PinMemoryBackend`/`BaseCacheContext` auto-discovered by `device_type` | `lmcache/v1/platform/` |
 
@@ -317,7 +317,7 @@ The import lives inside the property body on purpose:
 - It keeps native CUDA loading deferred until `CudaDeviceOps.populate_module()`,
   preserving the current `lmcache.c_ops` shim bootstrap ordering.
 
-Resolution is still fail-fast for accelerators. If `_install_c_ops_shim()` is
+Resolution is still fail-fast for accelerators. If `build_c_ops_shim()` is
 asked for `"cuda"` / `"xpu"` / `"musa"` / `"hpu"` and no `DeviceSpec` is
 registered, it raises instead of silently falling back to the torch baseline.
 The normal CPU path resolves through `CpuDeviceSpec -> CpuDeviceOps`; only `""`
@@ -382,23 +382,21 @@ The per-device op merge is replaced by `DeviceSpec`-based lookup. The existing
 resolved `DeviceOps` class.
 
 ```python
-# lmcache/__init__.py
-def _install_c_ops_shim() -> None:
-    from lmcache.v1.platform import get_device_spec
-    from lmcache.v1.platform.base_device_spec import DeviceSpec
-
-    spec = get_device_spec(torch_device_type)
-    if spec is None:
-        if torch_device_type in ("", "cpu"):
-            spec = DeviceSpec()
-        else:
-            raise RuntimeError(...)
-
-    ops_cls = spec.ops_cls
-
+# lmcache/v1/platform/c_ops_shim.py
+def build_c_ops_shim(device_type: str) -> types.ModuleType:
+    ops = resolve_device_ops(device_type)  # fail-fast for accelerators
+    ops.ensure_native()
     shim = types.ModuleType("lmcache.c_ops")
-    ops_cls.populate_module(shim)
-    sys.modules["lmcache.c_ops"] = shim
+    # copy public symbols from the native .so (if any), then fall back
+    # to the DeviceOps instance for torch-baseline ops.
+    ...
+    shim.__getattr__ = lambda name: getattr(ops, name)
+    return shim
+
+# lmcache/__init__.py
+_shim = build_c_ops_shim(torch_device_type)
+sys.modules["lmcache.c_ops"] = _shim
+globals()["c_ops"] = _shim  # parent attr for IMPORT_FROM bytecode
 ```
 
 ---
