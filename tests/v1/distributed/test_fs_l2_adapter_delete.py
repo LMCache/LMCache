@@ -55,6 +55,10 @@ class _Buf:
         return memoryview(self._data)
 
 
+# (adapter, listener) pair produced by the ``adapter`` fixture.
+AdapterFixture = tuple[FSL2Adapter, _RecordingListener]
+
+
 def _key(h: bytes = b"\xde\xad\xbe\xef", salt: str = "alice") -> ObjectKey:
     return ObjectKey(
         chunk_hash=h,
@@ -67,7 +71,7 @@ def _key(h: bytes = b"\xde\xad\xbe\xef", salt: str = "alice") -> ObjectKey:
 @pytest.fixture
 def adapter(
     tmp_path: Path,
-) -> "Iterator[tuple[FSL2Adapter, _RecordingListener]]":
+) -> Iterator[AdapterFixture]:
     adp = FSL2Adapter(FSL2AdapterConfig(base_path=str(tmp_path)))
     listener = _RecordingListener()
     adp.register_listener(listener)  # type: ignore[arg-type]
@@ -113,7 +117,7 @@ def _store_and_wait(
 
 
 class TestDelete:
-    def test_delete_removes_keys_and_notifies(self, adapter):
+    def test_delete_removes_keys_and_notifies(self, adapter: AdapterFixture) -> None:
         adp, listener = adapter
         k1, k2 = _key(b"\x01" * 4), _key(b"\x02" * 4)
         _store_and_wait(adp, [k1, k2], [b"x" * 100, b"y" * 40])
@@ -128,13 +132,13 @@ class TestDelete:
         # k1 is gone, k2 survives.
         assert _lookup_and_wait(adp, [k1, k2]) == [False, True]
 
-    def test_delete_missing_key_is_noop(self, adapter):
+    def test_delete_missing_key_is_noop(self, adapter: AdapterFixture) -> None:
         adp, listener = adapter
         adp.delete([_key(b"\xff" * 4)])
         assert listener.deleted == []
         assert adp.get_usage().total_bytes_used == 0
 
-    def test_double_delete_is_idempotent(self, adapter):
+    def test_double_delete_is_idempotent(self, adapter: AdapterFixture) -> None:
         adp, listener = adapter
         k = _key()
         _store_and_wait(adp, [k], [b"z" * 10])
@@ -143,12 +147,39 @@ class TestDelete:
         assert listener.deleted == [k]
         assert adp.get_usage().total_bytes_used == 0
 
-    def test_empty_key_list_is_noop(self, adapter):
+    def test_large_batch_deletes_all_and_notifies(
+        self, adapter: AdapterFixture
+    ) -> None:
+        """A batch far wider than _DELETE_CONCURRENCY is fully deleted
+        with per-key sizes intact — exercises the bounded concurrent
+        fan-out (order-preserving gather + semaphore)."""
+        adp, listener = adapter
+        n = 300
+        keys = [_key(i.to_bytes(4, "big")) for i in range(n)]
+        payloads = [b"x" * (10 + i % 7) for i in range(n)]
+        _store_and_wait(adp, keys, payloads)
+
+        adp.delete(keys)
+
+        assert sorted(listener.deleted, key=str) == sorted(keys, key=str)
+        assert adp.get_usage().total_bytes_used == 0
+        assert _lookup_and_wait(adp, keys[:8]) == [False] * 8
+
+    def test_delete_after_close_does_not_raise(self, adapter: AdapterFixture) -> None:
+        """delete() on a closed adapter is a logged no-op, never a
+        crash: run_coroutine_threadsafe raises RuntimeError once the
+        background loop is stopped, and delete is best-effort."""
+        adp, listener = adapter
+        adp.close()
+        adp.delete([_key()])
+        assert listener.deleted == []
+
+    def test_empty_key_list_is_noop(self, adapter: AdapterFixture) -> None:
         adp, listener = adapter
         adp.delete([])
         assert listener.deleted == []
 
-    def test_load_after_delete_is_miss(self, adapter):
+    def test_load_after_delete_is_miss(self, adapter: AdapterFixture) -> None:
         """The documented race outcome: a load for a deleted key
         degrades to a miss, never an error."""
         adp, listener = adapter
@@ -170,7 +201,9 @@ class TestDelete:
 
 
 class TestStoreLoadNotifications:
-    def test_restore_of_existing_key_does_not_renotify(self, adapter):
+    def test_restore_of_existing_key_does_not_renotify(
+        self, adapter: AdapterFixture
+    ) -> None:
         """A store that skips (file already on disk) fires no stored
         event, so byte accounting is never double-counted."""
         adp, listener = adapter
@@ -180,7 +213,7 @@ class TestStoreLoadNotifications:
         assert listener.stored == [(k, 8)]
         assert adp.get_usage().total_bytes_used == 8
 
-    def test_load_notifies_accessed(self, adapter):
+    def test_load_notifies_accessed(self, adapter: AdapterFixture) -> None:
         adp, listener = adapter
         k = _key()
         _store_and_wait(adp, [k], [b"b" * 12])

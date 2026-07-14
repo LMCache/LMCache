@@ -253,6 +253,8 @@ class FSL2Adapter(L2AdapterInterface):
     thread.
     """
 
+    _DELETE_CONCURRENCY = 64
+
     def __init__(self, config: FSL2AdapterConfig):
         super().__init__()
         self._config = config
@@ -433,11 +435,11 @@ class FSL2Adapter(L2AdapterInterface):
         """
         if not keys:
             return
-        fut = asyncio.run_coroutine_threadsafe(
-            self._execute_delete(keys),
-            self._loop,
-        )
         try:
+            fut = asyncio.run_coroutine_threadsafe(
+                self._execute_delete(keys),
+                self._loop,
+            )
             deleted_keys, deleted_sizes = fut.result(timeout=30.0)
         except Exception as e:
             logger.warning("FSL2Adapter delete failed: %s", e)
@@ -786,24 +788,34 @@ class FSL2Adapter(L2AdapterInterface):
     async def _execute_delete(
         self, keys: list[ObjectKey]
     ) -> tuple[list[ObjectKey], list[int]]:
-        """Unlink each key's file; return the removed keys and their sizes."""
+        """Unlink each key's file concurrently; return removed keys + sizes."""
+        sem = asyncio.Semaphore(self._DELETE_CONCURRENCY)
+
+        async def _delete_one(key: ObjectKey) -> tuple[ObjectKey, int] | None:
+            file_path = self._key_to_path(key)
+            async with sem:
+                try:
+                    size = (await aiofiles.os.stat(file_path)).st_size
+                    await aiofiles.os.unlink(file_path)
+                except FileNotFoundError:
+                    return None
+                except Exception:
+                    logger.exception(
+                        "FSL2Adapter failed to delete %s",
+                        file_path,
+                    )
+                    return None
+            return key, size
+
+        results = await asyncio.gather(*(_delete_one(k) for k in keys))
+
         deleted_keys: list[ObjectKey] = []
         deleted_sizes: list[int] = []
-        for key in keys:
-            file_path = self._key_to_path(key)
-            try:
-                size = (await aiofiles.os.stat(file_path)).st_size
-                await aiofiles.os.unlink(file_path)
-            except FileNotFoundError:
-                continue
-            except Exception:
-                logger.exception(
-                    "FSL2Adapter failed to delete %s",
-                    file_path,
-                )
-                continue
-            deleted_keys.append(key)
-            deleted_sizes.append(size)
+        for res in results:
+            if res is not None:
+                key, size = res
+                deleted_keys.append(key)
+                deleted_sizes.append(size)
         return deleted_keys, deleted_sizes
 
 
