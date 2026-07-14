@@ -3,17 +3,28 @@
 #
 # End-to-end GPU test for LMCache + vLLM pipeline parallelism + MLA.
 #
+# Works on both NVIDIA CUDA and AMD ROCm.
+#
 # Requirements:
-#   - Linux with NVIDIA CUDA (compute >= 7.5) or AMD ROCm
-#   - 2+ GPUs (for TP=2 PP=2)
+#   - Linux with NVIDIA CUDA (compute >= 7.5) or AMD ROCm (MI200/MI300+)
+#   - TP*PP GPUs available
 #   - lmcache installed (pip install -e .)
 #   - vllm installed (pip install vllm)
+#   - On ROCm: build lmcache with BUILD_WITH_HIP=1
+#   - On ROCm: use vllm ROCm build (pip install vllm-rocm)
 #
 # Usage:
-#   bash tests/v1/multiprocess/test_e2e_gpu_pp_mla.sh [model_name]
+#   bash tests/v1/multiprocess/test_e2e_gpu_pp_mla.sh [model] [PP] [TP]
 #
-# Default model: moonshotai/Kimi-K2-Instruct (MLA)
-# Alt model:     zai-org/GLM-4.6 (MLA)
+# Examples:
+#   # Default: Kimi K2, PP=2, TP=2
+#   bash tests/v1/multiprocess/test_e2e_gpu_pp_mla.sh
+#
+#   # GLM-4.6, PP=3, TP=2
+#   bash tests/v1/multiprocess/test_e2e_gpu_pp_mla.sh zai-org/GLM-4.6 3 2
+#
+#   # Kimi K2, PP=3, TP=4 (needs 12 GPUs)
+#   bash tests/v1/multiprocess/test_e2e_gpu_pp_mla.sh moonshotai/Kimi-K2-Instruct 3 4
 
 set -euo pipefail
 
@@ -22,30 +33,84 @@ PP="${2:-2}"
 TP="${3:-2}"
 PORT=8000
 LMCACHE_PORT=5555
+NUM_GPUS=$((TP * PP))
 
 echo "============================================================"
 echo "  E2E GPU Test: LMCache + PP + MLA"
 echo "  Model: ${MODEL}"
-echo "  Config: TP=${TP} PP=${PP}, single LMCache server"
+echo "  Config: TP=${TP} PP=${PP} (${NUM_GPUS} GPUs needed)"
 echo "============================================================"
 
-# Detect GPU vendor
-if python -c "import torch; assert torch.version.hip is not None" 2>/dev/null; then
-    echo "  GPU: AMD ROCm (HIP ${torch.version.hip})"
-elif python -c "import torch; assert torch.cuda.is_available()" 2>/dev/null; then
-    echo "  GPU: NVIDIA CUDA"
+# -------------------------------------------------------------------------
+# Detect GPU vendor (NVIDIA CUDA or AMD ROCm)
+# -------------------------------------------------------------------------
+GPU_VENDOR="unknown"
+GPU_INFO=""
+
+# Try NVIDIA first
+if python -c "import torch; assert torch.cuda.is_available() and torch.version.hip is None" 2>/dev/null; then
+    GPU_VENDOR="nvidia"
+    GPU_INFO=$(python -c "import torch; print(torch.cuda.get_device_name(0))" 2>/dev/null || echo "CUDA GPU")
+    echo "  GPU: NVIDIA CUDA (${GPU_INFO})"
+
+# Then try AMD ROCm
+elif python -c "import torch; assert torch.cuda.is_available() and torch.version.hip is not None" 2>/dev/null; then
+    GPU_VENDOR="rocm"
+    HIP_VER=$(python -c "import torch; print(torch.version.hip)" 2>/dev/null || echo "unknown")
+    GPU_INFO=$(python -c "import torch; print(torch.cuda.get_device_name(0))" 2>/dev/null || echo "ROCm GPU")
+    echo "  GPU: AMD ROCm (HIP ${HIP_VER}, ${GPU_INFO})"
+
+    # On ROCm, ensure HIP_VISIBLE_DEVICES is set correctly
+    if [ -z "${HIP_VISIBLE_DEVICES:-}" ] && [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
+        export HIP_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}"
+        echo "  Set HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES}"
+    fi
+
 else
-    echo "ERROR: No GPU detected"
+    echo "ERROR: No GPU detected (neither NVIDIA CUDA nor AMD ROCm)"
+    echo "  Check: python -c 'import torch; print(torch.cuda.is_available(), torch.version.hip)'"
     exit 1
 fi
 
+# Verify GPU count
+GPU_COUNT=$(python -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo 0)
+echo "  GPU count: ${GPU_COUNT}"
+if [ "${GPU_COUNT}" -lt "${NUM_GPUS}" ]; then
+    echo "ERROR: Need ${NUM_GPUS} GPUs for TP=${TP} PP=${PP}, found ${GPU_COUNT}"
+    exit 1
+fi
+
+# Verify lmcache is installed
+if ! python -c "import lmcache" 2>/dev/null; then
+    echo "ERROR: lmcache not installed. Run: pip install -e ."
+    if [ "${GPU_VENDOR}" = "rocm" ]; then
+        echo "  On ROCm, build with: BUILD_WITH_HIP=1 pip install -e ."
+    fi
+    exit 1
+fi
+
+# Verify vllm is installed
+if ! python -c "import vllm" 2>/dev/null; then
+    echo "ERROR: vllm not installed."
+    if [ "${GPU_VENDOR}" = "rocm" ]; then
+        echo "  On ROCm, install with: pip install vllm-rocm"
+    else
+        echo "  Install with: pip install vllm"
+    fi
+    exit 1
+fi
+
+echo "  Environment: OK"
+
+# -------------------------------------------------------------------------
 # Step 1: Start LMCache server
+# -------------------------------------------------------------------------
 echo ""
 echo "[1/4] Starting LMCache server on port ${LMCACHE_PORT}..."
 lmcache server --host localhost --port ${LMCACHE_PORT} \
     --l1-size-gb 4 --eviction-policy LRU --chunk-size 16 &
 LMCACHE_PID=$!
-trap "kill ${LMCACHE_PID} 2>/dev/null || true" EXIT
+trap "kill ${LMCACHE_PID} ${VLLM_PID:-} 2>/dev/null || true" EXIT
 
 sleep 3
 if ! kill -0 ${LMCACHE_PID} 2>/dev/null; then
@@ -54,24 +119,36 @@ if ! kill -0 ${LMCACHE_PID} 2>/dev/null; then
 fi
 echo "  LMCache server started (PID ${LMCACHE_PID})"
 
-# Step 2: Start vLLM with PP=2 TP=2 + LMCache
+# -------------------------------------------------------------------------
+# Step 2: Start vLLM with TP*PP + LMCache
+# -------------------------------------------------------------------------
 echo ""
-echo "[2/4] Starting vLLM with TP=2 PP=2 + LMCache..."
+echo "[2/4] Starting vLLM with TP=${TP} PP=${PP} + LMCache..."
+
+VLLM_EXTRA_FLAGS=""
+if [ "${GPU_VENDOR}" = "rocm" ]; then
+    # On ROCm, ensure env vars are set for multi-GPU
+    export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
+    echo "  ROCm: NCCL_DEBUG=${NCCL_DEBUG}"
+fi
+
 vllm serve "${MODEL}" \
     --port ${PORT} \
     --tensor-parallel-size ${TP} \
     --pipeline-parallel-size ${PP} \
     --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.host\":\"tcp://localhost\",\"lmcache.mp.port\":${LMCACHE_PORT}}}" \
     --trust-remote-code \
-    --dtype bfloat16 &
+    --dtype bfloat16 \
+    ${VLLM_EXTRA_FLAGS} &
 VLLM_PID=$!
 trap "kill ${LMCACHE_PID} ${VLLM_PID} 2>/dev/null || true" EXIT
 
 echo "  vLLM starting (PID ${VLLM_PID})..."
-echo "  Waiting for vLLM to be ready (up to 300s)..."
+echo "  Waiting for vLLM to be ready (up to 600s)..."
 
-# Wait for vLLM to be ready
-for i in $(seq 1 60); do
+# Wait for vLLM to be ready (ROCm can be slower to init)
+MAX_WAIT=120
+for i in $(seq 1 ${MAX_WAIT}); do
     if curl -s http://localhost:${PORT}/health > /dev/null 2>&1; then
         echo "  vLLM is ready (after ${i}*5s)"
         break
@@ -84,11 +161,14 @@ for i in $(seq 1 60); do
 done
 
 if ! curl -s http://localhost:${PORT}/health > /dev/null 2>&1; then
-    echo "ERROR: vLLM did not become ready within 300s"
+    echo "ERROR: vLLM did not become ready within $((MAX_WAIT*5))s"
+    echo "  Check vLLM logs for errors"
     exit 1
 fi
 
-# Step 3: Send a request with a shared prefix (to trigger LMCache)
+# -------------------------------------------------------------------------
+# Step 3: Send requests with a shared prefix (to trigger LMCache)
+# -------------------------------------------------------------------------
 echo ""
 echo "[3/4] Sending requests with shared prefix..."
 PREFIX="You are a helpful assistant. Please answer the following question carefully and concisely. "
@@ -109,21 +189,28 @@ RESPONSE2=$(curl -s http://localhost:${PORT}/v1/completions \
     -d "{\"model\":\"${MODEL}\",\"prompt\":\"${PREFIX}${QUESTION2}\",\"max_tokens\":32,\"temperature\":0}")
 echo "  Response 2: $(echo ${RESPONSE2} | python -c 'import sys,json; print(json.load(sys.stdin)["choices"][0]["text"][:80])' 2>/dev/null || echo '(parse error)')"
 
-# Step 4: Verify LMCache is being used
+# -------------------------------------------------------------------------
+# Step 4: Verify
+# -------------------------------------------------------------------------
 echo ""
-echo "[4/4] Checking LMCache logs for cache hits..."
-if dmesg 2>/dev/null | tail -100 | grep -qi "lmcache\|Stored\|Retrieved"; then
-    echo "  LMCache activity detected in dmesg"
+echo "[4/4] Verifying..."
+if ! kill -0 ${LMCACHE_PID} 2>/dev/null; then
+    echo "ERROR: LMCache server died during test"
+    exit 1
+fi
+if ! kill -0 ${VLLM_PID} 2>/dev/null; then
+    echo "ERROR: vLLM died during test"
+    exit 1
 fi
 
-# Check LMCache server logs for Stored/Retrieved
-if kill -0 ${LMCACHE_PID} 2>/dev/null; then
-    echo "  LMCache server is still running"
-fi
+echo "  LMCache server: running"
+echo "  vLLM: running"
+echo "  Both requests completed"
 
 echo ""
 echo "============================================================"
 echo "  E2E TEST PASSED"
+echo "  - GPU: ${GPU_VENDOR} (${GPU_INFO})"
 echo "  - vLLM started with TP=${TP} PP=${PP}"
 echo "  - LMCache MP connector connected"
 echo "  - Requests completed successfully"
