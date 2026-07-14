@@ -8,6 +8,7 @@ sharing cache across nodes.
    :maxdepth: 1
 
    s3
+   gcs
    hfbucket
    mooncake_store
    resp

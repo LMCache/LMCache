@@ -28,6 +28,9 @@ target.
    * - :doc:`S3 <s3>`
      - ``s3``
      - Remote & Distributed
+   * - :doc:`GCS <gcs>`
+     - ``gcs``
+     - Remote & Distributed
    * - :doc:`HF Bucket <hfbucket>`
      - ``hfbucket``
      - Remote & Distributed
