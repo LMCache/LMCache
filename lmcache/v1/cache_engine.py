@@ -1076,21 +1076,42 @@ class LMCacheEngine:
             next(mem_obj_consumer)
 
             to_count_down = []
-            for layer_id in range(self.num_layers):
-                task = next(get_generator)
+            try:
+                for layer_id in range(self.num_layers):
+                    task = next(get_generator)
 
-                assert task is not None
+                    assert task is not None
 
-                if layer_id == 0:
-                    # NOTE(Yuwei): For sglang integration we need to provide retrieved
-                    # tokens number in the first layer loading since there is no lookup
-                    yield torch.sum(ret_mask)
-                else:
-                    yield None
+                    if layer_id == 0:
+                        # NOTE(Yuwei): For sglang integration we need to provide
+                        # retrieved tokens number in the first layer loading since
+                        # there is no lookup
+                        yield torch.sum(ret_mask)
+                    else:
+                        yield None
 
-                mem_objs_layer = task.result()
-                mem_obj_consumer.send(mem_objs_layer)
-                to_count_down.extend(mem_objs_layer)
+                    mem_objs_layer = task.result()
+                    mem_obj_consumer.send(mem_objs_layer)
+                    to_count_down.extend(mem_objs_layer)
+            except Exception:
+                # A layer retrieve failed (e.g. StagingAllocationError when the
+                # CPU staging pool is exhausted). Release every staging buffer
+                # already loaded for this request so the failure does not leak
+                # pins/refcounts and worsen the pressure, then tear down the GPU
+                # consumer and re-raise for the caller to treat as a cache miss.
+                for mem_obj in to_count_down:
+                    if mem_obj.is_pinned:
+                        mem_obj.unpin()
+                    mem_obj.ref_count_down()
+                try:
+                    mem_obj_consumer.close()
+                except Exception:
+                    logger.warning(
+                        "[req_id=%s] Failed to close GPU consumer after an "
+                        "aborted layerwise retrieve",
+                        req_id,
+                    )
+                raise
 
             for mem_obj in to_count_down:
                 mem_obj.ref_count_down()

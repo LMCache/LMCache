@@ -17,6 +17,10 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import _parse_local_disk
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.v1.storage_backend.exceptions import (
+    StagingAllocationError,
+    StorageBackendError,
+)
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
 
@@ -467,6 +471,192 @@ class TestGetBlockingCachePolicyUpdate:
         assert result is None
         mock_update.assert_not_called()
         local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+
+class _StubStagingObj:
+    """Minimal stand-in for a pinned CPU staging ``MemoryObj``.
+
+    Tracks pin and reference counts so tests can assert that the rollback
+    path releases everything it acquired. A fresh allocation starts with
+    ``ref_count == 1`` (as the real allocator returns).
+    """
+
+    def __init__(self) -> None:
+        self.pin_count = 0
+        self.ref_count = 1
+
+    def pin(self) -> bool:
+        self.pin_count += 1
+        return True
+
+    def unpin(self) -> bool:
+        self.pin_count -= 1
+        return True
+
+    def ref_count_down(self) -> None:
+        self.ref_count -= 1
+
+    def get_ref_count(self) -> int:
+        return self.ref_count
+
+    @property
+    def is_pinned(self) -> bool:
+        return self.pin_count > 0
+
+
+class TestBatchedGetNonBlockingAllocationFailure:
+    """Regression tests for the disk-retrieve deadlock (SGLang hang under
+    host-memory pressure).
+
+    ``batched_get_non_blocking`` used to ``self.disk_lock.acquire()`` per
+    iteration and ``return`` a partial list when a staging allocation failed,
+    leaking ``disk_lock`` (wedging the next caller / the SGLang scheduler) and
+    returning unfilled buffers with dangling pins. The fix must always release
+    the lock, roll back every acquired resource, and raise instead of returning
+    garbage.
+    """
+
+    def _inject_key(
+        self,
+        backend: LocalDiskBackend,
+        key: CacheEngineKey,
+        shape: torch.Size,
+    ) -> None:
+        """Register a key in the disk index without writing anything to disk."""
+        meta = DiskCacheMetadata(
+            path="/nonexistent/path.pt",
+            size=0,
+            shape=shape,
+            dtype=torch.bfloat16,
+            cached_positions=None,
+            fmt=MemoryFormat.KV_2LTD,
+            pin_count=0,
+        )
+        with backend.disk_lock:
+            backend.dict[key] = meta
+            backend.cache_policy.update_on_put(key)
+
+    def _assert_lock_released(self, backend: LocalDiskBackend) -> None:
+        acquired = backend.disk_lock.acquire(timeout=1.0)
+        assert acquired, "disk_lock was leaked on the failure path"
+        backend.disk_lock.release()
+
+    def test_allocation_failure_releases_lock_and_rolls_back(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """A mid-batch allocation failure raises, releases the lock, and rolls
+        back the already-acquired key pin and staging buffer."""
+        backend = local_disk_backend
+        shape = torch.Size([28, 2, 16, 8, 128])
+        key0 = create_test_key(0)
+        key1 = create_test_key(1)
+        self._inject_key(backend, key0, shape)
+        self._inject_key(backend, key1, shape)
+
+        stub0 = _StubStagingObj()
+        # First key allocates a staging buffer; second fails (pool exhausted).
+        with patch.object(
+            backend.local_cpu_backend, "allocate", side_effect=[stub0, None]
+        ):
+            with pytest.raises(StagingAllocationError):
+                asyncio.run(backend.batched_get_non_blocking("lookup", [key0, key1]))
+
+        self._assert_lock_released(backend)
+
+        # Both disk-index pins are rolled back...
+        assert backend.dict[key0].pin_count == 0
+        assert backend.dict[key1].pin_count == 0
+        # ...and the one allocated staging buffer is unpinned and freed.
+        assert not stub0.is_pinned
+        assert stub0.get_ref_count() == 0
+
+        backend.local_cpu_backend.memory_allocator.close()
+
+    def test_allocation_failure_on_first_key_releases_lock(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """Failing on the very first key still releases the lock and leaves no
+        pins behind (nothing to roll back)."""
+        backend = local_disk_backend
+        shape = torch.Size([28, 2, 16, 8, 128])
+        key0 = create_test_key(0)
+        self._inject_key(backend, key0, shape)
+
+        with patch.object(backend.local_cpu_backend, "allocate", return_value=None):
+            with pytest.raises(StagingAllocationError):
+                asyncio.run(backend.batched_get_non_blocking("lookup", [key0]))
+
+        self._assert_lock_released(backend)
+        assert backend.dict[key0].pin_count == 0
+        backend.local_cpu_backend.memory_allocator.close()
+
+    def test_missing_key_aborts_before_allocation(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """A key absent from the index aborts with StorageBackendError during
+        the up-front metadata snapshot -- before any staging allocation -- and
+        releases the lock."""
+        backend = local_disk_backend
+        shape = torch.Size([28, 2, 16, 8, 128])
+        key0 = create_test_key(0)
+        key1 = create_test_key(1)
+        self._inject_key(backend, key0, shape)
+        # key1 is intentionally NOT injected.
+
+        with patch.object(backend.local_cpu_backend, "allocate") as mock_allocate:
+            with pytest.raises(StorageBackendError):
+                asyncio.run(backend.batched_get_non_blocking("lookup", [key0, key1]))
+            # Fail-fast: the missing key is detected up front, so no staging
+            # buffer is ever allocated (and nothing needs rolling back).
+            mock_allocate.assert_not_called()
+
+        self._assert_lock_released(backend)
+        # key0 was only snapshotted, never pinned.
+        assert backend.dict[key0].pin_count == 0
+        backend.local_cpu_backend.memory_allocator.close()
+
+    def test_success_pins_keys_and_submits_prefetch(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """The happy path pins every key, pins each staging buffer, and submits
+        a single batched prefetch task."""
+        backend = local_disk_backend
+        shape = torch.Size([28, 2, 16, 8, 128])
+        key0 = create_test_key(0)
+        key1 = create_test_key(1)
+        self._inject_key(backend, key0, shape)
+        self._inject_key(backend, key1, shape)
+
+        stub0 = _StubStagingObj()
+        stub1 = _StubStagingObj()
+
+        captured = {}
+
+        async def fake_submit(task_type, fn, *, paths, keys, memory_objs):
+            captured["task_type"] = task_type
+            captured["paths"] = paths
+            captured["keys"] = keys
+            captured["memory_objs"] = memory_objs
+            return memory_objs
+
+        with patch.object(
+            backend.local_cpu_backend, "allocate", side_effect=[stub0, stub1]
+        ):
+            with patch.object(
+                backend.disk_worker, "submit_task", side_effect=fake_submit
+            ):
+                result = asyncio.run(
+                    backend.batched_get_non_blocking("lookup", [key0, key1])
+                )
+
+        assert result == [stub0, stub1]
+        assert captured["task_type"] == "prefetch"
+        assert captured["keys"] == [key0, key1]
+        assert len(captured["paths"]) == 2
+        assert backend.dict[key0].pin_count == 1
+        assert backend.dict[key1].pin_count == 1
+        assert stub0.is_pinned and stub1.is_pinned
+        backend.local_cpu_backend.memory_allocator.close()
 
 
 class TestBatchedGetBlocking:
