@@ -82,7 +82,7 @@ class LocalDiskWorker:
             if key in self.put_tasks:
                 self.put_tasks.remove(key)
             else:
-                logger.warning(f"Key {key} not found in put tasks.")
+                logger.warning("Key %s not found in put tasks.", key)
 
     def insert_put_task(self, key: CacheEngineKey):
         with self.put_lock:
@@ -333,7 +333,7 @@ class LocalDiskBackend(StorageBackendInterface):
 
         # skip repeated save
         if self.exists_in_put_tasks(key):
-            logger.debug(f"Put task for {key} is already in progress.")
+            logger.debug("Put task for %s is already in progress.", key)
             return None
 
         self.disk_worker.insert_put_task(key)
@@ -441,7 +441,7 @@ class LocalDiskBackend(StorageBackendInterface):
         if memory_obj is not None:
             # Re-acquire the lock to update the eviction policy.  The key
             # membership check guards against the entry being evicted between
-            # the two lock regions — in that case the policy state is already
+            # the two lock regions � in that case the policy state is already
             # consistent and no update is needed.
             with self.disk_lock:
                 if key in self.dict:
@@ -544,7 +544,9 @@ class LocalDiskBackend(StorageBackendInterface):
         mem_objs: list[MemoryObj] = []
         paths: list[str] = []
 
-        logger.debug(f"lookup_id: {lookup_id}; Prefetching {len(keys)} keys from disk.")
+        logger.debug(
+            "lookup_id: %s; Prefetching %s keys from disk.", lookup_id, len(keys)
+        )
         for key in keys:
             self.disk_lock.acquire()
             assert key in self.dict, f"Key {key} not found in disk cache after pinning"
@@ -583,7 +585,7 @@ class LocalDiskBackend(StorageBackendInterface):
             self.cache_policy.update_on_hit(key, self.dict)
 
             self.disk_lock.release()
-            logger.debug(f"Prefetching {key} from disk.")
+            logger.debug("Prefetching %s from disk.", key)
             memory_obj.pin()
             mem_objs.append(memory_obj)
             paths.append(path)
@@ -662,7 +664,7 @@ class LocalDiskBackend(StorageBackendInterface):
             try:
                 on_complete_callback(key)
             except Exception as e:
-                logger.warning(f"on_complete_callback failed for key {key}: {e}")
+                logger.warning("on_complete_callback failed for key %s: %s", key, e)
 
     @_lmcache_nvtx_annotate
     def batched_async_load_bytes_from_disk(
@@ -728,10 +730,14 @@ class LocalDiskBackend(StorageBackendInterface):
             os.write(fd, buffer)
             os.close(fd)
         disk_write_time = time.time() - start_time
-        logger.debug(
-            f"Disk write size: {size} bytes, "
-            f"Bandwidth: {size / disk_write_time / 1e6:.2f} MB/s"
-        )
+        if disk_write_time > 0:
+            logger.debug(
+                "Disk write size: %s bytes, Bandwidth: %.2f MB/s",
+                size,
+                size / disk_write_time / 1e6,
+            )
+        else:
+            logger.debug("Disk write size: %s bytes", size)
 
     @_lmcache_nvtx_annotate
     def read_file(self, key, buffer, path):
@@ -753,16 +759,20 @@ class LocalDiskBackend(StorageBackendInterface):
                 with os.fdopen(fd, "rb", buffering=0) as fdo:
                     fdo.readinto(buffer)
         except FileNotFoundError:
-            logger.warning(f"File not found on disk: {path}")
+            logger.warning("File not found on disk: %s", path)
             if self.dict.get(key, None):
                 self.dict.pop(key)
             return
 
         disk_read_time = time.time() - start_time
-        logger.debug(
-            f"Disk read size: {size} bytes, "
-            f"Bandwidth: {size / disk_read_time / 1e6:.2f} MB/s"
-        )
+        if disk_read_time > 0:
+            logger.debug(
+                "Disk read size: %s bytes, Bandwidth: %.2f MB/s",
+                size,
+                size / disk_read_time / 1e6,
+            )
+        else:
+            logger.debug("Disk read size: %s bytes", size)
 
     def get_allocator_backend(self) -> LocalCPUBackend:
         return self.local_cpu_backend
