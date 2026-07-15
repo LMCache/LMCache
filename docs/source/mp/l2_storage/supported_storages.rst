@@ -25,6 +25,9 @@ target.
    * - :doc:`Raw Block (Rust) <raw_block>`
      - ``raw_block``
      - File & Block
+   * - :doc:`Bigtable <bigtable>`
+     - ``bigtable``
+     - Remote & Distributed
    * - :doc:`S3 <s3>`
      - ``s3``
      - Remote & Distributed
