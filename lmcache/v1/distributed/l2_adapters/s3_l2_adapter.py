@@ -1666,9 +1666,7 @@ class S3L2Adapter(L2AdapterInterface):
         )
         return all_entries
 
-    def _seed_policy_in_order(
-        self, ordered: list[tuple[ObjectKey, int]]
-    ) -> int:
+    def _seed_policy_in_order(self, ordered: list[tuple[ObjectKey, int]]) -> int:
         """Seed usage + the eviction policy from keys in LRU order.
 
         ``ordered`` is ``[(ObjectKey, size), ...]`` with the **least
@@ -1747,8 +1745,7 @@ class S3L2Adapter(L2AdapterInterface):
         ordered = _order_entries_by_last_modified(entries)
         seeded = self._seed_policy_in_order(ordered)
         logger.info(
-            "S3L2Adapter seeded %d keys from LastModified ordering "
-            "(total bytes ~%d)",
+            "S3L2Adapter seeded %d keys from LastModified ordering (total bytes ~%d)",
             seeded,
             sum(sz for _k, sz in ordered),
         )
@@ -1851,8 +1848,7 @@ class S3L2Adapter(L2AdapterInterface):
         """
         with self._lock:
             items = [
-                (name, size, tick)
-                for name, (size, tick) in self._access_ticks.items()
+                (name, size, tick) for name, (size, tick) in self._access_ticks.items()
             ]
         items.sort(key=lambda t: t[2])
         return items
