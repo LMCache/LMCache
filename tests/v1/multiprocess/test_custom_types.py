@@ -243,6 +243,88 @@ def test_cudaipc_wrapper_multiprocess_serialization():
         )
 
 
+def _worker_reconstruct_offset_tensor(encoded_data: bytes, result_queue: Queue):
+    """Worker: decode a single CudaIPCWrapper and reconstruct its tensor,
+    reporting the layout metadata and a checksum back to the parent."""
+    try:
+        torch.cuda.init()
+        decoder = get_customized_decoder(type=CudaIPCWrapper)
+        wrapper = decoder.decode(encoded_data)
+        tensor = wrapper.to_tensor()
+        result_queue.put(
+            (
+                "success",
+                int(tensor.storage_offset()),
+                list(tensor.shape),
+                list(tensor.stride()),
+                float(tensor.sum().cpu().item()),
+            )
+        )
+    except Exception as e:
+        result_queue.put(("error", str(e), None, None, None))
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA is required for CudaIPCWrapper tests",
+)
+def test_cudaipc_wrapper_nonzero_storage_offset():
+    """CudaIPCWrapper must round-trip a slice/narrow view with
+    ``storage_offset > 0`` bit-identically across processes.
+
+    This is the property PR #3853 relies on: with MTP speculative decoding +
+    CPU offload, per-layer KV are non-zero-``storage_offset`` slices of a
+    unified pool, so ``_validate_dim0_padded_layout`` must accept them. The
+    view here is both dim-0-padded (``stride[0] > prod(shape[1:])``) and
+    offset-shifted, exactly that shape. ``CudaIPCWrapper`` encodes
+    ``storage_offset`` and the receiver rebuilds the view via
+    ``set_(storage, storage_offset, shape, stride)``; this verifies the
+    reconstructed tensor reads from the correct (offset, strided) region.
+    """
+    ctx = mp.get_context("spawn")
+
+    # arange so each element's value equals its flat storage index -- the
+    # checksum then pins down exactly which storage positions were read.
+    base = torch.arange(64, dtype=torch.float32, device="cuda")
+    # dim-0-padded view: shape (3, 2, 4), per-block stride 12 > prod(shape[1:])=8
+    # (4 elements of padding per block), shifted by storage_offset=8.
+    view = base.as_strided((3, 2, 4), (12, 4, 1), storage_offset=8)
+    assert view.storage_offset() == 8
+    assert not view.is_contiguous()
+
+    wrapper = CudaIPCWrapper(view)
+    assert wrapper.storage_offset == view.storage_offset()
+    assert wrapper.shape == tuple(view.shape)
+    assert wrapper.stride == tuple(view.stride())
+
+    encoder = get_customized_encoder(type=CudaIPCWrapper)
+    encoded = encoder.encode(wrapper)
+
+    result_queue = ctx.Queue()
+    process = ctx.Process(
+        target=_worker_reconstruct_offset_tensor,
+        args=(encoded, result_queue),
+    )
+    process.start()
+    process.join(timeout=10)
+
+    if process.is_alive():
+        process.terminate()
+        process.join()
+        pytest.fail("Worker process timed out")
+    assert process.exitcode == 0, (
+        f"Worker process failed with exit code {process.exitcode}"
+    )
+    assert not result_queue.empty(), "No result received from worker process"
+
+    status, offset, shape, stride, checksum = result_queue.get()
+    assert status == "success", f"Worker process encountered error: {offset}"
+    assert offset == view.storage_offset()
+    assert shape == list(view.shape)
+    assert stride == list(view.stride())
+    assert abs(checksum - float(view.sum().cpu().item())) < 1e-5
+
+
 def test_block_allocation_record_serialization():
     """Test encoding and decoding of BlockAllocationRecord using msgspec."""
     original = BlockAllocationRecord(

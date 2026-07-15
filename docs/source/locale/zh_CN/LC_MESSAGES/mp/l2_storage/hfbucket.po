@@ -30,7 +30,7 @@ msgid ""
 "``huggingface_hub`` bucket APIs.  Blocking Hub calls run on a bounded "
 "thread pool driven by an asyncio loop on a daemon thread, so the L2 "
 "controller thread is never blocked on network I/O."
-msgstr "一个 L2 适配器，通过 ``huggingface_hub`` 桶 API 将 KV Cache 对象存储在 `Hugging Face Bucket <https://huggingface.co/docs/hub/storage-backends>`_ 中。阻塞的 Hub 调用在一个由 asyncio 循环驱动的有界线程池上运行在守护线程中，因此 L2 控制器线程在网络 I/O 上不会被阻塞。"
+msgstr "一个 L2 适配器，通过 ``huggingface_hub`` 桶 API 将 KV Cache 对象存储在 `Hugging Face Bucket <https://huggingface.co/docs/hub/storage-backends>`_ 中。阻塞式 Hub 调用在一个由守护线程上的 asyncio 循环驱动的有界线程池中执行，因此 L2 控制器线程不会阻塞在网络 I/O 上。"
 
 #: ../../source/mp/l2_storage/hfbucket.rst:10
 msgid ""
@@ -47,7 +47,7 @@ msgstr "对象名称源自 MP ``ObjectKey``，格式为 ``<model>@<kv_rank_hex>@
 msgid ""
 "This is a persistent remote backend best suited to warm and cold KV cache"
 " tiers; prefer a lower-latency local adapter for the hottest cache tier."
-msgstr "这是一个持久的远程后端，最适合温存和冷存储 KV Cache 层；对于最热的缓存层，建议使用延迟更低的本地适配器。"
+msgstr "这是一个持久化远程后端，最适合温层和冷层 KV Cache 缓存；对于最热的缓存层，建议优先使用延迟更低的本地适配器。"
 
 #: ../../source/mp/l2_storage/hfbucket.rst:20
 msgid "**Required fields:**"
@@ -73,43 +73,43 @@ msgstr "``token_env`` (字符串，默认 ``\"HF_TOKEN\"``)：用于解析 Huggi
 msgid ""
 "``token`` (string): Direct token fallback used when ``token_env`` is "
 "unset."
-msgstr "``token`` (string): 当 ``token_env`` 未设置时使用的直接令牌回退。"
+msgstr "``token`` (字符串)：``token_env`` 未设置时直接使用的令牌备用值。"
 
 #: ../../source/mp/l2_storage/hfbucket.rst:30
 msgid ""
 "``create_bucket_if_missing`` (bool, default ``false``): Create the bucket"
 " lazily on the first store instead of requiring it to exist."
-msgstr "``create_bucket_if_missing`` (bool, default ``false``): 在第一次存储时懒惰地创建桶，而不是要求它必须存在。"
+msgstr "``create_bucket_if_missing`` (bool，默认 ``false``)：在首次存储时惰性创建桶，而非要求桶预先存在。"
 
 #: ../../source/mp/l2_storage/hfbucket.rst:32
 msgid ""
 "``download_tmp_dir`` (string): Root directory for temporary load "
 "downloads."
-msgstr "``download_tmp_dir`` (string): 临时加载下载的根目录。"
+msgstr "``download_tmp_dir`` (字符串)：加载时临时下载文件的根目录。"
 
 #: ../../source/mp/l2_storage/hfbucket.rst:33
 msgid ""
 "``metadata_cache_ttl_secs`` (float, default ``30.0``): TTL for the path-"
 "size metadata cache that backs lookups and usage accounting."
-msgstr "``metadata_cache_ttl_secs`` (float, default ``30.0``): 支持查找和使用计数的路径大小元数据缓存的 TTL。"
+msgstr "``metadata_cache_ttl_secs`` (float，默认 ``30.0``)：用于支持查找和用量统计的路径大小元数据缓存的 TTL。"
 
 #: ../../source/mp/l2_storage/hfbucket.rst:35
 msgid ""
 "``num_workers`` (int, default ``4``): Number of worker threads for "
 "blocking Hugging Face Hub API calls."
-msgstr "``num_workers`` (int, default ``4``): 用于阻塞 Hugging Face Hub API 调用的工作线程数量。"
+msgstr "``num_workers`` (int，默认 ``4``)：用于执行阻塞式 Hugging Face Hub API 调用的工作线程数。"
 
 #: ../../source/mp/l2_storage/hfbucket.rst:37
 msgid ""
 "``max_capacity_gb`` (float, default ``0.0``): Aggregate capacity used by "
 "``get_usage()``.  A value of ``0`` disables aggregate eviction."
-msgstr "``max_capacity_gb`` (float, default ``0.0``): ``get_usage()`` 使用的总容量。值为 ``0`` 将禁用总逐出。"
+msgstr "``max_capacity_gb`` (float，默认 ``0.0``)：``get_usage()`` 所使用的总容量上限。值为 ``0`` 时禁用整体逐出。"
 
 #: ../../source/mp/l2_storage/hfbucket.rst:39
 msgid ""
 "``eviction`` (dict): Optional eviction policy, see "
 "``L2AdapterConfigBase``."
-msgstr "``逐出`` (dict): 可选的逐出策略，参见 ``L2AdapterConfigBase``。"
+msgstr "``eviction`` (dict)：可选的逐出策略，参见 ``L2AdapterConfigBase``。"
 
 #: ../../source/mp/l2_storage/hfbucket.rst:41
 msgid "**Configuration examples:**"

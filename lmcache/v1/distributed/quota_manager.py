@@ -7,10 +7,18 @@ Consumed by the L2 eviction controller each cycle to decide which
 users are over their quota, and by the HTTP API for runtime
 administration (CRUD endpoints at ``/quota/...``).
 
-Allowlist semantics: a ``cache_salt`` with no entry has an effective
-limit of ``0`` bytes — stores are still permitted on the hot path,
-but any bytes accumulated under that salt will be evicted at the next
-eviction cycle. Only salts with an explicit quota retain cached data.
+Salts without an explicit entry resolve through two different lenses:
+
+- :meth:`get_limit_bytes` — legacy allowlist semantics: unregistered
+  salts resolve to ``0`` bytes, so their data is evicted next cycle.
+  Used by the MP server's local eviction controller.
+- :meth:`effective_limit_bytes` — default-quota semantics: unregistered
+  salts resolve to the registry's *default limit*, which starts as
+  ``None`` (exempt from eviction). Used by the coordinator's eviction
+  manager, so a freshly booted coordinator whose quota table has not
+  been re-synced by the external quota controller cannot mass-evict
+  unknown tenants. The controller arms allowlist enforcement by setting
+  the default to ``0`` (``PUT /quota/config``) after syncing quotas.
 """
 
 # Future
@@ -35,6 +43,11 @@ class QuotaManager:
         self._lock = threading.Lock()
         # cache_salt -> limit in bytes
         self._limits: dict[str, int] = {}
+        # Limit applied by ``effective_limit_bytes`` to salts with no
+        # explicit entry. ``None`` (the boot default) means "exempt":
+        # consumers of the default-quota semantics skip eviction for
+        # unregistered salts until an operator sets a concrete value.
+        self._default_limit_bytes: int | None = None
 
     def set_quota(self, cache_salt: str, limit_bytes: int) -> None:
         """Create or update the quota for ``cache_salt``.
@@ -71,6 +84,48 @@ class QuotaManager:
         """
         with self._lock:
             return self._limits.get(cache_salt, 0)
+
+    def set_default_limit_bytes(self, limit_bytes: int | None) -> None:
+        """Set the limit applied to salts with no explicit entry.
+
+        Args:
+            limit_bytes: ``None`` exempts unregistered salts from
+                eviction (the boot default). ``0`` activates strict
+                allowlist enforcement — all bytes under unregistered
+                salts become evictable next cycle. A positive value
+                gives every unregistered salt that byte budget.
+
+        Raises:
+            ValueError: If ``limit_bytes`` is negative.
+        """
+        if limit_bytes is not None and limit_bytes < 0:
+            raise ValueError(f"limit_bytes must be non-negative (got {limit_bytes})")
+        with self._lock:
+            self._default_limit_bytes = limit_bytes
+
+    def get_default_limit_bytes(self) -> int | None:
+        """Return the default limit for unregistered salts.
+
+        ``None`` means unregistered salts are exempt from eviction (no
+        default has been configured since startup).
+        """
+        with self._lock:
+            return self._default_limit_bytes
+
+    def effective_limit_bytes(self, cache_salt: str) -> int | None:
+        """Return the limit for ``cache_salt`` under default-quota semantics.
+
+        Explicitly registered salts return their registered limit.
+        Unregistered salts return the default limit — ``None`` (exempt
+        from eviction) until :meth:`set_default_limit_bytes` configures a
+        concrete value. See the module docstring for how this differs
+        from :meth:`get_limit_bytes`.
+        """
+        with self._lock:
+            explicit = self._limits.get(cache_salt)
+            if explicit is not None:
+                return explicit
+            return self._default_limit_bytes
 
     def has_quota(self, cache_salt: str) -> bool:
         """Whether ``cache_salt`` has an explicit registration.

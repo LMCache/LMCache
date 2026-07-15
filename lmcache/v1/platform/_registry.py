@@ -43,10 +43,6 @@ DEFAULT_BACKEND: str = "cpu"
 # :func:`snapshot` / :func:`restore`.
 _KV_WRAPPER_FACTORIES: Dict[str, Callable[..., Any]] = {}
 
-# Per-backend availability predicate (e.g. CUDA's ``is_available``).
-# Missing entry == always available.
-_AVAILABILITY: Dict[str, Callable[[], bool]] = {}
-
 # Guard so discovery only runs once (lazy init).  The lock plus the
 # double-checked flag below keep the first concurrent caller from
 # racing a second one through the scan and emitting duplicate
@@ -131,17 +127,6 @@ def _register_discovered_wrapper(cls: type) -> None:
     _KV_WRAPPER_FACTORIES[device_type] = factory
 
 
-def register_availability(device_type: str, predicate: Callable[[], bool]) -> None:
-    """Register an availability predicate for a device type.
-
-    Args:
-        device_type: The device type string (e.g., ``"cuda"``).
-        predicate: A zero-argument callable returning ``True`` when the
-            device is available.
-    """
-    _AVAILABILITY[device_type] = predicate
-
-
 def register_kv_wrapper(device_type: str, factory: Callable[..., Any]) -> None:
     """Register a KV-cache IPC wrapper factory for ``device_type``.
 
@@ -156,25 +141,6 @@ def register_kv_wrapper(device_type: str, factory: Callable[..., Any]) -> None:
             returns a wrapper instance ready for the multiprocess wire.
     """
     _KV_WRAPPER_FACTORIES[device_type] = factory
-
-
-def is_available(device_type: str) -> bool:
-    """Check whether a device type is available.
-
-    Args:
-        device_type: The device type string (e.g., ``"cuda"``).
-
-    Returns:
-        ``True`` if the device is available or no predicate is registered,
-        ``False`` otherwise.
-    """
-    pred = _AVAILABILITY.get(device_type)
-    if pred is None:
-        return True
-    try:
-        return bool(pred())
-    except Exception:
-        return False
 
 
 def get_kv_wrapper_factory(device_type: str) -> Callable[..., Any]:
@@ -217,12 +183,10 @@ def snapshot() -> Dict[str, Any]:
     empty" view.
 
     Returns:
-        A dict with keys ``"kv_wrapper"``, ``"availability"`` and
-        ``"discovered"``.
+        A dict with keys ``"kv_wrapper"``, and ``"discovered"``.
     """
     return {
         "kv_wrapper": dict(_KV_WRAPPER_FACTORIES),
-        "availability": dict(_AVAILABILITY),
         "discovered": _WRAPPERS_DISCOVERED,
     }
 
@@ -236,8 +200,6 @@ def restore(state: Dict[str, Any]) -> None:
     global _WRAPPERS_DISCOVERED
     _KV_WRAPPER_FACTORIES.clear()
     _KV_WRAPPER_FACTORIES.update(state.get("kv_wrapper", {}))
-    _AVAILABILITY.clear()
-    _AVAILABILITY.update(state.get("availability", {}))
     _WRAPPERS_DISCOVERED = bool(state.get("discovered", False))
 
 
@@ -245,7 +207,7 @@ def reset_for_tests() -> None:
     """Wipe registry tables and force re-discovery on next access.
 
     Intended **only** for test fixtures: clears every registered KV
-    wrapper / availability predicate and flips
+    wrapper and flips
     :data:`_WRAPPERS_DISCOVERED` back to ``False`` so the next
     :func:`get_kv_wrapper_factory` call re-runs the
     :func:`_discover_wrappers_once` scan and re-populates the table
@@ -258,5 +220,4 @@ def reset_for_tests() -> None:
     """
     global _WRAPPERS_DISCOVERED
     _KV_WRAPPER_FACTORIES.clear()
-    _AVAILABILITY.clear()
     _WRAPPERS_DISCOVERED = False

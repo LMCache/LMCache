@@ -5,6 +5,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 import asyncio
 import ctypes
+import ctypes.util
 import json
 import mmap
 import os
@@ -28,9 +29,11 @@ from lmcache.utils import (
     parse_cache_key,
 )
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import (
-    CuFileMemoryAllocator,
+from lmcache.v1.memory_allocators.cu_file_memory_allocator import CuFileMemoryAllocator
+from lmcache.v1.memory_allocators.hip_file_memory_allocator import (
     HipFileMemoryAllocator,
+)
+from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
@@ -180,6 +183,38 @@ def get_extra_config_bool(key, config: LMCacheEngineConfig) -> bool | None:
     return bool_value
 
 
+def _load_gpu_memcpy() -> Callable:
+    """Load the GPU runtime ``memcpy`` symbol (CUDA or ROCm).
+
+    Tries ``libcudart`` first, then ``libamdhip64``. On CUDA the symbol is
+    ``cudaMemcpy``; on ROCm it is ``hipMemcpy`` — both share the same
+    ``(dst, src, count, kind)`` C signature.
+
+    Returns:
+        A ``ctypes`` function pointer to the GPU ``memcpy`` symbol.
+
+    Raises:
+        RuntimeError: If neither CUDA nor ROCm runtime can be loaded.
+    """
+    candidates: list[tuple[str, str, str]] = [
+        ("cudart", "libcudart.so", "cudaMemcpy"),
+        ("amdhip64", "libamdhip64.so", "hipMemcpy"),
+    ]
+    for lib_name, fallback_path, symbol in candidates:
+        try:
+            path = ctypes.util.find_library(lib_name) or fallback_path
+            lib = ctypes.CDLL(path)
+            fn = getattr(lib, symbol)
+            logger.info("Loaded GPU runtime '%s' (symbol: %s)", path, symbol)
+            return fn
+        except (OSError, AttributeError):
+            continue
+    raise RuntimeError(
+        "GDS POSIX fallback requires a GPU runtime library "
+        "(libcudart.so or libamdhip64.so) but neither could be loaded"
+    )
+
+
 class GdsBackend(AllocatorBackendInterface):
     """
     Originally based on the open sourced WekaGdsBackend, this is a backend that
@@ -189,7 +224,7 @@ class GdsBackend(AllocatorBackendInterface):
 
     The GDS library to use is controlled by the `gds_backend` config field
     (default: ``"cufile"``). Setting ``use_gds=False`` disables the GDS API
-    and falls back to POSIX I/O via cudart.
+    and falls back to POSIX I/O via the GPU runtime (CUDA or ROCm).
 
     Cache Directory Structure created by this Backend:
     /{gds_path}/{first_level}/{second_level}/{data & metadata} This structure
@@ -271,9 +306,14 @@ class GdsBackend(AllocatorBackendInterface):
         if self.use_thread_pool:
             thread_count = _DEFAULT_THREAD_COUNT
             if config.extra_config is not None:
-                thread_count = config.extra_config.get(
-                    "gds_io_threads", _DEFAULT_THREAD_COUNT
-                )
+                if "disk_io_threads" in config.extra_config:
+                    thread_count = config.extra_config["disk_io_threads"]
+                elif "gds_io_threads" in config.extra_config:
+                    logger.warning(
+                        "extra_config.gds_io_threads is deprecated; "
+                        "use disk_io_threads instead."
+                    )
+                    thread_count = config.extra_config["gds_io_threads"]
             self._thread_pool = ThreadPoolExecutor(
                 max_workers=thread_count, thread_name_prefix="gds-io"
             )
@@ -286,7 +326,7 @@ class GdsBackend(AllocatorBackendInterface):
                 # Third Party
                 import cufile
 
-                self.cudart = None
+                self._gpu_memcpy = None
                 self.gds_module = cufile
                 self._gds_driver = self.gds_module.CuFileDriver()
             elif self.gds_backend == "hipfile":
@@ -295,7 +335,7 @@ class GdsBackend(AllocatorBackendInterface):
                 # First Party
                 from lmcache.v1.storage_backend import hipfile_shim
 
-                self.cudart = None
+                self._gpu_memcpy = None
                 self.gds_module = hipfile_shim
                 self._gds_driver = self.gds_module.CuFileDriver()
             else:
@@ -303,7 +343,7 @@ class GdsBackend(AllocatorBackendInterface):
         else:
             logger.info("GDS disabled, using POSIX fallback")
             self.gds_module = None
-            self.cudart = ctypes.CDLL("libcudart.so")
+            self._gpu_memcpy = _load_gpu_memcpy()
 
         self.use_direct_io = False
 
@@ -967,7 +1007,7 @@ class GdsBackend(AllocatorBackendInterface):
                     f.write(
                         addr, kv_chunk.nbytes, file_offset=offset, dev_offset=dev_offset
                     )
-            elif self.cudart:
+            elif self._gpu_memcpy:
                 # mmap the file
                 fd = os.open(tmp_path, os.O_RDWR)
                 nbytes = kv_chunk.nbytes
@@ -982,14 +1022,14 @@ class GdsBackend(AllocatorBackendInterface):
                 buf_addr = arr.__array_interface__["data"][0]
 
                 assert addr.value is not None
-                res = self.cudart.cudaMemcpy(
+                res = self._gpu_memcpy(
                     ctypes.c_void_p(buf_addr + offset),
                     ctypes.c_void_p(int(addr.value) + device_offset),
                     ctypes.c_size_t(nbytes),
                     ctypes.c_int(2),
                 )
                 if res:
-                    raise RuntimeError(f"cudaMemcpy failed {res}")
+                    raise RuntimeError(f"GPU memcpy failed {res}")
                 del arr
                 mm.close()
 
@@ -1019,7 +1059,7 @@ class GdsBackend(AllocatorBackendInterface):
                         file_offset=file_offset,
                         dev_offset=dev_offset,
                     )
-            elif self.cudart:
+            elif self._gpu_memcpy:
                 fd = os.open(gds_path, os.O_RDONLY)
                 file_size = os.fstat(fd).st_size
 
@@ -1045,7 +1085,7 @@ class GdsBackend(AllocatorBackendInterface):
                 addr = arr.__array_interface__["data"][0]
 
                 assert gpu_pointer.value is not None
-                res = self.cudart.cudaMemcpy(
+                res = self._gpu_memcpy(
                     ctypes.c_void_p(int(gpu_pointer.value) + dev_offset),
                     ctypes.c_void_p(addr + file_offset),
                     ctypes.c_size_t(size_in_bytes),
@@ -1053,13 +1093,13 @@ class GdsBackend(AllocatorBackendInterface):
                 )
 
                 if res != 0:
-                    raise RuntimeError(f"cudaMemcpy failed with code {res}")
+                    raise RuntimeError(f"GPU memcpy failed with code {res}")
                 del arr
                 mm.close()
                 return size_in_bytes
             else:
                 raise RuntimeError(
-                    "Both gds_module and cudart are None, this should not happen"
+                    "Both gds_module and _gpu_memcpy are None, this should not happen"
                 )
         except Exception as e:
             # return -1 on any exception, and log the error.

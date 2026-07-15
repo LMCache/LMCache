@@ -10,9 +10,9 @@ import pytest
 
 # First Party
 from lmcache.v1.distributed.quota_manager import QuotaManager
-from lmcache.v1.mp_coordinator.l2.eviction_manager import L2EvictionManager
-from lmcache.v1.mp_coordinator.l2.resync_manager import L2ResyncManager
-from lmcache.v1.mp_coordinator.l2.usage_manager import L2UsageManager
+from lmcache.v1.mp_coordinator.cache_control.eviction_manager import L2EvictionManager
+from lmcache.v1.mp_coordinator.cache_control.resync_manager import L2ResyncManager
+from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry, MPInstance
 
 
@@ -68,7 +68,7 @@ class TestResyncFrom:
         usage, eviction, resync = _make_components()
 
         def handler(request: httpx.Request) -> httpx.Response:
-            assert str(request.url) == "http://10.0.0.1:8000/l2/keys?page_size=2"
+            assert str(request.url) == "http://10.0.0.1:8000/cache/objects?page_size=2"
             return httpx.Response(
                 200,
                 json={

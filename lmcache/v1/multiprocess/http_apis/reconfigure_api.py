@@ -184,21 +184,6 @@ def _backend_adapter_entries(status: dict, backend: str) -> list[tuple[int, dict
     return backend_adapters
 
 
-def _available_backend_names(status: dict) -> list[str]:
-    raw_adapters = status.get("adapters", [])
-    if not isinstance(raw_adapters, list):
-        return []
-
-    backends = set()
-    for adapter in raw_adapters:
-        if not isinstance(adapter, dict):
-            continue
-        backend = _adapter_backend_name(adapter)
-        if backend is not None:
-            backends.add(backend)
-    return sorted(backends)
-
-
 def _backend_status_response(status: dict, backend: str) -> dict:
     adapters = []
     for backend_index, (_, adapter) in enumerate(
@@ -212,15 +197,6 @@ def _backend_status_response(status: dict, backend: str) -> dict:
         "backend": backend,
         "num_adapters": len(adapters),
         "adapters": adapters,
-    }
-
-
-def _backends_response(status: dict) -> dict:
-    backends = _available_backend_names(status)
-    return {
-        "enabled": bool(backends),
-        "num_backends": len(backends),
-        "backends": backends,
     }
 
 
@@ -313,19 +289,6 @@ def _operation_payload(
     if backend == "dax":
         return _dax_operation_payload(operation, payload)
     return _generic_operation_payload(payload)
-
-
-@router.get("/reconfigure/backends", response_model=None)
-async def reconfigure_backends(request: Request) -> dict | JSONResponse:
-    """Return backend strings accepted by runtime reconfiguration routes."""
-    sm = _get_storage_manager(request)
-    if isinstance(sm, JSONResponse):
-        return sm
-    try:
-        status = sm.get_l2_adapter_reconfigure_status()
-        return _backends_response(status)
-    except L2ReconfigureError as exc:
-        return _api_error_response(exc)
 
 
 @router.get("/reconfigure/{backend}/status", response_model=None)

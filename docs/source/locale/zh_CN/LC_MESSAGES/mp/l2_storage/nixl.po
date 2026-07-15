@@ -41,7 +41,7 @@ msgid ""
 "``nixl_store_dynamic`` — opens and registers files per operation, adding "
 "persist/recover across restarts and removing the open-file-descriptor "
 "limit."
-msgstr "``nixl_store_dynamic`` — 每次操作打开并注册文件，增加持久化/恢复功能，跨重启并移除打开文件描述符限制。"
+msgstr "``nixl_store_dynamic`` — 每次操作时动态打开并注册文件，支持跨重启的持久化/恢复，并消除打开文件描述符数量的限制。"
 
 #: ../../source/mp/l2_storage/nixl.rst:13
 msgid "Static pool — ``nixl_store``"
@@ -51,7 +51,7 @@ msgstr "静态池 — ``nixl_store``"
 msgid ""
 "The primary production adapter. Pre-allocates a pool of storage "
 "descriptors at initialization."
-msgstr "主要的生产适配器。在初始化时预分配一池存储描述符。"
+msgstr "主要的生产适配器。在初始化时预分配一组存储描述符池。"
 
 #: ../../source/mp/l2_storage/nixl.rst:18
 #: ../../source/mp/l2_storage/nixl.rst:92
@@ -62,7 +62,7 @@ msgstr "**必填字段：**"
 msgid ""
 "``backend``: Storage backend -- one of ``POSIX``, ``GDS``, ``GDS_MT``, "
 "``HF3FS``, ``OBJ``, ``AZURE_BLOB``."
-msgstr "``backend``: 存储后端 -- 其中之一为 ``POSIX``, ``GDS``, ``GDS_MT``, ``HF3FS``, ``OBJ``, ``AZURE_BLOB``。"
+msgstr "``backend``: 存储后端 -- 以下之一：``POSIX``、``GDS``、``GDS_MT``、``HF3FS``、``OBJ``、``AZURE_BLOB``。"
 
 #: ../../source/mp/l2_storage/nixl.rst:22
 msgid ""
@@ -170,7 +170,7 @@ msgstr "动态（持久/恢复） — ``nixl_store_dynamic``"
 msgid ""
 "A dynamic variant of the NIXL adapter that opens and registers files per-"
 "operation instead of pre-allocating them at init. This enables:"
-msgstr "NIXL 适配器的动态变体，按操作打开和注册文件，而不是在初始化时预分配。这使得："
+msgstr "NIXL 适配器的动态变体，按操作打开和注册文件，而不是在初始化时预分配。该变体支持以下功能："
 
 #: ../../source/mp/l2_storage/nixl.rst:83
 msgid "**Persist/recover** -- cached KV metadata survives restarts."
@@ -193,7 +193,7 @@ msgstr "仅支持基于文件的后端（``POSIX``, ``GDS``, ``GDS_MT``, ``HF3FS
 msgid ""
 "``backend``: Storage backend -- one of ``POSIX``, ``GDS``, ``GDS_MT``, "
 "``HF3FS``."
-msgstr "``backend``: 存储后端 -- 其中之一为 ``POSIX``, ``GDS``, ``GDS_MT``, ``HF3FS``。"
+msgstr "``backend``: 存储后端 -- 以下之一：``POSIX``、``GDS``、``GDS_MT``、``HF3FS``。"
 
 #: ../../source/mp/l2_storage/nixl.rst:99
 msgid "``file_path``: Directory path for storing L2 data files."
@@ -219,13 +219,13 @@ msgid ""
 "``persist_enabled`` (bool, default ``true``): If ``true``, data files are"
 " kept on disk at shutdown. If ``false``, all data files are deleted on "
 "shutdown."
-msgstr "``persist_enabled`` (bool, 默认 ``true``): 如果 ``true``，数据文件将在关闭时保留在磁盘上。如果 ``false``，所有数据文件将在关闭时被删除。"
+msgstr "``persist_enabled`` (bool, 默认 ``true``): 若为 ``true``，关闭时数据文件将保留在磁盘上。若为 ``false``，关闭时所有数据文件将被删除。"
 
 #: ../../source/mp/l2_storage/nixl.rst:111
 msgid ""
 "Lookup always checks secondary storage (disk) on miss and lazily "
 "populates the in-memory index when a file is found."
-msgstr "查找总是在未命中时检查二级存储（磁盘），并在找到文件时懒惰地填充内存中的索引。"
+msgstr "查找时，若未命中则始终回退到二级存储（磁盘）进行检查；找到文件后，惰性填充内存索引。"
 
 #: ../../source/mp/l2_storage/nixl.rst:127
 msgid "**Persist / secondary lookup behaviour:**"
@@ -244,5 +244,5 @@ msgid ""
 "through to a secondary lookup on disk: if the deterministic file exists, "
 "it is treated as a hit and the in-memory index is populated lazily from "
 "the file size."
-msgstr "在 **启动** 时，内存中的索引是空的。每次查找未命中都会转到磁盘上的二次查找：如果确定性文件存在，则将其视为命中，并根据文件大小懒惰地填充内存中的索引。"
+msgstr "在 **启动** 时，内存索引为空。每次查找未命中都会回退到磁盘上的二级查找：若对应的确定性文件存在，则视为命中，并根据文件大小惰性填充内存索引。"
 

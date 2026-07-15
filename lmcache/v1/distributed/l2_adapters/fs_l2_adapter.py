@@ -18,9 +18,11 @@ import os
 import threading
 
 if TYPE_CHECKING:
+    # First Party
     from lmcache.v1.distributed.internal_api import (
         L1MemoryDesc,
     )
+    from lmcache.v1.memory_management import MemoryObj
 
 # Third Party
 import aiofiles
@@ -42,7 +44,6 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
-from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)

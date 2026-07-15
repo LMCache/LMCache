@@ -25,6 +25,9 @@ target.
    * - :doc:`Raw Block (Rust) <raw_block>`
      - ``raw_block``
      - File & Block
+   * - :doc:`Bigtable <bigtable>`
+     - ``bigtable``
+     - Remote & Distributed
    * - :doc:`S3 <s3>`
      - ``s3``
      - Remote & Distributed
@@ -49,6 +52,9 @@ target.
    * - :doc:`Fault Inject <fault_inject>`
      - ``fault_inject``
      - Testing
+   * - :doc:`Plugin <plugin>`
+     - ``plugin`` / ``native_plugin``
+     - Custom / External
 
 .. toctree::
    :maxdepth: 1
@@ -59,3 +65,4 @@ target.
    dax
    mock
    fault_inject
+   plugin

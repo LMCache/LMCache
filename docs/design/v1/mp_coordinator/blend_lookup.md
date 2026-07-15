@@ -49,8 +49,8 @@ LOOKUP (blend server, cb_unified_lookup)
   → one sparse prefetch from shared L2 → retrieve + re-RoPE
 ```
 
-The coordinator owns `chunk_size` (`blend_chunk_size`, fleet config, must equal
-the servers' LMCache chunk size) and the polynomial base; servers carry neither.
+The coordinator owns `chunk_size` (fleet config, must equal the servers'
+LMCache chunk size) and the polynomial base; servers carry neither.
 **Trust note:** the coordinator now sees raw tokens (content), not just opaque
 hashes — acceptable when it is trusted fleet infra; revisit if not.
 
