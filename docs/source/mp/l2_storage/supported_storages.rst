@@ -40,6 +40,9 @@ target.
    * - :doc:`RESP (Redis/Valkey) <resp>`
      - ``resp``
      - Remote & Distributed
+   * - :doc:`Valkey <valkey>`
+     - ``valkey``
+     - Remote & Distributed
    * - :doc:`Aerospike <aerospike>`
      - ``aerospike``
      - Remote & Distributed
