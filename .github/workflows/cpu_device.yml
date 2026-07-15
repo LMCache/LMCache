@@ -94,6 +94,11 @@ jobs:
             pyproject.toml
             requirements/*.txt
 
+      - name: Install FFmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y ffmpeg
+
       - name: Install FFmpeg (macOS)
         if: runner.os == 'macOS'
         run: |
