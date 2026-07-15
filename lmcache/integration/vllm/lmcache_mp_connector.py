@@ -1163,16 +1163,23 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # this, the locks persist until TTL expiry — a slow memory leak
         # on abort-heavy workloads.  Mirrors SGLang's end_session which
         # frees pending locks before END_SESSION.
+        #
+        # Only free the UNRETRIEVED tail [num_vllm_hit, num_lmcache_hit).
+        # The range [0, num_vllm_hit) was already freed by
+        # update_state_after_alloc (connector line ~1072), and
+        # [num_vllm_hit, num_lmcache_hit) was freed by each TP worker's
+        # RETRIEVE.  On normal completion both ranges are already
+        # released, so this is a no-op.  On abort (retrieve didn't
+        # happen), the tail is still held and this frees it.
         tracker = self._get_request_tracker(request.request_id)
         if (
             tracker is not None
             and tracker.num_lmcache_hit_tokens > tracker.num_vllm_hit_tokens
         ):
-            free_end = tracker.num_lmcache_hit_tokens
             self.scheduler_adapter.free_lookup_locks(
                 token_ids=list(tracker.all_token_ids),
-                start=0,
-                end=free_end,
+                start=tracker.num_vllm_hit_tokens,
+                end=tracker.num_lmcache_hit_tokens,
                 request_id=request.request_id,
                 cache_salt=tracker.cache_salt,
             )

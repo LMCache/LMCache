@@ -41,12 +41,14 @@ def _load_libamdhip64() -> ctypes.CDLL | None:
         The loaded ``ctypes.CDLL`` library with bound symbols on success,
         or ``None`` if the library cannot be found or loaded.
     """
-    # Try several names: the SONAME, the full path, and the bare name.
-    for lib_name, fallback_path in [
-        ("amdhip64", "libamdhip64.so"),
-        ("amdhip64", "libamdhip64.so.1"),
-    ]:
-        path = ctypes.util.find_library(lib_name) or fallback_path
+    # Try several names: find_library first, then hardcoded fallbacks.
+    found = ctypes.util.find_library("amdhip64")
+    if found is not None:
+        candidates = [found]
+    else:
+        candidates = []
+    candidates.extend(["libamdhip64.so", "libamdhip64.so.1"])
+    for path in candidates:
         try:
             lib = ctypes.CDLL(path)
             lib.hipHostRegister.restype = ctypes.c_int

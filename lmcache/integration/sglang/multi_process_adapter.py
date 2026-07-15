@@ -204,10 +204,20 @@ class LMCacheMPConnector:
         request_id: str,
         no_worker_id: bool = False,
     ) -> IPCCacheServerKey:
+        # For MLA, world_size should be 1 (all TP workers share one KV
+        # object) and worker_id should be 0 (no TP shard distinction).
+        # For non-MLA, world_size=tp_size (each TP worker owns a shard)
+        # and worker_id=rank.
+        if self.use_mla:
+            ws = 1
+            wid = 0
+        else:
+            ws = self.tp_size
+            wid = self.worker_id
         return IPCCacheServerKey(
             model_name=self.model_name,
-            world_size=self.tp_size,
-            worker_id=None if no_worker_id else self.worker_id,
+            world_size=ws,
+            worker_id=None if no_worker_id else wid,
             token_ids=tuple(token_ids),
             start=start,
             end=end,

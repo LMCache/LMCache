@@ -67,11 +67,13 @@ def _load_libhip() -> ctypes.CDLL | None:
         if _libhip_cache is not None:
             return _libhip_cache
 
-        for lib_name, fallback_path in [
-            ("amdhip64", "libamdhip64.so"),
-            ("amdhip64", "libamdhip64.so.1"),
-        ]:
-            path = ctypes.util.find_library(lib_name) or fallback_path
+        found = ctypes.util.find_library("amdhip64")
+        if found is not None:
+            candidates = [found]
+        else:
+            candidates = []
+        candidates.extend(["libamdhip64.so", "libamdhip64.so.1"])
+        for path in candidates:
             try:
                 lib = ctypes.CDLL(path)
                 lib.hipIpcGetMemHandle.restype = ctypes.c_int

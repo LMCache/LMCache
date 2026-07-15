@@ -194,11 +194,16 @@ def test_pp3_misaligned_configs_rejected():
     # All these have rpn % tp != 0 → must raise
     misaligned = [
         (2, 3, 2),   # rpn=3, 3%2=1
+        (2, 3, 6),   # rpn=1, 1%2=1
         (4, 3, 2),   # rpn=6, 6%4=2
         (4, 3, 4),   # rpn=3, 3%4=3
+        (4, 3, 6),   # rpn=2, 2%4=2
+        (4, 3, 12),  # rpn=1, 1%4=1
         (8, 3, 2),   # rpn=12, 12%8=4
         (8, 3, 4),   # rpn=6, 6%8=6
+        (8, 3, 6),   # rpn=4, 4%8=4
         (6, 3, 2),   # rpn=9, 9%6=3
+        (6, 3, 6),   # rpn=3, 3%6=3
     ]
     for tp, pp, ns in misaligned:
         cfg = _fake_vllm_config(tp=tp, pp=pp, dp=1, world_size=tp*pp, use_mla=True)
@@ -220,14 +225,10 @@ def test_pp3_aligned_configs_pass():
     aligned = [
         (2, 3, 1),   # rpn=6, 6%2=0
         (2, 3, 3),   # rpn=2, 2%2=0
-        (2, 3, 6),   # rpn=1, 1%2=1... but kv_tp=min(2,1)=1, extra=0 → balanced
         (4, 3, 1),   # rpn=12, 12%4=0
         (4, 3, 3),   # rpn=4, 4%4=0
-        (4, 3, 6),   # rpn=2, 2%4=2... but kv_tp=min(4,2)=2 → balanced
-        (4, 3, 12),  # rpn=1, kv_tp=1 → balanced
         (8, 3, 1),   # rpn=24, 24%8=0
         (8, 3, 3),   # rpn=8, 8%8=0
-        (8, 3, 6),   # rpn=4, kv_tp=4 → balanced
         (3, 3, 1),   # rpn=9, 9%3=0
         (3, 3, 3),   # rpn=3, 3%3=0
         (6, 3, 1),   # rpn=18, 18%6=0
