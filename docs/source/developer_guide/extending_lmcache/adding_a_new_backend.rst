@@ -39,26 +39,26 @@ Your PyTorch backend should support:
 Add ``DeviceSpec``
 ~~~~~~~~~~~~~~~~~~
 
-Create ``lmcache/v1/platform/<device>/__init__.py``:
+Create ``lmcache/v1/platform/foo/__init__.py``:
 
 .. code-block:: python
 
     # SPDX-License-Identifier: Apache-2.0
-    """<device>-specific platform primitives."""
+    """foo-specific platform primitives."""
 
     from lmcache.v1.platform.base_device_spec import DeviceSpec
 
 
-    class <Device>DeviceSpec(DeviceSpec):
-        """<device> device specification for LMCache registry discovery."""
+    class FooDeviceSpec(DeviceSpec):
+        """foo device specification for LMCache registry discovery."""
 
         @property
         def device_type(self) -> str:
-            return "<device>"
+            return "foo"
 
         @property
         def torch_module_name(self) -> str:
-            return "<device>"
+            return "foo"
 
         @property
         def ops_module(self) -> str | None:
@@ -69,7 +69,7 @@ Create ``lmcache/v1/platform/<device>/__init__.py``:
             try:
                 import torch
 
-                return hasattr(torch, "<device>") and torch.<device>.is_available()
+                return hasattr(torch, "foo") and torch.foo.is_available()
             except Exception:
                 return False
 
@@ -100,11 +100,11 @@ Key properties:
 
    ``ops_module`` defaults to ``None`` in the base ``DeviceSpec``, so
    you can simply omit that property for a minimal Part 1 setup.  The
-   ``hasattr(torch, "<device>")`` guard shown above is only needed for
+   ``hasattr(torch, "foo")`` guard shown above is only needed for
    out-of-tree PyTorch extensions (e.g. ``torch.musa``, ``torch.xpu``
    when installed as a plug-in).  For accelerators shipped inside
    PyTorch itself (like ``torch.cuda``) a plain
-   ``torch.<device>.is_available()`` is enough.
+   ``torch.foo.is_available()`` is enough.
 
 That's it.  Defining this class is enough for auto-discovery — no
 global list or manual registration call is required.  All ops
@@ -129,7 +129,7 @@ instead of auto-detecting:
 
 .. code-block:: bash
 
-    export DEVICE_TYPE=<device>            # optional; only when auto-detection picks the wrong device
+    export DEVICE_TYPE=foo            # optional; only when auto-detection picks the wrong device
 
     vllm serve <your-model> \
         --kv-transfer-config '{
@@ -147,8 +147,8 @@ instead of auto-detecting:
 
 Check the LMCache logs — with ``ops_module = None`` you should see::
 
-    torch_dev=..., torch_device_type=<device>
-    Custom ops not supported for device: <device>, using fallback ops.
+    torch_dev=..., torch_device_type=foo
+    Custom ops not supported for device: foo, using fallback ops.
 
 This confirms your ``DeviceSpec`` was discovered and the Python
 fallback is active.  (Once you set ``ops_module`` in
@@ -157,10 +157,10 @@ fallback is active.  (Once you set ``ops_module`` in
 
 Debugging checklist:
 
-- [ ] ``torch.<device>.is_available()`` returns ``True``.
-- [ ] Set ``DEVICE_TYPE=<device>`` to force selection if not picked up
+- [ ] ``torch.foo.is_available()`` returns ``True``.
+- [ ] Set ``DEVICE_TYPE=foo`` to force selection if not picked up
   automatically.
-- [ ] Log shows either ``Custom ops not supported for device: <device>,
+- [ ] Log shows either ``Custom ops not supported for device: foo,
   using fallback ops.`` (pure fallback) or
   ``Using backend: <your.ops.module>`` (custom ops loaded).
 - [ ] Engine-driven transfer works end-to-end (check the LMCache logs
@@ -220,17 +220,18 @@ must hold:
 
   .. code-block:: python
 
-      class <Device>DeviceSpec(DeviceSpec):
+      class FooDeviceSpec(DeviceSpec):
           @property
           def ops_module(self) -> str | None:
-              return "my_device.ops"   # any importable module path
+              return "foo_device.ops"   # any importable module path
 
 Implementation notes
 ^^^^^^^^^^^^^^^^^^^^
 
-- For engine-driven transfer the hot entry point is
-  ``multi_layer_block_kv_transfer``; other functions in
-  ``python_ops_fallback`` can be overridden as needed.
+- ``multi_layer_block_kv_transfer`` and ``lmcache_memcpy_async`` are
+  the hot entry points for both engine-driven and LMCache-driven
+  transfer; other functions in ``python_ops_fallback`` can be
+  overridden as needed.
 - If you fall back to the generic path from inside a device-specific
   wrapper (e.g. when inputs are unsupported), call the corresponding
   ``lmcache.python_ops_fallback`` function directly to preserve
@@ -260,6 +261,11 @@ factory raises ``ValueError`` (there is no silent fallback):
    ``get_kv_wrapper_factory``).
 2. The device's ``DeviceSpec.is_handle_transfer_available()`` must
    return ``True``.
+3. A ``BaseCacheContext`` subclass must exist under
+   ``lmcache/v1/platform/foo/cache_context.py`` (discovered
+   automatically by ``create_cache_context``).  The server-side
+   LMCache-driven module uses it to manage KV cache layout and
+   pointers for IPC transfer.
 
 Host-side pinning via ``pin_memory_backend`` is *optional* and only
 affects staging-buffer performance; it is not required to enable
@@ -272,7 +278,7 @@ support IPC handle transfer):
 
 .. code-block:: python
 
-    class <Device>DeviceSpec(DeviceSpec):
+    class FooDeviceSpec(DeviceSpec):
         def is_handle_transfer_available(self) -> bool:
             """Return True if your device supports IPC handle transfer."""
             return True  # base-class default; override to False if unsupported
@@ -317,6 +323,10 @@ References
      - ``lmcache/v1/platform/__init__.py``
    * - Python fallback
      - ``lmcache/python_ops_fallback.py``
+   * - Cache context base
+     - ``lmcache/v1/platform/base_cache_context.py``
+   * - Cache context factory
+     - ``lmcache/v1/platform/cache_context.py``
    * - Reference ``DeviceSpec`` (engine-driven baseline)
      - ``lmcache/v1/platform/cuda/__init__.py``
    * - Reference ``DeviceSpec`` (LMCache-driven capable)
