@@ -516,11 +516,34 @@ class LookupModule:
         #
         # NOTE: correct only for full attention, where every locked chunk is a
         # hit chunk. Sliding-window groups do not retain chunks outside their
-        # window, so once SWA prefetch lands this must skip those chunks instead
-        # of releasing every one -- otherwise chunks the engine still holds can
-        # be over-released (e.g. window=512, LMCache hit 1024, vLLM hit 768 ->
-        # chunks 512..768 may leak). Revisit when sliding-window prefetch is on.
+        # window.  When num_object_groups > 1 (hybrid/SWA models), we check
+        # each group's window size and skip release for SWA groups whose
+        # chunks may still be in use by the engine.  This prevents
+        # over-releasing chunks the engine still holds.
+        attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
+            key.model_name, key.world_size
+        )
         obj_keys = self._chunk_major_object_keys(key, chunk_hashes)
+
+        # Filter out SWA groups that may still hold chunks.  Full-attention
+        # groups (window == -1) are always safe to release.
+        num_groups = getattr(attn_desc, "num_object_groups", 1)
+        if isinstance(num_groups, int) and num_groups > 1:
+            safe_keys = []
+            for i, w in enumerate(attn_desc.num_chunks_in_sw):
+                if w == -1:  # full attention
+                    # Include this group's keys
+                    safe_keys.extend(
+                        k for k in obj_keys
+                        if k.group_idx == i
+                    )
+            if len(safe_keys) < len(obj_keys):
+                logger.debug(
+                    "free_lookup_locks: skipping %d SWA group keys "
+                    "(may still be in use by engine)",
+                    len(obj_keys) - len(safe_keys),
+                )
+                obj_keys = safe_keys if safe_keys else obj_keys
 
         extra_count = compute_extra_count(tp_size, key.world_size, use_mla=key.use_mla)
 

@@ -135,14 +135,35 @@ class EICConnector(RemoteConnector):
         self.cudaError_t = ctypes.c_int
         self.cudaMemcpyDeviceToHost = 2
         self.cudaMemcpyHostToDevice = 1
-        self.cuda_lib = ctypes.CDLL("libcudart.so")
-        self.cuda_lib.cudaMemcpy.argtypes = [
+        # Dual-vendor: try libcudart (NVIDIA) then libamdhip64 (AMD ROCm).
+        # hipMemcpy has the same C signature as cudaMemcpy.
+        self.cuda_lib = None
+        for lib_name, fallback, symbol in [
+            ("cudart", "libcudart.so", "cudaMemcpy"),
+            ("amdhip64", "libamdhip64.so", "hipMemcpy"),
+        ]:
+            path = ctypes.util.find_library(lib_name) or fallback
+            try:
+                lib = ctypes.CDLL(path)
+                getattr(lib, symbol)  # verify symbol exists
+                self.cuda_lib = lib
+                self._memcpy_fn = symbol
+                break
+            except (OSError, AttributeError):
+                continue
+        if self.cuda_lib is None:
+            raise RuntimeError(
+                "EIC connector requires a GPU runtime library "
+                "(libcudart.so or libamdhip64.so) but neither could be loaded"
+            )
+        memcpy = getattr(self.cuda_lib, self._memcpy_fn)
+        memcpy.argtypes = [
             ctypes.c_void_p,
             ctypes.c_void_p,
             ctypes.c_size_t,
             ctypes.c_int,
         ]
-        self.cuda_lib.cudaMemcpy.restype = self.cudaError_t
+        memcpy.restype = self.cudaError_t
 
         self.enable_compare = False
 

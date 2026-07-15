@@ -1,5 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Blend (context-blend / cross-request KV reuse) module for MPCacheServer."""
+"""Blend (context-blend / cross-request KV reuse) module for MPCacheServer.
+
+.. note::
+    This is the **v2** blend module.  It does NOT support MLA models:
+    the ``CB_LOOKUP_PRE_COMPUTED`` wire protocol carries only
+    ``[IPCCacheServerKey]`` (no ``tp_size``), so the MLA
+    ``extra_count`` cannot be computed.  MLA + CacheBlend is explicitly
+    rejected by ``validate_mla_config`` in ``utils.py``.  Use the
+    **v3** blend module (``blend_v3.py``) for MLA support — it
+    correctly threads ``tp_size`` and ``extra_count`` through the
+    ``CB_UNIFIED_LOOKUP`` protocol.
+"""
 
 # Standard
 from typing import Any

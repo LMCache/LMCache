@@ -343,9 +343,12 @@ def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int,
     """
     Calculate the local worker id and local world size.
 
-    Current assumption (TODO: add custom logic in the future):
-    - Tensor Parallel is intra-node
-    - Pipeline Parallel is inter-node
+    In multi-node deployments, the default layout is TP intra-node / PP
+    inter-node (one PP stage per node).  If the node has more GPUs than
+    ``tp_size`` (i.e. PP stages are co-located on the same node), the
+    local world size will be larger than ``tp_size`` — this is allowed
+    (the connector handles it via contiguous server blocks), but a
+    warning is logged.
 
     Returns:
         Tuple[int, int]: (local_worker_id, local_world_size)
@@ -364,11 +367,14 @@ def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int,
         tp_size = parallel_config.tensor_parallel_size
         pp_size = parallel_config.pipeline_parallel_size
         local_world_size = global_world_size // pp_size
-        assert local_world_size == tp_size, (
-            "LMCache is operating under the assumption that the "
-            "local world size is equal to the tensor parallel size "
-            "in multi-node deployment."
-        )
+        if local_world_size != tp_size:
+            logger.warning(
+                "Multi-node deployment: local_world_size (%d) != tp_size (%d). "
+                "PP stages may be co-located on the same node. "
+                "This is supported but may affect server block alignment.",
+                local_world_size,
+                tp_size,
+            )
         local_worker_id = global_rank % local_world_size
         return local_worker_id, local_world_size
 

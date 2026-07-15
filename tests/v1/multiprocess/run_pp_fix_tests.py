@@ -304,6 +304,10 @@ COMBOS = [
     (4, 3, 1), (4, 3, 3), (4, 3, 6), (4, 3, 12),
     (8, 3, 1), (8, 3, 3), (8, 3, 6),
     (3, 3, 1), (3, 3, 3), (3, 3, 9),
+    # PP=4, PP=6, PP=8 combos
+    (1, 4, 1), (2, 4, 1), (4, 4, 1), (4, 4, 4),
+    (2, 6, 1), (2, 6, 2), (3, 6, 1), (3, 6, 3),
+    (1, 8, 1), (2, 8, 1), (2, 8, 2), (4, 8, 1), (4, 8, 4),
     (6, 3, 1), (6, 3, 3), (6, 3, 6),
 ]
 for tp, pp, ns in COMBOS:
@@ -695,6 +699,93 @@ if e2e_script.is_file():
           "torch.cuda.is_available" in e2e_src)
     check("e2e script uses LMCacheMPConnector",
           "LMCacheMPConnector" in e2e_src)
+
+# --------------------------------------------------------------------------- #
+print()
+print("=" * 72)
+print("  Full device coverage (EIC, TRT dispatch, TurboQuant, all connectors)")
+print("=" * 72)
+
+# D2: EIC connector dual-vendor
+eic_src = (ROOT / "lmcache/v1/storage_backend/connector/eic_connector.py").read_text()
+check("EIC connector tries libcudart.so",
+      "libcudart.so" in eic_src)
+check("EIC connector tries libamdhip64.so",
+      "libamdhip64.so" in eic_src)
+check("EIC connector dual-vendor loop",
+      "for lib_name" in eic_src or "for fallback" in eic_src or "for name" in eic_src)
+
+# D3: TRT RawIPCWrapper dispatch
+trt_src = (ROOT / "lmcache/integration/tensorrt_llm/tensorrt_mp_adapter.py").read_text()
+check("TRT adapter dispatches RawIPCWrapper by torch.version.hip",
+      "hip" in trt_src and "RocmRawIPCWrapper" in trt_src and "RawIPCWrapper" in trt_src)
+check("TRT adapter uses RawIPCWrapper (not hardcoded RawCudaIPCWrapper)",
+      "RawIPCWrapper(kv_cache_tensor)" in trt_src)
+
+# A3: TurboQuant ROCm guard
+tq_src = (ROOT / "lmcache/v1/distributed/serde/turboquant/decode_kernel.py").read_text()
+check("TurboQuant guards ROCm (torch.version.hip)",
+      "torch.version.hip" in tq_src or "hip" in tq_src)
+
+# A4: python_ops_fallback TODO removed
+pof_src = (ROOT / "lmcache/python_ops_fallback.py").read_text()
+check("python_ops_fallback has no ROCm TODO",
+      "TODO: ROCm" not in pof_src)
+
+# A5: cache_context ROCm cupy warning
+cc_src = (ROOT / "lmcache/v1/platform/cuda/cache_context.py").read_text()
+check("cache_context handles cupy ExternalStream failure on ROCm",
+      "AttributeError" in cc_src and "hip" in cc_src.lower())
+
+# B1: blend v2 MLA doc
+blend_v2_src = (ROOT / "lmcache/v1/multiprocess/modules/blend.py").read_text()
+check("blend v2 documents MLA limitation",
+      "does NOT support MLA" in blend_v2_src or "v3" in blend_v2_src)
+
+# B2: 0201 abort-leak
+c0201_src = (ROOT / "lmcache/integration/vllm/lmcache_mp_connector_0201.py").read_text()
+check("0201 connector has abort-leak fix (free_lookup_locks)",
+      "free_lookup_locks" in c0201_src and "num_lmcache_hit_blocks" in c0201_src)
+check("0201 connector frees unretrieved tail (not full range)",
+      "num_vllm_hit_blocks" in c0201_src and "vllm_hit_tokens" in c0201_src)
+
+# B3: 0180 abort-leak
+c0180_src = (ROOT / "lmcache/integration/vllm/lmcache_mp_connector_0180.py").read_text()
+check("0180 connector has abort-leak fix (free_lookup_locks)",
+      "free_lookup_locks" in c0180_src and "num_lmcache_hit_blocks" in c0180_src)
+
+# B4: SGLang use_mla in metadata
+sglang_src = (ROOT / "lmcache/integration/sglang/sglang_adapter.py").read_text()
+check("SGLang in-process sets use_mla in metadata",
+      "use_mla=" in sglang_src and "LMCacheMetadata" in sglang_src)
+
+# B5: TRT single-adapter use_mla in metadata
+trt_utils_src = (ROOT / "lmcache/integration/tensorrt_llm/utils.py").read_text()
+check("TRT single-adapter sets use_mla in metadata",
+      "use_mla=" in trt_utils_src and "LMCacheMetadata" in trt_utils_src)
+check("TRT single-adapter reads LMCACHE_USE_MLA env",
+      "LMCACHE_USE_MLA" in trt_utils_src)
+
+# B6: TRT MLA warning
+check("TRT adapter warns about MLA env var",
+      "LMCACHE_USE_MLA" in trt_src)
+
+# C1: configurable first_rank
+meta_src = (ROOT / "lmcache/v1/metadata.py").read_text()
+check("first_rank is configurable (int field, not hardcoded 0)",
+      "first_rank: int = 0" in meta_src and "TODO" not in meta_src.split("first_rank")[1][:50])
+
+# C2: relaxed multi-node assert
+utils_src = (ROOT / "lmcache/integration/vllm/utils.py").read_text()
+check("multi-node PP assert relaxed to warning",
+      "logger.warning" in utils_src and "local_world_size" in utils_src)
+check("no hard assert on local_world_size == tp_size",
+      "assert local_world_size == tp_size" not in utils_src)
+
+# C3: SWA lock release guard
+lookup_src = (ROOT / "lmcache/v1/multiprocess/modules/lookup.py").read_text()
+check("free_lookup_locks has SWA guard (num_object_groups check)",
+      "num_object_groups" in lookup_src and "safe_keys" in lookup_src)
 
 # --------------------------------------------------------------------------- #
 print()

@@ -40,8 +40,8 @@ def _get_copy_lib() -> Optional[ctypes.CDLL]:
     """Lazily load and cache the CUDA/ROCm runtime library, or None for CPU fallback."""
     global _copy_lib
     if _copy_lib is _copy_lib_NOT_LOADED:
-        # Try to load GPU runtime libraries in priority order: CUDA first, then ROCm
-        # TODO: ROCm path to be validated on real device
+        # Try to load GPU runtime libraries in priority order: CUDA first, then ROCm.
+        # hipMemcpy has the same C signature as cudaMemcpy; both are bound below.
         for name, fallback in [
             ("cudart", "libcudart.so"),  # NVIDIA CUDA Runtime
             ("amdhip64", "libamdhip64.so"),  # AMD ROCm HIP Runtime

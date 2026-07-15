@@ -958,6 +958,26 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                 num_extra_cached_blocks * self.vllm_block_size
             )
 
+        # Free any still-held read locks before ending the session.
+        # If the request was aborted after LOOKUP but before RETRIEVE,
+        # the LMCache-hit chunks' read locks were acquired but never
+        # consumed.  Free only the unretrieved tail to avoid double-free.
+        request_tracker = self._get_request_tracker(request.request_id)
+        if (
+            request_tracker is not None
+            and request_tracker.num_lmcache_hit_blocks
+            > request_tracker.num_vllm_hit_blocks
+        ):
+            # Convert blocks to token range for free_lookup_locks
+            vllm_hit_tokens = request_tracker.num_vllm_hit_blocks * self.vllm_block_size
+            lmcache_hit_tokens = request_tracker.num_lmcache_hit_blocks * self.vllm_block_size
+            self.scheduler_adapter.free_lookup_locks(
+                token_ids=list(request_tracker.all_token_ids),
+                start=vllm_hit_tokens,
+                end=lmcache_hit_tokens,
+                request_id=request.request_id,
+            )
+
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
         # Notify LMCache to end the session for this request

@@ -21,10 +21,20 @@ _FP8_E4B15: dict[int, int] = {}
 
 
 def _use_fp8_e4b15(device: int = 0) -> int:
-    """Return 1 if device needs fp8e4b15 (Ampere/Ada, SM < 8.9), else 0."""
+    """Return 1 if device needs fp8e4b15 (Ampere/Ada, SM < 8.9), else 0.
+
+    On ROCm, the CUDA compute-capability tuple doesn't apply (ROCm uses
+    GFX architecture versions).  The fp8-e4b15 workaround is an
+    NVIDIA-specific concern, so return 0 on AMD.
+    """
     if device not in _FP8_E4B15:
-        cap = torch_dev.get_device_capability(device)
-        _FP8_E4B15[device] = 1 if cap < (8, 9) else 0
+        # Skip on ROCm — the e4b15 workaround is NVIDIA Ampere/Ada only.
+        if getattr(torch_dev, "version", None) is not None and \
+                getattr(torch_dev.version, "hip", None) is not None:
+            _FP8_E4B15[device] = 0
+        else:
+            cap = torch_dev.get_device_capability(device)
+            _FP8_E4B15[device] = 1 if cap < (8, 9) else 0
     return _FP8_E4B15[device]
 
 

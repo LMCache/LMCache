@@ -82,6 +82,21 @@ def create_trtllm_metadata(
     local_worker_id = rank % local_world_size
     model_name = str(getattr(llm_args, "model", "unknown_model"))
 
+    # Detect MLA via env var (TRT-LLM doesn't expose an MLA flag on llm_args).
+    # If LMCACHE_USE_MLA is set, respect it; otherwise try to detect from
+    # kv_factor (MLA models have kv_factor=1, meaning a single latent vector
+    # instead of separate K/V).
+    import os
+    use_mla = os.environ.get("LMCACHE_USE_MLA", "").strip().lower() in (
+        "1", "true", "yes",
+    )
+    if not use_mla and kv_factor == 1:
+        # Heuristic: kv_factor=1 likely means MLA (single latent, no separate K/V)
+        logger.info(
+            "TRT-LLM: detected kv_factor=1, likely MLA model. "
+            "Set LMCACHE_USE_MLA=1 to enable MLA cache locking."
+        )
+
     return LMCacheMetadata(
         model_name=model_name,
         world_size=world_size,
@@ -91,4 +106,5 @@ def create_trtllm_metadata(
         kv_dtype=kv_cache_tensor.dtype,
         kv_shape=kv_shape,
         chunk_size=config.chunk_size,
+        use_mla=use_mla,
     )

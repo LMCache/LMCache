@@ -421,9 +421,23 @@ class GPUCacheContext(BaseCacheContext):
         # Third Party
         import cupy
 
-        self.cupy_stream_: "cupy.cuda.Stream" = cupy.cuda.ExternalStream(
-            self.cuda_stream_.cuda_stream, self.device_.index
-        )
+        # On ROCm, cupy-rocm exposes the same cupy.cuda.ExternalStream
+        # and launch_host_func API as cupy-cuda.  If the ROCm build of
+        # cupy does not support ExternalStream, log a warning rather
+        # than crashing.
+        try:
+            self.cupy_stream_: "cupy.cuda.Stream" = cupy.cuda.ExternalStream(
+                self.cuda_stream_.cuda_stream, self.device_.index
+            )
+        except (AttributeError, TypeError) as exc:
+            if getattr(getattr(torch_dev, "version", None), "hip", None) is not None:
+                logger.warning(
+                    "cupy.cuda.ExternalStream unavailable on ROCm (%s); "
+                    "falling back to torch stream", exc,
+                )
+                self.cupy_stream_ = self.cuda_stream_
+            else:
+                raise
 
         # Extra initialization
         self.cupy_stream_.launch_host_func(

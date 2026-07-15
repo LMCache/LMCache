@@ -39,7 +39,19 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
-from lmcache.v1.platform.cuda.ipc_wrapper import RawCudaIPCWrapper
+
+# Runtime dispatch: select the correct raw IPC wrapper based on GPU vendor.
+# On NVIDIA, RawCudaIPCWrapper uses cuda.bindings. On ROCm, RocmRawIPCWrapper
+# uses libamdhip64.so via ctypes. Both have device_type="cuda" (PyTorch HIP
+# compat) and _is_default_wrapper=False (instantiated directly).
+try:
+    import torch as _torch
+    if getattr(_torch.version, "hip", None) is not None:
+        from lmcache.v1.platform.rocm.ipc_wrapper import RocmRawIPCWrapper as RawIPCWrapper
+    else:
+        from lmcache.v1.platform.cuda.ipc_wrapper import RawCudaIPCWrapper as RawIPCWrapper
+except ImportError:
+    from lmcache.v1.platform.cuda.ipc_wrapper import RawCudaIPCWrapper as RawIPCWrapper
 
 logger = init_logger(__name__)
 
@@ -378,7 +390,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         _, _, _, block_size_flat = kv_cache_tensor.shape
         tokens_per_block = block_size_flat // (num_kv_heads * head_dim)
 
-        wrapped = [RawCudaIPCWrapper(kv_cache_tensor)]
+        wrapped = [RawIPCWrapper(kv_cache_tensor)]
 
         layout_hints = {
             "kv_layout": "HND",

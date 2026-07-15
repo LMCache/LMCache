@@ -80,6 +80,11 @@ def init_lmcache_engine(
 
     kv_shape = (num_layer, 2, chunk_size, num_kv_head, head_dim)
 
+    # Detect MLA: if num_kv_heads is 1 (or the model uses MLA attention),
+    # all TP workers share one KV object.  SGLang doesn't expose a direct
+    # MLA flag, so we check the kv head count.
+    use_mla = num_kv_head == 1 and tp_size > 1
+
     # Change current device using local GPU index
     # Use global rank for metadata (tensor parallel rank)
     metadata = LMCacheMetadata(
@@ -90,6 +95,7 @@ def init_lmcache_engine(
         local_worker_id=local_rank,
         kv_dtype=kv_dtype,
         kv_shape=kv_shape,
+        use_mla=use_mla,
     )
 
     gpu_connector = CreateGPUConnector(config, metadata, EngineType.SGLANG)

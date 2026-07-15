@@ -50,9 +50,10 @@ class LMCacheMetadata:
     use_mla: bool = False
     """ the role of the current instance (e.g., 'scheduler', 'worker') """
     role: Optional[str] = None
-    """ the first rank of the distributed setting """
-    # TODO(baoloongmao): first_rank should be configurable
-    first_rank = 0
+    """ the first rank of the distributed setting.
+    Under PP, this is the first rank of the first PP stage (typically 0).
+    Connectors can override this for non-standard rank mappings. """
+    first_rank: int = 0
     served_model_name: Optional[str] = None
     """chunk size"""
     chunk_size: int = 256
