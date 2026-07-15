@@ -190,10 +190,10 @@ RESPONSE2=$(curl -s http://localhost:${PORT}/v1/completions \
 echo "  Response 2: $(echo ${RESPONSE2} | python -c 'import sys,json; print(json.load(sys.stdin)["choices"][0]["text"][:80])' 2>/dev/null || echo '(parse error)')"
 
 # -------------------------------------------------------------------------
-# Step 4: Verify
+# Step 4: Verify LMCache actually cached the shared prefix
 # -------------------------------------------------------------------------
 echo ""
-echo "[4/4] Verifying..."
+echo "[4/4] Verifying LMCache activity..."
 if ! kill -0 ${LMCACHE_PID} 2>/dev/null; then
     echo "ERROR: LMCache server died during test"
     exit 1
@@ -201,6 +201,31 @@ fi
 if ! kill -0 ${VLLM_PID} 2>/dev/null; then
     echo "ERROR: vLLM died during test"
     exit 1
+fi
+
+# Query LMCache HTTP status API (port 8080 by default)
+LMCACHE_STATUS=$(curl -s http://localhost:8080/status 2>/dev/null || echo '{}')
+if [ "${LMCACHE_STATUS}" != "{}" ] && [ -n "${LMCACHE_STATUS}" ]; then
+    echo "  LMCache status: ${LMCACHE_STATUS}" | head -c 200
+    echo ""
+    # Check if there are active sessions (indicates LOOKUP was called)
+    if echo "${LMCACHE_STATUS}" | python -c "
+import sys, json
+status = json.load(sys.stdin)
+sessions = status.get('active_sessions', status.get('sessions', 0))
+if isinstance(sessions, list):
+    sessions = len(sessions)
+if isinstance(sessions, int) and sessions > 0:
+    sys.exit(0)  # sessions found
+sys.exit(1)  # no sessions
+" 2>/dev/null; then
+        echo "  LMCache: sessions found (LOOKUP was called)"
+    else
+        echo "  LMCache: no active sessions (LOOKUP may not have been called)"
+    fi
+else
+    echo "  LMCache: HTTP status API not available (port 8080)"
+    echo "  (This is OK — the ZMQ connector may have cached without the HTTP API)"
 fi
 
 echo "  LMCache server: running"

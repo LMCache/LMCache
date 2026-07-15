@@ -152,9 +152,12 @@ def get_device_spec(device_type: str) -> DeviceSpec | None:
     for spec in _DEVICE_REGISTRY:
         if spec.device_type == device_type and spec.is_available():
             return spec
-    # Fallback: return the first matching spec even if not available
-    # (e.g. for inspection in CLI-only mode).
-    for spec in _DEVICE_REGISTRY:
+    # Fallback: return a matching spec even if not available (e.g. for
+    # inspection in CLI-only mode).  Prefer CudaDeviceSpec over
+    # RocmDeviceSpec in this fallback, since on a no-GPU box the CUDA
+    # backend's no-op degradation is safer than trying to load
+    # libamdhip64.so.
+    for spec in reversed(_DEVICE_REGISTRY):
         if spec.device_type == device_type:
             return spec
     return None

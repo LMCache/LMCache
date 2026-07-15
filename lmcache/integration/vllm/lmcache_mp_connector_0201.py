@@ -121,13 +121,12 @@ def create_scheduler_adapter(
         vllm_config,
     )
     parallel_strategy = ParallelStrategy(
-        mla_enabled(vllm_config.model_config),
-        world_size,
-        kv_rank,
-        vllm_config.parallel_config.world_size,
-        vllm_config.parallel_config.rank,
-        vllm_config.parallel_config.tensor_parallel_size,
-        vllm_config.parallel_config.pipeline_parallel_size,
+        use_mla=mla_enabled(vllm_config.model_config),
+        vllm_world_size=vllm_config.parallel_config.world_size,
+        vllm_worker_id=vllm_config.parallel_config.rank,
+        tp_size=vllm_config.parallel_config.tensor_parallel_size,
+        pp_size=vllm_config.parallel_config.pipeline_parallel_size,
+        n_servers=1,  # 0201 connector is single-server only
     )
 
     return LMCacheMPSchedulerAdapter(
@@ -154,13 +153,12 @@ def create_worker_adapter(
         vllm_config,
     )
     parallel_strategy = ParallelStrategy(
-        mla_enabled(vllm_config.model_config),
-        world_size,
-        kv_rank,
-        vllm_config.parallel_config.world_size,
-        vllm_config.parallel_config.rank,
-        vllm_config.parallel_config.tensor_parallel_size,
-        vllm_config.parallel_config.pipeline_parallel_size,
+        use_mla=mla_enabled(vllm_config.model_config),
+        vllm_world_size=vllm_config.parallel_config.world_size,
+        vllm_worker_id=vllm_config.parallel_config.rank,
+        tp_size=vllm_config.parallel_config.tensor_parallel_size,
+        pp_size=vllm_config.parallel_config.pipeline_parallel_size,
+        n_servers=1,  # 0201 connector is single-server only
     )
 
     return LMCacheMPWorkerAdapter(
