@@ -37,7 +37,10 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
     DevDaxL1MemoryManager,
 )
-from lmcache.v1.memory_allocators.devdax_memory_allocator import DevDaxMemoryAllocator
+from lmcache.v1.memory_allocators.devdax_memory_allocator import (
+    DevDaxArenaState,
+    DevDaxMemoryAllocator,
+)
 from lmcache.v1.multiprocess.config import add_mp_server_args
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 import lmcache.v1.memory_management as memory_management
@@ -605,3 +608,278 @@ def test_devdax_l1_does_not_advertise_shm_pool(tmp_path):
         assert os.path.exists(path)
     finally:
         context.storage_manager.close()
+
+
+def _pure_devdax_manager(path: str, size: int = 4096) -> DevDaxL1MemoryManager:
+    """Build a pure Device-DAX L1 manager whose single arena has ``size`` bytes."""
+    return DevDaxL1MemoryManager(
+        L1MemoryManagerConfig(
+            size_in_bytes=size,
+            use_lazy=False,
+            shm_name="",
+            align_bytes=4096,
+            devdax_path=path,
+        )
+    )
+
+
+def test_add_device_serves_overflow_after_primary_full(tmp_path):
+    primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")
+    manager = _pure_devdax_manager(primary)
+
+    error, first = manager.allocate(_layout(4096), count=1)
+    assert error == L1Error.SUCCESS
+    assert len(first) == 1
+
+    # The primary arena is full, so the next allocation fails until we grow.
+    error, spilled = manager.allocate(_layout(4096), count=1)
+    assert error == L1Error.OUT_OF_MEMORY
+    assert spilled == []
+
+    extra = _make_mmap_file(tmp_path, size=4096, name="extra.bin")
+    status = manager.add_device(extra, 4096)
+    assert status.device_path == extra
+    assert status.state == DevDaxArenaState.ACTIVE
+    assert status.is_primary is False
+    assert status.size_in_bytes == 4096
+
+    error, second = manager.allocate(_layout(4096), count=1)
+    assert error == L1Error.SUCCESS
+    assert len(second) == 1
+
+    statuses = manager.get_arena_statuses()
+    assert [status.device_path for status in statuses] == [primary, extra]
+    used, total = manager.get_memory_usage()
+    assert total == 8192
+    assert used == 8192
+
+    manager.free(first)
+    manager.free(second)
+    del first
+    del second
+    gc.collect()
+    manager.close()
+
+
+def test_remove_device_reaps_empty_arena_immediately(tmp_path):
+    primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")
+    manager = _pure_devdax_manager(primary)
+
+    extra = _make_mmap_file(tmp_path, size=4096, name="extra.bin")
+    manager.add_device(extra, 4096)
+    assert len(manager.get_arena_statuses()) == 2
+
+    status = manager.remove_device(extra)
+    assert status.device_path == extra
+    assert status.state == DevDaxArenaState.REMOVED
+
+    assert [status.device_path for status in manager.get_arena_statuses()] == [primary]
+    used, total = manager.get_memory_usage()
+    assert total == 4096
+    assert used == 0
+    manager.close()
+
+
+def test_remove_device_drains_until_allocations_freed(tmp_path):
+    primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")
+    manager = _pure_devdax_manager(primary)
+
+    # Fill the primary arena so the spilled object must land on the extra arena.
+    error, first = manager.allocate(_layout(4096), count=1)
+    assert error == L1Error.SUCCESS
+
+    extra = _make_mmap_file(tmp_path, size=4096, name="extra.bin")
+    manager.add_device(extra, 4096)
+    error, second = manager.allocate(_layout(4096), count=1)
+    assert error == L1Error.SUCCESS
+
+    status = manager.remove_device(extra)
+    assert status.state == DevDaxArenaState.DRAINING
+    assert status.active_allocations == 1
+
+    # A draining arena accepts no new allocations, so with the primary full the
+    # allocation fails rather than reusing the arena being retired.
+    error, blocked = manager.allocate(_layout(4096), count=1)
+    assert error == L1Error.OUT_OF_MEMORY
+    assert blocked == []
+    assert [status.state for status in manager.get_arena_statuses()] == [
+        DevDaxArenaState.ACTIVE,
+        DevDaxArenaState.DRAINING,
+    ]
+
+    # Freeing the arena's last allocation unmaps it automatically.
+    manager.free(second)
+    del second
+    gc.collect()
+    assert [status.device_path for status in manager.get_arena_statuses()] == [primary]
+
+    manager.free(first)
+    del first
+    gc.collect()
+    manager.close()
+
+
+def test_remove_device_defers_unmap_while_external_views_alive(tmp_path):
+    primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")
+    manager = _pure_devdax_manager(primary)
+
+    # Fill the primary arena so the second object lands on the extra arena.
+    error, first = manager.allocate(_layout(4096), count=1)
+    assert error == L1Error.SUCCESS
+
+    extra = _make_mmap_file(tmp_path, size=4096, name="extra.bin")
+    manager.add_device(extra, 4096)
+    error, second = manager.allocate(_layout(4096), count=1)
+    assert error == L1Error.SUCCESS
+
+    # Keep a view into the arena beyond the free, as a reader still consuming
+    # the tensor would.
+    lingering_view = second[0].tensor
+
+    manager.remove_device(extra)
+    manager.free(second)
+    del second
+    gc.collect()
+
+    # The arena is fully drained but cannot unmap while the view is alive, so
+    # it stays in the pool as DRAINING instead of crashing the free.
+    statuses = manager.get_arena_statuses()
+    assert [status.state for status in statuses] == [
+        DevDaxArenaState.ACTIVE,
+        DevDaxArenaState.DRAINING,
+    ]
+    assert statuses[1].active_allocations == 0
+
+    # Once the view is gone, the next free retries and reaps the arena.
+    del lingering_view
+    gc.collect()
+    manager.free(first)
+    del first
+    gc.collect()
+    assert [status.device_path for status in manager.get_arena_statuses()] == [primary]
+    manager.close()
+
+
+def test_add_device_releases_mapping_when_arena_setup_fails(tmp_path, monkeypatch):
+    primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")
+    allocator = DevDaxMemoryAllocator(
+        size=4096,
+        device_path=primary,
+        align_bytes=4096,
+    )
+
+    captured = {}
+
+    def _failing_pin(self, arena):
+        captured["arena"] = arena
+        raise RuntimeError("pin registration failed")
+
+    monkeypatch.setattr(DevDaxMemoryAllocator, "_register_arena_pin", _failing_pin)
+    extra = _make_mmap_file(tmp_path, size=4096, name="extra.bin")
+    with pytest.raises(RuntimeError, match="pin registration failed"):
+        allocator.add_device(extra, 4096)
+
+    # The failed arena never joins the pool and its mapping is unmapped.
+    assert [status.device_path for status in allocator.arena_statuses()] == [primary]
+    assert captured["arena"].mmap_obj.closed
+    allocator.close()
+
+
+def test_remove_primary_arena_rejected(tmp_path):
+    primary = _make_mmap_file(tmp_path, size=4096)
+    manager = _pure_devdax_manager(primary)
+
+    with pytest.raises(ValueError, match="primary"):
+        manager.remove_device(primary)
+
+    # The primary arena survives the rejected removal.
+    assert [status.device_path for status in manager.get_arena_statuses()] == [primary]
+    manager.close()
+
+
+def test_add_duplicate_device_rejected(tmp_path):
+    primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")
+    manager = _pure_devdax_manager(primary)
+
+    extra = _make_mmap_file(tmp_path, size=4096, name="extra.bin")
+    manager.add_device(extra, 4096)
+    with pytest.raises(ValueError, match="already mapped"):
+        manager.add_device(extra, 4096)
+
+    assert len(manager.get_arena_statuses()) == 2
+    manager.close()
+
+
+def test_add_device_validates_arguments(tmp_path):
+    primary = _make_mmap_file(tmp_path, size=4096)
+    manager = _pure_devdax_manager(primary)
+
+    with pytest.raises(ValueError, match="device_path"):
+        manager.add_device("", 4096)
+    with pytest.raises(ValueError, match="size_in_bytes"):
+        manager.add_device(str(tmp_path / "unused.bin"), 0)
+
+    manager.close()
+
+
+def test_hybrid_initial_devdax_arena_is_removable(tmp_path):
+    # In hybrid mode DRAM is the primary L1 region, so the initial Device-DAX
+    # arena is removable overflow rather than primary.
+    path = _make_mmap_file(tmp_path, size=4096)
+    manager = DevDaxL1MemoryManager(
+        L1MemoryManagerConfig(
+            size_in_bytes=4096,
+            use_lazy=False,
+            shm_name="",
+            align_bytes=4096,
+            devdax_path=path,
+            devdax_size_in_bytes=4096,
+        )
+    )
+
+    statuses = manager.get_arena_statuses()
+    assert len(statuses) == 1
+    assert statuses[0].is_primary is False
+
+    status = manager.remove_device(path)
+    assert status.state == DevDaxArenaState.REMOVED
+    assert manager.get_arena_statuses() == []
+
+    # DRAM still serves allocations after the overflow arena is gone.
+    error, objs = manager.allocate(_layout(4096), count=1)
+    assert error == L1Error.SUCCESS
+    manager.free(objs)
+    del objs
+    gc.collect()
+    manager.close()
+
+
+def test_allocator_batched_allocation_spans_arenas(tmp_path):
+    first_path = _make_mmap_file(tmp_path, size=8192, name="arena-1.bin")
+    allocator = DevDaxMemoryAllocator(
+        size=8192,
+        device_path=first_path,
+        align_bytes=4096,
+    )
+    second_path = _make_mmap_file(tmp_path, size=8192, name="arena-2.bin")
+    allocator.add_device(second_path, 8192)
+
+    # Four 4096-byte slots: two from each arena.
+    objs = allocator.batched_allocate(torch.Size([4096]), torch.uint8, 4)
+    assert objs is not None
+    assert len(objs) == 4
+    used, total = allocator.get_memory_usage()
+    assert total == 16384
+    assert used == 16384
+
+    # One more object cannot be satisfied; the partial attempt rolls back and
+    # leaves the pool intact.
+    assert allocator.batched_allocate(torch.Size([4096]), torch.uint8, 1) is None
+    used_after, total_after = allocator.get_memory_usage()
+    assert used_after == 16384
+    assert total_after == 16384
+
+    allocator.batched_free(objs)
+    del objs
+    gc.collect()
+    allocator.close()

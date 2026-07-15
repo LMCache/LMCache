@@ -9,31 +9,21 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.config import L1MemoryManagerConfig
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.memory_manager.l1_memory_manager import L1MemoryManager
-from lmcache.v1.memory_allocators.devdax_memory_allocator import DevDaxMemoryAllocator
+from lmcache.v1.memory_allocators.devdax_memory_allocator import (
+    DevDaxArenaStatus,
+    DevDaxMemoryAllocator,
+    DevDaxRemoveMode,
+)
 
 logger = init_logger(__name__)
 
 
 class DevDaxL1MemoryManager(L1MemoryManager):
-    """L1 memory manager for Device-DAX-backed L1 memory.
-
-    This is a peer of
-    :class:`~lmcache.v1.distributed.memory_manager.l1_memory_manager.L1MemoryManager`
-    and owns the Device-DAX allocator path that used to live inside the generic
-    CPU L1 manager. A pure Device-DAX configuration maps the DAX device as the
-    full L1 arena. A hybrid configuration uses DRAM first and spills overflow
-    allocations into Device-DAX.
+    """L1 memory manager backed by Device-DAX. Pure Device-DAX maps the device
+    as the full L1 arena; hybrid uses DRAM first and spills into Device-DAX.
     """
 
     def __init__(self, config: L1MemoryManagerConfig) -> None:
-        """Create a Device-DAX L1 memory manager.
-
-        Args:
-            config: L1 memory configuration with ``devdax_path`` set.
-
-        Raises:
-            ValueError: If ``devdax_path`` is not configured.
-        """
         if not config.devdax_path:
             raise ValueError("DevDaxL1MemoryManager requires devdax_path")
 
@@ -54,19 +44,12 @@ class DevDaxL1MemoryManager(L1MemoryManager):
             shm_name=config.shm_name or None,
             align_bytes=config.align_bytes,
         )
+        self._config = config
         self._size_in_bytes = config.size_in_bytes
         self._align_bytes = config.align_bytes
 
     def get_l1_memory_desc(self) -> L1MemoryDesc:
-        """Return a descriptor for the primary L1 buffer.
-
-        Existing callers expect Device-DAX L1 to expose the mapped buffer here.
-        Hybrid DRAM + Device-DAX L1 is still rejected by transfer paths that
-        require one registerable L1 region via ``l1_exposes_single_memory_region``.
-
-        Returns:
-            The descriptor for the primary L1 buffer.
-        """
+        """Return a descriptor for the primary L1 buffer."""
         allocator = cast(DevDaxMemoryAllocator, self._allocator)
         buffer = allocator.buffer
         return L1MemoryDesc(
@@ -74,3 +57,25 @@ class DevDaxL1MemoryManager(L1MemoryManager):
             size=self._size_in_bytes,
             align_bytes=self._align_bytes,
         )
+
+    def add_device(self, device_path: str, size_in_bytes: int) -> DevDaxArenaStatus:
+        """Map an additional Device-DAX device into the pool at runtime; it
+        serves overflow immediately."""
+        allocator = cast(DevDaxMemoryAllocator, self._allocator)
+        return allocator.add_device(device_path, size_in_bytes)
+
+    def remove_device(
+        self,
+        device_path: str,
+        mode: DevDaxRemoveMode = DevDaxRemoveMode.DRAIN,
+    ) -> DevDaxArenaStatus:
+        """Drain-remove a device at runtime: no new allocations, unmapped once
+        idle. Returns ``REMOVED`` or ``DRAINING``; the primary arena is
+        rejected."""
+        allocator = cast(DevDaxMemoryAllocator, self._allocator)
+        return allocator.remove_device(device_path, mode)
+
+    def get_arena_statuses(self) -> list[DevDaxArenaStatus]:
+        """Return a status snapshot of every arena, in pool order."""
+        allocator = cast(DevDaxMemoryAllocator, self._allocator)
+        return allocator.arena_statuses()
