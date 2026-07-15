@@ -4,67 +4,40 @@ Adding a New Device Backend
 ===========================
 
 This guide explains how to add a **new accelerator** to LMCache in
-**Multiprocess (MP) engine-driven mode**.
+**Multiprocess (MP) mode**.
 
-The integration is intentionally small and self-contained:
+**For basic users:** read :ref:`Part 1 <part-1-basic>` only — adding a
+``DeviceSpec`` is all you need to get your device working with the
+built-in Python fallback ops.
 
-- Add one ``DeviceSpec`` under ``lmcache/v1/platform/<device>/__init__.py``
-- Add one ops backend module ``lmcache/v1/platform/<device>/ops.py``
-- Add a KV transfer adapter ``kv_transfer_adapter.py``
+**For advanced users:** continue to :ref:`Part 2 <part-2-performance>`
+for native ops and advanced transfer modes.
 
-You do **not** need to modify global dispatch code.
+.. _part-1-basic:
 
-Scope
------
+Part 1 — Basic Function Enabling
+--------------------------------
 
-This guide explains how to add a **new accelerator** to LMCache in
-**Multiprocess (MP) engine-driven mode**.
-
-The integration is intentionally small and self-contained:
-
-- Add one ``DeviceSpec`` under ``lmcache/v1/platform/<device>/__init__.py``
-- Add one ops backend module ``lmcache/v1/platform/<device>/ops.py``
-- Add a KV transfer adapter ``kv_transfer_adapter.py``
-
-You do **not** need to modify global dispatch code.
-
-Architecture Rules
-------------------
-
-Current backend selection is registry-driven:
-
-- Device detection: ``lmcache/v1/platform/__init__.py::_detect_device()``
-- Backend loading: ``lmcache/v1/platform/__init__.py::get_backend(device_type)``
-- Device descriptor base class: ``lmcache/v1/platform/base_device_spec.py::DeviceSpec``
-
-``DeviceSpec`` subclasses are discovered automatically under
-``lmcache.v1.platform``.
-
-What not to do
-~~~~~~~~~~~~~~
-
-- Do not edit ``lmcache/__init__.py`` for device detection/backend selection.
-- Do not add any ``register_availability(...)`` call (no such API exists).
-- Do not treat ``lmcache/v1/platform/_registry.py`` as device-detection
-  registry; it is for KV IPC wrapper factories (``register_kv_wrapper`` /
-  ``get_kv_wrapper_factory``).
+For the majority of devices, a single ``DeviceSpec`` class is
+sufficient.  LMCache ships with a complete Python fallback ops
+(``lmcache/python_ops_fallback.py``) that works on any device
+supporting standard PyTorch tensor operations — **no custom kernels
+required**.
 
 Prerequisites
--------------
+~~~~~~~~~~~~~
 
 Your PyTorch backend should support:
 
 - ``torch.<device>.is_available()``
 - ``torch.<device>.device_count()``
-- ``torch.<device>.set_device()`` / ``current_device()`` / ``synchronize()``
-- Tensor movement between host and device (``.cpu()``, ``.to("cpu")``,
+- ``torch.<device>.set_device()`` / ``current_device()`` /
+  ``synchronize()``
+- Tensor movement between host and device (``.cpu()``,
   ``.to(<device>)``)
 
-If these are available, engine-driven transfer can run with Python fallback
-before native kernels exist.
-
-Step 1 — Add ``DeviceSpec``
----------------------------
+Add ``DeviceSpec``
+~~~~~~~~~~~~~~~~~~
 
 Create ``lmcache/v1/platform/<device>/__init__.py``:
 
@@ -89,7 +62,7 @@ Create ``lmcache/v1/platform/<device>/__init__.py``:
 
         @property
         def ops_module(self) -> str | None:
-            return "lmcache.v1.platform.<device>.ops"
+            return None
 
         def is_available(self) -> bool:
             """Check backend availability without importing lmcache.__init__."""
@@ -100,126 +73,49 @@ Create ``lmcache/v1/platform/<device>/__init__.py``:
             except Exception:
                 return False
 
-Notes:
-
-- Defining this class is enough for registration.
-- No global list or manual registration call is required.
-- ``DEVICE_TYPE=<device>`` can force selection when this backend is available.
-
-Step 2 — Add ops backend module
--------------------------------
-
-Create ``lmcache/v1/platform/<device>/ops.py``.
-
-This module is merged over ``lmcache.python_ops_fallback`` by
-``get_backend(device_type)``. Any function not implemented here uses fallback.
-
-.. code-block:: python
-
-    # SPDX-License-Identifier: Apache-2.0
-    """<device> ops backend assembled into ``lmcache.c_ops`` at import time."""
-
-    from __future__ import annotations
-
-    import torch
-
-    import lmcache.python_ops_fallback as py_ops
-
-
-    def _tensor_list(value: object) -> list[torch.Tensor] | None:
-        if not isinstance(value, list):
-            return None
-        if not all(isinstance(item, torch.Tensor) for item in value):
-            return None
-        return value
-
-
-    def multi_layer_block_kv_transfer(
-        paged_buffer_ptrs_tensor: torch.Tensor | list,
-        lmcache_objects_ptrs: list[int] | list[torch.Tensor],
-        block_ids: torch.Tensor | list[int],
-        device: torch.device | str,
-        direction: py_ops.TransferDirection,
-        shape_desc: py_ops.PageBufferShapeDesc,
-        lmcache_chunk_size: int,
-        engine_kv_format: py_ops.EngineKVFormat,
-        skip_prefix_n_blocks: int,
-    ) -> None:
-        """Block-based multi-layer KV transfer for <device>."""
-        from lmcache.v1.platform.<device>.kv_transfer_adapter import (
-            try_native_multi_layer_block_kv_transfer,
-        )
-
-        object_tensors = _tensor_list(lmcache_objects_ptrs)
-        if object_tensors is not None and try_native_multi_layer_block_kv_transfer(
-            paged_layers=paged_buffer_ptrs_tensor,
-            object_tensors=object_tensors,
-            block_ids=block_ids,
-            direction=direction,
-            shape_desc=shape_desc,
-            lmcache_chunk_size=lmcache_chunk_size,
-            engine_kv_format=engine_kv_format,
-            skip_prefix_n_blocks=skip_prefix_n_blocks,
-        ):
-            return
-
-        py_ops.multi_layer_block_kv_transfer(
-            paged_buffer_ptrs_tensor,
-            lmcache_objects_ptrs,
-            block_ids,
-            device,
-            direction,
-            shape_desc,
-            lmcache_chunk_size,
-            engine_kv_format,
-            skip_prefix_n_blocks,
-        )
-
-Initial bring-up can use Python fallback for validation, but native path
-is required for production performance.
-
-Step 3 — KV transfer adapter
-----------------------------
-
-Add ``lmcache/v1/platform/<device>/kv_transfer_adapter.py`` as a
-fail-closed adapter. Native performance is the standard expectation for new
-hardware.
-
-Contract
-~~~~~~~~
-
-- Native path must be optional (missing wheel should not break inference).
-- Return ``False`` when unavailable/unsupported so fallback path runs.
-- Keep ABI-compatible symbol set.
-
-Required native symbols
-~~~~~~~~~~~~~~~~~~~~~~~~
+Key properties:
 
 .. list-table::
    :header-rows: 1
 
-   * - Symbol
+   * - Property
+     - Required
      - Purpose
-   * - ``native_lmcache_kv_transfer_abi_version``
-     - ABI version check
-   * - ``lmcache_kv_paged_to_buffer``
-     - D2H gather (non-MLA)
-   * - ``lmcache_kv_buffer_to_paged``
-     - H2D scatter (non-MLA)
-   * - ``lmcache_mla_paged_to_buffer``
-     - D2H gather (MLA)
-   * - ``lmcache_mla_buffer_to_paged``
-     - H2D scatter (MLA)
+   * - ``device_type``
+     - yes
+     - Device type string (e.g. ``"cuda"``, ``"musa"``)
+   * - ``torch_module_name``
+     - yes
+     - Attribute on the ``torch`` package (e.g. ``"cuda"`` →
+       ``torch.cuda``)
+   * - ``ops_module``
+     - no
+     - Ops module path; leave the base-class default (``None``) for
+       pure fallback, or override in :ref:`Part 2 <part-2-performance>`
+   * - ``is_available()``
+     - yes
+     - Returns ``True`` when the device is usable
 
-Current ABI version is ``1``.
+.. note::
 
-Reference implementation:
-``lmcache/v1/platform/musa/native_kv_transfer.py``
-(``LMCACHE_MUSA_NATIVE_KV_TRANSFER``, ABI version check, required symbol checks,
-fail-closed behavior).
+   ``ops_module`` defaults to ``None`` in the base ``DeviceSpec``, so
+   you can simply omit that property for a minimal Part 1 setup.  The
+   ``hasattr(torch, "<device>")`` guard shown above is only needed for
+   out-of-tree PyTorch extensions (e.g. ``torch.musa``, ``torch.xpu``
+   when installed as a plug-in).  For accelerators shipped inside
+   PyTorch itself (like ``torch.cuda``) a plain
+   ``torch.<device>.is_available()`` is enough.
+
+That's it.  Defining this class is enough for auto-discovery — no
+global list or manual registration call is required.  All ops
+automatically route through ``lmcache.python_ops_fallback``, which is
+not performant but is functionally applicable to any device that
+supports the standard PyTorch tensor surface.  Later, each device can
+provide its own ops (Python, C, CUDA, Rust, or any language exposing
+Python bindings) to override the fallback function-by-function.
 
 Verification
-------------
+~~~~~~~~~~~~
 
 Start LMCache server:
 
@@ -227,9 +123,13 @@ Start LMCache server:
 
     lmcache server --l1-size-gb 10 --eviction-policy LRU --port 5555
 
-Run vLLM with MP connector and engine-driven mode:
+Run vLLM with MP connector.  If multiple accelerators are visible on
+the host, set ``DEVICE_TYPE`` to force LMCache to pick the new backend
+instead of auto-detecting:
 
 .. code-block:: bash
+
+    export DEVICE_TYPE=<device>            # optional; only when auto-detection picks the wrong device
 
     vllm serve <your-model> \
         --kv-transfer-config '{
@@ -245,15 +145,163 @@ Run vLLM with MP connector and engine-driven mode:
         --no-enable-prefix-caching \
         --port 8000
 
-Checklist:
+Check the LMCache logs — with ``ops_module = None`` you should see::
 
-- [ ] Backend is discoverable via ``DeviceSpec`` and selected correctly.
-- [ ] ``lmcache.c_ops.multi_layer_block_kv_transfer`` resolves on your device.
-- [ ] Engine-driven pickle transfer works end-to-end.
-- [ ] Engine-driven SHM transfer works end-to-end.
+    torch_dev=..., torch_device_type=<device>
+    Custom ops not supported for device: <device>, using fallback ops.
+
+This confirms your ``DeviceSpec`` was discovered and the Python
+fallback is active.  (Once you set ``ops_module`` in
+:ref:`Part 2 <part-2-performance>`, the second line becomes
+``Using backend: <your.ops.module>`` instead.)
+
+Debugging checklist:
+
+- [ ] ``torch.<device>.is_available()`` returns ``True``.
+- [ ] Set ``DEVICE_TYPE=<device>`` to force selection if not picked up
+  automatically.
+- [ ] Log shows either ``Custom ops not supported for device: <device>,
+  using fallback ops.`` (pure fallback) or
+  ``Using backend: <your.ops.module>`` (custom ops loaded).
+- [ ] Engine-driven transfer works end-to-end (check the LMCache logs
+  to confirm whether the SHM or Pickle sub-path is chosen — both
+  should succeed).
 - [ ] Store/retrieve correctness is verified.
 - [ ] TP>1 / multi-worker behavior is verified.
-- [ ] KV transfer adapter path is hit and bit-exact.
+
+.. _part-2-performance:
+
+Part 2 — Performance Optimization
+---------------------------------
+
+Once basic functionality is verified, add device-specific
+optimizations.
+
+Device-specific ops
+~~~~~~~~~~~~~~~~~~~
+
+The generic ops interface is defined in
+``lmcache/python_ops_fallback.py``.  Each vendor may replace any
+subset of these functions with a device-specific implementation; the
+choice of language (C, CUDA, SYCL, Python, Rust, …) and packaging is
+entirely up to the vendor.  LMCache only cares that the resulting
+symbols are importable from Python.
+
+**How it works.** At import time, ``get_backend(device_type)`` imports
+the module named by your ``DeviceSpec.ops_module`` and merges its
+symbols over ``python_ops_fallback``:
+
+.. code-block:: text
+
+    callers  →  lmcache.c_ops  →  <your ops module>       (functions you defined)
+                               →  lmcache.python_ops_fallback  (everything else)
+
+Integration contract
+^^^^^^^^^^^^^^^^^^^^
+
+Regardless of how you build your ops module, the following contract
+must hold:
+
+- **Same symbol names.** Every function you override must be exposed
+  under the exact name used in ``python_ops_fallback`` (e.g.
+  ``multi_layer_block_kv_transfer``).
+- **Same call signature.** Positional/keyword arguments, argument
+  order and semantics must match the fallback; callers invoke the
+  merged module without knowing which backend answered.
+- **Importable Python module.** ``ops_module`` is a fully-qualified
+  Python module path (``importlib.import_module`` must succeed).  How
+  the module gets there — a pure-Python file, a pybind11 extension,
+  a ctypes wrapper, a Rust ``PyO3`` module, etc. — is your choice.
+- **Partial override is allowed.** You do not have to reimplement
+  every function.  Anything you leave out keeps using the Python
+  fallback, so incremental optimization is supported.
+- **Point ``DeviceSpec.ops_module`` at the module** once it is
+  reachable on ``sys.path``:
+
+  .. code-block:: python
+
+      class <Device>DeviceSpec(DeviceSpec):
+          @property
+          def ops_module(self) -> str | None:
+              return "my_device.ops"   # any importable module path
+
+Implementation notes
+^^^^^^^^^^^^^^^^^^^^
+
+- For engine-driven transfer the hot entry point is
+  ``multi_layer_block_kv_transfer``; other functions in
+  ``python_ops_fallback`` can be overridden as needed.
+- If you fall back to the generic path from inside a device-specific
+  wrapper (e.g. when inputs are unsupported), call the corresponding
+  ``lmcache.python_ops_fallback`` function directly to preserve
+  semantics.
+- Keep your ops module free of side effects at import time — it is
+  imported eagerly during ``get_backend()``.
+
+For concrete reference implementations, see
+``lmcache/v1/platform/cuda/`` and ``lmcache/v1/platform/musa/``.
+Both are examples of what a vendor *may* do, not templates every new
+backend has to follow.
+
+Advanced transfer mode
+~~~~~~~~~~~~~~~~~~~~~~
+
+By default, devices use **engine-driven** transfer mode.  Some devices
+can support the **LMCache-driven** mode for better multi-worker
+throughput via IPC-based zero-copy handle transfer.
+
+When the caller (or ``LMCACHE_MP_TRANSFER_MODE``) explicitly requests
+``lmcache_driven``, ``_build_lmcache_driven_context`` performs two
+hard checks against the device — both must succeed, otherwise the
+factory raises ``ValueError`` (there is no silent fallback):
+
+1. A KV IPC wrapper factory must be registered for the device via
+   ``lmcache/v1/platform/_registry.py`` (see ``register_kv_wrapper`` /
+   ``get_kv_wrapper_factory``).
+2. The device's ``DeviceSpec.is_handle_transfer_available()`` must
+   return ``True``.
+
+Host-side pinning via ``pin_memory_backend`` is *optional* and only
+affects staging-buffer performance; it is not required to enable
+LMCache-driven mode.
+
+Override these methods in your ``DeviceSpec`` accordingly (note that
+``is_handle_transfer_available()`` defaults to ``True`` in the base
+class, so you only need to override it when your device does *not*
+support IPC handle transfer):
+
+.. code-block:: python
+
+    class <Device>DeviceSpec(DeviceSpec):
+        def is_handle_transfer_available(self) -> bool:
+            """Return True if your device supports IPC handle transfer."""
+            return True  # base-class default; override to False if unsupported
+
+        @property
+        def pin_memory_backend(self):
+            """Return a PinMemoryBackend subclass, or None.
+
+            Optional; only affects host staging performance.
+            """
+            return None  # default
+
+Once the checks above pass, opt into LMCache-driven mode by setting
+``lmcache.mp.mp_transfer_mode`` to ``lmcache_driven`` in the vLLM
+``kv_connector_extra_config`` shown in :ref:`Part 1 <part-1-basic>`,
+or by exporting ``LMCACHE_MP_TRANSFER_MODE=lmcache_driven``.  If
+either capability check above fails, the factory raises
+``ValueError`` and refuses to construct the context — the caller must
+switch back to ``engine_driven`` or ``auto``.
+
+.. note::
+
+   In ``auto`` mode the router still dispatches strictly by device
+   type: only ``device_type == "cuda"`` is routed to
+   ``LMCacheDrivenTransferContext``; every other device is routed to
+   ``EngineDrivenTransferContext``.  A non-CUDA device that supports
+   handle transfer must therefore opt in explicitly via
+   ``lmcache.mp.mp_transfer_mode = "lmcache_driven"`` /
+   ``LMCACHE_MP_TRANSFER_MODE=lmcache_driven``.
 
 References
 ----------
@@ -263,28 +311,16 @@ References
 
    * - Topic
      - Path
-   * - Device detection and backend loading
-     - ``lmcache/v1/platform/__init__.py``
    * - Device spec base
      - ``lmcache/v1/platform/base_device_spec.py``
-   * - Full ``DeviceSpec`` example
-     - ``lmcache/v1/platform/musa/__init__.py``
-   * - Ops backend example
-     - ``lmcache/v1/platform/musa/ops.py``
-   * - KV transfer adapter example
-     - ``lmcache/v1/platform/musa/native_kv_transfer.py``
-   * - Engine-driven gather/scatter call site
-     - ``lmcache/v1/multiprocess/transfer_context/base.py``
-   * - Python fallback implementation
+   * - Backend loading
+     - ``lmcache/v1/platform/__init__.py``
+   * - Python fallback
      - ``lmcache/python_ops_fallback.py``
-   * - KV wrapper registry (advanced/optional)
-     - ``lmcache/v1/platform/_registry.py``
-
-Related docs
-------------
-
-- Multi-hardware architecture: ``docs/design/ARCHITECTURE_MULTI_HARDWARE.md``
-- Engine-driven transfer design:
-  ``docs/design/v1/multiprocess/engine_driven_transfer_design.md``
-- Event notifier design: ``docs/design/v1/platform/event_notifier.md``
-- MP protocol docs: ``docs/design/v1/multiprocess/protocols/README.md``
+   * - Reference ``DeviceSpec`` (engine-driven baseline)
+     - ``lmcache/v1/platform/cuda/__init__.py``
+   * - Reference ``DeviceSpec`` (LMCache-driven capable)
+     - ``lmcache/v1/platform/musa/__init__.py``
+   * - Engine-driven call site
+     - ``lmcache/v1/multiprocess/transfer_context/worker_transfer.py``
+       (``EngineDrivenTransferContext``, ``create_transfer_context``)
