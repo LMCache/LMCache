@@ -430,6 +430,16 @@ class FlameProfiler:
         if self._stopped:
             return
         self._stopped = True
+        # Close the capture file handles first so a start() that failed
+        # before spawning the recorder (self._proc is None) still releases
+        # them before the early return below. The recorder holds its own
+        # dup'd fds, so closing ours early never truncates its output.
+        if self._raw_fh is not None:
+            self._raw_fh.close()  # type: ignore[attr-defined]
+            self._raw_fh = None
+        if self._err_fh is not None:
+            self._err_fh.close()  # type: ignore[attr-defined]
+            self._err_fh = None
         if self._proc is None:
             return
 
@@ -444,12 +454,6 @@ class FlameProfiler:
         except subprocess.TimeoutExpired:
             self._proc.kill()
             self._proc.wait()
-        if self._raw_fh is not None:
-            self._raw_fh.close()  # type: ignore[attr-defined]
-            self._raw_fh = None
-        if self._err_fh is not None:
-            self._err_fh.close()  # type: ignore[attr-defined]
-            self._err_fh = None
 
         # py-spy renders the SVG itself and, unlike perf, reports failure
         # through its exit status rather than an empty capture.
@@ -571,11 +575,16 @@ class FlameProfiler:
         Its header makes size meaningless, so it must be decoded; only the
         first line is read (the full decode is left to :meth:`_render`).
         """
-        proc = subprocess.Popen(
-            ["perf", "script", "-i", self._raw_path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
+        try:
+            proc = subprocess.Popen(
+                ["perf", "script", "-i", self._raw_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            # perf missing / not executable: treat as no decodable stacks
+            # rather than crashing teardown.
+            return False
         try:
             first_line = proc.stdout.readline() if proc.stdout else b""
         finally:
@@ -608,19 +617,37 @@ class FlameProfiler:
         otherwise pass unnoticed.
         """
         collapse_pl = os.path.join(self._flamegraph_dir, "stackcollapse-perf.pl")
-        script = subprocess.Popen(
-            ["perf", "script", "-i", self._raw_path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
-        collapse = subprocess.Popen(
-            [collapse_pl], stdin=script.stdout, stdout=subprocess.PIPE
-        )
-        flame = subprocess.Popen(
-            [flamegraph_pl, "--title", self._title, "--width", str(_FLAME_WIDTH_PX)],
-            stdin=collapse.stdout,
-            stdout=svg,
-        )
+        script: subprocess.Popen[bytes] | None = None
+        collapse: subprocess.Popen[bytes] | None = None
+        flame: subprocess.Popen[bytes] | None = None
+        try:
+            script = subprocess.Popen(
+                ["perf", "script", "-i", self._raw_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+            collapse = subprocess.Popen(
+                [collapse_pl], stdin=script.stdout, stdout=subprocess.PIPE
+            )
+            flame = subprocess.Popen(
+                [
+                    flamegraph_pl,
+                    "--title",
+                    self._title,
+                    "--width",
+                    str(_FLAME_WIDTH_PX),
+                ],
+                stdin=collapse.stdout,
+                stdout=svg,
+            )
+        except OSError as e:
+            # A missing/inexecutable stage (e.g. stackcollapse-perf.pl) would
+            # otherwise leave the already-started stages running as orphans.
+            for proc in (script, collapse, flame):
+                if proc is not None:
+                    proc.kill()
+                    proc.wait()
+            raise ProfileError(f"failed to start rendering pipeline: {e}") from e
         # Drop the parent's copies so EOF/SIGPIPE flows down the chain.
         for pipe in (script.stdout, collapse.stdout):
             if pipe is not None:
