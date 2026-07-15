@@ -133,18 +133,13 @@ def add_l2_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--flamegraph-mode",
-        choices=["on-cpu", "off-cpu", "offwake", "wakeup", "wall", "gil"],
         default="on-cpu",
+        metavar="MODE[,MODE...]",
         help=(
-            "Flame-graph mode if flame-graph profiling is on. 'on-cpu' "
-            "(perf) shows where CPU time goes; 'off-cpu' (offcputime-bpfcc) "
-            "shows time blocked on I/O / locks and is best for I/O-bound "
-            "adapters; 'offwake' (offwaketime-bpfcc) adds the waker stack to "
-            "each blocked stack; 'wakeup' (wakeuptime-bpfcc) shows the stacks "
-            "doing the waking. 'wall' and 'gil' (py-spy) give one root per "
-            "thread instead of merging them: 'wall' is wall-clock time per "
-            "thread, 'gil' counts only threads holding the interpreter lock. "
-            "Default: on-cpu."
+            "What to sample when profiling is on (default: on-cpu). Pass "
+            "several comma-separated to profile one benchmark run per mode. "
+            "Modes: on-cpu, off-cpu, wakeup, offwake (perf/bcc), wall, gil "
+            "(py-spy). See the 'lmcache tool flamegraph' docs for detail."
         ),
     )
     parser.add_argument(
@@ -162,10 +157,9 @@ def add_l2_arguments(parser: argparse.ArgumentParser) -> None:
         metavar="DIR",
         help=(
             "Directory with the FlameGraph scripts (flamegraph.pl, "
-            "stackcollapse-perf.pl). Default: $FLAMEGRAPH_DIR or "
-            "~/FlameGraph, else auto-cloned into a temp directory. "
-            "Unused by --flamegraph-mode wall / gil, which render "
-            "their own SVG."
+            "stackcollapse-perf.pl); default ~/FlameGraph (cloned there on "
+            "first use). Unused by --flamegraph-mode wall / gil, which "
+            "render their own SVG."
         ),
     )
 

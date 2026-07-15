@@ -111,17 +111,18 @@ list, including the client's own ``--listen-url`` and the catalog
 flamegraph
 ----------
 
-Attach a profiler to an already-running process (an MP cache server, a vLLM
-worker with LMCache embedded, or any Python process), record for a fixed
-duration, and render a flame graph.
+Attach a profiler to an already-running process, record for a fixed
+duration, and render a flame graph to find its bottlenecks.
 
-It is a thin wrapper over the standard Linux profilers (``py-spy``, ``perf``,
-and ``bcc``), rendered as a flame graph with Brendan Gregg's FlameGraph. A
-single ``--mode`` selects the tool; the command applies sensible defaults,
-resolves Python function names that a raw native profiler leaves as
-``[unknown]``, fetches the FlameGraph renderer, and reports a missing tool or
-blocked attach with an actionable message. It does not install the profilers
-themselves; it names what to run.
+It gives one unified interface over widely adopted profilers (``py-spy``,
+``perf``, and ``bcc``), each producing a flame graph. A single ``--mode``
+spans the whole spectrum, from Python and GIL contention to
+CPU time, kernel frames, and blocked time: you pick a mode by what you want
+to see rather than which tool to run, and get consistent output, defaults,
+and permission checks across all six. It wraps these tools rather than
+replacing them (it names what to install, it does not install it), so a user
+or developer can find a pain point or a resource-heavy code path without
+stitching the tools together by hand.
 
 .. list-table::
    :header-rows: 1
@@ -135,7 +136,8 @@ themselves; it names what to run.
      - Process to profile.
    * - ``--mode``
      - ``gil``
-     - ``on-cpu``, ``off-cpu``, ``offwake``, ``wakeup``, ``wall``, or ``gil``.
+     - One of ``on-cpu``, ``off-cpu``, ``wakeup``, ``offwake``, ``wall``,
+       ``gil``, or several comma-separated to record each in turn.
    * - ``--duration``
      - ``30``
      - Seconds to record. ``0`` records until interrupted with Ctrl-C.
@@ -155,61 +157,44 @@ Usage
    # Which threads of an MP cache server hold the GIL, sampled for 20s
    lmcache tool flamegraph --pid $(pgrep -f 'lmcache server') --mode gil --duration 20
 
-.. _lmcache-flamegraph-entry-points:
-
-LMCache renders flame graphs from three commands; they differ in **where the
-load comes from** and **what they attach to**:
-
-.. list-table::
-   :header-rows: 1
-   :widths: 32 32 36
-
-   * - Command
-     - Load driven by
-     - Profiles
-   * - ``lmcache bench l2 --flamegraph on``
-     - The benchmark itself (synthetic, in-process)
-     - Its own process: one L2 adapter under a microbenchmark.
-   * - ``lmcache bench server --flamegraph on``
-     - The benchmark client (synthetic KV over ZMQ)
-     - An external server via ``--profile-server-pid``, under that load.
-   * - ``lmcache tool flamegraph`` *(this command)*
-     - Nothing (it drives no load)
-     - Any running process, under whatever **real** work it is already doing.
+   # Capture GIL, CPU, and blocked-time views in one sweep (one SVG per mode)
+   lmcache tool flamegraph --pid $(pgrep -f 'lmcache server') --mode gil,on-cpu,off-cpu
 
 Reach for this command to profile a **real, unmodified process** (a
 production or vLLM-driven server under actual traffic, an idle server, or any
-arbitrary PID) without standing up a benchmark harness.
-
+arbitrary PID) without standing up a benchmark harness. The ``bench``
+commands (``lmcache bench l2`` / ``lmcache bench server``) instead profile a
+process under synthetic load they generate.
 
 Modes
 ~~~~~
 
 .. _lmcache-flamegraph-modes:
 
-The six ``--mode`` values fall into two families; pick by what you want to
-see.
-
-**Python execution or GIL contention** with ``gil`` / ``wall`` (``py-spy``):
-one root frame per thread, attach to an **unmodified** CPython target, but
-see no kernel frames.
+LMCache is mostly Python, so the first question is usually where Python time
+goes and how contended the GIL is. **To profile Python execution or GIL
+contention**, use ``gil`` / ``wall`` (``py-spy``): one root frame per thread,
+attaching to an **unmodified** CPython target, but with no kernel frames.
 
 * **gil**: only threads holding the GIL, so interpreter-lock contention is
   directly visible (the default for a live server).
 * **wall**: wall-clock time per thread, blocked threads included.
 
-**CPU/IO time, kernel frames, context switches, or a non-Python process**
-with the whole-process modes (``perf`` / bcc): every thread, kernel frames,
+But LMCache also uses C++, Rust, and CUDA to accelerate hot paths and release
+the GIL, and py-spy sees none of that. **To profile CPU/IO time, kernel
+frames, context switches, or a non-Python process** (or to get a
+cross-language picture of where the whole process spends time and blocks),
+use the whole-process modes (``perf`` / bcc): every thread, kernel frames,
 scheduler activity, any process, but merged into one chart.
 
 * **on-cpu** (``perf``): where CPU *cycles* go.
 * **off-cpu** (``offcputime-bpfcc``): time spent *blocked* (I/O, locks).
-* **offwake** (``offwaketime-bpfcc``): like ``off-cpu``, but each blocked
-  stack also carries the stack of the thread that *woke* it (upper half,
-  drawn inverted); use it when ``off-cpu`` shows a big blocked tower and you
-  need the cause.
-* **wakeup** (``wakeuptime-bpfcc``): the mirror image, the stacks doing the
-  waking.
+* **wakeup** (``wakeuptime-bpfcc``): the stacks that *do* the waking, ending
+  others' sleep.
+* **offwake** (``offwaketime-bpfcc``): ``off-cpu`` and ``wakeup`` combined,
+  each blocked stack joined to the stack of the thread that woke it (that
+  waker half drawn inverted on top). Use it when ``off-cpu`` shows a big
+  blocked tower and you need the cause.
 
 **How they work.** All run as external processes; what differs is *where the
 data is collected*, in the kernel (perf, bcc) or by reading the target's
@@ -232,8 +217,8 @@ memory (py-spy):
    wall     py-spy record       --rate 200 --threads --idle --nonblocking --pid P
    on-cpu   perf record -F 99 -g -p P  ->  perf script | stackcollapse-perf.pl | flamegraph.pl
    off-cpu  sudo offcputime-bpfcc  -df -p P  |  flamegraph.pl --colors io
-   offwake  sudo offwaketime-bpfcc -df -p P  |  flamegraph.pl --colors chain
    wakeup   sudo wakeuptime-bpfcc   -f -p P  |  flamegraph.pl --colors wakeup
+   offwake  sudo offwaketime-bpfcc -df -p P  |  flamegraph.pl --colors chain
 
 **Native stacks need frame pointers.** The perf/bcc modes unwind native
 stacks through frame pointers (perf via ``-g``, bcc via ``bpf_get_stackid``),
@@ -242,23 +227,30 @@ either; rebuild with ``-fno-omit-frame-pointer``. py-spy is unaffected (it
 reads the interpreter) but sees only Python.
 
 
-Requirements
-~~~~~~~~~~~~~
+Installation
+~~~~~~~~~~~~
 
-Each mode wraps an external tool; a missing one fails fast naming what to
-install.
+Each mode wraps an external tool that must be installed on the host running
+the command (the same host as the target); a missing one fails fast naming
+what to install.
 
-* `py-spy <https://github.com/benfred/py-spy>`__ (``wall`` / ``gil``), by Ben
-  Frederickson: reads the interpreter and renders its own SVG.
-  ``pip install py-spy``.
-* Linux ``perf`` (``on-cpu``), with the FlameGraph scripts below.
-* `bcc <https://github.com/iovisor/bcc>`__ (``off-cpu`` / ``offwake`` /
-  ``wakeup``), the IO Visor project's BPF Compiler Collection: its
-  ``*-bpfcc`` tools need ``sudo``.
+* `py-spy <https://github.com/benfred/py-spy>`__ (``wall`` / ``gil``): reads
+  the interpreter and renders its own SVG. Install with ``pip install
+  py-spy``.
+* Linux ``perf`` (``on-cpu``): ``sudo apt install linux-tools-generic``
+  (Debian / Ubuntu) or ``sudo dnf install perf`` (Fedora / RHEL); the package
+  must match the running kernel. Rendered with the FlameGraph scripts below.
+* `bcc <https://github.com/iovisor/bcc>`__ (``off-cpu`` / ``wakeup`` /
+  ``offwake``): ``sudo apt install bpfcc-tools`` (Debian / Ubuntu) or
+  ``sudo dnf install bcc-tools`` (Fedora / RHEL). Its ``*-bpfcc`` tools also
+  need ``sudo`` at run time.
 * `FlameGraph <https://github.com/brendangregg/FlameGraph>`__, by Brendan
-  Gregg: folds and renders the perf/bcc SVGs. Point
-  ``--flamegraph-scripts-dir`` (or ``FLAMEGRAPH_DIR``) at a checkout; default
-  ``~/FlameGraph``, auto-cloned when absent.
+  Gregg: folds and renders the perf/bcc SVGs. Cloned to ``~/FlameGraph`` on
+  first use (needs ``git``); or point ``--flamegraph-scripts-dir`` at an
+  existing checkout.
+
+Permissions
+~~~~~~~~~~~
 
 **Naming Python frames in the perf/bcc modes** requires the target to have
 been *started* with ``PYTHONPERFSUPPORT=1`` (its perf trampoline map); you
@@ -273,68 +265,58 @@ cannot enable it on a running process.
      lifetime, so reserve it for a dedicated profiling session, not
      production.
 
-**Permissions (bare-metal / VM).** Attaching needs permission to trace the
-target: ``wall`` / ``gil`` need ``kernel.yama.ptrace_scope`` at ``0`` (or
-``CAP_SYS_PTRACE``); ``on-cpu`` needs ``kernel.perf_event_paranoid`` at ``2``
-or lower; the bcc modes need ``sudo``. A blocked attach exits non-zero
-naming the sysctl.
+**System settings to adjust (bare-metal / VM).** Each tool needs a kernel
+permission; set the one for your mode, or run as root, which satisfies all
+three:
+
+* ``wall`` / ``gil`` (py-spy) read the target's memory via ``ptrace``, gated
+  by Yama. Ubuntu / Debian default ``ptrace_scope`` to ``1`` (trace only
+  descendants), which blocks attaching to a server:
+
+  .. code-block:: bash
+
+     sudo sysctl -w kernel.yama.ptrace_scope=0
+
+  ``CAP_SYS_PTRACE`` (or root) bypasses it; py-spy also prints this hint when
+  it is blocked.
+* ``on-cpu`` (perf) samples via ``perf_event_open``. Level ``3`` (a Debian
+  addition) blocks it outright, and any level above ``2`` makes ``perf
+  record`` silently write an empty file, so lower it:
+
+  .. code-block:: bash
+
+     sudo sysctl -w kernel.perf_event_paranoid=2
+
+* ``off-cpu`` / ``wakeup`` / ``offwake`` (bcc) load an eBPF program, so their
+  ``*-bpfcc`` tools need ``sudo`` (root).
 
 .. note::
 
-   **Inside a container** it comes down to three separable things: what you
-   **install**, which ``docker run`` **flags** you pass, and the **host
-   sysctls** those flags bypass.
+   **In a container, use the py-spy modes.** perf and bcc gate on host-wide
+   kernel state a container should not change, so run them on the host (the
+   settings above apply there).
 
-   **PID namespace:** the profiler must share the target's PID namespace, the
-   **same container** or ``--pid=container:<target>`` / ``--pid=host``.
+   py-spy works inside a container. Run the profiler in the **same container**
+   as the target (or share its PID namespace with ``--pid=container:<target>``)
+   and start the container with ``--cap-add SYS_PTRACE``, the container
+   equivalent of the ``ptrace_scope`` setting above:
 
-   The official images ship no profilers, and the default container drops the
-   privileges each needs; the install goes *inside*, the flags *at launch*:
+   .. code-block:: bash
 
-   .. list-table::
-      :header-rows: 1
-      :widths: 20 40 40
+      docker run --cap-add SYS_PTRACE ... <image>
+      pip install py-spy
+      lmcache tool flamegraph --pid <target-pid> --mode gil
 
-      * - Mode
-        - Install (in the container)
-        - ``docker run`` flags (at launch)
-      * - ``wall`` / ``gil``
-        - ``pip install py-spy``
-        - ``--cap-add SYS_PTRACE`` (root alone is not enough).
-      * - ``on-cpu``
-        - ``linux-tools-generic``; if the wrapper says ``perf not found for
-          kernel <ver>`` call ``/usr/lib/linux-tools/*/perf`` directly.
-        - ``--security-opt seccomp=unconfined`` **and** ``--cap-add PERFMON``
-          (older Docker: ``--cap-add SYS_ADMIN`` / ``--privileged``).
-      * - ``off-cpu`` / ``offwake`` / ``wakeup``
-        - ``bpfcc-tools`` **plus** the running kernel's headers
-          (``/lib/modules/$(uname -r)/build``; BTF alone does not satisfy it).
-        - ``seccomp=unconfined``, ``--cap-add BPF --cap-add PERFMON`` (or
-          ``SYS_ADMIN`` / ``--privileged``), and
-          ``-v /sys/kernel/debug:/sys/kernel/debug``.
-
-   **Host sysctls** (``ptrace_scope``, ``perf_event_paranoid``) are read-only
-   inside a container, but the capabilities above bypass them. Verified: at
-   ``perf_event_paranoid=3``, ``perf_event_open`` fails with no cap and
-   succeeds with ``--cap-add SYS_ADMIN``. They only gate you when you can pass
-   *no* flags at all.
-
-   **If you cannot re-launch the container** (RunPod, many Kubernetes
-   setups): perf/bcc are effectively unavailable (their gates are not
-   grantable from inside). ``wall`` / ``gil`` still work if the pod has
-   ``CAP_SYS_PTRACE`` (check with ``py-spy dump --pid <target>``); if not,
-   launch the target **under** py-spy, since tracing your own child needs no
-   capability:
+   If the platform will not grant ``CAP_SYS_PTRACE`` (RunPod, some
+   Kubernetes), you can still profile a process you start yourself: tracing
+   your own child needs no capability, so launch the target **under** py-spy
+   instead of attaching to it:
 
    .. code-block:: bash
 
       py-spy record --rate 200 --format flamegraph --threads --idle --gil \
           --subprocesses --duration 30 -o /workspace/flame.svg \
           -- <the target launch command>
-
-   Drop ``--gil`` for ``wall``, or ``--format speedscope`` for an interactive
-   chart. ``lmcache tool flamegraph --pid`` is attach-only; run ``py-spy``
-   directly.
 
 
 Cost

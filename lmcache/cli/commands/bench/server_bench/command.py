@@ -222,14 +222,14 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
     )
     prof.add_argument(
         "--flamegraph-mode",
-        choices=["on-cpu", "off-cpu", "offwake", "wakeup", "wall", "gil"],
         default="gil",
+        metavar="MODE[,MODE...]",
         help=(
-            "What to sample in the server. 'wall' and 'gil' (py-spy) attach "
-            "to an unmodified server and split by thread; 'on-cpu' and "
-            "'off-cpu' (perf / bcc) resolve kernel frames but only name "
-            "Python functions when the server was launched with "
-            "PYTHONPERFSUPPORT=1. Default: gil."
+            "What to sample in the server (default: gil). Pass several "
+            "comma-separated to profile one load run per mode. Modes: on-cpu, "
+            "off-cpu, wakeup, offwake (perf/bcc), wall, gil (py-spy). perf/bcc "
+            "name Python functions only when the server was launched with "
+            "PYTHONPERFSUPPORT=1. See the 'lmcache tool flamegraph' docs."
         ),
     )
     prof.add_argument(
@@ -247,9 +247,9 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
         metavar="DIR",
         help=(
             "Directory with the FlameGraph scripts (flamegraph.pl, "
-            "stackcollapse-perf.pl). Default: $FLAMEGRAPH_DIR or "
-            "~/FlameGraph, else auto-cloned. Unused by --flamegraph-mode "
-            "wall / gil, which render their own SVG."
+            "stackcollapse-perf.pl); default ~/FlameGraph (cloned there on "
+            "first use). Unused by --flamegraph-mode wall / gil, which "
+            "render their own SVG."
         ),
     )
 

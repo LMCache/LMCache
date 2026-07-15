@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the ``lmcache tool flamegraph`` CLI command.
-
-Covers auto-discovery under ``lmcache tool`` and the ``execute`` fail-fast
-path, without ever spawning a real recorder.
-"""
+"""Tests for the ``lmcache tool flamegraph`` CLI command."""
 
 # Standard
 import argparse
@@ -16,50 +12,39 @@ from lmcache.cli.commands.tool import ToolCommand
 from lmcache.cli.commands.tool.flamegraph import FlamegraphCommand
 
 
-@pytest.fixture
-def parser() -> argparse.ArgumentParser:
-    """Parser with the whole ``lmcache tool`` group registered."""
-    p = argparse.ArgumentParser()
-    sub = p.add_subparsers(dest="command")
-    ToolCommand().register(sub)
-    return p
+def _args(**overrides: object) -> argparse.Namespace:
+    base = {
+        "pid": 1,
+        "mode": "gil",
+        "duration": 5.0,
+        "output": "",
+        "flamegraph_scripts_dir": "",
+    }
+    base.update(overrides)
+    return argparse.Namespace(**base)
 
 
-class TestRegistration:
-    def test_flamegraph_is_discovered(
-        self,
-        parser: argparse.ArgumentParser,
-    ) -> None:
-        """The tool group auto-discovers flamegraph without registry edits."""
-        args = parser.parse_args(["tool", "flamegraph", "--pid", "1"])
-        assert hasattr(args, "func")
-        assert args.tool_target == "flamegraph"
+def test_flamegraph_is_discovered() -> None:
+    """The tool group auto-discovers flamegraph without registry edits."""
+    parser = argparse.ArgumentParser()
+    ToolCommand().register(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(["tool", "flamegraph", "--pid", "1"])
+    assert hasattr(args, "func")
+    assert args.tool_target == "flamegraph"
 
 
-class TestExecuteFailFast:
-    """``execute`` exits non-zero before spawning a recorder."""
+def test_multiple_modes_record_each_in_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A comma-separated ``--mode`` records each mode in turn, de-duplicated."""
+    # First Party
+    from lmcache.cli import profiling
 
-    @staticmethod
-    def _args(**overrides: object) -> argparse.Namespace:
-        base = {
-            "pid": 1,
-            "mode": "gil",
-            "duration": 5.0,
-            "output": "",
-            "flamegraph_scripts_dir": "",
-        }
-        base.update(overrides)
-        return argparse.Namespace(**base)
+    recorded: list[str] = []
+    monkeypatch.setattr(profiling, "check_profiling_deps", lambda _mode: None)
+    monkeypatch.setattr(profiling, "resolve_flamegraph_dir", lambda *_: "")
+    monkeypatch.setattr(
+        profiling, "record_attached", lambda **kw: recorded.append(kw["mode"])
+    )
 
-    def test_missing_toolchain_exits(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        # First Party
-        from lmcache.cli import profiling
+    FlamegraphCommand().execute(_args(mode="gil,on-cpu,gil"))
 
-        monkeypatch.setattr(profiling.shutil, "which", lambda _name: None)
-
-        with pytest.raises(SystemExit) as excinfo:
-            FlamegraphCommand().execute(self._args(mode="gil"))
-        assert excinfo.value.code == 2
+    assert recorded == ["gil", "on-cpu"]

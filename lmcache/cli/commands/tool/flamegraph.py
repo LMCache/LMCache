@@ -48,14 +48,15 @@ class FlamegraphCommand(BaseCommand):
         )
         parser.add_argument(
             "--mode",
-            choices=["on-cpu", "off-cpu", "offwake", "wakeup", "wall", "gil"],
             default="gil",
+            metavar="MODE[,MODE...]",
             help=(
-                "What to sample (default: gil). 'gil' / 'wall' use py-spy "
-                "(Python/GIL, CPython only, no target change); 'on-cpu' / "
-                "'off-cpu' / 'offwake' / 'wakeup' use perf/bcc (CPU/IO/kernel, "
-                "any process, Python names need PYTHONPERFSUPPORT=1). See the "
-                "'lmcache tool flamegraph' docs for what each shows."
+                "What to sample (default: gil). Pass several comma-separated "
+                "to record each in turn, a clean window per mode and one SVG "
+                "each. 'gil' / 'wall' use py-spy (Python/GIL, CPython only); "
+                "'on-cpu' / 'off-cpu' / 'wakeup' / 'offwake' use perf/bcc "
+                "(CPU/IO/kernel, any process, Python names need "
+                "PYTHONPERFSUPPORT=1). See the 'lmcache tool flamegraph' docs."
             ),
         )
         parser.add_argument(
@@ -83,8 +84,7 @@ class FlamegraphCommand(BaseCommand):
             metavar="DIR",
             help=(
                 "Directory with the FlameGraph scripts (perf/bcc modes only). "
-                "If omitted, resolved from $FLAMEGRAPH_DIR / ~/FlameGraph or "
-                "auto-cloned to a temp directory."
+                "If omitted, uses ~/FlameGraph, cloning it there on first use."
             ),
         )
 
@@ -121,24 +121,40 @@ class FlamegraphCommand(BaseCommand):
         def log(message: str) -> None:
             print(message, flush=True)
 
-        output = args.output or default_output_path(f"pid{args.pid}", args.mode)
+        # One mode, or several comma-separated to record in turn.
+        modes: list[str] = []
+        for mode in args.mode.split(","):
+            mode = mode.strip()
+            if mode and mode not in modes:
+                modes.append(mode)
+
         try:
-            check_profiling_deps(args.mode)
+            if args.output and len(modes) > 1:
+                raise ProfileError(
+                    "--output takes a single path; with several --mode values "
+                    "each graph uses its own default path, so drop --output "
+                    "or record one mode at a time."
+                )
+            # Validate every mode's toolchain before recording any of them.
+            for mode in modes:
+                check_profiling_deps(mode)
             # py-spy renders its own SVG; only the perf/bcc modes need the
-            # FlameGraph scripts, so do not clone them otherwise.
+            # FlameGraph scripts, so resolve them once, and only if used.
             flamegraph_dir = ""
-            if args.mode not in PY_SPY_MODES:
+            if any(mode not in PY_SPY_MODES for mode in modes):
                 flamegraph_dir = resolve_flamegraph_dir(
                     args.flamegraph_scripts_dir, log
                 )
-            record_attached(
-                pid=args.pid,
-                mode=args.mode,
-                output=output,
-                flamegraph_dir=flamegraph_dir,
-                duration=args.duration,
-                log=log,
-            )
+            # Record each mode in its own clean window.
+            for mode in modes:
+                record_attached(
+                    pid=args.pid,
+                    mode=mode,
+                    output=args.output or default_output_path(f"pid{args.pid}", mode),
+                    flamegraph_dir="" if mode in PY_SPY_MODES else flamegraph_dir,
+                    duration=args.duration,
+                    log=log,
+                )
         except ProfileError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(2)

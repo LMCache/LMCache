@@ -874,17 +874,15 @@ flame graph of the server, not of the client.
        --profile-server-pid "$(pgrep -f 'lmcache server')"
 
 ``--flamegraph-mode`` takes the same six values documented under
-:ref:`lmcache tool flamegraph <lmcache-flamegraph-modes>`. Because the
+:ref:`lmcache tool flamegraph <lmcache-flamegraph-modes>` (or several
+comma-separated to drive the load once per mode, one SVG each). Because the
 target is a separate, already-running server (not a process this benchmark
 spawns), it profiles by *attaching*, so the same attach-mode caveats
 documented for
 :doc:`lmcache tool flamegraph </cli/tool>` apply here: what each mode
 shows, the ``PYTHONPERFSUPPORT=1`` requirement for naming Python frames in
 the perf/bcc modes, the container privileges each mode needs, and the fact
-that recording a live process is never free. See
-:ref:`Choosing a profiling entry point
-<lmcache-flamegraph-entry-points>` for those details and for how the two
-``bench`` commands and the standalone tool differ.
+that recording a live process is never free.
 
 .. note::
 
@@ -1209,7 +1207,7 @@ Options
        itself and renders an SVG. Default ``off`` leaves benchmark
        behavior unchanged. See
        :ref:`Profiling / flame charts <lmcache-bench-l2-profiling>`.
-   * - ``--flamegraph-mode {on-cpu,off-cpu,offwake,wakeup,wall,gil}``
+   * - ``--flamegraph-mode {on-cpu,off-cpu,wakeup,offwake,wall,gil}``
      - ``on-cpu``
      - Flame-graph mode for ``--flamegraph on``. ``on-cpu`` shows
        where CPU time goes; ``off-cpu`` shows time blocked on I/O /
@@ -1223,7 +1221,7 @@ Options
      - SVG output path. Default:
        ``/tmp/lmcache_bench_flames/<adapter>.<mode>.svg``.
    * - ``--flamegraph-scripts-dir DIR``
-     - *($FLAMEGRAPH_DIR or ~/FlameGraph)*
+     - *(~/FlameGraph)*
      - Directory with the FlameGraph scripts (``flamegraph.pl``,
        ``stackcollapse-perf.pl``).
 
@@ -1360,8 +1358,8 @@ Profiling / flame charts
 When ``--flamegraph on`` is passed, the benchmark profiles **its own
 process** (the L2 adapter driven by this microbenchmark's synthetic load)
 and renders a flame graph of the measured phases (to profile a separate
-server or a real process instead, see
-:ref:`Choosing a profiling entry point <lmcache-flamegraph-entry-points>`):
+server or a real process instead, use
+:doc:`lmcache tool flamegraph </cli/tool>`):
 
 .. code-block:: bash
 
@@ -1371,45 +1369,24 @@ server or a real process instead, see
    #   [Profile] on-cpu recording started (pid=12345) -> .../FSL2Adapter.oncpu.svg
    #   [Profile] wrote /tmp/lmcache_bench_flames/FSL2Adapter.oncpu.svg
 
-What the six ``--flamegraph-mode`` values show (``on-cpu``, ``off-cpu``,
-``offwake``, ``wakeup``, ``wall``, ``gil``), the cost of recording, the
-frame-pointer caveat, and the tool / sysctl requirements are documented once
-under :ref:`lmcache tool flamegraph <lmcache-flamegraph-modes>`. Only the
-points below are specific to ``bench l2``:
+The ``--flamegraph-mode`` values, cost of recording, and tool / sysctl
+requirements are documented under
+:ref:`lmcache tool flamegraph <lmcache-flamegraph-modes>` (or pass several
+comma-separated to profile one benchmark run per mode, one SVG each). What is
+specific to ``bench l2``:
 
-* **It self-profiles.** Most L2 adapters are written in Python, whose calls
-  collapse into a single native ``_PyEval_EvalFrameDefault`` frame, so the
-  whole-process recorders would render them as ``[unknown]``. On CPython
-  3.12+ the benchmark **activates the interpreter's perf trampolines
-  itself** for the duration of the recording, so adapter functions appear
-  as ``py::<qualname>`` in the ``on-cpu`` / ``off-cpu`` charts, with no
-  ``PYTHONPERFSUPPORT`` needed (unlike attaching to a server, which cannot
-  turn them on after the fact). Older interpreters still render, without
-  Python names; ``wall`` / ``gil`` read interpreter state directly and need
-  no trampoline. Trampolines cost a few percent of throughput while
-  recording, so treat a profiled run's timings as indicative, not as a
-  benchmark result.
-* **Because it runs as a child of the benchmark**, the ``wall`` / ``gil``
-  modes need ``kernel.yama.ptrace_scope`` at ``0`` (scope ``1``, the Ubuntu
-  default, lets a process trace only its own descendants) rather than the
-  attach-mode permissions in the tool docs.
-* **Recording covers only the measured work**, so make the run long enough
-  to collect samples; use a large ``--rounds``. A phase shorter than the
-  recorder's own startup captures nothing; the benchmark then reports that
-  no samples were captured instead of writing an empty SVG.
+* It **self-profiles**, so on CPython 3.12+ it activates the perf trampolines
+  itself and adapter functions resolve as ``py::<qualname>`` in the
+  ``on-cpu`` / ``off-cpu`` charts with no ``PYTHONPERFSUPPORT`` needed (an
+  attached server cannot). Trampolines cost a few percent, so treat a
+  profiled run's timings as indicative.
+* The recorder runs as a child of the benchmark, so ``wall`` / ``gil`` need
+  ``kernel.yama.ptrace_scope`` at ``0`` (not the attach-mode permissions).
+* Recording covers only the measured work, so use a large ``--rounds``; too
+  short a run captures no samples.
 
 The SVG is written to ``--flamegraph-output`` (default
-``/tmp/lmcache_bench_flames/<adapter>.<mode>.svg``). Comparing the two
-py-spy modes answers "is this adapter GIL-bound?"; profiling ``fs`` this
-way shows the GIL held during only 4% of sampled thread-time, 89% of that
-by the event-loop thread: an adapter waiting on I/O, not the interpreter.
-
-.. note::
-
-   When comparing a change, profile each variant with the same
-   ``--rounds`` and ``--flamegraph-mode`` and distinct
-   ``--flamegraph-output`` paths (e.g. ``baseline.svg`` vs
-   ``after.svg``) so the two flame graphs are directly comparable.
+``/tmp/lmcache_bench_flames/<adapter>.<mode>.svg``).
 
 
 Exit codes

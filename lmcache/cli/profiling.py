@@ -2,7 +2,7 @@
 """Flame-graph profiling shared by the LMCache CLI.
 
 Dependency: py-spy (``gil`` / ``wall``), Linux perf (``on-cpu``), or the bcc
-``*-bpfcc`` tools (``off-cpu`` / ``offwake`` / ``wakeup``), validated at
+``*-bpfcc`` tools (``off-cpu`` / ``wakeup`` / ``offwake``), validated at
 runtime by :func:`check_profiling_deps`.
 
 Usage: construct a :class:`FlameProfiler` and start/stop it around a
@@ -47,24 +47,16 @@ _ATTACH_POLL_SEC = 0.5
 # Rendered flame-graph width, in pixels.
 _FLAME_WIDTH_PX = 1600
 
-# --- Kernel permission gates (checked before recording) ---
+# --- Kernel permission gate (checked before recording) ---
 # Highest ``kernel.perf_event_paranoid`` that still allows a non-root
 # user to sample its own process with ``perf record``. Level 2 only
 # withholds kernel-symbol resolution; level 3 (a Debian addition)
-# rejects ``perf_event_open`` outright.
+# rejects ``perf_event_open`` outright. Above it, perf silently writes an
+# empty perf.data, so we fail fast; py-spy's ptrace gate is not preflighted
+# (py-spy errors on its own, and the docs cover ptrace_scope / --cap-add).
 _MAX_PERF_PARANOID = 2
 # Path holding the kernel's perf sampling restriction level.
 _PERF_PARANOID_PATH = "/proc/sys/kernel/perf_event_paranoid"
-# Yama ptrace restriction level, and the highest value that still lets
-# py-spy attach. Above 0 a process may trace only its descendants; the full
-# rationale and the CAP_SYS_PTRACE bypass live in _check_ptrace_scope.
-_YAMA_PTRACE_PATH = "/proc/sys/kernel/yama/ptrace_scope"
-_MAX_YAMA_PTRACE_SCOPE = 0
-# Effective-capability set (the "CapEff:" line of /proc/self/status) and the
-# bit for CAP_SYS_PTRACE. Holding it (not being uid 0) bypasses the ptrace
-# scope; see _has_cap_sys_ptrace.
-_PROC_STATUS_PATH = "/proc/self/status"
-_CAP_SYS_PTRACE_BIT = 19
 
 # --- Python-frame resolution: the CPython perf trampoline map ---
 # CPython writes its perf trampoline map here (one per pid) when the
@@ -77,8 +69,8 @@ _PERF_MAP_DIR = "/tmp"
 _MODE_TAG = {
     "on-cpu": "oncpu",
     "off-cpu": "offcpu",
-    "offwake": "offwake",
     "wakeup": "wakeup",
+    "offwake": "offwake",
     "wall": "wall",
     "gil": "gil",
 }
@@ -90,13 +82,13 @@ PY_SPY_MODES = frozenset({"wall", "gil"})
 # hence ``-f`` rather than ``-df``.
 _BCC_MODES = {
     "off-cpu": ("offcputime-bpfcc", ["-df"]),
-    "offwake": ("offwaketime-bpfcc", ["-df"]),
     "wakeup": ("wakeuptime-bpfcc", ["-f"]),
+    "offwake": ("offwaketime-bpfcc", ["-df"]),
 }
 # flamegraph.pl ``--colors`` palette per bcc mode, so the three read apart
 # and offwake's blocked (blue) and waker (aqua, past the ``;--;`` delimiter)
 # halves are distinguishable.
-_BCC_PALETTE = {"off-cpu": "io", "offwake": "chain", "wakeup": "wakeup"}
+_BCC_PALETTE = {"off-cpu": "io", "wakeup": "wakeup", "offwake": "chain"}
 
 
 class ProfileError(RuntimeError):
@@ -109,71 +101,21 @@ def _perf_map_path(pid: int) -> str:
 
 
 def _check_perf_paranoid() -> None:
-    """Fail fast if ``kernel.perf_event_paranoid`` forbids perf sampling.
+    """Return whether perf can work by checking  ``perf_event_paranoid``.
 
     Above :data:`_MAX_PERF_PARANOID`, ``perf record`` silently writes an
-    empty ``perf.data`` that only surfaces later as an empty graph; raise
-    instead, naming the sysctl to lower.
+    empty ``perf.data`` that only surfaces later as a blank graph.
     """
     try:
         with open(_PERF_PARANOID_PATH, encoding="utf-8") as fh:
             level = int(fh.read().strip())
     except (OSError, ValueError):
-        # Non-Linux or an unreadable procfs: let perf itself report.
-        return
+        return  # Non-Linux / unreadable procfs: let perf report it.
     if level > _MAX_PERF_PARANOID:
         raise ProfileError(
-            f"kernel.perf_event_paranoid is {level}; perf cannot sample "
-            f"(needs <= {_MAX_PERF_PARANOID}). Lower it with "
-            f"'sudo sysctl -w kernel.perf_event_paranoid={_MAX_PERF_PARANOID}' "
-            "or pick the off-cpu mode."
-        )
-
-
-def _has_cap_sys_ptrace() -> bool:
-    """Return whether the effective set holds CAP_SYS_PTRACE.
-
-    That capability (not being uid 0) is what bypasses the Yama ptrace
-    scope, and a container can run as root while dropping it, so this reads
-    ``CapEff`` from ``/proc/self/status`` rather than checking the uid.
-    Returns False when it is absent or unreadable (e.g. non-Linux).
-    """
-    try:
-        with open(_PROC_STATUS_PATH, encoding="utf-8") as fh:
-            for line in fh:
-                if line.startswith("CapEff:"):
-                    caps = int(line.split()[1], 16)
-                    return bool(caps >> _CAP_SYS_PTRACE_BIT & 1)
-    except (OSError, ValueError, IndexError):
-        pass
-    return False
-
-
-def _check_ptrace_scope() -> None:
-    """Fail fast if the Yama ptrace scope forbids py-spy's attach.
-
-    Above :data:`_MAX_YAMA_PTRACE_SCOPE` a process may trace only its
-    descendants, and py-spy's target never is one; CAP_SYS_PTRACE bypasses
-    this, so the check is skipped when the process holds it (uid 0 alone is
-    not enough, since a container can be root without the capability).
-    """
-    if _has_cap_sys_ptrace():
-        return
-    try:
-        with open(_YAMA_PTRACE_PATH, encoding="utf-8") as fh:
-            scope = int(fh.read().strip())
-    except (OSError, ValueError):
-        # No Yama LSM: ptrace is unrestricted for same-uid processes.
-        return
-    if scope > _MAX_YAMA_PTRACE_SCOPE:
-        raise ProfileError(
-            f"kernel.yama.ptrace_scope is {scope} and this process lacks "
-            "CAP_SYS_PTRACE; py-spy may only trace its own descendants, and "
-            f"its target never is one (needs scope {_MAX_YAMA_PTRACE_SCOPE} or "
-            "CAP_SYS_PTRACE). Lower the sysctl with "
-            f"'sudo sysctl -w kernel.yama.ptrace_scope={_MAX_YAMA_PTRACE_SCOPE}', "
-            "grant the capability (in a container, launch it with "
-            "'--cap-add SYS_PTRACE'), or pick the on-cpu / off-cpu mode."
+            f"kernel.perf_event_paranoid is {level} (needs "
+            f"<= {_MAX_PERF_PARANOID}); lower it with 'sudo sysctl -w "
+            f"kernel.perf_event_paranoid={_MAX_PERF_PARANOID}' or use off-cpu."
         )
 
 
@@ -218,7 +160,6 @@ def check_profiling_deps(mode: str) -> None:
                 "graph). Install it ('pip install py-spy') or pick the "
                 "on-cpu mode."
             )
-        _check_ptrace_scope()
         return
     if mode == "on-cpu":
         if shutil.which("perf") is None:
@@ -247,28 +188,24 @@ def check_profiling_deps(mode: str) -> None:
             )
 
 
-# Upstream FlameGraph repo, and the managed temp location it is
-# shallow-cloned into on demand when the scripts are not found locally.
 _FLAMEGRAPH_REPO = "https://github.com/brendangregg/FlameGraph"
-_MANAGED_FLAMEGRAPH_DIR = "/tmp/lmcache_flamegraph/FlameGraph"
 
 
 def _has_flamegraph(flamegraph_dir: str) -> bool:
     """Return True if ``flamegraph.pl`` exists under *flamegraph_dir*."""
-    return os.path.isfile(os.path.join(flamegraph_dir, "flamegraph.pl"))
+    return bool(flamegraph_dir) and os.path.isfile(
+        os.path.join(flamegraph_dir, "flamegraph.pl")
+    )
 
 
-def _clone_flamegraph(log: Callable[[str], None]) -> None:
-    """Shallow-clone the FlameGraph repo into :data:`_MANAGED_FLAMEGRAPH_DIR`."""
-    dest = _MANAGED_FLAMEGRAPH_DIR
+def _clone_flamegraph(dest: str, log: Callable[[str], None]) -> None:
+    """Shallow-clone the FlameGraph repo into *dest*."""
     if shutil.which("git") is None:
         raise ProfileError(
-            "git not found; cannot auto-clone FlameGraph. Clone "
-            f"{_FLAMEGRAPH_REPO} manually and pass --flamegraph-scripts-dir "
-            "or set FLAMEGRAPH_DIR."
+            f"git not found; clone {_FLAMEGRAPH_REPO} and pass "
+            "--flamegraph-scripts-dir."
         )
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
-    log(f"[Profile] FlameGraph not found; cloning {_FLAMEGRAPH_REPO} -> {dest}")
+    log(f"[Profile] FlameGraph not found; cloning to {dest}")
     try:
         subprocess.run(
             ["git", "clone", "--depth", "1", _FLAMEGRAPH_REPO, dest],
@@ -284,11 +221,10 @@ def _clone_flamegraph(log: Callable[[str], None]) -> None:
 
 
 def resolve_flamegraph_dir(explicit: str, log: Callable[[str], None]) -> str:
-    """Resolve the FlameGraph scripts directory, auto-cloning if needed.
+    """Resolve the FlameGraph scripts directory (perf/bcc modes only).
 
-    Tries ``--flamegraph-scripts-dir``, ``$FLAMEGRAPH_DIR``, ``~/FlameGraph``,
-    then a managed ``/tmp`` clone; shallow-clones the repo there when nothing
-    else has ``flamegraph.pl``, and raises if an explicit dir lacks it.
+    Uses ``--flamegraph-scripts-dir`` if given; otherwise ``~/FlameGraph``,
+    cloning FlameGraph there on first use.
     """
     if explicit:
         if not _has_flamegraph(explicit):
@@ -296,18 +232,10 @@ def resolve_flamegraph_dir(explicit: str, log: Callable[[str], None]) -> str:
                 f"flamegraph.pl not found under --flamegraph-scripts-dir {explicit}"
             )
         return explicit
-
-    for candidate in (
-        os.environ.get("FLAMEGRAPH_DIR", ""),
-        os.path.expanduser("~/FlameGraph"),
-        _MANAGED_FLAMEGRAPH_DIR,
-    ):
-        if candidate and _has_flamegraph(candidate):
-            return candidate
-
-    # Not found anywhere: auto-clone into the managed cache location.
-    _clone_flamegraph(log)
-    return _MANAGED_FLAMEGRAPH_DIR
+    home = os.path.expanduser("~/FlameGraph")
+    if not _has_flamegraph(home):
+        _clone_flamegraph(home, log)
+    return home
 
 
 def _bcc_capture_has_stacks(path: str) -> bool:
@@ -712,7 +640,7 @@ class FlameProfiler:
         """Render folded bcc stacks through ``flamegraph.pl``.
 
         The ``--colors`` palette is per mode (see :data:`_BCC_PALETTE`) so
-        off-cpu / offwake / wakeup read apart and offwake's blocked and waker
+        off-cpu / wakeup / offwake read apart and offwake's blocked and waker
         halves get distinct colors.
         """
         palette = _BCC_PALETTE[self._mode]
