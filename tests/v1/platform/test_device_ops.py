@@ -15,7 +15,7 @@ import inspect
 import pytest
 
 # First Party
-from lmcache.v1.platform import resolve_device_ops, resolve_device_ops_cls
+from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform.base_device_ops import DeviceOps
 from lmcache.v1.platform.base_device_spec import DeviceSpec
 from lmcache.v1.platform.cpu.device_ops import CpuDeviceOps
@@ -260,8 +260,8 @@ def test_c_ops_shim_dir() -> None:
 
 def test_cpu_and_empty_string_resolve_to_expected_ops_classes() -> None:
     """``cpu`` resolves via CpuDeviceSpec; ``""`` uses the bare fallback."""
-    assert resolve_device_ops_cls("cpu") is CpuDeviceOps
-    assert resolve_device_ops_cls("") is DeviceOps
+    assert type(resolve_device_ops("cpu")) is CpuDeviceOps
+    assert type(resolve_device_ops("")) is DeviceOps
 
 
 def test_resolve_device_ops_returns_cached_singleton() -> None:
@@ -277,7 +277,7 @@ def test_cpu_without_registered_spec_falls_back_to_base_device_ops(
 ) -> None:
     table = {k: v for k, v in isolated_registry.items() if k != "cpu"}
     monkeypatch.setattr(platform_pkg, "_DEVICE_REGISTRY", table)
-    assert resolve_device_ops_cls("cpu") is DeviceOps
+    assert type(resolve_device_ops("cpu")) is DeviceOps
 
 
 def test_unregistered_accelerator_fails_fast(
@@ -290,7 +290,7 @@ def test_unregistered_accelerator_fails_fast(
         RuntimeError,
         match="refusing to silently fall back to the torch baseline",
     ):
-        resolve_device_ops_cls("cuda")
+        resolve_device_ops("cuda")
 
 
 def test_unknown_accelerator_fails_fast_without_registry_edits() -> None:
@@ -298,7 +298,7 @@ def test_unknown_accelerator_fails_fast_without_registry_edits() -> None:
         RuntimeError,
         match="refusing to silently fall back to the torch baseline",
     ):
-        resolve_device_ops_cls("definitely-not-a-real-device")
+        resolve_device_ops("definitely-not-a-real-device")
 
 
 def test_new_device_needs_zero_resolver_edits(
@@ -323,4 +323,4 @@ def test_new_device_needs_zero_resolver_edits(
         "_DEVICE_REGISTRY",
         {**isolated_registry, "dummy": DummyDeviceSpec()},
     )
-    assert resolve_device_ops_cls("dummy") is DummyDeviceOps
+    assert type(resolve_device_ops("dummy")) is DummyDeviceOps

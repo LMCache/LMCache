@@ -33,11 +33,6 @@ def _install_c_ops_shim() -> None:
     Resolves the singleton :class:`DeviceOps` instance for the detected
     device (which calls :meth:`ensure_native` internally), then registers
     a PEP 562 shim module that forwards attribute access to it.
-
-    Since all ops are instance methods and types are instance/class attrs,
-    ``c_ops.multi_layer_kv_transfer(...)`` resolves with zero overhead.
-    Later ``setattr(ops_instance, ...)`` patches (e.g. from tests) remain
-    visible through the live ``__getattr__`` forwarding.
     """
     # First Party
     from lmcache.v1.platform import resolve_device_ops

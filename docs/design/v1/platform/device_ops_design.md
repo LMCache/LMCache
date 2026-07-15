@@ -313,9 +313,6 @@ def _resolve_device_spec(device_type: str) -> DeviceSpec:
         "refusing to silently fall back to the torch baseline."
     )
 
-def resolve_device_ops_cls(device_type: str) -> type[DeviceOps]:
-    return _resolve_device_spec(device_type).ops_cls
-
 def resolve_device_ops(device_type: str) -> DeviceOps:
     return _resolve_device_spec(device_type).get_ops()
 ```

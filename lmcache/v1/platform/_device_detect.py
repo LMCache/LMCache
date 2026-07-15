@@ -29,6 +29,11 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Private helpers
+# ---------------------------------------------------------------------------
+
+
 @lru_cache(maxsize=1)
 def _build_device_registry() -> "dict[str, DeviceSpec]":
     """Discover and instantiate every :class:`DeviceSpec` subclass.
@@ -53,11 +58,6 @@ def _build_device_registry() -> "dict[str, DeviceSpec]":
             )
         ]
     }
-
-
-def get_device_spec(device_type: str) -> "DeviceSpec | None":
-    """Return the :class:`DeviceSpec` registered for *device_type*, if any."""
-    return _build_device_registry().get(device_type)
 
 
 def _detect_device() -> tuple[Any, str]:
@@ -119,6 +119,16 @@ def _detect_device() -> tuple[Any, str]:
     from lmcache.v1.platform.cpu.stub_cpu_device import StubCPUDevice
 
     return StubCPUDevice("cpu"), "cpu"
+
+
+# ---------------------------------------------------------------------------
+# Public functions
+# ---------------------------------------------------------------------------
+
+
+def get_device_spec(device_type: str) -> "DeviceSpec | None":
+    """Return the :class:`DeviceSpec` registered for *device_type*, if any."""
+    return _build_device_registry().get(device_type)
 
 
 @lru_cache(maxsize=1)

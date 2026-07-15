@@ -210,18 +210,6 @@ def _resolve_device_spec(device_type: str) -> DeviceSpec:
     )
 
 
-def resolve_device_ops_cls(device_type: str) -> type[DeviceOps]:
-    """Resolve the ``DeviceOps`` class for *device_type*.
-
-    Args:
-        device_type: Device type string such as ``"cuda"`` or ``"cpu"``.
-
-    Returns:
-        The resolved :class:`DeviceOps` subclass for the requested device.
-    """
-    return _resolve_device_spec(device_type).ops_cls
-
-
 def resolve_device_ops(device_type: str) -> DeviceOps:
     """Resolve the :class:`DeviceOps` **instance** for *device_type*.
 
