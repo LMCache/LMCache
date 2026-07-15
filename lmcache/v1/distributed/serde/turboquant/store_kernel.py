@@ -147,7 +147,7 @@ def _store_quantized_value(
 
 @triton.jit
 def _tq_fused_store_fp8(
-    Key_ptr,  # [NH, D] float16/bfloat16 — raw keys
+    Key_ptr,  # [NH, D] float16/bfloat16 raw keys, or uint8 if KEY_ALREADY_FP8
     Value_ptr,  # [NH, D] float16/bfloat16 — raw values
     KV_cache_ptr,  # [total_bytes] uint8 (flattened view)
     Slot_mapping_ptr,  # [N] int32 — per-token slot indices
@@ -169,6 +169,7 @@ def _tq_fused_store_fp8(
     BLOCK_VAL: tl.constexpr,
     BLOCK_GRP: tl.constexpr = 16,
     FP8_E4B15: tl.constexpr = 0,  # 1 = e4b15 (Ampere/Ada), 0 = e4nv (Hopper+)
+    KEY_ALREADY_FP8: tl.constexpr = 0,  # 1 = Key_ptr is uint8 holding fp8 bits already
 ):
     """FP8 key cast+scatter + value uniform quantization."""
     pid = tl.program_id(0)
@@ -190,8 +191,11 @@ def _tq_fused_store_fp8(
     d_offs = tl.arange(0, BLOCK_D)
     d_mask = d_offs < D
     k_vals = tl.load(Key_ptr + base + d_offs, mask=d_mask, other=0.0)
-    k_fp8 = k_vals.to(tl.float8e4b15) if FP8_E4B15 else k_vals.to(tl.float8e4nv)
-    k_bytes = k_fp8.to(tl.uint8, bitcast=True)
+    if KEY_ALREADY_FP8:
+        k_bytes = k_vals.to(tl.uint8, bitcast=True)
+    else:
+        k_fp8 = k_vals.to(tl.float8e4b15) if FP8_E4B15 else k_vals.to(tl.float8e4nv)
+        k_bytes = k_fp8.to(tl.uint8, bitcast=True)
     tl.store(KV_cache_ptr + slot_base + d_offs, k_bytes, mask=d_mask)
 
     # ── VALUE QUANTIZE + PACK ───────────────────────────────────────
@@ -356,6 +360,7 @@ def triton_turboquant_store(
     key_packed_size: int,
     value_quant_bits: int,
     key_fp8: bool = False,
+    key_already_fp8: bool = False,
 ):
     """Launch TQ store kernel (FP8 or MSE path)."""
     N, H, D = key.shape
@@ -402,6 +407,7 @@ def triton_turboquant_store(
             BLOCK_VAL=BLOCK_VAL,
             BLOCK_GRP=block_grp,
             FP8_E4B15=fp8_e4b15,
+            KEY_ALREADY_FP8=1 if key_already_fp8 else 0,
             num_warps=4,
             num_stages=1,
         )
