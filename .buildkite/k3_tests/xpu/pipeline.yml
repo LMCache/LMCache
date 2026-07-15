@@ -5,7 +5,7 @@ steps:
   - label: ":gpu: XPU smoke test"
     command: bash "${BUILDKITE_BUILD_CHECKOUT_PATH:-.}/.buildkite/k3_tests/xpu/run.sh"
     timeout_in_minutes: 180
-    agents: { queue: "xpu" }
+    agents: { queue: "intel-xpu" }
     plugins:
       - kubernetes:
           podSpec:
