@@ -261,28 +261,36 @@ backend has to follow.
 Advanced transfer mode
 ~~~~~~~~~~~~~~~~~~~~~~
 
-By default, the transfer mode is **AUTO** — CUDA is routed to
-LMCache-driven, all other devices to engine-driven.  Some devices
-can support the **LMCache-driven** mode for better multi-worker
-throughput via IPC-based zero-copy handle transfer.
+By default, the transfer mode is **AUTO**: the router dispatches
+strictly by ``device_type`` — ``device_type == "cuda"`` goes to
+``LMCacheDrivenTransferContext`` (IPC zero-copy), everything else to
+``EngineDrivenTransferContext``.  A non-CUDA device that supports IPC
+handle transfer can still opt into LMCache-driven explicitly (below).
+
+.. note::
+
+   ROCm is not a separate backend: under PyTorch a ROCm GPU reports
+   ``device_type == "cuda"`` and reuses ``CudaIPCWrapper`` (CUDA IPC)
+   for the LMCache-driven path, so it works in AUTO mode with no extra
+   setup.  There is currently no dedicated ``platform/rocm`` package.
 
 When the caller (or ``LMCACHE_MP_TRANSFER_MODE``) explicitly requests
-   ``lmcache_driven``, ``_build_lmcache_driven_context`` performs two
-hard checks against the device — both must succeed, otherwise the
-factory raises ``ValueError`` (there is no silent fallback):
+``lmcache_driven``, ``_build_lmcache_driven_context`` performs two hard
+checks — both must succeed, otherwise the factory raises
+``ValueError`` (no silent fallback):
 
 1. A ``DeviceIPCWrapper`` subclass with ``device_type`` and ``wrap``
-   must be registered for the device.  It is auto-discovered by
-   scanning ``lmcache/v1/platform/`` (see
-   ``lmcache/v1/platform/_registry.py``), so you only need to ship the
-   subclass under ``lmcache/v1/platform/foo/``.
+   must be registered.  It is auto-discovered by scanning
+   ``lmcache/v1/platform/`` (see ``lmcache/v1/platform/_registry.py``),
+   so you only need to ship the subclass under
+   ``lmcache/v1/platform/foo/``.
 2. ``DeviceSpec.is_handle_transfer_available()`` must return ``True``
-   (the base-class default is ``True``; override to ``False`` only if
-   your device lacks IPC handle transfer).
+   (the base-class default; override to ``False`` only if your device
+   lacks IPC handle transfer).
 
-Separately, the server-side LMCache-driven module also requires a
-   ``BaseCacheContext`` subclass under
-   ``lmcache/v1/platform/foo/cache_context.py``.  ``create_cache_context``
+Separately, the LMCache-driven server module also requires a
+``BaseCacheContext`` subclass under
+``lmcache/v1/platform/foo/cache_context.py``.  ``create_cache_context``
 discovers it lazily at runtime and raises ``ValueError`` if no backend
 matches the device type; it manages the KV cache layout and pointers
 used for IPC transfer.
@@ -291,10 +299,7 @@ Host-side pinning via ``pin_memory_backend`` is *optional* and only
 affects staging-buffer performance; it is not required to enable
 LMCache-driven mode.
 
-Override these methods in your ``DeviceSpec`` accordingly (note that
-``is_handle_transfer_available()`` defaults to ``True`` in the base
-class, so you only need to override it when your device does *not*
-support IPC handle transfer):
+Override these methods in your ``DeviceSpec``:
 
 .. code-block:: python
 
@@ -311,23 +316,12 @@ support IPC handle transfer):
             """
             return None  # default
 
-Once the checks above pass, opt into LMCache-driven mode by setting
-``lmcache.mp.mp_transfer_mode`` to ``lmcache_driven`` in the vLLM
-``kv_connector_extra_config`` shown in :ref:`Part 1 <part-1-basic>`,
-or by exporting ``LMCACHE_MP_TRANSFER_MODE=lmcache_driven``.  If
-either hard check above fails, the factory raises
-``ValueError`` and refuses to construct the context — the caller must
-switch back to ``engine_driven`` or ``auto``.
-
-.. note::
-
-   In ``auto`` mode the router still dispatches strictly by device
-   type: only ``device_type == "cuda"`` is routed to
-   ``LMCacheDrivenTransferContext``; every other device is routed to
-   ``EngineDrivenTransferContext``.  A non-CUDA device that supports
-   handle transfer must therefore opt in explicitly via
-   ``lmcache.mp.mp_transfer_mode = "lmcache_driven"`` /
-   ``LMCACHE_MP_TRANSFER_MODE=lmcache_driven``.
+Opt into LMCache-driven mode by setting ``lmcache.mp.mp_transfer_mode``
+to ``lmcache_driven`` in the vLLM ``kv_connector_extra_config`` shown
+in :ref:`Part 1 <part-1-basic>`, or by exporting
+``LMCACHE_MP_TRANSFER_MODE=lmcache_driven``.  If either hard check
+fails, the factory raises ``ValueError`` and refuses to construct the
+context — switch back to ``engine_driven`` or ``auto``.
 
 References
 ----------
