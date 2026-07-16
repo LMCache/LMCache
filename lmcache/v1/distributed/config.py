@@ -198,11 +198,24 @@ class L1ManagerConfig:
     """ Optional GDS L1 tier. When set, the GDS slab is the L1 medium
     (mutually exclusive with the pinned-DRAM tier in ``memory_config``). """
 
+    phx_l2_enabled: bool = False
+    """ When True, L1 uses :class:`PhxL1MemoryManager` whose ``free()``
+    dispatches device-resident MemoryObjs (injected by PhxL2Adapter via
+    :meth:`L1Manager.replace_memory_obj`) to their parent allocator, while
+    CPU objs still go through the CPU pinned-DRAM allocator.  Mutually
+    exclusive with GDS L1 and Device-DAX L1. """
+
     write_ttl_seconds: int = field(default=600)
     """ Time to live for each object's write lock. Default is 600s (10 minutes). """
 
     read_ttl_seconds: int = field(default=300)
     """ Time to live for each object's read lock. Default is 300s (5 minutes). """
+
+    enable_write_back: bool = False
+    """ When True, device-resident MemoryObjs in L1 are D2H-copied to CPU
+    objs after D2D transfer, preserving the L1 cache entry for future H2D
+    hits.  When False (default), device objs are deleted after D2D,
+    freeing the DMA buffer immediately but losing the L1 cache entry. """
 
 
 @dataclass
@@ -301,6 +314,15 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
         and config.l1_manager_config.memory_config.devdax_path
     ):
         raise ValueError("gds-l1-path cannot be used with l1-devdax-path")
+
+    if config.l1_manager_config.phx_l2_enabled:
+        if config.l1_manager_config.gds_l1_config is not None:
+            raise ValueError(
+                "phx L2 adapter cannot be used with GDS L1 "
+                "(GDS L1 exposes no registerable memory region for DMA)"
+            )
+        if config.l1_manager_config.memory_config.devdax_path:
+            raise ValueError("phx L2 adapter cannot be used with Device-DAX L1")
 
     memory_config = config.l1_manager_config.memory_config
     if not (memory_config.devdax_path and memory_config.devdax_size_in_bytes):
@@ -443,6 +465,14 @@ def add_storage_manager_args(
         default=300,
         help="Time to live for each object's read lock. Default is 300s.",
     )
+    ttl_group.add_argument(
+        "--enable-write-back",
+        action="store_true",
+        default=False,
+        help="D2H-copy device-resident MemoryObjs to CPU after D2D transfer, "
+        "preserving L1 cache entries for future H2D hits. Default is False "
+        "(delete device objs after D2D to immediately free DMA buffer).",
+    )
 
     # Eviction Config
     eviction_group = parser.add_argument_group(
@@ -583,11 +613,19 @@ def parse_args_to_config(
             use_direct_io=args.gds_l1_use_direct_io,
         )
 
+    l2_adapter_config = parse_args_to_l2_adapters_config(args)
+
+    phx_l2_enabled = any(
+        get_type_name_for_config(cfg) == "phx" for cfg in l2_adapter_config.adapters
+    )
+
     l1_manager_config = L1ManagerConfig(
         memory_config=memory_config,
         gds_l1_config=gds_l1_config,
+        phx_l2_enabled=phx_l2_enabled,
         write_ttl_seconds=args.l1_write_ttl_seconds,
         read_ttl_seconds=args.l1_read_ttl_seconds,
+        enable_write_back=getattr(args, "enable_write_back", False),
     )
 
     eviction_config = EvictionConfig(
@@ -597,8 +635,6 @@ def parse_args_to_config(
         extra_logging_enabled=getattr(args, "enable_extra_logging", False),
         extra_logging_interval=getattr(args, "extra_logging_interval", 10.0),
     )
-
-    l2_adapter_config = parse_args_to_l2_adapters_config(args)
 
     config = StorageManagerConfig(
         l1_manager_config=l1_manager_config,

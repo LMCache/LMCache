@@ -69,6 +69,7 @@ class StorageManager:
     def __init__(self, config: StorageManagerConfig):
         self._l1_manager = L1Manager(config.l1_manager_config)
         self._event_bus = get_event_bus()
+        self._enable_write_back = config.l1_manager_config.enable_write_back
 
         # L1 eviction controller
         self._eviction_controller = L1EvictionController(
@@ -386,6 +387,16 @@ class StorageManager:
         finish_result = self._l1_manager.finish_read(keys, extra_count=extra_count)
         successful_keys = [k for k, e in finish_result.items() if e == L1Error.SUCCESS]
         failed_keys = [k for k, e in finish_result.items() if e != L1Error.SUCCESS]
+
+        # Release device-resident MemoryObjs now that D2D has completed.
+        # This recycles DMA buffer space that would otherwise stay pinned
+        # as L1 cache entries, preventing pool exhaustion under load.
+        if successful_keys:
+            self._l1_manager.release_device_objs(
+                successful_keys,
+                write_back=self._enable_write_back,
+            )
+
         self._event_bus.publish(
             Event(
                 event_type=EventType.SM_READ_PREFETCHED_FINISHED,

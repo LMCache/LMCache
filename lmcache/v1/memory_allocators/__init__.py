@@ -15,6 +15,7 @@ _EXPORT_TO_MODULE = {
     "MixedMemoryAllocator": "mixed_memory_allocator",
     "PagedCpuGpuMemoryAllocator": "paged_cpu_gpu_memory_allocator",
     "PagedTensorMemoryAllocator": "paged_tensor_memory_allocator",
+    "PhxDeviceMemoryAllocator": "phx_device_memory_allocator",
     "PinMemoryAllocator": "pin_memory_allocator",
     "TensorMemoryAllocator": "tensor_memory_allocator",
 }
