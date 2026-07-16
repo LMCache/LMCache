@@ -272,16 +272,20 @@ hard checks against the device — both must succeed, otherwise the
 factory raises ``ValueError`` (there is no silent fallback):
 
 1. A ``DeviceIPCWrapper`` subclass with ``device_type`` and ``wrap``
-   must exist under ``lmcache/v1/platform/foo/`` (discovered
-   automatically by ``_discover_wrappers_once``; see
-   ``lmcache/v1/platform/_registry.py``).
-2. The device's ``DeviceSpec.is_handle_transfer_available()`` must
-   return ``True``.
-3. A ``BaseCacheContext`` subclass must exist under
-   ``lmcache/v1/platform/foo/cache_context.py`` (discovered
-   lazily by ``create_cache_context`` at runtime).  The server-side
-   LMCache-driven module uses it to manage KV cache layout and
-   pointers for IPC transfer.
+   must be registered for the device.  It is auto-discovered by
+   scanning ``lmcache/v1/platform/`` (see
+   ``lmcache/v1/platform/_registry.py``), so you only need to ship the
+   subclass under ``lmcache/v1/platform/foo/``.
+2. ``DeviceSpec.is_handle_transfer_available()`` must return ``True``
+   (the base-class default is ``True``; override to ``False`` only if
+   your device lacks IPC handle transfer).
+
+Separately, the server-side LMCache-driven module also requires a
+   ``BaseCacheContext`` subclass under
+   ``lmcache/v1/platform/foo/cache_context.py``.  ``create_cache_context``
+discovers it lazily at runtime and raises ``ValueError`` if no backend
+matches the device type; it manages the KV cache layout and pointers
+used for IPC transfer.
 
 Host-side pinning via ``pin_memory_backend`` is *optional* and only
 affects staging-buffer performance; it is not required to enable
@@ -311,7 +315,7 @@ Once the checks above pass, opt into LMCache-driven mode by setting
 ``lmcache.mp.mp_transfer_mode`` to ``lmcache_driven`` in the vLLM
 ``kv_connector_extra_config`` shown in :ref:`Part 1 <part-1-basic>`,
 or by exporting ``LMCACHE_MP_TRANSFER_MODE=lmcache_driven``.  If
-either capability check above fails, the factory raises
+either hard check above fails, the factory raises
 ``ValueError`` and refuses to construct the context — the caller must
 switch back to ``engine_driven`` or ``auto``.
 
