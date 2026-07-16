@@ -29,15 +29,23 @@ Prerequisites
 
 Your PyTorch backend should support:
 
-- ``torch.<device>.is_available()``
-- ``torch.<device>.device_count()``
-- ``torch.<device>.set_device()`` / ``current_device()`` /
-  ``synchronize()``
-- Tensor movement between host and device (``.cpu()``,
-  ``.to(<device>)``)
+**Device Discovery & Status:**
 
-Add ``DeviceSpec``
-~~~~~~~~~~~~~~~~~~
+- ``torch.<device>.is_available()`` → ``bool``
+- ``torch.<device>.device_count()`` → ``int``
+
+**Device Context & Synchronization:**
+
+- ``torch.<device>.set_device(device)`` → ``None``
+- ``torch.<device>.current_device()`` → ``int``
+- ``torch.<device>.synchronize()`` → ``None``
+
+**Data Movement:**
+
+- ``tensor.to(device)`` / ``tensor.cpu()`` (host↔device transfers)
+
+Add a ``FooDeviceSpec``
+~~~~~~~~~~~~~~~~~~~~~~~
 
 Create ``lmcache/v1/platform/foo/__init__.py``:
 
@@ -98,9 +106,7 @@ Key properties:
 
 .. note::
 
-   ``ops_module`` defaults to ``None`` in the base ``DeviceSpec``, so
-   you can simply omit that property for a minimal Part 1 setup.  The
-   ``hasattr(torch, "foo")`` guard shown above is only needed for
+   The ``hasattr(torch, "foo")`` guard shown above is only needed for
    out-of-tree PyTorch extensions (e.g. ``torch.musa``, ``torch.xpu``
    when installed as a plug-in).  For accelerators shipped inside
    PyTorch itself (like ``torch.cuda``) a plain
@@ -145,6 +151,14 @@ instead of auto-detecting:
         --no-enable-prefix-caching \
         --port 8000
 
+.. note::
+
+   The default transfer mode is ``auto`` (CUDA → LMCache-driven, other
+   devices → engine-driven).  The example above explicitly sets
+   ``engine_driven`` so that a new non-CUDA device works without
+   additional capability checks.  For the ``lmcache_driven`` mode
+   (IPC zero-copy), see :ref:`Advanced transfer mode <part-2-performance>`.
+
 Check the LMCache logs — with ``ops_module = None`` you should see::
 
     torch_dev=..., torch_device_type=foo
@@ -153,7 +167,7 @@ Check the LMCache logs — with ``ops_module = None`` you should see::
 This confirms your ``DeviceSpec`` was discovered and the Python
 fallback is active.  (Once you set ``ops_module`` in
 :ref:`Part 2 <part-2-performance>`, the second line becomes
-``Using backend: <your.ops.module>`` instead.)
+``Using backend: foo_device.ops`` instead.)
 
 Debugging checklist:
 
@@ -162,7 +176,7 @@ Debugging checklist:
   automatically.
 - [ ] Log shows either ``Custom ops not supported for device: foo,
   using fallback ops.`` (pure fallback) or
-  ``Using backend: <your.ops.module>`` (custom ops loaded).
+  ``Using backend: foo_device.ops`` (custom ops loaded).
 - [ ] Engine-driven transfer works end-to-end (check the LMCache logs
   to confirm whether the SHM or Pickle sub-path is chosen — both
   should succeed).
@@ -193,7 +207,7 @@ symbols over ``python_ops_fallback``:
 
 .. code-block:: text
 
-    callers  →  lmcache.c_ops  →  <your ops module>       (functions you defined)
+    callers  →  lmcache.c_ops  →  foo_device.ops          (functions you defined)
                                →  lmcache.python_ops_fallback  (everything else)
 
 Integration contract
@@ -247,23 +261,25 @@ backend has to follow.
 Advanced transfer mode
 ~~~~~~~~~~~~~~~~~~~~~~
 
-By default, devices use **engine-driven** transfer mode.  Some devices
+By default, the transfer mode is **AUTO** — CUDA is routed to
+LMCache-driven, all other devices to engine-driven.  Some devices
 can support the **LMCache-driven** mode for better multi-worker
 throughput via IPC-based zero-copy handle transfer.
 
 When the caller (or ``LMCACHE_MP_TRANSFER_MODE``) explicitly requests
-``lmcache_driven``, ``_build_lmcache_driven_context`` performs two
+   ``lmcache_driven``, ``_build_lmcache_driven_context`` performs two
 hard checks against the device — both must succeed, otherwise the
 factory raises ``ValueError`` (there is no silent fallback):
 
-1. A KV IPC wrapper factory must be registered for the device via
-   ``lmcache/v1/platform/_registry.py`` (see ``register_kv_wrapper`` /
-   ``get_kv_wrapper_factory``).
+1. A ``DeviceIPCWrapper`` subclass with ``device_type`` and ``wrap``
+   must exist under ``lmcache/v1/platform/foo/`` (discovered
+   automatically by ``_discover_wrappers_once``; see
+   ``lmcache/v1/platform/_registry.py``).
 2. The device's ``DeviceSpec.is_handle_transfer_available()`` must
    return ``True``.
 3. A ``BaseCacheContext`` subclass must exist under
    ``lmcache/v1/platform/foo/cache_context.py`` (discovered
-   automatically by ``create_cache_context``).  The server-side
+   lazily by ``create_cache_context`` at runtime).  The server-side
    LMCache-driven module uses it to manage KV cache layout and
    pointers for IPC transfer.
 

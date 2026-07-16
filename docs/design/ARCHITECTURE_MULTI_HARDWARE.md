@@ -143,7 +143,7 @@ which is wrong for that backend's actual KV cache layout.
    ``lmcache/v1/platform/<device>/__init__.py``.  ``ops_module = None``
    is sufficient for basic bring-up — Python fallback handles all ops.
 2. Verify with MP ``engine_driven`` mode (see the :doc:`developer guide
-   <../source/developer_guide/extending_lmcache/adding_a_new_backend>`).
+   <../source/developer_guide/extending_lmcache/adding_a_new_device_backend>`).
 3. (Optional) Provide device-specific ops matching the signatures in
    ``lmcache.python_ops_fallback``.  ``get_backend()`` merges by name;
    vendor-specific APIs must not leak to upper layers.
