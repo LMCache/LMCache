@@ -664,19 +664,24 @@ class L1Manager:
         return ret
 
     @l1_mgr_synchronized
-    def delete(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1Error]:
+    def delete(
+        self, keys: list[ObjectKey], force: bool = False
+    ) -> dict[ObjectKey, L1Error]:
         """Delete the given keys from L1 cache.
 
         Args:
             keys: The list of object keys to delete.
+            force: When True, delete even a read/write-locked key. This may free
+                memory a concurrent store/read still uses (same hazard as
+                :meth:`clear` with ``force=True``); use with care.
 
         Returns:
             A dictionary mapping each object key to an L1Error.
 
         Errors:
             KEY_NOT_EXIST: The key does not exist.
-            KEY_IS_LOCKED: The key is locked (either write-locked or read-locked
-                and cannot be deleted).
+            KEY_IS_LOCKED: The key is write-locked or read-locked and cannot be
+                deleted. Never returned when ``force`` is True.
         """
         need_to_free: list[MemoryObj] = []
         ret: dict[ObjectKey, L1Error] = {}
@@ -688,9 +693,12 @@ class L1Manager:
                 ret[key] = L1Error.KEY_NOT_EXIST
                 continue
 
-            if entry.read_lock.is_locked() or entry.write_lock.is_locked():
+            locked = entry.read_lock.is_locked() or entry.write_lock.is_locked()
+            if locked and not force:
                 ret[key] = L1Error.KEY_IS_LOCKED
                 continue
+            if locked:
+                logger.warning("L1Manager: force-deleting locked key %s", key)
 
             need_to_free.append(entry.memory_obj)
             del self._objects[key]
