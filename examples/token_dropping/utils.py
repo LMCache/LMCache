@@ -3,6 +3,7 @@
 
 # Standard
 import json
+import re
 
 # Third Party
 from transformers import AutoConfig
@@ -27,6 +28,18 @@ def _rotate_half_interleaved(x: torch.Tensor) -> torch.Tensor:
     return torch.stack((-x_odd, x_even), dim=-1).flatten(-2)
 
 
+def _resolve_rope_theta(config: AutoConfig, rope_scaling: dict | None) -> float:
+    """Return the RoPE base frequency (theta) for the model config."""
+    theta = None
+    if rope_scaling is not None:
+        theta = rope_scaling.get("rope_theta")
+    if theta is None:
+        theta = getattr(config, "rope_theta", None)
+    if theta is None:
+        raise ValueError("could not resolve rope_theta from config or rope_scaling")
+    return float(theta)
+
+
 def _rope_cos_sin(
     *,
     config: AutoConfig,
@@ -42,7 +55,7 @@ def _rope_cos_sin(
         rope_type = rope_scaling.get("rope_type", rope_scaling.get("type"))
 
     if rope_scaling is None or rope_type == "default":
-        rope_theta = getattr(config, "rope_theta", 10000.0)
+        rope_theta = _resolve_rope_theta(config, rope_scaling)
         inv_freq = 1.0 / (
             rope_theta
             ** (
@@ -57,7 +70,7 @@ def _rope_cos_sin(
             raise ValueError(f"rope_scaling is missing rope_type/type: {rope_scaling}")
 
         if rope_type == "default":
-            rope_theta = getattr(config, "rope_theta", 1000000)  # Qwen3
+            rope_theta = _resolve_rope_theta(config, rope_scaling)
             inv_freq = 1.0 / (
                 rope_theta
                 ** (
@@ -186,6 +199,50 @@ def _extract_token_id(choice: dict) -> int:
         return -1
     last = toks[-1]
     return int(last.split(":")[-1]) if ":" in last else -1
+
+
+def extract_answer_choice(response: str) -> str:
+    """Extract the predicted choice letter from a LongBench-v2 response.
+
+    Args:
+        response: The model's generated text.
+
+    Returns:
+        The predicted letter ("A", "B", "C" or "D").
+        Empty string if none was found.
+    """
+    cleaned = response.replace("*", "")
+    match = re.search(r"The correct answer is \(([A-D])\)", cleaned)
+    if match is None:
+        match = re.search(r"The correct answer is ([A-D])", cleaned)
+    return match.group(1) if match is not None else ""
+
+
+def score_answers(
+    ground_truth: list[str], responses: list[str]
+) -> tuple[int, int, list[bool]]:
+    """Score generated responses against ground-truth choice letters.
+
+    Args:
+        ground_truth: list of ground-truth letters.
+        responses: generated answers for each sample.
+
+    Returns:
+        A tuple ``(correct, total, per_example)``.
+        ``correct`` is the number of samples with correct answers,
+        ``total`` is the total number of samples, and
+        ``per_example`` is a list of boolean for each sample's correctness.
+
+    Raises:
+        ValueError: If the two lists have different lengths.
+    """
+    if len(ground_truth) != len(responses):
+        raise ValueError(f"length mismatch: {len(ground_truth)} and {len(responses)}")
+    per_example = [
+        extract_answer_choice(resp) == truth
+        for truth, resp in zip(ground_truth, responses, strict=False)
+    ]
+    return sum(per_example), len(per_example), per_example
 
 
 def make_post_completion(
