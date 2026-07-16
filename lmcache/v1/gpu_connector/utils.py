@@ -324,6 +324,13 @@ def get_page_buffer_size(
     return get_spec(kv_caches, engine_kv_format).page_buffer_size()
 
 
+def get_kv_size(
+    kv_caches: DiscoverableKVCache, engine_kv_format: "lmc_ops.EngineKVFormat"
+) -> int:
+    """Return the K/V axis size (2 for split K/V, 1 for fused)."""
+    return get_spec(kv_caches, engine_kv_format).kv_size()
+
+
 def get_num_heads(
     kv_caches: DiscoverableKVCache,
     engine_kv_format: "lmc_ops.EngineKVFormat",
@@ -633,7 +640,7 @@ def make_page_buffer_shape_desc(
         A populated ``PageBufferShapeDesc``.
     """
     desc = lmc_ops.PageBufferShapeDesc()
-    desc.kv_size = 1 if is_mla(engine_kv_format) else 2
+    desc.kv_size = get_kv_size(kv_caches, engine_kv_format)
     desc.nl = num_layers_in_group
     desc.nb = num_blocks
     desc.bs = block_size
