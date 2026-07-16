@@ -22,6 +22,7 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
 )
+from lmcache.v1.platform import current_device_spec
 
 logger = init_logger(__name__)
 
@@ -252,7 +253,7 @@ class EngineDrivenContextShm(EngineDrivenContext):
                 exc,
             )
             return
-        if torch_dev.ext.pin_memory(ptr, self._pool_size):
+        if current_device_spec.pin_memory(ptr, self._pool_size):
             self._pinned = True
             self._pinned_ptr = ptr
             self._pinned_size = self._pool_size
@@ -269,7 +270,7 @@ class EngineDrivenContextShm(EngineDrivenContext):
         """Unpin the SHM buffer if it was previously pinned via cudaHostRegister."""
         if not self._pinned or self._pinned_ptr == 0:
             return
-        torch_dev.ext.unpin_memory(self._pinned_ptr)
+        current_device_spec.unpin_memory(self._pinned_ptr)
         self._pinned = False
         self._pinned_ptr = 0
         self._pinned_size = 0

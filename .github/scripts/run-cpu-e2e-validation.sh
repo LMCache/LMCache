@@ -406,27 +406,41 @@ if ! wait_for_endpoint_contains "http://localhost:${LMCACHE_HTTP_PORT}/healthche
 fi
 echo "✅ LMCache server is healthy"
 
-echo "[Phase 2 / Step 4] Installing libnuma (Linux only) and starting vLLM server"
+echo "[Phase 2 / Step 4] Installing system libs (Linux only) and starting vLLM server"
 if [ "$(uname -s)" = "Linux" ]; then
-  # libnuma1 is required by some vLLM CPU paths. On GitHub Actions
-  # ubuntu runners apt-get must be invoked via sudo; on hardened images
-  # without passwordless sudo it may not be available at all. Skip the
-  # install if the shared object is already present, and never let an
-  # apt-get hiccup fail the whole e2e step (vLLM startup itself will
-  # surface a clearer error if libnuma is genuinely missing).
+  # System libs vLLM's CPU serve path dlopens at import time:
+  #   - libnuma1: needed by some vLLM CPU code paths.
+  #   - ffmpeg:   provides libavutil.so.{56..60} etc. that torchcodec
+  #               dlopens. Recent vLLM nightlies import torchcodec
+  #               unconditionally, so `vllm serve` aborts with
+  #               "libavutil.so.NN: cannot open shared object file"
+  #               without FFmpeg — even for text-only models.
+  # Prefer sudo if present (GitHub ubuntu runners need it). Install only
+  # what's missing and never let an apt hiccup fail the step.
+  MISSING_PKGS=()
   if [ ! -e /usr/lib/x86_64-linux-gnu/libnuma.so.1 ] \
      && [ ! -e /lib/x86_64-linux-gnu/libnuma.so.1 ]; then
+    MISSING_PKGS+=(libnuma1)
+  fi
+  # torchcodec supports FFmpeg 4-8; the distro's ffmpeg package provides a
+  # compatible libavutil. Detect via ldconfig so we match whichever
+  # soname (56..60) the runner already ships.
+  if ! ldconfig -p 2>/dev/null | grep -q 'libavutil\.so'; then
+    MISSING_PKGS+=(ffmpeg)
+  fi
+  if [ "${#MISSING_PKGS[@]}" -gt 0 ]; then
+    echo "Installing missing system packages: ${MISSING_PKGS[*]}"
     if command -v sudo >/dev/null 2>&1; then
       sudo apt-get update \
-        && sudo apt-get install -y --no-install-recommends libnuma1 \
-        || echo "⚠️  libnuma1 install via sudo apt-get failed; continuing"
+        && sudo apt-get install -y --no-install-recommends "${MISSING_PKGS[@]}" \
+        || echo "⚠️  apt-get install (${MISSING_PKGS[*]}) via sudo failed; continuing"
     else
       apt-get update \
-        && apt-get install -y --no-install-recommends libnuma1 \
-        || echo "⚠️  libnuma1 install via apt-get failed; continuing"
+        && apt-get install -y --no-install-recommends "${MISSING_PKGS[@]}" \
+        || echo "⚠️  apt-get install (${MISSING_PKGS[*]}) failed; continuing"
     fi
   else
-    echo "libnuma1 already present, skipping apt install"
+    echo "libnuma1 and FFmpeg runtime libs already present, skipping apt install"
   fi
 fi
 # VLLM_DEVICE is the modern env var (vLLM 0.8+)

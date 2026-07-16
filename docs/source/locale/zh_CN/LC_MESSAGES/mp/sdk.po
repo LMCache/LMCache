@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/mp/sdk.rst:2
 msgid "KV Cache SDK"
-msgstr ""
+msgstr "KV Cache SDK"
 
 #: ../../source/mp/sdk.rst:4
 msgid ""
@@ -32,18 +32,18 @@ msgid ""
 "and show the decode-throughput gain. The full runnable notebook lives at "
 "`examples/token_dropping/token_dropping.ipynb "
 "<https://github.com/LMCache/LMCache/tree/dev/examples/token_dropping>`_."
-msgstr ""
+msgstr "LMCache **SDK** 允许您从 LMCache 服务器检索请求的 KV 缓存，在 CPU 上进行转换，然后再存储回去。这可以用于 KV 缓存转换，例如丢弃令牌。在这个例子中：我们预填充一批长提示，丢弃每个请求的一半 KV 块，并展示解码吞吐量的提升。完整的可运行笔记本位于 `examples/token_dropping/token_dropping.ipynb <https://github.com/LMCache/LMCache/tree/dev/examples/token_dropping>`_。"
 
 #: ../../source/mp/sdk.rst:18
 msgid "Why KV Cache SDK"
-msgstr ""
+msgstr "为什么选择 KV Cache SDK"
 
 #: ../../source/mp/sdk.rst:20
 msgid ""
 "**Improving Decode Throughput** when shrinking KV cache using token "
 "dropping. Token dropping reduces the KV cache size, allowing more "
 "requests to fit in a batch, improving decode throughput."
-msgstr ""
+msgstr "**通过丢弃令牌** 来提高解码吞吐量。当使用丢弃令牌缩小 KV Cache 时，KV Cache 的大小减少，使得更多请求可以适应一个批次，从而提高解码吞吐量。"
 
 #: ../../source/mp/sdk.rst:24
 msgid ""
@@ -51,21 +51,21 @@ msgid ""
 "function to edit the KV, and store the edited KV back. The SDK also "
 "provides a batched-stream API to prefill, modify, and store the cache "
 "back before decoding continues."
-msgstr ""
+msgstr "SDK 提供了钩子来检索请求的 KV，允许您提供自己的函数来编辑 KV，并将编辑后的 KV 存储回去。SDK 还提供了一个批量流 API，以便在继续解码之前进行预填充、修改和存储缓存。"
 
 #: ../../source/mp/sdk.rst:31
 msgid "How it works"
-msgstr ""
+msgstr "它是如何工作的"
 
 #: ../../source/mp/sdk.rst:33
 msgid "A request flows through three phases on the batched-stream API:"
-msgstr ""
+msgstr "请求在批处理流 API 上经历三个阶段："
 
 #: ../../source/mp/sdk.rst:35
 msgid ""
 "**prefill** — run each prompt through vLLM once (``max_tokens=1``); vLLM "
 "computes the KV cache and stores it in LMCache."
-msgstr ""
+msgstr "**预取** — 将每个提示通过 vLLM 运行一次（``max_tokens=1``）；vLLM 计算 KV Cache 并将其存储在 LMCache 中。"
 
 #: ../../source/mp/sdk.rst:37
 msgid ""

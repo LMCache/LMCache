@@ -843,11 +843,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         This prevents overwrites of paged KV buffer before saving done.
         """
-        # In MLA scenario, only the first rank of the pipeline group
-        # needs to save the KV cache.
-        if not self.worker_adapter.is_kv_writer:
-            return
-
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
 

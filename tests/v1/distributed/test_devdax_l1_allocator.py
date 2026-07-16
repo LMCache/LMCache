@@ -37,7 +37,7 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
     DevDaxL1MemoryManager,
 )
-from lmcache.v1.memory_management import DevDaxMemoryAllocator
+from lmcache.v1.memory_allocators.devdax_memory_allocator import DevDaxMemoryAllocator
 from lmcache.v1.multiprocess.config import add_mp_server_args
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 import lmcache.v1.memory_management as memory_management
@@ -82,8 +82,8 @@ class _FakeExt:
     def __init__(self, fake_runtime: "_FakeCudaRuntime") -> None:
         self._runtime = fake_runtime
 
-    def pin_memory(self, ptr: int, size: int) -> bool:
-        self._runtime.register_calls.append((ptr, size, 0))
+    def pin_memory(self, ptr: int, size: int, flags: int = 0) -> bool:
+        self._runtime.register_calls.append((ptr, size, flags))
         return self._runtime.register_error == 0
 
     def unpin_memory(self, ptr: int) -> bool:
@@ -239,6 +239,7 @@ def test_devdax_allocator_registers_cuda_host_mapping(tmp_path, monkeypatch):
     cuda_runtime = _FakeCudaRuntime()
     monkeypatch.setattr(memory_management, "torch_device_type", "cuda")
     monkeypatch.setattr(memory_management, "torch_dev", cuda_runtime)
+    monkeypatch.setattr(memory_management, "current_device_spec", cuda_runtime.ext)
 
     allocator = DevDaxMemoryAllocator(
         size=1024 * 1024,
@@ -259,6 +260,7 @@ def test_devdax_allocator_falls_back_when_cuda_host_register_fails(
     cuda_runtime = _FakeCudaRuntime(register_error=1)
     monkeypatch.setattr(memory_management, "torch_device_type", "cuda")
     monkeypatch.setattr(memory_management, "torch_dev", cuda_runtime)
+    monkeypatch.setattr(memory_management, "current_device_spec", cuda_runtime.ext)
 
     allocator = DevDaxMemoryAllocator(
         size=1024 * 1024,
