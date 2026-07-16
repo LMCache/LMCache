@@ -16,7 +16,10 @@ import zmq
 # First Party
 from lmcache import torch_dev
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
-from lmcache.integration.vllm.utils import vllm_layout_hints
+from lmcache.integration.vllm.utils import (
+    read_explicit_kv_layout_from_config_dict,
+    vllm_layout_hints,
+)
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
@@ -1099,6 +1102,14 @@ class LMCacheMPWorkerAdapter:
                 self._mp_transfer_mode = None
         else:
             self._mp_transfer_mode = None
+        # Resolve the explicit KV-layout override once, from this adapter's
+        # extra_config, and store it on the instance (no process-global state).
+        # It is threaded into the transfer-context registration so the worker
+        # store/retrieve path uses the same layout as the connector's
+        # register_kv_caches / detector path.
+        self._explicit_kv_layout = read_explicit_kv_layout_from_config_dict(
+            extra_config
+        )
         self.mq_client = MessageQueueClient(server_url, context)
         self._mq_timeout = mq_timeout
 
@@ -1282,7 +1293,7 @@ class LMCacheMPWorkerAdapter:
         """
         self.kv_caches = kv_caches
         transfer_ctx = create_transfer_context(kv_caches, mode=self._mp_transfer_mode)
-        layout_hints = vllm_layout_hints()
+        layout_hints = vllm_layout_hints(self._explicit_kv_layout)
         self.transfer_ctx = transfer_ctx
         try:
             # Register on the local, not self.transfer_ctx: a concurrent

@@ -46,7 +46,11 @@ from lmcache.integration.vllm.kv_cache_group_edits import (
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
 )
-from lmcache.integration.vllm.utils import mla_enabled, vllm_layout_hints
+from lmcache.integration.vllm.utils import (
+    mla_enabled,
+    read_explicit_kv_layout_from_config,
+    vllm_layout_hints,
+)
 from lmcache.utils import init_logger as lmcache_init_logger
 from lmcache.v1.multiprocess.group_view import slice_block_ids_per_group
 
@@ -581,6 +585,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         assert vllm_config.kv_transfer_config is not None
 
+        # Resolve the explicit KV-layout override ONCE, here, and store it on
+        # the connector instance (no process-global state). Every layout
+        # consumer (register_kv_caches / KV-format detection / engine-driven
+        # gather+scatter / the worker transfer context) is passed this same
+        # value, so STORE and RETRIEVE use exactly the same decision. Reading
+        # the canonical ``lmcache.kv_layout`` (or alias ``kv_layout``) here
+        # also fails fast on an invalid value.
+        self._explicit_kv_layout = read_explicit_kv_layout_from_config(
+            vllm_config.kv_transfer_config
+        )
+
         # Multi-server: prefer lmcache.mp.server_urls (list or comma-separated
         # string) over the single-server lmcache.mp.host / lmcache.mp.port.
         server_urls_cfg = vllm_config.kv_transfer_config.get_from_extra_config(
@@ -754,7 +769,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         engine_group_infos = create_engine_group_infos_from_vllm(
             kv_cache_config,
             kv_caches,
-            layout_hints=vllm_layout_hints(),
+            layout_hints=vllm_layout_hints(self._explicit_kv_layout),
         )
         self.worker_adapter.register_kv_caches(
             kv_caches, engine_group_infos=engine_group_infos

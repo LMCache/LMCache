@@ -25,6 +25,7 @@ from lmcache.v1.multiprocess.protocols.engine import RegisterEngineDrivenContext
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
+    _first_leaf_tensor,
     compute_kv_layout,
     create_engine_driven_context,
     gather_paged_kv_to_cpu,
@@ -631,7 +632,12 @@ def create_transfer_context(
     """
     if not kv_caches:
         raise ValueError("kv_caches is empty")
-    device_types = {tensor.device.type for tensor in kv_caches.values()}
+    # A per-layer value may be a fused tensor or a split (key, value) pair, so
+    # read the device from the first leaf tensor of each value rather than
+    # assuming the value is itself a tensor.
+    device_types = {
+        _first_leaf_tensor(value).device.type for value in kv_caches.values()
+    }
     if len(device_types) != 1:
         raise ValueError(
             f"All KV cache tensors must share one device type, got {device_types}"

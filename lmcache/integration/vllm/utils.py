@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Literal, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Literal, Optional, Tuple
 import hashlib
 import os
 import string
@@ -36,10 +36,160 @@ def is_false(value: str) -> bool:
     return value.lower() in ("false", "0", "no", "n", "off")
 
 
-def vllm_layout_hints() -> "LayoutHints":
-    """Build layout_hints dict by querying vLLM at runtime."""
+SUPPORTED_KV_LAYOUTS = ("NHD", "HND")
+
+# Canonical LMCache connector-config key for an explicit KV-layout override,
+# plus a compatibility alias. Documentation should use the canonical key.
+KV_LAYOUT_CONFIG_KEY = "lmcache.kv_layout"
+KV_LAYOUT_CONFIG_ALIAS = "kv_layout"
+
+
+def normalize_kv_layout(value: "str | None", *, source: str) -> "str | None":
+    """Validate/normalize an explicit KV-layout value.
+
+    Accepts only the supported layouts (case-insensitive); returns the
+    upper-cased canonical value. ``None`` passes through unchanged (meaning
+    "no explicit value"). An unknown non-empty value raises ``ValueError`` —
+    an explicit override is never silently ignored.
+
+    Args:
+        value: the raw layout string (or ``None``).
+        source: human-readable origin (used only in the error message).
+    """
+    if value is None:
+        return None
+    normalized = str(value).strip().upper()
+    if normalized == "":
+        return None
+    if normalized not in SUPPORTED_KV_LAYOUTS:
+        raise ValueError(
+            f"Invalid KV layout {value!r} from {source}. "
+            f"Supported values: {', '.join(SUPPORTED_KV_LAYOUTS)}."
+        )
+    return normalized
+
+
+def resolve_kv_layout(
+    explicit_layout: "str | None" = None,
+    *,
+    query_vllm: bool = True,
+) -> "str | None":
+    """Resolve the KV-cache layout using one authoritative precedence order.
+
+    This is backend-neutral: it never inspects the backend name, platform, or
+    whether any particular plugin is installed. It exists so that host-memory /
+    CPU-presented KV tensors whose physical layout differs from the normal x86
+    CPU backend default (which LMCache treats as HND) can declare their true
+    layout explicitly.
+
+    Precedence (highest wins):
+        1. ``explicit_layout`` — the value the connector read from its
+           ``kv_transfer_config`` extra config (``lmcache.kv_layout`` or the
+           compatibility alias ``kv_layout``). Already validated by the caller,
+           but re-validated here defensively.
+        2. vLLM runtime layout query (``get_kv_cache_layout()``), when available.
+        3. ``LMCACHE_VLLM_KV_LAYOUT`` environment variable (compatibility
+           fallback only).
+        4. ``None`` — no hint; downstream applies the device default
+           (CPU -> HND, non-CPU -> NHD) in the detector.
+
+    Args:
+        explicit_layout: the connector-config override, or ``None``.
+        query_vllm: whether to consult the live vLLM layout query (tier 2).
+            Disable in contexts where vLLM is not importable (e.g. the MP
+            server process) to avoid a spurious error log.
+
+    Returns:
+        ``"NHD"``/``"HND"`` when resolved, or ``None`` when no tier supplied a
+        value (leaving the device default to the detector).
+    """
+    # Standard
+    import os
+
+    # Tier 1: explicit connector configuration (defensive re-validation).
+    layout = normalize_kv_layout(explicit_layout, source="connector config")
+    if layout is not None:
+        return layout
+
+    # Tier 2: vLLM runtime query.
+    if query_vllm:
+        queried = try_get_vllm_kv_cache_layout()
+        if queried is not None:
+            return queried
+
+    # Tier 3: environment-variable compatibility fallback.
+    env_layout = normalize_kv_layout(
+        os.environ.get("LMCACHE_VLLM_KV_LAYOUT"),
+        source="LMCACHE_VLLM_KV_LAYOUT",
+    )
+    if env_layout is not None:
+        return env_layout
+
+    # Tier 4: no hint -> device default is applied by the detector.
+    return None
+
+
+def read_explicit_kv_layout_from_config(kv_transfer_config: Any) -> "str | None":
+    """Read + validate the explicit KV-layout override from a KVTransferConfig.
+
+    Looks up the canonical key ``lmcache.kv_layout`` first, then the
+    compatibility alias ``kv_layout``. Returns the validated upper-cased value,
+    or ``None`` when neither key is set. Raises ``ValueError`` on an unknown
+    value (an explicit override is never silently ignored).
+
+    Args:
+        kv_transfer_config: the vLLM ``KVTransferConfig`` (or ``None``); must
+            expose ``get_from_extra_config(key, default)``.
+    """
+    if kv_transfer_config is None:
+        return None
+    raw = kv_transfer_config.get_from_extra_config(KV_LAYOUT_CONFIG_KEY, None)
+    source = KV_LAYOUT_CONFIG_KEY
+    if raw is None:
+        raw = kv_transfer_config.get_from_extra_config(KV_LAYOUT_CONFIG_ALIAS, None)
+        source = KV_LAYOUT_CONFIG_ALIAS
+    return normalize_kv_layout(raw, source=source)
+
+
+def read_explicit_kv_layout_from_config_dict(
+    extra_config: "dict[str, Any] | None",
+) -> "str | None":
+    """Read + validate the explicit KV-layout override from a plain dict.
+
+    Dict analogue of :func:`read_explicit_kv_layout_from_config` for callers
+    that hold the raw ``kv_connector_extra_config`` dict (e.g. the worker
+    adapter) rather than the ``KVTransferConfig`` object. Same canonical key
+    (``lmcache.kv_layout``) and alias (``kv_layout``) and same validation.
+    """
+    if not extra_config:
+        return None
+    raw = extra_config.get(KV_LAYOUT_CONFIG_KEY)
+    source = KV_LAYOUT_CONFIG_KEY
+    if raw is None:
+        raw = extra_config.get(KV_LAYOUT_CONFIG_ALIAS)
+        source = KV_LAYOUT_CONFIG_ALIAS
+    return normalize_kv_layout(raw, source=source)
+
+
+def vllm_layout_hints(
+    explicit_layout: "str | None" = None,
+    *,
+    query_vllm: bool = True,
+) -> "LayoutHints":
+    """Build the ``layout_hints`` dict passed to KV-format detection.
+
+    Thin wrapper over :func:`resolve_kv_layout` that packages the resolved
+    layout into the ``{"kv_layout": ...}`` hint dict the detector consumes.
+    The resolved layout is threaded through every format/gather/scatter path,
+    so store and retrieve use exactly the same decision.
+
+    Args:
+        explicit_layout: connector-config override (``lmcache.kv_layout``), or
+            ``None`` to fall back to the runtime query / env / default.
+        query_vllm: forwarded to :func:`resolve_kv_layout`.
+    """
     hints: dict[str, str] = {}
-    kv_layout = try_get_vllm_kv_cache_layout()
+    kv_layout = resolve_kv_layout(explicit_layout, query_vllm=query_vllm)
     if kv_layout is not None:
         hints["kv_layout"] = kv_layout
     return hints  # type: ignore[return-value]
