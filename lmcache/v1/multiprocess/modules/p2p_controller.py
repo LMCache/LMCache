@@ -16,6 +16,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
+    PrefetchRequestSpec,
 )
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 from lmcache.v1.distributed.transfer_channel import (
@@ -242,8 +243,7 @@ class P2PController:
 
         # NOTE: skip_l2=True -- only objects already resident in L1 are locked.
         handle = self._ctx.storage_manager.submit_prefetch_task(
-            keys,
-            layout_desc,
+            PrefetchRequestSpec(keys=keys, layout_desc=layout_desc),
             external_request_id=f"p2p-{task_id}",
             skip_l2=True,
         )

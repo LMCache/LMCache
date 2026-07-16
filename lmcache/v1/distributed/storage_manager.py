@@ -13,12 +13,11 @@ import time
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap, PeriodicEventNotifier
 from lmcache.v1.distributed.api import (
-    DEFAULT_ATTN_WINDOW_DESC,
-    AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
     PrefetchMode,
+    PrefetchRequestSpec,
     TrimPolicy,
 )
 from lmcache.v1.distributed.config import EvictionConfig, StorageManagerConfig
@@ -398,50 +397,41 @@ class StorageManager:
     @enable_tracing()
     def submit_prefetch_task(
         self,
-        keys: list[ObjectKey],
-        layout_desc: MemoryLayoutDesc,
-        extra_count: int = 0,
+        spec: PrefetchRequestSpec,
         external_request_id: str = "",
-        policy: TrimPolicy = TrimPolicy.PREFIX,
-        attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
         skip_l2: bool = False,
-        mode: PrefetchMode = PrefetchMode.LOOKUP,
     ) -> PrefetchHandle:
         """Prefetch objects into L1 asynchronously.
 
         Args:
-            keys: Object keys to prefetch.
-            layout_desc: Memory layout description.
-            extra_count: Extra workers (on top of the default
-                1) that will independently retrieve the same
-                key.  Total locks = 1 + extra_count.
-            external_request_id: Request ID from the caller
-                for end-to-end log tracing.
-            policy: Which retained-subset policy to apply (see
-                :class:`TrimPolicy`).  ``PREFIX`` keeps the contiguous prefix;
-                ``SPARSE`` keeps every found key (gap-tolerant).
-            attn_desc: Cross-chunk attention windows of all object groups, in
-                object-group order.
+            spec: The L2-fetch request inputs (see :class:`PrefetchRequestSpec`).
+            external_request_id: Caller id for end-to-end log tracing.
             skip_l2: If True, do not load from L2. For ``LOOKUP`` only
                 already-resident L1 keys are returned; for ``WARM`` nothing is
                 loaded and an empty handle is returned.
-            mode: The prefetch intent (see :class:`PrefetchMode`).  ``WARM``
-                retains loaded keys and pins none; ``LOOKUP`` (default) pins
-                them for an imminent reader and follows the policy.
 
         Returns:
             PrefetchHandle to track the task.
         """
+        keys = spec.keys
+        layout_desc = spec.layout_desc
+        extra_count = spec.extra_count
+        policy = spec.policy
+        attn_desc = spec.attn_desc
+        mode = spec.mode
+
         if mode is PrefetchMode.WARM:
             # Warm path: load all keys, pin none. skip_l2 makes it a no-op.
             prefetch_request_id = -1
             if not skip_l2 and keys and self._l2_adapters:
                 prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
-                    keys,
-                    layout_desc,
-                    extra_count=extra_count,
-                    policy=policy,
-                    mode=mode,
+                    PrefetchRequestSpec(
+                        keys=keys,
+                        layout_desc=layout_desc,
+                        extra_count=extra_count,
+                        policy=policy,
+                        mode=mode,
+                    )
                 )
             return PrefetchHandle(
                 prefetch_request_id=prefetch_request_id,
@@ -490,12 +480,14 @@ class StorageManager:
             prefetch_request_id = -1
             if remaining_keys and self._has_l2_adapters():
                 prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
-                    remaining_keys,
-                    layout_desc,
-                    extra_count=extra_count,
-                    policy=TrimPolicy.SPARSE,
-                    attn_desc=attn_desc,
-                    mode=mode,
+                    PrefetchRequestSpec(
+                        keys=remaining_keys,
+                        layout_desc=layout_desc,
+                        extra_count=extra_count,
+                        policy=TrimPolicy.SPARSE,
+                        attn_desc=attn_desc,
+                        mode=mode,
+                    )
                 )
             return PrefetchHandle(
                 prefetch_request_id=prefetch_request_id,
@@ -556,12 +548,14 @@ class StorageManager:
         l2_orig_indices: tuple[int, ...] = ()
         if remaining_keys and self._has_l2_adapters():
             prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
-                remaining_keys,
-                layout_desc,
-                extra_count=extra_count,
-                attn_desc=attn_desc,
-                policy=policy,
-                mode=mode,
+                PrefetchRequestSpec(
+                    keys=remaining_keys,
+                    layout_desc=layout_desc,
+                    extra_count=extra_count,
+                    attn_desc=attn_desc,
+                    policy=policy,
+                    mode=mode,
+                )
             )
             # The controller indexes its result bitmap over remaining_keys
             # (0-based); map those local indices back to original positions.

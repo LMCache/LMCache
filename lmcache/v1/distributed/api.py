@@ -305,6 +305,31 @@ windows are supplied."""
 
 
 @dataclass(frozen=True)
+class PrefetchRequestSpec:
+    """Immutable inputs of a single L2 prefetch request.
+
+    Bundles the caller-supplied arguments that travel together into the
+    prefetch controller's submission queue. See
+    ``PrefetchController._start_lookup_phase`` for per-field semantics.
+
+    Attributes:
+        keys: Object keys to prefetch; order defines the prefix.
+        layout_desc: Memory layout for L1 write-buffer allocation.
+        extra_count: Extra read locks per key beyond the default 1.
+        policy: Retained-subset policy (see :class:`TrimPolicy`).
+        attn_desc: Cross-chunk attention windows, in object-group order.
+        mode: Prefetch intent (see :class:`PrefetchMode`).
+    """
+
+    keys: list[ObjectKey]
+    layout_desc: MemoryLayoutDesc
+    extra_count: int = 0
+    policy: TrimPolicy = TrimPolicy.PREFIX
+    attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
+    mode: PrefetchMode = PrefetchMode.LOOKUP
+
+
+@dataclass(frozen=True)
 class PrefetchHandle:
     """Opaque handle returned by ``StorageManager.submit_prefetch_task``.
 

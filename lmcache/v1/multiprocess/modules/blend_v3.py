@@ -31,6 +31,7 @@ from lmcache.logging import init_logger
 from lmcache.utils import check_interprocess_event_support
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
+    PrefetchRequestSpec,
     TrimPolicy,
     ipc_key_to_object_keys,
 )
@@ -731,10 +732,12 @@ class BlendV3Module(InstanceLivenessTarget):
             expanded_uidx.append(uidx)
 
         handle: PrefetchHandle = self._ctx.storage_manager.submit_prefetch_task(
-            uniq_keys,
-            layout_desc,
+            PrefetchRequestSpec(
+                keys=uniq_keys,
+                layout_desc=layout_desc,
+                policy=TrimPolicy.SPARSE,
+            ),
             external_request_id=key.request_id,
-            policy=TrimPolicy.SPARSE,
         )
         return handle, per_hash_obj_keys, expanded_uidx
 
@@ -883,11 +886,13 @@ class BlendV3Module(InstanceLivenessTarget):
         extra_count = compute_extra_count(tp_size, world_size)
         obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
         handle = self._ctx.storage_manager.submit_prefetch_task(
-            obj_keys,
-            layout_desc,
-            extra_count=extra_count,
+            PrefetchRequestSpec(
+                keys=obj_keys,
+                layout_desc=layout_desc,
+                extra_count=extra_count,
+                policy=policy,
+            ),
             external_request_id=rid,
-            policy=policy,
         )
         return handle, world_size
 
