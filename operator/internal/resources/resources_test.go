@@ -962,6 +962,104 @@ func TestBuildConnectionConfigMap_CustomPort(t *testing.T) {
 	}
 }
 
+func TestBuildConnectionConfigMap_PDPrefiller(t *testing.T) {
+	engine := minimalEngine()
+	engine.Spec.PD = &lmcachev1alpha1.PDSpec{
+		Role:                lmcachev1alpha1.PDRolePrefiller,
+		NixlSideChannelPort: ptr(int32(5557)),
+	}
+	cm := BuildConnectionConfigMap(engine)
+
+	var config map[string]any
+	if err := json.Unmarshal([]byte(cm.Data["kv-transfer-config.json"]), &config); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	if config["kv_connector"] != "MultiConnector" {
+		t.Fatalf("expected kv_connector=MultiConnector, got %v", config["kv_connector"])
+	}
+	if config["kv_role"] != "kv_producer" {
+		t.Fatalf("expected kv_role=kv_producer, got %v", config["kv_role"])
+	}
+
+	outer := config["kv_connector_extra_config"].(map[string]any)
+	connectors := outer["connectors"].([]any)
+	if len(connectors) != 2 {
+		t.Fatalf("expected 2 inner connectors, got %d", len(connectors))
+	}
+
+	nixl := connectors[0].(map[string]any)
+	if nixl["kv_connector"] != "NixlConnector" {
+		t.Fatalf("first connector must be NixlConnector, got %v", nixl["kv_connector"])
+	}
+	if nixl["kv_role"] != "kv_producer" {
+		t.Fatalf("NixlConnector role must be kv_producer, got %v", nixl["kv_role"])
+	}
+	if nixl["kv_load_failure_policy"] != "fail" {
+		t.Fatalf("expected kv_load_failure_policy=fail, got %v", nixl["kv_load_failure_policy"])
+	}
+
+	lmc := connectors[1].(map[string]any)
+	if lmc["kv_connector"] != "LMCacheMPConnector" {
+		t.Fatalf("second connector must be LMCacheMPConnector, got %v", lmc["kv_connector"])
+	}
+	if lmc["kv_role"] != "kv_both" {
+		t.Fatalf("LMCacheMPConnector role must be kv_both, got %v", lmc["kv_role"])
+	}
+	lmcExtra := lmc["kv_connector_extra_config"].(map[string]any)
+	if lmcExtra["lmcache.mp.port"] != "5555" {
+		t.Fatalf("expected lmcache.mp.port=5555, got %v", lmcExtra["lmcache.mp.port"])
+	}
+}
+
+func TestBuildConnectionConfigMap_PDDecoder(t *testing.T) {
+	engine := minimalEngine()
+	engine.Spec.PD = &lmcachev1alpha1.PDSpec{
+		Role: lmcachev1alpha1.PDRoleDecoder,
+	}
+	cm := BuildConnectionConfigMap(engine)
+
+	var config map[string]any
+	if err := json.Unmarshal([]byte(cm.Data["kv-transfer-config.json"]), &config); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	if config["kv_role"] != "kv_consumer" {
+		t.Fatalf("expected kv_role=kv_consumer, got %v", config["kv_role"])
+	}
+
+	outer := config["kv_connector_extra_config"].(map[string]any)
+	nixl := outer["connectors"].([]any)[0].(map[string]any)
+	if nixl["kv_role"] != "kv_consumer" {
+		t.Fatalf("NixlConnector role must be kv_consumer, got %v", nixl["kv_role"])
+	}
+}
+
+func TestBuildConnectionConfigMap_PDEnforceHandshakeCompat(t *testing.T) {
+	engine := minimalEngine()
+	handshakeCompat := false
+	engine.Spec.PD = &lmcachev1alpha1.PDSpec{
+		Role:                   lmcachev1alpha1.PDRolePrefiller,
+		EnforceHandshakeCompat: &handshakeCompat,
+	}
+	cm := BuildConnectionConfigMap(engine)
+
+	var config map[string]any
+	if err := json.Unmarshal([]byte(cm.Data["kv-transfer-config.json"]), &config); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	outer := config["kv_connector_extra_config"].(map[string]any)
+	nixl := outer["connectors"].([]any)[0].(map[string]any)
+	nixlExtra, ok := nixl["kv_connector_extra_config"].(map[string]any)
+	if !ok {
+		t.Fatal("expected kv_connector_extra_config on NixlConnector")
+	}
+	if nixlExtra["enforce_handshake_compat"] != false {
+		t.Fatalf("expected enforce_handshake_compat=false, got %v", nixlExtra["enforce_handshake_compat"])
+	}
+}
+
 // ===========================
 // ServiceMonitor
 // ===========================

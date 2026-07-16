@@ -204,6 +204,13 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "LMCacheCoordinator")
 		os.Exit(1)
 	}
+	if err := (&controller.VllmRouterReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "VllmRouter")
+		os.Exit(1)
+	}
 	// ENABLE_WEBHOOKS=false skips registering the pod-mutating webhook, so a
 	// local `make run` (which has no serving certs on the host) can start the
 	// controller without the webhook server failing on a missing tls.crt. The

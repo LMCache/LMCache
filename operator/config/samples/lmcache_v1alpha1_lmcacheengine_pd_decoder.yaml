@@ -1,0 +1,43 @@
+# LMCacheEngine — PD disaggregation DECODER role.
+#
+# This engine runs alongside the decoder vLLM pod. The connection ConfigMap
+# it generates contains a MultiConnector config:
+#   MultiConnector(kv_consumer)
+#     ├── NixlConnector(kv_consumer)   — direct GPU-GPU KV transfer from prefiller
+#     └── LMCacheMPConnector(kv_both)  — node-local KV cache (prefix reuse)
+#
+# The webhook also injects into opted-in vLLM pods:
+#   VLLM_NIXL_SIDE_CHANNEL_HOST = pod's node IP (downward API status.hostIP)
+#   VLLM_NIXL_SIDE_CHANNEL_PORT = spec.pd.nixlSideChannelPort (5558 here)
+#
+# PREREQUISITES:
+#   1. Apply the prefiller LMCacheEngine (lmcache_v1alpha1_lmcacheengine_pd_prefiller.yaml).
+#   2. Deploy the decoder vLLM with the opt-in label/annotation (see vllm_pd_disaggregation.yaml).
+#   3. Deploy a vllm-router pointing at the prefiller and decoder vLLM Services.
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: LMCacheEngine
+metadata:
+  name: decoder-cache
+  namespace: default
+spec:
+  l1:
+    sizeGB: 100
+
+  server:
+    port: 5555
+    httpPort: 8080
+    chunkSize: 256
+
+  eviction:
+    policy: LRU
+
+  # PD disaggregation: decoder role.
+  pd:
+    role: decoder
+    nixlSideChannelPort: 5558         # must differ from the prefiller's port
+    nixlLoadFailurePolicy: fail
+
+  # -- Scheduling --
+  # nodeSelector:
+  #   nvidia.com/gpu.present: "true"
+  #   lmcache.ai/role: decoder        # optional: pin to decoder nodes

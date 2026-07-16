@@ -30,6 +30,12 @@ const (
 	PhaseFailed   = "Failed"
 )
 
+// PD disaggregation role constants.
+const (
+	PDRolePrefiller = "prefiller"
+	PDRoleDecoder   = "decoder"
+)
+
 const (
 	GPUVendorNvidia = "nvidia"
 	GPUVendorAMD    = "amd"
@@ -328,6 +334,44 @@ type CoordinatorConnectionSpec struct {
 	L2EventFlushInterval *float64 `json:"l2EventFlushInterval,omitempty"`
 }
 
+// PDSpec configures PD (Prefill-Decode) disaggregation for a vLLM engine.
+// When set, the engine's connection ConfigMap emits a MultiConnector that
+// wraps NixlConnector (direct GPU-GPU KV transfer) and the engine's LMCache
+// connector instead of a bare LMCacheMPConnector / CBKVConnector.
+// The webhook also injects VLLM_NIXL_SIDE_CHANNEL_HOST (from the pod's
+// status.hostIP via the downward API) and VLLM_NIXL_SIDE_CHANNEL_PORT.
+type PDSpec struct {
+	// role is the PD role. "prefiller" sets kv_role=kv_producer on both the
+	// outer MultiConnector and the inner NixlConnector; "decoder" uses kv_consumer.
+	// +kubebuilder:validation:Enum=prefiller;decoder
+	Role string `json:"role"`
+
+	// nixlSideChannelPort is the port the NIXL agent advertises for
+	// side-channel negotiation. Use distinct values for prefiller and decoder
+	// when both roles run on the same node (e.g. local testing).
+	// +optional
+	// +kubebuilder:default=5558
+	// +kubebuilder:validation:Minimum=1024
+	// +kubebuilder:validation:Maximum=65535
+	NixlSideChannelPort *int32 `json:"nixlSideChannelPort,omitempty"`
+
+	// nixlLoadFailurePolicy controls what NixlConnector does when the remote
+	// peer cannot be reached. "fail" aborts the request (default);
+	// "ignore" falls back to local prefill.
+	// +optional
+	// +kubebuilder:default="fail"
+	// +kubebuilder:validation:Enum=fail;ignore
+	NixlLoadFailurePolicy *string `json:"nixlLoadFailurePolicy,omitempty"`
+
+	// enforceHandshakeCompat, when set, is forwarded to the NixlConnector as
+	// kv_connector_extra_config["enforce_handshake_compat"]. Set to false to
+	// disable strict NIXL version negotiation — required when the CacheBlend
+	// prefiller and decoder run different vLLM builds. When nil the key is
+	// omitted and NixlConnector uses its own default.
+	// +optional
+	EnforceHandshakeCompat *bool `json:"enforceHandshakeCompat,omitempty"`
+}
+
 // LMCacheEngineSpec defines the desired state of LMCacheEngine.
 type LMCacheEngineSpec struct {
 	// gpuVendor selects the GPU vendor. "nvidia" (default) requires the NVIDIA
@@ -447,6 +491,12 @@ type LMCacheEngineSpec struct {
 	// They are appended last and can override any auto-generated flag.
 	// +optional
 	ExtraArgs []string `json:"extraArgs,omitempty"`
+
+	// pd enables PD (Prefill-Decode) disaggregation. When set the connection
+	// ConfigMap emits a MultiConnector config and the webhook injects the NIXL
+	// side-channel env vars into opted-in vLLM pods.
+	// +optional
+	PD *PDSpec `json:"pd,omitempty"`
 }
 
 // EndpointStatus represents a single LMCache instance endpoint.

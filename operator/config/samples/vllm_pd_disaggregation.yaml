@@ -1,0 +1,202 @@
+# vLLM Prefiller + Decoder Deployments for standard PD disaggregation.
+#
+# Each Deployment opts in to the LMCache webhook, which injects:
+#   - pod hostIPC=true
+#   - --kv-transfer-config <MultiConnector JSON from the engine ConfigMap>
+#   - PYTHONHASHSEED=0
+#   - VLLM_NIXL_SIDE_CHANNEL_HOST (downward API, pod's node IP)
+#   - VLLM_NIXL_SIDE_CHANNEL_PORT (from the engine ConfigMap)
+#
+# PREREQUISITES:
+#   1. LMCacheEngine "prefiller-cache" (pd.role=prefiller, port 5557) is Ready.
+#   2. LMCacheEngine "decoder-cache"   (pd.role=decoder,   port 5558) is Ready.
+#   3. The webhook is deployed (make deploy) and cert-manager is installed.
+#   4. This namespace is labeled pod-security.kubernetes.io/enforce=privileged.
+#
+# After creation, verify injection on a pod:
+#   kubectl get pod -l app=vllm-prefiller -o yaml | \
+#     grep -E "hostIPC|kv-transfer-config|NIXL|lmcache-injected"
+#
+# Then deploy the vllm-router pointing --prefill and --decode at the Services
+# below (vllm-prefiller:8001, vllm-decoder:8002).
+---
+# ── Prefiller vLLM ──────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-prefiller
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-prefiller
+  template:
+    metadata:
+      labels:
+        app: vllm-prefiller
+        # Opt in to the LMCache webhook.
+        lmcache.ai/lmcache-inject: "true"
+      annotations:
+        # Bind to the prefiller LMCacheEngine (must be in the same namespace).
+        lmcache.ai/lmcache-engine: "prefiller-cache"
+    spec:
+      runtimeClassName: nvidia
+      # Do NOT set hostIPC here — the webhook injects hostIPC=true.
+      # Do NOT mount an emptyDir at /dev/shm — hostIPC shares the host /dev/shm.
+      containers:
+        - name: vllm
+          image: lmcache/vllm-openai:latest-nightly
+          # Args-only launch (ENTRYPOINT is ["vllm","serve"]).
+          # Do NOT add --kv-transfer-config — the webhook injects it.
+          args:
+            - "meta-llama/Llama-3.1-8B-Instruct"
+            - "--served-model-name"
+            - "Llama-3.1-8B-Instruct"
+            - "--port"
+            - "8001"
+            - "--tensor-parallel-size"
+            - "1"
+            - "--enforce-eager"
+            - "--max-model-len"
+            - "16384"
+            - "--gpu-memory-utilization"
+            - "0.4"
+          ports:
+            - name: http
+              containerPort: 8001
+          env:
+            - name: UCX_NET_DEVICES
+              value: "all"
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-prefiller
+  namespace: default
+spec:
+  selector:
+    app: vllm-prefiller
+  ports:
+    - name: http
+      port: 8001
+      targetPort: 8001
+---
+# ── Decoder vLLM ────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-decoder
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-decoder
+  template:
+    metadata:
+      labels:
+        app: vllm-decoder
+        lmcache.ai/lmcache-inject: "true"
+      annotations:
+        lmcache.ai/lmcache-engine: "decoder-cache"
+    spec:
+      runtimeClassName: nvidia
+      containers:
+        - name: vllm
+          image: lmcache/vllm-openai:latest-nightly
+          args:
+            - "meta-llama/Llama-3.1-8B-Instruct"
+            - "--served-model-name"
+            - "Llama-3.1-8B-Instruct"
+            - "--port"
+            - "8002"
+            - "--tensor-parallel-size"
+            - "1"
+            - "--enforce-eager"
+            - "--max-model-len"
+            - "16384"
+            - "--gpu-memory-utilization"
+            - "0.4"
+          ports:
+            - name: http
+              containerPort: 8002
+          env:
+            - name: UCX_NET_DEVICES
+              value: "all"
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-decoder
+  namespace: default
+spec:
+  selector:
+    app: vllm-decoder
+  ports:
+    - name: http
+      port: 8002
+      targetPort: 8002
+---
+# ── vLLM Router ─────────────────────────────────────────────────────────────
+# Runs vllm-router in PD disaggregation mode. Adjust image/version as needed.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-router
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-router
+  template:
+    metadata:
+      labels:
+        app: vllm-router
+    spec:
+      containers:
+        - name: router
+          image: vllm/vllm-router:nightly
+          command:
+            - vllm-router
+          args:
+            - "--policy"
+            - "round_robin"
+            - "--vllm-pd-disaggregation"
+            - "--prefill"
+            - "http://vllm-prefiller:8001"
+            - "--decode"
+            - "http://vllm-decoder:8002"
+            - "--host"
+            - "0.0.0.0"
+            - "--port"
+            - "30000"
+            - "--intra-node-data-parallel-size"
+            - "1"
+          ports:
+            - name: http
+              containerPort: 30000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-router
+  namespace: default
+spec:
+  selector:
+    app: vllm-router
+  ports:
+    - name: http
+      port: 30000
+      targetPort: 30000

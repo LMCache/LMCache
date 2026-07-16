@@ -143,6 +143,10 @@ func BuildCBEngineMetricsService(engine *lmcachev1alpha1.CacheBlendEngine) *core
 // the node-local Service (lmcache.mp.host) and carries the blend tunables
 // cb.check_layer and cb.recomp_ratio read from spec.Blend (defaults are pinned by
 // SetDefaults: checkLayer=1, recompRatio=0.15).
+//
+// When spec.PD is set (CacheBlend PD prefiller mode) the ConfigMap emits a
+// MultiConnector wrapping NixlConnector + CBKVConnector, and adds a
+// NixlSideChannelPortDataKey key for the webhook to use.
 func BuildCBConnectionConfigMap(engine *lmcachev1alpha1.CacheBlendEngine) *corev1.ConfigMap {
 	spec := &engine.Spec
 	// Use the same default (5555) as BuildContainerArgs/getServerPort so the
@@ -160,6 +164,19 @@ func BuildCBConnectionConfigMap(engine *lmcachev1alpha1.CacheBlendEngine) *corev
 	extra := map[string]any{
 		"cb.check_layer":  checkLayer,
 		"cb.recomp_ratio": recompRatio,
+	}
+
+	if spec.PD != nil {
+		// CBKVConnector has no separate module path when used inside MultiConnector.
+		return buildPDConnectionConfigMap(
+			engine.Name,
+			engine.Namespace,
+			cbKVConnector,
+			"",
+			port,
+			spec.PD,
+			extra,
+		)
 	}
 
 	return buildConnectionConfigMapCore(

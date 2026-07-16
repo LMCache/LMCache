@@ -160,6 +160,12 @@ func (p *LMCachePodInjector) Handle(ctx context.Context, req admission.Request) 
 		stagePayload(ctx, pod, target, engine.Spec.Injection)
 	}
 
+	// PD disaggregation: inject NIXL side-channel env vars when the engine is
+	// configured for PD mode.
+	if engine.Spec.PD != nil {
+		target.Env = BuildPDEnv(target.Env, engine.Spec.PD)
+	}
+
 	log.Info("Injected LMCache connection", "engine", engineName, "container", target.Name)
 	return lmCacheKeys.stampInjected(req, pod, userHasKVTransferConfig)
 }

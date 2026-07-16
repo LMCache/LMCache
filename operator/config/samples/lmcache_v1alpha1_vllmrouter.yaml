@@ -1,0 +1,47 @@
+# VllmRouter — manages the vllm-router Deployment + Service for PD disaggregation.
+#
+# The operator creates:
+#   - A Deployment running `vllm-router --vllm-pd-disaggregation --prefill ... --decode ...`
+#   - A ClusterIP Service exposing the router on spec.port (default 30000)
+#
+# PREREQUISITES:
+#   1. LMCacheEngine "prefiller-cache" (pd.role=prefiller) is Ready.
+#   2. LMCacheEngine "decoder-cache"   (pd.role=decoder)   is Ready.
+#   3. vLLM prefiller Deployment is running and its Service "vllm-prefiller" exists.
+#   4. vLLM decoder  Deployment is running and its Service "vllm-decoder"   exists.
+#
+# The router URL is:  http://my-pd-router.<namespace>.svc.cluster.local:30000
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: VllmRouter
+metadata:
+  name: my-pd-router
+  namespace: default
+spec:
+  # prefill and decode point at the Kubernetes Services that front the vLLM pods,
+  # NOT the LMCache engine Services.
+  prefill:
+    serviceName: vllm-prefiller  # Service created in vllm_pd_disaggregation.yaml
+    port: 8001
+
+  decode:
+    serviceName: vllm-decoder    # Service created in vllm_pd_disaggregation.yaml
+    port: 8002
+
+  # Router settings
+  port: 30000
+  policy: round_robin
+  replicas: 1
+  intraNodeDataParallelSize: 1
+
+  # -- Image (same as LMCache engines by default) --
+  # image:
+  #   repository: lmcache/vllm-openai
+  #   tag: latest-nightly
+  #   pullPolicy: IfNotPresent
+
+  # -- Service type (ClusterIP default; use LoadBalancer to expose externally) --
+  # serviceType: ClusterIP
+
+  # -- Scheduling --
+  # nodeSelector: {}
+  # tolerations: []
