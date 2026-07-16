@@ -7,24 +7,24 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
 log() {
-  echo "[xpu-test] $*"
+  echo "[intel-xpu-unit-tests] $*"
 }
 
 fail() {
-  echo "[xpu-test] ERROR: $*" >&2
+  echo "[intel-xpu-unit-tests] ERROR: $*" >&2
   exit 1
 }
-
-export TEST_SELECTOR="${TEST_SELECTOR:-calculate_cdf or get_gpu_pci_bus_id or load_and_reshape_flash}"
-cd "${REPO_ROOT}"
-
-source "${REPO_ROOT}/.buildkite/k3_harness/setup-lmcache-only-env.sh"
 
 if [ -f /opt/intel/oneapi/setvars.sh ]; then
   # Intel XPU runtime environment.
   # shellcheck disable=SC1091
+  log "enable Intel XPU runtime environment"
   source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1 || true
 fi
+
+export TEST_SELECTOR="${TEST_SELECTOR:-calculate_cdf or get_gpu_pci_bus_id or load_and_reshape_flash}"
+cd "${REPO_ROOT}"
+source "${REPO_ROOT}/.buildkite/k3_harness/setup-lmcache-only-env.sh"
 
 log "installing job dependencies"
 uv pip install -r requirements/common.txt -r requirements/test.txt
