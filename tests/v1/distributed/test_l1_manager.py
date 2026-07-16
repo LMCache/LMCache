@@ -1293,6 +1293,8 @@ class TestDelete:
         assert result[key2] == L1Error.KEY_NOT_EXIST
         assert result[key3] == L1Error.KEY_IS_LOCKED
 
+        manager.close()
+
     def test_force_delete_removes_write_locked_key(self, basic_l1_config, basic_layout):
         """force=True deletes a write-locked key that non-force refuses."""
         manager = L1Manager(basic_l1_config)
