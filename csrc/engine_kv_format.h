@@ -98,8 +98,8 @@ enum class EngineKVFormat : int {
   - vLLM non-MLA blocks-first attention with K/V fused into the trailing dim
   physical shape per layer: [num_blocks, num_heads, block_size, 2, head_size]
   (recovered by splitting the fused trailing [block_size, 2 * head_size]).
-  Currently only reached via the host gather/scatter path, not the device
-  transfer kernels.
+  The device transfer kernels treat it as HND with kv_size == 1 and
+  hs == 2 * head_size (the K/V axis stays packed inside each head copy).
   */
 };
 
