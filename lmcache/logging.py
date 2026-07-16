@@ -42,6 +42,8 @@ class CustomFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         formatter = self._formatters.get(record.levelno, self._default_formatter)
+        formatter.datefmt = self.datefmt
+        formatter.converter = self.converter
         return formatter.format(record)
 
 
