@@ -213,227 +213,238 @@ def attention_layer_names_from_vllm(
     return [name for name in kv_caches.keys() if name in attention_names]
 
 
-def setup_q_ring(
-    kv_caches: dict[str, torch.Tensor],
-    kv_cache_config: "KVCacheConfig | None",
-    vllm_config: "VllmConfig",
-    worker_adapter: "LMCacheMPWorkerAdapter",
-) -> dict[str, int]:
-    """Allocate and register the paged-Q ring for the attention layers.
-    Builds the mapping between layer names and ring indices (for attention layers).
-    Calls the register_q_ring method of the worker adapter to allocate the ring.
+class QRingBufferCapture:
+    def __init__(
+        self,
+        worker_adapter: "LMCacheMPWorkerAdapter",
+        transfer_intermediate_tensors: bool,
+    ) -> None:
+        self.worker_adapter = worker_adapter
+        self._enabled = transfer_intermediate_tensors
+        self.q_layer_index: dict[str, int] = {}
+        self.q_step_state: _QStepState | None = None
+        self.q_step_disabled: bool = False
 
-    Args:
-        kv_caches: Registered KV caches.
-    """
-    if not kv_caches:
-        logger.warning("No KV caches registered; skipping Q ring setup.")
-        return {}
+    def setup_q_ring(
+        self,
+        kv_caches: dict[str, torch.Tensor],
+        kv_cache_config: "KVCacheConfig | None",
+        vllm_config: "VllmConfig",
+    ) -> None:
+        """Allocate and register the paged-Q ring for the attention layers.
+        Builds the mapping between layer names and ring indices (for attention layers).
+        Calls the register_q_ring method of the worker adapter to allocate the ring.
 
-    attn_layer_names = attention_layer_names_from_vllm(kv_cache_config, kv_caches)
-    if not attn_layer_names:
-        logger.warning("No attention layers registered. Skipping Q ring setup.")
-        return {}
-    num_layers = len(attn_layer_names)
+        Args:
+            kv_caches: Registered KV caches.
+        """
+        if not self._enabled:
+            logger.info("Q ring capture is disabled; skipping Q ring setup.")
+            return
 
-    q_layer_index = {}
-    for i, name in enumerate(attn_layer_names):
-        q_layer_index[name] = i
+        if not kv_caches:
+            logger.warning("No KV caches registered; skipping Q ring setup.")
+            return
 
-    model_config = vllm_config.model_config
-    parallel_config = vllm_config.parallel_config
-    num_q_heads = model_config.get_num_attention_heads(parallel_config)
-    head_size = model_config.get_head_size()
+        attn_layer_names = attention_layer_names_from_vllm(kv_cache_config, kv_caches)
+        if not attn_layer_names:
+            logger.warning("No attention layers registered. Skipping Q ring setup.")
+            return
+        num_layers = len(attn_layer_names)
 
-    raw_dtype = model_config.dtype
-    dtype = (
-        raw_dtype
-        if isinstance(raw_dtype, torch.dtype)
-        else getattr(torch, str(raw_dtype))
-    )
-    device = next(iter(kv_caches.values())).device
-    block_size = vllm_config.cache_config.block_size
+        self.q_layer_index = {}
+        for i, name in enumerate(attn_layer_names):
+            self.q_layer_index[name] = i
 
-    cfg = vllm_config.kv_transfer_config
-    if not cfg:
-        raise ValueError("kv_transfer_config is None; cannot register Q ring")
+        model_config = vllm_config.model_config
+        parallel_config = vllm_config.parallel_config
+        num_q_heads = model_config.get_num_attention_heads(parallel_config)
+        head_size = model_config.get_head_size()
 
-    explicit = cfg.get_from_extra_config("lmcache.q.ring_blocks", None)
-    if explicit is not None:
-        num_ring_blocks = max(1, int(explicit))
-    else:
-        depth = max(1, int(cfg.get_from_extra_config("lmcache.q.ring_depth", 2)))
-        max_batched = (
-            getattr(vllm_config.scheduler_config, "max_num_batched_tokens", None)
-            or 8192
+        raw_dtype = model_config.dtype
+        dtype = (
+            raw_dtype
+            if isinstance(raw_dtype, torch.dtype)
+            else getattr(torch, str(raw_dtype))
         )
-        num_ring_blocks = max(1, math.ceil(max_batched / block_size) * depth)
+        device = next(iter(kv_caches.values())).device
+        block_size = vllm_config.cache_config.block_size
 
-    worker_adapter.register_q_ring(
-        num_layers=num_layers,
-        num_q_heads=num_q_heads,
-        head_size=head_size,
-        dtype=dtype,
-        num_ring_blocks=num_ring_blocks,
-        device=device,
-    )
+        cfg = vllm_config.kv_transfer_config
+        if cfg is None:
+            raise ValueError("kv_transfer_config is None; cannot register Q ring")
 
-    return q_layer_index
+        explicit = cfg.get_from_extra_config("lmcache.q.ring_blocks", None)
+        if explicit is not None:
+            num_ring_blocks = max(1, int(explicit))
+        else:
+            depth = max(1, int(cfg.get_from_extra_config("lmcache.q.ring_depth", 2)))
+            max_batched = (
+                getattr(vllm_config.scheduler_config, "max_num_batched_tokens", None)
+                or 8192
+            )
+            num_ring_blocks = max(1, math.ceil(max_batched / block_size) * depth)
 
-
-def save_q_layer(
-    layer_name: str,
-    transfer_intermediate_tensors: bool,
-    worker_adapter: "LMCacheMPWorkerAdapter",
-    q_step_disabled: bool,
-    q_layer_index: dict[str, int],
-    q_step_state: "_QStepState | None",
-    metadata: "LMCacheMPConnectorMetadata",
-    **kwargs,
-) -> tuple["_QStepState | None", bool]:
-    """Scatter this layer's query into the ring, building the per-step plan on
-    the first attention layer of the step.
-
-    Returns:
-        (q_step_state, q_step_disabled) for the connector to write back.
-    """
-    if (
-        not transfer_intermediate_tensors
-        or not worker_adapter.is_kv_writer
-        or q_step_disabled
-    ):
-        return q_step_state, q_step_disabled
-
-    intermediate_tensors = kwargs.get("intermediate_tensors")
-    if intermediate_tensors is None:
-        return q_step_state, q_step_disabled
-    query = get_tensor(intermediate_tensors, ["q", "query"])
-    if query is None:
-        return q_step_state, q_step_disabled
-
-    layer_index = q_layer_index.get(layer_name)
-    if layer_index is None:
-        return q_step_state, q_step_disabled
-
-    if q_step_state is None:
-        q_step_state = _build_q_step_state(query, worker_adapter, metadata)
-        if q_step_state is None:
-            return None, True  # disable for the rest of this step
-
-    worker_adapter.scatter_q_layer(layer_index, query, q_step_state.ring_slots)
-    return q_step_state, q_step_disabled
-
-
-def _build_q_step_state(
-    query: torch.Tensor,
-    worker_adapter: "LMCacheMPWorkerAdapter",
-    metadata: "LMCacheMPConnectorMetadata",
-) -> "_QStepState | None":
-    """Build the per-step query store plan for the current forward step.
-    Done only on the first layer's save_kv_layer call of the step.
-
-    Args:
-        query: The query tensor of shape [num_tokens, num_q_heads, head_size].
-        metadata: The LMCache connector metadata.
-
-    Returns:
-        _QStepState: the query capture plan (containing ring slot mapping
-                        and per-request store ops).
-        None if not storing any query tensors.
-    """
-    if not (all(meta.direction == "STORE" for meta in metadata.requests)):
-        logger.warning(
-            "Not all requests are STORE. Skip query for requests %s...",
-            [meta.request_id for meta in metadata.requests],
+        self.worker_adapter.register_q_ring(
+            num_layers=num_layers,
+            num_q_heads=num_q_heads,
+            head_size=head_size,
+            dtype=dtype,
+            num_ring_blocks=num_ring_blocks,
+            device=device,
         )
-        return None
 
-    q_ring_adapter = worker_adapter.q_ring_adapter
-    if q_ring_adapter is None or q_ring_adapter.q_ring is None:
-        return None
-    q_ring = q_ring_adapter.q_ring
-    if q_ring is None:
-        return None
-    block_size = q_ring.block_size
-    num_query_rows = query.shape[0]
-    ring_slots = torch.full(
-        (num_query_rows,), -1, dtype=torch.int64, device=query.device
-    )
+    def save_q_layer(
+        self,
+        layer_name: str,
+        metadata: "LMCacheMPConnectorMetadata",
+        **kwargs,
+    ) -> None:
+        """Scatter this layer's query into the ring, building the per-step plan on
+        the first attention layer of the step.
+        """
+        if (
+            not self._enabled
+            or not self.worker_adapter.is_kv_writer
+            or self.q_step_disabled
+        ):
+            return
 
-    stores: list[_QLayerStore] = []
-    row_cursor = 0
-    for meta in metadata.requests:
-        op = meta.op
-        num_tokens = op.end - op.start
-        if num_tokens <= 0:
-            continue
-        if meta.direction != "STORE":
+        intermediate_tensors = kwargs.get("intermediate_tensors")
+        if intermediate_tensors is None:
+            return
+        query = get_tensor(intermediate_tensors, ["q", "query"])
+        if query is None:
+            return
+
+        layer_index = self.q_layer_index.get(layer_name)
+        if layer_index is None:
+            return
+
+        if self.q_step_state is None:
+            self.q_step_state = self._build_q_step_state(query, metadata)
+            if self.q_step_state is None:
+                self.q_step_disabled = True
+                return
+
+        self.worker_adapter.scatter_q_layer(
+            layer_index, query, self.q_step_state.ring_slots
+        )
+
+    def _build_q_step_state(
+        self,
+        query: torch.Tensor,
+        metadata: "LMCacheMPConnectorMetadata",
+    ) -> "_QStepState | None":
+        """Build the per-step query store plan for the current forward step.
+        Done only on the first layer's save_kv_layer call of the step.
+
+        Args:
+            query: The query tensor of shape [num_tokens, num_q_heads, head_size].
+            metadata: The LMCache connector metadata.
+
+        Returns:
+            _QStepState: the query capture plan (containing ring slot mapping
+                            and per-request store ops).
+            None if not storing any query tensors.
+        """
+        if not (all(meta.direction == "STORE" for meta in metadata.requests)):
+            logger.warning(
+                "Not all requests are STORE. Skip query for requests %s...",
+                [meta.request_id for meta in metadata.requests],
+            )
+            return None
+
+        q_ring_adapter = self.worker_adapter.q_ring_adapter
+        if q_ring_adapter is None or q_ring_adapter.q_ring is None:
+            return None
+        q_ring = q_ring_adapter.q_ring
+        block_size = q_ring.block_size
+        num_query_rows = query.shape[0]
+        ring_slots = torch.full(
+            (num_query_rows,), -1, dtype=torch.int64, device=query.device
+        )
+
+        stores: list[_QLayerStore] = []
+        row_cursor = 0
+        for meta in metadata.requests:
+            op = meta.op
+            num_tokens = op.end - op.start
+            if num_tokens <= 0:
+                continue
+            if meta.direction != "STORE":
+                row_cursor += num_tokens
+                continue
+
+            if row_cursor + num_tokens > num_query_rows:
+                logger.warning(
+                    "Skip query for request %s: query rows (%d) < %d tokens",
+                    meta.request_id,
+                    num_query_rows - row_cursor,
+                    num_tokens,
+                )
+                self._free_partial_ring_blocks(stores)
+                return None
+
+            if num_tokens % block_size != 0:
+                logger.warning(
+                    "Skip query for %s: tokens (%d) undivisible by block size",
+                    meta.request_id,
+                    num_tokens,
+                )
+                self._free_partial_ring_blocks(stores)
+                return None
+
+            n_blocks = num_tokens // block_size
+            ring_blocks = q_ring.allocate(n_blocks)
+            if ring_blocks is None:
+                logger.warning(
+                    "Skip query for request %s: need %d Q blocks, %d free",
+                    meta.request_id,
+                    n_blocks,
+                    q_ring.num_free_blocks(),
+                )
+                self._free_partial_ring_blocks(stores)
+                return None
+
+            block_tensor = torch.tensor(
+                ring_blocks, dtype=torch.int64, device=query.device
+            )
+            rows = torch.arange(num_tokens, device=query.device)
+            slots = block_tensor[rows // block_size] * block_size + (rows % block_size)
+            ring_slots[row_cursor : row_cursor + num_tokens] = slots
+            stores.append(
+                _QLayerStore(
+                    request_id=meta.request_id,
+                    op=op,
+                    ring_block_ids=ring_blocks,
+                    cache_salt=meta.cache_salt,
+                )
+            )
             row_cursor += num_tokens
-            continue
 
-        if row_cursor + num_tokens > num_query_rows:
-            logger.warning(
-                "Skip query for request %s: query rows (%d) < %d tokens",
-                meta.request_id,
-                num_query_rows - row_cursor,
-                num_tokens,
-            )
-            _free_partial_ring_blocks(worker_adapter, stores)
+        if not stores:
             return None
 
-        if num_tokens % block_size != 0:
-            logger.warning(
-                "Skip query for %s: tokens (%d) undivisible by block size",
-                meta.request_id,
-                num_tokens,
-            )
-            _free_partial_ring_blocks(worker_adapter, stores)
-            return None
+        return _QStepState(ring_slots=ring_slots, stores=stores)
 
-        n_blocks = num_tokens // block_size
-        ring_blocks = q_ring.allocate(n_blocks)
-        if ring_blocks is None:
-            logger.warning(
-                "Skip query for request %s: need %d Q blocks, %d free",
-                meta.request_id,
-                n_blocks,
-                q_ring.num_free_blocks(),
-            )
-            _free_partial_ring_blocks(worker_adapter, stores)
-            return None
+    def _free_partial_ring_blocks(self, stores: list[_QLayerStore]) -> None:
+        """Free allocated ring blocks when a full allocation is unsuccessful"""
+        q_ring_adapter = self.worker_adapter.q_ring_adapter
+        if q_ring_adapter is None or q_ring_adapter.q_ring is None:
+            return
+        q_ring = q_ring_adapter.q_ring
+        if q_ring is None:
+            return
+        for store in stores:
+            q_ring.free(store.ring_block_ids)
 
-        block_tensor = torch.tensor(ring_blocks, dtype=torch.int64, device=query.device)
-        rows = torch.arange(num_tokens, device=query.device)
-        slots = block_tensor[rows // block_size] * block_size + (rows % block_size)
-        ring_slots[row_cursor : row_cursor + num_tokens] = slots
-        stores.append(
-            _QLayerStore(
-                request_id=meta.request_id,
-                op=op,
-                ring_block_ids=ring_blocks,
-                cache_salt=meta.cache_salt,
-            )
-        )
-        row_cursor += num_tokens
-
-    if not stores:
-        return None
-
-    return _QStepState(ring_slots=ring_slots, stores=stores)
-
-
-def _free_partial_ring_blocks(
-    worker_adapter: "LMCacheMPWorkerAdapter", stores: list[_QLayerStore]
-) -> None:
-    """Free allocated ring blocks when a full allocation is unsuccessful"""
-    q_ring_adapter = worker_adapter.q_ring_adapter
-    if q_ring_adapter is None or q_ring_adapter.q_ring is None:
-        return
-    q_ring = q_ring_adapter.q_ring
-    if q_ring is None:
-        return
-    for store in stores:
-        q_ring.free(store.ring_block_ids)
+    def consume_q_step_state(self) -> _QStepState | None:
+        """Reset the per-step plan."""
+        state = self.q_step_state
+        self.q_step_state = None
+        self.q_step_disabled = False
+        return state
 
 
 class QRingBufferAdapter:
