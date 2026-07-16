@@ -18,7 +18,6 @@ import torch
 import zmq
 
 # First Party
-from lmcache.integration.vllm.vllm_multi_process_adapter import send_lmcache_request
 from lmcache.logging import init_logger
 from lmcache.sdk.wrapper.contiguous import ContiguousTransferWrapper
 from lmcache.v1.gpu_connector.utils import (
@@ -249,6 +248,11 @@ class LMCacheSDKContext:
             num_kv_heads=num_kv_heads,
             tokens_per_block=block_size,
             head_dim=head_dim,
+        )
+
+        # First Party
+        from lmcache.integration.vllm.vllm_multi_process_adapter import (
+            send_lmcache_request,
         )
 
         transfer_ctx.register(
