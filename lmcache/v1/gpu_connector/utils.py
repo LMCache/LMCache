@@ -417,9 +417,10 @@ def assert_is_vllm_flash_attn_or_flash_infer(
         lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
         lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
         lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,
-        # Blocks-first fused K/V (vLLM CPU): a per-layer non-MLA layout that
-        # shares this transfer path even though it is not literally flash-*.
+        # Blocks-first fused K/V (HND and NHD): per-layer non-MLA layouts that
+        # share this transfer path even though they are not literally flash-*.
         lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS,
+        lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS,
     )
 
 

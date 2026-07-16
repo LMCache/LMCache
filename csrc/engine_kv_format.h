@@ -101,6 +101,17 @@ enum class EngineKVFormat : int {
   The device transfer kernels treat it as HND with kv_size == 1 and
   hs == 2 * head_size (the K/V axis stays packed inside each head copy).
   */
+
+  NL_X_NB_BS_NH_TWO_HS = 11,
+  /*
+  used by:
+  - vLLM non-MLA blocks-first attention (NHD layout) with K/V fused into the
+    trailing dim
+  physical shape per layer: [num_blocks, block_size, num_heads, 2, head_size]
+  (recovered by splitting the fused trailing [num_heads, 2 * head_size]).
+  Like NL_X_NB_NH_BS_TWO_HS but tokens before heads; the device transfer
+  kernels treat it as NHD with kv_size == 1 and hs == 2 * head_size.
+  */
 };
 
 // __host__ __device__ under CUDA/HIP so the kernels can call these; the guard
@@ -133,7 +144,8 @@ LMC_KV_FORMAT_HD constexpr bool is_layer_list(EngineKVFormat f) {
          f == EngineKVFormat::NL_X_NBBS_ONE_HS ||
          f == EngineKVFormat::NL_X_TWO_NB_NH_BS_HS ||
          f == EngineKVFormat::NL_X_NB_TWO_NH_BS_HS ||
-         f == EngineKVFormat::NL_X_NB_NH_BS_TWO_HS;
+         f == EngineKVFormat::NL_X_NB_NH_BS_TWO_HS ||
+         f == EngineKVFormat::NL_X_NB_BS_NH_TWO_HS;
 }
 
 // Multi-head Latent Attention: a single latent KV head (no separate K/V split).

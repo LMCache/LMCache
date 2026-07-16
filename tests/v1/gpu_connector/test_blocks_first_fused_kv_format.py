@@ -69,7 +69,7 @@ def test_accessors():
     assert U.get_num_blocks(norm, fmt) == NB
     assert U.get_block_size(norm, fmt) == BS
     assert U.get_num_heads(norm, fmt) == NH
-    assert U.get_head_size(norm, fmt) == HS
+    assert U.get_head_size(norm, fmt) == HS * 2
     assert U.get_hidden_dim_size(norm, fmt) == NH * HS
     assert U.get_page_buffer_size(norm, fmt) == NB * BS
     assert U.get_tokens_per_layer(norm, fmt) == NB * BS

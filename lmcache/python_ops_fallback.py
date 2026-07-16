@@ -299,6 +299,12 @@ class EngineKVFormat(IntEnum):
     # second-to-last, recovered by splitting the fused [..., 2 * head_size].
     NL_X_NB_NH_BS_TWO_HS = 10
 
+    # used by: vLLM non-MLA blocks-first attention (NHD layout) with K/V fused
+    # into the trailing dim. Per-layer physical shape
+    # [num_blocks, block_size, num_heads, 2, head_size] -- like
+    # NL_X_NB_NH_BS_TWO_HS but tokens before heads.
+    NL_X_NB_BS_NH_TWO_HS = 11
+
 
 # Backward-compat alias
 GPUKVFormat = EngineKVFormat
@@ -861,6 +867,7 @@ def is_layer_list(engine_kv_format: EngineKVFormat) -> bool:
         int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS),
         int(EngineKVFormat.NL_X_NB_TWO_NH_BS_HS),
         int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
+        int(EngineKVFormat.NL_X_NB_BS_NH_TWO_HS),
     )
 
 
