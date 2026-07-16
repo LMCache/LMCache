@@ -103,15 +103,13 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
     # First Party
-    from lmcache.sdk.qringbuffer import _QStepState, save_q_layer, setup_q_ring
+    from lmcache.sdk.qringbuffer import QRingBufferCapture
 else:
     try:
         # First Party
-        from lmcache.sdk.qringbuffer import _QStepState, save_q_layer, setup_q_ring
+        from lmcache.sdk.qringbuffer import QRingBufferCapture
     except ImportError:
-        _QStepState = None
-        setup_q_ring = None
-        save_q_layer = None
+        QRingBufferCapture = None
 
 logger = lmcache_init_logger(__name__)
 
@@ -707,9 +705,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 parallel_strategy=parallel_strategy,
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
-            self._q_layer_index: dict[str, int] = {}
-            self._q_step_state: _QStepState | None = None
-            self._q_step_disabled: bool = False
+            self.q_ring_capture: "QRingBufferCapture | None" = None
+            if QRingBufferCapture is not None:
+                self.q_ring_capture = QRingBufferCapture(
+                    self.worker_adapter, self.transfer_intermediate_tensors
+                )
         else:
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
 
@@ -805,9 +805,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self.worker_adapter.register_kv_caches(
             kv_caches, engine_group_infos=engine_group_infos
         )
-        if self.transfer_intermediate_tensors:
-            self._q_layer_index = setup_q_ring(
-                kv_caches, kv_cache_config, self._vllm_config, self.worker_adapter
+        if self.q_ring_capture is not None:
+            self.q_ring_capture.setup_q_ring(
+                kv_caches, kv_cache_config, self._vllm_config
             )
         return
 
@@ -887,16 +887,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
         """
-        self._q_step_state, self._q_step_disabled = save_q_layer(
-            layer_name,
-            self.transfer_intermediate_tensors,
-            self.worker_adapter,
-            self._q_step_disabled,
-            self._q_layer_index,
-            self._q_step_state,
-            self._get_connector_metadata(),
-            **kwargs,
-        )
+        if self.q_ring_capture is not None:
+            self.q_ring_capture.save_q_layer(
+                layer_name, self._get_connector_metadata(), **kwargs
+            )
         return
 
     def wait_for_save(self):
@@ -921,9 +915,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             cache_salts.append(meta.cache_salt)
 
         # Consume the per-step query capture plan built during save_kv_layer
-        q_step_state = self._q_step_state
-        self._q_step_state = None
-        self._q_step_disabled = False
+        q_step_state = self.q_ring_capture.consume_q_step_state()
 
         if len(request_ids) == 0:
             return
