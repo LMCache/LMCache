@@ -278,9 +278,11 @@ def _stub_dynamic_agent_runtime(backend) -> None:
     backend.agent.create_batched_storage_handler = MagicMock(
         return_value=(MagicMock(), MagicMock())
     )
+    backend.agent.create_batched_mem_handler = MagicMock(return_value=MagicMock())
     backend.agent.get_storage_to_mem_handle = MagicMock(return_value=MagicMock())
     backend.agent.post_blocking = MagicMock()
     backend.agent.release_handle = MagicMock()
+    backend.agent.release_mem_handler = MagicMock()
     backend.agent.release_storage_handler = MagicMock()
 
 
