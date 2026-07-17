@@ -1114,6 +1114,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     )
                 else:
                     total_bytes = 0
+                num_tokens = num_chunks * self._ctx.chunk_size if stored_count else 0
                 self._ctx.event_bus.publish_on_stream(
                     cache_context.cupy_stream,
                     Event(
@@ -1125,6 +1126,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             "engine_id": instance_id,
                             "model_name": model_name,
                             "total_bytes": total_bytes,
+                            "num_tokens": num_tokens,
                         },
                     ),
                 )
@@ -1286,6 +1288,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         "finish_read_prefetched",
                         prefetched_keys,
                     )
+                num_tokens = (
+                    num_chunks * self._ctx.chunk_size
+                    if len(prefetched_keys) == num_chunks * num_object_groups
+                    else 0
+                )
                 self._ctx.event_bus.publish_on_stream(
                     cache_context.cupy_stream,
                     Event(
@@ -1298,6 +1305,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             "model_name": model_name,
                             "cache_salt": key.cache_salt,
                             "total_bytes": total_bytes,
+                            "num_tokens": num_tokens,
                         },
                     ),
                 )
