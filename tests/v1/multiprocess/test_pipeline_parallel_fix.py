@@ -30,6 +30,13 @@ and uses it directly in ``compute_extra_count``.  These tests verify:
 from unittest.mock import MagicMock, patch
 import threading
 
+# Third Party
+import pytest
+
+pytest.importorskip(
+    "vllm", reason="PP-MLA multi-server test requires the vLLM integration connector"
+)
+
 # First Party
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import compute_extra_count
