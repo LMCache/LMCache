@@ -520,8 +520,8 @@ class SageMakerHyperPodL2Adapter(L2AdapterInterface):
         self._loop_thread.join(timeout=5)
         if self._loop_thread.is_alive():
             logger.error("SageMaker HyperPod L2 event loop did not stop")
-            return
-        self._loop.close()
+        else:
+            self._loop.close()
         self._store_efd.close()
         self._lookup_efd.close()
         self._load_efd.close()
