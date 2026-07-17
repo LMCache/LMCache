@@ -1469,17 +1469,29 @@ class BlendV3Module(InstanceLivenessTarget):
                 gpu_context.get_temp_kernel_group_buffer(slot_idx, group_idx)
                 for slot_idx in range(batch_len)
             ]
-            if all_slots[0].shape[0] != 2:
+            kv_size = all_slots[0].shape[0]
+            # vLLM's fused blocks-first K/V formats pack K and V into a doubled
+            # head dim and report kv_size==1 (the K/V axis stays packed inside
+            # each head copy). Detect them so the K half is re-RoPE'd in place
+            # via the strided kernel; everything else must be genuine K/V.
+            fused_packed = int(group.engine_kv_format) in (
+                int(lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
+                int(lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS),
+            )
+            if kv_size != 2 and not fused_packed:
                 raise RuntimeError(
-                    f"CB v3: group {group_idx} has kv_size={all_slots[0].shape[0]}; "
-                    "MLA layouts unsupported."
+                    f"CB v3: group {group_idx} has kv_size={kv_size}; only K/V (2) "
+                    "and fused-packed K/V layouts are supported (MLA unsupported)."
                 )
             num_layers, slots, hidden_dim = all_slots[0].shape[1:]
-            n_heads = hidden_dim // rope_state.head_size
-            if n_heads * rope_state.head_size != hidden_dim:
+            # Fused-packed: each head is [K(head_size) | V(head_size)], so the
+            # per-head width is 2*head_size and only the K half is rotated.
+            per_head = rope_state.head_size * (2 if fused_packed else 1)
+            n_heads = hidden_dim // per_head
+            if n_heads * per_head != hidden_dim:
                 raise RuntimeError(
-                    f"CB rope: group {group_idx} hidden_dim ({hidden_dim}) "
-                    f"not a multiple of head_size ({rope_state.head_size})."
+                    f"CB rope: group {group_idx} hidden_dim ({hidden_dim}) not a "
+                    f"multiple of per-head width ({per_head}; fused={fused_packed})."
                 )
             # Per-group rope cache: dual-RoPE models rotate each
             # kernel group with its own theta's cos/sin.
@@ -1501,16 +1513,29 @@ class BlendV3Module(InstanceLivenessTarget):
             for slot_idx, old_st, cur_st in slots_to_rope:
                 # reshape returns an in-place view (tmp slots are contiguous).
                 k_view = all_slots[slot_idx][0].reshape(
-                    num_layers * slots, n_heads, rope_state.head_size
+                    num_layers * slots, n_heads, per_head
                 )
-                lmc_ops.rotary_embedding_k_fused(
-                    old_st + slot_positions_rep,
-                    cur_st + slot_positions_rep,
-                    k_view,
-                    rope_state.head_size,
-                    group_cos_sin,
-                    rope_state.is_neox_style,
-                )
+                if fused_packed:
+                    # Strided kernel rotates only the first head_size (K) of each
+                    # per-head 2*head_size slot in place, leaving V untouched.
+                    lmc_ops.rotary_embedding_k_fused_strided(
+                        old_st + slot_positions_rep,
+                        cur_st + slot_positions_rep,
+                        k_view,
+                        rope_state.head_size,
+                        per_head,  # head_stride: hop over the packed V half
+                        group_cos_sin,
+                        rope_state.is_neox_style,
+                    )
+                else:
+                    lmc_ops.rotary_embedding_k_fused(
+                        old_st + slot_positions_rep,
+                        cur_st + slot_positions_rep,
+                        k_view,
+                        rope_state.head_size,
+                        group_cos_sin,
+                        rope_state.is_neox_style,
+                    )
 
     def cb_retrieve_pre_computed(
         self,
