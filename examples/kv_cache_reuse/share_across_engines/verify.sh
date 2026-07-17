@@ -18,14 +18,37 @@ SGLANG_PID=""
 VLLM_PID=""
 
 cleanup() {
+    trap - EXIT INT TERM
+
     for pid in "${VLLM_PID}" "${SGLANG_PID}" "${LMCACHE_PID}"; do
         if [[ -n "${pid}" ]]; then
-            kill "${pid}" 2>/dev/null || true
+            kill -TERM -- "-${pid}" 2>/dev/null || true
         fi
     done
+
+    for pid in "${VLLM_PID}" "${SGLANG_PID}" "${LMCACHE_PID}"; do
+        if [[ -z "${pid}" ]]; then
+            continue
+        fi
+        for _ in {1..150}; do
+            if ! kill -0 -- "-${pid}" 2>/dev/null; then
+                break
+            fi
+            sleep 0.1
+        done
+        kill -KILL -- "-${pid}" 2>/dev/null || true
+    done
+
     wait 2>/dev/null || true
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if ! command -v setsid >/dev/null 2>&1; then
+    echo "Missing executable: setsid" >&2
+    exit 1
+fi
 
 for executable in \
     "${SGLANG_VENV}/bin/python" \
@@ -65,7 +88,7 @@ metric_sum() {
 }
 
 echo "Starting LMCache"
-"${VLLM_VENV}/bin/lmcache" server \
+setsid "${VLLM_VENV}/bin/lmcache" server \
     --host 127.0.0.1 \
     --port "${LMCACHE_PORT}" \
     --http-port "${LMCACHE_HTTP_PORT}" \
@@ -78,7 +101,8 @@ wait_for_health "LMCache" "${LMCACHE_HTTP_PORT}" "${LMCACHE_PID}" \
     "${WORK_DIR}/lmcache.log" "healthcheck"
 
 echo "Starting SGLang on GPU 0"
-CUDA_VISIBLE_DEVICES=0 "${SGLANG_VENV}/bin/python" -m sglang.launch_server \
+CUDA_VISIBLE_DEVICES=0 FLASHINFER_USE_CUDA_NORM=1 \
+    setsid "${SGLANG_VENV}/bin/python" -m sglang.launch_server \
     --model-path "${MODEL}" \
     --revision "${MODEL_REVISION}" \
     --host 127.0.0.1 \
@@ -93,7 +117,7 @@ CUDA_VISIBLE_DEVICES=0 "${SGLANG_VENV}/bin/python" -m sglang.launch_server \
 SGLANG_PID=$!
 
 echo "Starting vLLM on GPU 1"
-CUDA_VISIBLE_DEVICES=1 "${VLLM_VENV}/bin/vllm" serve "${MODEL}" \
+CUDA_VISIBLE_DEVICES=1 setsid "${VLLM_VENV}/bin/vllm" serve "${MODEL}" \
     --revision "${MODEL_REVISION}" \
     --host 127.0.0.1 \
     --port "${VLLM_PORT}" \

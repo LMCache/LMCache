@@ -28,6 +28,9 @@ Create separate environments so each serving engine resolves only its own
 runtime dependencies:
 
 ```bash
+export UV_CACHE_DIR="$PWD/.uv-cache"
+export UV_LINK_MODE=copy
+
 uv venv --python 3.12 .venv-sglang
 uv pip install --prerelease=allow --python .venv-sglang/bin/python \
   "lmcache==0.5.1" "sglang==0.5.15.post1"
@@ -38,7 +41,10 @@ uv pip install --python .venv-vllm/bin/python \
 ```
 
 SGLang `0.5.15.post1` pins a prerelease FlashAttention wheel, which is why its
-install command explicitly uses `--prerelease=allow`.
+install command explicitly uses `--prerelease=allow`. The dedicated uv cache
+keeps this installation isolated from shared cache entries, while copy mode
+supports hosts where the uv cache and virtual environments are on different
+filesystems.
 
 ## Run
 
@@ -59,6 +65,10 @@ SGLang and vLLM. It exits with `PASS` only when:
    request after SGLang populates the cache; and
 3. greedy vLLM decoding produces identical text for the cache-isolated cold
    request and the cross-engine cache-hit request.
+
+The SGLang process sets `FLASHINFER_USE_CUDA_NORM=1` so FlashInfer `0.6.12`
+uses its CUDA JIT normalization fallback instead of the CuTeDSL path on the
+validated Blackwell host.
 
 The fixed model revision and identical model name, tensor-parallel size, KV
 dtype, page size, and LMCache chunk size are part of the cache identity and
