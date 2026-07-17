@@ -91,6 +91,14 @@ def build_parallel_strategy(vllm_config: VllmConfig) -> ParallelStrategy:
     ``ParallelStrategy`` derives ``kv_world_size`` / ``kv_worker_id`` from the
     raw vLLM geometry (including the MLA adjustment), so the world size and
     rank are passed through unmodified.
+
+    Args:
+        vllm_config: The vLLM configuration to read the parallel geometry and
+            MLA setting from.
+
+    Returns:
+        A ``ParallelStrategy`` describing the KV parallel layout for this
+        worker, with ``n_servers`` fixed at 1.
     """
     pc = vllm_config.parallel_config
     return ParallelStrategy(
