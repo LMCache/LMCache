@@ -375,7 +375,7 @@ def gather_paged_kv_to_cpu(
 
     block_size = get_block_size(normalized, engine_kv_format)
     num_layers = get_num_layers(normalized, engine_kv_format)
-    token_hidden = get_num_heads(normalized, engine_kv_format) * get_head_size(
+    content_size = get_num_heads(normalized, engine_kv_format) * get_head_size(
         normalized, engine_kv_format
     )
     num_blocks = get_num_blocks(normalized, engine_kv_format)
@@ -415,7 +415,7 @@ def gather_paged_kv_to_cpu(
         if get_kv_size(normalized, engine_kv_format) == 1:
             chunks = [
                 torch.empty(
-                    (num_layers, chunk_tokens, token_hidden),
+                    (num_layers, chunk_tokens, content_size),
                     dtype=tensors[0].dtype,
                     device=torch.device("cpu"),
                     pin_memory=requires_pinned,
@@ -425,7 +425,7 @@ def gather_paged_kv_to_cpu(
         else:
             chunks = [
                 torch.empty(
-                    (2, num_layers, chunk_tokens, token_hidden),
+                    (2, num_layers, chunk_tokens, content_size),
                     dtype=tensors[0].dtype,
                     device=torch.device("cpu"),
                     pin_memory=requires_pinned,
