@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Per-layer, HND, blocks-first with fused K/V: ``NL x [NB, NH, BS, 2, HS]``.
+"""Per-layer, NHD, blocks-first with fused K/V: ``NL x [NB, BS, NH, 2, HS]``.
 
 A ``list[NL]`` of a 5-D tensor whose K/V (size-2) axis is second-to-last.
-The engine registers it raw as 4-D ``[NB, NH, BS, 2*HS]`` (K/V fused into the
+The engine registers it raw as 4-D ``[NB, BS, NH, 2*HS]`` (K/V fused into the
 trailing dim); detection splits that into this canonical 5-D shape. Produced
-by vLLM's non-MLA blocks-first CPU attention backend.
+by vLLM non-MLA blocks-first attention with the NHD layout.
 """
 
 # Each spec indexes ``kv_caches`` (Tensor | nested list) per its format, so the
@@ -21,9 +21,9 @@ from lmcache.v1.gpu_connector.kv_format.specs.base import KVFormatSpec
 import lmcache.c_ops as lmc_ops
 
 
-class NL_X_NB_NH_BS_TWO_HS_Spec(KVFormatSpec):
-    engine_kv_format = lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS
-    attention_backends = ("vLLM non-MLA blocks-first, fused K/V",)
+class NL_X_NB_BS_NH_TWO_HS_Spec(KVFormatSpec):
+    engine_kv_format = lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS
+    attention_backends = ("vLLM non-MLA blocks-first, fused K/V (NHD)",)
 
     def num_layers(self) -> int:
         return len(self.kv_caches)
@@ -32,32 +32,32 @@ class NL_X_NB_NH_BS_TWO_HS_Spec(KVFormatSpec):
         return self.kv_caches[0].shape[0]
 
     def block_size(self, layer_idx: int = 0) -> int:
-        return self.kv_caches[layer_idx].shape[2]
+        return self.kv_caches[layer_idx].shape[1]
 
     def page_buffer_size(self) -> int:
-        return self.kv_caches[0].shape[0] * self.kv_caches[0].shape[2]
+        return self.kv_caches[0].shape[0] * self.kv_caches[0].shape[1]
 
     def kv_size(self) -> int:
         # NOTE(ApostaC): for this special format, we treat it as
-        # normal HND format with fused KV, and the D-size is doubled
+        # normal NHD format with fused KV, and the D-size is doubled
         # (as it's kv-packed)
         return 1
 
     def num_heads(self, layer_idx: int = 0) -> int:
-        return self.kv_caches[layer_idx].shape[1]
+        return self.kv_caches[layer_idx].shape[2]
 
     def hidden_dim(self, layer_idx: int = 0) -> int:
         t = self.kv_caches[layer_idx]
-        return t.shape[1] * t.shape[4]
+        return t.shape[2] * t.shape[4]
 
     def head_size(self, layer_idx: int = 0) -> int:
         # NOTE(ApostaC): for this special format, we treat it as
-        # normal HND format with fused KV, and the D-size is doubled
+        # normal NHD format with fused KV, and the D-size is doubled
         # (as it's kv-packed)
         return self.kv_caches[layer_idx].shape[4] * 2
 
     def tokens_per_layer(self) -> int:
-        return self.kv_caches[0].shape[0] * self.kv_caches[0].shape[2]
+        return self.kv_caches[0].shape[0] * self.kv_caches[0].shape[1]
 
     def elements_per_layer(self) -> int:
         t = self.kv_caches[0]

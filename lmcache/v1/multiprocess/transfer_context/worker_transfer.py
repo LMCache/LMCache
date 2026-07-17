@@ -15,7 +15,7 @@ import torch
 from lmcache import torch_dev
 from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
-from lmcache.v1.gpu_connector.utils import LayoutHints, is_mla
+from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import RegisterEngineDrivenContextPayload
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
@@ -453,11 +453,14 @@ class EngineDrivenTransferContext(TransferContext):
             hidden_dim_size,
             dtype_str,
             engine_kv_format,
+            kv_size,
         ) = compute_kv_layout(kv_caches, layout_hints=layout_hints)
         self._layout_hints = layout_hints
         self._engine_kv_format = engine_kv_format
 
-        use_mla_flag = is_mla(engine_kv_format)
+        # The wire field is named use_mla but only drives the object plane
+        # count: single-plane (kv_size == 1) covers MLA and fused-K/V formats.
+        use_mla_flag = kv_size == 1
         shape = (
             torch.Size([num_layers, blocks_in_chunk * block_size, hidden_dim_size])
             if use_mla_flag
