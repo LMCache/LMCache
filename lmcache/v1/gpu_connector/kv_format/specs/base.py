@@ -133,6 +133,12 @@ class KVFormatSpec(ABC):
         """
 
     @abstractmethod
+    def kv_size(self) -> int:
+        """Return the number of dimensions for "KV". For normal specs, it's 2.
+        Some specs has a fused KV (e.g., MLA, or new vLLM format), so it's 1.
+        """
+
+    @abstractmethod
     def num_heads(self, layer_idx: int = 0) -> int:
         """Return the number of KV heads for ``layer_idx`` (1 for MLA)."""
 

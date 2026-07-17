@@ -1295,6 +1295,43 @@ class TestDelete:
 
         manager.close()
 
+    def test_force_delete_removes_write_locked_key(self, basic_l1_config, basic_layout):
+        """force=True deletes a write-locked key that non-force refuses."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(1)
+        manager.reserve_write([key], [False], basic_layout)  # write-locked
+
+        assert manager.delete([key]) == {key: L1Error.KEY_IS_LOCKED}
+        assert manager.delete([key], force=True) == {key: L1Error.SUCCESS}
+        assert manager.get_object_state(key) is None
+
+        manager.close()
+
+    def test_force_delete_removes_read_locked_key(self, basic_l1_config, basic_layout):
+        """force=True deletes a read-locked key that non-force refuses."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(1)
+        manager.reserve_write([key], [False], basic_layout)
+        manager.finish_write([key])
+        manager.reserve_read([key])  # read-locked
+
+        assert manager.delete([key]) == {key: L1Error.KEY_IS_LOCKED}
+        assert manager.delete([key], force=True) == {key: L1Error.SUCCESS}
+        assert manager.get_object_state(key) is None
+
+        manager.close()
+
+    def test_force_delete_missing_key_still_key_not_exist(
+        self, basic_l1_config, basic_layout
+    ):
+        """force does not invent keys: a missing key still reports KEY_NOT_EXIST."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(999)
+
+        assert manager.delete([key], force=True) == {key: L1Error.KEY_NOT_EXIST}
+
+        manager.close()
+
 
 # =============================================================================
 # Tests for L1Manager.get_object_state()

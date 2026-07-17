@@ -1,11 +1,14 @@
-
 # LMCache Multi-Hardware Architecture
+
+This document describes the multi-hardware architecture for LMCache's
+multiprocess (MP) mode. 
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      lmcache/__init__.py                        │
+│                 lmcache/v1/platform/__init__.py                 │
 │                                                                 │
 │  torch_dev, torch_device_type = _detect_device()                │
+│  _ops = get_backend(torch_device_type)                          │
 │                                                                 │
 │  ┌───────────┐     ┌───────────┐     ┌───────────┐              │
 │  │ torch.cuda│     │ torch.xpu │     │ torch.hpu │  ...         │
@@ -13,11 +16,12 @@
 │        └──────────────────┴──────────────────┘                  │
 │                           │                                     │
 │                     torch_dev (unified entry)                   │
-│                  torch_device_type ("cuda"/"xpu"/"hpu"/"cpu")   │
+│              torch_device_type (e.g. "cuda"/"musa"/"xpu"/       │
+│                                 "hpu"/"cpu"; auto-discoverable) │
 │                                                                 │
-│  [Monkey Patch Point]                                           │
-│  New hardware can be added by extending _detect_device()        │
-│  and providing a gpu_connector implementation.                  │
+│  [Registry Discovery Point]                                     │
+│  DeviceSpec subclasses are auto-discovered under                │
+│  lmcache.v1.platform and selected by availability.              │
 └──────────────────────────────┬──────────────────────────────────┘
                                │
               ┌────────────────┼──────────────────┐
@@ -36,9 +40,10 @@
 │                  │ │  device()    │ │ .Event()                 │
 │                  │ │ .device_     │ │ .Stream()                │
 │                  │ │  count()     │ │                          │
-│                  │ │              │ │ CUDA-only (hasattr):     │
+│                  │ │              │ │ IPC-capable (hasattr):   │
 │                  │ │              │ │ .Event(interprocess)     │
 │                  │ │              │ │ .from_ipc_handle()       │
+│                  │ │              │ │ CUDA-only (hasattr):     │
 │                  │ │              │ │ .cudart()                │
 └────────┬─────────┘ └──────┬───────┘ └─────────────┬────────────┘
          │                  │                       │
@@ -52,29 +57,27 @@
 │ │ MixedMemory  │  │ PinMemory    │  │ LazyMemory   │            │
 │ │ Allocator    │  │ Allocator    │  │ Allocator    │            │
 │ └──────────────┘  └──────────────┘  └──────────────┘            │
-│ ┌──────────────┐  ┌──────────────┐                              │
-│ │ XPUMemory    │  │ PagedTensor  │   uses torch_dev:            │
-│ │ Allocator    │  │ MemAllocator │   .synchronize()             │
-│ └──────────────┘  └──────────────┘   .cudart() (hasattr)        │
+│ ┌──────────────────────┐                                        │
+│ │ PagedTensorMemory    │   uses torch_dev:                      │
+│ │ Allocator            │   .synchronize()                       │
+│ └──────────────────────┘   .cudart() (hasattr)                  │
 └───────────────────────────┬─────────────────────────────────────┘
                             │
                             ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│        GPU Connector Layer (per-hardware, no unification)       │
+│              Transfer Context Layer (per-hardware routing)      │
 │                                                                 │
-│ ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐   │
-│ │ CUDA            │  │ XPU             │  │ HPU             │   │
-│ │                 │  │                 │  │                 │   │
-│ │ • PagedMemV2/V3 │  │ • PagedMemXPUV2 │  │ • PagedMemHPU   │   │
-│ │ • Layerwise     │  │ • LayerwiseXPU  │  │                 │   │
-│ │ • Buffer        │  │                 │  │ torch.hpu.*     │   │
-│ │ • SGLang        │  │ torch.xpu.*     │  │                 │   │
-│ │                 │  │ python_ops_fb   │  │                 │   │
-│ │ torch.cuda.*    │  │                 │  │                 │   │
-│ │ c_ops + cupy    │  │                 │  │                 │   │
-│ └─────────────────┘  └─────────────────┘  └─────────────────┘   │
+│ ┌────────────────────────┐  ┌──────────────────────────────┐    │
+│ │ EngineDriven           │  │ LMCacheDriven                │    │
+│ │ TransferContext        │  │ TransferContext              │    │
+│ │                        │  │                              │    │
+│ │ • host-side workers    │  │ • IPC-capable device workers │    │
+│ │ • Pickle / SHM backend │  │ • SHM wrappers (host+device) │    │
+│ │ • gather/scatter copy  │  │ • zero-copy handle transfer  │    │
+│ └────────────────────────┘  └──────────────────────────────┘    │
 │                                                                 │
-│ Route: torch_device_type -> cuda/xpu/hpu -> Connector           │
+│ Route: create_transfer_context(kv_caches, mode)                 │
+│   mode = auto | engine_driven | lmcache_driven                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -82,18 +85,27 @@
 
 | Layer | Device Reference | Notes |
 |-------|-----------------|-------|
-| **Entry** `__init__.py` | `_detect_device()` -> `torch_dev` | Monkey patch point. Detect once, reuse globally. |
+| **Entry** `v1/platform/__init__.py` | `_detect_device()` + `get_backend()` | Registry-driven detection and backend composition. |
 | **Middle** engine / storage / multiprocess | `from lmcache import torch_dev` | Hardware-agnostic unified code |
-| **Middle** CUDA-only APIs | `hasattr(torch_dev, 'xxx')` guard | Graceful runtime degradation |
-| **Bottom** GPU Connector | Direct `torch.cuda` / `torch.xpu` / `torch.hpu` | Per-hardware impl, no abstraction |
+| **Middle** IPC-capable / device-specific APIs | `hasattr(torch_dev, 'xxx')` guard | Graceful runtime degradation |
+| **Bottom** Transfer Context | `create_transfer_context(kv_caches, mode)` | Per-device routing. In `AUTO` mode: CUDA→LMCacheDriven, other devices→EngineDriven. Other IPC-capable devices (e.g. MUSA) can opt-in to LMCacheDriven via explicit `mode=lmcache_driven` when their `DeviceSpec` reports `is_handle_transfer_available() == True`. |
 
-## Connector Routing (`gpu_connector/__init__.py`)
+## Transfer Mode Routing (`transfer_context/worker_transfer.py`)
 
 ```
-torch_device_type == "cuda"  -->  VLLMPagedMemGPUConnectorV2/V3
-torch_device_type == "xpu"   -->  VLLMPagedMemXPUConnectorV2
-torch_device_type == "hpu"   -->  VLLMPagedMemHPUConnector
-torch_device_type == "cpu"   -->  (no GPU connector; raises RuntimeError)
+MPTransferMode.AUTO (default):
+  device_type == "cuda"  -->  LMCacheDrivenTransferContext  (IPC zero-copy)
+  device_type != "cuda"  -->  EngineDrivenTransferContext    (gather/scatter copy)
+
+MPTransferMode.ENGINE_DRIVEN:
+  any device             -->  EngineDrivenTransferContext
+
+MPTransferMode.LMCACHE_DRIVEN:
+  any device that reports  --> LMCacheDrivenTransferContext
+  `DeviceSpec.is_handle_transfer_available() == True`
+  (otherwise the factory raises and the caller must fall back)
+
+Override: LMCACHE_MP_TRANSFER_MODE env var or the mode argument to create_transfer_context()
 ```
 
 ## CPU-Only Stub Fallback
@@ -116,11 +128,9 @@ supported accelerators (CUDA, XPU, HPU) is available. In that case
   storage paths do not.
 
 The stub is intended for L1-adapter-only flows (e.g., end-to-end MP
-server smoke tests on a CPU-only host) and CLI loading without torch. It
-is **not** a CPU connector: there is no entry for `"cpu"` in
-`gpu_connector/__init__.py`, so calling `CreateGPUConnector` with
-`torch_device_type == "cpu"` raises `RuntimeError("No supported cpu
-connector found.")`.
+server smoke tests on a CPU-only host) and CLI loading without torch. In
+MP mode, CPU workers use `EngineDrivenTransferContext` (Pickle or SHM
+backend) for KV transfer; there is no GPU-side connector involved.
 
 `normalize_kv_and_discover_format` also hardcodes `kv_layout = "HND"`
 when `torch_device_type == "cpu"`, because vLLM's
@@ -129,8 +139,14 @@ which is wrong for that backend's actual KV cache layout.
 
 ## Adding New Hardware
 
-1. Add detection branch in `__init__.py` `_detect_device()`
-2. Create `gpu_connector/xxx_connectors.py`, implement `GPUConnectorInterface`
-3. Add routing branch in `gpu_connector/__init__.py`
-4. Add kernels in `c_ops/` or fallback in `python_ops_fallback.py`
-5. No changes needed in middle layer code
+1. Add a ``DeviceSpec`` subclass under
+   ``lmcache/v1/platform/<device>/__init__.py``.  ``ops_module = None``
+   is sufficient for basic bring-up — Python fallback handles all ops.
+2. Verify with MP ``engine_driven`` mode (see the :doc:`developer guide
+   <../source/developer_guide/extending_lmcache/adding_a_new_device_backend>`).
+3. (Optional) Provide device-specific ops matching the signatures in
+   ``lmcache.python_ops_fallback``.  ``get_backend()`` merges by name;
+   vendor-specific APIs must not leak to upper layers.
+
+No edits to ``lmcache/__init__.py`` or global backend candidate lists
+are required.
