@@ -14,12 +14,26 @@ import torch
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.gpu_connector.xpu_connectors import VLLMPagedMemXPUConnectorV2
+from lmcache.v1.gpu_connector.xpu_connectors import SGLangXPUConnector
 from tests.v1.utils import (
     dumb_metadata,
-    generate_kv_cache_paged_list_tensors,
+    generate_sglang_kv_cache_paged_list_tensors,
     generate_tokens,
 )
+
+# Mirrors tests/benchmarks/test_xpu_connector_benchmark.py but exercises the
+# SGLang XPU connector instead of the vLLM one. Same axes, same workload sizes,
+# same pytest-benchmark groups so the two outputs can be compared side-by-side.
+#
+# Run:
+#   pytest -v tests/benchmarks/test_xpu_sglang_connector_benchmark.py
+#   pytest -v tests/benchmarks/test_xpu_sglang_connector_benchmark.py -k store
+#   pytest -v tests/benchmarks/test_xpu_sglang_connector_benchmark.py -k retrieve
+#   pytest -v tests/benchmarks/test_xpu_sglang_connector_benchmark.py -k lookup
+#
+# Two-letter config legend (matches vLLM benchmark):
+#   1st letter = use_gpu             (F=False, T=True)
+#   2nd letter = save_unfull_chunk   (F=False, T=True)
 
 DEVICE_PARAMS = ["xpu"]
 BACKENDS = ["cpu", "disk"]
@@ -35,14 +49,22 @@ def _skip_if_no_xpu() -> None:
 
 
 def _skip_if_xpu_without_gpu_buffer(device_type: str, use_gpu: bool) -> None:
-    """Skip combos that require running the XPU transfer kernel against a
-    plain host pointer. Level Zero forbids it (UR_RESULT_ERROR_DEVICE_LOST),
-    and once a single test trips it the device stays dead for the rest of
-    the pytest process, cascading every subsequent test into failure."""
+    """Skip combos that exercise an unsupported codepath on XPU.
+
+    ``SGLangXPUConnector.from_gpu`` with ``use_gpu=False`` asks the native
+    SYCL kernel ``lmc_ops.multi_layer_kv_transfer_unilateral`` to gather
+    XPU KV slots and write them straight into a pinned host buffer in the
+    same kernel launch. Level Zero does not allow a compute kernel to
+    write to plain host pointers (only device or USM-shared memory), so
+    the driver kills the queue and surfaces ``UR_RESULT_ERROR_DEVICE_LOST``.
+    ``use_gpu=True`` instead stages through an XPU buffer and then uses
+    ``tensor.copy_()`` for the D2H, which the L0 DMA engine handles.
+    """
     if device_type == "xpu" and not use_gpu:
         pytest.skip(
-            "XPU connector requires use_gpu=True (Level Zero cannot run the "
-            "transfer kernel against host memory)"
+            "SGLangXPUConnector with use_gpu=False uses an XPU->pinned-host "
+            "kernel path that Level Zero does not support (causes "
+            "DEVICE_LOST). Use use_gpu=True on XPU."
         )
 
 
@@ -91,19 +113,30 @@ def _create_connector(
     chunk_size: int,
     dtype: torch.dtype,
     use_mla: bool = False,
-):
-    return VLLMPagedMemXPUConnectorV2(
+) -> SGLangXPUConnector:
+    # SGLangXPUConnector init signature:
+    #   (hidden_dim_size, num_layers, use_gpu=False, **kwargs)
+    # When use_gpu=True it also requires chunk_size, dtype, device kwargs.
+    return SGLangXPUConnector(
         hidden_dim_size=hidden_dim,
         num_layers=num_layers,
         use_gpu=use_gpu,
         chunk_size=chunk_size,
         dtype=dtype,
-        use_mla=use_mla,
         device=device,
+        use_mla=use_mla,
     )
 
 
-def _v2_store_vllm_contract(
+def _kv_device(kvcaches: list) -> torch.device:
+    """SGLang non-MLA kvcaches is [[k_list], [v_list]]; MLA is a flat list."""
+    head = kvcaches[0]
+    if isinstance(head, list):
+        return head[0].device
+    return head.device
+
+
+def _v2_store_sglang_contract(
     engine,
     list_token_ids,
     list_slot_mappings,
@@ -112,12 +145,13 @@ def _v2_store_vllm_contract(
     chunk_size: int,
     save_unfull_chunk: bool,
 ):
-    """Mimic vLLM non-layerwise store contract for V2 connector."""
+    """Mimic SGLang non-layerwise store contract for V2 connector."""
+    target_device = _kv_device(kvcaches)
     for token_ids, slot_mapping in zip(
         list_token_ids, list_slot_mappings, strict=False
     ):
         tokens = token_ids
-        slots = slot_mapping.to(kvcaches[0][0].device)
+        slots = slot_mapping.to(target_device)
 
         if save_unfull_chunk:
             aligned_len = len(tokens)
@@ -132,7 +166,7 @@ def _v2_store_vllm_contract(
         engine.store(tokens, kvcaches=kvcaches, slot_mapping=slots)
 
 
-def _v2_retrieve_vllm_contract(
+def _v2_retrieve_sglang_contract(
     engine,
     list_token_ids,
     list_slot_mappings,
@@ -141,12 +175,13 @@ def _v2_retrieve_vllm_contract(
     chunk_size: int,
     save_unfull_chunk: bool,
 ):
-    """Mimic vLLM non-layerwise retrieve contract for V2 connector."""
+    """Mimic SGLang non-layerwise retrieve contract for V2 connector."""
+    target_device = _kv_device(kvcaches)
     for token_ids, slot_mapping in zip(
         list_token_ids, list_slot_mappings, strict=False
     ):
         tokens = token_ids
-        slots = slot_mapping.to(kvcaches[0][0].device)
+        slots = slot_mapping.to(target_device)
 
         if save_unfull_chunk:
             aligned_len = len(tokens)
@@ -263,18 +298,22 @@ def test_store_1gb_v2(
         use_mla=False,
     )
 
-    kv_cache = generate_kv_cache_paged_list_tensors(
-        num_blocks,
-        device,
-        block_size,
-        dtype,
+    # SGLang non-MLA layout: [[k_list], [v_list]] with each tensor of shape
+    # [num_blocks * block_size, num_heads, head_dim].
+    kv_cache = generate_sglang_kv_cache_paged_list_tensors(
         num_layers=num_layers,
+        num_blocks=num_blocks,
+        block_size=block_size,
+        num_heads=num_heads,
         head_size=head_dim,
+        use_mla=False,
+        device=device,
+        dtype=dtype,
     )
 
-    # Bumped from 1.5 to 4.0 GB: at rounds=10 with num_requests=4 the
+    # Bumped from 1.5 to 4.0 GB: with num_requests=4 and rounds=10 the
     # smaller cap fills up and the allocator spends most of each round
-    # spinning on eviction retries.
+    # spinning on eviction retries (memory_management.py warnings).
     cfg = create_config(backend, 4.0, save_unfull_chunk=save_unfull_chunk)
     engine = _build_engine(
         name="test",
@@ -290,7 +329,7 @@ def test_store_1gb_v2(
     expected = get_expected_count(num_tokens, save_unfull_chunk, chunk_size)
 
     def run_func(tokens, slot_mappings):
-        _v2_store_vllm_contract(
+        _v2_store_sglang_contract(
             engine,
             tokens,
             slot_mappings,
@@ -355,13 +394,15 @@ def test_retrieve_1gb_allhit_v2(
         use_mla=False,
     )
 
-    kv_cache = generate_kv_cache_paged_list_tensors(
-        num_blocks,
-        device,
-        block_size,
-        dtype,
+    kv_cache = generate_sglang_kv_cache_paged_list_tensors(
         num_layers=num_layers,
+        num_blocks=num_blocks,
+        block_size=block_size,
+        num_heads=num_heads,
         head_size=head_dim,
+        use_mla=False,
+        device=device,
+        dtype=dtype,
     )
 
     list_tokens = [generate_tokens(num_tokens, device) for _ in range(num_requests)]
@@ -383,7 +424,7 @@ def test_retrieve_1gb_allhit_v2(
         autorelease_v1=autorelease_v1,
     )
 
-    _v2_store_vllm_contract(
+    _v2_store_sglang_contract(
         engine,
         list_tokens,
         list_slot_mappings,
@@ -395,7 +436,7 @@ def test_retrieve_1gb_allhit_v2(
     _wait_for_store(engine, list_tokens, expected)
 
     def run_func():
-        _v2_retrieve_vllm_contract(
+        _v2_retrieve_sglang_contract(
             engine,
             list_tokens,
             list_slot_mappings,
@@ -437,7 +478,7 @@ def test_lookup_20k_tokens_v2(
     block_size = 16
     chunk_size = 256
 
-    # Match layerwise benchmark's request count cap for use_gpu=True.
+    # Match the vLLM benchmark's request-count cap for use_gpu=True.
     num_requests = 8 if use_gpu else 10
     num_repeats = 10
 
@@ -451,13 +492,15 @@ def test_lookup_20k_tokens_v2(
         use_mla=False,
     )
 
-    kv_cache = generate_kv_cache_paged_list_tensors(
-        num_blocks,
-        device,
-        block_size,
-        dtype,
+    kv_cache = generate_sglang_kv_cache_paged_list_tensors(
         num_layers=num_layers,
+        num_blocks=num_blocks,
+        block_size=block_size,
+        num_heads=num_heads,
         head_size=head_dim,
+        use_mla=False,
+        device=device,
+        dtype=dtype,
     )
 
     list_tokens = [generate_tokens(num_tokens, device) for _ in range(num_requests)]
@@ -478,7 +521,7 @@ def test_lookup_20k_tokens_v2(
         autorelease_v1=autorelease_v1,
     )
 
-    _v2_store_vllm_contract(
+    _v2_store_sglang_contract(
         engine,
         list_tokens,
         list_slot_mappings,
