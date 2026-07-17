@@ -40,6 +40,22 @@ from lmcache.v1.platform import _registry as platform_registry
 logger = init_logger(__name__)
 
 
+def _is_rocm() -> bool:
+    """Return True if running on AMD ROCm."""
+    try:
+        return getattr(torch.version, "hip", None) is not None
+    except Exception:
+        return False
+
+
+def _has_cuda() -> bool:
+    """Return True if running on NVIDIA CUDA (not ROCm)."""
+    try:
+        return torch.cuda.is_available() and not _is_rocm()
+    except Exception:
+        return False
+
+
 class ExtraConfigDefault(enum.Enum):
     """Centralized default values for extra_config keys.
 
@@ -319,6 +335,23 @@ class ParallelStrategy:
     n_servers: int
     """Number of LMCache servers backing this deployment"""
 
+    dp_rank: int = 0
+    """Data-parallel rank (0 when dp_size=1).  Used to offset server
+    block assignment so each DP replica targets different servers."""
+
+    dp_size: int = 1
+    """Data-parallel size.  When >1, each DP replica gets
+    ``n_servers // dp_size`` servers."""
+
+    dcp_size: int = 1
+    """Decode context parallel size.  DCP splits a TP group into
+    ``tp_size // dcp_size`` DCP groups that share the same KV.  Affects
+    reader counts and writer selection for MLA."""
+
+    pcp_size: int = 1
+    """Prefill context parallel size.  Included in world_size but does
+    not affect KV cache sharding (same as TP for LMCache purposes)."""
+
     @property
     def ranks_per_node(self) -> int:
         """Number of vLLM ranks assigned to each LMCache server.
@@ -373,13 +406,19 @@ class ParallelStrategy:
         split across servers and each server gets ``ranks_per_node``
         readers.
 
+        Under DCP (decode context parallel), each TP group is split
+        into ``tp_size // dcp_size`` DCP groups that all read the same
+        MLA KV object.  The effective reader count is multiplied by
+        ``dcp_size``: ``min(tp_size * dcp_size, ranks_per_node)``.
+
         The old formula ``tp_size // n_servers`` was correct only when
         server blocks split TP groups evenly (PP=1).  Under PP > 1 the
         server blocks align with PP stages, not TP groups, causing
         under-locking (e.g. TP=4 PP=2 ns=2: locked 2, actual readers 4).
         """
         if self.use_mla:
-            return min(self.tp_size, self.ranks_per_node)
+            effective_tp = self.tp_size * self.dcp_size
+            return min(effective_tp, self.ranks_per_node)
         return self.tp_size // self.n_servers
 
     @property
@@ -406,11 +445,32 @@ class ParallelStrategy:
             return True
         rpn = self.ranks_per_node
         if rpn == 0:
-            # n_servers > world_size — degenerate, shouldn't happen
-            # (connector asserts world_size % n_servers == 0), but
-            # guard against ZeroDivisionError regardless.
             return True
-        return (self.vllm_worker_id % rpn) % self.tp_size == 0
+        # Under DCP, the effective TP group is tp_size * dcp_size.
+        # The writer is the first rank in each (server, stage, dcp_group).
+        effective_tp = self.tp_size if self.dcp_size <= 1 else self.tp_size
+        # When dcp_size > 1, dcp workers share KV, so the writer condition
+        # uses tp_size (not tp_size * dcp_size) because only one DCP rank
+        # per TP rank writes.
+        return (self.vllm_worker_id % rpn) % effective_tp == 0
+
+    @property
+    def dp_server_offset(self) -> int:
+        """Server URL index offset for this DP replica.
+
+        When ``dp_size > 1``, each DP replica gets
+        ``n_servers // dp_size`` servers.  The offset is
+        ``dp_rank * (n_servers // dp_size)`` so replicas don't collide.
+        """
+        if self.dp_size <= 1:
+            return 0
+        servers_per_dp = self.n_servers // self.dp_size
+        return self.dp_rank * servers_per_dp
+
+    @property
+    def dp_rank_value(self) -> int:
+        """The DP rank to embed in cache keys (isolates DP replicas)."""
+        return self.dp_rank
 
 
 def _normalize_adapter_init_args(
@@ -819,18 +879,44 @@ class LMCacheMPSchedulerAdapter:
             for url in self._server_urls
         }
 
-        # Any one server failure means the whole lookup fails.
-        for url, fut in futures.items():
-            try:
-                fut.result(timeout=self._mq_timeout)
-            except TimeoutError:
-                logger.warning(
-                    "LOOKUP to %s timed out after %ss. Marking server as unhealthy.",
-                    url,
-                    self._mq_timeout,
-                )
-                self._health_events[url].clear()
-                return
+        # Collect results concurrently using a thread pool.  This prevents
+        # a single slow server from blocking the entire fan-out when there
+        # are many servers (16+).  ZMQ sends are already async (the dict
+        # comprehension fires all sends before any .result() call); this
+        # parallelizes the result-collection too.
+        if len(futures) > 4:
+            # Use ThreadPoolExecutor for many-server fan-out
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=len(futures)) as pool:
+                result_futs = {
+                    pool.submit(lambda f=fut: f.result(timeout=self._mq_timeout)): url
+                    for url, fut in futures.items()
+                }
+                for rf in as_completed(result_futs):
+                    url = result_futs[rf]
+                    try:
+                        rf.result()
+                    except TimeoutError:
+                        logger.warning(
+                            "LOOKUP to %s timed out after %ss. "
+                            "Marking server as unhealthy.",
+                            url, self._mq_timeout,
+                        )
+                        self._health_events[url].clear()
+                        return
+        else:
+            # Small server count: sequential is fine (less overhead)
+            for url, fut in futures.items():
+                try:
+                    fut.result(timeout=self._mq_timeout)
+                except TimeoutError:
+                    logger.warning(
+                        "LOOKUP to %s timed out after %ss. "
+                        "Marking server as unhealthy.",
+                        url, self._mq_timeout,
+                    )
+                    self._health_events[url].clear()
+                    return
 
         self._pending_lookups.add(request_id)
         self._lookup_params[request_id] = (token_ids, cache_salt)
@@ -1097,6 +1183,8 @@ class LMCacheMPSchedulerAdapter:
             request_id=request_id,
             cache_salt=cache_salt,
             use_mla=self.parallel_strategy.use_mla,
+            dp_rank=self.parallel_strategy.dp_rank_value,
+            device_vendor="rocm" if _is_rocm() else "nvidia" if _has_cuda() else "",
         )
 
 
@@ -1861,4 +1949,6 @@ class LMCacheMPWorkerAdapter:
             request_id=request_id,
             cache_salt=cache_salt,
             use_mla=self.parallel_strategy.use_mla,
+            dp_rank=self.parallel_strategy.dp_rank_value,
+            device_vendor="rocm" if _is_rocm() else "nvidia" if _has_cuda() else "",
         )

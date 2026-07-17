@@ -250,14 +250,24 @@ try:
 except (ValueError, AssertionError) as e:
     check("PP+MLA multi-server validation passes", False, f"raised: {e}")
 
-# DP + multi-server: MUST raise ValueError
+# DP + multi-server: now SUPPORTED (n_servers must be divisible by dp_size)
+# Valid: n_servers=4, dp_size=2 → each DP replica gets 2 servers
 try:
-    _validate_multi_server_config(_fake_cfg(tp=2, pp=1, dp=2, world_size=4), n_servers=2)
-    check("DP multi-server raises ValueError", False, "did not raise")
+    _validate_multi_server_config(_fake_cfg(tp=2, pp=1, dp=2, world_size=4), n_servers=4)
+    check("DP multi-server (n_servers%dp==0) passes", True)
+except (ValueError, AssertionError) as e:
+    check("DP multi-server (n_servers%dp==0) passes", False, f"raised: {e}")
+
+# Invalid: n_servers=6, dp_size=4 → 6%4 != 0 → must raise ValueError
+try:
+    _validate_multi_server_config(_fake_cfg(tp=2, pp=1, dp=4, world_size=12), n_servers=6)
+    check("DP multi-server (n_servers%dp!=0) raises ValueError", False, "did not raise")
 except ValueError as e:
-    check("DP multi-server raises ValueError", "data parallelism" in str(e), str(e))
+    check("DP multi-server (n_servers%dp!=0) raises ValueError",
+          "divisible by dp_size" in str(e) or "dp_size" in str(e), str(e))
 except AssertionError:
-    check("DP multi-server raises ValueError", False, "raised AssertionError not ValueError")
+    check("DP multi-server (n_servers%dp!=0) raises ValueError", False,
+          "raised AssertionError (world_size divisibility) not DP ValueError")
 
 # Non-divisible world_size: MUST raise AssertionError
 try:
@@ -351,10 +361,10 @@ for tp, pp, ns in [(4, 2, 2), (2, 1, 1), (8, 2, 4)]:
 
 # Source inspection: the formulas match the edited code
 ps_src = (ROOT / "lmcache/integration/vllm/vllm_multi_process_adapter.py").read_text()
-check("kv_tp_size uses min(tp, ranks_per_node) for MLA",
-      "min(self.tp_size, self.ranks_per_node)" in ps_src)
-check("is_kv_writer uses (wid % rpn) % tp for MLA",
-      "(self.vllm_worker_id % rpn) % self.tp_size" in ps_src)
+check("kv_tp_size uses min(effective_tp, ranks_per_node) for MLA (with DCP)",
+      "min(effective_tp, self.ranks_per_node)" in ps_src)
+check("is_kv_writer uses (wid % rpn) % effective_tp for MLA",
+      "(self.vllm_worker_id % rpn) % effective_tp" in ps_src)
 check("ranks_per_node property added",
       "def ranks_per_node" in ps_src)
 
@@ -786,6 +796,87 @@ check("no hard assert on local_world_size == tp_size",
 lookup_src = (ROOT / "lmcache/v1/multiprocess/modules/lookup.py").read_text()
 check("free_lookup_locks has SWA guard (num_object_groups check)",
       "num_object_groups" in lookup_src and "safe_keys" in lookup_src)
+
+# --------------------------------------------------------------------------- #
+print()
+print("=" * 72)
+print("  All parallelism: DP, DCP, large clusters, mixed-vendor")
+print("=" * 72)
+
+# Fix 1: ObjectKey 16-bit bitmap
+api_src = (ROOT / "lmcache/v1/distributed/api.py").read_text()
+check("ObjectKey uses 16-bit bitmap (<< 48)",
+      "<< 48" in api_src and "<< 32" in api_src)
+check("ObjectKey has 16-bit validation (assert)",
+      "_MAX_16BIT" in api_src or "0xFFFF" in api_src)
+check("ObjectKey comment says 65535 (not 8)",
+      "65535" in api_src)
+
+# Fix 2: DP fields in IPCCacheServerKey
+ct_src = (ROOT / "lmcache/v1/multiprocess/custom_types.py").read_text()
+check("IPCCacheServerKey has dp_rank field",
+      "dp_rank: int = 0" in ct_src)
+check("IPCCacheServerKey has device_vendor field",
+      'device_vendor: str = field(default="", compare=False)' in ct_src)
+check("from_token_ids accepts dp_rank and device_vendor",
+      "dp_rank: int = 0" in ct_src and "device_vendor: str = \"\"" in ct_src)
+check("no_worker_id_version propagates dp_rank and device_vendor",
+      "dp_rank=self.dp_rank" in ct_src and "device_vendor=self.device_vendor" in ct_src)
+
+# Fix 2: DP in ParallelStrategy
+check("ParallelStrategy has dp_rank field",
+      "dp_rank: int = 0" in ps_src)
+check("ParallelStrategy has dp_size field",
+      "dp_size: int = 1" in ps_src)
+check("ParallelStrategy has dp_server_offset property",
+      "def dp_server_offset" in ps_src)
+check("build_parallel_strategy reads data_parallel_size",
+      "data_parallel_size" in connector_src)
+check("build_parallel_strategy computes dp_rank",
+      "dp_rank" in connector_src and "pc.rank // pc.world_size" in connector_src)
+
+# Fix 2: DP server offset in connector
+check("connector applies dp_server_offset to server URL",
+      "dp_offset" in connector_src and "dp_server_offset" in connector_src)
+
+# Fix 3: DCP in ParallelStrategy
+check("ParallelStrategy has dcp_size field",
+      "dcp_size: int = 1" in ps_src)
+check("ParallelStrategy has pcp_size field",
+      "pcp_size: int = 1" in ps_src)
+check("kv_tp_size accounts for DCP (effective_tp)",
+      "effective_tp" in ps_src and "dcp_size" in ps_src)
+check("build_parallel_strategy reads decode_context_parallel_size",
+      "decode_context_parallel_size" in connector_src)
+
+# Fix 4: Relaxed MLA alignment
+mc_src = (ROOT / "lmcache/integration/vllm/multi_server_config.py").read_text()
+check("MLA alignment relaxed (rpn < tp allowed)",
+      "ranks_per_node >= tp_size" in mc_src or "ranks_per_node < tp_size" in mc_src)
+check("MLA alignment no longer rejects rpn < tp",
+      "min(tp, rpn) clamping" in mc_src or "clamping" in mc_src)
+
+# Fix 5: device_vendor in adapters
+check("vLLM adapter _create_key sets device_vendor",
+      "device_vendor=" in ps_src and "_is_rocm" in ps_src)
+check("_is_rocm helper defined",
+      "def _is_rocm" in ps_src)
+check("_has_cuda helper defined",
+      "def _has_cuda" in ps_src)
+
+# Fix 6: Async fan-out
+check("async fan-out uses ThreadPoolExecutor for many servers",
+      "ThreadPoolExecutor" in ps_src and "len(futures) > 4" in ps_src)
+
+# Fix 7: Duplicate URL validation
+check("connector validates duplicate server URLs",
+      "Duplicate server URLs" in connector_src or "len(set(server_urls))" in connector_src)
+
+# Fix 2: DP validation in multi_server_config
+check("DP multi-server validated (n_servers % dp_size)",
+      "n_servers % dp_size" in mc_src or "divisible by dp_size" in mc_src)
+check("DP multi-server no longer hard-rejected",
+      "does not support data parallelism yet" not in mc_src)
 
 # --------------------------------------------------------------------------- #
 print()

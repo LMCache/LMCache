@@ -188,6 +188,10 @@ def build_parallel_strategy_from_vllm_config(
         The constructed ParallelStrategy.
     """
     pc = vllm_config.parallel_config
+    dp_size = getattr(pc, "data_parallel_size", 1)
+    dp_rank = pc.rank // pc.world_size if pc.world_size > 0 else 0
+    dcp_size = getattr(pc, "decode_context_parallel_size", 1)
+    pcp_size = getattr(pc, "prefill_context_parallel_size", 1)
     return ParallelStrategy(
         use_mla=mla_enabled(vllm_config.model_config),
         vllm_world_size=pc.world_size,
@@ -195,6 +199,10 @@ def build_parallel_strategy_from_vllm_config(
         tp_size=pc.tensor_parallel_size,
         pp_size=pc.pipeline_parallel_size,
         n_servers=n_servers,
+        dp_rank=dp_rank,
+        dp_size=dp_size,
+        dcp_size=dcp_size,
+        pcp_size=pcp_size,
     )
 
 
@@ -612,6 +620,20 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # ZMQ requires an explicit transport such as ``tcp://``.
         server_urls = [_ensure_zmq_scheme(u) for u in server_urls]
 
+        # Check for duplicate server URLs (a config typo could silently
+        # collapse two server blocks into one).
+        if len(set(server_urls)) != len(server_urls):
+            seen = set()
+            dups = []
+            for url in server_urls:
+                if url in seen:
+                    dups.append(url)
+                seen.add(url)
+            raise ValueError(
+                f"Duplicate server URLs in lmcache.mp.server_urls: {dups}. "
+                "Each server must have a unique URL."
+            )
+
         # The server count is derived from lmcache.mp.server_urls.
         n_servers = len(server_urls)
 
@@ -641,9 +663,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             #   node 0 → ranks [0, ranks_per_node),
             #   node 1 → [ranks_per_node, 2 * ranks_per_node), ...
             ranks_per_node = parallel_strategy.vllm_world_size // n_servers
-            local_server_url = server_urls[
+            # Apply DP offset: each DP replica gets a contiguous block of
+            # servers.  The worker's rank within its DP replica determines
+            # the server; the DP offset shifts to the replica's block.
+            dp_offset = parallel_strategy.dp_server_offset
+            server_idx = (
                 parallel_strategy.vllm_worker_id // ranks_per_node
-            ]
+            ) + dp_offset
+            # Wrap around in case of edge cases
+            server_idx = server_idx % len(server_urls)
+            local_server_url = server_urls[server_idx]
             self.worker_adapter = LMCacheMPWorkerAdapter(
                 server_url=local_server_url,
                 context=zmq_context,

@@ -73,6 +73,24 @@ class IPCCacheServerKey:
     # because it does not affect cache identity.
     use_mla: bool = field(default=False, compare=False)
 
+    # === Data parallel rank (part of cache identity) ===
+    # When data_parallel_size > 1, each DP replica has its own KV cache
+    # namespace.  Two DP replicas with the same worker_id would produce
+    # identical keys without this field → cache collisions.  ``dp_rank``
+    # isolates each replica's key space.  Default 0 (no DP).
+    # ``compare=True`` because different DP replicas must have different
+    # cache identities.
+    dp_rank: int = 0
+
+    # === Device vendor (not part of cache identity) ===
+    # In mixed NVIDIA+AMD clusters, a CUDA worker and ROCm worker with
+    # the same rank would produce identical keys but incompatible IPC
+    # handles / serde formats.  This field (set to "nvidia" or "rocm")
+    # lets the server warn on cross-vendor access.  ``compare=False``
+    # because same-rank same-DP keys should be cache-identical (the
+    # vendor is informational, not identity).
+    device_vendor: str = field(default="", compare=False)
+
     # Duplicated from ObjectKey — cannot import ObjectKey here due to
     # circular dependency (api.py imports IPCCacheServerKey).
     _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
@@ -103,6 +121,8 @@ class IPCCacheServerKey:
         request_id: str = "",
         cache_salt: str = "",
         use_mla: bool = False,
+        dp_rank: int = 0,
+        device_vendor: str = "",
     ) -> "IPCCacheServerKey":
         """Create a key from token ids. Only used by the tests."""
         return cls(
@@ -115,6 +135,8 @@ class IPCCacheServerKey:
             request_id=request_id,
             cache_salt=cache_salt,
             use_mla=use_mla,
+            dp_rank=dp_rank,
+            device_vendor=device_vendor,
         )
 
     def no_worker_id_version(self) -> "IPCCacheServerKey":
@@ -129,6 +151,8 @@ class IPCCacheServerKey:
             request_id=self.request_id,
             cache_salt=self.cache_salt,
             use_mla=self.use_mla,
+            dp_rank=self.dp_rank,
+            device_vendor=self.device_vendor,
         )
 
 

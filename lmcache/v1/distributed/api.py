@@ -151,7 +151,7 @@ class ObjectKey:
             world_size (int): The total number of workers (include TP + PP)
             global_rank (int): The global worker id (from 0 to world_size - 1)
             local_world_size (int): The local world size (for local node),
-                should NOT be greater than 8
+                should NOT be greater than 65535
             local_rank (int): The local world rank (for local node)
 
         Returns:
@@ -165,16 +165,12 @@ class ObjectKey:
             - local_rank = 1
 
             The output KV rank is the bitmap:
-            +--head--+
-            |00000000|
-            |00000000|
-            |00000000|
-            |00000000| layers
-            |00001100|
-            |00001100|
-            |00001100|
-            |00001100|
-            +--------+
+            +------head------+
+            |0000000000000000|
+            |0000000000001000|
+            |0000000000000100|
+            |0000000000000001|
+            +----------------+
         """
         # TODO(ApostaC): in the long run, we want to have the above bitmap based
         # representation for asymmetric parallelism (e.g., sharing across different
@@ -182,11 +178,19 @@ class ObjectKey:
         # For now, let's have a simple implementation that just
         # differentiate between different parallel setups
 
-        # For each number, we use 8-bit, and pack them together
+        # For each number, we use 16-bit, and pack them together into a
+        # 64-bit int.  This supports up to 65535 GPUs per field, which is
+        # sufficient for any foreseeable cluster size.  The previous 8-bit
+        # layout overflowed silently at 256+ GPUs, causing cache collisions.
+        _MAX_16BIT = 0xFFFF
+        assert 0 <= world_size <= _MAX_16BIT, f"world_size {world_size} exceeds 16-bit limit"
+        assert 0 <= global_rank <= _MAX_16BIT, f"global_rank {global_rank} exceeds 16-bit limit"
+        assert 0 <= local_world_size <= _MAX_16BIT, f"local_world_size {local_world_size} exceeds 16-bit limit"
+        assert 0 <= local_rank <= _MAX_16BIT, f"local_rank {local_rank} exceeds 16-bit limit"
         return (
-            (world_size << 24)
-            | (global_rank << 16)
-            | (local_world_size << 8)
+            (world_size << 48)
+            | (global_rank << 32)
+            | (local_world_size << 16)
             | local_rank
         )
 
