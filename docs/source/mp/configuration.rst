@@ -456,6 +456,13 @@ logging, tracing).
    * - ``--prometheus-port``
      - ``9090``
      - Port for the Prometheus ``/metrics`` endpoint.
+   * - ``--enable-extra-logging``
+     - off
+     - Periodic INFO logs: per-GPU L0<->L1 transfer stats and L1 memory
+       usage. See :doc:`observability/logs`.
+   * - ``--extra-logging-interval``
+     - ``10.0``
+     - Seconds between extra-logging emissions.
 
 vLLM Client Configuration
 --------------------------
