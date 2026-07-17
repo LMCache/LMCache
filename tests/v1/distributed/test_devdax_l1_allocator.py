@@ -760,6 +760,71 @@ def test_remove_device_defers_unmap_while_external_views_alive(tmp_path):
     manager.close()
 
 
+def test_reap_synchronizes_device_before_unmap(tmp_path, monkeypatch):
+    """A drain reap must fence the device before it unmaps an arena.
+
+    L1 hands out raw pinned host pointers, and some GPU connectors release an
+    object's pin after only a device-side stream wait (no host sync). A transfer
+    reading the mapping can therefore still be in flight when the last L1
+    allocation is freed. The reap must ``torch_dev.synchronize()`` before it
+    unregisters/unmaps the arena, otherwise the munmap/cudaHostUnregister races
+    that in-flight transfer. This asserts the ordering, and that no fence is
+    wasted while the arena still has live allocations.
+    """
+    events: list[str] = []
+
+    class _OrderedExt:
+        is_pin_supported = True
+
+        def pin_memory(self, ptr: int, size: int, flags: int = 0) -> bool:
+            return True
+
+        def unpin_memory(self, ptr: int) -> bool:
+            events.append("unpin")
+            return True
+
+    class _OrderedRuntime:
+        def is_available(self) -> bool:
+            return True
+
+        def synchronize(self) -> None:
+            events.append("sync")
+
+    monkeypatch.setattr(memory_management, "torch_device_type", "cuda")
+    monkeypatch.setattr(memory_management, "torch_dev", _OrderedRuntime())
+    monkeypatch.setattr(memory_management, "current_device_spec", _OrderedExt())
+
+    primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")
+    manager = _pure_devdax_manager(primary)
+
+    # Fill the primary so the next object lands on the removable extra arena.
+    error, first = manager.allocate(_layout(4096), count=1)
+    assert error == L1Error.SUCCESS
+    extra = _make_mmap_file(tmp_path, size=4096, name="extra.bin")
+    manager.add_device(extra, 4096)
+    error, second = manager.allocate(_layout(4096), count=1)
+    assert error == L1Error.SUCCESS
+
+    # Draining with a live allocation has nothing to unmap yet, so it must not
+    # fence the device.
+    manager.remove_device(extra)
+    assert events == []
+
+    # Freeing the arena's last allocation reaps it: fence FIRST, then unmap.
+    manager.free(second)
+    del second
+    gc.collect()
+    assert [status.device_path for status in manager.get_arena_statuses()] == [primary]
+    assert events == ["sync", "unpin"], (
+        f"reap must synchronize the device before unmapping; got {events}"
+    )
+
+    manager.free(first)
+    del first
+    gc.collect()
+    manager.close()
+
+
 def test_add_device_releases_mapping_when_arena_setup_fails(tmp_path, monkeypatch):
     primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")
     allocator = DevDaxMemoryAllocator(

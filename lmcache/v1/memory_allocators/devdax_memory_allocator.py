@@ -323,6 +323,12 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             return
         if arena.allocator.num_active_allocations > 0:
             return
+        # No live L1 allocations, but a device transfer reading this mapping may
+        # still be in flight (L1 hands out raw pinned pointers; some connectors
+        # release the pin after only a device-side stream wait). Fence before
+        # cudaHostUnregister/munmap so no queued transfer outlives the mapping.
+        if memory_management.torch_dev.is_available():
+            memory_management.torch_dev.synchronize()
         try:
             self._close_arena_locked(arena)
         except BufferError:
