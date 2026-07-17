@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+import asyncio
 import threading
 
 # Third Party
@@ -730,3 +731,92 @@ class TestLocalCPUBackendAllocatorAlignment:
             assert kwargs.get("align_bytes") == 4096
         finally:
             backend.memory_allocator.close()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_pin_lookups_isolate_keys_in_request(
+        self, local_cpu_backend
+    ):
+        """Concurrent pin lookups must not clear each other's keys (#4137)."""
+        key_a = create_test_key("key_a")
+        key_b = create_test_key("key_b")
+        mem_a = create_test_memory_obj()
+        mem_b = create_test_memory_obj()
+        local_cpu_backend.submit_put_task(key_a, mem_a)
+        local_cpu_backend.submit_put_task(key_b, mem_b)
+
+        touched: list[CacheEngineKey] = []
+        original_update_on_hit = local_cpu_backend.cache_policy.update_on_hit
+
+        def tracking_update_on_hit(key, cache_dict):
+            touched.append(key)
+            original_update_on_hit(key, cache_dict)
+
+        local_cpu_backend.cache_policy.update_on_hit = tracking_update_on_hit
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def lookup_one(lookup_id: str, key: CacheEngineKey, wait: bool):
+            n = await local_cpu_backend.batched_async_contains(
+                lookup_id, [key], pin=True
+            )
+            assert n == 1
+            if wait:
+                started.set()
+                await release.wait()
+            else:
+                await started.wait()
+                local_cpu_backend.touch_cache()
+                release.set()
+                return
+            local_cpu_backend.touch_cache()
+
+        # Request A records keys, then yields; B contains+touches (would wipe a
+        # shared list); A then touches and must still see its own keys.
+        await asyncio.gather(
+            lookup_one("a", key_a, wait=True),
+            lookup_one("b", key_b, wait=False),
+        )
+
+        assert set(touched) == {key_a, key_b}
+        local_cpu_backend.memory_allocator.close()
+
+    def test_threaded_pin_lookups_isolate_keys_in_request(self, local_cpu_backend):
+        """Thread-concurrent pin lookups must isolate keys_in_request (#4137)."""
+        key_a = create_test_key("threaded_a")
+        key_b = create_test_key("threaded_b")
+        local_cpu_backend.submit_put_task(key_a, create_test_memory_obj())
+        local_cpu_backend.submit_put_task(key_b, create_test_memory_obj())
+
+        touched: list[CacheEngineKey] = []
+        touch_lock = threading.Lock()
+        original_update_on_hit = local_cpu_backend.cache_policy.update_on_hit
+
+        def tracking_update_on_hit(key, cache_dict):
+            with touch_lock:
+                touched.append(key)
+            original_update_on_hit(key, cache_dict)
+
+        local_cpu_backend.cache_policy.update_on_hit = tracking_update_on_hit
+
+        barrier = threading.Barrier(2)
+        errors: list[BaseException] = []
+
+        def lookup_one(key: CacheEngineKey):
+            try:
+                assert local_cpu_backend.contains(key, pin=True)
+                barrier.wait(timeout=5)
+                local_cpu_backend.touch_cache()
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        t1 = threading.Thread(target=lookup_one, args=(key_a,))
+        t2 = threading.Thread(target=lookup_one, args=(key_b,))
+        t1.start()
+        t2.start()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
+
+        assert not errors
+        assert set(touched) == {key_a, key_b}
+        local_cpu_backend.memory_allocator.close()

@@ -2,6 +2,7 @@
 # Standard
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import nullcontext
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence
 import asyncio
 import os
@@ -36,6 +37,27 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _DEFAULT_THREAD_COUNT = 4
+
+# Per-task / per-thread list of keys touched during a pin=True lookup.
+# Shared instance state is incorrect under concurrent lookups on one
+# asyncio thread (see #4137 / LocalCPUBackend).
+_keys_in_request_var: ContextVar[Optional[List[CacheEngineKey]]] = ContextVar(
+    "local_disk_keys_in_request", default=None
+)
+
+
+def _get_keys_in_request() -> List[CacheEngineKey]:
+    keys = _keys_in_request_var.get()
+    if keys is None:
+        keys = []
+        _keys_in_request_var.set(keys)
+    return keys
+
+
+def _take_keys_in_request() -> List[CacheEngineKey]:
+    keys = _keys_in_request_var.get()
+    _keys_in_request_var.set(None)
+    return keys if keys is not None else []
 
 
 # TODO(Jiayi): handle cases where cache is repetitvely prefetched.
@@ -174,11 +196,6 @@ class LocalDiskBackend(StorageBackendInterface):
         self.max_cache_size = int(config.max_local_disk_size * 1024**3)
         self.current_cache_size = 0.0
 
-        # to help maintain suffix -> prefix order in the dict
-        # assumption: only one request is looked up at a time
-        # (only one worker per cache engine)
-        self.keys_in_request: List[CacheEngineKey] = []
-
         self.lmcache_worker = lmcache_worker
         self.instance_id = config.lmcache_instance_id
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
@@ -214,15 +231,15 @@ class LocalDiskBackend(StorageBackendInterface):
             if pin:
                 self.dict[key].pin()
                 # vllm lookup sets pin to True
-                self.keys_in_request.append(key)
+                _get_keys_in_request().append(key)
             return True
 
     def touch_cache(self):
         # flip the order of the keys in the request
         with self.disk_lock:
-            for key in reversed(self.keys_in_request):
+            keys_in_request = _take_keys_in_request()
+            for key in reversed(keys_in_request):
                 self.cache_policy.update_on_hit(key, self.dict)
-            self.keys_in_request = []
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         return self.disk_worker.exists_in_put_tasks(key)
@@ -611,7 +628,7 @@ class LocalDiskBackend(StorageBackendInterface):
                     return num_hit_counts
                 if pin:
                     self.dict[key].pin()
-                    self.keys_in_request.append(key)
+                    _get_keys_in_request().append(key)
                 num_hit_counts += 1
         return num_hit_counts
 
