@@ -61,6 +61,10 @@ class EventType(Enum):
     # MP Server request-level events (start/end pairs)
     MP_STORE_START = "mp.store.start"
     MP_STORE_END = "mp.store.end"
+    # Emitted on a committed store; carries the committed ``key`` and its
+    # ``object_keys`` for the Dynamo KV-event store subscriber (counterpart to
+    # ``L1_KEYS_EVICTED``).
+    MP_KEYS_STORED = "mp.keys.stored"
     MP_RETRIEVE_START = "mp.retrieve.start"
     MP_RETRIEVE_END = "mp.retrieve.end"
     MP_LOOKUP_PREFETCH_START = "mp.lookup_prefetch.start"

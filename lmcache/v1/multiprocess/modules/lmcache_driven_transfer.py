@@ -1136,6 +1136,19 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 num_chunks * self._ctx.chunk_size,
                 ed - st,
             )
+            # Publish MP_KEYS_STORED for the committed range using group 0's
+            # token-ordered hashes. Skip if the publisher is disabled.
+            if self._ctx.dynamo_kv_publisher is not None:
+                self._ctx.event_bus.publish(
+                    Event(
+                        event_type=EventType.MP_KEYS_STORED,
+                        session_id=key.request_id,
+                        metadata={
+                            "key": key,
+                            "object_keys": obj_keys_per_obj_group[0],
+                        },
+                    )
+                )
         return event.ipc_handle(), True
 
     @_lmcache_nvtx_annotate
