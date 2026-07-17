@@ -253,7 +253,8 @@ class SageMakerHyperPodL2Adapter(L2AdapterInterface):
         except Exception:
             self._loop.call_soon_threadsafe(self._loop.stop)
             self._loop_thread.join(timeout=5)
-            self._loop.close()
+            if not self._loop_thread.is_alive():
+                self._loop.close()
             self._store_efd.close()
             self._lookup_efd.close()
             self._load_efd.close()
