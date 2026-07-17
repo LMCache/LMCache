@@ -730,6 +730,26 @@ class StorageManager:
         """
         self._l1_manager.touch_keys(keys)
 
+    def delete_l1_keys(
+        self, keys: list[ObjectKey], force: bool = False
+    ) -> tuple[int, int]:
+        """Delete the given keys from L1.
+
+        Args:
+            keys (list[ObjectKey]): List of object keys to delete.
+            force (bool): When True, delete even read/write-locked keys; else
+                skip them.
+
+        Returns:
+            tuple[int, int]: ``(deleted, skipped)`` -- the number of keys removed
+                and the number refused because they were locked (non-force only).
+                Missing keys are a no-op, so the operation is idempotent.
+        """
+        results = self._l1_manager.delete(keys, force=force)
+        deleted = sum(1 for err in results.values() if err == L1Error.SUCCESS)
+        skipped = sum(1 for err in results.values() if err == L1Error.KEY_IS_LOCKED)
+        return deleted, skipped
+
     def unsafe_read(
         self, keys: list[ObjectKey]
     ) -> tuple[list[ObjectKey], list[MemoryObj]]:

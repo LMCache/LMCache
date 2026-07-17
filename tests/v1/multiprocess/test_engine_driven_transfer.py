@@ -147,6 +147,38 @@ def _make_hnd_flashinfer_kv_caches(
     return kv_caches
 
 
+def _make_fused_hnd_kv_caches(
+    num_layers: int = 2,
+    num_blocks: int = 6,
+    block_size: int = 4,
+    num_heads: int = 2,
+    head_size: int = 8,
+) -> dict[str, torch.Tensor]:
+    """Build per-layer blocks-first fused-K/V HND tensors ([NB, NH, BS, 2*HS])."""
+    kv_caches = {}
+    for i in range(num_layers):
+        kv_caches[f"layer_{i}"] = torch.randn(
+            num_blocks, num_heads, block_size, 2 * head_size
+        )
+    return kv_caches
+
+
+def _make_fused_nhd_kv_caches(
+    num_layers: int = 2,
+    num_blocks: int = 6,
+    block_size: int = 4,
+    num_heads: int = 2,
+    head_size: int = 8,
+) -> dict[str, torch.Tensor]:
+    """Build per-layer blocks-first fused-K/V NHD tensors ([NB, BS, NH, 2*HS])."""
+    kv_caches = {}
+    for i in range(num_layers):
+        kv_caches[f"layer_{i}"] = torch.randn(
+            num_blocks, block_size, num_heads, 2 * head_size
+        )
+    return kv_caches
+
+
 def _make_storage_manager_config(
     *,
     shm_name: str = "",
@@ -409,13 +441,14 @@ def test_musa_data_context_keeps_layout_validation_device_agnostic(
 
     def _fake_compute_kv_layout(
         *_args: Any, **_kwargs: Any
-    ) -> tuple[int, int, int, str, Any]:
+    ) -> tuple[int, int, int, str, Any, int]:
         return (
             4,
             2,
             16,
             "float32",
             lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
+            2,
         )
 
     monkeypatch.setattr(worker_transfer, "compute_kv_layout", _fake_compute_kv_layout)
@@ -473,6 +506,7 @@ def test_musa_data_context_store_uses_device_agnostic_gather(
             16,
             "float32",
             lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+            2,
         ),
     )
     monkeypatch.setattr(
@@ -545,6 +579,7 @@ def test_musa_data_context_retrieve_uses_device_agnostic_scatter(
             16,
             "float32",
             lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+            2,
         ),
     )
     monkeypatch.setattr(
@@ -631,6 +666,24 @@ def test_create_transfer_context_env_var_overrides_default(
             None,
             id="mla",
         ),
+        pytest.param(
+            lambda: _make_fused_hnd_kv_caches(
+                num_layers=2, num_blocks=8, block_size=4, num_heads=2, head_size=8
+            ),
+            4,
+            32,
+            {"kv_layout": "HND"},
+            id="fused_hnd",
+        ),
+        pytest.param(
+            lambda: _make_fused_nhd_kv_caches(
+                num_layers=2, num_blocks=8, block_size=4, num_heads=2, head_size=8
+            ),
+            4,
+            32,
+            {"kv_layout": "NHD"},
+            id="fused_nhd",
+        ),
     ],
 )
 def test_compute_kv_layout_and_gather_scatter_roundtrip(
@@ -638,6 +691,7 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip(
     expected_block_size: int,
     expected_hidden_dim: int,
     layout_hints: "LayoutHints | None",
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Validate layout extraction and gather/scatter round-trip on CPU tensors."""
     # First Party
@@ -647,6 +701,12 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip(
         scatter_cpu_to_paged_kv,
     )
 
+    # Bypass the CPU-host HND safeguard so the layout hint drives detection
+    # regardless of the host running the test.
+    monkeypatch.setattr(
+        "lmcache.v1.gpu_connector.kv_format.detectors.vllm.torch_device_type", "cuda"
+    )
+
     source = {k: v.to(torch_device_type) for k, v in builder_fn().items()}
     (
         block_size,
@@ -654,6 +714,7 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip(
         hidden_dim,
         dtype_str,
         detected_kv_format,
+        kv_size,
     ) = compute_kv_layout(source, layout_hints=layout_hints)
     assert block_size == expected_block_size
     assert num_layers == 2
@@ -662,9 +723,22 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip(
     assert detected_kv_format is not None
 
     blocks_per_chunk = 2
-    gathered = gather_paged_kv_to_cpu(source, [0, 1], blocks_per_chunk)
+    gathered = gather_paged_kv_to_cpu(
+        source, [0, 1], blocks_per_chunk, layout_hints=layout_hints
+    )
+    # The gathered chunk shape must equal the layout the worker registers with
+    # the server (register() builds it from kv_size and hidden_dim), or the
+    # server-side commit_store shape check rejects every chunk.
+    expected_chunk_shape = (
+        (num_layers, blocks_per_chunk * block_size, hidden_dim)
+        if kv_size == 1
+        else (2, num_layers, blocks_per_chunk * block_size, hidden_dim)
+    )
+    assert tuple(gathered[0].shape) == expected_chunk_shape
     destination = {name: torch.zeros_like(tensor) for name, tensor in source.items()}
-    scatter_cpu_to_paged_kv(destination, [4, 5], gathered, blocks_per_chunk)
+    scatter_cpu_to_paged_kv(
+        destination, [4, 5], gathered, blocks_per_chunk, layout_hints=layout_hints
+    )
 
     for name in source:
         if source[name].dim() == 5:
@@ -703,6 +777,7 @@ def test_gather_scatter_roundtrip_hnd_layout(
         hidden_dim,
         dtype_str,
         detected_kv_format,
+        _kv_size,
     ) = compute_kv_layout(source, layout_hints=layout_hints)
     assert block_size == 4
     assert num_layers == 2

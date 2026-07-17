@@ -69,11 +69,42 @@ logger = init_logger(__name__)
 
 @dataclass
 class _CBRopeState:
-    """Per-instance RoPE state IPC-shared from vLLM; dangles on reallocate."""
+    """Per-instance RoPE state IPC-shared from vLLM; dangles on reallocate.
+
+    Models with per-layer-type RoPE (distinct local/global theta)
+    register one cache per distinct rope and a per-layer index into
+    ``cos_sin_caches``.
+    """
 
     head_size: int
     is_neox_style: bool  # NeoX = contiguous halves; else GPT-J.
-    cos_sin_cache: torch.Tensor
+    cos_sin_caches: list[torch.Tensor]
+    group_to_cache: list[int]  # engine group idx -> cache idx; empty = cache 0
+
+    def cache_for_group(self, engine_group_idx: int) -> torch.Tensor:
+        """The cos/sin cache for one engine group.
+
+        Engine groups partition layers by attention type, and rope follows
+        attention type (sliding=local theta, full=global theta),
+        so each engine group has exactly one cache.
+
+        Args:
+            engine_group_idx: The kernel group's engine group index.
+
+        Returns:
+            The group's cos/sin cache tensor.
+
+        Raises:
+            RuntimeError: If ``engine_group_idx`` is outside the map.
+        """
+        if not self.group_to_cache:
+            return self.cos_sin_caches[0]
+        if engine_group_idx >= len(self.group_to_cache):
+            raise RuntimeError(
+                f"CB re-RoPE: engine group {engine_group_idx} has no rope "
+                f"cache mapping (map covers {len(self.group_to_cache)} groups)."
+            )
+        return self.cos_sin_caches[self.group_to_cache[engine_group_idx]]
 
 
 @dataclass
@@ -441,68 +472,104 @@ class BlendV3Module(InstanceLivenessTarget):
     def cb_register_rope(
         self,
         instance_id: int,
-        cos_sin_cache_ipc: DeviceIPCWrapper,
+        cos_sin_caches_ipc: list[DeviceIPCWrapper],
         head_size: int,
         is_neox_style: bool,
+        group_to_cache: list[int],
     ) -> None:
         """Bolt CB re-RoPE state onto an already-registered KV-cache instance.
 
         Idempotent; ``REGISTER_KV_CACHE`` must precede this. Strips any
-        YaRN/longrope mscale baked into the rope cache so re-RoPE stays a pure
-        rotation.
+        YaRN/longrope mscale baked into each rope cache so re-RoPE stays a
+        pure rotation.
 
         Args:
             instance_id (int): KV-cache instance to attach rope state to.
-            cos_sin_cache_ipc (DeviceIPCWrapper): IPC handle to vLLM's cos/sin
-                rope cache.
+            cos_sin_caches_ipc (list[DeviceIPCWrapper]): IPC handles to vLLM's
+                cos/sin rope cache(s) — one per distinct rope (dual-RoPE
+                models send local/global); single-rope models send one.
             head_size (int): Rotary head dimension.
             is_neox_style (bool): True for NeoX (contiguous halves), else GPT-J.
+            group_to_cache (list[int]): Per-engine-group index into the
+                caches list; empty means every group uses cache 0.
 
         Raises:
-            ValueError: If ``instance_id`` has no registered KV cache.
+            ValueError: If ``instance_id`` has no registered KV cache, the
+                cache list is empty, or ``group_to_cache`` references a
+                missing cache or does not cover every engine group of the
+                registered model.
         """
-        if self._transfer_module.get_and_touch_context_entry(instance_id) is None:
+        entry = self._transfer_module.get_and_touch_context_entry(instance_id)
+        if entry is None:
             raise ValueError(
                 f"Instance {instance_id} has no paged KV cache registered; "
                 "send REGISTER_KV_CACHE before CB_REGISTER_ROPE_V3."
             )
-
-        cos_sin_cache = cos_sin_cache_ipc.to_tensor()
-        # YaRN/longrope bake an mscale m into the rope cache (cos²+sin²=m²≠1).
-        # vLLM already folds m into stored K, but CB re-RoPE assumes a pure
-        # rotation, so an un-normalized m injects an m² error per K element
-
-        _c32 = cos_sin_cache.to(torch.float32)
-        _half = _c32.shape[1] // 2
-        _m = float((_c32[:, :_half] ** 2 + _c32[:, _half:] ** 2).mean().sqrt())
-        if abs(_m - 1.0) >= 1e-3:
-            logger.info(
-                "CB re-RoPE: stripping rope-cache mscale=%.4f (m²=%.4f → K "
-                "inflation if uncorrected) → unit magnitude",
-                _m,
-                _m * _m,
+        if not cos_sin_caches_ipc:
+            raise ValueError("CB_REGISTER_ROPE_V3 requires >=1 cos/sin cache.")
+        if group_to_cache:
+            if min(group_to_cache) < 0 or max(group_to_cache) >= len(
+                cos_sin_caches_ipc
+            ):
+                raise ValueError(
+                    f"group_to_cache {group_to_cache} contains indices outside "
+                    f"[0, {len(cos_sin_caches_ipc)}) for the sent cache(s)."
+                )
+            # Fail at registration, not mid-retrieve: every engine group of
+            # the registered model must have a cache mapping.
+            max_eg_idx = max(
+                (
+                    g.engine_group_idx
+                    for g in entry.cache_context.kv_layer_groups_manager.kernel_groups
+                ),
+                default=-1,
             )
-            cos_sin_cache = (_c32 / _m).to(cos_sin_cache.dtype)
-        else:
-            logger.info(
-                "CB re-RoPE: rope-cache magnitude≈%.4f (unit); no mscale "
-                "normalization needed",
-                _m,
-            )
+            if len(group_to_cache) <= max_eg_idx:
+                raise ValueError(
+                    f"group_to_cache covers {len(group_to_cache)} engine "
+                    f"group(s) but the registered model has engine groups up "
+                    f"to index {max_eg_idx}."
+                )
+
+        cos_sin_caches: list[torch.Tensor] = []
+        for cache_idx, cache_ipc in enumerate(cos_sin_caches_ipc):
+            cos_sin_cache = cache_ipc.to_tensor()
+            # YaRN/longrope bake an mscale m into the rope cache
+            # (cos²+sin²=m²≠1). vLLM already folds m into stored K, but CB
+            # re-RoPE assumes a pure rotation, so an un-normalized m injects
+            # an m² error per K element.
+            _c32 = cos_sin_cache.to(torch.float32)
+            _half = _c32.shape[1] // 2
+            _m = float((_c32[:, :_half] ** 2 + _c32[:, _half:] ** 2).mean().sqrt())
+            if abs(_m - 1.0) >= 1e-3:
+                logger.info(
+                    "CB re-RoPE: cache %d: stripping rope-cache mscale=%.4f "
+                    "(m²=%.4f → K inflation if uncorrected) → unit magnitude",
+                    cache_idx,
+                    _m,
+                    _m * _m,
+                )
+                cos_sin_cache = (_c32 / _m).to(cos_sin_cache.dtype)
+            cos_sin_caches.append(cos_sin_cache)
+
         self._cb_rope_state[instance_id] = _CBRopeState(
             head_size=head_size,
             is_neox_style=is_neox_style,
-            cos_sin_cache=cos_sin_cache,
+            cos_sin_caches=cos_sin_caches,
+            group_to_cache=list(group_to_cache),
         )
 
         logger.info(
             "Registered CB rope state for instance %d "
-            "(cos_sin_cache shape=%s dtype=%s, head_size=%d, is_neox=%s)",
+            "(%d cache(s), shapes=%s dtype=%s, head_size=%d, is_neox=%s, "
+            "group_map=%s)",
             instance_id,
-            tuple(cos_sin_cache.shape),
-            cos_sin_cache.dtype,
+            len(cos_sin_caches),
+            [tuple(c.shape) for c in cos_sin_caches],
+            cos_sin_caches[0].dtype,
             head_size,
             is_neox_style,
+            "uniform" if not group_to_cache else str(group_to_cache),
         )
 
     def cb_unregister_rope(self, instance_id: int) -> None:
@@ -1423,21 +1490,34 @@ class BlendV3Module(InstanceLivenessTarget):
                     f"CB rope: group {group_idx} hidden_dim ({hidden_dim}) "
                     f"not a multiple of head_size ({rope_state.head_size})."
                 )
-            slot_positions = torch.arange(
-                slots, device=all_slots[0].device, dtype=torch.long
-            )
+            # Per-group rope cache: dual-RoPE models rotate each
+            # kernel group with its own theta's cos/sin.
+            group_cos_sin = rope_state.cache_for_group(group.engine_group_idx)
+            # slot ramp tiled across layers is invariant per (num_layers,
+            # slots) — cache it; each shifted slot then just adds its offset.
+            device = all_slots[0].device
+            sp_key = (str(device), num_layers, slots)
+            sp_cache = getattr(self, "_cb_sp_rep_cache", None)
+            if sp_cache is None:
+                sp_cache = {}
+                self._cb_sp_rep_cache = sp_cache
+            slot_positions_rep = sp_cache.get(sp_key)
+            if slot_positions_rep is None:
+                slot_positions_rep = torch.arange(
+                    slots, device=device, dtype=torch.long
+                ).repeat(num_layers)
+                sp_cache[sp_key] = slot_positions_rep
             for slot_idx, old_st, cur_st in slots_to_rope:
-                tmp = all_slots[slot_idx]
-                k_flat = tmp[0].reshape(num_layers * slots, hidden_dim)
-                old_positions = (old_st + slot_positions).repeat(num_layers)
-                new_positions = (cur_st + slot_positions).repeat(num_layers)
-                k_view = k_flat.view(-1, n_heads, rope_state.head_size)
+                # reshape returns an in-place view (tmp slots are contiguous).
+                k_view = all_slots[slot_idx][0].reshape(
+                    num_layers * slots, n_heads, rope_state.head_size
+                )
                 lmc_ops.rotary_embedding_k_fused(
-                    old_positions,
-                    new_positions,
+                    old_st + slot_positions_rep,
+                    cur_st + slot_positions_rep,
                     k_view,
                     rope_state.head_size,
-                    rope_state.cos_sin_cache,
+                    group_cos_sin,
                     rope_state.is_neox_style,
                 )
 
@@ -1584,7 +1664,15 @@ class BlendV3Module(InstanceLivenessTarget):
             for group_idx in range(num_groups):
                 eg_idx = kgm.kernel_groups[group_idx].engine_group_idx
                 if eg_idx >= len(block_ids_per_group_gpu):
-                    eg_idx = 0
+                    # Engine groups have independent block tables under HMA;
+                    # substituting another group's table would scatter KV into
+                    # the wrong physical blocks (silent corruption).
+                    raise ValueError(
+                        f"CB retrieve: kernel group {group_idx} maps to engine "
+                        f"group {eg_idx}, but only "
+                        f"{len(block_ids_per_group_gpu)} block table(s) were "
+                        "provided."
+                    )
                 resolved_groups.append(
                     (
                         block_ids_per_group_gpu[eg_idx],
@@ -1716,7 +1804,14 @@ class BlendV3Module(InstanceLivenessTarget):
                             for group_idx in range(num_groups):
                                 # This group's block table + size (resolved above).
                                 group_block_ids, group_bs = resolved_groups[group_idx]
-                                page_buffer_size = gpu_context.num_blocks * group_bs
+                                # Per-group block count: under HMA the sliding
+                                # group has fewer blocks than the full group, so
+                                # gpu_context.num_blocks (group 0's) would
+                                # truncate the other groups' bounds check.
+                                page_buffer_size = (
+                                    kgm.kernel_groups[group_idx].shape_desc.nb
+                                    * group_bs
+                                )
                                 slot_mapping = group_block_ids[
                                     pos // group_bs
                                 ] * group_bs + (pos % group_bs)
