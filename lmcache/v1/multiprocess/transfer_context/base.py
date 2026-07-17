@@ -327,10 +327,12 @@ def gather_paged_kv_to_cpu(
             (backward-compatible behaviour).
 
     Returns:
-        List of CPU tensors, one per chunk. For non-MLA each chunk has shape
-        ``[2, num_layers, chunk_tokens, hidden_dim]`` where dimension ``0``
-        stores ``(K, V)``. For MLA (multi-head latent attention) each chunk
-        has shape ``[num_layers, chunk_tokens, hidden_dim]``.
+        List of CPU tensors, one per chunk. For split-K/V formats each chunk
+        has shape ``[2, num_layers, chunk_tokens, hidden_dim]`` where
+        dimension ``0`` stores ``(K, V)``. For single-plane formats
+        (``kv_size == 1``: MLA and fused-K/V) each chunk has shape
+        ``[num_layers, chunk_tokens, num_heads * head_size]`` — for fused
+        formats ``head_size`` is the packed ``2 * head_size``.
 
     Raises:
         ValueError: If ``out`` is provided with fewer buffers than the number
@@ -339,10 +341,11 @@ def gather_paged_kv_to_cpu(
     # First Party
     from lmcache.v1.gpu_connector.utils import (
         get_block_size,
-        get_hidden_dim_size,
+        get_head_size,
+        get_kv_size,
         get_num_blocks,
+        get_num_heads,
         get_num_layers,
-        is_mla,
         make_page_buffer_shape_desc,
         normalize_kv_and_discover_format,
     )
@@ -357,7 +360,9 @@ def gather_paged_kv_to_cpu(
 
     block_size = get_block_size(normalized, engine_kv_format)
     num_layers = get_num_layers(normalized, engine_kv_format)
-    hidden_dim_size = get_hidden_dim_size(normalized, engine_kv_format)
+    token_hidden = get_num_heads(normalized, engine_kv_format) * get_head_size(
+        normalized, engine_kv_format
+    )
     num_blocks = get_num_blocks(normalized, engine_kv_format)
     num_chunks = len(block_ids) // blocks_per_chunk
     chunk_tokens = blocks_per_chunk * block_size
@@ -390,11 +395,12 @@ def gather_paged_kv_to_cpu(
     staged_chunks = []
 
     if out is None:
-        use_mla = is_mla(engine_kv_format)
-        if use_mla:
+        # One object plane per K/V entry: MLA and fused-K/V formats
+        # (kv_size == 1) store a single plane, split formats store K and V.
+        if get_kv_size(normalized, engine_kv_format) == 1:
             chunks = [
                 torch.empty(
-                    (num_layers, chunk_tokens, hidden_dim_size),
+                    (num_layers, chunk_tokens, token_hidden),
                     dtype=tensors[0].dtype,
                     device=torch.device("cpu"),
                     pin_memory=requires_pinned,
@@ -404,7 +410,7 @@ def gather_paged_kv_to_cpu(
         else:
             chunks = [
                 torch.empty(
-                    (2, num_layers, chunk_tokens, hidden_dim_size),
+                    (2, num_layers, chunk_tokens, token_hidden),
                     dtype=tensors[0].dtype,
                     device=torch.device("cpu"),
                     pin_memory=requires_pinned,
