@@ -30,8 +30,13 @@ import lmcache.v1.memory_management as memory_management
 
 
 class DevDaxArenaState(Enum):
-    """Arena lifecycle. ``REMOVED`` is terminal and report-only: the arena has
-    already been unmapped and dropped from the pool."""
+    """Lifecycle state of one Device-DAX arena in the L1 pool.
+
+    Arenas held in the pool are either ``ACTIVE`` or ``DRAINING``. ``REMOVED`` is
+    a terminal, report-only value: once an arena reaches it the arena has been
+    unmapped and dropped from the pool, so it is never observed by an in-pool
+    lookup.
+    """
 
     ACTIVE = "active"
     DRAINING = "draining"
@@ -39,15 +44,33 @@ class DevDaxArenaState(Enum):
 
 
 class DevDaxRemoveMode(Enum):
-    """Arena removal strategy. Only ``DRAIN`` (unmap after the last live
-    allocation is freed) is supported; migrate/evict are deferred."""
+    """Strategy for retiring a Device-DAX arena at runtime.
+
+    Only ``DRAIN`` is supported today: the arena stops accepting new allocations
+    and is unmapped once its already-issued allocations are all freed. Modes that
+    relocate live objects (migrate/evict) are intentionally deferred; L1 hands out
+    raw device pointers that live requests read and write, so relocation requires
+    hooking L1 eviction and is out of scope for the runtime add/remove path.
+    """
 
     DRAIN = "drain"
 
 
 @dataclass(frozen=True)
 class DevDaxArenaStatus:
-    """Immutable snapshot of one arena's runtime state."""
+    """Immutable snapshot of one Device-DAX arena's runtime state.
+
+    Attributes:
+        device_path: Path of the Device-DAX device backing this arena.
+        size_in_bytes: Mapped size of the arena in bytes.
+        used_bytes: Bytes currently handed out to live allocations.
+        free_bytes: Bytes still available for allocation.
+        active_allocations: Number of allocations not yet freed.
+        state: Lifecycle state of the arena.
+        is_primary: Whether this arena backs ``get_l1_memory_desc`` and so may
+            not be removed. Only the initial arena in a pure Device-DAX (no DRAM)
+            configuration is primary.
+    """
 
     device_path: str
     size_in_bytes: int
@@ -60,9 +83,14 @@ class DevDaxArenaStatus:
 
 @dataclass
 class _DevDaxArena:
-    """One mmap-backed arena: fd, mmap, flat ``torch.uint8`` view, and its own
-    :class:`TensorMemoryAllocator`. Frees are routed to the owning arena by
-    pointer range."""
+    """Mutable bookkeeping for one mmap-backed Device-DAX arena.
+
+    Each arena owns its own file descriptor, mmap, flat ``torch.uint8`` view, and
+    :class:`TensorMemoryAllocator`. Allocations carry the owning
+    :class:`DevDaxMemoryAllocator` as their parent; frees are routed back to the
+    correct arena by locating the arena whose ``[base_ptr, base_ptr + size)``
+    range contains the object's data pointer.
+    """
 
     device_path: str
     size: int
@@ -104,13 +132,25 @@ class _DevDaxArena:
 class DevDaxMemoryAllocator(MemoryAllocatorInterface):
     """Allocates L1 objects from DRAM and/or a pool of Device-DAX arenas.
 
-    DRAM (if configured) is tried first; active arenas serve overflow in pool
-    order. The pool grows/shrinks at runtime via :meth:`add_device` and
-    :meth:`remove_device` (drain-based: unmap once the last live allocation is
-    freed). In pure Device-DAX mode the initial arena is primary and
-    non-removable; in hybrid mode every arena is removable overflow.
-    ``host_mem_lock`` serializes all pool and per-arena mutations; the DRAM
-    local allocator synchronizes itself.
+    The mapped bytes of each arena are exposed as a flat CPU ``torch.uint8``
+    tensor so the existing L1 state machine and tensor slicing logic can run
+    unchanged while the overflow backing storage is one or more configured
+    Device-DAX devices. When a local allocator is provided, local DRAM is tried
+    first and the Device-DAX arenas are used as overflow.
+
+    The pool starts with a single arena mapped from the configured device and can
+    grow or shrink at runtime via :meth:`add_device` and :meth:`remove_device`.
+    Removal is drain-based: the arena stops accepting new allocations and is
+    unmapped once its already-issued allocations are all freed. In a pure
+    Device-DAX configuration (no DRAM) the initial arena is *primary* -- it backs
+    :meth:`get_l1_memory_desc` and may not be removed; in a hybrid DRAM +
+    Device-DAX configuration every Device-DAX arena is removable overflow.
+
+    Thread safety:
+        ``host_mem_lock`` serializes every mutation of the arena pool and of the
+        per-arena allocators (Device-DAX allocation, free, add, and remove). The
+        DRAM local allocator provides its own synchronization and is used outside
+        this lock.
     """
 
     def __init__(
@@ -168,7 +208,12 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
 
     @property
     def devdax_buffer(self) -> torch.Tensor:
-        """Return the initial arena buffer (backwards-compat shim)."""
+        """Return the initial Device-DAX arena buffer, or an empty tensor.
+
+        Retained for backwards compatibility with callers that expect a single
+        Device-DAX buffer. The pool may hold additional arenas; use
+        :meth:`arena_statuses` to inspect all of them.
+        """
         if self._arenas:
             return self._arenas[0].buffer
         return torch.empty(0, dtype=torch.uint8)
@@ -227,10 +272,23 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         *,
         is_primary: bool,
     ) -> _DevDaxArena:
-        """Map a device and append it to the pool as ACTIVE.
+        """Map one Device-DAX device and append it to the pool as ACTIVE.
 
-        Caller holds ``host_mem_lock`` (except in the single-threaded
-        ``__init__``).
+        The caller must hold ``host_mem_lock`` (except during ``__init__``, which
+        runs single-threaded).
+
+        Args:
+            device_path: Path to the Device-DAX device to map.
+            size: Number of bytes to map.
+            is_primary: Whether the new arena backs ``get_l1_memory_desc`` and so
+                may not be removed.
+
+        Returns:
+            The newly mapped arena.
+
+        Raises:
+            RuntimeError: If the device capacity is smaller than ``size``.
+            OSError: If the device cannot be opened or mapped.
         """
         fd, mmap_obj, mmap_buffer, buffer = self._open_devdax_mapping(device_path, size)
         arena: _DevDaxArena | None = None
@@ -263,9 +321,13 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         return arena
 
     def _close_arena_locked(self, arena: _DevDaxArena) -> None:
-        """Unpin and unmap one arena, dropping every reference into the mmap
-        first (CPython refuses to close a buffer with exported pointers).
-        Caller holds ``host_mem_lock``."""
+        """Unpin and unmap one arena. The caller must hold ``host_mem_lock``.
+
+        Every reference into the mmap (the allocator buffer, the arena buffer,
+        and the ctypes array exported from the mmap) is released before the mmap
+        is closed; otherwise CPython refuses to close a buffer with exported
+        pointers.
+        """
         self._unregister_arena_pin(arena)
         arena.allocator.buffer = torch.empty(0, dtype=torch.uint8)
         arena.buffer = torch.empty(0, dtype=torch.uint8)
@@ -300,15 +362,25 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         ]
 
     def _find_arena_locked(self, device_path: str) -> _DevDaxArena:
-        """Return the arena mapped at ``device_path``. Caller holds the lock."""
+        """Return the arena mapped at ``device_path``. Caller holds the lock.
+
+        Raises:
+            ValueError: If no arena is mapped at ``device_path``.
+        """
         for arena in self._arenas:
             if arena.device_path == device_path:
                 return arena
         raise ValueError(f"no Device-DAX arena mapped at {device_path}")
 
     def _arena_for_obj_locked(self, memory_obj: MemoryObj) -> _DevDaxArena:
-        """Return the arena owning ``memory_obj`` by pointer range; must run
-        before the free invalidates the object. Caller holds the lock."""
+        """Return the arena that owns ``memory_obj``. Caller holds the lock.
+
+        Resolution is by data pointer, so it must run before the object is freed
+        (freeing invalidates the object and drops its buffer slice).
+
+        Raises:
+            ValueError: If no arena owns the object.
+        """
         ptr = memory_obj.data_ptr
         for arena in self._arenas:
             if arena.contains(ptr):
@@ -624,9 +696,26 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             raise ValueError(f"Unsupported memory format: {fmt}")
 
     def add_device(self, device_path: str, size_in_bytes: int) -> DevDaxArenaStatus:
-        """Map an additional Device-DAX device into the pool; it serves
-        overflow immediately. Rejects empty/duplicate paths, non-positive
-        sizes, and a closed allocator."""
+        """Map an additional Device-DAX device and add it to the pool.
+
+        The new arena is immediately available as overflow; existing allocations
+        are untouched.
+
+        Args:
+            device_path: Path to a readable and writable Device-DAX device that
+                is not already mapped by this allocator.
+            size_in_bytes: Number of bytes to map from the device.
+
+        Returns:
+            The status of the newly added arena.
+
+        Raises:
+            ValueError: If ``device_path`` is empty, ``size_in_bytes`` is not
+                positive, or the device is already mapped.
+            RuntimeError: If the allocator is closed or the device capacity is
+                smaller than ``size_in_bytes``.
+            OSError: If the device cannot be opened or mapped.
+        """
         if not device_path:
             raise ValueError("device_path must be a non-empty string")
         if size_in_bytes <= 0:
@@ -651,9 +740,25 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         device_path: str,
         mode: DevDaxRemoveMode = DevDaxRemoveMode.DRAIN,
     ) -> DevDaxArenaStatus:
-        """Drain-remove an arena: it stops accepting allocations and is
-        unmapped once idle. Returns ``REMOVED`` if unmapped immediately, else
-        ``DRAINING``. Rejects unknown paths and the primary arena."""
+        """Retire a Device-DAX arena from the pool.
+
+        The arena stops accepting new allocations. If it has no live allocations
+        it is unmapped immediately; otherwise it is left DRAINING and unmapped
+        automatically once its last allocation is freed.
+
+        Args:
+            device_path: Path of the arena to remove.
+            mode: Removal strategy. Only :attr:`DevDaxRemoveMode.DRAIN` is
+                supported.
+
+        Returns:
+            The arena status after the request: ``REMOVED`` if it was unmapped
+            immediately, otherwise ``DRAINING`` with the live allocation count.
+
+        Raises:
+            ValueError: If ``mode`` is unsupported, no arena is mapped at
+                ``device_path``, or the arena is the primary (non-removable) one.
+        """
         if mode != DevDaxRemoveMode.DRAIN:
             raise ValueError(f"unsupported Device-DAX L1 remove mode: {mode}")
         with self.host_mem_lock:
