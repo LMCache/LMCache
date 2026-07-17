@@ -8,6 +8,8 @@ from __future__ import annotations
 import abc
 import argparse
 import sys
+from collections.abc import Mapping
+from types import MappingProxyType
 
 # First Party
 from lmcache.cli.metrics import (
@@ -151,6 +153,15 @@ class CompositeCommand(BaseCommand):
 
     def add_arguments(self, _parser: argparse.ArgumentParser) -> None:
         """No top-level arguments; all args are registered by subcommands."""
+
+    def subcommands(self) -> Mapping[str, BaseCommand]:
+        """Return auto-discovered child commands by command name.
+
+        Returns:
+            Read-only mapping from child command name to command instance. The
+            mapping is empty until :meth:`register` discovers child commands.
+        """
+        return MappingProxyType(getattr(self, "_subcmds", {}))
 
     def register(self, subparsers: argparse._SubParsersAction) -> None:
         """Register this command and auto-discover all sub-subcommands.

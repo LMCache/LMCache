@@ -128,11 +128,12 @@ creates the recursive nesting without any special configuration.
        │       └── engine_bench/__init__.py → EngineBenchCommand (leaf)
        └── tool/__init__.py → ToolCommand (composite)
            └── ToolCommand.register() discovers:
-               └── cache_simulator/__init__.py → CacheSimulatorCommand (composite)
-                   └── CacheSimulatorCommand.register() discovers:
-                       ├── simulate_command.py     → SimulateCommand (leaf)
-                       ├── sweep_command.py        → SweepCommand (leaf)
-                       └── gen_dataset_command.py  → GenDatasetCommand (leaf)
+               ├── cache_simulator/__init__.py → CacheSimulatorCommand (composite)
+               │   └── CacheSimulatorCommand.register() discovers:
+               │       ├── simulate_command.py     → SimulateCommand (leaf)
+               │       ├── sweep_command.py        → SweepCommand (leaf)
+               │       └── gen_dataset_command.py  → GenDatasetCommand (leaf)
+               └── list_commands.py → ListCommandsCommand (leaf)
 
 Directory Layout
 ----------------
@@ -152,6 +153,7 @@ Directory Layout
    │   └── ...
    └── tool/                  # Level-2 composite command
        ├── __init__.py         # ToolCommand(CompositeCommand)
+       ├── list_commands.py    # Level-2 leaf: ``lmcache tool list-commands``
        └── cache_simulator/    # Level-3 composite command
            ├── __init__.py     # CacheSimulatorCommand(CompositeCommand)
            ├── simulate_command.py   # Level-3 leaf: ``lmcache tool cache-simulator simulate``
@@ -302,8 +304,8 @@ Level 2: Adding a Subcommand to an Existing Group
 ---------------------------------------------------
 
 If a ``CompositeCommand`` group already exists (e.g. ``bench``, ``quota``,
-``trace``), you can extend it by simply adding **one new file** — no other
-changes are required.
+``trace``, ``tool``), you can extend it by simply adding **one new file**
+— no other changes are required.
 
 For example, to add a new ``lmcache bench l2`` subcommand under the
 existing ``bench`` group:
@@ -354,6 +356,22 @@ imports to add, no ``__init__.py`` edits in the parent.
 
    - It does **not** start with ``_``.
    - It contains a concrete ``BaseCommand`` subclass.
+
+Inspecting Discovered Commands
+------------------------------
+
+Run the built-in command tree inspector to see what the auto-discovery path
+registered:
+
+.. code-block:: bash
+
+   lmcache tool list-commands
+   lmcache tool list-commands --format json
+
+The command reports each path, command name, help text, command type
+(``group`` or ``command``), and depth. This is useful when adding or debugging
+plugin-style CLI extensions because it shows which ``BaseCommand`` and
+``CompositeCommand`` classes were registered without manual registry edits.
 
 Level N: Arbitrary Nesting
 --------------------------
@@ -465,7 +483,7 @@ command authors just build metrics and call ``emit()``:
        # Trigger all handlers
        metrics.emit()
 
-The ``--format`` and ``--output`` flags are added automatically by
+The ``--format``, ``--output``, and ``--quiet`` flags are added automatically by
 ``BaseCommand.register()`` — subcommands do not need to add them manually.
 
 Summary

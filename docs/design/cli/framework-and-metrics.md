@@ -11,14 +11,17 @@ of the [CLI design](commands.md), minus the actual server/ping/describe commands
 
 ---
 
-## 1. Explicit Command Registration
+## 1. Plugin-Style Command Discovery
 
 ### Goal
 
 Adding a new subcommand (e.g., `lmcache describe`) requires:
 
-1. Creating a new file in `lmcache/cli/commands/` with a `BaseCommand` subclass.
-2. Adding one import + one entry to `ALL_COMMANDS` in `commands/__init__.py`.
+1. Creating a new file or package in `lmcache/cli/commands/`.
+2. Defining a concrete `BaseCommand` subclass in that module.
+3. Letting startup auto-discovery collect and register the command.
+
+No import or manual `ALL_COMMANDS` edit is required.
 
 ### Mechanism
 
@@ -40,33 +43,29 @@ class MyCommand(BaseCommand):
         ...  # command logic
 ```
 
-```python
-# lmcache/cli/commands/__init__.py  (add import + list entry)
-from lmcache.cli.commands.my_cmd import MyCommand
-
-ALL_COMMANDS: list[BaseCommand] = [
-    ...,
-    MyCommand(),
-]
-```
-
 `BaseCommand` enforces that all four abstract methods (`name`, `help`,
 `add_arguments`, `execute`) are implemented — instantiation fails otherwise.
 The concrete `register()` method (inherited, not typically overridden) wires
 everything up automatically.
 
+`CompositeCommand` is a `BaseCommand` subclass for command groups. It scans the
+package where the concrete group is defined, discovers child `BaseCommand`
+subclasses, and registers them as nested subparsers.
+
 ### How command discovery works
 
 1. `lmcache <cmd> ...` invokes `main()` in `main.py`.
 2. `main.py` imports `ALL_COMMANDS` from `commands/__init__.py`.
-3. At import time, `__init__.py` imports each command class and instantiates
-   it into the `ALL_COMMANDS` list.  Instantiation validates that all abstract
-   methods are implemented (`TypeError` on failure).
+3. At import time, `commands/__init__.py` calls `discover_subclasses()` on its
+   own package. The helper walks direct submodules with `pkgutil.iter_modules`,
+   imports them, and yields concrete `BaseCommand` subclasses.
 4. `main.py` iterates `ALL_COMMANDS` and calls `cmd.register(subparsers)`.
 5. `BaseCommand.register()` creates an argparse subparser (using `name()` and
    `help()`), calls `add_arguments()` to wire up flags, and sets
    `parser.set_defaults(func=self.execute)`.
-6. After parsing, `main.py` dispatches via `args.func(args)`, which calls the
+6. `CompositeCommand.register()` repeats discovery inside its own package to
+   register nested child commands.
+7. After parsing, `main.py` dispatches via `args.func(args)`, which calls the
    matched command's `execute()`.
 
 ### How to add a new subcommand
@@ -90,18 +89,20 @@ class DescribeCommand(BaseCommand):
         ...  # implementation
 ```
 
-**Step 2.** Register it in `lmcache/cli/commands/__init__.py`:
+**Step 2.** Done. The command is automatically discovered:
 
-```python
-from lmcache.cli.commands.describe import DescribeCommand
-
-ALL_COMMANDS: list[BaseCommand] = [
-    MockCommand(),
-    DescribeCommand(),   # <-- add here
-]
+```bash
+lmcache describe --url http://localhost:8000
 ```
 
-That's it — `lmcache describe --url http://localhost:8000` is now available.
+Use the command-tree inspector to confirm discovery:
+
+```bash
+lmcache tool list-commands --format json
+```
+
+The output includes every discovered command path, including nested
+`CompositeCommand` groups and their leaf commands.
 
 ### File layout
 
@@ -116,9 +117,12 @@ lmcache/cli/
 │   ├── handler.py       # StreamHandler, FileHandler
 │   └── formatter.py     # TerminalFormatter, JsonFormatter
 ├── commands/
-│   ├── __init__.py      # ALL_COMMANDS registry
-│   ├── base.py          # BaseCommand ABC
-│   └── mock.py          # lmcache mock  (example command)
+│   ├── __init__.py      # Auto-discovers ALL_COMMANDS
+│   ├── base.py          # BaseCommand ABC + CompositeCommand
+│   ├── mock.py          # lmcache mock  (example command)
+│   └── tool/            # lmcache tool (CompositeCommand)
+│       ├── __init__.py
+│       └── list_commands.py
 └── corpora/             # built-in prompt corpora (future)
 ```
 

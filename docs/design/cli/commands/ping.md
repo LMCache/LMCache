@@ -186,17 +186,10 @@ def ping(url: str, timeout: int = 10) -> tuple[str, float, str | None]:
 Reuses `normalize_url()` from `describe.py` (import it, or move to a shared
 `lmcache/cli/utils.py` if preferred).
 
-### Modify: `lmcache/cli/commands/__init__.py`
+### Command discovery
 
-```python
-from lmcache.cli.commands.ping import PingCommand
-
-ALL_COMMANDS: list[BaseCommand] = [
-    MockCommand(),
-    DescribeCommand(),
-    PingCommand(),
-]
-```
+`PingCommand` is auto-discovered from `lmcache/cli/commands/ping.py`. No import
+or registry edit in `lmcache/cli/commands/__init__.py` is required.
 
 ---
 

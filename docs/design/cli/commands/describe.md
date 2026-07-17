@@ -435,18 +435,10 @@ def _fmt_used_gb(used_bytes: int, ratio: float) -> str:
     """Format as 'XX.XX (YY.Y%)'."""
 ```
 
-### Modify: `lmcache/cli/commands/__init__.py`
+### Command discovery
 
-Add import and registry entry:
-
-```python
-from lmcache.cli.commands.describe import DescribeCommand
-
-ALL_COMMANDS: list[BaseCommand] = [
-    MockCommand(),
-    DescribeCommand(),
-]
-```
+`DescribeCommand` is auto-discovered from `lmcache/cli/commands/describe.py`.
+No import or registry edit in `lmcache/cli/commands/__init__.py` is required.
 
 ### Patterns to follow
 

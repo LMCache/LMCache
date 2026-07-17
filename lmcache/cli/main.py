@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """LMCache CLI entry point.
 
-Subcommands are explicitly registered in
-``lmcache.cli.commands.ALL_COMMANDS``.
+Subcommands are auto-discovered into ``lmcache.cli.commands.ALL_COMMANDS``
+and registered with the root argparse parser at startup.
 """
 
 # Standard
