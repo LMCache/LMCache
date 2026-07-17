@@ -401,8 +401,9 @@ Each JSON object must include a ``"type"`` field that selects the adapter type.
 The order of ``--l2-adapter`` arguments determines the adapter order (cascade).
 
 Registered adapter types: ``nixl_store``, ``nixl_store_dynamic``, ``fs``,
-``fs_native``, ``mock``, ``mooncake_store``, ``aerospike``, ``s3``, ``resp``,
-``plugin``, ``native_plugin``, ``raw_block``, ``dax``.
+``fs_native``, ``mock``, ``mooncake_store``, ``aerospike``, ``bigtable``,
+``s3``, ``resp``, ``valkey``, ``plugin``, ``native_plugin``, ``raw_block``,
+``dax``.
 
 Each adapter type's required and optional fields, plus per-backend examples, are
 documented on its own page under :doc:`Secondary KV Storage <l2_storage/index>`
