@@ -95,6 +95,28 @@ def check_interprocess_event_support() -> None:
         )
 
 
+def make_transfer_event() -> Any:
+    """Create and record a device event for MP transfer synchronization.
+
+    Returns an event with ``interprocess=True`` on CUDA, or a plain
+    event on XPU.  The event is recorded on the current stream and
+    can be passed to IPC-based STORE/RETRIEVE operations.
+
+    Raises:
+        RuntimeError: If the backend does not support interprocess Events
+            (CUDA-only check; skipped for XPU and other backends).
+    """
+    from lmcache import torch_dev, torch_device_type
+
+    if torch_device_type == "xpu":
+        event = torch_dev.Event()
+    else:
+        check_interprocess_event_support()
+        event = torch_dev.Event(interprocess=True)
+    event.record()
+    return event
+
+
 # Math utility functions
 def cdiv(a: int, b: int) -> int:
     """Ceiling division."""

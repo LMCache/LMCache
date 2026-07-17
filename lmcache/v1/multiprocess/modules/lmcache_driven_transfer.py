@@ -23,11 +23,6 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
 )
-from lmcache.v1.gpu_connector.gpu_ops import (
-    build_staging_copies,
-    lmcache_memcpy_async_d2h,
-    lmcache_memcpy_async_h2d,
-)
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
@@ -52,6 +47,24 @@ from lmcache.v1.platform.base_cache_context import BaseCacheContext
 from lmcache.v1.platform.cache_context import create_cache_context
 import lmcache.c_ops as lmc_ops
 import lmcache.python_ops_fallback as _python_ops_fallback
+
+if torch_device_type == "xpu":
+    # First Party
+    from lmcache.v1.gpu_connector.xpu_ops import (
+        build_staging_copies,
+        lmcache_memcpy_async_d2h,
+        lmcache_memcpy_async_h2d,
+        multi_layer_block_kv_transfer,
+    )
+else:
+    # First Party
+    from lmcache.v1.gpu_connector.gpu_ops import (
+        build_staging_copies,
+        lmcache_memcpy_async_d2h,
+        lmcache_memcpy_async_h2d,
+    )
+
+    multi_layer_block_kv_transfer = lmc_ops.multi_layer_block_kv_transfer
 
 logger = init_logger(__name__)
 _HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = (
@@ -443,8 +456,10 @@ def transfer_kv_per_object_group(
         This function expects the caller to stage the block ids (list[list[int]])
         into GPU tensors and pass them in as `block_ids_gpu`.
     """
-    if _HAS_NATIVE_OBJECT_GROUP_TRANSFER and not any(
-        isinstance(mo, GDSMemoryObject) for mo in memory_objs
+    if (
+        _HAS_NATIVE_OBJECT_GROUP_TRANSFER
+        and cache_context.device.type != "xpu"
+        and not any(isinstance(mo, GDSMemoryObject) for mo in memory_objs)
     ):
         _run_object_group_transfer_plan(
             cache_context,
@@ -552,7 +567,7 @@ def transfer_kv_per_object_group(
                 ).data_ptr()
                 for i in range(batch_len)
             ]
-            lmc_ops.multi_layer_block_kv_transfer(
+            multi_layer_block_kv_transfer(
                 group_kv_pointers,
                 tmp_gpu_buffers_batched,
                 block_ids_curr_batch,
@@ -945,13 +960,15 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             gpu_block_ids: GPU block IDs to store, indexed by LMCache KV
                 group index.
             event_ipc_handle: The IPC handle of the event to wait on.
+                XPU ignores this value because dpctl exposes memory IPC but
+                not event IPC.
 
         Returns:
             A tuple where the first element is the IPC handle of the event
-            that signals the completion of the store operation, and the second
-            element indicates whether the store operation completed without a
-            fatal error (not whether every requested chunk was stored; see
-            Notes).
+            that signals the completion of the store operation (or empty bytes
+            for XPU), and the second element indicates whether the store
+            operation completed without a fatal error (not whether every
+            requested chunk was stored; see Notes).
 
         Raises:
             ValueError: If no GPU context is registered for the given instance ID.
@@ -993,8 +1010,14 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             torch_dev.device(cache_context.device),
             torch_dev.stream(cache_context.stream),
         ):
-            check_interprocess_event_support()
-            event = torch_dev.Event(interprocess=True)
+            is_xpu_context = cache_context.device.type == "xpu"
+            if is_xpu_context:
+                # dpctl PR 2331 exposes SYCL memory IPC only, so XPU cannot
+                # exchange CUDA-style cross-process event handles.
+                event = None
+            else:
+                check_interprocess_event_support()
+                event = torch_dev.Event(interprocess=True)
 
             # Fail closed: every LMCache group must have block IDs covering all
             # chunks. A short list (e.g. a caller/protocol bug) would otherwise
@@ -1017,23 +1040,26 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     num_chunks,
                     blocks_per_chunk,
                 )
-                event.record()
-                return event.ipc_handle(), False
+                if event is not None:
+                    event.record()
+                    return event.ipc_handle(), False
+                return b"", False
 
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
                 cache_context, gpu_block_ids
             )
 
-            if not hasattr(torch_dev.Event, "from_ipc_handle"):
-                raise RuntimeError(
-                    f"Backend '{torch_device_type}' does not support IPC event "
-                    "handles (Event.from_ipc_handle not available). "
-                    "Multiprocess IPC requires CUDA."
+            if not is_xpu_context:
+                if not hasattr(torch_dev.Event, "from_ipc_handle"):
+                    raise RuntimeError(
+                        f"Backend '{torch_device_type}' does not support IPC event "
+                        "handles (Event.from_ipc_handle not available). "
+                        "Multiprocess IPC requires CUDA."
+                    )
+                vllm_event = torch_dev.Event.from_ipc_handle(
+                    cache_context.device, event_ipc_handle
                 )
-            vllm_event = torch_dev.Event.from_ipc_handle(
-                cache_context.device, event_ipc_handle
-            )
-            vllm_event.wait(stream=cache_context.stream)
+                vllm_event.wait(stream=cache_context.stream)
 
             # CPU-synchronous sentinel: a GPU store is about to be enqueued.
             # Must be published via publish() (not publish_on_stream) so the
@@ -1046,18 +1072,22 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 )
             )
 
-            self._ctx.event_bus.publish_on_stream(
-                cache_context.cupy_stream,
-                Event(
-                    event_type=EventType.MP_STORE_START,
-                    session_id=key.request_id,
-                    metadata={
-                        "device": str(cache_context.device),
-                        "engine_id": instance_id,
-                        "model_name": model_name,
-                    },
-                ),
+            store_start_event = Event(
+                event_type=EventType.MP_STORE_START,
+                session_id=key.request_id,
+                metadata={
+                    "device": str(cache_context.device),
+                    "engine_id": instance_id,
+                    "model_name": model_name,
+                },
             )
+            if is_xpu_context:
+                self._ctx.event_bus.publish(store_start_event)
+            else:
+                self._ctx.event_bus.publish_on_stream(
+                    cache_context.cupy_stream,
+                    store_start_event,
+                )
 
             reserved_dict: dict[ObjectKey, MemoryObj] = {}
             all_dict: dict[ObjectKey, MemoryObj] = {}
@@ -1100,34 +1130,45 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 store_succeeded = True
             except Exception:
                 logger.exception("Cannot store keys due to exception")
-                return event.ipc_handle(), False
+                if event is not None:
+                    return event.ipc_handle(), False
+                return b"", False
             finally:
-                event.record()
+                if event is not None:
+                    event.record()
                 # Fail closed: commit the reserved objects only when every chunk
                 # copied successfully; otherwise the whole store is skipped.
                 stored_count = len(all_dict) if store_succeeded else 0
                 if stored_count:
-                    submit_callback_to_stream(
-                        cache_context.cupy_stream,
-                        "finish_write",
-                        list(all_dict.keys()),
-                    )
+                    if is_xpu_context:
+                        cache_context.stream.synchronize()
+                        self._ctx.storage_manager.finish_write(list(all_dict.keys()))
+                    else:
+                        submit_callback_to_stream(
+                            cache_context.cupy_stream,
+                            "finish_write",
+                            list(all_dict.keys()),
+                        )
                 else:
                     total_bytes = 0
-                self._ctx.event_bus.publish_on_stream(
-                    cache_context.cupy_stream,
-                    Event(
-                        event_type=EventType.MP_STORE_END,
-                        session_id=key.request_id,
-                        metadata={
-                            "stored_count": stored_count,
-                            "device": str(cache_context.device),
-                            "engine_id": instance_id,
-                            "model_name": model_name,
-                            "total_bytes": total_bytes,
-                        },
-                    ),
+                store_end_event = Event(
+                    event_type=EventType.MP_STORE_END,
+                    session_id=key.request_id,
+                    metadata={
+                        "stored_count": stored_count,
+                        "device": str(cache_context.device),
+                        "engine_id": instance_id,
+                        "model_name": model_name,
+                        "total_bytes": total_bytes,
+                    },
                 )
+                if is_xpu_context:
+                    self._ctx.event_bus.publish(store_end_event)
+                else:
+                    self._ctx.event_bus.publish_on_stream(
+                        cache_context.cupy_stream,
+                        store_end_event,
+                    )
 
         ed = time.perf_counter()
         if stored_count:
@@ -1136,7 +1177,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 num_chunks * self._ctx.chunk_size,
                 ed - st,
             )
-        return event.ipc_handle(), True
+        if event is not None:
+            return event.ipc_handle(), True
+        return b"", True
 
     @_lmcache_nvtx_annotate
     def retrieve(
@@ -1156,6 +1199,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             gpu_block_ids: GPU block IDs to retrieve into, indexed by LMCache
                 KV group index.
             event_ipc_handle: The IPC handle of the event to wait on.
+                XPU ignores this value because dpctl exposes memory IPC but
+                not event IPC.
             skip_first_n_tokens: Number of tokens to skip writing at
                 the start of the retrieve range. This avoids overwriting
                 APC-shared GPU blocks that may be read concurrently by other
@@ -1163,8 +1208,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
 
         Returns:
             A tuple where the first element is the IPC handle of the event
-            that signals the completion of the retrieve operation, and the
-            second element indicates whether the key was successfully retrieved.
+            that signals the completion of the retrieve operation (or empty
+            bytes for XPU), and the second element indicates whether the key
+            was successfully retrieved.
 
         Raises:
             ValueError: If no GPU context is registered for the given instance ID.
@@ -1194,18 +1240,23 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
         )
 
-        self._ctx.event_bus.publish_on_stream(
-            cache_context.cupy_stream,
-            Event(
-                event_type=EventType.MP_RETRIEVE_START,
-                session_id=key.request_id,
-                metadata={
-                    "device": str(cache_context.device),
-                    "engine_id": instance_id,
-                    "model_name": model_name,
-                },
-            ),
+        retrieve_start_event = Event(
+            event_type=EventType.MP_RETRIEVE_START,
+            session_id=key.request_id,
+            metadata={
+                "device": str(cache_context.device),
+                "engine_id": instance_id,
+                "model_name": model_name,
+            },
         )
+        is_xpu_context = cache_context.device.type == "xpu"
+        if is_xpu_context:
+            self._ctx.event_bus.publish(retrieve_start_event)
+        else:
+            self._ctx.event_bus.publish_on_stream(
+                cache_context.cupy_stream,
+                retrieve_start_event,
+            )
 
         blocks_per_chunk = [
             cache_context.calculate_num_blocks(self._ctx.chunk_size, group_idx)
@@ -1218,8 +1269,13 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             torch_dev.device(cache_context.device),
             torch_dev.stream(cache_context.stream),
         ):
-            check_interprocess_event_support()
-            event = torch_dev.Event(interprocess=True)
+            if is_xpu_context:
+                # dpctl PR 2331 exposes SYCL memory IPC only, so XPU cannot
+                # exchange CUDA-style cross-process event handles.
+                event = None
+            else:
+                check_interprocess_event_support()
+                event = torch_dev.Event(interprocess=True)
 
             # Fail closed: a short block-id list would drive the transfer
             # kernel to write out-of-bounds GPU memory. Checked on the raw
@@ -1240,8 +1296,10 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     num_chunks,
                     blocks_per_chunk,
                 )
-                event.record()
-                return event.ipc_handle(), False
+                if event is not None:
+                    event.record()
+                    return event.ipc_handle(), False
+                return b"", False
 
             # Cut and stage all block_ids to GPU once before the transfer
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
@@ -1258,7 +1316,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     ) as memory_objs:
                         if not memory_objs or len(memory_objs) != len(obj_keys):
                             logger.error("Some keys not found during retrieve!")
-                            return event.ipc_handle(), False
+                            if event is not None:
+                                return event.ipc_handle(), False
+                            return b"", False
 
                         total_bytes += sum(mo.get_size() for mo in memory_objs)
 
@@ -1277,30 +1337,43 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         prefetched_keys.extend(obj_keys)
             except Exception:
                 logger.exception("Cannot retrieve keys due to exception")
-                return event.ipc_handle(), False
+                if event is not None:
+                    return event.ipc_handle(), False
+                return b"", False
             finally:
-                event.record()
+                if event is not None:
+                    event.record()
                 if prefetched_keys:
-                    submit_callback_to_stream(
-                        cache_context.cupy_stream,
-                        "finish_read_prefetched",
-                        prefetched_keys,
-                    )
-                self._ctx.event_bus.publish_on_stream(
-                    cache_context.cupy_stream,
-                    Event(
-                        event_type=EventType.MP_RETRIEVE_END,
-                        session_id=key.request_id,
-                        metadata={
-                            "retrieved_count": len(prefetched_keys),
-                            "device": str(cache_context.device),
-                            "engine_id": instance_id,
-                            "model_name": model_name,
-                            "cache_salt": key.cache_salt,
-                            "total_bytes": total_bytes,
-                        },
-                    ),
+                    if is_xpu_context:
+                        cache_context.stream.synchronize()
+                        self._ctx.storage_manager.finish_read_prefetched(
+                            prefetched_keys
+                        )
+                    else:
+                        submit_callback_to_stream(
+                            cache_context.cupy_stream,
+                            "finish_read_prefetched",
+                            prefetched_keys,
+                        )
+                retrieve_end_event = Event(
+                    event_type=EventType.MP_RETRIEVE_END,
+                    session_id=key.request_id,
+                    metadata={
+                        "retrieved_count": len(prefetched_keys),
+                        "device": str(cache_context.device),
+                        "engine_id": instance_id,
+                        "model_name": model_name,
+                        "cache_salt": key.cache_salt,
+                        "total_bytes": total_bytes,
+                    },
                 )
+                if is_xpu_context:
+                    self._ctx.event_bus.publish(retrieve_end_event)
+                else:
+                    self._ctx.event_bus.publish_on_stream(
+                        cache_context.cupy_stream,
+                        retrieve_end_event,
+                    )
         tokens_retrieved = num_chunks * self._ctx.chunk_size
         ed = time.perf_counter()
         logger.info(
@@ -1309,4 +1382,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             ed - st,
         )
 
-        return event.ipc_handle(), True
+        if event is not None:
+            return event.ipc_handle(), True
+        return b"", True

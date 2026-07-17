@@ -33,3 +33,13 @@ class XpuDeviceSpec(DeviceSpec):
             return hasattr(torch, "xpu") and torch.xpu.is_available()
         except Exception:
             return False
+
+    def is_handle_transfer_available(self) -> bool:
+        """Return whether XPU IPC handle transfer APIs are available."""
+        try:
+            # Third Party
+            from dpctl.memory import IPCMemoryHandle, MemoryUSMDevice  # noqa: F401
+        except ImportError:
+            return False
+
+        return True

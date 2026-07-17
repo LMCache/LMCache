@@ -59,6 +59,7 @@ class SyclProfile(BuildProfile):
                     "cxx": [
                         "-std=c++17",
                         "-D_GLIBCXX_USE_CXX11_ABI=1",
+                        "-D__DPCPP_SYCL_EXTERNAL_LIBC=",
                         "-O3",
                         "-fsycl",
                         "-fno-sycl-id-queries-fit-in-int",

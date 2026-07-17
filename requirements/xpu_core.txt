@@ -1,0 +1,2 @@
+# XPU runtime dependencies
+dpctl

@@ -192,11 +192,11 @@ def _make_key(
 
 
 # ------------------------------------------------------------------ #
-#  GPU KV cache allocation                                             #
+#  Device KV cache allocation                                          #
 # ------------------------------------------------------------------ #
 
 
-def _allocate_gpu_kv_cache(
+def _allocate_device_kv_cache(
     num_layers: int = 32,
     num_heads: int = 8,
     head_size: int = 128,
@@ -206,8 +206,9 @@ def _allocate_gpu_kv_cache(
     device: str | torch.device | None = None,
     kv_size: int = 2,
     groups: list[KVLayerGroupInfo] | None = None,
+    source_device: str | torch.device | None = None,
 ) -> list[torch.Tensor]:
-    """Allocate paged GPU KV cache tensors.
+    """Allocate paged device KV cache tensors.
 
     Each layer is a tensor of shape
     ``(kv_size, num_blocks, block_size, num_heads, head_size)``
@@ -232,18 +233,23 @@ def _allocate_gpu_kv_cache(
         if device
         else torch.device(torch_device_type, torch_dev.current_device())
     )
+    init_dev = torch.device(source_device) if source_device is not None else dev
 
     def _alloc(
         shape: tuple[int, ...],
         a_dtype: torch.dtype,
     ) -> torch.Tensor:
         if a_dtype.is_floating_point:
-            return torch.randn(shape, dtype=a_dtype, device=dev)
+            tensor = torch.randn(shape, dtype=a_dtype, device=init_dev)
+            return tensor.to(dev) if init_dev != dev else tensor
         # ``torch.randn`` only supports floating-point dtypes; fall
         # back to ``randint`` for integer dtypes (e.g. ``uint8``
         # used by FP8 quantized KV cache layouts).
         iinfo = torch.iinfo(a_dtype)
-        return torch.randint(iinfo.min, iinfo.max + 1, shape, dtype=a_dtype, device=dev)
+        tensor = torch.randint(
+            iinfo.min, iinfo.max + 1, shape, dtype=a_dtype, device=init_dev
+        )
+        return tensor.to(dev) if init_dev != dev else tensor
 
     if groups:
         tensors: list[torch.Tensor] = []
@@ -255,6 +261,62 @@ def _allocate_gpu_kv_cache(
 
     shape = (kv_size, num_blocks, block_size, num_heads, head_size)
     return [_alloc(shape, dtype) for _ in range(num_layers)]
+
+
+def _allocate_gpu_kv_cache(
+    num_layers: int = 32,
+    num_heads: int = 8,
+    head_size: int = 128,
+    num_blocks: int = 1024,
+    block_size: int = 16,
+    dtype: torch.dtype | None = None,
+    device: str | torch.device | None = None,
+    kv_size: int = 2,
+    groups: list[KVLayerGroupInfo] | None = None,
+) -> list[torch.Tensor]:
+    """Allocate paged CUDA GPU KV cache tensors."""
+    return _allocate_device_kv_cache(
+        num_layers=num_layers,
+        num_heads=num_heads,
+        head_size=head_size,
+        num_blocks=num_blocks,
+        block_size=block_size,
+        dtype=dtype,
+        device=device,
+        kv_size=kv_size,
+        groups=groups,
+    )
+
+
+def _allocate_xpu_kv_cache(
+    num_layers: int = 32,
+    num_heads: int = 8,
+    head_size: int = 128,
+    num_blocks: int = 1024,
+    block_size: int = 16,
+    dtype: torch.dtype | None = None,
+    device: str | torch.device | None = None,
+    kv_size: int = 2,
+    groups: list[KVLayerGroupInfo] | None = None,
+) -> list[torch.Tensor]:
+    """Allocate paged XPU KV cache tensors.
+
+    PyTorch XPU nightly can abort in device-side random/fill kernels on
+    some driver/runtime combinations, so deterministic data is generated
+    on CPU and copied to XPU.
+    """
+    return _allocate_device_kv_cache(
+        num_layers=num_layers,
+        num_heads=num_heads,
+        head_size=head_size,
+        num_blocks=num_blocks,
+        block_size=block_size,
+        dtype=dtype,
+        device=device,
+        kv_size=kv_size,
+        groups=groups,
+        source_device="cpu",
+    )
 
 
 # Backward-compatible alias used by tests and older callers.
@@ -493,7 +555,7 @@ def _make_event_handle(use_gpu: bool = True) -> bytes:
     coherent without device-side sync), so an empty handle is
     returned and the server treats it as a no-op.
     """
-    if not use_gpu:
+    if not use_gpu or torch_device_type != "cuda":
         return b""
     check_interprocess_event_support()
     event = torch_dev.Event(interprocess=True)
@@ -608,6 +670,39 @@ def _scatter_flat_chunks_to_paged(
             target.copy_(reshaped)
 
 
+def _copy_paged_to_flat_slots(
+    tensors: list["torch.Tensor"],
+    slot_views: list["torch.Tensor"],
+    chunk_indices: list[int],
+    block_offset: int,
+    block_size: int,
+    chunk_size: int,
+) -> None:
+    """Copy paged client tensors directly into flat SHM chunk slots.
+
+    This is the store-side counterpart of
+    :func:`_scatter_flat_chunks_to_paged`, but writes directly into the
+    server-owned SHM slot views instead of first materializing a full
+    intermediate ``list[chunk]``. It avoids an extra full-size copy for
+    non-GPU engine-driven SHM benchmarks.
+    """
+    if chunk_size % block_size != 0:
+        raise ValueError(
+            "chunk_size %d must be a multiple of block_size %d"
+            % (chunk_size, block_size)
+        )
+    blocks_per_chunk = chunk_size // block_size
+    for slot_view, chunk_idx in zip(slot_views, chunk_indices, strict=False):
+        start_b = block_offset + chunk_idx * blocks_per_chunk
+        for layer_idx, t in enumerate(tensors):
+            kv, _, bs, nh, hs = t.shape
+            source = t.narrow(1, start_b, blocks_per_chunk)
+            target = slot_view[:, layer_idx].reshape(
+                kv, blocks_per_chunk, bs, nh, hs
+            )
+            target.copy_(source)
+
+
 # ------------------------------------------------------------------ #
 #  Client-side checksum / zero-fill (data-mode self-check)             #
 # ------------------------------------------------------------------ #
@@ -705,7 +800,7 @@ def _send_store(
             key,
             _INSTANCE_ID,
             [block_ids] * num_engine_group_infos,
-            _make_event_handle(),
+            _make_event_handle(use_gpu),
         ]
         result = _call(client, RequestType.STORE, payloads)
         if result is _TIMEOUT:
@@ -721,18 +816,15 @@ def _send_store(
         slots = ctx.get("slots", []) or []
         chunk_indices = ctx.get("chunk_indices", []) or []
         if slots and chunk_indices:
-            num_blocks = (key.end - key.start) // block_size
-            full_chunks = _gather_paged_to_flat_chunks(
+            slot_views = _build_server_slot_views(server_pool, slots)
+            _copy_paged_to_flat_slots(
                 client_tensors,
+                slot_views,
+                chunk_indices,
                 block_offset,
-                num_blocks,
                 block_size,
                 chunk_size,
             )
-            slot_views = _build_server_slot_views(server_pool, slots)
-            for slot_view, chunk_idx in zip(slot_views, chunk_indices, strict=False):
-                if 0 <= chunk_idx < len(full_chunks):
-                    slot_view.copy_(full_chunks[chunk_idx].view(slot_view.shape))
     commit = _call(client, RequestType.COMMIT_STORE, [key, _INSTANCE_ID, b""])
     if commit is _TIMEOUT:
         return "timeout"
@@ -774,7 +866,7 @@ def _send_retrieve(
             key,
             _INSTANCE_ID,
             [block_ids] * num_engine_group_infos,
-            _make_event_handle(),
+            _make_event_handle(use_gpu),
             0,  # skip_first_n_tokens
         ]
         result = _call(client, RequestType.RETRIEVE, payloads)
@@ -879,6 +971,46 @@ def _query_checksum(
     except (urllib.error.URLError, OSError) as exc:
         print("  [WARNING] Checksum query failed: %s" % exc)
     return None
+
+
+# ------------------------------------------------------------------ #
+#  Client-side checksum fallback (non_gpu mode)                        #
+# ------------------------------------------------------------------ #
+
+
+def _compute_local_checksum(
+    kv_caches: dict[str, torch.Tensor],
+    block_offset: int,
+    num_blocks: int,
+    chunk_size: int,
+    block_size: int,
+) -> list[str]:
+    """Compute MD5 checksums over local KV cache tensors.
+
+    Used as a fallback when the server-side HTTP checksum endpoint
+    is unavailable (e.g. non_gpu mode where no GPU contexts exist).
+    Reads blocks ``[block_offset, block_offset + num_blocks)`` along
+    axis 1 (NB dimension, NHD layout) across all layers.
+    """
+    block_ids = list(range(block_offset, block_offset + num_blocks))
+    chunk_size_blocks = chunk_size // block_size
+    num_chunks = (len(block_ids) + chunk_size_blocks - 1) // chunk_size_blocks
+    block_axis = 1  # NHD: (2, NB, BS, NH, HS)
+
+    hashes: list[str] = []
+    for ci in range(num_chunks):
+        s = ci * chunk_size_blocks
+        e = min(s + chunk_size_blocks, len(block_ids))
+        chunk_blocks = block_ids[s:e]
+        hasher = hashlib.md5()
+        for _name, tensor in kv_caches.items():
+            idx = torch.tensor(chunk_blocks, dtype=torch.long, device=tensor.device)
+            selected = tensor.index_select(block_axis, idx).contiguous().cpu()
+            if selected.dtype == torch.bfloat16:
+                selected = selected.to(torch.float32)
+            hasher.update(selected.numpy().tobytes())
+        hashes.append(hasher.hexdigest())
+    return hashes
 
 
 # ------------------------------------------------------------------ #

@@ -316,6 +316,38 @@ def test_load_store_op_accepts_per_group_block_ids():
     assert op.flat_block_ids == [0, 1, 10, 11]
 
 
+def test_load_store_op_accepts_flat_single_group_block_ids():
+    op = LoadStoreOp(
+        token_ids=[1, 2, 3, 4],
+        block_ids=[0, 1],
+        start=0,
+        end=4,
+    )
+
+    assert op.grouped_block_ids == [[0, 1]]
+    assert op.flat_block_ids == [0, 1]
+
+
+def test_submit_store_request_accepts_flat_single_group_block_ids(
+    fake_adapter, monkeypatch
+):
+    adapter, _send_mock, _ = fake_adapter
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "xpu"
+    adapter.kv_caches = {"layer.0": fake_tensor}
+    adapter.group_views = []
+    transfer_ctx = MagicMock()
+    fake_future = MagicMock()
+    transfer_ctx.submit_store.return_value = fake_future
+    adapter.transfer_ctx = transfer_ctx
+    op = LoadStoreOp(token_ids=[1, 2, 3, 4], block_ids=[0], start=0, end=4)
+
+    adapter.submit_store_request("req-1", op, event=MagicMock())
+
+    assert transfer_ctx.submit_store.call_args.args[4] == [[0]]
+
+
 def test_store_keeps_event_until_future_finishes(fake_adapter):
     """Store requests keep the exported CUDA event alive while pending."""
     adapter, _send_mock, _future = fake_adapter

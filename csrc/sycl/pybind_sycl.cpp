@@ -4,7 +4,9 @@
 // Python bindings for the SYCL/XPU memory and CacheGen kernels.
 // Exposed as `lmcache.xpu_ops`.
 //
+#include <sycl/sycl.hpp>
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 #include <torch/torch.h>
 #include "mem_kernels_sycl.h"
 #include "cachegen_kernels_sycl.h"
@@ -29,6 +31,17 @@ PYBIND11_MODULE(xpu_ops, m) {
       .value("TWO_X_NL_X_NB_BS_NH_HS", EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS)
       .value("NL_X_NB_NH_BS_TWO_HS", EngineKVFormat::NL_X_NB_NH_BS_TWO_HS)
       .export_values();
+  py::class_<PageBufferShapeDesc>(m, "PageBufferShapeDesc")
+      .def(py::init<>())
+      .def_readwrite("kv_size", &PageBufferShapeDesc::kv_size)
+      .def_readwrite("nl", &PageBufferShapeDesc::nl)
+      .def_readwrite("nb", &PageBufferShapeDesc::nb)
+      .def_readwrite("bs", &PageBufferShapeDesc::bs)
+      .def_readwrite("nh", &PageBufferShapeDesc::nh)
+      .def_readwrite("hs", &PageBufferShapeDesc::hs)
+      .def_readwrite("element_size", &PageBufferShapeDesc::element_size)
+      .def_readwrite("block_stride_elems",
+                     &PageBufferShapeDesc::block_stride_elems);
   m.def("multi_layer_kv_transfer", &multi_layer_kv_transfer,
         py::arg("key_value"), py::arg("key_value_ptrs"),
         py::arg("slot_mapping"), py::arg("paged_memory_device"),
@@ -36,27 +49,21 @@ PYBIND11_MODULE(xpu_ops, m) {
         py::arg("engine_kv_format"), py::arg("block_size") = 0,
         py::arg("head_size") = 0, py::arg("skip_prefix_n_tokens") = 0,
         py::call_guard<py::gil_scoped_release>());
+  m.def("multi_layer_block_kv_transfer", &multi_layer_block_kv_transfer,
+        py::arg("paged_buffer_ptrs_tensor"), py::arg("lmcache_objects_ptrs"),
+        py::arg("block_ids"), py::arg("device"), py::arg("direction"),
+        py::arg("shape_desc"), py::arg("lmcache_chunk_size"),
+        py::arg("engine_kv_format"), py::arg("skip_prefix_n_blocks"),
+        py::call_guard<py::gil_scoped_release>());
   m.def("single_layer_kv_transfer", &single_layer_kv_transfer,
         py::arg("lmc_key_value_cache"), py::arg("vllm_key_value_cache"),
         py::arg("slot_mapping"), py::arg("direction"),
         py::arg("engine_kv_format"), py::arg("token_major") = false,
         py::call_guard<py::gil_scoped_release>());
-  m.def("single_layer_kv_transfer_sgl", &single_layer_kv_transfer_sgl,
-        py::arg("lmc_key_value_cache"), py::arg("sgl_key_cache"),
-        py::arg("sgl_value_cache"), py::arg("slot_mapping"),
-        py::arg("direction"), py::arg("token_major") = false,
-        py::call_guard<py::gil_scoped_release>());
-  m.def("multi_layer_kv_transfer_unilateral",
-        &multi_layer_kv_transfer_unilateral, py::arg("key_value"),
-        py::arg("key_value_ptrs"), py::arg("slot_mapping"),
-        py::arg("paged_memory_device"), py::arg("page_buffer_size"),
-        py::arg("direction"), py::arg("engine_kv_format"),
-        py::call_guard<py::gil_scoped_release>());
   m.def("load_and_reshape_flash", &load_and_reshape_flash);
   m.def("reshape_and_cache_back_flash", &reshape_and_cache_back_flash);
   m.def("lmcache_memcpy_async", &lmcache_memcpy_async,
         py::call_guard<py::gil_scoped_release>());
-
   // CacheGen / RoPE kernels (Intel XPU).  Names match the
   // lmcache.python_ops_fallback module so the backend selection in
   // lmcache.v1.platform can transparently override.
@@ -72,6 +79,6 @@ PYBIND11_MODULE(xpu_ops, m) {
         py::arg("bytestreams"), py::arg("lengths"), py::arg("output"));
   m.def("decode_fast_prefsum", &decode_fast_prefsum_xpu, py::arg("cdf"),
         py::arg("bytestreams"), py::arg("lengths_prefsum"), py::arg("output"));
-  // Backward-compat alias: GPUKVFormat -> EngineKVFormat
-  m.attr("GPUKVFormat") = m.attr("EngineKVFormat");
+  // Backward-compat alias: EngineKVFormat -> EngineKVFormat
+  m.attr("EngineKVFormat") = m.attr("EngineKVFormat");
 }
