@@ -546,6 +546,12 @@ def _read_hugepage_info() -> Optional[Tuple[int, int, int]]:
         return None
 
 
+# Buffers returned by the pageable fallback in _allocate_cpu_memory, keyed by
+# data_ptr. These are torch-owned tensors (freed on GC), so _free_cpu_memory
+# must NOT hand their pointers to the native free path.
+_FALLBACK_HOST_BUFFERS: dict = {}
+
+
 def _allocate_cpu_memory(
     size: int,
     numa_mapping: Optional[NUMAMapping] = None,
@@ -588,7 +594,21 @@ def _allocate_cpu_memory(
                     "Failed to allocate huge pages. "
                     "Please grow the 2 MiB hugepage pool."
                 )
-        raise
+            raise
+        if shm_name or numa_mapping is not None or use_hugepages:
+            # shm / NUMA / hugepage allocations carry semantics a plain pageable
+            # host buffer cannot preserve, so don't silently substitute one.
+            raise
+        logger.warning(
+            "Pinned host allocation of %d bytes via the native allocator failed "
+            "(%s); falling back to pageable host memory.",
+            size,
+            e,
+        )
+        buffer = torch.empty(size, dtype=torch.uint8, pin_memory=False)
+        buffer.fill_(0)
+        _FALLBACK_HOST_BUFFERS[buffer.data_ptr()] = buffer
+        return buffer
 
     array_type = ctypes.c_uint8 * size
     buf = array_type.from_address(ptr)
@@ -606,6 +626,11 @@ def _free_cpu_memory(
 ) -> None:
     if torch_dev.is_available():
         torch_dev.synchronize()
+
+    # Pageable fallback buffers are torch-owned (freed on GC); just drop our
+    # reference instead of routing through the native free path.
+    if _FALLBACK_HOST_BUFFERS.pop(buffer.data_ptr(), None) is not None:
+        return
 
     resolved = _resolve_pinned_alloc_free(
         numa_mapping,

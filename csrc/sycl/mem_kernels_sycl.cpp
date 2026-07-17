@@ -1021,3 +1021,21 @@ void lmcache_memcpy_async(uintptr_t dest, uintptr_t src, size_t nbytes,
     offset += max_nbytes;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Pinned host allocation (SYCL/XPU analog of the CUDA cudaHostAlloc path in
+// csrc/mem_alloc.cpp). LMCache local_cpu backend expects a device-accessible
+// (USM host) buffer; without this the XPU build silently fell back to pageable
+// host memory, dropping D2H store throughput ~20x. sycl::malloc_host bound to
+// the current XPU device context gives true USM-pinned host memory.
+// ---------------------------------------------------------------------------
+uintptr_t alloc_pinned_ptr(size_t size, unsigned int flags) {
+  void* ptr = sycl::malloc_host(size, c10::xpu::get_device_context());
+  TORCH_CHECK(ptr != nullptr, "sycl::malloc_host failed for ", size,
+              " bytes (XPU pinned host)");
+  return reinterpret_cast<uintptr_t>(ptr);
+}
+
+void free_pinned_ptr(uintptr_t ptr) {
+  sycl::free(reinterpret_cast<void*>(ptr), c10::xpu::get_device_context());
+}
