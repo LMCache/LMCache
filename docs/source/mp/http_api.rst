@@ -145,8 +145,9 @@ compatibility with the vLLM-embedded API server.
        ``adapter``, ``model_name``, ``page_size``, ``page_token``).
    * - DELETE
      - ``/cache/objects``
-     - Delete a caller-supplied list of object keys (body: ``tier``,
-       ``adapter``, ``keys``).
+     - Delete a caller-supplied list of object keys from L1, L2, or both (body:
+       ``keys``, ``tier``, ``force``, ``adapter``). ``force`` deletes L1 keys
+       even if locked.
    * - POST
      - ``/cache/prefetches``
      - Warm a node's L1 by loading a token sequence from L2 ahead of traffic;
@@ -684,10 +685,8 @@ Both are intended for operator / admin workflows ("purge this
 user's keys", "show me what's resident", "garbage-collect orphans
 after a rename"). They are **not** on the inference data path.
 
-L1 is intentionally not touched. Keys deleted from L2 may still return
-from L1 until the L1 eviction controller expires them naturally;
-callers that need an L1+L2 purge should layer their own L1
-invalidation or wait for natural L1 eviction.
+``DELETE /cache/objects`` deletes from L1, L2, or both, selected by its ``tier``
+field (default ``l2``). ``GET /cache/objects`` lists L2 only.
 
 The coordinator's eviction loop uses ``DELETE /cache/objects`` automatically (see
 :doc:`coordinator` — "L2 usage tracking and eviction"); the
@@ -698,13 +697,14 @@ actions and debugging.
 ``DELETE /cache/objects``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Delete a caller-supplied list of keys from one tier/adapter.
-Idempotent: keys absent from the adapter are skipped silently; keys
-currently locked by in-flight store/load tasks are skipped so the
-delete never corrupts an active transfer. The blocking adapter call is
-run off the event loop.
+Delete a caller-supplied list of keys from L1, L2, or both (``tier``).
+Idempotent: absent keys are skipped silently. L2 deletes skip keys locked by
+in-flight store/load tasks so an active transfer is never corrupted; L1 deletes
+skip read/write-locked keys unless ``force`` is set. Blocking adapter I/O is run
+off the event loop. When the tier includes L2 the primary (or selected) L2
+adapter must be configured, else ``503``; a pure ``l1`` delete needs no adapter.
 
-Per-key successful deletions fire ``on_l2_keys_deleted`` on the
+Per-key successful L2 deletions fire ``on_l2_keys_deleted`` on the
 adapter's listeners — when the coordinator is wired (see
 ``--coordinator-l2-event-reporting``), the deletions show up at the
 coordinator's ``POST /quota/events`` as ``"type": "delete"`` events. The
@@ -726,11 +726,16 @@ that event flow, not from the response of this call.
        capped at ``10000`` keys per request.
    * - ``tier``
      - string
-     - Optional (default ``l2``). The only supported value.
+     - Optional (default ``l2``). One of ``l1`` / ``l2`` / ``all``.
+   * - ``force``
+     - bool
+     - Optional (default ``false``). When ``true``, delete an L1 key even if it
+       is read/write-locked (no effect on L2).
    * - ``adapter``
      - string
-     - Optional (default: primary, first-configured adapter). The
-       ``type_name`` of the target adapter (see ``GET /config/adapters``).
+     - Optional (default: primary, first-configured adapter). The ``type_name``
+       of the target L2 adapter (see ``GET /config/adapters``); ignored when
+       ``tier`` is ``l1``.
 
 Each ``EncodedObjectKey`` is
 
@@ -752,37 +757,42 @@ are optional for backward compatibility with older wire payloads.
 .. code-block:: json
 
     {
-      "requested": 2,
-      "adapter": "S3L2Adapter",
+      "deleted": 4,
+      "skipped": 0,
       "ok": true
     }
 
-On adapter-level failure the response is still ``200`` with
-``ok=false`` and an ``error`` field carrying the reason.
+``deleted`` is the total keys removed across the requested tiers (L1 removals
+plus the L2 batch size); ``skipped`` is the L1 keys refused because they were
+locked (non-force only). On an L2 adapter failure the response is still ``200``
+with ``ok=false`` and an ``error`` field carrying the reason.
 
 **HTTP status codes:**
 
-- ``200``: request reached the adapter (check ``ok`` for outcome).
+- ``200``: request processed (check ``ok`` for the L2 adapter outcome).
 - ``400``: batch exceeds the limit, or a key payload violates an
   ``ObjectKey`` invariant (bad hex, ``@`` in ``model_name``, forbidden
   ``cache_salt`` character).
 - ``404``: ``adapter`` (body) does not match any configured adapter.
 - ``422``: Pydantic-level body-shape failure (missing ``keys``,
   wrong field types).
-- ``503``: engine not initialized, or no L2 adapters configured.
+- ``503``: engine not initialized, or no L2 adapters configured (only when
+  ``tier`` includes L2).
 
-**Example:**
+**Example:** delete from both tiers.
 
 .. code-block:: bash
 
     curl -s -X DELETE http://localhost:8080/cache/objects \
         -H 'Content-Type: application/json' \
         -d '{
+            "tier": "all",
             "keys": [
               {"chunk_hash_hex": "aa", "model_name": "m",
                "kv_rank": 0, "object_group_id": 0, "cache_salt": "user-a"}
             ]
         }'
+    # -> {"deleted": 2, "skipped": 0, "ok": true}
 
 ``GET /cache/objects``
 ~~~~~~~~~~~~~~~~~~~~~~

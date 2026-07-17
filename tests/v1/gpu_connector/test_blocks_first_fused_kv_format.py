@@ -69,7 +69,7 @@ def test_accessors():
     assert U.get_num_blocks(norm, fmt) == NB
     assert U.get_block_size(norm, fmt) == BS
     assert U.get_num_heads(norm, fmt) == NH
-    assert U.get_head_size(norm, fmt) == HS
+    assert U.get_head_size(norm, fmt) == HS * 2
     assert U.get_hidden_dim_size(norm, fmt) == NH * HS
     assert U.get_page_buffer_size(norm, fmt) == NB * BS
     assert U.get_tokens_per_layer(norm, fmt) == NB * BS
@@ -91,8 +91,8 @@ def test_mp_gather_scatter_roundtrip():
     chunks = gather_paged_kv_to_cpu(
         src, block_ids, blocks_per_chunk, layout_hints=HINTS
     )
-    # [K/V, NL, chunk_tokens, NH*HS]
-    assert tuple(chunks[0].shape) == (2, NL, blocks_per_chunk * BS, NH * HS)
+    # Fused K/V is a single plane: [NL, chunk_tokens, NH * 2 * HS]
+    assert tuple(chunks[0].shape) == (NL, blocks_per_chunk * BS, NH * 2 * HS)
 
     # Wipe the gathered blocks, scatter back, and confirm exact recovery.
     dst = {k: v.clone() for k, v in src.items()}
@@ -116,23 +116,23 @@ def test_multi_layer_block_kv_transfer_roundtrip():
 
     Regression for the CI ``cpu_e2e_validation (server-side copy)`` failure:
     ``LMCacheDrivenTransferModule.store`` calls ``multi_layer_block_kv_transfer`` for
-    this format, so the per-layer HND fallback must recognize it and split
-    K/V at dim 3.
+    this format, so the fallback must transfer it as a single fused plane
+    (kv_size == 1, hs == 2 * head_size).
     """
-    # Use canonical 5D layers so the fallback exercises the HND split path.
+    # Use canonical 5D layers so the fallback exercises the fused path.
     fmt, norm = U.normalize_kv_and_discover_format(
         _raw_blocks_first_caches(), EngineType.VLLM, HINTS
     )
     chunk_tokens = NB * BS
-    obj = torch.zeros((2, NL, chunk_tokens, NH * HS), dtype=norm[0].dtype)
+    obj = torch.zeros((NL, chunk_tokens, NH * 2 * HS), dtype=norm[0].dtype)
 
     sd = lmc_ops.PageBufferShapeDesc()
-    sd.kv_size = 2
+    sd.kv_size = 1
     sd.nl = NL
     sd.nb = NB
     sd.bs = BS
     sd.nh = NH
-    sd.hs = HS
+    sd.hs = 2 * HS
     sd.element_size = norm[0].element_size()
     sd.block_stride_elems = NH * BS * 2 * HS
     set_shape_desc_dtype(sd, norm[0].dtype)

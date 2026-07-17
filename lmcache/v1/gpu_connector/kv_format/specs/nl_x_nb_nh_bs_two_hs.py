@@ -37,6 +37,12 @@ class NL_X_NB_NH_BS_TWO_HS_Spec(KVFormatSpec):
     def page_buffer_size(self) -> int:
         return self.kv_caches[0].shape[0] * self.kv_caches[0].shape[2]
 
+    def kv_size(self) -> int:
+        # NOTE(ApostaC): for this special format, we treat it as
+        # normal HND format with fused KV, and the D-size is doubled
+        # (as it's kv-packed)
+        return 1
+
     def num_heads(self, layer_idx: int = 0) -> int:
         return self.kv_caches[layer_idx].shape[1]
 
@@ -45,7 +51,10 @@ class NL_X_NB_NH_BS_TWO_HS_Spec(KVFormatSpec):
         return t.shape[1] * t.shape[4]
 
     def head_size(self, layer_idx: int = 0) -> int:
-        return self.kv_caches[layer_idx].shape[4]
+        # NOTE(ApostaC): for this special format, we treat it as
+        # normal HND format with fused KV, and the D-size is doubled
+        # (as it's kv-packed)
+        return self.kv_caches[layer_idx].shape[4] * 2
 
     def tokens_per_layer(self) -> int:
         return self.kv_caches[0].shape[0] * self.kv_caches[0].shape[2]
@@ -60,3 +69,9 @@ class NL_X_NB_NH_BS_TWO_HS_Spec(KVFormatSpec):
     def data_ptrs(self, layer_indices: list[int]) -> list[int]:
         layers = cast(list[torch.Tensor], self.kv_caches)
         return [layers[i].data_ptr() for i in layer_indices]
+
+    def concrete_shape_str(self) -> str:
+        # The base rendering pulls HS from head_size(), which is doubled here
+        # (kv-packed D) and would double-count next to the literal 2 axis;
+        # render the real tensor dims instead.
+        return f"{len(self.kv_caches)} x {list(self.kv_caches[0].shape)}"
