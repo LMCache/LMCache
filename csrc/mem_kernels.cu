@@ -285,10 +285,8 @@ __device__ __forceinline__ int64_t page_buffer_offset(
            head_idx * block_size * head_size + block_offset * head_size +
            head_offset;
   }
-  // vllm fused-K/V (HND) — physical: [NB, NH, BS, 2*HS], K and V packed in the
-  // trailing dim. Same head-decomposed HND addressing as NL_X_TWO_NB_NH_BS_HS,
-  // but there is no separate K/V plane (k_or_v is always 0) and the per-head
-  // copy width is 2*head_size, so each head copy moves the packed K+V pair.
+  // Fused-K/V HND: [NB, NH, BS, 2*HS]. HND addressing like NL_X_TWO_NB_NH_BS_HS
+  // but no K/V plane (k_or_v == 0) and per-head width 2*head_size (K+V packed).
   else if constexpr (format == EngineKVFormat::NL_X_NB_NH_BS_TWO_HS) {
     const int hs2 = 2 * head_size;  // packed K+V width per head (xword units)
     const int block_idx = token_idx / block_size;
@@ -299,10 +297,8 @@ __device__ __forceinline__ int64_t page_buffer_offset(
     return block_idx * num_heads * block_size * hs2 +
            head_idx * block_size * hs2 + block_offset * hs2 + head_offset;
   }
-  // vllm fused-K/V (NHD) — physical: [NB, BS, NH, 2*HS], tokens before heads.
-  // token_idx already encodes block * block_size + block_offset, so the packed
-  // per-token stride (scalars_per_token = NH * 2*HS) lands directly on the
-  // slot; no separate K/V plane (k_or_v is always 0).
+  // Fused-K/V NHD: [NB, BS, NH, 2*HS]. token_idx already encodes the slot, so
+  // the packed per-token stride lands directly on it (k_or_v == 0).
   else if constexpr (format == EngineKVFormat::NL_X_NB_BS_NH_TWO_HS) {
     return token_idx * scalars_per_token + scalar_offset;
   }
@@ -564,8 +560,7 @@ void multi_layer_kv_transfer_templated(
   lmc::check_block_size(engine_kv_format, block_size);
   lmc::check_head_size(engine_kv_format, head_size_xword);
 
-  // Fused K/V packs both planes in the trailing dim (kv_size == 1, like MLA),
-  // so there is a single k_or_v == 0 pass rather than separate K and V passes.
+  // Fused packs K+V in the trailing dim (kv_size == 1, like MLA): single pass.
   int k_or_v_size =
       (::is_mla(engine_kv_format) || ::is_fused_packed(engine_kv_format)) ? 1
                                                                           : 2;

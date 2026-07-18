@@ -108,12 +108,10 @@ __global__ void rotary_embedding_kernel_fused(
 
 }  // namespace lmc
 
-// General form: ``head_stride`` is the element distance between consecutive
-// heads in ``key``. For a contiguous [num_tokens, num_kv_heads, head_size]
-// buffer it equals head_size; for vLLM's fused K/V (K and V packed as
-// [.., num_kv_heads, 2*head_size]) pass head_stride = 2*head_size so only the
-// K half of each head is rotated in place (V, the trailing head_size, is left
-// untouched). rot_dim (<= head_size) bounds the rotation, so V is never read.
+// head_stride: element distance between consecutive heads in `key`. Contiguous
+// [num_tokens, num_kv_heads, head_size] passes head_size; fused K/V (packed
+// [.., num_kv_heads, 2*head_size]) passes 2*head_size to rotate only the K half
+// in place (rot_dim <= head_size, so the trailing V is never touched).
 void rotary_embedding_k_fused_strided(const torch::Tensor& old_positions,
                                       const torch::Tensor& new_positions,
                                       torch::Tensor& key, int64_t head_size,

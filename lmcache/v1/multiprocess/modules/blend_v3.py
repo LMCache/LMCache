@@ -1470,10 +1470,8 @@ class BlendV3Module(InstanceLivenessTarget):
                 for slot_idx in range(batch_len)
             ]
             kv_size = all_slots[0].shape[0]
-            # vLLM's fused blocks-first K/V formats pack K and V into a doubled
-            # head dim and report kv_size==1 (the K/V axis stays packed inside
-            # each head copy). Detect them so the K half is re-RoPE'd in place
-            # via the strided kernel; everything else must be genuine K/V.
+            # Fused blocks-first K/V pack K+V into a doubled head dim
+            # (kv_size==1); detect so only the K half is re-RoPE'd in place.
             _ekf = getattr(group, "engine_kv_format", None)
             fused_packed = _ekf is not None and int(_ekf) in (
                 int(lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
@@ -1485,8 +1483,7 @@ class BlendV3Module(InstanceLivenessTarget):
                     "and fused-packed K/V layouts are supported (MLA unsupported)."
                 )
             num_layers, slots, hidden_dim = all_slots[0].shape[1:]
-            # Fused-packed: each head is [K(head_size) | V(head_size)], so the
-            # per-head width is 2*head_size and only the K half is rotated.
+            # Fused-packed: per-head width is 2*head_size; only K is rotated.
             per_head = rope_state.head_size * (2 if fused_packed else 1)
             n_heads = hidden_dim // per_head
             if n_heads * per_head != hidden_dim:
@@ -1517,8 +1514,7 @@ class BlendV3Module(InstanceLivenessTarget):
                     num_layers * slots, n_heads, per_head
                 )
                 if fused_packed:
-                    # Strided kernel rotates only the first head_size (K) of each
-                    # per-head 2*head_size slot in place, leaving V untouched.
+                    # Strided kernel rotates only the K half of each slot.
                     lmc_ops.rotary_embedding_k_fused_strided(
                         old_st + slot_positions_rep,
                         cur_st + slot_positions_rep,

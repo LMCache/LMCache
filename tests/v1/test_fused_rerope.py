@@ -1,15 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Fused-K/V CacheBlend re-RoPE: correctness + efficiency of the two ways to
-rotate only the K half of a packed ``[.., num_kv_heads, 2*head_size]`` buffer.
+"""Fused-K/V CacheBlend re-RoPE: rotate the K half of a packed
+``[.., num_kv_heads, 2*head_size]`` buffer two ways and compare.
 
-* Option 1 (no new kernel): gather K into a contiguous ``[T, H, head_size]``
-  buffer, rotate with the existing ``rotary_embedding_k_fused``, scatter back.
-* Option 2 (strided kernel, #4128 follow-up): ``rotary_embedding_k_fused_strided``
-  with ``head_stride = 2*head_size`` rotates K in place, hopping over V.
-
-Option 1 uses the trusted contiguous kernel, so it is the correctness reference;
-Option 2 must match its K exactly and leave V byte-identical. Run directly for
-the timing comparison:  ``python tests/v1/test_fused_rerope.py``
+Option 1 (reference): gather K contiguous -> rotary_embedding_k_fused -> scatter.
+Option 2: rotary_embedding_k_fused_strided rotates K in place. Option 2 must
+match Option 1's K exactly and leave V byte-identical.
+Run for the timing table: ``python tests/v1/test_fused_rerope.py``.
 """
 
 # Standard

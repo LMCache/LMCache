@@ -2762,23 +2762,9 @@ def rotary_embedding_k_fused_strided(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
 ) -> None:
-    """Strided variant of rotary_embedding_k_fused.
-
-    ``key``'s last dim is ``head_stride`` per head; rotate only the leading
-    ``head_size`` elements (the K half of a packed K/V pair) in place, leaving
-    the trailing ``head_stride - head_size`` (the V half) untouched. When
-    ``head_stride == head_size`` this is exactly ``rotary_embedding_k_fused``.
-    The leading ``head_size`` slice is a view, so the in-place rotation writes
-    back through to ``key``.
-
-    Args:
-        old_positions: Token positions whose rotary embedding to reverse.
-        new_positions: Token positions whose rotary embedding to apply.
-        key: Key tensor to update in-place (last dim packs K then V per head).
-        head_size: Rotated (K) width per head.
-        head_stride: Full per-head element stride (e.g. 2 * head_size for fused).
-        cos_sin_cache: Precomputed cosine/sine cache indexed by position.
-        is_neox: If True, uses NeoX-style rotary; otherwise GPT-J-style.
+    """Strided rotary_embedding_k_fused: ``key``'s last dim is ``head_stride``
+    per head; rotate only the leading ``head_size`` (K) in place via a view,
+    leaving the trailing V. ``head_stride == head_size`` is the contiguous case.
     """
     rotary_embedding_k_fused(
         old_positions,
