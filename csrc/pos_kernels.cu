@@ -59,8 +59,7 @@ inline __device__ void apply_rotary_embedding_fused(
                                  // head_size]
     const scalar_t* old_cache_ptr, const scalar_t* new_cache_ptr,
     const int head_size, const int num_kv_heads, const int rot_dim,
-    const int token_idx, const int64_t key_stride,
-    const int64_t head_stride) {
+    const int token_idx, const int64_t key_stride, const int64_t head_stride) {
   const int embed_dim = rot_dim / 2;
   const scalar_t* old_cos_ptr = old_cache_ptr;
   const scalar_t* old_sin_ptr = old_cache_ptr + embed_dim;
@@ -115,10 +114,12 @@ __global__ void rotary_embedding_kernel_fused(
 // [.., num_kv_heads, 2*head_size]) pass head_stride = 2*head_size so only the
 // K half of each head is rotated in place (V, the trailing head_size, is left
 // untouched). rot_dim (<= head_size) bounds the rotation, so V is never read.
-void rotary_embedding_k_fused_strided(
-    const torch::Tensor& old_positions, const torch::Tensor& new_positions,
-    torch::Tensor& key, int64_t head_size, int64_t head_stride,
-    const torch::Tensor& cos_sin_cache, bool is_neox) {
+void rotary_embedding_k_fused_strided(const torch::Tensor& old_positions,
+                                      const torch::Tensor& new_positions,
+                                      torch::Tensor& key, int64_t head_size,
+                                      int64_t head_stride,
+                                      const torch::Tensor& cos_sin_cache,
+                                      bool is_neox) {
   int64_t num_tokens = key.numel() / (key.size(-1) * key.size(-2));
   int rot_dim = cos_sin_cache.size(1);
   int num_kv_heads = key.size(-2);
@@ -149,10 +150,11 @@ void rotary_embedding_k_fused_strided(
 }
 
 // Contiguous [num_tokens, num_kv_heads, head_size]: head_stride == head_size.
-void rotary_embedding_k_fused(
-    const torch::Tensor& old_positions, const torch::Tensor& new_positions,
-    torch::Tensor& key, int64_t head_size,
-    const torch::Tensor& cos_sin_cache, bool is_neox) {
+void rotary_embedding_k_fused(const torch::Tensor& old_positions,
+                              const torch::Tensor& new_positions,
+                              torch::Tensor& key, int64_t head_size,
+                              const torch::Tensor& cos_sin_cache,
+                              bool is_neox) {
   rotary_embedding_k_fused_strided(old_positions, new_positions, key, head_size,
                                    head_size, cos_sin_cache, is_neox);
 }

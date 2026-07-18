@@ -301,8 +301,8 @@ __device__ __forceinline__ int64_t page_buffer_offset(
   }
   // vllm fused-K/V (NHD) — physical: [NB, BS, NH, 2*HS], tokens before heads.
   // token_idx already encodes block * block_size + block_offset, so the packed
-  // per-token stride (scalars_per_token = NH * 2*HS) lands directly on the slot;
-  // no separate K/V plane (k_or_v is always 0).
+  // per-token stride (scalars_per_token = NH * 2*HS) lands directly on the
+  // slot; no separate K/V plane (k_or_v is always 0).
   else if constexpr (format == EngineKVFormat::NL_X_NB_BS_NH_TWO_HS) {
     return token_idx * scalars_per_token + scalar_offset;
   }
