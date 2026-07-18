@@ -9,18 +9,21 @@ The concrete implementations live in their respective sub-packages:
   CPU-only fallback (POSIX-SHM-backed KV tensors).
 
 :func:`create_cache_context` keeps the dispatch out of the call site
-in :mod:`lmcache.v1.multiprocess.server`. Selection is data-driven:
-each backend sub-package ships its own
-:class:`~lmcache.v1.platform.base_cache_context.BaseCacheContext`
-subclass under ``platform/<backend>/cache_context.py`` and declares
-the ``torch.device.type`` it handles via the
-:attr:`BaseCacheContext.device_type` ClassVar. The first
-:func:`create_cache_context` call discovers those subclasses with
-:func:`lmcache.v1.utils.subclass_discovery.discover_subclasses` and
-memoises the resulting ``device_type -> class`` map. Adding a new
-accelerator therefore requires *zero* edits to this module -- just
-drop a new ``platform/<backend>/cache_context.py`` whose subclass
-sets ``device_type``.
+in :mod:`lmcache.v1.multiprocess.server`. Selection is data-driven
+and delegated to the :class:`~lmcache.v1.platform.base_device_spec.
+DeviceSpec` registry maintained by :mod:`lmcache.v1.platform`: each
+backend sub-package ships a ``DeviceSpec`` subclass whose
+``create_cache_context`` hook lazy-imports and instantiates the
+matching :class:`~lmcache.v1.platform.base_cache_context.
+BaseCacheContext`. Adding a new accelerator therefore requires
+*zero* edits to this module -- just implement
+``DeviceSpec.create_cache_context`` in the sub-package's
+``__init__.py``.
+
+Tests can still swap in fakes without touching the ``DeviceSpec``
+registry via the :func:`snapshot_backends` / :func:`restore_backends`
+overrides: any ``device_type`` present in the override table wins
+over the registry lookup.
 """
 
 # Future
@@ -35,8 +38,8 @@ from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import KVCache
+from lmcache.v1.platform import get_device_spec
 from lmcache.v1.platform.base_cache_context import BaseCacheContext
-from lmcache.v1.utils.subclass_discovery import discover_subclasses
 
 if TYPE_CHECKING:
     # First Party
@@ -44,99 +47,63 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# ``device_type -> BaseCacheContext`` subclass.  Populated lazily on
-# the first :func:`create_cache_context` call by scanning the
-# ``platform`` package for ``cache_context`` leaf modules at depth 2
-# (i.e. ``platform/<backend>/cache_context.py``).  Tests substitute
-# entries via :func:`snapshot_backends` / :func:`restore_backends`.
+# ``device_type -> BaseCacheContext`` subclass override table.
+#
+# Empty by default: production dispatch flows through the
+# ``DeviceSpec`` registry (see :func:`_resolve_factory`).  Tests
+# install fakes here via :func:`snapshot_backends` /
+# :func:`restore_backends`; any device type registered here wins over
+# the ``DeviceSpec`` hook so a single test can shadow a real backend
+# without mutating the shared registry.
 #
 # The value type is the loose ``type`` (rather than
 # ``type[BaseCacheContext]``) so callers can instantiate it with the
 # concrete subclass' positional ``__init__`` signature without mypy
 # resolving the abstract-base ``__init__`` instead.
-_BACKENDS: dict[str, type] = {}
-_BACKENDS_DISCOVERED: bool = False
+_BACKEND_OVERRIDES: dict[str, type] = {}
 
 
-def _discover_backends_once() -> None:
-    """Populate :data:`_BACKENDS` on first use.
+def _resolve_factory(device_type: str):
+    """Return a zero-arg-ready callable that builds a cache context.
 
-    Walks ``lmcache.v1.platform`` two levels deep (``platform`` ->
-    ``<backend>`` -> ``cache_context``) and indexes every concrete
-    :class:`BaseCacheContext` subclass by its ``device_type``
-    ClassVar.  Subclasses with an empty ``device_type`` are skipped
-    with a warning so a missing override surfaces loudly instead of
-    silently shadowing a real backend.
+    Overrides installed via :func:`restore_backends` win over the
+    ``DeviceSpec`` registry so tests can shadow a real backend
+    without mutating shared state.
     """
-    global _BACKENDS_DISCOVERED
-    if _BACKENDS_DISCOVERED:
-        return
+    override = _BACKEND_OVERRIDES.get(device_type)
+    if override is not None:
+        return override
 
-    # First Party
-    import lmcache.v1.platform as platform_pkg
-
-    for cls in discover_subclasses(
-        platform_pkg,
-        BaseCacheContext,  # type: ignore[type-abstract]
-        module_filter=lambda short_name: short_name == "cache_context",
-        levels=[2, 2],
-    ):
-        device_type = getattr(cls, "device_type", "")
-        if not device_type:
-            logger.warning(
-                "Skipping %s: empty device_type ClassVar; concrete "
-                "BaseCacheContext subclasses must override it.",
-                cls.__name__,
-            )
-            continue
-        existing = _BACKENDS.get(device_type)
-        if existing is not None and existing is not cls:
-            logger.warning(
-                "Multiple cache-context classes claim device_type=%r "
-                "(%s vs %s); keeping the first.",
-                device_type,
-                existing.__name__,
-                cls.__name__,
-            )
-            continue
-        _BACKENDS[device_type] = cls
-
-    _BACKENDS_DISCOVERED = True
-
-
-def _resolve_backend(device_type: str) -> type:
-    _discover_backends_once()
-    cls = _BACKENDS.get(device_type)
-    if cls is None:
+    spec = get_device_spec(device_type)
+    if spec is None:
         raise ValueError(
             "No cache-context class registered for device type %r. "
-            "Make sure ``lmcache.v1.platform.<backend>.cache_context`` "
-            "ships a BaseCacheContext subclass with the matching "
-            "``device_type`` ClassVar." % device_type
+            "Make sure ``lmcache.v1.platform.<backend>.__init__`` "
+            "ships a DeviceSpec subclass whose ``create_cache_context`` "
+            "hook returns a BaseCacheContext instance." % device_type
         )
-    return cls
+    return spec.create_cache_context
 
 
 def snapshot_backends() -> dict[str, type]:
-    """Return a shallow copy of the backend table.
+    """Return a shallow copy of the override table.
 
     Pair with :func:`restore_backends` in test fixtures so installing
     fakes for one test does not leak into the next.
     """
-    _discover_backends_once()
-    return dict(_BACKENDS)
+    return dict(_BACKEND_OVERRIDES)
 
 
 def restore_backends(state: dict[str, type]) -> None:
-    """Replace the backend table with *state*.
+    """Replace the override table with *state*.
 
-    Marks the table as already-discovered so further calls do not
-    re-trigger filesystem scanning and overwrite the test's fakes.
+    Any ``device_type`` present in *state* shadows the corresponding
+    ``DeviceSpec.create_cache_context`` hook for the lifetime of the
+    override.  Pass an empty dict to fall back to registry-driven
+    dispatch.
     """
-    global _BACKENDS_DISCOVERED
-    _BACKENDS.clear()
-    _BACKENDS.update(state)
-    _BACKENDS_DISCOVERED = True
+    _BACKEND_OVERRIDES.clear()
+    _BACKEND_OVERRIDES.update(state)
 
 
 def _detect_device_type(kv_caches: KVCache) -> str:
@@ -171,11 +138,10 @@ def create_cache_context(
     backend.
 
     Selection is driven by ``tensor.device.type`` of *kv_caches*:
-    on first use the platform package is scanned for
-    ``BaseCacheContext`` subclasses and the one whose
-    ``device_type`` ClassVar matches is instantiated.  ``"cuda"``,
-    ``"cpu"``, future ``"xpu"`` ... all resolve through the same
-    code path -- no ``isinstance`` / ``if-elif`` chain.
+    the platform ``DeviceSpec`` registry is consulted and the
+    matching spec's ``create_cache_context`` hook is invoked.
+    ``"cuda"``, ``"cpu"``, future ``"xpu"`` ... all resolve through
+    the same code path -- no ``isinstance`` / ``if-elif`` chain.
 
     Args:
         kv_caches: KV cache tensor wrappers from the serving engine.
@@ -204,8 +170,8 @@ def create_cache_context(
         raise ValueError("create_cache_context requires a non-empty kv_caches list")
 
     device_type = _detect_device_type(kv_caches)
-    cls = _resolve_backend(device_type)
-    return cls(
+    factory = _resolve_factory(device_type)
+    return factory(
         kv_caches,
         lmcache_tokens_per_chunk,
         layout_hints,

@@ -31,14 +31,30 @@ class _FakeWrapper:
 
     ``create_cache_context`` only ever reads ``to_tensor().device.type``
     from the wrappers it receives, so a 0-byte tensor on the requested
-    device is enough.
+    device is enough.  For device types torch itself does not know
+    about (``"fakedev"``), we return a duck-typed stub instead so the
+    unregistered-device branch can still be exercised.
     """
 
     def __init__(self, device_type: str) -> None:
         self._device_type = device_type
 
     def to_tensor(self) -> torch.Tensor:
-        return torch.empty(0, device=torch.device(self._device_type))
+        try:
+            return torch.empty(0, device=torch.device(self._device_type))
+        except (RuntimeError, TypeError):
+            # ``torch.device("fakedev")`` raises -- return a stub that
+            # only implements the ``.device.type`` protocol used by
+            # ``_detect_device_type``.
+            device_type = self._device_type
+
+            class _StubDevice:
+                type = device_type
+
+            class _StubTensor:
+                device = _StubDevice()
+
+            return _StubTensor()  # type: ignore[return-value]
 
 
 class _FakeContext(BaseCacheContext):
@@ -192,6 +208,29 @@ def test_mixed_device_types_raises(isolated_registry: None) -> None:
 
 def test_unregistered_device_type_raises(isolated_registry: None) -> None:
     """An unknown device type is a hard failure with a clear hint."""
-    wrappers = [_FakeWrapper("cpu")]
+    wrappers = [_FakeWrapper("fakedev")]
     with pytest.raises(ValueError, match="No cache-context class"):
         create_cache_context(wrappers)  # type: ignore[arg-type]
+
+
+def test_dispatches_via_device_spec_when_no_override(
+    isolated_registry: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With an empty override table, dispatch must delegate to the
+    ``DeviceSpec.create_cache_context`` hook of the matching spec."""
+    # First Party
+    from lmcache.v1.platform import get_device_spec
+
+    spec = get_device_spec("cpu")
+    assert spec is not None, "CpuDeviceSpec should be registered"
+
+    def _fake_factory(*args: Any, **kwargs: Any) -> _FakeCPUContext:
+        return _FakeCPUContext(*args, **kwargs)
+
+    monkeypatch.setattr(spec, "create_cache_context", _fake_factory)
+
+    wrappers = [_FakeWrapper("cpu")]
+    ctx = create_cache_context(wrappers)  # type: ignore[arg-type]
+
+    assert isinstance(ctx, _FakeCPUContext)
+    assert ctx.kv_caches is wrappers
