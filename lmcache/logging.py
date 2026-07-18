@@ -30,9 +30,20 @@ class CustomFormatter(logging.Formatter):
         logging.CRITICAL: build_format(bold_red),
     }
 
-    def format(self, record):
-        log_fmt = self.FORMATS.get(record.levelno)
-        formatter = logging.Formatter(log_fmt)
+    def __init__(self) -> None:
+        """Pre-build one :class:`logging.Formatter` per level and reuse them."""
+        super().__init__()
+        self._formatters = {
+            level: logging.Formatter(fmt) for level, fmt in self.FORMATS.items()
+        }
+        # Fallback for any level not in FORMATS, matching the previous
+        # ``logging.Formatter(None)`` behaviour (bare "%(message)s").
+        self._default_formatter = logging.Formatter()
+
+    def format(self, record: logging.LogRecord) -> str:
+        formatter = self._formatters.get(record.levelno, self._default_formatter)
+        formatter.datefmt = self.datefmt
+        formatter.converter = self.converter
         return formatter.format(record)
 
 
