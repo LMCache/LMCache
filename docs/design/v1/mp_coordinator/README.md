@@ -35,6 +35,21 @@ POSTs to that mp server's **specific** existing endpoint (e.g. `/pin`,
 `/quota`). There is no generic command channel and no per-instance connection
 state — just an HTTP call to the relevant resource.
 
+## API contract
+
+`openapi.json` (this directory) is the coordinator's committed REST contract,
+exported from the FastAPI app. `tests/v1/mp_coordinator/test_openapi_contract.py`
+fails whenever the app and the committed file disagree, so every API-surface
+change lands as a reviewable diff of the contract rather than a silent drift.
+The contract is also the compatibility baseline for any alternative coordinator
+implementation (e.g. the planned native coordinator mode): parity means serving
+this document. After an intentional API change, regenerate with:
+
+```
+python -m lmcache.v1.mp_coordinator.utils.export_openapi \
+    docs/design/v1/mp_coordinator/openapi.json
+```
+
 ## Layout
 
 ```
