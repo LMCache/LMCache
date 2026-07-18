@@ -30,9 +30,18 @@ except Exception:  # allow running as a plain script (bench) without pytest
 
 
 # First Party
-import lmcache.c_ops as lmc_ops
+try:
+    # First Party
+    import lmcache.c_ops as lmc_ops
 
-_CUDA = torch.cuda.is_available()
+    _HAS_STRIDED = hasattr(lmc_ops, "rotary_embedding_k_fused_strided")
+except Exception:  # CPU-only / no built c_ops (e.g. the unit-test runner)
+    lmc_ops = None
+    _HAS_STRIDED = False
+
+# These tests need CUDA and the built c_ops carrying the strided kernel; without
+# both they skip cleanly (keeps CPU-only pytest collection from erroring).
+_REQ = torch.cuda.is_available() and _HAS_STRIDED
 
 
 def _make_inputs(n_tokens, n_heads, head_size, max_pos, dtype, device, seed=0):
@@ -70,7 +79,7 @@ def _option2_strided(packed, old_pos, new_pos, cos_sin, head_size, is_neox=True)
     )
 
 
-@_skipif(not _CUDA, reason="requires CUDA + built c_ops")
+@_skipif(not _REQ, reason="requires CUDA + built c_ops")
 def test_option2_matches_option1_and_preserves_v():
     dev, dtype = "cuda", torch.bfloat16
     packed, old_pos, new_pos, cos_sin = _make_inputs(
@@ -103,7 +112,7 @@ def _bench(fn, packed, *args, iters=200):
     return (time.perf_counter() - t0) / iters * 1e3  # ms/iter
 
 
-@_skipif(not _CUDA, reason="requires CUDA + built c_ops")
+@_skipif(not _REQ, reason="requires CUDA + built c_ops")
 def test_bench_option1_vs_option2(capsys):
     # Timing report; run with `pytest -s` to see the table.
     with capsys.disabled():
@@ -111,7 +120,7 @@ def test_bench_option1_vs_option2(capsys):
 
 
 def main():
-    if not _CUDA:
+    if not _REQ:
         print("CUDA unavailable; skipping fused re-RoPE bench")
         return
     dev, dtype = "cuda", torch.bfloat16
