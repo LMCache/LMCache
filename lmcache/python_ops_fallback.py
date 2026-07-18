@@ -2753,6 +2753,43 @@ def rotary_embedding_k_fused(
         key[..., 1:rot_dim:2] = y_out
 
 
+def rotary_embedding_k_fused_strided(
+    old_positions: torch.Tensor,
+    new_positions: torch.Tensor,
+    key: torch.Tensor,
+    head_size: int,
+    head_stride: int,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+) -> None:
+    """Strided variant of rotary_embedding_k_fused.
+
+    ``key``'s last dim is ``head_stride`` per head; rotate only the leading
+    ``head_size`` elements (the K half of a packed K/V pair) in place, leaving
+    the trailing ``head_stride - head_size`` (the V half) untouched. When
+    ``head_stride == head_size`` this is exactly ``rotary_embedding_k_fused``.
+    The leading ``head_size`` slice is a view, so the in-place rotation writes
+    back through to ``key``.
+
+    Args:
+        old_positions: Token positions whose rotary embedding to reverse.
+        new_positions: Token positions whose rotary embedding to apply.
+        key: Key tensor to update in-place (last dim packs K then V per head).
+        head_size: Rotated (K) width per head.
+        head_stride: Full per-head element stride (e.g. 2 * head_size for fused).
+        cos_sin_cache: Precomputed cosine/sine cache indexed by position.
+        is_neox: If True, uses NeoX-style rotary; otherwise GPT-J-style.
+    """
+    rotary_embedding_k_fused(
+        old_positions,
+        new_positions,
+        key[..., :head_size],
+        head_size,
+        cos_sin_cache,
+        is_neox,
+    )
+
+
 def get_gpu_pci_bus_id(device_id: int = 0) -> str | None:
     """
     Get the PCI bus ID via CUDA/ROCm runtime.
