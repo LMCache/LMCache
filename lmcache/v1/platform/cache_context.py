@@ -42,6 +42,9 @@ from lmcache.v1.platform import get_device_spec
 from lmcache.v1.platform.base_cache_context import BaseCacheContext
 
 if TYPE_CHECKING:
+    # Standard
+    from collections.abc import Callable
+
     # First Party
     from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 
@@ -63,7 +66,7 @@ logger = init_logger(__name__)
 _BACKEND_OVERRIDES: dict[str, type] = {}
 
 
-def _resolve_factory(device_type: str):
+def _resolve_factory(device_type: str) -> "Callable[..., BaseCacheContext]":
     """Return a zero-arg-ready callable that builds a cache context.
 
     Overrides installed via :func:`restore_backends` win over the
