@@ -290,10 +290,15 @@ checks — both must succeed, otherwise the factory raises
 
 Separately, the LMCache-driven server module also requires a
 ``BaseCacheContext`` subclass under
-``lmcache/v1/platform/foo/cache_context.py``.  ``create_cache_context``
-discovers it lazily at runtime and raises ``ValueError`` if no backend
-matches the device type; it manages the KV cache layout and pointers
-used for IPC transfer.
+``lmcache/v1/platform/foo/cache_context.py`` **and** a matching
+``DeviceSpec.create_cache_context`` override that lazy-imports and
+instantiates it.  The platform-agnostic factory
+``lmcache.v1.platform.cache_context.create_cache_context`` dispatches
+by ``device_type`` through the ``DeviceSpec`` registry and invokes
+that hook; the default ``DeviceSpec.create_cache_context`` raises
+``NotImplementedError`` so a missing override surfaces loudly instead
+of silently falling back.  The cache context itself manages the KV
+cache layout and pointers used for IPC transfer.
 
 Host-side pinning via ``pin_memory_backend`` is *optional* and only
 affects staging-buffer performance; it is not required to enable
@@ -326,6 +331,16 @@ Override these methods in your ``DeviceSpec``:
             Optional; only affects host staging performance.
             """
             return None  # default
+
+        def create_cache_context(self, *args, **kwargs):
+            """Lazy-import and instantiate the BaseCacheContext for this device.
+
+            Required for LMCache-driven mode; the base-class default
+            raises ``NotImplementedError``.
+            """
+            from lmcache.v1.platform.foo.cache_context import FooCacheContext
+
+            return FooCacheContext(*args, **kwargs)
 
 Opt into LMCache-driven mode by setting ``lmcache.mp.mp_transfer_mode``
 to ``lmcache_driven`` in the vLLM ``kv_connector_extra_config`` shown
