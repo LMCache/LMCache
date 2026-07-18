@@ -19,12 +19,15 @@ import time
 import torch
 
 try:
+    # Third Party
     import pytest
 
     _skipif = pytest.mark.skipif
 except Exception:  # allow running as a plain script (bench) without pytest
+
     def _skipif(*_a, **_k):
         return lambda f: f
+
 
 # First Party
 import lmcache.c_ops as lmc_ops
@@ -73,7 +76,7 @@ def test_option2_matches_option1_and_preserves_v():
     packed, old_pos, new_pos, cos_sin = _make_inputs(
         n_tokens=512, n_heads=8, head_size=64, max_pos=4096, dtype=dtype, device=dev
     )
-    p0 = packed.clone()          # original (for V-untouched check)
+    p0 = packed.clone()  # original (for V-untouched check)
     p1, p2 = packed.clone(), packed.clone()
 
     _option1_copy(p1, old_pos, new_pos, cos_sin, 64)
@@ -112,7 +115,10 @@ def main():
         print("CUDA unavailable; skipping fused re-RoPE bench")
         return
     dev, dtype = "cuda", torch.bfloat16
-    print(f"{'config (T x H x D)':>22} | {'opt1 copy':>10} | {'opt2 strided':>12} | speedup")
+    print(
+        f"{'config (T x H x D)':>22} | {'opt1 copy':>10} | "
+        f"{'opt2 strided':>12} | speedup"
+    )
     for t, h, d in [(512, 8, 64), (2048, 8, 128), (4096, 16, 128), (8192, 8, 128)]:
         packed, old_pos, new_pos, cos_sin = _make_inputs(t, h, d, 16384, dtype, dev)
         # warmup (compile/caches)
@@ -120,8 +126,10 @@ def main():
         _option2_strided(packed.clone(), old_pos, new_pos, cos_sin, d)
         ms1 = _bench(_option1_copy, packed, old_pos, new_pos, cos_sin, d)
         ms2 = _bench(_option2_strided, packed, old_pos, new_pos, cos_sin, d)
-        print(f"{t:>6} x {h:>2} x {d:>3}       | {ms1:>8.4f}ms | {ms2:>10.4f}ms | "
-              f"{ms1 / ms2:>5.2f}x")
+        print(
+            f"{t:>6} x {h:>2} x {d:>3}       | {ms1:>8.4f}ms | {ms2:>10.4f}ms | "
+            f"{ms1 / ms2:>5.2f}x"
+        )
 
 
 if __name__ == "__main__":

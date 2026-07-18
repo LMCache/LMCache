@@ -1474,7 +1474,8 @@ class BlendV3Module(InstanceLivenessTarget):
             # head dim and report kv_size==1 (the K/V axis stays packed inside
             # each head copy). Detect them so the K half is re-RoPE'd in place
             # via the strided kernel; everything else must be genuine K/V.
-            fused_packed = int(group.engine_kv_format) in (
+            _ekf = group.engine_kv_format
+            fused_packed = _ekf is not None and int(_ekf) in (
                 int(lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
                 int(lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS),
             )
