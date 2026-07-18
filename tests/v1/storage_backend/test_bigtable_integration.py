@@ -251,7 +251,8 @@ class TestBigtableEmulatorIntegration:
         """Verify writing a chunk larger than max_chunk_size_mb is skipped
         without failure.
         """
-        config = create_test_config()  # Max size is 5.0 MB
+        # Max size is 5.0 MB, sharding disabled
+        config = create_test_config(extra_overrides={"bigtable_layer_group_size": 0})
         metadata = create_test_metadata()
 
         backend = RemoteBackend(

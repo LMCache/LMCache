@@ -169,7 +169,7 @@ The coordinator's HTTP surface (base URL ``http://localhost:9300``) groups into:
   budgets, usage accounting, and the usage-event ingest that drives fleet-wide
   eviction.
 - **Cache control** -- the ``/cache`` group: cache operations dispatched to a
-  named server (warm prefetch and pin/unpin, with more to come).
+  named server (warm prefetch, pin/unpin, and delete, with more to come).
 
 Each endpoint is documented below. Success is ``200`` unless noted, and
 ``{cache_salt}`` uses the ``_default`` sentinel for the empty salt. The wire
@@ -678,8 +678,8 @@ Cache control
 -------------
 
 The ``/cache`` group dispatches cache operations to a named MP server. It covers
-**warm prefetch** and **pin/unpin**; further cache-control operations will be
-documented as endpoints here as they land.
+**warm prefetch**, **pin/unpin**, and **delete**; further cache-control
+operations will be documented as endpoints here as they land.
 
 **Warm prefetch (pre-loading L1 from L2).** Pre-warm one MP server's L1 with the
 KV for a known prompt **before** the requests arrive, so the first request hits
@@ -923,3 +923,61 @@ chunk pinned *N* times needs *N* unpins before it can be evicted.
             "cache_salt": "user-a"
         }'
     # -> {"requested": 12, "affected": 12, "status": "unpinned"}
+
+**Delete (removing cache by token sequence).** Delete a token sequence's cache
+on one named server, addressed by token ids. The coordinator resolves the tokens
+to object keys locally (like pin) and issues a single key-addressed
+``DELETE /cache/objects`` to the named server, which removes them from the
+requested tier(s). The ``tier`` field selects the tier(s): ``l1`` deletes only
+the named server's L1, ``l2`` only L2, ``all`` both. When the tier includes L2,
+the coordinator first drops any key it is protecting with an L2 pin from the
+delete set unless ``force`` is set — so a pinned key is retained in every tier
+the delete would have touched; ``force`` deletes them and drops those pins.
+
+``POST /cache/delete``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Delete a token sequence on one named server.
+
+**Request body:** (``model_name``,
+``world_size``, ``token_ids``, ``cache_salt``) plus ``tier`` (``l1`` / ``l2`` /
+``all``) and ``force`` (bool, default ``false``). When ``force`` is ``true``,
+locked keys are deleted anyway (L1 read/write locks on the node and the
+coordinator's L2 pin set).
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {"instance_id": "server-1", "requested": 12, "affected": 24, "skipped": 0, "status": "deleted"}
+
+``requested`` is the number of whole chunks resolved. ``affected`` and
+``skipped`` are **totals across the tiers acted on**: ``affected`` counts L1 keys
+removed by the node plus L2 keys removed by the coordinator, and ``skipped``
+counts L1 keys the node refused plus L2 keys held back for an L2 pin (non-force
+only). A chunk resident in both tiers (``tier=all``) contributes to both counts,
+so ``affected`` may be up to ``2 x requested x world_size``. A sub-chunk
+sequence returns ``status`` ``"noop"``.
+
+**HTTP status codes:**
+
+- ``200``: deleted (or a ``noop``).
+- ``404``: no server is registered under ``instance_id``.
+- ``502``: the target server was unreachable or rejected the delete.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s -X POST http://localhost:9300/cache/delete \
+        -H 'Content-Type: application/json' \
+        -d '{
+            "instance_id": "server-1",
+            "model_name": "Qwen/Qwen3-8B",
+            "world_size": 1,
+            "token_ids": [101, 102, 103, "..."],
+            "cache_salt": "user-a",
+            "tier": "all",
+            "force": false
+        }'
+    # -> {"instance_id": "server-1", "requested": 12, "affected": 24, "skipped": 0, "status": "deleted"}

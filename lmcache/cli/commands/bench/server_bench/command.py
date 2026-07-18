@@ -63,8 +63,12 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
 )
 
 if TYPE_CHECKING:
+    # Standard
+    from collections.abc import Callable
+
     # First Party
     from lmcache.cli.commands.base import BaseCommand
+    from lmcache.cli.profiling import FlameProfiler
     from lmcache.v1.multiprocess.custom_types import KVCache
 
 
@@ -192,10 +196,143 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
         help=("HTTP base URL for checksum API (default: http://localhost:8080)"),
     )
 
+    prof = parser.add_argument_group(
+        "server profiling",
+        "Flame-graph the MP server process while this benchmark drives "
+        "load into it. The server's store path (hashing, allocation, "
+        "gather, D2H) runs in its own process, not in this client, so "
+        "profiling attaches to --profile-server-pid rather than to the "
+        "benchmark. See 'lmcache tool flamegraph' for the standalone form.",
+    )
+    prof.add_argument(
+        "--flamegraph",
+        choices=["on", "off"],
+        default="off",
+        help="Record a flame graph of the server during the run (default: off).",
+    )
+    prof.add_argument(
+        "--profile-server-pid",
+        type=int,
+        default=0,
+        metavar="PID",
+        help=(
+            "Server process to profile, e.g. $(pgrep -f 'lmcache server'). "
+            "Required when --flamegraph on."
+        ),
+    )
+    prof.add_argument(
+        "--flamegraph-mode",
+        default="gil",
+        metavar="MODE[,MODE...]",
+        help=(
+            "What to sample in the server (default: gil). Pass several "
+            "comma-separated to profile one load run per mode. Modes: on-cpu, "
+            "off-cpu, wakeup, offwake (perf/bcc), wall, gil (py-spy). perf/bcc "
+            "name Python functions only when the server was launched with "
+            "PYTHONPERFSUPPORT=1. See the 'lmcache tool flamegraph' docs."
+        ),
+    )
+    prof.add_argument(
+        "--flamegraph-output",
+        default="",
+        metavar="PATH",
+        help=(
+            "SVG output path. Default: "
+            "/tmp/lmcache_bench_flames/server-pid<PID>.<mode>.svg."
+        ),
+    )
+    prof.add_argument(
+        "--flamegraph-scripts-dir",
+        default="",
+        metavar="DIR",
+        help=(
+            "Directory with the FlameGraph scripts (flamegraph.pl, "
+            "stackcollapse-perf.pl); default ~/FlameGraph (cloned there on "
+            "first use). Unused by --flamegraph-mode wall / gil, which "
+            "render their own SVG."
+        ),
+    )
+
 
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
+
+
+def _build_server_profiler(
+    args: argparse.Namespace,
+    log: "Callable[[str], None]",
+) -> "FlameProfiler | None":
+    """Build a profiler attached to the server, or ``None`` if disabled.
+
+    Validates the target pid and toolchain eagerly so a misconfigured run
+    fails before any load is sent. The returned profiler is not started;
+    the caller wraps the load loop with ``start`` / ``stop``.
+
+    Args:
+        args: Parsed CLI arguments for ``lmcache bench server``.
+        log: Progress logger.
+
+    Returns:
+        A ready :class:`FlameProfiler` targeting ``--profile-server-pid``,
+        or ``None`` when ``--flamegraph`` is off.
+    """
+    if getattr(args, "flamegraph", "off") != "on":
+        return None
+
+    # First Party
+    from lmcache.cli.profiling import (
+        PY_SPY_MODES,
+        FlameProfiler,
+        ProfileError,
+        check_profiling_deps,
+        default_output_path,
+        resolve_flamegraph_dir,
+    )
+
+    pid = args.profile_server_pid
+    if pid <= 0:
+        print(
+            "Error: --flamegraph on requires --profile-server-pid "
+            "(the pid of the running 'lmcache server').",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        print(f"Error: no such process: --profile-server-pid {pid}", file=sys.stderr)
+        sys.exit(2)
+    except PermissionError:
+        print(
+            f"Error: server pid {pid} belongs to another user; "
+            "profiling it needs root.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    try:
+        check_profiling_deps(args.flamegraph_mode)
+        flamegraph_dir = ""
+        if args.flamegraph_mode not in PY_SPY_MODES:
+            flamegraph_dir = resolve_flamegraph_dir(args.flamegraph_scripts_dir, log)
+        output = args.flamegraph_output or default_output_path(
+            f"server-pid{pid}", args.flamegraph_mode
+        )
+        return FlameProfiler(
+            mode=args.flamegraph_mode,
+            output=output,
+            flamegraph_dir=flamegraph_dir,
+            pid=pid,
+            title=f"{args.flamegraph_mode} (server pid {pid})",
+        )
+    except ProfileError as e:
+        print(
+            "Error: --flamegraph on was requested but profiling is "
+            f"unavailable:\n  {e}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
 
 def run_server_bench(
@@ -251,6 +388,12 @@ def run_server_bench(
             "  [info] --transfer-mode=lmcache_driven on cpu mode: "
             "using REGISTER_KV_CACHE + STORE/RETRIEVE over POSIX SHM"
         )
+
+    # The profiler targets the server process (--profile-server-pid), not
+    # this benchmark client. Build it before opening any connection so a
+    # bad pid or a missing toolchain fails immediately, not after a full
+    # benchmark has already run. ``None`` when --flamegraph is off.
+    profiler = _build_server_profiler(args, log)
 
     total_requests = 0
     total_checksum_ok = 0
@@ -475,6 +618,10 @@ def run_server_bench(
         # ``/cache/checksums`` path.
         client_tensors = None if use_handle else client_kv_tensors
 
+        # Record only the steady-state load, not the one-time registration.
+        if profiler is not None:
+            profiler.start(log)
+
         for seq_no in seq_iter:
             log("=== Request seq=%d ===" % seq_no)
 
@@ -557,6 +704,9 @@ def run_server_bench(
     except KeyboardInterrupt:
         log("\nStopping...")
     finally:
+        # Stop recording once load ends, before teardown
+        if profiler is not None:
+            profiler.stop(log)
         # Deregister our context from the server before tearing down the
         # client. Otherwise the server keeps the registration (and the
         # CUDA-IPC / POSIX-SHM mappings it holds) alive forever, leaking
