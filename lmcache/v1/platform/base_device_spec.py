@@ -22,11 +22,20 @@ behaviour, and ``device_type`` / ``torch_module_name`` default to
 ``"cpu"``.
 """
 
+# Future
+from __future__ import annotations
+
+# Standard
+from typing import TYPE_CHECKING
+
 # First Party
 from lmcache.v1.platform.base_pin_memory import PinMemoryBackend
 
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
 
-# TODO(chunxiaozheng): bind `DeviceIPCWrapper` with `DeviceSpec`?
+
 class DeviceSpec:
     """Description of a hardware accelerator backend.
 
@@ -90,6 +99,24 @@ class DeviceSpec:
         property and return the appropriate backend class.  Use a lazy
         import inside the property body to avoid heavy imports at class
         definition time.
+        """
+        return None
+
+    @property
+    def ipc_wrapper_cls(self) -> type[DeviceIPCWrapper] | None:
+        """:class:`DeviceIPCWrapper` subclass used to ship KV tensors across
+        the multiprocess wire for this device, or ``None`` when the
+        device has no IPC wrapper support.
+
+        Subclasses that participate in the LMCache multiprocess KV
+        transfer path override this property and return their concrete
+        wrapper class.  Use a lazy import inside the property body to
+        avoid dragging accelerator-specific modules into the platform
+        base import graph.
+
+        The wrapper class is expected to expose a ``wrap(tensor)``
+        classmethod that returns a serializable
+        :class:`DeviceIPCWrapper` instance ready for the wire.
         """
         return None
 

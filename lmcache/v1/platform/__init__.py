@@ -144,6 +144,36 @@ def get_device_spec(device_type: str) -> DeviceSpec | None:
 
 
 # ---------------------------------------------------------------------------
+# KV-cache IPC wrapper resolution
+# ---------------------------------------------------------------------------
+def resolve_kv_wrapper_factory(device_type: str) -> Any:
+    """Return the KV-cache IPC wrapper factory for *device_type*.
+
+    Reads :attr:`DeviceSpec.ipc_wrapper_cls` off the registered spec
+    and returns the class's ``wrap`` classmethod (falling back to the
+    class itself when no ``wrap`` is defined) so callers can invoke
+    ``factory(tensor)`` uniformly.
+
+    Args:
+        device_type: The device type string (e.g. ``"cuda"``).
+
+    Returns:
+        A callable that takes a single ``torch.Tensor`` and returns a
+        wrapper instance ready for the multiprocess wire.
+
+    Raises:
+        ValueError: If no spec / wrapper is registered for *device_type*.
+    """
+    spec = _DEVICE_REGISTRY.get(device_type)
+    wrapper_cls = spec.ipc_wrapper_cls if spec is not None else None
+    if wrapper_cls is None:
+        raise ValueError(
+            "No KV-cache wrapper factory registered for device type %r" % device_type
+        )
+    return getattr(wrapper_cls, "wrap", wrapper_cls)
+
+
+# ---------------------------------------------------------------------------
 # Dynamic backend selection
 # ---------------------------------------------------------------------------
 

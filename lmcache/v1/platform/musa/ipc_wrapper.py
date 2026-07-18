@@ -148,18 +148,17 @@ class MusaIPCWrapper(DeviceIPCWrapper):
     a MUSA tensor.
     """
 
-    #: ``torch.device.type`` this wrapper handles (used by auto-discovery).
+    #: ``torch.device.type`` this wrapper handles. Kept as a class-level
+    #: constant so external tooling / tests can introspect the binding.
     device_type: ClassVar[str] = "musa"
-
-    #: Marked ``True`` so auto-discovery picks this as the default factory.
-    _is_default_wrapper: ClassVar[bool] = True
 
     _discovered_device_mapping: dict[str, int] = {}
     _device_mapping_lock = threading.Lock()
 
     @classmethod
     def wrap(cls, tensor: torch.Tensor) -> "MusaIPCWrapper":
-        """Factory used by the platform registry auto-discovery.
+        """Factory used by
+        :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory`.
 
         Args:
             tensor: A MUSA tensor to export through TorchMUSA IPC.
