@@ -240,16 +240,17 @@ logger.info("torch_dev=%s, torch_device_type=%s", torch_dev, torch_device_type)
 
 # Resolve the DeviceSpec for the detected device so callers can use
 # platform-specific capabilities (e.g. ``current_device_spec.pin_memory(...)``)
-# without touching the torch device module.  When no accelerator sub-
-# package matches, fall back to a bare ``DeviceSpec()`` -- its default
+# without touching the torch device module.  Both accelerators and CPU
+# ship a concrete spec (``CpuDeviceSpec``, ``CudaDeviceSpec``, ...), so
+# a missing entry means auto-discovery genuinely failed and always
+# warrants a warning; fall back to a bare ``DeviceSpec()`` -- its default
 # implementation provides "no-op / all False" semantics.
 _registered_device_spec = _DEVICE_REGISTRY.get(torch_device_type)
 if _registered_device_spec is None:
-    if torch_device_type != "cpu":
-        logger.warning(
-            "No DeviceSpec registered for %r; using fallback with no-op capabilities.",
-            torch_device_type,
-        )
+    logger.warning(
+        "No DeviceSpec registered for %r; using fallback with no-op capabilities.",
+        torch_device_type,
+    )
     current_device_spec: DeviceSpec = DeviceSpec()
 else:
     current_device_spec = _registered_device_spec

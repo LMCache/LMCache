@@ -18,8 +18,9 @@ enough.
 :class:`DeviceSpec` itself is instantiable and doubles as the fallback
 implementation used when no accelerator sub-package matches the
 detected device: all capabilities default to a safe "no-op / False"
-behaviour, and ``device_type`` / ``torch_module_name`` default to
-``"cpu"``.
+behaviour, and ``device_type`` / ``torch_module_name`` default to an
+empty string (concrete backends -- including CPU via
+:class:`~lmcache.v1.platform.cpu.CpuDeviceSpec` -- override them).
 """
 
 # Future
@@ -55,18 +56,22 @@ class DeviceSpec:
     def device_type(self) -> str:
         """Device type string (e.g. ``"cuda"``, ``"musa"``, ``"mlu"``).
 
-        Defaults to ``"cpu"`` for the fallback implementation.
+        Concrete backends override this; the base returns an empty
+        string so a bare ``DeviceSpec()`` instance is never mistaken
+        for a real accelerator (CPU is represented by
+        :class:`~lmcache.v1.platform.cpu.CpuDeviceSpec`).
         """
-        return "cpu"
+        return ""
 
     @property
     def torch_module_name(self) -> str:
         """Attribute name on the ``torch`` package for the device module.
 
-        For example, ``"cuda"`` corresponds to ``torch.cuda``.  Defaults
-        to ``"cpu"`` for the fallback implementation.
+        For example, ``"cuda"`` corresponds to ``torch.cuda``.  The
+        base returns an empty string; concrete backends (including
+        :class:`~lmcache.v1.platform.cpu.CpuDeviceSpec`) override it.
         """
-        return "cpu"
+        return ""
 
     @property
     def ops_module(self) -> str | None:
