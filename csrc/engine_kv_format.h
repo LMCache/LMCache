@@ -153,3 +153,12 @@ LMC_KV_FORMAT_HD constexpr bool is_mla(EngineKVFormat f) {
   return f == EngineKVFormat::NL_X_NB_BS_HS ||   // vLLM MLA
          f == EngineKVFormat::NL_X_NBBS_ONE_HS;  // SGLang MLA
 }
+
+// vLLM fused K/V: K and V packed into the trailing dim (2 * head_size) with no
+// separate K/V axis. The device transfer kernels treat these as a single
+// k_or_v == 0 pass whose per-head copy width is 2 * head_size, so each head copy
+// moves the packed K+V pair (like MLA's single-plane transfer).
+LMC_KV_FORMAT_HD constexpr bool is_fused_packed(EngineKVFormat f) {
+  return f == EngineKVFormat::NL_X_NB_NH_BS_TWO_HS ||  // fused HND
+         f == EngineKVFormat::NL_X_NB_BS_NH_TWO_HS;    // fused NHD
+}
