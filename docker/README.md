@@ -199,6 +199,62 @@ docker build \
 
 ---
 
+### 4. `Dockerfile.rocm-wheel` - ROCm Wheel Artifact
+
+**Image**: local build stage only
+
+**Description**: Builds an LMCache ROCm wheel without installing vLLM. This is
+useful for validating the HIP extension packaging path, generating artifacts on
+AMD build hosts, and prototyping ROCm release jobs before publishing wheels.
+
+**Default targets**:
+- ROCm 7.0
+- PyTorch ROCm wheel index: `https://download.pytorch.org/whl/rocm7.0`
+- AMD GPU architectures: `gfx942,gfx950` (MI300X/MI325X and MI350X/MI355X)
+
+**Usage**:
+
+```bash
+docker/build_rocm_wheel.sh
+```
+
+The built wheel is exported to `dist/rocm/`. You can override the build inputs:
+
+```bash
+ROCM_VERSION=7.0 \
+ROCM_PLATFORM=linux/amd64 \
+PYTORCH_ROCM_ARCH="gfx942" \
+MAX_JOBS=4 \
+OUTPUT_DIR=/tmp/lmcache-rocm-wheel \
+docker/build_rocm_wheel.sh
+```
+
+Install and smoke-test the wheel on an AMD GPU host:
+
+```bash
+uv venv --python 3.12
+source .venv/bin/activate
+uv pip install /tmp/lmcache-rocm-wheel/lmcache-*.whl \
+  --index-url https://download.pytorch.org/whl/rocm7.0 \
+  --extra-index-url https://pypi.org/simple
+python - <<'PY'
+import importlib
+import torch
+
+import lmcache
+
+assert torch.version.hip is not None, torch.__version__
+assert torch.cuda.is_available()
+print("LMCache torch device:", lmcache.torch_device_type)
+backend = importlib.import_module("lmcache.c_ops")
+backend_path = str(getattr(backend, "__file__", ""))
+assert backend_path.endswith(".so"), backend_path
+print("LMCache backend:", backend_path)
+PY
+```
+
+---
+
 ## Published Images
 
 Pre-built images are available on Docker Hub:

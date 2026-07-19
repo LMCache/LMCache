@@ -159,6 +159,45 @@ Install LMCache
                             BUILD_WITH_HIP=1 \
                             uv pip install -e . --no-build-isolation
 
+                        To build a reusable ROCm wheel artifact instead of an editable
+                        install, use the ROCm wheel builder from the repository root:
+
+                        .. code-block:: bash
+
+                            docker/build_rocm_wheel.sh
+
+                        By default, the builder uses ROCm 7.0 and produces a
+                        ``gfx942,gfx950`` wheel under ``dist/rocm/``. Override
+                        ``PYTORCH_ROCM_ARCH`` to target a narrower or broader set of
+                        AMD GPU architectures:
+
+                        .. code-block:: bash
+
+                            PYTORCH_ROCM_ARCH="gfx942" docker/build_rocm_wheel.sh
+
+                        After installing the built wheel on an AMD GPU host, verify that
+                        PyTorch is using ROCm and LMCache can import its native backend:
+
+                        .. code-block:: bash
+
+                            uv pip install dist/rocm/lmcache-*.whl \
+                                --index-url https://download.pytorch.org/whl/rocm7.0 \
+                                --extra-index-url https://pypi.org/simple
+                            python - <<'PY'
+                            import importlib
+                            import torch
+
+                            import lmcache
+
+                            assert torch.version.hip is not None, torch.__version__
+                            assert torch.cuda.is_available()
+                            print("LMCache torch device:", lmcache.torch_device_type)
+                            backend = importlib.import_module("lmcache.c_ops")
+                            backend_path = str(getattr(backend, "__file__", ""))
+                            assert backend_path.endswith(".so"), backend_path
+                            print("LMCache backend:", backend_path)
+                            PY
+
                     .. tab-item:: Intel XPU
 
                         .. code-block:: bash

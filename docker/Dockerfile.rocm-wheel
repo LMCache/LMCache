@@ -1,0 +1,98 @@
+# syntax=docker/dockerfile:1.7
+#
+# Build an LMCache ROCm wheel artifact without installing vLLM.
+#
+# This image is intentionally narrower than docker/Dockerfile.rocm: it validates
+# the HIP extension wheel path and exports the built wheel for downstream
+# installation, CI artifacts, or release-pipeline experiments.
+
+ARG ROCM_VERSION=7.0
+ARG BASE_IMAGE=rocm/dev-ubuntu-24.04:${ROCM_VERSION}-complete
+ARG ROCM_PLATFORM=linux/amd64
+
+FROM --platform=${ROCM_PLATFORM} ${BASE_IMAGE} AS builder
+
+ARG MAX_JOBS=2
+ARG PYTORCH_ROCM_ARCH=gfx942,gfx950
+ARG PYTORCH_ROCM_INDEX_URL=https://download.pytorch.org/whl/rocm7.0
+ARG SETUPTOOLS_SCM_PRETEND_VERSION
+
+ENV BUILD_WITH_HIP=1 \
+    CXX=hipcc \
+    MAX_JOBS=${MAX_JOBS} \
+    PATH=/opt/venv/bin:${PATH} \
+    PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH} \
+    TORCH_DONT_CHECK_COMPILER_ABI=1
+
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+        ccache \
+        git \
+        python-is-python3 \
+        python3 \
+        python3-dev \
+        python3-pip \
+        python3-venv \
+        unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace/LMCache
+
+COPY requirements/build.txt requirements/build.txt
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m venv /opt/venv \
+    && /opt/venv/bin/python -m pip install --upgrade pip \
+    && /opt/venv/bin/python -m pip install build \
+    && /opt/venv/bin/python -m pip install -r requirements/build.txt \
+    && /opt/venv/bin/python -m pip install torch \
+        --index-url "${PYTORCH_ROCM_INDEX_URL}"
+
+COPY . .
+
+RUN --mount=type=cache,target=/root/.cache/ccache,id=lmcache-rocm-wheel-ccache \
+    python - <<'PY'
+import torch
+
+print("torch:", torch.__version__)
+print("torch.version.hip:", torch.version.hip)
+if torch.version.hip is None:
+    raise SystemExit("expected a ROCm PyTorch wheel, got torch.version.hip=None")
+PY
+
+RUN --mount=type=cache,target=/root/.cache/ccache,id=lmcache-rocm-wheel-ccache \
+    rm -rf /wheelhouse \
+    && if [ -n "${SETUPTOOLS_SCM_PRETEND_VERSION:-}" ]; then \
+        export SETUPTOOLS_SCM_PRETEND_VERSION; \
+    fi \
+    && python -m build --wheel --no-isolation --skip-dependency-check \
+        --outdir /wheelhouse
+
+FROM builder AS smoke
+
+RUN python - <<'PY'
+from pathlib import Path
+from zipfile import ZipFile
+
+wheel = next(Path("/wheelhouse").glob("lmcache-*.whl"))
+required_modules = (
+    "lmcache/c_ops",
+    "lmcache/native_storage_ops",
+    "lmcache/lmcache_redis",
+    "lmcache/lmcache_fs",
+)
+with ZipFile(wheel) as archive:
+    names = archive.namelist()
+missing = [
+    module
+    for module in required_modules
+    if not any(name.startswith(module) and name.endswith(".so") for name in names)
+]
+if missing:
+    raise SystemExit(f"missing expected native module(s): {', '.join(missing)}")
+print(f"validated wheel contents: {wheel.name}")
+PY
+
+FROM scratch AS wheel-export
+
+COPY --from=smoke /wheelhouse/ /
