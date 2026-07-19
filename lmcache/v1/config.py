@@ -119,7 +119,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": _to_int_list,
     },
     "blend_min_tokens": {"type": int, "default": 256, "env_converter": int},
-    "blend_special_str": {"type": str, "default": " # # ", "env_converter": str},
+    "blend_special_str": {"type": str, "default": " # #", "env_converter": str},
     "retrieve_locations": {"type": Optional[list[str]], "default": None},
     "store_location": {"type": Optional[str], "default": None},
     # P2P configurations
