@@ -599,7 +599,7 @@ class LMCacheConnectorV1Impl:
         Args:
             vllm_model: The vLLM model to register.
         """
-        if not self.enable_blending:
+        if not getattr(self, "enable_blending", False):
             return
 
         LMCBlenderBuilder.register_model(ENGINE_NAME, vllm_model)

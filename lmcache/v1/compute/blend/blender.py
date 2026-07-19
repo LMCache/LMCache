@@ -40,10 +40,10 @@ class LMCBlender:
         # TODO: remove this hardcode
         self.num_layers = len(vllm_model.model.layers)
 
-        if config.blend_check_layers is None or config.blend_recompute_ratios is None:
+        if not config.blend_check_layers or not config.blend_recompute_ratios:
             raise ValueError(
                 "blend_check_layers and blend_recompute_ratios must be set "
-                "when enable_blending is True. "
+                "and non-empty when enable_blending is True. "
                 "Example: blend_check_layers=[1], blend_recompute_ratios=[0.15]"
             )
 

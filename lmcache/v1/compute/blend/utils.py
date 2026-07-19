@@ -30,10 +30,19 @@ class LMCBlenderBuilder:
         cache_engine: "LMCacheEngine",
         gpu_connector: "GPUConnectorInterface",
         config: "LMCacheEngineConfig",
-    ):
+    ) -> Optional[LMCBlender]:
         """
         Get or create a blender for the given instance_id.
         If the model is not yet registered, defers creation until register_model is called.
+
+        Args:
+            instance_id: The ID of the LMCache instance.
+            cache_engine: The LMCache cache engine.
+            gpu_connector: The GPU connector interface.
+            config: The LMCache engine configuration.
+
+        Returns:
+            The blender instance, or None if model is not yet registered.
         """
 
         if instance_id in cls._blenders:
@@ -70,6 +79,10 @@ class LMCBlenderBuilder:
     def register_model(cls, instance_id: str, vllm_model: nn.Module) -> None:
         """
         Register a vllm model and create any pending blenders.
+
+        Args:
+            instance_id: The ID of the LMCache instance.
+            vllm_model: The vLLM model to register.
         """
         VLLMModelTracker.register_model(instance_id, vllm_model)
 
