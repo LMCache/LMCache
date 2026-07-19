@@ -12,7 +12,6 @@ from typing import Any, Callable, Dict, Optional, Protocol, Union
 import ast
 import json
 import os
-import re
 import threading
 import uuid
 
@@ -49,15 +48,41 @@ def _apply_env_converter_safely(config_definitions, name, value):
 
 # Common configuration parsing utilities
 def _parse_local_disk(local_disk) -> Optional[str]:
-    """Parse local disk path configuration"""
-    match local_disk:
-        case None:
-            local_disk_path = None
-        case path if re.match(r"file://(.*)/", path):
-            local_disk_path = path[7:]
-        case _:
-            local_disk_path = local_disk
-    return local_disk_path
+    """Parse local disk path configuration.
+
+    Accepts a single path or comma-separated paths, each optionally
+    prefixed with ``file://``.  Returns a comma-joined string of bare
+    directory paths suitable for ``LocalDiskBackend``.
+
+    Examples::
+
+        "file:///mnt/nvme0/"              -> "/mnt/nvme0/"
+        "/mnt/nvme0/,/mnt/nvme1/"         -> "/mnt/nvme0/,/mnt/nvme1/"
+        "file:///mnt/nvme0/,file:///mnt/nvme1/"
+                                           -> "/mnt/nvme0/,/mnt/nvme1/"
+
+    Args:
+        local_disk: Raw config value — ``None``, a single path, or
+            comma-separated paths.
+
+    Returns:
+        Comma-joined bare directory paths, or ``None`` if disabled.
+    """
+    if local_disk is None:
+        return None
+
+    raw_parts = [p.strip() for p in str(local_disk).split(",") if p.strip()]
+    if not raw_parts:
+        return None
+
+    parsed: list[str] = []
+    for part in raw_parts:
+        if part.startswith("file://"):
+            parsed.append(part[7:])
+        else:
+            parsed.append(part)
+
+    return ",".join(parsed)
 
 
 def _to_int_list(
@@ -151,7 +176,7 @@ def _from_json(cls, json_str: str):
         config_dict = json.loads(json_str)
         return cls.from_dict(config_dict)
     except json.JSONDecodeError as e:
-        logger.error(f"Invalid JSON input: {e}")
+        logger.error("Invalid JSON input: %s", e)
         raise
 
 
@@ -170,7 +195,7 @@ def _resolve_config_aliases(
     for key, value in config_dict.items():
         if key in deprecated_configs:
             # Log deprecation warning
-            logger.warning(f"{deprecated_configs[key]} (source: {source})")
+            logger.warning("%s (source: %s)", deprecated_configs[key], source)
 
             # Map to new key if alias exists
             if key in config_aliases:
@@ -184,7 +209,7 @@ def _resolve_config_aliases(
             resolved[key] = value
         else:
             # Unknown configuration key
-            logger.warning(f"Unknown configuration key: {key} (source: {source})")
+            logger.warning("Unknown configuration key: %s (source: %s)", key, source)
 
     return resolved
 
@@ -496,7 +521,7 @@ def create_singleton_config(
                         _config_instance = config_class.from_env()
                     else:
                         config_file = os.environ[config_env_var]
-                        logger.info(f"Loading config file {config_file}")
+                        logger.info("Loading config file %s", config_file)
                         _config_instance = config_class.from_file(config_file)
                         # Update config from environment variables
                         _config_instance.update_config_from_env()

@@ -29,7 +29,7 @@ func ptr[T any](v T) *T { return &v }
 func TestSetDefaults_LogLevelNil(t *testing.T) {
 	e := &LMCacheEngine{Spec: LMCacheEngineSpec{L1: L1BackendSpec{SizeGB: 10}}}
 	e.SetDefaults()
-	if e.Spec.LogLevel == nil || *e.Spec.LogLevel != "INFO" {
+	if e.Spec.LogLevel == nil || *e.Spec.LogLevel != defaultLogLevel {
 		t.Fatalf("expected LogLevel=INFO, got %v", e.Spec.LogLevel)
 	}
 }
@@ -51,7 +51,7 @@ func TestSetDefaults_NodeSelectorDefaultGPU(t *testing.T) {
 	if e.Spec.NodeSelector == nil {
 		t.Fatal("expected default NodeSelector, got nil")
 	}
-	if e.Spec.NodeSelector["nvidia.com/gpu.present"] != "true" {
+	if e.Spec.NodeSelector["nvidia.com/gpu.present"] != labelValueTrue {
 		t.Fatalf("expected nvidia.com/gpu.present=true, got %v", e.Spec.NodeSelector)
 	}
 }
@@ -67,6 +67,37 @@ func TestSetDefaults_NodeSelectorPreserved(t *testing.T) {
 	}
 	if _, ok := e.Spec.NodeSelector["nvidia.com/gpu.present"]; ok {
 		t.Fatal("default should not override user-provided NodeSelector")
+	}
+}
+
+func TestSetDefaults_GPUVendorDefaultNvidia(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{L1: L1BackendSpec{SizeGB: 10}}}
+	e.SetDefaults()
+	if e.Spec.GPUVendor == nil || *e.Spec.GPUVendor != GPUVendorNvidia {
+		t.Fatalf("expected GPUVendor=nvidia, got %v", e.Spec.GPUVendor)
+	}
+}
+
+func TestSetDefaults_GPUVendorAMDSkipsNodeSelectorDefault(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1:        L1BackendSpec{SizeGB: 10},
+		GPUVendor: ptr(GPUVendorAMD),
+	}}
+	e.SetDefaults()
+	if e.Spec.NodeSelector != nil {
+		t.Fatalf("expected nil NodeSelector for AMD vendor, got %v", e.Spec.NodeSelector)
+	}
+}
+
+func TestSetDefaults_GPUVendorAMDPreservesUserNodeSelector(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1:           L1BackendSpec{SizeGB: 10},
+		GPUVendor:    ptr(GPUVendorAMD),
+		NodeSelector: map[string]string{"feature.node.kubernetes.io/amd-gpu": labelValueTrue},
+	}}
+	e.SetDefaults()
+	if e.Spec.NodeSelector["feature.node.kubernetes.io/amd-gpu"] != labelValueTrue {
+		t.Fatalf("expected user-supplied AMD NodeSelector preserved, got %v", e.Spec.NodeSelector)
 	}
 }
 
@@ -222,5 +253,126 @@ func TestValidateSpec_MultipleErrors(t *testing.T) {
 	// sizeGB, port, policy, watermark, ratio = 5 errors
 	if len(errs) != 5 {
 		t.Fatalf("expected 5 errors, got %d: %v", len(errs), errs)
+	}
+}
+
+// --- L2 Backend validation tests ---
+
+func TestValidateSpec_L2RESPValid(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1: L1BackendSpec{SizeGB: 10},
+		L2Backend: &L2BackendSpec{
+			RESP: &RESPL2AdapterSpec{
+				Host: "redis.default.svc",
+				Port: 6379,
+			},
+		},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors, got %v", errs)
+	}
+}
+
+func TestValidateSpec_L2RESPEmptyHost(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1: L1BackendSpec{SizeGB: 10},
+		L2Backend: &L2BackendSpec{
+			RESP: &RESPL2AdapterSpec{
+				Host: "",
+				Port: 6379,
+			},
+		},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+	if errs[0].Field != "spec.l2Backend.resp.host" {
+		t.Fatalf("expected field spec.l2Backend.resp.host, got %s", errs[0].Field)
+	}
+}
+
+func TestValidateSpec_L2RESPInvalidPort(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1: L1BackendSpec{SizeGB: 10},
+		L2Backend: &L2BackendSpec{
+			RESP: &RESPL2AdapterSpec{
+				Host: "redis",
+				Port: 0,
+			},
+		},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+}
+
+func TestValidateSpec_L2RESPAuthSecretEmpty(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1: L1BackendSpec{SizeGB: 10},
+		L2Backend: &L2BackendSpec{
+			RESP: &RESPL2AdapterSpec{
+				Host:          "redis",
+				Port:          6379,
+				AuthSecretRef: &SecretReference{Name: ""},
+			},
+		},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+}
+
+func TestValidateSpec_L2RawValid(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1: L1BackendSpec{SizeGB: 10},
+		L2Backend: &L2BackendSpec{
+			Raw: &RawL2AdapterSpec{Type: "mock"},
+		},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors, got %v", errs)
+	}
+}
+
+func TestValidateSpec_L2RawEmptyType(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1: L1BackendSpec{SizeGB: 10},
+		L2Backend: &L2BackendSpec{
+			Raw: &RawL2AdapterSpec{Type: ""},
+		},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+}
+
+func TestValidateSpec_L2NoneSet(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1:        L1BackendSpec{SizeGB: 10},
+		L2Backend: &L2BackendSpec{},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+}
+
+func TestValidateSpec_L2BothSet(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1: L1BackendSpec{SizeGB: 10},
+		L2Backend: &L2BackendSpec{
+			RESP: &RESPL2AdapterSpec{Host: "redis", Port: 6379},
+			Raw:  &RawL2AdapterSpec{Type: "mock"},
+		},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
 	}
 }

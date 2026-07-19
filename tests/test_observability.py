@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock
 
 # Third Party
+from prometheus_client import REGISTRY
 import pytest
 
 # First Party
@@ -281,12 +282,12 @@ def test_zero_division_protection(stats_monitor):
 
 @pytest.fixture(scope="function")
 def _cleanup_prometheus_logger():
-    """Reset PrometheusLogger singleton and metrics between tests."""
+    """Reset PrometheusLogger instances and metrics between tests."""
     LMCStatsMonitor.unregister_all_metrics()
-    PrometheusLogger._instance = None
+    PrometheusLogger._instances = {}
     yield
     LMCStatsMonitor.unregister_all_metrics()
-    PrometheusLogger._instance = None
+    PrometheusLogger._instances = {}
 
 
 def _make_metadata():
@@ -307,6 +308,11 @@ def _make_config(extra_config=None):
         extra_config.get(key, default) if extra_config is not None else default
     )
     return cfg
+
+
+def _sample_labels(prom: PrometheusLogger) -> dict[str, str]:
+    """Return labels as Prometheus exposes them in collected samples."""
+    return {name: str(value) for name, value in prom.labels.items()}
 
 
 def test_prometheus_logger_default_buckets(_cleanup_prometheus_logger):
@@ -382,3 +388,79 @@ def test_prometheus_logger_get_or_create_with_config(
     upper_bounds = list(hist._upper_bounds)
     for bucket_val in custom_buckets:
         assert bucket_val in upper_bounds
+
+
+def test_prometheus_logger_get_or_create_allows_multiple_roles(
+    _cleanup_prometheus_logger,
+):
+    """Different roles should not be treated as global metadata conflicts."""
+    worker_meta = _make_metadata()
+    scheduler_meta = _make_metadata()
+    scheduler_meta.role = "scheduler"
+
+    worker_prom = PrometheusLogger.GetOrCreate(worker_meta)
+    scheduler_prom = PrometheusLogger.GetOrCreate(scheduler_meta)
+
+    assert worker_prom.labels["role"] == "worker"
+    assert scheduler_prom.labels["role"] == "scheduler"
+
+
+def test_prometheus_logger_label_view_rebinds_dynamic_metrics(
+    _cleanup_prometheus_logger,
+):
+    """Dynamic gauge callbacks should use each label view's labels."""
+    worker_meta = _make_metadata()
+    scheduler_meta = _make_metadata()
+    scheduler_meta.role = "scheduler"
+
+    worker_prom = PrometheusLogger.GetOrCreate(worker_meta)
+    scheduler_prom = PrometheusLogger.GetOrCreate(scheduler_meta)
+
+    worker_prom.lmcache_is_healthy.set_function(lambda: 1)
+    scheduler_prom.lmcache_is_healthy.set_function(lambda: 2)
+
+    assert (
+        REGISTRY.get_sample_value(
+            "lmcache:lmcache_is_healthy",
+            _sample_labels(worker_prom),
+        )
+        == 1
+    )
+    assert (
+        REGISTRY.get_sample_value(
+            "lmcache:lmcache_is_healthy",
+            _sample_labels(scheduler_prom),
+        )
+        == 2
+    )
+
+
+def test_prometheus_logger_reset_reinitializes_all_label_views(
+    _cleanup_prometheus_logger,
+):
+    """Resetting one label view should keep metric children visible for all views."""
+    worker_meta = _make_metadata()
+    scheduler_meta = _make_metadata()
+    scheduler_meta.role = "scheduler"
+
+    worker_prom = PrometheusLogger.GetOrCreate(worker_meta)
+    scheduler_prom = PrometheusLogger.GetOrCreate(scheduler_meta)
+
+    worker_prom.counter_num_retrieve_requests.labels(**worker_prom.labels).inc()
+    scheduler_prom.counter_num_retrieve_requests.labels(**scheduler_prom.labels).inc()
+    scheduler_prom.reset_counters()
+
+    assert (
+        REGISTRY.get_sample_value(
+            "lmcache:num_retrieve_requests_total",
+            _sample_labels(worker_prom),
+        )
+        == 0
+    )
+    assert (
+        REGISTRY.get_sample_value(
+            "lmcache:num_retrieve_requests_total",
+            _sample_labels(scheduler_prom),
+        )
+        == 0
+    )

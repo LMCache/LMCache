@@ -13,6 +13,7 @@ modularity, and future maintainability and readability.
 ## Project conventions
 
 Read these files for project standards:
+- `docs/coding_standards.md` — **authoritative** coding quality and review standard
 - `AGENTS.md` — coding conventions, testing practices, review checklist
 - `CONTRIBUTING.md` — contribution guidelines
 

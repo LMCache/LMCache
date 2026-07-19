@@ -13,18 +13,13 @@ pytest.importorskip(
 )
 
 # First Party
-if torch.cuda.is_available():
-    try:
-        # First Party
-        import lmcache.c_ops as lmc_ops
-    except ImportError:
-        lmc_ops = None
-else:
-    lmc_ops = None
+import lmcache.c_ops as lmc_ops
 
-# Skip all tests if c_ops is unavailable
-pytestmark = pytest.mark.skipif(lmc_ops is None, reason="lmcache.c_ops not available")
-
+# Skip all tests if cuda is unavailable
+pytestmark = pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.device_count() == 0,
+    reason="No CUDA GPU present",
+)
 
 # ---------------------------------------------------------------------------
 # Tensor factories (ported from kernel harness)
@@ -48,14 +43,20 @@ def _create_zero_tensor(
 
 
 # Format enum values from c_ops
-FMT_NORMAL = lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
-FMT_CROSS_LAYER = lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS
-FMT_FLASH_INFER = lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS
-FMT_MLA = lmc_ops.GPUKVFormat.NL_X_NB_BS_HS
-FMT_SGLANG_MHA = lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS
-FMT_SGLANG_MLA = lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS
+FMT_NORMAL = lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+FMT_CROSS_LAYER = lmc_ops.EngineKVFormat.NB_NL_TWO_BS_NH_HS
+FMT_FLASH_INFER = lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS
+FMT_MLA = lmc_ops.EngineKVFormat.NL_X_NB_BS_HS
+FMT_SGLANG_MHA = lmc_ops.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS
+FMT_SGLANG_MLA = lmc_ops.EngineKVFormat.NL_X_NBBS_ONE_HS
+FMT_NORMAL_HND = lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS
+FMT_FLASH_INFER_HND = lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS
+FMT_VLLM_FUSED_HND = lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS
+FMT_VLLM_FUSED_NHD = lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS
 
-# Format parameters: (gpu_kv_format, num_layers, num_heads, head_size, is_mla)
+# Format parameters: (engine_kv_format, num_layers, num_heads, head_size, is_mla)
+# The is_mla column really means "kv_size == 1": the fused-K/V HND format is
+# not MLA but transfers with kv_size == 1 and hs already doubled (kv-packed D).
 # Use small layer counts to keep GPU memory usage low in CI
 FORMAT_PARAMS = [
     (FMT_NORMAL, 4, 8, 128, False),
@@ -64,11 +65,15 @@ FORMAT_PARAMS = [
     (FMT_MLA, 4, 1, 576, True),
     (FMT_SGLANG_MHA, 4, 8, 128, False),
     (FMT_SGLANG_MLA, 4, 1, 576, True),
+    (FMT_NORMAL_HND, 4, 8, 128, False),
+    (FMT_FLASH_INFER_HND, 4, 8, 128, False),
+    (FMT_VLLM_FUSED_HND, 4, 8, 256, True),
+    (FMT_VLLM_FUSED_NHD, 4, 8, 256, True),
 ]
 
 
 def create_vllm_tensors(
-    gpu_kv_format,
+    engine_kv_format,
     nl: int,
     nb: int,
     bs: int,
@@ -78,29 +83,41 @@ def create_vllm_tensors(
     device: torch.device,
 ) -> list[torch.Tensor]:
     nbbs = nb * bs
-    if gpu_kv_format == FMT_NORMAL:
+    if engine_kv_format == FMT_NORMAL:
         shape = [2, nb, bs, nh, hs]
         return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
-    elif gpu_kv_format == FMT_CROSS_LAYER:
+    elif engine_kv_format == FMT_NORMAL_HND:
+        shape = [2, nb, nh, bs, hs]
+        return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
+    elif engine_kv_format == FMT_CROSS_LAYER:
         shape = [nb, nl, 2, bs, nh, hs]
         return [_create_random_tensor(shape, dtype, device)]
-    elif gpu_kv_format == FMT_FLASH_INFER:
+    elif engine_kv_format == FMT_FLASH_INFER:
         shape = [nb, 2, bs, nh, hs]
         return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
-    elif gpu_kv_format == FMT_MLA:
+    elif engine_kv_format == FMT_FLASH_INFER_HND:
+        shape = [nb, 2, nh, bs, hs]
+        return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
+    elif engine_kv_format == FMT_VLLM_FUSED_HND:
+        shape = [nb, nh, bs, hs]  # hs is the fused 2 * head_size
+        return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
+    elif engine_kv_format == FMT_VLLM_FUSED_NHD:
+        shape = [nb, bs, nh, hs]  # hs is the fused 2 * head_size
+        return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
+    elif engine_kv_format == FMT_MLA:
         shape = [nb, bs, hs]
         return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
-    elif gpu_kv_format == FMT_SGLANG_MHA:
+    elif engine_kv_format == FMT_SGLANG_MHA:
         shape = [nbbs, nh, hs]
         return [_create_random_tensor(shape, dtype, device) for _ in range(2 * nl)]
-    elif gpu_kv_format == FMT_SGLANG_MLA:
+    elif engine_kv_format == FMT_SGLANG_MLA:
         shape = [nbbs, 1, hs]
         return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
-    raise ValueError(f"Unknown format: {gpu_kv_format}")
+    raise ValueError(f"Unknown format: {engine_kv_format}")
 
 
 def create_zero_vllm_tensors(
-    gpu_kv_format,
+    engine_kv_format,
     nl: int,
     nb: int,
     bs: int,
@@ -110,25 +127,37 @@ def create_zero_vllm_tensors(
     device: torch.device,
 ) -> list[torch.Tensor]:
     nbbs = nb * bs
-    if gpu_kv_format == FMT_NORMAL:
+    if engine_kv_format == FMT_NORMAL:
         shape = [2, nb, bs, nh, hs]
         return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
-    elif gpu_kv_format == FMT_CROSS_LAYER:
+    elif engine_kv_format == FMT_NORMAL_HND:
+        shape = [2, nb, nh, bs, hs]
+        return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
+    elif engine_kv_format == FMT_CROSS_LAYER:
         shape = [nb, nl, 2, bs, nh, hs]
         return [_create_zero_tensor(shape, dtype, device)]
-    elif gpu_kv_format == FMT_FLASH_INFER:
+    elif engine_kv_format == FMT_FLASH_INFER:
         shape = [nb, 2, bs, nh, hs]
         return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
-    elif gpu_kv_format == FMT_MLA:
+    elif engine_kv_format == FMT_FLASH_INFER_HND:
+        shape = [nb, 2, nh, bs, hs]
+        return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
+    elif engine_kv_format == FMT_VLLM_FUSED_HND:
+        shape = [nb, nh, bs, hs]  # hs is the fused 2 * head_size
+        return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
+    elif engine_kv_format == FMT_VLLM_FUSED_NHD:
+        shape = [nb, bs, nh, hs]  # hs is the fused 2 * head_size
+        return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
+    elif engine_kv_format == FMT_MLA:
         shape = [nb, bs, hs]
         return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
-    elif gpu_kv_format == FMT_SGLANG_MHA:
+    elif engine_kv_format == FMT_SGLANG_MHA:
         shape = [nbbs, nh, hs]
         return [_create_zero_tensor(shape, dtype, device) for _ in range(2 * nl)]
-    elif gpu_kv_format == FMT_SGLANG_MLA:
+    elif engine_kv_format == FMT_SGLANG_MLA:
         shape = [nbbs, 1, hs]
         return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
-    raise ValueError(f"Unknown format: {gpu_kv_format}")
+    raise ValueError(f"Unknown format: {engine_kv_format}")
 
 
 def create_memory_objects(
@@ -156,7 +185,7 @@ def create_memory_objects(
 
 def get_block_data(
     vllm_tensors: list[torch.Tensor],
-    gpu_kv_format,
+    engine_kv_format,
     nl: int,
     bs: int,
     nh: int,
@@ -165,20 +194,28 @@ def get_block_data(
     """Extract all layer data for a given block."""
     results = []
     for layer_idx in range(nl):
-        if gpu_kv_format == FMT_NORMAL:
+        if engine_kv_format == FMT_NORMAL:
             results.append(vllm_tensors[layer_idx][:, block_idx, :, :, :].clone())
-        elif gpu_kv_format == FMT_CROSS_LAYER:
+        elif engine_kv_format == FMT_NORMAL_HND:
+            results.append(vllm_tensors[layer_idx][:, block_idx, :, :, :].clone())
+        elif engine_kv_format == FMT_CROSS_LAYER:
             results.append(vllm_tensors[0][block_idx, layer_idx, :, :, :, :].clone())
-        elif gpu_kv_format == FMT_FLASH_INFER:
+        elif engine_kv_format == FMT_FLASH_INFER:
             results.append(vllm_tensors[layer_idx][block_idx, :, :, :, :].clone())
-        elif gpu_kv_format == FMT_MLA:
+        elif engine_kv_format == FMT_FLASH_INFER_HND:
+            results.append(vllm_tensors[layer_idx][block_idx, :, :, :, :].clone())
+        elif engine_kv_format == FMT_VLLM_FUSED_HND:
+            results.append(vllm_tensors[layer_idx][block_idx, :, :, :].clone())
+        elif engine_kv_format == FMT_VLLM_FUSED_NHD:
+            results.append(vllm_tensors[layer_idx][block_idx, :, :, :].clone())
+        elif engine_kv_format == FMT_MLA:
             results.append(vllm_tensors[layer_idx][block_idx, :, :].clone())
-        elif gpu_kv_format == FMT_SGLANG_MHA:
+        elif engine_kv_format == FMT_SGLANG_MHA:
             ts, ed = block_idx * bs, (block_idx + 1) * bs
             k = vllm_tensors[layer_idx][ts:ed, :, :].clone()
             v = vllm_tensors[nl + layer_idx][ts:ed, :, :].clone()
             results.append(torch.stack([k, v], dim=0))
-        elif gpu_kv_format == FMT_SGLANG_MLA:
+        elif engine_kv_format == FMT_SGLANG_MLA:
             ts, ed = block_idx * bs, (block_idx + 1) * bs
             results.append(vllm_tensors[layer_idx][ts:ed, 0, :].clone())
     return results
@@ -193,7 +230,7 @@ def call_block_kernel(
     vllm_tensors: list[torch.Tensor],
     mem_objects: list[torch.Tensor],
     block_ids: list[int],
-    gpu_kv_format,
+    engine_kv_format,
     direction,
     nl: int,
     nb: int,
@@ -228,7 +265,7 @@ def call_block_kernel(
         direction,
         shape_desc,
         tokens_per_object,
-        gpu_kv_format,
+        engine_kv_format,
         skip_prefix_n_blocks,
     )
 
@@ -246,15 +283,28 @@ TOTAL_BLOCKS = NUM_MEMORY_OBJECTS * BLOCKS_PER_OBJECT  # 64
 
 
 @pytest.mark.parametrize(
-    "gpu_kv_format,nl,nh,hs,is_mla",
+    "engine_kv_format,nl,nh,hs,is_mla",
     FORMAT_PARAMS,
-    ids=["normal", "cross_layer", "flash_infer", "mla", "sglang_mha", "sglang_mla"],
+    ids=[
+        "normal",
+        "cross_layer",
+        "flash_infer",
+        "mla",
+        "sglang_mha",
+        "sglang_mla",
+        "normal_hnd",
+        "flash_infer_hnd",
+        "vllm_fused_hnd",
+        "vllm_fused_nhd",
+    ],
 )
 @pytest.mark.parametrize(
     "dtype", [torch.bfloat16, torch.float8_e4m3fn], ids=["bf16", "fp8"]
 )
 @pytest.mark.parametrize("mem_device", ["cuda", "cpu"], ids=["mem_gpu", "mem_cpu"])
-def test_block_transfer_roundtrip(gpu_kv_format, nl, nh, hs, is_mla, dtype, mem_device):
+def test_block_transfer_roundtrip(
+    engine_kv_format, nl, nh, hs, is_mla, dtype, mem_device
+):
     """
     D2H -> H2D roundtrip with different block IDs proves data flows through
     memory objects.
@@ -265,9 +315,11 @@ def test_block_transfer_roundtrip(gpu_kv_format, nl, nh, hs, is_mla, dtype, mem_
     hidden_dim = nh * hs
 
     # Create tensors
-    source_vllm = create_vllm_tensors(gpu_kv_format, nl, NB, BS, nh, hs, dtype, device)
+    source_vllm = create_vllm_tensors(
+        engine_kv_format, nl, NB, BS, nh, hs, dtype, device
+    )
     target_vllm = create_zero_vllm_tensors(
-        gpu_kv_format, nl, NB, BS, nh, hs, dtype, device
+        engine_kv_format, nl, NB, BS, nh, hs, dtype, device
     )
     mem_objects = create_memory_objects(
         kv_dim,
@@ -292,7 +344,7 @@ def test_block_transfer_roundtrip(gpu_kv_format, nl, nh, hs, is_mla, dtype, mem_
         source_vllm,
         mem_objects,
         block_ids_d2h,
-        gpu_kv_format,
+        engine_kv_format,
         lmc_ops.TransferDirection.D2H,
         nl,
         NB,
@@ -309,7 +361,7 @@ def test_block_transfer_roundtrip(gpu_kv_format, nl, nh, hs, is_mla, dtype, mem_
         target_vllm,
         mem_objects,
         block_ids_h2d,
-        gpu_kv_format,
+        engine_kv_format,
         lmc_ops.TransferDirection.H2D,
         nl,
         NB,
@@ -324,10 +376,10 @@ def test_block_transfer_roundtrip(gpu_kv_format, nl, nh, hs, is_mla, dtype, mem_
     # Verify: target[h2d_block] == source[d2h_block]
     for i in range(TOTAL_BLOCKS):
         src_data = get_block_data(
-            source_vllm, gpu_kv_format, nl, BS, nh, block_ids_d2h[i]
+            source_vllm, engine_kv_format, nl, BS, nh, block_ids_d2h[i]
         )
         tgt_data = get_block_data(
-            target_vllm, gpu_kv_format, nl, BS, nh, block_ids_h2d[i]
+            target_vllm, engine_kv_format, nl, BS, nh, block_ids_h2d[i]
         )
         for layer_idx in range(nl):
             assert torch.equal(src_data[layer_idx], tgt_data[layer_idx]), (
@@ -336,21 +388,34 @@ def test_block_transfer_roundtrip(gpu_kv_format, nl, nh, hs, is_mla, dtype, mem_
 
 
 @pytest.mark.parametrize(
-    "gpu_kv_format,nl,nh,hs,is_mla",
+    "engine_kv_format,nl,nh,hs,is_mla",
     FORMAT_PARAMS,
-    ids=["normal", "cross_layer", "flash_infer", "mla", "sglang_mha", "sglang_mla"],
+    ids=[
+        "normal",
+        "cross_layer",
+        "flash_infer",
+        "mla",
+        "sglang_mha",
+        "sglang_mla",
+        "normal_hnd",
+        "flash_infer_hnd",
+        "vllm_fused_hnd",
+        "vllm_fused_nhd",
+    ],
 )
 @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=["bf16"])
-def test_block_transfer_skip_prefix(gpu_kv_format, nl, nh, hs, is_mla, dtype):
+def test_block_transfer_skip_prefix(engine_kv_format, nl, nh, hs, is_mla, dtype):
     """Verify skip_prefix_n_blocks=4 skips the first 4 blocks globally."""
     device = torch.device("cuda")
     kv_dim = 1 if is_mla else 2
     hidden_dim = nh * hs
     skip = 4
 
-    source_vllm = create_vllm_tensors(gpu_kv_format, nl, NB, BS, nh, hs, dtype, device)
+    source_vllm = create_vllm_tensors(
+        engine_kv_format, nl, NB, BS, nh, hs, dtype, device
+    )
     target_vllm = create_zero_vllm_tensors(
-        gpu_kv_format, nl, NB, BS, nh, hs, dtype, device
+        engine_kv_format, nl, NB, BS, nh, hs, dtype, device
     )
     mem_objects = create_memory_objects(
         kv_dim,
@@ -374,7 +439,7 @@ def test_block_transfer_skip_prefix(gpu_kv_format, nl, nh, hs, is_mla, dtype):
         source_vllm,
         mem_objects,
         block_ids_d2h,
-        gpu_kv_format,
+        engine_kv_format,
         lmc_ops.TransferDirection.D2H,
         nl,
         NB,
@@ -392,7 +457,7 @@ def test_block_transfer_skip_prefix(gpu_kv_format, nl, nh, hs, is_mla, dtype):
         target_vllm,
         mem_objects,
         block_ids_h2d,
-        gpu_kv_format,
+        engine_kv_format,
         lmc_ops.TransferDirection.H2D,
         nl,
         NB,
@@ -408,10 +473,10 @@ def test_block_transfer_skip_prefix(gpu_kv_format, nl, nh, hs, is_mla, dtype):
     # Non-skipped blocks should match
     for i in range(skip, TOTAL_BLOCKS):
         src_data = get_block_data(
-            source_vllm, gpu_kv_format, nl, BS, nh, block_ids_d2h[i]
+            source_vllm, engine_kv_format, nl, BS, nh, block_ids_d2h[i]
         )
         tgt_data = get_block_data(
-            target_vllm, gpu_kv_format, nl, BS, nh, block_ids_h2d[i]
+            target_vllm, engine_kv_format, nl, BS, nh, block_ids_h2d[i]
         )
         for layer_idx in range(nl):
             assert torch.equal(src_data[layer_idx], tgt_data[layer_idx]), (
@@ -421,7 +486,7 @@ def test_block_transfer_skip_prefix(gpu_kv_format, nl, nh, hs, is_mla, dtype):
     # Skipped blocks in target should remain zero
     for i in range(skip):
         tgt_data = get_block_data(
-            target_vllm, gpu_kv_format, nl, BS, nh, block_ids_h2d[i]
+            target_vllm, engine_kv_format, nl, BS, nh, block_ids_h2d[i]
         )
         for layer_idx in range(nl):
             block = tgt_data[layer_idx]

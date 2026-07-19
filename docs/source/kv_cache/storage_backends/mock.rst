@@ -1,6 +1,11 @@
 Mock
 ====
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/l2_storage/index`.
+
+
 LMCache provides a mock remote connector that allows you to manually set the peeking latency, read throughput, and write throughput inside of the remote url. It will create copies of your KV cache in unmanaged local RAM.
 
 Configuration

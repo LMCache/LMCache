@@ -1,5 +1,5 @@
-Adding Native Connectors
-========================
+Adding Native Backends
+======================
 
 .. _native-connectors-overview:
 
@@ -50,7 +50,8 @@ Step 1: C++ Connector
 ---------------------
 
 Create your connector directory (e.g., ``csrc/storage_backends/mybackend/``) and
-inherit from ``ConnectorBase<YourConnectionType>``. You only need to override 4 methods.
+inherit from ``ConnectorBase<YourConnectionType>``. You need to override 4 required methods
+(and optionally ``do_single_delete`` to support eviction).
 
 **connector.h:**
 
@@ -104,6 +105,12 @@ inherit from ``ConnectorBase<YourConnectionType>``. You only need to override 4 
         // send EXISTS, return true/false
       }
 
+      // 5. DELETE: remove key (optional, has default no-op)
+      bool do_single_delete(MyConn& conn,
+                            const std::string& key) override {
+        // send DELETE, return true if deleted, false if not found
+      }
+
       // Optional: clean shutdown
       void shutdown_connections() override {
         // close sockets, free resources
@@ -136,8 +143,8 @@ inherit from ``ConnectorBase<YourConnectionType>``. You only need to override 4 
 Step 2: Pybind Module
 ---------------------
 
-Use the ``LMCACHE_BIND_CONNECTOR_METHODS`` macro, which binds all 6 methods
-(``event_fd``, ``submit_batch_get/set/exists``, ``drain_completions``, ``close``)
+Use the ``LMCACHE_BIND_CONNECTOR_METHODS`` macro, which binds all 7 methods
+(``event_fd``, ``submit_batch_get/set/exists/delete``, ``drain_completions``, ``close``)
 with proper GIL release and Python buffer protocol handling.
 
 .. code-block:: cpp
@@ -255,10 +262,12 @@ Create a new file in the L2 adapters package:
 
     class MyBackendL2AdapterConfig(L2AdapterConfigBase):
         def __init__(self, host: str, port: int,
-                     num_workers: int = 8):
+                     num_workers: int = 8,
+                     max_capacity_gb: float = 0):
             self.host = host
             self.port = port
             self.num_workers = num_workers
+            self.max_capacity_gb = max_capacity_gb
 
         @classmethod
         def from_dict(cls, d: dict) -> "MyBackendL2AdapterConfig":
@@ -269,8 +278,10 @@ Create a new file in the L2 adapters package:
             if not isinstance(port, int) or port <= 0:
                 raise ValueError("port must be a positive integer")
             num_workers = d.get("num_workers", 8)
+            max_capacity_gb = d.get("max_capacity_gb", 0)
             return cls(host=host, port=port,
-                       num_workers=num_workers)
+                       num_workers=num_workers,
+                       max_capacity_gb=max_capacity_gb)
 
         @classmethod
         def help(cls) -> str:
@@ -296,7 +307,10 @@ Create a new file in the L2 adapters package:
         native_client = LMCacheMyBackendClient(
             config.host, config.port, config.num_workers
         )
-        return NativeConnectorL2Adapter(native_client)
+        return NativeConnectorL2Adapter(
+            native_client,
+            max_capacity_gb=config.max_capacity_gb,
+        )
 
 
     # Self-register -- runs automatically when the module
@@ -358,18 +372,299 @@ looks up each ``future_id`` to determine its operation type, routes the result t
 the correct completion dict, and signals the corresponding Python eventfd.
 
 
+Third-Party Native Connector Plugins (``native_plugin``)
+---------------------------------------------------------
+
+.. _native-plugin-overview:
+
+The steps above describe how to add a native connector **inside** the LMCache source tree.
+If you want to ship a connector as a **separate, pip-installable package** (e.g. a proprietary
+storage backend), use the ``native_plugin`` L2 adapter type instead. It dynamically loads your
+connector at runtime -- no LMCache source modifications required.
+
+How It Works
+~~~~~~~~~~~~
+
+The ``native_plugin`` adapter type loads a third-party **connector object** (pybind-wrapped C++
+or pure Python) and wraps it with the built-in ``NativeConnectorL2Adapter`` bridge. This means
+you only need to implement the 6 connector methods -- the Python-side demux/lock bridging logic
+is reused from LMCache.
+
+.. list-table:: ``plugin`` vs ``native_plugin``
+   :header-rows: 1
+   :widths: 25 35 40
+
+   * - Aspect
+     - ``plugin``
+     - ``native_plugin``
+   * - What is loaded
+     - A full ``L2AdapterInterface`` subclass
+     - A **connector** object (lower level)
+   * - Bridging logic
+     - Provided by the plugin itself
+     - Reused from ``NativeConnectorL2Adapter``
+   * - Third-party effort
+     - Must implement all abstract methods + 3 eventfds
+     - Only 6 connector methods
+
+Required Connector Interface
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The dynamically loaded connector instance must expose the following methods (identical to the
+pybind ``LMCACHE_BIND_CONNECTOR_METHODS`` contract):
+
+.. code-block:: python
+
+    class NativeConnectorProtocol:
+        def event_fd(self) -> int: ...
+        def submit_batch_get(
+            self,
+            keys: list[str],
+            memoryviews: list[memoryview],
+        ) -> int: ...
+        def submit_batch_set(
+            self,
+            keys: list[str],
+            memoryviews: list[memoryview],
+        ) -> int: ...
+        def submit_batch_exists(
+            self,
+            keys: list[str],
+        ) -> int: ...
+        def submit_batch_delete(
+            self,
+            keys: list[str],
+        ) -> int: ...
+        def drain_completions(
+            self,
+        ) -> list[tuple[int, bool, str, list[bool] | None]]: ...
+        def close(self) -> None: ...
+
+The factory validates the first 6 methods at creation time and raises ``TypeError`` if
+any are missing. ``submit_batch_delete`` is **optional** -- if absent, the adapter's
+``delete()`` method will be a no-op (eviction will not remove keys from the backend).
+
+Configuration
+~~~~~~~~~~~~~
+
+.. code-block:: json
+
+    {
+      "type": "native_plugin",
+      "module_path": "my_ext_package",
+      "class_name": "MyConnectorClient",
+      "adapter_params": {
+        "host": "localhost",
+        "port": 1234
+      }
+    }
+
+.. list-table:: ``NativePluginL2AdapterConfig`` fields
+   :header-rows: 1
+   :widths: 20 10 10 60
+
+   * - Field
+     - Type
+     - Required
+     - Description
+   * - ``module_path``
+     - ``str``
+     - yes
+     - Dotted Python import path of the module containing the connector class.
+   * - ``class_name``
+     - ``str``
+     - yes
+     - Name of the connector class inside ``module_path``.
+   * - ``adapter_params``
+     - ``dict``
+     - no
+     - Forwarded as ``**kwargs`` to the connector class constructor.
+   * - ``max_capacity_gb``
+     - ``float``
+     - no
+     - Maximum L2 storage capacity in GB for client-side usage tracking. Required for L2 eviction. Default 0 (disabled).
+
+Loading Flow
+~~~~~~~~~~~~
+
+.. code-block:: text
+
+    CLI / config JSON
+      |
+      v
+    NativePluginL2AdapterConfig.from_dict(d)
+      |
+      v
+    _create_native_plugin_l2_adapter(config, ...)
+      |
+      +-- importlib.import_module(config.module_path)
+      +-- getattr(module, config.class_name)
+      +-- connector_cls(**config.adapter_params)
+      +-- validate 6 required methods
+      +-- NativeConnectorL2Adapter(native_client)
+              |
+              v
+      L2AdapterInterface instance (ready for use)
+
+Step-by-Step: Building an External Native Connector Plugin
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+1. **Create a Python package** with a C++ pybind11 extension that inherits from
+   ``ConnectorBase<T>`` (same base class as built-in connectors).
+
+   Project layout:
+
+   .. code-block:: text
+
+       my_ext_connector/
+       +-- csrc/
+       |   +-- connector.h      # C++ connector class
+       |   +-- connector.cpp    # C++ implementation
+       |   +-- pybind.cpp       # pybind11 bindings
+       +-- src/
+       |   +-- my_ext_connector/
+       |       +-- __init__.py   # re-export the factory class
+       |       +-- connector.py  # Python factory wrapper
+       +-- pyproject.toml
+       +-- setup.py              # build C++ extension
+
+2. **Implement the C++ connector** inheriting from ``ConnectorBase<T>`` and override
+   the 4 required methods (``create_connection``, ``do_single_get``, ``do_single_set``,
+   ``do_single_exists``) and optionally ``do_single_delete`` for eviction support.
+
+3. **Create pybind11 bindings** using the ``LMCACHE_BIND_CONNECTOR_METHODS`` macro:
+
+   .. code-block:: cpp
+
+       #include <pybind11/pybind11.h>
+       #include "connector_pybind_utils.h"
+       #include "connector.h"
+
+       namespace py = pybind11;
+
+       PYBIND11_MODULE(_native, m) {
+         py::class_<MyFSConnector>(m, "MyFSConnector")
+             .def(py::init<std::string, int>(),
+                  py::arg("base_path"),
+                  py::arg("num_workers"))
+             LMCACHE_BIND_CONNECTOR_METHODS(MyFSConnector);
+       }
+
+4. **Write a Python factory class** that selects the backend and returns the native
+   connector instance:
+
+   .. code-block:: python
+
+       from my_ext_connector._native import MyFSConnector
+
+       class MyConnectorClient:
+           def __new__(
+               cls,
+               base_path: str = "/tmp/my_ext",
+               num_workers: int = 2,
+           ):
+               return MyFSConnector(base_path, num_workers)
+
+5. **Build and install** the package:
+
+   .. code-block:: bash
+
+       cd my_ext_connector
+       pip install -e .
+
+6. **Configure LMCache** to use it:
+
+   .. code-block:: bash
+
+       --l2-adapter '{
+         "type": "native_plugin",
+         "module_path": "my_ext_connector",
+         "class_name": "MyConnectorClient",
+         "adapter_params": {
+           "base_path": "/tmp/my_ext",
+           "num_workers": 2
+         }
+       }'
+
+Reference Implementation
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+See ``examples/lmc_external_native_connector/`` for a complete, pip-installable example
+connector plugin that demonstrates:
+
+- C++ pybind11-wrapped connectors inheriting from ``ConnectorBase<T>`` (same as built-in
+  Redis/FS).
+- Two backends: filesystem (``ExampleFSConnector``) and in-memory
+  (``ExampleMemoryConnector``), both in C++.
+- A thin Python factory class (``ExampleNativeConnector``) that selects the backend via a
+  ``"backend"`` parameter.
+- Worker thread pool with eventfd notification (inherited from ``ConnectorBase``).
+- Build via ``pip install -e .`` using pybind11 + setuptools.
+
+
 Checklist
 ---------
 
 Use this checklist when adding a new native connector:
 
-1. C++ connector inheriting ``ConnectorBase<T>`` with 4 method overrides
+1. C++ connector inheriting ``ConnectorBase<T>`` with 4 required + 1 optional (``do_single_delete``) method overrides
 2. Pybind module using ``LMCACHE_BIND_CONNECTOR_METHODS``
 3. ``setup.py`` entry for the new ``CppExtension``
 4. Python client inheriting ``ConnectorClientBase`` (non-MP mode)
 5. L2 adapter module with config class + factory self-registration (MP mode)
 6. Unit tests (see ``tests/v1/distributed/test_native_connector_l2_adapter.py``)
 7. Rebuild with ``pip install -e .`` and verify both modes work
+
+For **external** native connector plugins (``native_plugin``):
+
+1. Separate pip-installable package with C++ pybind11 extension
+2. Connector class exposing the 6 required methods (+ optional ``submit_batch_delete`` for eviction)
+3. Python factory class for backend selection
+4. ``pip install -e .`` and configure via ``--l2-adapter`` JSON
+5. Unit tests (see ``examples/lmc_external_native_connector/tests/``)
+
+
+Built-in Aerospike backend (optional)
+-------------------------------------
+
+LMCache ships an optional in-tree Aerospike native connector (same
+``ConnectorBase`` harness as Redis). It is compiled only when
+``BUILD_AEROSPIKE=1`` or ``AEROSPIKE_INCLUDE_DIR`` is set during
+``pip install -e .``.
+
+**Build:**
+
+.. code-block:: bash
+
+   See ``.github/workflows/aerospike_integration.yml`` for installing the C client into ``.deps/``
+   source .deps/aerospike-client-c.env
+   BUILD_AEROSPIKE=1 pip install -e .
+
+The ``aerospike-client-c.env`` file simply points the build at the C client
+headers and shared libraries you unpacked into ``.deps/``. Adjust the paths to
+match where the client was installed. Example:
+
+.. code-block:: bash
+
+   # .deps/aerospike-client-c.env
+   export AEROSPIKE_INCLUDE_DIR="${PWD}/.deps/aerospike-install/usr/include"
+   export AEROSPIKE_LIBRARY_DIR="${PWD}/.deps/aerospike-install/usr/lib"
+   # Needed at build and runtime so the loader can find libaerospike (and
+   # libyaml if you built it locally):
+   export LD_LIBRARY_PATH="${AEROSPIKE_LIBRARY_DIR}:${PWD}/.deps/libyaml-install/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+
+Setting ``AEROSPIKE_INCLUDE_DIR`` is enough to enable the extension, so
+``BUILD_AEROSPIKE=1`` is optional once the env file is sourced. Multiple include
+or library directories can be passed as ``;``-separated lists.
+
+**MP mode:**
+
+.. code-block:: bash
+
+   --l2-adapter '{"type": "aerospike", "hosts": "127.0.0.1:3000", "namespace": "lmcache", "set_name": "kv_chunks", "num_workers": 8}'
+
+Implementation: ``csrc/storage_backends/aerospike/``,
+``lmcache/v1/distributed/l2_adapters/aerospike_l2_adapter.py``.
 
 
 Additional Resources
@@ -380,5 +675,12 @@ Additional Resources
 - ``IStorageConnector`` interface: ``csrc/storage_backends/connector_interface.h``
 - Pybind utilities: ``csrc/storage_backends/connector_pybind_utils.h``
 - Redis reference implementation: ``csrc/storage_backends/redis/``
+- Aerospike implementation (optional): ``csrc/storage_backends/aerospike/``
 - Architecture README: ``csrc/storage_backends/README.md``
+- External native connector example:
+  ``examples/lmc_external_native_connector/``
+- Native plugin adapter source:
+  ``lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py``
+- Design document:
+  ``lmcache/v1/distributed/l2_adapters/design_docs/plugin.md``
 - RESP backend user guide: :doc:`RESP (Native Redis/Valkey) <../../kv_cache/storage_backends/resp>`

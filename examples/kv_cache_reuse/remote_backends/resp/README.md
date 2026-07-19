@@ -91,6 +91,7 @@ The `--l2-adapter` JSON accepts these fields:
 | `num_workers` | int | 8 | C++ worker threads for parallel I/O |
 | `username` | str | `""` | Redis ACL username |
 | `password` | str | `""` | Redis AUTH password |
+| `max_capacity_gb` | float | 0 | Max L2 capacity in GB for usage tracking (required for L2 eviction) |
 
 ### Launch vLLM with LMCache MP Connector
 

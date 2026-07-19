@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include "connector_base.h"
 #include "connector_interface.h"
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -34,6 +35,10 @@ example usage (see `redis/pybind.cpp`):
            py::arg("keys"), py::arg("memoryviews"))                    \
       .def("submit_batch_exists",                                      \
            lmcache::connector::pybind_utils::bind_submit_batch_exists< \
+               ConnectorType>(),                                       \
+           py::arg("keys"))                                            \
+      .def("submit_batch_delete",                                      \
+           lmcache::connector::pybind_utils::bind_submit_batch_delete< \
                ConnectorType>(),                                       \
            py::arg("keys"))                                            \
       .def("drain_completions",                                        \
@@ -114,6 +119,14 @@ auto bind_submit_batch_exists() {
 }
 
 template <typename ConnectorType>
+auto bind_submit_batch_delete() {
+  return [](ConnectorType& self, const std::vector<std::string>& keys) {
+    py::gil_scoped_release release;
+    return self.submit_batch_delete(keys);
+  };
+}
+
+template <typename ConnectorType>
 auto bind_drain_completions() {
   return [](ConnectorType& self) {
     // call cpp method without holding GIL
@@ -143,6 +156,24 @@ auto bind_drain_completions() {
     return result;
   };
 }
+inline WorkerPoolConfig parse_per_op_workers(const py::object& obj) {
+  if (obj.is_none()) {
+    return {};
+  }
+  py::dict d = obj.cast<py::dict>();
+  std::unordered_map<std::string, int> per_op;
+  for (auto& [key, value] : d) {
+    std::string key_str = key.cast<std::string>();
+    int count = value.cast<int>();
+    if (count <= 0) {
+      throw std::runtime_error("per_op_workers['" + key_str +
+                               "'] must be a positive integer");
+    }
+    per_op[key_str] = count;
+  }
+  return {std::move(per_op)};
+}
+
 }  // namespace pybind_utils
 }  // namespace connector
 }  // namespace lmcache

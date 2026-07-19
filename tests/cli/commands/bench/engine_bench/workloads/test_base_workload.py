@@ -2,7 +2,7 @@
 """Tests for the BaseWorkload abstract class."""
 
 # Standard
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 import queue
 
 # First Party
@@ -46,6 +46,7 @@ def _make_mock_result(request_id: str = "req_0") -> RequestResult:
 
 def _make_stub(**kwargs) -> StubWorkload:
     sender = MagicMock()
+    sender.close = AsyncMock()
     collector = MagicMock()
     monitor = MagicMock()
     return StubWorkload(sender, collector, monitor, **kwargs)
@@ -137,6 +138,7 @@ class TestBaseWorkloadRunLoop:
                 self.request_finished(_make_mock_result("warmup_0"), "warmup_text")
 
         sender = MagicMock()
+        sender.close = AsyncMock()
         collector = MagicMock()
         monitor = MagicMock()
         w = WarmupEnqueuer(sender, collector, monitor)

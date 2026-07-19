@@ -39,6 +39,7 @@ class EngineBenchConfig:
     export_csv: bool
     export_json: bool
     quiet: bool
+    ignore_eos: bool = False
 
     def __post_init__(self) -> None:
         if not self.engine_url:
@@ -93,7 +94,7 @@ def auto_detect_model(engine_url: str) -> str:
 
 
 def _fetch_lmcache_status(lmcache_url: str) -> dict:
-    """Fetch ``/api/status`` from the LMCache HTTP server.
+    """Fetch ``/status`` from the LMCache HTTP server.
 
     Returns:
         Parsed JSON response.
@@ -104,7 +105,7 @@ def _fetch_lmcache_status(lmcache_url: str) -> dict:
     url = lmcache_url.rstrip("/")
     if not url.startswith(("http://", "https://")):
         url = f"http://{url}"
-    status_url = f"{url}/api/status"
+    status_url = f"{url}/status"
 
     logger.debug("Fetching LMCache status from %s", status_url)
 
@@ -125,7 +126,7 @@ def _find_model_meta(
     """Find the GPU metadata entry matching *model_name*.
 
     Args:
-        gpu_meta: The ``gpu_context_meta`` dict from ``/api/status``.
+        gpu_meta: The ``cache_context_meta`` dict from ``/status``.
         model_name: Model name to match.
 
     Returns:
@@ -148,7 +149,7 @@ def _find_model_meta(
 def resolve_tokens_per_gb(lmcache_url: str, model_name: str) -> int:
     """Query the LMCache server and compute tokens per GB of KV cache.
 
-    Fetches ``/api/status``, finds the model entry matching
+    Fetches ``/status``, finds the model entry matching
     *model_name*, and computes::
 
         global_bytes_per_token = cache_size_per_token * world_size
@@ -171,7 +172,11 @@ def resolve_tokens_per_gb(lmcache_url: str, model_name: str) -> int:
     """
     data = _fetch_lmcache_status(lmcache_url)
 
-    gpu_meta = data.get("gpu_context_meta", {})
+    gpu_meta = data.get("cache_context_meta", {})
+    if not gpu_meta:
+        # CB-only deployments (engine_type="blend") populate
+        # cb_gpu_context_meta instead of cache_context_meta.
+        gpu_meta = data.get("cb_gpu_context_meta", {})
     if not gpu_meta:
         raise RuntimeError(
             "No model info returned by LMCache server; "
@@ -242,4 +247,5 @@ def parse_args_to_config(args: argparse.Namespace) -> EngineBenchConfig:
         export_csv=not args.no_csv,
         export_json=args.json,
         quiet=args.quiet,
+        ignore_eos=args.ignore_eos,
     )

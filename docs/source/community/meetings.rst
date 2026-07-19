@@ -22,7 +22,7 @@ Please find the meeting invite link below:
 
 - **Meeting link**: `Zoom link <https://uchicago.zoom.us/j/6603596916?pwd=Z1E5MDRWUSt2am5XbEt4dTFkNGx6QT09>`_
 - **Calendar Invite**: `Google Calendar <https://drive.usercontent.google.com/u/0/uc?id=15Xz8-LtpBQ5QgR7KrorOOyfuohCFQmwn&export=download>`__
-- **Slack Channel**: `#lmcache <https://lmcacheworkspace.slack.com/join/shared_invite/zt-3h7ohnf5t-ZZ0JBuYCIh1eUwHPTqSNCQ#/shared-invite/email>`_
+- **Slack Channel**: `#lmcache <https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3zxjao8h0-lRfBfnLqbALOtLsWn2ITxA>`_
 
 vLLM Production Stack Project
 +++++++++++++++++++++++++++++++
@@ -42,7 +42,7 @@ Please find the meeting invite link below:
 LMCache Office Hours
 ++++++++++++++++++++
 
-Held monthly on the second Thursday at 2PM ET, 11AM PT.  
+Held monthly on the second Wednesday of the month at 2PM ET, 11AM PT.  
 
 - Topic announced on the LMCache #office-hour Slack channel
 - Request a calendar invite via `this form <https://lmcache-officehours.zapier.app/>`_

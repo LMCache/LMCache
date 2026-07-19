@@ -8,6 +8,7 @@ rules:
   - ""
   resources:
   - configmaps
+  - secrets
   - services
   verbs:
   - create
@@ -29,6 +30,7 @@ rules:
   - apps
   resources:
   - daemonsets
+  - deployments
   verbs:
   - create
   - delete
@@ -40,6 +42,8 @@ rules:
 - apiGroups:
   - lmcache.lmcache.ai
   resources:
+  - cacheblendengines
+  - lmcachecoordinators
   - lmcacheengines
   verbs:
   - create
@@ -52,12 +56,16 @@ rules:
 - apiGroups:
   - lmcache.lmcache.ai
   resources:
+  - cacheblendengines/finalizers
+  - lmcachecoordinators/finalizers
   - lmcacheengines/finalizers
   verbs:
   - update
 - apiGroups:
   - lmcache.lmcache.ai
   resources:
+  - cacheblendengines/status
+  - lmcachecoordinators/status
   - lmcacheengines/status
   verbs:
   - get

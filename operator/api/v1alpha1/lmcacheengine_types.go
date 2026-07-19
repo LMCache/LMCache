@@ -30,6 +30,11 @@ const (
 	PhaseFailed   = "Failed"
 )
 
+const (
+	GPUVendorNvidia = "nvidia"
+	GPUVendorAMD    = "amd"
+)
+
 // Condition type constants.
 const (
 	ConditionAvailable         = "Available"
@@ -56,6 +61,39 @@ type ImageSpec struct {
 	PullPolicy *string `json:"pullPolicy,omitempty"`
 }
 
+// LMCacheInjectionSpec configures optional lmcache code-payload staging for vLLM
+// pods bound to this engine. When payloadImage is unset the webhook wires only
+// the connection (--kv-transfer-config); when set it also copies the payload
+// tree into the vLLM container and prepends PYTHONPATH so vLLM imports that
+// lmcache instead of the one baked into its image, keeping the vLLM client and
+// the engine server on one build.
+type LMCacheInjectionSpec struct {
+	// payloadImage is a purpose-built init-container image (repository/tag/
+	// pullPolicy, like spec.image) that ships an unpacked lmcache tree under
+	// /payload and copies it to $SHARED_DIR on start (see
+	// docker/Dockerfile.payload); the vLLM container imports it via PYTHONPATH.
+	//
+	// repository has no usable default — the ImageSpec default
+	// (lmcache/vllm-openai) is NOT a payload — so it must be set explicitly. For
+	// private registries, imagePullSecrets must reference Secret(s) in the vLLM
+	// pod's namespace.
+	// +optional
+	PayloadImage *ImageSpec `json:"payloadImage,omitempty"`
+
+	// imagePullSecrets are appended to the vLLM pod's spec.imagePullSecrets so a
+	// PRIVATE payload init-container image can pull. The referenced Secret(s)
+	// must already exist in the vLLM pod's namespace; the operator does not copy
+	// them cross-namespace.
+	// +optional
+	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
+
+	// targetContainer is the name of the vLLM container to inject into. Empty
+	// (the default) selects the first container; a per-pod annotation may
+	// override it.
+	// +optional
+	TargetContainer *string `json:"targetContainer,omitempty"`
+}
+
 // ServerSpec defines server configuration mapping to server.py argparse.
 type ServerSpec struct {
 	// port is the server listening port.
@@ -80,20 +118,32 @@ type ServerSpec struct {
 	// +kubebuilder:default="blake3"
 	// +kubebuilder:validation:Enum=builtin;sha256_cbor;blake3
 	HashAlgorithm *string `json:"hashAlgorithm,omitempty"`
+
+	// httpPort is the HTTP frontend port (health checks, cache admin).
+	// +optional
+	// +kubebuilder:default=8080
+	// +kubebuilder:validation:Minimum=1024
+	// +kubebuilder:validation:Maximum=65535
+	HTTPPort *int32 `json:"httpPort,omitempty"`
 }
 
 // L1BackendSpec defines the L1 memory cache configuration.
 type L1BackendSpec struct {
 	// sizeGB is the L1 cache size in gigabytes. Required, must be > 0.
+	// The CRD-level constraint (exclusiveMinimum=0) rejects invalid values
+	// at admission time so the controller never sees them; the in-Go
+	// ValidateSpec keeps the same rule for defense in depth.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:ExclusiveMinimum=true
 	SizeGB float64 `json:"sizeGB"`
 }
 
 // EvictionSpec defines the cache eviction configuration.
 type EvictionSpec struct {
-	// policy is the eviction policy. Currently only LRU is supported.
+	// policy is the eviction policy. LRU or noop.
 	// +optional
 	// +kubebuilder:default="LRU"
-	// +kubebuilder:validation:Enum=LRU
+	// +kubebuilder:validation:Enum=LRU;noop
 	Policy *string `json:"policy,omitempty"`
 
 	// triggerWatermark is the cache usage ratio that triggers eviction.
@@ -141,9 +191,92 @@ type PrometheusSpec struct {
 	ServiceMonitor *ServiceMonitorSpec `json:"serviceMonitor,omitempty"`
 }
 
-// L2BackendSpec defines an L2 storage backend.
+// L2BackendSpec defines the L2 storage backend.
+// Exactly one of RESP or Raw must be set.
 type L2BackendSpec struct {
-	// type is the adapter type name (mock, disk, redis, s3, p2p).
+	// resp configures a Redis/Valkey RESP L2 adapter backed by the
+	// native C++ connector.
+	// +optional
+	RESP *RESPL2AdapterSpec `json:"resp,omitempty"`
+
+	// raw is an escape hatch for adapter types not yet natively
+	// supported by the operator (e.g. nixl_store, fs, mock).
+	// The JSON is passed through to --l2-adapter as-is.
+	// +optional
+	Raw *RawL2AdapterSpec `json:"raw,omitempty"`
+
+	// storePolicy controls how keys flow from L1 to L2.
+	// "default" stores all keys to the adapter and keeps L1.
+	// "skip_l1" stores all keys to the adapter and deletes them from L1
+	// (buffer-only mode — pair with eviction.policy=noop).
+	// +optional
+	// +kubebuilder:default="default"
+	// +kubebuilder:validation:Enum=default;skip_l1
+	StorePolicy *string `json:"storePolicy,omitempty"`
+
+	// prefetchPolicy controls how keys flow from L2 back to L1 on
+	// cache misses. "default" picks the first adapter that has the key.
+	// +optional
+	// +kubebuilder:default="default"
+	// +kubebuilder:validation:Enum=default;retain
+	PrefetchPolicy *string `json:"prefetchPolicy,omitempty"`
+
+	// prefetchMaxInFlight limits the number of concurrent prefetch
+	// (L2→L1 load) requests, preventing excessive L1 memory pressure.
+	// +optional
+	// +kubebuilder:default=8
+	// +kubebuilder:validation:Minimum=1
+	PrefetchMaxInFlight *int32 `json:"prefetchMaxInFlight,omitempty"`
+}
+
+// RESPL2AdapterSpec configures a RESP (Redis/Valkey) L2 adapter.
+type RESPL2AdapterSpec struct {
+	// host is the Redis/Valkey server hostname or IP.
+	Host string `json:"host"`
+
+	// port is the Redis/Valkey server port.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Port int32 `json:"port"`
+
+	// numWorkers is the number of C++ worker threads for I/O.
+	// +optional
+	// +kubebuilder:default=8
+	// +kubebuilder:validation:Minimum=1
+	NumWorkers *int32 `json:"numWorkers,omitempty"`
+
+	// maxCapacityGB is the max L2 capacity in GB for usage tracking
+	// and eviction. 0 means disabled.
+	// +optional
+	// +kubebuilder:default=0
+	MaxCapacityGB *float64 `json:"maxCapacityGB,omitempty"`
+
+	// authSecretRef is a reference to a Secret containing "username"
+	// and "password" keys for Redis authentication.
+	// The Secret may live in a different namespace; the operator will
+	// create a managed copy in the LMCacheEngine's namespace.
+	// The credentials are injected via environment variables so they
+	// do not appear in container args or kubectl describe output.
+	// +optional
+	AuthSecretRef *SecretReference `json:"authSecretRef,omitempty"`
+}
+
+// SecretReference is a reference to a Secret that supports cross-namespace access.
+type SecretReference struct {
+	// name is the name of the Secret.
+	Name string `json:"name"`
+
+	// namespace is the namespace of the Secret.
+	// If empty, defaults to the namespace of the LMCacheEngine resource.
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+}
+
+// RawL2AdapterSpec is a pass-through escape hatch for adapter types
+// not natively supported by the operator. The type and config fields
+// are merged into a flat JSON object and passed to --l2-adapter.
+type RawL2AdapterSpec struct {
+	// type is the adapter type name (e.g. "nixl_store", "fs", "mock").
 	Type string `json:"type"`
 
 	// config is type-specific configuration as a free-form map.
@@ -151,8 +284,60 @@ type L2BackendSpec struct {
 	Config map[string]apiextensionsv1.JSON `json:"config,omitempty"`
 }
 
+// CoordinatorConnectionSpec configures how an engine server registers with an
+// MP coordinator. It maps to the server's coordinator-client flags
+// (lmcache/v1/multiprocess/config.py: add_coordinator_args). Exactly one of
+// ref or url must be set.
+type CoordinatorConnectionSpec struct {
+	// ref names an LMCacheCoordinator in the same namespace. The operator
+	// resolves it to the coordinator's in-cluster Service URL.
+	// +optional
+	Ref *corev1.LocalObjectReference `json:"ref,omitempty"`
+
+	// url is an explicit coordinator base URL (e.g. http://coordinator:9300),
+	// used to target a coordinator the operator does not manage.
+	// +optional
+	URL *string `json:"url,omitempty"`
+
+	// advertiseIP is the IP the coordinator should reach this server at.
+	//
+	// DO NOT SET THIS IN ALMOST EVERY CASE. When unset, the server's pod IP is
+	// injected automatically via the downward API, which is the correct value
+	// for normal in-cluster deployments. Only set this if you know exactly what
+	// you are doing -- e.g. the coordinator runs outside the cluster and must
+	// reach the server through a specific externally-routable address. An
+	// incorrect value silently breaks coordinator-to-server connectivity.
+	// +optional
+	AdvertiseIP *string `json:"advertiseIP,omitempty"`
+
+	// heartbeatInterval is the seconds between heartbeats; must be > 0.
+	// +optional
+	// +kubebuilder:default=5
+	HeartbeatInterval *float64 `json:"heartbeatInterval,omitempty"`
+
+	// l2EventReporting enables reporting L2 store/lookup events to the
+	// coordinator for fleet-wide usage tracking and eviction.
+	// +optional
+	// +kubebuilder:default=false
+	L2EventReporting *bool `json:"l2EventReporting,omitempty"`
+
+	// l2EventFlushInterval is the seconds between L2 event flush attempts; must
+	// be > 0.
+	// +optional
+	// +kubebuilder:default=1
+	L2EventFlushInterval *float64 `json:"l2EventFlushInterval,omitempty"`
+}
+
 // LMCacheEngineSpec defines the desired state of LMCacheEngine.
 type LMCacheEngineSpec struct {
+	// gpuVendor selects the GPU vendor. "nvidia" (default) requires the NVIDIA
+	// GPU Operator's "nvidia" RuntimeClass; "amd" runs on the default container
+	// runtime.
+	// +optional
+	// +kubebuilder:default="nvidia"
+	// +kubebuilder:validation:Enum=nvidia;amd
+	GPUVendor *string `json:"gpuVendor,omitempty"`
+
 	// image defines the container image to use.
 	// +optional
 	Image *ImageSpec `json:"image,omitempty"`
@@ -176,9 +361,21 @@ type LMCacheEngineSpec struct {
 	// +optional
 	Prometheus *PrometheusSpec `json:"prometheus,omitempty"`
 
-	// l2Backends defines L2 storage backends.
+	// l2Backend defines the L2 storage backend.
+	// Currently only a single adapter is supported.
 	// +optional
-	L2Backends []L2BackendSpec `json:"l2Backends,omitempty"`
+	L2Backend *L2BackendSpec `json:"l2Backend,omitempty"`
+
+	// coordinator configures registration with an MP coordinator. When unset,
+	// the server does not register with any coordinator.
+	// +optional
+	Coordinator *CoordinatorConnectionSpec `json:"coordinator,omitempty"`
+
+	// injection defines the defaults the LMCache mutating webhook reads for pods
+	// bound to this engine. When unset, the webhook wires only the connection;
+	// set injection.payloadImage to also stage an lmcache code payload.
+	// +optional
+	Injection *LMCacheInjectionSpec `json:"injection,omitempty"`
 
 	// resourceOverrides allows overriding auto-computed resource requirements.
 	// +optional
@@ -229,6 +426,22 @@ type LMCacheEngineSpec struct {
 	// priorityClassName is the priority class for the pods.
 	// +optional
 	PriorityClassName string `json:"priorityClassName,omitempty"`
+
+	// hostNetwork runs the pod in the host's network namespace. When true the
+	// operator also sets dnsPolicy to ClusterFirstWithHostNet so cluster DNS
+	// still works. Default: false.
+	// +optional
+	// +kubebuilder:default=false
+	HostNetwork *bool `json:"hostNetwork,omitempty"`
+
+	// privileged runs the engine container in privileged mode. On some clusters
+	// this is required for the engine to see all node GPUs (for CUDA IPC) without
+	// claiming any via the nvidia.com/gpu device plugin; on many clusters
+	// NVIDIA_VISIBLE_DEVICES=all already grants that visibility without it, so it
+	// defaults to false.
+	// +optional
+	// +kubebuilder:default=false
+	Privileged *bool `json:"privileged,omitempty"`
 
 	// extraArgs are additional CLI flags appended to the server command.
 	// They are appended last and can override any auto-generated flag.

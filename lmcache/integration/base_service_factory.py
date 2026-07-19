@@ -125,8 +125,12 @@ class BaseServiceFactory(ABC):
         health_monitor.start()
         logger.info("Health monitor initialized and started")
 
-        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
-        if prometheus_logger is not None:
+        metadata = lmcache_manager.lmcache_engine_metadata
+        if metadata is not None:
+            prometheus_logger = PrometheusLogger.GetOrCreate(
+                metadata,
+                config=config,
+            )
             prometheus_logger.lmcache_is_healthy.set_function(
                 lambda: 1 if lmcache_manager.is_healthy() else 0
             )

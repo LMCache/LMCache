@@ -81,6 +81,24 @@ class IStorageConnector {
       const std::vector<std::string>& keys) = 0;
 
   /*
+  submit a batch DELETE operation
+
+  deletes multiple keys in parallel. work is automatically divided
+  among worker threads (tiling). returns a single future_id for the entire
+  batch.
+
+  args:
+    keys: vector of key strings to delete
+
+  returns:
+    uint64_t: future id for tracking this batch operation
+    completion will contain result_bytes vector with 0/1 for each key
+    (1 = deleted, 0 = not found)
+  */
+  virtual uint64_t submit_batch_delete(
+      const std::vector<std::string>& keys) = 0;
+
+  /*
   drain all available completions
 
   this is the ONLY method that should be called when the eventfd becomes

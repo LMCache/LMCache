@@ -30,6 +30,35 @@ def create_test_config(fs_path: str):
     return config
 
 
+def create_test_config_with_plugin(fs_path: str):
+    """Create a test configuration for FSConnector using remote_storage_plugins."""
+    config = LMCacheEngineConfig.from_defaults(
+        chunk_size=256,
+        remote_storage_plugins=["fs"],
+        remote_serde="naive",
+        lmcache_instance_id="test_instance",
+        extra_config={
+            "remote_storage_plugin.fs.base_path": fs_path,
+        },
+    )
+    return config
+
+
+def create_test_config_with_dual_plugins(fs_path1: str, fs_path2: str):
+    """Create config with two fs_connector instances."""
+    config = LMCacheEngineConfig.from_defaults(
+        chunk_size=256,
+        remote_storage_plugins=["fs.primary", "fs.backup"],
+        remote_serde="naive",
+        lmcache_instance_id="test_instance",
+        extra_config={
+            "remote_storage_plugin.fs.primary.base_path": fs_path1,
+            "remote_storage_plugin.fs.backup.base_path": fs_path2,
+        },
+    )
+    return config
+
+
 def create_test_metadata():
     """Create a test metadata for LMCacheMetadata."""
     return LMCacheMetadata(
@@ -138,6 +167,82 @@ class TestFSConnector:
 
         local_cpu_backend.memory_allocator.close()
         backend.close()
+
+    def test_init_with_plugin(self, temp_fs_path, async_loop, local_cpu_backend):
+        """Test FSConnector init via RemoteBackend
+        using remote_storage_plugins."""
+        config = create_test_config_with_plugin(temp_fs_path)
+        metadata = create_test_metadata()
+        backend = RemoteBackend(
+            config=config,
+            metadata=metadata,
+            loop=async_loop,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cpu",
+            plugin_name="fs",
+        )
+
+        assert backend.dst_device == "cpu"
+        assert backend.local_cpu_backend == local_cpu_backend
+        assert backend.plugin_name == "fs"
+        assert os.path.exists(temp_fs_path)
+        assert backend.config.remote_serde == "naive"
+
+        local_cpu_backend.memory_allocator.close()
+        backend.close()
+
+    def test_dual_fs_instances(self, async_loop, local_cpu_backend):
+        """Test two fs_connector instances with different paths."""
+        dir1 = tempfile.mkdtemp()
+        dir2 = tempfile.mkdtemp()
+        try:
+            config = create_test_config_with_dual_plugins(dir1, dir2)
+            metadata = create_test_metadata()
+
+            backend1 = RemoteBackend(
+                config=config,
+                metadata=metadata,
+                loop=async_loop,
+                local_cpu_backend=local_cpu_backend,
+                dst_device="cpu",
+                plugin_name="fs.primary",
+            )
+            backend2 = RemoteBackend(
+                config=config,
+                metadata=metadata,
+                loop=async_loop,
+                local_cpu_backend=local_cpu_backend,
+                dst_device="cpu",
+                plugin_name="fs.backup",
+            )
+
+            key = create_test_key(99)
+            memory_obj = create_test_memory_obj()
+
+            # Put to backend1 only
+            future = backend1.submit_put_task(key, memory_obj)
+            if future:
+                future.result(timeout=5.0)
+
+            # backend1 has the key, backend2 does not
+            assert backend1.contains(key)
+            assert not backend2.contains(key)
+
+            # Put to backend2 as well
+            future2 = backend2.submit_put_task(key, memory_obj)
+            if future2:
+                future2.result(timeout=5.0)
+
+            assert backend2.contains(key)
+
+            backend1.close()
+            backend2.close()
+            local_cpu_backend.memory_allocator.close()
+        finally:
+            if os.path.exists(dir1):
+                shutil.rmtree(dir1)
+            if os.path.exists(dir2):
+                shutil.rmtree(dir2)
 
     def test_contains_key_not_exists(self, remote_backend_with_fs):
         """Test contains() when key doesn't exist in filesystem."""

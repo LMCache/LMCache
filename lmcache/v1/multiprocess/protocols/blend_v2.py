@@ -9,7 +9,7 @@ key lookup without re-hashing on the server side.
 """
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import CBMatchResult, IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import CBMatchResult, IPCCacheServerKey
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
 
 # Define request names for this protocol group
@@ -29,16 +29,16 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
     return {
         # Lookup pre-computed chunks (V2)
         # Payload:
-        #   - key: IPCCacheEngineKey - The key containing the token ids
+        #   - key: IPCCacheServerKey - The key containing the token ids
         # Returns: List of CBMatchResult with match positions and chunk hashes
         "CB_LOOKUP_PRE_COMPUTED_V2": ProtocolDefinition(
-            payload_classes=[IPCCacheEngineKey],
+            payload_classes=[IPCCacheServerKey],
             response_class=list[CBMatchResult],
             handler_type=HandlerType.BLOCKING,
         ),
         # Retrieve pre-computed chunks (V2)
         # Payload:
-        #   - key: IPCCacheEngineKey - The key containing the token ids
+        #   - key: IPCCacheServerKey - The key containing the token ids
         #   - cb_match_result: list[CBMatchResult] - Match results returned by
         #                      CB_LOOKUP_PRE_COMPUTED_V2, with per-chunk hashes
         #                      and query positions
@@ -50,7 +50,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - IPC handle bytes
         #   - boolean flag indicating if the retrieval is successful
         "CB_RETRIEVE_PRE_COMPUTED_V2": ProtocolDefinition(
-            payload_classes=[IPCCacheEngineKey, list[CBMatchResult], int, int, bytes],
+            payload_classes=[IPCCacheServerKey, list[CBMatchResult], int, int, bytes],
             response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
         ),

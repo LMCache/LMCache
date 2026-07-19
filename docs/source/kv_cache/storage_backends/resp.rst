@@ -177,6 +177,66 @@ Expected output:
     All tests passed
 
 
+Environment Variable Configuration
+------------------------------------
+
+Sensitive credentials (and optionally host/port) can be provided via environment
+variables instead of config files or CLI arguments. This prevents secrets from
+appearing in logged configuration at startup.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 65
+
+   * - Variable
+     - Description
+   * - ``LMCACHE_RESP_USERNAME``
+     - Redis ACL username. Used as default when ``username`` is not set in config/JSON.
+   * - ``LMCACHE_RESP_PASSWORD``
+     - Redis AUTH password. Used as default when ``password`` is not set in config/JSON.
+   * - ``LMCACHE_RESP_HOST``
+     - Redis hostname or IP. Used as default when ``host`` is not set in config/JSON/URL.
+   * - ``LMCACHE_RESP_PORT``
+     - Redis port. Used as default when ``port`` is not set in config/JSON/URL.
+
+Config files (non-MP) and ``--l2-adapter`` JSON (MP) take precedence over
+environment variables. Environment variables serve as defaults — they are used
+when the corresponding config value is empty or unset. They are read at adapter
+creation time inside the adapter itself, so they are **never stored in the
+config object** and **never printed in startup logs**.
+
+**Example — MP mode with env vars:**
+
+.. code-block:: bash
+
+    export LMCACHE_RESP_USERNAME="default"
+    export LMCACHE_RESP_PASSWORD="secret"
+
+    lmcache server \
+        --l1-size-gb 10 \
+        --eviction-policy LRU \
+        --chunk-size 16 \
+        --l2-adapter '{"type": "resp", "host": "localhost", "port": 6379, "num_workers": 8}' \
+        --port 6555
+
+**Example — Non-MP mode with env vars:**
+
+.. code-block:: bash
+
+    export LMCACHE_RESP_USERNAME="default"
+    export LMCACHE_RESP_PASSWORD="secret"
+
+    LMCACHE_CONFIG_FILE=resp-config.yaml \
+    vllm serve meta-llama/Llama-3.1-8B-Instruct \
+        --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}' \
+        --no-enable-prefix-caching \
+        --load-format dummy
+
+.. tip::
+   For production deployments, always use environment variables for credentials
+   rather than embedding them in config files or CLI arguments.
+
+
 Non-MP Mode (Single Process)
 -----------------------------
 
@@ -188,8 +248,11 @@ via the ``RESPClient`` asyncio wrapper.
 .. code-block:: yaml
 
     chunk_size: 16
-    remote_url: "redis://localhost:6379"
+    remote_url: "resp://localhost:6379"
     remote_serde: "naive"
+
+Credentials can be set via environment variables (recommended) or in the config file
+under ``extra_config`` (see `Environment Variable Configuration`_ above).
 
 **Launch vLLM:**
 
@@ -276,11 +339,50 @@ The ``--l2-adapter`` JSON accepts these fields:
    * - ``username``
      - str
      - ``""``
-     - Redis ACL username (leave empty for no auth)
+     - Redis ACL username (leave empty for no auth). Falls back to ``LMCACHE_RESP_USERNAME`` env var if empty.
    * - ``password``
      - str
      - ``""``
-     - Redis AUTH password (leave empty for no auth)
+     - Redis AUTH password (leave empty for no auth). Falls back to ``LMCACHE_RESP_PASSWORD`` env var if empty.
+   * - ``max_capacity_gb``
+     - float
+     - 0
+     - Maximum L2 storage capacity in GB for client-side usage tracking. Required for L2 eviction. Set to 0 (default) to disable usage tracking.
+
+L2 Eviction
+~~~~~~~~~~~~
+
+To enable automatic eviction of least-recently-used keys when the Redis backend fills up,
+set ``max_capacity_gb`` and add an ``"eviction"`` block:
+
+.. code-block:: bash
+
+    lmcache server \
+        --l1-size-gb 10 \
+        --eviction-policy LRU \
+        --chunk-size 16 \
+        --l2-adapter '{
+            "type": "resp",
+            "host": "localhost",
+            "port": 6379,
+            "num_workers": 8,
+            "max_capacity_gb": 10,
+            "eviction": {
+                "eviction_policy": "LRU",
+                "trigger_watermark": 0.8,
+                "eviction_ratio": 0.2
+            }
+        }' \
+        --port 6555
+
+This configures a 10 GB capacity limit. When usage exceeds 80% (``trigger_watermark``),
+the eviction controller will delete the least-recently-used ~20% of stored keys
+(``eviction_ratio``) using the Redis ``DEL`` command.
+
+.. note::
+   ``max_capacity_gb`` enables **client-side** size tracking. It does not configure
+   the Redis server's ``maxmemory`` setting. You should set ``max_capacity_gb`` to
+   match or be slightly below your Redis server's available memory.
 
 
 Testing the Setup
@@ -324,7 +426,7 @@ Best Practices
 - Use Redis 8.2+ with ``--io-threads 4`` (or more, matching available cores)
 - Disable persistence (``--save '' --appendonly no``) for KV cache workloads
 - Pin Redis to its own NUMA node if running on multi-socket systems
-- For production, enable authentication with ``--requirepass`` and use the ``username``/``password`` config fields
+- For production, enable authentication with ``--requirepass`` and supply credentials via ``LMCACHE_RESP_USERNAME`` / ``LMCACHE_RESP_PASSWORD`` environment variables to keep them out of logs
 
 **Client tuning:**
 

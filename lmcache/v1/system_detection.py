@@ -6,17 +6,16 @@ import platform
 
 # Third Party
 import psutil
-import torch
 
-if torch.cuda.is_available():
-    try:
-        # First Party
-        from lmcache.c_ops import get_gpu_pci_bus_id
-    except ImportError:
-        # Fallback if c_ops is not available
-        get_gpu_pci_bus_id = None
+try:
+    # First Party
+    from lmcache.c_ops import get_gpu_pci_bus_id
+except ImportError:
+    # Fallback if c_ops is not available
+    get_gpu_pci_bus_id = None
 
 # First Party
+from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
 
@@ -44,11 +43,11 @@ class SystemMemoryDetector:
             available_gb = memory.available / (1024**3)
 
             system = platform.system()
-            logger.info(f"{system} system available memory: {available_gb:.2f} GB")
+            logger.info("%s system available memory: %.2f GB", system, available_gb)
             return available_gb
 
         except Exception as e:
-            logger.warning(f"Failed to get system available memory using psutil: {e}")
+            logger.warning("Failed to get system available memory using psutil: %s", e)
             return 0.0
 
 
@@ -98,7 +97,7 @@ class NUMADetector:
         """
 
         try:
-            device_index = torch.cuda.current_device()
+            device_index = torch_dev.current_device()
             pci_bus_id = get_gpu_pci_bus_id(device_index).lower()
 
             numa_node_file = f"/sys/bus/pci/devices/{pci_bus_id}/numa_node"
@@ -107,5 +106,5 @@ class NUMADetector:
 
             return NUMAMapping(gpu_to_numa_mapping={device_index: numa_node})
         except Exception as e:
-            logger.warning(f"Failed to auto read NUMA mapping from system: {e}")
+            logger.warning("Failed to auto read NUMA mapping from system: %s", e)
             return None

@@ -23,7 +23,12 @@ namespace connector {
 
 // we only support batched operations
 // benefits are fewer submissions and fewer completions
-enum class Op : uint8_t { BATCH_TILE_GET, BATCH_TILE_SET, BATCH_TILE_EXISTS };
+enum class Op : uint8_t {
+  BATCH_TILE_GET,
+  BATCH_TILE_SET,
+  BATCH_TILE_EXISTS,
+  BATCH_TILE_DELETE
+};
 
 /*
 shared communication state between threads executing a single batch operation.

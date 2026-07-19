@@ -19,7 +19,7 @@ jobs:
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
         with:
-          egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
+          egress-policy: audit
 
       - name: Checkout code
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
@@ -42,15 +42,22 @@ jobs:
       - name: Build Versioned Sphinx Documentation
         run: |
           sphinx-multiversion docs/source output
+          SPHINX_LANGUAGE=zh_CN sphinx-multiversion docs/source output-zh
         continue-on-error: false
 
-      - name: Setup root docs and .nojekyll
+      - name: Setup root docs, .nojekyll, and Chinese docs
         run: |
           touch output/.nojekyll
           # Copy dev docs to root (latest docs at root URL)
           cp -r output/dev/* output/
           # Remove dev directory to avoid duplication
           rm -rf output/dev
+          # Copy Chinese dev docs to /zh_CN/ and versioned docs under /zh_CN/<version>/
+          mkdir -p output/zh_CN
+          cp -r output-zh/dev/* output/zh_CN/
+          rm -rf output-zh/dev
+          cp -r output-zh/. output/zh_CN/
+          rm -rf output-zh
 
       - name: Upload doc artifacts to GHA
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -66,7 +73,7 @@ jobs:
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
         with:
-          egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
+          egress-policy: audit
 
       - name: Fetch doc artifacts
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0

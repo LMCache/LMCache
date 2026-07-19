@@ -16,11 +16,11 @@ import torch
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import (
-    CuFileMemoryAllocator,
+from lmcache.v1.memory_allocators.cu_file_memory_allocator import CuFileMemoryAllocator
+from lmcache.v1.memory_allocators.hip_file_memory_allocator import (
     HipFileMemoryAllocator,
-    MemoryFormat,
 )
+from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.storage_backend import CreateStorageBackends
 from lmcache.v1.storage_backend.gds_backend import pack_metadata, unpack_metadata
 
@@ -67,7 +67,7 @@ def test_gds_backend_sanity():
     try:
         os.makedirs(GDS_DIR, exist_ok=True)
         config_gds = LMCacheEngineConfig.from_file(BASE_DIR / "data/gds.yaml")
-        assert config_gds.cufile_buffer_size == 128
+        assert config_gds.gds_buffer_size == 128
 
         thread_loop = asyncio.new_event_loop()
         thread = threading.Thread(target=thread_loop.run_forever)

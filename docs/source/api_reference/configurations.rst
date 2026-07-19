@@ -1,6 +1,11 @@
 Configuring LMCache
 ===================
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/configuration`.
+
+
 LMCache supports two types of configurations:
 
 1. **Configuration file**: a YAML (recommended) or JSON file that contains the configuration items.
@@ -34,9 +39,15 @@ Basic cache settings that control the core functionality of LMCache.
    * - max_local_cpu_size
      - LMCACHE_MAX_LOCAL_CPU_SIZE
      - Maximum CPU cache size in GB. Default: 5.0
+   * - local_cpu_use_hugepages
+     - LMCACHE_LOCAL_CPU_USE_HUGEPAGES
+     - Whether to use Linux hugepages (2 MB) for CPU-pinned KV cache memory. Not compatible with P2P mode or shared memory (multiprocess). Requires pre-allocated hugepages (``sysctl vm.nr_hugepages``). Values: true/false. Default: false
    * - local_disk
      - LMCACHE_LOCAL_DISK
-     - Path to local disk cache. Format: "file:///path/to/cache".
+     - Path (or comma-separated paths) to local disk cache directories. Format: ``"file:///path/to/cache"`` or ``"/path/a,/path/b"`` for multi-device I/O. See ``local_disk_path_sharding`` for how paths are assigned to GPUs.
+   * - local_disk_path_sharding
+     - LMCACHE_LOCAL_DISK_PATH_SHARDING
+     - Strategy for selecting a path when multiple paths are provided. Currently only ``"by_gpu"`` is supported, which selects paths based on GPU device ID (default: "by_gpu").
    * - max_local_disk_size
      - LMCACHE_MAX_LOCAL_DISK_SIZE
      - Maximum disk cache size in GB. Default: 0.0
@@ -244,7 +255,7 @@ Settings for disaggregated prefill functionality. The latest/default PD is imple
      - PD role. Values: "sender" (prefiller) or "receiver" (decoder).
    * - pd_buffer_size
      - LMCACHE_PD_BUFFER_SIZE
-     - Transport buffer size for PD in bytes. Required for both senders and receivers when enable_pd=true
+     - Upper bound of PD transport buffer size (in bytes), aligned to chunk size. Required for both senders and receivers when enable_pd=true
    * - pd_buffer_device
      - LMCACHE_PD_BUFFER_DEVICE
      - Device for PD buffer. Values: "cpu", "cuda". Required for both senders and receivers when enable_pd=true
@@ -266,6 +277,30 @@ Settings for disaggregated prefill functionality. The latest/default PD is imple
    * - pd_proxy_port
      - LMCACHE_PD_PROXY_PORT
      - Port for proxy server. Required for senders to connect to inform the proxy when transfer to decoder has been completed
+   * - pd_allocation_timeout_sec
+     - LMCACHE_PD_ALLOCATION_TIMEOUT_SEC
+     - Maximum seconds to retry memory allocation before giving up. Default: 5.0
+   * - pd_shutdown_timeout_sec
+     - LMCACHE_PD_SHUTDOWN_TIMEOUT_SEC
+     - Maximum seconds to wait for event loop shutdown and thread join. Default: 5.0
+   * - pd_condition_poll_interval_sec
+     - LMCACHE_PD_CONDITION_POLL_INTERVAL_SEC
+     - Polling interval in seconds when waiting on a threading/asyncio Condition. Small enough to be responsive, large enough not to spin-waste CPU. Default: 0.05
+   * - pd_max_prefill_len
+     - LMCACHE_PD_MAX_PREFILL_LEN
+     - Maximum prefill token length that the PD buffer must be able to hold. If > 0, initialization raises ValueError when the buffer capacity (in tokens) is smaller than this value. Set to 0 (default) to skip the check.
+   * - pd_backend_mode
+     - LMCACHE_PD_BACKEND_MODE
+     - Select the PD backend implementation: 'async' (default) uses the asyncio-based implementation; 'sync' uses the original thread-based synchronous implementation. Default: "async"
+   * - pd_skip_proxy_notification
+     - LMCACHE_PD_SKIP_PROXY_NOTIFICATION
+     - When true, the sender skips ZMQ proxy notification after KV transfer and does not require pd_proxy_host/pd_proxy_port. This option is intended for external orchestrators only (e.g., vLLM Production Stack router) that manage the prefill-decode request flow via HTTP and do not rely on ZMQ notifications. It must not be used with LMCache's built-in disaggregation proxy (``disagg_proxy_server.py``), which depends on ZMQ notifications to know when KV transfer is complete before forwarding the decode request. Values: true/false. Default: false
+   * - pd_bidirectional
+     - LMCACHE_PD_BIDIRECTIONAL
+     - When true, enables bidirectional NIXL cache probe. The prefiller queries the decoder for cached KV blocks before transfer, and reads cached blocks via NIXL RDMA instead of recomputing. Values: true/false. Default: false
+   * - pd_peer_query_port
+     - LMCACHE_PD_PEER_QUERY_PORT
+     - ZMQ ports for the bidirectional cache query channel (one per TP rank). Required on both prefiller and decoder when pd_bidirectional=true. Example: [7500, 7501, 7502, 7503]
 
 P2P Backend Configurations
 --------------------------
@@ -292,6 +327,31 @@ Settings for P2P (peer-to-peer) backend timeout behavior. These configurations a
      - 10000
      - Timeout in milliseconds for socket send operations
 
+Disk I/O Backend Configurations
+---------------------------------
+
+Settings shared by disk-based storage backends (local disk and GDS). These configurations are specified through ``extra_config``.
+
+.. code-block:: yaml
+
+    extra_config:
+      use_odirect: true
+      disk_io_threads: 8
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 55
+
+   * - Configuration Key
+     - Default
+     - Description
+   * - use_odirect
+     - false
+     - Enable O_DIRECT for disk I/O, bypassing the kernel page cache. Recommended when most local CPU memory is already used for KV cache offloading.
+   * - disk_io_threads
+     - 4
+     - Number of worker threads in the disk I/O thread pool. Applies to both the local disk backend and the GDS backend. Increase for higher parallelism on fast NVMe drives. (Replaces the deprecated ``gds_io_threads`` key.)
+
 Nixl (as a storage backend) Configurations
 ------------------------------------------
 
@@ -307,9 +367,9 @@ Settings for using Nixl as a storage backend instead of disaggregated prefill. T
     extra_config: 
       # enable_nixl_storage will disable disaggregated prefill mode.
       enable_nixl_storage: true
-      nixl_backend: "POSIX"  # Options: "GDS", "GDS_MT", "POSIX", "HF3FS"
+      nixl_backend: "POSIX"  # Options: "GDS", "GDS_MT", "POSIX", "HF3FS", "OBJ"
       nixl_path: "/path/to/storage/"
-      nixl_file_pool_size: 64
+      nixl_pool_size: 64
 
 .. list-table::
    :header-rows: 1
@@ -320,11 +380,15 @@ Settings for using Nixl as a storage backend instead of disaggregated prefill. T
    * - enable_nixl_storage
      - Whether to enable Nixl storage backend. Values: true/false
    * - nixl_backend
-     - Storage backend type. Options: "GDS", "GDS_MT", "POSIX", "HF3FS"
+     - Storage backend type. Options: "GDS", "GDS_MT", "POSIX", "HF3FS", "OBJ"
    * - nixl_path
      - File system path for Nixl storage
-   * - nixl_file_pool_size
-     - Number of files in the storage pool
+   * - nixl_pool_size
+     - Number of files or objects in the storage pool
+   * - nixl_endpoint_list
+     - List of object-storage endpoint URLs for per-worker distribution. Each TP worker selects an entry round-robin by ``local_worker_id``, overriding ``nixl_backend_params.endpoint_override``. Only applied when ``nixl_backend`` is ``"OBJ"`` (silently ignored otherwise). Each entry must start with ``http://`` or ``https://``; an empty list raises ``ValueError`` at engine init.
+   * - nixl_use_hugepages
+     - **Deprecated.** Use ``local_cpu_use_hugepages`` instead. When set, the value is copied into ``local_cpu_use_hugepages`` (a warning is logged) and the key is dropped. Hugepages have never applied to GPU buffers; in CPU mode the NIXL pool is now owned by ``LocalCPUBackend``.
 
 
 Additional Storage Configurations
@@ -341,10 +405,19 @@ Settings for different storage backends and paths.
      - Description
    * - gds_path
      - LMCACHE_GDS_PATH
-     - Path for GDS backend. Supports comma-separated paths for multi-device I/O (e.g. ``/mnt/nvme0/cache,/mnt/nvme1/cache``). Each GPU selects a path via ``device_id % num_paths``.
-   * - cufile_buffer_size
-     - LMCACHE_CUFILE_BUFFER_SIZE
-     - Buffer size for cuFile/hipFile operations
+     - Path for GDS backend. Supports comma-separated paths for multi-device I/O (e.g. ``/mnt/nvme0/cache,/mnt/nvme1/cache``). See ``gds_path_sharding`` for how paths are assigned to GPUs.
+   * - gds_path_sharding
+     - LMCACHE_GDS_PATH_SHARDING
+     - Strategy for selecting a path when multiple paths are provided. Currently only ``"by_gpu"`` is supported, which selects paths based on GPU device ID (default: "by_gpu").
+   * - gds_buffer_size
+     - LMCACHE_GDS_BUFFER_SIZE
+     - Buffer size for GDS operations
+   * - use_gds
+     - LMCACHE_USE_GDS
+     - Enable or disable GPU Direct Storage API usage (default: true)
+   * - gds_backend
+     - LMCACHE_GDS_BACKEND
+     - GDS library backend to use (default: "cufile")
 
 Custom Prometheus Histogram Buckets
 ------------------------------------

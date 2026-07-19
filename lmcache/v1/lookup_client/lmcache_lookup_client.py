@@ -120,8 +120,16 @@ class LMCacheLookupClient(LookupClientInterface):
                 request_configs_str,
             ]
         else:
+            # Convert token_ids to a plain list for msgpack serialization
+            # (vLLM 0.18+ may pass ConstantList which msgspec can't encode)
+            if isinstance(token_ids, torch.Tensor):
+                serializable_ids = token_ids.tolist()
+            elif not isinstance(token_ids, list):
+                serializable_ids = list(token_ids)
+            else:
+                serializable_ids = token_ids
             msg_buf = [
-                token_ids,
+                serializable_ids,
                 lookup_id,
                 request_configs_str,
             ]
@@ -250,11 +258,11 @@ class LMCacheLookupServer:
                     response = lookup_result.to_bytes(4, "big")
                     self.transport.send_response(identity, response)
                 except json.JSONDecodeError as e:
-                    logger.error(f"Error decoding JSON in lookup request: {e}")
+                    logger.error("Error decoding JSON in lookup request: %s", e)
                 except UnicodeDecodeError as e:
-                    logger.error(f"Error decoding UTF-8 in lookup request: {e}")
+                    logger.error("Error decoding UTF-8 in lookup request: %s", e)
                 except Exception as e:
-                    logger.error(f"Error processing lookup request: {e}")
+                    logger.error("Error processing lookup request: %s", e)
 
         logger.info("lmcache lookup server started")
         self.thread = threading.Thread(

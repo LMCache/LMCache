@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import List, Tuple
+from typing import Any, Dict, List, Tuple
+import os
 
 # First Party
 from lmcache.logging import init_logger
@@ -42,15 +43,28 @@ class RESPConnectorAdapter(ConnectorAdapter):
         # Get number of threads for RESP connection pool (default is 8)
         self.resp_num_threads = int(extra_config.get("resp_num_threads", 8))
 
-        # Get authentication credentials from extra_config
-        username = str(extra_config.get("username", ""))
-        password = str(extra_config.get("password", ""))
+        # Config/CLI args take precedence over environment variables,
+        # which serve as defaults. This keeps secrets out of logged
+        # config while allowing explicit overrides.
+        cfg_username = str(extra_config.get("username", ""))
+        cfg_password = str(extra_config.get("password", ""))
+        username = cfg_username or os.environ.get("LMCACHE_RESP_USERNAME", "")
+        password = cfg_password or os.environ.get("LMCACHE_RESP_PASSWORD", "")
 
-        logger.info(f"Creating RESP connector for URL: {context.url}")
         parsed_url = parse_remote_url(context.url)
+
+        # Config/URL values take precedence; env vars are fallback
+        host = parsed_url.host or os.environ.get("LMCACHE_RESP_HOST", "")
+        port = (
+            parsed_url.port
+            if parsed_url.port
+            else int(os.environ.get("LMCACHE_RESP_PORT", "0"))
+        )
+
+        logger.info("Creating RESP connector for %s:%d", host, port)
         return RESPConnector(
-            host=parsed_url.host,
-            port=parsed_url.port,
+            host=host,
+            port=port,
             loop=context.loop,
             local_cpu_backend=context.local_cpu_backend,
             num_threads=self.resp_num_threads,
@@ -66,15 +80,31 @@ class RedisConnectorAdapter(ConnectorAdapter):
         super().__init__("redis://")
 
     def can_parse(self, url: str) -> bool:
-        return url.startswith((self.schema, "rediss://", "unix://"))
+        return url.startswith((self.schema, "rediss://", "unix://", "plugin://redis"))
 
     def create_connector(self, context: ConnectorContext) -> RemoteConnector:
         # Local
         from .redis_connector import RedisConnector
 
-        logger.info(f"Creating Redis connector for URL: {context.url}")
+        url = context.url
+        if url.startswith("plugin://redis"):
+            extra_config: Dict[str, Any] = {}
+            remote_url = None
+            if context.config is not None:
+                extra_config = (
+                    context.config.extra_config
+                    if context.config.extra_config is not None
+                    else {}
+                )
+                remote_url = context.config.remote_url
+            cfg_redis_url = extra_config.get(
+                "remote_storage_plugin.redis.redis_url"
+            ) or extra_config.get("redis_url")
+            url = cfg_redis_url or remote_url or "redis://localhost:6379"
+
+        logger.info(f"Creating Redis connector for URL: {url}")
         return RedisConnector(
-            url=context.url,
+            url=url,
             loop=context.loop,
             local_cpu_backend=context.local_cpu_backend,
         )

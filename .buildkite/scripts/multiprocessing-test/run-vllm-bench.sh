@@ -137,21 +137,26 @@ verify_results() {
     
     echo "=== Verification ==="
     
-    # Check total_input_tokens for LMCache
-    if [ "$lmcache_total_input_tokens" -eq "$EXPECTED_TOTAL_INPUT_TOKENS" ] 2>/dev/null; then
-        echo "✅ LMCache total_input_tokens: $lmcache_total_input_tokens (expected: $EXPECTED_TOTAL_INPUT_TOKENS)"
-    else
-        echo "❌ LMCache total_input_tokens: $lmcache_total_input_tokens (expected: $EXPECTED_TOTAL_INPUT_TOKENS)"
-        failed=1
-    fi
-    
-    # Check total_input_tokens for baseline
-    if [ "$baseline_total_input_tokens" -eq "$EXPECTED_TOTAL_INPUT_TOKENS" ] 2>/dev/null; then
-        echo "✅ Baseline total_input_tokens: $baseline_total_input_tokens (expected: $EXPECTED_TOTAL_INPUT_TOKENS)"
-    else
-        echo "❌ Baseline total_input_tokens: $baseline_total_input_tokens (expected: $EXPECTED_TOTAL_INPUT_TOKENS)"
-        failed=1
-    fi
+    # vLLM's random dataset decodes and re-encodes token sequences, which can
+    # drift slightly from the requested length (see RandomDataset in
+    # vllm/benchmarks/datasets.py). Allow 1% tolerance.
+    local token_tolerance=$((EXPECTED_TOTAL_INPUT_TOKENS / 100))
+
+    check_input_tokens() {
+        local label="$1"
+        local actual="$2"
+        local diff=$((actual - EXPECTED_TOTAL_INPUT_TOKENS))
+        local abs_diff=${diff#-}
+        if [ "$abs_diff" -le "$token_tolerance" ] 2>/dev/null; then
+            echo "✅ $label total_input_tokens: $actual (expected: $EXPECTED_TOTAL_INPUT_TOKENS ±$token_tolerance)"
+        else
+            echo "❌ $label total_input_tokens: $actual (expected: $EXPECTED_TOTAL_INPUT_TOKENS ±$token_tolerance)"
+            failed=1
+        fi
+    }
+
+    check_input_tokens "LMCache" "$lmcache_total_input_tokens"
+    check_input_tokens "Baseline" "$baseline_total_input_tokens"
     
     # Check completed for LMCache
     if [ "$lmcache_completed" -eq "$EXPECTED_COMPLETED" ] 2>/dev/null; then

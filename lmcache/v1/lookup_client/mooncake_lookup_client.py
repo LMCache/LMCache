@@ -11,6 +11,10 @@ from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.v1.storage_backend.connector.mooncakestore_connector import (
+    MooncakeStoreConfig,
+    setup_mooncake_store,
+)
 
 logger = init_logger(__name__)
 
@@ -26,15 +30,20 @@ class MooncakeLookupClient(LookupClientInterface):
         from mooncake.store import MooncakeDistributedStore
 
         self.store = MooncakeDistributedStore()
-        self.store.setup(
-            "localhost",
-            "P2PHANDSHAKE",
-            0,
-            16 * 1024 * 1024,
-            "tcp",
-            "",
-            master_addr,
+        # Deprecated
+        # TODO(baoloongmao): use dict config instead in the future
+        lookup_config = MooncakeStoreConfig(
+            setup_config={
+                "local_hostname": "localhost",
+                "metadata_server": "P2PHANDSHAKE",
+                "global_segment_size": "0",
+                "local_buffer_size": str(16 * 1024 * 1024),
+                "protocol": "tcp",
+                "device_name": "",
+                "master_server_address": master_addr,
+            },
         )
+        setup_mooncake_store(self.store, lookup_config)
 
         # Initialize token database for processing tokens
         assert isinstance(config, LMCacheEngineConfig), (

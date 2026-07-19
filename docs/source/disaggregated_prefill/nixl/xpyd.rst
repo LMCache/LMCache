@@ -1,6 +1,11 @@
 XpYd
 ====
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/disaggregated_prefill`.
+
+
 X Prefiller, Y Decoder (XpYd) Example
 --------------------------------------
 
@@ -114,7 +119,7 @@ All prefillers share the same configuration via ``configs/lmcache-prefiller-conf
 Key settings:
 
 - ``pd_role: "sender"`` - Configures these instances to send KV cache data
-- ``pd_buffer_size: 1073741824 # 1GB`` - Buffer size for transfers
+- ``pd_buffer_size: 1073741824 # 1GB`` - Upper bound of PD transport buffer size (in bytes), aligned to chunk size
 - ``pd_buffer_device: "cuda"`` - Uses GPU memory for buffering
 
 Decoder Configuration
@@ -140,7 +145,7 @@ The decoder(s) are configured via ``configs/lmcache-decoder-x-config.yaml``:
 Key settings:
 
 - ``pd_role: "receiver"`` - Configures these instances to receive KV cache data
-- ``pd_buffer_size: 2147483648 # 2GB`` - Buffer size for transfers
+- ``pd_buffer_size: 2147483648 # 2GB`` - Upper bound of PD transport buffer size (in bytes), aligned to chunk size
 - ``pd_buffer_device: "cuda"`` - Uses GPU memory for buffering
 
 Components Deep Dive

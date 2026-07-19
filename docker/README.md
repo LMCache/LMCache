@@ -20,13 +20,14 @@ This directory contains Dockerfiles for building different LMCache images. Each 
 **Build Targets**:
 - `image-build`: Builds with vLLM nightly and LMCache from source
 - `image-release`: Uses stable vLLM release and LMCache from PyPI
+- `image-release-cu129`: Uses nightly cu12.9 vLLM and LMCache from the cu12.9 GitHub Release
 
 **Usage**:
 
 ```bash
 # Build with nightly vLLM
 docker build \
-  --build-arg CUDA_VERSION=12.8 \
+  --build-arg CUDA_VERSION=13.0 \
   --build-arg UBUNTU_VERSION=24.04 \
   --target image-build \
   --tag lmcache/vllm-openai:latest \
@@ -34,10 +35,19 @@ docker build \
 
 # Build with stable releases
 docker build \
-  --build-arg CUDA_VERSION=12.8 \
+  --build-arg CUDA_VERSION=13.0 \
   --build-arg UBUNTU_VERSION=24.04 \
   --target image-release \
   --tag lmcache/vllm-openai:latest \
+  --file docker/Dockerfile .
+
+# Build with cu12.9 release packages
+docker build \
+  --build-arg CUDA_VERSION=12.9 \
+  --build-arg UBUNTU_VERSION=24.04 \
+  --build-arg LMCACHE_VERSION=<version> \
+  --target image-release-cu129 \
+  --tag lmcache/vllm-openai:cu129 \
   --file docker/Dockerfile .
 ```
 
@@ -51,7 +61,7 @@ docker run --runtime nvidia --gpus all \
   -p 8000:8000 \
   --ipc=host \
   lmcache/vllm-openai:latest \
-  serve Qwen/Qwen3-0.6B \
+  Qwen/Qwen3-0.6B \
   --kv-transfer-config \
   '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
 ```
@@ -76,7 +86,7 @@ docker run --runtime nvidia --gpus all \
 
 ```bash
 docker build \
-  --build-arg CUDA_VERSION=12.8 \
+  --build-arg CUDA_VERSION=13.0 \
   --build-arg UBUNTU_VERSION=24.04 \
   --target lmcache-final \
   --tag lmcache/standalone:latest \
@@ -86,12 +96,12 @@ docker build \
 **Run Example**:
 
 ```bash
-# Start an interactive shell
+# Start the LMCache server
 docker run --runtime nvidia --gpus all -it \
   lmcache/standalone:latest \
-  /opt/venv/bin/python3 \
-  -m lmcache.v1.multiprocess.server \
-  --cpu-buffer-size 60 \
+  /opt/venv/bin/lmcache server \
+  --l1-size-gb 60 \
+  --eviction-policy LRU \
   --max-workers 4 \
   --max-gpu-workers 2 \
   --port 6555
@@ -134,7 +144,7 @@ docker run --runtime nvidia --gpus all \
   -p 8000:8000 \
   --ipc=host \
   lmcache/vllm-openai:lightweight \
-  serve Qwen/Qwen3-0.6B \
+  Qwen/Qwen3-0.6B \
   --kv-transfer-config \
   '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
 ```
@@ -160,18 +170,20 @@ docker run --runtime nvidia --gpus all \
 
 ---
 
-## Build Arguments
+## CUDA Build Arguments
 
-All Dockerfiles support the following build arguments:
+`Dockerfile` and `Dockerfile.standalone` support the following build arguments:
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `CUDA_VERSION` | `12.8` | CUDA version to use |
+| `CUDA_VERSION` | `13.0` | CUDA version to use |
 | `UBUNTU_VERSION` | `24.04` | Ubuntu base version |
 | `PYTHON_VERSION` | `3.12` | Python version |
 | `max_jobs` | `2` | Max parallel jobs for build |
 | `nvcc_threads` | `8` | Number of nvcc threads |
-| `torch_cuda_arch_list` | `7.0 7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX` | CUDA architectures |
+| `torch_cuda_arch_list` | `7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX` | CUDA architectures |
+
+`Dockerfile.lightweight` does not define build arguments. ROCm images use ROCm-specific arguments such as `ROCM_VERSION` and `PYTORCH_ROCM_ARCH`.
 
 **Example with custom arguments**:
 
@@ -211,4 +223,3 @@ docker pull lmcache/standalone:latest
 - [vLLM Documentation](https://docs.vllm.ai/)
 - [Installation Guide](https://docs.lmcache.ai/getting_started/installation.html)
 - [Docker Deployment Guide](https://docs.lmcache.ai/production/docker_deployment.html)
-

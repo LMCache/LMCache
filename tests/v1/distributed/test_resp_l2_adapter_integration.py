@@ -16,12 +16,15 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+from lmcache.v1.platform import consume_fd
+
+_EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6399"))
@@ -90,7 +93,7 @@ def wait_for_event_fd(event_fd: int, timeout: float = 10.0) -> bool:
     events = poll.poll(timeout * 1000)
     if events:
         try:
-            os.eventfd_read(event_fd)
+            consume_fd(event_fd)
         except BlockingIOError:
             pass
         return True
@@ -147,10 +150,10 @@ class TestRESPL2AdapterIntegration:
         store_tid = self.adapter.submit_store_task(keys, objs)
         assert wait_for_event_fd(store_fd)
         completed = self.adapter.pop_completed_store_tasks()
-        assert completed[store_tid] is True
+        assert completed[store_tid].is_successful()
 
         # Lookup all — should find everything
-        lookup_tid = self.adapter.submit_lookup_and_lock_task(keys)
+        lookup_tid = self.adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
         assert wait_for_event_fd(lookup_fd)
         bitmap = self.adapter.query_lookup_and_lock_result(lookup_tid)
         assert bitmap is not None
@@ -165,7 +168,7 @@ class TestRESPL2AdapterIntegration:
         keys = [create_object_key(i + 1000) for i in range(3)]
         lookup_fd = self.adapter.get_lookup_and_lock_event_fd()
 
-        lookup_tid = self.adapter.submit_lookup_and_lock_task(keys)
+        lookup_tid = self.adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
         assert wait_for_event_fd(lookup_fd)
         bitmap = self.adapter.query_lookup_and_lock_result(lookup_tid)
         assert bitmap is not None
@@ -185,10 +188,10 @@ class TestRESPL2AdapterIntegration:
         # Store
         store_tid = self.adapter.submit_store_task([key], [store_obj])
         assert wait_for_event_fd(store_fd)
-        assert self.adapter.pop_completed_store_tasks()[store_tid] is True
+        assert self.adapter.pop_completed_store_tasks()[store_tid].is_successful()
 
         # Lookup
-        lookup_tid = self.adapter.submit_lookup_and_lock_task([key])
+        lookup_tid = self.adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         assert wait_for_event_fd(lookup_fd)
         bitmap = self.adapter.query_lookup_and_lock_result(lookup_tid)
         assert bitmap.test(0) is True
@@ -223,10 +226,10 @@ class TestRESPL2AdapterIntegration:
         # Store all
         store_tid = self.adapter.submit_store_task(keys, store_objs)
         assert wait_for_event_fd(store_fd)
-        assert self.adapter.pop_completed_store_tasks()[store_tid] is True
+        assert self.adapter.pop_completed_store_tasks()[store_tid].is_successful()
 
         # Lookup all
-        lookup_tid = self.adapter.submit_lookup_and_lock_task(keys)
+        lookup_tid = self.adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
         assert wait_for_event_fd(lookup_fd)
         bitmap = self.adapter.query_lookup_and_lock_result(lookup_tid)
         for i in range(n):
@@ -259,7 +262,7 @@ class TestRESPL2AdapterIntegration:
 
         # Lookup 5 keys (3 stored + 2 missing)
         all_keys = stored_keys + [create_object_key(100), create_object_key(101)]
-        lookup_tid = self.adapter.submit_lookup_and_lock_task(all_keys)
+        lookup_tid = self.adapter.submit_lookup_and_lock_task(all_keys, _EMPTY_LAYOUT)
         assert wait_for_event_fd(lookup_fd)
         bitmap = self.adapter.query_lookup_and_lock_result(lookup_tid)
 
@@ -274,7 +277,7 @@ class TestRESPL2AdapterIntegration:
         """Verify the factory can create a RESP L2 adapter from config."""
         # First Party
         from lmcache.v1.distributed.l2_adapters import create_l2_adapter
-        from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+        from lmcache.v1.distributed.l2_adapters.resp_l2_adapter import (
             RESPL2AdapterConfig,
         )
 

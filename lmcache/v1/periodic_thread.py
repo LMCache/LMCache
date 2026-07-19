@@ -190,6 +190,11 @@ class PeriodicThread(ABC):
         return self._running and self._thread is not None and self._thread.is_alive()
 
     @property
+    def stop_requested(self) -> bool:
+        """Whether a stop has been requested (set by stop, reset by start)."""
+        return self._stop_event.is_set()
+
+    @property
     def is_active(self) -> bool:
         """
         Check if the thread is active (running and recently executed).

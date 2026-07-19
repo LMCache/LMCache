@@ -72,11 +72,21 @@ class BaseWorkload(ABC):
     # ------------------------------------------------------------------
 
     def run(self) -> None:
-        """Run the full workload: warmup, then the benchmark loop.
+        """Run warmup + benchmark, closing the HTTP client in the same loop.
 
-        Blocks until the workload is complete.
+        Blocks until the workload is complete. The ``RequestSender``'s
+        httpx transports are bound to this loop, so they must be closed
+        before ``asyncio.run`` destroys it — otherwise a later close
+        from a fresh loop raises ``RuntimeError: Event loop is closed``.
         """
-        asyncio.run(self._run_async())
+
+        async def _run_and_close() -> None:
+            try:
+                await self._run_async()
+            finally:
+                await self._request_sender.close()
+
+        asyncio.run(_run_and_close())
 
     async def _run_async(self) -> None:
         """Internal async implementation of the run loop."""

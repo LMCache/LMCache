@@ -31,26 +31,51 @@ class FSConnector(RemoteConnector):
 
     def __init__(
         self,
-        base_paths_str: str,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
         config: Optional[LMCacheEngineConfig],
+        plugin_name: Optional[str] = None,
+        base_paths_str: Optional[str] = None,
     ):
         """
         Args:
-            base_paths_str: Comma separated storage paths
             loop: Asyncio event loop
             local_cpu_backend: Memory allocator interface
             config: Lmcache engine config
+            plugin_name: Plugin instance name
+                (e.g. "fs", "fs.primary")
+            base_paths_str: Comma-separated base paths
+                (legacy, passed from adapter when using
+                fs:// URL)
         """
-        # initialize base class, which includes some common attributes
-        super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
+        # initialize base class
+        super().__init__(
+            local_cpu_backend.config,
+            local_cpu_backend.metadata,
+        )
+
+        base_path = base_paths_str
+        if base_path is None:
+            # Resolve from extra_config
+            extra_config = config.extra_config if config else None
+            if extra_config is not None:
+                key_prefix = plugin_name or "fs"
+                base_path = extra_config.get(
+                    "remote_storage_plugin.%s.base_path" % key_prefix
+                )
+            if base_path is None:
+                if extra_config is not None:
+                    base_path = extra_config.get("fs_base_path")
+            if base_path is None:
+                raise ValueError(
+                    "FS connector requires base_path via URL or extra_config"
+                )
 
         # Parse comma separated paths
         self.base_paths = (
-            [Path(p.strip()) for p in base_paths_str.split(",")]
-            if "," in base_paths_str
-            else [Path(base_paths_str)]
+            [Path(p.strip()) for p in base_path.split(",")]
+            if "," in base_path
+            else [Path(base_path)]
         )
 
         self.loop = loop
@@ -94,10 +119,14 @@ class FSConnector(RemoteConnector):
                 self.os_disk_bs = stat.f_bsize
 
         logger.info(
-            f"Initialized FSConnector with base paths {self.base_paths}, "
-            f"relative tmp dir: {self.relative_tmp_dir}, "
-            f"read ahead size: {self.read_ahead_size}, "
-            f"use O_DIRECT: {self.use_odirect}"
+            "Initialized FSConnector with base paths %s, "
+            "relative tmp dir: %s, "
+            "read ahead size: %s, "
+            "use O_DIRECT: %s",
+            self.base_paths,
+            self.relative_tmp_dir,
+            self.read_ahead_size,
+            self.use_odirect,
         )
         # Create directories for all paths
         for path in self.base_paths:
@@ -169,7 +198,7 @@ class FSConnector(RemoteConnector):
             )
             if not fblock_aligned:
                 logger.warning(
-                    f"Cannot use O_DIRECT for {file_path}, size is not aligned."
+                    "Cannot use O_DIRECT for %s, size is not aligned.", file_path
                 )
                 with open(file_path, "rb") as f:
                     num_read = f.readinto(buffer)
@@ -185,7 +214,7 @@ class FSConnector(RemoteConnector):
             return memory_obj
 
         except Exception as e:
-            logger.error(f"Failed to read from file {file_path}: {str(e)}")
+            logger.error("Failed to read from file %s: %s", file_path, str(e))
             if memory_obj is not None:
                 memory_obj.ref_count_down()
             return None
@@ -272,7 +301,7 @@ class FSConnector(RemoteConnector):
 
         except Exception as e:
             if not isinstance(e, FileNotFoundError):
-                logger.error(f"Failed to read from file {file_path}: {str(e)}")
+                logger.error("Failed to read from file %s: %s", file_path, str(e))
             if memory_obj is not None:
                 memory_obj.ref_count_down()
             return None
@@ -287,7 +316,7 @@ class FSConnector(RemoteConnector):
             )
             os.write(fd, buffer)
         except Exception as e:
-            logger.error(f"Failed to write to file {file_path}: {e}")
+            logger.error("Failed to write to file %s: %s", file_path, e)
             raise
         finally:
             if fd >= 0:
@@ -320,8 +349,10 @@ class FSConnector(RemoteConnector):
                 fblock_aligned = self.os_disk_bs > 0 and size % self.os_disk_bs == 0
                 if not fblock_aligned:
                     logger.warning(
-                        f"Cannot use O_DIRECT for writing size {size}, "
-                        f"which is not aligned to block size {self.os_disk_bs}."
+                        "Cannot use O_DIRECT for writing size %s, "
+                        "which is not aligned to block size %s.",
+                        size,
+                        self.os_disk_bs,
                     )
                     do_use_odirect = False
 
@@ -342,7 +373,7 @@ class FSConnector(RemoteConnector):
             await aiofiles.os.replace(temp_path, final_path)
 
         except Exception as e:
-            logger.error(f"Failed to write file {final_path}: {str(e)}")
+            logger.error("Failed to write file %s: %s", final_path, str(e))
             if await aiofiles.os.path.exists(temp_path):
                 await aiofiles.os.unlink(temp_path)  # Remove corrupted file
             raise
@@ -362,7 +393,7 @@ class FSConnector(RemoteConnector):
             os.remove(file_path)
             return True
         except OSError as e:
-            logger.error(f"Failed to remove file {file_path}: {e}")
+            logger.error("Failed to remove file %s: %s", file_path, e)
             return False
 
     @no_type_check

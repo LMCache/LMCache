@@ -15,10 +15,18 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerListener
-from lmcache.v1.distributed.memory_manager import L1MemoryManager
+from lmcache.v1.distributed.memory_manager import (
+    GDSL1MemoryManager,
+    L1ManagerProtocol,
+    L1MemoryManager,
+)
+from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
+    DevDaxL1MemoryManager,
+)
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
+from lmcache.v1.mp_observability.otel_init import register_gauge
 
 logger = init_logger(__name__)
 
@@ -111,6 +119,20 @@ def _validate_extra_count(extra_count: int) -> int:
     return extra_count
 
 
+def _l1_usage_ratio_or_zero(target: "L1Manager | None") -> float:
+    """Return ``target.get_memory_usage()`` as a 0.0-1.0 ratio.
+
+    Returns 0.0 when ``target`` is None or ``total_bytes`` is zero so the
+    observable-gauge callback never raises during scrape.
+    """
+    if target is None:
+        return 0.0
+    used, total = target.get_memory_usage()
+    if total <= 0:
+        return 0.0
+    return used / total
+
+
 # Main classes
 
 
@@ -157,12 +179,29 @@ class L1Manager:
     For every operation on list of keys, the operation is atomic
     """
 
+    # Singleton dispatch for ``lmcache_mp.l1_memory_usage_bytes``: tests may
+    # construct multiple L1Managers but the OTel SDK only honors the first
+    # gauge registration, so the callback reads from the most recently built
+    # instance via ``_gauge_target``.
+    _gauge_registered: bool = False
+    _gauge_target: "L1Manager | None" = None
+
     def __init__(self, config: L1ManagerConfig):
         self._lock = threading.Lock()
 
         self._objects: dict[ObjectKey, L1ObjectState] = {}
 
-        self._memory_manager = L1MemoryManager(config.memory_config)
+        # GDS, Device-DAX, and CPU L1 are mutually exclusive tiers. Each tier
+        # owns its backing allocator instead of branching inside the CPU path.
+        self._memory_manager: L1ManagerProtocol
+        if config.gds_l1_config is not None:
+            self._memory_manager = GDSL1MemoryManager(config.gds_l1_config)
+            logger.info("L1Manager: GDS L1 tier enabled; CPU pinned-DRAM L1 disabled")
+        elif config.memory_config.devdax_path:
+            self._memory_manager = DevDaxL1MemoryManager(config.memory_config)
+            logger.info("L1Manager: Device-DAX L1 tier enabled; CPU-only L1 disabled")
+        else:
+            self._memory_manager = L1MemoryManager(config.memory_config)
 
         self._write_ttl_seconds = config.write_ttl_seconds
         self._read_ttl_seconds = config.read_ttl_seconds
@@ -170,6 +209,26 @@ class L1Manager:
         self._registered_listeners: list[L1ManagerListener] = []
 
         self._event_bus = get_event_bus()
+
+        L1Manager._gauge_target = self
+        if not L1Manager._gauge_registered:
+            L1Manager._gauge_registered = True
+            register_gauge(
+                "lmcache.l1_manager",
+                "lmcache_mp.l1_memory_usage_bytes",
+                "Bytes currently held in L1 cache",
+                lambda: (
+                    L1Manager._gauge_target.get_memory_usage()[0]
+                    if L1Manager._gauge_target is not None
+                    else 0
+                ),
+            )
+            register_gauge(
+                "lmcache.l1_manager",
+                "lmcache_mp.l1_usage_ratio",
+                "L1 used/total ratio (0.0–1.0)",
+                lambda: _l1_usage_ratio_or_zero(L1Manager._gauge_target),
+            )
 
     def register_listener(self, listener: L1ManagerListener) -> None:
         """Register a listener for L1Manager events.
@@ -605,19 +664,24 @@ class L1Manager:
         return ret
 
     @l1_mgr_synchronized
-    def delete(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1Error]:
+    def delete(
+        self, keys: list[ObjectKey], force: bool = False
+    ) -> dict[ObjectKey, L1Error]:
         """Delete the given keys from L1 cache.
 
         Args:
             keys: The list of object keys to delete.
+            force: When True, delete even a read/write-locked key. This may free
+                memory a concurrent store/read still uses (same hazard as
+                :meth:`clear` with ``force=True``); use with care.
 
         Returns:
             A dictionary mapping each object key to an L1Error.
 
         Errors:
             KEY_NOT_EXIST: The key does not exist.
-            KEY_IS_LOCKED: The key is locked (either write-locked or read-locked
-                and cannot be deleted).
+            KEY_IS_LOCKED: The key is write-locked or read-locked and cannot be
+                deleted. Never returned when ``force`` is True.
         """
         need_to_free: list[MemoryObj] = []
         ret: dict[ObjectKey, L1Error] = {}
@@ -629,9 +693,12 @@ class L1Manager:
                 ret[key] = L1Error.KEY_NOT_EXIST
                 continue
 
-            if entry.read_lock.is_locked() or entry.write_lock.is_locked():
+            locked = entry.read_lock.is_locked() or entry.write_lock.is_locked()
+            if locked and not force:
                 ret[key] = L1Error.KEY_IS_LOCKED
                 continue
+            if locked:
+                logger.warning("L1Manager: force-deleting locked key %s", key)
 
             need_to_free.append(entry.memory_obj)
             del self._objects[key]
@@ -649,6 +716,15 @@ class L1Manager:
             )
         )
         return ret
+
+    def touch_keys(self, keys: list[ObjectKey]):
+        """Touch the given keys, marking the keys as accessed(retrieved or stored).
+
+        Args:
+            keys: The list of object keys to touch.
+        """
+        for listener in self._registered_listeners:
+            listener.on_l1_keys_accessed(keys)
 
     @l1_mgr_synchronized
     def clear(self, force: bool = False) -> None:
@@ -716,6 +792,25 @@ class L1Manager:
             len(keys_to_clear),
             locked_count,
         )
+
+    def is_key_evictable(self, key: ObjectKey) -> bool:
+        """Check if a key is eligible for eviction (not locked).
+
+        This method does NOT acquire the global L1Manager lock.
+        L1Manager.delete() will check again and safely reject a key
+        that became locked between the check and the actual deletion.
+
+        Args:
+            key: The object key to check.
+
+        Returns:
+            True if the key exists and is not locked (neither read-locked
+            nor write-locked), False otherwise.
+        """
+        entry = self._objects.get(key, None)
+        if entry is None:
+            return False
+        return not entry.read_lock.is_locked() and not entry.write_lock.is_locked()
 
     def get_memory_usage(self) -> tuple[int, int]:
         """Get the current memory usage of L1 cache.
