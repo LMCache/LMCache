@@ -402,13 +402,17 @@ The order of ``--l2-adapter`` arguments determines the adapter order (cascade).
 
 Registered adapter types: ``nixl_store``, ``nixl_store_dynamic``, ``fs``,
 ``fs_native``, ``mock``, ``mooncake_store``, ``aerospike``, ``s3``, ``resp``,
-``plugin``, ``native_plugin``, ``raw_block``, ``dax``.
+``valkey``, ``hfbucket``, ``bigtable``, ``sagemaker-hyperpod``, ``plugin``,
+``native_plugin``, ``raw_block``, ``dax``, ``fault_inject``.
 
 Each adapter type's required and optional fields, plus per-backend examples, are
 documented on its own page under :doc:`Secondary KV Storage <l2_storage/index>`
 -- including the adapters not detailed inline here (``fs_native``,
 ``raw_block``, ``dax``, ``mooncake_store``, ``aerospike``, ``hfbucket``,
-``resp``).
+``bigtable``, ``sagemaker-hyperpod``, ``resp``). The ``valkey`` adapter's
+configuration schema is currently documented in the
+`Valkey L2 adapter design doc <https://github.com/LMCache/LMCache/blob/dev/docs/design/v1/distributed/l2_adapters/valkey.md>`_
+pending a dedicated user-facing page.
 
 Multiple adapters (cascade)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -456,6 +460,21 @@ logging, tracing).
    * - ``--prometheus-port``
      - ``9090``
      - Port for the Prometheus ``/metrics`` endpoint.
+   * - ``--metrics-sample-rate``
+     - ``0.01``
+     - Fraction of chunks/blocks to track for lifecycle histograms
+       (0, 1.0]. Counters always count all events regardless of this
+       setting. Default is 0.01 (1%).
+   * - ``--trace-level``
+     - *(none)*
+     - Enable trace recording at the given level. Currently only
+       ``storage`` is supported (records ``StorageManager`` public-API
+       calls for offline replay). See :doc:`tracing_and_debugging`.
+   * - ``--trace-output``
+     - *(none)*
+     - Path to write the trace file. If omitted while ``--trace-level``
+       is set, a timestamped file under ``$TMPDIR`` is minted and its
+       path is logged at INFO.
    * - ``--enable-extra-logging``
      - off
      - Periodic INFO logs: per-GPU L0<->L1 transfer stats and L1 memory
@@ -567,6 +586,9 @@ Environment Variables
    * - ``DO_NOT_TRACK``
      - Set to ``1`` to disable anonymous usage statistics (cross-tool
        convention).
+   * - ``LMCACHE_USAGE_TRACK_INTERVAL``
+     - Seconds between continuous usage-telemetry flushes (default
+       ``600``). See :ref:`usage-stats-collection`.
 
 Full Example
 ------------

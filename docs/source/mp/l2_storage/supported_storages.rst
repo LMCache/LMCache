@@ -43,6 +43,9 @@ target.
    * - :doc:`RESP (Redis/Valkey) <resp>`
      - ``resp``
      - Remote & Distributed
+   * - Valkey (glide-sync) — see design doc [1]_
+     - ``valkey``
+     - Remote & Distributed
    * - :doc:`Aerospike <aerospike>`
      - ``aerospike``
      - Remote & Distributed
@@ -69,3 +72,11 @@ target.
    mock
    fault_inject
    plugin
+
+.. [1] The ``valkey`` MP L2 adapter (added in #3505) uses the
+   ``valkey-glide-sync`` client for copy-reduced GET/SET; its full
+   configuration schema is documented in
+   `docs/design/v1/distributed/l2_adapters/valkey.md
+   <https://github.com/LMCache/LMCache/blob/dev/docs/design/v1/distributed/l2_adapters/valkey.md>`_
+   pending a dedicated user-facing page. Distinct from the legacy V0
+   :doc:`Valkey backend </kv_cache/storage_backends/valkey>`.
