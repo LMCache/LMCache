@@ -19,11 +19,6 @@ BaseCacheContext`. Adding a new accelerator therefore requires
 *zero* edits to this module -- just implement
 ``DeviceSpec.create_cache_context`` in the sub-package's
 ``__init__.py``.
-
-Tests can still swap in fakes without touching the ``DeviceSpec``
-registry via the :func:`snapshot_backends` / :func:`restore_backends`
-overrides: any ``device_type`` present in the override table wins
-over the registry lookup.
 """
 
 # Future
@@ -42,71 +37,10 @@ from lmcache.v1.platform import get_device_spec
 from lmcache.v1.platform.base_cache_context import BaseCacheContext
 
 if TYPE_CHECKING:
-    # Standard
-    from collections.abc import Callable
-
     # First Party
     from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 
 logger = init_logger(__name__)
-
-# ``device_type -> BaseCacheContext`` subclass override table.
-#
-# Empty by default: production dispatch flows through the
-# ``DeviceSpec`` registry (see :func:`_resolve_factory`).  Tests
-# install fakes here via :func:`snapshot_backends` /
-# :func:`restore_backends`; any device type registered here wins over
-# the ``DeviceSpec`` hook so a single test can shadow a real backend
-# without mutating the shared registry.
-#
-# The value type is the loose ``type`` (rather than
-# ``type[BaseCacheContext]``) so callers can instantiate it with the
-# concrete subclass' positional ``__init__`` signature without mypy
-# resolving the abstract-base ``__init__`` instead.
-_BACKEND_OVERRIDES: dict[str, type] = {}
-
-
-def _resolve_factory(device_type: str) -> "Callable[..., BaseCacheContext]":
-    """Return a zero-arg-ready callable that builds a cache context.
-
-    Overrides installed via :func:`restore_backends` win over the
-    ``DeviceSpec`` registry so tests can shadow a real backend
-    without mutating shared state.
-    """
-    override = _BACKEND_OVERRIDES.get(device_type)
-    if override is not None:
-        return override
-
-    spec = get_device_spec(device_type)
-    if spec is None:
-        raise ValueError(
-            "No cache-context class registered for device type %r. "
-            "Make sure ``lmcache.v1.platform.<backend>.__init__`` "
-            "ships a DeviceSpec subclass whose ``create_cache_context`` "
-            "hook returns a BaseCacheContext instance." % device_type
-        )
-    return spec.create_cache_context
-
-
-def snapshot_backends() -> dict[str, type]:
-    """Return a shallow copy of the override table.
-
-    Pair with :func:`restore_backends` in test fixtures so installing
-    fakes for one test does not leak into the next.
-    """
-    return dict(_BACKEND_OVERRIDES)
-
-
-def restore_backends(state: dict[str, type]) -> None:
-    """Replace the override table with *state*.
-
-    Any ``device_type`` present in *state* shadows the corresponding
-    ``DeviceSpec.create_cache_context`` hook for the lifetime of the
-    override.  Pass an empty dict to fall back to registry-driven
-    dispatch.
-    """
-    _BACKEND_OVERRIDES.clear()
-    _BACKEND_OVERRIDES.update(state)
 
 
 def _detect_device_type(kv_caches: KVCache) -> str:
@@ -173,8 +107,15 @@ def create_cache_context(
         raise ValueError("create_cache_context requires a non-empty kv_caches list")
 
     device_type = _detect_device_type(kv_caches)
-    factory = _resolve_factory(device_type)
-    return factory(
+    spec = get_device_spec(device_type)
+    if spec is None:
+        raise ValueError(
+            "No cache-context class registered for device type %r. "
+            "Make sure ``lmcache.v1.platform.<backend>.__init__`` "
+            "ships a DeviceSpec subclass whose ``create_cache_context`` "
+            "hook returns a BaseCacheContext instance." % device_type
+        )
+    return spec.create_cache_context(
         kv_caches,
         lmcache_tokens_per_chunk,
         layout_hints,
