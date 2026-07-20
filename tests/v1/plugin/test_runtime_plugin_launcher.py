@@ -219,9 +219,12 @@ def test_launch_plugins_worker_id_filtering(
         launcher.launch_plugins()
 
         # Should log info about skipping worker0 plugin
-        info_calls = [call[0][0] for call in mock_logger.info.call_args_list]
+        info_calls = [call[0] for call in mock_logger.info.call_args_list]
         worker0_skipped = any(
-            "worker 1 is skipping" in str(call) and "worker ID 0" in str(call)
+            len(call) >= 4
+            and "is skipping" in call[0]
+            and call[1] == 1
+            and call[3] == 0
             for call in info_calls
         )
         assert worker0_skipped

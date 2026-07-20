@@ -79,7 +79,10 @@ class LMCacheWorker:
         # Please consider removing it.
         self.config = config
         self.lmcache_instance_id = config.lmcache_instance_id
-        assert self.lmcache_instance_id is not None
+        if self.lmcache_instance_id is None:
+            raise ValueError(
+                "lmcache_instance_id is required when enable_controller=True"
+            )
         self.lmcache_engine = lmcache_engine
         self.worker_id = metadata.worker_id
 
@@ -93,7 +96,10 @@ class LMCacheWorker:
             "worker_socket_send_timeout_ms", DEFAULT_SOCKET_SEND_TIMEOUT_MS
         )
 
-        assert config.controller_pull_url is not None
+        if config.controller_pull_url is None:
+            raise ValueError(
+                "controller_pull_url is required when enable_controller=True"
+            )
 
         controller_pull_url = config.controller_pull_url
         self.push_socket = get_zmq_socket(
@@ -131,12 +137,22 @@ class LMCacheWorker:
         if not lmcache_worker_ids:
             # start lmcache worker on all ranks;
             # need at least one port per rank (world_size)
-            assert len(config.lmcache_worker_ports) >= metadata.world_size
+            if len(config.lmcache_worker_ports) < metadata.world_size:
+                raise ValueError(
+                    f"lmcache_worker_ports must have at least {metadata.world_size} "
+                    f"port(s) (world_size), got {len(config.lmcache_worker_ports)}"
+                )
             lmcache_worker_port = config.lmcache_worker_ports[self.worker_id]
         else:
             # start lmcache worker on given worker ids;
             # need at least one port per explicitly listed worker
-            assert len(config.lmcache_worker_ports) >= len(lmcache_worker_ids)
+            if len(config.lmcache_worker_ports) < len(lmcache_worker_ids):
+                raise ValueError(
+                    f"lmcache_worker_ports must have at least "
+                    f"{len(lmcache_worker_ids)} "
+                    f"port(s) (one per lmcache worker), "
+                    f"got {len(config.lmcache_worker_ports)}"
+                )
             index = lmcache_worker_ids.index(self.worker_id)
             lmcache_worker_port = config.lmcache_worker_ports[index]
 
@@ -158,7 +174,7 @@ class LMCacheWorker:
             bind_or_connect="bind",
         )
 
-        logger.info(f"Reply socket established at {self.lmcache_worker_internal_url}")
+        logger.info("Reply socket established at %s", self.lmcache_worker_internal_url)
 
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(
@@ -502,13 +518,13 @@ class LMCacheWorker:
         while True:
             try:
                 msgs = await self.batched_get_msg()
-                logger.debug(f"Sending {len(msgs)} messages")
+                logger.debug("Sending %d messages", len(msgs))
                 self.push_socket.send_multipart(
                     [msgspec.msgpack.encode(msg) for msg in msgs]
                 )
 
             except Exception as e:
-                logger.error(f"Push error: {e}")
+                logger.error("Push error: %s", e)
 
     async def handle_request(self):
         """
@@ -518,7 +534,7 @@ class LMCacheWorker:
             try:
                 serialized_request = await self.reply_socket.recv()
                 request = msgspec.msgpack.decode(serialized_request, type=Msg)
-                logger.debug(f"Received message: {request}")
+                logger.debug("Received message: %s", request)
                 if isinstance(request, MoveWorkerMsg):
                     tokens = request.tokens
                     old_position = request.old_position
@@ -601,14 +617,14 @@ class LMCacheWorker:
                         HealthWorkerRetMsg(error_code=error_code)
                     )
                 else:
-                    logger.error(f"Unknown message: {request}")
+                    logger.error("Unknown message: %s", request)
                     serialized_ret_msg = msgspec.msgpack.encode(
                         ErrorMsg(error=f"Unknown message: {request}")
                     )
 
                 await self.reply_socket.send(serialized_ret_msg)
             except Exception as e:
-                logger.error(f"Worker error: {e}")
+                logger.error("Worker error: %s", e)
                 serialized_ret_msg = msgspec.msgpack.encode(
                     ErrorMsg(error=f"Worker error: {e}")
                 )

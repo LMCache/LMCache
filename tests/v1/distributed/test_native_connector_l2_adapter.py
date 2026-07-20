@@ -8,7 +8,6 @@ C++ IStorageConnector interface, so no Redis or C++ build is needed.
 
 # Standard
 import ctypes
-import os
 import select
 import threading
 
@@ -17,7 +16,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
     NativeConnectorL2Adapter,
     _object_key_to_string,
@@ -27,6 +26,9 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+from lmcache.v1.platform import consume_fd, create_event_notifier
+
+_EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
 # =============================================================================
 # Mock Native Connector (simulates the pybind C++ IStorageConnector interface)
@@ -48,7 +50,7 @@ class MockNativeConnector:
     """
 
     def __init__(self):
-        self._efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._efd = create_event_notifier()
         self._store: dict[str, bytes] = {}
         self._next_id = 1
         self._completions: list[tuple[int, bool, str, list[bool] | None]] = []
@@ -56,7 +58,7 @@ class MockNativeConnector:
         self._closed = False
 
     def event_fd(self) -> int:
-        return self._efd
+        return self._efd.fileno()
 
     def submit_batch_set(self, keys: list[str], memoryviews: list) -> int:
         with self._lock:
@@ -127,7 +129,7 @@ class MockNativeConnector:
     def drain_completions(self) -> list[tuple[int, bool, str, list[bool] | None]]:
         # Drain the eventfd
         try:
-            os.eventfd_read(self._efd)
+            self._efd.consume()
         except BlockingIOError:
             pass
 
@@ -139,7 +141,7 @@ class MockNativeConnector:
     def close(self):
         if not self._closed:
             self._closed = True
-            os.close(self._efd)
+            self._efd.close()
 
     def _push_completion(
         self, fid: int, ok: bool, error: str, result_bools: list[bool] | None
@@ -148,7 +150,7 @@ class MockNativeConnector:
             self._completions.append((fid, ok, error, result_bools))
         # Signal the eventfd
         try:
-            os.eventfd_write(self._efd, 1)
+            self._efd.notify()
         except OSError:
             pass
 
@@ -186,7 +188,7 @@ def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
     events = poll.poll(timeout * 1000)
     if events:
         try:
-            os.eventfd_read(event_fd)
+            consume_fd(event_fd)
         except BlockingIOError:
             pass
         return True
@@ -219,13 +221,187 @@ class TestObjectKeySerialization:
         assert _object_key_to_string(k1) != _object_key_to_string(k2)
 
     def test_serialization_format(self):
+        """Unsalted keys use the 4-field shape with object_group_id
+        embedded right after kv_rank."""
         key = ObjectKey(
             chunk_hash=b"\x00\x01\x02\x03",
             model_name="llama",
             kv_rank=255,
         )
         s = _object_key_to_string(key)
-        assert s == "llama@000000ff@00010203"
+        assert s == "llama@000000ff@0@00010203"
+
+    def test_object_group_id_embedded(self):
+        key = ObjectKey(
+            chunk_hash=b"\x00\x01\x02\x03",
+            model_name="llama",
+            kv_rank=255,
+            object_group_id=5,
+        )
+        s = _object_key_to_string(key)
+        assert s == "llama@000000ff@5@00010203"
+
+    def test_salted_serialization_format(self):
+        """Salted keys append ``@<cache_salt>`` as a 5th field."""
+        key = ObjectKey(
+            chunk_hash=b"\x00\x01\x02\x03",
+            model_name="llama",
+            kv_rank=255,
+            cache_salt="alice",
+        )
+        s = _object_key_to_string(key)
+        assert s == "llama@000000ff@0@00010203@alice"
+
+    def test_different_salts_produce_different_strings(self):
+        base = {
+            "chunk_hash": b"\x00\x01\x02\x03",
+            "model_name": "llama",
+            "kv_rank": 0,
+        }
+        k_empty = ObjectKey(**base)
+        k_alice = ObjectKey(**base, cache_salt="alice")
+        k_bob = ObjectKey(**base, cache_salt="bob")
+        s_empty = _object_key_to_string(k_empty)
+        s_alice = _object_key_to_string(k_alice)
+        s_bob = _object_key_to_string(k_bob)
+        assert s_empty != s_alice
+        assert s_alice != s_bob
+        # Empty salt has no trailing "@salt", salted keys do.
+        assert s_empty.count("@") == 3  # 4 fields (model, kv_rank, group, hash)
+        assert s_alice.endswith("@alice")
+        assert s_bob.endswith("@bob")
+
+
+class TestObjectKeyModelNameValidation:
+    """model_name must not contain ``@`` — the L2 adapters split keys
+    and filenames on ``@`` and rely on this invariant."""
+
+    def test_reject_at_in_model_name(self):
+        with pytest.raises(ValueError, match="model_name"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="ns@model",
+                kv_rank=0,
+            )
+
+    def test_slash_in_model_name_is_accepted(self):
+        # '/' is sanitized to '-SEP-' by the FS adapter; the invariant
+        # is only about '@'.
+        key = ObjectKey(
+            chunk_hash=b"\x00",
+            model_name="meta-llama/Llama-3",
+            kv_rank=0,
+        )
+        assert key.model_name == "meta-llama/Llama-3"
+
+
+class TestObjectKeyCacheSaltValidation:
+    """cache_salt must not contain ``@``, ``/``, ``\\``, or NUL, and must
+    be <= 128 chars. The invariant is enforced at construction time so
+    all downstream serializers (Python + C++) can rely on it."""
+
+    def test_reject_at_in_salt(self):
+        with pytest.raises(ValueError, match="cache_salt"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                cache_salt="alice@bob",
+            )
+
+    def test_reject_leading_at_in_salt(self):
+        with pytest.raises(ValueError, match="cache_salt"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                cache_salt="@user",
+            )
+
+    def test_reject_slash_in_salt(self):
+        with pytest.raises(ValueError, match="cache_salt"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                cache_salt="tenant/alice",
+            )
+
+    def test_reject_backslash_in_salt(self):
+        with pytest.raises(ValueError, match="cache_salt"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                cache_salt="tenant\\alice",
+            )
+
+    def test_reject_nul_in_salt(self):
+        with pytest.raises(ValueError, match="cache_salt"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                cache_salt="bad\x00salt",
+            )
+
+    def test_reject_too_long_salt(self):
+        with pytest.raises(ValueError, match="max length"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                cache_salt="x" * 129,
+            )
+
+    def test_max_length_salt_accepted(self):
+        key = ObjectKey(
+            chunk_hash=b"\x00",
+            model_name="m",
+            kv_rank=0,
+            cache_salt="x" * 128,
+        )
+        assert len(key.cache_salt) == 128
+
+    def test_empty_salt_is_accepted(self):
+        # Default (unsalted) path.
+        key = ObjectKey(chunk_hash=b"\x00", model_name="m", kv_rank=0)
+        assert key.cache_salt == ""
+
+    def test_non_salt_chars_are_accepted(self):
+        # Common identifier chars are fine.
+        key = ObjectKey(
+            chunk_hash=b"\x00",
+            model_name="m",
+            kv_rank=0,
+            cache_salt="user-abc_123.xyz:42",
+        )
+        assert key.cache_salt == "user-abc_123.xyz:42"
+
+
+class TestObjectKeyIsolation:
+    """cache_salt must participate in eq/hash so the L1/L2 caches treat
+    same-content/different-user entries as distinct."""
+
+    def test_different_salts_are_unequal(self):
+        base = {"chunk_hash": b"x", "model_name": "m", "kv_rank": 0}
+        a = ObjectKey(**base, cache_salt="alice")
+        b = ObjectKey(**base, cache_salt="bob")
+        assert a != b
+        assert hash(a) != hash(b)
+
+    def test_empty_salt_is_unequal_to_any_salted(self):
+        base = {"chunk_hash": b"x", "model_name": "m", "kv_rank": 0}
+        unsalted = ObjectKey(**base)
+        salted = ObjectKey(**base, cache_salt="alice")
+        assert unsalted != salted
+
+    def test_same_salt_are_equal(self):
+        base = {"chunk_hash": b"x", "model_name": "m", "kv_rank": 0}
+        a = ObjectKey(**base, cache_salt="alice")
+        b = ObjectKey(**base, cache_salt="alice")
+        assert a == b
+        assert hash(a) == hash(b)
 
 
 # =============================================================================
@@ -267,7 +443,7 @@ class TestStoreInterface:
 
         completed = adapter.pop_completed_store_tasks()
         assert task_id in completed
-        assert completed[task_id] is True
+        assert completed[task_id].is_successful()
 
     def test_pop_clears_completed_tasks(self, adapter):
         key = create_object_key(1)
@@ -300,7 +476,7 @@ class TestStoreInterface:
             completed.update(adapter.pop_completed_store_tasks())
 
         for tid in task_ids:
-            assert completed[tid] is True
+            assert completed[tid].is_successful()
 
     def test_batch_store(self, adapter):
         keys = [create_object_key(i) for i in range(3)]
@@ -311,7 +487,7 @@ class TestStoreInterface:
         assert wait_for_event_fd(store_fd, timeout=5.0)
 
         completed = adapter.pop_completed_store_tasks()
-        assert completed[task_id] is True
+        assert completed[task_id].is_successful()
 
 
 # =============================================================================
@@ -324,7 +500,7 @@ class TestLookupAndLockInterface:
         key = create_object_key(999)
         lookup_fd = adapter.get_lookup_and_lock_event_fd()
 
-        task_id = adapter.submit_lookup_and_lock_task([key])
+        task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
 
         bitmap = adapter.query_lookup_and_lock_result(task_id)
@@ -343,7 +519,7 @@ class TestLookupAndLockInterface:
         adapter.pop_completed_store_tasks()
 
         # Lookup
-        task_id = adapter.submit_lookup_and_lock_task([key])
+        task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
 
         bitmap = adapter.query_lookup_and_lock_result(task_id)
@@ -361,7 +537,9 @@ class TestLookupAndLockInterface:
         wait_for_event_fd(store_fd, timeout=5.0)
         adapter.pop_completed_store_tasks()
 
-        task_id = adapter.submit_lookup_and_lock_task([existing, missing])
+        task_id = adapter.submit_lookup_and_lock_task(
+            [existing, missing], _EMPTY_LAYOUT
+        )
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
 
         bitmap = adapter.query_lookup_and_lock_result(task_id)
@@ -373,7 +551,7 @@ class TestLookupAndLockInterface:
         key = create_object_key(1)
         lookup_fd = adapter.get_lookup_and_lock_event_fd()
 
-        task_id = adapter.submit_lookup_and_lock_task([key])
+        task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         wait_for_event_fd(lookup_fd, timeout=5.0)
 
         result1 = adapter.query_lookup_and_lock_result(task_id)
@@ -406,7 +584,7 @@ class TestUnlockInterface:
         wait_for_event_fd(store_fd, timeout=5.0)
         adapter.pop_completed_store_tasks()
 
-        task_id = adapter.submit_lookup_and_lock_task([key])
+        task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         wait_for_event_fd(lookup_fd, timeout=5.0)
         adapter.query_lookup_and_lock_result(task_id)
 
@@ -505,10 +683,10 @@ class TestEndToEndWorkflow:
         # Store
         store_tid = adapter.submit_store_task([key], [store_obj])
         assert wait_for_event_fd(store_fd, timeout=5.0)
-        assert adapter.pop_completed_store_tasks()[store_tid] is True
+        assert adapter.pop_completed_store_tasks()[store_tid].is_successful()
 
         # Lookup
-        lookup_tid = adapter.submit_lookup_and_lock_task([key])
+        lookup_tid = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         bitmap = adapter.query_lookup_and_lock_result(lookup_tid)
         assert bitmap.test(0) is True
@@ -538,10 +716,10 @@ class TestEndToEndWorkflow:
         # Store all
         store_tid = adapter.submit_store_task(keys, store_objs)
         assert wait_for_event_fd(store_fd, timeout=5.0)
-        assert adapter.pop_completed_store_tasks()[store_tid] is True
+        assert adapter.pop_completed_store_tasks()[store_tid].is_successful()
 
         # Lookup all
-        lookup_tid = adapter.submit_lookup_and_lock_task(keys)
+        lookup_tid = adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         bitmap = adapter.query_lookup_and_lock_result(lookup_tid)
         for i in range(n):
@@ -982,7 +1160,7 @@ class TestDeleteInterface:
         adapter.pop_completed_store_tasks()
 
         # Verify exists
-        task_id = adapter.submit_lookup_and_lock_task([key])
+        task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         wait_for_event_fd(lookup_fd, timeout=5.0)
         bitmap = adapter.query_lookup_and_lock_result(task_id)
         assert bitmap.test(0) is True
@@ -992,7 +1170,7 @@ class TestDeleteInterface:
         adapter.delete([key])
 
         # Verify gone
-        task_id = adapter.submit_lookup_and_lock_task([key])
+        task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         wait_for_event_fd(lookup_fd, timeout=5.0)
         bitmap = adapter.query_lookup_and_lock_result(task_id)
         assert bitmap.test(0) is False
@@ -1019,7 +1197,7 @@ class TestDeleteInterface:
         adapter.delete(keys[:3])
 
         # Verify: first 3 gone, last 2 remain
-        task_id = adapter.submit_lookup_and_lock_task(keys)
+        task_id = adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
         wait_for_event_fd(lookup_fd, timeout=5.0)
         bitmap = adapter.query_lookup_and_lock_result(task_id)
         for i in range(3):
@@ -1042,11 +1220,11 @@ class TestDeleteBackwardCompatibility:
             """Mock connector that only has the 6 original methods."""
 
             def __init__(self):
-                self._efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+                self._efd = create_event_notifier()
                 self._closed = False
 
             def event_fd(self) -> int:
-                return self._efd
+                return self._efd.fileno()
 
             def submit_batch_get(self, keys, memoryviews):
                 return 0
@@ -1063,7 +1241,7 @@ class TestDeleteBackwardCompatibility:
             def close(self):
                 if not self._closed:
                     self._closed = True
-                    os.close(self._efd)
+                    self._efd.close()
 
         client = NoDeleteConnector()
         adp = NativeConnectorL2Adapter(client)
@@ -1091,13 +1269,15 @@ def adapter_with_capacity():
 
 class TestUsageTracking:
     def test_get_usage_without_capacity(self, adapter):
-        """Without max_capacity_bytes, get_usage returns (-1, -1)."""
+        """Without max_capacity_bytes, usage_fraction == -1 (sentinel)."""
         usage = adapter.get_usage()
-        assert usage == (-1.0, -1.0)
+        assert usage.usage_fraction == -1.0
+        assert usage.total_capacity_bytes == 0
 
     def test_get_usage_starts_at_zero(self, adapter_with_capacity):
-        usage, _ = adapter_with_capacity.get_usage()
-        assert usage == 0.0
+        usage = adapter_with_capacity.get_usage()
+        assert usage.usage_fraction == 0.0
+        assert usage.total_bytes_used == 0
 
     def test_get_usage_after_store(self, adapter_with_capacity):
         adp = adapter_with_capacity
@@ -1110,9 +1290,10 @@ class TestUsageTracking:
         wait_for_event_fd(store_fd, timeout=5.0)
         adp.pop_completed_store_tasks()
 
-        usage, _ = adp.get_usage()
+        usage = adp.get_usage()
         # 400 bytes / 2000 bytes = 0.2
-        assert usage == pytest.approx(0.2)
+        assert usage.usage_fraction == pytest.approx(0.2)
+        assert usage.total_bytes_used == 400
 
     def test_get_usage_after_delete(self, adapter_with_capacity):
         adp = adapter_with_capacity
@@ -1126,12 +1307,13 @@ class TestUsageTracking:
         wait_for_event_fd(store_fd, timeout=5.0)
         adp.pop_completed_store_tasks()
 
-        assert adp.get_usage()[0] == pytest.approx(0.2)
+        assert adp.get_usage().usage_fraction == pytest.approx(0.2)
 
         # Delete
         adp.delete([key])
 
-        assert adp.get_usage()[0] == pytest.approx(0.0)
+        assert adp.get_usage().usage_fraction == pytest.approx(0.0)
+        assert adp.get_usage().total_bytes_used == 0
 
     def test_get_usage_store_delete_cycle(self, adapter_with_capacity):
         adp = adapter_with_capacity
@@ -1145,14 +1327,16 @@ class TestUsageTracking:
         wait_for_event_fd(store_fd, timeout=5.0)
         adp.pop_completed_store_tasks()
 
-        usage, _ = adp.get_usage()
-        assert usage == pytest.approx(1200 / 2000)
+        usage = adp.get_usage()
+        assert usage.usage_fraction == pytest.approx(1200 / 2000)
+        assert usage.total_bytes_used == 1200
 
         # Delete 2
         adp.delete(keys[:2])
 
-        usage, _ = adp.get_usage()
-        assert usage == pytest.approx(400 / 2000)
+        usage = adp.get_usage()
+        assert usage.usage_fraction == pytest.approx(400 / 2000)
+        assert usage.total_bytes_used == 400
 
     def test_idempotent_store_no_double_count(self, adapter_with_capacity):
         adp = adapter_with_capacity
@@ -1171,5 +1355,6 @@ class TestUsageTracking:
         adp.pop_completed_store_tasks()
 
         # Should only count once
-        usage, _ = adp.get_usage()
-        assert usage == pytest.approx(0.2)
+        usage = adp.get_usage()
+        assert usage.usage_fraction == pytest.approx(0.2)
+        assert usage.total_bytes_used == 400

@@ -6,6 +6,7 @@ from typing import Optional, Union
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.logging import init_logger
 from lmcache.v1.compute.attention.metadata import LMCAttnMetadata
 from lmcache.v1.compute.blend.metadata import LMCBlendCommonMetadata, LMCBlendMetadata
@@ -160,7 +161,7 @@ class LMCBlender:
         """
 
         if isinstance(tokens, list):
-            tokens = torch.tensor(tokens).cuda()
+            tokens = torch.tensor(tokens).to(torch_device_type)
 
         layerwise_blender = self.blend_layer(tokens, mask, **kwargs)
 

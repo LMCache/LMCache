@@ -27,18 +27,64 @@ import (
 	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
 )
 
+const (
+	// nvidiaRuntimeClass is the RuntimeClass name registered by the NVIDIA GPU
+	// Operator; engine pods request it when gpuVendor is nvidia.
+	nvidiaRuntimeClass = "nvidia"
+
+	// lmcacheServerBinary is the entrypoint binary for the LMCache server inside
+	// the engine image.
+	lmcacheServerBinary = "/opt/venv/bin/lmcache"
+
+	// serverSubcommand is the `lmcache server` subcommand that starts the engine.
+	serverSubcommand = "server"
+
+	// serverPortName is the name of the engine's serving port on the container
+	// and the node-local Service.
+	serverPortName = "server"
+)
+
 // BuildDaemonSet constructs a DaemonSet for the given LMCacheEngine.
 func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
-	spec := &engine.Spec
-	selectorLabels := SelectorLabels(engine.Name)
-	podLabels := MergeLabels(StandardLabels(engine.Name), spec.PodLabels)
+	return buildDaemonSetCore(engine.Name, engine.Namespace, &engine.Spec, BuildContainerArgs(&engine.Spec), "lmcache/vllm-openai")
+}
+
+// buildDaemonSetCore constructs the DaemonSet shared by the LMCacheEngine and
+// CacheBlendEngine controllers. It is the single source of truth for the
+// GPU/security pod-template scaffolding (hostIPC, runtimeClassName, optional
+// privileged (default false, via spec.Privileged), NVIDIA_VISIBLE_DEVICES,
+// resources without a device-plugin GPU claim) so those settings cannot drift
+// between the two engines.
+//
+// Parameters:
+//   - name, namespace: the owning object's identity, used for labels and metadata.
+//   - spec: the engine spec (LMCacheEngine and CacheBlendEngine reuse the same
+//     shared sub-structs, so callers project the CacheBlendEngine spec into an
+//     *LMCacheEngineSpec before calling).
+//   - containerArgs: the fully serialized server CLI args (callers append any
+//     engine-specific flags such as --engine-type before passing them in).
+//   - defaultImageRepo: the container image repository to use when spec.Image
+//     does not set one.
+func buildDaemonSetCore(
+	name, namespace string,
+	spec *lmcachev1alpha1.LMCacheEngineSpec,
+	containerArgs []string,
+	defaultImageRepo string,
+) *appsv1.DaemonSet {
+	selectorLabels := SelectorLabels(name)
+	podLabels := MergeLabels(StandardLabels(name), spec.PodLabels)
 	podAnnotations := spec.PodAnnotations
 
-	nvidiaRuntime := "nvidia"
-	privileged := true
+	gpuVendor := derefString(spec.GPUVendor, lmcachev1alpha1.GPUVendorNvidia)
+	var runtimeClassName *string
+	if gpuVendor == lmcachev1alpha1.GPUVendorNvidia {
+		rc := nvidiaRuntimeClass
+		runtimeClassName = &rc
+	}
+	privileged := derefBool(spec.Privileged, false)
 
 	serverPort := derefInt32(getServerPort(spec), 5555)
-	imgRepo := "lmcache/vllm-openai"
+	imgRepo := defaultImageRepo
 	imgTag := "latest"
 	imgPullPolicy := corev1.PullIfNotPresent
 	if spec.Image != nil {
@@ -55,23 +101,73 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 	}
 
 	// Build env vars
-	envVars := make([]corev1.EnvVar, 0, 2+len(spec.Env))
+	envVars := make([]corev1.EnvVar, 0, 5+len(spec.Env))
 	envVars = append(envVars,
 		corev1.EnvVar{
 			Name:  "LMCACHE_LOG_LEVEL",
 			Value: derefString(spec.LogLevel, "INFO"),
 		},
-		corev1.EnvVar{
-			// Expose all GPUs without consuming device plugin resources.
-			// LMCache needs GPU visibility for CUDA IPC, not compute ownership.
-			Name:  "NVIDIA_VISIBLE_DEVICES",
-			Value: "all",
-		},
-		corev1.EnvVar{
-			Name:  "NVIDIA_DRIVER_CAPABILITIES",
-			Value: "all",
-		},
 	)
+	if gpuVendor == lmcachev1alpha1.GPUVendorNvidia {
+		// Expose all GPUs without consuming device plugin resources.
+		// LMCache needs GPU visibility for CUDA IPC, not compute ownership.
+		envVars = append(envVars,
+			corev1.EnvVar{
+				Name:  "NVIDIA_VISIBLE_DEVICES",
+				Value: "all",
+			},
+			corev1.EnvVar{
+				Name:  "NVIDIA_DRIVER_CAPABILITIES",
+				Value: "all",
+			},
+		)
+	}
+	// Inject RESP auth credentials from Secret as env vars so they
+	// don't appear in container args or kubectl describe output.
+	// The DaemonSet references the local (same-namespace) managed copy
+	// created by the controller via reconcileRESPAuthSecret.
+	if spec.L2Backend != nil && spec.L2Backend.RESP != nil && spec.L2Backend.RESP.AuthSecretRef != nil {
+		secretName := RESPAuthSecretName(name)
+		optional := true
+		envVars = append(envVars,
+			corev1.EnvVar{
+				Name: "LMCACHE_RESP_PASSWORD",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+						Key:                  "password",
+					},
+				},
+			},
+			corev1.EnvVar{
+				// Optional: if the managed secret has no "username" key
+				// (password-only auth), this env var is simply not set.
+				Name: "LMCACHE_RESP_USERNAME",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+						Key:                  "username",
+						Optional:             &optional,
+					},
+				},
+			},
+		)
+	}
+	// Inject the pod IP as the coordinator advertise address (downward API)
+	// when registration is enabled and no explicit advertiseIP is set, so the
+	// coordinator can reach this server. The server's --coordinator-advertise-ip
+	// flag falls back to this env var.
+	if spec.Coordinator != nil && derefString(spec.Coordinator.URL, "") != "" &&
+		(spec.Coordinator.AdvertiseIP == nil || *spec.Coordinator.AdvertiseIP == "") {
+		envVars = append(envVars, corev1.EnvVar{
+			Name: "LMCACHE_COORDINATOR_ADVERTISE_IP",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "status.podIP",
+				},
+			},
+		})
+	}
 	envVars = append(envVars, spec.Env...)
 
 	// No emptyDir /dev/shm mount — hostIPC: true exposes the host's /dev/shm
@@ -80,8 +176,13 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 	volumes := append([]corev1.Volume{}, spec.Volumes...)
 	volumeMounts := append([]corev1.VolumeMount{}, spec.VolumeMounts...)
 
-	// Build container args
-	containerArgs := BuildContainerArgs(spec)
+	// Build container args. Auth credentials are handled via env vars
+	// (LMCACHE_RESP_USERNAME / LMCACHE_RESP_PASSWORD) injected above,
+	// so no shell wrapper is needed.
+	containerCommand := []string{
+		lmcacheServerBinary,
+		serverSubcommand,
+	}
 
 	// Probes
 	tcpProbe := &corev1.TCPSocketAction{
@@ -112,10 +213,16 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 	}
 
 	// Container ports
+	httpPort := getHTTPPort(spec)
 	containerPorts := []corev1.ContainerPort{
 		{
-			Name:          "server",
+			Name:          serverPortName,
 			ContainerPort: serverPort,
+			Protocol:      corev1.ProtocolTCP,
+		},
+		{
+			Name:          "http",
+			ContainerPort: httpPort,
 			Protocol:      corev1.ProtocolTCP,
 		},
 	}
@@ -137,9 +244,9 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 
 	ds := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      engine.Name,
-			Namespace: engine.Namespace,
-			Labels:    StandardLabels(engine.Name),
+			Name:      name,
+			Namespace: namespace,
+			Labels:    StandardLabels(name),
 		},
 		Spec: appsv1.DaemonSetSpec{
 			Selector: &metav1.LabelSelector{
@@ -152,7 +259,8 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 				},
 				Spec: corev1.PodSpec{
 					HostIPC:            true,
-					RuntimeClassName:   &nvidiaRuntime,
+					HostNetwork:        derefBool(spec.HostNetwork, false),
+					RuntimeClassName:   runtimeClassName,
 					ServiceAccountName: spec.ServiceAccountName,
 					PriorityClassName:  spec.PriorityClassName,
 					NodeSelector:       spec.NodeSelector,
@@ -164,15 +272,11 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 							Name:            "lmcache",
 							Image:           fmt.Sprintf("%s:%s", imgRepo, imgTag),
 							ImagePullPolicy: imgPullPolicy,
-							Command: []string{
-								"/opt/venv/bin/python3",
-								"-m",
-								"lmcache.v1.multiprocess.server",
-							},
-							Args:      containerArgs,
-							Ports:     containerPorts,
-							Env:       envVars,
-							Resources: ComputeResources(spec),
+							Command:         containerCommand,
+							Args:            containerArgs,
+							Ports:           containerPorts,
+							Env:             envVars,
+							Resources:       ComputeResources(spec),
 							SecurityContext: &corev1.SecurityContext{
 								Privileged: &privileged,
 							},
@@ -186,6 +290,10 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 				},
 			},
 		},
+	}
+
+	if derefBool(spec.HostNetwork, false) {
+		ds.Spec.Template.Spec.DNSPolicy = corev1.DNSClusterFirstWithHostNet
 	}
 
 	return ds

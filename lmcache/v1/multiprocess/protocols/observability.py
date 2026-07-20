@@ -26,10 +26,13 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
     """
     return {
         # Report vLLM block allocation
-        # Payload: [list[BlockAllocationRecord]] - list of allocation records
+        # Payload:
+        #   - instance_id: int - scheduler instance ID
+        #   - model_name: str - model name from the adapter
+        #   - records: list[BlockAllocationRecord] - allocation records
         # Returns: None (fire-and-forget)
         "REPORT_BLOCK_ALLOCATION": ProtocolDefinition(
-            payload_classes=[list[BlockAllocationRecord]],
+            payload_classes=[int, str, list[BlockAllocationRecord]],
             response_class=None,
             handler_type=HandlerType.BLOCKING,
         ),

@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from collections import deque
-from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import Enum, auto
-from functools import wraps
+from functools import cache, wraps
 from typing import Any, List, Optional, Tuple, Union
 import abc
 import ctypes
@@ -16,22 +14,47 @@ from sortedcontainers import SortedList
 import torch
 
 # First Party
+from lmcache import torch_dev
+from lmcache import torch_device_type as torch_device_type  # noqa: F401
 from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.pin_monitor import PinMonitor
+from lmcache.v1.platform import current_device_spec as current_device_spec  # noqa: F401
 from lmcache.v1.system_detection import NUMAMapping
-
-if torch.cuda.is_available():
-    # First Party
-    import lmcache.c_ops as lmc_ops
-else:
-    # First Party
-    import lmcache.non_cuda_equivalents as lmc_ops
-
+import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
+
+
+# Cache for ctypes ubyte-array types keyed by length.
+#
+# ctypes does not cache `(c_ubyte * N)` array types -- each call to the `*`
+# operator builds a fresh heap type via PyCArrayType_from_ctype. The heap
+# type metadata stays alive forever (held by the type system), so calling
+# `(ctypes.c_ubyte * N).from_address(...)` on every TensorMemoryObj.byte_array
+# access leaks ~1-2 kB per call. Under long-running remote-backend put/get
+# workloads this is the dominant source of monotonic anonymous-memory growth
+# (see https://github.com/LMCache/LMCache/issues/3767).
+#
+# Caching by length is safe: the `from_address(addr)` instance never owns the
+# underlying buffer, only the metadata (length, item-type), and that metadata
+# depends solely on `N`. ``functools.cache`` provides a thread-safe unbounded
+# memoization primitive, so concurrent first-time accesses for the same `N`
+# cannot race to create distinct heap types.
+@cache
+def _get_cached_ubyte_array_type(num_bytes: int) -> type[ctypes.Array[ctypes.c_ubyte]]:
+    """Return a cached ``ctypes.c_ubyte * num_bytes`` array type.
+
+    Args:
+        num_bytes: The length of the array type in bytes.
+
+    Returns:
+        The cached ``ctypes.Array`` subclass for the given length. Subsequent
+        calls with the same ``num_bytes`` return the same type object.
+    """
+    return ctypes.c_ubyte * num_bytes
 
 
 # Helper functions for thread safety
@@ -77,6 +100,19 @@ class MemoryFormat(Enum):
     """[1, num_layers, num_tokens, aligned_head_size]
     """
 
+    # This is for the encoder cache (EC) tensor format
+    EC_TD = auto()
+    """[num_tokens, hidden_dim]
+    """
+
+    # Hidden-state store (HS) tensor format. Same logical shape as EC_TD
+    # ([num_tokens, hidden_dim]) but tagged separately so the allocator and
+    # any future mp/serialization paths can distinguish encoder-cache entries
+    # from hidden-state entries.
+    HS_TD = auto()
+    """[num_tokens, hidden_dim]
+    """
+
     def token_dim(self) -> int:
         if self == MemoryFormat.KV_2LTD:
             return 2
@@ -90,6 +126,10 @@ class MemoryFormat(Enum):
             return 0
         elif self == MemoryFormat.KV_MLA_FMT:
             return 2
+        elif self == MemoryFormat.EC_TD:
+            return 0
+        elif self == MemoryFormat.HS_TD:
+            return 0
         return 0
 
 
@@ -256,6 +296,28 @@ class MemoryObj(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    def set_used_size(self, n: int) -> None:  # noqa: B027
+        """Narrow this buffer's logical size to the first ``n`` bytes.
+
+        Optional hook for callers that have just written ``n`` bytes
+        into a buffer originally allocated with an upper-bound size
+        (e.g. the async serde processor, where the destination is sized
+        from ``estimate_serialized_size`` but ``serialize`` returns the
+        actual ``n`` it wrote). After this call, ``get_size()`` /
+        ``byte_array`` / any downstream L2 adapter that reads the
+        logical size will see exactly ``n`` bytes.
+
+        Default is a no-op so subclasses without a "used vs allocated"
+        distinction (e.g. :class:`BytesBufferMemoryObj`, where the raw
+        bytes already are the actual contents) keep working unchanged.
+
+        Args:
+            n: bytes actually used in this buffer. Subclasses that
+                implement this must validate ``n`` and raise
+                ``ValueError`` on out-of-range or unsupported layouts.
+        """
+        pass
+
     @abc.abstractmethod
     def pin(self) -> bool:
         """
@@ -297,6 +359,16 @@ class MemoryObj(metaclass=abc.ABCMeta):
         Get token number for the given MemoryObj.
         """
         raise NotImplementedError
+
+    @property
+    def shm_offset(self) -> int:
+        """Return the byte offset of this object inside the SHM pool."""
+        return self.meta.address
+
+    @property
+    def shm_byte_length(self) -> int:
+        """Return the byte length of this object inside the SHM pool."""
+        return self.get_size()
 
     @property
     @abc.abstractmethod
@@ -371,29 +443,48 @@ class MemoryObj(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
 
+@dataclass
+class PinnedAllocFree:
+    """Resolved alloc/free function pair for pinned CPU memory."""
+
+    alloc_fn: Any
+    alloc_args: tuple
+    free_fn: Any
+    free_args: tuple
+
+    def alloc(self) -> int:
+        """Allocate pinned memory and return the raw pointer."""
+        return self.alloc_fn(*self.alloc_args)
+
+    def free(self, ptr: int) -> None:
+        """Free a previously allocated pinned-memory pointer."""
+        self.free_fn(ptr, *self.free_args)
+
+
 def _resolve_pinned_alloc_free(
     numa_mapping: Optional[NUMAMapping] = None,
     shm_name: Optional[str] = None,
     size: Optional[int] = None,
-) -> Tuple[
-    tuple,  # (alloc_fn, *alloc_args)
-    tuple,  # (free_fn, *free_args_after_ptr)
-]:
+    use_hugepages: bool = False,
+) -> PinnedAllocFree:
     """Resolve the alloc/free function pair based on memory type.
 
     Returns:
-        A tuple of (alloc_info, free_info) where:
-        - alloc_info: (alloc_fn, *args) to call as alloc_fn(size, *args)
-        - free_info: (free_fn, *args) to call as free_fn(ptr, *args)
+        A PinnedAllocFree with the resolved functions and their extra
+        arguments.  Call ``ptr = resolved.alloc()`` and ``resolved.free(ptr)``.
     """
     if shm_name:
-        return (
-            (lmc_ops.alloc_shm_pinned_ptr, shm_name),
-            (lmc_ops.free_shm_pinned_ptr, size, shm_name),
+        if use_hugepages:
+            raise ValueError("Hugepages are not supported with shared memory (shm)")
+        return PinnedAllocFree(
+            alloc_fn=lmc_ops.alloc_shm_pinned_ptr,
+            alloc_args=(size, shm_name),
+            free_fn=lmc_ops.free_shm_pinned_ptr,
+            free_args=(size, shm_name),
         )
     elif numa_mapping:
-        if torch.cuda.is_available():
-            current_device_id = torch.cuda.current_device()
+        if torch_dev.is_available():
+            current_device_id = torch_dev.current_device()
         else:
             current_device_id = 0
         gpu_to_numa_mapping = numa_mapping.gpu_to_numa_mapping
@@ -401,31 +492,103 @@ def _resolve_pinned_alloc_free(
             f"Current device {current_device_id} is not in the GPU NUMA mapping."
         )
         numa_id = gpu_to_numa_mapping[current_device_id]
-        return (
-            (lmc_ops.alloc_pinned_numa_ptr, numa_id),
-            (lmc_ops.free_pinned_numa_ptr, size),
-        )
+        if use_hugepages:
+            return PinnedAllocFree(
+                alloc_fn=lmc_ops.alloc_hugepage_pinned_numa_ptr,
+                alloc_args=(size, numa_id),
+                free_fn=lmc_ops.free_hugepage_pinned_numa_ptr,
+                free_args=(size,),
+            )
+        else:
+            return PinnedAllocFree(
+                alloc_fn=lmc_ops.alloc_pinned_numa_ptr,
+                alloc_args=(size, numa_id),
+                free_fn=lmc_ops.free_pinned_numa_ptr,
+                free_args=(size,),
+            )
     else:
-        return (
-            (lmc_ops.alloc_pinned_ptr, 0),
-            (lmc_ops.free_pinned_ptr,),
-        )
+        flags = 0
+        if use_hugepages:
+            return PinnedAllocFree(
+                alloc_fn=lmc_ops.alloc_hugepage_pinned_ptr,
+                alloc_args=(size, flags),
+                free_fn=lmc_ops.free_hugepage_pinned_ptr,
+                free_args=(size,),
+            )
+        else:
+            return PinnedAllocFree(
+                alloc_fn=lmc_ops.alloc_pinned_ptr,
+                alloc_args=(size, flags),
+                free_fn=lmc_ops.free_pinned_ptr,
+                free_args=(),
+            )
+
+
+def _read_hugepage_info() -> Optional[Tuple[int, int, int]]:
+    """Read hugepage pool stats from sysfs.
+
+    NOTE: We only use 2 MiB hugepages, so the pool stats are taken from
+    the 2 MiB pool directly rather than the system default pool reported in
+    ``/proc/meminfo`` (which can be 1 GiB on some hosts).
+
+    Returns:
+        ``(nr_hugepages, free_hugepages, page_size_mb)`` for the hugepage
+        pool, or ``None`` if the sysfs entries are unavailable.
+    """
+    base = "/sys/kernel/mm/hugepages/hugepages-2048kB"
+    try:
+        with open(f"{base}/nr_hugepages") as f:
+            total = int(f.read().strip())
+        with open(f"{base}/free_hugepages") as f:
+            free = int(f.read().strip())
+        return total, free, 2
+    except (OSError, ValueError):
+        return None
 
 
 def _allocate_cpu_memory(
     size: int,
     numa_mapping: Optional[NUMAMapping] = None,
     shm_name: Optional[str] = None,
+    use_hugepages: bool = False,
 ) -> torch.Tensor:
     if size == 0:
         return torch.empty(0, dtype=torch.uint8)
 
-    alloc_info, _ = _resolve_pinned_alloc_free(
+    resolved = _resolve_pinned_alloc_free(
         numa_mapping,
         shm_name,
+        size,
+        use_hugepages,
     )
-    alloc_fn, *alloc_args = alloc_info
-    ptr = alloc_fn(size, *alloc_args)
+
+    try:
+        ptr = resolved.alloc()
+    except RuntimeError as e:
+        if use_hugepages and "mmap failed" in str(e):
+            diag = _read_hugepage_info()
+            if diag is not None:
+                total, free, page_mb = diag
+                page_bytes = page_mb * 1024 * 1024
+                needed = (size + page_bytes - 1) // page_bytes
+                logger.error(
+                    "Failed to allocate huge pages. "
+                    "Pool has %d pages (%d free, each %d MiB). "
+                    "Requested %d bytes (%d pages). "
+                    "Please grow the %d MiB hugepage pool.",
+                    total,
+                    free,
+                    page_mb,
+                    size,
+                    needed,
+                    page_mb,
+                )
+            else:
+                logger.error(
+                    "Failed to allocate huge pages. "
+                    "Please grow the 2 MiB hugepage pool."
+                )
+        raise
 
     array_type = ctypes.c_uint8 * size
     buf = array_type.from_address(ptr)
@@ -439,17 +602,18 @@ def _free_cpu_memory(
     size: int | None = None,
     numa_mapping: Optional[NUMAMapping] = None,
     shm_name: Optional[str] = None,
+    use_hugepages: bool = False,
 ) -> None:
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
+    if torch_dev.is_available():
+        torch_dev.synchronize()
 
-    _, free_info = _resolve_pinned_alloc_free(
+    resolved = _resolve_pinned_alloc_free(
         numa_mapping,
         shm_name,
-        size=size,
+        size,
+        use_hugepages,
     )
-    free_fn, *free_args = free_info
-    free_fn(buffer.data_ptr(), *free_args)
+    resolved.free(buffer.data_ptr())
 
 
 def _allocate_gpu_memory(
@@ -488,6 +652,12 @@ class TensorMemoryObj(MemoryObj):
         self.valid = True
         self.lock = threading.Lock()
         self.parent_allocator = parent_allocator
+        # ``None`` means "use the layout-derived size from
+        # group_prefix_sum"; a non-None value narrows the logical view to
+        # exactly that many bytes (see set_used_size).  Allocator reuse
+        # paths must reset this to None along with the rest of the
+        # per-allocation metadata.
+        self._used_size_override: Optional[int] = None
         # Calculate the prefix sum of the group sizes
         # If there are two groups, the prefix sum will be
         # [0, size_of_group_1, size_of_group_1 + size_of_group_2]
@@ -525,7 +695,38 @@ class TensorMemoryObj(MemoryObj):
         return self.valid
 
     def get_size(self) -> int:
+        if self._used_size_override is not None:
+            return self._used_size_override
         return self.group_prefix_sum[-1]
+
+    def set_used_size(self, n: int) -> None:
+        """Narrow the logical size to ``n`` bytes after a write.
+
+        After this call, ``get_size()`` returns ``n`` and ``byte_array``
+        exposes exactly ``n`` bytes from the start of ``raw_data``.  The
+        physical allocation (``get_physical_size``) and ``raw_data``
+        buffer are unchanged.  Allocator reuse resets this override to
+        ``None`` so a recycled block returns to its layout-derived size.
+
+        Note: the ``tensor`` property still derives its shape from
+        ``meta.shape``, so accessing ``.tensor`` on a buffer narrowed
+        below its layout size will fail to reshape.  Use ``byte_array``
+        (or read ``raw_data[: get_size()]`` directly) for downstream
+        I/O that must honor the narrowed size.
+
+        Args:
+            n: bytes actually written.  Must satisfy
+                ``0 <= n <= get_physical_size()``.
+
+        Raises:
+            ValueError: if ``n`` is outside the allowed range.
+        """
+        if n < 0 or n > self.meta.phy_size:
+            raise ValueError(
+                f"set_used_size: n={n} out of range [0, {self.meta.phy_size}]"
+            )
+        with self.lock:
+            self._used_size_override = n
 
     # TODO(chunxiaozheng): use get_shapes and get_dtypes to replace
     #  get_shape and get_dtype
@@ -533,6 +734,7 @@ class TensorMemoryObj(MemoryObj):
         return self.meta.shape
 
     def get_dtype(self) -> torch.dtype:
+        assert self.meta.dtype is not None
         return self.meta.dtype
 
     def get_shapes(self) -> list[torch.Size]:
@@ -635,6 +837,16 @@ class TensorMemoryObj(MemoryObj):
             logger.warning("Trying to access an invalidated MemoryObj")
             return None
         assert self.meta.dtype is not None
+        if self._used_size_override is not None:
+            # Narrowed byte buffer (see set_used_size): expose exactly
+            # the used bytes as a flat uint8 view.  Reshaping to the
+            # original meta.shape would raise -- fewer than shape-many
+            # bytes are logically present -- so keep the view consistent
+            # with get_size()/byte_array/shm_byte_length, which all
+            # report the narrowed length.  Consumers that build SHM
+            # transport slots from ``tensor.shape`` and
+            # ``shm_byte_length`` then stay self-consistent.
+            return self.raw_data[: self._used_size_override].view(torch.uint8)
         # TODO(Jiayi): consider caching the `get_size()`
         return (
             self.raw_data[: self.get_size()].view(self.meta.dtype).view(self.meta.shape)
@@ -653,12 +865,22 @@ class TensorMemoryObj(MemoryObj):
         #   "byte_array only works with CPU tensors"
         # return memoryview(self.raw_data.contiguous().numpy())
 
-        num_bytes = self.raw_data.numel() * self.raw_data.element_size()
+        # Use logical size (get_size) rather than raw_data physical size.
+        # The raw_data buffer may include alignment padding (e.g. from
+        # batched_allocate) that must not be exposed to callers such as
+        # remote-backend put/get which rely on byte_array length matching
+        # the metadata length.
+        num_bytes = self.get_size()
         ptr = self.raw_data.data_ptr()
+        # ctypes does not cache (c_ubyte * N) array types -- each `*` builds a
+        # fresh heap type. With this property accessed once per remote put/get,
+        # uncached creation leaks ~1-2 kB per call (heap-type metadata is held
+        # by the type system and never reclaimed). Cache the array type per
+        # size so steady-state usage reuses a fixed set of types. See
+        # https://github.com/LMCache/LMCache/issues/3767.
+        arr_type = _get_cached_ubyte_array_type(num_bytes)
         ubyte_ptr = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_ubyte))
-        byte_array = (ctypes.c_ubyte * num_bytes).from_address(
-            ctypes.addressof(ubyte_ptr.contents)
-        )
+        byte_array = arr_type.from_address(ctypes.addressof(ubyte_ptr.contents))
         return memoryview(byte_array)
 
     @property
@@ -825,6 +1047,128 @@ class BytesBufferMemoryObj(MemoryObj):
     def parent(self) -> Optional["MemoryAllocatorInterface"]:
         # NOTE: BytesBufferMemoryObj may not be allocated by any allocator,
         # so just return None here
+        return None
+
+
+class GDSMemoryObject(MemoryObj):
+    """A slab-anchored ``MemoryObj`` for the GDS L1 tier.
+
+    The bytes live in the GDS slab file, not in host or device memory, so
+    this object carries only the slab ``(offset, size)`` (in ``meta.address``
+    / ``meta.phy_size``) and is otherwise a placeholder: ``tensor`` is always
+    ``None`` and ``byte_array`` / ``data_ptr`` raise.
+    """
+
+    def __init__(self, metadata: MemoryObjMetadata) -> None:
+        super().__init__(metadata)
+        self.valid = True
+
+    @property
+    def slab_offset(self) -> int:
+        """Byte offset of this chunk within the slab file (== ``meta.address``)."""
+        return self.meta.address
+
+    def invalidate(self) -> None:
+        self.valid = False
+
+    def is_valid(self) -> bool:
+        return self.valid
+
+    def get_size(self) -> int:
+        return self.meta.phy_size
+
+    def get_shape(self) -> torch.Size:
+        return self.meta.shape
+
+    def get_dtype(self) -> Optional[torch.dtype]:
+        return self.meta.dtype
+
+    def get_shapes(self) -> list[torch.Size]:
+        raise NotImplementedError(
+            "GDSMemoryObject.get_shapes: per-group shapes are not tracked on "
+            "the GDS path (only the singular meta.shape is); use get_shape()"
+        )
+
+    def get_dtypes(self) -> list[torch.dtype]:
+        raise NotImplementedError(
+            "GDSMemoryObject.get_dtypes: per-group dtypes are not tracked on "
+            "the GDS path (only the singular meta.dtype is); use get_dtype()"
+        )
+
+    def get_memory_format(self) -> MemoryFormat:
+        return self.meta.fmt
+
+    def get_physical_size(self) -> int:
+        return self.meta.phy_size
+
+    def ref_count_up(self) -> None:
+        raise NotImplementedError(
+            "GDSMemoryObject.ref_count_up: not used on the GDS path"
+        )
+
+    def ref_count_down(self) -> None:
+        raise NotImplementedError(
+            "GDSMemoryObject.ref_count_down: not used on the GDS path"
+        )
+
+    def get_ref_count(self) -> int:
+        raise NotImplementedError(
+            "GDSMemoryObject.get_ref_count: not used on the GDS path"
+        )
+
+    def get_num_tokens(self) -> int:
+        raise NotImplementedError(
+            "GDSMemoryObject.get_num_tokens: not used on the GDS path"
+        )
+
+    def pin(self) -> bool:
+        raise NotImplementedError("GDSMemoryObject.pin: not used on the GDS path")
+
+    def unpin(self) -> bool:
+        raise NotImplementedError("GDSMemoryObject.unpin: not used on the GDS path")
+
+    @property
+    def metadata(self) -> MemoryObjMetadata:
+        return self.meta
+
+    @property
+    def tensor(self) -> Optional[torch.Tensor]:
+        return None
+
+    @property
+    def byte_array(self) -> bytes:
+        raise NotImplementedError(
+            f"GDSMemoryObject(slab_offset={self.slab_offset}).byte_array is not "
+            "supported; bytes live in the GDS slab file and the staging buffer "
+            "is registered VRAM (no buffer protocol)."
+        )
+
+    @property
+    def data_ptr(self) -> int:
+        raise NotImplementedError(
+            f"GDSMemoryObject(slab_offset={self.slab_offset}).data_ptr is not "
+            "supported; GDS reads/writes use gpu_buffer.data_ptr() via the "
+            "gpu_ops dispatch, never the MemoryObj's data_ptr."
+        )
+
+    @property
+    def is_pinned(self) -> bool:
+        raise NotImplementedError("GDSMemoryObject.is_pinned: not used on the GDS path")
+
+    @property
+    def can_evict(self) -> bool:
+        raise NotImplementedError("GDSMemoryObject.can_evict: not used on the GDS path")
+
+    @property
+    def raw_tensor(self) -> Optional[torch.Tensor]:
+        return None
+
+    def get_tensor(self, index: int) -> Optional[torch.Tensor]:
+        return None
+
+    def parent(self) -> Optional["MemoryAllocatorInterface"]:
+        # The GDS slab is not a MemoryAllocatorInterface; dispatch in gpu_ops
+        # keys off the GDSMemoryObject type, not the parent allocator.
         return None
 
 
@@ -1266,1356 +1610,17 @@ class AddressManager:
         return True
 
 
-class TensorMemoryAllocator(MemoryAllocatorInterface):
-    """
-    Implements a "explicit list" memory allocator.
-    Uses AddressManager for address space management.
-    """
-
-    def __init__(
-        self,
-        tensor: torch.Tensor,
-        align_bytes: int = AddressManager.ALIGN_BYTES,
-        init_address_space: int | None = None,
-    ):
-        """
-        Args:
-            tensor: The pre-allocated flat tensor to use as the memory pool.
-            align_bytes: The alignment requirement for allocations.
-            init_address_space: Initial size of the address space. If None,
-                use the size of the provided tensor.
-
-        Note:
-            The `init_address_space` is used for lazy memory allocation.
-            We probably want to have a better way to make sure that the
-            LazyMemoryAllocator can be decoupled from TensorMemoryAllocator.
-        """
-        self.buffer = tensor.view(torch.uint8).flatten()
-
-        # Use AddressManager for address space management
-        self.address_manager = AddressManager(
-            self.buffer.numel() if init_address_space is None else init_address_space,
-            align_bytes,
-        )
-
-        # For debugging purposes
-        self.num_active_allocations = 0
-
-        self.stats_monitor = LMCStatsMonitor.GetOrCreate()
-
-    @property
-    def total_allocated_size(self) -> int:
-        return self.address_manager.total_allocated_size
-
-    @_lmcache_nvtx_annotate
-    def allocate(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        allocator_type: Optional[str] = None,
-    ) -> Optional[TensorMemoryObj]:
-        shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
-
-        # Calculate the size of the tensor
-        raw_size = get_size_bytes(shapes, dtypes)
-
-        # Allocate from address manager
-        try:
-            block_start, aligned_size = self.address_manager.allocate(raw_size)
-        except RuntimeError:
-            # No block found
-            return None
-
-        # For debug
-        self.num_active_allocations += 1
-
-        # Update stats
-        self.stats_monitor.update_local_cache_usage(
-            self.address_manager.total_allocated_size
-        )
-        self.stats_monitor.update_active_memory_objs_count(self.num_active_allocations)
-
-        # Allocate the block
-        raw_data = self._get_buffer_slice(block_start, raw_size)
-        return TensorMemoryObj(
-            raw_data=raw_data,
-            metadata=MemoryObjMetadata(
-                shapes[0],
-                dtypes[0],
-                block_start,
-                aligned_size,
-                1,
-                0,
-                fmt,
-                shapes=shapes,
-                dtypes=dtypes,
-            ),
-            parent_allocator=self,
-        )
-
-    def _get_buffer_slice(self, start: int, size: int) -> torch.Tensor:
-        """Hook: Get buffer slice. Override for custom buffer access."""
-        return self.buffer[start : start + size]
-
-    @_lmcache_nvtx_annotate
-    def batched_allocate(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-        batch_size: int,
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        allocator_type: Optional[str] = None,
-    ) -> Optional[List[TensorMemoryObj]]:
-        """
-        Batched allocate tensor memory objs with equal sizes.
-        """
-        shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
-
-        # Calculate the size of the tensor
-        unit_raw_size = get_size_bytes(shapes, dtypes)
-        unit_aligned_size = self.address_manager.compute_aligned_size(unit_raw_size)
-
-        try:
-            alloc_results = self.address_manager.batched_allocate(
-                unit_aligned_size, batch_size
-            )
-        except RuntimeError:
-            return None
-        addresses = [addr for addr, _ in alloc_results]
-        raw_datas = [
-            self._get_buffer_slice(addr, unit_aligned_size) for addr in addresses
-        ]
-
-        # For debug
-        self.num_active_allocations += batch_size
-
-        # Update stats
-        self.stats_monitor.update_local_cache_usage(
-            self.address_manager.total_allocated_size
-        )
-        self.stats_monitor.update_active_memory_objs_count(self.num_active_allocations)
-
-        tensor_mem_objs = []
-        for raw_data, address in zip(raw_datas, addresses, strict=True):
-            tensor_mem_objs.append(
-                TensorMemoryObj(
-                    raw_data=raw_data,
-                    metadata=MemoryObjMetadata(
-                        shapes[0],
-                        dtypes[0],
-                        address,
-                        unit_aligned_size,
-                        1,
-                        0,
-                        fmt,
-                        shapes=shapes,
-                        dtypes=dtypes,
-                    ),
-                    parent_allocator=self,
-                )
-            )
-
-        return tensor_mem_objs
-
-    @_lmcache_nvtx_annotate
-    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
-        if not memory_obj.is_valid():
-            return
-
-        self.address_manager.free(memory_obj.meta.address, memory_obj.meta.phy_size)
-        memory_obj.invalidate()
-
-        # For debug
-        self.num_active_allocations -= 1
-
-        # Update stats
-        self.stats_monitor.update_local_cache_usage(
-            self.address_manager.total_allocated_size
-        )
-        self.stats_monitor.update_active_memory_objs_count(self.num_active_allocations)
-
-    @_lmcache_nvtx_annotate
-    def batched_free(
-        self,
-        memory_objs: List[MemoryObj],
-        allocator_type: Optional[str] = None,
-        update_stats: bool = True,
-    ):
-        """
-        Batched free memory objs.
-        Unlike `batched_allocate`, this function does not
-        assume that the memory objs are equal-sized.
-        """
-        if not memory_objs:
-            return
-
-        # Coalesce adjacent memory objects before freeing to reduce
-        # the number of free operations
-        coalesced_blocks: list[tuple[int, int, int]] = []  # (address, size, count)
-        curr_start = None
-        curr_size = 0
-        curr_count = 0
-
-        memory_objs.sort(key=lambda x: x.meta.address)
-        for memory_obj in memory_objs:
-            if not memory_obj.is_valid():
-                logger.warning("Trying to free an invalidated MemoryObj")
-                continue
-            memory_obj.invalidate()
-
-            if curr_start is None:
-                curr_start = memory_obj.meta.address
-                curr_size = memory_obj.meta.phy_size
-                curr_count = 1
-            elif curr_start + curr_size == memory_obj.meta.address:
-                # Adjacent block, extend current
-                curr_size += memory_obj.meta.phy_size
-                curr_count += 1
-            else:
-                # Non-adjacent, save current and start new
-                coalesced_blocks.append((curr_start, curr_size, curr_count))
-                curr_start = memory_obj.meta.address
-                curr_size = memory_obj.meta.phy_size
-                curr_count = 1
-
-        if curr_start is not None:
-            coalesced_blocks.append((curr_start, curr_size, curr_count))
-
-        # Free all coalesced blocks
-        total_count = 0
-        for address, size, count in coalesced_blocks:
-            self.address_manager.free(address, size)
-            total_count += count
-
-        # For debug
-        self.num_active_allocations -= total_count
-
-        if update_stats:
-            self.stats_monitor.update_local_cache_usage(
-                self.address_manager.total_allocated_size
-            )
-            self.stats_monitor.update_active_memory_objs_count(
-                self.num_active_allocations
-            )
-
-    def memcheck(self):
-        """For debug purposes.
-        Returns True is everything is fine, otherwise False.
-        """
-        clear = True
-        logger.info("Checking memory allocator consistency")
-        logger.info(f" - Total active allocations: {self.num_active_allocations}")
-        logger.info(
-            f" - Total allocated size: "
-            f"{self.address_manager.total_allocated_size / 1048576} MB"
-        )
-
-        # Check the real total free size
-        total_free_size = self.address_manager.get_free_size()
-        logger.info(f" - Total free size: {total_free_size / 1048576} MB")
-
-        # Check if the numbers are consistent
-        if (
-            total_free_size + self.address_manager.total_allocated_size
-            != self.address_manager.get_heap_size()
-        ):
-            logger.error("Memory allocator size is inconsistent")
-            logger.error("This implies a bug in the memory allocator")
-            clear = False
-
-        # Check if the blocks are coalesced
-        if not self.address_manager.check_consistency():
-            logger.error("Memory allocator has non-coalesced blocks")
-            logger.error("This implies a bug in the memory allocator")
-            clear = False
-
-        return clear
-
-    def __str__(self):
-        return "TensorMemoryAllocator"
-
-
-class PagedAddressManager:
-    """
-    A lightweight address manager for PagedTensorMemoryAllocator.
-    Provides get_free_size() and get_heap_size() by reading the
-    paged allocator's state.
-    """
-
-    def __init__(self, paged_allocator: "PagedTensorMemoryAllocator"):
-        self._allocator = paged_allocator
-
-    def get_heap_size(self) -> int:
-        """Get the total size of the paged address space in bytes."""
-        return self._allocator.buffer_size
-
-    def get_free_size(self) -> int:
-        """Get the total free size in bytes."""
-        return len(self._allocator.free_blocks) * self._allocator.align_bytes
-
-
-class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
-    """
-    Implements a paged memory allocator.
-    """
-
-    def __init__(
-        self,
-        tensor: torch.Tensor,
-        shapes: list[torch.Size],
-        dtypes: list[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-    ):
-        self.buffer = tensor.view(torch.uint8).flatten()
-        self.buffer_size = self.buffer.numel() * self.buffer.element_size()
-        self.buffer_ptr = self.buffer.data_ptr()
-
-        self.shapes = shapes
-        self.dtypes = dtypes
-        self.fmt = fmt
-
-        # full chunk size bytes
-        self.align_bytes = get_size_bytes(shapes, dtypes)
-
-        assert self.buffer_size % self.align_bytes == 0, (
-            f"Buffer size {self.buffer_size} must be a"
-            f" multiple of align bytes {self.align_bytes}"
-            " in paged memory allocator."
-        )
-
-        self.paged_buffers = torch.split(self.buffer, self.align_bytes, dim=0)
-
-        # NOTE: deque is used since thread-safety is not a concern here as
-        # is implemented in C under the hood (in CPython), and operations
-        # on deque are atomic.
-        self.free_blocks: deque[TensorMemoryObj] = deque()
-
-        for idx, buf in enumerate(self.paged_buffers):
-            # NOTE: idx is the paged index
-            # NOTE: the last unfull chunk's shape needs to be
-            # adjusted during allocation.
-            metadata = MemoryObjMetadata(
-                self.shapes[0],
-                self.dtypes[0],
-                idx,
-                self.align_bytes,  # 1 page
-                1,  # ref_count=1
-                0,  # pin_count=0
-                self.fmt,
-                shapes=self.shapes,
-                dtypes=self.dtypes,
-            )
-            mem_obj = TensorMemoryObj(
-                raw_data=buf,
-                metadata=metadata,
-                parent_allocator=self,
-            )
-            self.free_blocks.append(mem_obj)
-
-        # Address manager for memory usage tracking
-        self.address_manager = PagedAddressManager(self)
-
-        # For debugging purposes
-        self.num_active_allocations = 0
-        self.total_allocated_size = 0
-
-        self.stats_monitor = LMCStatsMonitor.GetOrCreate()
-        logger.info(
-            "Paged tensor memory allocator initialized, "
-            "shapes: %s, dtypes: %s, align bytes: %s",
-            self.shapes,
-            self.dtypes,
-            self.align_bytes,
-        )
-
-    @_lmcache_nvtx_annotate
-    def allocate(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        allocator_type: Optional[str] = None,
-    ) -> Optional[TensorMemoryObj]:
-        shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
-
-        try:
-            free_block = self.free_blocks.popleft()
-        except IndexError:
-            logger.debug(
-                f"Failed to allocate memory for "
-                f"tensor({shapes}, {dtypes}) because "
-                "no free blocks is available"
-            )
-            return None
-
-        # TODO (Jiayi): This is a bit redundant.
-        free_block.meta.shape = shapes[0]
-        free_block.meta.dtype = dtypes[0]
-        free_block.meta.shapes = shapes
-        free_block.meta.dtypes = dtypes
-        free_block.meta.fmt = fmt
-        free_block.meta.ref_count = 1
-
-        if shapes != self.shapes:
-            size_in_bytes = get_size_bytes(shapes, dtypes)
-            free_block.raw_data = free_block.raw_data[:size_in_bytes]
-
-        # TODO (Jiayi): need a flag to drop these debug ops
-        # NOTE (Jiayi): the following code is not thread-safe but
-        # is tolerable as this is only used for debugging purposes.
-        # Update debug status
-        self.num_active_allocations += 1
-        self.total_allocated_size += self.align_bytes
-        self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
-        self.stats_monitor.update_active_memory_objs_count(self.num_active_allocations)
-
-        # Allocate the block
-        return free_block
-
-    @_lmcache_nvtx_annotate
-    def batched_allocate(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-        batch_size: int,
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        allocator_type: Optional[str] = None,
-    ) -> Optional[List[TensorMemoryObj]]:
-        """
-        Batched allocate tensor memory objs with pre-defined equal sizes.
-        """
-        shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
-
-        allocated_blocks: list[TensorMemoryObj] = []
-        for i in range(batch_size):
-            try:
-                free_block = self.free_blocks.popleft()
-            except IndexError:
-                logger.debug(
-                    f"Failed to allocate memory for "
-                    f"tensor({shapes}, {dtypes}) because "
-                    "no free blocks is available"
-                )
-                self.batched_free(allocated_blocks, update_stats=False)
-                return None
-
-            # FIXME: think about whether pareant_allocator
-            # should be updated here.
-            free_block.meta.shape = shapes[0]
-            free_block.meta.dtype = dtypes[0]
-            free_block.meta.shapes = shapes
-            free_block.meta.dtypes = dtypes
-            free_block.meta.fmt = fmt
-            free_block.meta.ref_count = 1
-
-            if shapes != self.shapes:
-                size_in_bytes = get_size_bytes(shapes, dtypes)
-                free_block.raw_data = free_block.raw_data[:size_in_bytes]
-
-            allocated_blocks.append(free_block)
-
-        # TODO (Jiayi): need a flag to drop these debug ops
-        # NOTE (Jiayi): the following code is not thread-safe but
-        # is tolerable as this is only used for debugging purposes.
-        # Update debug status
-        self.num_active_allocations += batch_size
-        self.total_allocated_size = self.num_active_allocations * self.align_bytes
-        self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
-        self.stats_monitor.update_active_memory_objs_count(self.num_active_allocations)
-
-        # Allocate the block
-        return allocated_blocks
-
-    @_lmcache_nvtx_annotate
-    def free(self, memory_obj: TensorMemoryObj, allocator_type: Optional[str] = None):
-        if not memory_obj.is_valid():
-            return
-        if memory_obj.meta.shapes != self.shapes:
-            page_idx = memory_obj.meta.address
-            memory_obj.raw_data = self.paged_buffers[page_idx]
-
-        self.free_blocks.append(memory_obj)
-
-        # memory_obj.invalidate()
-
-        # TODO (Jiayi): need a flag to drop these debug ops
-        # NOTE (Jiayi): the following code is not thread-safe but
-        # is tolerable as this is only used for debugging purposes.
-        # Update debug status
-        self.total_allocated_size -= self.align_bytes
-        self.num_active_allocations -= 1
-        self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
-        self.stats_monitor.update_active_memory_objs_count(self.num_active_allocations)
-
-    @_lmcache_nvtx_annotate
-    def batched_free(
-        self,
-        memory_objs: List[TensorMemoryObj],
-        allocator_type: Optional[str] = None,
-        update_stats: bool = True,
-    ):
-        """
-        Batched free memory objs.
-        Unlike `batched_allocate`, this function does not
-        assume that the memory objs are equal-sized.
-        """
-        if not memory_objs:
-            return
-
-        for memory_obj in memory_objs:
-            if not memory_obj.is_valid():
-                logger.warning("Trying to free an invalidated MemoryObj")
-                continue
-            # memory_obj.invalidate()
-            if memory_obj.meta.shapes != self.shapes:
-                page_idx = memory_obj.meta.address
-                memory_obj.raw_data = self.paged_buffers[page_idx]
-
-            self.free_blocks.append(memory_obj)
-
-        if update_stats:
-            num_freed_blocks = len(memory_objs)
-            # TODO (Jiayi): need a flag to drop these debug ops
-            # NOTE (Jiayi): the following code is not thread-safe but
-            # is tolerable as this is only used for debugging purposes.
-            # Update debug status
-            self.total_allocated_size -= self.align_bytes * num_freed_blocks
-            self.num_active_allocations -= num_freed_blocks
-            self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
-            self.stats_monitor.update_active_memory_objs_count(
-                self.num_active_allocations
-            )
-
-    def memcheck(self):
-        """For debug purposes.
-        Returns True is everything is fine, otherwise False.
-        """
-
-        logger.info("Checking memory allocator consistency")
-        logger.info(f" - Total active allocations: {self.num_active_allocations}")
-        logger.info(
-            f" - Total allocated size: {self.total_allocated_size / 1048576} MB"
-        )
-
-        # Check the real total free size
-        total_free_size = len(self.free_blocks) * self.align_bytes
-        logger.info(f" - Total free size: {total_free_size / 1048576} MB")
-
-        # Check if the numbers are consistent
-        if total_free_size + self.total_allocated_size != self.buffer.numel():
-            logger.error("Memory allocator size is inconsistent")
-            logger.error("This implies a bug in the memory allocator")
-            return False
-
-        return True
-
-    def __str__(self):
-        return "PagedTensorMemoryAllocator"
-
-    def __del__(self):
-        # FIXME: NIXL-related memory leak should be handled somewhere (else).
-        del self.buffer
-
-
-class BufferAllocator(MemoryAllocatorInterface):
-    """Allocates memory in the pre-allocated pinned memory."""
-
-    def __init__(self, device="cpu"):
-        """
-        :param str device: The device of the buffer memory.
-        """
-        self.device = device
-
-    @_lmcache_nvtx_annotate
-    def allocate(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-        fmt: MemoryFormat = MemoryFormat.BINARY_BUFFER,
-        allocator_type: Optional[str] = None,
-    ) -> BytesBufferMemoryObj:
-        if isinstance(shapes, list):
-            n = shapes[0][0]
-        else:
-            n = shapes[0]
-        byte_array = bytearray(n)
-        return BytesBufferMemoryObj(byte_array)
-
-    @_lmcache_nvtx_annotate
-    def batched_allocate(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-        batch_size: int,
-        fmt: MemoryFormat = MemoryFormat.BINARY_BUFFER,
-        allocator_type: Optional[str] = None,
-    ) -> List[BytesBufferMemoryObj]:
-        if isinstance(shapes, list):
-            n = shapes[0][0]
-        else:
-            n = shapes[0]
-        # TODO(Jiayi): Optimize the following loop.
-        byte_arrays = [bytearray(n) for _ in range(batch_size)]
-        return [BytesBufferMemoryObj(byte_array) for byte_array in byte_arrays]
-
-    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
-        return
-
-    def batched_free(
-        self,
-        memory_objs: List[MemoryObj],
-        allocator_type: Optional[str] = None,
-        update_stats: bool = True,
-    ):
-        return
-
-    def __str__(self):
-        return "BufferAllocator"
-
-    def memcheck(self):
-        return True
-
-
-class HostMemoryAllocator(MemoryAllocatorInterface):
-    """Allocates memory in the pre-allocated Host memory."""
-
-    def __init__(self, size: int, use_paging: bool = False, **kwargs):
-        """
-        :param int size: The size of the pinned memory in bytes.
-        """
-        buffer = torch.empty(size, dtype=torch.uint8, device="cpu")
-
-        self.allocator: MemoryAllocatorInterface
-        if use_paging:
-            assert "shapes" in kwargs, (
-                "shapes must be specified for paged memory allocator"
-            )
-            assert "dtypes" in kwargs, (
-                "dtypes must be specified for paged memory allocator"
-            )
-            assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
-            self.allocator = PagedTensorMemoryAllocator(
-                tensor=buffer,
-                shapes=kwargs["shapes"],
-                dtypes=kwargs["dtypes"],
-                fmt=kwargs["fmt"],
-            )
-        else:
-            self.allocator = TensorMemoryAllocator(buffer)
-
-        self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
-
-    @_lmcache_nvtx_annotate
-    def allocate(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        allocator_type: Optional[str] = None,
-    ) -> Optional[MemoryObj]:
-        with self.host_mem_lock:
-            return self.allocator.allocate(shapes, dtypes, fmt, str(self))
-
-    @_lmcache_nvtx_annotate
-    def batched_allocate(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-        batch_size: int,
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        allocator_type: Optional[str] = None,
-    ) -> Optional[List[MemoryObj]]:
-        with self.host_mem_lock:
-            return self.allocator.batched_allocate(
-                shapes, dtypes, batch_size, fmt, str(self)
-            )
-
-    @_lmcache_nvtx_annotate
-    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
-        with self.host_mem_lock:
-            self.allocator.free(memory_obj)
-
-    @_lmcache_nvtx_annotate
-    def batched_free(
-        self,
-        memory_objs: List[MemoryObj],
-        allocator_type: Optional[str] = None,
-        update_stats: bool = True,
-    ):
-        with self.host_mem_lock:
-            self.allocator.batched_free(memory_objs)
-
-    def memcheck(self):
-        with self.host_mem_lock:
-            return self.allocator.memcheck()
-
-    def __str__(self):
-        return "HostMemoryAllocator"
-
-
-class PinMemoryAllocator(MemoryAllocatorInterface):
-    """Allocates memory in the pre-allocated pinned memory."""
-
-    def __init__(self, size: int, use_paging: bool = False, **kwargs):
-        """
-        :param int size: The size of the pinned memory in bytes.
-        """
-        self.size = size
-        self.buffer = _allocate_cpu_memory(size)
-        self._unregistered = False
-
-        self.allocator: MemoryAllocatorInterface
-        if use_paging:
-            assert "shapes" in kwargs, (
-                "shapes must be specified for paged memory allocator"
-            )
-            assert "dtypes" in kwargs, (
-                "dtypes must be specified for paged memory allocator"
-            )
-            assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
-            self.allocator = PagedTensorMemoryAllocator(
-                tensor=self.buffer,
-                shapes=kwargs["shapes"],
-                dtypes=kwargs["dtypes"],
-                fmt=kwargs["fmt"],
-            )
-        else:
-            self.allocator = TensorMemoryAllocator(self.buffer)
-
-        self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
-
-    @_lmcache_nvtx_annotate
-    def allocate(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        allocator_type: Optional[str] = None,
-    ) -> Optional[MemoryObj]:
-        with self.host_mem_lock:
-            return self.allocator.allocate(shapes, dtypes, fmt, str(self))
-
-    @_lmcache_nvtx_annotate
-    def batched_allocate(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-        batch_size: int,
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        allocator_type: Optional[str] = None,
-    ) -> Optional[List[MemoryObj]]:
-        with self.host_mem_lock:
-            return self.allocator.batched_allocate(
-                shapes, dtypes, batch_size, fmt, str(self)
-            )
-
-    @_lmcache_nvtx_annotate
-    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
-        with self.host_mem_lock:
-            self.allocator.free(memory_obj)
-
-    @_lmcache_nvtx_annotate
-    def batched_free(
-        self,
-        memory_objs: List[MemoryObj],
-        allocator_type: Optional[str] = None,
-        update_stats: bool = True,
-    ):
-        with self.host_mem_lock:
-            self.allocator.batched_free(memory_objs)
-
-    def memcheck(self):
-        with self.host_mem_lock:
-            return self.allocator.memcheck()
-
-    def close(self):
-        if not self._unregistered:
-            if self.buffer.numel() == 0:
-                return
-            _free_cpu_memory(self.buffer, self.size)
-            self._unregistered = True
-
-    def __str__(self):
-        return "PinMemoryAllocator"
-
-
-class MixedMemoryAllocator(MemoryAllocatorInterface):
-    """
-    Allocates (1) memory in the pre-allocated pinned memory.
-              (2) byte_array buffer memory.
-    """
-
-    def __init__(self, size: int, use_paging: bool = False, **kwargs):
-        """
-        :param int size: The size of the pinned memory in bytes.
-        """
-
-        self.numa_mapping = kwargs.get("numa_mapping", None)
-        self.align_bytes = kwargs.get("align_bytes", AddressManager.ALIGN_BYTES)
-        if self.align_bytes <= 0 or self.align_bytes & (self.align_bytes - 1) != 0:
-            raise ValueError("align_bytes must be a positive power of two")
-
-        # Extract shm_name from config.extra_config if available
-        config = kwargs.get("config", None)
-        if config is not None:
-            self.shm_name: Optional[str] = config.get_extra_config_value(
-                "shm_name", None
-            )
-        else:
-            self.shm_name = kwargs.get("shm_name", None)
-
-        self.size = size
-
-        self.buffer = _allocate_cpu_memory(size, self.numa_mapping, self.shm_name)
-
-        self._unregistered = False
-
-        self.pin_allocator: MemoryAllocatorInterface
-        if use_paging:
-            assert "shapes" in kwargs, (
-                "shapes must be specified for paged memory allocator"
-            )
-            assert "dtypes" in kwargs, (
-                "dtypes must be specified for paged memory allocator"
-            )
-            assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
-            self.pin_allocator = PagedTensorMemoryAllocator(
-                tensor=self.buffer,
-                shapes=kwargs["shapes"],
-                dtypes=kwargs["dtypes"],
-                fmt=kwargs["fmt"],
-            )
-        else:
-            self.pin_allocator = TensorMemoryAllocator(
-                self.buffer, align_bytes=self.align_bytes
-            )
-
-        self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
-
-        self.buffer_allocator = BufferAllocator("cpu")
-
-    @_lmcache_nvtx_annotate
-    def allocate(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        allocator_type: Optional[str] = None,
-    ) -> Optional[MemoryObj]:
-        if fmt == MemoryFormat.BINARY_BUFFER:
-            return self.buffer_allocator.allocate(shapes, dtypes, fmt)
-        elif fmt in [
-            MemoryFormat.KV_2LTD,
-            MemoryFormat.KV_2TD,
-            MemoryFormat.KV_T2D,
-            MemoryFormat.KV_MLA_FMT,
-        ]:
-            with self.host_mem_lock:
-                return self.pin_allocator.allocate(shapes, dtypes, fmt, str(self))
-        else:
-            raise ValueError(f"Unsupported memory format: {fmt}")
-
-    @_lmcache_nvtx_annotate
-    def batched_allocate(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-        batch_size: int,
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        allocator_type: Optional[str] = None,
-    ) -> Optional[List[MemoryObj]]:
-        if fmt == MemoryFormat.BINARY_BUFFER:
-            return self.buffer_allocator.batched_allocate(
-                shapes, dtypes, batch_size, fmt
-            )
-        elif fmt in [
-            MemoryFormat.KV_2LTD,
-            MemoryFormat.KV_2TD,
-            MemoryFormat.KV_T2D,
-            MemoryFormat.KV_MLA_FMT,
-        ]:
-            with self.host_mem_lock:
-                return self.pin_allocator.batched_allocate(
-                    shapes, dtypes, batch_size, fmt, str(self)
-                )
-        else:
-            raise ValueError(f"Unsupported memory format: {fmt}")
-
-    @_lmcache_nvtx_annotate
-    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
-        fmt = memory_obj.meta.fmt
-        if fmt == MemoryFormat.BINARY_BUFFER:
-            self.buffer_allocator.free(memory_obj)
-        elif fmt in [
-            MemoryFormat.KV_2LTD,
-            MemoryFormat.KV_2TD,
-            MemoryFormat.KV_T2D,
-            MemoryFormat.KV_MLA_FMT,
-        ]:
-            with self.host_mem_lock:
-                self.pin_allocator.free(memory_obj)
-        else:
-            raise ValueError(f"Unsupported memory format: {fmt}")
-
-    @_lmcache_nvtx_annotate
-    def batched_free(
-        self,
-        memory_objs: List[MemoryObj],
-        allocator_type: Optional[str] = None,
-        update_stats: bool = True,
-    ):
-        if not memory_objs:
-            return
-
-        # NOTE: fmts of all memory_objs should be the same
-        fmt = memory_objs[0].meta.fmt
-        if fmt == MemoryFormat.BINARY_BUFFER:
-            self.buffer_allocator.batched_free(memory_objs)
-        elif fmt in [
-            MemoryFormat.KV_2LTD,
-            MemoryFormat.KV_2TD,
-            MemoryFormat.KV_T2D,
-            MemoryFormat.KV_MLA_FMT,
-        ]:
-            with self.host_mem_lock:
-                self.pin_allocator.batched_free(memory_objs)
-        else:
-            raise ValueError(f"Unsupported memory format: {fmt}")
-
-    def memcheck(self):
-        with self.host_mem_lock:
-            return self.pin_allocator.memcheck()
-
-    def close(self):
-        if not self._unregistered:
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-            if self.buffer.numel() == 0:
-                return
-            _free_cpu_memory(
-                self.buffer,
-                self.size,
-                self.numa_mapping,
-                self.shm_name,
-            )
-            self._unregistered = True
-
-    def __str__(self):
-        return "MixedMemoryAllocator"
-
-
-class GPUMemoryAllocator(MemoryAllocatorInterface):
-    """Allocates memory in the pre-allocated GPU memory."""
-
-    def __init__(
-        self,
-        size: int,
-        device="cuda",
-        align_bytes: Optional[int] = None,
-        use_paging: bool = False,
-        **kwargs,
-    ):
-        """
-        :param int size: The size of the GPU memory in bytes.
-        :param Optional[int] align_bytes: The byte alignment for allocations.
-        """
-        if not torch.cuda.is_available():
-            device = "cpu"
-
-        self.tensor = torch.empty(size, dtype=torch.uint8, device=device)
-
-        self.allocator: MemoryAllocatorInterface
-        if use_paging:
-            assert "shapes" in kwargs, (
-                "shapes must be specified for paged memory allocator"
-            )
-            assert "dtypes" in kwargs, (
-                "dtypes must be specified for paged memory allocator"
-            )
-            assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
-            self.allocator = PagedTensorMemoryAllocator(
-                tensor=self.tensor,
-                shapes=kwargs["shapes"],
-                dtypes=kwargs["dtypes"],
-                fmt=kwargs["fmt"],
-            )
-        else:
-            kwargs = {}
-            if align_bytes is not None:
-                kwargs["align_bytes"] = align_bytes
-            self.allocator = TensorMemoryAllocator(self.tensor, **kwargs)
-
-        self.device_mem_lock = threading.Lock() if not use_paging else nullcontext()
-
-    @_lmcache_nvtx_annotate
-    def allocate(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        allocator_type: Optional[str] = None,
-    ) -> Optional[MemoryObj]:
-        with self.device_mem_lock:
-            return self.allocator.allocate(shapes, dtypes, fmt, str(self))
-
-    @_lmcache_nvtx_annotate
-    def batched_allocate(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-        batch_size: int,
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        allocator_type: Optional[str] = None,
-    ) -> Optional[List[MemoryObj]]:
-        with self.device_mem_lock:
-            return self.allocator.batched_allocate(
-                shapes, dtypes, batch_size, fmt, str(self)
-            )
-
-    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
-        with self.device_mem_lock:
-            self.allocator.free(memory_obj)
-
-    def batched_free(
-        self,
-        memory_objs: List[MemoryObj],
-        allocator_type: Optional[str] = None,
-        update_stats: bool = True,
-    ):
-        with self.device_mem_lock:
-            self.allocator.batched_free(memory_objs)
-
-    def memcheck(self):
-        with self.device_mem_lock:
-            return self.allocator.memcheck()
-
-    def __str__(self):
-        return "GPUMemoryAllocator"
-
-
-class AdHocMemoryAllocator(MemoryAllocatorInterface):
-    """
-    AdHocMemoryAllocator is a simple allocator that does not actually
-    allocate memory. It is used for testing purposes only.
-    """
-
-    def __init__(self, device: str = "cpu"):
-        """
-        :param str device: The device of the ad hoc memory allocator.
-        """
-        if not torch.cuda.is_available():
-            self.device = "cpu"
-        else:
-            self.device = device
-
-    @_lmcache_nvtx_annotate
-    def allocate(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        allocator_type: Optional[str] = None,
-    ) -> Optional[MemoryObj]:
-        """
-        Returns a dummy MemoryObj for testing purposes.
-        """
-        shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
-        size = get_size_bytes(shapes, dtypes)
-
-        # Return a dummy object with no actual memory allocation
-        return TensorMemoryObj(
-            raw_data=torch.empty(
-                torch.Size([size]), dtype=torch.uint8, device=self.device
-            ),
-            metadata=MemoryObjMetadata(
-                shape=shapes[0],
-                dtype=dtypes[0],
-                address=0,
-                phy_size=0,
-                ref_count=1,
-                pin_count=0,
-                fmt=fmt,
-                shapes=shapes,
-                dtypes=dtypes,
-            ),
-            parent_allocator=self,
-        )
-
-    @_lmcache_nvtx_annotate
-    def batched_allocate(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-        batch_size: int,
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        allocator_type: Optional[str] = None,
-    ) -> Optional[List[MemoryObj]]:
-        raise NotImplementedError(
-            "Batched allocation is not supported in AdHocMemoryAllocator"
-        )
-
-    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
-        pass
-
-    def batched_free(
-        self,
-        memory_objs: List[MemoryObj],
-        allocator_type: Optional[str] = None,
-        update_stats: bool = True,
-    ):
-        pass
-
-    def ref_count_up(self, memory_obj: MemoryObj):
-        pass
-
-    def ref_count_down(self, memory_obj: MemoryObj):
-        pass
-
-    def get_ref_count(self, memory_obj: MemoryObj):
-        return 0
-
-    def memcheck(self):
-        return True
-
-    def __str__(self):
-        return "AdHocMemoryAllocator"
-
-
-class CuFileMemoryAllocator(GPUMemoryAllocator):
-    def __init__(self, size: int, device=None):
-        # HACK(Jiayi): cufile import is buggy on some hardware
-        # (e.g., without GPUDirect), so it's temporarily put here.
-        # Third Party
-        from cufile.bindings import cuFileBufDeregister, cuFileBufRegister
-
-        self.cuFileBufDeregister = cuFileBufDeregister
-        if device is None:
-            # TODO(Serapheim): Ideally we'd get the device from the upper
-            # layer - for now just use the current device.
-            if torch.cuda.is_available():
-                device = f"cuda:{torch.cuda.current_device()}"
-            else:
-                device = "cpu:0"
-        super().__init__(size, device, align_bytes=4096)
-        self.base_pointer = self.tensor.data_ptr()
-        cuFileBufRegister(ctypes.c_void_p(self.base_pointer), size, flags=0)
-
-    def __del__(self):
-        self.cuFileBufDeregister(ctypes.c_void_p(self.base_pointer))
-
-    def __str__(self):
-        return "CuFileMemoryAllocator"
-
-
-class HipFileMemoryAllocator(GPUMemoryAllocator):
-    def __init__(self, size: int, device=None):
-        # HACK: hipfile import is placed here to avoid import errors on
-        # hardware without GPUDirect Storage / hipFile support.
-        # Third Party
-        from hipfile.bindings import hipFileBufDeregister, hipFileBufRegister
-
-        self.hipFileBufDeregister = hipFileBufDeregister
-        if device is None:
-            if torch.cuda.is_available():
-                # TODO: On ROCm, PyTorch still uses the CUDA API internally
-                device = f"cuda:{torch.cuda.current_device()}"
-            else:
-                device = "cpu:0"
-
-        super().__init__(size, device, align_bytes=4096)
-        self.base_pointer = self.tensor.data_ptr()
-        hipFileBufRegister(ctypes.c_void_p(self.base_pointer), size, flags=0)
-
-    def __del__(self):
-        self.hipFileBufDeregister(ctypes.c_void_p(self.base_pointer))
-
-    def __str__(self):
-        return "HipFileMemoryAllocator"
-
-
-class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
-    """
-    Paged Memory Allocator for both CPU and GPU memory.
-    This is a paged memory allocator for PD and P2P sharing
-    when NIXL is enabled as NIXL relies on the paging abstraction.
-    """
-
-    def __init__(self):
-        pass
-
-    def init_gpu_memory_allocator(
-        self,
-        size: int,
-        shapes: list[torch.Size],
-        dtypes: list[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        device: str = "cuda",
-    ):
-        self.gpu_buffer = torch.empty(
-            size,
-            dtype=torch.uint8,
-            device=device,
-        )
-        self.gpu_allocator = PagedTensorMemoryAllocator(
-            self.gpu_buffer,
-            shapes,
-            dtypes,
-            fmt,
-        )
-
-    def init_cpu_memory_allocator(
-        self,
-        size: int,
-        shapes: list[torch.Size],
-        dtypes: list[torch.dtype],
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        numa_mapping: Optional[NUMAMapping] = None,
-    ):
-        self.cpu_buffer = _allocate_cpu_memory(size, numa_mapping)
-        self.cpu_allocator = PagedTensorMemoryAllocator(
-            self.cpu_buffer,
-            shapes,
-            dtypes,
-            fmt,
-        )
-        self.align_bytes = self.cpu_allocator.align_bytes
-
-    def allocate(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-        fmt: MemoryFormat = MemoryFormat.UNDEFINED,
-        allocator_type: Optional[str] = "cpu",
-    ) -> Optional[MemoryObj]:
-        if allocator_type == "gpu":
-            return self.gpu_allocator.allocate(shapes, dtypes, fmt)
-        elif allocator_type == "cpu":
-            return self.cpu_allocator.allocate(shapes, dtypes, fmt)
-        else:
-            raise ValueError(f"Unsupported allocator type: {allocator_type}")
-
-    def batched_allocate(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-        batch_size: int,
-        fmt: MemoryFormat = MemoryFormat.UNDEFINED,
-        allocator_type: Optional[str] = "gpu",
-    ) -> Optional[List[MemoryObj]]:
-        if allocator_type == "gpu":
-            return self.gpu_allocator.batched_allocate(shapes, dtypes, batch_size, fmt)
-        elif allocator_type == "cpu":
-            return self.cpu_allocator.batched_allocate(shapes, dtypes, batch_size, fmt)
-        else:
-            raise ValueError(f"Unsupported allocator type: {allocator_type}")
-
-    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = "cpu"):
-        if allocator_type == "gpu":
-            self.gpu_allocator.free(memory_obj)
-        elif allocator_type == "cpu":
-            self.cpu_allocator.free(memory_obj)
-        else:
-            raise ValueError(f"Unsupported allocator type: {allocator_type}")
-
-    def batched_free(
-        self,
-        memory_objs: List[MemoryObj],
-        allocator_type: Optional[str] = None,
-        update_stats: bool = True,
-    ):
-        if allocator_type == "gpu":
-            self.gpu_allocator.batched_free(memory_objs, update_stats=update_stats)
-        elif allocator_type == "cpu":
-            self.cpu_allocator.batched_free(memory_objs, update_stats=update_stats)
-        else:
-            raise ValueError(f"Unsupported allocator type: {allocator_type}")
-
-    def __str__(self):
-        return "PDMemoryAllocator"
-
-
-class XPUMemoryAllocator(MemoryAllocatorInterface):
-    """Allocates memory in the pre-allocated XPU memory."""
-
-    def __init__(
-        self,
-        size: int,
-        device="xpu",
-        align_bytes: Optional[int] = None,
-        use_paging: bool = False,
-        **kwargs,
-    ):
-        self.tensor = torch.empty((size,), dtype=torch.uint8, device=device)
-
-        self.allocator: MemoryAllocatorInterface
-        if use_paging:
-            assert "shapes" in kwargs, (
-                "shapes must be specified for paged memory allocator"
-            )
-            assert "dtypes" in kwargs, (
-                "dtypes must be specified for paged memory allocator"
-            )
-            assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
-            self.allocator = PagedTensorMemoryAllocator(
-                tensor=self.tensor,
-                shapes=kwargs["shapes"],
-                dtypes=kwargs["dtypes"],
-                fmt=kwargs["fmt"],
-            )
-        else:
-            alloc_kwargs = {}
-            if align_bytes is not None:
-                alloc_kwargs["align_bytes"] = align_bytes
-            self.allocator = TensorMemoryAllocator(self.tensor, **alloc_kwargs)
-
-        self.device_mem_lock = threading.Lock() if not use_paging else nullcontext()
-
-    @_lmcache_nvtx_annotate
-    def allocate(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        allocator_type: Optional[str] = None,
-    ) -> Optional[MemoryObj]:
-        with self.device_mem_lock:
-            return self.allocator.allocate(shapes, dtypes, fmt, str(self))
-
-    @_lmcache_nvtx_annotate
-    def batched_allocate(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-        batch_size: int,
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        allocator_type: Optional[str] = None,
-    ) -> Optional[List[MemoryObj]]:
-        with self.device_mem_lock:
-            return self.allocator.batched_allocate(
-                shapes, dtypes, batch_size, fmt, str(self)
-            )
-
-    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
-        with self.device_mem_lock:
-            self.allocator.free(memory_obj)
-
-    def batched_free(
-        self,
-        memory_objs: List[MemoryObj],
-        allocator_type: Optional[str] = None,
-        update_stats: bool = True,
-    ):
-        with self.device_mem_lock:
-            self.allocator.batched_free(memory_objs)
-
-    def memcheck(self):
-        with self.device_mem_lock:
-            return self.allocator.memcheck()
-
-    def close(self):
-        if hasattr(torch, "xpu") and torch.xpu.is_available():
-            torch.xpu.synchronize()
-
-    def __str__(self):
-        return "XPUMemoryAllocator"
+_CORE_EXPORTS = [
+    "AddressManager",
+    "BytesBufferMemoryObj",
+    "FreeBlock",
+    "GDSMemoryObject",
+    "MemoryAllocatorInterface",
+    "MemoryFormat",
+    "MemoryObj",
+    "MemoryObjMetadata",
+    "TensorMemoryObj",
+    "torch_device_type",
+]
+
+__all__ = list(_CORE_EXPORTS)

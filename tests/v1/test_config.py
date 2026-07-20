@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from pathlib import Path
+from typing import Any, cast
 import os
 
 # Third Party
 import pytest
 
 # First Party
-from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.config import LMCacheEngineConfig, load_ec_engine_config
 from lmcache.v1.config_base import apply_remote_configs, validate_and_set_config_value
 
 BASE_DIR = Path(__file__).parent
@@ -35,6 +36,58 @@ def check_extra_config(config: "LMCacheEngineConfig"):
     assert len(config.extra_config) == 2
     assert config.extra_config["key1"] == "value1"
     assert config.extra_config["key2"] == "value2"
+
+
+def test_load_ec_engine_config_prefixed_file_and_env_overrides(
+    tmp_path: Path,
+    monkeypatch,
+):
+    config_path = tmp_path / "lmcache.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "chunk_size: 256",
+                "local_disk: /tmp/base-disk",
+                "max_local_disk_size: 2",
+                "ec_chunk_size: 1024",
+                "ec_local_disk: /tmp/ec-disk",
+                "ec_max_local_disk_size: 4",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("LMCACHE_CONFIG_FILE", str(config_path))
+    monkeypatch.setenv("LMCACHE_EC_CHUNK_SIZE", "1536")
+    monkeypatch.setenv("LMCACHE_EC_REMOTE_URL", "http://ec.example.com")
+
+    base_config = LMCacheEngineConfig.from_file(config_path)
+    ec_config = cast(Any, load_ec_engine_config(base_config=base_config))
+
+    assert base_config.chunk_size == 256
+    assert base_config.local_disk == "/tmp/base-disk"
+    assert base_config.max_local_disk_size == 2
+
+    assert ec_config.chunk_size == 1536
+    assert ec_config.local_disk == "/tmp/ec-disk"
+    assert ec_config.max_local_disk_size == 4
+    assert ec_config.remote_url == "http://ec.example.com"
+
+
+def test_load_ec_engine_config_applies_storage_defaults():
+    base_config = LMCacheEngineConfig.from_defaults(
+        enable_pd=False,
+        local_cpu=False,
+        max_local_cpu_size=0,
+        local_disk="/tmp/ec-disk",
+        max_local_disk_size=0,
+    )
+
+    ec_config = cast(Any, load_ec_engine_config(base_config=base_config))
+
+    assert ec_config.local_cpu is True
+    assert ec_config.max_local_cpu_size == 1
+    assert ec_config.max_local_disk_size == 64
 
 
 def test_update_config_from_env_basic():
@@ -683,6 +736,59 @@ class TestValidateAndSetConfigValueTypeConversion:
         assert result is False
 
 
+def test_lmcache_get_or_create_config_validates_pd_settings():
+    # First Party
+    from lmcache.integration.vllm.utils import lmcache_get_or_create_config
+    import lmcache.integration.vllm.utils as vllm_utils
+
+    os.environ["LMCACHE_ENABLE_PD"] = "true"
+    os.environ["LMCACHE_PD_ROLE"] = "sender"
+    os.environ["LMCACHE_PD_BUFFER_SIZE"] = "1024"
+    os.environ["LMCACHE_PD_BUFFER_DEVICE"] = "cpu"
+    os.environ.pop("LMCACHE_CONFIG_FILE", None)
+    os.environ.pop("LMCACHE_SAVE_UNFULL_CHUNK", None)
+
+    # Reset singleton so we get a fresh config
+    old_instance = vllm_utils._config_instance
+    vllm_utils._config_instance = None
+
+    try:
+        config = lmcache_get_or_create_config()
+        assert config.save_unfull_chunk is True, (
+            "validate() was not called — save_unfull_chunk should be "
+            "auto-set to True for P/D mode"
+        )
+    finally:
+        vllm_utils._config_instance = old_instance
+        del os.environ["LMCACHE_ENABLE_PD"]
+        del os.environ["LMCACHE_PD_ROLE"]
+        del os.environ["LMCACHE_PD_BUFFER_SIZE"]
+        del os.environ["LMCACHE_PD_BUFFER_DEVICE"]
+
+
+def test_sglang_lmcache_get_config_validates_pd_settings(tmp_path):
+    # First Party
+    from lmcache.integration.sglang.utils import lmcache_get_config
+
+    config_path = tmp_path / "lmcache_pd.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "enable_pd: true",
+                "pd_role: sender",
+                "pd_buffer_size: 1024",
+                "pd_buffer_device: cpu",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config = lmcache_get_config(str(config_path))
+    assert config.save_unfull_chunk is True, (
+        "validate() was not called — save_unfull_chunk should be "
+        "auto-set to True for P/D mode"
+    )
+
+
 def test_update_config_from_env_calls_validate():
     """Test that update_config_from_env() calls validate() method.
 
@@ -715,3 +821,233 @@ def test_update_config_from_env_calls_validate():
         del os.environ["LMCACHE_PD_BUFFER_SIZE"]
         del os.environ["LMCACHE_PD_BUFFER_DEVICE"]
         del os.environ["LMCACHE_SAVE_UNFULL_CHUNK"]
+
+
+class TestControllerConfigValidation:
+    """Test validation of required controller fields when enable_controller=True."""
+
+    def _make_controller_config(self, **overrides):
+        """Create a config with controller enabled and all required fields set.
+
+        Override specific fields to None to test individual validation checks.
+        Note: lmcache_instance_id is auto-generated in __post_init__ if None,
+        so we set it after construction to test the validation path.
+        """
+        defaults = dict(
+            enable_controller=True,
+            controller_pull_url="tcp://localhost:5555",
+            controller_reply_url="tcp://localhost:5556",
+            lmcache_worker_ports=[8000],
+        )
+        # lmcache_instance_id must be set after construction because
+        # __post_init__ auto-generates it when None
+        instance_id = overrides.pop("lmcache_instance_id", "instance-1")
+        defaults.update(overrides)
+        config = LMCacheEngineConfig.from_defaults(**defaults)
+        config.lmcache_instance_id = instance_id
+        return config
+
+    def test_controller_requires_lmcache_instance_id(self):
+        config = self._make_controller_config(lmcache_instance_id=None)
+        with pytest.raises(ValueError, match="lmcache_instance_id"):
+            config.validate()
+
+    def test_controller_requires_controller_pull_url(self):
+        config = self._make_controller_config(controller_pull_url=None)
+        with pytest.raises(ValueError, match="controller_pull_url"):
+            config.validate()
+
+    def test_controller_requires_controller_reply_url(self):
+        config = self._make_controller_config(controller_reply_url=None)
+        with pytest.raises(ValueError, match="controller_reply_url"):
+            config.validate()
+
+    def test_controller_requires_lmcache_worker_ports(self):
+        config = self._make_controller_config(lmcache_worker_ports=None)
+        with pytest.raises(ValueError, match="lmcache_worker_ports"):
+            config.validate()
+
+    def test_controller_rejects_empty_worker_ports(self):
+        config = self._make_controller_config(lmcache_worker_ports=[])
+        with pytest.raises(ValueError, match="cannot be empty"):
+            config.validate()
+
+    def test_controller_valid_config_no_error(self):
+        config = self._make_controller_config()
+        config.validate()  # Should not raise
+
+    def test_controller_disabled_no_error(self):
+        config = LMCacheEngineConfig.from_defaults(
+            enable_controller=False,
+        )
+        # All controller fields are None by default; should not raise
+        config.validate()
+
+
+class TestNixlBufferDeviceCpuValidation:
+    """Validate the rejection of nixl_buffer_size in CPU mode and the
+    max_local_cpu_size requirement (see review item #1)."""
+
+    @staticmethod
+    def _nixl_cpu_defaults(**overrides: Any) -> LMCacheEngineConfig:
+        config = LMCacheEngineConfig.from_defaults()
+        config.nixl_buffer_device = "cpu"
+        config.extra_config = {
+            "enable_nixl_storage": True,
+            "nixl_backend": "POSIX",
+            "nixl_pool_size": 2,
+            "nixl_path": "/tmp/nixl/cache",
+        }
+        for key, value in overrides.items():
+            setattr(config, key, value)
+        return config
+
+    def test_cpu_mode_rejects_nixl_buffer_size(self):
+        config = self._nixl_cpu_defaults(nixl_buffer_size=2**30)
+        with pytest.raises(ValueError, match="nixl_buffer_size must not be set"):
+            config.validate()
+
+    def test_cpu_mode_requires_max_local_cpu_size_positive(self):
+        config = self._nixl_cpu_defaults(max_local_cpu_size=0.0)
+        with pytest.raises(ValueError, match="max_local_cpu_size > 0"):
+            config.validate()
+
+    def test_cpu_mode_valid_when_buffer_size_unset(self):
+        config = self._nixl_cpu_defaults()
+        config.validate()  # Should not raise
+
+    def test_gpu_mode_still_requires_nixl_buffer_size(self):
+        config = self._nixl_cpu_defaults(nixl_buffer_device="cuda")
+        with pytest.raises(AssertionError):
+            config.validate()
+
+    def test_gpu_mode_accepts_nixl_buffer_size(self):
+        config = self._nixl_cpu_defaults(
+            nixl_buffer_device="cuda", nixl_buffer_size=2**30
+        )
+        config.validate()  # Should not raise
+
+    def test_cpu_mode_rejects_enable_p2p(self):
+        """P2P and the NIXL storage backend would both run NIXL agents over
+        LocalCPUBackend's pinned pool when nixl_buffer_device=cpu. The
+        combination is structurally supported but has no CI coverage and
+        has not been exercised end-to-end; reject until it has been."""
+        config = self._nixl_cpu_defaults()
+        # enable_p2p has its own validate() preconditions (controller URLs,
+        # peer ports, transfer_channel); set them so we hit the NIXL block.
+        config.enable_p2p = True
+        config.enable_controller = True
+        config.controller_pull_url = "tcp://localhost:9001"
+        config.controller_reply_url = "tcp://localhost:9002"
+        config.lmcache_instance_id = "test"
+        config.lmcache_worker_ports = [9000]
+        config.p2p_host = "localhost"
+        config.p2p_init_ports = [9003]
+        config.p2p_lookup_ports = [9004]
+        config.transfer_channel = "nixl"
+        with pytest.raises(ValueError, match="has not been validated end-to-end"):
+            config.validate()
+
+    def test_gpu_mode_accepts_enable_p2p(self):
+        """The P2P + NIXL storage combo is only rejected in CPU mode; the
+        GPU-mode path doesn't touch LocalCPUBackend's allocator."""
+        config = self._nixl_cpu_defaults(
+            nixl_buffer_device="cuda", nixl_buffer_size=2**30
+        )
+        config.enable_p2p = True
+        config.enable_controller = True
+        config.controller_pull_url = "tcp://localhost:9001"
+        config.controller_reply_url = "tcp://localhost:9002"
+        config.lmcache_instance_id = "test"
+        config.lmcache_worker_ports = [9000]
+        config.p2p_host = "localhost"
+        config.p2p_init_ports = [9003]
+        config.p2p_lookup_ports = [9004]
+        config.transfer_channel = "nixl"
+        config.validate()  # Should not raise
+
+
+class TestNixlUseHugepagesDeprecation:
+    """Validate the deprecation alias for extra_config.nixl_use_hugepages.
+
+    The flag is replaced by the top-level local_cpu_use_hugepages: hugepages
+    have never applied to GPU buffers, and in CPU mode the NIXL pool is now
+    owned by LocalCPUBackend. validate() must alias the value into
+    local_cpu_use_hugepages in CPU mode, warn in GPU mode, and pop the
+    deprecated key in both cases (see review item #2).
+    """
+
+    @staticmethod
+    def _nixl_cpu_defaults(**overrides: Any) -> LMCacheEngineConfig:
+        config = LMCacheEngineConfig.from_defaults()
+        config.nixl_buffer_device = "cpu"
+        config.extra_config = {
+            "enable_nixl_storage": True,
+            "nixl_backend": "POSIX",
+            "nixl_pool_size": 2,
+            "nixl_path": "/tmp/nixl/cache",
+        }
+        for key, value in overrides.items():
+            setattr(config, key, value)
+        return config
+
+    def test_cpu_mode_aliases_to_local_cpu_use_hugepages(self):
+        config = self._nixl_cpu_defaults()
+        config.extra_config["nixl_use_hugepages"] = True
+        assert config.local_cpu_use_hugepages is False  # default
+        config.validate()
+        assert config.local_cpu_use_hugepages is True
+        assert "nixl_use_hugepages" not in config.extra_config
+
+    def test_cpu_mode_conflicting_values_raise(self):
+        config = LMCacheEngineConfig.from_defaults(local_cpu_use_hugepages=False)
+        config.nixl_buffer_device = "cpu"
+        config.extra_config = {
+            "enable_nixl_storage": True,
+            "nixl_backend": "POSIX",
+            "nixl_pool_size": 2,
+            "nixl_path": "/tmp/nixl/cache",
+            "nixl_use_hugepages": True,
+        }
+        with pytest.raises(ValueError, match="Conflicting hugepage settings"):
+            config.validate()
+
+    def test_cpu_mode_agreeing_values_no_conflict(self):
+        config = LMCacheEngineConfig.from_defaults(local_cpu_use_hugepages=True)
+        config.nixl_buffer_device = "cpu"
+        config.extra_config = {
+            "enable_nixl_storage": True,
+            "nixl_backend": "POSIX",
+            "nixl_pool_size": 2,
+            "nixl_path": "/tmp/nixl/cache",
+            "nixl_use_hugepages": True,
+        }
+        config.validate()
+        assert config.local_cpu_use_hugepages is True
+        assert "nixl_use_hugepages" not in config.extra_config
+
+    def test_gpu_mode_drops_flag_without_aliasing(self):
+        """In GPU mode the flag was always a no-op; alias would be misleading
+        (LocalCPUBackend's hugepages should not be toggled by a NIXL knob in
+        a GPU-only deployment). Just drop it with a warning."""
+        config = self._nixl_cpu_defaults(
+            nixl_buffer_device="cuda", nixl_buffer_size=2**30
+        )
+        config.extra_config["nixl_use_hugepages"] = True
+        config.validate()
+        assert config.local_cpu_use_hugepages is False  # unchanged
+        assert "nixl_use_hugepages" not in config.extra_config
+
+    def test_flag_absent_is_noop(self):
+        """No-op when the deprecated flag isn't set; local_cpu_use_hugepages
+        keeps whatever value the user set."""
+        config = LMCacheEngineConfig.from_defaults(local_cpu_use_hugepages=True)
+        config.nixl_buffer_device = "cpu"
+        config.extra_config = {
+            "enable_nixl_storage": True,
+            "nixl_backend": "POSIX",
+            "nixl_pool_size": 2,
+            "nixl_path": "/tmp/nixl/cache",
+        }
+        config.validate()
+        assert config.local_cpu_use_hugepages is True

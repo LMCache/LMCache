@@ -357,6 +357,59 @@ class TestStoreControllerSingleAdapter:
         ctrl.stop()
         adapter.close()
 
+    def test_multiple_concurrent_requests_same_adapter(self, l1_manager):
+        """Each L1-write batch produces an independent in-flight store request.
+
+        When two batches target the same adapter, the adapter's single
+        eventfd may batch-signal both completions. All in-flight requests
+        should be advanced and their L1 read locks released.
+        """
+        adapter = make_adapter()
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy(),
+        )
+        ctrl.start()
+
+        layout = make_layout()
+        batch_a = [make_object_key(i) for i in range(3)]
+        batch_b = [make_object_key(i) for i in range(3, 6)]
+
+        write_keys_to_l1(l1_manager, batch_a, layout)
+        write_keys_to_l1(l1_manager, batch_b, layout)
+
+        all_keys = batch_a + batch_b
+        ok = wait_for_condition(
+            lambda: all(adapter.debug_has_key(k) for k in all_keys),
+            timeout=5.0,
+        )
+        assert ok, "Both batches should reach L2"
+
+        # Every key must be updatable: read locks from both requests released.
+        # ``reserve_write`` acquires a write lock on success, so release it
+        # via ``finish_write`` after each successful check — otherwise the
+        # second poll would find already-locked keys and time out.
+        def all_keys_updatable() -> bool:
+            for k in all_keys:
+                result = l1_manager.reserve_write(
+                    keys=[k],
+                    is_temporary=[False],
+                    layout_desc=layout,
+                    mode="update",
+                )
+                if result[k][1] is None:
+                    return False
+                l1_manager.finish_write([k])
+            return True
+
+        ok = wait_for_condition(all_keys_updatable, timeout=5.0)
+        assert ok, "Read locks must be released for every concurrent request"
+
+        ctrl.stop()
+        adapter.close()
+
 
 class TestStoreControllerMultipleAdapters:
     """Test StoreController with multiple L2 adapters."""

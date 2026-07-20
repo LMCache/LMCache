@@ -47,3 +47,9 @@ func derefFloat64(p *float64, def float64) float64 {
 	}
 	return def
 }
+
+// RESPAuthSecretName returns the name of the managed local copy of the
+// RESP auth secret for a given LMCacheEngine.
+func RESPAuthSecretName(engineName string) string {
+	return engineName + "-resp-auth"
+}

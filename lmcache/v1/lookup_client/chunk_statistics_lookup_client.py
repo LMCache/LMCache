@@ -1,23 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
-
 # Standard
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 import threading
 import time
-
-# Third Party
-import torch
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.observability import PrometheusLogger
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.lookup_client.abstract_client import LookupClientInterface
 from lmcache.v1.lookup_client.record_strategies import (
     AsyncRecorder,
-    RecordStrategy,
     create_record_strategy,
 )
+
+if TYPE_CHECKING:
+    # Third Party
+    import torch
+
+    # First Party
+    from lmcache.v1.config import LMCacheEngineConfig
+    from lmcache.v1.lookup_client.record_strategies import RecordStrategy
+    from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 
@@ -28,9 +31,12 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
     def __init__(
         self,
         actual_lookup_client: LookupClientInterface,
-        config: LMCacheEngineConfig,
-    ):
+        config: "LMCacheEngineConfig",
+        metadata: Optional["LMCacheMetadata"] = None,
+    ) -> None:
         self.actual_lookup_client = actual_lookup_client
+        self.config = config
+        self.metadata = metadata
         self.lock = threading.RLock()
         self.chunk_size = config.chunk_size
         self.enabled = False
@@ -46,7 +52,7 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
         self.enable_auto_exit = (
             self.timeout_hours > 0.0 or self.target_unique_chunks > 0
         )
-        strategy: RecordStrategy = create_record_strategy(config)
+        strategy: "RecordStrategy" = create_record_strategy(config)
         self.recorder = AsyncRecorder(
             strategy=strategy,
             queue_capacity=config.get_extra_config_value(
@@ -116,7 +122,7 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
 
     def lookup(
         self,
-        token_ids: Union[torch.Tensor, list[int]],
+        token_ids: Union["torch.Tensor", list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
     ) -> Optional[int]:
@@ -188,13 +194,18 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
         if self.enabled:
             self.stop_statistics()
 
-    def _setup_metrics(self):
-        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
-        if prometheus_logger is not None:
-            prometheus_logger.chunk_statistics_enabled.set_function(
-                lambda: 1.0 if self.enabled else 0.0
-            )
-            prometheus_logger.chunk_statistics_total_requests.set_function(
-                lambda: len(self.request_seen)
-            )
-            self.recorder.strategy.setup_metrics(prometheus_logger)
+    def _setup_metrics(self) -> None:
+        if self.metadata is None:
+            return
+
+        prometheus_logger = PrometheusLogger.GetOrCreate(
+            self.metadata,
+            config=self.config,
+        )
+        prometheus_logger.chunk_statistics_enabled.set_function(
+            lambda: 1.0 if self.enabled else 0.0
+        )
+        prometheus_logger.chunk_statistics_total_requests.set_function(
+            lambda: len(self.request_seen)
+        )
+        self.recorder.strategy.setup_metrics(prometheus_logger)

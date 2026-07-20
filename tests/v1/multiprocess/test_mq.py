@@ -12,10 +12,10 @@ import torch
 import zmq
 
 # First Party
+from lmcache.utils import EngineType
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
-    CudaIPCWrapper,
-    IPCCacheEngineKey,
+    IPCCacheServerKey,
 )
 from lmcache.v1.multiprocess.mq import (
     BlockingRequestHandler,
@@ -28,6 +28,7 @@ from lmcache.v1.multiprocess.protocol import (
     get_payload_classes,
 )
 from lmcache.v1.multiprocess.server import add_handler_helper
+from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
 
 # Test helpers
 from tests.v1.multiprocess import test_mq_handler_helpers
@@ -37,13 +38,13 @@ from tests.v1.multiprocess import test_mq_handler_helpers
 # ==============================================================================
 
 
-def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheEngineKey:
+def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheServerKey:
     """
     Create a cache key for testing.
     """
     chunk_size = 256
     token_ids = [index] * chunk_size
-    return IPCCacheEngineKey.from_token_ids(
+    return IPCCacheServerKey.from_token_ids(
         model,
         1,
         0,
@@ -384,7 +385,15 @@ def test_mq_register_kv_cache():
     # Run test with REGISTER_KV_CACHE request
     helper.run_test(
         request_type=RequestType.REGISTER_KV_CACHE,
-        payloads=[gpu_id, kv_cache, "testmodel", 1, {}],
+        payloads=[
+            gpu_id,
+            kv_cache,
+            "testmodel",
+            1,
+            EngineType.VLLM,
+            {"vllm_block_size": 16},
+            [],
+        ],
         expected_response=None,
         num_requests=1,
     )
@@ -440,13 +449,13 @@ def test_mq_unregister_kv_cache_multiple_clients():
 def test_mq_store():
     """
     Test MessageQueue with STORE request type.
-    STORE takes (key: KeyType, gpu_id: int, gpu_block_ids: list[int],
+    STORE takes (key: KeyType, gpu_id: int, gpu_block_ids: list[list[int]],
     event_ipc_handle: bytes) and returns (bytes, bool).
     """
     # Create test key
     key = create_cache_key(0)
     gpu_id = 0
-    gpu_block_ids = [0, 1, 2]
+    gpu_block_ids = [[0, 1, 2]]
     test_handle = b"\x00" * 64
 
     # Create test helper and register handler
@@ -465,13 +474,13 @@ def test_mq_store():
 def test_mq_retrieve():
     """
     Test MessageQueue with RETRIEVE request type.
-    RETRIEVE takes (key: KeyType, gpu_id: int, gpu_block_ids: list[int],
+    RETRIEVE takes (key: KeyType, gpu_id: int, gpu_block_ids: list[list[int]],
     event_ipc_handle: bytes) and returns (bytes, bool).
     """
     # Create test key
     key = create_cache_key(0)
     gpu_id = 0
-    gpu_block_ids = [0, 1, 2]
+    gpu_block_ids = [[0, 1, 2]]
     test_handle = b"\x00" * 64
 
     # Create test helper and register handler
@@ -492,13 +501,14 @@ def test_mq_retrieve():
 def test_mq_lookup():
     """
     Test MessageQueue with LOOKUP request type.
-    LOOKUP takes (key: KeyType) and returns int.
+    LOOKUP takes (key: KeyType, tp_size: int) and returns None.
+    The job is tracked server-side by request_id; poll via QUERY_PREFETCH_STATUS.
     """
     # Create a single test key
     key = create_cache_key(0)
 
-    # Expected response: 1 (dummy handler always returns 1)
-    expected_response = 1
+    # Expected response: None (LOOKUP no longer returns a job_id)
+    expected_response = None
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5564")
@@ -521,8 +531,8 @@ def test_mq_lookup_with_different_key():
     # Create a different test key
     key = create_cache_key(42)
 
-    # Expected response: 1 (dummy handler always returns 1)
-    expected_response = 1
+    # Expected response: None (LOOKUP no longer returns a job_id)
+    expected_response = None
 
     # Create test helper and register handler
     helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5565")
@@ -540,7 +550,7 @@ def test_mq_lookup_with_different_key():
 def test_mq_report_block_allocation():
     """
     Test MessageQueue with REPORT_BLOCK_ALLOCATION request type.
-    REPORT_BLOCK_ALLOCATION takes (records: list[BlockAllocationRecord])
+    REPORT_BLOCK_ALLOCATION takes (instance_id, model_name, records)
     and returns None.
     """
     records = [
@@ -564,7 +574,7 @@ def test_mq_report_block_allocation():
 
     helper.run_test(
         request_type=RequestType.REPORT_BLOCK_ALLOCATION,
-        payloads=[records],
+        payloads=[42, "test-model", records],
         expected_response=None,
         num_requests=1,
     )
@@ -584,10 +594,117 @@ def test_mq_report_block_allocation_empty():
 
     helper.run_test(
         request_type=RequestType.REPORT_BLOCK_ALLOCATION,
-        payloads=[records],
+        payloads=[0, "", records],
         expected_response=None,
         num_requests=1,
     )
+
+
+# ==============================================================================
+# Shared Polling Loop Lifecycle Tests
+# ==============================================================================
+
+
+def test_shared_loop_lifecycle():
+    """
+    Test that multiple clients share a single ClientPollingLoop and
+    that the loop is torn down when all clients close.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.mq import ClientPollingLoop
+
+    context = zmq.Context.instance()
+
+    # No loop before any clients exist
+    assert ClientPollingLoop._instance is None
+
+    client_a = MessageQueueClient("tcp://127.0.0.1:16000", context)
+    client_b = MessageQueueClient("tcp://127.0.0.1:16001", context)
+
+    # Both share the same singleton
+    loop = ClientPollingLoop._instance
+    assert loop is not None
+    assert loop._ref_count == 2
+    assert len(loop._socket_to_client) == 2
+
+    # Close one — loop persists
+    client_a.close()
+    assert ClientPollingLoop._instance is loop
+    assert loop._ref_count == 1
+    assert len(loop._socket_to_client) == 1
+
+    # Close the last — loop is destroyed
+    client_b.close()
+    assert ClientPollingLoop._instance is None
+
+
+def test_shared_loop_dispatch():
+    """
+    Test that the shared polling loop correctly dispatches responses
+    to multiple clients connected to the same server.
+
+    Server and clients run in the same process (different threads),
+    so both clients share one ClientPollingLoop.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.mq import ClientPollingLoop
+
+    server_url = "tcp://127.0.0.1:16020"
+    context = zmq.Context.instance()
+
+    # Start server in-process
+    server = MessageQueueServer(server_url, context)
+    add_handler_helper(server, RequestType.NOOP, test_mq_handler_helpers.noop_handler)
+    server.start()
+
+    try:
+        # Create two clients sharing the same polling loop
+        client_a = MessageQueueClient(server_url, context)
+        client_b = MessageQueueClient(server_url, context)
+
+        loop = ClientPollingLoop._instance
+        assert loop is not None
+        assert loop._ref_count == 2
+
+        # Both clients submit requests concurrently
+        futures_a = [client_a.submit_request(RequestType.NOOP, []) for _ in range(5)]
+        futures_b = [client_b.submit_request(RequestType.NOOP, []) for _ in range(5)]
+
+        # All futures should resolve with the correct response
+        for future in futures_a:
+            assert future.result(timeout=5) == "NOOP_OK"
+        for future in futures_b:
+            assert future.result(timeout=5) == "NOOP_OK"
+
+        client_a.close()
+        client_b.close()
+        assert ClientPollingLoop._instance is None
+    finally:
+        server.close()
+
+
+def test_shared_loop_recreate():
+    """
+    Test that closing all clients and creating new ones starts a fresh loop.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.mq import ClientPollingLoop
+
+    context = zmq.Context.instance()
+
+    client = MessageQueueClient("tcp://127.0.0.1:16010", context)
+    first_loop = ClientPollingLoop._instance
+    assert first_loop is not None
+    client.close()
+    assert ClientPollingLoop._instance is None
+
+    # New client creates a brand-new loop
+    client2 = MessageQueueClient("tcp://127.0.0.1:16011", context)
+    second_loop = ClientPollingLoop._instance
+    assert second_loop is not None
+    assert second_loop is not first_loop
+    client2.close()
+    assert ClientPollingLoop._instance is None
 
 
 # ==============================================================================

@@ -2,11 +2,12 @@
 # Standard
 from pathlib import Path
 from typing import List, Literal, Optional
-import importlib.util
-import pkgutil
 
 # Third Party
 from fastapi import APIRouter
+
+# First Party
+from lmcache.v1.utils.router_discovery import discover_api_routers
 
 APICategory = Literal["common", "vllm", "controller"]
 
@@ -45,15 +46,7 @@ class APIRegistry:
                 continue
 
             category_package = f"{package_name}.{category}"
-
-            for _, module_name, _ in pkgutil.iter_modules([str(category_path)]):
-                if module_name.endswith("_api"):
-                    full_module_name = f"{category_package}.{module_name}"
-                    module = importlib.import_module(full_module_name)
-                    # Include the router if it exists
-                    if hasattr(module, "router") and isinstance(
-                        module.router, APIRouter
-                    ):
-                        self.router.include_router(module.router)
+            for r in discover_api_routers(category_path, category_package):
+                self.router.include_router(r)
 
         self.app.include_router(self.router)

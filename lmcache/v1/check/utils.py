@@ -13,18 +13,13 @@ import torch
 
 # First Party
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.kv_layer_groups import DTYPE_MAP
 
 # Import from lmcache with absolute paths
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
 from lmcache.v1.storage_backend.storage_manager import StorageManager
-
-DTYPE_MAP = {
-    "float32": torch.float32,
-    "float16": torch.float16,
-    "bfloat16": torch.bfloat16,
-}
 
 DEFAULT_KV_DTYPE_STR = "bfloat16"
 DEFAULT_OBJ_SIZE = 1024

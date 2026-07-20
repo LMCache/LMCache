@@ -90,3 +90,66 @@ S3-Specific (in extra_config)
 - Use same region for compute and S3
 
 - Consider S3 Express One Zone for less redundancy but better performance
+
+
+MP Mode Configuration
+---------------------
+
+In multi-process (MP) mode, S3 is configured as an L2 adapter via a JSON
+spec passed to the LMCache server, rather than through ``remote_url`` +
+``extra_config``. Each ``--l2-adapter`` argument takes a JSON object
+whose ``"type": "s3"`` field selects the S3 adapter.
+
+.. code-block:: json
+
+   {
+     "type": "s3",
+     "s3_endpoint": "s3://my-bucket",
+     "s3_region": "us-east-1",
+     "s3_num_io_threads": 64,
+     "s3_prefer_http2": true,
+     "s3_enable_s3express": false,
+     "disable_tls": false,
+     "max_capacity_gb": 500,
+     "eviction": {
+       "eviction_policy": "LRU",
+       "trigger_watermark": 0.85,
+       "eviction_ratio": 0.2
+     }
+   }
+
+S3 L2 Adapter Fields
+~~~~~~~~~~~~~~~~~~~~
+
+* **type** (required): must be ``"s3"``.
+* **s3_endpoint** (required): bucket URL. Accepts either ``s3://bucket`` or
+  the bare host form (e.g. ``bucket.s3.us-east-1.amazonaws.com``).
+* **s3_region** (required): AWS region for the S3 client.
+* **s3_num_io_threads**: number of CRT IO threads (default ``64``).
+* **s3_prefer_http2**: attempt HTTP/2 via ALPN negotiation (default ``true``).
+* **s3_enable_s3express**: enable S3 Express One Zone signing (default ``false``).
+* **disable_tls**: bypass TLS, for non-AWS HTTP endpoints (default ``false``).
+* **aws_access_key_id**, **aws_secret_access_key**: optional static credentials.
+  When omitted the adapter uses the AWS default credentials chain
+  (``aws configure``, environment variables, IRSA, etc.).
+* **max_capacity_gb**: capacity used by ``get_usage()`` for watermark-based
+  L2 eviction. Set to ``0`` (default) to disable usage tracking — ``get_usage()``
+  then returns ``(-1.0, -1.0)`` and no automatic eviction is triggered.
+* **eviction**: optional sub-dict enabling the L2 eviction controller for
+  this adapter. See :class:`L2AdapterConfigBase` ``_parse_eviction_config``
+  for the full schema. When present, keys that are currently being loaded
+  (reference-counted by the lookup-and-lock path) are skipped by
+  ``delete()``.
+
+Differences vs Non-MP S3
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+* The MP adapter honors first-class eviction: it implements ``delete()``
+  (real S3 ``DeleteObject``), refcounted ``submit_unlock``, and
+  ``get_usage()`` driven by ``max_capacity_gb``.
+* Keys are identified by ``ObjectKey`` (``model_name`` + ``kv_rank`` +
+  ``chunk_hash``) rather than ``CacheEngineKey``. The wire-format object
+  name is ``<model>@<kv_rank_hex>@<chunk_hash_hex>``, which is **not**
+  compatible with the non-MP naming. A bucket populated by non-MP LMCache
+  cannot be read directly by MP LMCache and vice versa.
+* Unfull chunks are rejected (same constraint as non-MP).

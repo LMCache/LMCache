@@ -3,7 +3,7 @@
 """Tests for EventBus, EventSubscriber, and singleton management."""
 
 # Standard
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import time
 
 # Third Party
@@ -311,6 +311,126 @@ class TestBackpressure:
 
 
 # ---------------------------------------------------------------------------
+# Self-monitoring accessors
+# ---------------------------------------------------------------------------
+
+
+class TestSelfMonitoring:
+    def test_queue_depth_reports_current_size(self, bus):
+        # Don't start the drain thread so events accumulate.
+        assert bus.queue_depth() == 0
+        for _ in range(3):
+            bus.publish(_make_event())
+        assert bus.queue_depth() == 3
+
+    def test_oldest_event_lag_zero_when_empty(self, bus):
+        assert bus.oldest_event_lag_seconds() == 0.0
+
+    def test_oldest_event_lag_grows_with_age(self, bus):
+        # Don't start drain — let events sit in the queue.
+        bus.publish(_make_event())
+        time.sleep(0.05)
+        lag = bus.oldest_event_lag_seconds()
+        assert lag >= 0.05
+        # Drain via stop() so the bus shuts down cleanly.
+        bus.stop()
+
+    def test_oldest_event_lag_returns_zero_after_drain(self, bus):
+        sub = _RecordingSubscriber()
+        bus.register_subscriber(sub)
+        bus.start()
+        bus.publish(_make_event())
+        time.sleep(0.15)
+        # Drained, queue should be empty.
+        assert bus.oldest_event_lag_seconds() == 0.0
+        bus.stop()
+
+    def test_dropped_events_count_starts_zero(self, bus):
+        assert bus.dropped_events_count() == 0
+
+    def test_dropped_events_count_increments_on_drop(self):
+        b = EventBus(EventBusConfig(enabled=True, max_queue_size=2))
+        # Don't start — nothing drains.
+        for _ in range(5):
+            b.publish(_make_event())
+        assert b.dropped_events_count() == 3
+
+    def test_subscriber_exception_counts_starts_empty(self, bus):
+        assert bus.subscriber_exception_counts() == {}
+
+    def test_subscriber_exception_counts_tracks_bound_methods(self, bus):
+        class _BadSub(EventSubscriber):
+            def get_subscriptions(self):
+                return {EventType.L1_READ_FINISHED: self._on_event}
+
+            def _on_event(self, event):
+                raise RuntimeError("boom")
+
+        bus.register_subscriber(_BadSub())
+        bus.start()
+        bus.publish(_make_event())
+        bus.publish(_make_event())
+        time.sleep(0.15)
+        bus.stop()
+
+        counts = bus.subscriber_exception_counts()
+        assert counts.get("_BadSub") == 2
+
+    def test_subscriber_exception_counts_returns_copy(self, bus):
+        class _BadSub(EventSubscriber):
+            def get_subscriptions(self):
+                return {EventType.L1_READ_FINISHED: self._on_event}
+
+            def _on_event(self, event):
+                raise RuntimeError("boom")
+
+        bus.register_subscriber(_BadSub())
+        bus.start()
+        bus.publish(_make_event())
+        time.sleep(0.15)
+        bus.stop()
+
+        snapshot = bus.subscriber_exception_counts()
+        snapshot["_BadSub"] = 99
+        assert bus.subscriber_exception_counts().get("_BadSub") == 1
+
+    def test_subscriber_exception_counts_uses_qualname_for_free_function(self, bus):
+        def free_callback(event):
+            raise RuntimeError("boom")
+
+        bus.subscribe(EventType.L1_READ_FINISHED, free_callback)
+        bus.start()
+        bus.publish(_make_event())
+        time.sleep(0.15)
+        bus.stop()
+
+        counts = bus.subscriber_exception_counts()
+        # Free functions are labeled by __qualname__, which here lives
+        # inside the test method.
+        assert any("free_callback" in name for name in counts)
+
+    def test_good_subscriber_not_counted(self, bus):
+        class _BadSub(EventSubscriber):
+            def get_subscriptions(self):
+                return {EventType.L1_READ_FINISHED: self._on_event}
+
+            def _on_event(self, event):
+                raise RuntimeError("boom")
+
+        good = _RecordingSubscriber()
+        bus.register_subscriber(_BadSub())
+        bus.register_subscriber(good)
+        bus.start()
+        bus.publish(_make_event())
+        time.sleep(0.15)
+        bus.stop()
+
+        counts = bus.subscriber_exception_counts()
+        assert "_BadSub" in counts
+        assert "_RecordingSubscriber" not in counts
+
+
+# ---------------------------------------------------------------------------
 # Global singleton
 # ---------------------------------------------------------------------------
 
@@ -391,3 +511,29 @@ class TestBlockAllocationEvent:
         bus.stop()
 
         assert len(sub.events) == 0
+
+
+_REGISTER_GAUGE = "lmcache.v1.mp_observability.event_bus.register_gauge"
+
+
+class TestSelfMonitoringGauges:
+    def test_init_registers_both_gauges(self):
+        with patch(_REGISTER_GAUGE) as mock_register:
+            EventBus(EventBusConfig(enabled=True))
+            names = [c.args[1] for c in mock_register.call_args_list]
+            assert set(names) == {
+                "lmcache_mp.event_bus.queue_depth",
+                "lmcache_mp.event_bus.drain_lag_seconds",
+            }
+
+    def test_queue_depth_callback_reflects_bus(self):
+        captured: dict[str, object] = {}
+
+        def _capture(_meter, name, _desc, func):
+            captured[name] = func
+
+        with patch(_REGISTER_GAUGE, side_effect=_capture):
+            bus = EventBus(EventBusConfig(enabled=True))
+            bus.publish(_make_event(session_id="s1"))
+            bus.publish(_make_event(session_id="s2"))
+            assert captured["lmcache_mp.event_bus.queue_depth"]() == 2

@@ -30,8 +30,11 @@ uv pip install -e . --no-build-isolation
 # Standard install with CUDA extensions (requires torch pre-installed)
 pip install -e . --no-build-isolation
 
-# Source-only (no CUDA extensions)
-NO_CUDA_EXT=1 pip install -e .
+# Source-only (no native extensions)
+NO_NATIVE_EXT=1 pip install -e .
+
+# CPU-only (common C++ extensions, no GPU backend)
+NO_GPU_EXT=1 pip install -e . --no-build-isolation
 
 # HIP/ROCm build
 BUILD_WITH_HIP=1 pip install -e .
@@ -44,11 +47,10 @@ BUILD_WITH_HIP=1 pip install -e .
 ```bash
 # Run standard test suite (mirrors CI)
 pytest -xvs --ignore=tests/disagg \
-  --ignore=tests/v1/test_nixl_storage.py \
-  --ignore=tests/v1/multiprocess/ \
-  --ignore=tests/v1/distributed/ \
-  --ignore=tests/skipped \
-  --ignore=tests/v1/storage_backend/test_eic.py
+ --ignore=tests/v1/multiprocess/ \
+ --ignore=tests/v1/distributed/ \
+ --ignore=tests/skipped \
+ --ignore=tests/v1/storage_backend/test_eic.py
 
 # Run a single test file
 pytest -xvs tests/v1/test_cache_engine.py
@@ -125,7 +127,20 @@ Every public function and method must have a clear docstring covering:
 
 ### Writing Documentation
 
-User-facing and design documentation lives in the `docs/source/` directory and is built with **Sphinx**. Documentation files use reStructuredText (`.rst`). When adding or modifying docs, place them in the appropriate subdirectory under `docs/source/` (e.g., `developer_guide/`, `getting_started/`, `kv_cache/`) and make sure any new pages are linked from a `toctree` so they appear in the built site.
+LMCache has three documentation surfaces:
+
+1. **User-facing docs** (`docs/source/`, reStructuredText, Sphinx-built). When adding
+   or modifying user docs, place them in the appropriate subdirectory under
+   `docs/source/` (e.g., `developer_guide/`, `getting_started/`, `kv_cache/`) and link
+   new pages from a `toctree` so they appear in the built site.
+2. **Design docs** (`docs/design/`, Markdown). **`docs/design/` mirrors the `lmcache/`
+   package tree** — a design doc for `lmcache/<path>/` lives at `docs/design/<path>/`.
+   For example, `lmcache/v1/distributed/l2_adapters/` → `docs/design/v1/distributed/l2_adapters/`.
+   When adding a design doc, place it at the path matching the module it describes;
+   when touching existing docs, find them at the mirrored location. See
+   `docs/design/README.md` for the full convention.
+3. **Module READMEs** (`README.md` next to code). Stay in place as user-entry-points;
+   they are symlinked from `docs/design/<path>/README.md`. Do not move them.
 
 When writing or updating documentation, follow these principles:
 

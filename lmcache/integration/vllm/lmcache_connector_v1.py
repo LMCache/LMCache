@@ -66,11 +66,6 @@ class LMCacheConnectorV1Dynamic(KVConnectorBase_V1):
         Args:
             forward_context (ForwardContext): the forward context.
             **kwargs: additional arguments for the load operation
-
-        Note:
-            The number of elements in kv_caches and layer_names should be
-            the same.
-
         """
         self._lmcache_engine.start_load_kv(forward_context, **kwargs)
 

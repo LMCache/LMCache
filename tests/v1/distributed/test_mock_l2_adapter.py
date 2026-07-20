@@ -7,7 +7,6 @@ Tests only use public methods and do not access private fields.
 """
 
 # Standard
-import os
 import select
 import time
 
@@ -16,7 +15,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2AdapterListener
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
@@ -27,6 +26,9 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+from lmcache.v1.platform import consume_fd
+
+_EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
 
 class _RecordingListener(L2AdapterListener):
@@ -37,7 +39,7 @@ class _RecordingListener(L2AdapterListener):
         self.accessed: list[list[ObjectKey]] = []
         self.deleted: list[list[ObjectKey]] = []
 
-    def on_l2_keys_stored(self, keys: list[ObjectKey]):
+    def on_l2_keys_stored(self, keys: list[ObjectKey], sizes: list[int]):
         self.stored.append(list(keys))
 
     def on_l2_keys_accessed(self, keys: list[ObjectKey]):
@@ -88,7 +90,7 @@ def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
     if events:
         # Read and consume the event
         try:
-            os.eventfd_read(event_fd)
+            consume_fd(event_fd)
         except BlockingIOError:
             pass
         return True
@@ -202,7 +204,7 @@ class TestStoreInterface:
         completed = adapter.pop_completed_store_tasks()
 
         assert task_id in completed
-        assert completed[task_id] is True  # Should be successful
+        assert completed[task_id].is_successful()  # Should be successful
 
     def test_pop_completed_store_tasks_clears_completed(self, adapter):
         """pop_completed_store_tasks should clear the completed tasks."""
@@ -244,7 +246,7 @@ class TestStoreInterface:
         # All tasks should be completed
         for task_id in task_ids:
             assert task_id in completed
-            assert completed[task_id] is True
+            assert completed[task_id].is_successful()
 
     def test_store_batch_of_objects(self, adapter):
         """A single store task can store multiple key-object pairs."""
@@ -258,7 +260,7 @@ class TestStoreInterface:
 
         completed = adapter.pop_completed_store_tasks()
         assert task_id in completed
-        assert completed[task_id] is True
+        assert completed[task_id].is_successful()
 
 
 # =============================================================================
@@ -273,7 +275,7 @@ class TestLookupAndLockInterface:
         """submit_lookup_and_lock_task should return a valid task ID."""
         key = create_object_key(1)
 
-        task_id = adapter.submit_lookup_and_lock_task([key])
+        task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
 
         assert isinstance(task_id, int)
 
@@ -282,7 +284,7 @@ class TestLookupAndLockInterface:
         key = create_object_key(1)
         lookup_fd = adapter.get_lookup_and_lock_event_fd()
 
-        adapter.submit_lookup_and_lock_task([key])
+        adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
 
         assert wait_for_event_fd(lookup_fd, timeout=5.0), (
             "Lookup event fd was not signaled within timeout"
@@ -293,7 +295,7 @@ class TestLookupAndLockInterface:
         key = create_object_key(999)  # Never stored
         lookup_fd = adapter.get_lookup_and_lock_event_fd()
 
-        task_id = adapter.submit_lookup_and_lock_task([key])
+        task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         wait_for_event_fd(lookup_fd, timeout=5.0)
 
         bitmap = adapter.query_lookup_and_lock_result(task_id)
@@ -314,7 +316,7 @@ class TestLookupAndLockInterface:
         adapter.pop_completed_store_tasks()
 
         # Now lookup
-        task_id = adapter.submit_lookup_and_lock_task([key])
+        task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         wait_for_event_fd(lookup_fd, timeout=5.0)
 
         bitmap = adapter.query_lookup_and_lock_result(task_id)
@@ -336,7 +338,9 @@ class TestLookupAndLockInterface:
         adapter.pop_completed_store_tasks()
 
         # Lookup both keys
-        task_id = adapter.submit_lookup_and_lock_task([existing_key, nonexistent_key])
+        task_id = adapter.submit_lookup_and_lock_task(
+            [existing_key, nonexistent_key], _EMPTY_LAYOUT
+        )
         wait_for_event_fd(lookup_fd, timeout=5.0)
 
         bitmap = adapter.query_lookup_and_lock_result(task_id)
@@ -355,7 +359,7 @@ class TestLookupAndLockInterface:
         key = create_object_key(1)
         lookup_fd = adapter.get_lookup_and_lock_event_fd()
 
-        task_id = adapter.submit_lookup_and_lock_task([key])
+        task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         wait_for_event_fd(lookup_fd, timeout=5.0)
 
         # First query returns result
@@ -395,7 +399,7 @@ class TestUnlockInterface:
         adapter.pop_completed_store_tasks()
 
         # Lookup and lock
-        task_id = adapter.submit_lookup_and_lock_task([key])
+        task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         wait_for_event_fd(lookup_fd, timeout=5.0)
         adapter.query_lookup_and_lock_result(task_id)
 
@@ -516,10 +520,10 @@ class TestEndToEndWorkflow:
         store_task_id = adapter.submit_store_task([key], [store_obj])
         assert wait_for_event_fd(store_fd, timeout=5.0)
         completed = adapter.pop_completed_store_tasks()
-        assert completed[store_task_id] is True
+        assert completed[store_task_id].is_successful()
 
         # Step 2: Lookup and lock
-        lookup_task_id = adapter.submit_lookup_and_lock_task([key])
+        lookup_task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         lookup_bitmap = adapter.query_lookup_and_lock_result(lookup_task_id)
         assert lookup_bitmap.test(0) is True
@@ -556,10 +560,10 @@ class TestEndToEndWorkflow:
         store_task_id = adapter.submit_store_task(keys, store_objs)
         assert wait_for_event_fd(store_fd, timeout=5.0)
         completed = adapter.pop_completed_store_tasks()
-        assert completed[store_task_id] is True
+        assert completed[store_task_id].is_successful()
 
         # Lookup all
-        lookup_task_id = adapter.submit_lookup_and_lock_task(keys)
+        lookup_task_id = adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         lookup_bitmap = adapter.query_lookup_and_lock_result(lookup_task_id)
         for i in range(num_objects):
@@ -675,7 +679,7 @@ class TestEvictionInterface:
 
         adapter.delete([key])
 
-        task_id = adapter.submit_lookup_and_lock_task([key])
+        task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         bitmap = adapter.query_lookup_and_lock_result(task_id)
         assert bitmap.test(0) is False
@@ -697,27 +701,28 @@ class TestEvictionInterface:
 
         adapter.delete(keys)
 
-        task_id = adapter.submit_lookup_and_lock_task(keys)
+        task_id = adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
         assert wait_for_event_fd(lookup_fd, timeout=5.0)
         bitmap = adapter.query_lookup_and_lock_result(task_id)
         for i in range(len(keys)):
             assert bitmap.test(i) is False
 
     def test_get_usage_empty_adapter_is_zero(self, adapter):
-        """get_usage() on a fresh adapter should return (0.0, 0.0)."""
-        current, projected = adapter.get_usage()
-        assert current == 0.0
-        assert projected == 0.0
+        """get_usage() on a fresh adapter should report 0 bytes."""
+        usage = adapter.get_usage()
+        assert usage.total_bytes_used == 0
+        assert usage.usage_fraction == 0.0
+        assert usage.bytes_by_cache_salt == {}
 
     def test_get_usage_increases_after_store(self, adapter):
-        """get_usage() current value should be > 0 after storing an object."""
+        """get_usage() should report positive bytes after a store."""
         key = create_object_key(1)
         obj = create_memory_obj(size=1024)
         _store_and_wait(adapter, key, obj)
 
-        current, _ = adapter.get_usage()
-        assert current > 0.0
-        assert current <= 1.0
+        usage = adapter.get_usage()
+        assert usage.total_bytes_used > 0
+        assert 0.0 < usage.usage_fraction <= 1.0
 
     def test_get_usage_decreases_after_delete(self, adapter):
         """get_usage() should drop back to 0 after deleting the only stored key."""
@@ -725,13 +730,57 @@ class TestEvictionInterface:
         obj = create_memory_obj(size=1024)
         _store_and_wait(adapter, key, obj)
 
-        usage_before, _ = adapter.get_usage()
-        assert usage_before > 0.0
+        assert adapter.get_usage().total_bytes_used > 0
 
         adapter.delete([key])
 
-        current, _ = adapter.get_usage()
-        assert current == 0.0
+        usage = adapter.get_usage()
+        assert usage.total_bytes_used == 0
+        assert usage.usage_fraction == 0.0
+
+    def test_bytes_by_cache_salt_populated_from_cache_salt(self, adapter):
+        """End-to-end: storing keys with different ``cache_salt`` values
+        should drive the byte buckets in ``AdapterUsage`` — proves the
+        salt actually flows through the real adapter into the base-class
+        accounting (not just verified by the stub tests)."""
+        # Two keys per cache_salt so we know the totals are summed, not
+        # just per-key-overwritten.
+        alice_keys = [
+            ObjectKey(
+                chunk_hash=ObjectKey.IntHash2Bytes(i),
+                model_name="m",
+                kv_rank=0,
+                cache_salt="alice",
+            )
+            for i in (1, 2)
+        ]
+        bob_key = ObjectKey(
+            chunk_hash=ObjectKey.IntHash2Bytes(3),
+            model_name="m",
+            kv_rank=0,
+            cache_salt="bob",
+        )
+        obj = create_memory_obj(size=128)  # 128 floats * 4 bytes = 512 B
+        for k in alice_keys + [bob_key]:
+            _store_and_wait(adapter, k, obj)
+
+        usage = adapter.get_usage()
+        assert usage.bytes_by_cache_salt == {"alice": 1024, "bob": 512}
+        assert usage.total_bytes_used == 1536
+
+        # Deleting one of alice's keys should shrink alice's bucket but
+        # leave bob's untouched.
+        adapter.delete([alice_keys[0]])
+        usage = adapter.get_usage()
+        assert usage.bytes_by_cache_salt == {"alice": 512, "bob": 512}
+        assert usage.total_bytes_used == 1024
+
+        # Deleting alice's last key should drop the bucket entirely so
+        # the snapshot stays compact.
+        adapter.delete([alice_keys[1]])
+        usage = adapter.get_usage()
+        assert "alice" not in usage.bytes_by_cache_salt
+        assert usage.bytes_by_cache_salt == {"bob": 512}
 
     def test_listener_notified_on_store(self, adapter):
         """Listener.on_l2_keys_stored should be called after a store completes."""

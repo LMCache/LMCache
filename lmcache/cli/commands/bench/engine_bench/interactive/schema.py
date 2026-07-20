@@ -90,7 +90,8 @@ ALL_ITEMS: list[ConfigItem] = [
         key="engine_url",
         display_name="Engine URL",
         description=(
-            "URL of the inference engine. "
+            "URL of the inference engine. Enter just a port (e.g. 8000) to "
+            "use http://localhost:8000. "
             "Set OPENAI_API_KEY env var if authentication is needed."
         ),
         input_type="text",
@@ -112,6 +113,10 @@ ALL_ITEMS: list[ConfigItem] = [
             ),
             ("long-doc-qa", "Repeated Q&A over long documents (tests KV cache reuse)"),
             ("multi-round-chat", "Multi-turn chat with stateful sessions"),
+            (
+                "prefix-suffix-tuner",
+                "Two-pass sequential workload demonstrating tiered KV cache reuse",
+            ),
             ("random-prefill", "Prefill-only requests fired simultaneously"),
         ],
         phase=PHASE_REQUIRED,
@@ -131,7 +136,10 @@ ALL_ITEMS: list[ConfigItem] = [
     ConfigItem(
         key="lmcache_url",
         display_name="LMCache Server URL",
-        description="URL of the running LMCache HTTP server.",
+        description=(
+            "URL of the running LMCache HTTP server. Enter just a port "
+            "(e.g. 8080) to use http://localhost:8080."
+        ),
         input_type="text",
         default="http://localhost:8080",
         required=False,
@@ -173,6 +181,18 @@ ALL_ITEMS: list[ConfigItem] = [
         description="Target active KV cache size for the benchmark.",
         input_type="float",
         default=100.0,
+        phase=PHASE_GENERAL,
+    ),
+    ConfigItem(
+        key="ignore_eos",
+        display_name="Ignore EOS",
+        description=(
+            "Force generation to run for the full output length by ignoring "
+            "the model's EOS token (vLLM extension). Makes decode throughput "
+            "reproducible."
+        ),
+        input_type="bool",
+        default=False,
         phase=PHASE_GENERAL,
     ),
     # ── Phase 3: long-doc-permutator ─────────────────────────────────
@@ -262,6 +282,15 @@ ALL_ITEMS: list[ConfigItem] = [
         condition=_workload_is("long-doc-qa"),
         phase=PHASE_WORKLOAD,
     ),
+    ConfigItem(
+        key="ldqa_max_output_length",
+        display_name="Max output length (tokens)",
+        description="Max tokens to generate per benchmark query.",
+        input_type="int",
+        default=128,
+        condition=_workload_is("long-doc-qa"),
+        phase=PHASE_WORKLOAD,
+    ),
     # ── Phase 3: multi-round-chat ─────────────────────────────────────
     ConfigItem(
         key="mrc_shared_prompt_length",
@@ -315,6 +344,43 @@ ALL_ITEMS: list[ConfigItem] = [
         input_type="float",
         default=60.0,
         condition=_workload_is("multi-round-chat"),
+        phase=PHASE_WORKLOAD,
+    ),
+    # ── Phase 3: prefix-suffix-tuner ──────────────────────────────────
+    ConfigItem(
+        key="psf_context_length",
+        display_name="Context length (tokens)",
+        description="Total tokens per request (prefix + breaker + suffix).",
+        input_type="int",
+        default=8000,
+        condition=_workload_is("prefix-suffix-tuner"),
+        phase=PHASE_WORKLOAD,
+    ),
+    ConfigItem(
+        key="psf_prefix_ratio",
+        display_name="Prefix ratio",
+        description=(
+            "Fraction of context-length used by the prefix. Must be in "
+            "(0.0, 1.0). The remainder (minus a 32-token breaker) is the "
+            "shared suffix."
+        ),
+        input_type="float",
+        default=0.8,
+        condition=_workload_is("prefix-suffix-tuner"),
+        phase=PHASE_WORKLOAD,
+    ),
+    ConfigItem(
+        key="psf_thrash",
+        display_name="Target tier size (GB)",
+        description=(
+            "Size in GB of the KV-cache tier to overflow. The prefix pool "
+            "is sized to slightly more than this, so every pass-2 request "
+            "misses the targeted tier. Use the L0 (HBM) size for vanilla "
+            "vLLM, or the L1 (LMCache DRAM) size for tiered baselines."
+        ),
+        input_type="float",
+        default=20.0,
+        condition=_workload_is("prefix-suffix-tuner"),
         phase=PHASE_WORKLOAD,
     ),
     # ── Phase 3: random-prefill ───────────────────────────────────────

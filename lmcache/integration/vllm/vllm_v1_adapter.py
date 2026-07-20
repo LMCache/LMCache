@@ -4,7 +4,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generator, Optional, Union
 import hashlib
+import math
 import os
+import sys
 
 # Third Party
 from vllm.config import (
@@ -28,6 +30,7 @@ import torch
 # Use LMCache's own math utilities instead of vllm's
 # (avoids dependency on vllm internal changes like https://github.com/vllm-project/vllm/pull/27188)
 from lmcache import utils
+from lmcache.banner import print_banner_once
 from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
@@ -86,6 +89,8 @@ class DisaggSpec:
     receiver_alloc_port: int
     is_last_prefill: bool = False
     num_transferred_tokens: int = 0
+    total_chunks: int = 0
+    receiver_query_port: Optional[list[int]] = None
 
 
 tmp_disagg_tracker: dict[str, DisaggSpec] = {}
@@ -431,6 +436,12 @@ class ReqMeta:
                 tracker.req_id,
             )
 
+        # For disagg requests, compute total_chunks for sender admission control.
+        if tracker.disagg_spec is not None and tracker.disagg_spec.total_chunks == 0:
+            # Only compute once (on first batch)
+            total_chunks_for_req = math.ceil(tracker.prompt_len / lmcache_chunk_size)
+            tracker.disagg_spec.total_chunks = total_chunks_for_req
+
         # Note: We keep load_spec even when can_load=False to pass metrics to worker
         return ReqMeta(
             req_id=tracker.req_id,
@@ -465,6 +476,11 @@ class LMCacheConnectorV1Impl:
         role: KVConnectorRole,
         parent: KVConnectorBase_V1,
     ):
+        # Banner from the scheduler role only, so tensor-parallel
+        # deployments print it once rather than once per worker.
+        if role == KVConnectorRole.SCHEDULER:
+            print_banner_once(sys.stderr)
+
         self._parent = parent
         self._vllm_config = vllm_config
         self._role = role
@@ -582,6 +598,20 @@ class LMCacheConnectorV1Impl:
 
         self.force_skip_save = bool(os.environ.get("LMCACHE_FORCE_SKIP_SAVE", False))
         self._requests_priority: dict[str, int] = {}
+
+        # Chunked KV loading: cap the number of external tokens
+        # reported per scheduling step to prevent GPU block pool
+        # exhaustion at high concurrency with long contexts.
+        # Configurable via kv_connector_extra_config:
+        #   "lmcache.max_tokens_per_load": <int>
+        # Default 0 (no cap — original behavior, all matched tokens
+        # reported at once). Set to a positive value (e.g. 131072)
+        # to enable chunked loading.
+        self._max_tokens_per_load: int = int(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.max_tokens_per_load", 0
+            )
+        )
         self._invalid_block_ids: set[int] = set()
 
     def _check_legacy_register_kv_caches(self) -> None:
@@ -628,15 +658,19 @@ class LMCacheConnectorV1Impl:
         """Get the lookup server from manager."""
         return self._manager.lookup_server
 
-    def _setup_metrics(self):
+    def _setup_metrics(self) -> None:
         """Setup metrics for monitoring data structures in the connector."""
-        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
-        if prometheus_logger is None:
+        metadata = self._manager.lmcache_engine_metadata
+        if metadata is None:
             logger.warning(
-                "PrometheusLogger is not initialized, "
+                "LMCache metadata is not initialized, "
                 "connector metrics will not be collected"
             )
             return
+        prometheus_logger = PrometheusLogger.GetOrCreate(
+            metadata,
+            config=self.config,
+        )
 
         # Set up metrics for scheduler-specific and general data structures
         metrics_map = {
@@ -716,15 +750,6 @@ class LMCacheConnectorV1Impl:
         """
         return VLLM_VERSION
 
-    def _build_kv_layer_groups(self):
-        # Build KV layer groups structure if not already built
-        if self.lmcache_engine is not None:
-            assert len(self.kv_caches) > 0
-            kv_layer_groups_manager = (
-                self.lmcache_engine.metadata.kv_layer_groups_manager
-            )
-            kv_layer_groups_manager.build_kv_layer_groups(self.kv_caches)
-
     # TODO(chunxiaozheng): in the latest lmcache_connector, we use `register_kv_caches`
     #  to init self.kv_caches, we keep it in order to be compatible with old versions
     #  and will be removed in the future.
@@ -741,8 +766,6 @@ class LMCacheConnectorV1Impl:
                     forward_context.virtual_engine
                 ]
 
-        self._build_kv_layer_groups()
-
     ####################
     # Worker side APIs
     ####################
@@ -753,7 +776,6 @@ class LMCacheConnectorV1Impl:
         #  not called, we should consider removing it.
         assert len(self.kv_caches) == 0 and len(kv_caches) > 0
         self.kv_caches = kv_caches
-        self._build_kv_layer_groups()
         self._manager.post_init()
 
     @_lmcache_nvtx_annotate
@@ -764,10 +786,6 @@ class LMCacheConnectorV1Impl:
         Args:
             forward_context (ForwardContext): the forward context.
             **kwargs: additional arguments for the load operation
-
-        Note:
-            The number of elements in kv_caches and layer_names should be
-            the same.
         """
         self.current_layer = 0
 
@@ -789,7 +807,10 @@ class LMCacheConnectorV1Impl:
             logger.debug("In connector.start_load_kv, but the attn_metadata is None")
             return
 
-        assert self.lmcache_engine is not None
+        # LMCache failed to initialize and is running in degraded mode; skip the
+        # KV load so vLLM falls back to recompute instead of crashing EngineCore.
+        if self.lmcache_engine is None:
+            return
 
         self.layerwise_retrievers = []
 
@@ -1013,7 +1034,9 @@ class LMCacheConnectorV1Impl:
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
         """
-        assert self.lmcache_engine is not None
+        # Degraded mode (LMCache init failed): nothing to save, fall back silently.
+        if self.lmcache_engine is None:
+            return
 
         if not self.use_layerwise:
             return
@@ -1102,6 +1125,10 @@ class LMCacheConnectorV1Impl:
     def wait_for_save(self):
         """Blocking until the KV cache is saved to the connector buffer."""
 
+        # Degraded mode (LMCache init failed): no engine to save to / unpin from.
+        if self.lmcache_engine is None:
+            return
+
         connector_metadata = self._parent._get_connector_metadata()
         assert isinstance(connector_metadata, LMCacheConnectorMetadata)
 
@@ -1133,6 +1160,9 @@ class LMCacheConnectorV1Impl:
 
         assert self.lmcache_engine is not None
 
+        # Probe decoder cache before store if bidirectional mode is enabled
+        bidir_enabled = getattr(self.config, "pd_bidirectional", False)
+
         for request in connector_metadata.requests:
             # unpin the kv caches according to req_id
             self.lmcache_engine.lookup_unpin(request.req_id)
@@ -1147,7 +1177,17 @@ class LMCacheConnectorV1Impl:
 
             slot_mapping = request.slot_mapping
             assert isinstance(slot_mapping, torch.Tensor)
-            assert len(slot_mapping) == len(token_ids)
+            if len(slot_mapping) != len(token_ids):
+                logger.warning(
+                    "Skipping KV save for request %s: slot_mapping/token_ids "
+                    "length mismatch (slot_mapping=%d, token_ids=%d). Likely "
+                    "an upstream allocation/preemption desync; the engine "
+                    "stays alive and only this request's save is dropped.",
+                    request.req_id,
+                    len(slot_mapping),
+                    len(token_ids),
+                )
+                continue
 
             # TODO: have a pre-allocated buffer to hold the slot_mappings
             slot_mapping = slot_mapping.to(self.device)
@@ -1194,6 +1234,17 @@ class LMCacheConnectorV1Impl:
                     store_mask = store_mask[:aligned_token_len]
                     slot_mapping = slot_mapping[:aligned_token_len]
 
+            # Probe decoder cache before store
+            if bidir_enabled and request.disagg_spec is not None:
+                try:
+                    self._probe_decoder_cache(request, token_ids)
+                except Exception as e:
+                    logger.warning(
+                        "Bidirectional NIXL cache probe failed for %s: %s",
+                        request.req_id,
+                        e,
+                    )
+
             self.lmcache_engine.store(
                 token_ids,
                 mask=store_mask,
@@ -1205,6 +1256,21 @@ class LMCacheConnectorV1Impl:
                 req_id=request.req_id,
             )
 
+            # Probe decoder cache after store
+            if (
+                bidir_enabled
+                and request.disagg_spec is not None
+                and request.disagg_spec.receiver_query_port is not None
+            ):
+                try:
+                    self._probe_decoder_cache(request, token_ids)
+                except Exception as e:
+                    logger.warning(
+                        "Bidirectional NIXL cache probe failed for %s: %s",
+                        request.req_id,
+                        e,
+                    )
+
             # Update skip_leading_tokens only on last rank to ensure
             # each PP stage stores its own KV cache
             if get_pp_group().is_last_rank:
@@ -1212,6 +1278,83 @@ class LMCacheConnectorV1Impl:
                 save_spec.skip_leading_tokens = len(token_ids)
                 if request.disagg_spec:
                     request.disagg_spec.num_transferred_tokens = len(token_ids)
+
+    def _probe_decoder_cache(self, request: ReqMeta, token_ids: list[int]) -> None:
+        """Query the decoder's cache to check which blocks are already cached.
+
+        This is the bidirectional NIXL cache probe: the prefiller queries the
+        decoder via ZMQ to find out which KV blocks are already in the
+        decoder's GPU memory. This validates the cache query channel works
+        E2E through the real inference path.
+
+        In the future, this information can be used to skip prefill
+        computation for cached blocks.
+        """
+        sm = self.lmcache_engine.storage_manager  # type: ignore[union-attr]
+        if sm is None or sm.allocator_backend is None:
+            return
+        pd_backend = sm.allocator_backend
+        if not hasattr(pd_backend, "query_remote_cache"):
+            return
+        if not hasattr(pd_backend, "cache_query_sockets"):
+            return
+
+        # Get query port from LMCache config (pd_peer_query_port)
+        query_ports = self.config.pd_peer_query_port
+        if query_ports is None:
+            return
+
+        # Build cache keys using the token database's process_tokens
+        td = self.lmcache_engine.token_database  # type: ignore[union-attr]
+        if td is None:
+            return
+
+        chunk_keys = []
+        for _start, _end, key in td.process_tokens(
+            tokens=token_ids, mask=None, make_key=True
+        ):
+            chunk_keys.append(key)
+
+        if not chunk_keys:
+            return
+
+        # Build receiver_id from disagg_spec
+        disagg = request.disagg_spec
+        init_port = disagg.receiver_init_port  # type: ignore[union-attr]
+        if isinstance(init_port, list):
+            init_port = init_port[pd_backend.tp_rank]  # type: ignore[union-attr]
+        receiver_id = disagg.receiver_host + str(init_port)  # type: ignore[union-attr]
+
+        # Ensure peer and cache query connections
+        alloc_port = disagg.receiver_alloc_port  # type: ignore[union-attr]
+        if isinstance(alloc_port, list):
+            alloc_port = alloc_port[pd_backend.tp_rank]  # type: ignore[union-attr]
+        query_port = query_ports[pd_backend.tp_rank]  # type: ignore[union-attr]
+
+        pd_backend._ensure_peer_connection(  # type: ignore[union-attr]
+            receiver_id=receiver_id,
+            receiver_host=disagg.receiver_host,  # type: ignore[union-attr]
+            receiver_init_port=init_port,
+            receiver_alloc_port=alloc_port,
+        )
+        pd_backend._ensure_cache_query_connection(  # type: ignore[union-attr]
+            receiver_id=receiver_id,
+            receiver_host=disagg.receiver_host,  # type: ignore[union-attr]
+            receiver_query_port=query_port,
+        )
+
+        # Query decoder cache
+        cache_resp = pd_backend.query_remote_cache(receiver_id, chunk_keys)
+
+        logger.info(
+            "Bidirectional NIXL cache probe: req=%s, "
+            "queried %d chunks, decoder has %d cached "
+            "(%.0f%% hit rate)",
+            request.req_id,
+            len(chunk_keys),
+            len(cache_resp.cached_keys),
+            100.0 * len(cache_resp.cached_keys) / len(chunk_keys) if chunk_keys else 0,
+        )
 
     @_lmcache_nvtx_annotate
     def get_finished(
@@ -1269,8 +1412,11 @@ class LMCacheConnectorV1Impl:
 
         req_id = request.request_id
 
-        # lookup_client is always initialized for scheduler role
-        assert self.lookup_client is not None
+        # Degraded mode (LMCache init failed): no lookup client is available, so
+        # report no external hits and let vLLM recompute instead of asserting and
+        # crashing EngineCore during scheduling.
+        if self.lookup_client is None:
+            return 0
 
         if (
             num_external_hit_tokens := self.lookup_client.lookup_cache(lookup_id=req_id)
@@ -1359,9 +1505,44 @@ class LMCacheConnectorV1Impl:
                 max(need_to_allocate, 0),
             )
 
+        # Chunked KV loading: cap the number of tokens reported
+        # to the scheduler to avoid exhausting the GPU block pool
+        # when many concurrent requests each need large allocations.
+        # Remaining tokens beyond the cap will be computed locally
+        # via chunked prefill rather than loaded from external cache.
+        capped_lmcache_tokens = num_external_hit_tokens
+        if (
+            self._max_tokens_per_load > 0
+            and need_to_allocate > self._max_tokens_per_load
+        ):
+            # Align cap to LMCache chunk boundaries so that the
+            # retrieve path receives chunk-aligned token ranges.
+            cap = (
+                self._max_tokens_per_load
+                // self._lmcache_chunk_size
+                * self._lmcache_chunk_size
+            )
+            need_to_allocate = cap
+            # Align capped_lmcache_tokens to chunk boundary so that
+            # session.get_hashes() receives a chunk-aligned end value.
+            capped_lmcache_tokens = (
+                (num_computed_tokens + cap)
+                // self._lmcache_chunk_size
+                * self._lmcache_chunk_size
+            )
+            logger.debug(
+                "Reqid: %s, Chunked KV loading: capped from "
+                "%d to %d external tokens "
+                "(max_tokens_per_load=%d)",
+                req_id,
+                num_external_hit_tokens - num_computed_tokens,
+                need_to_allocate,
+                self._max_tokens_per_load,
+            )
+
         self.load_specs[req_id] = LoadSpec(
             vllm_cached_tokens=num_computed_tokens,
-            lmcache_cached_tokens=num_external_hit_tokens,
+            lmcache_cached_tokens=capped_lmcache_tokens,
             can_load=False,
         )
 
@@ -1383,9 +1564,13 @@ class LMCacheConnectorV1Impl:
         if the CacheManager this allocated blocks for us.
         """
 
+        # Degraded mode (LMCache init failed): there is no lookup client to clear
+        # and no load spec was recorded, so nothing to do.
+        if self.lookup_client is None:
+            return
+
         # Clear local status in lookup client when a new request is
         # successfully scheduled.
-        assert self.lookup_client is not None
         self.lookup_client.clear_lookup_status(request.request_id)
 
         kv_transfer_params = (
@@ -1407,6 +1592,7 @@ class LMCacheConnectorV1Impl:
                 receiver_host=req_disagg_spec["receiver_host"],
                 receiver_init_port=req_disagg_spec["receiver_init_port"],
                 receiver_alloc_port=req_disagg_spec["receiver_alloc_port"],
+                receiver_query_port=req_disagg_spec.get("receiver_query_port"),
             )
 
             tmp_disagg_tracker[request.request_id] = disagg_spec
@@ -1460,6 +1646,11 @@ class LMCacheConnectorV1Impl:
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
+
+        # Degraded mode (LMCache init failed): no lookup client means no load specs
+        # were ever recorded, so return empty metadata for the worker-side hooks.
+        if self.lookup_client is None:
+            return LMCacheConnectorMetadata()
 
         force_skip_save = self.kv_role == "kv_consumer" or self.force_skip_save
 
@@ -1702,12 +1893,50 @@ class LMCacheConnectorV1Impl:
         ):
             self._layerwise_save_storers.pop(request.request_id, None)
 
-        # Cleanup if request was aborted
-        if request.status == RequestStatus.FINISHED_ABORTED and self.async_loading:
-            # Cancel any ongoing async lookup and prefetch tasks on workers
-            lookup_id = request.request_id
-            assert self.lookup_client is not None
-            self.lookup_client.cancel_lookup(lookup_id)  # type: ignore[attr-defined]
+        # Cleanup if request was aborted. The per-branch logic below already
+        # degrades gracefully when ``lmcache_engine`` and/or ``lookup_client``
+        # are missing (it warns and skips only the unavailable backend), so we
+        # must not short-circuit the whole method here -- doing so would drop
+        # the storage/lookup cancels that still need to run when just one of
+        # the two is present. See LMCache#3337.
+        if request.status == RequestStatus.FINISHED_ABORTED:
+            # ``request_finished`` is a Scheduler-side connector API.
+            # The Scheduler typically does not initialize the storage
+            # engine (unless ``enable_scheduler_bypass_lookup`` is set);
+            # only the Worker role builds it by default. The Scheduler
+            # *does* own the lookup_client though, so the async lookup
+            # cancel below must run independently of the engine check
+            # to avoid leaking in-flight async lookups on Scheduler-side
+            # aborts. See LMCache#3337.
+            if self.lmcache_engine is None:
+                logger.warning(
+                    "Skipping abort-time backend cleanup for request %s: "
+                    "lmcache_engine is not initialized (Scheduler role "
+                    "without enable_scheduler_bypass_lookup).",
+                    request.request_id,
+                )
+            else:
+                # Notify storage backends of aborted requests
+                sm = self.lmcache_engine.storage_manager
+                if sm is not None:
+                    sm.cancel_request(request.request_id)
+
+            if self.async_loading:
+                # Cancel any ongoing async lookup and prefetch tasks on
+                # workers. Independent of ``lmcache_engine`` because the
+                # Scheduler owns ``lookup_client`` even when it does not
+                # build an engine.
+                lookup_id = request.request_id
+                if self.lookup_client is None:
+                    logger.warning(
+                        "Skipping abort-time async lookup cancel for "
+                        "request %s: lookup_client is not initialized "
+                        "while async_loading is enabled. Engine stays "
+                        "alive; this request's lookup is dropped.",
+                        request.request_id,
+                    )
+                else:
+                    self.lookup_client.cancel_lookup(lookup_id)  # type: ignore[attr-defined]
 
         params = (
             request.kv_transfer_params

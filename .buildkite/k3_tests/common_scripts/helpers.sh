@@ -78,10 +78,14 @@ find_free_port() {
 }
 
 # Wait for a vLLM server to become ready by polling /v1/models.
-# Usage: wait_for_server <port> [timeout_secs]
+# Usage: wait_for_server <port> [timeout_secs] [log_file]
+# If log_file is provided, its tail is dumped to stderr on timeout so the
+# real failure (e.g. an ImportError during startup) is visible inline in the
+# job output instead of requiring a trip through build artifacts.
 wait_for_server() {
     local port="$1"
     local timeout="${2:-180}"
+    local log_file="${3:-}"
     echo "Waiting for vLLM on port $port (timeout=${timeout}s)..."
     for ((i = 0; i < timeout; i++)); do
         if curl -sf "http://localhost:${port}/v1/models" >/dev/null 2>&1; then
@@ -91,6 +95,10 @@ wait_for_server() {
         sleep 1
     done
     echo "vLLM failed to start on port $port within ${timeout}s" >&2
+    if [[ -n "$log_file" && -f "$log_file" ]]; then
+        echo "--- :page_facing_up: Last 200 lines of ${log_file}" >&2
+        tail -n 200 "$log_file" >&2
+    fi
     return 1
 }
 

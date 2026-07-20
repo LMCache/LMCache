@@ -1,6 +1,11 @@
 LMCache Controller
 ==================
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance.
+
+
 Overview
 --------
 The overall architecture of the LMCache Controller is shown in the figure,
@@ -101,7 +106,7 @@ Expected output:
 
     # p2p configuration
     p2p_host: localhost
-    p2p_init_port: [11, 12, 13]
+    p2p_init_ports: [11, 12, 13]
 
 .. toctree::
    :maxdepth: 1

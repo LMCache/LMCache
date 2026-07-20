@@ -31,6 +31,7 @@ from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import parse_command_line_extra_params
 from lmcache.v1.gpu_connector import CreateGPUConnector
+from lmcache.v1.kv_layer_groups import DEFAULT_LAYER_NAME_PREFIX
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.standalone.manager import StandaloneLMCacheManager
 
@@ -262,7 +263,7 @@ class LMCacheStandaloneStarter:
                 layer_idx = current_layer + layer_in_group
                 torch.manual_seed(42 + layer_idx)
                 tensor = torch.rand(tensor_shape, dtype=group.dtype, device=device)
-                layer_name = f"model.layers.{layer_idx}"
+                layer_name = f"{DEFAULT_LAYER_NAME_PREFIX}{layer_idx}"
                 kvcaches[layer_name] = tensor
 
             current_layer += group.layer_count

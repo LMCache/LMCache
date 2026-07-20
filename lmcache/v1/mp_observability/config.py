@@ -8,13 +8,19 @@ Configuration for the MP-mode observability stack.
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 import argparse
+import uuid
 
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.mp_observability.event_bus import EventBus
+
+# First Party
+from lmcache.v1.mp_observability.subscribers.logging.lookup_hash import (
+    LookupHashLogConfig,
+)
 
 
 @dataclass
@@ -48,6 +54,43 @@ class ObservabilityConfig:
     prometheus_port: int = 9090
     """Port for the Prometheus /metrics endpoint.  Only used when
     ``otlp_endpoint`` is ``None`` (Prometheus pull fallback)."""
+
+    metrics_sample_rate: float = 0.01
+    """Fraction of chunks/blocks to track for lifecycle histograms (0, 1.0].
+    Counters always count all events regardless of this setting."""
+
+    lookup_hash_log: LookupHashLogConfig = field(default_factory=LookupHashLogConfig)
+    """Configuration for lookup hash file logging.  Disabled by default
+    (empty ``output_dir``)."""
+
+    extra_logging_enabled: bool = False
+    """Register the periodic extra-stats logging subscriber (opt-in):
+    per-GPU L0<->L1 store/retrieve throughput and token counts at INFO."""
+
+    extra_logging_interval: float = 10.0
+    """Seconds between extra-stats log flushes."""
+
+    trace_level: str | None = None
+    """If set, enables trace recording at the given level.  Currently
+    only ``"storage"`` is supported.  See
+    :mod:`lmcache.v1.mp_observability.trace` for details."""
+
+    trace_output: str | None = None
+    """Path to write the trace file.  When :attr:`trace_level` is set
+    but this is ``None``, a timestamped path under ``$TMPDIR`` is
+    minted and logged at INFO."""
+
+    service_instance_id: str | None = None
+    """OTel ``service.instance.id`` resource attribute, attached to every
+    metric and span. There is no CLI flag for it: the operator-facing id is
+    ``--instance-id`` (``MPServerConfig.instance_id``), which ``run_cache_server``
+    projects onto this attribute so telemetry and coordinator membership share
+    one id.
+
+    ``None`` (the default) means "not set": standalone callers that build an
+    ``ObservabilityConfig`` directly (e.g. the trace CLI driver) fall back to a
+    random UUID v4 at ``init_observability`` time. An explicit value is
+    preserved verbatim."""
 
 
 DEFAULT_OBSERVABILITY_CONFIG = ObservabilityConfig(enabled=False)
@@ -119,6 +162,92 @@ def add_observability_args(
             "Only used when --otlp-endpoint is not set. Default is 9090."
         ),
     )
+    group.add_argument(
+        "--metrics-sample-rate",
+        type=float,
+        default=0.01,
+        help=(
+            "Fraction of chunks/blocks to track for lifecycle histograms "
+            "(0, 1.0]. Counters always count all events. Default is 0.01 (1%%)."
+        ),
+    )
+
+    # Lookup hash logging config
+    log_group = parser.add_argument_group(
+        "Lookup Hash Logging",
+        "Configuration for lookup hash file logging (offline analysis)",
+    )
+    log_group.add_argument(
+        "--lookup-hash-log-dir",
+        type=str,
+        default="",
+        help="Directory to write lookup hash JSONL files for offline analysis. "
+        "Empty string (default) disables logging.",
+    )
+    log_group.add_argument(
+        "--lookup-hash-log-rotation-interval",
+        type=int,
+        default=6 * 3600,
+        help="Time interval in seconds before rotating to a new log file. "
+        "Default is 21600 (6 hours).",
+    )
+    log_group.add_argument(
+        "--lookup-hash-log-rotation-max-size",
+        type=int,
+        default=100 * 1024 * 1024,
+        help="Max file size in bytes before rotating even if the time "
+        "interval has not elapsed. Default is 100MB (104857600).",
+    )
+    log_group.add_argument(
+        "--lookup-hash-log-max-files",
+        type=int,
+        default=100,
+        help="Max number of lookup hash log files to keep. "
+        "Oldest files are deleted when this limit is exceeded. Default is 100.",
+    )
+
+    extra_group = parser.add_argument_group(
+        "Extra Logging",
+        "Periodic INFO-level L0<->L1 throughput/token stats per GPU and "
+        "L1 memory usage",
+    )
+    extra_group.add_argument(
+        "--enable-extra-logging",
+        action="store_true",
+        default=False,
+        help="Periodically log L0<->L1 store/retrieve throughput and token "
+        "counts per GPU, and L1 memory usage. Disabled by default.",
+    )
+    extra_group.add_argument(
+        "--extra-logging-interval",
+        type=float,
+        default=10.0,
+        help="Seconds between extra-logging emissions. Default is 10.0. "
+        "Values below 1.0 are limited by the 1 Hz internal heartbeat.",
+    )
+
+    trace_group = parser.add_argument_group(
+        "Trace Recording",
+        "Capture LMCache operations to a binary trace file for replay "
+        "(see `lmcache trace`).",
+    )
+    trace_group.add_argument(
+        "--trace-level",
+        type=str,
+        choices=["storage"],
+        default=None,
+        help="Enable trace recording at the given level. Currently only "
+        "'storage' is supported (records StorageManager public-API calls).",
+    )
+    trace_group.add_argument(
+        "--trace-output",
+        type=str,
+        default=None,
+        help="Path to write the trace file. Defaults to a timestamped "
+        "file under $TMPDIR when --trace-level is set without an explicit "
+        "output path.",
+    )
+
     return parser
 
 
@@ -141,6 +270,17 @@ def parse_args_to_observability_config(
         tracing_enabled=args.enable_tracing,
         otlp_endpoint=args.otlp_endpoint,
         prometheus_port=args.prometheus_port,
+        metrics_sample_rate=args.metrics_sample_rate,
+        lookup_hash_log=LookupHashLogConfig(
+            output_dir=args.lookup_hash_log_dir,
+            rotation_interval_sec=args.lookup_hash_log_rotation_interval,
+            rotation_max_size=args.lookup_hash_log_rotation_max_size,
+            max_files=args.lookup_hash_log_max_files,
+        ),
+        extra_logging_enabled=args.enable_extra_logging,
+        extra_logging_interval=args.extra_logging_interval,
+        trace_level=args.trace_level,
+        trace_output=args.trace_output,
     )
 
     if config.tracing_enabled and config.otlp_endpoint is None:
@@ -149,14 +289,33 @@ def parse_args_to_observability_config(
             "Tracing needs an OTLP gRPC endpoint to export spans."
         )
 
+    if config.extra_logging_enabled and not config.enabled:
+        raise ValueError(
+            "--enable-extra-logging requires the observability EventBus; "
+            "remove --disable-observability."
+        )
+
+    if config.extra_logging_interval <= 0:
+        raise ValueError("--extra-logging-interval must be > 0.")
+
     return config
 
 
-def init_observability(obs_config: ObservabilityConfig) -> EventBus:
+def init_observability(
+    obs_config: ObservabilityConfig,
+    *,
+    start_prometheus_http_server: bool = True,
+) -> EventBus:
     """Initialize OTel providers, EventBus, and register subscribers.
 
     This is the single entry-point that every MP server calls at startup.
     Returns a **started** EventBus.
+
+    Args:
+        obs_config: Observability configuration.
+        start_prometheus_http_server: Whether to start a standalone
+            Prometheus HTTP server.  Set to ``False`` when an
+            external HTTP framework already serves ``/metrics``.
     """
     # First Party
     from lmcache.v1.mp_observability.event_bus import (
@@ -166,6 +325,13 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
 
     # Set up OTel providers BEFORE creating subscribers so that
     # module-level get_meter()/get_tracer() calls bind to the real provider
+    instance_id = (
+        obs_config.service_instance_id
+        if obs_config.service_instance_id is not None
+        else str(uuid.uuid4())
+    )
+    resource_attrs = {"service.instance.id": instance_id}
+
     if obs_config.enabled and obs_config.metrics_enabled:
         # First Party
         from lmcache.v1.mp_observability.otel_init import init_otel_metrics
@@ -173,13 +339,18 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
         init_otel_metrics(
             otlp_endpoint=obs_config.otlp_endpoint,
             prometheus_port=obs_config.prometheus_port,
+            resource_attributes=resource_attrs,
+            start_http_server=start_prometheus_http_server,
         )
 
     if obs_config.enabled and obs_config.tracing_enabled:
         # First Party
         from lmcache.v1.mp_observability.otel_init import init_otel_tracing
 
-        init_otel_tracing(otlp_endpoint=obs_config.otlp_endpoint)
+        init_otel_tracing(
+            otlp_endpoint=obs_config.otlp_endpoint,
+            resource_attributes=resource_attrs,
+        )
 
     bus = init_event_bus(
         EventBusConfig(
@@ -191,36 +362,93 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
     if obs_config.metrics_enabled:
         # First Party
         from lmcache.v1.mp_observability.subscribers.metrics import (
+            BlendMetricsSubscriber,
+            EngineMetricsSubscriber,
+            EventBusSelfMetricsSubscriber,
+            L0L1ThroughputSubscriber,
+            L0LifecycleSubscriber,
+            L1EvictionLoopSubscriber,
+            L1FailureMetricsSubscriber,
+            L1LifecycleSubscriber,
             L1MetricsSubscriber,
+            L2FailureMetricsSubscriber,
             L2MetricsSubscriber,
-            SMMetricsSubscriber,
+            L2ThroughputSubscriber,
+            LookupMetricsSubscriber,
+            SMLifecycleSubscriber,
+            TimeoutMetricsSubscriber,
         )
 
+        sample_rate = obs_config.metrics_sample_rate
+        bus.register_subscriber(L0LifecycleSubscriber(sample_rate=sample_rate))
         bus.register_subscriber(L1MetricsSubscriber())
+        bus.register_subscriber(L1LifecycleSubscriber(sample_rate=sample_rate))
+        bus.register_subscriber(L1FailureMetricsSubscriber())
+        bus.register_subscriber(L1EvictionLoopSubscriber())
+        bus.register_subscriber(L0L1ThroughputSubscriber())
         bus.register_subscriber(L2MetricsSubscriber())
-        bus.register_subscriber(SMMetricsSubscriber())
+        bus.register_subscriber(L2FailureMetricsSubscriber())
+        bus.register_subscriber(L2ThroughputSubscriber())
+        bus.register_subscriber(LookupMetricsSubscriber())
+        bus.register_subscriber(SMLifecycleSubscriber(sample_rate=sample_rate))
+        bus.register_subscriber(BlendMetricsSubscriber())
+        bus.register_subscriber(EngineMetricsSubscriber())
+        bus.register_subscriber(EventBusSelfMetricsSubscriber(bus))
+        bus.register_subscriber(TimeoutMetricsSubscriber())
 
     if obs_config.logging_enabled:
         # First Party
         from lmcache.v1.mp_observability.subscribers.logging import (
+            BlendLoggingSubscriber,
             L1LoggingSubscriber,
             L2LoggingSubscriber,
             MPServerLoggingSubscriber,
             SMLoggingSubscriber,
+            TimeoutLoggingSubscriber,
         )
 
         bus.register_subscriber(MPServerLoggingSubscriber())
         bus.register_subscriber(L1LoggingSubscriber())
         bus.register_subscriber(L2LoggingSubscriber())
         bus.register_subscriber(SMLoggingSubscriber())
+        bus.register_subscriber(BlendLoggingSubscriber())
+        bus.register_subscriber(TimeoutLoggingSubscriber())
 
     if obs_config.tracing_enabled:
         # First Party
         from lmcache.v1.mp_observability.subscribers.tracing import (
+            BlendTracingSubscriber,
             MPServerTracingSubscriber,
+            TimeoutTracingSubscriber,
+            get_span_registry,
         )
 
-        bus.register_subscriber(MPServerTracingSubscriber())
+        registry = get_span_registry()
+        bus.register_subscriber(MPServerTracingSubscriber(registry))
+        bus.register_subscriber(BlendTracingSubscriber(registry))
+        bus.register_subscriber(TimeoutTracingSubscriber(registry))
+
+    # Lookup hash file logging (independent of the logging_enabled flag —
+    # it has its own enable gate via output_dir).
+    if obs_config.lookup_hash_log.enabled:
+        # First Party
+        from lmcache.v1.mp_observability.subscribers.logging.lookup_hash import (
+            LookupHashLoggingSubscriber,
+        )
+
+        bus.register_subscriber(LookupHashLoggingSubscriber(obs_config.lookup_hash_log))
+
+    # Extra-stats logging (independent of the logging_enabled flag — it has
+    # its own enable gate).
+    if obs_config.extra_logging_enabled:
+        # First Party
+        from lmcache.v1.mp_observability.subscribers.logging.extra_stats import (
+            ExtraStatsLoggingSubscriber,
+        )
+
+        bus.register_subscriber(
+            ExtraStatsLoggingSubscriber(obs_config.extra_logging_interval)
+        )
 
     bus.start()
     return bus

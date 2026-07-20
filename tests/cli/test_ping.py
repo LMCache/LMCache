@@ -205,7 +205,7 @@ class TestPingCommandEngine:
 
 class TestDefaultUrls:
     def test_kvcache_default(self):
-        """Verify that url=None resolves to localhost:8080/api/healthcheck."""
+        """Verify that url=None resolves to localhost:8080/healthcheck."""
         cmd = PingCommand()
 
         class FakeArgs:

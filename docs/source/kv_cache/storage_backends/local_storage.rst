@@ -1,6 +1,11 @@
 Local storage
 =============
 
+.. warning::
+
+   This page documents the behavior of LMCache's in-process mode (deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` for better feature support and performance. For the MP mode equivalent of this page, see :doc:`/mp/l2_storage/index`.
+
+
 .. _local-storage-overview:
 
 Overview
@@ -30,7 +35,8 @@ Two ways to configure LMCache Disk Offloading:
 
     # Disable page cache
     # This should be turned on for better performance if most local CPU memory is used
-    export LMCACHE_EXTRA_CONFIG='{'use_odirect': True}'
+    # Optionally tune the number of I/O worker threads (default: 4)
+    export LMCACHE_EXTRA_CONFIG='{"use_odirect": true, "disk_io_threads": 8}'
 
 **2. Configuration File**:
 
@@ -47,7 +53,62 @@ Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``
 
     # Disable page cache
     # This should be turned on for better performance if most local CPU memory is used
-    extra_config: {'use_odirect': True}
+    # Optionally tune the number of I/O worker threads (default: 4)
+    extra_config:
+      use_odirect: true
+      disk_io_threads: 8
+
+
+Multi-Path (Multi-Device) Disk Offloading
+-----------------------------------------
+
+If you have **multiple NVMe devices** (or any independent mount points), you can
+assign each GPU its own disk path so that each device writes to a dedicated drive.
+
+Specify a **comma-separated list** of paths in ``local_disk``.
+Each path can optionally use the ``file://`` prefix.  The
+``local_disk_path_sharding`` option controls how each GPU worker selects its
+path.  Currently only ``"by_gpu"`` is supported (the default), which selects a
+path based on the device index (``device_id % num_paths``), so all KV cache
+files from a given GPU land on the same NVMe.  This is especially useful when
+GPUs and NVMe devices share a PCIe switch or NUMA node.
+
+For example, with two GPUs and two paths:
+
+- ``cuda:0`` → ``/mnt/nvme0/kvcache/``
+- ``cuda:1`` → ``/mnt/nvme1/kvcache/``
+
+``max_local_disk_size`` is the **total budget** shared across all paths.
+
+**Environment variable example:**
+
+.. code-block:: bash
+
+    export LMCACHE_LOCAL_DISK="file:///mnt/nvme0/kvcache/,file:///mnt/nvme1/kvcache/"
+    export LMCACHE_LOCAL_DISK_PATH_SHARDING="by_gpu"
+    export LMCACHE_MAX_LOCAL_DISK_SIZE=20.0   # combined budget (GB)
+
+**YAML example:**
+
+.. code-block:: yaml
+
+    local_disk: "/mnt/nvme0/kvcache/,/mnt/nvme1/kvcache/"
+    local_disk_path_sharding: "by_gpu"
+    max_local_disk_size: 20.0
+
+.. note::
+
+    Each GPU worker uses only its assigned path, so O_DIRECT alignment
+    is determined by that path's filesystem block size.  Different
+    devices may have different block sizes without issue.
+
+.. tip::
+
+    If you are able to use kernel-level RAID 0 (e.g. ``mdadm --level=0``)
+    you will get true block-level striping (even a single large file can
+    use bandwidth from both devices simultaneously).  The multi-path
+    feature is most useful when you cannot or do not want to reconfigure
+    the block devices — for example, when they already have other data.
 
 Local Storage Explanation:
 --------------------------
@@ -91,7 +152,7 @@ The following diagram shows the overall architecture of the Local Disk Backend:
             end
             
             subgraph Worker["<b>LocalDiskWorker</b>"]
-                PQ["<b>Priority Queue Executor (4 workers)</b>"]
+                PQ["<b>Priority Queue Executor (configurable workers, default 4)</b>"]
                 P0["<b>Priority 0: PREFETCH</b>"]
                 P1["<b>Priority 1: DELETE</b>"]
                 P2["<b>Priority 2: PUT</b>"]
@@ -120,7 +181,7 @@ The following diagram shows the overall architecture of the Local Disk Backend:
 
 - **Metadata Dictionary**: Maps each ``CacheEngineKey`` to its disk metadata (file path, size, shape, dtype, pin status)
 - **Cache Policy**: Configurable eviction policy (LRU, LFU, FIFO, or MRU) that tracks access patterns and decides which entries to evict when space is needed
-- **LocalDiskWorker**: Async task executor with priority queue - prefetch tasks run first (priority 0), then deletes (priority 1), then saves (priority 2)
+- **LocalDiskWorker**: Async task executor with priority queue - prefetch tasks run first (priority 0), then deletes (priority 1), then saves (priority 2). The number of I/O worker threads is configurable via ``extra_config.disk_io_threads`` (default: 4).
 - **Local Disk**: Filesystem where KV cache chunks are stored as individual ``.pt`` files
 
 

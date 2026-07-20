@@ -49,7 +49,7 @@ WORK_DIR="/tmp/baselines_push_$$"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 # Push baselines to a dedicated CI repo instead of the main LMCache repo.
-CI_REPO="LMCache/LMCache-CI"
+CI_REPO="LMCache/LMCache"
 CI_BRANCH="benchmarks-main"
 
 if [[ -n "${GITHUB_TOKEN:-}" ]]; then

@@ -36,13 +36,30 @@ import (
 	"github.com/LMCache/LMCache/internal/resources"
 )
 
-// handleFinalizer adds or processes the finalizer. Returns (err, done).
-// If done is true, the caller should return immediately.
+// handleFinalizer migrates any LMCacheEngine carrying the legacy
+// "lmcache.ai/cleanup" finalizer off of it. Owner references on every
+// child resource (DaemonSet, Services, ConfigMap, managed Secret)
+// already cause K8s garbage collection to cascade-delete them when
+// the CR goes away, so no finalizer work is necessary today.
+//
+// Why this changed: a no-op finalizer blocks CR deletion whenever the
+// controller pod isn't running (e.g. during cluster issues or a
+// `kubectl delete -k config/default` that takes down the operator
+// alongside the CRDs), with no upside since GC already does the work.
+// See discussion in https://github.com/LMCache/LMCache/issues/2693.
+//
+// We may re-introduce a finalizer in the future for state K8s GC
+// can't reach — e.g. evicting L2 Redis keys on CR delete, federation
+// deregistration. When that happens, this function will grow real
+// cleanup work alongside the legacy migration.
+//
+// Returns (err, done). If done is true the caller must return.
 func (r *LMCacheEngineReconciler) handleFinalizer(ctx context.Context, engine *lmcachev1alpha1.LMCacheEngine) (error, bool) {
+	// On the deletion path we still need to clear the legacy finalizer
+	// if a CR created by an older operator version is being deleted,
+	// otherwise K8s would block on it forever.
 	if engine.DeletionTimestamp != nil {
 		if controllerutil.ContainsFinalizer(engine, finalizerName) {
-			// Owned resources are cleaned up by K8s garbage collection via ownerRefs.
-			// Remove the finalizer to allow deletion.
 			controllerutil.RemoveFinalizer(engine, finalizerName)
 			if err := r.Update(ctx, engine); err != nil {
 				return err, true
@@ -51,12 +68,18 @@ func (r *LMCacheEngineReconciler) handleFinalizer(ctx context.Context, engine *l
 		return nil, true
 	}
 
-	// Add finalizer if not present.
-	if !controllerutil.ContainsFinalizer(engine, finalizerName) {
-		controllerutil.AddFinalizer(engine, finalizerName)
+	// Pro-active migration on the create/update path: strip the
+	// legacy finalizer from any CR that still has it from a prior
+	// operator version, so future deletes don't deadlock.
+	if controllerutil.ContainsFinalizer(engine, finalizerName) {
+		controllerutil.RemoveFinalizer(engine, finalizerName)
 		if err := r.Update(ctx, engine); err != nil {
 			return err, true
 		}
+		// Return done=true so the controller requeues with a fresh
+		// Get; continuing here would race with the resourceVersion
+		// bump the Update just produced on the server.
+		return nil, true
 	}
 
 	return nil, false
@@ -68,38 +91,45 @@ func (r *LMCacheEngineReconciler) validateAndSetCondition(ctx context.Context, e
 	errs := engine.ValidateSpec()
 
 	if len(errs) > 0 {
+		// Re-fetch to get the latest resourceVersion before status update.
+		generation := engine.Generation
+		if err := r.Get(ctx, types.NamespacedName{Name: engine.Name, Namespace: engine.Namespace}, engine); err != nil {
+			return fmt.Errorf("failed to re-fetch engine for status update: %w", err)
+		}
 		meta.SetStatusCondition(&engine.Status.Conditions, metav1.Condition{
 			Type:               lmcachev1alpha1.ConditionConfigValid,
 			Status:             metav1.ConditionFalse,
 			Reason:             "ValidationFailed",
 			Message:            errs.ToAggregate().Error(),
-			ObservedGeneration: engine.Generation,
+			ObservedGeneration: generation,
 		})
 		engine.Status.Phase = lmcachev1alpha1.PhaseFailed
-		engine.Status.ObservedGeneration = engine.Generation
+		engine.Status.ObservedGeneration = generation
 		if err := r.Status().Update(ctx, engine); err != nil {
 			return fmt.Errorf("failed to update status after validation failure: %w", err)
 		}
 		return fmt.Errorf("spec validation failed: %s", errs.ToAggregate().Error())
 	}
 
-	meta.SetStatusCondition(&engine.Status.Conditions, metav1.Condition{
-		Type:               lmcachev1alpha1.ConditionConfigValid,
-		Status:             metav1.ConditionTrue,
-		Reason:             "Valid",
-		Message:            "Spec validation passed",
-		ObservedGeneration: engine.Generation,
-	})
-
+	// ConfigValid=True condition is set in updateStatus (after re-fetch)
+	// to avoid resourceVersion conflicts.
 	return nil
 }
 
 // reconcileDaemonSet creates or updates the DaemonSet.
 func (r *LMCacheEngineReconciler) reconcileDaemonSet(ctx context.Context, engine *lmcachev1alpha1.LMCacheEngine) error {
+	// Resolve the coordinator connection (ref -> Service URL) so the DaemonSet
+	// builder emits --coordinator-url for server registration.
+	conn, err := resources.ResolveCoordinatorConnection(ctx, r.Client, engine.Namespace, engine.Spec.Coordinator)
+	if err != nil {
+		return err
+	}
+	engine.Spec.Coordinator = conn
+
 	desired := resources.BuildDaemonSet(engine)
 
 	existing := &appsv1.DaemonSet{}
-	err := r.Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, existing)
+	err = r.Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, existing)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			if err := ctrl.SetControllerReference(engine, desired, r.Scheme); err != nil {
@@ -262,7 +292,25 @@ func (r *LMCacheEngineReconciler) reconcileServiceMonitor(ctx context.Context, e
 }
 
 // updateStatus queries the DaemonSet and pods to compute status fields.
+// It re-fetches the engine to get the latest resourceVersion, avoiding
+// conflicts from watch events triggered by earlier reconcile steps.
 func (r *LMCacheEngineReconciler) updateStatus(ctx context.Context, engine *lmcachev1alpha1.LMCacheEngine) error {
+	// Re-fetch to get the latest resourceVersion, avoiding conflicts
+	// from watch events triggered by earlier reconcile steps (e.g.
+	// DaemonSet/Service creation fires Owns watches).
+	if err := r.Get(ctx, types.NamespacedName{Name: engine.Name, Namespace: engine.Namespace}, engine); err != nil {
+		return err
+	}
+
+	// ConfigValid condition (set here after re-fetch so it's not lost).
+	meta.SetStatusCondition(&engine.Status.Conditions, metav1.Condition{
+		Type:               lmcachev1alpha1.ConditionConfigValid,
+		Status:             metav1.ConditionTrue,
+		Reason:             "Valid",
+		Message:            "Spec validation passed",
+		ObservedGeneration: engine.Generation,
+	})
+
 	ds := &appsv1.DaemonSet{}
 	err := r.Get(ctx, types.NamespacedName{Name: engine.Name, Namespace: engine.Namespace}, ds)
 	if err != nil {
@@ -364,4 +412,97 @@ func reasonFromReady(ready bool, trueReason, falseReason string) string {
 		return trueReason
 	}
 	return falseReason
+}
+
+// reconcileRESPAuthSecret ensures a local copy of the RESP auth secret
+// exists in the engine's namespace. If the source secret is in the same
+// namespace, the DaemonSet references it directly via a managed copy.
+// If cross-namespace, the operator reads the source and creates/updates
+// a managed copy with ownerRef on the engine.
+func (r *LMCacheEngineReconciler) reconcileRESPAuthSecret(ctx context.Context, engine *lmcachev1alpha1.LMCacheEngine) error {
+	log := logf.FromContext(ctx)
+	spec := &engine.Spec
+
+	// No RESP auth configured — clean up any stale managed secret.
+	if spec.L2Backend == nil || spec.L2Backend.RESP == nil || spec.L2Backend.RESP.AuthSecretRef == nil {
+		return r.deleteRESPAuthSecretIfExists(ctx, engine)
+	}
+
+	ref := spec.L2Backend.RESP.AuthSecretRef
+	sourceNS := ref.Namespace
+	if sourceNS == "" {
+		sourceNS = engine.Namespace
+	}
+	localName := resources.RESPAuthSecretName(engine.Name)
+
+	// Read the source secret.
+	source := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: sourceNS}, source); err != nil {
+		return fmt.Errorf("failed to read RESP auth secret %s/%s: %w", sourceNS, ref.Name, err)
+	}
+
+	// Validate that the source secret contains the required "password" key.
+	password, ok := source.Data["password"]
+	if !ok || len(password) == 0 {
+		return fmt.Errorf("RESP auth secret %s/%s is missing required 'password' key", sourceNS, ref.Name)
+	}
+
+	// Build the local managed copy.
+	// Only "password" is required; "username" is optional (Redis Enterprise
+	// often uses password-only auth).
+	secretData := map[string][]byte{
+		"password": password,
+	}
+	if u, ok := source.Data["username"]; ok {
+		secretData["username"] = u
+	}
+	desired := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      localName,
+			Namespace: engine.Namespace,
+			Labels:    resources.StandardLabels(engine.Name),
+		},
+		Data: secretData,
+	}
+
+	existing := &corev1.Secret{}
+	err := r.Get(ctx, types.NamespacedName{Name: localName, Namespace: engine.Namespace}, existing)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			if err := ctrl.SetControllerReference(engine, desired, r.Scheme); err != nil {
+				return err
+			}
+			log.Info("Creating managed RESP auth secret", "name", localName, "source", sourceNS+"/"+ref.Name)
+			return r.Create(ctx, desired)
+		}
+		return err
+	}
+
+	// Update existing — apply ownerRef, data, and labels.
+	if err := ctrl.SetControllerReference(engine, existing, r.Scheme); err != nil {
+		return err
+	}
+	patch := client.MergeFrom(existing.DeepCopy())
+	existing.Data = desired.Data
+	existing.Labels = desired.Labels
+	return r.Patch(ctx, existing, patch)
+}
+
+// deleteRESPAuthSecretIfExists removes the managed RESP auth secret
+// if it exists (e.g. when authSecretRef is removed from the spec).
+func (r *LMCacheEngineReconciler) deleteRESPAuthSecretIfExists(ctx context.Context, engine *lmcachev1alpha1.LMCacheEngine) error {
+	secret := &corev1.Secret{}
+	name := resources.RESPAuthSecretName(engine.Name)
+	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: engine.Namespace}, secret)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	// Only delete if we own it.
+	if metav1.IsControlledBy(secret, engine) {
+		return r.Delete(ctx, secret)
+	}
+	return nil
 }

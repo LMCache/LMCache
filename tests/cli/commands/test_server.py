@@ -127,24 +127,25 @@ class TestServerCommandExecute:
         )
         assert args.func == cmd.execute
 
-    @patch("lmcache.v1.multiprocess.http_server.run_http_server")
-    def test_execute_calls_run_http_server(self, mock_run, parser):
+    def test_execute_calls_run_http_server(self, parser):
         """execute() should call run_http_server with parsed configs."""
-        args = parser.parse_args(
-            [
-                "server",
-                "--l1-size-gb",
-                "4",
-                "--eviction-policy",
-                "LRU",
-            ]
-        )
-        cmd = ServerCommand()
-        cmd.execute(args)
+        http_server = pytest.importorskip("lmcache.v1.multiprocess.http_server")
+        with patch.object(http_server, "run_http_server") as mock_run:
+            args = parser.parse_args(
+                [
+                    "server",
+                    "--l1-size-gb",
+                    "4",
+                    "--eviction-policy",
+                    "LRU",
+                ]
+            )
+            cmd = ServerCommand()
+            cmd.execute(args)
 
-        mock_run.assert_called_once()
-        kwargs = mock_run.call_args.kwargs
-        assert "http_config" in kwargs
-        assert "mp_config" in kwargs
-        assert "storage_manager_config" in kwargs
-        assert "obs_config" in kwargs
+            mock_run.assert_called_once()
+            kwargs = mock_run.call_args.kwargs
+            assert "http_config" in kwargs
+            assert "mp_config" in kwargs
+            assert "storage_manager_config" in kwargs
+            assert "obs_config" in kwargs

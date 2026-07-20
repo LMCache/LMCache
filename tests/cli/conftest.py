@@ -36,6 +36,7 @@ def _stub_native_storage_ops() -> Generator[None, None, None]:
     stub: Any = types.ModuleType(_MOD_NAME)
     stub.TTLLock = MagicMock()
     stub.Bitmap = MagicMock()
+    stub.PeriodicEventNotifier = MagicMock()
     stub.ParallelPatternMatcher = MagicMock()
     stub.RangePatternMatcher = MagicMock()
 

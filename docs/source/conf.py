@@ -66,6 +66,9 @@ autodoc.ClassDocumenter = MockedClassDocumenter
 templates_path = ["_templates"]
 exclude_patterns: list[Any] = []
 add_module_names = False
+language = os.environ.get("SPHINX_LANGUAGE", "en")
+locale_dirs = ["locale/"]
+gettext_compact = False
 
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
