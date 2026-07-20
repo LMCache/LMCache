@@ -94,16 +94,54 @@ class _ZmqSelfPipe:
                 pass
 
 
-def _target_of(url: str) -> str:
-    """Turn ``grpc://host:port`` or ``grpc+unix:///path`` into a grpc target."""
+def _parse_url(url: str) -> tuple[str, dict[str, str]]:
+    """Turn a ``grpc://`` / ``grpc+unix://`` URL into (grpc_target, options).
+
+    Supported query parameters:
+
+    * ``compression=gzip|deflate|none`` -- enables per-call payload
+      compression.  Gzip is a good default for KV metadata payloads
+      that carry ascii identifiers / json-ish blobs; leave off for
+      already-compressed / tiny frames where the cpu cost outweighs
+      the byte savings.
+    """
     parts = urlsplit(url)
     scheme = parts.scheme
     if scheme == "grpc":
-        return parts.netloc
-    if scheme == "grpc+unix":
-        # grpc's unix scheme; path already begins with '/'.
-        return "unix:" + parts.path
-    raise ValueError("unsupported grpc URL scheme: " + scheme)
+        target = parts.netloc
+    elif scheme == "grpc+unix":
+        target = "unix:" + parts.path
+    else:
+        raise ValueError("unsupported grpc URL scheme: " + scheme)
+
+    opts: dict[str, str] = {}
+    if parts.query:
+        for chunk in parts.query.split("&"):
+            if not chunk:
+                continue
+            key, _, value = chunk.partition("=")
+            opts[key] = value
+    return target, opts
+
+
+_COMPRESSION_MAP = {
+    "gzip": grpc.Compression.Gzip,
+    "deflate": grpc.Compression.Deflate,
+    "none": grpc.Compression.NoCompression,
+    "": grpc.Compression.NoCompression,
+}
+
+
+def _resolve_compression(opts: dict[str, str]) -> grpc.Compression:
+    raw = opts.get("compression", "").lower()
+    if raw not in _COMPRESSION_MAP:
+        raise ValueError(
+            "unknown compression '"
+            + raw
+            + "'; expected one of "
+            + ", ".join(sorted(k for k in _COMPRESSION_MAP if k))
+        )
+    return _COMPRESSION_MAP[raw]
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +161,7 @@ class GrpcClientTransport(ClientTransport):
         self._pipe = _ZmqSelfPipe(self._ctx)
         self._pump: Optional[threading.Thread] = None
         self._closed = threading.Event()
+        self._compression: grpc.Compression = grpc.Compression.NoCompression
 
     # -- request iterator fed by ``send_frames`` ---------------------------
 
@@ -136,7 +175,9 @@ class GrpcClientTransport(ClientTransport):
     def _pump_loop(self) -> None:
         assert self._stub is not None
         try:
-            call = self._stub.Exchange(self._request_iter())
+            call = self._stub.Exchange(
+                self._request_iter(), compression=self._compression
+            )
             for response in call:
                 self._inbox.put(list(response.frames))
                 self._pipe.notify()
@@ -150,7 +191,8 @@ class GrpcClientTransport(ClientTransport):
 
     def connect(self, url: str) -> None:
         assert self._channel is None, "GrpcClientTransport already connected"
-        target = _target_of(url)
+        target, opts = _parse_url(url)
+        self._compression = _resolve_compression(opts)
         self._channel = grpc.insecure_channel(target)
         self._stub = lmcache_mq_pb2_grpc.MessageQueueStub(self._channel)
         self._pump = threading.Thread(
@@ -269,9 +311,11 @@ class GrpcServerTransport(ServerTransport):
 
     def bind(self, url: str) -> None:
         assert self._server is None, "GrpcServerTransport already bound"
-        target = _target_of(url)
+        target, opts = _parse_url(url)
+        compression = _resolve_compression(opts)
         self._server = grpc.server(
             ThreadPoolExecutor(max_workers=self._max_workers),
+            compression=compression,
         )
         lmcache_mq_pb2_grpc.add_MessageQueueServicer_to_server(
             self._servicer, self._server

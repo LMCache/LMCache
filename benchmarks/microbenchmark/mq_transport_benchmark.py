@@ -143,6 +143,9 @@ def _make_url_factories() -> dict[str, Callable[[], str]]:
         "ipc": lambda: "ipc://" + tempfile.mktemp(prefix="mq-bench-"),
         "tcp": lambda: "tcp://127.0.0.1:" + str(_pick_free_port()),
         "grpc": lambda: "grpc://127.0.0.1:" + str(_pick_free_port()),
+        "grpc-gzip": (
+            lambda: "grpc://127.0.0.1:" + str(_pick_free_port()) + "?compression=gzip"
+        ),
     }
 
 
@@ -150,8 +153,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--transports",
-        default="ipc,tcp,grpc",
-        help="Comma-separated list of transports to bench (default: ipc,tcp,grpc)",
+        default="ipc,tcp,grpc,grpc-gzip",
+        help="Comma-separated list of transports to bench "
+        "(default: ipc,tcp,grpc,grpc-gzip)",
     )
     parser.add_argument(
         "--requests",
