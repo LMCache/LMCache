@@ -31,6 +31,34 @@ def test_register_lists_then_deregister():
         assert client.get("/instances").json()["instances"] == []
 
 
+def test_register_round_trips_p2p_and_mq_fields():
+    with _client() as client:
+        client.post(
+            "/instances",
+            json={
+                "instance_id": "i1",
+                "ip": "10.0.0.1",
+                "http_port": 8080,
+                "p2p_advertised_url": "10.0.0.1:7600",
+                "mq_port": 5555,
+            },
+        )
+        listed = client.get("/instances").json()["instances"]
+        assert listed[0]["ip"] == "10.0.0.1"
+        assert listed[0]["p2p_advertised_url"] == "10.0.0.1:7600"
+        assert listed[0]["mq_port"] == 5555
+
+
+def test_register_defaults_mq_port_when_absent():
+    with _client() as client:
+        client.post(
+            "/instances",
+            json={"instance_id": "i1", "ip": "127.0.0.1", "http_port": 8080},
+        )
+        listed = client.get("/instances").json()["instances"]
+        assert listed[0]["mq_port"] == 0
+
+
 def test_re_register_reports_true():
     with _client() as client:
         client.post(

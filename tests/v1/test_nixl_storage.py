@@ -25,10 +25,14 @@ from nixl._api import nixl_agent_config as NixlAgentConfig
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import MemoryFormat, PagedTensorMemoryAllocator
+from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
+    PagedTensorMemoryAllocator,
+)
+from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend import CreateStorageBackends
 from lmcache.v1.storage_backend.nixl_storage_backend import (
+    NixlDynamicStorageBackend,
     NixlStorageBackend,
     NixlStorageConfig,
 )
@@ -500,7 +504,7 @@ def _build_dynamic_file_backend(config, dtype, allocate_objs: bool = True):
         dst_device=config.nixl_buffer_device,
     )
     nixl_backend = backends[BACKEND_NAME]
-    assert isinstance(nixl_backend, NixlStorageBackend)
+    assert isinstance(nixl_backend, NixlDynamicStorageBackend)
 
     if not allocate_objs:
         return nixl_backend, backends, thread_loop, thread, keys, []
@@ -599,6 +603,7 @@ def run_dynamic_file(config, dtype, tmp_path):
     finally:
         _teardown_dynamic_file_backend(backends, thread_loop, thread, retained_objs)
 
+
 @pytest.mark.no_shared_allocator
 def test_nixl_posix_backend_multipath():
     """Test NIXL backend with multipath support and path sharding."""
@@ -618,6 +623,7 @@ def test_nixl_posix_backend_multipath():
     assert config.extra_config["nixl_path_sharding"] == "by_gpu"
 
     run(config, shape, dtype)
+
 
 @pytest.mark.no_shared_allocator
 def test_nixl_dynamic_file_layerwise_uses_logical_size(tmp_path):
@@ -822,8 +828,8 @@ def test_nixl_dynamic_file_read_acquire_failure_releases_allocations(
     config.extra_config["nixl_path"] = str(tmp_path)
     config.extra_config["enable_cuda"] = False
 
-    nixl_backend, backends, thread_loop, thread, keys, _ = (
-        _build_dynamic_file_backend(config, dtype, allocate_objs=False)
+    nixl_backend, backends, thread_loop, thread, keys, _ = _build_dynamic_file_backend(
+        config, dtype, allocate_objs=False
     )
     probes = [_RefCountProbe(), _RefCountProbe()]
 
@@ -847,9 +853,7 @@ def test_nixl_dynamic_file_read_acquire_failure_releases_allocations(
 
 
 @pytest.mark.no_shared_allocator
-def test_nixl_dynamic_file_async_acquire_failure_releases_refs(
-    tmp_path, monkeypatch
-):
+def test_nixl_dynamic_file_async_acquire_failure_releases_refs(tmp_path, monkeypatch):
     BASE_DIR = Path(__file__).parent
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
@@ -962,8 +966,8 @@ def test_nixl_dynamic_file_wait_cleanup_failures_still_release_refs(
     config.extra_config["nixl_path"] = str(tmp_path)
     config.extra_config["enable_cuda"] = False
 
-    nixl_backend, backends, thread_loop, thread, keys, _ = (
-        _build_dynamic_file_backend(config, dtype, allocate_objs=False)
+    nixl_backend, backends, thread_loop, thread, keys, _ = _build_dynamic_file_backend(
+        config, dtype, allocate_objs=False
     )
     probes = [_RefCountProbe()]
 

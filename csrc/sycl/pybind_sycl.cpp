@@ -28,6 +28,7 @@ PYBIND11_MODULE(xpu_ops, m) {
       .value("NB_NL_TWO_NH_BS_HS", EngineKVFormat::NB_NL_TWO_NH_BS_HS)
       .value("TWO_X_NL_X_NB_BS_NH_HS", EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS)
       .value("NL_X_NB_NH_BS_TWO_HS", EngineKVFormat::NL_X_NB_NH_BS_TWO_HS)
+      .value("NL_X_NB_BS_NH_TWO_HS", EngineKVFormat::NL_X_NB_BS_NH_TWO_HS)
       .export_values();
   m.def("multi_layer_kv_transfer", &multi_layer_kv_transfer,
         py::arg("key_value"), py::arg("key_value_ptrs"),
@@ -58,8 +59,8 @@ PYBIND11_MODULE(xpu_ops, m) {
         py::call_guard<py::gil_scoped_release>());
 
   // CacheGen / RoPE kernels (Intel XPU).  Names match the
-  // lmcache.python_ops_fallback module so lmcache._get_backend() can
-  // transparently override.
+  // lmcache.python_ops_fallback module so the backend selection in
+  // lmcache.v1.platform can transparently override.
   m.def("calculate_cdf", &calculate_cdf_xpu, py::arg("input"),
         py::arg("max_bins"));
   m.def("rotary_embedding_k_fused", &rotary_embedding_k_fused_xpu,

@@ -1,44 +1,58 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CUDA-specific platform primitives.
+"""CUDA-specific platform primitives."""
 
-Importing this package self-registers a CUDA KV-cache wrapper
-factory with :mod:`lmcache.v1.platform._registry`, so the dispatch
-in :mod:`lmcache.integration.vllm.vllm_multi_process_adapter` can
-locate it by ``tensor.device.type``.
-"""
+# Future
+from __future__ import annotations
 
 # Standard
-from typing import Any
-
-# Third Party
-import torch
+from typing import TYPE_CHECKING
 
 # First Party
-from lmcache.v1.platform._registry import (
-    register_availability,
-    register_kv_wrapper,
-)
+from lmcache.v1.platform.base_device_spec import DeviceSpec
+from lmcache.v1.platform.base_pin_memory import PinMemoryBackend
+from lmcache.v1.platform.cuda.pin_memory import CudaPinMemoryBackend
 
-
-def _kv_wrapper_factory(tensor: torch.Tensor) -> Any:
-    """Indirect-dispatch wrapper.
-
-    Re-imports :class:`CudaIPCWrapper` on every call so test suites
-    that swap the symbol still see their override take effect.
-    """
+if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.multiprocess.custom_types import CudaIPCWrapper
+    from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
 
-    return CudaIPCWrapper(tensor)
-
-
-def _cuda_is_available() -> bool:
-    """Lazy availability check to avoid circular import at module load."""
-    # First Party
-    from lmcache import torch_dev
-
-    return torch_dev.is_available()
+# ---------------------------------------------------------------------------
+# Device detection registry entry
+# ---------------------------------------------------------------------------
 
 
-register_availability("cuda", _cuda_is_available)
-register_kv_wrapper("cuda", _kv_wrapper_factory)
+class CudaDeviceSpec(DeviceSpec):
+    """CUDA device specification for the detection registry."""
+
+    @property
+    def device_type(self) -> str:
+        return "cuda"
+
+    @property
+    def torch_module_name(self) -> str:
+        return "cuda"
+
+    @property
+    def ops_module(self) -> str | None:
+        return "lmcache.c_ops"
+
+    @property
+    def pin_memory_backend(self) -> type[PinMemoryBackend] | None:
+        return CudaPinMemoryBackend
+
+    @property
+    def ipc_wrapper_cls(self) -> type[DeviceIPCWrapper] | None:
+        # First Party
+        from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
+
+        return CudaIPCWrapper
+
+    def is_available(self) -> bool:
+        """Check CUDA availability without importing lmcache.__init__."""
+        try:
+            # Third Party
+            import torch
+
+            return torch.cuda.is_available()
+        except Exception:
+            return False

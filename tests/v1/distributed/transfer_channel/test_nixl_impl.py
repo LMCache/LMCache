@@ -20,6 +20,7 @@ an existing context's connected clients short of closing it.
 """
 
 # Standard
+from unittest.mock import MagicMock
 import itertools
 import time
 
@@ -170,6 +171,52 @@ def test_get_client_is_idempotent(shared_contexts):
     first = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
     second = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
     assert first is second
+
+
+def test_register_client_keeps_first_and_closes_duplicate(fresh_contexts):
+    """A racing second registration keeps the first client and closes the dup."""
+    ctx_a, _, _, _ = fresh_contexts
+    key = "10.255.255.1:65000"
+    first = MagicMock()
+    second = MagicMock()
+
+    assert ctx_a.register_client(key, first) is first
+    # The peer's inbound connection registers a duplicate for the same key.
+    assert ctx_a.register_client(key, second) is first
+    second.close.assert_called_once()
+    first.close.assert_not_called()
+    assert ctx_a.get_num_connected_clients() == 1
+
+
+def test_remove_client_closes_and_drops_it(fresh_contexts):
+    """Removing a peer closes its client and drops it from the context."""
+    ctx_a, _, _, _ = fresh_contexts
+    key = "10.255.255.1:65000"
+    client = MagicMock()
+    ctx_a.register_client(key, client)
+    assert ctx_a.get_num_connected_clients() == 1
+
+    ctx_a.remove_transfer_channel_client(key)
+
+    client.close.assert_called_once()
+    assert ctx_a.get_num_connected_clients() == 0
+
+
+def test_remove_unknown_client_is_noop(fresh_contexts):
+    """Removing a peer with no registered client does nothing and does not raise."""
+    ctx_a, _, _, _ = fresh_contexts
+    ctx_a.remove_transfer_channel_client("10.255.255.1:65000")
+    assert ctx_a.get_num_connected_clients() == 0
+
+
+def test_remove_client_after_connect(fresh_contexts):
+    """A live client obtained via get_transfer_channel_client can be removed."""
+    ctx_a, _, ctx_b, _ = fresh_contexts
+    ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+    assert ctx_a.get_num_connected_clients() == 1
+
+    ctx_a.remove_transfer_channel_client(ctx_b.advertise_url)
+    assert ctx_a.get_num_connected_clients() == 0
 
 
 def test_connecting_registers_clients_on_both_sides(fresh_contexts):

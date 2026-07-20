@@ -2,17 +2,13 @@
 
 # Standard
 from enum import IntEnum, auto
-from typing import List, Optional
+from typing import Any, List, Optional, cast
 import asyncio
 import inspect
-import threading
-
-# Third Party
-from cachetools import TTLCache as _TTLCache  # type: ignore
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey
+from lmcache.utils import CacheEngineKey, TTLCache
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
@@ -22,6 +18,7 @@ from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 # Local
 from .bigtable_config import BigtablePluginConfig
 from .bigtable_schema import BigtableSchema
+from .bigtable_sharder import BigtablePayloadSharder
 
 logger = init_logger(__name__)
 
@@ -33,24 +30,81 @@ class Priorities(IntEnum):
     PUT = auto()
 
 
-class TTLCache:
-    """Thread-safe wrapper around cachetools.TTLCache for existence checks."""
+def _extract_shards_from_row(row: Any, family_name: str) -> dict[str, bytes]:
+    """Extracts sharded column qualifier to value map from a row object.
+    Filters out stale shards from older writes by comparing timestamps.
 
-    def __init__(self, max_size: int, ttl_seconds: float):
-        self.cache: _TTLCache = _TTLCache(maxsize=max_size, ttl=ttl_seconds)
-        self.lock = threading.RLock()
+    Args:
+        row: The Bigtable row object.
+        family_name: The column family name to filter.
 
-    def get(self, key: str) -> Optional[bool]:
-        with self.lock:
-            return self.cache.get(key)
+    Returns:
+        A dictionary mapping column qualifiers (as strings) to cell values.
+    """
+    shards_raw: dict[str, tuple[bytes, int]] = {}
+    if row is None or not hasattr(row, "cells"):
+        return {}
 
-    def put(self, key: str, val: bool):
-        with self.lock:
-            self.cache[key] = val
+    # Helper to decode bytes or string qualifiers
+    def decode_qual(qual):
+        return (
+            qual.decode("utf-8", errors="ignore") if isinstance(qual, bytes) else qual
+        )
 
-    def invalidate(self, key: str):
-        with self.lock:
-            self.cache.pop(key, None)
+    if isinstance(row.cells, dict):
+        cells_dict = row.cells.get(family_name, {})
+        for qual_bytes, cell_list in cells_dict.items():
+            if cell_list:
+                qual_str = decode_qual(qual_bytes)
+                # cell_list is sorted by timestamp descending, so cell_list[0] is latest
+                shards_raw[qual_str] = (
+                    cell_list[0].value,
+                    cell_list[0].timestamp_micros,
+                )
+    else:
+        for cell in row.cells:
+            if cell.family == family_name:
+                qual_str = decode_qual(cell.qualifier)
+                # Keep the latest cell for this qualifier
+                if (
+                    qual_str not in shards_raw
+                    or cell.timestamp_micros > shards_raw[qual_str][1]
+                ):
+                    shards_raw[qual_str] = (cell.value, cell.timestamp_micros)
+
+    if not shards_raw:
+        return {}
+
+    # Find the maximum timestamp across all shards
+    max_ts = max(ts for _, ts in shards_raw.values())
+
+    # Discard shards older than max_ts by >5s (5,000,000 micros).
+    # This prevents merging shards from different write operations.
+    TOLERANCE_MICROS = 5 * 1000000
+    shards: dict[str, bytes] = {}
+    for qual, (val, ts) in shards_raw.items():
+        if max_ts - ts <= TOLERANCE_MICROS:
+            shards[qual] = val
+        else:
+            logger.warning(
+                f"Discarding stale shard {qual} with timestamp {ts} "
+                f"(max timestamp is {max_ts}, diff is {(max_ts - ts) / 1e6:.2f}s)"
+            )
+
+    return shards
+
+
+def _prepare_bytes(blob: Any) -> bytes:
+    if isinstance(blob, (bytes, bytearray)):
+        return cast(bytes, blob)
+    return bytes(blob)
+
+
+def _prepare_and_shard(
+    sharder: BigtablePayloadSharder, blob: Any
+) -> tuple[bytes, dict[str, bytes]]:
+    data_bytes = blob if isinstance(blob, (bytes, bytearray)) else bytes(blob)
+    return cast(bytes, data_bytes), sharder.shard(cast(bytes, data_bytes))
 
 
 class BigtableConnector(RemoteConnector):
@@ -71,7 +125,10 @@ class BigtableConnector(RemoteConnector):
         extra_config = config.extra_config if config.extra_config is not None else {}
         self.cfg = BigtablePluginConfig.from_extra_config(extra_config, plugin_name)
         self.schema = BigtableSchema(
-            self.cfg.row_key_template, self.cfg.family_name, self.cfg.column_name
+            self.cfg.row_key_template,
+            self.cfg.family_name,
+            self.cfg.column_name,
+            layer_group_size=self.cfg.layer_group_size,
         )
 
         self.loop = loop
@@ -88,6 +145,25 @@ class BigtableConnector(RemoteConnector):
 
         # Use native AsyncPQExecutor to run pure coroutines directly on the event loop
         self.pq_executor = AsyncPQExecutor(loop, max_workers=self.cfg.thread_pool_size)
+
+        # Compute total layers dynamically
+        num_layers = 0
+        for shape in self.meta_shapes:
+            if len(shape) >= 2:
+                num_layers += shape[1]
+            else:
+                num_layers += 1
+        if num_layers == 0:
+            num_layers = 1
+
+        kv_size = self.meta_shapes[0][0] if self.meta_shapes else 2
+        self.sharder: Optional[BigtablePayloadSharder] = None
+        if self.cfg.layer_group_size > 0:
+            self.sharder = BigtablePayloadSharder(
+                num_layers=num_layers,
+                layer_group_size=self.cfg.layer_group_size,
+                kv_size=kv_size,
+            )
 
         logger.info(
             f"Initialized Bigtable remote connector for project={self.cfg.project_id}, "
@@ -282,7 +358,27 @@ class BigtableConnector(RemoteConnector):
 
                 self.exists_cache.put(key_str, True)
 
-                cell_value = self.schema.extract_cell_value(row)
+                shards = _extract_shards_from_row(row, self.cfg.family_name)
+                cell_value: Optional[bytes] = None
+                if self.sharder is not None:
+                    try:
+                        loop = asyncio.get_running_loop()
+                        cell_value = await loop.run_in_executor(
+                            None, self.sharder.reassemble, shards
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to reassemble shards for key {key_str}: {e}"
+                        )
+                        return None
+                else:
+                    legacy_qual = (
+                        self.cfg.column_name.decode("utf-8")
+                        if isinstance(self.cfg.column_name, bytes)
+                        else self.cfg.column_name
+                    )
+                    cell_value = shards.get(legacy_qual)
+
                 if cell_value is None:
                     return None
 
@@ -350,82 +446,134 @@ class BigtableConnector(RemoteConnector):
         )
 
     async def _put_internal(self, key: CacheEngineKey, memory_obj: MemoryObj):
-        try:
-            key_str = key.to_string()
-            blob = memory_obj.byte_array
-            blob_size_mb = len(blob) / (1024 * 1024)
+        key_str = key.to_string()
+        blob = memory_obj.byte_array
+        blob_size_mb = len(blob) / (1024 * 1024)
 
-            if blob_size_mb > self.cfg.max_chunk_size_mb:
+        sharding_enabled = self.sharder is not None
+        limit_mb = 240.0 if sharding_enabled else self.cfg.max_chunk_size_mb
+
+        if blob_size_mb > limit_mb:
+            logger.warning(
+                f"Bigtable chunk size {blob_size_mb:.2f} MB exceeds "
+                f"threshold {limit_mb} MB. "
+                f"Skipping write to prevent hard failures."
+            )
+            return
+
+        row_key = self.schema.get_row_key(key)
+        loop = asyncio.get_running_loop()
+
+        # Third Party
+        from google.cloud.bigtable.data import SetCell
+
+        if self.sharder is not None:
+            data_bytes, shards = await loop.run_in_executor(
+                None, _prepare_and_shard, self.sharder, blob
+            )
+            if max(len(s) for s in shards.values()) > 90 * 1024 * 1024:
+                rk_str = row_key.decode("utf-8", errors="ignore")
                 logger.warning(
-                    f"Bigtable chunk size {blob_size_mb:.2f} MB exceeds "
-                    f"threshold {self.cfg.max_chunk_size_mb} MB. "
-                    f"Skipping write to prevent hard failures."
+                    f"Skipping write to Bigtable for key {rk_str} "
+                    f"because a single shard exceeds the 90MB cell size limit."
                 )
                 return
 
-            row_key = self.schema.get_row_key(key)
-            data_bytes = (
-                bytes(blob) if not isinstance(blob, (bytes, bytearray)) else blob
-            )
+            total_size = len(data_bytes)
+            # Standard
+            import time
 
-            # Third Party
-            from google.cloud.bigtable.data import SetCell
+            timestamp = (time.time_ns() // 1000000) * 1000
 
-            mutation = SetCell(self.cfg.family_name, self.cfg.column_name, data_bytes)
+            if total_size < 150 * 1024 * 1024:
+                mutations = [
+                    SetCell(
+                        self.cfg.family_name,
+                        qual,
+                        shard_data,
+                        timestamp_micros=timestamp,
+                    )
+                    for qual, shard_data in shards.items()
+                ]
+                use_combined = True
+            else:
+                use_combined = False
+        else:
+            data_bytes = await loop.run_in_executor(None, _prepare_bytes, blob)
+            mutations = [
+                SetCell(self.cfg.family_name, self.cfg.column_name, data_bytes)
+            ]
+            use_combined = True
 
-            retries = 0
-            while True:
-                try:
-                    kwargs = {}
-                    if self.cfg.app_profile_id:
-                        kwargs["app_profile_id"] = self.cfg.app_profile_id
+        retries = 0
+        while True:
+            try:
+                kwargs = {}
+                if self.cfg.app_profile_id:
+                    kwargs["app_profile_id"] = self.cfg.app_profile_id
 
-                    table = self._get_table()
+                table = self._get_table()
+                if sharding_enabled and not use_combined:
+                    await asyncio.gather(
+                        *[
+                            table.mutate_row(
+                                row_key,
+                                [
+                                    SetCell(
+                                        self.cfg.family_name,
+                                        qual,
+                                        shard_data,
+                                        timestamp_micros=timestamp,
+                                    )
+                                ],
+                                operation_timeout=self.cfg.write_timeout_sec,
+                                **kwargs,
+                            )
+                            for qual, shard_data in shards.items()
+                        ]
+                    )
+                else:
                     await table.mutate_row(
                         row_key,
-                        mutation,
+                        mutations,
                         operation_timeout=self.cfg.write_timeout_sec,
                         **kwargs,
                     )
-                    self.exists_cache.put(key_str, True)
-                    logger.debug(
-                        f"Successfully wrote "
-                        f"{row_key.decode('utf-8', errors='ignore')} "
-                        f"via async Bigtable"
-                    )
-                    return
-                except (
-                    self.google_exceptions.DeadlineExceeded,
-                    TimeoutError,
-                ) as e:
+                self.exists_cache.put(key_str, True)
+                logger.debug(
+                    f"Successfully wrote "
+                    f"{row_key.decode('utf-8', errors='ignore')} "
+                    f"via async Bigtable"
+                )
+                return
+            except (
+                self.google_exceptions.DeadlineExceeded,
+                TimeoutError,
+            ) as e:
+                logger.warning(f"Bigtable async timeout in put: {e}. Skipping write.")
+                return
+            except (
+                self.google_exceptions.PermissionDenied,
+                self.google_exceptions.Unauthenticated,
+            ) as e:
+                logger.error(f"Bigtable permission/auth error in put: {e}")
+                raise
+            except self.google_exceptions.NotFound as e:
+                logger.error(f"Bigtable NotFound in put: {e}")
+                raise
+            except self.google_exceptions.ResourceExhausted:
+                if retries < self.cfg.max_retries:
+                    sleep_time = 0.5 * (2**retries)
                     logger.warning(
-                        f"Bigtable async timeout in put: {e}. Skipping write."
+                        f"Bigtable ResourceExhausted. Retrying in {sleep_time}s."
+                    )
+                    await asyncio.sleep(sleep_time)
+                    retries += 1
+                else:
+                    logger.warning(
+                        "Bigtable ResourceExhausted max retries reached in put."
                     )
                     return
-                except (
-                    self.google_exceptions.PermissionDenied,
-                    self.google_exceptions.Unauthenticated,
-                ) as e:
-                    logger.error(f"Bigtable permission/auth error in put: {e}")
-                    raise
-                except self.google_exceptions.NotFound as e:
-                    logger.error(f"Bigtable NotFound in put: {e}")
-                    raise
-                except self.google_exceptions.ResourceExhausted:
-                    if retries < self.cfg.max_retries:
-                        sleep_time = 0.5 * (2**retries)
-                        logger.warning(
-                            f"Bigtable ResourceExhausted. Retrying in {sleep_time}s."
-                        )
-                        await asyncio.sleep(sleep_time)
-                        retries += 1
-                    else:
-                        logger.warning(
-                            "Bigtable ResourceExhausted max retries reached in put."
-                        )
-                        return
-        finally:
-            memory_obj.ref_count_down()
 
     async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         await self.pq_executor.submit_job(
@@ -445,6 +593,7 @@ class BigtableConnector(RemoteConnector):
         from google.cloud.bigtable.data import ReadRowsQuery
 
         row_keys: List[str | bytes] = [self.schema.get_row_key(k) for k in keys]
+
         row_filters = self._get_row_filters_module()
         row_filter = getattr(row_filters, "CellsColumnLimitFilter", lambda n: None)(1)
 
@@ -469,7 +618,7 @@ class BigtableConnector(RemoteConnector):
                     row_dict[row.row_key] = row
 
                 memory_objs: List[Optional[MemoryObj]] = []
-                for key, rk in zip(keys, row_keys, strict=False):
+                for key, rk in zip(keys, row_keys, strict=True):
                     key_str = key.to_string()
                     row = row_dict.get(rk)
                     if row is None:
@@ -478,7 +627,29 @@ class BigtableConnector(RemoteConnector):
                         continue
 
                     self.exists_cache.put(key_str, True)
-                    cell_value = self.schema.extract_cell_value(row)
+
+                    shards = _extract_shards_from_row(row, self.cfg.family_name)
+                    cell_value: Optional[bytes] = None
+                    if self.sharder is not None:
+                        try:
+                            loop = asyncio.get_running_loop()
+                            cell_value = await loop.run_in_executor(
+                                None, self.sharder.reassemble, shards
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to reassemble shards for key {key_str}: {e}"
+                            )
+                            memory_objs.append(None)
+                            continue
+                    else:
+                        legacy_qual = (
+                            self.cfg.column_name.decode("utf-8")
+                            if isinstance(self.cfg.column_name, bytes)
+                            else self.cfg.column_name
+                        )
+                        cell_value = shards.get(legacy_qual)
+
                     if cell_value is None:
                         memory_objs.append(None)
                         continue
@@ -563,120 +734,173 @@ class BigtableConnector(RemoteConnector):
     async def _batched_put_internal(
         self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
     ):
-        try:
-            # Third Party
-            from google.cloud.bigtable.data import RowMutationEntry, SetCell
+        # Third Party
+        from google.cloud.bigtable.data import RowMutationEntry, SetCell
 
-            current_batch: List[RowMutationEntry] = []
-            current_batch_keys: List[str] = []
-            current_batch_size = 0
-            MAX_BATCH_SIZE_BYTES = 30 * 1024 * 1024  # 30MB safety limit
+        current_batch: List[RowMutationEntry] = []
+        current_batch_keys: List[str] = []
+        current_batch_size = 0
+        MAX_BATCH_SIZE_BYTES = 30 * 1024 * 1024  # 30MB safety limit
 
-            table = self._get_table()
-            kwargs = {}
-            if self.cfg.app_profile_id:
-                kwargs["app_profile_id"] = self.cfg.app_profile_id
+        table = self._get_table()
+        kwargs = {}
+        if self.cfg.app_profile_id:
+            kwargs["app_profile_id"] = self.cfg.app_profile_id
 
-            async def flush_batch(batch, batch_keys):
-                if not batch:
+        async def flush_batch(batch, batch_keys):
+            if not batch:
+                return
+            retries = 0
+            while True:
+                try:
+                    await table.bulk_mutate_rows(
+                        batch,
+                        operation_timeout=self.cfg.write_timeout_sec,
+                        **kwargs,
+                    )
+                    for k_str in batch_keys:
+                        self.exists_cache.put(k_str, True)
+                    logger.debug(
+                        f"Successfully batched put {len(batch)} rows via async Bigtable"
+                    )
                     return
-                retries = 0
-                while True:
-                    try:
-                        await table.bulk_mutate_rows(
-                            batch,
-                            operation_timeout=self.cfg.write_timeout_sec,
-                            **kwargs,
-                        )
-                        for k_str in batch_keys:
-                            self.exists_cache.put(k_str, True)
-                        logger.debug(
-                            f"Successfully batched put {len(batch)} rows "
-                            f"via async Bigtable"
-                        )
-                        return
-                    except (
-                        self.google_exceptions.DeadlineExceeded,
-                        TimeoutError,
-                    ) as e:
-                        logger.warning(
-                            f"Bigtable async timeout in batched_put: {e}. Skipping."
-                        )
-                        return
-                    except (
-                        self.google_exceptions.PermissionDenied,
-                        self.google_exceptions.Unauthenticated,
-                    ) as e:
-                        logger.error(
-                            f"Bigtable permission/auth error in batched_put: {e}"
-                        )
-                        raise
-                    except self.google_exceptions.NotFound as e:
-                        logger.error(f"Bigtable NotFound in batched_put: {e}")
-                        raise
-                    except self.google_exceptions.ResourceExhausted:
-                        if retries < self.cfg.max_retries:
-                            sleep_time = 0.5 * (2**retries)
-                            logger.warning(f"Retrying Bigtable in {sleep_time}s.")
-                            await asyncio.sleep(sleep_time)
-                            retries += 1
-                        else:
-                            logger.warning(
-                                "Bigtable ResourceExhausted max retries reached "
-                                "in batched_put."
-                            )
-                            return
-                    except Exception as e:
-                        logger.error(
-                            f"Unexpected error in Bigtable "
-                            f"_batched_put_internal flush: {e}",
-                            exc_info=True,
-                        )
-                        raise
-
-            for key, memory_obj in zip(keys, memory_objs, strict=False):
-                if memory_obj is None:
-                    continue
-                blob = memory_obj.byte_array
-                blob_size = len(blob)
-                blob_size_mb = blob_size / (1024 * 1024)
-
-                if blob_size_mb > self.cfg.max_chunk_size_mb:
+                except (
+                    self.google_exceptions.DeadlineExceeded,
+                    TimeoutError,
+                ) as e:
                     logger.warning(
-                        f"Bigtable chunk size {blob_size_mb:.2f} MB exceeds "
-                        f"threshold {self.cfg.max_chunk_size_mb} MB. "
-                        f"Skipping write for key {key.to_string()}."
+                        f"Bigtable async timeout in batched_put: {e}. Skipping."
+                    )
+                    return
+                except (
+                    self.google_exceptions.PermissionDenied,
+                    self.google_exceptions.Unauthenticated,
+                ) as e:
+                    logger.error(f"Bigtable permission/auth error in batched_put: {e}")
+                    raise
+                except self.google_exceptions.NotFound as e:
+                    logger.error(f"Bigtable NotFound in batched_put: {e}")
+                    raise
+                except self.google_exceptions.ResourceExhausted:
+                    if retries < self.cfg.max_retries:
+                        sleep_time = 0.5 * (2**retries)
+                        logger.warning(f"Retrying Bigtable in {sleep_time}s.")
+                        await asyncio.sleep(sleep_time)
+                        retries += 1
+                    else:
+                        logger.warning(
+                            "Bigtable ResourceExhausted max retries reached "
+                            "in batched_put."
+                        )
+                        return
+                except Exception as e:
+                    logger.error(
+                        f"Unexpected error in Bigtable "
+                        f"_batched_put_internal flush: {e}",
+                        exc_info=True,
+                    )
+                    raise
+
+        for key, memory_obj in zip(keys, memory_objs, strict=True):
+            if memory_obj is None:
+                continue
+            blob = memory_obj.byte_array
+            blob_size = len(blob)
+            blob_size_mb = blob_size / (1024 * 1024)
+
+            sharding_enabled = self.sharder is not None
+            limit_mb = 240.0 if sharding_enabled else self.cfg.max_chunk_size_mb
+
+            if blob_size_mb > limit_mb:
+                logger.warning(
+                    f"Bigtable chunk size {blob_size_mb:.2f} MB exceeds "
+                    f"threshold {limit_mb} MB. "
+                    f"Skipping write for key {key.to_string()}."
+                )
+                continue
+
+            if current_batch_size + blob_size > MAX_BATCH_SIZE_BYTES and current_batch:
+                await flush_batch(current_batch, current_batch_keys)
+                current_batch = []
+                current_batch_keys = []
+                current_batch_size = 0
+
+            row_key = self.schema.get_row_key(key)
+            loop = asyncio.get_running_loop()
+
+            if self.sharder is not None:
+                data_bytes, shards = await loop.run_in_executor(
+                    None, _prepare_and_shard, self.sharder, blob
+                )
+                if max(len(s) for s in shards.values()) > 90 * 1024 * 1024:
+                    logger.warning(
+                        f"Skipping batched write to Bigtable for key {key.to_string()} "
+                        f"because a single shard exceeds the 90MB cell size limit."
                     )
                     continue
 
-                if (
-                    current_batch_size + blob_size > MAX_BATCH_SIZE_BYTES
-                    and current_batch
-                ):
-                    await flush_batch(current_batch, current_batch_keys)
-                    current_batch = []
-                    current_batch_keys = []
-                    current_batch_size = 0
+                # Standard
+                import time
 
-                row_key = self.schema.get_row_key(key)
-                data_bytes = (
-                    bytes(blob) if not isinstance(blob, (bytes, bytearray)) else blob
-                )
+                timestamp = (time.time_ns() // 1000000) * 1000
 
-                mutation = SetCell(
-                    self.cfg.family_name, self.cfg.column_name, data_bytes
+                if blob_size < 150 * 1024 * 1024:
+                    mutations: List[Any] = [
+                        SetCell(
+                            self.cfg.family_name,
+                            qualifier,
+                            shard_data,
+                            timestamp_micros=timestamp,
+                        )
+                        for qualifier, shard_data in shards.items()
+                    ]
+                    entry = RowMutationEntry(row_key, mutations)
+                    current_batch.append(entry)
+                    current_batch_keys.append(key.to_string())
+                    current_batch_size += blob_size
+                else:
+                    for qualifier, shard_data in shards.items():
+                        if (
+                            current_batch_size + len(shard_data) > MAX_BATCH_SIZE_BYTES
+                            and current_batch
+                        ):
+                            await flush_batch(current_batch, current_batch_keys)
+                            current_batch = []
+                            current_batch_keys = []
+                            current_batch_size = 0
+
+                        entry = RowMutationEntry(
+                            row_key,
+                            [
+                                SetCell(
+                                    self.cfg.family_name,
+                                    qualifier,
+                                    shard_data,
+                                    timestamp_micros=timestamp,
+                                )
+                            ],
+                        )
+                        current_batch.append(entry)
+                        current_batch_keys.append(key.to_string())
+                        current_batch_size += len(shard_data)
+            else:
+                data_bytes = await loop.run_in_executor(None, _prepare_bytes, blob)
+                entry = RowMutationEntry(
+                    row_key,
+                    [
+                        SetCell(
+                            self.cfg.family_name,
+                            self.cfg.column_name,
+                            data_bytes,
+                        )
+                    ],
                 )
-                entry = RowMutationEntry(row_key, mutation)
                 current_batch.append(entry)
                 current_batch_keys.append(key.to_string())
                 current_batch_size += blob_size
 
-            if current_batch:
-                await flush_batch(current_batch, current_batch_keys)
-        finally:
-            for memory_obj in memory_objs:
-                if memory_obj is not None:
-                    memory_obj.ref_count_down()
+        if current_batch:
+            await flush_batch(current_batch, current_batch_keys)
 
     async def batched_put(
         self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
@@ -737,7 +961,7 @@ class BigtableConnector(RemoteConnector):
                 for row in rows_gen:
                     existing_rk_set.add(row.row_key)
 
-                for k, rk in zip(missing_keys, row_keys_missing, strict=False):
+                for k, rk in zip(missing_keys, row_keys_missing, strict=True):
                     exists = rk in existing_rk_set
                     self.exists_cache.put(k.to_string(), exists)
                     if not exists:
@@ -880,14 +1104,7 @@ class BigtableConnector(RemoteConnector):
 
     async def close(self):
         await self.pq_executor.shutdown_async(wait=False)
-        if getattr(self, "_table", None) is not None:
-            try:
-                res = self._table.close()
-                if inspect.isawaitable(res):
-                    await res
-            except Exception as e:
-                logger.warning(f"Failed to close Bigtable table cleanly: {e}")
-            self._table = None
+        self._table = None
         if getattr(self, "_client", None) is not None:
             try:
                 res = self._client.close()

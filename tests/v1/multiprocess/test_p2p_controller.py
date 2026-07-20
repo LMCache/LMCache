@@ -8,12 +8,20 @@ definitions, MemoryLayoutDesc wire serialization, and server handlers.
 from unittest.mock import MagicMock
 
 # Third Party
+import httpx
 import torch
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
-from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
+from lmcache.v1.multiprocess.config import CoordinatorConfig, P2PConfig
+from lmcache.v1.multiprocess.modules.p2p_controller import (
+    _MAX_MISSES,
+    P2PController,
+    _P2PState,
+    _PeerInstance,
+)
 from lmcache.v1.multiprocess.mq import msgspec_decode, msgspec_encode
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
@@ -130,8 +138,14 @@ def test_transfer_channel_address_validity():
 
 
 def _make_controller() -> tuple[P2PController, MagicMock]:
+    """Build a P2P-disabled controller (no thread / transfer channel)."""
     ctx = MagicMock()
-    controller = P2PController(ctx)
+    controller = P2PController(
+        ctx,
+        P2PConfig(),
+        CoordinatorConfig(),
+        instance_id="self",
+    )
     return controller, ctx
 
 
@@ -242,9 +256,12 @@ def test_report_status_counts_active_jobs():
     ctx.storage_manager.submit_prefetch_task.return_value = MagicMock(
         l1_found_indices=()
     )
-    assert controller.report_status() == {"active_p2p_lookup_jobs": 0}
+    assert controller.report_status()["active_p2p_lookup_jobs"] == 0
     controller.p2p_lookup_and_lock([_make_key(0)], _make_layout_desc())
-    assert controller.report_status() == {"active_p2p_lookup_jobs": 1}
+    status = controller.report_status()
+    assert status["active_p2p_lookup_jobs"] == 1
+    assert status["p2p_enabled"] is False
+    assert status["p2p_state"] == _P2PState.UNREGISTERED.value
 
 
 def test_get_handlers_covers_all_p2p_request_types():
@@ -256,3 +273,213 @@ def test_get_handlers_covers_all_p2p_request_types():
         RequestType.P2P_QUERY_LOOKUP_RESULTS,
         RequestType.P2P_UNLOCK_OBJECTS,
     }
+
+
+# ============================================================================
+# Orchestration: adapter reconcile
+# ============================================================================
+
+
+def _peer(
+    instance_id: str,
+    url: str = "tc-host:9",
+    ip: str = "10.0.0.2",
+    mq_port: int = 5555,
+) -> _PeerInstance:
+    return _PeerInstance(
+        instance_id=instance_id,
+        ip=ip,
+        p2p_advertised_url=url,
+        mq_port=mq_port,
+    )
+
+
+def test_reconcile_adds_new_peer():
+    """A newly discovered peer gets one P2P L2 adapter with the right urls."""
+    controller, ctx = _make_controller()
+    ctx.storage_manager.add_l2_adapter.return_value = 7
+
+    controller._apply_state(_P2PState.REGISTERED, {"peerA": _peer("peerA")})
+
+    ctx.storage_manager.add_l2_adapter.assert_called_once()
+    config = ctx.storage_manager.add_l2_adapter.call_args.args[0]
+    assert isinstance(config, P2PL2AdapterConfig)
+    assert config.peer_mq_server_url == "tcp://10.0.0.2:5555"
+    assert config.peer_transfer_channel_server_url == "tc-host:9"
+    assert controller.report_status()["p2p_peers"] == ["peerA"]
+
+
+def test_reconcile_no_op_when_peer_unchanged():
+    """A still-present, unchanged peer is not re-added on the next cycle."""
+    controller, ctx = _make_controller()
+    ctx.storage_manager.add_l2_adapter.return_value = 7
+
+    controller._apply_state(_P2PState.REGISTERED, {"peerA": _peer("peerA")})
+    controller._apply_state(_P2PState.REGISTERED, {"peerA": _peer("peerA")})
+
+    ctx.storage_manager.add_l2_adapter.assert_called_once()
+    ctx.storage_manager.delete_l2_adapter.assert_not_called()
+
+
+def test_reconcile_keeps_peer_within_grace():
+    """A peer absent for up to _MAX_MISSES cycles keeps its adapter."""
+    controller, ctx = _make_controller()
+    ctx.storage_manager.add_l2_adapter.return_value = 7
+
+    controller._apply_state(_P2PState.REGISTERED, {"peerA": _peer("peerA")})
+    for _ in range(_MAX_MISSES):
+        controller._apply_state(_P2PState.REGISTERED, {})
+
+    ctx.storage_manager.delete_l2_adapter.assert_not_called()
+    assert controller.report_status()["p2p_peers"] == ["peerA"]
+
+
+def test_reconcile_removes_peer_after_grace():
+    """A peer absent beyond _MAX_MISSES cycles has its adapter removed."""
+    controller, ctx = _make_controller()
+    ctx.storage_manager.add_l2_adapter.return_value = 7
+
+    controller._apply_state(_P2PState.REGISTERED, {"peerA": _peer("peerA")})
+    for _ in range(_MAX_MISSES + 1):
+        controller._apply_state(_P2PState.REGISTERED, {})
+
+    ctx.storage_manager.delete_l2_adapter.assert_called_once_with(7)
+    assert controller.report_status()["p2p_peers"] == []
+
+
+def test_reconcile_readds_on_url_change():
+    """A peer whose advertised url changes is removed and re-added."""
+    controller, ctx = _make_controller()
+    ctx.storage_manager.add_l2_adapter.side_effect = [7, 8]
+
+    controller._apply_state(_P2PState.REGISTERED, {"peerA": _peer("peerA", url="a:1")})
+    controller._apply_state(_P2PState.REGISTERED, {"peerA": _peer("peerA", url="b:2")})
+
+    ctx.storage_manager.delete_l2_adapter.assert_called_once_with(7)
+    assert ctx.storage_manager.add_l2_adapter.call_count == 2
+    latest = ctx.storage_manager.add_l2_adapter.call_args.args[0]
+    assert latest.peer_transfer_channel_server_url == "b:2"
+
+
+def test_close_removes_all_adapters():
+    """close drains every tracked peer adapter."""
+    controller, ctx = _make_controller()
+    ctx.storage_manager.add_l2_adapter.side_effect = [7, 8]
+    controller._apply_state(
+        _P2PState.REGISTERED,
+        {"peerA": _peer("peerA"), "peerB": _peer("peerB", mq_port=5556)},
+    )
+
+    controller.close()
+
+    removed = {c.args[0] for c in ctx.storage_manager.delete_l2_adapter.call_args_list}
+    assert removed == {7, 8}
+
+
+# ============================================================================
+# Orchestration: poll-cycle state machine
+# ============================================================================
+
+
+def _enable_polling(
+    controller: P2PController, advertise_url: str = "me:1"
+) -> MagicMock:
+    """Point a controller's poll loop at a mock coordinator client."""
+    controller._p2p_config = P2PConfig(advertise_url=advertise_url)
+    controller._instances_url = "http://coordinator/instances"
+    client = MagicMock()
+    controller._http_client = client
+    return client
+
+
+def _instances_response(instances: list[dict]) -> MagicMock:
+    response = MagicMock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {"instances": instances}
+    return response
+
+
+def _entry(
+    instance_id: str,
+    url: str,
+    ip: str = "10.0.0.9",
+    mq_port: int = 5555,
+) -> dict:
+    return {
+        "instance_id": instance_id,
+        "ip": ip,
+        "p2p_advertised_url": url,
+        "mq_port": mq_port,
+    }
+
+
+def test_poll_cycle_timeout_is_disconnected():
+    """A request timeout maps to the Disconnected state."""
+    controller, _ = _make_controller()
+    client = _enable_polling(controller)
+    client.get.side_effect = httpx.TimeoutException("boom")
+
+    controller._poll_cycle()
+    assert controller.report_status()["p2p_state"] == _P2PState.DISCONNECTED.value
+
+
+def test_poll_cycle_http_error_is_unregistered():
+    """A non-timeout HTTP error maps to the Unregistered state."""
+    controller, _ = _make_controller()
+    client = _enable_polling(controller)
+    client.get.side_effect = httpx.HTTPError("boom")
+
+    controller._poll_cycle()
+    assert controller.report_status()["p2p_state"] == _P2PState.UNREGISTERED.value
+
+
+def test_poll_cycle_self_absent_is_unregistered():
+    """Not finding our own instance in the listing is Unregistered."""
+    controller, _ = _make_controller()
+    client = _enable_polling(controller)
+    client.get.return_value = _instances_response([_entry("other", "tc:1")])
+
+    controller._poll_cycle()
+    assert controller.report_status()["p2p_state"] == _P2PState.UNREGISTERED.value
+
+
+def test_poll_cycle_registered_excludes_self_and_adds_peer():
+    """When registered, peers (but not self) get adapters."""
+    controller, ctx = _make_controller()
+    ctx.storage_manager.add_l2_adapter.return_value = 7
+    client = _enable_polling(controller, advertise_url="me:1")
+    client.get.return_value = _instances_response(
+        [_entry("self", "me:1"), _entry("peerA", "tc:1")]
+    )
+
+    controller._poll_cycle()
+
+    status = controller.report_status()
+    assert status["p2p_state"] == _P2PState.REGISTERED.value
+    assert status["p2p_peers"] == ["peerA"]
+
+
+def test_poll_cycle_unexpected_error_does_not_crash():
+    """An unexpected parsing error is caught and maps to Unregistered."""
+    controller, _ = _make_controller()
+    client = _enable_polling(controller)
+    # A non-dict entry makes parsing raise AttributeError (raw.get on a str).
+    client.get.return_value = _instances_response(["not-a-dict"])
+
+    summary = controller._poll_cycle()  # must not raise
+    assert summary.success is True
+    assert controller.report_status()["p2p_state"] == _P2PState.UNREGISTERED.value
+
+
+def test_poll_cycle_skips_peer_without_p2p_url():
+    """A peer that advertises no p2p url is not adapted."""
+    controller, ctx = _make_controller()
+    client = _enable_polling(controller, advertise_url="me:1")
+    client.get.return_value = _instances_response(
+        [_entry("self", "me:1"), _entry("peerA", "")]
+    )
+
+    controller._poll_cycle()
+
+    ctx.storage_manager.add_l2_adapter.assert_not_called()
+    assert controller.report_status()["p2p_peers"] == []

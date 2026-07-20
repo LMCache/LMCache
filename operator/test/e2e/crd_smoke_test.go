@@ -160,10 +160,10 @@ var _ = Describe("LMCacheEngine smoke (no-GPU)", Ordered, func() {
 })
 
 // assertDaemonSetShape verifies the operator's auto-injected pod-level
-// settings: hostIPC, runtimeClassName=nvidia, container privileged
-// security context, --host 0.0.0.0 always present in container args,
-// and the absence of any /dev/shm volume mount that would shadow the
-// host's /dev/shm and break CUDA IPC.
+// settings: hostIPC, runtimeClassName=nvidia, a container security context
+// that is non-privileged by default (privileged is opt-in via spec.privileged),
+// --host 0.0.0.0 always present in container args, and the absence of any
+// /dev/shm volume mount that would shadow the host's /dev/shm and break CUDA IPC.
 func assertDaemonSetShape(ds *appsv1.DaemonSet, expectedServerPort int32) {
 	GinkgoHelper()
 	pod := ds.Spec.Template.Spec
@@ -175,7 +175,8 @@ func assertDaemonSetShape(ds *appsv1.DaemonSet, expectedServerPort int32) {
 	c := pod.Containers[0]
 	Expect(c.SecurityContext).NotTo(BeNil(), "container.securityContext must be set")
 	Expect(c.SecurityContext.Privileged).NotTo(BeNil())
-	Expect(*c.SecurityContext.Privileged).To(BeTrue(), "container.privileged must be true")
+	Expect(*c.SecurityContext.Privileged).To(BeFalse(),
+		"container.privileged must default to false (opt-in via spec.privileged)")
 	Expect(c.Args).To(ContainElements("--host", "0.0.0.0"))
 	Expect(argValue(c.Args, "--port")).To(Equal(fmt.Sprintf("%d", expectedServerPort)))
 

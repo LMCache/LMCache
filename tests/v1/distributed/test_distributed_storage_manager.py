@@ -11,7 +11,12 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, TrimPolicy
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    ObjectKey,
+    PrefetchMode,
+    TrimPolicy,
+)
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -626,6 +631,34 @@ class TestStorageManagerL2Prefetch:
 
         sm.close()
 
+    def test_warm_skip_l2_is_noop(self, l2_storage_manager_config, basic_layout):
+        """``mode=WARM`` + ``skip_l2=True`` submits no controller request.
+
+        Regression: the WARM branch must honor ``skip_l2`` (it previously
+        ignored it, issuing L2 lookup/load work and mutating L1). The returned
+        :class:`PrefetchHandle` is the public signal — no request id to track
+        and no L2-sourced indices; since the controller is the only path that
+        loads from L2, this also means L1 is left untouched.
+        """
+        sm = StorageManager(l2_storage_manager_config)
+        keys = [make_object_key(i) for i in range(3)]
+
+        # Put the keys in L2 so a non-skip warm would have something to load,
+        # then clear L1 so a load would be the only way they could reappear.
+        self._write_keys_and_wait_for_l2(sm, keys, basic_layout)
+        sm.clear()
+
+        handle = sm.submit_prefetch_task(
+            keys, basic_layout, mode=PrefetchMode.WARM, skip_l2=True
+        )
+
+        # skip_l2 honored: the controller was never asked.
+        assert handle.prefetch_request_id == -1
+        assert handle.l2_orig_indices == ()
+        assert handle.total_requested_keys == len(keys)
+
+        sm.close()
+
     def test_prefetch_l2_partial_prefix(self, l2_storage_manager_config, basic_layout):
         """L2 has keys {0,1,3,4} but not 2 → L2 returns prefix of 2."""
         sm = StorageManager(l2_storage_manager_config)
@@ -737,10 +770,12 @@ class TestFailureEventProduction:
 
             # Allow drain thread to deliver the event.
             assert wait_for_condition(
-                lambda: len(
-                    _events_of_type(captured_events, EventType.L1_ALLOCATION_FAILED)
-                )
-                >= 1,
+                lambda: (
+                    len(
+                        _events_of_type(captured_events, EventType.L1_ALLOCATION_FAILED)
+                    )
+                    >= 1
+                ),
                 timeout=2.0,
             )
 
@@ -788,8 +823,9 @@ class TestFailureEventProduction:
                 assert objs is None  # all_good=False because middle key is gone
 
             assert wait_for_condition(
-                lambda: len(_events_of_type(captured_events, EventType.L1_READ_FAILED))
-                >= 1,
+                lambda: (
+                    len(_events_of_type(captured_events, EventType.L1_READ_FAILED)) >= 1
+                ),
                 timeout=2.0,
             )
 
@@ -869,3 +905,43 @@ class TestStorageManagerSparsePrefetch:
 
         sm.finish_read_prefetched(existing)
         sm.close()
+
+
+class TestStorageManagerDelete:
+    """Tests for StorageManager.delete_l1_keys()."""
+
+    def test_delete_counts_deleted_and_missing(
+        self, basic_storage_manager_config, basic_layout
+    ):
+        """delete_l1_keys reports deleted keys; missing keys are a no-op."""
+        storage_manager = StorageManager(basic_storage_manager_config)
+
+        resident = make_object_key(1)
+        missing = make_object_key(2)
+        storage_manager.reserve_write([resident], basic_layout, mode="new")
+        storage_manager.finish_write([resident])
+
+        assert storage_manager.delete_l1_keys([resident, missing]) == (1, 0)
+        assert storage_manager._l1_manager.get_object_state(resident) is None
+
+        storage_manager.close()
+
+    def test_delete_non_force_skips_locked_force_removes(
+        self, basic_storage_manager_config, basic_layout
+    ):
+        """A locked key is skipped by non-force delete and removed by force."""
+        storage_manager = StorageManager(basic_storage_manager_config)
+
+        # Reserve write without finishing -> the key is write-locked.
+        key = make_object_key(1)
+        storage_manager.reserve_write([key], basic_layout, mode="new")
+
+        # Non-force delete refuses the locked key; it survives.
+        assert storage_manager.delete_l1_keys([key]) == (0, 1)
+        assert storage_manager._l1_manager.get_object_state(key) is not None
+
+        # Force delete removes it regardless of the lock.
+        assert storage_manager.delete_l1_keys([key], force=True) == (1, 0)
+        assert storage_manager._l1_manager.get_object_state(key) is None
+
+        storage_manager.close()

@@ -83,7 +83,7 @@ def close_zmq_socket(socket: zmq.asyncio.Socket, linger: int = 0) -> None:
         socket.setsockopt(zmq.LINGER, linger)  # type: ignore[attr-defined]
         socket.close()
     except Exception as e:
-        logger.error(f"Warning: Failed to close socket cleanly: {e}")
+        logger.error("Warning: Failed to close socket cleanly: %s", e)
 
 
 def get_ip():

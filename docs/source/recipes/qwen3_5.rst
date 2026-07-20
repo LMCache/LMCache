@@ -1,7 +1,7 @@
 .. _recipe_qwen3_5:
 
-Qwen3_5ForConditionalGeneration
-===============================
+Qwen3.5 / Qwen3.6 series
+========================
 
 A hybrid architecture interleaving Mamba / Gated-DeltaNet (GDN) linear-attention
 layers with full-attention layers, shared by the **Qwen3.5 and Qwen3.6**

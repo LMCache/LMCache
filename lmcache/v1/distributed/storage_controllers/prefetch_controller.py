@@ -15,7 +15,7 @@ The controller runs a background thread with an event-driven loop that:
 # Standard
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 import enum
 import select
 import threading
@@ -23,7 +23,14 @@ import threading
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, TrimPolicy
+from lmcache.v1.distributed.api import (
+    DEFAULT_ATTN_WINDOW_DESC,
+    AttnWindowDesc,
+    MemoryLayoutDesc,
+    ObjectKey,
+    PrefetchMode,
+    TrimPolicy,
+)
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
@@ -38,7 +45,6 @@ from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
 )
-from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
@@ -46,6 +52,10 @@ from lmcache.v1.platform import (
     consume_fd,
     create_event_notifier,
 )
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.memory_management import MemoryObj
 
 logger = init_logger(__name__)
 
@@ -138,6 +148,14 @@ class InFlightPrefetchRequest:
     policy: TrimPolicy = TrimPolicy.PREFIX
     """Which retained-subset policy to apply (see :class:`TrimPolicy`)."""
 
+    attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
+    """Cross-chunk attention windows of all object groups, in object-group
+    order."""
+    mode: PrefetchMode = PrefetchMode.LOOKUP
+    """The prefetch intent (see :class:`PrefetchMode`).  ``WARM`` forces all
+    loaded keys permanent and acquires no read lock; ``LOOKUP`` defers
+    retention to the policy and read-locks loaded keys."""
+
     # Lookup phase: adapter_idx -> task_id (removed as results arrive)
     pending_lookup_tasks: dict[int, L2TaskId] = field(default_factory=dict)
     # Lookup phase: adapter_idx -> bitmap (populated as results arrive)
@@ -154,7 +172,7 @@ class InFlightPrefetchRequest:
     load_results: dict[int, Bitmap] = field(default_factory=dict)
     # Load phase: keys that were write-reserved in L1
     write_reserved_keys: list[ObjectKey] = field(default_factory=list)
-    write_reserved_objs: dict[ObjectKey, MemoryObj] = field(default_factory=dict)
+    write_reserved_objs: dict[ObjectKey, "MemoryObj"] = field(default_factory=dict)
 
     def all_lookups_done(self) -> bool:
         return len(self.pending_lookup_tasks) == 0
@@ -228,6 +246,8 @@ class PrefetchController(StorageControllerInterface):
                 MemoryLayoutDesc,
                 int,
                 TrimPolicy,
+                AttnWindowDesc,
+                PrefetchMode,
             ]
         ] = []
 
@@ -246,6 +266,8 @@ class PrefetchController(StorageControllerInterface):
                 MemoryLayoutDesc,
                 int,
                 TrimPolicy,
+                AttnWindowDesc,
+                PrefetchMode,
             ]
         ] = []
         self._next_request_id: PrefetchRequestId = 0
@@ -255,8 +277,11 @@ class PrefetchController(StorageControllerInterface):
         self._lookup_results_lock = threading.Lock()
         self._completed_lookups: dict[PrefetchRequestId, int] = {}
 
-        # Thread-safe prefetch results (background -> external)
+        # Thread-safe prefetch results (background -> external).  The condition
+        # variable lets a WAIT_PREFETCH_STATUS handler block until a result is
+        # published instead of busy-polling QUERY_PREFETCH_STATUS.
         self._prefetch_results_lock = threading.Lock()
+        self._prefetch_results_cv = threading.Condition(self._prefetch_results_lock)
         self._completed_results: dict[PrefetchRequestId, Bitmap] = {}
 
         # Map eventfds to adapter indices for quick lookup in poll.
@@ -326,6 +351,8 @@ class PrefetchController(StorageControllerInterface):
         layout_desc: MemoryLayoutDesc,
         extra_count: int = 0,
         policy: TrimPolicy = TrimPolicy.PREFIX,
+        attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
+        mode: PrefetchMode = PrefetchMode.LOOKUP,
     ) -> PrefetchRequestId:
         """
         Submit a prefetch request for the given keys.
@@ -352,6 +379,12 @@ class PrefetchController(StorageControllerInterface):
                 workers can each consume one read lock.
             policy: Which retained-subset policy to apply (see
                 :class:`TrimPolicy`).  Defaults to ``PREFIX``.
+            attn_desc: Cross-chunk attention windows of all object groups, in
+                object-group order.
+            mode: The prefetch intent (see :class:`PrefetchMode`).  ``WARM``
+                forces every loaded key permanent and acquires no read lock;
+                ``LOOKUP`` defers retention to the configured
+                :class:`PrefetchPolicy` and read-locks loaded keys.
 
         Returns:
             A request ID for tracking via query_prefetch_result.
@@ -360,7 +393,7 @@ class PrefetchController(StorageControllerInterface):
             request_id = self._next_request_id
             self._next_request_id += 1
             self._submission_queue.append(
-                (request_id, keys, layout_desc, extra_count, policy)
+                (request_id, keys, layout_desc, extra_count, policy, attn_desc, mode)
             )
         self._submission_efd.notify()
         return request_id
@@ -415,6 +448,29 @@ class PrefetchController(StorageControllerInterface):
             with self._lookup_results_lock:
                 self._completed_lookups.pop(request_id, None)
         return result
+
+    def wait_prefetch_result(
+        self, request_id: PrefetchRequestId, timeout: float
+    ) -> bool:
+        """
+        Block until a prefetch request's result is published, or until timeout.
+
+        Thread-safe. Lets a handler wait for prefetch completion instead of
+        busy-polling query_prefetch_result. Does not consume the result; the
+        caller still retrieves it via query_prefetch_result.
+
+        Args:
+            request_id: The request ID from submit_prefetch_request.
+            timeout: Maximum number of seconds to wait for the result.
+
+        Returns:
+            True if the result became available within the timeout, False if
+            the wait timed out.
+        """
+        with self._prefetch_results_cv:
+            return self._prefetch_results_cv.wait_for(
+                lambda: request_id in self._completed_results, timeout
+            )
 
     def report_status(self) -> dict:
         """Return a status dict for the prefetch controller."""
@@ -721,11 +777,13 @@ class PrefetchController(StorageControllerInterface):
         while (
             self._pending_queue and len(self._in_flight_requests) < self._max_in_flight
         ):
-            request_id, keys, layout_desc, extra_count, policy = (
+            request_id, keys, layout_desc, extra_count, policy, attn_desc, mode = (
                 self._pending_queue.pop(0)
             )
             self._status_pending_count -= 1
-            self._start_lookup_phase(request_id, keys, layout_desc, extra_count, policy)
+            self._start_lookup_phase(
+                request_id, keys, layout_desc, extra_count, policy, attn_desc, mode
+            )
 
     # =========================================================================
     # Lookup phase
@@ -738,6 +796,8 @@ class PrefetchController(StorageControllerInterface):
         layout_desc: MemoryLayoutDesc,
         extra_count: int = 0,
         policy: TrimPolicy = TrimPolicy.PREFIX,
+        attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
+        mode: PrefetchMode = PrefetchMode.LOOKUP,
     ) -> None:
         """Submit lookup_and_lock to all live (non-draining) adapters for a
         new request."""
@@ -754,7 +814,7 @@ class PrefetchController(StorageControllerInterface):
 
         pending_lookup_tasks: dict[int, L2TaskId] = {}
         for adapter_id, adapter in routing_adapters.items():
-            task_id = adapter.submit_lookup_and_lock_task(keys)
+            task_id = adapter.submit_lookup_and_lock_task(keys, layout_desc)
             pending_lookup_tasks[adapter_id] = task_id
 
         request = InFlightPrefetchRequest(
@@ -764,6 +824,8 @@ class PrefetchController(StorageControllerInterface):
             phase=PrefetchPhase.LOOKUP,
             extra_count=extra_count,
             policy=policy,
+            attn_desc=attn_desc,
+            mode=mode,
             pending_lookup_tasks=pending_lookup_tasks,
         )
         self._in_flight_requests[request_id] = request
@@ -833,9 +895,13 @@ class PrefetchController(StorageControllerInterface):
         keys_to_reserve = merged_bitmap.gather(request.keys)
         l1_mgr = self._l1_manager
 
-        retentions = self._policy.select_l1_retentions(
-            keys_to_reserve,
-        )
+        # WARM retains every loaded key; LOOKUP follows the configured policy.
+        if request.mode is PrefetchMode.WARM:
+            retentions = [True] * len(keys_to_reserve)
+        else:
+            retentions = self._policy.select_l1_retentions(
+                keys_to_reserve,
+            )
         write_results = l1_mgr.reserve_write(
             keys=keys_to_reserve,
             is_temporary=[not r for r in retentions],
@@ -1080,12 +1146,17 @@ class PrefetchController(StorageControllerInterface):
 
         l1_mgr = self._l1_manager
 
-        # Transition loaded keys: write-locked -> read-locked
-        # Use extra_count so that all TP workers each get their own read lock.
+        # Transition loaded keys out of write-locked state.
         if loaded_keys:
-            l1_mgr.finish_write_and_reserve_read(
-                loaded_keys, extra_count=request.extra_count
-            )
+            if request.mode is PrefetchMode.WARM:
+                # Warm: make ready, pin nothing.
+                l1_mgr.finish_write(loaded_keys)
+            else:
+                # write-locked -> read-locked; extra_count so each TP worker
+                # gets its own read lock.
+                l1_mgr.finish_write_and_reserve_read(
+                    loaded_keys, extra_count=request.extra_count
+                )
 
         # Clean up failed keys
         if failed_keys:
@@ -1161,6 +1232,8 @@ class PrefetchController(StorageControllerInterface):
         """Store the retained-key bitmap and remove from in-flight tracking."""
         with self._prefetch_results_lock:
             self._completed_results[request_id] = result
+            # Wake any WAIT_PREFETCH_STATUS handler blocked on this result.
+            self._prefetch_results_cv.notify_all()
         removed = self._in_flight_requests.pop(request_id, None)
         if removed is not None:
             self._status_in_flight_count -= 1

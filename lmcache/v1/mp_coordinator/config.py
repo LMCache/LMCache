@@ -35,21 +35,29 @@ class MPCoordinatorConfig:
             cycle (0.0 to 1.0).
         trigger_watermark: Eviction fires when usage reaches this fraction
             of the quota (0.0 to 1.0).
-        blend_chunk_size: Tokens per chunk for the global CacheBlend directory
-            (the match unit). Must equal the LMCache chunk size the blend servers
-            use, so the coordinator chunks published/queried tokens the same way.
+        chunk_size: Tokens per KV chunk. The single fleet chunk size: it is the
+            CacheBlend match unit *and* resolves a pin request's ``token_ids`` to
+            object keys. Must equal the MP servers' ``--chunk-size`` or blend
+            matches and resolved pin keys will not line up with what was stored.
+        hash_algorithm: Token hash algorithm for pin key resolution. Must equal
+            the MP servers' ``--hash-algorithm`` (default ``blake3``, which is
+            self-contained; other algorithms require vLLM importable in the
+            coordinator process).
         blend_probe_stride: Positions between match probes. With partial-fill
             reuse any offset is usable, so ``1`` (probe every offset) gives full
             recall; raise only to trade recall for coordinator CPU.
         enable_startup_resync: When ``True``, run a one-shot L2 resync
             on startup to backfill trackers from an MP server's
-            ``GET /l2/keys``.
+            ``GET /cache/objects``.
         resync_poll_interval: Seconds between registry checks while
             waiting for the first MP server to register.
         resync_max_wait: Maximum seconds startup resync waits for an MP
             server before giving up.
-        resync_page_size: ``page_size`` forwarded to ``GET /l2/keys``
+        resync_page_size: ``page_size`` forwarded to ``GET /cache/objects``
             during resync.
+        timeout_keep_alive: Seconds the HTTP server keeps idle connections
+            open before closing them. Must be greater than the heartbeat
+            interval of MP servers to avoid race-condition disconnects.
     """
 
     host: str = "0.0.0.0"
@@ -59,12 +67,14 @@ class MPCoordinatorConfig:
     eviction_check_interval: float = 5.0
     eviction_ratio: float = 0.2
     trigger_watermark: float = 1.0
-    blend_chunk_size: int = 256
+    chunk_size: int = 256
+    hash_algorithm: str = "blake3"
     blend_probe_stride: int = 1
     enable_startup_resync: bool = True
     resync_poll_interval: float = 1.0
     resync_max_wait: float = 60.0
     resync_page_size: int = 1000
+    timeout_keep_alive: int = 10
 
     def __post_init__(self) -> None:
         """Validate timing parameters.
@@ -90,10 +100,14 @@ class MPCoordinatorConfig:
             raise ValueError("resync_max_wait must be non-negative")
         if self.resync_page_size <= 0:
             raise ValueError("resync_page_size must be positive")
-        if self.blend_chunk_size < 1:
-            raise ValueError("blend_chunk_size must be positive")
+        if self.chunk_size < 1:
+            raise ValueError("chunk_size must be positive")
+        if not self.hash_algorithm:
+            raise ValueError("hash_algorithm must be a non-empty string")
         if self.blend_probe_stride < 1:
             raise ValueError("blend_probe_stride must be positive")
+        if self.timeout_keep_alive <= 0:
+            raise ValueError("timeout_keep_alive must be positive")
 
     @classmethod
     def from_env(cls) -> "MPCoordinatorConfig":
@@ -138,7 +152,8 @@ class MPCoordinatorConfig:
             ),
             eviction_ratio=_num("EVICTION_RATIO", cls.eviction_ratio, float),
             trigger_watermark=_num("TRIGGER_WATERMARK", cls.trigger_watermark, float),
-            blend_chunk_size=int(_num("BLEND_CHUNK_SIZE", cls.blend_chunk_size, int)),
+            chunk_size=int(_num("CHUNK_SIZE", cls.chunk_size, int)),
+            hash_algorithm=_str("HASH_ALGORITHM", cls.hash_algorithm),
             blend_probe_stride=int(
                 _num("BLEND_PROBE_STRIDE", cls.blend_probe_stride, int)
             ),
@@ -150,4 +165,7 @@ class MPCoordinatorConfig:
             ),
             resync_max_wait=_num("RESYNC_MAX_WAIT", cls.resync_max_wait, float),
             resync_page_size=int(_num("RESYNC_PAGE_SIZE", cls.resync_page_size, int)),
+            timeout_keep_alive=int(
+                _num("TIMEOUT_KEEP_ALIVE", cls.timeout_keep_alive, int)
+            ),
         )

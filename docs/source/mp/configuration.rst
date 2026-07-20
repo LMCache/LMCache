@@ -120,6 +120,14 @@ Source: ``lmcache/v1/multiprocess/config.py``
        L1-resident and only the dropped gap is recomputed, instead of
        truncating the prefix at the gap. No effect for other engines. See
        :doc:`/mp/l2_storage/fault_inject` for a way to exercise it.
+   * - ``--separate-object-groups`` / ``--no-separate-object-groups``
+     - ``True``
+     - Split a hybrid model's kernel groups into one object group per
+       cross-chunk attention window (full attention, each sliding-window
+       size, mamba/GDN) at KV-cache registration. On by default; pass
+       ``--no-separate-object-groups`` to keep all layers in a single
+       full-attention object group. Transparent to correctness; a non-hybrid
+       model always resolves to one object group. See :doc:`/mp/hybrid_models`.
 
 Lookup Hash Logging
 -------------------
@@ -176,6 +184,42 @@ The HTTP frontend is included when running ``lmcache server``.
      - ``8080``
      - Port to bind the HTTP server.
 
+P2P
+---
+
+Source: ``lmcache/v1/multiprocess/config.py``
+
+These flags configure peer-to-peer KV cache sharing between MP servers
+(see :doc:`p2p`). They are registered by ``add_p2p_args()`` on the
+``lmcache server`` parser. P2P is enabled when ``--p2p-advertise-url``
+is set, which additionally requires a coordinator URL via
+``--coordinator-url`` (or ``LMCACHE_COORDINATOR_URL``).
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 55
+
+   * - Argument
+     - Default
+     - Description
+   * - ``--p2p-advertise-url``
+     - ``""`` (P2P disabled)
+     - Transfer-channel server ``host:port`` this instance advertises to
+       peers. Setting it enables P2P (also requires ``--coordinator-url``).
+   * - ``--p2p-listen-url``
+     - ``""``
+     - Transfer-channel server ``host:port`` to bind. Defaults to
+       ``--p2p-advertise-url``.
+   * - ``--p2p-lookup-timeout``
+     - ``30.0``
+     - Seconds before a peer lookup result counts as a miss.
+   * - ``--p2p-load-timeout``
+     - ``30.0``
+     - Seconds before a peer load counts as a failure.
+   * - ``--p2p-transfer-engine``
+     - ``nixl``
+     - Transfer-channel implementation to use.
+
 L1 Memory Manager
 ------------------
 
@@ -197,10 +241,6 @@ Source: ``lmcache/v1/distributed/config.py``
      - Enable or disable lazy allocation for L1 memory.
        Pass ``--l1-use-lazy`` to enable (default) or
        ``--no-l1-use-lazy`` to explicitly disable.
-       Lazy allocation relies on ``cudart`` host-pinned memory, so on
-       non-CUDA backends (where ``lmcache.torch_dev`` exposes no
-       ``cudart`` attribute) it is automatically downgraded to eager
-       allocation with a logged warning, regardless of the flag value.
    * - ``--l1-init-size-gb``
      - ``20``
      - Initial allocation size (GB) when using lazy allocation.
@@ -223,10 +263,23 @@ GDS L1 Tier
 Source: ``lmcache/v1/distributed/config.py``
 
 Opt-in. Setting ``--gds-l1-path`` switches the L1 medium from pinned DRAM to
-an NVMe slab file accessed via GPUDirect Storage (cuFile DMA). The CPU
-pinned-DRAM tier is then disabled, and ``--l1-size-gb`` sizes the slab.
-Disable byte-array L2 adapters when this is on (the GDS tier exposes no L1
-memory buffer for them to register).
+an NVMe slab file accessed via GPUDirect Storage DMA. The CPU pinned-DRAM tier
+is then disabled, and ``--l1-size-gb`` sizes the slab. Disable byte-array L2
+adapters when this is on (the GDS tier exposes no L1 memory buffer for them to
+register).
+
+The DMA path is selected automatically by platform: **cuFile**
+(``libcufile.so``) on NVIDIA and **hipFile** (``libhipfile.so``,
+`ROCm/hipFile <https://github.com/ROCm/hipFile>`_) on AMD ROCm. The same
+flags apply to both; no configuration change is needed to switch vendors.
+
+.. note::
+
+   AMD hipFile requires ROCm >= 7.2.0. The zero-copy GPUDirect fast path
+   additionally needs a kernel built with ``CONFIG_PCI_P2PDMA``,
+   ``amdgpu-dkms >= 30.20.1``, and the slab on a local NVMe ext4/xfs
+   filesystem; where those are unavailable hipFile transparently falls back to
+   a host-bounce compatibility path (correct, but not zero-copy).
 
 .. list-table::
    :header-rows: 1
@@ -354,34 +407,8 @@ Registered adapter types: ``nixl_store``, ``nixl_store_dynamic``, ``fs``,
 Each adapter type's required and optional fields, plus per-backend examples, are
 documented on its own page under :doc:`Secondary KV Storage <l2_storage/index>`
 -- including the adapters not detailed inline here (``fs_native``,
-``raw_block``, ``dax``, ``mooncake_store``, ``hfbucket``, ``resp``).
-
-``aerospike`` -- Aerospike native connector
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Native C++ Aerospike L2 adapter (optional; build with ``BUILD_AEROSPIKE=1``).
-See :doc:`l2_storage/index` for build prerequisites and the full field list.
-
-Fields:
-
-- ``hosts`` *(required)*: Seed hosts ``host:port[,host:port...]``.
-- ``namespace`` *(optional, default ``"lmcache"``)*: Aerospike namespace.
-- ``set_name`` / ``set`` *(optional, default ``"kv_chunks"``)*: Aerospike set.
-- ``num_workers`` *(optional, default ``8``)*: C++ I/O worker threads.
-- ``read_timeout_ms`` / ``write_timeout_ms`` *(optional)*: Client timeouts.
-- ``default_ttl_seconds`` *(optional, default ``86400``)*: Record TTL
-  (``0`` = namespace default).
-- ``target_segment_bytes`` / ``max_record_bytes`` *(optional, default ``0``)*:
-  Shard target and record-cap override (``0`` = auto-discover).
-- ``username`` / ``password`` *(optional)*: Enterprise Edition auth.
-- ``max_capacity_gb`` *(optional, default ``0``)*: L2 capacity for eviction
-  (``0`` disables tracking).
-
-Example:
-
-.. code-block:: bash
-
-    --l2-adapter '{"type": "aerospike", "hosts": "127.0.0.1:3000", "namespace": "lmcache", "set_name": "kv_chunks", "num_workers": 8}'
+``raw_block``, ``dax``, ``mooncake_store``, ``aerospike``, ``hfbucket``,
+``resp``).
 
 Multiple adapters (cascade)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -429,6 +456,13 @@ logging, tracing).
    * - ``--prometheus-port``
      - ``9090``
      - Port for the Prometheus ``/metrics`` endpoint.
+   * - ``--enable-extra-logging``
+     - off
+     - Periodic INFO logs: per-GPU L0<->L1 transfer stats and L1 memory
+       usage. See :doc:`observability/logs`.
+   * - ``--extra-logging-interval``
+     - ``10.0``
+     - Seconds between extra-logging emissions.
 
 vLLM Client Configuration
 --------------------------
@@ -440,7 +474,24 @@ On the vLLM side, specify the LMCache server host and port via the
 
     vllm serve Qwen/Qwen3-14B \
         --kv-transfer-config \
-        '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "127.0.0.1", "lmcache.mp.port": 6000}}'
+        '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "tcp://127.0.0.1", "lmcache.mp.port": 6000}}'
+
+To target multiple LMCache servers from a single vLLM deployment, pass a
+list (or comma-separated string) of server URLs via
+``lmcache.mp.server_urls``. When set, ``server_urls`` takes precedence
+over the single-server ``host`` / ``port`` keys; vLLM's world size must
+be divisible by the number of servers, and each worker connects only to
+its locally-assigned server (global ranks are sliced into contiguous
+blocks, one block per server). Multi-server mode currently supports
+tensor parallelism only -- pipeline parallelism (``pp_size > 1``) and
+data parallelism (``dp_size > 1``) are rejected with a clear error.
+
+.. code-block:: bash
+
+    vllm serve Qwen/Qwen3-14B \
+        --tensor-parallel-size 4 \
+        --kv-transfer-config \
+        '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.server_urls": "tcp://host1:6667,tcp://host2:6667"}}'
 
 ``LMCacheMPConnector`` reads the following keys from
 ``kv_connector_extra_config``:
@@ -458,12 +509,24 @@ All connector-level options are passed through
    * - Key
      - Default
      - Description
+   * - ``lmcache.mp.server_urls``
+     - *(unset)*
+     - Multi-server deployment: list (or comma-separated string) of
+       ``<transport>://<host>:<port>`` URLs, e.g.
+       ``"tcp://host1:6667,tcp://host2:6667"``. When set, takes
+       precedence over ``lmcache.mp.host`` / ``lmcache.mp.port``; the
+       vLLM world size must be divisible by the number of servers, and
+       each worker connects to its locally-assigned server.
    * - ``lmcache.mp.host``
      - ``tcp://localhost``
-     - Host (with ZMQ transport prefix) of the LMCache MP server.
+     - Single-server deployment: host (with ZMQ transport prefix) of
+       the LMCache MP server. Ignored when ``lmcache.mp.server_urls``
+       is set.
    * - ``lmcache.mp.port``
      - ``5555``
-     - Port of the LMCache MP server. Must match the server's ``--port``.
+     - Single-server deployment: port of the LMCache MP server. Must
+       match the server's ``--port``. Ignored when
+       ``lmcache.mp.server_urls`` is set.
    * - ``lmcache.mp.mq_timeout``
      - ``300.0``
      - Timeout (seconds) for blocking message-queue requests, including
@@ -477,10 +540,12 @@ All connector-level options are passed through
    * - ``lmcache.mp.mp_transfer_mode``
      - ``auto``
      - Routing mode for the worker -> server transfer context. One of
-       ``auto`` (CUDA -> engine_driven, others -> lmcache_driven),
-       ``engine_driven`` (force IPC / SHM zero-copy), or
-       ``lmcache_driven`` (force worker-side gather/scatter copy).
-       Overrides the ``LMCACHE_MP_TRANSFER_MODE`` env var when set.
+       ``auto`` (CUDA -> lmcache_driven, others -> engine_driven),
+       ``lmcache_driven`` (force the IPC / SHM zero-copy handle path —
+       LMCache server pulls data via device handles), or
+       ``engine_driven`` (force the worker-side gather/scatter copy
+       path). Overrides the ``LMCACHE_MP_TRANSFER_MODE`` env var when
+       set.
 
 Environment Variables
 ---------------------
@@ -497,6 +562,11 @@ Environment Variables
    * - ``PYTHONHASHSEED``
      - Set to a fixed value for reproducible hashing across processes
        (relevant when using ``--hash-algorithm builtin``).
+   * - ``LMCACHE_TRACK_USAGE``
+     - Set to ``false`` to disable anonymous usage statistics (see below).
+   * - ``DO_NOT_TRACK``
+     - Set to ``1`` to disable anonymous usage statistics (cross-tool
+       convention).
 
 Full Example
 ------------
@@ -533,3 +603,14 @@ Full Example
         --metrics-sample-rate 0.01 \
         --enable-tracing \
         --otlp-endpoint http://localhost:4317
+
+Anonymous Usage Statistics
+--------------------------
+
+The MP server reports anonymous usage statistics: a one-time
+environment/configuration snapshot at startup and interval counters
+(tokens retrieved/stored, bytes stored, uptime) every
+``LMCACHE_USAGE_TRACK_INTERVAL`` seconds. No prompts, keys, KV-cache
+data, model names, or ``--instance-id`` are ever sent, and reporting can
+never affect serving. Opt out with ``LMCACHE_TRACK_USAGE=false`` or
+``DO_NOT_TRACK=1``; see :ref:`usage-stats-collection` for details.

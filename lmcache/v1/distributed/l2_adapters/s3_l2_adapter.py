@@ -25,7 +25,10 @@ import threading
 import xml.etree.ElementTree as ET
 
 if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.distributed.api import MemoryLayoutDesc
     from lmcache.v1.distributed.internal_api import L1MemoryDesc
+    from lmcache.v1.memory_management import MemoryObj
 
 # Third Party
 from awscrt import auth, io, s3
@@ -48,7 +51,6 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
-from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
@@ -593,7 +595,9 @@ class S3L2Adapter(L2AdapterInterface):
     # Lookup and Lock Interface
     # ------------------------------------------------------------------
 
-    def submit_lookup_and_lock_task(self, keys: list[ObjectKey]) -> L2TaskId:
+    def submit_lookup_and_lock_task(
+        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+    ) -> L2TaskId:
         with self._lock:
             task_id = self._next_task_id
             self._next_task_id += 1
@@ -981,7 +985,7 @@ class S3L2Adapter(L2AdapterInterface):
         def on_body(chunk, offset, **kwargs):
             body_chunks.append(bytes(chunk))
 
-        def on_headers(status_code, headers_in, **kwargs):
+        def on_headers(status_code, headers, **kwargs):
             captured["status"] = status_code
 
         def on_done(error=None, status_code=None, **kwargs):

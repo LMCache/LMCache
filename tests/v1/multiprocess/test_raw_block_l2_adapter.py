@@ -29,10 +29,13 @@ install_native_storage_ops_fallback()
 pytest.importorskip("lmcache_rust_raw_block_io")
 
 # First Party
+from lmcache.v1.distributed.api import MemoryLayoutDesc  # noqa: E402
 from lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter import (  # noqa: E402
     RawBlockL2Adapter,
     RawBlockL2AdapterConfig,
 )
+
+_EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
 
 def _make_adapter(tmp_path: Path) -> RawBlockL2Adapter:
@@ -70,7 +73,9 @@ def test_raw_block_l2_adapter_store_lookup_load_roundtrip(tmp_path):
         assert store_result.is_successful()
         assert store_result.bytes_transferred() == RAW_BLOCK_CI_SLOT_BYTES
 
-        lookup_task_id = adapter.submit_lookup_and_lock_task([key, missing_key])
+        lookup_task_id = adapter.submit_lookup_and_lock_task(
+            [key, missing_key], _EMPTY_LAYOUT
+        )
         assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         lookup_bitmap = adapter.query_lookup_and_lock_result(lookup_task_id)
         assert lookup_bitmap is not None
@@ -106,7 +111,7 @@ def test_raw_block_l2_adapter_delete_makes_key_miss(tmp_path):
 
         adapter.delete([key])
 
-        lookup_task_id = adapter.submit_lookup_and_lock_task([key])
+        lookup_task_id = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         lookup_bitmap = adapter.query_lookup_and_lock_result(lookup_task_id)
         assert lookup_bitmap is not None

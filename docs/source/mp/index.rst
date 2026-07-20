@@ -77,7 +77,7 @@ High-Level Architecture
          |
          |--- L1Manager (l1_manager.py)
          |       |--- L1MemoryManager (CPU DRAM) or
-         |       |    GDSL1MemoryManager (NVMe slab via cuFile)
+         |       |    GDSL1MemoryManager (NVMe slab via cuFile / hipFile)
          |       |--- TTLLock per object (read/write)
          |
          |--- StoreController  -----> L2 Adapter(s) (async L1->L2 push)
@@ -93,7 +93,7 @@ Engine and Modules
 All server entry points share the same ``MPCacheServer`` and
 ``StorageManager`` core. ``MPCacheServer`` is now a thin compositor:
 it holds an ``MPCacheServerContext`` and a list of ``EngineModule``
-instances assembled by ``build_engine_modules()`` (in ``server.py``)
+instances assembled by ``_build_modules()`` (in ``server.py``)
 based on ``--engine-type`` and ``--supported-transfer-mode``.
 
 **``server.py``** -- The default ZMQ-only server.  Creates an
@@ -133,7 +133,7 @@ Both blend variants require ``--supported-transfer-mode`` to be
 **``http_server.py``** -- Wraps ``run_cache_server()`` (from ``server.py``)
 inside a FastAPI application.  Endpoints are contributed by modules under
 ``http_apis/`` and auto-registered via ``HTTPAPIRegistry``: ``GET /`` (basic
-liveness), ``GET /healthcheck`` for Kubernetes probes, ``POST /clear-cache``
+liveness), ``GET /healthcheck`` for Kubernetes probes, ``POST /cache/clear``
 for clearing all KV cache data in L1 (CPU) memory, and ``GET /status``
 for inspecting detailed internal state.  The ZMQ server runs as part of the
 same process, and any configured runtime plugins are spawned by
@@ -209,6 +209,11 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
      - BLOCKING
      - Poll a prefetch job by request_id. Returns the loaded chunk count
        when done, or ``None`` while the prefetch is still in progress.
+   * - ``WAIT_PREFETCH_STATUS``
+     - BLOCKING
+     - (SGLang only) Block until a prefetch job completes, then return its
+       loaded chunk count, or ``None`` on timeout. The blocking alternative
+       to polling ``QUERY_PREFETCH_STATUS``.
    * - ``QUERY_PREFETCH_LOOKUP_HITS``
      - BLOCKING
      - Query the lookup-phase hit chunk count by request_id, before the
@@ -282,6 +287,25 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
        match, reconciles, issues one sparse-coalesced prefetch, and
        classifies per-TP-rank. Returns ``CBUnifiedLookupResult`` (or
        ``None`` while the prefetch is still in flight).
+   * - ``P2P_LOOKUP_AND_LOCK``
+     - BLOCKING
+     - (P2P) Look up the given keys and read-lock the locally cached
+       prefix. Returns a task id which the caller passes to
+       ``P2P_QUERY_LOOKUP_RESULTS`` to poll for the transfer addresses.
+       Served by ``P2PController`` (loaded unconditionally by
+       ``_build_modules()``); whether this server also acts as a P2P
+       client is controlled by ``--p2p-advertise-url`` -- see
+       :doc:`p2p`.
+   * - ``P2P_QUERY_LOOKUP_RESULTS``
+     - BLOCKING
+     - (P2P) Poll the transfer addresses for a lookup task. Returns a
+       list of ``TransferChannelAddress`` once the lookup is complete,
+       or ``None`` while the lookup is still in progress or its
+       results have already been consumed.
+   * - ``P2P_UNLOCK_OBJECTS``
+     - BLOCKING
+     - (P2P) Release the read locks previously taken by
+       ``P2P_LOOKUP_AND_LOCK`` on the given keys.
 
 **Handler types:**
 
@@ -331,7 +355,13 @@ methods:
 
 - ``reserve_write()`` / ``finish_write()`` -- Two-phase write into L1.
 - ``submit_prefetch_task()`` / ``query_prefetch_status()`` -- Async lookup +
-  L2 prefetch.
+  L2 prefetch. ``query_prefetch_status()`` is non-blocking and returns
+  ``None`` while the L2 prefetch is still in flight.
+- ``wait_prefetch_status()`` -- Blocking alternative to polling
+  ``query_prefetch_status()``: waits on a controller condition variable
+  until the prefetch result is published (or a timeout expires).
+  L1-only prefetches return immediately. Used by the
+  ``WAIT_PREFETCH_STATUS`` RPC to avoid busy-polling on the load path.
 - ``read_prefetched_results()`` / ``finish_read_prefetched()`` -- Read
   prefetched data from L1 with automatic lock management.
 
@@ -360,9 +390,12 @@ tiers selected at startup (both satisfy ``L1ManagerProtocol``):
   ``--l1-size-gb``.
 - ``GDSL1MemoryManager`` -- an NVMe slab file when ``--gds-l1-path`` is set.
   The bytes live on disk; reads/writes DMA directly between the GPU staging
-  buffer and the slab via cuFile, driven by the process-global ``GDSContext``
-  (``gpu_connector/gds_context.py``) and dispatched from ``gpu_ops``. The CPU
-  tier is disabled in this mode.
+  buffer and the slab, driven by the process-global ``GDSContext``
+  (``gpu_connector/gds_context.py``) and dispatched from ``gpu_ops``. The DMA
+  backend is selected by platform via ``gpu_connector/_gds_async.py`` --
+  cuFile (``libcufile.so``) on NVIDIA and hipFile (``libhipfile.so``) on AMD
+  ROCm; see the *GDS L1 Tier* section of :doc:`configuration` for the
+  vendor-specific requirements. The CPU tier is disabled in this mode.
 
 L2 Adapters
 ~~~~~~~~~~~
@@ -531,7 +564,7 @@ Adding a new request type
 1. Add a new member to ``RequestType`` in ``protocols/base.py``.
 2. Create a ``ProtocolDefinition`` in the appropriate ``protocols/*.py`` file
    (``engine``, ``controller``, ``observability``, ``debug``, ``blend``,
-   ``blend_v2``, or ``blend_v3``) and add the request name to that
+   ``blend_v2``, ``blend_v3``, or ``p2p``) and add the request name to that
    module's ``REQUEST_NAMES``.
 3. Implement the handler method on the appropriate ``EngineModule``
    (e.g. ``LookupModule``, ``LMCacheDrivenTransferModule``, ``BlendV3Module``) and
@@ -573,7 +606,7 @@ Key Source Files
      - ``HTTPAPIRegistry`` that auto-discovers routers in ``http_apis/``
    * - ``lmcache/v1/multiprocess/http_apis/``
      - Extensible HTTP endpoints (``/``, ``/healthcheck``,
-       ``/clear-cache``, ``/status``)
+       ``/cache/clear``, ``/status``)
    * - ``lmcache/v1/multiprocess/mp_runtime_plugin_launcher.py``
      - ``MPRuntimePluginLauncher`` that spawns runtime plugins with the
        full server config serialized into environment variables

@@ -41,8 +41,7 @@ msgid ""
 "The Aerospike extension is **not** built by default.  Install the "
 "Aerospike C client, then build with ``BUILD_AEROSPIKE=1`` (or set "
 "``AEROSPIKE_INCLUDE_DIR``):"
-msgstr ""
-"Aerospike 扩展\\ **默认不**\\ 构建。请先安装 Aerospike C 客户端，然后使用 ``BUILD_AEROSPIKE=1`` 进行构建（或设置 ``AEROSPIKE_INCLUDE_DIR``\\ ）："
+msgstr "Aerospike 扩展\\ **默认不**\\ 构建。请先安装 Aerospike C 客户端，然后使用 ``BUILD_AEROSPIKE=1`` 进行构建（或设置 ``AEROSPIKE_INCLUDE_DIR``\\ ）："
 
 #: ../../source/mp/l2_storage/aerospike.rst:19
 msgid ""
@@ -57,8 +56,7 @@ msgstr "**必填字段：**"
 
 #: ../../source/mp/l2_storage/aerospike.rst:25
 msgid "``hosts``: Seed hosts as ``host:port[,host:port...]``."
-msgstr ""
-"``hosts``: 种子主机格式为 ``host:port[,host:port...]``\\ 。"
+msgstr "``hosts``: 种子主机格式为 ``host:port[,host:port...]``\\ 。"
 
 #: ../../source/mp/l2_storage/aerospike.rst:27
 msgid "**Optional fields:**"
@@ -69,8 +67,7 @@ msgid ""
 "``namespace`` (str, default ``\"lmcache\"``): Aerospike namespace.  Must "
 "exist on the server and have ``nsup-period > 0`` if you rely on TTL "
 "expiry."
-msgstr ""
-"``namespace`` (str, default ``\"lmcache\"``): Aerospike 命名空间。该命名空间必须已在服务器上创建；若需依赖 TTL 自动过期，还须满足 ``nsup-period > 0``\\ 。"
+msgstr "``namespace`` (str, default ``\"lmcache\"``): Aerospike 命名空间。该命名空间必须已在服务器上创建；若需依赖 TTL 自动过期，还须满足 ``nsup-period > 0``\\ 。"
 
 #: ../../source/mp/l2_storage/aerospike.rst:31
 msgid ""
@@ -120,8 +117,7 @@ msgstr "``username`` / ``password`` (str, default ``\"\"``): 可选的企业版�
 msgid ""
 "``max_capacity_gb`` (float, default ``0``): Maximum L2 capacity in GB for"
 " client-side usage tracking / eviction.  ``0`` disables tracking."
-msgstr ""
-"``max_capacity_gb`` (float, default ``0``): 客户端侧用量跟踪与逐出所使用的最大 L2 容量（GB）。\\ ``0`` 表示禁用跟踪。"
+msgstr "``max_capacity_gb`` (float, default ``0``): 客户端侧用量跟踪与逐出所使用的最大 L2 容量（GB）。\\ ``0`` 表示禁用跟踪。"
 
 #: ../../source/mp/l2_storage/aerospike.rst:47
 msgid ""
@@ -130,8 +126,7 @@ msgid ""
 "``LMCACHE_AEROSPIKE_HOSTS``, ``LMCACHE_AEROSPIKE_NAMESPACE``, "
 "``LMCACHE_AEROSPIKE_SET``, ``LMCACHE_AEROSPIKE_USERNAME``, "
 "``LMCACHE_AEROSPIKE_PASSWORD``."
-msgstr ""
-"**环境变量回退。** 当相应的配置值为空时，将使用这些环境变量：\\ ``LMCACHE_AEROSPIKE_HOSTS``\\ 、\\ ``LMCACHE_AEROSPIKE_NAMESPACE``\\ 、\\ ``LMCACHE_AEROSPIKE_SET``\\ 、\\ ``LMCACHE_AEROSPIKE_USERNAME``\\ 、\\ ``LMCACHE_AEROSPIKE_PASSWORD``\\ 。"
+msgstr "**环境变量回退。** 当相应的配置值为空时，将使用这些环境变量：\\ ``LMCACHE_AEROSPIKE_HOSTS``\\ 、\\ ``LMCACHE_AEROSPIKE_NAMESPACE``\\ 、\\ ``LMCACHE_AEROSPIKE_SET``\\ 、\\ ``LMCACHE_AEROSPIKE_USERNAME``\\ 、\\ ``LMCACHE_AEROSPIKE_PASSWORD``\\ 。"
 
 #: ../../source/mp/l2_storage/aerospike.rst:52
 msgid "**Configuration examples:**"

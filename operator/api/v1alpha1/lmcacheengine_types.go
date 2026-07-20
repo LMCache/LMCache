@@ -61,6 +61,39 @@ type ImageSpec struct {
 	PullPolicy *string `json:"pullPolicy,omitempty"`
 }
 
+// LMCacheInjectionSpec configures optional lmcache code-payload staging for vLLM
+// pods bound to this engine. When payloadImage is unset the webhook wires only
+// the connection (--kv-transfer-config); when set it also copies the payload
+// tree into the vLLM container and prepends PYTHONPATH so vLLM imports that
+// lmcache instead of the one baked into its image, keeping the vLLM client and
+// the engine server on one build.
+type LMCacheInjectionSpec struct {
+	// payloadImage is a purpose-built init-container image (repository/tag/
+	// pullPolicy, like spec.image) that ships an unpacked lmcache tree under
+	// /payload and copies it to $SHARED_DIR on start (see
+	// docker/Dockerfile.payload); the vLLM container imports it via PYTHONPATH.
+	//
+	// repository has no usable default — the ImageSpec default
+	// (lmcache/vllm-openai) is NOT a payload — so it must be set explicitly. For
+	// private registries, imagePullSecrets must reference Secret(s) in the vLLM
+	// pod's namespace.
+	// +optional
+	PayloadImage *ImageSpec `json:"payloadImage,omitempty"`
+
+	// imagePullSecrets are appended to the vLLM pod's spec.imagePullSecrets so a
+	// PRIVATE payload init-container image can pull. The referenced Secret(s)
+	// must already exist in the vLLM pod's namespace; the operator does not copy
+	// them cross-namespace.
+	// +optional
+	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
+
+	// targetContainer is the name of the vLLM container to inject into. Empty
+	// (the default) selects the first container; a per-pod annotation may
+	// override it.
+	// +optional
+	TargetContainer *string `json:"targetContainer,omitempty"`
+}
+
 // ServerSpec defines server configuration mapping to server.py argparse.
 type ServerSpec struct {
 	// port is the server listening port.
@@ -107,10 +140,10 @@ type L1BackendSpec struct {
 
 // EvictionSpec defines the cache eviction configuration.
 type EvictionSpec struct {
-	// policy is the eviction policy. Currently only LRU is supported.
+	// policy is the eviction policy. LRU or noop.
 	// +optional
 	// +kubebuilder:default="LRU"
-	// +kubebuilder:validation:Enum=LRU
+	// +kubebuilder:validation:Enum=LRU;noop
 	Policy *string `json:"policy,omitempty"`
 
 	// triggerWatermark is the cache usage ratio that triggers eviction.
@@ -185,7 +218,7 @@ type L2BackendSpec struct {
 	// cache misses. "default" picks the first adapter that has the key.
 	// +optional
 	// +kubebuilder:default="default"
-	// +kubebuilder:validation:Enum=default
+	// +kubebuilder:validation:Enum=default;retain
 	PrefetchPolicy *string `json:"prefetchPolicy,omitempty"`
 
 	// prefetchMaxInFlight limits the number of concurrent prefetch
@@ -299,7 +332,7 @@ type CoordinatorConnectionSpec struct {
 type LMCacheEngineSpec struct {
 	// gpuVendor selects the GPU vendor. "nvidia" (default) requires the NVIDIA
 	// GPU Operator's "nvidia" RuntimeClass; "amd" runs on the default container
-	// runtime with privileged: true.
+	// runtime.
 	// +optional
 	// +kubebuilder:default="nvidia"
 	// +kubebuilder:validation:Enum=nvidia;amd
@@ -337,6 +370,12 @@ type LMCacheEngineSpec struct {
 	// the server does not register with any coordinator.
 	// +optional
 	Coordinator *CoordinatorConnectionSpec `json:"coordinator,omitempty"`
+
+	// injection defines the defaults the LMCache mutating webhook reads for pods
+	// bound to this engine. When unset, the webhook wires only the connection;
+	// set injection.payloadImage to also stage an lmcache code payload.
+	// +optional
+	Injection *LMCacheInjectionSpec `json:"injection,omitempty"`
 
 	// resourceOverrides allows overriding auto-computed resource requirements.
 	// +optional
@@ -387,6 +426,22 @@ type LMCacheEngineSpec struct {
 	// priorityClassName is the priority class for the pods.
 	// +optional
 	PriorityClassName string `json:"priorityClassName,omitempty"`
+
+	// hostNetwork runs the pod in the host's network namespace. When true the
+	// operator also sets dnsPolicy to ClusterFirstWithHostNet so cluster DNS
+	// still works. Default: false.
+	// +optional
+	// +kubebuilder:default=false
+	HostNetwork *bool `json:"hostNetwork,omitempty"`
+
+	// privileged runs the engine container in privileged mode. On some clusters
+	// this is required for the engine to see all node GPUs (for CUDA IPC) without
+	// claiming any via the nvidia.com/gpu device plugin; on many clusters
+	// NVIDIA_VISIBLE_DEVICES=all already grants that visibility without it, so it
+	// defaults to false.
+	// +optional
+	// +kubebuilder:default=false
+	Privileged *bool `json:"privileged,omitempty"`
 
 	// extraArgs are additional CLI flags appended to the server command.
 	// They are appended last and can override any auto-generated flag.

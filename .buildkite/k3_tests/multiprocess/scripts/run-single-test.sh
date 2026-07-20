@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Orchestrator for a single multiprocessing test (native, no Docker).
 # Usage: run-single-test.sh <test_name>
-#   test_name: lm_eval | hma_lm_eval_gemma4 | vllm_bench | long_doc_qa
-#              | long_doc_qa_l2 | fault_tolerance | deadlock | restart_recovery
-#              | gds_smoke_test
+#   test_name: lm_eval | lm_eval_preemption | hma_lm_eval_gemma4 | vllm_bench
+#              | long_doc_qa | long_doc_qa_l2 | fault_tolerance | deadlock
+#              | restart_recovery | gds_smoke_test
 #
 # Each invocation is self-contained: launches servers, runs one test, cleans up.
 # This mirrors the comprehensive tests' run-single-config.sh pattern.
@@ -84,7 +84,7 @@ echo "Results dir: $RESULTS_DIR"
 echo ""
 
 # Tests that handle their own server lifecycle (different GPU/model config)
-SELF_CONTAINED_TESTS=" deadlock "
+SELF_CONTAINED_TESTS=" deadlock p2p "
 
 # Tests that compare against a baseline vLLM (no LMCache) on a second GPU.
 # Only these need the baseline server (and thus a 2-GPU pod); everything
@@ -127,6 +127,10 @@ case "$TEST_NAME" in
     lm_eval)
         exec_script="${SCRIPT_DIR}/run-lm-eval.sh"
         ;;
+    lm_eval_preemption)
+        export LM_EVAL_VERIFY_MODE=preemption
+        exec_script="${SCRIPT_DIR}/run-lm-eval.sh"
+        ;;
     hma_lm_eval_gemma4)
         exec_script="${SCRIPT_DIR}/run-hma-lm-eval.sh"
         ;;
@@ -154,6 +158,9 @@ case "$TEST_NAME" in
     cache_stats)
         exec_script="${SCRIPT_DIR}/run-cache-stats.sh"
         ;;
+    p2p)
+        exec_script="${SCRIPT_DIR}/run-p2p.sh"
+        ;;
     http_api)
         exec_script="${SCRIPT_DIR}/run-http-api.sh"
         ;;
@@ -162,7 +169,7 @@ case "$TEST_NAME" in
         ;;
     *)
         echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, http_api, gds_smoke_test"
+        echo "Valid tests: lm_eval, lm_eval_preemption, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, http_api, gds_smoke_test, p2p"
         exit 1
         ;;
 esac

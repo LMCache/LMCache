@@ -529,7 +529,9 @@ class NixlStoreL2Adapter(L2AdapterInterface):
     # Lookup and Lock Interface
     #####################
 
-    def submit_lookup_and_lock_task(self, keys: list[ObjectKey]) -> L2TaskId:
+    def submit_lookup_and_lock_task(
+        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+    ) -> L2TaskId:
         with self._lock:
             task_id = self._get_next_task_id()
 

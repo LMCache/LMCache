@@ -209,7 +209,11 @@ func main() {
 	// controller without the webhook server failing on a missing tls.crt. The
 	// deployed manager leaves it unset, so the webhook is on by default.
 	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
-		mgr.GetWebhookServer().Register("/mutate--v1-pod", &webhook.Admission{Handler: &cbwebhook.PodInjector{
+		mgr.GetWebhookServer().Register("/mutate--v1-pod", &webhook.Admission{Handler: &cbwebhook.CacheBlendPodInjector{
+			Client:  mgr.GetClient(),
+			Decoder: admission.NewDecoder(mgr.GetScheme()),
+		}})
+		mgr.GetWebhookServer().Register("/mutate-lmcache--v1-pod", &webhook.Admission{Handler: &cbwebhook.LMCachePodInjector{
 			Client:  mgr.GetClient(),
 			Decoder: admission.NewDecoder(mgr.GetScheme()),
 		}})

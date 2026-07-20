@@ -45,6 +45,11 @@ class MPServerConfig:
     ('default' for standard prefix caching, 'blend' when cacheblend is enabled).
     """
 
+    separate_object_groups: bool = True
+    """When True (default), split kernel groups into one object group per
+    sliding-window size at KV-cache registration (hybrid models). When False,
+    all kernel groups share a single full-attention object group."""
+
     enable_segmented_prefix: bool = False
     """CacheBlend only (engine_type='blend'): on a mid-prefix L2 retrieve
     failure, retain the gapped contiguous prefix so the post-gap chunks stay
@@ -60,6 +65,10 @@ class MPServerConfig:
         default_factory=lambda: RuntimePluginConfig()
     )
     """Runtime plugin configuration (locations + extra config)."""
+
+    p2p_config: "P2PConfig" = field(default_factory=lambda: P2PConfig())
+    """Peer-to-peer configuration. P2P is enabled when its advertise URL is
+    set."""
 
     shm_name: str | None = None
     """SHM segment name for engine-driven KV transfer.
@@ -121,6 +130,45 @@ class RuntimePluginConfig:
     via the JSON config blob.
     Accepts a JSON string on the command line.
     """
+
+
+@dataclass
+class P2PConfig:
+    """Configuration for peer-to-peer KV transfer.
+
+    P2P is enabled when :attr:`advertise_url` is non-empty. It additionally
+    requires a coordinator URL for peer discovery (validated at startup).
+    """
+
+    advertise_url: str = ""
+    """Transfer-channel server ``host:port`` this instance advertises to peers.
+    Empty disables P2P."""
+
+    listen_url: str = ""
+    """Transfer-channel server ``host:port`` to bind and listen on. Empty
+    defers to :attr:`advertise_url`."""
+
+    lookup_timeout: float = 30.0
+    """Seconds before a peer lookup result counts as a miss."""
+
+    load_timeout: float = 30.0
+    """Seconds before a peer load counts as a failure."""
+
+    transfer_engine: str = "nixl"
+    """Transfer-channel implementation to use."""
+
+    @property
+    def enabled(self) -> bool:
+        """Whether P2P is enabled (an advertise URL is configured)."""
+        return bool(self.advertise_url)
+
+    @property
+    def effective_listen_url(self) -> str:
+        """The listen URL, defaulting to the advertise URL when unset."""
+        return self.listen_url or self.advertise_url
+
+
+DEFAULT_P2P_CONFIG = P2PConfig()
 
 
 DEFAULT_MP_SERVER_CONFIG = MPServerConfig()
@@ -297,6 +345,13 @@ def add_mp_server_args(
         "import. Example: --script-allowed-imports numpy pandas",
     )
     mp_group.add_argument(
+        "--separate-object-groups",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Split kernel groups into one object group per sliding-window size "
+        "at KV-cache registration (for hybrid models). (Default is True)",
+    )
+    mp_group.add_argument(
         "--worker-reap-timeout-seconds",
         type=float,
         default=120.0,
@@ -351,16 +406,87 @@ def parse_args_to_mp_server_config(
         max_cpu_workers=max_cpu,
         hash_algorithm=args.hash_algorithm,
         engine_type=args.engine_type,
+        separate_object_groups=args.separate_object_groups,
         enable_segmented_prefix=args.enable_segmented_prefix,
         supported_transfer_mode=args.supported_transfer_mode,
         runtime_plugin_config=RuntimePluginConfig(
             locations=(args.runtime_plugin_locations or []),
             extra_config=plugin_extra,
         ),
+        p2p_config=parse_args_to_p2p_config(args),
         shm_name=args.shm_name,
         script_allowed_imports=args.script_allowed_imports or [],
         worker_reap_timeout_seconds=args.worker_reap_timeout_seconds,
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
+    )
+
+
+def add_p2p_args(
+    parser: argparse.ArgumentParser,
+) -> argparse.ArgumentParser:
+    """Add peer-to-peer configuration arguments to an existing parser.
+
+    Args:
+        parser: The argument parser to add arguments to.
+
+    Returns:
+        The same parser with P2P arguments added.
+    """
+    group = parser.add_argument_group(
+        "P2P", "Configuration for peer-to-peer KV transfer"
+    )
+    group.add_argument(
+        "--p2p-advertise-url",
+        type=str,
+        default="",
+        help="Transfer-channel server host:port this instance advertises to "
+        "peers. Setting it enables P2P (also requires --coordinator-url).",
+    )
+    group.add_argument(
+        "--p2p-listen-url",
+        type=str,
+        default="",
+        help="Transfer-channel server host:port to bind. Defaults to "
+        "--p2p-advertise-url.",
+    )
+    group.add_argument(
+        "--p2p-lookup-timeout",
+        type=float,
+        default=30.0,
+        help="Seconds before a peer lookup result counts as a miss. Default is 30.",
+    )
+    group.add_argument(
+        "--p2p-load-timeout",
+        type=float,
+        default=30.0,
+        help="Seconds before a peer load counts as a failure. Default is 30.",
+    )
+    group.add_argument(
+        "--p2p-transfer-engine",
+        type=str,
+        default="nixl",
+        help="Transfer-channel implementation to use. Default is nixl.",
+    )
+    return parser
+
+
+def parse_args_to_p2p_config(
+    args: argparse.Namespace,
+) -> P2PConfig:
+    """Convert parsed command line arguments to a P2PConfig.
+
+    Args:
+        args: Parsed arguments from the argument parser.
+
+    Returns:
+        The configuration object.
+    """
+    return P2PConfig(
+        advertise_url=getattr(args, "p2p_advertise_url", "") or "",
+        listen_url=getattr(args, "p2p_listen_url", "") or "",
+        lookup_timeout=getattr(args, "p2p_lookup_timeout", 30.0),
+        load_timeout=getattr(args, "p2p_load_timeout", 30.0),
+        transfer_engine=getattr(args, "p2p_transfer_engine", "nixl"),
     )
 
 

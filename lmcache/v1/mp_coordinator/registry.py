@@ -37,6 +37,9 @@ class MPInstance:
         metadata: Free-form string key/value pairs supplied at registration.
         p2p_advertised_url: URL this instance advertises for peer-to-peer
             transfers. Empty when the instance does not participate in P2P.
+        mq_port: Port of the instance's ZMQ message-queue server that P2P peers
+            send lookup/unlock RPCs to, reachable at this instance's ``ip``. 0
+            when P2P is disabled.
     """
 
     instance_id: str
@@ -46,6 +49,7 @@ class MPInstance:
     last_heartbeat_time: float
     metadata: dict[str, str] = field(default_factory=dict)
     p2p_advertised_url: str = ""
+    mq_port: int = 0
 
 
 class InstanceRegistry:

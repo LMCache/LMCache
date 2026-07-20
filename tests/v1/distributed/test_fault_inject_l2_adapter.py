@@ -16,7 +16,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.l2_adapters.fault_inject_l2_adapter import (
     FaultInjectL2Adapter,
 )
@@ -30,6 +30,8 @@ from lmcache.v1.memory_management import (
     TensorMemoryObj,
 )
 from lmcache.v1.platform import consume_fd
+
+_EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
 N_KEYS = 8
 
@@ -101,7 +103,7 @@ def _store_all(adapter, keys):
 def _lookup_bitmap(adapter, keys):
     """Run a lookup-and-lock for ``keys`` and return its result bitmap."""
     fd = adapter.get_lookup_and_lock_event_fd()
-    tid = adapter.submit_lookup_and_lock_task(keys)
+    tid = adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
     assert _wait_fd(fd)
     # query_*_result is non-idempotent (returns non-None once); poll briefly.
     for _ in range(50):

@@ -194,7 +194,7 @@ class TestEndSessionTouchKeys:
 
     def test_end_session_generates_correct_keys(self, hasher: TokenHasher):
         """end_session should generate ObjectKeys from session hashes and lookup key."""
-        mgr = SessionManager(hasher, ttl=600)
+        mgr = SessionManager(hasher, ttl=600, cleanup_interval=None)
         session = mgr.get_or_create("req-1")
 
         tokens = list(range(12))  # 3 chunks of 4
@@ -217,7 +217,7 @@ class TestEndSessionTouchKeys:
 
     def test_end_session_expands_keys_for_world_size(self, hasher: TokenHasher):
         """end_session should expand keys for all workers when world_size > 1."""
-        mgr = SessionManager(hasher, ttl=600)
+        mgr = SessionManager(hasher, ttl=600, cleanup_interval=None)
         session = mgr.get_or_create("req-1")
 
         tokens = list(range(8))  # 2 chunks of 4
@@ -245,14 +245,14 @@ class TestEndSessionTouchKeys:
 
     def test_end_session_no_session_skips_touch(self, hasher: TokenHasher):
         """end_session should skip touch when session doesn't exist."""
-        mgr = SessionManager(hasher, ttl=600)
+        mgr = SessionManager(hasher, ttl=600, cleanup_interval=None)
         removed = mgr.remove("nonexistent")
         assert removed is None
         # No error should occur
 
     def test_end_session_no_lookup_key_skips_touch(self, hasher: TokenHasher):
         """end_session should skip touch when session has no lookup_ipc_key."""
-        mgr = SessionManager(hasher, ttl=600)
+        mgr = SessionManager(hasher, ttl=600, cleanup_interval=None)
         session = mgr.get_or_create("req-1")
         session.set_tokens(list(range(8)))
         session.get_hashes(0, 8)
@@ -265,7 +265,7 @@ class TestEndSessionTouchKeys:
 
     def test_end_session_empty_hashes_produces_no_keys(self, hasher: TokenHasher):
         """end_session should produce no keys when session has no computed hashes."""
-        mgr = SessionManager(hasher, ttl=600)
+        mgr = SessionManager(hasher, ttl=600, cleanup_interval=None)
         session = mgr.get_or_create("req-1")
 
         ipc_key = make_ipc_key(
@@ -291,7 +291,7 @@ class TestEndSessionTouchKeys:
         3. store calls session.get_hashes(hit_end, total)
         4. end_session uses session.get_hashes(0) to get all
         """
-        mgr = SessionManager(hasher, ttl=600)
+        mgr = SessionManager(hasher, ttl=600, cleanup_interval=None)
         session = mgr.get_or_create("req-1")
 
         tokens = list(range(20))  # 5 chunks of 4

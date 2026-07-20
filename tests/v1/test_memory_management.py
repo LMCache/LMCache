@@ -10,16 +10,18 @@ import torch
 # First Party
 from lmcache.observability import LMCStatsMonitor
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
+from lmcache.v1.memory_allocators.host_memory_allocator import HostMemoryAllocator
+from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
+from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
+    PagedTensorMemoryAllocator,
+)
+from lmcache.v1.memory_allocators.pin_memory_allocator import PinMemoryAllocator
+from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
 from lmcache.v1.memory_management import (
     BytesBufferMemoryObj,
-    GPUMemoryAllocator,
-    HostMemoryAllocator,
     MemoryFormat,
     MemoryObjMetadata,
-    MixedMemoryAllocator,
-    PagedTensorMemoryAllocator,
-    PinMemoryAllocator,
-    TensorMemoryAllocator,
     TensorMemoryObj,
     _allocate_cpu_memory,
     _free_cpu_memory,
@@ -299,6 +301,59 @@ def test_mixed_alloc(alloc_cls):
 
     allocator.memcheck()
     allocator.close()
+
+
+def test_byte_array_caches_ctypes_array_type():
+    """``TensorMemoryObj.byte_array`` must reuse the ctypes array type per length.
+
+    Regression for https://github.com/LMCache/LMCache/issues/3767.
+
+    ``ctypes`` does not cache ``(c_ubyte * N)`` array types: every ``*`` call
+    builds a fresh heap type whose metadata stays alive forever. On the remote
+    backend put/get path ``byte_array`` is accessed once per chunk, so without
+    caching every call permanently leaks ~1-2 kB of heap-type metadata. Long
+    timed-trace replays then see monotonic anonymous-memory growth that
+    eventually triggers an OOM kill.
+
+    Verify two contracts:
+    1. Repeated ``byte_array`` accesses with the same logical size return
+       memoryviews backed by the same underlying ctypes array type.
+    2. Different sizes hit different cached types (the cache is keyed on the
+       logical byte length).
+    """
+    # First Party
+    from lmcache.v1.memory_management import _get_cached_ubyte_array_type
+
+    # Direct helper contract.
+    t1 = _get_cached_ubyte_array_type(1024)
+    t2 = _get_cached_ubyte_array_type(1024)
+    t3 = _get_cached_ubyte_array_type(2048)
+    assert t1 is t2, "same length must map to the same cached array type"
+    assert t1 is not t3, "different lengths must not share a cached array type"
+
+    # Property-level contract: repeated TensorMemoryObj.byte_array accesses
+    # must not create new heap types.
+    total_size = 1 << 22
+    allocator = MixedMemoryAllocator(total_size)
+    shape = torch.Size([4096])
+    obj = allocator.allocate(shape, torch.uint8)
+    assert isinstance(obj, TensorMemoryObj)
+    try:
+        # Prime the cache with this object's size (and any other state the
+        # allocate path warmed up) so we measure only repeated-access growth.
+        _ = obj.byte_array
+        before = _get_cached_ubyte_array_type.cache_info().currsize
+        for _ in range(50):
+            mv = obj.byte_array
+            assert isinstance(mv, memoryview)
+        after = _get_cached_ubyte_array_type.cache_info().currsize
+        assert after == before, (
+            f"byte_array leaked array types across 50 repeated accesses: "
+            f"cache grew from {before} to {after}"
+        )
+    finally:
+        obj.ref_count_down()
+        allocator.close()
 
 
 def test_memory_obj_metadata_to_and_from_dict():
@@ -581,7 +636,9 @@ class TestLazyMemoryAllocator:
         on CPU-only builds.
         """
         # First Party
-        from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
+        from lmcache.v1.memory_allocators.lazy_memory_allocator import (
+            LazyMemoryAllocator,
+        )
 
         return LazyMemoryAllocator
 

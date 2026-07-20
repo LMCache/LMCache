@@ -51,6 +51,23 @@ Options
    * - ``--trigger-watermark RATIO``
      - Eviction fires when usage reaches this fraction of the quota, ``0.0``
        (exclusive) to ``1.0`` (default: ``1.0``).
+   * - ``--chunk-size N``
+     - Tokens per KV chunk: the CacheBlend match unit and the unit used to
+       resolve pin ``token_ids`` to keys. Must equal the MP servers'
+       ``--chunk-size`` (default: ``256``).
+   * - ``--hash-algorithm NAME``
+     - Token hash algorithm for pin key resolution; must equal the MP servers'
+       ``--hash-algorithm``. ``blake3`` (default) is self-contained; other
+       algorithms require vLLM importable in the coordinator.
+   * - ``--blend-probe-stride N``
+     - Positions between CacheBlend match probes; ``1`` probes every offset
+       for full recall (default: ``1``).
+   * - ``--timeout-keep-alive SECS``
+     - Seconds the HTTP server keeps idle connections open before closing
+       them. Must be greater than the MP servers' heartbeat interval
+       (default ``5``), otherwise heartbeat requests may hit a closing
+       connection and fail with ``Server disconnected without sending a
+       response`` (default: ``10``).
 
 Configuration
 -------------
@@ -58,7 +75,8 @@ Configuration
 Every flag is optional. Unset flags fall back to the
 ``LMCACHE_MP_COORDINATOR_*`` environment variables (``HOST``, ``PORT``,
 ``INSTANCE_TIMEOUT``, ``HEALTH_CHECK_INTERVAL``, ``EVICTION_CHECK_INTERVAL``,
-``EVICTION_RATIO``, ``TRIGGER_WATERMARK``), and then to the built-in
+``EVICTION_RATIO``, ``TRIGGER_WATERMARK``, ``CHUNK_SIZE``, ``HASH_ALGORITHM``,
+``BLEND_PROBE_STRIDE``, ``TIMEOUT_KEEP_ALIVE``), and then to the built-in
 defaults. A supplied flag always overrides the matching env-derived value, so
 env-only deployments keep working unchanged.
 

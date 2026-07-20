@@ -1,35 +1,60 @@
 # SPDX-License-Identifier: Apache-2.0
 """CPU-specific platform primitives.
 
-Importing this package self-registers the POSIX-SHM KV-cache wrapper
-factory with :mod:`lmcache.v1.platform._registry`, so the dispatch
-in :mod:`lmcache.integration.vllm.vllm_multi_process_adapter` can
-pick the right wrapper based on ``tensor.device.type`` without any
-if/elif chain.
+Defines :class:`CpuDeviceSpec` for the device registry.  The spec's
+:attr:`~CpuDeviceSpec.ipc_wrapper_cls` binds
+:class:`~lmcache.v1.platform.cpu.shm.CpuShmTensorWrapper` to the
+``"cpu"`` device, so the multiprocess adapter can dispatch by
+``tensor.device.type`` without any if/elif chain.
 """
 
-# Standard
-from typing import Any
+# Future
+from __future__ import annotations
 
-# Third Party
-import torch
+# Standard
+from typing import TYPE_CHECKING
 
 # First Party
-from lmcache.v1.platform._registry import register_kv_wrapper
+from lmcache.v1.platform.base_device_spec import DeviceSpec
 
-
-def _kv_wrapper_factory(tensor: torch.Tensor) -> Any:
-    """Indirect-dispatch wrapper.
-
-    Defers loading :mod:`lmcache.v1.platform.cpu.shm` (which pulls in
-    ``multiprocess.custom_types``) until first use, so importing this
-    package during ``lmcache/__init__.py``'s bootstrap does not race
-    other imports that touch ``torch_dev``.
-    """
+if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.platform.cpu.shm import migrate_to_shm_and_wrap
-
-    return migrate_to_shm_and_wrap(tensor)
+    from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
 
 
-register_kv_wrapper("cpu", _kv_wrapper_factory)
+class CpuDeviceSpec(DeviceSpec):
+    """CPU device specification for the detection registry.
+
+    Keeps ``device_type="cpu"`` aligned with the accelerator-specific
+    resolution path by exposing an :attr:`ipc_wrapper_cls` binding, so
+    callers dispatching on ``tensor.device.type`` never fall through
+    to the bare :class:`DeviceSpec` fallback when the CPU backend is
+    installed.
+
+    Invariant:
+        ``is_available()`` must inherit the base-class ``False`` (i.e.
+        do **not** override it here). ``_detect_device()`` skips
+        ``"cpu"`` inside its auto-detection loop to preserve the
+        "cpu is the tail fallback" semantics, but that skip is
+        defence-in-depth: if this class ever returned ``True`` from
+        ``is_available()``, accelerators registered later in the dict
+        would still be reached only because of that ``continue``. Keep
+        this method inherited so the invariant holds in both layers;
+        an explicit opt-in via ``DEVICE_TYPE=cpu`` is the supported
+        path for forcing CPU selection.
+    """
+
+    @property
+    def device_type(self) -> str:
+        return "cpu"
+
+    @property
+    def torch_module_name(self) -> str:
+        return "cpu"
+
+    @property
+    def ipc_wrapper_cls(self) -> type[DeviceIPCWrapper] | None:
+        # First Party
+        from lmcache.v1.platform.cpu.shm import CpuShmTensorWrapper
+
+        return CpuShmTensorWrapper
