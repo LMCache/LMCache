@@ -135,11 +135,22 @@ class P2PController:
         Args:
             coordinator_config: Coordinator connection used for peer discovery.
         """
+        transfer_kwargs = {}
+        if self._p2p_config.transfer_engine == "verbs":
+            transfer_kwargs = {
+                "device_name": self._p2p_config.rdma_device,
+                "port_num": self._p2p_config.rdma_port,
+                "gid_index": self._p2p_config.rdma_gid_index,
+                "gid_indices": self._p2p_config.rdma_gid_indices,
+                "queue_depth": self._p2p_config.rdma_queue_depth,
+                "handshake_timeout_ms": self._p2p_config.rdma_handshake_timeout_ms,
+            }
         initialize_transfer_channel_context(
             self._p2p_config.transfer_engine,
             self._ctx.storage_manager.l1_memory_desc,
             listen_url=self._p2p_config.effective_listen_url,
             advertise_url=self._p2p_config.advertise_url,
+            **transfer_kwargs,
         )
         self._instances_url = coordinator_config.url.rstrip("/") + "/instances"
         timeout = max(1.0, coordinator_config.heartbeat_interval)

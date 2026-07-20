@@ -239,6 +239,15 @@ def run_http_server(
                 "can register; it is incompatible with GDS L1 (--gds-l1-path) "
                 "and Device-DAX L1 (--l1-devdax-path)."
             )
+        if (
+            mp_config.p2p_config.transfer_engine == "verbs"
+            and storage_manager_config.l1_manager_config.memory_config.use_lazy
+        ):
+            raise ValueError(
+                "Native verbs P2P requires lazy L1 allocation to be disabled: "
+                "set --no-l1-use-lazy. Registering the final L1 range during "
+                "background pinning is not supported."
+            )
     _configs["mp"] = mp_config
     _configs["storage_manager"] = storage_manager_config
     _configs["observability"] = obs_config

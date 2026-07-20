@@ -12,6 +12,10 @@ import math
 import os
 import uuid
 
+_MAX_RDMA_GID_INDEX = 255
+_MAX_RDMA_QUEUE_DEPTH = (1 << 32) - 1
+_MAX_RDMA_HANDSHAKE_TIMEOUT_MS = (1 << 31) - 1
+
 
 @dataclass
 class MPServerConfig:
@@ -156,6 +160,83 @@ class P2PConfig:
 
     transfer_engine: str = "nixl"
     """Transfer-channel implementation to use."""
+
+    rdma_device: str = ""
+    """Comma-separated HCAs used by the native ``verbs`` engine."""
+
+    rdma_port: int = 1
+    """Physical verbs port number."""
+
+    rdma_gid_index: int = -1
+    """RoCE GID index. ``-1`` selects the advertised IPv4 address."""
+
+    rdma_gid_indices: str = ""
+    """Optional comma-separated GID index per HCA."""
+
+    rdma_queue_depth: int = 4096
+    """Maximum outstanding work requests per peer QP."""
+
+    rdma_handshake_timeout_ms: int = 10_000
+    """Per-rail TCP-connect-plus-QP-handshake deadline in milliseconds."""
+
+    def __post_init__(self) -> None:
+        # Keep implementation-specific options inert for existing transfer
+        # engines. In particular, adding the verbs backend must not tighten the
+        # configuration contract for the default NIXL path.
+        if self.transfer_engine != "verbs":
+            return
+        if not isinstance(self.rdma_device, str):
+            raise ValueError("p2p rdma device must be a string")
+        if not isinstance(self.rdma_gid_indices, str):
+            raise ValueError("p2p rdma gid indices must be a string")
+        devices = [device.strip() for device in self.rdma_device.split(",")]
+        if self.rdma_device and (
+            any(not device for device in devices) or len(set(devices)) != len(devices)
+        ):
+            raise ValueError("p2p rdma devices must be unique non-empty names")
+        if not self.rdma_device:
+            raise ValueError("p2p rdma device is required for the verbs engine")
+        if (
+            isinstance(self.rdma_port, bool)
+            or not isinstance(self.rdma_port, int)
+            or not 1 <= self.rdma_port <= 255
+        ):
+            raise ValueError("p2p rdma port must be an integer in [1, 255]")
+        if (
+            isinstance(self.rdma_gid_index, bool)
+            or not isinstance(self.rdma_gid_index, int)
+            or not -1 <= self.rdma_gid_index <= _MAX_RDMA_GID_INDEX
+        ):
+            raise ValueError("p2p rdma gid index must be an integer in [-1, 255]")
+        if self.rdma_gid_indices:
+            try:
+                indices = [
+                    int(index.strip()) for index in self.rdma_gid_indices.split(",")
+                ]
+            except ValueError as error:
+                raise ValueError(
+                    "p2p rdma gid indices must be comma-separated integers"
+                ) from error
+            if any(index < -1 or index > _MAX_RDMA_GID_INDEX for index in indices):
+                raise ValueError("p2p rdma gid indices must be in [-1, 255]")
+            if len(indices) != len(devices):
+                raise ValueError(
+                    "p2p rdma gid index count must match rdma device count"
+                )
+        if (
+            isinstance(self.rdma_queue_depth, bool)
+            or not isinstance(self.rdma_queue_depth, int)
+            or not 1 <= self.rdma_queue_depth <= _MAX_RDMA_QUEUE_DEPTH
+        ):
+            raise ValueError("p2p rdma queue depth must be an integer in [1, 2^32-1]")
+        if (
+            isinstance(self.rdma_handshake_timeout_ms, bool)
+            or not isinstance(self.rdma_handshake_timeout_ms, int)
+            or not 1 <= self.rdma_handshake_timeout_ms <= _MAX_RDMA_HANDSHAKE_TIMEOUT_MS
+        ):
+            raise ValueError(
+                "p2p rdma handshake timeout must be an integer in [1, INT_MAX] ms"
+            )
 
     @property
     def enabled(self) -> bool:
@@ -467,6 +548,45 @@ def add_p2p_args(
         default="nixl",
         help="Transfer-channel implementation to use. Default is nixl.",
     )
+    group.add_argument(
+        "--p2p-rdma-device",
+        type=str,
+        default="",
+        help="Comma-separated HCAs for --p2p-transfer-engine=verbs.",
+    )
+    group.add_argument(
+        "--p2p-rdma-port",
+        type=int,
+        default=1,
+        help="Native-verbs physical port number. Default is 1.",
+    )
+    group.add_argument(
+        "--p2p-rdma-gid-index",
+        type=int,
+        default=-1,
+        help="Native-verbs GID index. -1 auto-selects by advertised IPv4.",
+    )
+    group.add_argument(
+        "--p2p-rdma-gid-indices",
+        type=str,
+        default="",
+        help="Optional comma-separated GID index per configured HCA.",
+    )
+    group.add_argument(
+        "--p2p-rdma-queue-depth",
+        type=int,
+        default=4096,
+        help="Native-verbs maximum outstanding WRs per QP. Default is 4096.",
+    )
+    group.add_argument(
+        "--p2p-rdma-handshake-timeout-ms",
+        type=int,
+        default=10_000,
+        help=(
+            "Native-verbs per-rail TCP-connect-plus-QP-handshake deadline in "
+            "milliseconds. Default is 10000."
+        ),
+    )
     return parser
 
 
@@ -487,6 +607,14 @@ def parse_args_to_p2p_config(
         lookup_timeout=getattr(args, "p2p_lookup_timeout", 30.0),
         load_timeout=getattr(args, "p2p_load_timeout", 30.0),
         transfer_engine=getattr(args, "p2p_transfer_engine", "nixl"),
+        rdma_device=getattr(args, "p2p_rdma_device", ""),
+        rdma_port=getattr(args, "p2p_rdma_port", 1),
+        rdma_gid_index=getattr(args, "p2p_rdma_gid_index", -1),
+        rdma_gid_indices=getattr(args, "p2p_rdma_gid_indices", ""),
+        rdma_queue_depth=getattr(args, "p2p_rdma_queue_depth", 4096),
+        rdma_handshake_timeout_ms=getattr(
+            args, "p2p_rdma_handshake_timeout_ms", 10_000
+        ),
     )
 
 
