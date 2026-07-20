@@ -47,10 +47,10 @@ instead of `buildkite-agent pipeline upload` directly. The wrapper
 - **Skips** the build (exits 0 without uploading `pipeline.yml` → build is
   green with just the upload step) when *all* changed files match a "trivial"
   pattern: `*.md`, `LICENSE*`, `NOTICE*`, `.gitignore`, `.gitattributes`,
-  `.editorconfig`, `.mailmap`, `CODEOWNERS`, or anything under `docs/` or
-  `.github/`. (`.github/` is trivial here because k3 tests run on Buildkite,
-  not GitHub Actions, so workflow / CODEOWNERS / template changes do not
-  affect them.)
+  `.editorconfig`, `.mailmap`, `CODEOWNERS`, or anything under `docs/`,
+  `asset/`, `assets/`, or `.github/`. (`.github/` is trivial here
+  because k3 tests run on Buildkite, not GitHub Actions, so workflow /
+  CODEOWNERS / template changes do not affect them.)
 - **Force-runs** the build when any changed file lives under `.buildkite/` —
   those PRs are usually fixing the k3 CI itself, so we want them tested on
   the PR rather than after merge.
@@ -69,6 +69,13 @@ To bypass the skip and force a full run, add the **`force-ci`** label to the
 PR on GitHub. Buildkite picks up PR labels automatically; when the filter
 sees `force-ci` it runs the full pipeline regardless of which files changed.
 
+If you want a change to be treated as CI-trivial, prefer placing it under one
+of the safe directories above. For example:
+
+- docs edits under `docs/` or `*.md` files are skipped
+- image/logo updates under `asset/` or `assets/` are skipped
+- Buildkite or pipeline changes under `.buildkite/` always run
+
 ### Trigger strategy
 
 Not all tests should run on every push. The general pattern:
@@ -79,6 +86,13 @@ Not all tests should run on every push. The general pattern:
 | Heavy (multi-GPU, >30 min) | PR label or main branch only | `build.pull_request.labels includes "full" \|\| build.branch == 'dev'` |
 
 Set **"Rebuild on PR label change"** to `Yes` for label-triggered pipelines so adding a label to an existing PR kicks off the build.
+
+For XPU specifically:
+
+- GitHub trigger: `build.pull_request.labels includes "xpu" || build.pull_request.labels includes "full" || build.branch == 'dev'`
+- Pipeline upload still goes through the shared path filter, so docs/example/asset-only changes auto-pass before the real XPU steps are uploaded
+- Changes under `.buildkite/` always run, even for the XPU pipeline
+- If you need to force XPU CI on a docs-only or examples-only PR, add the `force-ci` label
 
 ## Adding a New Test
 
