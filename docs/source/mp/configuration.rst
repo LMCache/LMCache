@@ -401,14 +401,17 @@ Each JSON object must include a ``"type"`` field that selects the adapter type.
 The order of ``--l2-adapter`` arguments determines the adapter order (cascade).
 
 Registered adapter types: ``nixl_store``, ``nixl_store_dynamic``, ``fs``,
-``fs_native``, ``mock``, ``mooncake_store``, ``aerospike``, ``s3``, ``resp``,
-``plugin``, ``native_plugin``, ``raw_block``, ``dax``.
+``fs_native``, ``mock``, ``mooncake_store``, ``aerospike``, ``bigtable``,
+``sagemaker-hyperpod``, ``s3``, ``hfbucket``, ``resp``, ``valkey``,
+``plugin``, ``native_plugin``, ``raw_block``, ``dax``, ``fault_inject``.
+(A ``p2p`` type is also registered, but it is wired in dynamically by the
+:doc:`P2P subsystem </mp/p2p>` rather than configured via ``--l2-adapter``.)
 
 Each adapter type's required and optional fields, plus per-backend examples, are
 documented on its own page under :doc:`Secondary KV Storage <l2_storage/index>`
 -- including the adapters not detailed inline here (``fs_native``,
-``raw_block``, ``dax``, ``mooncake_store``, ``aerospike``, ``hfbucket``,
-``resp``).
+``raw_block``, ``dax``, ``mooncake_store``, ``aerospike``, ``bigtable``,
+``sagemaker-hyperpod``, ``hfbucket``, ``resp``, ``valkey``).
 
 Multiple adapters (cascade)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -456,6 +459,23 @@ logging, tracing).
    * - ``--prometheus-port``
      - ``9090``
      - Port for the Prometheus ``/metrics`` endpoint.
+   * - ``--metrics-sample-rate``
+     - ``0.01``
+     - Fraction of chunks/blocks in ``(0, 1.0]`` to track for lifecycle
+       histograms. Counters always count every event regardless of this
+       setting.
+   * - ``--trace-level``
+     - *(none)*
+     - Enable trace recording at the given level. Currently only
+       ``storage`` is supported (records ``StorageManager`` public-API
+       calls for offline replay via ``lmcache trace``). See
+       :doc:`tracing_and_debugging`.
+   * - ``--trace-output``
+     - *(none)*
+     - Path to write the trace file. If omitted while ``--trace-level``
+       is set, a timestamped file under ``$TMPDIR``
+       (``lmcache-trace-<pid>-<UTC>.lct``) is minted and its path is
+       logged at INFO.
    * - ``--enable-extra-logging``
      - off
      - Periodic INFO logs: per-GPU L0<->L1 transfer stats and L1 memory
@@ -468,13 +488,15 @@ vLLM Client Configuration
 --------------------------
 
 On the vLLM side, specify the LMCache server host and port via the
-``kv_connector_extra_config`` parameter:
+``kv_connector_extra_config`` parameter. The ``tcp://`` transport prefix
+on ``lmcache.mp.host`` is optional -- a bare host is accepted and
+normalized to ``tcp://`` by the connector:
 
 .. code-block:: bash
 
     vllm serve Qwen/Qwen3-14B \
         --kv-transfer-config \
-        '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "tcp://127.0.0.1", "lmcache.mp.port": 6000}}'
+        '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "127.0.0.1", "lmcache.mp.port": 6000}}'
 
 To target multiple LMCache servers from a single vLLM deployment, pass a
 list (or comma-separated string) of server URLs via
@@ -513,15 +535,19 @@ All connector-level options are passed through
      - *(unset)*
      - Multi-server deployment: list (or comma-separated string) of
        ``<transport>://<host>:<port>`` URLs, e.g.
-       ``"tcp://host1:6667,tcp://host2:6667"``. When set, takes
-       precedence over ``lmcache.mp.host`` / ``lmcache.mp.port``; the
-       vLLM world size must be divisible by the number of servers, and
-       each worker connects to its locally-assigned server.
+       ``"tcp://host1:6667,tcp://host2:6667"``. The transport prefix
+       may be omitted -- bare ``host:port`` entries such as
+       ``"host1:6667,host2:6667"`` are normalized to ``tcp://`` by the
+       connector. When set, takes precedence over ``lmcache.mp.host`` /
+       ``lmcache.mp.port``; the vLLM world size must be divisible by the
+       number of servers, and each worker connects to its
+       locally-assigned server.
    * - ``lmcache.mp.host``
      - ``tcp://localhost``
-     - Single-server deployment: host (with ZMQ transport prefix) of
-       the LMCache MP server. Ignored when ``lmcache.mp.server_urls``
-       is set.
+     - Single-server deployment: host of the LMCache MP server. A ZMQ
+       transport prefix (e.g. ``tcp://``) is optional -- a bare
+       ``localhost`` / ``127.0.0.1`` is normalized to ``tcp://`` by the
+       connector. Ignored when ``lmcache.mp.server_urls`` is set.
    * - ``lmcache.mp.port``
      - ``5555``
      - Single-server deployment: port of the LMCache MP server. Must
@@ -567,6 +593,9 @@ Environment Variables
    * - ``DO_NOT_TRACK``
      - Set to ``1`` to disable anonymous usage statistics (cross-tool
        convention).
+   * - ``LMCACHE_USAGE_TRACK_INTERVAL``
+     - Seconds between continuous usage-telemetry flushes (default
+       ``600``). See :ref:`usage-stats-collection`.
 
 Full Example
 ------------

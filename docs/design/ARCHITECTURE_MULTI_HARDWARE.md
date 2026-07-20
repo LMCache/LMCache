@@ -22,6 +22,8 @@ multiprocess (MP) mode.
 │  [Registry Discovery Point]                                     │
 │  DeviceSpec subclasses are auto-discovered under                │
 │  lmcache.v1.platform and selected by availability.              │
+│  The DEVICE_TYPE env var forces the detector to prefer one      │
+│  registered device_type when multiple are available.            │
 └──────────────────────────────┬──────────────────────────────────┘
                                │
               ┌────────────────┼──────────────────┐
@@ -111,7 +113,7 @@ Override: LMCACHE_MP_TRANSFER_MODE env var or the mode argument to create_transf
 ## CPU-Only Stub Fallback
 
 `_detect_device()` also accepts a CPU-only environment where none of the
-supported accelerators (CUDA, XPU, HPU) is available. In that case
+supported accelerators (CUDA, MUSA, XPU, HPU) is available. In that case
 `torch_device_type` is `"cpu"` and `torch_dev` is either:
 
 - `lmcache.v1.platform.cpu.stub_cpu_device.StubCPUDevice` — when `torch`
@@ -149,4 +151,5 @@ which is wrong for that backend's actual KV cache layout.
    vendor-specific APIs must not leak to upper layers.
 
 No edits to ``lmcache/__init__.py`` or global backend candidate lists
-are required.
+are required. Users can set ``DEVICE_TYPE=<device_type>`` at runtime to
+force selection of a registered device when multiple are available.
