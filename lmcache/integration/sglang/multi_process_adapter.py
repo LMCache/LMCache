@@ -63,19 +63,25 @@ def _wrap_sglang_kv_caches(
     return wrapped
 
 
-def _completed_future() -> MessagingFuture[bool]:
-    """Return an already-completed future resolving to ``True``.
+def _completed_future(result: bool) -> MessagingFuture[bool]:
+    """Return an already-completed future resolving to ``result``.
 
     Used by :meth:`LMCacheMPConnector.store_kv_async` for the paths that
-    perform no wire send (unhealthy connector, or no chunk-aligned range
-    to store) so every return value is a pollable future and callers
-    never have to special-case ``None``.
+    perform no wire send, so every return value is a pollable future and
+    callers never have to special-case ``None``. ``result`` carries the
+    store outcome for that path: ``False`` when the connector is
+    unhealthy (nothing was stored), ``True`` when there was simply no
+    chunk-aligned range to store (a no-op success).
+
+    Args:
+        result: the success value the returned future resolves to.
 
     Returns:
-        A ``MessagingFuture`` whose ``result()`` is immediately ``True``.
+        A ``MessagingFuture`` whose ``result()`` is immediately
+        ``result``.
     """
     future: MessagingFuture[bool] = MessagingFuture()
-    future.set_result(True)
+    future.set_result(result)
     return future
 
 
@@ -521,9 +527,10 @@ class LMCacheMPConnector:
         The KV slots referenced by ``store_metadata`` must remain pinned
         (not evicted or reused) until the returned future reports done;
         the caller owns that lifetime. Paths that perform no wire send
-        (unhealthy connector, or no chunk-aligned range to store) return
-        an already-completed future so callers never special-case
-        ``None``.
+        return an already-completed future so callers never special-case
+        ``None``: an unhealthy connector resolves to ``False`` (nothing
+        was stored), and no chunk-aligned range resolves to ``True`` (a
+        no-op success).
 
         END_SESSION is owned by ``LMCRadixCache.cache_finished_req``
         (see :meth:`end_session`); it is not fired here.
@@ -534,16 +541,17 @@ class LMCacheMPConnector:
 
         Returns:
             A future resolving to ``True`` when the store completes
-            successfully, or ``False`` on daemon-side failure.
+            successfully (or there was nothing to store), or ``False``
+            on daemon-side failure or an unhealthy connector.
         """
         if not self.is_healthy:
-            return _completed_future()
+            return _completed_future(False)
 
         aligned_end = (len(store_metadata.token_ids) // self._lmcache_chunk_size) * (
             self._lmcache_chunk_size
         )
         if aligned_end == 0:
-            return _completed_future()
+            return _completed_future(True)
 
         request_id = store_metadata.request_id
         block_ids = self._slot_mapping_to_block_ids(
@@ -551,7 +559,7 @@ class LMCacheMPConnector:
         )
         event = torch_dev.Event(interprocess=True)
         event.record(torch_dev.current_stream())
-        return send_lmcache_request(
+        future = send_lmcache_request(
             self.mq_client,
             RequestType.STORE,
             [
@@ -568,6 +576,13 @@ class LMCacheMPConnector:
                 event.ipc_handle(),
             ],
         ).to_cuda_future(device=self.device)
+        # Keep the exporting CUDA event alive until the caller releases the
+        # future. Since we return without blocking, the local ``event`` would
+        # otherwise be garbage-collected immediately, destroying the underlying
+        # CUDA event before the daemon imports its IPC handle and waits on it.
+        # (Dynamic keepalive attribute; the future type doesn't declare it.)
+        future._export_event = event  # type: ignore[attr-defined]
+        return future
 
     def store_kv(self, store_metadata: StoreMetadata) -> None:
         if not self.is_healthy:

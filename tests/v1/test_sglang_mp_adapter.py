@@ -13,6 +13,10 @@ import threading
 import pytest
 import torch
 
+# The adapter imports ``sglang`` at module load; skip cleanly where it's absent
+# (sglang is an optional integration, not a hard LMCache dependency).
+pytest.importorskip("sglang")
+
 # First Party
 from lmcache.integration.sglang import multi_process_adapter as adapter_mod
 from lmcache.integration.sglang.multi_process_adapter import (
@@ -92,13 +96,17 @@ class _FakeTorchDev:
         return object()
 
 
-def test_completed_future_is_done_and_true() -> None:
-    future = _completed_future()
-    assert future.query() is True
-    assert future.result(timeout=0) is True
+def test_completed_future_resolves_to_given_result() -> None:
+    done_true = _completed_future(True)
+    assert done_true.query() is True
+    assert done_true.result(timeout=0) is True
+
+    done_false = _completed_future(False)
+    assert done_false.query() is True
+    assert done_false.result(timeout=0) is False
 
 
-def test_store_kv_async_unhealthy_returns_completed_future_no_send(monkeypatch) -> None:
+def test_store_kv_async_unhealthy_returns_failed_future_no_send(monkeypatch) -> None:
     conn = _make_connector(healthy=False)
 
     def _fail_send(*args, **kwargs):
@@ -110,7 +118,8 @@ def test_store_kv_async_unhealthy_returns_completed_future_no_send(monkeypatch) 
 
     assert isinstance(future, MessagingFuture)
     assert future.query() is True
-    assert future.result(timeout=0) is True
+    # Unhealthy connector stored nothing -> the future must report failure.
+    assert future.result(timeout=0) is False
 
 
 def test_store_kv_async_no_aligned_range_returns_completed_future_no_send(
@@ -154,3 +163,6 @@ def test_store_kv_async_happy_path_returns_daemon_future_without_blocking(
     # It returns the daemon's own future, and must NOT have blocked on it.
     assert future is sentinel
     assert sentinel.result_called is False
+    # The exporting CUDA event must be pinned to the future so it isn't
+    # garbage-collected before the daemon waits on its IPC handle.
+    assert hasattr(future, "_export_event")
