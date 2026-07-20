@@ -4,6 +4,9 @@ from typing import Dict, Type
 
 # First Party
 from lmcache.v1.storage_backend.cache_policy.base_policy import BaseCachePolicy
+from lmcache.v1.storage_backend.cache_policy.cost_aware_policy import (
+    CostAwareEvictionPolicy,
+)
 from lmcache.v1.storage_backend.cache_policy.fifo import FIFOCachePolicy
 from lmcache.v1.storage_backend.cache_policy.lfu import LFUCachePolicy
 from lmcache.v1.storage_backend.cache_policy.lru import LRUCachePolicy
@@ -15,6 +18,7 @@ POLICY_MAPPING: Dict[str, Type[BaseCachePolicy]] = {
     "LFU": LFUCachePolicy,
     "FIFO": FIFOCachePolicy,
     "MRU": MRUCachePolicy,
+    "COST_AWARE": CostAwareEvictionPolicy,
 }
 
 
