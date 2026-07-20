@@ -45,36 +45,64 @@ import re
 
 root = Path("tests")
 name_pattern = re.compile(r"(^|/)test_.*xpu.*\.py$")
-content_patterns = [
-    r'torch_device_type\s*!=\s*"xpu"',
+xpu_only_skipif_pattern = re.compile(
+    r'pytestmark\s*=\s*pytest\.mark\.skipif\(\s*torch_device_type\s*!=\s*"xpu".*?reason\s*=\s*"XPU-only tests"',
+    re.S,
+)
+xpu_only_reason_pattern = re.compile(r'reason\s*=\s*"XPU-only tests"')
+xpu_only_signal_patterns = [
     r'torch_device_type\s*==\s*"xpu"',
     r'torch\.xpu',
     r'xpu_connectors',
     r'xpu_ops',
     r'XPU-only tests',
     r'Intel XPU',
-    r'CUDA or XPU',
-    r'CUDA/XPU',
-    r'No GPU backend \(CUDA or XPU\)',
 ]
+
+shared_xpu_capable_tests = {
+  "tests/benchmarks/test_cachegen.py",
+  "tests/test_serde.py",
+  "tests/v1/gpu_connector/test_kv_format_detection.py",
+  "tests/v1/gpu_connector/test_normalize_per_layer_formats.py",
+  "tests/v1/multiprocess/test_engine_driven_transfer.py",
+  "tests/v1/test_ec_connector.py",
+  "tests/v1/test_memory_allocator_import_surface.py",
+  "tests/v1/test_python_ops_fallback.py",
+}
 blacklist_raw = os.environ.get(
     "XPU_TEST_BLACKLIST",
     "tests/v1/test_musa_support.py,tests/v1/test_*sglang*.py",
 )
 blacklist = {item.strip() for item in blacklist_raw.split(",") if item.strip()}
-selected: list[str] = []
+selected: set[str] = set()
+
+
+def is_blacklisted(rel: str) -> bool:
+  return any(fnmatch(rel, pattern) for pattern in blacklist)
+
+
+def is_xpu_only_test(rel: str, text: str) -> bool:
+  if name_pattern.search(rel):
+    return True
+  if xpu_only_skipif_pattern.search(text):
+    return True
+  if xpu_only_reason_pattern.search(text):
+    return True
+  return any(re.search(pattern, text) for pattern in xpu_only_signal_patterns)
+
+
+def is_shared_xpu_capable_test(rel: str) -> bool:
+  return rel in shared_xpu_capable_tests
 
 for path in root.rglob("test_*.py"):
     rel = path.as_posix()
-    if any(fnmatch(rel, pattern) for pattern in blacklist):
+  if is_blacklisted(rel):
       continue
     text = path.read_text(encoding="utf-8", errors="ignore")
-    if name_pattern.search(rel) or any(
-      re.search(pattern, text) for pattern in content_patterns
-    ):
-        selected.append(rel)
+  if is_shared_xpu_capable_test(rel) or is_xpu_only_test(rel, text):
+    selected.add(rel)
 
-for rel in sorted(dict.fromkeys(selected)):
+for rel in sorted(selected):
     print(rel)
 PY
 }
