@@ -29,6 +29,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
 )
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
+from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     KVCache,
@@ -249,7 +250,10 @@ class LMCacheMPConnector:
             [request_id, self._mq_timeout],
         ).result(timeout=self._mq_timeout + _WAIT_LOOKUP_RESPONSE_BUFFER_S)
         if matched_chunks is None:
-            raise TimeoutError("Timed out waiting for LMCache prefetch to finish")
+            raise LMCacheTimeoutError(
+                "Timed out waiting for LMCache prefetch to finish",
+                session_id=request_id,
+            )
         return matched_chunks * self._lmcache_chunk_size
 
     def _free_lookup_locks(

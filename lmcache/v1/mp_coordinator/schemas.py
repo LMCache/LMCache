@@ -18,6 +18,7 @@ import numpy as np
 
 # First Party
 from lmcache.v1.distributed.api import EncodedObjectKey  # noqa: F401  re-exported
+from lmcache.v1.distributed.tiers import Tier
 
 
 def encode_tokens(tokens: "list[int] | np.ndarray") -> str:
@@ -119,9 +120,11 @@ class SetQuotaRequest(BaseModel):
 
     Attributes:
         limit_gb: Non-negative byte budget in GiB.
+        tier: Cache tier the quota applies to (only ``l2`` is supported today).
     """
 
     limit_gb: float = Field(ge=0.0)
+    tier: Tier = Tier.L2
 
 
 class QuotaResponse(BaseModel):
@@ -138,11 +141,36 @@ class QuotaResponse(BaseModel):
     status: str
 
 
-# -- L2 usage tracking -------------------------------------------------------
+class QuotaConfigRequest(BaseModel):
+    """Body of ``PUT /quota/config``.
+
+    Attributes:
+        default_limit_gb: Byte budget in GiB applied to salts with no
+            explicit quota entry. ``None`` (default) leaves unquota'd
+            salts exempt from eviction.
+        tier: Cache tier the config applies to (only ``l2`` today).
+    """
+
+    default_limit_gb: float | None = Field(default=None, ge=0.0)
+    tier: Tier = Tier.L2
+
+
+class QuotaConfigResponse(BaseModel):
+    """Reply to ``GET`` / ``PUT /quota/config``.
+
+    Attributes:
+        default_limit_gb: Current default limit in GiB, or ``None``
+            when unquota'd salts are exempt from eviction.
+    """
+
+    default_limit_gb: float | None
+
+
+# -- Usage tracking ----------------------------------------------------------
 
 
 class EventType(str, Enum):
-    """L2 cache events reported by an MP server."""
+    """Cache events reported by an MP server."""
 
     STORE = "store"
     LOOKUP = "lookup"
@@ -150,7 +178,7 @@ class EventType(str, Enum):
 
 
 class UsageEvent(BaseModel):
-    """A single L2 event reported by an MP server.
+    """A single cache event reported by an MP server.
 
     Attributes:
         type: The event type.
@@ -164,7 +192,7 @@ class UsageEvent(BaseModel):
 
 
 class ReportUsageRequest(BaseModel):
-    """Body of ``POST /l2/events``.
+    """Body of ``POST /quota/events``.
 
     Attributes:
         instance_id: Identifier of the MP server that produced this batch.
@@ -172,15 +200,17 @@ class ReportUsageRequest(BaseModel):
             ``instance_id``. Starts at 1 for the first flush after the
             server starts.
         events: Batch of store/lookup events to record.
+        tier: Cache tier the events apply to (only ``l2`` is supported today).
     """
 
     instance_id: str
     seq: int = Field(ge=1)
     events: list[UsageEvent]
+    tier: Tier = Tier.L2
 
 
 class ReportUsageResponse(BaseModel):
-    """Reply to ``POST /l2/events``.
+    """Reply to ``POST /quota/events``.
 
     Attributes:
         recorded: Number of events processed.
@@ -189,14 +219,14 @@ class ReportUsageResponse(BaseModel):
     recorded: int
 
 
-class L2StatusResponse(BaseModel):
+class StatusResponse(BaseModel):
     """Combined quota and usage for a single ``cache_salt``.
 
     Attributes:
         cache_salt: The tenant identifier.
         quota_limit_gb: The byte budget in GiB (0.0 if no quota set).
         quota_exists: Whether an explicit quota is registered.
-        usage_gb: Current L2 usage in GiB.
+        usage_gb: Current usage in GiB.
     """
 
     cache_salt: str
@@ -205,16 +235,16 @@ class L2StatusResponse(BaseModel):
     usage_gb: float
 
 
-class L2StatusListResponse(BaseModel):
-    """Reply to ``GET /l2/status``.
+class StatusListResponse(BaseModel):
+    """Reply to ``GET /quota``.
 
     Attributes:
-        total_gb: Aggregate L2 usage in GiB.
+        total_gb: Aggregate usage in GiB.
         by_cache_salt: Per-tenant breakdown with quota and usage.
     """
 
     total_gb: float
-    by_cache_salt: list[L2StatusResponse]
+    by_cache_salt: list[StatusResponse]
 
 
 # -- Global CacheBlend fingerprint directory ------------------------------
@@ -339,13 +369,13 @@ class BlendMatchResponse(BaseModel):
 
 
 class PrefetchRequest(BaseModel):
-    """Body of ``POST /l2/prefetch`` on the coordinator.
+    """Body of ``POST /cache/prefetches`` on the coordinator.
 
     Asks the coordinator to warm one MP server's L1 with the chunks of a token
     sequence. The caller describes content by ``token_ids`` -- the unit the
     cache speaks -- not by internal cache keys, which it cannot construct. The
     coordinator forwards the request verbatim to that server's own
-    ``POST /l2/prefetch``, which hashes the tokens and expands them into the
+    ``POST /cache/prefetches``, which hashes the tokens and expands them into the
     per-rank keys.
 
     Attributes:
@@ -364,12 +394,12 @@ class PrefetchRequest(BaseModel):
 
 
 class PrefetchResponse(BaseModel):
-    """Reply to ``POST /l2/prefetch`` on the coordinator.
+    """Reply to ``POST /cache/prefetches`` on the coordinator.
 
     Attributes:
         instance_id: The target MP server the prefetch was submitted to.
         request_id: The server's job id to poll via
-            ``GET /l2/prefetch/{instance_id}/{request_id}``. Empty when
+            ``GET /cache/prefetches/{instance_id}/{request_id}``. Empty when
             ``status`` is ``"noop"`` (nothing to warm).
         chunks: Number of whole chunks submitted to warm.
         status: ``"submitted"`` (a job is in flight) or ``"noop"`` (the
@@ -379,4 +409,85 @@ class PrefetchResponse(BaseModel):
     instance_id: str
     request_id: str = ""
     chunks: int = 0
+    status: str
+
+
+class PinRequest(BaseModel):
+    """Body of ``POST`` / ``DELETE /cache/pins`` on the coordinator.
+
+    Pinning protects the resolved keys from L2 eviction until unpinned. The
+    coordinator resolves ``token_ids`` to keys locally; L2 pins are fleet-wide
+    (per ``cache_salt``), so no target instance is needed.
+
+    Attributes:
+        model_name: Model whose rank fan-out to use when resolving keys.
+        world_size: World size selecting the per-rank fan-out.
+        token_ids: Prompt tokens whose complete chunks should be (un)pinned.
+        cache_salt: Per-tenant isolation salt applied to the produced keys.
+    """
+
+    model_name: str
+    world_size: int = Field(ge=1)
+    token_ids: list[int] = Field(default_factory=list)
+    cache_salt: str = ""
+
+
+class PinResponse(BaseModel):
+    """Reply to ``POST`` / ``DELETE /cache/pins`` on the coordinator.
+
+    Attributes:
+        requested: Number of whole chunks the token sequence resolved to.
+        affected: Number of L2 keys pinned (on pin) or unpinned (on unpin);
+            disambiguated by ``status``.
+        status: ``"pinned"`` / ``"unpinned"``.
+    """
+
+    requested: int = 0
+    affected: int = 0
+    status: str
+
+
+class DeleteRequest(BaseModel):
+    """Body of ``POST /cache/delete`` on the coordinator.
+
+    Attributes:
+        instance_id: Identifier of the target MP server (must be registered).
+        model_name: Model whose layout the target uses to resolve keys.
+        world_size: World size selecting the layout and the per-rank fan-out.
+        token_ids: Prompt tokens whose complete chunks should be deleted.
+        cache_salt: Per-tenant isolation salt applied to the produced keys.
+        tier: Which tier(s) to delete: ``l1`` (L1 only), ``l2`` (L2 only), or
+            ``all`` (both). ``l1`` never touches L2 and vice versa.
+        force: When True, delete even locked/pinned keys -- bypasses L1
+            locks/pins on the node and the coordinator's L2 pin filter.
+    """
+
+    instance_id: str
+    model_name: str
+    world_size: int = Field(ge=1)
+    token_ids: list[int] = Field(default_factory=list)
+    cache_salt: str = ""
+    tier: Tier = Tier.ALL
+    force: bool = False
+
+
+class DeleteResponse(BaseModel):
+    """Reply to ``POST /cache/delete`` on the coordinator.
+
+    Attributes:
+        instance_id: The target MP server the request was dispatched to.
+        requested: Number of whole chunks the token sequence resolved to.
+        affected: Total keys removed across the tiers acted on -- L1 keys deleted
+            by the node plus L2 keys deleted by the coordinator. A chunk resident
+            in both tiers (``tier=all``) contributes to both, so ``affected`` may
+            exceed ``requested`` (which counts chunks, not per-tier keys).
+        skipped: Total keys refused because they were locked/pinned (non-force
+            only) -- L1 keys the node refused plus L2 keys held back for an L2 pin.
+        status: ``"deleted"`` / ``"noop"``.
+    """
+
+    instance_id: str
+    requested: int = 0
+    affected: int = 0
+    skipped: int = 0
     status: str

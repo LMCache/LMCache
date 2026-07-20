@@ -22,7 +22,8 @@ A device-agnostic base, `DeviceIPCWrapper`, now owns everything that is not tran
 DeviceIPCWrapper                        base: contract + (de)serialize
 ├── CudaIPCWrapper                      cuda  — torch caching allocator
 ├── RawCudaIPCWrapper                   cuda — raw cudaMalloc, TRT-LLM
-└── CpuShmTensorWrapper                 cpu   — POSIX shared memory
+├── CpuShmTensorWrapper                 cpu   — POSIX shared memory
+└── MusaIPCWrapper                      musa  — TorchMUSA memory IPC
 ```
 
 All of them live behind a single msgspec ext code 1 and a single `KVCache = list[DeviceIPCWrapper]` wire type, so new device backends can be added as further siblings without touching the wire format.
@@ -51,24 +52,33 @@ transport shares:
 | `CudaIPCWrapper` | `cuda` | `UntypedStorage._share_cuda_()` | `_new_shared_cuda` + `set_()` |
 | `RawCudaIPCWrapper` | `cuda` | `cudaIpcGetMemHandle` (raw ptr) | `cudaIpcOpenMemHandle` → CuPy → DLPack |
 | `CpuShmTensorWrapper` | `cpu` | POSIX `shm_open` | `mmap` same segment |
+| `MusaIPCWrapper` | `musa` | TorchMUSA memory IPC handle | `ipc_open_mem_handle` + DLPack / tensor view |
 
 ## Platform registration
 
-The factory lookup (`platform/_registry.py`) keys on `tensor.device.type`, so
-the integration adapter never has an if/elif chain.  Concrete wrappers are
-discovered automatically at runtime — no static `register_kv_wrapper` calls
+The factory lookup (`platform.resolve_kv_wrapper_factory`) keys on
+`tensor.device.type`, so the integration adapter never has an if/elif
+chain.  Concrete wrappers are bound to their device via
+`DeviceSpec.ipc_wrapper_cls` — no static `register_kv_wrapper` calls
 needed:
 
-- Each concrete subclass sets a ``device_type`` ClassVar (e.g. ``"cuda"``)
-  and exposes a ``wrap`` factory classmethod.
-- :func:`~lmcache.v1.platform._registry._discover_wrappers_once` scans
-  ``lmcache.v1.platform`` two levels deep for ``DeviceIPCWrapper`` subclasses
-  on first use, indexes them by ``device_type``, and skips any subclass where
-  ``_is_default_wrapper`` is ``False`` (so ``RawCudaIPCWrapper`` coexists with
-  ``CudaIPCWrapper`` without colliding).
-- Adding a new accelerator backend only requires shipping a sub-package under
-  ``platform/<device>/`` with a ``DeviceIPCWrapper`` subclass — zero changes
-  to the dispatcher or the registry.
+- Each concrete subclass carries a ``device_type`` ClassVar (e.g.
+  ``"cuda"``) for introspection and exposes a ``wrap`` factory
+  classmethod.
+- Each accelerator's :class:`DeviceSpec` subclass (e.g.
+  :class:`CudaDeviceSpec`) overrides
+  :attr:`~DeviceSpec.ipc_wrapper_cls` to return its default
+  wrapper class.
+- :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory` reads that
+  binding off the registered spec and returns the wrapper's ``wrap``
+  classmethod so callers can invoke ``factory(tensor)`` uniformly.
+- ``RawCudaIPCWrapper`` intentionally stays off the spec so it
+  coexists with ``CudaIPCWrapper`` without collision — callers
+  (TRT-LLM adapter) instantiate it directly.
+- Adding a new accelerator backend only requires shipping a sub-package
+  under ``platform/<device>/`` with a ``DeviceSpec`` subclass whose
+  ``ipc_wrapper_cls`` returns the wrapper — zero changes to the
+  dispatcher.
 
 ## Backward compatibility
 

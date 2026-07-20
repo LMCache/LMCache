@@ -94,6 +94,7 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
         engine_group_infos: object = (),
         engine_type: object = None,
         separate_object_groups: bool = False,
+        full_sw_kv: bool = False,
     ) -> _FakeGPUContext:
         """Return a fake cache context without touching CUDA or wrappers."""
         return _FakeGPUContext()

@@ -28,6 +28,112 @@ subclasses found in those modules. This means:
 3. Utility/helper modules should be prefixed with ``_`` (e.g.
    ``_helpers.py``) so they are excluded from the scan.
 
+Auto-Discovery Mechanism
+------------------------
+
+The CLI uses a unified ``discover_subclasses()`` utility (defined in
+``lmcache/v1/utils/subclass_discovery.py``) to locate command classes at
+every level.  Understanding the two discovery entry points is key to
+extending the CLI.
+
+Top-Level Command Discovery
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When the CLI starts, ``lmcache/cli/commands/__init__.py`` calls
+``discover_subclasses()`` on its own package (``lmcache.cli.commands``).
+This scans all **direct submodules** — both ``.py`` files and
+sub-packages (via their ``__init__.py``) — and collects every concrete
+``BaseCommand`` subclass found.
+
+.. code-block:: python
+
+   # Simplified from lmcache/cli/commands/__init__.py
+   from lmcache.v1.utils.subclass_discovery import discover_subclasses
+
+   ALL_COMMANDS = [
+       cls()
+       for cls in discover_subclasses(
+           __name__,                          # "lmcache.cli.commands"
+           BaseCommand,
+           module_filter=lambda name: name != "base",  # skip base.py itself
+       )
+   ]
+
+The resulting ``ALL_COMMANDS`` list is then registered with the root
+``argparse`` parser in ``main.py``.  This means any new ``.py`` file (or
+sub-package) placed under ``lmcache/cli/commands/`` is automatically
+available as a top-level command — no manual imports or registration
+needed.
+
+**Filtering rules for top-level discovery:**
+
+- The module named ``base`` is explicitly excluded (it defines the
+  abstract base classes, not a command).
+- Modules whose name starts with ``_`` are excluded by the underlying
+  ``pkgutil.iter_modules`` convention (they are treated as private).
+- Only **concrete** subclasses are collected — abstract classes are
+  skipped.
+- Only classes **defined in** the scanned module are collected (re-exports
+  are ignored via ``require_defined_in_module=True``).
+
+Sub-Command Discovery (CompositeCommand)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When a ``CompositeCommand`` registers itself with the parser, its
+``register()`` method calls ``discover_subclasses()`` on the package
+where the ``CompositeCommand`` subclass is defined (i.e. its own
+``__init__.py``'s package).
+
+.. code-block:: python
+
+   # Simplified from CompositeCommand.register() in base.py
+   package = self.__class__.__module__   # e.g. "lmcache.cli.commands.bench"
+
+   for cls in discover_subclasses(
+       package,
+       BaseCommand,
+       module_filter=lambda name: not name.startswith("_"),
+       require_defined_in_module=True,
+   ):
+       if cls is self.__class__:
+           continue          # skip the CompositeCommand itself
+       inst = cls()
+       inst.register(inner)  # register as a nested subcommand
+
+**Filtering rules for sub-command discovery:**
+
+- Modules starting with ``_`` are excluded (use this prefix for helper
+  files like ``_utils.py``).
+- The ``CompositeCommand`` class itself is skipped to avoid infinite
+  recursion.
+- Only concrete ``BaseCommand`` subclasses **defined in** the scanned
+  module are collected.
+- The scan is **non-recursive** (depth 1 only) — each
+  ``CompositeCommand`` only sees its own package's direct children.
+
+**How nesting works:** If a child is itself a ``CompositeCommand``
+(defined in a sub-package's ``__init__.py``), its own ``register()``
+method will in turn scan *its* package for further children.  This
+creates the recursive nesting without any special configuration.
+
+.. code-block:: text
+
+   CLI startup
+   └── __init__.py discovers ALL top-level commands
+       ├── ping.py          → PingCommand (leaf)
+       ├── bench/__init__.py → BenchCommand (composite)
+       │   └── BenchCommand.register() discovers:
+       │       ├── server_bench/__init__.py → ServerBenchCommand (leaf)
+       │       ├── l2_adapter_bench/__init__.py → L2AdapterBenchCommand (leaf)
+       │       └── engine_bench/__init__.py → EngineBenchCommand (leaf)
+       └── tool/__init__.py → ToolCommand (composite)
+           └── ToolCommand.register() discovers:
+               └── cache_simulator/__init__.py → CacheSimulatorCommand (composite)
+                   └── CacheSimulatorCommand.register() discovers:
+                       ├── simulate_command.py     → SimulateCommand (leaf)
+                       ├── sweep_command.py        → SweepCommand (leaf)
+                       └── gen_dataset_command.py  → GenDatasetCommand (leaf)
+
 Directory Layout
 ----------------
 

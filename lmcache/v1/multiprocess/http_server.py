@@ -19,7 +19,7 @@ from lmcache.v1.distributed.config import (
     l1_exposes_single_memory_region,
     parse_args_to_config,
 )
-from lmcache.v1.mp_coordinator.l2.event_listener import L2EventListener
+from lmcache.v1.mp_coordinator.cache_control.event_listener import L2EventListener
 from lmcache.v1.mp_coordinator.registrar import keep_registered
 from lmcache.v1.mp_observability.config import (
     ObservabilityConfig,
@@ -43,6 +43,8 @@ from lmcache.v1.multiprocess.config import (
 from lmcache.v1.multiprocess.http_api_registry import (
     HTTPAPIRegistry,
 )
+from lmcache.v1.multiprocess.http_apis.dependencies import build_context
+from lmcache.v1.multiprocess.http_apis.error_handlers import register_error_handlers
 from lmcache.v1.multiprocess.mp_runtime_plugin_launcher import (
     MPRuntimePluginLauncher,
 )
@@ -106,6 +108,9 @@ async def lifespan(app: FastAPI):
 
     app.state.zmq_server = zmq_server
     app.state.engine = engine
+    # Typed per-app context the cache handlers resolve via ``get_context``
+    # (built now that the engine is ready).
+    app.state.context = build_context(engine)
     app.state.plugin_launcher = plugin_launcher
 
     # Optionally register this server with an MP coordinator (enabled when
@@ -193,6 +198,10 @@ app = FastAPI(title="LMCache HTTP API", version="1.0.0", lifespan=lifespan)
 # Automatically discover and register all HTTP API endpoints
 registry = HTTPAPIRegistry(app)
 registry.register_all_apis()
+
+# Map cache-control domain errors to HTTP responses centrally, so routes need
+# no try/except (auto-discovery finds routers, not exception handlers).
+register_error_handlers(app)
 
 
 def run_http_server(

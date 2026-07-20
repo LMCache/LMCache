@@ -90,7 +90,8 @@ ALL_ITEMS: list[ConfigItem] = [
         key="engine_url",
         display_name="Engine URL",
         description=(
-            "URL of the inference engine. "
+            "URL of the inference engine. Enter just a port (e.g. 8000) to "
+            "use http://localhost:8000. "
             "Set OPENAI_API_KEY env var if authentication is needed."
         ),
         input_type="text",
@@ -135,7 +136,10 @@ ALL_ITEMS: list[ConfigItem] = [
     ConfigItem(
         key="lmcache_url",
         display_name="LMCache Server URL",
-        description="URL of the running LMCache HTTP server.",
+        description=(
+            "URL of the running LMCache HTTP server. Enter just a port "
+            "(e.g. 8080) to use http://localhost:8080."
+        ),
         input_type="text",
         default="http://localhost:8080",
         required=False,

@@ -30,6 +30,7 @@ except ImportError:
 
 
 # Third Party
+from cachetools import TTLCache as _TTLCache  # type: ignore
 import torch
 
 # First Party
@@ -779,3 +780,23 @@ def mock_up_broadcast_fn(t: torch.Tensor, i: int) -> None:
 
 def mock_up_broadcast_object_fn(a: Any, i: int) -> None:
     raise NotImplementedError("Calling invalid broadcast object function")
+
+
+class TTLCache:
+    """Thread-safe wrapper around cachetools.TTLCache for existence checks."""
+
+    def __init__(self, max_size: int, ttl_seconds: float):
+        self.cache: _TTLCache = _TTLCache(maxsize=max_size, ttl=ttl_seconds)
+        self.lock = threading.RLock()
+
+    def get(self, key: str) -> Optional[bool]:
+        with self.lock:
+            return self.cache.get(key)
+
+    def put(self, key: str, val: bool):
+        with self.lock:
+            self.cache[key] = val
+
+    def invalidate(self, key: str):
+        with self.lock:
+            self.cache.pop(key, None)

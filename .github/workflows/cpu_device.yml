@@ -94,6 +94,20 @@ jobs:
             pyproject.toml
             requirements/*.txt
 
+      - name: Install FFmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y ffmpeg
+
+      - name: Install FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            brew install ffmpeg
+          else
+            echo "ffmpeg already installed: $(ffmpeg -version | head -n1)"
+          fi
+
       - name: Cache opt-125m model (GitHub release)
         uses: actions/cache@v4
         with:
