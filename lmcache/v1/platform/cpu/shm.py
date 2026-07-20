@@ -5,8 +5,8 @@ Mirrors the GPU-mode CUDA-IPC zero-copy semantics for hosts without an
 accelerator: client and LMCache mp server map the **same** physical
 pages so transfers are pointer-shuffles rather than memcpys.
 
-Self-registers a ``"cpu"`` factory with
-:mod:`lmcache.v1.platform._registry` at import time, so the
+Bound to ``device_type="cpu"`` via
+:attr:`~lmcache.v1.platform.cpu.CpuDeviceSpec.ipc_wrapper_cls`, so the
 multiprocess adapter can dispatch by ``tensor.device.type`` without
 any if/elif chain.
 """
@@ -71,13 +71,10 @@ class CpuShmTensorWrapper(DeviceIPCWrapper):
     so ``to_tensor`` dispatches correctly on both sides.
     """
 
-    #: ``torch.device.type`` this wrapper handles (used by auto-discovery
-    #: in :func:`~lmcache.v1.platform._registry._discover_wrappers_once`).
+    #: ``torch.device.type`` this wrapper handles. Kept as a class-level
+    #: constant so external tooling / tests can introspect the binding
+    #: without instantiating the wrapper.
     device_type: ClassVar[str] = "cpu"
-
-    #: Marked ``True`` so auto-discovery picks this as the default
-    #: factory for ``"cpu"``.
-    _is_default_wrapper: ClassVar[bool] = True
 
     # POSIX shared-memory name (``/lmcache_...``) -- leading ``/`` is
     # required by ``shm_open(3)`` on both Linux and macOS.
@@ -86,7 +83,7 @@ class CpuShmTensorWrapper(DeviceIPCWrapper):
     @classmethod
     def wrap(cls, tensor: torch.Tensor) -> "CpuShmTensorWrapper":
         """Factory used by
-        :func:`~lmcache.v1.platform._registry._discover_wrappers_once`.
+        :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory`.
 
         Delegates to :func:`migrate_to_shm_and_wrap`, which migrates the
         tensor's storage to a POSIX SHM segment so the LMCache mp server

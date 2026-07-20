@@ -279,11 +279,11 @@ When the caller (or ``LMCACHE_MP_TRANSFER_MODE``) explicitly requests
 checks — both must succeed, otherwise the factory raises
 ``ValueError`` (no silent fallback):
 
-1. A ``DeviceIPCWrapper`` subclass with ``device_type`` and ``wrap``
-   must be registered.  It is auto-discovered by scanning
-   ``lmcache/v1/platform/`` (see ``lmcache/v1/platform/_registry.py``),
-   so you only need to ship the subclass under
-   ``lmcache/v1/platform/foo/``.
+1. Your ``DeviceSpec`` subclass must bind a ``DeviceIPCWrapper``
+   subclass (exposing a ``wrap`` classmethod) via
+   :attr:`~lmcache.v1.platform.base_device_spec.DeviceSpec.ipc_wrapper_cls`.
+   :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory` reads that
+   binding off the registered spec — no separate registry / auto-scan.
 2. ``DeviceSpec.is_handle_transfer_available()`` must return ``True``
    (the base-class default; override to ``False`` only if your device
    lacks IPC handle transfer).
@@ -304,6 +304,17 @@ Override these methods in your ``DeviceSpec``:
 .. code-block:: python
 
     class FooDeviceSpec(DeviceSpec):
+        @property
+        def ipc_wrapper_cls(self):
+            """Bind the DeviceIPCWrapper subclass for this device.
+
+            Lazy import so the accelerator-specific module is only
+            pulled in when the LMCache-driven path is actually used.
+            """
+            from lmcache.v1.platform.foo.ipc_wrapper import FooIPCWrapper
+
+            return FooIPCWrapper
+
         def is_handle_transfer_available(self) -> bool:
             """Return True if your device supports IPC handle transfer."""
             return True  # base-class default; override to False if unsupported
