@@ -26,6 +26,9 @@ Usage examples::
 
     # Run forever starting from sequence 0
     lmcache bench server --rpc-url tcp://localhost:5555
+
+    # Benchmark the gRPC transport (compare against tcp:// zmq)
+    lmcache bench server --rpc-url grpc://localhost:5555
 """
 
 # Future
@@ -101,7 +104,12 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--rpc-url",
         default="tcp://localhost:5555",
-        help=("ZMQ endpoint of the MP server (default: tcp://localhost:5555)"),
+        help=(
+            "RPC endpoint of the MP server. Supported schemes: "
+            "tcp://host:port and ipc:///path (ZMQ, default), "
+            "grpc://host:port and grpc+unix:///path (gRPC). "
+            "Default: tcp://localhost:5555."
+        ),
     )
     parser.add_argument(
         "--mode",
