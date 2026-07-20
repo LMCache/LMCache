@@ -219,6 +219,28 @@ is set, which additionally requires a coordinator URL via
    * - ``--p2p-transfer-engine``
      - ``nixl``
      - Transfer-channel implementation to use.
+   * - ``--p2p-rdma-device``
+     - ``""``
+     - Comma-separated HCA names. Required when the transfer engine is
+       ``verbs``.
+   * - ``--p2p-rdma-port``
+     - ``1``
+     - Physical verbs port used on every configured HCA.
+   * - ``--p2p-rdma-gid-index``
+     - ``-1``
+     - GID index used on every HCA. ``-1`` auto-selects a GID matching the
+       advertised IPv4 address.
+   * - ``--p2p-rdma-gid-indices``
+     - ``""``
+     - Optional comma-separated GID index per HCA. Overrides the shared GID
+       index.
+   * - ``--p2p-rdma-queue-depth``
+     - ``4096``
+     - Maximum outstanding work requests per peer QP.
+   * - ``--p2p-rdma-handshake-timeout-ms``
+     - ``10000``
+     - Per-rail TCP-connect-plus-QP-handshake deadline in milliseconds for
+       ``verbs``. Multi-rail connections are established sequentially.
 
 L1 Memory Manager
 ------------------

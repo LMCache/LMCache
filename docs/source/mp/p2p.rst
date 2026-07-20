@@ -53,7 +53,9 @@ Requirements
   start.
 * **An RDMA-capable network** (InfiniBand / RoCE) is strongly recommended for
   production performance. By default P2P uses the ``nixl`` transfer engine,
-  which is shipped with LMCache, so there is nothing extra to install.
+  which is shipped with LMCache. On Ubuntu, the optional native ``verbs``
+  engine requires ``libibverbs-dev`` when LMCache is built and
+  ``libibverbs1`` at runtime.
 * **A single, contiguous L1 region.** The transfer channel registers the whole
   L1 buffer for RDMA, so P2P is incompatible with the GDS L1 tier
   (``--gds-l1-path``) and the Device-DAX L1 tier (``--l1-devdax-path``); the
@@ -82,9 +84,29 @@ P2P is enabled per server by the ``--p2p-advertise-url`` flag. The relevant
      - Deadline for a peer lookup before it counts as a miss (default ``30``).
    * - ``--p2p-load-timeout SECONDS``
      - Deadline for a peer KV read before it counts as a failure
-       (default ``30``).
+       (default ``30``). A timeout closes that peer connection and fails all
+       sibling reads on it before their destination buffers can be reused; the
+       next load reconnects lazily. If close cannot be confirmed, the buffers
+       remain reserved and the load remains nonterminal.
    * - ``--p2p-transfer-engine ENGINE``
      - Transfer-channel implementation (default ``nixl``).
+   * - ``--p2p-rdma-device DEVICES``
+     - Comma-separated HCA names required by the native ``verbs`` engine.
+   * - ``--p2p-rdma-port PORT``
+     - Physical verbs port used on every configured HCA (default ``1``).
+   * - ``--p2p-rdma-gid-index INDEX``
+     - Shared GID index for all HCAs. ``-1`` auto-selects a GID matching the
+       advertised IPv4 address (default ``-1``).
+   * - ``--p2p-rdma-gid-indices INDICES``
+     - Optional comma-separated GID index per HCA. Use this when rails have
+       different interface addresses.
+   * - ``--p2p-rdma-queue-depth DEPTH``
+     - Maximum outstanding work requests per peer QP (default ``4096``).
+   * - ``--p2p-rdma-handshake-timeout-ms MILLISECONDS``
+     - One monotonic per-rail deadline covering TCP connect and the complete QP
+       metadata/ready handshake (default ``10000``). Rails connect
+       sequentially, so worst-case multi-rail setup time can approach the rail
+       count multiplied by this value.
 
 P2P also reuses the coordinator connection flags (``--coordinator-url``,
 ``--coordinator-advertise-ip``, ``--coordinator-heartbeat-interval``); the
@@ -114,10 +136,49 @@ selected per server with ``--p2p-transfer-engine``.
    * - ``nixl`` (default)
      - RDMA-based transport, shipped with LMCache. Runs over InfiniBand / RoCE
        fabrics.
+   * - ``verbs`` (optional)
+     - LMCache-owned host-DRAM transport using one-sided libibverbs RC reads.
+       It has no NIXL dependency.
 
-``nixl`` is the only backend available today. The transfer engine is a
-pluggable abstraction, so additional backends can be added in the future
-without changing the rest of the P2P stack.
+The native extension is deliberately opt-in and is not built by default, even
+when libibverbs development files are installed. Build it in the same Python
+environment as the runtime so the extension uses the runtime PyTorch ABI:
+
+.. code-block:: bash
+
+   BUILD_WITH_RDMA_L1=1 uv pip install -e . --no-build-isolation
+
+Then add the following arguments on every participating server (replace the
+device and GID values for each host):
+
+.. code-block:: bash
+
+   --p2p-transfer-engine verbs \
+   --p2p-rdma-device mlx5_0,mlx5_1 \
+   --p2p-rdma-gid-indices 3,5 \
+   --no-l1-use-lazy
+
+Native verbs currently requires lazy L1 allocation to be disabled. Registering
+the final L1 range while its pages are still being pinned in the background is
+not a supported configuration.
+
+The first HCA listens at ``--p2p-listen-url``. Each additional HCA uses the
+next TCP control port, so reserve and expose every consecutive port in
+``BASE..BASE+N-1`` for ``N`` rails. All peers continue to advertise the base
+URL. The control implementation currently accepts IPv4 endpoints only.
+TCP exchanges QP and memory-registration metadata and monitors connection
+liveness; KV bytes move only through RDMA READ. The native engine registers
+host L1 memory only and does not provide GPUDirect or remote-write support.
+Each peer remains the allocator and eviction owner of its local L1; remote
+reads create on-demand requester-side copies rather than a globally managed
+capacity or placement domain.
+
+.. warning::
+
+   The native bootstrap and P2P lookup paths do not provide authentication,
+   authorization, TLS, or payload encryption. They exchange host-L1 memory
+   registration credentials over the control plane. Expose the coordinator,
+   ZMQ, and consecutive RDMA control ports only on a trusted, isolated fabric.
 
 Running a multi-node deployment
 -------------------------------

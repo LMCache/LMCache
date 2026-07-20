@@ -94,6 +94,21 @@ Commonly used flags include:
        (default ``30``).
    * - ``--p2p-transfer-engine ENGINE``
      - Transfer-channel implementation for P2P reads (default ``nixl``).
+   * - ``--p2p-rdma-device DEVICES``
+     - Comma-separated HCA names required by the native ``verbs`` engine.
+   * - ``--p2p-rdma-port PORT``
+     - Physical verbs port used on every configured HCA (default ``1``).
+   * - ``--p2p-rdma-gid-index INDEX``
+     - GID index used on every HCA (default ``-1``, auto-select by the
+       advertised IPv4 address).
+   * - ``--p2p-rdma-gid-indices INDICES``
+     - Optional comma-separated GID index per HCA; overrides
+       ``--p2p-rdma-gid-index``.
+   * - ``--p2p-rdma-queue-depth DEPTH``
+     - Maximum outstanding work requests per peer QP (default ``4096``).
+   * - ``--p2p-rdma-handshake-timeout-ms MILLISECONDS``
+     - Native-verbs per-rail TCP-connect-plus-QP-handshake deadline (default
+       ``10000``). Multi-rail connections are established sequentially.
    * - ``--trace-level {storage}``
      - Enable storage-level trace recording (see :doc:`trace`).
    * - ``--trace-output PATH``
