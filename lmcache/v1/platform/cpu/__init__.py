@@ -30,6 +30,18 @@ class CpuDeviceSpec(DeviceSpec):
     callers dispatching on ``tensor.device.type`` never fall through
     to the bare :class:`DeviceSpec` fallback when the CPU backend is
     installed.
+
+    Invariant:
+        ``is_available()`` must inherit the base-class ``False`` (i.e.
+        do **not** override it here). ``_detect_device()`` skips
+        ``"cpu"`` inside its auto-detection loop to preserve the
+        "cpu is the tail fallback" semantics, but that skip is
+        defence-in-depth: if this class ever returned ``True`` from
+        ``is_available()``, accelerators registered later in the dict
+        would still be reached only because of that ``continue``. Keep
+        this method inherited so the invariant holds in both layers;
+        an explicit opt-in via ``DEVICE_TYPE=cpu`` is the supported
+        path for forcing CPU selection.
     """
 
     @property

@@ -113,6 +113,10 @@ def _detect_device() -> tuple[Any, str]:
         # its IPC wrapper), auto-detection must still prefer accelerators
         # and let the ``StubCPUDevice`` branch below handle the no-accelerator
         # case. ``DEVICE_TYPE=cpu`` remains an explicit opt-in above.
+        #
+        # Defence-in-depth pairs with the ``CpuDeviceSpec`` invariant that
+        # ``is_available()`` stays inherited (False); do not remove either
+        # side without updating the other.
         if spec.device_type == "cpu":
             continue
         if not spec.is_available():
