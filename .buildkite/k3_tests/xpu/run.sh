@@ -96,11 +96,11 @@ def is_shared_xpu_capable_test(rel: str) -> bool:
 
 for path in root.rglob("test_*.py"):
     rel = path.as_posix()
-  if is_blacklisted(rel):
+    if is_blacklisted(rel):
       continue
     text = path.read_text(encoding="utf-8", errors="ignore")
-  if is_shared_xpu_capable_test(rel) or is_xpu_only_test(rel, text):
-    selected.add(rel)
+    if is_shared_xpu_capable_test(rel) or is_xpu_only_test(rel, text):
+      selected.add(rel)
 
 for rel in sorted(selected):
     print(rel)
