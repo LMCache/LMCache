@@ -1,0 +1,31 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Wire format for the LMCache mp-mode message queue over gRPC.
+//
+// The payload frames are opaque bytes on this layer so no server-side
+// business code has to change: the existing msgpack encoded RequestType
+// / request_uid / *payloads tuple travels as a repeated bytes field.
+// A future PR can promote hot RequestTypes to typed proto messages
+// without breaking this envelope.
+
+syntax = "proto3";
+
+package lmcache.mp;
+
+message MqRequest {
+  // opaque frames: [request_uid, request_type, *payloads]
+  repeated bytes frames = 1;
+}
+
+message MqResponse {
+  // opaque frames: [request_uid, request_type, *response]
+  repeated bytes frames = 1;
+}
+
+service MessageQueue {
+  // A single long-lived bidirectional stream per client, mirroring
+  // the DEALER-ROUTER pattern one-to-one: each MqRequest maps to
+  // exactly one recv_request() on the server; each MqResponse maps
+  // to exactly one recv_frames() on the client.
+  rpc Exchange(stream MqRequest) returns (stream MqResponse);
+}

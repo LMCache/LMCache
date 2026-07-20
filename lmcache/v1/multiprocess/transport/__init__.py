@@ -10,7 +10,17 @@ themselves via :func:`~.registry.register_client` /
 # First Party
 # Import built-in transports for their side-effect: registering
 # themselves with the URL-scheme registry.
-from lmcache.v1.multiprocess.transport import zmq_transport  # noqa: F401
+from lmcache.v1.multiprocess.transport import zmq_impl  # noqa: F401
+
+# gRPC transport is optional: it depends on grpcio + generated stubs.
+# If either is missing (e.g. minimal install), grpc:// URLs simply fail
+# at ``create_client_transport`` time with a clear error message.
+try:
+    # First Party
+    from lmcache.v1.multiprocess.transport import grpc_impl  # noqa: F401
+except ImportError:
+    pass
+# First Party
 from lmcache.v1.multiprocess.transport.base import (
     ClientContext,
     ClientTransport,
