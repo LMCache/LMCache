@@ -318,7 +318,13 @@ def test_load_not_finished_returns_none():
 
 def test_load_deadline_expired_yields_failure():
     keys = [_key(0)]
-    with _adapter(load_timeout_s=0.01) as (adapter, _mq, _tc_ctx, tc_client, _notifier):
+    with _adapter(load_timeout_s=0.01) as (
+        adapter,
+        _mq,
+        tc_ctx,
+        tc_client,
+        _notifier,
+    ):
         adapter._remote_addresses[keys[0]] = TransferChannelAddress(offset=100, size=10)
         tc_client.submit_read.return_value = 1
         task_id = adapter.submit_load_task(
@@ -328,6 +334,60 @@ def test_load_deadline_expired_yields_failure():
         bitmap = adapter.query_load_result(task_id)
         assert bitmap is not None
         assert bitmap.popcount() == 0
+        tc_client.close.assert_called_once_with()
+        tc_ctx.remove_transfer_channel_client.assert_called_once_with("peer:7600")
+
+
+def test_load_timeout_keeps_destination_reserved_when_quiesce_fails():
+    keys = [_key(0)]
+    with _adapter(load_timeout_s=0.01) as (
+        adapter,
+        _mq,
+        tc_ctx,
+        tc_client,
+        _notifier,
+    ):
+        adapter._remote_addresses[keys[0]] = TransferChannelAddress(offset=100, size=10)
+        tc_client.submit_read.return_value = 1
+        tc_client.close.side_effect = RuntimeError("injected close failure")
+        task_id = adapter.submit_load_task(
+            keys, [MagicMock(shm_offset=0, shm_byte_length=10)]
+        )
+
+        time.sleep(0.02)
+        assert adapter.query_load_result(task_id) is None
+        assert adapter.report_status()["in_flight_loads"] == 1
+        tc_ctx.remove_transfer_channel_client.assert_not_called()
+
+        tc_client.close.side_effect = None
+        bitmap = adapter.query_load_result(task_id)
+        assert bitmap is not None
+        assert bitmap.popcount() == 0
+        tc_ctx.remove_transfer_channel_client.assert_called_once_with("peer:7600")
+
+
+def test_load_after_timeout_lazily_reconnects_peer_client():
+    keys = [_key(0)]
+    with _adapter(load_timeout_s=0.01) as (
+        adapter,
+        _mq,
+        tc_ctx,
+        first_client,
+        _notifier,
+    ):
+        second_client = MagicMock()
+        second_client.submit_read.return_value = 2
+        tc_ctx.get_transfer_channel_client.side_effect = [second_client]
+        adapter._remote_addresses[keys[0]] = TransferChannelAddress(offset=100, size=10)
+        first_client.submit_read.return_value = 1
+        first_task = adapter.submit_load_task(
+            keys, [MagicMock(shm_offset=0, shm_byte_length=10)]
+        )
+        time.sleep(0.02)
+        assert adapter.query_load_result(first_task).popcount() == 0
+
+        adapter.submit_load_task(keys, [MagicMock(shm_offset=10, shm_byte_length=10)])
+        second_client.submit_read.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
