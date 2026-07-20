@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Base classes for the optional L2 storage backend build profile pattern.
+"""Base classes for optional backend extension build profiles.
 
-Each optional storage backend (Mooncake, ...) implements
-:class:`StorageBackendProfile`.  Unlike GPU backends, multiple storage
+Each optional storage backend or transport (Mooncake, native verbs, ...) uses
+:class:`StorageBackendProfile`. Unlike GPU backends, multiple optional
 backends can be selected simultaneously.
 """
 
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 class StorageBackendProfile(ABC):
-    """Build profile for an optional L2 storage backend extension.
+    """Build profile for an optional backend extension.
 
     Subclasses must define:
         name     – unique identifier string.
