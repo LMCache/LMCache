@@ -57,11 +57,11 @@ content_patterns = [
     r'CUDA/XPU',
     r'No GPU backend \(CUDA or XPU\)',
 ]
-  blacklist_raw = os.environ.get(
+blacklist_raw = os.environ.get(
     "XPU_TEST_BLACKLIST",
     "tests/v1/test_musa_support.py,tests/v1/test_*sglang*.py",
-  )
-  blacklist = {item.strip() for item in blacklist_raw.split(",") if item.strip()}
+)
+blacklist = {item.strip() for item in blacklist_raw.split(",") if item.strip()}
 selected: list[str] = []
 
 for path in root.rglob("test_*.py"):
