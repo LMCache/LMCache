@@ -31,6 +31,13 @@ from lmcache.v1.multiprocess.protocol import (
     get_payload_classes,
     get_response_class,
 )
+from lmcache.v1.multiprocess.transport import (
+    ClientContext,
+    ClientTransport,
+    ServerTransport,
+    create_client_transport,
+    create_server_transport,
+)
 from lmcache.v1.platform import EventNotifier, create_event_notifier
 
 logger = init_logger(__name__)
@@ -146,7 +153,10 @@ class ClientPollingLoop:
         self._ops_queue: queue.Queue[_PollOp] = queue.Queue()
         self._poller = zmq.Poller()
         self._poller.register(self._notifier.fileno(), zmq.POLLIN)
-        self._socket_to_client: dict[zmq.Socket, "MessageQueueClient"] = {}
+        # keyed by the transport's readable_handle() (a zmq.Socket for
+        # the built-in ZMQ transport; a raw fd for future transports
+        # such as gRPC).  ``zmq.Poller`` accepts both.
+        self._handle_to_client: dict = {}
         self._thread = threading.Thread(
             target=self._main_loop, daemon=True, name="mq-client-shared-loop"
         )
@@ -218,14 +228,15 @@ class ClientPollingLoop:
         try:
             while True:
                 op = self._ops_queue.get_nowait()
+                handle = op.client.transport.readable_handle()
                 if op.kind is _OpKind.REGISTER:
-                    self._poller.register(op.client.socket, zmq.POLLIN)
-                    self._socket_to_client[op.client.socket] = op.client
-                    logger.debug("Registered client socket %s", op.client.socket)
+                    self._poller.register(handle, zmq.POLLIN)
+                    self._handle_to_client[handle] = op.client
+                    logger.debug("Registered client handle %s", handle)
                 elif op.kind is _OpKind.UNREGISTER:
-                    self._poller.unregister(op.client.socket)
-                    self._socket_to_client.pop(op.client.socket, None)
-                    logger.debug("Unregistered client socket %s", op.client.socket)
+                    self._poller.unregister(handle)
+                    self._handle_to_client.pop(handle, None)
+                    logger.debug("Unregistered client handle %s", handle)
                 op.done.set()
         except queue.Empty:
             pass
@@ -243,15 +254,15 @@ class ClientPollingLoop:
             # all clients' output queues.
             if socks.get(notifier_fd) and socks[notifier_fd] & zmq.POLLIN:
                 self._notifier.consume()
-                for client in self._socket_to_client.values():
+                for client in self._handle_to_client.values():
                     client.process_outbound_task()
 
-            # Inbound: dispatch each ready DEALER socket to its client.
-            for sock, event in socks.items():
-                if sock is notifier_fd:
+            # Inbound: dispatch each ready transport handle to its client.
+            for handle, event in socks.items():
+                if handle is notifier_fd:
                     continue
                 if event & zmq.POLLIN:
-                    owner = self._socket_to_client.get(sock)
+                    owner = self._handle_to_client.get(handle)
                     if owner is not None:
                         owner.process_inbound()
 
@@ -268,11 +279,22 @@ class MessageQueueClient:
         request_type: RequestType
         request_payloads: list[Any]
 
-    def __init__(self, server_url: str, context: zmq.Context):
-        # Socket
-        self.ctx = context
-        self.socket = self.ctx.socket(zmq.DEALER)
-        self.socket.connect(server_url)
+    def __init__(
+        self,
+        server_url: str,
+        context: Optional[zmq.Context] = None,
+        transport: Optional[ClientTransport] = None,
+    ):
+        # Backwards-compatible: callers may pass a ``zmq.Context`` (legacy)
+        # or an already-constructed ``ClientTransport`` (new).  When only a
+        # context is passed, the transport is selected by the URL scheme
+        # (ipc:// / tcp:// -> ZMQ) and the context is forwarded to the
+        # factory.  ``self.ctx`` is retained for legacy users that read it.
+        self.ctx = context if context is not None else zmq.Context.instance()
+        if transport is None:
+            transport = create_client_transport(server_url, context=self.ctx)
+        self.transport: ClientTransport = transport
+        self.transport.connect(server_url)
 
         # Input queue
         self.input_queue: queue.Queue = queue.Queue()
@@ -324,23 +346,24 @@ class MessageQueueClient:
                         strict=False,
                     )
                 ]
-                self.socket.send_multipart([b_request_uid, b_request_type] + b_payloads)
+                self.transport.send_frames([b_request_uid, b_request_type] + b_payloads)
         except queue.Empty:
             pass
 
     def process_inbound(self) -> None:
         """Process one inbound response from the server.
 
-        Called by the shared ClientPollingLoop when the DEALER socket
-        is readable.  Only touches ``pending_futures``, which is
-        exclusively accessed from the loop thread.
+        Called by the shared ClientPollingLoop when the transport's
+        readable handle becomes readable.  Only touches
+        ``pending_futures``, which is exclusively accessed from the
+        loop thread.
         """
-        msg = self.socket.recv_multipart()
-        if len(msg) < 2:
+        msg = self.transport.recv_frames()
+        if msg is None or len(msg) < 2:
             logger.error(
                 "Malformed response: expected at least 2 message parts "
                 "[request_uid, request_type, *response], got %d",
-                len(msg),
+                0 if msg is None else len(msg),
             )
             return
         b_request_uid, b_request_type, *b_response = msg
@@ -389,7 +412,7 @@ class MessageQueueClient:
     def close(self) -> None:
         self._polling_loop.unregister(self)
         ClientPollingLoop.release_instance()
-        self.socket.close()
+        self.transport.close()
 
 
 ResponseType = TypeVar("ResponseType", covariant=True)
@@ -454,7 +477,7 @@ class BlockingRequestHandler(RequestHandlerBase[ResponseType]):
         self.response_cls = response_cls
 
     def __call__(
-        self, payloads: list[bytes], affinity_key: int = 0
+        self, payloads: list[bytes], affinity_key: Any = 0
     ) -> Future[ResponseType]:
         assert self.executor is not None, (
             "BlockingRequestHandler has no executor assigned. "
@@ -491,11 +514,20 @@ class NonBlockingRequestHandler(Generic[ResponseType, StateType]):
 
 
 class MessageQueueServer:
-    def __init__(self, bind_url: str, context: zmq.Context):
-        # Socket
-        self.ctx = context
-        self.socket = self.ctx.socket(zmq.ROUTER)
-        self.socket.bind(bind_url)
+    def __init__(
+        self,
+        bind_url: str,
+        context: Optional[zmq.Context] = None,
+        transport: Optional[ServerTransport] = None,
+    ):
+        # Backwards-compatible: accept either a legacy ``zmq.Context`` or
+        # a pre-built ``ServerTransport``.  When only a context is given,
+        # the transport is selected by URL scheme.
+        self.ctx = context if context is not None else zmq.Context.instance()
+        if transport is None:
+            transport = create_server_transport(bind_url, context=self.ctx)
+        self.transport: ServerTransport = transport
+        self.transport.bind(bind_url)
         # Use a cross-platform Notifier instead of zmq PUSH/PULL sockets
         # because blocking handler callbacks run on ThreadPoolExecutor
         # threads, and zmq sockets are not thread-safe. Notifier.notify()
@@ -505,7 +537,8 @@ class MessageQueueServer:
 
         # Poller
         self.poller = zmq.Poller()
-        self.poller.register(self.socket, zmq.POLLIN)
+        self._inbound_handle = self.transport.readable_handle()
+        self.poller.register(self._inbound_handle, zmq.POLLIN)
         self.poller.register(self._output_efd.fileno(), zmq.POLLIN)
 
         # Main loop thread
@@ -523,6 +556,7 @@ class MessageQueueServer:
     def _call_sync_handler(
         self,
         handler_entry: SyncRequestHandler[Any],
+        client_ctx: ClientContext,
         payloads: list[bytes],
         prefix_frames: list[bytes],
     ) -> Any:
@@ -531,20 +565,24 @@ class MessageQueueServer:
 
         Args:
             handler_entry (SyncRequestHandler[Any]): The handler entry.
+            client_ctx (ClientContext): Opaque per-connection identity
+                used to route the response back.
             payloads (list[bytes]): The payloads of the request.
-            prefix_frames (list[bytes]): The prefix frames to send back.
+            prefix_frames (list[bytes]): The prefix frames to send back
+                (request_uid + request_type).
         """
         response = handler_entry(payloads)
         response_cls = handler_entry.get_response_class()
         b_response = msgspec_encode(response, cls=response_cls)
         if response is not None:
-            self.socket.send_multipart(prefix_frames + [b_response])
+            self.transport.send_response(client_ctx, prefix_frames + [b_response])
         else:
-            self.socket.send_multipart(prefix_frames)
+            self.transport.send_response(client_ctx, prefix_frames)
 
     def _call_blocking_handler(
         self,
         handler_entry: BlockingRequestHandler[Any],
+        client_ctx: ClientContext,
         payloads: list[bytes],
         prefix_frames: list[bytes],
     ) -> Any:
@@ -554,11 +592,13 @@ class MessageQueueServer:
 
         Args:
             handler_entry (BlockingRequestHandler[Any]): The handler entry.
+            client_ctx (ClientContext): Opaque per-connection identity
+                used as the affinity key and to route the response back.
             payloads (list[bytes]): The payloads of the request.
-            prefix_frames (list[bytes]): The prefix frames to send back.
-                prefix_frames[0] is the zmq identity used as affinity key.
+            prefix_frames (list[bytes]): The prefix frames to send back
+                (request_uid + request_type).
         """
-        affinity_key = hash(prefix_frames[0])
+        affinity_key = hash(client_ctx)
         future = handler_entry(payloads, affinity_key=affinity_key)
 
         def _notify_response(fut: Future):
@@ -572,7 +612,7 @@ class MessageQueueServer:
                     else prefix_frames
                 )
 
-                self.output_queue.put(frames_to_send)
+                self.output_queue.put((client_ctx, frames_to_send))
                 self._output_efd.notify()
 
             except Exception:
@@ -583,16 +623,21 @@ class MessageQueueServer:
     def _call_handler(
         self,
         handler_entry: RequestHandlerBase[Any],
+        client_ctx: ClientContext,
         payloads: list[bytes],
         prefix_frames: list[bytes],
     ) -> Any:
         match handler_entry.get_handler_type():
             case HandlerType.SYNC:
                 assert isinstance(handler_entry, SyncRequestHandler)
-                self._call_sync_handler(handler_entry, payloads, prefix_frames)
+                self._call_sync_handler(
+                    handler_entry, client_ctx, payloads, prefix_frames
+                )
             case HandlerType.BLOCKING:
                 assert isinstance(handler_entry, BlockingRequestHandler)
-                self._call_blocking_handler(handler_entry, payloads, prefix_frames)
+                self._call_blocking_handler(
+                    handler_entry, client_ctx, payloads, prefix_frames
+                )
             case HandlerType.NON_BLOCKING:
                 raise NotImplementedError("Non-blocking handler is not supported yet")
             case _:
@@ -602,26 +647,30 @@ class MessageQueueServer:
         output_fd = self._output_efd.fileno()
         while not self.is_finished.is_set():
             socks = dict(self.poller.poll(1000))
-            inbound_state = socks.get(self.socket, None)
+            inbound_state = socks.get(self._inbound_handle, None)
             outbound_state = socks.get(output_fd, None)
 
             # Process the incoming requests
             if inbound_state and inbound_state & zmq.POLLIN:
-                msg = self.socket.recv_multipart()
-                assert len(msg) >= 3, (
-                    "Expected at least 3 message parts "
-                    "[identity, request_uid, request_type, *payloads]"
+                received = self.transport.recv_request()
+                if received is None:
+                    continue
+                client_ctx, frames = received
+                assert len(frames) >= 2, (
+                    "Expected at least 2 message parts "
+                    "[request_uid, request_type, *payloads]"
                 )
 
-                identity, b_request_uid, b_request_type, *payloads = msg
+                b_request_uid, b_request_type, *payloads = frames
                 request_type = msgspec_decode(b_request_type, cls=RequestType)
 
                 if handler_entry := self.handlers.get(request_type):
                     try:
                         self._call_handler(
                             handler_entry=handler_entry,
+                            client_ctx=client_ctx,
                             payloads=payloads,
-                            prefix_frames=[identity, b_request_uid, b_request_type],
+                            prefix_frames=[b_request_uid, b_request_type],
                         )
                     except Exception:
                         logger.exception("Error handling request %s", request_type)
@@ -638,8 +687,9 @@ class MessageQueueServer:
 
                 # Process the output tasks
                 try:
-                    while frames_to_send := self.output_queue.get_nowait():
-                        self.socket.send_multipart(frames_to_send)
+                    while item := self.output_queue.get_nowait():
+                        out_ctx, out_frames = item
+                        self.transport.send_response(out_ctx, out_frames)
                 except queue.Empty:
                     pass
 
@@ -873,7 +923,7 @@ class MessageQueueServer:
         self.is_finished.set()
         if self.worker_thread.is_alive():
             self.worker_thread.join()
-        self.socket.close()
+        self.transport.close()
         for pool in self.extra_pools:
             pool.shutdown(wait=False)
         self._output_efd.close()
