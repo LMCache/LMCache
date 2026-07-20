@@ -138,7 +138,9 @@ def _make_hnd_flashinfer_kv_caches(
     num_heads: int = 2,
     head_size: int = 8,
 ) -> dict[str, torch.Tensor]:
-    """Build per-layer HND flash-infer KV tensors for device-agnostic data transfer tests."""
+    """Build per-layer HND flash-infer KV tensors for
+    device-agnostic data transfer tests.
+    """
     kv_caches = {}
     for i in range(num_layers):
         kv_caches[f"layer_{i}"] = torch.randn(

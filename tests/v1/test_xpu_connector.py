@@ -56,7 +56,7 @@ if lmc_ops is None:
     lmc_ops = MockCOps()
 
 # Local
-from .utils import (
+from .utils import (  # noqa: E402
     check_paged_kv_cache_equal,
     check_paged_kv_cache_equal_with_mla,
     generate_kv_cache_paged_list_tensors,
@@ -149,7 +149,9 @@ def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, engine_kv_format):
     dtype = get_dtype(gpu_kv_src, engine_kv_format)
 
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
-    slot_mapping = torch.tensor(slot_mapping, device=torch_device_type, dtype=torch.int64)
+    slot_mapping = torch.tensor(
+        slot_mapping, device=torch_device_type, dtype=torch.int64
+    )
 
     # Check the gpu_kv is not the same before copying
     with pytest.raises(AssertionError):
@@ -274,7 +276,9 @@ def test_vllm_paged_connector_v3_with_gpu_and_mla(
                 kv_caches[f"{i}-{j}"] = layer_tensor
 
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
-    slot_mapping = torch.tensor(slot_mapping, device=torch_device_type, dtype=torch.int64)
+    slot_mapping = torch.tensor(
+        slot_mapping, device=torch_device_type, dtype=torch.int64
+    )
 
     # Check the kv group is not the same before copying
     with pytest.raises(AssertionError):
@@ -396,7 +400,9 @@ def test_layerwise_vllm_paged_connector_with_gpu(use_gpu, engine_kv_format):
     dtype = get_dtype(gpu_kv_src, engine_kv_format)
 
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
-    slot_mapping = torch.tensor(slot_mapping, device=torch_device_type, dtype=torch.int64)
+    slot_mapping = torch.tensor(
+        slot_mapping, device=torch_device_type, dtype=torch.int64
+    )
 
     # Check the gpu_kv is not the same before copying
     with pytest.raises(AssertionError):
@@ -665,7 +671,9 @@ def test_layerwise_vllm_buffer_connector_with_gpu(use_gpu):
     dtype = gpu_kv_src[0][0].dtype
 
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
-    slot_mapping = torch.tensor(slot_mapping, device=torch_device_type, dtype=torch.int64)
+    slot_mapping = torch.tensor(
+        slot_mapping, device=torch_device_type, dtype=torch.int64
+    )
 
     # Check the gpu_kv is not the same before copying
     with pytest.raises(AssertionError):
@@ -741,6 +749,7 @@ def test_layerwise_vllm_buffer_connector_with_gpu(use_gpu):
 
     allocator.close()
 
+
 def test_vllm_paged_connector_v2_to_gpu_bench(benchmark):
     """
     VLLMPagedMemXPUConnectorV2.to_gpu() micro-benchmark.
@@ -769,7 +778,9 @@ def test_vllm_paged_connector_v2_to_gpu_bench(benchmark):
     )
 
     slot_mapping = random.sample(range(0, num_blocks * block_size), chunk_size)
-    slot_mapping = torch.tensor(slot_mapping, device=torch_device_type, dtype=torch.int64)
+    slot_mapping = torch.tensor(
+        slot_mapping, device=torch_device_type, dtype=torch.int64
+    )
 
     connector = VLLMPagedMemXPUConnectorV2(hidden_dim, num_layers)
     shape = connector.get_shape(chunk_size)
