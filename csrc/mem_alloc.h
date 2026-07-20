@@ -1,4 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Samsung Electronics Co., Ltd.All Rights Reserved
+//
+// 2026/6/5 add c_memcpy function
+//   Wenwen Chen <wenwen.chen@samsung.com>
 
 #include <cstdint>
 #include <string>
@@ -8,6 +12,7 @@ uintptr_t alloc_pinned_ptr(size_t size, unsigned int flags);
 uintptr_t alloc_numa_ptr(size_t size, int node);
 uintptr_t alloc_pinned_numa_ptr(size_t size, int node);
 uintptr_t alloc_shm_pinned_ptr(size_t size, const std::string& shm_name);
+bool c_memcpy(void* dst_ptr, const void* src_ptr, size_t length);
 void batched_memcpy(const std::vector<uintptr_t>& src_ptrs,
                     const std::vector<uintptr_t>& dst_ptrs,
                     const std::vector<size_t>& sizes);

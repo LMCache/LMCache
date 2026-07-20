@@ -15,6 +15,7 @@ import os
 import threading
 
 # First Party
+from lmcache.c_ops import memcpy
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_management import MemoryObj
@@ -252,7 +253,7 @@ class HF3fsConnector(FSConnector):
                     f.write(md, md_len, 0)
 
                 # write data
-                f.write(buffer.tobytes(), size, md_len)
+                f.write(buffer, size, md_len)
                 # logger.info(f"num_write = {size}, key chunk_hash={key.chunk_hash}")
 
                 # Atomically rename temp file to final destination
@@ -472,7 +473,7 @@ class Hf3fsClient:
         total_bytes_read = done.result
 
         # read from shm
-        buffer[:total_bytes_read] = self.shm_read.buf[:total_bytes_read]
+        memcpy(buffer, self.shm_read.buf, total_bytes_read)
         return total_bytes_read
 
     def read(self, fd: int, buffer: memoryview, length: int, start: int = 0) -> int:
@@ -503,7 +504,7 @@ class Hf3fsClient:
         total_bytes_written = 0
 
         # write shm
-        self.shm_write.buf[:length] = buffer[:length]
+        memcpy(self.shm_write.buf, buffer, length)
 
         # prepare
         self.ior_write.prepare(self.iov_write[:length], False, fd, file_offset)

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Samsung Electronics Co., Ltd.All Rights Reserved
+//
+// 2026/6/5 add c_memcpy function
+//   Wenwen Chen <wenwen.chen@samsung.com>
+
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <string>
@@ -74,6 +80,19 @@ void free_hugepage_pinned_ptr(uintptr_t ptr, size_t size) {
   if (munmap(p, size) != 0) {
     throw std::runtime_error(std::string("munmap failed: ") + strerror(errno));
   }
+}
+
+bool c_memcpy(void* dst_ptr, const void* src_ptr, size_t length) {
+  if (dst_ptr == nullptr || src_ptr == nullptr) {
+    return false;
+  }
+
+  if (length == 0) {
+    return true;
+  }
+
+  std::memcpy(dst_ptr, src_ptr, length);
+  return true;
 }
 
 void batched_memcpy(const std::vector<uintptr_t>& src_ptrs,

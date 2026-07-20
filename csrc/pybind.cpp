@@ -1,4 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Samsung Electronics Co., Ltd.All Rights Reserved
+//
+// 2026/6/5 add memcpy function
+//   Wenwen Chen <wenwen.chen@samsung.com>
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -93,6 +97,28 @@ PYBIND11_MODULE(c_ops, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("free_shm_pinned_ptr", &free_shm_pinned_ptr,
         py::call_guard<py::gil_scoped_release>());
+  m.def(
+      "memcpy",
+      [](py::buffer dst_buf, py::buffer src_buf, size_t length) {
+        py::buffer_info dst_info = dst_buf.request();
+        py::buffer_info src_info = src_buf.request();
+
+        if (dst_info.ptr == nullptr || src_info.ptr == nullptr) {
+          throw std::runtime_error("Null buffer pointer");
+        }
+
+        size_t dst_bytes = static_cast<size_t>(dst_info.size) *
+                           static_cast<size_t>(dst_info.itemsize);
+        size_t src_bytes = static_cast<size_t>(src_info.size) *
+                           static_cast<size_t>(src_info.itemsize);
+        if (length > dst_bytes || length > src_bytes) {
+          throw std::runtime_error("Length exceeds buffer size");
+        }
+        py::gil_scoped_release release;
+        return c_memcpy(dst_info.ptr, src_info.ptr, length);
+      },
+      py::arg("dst_buf"), py::arg("src_buf"), py::arg("length"),
+      "Copy length bytes from src_buf to dst_buf (releases GIL)");
   m.def("batched_memcpy", &batched_memcpy, py::arg("src_ptrs"),
         py::arg("dst_ptrs"), py::arg("sizes"),
         py::call_guard<py::gil_scoped_release>());

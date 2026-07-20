@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Samsung Electronics Co., Ltd.All Rights Reserved
 #
 # This file contains Python non-CUDA fallback implementations for
 # CUDA-specific operations.
+#
+# 2026/6/25 add memcpy function
+#   Wenwen Chen <wenwen.chen@samsung.com>
 #
 # Standard
 from concurrent.futures import ThreadPoolExecutor
@@ -501,6 +505,55 @@ def free_pinned_ptr(ptr: int) -> None:
 
     # Release the tensor object for that pointer reference
     _tensor_registry.pop(ptr, None)
+
+
+def memcpy(dst_buf: Any, src_buf: Any, length: int) -> bool:
+    """Non-CUDA equivalent of the native memcpy helper.
+
+    Copy length bytes from src_buf to dst_buf using ctypes memmove.
+
+    Args:
+        dst_buf: Destination buffer (must support Python buffer protocol).
+        src_buf: Source buffer (must support Python buffer protocol).
+        length: Number of bytes to copy.
+
+    Returns:
+        True if copy succeeded.
+
+    Raises:
+        ValueError: If buffer is null or length exceeds buffer size.
+        TypeError: If input does not support buffer protocol.
+    """
+
+    # memoryview() auto check buffer protocol，raise TypeError if not support
+    dst_bytes_mv = memoryview(dst_buf).cast("B")
+    src_bytes_mv = memoryview(src_buf).cast("B")
+
+    # Check writability of destination
+    if dst_bytes_mv.readonly:
+        raise TypeError("Destination buffer is not writable")
+
+    if length > len(dst_bytes_mv) or length > len(src_bytes_mv):
+        raise ValueError("Length exceeds buffer size")
+
+    if length <= 0:
+        return False
+
+    # Use ctypes.from_buffer for destination (must be writable)
+    # Use ctypes.from_buffer_copy for source (can be read-only)
+    dst_array = (ctypes.c_uint8 * length).from_buffer(dst_bytes_mv)
+
+    if src_bytes_mv.readonly:
+        src_array = (ctypes.c_uint8 * length).from_buffer_copy(src_bytes_mv)
+    else:
+        src_array = (ctypes.c_uint8 * length).from_buffer(src_bytes_mv)
+
+    ctypes.memmove(
+        ctypes.byref(dst_array),
+        ctypes.byref(src_array),
+        length,
+    )
+    return True
 
 
 def batched_memcpy(src_ptrs: list[int], dst_ptrs: list[int], sizes: list[int]) -> None:
