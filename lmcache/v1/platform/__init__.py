@@ -108,6 +108,13 @@ def _detect_device() -> tuple[Any, str]:
             )
 
     for spec in _DEVICE_REGISTRY.values():
+        # ``cpu`` is the tail fallback: even though ``CpuDeviceSpec`` now
+        # lives in the registry (so ``resolve_kv_wrapper_factory`` can bind
+        # its IPC wrapper), auto-detection must still prefer accelerators
+        # and let the ``StubCPUDevice`` branch below handle the no-accelerator
+        # case. ``DEVICE_TYPE=cpu`` remains an explicit opt-in above.
+        if spec.device_type == "cpu":
+            continue
         if not spec.is_available():
             continue
 
