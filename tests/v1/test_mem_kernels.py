@@ -336,6 +336,111 @@ def test_multi_layer_kernel(num_tokens, engine_kv_format):
 
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
+@pytest.mark.parametrize("head_size", [64, 128])  # 64 = gpt-oss; 128 = common
+def test_multi_layer_kernel_packed_nhd(num_tokens, head_size):
+    """Round-trip the NHD fused-K/V packed layout NL_X_NB_BS_NH_TWO_HS.
+
+    vLLM packs [K, V] into the content dim ([NB, BS, NH, 2*HS]); the transfer
+    spec reports it as kv_size=1 with a doubled head_size. This exercises the
+    multi_layer_kv_transfer H2D scatter (the CacheBlend retrieve path) and D2H
+    gather for that layout: gather a paged cache into a memory object, scatter
+    it into a fresh paged cache, and assert per-token K/V equality at the slots.
+    """
+    device = "cuda"
+    num_blocks = 1000
+    block_size = 16
+    num_heads = 8
+    chunk_size = 256
+    num_layers = 32
+    dtype = torch.bfloat16
+    fmt = lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS
+
+    kv_cache = generate_kv_cache_paged_list_tensors(
+        num_blocks,
+        device,
+        block_size,
+        dtype,
+        num_layers,
+        head_size,
+        engine_kv_format=fmt,
+    )
+    page_buffer_size = num_blocks * block_size
+    slot_mapping = torch.tensor(
+        random.sample(range(0, page_buffer_size), num_tokens), device=device
+    )
+
+    mem_allocator = PinMemoryAllocator(4 * 1024 * 1024 * 1024)
+    kv_cache_pointers = torch.empty(
+        num_layers, dtype=torch.int64, device="cpu", pin_memory=True
+    )
+    for i in range(num_layers):
+        kv_cache_pointers[i] = kv_cache[i].data_ptr()
+
+    # D2H gather: fused K/V => memory object is kv_size==1 with a doubled D.
+    mem_obj_list = []
+    for slot_mapping_temp in torch.split(slot_mapping, chunk_size):
+        mem_obj = mem_allocator.allocate(
+            torch.Size(
+                [1, num_layers, len(slot_mapping_temp), num_heads * 2 * head_size]
+            ),
+            dtype,
+        )
+        lmc_ops.multi_layer_kv_transfer(
+            mem_obj.tensor,
+            kv_cache_pointers,
+            slot_mapping_temp,
+            kv_cache[0].device,
+            page_buffer_size,
+            lmc_ops.TransferDirection.D2H,
+            fmt,
+            block_size,
+            head_size=head_size,
+        )
+        mem_obj_list.append(mem_obj)
+
+    # H2D scatter into a fresh paged cache (the path CacheBlend retrieve uses).
+    kv_cache_new = generate_kv_cache_paged_list_tensors(
+        num_blocks,
+        device,
+        block_size,
+        dtype,
+        num_layers,
+        head_size,
+        engine_kv_format=fmt,
+    )
+    kv_cache_pointers_new = torch.empty(
+        num_layers, dtype=torch.int64, device="cpu", pin_memory=True
+    )
+    for i in range(num_layers):
+        kv_cache_pointers_new[i] = kv_cache_new[i].data_ptr()
+
+    for mem_obj, slot_mapping_temp in zip(
+        mem_obj_list, torch.split(slot_mapping, chunk_size), strict=True
+    ):
+        lmc_ops.multi_layer_kv_transfer(
+            mem_obj.tensor,
+            kv_cache_pointers_new,
+            slot_mapping_temp,
+            kv_cache_new[0].device,
+            page_buffer_size,
+            lmc_ops.TransferDirection.H2D,
+            fmt,
+            block_size,
+            head_size=head_size,
+        )
+
+    check_paged_kv_cache_equal(
+        kv_cache,
+        kv_cache_new,
+        slot_mapping,
+        num_heads=num_heads,
+        head_size=head_size,
+        engine_kv_format=fmt,
+    )
+    mem_allocator.close()
+
+
+@pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
 @pytest.mark.parametrize("head_size", [576, 66])  # Use 68 for dsv32 (132x int8)
 @pytest.mark.parametrize(
     "engine_kv_format",

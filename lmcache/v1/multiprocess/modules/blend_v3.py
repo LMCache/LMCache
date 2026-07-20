@@ -66,6 +66,12 @@ import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
+# vLLM's fused K/V layouts pack [K, V] into the content dim; the transfer spec
+# then reports kv_size=1 with a doubled head_size. CB v3 re-RoPE un-folds only
+# the NHD-packed variant (see _apply_cb_rope_batched). None on builds whose
+# lmc_ops predates the enum member.
+_CB_PACKED_NHD_FMT = getattr(lmc_ops.EngineKVFormat, "NL_X_NB_BS_NH_TWO_HS", None)
+
 
 @dataclass
 class _CBRopeState:
@@ -1469,18 +1475,43 @@ class BlendV3Module(InstanceLivenessTarget):
                 gpu_context.get_temp_kernel_group_buffer(slot_idx, group_idx)
                 for slot_idx in range(batch_len)
             ]
-            if all_slots[0].shape[0] != 2:
+            # Fused NHD-packed layout (kv_size==1, K/V doubled into the content
+            # dim): the transfer kernels move the packed [K, V] blob unchanged,
+            # but re-RoPE needs the K half only, so un-fold it below.
+            is_packed_kv = (
+                all_slots[0].shape[0] == 1
+                and _CB_PACKED_NHD_FMT is not None
+                and group.engine_kv_format == _CB_PACKED_NHD_FMT
+            )
+            if all_slots[0].shape[0] != 2 and not is_packed_kv:
                 raise RuntimeError(
-                    f"CB v3: group {group_idx} has kv_size={all_slots[0].shape[0]}; "
-                    "MLA layouts unsupported."
+                    f"CB v3: group {group_idx} kv_size={all_slots[0].shape[0]} "
+                    f"(format={group.engine_kv_format}) unsupported for re-RoPE. "
+                    "Only kv-split layouts and the NHD-packed "
+                    "NL_X_NB_BS_NH_TWO_HS are handled; MLA and other packed "
+                    "variants are not."
                 )
             num_layers, slots, hidden_dim = all_slots[0].shape[1:]
-            n_heads = hidden_dim // rope_state.head_size
-            if n_heads * rope_state.head_size != hidden_dim:
-                raise RuntimeError(
-                    f"CB rope: group {group_idx} hidden_dim ({hidden_dim}) "
-                    f"not a multiple of head_size ({rope_state.head_size})."
-                )
+            # The model head_dim (un-folded) — NOT the transfer spec's doubled
+            # head_size; the packed n_heads below relies on this.
+            head_size = rope_state.head_size
+            if is_packed_kv:
+                # hidden_dim is [n_heads, 2, head_size] flattened (K and V
+                # interleaved per head); re-RoPE must touch K only.
+                if hidden_dim % (2 * head_size) != 0:
+                    raise RuntimeError(
+                        f"CB rope: group {group_idx} packed hidden_dim "
+                        f"({hidden_dim}) not a multiple of 2*head_size "
+                        f"({2 * head_size})."
+                    )
+                n_heads = hidden_dim // (2 * head_size)
+            else:
+                n_heads = hidden_dim // head_size
+                if n_heads * head_size != hidden_dim:
+                    raise RuntimeError(
+                        f"CB rope: group {group_idx} hidden_dim ({hidden_dim}) "
+                        f"not a multiple of head_size ({head_size})."
+                    )
             # Per-group rope cache: dual-RoPE models rotate each
             # kernel group with its own theta's cos/sin.
             group_cos_sin = rope_state.cache_for_group(group.engine_group_idx)
@@ -1499,18 +1530,28 @@ class BlendV3Module(InstanceLivenessTarget):
                 ).repeat(num_layers)
                 sp_cache[sp_key] = slot_positions_rep
             for slot_idx, old_st, cur_st in slots_to_rope:
-                # reshape returns an in-place view (tmp slots are contiguous).
-                k_view = all_slots[slot_idx][0].reshape(
-                    num_layers * slots, n_heads, rope_state.head_size
-                )
+                buf = all_slots[slot_idx][0]
+                if is_packed_kv:
+                    # Un-fold [.., n_heads, 2, head_size]; K is [..., 0, :],
+                    # strided by the interleaved V. Gather it to a contiguous
+                    # buffer for the kernel, then scatter it back below. view()
+                    # (not reshape) so the scatter-back writes through buf —
+                    # a silent copy would lose the re-RoPE'd K.
+                    packed = buf.view(num_layers * slots, n_heads, 2, head_size)
+                    k = packed[:, :, 0, :].contiguous()
+                else:
+                    # reshape returns an in-place view (tmp slots are contiguous).
+                    k = buf.reshape(num_layers * slots, n_heads, head_size)
                 lmc_ops.rotary_embedding_k_fused(
                     old_st + slot_positions_rep,
                     cur_st + slot_positions_rep,
-                    k_view,
-                    rope_state.head_size,
+                    k,
+                    head_size,
                     group_cos_sin,
                     rope_state.is_neox_style,
                 )
+                if is_packed_kv:
+                    packed[:, :, 0, :] = k  # write re-RoPE'd K back; V untouched
 
     def cb_retrieve_pre_computed(
         self,

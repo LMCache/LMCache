@@ -256,9 +256,16 @@ __device__ __forceinline__ int64_t page_buffer_offset(
            k_or_v * block_size * scalars_per_token +
            block_offset * scalars_per_token + scalar_offset;
   }
-  // MLA formats: vLLM (NL_X_NB_BS_HS) and SGLang (NL_X_NBBS_ONE_HS)
+  // MLA formats: vLLM (NL_X_NB_BS_HS) and SGLang (NL_X_NBBS_ONE_HS); plus the
+  // fused-K/V NHD packed layout NL_X_NB_BS_NH_TWO_HS ([NB, BS, NH, 2*HS]).
+  // The latter is token-contiguous with a single fused K/V axis (kv_size == 1,
+  // scalars_per_token == NH * 2 * HS), so it addresses like MLA — K and V ride
+  // together in each token's contiguous span. (The HND-packed sibling
+  // NL_X_NB_NH_BS_TWO_HS is heads-outermost and would need its own offset case;
+  // not wired here — CB v3 only routes the NHD-packed layout.)
   else if constexpr (format == EngineKVFormat::NL_X_NB_BS_HS ||
-                     format == EngineKVFormat::NL_X_NBBS_ONE_HS) {
+                     format == EngineKVFormat::NL_X_NBBS_ONE_HS ||
+                     format == EngineKVFormat::NL_X_NB_BS_NH_TWO_HS) {
     return token_idx * scalars_per_token + scalar_offset;
   }
   // vllm flash attention (HND) — physical: [2, NB, NH, BS, HS]
@@ -543,7 +550,15 @@ void multi_layer_kv_transfer_templated(
   lmc::check_block_size(engine_kv_format, block_size);
   lmc::check_head_size(engine_kv_format, head_size_xword);
 
-  int k_or_v_size = ::is_mla(engine_kv_format) ? 1 : 2;
+  // Fused-K/V packed layouts (NL_X_NB_BS_NH_TWO_HS: [NB, BS, NH, 2*HS]) carry
+  // a single fused K/V axis like MLA — the source key_value has size(0) == 1,
+  // so the K/V grid dim must iterate once (k_or_v == 1 would read past the
+  // source and write the paged slot twice).
+  int k_or_v_size =
+      (::is_mla(engine_kv_format) ||
+       engine_kv_format == EngineKVFormat::NL_X_NB_BS_NH_TWO_HS)
+          ? 1
+          : 2;
 
   dim3 grid(num_transfer_tokens, num_layers, k_or_v_size);
   dim3 block(std::min(num_xwords, 128));
@@ -578,6 +593,10 @@ void multi_layer_kv_transfer_templated(
         LAUNCH_KERNEL_WITH_FORMAT(T, false,
                                   EngineKVFormat::NL_X_NB_TWO_NH_BS_HS);
         break;
+      case EngineKVFormat::NL_X_NB_BS_NH_TWO_HS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, false,
+                                  EngineKVFormat::NL_X_NB_BS_NH_TWO_HS);
+        break;
       default:
         throw std::runtime_error("Unsupported EngineKVFormat");
     }
@@ -607,6 +626,10 @@ void multi_layer_kv_transfer_templated(
       case EngineKVFormat::NL_X_NB_TWO_NH_BS_HS:
         LAUNCH_KERNEL_WITH_FORMAT(T, true,
                                   EngineKVFormat::NL_X_NB_TWO_NH_BS_HS);
+        break;
+      case EngineKVFormat::NL_X_NB_BS_NH_TWO_HS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, true,
+                                  EngineKVFormat::NL_X_NB_BS_NH_TWO_HS);
         break;
       default:
         throw std::runtime_error("Unsupported EngineKVFormat");

@@ -320,6 +320,9 @@ def generate_kv_cache_paged_list_tensors(
         elif engine_kv_format == lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS:
             # blocks-first, K/V fused into the trailing dim
             shape = [num_blocks, num_heads, block_size, 2, head_size]
+        elif engine_kv_format == lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS:
+            # NHD blocks-first, K/V fused into the trailing dim
+            shape = [num_blocks, block_size, num_heads, 2, head_size]
         else:
             raise ValueError(f"Unsupported engine_kv_format: {engine_kv_format}")
 
@@ -569,6 +572,20 @@ def check_paged_kv_cache_equal(
                 .contiguous()
                 .reshape(-1, num_heads, head_size)
             )
+
+            assert left_k.shape[0] >= num_tokens
+            assert (left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
+            assert (left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
+
+    elif engine_kv_format == lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS:
+        # NHD fused K/V: [num_blocks, block_size, num_heads, 2, head_size].
+        # Split the trailing pair into K (index 0) and V (index 1) per head.
+        num_tokens = slot_mapping.shape[0]
+        for left_kv_layer, right_kv_layer in zip(left, right, strict=True):
+            left_k = left_kv_layer[:, :, :, 0, :].reshape(-1, num_heads, head_size)
+            left_v = left_kv_layer[:, :, :, 1, :].reshape(-1, num_heads, head_size)
+            right_k = right_kv_layer[:, :, :, 0, :].reshape(-1, num_heads, head_size)
+            right_v = right_kv_layer[:, :, :, 1, :].reshape(-1, num_heads, head_size)
 
             assert left_k.shape[0] >= num_tokens
             assert (left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
