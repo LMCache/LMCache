@@ -14,6 +14,7 @@ import torch
 import zmq
 
 # First Party
+from lmcache import torch_dev
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
 from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
@@ -34,7 +35,7 @@ from lmcache.v1.multiprocess.transfer_context import (
     create_transfer_context,
 )
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
-from lmcache.v1.platform import _registry as platform_registry
+from lmcache.v1.platform import resolve_kv_wrapper_factory
 
 logger = init_logger(__name__)
 
@@ -130,6 +131,8 @@ def _resolve_extra_config(
 class _IpcEvent(Protocol):
     def ipc_handle(self) -> Any: ...
 
+    def wait(self, stream: Any = None) -> None: ...
+
 
 def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
     # Emit a per-layer (name, shape, dtype) summary so the operator can
@@ -192,7 +195,7 @@ def wrap_one_kv_cache(tensor: torch.Tensor) -> Any:
     this call site stays free of if/elif chains and new accelerators
     plug in by shipping a sibling wrapper class.
     """
-    return platform_registry.get_kv_wrapper_factory(tensor.device.type)(tensor)
+    return resolve_kv_wrapper_factory(tensor.device.type)(tensor)
 
 
 def send_lmcache_request(
@@ -1396,6 +1399,9 @@ class LMCacheMPWorkerAdapter:
         """
         self._ensure_heartbeat_started()
 
+        if not self.is_kv_writer:
+            return
+
         if not self.is_healthy:
             return
 
@@ -1693,6 +1699,25 @@ class LMCacheMPWorkerAdapter:
         errors = self.error_block_ids.copy()
         self.error_block_ids.clear()
         return errors
+
+    def handle_preemptions(self, need_flush_before_forward: bool) -> None:
+        """Handle worker-side preemption hints from connector metadata.
+
+        When ``need_flush_before_forward`` is true, synchronize deferred
+        engine-driven gather work before the next forward pass can overwrite
+        paged KV blocks.
+
+        Args:
+            need_flush_before_forward: When True, flush in-flight gather
+                operations on the transfer context. When False, this is a no-op.
+        """
+        if not need_flush_before_forward:
+            return
+        if not self.is_healthy or self.transfer_ctx is None:
+            return
+        self.transfer_ctx.flush_inflight_stores()
+        # Force device sync here, compare to preemption, perf panelty is trivial
+        torch_dev.synchronize()
 
     def shutdown(self) -> None:
         """

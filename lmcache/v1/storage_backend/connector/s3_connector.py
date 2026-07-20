@@ -218,8 +218,8 @@ class S3Connector(RemoteConnector):
         if got["err"] or got["status"] != 200:
             if got["status"] != 404:  # Don't warn for 404, it's expected
                 logger.warning(
-                    "Encountering error in S3 HEAD request "
-                    f"with error code: {got['status']}"
+                    "Encountering error in S3 HEAD request with error code: %s",
+                    got["status"],
                 )
             return 0
         return got["len"] if got["len"] is not None else 0
@@ -268,8 +268,8 @@ class S3Connector(RemoteConnector):
         if got["err"] or got["status"] != 200:
             if got["status"] != 404:  # Don't warn for 404, it's expected
                 logger.warning(
-                    "Encountering error in S3 HEAD request "
-                    f"with error code: {got['status']}"
+                    "Encountering error in S3 HEAD request with error code: %s",
+                    got["status"],
                 )
             return 0
         return got["len"] if got["len"] is not None else 0
@@ -342,7 +342,7 @@ class S3Connector(RemoteConnector):
         # Circuit breaker: if connection is disabled, return None immediately
         if self.connection_disabled:
             logger.debug(
-                f"S3 connection disabled. Skipping download for {key.to_string()}"
+                "S3 connection disabled. Skipping download for %s", key.to_string()
             )
             return None
 
@@ -369,10 +369,13 @@ class S3Connector(RemoteConnector):
         # Check if stored size matches expected size
         if obj_size != memory_obj.get_size():
             logger.error(
-                f"Size mismatch for {key_str}: S3 has {obj_size} bytes, "
-                f"but current config expects {memory_obj.get_size()} bytes. "
-                f"This usually means the data was stored with different chunk_size "
-                f"or model configuration. Please use matching config or clear S3."
+                "Size mismatch for %s: S3 has %s bytes, "
+                "but current config expects %s bytes. "
+                "This usually means the data was stored with different chunk_size "
+                "or model configuration. Please use matching config or clear S3.",
+                key_str,
+                obj_size,
+                memory_obj.get_size(),
             )
             memory_obj.ref_count_down()
             return None
@@ -409,8 +412,8 @@ class S3Connector(RemoteConnector):
         # Circuit breaker: if connection is disabled, return all None
         if self.connection_disabled:
             logger.debug(
-                f"S3 connection disabled. "
-                f"Skipping batched download for {len(keys)} keys"
+                "S3 connection disabled. Skipping batched download for %s keys",
+                len(keys),
             )
             return [None] * len(keys)
 
@@ -444,9 +447,12 @@ class S3Connector(RemoteConnector):
             # Check if stored size matches expected size
             if obj_size != memory_obj.get_size():
                 logger.error(
-                    f"Size mismatch for {key_str}: S3 has {obj_size} bytes, "
-                    f"but current config expects {memory_obj.get_size()} bytes. "
-                    f"Skipping this key."
+                    "Size mismatch for %s: S3 has %s bytes, "
+                    "but current config expects %s bytes. "
+                    "Skipping this key.",
+                    key_str,
+                    obj_size,
+                    memory_obj.get_size(),
                 )
                 memory_obj.ref_count_down()
                 memory_objs.append(None)
@@ -478,7 +484,9 @@ class S3Connector(RemoteConnector):
                 if not is_connection_error:
                     # Log non-connection errors
                     logger.error(
-                        f"Failed to download key at index {memobj_idx}: {error_msg}"
+                        "Failed to download key at index %s: %s",
+                        memobj_idx,
+                        error_msg,
                     )
                 # Release the memory object for failed download
                 memobj = memory_objs[memobj_idx]
@@ -541,8 +549,9 @@ class S3Connector(RemoteConnector):
         # Circuit breaker: if connection is disabled, just log and return
         if self.connection_disabled:
             logger.debug(
-                f"S3 connection disabled due to repeated failures. "
-                f"Skipping upload for {key.to_string()}"
+                "S3 connection disabled due to repeated failures. "
+                "Skipping upload for %s",
+                key.to_string(),
             )
             return
 
@@ -551,9 +560,12 @@ class S3Connector(RemoteConnector):
         # Check if the chunk size matches expected S3 part size
         if memory_obj.get_physical_size() != self.s3_part_size:
             logger.error(
-                f"Cannot upload {key_str}: chunk size {memory_obj.get_physical_size()} "
-                f"bytes does not match S3 part size {self.s3_part_size} bytes. "
-                f"Partial/unfull chunks are not supported."
+                "Cannot upload %s: chunk size %s "
+                "bytes does not match S3 part size %s bytes. "
+                "Partial/unfull chunks are not supported.",
+                key_str,
+                memory_obj.get_physical_size(),
+                self.s3_part_size,
             )
             return
 
@@ -674,17 +686,19 @@ class S3Connector(RemoteConnector):
         if is_connection_error:
             self.connection_failures += 1
             logger.error(
-                f"S3 connection error ({self.connection_failures}/"
-                f"{self.max_connection_failures}): {error_msg}"
+                "S3 connection error (%s/%s): %s",
+                self.connection_failures,
+                self.max_connection_failures,
+                error_msg,
             )
 
             if self.connection_failures >= self.max_connection_failures:
                 self.connection_disabled = True
                 logger.error(
-                    f"S3 connection disabled after "
-                    f"{self.max_connection_failures} "
-                    f"consecutive failures. "
-                    f"All future S3 operations will be skipped."
+                    "S3 connection disabled after %s "
+                    "consecutive failures. "
+                    "All future S3 operations will be skipped.",
+                    self.max_connection_failures,
                 )
 
         return is_connection_error

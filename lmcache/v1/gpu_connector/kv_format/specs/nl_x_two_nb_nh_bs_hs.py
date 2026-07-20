@@ -35,6 +35,9 @@ class NL_X_TWO_NB_NH_BS_HS_Spec(KVFormatSpec):
     def page_buffer_size(self) -> int:
         return self.kv_caches[0].shape[1] * self.kv_caches[0].shape[3]
 
+    def kv_size(self) -> int:
+        return 2
+
     def num_heads(self, layer_idx: int = 0) -> int:
         return self.kv_caches[layer_idx].shape[2]
 

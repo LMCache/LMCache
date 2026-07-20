@@ -5,11 +5,12 @@
 allocator (vLLM default).  :class:`RawCudaIPCWrapper` handles tensors
 allocated outside PyTorch (e.g. TRT-LLM's ``cudaMalloc``'d pool).
 
-Both carry ``device_type = "cuda"`` so
-:func:`~lmcache.v1.platform._registry._discover_wrappers_once` can
-index them; :class:`RawCudaIPCWrapper` sets ``_is_default_wrapper =
-False`` so only :class:`CudaIPCWrapper` auto-registers as the default
-factory.
+:class:`CudaIPCWrapper` is bound to ``device_type="cuda"`` via
+:attr:`~lmcache.v1.platform.cuda.CudaDeviceSpec.ipc_wrapper_cls`, so the
+multiprocess adapter dispatches to it via
+:func:`~lmcache.v1.platform.resolve_kv_wrapper_factory`.
+:class:`RawCudaIPCWrapper` is not exposed on the spec -- callers (the
+TRT-LLM adapter) instantiate it directly.
 """
 
 # Future
@@ -27,17 +28,14 @@ from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
 
 
 class CudaIPCWrapper(DeviceIPCWrapper):
-    #: ``torch.device.type`` this wrapper handles (used by auto-discovery).
+    #: ``torch.device.type`` this wrapper handles. Kept as a class-level
+    #: constant so external tooling / tests can introspect the binding.
     device_type: ClassVar[str] = "cuda"
-
-    #: Marked ``True`` so auto-discovery picks this as the default
-    #: factory for ``"cuda"``.
-    _is_default_wrapper: ClassVar[bool] = True
 
     @classmethod
     def wrap(cls, tensor: torch.Tensor) -> "CudaIPCWrapper":
         """Factory used by
-        :func:`~lmcache.v1.platform._registry._discover_wrappers_once`.
+        :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory`.
 
         Args:
             tensor: A CUDA tensor backed by PyTorch's caching allocator.
@@ -112,11 +110,10 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
     dispatches correctly.
     """
 
-    #: Same ``torch.device.type`` as ``CudaIPCWrapper``, but
-    #: ``_is_default_wrapper = False`` so auto-discovery skips this
-    #: class — callers (TRT-LLM adapter) instantiate it directly.
+    #: Same ``torch.device.type`` as ``CudaIPCWrapper``, but not exposed
+    #: on :attr:`~lmcache.v1.platform.cuda.CudaDeviceSpec.ipc_wrapper_cls`
+    #: -- callers (TRT-LLM adapter) instantiate it directly.
     device_type: ClassVar[str] = "cuda"
-    _is_default_wrapper: ClassVar[bool] = False
 
     def __init__(self, tensor: torch.Tensor) -> None:
         # First Party

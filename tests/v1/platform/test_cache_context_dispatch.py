@@ -5,11 +5,12 @@
 
 The facade routes by the ``torch.device.type`` reported by the
 wrappers' ``to_tensor()`` output and looks up the registered cache
-context class via :mod:`lmcache.v1.platform._registry`. These tests
+context class via :mod:`lmcache.v1.platform.cache_context`. These tests
 exercise that dispatch without touching CUDA or the real
 ``GPUCacheContext`` / ``CPUCacheContext`` constructors -- they
-install fake classes in the registry through ``snapshot``/``restore``
-so the test stays platform-agnostic.
+install fake classes in the backend table through
+``snapshot_backends``/``restore_backends`` so the test stays
+platform-agnostic.
 """
 
 # Standard
@@ -58,6 +59,7 @@ class _FakeContext(BaseCacheContext):
         engine_group_infos: Any,
         engine_type: Any,
         separate_object_groups: bool = True,
+        full_sw_kv: bool = False,
     ) -> None:
         # Skip ``BaseCacheContext.__init__`` -- it requires real
         # KVLayerGroupsManager / shape descriptors that are out of
@@ -68,6 +70,7 @@ class _FakeContext(BaseCacheContext):
         self.engine_group_infos = engine_group_infos
         self.engine_type = engine_type
         self.separate_object_groups = separate_object_groups
+        self.full_sw_kv = full_sw_kv
 
     # ------------------------------------------------------------------
     # Abstract stubs -- never called from these tests.

@@ -72,7 +72,7 @@ steps:
   - group: ":compression: Multiprocess (1-GPU)"
     if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
     steps:
-      - label: ":compression: lm_eval"
+      - label: ":compression: lm_eval_lmcache_driven"
         command: .buildkite/k3_tests/multiprocess/run.sh lm_eval
         timeout_in_minutes: 30
         retry: *flaky-retry
@@ -110,7 +110,7 @@ steps:
         agents: { queue: "k8s" }
         plugins:
           - kubernetes:
-              podSpec:
+              podSpec: &pod-1gpu-dshm
                 containers:
                   - name: container-0
                     image: lmcache/ci-base:latest
@@ -122,6 +122,36 @@ steps:
                 volumes:
                   - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
                   - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 128Gi } }
+        artifact_paths: ["*.log"]
+
+      # Preemption correctness: GPU_MEMORY_UTILIZATION=0.4 forces the KV cache
+      # pool small enough that vLLM preempts in-flight requests under concurrent
+      # lm_eval load. Both steps reuse the same run.sh lm_eval_preemption
+      # command; env vars select the transfer mode. Checks: no crash, score
+      # drift < 0.01, preemption actually occurred, score >= SCORE_MIN.
+      - label: ":compression: lm_eval_preemption / {{matrix.mode}}"
+        command: |
+          case "{{matrix.mode}}" in
+            lmcache_driven) ;;
+            engine_driven)
+              export LMCACHE_MP_TRANSFER_MODE="engine_driven"
+              export L1_USE_LAZY="false"
+              ;;
+          esac
+          .buildkite/k3_tests/multiprocess/run.sh lm_eval_preemption
+        matrix:
+          setup:
+            mode:
+              - "lmcache_driven"
+              - "engine_driven"
+        timeout_in_minutes: 30
+        env:
+          GPU_MEMORY_UTILIZATION: "0.4"
+          NUM_CONCURRENT: "256"
+          MAX_MODEL_LEN: "4096"
+          MAX_WAIT_SECONDS: "600"
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu-dshm } }]
         artifact_paths: ["*.log"]
 
       # HMA correctness check on google/gemma-4-31B-it (a hybrid model whose KV
@@ -202,62 +232,26 @@ steps:
   - group: ":compression: Multiprocess (CPU-only)"
     if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
     steps:
-      - label: ":compression: cpu_e2e_validation (shm)"
-        command: bash .github/scripts/run-cpu-e2e-validation.sh
-        timeout_in_minutes: 30
-        agents: { queue: "k8s" }
-        plugins:
-          - kubernetes:
-              podSpec:
-                containers:
-                  - name: container-0
-                    image: lmcache/ci-base:latest
-                    imagePullPolicy: Never
-                    resources:
-                      requests:
-                        cpu: "8"
-                        memory: "256Gi"
-                      limits:
-                        cpu: "8"
-                        memory: "256Gi"
-                    volumeMounts:
-                      - { name: hf-cache, mountPath: /root/.cache/huggingface }
-                      - { name: dshm, mountPath: /dev/shm }
-                volumes:
-                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
-                  - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 4Gi } }
-
-      - label: ":compression: cpu_e2e_validation (pickle)"
-        command: bash .github/scripts/run-cpu-e2e-validation.sh
-        env:
-          LMCACHE_SHM_NAME: ""
-        timeout_in_minutes: 30
-        agents: { queue: "k8s" }
-        plugins:
-          - kubernetes:
-              podSpec:
-                containers:
-                  - name: container-0
-                    image: lmcache/ci-base:latest
-                    imagePullPolicy: Never
-                    resources:
-                      requests:
-                        cpu: "8"
-                        memory: "256Gi"
-                      limits:
-                        cpu: "8"
-                        memory: "256Gi"
-                    volumeMounts:
-                      - { name: hf-cache, mountPath: /root/.cache/huggingface }
-                      - { name: dshm, mountPath: /dev/shm }
-                volumes:
-                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
-                  - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 4Gi } }
-
-      - label: ":compression: cpu_e2e_validation (server-side copy)"
-        command: bash .github/scripts/run-cpu-e2e-validation.sh
-        env:
-          LMCACHE_MP_TRANSFER_MODE: "lmcache_driven"
+      # Note: LMCACHE_SHM_NAME uses `${VAR-default}` (not `:-`) in the
+      # runner script, so an empty string ("") is meaningful and differs
+      # from unset. `__default__` is the sentinel meaning "shm mode".
+      - label: ":compression: cpu_e2e_validation ({{matrix.mode}})"
+        # matrix.adjustments does not support `env:` in Buildkite. Instead
+        # we branch on {{matrix.mode}} inside the command to set the
+        # per-mode env before invoking the shared runner script.
+        command: |
+          case "{{matrix.mode}}" in
+            shm) ;;  # rely on script defaults (engine-driven + shm transport)
+            pickle) export LMCACHE_SHM_NAME="" ;;
+            server_copy) export LMCACHE_MP_TRANSFER_MODE="lmcache_driven" ;;
+          esac
+          bash .github/scripts/run-cpu-e2e-validation.sh
+        matrix:
+          setup:
+            mode:
+              - "shm"
+              - "pickle"
+              - "server_copy"
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins:

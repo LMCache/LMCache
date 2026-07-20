@@ -770,10 +770,12 @@ class TestFailureEventProduction:
 
             # Allow drain thread to deliver the event.
             assert wait_for_condition(
-                lambda: len(
-                    _events_of_type(captured_events, EventType.L1_ALLOCATION_FAILED)
-                )
-                >= 1,
+                lambda: (
+                    len(
+                        _events_of_type(captured_events, EventType.L1_ALLOCATION_FAILED)
+                    )
+                    >= 1
+                ),
                 timeout=2.0,
             )
 
@@ -821,8 +823,9 @@ class TestFailureEventProduction:
                 assert objs is None  # all_good=False because middle key is gone
 
             assert wait_for_condition(
-                lambda: len(_events_of_type(captured_events, EventType.L1_READ_FAILED))
-                >= 1,
+                lambda: (
+                    len(_events_of_type(captured_events, EventType.L1_READ_FAILED)) >= 1
+                ),
                 timeout=2.0,
             )
 
@@ -902,3 +905,43 @@ class TestStorageManagerSparsePrefetch:
 
         sm.finish_read_prefetched(existing)
         sm.close()
+
+
+class TestStorageManagerDelete:
+    """Tests for StorageManager.delete_l1_keys()."""
+
+    def test_delete_counts_deleted_and_missing(
+        self, basic_storage_manager_config, basic_layout
+    ):
+        """delete_l1_keys reports deleted keys; missing keys are a no-op."""
+        storage_manager = StorageManager(basic_storage_manager_config)
+
+        resident = make_object_key(1)
+        missing = make_object_key(2)
+        storage_manager.reserve_write([resident], basic_layout, mode="new")
+        storage_manager.finish_write([resident])
+
+        assert storage_manager.delete_l1_keys([resident, missing]) == (1, 0)
+        assert storage_manager._l1_manager.get_object_state(resident) is None
+
+        storage_manager.close()
+
+    def test_delete_non_force_skips_locked_force_removes(
+        self, basic_storage_manager_config, basic_layout
+    ):
+        """A locked key is skipped by non-force delete and removed by force."""
+        storage_manager = StorageManager(basic_storage_manager_config)
+
+        # Reserve write without finishing -> the key is write-locked.
+        key = make_object_key(1)
+        storage_manager.reserve_write([key], basic_layout, mode="new")
+
+        # Non-force delete refuses the locked key; it survives.
+        assert storage_manager.delete_l1_keys([key]) == (0, 1)
+        assert storage_manager._l1_manager.get_object_state(key) is not None
+
+        # Force delete removes it regardless of the lock.
+        assert storage_manager.delete_l1_keys([key], force=True) == (1, 0)
+        assert storage_manager._l1_manager.get_object_state(key) is None
+
+        storage_manager.close()

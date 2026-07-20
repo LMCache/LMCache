@@ -13,6 +13,8 @@ import zmq
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
+from lmcache.usage_telemetry.mp import InitializeMPUsageContext
+from lmcache.usage_telemetry.mp_continuous import InitializeMPContinuousUsage
 from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     add_storage_manager_args,
@@ -344,15 +346,22 @@ def run_cache_server(
                 )
                 mem_cfg.shm_name = ""
 
+    # blend engine: single object group + full per-chunk SWA KV
+    is_blend = mp_config.engine_type == "blend"
+
     ctx = MPCacheServerContext(
         storage_manager_config=storage_manager_config,
         chunk_size=mp_config.chunk_size,
         hash_algorithm=mp_config.hash_algorithm,
-        separate_object_groups=mp_config.separate_object_groups,
+        separate_object_groups=mp_config.separate_object_groups and not is_blend,
+        full_sw_kv=is_blend,
     )
 
     modules = _build_modules(ctx, mp_config, coordinator_config)
     engine = MPCacheServer(ctx, modules)
+
+    InitializeMPUsageContext(mp_config, storage_manager_config)
+    InitializeMPContinuousUsage(event_bus, mp_config.chunk_size)
 
     zmq_context = zmq.Context.instance()
     server = MessageQueueServer(
