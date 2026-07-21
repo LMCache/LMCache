@@ -178,6 +178,7 @@ class _FakeS3Request:
         **kwargs,
     ):
         self.finished_future: ConcurrentFuture = ConcurrentFuture()
+        self.request = request
 
         # Extract method + path from the HttpRequest
         method = request.method
@@ -190,7 +191,7 @@ class _FakeS3Request:
         if (
             method == "GET"
             and operation_name == "ListObjectsV2"
-            and path.startswith("/?")
+            and (path.startswith("/?") or "/?" in path)
         ):
             prefix, max_keys, cont = _parse_list_query(path)
             xml = _build_list_objects_v2_response(_BACKEND, prefix, max_keys, cont)
@@ -727,6 +728,9 @@ class TestConfig:
                 "s3_prefer_http2": False,
                 "s3_enable_s3express": True,
                 "disable_tls": True,
+                "s3_addressing_style": "path",
+                "s3_bucket": "my-bucket",
+                "s3_ca_bundle": "/certs/ca.pem",
                 "aws_access_key_id": "id",
                 "aws_secret_access_key": "secret",
                 "max_capacity_gb": 2.5,
@@ -738,6 +742,9 @@ class TestConfig:
         assert cfg.s3_prefer_http2 is False
         assert cfg.s3_enable_s3express is True
         assert cfg.disable_tls is True
+        assert cfg.s3_addressing_style == "path"
+        assert cfg.s3_bucket == "my-bucket"
+        assert cfg.s3_ca_bundle == "/certs/ca.pem"
         assert cfg.aws_access_key_id == "id"
         assert cfg.aws_secret_access_key == "secret"
         assert cfg.max_capacity_gb == 2.5
@@ -745,6 +752,48 @@ class TestConfig:
     def test_help_nonempty(self):
         assert isinstance(S3L2AdapterConfig.help(), str)
         assert "s3_endpoint" in S3L2AdapterConfig.help()
+
+
+    def test_path_style_requires_bucket(self):
+        with pytest.raises(ValueError, match="s3_bucket"):
+            S3L2AdapterConfig.from_dict(
+                {
+                    "s3_endpoint": "s3.example.test",
+                    "s3_region": "us-east-1",
+                    "s3_addressing_style": "path",
+                }
+            )
+
+    def test_rejects_unknown_addressing_style(self):
+        with pytest.raises(ValueError, match="s3_addressing_style"):
+            S3L2AdapterConfig.from_dict(
+                {
+                    "s3_endpoint": "s3://bucket",
+                    "s3_region": "us-east-1",
+                    "s3_addressing_style": "invalid",
+                }
+            )
+
+
+def test_path_style_uses_service_host_bucket_prefix_and_bucket_root():
+    """Path-style requests address objects and ListObjectsV2 under the bucket."""
+    config = S3L2AdapterConfig(
+        s3_endpoint="s3.example.test",
+        s3_region="us-east-1",
+        s3_addressing_style="path",
+        s3_bucket="path-bucket",
+        s3_prefer_http2=False,
+        s3_num_io_threads=1,
+    )
+    adapter = S3L2Adapter(config)
+    try:
+        request = adapter._make_request("GET", "object@key")
+        assert request.path == "/path-bucket/object%40key"
+
+        s3_request, _body_chunks, _captured = adapter._list_request(None, 100, None)
+        assert s3_request.request.path.startswith("/path-bucket/?list-type=2")
+    finally:
+        adapter.close()
 
 
 # =============================================================================
