@@ -62,11 +62,7 @@ xpu_only_signal_patterns = [
 shared_xpu_capable_tests = {
   "tests/benchmarks/test_cachegen.py",
   "tests/test_serde.py",
-  "tests/v1/gpu_connector/test_kv_format_detection.py",
-  "tests/v1/gpu_connector/test_normalize_per_layer_formats.py",
   "tests/v1/multiprocess/test_engine_driven_transfer.py",
-  "tests/v1/test_ec_connector.py",
-  "tests/v1/test_memory_allocator_import_surface.py",
   "tests/v1/test_python_ops_fallback.py",
 }
 blacklist_raw = os.environ.get(
