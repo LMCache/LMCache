@@ -673,7 +673,8 @@ class TestStorageManagerL2Prefetch:
         # All keys reach L2; delete key 1 from L1 so it is L2-only.
         self._write_keys_and_wait_for_l2(sm, all_keys, basic_layout)
         time.sleep(0.05)
-        sm._l1_manager.delete([all_keys[1]])
+        deleted, skipped = sm.delete_l1_keys([all_keys[1]])
+        assert (deleted, skipped) == (1, 0)
 
         handle = sm.submit_prefetch_task(
             all_keys, basic_layout, policy=TrimPolicy.SPARSE, skip_l2=True

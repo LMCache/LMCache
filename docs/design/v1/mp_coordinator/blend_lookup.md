@@ -167,8 +167,9 @@ a synchronous `httpx.Client` plus a daemon, mirroring the module's existing
     `np.frombuffer` straight to the matcher's array. Register still ships raw
     tokens as JSON (lower frequency).
 
-Opt-in via the coordinator URL `--coordinator-url`
-every publish/query path is skipped (behavior unchanged).
+Opt-in via the coordinator URL (`--coordinator-url`, falling back to
+`LMCACHE_COORDINATOR_URL` at config parsing); unset → the module receives
+`None` and every publish/query path is skipped (behavior unchanged).
 
 ## Lookup flow in `cb_unified_lookup`
 

@@ -205,17 +205,22 @@ class BlendCoordinatorClient:
             self._client.close()
 
     @classmethod
-    def maybe_create(cls, url: str) -> "BlendCoordinatorClient | None":
+    def maybe_create(cls, url: str | None) -> "BlendCoordinatorClient | None":
         """Build a started client for ``url``; an empty URL returns ``None``.
 
+        Timing knobs are read from the environment:
+        ``LMCACHE_COORDINATOR_BLEND_TIMEOUT`` (seconds, default 1.0; used as
+        both the per-request HTTP timeout and the per-lookup match budget) and
+        ``LMCACHE_COORDINATOR_BLEND_MATCH_CONCURRENCY`` (default 8).
+
         Args:
-            url: Coordinator base URL; empty disables the client.
+            url: Coordinator base URL; empty or ``None`` disables the client.
 
         Returns:
             A started client, or ``None`` when ``url`` is empty (the blend
             module then runs purely local).
         """
-        url = url.strip()
+        url = (url or "").strip()
         if not url:
             return None
         concurrency = int(os.getenv("LMCACHE_COORDINATOR_BLEND_MATCH_CONCURRENCY", "8"))
