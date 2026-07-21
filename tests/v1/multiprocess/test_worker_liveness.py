@@ -39,8 +39,6 @@ def _bare_gpu_module() -> LMCacheDrivenTransferModule:
     """
     module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
     module._ctx = MagicMock(name="ctx")
-    # Stock L1: skip the maru pool bring-up hook in register_kv_cache.
-    module._ctx.storage_manager.requires_kv_layout_registration = False
     module._cache_contexts = {}
     module._lock = threading.Lock()
     return module

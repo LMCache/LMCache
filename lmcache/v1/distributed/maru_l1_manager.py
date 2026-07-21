@@ -58,6 +58,7 @@ from lmcache.v1.distributed.l1_manager import (
 from lmcache.v1.distributed.memory_manager.maru_memory_allocator import (
     MaruMemoryAllocator,
 )
+from lmcache.v1.gpu_connector.utils import is_mla
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
@@ -67,6 +68,9 @@ if TYPE_CHECKING:
     # Third Party
     from maru import MaruHandler
     from maru_handler.memory import MemoryInfo
+
+    # First Party
+    import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
@@ -1173,15 +1177,24 @@ class MaruL1Manager:
         self,
         shapes: list[torch.Size],
         dtypes: list[torch.dtype],
-        fmt: MemoryFormat,
+        engine_kv_format: "lmc_ops.EngineKVFormat",
         chunk_size_in_tokens: int,
     ) -> None:
         """Bind the KV layout, bringing up the CXL pool (idempotent per layout).
 
+        Maps the engine's KV format to the maru memory format here (MLA
+        layouts store as KV_MLA_FMT, everything else as KV_2LTD) so engine-
+        side callers forward the raw format without touching the probe.
+
         Args:
             shapes: Per-group tensor shapes of one chunk.
             dtypes: Per-group dtypes of one chunk.
-            fmt: The KV memory format.
+            engine_kv_format: The engine's KV format for the layout.
             chunk_size_in_tokens: Tokens per chunk.
         """
+        fmt = (
+            MemoryFormat.KV_MLA_FMT
+            if is_mla(engine_kv_format)
+            else MemoryFormat.KV_2LTD
+        )
         self._allocator.init_layout(shapes, dtypes, fmt, chunk_size_in_tokens)

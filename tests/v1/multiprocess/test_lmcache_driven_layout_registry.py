@@ -31,6 +31,10 @@ class _FakeGPUContext:
     num_layers: int = 2
     kv_layer_groups_manager: _FakeKVLayerGroupsManager = _FakeKVLayerGroupsManager()
 
+    def get_engine_kv_format(self, object_group_id: int) -> object:
+        """Return a sentinel engine KV format (forwarded, never dereferenced)."""
+        return object()
+
     def close(self) -> None:
         """No-op teardown (real GPUCacheContext.close deregisters its GDS buffer)."""
 
@@ -86,8 +90,6 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
     ctx = MagicMock()
     ctx.chunk_size = 16
     ctx.layout_desc_registry = LayoutDescRegistry()
-    # Stock L1: the maru pool bring-up hook must be skipped entirely.
-    ctx.storage_manager.requires_kv_layout_registration = False
 
     def fake_create_cache_context(
         kv_caches: object,

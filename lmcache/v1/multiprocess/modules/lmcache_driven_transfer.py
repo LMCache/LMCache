@@ -28,9 +28,9 @@ from lmcache.v1.gpu_connector.gpu_ops import (
     lmcache_memcpy_async_d2h,
     lmcache_memcpy_async_h2d,
 )
-from lmcache.v1.gpu_connector.utils import LayoutHints, is_mla
+from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
-from lmcache.v1.memory_management import GDSMemoryObject, MemoryFormat, MemoryObj
+from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
@@ -890,28 +890,23 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             model_name, world_size, layout_desc, attn_desc
         )
 
-        # Bring up the maru CXL pool now that the KV layout is known. Skipped
-        # entirely (including the format probe) for the stock L1 backend;
-        # maru's register_kv_layout is idempotent across instances.
-        if self._ctx.storage_manager.requires_kv_layout_registration:
-            fmt = (
-                MemoryFormat.KV_MLA_FMT
-                if is_mla(cache_context.get_engine_kv_format(0))
-                else MemoryFormat.KV_2LTD
+        # Bring up the maru CXL pool now that the KV layout is known; a no-op
+        # for the stock L1 backend. The raw engine format is forwarded as-is
+        # (maru maps it to its memory format internally) so this hook carries
+        # no maru-conditional logic. Idempotent across instances.
+        try:
+            self._ctx.storage_manager.register_kv_layout(
+                layout_desc,
+                cache_context.get_engine_kv_format(0),
+                self._ctx.chunk_size,
+                attn_desc.num_object_groups,
             )
-            try:
-                self._ctx.storage_manager.register_kv_layout(
-                    layout_desc,
-                    fmt,
-                    self._ctx.chunk_size,
-                    attn_desc.num_object_groups,
-                )
-            except Exception:
-                # e.g. maru rejects >1 object group -- drop the context we
-                # just built so the instance is not left half-registered,
-                # then surface the error on the REGISTER path.
-                cache_context.close()
-                raise
+        except Exception:
+            # e.g. maru rejects >1 object group -- drop the context we
+            # just built so the instance is not left half-registered,
+            # then surface the error on the REGISTER path.
+            cache_context.close()
+            raise
 
         with self._lock:
             self._cache_contexts[instance_id] = ContextEntry(

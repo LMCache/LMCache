@@ -5,9 +5,13 @@ Distributed multi-tier storage manager for MP mode
 
 # Standard
 from contextlib import contextmanager
-from typing import Iterator, Literal, Optional
+from typing import TYPE_CHECKING, Iterator, Literal, Optional
 import threading
 import time
+
+if TYPE_CHECKING:
+    # First Party
+    import lmcache.c_ops as lmc_ops
 
 # First Party
 from lmcache.logging import init_logger
@@ -51,7 +55,7 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
     create_store_policy,
 )
-from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
@@ -179,34 +183,25 @@ class StorageManager:
         )
 
     # External APIs for serving engine integration code to call
-    @property
-    def requires_kv_layout_registration(self) -> bool:
-        """Whether the engine must call register_kv_layout after KV registration.
-
-        True for the maru L1 tier, which defers pool creation until the KV
-        layout is known; False for stock L1, which sizes its pool from config
-        at construction. Callers should skip the register_kv_layout path
-        entirely (including any layout/format computation feeding it) when
-        this is False.
-        """
-        return isinstance(self._l1_manager, MaruL1Manager)
-
     def register_kv_layout(
         self,
         layout_desc: MemoryLayoutDesc,
-        fmt: MemoryFormat,
+        engine_kv_format: "lmc_ops.EngineKVFormat",
         chunk_size_in_tokens: int,
         num_object_groups: int,
     ) -> None:
         """Bind the KV layout to the L1 backend (maru CXL pool bring-up).
 
-        Stock L1 sizes its pool from config at construction and ignores this;
-        the maru L1 tier defers pool creation until the layout is known, so the
-        engine calls this once the KV cache is registered. A no-op for stock.
+        Stock L1 sizes its pool from config at construction, so this is a
+        silent no-op for it (``engine_kv_format`` is never dereferenced); the
+        maru L1 tier defers pool creation until the layout is known and maps
+        the engine format to its memory format internally. The engine calls
+        this unconditionally once the KV cache is registered.
 
         Args:
             layout_desc: Per-group chunk shapes and dtypes.
-            fmt: The KV memory format.
+            engine_kv_format: The engine's KV format for object group 0,
+                forwarded verbatim to the maru backend.
             chunk_size_in_tokens: Tokens per chunk.
             num_object_groups: Number of KV object groups in the layout.
 
@@ -214,7 +209,8 @@ class StorageManager:
             ValueError: The maru L1 tier supports a single object group only
                 (multi-model support is a maru TODO).
         """
-        # isinstance (not the property) so mypy narrows for the call below.
+        # isinstance narrowing: register_kv_layout is maru-only, not part of
+        # L1ManagerInterface.
         if not isinstance(self._l1_manager, MaruL1Manager):
             return
         if num_object_groups > 1:
@@ -223,7 +219,10 @@ class StorageManager:
                 f"{num_object_groups} (multi-model support is a maru TODO)"
             )
         self._l1_manager.register_kv_layout(
-            layout_desc.shapes, layout_desc.dtypes, fmt, chunk_size_in_tokens
+            layout_desc.shapes,
+            layout_desc.dtypes,
+            engine_kv_format,
+            chunk_size_in_tokens,
         )
 
     @enable_tracing()

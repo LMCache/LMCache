@@ -46,6 +46,7 @@ try:
     from lmcache.v1.distributed.storage_manager import StorageManager
     from lmcache.v1.memory_management import MemoryFormat
     from lmcache.v1.mp_observability.event import EventType
+    import lmcache.c_ops as lmc_ops
 
     # Local
     from .maru_fakes import (
@@ -839,3 +840,29 @@ def test_eviction_deletes_from_maru_directory():
         assert _wait(lambda: len(handler.store_map) < 6)
     finally:
         sm.close()
+
+
+# =========================================================================
+# register_kv_layout: engine format -> memory format mapping
+# =========================================================================
+
+
+def test_register_kv_layout_maps_engine_format_to_memory_format():
+    """MLA engine layouts bind as KV_MLA_FMT; everything else as KV_2LTD.
+
+    The mapping (and the pybind ``is_mla`` probe) lives here in the maru
+    backend so engine-side callers forward the raw engine format untouched.
+    """
+    manager, _, _ = make_maru_manager()
+    manager._allocator.init_layout = MagicMock()  # type: ignore[method-assign]
+    shapes, dtypes = [torch.Size([4, 8])], [torch.float16]
+
+    manager.register_kv_layout(shapes, dtypes, lmc_ops.EngineKVFormat.NL_X_NB_BS_HS, 16)
+    fmt = manager._allocator.init_layout.call_args.args[2]
+    assert fmt == MemoryFormat.KV_MLA_FMT
+
+    manager.register_kv_layout(
+        shapes, dtypes, lmc_ops.EngineKVFormat.NB_NL_TWO_BS_NH_HS, 16
+    )
+    fmt = manager._allocator.init_layout.call_args.args[2]
+    assert fmt == MemoryFormat.KV_2LTD

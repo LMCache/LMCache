@@ -246,6 +246,11 @@ with the pinned-DRAM / DevDax / GDS tiers):
 
 `register_kv_layout` binds the KV layout to the allocator (pool bring-up) on the
 first `register_kv_cache`; it is wired only on the `lmcache_driven` transfer path.
+The engine hook calls `StorageManager.register_kv_layout` unconditionally with the
+raw group-0 engine KV format — a silent no-op for the stock L1 backend, so the
+hook carries no maru-conditional logic (and never feeds mocked values into native
+code under test). The maru backend maps the engine format to its memory format
+internally (MLA layouts bind as `KV_MLA_FMT`, everything else as `KV_2LTD`).
 
 ### Startup guards
 

@@ -29,7 +29,6 @@ from lmcache.v1.distributed.l2_adapters.config import (
     L2AdaptersConfig,
 )
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
-from lmcache.v1.memory_management import MemoryFormat
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBusConfig, init_event_bus
 
@@ -940,7 +939,6 @@ class TestMaruL1Selection:
         sm = StorageManager(maru_storage_manager_config)
         try:
             assert isinstance(sm._l1_manager, MaruL1Manager)
-            assert sm.requires_kv_layout_registration
         finally:
             sm.close()
 
@@ -948,7 +946,6 @@ class TestMaruL1Selection:
         sm = StorageManager(basic_storage_manager_config)
         try:
             assert isinstance(sm._l1_manager, L1Manager)
-            assert not sm.requires_kv_layout_registration
         finally:
             sm.close()
 
@@ -959,11 +956,10 @@ class TestMaruL1Selection:
         try:
             # Spy the forward so the test needs no maru runtime (init_layout).
             sm._l1_manager.register_kv_layout = MagicMock()  # type: ignore[method-assign]
-            sm.register_kv_layout(
-                basic_layout, MemoryFormat.KV_MLA_FMT, 16, num_object_groups=1
-            )
+            engine_fmt = MagicMock(name="engine_kv_format")
+            sm.register_kv_layout(basic_layout, engine_fmt, 16, num_object_groups=1)
             sm._l1_manager.register_kv_layout.assert_called_once_with(
-                basic_layout.shapes, basic_layout.dtypes, MemoryFormat.KV_MLA_FMT, 16
+                basic_layout.shapes, basic_layout.dtypes, engine_fmt, 16
             )
         finally:
             sm.close()
@@ -975,7 +971,10 @@ class TestMaruL1Selection:
         try:
             with pytest.raises(ValueError):
                 sm.register_kv_layout(
-                    basic_layout, MemoryFormat.KV_MLA_FMT, 16, num_object_groups=2
+                    basic_layout,
+                    MagicMock(name="engine_kv_format"),
+                    16,
+                    num_object_groups=2,
                 )
         finally:
             sm.close()
@@ -986,9 +985,13 @@ class TestMaruL1Selection:
         sm = StorageManager(basic_storage_manager_config)
         try:
             # Stock sizes its pool at construction: this must be a silent no-op
-            # (no forward, no raise) even for a would-be-rejected group count.
+            # (no forward, no raise, format never dereferenced) even for a
+            # would-be-rejected group count.
             sm.register_kv_layout(
-                basic_layout, MemoryFormat.KV_MLA_FMT, 16, num_object_groups=2
+                basic_layout,
+                MagicMock(name="engine_kv_format"),
+                16,
+                num_object_groups=2,
             )
         finally:
             sm.close()
