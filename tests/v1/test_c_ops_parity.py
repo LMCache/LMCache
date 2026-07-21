@@ -24,7 +24,6 @@ import re
 import pytest
 
 # First Party
-from lmcache.v1.platform import ops_types
 from lmcache.v1.platform import torch_ops as fallback
 
 try:
@@ -211,19 +210,16 @@ def _has_real_names(params):
 # ── Discover the intersection automatically ──
 
 # Functions intentionally excluded from parity checks.
-_EXCLUDED_FUNCS: set[str] = set()
+# These are native-only with no torch fallback; call sites guard with hasattr.
+# NOTE: execute_object_group_transfer previously had a signature-only stub
+# (raised NotImplementedError unconditionally) — not a real fallback.
+_EXCLUDED_FUNCS: set[str] = {"execute_object_group_transfer"}
 
-# Plan types are native-only (no torch fallback); stubs in ops_types exist
-# only to expose the names on CPU builds.  Cross-check against ops_types so
-# any typo or removal is caught immediately.
+# Plan types (StagingCopy, LaunchVar, BatchStep, KernelGroupSpec)
+# are native-only with no torch fallback — auto-discovered by bind_native.
+# NOTE: these previously had signature-only stubs (raised NotImplementedError
+# unconditionally) — not real fallbacks.
 _EXCLUDED_DESCS: set[str] = {"StagingCopy", "LaunchVar", "BatchStep", "KernelGroupSpec"}
-
-# First Party
-# Validate that every excluded descriptor actually exists in ops_types.
-for _name in _EXCLUDED_DESCS:
-    assert hasattr(ops_types, _name), (
-        f"_EXCLUDED_DESCS contains {_name!r} but it does not exist in ops_types"
-    )
 
 _fallback_callables = _public_callables(fallback)
 _c_ops_callables = _public_callables(c_ops) if HAS_C_OPS else {}

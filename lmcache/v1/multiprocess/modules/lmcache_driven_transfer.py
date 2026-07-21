@@ -50,19 +50,11 @@ from lmcache.v1.multiprocess.native_completion import (
 from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.platform.base_cache_context import BaseCacheContext
 from lmcache.v1.platform.cache_context import create_cache_context
-from lmcache.v1.platform.ops_types import NativePlanType
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
-# The object-group transfer path requires the compiled c_ops extension:
-# it constructs pybind plan types (``KernelGroupSpec`` etc.) and calls
-# ``execute_object_group_transfer`` on them.  If ``KernelGroupSpec`` on
-# the ``lmcache.c_ops`` shim is still the pure-Python ``NativePlanType``
-# stub, native binding didn't happen and we must fall back to the
-# per-object copy path instead of building an unusable plan.
-_HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = not (
-    isinstance(lmc_ops.KernelGroupSpec, type)
-    and issubclass(lmc_ops.KernelGroupSpec, NativePlanType)
+_HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = hasattr(
+    lmc_ops, "execute_object_group_transfer"
 )
 
 

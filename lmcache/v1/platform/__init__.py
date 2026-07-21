@@ -54,8 +54,8 @@ from lmcache.v1.platform._device_detect import get_device_spec as get_device_spe
 from lmcache.v1.platform._device_detect import (
     get_torch_device,
 )
-from lmcache.v1.utils.subclass_discovery import discover_subclasses
 from lmcache.v1.platform.base_device_spec import DeviceSpec
+from lmcache.v1.utils.subclass_discovery import discover_subclasses
 
 if TYPE_CHECKING:
     from lmcache.v1.platform.base_device_ops import DeviceOps
@@ -240,6 +240,3 @@ def resolve_device_ops(device_type: str) -> DeviceOps:
 torch_dev, torch_device_type = get_torch_device()
 
 current_device_spec: DeviceSpec = _current_device_spec_fn()
-
-
-

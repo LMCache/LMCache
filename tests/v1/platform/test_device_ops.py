@@ -20,12 +20,8 @@ from lmcache.v1.platform.base_device_ops import DeviceOps
 from lmcache.v1.platform.base_device_spec import DeviceSpec
 from lmcache.v1.platform.cpu.device_ops import CpuDeviceOps
 from lmcache.v1.platform.ops_types import (
-    BatchStep,
     EngineKVFormat,
-    KernelGroupSpec,
-    LaunchVar,
     PageBufferShapeDesc,
-    StagingCopy,
     TransferDirection,
 )
 import lmcache.v1.platform as platform_pkg
@@ -75,10 +71,6 @@ def test_base_class_has_all_types() -> None:
     assert DeviceOps.EngineKVFormat is EngineKVFormat
     assert DeviceOps.GPUKVFormat is EngineKVFormat
     assert DeviceOps.PageBufferShapeDesc is PageBufferShapeDesc
-    assert DeviceOps.StagingCopy is StagingCopy
-    assert DeviceOps.LaunchVar is LaunchVar
-    assert DeviceOps.BatchStep is BatchStep
-    assert DeviceOps.KernelGroupSpec is KernelGroupSpec
     assert callable(DeviceOps.set_shape_desc_dtype)
 
 
@@ -203,11 +195,12 @@ def test_bind_native_shadows_baseline_for_present_ops() -> None:
     assert other.multi_layer_kv_transfer is not ops.multi_layer_kv_transfer  # type: ignore[attr-defined]
 
 
-def test_bind_native_ignores_symbols_absent_from_ops() -> None:
-    """Symbols on the module not in _OP_NAMES are not copied to the instance."""
+def test_bind_native_discovers_all_public_symbols() -> None:
+    """bind_native auto-discovers all public symbols from the native module."""
     ops = DeviceOps()
     ops.bind_native(_FakeNativeModule())
-    assert "not_in_ops" not in vars(ops)
+    # Extra symbols on the module are now bound (auto-discovery).
+    assert "not_in_ops" in vars(ops)
 
 
 def test_bind_native_rebinds_types() -> None:

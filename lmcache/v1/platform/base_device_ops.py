@@ -21,12 +21,8 @@ if TYPE_CHECKING:
 from lmcache.logging import init_logger
 from lmcache.v1.platform import ops_types, torch_ops
 from lmcache.v1.platform.ops_types import (
-    BatchStep,
     EngineKVFormat,
-    KernelGroupSpec,
-    LaunchVar,
     PageBufferShapeDesc,
-    StagingCopy,
     TransferDirection,
     set_shape_desc_dtype,
 )
@@ -56,10 +52,6 @@ class DeviceOps:
     EngineKVFormat = EngineKVFormat
     GPUKVFormat = EngineKVFormat  # back-compat alias
     PageBufferShapeDesc = PageBufferShapeDesc
-    StagingCopy = StagingCopy
-    LaunchVar = LaunchVar
-    BatchStep = BatchStep
-    KernelGroupSpec = KernelGroupSpec
     set_shape_desc_dtype = staticmethod(set_shape_desc_dtype)
 
     def __init__(self) -> None:
@@ -76,28 +68,25 @@ class DeviceOps:
         """
 
     def bind_native(self, module: object) -> None:
-        """Rebind ops and types on this instance from a compiled native module.
+        """Rebind ops and types from a compiled native module.
 
-        Walks ``vars(DeviceOps)`` once.  For each public name:
-
-        - function → rebind as native callable on self
-        - type → rebind for pybind enum/class identity
-
-        The class body is the SSOT: add a method here and it is
-        automatically eligible for native rebinding.
+        Walks the native module's public symbols.  For each callable or
+        type, binds it on this instance — replacing the torch fallback if
+        one exists, or adding a native-only symbol that has no pure-Python
+        equivalent.
         """
         bound_ops = 0
         bound_types = 0
-        for name, member in vars(DeviceOps).items():
-            if name.startswith("_") or name == "ensure_native":
+        for name in dir(module):
+            if name.startswith("_"):
                 continue
             native_sym = getattr(module, name, None)
             if native_sym is None:
                 continue
-            if isinstance(member, type):
+            if isinstance(native_sym, type):
                 setattr(self, name, native_sym)
                 bound_types += 1
-            elif callable(member):
+            elif callable(native_sym):
                 setattr(self, name, native_sym)
                 bound_ops += 1
         # GPUKVFormat alias → EngineKVFormat on native side
@@ -151,9 +140,6 @@ class DeviceOps:
         return torch_ops.free_shm_pinned_ptr(ptr, size, shm_name)
 
     # ── Ops: KV transfer ─────────────────────────────────────────────
-
-    def execute_object_group_transfer(self, *args, **kwargs):
-        return torch_ops.execute_object_group_transfer(*args, **kwargs)
 
     def multi_layer_block_kv_transfer(
         self,

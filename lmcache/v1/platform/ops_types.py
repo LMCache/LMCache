@@ -8,7 +8,7 @@ self-contained (only ``torch`` + ``enum``) so call sites can import them
 without pulling in the heavier torch-baseline op implementations in
 :mod:`lmcache.v1.platform.torch_ops`.
 
-The object-group transfer plan types (``NativePlanType`` and its
+The object-group transfer plan types (``_NativePlanType`` and its
 ``StagingCopy`` / ``LaunchVar`` / ``BatchStep`` / ``KernelGroupSpec``
 subclasses) only exist natively in the compiled ``c_ops`` extension; the
 pure-Python subclasses here are stubs so the CPU-only build exposes the same
@@ -134,7 +134,8 @@ class PageBufferShapeDesc:
         self.dtype: torch.dtype | None = None
 
 
-class NativePlanType:
+class _NativePlanType:
+    # TODO: Deprecate this class if it will not be used by 2+ vendors
     """Base for object-group transfer plan types that only exist natively.
 
     The plan value structs (see ``csrc/mp_mem_kernels.cuh``) are built on the
@@ -151,19 +152,19 @@ class NativePlanType:
         )
 
 
-class StagingCopy(NativePlanType):
+class StagingCopy(_NativePlanType):
     """Fallback stub for the native ``StagingCopy`` plan type."""
 
 
-class LaunchVar(NativePlanType):
+class LaunchVar(_NativePlanType):
     """Fallback stub for the native ``LaunchVar`` plan type."""
 
 
-class BatchStep(NativePlanType):
+class BatchStep(_NativePlanType):
     """Fallback stub for the native ``BatchStep`` plan type."""
 
 
-class KernelGroupSpec(NativePlanType):
+class KernelGroupSpec(_NativePlanType):
     """Fallback stub for the native ``KernelGroupSpec`` plan type."""
 
 

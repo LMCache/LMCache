@@ -1220,36 +1220,6 @@ def multi_layer_block_kv_transfer(
         )
 
 
-def execute_object_group_transfer(
-    direction: TransferDirection,
-    device: torch.device | str,
-    host_buffer_alignment: int,
-    kernel_group_specs: list,
-    batch_steps: list,
-) -> None:
-    """Python fallback for the native object-group transfer plan executor.
-
-    The planned/batched object-group transfer (see ``csrc/mp_mem_kernels.cuh``
-    and ``execute_object_group_transfer``) is only implemented in the compiled
-    ``c_ops`` extension. The signature mirrors the C++ binding so callers can
-    dispatch uniformly, but there is no pure-Python equivalent.
-
-    Args:
-        direction: Transfer direction (H2D or D2H).
-        device: CUDA device of the transfer.
-        host_buffer_alignment: Host buffer alignment for staging copies.
-        kernel_group_specs: Per-kernel-group invariants (native ``KernelGroupSpec``).
-        batch_steps: Ordered per-batch staging + launch work (native ``BatchStep``).
-
-    Raises:
-        NotImplementedError: Always; requires the c_ops native extension.
-    """
-    raise NotImplementedError(
-        "execute_object_group_transfer requires the c_ops native extension; "
-        "no pure-Python fallback exists."
-    )
-
-
 def _valid_block_range(
     object_idx: int,
     block_id_list: list[int],
