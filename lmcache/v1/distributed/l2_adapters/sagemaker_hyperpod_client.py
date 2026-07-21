@@ -72,18 +72,18 @@ class _ReadOnlySharedMemoryMapping:
         self._mmap: mmap.mmap | None = None
         self._shm: shared_memory.SharedMemory | None = None
         if os.path.isdir(_SHM_DIR):
-            fd = os.open(_shm_segment_path(name), os.O_RDONLY)
             try:
-                # length=0 maps the whole file as of this call, avoiding a
-                # stat-then-map race with daemon recreation.
-                self._mmap = mmap.mmap(fd, 0, prot=mmap.PROT_READ)
-            except ValueError as exc:
-                # Zero-length file: the daemon has not populated it yet.
+                fd = os.open(_shm_segment_path(name), os.O_RDONLY)
+                try:
+                    # length=0 maps the whole file as of this call, avoiding a
+                    # stat-then-map race with daemon recreation.
+                    self._mmap = mmap.mmap(fd, 0, prot=mmap.PROT_READ)
+                finally:
+                    os.close(fd)
+            except (OSError, ValueError) as exc:
                 raise FileNotFoundError(
-                    f"shared-memory segment {name!r} exists but is empty"
+                    f"shared-memory segment {name!r} cannot be opened or mapped"
                 ) from exc
-            finally:
-                os.close(fd)
             self._size = len(self._mmap)
             self._buf = memoryview(self._mmap)
         else:
