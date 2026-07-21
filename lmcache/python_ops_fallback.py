@@ -2753,6 +2753,29 @@ def rotary_embedding_k_fused(
         key[..., 1:rot_dim:2] = y_out
 
 
+def rotary_embedding_k_fused_strided(
+    old_positions: torch.Tensor,
+    new_positions: torch.Tensor,
+    key: torch.Tensor,
+    head_size: int,
+    head_stride: int,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+) -> None:
+    """Strided rotary_embedding_k_fused: ``key``'s last dim is ``head_stride``
+    per head; rotate only the leading ``head_size`` (K) in place via a view,
+    leaving the trailing V. ``head_stride == head_size`` is the contiguous case.
+    """
+    rotary_embedding_k_fused(
+        old_positions,
+        new_positions,
+        key[..., :head_size],
+        head_size,
+        cos_sin_cache,
+        is_neox,
+    )
+
+
 def get_gpu_pci_bus_id(device_id: int = 0) -> str | None:
     """
     Get the PCI bus ID via CUDA/ROCm runtime.

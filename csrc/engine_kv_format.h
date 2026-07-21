@@ -153,3 +153,10 @@ LMC_KV_FORMAT_HD constexpr bool is_mla(EngineKVFormat f) {
   return f == EngineKVFormat::NL_X_NB_BS_HS ||   // vLLM MLA
          f == EngineKVFormat::NL_X_NBBS_ONE_HS;  // SGLang MLA
 }
+
+// vLLM fused K/V: K and V packed in the trailing dim (2 * head_size), no
+// separate K/V axis — transferred as one k_or_v == 0 pass (like MLA).
+LMC_KV_FORMAT_HD constexpr bool is_fused_packed(EngineKVFormat f) {
+  return f == EngineKVFormat::NL_X_NB_NH_BS_TWO_HS ||  // fused HND
+         f == EngineKVFormat::NL_X_NB_BS_NH_TWO_HS;    // fused NHD
+}

@@ -18,15 +18,25 @@ enough.
 :class:`DeviceSpec` itself is instantiable and doubles as the fallback
 implementation used when no accelerator sub-package matches the
 detected device: all capabilities default to a safe "no-op / False"
-behaviour, and ``device_type`` / ``torch_module_name`` default to
-``"cpu"``.
+behaviour, and ``device_type`` / ``torch_module_name`` default to an
+empty string (concrete backends -- including CPU via
+:class:`~lmcache.v1.platform.cpu.CpuDeviceSpec` -- override them).
 """
+
+# Future
+from __future__ import annotations
+
+# Standard
+from typing import TYPE_CHECKING
 
 # First Party
 from lmcache.v1.platform.base_pin_memory import PinMemoryBackend
 
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
 
-# TODO(chunxiaozheng): bind `DeviceIPCWrapper` with `DeviceSpec`?
+
 class DeviceSpec:
     """Description of a hardware accelerator backend.
 
@@ -46,18 +56,22 @@ class DeviceSpec:
     def device_type(self) -> str:
         """Device type string (e.g. ``"cuda"``, ``"musa"``, ``"mlu"``).
 
-        Defaults to ``"cpu"`` for the fallback implementation.
+        Concrete backends override this; the base returns an empty
+        string so a bare ``DeviceSpec()`` instance is never mistaken
+        for a real accelerator (CPU is represented by
+        :class:`~lmcache.v1.platform.cpu.CpuDeviceSpec`).
         """
-        return "cpu"
+        return ""
 
     @property
     def torch_module_name(self) -> str:
         """Attribute name on the ``torch`` package for the device module.
 
-        For example, ``"cuda"`` corresponds to ``torch.cuda``.  Defaults
-        to ``"cpu"`` for the fallback implementation.
+        For example, ``"cuda"`` corresponds to ``torch.cuda``.  The
+        base returns an empty string; concrete backends (including
+        :class:`~lmcache.v1.platform.cpu.CpuDeviceSpec`) override it.
         """
-        return "cpu"
+        return ""
 
     @property
     def ops_module(self) -> str | None:
@@ -90,6 +104,24 @@ class DeviceSpec:
         property and return the appropriate backend class.  Use a lazy
         import inside the property body to avoid heavy imports at class
         definition time.
+        """
+        return None
+
+    @property
+    def ipc_wrapper_cls(self) -> type[DeviceIPCWrapper] | None:
+        """:class:`DeviceIPCWrapper` subclass used to ship KV tensors across
+        the multiprocess wire for this device, or ``None`` when the
+        device has no IPC wrapper support.
+
+        Subclasses that participate in the LMCache multiprocess KV
+        transfer path override this property and return their concrete
+        wrapper class.  Use a lazy import inside the property body to
+        avoid dragging accelerator-specific modules into the platform
+        base import graph.
+
+        The wrapper class is expected to expose a ``wrap(tensor)``
+        classmethod that returns a serializable
+        :class:`DeviceIPCWrapper` instance ready for the wire.
         """
         return None
 
