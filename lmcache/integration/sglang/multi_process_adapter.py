@@ -4,7 +4,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional, Tuple
 import os
 import threading
 
@@ -194,6 +194,27 @@ class LMCacheMPConnector:
         dist.all_reduce(t, op=dist.ReduceOp.MIN, group=self.tp_group)
         return int(t.item())
 
+    @staticmethod
+    def _apply_mm_hashes(
+        token_ids: list[int],
+        mm_hashes: Optional[List[str]],
+        mm_positions: Optional[List[Tuple[int, int]]],
+    ) -> list[int]:
+        """Apply multimodal content hashes to token IDs.
+
+        Returns a new list with placeholder token positions overwritten
+        by stable content hashes. Returns the original list unchanged
+        when no multimodal data is present.
+        """
+        if not mm_hashes or not mm_positions:
+            return token_ids
+
+        from lmcache.integration.mm_utils import apply_mm_hashes_to_token_ids as _apply
+
+        token_ids_copy = list(token_ids)
+        _apply(token_ids_copy, mm_hashes, mm_positions)
+        return token_ids_copy
+
     def _create_key(
         self,
         token_ids: list[int],
@@ -280,7 +301,13 @@ class LMCacheMPConnector:
             ],
         )
 
-    def lookup_kv(self, token_ids: list[int], request_id: str) -> int:
+    def lookup_kv(
+        self,
+        token_ids: list[int],
+        request_id: str,
+        mm_hashes: Optional[List[str]] = None,
+        mm_positions: Optional[List[Tuple[int, int]]] = None,
+    ) -> int:
         """Phase 1 of the two-phase load — fires LOOKUP only.
 
         The daemon prefetches missing chunks L2 → L1 (DRAM), creates a
@@ -299,6 +326,9 @@ class LMCacheMPConnector:
         """
         if not self.is_healthy or not request_id:
             return 0
+
+        # Apply multimodal hashes before cache key computation
+        token_ids = self._apply_mm_hashes(token_ids, mm_hashes, mm_positions)
 
         # If a previous LOOKUP for this rid is still pending (e.g., a
         # rescheduling pass or a prior partial flow), release its locks
@@ -494,6 +524,13 @@ class LMCacheMPConnector:
     def store_kv(self, store_metadata: StoreMetadata) -> None:
         if not self.is_healthy:
             return
+
+        # Apply multimodal hashes before cache key computation
+        store_metadata.token_ids = self._apply_mm_hashes(
+            store_metadata.token_ids,
+            store_metadata.mm_hashes,
+            store_metadata.mm_positions,
+        )
 
         aligned_end = (len(store_metadata.token_ids) // self._lmcache_chunk_size) * (
             self._lmcache_chunk_size

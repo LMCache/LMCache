@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import TYPE_CHECKING, Literal, Optional, Tuple
-import hashlib
 import os
-import string
 import threading
 
 if TYPE_CHECKING:
@@ -140,34 +138,6 @@ def create_lmcache_ec_config() -> LMCacheEngineConfig:
     return load_ec_engine_config(base_config=lmcache_get_or_create_config())
 
 
-def hex_hash_to_int16(s: str) -> int:
-    """
-    Convert a hash identifier into a 16-bit integer.
-
-    Historically, LMCache expected multimodal identifiers to be hex strings.
-    In practice (e.g., OpenAI-style multimodal requests), identifiers may be
-    arbitrary strings like `chatcmpl-...-image-0`. This function therefore:
-      - Parses hex strings (optionally prefixed with `0x`) as before, or
-      - Falls back to a stable string hash (SHA-256) when the input is not hex.
-    """
-    # Be defensive: vLLM may pass non-string identifiers.
-    s = "" if s is None else str(s)
-    s_stripped = s.strip()
-
-    # Fast-path: pure hex (optionally 0x-prefixed).
-    hex_part = s_stripped[2:] if s_stripped.lower().startswith("0x") else s_stripped
-    if hex_part and all(c in string.hexdigits for c in hex_part):
-        try:
-            return int(hex_part, 16) & 0xFFFF
-        except ValueError:
-            # Extremely unlikely (e.g., oversized/odd formatting); fall back to hashing.
-            pass
-
-    # Fallback: stable 16-bit value derived from the full identifier string.
-    digest = hashlib.sha256(s_stripped.encode("utf-8")).digest()
-    return int.from_bytes(digest[:2], byteorder="big", signed=False)
-
-
 def apply_mm_hashes_to_token_ids(
     token_ids: torch.Tensor,
     mm_hashes: list[str],
@@ -177,14 +147,11 @@ def apply_mm_hashes_to_token_ids(
     Overwrite token_ids in-place for multimodal placeholders using
     efficient slice assignments.
     """
-    n = token_ids.size(0)
-    for hash_str, placeholder in zip(mm_hashes, mm_positions, strict=False):
-        start, length = placeholder.offset, placeholder.length
-        if start >= n:
-            continue
-        end = min(start + length, n)
-        token_ids[start:end] = hex_hash_to_int16(hash_str)
-    return token_ids
+    positions = [(p.offset, p.length) for p in mm_positions]
+    # First Party
+    from lmcache.integration.mm_utils import apply_mm_hashes_to_token_ids as _apply
+
+    return _apply(token_ids, mm_hashes, positions)
 
 
 def mla_enabled(model_config: "ModelConfig") -> bool:

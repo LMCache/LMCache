@@ -46,7 +46,12 @@ from lmcache.integration.vllm.kv_cache_group_edits import (
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
 )
-from lmcache.integration.vllm.utils import mla_enabled, vllm_layout_hints
+from lmcache.integration.vllm.utils import (
+    apply_mm_hashes_to_token_ids,
+    extract_mm_features,
+    mla_enabled,
+    vllm_layout_hints,
+)
 from lmcache.utils import init_logger as lmcache_init_logger
 from lmcache.v1.multiprocess.group_view import slice_block_ids_per_group
 
@@ -220,6 +225,12 @@ class LMCacheMPRequestTracker:
     # Read-only list to track the token ids
     all_token_ids: ConstantList[int]
 
+    # Multimodal content hashes and positions extracted from the request.
+    # Used to compute cache-key token IDs that reflect actual multimodal
+    # content rather than placeholder positions.
+    _mm_hashes: list[str] | None = None
+    _mm_positions: list[tuple[int, int]] | None = None
+
     # Block ids will be updated at update_states_after_alloc and
     # during generation. Keyed by engine_group_idx; non-HMA models use 0.
     allocated_block_ids: dict[int, list[int]] = field(default_factory=dict)
@@ -251,6 +262,39 @@ class LMCacheMPRequestTracker:
         self.num_vllm_hit_tokens = 0
         self.num_lmcache_hit_tokens = 0
         self.state = LMCacheMPRequestState.PREFETCHING
+        self._precompute_cache_token_ids(request)
+
+    def _precompute_cache_token_ids(self, request: "Request") -> None:
+        """Pre-compute token IDs with multimodal hashes applied.
+
+        For multimodal requests, placeholder tokens are replaced with
+        content hashes so that cache keys reflect the actual multimodal
+        content rather than generic placeholder positions.
+        """
+        mm_hashes, mm_positions = extract_mm_features(request)
+        if not mm_hashes or not mm_positions:
+            self._cache_token_ids = None
+            return
+
+        token_ids = list(self.all_token_ids)
+        apply_mm_hashes_to_token_ids(token_ids, mm_hashes, mm_positions)
+        self._cache_token_ids = token_ids
+
+    def get_cache_token_ids(self) -> list[int]:
+        """Return token IDs suitable for cache key computation.
+
+        For multimodal requests, this returns token IDs with content
+        hashes applied for the prompt tokens and raw tokens for any
+        new tokens added after the initial lookup. For text-only
+        requests, this returns the raw token IDs.
+        """
+        if self._cache_token_ids is not None:
+            if len(self._cache_token_ids) < len(self.all_token_ids):
+                self._cache_token_ids.extend(
+                    list(self.all_token_ids)[len(self._cache_token_ids) :]
+                )
+            return self._cache_token_ids
+        return list(self.all_token_ids)
 
     ####
     # Check the state of the request
@@ -401,7 +445,7 @@ class LMCacheMPRequestMetadata:
                 start_token_idx,
                 end_token_idx,
             )
-            token_ids = list(tracker.all_token_ids)
+            token_ids = tracker.get_cache_token_ids()
             op = LoadStoreOp(
                 token_ids=token_ids,
                 block_ids=block_ids,
@@ -468,7 +512,7 @@ class LMCacheMPRequestMetadata:
                 start_token_idx,
                 end_token_idx,
             )
-            token_ids = list(tracker.all_token_ids)
+            token_ids = tracker.get_cache_token_ids()
 
             # Compute how many tokens at the start of the retrieve range
             # overlap with APC-shared blocks. The server must skip writing
@@ -991,7 +1035,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
-            token_ids=list(request.all_token_ids),
+            token_ids=tracker.get_cache_token_ids(),
             cache_salt=tracker.cache_salt,
         )
 
@@ -1092,7 +1136,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
                 if free_end > 0:
                     self.scheduler_adapter.free_lookup_locks(
-                        token_ids=list(tracker.all_token_ids),
+                        token_ids=tracker.get_cache_token_ids(),
                         start=0,
                         end=free_end,
                         request_id=request.request_id,

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from typing import Any, Iterable, List, Optional
+from typing import Any, Iterable, List, Optional, Tuple
 import uuid
 
 # Third Party
@@ -34,6 +34,8 @@ class StoreMetadata:
     kv_indices: torch.Tensor
     offset: int
     request_id: str = ""
+    mm_hashes: Optional[List[str]] = None
+    mm_positions: Optional[List[Tuple[int, int]]] = None
 
 
 @dataclass
@@ -43,6 +45,8 @@ class LoadMetadata:
     offset: int
     prefix_pad: int = 0
     request_id: str = ""
+    mm_hashes: Optional[List[str]] = None
+    mm_positions: Optional[List[Tuple[int, int]]] = None
 
 
 def init_lmcache_engine(
@@ -145,6 +149,26 @@ class LMCacheConnector:
 
         self.lmcache_engine.post_init(kvcaches=self.kvcaches)
 
+    @staticmethod
+    def _apply_mm_hashes(
+        token_ids: torch.Tensor,
+        mm_hashes: Optional[List[str]],
+        mm_positions: Optional[List[Tuple[int, int]]],
+    ) -> torch.Tensor:
+        """Apply multimodal content hashes to token IDs in-place.
+
+        When multimodal data (images, audio, etc.) is present, placeholder
+        token positions are overwritten with stable content hashes so that
+        cache keys reflect the actual multimodal content.
+        """
+        if not mm_hashes or not mm_positions:
+            return token_ids
+
+        # First Party
+        from lmcache.integration.mm_utils import apply_mm_hashes_to_token_ids as _apply
+
+        return _apply(token_ids, mm_hashes, mm_positions)
+
     ####################
     # Worker side APIs
     ####################
@@ -152,6 +176,9 @@ class LMCacheConnector:
     def load_kv(self, load_metadata: LoadMetadata) -> int:
         token_ids = torch.tensor(load_metadata.token_ids, dtype=torch.int64).to(
             torch_device_type
+        )
+        self._apply_mm_hashes(
+            token_ids, load_metadata.mm_hashes, load_metadata.mm_positions
         )
         slot_mapping = load_metadata.slot_mapping.to(torch_device_type)
         offset = load_metadata.offset
@@ -176,6 +203,9 @@ class LMCacheConnector:
     def store_kv(self, store_metadata: StoreMetadata) -> None:
         token_ids = torch.tensor(store_metadata.token_ids, dtype=torch.int64).to(
             torch_device_type
+        )
+        self._apply_mm_hashes(
+            token_ids, store_metadata.mm_hashes, store_metadata.mm_positions
         )
         slot_mapping = store_metadata.kv_indices.to(torch.int64).to(torch_device_type)
         offset = store_metadata.offset
@@ -261,6 +291,9 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         token_ids = torch.tensor(load_metadata.token_ids, dtype=torch.int64).to(
             torch_device_type
         )
+        self._apply_mm_hashes(
+            token_ids, load_metadata.mm_hashes, load_metadata.mm_positions
+        )
         slot_mapping = load_metadata.slot_mapping.to(torch_device_type)
         offset = load_metadata.offset
 
@@ -320,6 +353,9 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         slot_mapping = store_metadata.kv_indices.to(torch.int64).to(torch_device_type)
         token_ids = torch.tensor(store_metadata.token_ids, dtype=torch.int64).to(
             torch_device_type
+        )
+        self._apply_mm_hashes(
+            token_ids, store_metadata.mm_hashes, store_metadata.mm_positions
         )
         store_mask = torch.ones_like(token_ids, dtype=torch.bool)
 
