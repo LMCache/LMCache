@@ -89,6 +89,7 @@ def _make_connector() -> LMCacheConnectorV1Impl:
     connector._request_trackers = {}
     connector._block_size = 16
     connector._lmcache_chunk_size = 8
+    connector._max_tokens_per_load = 0
     connector._discard_partial_chunks = False
     connector.force_skip_save = False
     connector.config = SimpleNamespace(
