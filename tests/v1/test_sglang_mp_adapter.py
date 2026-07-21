@@ -143,12 +143,12 @@ def test_store_kv_async_happy_path_returns_daemon_future_without_blocking(
     monkeypatch,
 ) -> None:
     conn = _make_connector(healthy=True)
-    conn.mq_client = object()
+    conn.mq_client = object()  # type: ignore[assignment]
     conn.instance_id = 123
     conn.device = "cpu"
     # Stub the helpers store_kv_async calls so we exercise only its own logic.
-    conn._slot_mapping_to_block_ids = lambda kv_indices: [0, 1]
-    conn._create_key = lambda *args, **kwargs: "fake-key"
+    conn._slot_mapping_to_block_ids = lambda kv_indices: [0, 1]  # type: ignore[method-assign,assignment]
+    conn._create_key = lambda *args, **kwargs: "fake-key"  # type: ignore[method-assign,assignment]
 
     sentinel = _SpyFuture()
     monkeypatch.setattr(adapter_mod, "torch_dev", _FakeTorchDev)
