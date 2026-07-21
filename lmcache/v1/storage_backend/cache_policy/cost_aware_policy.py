@@ -1,15 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import Any, Dict, List, Optional, Tuple, Union
+import math
 import time
-
-try:
-    # Third Party
-    import numpy as np
-
-    HAS_NUMPY = True
-except ImportError:
-    HAS_NUMPY = False
 
 # First Party
 from lmcache.logging import init_logger
@@ -17,91 +10,96 @@ from lmcache.v1.storage_backend.cache_policy.base_policy import BaseCachePolicy,
 
 logger = init_logger(__name__)
 
-DEFAULT_STORAGE_TIER_COSTS: Dict[str, float] = {
-    "GPU": 1.0,
-    "RAM": 10.0,
-    "CPU": 10.0,
-    "DISK": 100.0,
-    "S3": 1000.0,
-    "REMOTE": 1000.0,
-}
-
 
 class _ChunkMetadata:
     """Internal metadata holder for tracked cache chunks."""
 
-    __slots__ = ("chunk_length", "storage_tier_cost", "last_access_time")
+    __slots__ = (
+        "estimated_recompute_tokens",
+        "memory_size_bytes",
+        "last_access_time",
+        "insertion_index",
+        "observation_count",
+    )
 
     def __init__(
         self,
-        chunk_length: float,
-        storage_tier_cost: float,
+        estimated_recompute_tokens: Optional[float],
+        memory_size_bytes: Optional[float],
         last_access_time: float,
+        insertion_index: int,
+        observation_count: int = 0,
     ) -> None:
-        self.chunk_length = chunk_length
-        self.storage_tier_cost = storage_tier_cost
+        self.estimated_recompute_tokens = estimated_recompute_tokens
+        self.memory_size_bytes = memory_size_bytes
         self.last_access_time = last_access_time
+        self.insertion_index = insertion_index
+        self.observation_count = observation_count
 
 
 class CostAwareEvictionPolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
     """
-    Cost-Aware Cache Eviction Policy for LMCache.
+    Compute-Cost-Aware Eviction Policy with Recency Decay for LMCache.
 
-    Weighs cache entries by their recomputation compute cost (chunk length)
-    and storage layer retrieval latency, balanced against recency decay:
+    Calculates chunk eviction score according to:
+        1. observed_recompute_tokens = total_request_tokens - chunk_start
+        2. estimated_recompute_tokens = EWMA(observed_recompute_tokens, alpha)
+        3. cost_density = estimated_recompute_tokens / memory_size_bytes
+        4. score = cost_density / (1.0 + age_seconds / half_life_seconds)
 
-        Score = (w1 * chunk_length) + (w2 * storage_tier_cost) - (w3 * time_since_last_access)
+    The candidate with the absolute LOWEST score is selected for eviction first.
 
-    Where:
-    - chunk_length: Number of tokens in the chunk (proxy for GPU prefill cost).
-    - storage_tier_cost: Retrieval latency weight of the storage tier.
-    - time_since_last_access: Elapsed time since the chunk was last accessed.
-
-    The chunk with the absolute LOWEST score is selected for eviction first.
+    Known Limitations:
+    The recomputation estimate is derived from request position, but the policy
+    does not enforce structural prefix dependencies or anti-orphan constraints.
+    Cross-tier placement and tier demotion are handled outside this local policy.
     """
 
     def __init__(
         self,
-        w1: float = 1.0,
-        w2: float = 1.0,
-        w3: float = 1.0,
-        storage_tier_cost: Optional[Dict[str, float]] = None,
-        default_chunk_length: int = 256,
-        default_storage_tier: str = "CPU",
-        default_tier_cost: float = 10.0,
+        half_life_seconds: float = 60.0,
+        cost_ewma_alpha: float = 0.2,
     ) -> None:
         """
         Initialize CostAwareEvictionPolicy.
 
         Args:
-            w1: Weight for compute cost (chunk token length).
-            w2: Weight for storage tier retrieval latency cost.
-            w3: Weight for recency decay (time since last access penalty).
-            storage_tier_cost: Optional mapping of tier name (e.g. "GPU", "DISK")
-                to tier retrieval cost float.
-            default_chunk_length: Default token length when unassigned.
-            default_storage_tier: Default tier name when unassigned.
-            default_tier_cost: Default fallback tier cost when tier is unknown.
+            half_life_seconds: Time in seconds after which cost density decays by half.
+            cost_ewma_alpha: EWMA smoothing factor for updating recompute estimates (0 < alpha <= 1).
+
+        Raises:
+            ValueError: If parameters are non-positive, out of range, or non-finite.
         """
-        self.w1 = float(w1)
-        self.w2 = float(w2)
-        self.w3 = float(w3)
+        if (
+            not isinstance(half_life_seconds, (int, float))
+            or math.isnan(half_life_seconds)
+            or math.isinf(half_life_seconds)
+            or half_life_seconds <= 0
+        ):
+            raise ValueError(
+                f"half_life_seconds must be a finite positive float, got {half_life_seconds!r}"
+            )
 
-        self.tier_cost_map: Dict[str, float] = dict(DEFAULT_STORAGE_TIER_COSTS)
-        if storage_tier_cost is not None:
-            self.tier_cost_map.update(storage_tier_cost)
+        if (
+            not isinstance(cost_ewma_alpha, (int, float))
+            or math.isnan(cost_ewma_alpha)
+            or math.isinf(cost_ewma_alpha)
+            or not (0 < cost_ewma_alpha <= 1.0)
+        ):
+            raise ValueError(
+                f"cost_ewma_alpha must be a finite float in range (0, 1], got {cost_ewma_alpha!r}"
+            )
 
-        self.default_chunk_length = float(default_chunk_length)
-        self.default_storage_tier = default_storage_tier
-        self.default_tier_cost = float(default_tier_cost)
+        self.half_life_seconds = float(half_life_seconds)
+        self.cost_ewma_alpha = float(cost_ewma_alpha)
 
         self.metadata: Dict[KeyType, _ChunkMetadata] = {}
+        self._next_insertion_index: int = 0
 
         logger.info(
-            "Initializing CostAwareEvictionPolicy (w1=%.2f, w2=%.2f, w3=%.2f)",
-            self.w1,
-            self.w2,
-            self.w3,
+            "Initializing CostAwareEvictionPolicy (half_life_seconds=%.2f, cost_ewma_alpha=%.2f)",
+            self.half_life_seconds,
+            self.cost_ewma_alpha,
         )
 
     def init_mutable_mapping(self) -> dict[KeyType, Any]:
@@ -113,94 +111,121 @@ class CostAwareEvictionPolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
         """
         return {}
 
-    def _resolve_tier_cost(
+    def _extract_memory_bytes(
         self,
-        storage_tier: Optional[str] = None,
-        storage_tier_cost: Optional[float] = None,
-    ) -> float:
-        if storage_tier_cost is not None:
-            return float(storage_tier_cost)
-        if storage_tier is not None:
-            tier_upper = str(storage_tier).upper()
-            return self.tier_cost_map.get(tier_upper, self.default_tier_cost)
-        return self.default_tier_cost
+        value: Any = None,
+        explicit_memory_bytes: Optional[int] = None,
+    ) -> Optional[float]:
+        """
+        Extract physical/allocated memory size in bytes from object methods or explicit args.
 
-    def _extract_metadata(
+        Extraction order:
+        1. Explicit memory_size_bytes argument.
+        2. value.get_physical_size(), when available and valid (> 0).
+        3. value.get_size(), when available and valid (> 0).
+        4. Explicit metadata fields (memory_size_bytes, memory_bytes, size_bytes).
+        5. Missing-metadata fallback (None).
+        """
+        if explicit_memory_bytes is not None:
+            if (
+                not isinstance(explicit_memory_bytes, (int, float))
+                or math.isnan(explicit_memory_bytes)
+                or math.isinf(explicit_memory_bytes)
+                or explicit_memory_bytes <= 0
+            ):
+                raise ValueError(
+                    f"memory_size_bytes must be a finite positive number, got {explicit_memory_bytes!r}"
+                )
+            return float(explicit_memory_bytes)
+
+        if value is None:
+            return None
+
+        # Prefer get_physical_size()
+        if hasattr(value, "get_physical_size"):
+            try:
+                psize = value.get_physical_size()
+                if (
+                    isinstance(psize, (int, float))
+                    and psize > 0
+                    and not math.isnan(psize)
+                    and not math.isinf(psize)
+                ):
+                    return float(psize)
+            except (AttributeError, TypeError, ValueError):
+                pass
+
+        # Fallback to get_size()
+        if hasattr(value, "get_size"):
+            try:
+                gsize = value.get_size()
+                if (
+                    isinstance(gsize, (int, float))
+                    and gsize > 0
+                    and not math.isnan(gsize)
+                    and not math.isinf(gsize)
+                ):
+                    return float(gsize)
+            except (AttributeError, TypeError, ValueError):
+                pass
+
+        # Explicit typed metadata fields
+        for attr in ("memory_size_bytes", "memory_bytes", "size_bytes"):
+            if hasattr(value, attr):
+                try:
+                    val = getattr(value, attr)
+                    if (
+                        isinstance(val, (int, float))
+                        and val > 0
+                        and not math.isnan(val)
+                        and not math.isinf(val)
+                    ):
+                        return float(val)
+                except (AttributeError, TypeError, ValueError):
+                    pass
+            elif isinstance(value, dict) and attr in value:
+                try:
+                    val = value[attr]
+                    if (
+                        isinstance(val, (int, float))
+                        and val > 0
+                        and not math.isnan(val)
+                        and not math.isinf(val)
+                    ):
+                        return float(val)
+                except (AttributeError, TypeError, ValueError):
+                    pass
+
+        return None
+
+    def _update_recompute_ewma(
         self,
         key: KeyType,
-        value: Any = None,
-        chunk_length: Optional[int] = None,
-        storage_tier: Optional[str] = None,
-        storage_tier_cost: Optional[float] = None,
-    ) -> Tuple[float, float]:
+        observed_cost: float,
+    ) -> float:
         """
-        Extract chunk length and tier cost from arguments or object properties.
+        Update recompute estimate for key using EWMA.
         """
-        resolved_length: Optional[float] = (
-            float(chunk_length) if chunk_length is not None else None
-        )
-
-        if resolved_length is None and value is not None:
-            for attr in ("chunk_length", "length", "num_tokens", "seq_len", "size"):
-                if hasattr(value, attr):
-                    val = getattr(value, attr)
-                    if isinstance(val, (int, float)):
-                        resolved_length = float(val)
-                        break
-                    elif callable(val):
-                        try:
-                            resolved_length = float(val())
-                            break
-                        except Exception:
-                            pass
-                elif isinstance(value, dict) and attr in value:
-                    val = value[attr]
-                    if isinstance(val, (int, float)):
-                        resolved_length = float(val)
-                        break
-
-        if resolved_length is None and key is not None:
-            for attr in ("chunk_length", "length"):
-                if hasattr(key, attr):
-                    val = getattr(key, attr)
-                    if isinstance(val, (int, float)):
-                        resolved_length = float(val)
-                        break
-
-        if resolved_length is None:
-            resolved_length = self.default_chunk_length
-
-        resolved_cost: Optional[float] = None
-        if storage_tier_cost is not None:
-            resolved_cost = float(storage_tier_cost)
-        elif storage_tier is not None:
-            resolved_cost = self._resolve_tier_cost(storage_tier=storage_tier)
-
-        if resolved_cost is None and value is not None:
-            for attr in ("storage_tier_cost", "tier_cost"):
-                if hasattr(value, attr):
-                    resolved_cost = float(getattr(value, attr))
-                    break
-                elif isinstance(value, dict) and attr in value:
-                    resolved_cost = float(value[attr])
-                    break
-            if resolved_cost is None:
-                for attr in ("storage_tier", "tier", "backend"):
-                    if hasattr(value, attr):
-                        tier_str = str(getattr(value, attr))
-                        resolved_cost = self._resolve_tier_cost(storage_tier=tier_str)
-                        break
-                    elif isinstance(value, dict) and attr in value:
-                        tier_str = str(value[attr])
-                        resolved_cost = self._resolve_tier_cost(storage_tier=tier_str)
-                        break
-
-        if resolved_cost is None:
-            resolved_cost = self._resolve_tier_cost(
-                storage_tier=self.default_storage_tier
+        if (
+            not isinstance(observed_cost, (int, float))
+            or math.isnan(observed_cost)
+            or math.isinf(observed_cost)
+            or observed_cost <= 0
+        ):
+            raise ValueError(
+                f"observed_cost must be a finite positive float, got {observed_cost!r}"
             )
 
-        return resolved_length, resolved_cost
+        obs_float = float(observed_cost)
+        meta = self.metadata.get(key)
+        if meta is None or meta.estimated_recompute_tokens is None:
+            return obs_float
+        else:
+            old_est = meta.estimated_recompute_tokens
+            return (
+                self.cost_ewma_alpha * obs_float
+                + (1.0 - self.cost_ewma_alpha) * old_est
+            )
 
     def calculate_score(
         self,
@@ -210,134 +235,236 @@ class CostAwareEvictionPolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
         """
         Calculate the cost-aware score for a single chunk key.
 
-        Args:
-            key: The key of the chunk.
-            current_time: Optional current monotonic timestamp.
-
         Returns:
-            The calculated float score, or float("-inf") if the key is untracked.
+            Calculated float score, or float("-inf") if untracked or missing metadata.
         """
         meta = self.metadata.get(key)
         if meta is None:
             return float("-inf")
+        if meta.estimated_recompute_tokens is None or meta.memory_size_bytes is None:
+            return float("-inf")
+
         if current_time is None:
             current_time = time.monotonic()
-        time_since_last_access = current_time - meta.last_access_time
-        return (
-            self.w1 * meta.chunk_length
-            + self.w2 * meta.storage_tier_cost
-            - self.w3 * time_since_last_access
-        )
 
-    def _compute_scores_vectorized(
-        self,
-        candidate_keys: List[KeyType],
-        current_time: float,
-    ) -> Union[List[float], Any]:
-        """
-        Compute cost-aware scores for candidate keys using NumPy vectorization if available,
-        or optimized Python list comprehension.
-        """
-        n = len(candidate_keys)
-        if n == 0:
-            return np.array([], dtype=np.float64) if HAS_NUMPY else []
+        age_seconds = max(0.0, current_time - meta.last_access_time)
+        cost_density = meta.estimated_recompute_tokens / meta.memory_size_bytes
+        time_decay = 1.0 + (age_seconds / self.half_life_seconds)
 
-        if HAS_NUMPY:
-            lengths = np.empty(n, dtype=np.float64)
-            tier_costs = np.empty(n, dtype=np.float64)
-            last_accesses = np.empty(n, dtype=np.float64)
-
-            for i, k in enumerate(candidate_keys):
-                meta = self.metadata.get(k)
-                if meta is not None:
-                    lengths[i] = meta.chunk_length
-                    tier_costs[i] = meta.storage_tier_cost
-                    last_accesses[i] = meta.last_access_time
-                else:
-                    lengths[i] = self.default_chunk_length
-                    tier_costs[i] = self.default_tier_cost
-                    last_accesses[i] = current_time
-
-            time_since_access = current_time - last_accesses
-            scores = (
-                self.w1 * lengths
-                + self.w2 * tier_costs
-                - self.w3 * time_since_access
-            )
-            return scores
-        else:
-            w1, w2, w3 = self.w1, self.w2, self.w3
-            def_len, def_cost = self.default_chunk_length, self.default_tier_cost
-            scores_list = []
-            for k in candidate_keys:
-                meta = self.metadata.get(k)
-                if meta is not None:
-                    c_len = meta.chunk_length
-                    t_cost = meta.storage_tier_cost
-                    tsa = current_time - meta.last_access_time
-                else:
-                    c_len = def_len
-                    t_cost = def_cost
-                    tsa = 0.0
-                scores_list.append(w1 * c_len + w2 * t_cost - w3 * tsa)
-            return scores_list
+        return cost_density / time_decay
 
     def put(
         self,
         key: KeyType,
         value: Any = None,
-        chunk_length: Optional[int] = None,
-        storage_tier: Optional[str] = None,
-        storage_tier_cost: Optional[float] = None,
+        total_request_tokens: Optional[int] = None,
+        chunk_start: Optional[int] = None,
+        memory_size_bytes: Optional[int] = None,
+        estimated_recompute_tokens: Optional[float] = None,
+        observed_recompute_tokens: Optional[float] = None,
     ) -> None:
         """
         Store or update metadata for a cache entry.
-
-        Args:
-            key: Cache key.
-            value: Cache value object (optional).
-            chunk_length: Number of tokens in chunk (optional override).
-            storage_tier: Name of storage tier (optional override).
-            storage_tier_cost: Retrieval cost of storage tier (optional override).
         """
-        length, tier_cost = self._extract_metadata(
+        self.update_on_put_with_metadata(
             key,
-            value=value,
-            chunk_length=chunk_length,
-            storage_tier=storage_tier,
-            storage_tier_cost=storage_tier_cost,
+            cache_obj=value,
+            total_request_tokens=total_request_tokens,
+            chunk_start=chunk_start,
+            memory_size_bytes=memory_size_bytes,
+            estimated_recompute_tokens=estimated_recompute_tokens,
+            observed_recompute_tokens=observed_recompute_tokens,
         )
-        self.metadata[key] = _ChunkMetadata(
-            chunk_length=length,
-            storage_tier_cost=tier_cost,
-            last_access_time=time.monotonic(),
-        )
-
-    def access(self, key: KeyType, cache_dict: Any = None) -> None:
-        """
-        Record access to a chunk key, refreshing its last_access_time timestamp.
-
-        Args:
-            key: Cache key accessed.
-            cache_dict: Optional cache storage dictionary.
-        """
-        if key in self.metadata:
-            self.metadata[key].last_access_time = time.monotonic()
-        else:
-            value = cache_dict.get(key) if isinstance(cache_dict, dict) else None
-            self.put(key, value=value)
 
     def update_on_put(self, key: KeyType) -> None:
         """
-        BaseCachePolicy interface method called when a cache entry is stored.
-
-        Args:
-            key: Cache key stored.
+        BaseCachePolicy interface callback when a cache chunk is stored.
         """
-        if key not in self.metadata:
-            self.put(key)
+        self.update_on_put_with_metadata(key)
+
+    def update_on_put_with_metadata(
+        self,
+        key: KeyType,
+        cache_obj: Any = None,
+        **metadata: Any,
+    ) -> None:
+        """
+        Update internal policy metadata when a cache object is stored.
+        """
+        now = time.monotonic()
+
+        # Validate explicit position parameters if provided
+        total_req = metadata.get("total_request_tokens")
+        c_start = metadata.get("chunk_start")
+
+        if total_req is not None:
+            if (
+                not isinstance(total_req, (int, float))
+                or math.isnan(total_req)
+                or math.isinf(total_req)
+                or total_req < 0
+            ):
+                raise ValueError(
+                    f"total_request_tokens must be a non-negative finite integer, got {total_req!r}"
+                )
+
+        if c_start is not None:
+            if (
+                not isinstance(c_start, (int, float))
+                or math.isnan(c_start)
+                or math.isinf(c_start)
+                or c_start < 0
+            ):
+                raise ValueError(
+                    f"chunk_start must be a non-negative finite integer, got {c_start!r}"
+                )
+
+        if total_req is not None and c_start is not None:
+            if c_start >= total_req and total_req > 0:
+                raise ValueError(
+                    f"chunk_start ({c_start}) must be strictly less than total_request_tokens ({total_req})"
+                )
+
+        # Determine observed recompute tokens
+        obs_recompute = metadata.get("observed_recompute_tokens")
+        if obs_recompute is None and total_req is not None and c_start is not None:
+            obs_recompute = float(max(1, total_req - c_start))
+
+        if obs_recompute is not None:
+            if (
+                not isinstance(obs_recompute, (int, float))
+                or math.isnan(obs_recompute)
+                or math.isinf(obs_recompute)
+                or obs_recompute <= 0
+            ):
+                raise ValueError(
+                    f"observed_recompute_tokens must be a finite positive float, got {obs_recompute!r}"
+                )
+
+        explicit_est_recompute = metadata.get("estimated_recompute_tokens")
+        if explicit_est_recompute is not None:
+            if (
+                not isinstance(explicit_est_recompute, (int, float))
+                or math.isnan(explicit_est_recompute)
+                or math.isinf(explicit_est_recompute)
+                or explicit_est_recompute <= 0
+            ):
+                raise ValueError(
+                    f"estimated_recompute_tokens must be a finite positive float, got {explicit_est_recompute!r}"
+                )
+
+        # Resolve recompute estimate
+        new_recompute: Optional[float] = None
+        if explicit_est_recompute is not None:
+            new_recompute = float(explicit_est_recompute)
+        elif obs_recompute is not None:
+            new_recompute = self._update_recompute_ewma(key, float(obs_recompute))
+        elif key in self.metadata:
+            new_recompute = self.metadata[key].estimated_recompute_tokens
+
+        # Resolve memory size
+        explicit_mem = metadata.get("memory_size_bytes")
+        extracted_mem = self._extract_memory_bytes(
+            value=cache_obj, explicit_memory_bytes=explicit_mem
+        )
+        new_mem = extracted_mem if extracted_mem is not None else (
+            self.metadata[key].memory_size_bytes if key in self.metadata else None
+        )
+
+        obs_count = (
+            self.metadata[key].observation_count + (1 if obs_recompute is not None else 0)
+            if key in self.metadata
+            else (1 if obs_recompute is not None else 0)
+        )
+
+        if key in self.metadata:
+            meta = self.metadata[key]
+            meta.estimated_recompute_tokens = new_recompute
+            meta.memory_size_bytes = new_mem
+            meta.last_access_time = now
+            meta.observation_count = obs_count
         else:
-            self.metadata[key].last_access_time = time.monotonic()
+            self._next_insertion_index += 1
+            self.metadata[key] = _ChunkMetadata(
+                estimated_recompute_tokens=new_recompute,
+                memory_size_bytes=new_mem,
+                last_access_time=now,
+                insertion_index=self._next_insertion_index,
+                observation_count=obs_count,
+            )
+
+    def update_cost_observation(
+        self,
+        key: KeyType,
+        observed_recompute_tokens: Optional[float] = None,
+        **metadata: Any,
+    ) -> None:
+        """
+        Record a cost observation for key using EWMA without altering recency or last_access_time.
+        """
+        obs_recompute = observed_recompute_tokens
+        if obs_recompute is None:
+            obs_recompute = metadata.get("observed_recompute_tokens")
+
+        if obs_recompute is not None and key in self.metadata:
+            obs_float = float(obs_recompute)
+            if (
+                math.isnan(obs_float)
+                or math.isinf(obs_float)
+                or obs_float <= 0
+            ):
+                raise ValueError(
+                    f"observed_recompute_tokens must be a finite positive float, got {obs_recompute!r}"
+                )
+
+            meta = self.metadata[key]
+            if meta.estimated_recompute_tokens is None:
+                meta.estimated_recompute_tokens = obs_float
+            else:
+                meta.estimated_recompute_tokens = (
+                    self.cost_ewma_alpha * obs_float
+                    + (1.0 - self.cost_ewma_alpha) * meta.estimated_recompute_tokens
+                )
+            meta.observation_count += 1
+
+    def access(
+        self,
+        key: KeyType,
+        cache_dict: Any = None,
+        cache_obj: Any = None,
+        observed_recompute_tokens: Optional[float] = None,
+        **metadata: Any,
+    ) -> None:
+        """
+        Record access/hit for a key. Refreshes recency and optional memory size.
+        Does NOT update estimated_recompute_tokens unless a real observed_recompute_tokens is explicitly provided.
+        """
+        now = time.monotonic()
+        val = cache_obj
+        if val is None and isinstance(cache_dict, dict):
+            val = cache_dict.get(key)
+
+        if key in self.metadata:
+            meta = self.metadata[key]
+            meta.last_access_time = now
+
+            # Refresh memory size if available
+            extracted_mem = self._extract_memory_bytes(value=val)
+            if extracted_mem is not None:
+                meta.memory_size_bytes = extracted_mem
+
+            # Only update cost EWMA if real observation is explicitly passed
+            if observed_recompute_tokens is not None:
+                self.update_cost_observation(
+                    key, observed_recompute_tokens=observed_recompute_tokens
+                )
+        else:
+            self.update_on_put_with_metadata(
+                key,
+                cache_obj=val,
+                observed_recompute_tokens=observed_recompute_tokens,
+                **metadata,
+            )
 
     def update_on_hit(
         self,
@@ -345,20 +472,13 @@ class CostAwareEvictionPolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
         cache_dict: dict[KeyType, Any],
     ) -> None:
         """
-        BaseCachePolicy interface method called on cache hit.
-
-        Args:
-            key: Cache key hit.
-            cache_dict: Current cache dict.
+        BaseCachePolicy interface callback on cache hit.
         """
         self.access(key, cache_dict=cache_dict)
 
     def update_on_force_evict(self, key: KeyType) -> None:
         """
-        BaseCachePolicy interface method called when key is evicted.
-
-        Args:
-            key: Key force evicted.
+        BaseCachePolicy interface callback when a key is force-evicted by backend.
         """
         self.metadata.pop(key, None)
 
@@ -368,14 +488,15 @@ class CostAwareEvictionPolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
         num_candidates: int = 1,
     ) -> List[KeyType]:
         """
-        Select candidate keys with the absolute lowest scores for eviction.
+        Select candidate keys for eviction.
 
-        Args:
-            cache_dict: Dictionary of current cache entries.
-            num_candidates: Number of candidate keys to return.
-
-        Returns:
-            List of candidate keys to evict ordered by score ascending (lowest score first).
+        Ordering Rules:
+        1. Candidates with can_evict == False are skipped.
+        2. Candidates without valid cost metadata (untrusted) are ranked BEFORE fully scored candidates.
+        3. Among missing-metadata candidates, order by oldest last_access_time first.
+        4. Among fully scored candidates, order by score ascending.
+        5. Tie-breaker for equal scores: older last_access_time first.
+        6. Final tie-breaker: insertion_index ascending.
         """
         if not cache_dict or num_candidates <= 0:
             return []
@@ -390,21 +511,28 @@ class CostAwareEvictionPolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
             return []
 
         current_time = time.monotonic()
-        scores = self._compute_scores_vectorized(candidate_keys, current_time)
 
-        k_num = min(num_candidates, len(candidate_keys))
-
-        if HAS_NUMPY:
-            if k_num == 1:
-                min_idx = int(np.argmin(scores))
-                return [candidate_keys[min_idx]]
+        def candidate_sort_key(k: KeyType) -> Tuple[int, float, float, int]:
+            meta = self.metadata.get(k)
+            if (
+                meta is None
+                or meta.estimated_recompute_tokens is None
+                or meta.memory_size_bytes is None
+            ):
+                # Category 0: Missing metadata (untrusted -> rank first for eviction)
+                last_access = meta.last_access_time if meta is not None else 0.0
+                insert_idx = meta.insertion_index if meta is not None else 0
+                return (0, 0.0, last_access, insert_idx)
             else:
-                partition_indices = np.argpartition(scores, k_num - 1)[:k_num]
-                sorted_subset = partition_indices[np.argsort(scores[partition_indices])]
-                return [candidate_keys[idx] for idx in sorted_subset]
-        else:
-            indexed_scores = sorted(enumerate(scores), key=lambda x: x[1])
-            return [candidate_keys[idx] for idx, _ in indexed_scores[:k_num]]
+                # Category 1: Valid metadata
+                age_seconds = max(0.0, current_time - meta.last_access_time)
+                cost_density = meta.estimated_recompute_tokens / meta.memory_size_bytes
+                time_decay = 1.0 + (age_seconds / self.half_life_seconds)
+                score = cost_density / time_decay
+                return (1, score, meta.last_access_time, meta.insertion_index)
+
+        sorted_candidates = sorted(candidate_keys, key=candidate_sort_key)
+        return sorted_candidates[: min(num_candidates, len(sorted_candidates))]
 
     def evict(
         self,
@@ -412,40 +540,25 @@ class CostAwareEvictionPolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
         num_candidates: int = 1,
     ) -> Union[List[KeyType], KeyType, None]:
         """
-        Evict chunk(s) with the lowest score(s).
-
-        Args:
-            cache_dict: Optional dictionary of cache entries. If None, evaluates tracked metadata keys.
-            num_candidates: Number of keys to evict.
-
-        Returns:
-            List of evicted keys if num_candidates > 1, or single key if num_candidates == 1.
+        Select candidate key(s) for eviction.
+        Does NOT remove metadata directly; backend calls update_on_force_evict(key) after eviction.
         """
         target_dict = (
             cache_dict if cache_dict is not None else {k: None for k in self.metadata}
         )
-        evict_keys = self.get_evict_candidates(
+        candidates = self.get_evict_candidates(
             target_dict, num_candidates=num_candidates
         )
-        for key in evict_keys:
-            self.metadata.pop(key, None)
-
         if num_candidates == 1:
-            return evict_keys[0] if evict_keys else None
-        return evict_keys
+            return candidates[0] if candidates else None
+        return candidates
 
     def remove_next(
         self,
         cache_dict: Optional[dict[KeyType, Any]] = None,
     ) -> Optional[KeyType]:
         """
-        Select, remove, and return the single chunk with the lowest score.
-
-        Args:
-            cache_dict: Optional dictionary of cache entries.
-
-        Returns:
-            Key of evicted entry, or None if empty.
+        Select and return the single candidate chunk key with the lowest score.
         """
         res = self.evict(cache_dict=cache_dict, num_candidates=1)
         if isinstance(res, list):

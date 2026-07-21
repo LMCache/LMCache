@@ -59,7 +59,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         else:
             super().__init__("cpu")
 
-        self.cache_policy = get_cache_policy(config.cache_policy)
+        self.cache_policy = get_cache_policy(config.cache_policy, config=config)
         self.hot_cache = self.cache_policy.init_mutable_mapping()
 
         self.use_hot = config.local_cpu
@@ -162,12 +162,26 @@ class LocalCPUBackend(AllocatorBackendInterface):
         stored = False
         with self.cpu_lock:
             if key in self.hot_cache:
+                obs_recompute = (
+                    getattr(memory_obj, "observed_recompute_tokens", None)
+                    if memory_obj is not None
+                    else None
+                )
+                if obs_recompute is not None:
+                    self.cache_policy.update_cost_observation(
+                        key, observed_recompute_tokens=obs_recompute
+                    )
                 return None
 
             memory_obj.ref_count_up()
             self.hot_cache[key] = memory_obj
 
-            self.cache_policy.update_on_put(key)
+            obs_recompute = getattr(memory_obj, "observed_recompute_tokens", None)
+            self.cache_policy.update_on_put_with_metadata(
+                key,
+                cache_obj=memory_obj,
+                observed_recompute_tokens=obs_recompute,
+            )
 
             # Push kv admit msg with batching
             if self.batched_msg_sender is not None:
@@ -279,9 +293,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
             memory_obj = self.hot_cache.pop(key)
             memory_obj.ref_count_down()
-
-            if force:
-                self.cache_policy.update_on_force_evict(key)
+            self.cache_policy.update_on_force_evict(key)
 
         if self.batched_msg_sender is not None:
             self.batched_msg_sender.add_kv_op(

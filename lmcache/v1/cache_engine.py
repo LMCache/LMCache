@@ -480,6 +480,16 @@ class LMCacheEngine:
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
 
+        total_request_tokens = 0
+        if tokens is not None:
+            total_request_tokens = len(tokens)
+        elif hashes is not None and offsets is not None:
+            total_request_tokens = sum(offsets)
+        elif mask is not None:
+            total_request_tokens = len(mask)
+        else:
+            total_request_tokens = num_to_store_tokens
+
         with store_stats.profile_process_tokens():
             prev_key = 0
             for start, end, key in self.token_database.process_tokens(
@@ -512,6 +522,9 @@ class LMCacheEngine:
                         len(memory_objs),
                     )
                     break
+
+                observed_recompute = max(1, total_request_tokens - start)
+                setattr(memory_obj, "observed_recompute_tokens", observed_recompute)
 
                 starts.append(start)
                 ends.append(end)
@@ -696,6 +709,10 @@ class LMCacheEngine:
                     " choosing to not store the KV cache."
                 )
                 break
+
+            observed_recompute = max(1, len(tokens) - start)
+            for layer_mem_obj in memory_objs_multi_layer:
+                setattr(layer_mem_obj, "observed_recompute_tokens", observed_recompute)
 
             starts.append(start)
             ends.append(end)
@@ -1811,6 +1828,19 @@ class LMCacheEngine:
                     else:
                         memory_obj.ref_count_down()
             reordered_chunks = kept_chunks
+
+        total_req_tokens = (
+            len(tokens)
+            if tokens is not None
+            else (len(mask) if mask is not None else 0)
+        )
+        if total_req_tokens > 0:
+            for key, _, start, _ in reordered_chunks:
+                if start < total_req_tokens:
+                    obs_cost = max(1, total_req_tokens - start)
+                    self.storage_manager.record_cost_observation(
+                        key, observed_recompute_tokens=obs_cost
+                    )
         return reordered_chunks, tot_kv_size
 
     def _broadcast_or_receive_memory_objs(
