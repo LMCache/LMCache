@@ -281,6 +281,25 @@ class TestStorageManagerBasic:
 
         storage_manager.close()
 
+    def test_prefetch_disable_l1_retrieval(self, basic_l1_config, basic_layout):
+        """With disable_l1_retrieval, resident L1 keys are never served: with
+        no L2 configured they surface as misses instead of prefix hits."""
+        config = StorageManagerConfig(
+            l1_manager_config=basic_l1_config,
+            eviction_config=EvictionConfig(eviction_policy="LRU"),
+            disable_l1_retrieval=True,
+        )
+        storage_manager = StorageManager(config)
+
+        object_keys = [make_object_key(i) for i in range(5)]
+        ret = storage_manager.reserve_write(object_keys, basic_layout, mode="new")
+        storage_manager.finish_write(list(ret.keys()))
+
+        handle = storage_manager.submit_prefetch_task(object_keys, basic_layout)
+        assert storage_manager.query_prefetch_status(handle).count_leading_ones() == 0
+
+        storage_manager.close()
+
     def test_prefetch_partial_prefix_hits(
         self, basic_storage_manager_config, basic_layout
     ):

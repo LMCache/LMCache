@@ -68,6 +68,7 @@ class StorageManager:
     def __init__(self, config: StorageManagerConfig):
         self._l1_manager = L1Manager(config.l1_manager_config)
         self._event_bus = get_event_bus()
+        self._disable_l1_retrieval = config.disable_l1_retrieval
 
         # L1 eviction controller
         self._eviction_controller = L1EvictionController(
@@ -457,7 +458,12 @@ class StorageManager:
         # NOTE: now we only have L1, so the prefetch is essentially checking how many
         # objects are already in L1, and adding read locks to them.
 
-        l1_read_result = self._l1_manager.reserve_read(keys, extra_count=extra_count)
+        # disable_l1_retrieval: skip the L1 hit-check so every key routes to L2.
+        l1_read_result: dict[ObjectKey, tuple[L1Error, MemoryObj | None]] = (
+            {}
+            if self._disable_l1_retrieval
+            else self._l1_manager.reserve_read(keys, extra_count=extra_count)
+        )
 
         if policy is TrimPolicy.SPARSE:
             # SPARSE: retain a read lock on every L1 hit (not just the leading

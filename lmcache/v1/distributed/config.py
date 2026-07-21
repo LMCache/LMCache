@@ -250,6 +250,10 @@ class StorageManagerConfig:
     prefetch_policy: str = "default"
     """ The L2 prefetch policy name. """
 
+    disable_l1_retrieval: bool = False
+    """ When True, retrieval never serves reads from resident L1: every key is
+    routed to L2 regardless of L1 residency. """
+
     prefetch_max_in_flight: int = 8
     """ Maximum number of concurrent prefetch requests. """
 
@@ -508,6 +512,12 @@ def add_storage_manager_args(
         "Default is 'default' (pick the first adapter by index).",
     )
     policy_group.add_argument(
+        "--disable-l1-retrieval",
+        action="store_true",
+        help="Never serve reads from resident L1: route every key to L2. "
+        "Off by default.",
+    )
+    policy_group.add_argument(
         "--l2-prefetch-max-in-flight",
         type=int,
         default=8,
@@ -606,6 +616,7 @@ def parse_args_to_config(
         l2_adapter_config=l2_adapter_config,
         store_policy=args.l2_store_policy,
         prefetch_policy=args.l2_prefetch_policy,
+        disable_l1_retrieval=args.disable_l1_retrieval,
         prefetch_max_in_flight=args.l2_prefetch_max_in_flight,
         periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
     )
