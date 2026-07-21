@@ -197,7 +197,7 @@ capacity) can omit steps 2–6 and rely on the base class no-op defaults.
 | `MockL2Adapter`            | ✓        | ✓           | stored, deleted     |
 | `NixlStoreL2Adapter`       | ✓ (skips pinned) | ✓ (pool-based) | stored, deleted |
 | `RawBlockL2Adapter`        | ✓ (skips locked) | ✓ | stored, accessed, deleted |
-| `FSL2Adapter`              | no-op    | `(-1, -1)`  | none                |
+| `FSL2Adapter`              | ✓ (unlinks data files) | ✓ (bytes tracked; no capacity, so fraction stays `-1`) | stored, deleted |
 | `NativeConnectorL2Adapter` | ✓ (via `submit_batch_delete`) | ✓ (client-side, requires `max_capacity_gb`) | stored, deleted |
 
 **Note on `NativeConnectorL2Adapter`:** Eviction support requires two things:

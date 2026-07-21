@@ -376,8 +376,8 @@ class FSL2Adapter(L2AdapterInterface):
             return self._completed_lookup_tasks.pop(task_id, None)
 
     def submit_unlock(self, keys: list[ObjectKey]) -> None:
-        # No-op: FS adapter has no eviction, so locking
-        # between lookup and load is unnecessary.
+        # No-op: the FS adapter holds no read locks. A delete racing a
+        # lookup->load window surfaces as a load miss for that key.
         pass
 
     # ------------------------------------------------------------------
@@ -421,8 +421,33 @@ class FSL2Adapter(L2AdapterInterface):
     # ------------------------------------------------------------------
 
     def delete(self, keys: list[ObjectKey]) -> None:
-        # Not implemented for the filesystem adapter.
-        pass
+        """Delete each key's data file from disk.
+
+        Missing files are skipped, so the call is idempotent. Keys are
+        removed regardless of any in-flight lookup/load window (the FS
+        adapter holds no read locks); a load racing a delete reports that
+        key as a miss. Fires ``on_l2_keys_deleted`` on registered listeners
+        for the keys actually removed.
+
+        Args:
+            keys: The keys of the objects to delete.
+        """
+        deleted_keys: list[ObjectKey] = []
+        deleted_sizes: list[int] = []
+        for key in keys:
+            file_path = self._key_to_path(key)
+            try:
+                size = os.stat(file_path).st_size
+                os.unlink(file_path)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                logger.exception("FSL2Adapter failed to delete %s", file_path)
+                continue
+            deleted_keys.append(key)
+            deleted_sizes.append(size)
+        if deleted_keys:
+            self._notify_keys_deleted(deleted_keys, deleted_sizes)
 
     # ``get_usage()`` is inherited from ``L2AdapterInterface``. The FS
     # adapter declares no max capacity (default 0) so ``supports_global_eviction``
@@ -581,6 +606,8 @@ class FSL2Adapter(L2AdapterInterface):
     ) -> None:
         success = True
         bytes_written = 0
+        stored_keys: list[ObjectKey] = []
+        stored_sizes: list[int] = []
         try:
             for key, obj in zip(keys, objects, strict=True):
                 file_path, tmp_path = self._key_to_file_and_tmp_path(key)
@@ -620,6 +647,8 @@ class FSL2Adapter(L2AdapterInterface):
 
                     await aiofiles.os.replace(tmp_path, file_path)
                     bytes_written += size
+                    stored_keys.append(key)
+                    stored_sizes.append(size)
                     logger.debug(
                         "FSL2Adapter stored key %s (%d bytes)",
                         file_path.name,
@@ -640,6 +669,8 @@ class FSL2Adapter(L2AdapterInterface):
             )
             success = False
 
+        if stored_keys:
+            self._notify_keys_stored(stored_keys, stored_sizes)
         with self._lock:
             self._completed_store_tasks[task_id] = L2StoreResult(success, bytes_written)
         self._store_efd.notify()
