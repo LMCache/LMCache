@@ -608,6 +608,67 @@ class FSL2Adapter(L2AdapterInterface):
 
     # ---- store ----------------------------------------------------------
 
+    async def _store_one(
+        self,
+        key: ObjectKey,
+        obj: MemoryObj,
+    ) -> tuple[bool, int]:
+        """Store a single key's bytes atomically.
+
+        Writes to a per-key temp path, then ``rename``s onto the final
+        path. Returns ``(success, bytes_written)`` where
+        ``bytes_written == 0`` on either a skipped (already-present) or
+        failed write; ``success`` is False only on I/O errors — a
+        skipped key is not a failure.
+        """
+        file_path, tmp_path = self._key_to_file_and_tmp_path(key)
+
+        if await aiofiles.os.path.exists(file_path):
+            return True, 0
+
+        buf = obj.byte_array
+        size = len(buf)
+
+        try:
+            do_odirect = self._use_odirect
+            if do_odirect:
+                aligned = self._os_disk_bs > 0 and size % self._os_disk_bs == 0
+                if not aligned:
+                    logger.warning(
+                        "Cannot use O_DIRECT for writing size %d, "
+                        "not aligned to block size %d.",
+                        size,
+                        self._os_disk_bs,
+                    )
+                    do_odirect = False
+
+            if do_odirect:
+                await self._loop.run_in_executor(
+                    None,
+                    self._write_with_odirect,
+                    tmp_path,
+                    buf,
+                )
+            else:
+                async with aiofiles.open(tmp_path, "wb") as f:
+                    await f.write(buf)
+
+            await aiofiles.os.replace(tmp_path, file_path)
+            logger.debug(
+                "FSL2Adapter stored key %s (%d bytes)",
+                file_path.name,
+                size,
+            )
+            return True, size
+        except Exception:
+            logger.exception("FSL2Adapter failed to store %s", file_path)
+            if await aiofiles.os.path.exists(tmp_path):
+                try:
+                    await aiofiles.os.unlink(tmp_path)
+                except OSError:
+                    pass
+            return False, 0
+
     async def _execute_store(
         self,
         keys: list[ObjectKey],
@@ -618,66 +679,62 @@ class FSL2Adapter(L2AdapterInterface):
         bytes_written = 0
         stored_keys: list[ObjectKey] = []
         stored_sizes: list[int] = []
+
         try:
-            for key, obj in zip(keys, objects, strict=True):
-                file_path, tmp_path = self._key_to_file_and_tmp_path(key)
-
-                # Skip if already stored on disk
-                if await aiofiles.os.path.exists(file_path):
-                    continue
-                buf = obj.byte_array
-                size = len(buf)
-
-                try:
-                    # Decide whether O_DIRECT is usable
-                    do_odirect = self._use_odirect
-                    if do_odirect:
-                        aligned = self._os_disk_bs > 0 and size % self._os_disk_bs == 0
-                        if not aligned:
-                            logger.warning(
-                                "Cannot use O_DIRECT for "
-                                "writing size %d, not "
-                                "aligned to block size "
-                                "%d.",
-                                size,
-                                self._os_disk_bs,
-                            )
-                            do_odirect = False
-
-                    if do_odirect:
-                        await self._loop.run_in_executor(
-                            None,
-                            self._write_with_odirect,
-                            tmp_path,
-                            buf,
-                        )
-                    else:
-                        async with aiofiles.open(tmp_path, "wb") as f:
-                            await f.write(buf)
-
-                    await aiofiles.os.replace(tmp_path, file_path)
-                    bytes_written += size
-                    stored_keys.append(key)
-                    stored_sizes.append(size)
-                    logger.debug(
-                        "FSL2Adapter stored key %s (%d bytes)",
-                        file_path.name,
-                        size,
-                    )
-                except Exception:
-                    logger.exception(
-                        "FSL2Adapter failed to store %s",
-                        file_path,
-                    )
-                    if await aiofiles.os.path.exists(tmp_path):
-                        await aiofiles.os.unlink(tmp_path)
-                    success = False
-        except Exception:
+            grouped = _group_objects_by_key(keys, objects)
+        except ValueError:
             logger.exception(
-                "FSL2Adapter store task %s failed",
+                "FSL2Adapter store task %s has mismatched key/object counts",
                 task_id,
             )
+            grouped = {}
             success = False
+
+        # Fan out one write per unique key. Keeping the first object for
+        # duplicates preserves the previous serial behavior, where the first
+        # occurrence created the final file and later occurrences skipped it.
+        unique_pairs = [
+            (key, occurrences[0][1]) for key, occurrences in grouped.items()
+        ]
+        if len(unique_pairs) == 1:
+            key, obj = unique_pairs[0]
+            try:
+                ok, nbytes = await self._store_one(key, obj)
+            except Exception:
+                logger.exception(
+                    "FSL2Adapter store coroutine for key %s raised",
+                    self._key_to_path(key).name,
+                )
+                ok, nbytes = False, 0
+            if not ok:
+                success = False
+            bytes_written += nbytes
+            if nbytes:
+                stored_keys.append(key)
+                stored_sizes.append(nbytes)
+        elif unique_pairs:
+            results = await asyncio.gather(
+                *(self._store_one(key, obj) for key, obj in unique_pairs),
+                return_exceptions=True,
+            )
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.error(
+                        "FSL2Adapter store coroutine for key %s raised: %r",
+                        self._key_to_path(unique_pairs[i][0]).name,
+                        result,
+                    )
+                    success = False
+                    continue
+                if isinstance(result, BaseException):
+                    raise result
+                ok, nbytes = result
+                if not ok:
+                    success = False
+                bytes_written += nbytes
+                if nbytes:
+                    stored_keys.append(unique_pairs[i][0])
+                    stored_sizes.append(nbytes)
 
         if stored_keys:
             self._notify_keys_stored(stored_keys, stored_sizes)
