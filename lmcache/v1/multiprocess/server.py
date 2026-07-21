@@ -423,8 +423,16 @@ def run_cache_server(
     InitializeL1Usage(event_bus, ctx.storage_manager)
 
     zmq_context = zmq.Context.instance()
+    # ``host`` may already carry a transport scheme (e.g. ``grpc://0.0.0.0``
+    # or ``tcp://0.0.0.0``); fall back to ``tcp://`` when it doesn't. This
+    # mirrors ``_ensure_transport_scheme`` on the client side and lets ops
+    # switch the RPC transport (zmq/grpc) purely via config, without any
+    # schema change.
+    host = mp_config.host
+    bind_prefix = host if "://" in host else "tcp://" + host
+    bind_url = bind_prefix + ":" + str(mp_config.port)
     server = MessageQueueServer(
-        bind_url=f"tcp://{mp_config.host}:{mp_config.port}",
+        bind_url=bind_url,
         context=zmq_context,
     )
 
@@ -451,9 +459,8 @@ def run_cache_server(
         )
 
     logger.info(
-        "LMCache ZMQ cache server is running on tcp://%s:%d",
-        mp_config.host,
-        mp_config.port,
+        "LMCache cache server is running on %s",
+        bind_url,
     )
 
     if not hasattr(torch_dev, "init"):

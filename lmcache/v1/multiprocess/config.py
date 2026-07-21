@@ -21,13 +21,19 @@ logger = init_logger(__name__)
 
 @dataclass
 class MPServerConfig:
-    """Configuration for the ZMQ-based multiprocess cache server."""
+    """Configuration for the multiprocess cache server."""
 
     host: str = "localhost"
-    """ZMQ server host."""
+    """MessageQueue server host.
+
+    May optionally carry a transport scheme understood by the mp-mode
+    transport registry (``tcp://`` / ``ipc://`` for ZMQ, ``grpc://`` /
+    ``grpc+unix://`` for gRPC); when no scheme is present, ``tcp://`` is
+    assumed so existing deployments keep working unchanged.
+    """
 
     port: int = 5555
-    """ZMQ server port."""
+    """MessageQueue server port."""
 
     chunk_size: int = 256
     """Chunk size for KV cache operations."""
