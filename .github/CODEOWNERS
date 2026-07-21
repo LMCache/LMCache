@@ -58,8 +58,8 @@
 /lmcache/non_cuda_equivalents.py       @hlin99 @hickeyma
 
 # C extensions
-/csrc/                                 @ApostaC @YaoJiayi @sammshen
-/csrc/storage_backends/                @sammshen @hlin99
+/csrc/                                 @ApostaC @YaoJiayi @sammshen @DongDongJu
+/csrc/storage_backends/                @sammshen @hlin99 @DongDongJu
 
 # Native connector L2 adapters
 /lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py  @sammshen @hlin99
@@ -93,7 +93,7 @@
 /.buildkite/                           @sammshen @ApostaC @deng451e @hickeyma
 
 # Operator
-/operator/                             @royyhuang
+/operator/                             @royyhuang @DongDongJu
 
 # Rust
 /rust/                                 @DongDongJu
