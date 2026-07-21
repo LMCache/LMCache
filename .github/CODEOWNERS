@@ -9,13 +9,13 @@
 /lmcache/v1/memory_management.py       @sammshen @deng451e @chunxiaozheng @DongDongJu @ApostaC
 
 # Multiprocess
-/lmcache/v1/multiprocess/              @ApostaC @hlin99
+/lmcache/v1/multiprocess/              @ApostaC @DongDongJu @hlin99
 /lmcache/v1/multiprocess/protocols/observability.py  @royyhuang @ApostaC
 /lmcache/v1/multiprocess/http_server.py              @royyhuang @ApostaC
 /lmcache/v1/mp_observability/            @yoo-kumaneko @royyhuang @ApostaC @sammshen
 
 # Distributed / L2
-/lmcache/v1/distributed/               @ApostaC @maobaolong @chunxiaozheng
+/lmcache/v1/distributed/               @ApostaC @maobaolong @chunxiaozheng @DongDongJu
 /lmcache/v1/distributed/eviction.py                              @YaoJiayi @hlin99
 /lmcache/v1/distributed/eviction_policy/                         @YaoJiayi @hlin99
 /lmcache/v1/distributed/storage_controllers/eviction_controller.py @YaoJiayi @hlin99
