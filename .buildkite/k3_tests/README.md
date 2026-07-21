@@ -63,8 +63,7 @@ plus a few suite-specific surfaces:
 
 - Shared runtime surface: `lmcache/**`, `csrc/**`, `tests/**`,
   `requirements/**`, build files such as `pyproject.toml` / `setup.py` /
-  `CMakeLists.txt`, shared CI harness files like `.buildkite/k3_harness/setup-env.sh`,
-  `.buildkite/k3_harness/setup-lmcache-only-env.sh`, and
+  `CMakeLists.txt`, shared CI files like `.buildkite/k3_harness/**`, and
   `.buildkite/k3_tests/common_scripts/`
 - `integration` adds `.buildkite/k3_tests/integration/**`
 - `correctness` adds `.buildkite/k3_tests/correctness/**`
