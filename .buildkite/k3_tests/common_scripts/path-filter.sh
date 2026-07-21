@@ -122,14 +122,14 @@ _path_filter_is_xpu_surface() {
 
 _path_filter_pipeline_kind() {
     case "$1" in
-        .buildkite/k3_tests/unit/pipeline.yml) echo unit ;;
-        .buildkite/k3_tests/integration/pipeline.yml) echo integration ;;
-        .buildkite/k3_tests/correctness/pipeline.yml) echo correctness ;;
-        .buildkite/k3_tests/multiprocess/pipeline.yml) echo multiprocess ;;
-        .buildkite/k3_tests/blend/pipeline.yml) echo blend ;;
-        .buildkite/k3_tests/sglang/pipeline.yml) echo sglang ;;
-        .buildkite/k3_tests/xpu/pipeline.yml) echo xpu ;;
-        .buildkite/k3_tests/comprehensive/pipeline.yml) echo comprehensive ;;
+        *k3_tests/unit/pipeline.yml) echo unit ;;
+        *k3_tests/integration/pipeline.yml) echo integration ;;
+        *k3_tests/correctness/pipeline.yml) echo correctness ;;
+        *k3_tests/multiprocess/pipeline.yml) echo multiprocess ;;
+        *k3_tests/blend/pipeline.yml) echo blend ;;
+        *k3_tests/sglang/pipeline.yml) echo sglang ;;
+        *k3_tests/xpu/pipeline.yml) echo xpu ;;
+        *k3_tests/comprehensive/pipeline.yml) echo comprehensive ;;
         *) echo generic ;;
     esac
 }
