@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 # Standard
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 # First Party
 from lmcache.v1.platform.base_device_spec import DeviceSpec
@@ -14,6 +14,7 @@ from lmcache.v1.platform.cuda.pin_memory import CudaPinMemoryBackend
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.v1.platform.base_cache_context import BaseCacheContext
     from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
 
 # ---------------------------------------------------------------------------
@@ -56,3 +57,9 @@ class CudaDeviceSpec(DeviceSpec):
             return torch.cuda.is_available()
         except Exception:
             return False
+
+    def create_cache_context(self, *args: Any, **kwargs: Any) -> "BaseCacheContext":
+        # First Party
+        from lmcache.v1.platform.cuda.cache_context import GPUCacheContext
+
+        return GPUCacheContext(*args, **kwargs)
