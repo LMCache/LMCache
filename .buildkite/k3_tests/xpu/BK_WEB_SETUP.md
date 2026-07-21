@@ -26,7 +26,7 @@ The path filter treats the following as trivial for the k3 test harness:
 
 - `*.md`, `LICENSE*`, `NOTICE*`
 - `.gitignore`, `.gitattributes`, `.editorconfig`, `.mailmap`, `CODEOWNERS`
-- anything under `docs/`, `asset/`, `assets/`, or `.github/`
+- anything under `docs/`, `asset/`, or `.github/`
 
 If you need the XPU pipeline to run for a docs/asset-only PR, add the
 `force-ci` label.

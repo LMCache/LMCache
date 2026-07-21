@@ -51,7 +51,6 @@ _path_filter_is_trivial() {
         CODEOWNERS) return 0 ;;
         docs/*) return 0 ;;
         asset/*) return 0 ;;
-        assets/*) return 0 ;;
         .github/*) return 0 ;;
     esac
     return 1

@@ -48,7 +48,7 @@ instead of `buildkite-agent pipeline upload` directly. The wrapper
   green with just the upload step) when *all* changed files match a "trivial"
   pattern: `*.md`, `LICENSE*`, `NOTICE*`, `.gitignore`, `.gitattributes`,
   `.editorconfig`, `.mailmap`, `CODEOWNERS`, or anything under `docs/`,
-  `asset/`, `assets/`, or `.github/`. (`.github/` is trivial here
+  `asset/`, or `.github/`. (`.github/` is trivial here
   because k3 tests run on Buildkite, not GitHub Actions, so workflow /
   CODEOWNERS / template changes do not affect them.)
 - **Force-runs** the build when any changed file lives under `.buildkite/` —
@@ -73,7 +73,7 @@ If you want a change to be treated as CI-trivial, prefer placing it under one
 of the safe directories above. For example:
 
 - docs edits under `docs/` or `*.md` files are skipped
-- image/logo updates under `asset/` or `assets/` are skipped
+- image/logo updates under `asset/` are skipped
 - Buildkite or pipeline changes under `.buildkite/` always run
 
 ### Trigger strategy
