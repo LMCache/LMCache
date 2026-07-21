@@ -57,6 +57,32 @@ instead of `buildkite-agent pipeline upload` directly. The wrapper
 - **Runs** the build whenever there is at least one non-trivial file by
   uploading `pipeline.yml`, which contains the real test steps.
 
+The filter is now test-aware instead of one global non-trivial rule. In
+practice, it evaluates the uploaded pipeline against a shared runtime surface
+plus a few suite-specific surfaces:
+
+- Shared runtime surface: `lmcache/**`, `csrc/**`, `tests/**`,
+  `requirements/**`, build files such as `pyproject.toml` / `setup.py` /
+  `CMakeLists.txt`, shared CI harness files like `.buildkite/k3_harness/setup-env.sh`,
+  `.buildkite/k3_harness/setup-lmcache-only-env.sh`, and
+  `.buildkite/k3_tests/common_scripts/`
+- `integration` adds `.buildkite/k3_tests/integration/**`
+- `correctness` adds `.buildkite/k3_tests/correctness/**`
+- `multiprocess` adds `benchmarks/long_doc_qa/**` and
+  `.buildkite/k3_tests/multiprocess/**`
+- `comprehensive` adds `benchmarks/**`, `examples/disagg_prefill*`, and
+  `.buildkite/k3_tests/comprehensive/**`
+- `blend` adds `.buildkite/k3_tests/blend/**` and
+  `.buildkite/k3_harness/setup-blend-env.sh`
+- `sglang` keeps a dedicated entry for `lmcache/integration/sglang/**` and
+  `.buildkite/k3_tests/sglang/**` plus `.buildkite/k3_harness/setup-sglang-env.sh`
+- `xpu` relies on the shared runtime surface plus
+  `.buildkite/k3_tests/xpu/**`
+
+Suite-local `.buildkite/k3_tests/<suite>/...` changes only fan out to that
+suite. Shared harness updates fan out to the suites that actually depend on the
+file they touch.
+
 Detection:
 - PR builds diff against `origin/${BUILDKITE_PULL_REQUEST_BASE_BRANCH}`
   (default `main`) using the merge-base.
