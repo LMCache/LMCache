@@ -13,12 +13,15 @@ coordinator-facing warm-prefetch surface:
 3. ``POST /cache/prefetches`` (token-addressed, the payload the coordinator
    forwards verbatim) reloads the chunks L2 -> L1; the status poll reports
    ``found_keys == total_keys``.
-4. The L2 copies are deleted, and a normal SGLang-shaped ``LOOKUP`` +
-   ``RETRIEVE`` round-trip returns byte-identical KV -- data that can only
-   have come from the warm-prefetched L1 entries.
+4. ``DELETE /cache/objects`` removes the L2 copies, addressed by keys from
+   the coordinator-side resolver (the same resolution the pin/unpin
+   endpoints use), and a normal SGLang-shaped ``LOOKUP`` + ``RETRIEVE``
+   round-trip returns byte-identical KV -- data that can only have come
+   from the warm-prefetched L1 entries.
 """
 
 # Standard
+from dataclasses import asdict
 from typing import Generator
 import multiprocessing as mp
 import os
@@ -41,6 +44,7 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import FSL2AdapterConfig
+from lmcache.v1.mp_coordinator.utils.cache_utils import resolve_object_keys
 from lmcache.v1.mp_observability.config import DEFAULT_OBSERVABILITY_CONFIG
 from lmcache.v1.multiprocess.config import (
     CoordinatorConfig,
@@ -50,6 +54,7 @@ from lmcache.v1.multiprocess.config import (
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, KVCache
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
 
 SERVER_HOST = "127.0.0.1"
@@ -377,10 +382,30 @@ def test_warm_prefetch_restores_sglang_kv(
     assert status["total_keys"] == NUM_CHUNKS * WORLD_SIZE
     assert status["found_keys"] == status["total_keys"]
 
-    # Remove the L2 copies so the retrieve below can only be served by the
-    # warm-prefetched L1 entries.
-    for path in l2_files:
-        os.remove(path)
+    # Remove the L2 copies through the key-addressed delete API, with keys
+    # resolved by the coordinator-side resolver (the same resolution the
+    # pin/unpin endpoints use), so the retrieve below can only be served by
+    # the warm-prefetched L1 entries.
+    resolved_keys, resolved_chunks = resolve_object_keys(
+        TokenHasher(chunk_size=CHUNK_SIZE),
+        MODEL_NAME,
+        WORLD_SIZE,
+        token_ids,
+        "",
+    )
+    assert resolved_chunks == NUM_CHUNKS
+    resp = httpx.request(
+        "DELETE",
+        f"{HTTP_URL}/cache/objects",
+        json={"keys": [asdict(k.to_encoded_object_key()) for k in resolved_keys]},
+        timeout=10.0,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["ok"] is True
+    deadline = time.monotonic() + POLL_DEADLINE
+    while time.monotonic() < deadline and any(os.path.exists(p) for p in l2_files):
+        time.sleep(0.2)
+    assert not any(os.path.exists(p) for p in l2_files)
 
     matched_chunks = sgl_client.lookup(token_ids, request_id="warm-sgl-load")
     assert matched_chunks == NUM_CHUNKS
