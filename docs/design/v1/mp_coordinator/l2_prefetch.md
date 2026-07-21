@@ -80,6 +80,17 @@ node already holds or retry. Completion is observed via the status endpoint
 the load itself still surfaces through the controller's
 `L2_PREFETCH_LOAD_COMPLETED` event).
 
+### Serving engines
+
+The endpoint is engine-agnostic: keys are resolved from ``(model_name,
+world_size, cache_salt)`` and the server-side token hasher, the same
+identity every MP engine adapter (vLLM, SGLang, TensorRT-LLM) uses on
+STORE, and the load itself moves L1 buffers without touching GPU state.
+For SGLang, ``model_name`` is the ``--model-path`` string and
+``cache_salt`` stays ``""`` (the SGLang adapter stores with the default
+salt). ``tests/v1/multiprocess/test_warm_prefetch_sglang.py`` covers the
+full flow against an SGLang-shaped registration.
+
 ### Single-node vs. multi-node
 
 One `instance_id` is **one node's** MP server, and its L1 is shared with that
