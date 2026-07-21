@@ -682,11 +682,34 @@ class FSL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         task_id: L2TaskId,
     ) -> None:
+        # Check keys concurrently; avoid gather overhead for a single key.
         bitmap = Bitmap(len(keys))
-        for i, key in enumerate(keys):
-            if not await self._key_exists_on_disk(key):
-                continue
-            bitmap.set(i)
+        if len(keys) == 1:
+            try:
+                if await self._key_exists_on_disk(keys[0]):
+                    bitmap.set(0)
+            except Exception:
+                logger.exception(
+                    "FSL2Adapter lookup coroutine for %s raised",
+                    self._key_to_path(keys[0]).name,
+                )
+        elif keys:
+            results = await asyncio.gather(
+                *(self._key_exists_on_disk(k) for k in keys),
+                return_exceptions=True,
+            )
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.error(
+                        "FSL2Adapter lookup coroutine for %s raised: %r",
+                        self._key_to_path(keys[i]).name,
+                        result,
+                    )
+                    continue
+                if isinstance(result, BaseException):
+                    raise result
+                if result:
+                    bitmap.set(i)
 
         with self._lock:
             self._completed_lookup_tasks[task_id] = bitmap
