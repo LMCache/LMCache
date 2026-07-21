@@ -174,7 +174,7 @@ class LMCacheWorker:
             bind_or_connect="bind",
         )
 
-        logger.info(f"Reply socket established at {self.lmcache_worker_internal_url}")
+        logger.info("Reply socket established at %s", self.lmcache_worker_internal_url)
 
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(
@@ -518,13 +518,13 @@ class LMCacheWorker:
         while True:
             try:
                 msgs = await self.batched_get_msg()
-                logger.debug(f"Sending {len(msgs)} messages")
+                logger.debug("Sending %d messages", len(msgs))
                 self.push_socket.send_multipart(
                     [msgspec.msgpack.encode(msg) for msg in msgs]
                 )
 
             except Exception as e:
-                logger.error(f"Push error: {e}")
+                logger.error("Push error: %s", e)
 
     async def handle_request(self):
         """
@@ -534,7 +534,7 @@ class LMCacheWorker:
             try:
                 serialized_request = await self.reply_socket.recv()
                 request = msgspec.msgpack.decode(serialized_request, type=Msg)
-                logger.debug(f"Received message: {request}")
+                logger.debug("Received message: %s", request)
                 if isinstance(request, MoveWorkerMsg):
                     tokens = request.tokens
                     old_position = request.old_position
@@ -617,14 +617,14 @@ class LMCacheWorker:
                         HealthWorkerRetMsg(error_code=error_code)
                     )
                 else:
-                    logger.error(f"Unknown message: {request}")
+                    logger.error("Unknown message: %s", request)
                     serialized_ret_msg = msgspec.msgpack.encode(
                         ErrorMsg(error=f"Unknown message: {request}")
                     )
 
                 await self.reply_socket.send(serialized_ret_msg)
             except Exception as e:
-                logger.error(f"Worker error: {e}")
+                logger.error("Worker error: %s", e)
                 serialized_ret_msg = msgspec.msgpack.encode(
                     ErrorMsg(error=f"Worker error: {e}")
                 )

@@ -916,14 +916,26 @@ class MaruL1Manager:
         self._pin_retrieve_stage(registered, total, ret, successful_keys)
 
     @_maru_l1_synchronized
-    def delete(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1Error]:
+    def delete(
+        self, keys: list[ObjectKey], force: bool = False
+    ) -> dict[ObjectKey, L1Error]:
         """Delete keys from the shared directory.
 
         PARITY(L1Manager.delete): a key held by any reader or writer refuses
         with KEY_IS_LOCKED; the eviction policy keeps it and retries later.
 
+        DIVERGENCE(L1Manager.delete): ``force`` is accepted for interface
+        parity but ignored — locked keys are ALWAYS refused. On the shared
+        pool a lock may be a pin held by another process, and the handler has
+        no force-delete RPC; freeing a pinned page would corrupt in-flight
+        reads/writes across the pool. Callers see the refusal as
+        KEY_IS_LOCKED (reported upstream as "skipped"), never a silent
+        success.
+
         Args:
             keys: The list of object keys to delete.
+            force: Ignored (see DIVERGENCE above). Present so this backend
+                satisfies ``L1ManagerInterface.delete``.
 
         Returns:
             A dictionary mapping each key to an L1Error.
@@ -931,7 +943,8 @@ class MaruL1Manager:
         Errors:
             KEY_NOT_EXIST: The key is not in the directory.
             KEY_IS_LOCKED: The key is staged locally, pinned on the server,
-                or the delete RPC failed (retryable).
+                or the delete RPC failed (retryable). Returned regardless of
+                ``force``.
         """
         ret: dict[ObjectKey, L1Error] = {}
         successful_keys: list[ObjectKey] = []

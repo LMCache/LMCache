@@ -1581,7 +1581,6 @@ class RawBlockCore:
                 "meta_version": self.meta_version,
                 "data_base_offset": self._data_base_offset,
                 "next_slot": self._next_slot,
-                "free_slots": list(self._free_slots),
                 "entries": {
                     encoded_key: {
                         "offset": entry.offset,
@@ -1737,35 +1736,9 @@ class RawBlockCore:
             )
             return False
 
-        raw_free_slots = data.get("free_slots", [])
-        if not isinstance(raw_free_slots, list):
-            logger.warning("Device metadata free_slots is invalid; ignoring metadata")
-            return False
-        free_slots: list[int] = []
-        seen_slots: set[int] = set()
-        for raw_slot in raw_free_slots:
-            try:
-                slot = int(raw_slot)
-            except Exception:
-                logger.warning(
-                    "Device metadata free_slots contains non-integer; ignoring metadata"
-                )
-                return False
-            if slot < 0 or slot >= self._max_slots:
-                logger.warning(
-                    "Device metadata free_slots contains out-of-range slot %d; "
-                    "ignoring metadata",
-                    slot,
-                )
-                return False
-            if slot in seen_slots:
-                continue
-            seen_slots.add(slot)
-            free_slots.append(slot)
-
         with self._lock:
             self._next_slot = next_slot
-            self._free_slots = free_slots
+            self._free_slots = []
             self._index.clear()
             self._lock_refcnt.clear()
 
@@ -1821,8 +1794,11 @@ class RawBlockCore:
                 self._offset_to_slot(int(entry.offset))
                 for entry in self._index.values()
             }
+            # Rebuild from committed entries instead of trusting checkpoint
+            # free_slots. A crash-time checkpoint can otherwise preserve a slot
+            # reserved by an uncommitted in-flight write as neither used nor free.
             self._free_slots = [
-                slot for slot in self._free_slots if slot not in used_slots
+                slot for slot in range(self._next_slot) if slot not in used_slots
             ]
 
             self._meta_dirty_total = 0

@@ -249,6 +249,15 @@ Configuration
      - ``0.01``
      - Fraction of chunks/blocks to track for lifecycle histograms
        (0, 1.0]. Counters always count all events. Default is 1%.
+   * - ``--enable-extra-logging``
+     - off
+     - Periodically log per-GPU L0<->L1 store/retrieve throughput and token
+       counts, plus L1 memory usage, at INFO level. Conflicts with
+       ``--disable-observability``. See :doc:`logs`.
+   * - ``--extra-logging-interval``
+     - ``10.0``
+     - Seconds between extra-logging emissions. Values below ``1.0`` are
+       limited by the 1 Hz internal heartbeat.
    * - ``--trace-level``
      - *(none)*
      - Enable trace recording at the given level. Currently only

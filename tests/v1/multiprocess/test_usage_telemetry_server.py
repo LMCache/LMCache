@@ -88,20 +88,34 @@ def test_server_startup_emits_usage_report(monkeypatch, tmp_path):
         "LMCACHE_USAGE_TRACK_URL", f"http://127.0.0.1:{sink.server_address[1]}"
     )
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LMCACHE_USAGE_TRACK_INTERVAL", "1")
 
     context = multiprocessing.get_context("spawn")
     process = context.Process(target=_usage_server_runner, args=(SERVER_PORT,))
     process.start()
     try:
+        # With a short flush interval, continuous heartbeats can interleave
+        # with (or precede) the one-shot startup messages: wait for the
+        # startup message types, not a message count.
+        def received_types() -> set[object]:
+            return {payload["message_type"] for _, payload in sink.received}
+
         deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
-        while time.monotonic() < deadline and len(sink.received) < 2:
+        while time.monotonic() < deadline and not (
+            {"EnvMessage", "MPServerMessage"} <= received_types()
+        ):
             time.sleep(0.1)
         received = list(sink.received)
-        assert len(received) == 2, f"expected 2 usage messages, got {received}"
-
-        assert {path for path, _ in received} == {"/context"}
         payloads = {payload["message_type"]: payload for _, payload in received}
-        assert set(payloads) == {"EnvMessage", "MPServerMessage"}
+        assert {"EnvMessage", "MPServerMessage"} <= set(payloads), (
+            f"startup messages missing, got {received}"
+        )
+        startup_paths = {
+            path
+            for path, payload in received
+            if payload["message_type"] in ("EnvMessage", "MPServerMessage")
+        }
+        assert startup_paths == {"/context"}
 
         mp_payload = payloads["MPServerMessage"]
         assert mp_payload["deployment_mode"] == "mp_server"
@@ -109,6 +123,27 @@ def test_server_startup_emits_usage_report(monkeypatch, tmp_path):
         assert mp_payload["l1_size_bytes"] == 1 << 30
         assert "instance_id" not in mp_payload
         assert payloads["EnvMessage"]["session_id"] == mp_payload["session_id"]
+
+        # With a 1 s flush interval the continuous reporter must deliver a
+        # heartbeat shortly after startup.
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not any(
+            payload["message_type"] == "ContinuousContextMessage"
+            for _, payload in sink.received
+        ):
+            time.sleep(0.1)
+        continuous = [
+            (path, payload)
+            for path, payload in sink.received
+            if payload["message_type"] == "ContinuousContextMessage"
+        ]
+        assert continuous, "no ContinuousContextMessage received"
+        path, payload = continuous[0]
+        assert path == "/cache-usage"
+        assert payload["deployment_mode"] == "mp_server"
+        assert payload["sequence_number"] >= 1
+        assert payload["uptime_seconds"] >= 0
+        assert payload["session_id"] == mp_payload["session_id"]
     finally:
         process.terminate()
         process.join(timeout=10)

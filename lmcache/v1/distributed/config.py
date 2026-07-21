@@ -262,6 +262,12 @@ class EvictionConfig:
     eviction_ratio: float = field(default=0.2)
     """ The fraction of *allocated* memory to evict when triggered (0.0 to 1.0). """
 
+    extra_logging_enabled: bool = field(default=False)
+    """ Whether the eviction loop periodically logs L1 memory usage at INFO. """
+
+    extra_logging_interval: float = field(default=10.0)
+    """ Seconds between L1 memory usage log lines when extra logging is enabled. """
+
 
 @dataclass
 class StorageManagerConfig:
@@ -716,6 +722,8 @@ def parse_args_to_config(
         eviction_policy=args.eviction_policy,
         trigger_watermark=args.eviction_trigger_watermark,
         eviction_ratio=args.eviction_ratio,
+        extra_logging_enabled=getattr(args, "enable_extra_logging", False),
+        extra_logging_interval=getattr(args, "extra_logging_interval", 10.0),
     )
 
     l2_adapter_config = parse_args_to_l2_adapters_config(args)

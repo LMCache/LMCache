@@ -449,6 +449,28 @@ def test_delete_remotely_pinned_key_is_locked():
     assert manager.delete([k])[k] == L1Error.KEY_IS_LOCKED
 
 
+def test_delete_force_is_ignored_for_locked_keys():
+    """DIVERGENCE(L1Manager.delete): force never bypasses locks on maru.
+
+    A lock may be a pin held by another process on the shared pool, so
+    force=True must still refuse both remotely pinned and locally staged
+    keys with KEY_IS_LOCKED (surfaced upstream as "skipped").
+    """
+    manager, handler, _ = make_maru_manager()
+
+    pinned = _key(1)
+    _seed(handler, pinned)
+    handler.pins[object_key_to_string(pinned)] = 1  # pinned by another instance
+
+    staged = _key(2)
+    manager.reserve_write([staged], [True], _LAYOUT, mode="new")  # in-flight write
+
+    results = manager.delete([pinned, staged], force=True)
+    assert results[pinned] == L1Error.KEY_IS_LOCKED
+    assert results[staged] == L1Error.KEY_IS_LOCKED
+    assert staged in manager._pending_write  # staging untouched, no page freed
+
+
 # =========================================================================
 # get_memory_usage (device-fill watermark) / is_key_evictable
 # =========================================================================

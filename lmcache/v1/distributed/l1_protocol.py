@@ -69,8 +69,13 @@ class L1ManagerInterface(Protocol):
         Fires ``on_l1_keys_finish_write_and_reserve_read`` (NOT write_finished)."""
         ...
 
-    def delete(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1Error]:
+    def delete(
+        self, keys: list[ObjectKey], force: bool = False
+    ) -> dict[ObjectKey, L1Error]:
         """Delete unlocked keys (locked keys refused).
+        ``force`` requests deletion of locked keys too; backends that cannot
+        honor it (e.g. a shared pool with cross-process pins) may still refuse
+        with ``KEY_IS_LOCKED``.
         Fires ``on_l1_keys_deleted_by_manager`` for keys actually removed."""
         ...
 

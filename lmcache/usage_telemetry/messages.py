@@ -264,7 +264,14 @@ class MPServerMessage(UsageMessage):
 
 @dataclass
 class ContinuousContextMessage(UsageMessage):
-    """Interval counters flushed periodically by the continuous reporter."""
+    """Interval counters flushed periodically by the continuous reporters.
+
+    Sent by both deployment modes; distinguish by the ``deployment_mode``
+    header. ``interval_num_hit_tokens`` counts tokens actually retrieved
+    (served) from LMCache in the interval; ``interval_stored_kv_size`` is
+    exact bytes in MP mode and a kv-bytes-per-token estimate in
+    single-process mode.
+    """
 
     ENDPOINT: ClassVar[str] = "cache-usage"
 
@@ -272,15 +279,23 @@ class ContinuousContextMessage(UsageMessage):
     interval_num_hit_tokens: int
     interval_stored_kv_size: int
     sequence_number: int
+    uptime_seconds: float
+    """Seconds since the reporting process started."""
 
 
 @dataclass
 class CacheLifespanMessage(UsageMessage):
-    """Cache-entry lifespan histogram flushed with each continuous report."""
+    """Cache-entry lifespan histogram flushed with each continuous report.
+
+    Single-process mode only; measures the store-to-reuse gap per reused
+    chunk.
+    """
 
     ENDPOINT: ClassVar[str] = "cache-lifespan"
 
     cache_lifespan_histogram: dict[float, int]
-    """Bucket lower bound (seconds) to sample count. Numeric keys become
+    """Bucket lower bound (minutes) to sample count. Numeric keys become
     strings on the wire (JSON object keys)."""
     sequence_number: int
+    uptime_seconds: float
+    """Seconds since the reporting process started."""

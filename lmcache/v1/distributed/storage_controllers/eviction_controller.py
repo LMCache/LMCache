@@ -106,6 +106,7 @@ class L1EvictionController(EvictionController):
         self._listener = L1EvictionPolicy(self._eviction_policy)
         self._l1_manager.register_listener(self._listener)
         self._event_bus = get_event_bus()
+        self._last_extra_log = time.monotonic()
 
     def report_status(self) -> dict:
         return {
@@ -142,6 +143,20 @@ class L1EvictionController(EvictionController):
             )
         )
 
+    def _maybe_log_memory_usage(self, used_bytes: int, total_bytes: int) -> None:
+        """Emit the opt-in L1 memory usage INFO line, throttled to the interval."""
+        now = time.monotonic()
+        if now - self._last_extra_log < self._eviction_config.extra_logging_interval:
+            return
+        self._last_extra_log = now
+        pct = 0.0 if total_bytes == 0 else used_bytes / total_bytes * 100.0
+        logger.info(
+            "L1 memory usage: %.2f/%.2f GiB (%.1f%%)",
+            used_bytes / (1 << 30),
+            total_bytes / (1 << 30),
+            pct,
+        )
+
     def eviction_loop(self):
         watermark = self._eviction_config.trigger_watermark
         eviction_ratio = self._eviction_config.eviction_ratio
@@ -149,6 +164,8 @@ class L1EvictionController(EvictionController):
         while not self._stop_flag.is_set():
             time.sleep(1)
             used_bytes, total_bytes = self._l1_manager.get_memory_usage()
+            if self._eviction_config.extra_logging_enabled:
+                self._maybe_log_memory_usage(used_bytes, total_bytes)
             usage = 0 if total_bytes == 0 else used_bytes / total_bytes
             if usage < watermark:
                 logger.debug(

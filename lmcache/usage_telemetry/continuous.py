@@ -87,9 +87,14 @@ class ContinuousUsageContext:
         self.metadata: LMCacheMetadata = metadata
         self.cache_usage_url: str = usage_server_url(ContinuousContextMessage.ENDPOINT)
         self.cache_lifespan_url: str = usage_server_url(CacheLifespanMessage.ENDPOINT)
-        self.min_logging_interval: int = int(
-            os.getenv("LMCACHE_USAGE_TRACK_INTERVAL", "600")
-        )
+        try:
+            self.min_logging_interval: int = int(
+                os.getenv("LMCACHE_USAGE_TRACK_INTERVAL", "600")
+            )
+        except ValueError:
+            # A malformed env value must not raise into engine startup.
+            logger.debug("Invalid LMCACHE_USAGE_TRACK_INTERVAL", exc_info=True)
+            self.min_logging_interval = 600
         # send the first message immediately after init
         self.last_logged_ts: float = -1
 
@@ -109,6 +114,7 @@ class ContinuousUsageContext:
         self._sender = sender if sender is not None else DEFAULT_SENDER
         self._mode = mode
         self._sequence_number: int = 0
+        self._start_monotonic: float = time.monotonic()
 
     @staticmethod
     def GetOrCreate(metadata: LMCacheMetadata) -> ContinuousUsageContext:
@@ -134,6 +140,7 @@ class ContinuousUsageContext:
         """Flush the interval counters and lifespan histogram, then reset."""
         self._sequence_number += 1
         identity = get_usage_identity()
+        uptime_seconds = time.monotonic() - self._start_monotonic
 
         usage_message = ContinuousContextMessage(
             interval_stored_kv_size=int(
@@ -142,6 +149,7 @@ class ContinuousUsageContext:
             interval_num_hit_tokens=int(self.interval_num_hit_tokens),
             interval_num_stored_tokens=int(self.interval_num_stored_tokens),
             sequence_number=self._sequence_number,
+            uptime_seconds=uptime_seconds,
         )
         self._sender.send(
             self.cache_usage_url,
@@ -155,6 +163,7 @@ class ContinuousUsageContext:
                 self.cache_lifespan_data, self.cache_lifespan_buckets
             ),
             sequence_number=self._sequence_number,
+            uptime_seconds=uptime_seconds,
         )
         self._sender.send(
             self.cache_lifespan_url,

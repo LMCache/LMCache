@@ -171,6 +171,27 @@ jobs:
           docker push lmcache/vllm-openai:latest-nightly
           docker push lmcache/vllm-openai:nightly-${{ env.NOW }}
 
+      # Payload (docker/Dockerfile.payload) extracts lmcache from the cu13 nightly
+      # image just pushed above — still local, and dropped by the standalone
+      # build's leading prune, so build here.
+      - name: Build lmcache/lmcache-payload image (nightly)
+        run: |
+          docker build \
+          --build-arg SOURCE_IMAGE=lmcache/vllm-openai:latest-nightly \
+          --tag lmcache/lmcache-payload:latest-nightly --tag lmcache/lmcache-payload:nightly-${{ env.NOW }} \
+          --file docker/Dockerfile.payload .
+
+      # Run the ENTRYPOINT copy; assert the lmcache tree lands.
+      - name: Smoke test lmcache/lmcache-payload (nightly)
+        run: |
+          docker run --rm -e SHARED_DIR=/out -v "$PWD/payload-out:/out" lmcache/lmcache-payload:nightly-${{ env.NOW }}
+          test -f payload-out/lmcache/__init__.py
+
+      - name: Push lmcache/lmcache-payload nightly image to DockerHub
+        run: |
+          docker push lmcache/lmcache-payload:latest-nightly
+          docker push lmcache/lmcache-payload:nightly-${{ env.NOW }}
+
       - name: Build lmcache/standalone container image (cu13 nightly)
         run: |
           docker system prune -f --all
@@ -203,6 +224,27 @@ jobs:
         run: |
           docker push lmcache/vllm-openai:latest-nightly-cu129
           docker push lmcache/vllm-openai:nightly-${{ env.NOW }}-cu129
+
+      # Payload extracts lmcache from the cu129 nightly image just pushed above —
+      # still local, and dropped by the standalone build's leading prune, so
+      # build here.
+      - name: Build lmcache/lmcache-payload image (cu129 nightly)
+        run: |
+          docker build \
+          --build-arg SOURCE_IMAGE=lmcache/vllm-openai:latest-nightly-cu129 \
+          --tag lmcache/lmcache-payload:latest-nightly-cu129 --tag lmcache/lmcache-payload:nightly-${{ env.NOW }}-cu129 \
+          --file docker/Dockerfile.payload .
+
+      # Run the ENTRYPOINT copy; assert the lmcache tree lands.
+      - name: Smoke test lmcache/lmcache-payload (cu129 nightly)
+        run: |
+          docker run --rm -e SHARED_DIR=/out -v "$PWD/payload-out-cu129:/out" lmcache/lmcache-payload:nightly-${{ env.NOW }}-cu129
+          test -f payload-out-cu129/lmcache/__init__.py
+
+      - name: Push lmcache/lmcache-payload cu12.9 nightly image to DockerHub
+        run: |
+          docker push lmcache/lmcache-payload:latest-nightly-cu129
+          docker push lmcache/lmcache-payload:nightly-${{ env.NOW }}-cu129
 
       - name: Build lmcache/standalone container image (cu12.9 nightly)
         run: |
