@@ -140,22 +140,28 @@ class ObjectService:
         tier: Tier,
         adapter_selector: str | None,
         keys: list[EncodedObjectKey],
+        force: bool = False,
     ) -> dict[str, object]:
-        """Delete a caller-supplied list of keys from one adapter.
+        """Delete a caller-supplied list of keys from L1, L2, or both (``tier``).
 
-        Idempotent at the adapter level (absent / locked keys are skipped).
+        Key-addressed. L1 deletion respects read/write locks unless ``force``;
+        L2 deletion is idempotent at the adapter level (absent / locked keys are
+        skipped). The L2 adapter is only resolved when the tier includes L2, so a
+        pure ``l1`` delete works on an L1-only server.
 
         Returns:
-            ``{"requested", "adapter", "ok"[, "error"]}``; ``ok`` is ``False``
-            with ``error`` set when the adapter raised (a structured failure,
-            not a crash).
+            ``{"deleted", "skipped", "ok"[, "error"]}``: ``deleted`` is the total
+            keys removed across the requested tiers (L1 removals plus the L2 batch
+            size); ``skipped`` is the L1 keys refused because they were locked
+            (non-force only); ``ok`` is ``False`` with ``error`` set when the L2
+            adapter raised (a structured failure, not a crash).
 
         Raises:
-            InvalidRequest: unsupported ``tier``, batch too large, or an
-                ``ObjectKey`` invariant violation.
-            Unavailable / NotFound: adapter resolution.
+            InvalidRequest: batch too large, or an ``ObjectKey`` invariant
+                violation.
+            Unavailable / NotFound: L2 adapter resolution (only when ``tier``
+                includes L2).
         """
-        self._require_supported_tier(tier)
         if len(keys) > MAX_DELETE_BATCH:
             raise InvalidRequest(
                 f"too many keys in a single request "
@@ -168,13 +174,28 @@ class ObjectService:
             except ValueError as exc:
                 raise InvalidRequest(f"keys[{i}]: {exc}") from None
 
-        desc, adapter = self._resolve_adapter(adapter_selector)
-        body: dict[str, object] = {"requested": len(parsed), "adapter": desc.type_name}
-        try:
-            await asyncio.to_thread(adapter.delete, parsed)
-        except Exception as exc:  # noqa: BLE001 - surfaced as a structured result
-            body["ok"] = False
-            body["error"] = str(exc)
-            return body
-        body["ok"] = True
-        return body
+        deleted = 0
+        skipped = 0
+        ok = True
+        error: str | None = None
+
+        if tier in (Tier.L1, Tier.ALL):
+            l1_deleted, l1_skipped = self._engine.storage_manager.delete_l1_keys(
+                parsed, force=force
+            )
+            deleted += l1_deleted
+            skipped += l1_skipped
+
+        if tier in (Tier.L2, Tier.ALL):
+            _, adapter = self._resolve_adapter(adapter_selector)
+            try:
+                await asyncio.to_thread(adapter.delete, parsed)
+                deleted += len(parsed)
+            except Exception as exc:  # noqa: BLE001 - structured result, not a crash
+                ok = False
+                error = str(exc)
+
+        result: dict[str, object] = {"deleted": deleted, "skipped": skipped, "ok": ok}
+        if error is not None:
+            result["error"] = error
+        return result

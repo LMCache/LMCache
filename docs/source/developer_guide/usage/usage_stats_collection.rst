@@ -43,11 +43,13 @@ When LMCache runs as a **standalone multiprocess (MP) cache server**
   server startup (vLLM instances register later) and are not part of this
   message.
 
-In addition to the one-shot messages above, a continuous reporter periodically
-sends interval counters (**ContinuousContextMessage**: tokens stored/hit and
-stored KV bytes in the interval) and a cache-lifespan histogram
-(**CacheLifespanMessage**). The flush interval is controlled by
-``LMCACHE_USAGE_TRACK_INTERVAL`` (seconds, default 600).
+In addition to the one-shot messages above, both deployment modes
+periodically send interval counters (**ContinuousContextMessage**: tokens
+retrieved, tokens stored, stored KV bytes, process uptime). Idle
+intervals are still sent and double as a liveness heartbeat.
+Single-process mode additionally sends a cache-lifespan histogram
+(**CacheLifespanMessage**). The flush interval is
+``LMCACHE_USAGE_TRACK_INTERVAL`` seconds (default 600).
 
 Every payload carries four common fields:
 

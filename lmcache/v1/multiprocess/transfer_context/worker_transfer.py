@@ -15,7 +15,7 @@ import torch
 from lmcache import torch_dev
 from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
-from lmcache.v1.gpu_connector.utils import LayoutHints, is_mla
+from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import RegisterEngineDrivenContextPayload
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
@@ -30,8 +30,7 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )
-from lmcache.v1.platform import _registry as platform_registry
-from lmcache.v1.platform import get_device_spec
+from lmcache.v1.platform import get_device_spec, resolve_kv_wrapper_factory
 
 logger = init_logger(__name__)
 
@@ -143,7 +142,7 @@ def _resolve_mode(mode: "str | MPTransferMode | None") -> MPTransferMode:
 def _build_lmcache_driven_context(device_type: str) -> "TransferContext":
     """Build a :class:`LMCacheDrivenTransferContext` after capability check."""
     try:
-        platform_registry.get_kv_wrapper_factory(device_type)
+        resolve_kv_wrapper_factory(device_type)
     except ValueError as exc:
         raise ValueError(
             "MP transfer mode 'lmcache_driven' is not supported for device type "
@@ -453,11 +452,14 @@ class EngineDrivenTransferContext(TransferContext):
             hidden_dim_size,
             dtype_str,
             engine_kv_format,
+            kv_size,
         ) = compute_kv_layout(kv_caches, layout_hints=layout_hints)
         self._layout_hints = layout_hints
         self._engine_kv_format = engine_kv_format
 
-        use_mla_flag = is_mla(engine_kv_format)
+        # The wire field is named use_mla but only drives the object plane
+        # count: single-plane (kv_size == 1) covers MLA and fused-K/V formats.
+        use_mla_flag = kv_size == 1
         shape = (
             torch.Size([num_layers, blocks_in_chunk * block_size, hidden_dim_size])
             if use_mla_flag

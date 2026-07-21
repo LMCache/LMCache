@@ -33,8 +33,14 @@ def usage_server_url(endpoint: str) -> str:
 
     Returns:
         The full URL, honoring the ``LMCACHE_USAGE_TRACK_URL`` override.
+        Any path on the override is preserved (e.g. base
+        ``http://host/api/v1`` yields ``http://host/api/v1/context``).
     """
     base = os.getenv("LMCACHE_USAGE_TRACK_URL", "http://stats.lmcache.ai:8080")
+    # urljoin drops the last path segment of a base without a trailing
+    # slash (http://host/api/v1 + context -> http://host/api/context).
+    if not base.endswith("/"):
+        base += "/"
     return urljoin(base, endpoint)
 
 

@@ -66,13 +66,22 @@ class _FakeAdapter:
 
 @dataclass
 class _FakeStorageManager:
-    """Implements ``l2_adapters()``. An empty list reproduces the "no L2 adapters
-    configured" condition."""
+    """Implements ``l2_adapters()`` and ``delete_l1_keys()``. An empty adapter
+    list reproduces the "no L2 adapters configured" condition."""
 
     adapters: list[tuple[str, _FakeAdapter]] = field(default_factory=list)
+    # Number of L1 keys the next delete_l1_keys call reports as locked/skipped.
+    l1_skip: int = 0
+    # Records (keys, force) for each delete_l1_keys call.
+    l1_delete_calls: list[tuple[list, bool]] = field(default_factory=list)
 
     def l2_adapters(self) -> list[tuple[_FakeDescriptor, _FakeAdapter]]:
         return [(_FakeDescriptor(type_name=n), a) for n, a in self.adapters]
+
+    def delete_l1_keys(self, keys: list, force: bool = False) -> tuple[int, int]:
+        self.l1_delete_calls.append((list(keys), force))
+        deleted = max(0, len(keys) - self.l1_skip)
+        return deleted, min(self.l1_skip, len(keys))
 
 
 class _FakeEngine:
@@ -127,7 +136,9 @@ class TestDeleteObjectsEndpoint:
             },
         )
         assert resp.status_code == 200, resp.text
-        assert resp.json() == {"requested": 2, "adapter": "s3", "ok": True}
+        # Default tier is l2: 2 keys deleted from the primary adapter, no L1.
+        assert resp.json() == {"deleted": 2, "skipped": 0, "ok": True}
+        assert sm.l1_delete_calls == []
         assert len(primary.delete_calls) == 1
         assert secondary.delete_calls == []
         forwarded = primary.delete_calls[0]
@@ -154,7 +165,7 @@ class TestDeleteObjectsEndpoint:
             },
         )
         assert resp.status_code == 200, resp.text
-        assert resp.json()["adapter"] == "fs"
+        assert resp.json()["deleted"] == 1
         assert primary.delete_calls == []
         assert len(secondary.delete_calls) == 1
 
@@ -172,19 +183,64 @@ class TestDeleteObjectsEndpoint:
         resp = client.request("DELETE", "/cache/objects", json={"keys": []})
         assert resp.status_code == 200, resp.text
         body = resp.json()
-        assert body["adapter"] == "s3"
         assert body["ok"] is False
         assert "s3 down" in body["error"]
 
-    def test_400_on_unsupported_tier(self):
-        client = TestClient(_make_app(_sm_with(("s3", _FakeAdapter()))))
+    def test_tier_l1_deletes_l1_only(self):
+        """tier=l1 deletes from L1 and never touches an L2 adapter."""
+        adapter = _FakeAdapter()
+        sm = _sm_with(("s3", adapter))
+        client = TestClient(_make_app(sm))
         resp = client.request(
-            "DELETE", "/cache/objects", json={"tier": "l1", "keys": []}
+            "DELETE",
+            "/cache/objects",
+            json={
+                "tier": "l1",
+                "keys": [{"chunk_hash_hex": _hex(1), "model_name": "m", "kv_rank": 0}],
+            },
         )
-        assert resp.status_code == 400
-        assert "tier" in resp.json()["detail"]
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"deleted": 1, "skipped": 0, "ok": True}
+        assert len(sm.l1_delete_calls) == 1
+        assert adapter.delete_calls == []  # L2 untouched
+
+    def test_tier_all_deletes_both_and_force_plumbs(self):
+        """tier=all deletes L1 + L2 and forwards ``force`` to the L1 delete."""
+        adapter = _FakeAdapter()
+        sm = _sm_with(("s3", adapter))
+        client = TestClient(_make_app(sm))
+        resp = client.request(
+            "DELETE",
+            "/cache/objects",
+            json={
+                "tier": "all",
+                "force": True,
+                "keys": [{"chunk_hash_hex": _hex(1), "model_name": "m", "kv_rank": 0}],
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        # 1 L1 key + 1 L2 key removed.
+        assert resp.json() == {"deleted": 2, "skipped": 0, "ok": True}
+        assert sm.l1_delete_calls[0][1] is True  # force forwarded
+        assert len(adapter.delete_calls) == 1
+
+    def test_tier_l1_needs_no_l2_adapter(self):
+        """A pure L1 delete works on a server with no L2 adapters."""
+        sm = _sm_with()  # no L2 adapters
+        client = TestClient(_make_app(sm))
+        resp = client.request(
+            "DELETE",
+            "/cache/objects",
+            json={
+                "tier": "l1",
+                "keys": [{"chunk_hash_hex": _hex(1), "model_name": "m", "kv_rank": 0}],
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["deleted"] == 1
 
     def test_503_when_no_adapters_configured(self):
+        """A delete that touches L2 needs an adapter (default tier is l2)."""
         client = TestClient(_make_app(_sm_with()))
         resp = client.request("DELETE", "/cache/objects", json={"keys": []})
         assert resp.status_code == 503
