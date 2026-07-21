@@ -56,6 +56,28 @@ def test_vllm_flash_infer_nhd(monkeypatch):
     assert fmt == F.NL_X_NB_TWO_BS_NH_HS
 
 
+def test_vllm_flash_infer_single_head_hnd_resolves_to_nhd(monkeypatch):
+    # A physically-NHD single-KV-head tensor (e.g. FlashInfer forcing an HND
+    # hint) has a degenerate head axis, so the HND permute is a no-op and the
+    # hint cannot be trusted. Shape [NB, 2, BS, 1, HS] must be read as NHD
+    # (num_heads=1), not HND (which would treat BS as the head count and blow
+    # past the CUDA 1024-thread block limit downstream).
+    monkeypatch.setattr(_VLLM_DEV, "cuda")
+    kv = [_t(NB, 2, BS, 1, HS) for _ in range(NL)]
+    fmt, _ = detect_format(kv, EngineType.VLLM, {"kv_layout": "HND"})
+    assert fmt == F.NL_X_NB_TWO_BS_NH_HS
+
+
+def test_vllm_flash_infer_multi_head_hnd_still_honours_hint(monkeypatch):
+    # Guard against over-correction: when neither axis is degenerate
+    # (num_heads > 1), the hint must still decide, so a genuine HND tensor
+    # [NB, 2, NH, BS, HS] is classified as HND.
+    monkeypatch.setattr(_VLLM_DEV, "cuda")
+    kv = [_t(NB, 2, NH, BS, HS) for _ in range(NL)]
+    fmt, _ = detect_format(kv, EngineType.VLLM, {"kv_layout": "HND"})
+    assert fmt == F.NL_X_NB_TWO_NH_BS_HS
+
+
 def test_vllm_mla():
     kv = [_t(NB, BS, HS) for _ in range(NL)]
     fmt, _ = detect_format(kv, EngineType.VLLM, {"kv_layout": "NHD"})
@@ -85,6 +107,19 @@ def test_vllm_blocks_first_fused_nhd_vs_hnd(monkeypatch):
     raw_hnd = [_t(NB, NH, BS, 2 * HS) for _ in range(NL)]
     fmt_hnd, _ = detect_format(raw_hnd, EngineType.VLLM, {"kv_layout": "HND"})
     assert fmt_hnd == F.NL_X_NB_NH_BS_TWO_HS
+
+
+def test_vllm_blocks_first_fused_single_head_hint_ignored(monkeypatch):
+    # Packed (rank-4) contract with a single KV head. vLLM's packed view is
+    # head-first, so the head axis is shape[1] == 1, making the layout
+    # byte-identical under NHD and HND. Regardless of the hint, detection must
+    # read num_heads from the length-1 axis (the NH-before-BS format).
+    monkeypatch.setattr(_VLLM_DEV, "cuda")
+    raw = [_t(NB, 1, BS, 2 * HS) for _ in range(NL)]
+    fmt_hnd, _ = detect_format(raw, EngineType.VLLM, {"kv_layout": "HND"})
+    assert fmt_hnd == F.NL_X_NB_NH_BS_TWO_HS
+    fmt_nhd, _ = detect_format(raw, EngineType.VLLM, {"kv_layout": "NHD"})
+    assert fmt_nhd == F.NL_X_NB_NH_BS_TWO_HS
 
 
 def test_sglang_mla_depth1():
