@@ -9,10 +9,10 @@
 /lmcache/v1/memory_management.py       @sammshen @deng451e @chunxiaozheng @DongDongJu @ApostaC
 
 # Multiprocess
-/lmcache/v1/multiprocess/              @ApostaC @OasisGit @hlin99
+/lmcache/v1/multiprocess/              @ApostaC @hlin99
 /lmcache/v1/multiprocess/protocols/observability.py  @royyhuang @ApostaC
-/lmcache/v1/multiprocess/http_server.py              @royyhuang @ApostaC @OasisGit
-/lmcache/v1/mp_observability/            @yoo-kumaneko @royyhuang @ApostaC @OasisGit @sammshen
+/lmcache/v1/multiprocess/http_server.py              @royyhuang @ApostaC
+/lmcache/v1/mp_observability/            @yoo-kumaneko @royyhuang @ApostaC @sammshen
 
 # Distributed / L2
 /lmcache/v1/distributed/               @ApostaC @maobaolong @chunxiaozheng
@@ -51,7 +51,7 @@
 
 # Integration
 /lmcache/integration/vllm/             @sammshen @maobaolong @YaoJiayi @deng451e @hlin99
-/lmcache/integration/sglang/           @OasisGit @DongDongJu @sammshen @Shaoting-Feng
+/lmcache/integration/sglang/           @DongDongJu @sammshen @Shaoting-Feng
 /lmcache/integration/tensorrt_llm/     @sammshen
 
 # Non-CUDA equivalents
