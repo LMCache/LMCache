@@ -27,13 +27,14 @@ empty string (concrete backends -- including CPU via
 from __future__ import annotations
 
 # Standard
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 # First Party
 from lmcache.v1.platform.base_pin_memory import PinMemoryBackend
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.v1.platform.base_cache_context import BaseCacheContext
     from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
 
 
@@ -163,3 +164,26 @@ class DeviceSpec:
     def is_pin_supported(self) -> bool:
         """Whether the current platform supports memory pinning."""
         return self._get_pin_backend().is_pin_supported
+
+    # ------------------------------------------------------------------
+    # Cache context factory
+    # ------------------------------------------------------------------
+
+    def create_cache_context(self, *args: Any, **kwargs: Any) -> "BaseCacheContext":
+        """Instantiate the ``BaseCacheContext`` implementation for this device.
+
+        Subclasses that ship a ``cache_context`` module (e.g. ``cuda``,
+        ``cpu``) must override this hook: perform a lazy import of the
+        concrete subclass and forward ``*args`` / ``**kwargs`` verbatim
+        so the call site in
+        :func:`lmcache.v1.platform.cache_context.create_cache_context`
+        stays backend-agnostic.
+
+        The default implementation raises :class:`NotImplementedError`
+        so a missing override surfaces loudly instead of silently
+        falling back to the CPU path.
+        """
+        raise NotImplementedError(
+            "DeviceSpec for device_type=%r does not provide a "
+            "BaseCacheContext implementation." % self.device_type
+        )
