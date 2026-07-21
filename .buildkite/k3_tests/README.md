@@ -45,42 +45,30 @@ instead of `buildkite-agent pipeline upload` directly. The wrapper
 (`common_scripts/path-filter.sh`) inspects the changed files in the build and:
 
 - **Skips** the build (exits 0 without uploading `pipeline.yml` → build is
-  green with just the upload step) when *all* changed files match a "trivial"
-  pattern: `*.md`, `LICENSE*`, `NOTICE*`, `.gitignore`, `.gitattributes`,
+  green with just the upload step) when the changed files are not relevant to
+  the uploaded test pipeline. This includes docs-only / trivial changes such
+  as `*.md`, `LICENSE*`, `NOTICE*`, `.gitignore`, `.gitattributes`,
   `.editorconfig`, `.mailmap`, `CODEOWNERS`, or anything under `docs/` or
   `.github/`. (`.github/` is trivial here because k3 tests run on Buildkite,
   not GitHub Actions, so workflow / CODEOWNERS / template changes do not
   affect them.)
-- **Force-runs** the build when any changed file lives under `.buildkite/` —
-  those PRs are usually fixing the k3 CI itself, so we want them tested on
-  the PR rather than after merge.
-- **Runs** the build whenever there is at least one non-trivial file by
-  uploading `pipeline.yml`, which contains the real test steps.
 
 The filter is now test-aware instead of one global non-trivial rule. In
 practice, it evaluates the uploaded pipeline against a shared runtime surface
 plus a few suite-specific surfaces:
 
-- Shared runtime surface: `lmcache/**`, `csrc/**`, `tests/**`,
-  `requirements/**`, build files such as `pyproject.toml` / `setup.py` /
-  `CMakeLists.txt`, shared CI files like `.buildkite/k3_harness/**`, and
-  `.buildkite/k3_tests/common_scripts/`
-- `integration` adds `.buildkite/k3_tests/integration/**`
-- `correctness` adds `.buildkite/k3_tests/correctness/**`
-- `multiprocess` adds `benchmarks/long_doc_qa/**` and
-  `.buildkite/k3_tests/multiprocess/**`
-- `comprehensive` adds `benchmarks/**`, `examples/disagg_prefill*`, and
-  `.buildkite/k3_tests/comprehensive/**`
-- `blend` adds `.buildkite/k3_tests/blend/**` and
-  `.buildkite/k3_harness/setup-blend-env.sh`
-- `sglang` keeps a dedicated entry for `lmcache/integration/sglang/**` and
-  `.buildkite/k3_tests/sglang/**` plus `.buildkite/k3_harness/setup-sglang-env.sh`
-- `xpu` relies on the shared runtime surface plus
-  `.buildkite/k3_tests/xpu/**`
+| Scope | Surface |
+|------|---------|
+| Shared runtime surface | `lmcache/**`, `csrc/**`, `tests/**`, `requirements/**`, build files such as `pyproject.toml` / `setup.py` / `CMakeLists.txt`, shared CI files like `.buildkite/k3_harness/**`, and `.buildkite/k3_tests/common_scripts/` |
+| integration | Shared runtime surface + `.buildkite/k3_tests/integration/**` |
+| correctness | Shared runtime surface + `.buildkite/k3_tests/correctness/**` |
+| multiprocess | Shared runtime surface + `benchmarks/long_doc_qa/**`, `.buildkite/k3_tests/multiprocess/**` |
+| comprehensive | Shared runtime surface + `benchmarks/**`, `examples/disagg_prefill*`, `.buildkite/k3_tests/comprehensive/**` |
+| blend | Shared runtime surface + `.buildkite/k3_tests/blend/**`, `.buildkite/k3_harness/setup-blend-env.sh` |
+| sglang | Shared runtime surface + `lmcache/integration/sglang/**`, `.buildkite/k3_tests/sglang/**`, `.buildkite/k3_harness/setup-sglang-env.sh` |
+| xpu | Shared runtime surface + `.buildkite/k3_tests/xpu/**` |
 
-Suite-local `.buildkite/k3_tests/<suite>/...` changes only fan out to that
-suite. Shared harness updates fan out to the suites that actually depend on the
-file they touch.
+
 
 Detection:
 - PR builds diff against `origin/${BUILDKITE_PULL_REQUEST_BASE_BRANCH}`
