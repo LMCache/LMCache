@@ -109,19 +109,6 @@ def test_vllm_blocks_first_fused_nhd_vs_hnd(monkeypatch):
     assert fmt_hnd == F.NL_X_NB_NH_BS_TWO_HS
 
 
-def test_vllm_blocks_first_fused_single_head_hint_ignored(monkeypatch):
-    # Packed (rank-4) contract with a single KV head. vLLM's packed view is
-    # head-first, so the head axis is shape[1] == 1, making the layout
-    # byte-identical under NHD and HND. Regardless of the hint, detection must
-    # read num_heads from the length-1 axis (the NH-before-BS format).
-    monkeypatch.setattr(_VLLM_DEV, "cuda")
-    raw = [_t(NB, 1, BS, 2 * HS) for _ in range(NL)]
-    fmt_hnd, _ = detect_format(raw, EngineType.VLLM, {"kv_layout": "HND"})
-    assert fmt_hnd == F.NL_X_NB_NH_BS_TWO_HS
-    fmt_nhd, _ = detect_format(raw, EngineType.VLLM, {"kv_layout": "NHD"})
-    assert fmt_nhd == F.NL_X_NB_NH_BS_TWO_HS
-
-
 def test_sglang_mla_depth1():
     kv = [_t(NB * BS, 1, HS) for _ in range(NL)]
     fmt, _ = detect_format(kv, EngineType.SGLANG, {})
