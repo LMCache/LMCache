@@ -27,6 +27,7 @@ from lmcache.v1.platform.base_device_spec import DeviceSpec
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.platform.base_cache_context import BaseCacheContext
+    from lmcache.v1.platform.base_device_ops import DeviceOps
     from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
 
 
@@ -41,18 +42,6 @@ class CpuDeviceSpec(DeviceSpec):
 
     Also used for ``get_device_spec("cpu")`` lookups (e.g. by
     :func:`lmcache.v1.platform.cache_context.create_cache_context`).
-
-    Invariant:
-        ``is_available()`` must inherit the base-class ``False`` (i.e.
-        do **not** override it here). ``_detect_device()`` skips
-        ``"cpu"`` inside its auto-detection loop to preserve the
-        "cpu is the tail fallback" semantics, but that skip is
-        defence-in-depth: if this class ever returned ``True`` from
-        ``is_available()``, accelerators registered later in the dict
-        would still be reached only because of that ``continue``. Keep
-        this method inherited so the invariant holds in both layers;
-        an explicit opt-in via ``DEVICE_TYPE=cpu`` is the supported
-        path for forcing CPU selection.
     """
 
     @property
@@ -75,3 +64,10 @@ class CpuDeviceSpec(DeviceSpec):
         from lmcache.v1.platform.cpu.cache_context import CPUCacheContext
 
         return CPUCacheContext(*args, **kwargs)
+
+    @property
+    def ops_cls(self) -> type[DeviceOps]:
+        # First Party
+        from lmcache.v1.platform.cpu.device_ops import CpuDeviceOps
+
+        return CpuDeviceOps
