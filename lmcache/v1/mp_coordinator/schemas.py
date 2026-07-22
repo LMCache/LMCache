@@ -141,6 +141,31 @@ class QuotaResponse(BaseModel):
     status: str
 
 
+class QuotaConfigRequest(BaseModel):
+    """Body of ``PUT /quota/config``.
+
+    Attributes:
+        default_limit_gb: Byte budget in GiB applied to salts with no
+            explicit quota entry. ``None`` (default) leaves unquota'd
+            salts exempt from eviction.
+        tier: Cache tier the config applies to (only ``l2`` today).
+    """
+
+    default_limit_gb: float | None = Field(default=None, ge=0.0)
+    tier: Tier = Tier.L2
+
+
+class QuotaConfigResponse(BaseModel):
+    """Reply to ``GET`` / ``PUT /quota/config``.
+
+    Attributes:
+        default_limit_gb: Current default limit in GiB, or ``None``
+            when unquota'd salts are exempt from eviction.
+    """
+
+    default_limit_gb: float | None
+
+
 # -- Usage tracking ----------------------------------------------------------
 
 
@@ -384,4 +409,85 @@ class PrefetchResponse(BaseModel):
     instance_id: str
     request_id: str = ""
     chunks: int = 0
+    status: str
+
+
+class PinRequest(BaseModel):
+    """Body of ``POST`` / ``DELETE /cache/pins`` on the coordinator.
+
+    Pinning protects the resolved keys from L2 eviction until unpinned. The
+    coordinator resolves ``token_ids`` to keys locally; L2 pins are fleet-wide
+    (per ``cache_salt``), so no target instance is needed.
+
+    Attributes:
+        model_name: Model whose rank fan-out to use when resolving keys.
+        world_size: World size selecting the per-rank fan-out.
+        token_ids: Prompt tokens whose complete chunks should be (un)pinned.
+        cache_salt: Per-tenant isolation salt applied to the produced keys.
+    """
+
+    model_name: str
+    world_size: int = Field(ge=1)
+    token_ids: list[int] = Field(default_factory=list)
+    cache_salt: str = ""
+
+
+class PinResponse(BaseModel):
+    """Reply to ``POST`` / ``DELETE /cache/pins`` on the coordinator.
+
+    Attributes:
+        requested: Number of whole chunks the token sequence resolved to.
+        affected: Number of L2 keys pinned (on pin) or unpinned (on unpin);
+            disambiguated by ``status``.
+        status: ``"pinned"`` / ``"unpinned"``.
+    """
+
+    requested: int = 0
+    affected: int = 0
+    status: str
+
+
+class DeleteRequest(BaseModel):
+    """Body of ``POST /cache/delete`` on the coordinator.
+
+    Attributes:
+        instance_id: Identifier of the target MP server (must be registered).
+        model_name: Model whose layout the target uses to resolve keys.
+        world_size: World size selecting the layout and the per-rank fan-out.
+        token_ids: Prompt tokens whose complete chunks should be deleted.
+        cache_salt: Per-tenant isolation salt applied to the produced keys.
+        tier: Which tier(s) to delete: ``l1`` (L1 only), ``l2`` (L2 only), or
+            ``all`` (both). ``l1`` never touches L2 and vice versa.
+        force: When True, delete even locked/pinned keys -- bypasses L1
+            locks/pins on the node and the coordinator's L2 pin filter.
+    """
+
+    instance_id: str
+    model_name: str
+    world_size: int = Field(ge=1)
+    token_ids: list[int] = Field(default_factory=list)
+    cache_salt: str = ""
+    tier: Tier = Tier.ALL
+    force: bool = False
+
+
+class DeleteResponse(BaseModel):
+    """Reply to ``POST /cache/delete`` on the coordinator.
+
+    Attributes:
+        instance_id: The target MP server the request was dispatched to.
+        requested: Number of whole chunks the token sequence resolved to.
+        affected: Total keys removed across the tiers acted on -- L1 keys deleted
+            by the node plus L2 keys deleted by the coordinator. A chunk resident
+            in both tiers (``tier=all``) contributes to both, so ``affected`` may
+            exceed ``requested`` (which counts chunks, not per-tier keys).
+        skipped: Total keys refused because they were locked/pinned (non-force
+            only) -- L1 keys the node refused plus L2 keys held back for an L2 pin.
+        status: ``"deleted"`` / ``"noop"``.
+    """
+
+    instance_id: str
+    requested: int = 0
+    affected: int = 0
+    skipped: int = 0
     status: str

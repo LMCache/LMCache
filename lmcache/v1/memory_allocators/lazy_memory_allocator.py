@@ -10,13 +10,14 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
+from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
 from lmcache.v1.memory_management import (
     AddressManager,
     MemoryAllocatorInterface,
     MemoryFormat,
     MemoryObj,
-    TensorMemoryAllocator,
 )
+from lmcache.v1.platform import current_device_spec
 from lmcache.v1.system_detection import NUMAMapping
 import lmcache.c_ops as lmc_ops
 
@@ -76,7 +77,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         final_size: int,
         align_bytes: int = AddressManager.ALIGN_BYTES,
         numa_mapping: NUMAMapping | None = None,
-    ):
+    ) -> None:
         """
         Args:
             init_size (int): Initial size of the memory allocation in bytes.
@@ -91,7 +92,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         self._final_size = align_to(final_size, self.PIN_CHUNK_SIZE)
         # Underlying buffer for the memory allocation
         self._buffer: torch.Tensor
-        if not torch_dev.ext.is_pin_supported:
+        if not current_device_spec.is_pin_supported:
             raise RuntimeError(
                 f"Backend '{torch_device_type}' does not support memory "
                 "pinning. LazyMemoryAllocator requires pinned memory."
@@ -144,6 +145,17 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.UNDEFINED,
         allocator_type: Optional[str] = None,
     ) -> Optional[MemoryObj]:
+        """Allocate one object from the lazily pinned memory pool.
+
+        Args:
+            shapes: Logical tensor shape or shapes to allocate.
+            dtypes: Logical tensor dtype or dtypes to allocate.
+            fmt: Memory format stored in the returned metadata.
+            allocator_type: Optional allocator type string.
+
+        Returns:
+            A memory object, or ``None`` if the committed address space is full.
+        """
         obj = self._allocator.allocate(shapes, dtypes, fmt, allocator_type)
         # HACK(ApostaC): reset the parent allocator to this lazy allocator
         # There should be a cleaner way to decouple lazy allocator and
@@ -160,6 +172,18 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.UNDEFINED,
         allocator_type: Optional[str] = None,
     ) -> Optional[List[MemoryObj]]:
+        """Allocate a batch of objects from the lazily pinned memory pool.
+
+        Args:
+            shapes: Logical tensor shape or shapes to allocate for each object.
+            dtypes: Logical tensor dtype or dtypes to allocate for each object.
+            batch_size: Number of memory objects to allocate.
+            fmt: Memory format stored in the returned metadata.
+            allocator_type: Optional allocator type string.
+
+        Returns:
+            Memory objects for the batch, or ``None`` if allocation fails.
+        """
         # HACK(ApostaC): reset the parent allocator to this lazy allocator
         # There should be a cleaner way to decouple lazy allocator and
         # tensor memory allocator
@@ -178,7 +202,13 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         self,
         memory_obj: MemoryObj,
         allocator_type: Optional[str] = None,
-    ):
+    ) -> None:
+        """Free one memory object back to the lazy allocator.
+
+        Args:
+            memory_obj: The memory object to free.
+            allocator_type: Optional allocator type string.
+        """
         self._allocator.free(memory_obj, allocator_type)
 
     def batched_free(
@@ -186,17 +216,25 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         memory_objs: List[MemoryObj],
         allocator_type: Optional[str] = None,
         update_stats: bool = True,
-    ):
+    ) -> None:
+        """Free a batch of memory objects back to the lazy allocator.
+
+        Args:
+            memory_objs: Memory objects to free.
+            allocator_type: Optional allocator type string.
+            update_stats: Whether to update allocator statistics.
+        """
         self._allocator.batched_free(memory_objs, allocator_type, update_stats)
 
-    def close(self):
+    def close(self) -> None:
+        """Stop background expansion and release pinned or NUMA memory."""
         # Stop the background expansion thread
         self._stop_expand.set()
         self._expand_thread.join()
 
         # Unpin all pinned memory chunks
         for ptr, size in self._pin_record:
-            torch_dev.ext.unpin_memory(ptr)
+            current_device_spec.unpin_memory(ptr)
         self._pin_record.clear()
 
         # Free the underlying buffer if using NUMA allocation
@@ -204,6 +242,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
             lmc_ops.free_numa_ptr(self._buffer.data_ptr(), self._final_size)
 
     def memcheck(self) -> bool:
+        """Return whether the delegated tensor allocator is consistent."""
         return self._allocator.memcheck()
 
     def get_underlying_buffer(self) -> torch.Tensor:
@@ -219,7 +258,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         return self._address_manager
 
     # Helper functions
-    def _pin_memory_chunk(self, offset: int, size: int):
+    def _pin_memory_chunk(self, offset: int, size: int) -> None:
         """
         Pin a chunk of memory.
 
@@ -237,7 +276,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
 
         ptr = self._buffer.data_ptr() + offset
         # Use flag: cudaHostRegisterMapped (0x02)
-        if not torch_dev.ext.pin_memory(ptr, size, 2):
+        if not current_device_spec.pin_memory(ptr, size, 2):
             logger.warning(
                 "pin_memory failed for chunk at ptr=%#x size=%d; "
                 "DMA performance may be degraded",
@@ -247,13 +286,13 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         else:
             self._pin_record.append((ptr, size))
 
-    def _commit_expansion(self, expand_size: int):
+    def _commit_expansion(self, expand_size: int) -> None:
         """
         Call sbrk in the address manager to commit the expansion.
         """
         self._address_manager.sbrk(expand_size)
 
-    def _log_expansion_progress(self, expanded_since_last_log: int):
+    def _log_expansion_progress(self, expanded_since_last_log: int) -> None:
         """
         Log the cumulative expansion progress since the last log.
         """
@@ -267,7 +306,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
             percent,
         )
 
-    def _expand_worker(self):
+    def _expand_worker(self) -> None:
         """
         Background worker to expand the pinned memory.
         """

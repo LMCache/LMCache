@@ -456,6 +456,13 @@ logging, tracing).
    * - ``--prometheus-port``
      - ``9090``
      - Port for the Prometheus ``/metrics`` endpoint.
+   * - ``--enable-extra-logging``
+     - off
+     - Periodic INFO logs: per-GPU L0<->L1 transfer stats and L1 memory
+       usage. See :doc:`observability/logs`.
+   * - ``--extra-logging-interval``
+     - ``10.0``
+     - Seconds between extra-logging emissions.
 
 vLLM Client Configuration
 --------------------------
@@ -467,7 +474,7 @@ On the vLLM side, specify the LMCache server host and port via the
 
     vllm serve Qwen/Qwen3-14B \
         --kv-transfer-config \
-        '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "127.0.0.1", "lmcache.mp.port": 6000}}'
+        '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "tcp://127.0.0.1", "lmcache.mp.port": 6000}}'
 
 To target multiple LMCache servers from a single vLLM deployment, pass a
 list (or comma-separated string) of server URLs via
@@ -555,6 +562,11 @@ Environment Variables
    * - ``PYTHONHASHSEED``
      - Set to a fixed value for reproducible hashing across processes
        (relevant when using ``--hash-algorithm builtin``).
+   * - ``LMCACHE_TRACK_USAGE``
+     - Set to ``false`` to disable anonymous usage statistics (see below).
+   * - ``DO_NOT_TRACK``
+     - Set to ``1`` to disable anonymous usage statistics (cross-tool
+       convention).
 
 Full Example
 ------------
@@ -591,3 +603,14 @@ Full Example
         --metrics-sample-rate 0.01 \
         --enable-tracing \
         --otlp-endpoint http://localhost:4317
+
+Anonymous Usage Statistics
+--------------------------
+
+The MP server reports anonymous usage statistics: a one-time
+environment/configuration snapshot at startup and interval counters
+(tokens retrieved/stored, bytes stored, uptime) every
+``LMCACHE_USAGE_TRACK_INTERVAL`` seconds. No prompts, keys, KV-cache
+data, model names, or ``--instance-id`` are ever sent, and reporting can
+never affect serving. Opt out with ``LMCACHE_TRACK_USAGE=false`` or
+``DO_NOT_TRACK=1``; see :ref:`usage-stats-collection` for details.

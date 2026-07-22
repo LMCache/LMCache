@@ -30,8 +30,18 @@ def _make_key(salt: str, model: str = "m", rank: int = 0, h: str = "aa") -> Obje
 def _setup(
     eviction_ratio: float = 0.5,
     trigger_watermark: float = 1.0,
+    default_limit_bytes: int | None = 0,
 ) -> tuple[L2EvictionManager, QuotaManager, L2UsageManager]:
+    """Build the manager trio.
+
+    ``default_limit_bytes=0`` (the helper default) arms strict allowlist
+    enforcement — the steady state a quota controller configures via
+    ``PUT /quota/config`` after re-syncing quotas — so most tests exercise
+    armed behavior. Pass ``default_limit_bytes=None`` to exercise the
+    exempt boot state instead.
+    """
     qs = QuotaManager()
+    qs.set_default_limit_bytes(default_limit_bytes)
     ut = L2UsageManager()
     ctrl = L2EvictionManager(
         qs,
@@ -135,13 +145,70 @@ def test_on_remove_cleans_empty_bucket():
     assert result == {}
 
 
-def test_no_quotas_evicts_all():
+def test_no_quota_evicts_all_when_default_armed():
+    """Armed default (0): a salt with no explicit quota is fully evicted."""
     ctrl, _, ut = _setup(eviction_ratio=1.0)
     k = _make_key("a")
     _store(ctrl, ut, k, 1000)
     result = ctrl.compute_eviction_plan()
     assert "a" in result
     assert result["a"] == [k]
+
+
+# ============================================================================
+# Default-limit gating (exempt boot state vs armed allowlist)
+# ============================================================================
+
+
+def test_unquotad_salt_exempt_until_default_set():
+    """Boot state (default None): unquota'd salts are skipped entirely —
+    a restarted coordinator with an empty quota table must not plan a
+    mass eviction of unknown tenants."""
+    ctrl, _, ut = _setup(eviction_ratio=1.0, default_limit_bytes=None)
+    _store(ctrl, ut, _make_key("a", h="01"), 1000)
+    _store(ctrl, ut, _make_key("b", h="02"), 2000)
+    assert ctrl.compute_eviction_plan() == {}
+
+
+def test_explicit_quota_enforced_even_while_default_unset():
+    """Per-salt quotas take effect as soon as they are registered, even
+    before the controller arms the default — over-quota tenants are
+    evicted while unquota'd tenants stay exempt."""
+    ctrl, qs, ut = _setup(eviction_ratio=1.0, default_limit_bytes=None)
+    ka = _make_key("a", h="01")
+    kb = _make_key("b", h="02")
+    _store(ctrl, ut, ka, 1000)
+    _store(ctrl, ut, kb, 1000)
+    qs.set_quota("a", 500)  # over quota
+    result = ctrl.compute_eviction_plan()
+    assert result.get("a") == [ka]
+    assert "b" not in result  # unquota'd, default unset ⇒ exempt
+
+
+def test_setting_default_zero_arms_allowlist_eviction():
+    """The controller's ``PUT /quota/config`` signal: flipping the default
+    from None to 0 makes previously-exempt unquota'd bytes evictable."""
+    ctrl, qs, ut = _setup(eviction_ratio=1.0, default_limit_bytes=None)
+    k = _make_key("a")
+    _store(ctrl, ut, k, 1000)
+    assert ctrl.compute_eviction_plan() == {}
+
+    qs.set_default_limit_bytes(0)
+    result = ctrl.compute_eviction_plan()
+    assert result.get("a") == [k]
+
+
+def test_positive_default_acts_as_budget_for_unquotad_salts():
+    """A positive default gives unquota'd salts a real byte budget."""
+    ctrl, qs, ut = _setup(eviction_ratio=1.0, default_limit_bytes=None)
+    qs.set_default_limit_bytes(1500)
+    under = _make_key("a", h="01")
+    over = _make_key("b", h="02")
+    _store(ctrl, ut, under, 1000)  # under the 1500 default
+    _store(ctrl, ut, over, 2000)  # over it
+    result = ctrl.compute_eviction_plan()
+    assert "a" not in result
+    assert result.get("b") == [over]
 
 
 def test_under_quota():
@@ -343,6 +410,46 @@ async def test_execute_evictions_http_failure_keeps_lru():
 
 
 @pytest.mark.asyncio
+async def test_execute_evictions_chunks_large_plan(monkeypatch):
+    """A plan larger than ``MAX_KEYS_PER_DELETE`` is split into multiple DELETE
+    requests, each within the cap, together covering every key. Guards against
+    the MP endpoint's per-request key limit (object_service.MAX_DELETE_BATCH),
+    which rejects an oversized single request with HTTP 400."""
+    # First Party
+    import lmcache.v1.mp_coordinator.cache_control.eviction_manager as em
+
+    monkeypatch.setattr(em, "MAX_DELETE_BATCH", 2)
+
+    ctrl, qs, ut = _setup(eviction_ratio=1.0)
+    keys = [_make_key("alice", h=f"{i:02x}") for i in range(5)]
+    for k in keys:
+        _store(ctrl, ut, k, 100)
+    qs.set_quota("alice", 0)  # ratio=1.0 → full eviction of all 5 keys
+
+    registry = _make_registry(_instance("mp-1"))
+
+    # Standard
+    import json as _json
+
+    batch_sizes: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = _json.loads((request.read() or b"").decode())
+        batch_sizes.append(len(body["keys"]))
+        return httpx.Response(200, json={"requested": len(body["keys"]), "ok": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        plan = await ctrl.execute_evictions(registry, client)
+        await ctrl.wait_for_in_flight_dispatches()
+
+    assert plan == {"alice": keys}
+    # 5 keys, cap 2 → three requests of 2, 2, 1; none exceeds the cap.
+    assert sum(batch_sizes) == 5
+    assert all(n <= 2 for n in batch_sizes)
+    assert sorted(batch_sizes, reverse=True) == [2, 2, 1]
+
+
+@pytest.mark.asyncio
 async def test_execute_evictions_empty_plan_is_noop():
     """No salts over threshold ⇒ no HTTP dispatch."""
     ctrl, _, _ = _setup()
@@ -358,3 +465,98 @@ async def test_execute_evictions_empty_plan_is_noop():
         await ctrl.wait_for_in_flight_dispatches()
 
     assert plan == {}
+
+
+# =============================================================================
+# L2 pin / unpin (eviction exclusion)
+# =============================================================================
+
+
+def test_pin_excludes_key_from_eviction_plan():
+    """A pinned key is never selected for eviction, even over-quota."""
+    ctrl, _, ut = _setup(eviction_ratio=1.0)
+    k1 = _make_key("a", h="01")
+    k2 = _make_key("a", h="02")
+    _store(ctrl, ut, k1, 100)
+    _store(ctrl, ut, k2, 100)
+
+    ctrl.pin([k1])
+    plan = ctrl.compute_eviction_plan()
+    assert k1 not in plan.get("a", [])
+    assert k2 in plan["a"]
+
+
+def test_unpin_restores_eviction_eligibility():
+    """After unpin, a previously pinned key can be evicted again."""
+    ctrl, _, ut = _setup(eviction_ratio=1.0)
+    k = _make_key("a")
+    _store(ctrl, ut, k, 100)
+
+    ctrl.pin([k])
+    assert ctrl.compute_eviction_plan() == {}
+
+    ctrl.unpin([k])
+    assert ctrl.compute_eviction_plan()["a"] == [k]
+
+
+def test_pin_is_reference_counted():
+    """Two pins require two unpins before the key can be evicted."""
+    ctrl, _, ut = _setup(eviction_ratio=1.0)
+    k = _make_key("a")
+    _store(ctrl, ut, k, 100)
+
+    ctrl.pin([k])
+    ctrl.pin([k])
+    assert ctrl.compute_eviction_plan() == {}
+
+    ctrl.unpin([k])
+    assert ctrl.compute_eviction_plan() == {}  # still pinned once
+
+    ctrl.unpin([k])
+    assert ctrl.compute_eviction_plan()["a"] == [k]
+
+
+def test_unpin_unknown_key_is_noop():
+    """Unpinning a key that was never pinned does not go negative."""
+    ctrl, _, ut = _setup(eviction_ratio=1.0)
+    k = _make_key("a")
+    _store(ctrl, ut, k, 100)
+
+    ctrl.unpin([_make_key("a", h="ff")])  # never pinned
+    assert ctrl.compute_eviction_plan()["a"] == [k]
+
+
+# =============================================================================
+# L2 delete helpers (filter_unpinned / drop_pins)
+# =============================================================================
+
+
+def test_filter_unpinned_returns_only_unpinned_keys():
+    """filter_unpinned keeps unpinned keys and drops pinned ones, in order."""
+    ctrl, _, _ = _setup()
+    k1 = _make_key("a", h="01")
+    k2 = _make_key("a", h="02")
+    k3 = _make_key("a", h="03")
+    ctrl.pin([k2])
+
+    assert ctrl.filter_unpinned([k1, k2, k3]) == [k1, k3]
+
+
+def test_drop_pins_purges_pin_regardless_of_count():
+    """drop_pins removes a key from the pin set even if pinned multiple times."""
+    ctrl, _, ut = _setup(eviction_ratio=1.0)
+    k = _make_key("a")
+    _store(ctrl, ut, k, 100)
+    ctrl.pin([k])
+    ctrl.pin([k])  # pinned twice
+
+    ctrl.drop_pins([k])
+    # A single drop clears all pin counts: the key is evictable again.
+    assert ctrl.compute_eviction_plan()["a"] == [k]
+    assert ctrl.filter_unpinned([k]) == [k]
+
+
+def test_drop_pins_unknown_key_is_noop():
+    """drop_pins on a never-pinned key does not raise."""
+    ctrl, _, _ = _setup()
+    ctrl.drop_pins([_make_key("a", h="ff")])  # no error

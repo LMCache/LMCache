@@ -25,6 +25,7 @@ EXPECTED = {
     F.NL_X_TWO_NB_NH_BS_HS: (False, False, True, False),
     F.NL_X_NB_TWO_NH_BS_HS: (False, False, True, False),
     F.NL_X_NB_NH_BS_TWO_HS: (False, False, True, False),
+    F.NL_X_NB_BS_NH_TWO_HS: (False, False, True, False),
     F.NL_X_NB_BS_HS: (False, False, True, True),
     F.NL_X_NBBS_ONE_HS: (False, False, True, True),
 }

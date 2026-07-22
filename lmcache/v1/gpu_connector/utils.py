@@ -324,6 +324,13 @@ def get_page_buffer_size(
     return get_spec(kv_caches, engine_kv_format).page_buffer_size()
 
 
+def get_kv_size(
+    kv_caches: DiscoverableKVCache, engine_kv_format: "lmc_ops.EngineKVFormat"
+) -> int:
+    """Return the K/V axis size (2 for split K/V, 1 for fused)."""
+    return get_spec(kv_caches, engine_kv_format).kv_size()
+
+
 def get_num_heads(
     kv_caches: DiscoverableKVCache,
     engine_kv_format: "lmc_ops.EngineKVFormat",
@@ -410,9 +417,10 @@ def assert_is_vllm_flash_attn_or_flash_infer(
         lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
         lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
         lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,
-        # Blocks-first fused K/V (vLLM CPU): a per-layer non-MLA layout that
-        # shares this transfer path even though it is not literally flash-*.
+        # Blocks-first fused K/V (HND and NHD): per-layer non-MLA layouts that
+        # share this transfer path even though they are not literally flash-*.
         lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS,
+        lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS,
     )
 
 
@@ -633,7 +641,7 @@ def make_page_buffer_shape_desc(
         A populated ``PageBufferShapeDesc``.
     """
     desc = lmc_ops.PageBufferShapeDesc()
-    desc.kv_size = 1 if is_mla(engine_kv_format) else 2
+    desc.kv_size = get_kv_size(kv_caches, engine_kv_format)
     desc.nl = num_layers_in_group
     desc.nb = num_blocks
     desc.bs = block_size

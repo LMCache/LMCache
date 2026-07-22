@@ -40,6 +40,39 @@ const (
 	pythonHashSeedValue = "0"
 )
 
+// LMCache code-payload staging names. These mirror the CacheBlend staging
+// constants with an lmcache- discriminator so the two injectors never collide on
+// the same pod (distinct volume / mount path / init-container names). Staging is
+// applied only when the engine's injection.payloadImage is set.
+const (
+	// lmcPayloadVolumeName is the shared emptyDir volume the init container stages
+	// the lmcache package tree into and the vLLM container reads it back from.
+	lmcPayloadVolumeName = "lmcache-payload"
+
+	// lmcPayloadMountPath is the in-container path the lmcache-payload volume
+	// mounts at (read-write in the init container, read-only in the vLLM
+	// container). It is also the vLLM container's prepended PYTHONPATH entry.
+	lmcPayloadMountPath = "/lmcache-payload"
+
+	// lmcPayloadInitName is the name of the injected payload init container.
+	lmcPayloadInitName = "lmcache-payload-stage"
+
+	// lmcSharedDirEnvName is the env var the payload init container reads to learn
+	// where to copy the tree (its busybox `cp -a /payload $SHARED_DIR` ENTRYPOINT).
+	// It matches the CacheBlend payload contract so one payload-image convention
+	// serves both injectors.
+	lmcSharedDirEnvName = "SHARED_DIR"
+)
+
+// lmcStaging is the LMCache injector's payload-staging parameters, consumed by
+// the shared payloadStaging builders.
+var lmcStaging = payloadStaging{
+	volumeName:   lmcPayloadVolumeName,
+	mountPath:    lmcPayloadMountPath,
+	initName:     lmcPayloadInitName,
+	sharedDirEnv: lmcSharedDirEnvName,
+}
+
 // BuildLMCacheArgs returns the target vLLM container's args with the LMCache
 // --kv-transfer-config flag applied (append-or-replace via applyArg, shared with
 // the CacheBlend builders). The flag is injected only when kvTransferConfigJSON

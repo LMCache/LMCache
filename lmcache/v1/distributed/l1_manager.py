@@ -20,6 +20,9 @@ from lmcache.v1.distributed.memory_manager import (
     L1ManagerProtocol,
     L1MemoryManager,
 )
+from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
+    DevDaxL1MemoryManager,
+)
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
@@ -188,13 +191,15 @@ class L1Manager:
 
         self._objects: dict[ObjectKey, L1ObjectState] = {}
 
-        # GDS and CPU L1 are mutually exclusive tiers, each driven by its own
-        # config: the GDS tier reads only ``gds_l1_config`` (slab size +
-        # alignment), the CPU tier only ``memory_config``.
+        # GDS, Device-DAX, and CPU L1 are mutually exclusive tiers. Each tier
+        # owns its backing allocator instead of branching inside the CPU path.
         self._memory_manager: L1ManagerProtocol
         if config.gds_l1_config is not None:
             self._memory_manager = GDSL1MemoryManager(config.gds_l1_config)
             logger.info("L1Manager: GDS L1 tier enabled; CPU pinned-DRAM L1 disabled")
+        elif config.memory_config.devdax_path:
+            self._memory_manager = DevDaxL1MemoryManager(config.memory_config)
+            logger.info("L1Manager: Device-DAX L1 tier enabled; CPU-only L1 disabled")
         else:
             self._memory_manager = L1MemoryManager(config.memory_config)
 
@@ -659,19 +664,24 @@ class L1Manager:
         return ret
 
     @l1_mgr_synchronized
-    def delete(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1Error]:
+    def delete(
+        self, keys: list[ObjectKey], force: bool = False
+    ) -> dict[ObjectKey, L1Error]:
         """Delete the given keys from L1 cache.
 
         Args:
             keys: The list of object keys to delete.
+            force: When True, delete even a read/write-locked key. This may free
+                memory a concurrent store/read still uses (same hazard as
+                :meth:`clear` with ``force=True``); use with care.
 
         Returns:
             A dictionary mapping each object key to an L1Error.
 
         Errors:
             KEY_NOT_EXIST: The key does not exist.
-            KEY_IS_LOCKED: The key is locked (either write-locked or read-locked
-                and cannot be deleted).
+            KEY_IS_LOCKED: The key is write-locked or read-locked and cannot be
+                deleted. Never returned when ``force`` is True.
         """
         need_to_free: list[MemoryObj] = []
         ret: dict[ObjectKey, L1Error] = {}
@@ -683,9 +693,12 @@ class L1Manager:
                 ret[key] = L1Error.KEY_NOT_EXIST
                 continue
 
-            if entry.read_lock.is_locked() or entry.write_lock.is_locked():
+            locked = entry.read_lock.is_locked() or entry.write_lock.is_locked()
+            if locked and not force:
                 ret[key] = L1Error.KEY_IS_LOCKED
                 continue
+            if locked:
+                logger.warning("L1Manager: force-deleting locked key %s", key)
 
             need_to_free.append(entry.memory_obj)
             del self._objects[key]

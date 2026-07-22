@@ -85,9 +85,30 @@ class CudaProfile(BuildProfile):
 
     def requirements_file(self) -> Optional[str]:
         """Return the CUDA version-specific requirements file."""
+        return "cuda%s_core.txt" % self._cuda_major()
+
+    def extras_requirements(self) -> dict[str, str]:
+        """Return the CUDA optional extras.
+
+        Returns:
+            Mapping with the ``"nixl"`` extra (``pip install lmcache[nixl]``).
+            The extra depends on the ``nixl`` meta-package, which selects the
+            CUDA backend at runtime, so it is identical for CUDA 12 and 13.
+        """
+        return {"nixl": "nixl.txt"}
+
+    def _cuda_major(self) -> str:
+        """Resolve the target CUDA major version from ``LMCACHE_CUDA_MAJOR``.
+
+        Returns:
+            ``"12"`` or ``"13"`` (default ``"13"``, matching the PyPI build).
+
+        Raises:
+            ValueError: If ``LMCACHE_CUDA_MAJOR`` is set to anything else.
+        """
         cuda_major = os.environ.get("LMCACHE_CUDA_MAJOR", "13")
         if cuda_major not in ("12", "13"):
             raise ValueError(
                 "LMCACHE_CUDA_MAJOR must be '12' or '13', got '%s'" % cuda_major
             )
-        return "cuda%s_core.txt" % cuda_major
+        return cuda_major

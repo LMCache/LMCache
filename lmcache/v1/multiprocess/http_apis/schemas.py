@@ -19,13 +19,17 @@ from lmcache.v1.distributed.tiers import Tier
 class DeleteObjectsRequest:
     """Wire body for ``DELETE /cache/objects``.
 
-    ``keys`` field types are validated by FastAPI (422); their ``ObjectKey``
-    invariants, the batch cap, and tier support are enforced by the service.
-    ``tier`` defaults to ``l2``; ``adapter`` selects an adapter, else the primary.
+    Key-addressed delete for L1, L2, or both. ``keys`` field types are validated
+    by FastAPI (422); their ``ObjectKey`` invariants and the batch cap are
+    enforced by the service. ``tier`` selects the tier(s) -- ``l1`` / ``l2`` /
+    ``all`` (default ``l2`` for backward compatibility with the eviction loop).
+    ``force`` deletes L1 keys even if read/write-locked. ``adapter`` selects an
+    L2 adapter, else the primary (ignored when ``tier`` is ``l1``).
     """
 
     keys: list[EncodedObjectKey]
     tier: Tier = Tier.L2
+    force: bool = False
     adapter: str | None = None
 
 

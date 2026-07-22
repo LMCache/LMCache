@@ -40,11 +40,12 @@ class DeviceIPCWrapper:
     Subclasses implement ``__init__`` (populate the interface fields from a
     tensor) and ``to_tensor`` (reconstruct the tensor from the handle).
 
-    Concrete subclasses set ``_is_default_wrapper = True`` (a ``ClassVar``)
-    to mark themselves as the default factory for their ``device_type``;
-    auto-discovery in :mod:`lmcache.v1.platform._registry` reads it via
-    ``getattr(cls, "_is_default_wrapper", False)`` so the attribute is
-    intentionally not declared on the base class.
+    The default wrapper for each device is bound to that device's
+    :class:`~lmcache.v1.platform.base_device_spec.DeviceSpec` via
+    :attr:`~lmcache.v1.platform.base_device_spec.DeviceSpec.ipc_wrapper_cls`;
+    :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory` reads that
+    binding and returns the wrapper's ``wrap`` classmethod so callers can
+    dispatch by ``tensor.device.type`` without any if/elif chain.
     """
 
     # Interface fields populated by each concrete subclass's

@@ -13,6 +13,8 @@ import zmq
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
+from lmcache.usage_telemetry.mp import InitializeMPUsageContext
+from lmcache.usage_telemetry.mp_continuous import InitializeMPContinuousUsage
 from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     add_storage_manager_args,
@@ -30,7 +32,9 @@ from lmcache.v1.multiprocess.config import (
     DEFAULT_COORDINATOR_CONFIG,
     CoordinatorConfig,
     MPServerConfig,
+    add_coordinator_args,
     add_mp_server_args,
+    parse_args_to_coordinator_config,
     parse_args_to_mp_server_config,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
@@ -245,9 +249,10 @@ def _build_modules(
         transfer_module = next(
             m for m in transfer_modules if isinstance(m, LMCacheDrivenTransferModule)
         )
-        # Opt-in: enabled only when LMCACHE_COORDINATOR_URL is set; otherwise
+        # Opt-in: enabled when a coordinator URL is configured (flag or
+        # LMCACHE_COORDINATOR_URL, resolved at config parsing); otherwise
         # None and the blend module matches purely locally.
-        coordinator = BlendCoordinatorClient.maybe_from_env()
+        coordinator = BlendCoordinatorClient.maybe_create(coordinator_config.url)
         blend_v3 = BlendV3Module(
             ctx,
             transfer_module,
@@ -344,15 +349,22 @@ def run_cache_server(
                 )
                 mem_cfg.shm_name = ""
 
+    # blend engine: single object group + full per-chunk SWA KV
+    is_blend = mp_config.engine_type == "blend"
+
     ctx = MPCacheServerContext(
         storage_manager_config=storage_manager_config,
         chunk_size=mp_config.chunk_size,
         hash_algorithm=mp_config.hash_algorithm,
-        separate_object_groups=mp_config.separate_object_groups,
+        separate_object_groups=mp_config.separate_object_groups and not is_blend,
+        full_sw_kv=is_blend,
     )
 
     modules = _build_modules(ctx, mp_config, coordinator_config)
     engine = MPCacheServer(ctx, modules)
+
+    InitializeMPUsageContext(mp_config, storage_manager_config)
+    InitializeMPContinuousUsage(event_bus, mp_config.chunk_size)
 
     zmq_context = zmq.Context.instance()
     server = MessageQueueServer(
@@ -425,6 +437,7 @@ def parse_args():
     add_mp_server_args(parser)
     add_storage_manager_args(parser)
     add_observability_args(parser)
+    add_coordinator_args(parser)
     return parser.parse_args()
 
 
@@ -433,8 +446,10 @@ if __name__ == "__main__":
     mp_config = parse_args_to_mp_server_config(args)
     storage_manager_config = parse_args_to_config(args)
     obs_config = parse_args_to_observability_config(args)
+    coordinator_config = parse_args_to_coordinator_config(args)
     run_cache_server(
         mp_config=mp_config,
         storage_manager_config=storage_manager_config,
         obs_config=obs_config,
+        coordinator_config=coordinator_config,
     )
