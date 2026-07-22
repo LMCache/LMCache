@@ -242,6 +242,13 @@ start_vllm() {
   export VLLM_TARGET_DEVICE=cpu
   export VLLM_CPU_KVCACHE_SPACE="${VLLM_CPU_KVCACHE_SPACE}"
   export LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE}"
+  # Force non-MLA attention backend when the matrix profile asks for it.
+  # vLLM's CPU backend still raises NotImplementedError for MLA today,
+  # so DeepSeek-V2-family models (which normally route through MLA) must
+  # set this on CPU to fall back to standard MHA.
+  if [ -n "${VLLM_MLA_DISABLE:-}" ]; then
+    export VLLM_MLA_DISABLE="${VLLM_MLA_DISABLE}"
+  fi
   # Pin gloo / vLLM rendezvous to loopback. Otherwise vLLM's
   # network_utils.get_ip() picks a LAN address (e.g. 192.168.x.x on the
   # macOS GHA runner) and gloo's init_process_group sits there for ~16
