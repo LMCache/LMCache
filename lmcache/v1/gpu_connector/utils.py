@@ -15,7 +15,6 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.python_ops_fallback import set_shape_desc_dtype
 from lmcache.utils import EngineType, lmcache_deprecate
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector.kv_format import (
@@ -26,6 +25,7 @@ from lmcache.v1.gpu_connector.kv_format import (
     get_spec_class,
 )
 from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, LayoutHints
+from lmcache.v1.platform.ops_types import set_shape_desc_dtype
 
 if TYPE_CHECKING:
     # First Party

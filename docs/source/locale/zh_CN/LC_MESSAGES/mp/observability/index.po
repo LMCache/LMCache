@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-06 10:41+0000\n"
+"POT-Creation-Date: 2026-07-20 10:08+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -56,7 +56,9 @@ msgstr "默认情况下，\\ **指标**\\ 和\\ **日志记录**\\ 是启用的�
 msgid ""
 "The server then exposes Prometheus metrics at ``/metrics`` on its **HTTP "
 "frontend port** (``--http-port``, default ``8080``):"
-msgstr "服务器然后在其 **HTTP 前端端口** (``--http-port``, 默认 ``8080``) 上暴露 Prometheus 指标于 ``/metrics``："
+msgstr ""
+"服务器然后在其 **HTTP 前端端口** (``--http-port``, 默认 ``8080``) 上暴露 Prometheus 指标于 "
+"``/metrics``："
 
 #: ../../source/mp/observability/index.rst:36
 msgid ""
@@ -69,7 +71,13 @@ msgid ""
 "replay``) — see :ref:`mp-obs-metrics-endpoint`. Also note metrics are "
 "lazy: a series only appears *after* the first store/retrieve that "
 "produces it, so drive some traffic before scraping."
-msgstr "对于 ``lmcache server``，``/metrics`` 位于 ``--http-port``（默认 ``8080``），**而不是** ``--prometheus-port``：HTTP 前端已经提供了 ``/metrics``，因此独立的 Prometheus 服务器被禁用，``--prometheus-port`` 在此命令下没有效果。``--prometheus-port`` *是* 前端无入口点的指标端点（``python -m lmcache.v1.multiprocess.server`` 和 ``lmcache trace replay``）— 请参见 :ref:`mp-obs-metrics-endpoint`。还要注意，指标是惰性加载的：一个系列只有在第一次存储/检索产生它之后才会出现，因此在抓取之前请先驱动一些流量。"
+msgstr ""
+"对于 ``lmcache server``，``/metrics`` 位于 ``--http-port``（默认 "
+"``8080``），**而不是** ``--prometheus-port``：HTTP 前端已经提供了 ``/metrics``，因此独立的 "
+"Prometheus 服务器被禁用，``--prometheus-port`` 在此命令下没有效果。``--prometheus-port`` "
+"*是* 前端无入口点的指标端点（``python -m lmcache.v1.multiprocess.server`` 和 ``lmcache "
+"trace replay``）— 请参见 :ref:`mp-obs-metrics-"
+"endpoint`。还要注意，指标是惰性加载的：一个系列只有在第一次存储/检索产生它之后才会出现，因此在抓取之前请先驱动一些流量。"
 
 #: ../../source/mp/observability/index.rst:46
 msgid ""
@@ -82,7 +90,9 @@ msgid ""
 "To enable tracing instead of (or alongside) Prometheus pull, supply an "
 "OTLP endpoint — this switches metrics to **push mode** (see :ref:`mp-obs-"
 "grafana`):"
-msgstr "要启用追踪而不是（或与）Prometheus 拉取并行，请提供 OTLP 端点——这将切换指标到 **推送模式**（参见 :ref:`mp-obs-grafana`）："
+msgstr ""
+"要启用追踪而不是（或与）Prometheus 拉取并行，请提供 OTLP 端点——这将切换指标到 **推送模式**（参见 :ref:`mp-"
+"obs-grafana`）："
 
 #: ../../source/mp/observability/index.rst:68
 msgid "Where ``/metrics`` lives"
@@ -95,7 +105,9 @@ msgid ""
 "frontend serve it there (and disable the standalone Prometheus server); "
 "entrypoints with no HTTP frontend start the standalone server on "
 "``--prometheus-port`` instead."
-msgstr "拉模式的 ``/metrics`` 端点根据入口点的不同而服务于两个地方。嵌入 uvicorn HTTP 前端的入口点在此提供该端点（并禁用独立的 Prometheus 服务器）；没有 HTTP 前端的入口点则在 ``--prometheus-port`` 上启动独立服务器。"
+msgstr ""
+"拉模式的 ``/metrics`` 端点根据入口点的不同而服务于两个地方。嵌入 uvicorn HTTP 前端的入口点在此提供该端点（并禁用独立的"
+" Prometheus 服务器）；没有 HTTP 前端的入口点则在 ``--prometheus-port`` 上启动独立服务器。"
 
 #: ../../source/mp/observability/index.rst:79
 msgid "Entrypoint"
@@ -213,13 +225,18 @@ msgid ""
 "Prometheus + Tempo → Grafana) under ``examples/observability/``. Grafana "
 "comes with the **LMCache dashboard and datasources pre-provisioned** and "
 "anonymous access enabled, so there is nothing to click to log in."
-msgstr "该存储库提供了一个可直接运行的堆栈（OpenTelemetry Collector → Prometheus + Tempo → Grafana），位于 ``examples/observability/`` 下。Grafana 配备了 **预配置的 LMCache 仪表板和数据源**，并启用了匿名访问，因此无需点击登录。"
+msgstr ""
+"该存储库提供了一个可直接运行的堆栈（OpenTelemetry Collector → Prometheus + Tempo → "
+"Grafana），位于 ``examples/observability/`` 下。Grafana 配备了 **预配置的 LMCache "
+"仪表板和数据源**，并启用了匿名访问，因此无需点击登录。"
 
 #: ../../source/mp/observability/index.rst:142
 msgid ""
 "In this path the server pushes to the Collector and **Prometheus scrapes "
 "the Collector**, so you do *not* scrape the server's ``:8080`` directly."
-msgstr "在这个路径中，服务器将数据推送到 Collector，**Prometheus 从 Collector 中抓取数据**，因此您*不*直接从服务器的 ``:8080`` 抓取数据。"
+msgstr ""
+"在这个路径中，服务器将数据推送到 Collector，**Prometheus 从 Collector 中抓取数据**，因此您*不*直接从服务器的"
+" ``:8080`` 抓取数据。"
 
 #: ../../source/mp/observability/index.rst:146
 msgid "Path B — pull mode (metrics only, no collector)"
@@ -230,7 +247,9 @@ msgid ""
 "If you only want metrics, skip the collector entirely and have Prometheus"
 " scrape the server's ``/metrics`` endpoint directly. Start the server "
 "**without** ``--otlp-endpoint`` (see Quick Start above), then:"
-msgstr "如果您只想要指标，可以完全跳过收集器，让 Prometheus 直接抓取服务器的 ``/metrics`` 端点。启动服务器时 **不** 使用 ``--otlp-endpoint``（请参见上面的快速开始），然后："
+msgstr ""
+"如果您只想要指标，可以完全跳过收集器，让 Prometheus 直接抓取服务器的 ``/metrics`` 端点。启动服务器时 **不** 使用 "
+"``--otlp-endpoint``（请参见上面的快速开始），然后："
 
 #: ../../source/mp/observability/index.rst:175
 msgid "Then in Grafana (``http://localhost:3000``):"
@@ -247,7 +266,11 @@ msgid ""
 "and select the Prometheus datasource. This is the same dashboard the "
 "bundled stack provisions (cache hit rate, L1/L2 cache ops, L1↔L2 "
 "throughput, eviction loop, EventBus health, and more)."
-msgstr "**导入仪表板**：仪表板 → 新建 → 导入 → 上传 ``examples/observability/grafana/provisioning/dashboards/lmcache.json`` 并选择 Prometheus 数据源。这是捆绑堆栈提供的相同仪表板（缓存命中率、L1/L2 缓存操作、L1↔L2 吞吐量、逐出循环、EventBus 健康状况等）。"
+msgstr ""
+"**导入仪表板**：仪表板 → 新建 → 导入 → 上传 "
+"``examples/observability/grafana/provisioning/dashboards/lmcache.json`` "
+"并选择 Prometheus 数据源。这是捆绑堆栈提供的相同仪表板（缓存命中率、L1/L2 缓存操作、L1↔L2 "
+"吞吐量、逐出循环、EventBus 健康状况等）。"
 
 #: ../../source/mp/observability/index.rst:184
 msgid "Verify the pipeline end to end:"
@@ -264,7 +287,11 @@ msgid ""
 "with ``-p 9090:9090`` / ``-p 3000:3000``, and set the scrape target to "
 "``host.docker.internal:8080`` and the Grafana datasource URL to "
 "``http://host.docker.internal:9090``."
-msgstr "``--network host``（如上所述）是在 Linux 上最简单的选项。在 Docker Desktop（macOS/Windows）上，去掉 ``--network host``，使用 ``-p 9090:9090`` / ``-p 3000:3000`` 发布端口，并将抓取目标设置为 ``host.docker.internal:8080``，Grafana 数据源 URL 设置为 ``http://host.docker.internal:9090``。"
+msgstr ""
+"``--network host``（如上所述）是在 Linux 上最简单的选项。在 Docker "
+"Desktop（macOS/Windows）上，去掉 ``--network host``，使用 ``-p 9090:9090`` / ``-p "
+"3000:3000`` 发布端口，并将抓取目标设置为 ``host.docker.internal:8080``，Grafana 数据源 URL "
+"设置为 ``http://host.docker.internal:9090``。"
 
 #: ../../source/mp/observability/index.rst:207
 msgid "Configuration"
@@ -275,12 +302,12 @@ msgid "Argument"
 msgstr "参数"
 
 #: ../../source/mp/observability/index.rst:214
-#: ../../source/mp/observability/index.rst:271
+#: ../../source/mp/observability/index.rst:280
 msgid "Default"
 msgstr "默认"
 
 #: ../../source/mp/observability/index.rst:215
-#: ../../source/mp/observability/index.rst:272
+#: ../../source/mp/observability/index.rst:281
 msgid "Description"
 msgstr "描述"
 
@@ -292,6 +319,7 @@ msgstr "``--disable-observability``"
 #: ../../source/mp/observability/index.rst:221
 #: ../../source/mp/observability/index.rst:224
 #: ../../source/mp/observability/index.rst:227
+#: ../../source/mp/observability/index.rst:253
 msgid "off"
 msgstr "关闭"
 
@@ -342,8 +370,8 @@ msgid "``--otlp-endpoint``"
 msgstr "``--otlp-endpoint``"
 
 #: ../../source/mp/observability/index.rst:233
-#: ../../source/mp/observability/index.rst:253
-#: ../../source/mp/observability/index.rst:259
+#: ../../source/mp/observability/index.rst:262
+#: ../../source/mp/observability/index.rst:268
 msgid "*(none)*"
 msgstr "(无)"
 
@@ -368,7 +396,11 @@ msgid ""
 "``lmcache trace replay``). **Ignored by** ``lmcache server`` — there the "
 "HTTP frontend serves ``/metrics`` on ``--http-port`` instead, so the "
 "standalone server is disabled. See :ref:`mp-obs-metrics-endpoint`."
-msgstr "独立 Prometheus ``/metrics`` 服务器的端口。仅由无前端的入口点启动（``python -m lmcache.v1.multiprocess.server``，``lmcache trace replay``）。**在** ``lmcache server`` 中被忽略——在这里，HTTP 前端在 ``--http-port`` 上提供 ``/metrics``，因此独立服务器被禁用。请参见 :ref:`mp-obs-metrics-endpoint`。"
+msgstr ""
+"独立 Prometheus ``/metrics`` 服务器的端口。仅由无前端的入口点启动（``python -m "
+"lmcache.v1.multiprocess.server``，``lmcache trace replay``）。**在** "
+"``lmcache server`` 中被忽略——在这里，HTTP 前端在 ``--http-port`` 上提供 "
+"``/metrics``，因此独立服务器被禁用。请参见 :ref:`mp-obs-metrics-endpoint`。"
 
 #: ../../source/mp/observability/index.rst:243
 msgid "``--http-port``"
@@ -383,7 +415,9 @@ msgid ""
 "Port of the HTTP frontend, which serves the Prometheus ``/metrics`` "
 "endpoint in pull mode (when ``--otlp-endpoint`` is unset) for ``lmcache "
 "server``."
-msgstr "HTTP 前端的端口，用于在拉取模式下（当 ``--otlp-endpoint`` 未设置时）为 ``lmcache server`` 提供 Prometheus ``/metrics`` 端点。"
+msgstr ""
+"HTTP 前端的端口，用于在拉取模式下（当 ``--otlp-endpoint`` 未设置时）为 ``lmcache server`` 提供 "
+"Prometheus ``/metrics`` 端点。"
 
 #: ../../source/mp/observability/index.rst:248
 msgid "``--metrics-sample-rate``"
@@ -400,10 +434,35 @@ msgid ""
 msgstr "用于生命周期直方图的 chunk/block 采样比例 (0, 1.0]。计数器始终统计所有事件。默认值为 1%。"
 
 #: ../../source/mp/observability/index.rst:252
+msgid "``--enable-extra-logging``"
+msgstr "``--enable-extra-logging``"
+
+#: ../../source/mp/observability/index.rst:254
+msgid ""
+"Periodically log per-GPU L0<->L1 store/retrieve throughput and token "
+"counts, plus L1 memory usage, at INFO level. Conflicts with ``--disable-"
+"observability``. See :doc:`logs`."
+msgstr "定期以 INFO 级别记录每个 GPU 的 L0<->L1 存储/检索吞吐量和令牌计数，以及 L1 内存使用情况。与 ``--disable-observability`` 冲突。请参见 :doc:`logs`。"
+
+#: ../../source/mp/observability/index.rst:257
+msgid "``--extra-logging-interval``"
+msgstr "``--extra-logging-interval``"
+
+#: ../../source/mp/observability/index.rst:258
+msgid "``10.0``"
+msgstr "``10.0``"
+
+#: ../../source/mp/observability/index.rst:259
+msgid ""
+"Seconds between extra-logging emissions. Values below ``1.0`` are limited"
+" by the 1 Hz internal heartbeat."
+msgstr "额外日志发出的间隔时间（秒）。低于 ``1.0`` 的值受到 1 Hz 内部心跳的限制。"
+
+#: ../../source/mp/observability/index.rst:261
 msgid "``--trace-level``"
 msgstr "``--trace-level``"
 
-#: ../../source/mp/observability/index.rst:254
+#: ../../source/mp/observability/index.rst:263
 msgid ""
 "Enable trace recording at the given level. Currently only ``storage`` is "
 "supported (records ``StorageManager`` public-API calls for offline "
@@ -413,11 +472,11 @@ msgstr ""
 "在指定级别启用追踪录制。目前仅支持 ``storage``\\ （记录 ``StorageManager`` 公共 API "
 "调用以便离线回放）。未设置时，追踪录制关闭。详情请参见 :ref:`trace-recording`。"
 
-#: ../../source/mp/observability/index.rst:258
+#: ../../source/mp/observability/index.rst:267
 msgid "``--trace-output``"
 msgstr "``--trace-output``"
 
-#: ../../source/mp/observability/index.rst:260
+#: ../../source/mp/observability/index.rst:269
 msgid ""
 "Path to write the trace file. If omitted while ``--trace-level`` is set, "
 "a timestamped file under ``$TMPDIR`` is minted (``lmcache-"
@@ -426,23 +485,23 @@ msgstr ""
 "追踪文件的写入路径。若设置了 ``--trace-level`` 但省略此项，将在 ``$TMPDIR`` 下自动生成一个带时间戳的文件（\\ "
 "``lmcache-trace-<pid>-<UTC>.lct``\\ ），并以 INFO 级别记录其路径。"
 
-#: ../../source/mp/observability/index.rst:264
+#: ../../source/mp/observability/index.rst:273
 msgid "**Environment variables:**"
 msgstr "**环境变量：**"
 
-#: ../../source/mp/observability/index.rst:270
+#: ../../source/mp/observability/index.rst:279
 msgid "Variable"
 msgstr "变量"
 
-#: ../../source/mp/observability/index.rst:273
+#: ../../source/mp/observability/index.rst:282
 msgid "``LMCACHE_LOG_LEVEL``"
 msgstr "``LMCACHE_LOG_LEVEL``"
 
-#: ../../source/mp/observability/index.rst:274
+#: ../../source/mp/observability/index.rst:283
 msgid "``INFO``"
 msgstr "``INFO``"
 
-#: ../../source/mp/observability/index.rst:275
+#: ../../source/mp/observability/index.rst:284
 msgid ""
 "Controls the log level for all LMCache loggers. Valid values: ``DEBUG``, "
 "``INFO``, ``WARNING``, ``ERROR``, ``CRITICAL``."

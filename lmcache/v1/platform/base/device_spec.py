@@ -30,12 +30,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 # First Party
-from lmcache.v1.platform.base_pin_memory import PinMemoryBackend
+from lmcache.v1.platform.base.pin_memory import PinMemoryBackend
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.platform.base_cache_context import BaseCacheContext
-    from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
+    from lmcache.v1.platform.base.cache_context import BaseCacheContext
+    from lmcache.v1.platform.base.device_ops import DeviceOps
+    from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
 
 class DeviceSpec:
@@ -52,6 +53,8 @@ class DeviceSpec:
 
     # Cached pin-memory backend instance (lazy-initialized).
     _pin_backend_cache: PinMemoryBackend | None = None
+    # Cached DeviceOps singleton instance (lazy-initialized).
+    _ops_cache: DeviceOps | None = None
 
     @property
     def device_type(self) -> str:
@@ -75,12 +78,37 @@ class DeviceSpec:
         return ""
 
     @property
-    def ops_module(self) -> str | None:
-        """Fully-qualified module path for the compiled ops backend.
+    def ops_cls(self) -> type[DeviceOps]:
+        """DeviceOps subclass providing the ``lmcache.c_ops`` surface.
 
-        Return ``None`` if no custom ops are available (fallback only).
+        Lazy by design: the import happens on *access*, not at class-definition
+        or DeviceSpec-discovery time, so resolving a spec never drags the torch
+        baseline (or a native .so) into the platform package's import graph.
+        The base returns the torch/CPU baseline; accelerator specs override.
+
+        Returns:
+            type[DeviceOps]: The base DeviceOps torch/CPU baseline class for the
+            fallback spec. Accelerator subclasses override this property to
+            return their backend-specific DeviceOps subclass.
         """
-        return None
+        # First Party
+        from lmcache.v1.platform.base.device_ops import DeviceOps
+
+        return DeviceOps
+
+    def get_ops(self) -> DeviceOps:
+        """Return the cached :class:`DeviceOps` singleton for this spec.
+
+        Lazy-initialized on first access.  Calls :meth:`ensure_native`
+        so native ops are bound before the instance is used.  The same
+        instance is reused process-wide for a given spec.
+        """
+        ops = self._ops_cache
+        if ops is None:
+            ops = self.ops_cls()
+            ops.ensure_native()
+            self._ops_cache = ops
+        return ops
 
     def is_available(self) -> bool:
         """Return ``True`` when the device is usable on this system.
