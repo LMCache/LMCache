@@ -22,6 +22,7 @@ from lmcache.v1.gpu_connector.kv_format import (
     concrete_shape,
     describe_shape,
     detect_format,
+    extract_kv_cache_shapes,
     get_spec,
     get_spec_class,
 )
@@ -237,13 +238,15 @@ def normalize_and_discover_per_layer_formats(
 
     # Detect the whole structure once. A format that isn't a per-layer list (a
     # cross-layer tensor, or a K/V-split) is single-format -- return it whole.
-    whole_format, whole_normalized = detect_format(
-        kv_caches, serving_engine, layout_hints
-    )
-    if not lmc_ops.is_layer_list(whole_format):
-        return whole_normalized, [whole_format] * get_num_layers(
-            whole_normalized, whole_format
+    extracted_shapes = extract_kv_cache_shapes(kv_caches)
+    if len(extracted_shapes) == 1:
+        whole_format, whole_normalized = detect_format(
+            kv_caches, serving_engine, layout_hints
         )
+        if not lmc_ops.is_layer_list(whole_format):
+            return whole_normalized, [whole_format] * get_num_layers(
+                whole_normalized, whole_format
+            )
 
     # Per-layer list: re-detect per engine group, split by tensor shape so a group
     # that mixes layouts gets the right format per layer.
