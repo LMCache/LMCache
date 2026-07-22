@@ -18,6 +18,8 @@ deployment operators), different transports, and independent opt-outs.
 | `env_probe.py` | Hardware/platform/cloud detection feeding `EnvMessage` |
 | `context.py` | `UsageContextBase`, single-process `UsageContext`, `InitializeUsageContext` — the `/context` snapshot reporters |
 | `continuous.py` | `ContinuousUsageContext` interval counters and lifespan histogram |
+| `metric_specs.py` | `MetricSpec` (map-reduce metric contract) and the default metric registry (not re-exported from the package root) |
+| `mp_continuous.py` | `MPContinuousUsageReporter` — buffers/reduces/sends the `MetricSpec` metrics for the MP server (not re-exported from the package root) |
 | `mp.py` | MP server `MPUsageContext`, `InitializeMPUsageContext` |
 
 `lmcache/usage_context.py` remains as a backward-compatibility shim
@@ -46,11 +48,15 @@ phone home is a dataclass there, and nowhere else. The contract:
 | Single-process one-shot | `LMCacheEngine.__init__` → `InitializeUsageContext` | `EnvMessage`, `EngineMessage`, `MetadataMessage` |
 | MP server one-shot | `run_cache_server` → `InitializeMPUsageContext` | `EnvMessage`, `MPServerMessage` |
 | Continuous (single-process) | `LMCacheStatsLogger.log_worker`, every `LMCACHE_USAGE_TRACK_INTERVAL` s (default 600) | `ContinuousContextMessage`, `CacheLifespanMessage` |
+| Continuous (MP server) | EventBus (`MP_RETRIEVE_END`, `MP_STORE_END`; lmcache-driven transfers only), flushed every `LMCACHE_USAGE_TRACK_INTERVAL` s | `ContinuousContextMessage`; empty intervals double as heartbeats |
 
 Model and KV-layout information only become visible to the MP server when
 a serving engine registers its KV caches; a registration-time report
-(`MPInstanceMessage`) is planned for a follow-up PR, together with MP-mode
-continuous reporting (an EventBus subscriber feeding the same endpoints).
+(`MPInstanceMessage`) is planned for a follow-up PR. MP continuous
+callbacks run on the EventBus drain thread and only increment counters;
+sends happen on the reporter's own flush thread, with a final flush when
+the bus stops. See `docs/design/usage_telemetry/continuous_metrics.md`
+for the metric roadmap.
 
 ## Failure isolation (no-throw guarantee)
 
@@ -58,16 +64,22 @@ A failure anywhere in telemetry must never affect caching or serving. The
 mechanisms, outermost first:
 
 - Every entry point called from serving code — `InitializeUsageContext`,
-  `InitializeMPUsageContext`, `ContinuousUsageContext.incr_or_send_stats`,
-  `report_once` — is decorated with
+  `InitializeMPUsageContext`, `InitializeMPContinuousUsage`,
+  `ContinuousUsageContext.incr_or_send_stats`, `report_once`, the MP
+  event callbacks, and `MPContinuousUsageReporter.flush` — is decorated
+  with
   `guard.swallow_telemetry_errors`: exceptions are logged at debug level
   and swallowed.
 - One-shot sends run on a daemon thread; startup never blocks on the
   stats server.
 - `UsageMessageSender.send` additionally swallows all transport errors
   with a 5 s timeout.
-- `ContinuousUsageContext.__init__` degrades (kv-bytes-per-token = 0)
-  rather than raising on nonstandard kv shapes.
+- Constructors reachable from serving code never raise on bad inputs:
+  nonstandard kv shapes degrade (kv-bytes-per-token = 0) and malformed
+  `LMCACHE_USAGE_TRACK_INTERVAL` values fall back to the default —
+  necessary because `ContinuousUsageContext.GetOrCreate` is called
+  unguarded inside `LMCacheStatsLogger.__init__` on the engine startup
+  path.
 
 Tests for this contract live in `TestFailureIsolation`
 (`tests/test_usage_telemetry.py`): a transport that raises must not break

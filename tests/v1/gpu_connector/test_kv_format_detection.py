@@ -62,15 +62,29 @@ def test_vllm_mla():
     assert fmt == F.NL_X_NB_BS_HS
 
 
-def test_vllm_blocks_first_fused_num_heads_2():
+def test_vllm_blocks_first_fused_num_heads_2(monkeypatch):
     # Raw 4-D [NB, NH, BS, 2*HS] with NH == 2 (a common GQA config): after the
     # fused split the K/V axis and the head axis both equal 2, so the 5-D shape
     # is ambiguous with flash-infer. Detection must use the rank-4 split, not
     # the post-split shape, to land on the fused format.
+    monkeypatch.setattr(_VLLM_DEV, "cuda")
     raw = [_t(NB, 2, BS, 2 * HS) for _ in range(NL)]
     fmt, out = detect_format(raw, EngineType.VLLM, {"kv_layout": "HND"})
     assert fmt == F.NL_X_NB_NH_BS_TWO_HS
     assert tuple(out[0].shape) == (NB, 2, BS, 2, HS)
+
+
+def test_vllm_blocks_first_fused_nhd_vs_hnd(monkeypatch):
+    # The rank-4 fused split is shape-ambiguous between NHD and HND (the two
+    # middle axes could be BS/NH or NH/BS), so the kv_layout hint decides.
+    monkeypatch.setattr(_VLLM_DEV, "cuda")
+    raw = [_t(NB, BS, NH, 2 * HS) for _ in range(NL)]
+    fmt_nhd, out = detect_format(raw, EngineType.VLLM, {"kv_layout": "NHD"})
+    assert fmt_nhd == F.NL_X_NB_BS_NH_TWO_HS
+    assert tuple(out[0].shape) == (NB, BS, NH, 2, HS)
+    raw_hnd = [_t(NB, NH, BS, 2 * HS) for _ in range(NL)]
+    fmt_hnd, _ = detect_format(raw_hnd, EngineType.VLLM, {"kv_layout": "HND"})
+    assert fmt_hnd == F.NL_X_NB_NH_BS_TWO_HS
 
 
 def test_sglang_mla_depth1():

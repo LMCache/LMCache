@@ -9,6 +9,6 @@ commands, and HTTP endpoints.
 
    contributing
    extending_lmcache/native_connectors
-extending_lmcache/adding_a_new_device_backend
+   extending_lmcache/adding_a_new_device_backend
    cli
    extending_http_api
