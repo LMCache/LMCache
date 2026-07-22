@@ -31,6 +31,22 @@ VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-2048}"
 VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-4}"
 LMCACHE_HEALTHCHECK_TIMEOUT="${LMCACHE_HEALTHCHECK_TIMEOUT:-30}"
 VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-120}"
+# Model selection knobs. Defaults keep the historical opt-125m path so
+# existing callers see no behaviour change; matrix entries for other
+# models (e.g. deepseek-ai/DeepSeek-V2-Lite-Chat) override these.
+#   VLLM_MODEL_ID        HF repo id, passed to `vllm serve`
+#   VLLM_LOAD_FORMAT     empty = default (real weights), "dummy" = random init
+#                        (matches vLLM's --load-format flag)
+#   VLLM_HF_OVERRIDES    optional JSON, passed via --hf-overrides. Used with
+#                        dummy load to shrink layer/expert counts so large
+#                        MoE models (MLA etc.) fit in CI runners.
+#   VLLM_DOWNLOAD_SCRIPT relative filename under .github/scripts/ that
+#                        prepares the model files locally. "" skips the step
+#                        (needed when weights are random-initialised).
+VLLM_MODEL_ID="${VLLM_MODEL_ID:-facebook/opt-125m}"
+VLLM_LOAD_FORMAT="${VLLM_LOAD_FORMAT:-}"
+VLLM_HF_OVERRIDES="${VLLM_HF_OVERRIDES:-}"
+VLLM_DOWNLOAD_SCRIPT="${VLLM_DOWNLOAD_SCRIPT:-download_opt125m_github.sh}"
 # Transport mode selection:
 #   LMCACHE_MP_TRANSFER_MODE=engine_driven  -> engine-driven data path,
 #       sub-selected by LMCACHE_SHM_NAME:
@@ -193,13 +209,14 @@ send_completion() {
   # file path and max_tokens via argv so the python snippet itself
   # does not need any shell interpolation inside its string body.
   PROMPT_FILE="${prompt_file}" MAX_TOKENS="${max_tokens}" \
+  VLLM_MODEL_ID="${VLLM_MODEL_ID}" \
     python3 - >"${body_file}" <<'PYEOF'
 import json
 import os
 
 prompt = open(os.environ['PROMPT_FILE']).read()
 print(json.dumps({
-    'model': 'facebook/opt-125m',
+    'model': os.environ['VLLM_MODEL_ID'],
     'prompt': prompt,
     'max_tokens': int(os.environ['MAX_TOKENS']),
     'temperature': 0,
@@ -255,7 +272,23 @@ print(json.dumps({
         'lmcache.mp.port': int('${LMCACHE_ZMQ_PORT}'),
     },
 }))")"
-  vllm serve facebook/opt-125m \
+  # Optional flags — appended only when set, so unrelated callers stay
+  # bit-identical to the pre-refactor invocation.
+  local -a extra_serve_args=()
+  if [ -n "${VLLM_LOAD_FORMAT}" ]; then
+    extra_serve_args+=(--load-format "${VLLM_LOAD_FORMAT}")
+  fi
+  if [ -n "${VLLM_HF_OVERRIDES}" ]; then
+    extra_serve_args+=(--hf-overrides "${VLLM_HF_OVERRIDES}")
+  fi
+  # trust-remote-code is required for models with custom python modelling
+  # code (e.g. DeepSeek-V2). Harmless for models that don't need it.
+  if [ "${VLLM_TRUST_REMOTE_CODE:-0}" = "1" ]; then
+    extra_serve_args+=(--trust-remote-code)
+  fi
+  echo "vLLM model: ${VLLM_MODEL_ID}"
+  echo "vLLM extra args: ${extra_serve_args[*]:-<none>}"
+  vllm serve "${VLLM_MODEL_ID}" \
     --port "${VLLM_PORT}" \
     --dtype bfloat16 \
     --disable-hybrid-kv-cache-manager \
@@ -266,6 +299,7 @@ print(json.dumps({
     --max-num-seqs "${VLLM_MAX_NUM_SEQS}" \
     --kv-transfer-config "${kv_transfer_config}" \
     --enforce-eager \
+    "${extra_serve_args[@]}" \
     >"${VLLM_LOG}" 2>&1 &
   VLLM_PID=$!
   echo "vLLM server started (PID=${VLLM_PID})"
@@ -275,7 +309,7 @@ print(json.dumps({
     return 1
   fi
   echo "Waiting for vLLM readiness at http://localhost:${VLLM_PORT}/v1/models (timeout: ${VLLM_READY_TIMEOUT}s)"
-  if ! wait_for_endpoint_contains "http://localhost:${VLLM_PORT}/v1/models" "${VLLM_READY_TIMEOUT}" "facebook/opt-125m" "vLLM server"; then
+  if ! wait_for_endpoint_contains "http://localhost:${VLLM_PORT}/v1/models" "${VLLM_READY_TIMEOUT}" "${VLLM_MODEL_ID}" "vLLM server"; then
     return 1
   fi
   echo "✅ vLLM server is ready"
@@ -345,9 +379,13 @@ else
   echo "✅ numpy<2 installed"
 fi
 
-echo "[Phase 2 / Step 2] Downloading facebook/opt-125m model (GitHub release)"
-bash "${SHARED_SCRIPTS_DIR}/download_opt125m_github.sh"
-echo "✅ Model download/check complete"
+if [ -z "${VLLM_DOWNLOAD_SCRIPT}" ]; then
+  echo "[Phase 2 / Step 2] Skipping model download (VLLM_DOWNLOAD_SCRIPT is empty)."
+else
+  echo "[Phase 2 / Step 2] Preparing model ${VLLM_MODEL_ID} via ${VLLM_DOWNLOAD_SCRIPT}"
+  bash "${SHARED_SCRIPTS_DIR}/${VLLM_DOWNLOAD_SCRIPT}"
+  echo "✅ Model download/check complete"
+fi
 
 echo "[Phase 2 / Step 3] Starting LMCache server"
 echo "LMCache log: ${LMCACHE_LOG}"
@@ -449,15 +487,22 @@ export VLLM_TARGET_DEVICE=cpu
 start_vllm
 
 echo "[Phase 2 / Step 5] Sending E2E test request"
+e2e_request_body="$(VLLM_MODEL_ID="${VLLM_MODEL_ID}" python3 -c "
+import json, os
+print(json.dumps({
+    'model': os.environ['VLLM_MODEL_ID'],
+    'prompt': 'Hello',
+    'max_tokens': 5,
+}))")"
 completion_response="$(curl -fsS "http://localhost:${VLLM_PORT}/v1/completions" \
   -H "Content-Type: application/json" \
-  -d '{"model":"facebook/opt-125m","prompt":"Hello","max_tokens":5}')"
+  -d "${e2e_request_body}")"
 echo "Completion response: ${completion_response}"
 if ! echo "${completion_response}" | grep -q '"choices"'; then
   echo "❌ E2E request response failed structural validation"
   false
 fi
-if ! echo "${completion_response}" | grep -q "facebook/opt-125m"; then
+if ! echo "${completion_response}" | grep -q "${VLLM_MODEL_ID}"; then
   echo "❌ E2E request response missing expected model"
   false
 fi
