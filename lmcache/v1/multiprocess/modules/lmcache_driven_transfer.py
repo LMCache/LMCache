@@ -51,12 +51,10 @@ from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.cache_context import create_cache_context
 import lmcache.c_ops as lmc_ops
-import lmcache.python_ops_fallback as _python_ops_fallback
 
 logger = init_logger(__name__)
-_HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = (
-    lmc_ops.execute_object_group_transfer
-    is not _python_ops_fallback.execute_object_group_transfer
+_HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = hasattr(
+    lmc_ops, "execute_object_group_transfer"
 )
 
 

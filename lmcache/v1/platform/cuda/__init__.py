@@ -15,6 +15,7 @@ from lmcache.v1.platform.cuda.pin_memory import CudaPinMemoryBackend
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.platform.base.cache_context import BaseCacheContext
+    from lmcache.v1.platform.base.device_ops import DeviceOps
     from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
 # ---------------------------------------------------------------------------
@@ -34,8 +35,11 @@ class CudaDeviceSpec(DeviceSpec):
         return "cuda"
 
     @property
-    def ops_module(self) -> str | None:
-        return "lmcache.c_ops"
+    def ops_cls(self) -> type[DeviceOps]:
+        # First Party
+        from lmcache.v1.platform.cuda.device_ops import CudaDeviceOps
+
+        return CudaDeviceOps
 
     @property
     def pin_memory_backend(self) -> type[PinMemoryBackend] | None:

@@ -12,6 +12,7 @@ from lmcache.v1.platform.base.device_spec import DeviceSpec
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.v1.platform.base.device_ops import DeviceOps
     from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
 # ---------------------------------------------------------------------------
@@ -31,8 +32,11 @@ class MusaDeviceSpec(DeviceSpec):
         return "musa"
 
     @property
-    def ops_module(self) -> str | None:
-        return "lmcache.v1.platform.musa.ops"
+    def ops_cls(self) -> type[DeviceOps]:
+        # First Party
+        from lmcache.v1.platform.musa.device_ops import MusaDeviceOps
+
+        return MusaDeviceOps
 
     @property
     def ipc_wrapper_cls(self) -> type[DeviceIPCWrapper] | None:
