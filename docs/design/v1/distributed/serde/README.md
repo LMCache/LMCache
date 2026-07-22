@@ -71,15 +71,16 @@ classes and register a factory.
 
 ## Contracts
 
-### `Serializer.serialize(src, dst, key) -> int`
+### `Serializer.serialize(src, dst, key=None) -> int`
 
 - `src` is a `MemoryObj` holding KV data (read-locked by the caller).
 - `dst` is a `MemoryObj` byte buffer (write-locked by the caller),
   sized ≥ `estimate_serialized_size(layout_of_src)`.
 - `key` is the `ObjectKey` for this `src`/`dst` pair, positionally
-  aligned with the batch. Serdes that transform bytes per-object
-  (e.g. an encryption serde keyed on `cache_salt`) read it;
-  transform-agnostic serdes (fp8, turboquant) ignore it.
+  aligned with the batch. It is **optional and defaults to `None`**:
+  serdes that transform bytes per-object (e.g. an encryption serde
+  keyed on `cache_salt`) read it and should reject `None`;
+  transform-agnostic serdes (fp8, turboquant) ignore it entirely.
 - Must return the number of bytes actually written to `dst`.
 - Must be **deterministic** given the same `src` — the wrapper relies
   on the serialize step being reproducible across retries.
@@ -94,7 +95,7 @@ classes and register a factory.
   uses the first object's layout to size temps for the whole batch,
   so a data-dependent estimate would break all-or-nothing allocation.
 
-### `Deserializer.deserialize(src, dst, key) -> None`
+### `Deserializer.deserialize(src, dst, key=None) -> None`
 
 - `src` is a byte-buffer MemoryObj filled by L2 load.
 - `dst` is a KV-shaped MemoryObj (write-locked), already the correct
@@ -106,9 +107,10 @@ classes and register a factory.
 
 ### `SerdeProcessor` (async)
 
-- `submit_serialize(src_objs, dst_objs, keys) → SerdeTaskId` must be
-  non-blocking. `keys` is positionally aligned with `src_objs` /
-  `dst_objs`. The actual transform runs asynchronously.
+- `submit_serialize(src_objs, dst_objs, keys=None) → SerdeTaskId` must
+  be non-blocking. `keys` is optional (defaults to `None`) and, when
+  given, positionally aligned with `src_objs` / `dst_objs`. The actual
+  transform runs asynchronously.
 - `query_serialize_result(task_id) → bool | None` is
   **non-idempotent**: it returns a non-None value exactly once per
   task id. `None` means the task is still in flight.
@@ -209,10 +211,10 @@ as one combined tensor. It does not work in two cases:
 - `LayoutDescGroup = Tuple[Optional[MemoryLayoutDesc], ...]` is the
   parallel layout-descriptor tuple used by size estimators.
 - `MultiSerializer.serialize(src: MemoryObjGroup, dst: MemoryObj,
-  key: ObjectKey)` takes a group whose length equals
+  key: ObjectKey | None = None)` takes a group whose length equals
   `MultiSerializer.group_size`.
 - `MultiDeserializer.deserialize(src: MemoryObj, dst: MemoryObjGroup,
-  key: ObjectKey)` produces a group whose length equals
+  key: ObjectKey | None = None)` produces a group whose length equals
   `MultiDeserializer.group_size`.
 - `single_to_multi_serializer(s)` and
   `single_to_multi_deserializer(d)` adapt an existing single-tensor

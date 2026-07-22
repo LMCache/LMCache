@@ -527,7 +527,9 @@ class TurboQuantSerializer(Serializer):
     def __init__(self, cfg: TurboQuantSerdeConfig):
         self._cfg = cfg
 
-    def serialize(self, src: MemoryObj, dst: MemoryObj, key: ObjectKey) -> int:
+    def serialize(
+        self, src: MemoryObj, dst: MemoryObj, key: ObjectKey | None = None
+    ) -> int:
         """Serialize a KV tensor into a TurboQuant-compressed byte buffer.
 
         Args:
@@ -535,8 +537,8 @@ class TurboQuantSerializer(Serializer):
                 ``[2, num_layers, num_tokens, hidden_dim]``.
             dst: Destination memory object containing a ``torch.uint8`` tensor
                 used as the serialized byte buffer.
-            key: Object key for this pair (unused: TurboQuant is
-                content-agnostic).
+            key: Object key for this pair, or None (unused: TurboQuant
+                is content-agnostic).
 
         Returns:
             The number of serialized bytes written to ``dst``.
@@ -676,7 +678,9 @@ class TurboQuantDeserializer(Deserializer):
     def __init__(self, cfg: TurboQuantSerdeConfig):
         self._cfg = cfg
 
-    def deserialize(self, src: MemoryObj, dst: MemoryObj, key: ObjectKey) -> None:
+    def deserialize(
+        self, src: MemoryObj, dst: MemoryObj, key: ObjectKey | None = None
+    ) -> None:
         """Deserialize a TurboQuant byte buffer into a destination KV tensor.
 
         Args:
@@ -684,8 +688,8 @@ class TurboQuantDeserializer(Deserializer):
                 byte buffer as a ``torch.uint8`` tensor.
             dst: Destination memory object containing the reconstructed KV
                 tensor with shape ``[2, num_layers, num_tokens, hidden_dim]``.
-            key: Object key for this pair (unused: TurboQuant is
-                content-agnostic).
+            key: Object key for this pair, or None (unused: TurboQuant
+                is content-agnostic).
 
         Raises:
             ValueError: If source or destination tensors are missing, if the
