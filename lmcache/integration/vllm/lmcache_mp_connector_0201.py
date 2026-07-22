@@ -451,9 +451,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
     - lmcache.mp.heartbeat_interval: interval (seconds) between server
       heartbeat pings.
     - lmcache.mp.mp_transfer_mode: routing mode for the worker -> server
-      transfer context. One of ``auto`` (default; CUDA -> engine_driven,
-      others -> lmcache_driven), ``engine_driven`` (force IPC / SHM
-      zero-copy), ``lmcache_driven`` (force worker-side gather/scatter
+      transfer context. One of ``auto`` (default; CUDA -> lmcache_driven,
+      others -> engine_driven), ``lmcache_driven`` (force IPC / SHM
+      zero-copy), ``engine_driven`` (force worker-side gather/scatter
       copy). Overrides the ``LMCACHE_MP_TRANSFER_MODE`` env var when set.
     """
 
