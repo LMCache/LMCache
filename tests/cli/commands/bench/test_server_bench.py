@@ -110,6 +110,7 @@ class TestCommandArguments:
         assert args.end is None
         assert args.interval == 0.5
         assert args.url == "http://localhost:8080"
+        assert args.tp_size == 1
 
     def test_custom_values(
         self,
@@ -923,3 +924,160 @@ class TestAllocShapeContract:
         tensors = _allocate_kv_cache(device="cpu", groups=[group])
         assert len(tensors) == 1
         assert tensors[0].shape == (2, 4, 2, 8, 16)
+
+
+# ------------------------------------------------------------------ #
+#  Multi-worker (TP > 1) fan-out                                       #
+# ------------------------------------------------------------------ #
+
+
+class TestProcessRequestMultiWorker:
+    """LOOKUP is scheduler-scoped (single call, worker_id=None) while
+    STORE / RETRIEVE fan out per-rank, mirroring how
+    ``LMCacheMPWorkerAdapter`` routes requests in a real vLLM
+    deployment. MLA marks only rank 0 as a KV writer (matching
+    ``ParallelStrategy.is_kv_writer``); non-MLA writes on every rank.
+    """
+
+    def _run(self, is_mla: bool, tp_size: int):
+        """Drive ``_process_request`` against a mocked ``_call`` and return
+        the sequence of ``(RequestType, worker_id, instance_id)`` tuples
+        for the fan-out ops (STORE / RETRIEVE)."""
+        # Standard
+        from unittest.mock import patch
+
+        # First Party
+        from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
+        from lmcache.cli.commands.bench.server_bench.helpers import (
+            _INSTANCE_ID_BASE,
+            WorkerContext,
+            _process_request,
+        )
+
+        calls: list[tuple] = []
+
+        # Stand-in for the two-phase PREPARE reply. ``success=True``
+        # plus an empty ``context`` sends the flow down the classical
+        # path (no slot views, no server_pool needed).
+        class _FakePrep:
+            success = True
+            context: dict = {}
+
+        # ``_call`` returns different shapes per RequestType:
+        #   LOOKUP -> None (void)
+        #   QUERY_PREFETCH_STATUS -> hit_chunks (int) or None
+        #   STORE / RETRIEVE (handle) -> (worker_id, True)
+        #   PREPARE_* -> _FakePrep()
+        #   COMMIT_* -> True
+        #   END_SESSION -> None
+        def fake_call(_client, req_type, payloads):
+            calls.append((req_type, payloads))
+            name = req_type.name
+            if name == "QUERY_PREFETCH_STATUS":
+                # No cache hits -> only STORE side fires.
+                return 0
+            if name in ("STORE", "RETRIEVE"):
+                return (0, True)
+            if name.startswith("PREPARE_"):
+                return _FakePrep()
+            if name.startswith("COMMIT_"):
+                return True
+            return None
+
+        workers = []
+        kv_world_size = 1 if is_mla else tp_size
+        for rank in range(tp_size):
+            workers.append(
+                WorkerContext(
+                    kv_worker_id=0 if is_mla else rank,
+                    kv_world_size=kv_world_size,
+                    instance_id=_INSTANCE_ID_BASE + rank,
+                    client_tensors=None,
+                    server_pool=None,
+                    # MLA: only rank 0 stores; non-MLA: every rank stores.
+                    is_kv_writer=(rank == 0) if is_mla else True,
+                )
+            )
+
+        with patch.object(sv_helpers, "_call", side_effect=fake_call):
+            _process_request(
+                client=None,  # type: ignore[arg-type]  # unused: _call mocked
+                seq_no=0,
+                num_tokens=32,
+                chunk_size=16,
+                pass_label="cold",
+                http_base="",
+                block_size=16,
+                total_blocks=64,
+                num_engine_group_infos=1,
+                use_gpu=True,  # handle mode: single-shot STORE / RETRIEVE
+                use_handle=True,
+                workers=workers,
+                world_size=kv_world_size,
+            )
+
+        return calls
+
+    def test_mla_tp2_store_only_from_rank0(self) -> None:
+        calls = self._run(is_mla=True, tp_size=2)
+        # Extract STORE + RETRIEVE calls with their instance_id argument.
+        stores = [c for c in calls if c[0].name == "STORE"]
+        retrieves = [c for c in calls if c[0].name == "RETRIEVE"]
+        # MLA: rank 0 only.
+        assert len(stores) == 1, "MLA tp=2 should STORE once (rank 0)"
+        # payloads is [key, instance_id, block_ids, event_handle].
+        store_key, store_iid = stores[0][1][0], stores[0][1][1]
+        assert store_iid == 1000  # _INSTANCE_ID_BASE + 0
+        # MLA folds all TP ranks into kv_worker_id 0 with kv_world_size 1
+        # -- must match ParallelStrategy.kv_worker_id / .kv_world_size
+        # or LOOKUP expands to kv_ranks the STORE never wrote and every
+        # warm pass misses.
+        assert store_key.world_size == 1, (
+            "MLA STORE key.world_size must be 1 (kv_world_size), got %d"
+            % store_key.world_size
+        )
+        assert store_key.worker_id == 0, (
+            "MLA STORE key.worker_id must be 0 (kv_worker_id), got %s"
+            % store_key.worker_id
+        )
+        # No hits in the fake -> RETRIEVE is skipped entirely.
+        assert retrieves == []
+
+    def test_non_mla_tp2_store_on_every_rank(self) -> None:
+        calls = self._run(is_mla=False, tp_size=2)
+        stores = [c for c in calls if c[0].name == "STORE"]
+        # Non-MLA: every rank stores.
+        assert len(stores) == 2
+        # payloads is [key, instance_id, block_ids, event_handle].
+        instance_ids = sorted(c[1][1] for c in stores)
+        assert instance_ids == [1000, 1001]
+        # Non-MLA: each rank stores under its own kv_worker_id, with
+        # kv_world_size == tp_size.
+        for c in stores:
+            store_key = c[1][0]
+            assert store_key.world_size == 2, (
+                "non-MLA STORE key.world_size must be tp_size=2, got %d"
+                % store_key.world_size
+            )
+        worker_ids = sorted(c[1][0].worker_id for c in stores)
+        assert worker_ids == [0, 1]
+
+    def test_lookup_called_once_regardless_of_tp(self) -> None:
+        for is_mla in (True, False):
+            for tp in (1, 2, 4):
+                calls = self._run(is_mla=is_mla, tp_size=tp)
+                lookups = [c for c in calls if c[0].name == "LOOKUP"]
+                assert len(lookups) == 1, (
+                    "LOOKUP should fire exactly once regardless of tp_size "
+                    "(is_mla=%s, tp=%d)" % (is_mla, tp)
+                )
+                # LOOKUP payload is ``[key, tp_size]``. MLA with tp>1
+                # needs tp_size on the wire so the server adds
+                # ``tp_size - 1`` extra read locks per chunk (see
+                # compute_extra_count in lookup.py); a hard-coded 1
+                # under-locks and subsequent-rank RETRIEVE reads stale
+                # bytes with a "non-read-locked key" warning.
+                assert lookups[0][1][1] == tp, (
+                    "LOOKUP payload tp_size must equal simulated tp "
+                    "(is_mla=%s, tp=%d, got=%s)" % (is_mla, tp, lookups[0][1][1])
+                )

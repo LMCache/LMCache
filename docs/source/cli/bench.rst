@@ -892,6 +892,40 @@ Both transfer modes support MLA:
    classical (non-MLA) layout; use ``lmcache_driven`` when you need
    true per-group MLA.
 
+Tensor Parallel (TP > 1)
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+``--tp-size N`` (default: 1) simulates a TP world of ``N`` vLLM
+workers against a single LMCache server. Each rank registers its own
+KV cache under a distinct ``instance_id``, so the server holds one
+context per rank -- exactly the layout ``LMCacheMPWorkerAdapter``
+creates in a real deployment. Fan-out for the store / retrieve /
+lookup ops mirrors ``ParallelStrategy`` from the vLLM adapter:
+
+* ``LOOKUP`` fires exactly once per request (scheduler-scoped,
+  ``worker_id=None``).
+* ``RETRIEVE`` fires on **every** rank -- each worker loads its own
+  KV shard back.
+* ``STORE`` fires on **KV writers only**. Non-MLA: every rank is a
+  writer. MLA: only rank 0 is a writer (the latent plane is shared
+  across ranks; storing from every rank would just re-write identical
+  bytes).
+
+Example: MLA + TP=2, exercising rank 0 STORE + both-rank RETRIEVE:
+
+.. code-block:: bash
+
+   lmcache bench server \
+       --rpc-url tcp://localhost:15556 \
+       --mode cpu --transfer-mode lmcache_driven \
+       --kvcache-shape-spec "(1,1024,16,1,128):bfloat16:8" \
+       --tp-size 2
+
+The bench's client-side checksum aggregates writer-rank bytes only,
+so a cold-vs-warm mismatch pinpoints the exact rank whose round trip
+went wrong -- useful for verifying that a new server-side change
+handles per-rank ``instance_id`` routing correctly.
+
 See ``parse_kvcache_shape_spec`` in ``lmcache/v1/kv_layer_groups.py``
 for the authoritative parsing rules and validation errors.
 
