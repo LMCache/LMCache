@@ -14,20 +14,23 @@
 #   MODEL_ID          HF repo id, e.g. facebook/opt-125m
 #                     Used to derive the HF cache directory name
 #                     (org/name -> models--org--name).
-#   TARBALL_URL       Full URL to a tar.gz whose top-level directory is
-#                     ${TARBALL_TOP_DIR}. Works with any host (GitHub
-#                     release asset, GitHub branch/tag archive, S3, ...).
-#                     Examples:
+#   TARBALL_URL       Full URL to a tar.gz whose top-level directory
+#                     contains the HF snapshot files. Works with any
+#                     host (GitHub release asset, GitHub branch/tag
+#                     archive, S3, ...). Examples:
 #                     https://github.com/OWNER/REPO/releases/download/TAG/FILE.tar.gz
 #                     https://github.com/OWNER/REPO/archive/refs/heads/BRANCH.tar.gz
 #                     https://github.com/OWNER/REPO/archive/refs/tags/TAG.tar.gz
 #   SNAPSHOT          HF snapshot hash (populates snapshots/<hash>/
 #                     and refs/main)
-#   TARBALL_TOP_DIR   Directory name inside the tarball whose contents
-#                     should be moved into snapshots/<hash>/
-#                     (e.g. opt-125m, deepseek_v2_lite-with_out_weight)
 #
 # Optional env vars:
+#   TARBALL_TOP_DIR   Explicit top-level directory name inside the
+#                     tarball. If unset, it is auto-detected (the
+#                     tarball must contain exactly one top-level
+#                     directory). Set this only when the tarball has
+#                     multiple top-level entries and you need to pick
+#                     one.
 #   CACHE_MARKER      File under snapshots/<hash>/ that, if present,
 #                     signals "already cached, skip download". Default:
 #                     config.json (works for weight-less mirrors too).
@@ -37,7 +40,7 @@ set -euo pipefail
 : "${MODEL_ID:?MODEL_ID is required (e.g. facebook/opt-125m)}"
 : "${TARBALL_URL:?TARBALL_URL is required (full https URL to the tar.gz)}"
 : "${SNAPSHOT:?SNAPSHOT is required (HF snapshot hash)}"
-: "${TARBALL_TOP_DIR:?TARBALL_TOP_DIR is required}"
+TARBALL_TOP_DIR="${TARBALL_TOP_DIR:-}"
 CACHE_MARKER="${CACHE_MARKER:-config.json}"
 
 # HF cache dir name: HF's rule is "models--<org>--<name>", i.e. the
@@ -73,11 +76,30 @@ for i in $(seq 1 5); do
     sleep $((10 * i))
 done
 
-# Tarball layout: top-level directory named ${TARBALL_TOP_DIR}
-# whose contents are the HF snapshot files.
+# Tarball layout: exactly one top-level directory whose contents are
+# the HF snapshot files. Auto-detect it unless the caller pinned an
+# explicit name via ${TARBALL_TOP_DIR}.
 EXTRACT_DIR="${TMP_DIR}/extract"
 mkdir -p "${EXTRACT_DIR}"
 tar -xzf "${TARBALL}" -C "${EXTRACT_DIR}"
+
+if [ -z "${TARBALL_TOP_DIR}" ]; then
+    # Awk picks the first path segment of every archive entry that
+    # actually lives under a directory (NF>1); `sort -u` collapses
+    # duplicates. A well-formed tarball has exactly one such segment.
+    mapfile -t _top_dirs < <(
+        tar -tzf "${TARBALL}" | awk -F/ 'NF>1 {print $1}' | sort -u
+    )
+    if [ "${#_top_dirs[@]}" -ne 1 ]; then
+        echo "!! Tarball from ${TARBALL_URL} has ${#_top_dirs[@]} top-level dirs;"
+        echo "   expected exactly one. Set TARBALL_TOP_DIR to pick."
+        printf '   - %s\n' "${_top_dirs[@]}"
+        exit 1
+    fi
+    TARBALL_TOP_DIR="${_top_dirs[0]}"
+    echo "Auto-detected top-level dir: ${TARBALL_TOP_DIR}"
+fi
+
 if [ ! -d "${EXTRACT_DIR}/${TARBALL_TOP_DIR}" ]; then
     echo "!! Tarball from ${TARBALL_URL} does not contain top-level dir '${TARBALL_TOP_DIR}'"
     echo "   Actual contents:"

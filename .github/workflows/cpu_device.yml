@@ -84,7 +84,6 @@ jobs:
           - name: opt-125m
             id: facebook/opt-125m
             tarball_url: https://github.com/LMCache/opt-125m/releases/download/v1.0/opt-125m.tar.gz
-            tarball_top_dir: opt-125m
             hf_snapshot: 27dcfa74d334bc871f3234de431e71c6eeba5dd6
             cache_marker: pytorch_model.bin
             load_format: ""
@@ -102,13 +101,12 @@ jobs:
           # path; MLA validation is deferred until vLLM CPU supports
           # it. Weights are random (`--load-format dummy`) and served
           # from a weight-less GitHub mirror (opendataio/deepseek_v2_lite
-          # branch `with_out_weight`, GitHub auto-generates the tar.gz).
+          # tag `v1.0`, GitHub auto-generates the tar.gz).
           # `hf_overrides` shrinks the model to 2 layers / 4 routed
           # experts so CPU runners can host it.
           - name: deepseek-v2-lite
             id: deepseek-ai/DeepSeek-V2-Lite-Chat
-            tarball_url: https://github.com/opendataio/deepseek_v2_lite/archive/refs/heads/with_out_weight.tar.gz
-            tarball_top_dir: deepseek_v2_lite-with_out_weight
+            tarball_url: https://github.com/opendataio/deepseek_v2_lite/archive/refs/tags/v1.0.tar.gz
             hf_snapshot: 85864749cd611b4353ce1decdb286193298f64c7
             cache_marker: config.json
             load_format: dummy
@@ -204,7 +202,6 @@ jobs:
           MODEL_ID: ${{ matrix.model.id }}
           TARBALL_URL: ${{ matrix.model.tarball_url }}
           SNAPSHOT: ${{ matrix.model.hf_snapshot }}
-          TARBALL_TOP_DIR: ${{ matrix.model.tarball_top_dir }}
           CACHE_MARKER: ${{ matrix.model.cache_marker }}
         run: bash .github/scripts/download_gh_release_model.sh
 
