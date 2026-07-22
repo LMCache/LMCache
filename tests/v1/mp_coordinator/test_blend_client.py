@@ -191,19 +191,19 @@ def test_take_match_clears():
         client.close()
 
 
-def test_maybe_from_env(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("LMCACHE_COORDINATOR_URL", raising=False)
-    assert BlendCoordinatorClient.maybe_from_env() is None
+def test_maybe_create(monkeypatch: pytest.MonkeyPatch):
+    assert BlendCoordinatorClient.maybe_create("") is None
+    assert BlendCoordinatorClient.maybe_create("   ") is None
+    assert BlendCoordinatorClient.maybe_create(None) is None
 
-    monkeypatch.setenv("LMCACHE_COORDINATOR_URL", "http://coord:9300")
     monkeypatch.delenv("LMCACHE_COORDINATOR_BLEND_TIMEOUT", raising=False)
-    client = BlendCoordinatorClient.maybe_from_env()
+    client = BlendCoordinatorClient.maybe_create("http://coord:9300")
     assert client is not None
     assert client.match_budget_s == 1.0  # default timeout
     client.close()
 
     monkeypatch.setenv("LMCACHE_COORDINATOR_BLEND_TIMEOUT", "1.5")
-    client = BlendCoordinatorClient.maybe_from_env()
+    client = BlendCoordinatorClient.maybe_create("http://coord:9300")
     assert client is not None
     assert client.match_budget_s == 1.5  # env override
     client.close()

@@ -673,6 +673,39 @@ class TestStorageManagerL2Prefetch:
 
         sm.close()
 
+    def test_sparse_skip_l2_locks_only_l1(
+        self, l2_storage_manager_config, basic_layout
+    ):
+        """``policy=SPARSE`` + ``skip_l2=True`` submits no controller request.
+
+        Only L1-resident keys are locked and reported found; keys present only
+        in L2 are reported as misses.
+        """
+        sm = StorageManager(l2_storage_manager_config)
+        all_keys = [make_object_key(i) for i in range(3)]
+
+        # All keys reach L2; delete key 1 from L1 so it is L2-only.
+        self._write_keys_and_wait_for_l2(sm, all_keys, basic_layout)
+        time.sleep(0.05)
+        deleted, skipped = sm.delete_l1_keys([all_keys[1]])
+        assert (deleted, skipped) == (1, 0)
+
+        handle = sm.submit_prefetch_task(
+            all_keys, basic_layout, policy=TrimPolicy.SPARSE, skip_l2=True
+        )
+
+        # skip_l2 honored: the controller was never asked.
+        assert handle.prefetch_request_id == -1
+        assert handle.l2_orig_indices == ()
+        assert handle.l1_found_indices == (0, 2)
+
+        found = sm.query_prefetch_status(handle)
+        assert found is not None
+        assert found.get_indices_list() == [0, 2]
+
+        sm.finish_read_prefetched([all_keys[0], all_keys[2]])
+        sm.close()
+
     def test_prefetch_l2_partial_prefix(self, l2_storage_manager_config, basic_layout):
         """L2 has keys {0,1,3,4} but not 2 → L2 returns prefix of 2."""
         sm = StorageManager(l2_storage_manager_config)
