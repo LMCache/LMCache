@@ -753,7 +753,6 @@ class TestConfig:
         assert isinstance(S3L2AdapterConfig.help(), str)
         assert "s3_endpoint" in S3L2AdapterConfig.help()
 
-
     def test_path_style_requires_bucket(self):
         with pytest.raises(ValueError, match="s3_bucket"):
             S3L2AdapterConfig.from_dict(
