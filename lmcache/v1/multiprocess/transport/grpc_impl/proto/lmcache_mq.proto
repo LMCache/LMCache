@@ -2,21 +2,31 @@
 //
 // Wire format for the LMCache mp-mode message queue over gRPC.
 //
-// Every request type is a distinct unary rpc method so gRPC handles all
-// dispatch: no request-type frame, no manual routing, no polling loop
-// on the client side. The payload / response are opaque bytes today
-// (msgspec encoded per the corresponding ProtocolDefinition), so a
-// follow-up PR can promote any single rpc to typed messages without
-// changing the service shape or any other rpc.
+// Two rpc flavors coexist here on purpose:
+//
+//   1. Typed rpcs -- request / response are real proto messages, so
+//      the wire is self-describing and callers never touch msgspec.
+//      New rpcs should go this way; migrating existing ones is a
+//      per-rpc chore because each has a bespoke Python payload shape.
+//   2. Legacy rpcs -- request / response are ``BytesRequest`` /
+//      ``BytesResponse`` wrappers whose ``payload`` / ``result``
+//      still carry msgspec-encoded values.  Kept only so we can
+//      promote rpcs to typed messages incrementally without
+//      touching the 30+ callers in one PR.
+//
+// The end state is "every rpc typed"; ``BytesRequest`` / ``BytesResponse``
+// will be deleted once the last handler stops using them.
 
 syntax = "proto3";
 
 package lmcache.mp;
 
-// Generic wrappers. Kept intentionally minimal -- every field a specific
-// rpc needs today already round-trips inside ``payload`` / ``result``
-// through msgspec, and each rpc will be promoted to a typed message
-// individually in follow-ups.
+// -----------------------------------------------------------------------
+// Legacy msgspec envelope.  Do not use for new rpcs -- add a real proto
+// message pair instead (see PingRequest / PingResponse below for the
+// smallest possible reference impl).
+// -----------------------------------------------------------------------
+
 message BytesRequest {
   bytes payload = 1;
 }
@@ -25,10 +35,32 @@ message BytesResponse {
   bytes result = 1;
 }
 
-// One rpc per RequestType.  Method names are the CamelCase form of the
-// RequestType enum (STORE -> Store, CB_LOOKUP_PRE_COMPUTED_V2 ->
-// CbLookupPreComputedV2, etc.) so gRPC's built-in method routing takes
-// over the dispatch that the old msgspec envelope did by hand.
+// -----------------------------------------------------------------------
+// Typed rpc messages start here.  Each new pair lives right above the
+// rpc that uses it so ``git blame`` reads top to bottom.
+// -----------------------------------------------------------------------
+
+// Ping: liveness probe.  ``instance_id`` is the caller's worker id, or
+// -1 for an untracked prober (the scheduler adapter uses this).  The
+// server always returns ``ok=true`` -- the mere fact that the rpc
+// completes is the health signal.  Chosen as the first typed rpc
+// precisely because both sides are trivial.
+message PingRequest {
+  // -1 => untracked prober; otherwise the worker instance id.
+  int64 instance_id = 1;
+}
+
+message PingResponse {
+  bool ok = 1;
+}
+
+// -----------------------------------------------------------------------
+// Service.  One rpc per RequestType.  Method names are the CamelCase
+// form of the RequestType enum (STORE -> Store, CB_LOOKUP_PRE_COMPUTED_V2
+// -> CbLookupPreComputedV2, etc.) so gRPC's built-in method routing
+// takes over the dispatch that the old msgspec envelope did by hand.
+// -----------------------------------------------------------------------
+
 service MessageQueue {
   // Engine operations
   rpc RegisterKvCache(BytesRequest) returns (BytesResponse);
@@ -51,7 +83,10 @@ service MessageQueue {
   // Controller operations
   rpc Clear(BytesRequest) returns (BytesResponse);
   rpc GetChunkSize(BytesRequest) returns (BytesResponse);
-  rpc Ping(BytesRequest) returns (BytesResponse);
+  // TYPED: reference impl for the typed-rpc migration path.  All
+  // other rpcs are still on the legacy BytesRequest/BytesResponse
+  // envelope until they get migrated one-by-one.
+  rpc Ping(PingRequest) returns (PingResponse);
 
   // Observability operations
   rpc ReportBlockAllocation(BytesRequest) returns (BytesResponse);
