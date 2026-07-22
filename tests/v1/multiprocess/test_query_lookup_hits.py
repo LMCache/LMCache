@@ -269,7 +269,7 @@ def _captured_lookup_object_keys(
     module.lookup(_lookup_key(world_size=world_size), tp_size=1)
 
     ctx.storage_manager.submit_prefetch_task.assert_called_once()
-    return ctx.storage_manager.submit_prefetch_task.call_args.args[0]
+    return ctx.storage_manager.submit_prefetch_task.call_args.args[0].keys
 
 
 def test_lookup_lays_keys_out_chunk_then_group_then_rank():
