@@ -51,7 +51,18 @@ class VLLM_Detector(EngineDetector):
                 raise ValueError(
                     f"blocks-first fused trailing dim {fused_dim} is not 2 * head_size"
                 )
-            split = [t.reshape(*t.shape[:3], 2, fused_dim // 2) for t in kv_caches]
+            # Leave non-rank-4 layers untouched: a hybrid model can mix this
+            # layout with another rank (e.g. a rank-3 key-only indexer), and
+            # the caller re-detects per shape anyway.
+            split = [
+                t.reshape(*t.shape[:3], 2, fused_dim // 2) if t.dim() == 4 else t
+                for t in kv_caches
+            ]
+            # Degenerate head axis, mirror of the rank-5 branch below: the
+            # packed view is head-first, so a lone head sits at shape[1]; read
+            # it as heads regardless of the unreliable hint.
+            if kv_caches[0].shape[1] == 1 and kv_caches[0].shape[2] != 1:
+                return lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS, split
             if is_hnd:
                 return lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS, split
             return lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS, split
