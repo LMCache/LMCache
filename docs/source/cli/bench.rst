@@ -852,6 +852,46 @@ All groups must share the same ``NB`` and ``BS`` (this is a physical
 constraint of paged KV). Layer counts across groups sum to the total
 layer count registered with the server.
 
+MLA (Multi-head Latent Attention)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Set ``kv_size=1`` to exercise the MLA data path. MLA folds K and V into
+a single latent plane, so each chunk on the wire is
+``(num_layers, chunk_tokens, num_heads * head_size)`` instead of the
+classical ``(2, num_layers, chunk_tokens, num_heads * head_size)``.
+The bench also allocates each per-layer client tensor as rank-3
+``(NB, BS, num_heads * head_size)`` (rather than the classical rank-5
+``(2, NB, BS, NH, HS)``), which is what the server's vLLM detector
+recognises as MLA -- see ``NL_X_NB_BS_HS`` in
+``lmcache/v1/gpu_connector/kv_format/detectors/vllm.py``.
+
+Pure MLA example (DeepSeek-V2-style, 61 layers, single latent head):
+
+.. code-block:: bash
+
+   lmcache bench server \
+       --rpc-url tcp://localhost:15556 \
+       --kvcache-shape-spec "(1,1024,16,1,128):bfloat16:61"
+
+Both transfer modes support MLA:
+
+* ``lmcache_driven`` (GPU default / CPU opt-in): the server discovers
+  ``use_mla`` from the registered tensor shapes -- the bench's rank-3
+  MLA client tensors trip this automatically.
+* ``engine_driven`` (CPU default): the bench derives ``use_mla`` from
+  ``kv_size`` in the spec and sends it on the register payload, so the
+  server sizes its SHM chunks correctly.
+
+.. note::
+
+   Heterogeneous specs that mix ``kv_size=1`` and ``kv_size=2`` groups
+   are fully supported in ``lmcache_driven`` mode -- each layer's
+   rank (3 vs. 5) tells the detector which per-group KV format to
+   use. In ``engine_driven`` mode the server registers a *single*
+   SHM chunk shape per context, so a mixed spec falls back to the
+   classical (non-MLA) layout; use ``lmcache_driven`` when you need
+   true per-group MLA.
+
 See ``parse_kvcache_shape_spec`` in ``lmcache/v1/kv_layer_groups.py``
 for the authoritative parsing rules and validation errors.
 

@@ -196,6 +196,41 @@ def _make_key(
 # ------------------------------------------------------------------ #
 
 
+# The server's vLLM detector identifies MLA layers by tensor rank: each
+# layer must be rank-3 ``(NB, BS, HS)`` (see ``VLLM_Detector.discover``
+# in ``lmcache/v1/gpu_connector/kv_format/detectors/vllm.py``). Classical
+# split-K/V is rank-5 ``(2, NB, BS, NH, HS)``. Sharing this shape recipe
+# across all allocation / gather / scatter helpers keeps the bench in
+# sync with the detector contract regardless of transfer mode.
+def _is_mla_kv_size(kv_size: int) -> bool:
+    """``kv_size == 1`` marks a single-plane KV group (MLA / fused-K/V)."""
+    return kv_size == 1
+
+
+def _make_alloc_shape(
+    kv_size: int,
+    num_blocks: int,
+    block_size: int,
+    num_heads: int,
+    head_size: int,
+) -> tuple[int, ...]:
+    """Per-layer paged tensor shape, honouring the MLA rank-3 contract."""
+    if _is_mla_kv_size(kv_size):
+        return (num_blocks, block_size, num_heads * head_size)
+    return (kv_size, num_blocks, block_size, num_heads, head_size)
+
+
+def _group_alloc_shape(shape_desc) -> tuple[int, ...]:
+    """``_make_alloc_shape`` variant reading fields off a ``shape_desc``."""
+    return _make_alloc_shape(
+        shape_desc.kv_size,
+        shape_desc.nb,
+        shape_desc.bs,
+        shape_desc.nh,
+        shape_desc.hs,
+    )
+
+
 def _allocate_gpu_kv_cache(
     num_layers: int = 32,
     num_heads: int = 8,
@@ -249,11 +284,11 @@ def _allocate_gpu_kv_cache(
         tensors: list[torch.Tensor] = []
         for g in groups:
             sd = g.shape_desc
-            g_shape = (sd.kv_size, sd.nb, sd.bs, sd.nh, sd.hs)
+            g_shape = _group_alloc_shape(sd)
             tensors.extend(_alloc(g_shape, g.dtype) for _ in range(sd.nl))
         return tensors
 
-    shape = (kv_size, num_blocks, block_size, num_heads, head_size)
+    shape = _make_alloc_shape(kv_size, num_blocks, block_size, num_heads, head_size)
     return [_alloc(shape, dtype) for _ in range(num_layers)]
 
 
@@ -287,7 +322,7 @@ def _allocate_cpu_shm_kv_cache(
     layer_idx = 0
     for g_idx, g in enumerate(groups):
         sd = g.shape_desc
-        g_shape = (sd.kv_size, sd.nb, sd.bs, sd.nh, sd.hs)
+        g_shape = _group_alloc_shape(sd)
         for _ in range(sd.nl):
             n_elems = 1
             for d in g_shape:
@@ -370,7 +405,7 @@ def _send_register_kv_cache(
 
     # CPU mode: use the non-GPU context registration protocol.
     # layout_hints carries num_layers, num_heads, head_size, block_size,
-    # dtype.  hidden_dim_size = num_heads * head_size (NHD layout).
+    # dtype, kv_size.  hidden_dim_size = num_heads * head_size (NHD).
     hints_d: dict = layout_hints or {}
     num_layers = int(hints_d.get("num_layers", 32))
     num_heads = hints_d.get("num_heads", 8)
@@ -383,6 +418,14 @@ def _send_register_kv_cache(
     if not isinstance(head_size, int):
         head_size = 128
     hidden_dim_size = int(num_heads) * int(head_size)
+    # ``kv_size`` == 1 marks an MLA group (single-plane KV: no separate
+    # K/V leading dim). The server uses ``use_mla`` to decide whether
+    # the SHM chunk shape is ``(NL, chunk, hidden)`` or
+    # ``(2, NL, chunk, hidden)``. ``"mixed"`` (heterogeneous specs) is
+    # not representable in a single data-mode register, so we default
+    # to non-MLA in that case.
+    kv_size_hint = hints_d.get("kv_size", 2)
+    use_mla = isinstance(kv_size_hint, int) and kv_size_hint == 1
     payload = RegisterEngineDrivenContextPayload(
         instance_id=instance_id,
         model_name=model_name,
@@ -391,7 +434,7 @@ def _send_register_kv_cache(
         num_layers=num_layers,
         hidden_dim_size=hidden_dim_size,
         dtype_str=dtype_str,
-        use_mla=False,
+        use_mla=use_mla,
     )
     result = _call(
         client, RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT, [payload]
@@ -554,21 +597,34 @@ def _gather_paged_to_flat_chunks(
     blocks_per_chunk = chunk_size // block_size
     num_chunks = num_blocks // blocks_per_chunk
     num_layers = len(tensors)
+    # Client tensors are rank-3 ``(NB, BS, hidden)`` in MLA mode and
+    # rank-5 ``(kv, NB, BS, NH, HS)`` otherwise. The block-axis lives at
+    # dim 0 for MLA and dim 1 for classical; per-layer flats stack into a
+    # 3D or 4D chunk to match the server's single-plane / split-K/V
+    # commit shape.
+    first_is_mla = bool(tensors) and tensors[0].dim() == 3
     chunks: list[torch.Tensor] = []
     for c in range(num_chunks):
         start_b = block_offset + c * blocks_per_chunk
         per_layer: list[torch.Tensor] = []
         for t in tensors:
-            # paged: (2, NB, BS, NH, HS) -> slice block range ->
-            # (2, blocks_per_chunk, BS, NH, HS) -> flatten to
-            # (2, chunk_size, NH*HS).
-            sliced = t.narrow(1, start_b, blocks_per_chunk)
-            kv, _, bs, nh, hs = sliced.shape
-            flat = sliced.contiguous().view(kv, blocks_per_chunk * bs, nh * hs)
+            if t.dim() == 3:
+                # MLA: (NB, BS, hidden) -> (chunk_size, hidden).
+                sliced = t.narrow(0, start_b, blocks_per_chunk)
+                _, bs, hidden = sliced.shape
+                flat = sliced.contiguous().view(blocks_per_chunk * bs, hidden)
+            else:
+                # Classical: (kv, NB, BS, NH, HS) -> (kv, chunk_size, NH*HS).
+                sliced = t.narrow(1, start_b, blocks_per_chunk)
+                kv, _, bs, nh, hs = sliced.shape
+                flat = sliced.contiguous().view(kv, blocks_per_chunk * bs, nh * hs)
             per_layer.append(flat)
-        # Stack along a new layer dim -> (2, NL, chunk_size, hidden).
-        chunk = torch.stack(per_layer, dim=1).contiguous()
-        if chunk.shape[1] != num_layers:
+        # MLA per-layer flats are 2D; classical are 3D. Stack picks the
+        # right rank automatically: dim=0 for MLA yields (NL, chunk, hidden);
+        # dim=1 for classical yields (kv, NL, chunk, hidden).
+        stack_dim = 0 if first_is_mla else 1
+        chunk = torch.stack(per_layer, dim=stack_dim).contiguous()
+        if chunk.shape[stack_dim] != num_layers:
             raise RuntimeError(
                 "unexpected chunk shape %s (NL mismatch)" % (chunk.shape,)
             )
@@ -598,14 +654,23 @@ def _scatter_flat_chunks_to_paged(
     blocks_per_chunk = chunk_size // block_size
     for c, chunk in enumerate(chunks):
         start_b = block_offset + c * blocks_per_chunk
+        # MLA chunks are 3D ``(NL, chunk, hidden)`` (kv_size == 1 is
+        # folded away by the server), classical K/V chunks are 4D
+        # ``(kv, NL, chunk, hidden)``. Client tensors match: MLA rank-3
+        # ``(NB, BS, hidden)`` vs. classical rank-5 ``(kv, NB, BS, NH, HS)``.
+        chunk_is_mla = chunk.dim() == 3
         for layer_idx, t in enumerate(tensors):
-            kv, _, bs, nh, hs = t.shape
-            target = t.narrow(1, start_b, blocks_per_chunk)
-            # chunk[:, layer_idx] is (chunk_size, hidden); reshape
-            # back to (2, blocks_per_chunk, BS, NH, HS).
-            flat = chunk[:, layer_idx]
-            reshaped = flat.reshape(kv, blocks_per_chunk, bs, nh, hs)
-            target.copy_(reshaped)
+            if t.dim() == 3:
+                # MLA: block axis at dim 0.
+                target = t.narrow(0, start_b, blocks_per_chunk)
+                flat = chunk[layer_idx] if chunk_is_mla else chunk[:, layer_idx]
+                nb, bs, hidden = target.shape
+                target.copy_(flat.reshape(nb, bs, hidden))
+            else:
+                kv, _, bs, nh, hs = t.shape
+                target = t.narrow(1, start_b, blocks_per_chunk)
+                flat = chunk[layer_idx] if chunk_is_mla else chunk[:, layer_idx]
+                target.copy_(flat.reshape(kv, blocks_per_chunk, bs, nh, hs))
 
 
 # ------------------------------------------------------------------ #
@@ -643,12 +708,13 @@ def _compute_client_checksums(
         end_b = start_b + blocks_per_chunk
         h = hashlib.md5()
         for t in tensors:
-            # Paged layout: dim 1 is the block dim for both kv-major
-            # ``(kv, NB, BS, NH, HS)`` and MLA ``(NB, BS, NH, HS)``
-            # tensors. ``contiguous().numpy().tobytes()`` survives
-            # non-contiguous slices and dtype quirks (bfloat16 has no
-            # numpy view, but uint8 reinterpret works after slice).
-            view = t.narrow(1, start_b, end_b - start_b).contiguous()
+            # Block axis is dim 0 for MLA rank-3 tensors ``(NB, BS, hidden)``
+            # and dim 1 for classical rank-5 ``(kv, NB, BS, NH, HS)``.
+            # ``contiguous().numpy().tobytes()`` survives non-contiguous
+            # slices and dtype quirks (bfloat16 has no numpy view, but
+            # uint8 reinterpret works after slice).
+            block_dim = 0 if t.dim() == 3 else 1
+            view = t.narrow(block_dim, start_b, end_b - start_b).contiguous()
             h.update(view.view(torch.uint8).numpy().tobytes())
         checksums.append(h.hexdigest())
     return checksums
@@ -668,7 +734,8 @@ def _zero_fill_client_blocks(
     pages were never overwritten in the first place).
     """
     for t in tensors:
-        t.narrow(1, block_offset, num_blocks).zero_()
+        block_dim = 0 if t.dim() == 3 else 1
+        t.narrow(block_dim, block_offset, num_blocks).zero_()
 
 
 def _send_store(

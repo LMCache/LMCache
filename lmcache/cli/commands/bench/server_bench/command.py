@@ -498,6 +498,12 @@ def run_server_bench(
             "num_blocks": num_blocks,
             "block_size": block_size,
             "dtype": dtype_str,
+            # kv_size == 1 marks an MLA group (single-plane KV); the
+            # data-mode register path reads this to set ``use_mla`` on
+            # the server payload. For "mixed" specs the server has no
+            # single plane count, so the bench falls back to first
+            # group's ``kv_size`` in ``_send_register_kv_cache``.
+            "kv_size": kv_size_disp,
         }
         # Tell the server each group's true tokens-per-paged-chunk
         # explicitly. Otherwise the server falls back to the block size

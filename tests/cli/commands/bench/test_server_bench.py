@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import argparse
 import json
 import threading
+import time
 
 # Third Party
 import msgspec
@@ -415,7 +416,9 @@ class TestAllocateKVCache:
             assert t.shape == (2, 2, 2, 8, 16)
             assert t.dtype == torch.float16
         for t in tensors[3:]:
-            assert t.shape == (1, 2, 2, 4, 32)
+            # MLA groups (kv_size == 1) allocate rank-3 ``(NB, BS, NH*HS)``
+            # to match the vLLM ``NL_X_NB_BS_HS`` detector contract.
+            assert t.shape == (2, 2, 4 * 32)
             assert t.dtype == torch.bfloat16
 
 
@@ -623,3 +626,300 @@ class TestUnregisterKVCache:
             client.close()
         finally:
             router.stop()
+
+
+# ------------------------------------------------------------------ #
+#  _send_register_kv_cache MLA support (data mode)                     #
+# ------------------------------------------------------------------ #
+
+
+class _RegisterEngineDrivenRouter:
+    """Fake ROUTER that decodes ``RegisterEngineDrivenContextPayload``.
+
+    Records the decoded payload of the last
+    ``REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT`` request so the test can
+    assert what the bench sent (notably ``use_mla``).
+    """
+
+    def __init__(self, endpoint: str) -> None:
+        # First Party
+        from lmcache.v1.multiprocess.custom_types import (
+            RegisterEngineDrivenContextPayload,
+        )
+
+        self._payload_type = RegisterEngineDrivenContextPayload
+        self.last_payload: RegisterEngineDrivenContextPayload | None = None
+        self._ctx = zmq.Context.instance()
+        self._router = self._ctx.socket(zmq.ROUTER)
+        # The ``router_endpoint`` fixture briefly binds/closes a probe
+        # socket to pick a free port, which occasionally leaves the port
+        # in TCP TIME_WAIT so an immediate rebind races. Retry a few
+        # times before giving up so this test doesn't flake in CI.
+        last_err: zmq.ZMQError | None = None
+        for _ in range(20):
+            try:
+                self._router.bind(endpoint)
+                last_err = None
+                break
+            except zmq.ZMQError as exc:
+                last_err = exc
+                time.sleep(0.05)
+        if last_err is not None:
+            raise last_err
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2)
+        self._router.close(linger=0)
+
+    def _run(self) -> None:
+        # First Party
+        from lmcache.v1.multiprocess.protocols.engine import (
+            RegisterEngineDrivenContextResponse,
+        )
+
+        while not self._stop.is_set():
+            if not self._router.poll(100, zmq.POLLIN):
+                continue
+            frames = self._router.recv_multipart()
+            identity, uid_f, type_f, *payload = frames
+            req_type = msgspec.msgpack.decode(type_f, type=RequestType)
+            if req_type == RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT:
+                self.last_payload = msgspec.msgpack.decode(
+                    payload[0], type=self._payload_type
+                )
+                # Reply with an empty pool (bench will skip mmap).
+                body = msgspec.msgpack.encode(
+                    RegisterEngineDrivenContextResponse(shm_name="", pool_size=0)
+                )
+                self._router.send_multipart([identity, uid_f, type_f, body])
+
+
+class TestRegisterKVCacheMLA:
+    """The data-mode register must set ``use_mla`` from ``layout_hints``.
+
+    The server keys the SHM chunk shape on ``use_mla``, so the bench
+    has to translate ``kv_size == 1`` from the ``--kvcache-shape-spec``
+    into ``use_mla=True`` on the payload; otherwise a Deepseek-style
+    MLA run would silently register a classical ``[2, NL, ...]`` chunk
+    shape and every STORE / RETRIEVE afterwards would corrupt data.
+    """
+
+    def _make_client(self, endpoint: str) -> MessageQueueClient:
+        ctx = zmq.Context.instance()
+        return MessageQueueClient(endpoint, ctx)
+
+    def _register(self, endpoint: str, kv_size):
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.helpers import (
+            _send_register_kv_cache,
+        )
+        from lmcache.v1.multiprocess.custom_types import (
+            RegisterEngineDrivenContextPayload,
+        )
+
+        router = _RegisterEngineDrivenRouter(endpoint)
+        router.start()
+        try:
+            client = self._make_client(endpoint)
+            hints = {
+                "num_layers": 4,
+                "num_heads": 1 if kv_size == 1 else 8,
+                "head_size": 128,
+                "num_blocks": 16,
+                "block_size": 16,
+                "dtype": "float16",
+                "kv_size": kv_size,
+            }
+            _send_register_kv_cache(
+                client,
+                layout_hints=hints,
+                kv_caches=None,
+                use_gpu=False,
+                use_handle=False,
+            )
+            client.close()
+            payload = router.last_payload
+            assert isinstance(payload, RegisterEngineDrivenContextPayload)
+            return payload
+        finally:
+            router.stop()
+
+    def test_mla_sets_use_mla_true(self, router_endpoint: str) -> None:
+        payload = self._register(router_endpoint, kv_size=1)
+        assert payload.use_mla is True
+
+    def test_classical_sets_use_mla_false(self, router_endpoint: str) -> None:
+        payload = self._register(router_endpoint, kv_size=2)
+        assert payload.use_mla is False
+
+    def test_mixed_kv_size_defaults_to_non_mla(self, router_endpoint: str) -> None:
+        """Heterogeneous specs cannot be expressed in one register call.
+
+        Data mode has a single SHM chunk shape, so ``"mixed"`` falls
+        back to the classical layout (``use_mla=False``).
+        """
+        payload = self._register(router_endpoint, kv_size="mixed")
+        assert payload.use_mla is False
+
+
+# ------------------------------------------------------------------ #
+#  _scatter_flat_chunks_to_paged MLA support                           #
+# ------------------------------------------------------------------ #
+
+
+class TestScatterMLA:
+    """MLA server chunks are 3D ``(NL, chunk, hidden)`` while classical
+    K/V chunks are 4D ``(kv, NL, chunk, hidden)``. Scatter must handle
+    both without mixing layer bytes.
+    """
+
+    def test_mla_scatter_writes_each_layer(self) -> None:
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.helpers import (
+            _scatter_flat_chunks_to_paged,
+        )
+
+        num_layers = 3
+        num_blocks = 4
+        block_size = 2
+        num_heads = 1
+        head_size = 4
+        chunk_size = 4  # 2 blocks per chunk
+        hidden = num_heads * head_size
+
+        # MLA-shaped client tensors: rank-3 ``(NB, BS, hidden)`` so the
+        # server's vLLM detector recognises this as ``NL_X_NB_BS_HS``.
+        tensors = [
+            torch.zeros(
+                (num_blocks, block_size, hidden),
+                dtype=torch.float16,
+            )
+            for _ in range(num_layers)
+        ]
+        # One 3D chunk with distinct constants per layer so a wrong
+        # ``chunk[:, layer_idx]`` index would smear values across layers.
+        chunk = torch.zeros((num_layers, chunk_size, hidden), dtype=torch.float16)
+        for layer_idx in range(num_layers):
+            chunk[layer_idx].fill_(float(layer_idx + 1))
+
+        _scatter_flat_chunks_to_paged(
+            tensors,
+            [chunk],
+            block_offset=0,
+            block_size=block_size,
+            chunk_size=chunk_size,
+        )
+
+        blocks_per_chunk = chunk_size // block_size
+        for layer_idx, t in enumerate(tensors):
+            written = t.narrow(0, 0, blocks_per_chunk)
+            assert torch.all(written == float(layer_idx + 1)), (
+                "layer %d expected value %f but got %s"
+                % (layer_idx, float(layer_idx + 1), written.unique().tolist())
+            )
+
+    def test_mla_gather_produces_3d_chunk(self) -> None:
+        """MLA gather must emit rank-3 chunks matching the server's
+        single-plane commit shape ``(NL, chunk, hidden)`` -- otherwise
+        the engine-driven SHM path writes off-by-one bytes into the
+        pool.
+        """
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.helpers import (
+            _gather_paged_to_flat_chunks,
+        )
+
+        num_layers = 3
+        num_blocks = 4
+        block_size = 2
+        hidden = 8
+        chunk_size = 4  # -> 2 blocks per chunk, 2 chunks total
+
+        tensors = [
+            torch.arange(num_blocks * block_size * hidden, dtype=torch.float32).reshape(
+                num_blocks, block_size, hidden
+            )
+            + float(layer_idx * 1000)
+            for layer_idx in range(num_layers)
+        ]
+
+        chunks = _gather_paged_to_flat_chunks(
+            tensors,
+            block_offset=0,
+            num_blocks=num_blocks,
+            block_size=block_size,
+            chunk_size=chunk_size,
+        )
+
+        assert len(chunks) == 2
+        for chunk in chunks:
+            assert chunk.dim() == 3
+            assert chunk.shape == (num_layers, chunk_size, hidden)
+
+        # First chunk covers blocks [0, 1); layer 0 baseline value.
+        blocks_per_chunk = chunk_size // block_size
+        first_expected = (
+            tensors[0].narrow(0, 0, blocks_per_chunk).reshape(chunk_size, hidden)
+        )
+        assert torch.allclose(chunks[0][0], first_expected)
+
+
+# ------------------------------------------------------------------ #
+#  Allocation shape contract (MLA vs. classical)                       #
+# ------------------------------------------------------------------ #
+
+
+class TestAllocShapeContract:
+    """The bench's paged-tensor allocation must match the shapes the
+    server's vLLM detector recognises: rank-5 ``(kv, NB, BS, NH, HS)``
+    for classical K/V, rank-3 ``(NB, BS, hidden)`` for MLA. Getting
+    this wrong is what caused ``lmcache_driven + MLA`` to be rejected
+    with ``unsupported kv_caches structure`` at register time.
+    """
+
+    def test_mla_alloc_shape_is_rank3(self) -> None:
+        # Standard
+        from types import SimpleNamespace
+
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.helpers import (
+            _allocate_kv_cache,
+        )
+        from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
+
+        group = KVLayerGroupInfo(
+            layer_indices=[0, 1],
+            shape_desc=SimpleNamespace(kv_size=1, nb=4, bs=2, nh=1, hs=32, nl=2),
+            dtype=torch.bfloat16,
+        )
+        tensors = _allocate_kv_cache(device="cpu", groups=[group])
+        assert len(tensors) == 2
+        for t in tensors:
+            assert t.dim() == 3
+            assert t.shape == (4, 2, 1 * 32)
+            assert t.dtype == torch.bfloat16
+
+    def test_classical_alloc_shape_is_rank5(self) -> None:
+        # Standard
+        from types import SimpleNamespace
+
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.helpers import (
+            _allocate_kv_cache,
+        )
+        from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
+
+        group = KVLayerGroupInfo(
+            layer_indices=[0],
+            shape_desc=SimpleNamespace(kv_size=2, nb=4, bs=2, nh=8, hs=16, nl=1),
+            dtype=torch.float16,
+        )
+        tensors = _allocate_kv_cache(device="cpu", groups=[group])
+        assert len(tensors) == 1
+        assert tensors[0].shape == (2, 4, 2, 8, 16)
