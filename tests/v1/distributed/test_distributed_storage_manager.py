@@ -662,9 +662,8 @@ class TestStorageManagerL2Prefetch:
         sm.clear()
 
         handle = sm.submit_prefetch_task(
-            PrefetchRequestSpec(
-                keys, basic_layout, mode=PrefetchMode.WARM, skip_l2=True
-            )
+            PrefetchRequestSpec(keys, basic_layout, mode=PrefetchMode.WARM),
+            skip_l2=True,
         )
 
         # skip_l2 honored: the controller was never asked.
