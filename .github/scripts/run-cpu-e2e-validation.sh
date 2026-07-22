@@ -299,7 +299,7 @@ print(json.dumps({
     --max-num-seqs "${VLLM_MAX_NUM_SEQS}" \
     --kv-transfer-config "${kv_transfer_config}" \
     --enforce-eager \
-    "${extra_serve_args[@]}" \
+    ${extra_serve_args[@]+"${extra_serve_args[@]}"} \
     >"${VLLM_LOG}" 2>&1 &
   VLLM_PID=$!
   echo "vLLM server started (PID=${VLLM_PID})"

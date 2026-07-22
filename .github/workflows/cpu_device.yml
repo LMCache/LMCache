@@ -86,19 +86,22 @@ jobs:
             load_format: ""
             hf_overrides: ""
             trust_remote_code: "0"
-          # DeepSeek-V2-Lite-Chat exercises MLA. Weights are random
-          # (`--load-format dummy`); `hf_overrides` shrinks the model
-          # to 2 layers / 4 routed experts so CPU runners can host it.
-          # Only KV geometry / attention path matters here, not output
-          # quality. `configuration_deepseek.py` is pulled but the CI
-          # does not execute it beyond vLLM's registered arch mapping.
-          - name: deepseek-v2-lite-mla
+          # DeepSeek-V2-Lite-Chat with MLA DISABLED (vLLM CPU backend
+          # currently raises NotImplementedError for MLA on CPU, see
+          # vllm/platforms/cpu.py:get_attn_backend_cls). We still exercise
+          # the DeepSeek architecture (MoE + custom modelling code) on the
+          # CPU e2e path; MLA validation is deferred until vLLM CPU
+          # supports it. Weights are random (`--load-format dummy`);
+          # `hf_overrides` shrinks the model to 2 layers / 4 routed
+          # experts so CPU runners can host it.
+          - name: deepseek-v2-lite
             id: deepseek-ai/DeepSeek-V2-Lite-Chat
             prepare_script: download_deepseek_v2_lite.sh
             load_format: dummy
             hf_overrides: >-
               {"num_hidden_layers": 2, "n_routed_experts": 4,
-               "first_k_dense_replace": 0, "num_experts_per_tok": 2}
+               "first_k_dense_replace": 0, "num_experts_per_tok": 2,
+               "use_mla": false}
             trust_remote_code: "1"
 
     env:
