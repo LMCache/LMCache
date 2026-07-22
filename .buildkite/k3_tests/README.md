@@ -87,12 +87,6 @@ Not all tests should run on every push. The general pattern:
 
 Set **"Rebuild on PR label change"** to `Yes` for label-triggered pipelines so adding a label to an existing PR kicks off the build.
 
-For XPU specifically:
-
-- GitHub trigger: `build.pull_request.labels includes "xpu" || build.pull_request.labels includes "full" || build.branch == 'dev'`
-- Pipeline upload still goes through the shared path filter, so docs/example/asset-only changes auto-pass before the real XPU steps are uploaded
-- Changes under `.buildkite/` always run, even for the XPU pipeline
-- If you need to force XPU CI on a docs-only or examples-only PR, add the `force-ci` label
 
 ## Adding a New Test
 

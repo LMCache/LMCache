@@ -16,7 +16,6 @@ The XPU pipeline is intentionally lightweight, so it is label/branch gated:
 
 | Condition | Result |
 |-----------|--------|
-| PR label includes `xpu` | upload the XPU pipeline |
 | PR label includes `full` | upload the XPU pipeline |
 | branch is `dev` | upload the XPU pipeline |
 | any docs/asset-only change | path filter skips upload |

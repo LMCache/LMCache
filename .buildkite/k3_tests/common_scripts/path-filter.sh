@@ -13,7 +13,7 @@
 #     (Those PRs are usually fixing the k3 CI itself, so we want to test on
 #     the PR instead of waiting for it to land on main.)
 #   - Otherwise, if EVERY changed file matches a "trivial" pattern (markdown,
-#     LICENSE, anything under docs/, asset(s)/, or .github/, etc.),
+#     LICENSE, anything under docs/, asset/, or .github/, etc.),
 #     the build can be
 #     skipped. .github/ is trivial for k3 because k3 tests run on Buildkite,
 #     not GitHub Actions, so workflow/CODEOWNERS/template changes do not
