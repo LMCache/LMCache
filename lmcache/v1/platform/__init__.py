@@ -108,6 +108,17 @@ def _detect_device() -> tuple[Any, str]:
             )
 
     for spec in _DEVICE_REGISTRY.values():
+        # ``cpu`` is the tail fallback: even though ``CpuDeviceSpec`` now
+        # lives in the registry (so ``resolve_kv_wrapper_factory`` can bind
+        # its IPC wrapper), auto-detection must still prefer accelerators
+        # and let the ``StubCPUDevice`` branch below handle the no-accelerator
+        # case. ``DEVICE_TYPE=cpu`` remains an explicit opt-in above.
+        #
+        # Defence-in-depth pairs with the ``CpuDeviceSpec`` invariant that
+        # ``is_available()`` stays inherited (False); do not remove either
+        # side without updating the other.
+        if spec.device_type == "cpu":
+            continue
         if not spec.is_available():
             continue
 
@@ -141,6 +152,36 @@ def get_device_spec(device_type: str) -> DeviceSpec | None:
         The DeviceSpec for the given device type, or None if not found.
     """
     return _DEVICE_REGISTRY.get(device_type)
+
+
+# ---------------------------------------------------------------------------
+# KV-cache IPC wrapper resolution
+# ---------------------------------------------------------------------------
+def resolve_kv_wrapper_factory(device_type: str) -> Any:
+    """Return the KV-cache IPC wrapper factory for *device_type*.
+
+    Reads :attr:`DeviceSpec.ipc_wrapper_cls` off the registered spec
+    and returns the class's ``wrap`` classmethod (falling back to the
+    class itself when no ``wrap`` is defined) so callers can invoke
+    ``factory(tensor)`` uniformly.
+
+    Args:
+        device_type: The device type string (e.g. ``"cuda"``).
+
+    Returns:
+        A callable that takes a single ``torch.Tensor`` and returns a
+        wrapper instance ready for the multiprocess wire.
+
+    Raises:
+        ValueError: If no spec / wrapper is registered for *device_type*.
+    """
+    spec = _DEVICE_REGISTRY.get(device_type)
+    wrapper_cls = spec.ipc_wrapper_cls if spec is not None else None
+    if wrapper_cls is None:
+        raise ValueError(
+            "No KV-cache wrapper factory registered for device type %r" % device_type
+        )
+    return getattr(wrapper_cls, "wrap", wrapper_cls)
 
 
 # ---------------------------------------------------------------------------
@@ -210,16 +251,17 @@ logger.info("torch_dev=%s, torch_device_type=%s", torch_dev, torch_device_type)
 
 # Resolve the DeviceSpec for the detected device so callers can use
 # platform-specific capabilities (e.g. ``current_device_spec.pin_memory(...)``)
-# without touching the torch device module.  When no accelerator sub-
-# package matches, fall back to a bare ``DeviceSpec()`` -- its default
+# without touching the torch device module.  Both accelerators and CPU
+# ship a concrete spec (``CpuDeviceSpec``, ``CudaDeviceSpec``, ...), so
+# a missing entry means auto-discovery genuinely failed and always
+# warrants a warning; fall back to a bare ``DeviceSpec()`` -- its default
 # implementation provides "no-op / all False" semantics.
 _registered_device_spec = _DEVICE_REGISTRY.get(torch_device_type)
 if _registered_device_spec is None:
-    if torch_device_type != "cpu":
-        logger.warning(
-            "No DeviceSpec registered for %r; using fallback with no-op capabilities.",
-            torch_device_type,
-        )
+    logger.warning(
+        "No DeviceSpec registered for %r; using fallback with no-op capabilities.",
+        torch_device_type,
+    )
     current_device_spec: DeviceSpec = DeviceSpec()
 else:
     current_device_spec = _registered_device_spec

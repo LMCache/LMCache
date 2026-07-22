@@ -34,6 +34,8 @@ Ways to configure LMCache GDS Backend
     # Disabling CPU RAM offload is sometimes recommended as the
     # CPU can get in the way of GPUDirect operations
     export LMCACHE_LOCAL_CPU=False
+    # Disk I/O Threads (default: 4, set to 0 to disable)
+    export LMCACHE_EXTRA_CONFIG='{"disk_io_threads": 8}'
 
 **2. Configuration File**:
 
@@ -51,6 +53,39 @@ Example ``config.yaml``:
     gds_path: "/mnt/gds/cache"
     # GDS Buffer Size in MiB
     gds_buffer_size: 8192
+    # Disk I/O Threads (default: 4, set to 0 to disable)
+    extra_config:
+      disk_io_threads: 8
+
+
+Disk I/O Thread Pool
+--------------------
+
+The backend uses a thread pool for parallel disk I/O. The thread pool is
+always enabled regardless of whether GDS APIs or POSIX fallback is used,
+so both code paths benefit from concurrent reads and writes.
+
+The number of worker threads is controlled by ``extra_config.disk_io_threads``
+(default: 4). Increase this on fast NVMe drives for higher parallelism. Set
+to ``0`` to disable the thread pool entirely.
+
+**Environment variable:**
+
+.. code-block:: bash
+
+    export LMCACHE_EXTRA_CONFIG='{"disk_io_threads": 8}'
+
+**YAML config:**
+
+.. code-block:: yaml
+
+    extra_config:
+      disk_io_threads: 8
+
+.. note::
+
+   The deprecated ``gds_io_threads`` key is no longer supported. Use
+   ``disk_io_threads`` instead.
 
 
 Multi-Path (Multi-Device) Support
@@ -227,6 +262,8 @@ Create a an lmcache configuration file called: ``gds-backend.yaml``
     chunk_size: 256
     gds_path: "/mnt/gds/cache"
     gds_buffer_size: 8192
+    extra_config:
+      disk_io_threads: 8
 
 If you don't want to use a config file, uncomment the first three environment variables
 and then comment out the ``LMCACHE_CONFIG_FILE`` below:
@@ -237,6 +274,7 @@ and then comment out the ``LMCACHE_CONFIG_FILE`` below:
     # LMCACHE_CHUNK_SIZE=256 \
     # LMCACHE_GDS_PATH="/mnt/gds/cache" \
     # LMCACHE_GDS_BUFFER_SIZE=8192 \
+    # LMCACHE_EXTRA_CONFIG='{"disk_io_threads": 8}' \
     LMCACHE_CONFIG_FILE="gds-backend.yaml" \
     vllm serve \
         meta-llama/Llama-3.1-8B-Instruct \

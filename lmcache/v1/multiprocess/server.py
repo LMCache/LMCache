@@ -14,6 +14,7 @@ import zmq
 from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
 from lmcache.usage_telemetry.mp import InitializeMPUsageContext
+from lmcache.usage_telemetry.mp_continuous import InitializeMPContinuousUsage
 from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     add_storage_manager_args,
@@ -360,6 +361,7 @@ def run_cache_server(
     engine = MPCacheServer(ctx, modules)
 
     InitializeMPUsageContext(mp_config, storage_manager_config)
+    InitializeMPContinuousUsage(event_bus, mp_config.chunk_size)
 
     zmq_context = zmq.Context.instance()
     server = MessageQueueServer(

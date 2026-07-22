@@ -15,7 +15,7 @@ The controller runs a background thread with an event-driven loop that:
 # Standard
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 import enum
 import select
 import threading
@@ -45,7 +45,6 @@ from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
 )
-from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
@@ -53,6 +52,10 @@ from lmcache.v1.platform import (
     consume_fd,
     create_event_notifier,
 )
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.memory_management import MemoryObj
 
 logger = init_logger(__name__)
 
@@ -169,7 +172,7 @@ class InFlightPrefetchRequest:
     load_results: dict[int, Bitmap] = field(default_factory=dict)
     # Load phase: keys that were write-reserved in L1
     write_reserved_keys: list[ObjectKey] = field(default_factory=list)
-    write_reserved_objs: dict[ObjectKey, MemoryObj] = field(default_factory=dict)
+    write_reserved_objs: dict[ObjectKey, "MemoryObj"] = field(default_factory=dict)
 
     def all_lookups_done(self) -> bool:
         return len(self.pending_lookup_tasks) == 0
