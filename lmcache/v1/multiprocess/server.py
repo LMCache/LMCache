@@ -8,9 +8,6 @@ import signal
 import sys
 import time
 
-# Third Party
-import zmq
-
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
@@ -422,19 +419,13 @@ def run_cache_server(
     InitializeL2ConnectorUsage(event_bus, ctx.storage_manager)
     InitializeL1Usage(event_bus, ctx.storage_manager)
 
-    zmq_context = zmq.Context.instance()
-    # ``host`` may already carry a transport scheme (e.g. ``grpc://0.0.0.0``
-    # or ``tcp://0.0.0.0``); fall back to ``tcp://`` when it doesn't. This
-    # mirrors ``_ensure_transport_scheme`` on the client side and lets ops
-    # switch the RPC transport (zmq/grpc) purely via config, without any
-    # schema change.
+    # gRPC is now the only supported mp-mode transport; ``host`` may
+    # optionally carry the ``grpc://`` scheme for readability but is not
+    # required (``mq.MessageQueueServer`` also accepts a bare host:port).
     host = mp_config.host
-    bind_prefix = host if "://" in host else "tcp://" + host
+    bind_prefix = host if "://" in host else "grpc://" + host
     bind_url = bind_prefix + ":" + str(mp_config.port)
-    server = MessageQueueServer(
-        bind_url=bind_url,
-        context=zmq_context,
-    )
+    server = MessageQueueServer(bind_url=bind_url)
 
     all_specs: list[HandlerSpec] = []
     for module in modules:

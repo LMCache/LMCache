@@ -210,20 +210,20 @@ def build_parallel_strategy_from_vllm_config(
 def _ensure_transport_scheme(server_url: str) -> str:
     """Ensure a MessageQueue server URL carries a transport scheme.
 
-    The message queue dispatches by URL scheme. ZeroMQ requires an explicit
-    transport in the address, while gRPC uses ``grpc://`` or
-    ``grpc+unix://``. Preserve an existing scheme and default bare addresses
-    to ``tcp://`` for backward compatibility.
+    The mp-mode message queue now dispatches over gRPC exclusively. Users
+    still write ``lmcache.mp.host`` as a plain IP or hostname, so we
+    prepend ``grpc://`` when the caller did not spell out a scheme; an
+    already-qualified ``grpc://<host>`` is left untouched.
 
     Args:
         server_url: A server URL, with or without a ``<scheme>://`` prefix.
 
     Returns:
-        The URL with a transport scheme, defaulting to ``tcp://``.
+        The URL with a transport scheme, defaulting to ``grpc://``.
     """
     if "://" in server_url:
         return server_url
-    return f"tcp://{server_url}"
+    return f"grpc://{server_url}"
 
 
 class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
@@ -289,7 +289,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
             server_urls = [f"{server_host}:{server_port}"]
 
-        # Preserve explicit transport schemes and retain ZMQ as the default.
+        # Preserve explicit transport schemes and default bare URLs to gRPC.
         server_urls = [_ensure_transport_scheme(u) for u in server_urls]
 
         # The server count is derived from lmcache.mp.server_urls.
