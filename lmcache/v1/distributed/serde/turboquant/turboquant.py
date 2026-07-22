@@ -634,7 +634,7 @@ class TurboQuantSerializer(Serializer):
                     .view(num_tokens, num_heads, head_dim)
                     .contiguous()
                 )
-                v_tensor = (
+                value = (
                     src_work[1, layer_idx]
                     .view(num_tokens, num_heads, head_dim)
                     .contiguous()
@@ -644,7 +644,7 @@ class TurboQuantSerializer(Serializer):
                 )
                 triton_turboquant_store(
                     k_tensor,
-                    v_tensor,
+                    value,
                     dst_view[compressed_idx],
                     slot_mapping,
                     pi_t,
@@ -845,14 +845,14 @@ class TurboQuantDeserializer(Deserializer):
                         k_layer.to(torch.float32), pi_t.T.contiguous()
                     ).to(k_out.dtype)
                 k_tensor = k_layer.contiguous().view(num_tokens, hidden_dim)
-                v_tensor = (
+                value = (
                     v_out[0, :, :num_tokens, :]
                     .transpose(0, 1)
                     .contiguous()
                     .view(num_tokens, hidden_dim)
                 )
                 dst_work[0, layer_idx].copy_(k_tensor.to(dst_work.dtype))
-                dst_work[1, layer_idx].copy_(v_tensor.to(dst_work.dtype))
+                dst_work[1, layer_idx].copy_(value.to(dst_work.dtype))
             offset += compressed_bytes
 
         last_raw_layers = num_layers - quant_end
