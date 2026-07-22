@@ -29,6 +29,7 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.custom_types import (
     DeviceIPCWrapper,
+    IPCCacheServerKey,
     get_customized_decoder,
     get_customized_encoder,
 )
@@ -120,6 +121,72 @@ def _ping_response_to_python(resp: "lmcache_mq_pb2.PingResponse") -> bool:
     return bool(resp.ok)
 
 
+# --- Shared: IpcCacheServerKey <-> IPCCacheServerKey -----------------
+# Consumed by every rpc that carries a cache key (Lookup today; Store /
+# Retrieve / FreeLookupLocks / Prepare*/Commit* / EndSession / CB-Lookup
+# variants tomorrow).  Keeping the conversion in one place means the
+# per-rpc adapter is a one-liner and the dataclass' ``__post_init__``
+# validation (salt char set, salt length) runs exactly on the wire
+# boundary regardless of who's calling.
+
+
+def _ipc_key_python_to_proto(
+    key: IPCCacheServerKey,
+) -> "lmcache_mq_pb2.IpcCacheServerKey":
+    msg = lmcache_mq_pb2.IpcCacheServerKey(
+        model_name=key.model_name,
+        world_size=key.world_size,
+        token_ids=list(key.token_ids),
+        start=key.start,
+        end=key.end,
+        request_id=key.request_id,
+        cache_salt=key.cache_salt,
+    )
+    if key.worker_id is not None:
+        msg.worker_id = key.worker_id
+    return msg
+
+
+def _ipc_key_proto_to_python(
+    msg: "lmcache_mq_pb2.IpcCacheServerKey",
+) -> IPCCacheServerKey:
+    return IPCCacheServerKey(
+        model_name=msg.model_name,
+        world_size=msg.world_size,
+        worker_id=msg.worker_id if msg.HasField("worker_id") else None,
+        token_ids=tuple(msg.token_ids),
+        start=msg.start,
+        end=msg.end,
+        request_id=msg.request_id,
+        cache_salt=msg.cache_salt,
+    )
+
+
+def _lookup_request_to_python(
+    req: "lmcache_mq_pb2.LookupRequest",
+) -> tuple[Any, ...]:
+    return (_ipc_key_proto_to_python(req.key), req.tp_size)
+
+
+def _lookup_python_to_request(
+    key: IPCCacheServerKey, tp_size: int
+) -> "lmcache_mq_pb2.LookupRequest":
+    return lmcache_mq_pb2.LookupRequest(
+        key=_ipc_key_python_to_proto(key), tp_size=tp_size
+    )
+
+
+def _lookup_python_to_response(result: Any) -> "lmcache_mq_pb2.LookupResponse":
+    # Handler returns None on the legacy path; the typed response is empty.
+    del result
+    return lmcache_mq_pb2.LookupResponse()
+
+
+def _lookup_response_to_python(resp: "lmcache_mq_pb2.LookupResponse") -> None:
+    del resp
+    return None
+
+
 # ---------------------------------------------------------------------------
 # msgspec encode / decode helpers (payload bytes wrapped inside proto)
 # ---------------------------------------------------------------------------
@@ -185,6 +252,14 @@ _TYPED_RPCS: dict[RequestType, TypedRpcSpec] = {
         python_to_request=_ping_python_to_request,
         python_to_response=_ping_python_to_response,
         response_to_python=_ping_response_to_python,
+    ),
+    RequestType.LOOKUP: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.LookupRequest,
+        response_message=lmcache_mq_pb2.LookupResponse,
+        request_to_python=_lookup_request_to_python,
+        python_to_request=_lookup_python_to_request,
+        python_to_response=_lookup_python_to_response,
+        response_to_python=_lookup_response_to_python,
     ),
 }
 

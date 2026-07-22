@@ -55,6 +55,40 @@ message PingResponse {
 }
 
 // -----------------------------------------------------------------------
+// Shared: cache key used by 9+ engine rpcs (Lookup / Store / Retrieve /
+// FreeLookupLocks / PrepareStore / CommitStore / PrepareRetrieve /
+// CommitRetrieve / EndSession / CB_LOOKUP_PRE_COMPUTED / ...).  Kept
+// here so those rpcs can just embed it once they migrate off the
+// legacy BytesRequest envelope, instead of each redeclaring the same
+// eight fields.  Field numbers mirror the dataclass declaration order
+// in ``lmcache/v1/multiprocess/custom_types.py`` for readability.
+//
+// ``worker_id`` is optional to preserve the ``int | None`` semantics
+// used for tp-fan-out lookups (the sentinel is a missing field, not
+// ``-1``, so numeric worker ids collide with nothing).
+// -----------------------------------------------------------------------
+message IpcCacheServerKey {
+  string model_name = 1;
+  int64 world_size = 2;
+  optional int64 worker_id = 3;
+  repeated int64 token_ids = 4;
+  int64 start = 5;
+  int64 end = 6;
+  string request_id = 7;
+  string cache_salt = 8;
+}
+
+// Lookup: submit a prefix lookup and return once the job is registered.
+// The rpc itself has no return value -- the caller polls with
+// ``QueryPrefetchStatus`` for the outcome.
+message LookupRequest {
+  IpcCacheServerKey key = 1;
+  int64 tp_size = 2;
+}
+
+message LookupResponse {}
+
+// -----------------------------------------------------------------------
 // Service.  One rpc per RequestType.  Method names are the CamelCase
 // form of the RequestType enum (STORE -> Store, CB_LOOKUP_PRE_COMPUTED_V2
 // -> CbLookupPreComputedV2, etc.) so gRPC's built-in method routing
@@ -67,7 +101,8 @@ service MessageQueue {
   rpc UnregisterKvCache(BytesRequest) returns (BytesResponse);
   rpc Store(BytesRequest) returns (BytesResponse);
   rpc Retrieve(BytesRequest) returns (BytesResponse);
-  rpc Lookup(BytesRequest) returns (BytesResponse);
+  // TYPED: first consumer of the shared IpcCacheServerKey message.
+  rpc Lookup(LookupRequest) returns (LookupResponse);
   rpc QueryPrefetchStatus(BytesRequest) returns (BytesResponse);
   rpc WaitPrefetchStatus(BytesRequest) returns (BytesResponse);
   rpc QueryPrefetchLookupHits(BytesRequest) returns (BytesResponse);

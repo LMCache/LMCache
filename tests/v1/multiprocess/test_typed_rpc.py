@@ -21,6 +21,7 @@ import threading
 import pytest
 
 # First Party
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import (
     _TYPED_RPCS,
@@ -179,3 +180,93 @@ def test_ping_wire_encoding_boundary_values(instance_id: Optional[int]) -> None:
 
     # Sanity: the wire really is a PingRequest, not BytesRequest.
     assert isinstance(proto_req, lmcache_mq_pb2.PingRequest)
+
+
+# ---------------------------------------------------------------------
+# LOOKUP: second typed rpc, first consumer of IpcCacheServerKey.
+# ---------------------------------------------------------------------
+
+
+def _sample_key(
+    *,
+    worker_id: Optional[int] = 3,
+    token_ids: tuple[int, ...] = (10, 20, 30, 40),
+    cache_salt: str = "",
+) -> IPCCacheServerKey:
+    return IPCCacheServerKey(
+        model_name="mymodel",
+        world_size=4,
+        worker_id=worker_id,
+        token_ids=token_ids,
+        start=0,
+        end=len(token_ids),
+        request_id="req-42",
+        cache_salt=cache_salt,
+    )
+
+
+def test_lookup_is_registered_as_typed_rpc() -> None:
+    assert RequestType.LOOKUP in _TYPED_RPCS
+    spec = _TYPED_RPCS[RequestType.LOOKUP]
+    assert spec.request_message is lmcache_mq_pb2.LookupRequest
+    assert spec.response_message is lmcache_mq_pb2.LookupResponse
+
+
+@pytest.mark.parametrize(
+    "worker_id,token_ids,cache_salt",
+    [
+        (None, (1,), ""),
+        (0, (), ""),
+        (7, (1, 2, 3), "tenant-a"),
+        (999, tuple(range(2048)), "long-token-list"),
+    ],
+)
+def test_lookup_key_roundtrip(
+    worker_id: Optional[int],
+    token_ids: tuple[int, ...],
+    cache_salt: str,
+) -> None:
+    """The shared IpcCacheServerKey proto <-> dataclass helpers must
+    preserve every field, including the None/optional worker_id and
+    empty/large token_ids edge cases."""
+    spec = _TYPED_RPCS[RequestType.LOOKUP]
+    key = _sample_key(worker_id=worker_id, token_ids=token_ids, cache_salt=cache_salt)
+    proto_req = spec.python_to_request(key, 4)
+    assert isinstance(proto_req, lmcache_mq_pb2.LookupRequest)
+    round_tripped_key, tp_size = spec.request_to_python(proto_req)
+    assert round_tripped_key == key
+    assert tp_size == 4
+
+
+def test_lookup_typed_roundtrip() -> None:
+    """Full gRPC roundtrip: server handler sees the exact key the
+    client sent, and the (empty) response arrives as Python ``None``."""
+    port = _find_free_port()
+    server_url = f"grpc://127.0.0.1:{port}"
+    seen: list[tuple[IPCCacheServerKey, int]] = []
+
+    def lookup_handler(key: IPCCacheServerKey, tp_size: int) -> None:
+        seen.append((key, tp_size))
+        return None
+
+    server = MessageQueueServer(server_url)
+    server.add_handler(
+        RequestType.LOOKUP,
+        get_payload_classes(RequestType.LOOKUP),
+        HandlerType.BLOCKING,
+        lookup_handler,
+    )
+    server.add_normal_thread_pool([RequestType.LOOKUP], max_workers=2)
+    server.start()
+
+    try:
+        client = MessageQueueClient(server_url)
+        key = _sample_key(cache_salt="tenant-b")
+
+        fut: MessagingFuture[None] = client.submit_request(RequestType.LOOKUP, [key, 8])
+        assert fut.result(timeout=5.0) is None
+        assert seen == [(key, 8)]
+
+        client.close()
+    finally:
+        server.close()
