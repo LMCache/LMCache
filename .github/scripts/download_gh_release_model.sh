@@ -21,10 +21,14 @@
 #                     https://github.com/OWNER/REPO/releases/download/TAG/FILE.tar.gz
 #                     https://github.com/OWNER/REPO/archive/refs/heads/BRANCH.tar.gz
 #                     https://github.com/OWNER/REPO/archive/refs/tags/TAG.tar.gz
-#   SNAPSHOT          HF snapshot hash (populates snapshots/<hash>/
-#                     and refs/main)
 #
 # Optional env vars:
+#   SNAPSHOT          HF snapshot hash string. Used only as the folder
+#                     name under snapshots/<hash>/ and as the refs/main
+#                     pointer content. Defaults to a stable hash derived
+#                     from ${TARBALL_URL} (sha1, 40 chars) — plenty for
+#                     `local_files_only` resolution, which does not
+#                     require matching the upstream HF commit.
 #   TARBALL_TOP_DIR   Explicit top-level directory name inside the
 #                     tarball. If unset, it is auto-detected (the
 #                     tarball must contain exactly one top-level
@@ -39,7 +43,10 @@ set -euo pipefail
 
 : "${MODEL_ID:?MODEL_ID is required (e.g. facebook/opt-125m)}"
 : "${TARBALL_URL:?TARBALL_URL is required (full https URL to the tar.gz)}"
-: "${SNAPSHOT:?SNAPSHOT is required (HF snapshot hash)}"
+# Derive a stable 40-char hash from TARBALL_URL when SNAPSHOT is unset,
+# so cache invalidation happens automatically on URL changes and callers
+# don't have to hand-copy an HF commit sha they don't actually need.
+SNAPSHOT="${SNAPSHOT:-$(printf '%s' "${TARBALL_URL}" | shasum -a 1 | cut -c1-40)}"
 TARBALL_TOP_DIR="${TARBALL_TOP_DIR:-}"
 CACHE_MARKER="${CACHE_MARKER:-config.json}"
 
@@ -87,9 +94,12 @@ if [ -z "${TARBALL_TOP_DIR}" ]; then
     # Awk picks the first path segment of every archive entry that
     # actually lives under a directory (NF>1); `sort -u` collapses
     # duplicates. A well-formed tarball has exactly one such segment.
-    mapfile -t _top_dirs < <(
-        tar -tzf "${TARBALL}" | awk -F/ 'NF>1 {print $1}' | sort -u
-    )
+    # `while read` is used instead of `mapfile` because macOS ships
+    # bash 3.2 which lacks the latter.
+    _top_dirs=()
+    while IFS= read -r _line; do
+        _top_dirs+=("${_line}")
+    done < <(tar -tzf "${TARBALL}" | awk -F/ 'NF>1 {print $1}' | sort -u)
     if [ "${#_top_dirs[@]}" -ne 1 ]; then
         echo "!! Tarball from ${TARBALL_URL} has ${#_top_dirs[@]} top-level dirs;"
         echo "   expected exactly one. Set TARBALL_TOP_DIR to pick."

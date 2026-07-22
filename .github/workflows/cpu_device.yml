@@ -84,7 +84,6 @@ jobs:
           - name: opt-125m
             id: facebook/opt-125m
             tarball_url: https://github.com/LMCache/opt-125m/releases/download/v1.0/opt-125m.tar.gz
-            hf_snapshot: 27dcfa74d334bc871f3234de431e71c6eeba5dd6
             cache_marker: pytorch_model.bin
             load_format: ""
             hf_overrides: ""
@@ -107,7 +106,6 @@ jobs:
           - name: deepseek-v2-lite
             id: deepseek-ai/DeepSeek-V2-Lite-Chat
             tarball_url: https://github.com/opendataio/deepseek_v2_lite/archive/refs/tags/v1.0.tar.gz
-            hf_snapshot: 85864749cd611b4353ce1decdb286193298f64c7
             cache_marker: config.json
             load_format: dummy
             hf_overrides: >-
@@ -201,7 +199,6 @@ jobs:
         env:
           MODEL_ID: ${{ matrix.model.id }}
           TARBALL_URL: ${{ matrix.model.tarball_url }}
-          SNAPSHOT: ${{ matrix.model.hf_snapshot }}
           CACHE_MARKER: ${{ matrix.model.cache_marker }}
         run: bash .github/scripts/download_gh_release_model.sh
 
