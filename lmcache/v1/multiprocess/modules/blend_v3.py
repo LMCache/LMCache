@@ -1821,9 +1821,7 @@ class BlendV3Module(InstanceLivenessTarget):
         obj_buf_ptrs = np.asarray(
             [buf.data_ptr() for buf in object_group_buffers], dtype=np.int64
         )
-        staging = np.stack(
-            [obj_buf_ptrs[slot_of], src, nbytes, host_off], axis=1
-        )
+        staging = np.stack([obj_buf_ptrs[slot_of], src, nbytes, host_off], axis=1)
 
         groups_arr = np.arange(num_groups, dtype=np.int64)
         shifted = old_st != cur_st
@@ -1848,9 +1846,7 @@ class BlendV3Module(InstanceLivenessTarget):
         )
 
         staging_end = np.cumsum(chunks_per_step)
-        step_of_chunk = np.repeat(
-            np.arange(n_steps, dtype=np.int64), chunks_per_step
-        )
+        step_of_chunk = np.repeat(np.arange(n_steps, dtype=np.int64), chunks_per_step)
         shifted_per_step = np.bincount(
             step_of_chunk[shifted], minlength=n_steps
         ).astype(np.int64)
@@ -1911,7 +1907,7 @@ class BlendV3Module(InstanceLivenessTarget):
             if resolved is None:
                 return None
             cached = (cache_key, resolved)
-            gpu_context._cb_plan_invariants = cached
+            gpu_context._cb_plan_invariants = cached  # type: ignore[attr-defined]
         group_specs, object_group_buffers = cached[1]
 
         # Shared logical positions, one arange per (consecutive) run --
@@ -2064,6 +2060,7 @@ class BlendV3Module(InstanceLivenessTarget):
                 )
             )
             return handle, True
+
         cb_match_result = sorted(cb_match_result, key=lambda r: r.cur_st)
         # vLLM may call retrieve twice (partial- then full-block alloc); skip
         # ranges already scattered (blocks never move mid-prefill), returning
@@ -2296,9 +2293,7 @@ class BlendV3Module(InstanceLivenessTarget):
                     )
                     if native_flat is not None or native_plan is not None:
                         if native_flat is not None:
-                            plan_group_specs, plan_tables, _plan_keepalive = (
-                                native_flat
-                            )
+                            plan_group_specs, plan_tables, _plan_keepalive = native_flat
                             lmc_ops.execute_cb_retrieve_plan_flat(
                                 gpu_context.device,
                                 LazyMemoryAllocator.PIN_CHUNK_SIZE,
@@ -2306,9 +2301,8 @@ class BlendV3Module(InstanceLivenessTarget):
                                 *plan_tables,
                             )
                         else:
-                            plan_group_specs, plan_steps, _plan_keepalive = (
-                                native_plan
-                            )
+                            assert native_plan is not None
+                            plan_group_specs, plan_steps, _plan_keepalive = native_plan
                             lmc_ops.execute_cb_retrieve_plan(
                                 gpu_context.device,
                                 LazyMemoryAllocator.PIN_CHUNK_SIZE,

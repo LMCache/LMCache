@@ -36,7 +36,9 @@ _FMT = lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS
 _DTYPE = torch.bfloat16
 
 
-def _reference_scatter(host_chunks, paged_ptrs, slot_mapping, old_sts, cur_sts, cos_sin):
+def _reference_scatter(
+    host_chunks, paged_ptrs, slot_mapping, old_sts, cur_sts, cos_sin
+):
     """Sequential per-chunk tensor-op reference (rope then scatter)."""
     dev = slot_mapping.device
     ramp = torch.arange(_SPC, device=dev, dtype=torch.long).repeat(_NL)
@@ -60,7 +62,17 @@ def _reference_scatter(host_chunks, paged_ptrs, slot_mapping, old_sts, cur_sts, 
     torch.cuda.synchronize()
 
 
-def _run_plan(n_chunks, max_batch, host_chunks, paged_ptrs, slot_mapping, old_sts, cur_sts, cos_sin, slots):
+def _run_plan(
+    n_chunks,
+    max_batch,
+    host_chunks,
+    paged_ptrs,
+    slot_mapping,
+    old_sts,
+    cur_sts,
+    cos_sin,
+    slots,
+):
     """Drive the executor with the planner's double-buffer wave layout."""
     chunk_bytes = _NL * _SPC * _HIDDEN * _DTYPE.itemsize
     spec = lmc_ops.CBGroupSpec(
@@ -102,9 +114,7 @@ def _run_plan(n_chunks, max_batch, host_chunks, paged_ptrs, slot_mapping, old_st
         steps.append(
             lmc_ops.CBRetrieveStep(staging=staging, ropes=ropes, scatters=scatters)
         )
-    lmc_ops.execute_cb_retrieve_plan(
-        slot_mapping.device, 1 << 26, [spec], steps
-    )
+    lmc_ops.execute_cb_retrieve_plan(slot_mapping.device, 1 << 26, [spec], steps)
     torch.cuda.synchronize()
 
 
@@ -145,8 +155,15 @@ def test_overlap_slot_reuse_is_bit_exact(n_chunks, max_batch):
 
     _reference_scatter(host_chunks, ptrs_ref, slot_mapping, old_sts, cur_sts, cos_sin)
     _run_plan(
-        n_chunks, max_batch, host_chunks, ptrs_new, slot_mapping,
-        old_sts, cur_sts, cos_sin, slots,
+        n_chunks,
+        max_batch,
+        host_chunks,
+        ptrs_new,
+        slot_mapping,
+        old_sts,
+        cur_sts,
+        cos_sin,
+        slots,
     )
 
     for layer in range(_NL):
