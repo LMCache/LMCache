@@ -28,6 +28,9 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.custom_types import (
+    BlockAllocationRecord,
+    CBMatchResult,
+    CBUnifiedLookupResult,
     DeviceIPCWrapper,
     IPCCacheServerKey,
     get_customized_decoder,
@@ -380,6 +383,428 @@ def _noop_response_to_python(resp: "lmcache_mq_pb2.NoopResponse") -> str:
     return resp.message
 
 
+# ---------------------------------------------------------------------
+# Wave 3 shared helpers.
+# ---------------------------------------------------------------------
+
+
+def _block_id_groups_python_to_proto(
+    groups: list[list[int]],
+) -> list["lmcache_mq_pb2.BlockIdGroup"]:
+    return [lmcache_mq_pb2.BlockIdGroup(block_ids=g) for g in groups]
+
+
+def _block_id_groups_proto_to_python(
+    groups: Any,
+) -> list[list[int]]:
+    return [list(g.block_ids) for g in groups]
+
+
+def _event_result_python_to_proto(
+    result: Any,
+) -> "lmcache_mq_pb2.EventIpcHandleResult":
+    handle, success = result
+    return lmcache_mq_pb2.EventIpcHandleResult(
+        event_ipc_handle=handle, success=bool(success)
+    )
+
+
+def _event_result_proto_to_python(
+    proto: "lmcache_mq_pb2.EventIpcHandleResult",
+) -> tuple[bytes, bool]:
+    return (proto.event_ipc_handle, bool(proto.success))
+
+
+def _match_ranges_python_to_proto(
+    ranges: list[tuple[int, int]],
+) -> list["lmcache_mq_pb2.MatchRange"]:
+    return [lmcache_mq_pb2.MatchRange(start=s, end=e) for (s, e) in ranges]
+
+
+def _match_ranges_proto_to_python(ranges: Any) -> list[tuple[int, int]]:
+    return [(r.start, r.end) for r in ranges]
+
+
+def _cb_match_python_to_proto(m: CBMatchResult) -> "lmcache_mq_pb2.CbMatchResult":
+    return lmcache_mq_pb2.CbMatchResult(
+        old_st=m.old_st,
+        old_ed=m.old_ed,
+        cur_st=m.cur_st,
+        cur_ed=m.cur_ed,
+        hash=m.hash,
+    )
+
+
+def _cb_match_proto_to_python(
+    msg: "lmcache_mq_pb2.CbMatchResult",
+) -> CBMatchResult:
+    return CBMatchResult(
+        old_st=msg.old_st,
+        old_ed=msg.old_ed,
+        cur_st=msg.cur_st,
+        cur_ed=msg.cur_ed,
+        hash=msg.hash,
+    )
+
+
+# --- Store ------------------------------------------------------------
+
+
+def _store_request_to_python(
+    req: "lmcache_mq_pb2.StoreRequest",
+) -> tuple[Any, ...]:
+    return (
+        _ipc_key_proto_to_python(req.key),
+        req.instance_id,
+        _block_id_groups_proto_to_python(req.gpu_block_ids),
+        req.event_ipc_handle,
+    )
+
+
+def _store_python_to_request(
+    key: IPCCacheServerKey,
+    instance_id: int,
+    gpu_block_ids: list[list[int]],
+    event_ipc_handle: bytes,
+) -> "lmcache_mq_pb2.StoreRequest":
+    return lmcache_mq_pb2.StoreRequest(
+        key=_ipc_key_python_to_proto(key),
+        instance_id=instance_id,
+        gpu_block_ids=_block_id_groups_python_to_proto(gpu_block_ids),
+        event_ipc_handle=event_ipc_handle,
+    )
+
+
+def _store_python_to_response(result: Any) -> "lmcache_mq_pb2.StoreResponse":
+    return lmcache_mq_pb2.StoreResponse(result=_event_result_python_to_proto(result))
+
+
+def _store_response_to_python(
+    resp: "lmcache_mq_pb2.StoreResponse",
+) -> tuple[bytes, bool]:
+    return _event_result_proto_to_python(resp.result)
+
+
+# --- Retrieve ---------------------------------------------------------
+
+
+def _retrieve_request_to_python(
+    req: "lmcache_mq_pb2.RetrieveRequest",
+) -> tuple[Any, ...]:
+    return (
+        _ipc_key_proto_to_python(req.key),
+        req.instance_id,
+        _block_id_groups_proto_to_python(req.gpu_block_ids),
+        req.event_ipc_handle,
+        req.skip_first_n_tokens,
+    )
+
+
+def _retrieve_python_to_request(
+    key: IPCCacheServerKey,
+    instance_id: int,
+    gpu_block_ids: list[list[int]],
+    event_ipc_handle: bytes,
+    skip_first_n_tokens: int,
+) -> "lmcache_mq_pb2.RetrieveRequest":
+    return lmcache_mq_pb2.RetrieveRequest(
+        key=_ipc_key_python_to_proto(key),
+        instance_id=instance_id,
+        gpu_block_ids=_block_id_groups_python_to_proto(gpu_block_ids),
+        event_ipc_handle=event_ipc_handle,
+        skip_first_n_tokens=skip_first_n_tokens,
+    )
+
+
+def _retrieve_python_to_response(
+    result: Any,
+) -> "lmcache_mq_pb2.RetrieveResponse":
+    return lmcache_mq_pb2.RetrieveResponse(result=_event_result_python_to_proto(result))
+
+
+def _retrieve_response_to_python(
+    resp: "lmcache_mq_pb2.RetrieveResponse",
+) -> tuple[bytes, bool]:
+    return _event_result_proto_to_python(resp.result)
+
+
+# --- ReportBlockAllocation -------------------------------------------
+
+
+def _block_alloc_record_python_to_proto(
+    r: BlockAllocationRecord,
+) -> "lmcache_mq_pb2.BlockAllocationRecord":
+    return lmcache_mq_pb2.BlockAllocationRecord(
+        req_id=r.req_id,
+        new_block_ids=r.new_block_ids,
+        new_token_ids=r.new_token_ids,
+    )
+
+
+def _block_alloc_record_proto_to_python(
+    msg: "lmcache_mq_pb2.BlockAllocationRecord",
+) -> BlockAllocationRecord:
+    return BlockAllocationRecord(
+        req_id=msg.req_id,
+        new_block_ids=list(msg.new_block_ids),
+        new_token_ids=list(msg.new_token_ids),
+    )
+
+
+def _report_block_alloc_request_to_python(
+    req: "lmcache_mq_pb2.ReportBlockAllocationRequest",
+) -> tuple[Any, ...]:
+    return (
+        req.instance_id,
+        req.model_name,
+        [_block_alloc_record_proto_to_python(r) for r in req.records],
+    )
+
+
+def _report_block_alloc_python_to_request(
+    instance_id: int,
+    model_name: str,
+    records: list[BlockAllocationRecord],
+) -> "lmcache_mq_pb2.ReportBlockAllocationRequest":
+    return lmcache_mq_pb2.ReportBlockAllocationRequest(
+        instance_id=instance_id,
+        model_name=model_name,
+        records=[_block_alloc_record_python_to_proto(r) for r in records],
+    )
+
+
+# --- CB v1 lookup / store / retrieve ---------------------------------
+
+
+def _cb_lookup_request_to_python(
+    req: "lmcache_mq_pb2.CbLookupPreComputedRequest",
+) -> tuple[Any, ...]:
+    return (_ipc_key_proto_to_python(req.key),)
+
+
+def _cb_lookup_python_to_request(
+    key: IPCCacheServerKey,
+) -> "lmcache_mq_pb2.CbLookupPreComputedRequest":
+    return lmcache_mq_pb2.CbLookupPreComputedRequest(key=_ipc_key_python_to_proto(key))
+
+
+def _cb_lookup_python_to_response(
+    result: list[tuple[int, int]],
+) -> "lmcache_mq_pb2.CbLookupPreComputedResponse":
+    return lmcache_mq_pb2.CbLookupPreComputedResponse(
+        ranges=_match_ranges_python_to_proto(result)
+    )
+
+
+def _cb_lookup_response_to_python(
+    resp: "lmcache_mq_pb2.CbLookupPreComputedResponse",
+) -> list[tuple[int, int]]:
+    return _match_ranges_proto_to_python(resp.ranges)
+
+
+def _cb_store_request_to_python(req: Any) -> tuple[Any, ...]:
+    return (
+        _ipc_key_proto_to_python(req.key),
+        req.offset,
+        req.instance_id,
+        req.event_ipc_handle,
+    )
+
+
+def _make_cb_store_python_to_request(message_cls: Any) -> Callable[..., Any]:
+    def _to_request(
+        key: IPCCacheServerKey,
+        offset: int,
+        instance_id: int,
+        event_ipc_handle: bytes,
+    ) -> Any:
+        return message_cls(
+            key=_ipc_key_python_to_proto(key),
+            offset=offset,
+            instance_id=instance_id,
+            event_ipc_handle=event_ipc_handle,
+        )
+
+    return _to_request
+
+
+def _make_event_result_python_to_response(
+    message_cls: Any,
+) -> Callable[[Any], Any]:
+    def _to_response(result: Any) -> Any:
+        return message_cls(result=_event_result_python_to_proto(result))
+
+    return _to_response
+
+
+def _event_result_response_to_python(resp: Any) -> tuple[bytes, bool]:
+    return _event_result_proto_to_python(resp.result)
+
+
+def _cb_retrieve_request_to_python(
+    req: "lmcache_mq_pb2.CbRetrievePreComputedRequest",
+) -> tuple[Any, ...]:
+    return (
+        _ipc_key_proto_to_python(req.key),
+        _match_ranges_proto_to_python(req.ranges),
+        req.offset,
+        req.instance_id,
+        req.event_ipc_handle,
+    )
+
+
+def _cb_retrieve_python_to_request(
+    key: IPCCacheServerKey,
+    ranges: list[tuple[int, int]],
+    offset: int,
+    instance_id: int,
+    event_ipc_handle: bytes,
+) -> "lmcache_mq_pb2.CbRetrievePreComputedRequest":
+    return lmcache_mq_pb2.CbRetrievePreComputedRequest(
+        key=_ipc_key_python_to_proto(key),
+        ranges=_match_ranges_python_to_proto(ranges),
+        offset=offset,
+        instance_id=instance_id,
+        event_ipc_handle=event_ipc_handle,
+    )
+
+
+# --- CB v2: lookup returns list[CBMatchResult]; retrieve consumes it -
+
+
+def _cb_lookup_v2_request_to_python(
+    req: "lmcache_mq_pb2.CbLookupPreComputedV2Request",
+) -> tuple[Any, ...]:
+    return (_ipc_key_proto_to_python(req.key),)
+
+
+def _cb_lookup_v2_python_to_request(
+    key: IPCCacheServerKey,
+) -> "lmcache_mq_pb2.CbLookupPreComputedV2Request":
+    return lmcache_mq_pb2.CbLookupPreComputedV2Request(
+        key=_ipc_key_python_to_proto(key)
+    )
+
+
+def _cb_lookup_v2_python_to_response(
+    result: list[CBMatchResult],
+) -> "lmcache_mq_pb2.CbLookupPreComputedV2Response":
+    return lmcache_mq_pb2.CbLookupPreComputedV2Response(
+        matches=[_cb_match_python_to_proto(m) for m in result]
+    )
+
+
+def _cb_lookup_v2_response_to_python(
+    resp: "lmcache_mq_pb2.CbLookupPreComputedV2Response",
+) -> list[CBMatchResult]:
+    return [_cb_match_proto_to_python(m) for m in resp.matches]
+
+
+def _cb_retrieve_v2_request_to_python(
+    req: "lmcache_mq_pb2.CbRetrievePreComputedV2Request",
+) -> tuple[Any, ...]:
+    return (
+        _ipc_key_proto_to_python(req.key),
+        [_cb_match_proto_to_python(m) for m in req.cb_match_result],
+        req.offset,
+        req.instance_id,
+        req.event_ipc_handle,
+    )
+
+
+def _cb_retrieve_v2_python_to_request(
+    key: IPCCacheServerKey,
+    cb_match_result: list[CBMatchResult],
+    offset: int,
+    instance_id: int,
+    event_ipc_handle: bytes,
+) -> "lmcache_mq_pb2.CbRetrievePreComputedV2Request":
+    return lmcache_mq_pb2.CbRetrievePreComputedV2Request(
+        key=_ipc_key_python_to_proto(key),
+        cb_match_result=[_cb_match_python_to_proto(m) for m in cb_match_result],
+        offset=offset,
+        instance_id=instance_id,
+        event_ipc_handle=event_ipc_handle,
+    )
+
+
+# --- CB v3: retrieve into paged blocks; unified lookup ---------------
+
+
+def _cb_retrieve_v3_request_to_python(
+    req: "lmcache_mq_pb2.CbRetrievePreComputedV3Request",
+) -> tuple[Any, ...]:
+    return (
+        _ipc_key_proto_to_python(req.key),
+        [_cb_match_proto_to_python(m) for m in req.cb_match_result],
+        _block_id_groups_proto_to_python(req.gpu_block_ids),
+        req.instance_id,
+        req.event_ipc_handle,
+    )
+
+
+def _cb_retrieve_v3_python_to_request(
+    key: IPCCacheServerKey,
+    cb_match_result: list[CBMatchResult],
+    gpu_block_ids: list[list[int]],
+    instance_id: int,
+    event_ipc_handle: bytes,
+) -> "lmcache_mq_pb2.CbRetrievePreComputedV3Request":
+    return lmcache_mq_pb2.CbRetrievePreComputedV3Request(
+        key=_ipc_key_python_to_proto(key),
+        cb_match_result=[_cb_match_python_to_proto(m) for m in cb_match_result],
+        gpu_block_ids=_block_id_groups_python_to_proto(gpu_block_ids),
+        instance_id=instance_id,
+        event_ipc_handle=event_ipc_handle,
+    )
+
+
+def _cb_unified_lookup_request_to_python(
+    req: "lmcache_mq_pb2.CbUnifiedLookupRequest",
+) -> tuple[Any, ...]:
+    return (_ipc_key_proto_to_python(req.key), req.tp_size)
+
+
+def _cb_unified_lookup_python_to_request(
+    key: IPCCacheServerKey, tp_size: int
+) -> "lmcache_mq_pb2.CbUnifiedLookupRequest":
+    return lmcache_mq_pb2.CbUnifiedLookupRequest(
+        key=_ipc_key_python_to_proto(key), tp_size=tp_size
+    )
+
+
+def _cb_unified_lookup_python_to_response(
+    result: Optional[CBUnifiedLookupResult],
+) -> "lmcache_mq_pb2.CbUnifiedLookupResponse":
+    resp = lmcache_mq_pb2.CbUnifiedLookupResponse()
+    if result is not None:
+        resp.payload.prefix_coverage_tokens = result.prefix_coverage_tokens
+        resp.payload.non_prefix_segments.extend(
+            _cb_match_python_to_proto(m) for m in result.non_prefix_segments
+        )
+        resp.payload.segmented_prefix_segments.extend(
+            _cb_match_python_to_proto(m) for m in result.segmented_prefix_segments
+        )
+    return resp
+
+
+def _cb_unified_lookup_response_to_python(
+    resp: "lmcache_mq_pb2.CbUnifiedLookupResponse",
+) -> Optional[CBUnifiedLookupResult]:
+    if not resp.HasField("payload"):
+        return None
+    p = resp.payload
+    return CBUnifiedLookupResult(
+        prefix_coverage_tokens=p.prefix_coverage_tokens,
+        non_prefix_segments=[
+            _cb_match_proto_to_python(m) for m in p.non_prefix_segments
+        ],
+        segmented_prefix_segments=[
+            _cb_match_proto_to_python(m) for m in p.segmented_prefix_segments
+        ],
+    )
+
+
 # ---------------------------------------------------------------------------
 # msgspec encode / decode helpers (payload bytes wrapped inside proto)
 # ---------------------------------------------------------------------------
@@ -549,6 +974,134 @@ _TYPED_RPCS: dict[RequestType, TypedRpcSpec] = {
         python_to_request=_make_empty_python_to_request(lmcache_mq_pb2.NoopRequest),
         python_to_response=_noop_python_to_response,
         response_to_python=_noop_response_to_python,
+    ),
+    RequestType.STORE: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.StoreRequest,
+        response_message=lmcache_mq_pb2.StoreResponse,
+        request_to_python=_store_request_to_python,
+        python_to_request=_store_python_to_request,
+        python_to_response=_store_python_to_response,
+        response_to_python=_store_response_to_python,
+    ),
+    RequestType.RETRIEVE: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.RetrieveRequest,
+        response_message=lmcache_mq_pb2.RetrieveResponse,
+        request_to_python=_retrieve_request_to_python,
+        python_to_request=_retrieve_python_to_request,
+        python_to_response=_retrieve_python_to_response,
+        response_to_python=_retrieve_response_to_python,
+    ),
+    RequestType.REPORT_BLOCK_ALLOCATION: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.ReportBlockAllocationRequest,
+        response_message=lmcache_mq_pb2.ReportBlockAllocationResponse,
+        request_to_python=_report_block_alloc_request_to_python,
+        python_to_request=_report_block_alloc_python_to_request,
+        python_to_response=_make_empty_python_to_response(
+            lmcache_mq_pb2.ReportBlockAllocationResponse
+        ),
+        response_to_python=_empty_response_to_python,
+    ),
+    RequestType.CB_UNREGISTER_KV_CACHE: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.CbUnregisterKvCacheRequest,
+        response_message=lmcache_mq_pb2.CbUnregisterKvCacheResponse,
+        request_to_python=_instance_id_request_to_python,
+        python_to_request=_make_instance_id_python_to_request(
+            lmcache_mq_pb2.CbUnregisterKvCacheRequest
+        ),
+        python_to_response=_make_empty_python_to_response(
+            lmcache_mq_pb2.CbUnregisterKvCacheResponse
+        ),
+        response_to_python=_empty_response_to_python,
+    ),
+    RequestType.CB_UNREGISTER_ROPE_V3: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.CbUnregisterRopeV3Request,
+        response_message=lmcache_mq_pb2.CbUnregisterRopeV3Response,
+        request_to_python=_instance_id_request_to_python,
+        python_to_request=_make_instance_id_python_to_request(
+            lmcache_mq_pb2.CbUnregisterRopeV3Request
+        ),
+        python_to_response=_make_empty_python_to_response(
+            lmcache_mq_pb2.CbUnregisterRopeV3Response
+        ),
+        response_to_python=_empty_response_to_python,
+    ),
+    RequestType.CB_LOOKUP_PRE_COMPUTED: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.CbLookupPreComputedRequest,
+        response_message=lmcache_mq_pb2.CbLookupPreComputedResponse,
+        request_to_python=_cb_lookup_request_to_python,
+        python_to_request=_cb_lookup_python_to_request,
+        python_to_response=_cb_lookup_python_to_response,
+        response_to_python=_cb_lookup_response_to_python,
+    ),
+    RequestType.CB_STORE_PRE_COMPUTED: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.CbStorePreComputedRequest,
+        response_message=lmcache_mq_pb2.CbStorePreComputedResponse,
+        request_to_python=_cb_store_request_to_python,
+        python_to_request=_make_cb_store_python_to_request(
+            lmcache_mq_pb2.CbStorePreComputedRequest
+        ),
+        python_to_response=_make_event_result_python_to_response(
+            lmcache_mq_pb2.CbStorePreComputedResponse
+        ),
+        response_to_python=_event_result_response_to_python,
+    ),
+    RequestType.CB_STORE_FINAL: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.CbStoreFinalRequest,
+        response_message=lmcache_mq_pb2.CbStoreFinalResponse,
+        request_to_python=_cb_store_request_to_python,
+        python_to_request=_make_cb_store_python_to_request(
+            lmcache_mq_pb2.CbStoreFinalRequest
+        ),
+        python_to_response=_make_event_result_python_to_response(
+            lmcache_mq_pb2.CbStoreFinalResponse
+        ),
+        response_to_python=_event_result_response_to_python,
+    ),
+    RequestType.CB_RETRIEVE_PRE_COMPUTED: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.CbRetrievePreComputedRequest,
+        response_message=lmcache_mq_pb2.CbRetrievePreComputedResponse,
+        request_to_python=_cb_retrieve_request_to_python,
+        python_to_request=_cb_retrieve_python_to_request,
+        python_to_response=_make_event_result_python_to_response(
+            lmcache_mq_pb2.CbRetrievePreComputedResponse
+        ),
+        response_to_python=_event_result_response_to_python,
+    ),
+    RequestType.CB_LOOKUP_PRE_COMPUTED_V2: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.CbLookupPreComputedV2Request,
+        response_message=lmcache_mq_pb2.CbLookupPreComputedV2Response,
+        request_to_python=_cb_lookup_v2_request_to_python,
+        python_to_request=_cb_lookup_v2_python_to_request,
+        python_to_response=_cb_lookup_v2_python_to_response,
+        response_to_python=_cb_lookup_v2_response_to_python,
+    ),
+    RequestType.CB_RETRIEVE_PRE_COMPUTED_V2: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.CbRetrievePreComputedV2Request,
+        response_message=lmcache_mq_pb2.CbRetrievePreComputedV2Response,
+        request_to_python=_cb_retrieve_v2_request_to_python,
+        python_to_request=_cb_retrieve_v2_python_to_request,
+        python_to_response=_make_event_result_python_to_response(
+            lmcache_mq_pb2.CbRetrievePreComputedV2Response
+        ),
+        response_to_python=_event_result_response_to_python,
+    ),
+    RequestType.CB_RETRIEVE_PRE_COMPUTED_V3: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.CbRetrievePreComputedV3Request,
+        response_message=lmcache_mq_pb2.CbRetrievePreComputedV3Response,
+        request_to_python=_cb_retrieve_v3_request_to_python,
+        python_to_request=_cb_retrieve_v3_python_to_request,
+        python_to_response=_make_event_result_python_to_response(
+            lmcache_mq_pb2.CbRetrievePreComputedV3Response
+        ),
+        response_to_python=_event_result_response_to_python,
+    ),
+    RequestType.CB_UNIFIED_LOOKUP: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.CbUnifiedLookupRequest,
+        response_message=lmcache_mq_pb2.CbUnifiedLookupResponse,
+        request_to_python=_cb_unified_lookup_request_to_python,
+        python_to_request=_cb_unified_lookup_python_to_request,
+        python_to_response=_cb_unified_lookup_python_to_response,
+        response_to_python=_cb_unified_lookup_response_to_python,
     ),
 }
 

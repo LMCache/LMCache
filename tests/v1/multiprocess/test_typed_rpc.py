@@ -21,7 +21,12 @@ import threading
 import pytest
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.custom_types import (
+    BlockAllocationRecord,
+    CBMatchResult,
+    CBUnifiedLookupResult,
+    IPCCacheServerKey,
+)
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import (
     _TYPED_RPCS,
@@ -403,6 +408,161 @@ def test_query_prefetch_status_typed_roundtrip() -> None:
         )
         assert fut1.result(timeout=5.0) == 7
         assert fut2.result(timeout=5.0) is None
+        client.close()
+    finally:
+        server.close()
+
+
+# ---------------------------------------------------------------------
+# Wave 3: Store/Retrieve, CB v1/v2/v3 lookup+store+retrieve family,
+# ReportBlockAllocation.  Adapter roundtrip tests only — full e2e
+# happens in the vllm-driven suite.
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "request_type",
+    [
+        RequestType.STORE,
+        RequestType.RETRIEVE,
+        RequestType.REPORT_BLOCK_ALLOCATION,
+        RequestType.CB_UNREGISTER_KV_CACHE,
+        RequestType.CB_UNREGISTER_ROPE_V3,
+        RequestType.CB_LOOKUP_PRE_COMPUTED,
+        RequestType.CB_STORE_PRE_COMPUTED,
+        RequestType.CB_STORE_FINAL,
+        RequestType.CB_RETRIEVE_PRE_COMPUTED,
+        RequestType.CB_LOOKUP_PRE_COMPUTED_V2,
+        RequestType.CB_RETRIEVE_PRE_COMPUTED_V2,
+        RequestType.CB_RETRIEVE_PRE_COMPUTED_V3,
+        RequestType.CB_UNIFIED_LOOKUP,
+    ],
+)
+def test_wave3_rpc_is_typed(request_type: RequestType) -> None:
+    """Wave 3 rpcs must all be off the msgspec envelope."""
+    assert request_type in _TYPED_RPCS
+    spec = _TYPED_RPCS[request_type]
+    assert spec.request_message is not lmcache_mq_pb2.BytesRequest
+    assert spec.response_message is not lmcache_mq_pb2.BytesResponse
+
+
+def test_store_retrieve_roundtrip() -> None:
+    """Store/Retrieve payload preservation across the wire boundary."""
+    key = _sample_key()
+    store_spec = _TYPED_RPCS[RequestType.STORE]
+    proto_req = store_spec.python_to_request(key, 12, [[1, 2, 3], [4, 5]], b"event")
+    assert isinstance(proto_req, lmcache_mq_pb2.StoreRequest)
+    round_key, iid, blocks, event = store_spec.request_to_python(proto_req)
+    assert round_key == key
+    assert iid == 12
+    assert blocks == [[1, 2, 3], [4, 5]]
+    assert event == b"event"
+
+    proto_resp = store_spec.python_to_response((b"eh", True))
+    assert store_spec.response_to_python(proto_resp) == (b"eh", True)
+
+    retrieve_spec = _TYPED_RPCS[RequestType.RETRIEVE]
+    proto_req = retrieve_spec.python_to_request(key, 12, [[7], [8, 9]], b"event2", 128)
+    round_key, iid, blocks, event, skip = retrieve_spec.request_to_python(proto_req)
+    assert round_key == key
+    assert iid == 12
+    assert blocks == [[7], [8, 9]]
+    assert event == b"event2"
+    assert skip == 128
+
+
+def test_report_block_allocation_roundtrip() -> None:
+    """BlockAllocationRecord list survives the wire in order."""
+    spec = _TYPED_RPCS[RequestType.REPORT_BLOCK_ALLOCATION]
+    records = [
+        BlockAllocationRecord(
+            req_id="r1", new_block_ids=[1, 2], new_token_ids=[10, 20]
+        ),
+        BlockAllocationRecord(req_id="r2", new_block_ids=[3], new_token_ids=[30]),
+    ]
+    proto_req = spec.python_to_request(7, "opt-125m", records)
+    iid, model, out = spec.request_to_python(proto_req)
+    assert iid == 7
+    assert model == "opt-125m"
+    assert out == records
+
+
+def test_cb_lookup_v1_and_v2_roundtrip() -> None:
+    """(start,end) tuples and CBMatchResult both survive the wire."""
+    key = _sample_key()
+
+    v1 = _TYPED_RPCS[RequestType.CB_LOOKUP_PRE_COMPUTED]
+    ranges = [(0, 8), (16, 24)]
+    proto_resp = v1.python_to_response(ranges)
+    assert v1.response_to_python(proto_resp) == ranges
+
+    v2 = _TYPED_RPCS[RequestType.CB_LOOKUP_PRE_COMPUTED_V2]
+    matches = [
+        CBMatchResult(old_st=0, old_ed=8, cur_st=0, cur_ed=8, hash=b"h1"),
+        CBMatchResult(old_st=8, old_ed=16, cur_st=16, cur_ed=24, hash=b"h2"),
+    ]
+    proto_req = v2.python_to_request(key)
+    (round_key,) = v2.request_to_python(proto_req)
+    assert round_key == key
+    proto_resp = v2.python_to_response(matches)
+    assert v2.response_to_python(proto_resp) == matches
+
+
+def test_cb_unified_lookup_nullable() -> None:
+    """None (still loading) and populated result must both roundtrip."""
+    spec = _TYPED_RPCS[RequestType.CB_UNIFIED_LOOKUP]
+
+    # Absent payload -> Python None.
+    proto_resp = spec.python_to_response(None)
+    assert spec.response_to_python(proto_resp) is None
+
+    # Populated payload.
+    result = CBUnifiedLookupResult(
+        prefix_coverage_tokens=64,
+        non_prefix_segments=[
+            CBMatchResult(old_st=0, old_ed=8, cur_st=8, cur_ed=16, hash=b"a"),
+        ],
+        segmented_prefix_segments=[
+            CBMatchResult(old_st=32, old_ed=40, cur_st=32, cur_ed=40, hash=b"b"),
+        ],
+    )
+    proto_resp = spec.python_to_response(result)
+    round = spec.response_to_python(proto_resp)
+    assert round == result
+
+
+def test_store_typed_grpc_roundtrip() -> None:
+    """Full gRPC roundtrip through a live channel for the STORE rpc."""
+    port = _find_free_port()
+    server_url = f"grpc://127.0.0.1:{port}"
+    seen: list[tuple[IPCCacheServerKey, int, list[list[int]], bytes]] = []
+
+    def store_handler(
+        key: IPCCacheServerKey,
+        instance_id: int,
+        gpu_block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+    ) -> tuple[bytes, bool]:
+        seen.append((key, instance_id, gpu_block_ids, event_ipc_handle))
+        return (b"handle-back", True)
+
+    server = MessageQueueServer(server_url)
+    server.add_handler(
+        RequestType.STORE,
+        get_payload_classes(RequestType.STORE),
+        HandlerType.BLOCKING,
+        store_handler,
+    )
+    server.add_normal_thread_pool([RequestType.STORE], max_workers=2)
+    server.start()
+    try:
+        client = MessageQueueClient(server_url)
+        key = _sample_key(cache_salt="wave3")
+        fut: MessagingFuture[tuple[bytes, bool]] = client.submit_request(
+            RequestType.STORE, [key, 42, [[1, 2], [3]], b"ev"]
+        )
+        assert fut.result(timeout=5.0) == (b"handle-back", True)
+        assert seen == [(key, 42, [[1, 2], [3]], b"ev")]
         client.close()
     finally:
         server.close()
