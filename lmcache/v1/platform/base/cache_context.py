@@ -163,7 +163,7 @@ class BaseCacheContext(ABC):
         """Returns hidden dimension sizes per KV layer group."""
         return [
             group.hidden_dim_size
-            for group in self.kv_layer_groups_manager.kv_layer_groups
+            for group in self.kv_layer_groups_manager.kernel_groups
         ]
 
     @property
@@ -190,7 +190,7 @@ class BaseCacheContext(ABC):
                 ``parse_kvcache_shape_spec`` should never reach the transfer
                 path; detection-built groups always carry one).
         """
-        groups = self.kv_layer_groups_manager.kv_layer_groups
+        groups = self.kv_layer_groups_manager.kernel_groups
         engine_kv_format = groups[kernel_group_idx].engine_kv_format
         if engine_kv_format is None:
             raise ValueError(
@@ -228,7 +228,7 @@ class BaseCacheContext(ABC):
         self, logical_num_tokens: int, group_idx: int = 0
     ) -> torch.Size:
         """Returns the KV buffer shape for *logical_num_tokens*."""
-        group = self.kv_layer_groups_manager.kv_layer_groups[group_idx]
+        group = self.kv_layer_groups_manager.kernel_groups[group_idx]
         compress_ratio = group.tokens_per_block // group.slots_per_block
         if logical_num_tokens % compress_ratio != 0:
             raise ValueError(
@@ -277,7 +277,7 @@ class BaseCacheContext(ABC):
     @property
     def concrete_engine_kv_shape(self) -> str:
         """Returns the engine KV shape with actual numeric values."""
-        group = self.kv_layer_groups_manager.kv_layer_groups[0]
+        group = self.kv_layer_groups_manager.kernel_groups[0]
         return get_concrete_engine_kv_shape_from_shape_desc(
             group.shape_desc, group.engine_kv_format
         )
