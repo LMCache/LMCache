@@ -2,7 +2,7 @@
 """XPU (Intel SYCL) platform helpers."""
 
 # First Party
-from lmcache.v1.platform.base_device_spec import DeviceSpec
+from lmcache.v1.platform.base.device_spec import DeviceSpec
 
 # ---------------------------------------------------------------------------
 # Device detection registry entry

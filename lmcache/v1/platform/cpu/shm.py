@@ -33,7 +33,7 @@ from lmcache.v1.multiprocess.posix_shm import (
     shm_munmap,
     shm_unlink,
 )
-from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
+from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
 logger = init_logger(__name__)
 

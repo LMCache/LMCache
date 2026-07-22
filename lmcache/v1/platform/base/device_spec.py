@@ -30,12 +30,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 # First Party
-from lmcache.v1.platform.base_pin_memory import PinMemoryBackend
+from lmcache.v1.platform.base.pin_memory import PinMemoryBackend
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.platform.base_cache_context import BaseCacheContext
-    from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
+    from lmcache.v1.platform.base.cache_context import BaseCacheContext
+    from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
 
 class DeviceSpec:
