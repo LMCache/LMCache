@@ -171,10 +171,12 @@ jobs:
 
       # server_bench is model-agnostic (cpu_server_bench_test.sh never
       # touches any model — it only exercises the lmcache server's KV
-      # transfer path via `lmcache bench server`). Running it on every
-      # matrix leg is cheap and doubles as a soak test for lmcache
-      # server startup/shutdown on this runner.
+      # transfer path via `lmcache bench server`). Gate it on the
+      # opt-125m leg so we run it exactly once per OS instead of once
+      # per (os, model) combo — running it on every leg would just
+      # burn CI minutes on identical work.
       - name: Server bench — LMCache-driven
+        if: matrix.model.name == 'opt-125m'
         run: |
           LMCACHE_BENCH_TRANSFER_MODE=lmcache_driven \
           LMCACHE_HTTP_PORT_BENCH=18080 \
@@ -182,6 +184,7 @@ jobs:
             bash .github/scripts/cpu_device_test.sh server_bench
 
       - name: Server bench — Engine-driven
+        if: matrix.model.name == 'opt-125m'
         run: |
           LMCACHE_BENCH_TRANSFER_MODE=engine_driven \
           LMCACHE_HTTP_PORT_BENCH=18081 \
