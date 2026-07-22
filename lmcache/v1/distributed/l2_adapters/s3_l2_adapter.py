@@ -1018,7 +1018,7 @@ class S3L2Adapter(L2AdapterInterface):
         # urlencode handles percent-escaping of values (continuation
         # tokens are typically base64 with ``+``/``/``/``=`` chars).
         path_prefix = (
-            "/" if self._bucket is None else f"/{url_quote(self._bucket, safe='')}/"
+            "/" if self._bucket is None else f"/{url_quote(self._bucket, safe='')}"
         )
         path = path_prefix + "?" + urlencode(params, quote_via=url_quote)
 

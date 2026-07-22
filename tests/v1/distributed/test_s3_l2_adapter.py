@@ -791,7 +791,7 @@ class TestPathStyleAddressing:
             assert request.path == "/path-bucket/object%40key"
 
             s3_request, _body_chunks, _captured = adapter._list_request(None, 100, None)
-            assert s3_request.request.path.startswith("/path-bucket/?list-type=2")
+            assert s3_request.request.path.startswith("/path-bucket?list-type=2")
         finally:
             adapter.close()
 
