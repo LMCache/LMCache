@@ -246,8 +246,15 @@ start_vllm() {
   # vLLM's CPU backend still raises NotImplementedError for MLA today,
   # so DeepSeek-V2-family models (which normally route through MLA) must
   # set this on CPU to fall back to standard MHA.
-  if [ -n "${VLLM_MLA_DISABLE:-}" ]; then
-    export VLLM_MLA_DISABLE="${VLLM_MLA_DISABLE}"
+  #
+  # vLLM parses this env as `bool(int(os.getenv("VLLM_MLA_DISABLE","0")))`,
+  # so any non-integer value (including the empty string GitHub Actions
+  # injects for unset matrix fields) blows up with ValueError. We only
+  # export it when the caller explicitly set "1".
+  if [ "${VLLM_MLA_DISABLE:-0}" = "1" ]; then
+    export VLLM_MLA_DISABLE=1
+  else
+    unset VLLM_MLA_DISABLE
   fi
   # Pin gloo / vLLM rendezvous to loopback. Otherwise vLLM's
   # network_utils.get_ip() picks a LAN address (e.g. 192.168.x.x on the

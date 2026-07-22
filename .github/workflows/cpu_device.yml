@@ -86,7 +86,7 @@ jobs:
             load_format: ""
             hf_overrides: ""
             trust_remote_code: "0"
-            mla_disable: ""
+            mla_disable: "0"
           # DeepSeek-V2-Lite-Chat with MLA DISABLED (vLLM CPU backend
           # currently raises NotImplementedError for MLA on CPU, see
           # vllm/platforms/cpu.py:get_attn_backend_cls). MLA is a
