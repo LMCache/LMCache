@@ -279,21 +279,26 @@ When the caller (or ``LMCACHE_MP_TRANSFER_MODE``) explicitly requests
 checks — both must succeed, otherwise the factory raises
 ``ValueError`` (no silent fallback):
 
-1. A ``DeviceIPCWrapper`` subclass with ``device_type`` and ``wrap``
-   must be registered.  It is auto-discovered by scanning
-   ``lmcache/v1/platform/`` (see ``lmcache/v1/platform/_registry.py``),
-   so you only need to ship the subclass under
-   ``lmcache/v1/platform/foo/``.
+1. Your ``DeviceSpec`` subclass must bind a ``DeviceIPCWrapper``
+   subclass (exposing a ``wrap`` classmethod) via
+   :attr:`~lmcache.v1.platform.base_device_spec.DeviceSpec.ipc_wrapper_cls`.
+   :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory` reads that
+   binding off the registered spec — no separate registry / auto-scan.
 2. ``DeviceSpec.is_handle_transfer_available()`` must return ``True``
    (the base-class default; override to ``False`` only if your device
    lacks IPC handle transfer).
 
 Separately, the LMCache-driven server module also requires a
 ``BaseCacheContext`` subclass under
-``lmcache/v1/platform/foo/cache_context.py``.  ``create_cache_context``
-discovers it lazily at runtime and raises ``ValueError`` if no backend
-matches the device type; it manages the KV cache layout and pointers
-used for IPC transfer.
+``lmcache/v1/platform/foo/cache_context.py`` **and** a matching
+``DeviceSpec.create_cache_context`` override that lazy-imports and
+instantiates it.  The platform-agnostic factory
+``lmcache.v1.platform.cache_context.create_cache_context`` dispatches
+by ``device_type`` through the ``DeviceSpec`` registry and invokes
+that hook; the default ``DeviceSpec.create_cache_context`` raises
+``NotImplementedError`` so a missing override surfaces loudly instead
+of silently falling back.  The cache context itself manages the KV
+cache layout and pointers used for IPC transfer.
 
 Host-side pinning via ``pin_memory_backend`` is *optional* and only
 affects staging-buffer performance; it is not required to enable
@@ -304,6 +309,17 @@ Override these methods in your ``DeviceSpec``:
 .. code-block:: python
 
     class FooDeviceSpec(DeviceSpec):
+        @property
+        def ipc_wrapper_cls(self):
+            """Bind the DeviceIPCWrapper subclass for this device.
+
+            Lazy import so the accelerator-specific module is only
+            pulled in when the LMCache-driven path is actually used.
+            """
+            from lmcache.v1.platform.foo.ipc_wrapper import FooIPCWrapper
+
+            return FooIPCWrapper
+
         def is_handle_transfer_available(self) -> bool:
             """Return True if your device supports IPC handle transfer."""
             return True  # base-class default; override to False if unsupported
@@ -315,6 +331,16 @@ Override these methods in your ``DeviceSpec``:
             Optional; only affects host staging performance.
             """
             return None  # default
+
+        def create_cache_context(self, *args, **kwargs):
+            """Lazy-import and instantiate the BaseCacheContext for this device.
+
+            Required for LMCache-driven mode; the base-class default
+            raises ``NotImplementedError``.
+            """
+            from lmcache.v1.platform.foo.cache_context import FooCacheContext
+
+            return FooCacheContext(*args, **kwargs)
 
 Opt into LMCache-driven mode by setting ``lmcache.mp.mp_transfer_mode``
 to ``lmcache_driven`` in the vLLM ``kv_connector_extra_config`` shown

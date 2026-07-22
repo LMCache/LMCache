@@ -59,7 +59,7 @@ inline __device__ void apply_rotary_embedding_fused(
                                  // head_size]
     const scalar_t* old_cache_ptr, const scalar_t* new_cache_ptr,
     const int head_size, const int num_kv_heads, const int rot_dim,
-    const int token_idx, const int64_t key_stride) {
+    const int token_idx, const int64_t key_stride, const int64_t head_stride) {
   const int embed_dim = rot_dim / 2;
   const scalar_t* old_cos_ptr = old_cache_ptr;
   const scalar_t* old_sin_ptr = old_cache_ptr + embed_dim;
@@ -70,7 +70,7 @@ inline __device__ void apply_rotary_embedding_fused(
   const int nk = num_kv_heads * embed_dim;
   for (int i = threadIdx.x; i < nk; i += blockDim.x) {
     const int head_idx = i / embed_dim;
-    const int64_t token_head = token_idx * key_stride + head_idx * head_size;
+    const int64_t token_head = token_idx * key_stride + head_idx * head_stride;
     const int rot_offset = i % embed_dim;
     apply_token_rotary_embedding_fused<scalar_t, IS_NEOX>(
         key + token_head, old_cos_ptr, old_sin_ptr, new_cos_ptr, new_sin_ptr,
@@ -92,7 +92,7 @@ __global__ void rotary_embedding_kernel_fused(
     const scalar_t* __restrict__ cos_sin_cache,  // [max_position, 2, rot_dim //
                                                  // 2]
     const int rot_dim, const int64_t key_stride, const int num_kv_heads,
-    const int head_size) {
+    const int head_size, const int64_t head_stride) {
   // Each thread block is responsible for one token.
   const int token_idx = blockIdx.x;
   int64_t old_pos = old_positions[token_idx];
@@ -103,25 +103,25 @@ __global__ void rotary_embedding_kernel_fused(
 
   apply_rotary_embedding_fused<scalar_t, IS_NEOX>(
       key, old_cache_ptr, new_cache_ptr, head_size, num_kv_heads, rot_dim,
-      token_idx, key_stride);
+      token_idx, key_stride, head_stride);
 }
 
 }  // namespace lmc
 
-void rotary_embedding_k_fused(
-    const torch::Tensor&
-        old_positions,  // [batch_size, seq_len] or [num_tokens]
-    const torch::Tensor&
-        new_positions,   // [batch_size, seq_len] or [num_tokens]
-    torch::Tensor& key,  // [batch_size, seq_len, num_kv_heads * head_size] or
-                         // Jiayi: [num_tokens, num_kv_heads, head_size]
-    int64_t head_size,
-    const torch::Tensor& cos_sin_cache,  // [max_position, rot_dim]
-    bool is_neox) {
+// head_stride: element distance between consecutive heads in `key`. Contiguous
+// [num_tokens, num_kv_heads, head_size] passes head_size; fused K/V (packed
+// [.., num_kv_heads, 2*head_size]) passes 2*head_size to rotate only the K half
+// in place (rot_dim <= head_size, so the trailing V is never touched).
+void rotary_embedding_k_fused_strided(const torch::Tensor& old_positions,
+                                      const torch::Tensor& new_positions,
+                                      torch::Tensor& key, int64_t head_size,
+                                      int64_t head_stride,
+                                      const torch::Tensor& cos_sin_cache,
+                                      bool is_neox) {
   int64_t num_tokens = key.numel() / (key.size(-1) * key.size(-2));
   int rot_dim = cos_sin_cache.size(1);
   int num_kv_heads = key.size(-2);
-  int64_t key_stride = num_kv_heads * head_size;
+  int64_t key_stride = num_kv_heads * head_stride;
 
   dim3 grid(num_tokens);
   dim3 block(std::min<int64_t>(num_kv_heads * rot_dim / 2, 512));
@@ -135,14 +135,24 @@ void rotary_embedding_k_fused(
                   old_positions.data_ptr<int64_t>(),
                   new_positions.data_ptr<int64_t>(), key.data_ptr<scalar_t>(),
                   cos_sin_cache.data_ptr<scalar_t>(), rot_dim, key_stride,
-                  num_kv_heads, head_size);
+                  num_kv_heads, head_size, head_stride);
         } else {
           lmc::rotary_embedding_kernel_fused<scalar_t, false>
               <<<grid, block, 0, stream>>>(
                   old_positions.data_ptr<int64_t>(),
                   new_positions.data_ptr<int64_t>(), key.data_ptr<scalar_t>(),
                   cos_sin_cache.data_ptr<scalar_t>(), rot_dim, key_stride,
-                  num_kv_heads, head_size);
+                  num_kv_heads, head_size, head_stride);
         }
       });
+}
+
+// Contiguous [num_tokens, num_kv_heads, head_size]: head_stride == head_size.
+void rotary_embedding_k_fused(const torch::Tensor& old_positions,
+                              const torch::Tensor& new_positions,
+                              torch::Tensor& key, int64_t head_size,
+                              const torch::Tensor& cos_sin_cache,
+                              bool is_neox) {
+  rotary_embedding_k_fused_strided(old_positions, new_positions, key, head_size,
+                                   head_size, cos_sin_cache, is_neox);
 }

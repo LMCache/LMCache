@@ -35,7 +35,7 @@ from lmcache.v1.multiprocess.transfer_context import (
     create_transfer_context,
 )
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
-from lmcache.v1.platform import _registry as platform_registry
+from lmcache.v1.platform import resolve_kv_wrapper_factory
 
 logger = init_logger(__name__)
 
@@ -195,7 +195,7 @@ def wrap_one_kv_cache(tensor: torch.Tensor) -> Any:
     this call site stays free of if/elif chains and new accelerators
     plug in by shipping a sibling wrapper class.
     """
-    return platform_registry.get_kv_wrapper_factory(tensor.device.type)(tensor)
+    return resolve_kv_wrapper_factory(tensor.device.type)(tensor)
 
 
 def send_lmcache_request(

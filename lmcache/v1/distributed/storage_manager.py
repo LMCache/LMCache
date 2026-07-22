@@ -488,7 +488,7 @@ class StorageManager:
             )
 
             prefetch_request_id = -1
-            if remaining_keys and self._has_l2_adapters():
+            if not skip_l2 and remaining_keys and self._has_l2_adapters():
                 prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
                     remaining_keys,
                     layout_desc,
@@ -503,7 +503,9 @@ class StorageManager:
                 l1_found_indices=tuple(l1_found_indices),
                 total_requested_keys=len(keys),
                 submit_time=time.monotonic(),
-                l2_orig_indices=tuple(sparse_l2_indices),
+                l2_orig_indices=(
+                    tuple(sparse_l2_indices) if prefetch_request_id != -1 else ()
+                ),
             )
 
         hit_count = 0

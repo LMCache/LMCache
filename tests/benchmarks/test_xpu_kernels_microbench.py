@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Microbenchmarks: SYCL (XPU) kernels vs python_ops_fallback.
+"""Microbenchmarks: SYCL (XPU) kernels vs torch_ops.
 
 Per the project plan, Phase 0 confirmed all four fallback functions
 accept XPU tensors directly, so we can do an apples-to-apples timing
@@ -14,7 +14,7 @@ import torch
 
 # First Party
 from lmcache import torch_device_type
-import lmcache.python_ops_fallback as F
+from lmcache.v1.platform import torch_ops as F
 
 pytestmark = pytest.mark.skipif(
     torch_device_type != "xpu",
@@ -152,7 +152,7 @@ def test_bench_decode_sycl(benchmark, xops, ntokens):
 # NOTE: decode_fast_new fallback crashes on XPU with an internal
 # IndexKernel gather OOB on these shapes (a torch-xpu fallback bug,
 # not a CacheGen bug).  Per the project plan we do not modify
-# python_ops_fallback to accommodate XPU; the SYCL kernel is the
+# torch_ops to accommodate XPU; the SYCL kernel is the
 # correct/fast path.  Recording the absolute SYCL throughput is
 # sufficient.
 

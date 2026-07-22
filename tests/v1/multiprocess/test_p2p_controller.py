@@ -12,7 +12,8 @@ import httpx
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.native_storage_ops import Bitmap
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, TrimPolicy
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.config import CoordinatorConfig, P2PConfig
@@ -150,7 +151,8 @@ def _make_controller() -> tuple[P2PController, MagicMock]:
 
 
 def test_lookup_and_lock_submits_skip_l2_and_returns_task_id():
-    """p2p_lookup_and_lock submits a skip_l2 prefetch and returns a fresh id."""
+    """p2p_lookup_and_lock submits a sparse skip_l2 prefetch and returns a
+    fresh id."""
     controller, ctx = _make_controller()
     handle = MagicMock(l1_found_indices=(0, 1))
     ctx.storage_manager.submit_prefetch_task.return_value = handle
@@ -164,6 +166,7 @@ def test_lookup_and_lock_submits_skip_l2_and_returns_task_id():
     assert args[0] == keys
     assert args[1] is layout_desc
     assert kwargs["skip_l2"] is True
+    assert kwargs["policy"] is TrimPolicy.SPARSE
     # A second call gets a distinct id.
     assert controller.p2p_lookup_and_lock(keys, layout_desc) == 1
 
@@ -178,9 +181,7 @@ def test_query_lookup_results_builds_addresses_for_prefix():
     keys = [_make_key(0), _make_key(1), _make_key(2)]
     task_id = controller.p2p_lookup_and_lock(keys, _make_layout_desc())
 
-    found = MagicMock()
-    found.count_leading_ones.return_value = 2
-    ctx.storage_manager.query_prefetch_status.return_value = found
+    ctx.storage_manager.query_prefetch_status.return_value = Bitmap(3, 2)
     obj0 = MagicMock(shm_offset=100, shm_byte_length=10)
     obj1 = MagicMock(shm_offset=200, shm_byte_length=20)
     ctx.storage_manager.unsafe_read.return_value = ([keys[0], keys[1]], [obj0, obj1])
@@ -193,6 +194,32 @@ def test_query_lookup_results_builds_addresses_for_prefix():
     ]
 
 
+def test_query_lookup_results_builds_addresses_for_sparse_hits():
+    """A lookup with a mid-sequence L1 gap returns real offsets at the found
+    indices and an invalid offset at the gap."""
+    controller, ctx = _make_controller()
+    handle = MagicMock(l1_found_indices=(0, 2))
+    ctx.storage_manager.submit_prefetch_task.return_value = handle
+
+    keys = [_make_key(0), _make_key(1), _make_key(2)]
+    task_id = controller.p2p_lookup_and_lock(keys, _make_layout_desc())
+
+    found = Bitmap(3)
+    found.batched_set([0, 2])
+    ctx.storage_manager.query_prefetch_status.return_value = found
+    obj0 = MagicMock(shm_offset=100, shm_byte_length=10)
+    obj2 = MagicMock(shm_offset=300, shm_byte_length=30)
+    ctx.storage_manager.unsafe_read.return_value = ([keys[0], keys[2]], [obj0, obj2])
+
+    addresses = controller.p2p_query_lookup_results(task_id)
+    ctx.storage_manager.unsafe_read.assert_called_once_with([keys[0], keys[2]])
+    assert addresses == [
+        TransferChannelAddress(offset=100, size=10),
+        TransferChannelAddress(offset=-1, size=0),
+        TransferChannelAddress(offset=300, size=30),
+    ]
+
+
 def test_query_lookup_results_exactly_once():
     """Re-querying a completed task returns None (the job is consumed)."""
     controller, ctx = _make_controller()
@@ -201,9 +228,7 @@ def test_query_lookup_results_exactly_once():
     )
     task_id = controller.p2p_lookup_and_lock([_make_key(0)], _make_layout_desc())
 
-    found = MagicMock()
-    found.count_leading_ones.return_value = 0
-    ctx.storage_manager.query_prefetch_status.return_value = found
+    ctx.storage_manager.query_prefetch_status.return_value = Bitmap(1)
 
     assert controller.p2p_query_lookup_results(task_id) == [
         TransferChannelAddress(offset=-1, size=0)
@@ -229,9 +254,7 @@ def test_query_lookup_results_in_progress():
     ctx.storage_manager.query_prefetch_status.return_value = None
     assert controller.p2p_query_lookup_results(task_id) is None
     # Job is still alive; status flips to done on the next poll.
-    found = MagicMock()
-    found.count_leading_ones.return_value = 0
-    ctx.storage_manager.query_prefetch_status.return_value = found
+    ctx.storage_manager.query_prefetch_status.return_value = Bitmap(1)
     assert controller.p2p_query_lookup_results(task_id) is not None
 
 

@@ -30,8 +30,7 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )
-from lmcache.v1.platform import _registry as platform_registry
-from lmcache.v1.platform import get_device_spec
+from lmcache.v1.platform import get_device_spec, resolve_kv_wrapper_factory
 
 logger = init_logger(__name__)
 
@@ -143,7 +142,7 @@ def _resolve_mode(mode: "str | MPTransferMode | None") -> MPTransferMode:
 def _build_lmcache_driven_context(device_type: str) -> "TransferContext":
     """Build a :class:`LMCacheDrivenTransferContext` after capability check."""
     try:
-        platform_registry.get_kv_wrapper_factory(device_type)
+        resolve_kv_wrapper_factory(device_type)
     except ValueError as exc:
         raise ValueError(
             "MP transfer mode 'lmcache_driven' is not supported for device type "
