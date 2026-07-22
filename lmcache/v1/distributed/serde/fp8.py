@@ -31,9 +31,7 @@ class Fp8QuantizationSerializer(Serializer):
     def __init__(self, fp8_dtype: torch.dtype = torch.float8_e4m3fn):
         self._fp8_dtype = fp8_dtype
 
-    def serialize(
-        self, src: MemoryObj, dst: MemoryObj, key: ObjectKey | None = None
-    ) -> int:
+    def serialize(self, src: MemoryObj, dst: MemoryObj, key: ObjectKey) -> int:
         """Cast src tensor to fp8 and copy bytes into dst buffer (key unused)."""
         src_tensor = src.tensor
         dst_tensor = dst.tensor
@@ -73,9 +71,7 @@ class Fp8QuantizationDeserializer(Deserializer):
     def __init__(self, fp8_dtype: torch.dtype = torch.float8_e4m3fn):
         self._fp8_dtype = fp8_dtype
 
-    def deserialize(
-        self, src: MemoryObj, dst: MemoryObj, key: ObjectKey | None = None
-    ) -> None:
+    def deserialize(self, src: MemoryObj, dst: MemoryObj, key: ObjectKey) -> None:
         """Read fp8 bytes from src, cast to dst's dtype, copy into dst (key unused)."""
         src_tensor = src.tensor
         dst_tensor = dst.tensor

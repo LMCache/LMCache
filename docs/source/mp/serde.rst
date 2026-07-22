@@ -128,11 +128,11 @@ transform logic, then register a factory keyed on a name you pick:
     )
 
     class MySerializer(Serializer):
-        def serialize(self, src, dst, key=None) -> int:
+        def serialize(self, src, dst, key) -> int:
             # Write serialized bytes into dst; return bytes written.
-            # ``key`` is the object's ObjectKey (or None); ignore it
-            # unless your transform is keyed per object (e.g. encryption
-            # keyed on cache_salt).
+            # ``key`` is the object's ObjectKey; ignore it unless your
+            # transform is keyed per object (e.g. encryption keyed on
+            # cache_salt).
             ...
 
         def estimate_serialized_size(self, layout_desc) -> int:
@@ -140,7 +140,7 @@ transform logic, then register a factory keyed on a name you pick:
             ...
 
     class MyDeserializer(Deserializer):
-        def deserialize(self, src, dst, key=None) -> None:
+        def deserialize(self, src, dst, key) -> None:
             # Read serialized bytes from src, write into dst (KV-shaped).
             # ``key`` mirrors serialize; ignore it unless keyed per object.
             ...

@@ -10,7 +10,7 @@ import time
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.serde.turboquant import (
     TurboQuantDeserializer,
     TurboQuantSerdeConfig,
@@ -71,12 +71,14 @@ def benchmark_one(
     src = _FakeMemoryObj(original)
     enc = _FakeMemoryObj(compressed)
     dec = _FakeMemoryObj(recovered)
+    # TurboQuant ignores the key; pass an empty ObjectKey.
+    key = ObjectKey(chunk_hash=b"", model_name="", kv_rank=0)
 
     for _ in range(warmup):
-        written = serializer.serialize(cast(MemoryObj, src), cast(MemoryObj, enc))
+        written = serializer.serialize(cast(MemoryObj, src), cast(MemoryObj, enc), key)
         if written != n_bytes:
             raise RuntimeError(f"written={written}, expected={n_bytes}")
-        deserializer.deserialize(cast(MemoryObj, enc), cast(MemoryObj, dec))
+        deserializer.deserialize(cast(MemoryObj, enc), cast(MemoryObj, dec), key)
     sync()
 
     encode_times = []
@@ -85,14 +87,14 @@ def benchmark_one(
     for _ in range(iters):
         sync()
         t0 = time.perf_counter()
-        written = serializer.serialize(cast(MemoryObj, src), cast(MemoryObj, enc))
+        written = serializer.serialize(cast(MemoryObj, src), cast(MemoryObj, enc), key)
         sync()
         t1 = time.perf_counter()
 
         if written != n_bytes:
             raise RuntimeError(f"written={written}, expected={n_bytes}")
 
-        deserializer.deserialize(cast(MemoryObj, enc), cast(MemoryObj, dec))
+        deserializer.deserialize(cast(MemoryObj, enc), cast(MemoryObj, dec), key)
         sync()
         t2 = time.perf_counter()
 

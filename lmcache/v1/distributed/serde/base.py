@@ -52,17 +52,15 @@ class Serializer(abc.ABC):
     """
 
     @abc.abstractmethod
-    def serialize(
-        self, src: MemoryObj, dst: MemoryObj, key: ObjectKey | None = None
-    ) -> int:
+    def serialize(self, src: MemoryObj, dst: MemoryObj, key: ObjectKey) -> int:
         """Serialize src KV data into dst byte buffer (in-place).
 
         Args:
             src: Source MemoryObj containing KV-shaped data (read-locked).
             dst: Destination MemoryObj byte buffer (write-locked).
                  Must have capacity >= estimate_serialized_size().
-            key: Object key for this src/dst pair, or None. Defaults to
-                 None; content-agnostic serdes ignore it.
+            key: Object key for this src/dst pair. Content-agnostic
+                 serdes ignore it.
 
         Returns:
             The actual number of bytes written to dst.
@@ -94,16 +92,14 @@ class Deserializer(abc.ABC):
     """
 
     @abc.abstractmethod
-    def deserialize(
-        self, src: MemoryObj, dst: MemoryObj, key: ObjectKey | None = None
-    ) -> None:
+    def deserialize(self, src: MemoryObj, dst: MemoryObj, key: ObjectKey) -> None:
         """Deserialize src byte buffer into dst KV-shaped MemoryObj (in-place).
 
         Args:
             src: Source MemoryObj containing serialized bytes.
             dst: Destination MemoryObj with KV-shaped layout (write-locked).
-            key: Object key for this src/dst pair, or None. Defaults to
-                 None; content-agnostic serdes ignore it.
+            key: Object key for this src/dst pair. Content-agnostic
+                 serdes ignore it.
         """
         raise NotImplementedError
 

@@ -105,9 +105,7 @@ class MultiSerializer(abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def serialize(
-        self, src: MemoryObjGroup, dst: MemoryObj, key: ObjectKey | None = None
-    ) -> int:
+    def serialize(self, src: MemoryObjGroup, dst: MemoryObj, key: ObjectKey) -> int:
         """Serialize ``src`` group into ``dst`` byte buffer.
 
         Args:
@@ -120,8 +118,8 @@ class MultiSerializer(abc.ABC):
                 Capacity MUST be at least the value previously
                 returned by :meth:`estimate_serialized_size` for the
                 same layout group.
-            key: Object key for the group, or None. Defaults to None;
-                content-agnostic serdes ignore it.
+            key: Object key for the group. Content-agnostic serdes
+                ignore it.
 
         Returns:
             The number of bytes written to ``dst``.
@@ -164,17 +162,15 @@ class MultiDeserializer(abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def deserialize(
-        self, src: MemoryObj, dst: MemoryObjGroup, key: ObjectKey | None = None
-    ) -> None:
+    def deserialize(self, src: MemoryObj, dst: MemoryObjGroup, key: ObjectKey) -> None:
         """Deserialize ``src`` byte buffer into ``dst`` group.
 
         Args:
             src: Source byte-buffer MemoryObj.
             dst: Destination group with length :attr:`group_size`.
                 ``None`` slots MUST be left untouched.
-            key: Object key for the group, or None. Defaults to None;
-                content-agnostic serdes ignore it.
+            key: Object key for the group. Content-agnostic serdes
+                ignore it.
         """
         raise NotImplementedError
 
@@ -198,9 +194,7 @@ class _SingleAsMultiSerializer(MultiSerializer):
     def group_size(self) -> int:
         return 1
 
-    def serialize(
-        self, src: MemoryObjGroup, dst: MemoryObj, key: ObjectKey | None = None
-    ) -> int:
+    def serialize(self, src: MemoryObjGroup, dst: MemoryObj, key: ObjectKey) -> int:
         if len(src) != 1:
             raise ValueError(
                 f"_SingleAsMultiSerializer expected group of size 1, got {len(src)}"
@@ -243,9 +237,7 @@ class _SingleAsMultiDeserializer(MultiDeserializer):
     def group_size(self) -> int:
         return 1
 
-    def deserialize(
-        self, src: MemoryObj, dst: MemoryObjGroup, key: ObjectKey | None = None
-    ) -> None:
+    def deserialize(self, src: MemoryObj, dst: MemoryObjGroup, key: ObjectKey) -> None:
         if len(dst) != 1:
             raise ValueError(
                 f"_SingleAsMultiDeserializer expected group of size 1, got {len(dst)}"
