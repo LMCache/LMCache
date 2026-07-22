@@ -53,6 +53,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
+from lmcache.v1.multiprocess.modules.qstore import QStoreModule
 from lmcache.v1.multiprocess.mq import MessageQueueServer
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
@@ -264,6 +265,17 @@ def _build_modules(
         # notify it via drop_instance_state when an instance is reaped.
         liveness_targets.append(blend_v3)
 
+    # QStoreModule now only supports LMCache-driven mode
+    lmcache_driven_module = next(
+        (m for m in transfer_modules if isinstance(m, LMCacheDrivenTransferModule)),
+        None,
+    )
+    qstore_modules: list[EngineModule] = []
+    if lmcache_driven_module is not None:
+        qstore_module = QStoreModule(ctx)
+        qstore_modules.append(qstore_module)
+        liveness_targets.append(qstore_module)
+
     management = ManagementModule(
         ctx,
         liveness_targets=liveness_targets,
@@ -280,6 +292,7 @@ def _build_modules(
         p2p_controller,
         management,
         *transfer_modules,
+        *qstore_modules,
         *blend_modules,
     ]
 

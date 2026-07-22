@@ -217,10 +217,8 @@ class QRingBufferCapture:
     def __init__(
         self,
         worker_adapter: "LMCacheMPWorkerAdapter",
-        transfer_intermediate_tensors: bool,
     ) -> None:
         self.worker_adapter = worker_adapter
-        self._enabled = transfer_intermediate_tensors
         self.q_layer_index: dict[str, int] = {}
         self.q_step_state: _QStepState | None = None
         self.q_step_disabled: bool = False
@@ -238,10 +236,6 @@ class QRingBufferCapture:
         Args:
             kv_caches: Registered KV caches.
         """
-        if not self._enabled:
-            logger.info("Q ring capture is disabled; skipping Q ring setup.")
-            return
-
         if not kv_caches:
             logger.warning("No KV caches registered; skipping Q ring setup.")
             return
@@ -285,14 +279,15 @@ class QRingBufferCapture:
             )
             num_ring_blocks = max(1, math.ceil(max_batched / block_size) * depth)
 
-        self.worker_adapter.register_q_ring(
-            num_layers=num_layers,
-            num_q_heads=num_q_heads,
-            head_size=head_size,
-            dtype=dtype,
-            num_ring_blocks=num_ring_blocks,
-            device=device,
-        )
+        if self.worker_adapter.q_ring_adapter is not None:
+            self.worker_adapter.q_ring_adapter.register_q_ring(
+                num_layers=num_layers,
+                num_q_heads=num_q_heads,
+                head_size=head_size,
+                dtype=dtype,
+                num_ring_blocks=num_ring_blocks,
+                device=device,
+            )
 
     def save_q_layer(
         self,
@@ -303,11 +298,7 @@ class QRingBufferCapture:
         """Scatter this layer's query into the ring, building the per-step plan on
         the first attention layer of the step.
         """
-        if (
-            not self._enabled
-            or not self.worker_adapter.is_kv_writer
-            or self.q_step_disabled
-        ):
+        if not self.worker_adapter.is_kv_writer or self.q_step_disabled:
             return
 
         intermediate_tensors = kwargs.get("intermediate_tensors")
@@ -327,9 +318,10 @@ class QRingBufferCapture:
                 self.q_step_disabled = True
                 return
 
-        self.worker_adapter.scatter_q_layer(
-            layer_index, query, self.q_step_state.ring_slots
-        )
+        if self.worker_adapter.q_ring_adapter is not None:
+            self.worker_adapter.q_ring_adapter.scatter_q_layer(
+                layer_index, query, self.q_step_state.ring_slots
+            )
 
     def _build_q_step_state(
         self,
@@ -439,12 +431,36 @@ class QRingBufferCapture:
         for store in stores:
             q_ring.free(store.ring_block_ids)
 
-    def consume_q_step_state(self) -> _QStepState | None:
-        """Reset the per-step plan."""
+    def batched_submit_qstore_requests(self, event: "_IpcEvent | None") -> None:
+        """
+        Submit a batched Q store request to LMCache.
+        A copy of batched_submit_store_requests for Q stores.
+        The recorded step state has all request IDs, ops, ring block IDs, and
+        cache salts for the current forward step.
+
+        Args:
+            event: The CUDA event that is recorded after the current
+                model inference step
+        """
         state = self.q_step_state
         self.q_step_state = None
         self.q_step_disabled = False
-        return state
+
+        if state is None or event is None:
+            return
+
+        q_ring_adapter = self.worker_adapter.q_ring_adapter
+        if q_ring_adapter is None:
+            return
+
+        for q_store in state.stores:
+            q_ring_adapter.submit_q_store_request(
+                q_store.request_id,
+                q_store.op,
+                q_store.ring_block_ids,
+                event,
+                cache_salt=q_store.cache_salt,
+            )
 
 
 class QRingBufferAdapter:
@@ -453,12 +469,10 @@ class QRingBufferAdapter:
     def __init__(
         self,
         adapter: "LMCacheMPWorkerAdapter",
-        q_instance_id: int,
         q_model_name: str,
         send_lmcache_request: Any,
     ) -> None:
         self._adapter = adapter
-        self.q_instance_id = q_instance_id
         self.q_model_name = q_model_name
         self.send_lmcache_request = send_lmcache_request
 
@@ -535,8 +549,8 @@ class QRingBufferAdapter:
         ):
             raise RuntimeError("Q ring is not initialized yet.")
         try:
-            self._adapter.transfer_ctx.register(
-                self.q_instance_id,
+            self._adapter.transfer_ctx.register_q(
+                self._adapter.instance_id,
                 self.q_ring.tensors,
                 self.q_model_name,
                 self._adapter.world_size,
@@ -604,10 +618,10 @@ class QRingBufferAdapter:
             cache_salt=cache_salt,
         )
         key = replace(key, model_name=self.q_model_name)
-        future = self._adapter.transfer_ctx.submit_store(
+        future = self._adapter.transfer_ctx.submit_q_store(
             request_id,
             key,
-            self.q_instance_id,
+            self._adapter.instance_id,
             self.q_ring.tensors,
             [ring_block_ids],
             event,
@@ -618,7 +632,7 @@ class QRingBufferAdapter:
         self.q_store_futures[seq] = (future, ring_block_ids)
         self.q_store_events[seq] = event
 
-    def _reclaim_finished_q_stores(self) -> None:
+    def reclaim_finished_q_stores(self) -> None:
         """Reclaim ring blocks when query has been saved to LMCache.
         This is called in get_finished()."""
         if not self.q_ring or not self.q_store_futures:
@@ -641,15 +655,15 @@ class QRingBufferAdapter:
             self.q_store_futures.pop(seq, None)
             self.q_store_events.pop(seq, None)
 
-    def _shutdown_q_ring(self) -> None:
+    def shutdown_q_ring(self) -> None:
         """Unregister the paged Q ring from LMCache server."""
         if not self.q_ring:
             return
         try:
             self.send_lmcache_request(
                 self._adapter.mq_client,
-                RequestType.UNREGISTER_KV_CACHE,
-                [self.q_instance_id],
+                RequestType.UNREGISTER_Q_CACHE,
+                [self._adapter.instance_id],
             ).result(timeout=self._adapter._mq_timeout)
         except TimeoutError:
             logger.warning(
