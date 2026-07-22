@@ -120,6 +120,12 @@ jobs:
       VLLM_LOAD_FORMAT: ${{ matrix.model.load_format }}
       VLLM_HF_OVERRIDES: ${{ matrix.model.hf_overrides }}
       VLLM_TRUST_REMOTE_CODE: ${{ matrix.model.trust_remote_code }}
+      # Downloader args, consumed by run-cpu-e2e-validation.sh's
+      # Phase 2 / Step 2 (which re-invokes download_gh_release_model.sh
+      # to be idempotent — the Prepare model step above may have
+      # already populated the cache, in which case this is a no-op).
+      VLLM_TARBALL_URL: ${{ matrix.model.tarball_url }}
+      VLLM_TARBALL_CACHE_MARKER: ${{ matrix.model.cache_marker }}
       # vLLM's own env: 1 -> force non-MLA attention backend even for
       # models that would normally route through MLA. Required on CPU
       # today because vLLM's CPU backend raises for MLA.

@@ -48,10 +48,21 @@ VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-120}"
 #                        details). Set to "" to skip the step entirely
 #                        (e.g. when weights are random-initialised and
 #                        no HF metadata is needed).
+#   VLLM_TARBALL_URL     Full https URL to the tar.gz consumed by the
+#                        downloader. Defaults to the opt-125m GitHub
+#                        release, so buildkite / historical callers keep
+#                        working unchanged. GHA overrides this per-model
+#                        via the matrix.
+#   VLLM_TARBALL_CACHE_MARKER  Cache-hit marker filename passed through
+#                              to the downloader. Defaults to
+#                              `pytorch_model.bin`, which is what the
+#                              opt-125m mirror ships.
 VLLM_MODEL_ID="${VLLM_MODEL_ID:-facebook/opt-125m}"
 VLLM_LOAD_FORMAT="${VLLM_LOAD_FORMAT:-}"
 VLLM_HF_OVERRIDES="${VLLM_HF_OVERRIDES:-}"
 VLLM_DOWNLOAD_SCRIPT="${VLLM_DOWNLOAD_SCRIPT:-download_gh_release_model.sh}"
+VLLM_TARBALL_URL="${VLLM_TARBALL_URL:-https://github.com/LMCache/opt-125m/releases/download/v1.0/opt-125m.tar.gz}"
+VLLM_TARBALL_CACHE_MARKER="${VLLM_TARBALL_CACHE_MARKER:-pytorch_model.bin}"
 # Transport mode selection:
 #   LMCACHE_MP_TRANSFER_MODE=engine_driven  -> engine-driven data path,
 #       sub-selected by LMCACHE_SHM_NAME:
@@ -402,7 +413,15 @@ if [ -z "${VLLM_DOWNLOAD_SCRIPT}" ]; then
   echo "[Phase 2 / Step 2] Skipping model download (VLLM_DOWNLOAD_SCRIPT is empty)."
 else
   echo "[Phase 2 / Step 2] Preparing model ${VLLM_MODEL_ID} via ${VLLM_DOWNLOAD_SCRIPT}"
-  bash "${SHARED_SCRIPTS_DIR}/${VLLM_DOWNLOAD_SCRIPT}"
+  # The downloader reads MODEL_ID / TARBALL_URL / CACHE_MARKER from
+  # env; thread them through explicitly so the buildkite path (which
+  # relies on the defaults above) and the GHA path (which pins them
+  # per matrix entry) both work without depending on the surrounding
+  # shell's env-var visibility rules.
+  MODEL_ID="${VLLM_MODEL_ID}" \
+    TARBALL_URL="${VLLM_TARBALL_URL}" \
+    CACHE_MARKER="${VLLM_TARBALL_CACHE_MARKER}" \
+    bash "${SHARED_SCRIPTS_DIR}/${VLLM_DOWNLOAD_SCRIPT}"
   echo "✅ Model download/check complete"
 fi
 
