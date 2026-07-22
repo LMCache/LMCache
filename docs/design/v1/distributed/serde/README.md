@@ -107,10 +107,10 @@ classes and register a factory.
 
 ### `SerdeProcessor` (async)
 
-- `submit_serialize(src_objs, dst_objs, keys=None) → SerdeTaskId` must
-  be non-blocking. `keys` is optional (defaults to `None`) and, when
-  given, positionally aligned with `src_objs` / `dst_objs`. The actual
-  transform runs asynchronously.
+- `submit_serialize(src_objs, dst_objs, keys) → SerdeTaskId` must be
+  non-blocking. `keys` is positionally aligned with `src_objs` /
+  `dst_objs` (the wrapper always supplies them). The actual transform
+  runs asynchronously.
 - `query_serialize_result(task_id) → bool | None` is
   **non-idempotent**: it returns a non-None value exactly once per
   task id. `None` means the task is still in flight.

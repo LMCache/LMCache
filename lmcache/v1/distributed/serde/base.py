@@ -155,15 +155,15 @@ class SerdeProcessor(abc.ABC):
         self,
         src_objs: list[MemoryObj],
         dst_objs: list[MemoryObj],
-        keys: list[ObjectKey] | None = None,
+        keys: list[ObjectKey],
     ) -> SerdeTaskId:
         """Submit a batch serialization task.
 
         Args:
             src_objs: Source KV-shaped MemoryObjs (read-locked).
             dst_objs: Destination byte-buffer MemoryObjs (write-locked).
-            keys: Object keys aligned with src_objs/dst_objs, or None.
-                Defaults to None; content-agnostic serdes ignore it.
+            keys: Object keys positionally aligned with src_objs/dst_objs.
+                Content-agnostic serdes ignore them.
 
         Returns:
             Task ID for querying completion.
@@ -186,15 +186,15 @@ class SerdeProcessor(abc.ABC):
         self,
         src_objs: list[MemoryObj],
         dst_objs: list[MemoryObj],
-        keys: list[ObjectKey] | None = None,
+        keys: list[ObjectKey],
     ) -> SerdeTaskId:
         """Submit a batch deserialization task.
 
         Args:
             src_objs: Source byte-buffer MemoryObjs (filled by L2 load).
             dst_objs: Destination KV-shaped MemoryObjs (write-locked).
-            keys: Object keys aligned with src_objs/dst_objs, or None.
-                Defaults to None; content-agnostic serdes ignore it.
+            keys: Object keys positionally aligned with src_objs/dst_objs.
+                Content-agnostic serdes ignore them.
 
         Returns:
             Task ID for querying completion.
