@@ -5,6 +5,7 @@ Distributed multi-tier storage manager for MP mode
 
 # Standard
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import Iterator, Literal, Optional
 import threading
 import time
@@ -414,24 +415,13 @@ class StorageManager:
             PrefetchHandle to track the task.
         """
         keys = spec.keys
-        layout_desc = spec.layout_desc
-        extra_count = spec.extra_count
-        policy = spec.policy
-        attn_desc = spec.attn_desc
-        mode = spec.mode
 
-        if mode is PrefetchMode.WARM:
+        if spec.mode is PrefetchMode.WARM:
             # Warm path: load all keys, pin none. skip_l2 makes it a no-op.
             prefetch_request_id = -1
             if not skip_l2 and keys and self._l2_adapters:
                 prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
-                    PrefetchRequestSpec(
-                        keys=keys,
-                        layout_desc=layout_desc,
-                        extra_count=extra_count,
-                        policy=policy,
-                        mode=mode,
-                    )
+                    spec
                 )
             return PrefetchHandle(
                 prefetch_request_id=prefetch_request_id,
@@ -447,9 +437,11 @@ class StorageManager:
         # NOTE: now we only have L1, so the prefetch is essentially checking how many
         # objects are already in L1, and adding read locks to them.
 
-        l1_read_result = self._l1_manager.reserve_read(keys, extra_count=extra_count)
+        l1_read_result = self._l1_manager.reserve_read(
+            keys, extra_count=spec.extra_count
+        )
 
-        if policy is TrimPolicy.SPARSE:
+        if spec.policy is TrimPolicy.SPARSE:
             # SPARSE: retain a read lock on every L1 hit (not just the leading
             # prefix) and send all L1 misses to L2 as one coalesced request.
             # reserve_read locks only SUCCESS keys, so the found-set already
@@ -480,14 +472,7 @@ class StorageManager:
             prefetch_request_id = -1
             if remaining_keys and self._has_l2_adapters():
                 prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
-                    PrefetchRequestSpec(
-                        keys=remaining_keys,
-                        layout_desc=layout_desc,
-                        extra_count=extra_count,
-                        policy=TrimPolicy.SPARSE,
-                        attn_desc=attn_desc,
-                        mode=mode,
-                    )
+                    replace(spec, keys=remaining_keys)
                 )
             return PrefetchHandle(
                 prefetch_request_id=prefetch_request_id,
@@ -520,7 +505,7 @@ class StorageManager:
                 skipped_keys.append(key)
 
         if skipped_keys:
-            self._l1_manager.finish_read(skipped_keys, extra_count=extra_count)
+            self._l1_manager.finish_read(skipped_keys, extra_count=spec.extra_count)
 
         self._event_bus.publish(
             Event(
@@ -548,14 +533,7 @@ class StorageManager:
         l2_orig_indices: tuple[int, ...] = ()
         if remaining_keys and self._has_l2_adapters():
             prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
-                PrefetchRequestSpec(
-                    keys=remaining_keys,
-                    layout_desc=layout_desc,
-                    extra_count=extra_count,
-                    attn_desc=attn_desc,
-                    policy=policy,
-                    mode=mode,
-                )
+                replace(spec, keys=remaining_keys)
             )
             # The controller indexes its result bitmap over remaining_keys
             # (0-based); map those local indices back to original positions.
