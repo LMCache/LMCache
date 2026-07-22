@@ -1,17 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
+"""LMCache mp-mode message queue, backed by gRPC.
+
+Each ``RequestType`` maps to a distinct unary rpc method on the
+``MessageQueue`` service defined in ``proto/lmcache_mq.proto`` -- the
+old msgspec envelope (uid + request_type frame + payloads) is gone and
+gRPC's method routing takes over.  The request/response payload bytes
+themselves still carry msgspec-encoded values today, so the surrounding
+handler / client business code keeps the same signatures; a follow-up
+PR can promote individual rpc methods to typed proto messages without
+touching this file.
+"""
+
 # Standard
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable, Generic, Optional, TypeVar, get_type_hints
-import enum
+from urllib.parse import urlparse
 import inspect
-import itertools
-import queue
 import threading
 
 # Third Party
+import grpc
 import msgspec
-import zmq
 
 # First Party
 from lmcache.logging import init_logger
@@ -31,44 +41,19 @@ from lmcache.v1.multiprocess.protocol import (
     get_payload_classes,
     get_response_class,
 )
-from lmcache.v1.multiprocess.transport import (
-    ClientContext,
-    ClientTransport,
-    ServerTransport,
-    create_client_transport,
-    create_server_transport,
+from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
+    lmcache_mq_pb2,
+    lmcache_mq_pb2_grpc,
 )
-from lmcache.v1.platform import EventNotifier, create_event_notifier
 
 logger = init_logger(__name__)
 
 T = TypeVar("T")
 
-# Internal type used for the client-server communication
-RequestUID = int
 
-
-# Helper functions
-def encode_request_uid(uid: RequestUID) -> bytes:
-    return msgspec.msgpack.encode(uid)
-
-
-def decode_request_uid(b_uid: bytes) -> RequestUID:
-    return msgspec.msgpack.decode(b_uid, type=RequestUID)
-
-
-def unwrap_request_payloads(
-    b_payloads: list[bytes], payload_clss: list[Any]
-) -> list[Any]:
-    if len(b_payloads) != len(payload_clss):
-        raise ValueError("Payload count does not match expected count")
-
-    decoded_payloads = [
-        msgspec_decode(payload, cls=cls)
-        for payload, cls in zip(b_payloads, payload_clss, strict=False)
-    ]
-    return decoded_payloads
-
+# ---------------------------------------------------------------------------
+# msgspec encode / decode helpers (payload bytes wrapped inside proto)
+# ---------------------------------------------------------------------------
 
 _SPECIAL_ENCODER_DECODERS = {
     DeviceIPCWrapper: (
@@ -91,293 +76,112 @@ _SPECIAL_ENCODER_DECODERS = {
 
 
 def msgspec_encode(obj: Any, cls: Any) -> bytes:
-    # Handle special cases
     if cls in _SPECIAL_ENCODER_DECODERS:
         encoder, _ = _SPECIAL_ENCODER_DECODERS[cls]
         return encoder.encode(obj)
-    # Defensive guard: coerce obj to the declared cls so that
-    # e.g. a bool passed as int (or vice-versa) is encoded in the
-    # wire format that msgspec_decode expects for that cls.
     if cls in (bool, int):
         obj = cls(obj)
     return msgspec.msgpack.encode(obj)
 
 
 def msgspec_decode(b_obj: bytes, cls: Any) -> Any:
-    # Handle special cases
     if cls in _SPECIAL_ENCODER_DECODERS:
         _, decoder = _SPECIAL_ENCODER_DECODERS[cls]
         return decoder.decode(b_obj)
-    # Defensive guard: msgspec strict-validates wire format
-    # (bool ≠ int in msgpack), but runtime type may not match
-    # declared cls. Decode untyped, then coerce.
     if cls in (bool, int):
         return cls(msgspec.msgpack.decode(b_obj))
     return msgspec.msgpack.decode(b_obj, type=cls)
 
 
-# Shared polling loop for MessageQueueClient instances
+def unwrap_request_payloads(
+    b_payloads: list[bytes], payload_clss: list[Any]
+) -> list[Any]:
+    if len(b_payloads) != len(payload_clss):
+        raise ValueError("Payload count does not match expected count")
+
+    return [
+        msgspec_decode(payload, cls=cls)
+        for payload, cls in zip(b_payloads, payload_clss, strict=False)
+    ]
 
 
-class _OpKind(enum.Enum):
-    REGISTER = "register"
-    UNREGISTER = "unregister"
+# ---------------------------------------------------------------------------
+# RequestType <-> gRPC method name
+# ---------------------------------------------------------------------------
 
 
-@dataclass
-class _PollOp:
-    kind: _OpKind
-    client: "MessageQueueClient"
-    done: threading.Event
+def request_type_to_method_name(request_type: RequestType) -> str:
+    """Return the CamelCase gRPC method name for a ``RequestType``.
 
-
-class ClientPollingLoop:
-    """Singleton polling loop shared by all MessageQueueClient instances.
-
-    Instead of each client running its own daemon thread and zmq.Poller,
-    a single loop polls all clients' DEALER sockets and dispatches
-    inbound/outbound work.
-
-    Use ``get_instance()`` / ``release_instance()`` for lifecycle
-    management — the loop starts lazily on first client and stops
-    automatically when the last client releases.
+    ``STORE`` -> ``Store``; ``CB_LOOKUP_PRE_COMPUTED_V2`` ->
+    ``CbLookupPreComputedV2``; ``P2P_LOOKUP_AND_LOCK`` ->
+    ``P2PLookupAndLock``.  These names are baked into ``lmcache_mq.proto``
+    so any drift shows up immediately at handshake time.
     """
+    parts = request_type.name.split("_")
+    out: list[str] = []
+    for part in parts:
+        if part == "P2P":
+            out.append("P2P")
+        else:
+            out.append(part[:1].upper() + part[1:].lower())
+    return "".join(out)
 
-    _instance: "ClientPollingLoop | None" = None
-    _instance_lock: threading.Lock = threading.Lock()
 
-    def __init__(self) -> None:
-        self._ref_count: int = 0
-        self._is_finished = threading.Event()
-        self._notifier: EventNotifier = create_event_notifier()
-        self._ops_queue: queue.Queue[_PollOp] = queue.Queue()
-        self._poller = zmq.Poller()
-        self._poller.register(self._notifier.fileno(), zmq.POLLIN)
-        # keyed by the transport's readable_handle() (a zmq.Socket for
-        # the built-in ZMQ transport; a raw fd for future transports
-        # such as gRPC).  ``zmq.Poller`` accepts both.
-        self._handle_to_client: dict = {}
-        self._thread = threading.Thread(
-            target=self._main_loop, daemon=True, name="mq-client-shared-loop"
+# ---------------------------------------------------------------------------
+# URL parsing
+# ---------------------------------------------------------------------------
+
+
+def _parse_grpc_url(url: str) -> str:
+    """Return a ``host:port`` target that ``grpc.insecure_channel`` accepts.
+
+    Accepts ``grpc://host:port`` or a bare ``host:port``.  Any other
+    transport scheme (``tcp://`` / ``ipc://`` / etc.) is rejected up front
+    now that gRPC is the only supported transport.
+    """
+    if "://" not in url:
+        return url
+    parsed = urlparse(url)
+    if parsed.scheme != "grpc":
+        raise ValueError(
+            f"unsupported transport scheme {parsed.scheme!r} for url {url!r}; "
+            f"only grpc:// (or a bare host:port) is supported"
         )
-        self._thread.start()
-
-    @classmethod
-    def get_instance(cls) -> "ClientPollingLoop":
-        """Get or create the singleton, incrementing the ref count.
-
-        Returns:
-            ClientPollingLoop: The shared polling loop instance.
-        """
-        with cls._instance_lock:
-            if cls._instance is None:
-                cls._instance = ClientPollingLoop()
-            cls._instance._ref_count += 1
-            return cls._instance
-
-    @classmethod
-    def release_instance(cls) -> None:
-        """Decrement the ref count; tear down the loop when it reaches 0."""
-        with cls._instance_lock:
-            inst = cls._instance
-            if inst is None:
-                return
-            inst._ref_count -= 1
-            if inst._ref_count > 0:
-                return
-            inst._is_finished.set()
-            inst._notifier.notify()
-            cls._instance = None
-
-        inst._thread.join()
-        inst._notifier.close()
-        logger.debug("ClientPollingLoop shut down")
-
-    def register(self, client: "MessageQueueClient") -> None:
-        """Register a client's DEALER socket with the shared poller.
-
-        Blocks until the loop thread has completed the registration.
-
-        Args:
-            client: The MessageQueueClient to register.
-        """
-        done = threading.Event()
-        self._ops_queue.put(_PollOp(kind=_OpKind.REGISTER, client=client, done=done))
-        self._notifier.notify()
-        done.wait()
-
-    def unregister(self, client: "MessageQueueClient") -> None:
-        """Unregister a client's DEALER socket from the shared poller.
-
-        Blocks until the loop thread has completed the unregistration.
-
-        Args:
-            client: The MessageQueueClient to unregister.
-        """
-        done = threading.Event()
-        self._ops_queue.put(_PollOp(kind=_OpKind.UNREGISTER, client=client, done=done))
-        self._notifier.notify()
-        done.wait()
-
-    def notify(self) -> None:
-        """Wake the polling loop to process outbound tasks."""
-        self._notifier.notify()
-
-    def _process_ops(self) -> None:
-        """Drain the ops queue and apply register/unregister to the poller."""
-        try:
-            while True:
-                op = self._ops_queue.get_nowait()
-                handle = op.client.transport.readable_handle()
-                if op.kind is _OpKind.REGISTER:
-                    self._poller.register(handle, zmq.POLLIN)
-                    self._handle_to_client[handle] = op.client
-                    logger.debug("Registered client handle %s", handle)
-                elif op.kind is _OpKind.UNREGISTER:
-                    self._poller.unregister(handle)
-                    self._handle_to_client.pop(handle, None)
-                    logger.debug("Unregistered client handle %s", handle)
-                op.done.set()
-        except queue.Empty:
-            pass
-
-    def _main_loop(self) -> None:
-        """Unified poll loop for all registered clients."""
-        notifier_fd = self._notifier.fileno()
-
-        while not self._is_finished.is_set():
-            self._process_ops()
-
-            socks = dict(self._poller.poll(1000))
-
-            # Outbound: shared notifier woke us — drain it, then flush
-            # all clients' output queues.
-            if socks.get(notifier_fd) and socks[notifier_fd] & zmq.POLLIN:
-                self._notifier.consume()
-                for client in self._handle_to_client.values():
-                    client.process_outbound_task()
-
-            # Inbound: dispatch each ready transport handle to its client.
-            for handle, event in socks.items():
-                if handle is notifier_fd:
-                    continue
-                if event & zmq.POLLIN:
-                    owner = self._handle_to_client.get(handle)
-                    if owner is not None:
-                        owner.process_inbound()
-
-        # Drain remaining ops so any waiting threads unblock.
-        self._process_ops()
+    if not parsed.netloc:
+        raise ValueError(f"missing host in url {url!r}")
+    return parsed.netloc
 
 
-# Main classes
+# ---------------------------------------------------------------------------
+# Client
+# ---------------------------------------------------------------------------
+
+
 class MessageQueueClient:
-    @dataclass
-    class WrappedRequest:
-        request_uid: RequestUID
-        future: MessagingFuture[Any]
-        request_type: RequestType
-        request_payloads: list[Any]
+    """gRPC-backed client for the LMCache mp cache server.
+
+    Instances are cheap; a shared ``grpc.Channel`` is created per client
+    and callers can share one client across many threads (gRPC channels
+    are thread-safe).
+
+    Args:
+        server_url: Either ``grpc://host:port`` or a bare ``host:port``.
+        context: Legacy positional slot kept for backwards compatibility
+            with the historical zmq-based constructor; ignored.
+    """
 
     def __init__(
         self,
         server_url: str,
-        context: Optional[zmq.Context] = None,
-        transport: Optional[ClientTransport] = None,
+        context: Optional[Any] = None,
+        transport: Optional[Any] = None,
     ):
-        # Backwards-compatible: callers may pass a ``zmq.Context`` (legacy)
-        # or an already-constructed ``ClientTransport`` (new).  When only a
-        # context is passed, the transport is selected by the URL scheme
-        # (ipc:// / tcp:// -> ZMQ) and the context is forwarded to the
-        # factory.  ``self.ctx`` is retained for legacy users that read it.
-        self.ctx = context if context is not None else zmq.Context.instance()
-        if transport is None:
-            transport = create_client_transport(server_url, context=self.ctx)
-        self.transport: ClientTransport = transport
-        self.transport.connect(server_url)
-
-        # Input queue
-        self.input_queue: queue.Queue = queue.Queue()
-
-        # Pending job's futures
-        self._request_counter = itertools.count()
-        self.pending_futures: dict[int, MessagingFuture[Any]] = {}
-
-        # Register with the shared polling loop
-        self._polling_loop = ClientPollingLoop.get_instance()
-        self._polling_loop.register(self)
-
-    def process_outbound_task(self):
-        try:
-            while wrapped_request := self.input_queue.get_nowait():
-                # wrapped_request = self.input_queue.get_nowait()
-
-                # Update the pending futures
-                request_uid = wrapped_request.request_uid
-                self.pending_futures[request_uid] = wrapped_request.future
-
-                # Send the request
-                b_request_uid = msgspec_encode(request_uid, cls=RequestUID)
-                b_request_type = msgspec_encode(
-                    wrapped_request.request_type, cls=RequestType
-                )
-                payload_classes = get_payload_classes(wrapped_request.request_type)
-                if len(payload_classes) != len(wrapped_request.request_payloads):
-                    expected_classes = [cls.__name__ for cls in payload_classes]
-                    actual_classes = [
-                        type(p).__name__ for p in wrapped_request.request_payloads
-                    ]
-                    raise ValueError(
-                        f"Payload count mismatch for request "
-                        f"{wrapped_request.request_type}: "
-                        f"expected {len(payload_classes)} payloads "
-                        f"{expected_classes}, "
-                        f"got {len(wrapped_request.request_payloads)} payloads "
-                        f"{actual_classes}. "
-                        f"This is likely caused by a version mismatch between "
-                        f"the lmcache client and lmcache server."
-                    )
-
-                b_payloads = [
-                    msgspec_encode(payload, cls=cls)
-                    for payload, cls in zip(
-                        wrapped_request.request_payloads,
-                        payload_classes,
-                        strict=False,
-                    )
-                ]
-                self.transport.send_frames([b_request_uid, b_request_type] + b_payloads)
-        except queue.Empty:
-            pass
-
-    def process_inbound(self) -> None:
-        """Process one inbound response from the server.
-
-        Called by the shared ClientPollingLoop when the transport's
-        readable handle becomes readable.  Only touches
-        ``pending_futures``, which is exclusively accessed from the
-        loop thread.
-        """
-        msg = self.transport.recv_frames()
-        if msg is None or len(msg) < 2:
-            logger.error(
-                "Malformed response: expected at least 2 message parts "
-                "[request_uid, request_type, *response], got %d",
-                0 if msg is None else len(msg),
-            )
-            return
-        b_request_uid, b_request_type, *b_response = msg
-        request_uid = msgspec_decode(b_request_uid, cls=RequestUID)
-        request_type = msgspec_decode(b_request_type, cls=RequestType)
-        response_cls = get_response_class(request_type)
-
-        if request_uid in self.pending_futures:
-            future = self.pending_futures.pop(request_uid)
-            if b_response:
-                response = msgspec_decode(b_response[0], cls=response_cls)
-                future.set_result(response)
-            else:
-                future.set_result(None)
+        del context, transport  # legacy positional slots, no longer used
+        target = _parse_grpc_url(server_url)
+        self._server_url = server_url
+        self._channel = grpc.insecure_channel(target)
+        self._stub = lmcache_mq_pb2_grpc.MessageQueueStub(self._channel)
 
     def submit_request(
         self,
@@ -385,34 +189,77 @@ class MessageQueueClient:
         request_payloads: list[Any],
         response_cls: Optional[T] = None,
     ) -> MessagingFuture[T]:
-        """Submit a request to the server.
+        """Submit a request and return a future for its response.
 
         Args:
-            request_type (RequestType): The type of the request.
-            request_payloads (list[Any]): The payloads of the request.
-            response_cls (Optional[T]): The expected response class.
-                This should be get from `get_response_class(request_type)`.
+            request_type: Which RPC to invoke.
+            request_payloads: Positional payloads matching
+                ``get_payload_classes(request_type)``.
+            response_cls: Kept for signature compatibility; ignored
+                (the response class is resolved from ``request_type``).
 
         Returns:
-            MessagingFuture[T]: A future that will hold the response.
+            A ``MessagingFuture`` completed by the gRPC callback.
         """
-        future: MessagingFuture[T] = MessagingFuture()
-        request_uid = next(self._request_counter)
-        self.input_queue.put(
-            MessageQueueClient.WrappedRequest(
-                request_uid=request_uid,
-                future=future,
-                request_type=request_type,
-                request_payloads=request_payloads,
+        del response_cls
+        payload_classes = get_payload_classes(request_type)
+        if len(payload_classes) != len(request_payloads):
+            expected = [cls.__name__ for cls in payload_classes]
+            actual = [type(p).__name__ for p in request_payloads]
+            raise ValueError(
+                "Payload count mismatch for request "
+                f"{request_type}: expected {len(payload_classes)} {expected}, "
+                f"got {len(request_payloads)} {actual}. Likely a version "
+                "skew between the lmcache client and server."
             )
-        )
-        self._polling_loop.notify()
+        b_payloads = [
+            msgspec_encode(payload, cls=cls)
+            for payload, cls in zip(request_payloads, payload_classes, strict=False)
+        ]
+        # A rpc's request is opaque bytes on the wire so we flatten
+        # any multi-payload request with msgpack (matches the daemon
+        # side's ``unwrap_request_payloads`` reconstruction).
+        wire = msgspec.msgpack.encode(b_payloads)
+        proto_request = lmcache_mq_pb2.BytesRequest(payload=wire)
+
+        method_name = request_type_to_method_name(request_type)
+        stub_method = getattr(self._stub, method_name)
+        future: MessagingFuture[T] = MessagingFuture()
+        response_type = get_response_class(request_type)
+
+        def _on_done(call: "grpc.Future[lmcache_mq_pb2.BytesResponse]") -> None:
+            try:
+                proto_response = call.result()
+            except grpc.RpcError as exc:
+                logger.error("gRPC call %s failed: %s", method_name, exc)
+                future.set_result(None)  # type: ignore[arg-type]
+                return
+            except Exception:  # defensive
+                logger.exception("gRPC call %s failed", method_name)
+                future.set_result(None)  # type: ignore[arg-type]
+                return
+            if response_type is None or not proto_response.result:
+                future.set_result(None)  # type: ignore[arg-type]
+                return
+            try:
+                decoded = msgspec_decode(proto_response.result, cls=response_type)
+            except Exception:  # decoding failed
+                logger.exception("failed to decode response for %s", method_name)
+                future.set_result(None)  # type: ignore[arg-type]
+                return
+            future.set_result(decoded)
+
+        call = stub_method.future(proto_request)
+        call.add_done_callback(_on_done)
         return future
 
     def close(self) -> None:
-        self._polling_loop.unregister(self)
-        ClientPollingLoop.release_instance()
-        self.transport.close()
+        self._channel.close()
+
+
+# ---------------------------------------------------------------------------
+# Server: RequestHandlerBase + concrete handler types (unchanged interface)
+# ---------------------------------------------------------------------------
 
 
 ResponseType = TypeVar("ResponseType", covariant=True)
@@ -431,9 +278,7 @@ class RequestHandlerBase(Generic[ResponseType]):
 
 
 class SyncRequestHandler(RequestHandlerBase[ResponseType]):
-    """
-    The handler for those "fast" functions that can be executed in the main loop
-    """
+    """Handler that runs in the calling grpc worker thread."""
 
     def __init__(
         self,
@@ -456,14 +301,7 @@ class SyncRequestHandler(RequestHandlerBase[ResponseType]):
 
 
 class BlockingRequestHandler(RequestHandlerBase[ResponseType]):
-    """
-    Returns the future of the response.
-
-    The ``executor`` field is initially ``None`` and must be assigned via
-    :meth:`MessageQueueServer.add_normal_thread_pool` or
-    :meth:`MessageQueueServer.add_affinity_thread_pool` before the server
-    is started.
-    """
+    """Handler dispatched to a dedicated thread pool (normal or affinity)."""
 
     def __init__(
         self,
@@ -498,213 +336,151 @@ class BlockingRequestHandler(RequestHandlerBase[ResponseType]):
 
 
 class NonBlockingRequestHandler(Generic[ResponseType, StateType]):
-    """
-    The handler for the "fire and probe" functions that launch async tasks
-    and have special mechanism to probe the task status.
+    """Reserved for future async handlers; not currently instantiated."""
 
-    It requires 2 callables as the input:
-    - the first one is to launch the async task. This function should return
-        a 'state handle' that can be used to probe the task status later.
-    - the second one is to probe the task status and get the return value
-        with the 'state handle' returned by the first function.
-    """
-
-    # TODO: implement this in the future versions if needed
     pass
 
 
+# ---------------------------------------------------------------------------
+# Server: gRPC servicer bridging RequestType -> RequestHandlerBase
+# ---------------------------------------------------------------------------
+
+
+class _RequestHandlerServicer(lmcache_mq_pb2_grpc.MessageQueueServicer):
+    """Bridge every rpc method to the ``RequestHandlerBase`` registered
+    under the matching ``RequestType``.
+
+    Each generated method just calls :meth:`_dispatch` with the right
+    ``RequestType``; keeping one implementation avoids 36 near-identical
+    thunks in this file.  gRPC's method routing already runs before we
+    get here, so ``_dispatch`` is the whole request path.
+    """
+
+    def __init__(
+        self,
+        handlers: dict[RequestType, RequestHandlerBase[Any]],
+    ):
+        self._handlers = handlers
+
+    def _dispatch(
+        self,
+        request: lmcache_mq_pb2.BytesRequest,
+        context: "grpc.ServicerContext",
+        request_type: RequestType,
+    ) -> lmcache_mq_pb2.BytesResponse:
+        handler = self._handlers.get(request_type)
+        if handler is None:
+            context.abort(
+                grpc.StatusCode.UNIMPLEMENTED,
+                f"No handler registered for {request_type}",
+            )
+            # ``context.abort`` raises, so this is unreachable; kept as
+            # an explicit fall-through for mypy's control-flow analysis.
+            raise RuntimeError("unreachable")
+        payloads: list[bytes] = msgspec.msgpack.decode(request.payload, type=list)
+        response_cls = handler.get_response_class()
+
+        handler_type = handler.get_handler_type()
+        if handler_type is HandlerType.SYNC:
+            assert isinstance(handler, SyncRequestHandler)
+            result = handler(payloads)
+        elif handler_type is HandlerType.BLOCKING:
+            assert isinstance(handler, BlockingRequestHandler)
+            # Peer id keeps the same affinity semantics as the old zmq
+            # DEALER-ROUTER identity: one thread per client, forever.
+            affinity_key = hash(context.peer())
+            fut = handler(payloads, affinity_key=affinity_key)
+            result = fut.result()
+        else:
+            raise NotImplementedError(f"handler_type {handler_type} not supported")
+
+        if result is None:
+            return lmcache_mq_pb2.BytesResponse(result=b"")
+        b_result = msgspec_encode(result, cls=response_cls)
+        return lmcache_mq_pb2.BytesResponse(result=b_result)
+
+
+def _install_servicer_methods() -> None:
+    """Attach one dispatch method per ``RequestType`` to the servicer."""
+    for rt in RequestType:
+        method_name = request_type_to_method_name(rt)
+
+        def _method(  # noqa: E501 (captured ``rt`` via default arg)
+            self: _RequestHandlerServicer,
+            request: lmcache_mq_pb2.BytesRequest,
+            context: "grpc.ServicerContext",
+            _rt: RequestType = rt,
+        ) -> lmcache_mq_pb2.BytesResponse:
+            return self._dispatch(request, context, _rt)
+
+        _method.__name__ = method_name
+        _method.__qualname__ = f"_RequestHandlerServicer.{method_name}"
+        setattr(_RequestHandlerServicer, method_name, _method)
+
+
+_install_servicer_methods()
+
+
+# ---------------------------------------------------------------------------
+# Server: public MessageQueueServer API preserved
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _ServerConfig:
+    bind_url: str
+    max_concurrency: int = 32
+
+
 class MessageQueueServer:
+    """gRPC server that wraps ``RequestHandlerBase`` instances.
+
+    Public API mirrors the historical zmq-backed one so no module needs
+    to change: ``add_handler`` / ``add_normal_thread_pool`` /
+    ``add_affinity_thread_pool`` / ``start`` / ``close`` all keep their
+    old semantics.
+
+    Args:
+        bind_url: Either ``grpc://host:port`` or a bare ``host:port``.
+        context: Legacy positional slot (used to be zmq.Context); ignored.
+        transport: Legacy positional slot; ignored.
+        grpc_max_workers: Size of the base grpc thread pool.  Sync
+            handlers run here directly; blocking handlers hand off to
+            their dedicated thread pool so this executor stays free
+            for dispatch and shouldn't need many threads.
+    """
+
     def __init__(
         self,
         bind_url: str,
-        context: Optional[zmq.Context] = None,
-        transport: Optional[ServerTransport] = None,
+        context: Optional[Any] = None,
+        transport: Optional[Any] = None,
+        grpc_max_workers: int = 32,
     ):
-        # Backwards-compatible: accept either a legacy ``zmq.Context`` or
-        # a pre-built ``ServerTransport``.  When only a context is given,
-        # the transport is selected by URL scheme.
-        self.ctx = context if context is not None else zmq.Context.instance()
-        if transport is None:
-            transport = create_server_transport(bind_url, context=self.ctx)
-        self.transport: ServerTransport = transport
-        self.transport.bind(bind_url)
-        # Use a cross-platform Notifier instead of zmq PUSH/PULL sockets
-        # because blocking handler callbacks run on ThreadPoolExecutor
-        # threads, and zmq sockets are not thread-safe. Notifier.notify()
-        # is atomic (eventfd on Linux, self-pipe elsewhere).
-        self._output_efd = create_event_notifier()
-        self.output_queue: queue.Queue = queue.Queue()
-
-        # Poller
-        self.poller = zmq.Poller()
-        self._inbound_handle = self.transport.readable_handle()
-        self.poller.register(self._inbound_handle, zmq.POLLIN)
-        self.poller.register(self._output_efd.fileno(), zmq.POLLIN)
-
-        # Main loop thread
-        self.is_finished = threading.Event()
-        self.worker_thread = threading.Thread(
-            target=self._main_loop, daemon=True, name="mq-server-thread"
-        )
-
-        # Registered handlers: request_type -> (payload_cls, handler)
+        del context, transport  # legacy positional slots, no longer used
+        self._bind_url = bind_url
+        self._grpc_max_workers = grpc_max_workers
         self.handlers: dict[RequestType, RequestHandlerBase[Any]] = {}
-
-        # Thread pools assigned via add_normal_thread_pool / add_affinity_thread_pool
         self.extra_pools: list[ThreadPoolExecutor | AffinityThreadPool] = []
+        self._server: grpc.Server | None = None
+        self._closed = threading.Event()
 
-    def _call_sync_handler(
-        self,
-        handler_entry: SyncRequestHandler[Any],
-        client_ctx: ClientContext,
-        payloads: list[bytes],
-        prefix_frames: list[bytes],
-    ) -> Any:
-        """
-        Call the sync handler and send the response back to the client.
+    # ------------------------------------------------------------------
+    # Handler registration (identical semantics to the old zmq server)
+    # ------------------------------------------------------------------
 
-        Args:
-            handler_entry (SyncRequestHandler[Any]): The handler entry.
-            client_ctx (ClientContext): Opaque per-connection identity
-                used to route the response back.
-            payloads (list[bytes]): The payloads of the request.
-            prefix_frames (list[bytes]): The prefix frames to send back
-                (request_uid + request_type).
-        """
-        response = handler_entry(payloads)
-        response_cls = handler_entry.get_response_class()
-        b_response = msgspec_encode(response, cls=response_cls)
-        if response is not None:
-            self.transport.send_response(client_ctx, prefix_frames + [b_response])
-        else:
-            self.transport.send_response(client_ctx, prefix_frames)
-
-    def _call_blocking_handler(
-        self,
-        handler_entry: BlockingRequestHandler[Any],
-        client_ctx: ClientContext,
-        payloads: list[bytes],
-        prefix_frames: list[bytes],
-    ) -> Any:
-        """
-        Call the blocking handler in a separate thread and send the response
-        back to the client.
-
-        Args:
-            handler_entry (BlockingRequestHandler[Any]): The handler entry.
-            client_ctx (ClientContext): Opaque per-connection identity
-                used as the affinity key and to route the response back.
-            payloads (list[bytes]): The payloads of the request.
-            prefix_frames (list[bytes]): The prefix frames to send back
-                (request_uid + request_type).
-        """
-        affinity_key = hash(client_ctx)
-        future = handler_entry(payloads, affinity_key=affinity_key)
-
-        def _notify_response(fut: Future):
-            try:
-                response = fut.result()
-                response_cls = handler_entry.get_response_class()
-                b_response = msgspec_encode(response, cls=response_cls)
-                frames_to_send = (
-                    prefix_frames + [b_response]
-                    if response is not None
-                    else prefix_frames
-                )
-
-                self.output_queue.put((client_ctx, frames_to_send))
-                self._output_efd.notify()
-
-            except Exception:
-                logger.exception("Error in blocking handler")
-
-        future.add_done_callback(_notify_response)
-
-    def _call_handler(
-        self,
-        handler_entry: RequestHandlerBase[Any],
-        client_ctx: ClientContext,
-        payloads: list[bytes],
-        prefix_frames: list[bytes],
-    ) -> Any:
-        match handler_entry.get_handler_type():
-            case HandlerType.SYNC:
-                assert isinstance(handler_entry, SyncRequestHandler)
-                self._call_sync_handler(
-                    handler_entry, client_ctx, payloads, prefix_frames
-                )
-            case HandlerType.BLOCKING:
-                assert isinstance(handler_entry, BlockingRequestHandler)
-                self._call_blocking_handler(
-                    handler_entry, client_ctx, payloads, prefix_frames
-                )
-            case HandlerType.NON_BLOCKING:
-                raise NotImplementedError("Non-blocking handler is not supported yet")
-            case _:
-                raise ValueError("Unknown handler type")
-
-    def _main_loop(self):
-        output_fd = self._output_efd.fileno()
-        while not self.is_finished.is_set():
-            socks = dict(self.poller.poll(1000))
-            inbound_state = socks.get(self._inbound_handle, None)
-            outbound_state = socks.get(output_fd, None)
-
-            # Process the incoming requests
-            if inbound_state and inbound_state & zmq.POLLIN:
-                received = self.transport.recv_request()
-                if received is None:
-                    continue
-                client_ctx, frames = received
-                assert len(frames) >= 2, (
-                    "Expected at least 2 message parts "
-                    "[request_uid, request_type, *payloads]"
-                )
-
-                b_request_uid, b_request_type, *payloads = frames
-                request_type = msgspec_decode(b_request_type, cls=RequestType)
-
-                if handler_entry := self.handlers.get(request_type):
-                    try:
-                        self._call_handler(
-                            handler_entry=handler_entry,
-                            client_ctx=client_ctx,
-                            payloads=payloads,
-                            prefix_frames=[b_request_uid, b_request_type],
-                        )
-                    except Exception:
-                        logger.exception("Error handling request %s", request_type)
-                else:
-                    logger.error(
-                        "No handler registered for request type %s", request_type
-                    )
-                    logger.error("Available handlers: %s", list(self.handlers.keys()))
-
-            # Send the responses
-            if outbound_state and outbound_state & zmq.POLLIN:
-                # Consume the notifier counter (resets atomically)
-                self._output_efd.consume()
-
-                # Process the output tasks
-                try:
-                    while item := self.output_queue.get_nowait():
-                        out_ctx, out_frames = item
-                        self.transport.send_response(out_ctx, out_frames)
-                except queue.Empty:
-                    pass
-
-    def _inspect_handler_signature(self, request_type: RequestType, handler) -> bool:
-        """Inspect the handler signature to ensure it matches the expected
-        payload classes.
-
-        Args:
-            handler (callable): The handler function.
+    def _inspect_handler_signature(
+        self, request_type: RequestType, handler: Callable[..., Any]
+    ) -> bool:
+        """Verify a handler's parameter / return annotations match the
+        registered ``ProtocolDefinition``.
 
         Returns:
-            bool: True if the signature matches, False otherwise.
+            True if the signature matches or the annotations are omitted
+            in a way that keeps us backwards compatible; False otherwise.
         """
 
-        def same_type(a, b) -> bool:
+        def same_type(a: Any, b: Any) -> bool:
             if a is None:
                 a = type(None)
             if b is None:
@@ -726,7 +502,7 @@ class MessageQueueServer:
         payload_clss = get_payload_classes(request_type)
         if len(params) != len(payload_clss):
             logger.error(
-                "Handler for %s expects %d arguments, but got %d",
+                "Handler for %s expects %d args, but got %d",
                 request_type,
                 len(payload_clss),
                 len(params),
@@ -739,7 +515,7 @@ class MessageQueueServer:
             ann = hints.get(param.name, param.annotation)
             if not same_type(ann, expected_cls):
                 logger.error(
-                    "Handler for %s argument %d expects type %s, but got %s",
+                    "Handler for %s arg %d expects %s, got %s",
                     request_type,
                     i,
                     expected_cls,
@@ -751,7 +527,7 @@ class MessageQueueServer:
         expected_return_cls = get_response_class(request_type)
         if not same_type(return_ann, expected_return_cls):
             logger.error(
-                "Handler for %s expects return type %s, but got %s",
+                "Handler for %s expects return %s, got %s",
                 request_type,
                 expected_return_cls,
                 return_ann,
@@ -764,34 +540,27 @@ class MessageQueueServer:
         request_type: RequestType,
         payload_clss: list[Any],
         handler_type: HandlerType,
-        handler,
+        handler: Callable[..., Any],
     ) -> None:
-        """Register a handler for a specific request type.
-
-        Args:
-            request_type (RequestType): The type of the request to handle.
-            payload_clss (list[Any]): The expected payload classes for the request.
-                This should be get from `get_payload_classes(request_type)`.
-            handler (callable): The handler function that takes the payloads
-                as arguments.
-        """
         if not self._inspect_handler_signature(request_type, handler):
             raise ValueError(
                 f"Handler signature does not match for request type: {request_type}"
             )
 
-        match handler_type:
-            case HandlerType.SYNC:
-                self.add_sync_handler(request_type, payload_clss, handler)
-            case HandlerType.BLOCKING:
-                self.add_blocking_handler(request_type, payload_clss, handler)
-            case HandlerType.NON_BLOCKING:
-                raise NotImplementedError("Non-blocking handler is not supported yet")
-            case _:
-                raise ValueError(f"Unknown handler type: {handler_type}")
+        if handler_type is HandlerType.SYNC:
+            self.add_sync_handler(request_type, payload_clss, handler)
+        elif handler_type is HandlerType.BLOCKING:
+            self.add_blocking_handler(request_type, payload_clss, handler)
+        elif handler_type is HandlerType.NON_BLOCKING:
+            raise NotImplementedError("Non-blocking handler is not supported yet")
+        else:
+            raise ValueError(f"Unknown handler type: {handler_type}")
 
     def add_sync_handler(
-        self, request_type: RequestType, payload_clss: list[Any], handler
+        self,
+        request_type: RequestType,
+        payload_clss: list[Any],
+        handler: Callable[..., Any],
     ) -> None:
         response_cls = get_response_class(request_type)
         self.handlers[request_type] = SyncRequestHandler(
@@ -799,7 +568,10 @@ class MessageQueueServer:
         )
 
     def add_blocking_handler(
-        self, request_type: RequestType, payload_clss: list[Any], handler
+        self,
+        request_type: RequestType,
+        payload_clss: list[Any],
+        handler: Callable[..., Any],
     ) -> None:
         response_cls = get_response_class(request_type)
         self.handlers[request_type] = BlockingRequestHandler(
@@ -807,7 +579,10 @@ class MessageQueueServer:
         )
 
     def add_nonblocking_handler(
-        self, request_type: RequestType, payload_clss: list[Any], handler
+        self,
+        request_type: RequestType,
+        payload_clss: list[Any],
+        handler: Callable[..., Any],
     ) -> None:
         raise NotImplementedError
 
@@ -816,7 +591,6 @@ class MessageQueueServer:
         request_types: list[RequestType],
         method_name: str,
     ) -> None:
-        """Validate that all request types are registered BlockingRequestHandlers."""
         for request_type in request_types:
             handler = self.handlers.get(request_type)
             if handler is None:
@@ -827,8 +601,7 @@ class MessageQueueServer:
             if not isinstance(handler, BlockingRequestHandler):
                 raise TypeError(
                     f"Handler for {request_type} is "
-                    f"{type(handler).__name__}, not BlockingRequestHandler. "
-                    f"Only blocking handlers can use thread pools."
+                    f"{type(handler).__name__}, not BlockingRequestHandler."
                 )
 
     def add_normal_thread_pool(
@@ -836,19 +609,6 @@ class MessageQueueServer:
         request_types: list[RequestType],
         max_workers: int,
     ) -> None:
-        """Assign a ThreadPoolExecutor to specific request types.
-
-        Use this for non-GPU blocking handlers (e.g. LOOKUP, END_SESSION).
-
-        Must be called after the handlers are registered (via add_handler /
-        add_blocking_handler) and before start().  Each request_type must
-        already be registered as a BlockingRequestHandler; otherwise a
-        ValueError or TypeError is raised.
-
-        Args:
-            request_types: The request types that should use this pool.
-            max_workers: Number of worker threads in the pool.
-        """
         self._validate_blocking_handlers(request_types, "add_normal_thread_pool")
         if not request_types:
             return
@@ -864,7 +624,7 @@ class MessageQueueServer:
             handler.executor = pool
 
         logger.debug(
-            "Created normal thread pool (max_workers=%d) for request types: %s",
+            "Created normal thread pool (max_workers=%d) for %s",
             max_workers,
             [rt.name for rt in request_types],
         )
@@ -874,20 +634,6 @@ class MessageQueueServer:
         request_types: list[RequestType],
         max_workers: int,
     ) -> None:
-        """Assign an AffinityThreadPool to specific request types.
-
-        Use this for GPU-bound blocking handlers (e.g. STORE, RETRIEVE).
-        Requests from the same zmq client identity are always dispatched
-        to the same worker thread, eliminating the need for per-instance
-        GPU transfer locks.
-
-        Must be called after the handlers are registered (via add_handler /
-        add_blocking_handler) and before start().
-
-        Args:
-            request_types: The request types that should use this pool.
-            max_workers: Number of worker threads in the pool.
-        """
         self._validate_blocking_handlers(request_types, "add_affinity_thread_pool")
         if not request_types:
             return
@@ -903,27 +649,44 @@ class MessageQueueServer:
             handler.executor = pool
 
         logger.debug(
-            "Created affinity thread pool (max_workers=%d) for request types: %s",
+            "Created affinity thread pool (max_workers=%d) for %s",
             max_workers,
             [rt.name for rt in request_types],
         )
 
-    def start(self):
-        # Validate all blocking handlers have an executor assigned
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def start(self) -> None:
         for rt, handler in self.handlers.items():
             if isinstance(handler, BlockingRequestHandler) and handler.executor is None:
                 raise RuntimeError(
                     f"BlockingRequestHandler for {rt} has no thread pool "
-                    f"assigned. Call add_normal_thread_pool or "
-                    f"add_affinity_thread_pool before start()."
+                    "assigned. Call add_normal_thread_pool or "
+                    "add_affinity_thread_pool before start()."
                 )
-        self.worker_thread.start()
+
+        target = _parse_grpc_url(self._bind_url)
+        server = grpc.server(
+            ThreadPoolExecutor(
+                max_workers=self._grpc_max_workers,
+                thread_name_prefix="mq-grpc-server",
+            )
+        )
+        servicer = _RequestHandlerServicer(self.handlers)
+        lmcache_mq_pb2_grpc.add_MessageQueueServicer_to_server(servicer, server)
+        server.add_insecure_port(target)
+        server.start()
+        self._server = server
+        logger.info("MessageQueueServer listening on %s (gRPC)", self._bind_url)
 
     def close(self) -> None:
-        self.is_finished.set()
-        if self.worker_thread.is_alive():
-            self.worker_thread.join()
-        self.transport.close()
+        if self._closed.is_set():
+            return
+        self._closed.set()
+        if self._server is not None:
+            self._server.stop(grace=None)
+            self._server = None
         for pool in self.extra_pools:
             pool.shutdown(wait=False)
-        self._output_efd.close()
