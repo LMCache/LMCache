@@ -546,10 +546,6 @@ def _read_hugepage_info() -> Optional[Tuple[int, int, int]]:
         return None
 
 
-# Buffers returned by the pageable fallback in _allocate_cpu_memory, keyed by
-# data_ptr. These are torch-owned tensors (freed on GC), so _free_cpu_memory
-# must NOT hand their pointers to the native free path.
-_FALLBACK_HOST_BUFFERS: dict = {}
 
 
 def _allocate_cpu_memory(
