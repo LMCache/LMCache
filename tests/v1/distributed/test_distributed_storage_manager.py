@@ -691,7 +691,8 @@ class TestStorageManagerL2Prefetch:
         assert (deleted, skipped) == (1, 0)
 
         handle = sm.submit_prefetch_task(
-            all_keys, basic_layout, policy=TrimPolicy.SPARSE, skip_l2=True
+            PrefetchRequestSpec(all_keys, basic_layout, policy=TrimPolicy.SPARSE),
+            skip_l2=True,
         )
 
         # skip_l2 honored: the controller was never asked.
