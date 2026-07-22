@@ -166,7 +166,7 @@ def test_lookup_and_lock_submits_skip_l2_and_returns_task_id():
     assert spec.keys == keys
     assert spec.layout_desc is layout_desc
     assert kwargs["skip_l2"] is True
-    assert kwargs["policy"] is TrimPolicy.SPARSE
+    assert spec.policy is TrimPolicy.SPARSE
     # A second call gets a distinct id.
     assert controller.p2p_lookup_and_lock(keys, layout_desc) == 1
 
