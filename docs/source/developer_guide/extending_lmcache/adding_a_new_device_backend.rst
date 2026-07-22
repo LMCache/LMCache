@@ -54,7 +54,7 @@ Create ``lmcache/v1/platform/foo/__init__.py``:
     # SPDX-License-Identifier: Apache-2.0
     """foo-specific platform primitives."""
 
-    from lmcache.v1.platform.base_device_spec import DeviceSpec
+    from lmcache.v1.platform.base.device_spec import DeviceSpec
 
 
     class FooDeviceSpec(DeviceSpec):
@@ -281,7 +281,7 @@ checks — both must succeed, otherwise the factory raises
 
 1. Your ``DeviceSpec`` subclass must bind a ``DeviceIPCWrapper``
    subclass (exposing a ``wrap`` classmethod) via
-   :attr:`~lmcache.v1.platform.base_device_spec.DeviceSpec.ipc_wrapper_cls`.
+   :attr:`~lmcache.v1.platform.base.device_spec.DeviceSpec.ipc_wrapper_cls`.
    :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory` reads that
    binding off the registered spec — no separate registry / auto-scan.
 2. ``DeviceSpec.is_handle_transfer_available()`` must return ``True``
@@ -358,13 +358,13 @@ References
    * - Topic
      - Path
    * - Device spec base
-     - ``lmcache/v1/platform/base_device_spec.py``
+     - ``lmcache/v1/platform/base/device_spec.py``
    * - Backend loading
      - ``lmcache/v1/platform/__init__.py``
    * - Python fallback
      - ``lmcache/python_ops_fallback.py``
    * - Cache context base
-     - ``lmcache/v1/platform/base_cache_context.py``
+     - ``lmcache/v1/platform/base/cache_context.py``
    * - Cache context factory
      - ``lmcache/v1/platform/cache_context.py``
    * - Reference ``DeviceSpec`` (engine-driven baseline)

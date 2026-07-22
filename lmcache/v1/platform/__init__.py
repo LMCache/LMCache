@@ -54,11 +54,11 @@ from lmcache.v1.platform._device_detect import get_device_spec as get_device_spe
 from lmcache.v1.platform._device_detect import (
     get_torch_device,
 )
-from lmcache.v1.platform.base_device_spec import DeviceSpec
+from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.utils.subclass_discovery import discover_subclasses
 
 if TYPE_CHECKING:
-    from lmcache.v1.platform.base_device_ops import DeviceOps
+    from lmcache.v1.platform.base.device_ops import DeviceOps
 
 # First Party
 from lmcache.v1.platform.event_notifier import HAS_EVENTFD as HAS_EVENTFD

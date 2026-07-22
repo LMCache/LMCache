@@ -22,13 +22,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 # First Party
-from lmcache.v1.platform.base_device_spec import DeviceSpec
+from lmcache.v1.platform.base.device_spec import DeviceSpec
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.platform.base_cache_context import BaseCacheContext
-    from lmcache.v1.platform.base_device_ops import DeviceOps
-    from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
+    from lmcache.v1.platform.base.cache_context import BaseCacheContext
+    from lmcache.v1.platform.base.device_ops import DeviceOps
+    from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
 
 class CpuDeviceSpec(DeviceSpec):

@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 # First Party
-from lmcache.v1.platform.base_device_ops import DeviceOps
+from lmcache.v1.platform.base.device_ops import DeviceOps
 
 
 class HpuDeviceOps(DeviceOps):

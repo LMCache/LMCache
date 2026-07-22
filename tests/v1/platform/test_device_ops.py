@@ -16,8 +16,8 @@ import pytest
 
 # First Party
 from lmcache.v1.platform import resolve_device_ops
-from lmcache.v1.platform.base_device_ops import DeviceOps
-from lmcache.v1.platform.base_device_spec import DeviceSpec
+from lmcache.v1.platform.base.device_ops import DeviceOps
+from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.cpu.device_ops import CpuDeviceOps
 from lmcache.v1.platform.ops_types import (
     EngineKVFormat,
