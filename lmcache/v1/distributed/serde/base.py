@@ -59,9 +59,8 @@ class Serializer(abc.ABC):
             src: Source MemoryObj containing KV-shaped data (read-locked).
             dst: Destination MemoryObj byte buffer (write-locked).
                  Must have capacity >= estimate_serialized_size().
-            key: Object key for this src/dst pair. Serdes that transform
-                 bytes per-object (e.g. encryption keyed on cache_salt)
-                 read it; transform-agnostic serdes ignore it.
+            key: Object key for this src/dst pair, positionally aligned
+                 with the batch.
 
         Returns:
             The actual number of bytes written to dst.
@@ -99,9 +98,8 @@ class Deserializer(abc.ABC):
         Args:
             src: Source MemoryObj containing serialized bytes.
             dst: Destination MemoryObj with KV-shaped layout (write-locked).
-            key: Object key for this src/dst pair. Serdes that transform
-                 bytes per-object (e.g. decryption keyed on cache_salt)
-                 read it; transform-agnostic serdes ignore it.
+            key: Object key for this src/dst pair, positionally aligned
+                 with the batch.
         """
         raise NotImplementedError
 

@@ -118,8 +118,8 @@ class MultiSerializer(abc.ABC):
                 Capacity MUST be at least the value previously
                 returned by :meth:`estimate_serialized_size` for the
                 same layout group.
-            key: Object key for the group. Serdes that transform bytes
-                per-object read it; transform-agnostic serdes ignore it.
+            key: Object key for the group, positionally aligned with
+                the batch.
 
         Returns:
             The number of bytes written to ``dst``.
@@ -169,8 +169,8 @@ class MultiDeserializer(abc.ABC):
             src: Source byte-buffer MemoryObj.
             dst: Destination group with length :attr:`group_size`.
                 ``None`` slots MUST be left untouched.
-            key: Object key for the group. Serdes that transform bytes
-                per-object read it; transform-agnostic serdes ignore it.
+            key: Object key for the group, positionally aligned with
+                the batch.
         """
         raise NotImplementedError
 
