@@ -17,15 +17,18 @@ from dataclasses import dataclass
 from typing import Any, Callable, Generic, Optional, TypeVar, get_type_hints
 from urllib.parse import urlparse
 import inspect
+import pickle
 import threading
 
 # Third Party
 import grpc
 import msgspec
+import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
@@ -33,6 +36,7 @@ from lmcache.v1.multiprocess.custom_types import (
     CBUnifiedLookupResult,
     DeviceIPCWrapper,
     IPCCacheServerKey,
+    RegisterEngineDrivenContextPayload,
     get_customized_decoder,
     get_customized_encoder,
 )
@@ -44,6 +48,11 @@ from lmcache.v1.multiprocess.protocol import (
     RequestType,
     get_payload_classes,
     get_response_class,
+)
+from lmcache.v1.multiprocess.protocols.engine import (
+    PrepareRetrieveResponse,
+    PrepareStoreResponse,
+    RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
     lmcache_mq_pb2,
@@ -805,6 +814,344 @@ def _cb_unified_lookup_response_to_python(
     )
 
 
+# ---------------------------------------------------------------------
+# Wave 4 helpers.
+# ---------------------------------------------------------------------
+
+
+# ``context: dict`` on the wire is pickle bytes; empty dict -> b"".
+# Consolidated so PrepareStore / CommitStore / PrepareRetrieve all
+# behave the same way.
+def _pickle_context_to_bytes(ctx: Optional[dict]) -> bytes:
+    if not ctx:
+        return b""
+    return pickle.dumps(ctx)
+
+
+def _pickle_context_from_bytes(data: bytes) -> dict:
+    if not data:
+        return {}
+    return pickle.loads(data)
+
+
+# --- RegisterKvCacheEngineDrivenContext ------------------------------
+
+
+def _register_edc_request_to_python(
+    req: "lmcache_mq_pb2.RegisterKvCacheEngineDrivenContextRequest",
+) -> tuple[Any, ...]:
+    return (
+        RegisterEngineDrivenContextPayload(
+            instance_id=req.instance_id,
+            model_name=req.model_name,
+            world_size=req.world_size,
+            block_size=req.block_size,
+            num_layers=req.num_layers,
+            hidden_dim_size=req.hidden_dim_size,
+            dtype_str=req.dtype_str,
+            use_mla=req.use_mla,
+        ),
+    )
+
+
+def _register_edc_python_to_request(
+    payload: RegisterEngineDrivenContextPayload,
+) -> "lmcache_mq_pb2.RegisterKvCacheEngineDrivenContextRequest":
+    return lmcache_mq_pb2.RegisterKvCacheEngineDrivenContextRequest(
+        instance_id=payload.instance_id,
+        model_name=payload.model_name,
+        world_size=payload.world_size,
+        block_size=payload.block_size,
+        num_layers=payload.num_layers,
+        hidden_dim_size=payload.hidden_dim_size,
+        dtype_str=payload.dtype_str,
+        use_mla=payload.use_mla,
+    )
+
+
+def _register_edc_python_to_response(
+    result: RegisterEngineDrivenContextResponse,
+) -> "lmcache_mq_pb2.RegisterKvCacheEngineDrivenContextResponse":
+    return lmcache_mq_pb2.RegisterKvCacheEngineDrivenContextResponse(
+        shm_name=result.shm_name,
+        pool_size=result.pool_size,
+    )
+
+
+def _register_edc_response_to_python(
+    resp: "lmcache_mq_pb2.RegisterKvCacheEngineDrivenContextResponse",
+) -> RegisterEngineDrivenContextResponse:
+    return RegisterEngineDrivenContextResponse(
+        shm_name=resp.shm_name,
+        pool_size=resp.pool_size,
+    )
+
+
+# --- PrepareStore / CommitStore / PrepareRetrieve / CommitRetrieve ---
+
+
+def _prepare_store_request_to_python(
+    req: "lmcache_mq_pb2.PrepareStoreRequest",
+) -> tuple[Any, ...]:
+    return (_ipc_key_proto_to_python(req.key), req.instance_id)
+
+
+def _prepare_store_python_to_request(
+    key: IPCCacheServerKey, instance_id: int
+) -> "lmcache_mq_pb2.PrepareStoreRequest":
+    return lmcache_mq_pb2.PrepareStoreRequest(
+        key=_ipc_key_python_to_proto(key), instance_id=instance_id
+    )
+
+
+def _prepare_store_python_to_response(
+    result: PrepareStoreResponse,
+) -> "lmcache_mq_pb2.PrepareStoreResponse":
+    return lmcache_mq_pb2.PrepareStoreResponse(
+        pickled_context=_pickle_context_to_bytes(result.context)
+    )
+
+
+def _prepare_store_response_to_python(
+    resp: "lmcache_mq_pb2.PrepareStoreResponse",
+) -> PrepareStoreResponse:
+    return PrepareStoreResponse(
+        context=_pickle_context_from_bytes(resp.pickled_context)
+    )
+
+
+def _commit_store_request_to_python(
+    req: "lmcache_mq_pb2.CommitStoreRequest",
+) -> tuple[Any, ...]:
+    return (
+        _ipc_key_proto_to_python(req.key),
+        req.instance_id,
+        req.pickled_context,
+    )
+
+
+def _commit_store_python_to_request(
+    key: IPCCacheServerKey, instance_id: int, context_bytes: bytes
+) -> "lmcache_mq_pb2.CommitStoreRequest":
+    return lmcache_mq_pb2.CommitStoreRequest(
+        key=_ipc_key_python_to_proto(key),
+        instance_id=instance_id,
+        pickled_context=context_bytes,
+    )
+
+
+def _commit_store_python_to_response(
+    result: bool,
+) -> "lmcache_mq_pb2.CommitStoreResponse":
+    return lmcache_mq_pb2.CommitStoreResponse(success=bool(result))
+
+
+def _commit_store_response_to_python(
+    resp: "lmcache_mq_pb2.CommitStoreResponse",
+) -> bool:
+    return bool(resp.success)
+
+
+def _prepare_retrieve_request_to_python(
+    req: "lmcache_mq_pb2.PrepareRetrieveRequest",
+) -> tuple[Any, ...]:
+    return (_ipc_key_proto_to_python(req.key), req.instance_id)
+
+
+def _prepare_retrieve_python_to_request(
+    key: IPCCacheServerKey, instance_id: int
+) -> "lmcache_mq_pb2.PrepareRetrieveRequest":
+    return lmcache_mq_pb2.PrepareRetrieveRequest(
+        key=_ipc_key_python_to_proto(key), instance_id=instance_id
+    )
+
+
+def _prepare_retrieve_python_to_response(
+    result: PrepareRetrieveResponse,
+) -> "lmcache_mq_pb2.PrepareRetrieveResponse":
+    return lmcache_mq_pb2.PrepareRetrieveResponse(
+        success=bool(result.success),
+        data=result.data,
+        pickled_context=_pickle_context_to_bytes(result.context),
+    )
+
+
+def _prepare_retrieve_response_to_python(
+    resp: "lmcache_mq_pb2.PrepareRetrieveResponse",
+) -> PrepareRetrieveResponse:
+    return PrepareRetrieveResponse(
+        success=bool(resp.success),
+        data=resp.data,
+        context=_pickle_context_from_bytes(resp.pickled_context),
+    )
+
+
+def _commit_retrieve_request_to_python(
+    req: "lmcache_mq_pb2.CommitRetrieveRequest",
+) -> tuple[Any, ...]:
+    return (_ipc_key_proto_to_python(req.key), req.instance_id)
+
+
+def _commit_retrieve_python_to_request(
+    key: IPCCacheServerKey, instance_id: int
+) -> "lmcache_mq_pb2.CommitRetrieveRequest":
+    return lmcache_mq_pb2.CommitRetrieveRequest(
+        key=_ipc_key_python_to_proto(key), instance_id=instance_id
+    )
+
+
+def _commit_retrieve_python_to_response(
+    result: bool,
+) -> "lmcache_mq_pb2.CommitRetrieveResponse":
+    return lmcache_mq_pb2.CommitRetrieveResponse(success=bool(result))
+
+
+def _commit_retrieve_response_to_python(
+    resp: "lmcache_mq_pb2.CommitRetrieveResponse",
+) -> bool:
+    return bool(resp.success)
+
+
+# --- P2P shared helpers ----------------------------------------------
+
+
+def _object_key_python_to_proto(k: ObjectKey) -> "lmcache_mq_pb2.ObjectKey":
+    return lmcache_mq_pb2.ObjectKey(
+        chunk_hash=k.chunk_hash,
+        model_name=k.model_name,
+        kv_rank=k.kv_rank,
+        object_group_id=k.object_group_id,
+        cache_salt=k.cache_salt,
+    )
+
+
+def _object_key_proto_to_python(msg: "lmcache_mq_pb2.ObjectKey") -> ObjectKey:
+    return ObjectKey(
+        chunk_hash=msg.chunk_hash,
+        model_name=msg.model_name,
+        kv_rank=msg.kv_rank,
+        object_group_id=msg.object_group_id,
+        cache_salt=msg.cache_salt,
+    )
+
+
+def _dtype_to_wire(dt: torch.dtype) -> str:
+    return str(dt).removeprefix("torch.")
+
+
+def _dtype_from_wire(name: str) -> torch.dtype:
+    dt = getattr(torch, name, None)
+    if not isinstance(dt, torch.dtype):
+        raise ValueError("unknown torch dtype name: " + repr(name))
+    return dt
+
+
+def _layout_python_to_proto(
+    layout: MemoryLayoutDesc,
+) -> "lmcache_mq_pb2.MemoryLayoutDesc":
+    return lmcache_mq_pb2.MemoryLayoutDesc(
+        shapes=[lmcache_mq_pb2.TensorShape(dims=list(s)) for s in layout.shapes],
+        dtypes=[_dtype_to_wire(dt) for dt in layout.dtypes],
+    )
+
+
+def _layout_proto_to_python(
+    msg: "lmcache_mq_pb2.MemoryLayoutDesc",
+) -> MemoryLayoutDesc:
+    return MemoryLayoutDesc(
+        shapes=[torch.Size(list(s.dims)) for s in msg.shapes],
+        dtypes=[_dtype_from_wire(n) for n in msg.dtypes],
+    )
+
+
+def _addr_python_to_proto(
+    a: TransferChannelAddress,
+) -> "lmcache_mq_pb2.TransferChannelAddress":
+    return lmcache_mq_pb2.TransferChannelAddress(offset=a.offset, size=a.size)
+
+
+def _addr_proto_to_python(
+    msg: "lmcache_mq_pb2.TransferChannelAddress",
+) -> TransferChannelAddress:
+    return TransferChannelAddress(offset=msg.offset, size=msg.size)
+
+
+# --- P2P_LOOKUP_AND_LOCK / QUERY / UNLOCK ----------------------------
+
+
+def _p2p_lookup_request_to_python(
+    req: "lmcache_mq_pb2.P2pLookupAndLockRequest",
+) -> tuple[Any, ...]:
+    return (
+        [_object_key_proto_to_python(k) for k in req.keys],
+        _layout_proto_to_python(req.layout_desc),
+    )
+
+
+def _p2p_lookup_python_to_request(
+    keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+) -> "lmcache_mq_pb2.P2pLookupAndLockRequest":
+    return lmcache_mq_pb2.P2pLookupAndLockRequest(
+        keys=[_object_key_python_to_proto(k) for k in keys],
+        layout_desc=_layout_python_to_proto(layout_desc),
+    )
+
+
+def _p2p_lookup_python_to_response(
+    result: int,
+) -> "lmcache_mq_pb2.P2pLookupAndLockResponse":
+    return lmcache_mq_pb2.P2pLookupAndLockResponse(task_id=int(result))
+
+
+def _p2p_lookup_response_to_python(
+    resp: "lmcache_mq_pb2.P2pLookupAndLockResponse",
+) -> int:
+    return int(resp.task_id)
+
+
+def _p2p_query_request_to_python(
+    req: "lmcache_mq_pb2.P2pQueryLookupResultsRequest",
+) -> tuple[Any, ...]:
+    return (req.task_id,)
+
+
+def _p2p_query_python_to_request(
+    task_id: int,
+) -> "lmcache_mq_pb2.P2pQueryLookupResultsRequest":
+    return lmcache_mq_pb2.P2pQueryLookupResultsRequest(task_id=task_id)
+
+
+def _p2p_query_python_to_response(
+    result: Optional[list[TransferChannelAddress]],
+) -> "lmcache_mq_pb2.P2pQueryLookupResultsResponse":
+    resp = lmcache_mq_pb2.P2pQueryLookupResultsResponse()
+    if result is not None:
+        resp.addresses.addresses.extend(_addr_python_to_proto(a) for a in result)
+    return resp
+
+
+def _p2p_query_response_to_python(
+    resp: "lmcache_mq_pb2.P2pQueryLookupResultsResponse",
+) -> Optional[list[TransferChannelAddress]]:
+    if not resp.HasField("addresses"):
+        return None
+    return [_addr_proto_to_python(a) for a in resp.addresses.addresses]
+
+
+def _p2p_unlock_request_to_python(
+    req: "lmcache_mq_pb2.P2pUnlockObjectsRequest",
+) -> tuple[Any, ...]:
+    return ([_object_key_proto_to_python(k) for k in req.keys],)
+
+
+def _p2p_unlock_python_to_request(
+    keys: list[ObjectKey],
+) -> "lmcache_mq_pb2.P2pUnlockObjectsRequest":
+    return lmcache_mq_pb2.P2pUnlockObjectsRequest(
+        keys=[_object_key_python_to_proto(k) for k in keys]
+    )
+
+
 # ---------------------------------------------------------------------------
 # msgspec encode / decode helpers (payload bytes wrapped inside proto)
 # ---------------------------------------------------------------------------
@@ -1102,6 +1449,72 @@ _TYPED_RPCS: dict[RequestType, TypedRpcSpec] = {
         python_to_request=_cb_unified_lookup_python_to_request,
         python_to_response=_cb_unified_lookup_python_to_response,
         response_to_python=_cb_unified_lookup_response_to_python,
+    ),
+    RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT: TypedRpcSpec(
+        request_message=(lmcache_mq_pb2.RegisterKvCacheEngineDrivenContextRequest),
+        response_message=(lmcache_mq_pb2.RegisterKvCacheEngineDrivenContextResponse),
+        request_to_python=_register_edc_request_to_python,
+        python_to_request=_register_edc_python_to_request,
+        python_to_response=_register_edc_python_to_response,
+        response_to_python=_register_edc_response_to_python,
+    ),
+    RequestType.PREPARE_STORE: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.PrepareStoreRequest,
+        response_message=lmcache_mq_pb2.PrepareStoreResponse,
+        request_to_python=_prepare_store_request_to_python,
+        python_to_request=_prepare_store_python_to_request,
+        python_to_response=_prepare_store_python_to_response,
+        response_to_python=_prepare_store_response_to_python,
+    ),
+    RequestType.COMMIT_STORE: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.CommitStoreRequest,
+        response_message=lmcache_mq_pb2.CommitStoreResponse,
+        request_to_python=_commit_store_request_to_python,
+        python_to_request=_commit_store_python_to_request,
+        python_to_response=_commit_store_python_to_response,
+        response_to_python=_commit_store_response_to_python,
+    ),
+    RequestType.PREPARE_RETRIEVE: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.PrepareRetrieveRequest,
+        response_message=lmcache_mq_pb2.PrepareRetrieveResponse,
+        request_to_python=_prepare_retrieve_request_to_python,
+        python_to_request=_prepare_retrieve_python_to_request,
+        python_to_response=_prepare_retrieve_python_to_response,
+        response_to_python=_prepare_retrieve_response_to_python,
+    ),
+    RequestType.COMMIT_RETRIEVE: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.CommitRetrieveRequest,
+        response_message=lmcache_mq_pb2.CommitRetrieveResponse,
+        request_to_python=_commit_retrieve_request_to_python,
+        python_to_request=_commit_retrieve_python_to_request,
+        python_to_response=_commit_retrieve_python_to_response,
+        response_to_python=_commit_retrieve_response_to_python,
+    ),
+    RequestType.P2P_LOOKUP_AND_LOCK: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.P2pLookupAndLockRequest,
+        response_message=lmcache_mq_pb2.P2pLookupAndLockResponse,
+        request_to_python=_p2p_lookup_request_to_python,
+        python_to_request=_p2p_lookup_python_to_request,
+        python_to_response=_p2p_lookup_python_to_response,
+        response_to_python=_p2p_lookup_response_to_python,
+    ),
+    RequestType.P2P_QUERY_LOOKUP_RESULTS: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.P2pQueryLookupResultsRequest,
+        response_message=lmcache_mq_pb2.P2pQueryLookupResultsResponse,
+        request_to_python=_p2p_query_request_to_python,
+        python_to_request=_p2p_query_python_to_request,
+        python_to_response=_p2p_query_python_to_response,
+        response_to_python=_p2p_query_response_to_python,
+    ),
+    RequestType.P2P_UNLOCK_OBJECTS: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.P2pUnlockObjectsRequest,
+        response_message=lmcache_mq_pb2.P2pUnlockObjectsResponse,
+        request_to_python=_p2p_unlock_request_to_python,
+        python_to_request=_p2p_unlock_python_to_request,
+        python_to_response=_make_empty_python_to_response(
+            lmcache_mq_pb2.P2pUnlockObjectsResponse
+        ),
+        response_to_python=_empty_response_to_python,
     ),
 }
 

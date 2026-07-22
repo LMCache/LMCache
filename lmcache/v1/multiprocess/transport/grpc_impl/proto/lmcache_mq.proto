@@ -356,6 +356,135 @@ message CbUnifiedLookupResponse {
 }
 
 // -----------------------------------------------------------------------
+// Wave 4 messages.
+// -----------------------------------------------------------------------
+
+// RegisterKvCacheEngineDrivenContext: worker-side non-GPU (data path)
+// registration.  All fields are already flat primitives (“dtype_str”
+// carries the torch dtype name), so the msgspec.Struct mirrors 1:1.
+message RegisterKvCacheEngineDrivenContextRequest {
+  int64 instance_id = 1;
+  string model_name = 2;
+  int64 world_size = 3;
+  int64 block_size = 4;
+  int64 num_layers = 5;
+  int64 hidden_dim_size = 6;
+  string dtype_str = 7;
+  bool use_mla = 8;
+}
+
+message RegisterKvCacheEngineDrivenContextResponse {
+  string shm_name = 1;
+  int64 pool_size = 2;
+}
+
+// PrepareStore / CommitStore / PrepareRetrieve / CommitRetrieve.
+//
+// ``context`` here is an opaque strategy-owned dict; the SHM strategy
+// packs slot / chunk-index bookkeeping into it, the pickle strategy
+// keeps it empty.  Rather than schematising every possible key today,
+// the wire carries the pickled bytes and the mq boundary transparently
+// (de)serialises -- this keeps the strategy layer free to add fields
+// without touching the .proto.  Empty dict maps to empty bytes on the
+// wire, so a fresh client hitting an old server (or vice versa) works.
+message PrepareStoreRequest {
+  IpcCacheServerKey key = 1;
+  int64 instance_id = 2;
+}
+
+message PrepareStoreResponse {
+  bytes pickled_context = 1;
+}
+
+message CommitStoreRequest {
+  IpcCacheServerKey key = 1;
+  int64 instance_id = 2;
+  bytes pickled_context = 3;
+}
+
+message CommitStoreResponse {
+  bool success = 1;
+}
+
+message PrepareRetrieveRequest {
+  IpcCacheServerKey key = 1;
+  int64 instance_id = 2;
+}
+
+message PrepareRetrieveResponse {
+  bool success = 1;
+  bytes data = 2;
+  bytes pickled_context = 3;
+}
+
+message CommitRetrieveRequest {
+  IpcCacheServerKey key = 1;
+  int64 instance_id = 2;
+}
+
+message CommitRetrieveResponse {
+  bool success = 1;
+}
+
+// ObjectKey / MemoryLayoutDesc: shared distributed-storage types used
+// by every P2P rpc.  Flat primitive fields so the wire is fully
+// self-describing.
+message ObjectKey {
+  bytes chunk_hash = 1;
+  string model_name = 2;
+  int64 kv_rank = 3;
+  int64 object_group_id = 4;
+  string cache_salt = 5;
+}
+
+// A tensor shape carried as a plain list of dims (torch.Size on the
+// Python side).
+message TensorShape {
+  repeated int64 dims = 1;
+}
+
+message MemoryLayoutDesc {
+  repeated TensorShape shapes = 1;
+  // torch dtype names, aligned with ``shapes``.
+  repeated string dtypes = 2;
+}
+
+message TransferChannelAddress {
+  int64 offset = 1;
+  int64 size = 2;
+}
+
+message P2pLookupAndLockRequest {
+  repeated ObjectKey keys = 1;
+  MemoryLayoutDesc layout_desc = 2;
+}
+
+message P2pLookupAndLockResponse {
+  int64 task_id = 1;
+}
+
+message P2pQueryLookupResultsRequest {
+  int64 task_id = 1;
+}
+
+message TransferChannelAddressList {
+  repeated TransferChannelAddress addresses = 1;
+}
+
+message P2pQueryLookupResultsResponse {
+  // Absent = handler returned Python None (lookup still in flight or
+  // already consumed); present with an empty list would be a real
+  // empty match.
+  optional TransferChannelAddressList addresses = 1;
+}
+
+message P2pUnlockObjectsRequest {
+  repeated ObjectKey keys = 1;
+}
+
+message P2pUnlockObjectsResponse {}
+
+// -----------------------------------------------------------------------
 // Service.  One rpc per RequestType.  Method names are the CamelCase
 // form of the RequestType enum (STORE -> Store, CB_LOOKUP_PRE_COMPUTED_V2
 // -> CbLookupPreComputedV2, etc.) so gRPC's built-in method routing
@@ -374,12 +503,12 @@ service MessageQueue {
   rpc QueryPrefetchLookupHits(QueryPrefetchLookupHitsRequest) returns (QueryPrefetchLookupHitsResponse);
   rpc FreeLookupLocks(FreeLookupLocksRequest) returns (FreeLookupLocksResponse);
   rpc EndSession(EndSessionRequest) returns (EndSessionResponse);
-  rpc RegisterKvCacheEngineDrivenContext(BytesRequest) returns (BytesResponse);
+  rpc RegisterKvCacheEngineDrivenContext(RegisterKvCacheEngineDrivenContextRequest) returns (RegisterKvCacheEngineDrivenContextResponse);
   rpc UnregisterKvCacheEngineDrivenContext(UnregisterKvCacheEngineDrivenContextRequest) returns (UnregisterKvCacheEngineDrivenContextResponse);
-  rpc PrepareStore(BytesRequest) returns (BytesResponse);
-  rpc CommitStore(BytesRequest) returns (BytesResponse);
-  rpc PrepareRetrieve(BytesRequest) returns (BytesResponse);
-  rpc CommitRetrieve(BytesRequest) returns (BytesResponse);
+  rpc PrepareStore(PrepareStoreRequest) returns (PrepareStoreResponse);
+  rpc CommitStore(CommitStoreRequest) returns (CommitStoreResponse);
+  rpc PrepareRetrieve(PrepareRetrieveRequest) returns (PrepareRetrieveResponse);
+  rpc CommitRetrieve(CommitRetrieveRequest) returns (CommitRetrieveResponse);
 
   // Controller operations
   rpc Clear(ClearRequest) returns (ClearResponse);
@@ -411,7 +540,7 @@ service MessageQueue {
   rpc CbUnifiedLookup(CbUnifiedLookupRequest) returns (CbUnifiedLookupResponse);
 
   // P2P
-  rpc P2PLookupAndLock(BytesRequest) returns (BytesResponse);
-  rpc P2PQueryLookupResults(BytesRequest) returns (BytesResponse);
-  rpc P2PUnlockObjects(BytesRequest) returns (BytesResponse);
+  rpc P2PLookupAndLock(P2pLookupAndLockRequest) returns (P2pLookupAndLockResponse);
+  rpc P2PQueryLookupResults(P2pQueryLookupResultsRequest) returns (P2pQueryLookupResultsResponse);
+  rpc P2PUnlockObjects(P2pUnlockObjectsRequest) returns (P2pUnlockObjectsResponse);
 }

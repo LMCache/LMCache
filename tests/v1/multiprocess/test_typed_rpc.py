@@ -566,3 +566,167 @@ def test_store_typed_grpc_roundtrip() -> None:
         client.close()
     finally:
         server.close()
+
+
+# ---------------------------------------------------------------------
+# Wave 4: Register*/Commit*/Prepare* + P2P family.
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "request_type",
+    [
+        RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
+        RequestType.PREPARE_STORE,
+        RequestType.COMMIT_STORE,
+        RequestType.PREPARE_RETRIEVE,
+        RequestType.COMMIT_RETRIEVE,
+        RequestType.P2P_LOOKUP_AND_LOCK,
+        RequestType.P2P_QUERY_LOOKUP_RESULTS,
+        RequestType.P2P_UNLOCK_OBJECTS,
+    ],
+)
+def test_wave4_rpc_is_typed(request_type: RequestType) -> None:
+    assert request_type in _TYPED_RPCS
+    spec = _TYPED_RPCS[request_type]
+    assert spec.request_message is not lmcache_mq_pb2.BytesRequest
+    assert spec.response_message is not lmcache_mq_pb2.BytesResponse
+
+
+def test_register_edc_roundtrip() -> None:
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import (
+        RegisterEngineDrivenContextPayload,
+    )
+    from lmcache.v1.multiprocess.protocols.engine import (
+        RegisterEngineDrivenContextResponse,
+    )
+
+    spec = _TYPED_RPCS[RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT]
+    payload = RegisterEngineDrivenContextPayload(
+        instance_id=7,
+        model_name="opt-125m",
+        world_size=4,
+        block_size=16,
+        num_layers=12,
+        hidden_dim_size=768,
+        dtype_str="float16",
+        use_mla=False,
+    )
+    proto_req = spec.python_to_request(payload)
+    (round_payload,) = spec.request_to_python(proto_req)
+    assert round_payload == payload
+
+    resp = RegisterEngineDrivenContextResponse(shm_name="/shm", pool_size=42)
+    proto_resp = spec.python_to_response(resp)
+    assert spec.response_to_python(proto_resp) == resp
+
+
+def test_prepare_store_pickle_context_roundtrip() -> None:
+    # First Party
+    from lmcache.v1.multiprocess.protocols.engine import PrepareStoreResponse
+
+    spec = _TYPED_RPCS[RequestType.PREPARE_STORE]
+    key = _sample_key()
+    proto_req = spec.python_to_request(key, 3)
+    round_key, iid = spec.request_to_python(proto_req)
+    assert round_key == key
+    assert iid == 3
+
+    # Empty dict must land as empty bytes on the wire.
+    proto_resp = spec.python_to_response(PrepareStoreResponse(context={}))
+    assert proto_resp.pickled_context == b""
+    assert spec.response_to_python(proto_resp).context == {}
+
+    # Non-empty dict survives pickle.
+    ctx = {"slots": [1, 2, 3], "chunk_indices": [0, 5]}
+    proto_resp = spec.python_to_response(PrepareStoreResponse(context=ctx))
+    assert spec.response_to_python(proto_resp).context == ctx
+
+
+def test_prepare_retrieve_pickle_context_roundtrip() -> None:
+    # First Party
+    from lmcache.v1.multiprocess.protocols.engine import (
+        PrepareRetrieveResponse,
+    )
+
+    spec = _TYPED_RPCS[RequestType.PREPARE_RETRIEVE]
+    resp = PrepareRetrieveResponse(success=True, data=b"hello", context={"slots": [7]})
+    proto_resp = spec.python_to_response(resp)
+    round = spec.response_to_python(proto_resp)
+    assert round.success is True
+    assert round.data == b"hello"
+    assert round.context == {"slots": [7]}
+
+
+def test_commit_store_and_retrieve_bool_roundtrip() -> None:
+    key = _sample_key()
+
+    cs = _TYPED_RPCS[RequestType.COMMIT_STORE]
+    proto_req = cs.python_to_request(key, 4, b"ctx-bytes")
+    r_key, r_iid, r_ctx = cs.request_to_python(proto_req)
+    assert (r_key, r_iid, r_ctx) == (key, 4, b"ctx-bytes")
+    assert cs.response_to_python(cs.python_to_response(True)) is True
+    assert cs.response_to_python(cs.python_to_response(False)) is False
+
+    cr = _TYPED_RPCS[RequestType.COMMIT_RETRIEVE]
+    proto_req = cr.python_to_request(key, 5)
+    r_key, r_iid = cr.request_to_python(proto_req)
+    assert (r_key, r_iid) == (key, 5)
+    assert cr.response_to_python(cr.python_to_response(True)) is True
+
+
+def test_p2p_lookup_and_query_roundtrip() -> None:
+    # Third Party
+    import torch
+
+    # First Party
+    from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+    from lmcache.v1.distributed.transfer_channel.api import (
+        TransferChannelAddress,
+    )
+
+    lookup = _TYPED_RPCS[RequestType.P2P_LOOKUP_AND_LOCK]
+    keys = [
+        ObjectKey(
+            chunk_hash=b"\x01\x02",
+            model_name="opt",
+            kv_rank=7,
+            object_group_id=1,
+            cache_salt="tenant",
+        ),
+        ObjectKey(chunk_hash=b"\x03\x04", model_name="opt", kv_rank=7),
+    ]
+    layout = MemoryLayoutDesc(
+        shapes=[torch.Size([2, 8, 128]), torch.Size([2, 8, 128])],
+        dtypes=[torch.float16, torch.bfloat16],
+    )
+    proto_req = lookup.python_to_request(keys, layout)
+    round_keys, round_layout = lookup.request_to_python(proto_req)
+    assert round_keys == keys
+    assert round_layout == layout
+
+    proto_resp = lookup.python_to_response(99)
+    assert lookup.response_to_python(proto_resp) == 99
+
+    # Query: None <-> present addr list.
+    query = _TYPED_RPCS[RequestType.P2P_QUERY_LOOKUP_RESULTS]
+    assert query.response_to_python(query.python_to_response(None)) is None
+
+    addrs = [
+        TransferChannelAddress(offset=0, size=1024),
+        TransferChannelAddress(offset=1024, size=512),
+    ]
+    proto_resp = query.python_to_response(addrs)
+    assert query.response_to_python(proto_resp) == addrs
+
+    # Empty list is a real (non-None) empty match.
+    proto_resp = query.python_to_response([])
+    assert query.response_to_python(proto_resp) == []
+
+    # Unlock: keys survive round-trip, response is None.
+    unlock = _TYPED_RPCS[RequestType.P2P_UNLOCK_OBJECTS]
+    proto_req = unlock.python_to_request(keys)
+    (round_keys,) = unlock.request_to_python(proto_req)
+    assert round_keys == keys
+    assert unlock.response_to_python(unlock.python_to_response(None)) is None
