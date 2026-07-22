@@ -1,15 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""gRPC transport implementation (grpc://, grpc+unix://).
+"""gRPC-generated stubs for the LMCache mp-mode message queue.
 
-Importing this package is enough to register the ``grpc`` and
-``grpc+unix`` URL schemes with the transport registry.  It has an
-optional runtime dependency on ``grpcio``; if that is not installed,
-importing this package raises ``ImportError`` and the top-level
-``transport`` package silently skips it.
+Only the generated proto module (``_proto_gen``) is exported now.  The
+old ``GrpcClientTransport`` / ``GrpcServerTransport`` classes are gone;
+``lmcache.v1.multiprocess.mq`` talks to the generated stubs directly.
 """
-
-# First Party
-from lmcache.v1.multiprocess.transport.grpc_impl.transport import (  # noqa: F401
-    GrpcClientTransport,
-    GrpcServerTransport,
-)
