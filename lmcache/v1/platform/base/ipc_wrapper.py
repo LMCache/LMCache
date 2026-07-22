@@ -88,7 +88,41 @@ class DeviceIPCWrapper:
 
     @classmethod
     def _get_device_index_from_uuid(cls, device_uuid: str) -> int:
-        """Get the physical device ordinal from its UUID."""
+        """Get the physical device ordinal from its UUID.
+
+        Args:
+            device_uuid: the UUID of the device to resolve, as carried in an
+                inter-process device handle received from a peer process.
+
+        Returns:
+            The physical device ordinal for ``device_uuid`` on this host.
+
+        Raises:
+            RuntimeError: if this process has no accelerator devices available
+                -- e.g. a CPU-only ``lmcache server`` receiving a CUDA worker's
+                IPC handle -- in which case the message points at the
+                ``engine_driven`` transfer mode; or if a device is available
+                but ``device_uuid`` is not among the discovered devices.
+        """
+        # A device-incapable process (e.g. a CPU-only lmcache server) can never
+        # resolve a peer's device IPC handle. Fail with actionable guidance
+        # instead of the generic "not found" below, which misleads operators
+        # into checking device visibility when the real fix is the transfer
+        # mode. See issue #4186.
+        if not torch_dev.is_available():
+            raise RuntimeError(
+                f"Received an inter-process handle for device {device_uuid}, "
+                "but this process has no accelerator devices available "
+                "(running on a CPU-only host). This usually means a CUDA "
+                "worker registered its KV caches with a CPU-only LMCache "
+                "server using the default 'auto' (lmcache_driven) transfer "
+                "mode, which requires the server to open device IPC handles. "
+                "Set 'lmcache.mp.mp_transfer_mode=engine_driven' in the vLLM "
+                "kv_connector_extra_config (or export "
+                "LMCACHE_MP_TRANSFER_MODE=engine_driven) so the worker performs "
+                "the device-side copy instead."
+            )
+
         cls._discover_devices()
 
         with DeviceIPCWrapper._device_mapping_lock:

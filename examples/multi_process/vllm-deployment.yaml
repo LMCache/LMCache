@@ -29,6 +29,12 @@ spec:
             - /bin/bash
             - -c
             - |
+              # The lmcache server DaemonSet runs CPU-only (no GPU request), so
+              # the CUDA worker must use engine_driven transfer mode: the worker
+              # does the device-side copy instead of asking the server to open
+              # CUDA IPC handles (which a CPU-only server cannot). Omitting this
+              # falls back to the default 'auto' (lmcache_driven) and fails at
+              # REGISTER_KV_CACHE. See issue #4186.
               vllm serve Qwen/Qwen3-14B \
                 --host 0.0.0.0 \
                 --port 8000 \
@@ -36,7 +42,7 @@ spec:
                 --max-model-len 32768 \
                 --gpu-memory-utilization 0.85 \
                 --tensor-parallel-size 4 \
-                --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_connector_extra_config\": {\"lmcache.mp.host\": \"tcp://${HOST_IP}\", \"lmcache.mp.port\": 6555}}"
+                --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_connector_extra_config\": {\"lmcache.mp.host\": \"tcp://${HOST_IP}\", \"lmcache.mp.port\": 6555, \"lmcache.mp.mp_transfer_mode\": \"engine_driven\"}}"
           env:
             - name: HOST_IP
               valueFrom:
