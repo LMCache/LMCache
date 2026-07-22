@@ -33,7 +33,7 @@ class _FakeSerializer(Serializer):
         self._transform = transform
         self.calls = 0
 
-    def serialize(self, src, dst, key) -> int:  # type: ignore[no-untyped-def]
+    def serialize(self, src, dst, key=None) -> int:  # type: ignore[no-untyped-def]
         if self._transform is not None:
             self._transform(self.calls)
         self.calls += 1
@@ -48,7 +48,7 @@ class _FakeDeserializer(Deserializer):
         self._transform = transform
         self.calls = 0
 
-    def deserialize(self, src, dst, key) -> None:  # type: ignore[no-untyped-def]
+    def deserialize(self, src, dst, key=None) -> None:  # type: ignore[no-untyped-def]
         if self._transform is not None:
             self._transform(self.calls)
         self.calls += 1
@@ -158,7 +158,7 @@ class _RecordingSerializer(Serializer):
     def __init__(self, n_bytes: int) -> None:
         self._n_bytes = n_bytes
 
-    def serialize(self, src, dst, key) -> int:  # type: ignore[no-untyped-def]
+    def serialize(self, src, dst, key=None) -> int:  # type: ignore[no-untyped-def]
         return self._n_bytes
 
     def estimate_serialized_size(self, layout_desc: MemoryLayoutDesc) -> int:
@@ -200,7 +200,7 @@ def test_serialize_failure_does_not_narrow_dst() -> None:
     size."""
 
     class _BoomSerializer(Serializer):
-        def serialize(self, src, dst, key) -> int:  # type: ignore[no-untyped-def]
+        def serialize(self, src, dst, key=None) -> int:  # type: ignore[no-untyped-def]
             raise RuntimeError("serialize failed")
 
         def estimate_serialized_size(self, layout_desc: MemoryLayoutDesc) -> int:
@@ -240,7 +240,7 @@ def test_serialize_skips_narrowing_when_serializer_returns_non_int() -> None:
     raise ``TypeError: '<' not supported between NoneType and int``."""
 
     class _NoneReturningSerializer(Serializer):
-        def serialize(self, src, dst, key):  # type: ignore[no-untyped-def]
+        def serialize(self, src, dst, key=None):  # type: ignore[no-untyped-def]
             return None  # type: ignore[return-value]
 
         def estimate_serialized_size(self, layout_desc: MemoryLayoutDesc) -> int:

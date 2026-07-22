@@ -115,7 +115,7 @@ class ConcatMultiSerializer(MultiSerializer):
     def group_size(self) -> int:
         return self._group_size
 
-    def serialize(self, src: MemoryObjGroup, dst, key) -> int:
+    def serialize(self, src: MemoryObjGroup, dst, key=None) -> int:
         validate_group_size(src, self._group_size, role="src")
         # Build header and payload separately so we can write into dst
         # in two contiguous moves.
@@ -186,7 +186,7 @@ class ConcatMultiDeserializer(MultiDeserializer):
     def group_size(self) -> int:
         return self._group_size
 
-    def deserialize(self, src, dst: MemoryObjGroup, key) -> None:
+    def deserialize(self, src, dst: MemoryObjGroup, key=None) -> None:
         validate_group_size(dst, self._group_size, role="dst")
         if src.tensor is None:
             raise ValueError("ConcatMultiDeserializer: src.tensor is None")
@@ -363,7 +363,7 @@ def test_deserialize_with_none_slot_leaves_caller_buffer_untouched() -> None:
 class _IdentitySerializer(Serializer):
     """Trivial single-tensor serializer copying tensor bytes verbatim."""
 
-    def serialize(self, src, dst, key) -> int:
+    def serialize(self, src, dst, key=None) -> int:
         if src.tensor is None or dst.tensor is None:
             raise ValueError("identity serde requires tensors on both sides")
         blob = _tensor_bytes(src.tensor)
@@ -388,7 +388,7 @@ class _IdentitySerializer(Serializer):
 class _IdentityDeserializer(Deserializer):
     """Inverse of :class:`_IdentitySerializer`."""
 
-    def deserialize(self, src, dst, key) -> None:
+    def deserialize(self, src, dst, key=None) -> None:
         if src.tensor is None or dst.tensor is None:
             raise ValueError("identity serde requires tensors on both sides")
         n = dst.tensor.numel() * dst.tensor.dtype.itemsize
