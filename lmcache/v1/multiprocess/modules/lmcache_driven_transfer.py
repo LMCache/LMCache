@@ -48,15 +48,13 @@ from lmcache.v1.multiprocess.native_completion import (
     submit_callback_to_stream,
 )
 from lmcache.v1.multiprocess.protocols.base import RequestType
-from lmcache.v1.platform.base_cache_context import BaseCacheContext
+from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.cache_context import create_cache_context
 import lmcache.c_ops as lmc_ops
-import lmcache.python_ops_fallback as _python_ops_fallback
 
 logger = init_logger(__name__)
-_HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = (
-    lmc_ops.execute_object_group_transfer
-    is not _python_ops_fallback.execute_object_group_transfer
+_HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = hasattr(
+    lmc_ops, "execute_object_group_transfer"
 )
 
 
@@ -725,25 +723,46 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             ]
             for iid in stale_ids:
                 reaped.append((iid, self._cache_contexts.pop(iid)))
-        for iid, entry in reaped:
-            self._release_entry(entry)
+        reaped_ids: list[int] = []
+        entries: list[ContextEntry] = []
+        for iid, e in reaped:
             logger.warning(
                 "Reaped GPU instance %d: silent for %.1fs (pinged=%s)",
                 iid,
-                now - entry.last_seen,
-                entry.has_liveness_signal,
+                now - e.last_seen,
+                e.has_liveness_signal,
             )
-        return [iid for iid, _ in reaped]
+            reaped_ids.append(iid)
+            entries.append(e)
+        if reaped:
+            del e  # a bound name would pin the final entry (see _release_entries)
+            reaped.clear()
+            self._release_entries(entries)
+        return reaped_ids
 
-    def _release_entry(self, entry: ContextEntry) -> None:
-        """Release resources for a popped entry (run outside the lock).
+    def _release_entries(self, entries: list[ContextEntry]) -> None:
+        """Release a batch of entries and reclaim their device memory.
 
         Args:
-            entry: The entry removed from the registry.
+            entries: The only remaining references to the released entries.
+                The list is cleared before memory is reclaimed.
         """
-        entry.cache_context.close()
-        self._ctx.layout_desc_registry.unregister(entry.model_name, entry.world_size)
+        if not entries:
+            return
+        for entry in entries:
+            entry.cache_context.close()
+            self._ctx.layout_desc_registry.unregister(
+                entry.model_name, entry.world_size
+            )
+        del entry
+        entries.clear()
+        # ipc_collect() only unmaps a CUDA-IPC-imported segment once its last
+        # tensor reference is gone (LMCache#4014), hence the clear() above.
         torch_dev.empty_cache()
+        ipc_collect = getattr(torch_dev, "ipc_collect", None)
+        if ipc_collect is not None:
+            # Non-CUDA device modules (xpu / musa) do not expose ipc_collect.
+            ipc_collect()
 
     def get_handlers(self) -> list[HandlerSpec]:
         """Return handler specs for all request types this module serves.
@@ -808,10 +827,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         with self._lock:
             entries = list(self._cache_contexts.values())
             self._cache_contexts.clear()
-        for entry in entries:
-            entry.cache_context.close()
-        if entries:
-            torch_dev.empty_cache()
+        self._release_entries(entries)
 
     def register_kv_cache(
         self,
@@ -894,14 +910,20 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             instance_id: The GPU instance ID (such as PID).
         """
         with self._lock:
-            entry = self._cache_contexts.pop(instance_id, None)
-        if entry is None:
+            popped = [
+                e
+                for e in (self._cache_contexts.pop(instance_id, None),)
+                if e is not None
+            ]
+        if not popped:
             logger.warning(
                 "No registered GPU context found for instance ID %d", instance_id
             )
             return
 
-        self._release_entry(entry)
+        # No scalar binding: `popped` must stay the only reference so
+        # _release_entries' reclaim actually unmaps the IPC segments.
+        self._release_entries(popped)
         logger.info("Unregistered KV cache for GPU ID %d", instance_id)
 
     @_lmcache_nvtx_annotate
@@ -1090,6 +1112,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     )
                 else:
                     total_bytes = 0
+                num_tokens = num_chunks * self._ctx.chunk_size if stored_count else 0
                 self._ctx.event_bus.publish_on_stream(
                     cache_context.cupy_stream,
                     Event(
@@ -1101,6 +1124,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             "engine_id": instance_id,
                             "model_name": model_name,
                             "total_bytes": total_bytes,
+                            "num_tokens": num_tokens,
                         },
                     ),
                 )
@@ -1262,6 +1286,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         "finish_read_prefetched",
                         prefetched_keys,
                     )
+                num_tokens = (
+                    num_chunks * self._ctx.chunk_size
+                    if len(prefetched_keys) == num_chunks * num_object_groups
+                    else 0
+                )
                 self._ctx.event_bus.publish_on_stream(
                     cache_context.cupy_stream,
                     Event(
@@ -1274,6 +1303,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             "model_name": model_name,
                             "cache_salt": key.cache_salt,
                             "total_bytes": total_bytes,
+                            "num_tokens": num_tokens,
                         },
                     ),
                 )

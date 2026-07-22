@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-#
-# This file contains Python non-CUDA fallback implementations for
-# CUDA-specific operations.
-#
+"""Device-agnostic torch baseline for the unified ``DeviceOps`` surface.
+
+Migrated verbatim from the former ``lmcache.python_ops_fallback`` module.
+Owns the torch/CPU implementation of every op in ``DeviceOps.OPS``; shared
+types live in :mod:`lmcache.v1.platform.ops_types`. Internal to the platform
+package -- consumers go through :class:`DeviceOps` or the ``lmcache.c_ops``
+shim, never this module directly.
+"""
+
 # Standard
 from concurrent.futures import ThreadPoolExecutor
-from enum import IntEnum
 from multiprocessing import shared_memory
-from typing import Any, Optional, Tuple
+from typing import Optional, Tuple
 import ctypes
 import ctypes.util
 import os
@@ -20,9 +24,18 @@ import numpy as np
 import torch
 
 # First Party
-from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
-from lmcache.v1.platform import current_device_spec
+from lmcache.v1.platform._device_detect import (
+    current_device_spec,
+    get_torch_device,
+)
+from lmcache.v1.platform.ops_types import (  # noqa: F401
+    EngineKVFormat,
+    GPUKVFormat,
+    PageBufferShapeDesc,
+    TransferDirection,
+    set_shape_desc_dtype,
+)
 
 # Store the tensor objects in memory so that they can be accessed
 # outside the scope of this file
@@ -247,161 +260,6 @@ def _copy_bytes_with_tensor(dst: int, src: int, num_bytes: int) -> None:
     dst_tensor.copy_(src_tensor)
 
 
-class TransferDirection(IntEnum):
-    """Specifies the direction of a memory transfer.
-
-    Inherits from IntEnum so that members compare equal to plain ints
-    and to native pybind11 enum members with the same integer value.
-    Several call sites (and the fallback ops themselves) use
-    ``int(direction)`` to compare across backend / fallback boundaries.
-    """
-
-    H2D = 0
-    D2H = 1
-
-
-class EngineKVFormat(IntEnum):
-    """Enumeration of different engine KV cache memory layouts."""
-
-    # used by: vLLM CROSS_LAYER mode
-    NB_NL_TWO_BS_NH_HS = 0
-
-    # used by: vLLM non-MLA flash attention
-    NL_X_TWO_NB_BS_NH_HS = 1
-
-    # used by: vLLM non-MLA flash infer
-    NL_X_NB_TWO_BS_NH_HS = 2
-
-    # used by: vLLM MLA
-    NL_X_NB_BS_HS = 3
-
-    # used by: SGLang MHA (flash attention and flash infer)
-    TWO_X_NL_X_NBBS_NH_HS = 4
-
-    # used by: SGLang MLA
-    NL_X_NBBS_ONE_HS = 5
-
-    # used by: vLLM non-MLA flash attention (HND layout)
-    NL_X_TWO_NB_NH_BS_HS = 6
-
-    # used by: vLLM non-MLA flash infer (HND layout)
-    NL_X_NB_TWO_NH_BS_HS = 7
-
-    # used by: TRT-LLM cross-layer (HND layout)
-    NB_NL_TWO_NH_BS_HS = 8
-
-    # used by: SGLang MHA via the MP daemon path
-    TWO_X_NL_X_NB_BS_NH_HS = 9
-
-    # used by: vLLM non-MLA blocks-first attention with K/V fused into the
-    # trailing dim. Per-layer physical shape
-    # [num_blocks, num_heads, block_size, 2, head_size] -- the K/V "2" axis is
-    # second-to-last, recovered by splitting the fused [..., 2 * head_size].
-    NL_X_NB_NH_BS_TWO_HS = 10
-
-
-# Backward-compat alias
-GPUKVFormat = EngineKVFormat
-
-
-class PageBufferShapeDesc:
-    """Python stand-in for the C++ ``PageBufferShapeDesc`` struct.
-
-    Mirrors the pybind ``def_readwrite`` attributes in ``csrc/pybind.cpp``
-    so non-CUDA code paths can construct and inspect shape descriptors
-    without the compiled extension.
-
-    ``block_stride_elems`` captures the *physical* per-block step in
-    element units (= ``tensor.stride(0)``). For a tightly-packed paged
-    buffer it equals ``bs * kv_size * nh * hs`` (non-MLA) /
-    ``bs * nh * hs`` (MLA); for a vLLM KV pool where a group's row is
-    padded to the pool's maximum row width (e.g. DeepSeek V4 compressor
-    / indexer caches), it is strictly larger. Downstream kernels must
-    use this value instead of recomputing a "tight" stride from the
-    logical shape, otherwise they'll skip into the next block's padding
-    region and read/write the wrong slots.
-    """
-
-    __slots__ = (
-        "kv_size",
-        "nl",
-        "nb",
-        "bs",
-        "nh",
-        "hs",
-        "element_size",
-        "block_stride_elems",
-        "dtype",
-    )
-
-    def __init__(self) -> None:
-        self.kv_size: int = 0
-        self.nl: int = 0
-        self.nb: int = 0
-        self.bs: int = 0
-        self.nh: int = 0
-        self.hs: int = 0
-        self.element_size: int = 0
-        # 0 means "unset — fall back to tight stride"; any downstream
-        # consumer that needs exact addressing must check this.
-        self.block_stride_elems: int = 0
-        self.dtype: torch.dtype | None = None
-
-
-class _NativePlanType:
-    """Base for object-group transfer plan types that only exist natively.
-
-    The plan value structs (see ``csrc/mp_mem_kernels.cuh``) are built on the
-    Python side and consumed by the native ``execute_object_group_transfer``.
-    They have no pure-Python fallback, so constructing one without the compiled
-    ``c_ops`` extension is unsupported. Subclasses exist only so the CPU-only
-    build exposes the same names as ``c_ops``.
-    """
-
-    def __init__(self, *args: object, **kwargs: object) -> None:
-        raise NotImplementedError(
-            f"{type(self).__name__} requires the c_ops native extension; "
-            "no pure-Python fallback exists."
-        )
-
-
-class StagingCopy(_NativePlanType):
-    """Fallback stub for the native ``StagingCopy`` plan type."""
-
-
-class LaunchVar(_NativePlanType):
-    """Fallback stub for the native ``LaunchVar`` plan type."""
-
-
-class BatchStep(_NativePlanType):
-    """Fallback stub for the native ``BatchStep`` plan type."""
-
-
-class KernelGroupSpec(_NativePlanType):
-    """Fallback stub for the native ``KernelGroupSpec`` plan type."""
-
-
-def set_shape_desc_dtype(shape_desc: Any, dtype: torch.dtype) -> None:
-    """Best-effort ``shape_desc.dtype = dtype``.
-
-    The pure-Python ``PageBufferShapeDesc`` exposes a ``dtype`` slot so
-    the CPU fallback kernel can disambiguate float16 vs bfloat16 (both
-    have ``element_size == 2``). The pybind C++ struct in
-    ``csrc/pybind.cpp`` has no such field; assignment raises
-    ``AttributeError`` and is silently swallowed here so call sites
-    don't need to branch on the active backend.
-
-    Args:
-        shape_desc: A ``PageBufferShapeDesc`` instance (either the
-            pure-Python fallback or the C++ pybind struct).
-        dtype: The torch dtype to assign.
-    """
-    try:
-        shape_desc.dtype = dtype
-    except AttributeError:
-        pass
-
-
 # Cuda path goes through func cudaHostAlloc, which is
 # already page aligned by CUDA spec. This fallback shim mirrors that
 # guarantee so consumers that require page-aligned host buffers, in
@@ -433,6 +291,8 @@ def _alloc_page_aligned_pinned_view(size: int) -> Tuple[torch.Tensor, int]:
     """
     # Pin the host buffer when an accelerator is present (probed once).
     # StubCPUDevice.is_available returns False on CPU-only hosts.
+    torch_dev, torch_device_type = get_torch_device()
+
     global _use_pinned
     if _use_pinned is None:
         _use_pinned = torch_dev.is_available()
@@ -546,7 +406,7 @@ def alloc_shm_pinned_ptr(size: int, shm_name: str = "") -> int:
     _shm_registry[ptr] = shm
 
     # Try to pin the SHM buffer for async D2H copies
-    if current_device_spec.pin_memory(ptr, size):
+    if current_device_spec().pin_memory(ptr, size):
         _pinned_ptr_registry[ptr] = size
 
     return ptr
@@ -558,7 +418,7 @@ def free_shm_pinned_ptr(ptr: int, size: int = 0, shm_name: str = "") -> None:
 
     # Unpin if previously registered
     if ptr in _pinned_ptr_registry:
-        current_device_spec.unpin_memory(ptr)
+        current_device_spec().unpin_memory(ptr)
         _pinned_ptr_registry.pop(ptr, None)
 
     # Release in order: tensor -> ctypes buf -> shm
@@ -861,6 +721,7 @@ def is_layer_list(engine_kv_format: EngineKVFormat) -> bool:
         int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS),
         int(EngineKVFormat.NL_X_NB_TWO_NH_BS_HS),
         int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
+        int(EngineKVFormat.NL_X_NB_BS_NH_TWO_HS),
     )
 
 
@@ -887,7 +748,15 @@ def _is_hnd_format(engine_kv_format: EngineKVFormat) -> bool:
     return int(engine_kv_format) in (
         int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS),
         int(EngineKVFormat.NL_X_NB_TWO_NH_BS_HS),
+    )
+
+
+def _is_fused_kv_format(engine_kv_format: EngineKVFormat) -> bool:
+    """Return True for per-layer formats whose K/V pair is packed in the
+    trailing dim (kv_size == 1, shape_desc.hs == 2 * head_size)."""
+    return int(engine_kv_format) in (
         int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
+        int(EngineKVFormat.NL_X_NB_BS_NH_TWO_HS),
     )
 
 
@@ -947,13 +816,14 @@ def _per_layer_paged_shape(
     if fmt == int(EngineKVFormat.NL_X_NB_TWO_NH_BS_HS):
         return (nb, 2, nh, bs, hs)
     if fmt == int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS):
-        # vLLM CPU blocks-first fused KV: K and V interleaved at the
-        # second-to-last dim so each layer is [NB, NH, BS, 2, HS].
-        return (nb, nh, bs, 2, hs)
+        # Blocks-first fused KV (HND): the desc's hs is the packed
+        # 2 * head_size, so each layer is the raw [NB, NH, BS, 2 * HS].
+        return (nb, nh, bs, hs)
+    if fmt == int(EngineKVFormat.NL_X_NB_BS_NH_TWO_HS):
+        # Blocks-first fused KV (NHD): tokens before heads.
+        return (nb, bs, nh, hs)
     if fmt == int(EngineKVFormat.NL_X_TWO_NB_BS_NH_HS):
         return (2, nb, bs, nh, hs)
-    if fmt == int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS):
-        return (nb, nh, bs, 2, hs)
     # Covers NL_X_NB_TWO_BS_NH_HS and any future NHD variants.
     return (nb, 2, bs, nh, hs)
 
@@ -1178,6 +1048,9 @@ def _normalize_lmcache_objects(
         chunk_tokens = lmcache_chunk_size
         if _is_mla_format(engine_kv_format):
             chunk_shape: tuple[int, ...] = (nl, chunk_tokens, hs)
+        elif _is_fused_kv_format(engine_kv_format):
+            # Single plane: hs is the packed 2 * head_size.
+            chunk_shape = (nl, chunk_tokens, nh * hs)
         else:
             chunk_shape = (2, nl, chunk_tokens, nh * hs)
         return [
@@ -1309,6 +1182,18 @@ def multi_layer_block_kv_transfer(
             is_d2h,
             skip_prefix_n_blocks,
         )
+    elif _is_fused_kv_format(engine_kv_format):
+        _transfer_per_layer_fused(
+            normalized,
+            object_tensors,
+            block_ids,
+            n_block_ids,
+            blocks_per_object,
+            block_size,
+            engine_kv_format,
+            is_d2h,
+            skip_prefix_n_blocks,
+        )
     elif _is_hnd_format(engine_kv_format):
         _transfer_per_layer_hnd(
             normalized,
@@ -1333,36 +1218,6 @@ def multi_layer_block_kv_transfer(
             is_d2h,
             skip_prefix_n_blocks,
         )
-
-
-def execute_object_group_transfer(
-    direction: TransferDirection,
-    device: torch.device | str,
-    host_buffer_alignment: int,
-    kernel_group_specs: list,
-    batch_steps: list,
-) -> None:
-    """Python fallback for the native object-group transfer plan executor.
-
-    The planned/batched object-group transfer (see ``csrc/mp_mem_kernels.cuh``
-    and ``execute_object_group_transfer``) is only implemented in the compiled
-    ``c_ops`` extension. The signature mirrors the C++ binding so callers can
-    dispatch uniformly, but there is no pure-Python equivalent.
-
-    Args:
-        direction: Transfer direction (H2D or D2H).
-        device: CUDA device of the transfer.
-        host_buffer_alignment: Host buffer alignment for staging copies.
-        kernel_group_specs: Per-kernel-group invariants (native ``KernelGroupSpec``).
-        batch_steps: Ordered per-batch staging + launch work (native ``BatchStep``).
-
-    Raises:
-        NotImplementedError: Always; requires the c_ops native extension.
-    """
-    raise NotImplementedError(
-        "execute_object_group_transfer requires the c_ops native extension; "
-        "no pure-Python fallback exists."
-    )
 
 
 def _valid_block_range(
@@ -1669,8 +1524,6 @@ def _transfer_per_layer_hnd(
     first_layer = layer_tensors[0]
     if int(engine_kv_format) == int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS):
         first_k = first_layer[0]
-    elif int(engine_kv_format) == int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS):
-        first_k = first_layer[:, :, :, 0]
     else:
         first_k = first_layer[:, 0]
     _nb0, nh0, _bs0, hs0 = first_k.shape
@@ -1718,16 +1571,6 @@ def _transfer_per_layer_hnd(
                     chunk_gpu[1, layer_idx].view(n_valid, block_size, nh0, hs0).copy_(
                         scratch.permute(0, 2, 1, 3)
                     )
-                elif int(engine_kv_format) == int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS):
-                    k_t, v_t = layer[:, :, :, 0], layer[:, :, :, 1]
-                    torch.index_select(k_t, 0, eff_idx, out=scratch)
-                    chunk_gpu[0, layer_idx].view(n_valid, block_size, nh0, hs0).copy_(
-                        scratch.permute(0, 2, 1, 3)
-                    )
-                    torch.index_select(v_t, 0, eff_idx, out=scratch)
-                    chunk_gpu[1, layer_idx].view(n_valid, block_size, nh0, hs0).copy_(
-                        scratch.permute(0, 2, 1, 3)
-                    )
                 else:
                     # FlashInfer HND stores KV as [NB, 2, NH, BS, HS].
                     # Gather on dim=0 first so reads stay contiguous in memory;
@@ -1748,8 +1591,6 @@ def _transfer_per_layer_hnd(
             for layer_idx, layer in enumerate(layer_tensors):
                 if int(engine_kv_format) == int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS):
                     k_t, v_t = layer[0], layer[1]
-                elif int(engine_kv_format) == int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS):
-                    k_t, v_t = layer[:, :, :, 0], layer[:, :, :, 1]
                 else:
                     k_t, v_t = layer[:, 0], layer[:, 1]
                 _nb, nh, _bs, hs = k_t.shape
@@ -1770,6 +1611,89 @@ def _transfer_per_layer_hnd(
                 else:
                     k_t.index_copy_(0, eff_idx, k_blocks)
                     v_t.index_copy_(0, eff_idx, v_blocks)
+
+
+def _transfer_per_layer_fused(
+    layer_tensors: list[torch.Tensor],
+    object_tensors: list[torch.Tensor],
+    block_ids: torch.Tensor | list[int],
+    n_block_ids: int,
+    blocks_per_object: int,
+    block_size: int,
+    engine_kv_format: EngineKVFormat,
+    is_d2h: bool,
+    skip_prefix_n_blocks: int,
+) -> None:
+    """Handle fused-K/V per-layer formats (kv_size == 1).
+
+    The K/V pair stays packed inside each ``2 * head_size`` head, so every
+    layer transfers as a single plane and the object layout is
+    ``[NL, tokens, NH * 2 * HS]`` — byte-identical to the device kernel's.
+    """
+    if not layer_tensors or not object_tensors:
+        return
+
+    target_device = layer_tensors[0].device
+    block_ids_dev = torch.as_tensor(block_ids, dtype=torch.long, device=target_device)
+
+    # Callers pass either the raw 4-D registration ([NB, NH, BS, 2*HS] or
+    # [NB, BS, NH, 2*HS]) or the canonical 5-D split with the size-2 axis
+    # second-to-last; both share storage, so flatten the trailing pair away.
+    layers = [
+        layer.reshape(*layer.shape[:3], -1) if layer.dim() == 5 else layer
+        for layer in layer_tensors
+    ]
+    is_hnd = int(engine_kv_format) == int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS)
+    first = layers[0]
+    if is_hnd:
+        _nb0, nh0, _bs0, hs0 = first.shape
+    else:
+        _nb0, _bs0, nh0, hs0 = first.shape
+    nl = len(layers)
+
+    for object_idx, obj in enumerate(object_tensors):
+        valid = _valid_block_range_indices(
+            object_idx,
+            n_block_ids,
+            blocks_per_object,
+            block_size,
+            skip_prefix_n_blocks,
+        )
+        if valid is None:
+            continue
+        idx_start, idx_end, offset_in_object = valid
+        n_valid = idx_end - idx_start
+        token_end = offset_in_object + n_valid * block_size
+        eff_idx = block_ids_dev[idx_start:idx_end]
+        # Tolerate legacy [2, NL, T, H]-shaped buffers: the flat storage is
+        # reinterpreted as the single-plane layout.
+        chunk_tokens = obj.numel() // (nl * nh0 * hs0)
+        obj_view = obj.reshape(nl, chunk_tokens, nh0 * hs0)
+
+        if is_d2h:
+            chunk_gpu = torch.empty(
+                nl,
+                n_valid * block_size,
+                nh0 * hs0,
+                dtype=first.dtype,
+                device=target_device,
+            )
+            for layer_idx, layer in enumerate(layers):
+                selected = layer.index_select(0, eff_idx)
+                if is_hnd:
+                    # [n, NH, BS, 2*HS] -> tokens-major [n, BS, NH, 2*HS]
+                    selected = selected.permute(0, 2, 1, 3)
+                chunk_gpu[layer_idx].view(n_valid, block_size, nh0, hs0).copy_(selected)
+            obj_view[:, offset_in_object:token_end].copy_(chunk_gpu, non_blocking=True)
+        else:
+            chunk_gpu = obj_view[:, offset_in_object:token_end].to(
+                target_device, non_blocking=True
+            )
+            for layer_idx, layer in enumerate(layers):
+                blocks = chunk_gpu[layer_idx].reshape(n_valid, block_size, nh0, hs0)
+                if is_hnd:
+                    blocks = blocks.permute(0, 2, 1, 3)
+                layer.index_copy_(0, eff_idx, blocks)
 
 
 def _transfer_per_layer_nhd(
@@ -2653,6 +2577,29 @@ def rotary_embedding_k_fused(
         key[..., 1:rot_dim:2] = y_out
 
 
+def rotary_embedding_k_fused_strided(
+    old_positions: torch.Tensor,
+    new_positions: torch.Tensor,
+    key: torch.Tensor,
+    head_size: int,
+    head_stride: int,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+) -> None:
+    """Strided rotary_embedding_k_fused: ``key``'s last dim is ``head_stride``
+    per head; rotate only the leading ``head_size`` (K) in place via a view,
+    leaving the trailing V. ``head_stride == head_size`` is the contiguous case.
+    """
+    rotary_embedding_k_fused(
+        old_positions,
+        new_positions,
+        key[..., :head_size],
+        head_size,
+        cos_sin_cache,
+        is_neox,
+    )
+
+
 def get_gpu_pci_bus_id(device_id: int = 0) -> str | None:
     """
     Get the PCI bus ID via CUDA/ROCm runtime.
@@ -2664,6 +2611,8 @@ def get_gpu_pci_bus_id(device_id: int = 0) -> str | None:
     Returns:
         str | None: PCI bus ID (e.g., "0000:29:00.0") or None if unavailable.
     """
+    torch_dev, _ = get_torch_device()
+
     try:
         if torch_dev.is_available() and device_id < torch_dev.device_count():
             props = torch_dev.get_device_properties(device_id)

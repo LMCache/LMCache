@@ -286,8 +286,10 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         if retrieve_token_num <= offset:
             self.lmcache_engine.lookup_unpin(lookup_id)
             logger.info(
-                f"LMCache retrieve skipped: lookup={retrieve_token_num}, "
-                f"offset={offset}, no new tokens to retrieve"
+                "LMCache retrieve skipped: lookup=%d, "
+                "offset=%d, no new tokens to retrieve",
+                retrieve_token_num,
+                offset,
             )
             return 0
 
@@ -310,8 +312,10 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
 
         num_new_tokens = retrieve_token_num - offset
         logger.info(
-            f"LMCache retrieve started: lookup={retrieve_token_num}, "
-            f"offset={offset}, retrieve {num_new_tokens} new tokens"
+            "LMCache retrieve started: lookup=%d, offset=%d, retrieve %d new tokens",
+            retrieve_token_num,
+            offset,
+            num_new_tokens,
         )
 
         return num_new_tokens
@@ -324,9 +328,10 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         store_mask = torch.ones_like(token_ids, dtype=torch.bool)
 
         logger.info(
-            f"LMCache store_kv started: tokens={len(token_ids)}, "
-            f"num_layers={self.sgl_config.num_hidden_layers}, "
-            f"offset={store_metadata.offset}"
+            "LMCache store_kv started: tokens=%d, num_layers=%d, offset=%d",
+            len(token_ids),
+            self.sgl_config.num_hidden_layers,
+            store_metadata.offset,
         )
 
         lookup_id = str(uuid.uuid4())
@@ -357,20 +362,22 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
                     next(layerwise_storer)
                 except StopIteration:
                     logger.error(
-                        (
-                            f"store_layer generator stopped at layer {layer_idx}/"
-                            f"{self.sgl_config.num_hidden_layers}"
-                        )
+                        "store_layer generator stopped at layer %d/%d",
+                        layer_idx,
+                        self.sgl_config.num_hidden_layers,
                     )
                     break
 
             self.lmcache_engine.lookup_unpin(lookup_id)
-            logger.info(f"LMCache store_kv completed: stored {len(token_ids)} tokens")
+            logger.info("LMCache store_kv completed: stored %d tokens", len(token_ids))
         except Exception as e:
             logger.error(
-                f"LMCache store_kv failed: {type(e).__name__}: {e}", exc_info=True
+                "LMCache store_kv failed: %s: %s",
+                type(e).__name__,
+                e,
+                exc_info=True,
             )
             try:
                 self.lmcache_engine.lookup_unpin(lookup_id)
             except Exception as unpin_err:
-                logger.error(f"Failed to unpin lookup: {unpin_err}", exc_info=True)
+                logger.error("Failed to unpin lookup: %s", unpin_err, exc_info=True)

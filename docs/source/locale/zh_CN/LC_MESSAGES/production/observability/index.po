@@ -29,5 +29,5 @@ msgid ""
 "(deprecated). Please consider using :doc:`LMCache MP mode </mp/index>` "
 "for better feature support and performance. For the MP mode equivalent of"
 " this page, see :doc:`/mp/observability/index`."
-msgstr ""
+msgstr "本页记录了 LMCache 的进程内模式（已弃用）的行为。请考虑使用 :doc:`LMCache MP 模式 </mp/index>` 以获得更好的功能支持和性能。有关此页面的 MP 模式等效项，请参见 :doc:`/mp/observability/index`。"
 
