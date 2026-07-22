@@ -30,7 +30,7 @@ All of them live behind a single msgspec ext code 1 and a single `KVCache = list
 
 ## What the base class owns
 
-`DeviceIPCWrapper` (in `platform/base_ipc_wrapper.py`) provides the parts that every
+`DeviceIPCWrapper` (in `platform/base/ipc_wrapper.py`) provides the parts that every
 transport shares:
 
 - **Interface fields** — `dtype`, `shape`, `stride`, `storage_offset`, `device_uuid`. Subclasses populate these in `__init__`; the base uses them for equality and the receiving side uses them to rebuild the logical view.

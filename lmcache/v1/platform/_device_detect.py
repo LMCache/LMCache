@@ -24,7 +24,7 @@ from lmcache.logging import init_logger
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.platform.base_device_spec import DeviceSpec
+    from lmcache.v1.platform.base.device_spec import DeviceSpec
 
 logger = init_logger(__name__)
 
@@ -42,7 +42,7 @@ def _build_device_registry() -> "dict[str, DeviceSpec]":
     stays cheap and side-effect free.
     """
     # First Party
-    from lmcache.v1.platform.base_device_spec import DeviceSpec
+    from lmcache.v1.platform.base.device_spec import DeviceSpec
     from lmcache.v1.utils.subclass_discovery import discover_subclasses
 
     return {
@@ -152,7 +152,7 @@ def current_device_spec() -> "DeviceSpec":
     when no accelerator sub-package matches.
     """
     # First Party
-    from lmcache.v1.platform.base_device_spec import DeviceSpec
+    from lmcache.v1.platform.base.device_spec import DeviceSpec
 
     _, device_type = get_torch_device()
     spec = get_device_spec(device_type)
