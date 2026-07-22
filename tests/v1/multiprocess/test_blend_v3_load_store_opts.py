@@ -598,8 +598,7 @@ def _build_scatter_engine_and_context(
     gpu_context.device = torch.device("cpu")
     gpu_context.kv_layer_groups_manager.num_kernel_groups = num_groups
     gpu_context.kv_layer_groups_manager.kernel_groups = [
-        SimpleNamespace(shape_desc=SimpleNamespace(nb=100))
-        for _ in range(num_groups)
+        SimpleNamespace(shape_desc=SimpleNamespace(nb=100)) for _ in range(num_groups)
     ]
 
     buffers = {
@@ -607,9 +606,7 @@ def _build_scatter_engine_and_context(
         for slot in range(num_slots)
         for group in range(num_groups)
     }
-    gpu_context.get_temp_kernel_group_buffer.side_effect = lambda s, g: buffers[
-        (s, g)
-    ]
+    gpu_context.get_temp_kernel_group_buffer.side_effect = lambda s, g: buffers[(s, g)]
     return eng, gpu_context, buffers
 
 
@@ -760,9 +757,7 @@ def _build_plan_engine_and_context(
     # One object group; each chunk memory object fills one flat slot.
     obj_bytes = sum(kv_buffers[(0, g)].numel() * 4 for g in range(num_groups))
     obj_buffers = [torch.zeros(obj_bytes, dtype=torch.uint8) for _ in range(max_batch)]
-    gpu_context.get_temp_object_group_buffer.side_effect = (
-        lambda s, og: obj_buffers[s]
-    )
+    gpu_context.get_temp_object_group_buffer.side_effect = lambda s, og: obj_buffers[s]
 
     rope_state = v3_mod._CBRopeState(
         head_size=head_size,
@@ -929,9 +924,7 @@ def test_object_steps_alternate_disjoint_slot_halves():
     runs = [
         [
             (
-                SimpleNamespace(
-                    cur_st=i * 4, cur_ed=i * 4 + 4, old_st=i * 4 + 100
-                ),
+                SimpleNamespace(cur_st=i * 4, cur_ed=i * 4 + 4, old_st=i * 4 + 100),
                 _lazy_memory_obj(obj_bytes, address=i * 4),
             )
             for i in range(6)
@@ -977,9 +970,7 @@ def test_flat_tables_alternate_disjoint_slot_halves():
     runs = [
         [
             (
-                SimpleNamespace(
-                    cur_st=i * 4, cur_ed=i * 4 + 4, old_st=i * 4 + 100
-                ),
+                SimpleNamespace(cur_st=i * 4, cur_ed=i * 4 + 4, old_st=i * 4 + 100),
                 _lazy_memory_obj(obj_bytes, address=i * 4),
             )
             for i in range(6)

@@ -7,10 +7,10 @@ retrieve scatters into the request's paged blocks.
 """
 
 # Standard
+from collections import OrderedDict
 from dataclasses import dataclass
 from queue import Empty as QueueEmpty
 from queue import Queue
-from collections import OrderedDict
 from typing import TYPE_CHECKING, Any
 import os
 import threading

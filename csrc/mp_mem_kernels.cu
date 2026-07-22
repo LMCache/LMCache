@@ -523,8 +523,8 @@ void execute_cb_retrieve_plan(const torch::Device& device,
   at::cuda::CUDAStream copy_stream =
       at::cuda::getStreamFromPool(/*isHighPriority=*/false, device.index());
 
-  at::cuda::CUDAEvent copy_done[2];      // staging(w) finished, parity w%2
-  at::cuda::CUDAEvent compute_done[2];   // kernels(w) finished, parity w%2
+  at::cuda::CUDAEvent copy_done[2];     // staging(w) finished, parity w%2
+  at::cuda::CUDAEvent compute_done[2];  // kernels(w) finished, parity w%2
   bool compute_recorded[2] = {false, false};
 
   const auto group_of = [&](int group_idx) -> const CBGroupSpec& {
@@ -581,8 +581,7 @@ void execute_cb_retrieve_plan(const torch::Device& device,
               static_cast<uintptr_t>(group.temp_buffer_ptrs[rope.slot_idx]));
           rope_old.push_back(rope.old_st);
           rope_new.push_back(rope.cur_st);
-          if (static_cast<int>(rope_keys.size()) ==
-              MAX_FUSED_TRANSFER_CHUNKS) {
+          if (static_cast<int>(rope_keys.size()) == MAX_FUSED_TRANSFER_CHUNKS) {
             rotary_embedding_k_fused_ramp_multi_ptr(
                 rope_keys, static_cast<at::ScalarType>(group.key_scalar_type),
                 static_cast<int64_t>(group.num_layers) * group.slot_tokens,

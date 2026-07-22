@@ -163,8 +163,8 @@ __global__ void rotary_embedding_kernel_fused_ramp_multi(
       cos_sin_cache + (chunk.new_st + ramp) * rot_dim;
 
   apply_rotary_embedding_fused<scalar_t, IS_NEOX>(
-      chunk.key, old_cache_ptr, new_cache_ptr, head_size, num_kv_heads,
-      rot_dim, token_idx, key_stride, head_stride);
+      chunk.key, old_cache_ptr, new_cache_ptr, head_size, num_kv_heads, rot_dim,
+      token_idx, key_stride, head_stride);
 }
 
 }  // namespace lmc
@@ -230,23 +230,22 @@ void rotary_embedding_k_fused_ramp_ptr(
   dim3 grid(num_tokens);
   dim3 block(std::min<int64_t>(num_kv_heads * rot_dim / 2, 512));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  LMC_DISPATCH_FLOATING_TYPES(
-      key_dtype, "rotary_embedding_k_fused_ramp", [&] {
-        auto* key = reinterpret_cast<scalar_t*>(key_ptr);
-        auto* cos_sin = reinterpret_cast<const scalar_t*>(cos_sin_cache_ptr);
-        if (is_neox) {
-          lmc::rotary_embedding_kernel_fused_ramp<scalar_t, true>
-              <<<grid, block, 0, stream>>>(old_st, new_st, slots, key, cos_sin,
-                                           rot_dim, key_stride, num_kv_heads,
-                                           head_size, head_stride);
-        } else {
-          lmc::rotary_embedding_kernel_fused_ramp<scalar_t, false>
-              <<<grid, block, 0, stream>>>(old_st, new_st, slots, key, cos_sin,
-                                           rot_dim, key_stride, num_kv_heads,
-                                           head_size, head_stride);
-        }
-        C10_CUDA_KERNEL_LAUNCH_CHECK();
-      });
+  LMC_DISPATCH_FLOATING_TYPES(key_dtype, "rotary_embedding_k_fused_ramp", [&] {
+    auto* key = reinterpret_cast<scalar_t*>(key_ptr);
+    auto* cos_sin = reinterpret_cast<const scalar_t*>(cos_sin_cache_ptr);
+    if (is_neox) {
+      lmc::rotary_embedding_kernel_fused_ramp<scalar_t, true>
+          <<<grid, block, 0, stream>>>(old_st, new_st, slots, key, cos_sin,
+                                       rot_dim, key_stride, num_kv_heads,
+                                       head_size, head_stride);
+    } else {
+      lmc::rotary_embedding_kernel_fused_ramp<scalar_t, false>
+          <<<grid, block, 0, stream>>>(old_st, new_st, slots, key, cos_sin,
+                                       rot_dim, key_stride, num_kv_heads,
+                                       head_size, head_stride);
+    }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  });
 }
 
 // Fused ramp entry: one launch, up to MAX_FUSED_TRANSFER_CHUNKS slots.
@@ -259,9 +258,9 @@ void rotary_embedding_k_fused_ramp_multi_ptr(
   const int n_chunks = static_cast<int>(key_ptrs.size());
   TORCH_CHECK(n_chunks >= 1 && n_chunks <= MAX_FUSED_TRANSFER_CHUNKS,
               "fused rope chunk count out of range: ", n_chunks);
-  TORCH_CHECK(old_sts.size() == key_ptrs.size() &&
-                  new_sts.size() == key_ptrs.size(),
-              "fused rope parameter vectors must be the same length");
+  TORCH_CHECK(
+      old_sts.size() == key_ptrs.size() && new_sts.size() == key_ptrs.size(),
+      "fused rope parameter vectors must be the same length");
   int64_t key_stride = num_kv_heads * head_stride;
 
   dim3 grid(num_tokens, n_chunks);

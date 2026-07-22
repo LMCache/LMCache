@@ -155,7 +155,7 @@ struct CBGroupSpec {
   EngineKVFormat engine_kv_format;
   int page_buffer_size;
   int block_size;
-  int head_size;  // scatter kernel head_size (element units)
+  int head_size;                  // scatter kernel head_size (element units)
   uintptr_t slot_mapping_base;    // device int64*, whole-request slot mapping
   int64_t slot_mapping_capacity;  // int64 elements behind slot_mapping_base
   // Re-RoPE (cos_sin_cache == 0 disables rope for this group).

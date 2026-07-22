@@ -167,36 +167,35 @@ PYBIND11_MODULE(c_ops, m) {
   // (blend_v3.cb_retrieve_pre_computed) and consumed by
   // execute_cb_retrieve_plan.
   py::class_<CBGroupSpec>(m, "CBGroupSpec")
-      .def(py::init([](uintptr_t paged_kv_ptrs,
-                       std::vector<int64_t> temp_buffer_ptrs, int num_layers,
-                       int slot_tokens, int hidden_elems, int element_size,
-                       EngineKVFormat engine_kv_format, int page_buffer_size,
-                       int block_size, int head_size,
-                       uintptr_t slot_mapping_base,
-                       int64_t slot_mapping_capacity, uintptr_t cos_sin_cache,
-                       int rot_dim, int rope_num_kv_heads,
-                       int64_t rope_head_size, int64_t rope_head_stride,
-                       int key_scalar_type, bool is_neox) {
-             return CBGroupSpec{paged_kv_ptrs,
-                                std::move(temp_buffer_ptrs),
-                                num_layers,
-                                slot_tokens,
-                                hidden_elems,
-                                element_size,
-                                engine_kv_format,
-                                page_buffer_size,
-                                block_size,
-                                head_size,
-                                slot_mapping_base,
-                                slot_mapping_capacity,
-                                cos_sin_cache,
-                                rot_dim,
-                                rope_num_kv_heads,
-                                rope_head_size,
-                                rope_head_stride,
-                                key_scalar_type,
-                                is_neox};
-           }),
+      .def(py::init(
+               [](uintptr_t paged_kv_ptrs,
+                  std::vector<int64_t> temp_buffer_ptrs, int num_layers,
+                  int slot_tokens, int hidden_elems, int element_size,
+                  EngineKVFormat engine_kv_format, int page_buffer_size,
+                  int block_size, int head_size, uintptr_t slot_mapping_base,
+                  int64_t slot_mapping_capacity, uintptr_t cos_sin_cache,
+                  int rot_dim, int rope_num_kv_heads, int64_t rope_head_size,
+                  int64_t rope_head_stride, int key_scalar_type, bool is_neox) {
+                 return CBGroupSpec{paged_kv_ptrs,
+                                    std::move(temp_buffer_ptrs),
+                                    num_layers,
+                                    slot_tokens,
+                                    hidden_elems,
+                                    element_size,
+                                    engine_kv_format,
+                                    page_buffer_size,
+                                    block_size,
+                                    head_size,
+                                    slot_mapping_base,
+                                    slot_mapping_capacity,
+                                    cos_sin_cache,
+                                    rot_dim,
+                                    rope_num_kv_heads,
+                                    rope_head_size,
+                                    rope_head_stride,
+                                    key_scalar_type,
+                                    is_neox};
+               }),
            py::arg("paged_kv_ptrs"), py::arg("temp_buffer_ptrs"),
            py::arg("num_layers"), py::arg("slot_tokens"),
            py::arg("hidden_elems"), py::arg("element_size"),
@@ -214,15 +213,15 @@ PYBIND11_MODULE(c_ops, m) {
       .def_readwrite("slot_mapping_capacity",
                      &CBGroupSpec::slot_mapping_capacity);
   py::class_<CBRopeVar>(m, "CBRopeVar")
-      .def(py::init([](int group_idx, int slot_idx, int64_t old_st,
-                       int64_t cur_st) {
-             return CBRopeVar{group_idx, slot_idx, old_st, cur_st};
-           }),
+      .def(py::init(
+               [](int group_idx, int slot_idx, int64_t old_st, int64_t cur_st) {
+                 return CBRopeVar{group_idx, slot_idx, old_st, cur_st};
+               }),
            py::arg("group_idx"), py::arg("slot_idx"), py::arg("old_st"),
            py::arg("cur_st"));
   py::class_<CBScatterVar>(m, "CBScatterVar")
-      .def(py::init([](int group_idx, int slot_idx,
-                       int64_t slot_mapping_offset, int n_tok) {
+      .def(py::init([](int group_idx, int slot_idx, int64_t slot_mapping_offset,
+                       int n_tok) {
              return CBScatterVar{group_idx, slot_idx, slot_mapping_offset,
                                  n_tok};
            }),
@@ -287,11 +286,11 @@ PYBIND11_MODULE(c_ops, m) {
           CBRetrieveStep step;
           step.staging.reserve(s1 - s0);
           for (int64_t j = s0; j < s1; ++j) {
-            step.staging.push_back(StagingCopy{
-                static_cast<uintptr_t>(st[j * 4 + 0]),
-                static_cast<uintptr_t>(st[j * 4 + 1]),
-                static_cast<size_t>(st[j * 4 + 2]),
-                static_cast<size_t>(st[j * 4 + 3])});
+            step.staging.push_back(
+                StagingCopy{static_cast<uintptr_t>(st[j * 4 + 0]),
+                            static_cast<uintptr_t>(st[j * 4 + 1]),
+                            static_cast<size_t>(st[j * 4 + 2]),
+                            static_cast<size_t>(st[j * 4 + 3])});
           }
           step.ropes.reserve(r1 - r0);
           for (int64_t j = r0; j < r1; ++j) {

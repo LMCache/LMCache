@@ -732,8 +732,7 @@ void multi_layer_kv_transfer_templated(
       key_value_ptr, page_buffer_ptrs, slot_mapping_ptr, key_value.size(1),
       key_value.size(2), key_value.size(2), key_value.size(3),
       key_value.element_size(), paged_memory_device, page_buffer_size,
-      direction, engine_kv_format, block_size, head_size,
-      skip_prefix_n_tokens);
+      direction, engine_kv_format, block_size, head_size, skip_prefix_n_tokens);
 }
 
 template <typename T>
@@ -784,53 +783,51 @@ void multi_layer_kv_transfer_fused_templated(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
 #ifndef LAUNCH_FUSED_WITH_FORMAT
-  #define LAUNCH_FUSED_WITH_FORMAT(T_, DIR, FORMAT)                     \
-    lmc::load_and_reshape_multi_layer_fused_kernel<T_, DIR, FORMAT>     \
-        <<<grid, block, 0, stream>>>(pack, page_buffer_ptrs,            \
-                                     k_or_v_size, num_xwords,           \
-                                     num_tokens, num_layers,            \
-                                     page_buffer_size, block_size,      \
-                                     head_size_xword);                  \
+  #define LAUNCH_FUSED_WITH_FORMAT(T_, DIR, FORMAT)                      \
+    lmc::load_and_reshape_multi_layer_fused_kernel<T_, DIR, FORMAT>      \
+        <<<grid, block, 0, stream>>>(                                    \
+            pack, page_buffer_ptrs, k_or_v_size, num_xwords, num_tokens, \
+            num_layers, page_buffer_size, block_size, head_size_xword);  \
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 #endif
 #ifndef FUSED_FORMAT_SWITCH
   #define FUSED_FORMAT_SWITCH(T_, DIR)                                        \
-    switch (engine_kv_format) {                                              \
-      case EngineKVFormat::NB_NL_TWO_BS_NH_HS:                               \
-        LAUNCH_FUSED_WITH_FORMAT(T_, DIR, EngineKVFormat::NB_NL_TWO_BS_NH_HS)\
-        break;                                                               \
-      case EngineKVFormat::NL_X_TWO_NB_BS_NH_HS:                             \
-        LAUNCH_FUSED_WITH_FORMAT(T_, DIR,                                    \
-                                 EngineKVFormat::NL_X_TWO_NB_BS_NH_HS)       \
-        break;                                                               \
-      case EngineKVFormat::NL_X_NB_TWO_BS_NH_HS:                             \
-        LAUNCH_FUSED_WITH_FORMAT(T_, DIR,                                    \
-                                 EngineKVFormat::NL_X_NB_TWO_BS_NH_HS)       \
-        break;                                                               \
-      case EngineKVFormat::NL_X_NB_BS_HS:                                    \
-        LAUNCH_FUSED_WITH_FORMAT(T_, DIR, EngineKVFormat::NL_X_NB_BS_HS)     \
-        break;                                                               \
-      case EngineKVFormat::NL_X_NBBS_ONE_HS:                                 \
-        LAUNCH_FUSED_WITH_FORMAT(T_, DIR, EngineKVFormat::NL_X_NBBS_ONE_HS)  \
-        break;                                                               \
-      case EngineKVFormat::NL_X_TWO_NB_NH_BS_HS:                             \
-        LAUNCH_FUSED_WITH_FORMAT(T_, DIR,                                    \
-                                 EngineKVFormat::NL_X_TWO_NB_NH_BS_HS)       \
-        break;                                                               \
-      case EngineKVFormat::NL_X_NB_TWO_NH_BS_HS:                             \
-        LAUNCH_FUSED_WITH_FORMAT(T_, DIR,                                    \
-                                 EngineKVFormat::NL_X_NB_TWO_NH_BS_HS)       \
-        break;                                                               \
-      case EngineKVFormat::NL_X_NB_NH_BS_TWO_HS:                             \
-        LAUNCH_FUSED_WITH_FORMAT(T_, DIR,                                    \
-                                 EngineKVFormat::NL_X_NB_NH_BS_TWO_HS)       \
-        break;                                                               \
-      case EngineKVFormat::NL_X_NB_BS_NH_TWO_HS:                             \
-        LAUNCH_FUSED_WITH_FORMAT(T_, DIR,                                    \
-                                 EngineKVFormat::NL_X_NB_BS_NH_TWO_HS)       \
-        break;                                                               \
-      default:                                                               \
-        throw std::runtime_error("Unsupported EngineKVFormat");              \
+    switch (engine_kv_format) {                                               \
+      case EngineKVFormat::NB_NL_TWO_BS_NH_HS:                                \
+        LAUNCH_FUSED_WITH_FORMAT(T_, DIR, EngineKVFormat::NB_NL_TWO_BS_NH_HS) \
+        break;                                                                \
+      case EngineKVFormat::NL_X_TWO_NB_BS_NH_HS:                              \
+        LAUNCH_FUSED_WITH_FORMAT(T_, DIR,                                     \
+                                 EngineKVFormat::NL_X_TWO_NB_BS_NH_HS)        \
+        break;                                                                \
+      case EngineKVFormat::NL_X_NB_TWO_BS_NH_HS:                              \
+        LAUNCH_FUSED_WITH_FORMAT(T_, DIR,                                     \
+                                 EngineKVFormat::NL_X_NB_TWO_BS_NH_HS)        \
+        break;                                                                \
+      case EngineKVFormat::NL_X_NB_BS_HS:                                     \
+        LAUNCH_FUSED_WITH_FORMAT(T_, DIR, EngineKVFormat::NL_X_NB_BS_HS)      \
+        break;                                                                \
+      case EngineKVFormat::NL_X_NBBS_ONE_HS:                                  \
+        LAUNCH_FUSED_WITH_FORMAT(T_, DIR, EngineKVFormat::NL_X_NBBS_ONE_HS)   \
+        break;                                                                \
+      case EngineKVFormat::NL_X_TWO_NB_NH_BS_HS:                              \
+        LAUNCH_FUSED_WITH_FORMAT(T_, DIR,                                     \
+                                 EngineKVFormat::NL_X_TWO_NB_NH_BS_HS)        \
+        break;                                                                \
+      case EngineKVFormat::NL_X_NB_TWO_NH_BS_HS:                              \
+        LAUNCH_FUSED_WITH_FORMAT(T_, DIR,                                     \
+                                 EngineKVFormat::NL_X_NB_TWO_NH_BS_HS)        \
+        break;                                                                \
+      case EngineKVFormat::NL_X_NB_NH_BS_TWO_HS:                              \
+        LAUNCH_FUSED_WITH_FORMAT(T_, DIR,                                     \
+                                 EngineKVFormat::NL_X_NB_NH_BS_TWO_HS)        \
+        break;                                                                \
+      case EngineKVFormat::NL_X_NB_BS_NH_TWO_HS:                              \
+        LAUNCH_FUSED_WITH_FORMAT(T_, DIR,                                     \
+                                 EngineKVFormat::NL_X_NB_BS_NH_TWO_HS)        \
+        break;                                                                \
+      default:                                                                \
+        throw std::runtime_error("Unsupported EngineKVFormat");               \
     }
 #endif
   if (direction == TransferDirection::H2D) {
@@ -853,13 +850,13 @@ void multi_layer_kv_transfer_fused_ptr(
     const int head_size) {
   int copy_size = num_origin_elements * element_size;
 #ifndef LAUNCH_FUSED_TRANSFER
-  #define LAUNCH_FUSED_TRANSFER(type)                                       \
-    do {                                                                    \
-      multi_layer_kv_transfer_fused_templated<type>(                        \
-          key_values, slot_mappings, n_toks, page_buffer_ptrs, num_layers,  \
-          layout_num_tokens, num_origin_elements, element_size,             \
-          paged_memory_device, page_buffer_size, direction,                 \
-          engine_kv_format, block_size, head_size);                         \
+  #define LAUNCH_FUSED_TRANSFER(type)                                         \
+    do {                                                                      \
+      multi_layer_kv_transfer_fused_templated<type>(                          \
+          key_values, slot_mappings, n_toks, page_buffer_ptrs, num_layers,    \
+          layout_num_tokens, num_origin_elements, element_size,               \
+          paged_memory_device, page_buffer_size, direction, engine_kv_format, \
+          block_size, head_size);                                             \
     } while (0)
 #endif
   if (copy_size % 8 == 0) {
@@ -888,15 +885,15 @@ void multi_layer_kv_transfer_ptr(
     const int head_size, const int skip_prefix_n_tokens) {
   int copy_size = num_origin_elements * element_size;
 #ifndef LAUNCH_MULTI_LAYER_KV_TRANSFER_PTR
-  #define LAUNCH_MULTI_LAYER_KV_TRANSFER_PTR(type)                             \
-    do {                                                                       \
-      multi_layer_kv_transfer_ptr_templated<type>(                             \
-          reinterpret_cast<type*>(key_value),                                  \
-          reinterpret_cast<type**>(page_buffer_ptrs),                          \
-          reinterpret_cast<const int64_t*>(slot_mapping), num_layers,          \
-          layout_num_tokens, transfer_num_tokens, num_origin_elements,         \
-          element_size, paged_memory_device, page_buffer_size, direction,      \
-          engine_kv_format, block_size, head_size, skip_prefix_n_tokens);      \
+  #define LAUNCH_MULTI_LAYER_KV_TRANSFER_PTR(type)                        \
+    do {                                                                  \
+      multi_layer_kv_transfer_ptr_templated<type>(                        \
+          reinterpret_cast<type*>(key_value),                             \
+          reinterpret_cast<type**>(page_buffer_ptrs),                     \
+          reinterpret_cast<const int64_t*>(slot_mapping), num_layers,     \
+          layout_num_tokens, transfer_num_tokens, num_origin_elements,    \
+          element_size, paged_memory_device, page_buffer_size, direction, \
+          engine_kv_format, block_size, head_size, skip_prefix_n_tokens); \
     } while (0)
 #endif
   if (copy_size % 8 == 0) {
