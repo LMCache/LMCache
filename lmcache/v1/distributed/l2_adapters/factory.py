@@ -145,10 +145,18 @@ def load_all_adapters() -> None:
         mod_path = _PENDING_MODULES.pop(0)
         try:
             importlib.import_module(mod_path)
-        except ImportError:
+        except Exception as exc:
+            # Bulk enumeration is best-effort (it backs CLI help text), so an
+            # adapter that fails to import must never take the whole CLI down.
+            # A missing third-party dep raises ImportError, but an *installed*
+            # but incompatible one can raise other errors too -- e.g. an
+            # incompatible google-cloud-bigtable/protobuf pairing raises
+            # TypeError during the bigtable adapter import (#4204). Skip any
+            # such module instead of letting the error escape.
             logger.debug(
-                "Skipping module %s during bulk load",
+                "Skipping module %s during bulk load (%s)",
                 mod_path,
+                exc,
             )
 
 
