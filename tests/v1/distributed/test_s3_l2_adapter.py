@@ -774,25 +774,26 @@ class TestConfig:
             )
 
 
-def test_path_style_uses_service_host_bucket_prefix_and_bucket_root():
-    """Path-style requests address objects and ListObjectsV2 under the bucket."""
-    config = S3L2AdapterConfig(
-        s3_endpoint="s3.example.test",
-        s3_region="us-east-1",
-        s3_addressing_style="path",
-        s3_bucket="path-bucket",
-        s3_prefer_http2=False,
-        s3_num_io_threads=1,
-    )
-    adapter = S3L2Adapter(config)
-    try:
-        request = adapter._make_request("GET", "object@key")
-        assert request.path == "/path-bucket/object%40key"
+class TestPathStyleAddressing:
+    def test_uses_service_host_bucket_prefix_and_bucket_root(self):
+        """Path-style requests address objects and ListObjectsV2 under the bucket."""
+        config = S3L2AdapterConfig(
+            s3_endpoint="s3.example.test",
+            s3_region="us-east-1",
+            s3_addressing_style="path",
+            s3_bucket="path-bucket",
+            s3_prefer_http2=False,
+            s3_num_io_threads=1,
+        )
+        adapter = S3L2Adapter(config)
+        try:
+            request = adapter._make_request("GET", "object@key")
+            assert request.path == "/path-bucket/object%40key"
 
-        s3_request, _body_chunks, _captured = adapter._list_request(None, 100, None)
-        assert s3_request.request.path.startswith("/path-bucket/?list-type=2")
-    finally:
-        adapter.close()
+            s3_request, _body_chunks, _captured = adapter._list_request(None, 100, None)
+            assert s3_request.request.path.startswith("/path-bucket/?list-type=2")
+        finally:
+            adapter.close()
 
 
 # =============================================================================
