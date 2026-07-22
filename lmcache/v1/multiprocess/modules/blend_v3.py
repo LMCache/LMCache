@@ -10,7 +10,9 @@ retrieve scatters into the request's paged blocks.
 from dataclasses import dataclass
 from queue import Empty as QueueEmpty
 from queue import Queue
+from collections import OrderedDict
 from typing import TYPE_CHECKING, Any
+import os
 import threading
 import time
 
@@ -36,7 +38,11 @@ from lmcache.v1.distributed.api import (
     ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.storage_manager import PrefetchHandle
-from lmcache.v1.gpu_connector.gpu_ops import lmcache_memcpy_async_h2d
+from lmcache.v1.gpu_connector.gpu_ops import (
+    build_staging_copies,
+    lmcache_memcpy_async_h2d,
+)
+from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.mp_coordinator.blend_client import PENDING
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
@@ -66,6 +72,26 @@ from lmcache.v1.platform.base.cache_context import BaseCacheContext
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
+
+# Plan-then-execute retrieve: one native call enqueues all fill/rope/scatter
+# in a single GIL release; the Python wave loop stays as fallback.
+# Kill switch: LMCACHE_CB_NATIVE_RETRIEVE_PLAN=0.
+_CB_NATIVE_RETRIEVE_PLAN = os.environ.get(
+    "LMCACHE_CB_NATIVE_RETRIEVE_PLAN", "1"
+) == "1" and hasattr(lmc_ops, "execute_cb_retrieve_plan")
+
+# Plan as numpy int64 tables (one pybind crossing) instead of ~5 pybind
+# objects per chunk. Kill switch: LMCACHE_CB_FLAT_PLAN=0.
+_CB_FLAT_PLAN = os.environ.get("LMCACHE_CB_FLAT_PLAN", "1") == "1" and hasattr(
+    lmc_ops, "execute_cb_retrieve_plan_flat"
+)
+
+# torch dtype -> at::ScalarType (rope dispatch); missing -> Python fallback.
+_TORCH_TO_AT_SCALAR = {
+    torch.float16: 5,  # at::ScalarType::Half
+    torch.float32: 6,  # at::ScalarType::Float
+    torch.bfloat16: 15,  # at::ScalarType::BFloat16
+}
 
 
 @dataclass
@@ -1551,6 +1577,422 @@ class BlendV3Module(InstanceLivenessTarget):
                         rope_state.is_neox_style,
                     )
 
+    def _scatter_batch_to_paged(
+        self,
+        gpu_context: BaseCacheContext,
+        resolved_groups: "list[tuple[torch.Tensor, int]]",
+        batch: "list[tuple[CBMatchResult, Any]]",
+        head_size: int,
+    ) -> None:
+        """Scatter one tmp-slot batch into the paged KV, one launch per
+        (kernel group, tmp slot), straight from each slot's contiguous buffer
+        (no ``torch.cat``). A partially filled slot is narrowed first: the
+        kernel scatters ``size(2)`` tokens, so a full-capacity buffer would
+        mis-align every later slot against ``slot_mapping``.
+
+        Args:
+            gpu_context (GPUCacheContext): The instance's GPU cache context.
+            resolved_groups: Per kernel group ``(block_ids, block_size)``.
+            batch: ``(match, memory_obj)`` pairs; slot ``i`` holds ``batch[i]``.
+            head_size: RoPE head size forwarded to the kernel.
+        """
+        kgm = gpu_context.kv_layer_groups_manager
+        tok_counts = [int(r.cur_ed - r.cur_st) for (r, _) in batch]
+        pos = torch.cat(
+            [
+                torch.arange(
+                    r.cur_st,
+                    r.cur_ed,
+                    device=gpu_context.device,
+                    dtype=torch.long,
+                )
+                for (r, _) in batch
+            ]
+        )
+        for group_idx in range(kgm.num_kernel_groups):
+            # This group's block table + size (resolved by the caller).
+            group_block_ids, group_bs = resolved_groups[group_idx]
+            # Per-group block count: under HMA the sliding group has fewer
+            # blocks than the full group, so gpu_context.num_blocks (group
+            # 0's) would truncate the other groups' bounds check.
+            page_buffer_size = kgm.kernel_groups[group_idx].shape_desc.nb * group_bs
+            slot_mapping = group_block_ids[pos // group_bs] * group_bs + (
+                pos % group_bs
+            )
+            tok_off = 0
+            for slot_idx, n_tok in enumerate(tok_counts):
+                key_value = gpu_context.get_temp_kernel_group_buffer(
+                    slot_idx, group_idx
+                )
+                if n_tok < key_value.shape[2]:
+                    # Partial chunk: narrow to the real token count (the
+                    # kernel scatters size(2) tokens). Slicing dim 2 breaks
+                    # contiguity, so this one slot pays a small copy.
+                    key_value = key_value[:, :, :n_tok].contiguous()
+                lmc_ops.multi_layer_kv_transfer(
+                    key_value,
+                    gpu_context.get_kernel_group_kv_pointers(group_idx),
+                    slot_mapping[tok_off : tok_off + n_tok],
+                    gpu_context.device,
+                    page_buffer_size,
+                    lmc_ops.TransferDirection.H2D,
+                    gpu_context.get_engine_kv_format(group_idx),
+                    block_size=group_bs,
+                    head_size=head_size,
+                )
+                tok_off += n_tok
+
+    def _resolve_cb_plan_invariants(
+        self,
+        gpu_context: BaseCacheContext,
+        rope_state: _CBRopeState,
+        max_batch: int,
+    ) -> "tuple[list[Any], list[torch.Tensor]] | None":
+        """Resolve the request-invariant plan half (cached on gpu_context).
+
+        Returns ``(group_specs, object_group_buffers)`` with slot-mapping
+        fields as placeholders for the per-request stamp, or ``None`` on an
+        unsupported layout (compressed / kv_size / dtype / head geometry).
+        """
+        kgm = gpu_context.kv_layer_groups_manager
+        group_specs: list[Any] = []
+        for group_idx in range(kgm.num_kernel_groups):
+            group = kgm.kernel_groups[group_idx]
+            if group.tokens_per_block != group.slots_per_block:
+                return None  # compressed layouts unsupported (rope parity)
+            buf0 = gpu_context.get_temp_kernel_group_buffer(0, group_idx)
+            kv_size = int(buf0.shape[0])
+            if kv_size not in (1, 2):
+                return None
+            num_layers, slot_tokens, hidden_dim = (
+                int(buf0.shape[1]),
+                int(buf0.shape[2]),
+                int(buf0.shape[3]),
+            )
+            at_scalar = _TORCH_TO_AT_SCALAR.get(buf0.dtype)
+            if at_scalar is None:
+                return None
+            # Same per-group rope geometry as _apply_cb_rope_batched: fused
+            # blocks-first K/V packs K+V into a doubled head width, and only
+            # the K half is rotated (head_stride hops over the packed V).
+            _ekf = getattr(group, "engine_kv_format", None)
+            fused_packed = _ekf is not None and int(_ekf) in (
+                int(lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
+                int(lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS),
+            )
+            per_head = rope_state.head_size * (2 if fused_packed else 1)
+            n_heads = hidden_dim // per_head
+            if n_heads * per_head != hidden_dim:
+                return None
+            group_cos_sin = rope_state.cache_for_group(group.engine_group_idx)
+            group_bs = group.tokens_per_block
+
+            group_specs.append(
+                lmc_ops.CBGroupSpec(
+                    paged_kv_ptrs=gpu_context.get_kernel_group_kv_pointers(
+                        group_idx
+                    ).data_ptr(),
+                    temp_buffer_ptrs=[
+                        gpu_context.get_temp_kernel_group_buffer(
+                            slot, group_idx
+                        ).data_ptr()
+                        for slot in range(max_batch)
+                    ],
+                    num_layers=num_layers,
+                    slot_tokens=slot_tokens,
+                    hidden_elems=hidden_dim,
+                    element_size=buf0.element_size(),
+                    engine_kv_format=gpu_context.get_engine_kv_format(group_idx),
+                    page_buffer_size=group.shape_desc.nb * group_bs,
+                    block_size=group_bs,
+                    head_size=rope_state.head_size,
+                    slot_mapping_base=0,
+                    slot_mapping_capacity=0,
+                    cos_sin_cache=group_cos_sin.data_ptr(),
+                    rot_dim=int(group_cos_sin.shape[1]),
+                    rope_num_kv_heads=n_heads,
+                    rope_head_size=rope_state.head_size,
+                    rope_head_stride=per_head,
+                    key_scalar_type=at_scalar,
+                    is_neox=rope_state.is_neox_style,
+                )
+            )
+        object_group_buffers = [
+            gpu_context.get_temp_object_group_buffer(slot, 0)
+            for slot in range(max_batch)
+        ]
+        return group_specs, object_group_buffers
+
+    def _build_cb_retrieve_plan(
+        self,
+        gpu_context: BaseCacheContext,
+        rope_state: _CBRopeState,
+        resolved_groups: "list[tuple[torch.Tensor, int]]",
+        runs: "list[list[tuple[CBMatchResult, Any]]]",
+        max_batch: int,
+    ) -> "tuple[list[Any], list[Any], list[torch.Tensor]] | None":
+        """Resolve a whole retrieve into an ``execute_cb_retrieve_plan`` plan
+        (pointers/scalars only, no CUDA work).
+
+        ``keepalive`` holds the device tensors the plan points into; keep it
+        referenced until the native call is submitted (stream ordering covers
+        the async kernels after that).
+
+        Returns:
+            ``(group_specs, steps, keepalive)``, or ``None`` -> Python
+            fallback (old c_ops, non-lazy objects, unsupported layout).
+        """
+        common = self._prepare_cb_plan_common(
+            gpu_context, rope_state, resolved_groups, runs, max_batch
+        )
+        if common is None:
+            return None
+        group_specs, object_group_buffers, keepalive, num_groups = common
+        return self._finish_build_cb_retrieve_plan_steps(
+            runs, max_batch, group_specs, object_group_buffers, keepalive, num_groups
+        )
+
+    def _build_cb_retrieve_plan_flat(
+        self,
+        gpu_context: BaseCacheContext,
+        rope_state: _CBRopeState,
+        resolved_groups: "list[tuple[torch.Tensor, int]]",
+        runs: "list[list[tuple[CBMatchResult, Any]]]",
+        max_batch: int,
+    ) -> "tuple[list[Any], tuple[Any, Any, Any, Any], list[torch.Tensor]] | None":
+        """Flat-table plan encoding: numpy-vectorized int64 tables for
+        ``execute_cb_retrieve_plan_flat`` (layouts in the pybind docstring).
+
+        Returns:
+            ``(group_specs, (staging, ropes, scatters, step_offsets),
+            keepalive)`` or ``None`` -> object/Python fallbacks.
+        """
+        if max_batch < 2:
+            return None
+        common = self._prepare_cb_plan_common(
+            gpu_context, rope_state, resolved_groups, runs, max_batch
+        )
+        if common is None:
+            return None
+        group_specs, object_group_buffers, keepalive, num_groups = common
+        wave = max_batch // 2
+
+        pairs = [pair for run in runs for pair in run]
+        n = len(pairs)
+        cur_st = np.empty(n, dtype=np.int64)
+        cur_ed = np.empty(n, dtype=np.int64)
+        old_st = np.empty(n, dtype=np.int64)
+        src = np.empty(n, dtype=np.int64)
+        nbytes = np.empty(n, dtype=np.int64)
+        host_off = np.empty(n, dtype=np.int64)
+        for i, (r, memory_obj) in enumerate(pairs):
+            cur_st[i] = r.cur_st
+            cur_ed[i] = r.cur_ed
+            old_st[i] = r.old_st
+            src[i] = memory_obj.data_ptr
+            nbytes[i] = memory_obj.get_size()
+            host_off[i] = memory_obj.meta.address
+        buf_bytes = int(object_group_buffers[0].nbytes)
+        if (nbytes != buf_bytes).any():
+            # Size mismatch: object path raises the descriptive error.
+            return None
+
+        # Waves of `wave` chunks per run, alternating slot halves.
+        slot_of = np.empty(n, dtype=np.int64)
+        step_lens: list[int] = []
+        i0 = 0
+        for run in runs:
+            m = len(run)
+            for w0 in range(0, m, wave):
+                batch_len = min(wave, m - w0)
+                slot_base = (len(step_lens) % 2) * wave
+                slot_of[i0 : i0 + batch_len] = slot_base + np.arange(
+                    batch_len, dtype=np.int64
+                )
+                step_lens.append(batch_len)
+                i0 += batch_len
+        chunks_per_step = np.asarray(step_lens, dtype=np.int64)
+        n_steps = len(step_lens)
+
+        n_tok = cur_ed - cur_st
+        tok_off = np.zeros(n, dtype=np.int64)
+        np.cumsum(n_tok[:-1], out=tok_off[1:])
+
+        obj_buf_ptrs = np.asarray(
+            [buf.data_ptr() for buf in object_group_buffers], dtype=np.int64
+        )
+        staging = np.stack(
+            [obj_buf_ptrs[slot_of], src, nbytes, host_off], axis=1
+        )
+
+        groups_arr = np.arange(num_groups, dtype=np.int64)
+        shifted = old_st != cur_st
+        n_shifted = int(shifted.sum())
+        ropes = np.stack(
+            [
+                np.tile(groups_arr, n_shifted),
+                np.repeat(slot_of[shifted], num_groups),
+                np.repeat(old_st[shifted], num_groups),
+                np.repeat(cur_st[shifted], num_groups),
+            ],
+            axis=1,
+        )
+        scatters = np.stack(
+            [
+                np.tile(groups_arr, n),
+                np.repeat(slot_of, num_groups),
+                np.repeat(tok_off, num_groups),
+                np.repeat(n_tok, num_groups),
+            ],
+            axis=1,
+        )
+
+        staging_end = np.cumsum(chunks_per_step)
+        step_of_chunk = np.repeat(
+            np.arange(n_steps, dtype=np.int64), chunks_per_step
+        )
+        shifted_per_step = np.bincount(
+            step_of_chunk[shifted], minlength=n_steps
+        ).astype(np.int64)
+        step_offsets = np.stack(
+            [
+                staging_end,
+                np.cumsum(shifted_per_step) * num_groups,
+                staging_end * num_groups,
+            ],
+            axis=1,
+        )
+        return (
+            group_specs,
+            (staging, ropes, scatters, step_offsets),
+            keepalive,
+        )
+
+    def _prepare_cb_plan_common(
+        self,
+        gpu_context: BaseCacheContext,
+        rope_state: _CBRopeState,
+        resolved_groups: "list[tuple[torch.Tensor, int]]",
+        runs: "list[list[tuple[CBMatchResult, Any]]]",
+        max_batch: int,
+    ) -> "tuple[list[Any], list[torch.Tensor], list[torch.Tensor], int] | None":
+        """Shared plan front half: eligibility gates, cached invariant specs,
+        and this request's slot mappings stamped into them.
+
+        Returns:
+            ``(group_specs, object_group_buffers, keepalive, num_groups)``,
+            or ``None`` -> Python fallback loop.
+        """
+        if not _CB_NATIVE_RETRIEVE_PLAN:
+            return None
+        pairs_flat = [pair for run in runs for pair in run]
+        if not pairs_flat:
+            return None
+        # Native staging requires the lazy-allocator (pin-chunked) host path.
+        for _, memory_obj in pairs_flat:
+            if not isinstance(memory_obj.parent(), LazyMemoryAllocator):
+                return None
+
+        kgm = gpu_context.kv_layer_groups_manager
+        num_groups = kgm.num_kernel_groups
+        device = gpu_context.device
+
+        # Specs are invariant per paged registration except the slot-mapping
+        # fields: cache them on the context, re-stamp per request (the full
+        # resolve costs dozens of torch-view creations under the shared GIL).
+        cache_key = (id(rope_state), max_batch)
+        cached = getattr(gpu_context, "_cb_plan_invariants", None)
+        if cached is not None and cached[0] != cache_key:
+            cached = None
+        if cached is None:
+            resolved = self._resolve_cb_plan_invariants(
+                gpu_context, rope_state, max_batch
+            )
+            if resolved is None:
+                return None
+            cached = (cache_key, resolved)
+            gpu_context._cb_plan_invariants = cached
+        group_specs, object_group_buffers = cached[1]
+
+        # Shared logical positions, one arange per (consecutive) run --
+        # dispatch count is the cost that matters under the shared GIL.
+        run_pos = [
+            torch.arange(
+                run[0][0].cur_st, run[-1][0].cur_ed, device=device, dtype=torch.long
+            )
+            for run in runs
+            if run
+        ]
+        pos = run_pos[0] if len(run_pos) == 1 else torch.cat(run_pos)
+        keepalive: list[torch.Tensor] = [pos]
+
+        for group_idx in range(num_groups):
+            _, group_bs = resolved_groups[group_idx]
+            group_block_ids = resolved_groups[group_idx][0]
+            slot_mapping = group_block_ids[pos // group_bs] * group_bs + (
+                pos % group_bs
+            )
+            keepalive.append(slot_mapping)
+            # Safe to mutate: one handler per context, and the native call
+            # copies spec contents at call time.
+            group_specs[group_idx].slot_mapping_base = slot_mapping.data_ptr()
+            group_specs[group_idx].slot_mapping_capacity = slot_mapping.numel()
+        return group_specs, object_group_buffers, keepalive, num_groups
+
+    def _finish_build_cb_retrieve_plan_steps(
+        self,
+        runs: "list[list[tuple[CBMatchResult, Any]]]",
+        max_batch: int,
+        group_specs: "list[Any]",
+        object_group_buffers: "list[torch.Tensor]",
+        keepalive: "list[torch.Tensor]",
+        num_groups: int,
+    ) -> "tuple[list[Any], list[Any], list[torch.Tensor]] | None":
+        # Double-buffer contract: steps alternate disjoint slot halves so the
+        # executor can overlap step w's staging with step w-1's kernels
+        # (per-parity events order the w vs w-2 slot reuse). Needs >= 2 slots.
+        if max_batch < 2:
+            return None
+        wave = max_batch // 2
+        steps: list[Any] = []
+        tok_off = 0
+        step_idx = 0
+        for run in runs:
+            for batch_start in range(0, len(run), wave):
+                batch = run[batch_start : batch_start + wave]
+                slot_base = (step_idx % 2) * wave
+                step_idx += 1
+                staging = build_staging_copies(
+                    [memory_obj for _, memory_obj in batch],
+                    object_group_buffers[slot_base : slot_base + len(batch)],
+                    is_h2d=True,
+                )
+                ropes: list[Any] = []
+                scatters: list[Any] = []
+                for i, (r, _) in enumerate(batch):
+                    slot_idx = slot_base + i
+                    n_tok = int(r.cur_ed - r.cur_st)
+                    for group_idx in range(num_groups):
+                        if r.old_st != r.cur_st:
+                            ropes.append(
+                                lmc_ops.CBRopeVar(
+                                    group_idx,
+                                    slot_idx,
+                                    int(r.old_st),
+                                    int(r.cur_st),
+                                )
+                            )
+                        scatters.append(
+                            lmc_ops.CBScatterVar(group_idx, slot_idx, tok_off, n_tok)
+                        )
+                    tok_off += n_tok
+                steps.append(
+                    lmc_ops.CBRetrieveStep(
+                        staging=staging, ropes=ropes, scatters=scatters
+                    )
+                )
+        return group_specs, steps, keepalive
+
     def cb_retrieve_pre_computed(
         self,
         key: IPCCacheServerKey,
@@ -1601,7 +2043,60 @@ class BlendV3Module(InstanceLivenessTarget):
         chunk_size = self._ctx.chunk_size
 
         _retrieve_t0 = time.perf_counter()
+
+        def _noop_success() -> tuple[bytes, bool]:
+            """Zero-work success return: must export a fresh recorded event
+            from THIS process -- echoing the caller's own handle back makes
+            the worker re-import it (CUDA "invalid device context").
+            """
+            with (
+                torch_dev.device(gpu_context.device),
+                torch_dev.stream(gpu_context.stream),
+            ):
+                check_interprocess_event_support()
+                done_event = torch_dev.Event(interprocess=True)
+                done_event.record()
+                handle = done_event.ipc_handle()
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.CB_REQUEST_END,
+                    session_id=key.request_id,
+                )
+            )
+            return handle, True
         cb_match_result = sorted(cb_match_result, key=lambda r: r.cur_st)
+        # vLLM may call retrieve twice (partial- then full-block alloc); skip
+        # ranges already scattered (blocks never move mid-prefill), returning
+        # before the obj-key/prefetched-read machinery (~7-20 ms).
+        applied_ranges = getattr(self, "_cb_applied_match_ranges", None)
+        if applied_ranges is None:
+            applied_ranges = OrderedDict()
+            self._cb_applied_match_ranges = applied_ranges
+        prior_applied = applied_ranges.get(key.request_id)
+        if prior_applied:
+            cb_match_result = [
+                r
+                for r in cb_match_result
+                if (r.hash, r.cur_st, r.cur_ed) not in prior_applied
+            ]
+            if not cb_match_result:
+                return _noop_success()
+        applied_now: "set[tuple[bytes, int, int]]" = set()
+        # Partial-alloc first call: every match can be beyond the allocated
+        # slots -> return before the obj-key machinery. Read locks stay held
+        # for the full-alloc follow-up, as the in-loop drop path leaves them.
+        if cb_match_result:
+            try:
+                slot_bound = min(
+                    len(gpu_block_ids[kg.engine_group_idx]) * kg.tokens_per_block
+                    for kg in gpu_context.kv_layer_groups_manager.kernel_groups
+                )
+            except (IndexError, TypeError):
+                slot_bound = None
+            if slot_bound is not None and all(
+                r.cur_ed > slot_bound for r in cb_match_result
+            ):
+                return _noop_success()
         # L2 opt: reuse lookup's obj_keys cache; fall back to re-resolve.
         with self._lookup_obj_keys_lock:
             cached = self._lookup_obj_keys_cache.pop(key.request_id, None)
@@ -1641,13 +2136,9 @@ class BlendV3Module(InstanceLivenessTarget):
         n_shifted = len(cb_match_result) - n_non_shifted
 
         if not all_obj_keys:
-            self._event_bus.publish(
-                Event(
-                    event_type=EventType.CB_REQUEST_END,
-                    session_id=key.request_id,
-                )
-            )
-            return event_ipc_handle, True
+            # Same latent hazard as the guards above: this used to echo the
+            # caller's own event handle back.
+            return _noop_success()
 
         logger.debug("CB V3 retrieving object keys: %s", all_obj_keys)
 
@@ -1786,6 +2277,46 @@ class BlendV3Module(InstanceLivenessTarget):
                             runs.append([r_obj])
 
                     max_batch = gpu_context.max_batch_size
+
+                    # Fast path: one native call for the whole request; the
+                    # per-wave Python loop is the fallback.
+                    native_flat = (
+                        self._build_cb_retrieve_plan_flat(
+                            gpu_context, rope_state, resolved_groups, runs, max_batch
+                        )
+                        if _CB_FLAT_PLAN
+                        else None
+                    )
+                    native_plan = (
+                        None
+                        if native_flat is not None
+                        else self._build_cb_retrieve_plan(
+                            gpu_context, rope_state, resolved_groups, runs, max_batch
+                        )
+                    )
+                    if native_flat is not None or native_plan is not None:
+                        if native_flat is not None:
+                            plan_group_specs, plan_tables, _plan_keepalive = (
+                                native_flat
+                            )
+                            lmc_ops.execute_cb_retrieve_plan_flat(
+                                gpu_context.device,
+                                LazyMemoryAllocator.PIN_CHUNK_SIZE,
+                                plan_group_specs,
+                                *plan_tables,
+                            )
+                        else:
+                            plan_group_specs, plan_steps, _plan_keepalive = (
+                                native_plan
+                            )
+                            lmc_ops.execute_cb_retrieve_plan(
+                                gpu_context.device,
+                                LazyMemoryAllocator.PIN_CHUNK_SIZE,
+                                plan_group_specs,
+                                plan_steps,
+                            )
+                        runs = []  # plan covers every wave; skip the loop
+
                     for run in runs:
                         for batch_start in range(0, len(run), max_batch):
                             batch = run[batch_start : batch_start + max_batch]
@@ -1811,49 +2342,14 @@ class BlendV3Module(InstanceLivenessTarget):
 
                             # (c) Per-token slot scatter: partial vLLM blocks
                             # shared with recomputed tokens stay disjoint.
-                            pos = torch.cat(
-                                [
-                                    torch.arange(
-                                        r.cur_st,
-                                        r.cur_ed,
-                                        device=gpu_context.device,
-                                        dtype=torch.long,
-                                    )
-                                    for (r, _) in batch
-                                ]
+                            self._scatter_batch_to_paged(
+                                gpu_context,
+                                resolved_groups,
+                                batch,
+                                rope_state.head_size,
                             )
-                            for group_idx in range(num_groups):
-                                # This group's block table + size (resolved above).
-                                group_block_ids, group_bs = resolved_groups[group_idx]
-                                # Per-group block count: under HMA the sliding
-                                # group has fewer blocks than the full group, so
-                                # gpu_context.num_blocks (group 0's) would
-                                # truncate the other groups' bounds check.
-                                page_buffer_size = (
-                                    kgm.kernel_groups[group_idx].shape_desc.nb
-                                    * group_bs
-                                )
-                                slot_mapping = group_block_ids[
-                                    pos // group_bs
-                                ] * group_bs + (pos % group_bs)
-                                tmp_buffers = [
-                                    gpu_context.get_temp_kernel_group_buffer(
-                                        slot_idx, group_idx
-                                    )
-                                    for slot_idx in range(batch_len)
-                                ]
-                                key_value = torch.cat(tmp_buffers, dim=2)
-                                lmc_ops.multi_layer_kv_transfer(
-                                    key_value,
-                                    gpu_context.get_kernel_group_kv_pointers(group_idx),
-                                    slot_mapping,
-                                    gpu_context.device,
-                                    page_buffer_size,
-                                    lmc_ops.TransferDirection.H2D,
-                                    gpu_context.get_engine_kv_format(group_idx),
-                                    block_size=group_bs,
-                                    head_size=rope_state.head_size,
-                                )
+
+                    applied_now = {(r.hash, r.cur_st, r.cur_ed) for r, _ in pairs}
 
                     self._event_bus.publish_on_stream(
                         gpu_context.cupy_stream,
@@ -1893,6 +2389,14 @@ class BlendV3Module(InstanceLivenessTarget):
                     metadata={"success": True},
                 ),
             )
+
+        # Record scattered ranges for the repeat-call guard (bounded LRU).
+        if applied_now:
+            entry = applied_ranges.setdefault(key.request_id, set())
+            entry.update(applied_now)
+            applied_ranges.move_to_end(key.request_id)
+            while len(applied_ranges) > 4096:
+                applied_ranges.popitem(last=False)
 
         _scatter_ms = (time.perf_counter() - _retrieve_t0) * 1000
         logger.info(

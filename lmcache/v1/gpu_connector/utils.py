@@ -214,6 +214,7 @@ def normalize_and_discover_per_layer_formats(
     layer_index_groups: "Sequence[Sequence[int]]",
     serving_engine: EngineType,
     layout_hints: "LayoutHints | None" = None,
+    group_block_sizes: "Sequence[int] | None" = None,
 ) -> "tuple[DiscoverableKVCache, list[lmc_ops.EngineKVFormat]]":
     """Normalize the KV caches and return one Engine KV format per layer.
 
@@ -252,7 +253,17 @@ def normalize_and_discover_per_layer_formats(
     # that mixes layouts gets the right format per layer.
     groups = layer_index_groups or [range(len(kv_caches))]
     detected: dict[int, tuple[DiscoverableKVCache, "lmc_ops.EngineKVFormat"]] = {}
-    for indices in groups:
+    for gi, indices in enumerate(groups):
+        # This group's block size disambiguates the fused rank-4 packed layout's
+        # heads/block axes, whose order is model-dependent (see the vLLM
+        # detector). Per-group so a hybrid model (e.g. MiniMax-M3: full-attn +
+        # sparse-index groups) with differing block sizes resolves each correctly.
+        group_hints = layout_hints
+        if group_block_sizes is not None and gi < len(group_block_sizes):
+            group_hints = {
+                **(layout_hints or {}),
+                "tokens_per_block": group_block_sizes[gi],
+            }
         layers_by_shape: dict[Hashable, list[int]] = {}
         for i in indices:
             shape = getattr(kv_caches[i], "shape", None)
@@ -262,7 +273,7 @@ def normalize_and_discover_per_layer_formats(
             fmt, normalized = detect_format(
                 [kv_caches[i] for i in same_shape_indices],
                 serving_engine,
-                layout_hints,
+                group_hints,
             )
             for sub_idx, layer_idx in enumerate(same_shape_indices):
                 detected[layer_idx] = (normalized[sub_idx], fmt)

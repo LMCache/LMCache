@@ -566,3 +566,489 @@ def test_register_rope_requires_registered_instance():
 
     with pytest.raises(ValueError, match="no paged KV cache registered"):
         eng.cb_register_rope(1, [_unit_rope_cache_ipc()], 8, True, group_to_cache=[])
+
+
+# ---------------------------------------------------------------------------
+# Retrieve: per-slot paged scatter (no torch.cat of the batch)
+# ---------------------------------------------------------------------------
+
+
+def _build_scatter_engine_and_context(
+    num_groups: int,
+    num_slots: int,
+    spc: int = 4,
+    num_layers: int = 2,
+    hidden_dim: int = 8,
+):
+    """Engine with the real ``_scatter_batch_to_paged`` bound, plus a fake
+    GPU context whose tmp slot buffers are real (CPU) tensors — distinct
+    objects per (slot, group) so kernel calls can be identity-checked."""
+    # First Party
+    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+
+    eng = MagicMock(spec=v3_mod.BlendV3Module)
+    eng._scatter_batch_to_paged = v3_mod.BlendV3Module._scatter_batch_to_paged.__get__(
+        eng
+    )
+
+    # Third Party
+    import torch
+
+    gpu_context = MagicMock()
+    gpu_context.device = torch.device("cpu")
+    gpu_context.kv_layer_groups_manager.num_kernel_groups = num_groups
+    gpu_context.kv_layer_groups_manager.kernel_groups = [
+        SimpleNamespace(shape_desc=SimpleNamespace(nb=100))
+        for _ in range(num_groups)
+    ]
+
+    buffers = {
+        (slot, group): torch.zeros(2, num_layers, spc, hidden_dim)
+        for slot in range(num_slots)
+        for group in range(num_groups)
+    }
+    gpu_context.get_temp_kernel_group_buffer.side_effect = lambda s, g: buffers[
+        (s, g)
+    ]
+    return eng, gpu_context, buffers
+
+
+def _match(cur_st: int, cur_ed: int):
+    return SimpleNamespace(cur_st=cur_st, cur_ed=cur_ed, old_st=cur_st)
+
+
+def test_scatter_launches_per_slot_without_cat():
+    """N slots × G groups → N*G kernel launches, each fed the slot's OWN
+    buffer object (no torch.cat copy), with a per-slot slot_mapping slice
+    that matches the group's block table numerically."""
+    # Third Party
+    import torch
+
+    # First Party
+    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+
+    eng, gpu_context, buffers = _build_scatter_engine_and_context(
+        num_groups=2, num_slots=3, spc=4
+    )
+    batch = [(_match(0, 4), None), (_match(4, 8), None), (_match(8, 12), None)]
+    # Group 0 and group 1 use different block tables (same bs=4).
+    resolved_groups = [
+        (torch.tensor([10, 11, 12], dtype=torch.long), 4),
+        (torch.tensor([20, 21, 22], dtype=torch.long), 4),
+    ]
+
+    with patch.object(v3_mod, "lmc_ops") as ops:
+        eng._scatter_batch_to_paged(gpu_context, resolved_groups, batch, 32)
+
+    calls = ops.multi_layer_kv_transfer.call_args_list
+    assert len(calls) == 3 * 2  # per (group, slot)
+
+    for call_idx, call in enumerate(calls):
+        group_idx, slot_idx = divmod(call_idx, 3)
+        key_value = call.args[0]
+        # Identity: the kernel scatters straight from the slot buffer.
+        assert key_value is buffers[(slot_idx, group_idx)]
+        # Per-slot slot_mapping slice: block_ids[tok // bs] * bs + tok % bs.
+        block_base = resolved_groups[group_idx][0][slot_idx].item() * 4
+        assert call.args[2].tolist() == list(range(block_base, block_base + 4))
+        # page_buffer_size = nb * group_bs.
+        assert call.args[4] == 100 * 4
+        assert call.kwargs["block_size"] == 4
+        assert call.kwargs["head_size"] == 32
+
+
+def test_scatter_narrows_partial_chunk_and_keeps_alignment():
+    """A slot holding fewer tokens than its buffer capacity is narrowed to
+    the real token count (the kernel scatters ``size(2)`` tokens); later
+    slots still get correctly aligned slot_mapping slices — the old cat
+    path shifted every subsequent slot off its mapping."""
+    # Third Party
+    import torch
+
+    # First Party
+    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+
+    eng, gpu_context, buffers = _build_scatter_engine_and_context(
+        num_groups=1, num_slots=3, spc=4
+    )
+    # Middle chunk is partial: 2 tokens in a 4-slot buffer.
+    batch = [(_match(0, 4), None), (_match(4, 6), None), (_match(6, 10), None)]
+    resolved_groups = [(torch.tensor([10, 11, 12], dtype=torch.long), 4)]
+
+    with patch.object(v3_mod, "lmc_ops") as ops:
+        eng._scatter_batch_to_paged(gpu_context, resolved_groups, batch, 32)
+
+    calls = ops.multi_layer_kv_transfer.call_args_list
+    assert len(calls) == 3
+
+    # Full slot 0: identity, tokens 0..3 -> block 10.
+    assert calls[0].args[0] is buffers[(0, 0)]
+    assert calls[0].args[2].tolist() == [40, 41, 42, 43]
+
+    # Partial slot 1: narrowed contiguous copy of 2 tokens, mapping 44..45.
+    kv1 = calls[1].args[0]
+    assert kv1 is not buffers[(1, 0)]
+    assert kv1.shape[2] == 2
+    assert kv1.is_contiguous()
+    assert calls[1].args[2].tolist() == [44, 45]
+
+    # Slot 2 stays aligned after the partial slot: tokens 6..9.
+    assert calls[2].args[0] is buffers[(2, 0)]
+    assert calls[2].args[2].tolist() == [11 * 4 + 2, 11 * 4 + 3, 12 * 4, 12 * 4 + 1]
+
+
+# ---------------------------------------------------------------------------
+# Retrieve: native plan builder (execute_cb_retrieve_plan fast path)
+# ---------------------------------------------------------------------------
+
+
+def _build_plan_engine_and_context(
+    num_groups: int = 2,
+    max_batch: int = 2,
+    spc: int = 4,
+    num_layers: int = 2,
+    head_size: int = 8,
+    n_heads: int = 2,
+):
+    """Engine with the real ``_build_cb_retrieve_plan`` bound, a fake GPU
+    context with real CPU tensors, and a real ``_CBRopeState``. Kernel
+    groups are plain (non-fused) K/V, so hidden_dim = n_heads * head_size."""
+    # Third Party
+    import torch
+
+    # First Party
+    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+    import lmcache.c_ops as lmc_ops
+
+    eng = MagicMock(spec=v3_mod.BlendV3Module)
+    for name in (
+        "_build_cb_retrieve_plan",
+        "_build_cb_retrieve_plan_flat",
+        "_prepare_cb_plan_common",
+        "_finish_build_cb_retrieve_plan_steps",
+        "_resolve_cb_plan_invariants",
+    ):
+        setattr(eng, name, getattr(v3_mod.BlendV3Module, name).__get__(eng))
+
+    hidden_dim = n_heads * head_size
+    gpu_context = MagicMock()
+    gpu_context.device = torch.device("cpu")
+    gpu_context.kv_layer_groups_manager.num_kernel_groups = num_groups
+    gpu_context.kv_layer_groups_manager.kernel_groups = [
+        SimpleNamespace(
+            tokens_per_block=4,
+            slots_per_block=4,
+            engine_group_idx=0,
+            engine_kv_format=lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+            shape_desc=SimpleNamespace(nb=100),
+        )
+        for _ in range(num_groups)
+    ]
+    kv_buffers = {
+        (slot, group): torch.zeros(2, num_layers, spc, hidden_dim)
+        for slot in range(max_batch)
+        for group in range(num_groups)
+    }
+    gpu_context.get_temp_kernel_group_buffer.side_effect = lambda s, g: kv_buffers[
+        (s, g)
+    ]
+    ptr_tensors = [torch.zeros(num_layers, dtype=torch.long) for _ in range(num_groups)]
+    gpu_context.get_kernel_group_kv_pointers.side_effect = lambda g: ptr_tensors[g]
+    gpu_context.get_engine_kv_format.side_effect = (
+        lambda g: lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+    )
+    # One object group; each chunk memory object fills one flat slot.
+    obj_bytes = sum(kv_buffers[(0, g)].numel() * 4 for g in range(num_groups))
+    obj_buffers = [torch.zeros(obj_bytes, dtype=torch.uint8) for _ in range(max_batch)]
+    gpu_context.get_temp_object_group_buffer.side_effect = (
+        lambda s, og: obj_buffers[s]
+    )
+
+    rope_state = v3_mod._CBRopeState(
+        head_size=head_size,
+        is_neox_style=True,
+        cos_sin_caches=[torch.zeros(64, head_size)],
+        group_to_cache=[],
+    )
+    return eng, gpu_context, rope_state, obj_bytes
+
+
+def _lazy_memory_obj(obj_bytes: int, address: int):
+    """MemoryObj stand-in that passes the lazy-allocator gate and
+    build_staging_copies' size/pointer checks."""
+    # Third Party
+    import torch
+
+    # First Party
+    from lmcache.v1.memory_allocators.lazy_memory_allocator import (
+        LazyMemoryAllocator,
+    )
+
+    obj = MagicMock()
+    obj.parent.return_value = MagicMock(spec=LazyMemoryAllocator)
+    obj.raw_tensor = torch.zeros(obj_bytes, dtype=torch.uint8)
+    obj.get_size.return_value = obj_bytes
+    obj.data_ptr = obj.raw_tensor.data_ptr()
+    obj.meta.address = address
+    return obj
+
+
+def test_native_plan_covers_every_wave_rope_and_scatter():
+    """3 chunks, max_batch=2 → 2 steps; per step: staging per chunk, rope
+    only for shifted chunks (per group), scatter per (chunk, group) with
+    cumulative slot_mapping offsets."""
+    # Third Party
+    import torch
+
+    eng, gpu_context, rope_state, obj_bytes = _build_plan_engine_and_context()
+
+    def pair(cur_st, cur_ed, old_st):
+        return (
+            SimpleNamespace(cur_st=cur_st, cur_ed=cur_ed, old_st=old_st),
+            _lazy_memory_obj(obj_bytes, address=cur_st * 1000),
+        )
+
+    # Chunks 0/1 shifted (old != cur), chunk 2 prefix (old == cur).
+    runs = [[pair(0, 4, 100), pair(4, 8, 104), pair(8, 12, 8)]]
+    resolved_groups = [
+        (torch.tensor([10, 11, 12], dtype=torch.long), 4),
+        (torch.tensor([20, 21, 22], dtype=torch.long), 4),
+    ]
+
+    plan = eng._build_cb_retrieve_plan(
+        gpu_context, rope_state, resolved_groups, runs, max_batch=2
+    )
+    assert plan is not None
+    group_specs, steps, keepalive = plan
+
+    assert len(group_specs) == 2
+    # keepalive: shared pos + one slot mapping per group.
+    assert len(keepalive) == 3
+    pos, sm0, sm1 = keepalive
+    assert pos.tolist() == list(range(12))
+    assert sm0.tolist() == [40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51]
+    assert sm1.tolist() == [80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91]
+    # Each cached spec is stamped with this request's slot-mapping tensor.
+    assert group_specs[0].slot_mapping_base == sm0.data_ptr()
+    assert group_specs[0].slot_mapping_capacity == 12
+    assert group_specs[1].slot_mapping_base == sm1.data_ptr()
+
+    # Wave split: max_batch=2 -> double-buffered waves of 1 chunk each,
+    # alternating slot halves.
+    assert len(steps) == 3
+
+    # Second build for the same context reuses the cached invariant specs
+    # (same objects) and re-stamps them for the new request.
+    def pair2(cur_st, cur_ed, old_st):
+        return (
+            SimpleNamespace(cur_st=cur_st, cur_ed=cur_ed, old_st=old_st),
+            _lazy_memory_obj(obj_bytes, address=cur_st * 1000),
+        )
+
+    plan2 = eng._build_cb_retrieve_plan(
+        gpu_context,
+        rope_state,
+        resolved_groups,
+        [[pair2(4, 8, 200)]],
+        max_batch=2,
+    )
+    assert plan2 is not None
+    group_specs2, _, keepalive2 = plan2
+    assert group_specs2[0] is group_specs[0]  # cached, not rebuilt
+    assert group_specs2[0].slot_mapping_base == keepalive2[1].data_ptr()
+    assert group_specs2[0].slot_mapping_capacity == 4
+
+
+def test_flat_plan_tables_match_object_plan_semantics():
+    """The flat tables encode the same work items as the object plan: one
+    staging row per chunk (dest = its wave slot's buffer), rope rows only for
+    shifted chunks x groups, scatter rows for all chunks x groups with
+    cumulative token offsets, and monotone per-step CSR offsets."""
+    # Third Party
+    import numpy as np
+    import torch
+
+    eng, gpu_context, rope_state, obj_bytes = _build_plan_engine_and_context()
+
+    def pair(cur_st, cur_ed, old_st):
+        return (
+            SimpleNamespace(cur_st=cur_st, cur_ed=cur_ed, old_st=old_st),
+            _lazy_memory_obj(obj_bytes, address=cur_st * 1000),
+        )
+
+    # Chunks 0/1 shifted, chunk 2 prefix (old == cur).
+    runs = [[pair(0, 4, 100), pair(4, 8, 104), pair(8, 12, 8)]]
+    resolved_groups = [
+        (torch.tensor([10, 11, 12], dtype=torch.long), 4),
+        (torch.tensor([20, 21, 22], dtype=torch.long), 4),
+    ]
+
+    plan = eng._build_cb_retrieve_plan_flat(
+        gpu_context, rope_state, resolved_groups, runs, max_batch=2
+    )
+    assert plan is not None
+    _specs, (staging, ropes, scatters, step_offsets), _keep = plan
+
+    # 3 chunks -> 3 staging rows; wave=1 alternates slots 0,1,0.
+    assert staging.shape == (3, 4)
+    slot_bufs = [gpu_context.get_temp_object_group_buffer(s, 0) for s in (0, 1)]
+    assert staging[:, 0].tolist() == [
+        slot_bufs[0].data_ptr(),
+        slot_bufs[1].data_ptr(),
+        slot_bufs[0].data_ptr(),
+    ]
+    # Rope rows: 2 shifted chunks x 2 groups.
+    assert ropes.shape == (4, 4)
+    assert sorted(set(ropes[:, 2].tolist())) == [100, 104]  # old_st values
+    # Scatter rows: 3 chunks x 2 groups, token offsets 0,4,8 repeated per group.
+    assert scatters.shape == (6, 4)
+    assert scatters[:, 2].tolist() == [0, 0, 4, 4, 8, 8]
+    assert scatters[:, 3].tolist() == [4] * 6
+    # Step CSR: 3 steps of 1 chunk; scatter ends = chunks x groups.
+    assert step_offsets.shape == (3, 3)
+    assert step_offsets[:, 0].tolist() == [1, 2, 3]
+    assert step_offsets[:, 2].tolist() == [2, 4, 6]
+    assert bool(np.all(np.diff(step_offsets[:, 1]) >= 0))
+
+
+def test_object_steps_alternate_disjoint_slot_halves():
+    """The double-buffer contract the executor's overlap relies on: waves are
+    max_batch//2 chunks, consecutive steps use DISJOINT tmp-slot halves, and
+    steps two apart reuse the same half. If the planner ever broke this,
+    step w's staging (copy stream) could race step w-1's kernels (compute
+    stream) on the same slots."""
+    # Third Party
+    import torch
+
+    # First Party
+    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+
+    eng, gpu_context, rope_state, obj_bytes = _build_plan_engine_and_context(
+        num_groups=1, max_batch=4
+    )
+    runs = [
+        [
+            (
+                SimpleNamespace(
+                    cur_st=i * 4, cur_ed=i * 4 + 4, old_st=i * 4 + 100
+                ),
+                _lazy_memory_obj(obj_bytes, address=i * 4),
+            )
+            for i in range(6)
+        ]
+    ]
+    resolved_groups = [(torch.arange(12, dtype=torch.long), 4)]
+
+    step_slots: list[list[int]] = []
+
+    class _RecStep:
+        def __init__(self, staging, ropes, scatters):
+            step_slots.append([s.args[1] for s in scatters])
+
+    class _RecVar:
+        def __init__(self, *args):
+            self.args = args
+
+    with (
+        patch.object(v3_mod.lmc_ops, "CBRetrieveStep", _RecStep),
+        patch.object(v3_mod.lmc_ops, "CBRopeVar", _RecVar),
+        patch.object(v3_mod.lmc_ops, "CBScatterVar", _RecVar),
+    ):
+        plan = eng._build_cb_retrieve_plan(
+            gpu_context, rope_state, resolved_groups, runs, max_batch=4
+        )
+    assert plan is not None
+
+    # 6 chunks, wave = 4//2 = 2 -> 3 steps: slots {0,1}, {2,3}, {0,1}.
+    assert [sorted(set(s)) for s in step_slots] == [[0, 1], [2, 3], [0, 1]]
+    for a, b in zip(step_slots, step_slots[1:], strict=False):
+        assert not (set(a) & set(b)), "consecutive steps must not share slots"
+
+
+def test_flat_tables_alternate_disjoint_slot_halves():
+    """Same double-buffer contract, asserted on the flat-table encoding."""
+    # Third Party
+    import numpy as np
+    import torch
+
+    eng, gpu_context, rope_state, obj_bytes = _build_plan_engine_and_context(
+        max_batch=4
+    )
+    runs = [
+        [
+            (
+                SimpleNamespace(
+                    cur_st=i * 4, cur_ed=i * 4 + 4, old_st=i * 4 + 100
+                ),
+                _lazy_memory_obj(obj_bytes, address=i * 4),
+            )
+            for i in range(6)
+        ]
+    ]
+    resolved_groups = [
+        (torch.arange(12, dtype=torch.long), 4),
+        (torch.arange(12, dtype=torch.long) + 100, 4),
+    ]
+    plan = eng._build_cb_retrieve_plan_flat(
+        gpu_context, rope_state, resolved_groups, runs, max_batch=4
+    )
+    assert plan is not None
+    _specs, (_staging, _ropes, scatters, step_offsets), _keep = plan
+
+    prev_slots: set[int] | None = None
+    c0 = 0
+    for c1 in step_offsets[:, 2].tolist():
+        slots = set(np.asarray(scatters[c0:c1, 1]).tolist())
+        assert slots <= {0, 1} or slots <= {2, 3}, "step must stay in one half"
+        if prev_slots is not None:
+            assert not (slots & prev_slots)
+        prev_slots = slots
+        c0 = c1
+
+
+def test_native_plan_falls_back_for_non_lazy_objects():
+    """A non-lazy-allocator memory object disables the native plan."""
+    # Third Party
+    import torch
+
+    eng, gpu_context, rope_state, obj_bytes = _build_plan_engine_and_context()
+    obj = _lazy_memory_obj(obj_bytes, address=0)
+    obj.parent.return_value = object()  # not a LazyMemoryAllocator
+    runs = [[(SimpleNamespace(cur_st=0, cur_ed=4, old_st=100), obj)]]
+    resolved_groups = [
+        (torch.tensor([10], dtype=torch.long), 4),
+        (torch.tensor([20], dtype=torch.long), 4),
+    ]
+    assert (
+        eng._build_cb_retrieve_plan(
+            gpu_context, rope_state, resolved_groups, runs, max_batch=2
+        )
+        is None
+    )
+
+
+def test_native_plan_falls_back_for_compressed_group():
+    """A compressed group (tokens != slots per block) disables the plan."""
+    # Third Party
+    import torch
+
+    eng, gpu_context, rope_state, obj_bytes = _build_plan_engine_and_context()
+    gpu_context.kv_layer_groups_manager.kernel_groups[1].slots_per_block = 2
+    runs = [
+        [
+            (
+                SimpleNamespace(cur_st=0, cur_ed=4, old_st=100),
+                _lazy_memory_obj(obj_bytes, address=0),
+            )
+        ]
+    ]
+    resolved_groups = [
+        (torch.tensor([10], dtype=torch.long), 4),
+        (torch.tensor([20], dtype=torch.long), 4),
+    ]
+    assert (
+        eng._build_cb_retrieve_plan(
+            gpu_context, rope_state, resolved_groups, runs, max_batch=2
+        )
+        is None
+    )

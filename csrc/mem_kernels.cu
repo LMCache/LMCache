@@ -366,6 +366,64 @@ __global__ void single_layer_kv_transfer_sgl_kernel(
 }
 
 /**
+ * One chunk of a fused transfer, passed BY VALUE in the kernel-arg buffer
+ * (a full pack fits the 4 KB limit -> no device-side parameter upload).
+ */
+template <typename scalar_t>
+struct FusedTransferChunk {
+  scalar_t* key_value;
+  const int64_t* slot_mapping;
+  int n_tok;
+};
+
+template <typename scalar_t>
+struct FusedTransferPack {
+  FusedTransferChunk<scalar_t> chunks[MAX_FUSED_TRANSFER_CHUNKS];
+};
+
+/**
+ * Fused multi-chunk load_and_reshape: one launch, same-geometry chunks.
+ * blockIdx.z packs (chunk * k_or_v_size + k_or_v); shorter chunks early-out
+ * on grid.x. Replaces the per-chunk launch storm.
+ */
+template <typename scalar_t, bool DIRECTION, EngineKVFormat format>
+__global__ void load_and_reshape_multi_layer_fused_kernel(
+    const FusedTransferPack<scalar_t> pack,
+    scalar_t** __restrict__ paged_buffer_ptrs, const int k_or_v_size,
+    const int scalars_per_token, const int num_tokens, const int num_layers,
+    const int page_buffer_size, const int block_size, const int head_size) {
+  const int token_id = blockIdx.x;
+  const int layer_id = blockIdx.y;
+  const int chunk_id = blockIdx.z / k_or_v_size;
+  const int k_or_v = blockIdx.z % k_or_v_size;
+  const int tid = threadIdx.x;
+  const int num_threads = blockDim.x;
+
+  const FusedTransferChunk<scalar_t>& chunk = pack.chunks[chunk_id];
+  if (token_id >= chunk.n_tok) {
+    return;
+  }
+  const int64_t slot_idx = chunk.slot_mapping[token_id];
+  scalar_t* paged_buffer_ptr = paged_buffer_ptrs[layer_id];
+  if (slot_idx < 0) {
+    return;
+  }
+
+  for (int i = tid; i < scalars_per_token; i += num_threads) {
+    const int64_t lmcache_offset =
+        key_value_offset(k_or_v, layer_id, token_id, i, scalars_per_token,
+                         num_tokens, num_layers);
+    const int64_t vllm_offset =
+        page_buffer_offset<format>(k_or_v, slot_idx, i, scalars_per_token,
+                                   page_buffer_size, block_size, head_size);
+    if (DIRECTION)
+      chunk.key_value[lmcache_offset] = paged_buffer_ptr[vllm_offset];
+    else
+      paged_buffer_ptr[vllm_offset] = chunk.key_value[lmcache_offset];
+  }
+}
+
+/**
  * Quickly load KV cache between vLLM paged memory and offloading buffer
  * slot_id = slot_mapping[block.x]
  * key_value[block.z, block.y, block.x, thread.x] <=> ptrs[block.y][block.z,
@@ -523,30 +581,21 @@ T* get_kernel_ptr(TENSOR_TYPE& tensor) {
                                    head_size_xword, skip_prefix_n_tokens);   \
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
+// Pointer/scalar core shared with the CB plan executor. `layout_num_tokens`
+// (buffer token axis, offset math) is separate from `transfer_num_tokens`
+// (tokens moved) so partial buffers stay aligned.
 template <typename T>
-void multi_layer_kv_transfer_templated(
-    torch::Tensor&
-        key_value,  // key/value must be on gpu/pinned cpu.
-                    // [2, num_layer, num_tokens, num_heads*head_size] for
-                    // flash_attn.
-                    // [1, num_layer, num_tokens, aligned_head_size]
-                    // for MLA.
-    const torch::Tensor& key_value_ptrs,  // [num_layers]
-    const torch::Tensor& slot_mapping,    // [num_tokens],
-    const torch::Device& paged_memory_device, const int page_buffer_size,
-    const TransferDirection direction, const EngineKVFormat engine_kv_format,
-    const int block_size, const int head_size, const int skip_prefix_n_tokens) {
-  T* key_value_ptr = get_kernel_ptr<T, torch::Tensor>(key_value);
-  T** page_buffer_ptrs =
-      get_kernel_ptr<T*, const torch::Tensor>(key_value_ptrs);
-  const int64_t* slot_mapping_ptr =
-      get_kernel_ptr<const int64_t, const torch::Tensor>(slot_mapping);
-
-  int num_layers = key_value.size(1);
-  int num_tokens = key_value.size(2);
-  int num_transfer_tokens = num_tokens - skip_prefix_n_tokens;
-  int num_origin_elements = key_value.size(3);
-  int elements_per_xword = sizeof(T) / key_value.element_size();
+void multi_layer_kv_transfer_ptr_templated(
+    T* key_value_ptr, T** page_buffer_ptrs, const int64_t* slot_mapping_ptr,
+    const int num_layers, const int layout_num_tokens,
+    const int transfer_num_tokens, const int num_origin_elements,
+    const int element_size, const torch::Device& paged_memory_device,
+    const int page_buffer_size, const TransferDirection direction,
+    const EngineKVFormat engine_kv_format, const int block_size,
+    const int head_size, const int skip_prefix_n_tokens) {
+  int num_tokens = layout_num_tokens;
+  int num_transfer_tokens = transfer_num_tokens - skip_prefix_n_tokens;
+  int elements_per_xword = sizeof(T) / element_size;
   int num_xwords = num_origin_elements / elements_per_xword;
   // head_size is in element units
   // convert to xword units
@@ -659,6 +708,208 @@ void multi_layer_kv_transfer_templated(
 }
 
 #undef LAUNCH_KERNEL_WITH_FORMAT
+
+template <typename T>
+void multi_layer_kv_transfer_templated(
+    torch::Tensor&
+        key_value,  // key/value must be on gpu/pinned cpu.
+                    // [2, num_layer, num_tokens, num_heads*head_size] for
+                    // flash_attn.
+                    // [1, num_layer, num_tokens, aligned_head_size]
+                    // for MLA.
+    const torch::Tensor& key_value_ptrs,  // [num_layers]
+    const torch::Tensor& slot_mapping,    // [num_tokens],
+    const torch::Device& paged_memory_device, const int page_buffer_size,
+    const TransferDirection direction, const EngineKVFormat engine_kv_format,
+    const int block_size, const int head_size, const int skip_prefix_n_tokens) {
+  T* key_value_ptr = get_kernel_ptr<T, torch::Tensor>(key_value);
+  T** page_buffer_ptrs =
+      get_kernel_ptr<T*, const torch::Tensor>(key_value_ptrs);
+  const int64_t* slot_mapping_ptr =
+      get_kernel_ptr<const int64_t, const torch::Tensor>(slot_mapping);
+
+  multi_layer_kv_transfer_ptr_templated<T>(
+      key_value_ptr, page_buffer_ptrs, slot_mapping_ptr, key_value.size(1),
+      key_value.size(2), key_value.size(2), key_value.size(3),
+      key_value.element_size(), paged_memory_device, page_buffer_size,
+      direction, engine_kv_format, block_size, head_size,
+      skip_prefix_n_tokens);
+}
+
+template <typename T>
+void multi_layer_kv_transfer_fused_templated(
+    const std::vector<uintptr_t>& key_values,
+    const std::vector<uintptr_t>& slot_mappings, const std::vector<int>& n_toks,
+    uintptr_t page_buffer_ptrs_raw, const int num_layers,
+    const int layout_num_tokens, const int num_origin_elements,
+    const int element_size, const torch::Device& paged_memory_device,
+    const int page_buffer_size, const TransferDirection direction,
+    const EngineKVFormat engine_kv_format, const int block_size,
+    const int head_size) {
+  const int n_chunks = static_cast<int>(key_values.size());
+  TORCH_CHECK(n_chunks >= 1 && n_chunks <= MAX_FUSED_TRANSFER_CHUNKS,
+              "fused transfer chunk count out of range: ", n_chunks);
+  TORCH_CHECK(slot_mappings.size() == key_values.size() &&
+                  n_toks.size() == key_values.size(),
+              "fused transfer parameter vectors must be the same length");
+
+  lmc::FusedTransferPack<T> pack{};
+  int max_tok = 0;
+  for (int c = 0; c < n_chunks; ++c) {
+    pack.chunks[c].key_value = reinterpret_cast<T*>(key_values[c]);
+    pack.chunks[c].slot_mapping =
+        reinterpret_cast<const int64_t*>(slot_mappings[c]);
+    pack.chunks[c].n_tok = n_toks[c];
+    max_tok = std::max(max_tok, n_toks[c]);
+  }
+  // Unused pack tail: n_tok stays 0, every block early-outs.
+
+  int num_tokens = layout_num_tokens;
+  int elements_per_xword = sizeof(T) / element_size;
+  int num_xwords = num_origin_elements / elements_per_xword;
+  int head_size_xword = head_size > 0 ? head_size / elements_per_xword : 0;
+
+  lmc::check_block_size(engine_kv_format, block_size);
+  lmc::check_head_size(engine_kv_format, head_size_xword);
+
+  int k_or_v_size =
+      (::is_mla(engine_kv_format) || ::is_fused_packed(engine_kv_format)) ? 1
+                                                                          : 2;
+
+  T** page_buffer_ptrs = reinterpret_cast<T**>(page_buffer_ptrs_raw);
+  dim3 grid(max_tok, num_layers, k_or_v_size * n_chunks);
+  dim3 block(std::min(num_xwords, 128));
+
+  const at::cuda::OptionalCUDAGuard device_guard(paged_memory_device);
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+#ifndef LAUNCH_FUSED_WITH_FORMAT
+  #define LAUNCH_FUSED_WITH_FORMAT(T_, DIR, FORMAT)                     \
+    lmc::load_and_reshape_multi_layer_fused_kernel<T_, DIR, FORMAT>     \
+        <<<grid, block, 0, stream>>>(pack, page_buffer_ptrs,            \
+                                     k_or_v_size, num_xwords,           \
+                                     num_tokens, num_layers,            \
+                                     page_buffer_size, block_size,      \
+                                     head_size_xword);                  \
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+#endif
+#ifndef FUSED_FORMAT_SWITCH
+  #define FUSED_FORMAT_SWITCH(T_, DIR)                                        \
+    switch (engine_kv_format) {                                              \
+      case EngineKVFormat::NB_NL_TWO_BS_NH_HS:                               \
+        LAUNCH_FUSED_WITH_FORMAT(T_, DIR, EngineKVFormat::NB_NL_TWO_BS_NH_HS)\
+        break;                                                               \
+      case EngineKVFormat::NL_X_TWO_NB_BS_NH_HS:                             \
+        LAUNCH_FUSED_WITH_FORMAT(T_, DIR,                                    \
+                                 EngineKVFormat::NL_X_TWO_NB_BS_NH_HS)       \
+        break;                                                               \
+      case EngineKVFormat::NL_X_NB_TWO_BS_NH_HS:                             \
+        LAUNCH_FUSED_WITH_FORMAT(T_, DIR,                                    \
+                                 EngineKVFormat::NL_X_NB_TWO_BS_NH_HS)       \
+        break;                                                               \
+      case EngineKVFormat::NL_X_NB_BS_HS:                                    \
+        LAUNCH_FUSED_WITH_FORMAT(T_, DIR, EngineKVFormat::NL_X_NB_BS_HS)     \
+        break;                                                               \
+      case EngineKVFormat::NL_X_NBBS_ONE_HS:                                 \
+        LAUNCH_FUSED_WITH_FORMAT(T_, DIR, EngineKVFormat::NL_X_NBBS_ONE_HS)  \
+        break;                                                               \
+      case EngineKVFormat::NL_X_TWO_NB_NH_BS_HS:                             \
+        LAUNCH_FUSED_WITH_FORMAT(T_, DIR,                                    \
+                                 EngineKVFormat::NL_X_TWO_NB_NH_BS_HS)       \
+        break;                                                               \
+      case EngineKVFormat::NL_X_NB_TWO_NH_BS_HS:                             \
+        LAUNCH_FUSED_WITH_FORMAT(T_, DIR,                                    \
+                                 EngineKVFormat::NL_X_NB_TWO_NH_BS_HS)       \
+        break;                                                               \
+      case EngineKVFormat::NL_X_NB_NH_BS_TWO_HS:                             \
+        LAUNCH_FUSED_WITH_FORMAT(T_, DIR,                                    \
+                                 EngineKVFormat::NL_X_NB_NH_BS_TWO_HS)       \
+        break;                                                               \
+      case EngineKVFormat::NL_X_NB_BS_NH_TWO_HS:                             \
+        LAUNCH_FUSED_WITH_FORMAT(T_, DIR,                                    \
+                                 EngineKVFormat::NL_X_NB_BS_NH_TWO_HS)       \
+        break;                                                               \
+      default:                                                               \
+        throw std::runtime_error("Unsupported EngineKVFormat");              \
+    }
+#endif
+  if (direction == TransferDirection::H2D) {
+    FUSED_FORMAT_SWITCH(T, false)
+  } else {
+    FUSED_FORMAT_SWITCH(T, true)
+  }
+#undef FUSED_FORMAT_SWITCH
+#undef LAUNCH_FUSED_WITH_FORMAT
+}
+
+void multi_layer_kv_transfer_fused_ptr(
+    const std::vector<uintptr_t>& key_values,
+    const std::vector<uintptr_t>& slot_mappings, const std::vector<int>& n_toks,
+    uintptr_t page_buffer_ptrs, const int num_layers,
+    const int layout_num_tokens, const int num_origin_elements,
+    const int element_size, const torch::Device& paged_memory_device,
+    const int page_buffer_size, const TransferDirection direction,
+    const EngineKVFormat engine_kv_format, const int block_size,
+    const int head_size) {
+  int copy_size = num_origin_elements * element_size;
+#ifndef LAUNCH_FUSED_TRANSFER
+  #define LAUNCH_FUSED_TRANSFER(type)                                       \
+    do {                                                                    \
+      multi_layer_kv_transfer_fused_templated<type>(                        \
+          key_values, slot_mappings, n_toks, page_buffer_ptrs, num_layers,  \
+          layout_num_tokens, num_origin_elements, element_size,             \
+          paged_memory_device, page_buffer_size, direction,                 \
+          engine_kv_format, block_size, head_size);                         \
+    } while (0)
+#endif
+  if (copy_size % 8 == 0) {
+    LAUNCH_FUSED_TRANSFER(int64_t);
+  } else if (copy_size % 4 == 0) {
+    LAUNCH_FUSED_TRANSFER(int32_t);
+  } else if (copy_size % 2 == 0) {
+    LAUNCH_FUSED_TRANSFER(int16_t);
+  } else {
+    LAUNCH_FUSED_TRANSFER(int8_t);
+  }
+#undef LAUNCH_FUSED_TRANSFER
+}
+
+/**
+ * Raw-pointer entry (CB plan executor); xword dispatch like the tensor entry.
+ * @see multi_layer_kv_transfer_ptr_templated for layout vs transfer tokens.
+ */
+void multi_layer_kv_transfer_ptr(
+    uintptr_t key_value, uintptr_t page_buffer_ptrs, uintptr_t slot_mapping,
+    const int num_layers, const int layout_num_tokens,
+    const int transfer_num_tokens, const int num_origin_elements,
+    const int element_size, const torch::Device& paged_memory_device,
+    const int page_buffer_size, const TransferDirection direction,
+    const EngineKVFormat engine_kv_format, const int block_size,
+    const int head_size, const int skip_prefix_n_tokens) {
+  int copy_size = num_origin_elements * element_size;
+#ifndef LAUNCH_MULTI_LAYER_KV_TRANSFER_PTR
+  #define LAUNCH_MULTI_LAYER_KV_TRANSFER_PTR(type)                             \
+    do {                                                                       \
+      multi_layer_kv_transfer_ptr_templated<type>(                             \
+          reinterpret_cast<type*>(key_value),                                  \
+          reinterpret_cast<type**>(page_buffer_ptrs),                          \
+          reinterpret_cast<const int64_t*>(slot_mapping), num_layers,          \
+          layout_num_tokens, transfer_num_tokens, num_origin_elements,         \
+          element_size, paged_memory_device, page_buffer_size, direction,      \
+          engine_kv_format, block_size, head_size, skip_prefix_n_tokens);      \
+    } while (0)
+#endif
+  if (copy_size % 8 == 0) {
+    LAUNCH_MULTI_LAYER_KV_TRANSFER_PTR(int64_t);
+  } else if (copy_size % 4 == 0) {
+    LAUNCH_MULTI_LAYER_KV_TRANSFER_PTR(int32_t);
+  } else if (copy_size % 2 == 0) {
+    LAUNCH_MULTI_LAYER_KV_TRANSFER_PTR(int16_t);
+  } else {
+    LAUNCH_MULTI_LAYER_KV_TRANSFER_PTR(int8_t);
+  }
+#undef LAUNCH_MULTI_LAYER_KV_TRANSFER_PTR
+}
 
 /**
  * @see multi_layer_kv_transfer_templated

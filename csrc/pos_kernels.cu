@@ -11,6 +11,10 @@
 
 #include "dispatch_utils.h"
 #include "cuda_compat.h"
+#include "mem_kernels.cuh"  // MAX_FUSED_TRANSFER_CHUNKS
+
+#include <vector>
+
 namespace lmc {
 
 template <typename scalar_t, bool IS_NEOX>
@@ -106,6 +110,63 @@ __global__ void rotary_embedding_kernel_fused(
       token_idx, key_stride, head_stride);
 }
 
+// CB tmp-slot ramp re-RoPE: positions are `st + (token_idx % slots)`
+// (num_layers repetitions of one chunk), derived in-kernel so a launch is
+// fully described by scalars -- no position tensors, no torch at enqueue.
+template <typename scalar_t, bool IS_NEOX>
+__global__ void rotary_embedding_kernel_fused_ramp(
+    const int64_t old_st, const int64_t new_st, const int64_t slots,
+    scalar_t* __restrict__ key,  // [num_tokens, num_kv_heads, head_size]
+    const scalar_t* __restrict__ cos_sin_cache,  // [max_position, 2,
+                                                 // rot_dim // 2]
+    const int rot_dim, const int64_t key_stride, const int num_kv_heads,
+    const int head_size, const int64_t head_stride) {
+  const int token_idx = blockIdx.x;
+  const int64_t ramp = token_idx % slots;
+
+  const scalar_t* old_cache_ptr = cos_sin_cache + (old_st + ramp) * rot_dim;
+  const scalar_t* new_cache_ptr = cos_sin_cache + (new_st + ramp) * rot_dim;
+
+  apply_rotary_embedding_fused<scalar_t, IS_NEOX>(
+      key, old_cache_ptr, new_cache_ptr, head_size, num_kv_heads, rot_dim,
+      token_idx, key_stride, head_stride);
+}
+
+// One chunk of a fused ramp re-RoPE (by-value pack, see FusedTransferChunk).
+template <typename scalar_t>
+struct FusedRopeChunk {
+  scalar_t* key;
+  int64_t old_st;
+  int64_t new_st;
+};
+
+template <typename scalar_t>
+struct FusedRopePack {
+  FusedRopeChunk<scalar_t> chunks[MAX_FUSED_TRANSFER_CHUNKS];
+};
+
+// Fused ramp re-RoPE: blockIdx.y selects the chunk; one launch replaces up
+// to MAX_FUSED_TRANSFER_CHUNKS same-geometry launches.
+template <typename scalar_t, bool IS_NEOX>
+__global__ void rotary_embedding_kernel_fused_ramp_multi(
+    const FusedRopePack<scalar_t> pack, const int64_t slots,
+    const scalar_t* __restrict__ cos_sin_cache, const int rot_dim,
+    const int64_t key_stride, const int num_kv_heads, const int head_size,
+    const int64_t head_stride) {
+  const int token_idx = blockIdx.x;
+  const FusedRopeChunk<scalar_t>& chunk = pack.chunks[blockIdx.y];
+  const int64_t ramp = token_idx % slots;
+
+  const scalar_t* old_cache_ptr =
+      cos_sin_cache + (chunk.old_st + ramp) * rot_dim;
+  const scalar_t* new_cache_ptr =
+      cos_sin_cache + (chunk.new_st + ramp) * rot_dim;
+
+  apply_rotary_embedding_fused<scalar_t, IS_NEOX>(
+      chunk.key, old_cache_ptr, new_cache_ptr, head_size, num_kv_heads,
+      rot_dim, token_idx, key_stride, head_stride);
+}
+
 }  // namespace lmc
 
 // head_stride: element distance between consecutive heads in `key`. Contiguous
@@ -155,4 +216,77 @@ void rotary_embedding_k_fused(const torch::Tensor& old_positions,
                               bool is_neox) {
   rotary_embedding_k_fused_strided(old_positions, new_positions, key, head_size,
                                    head_size, cos_sin_cache, is_neox);
+}
+
+// Raw-pointer ramp entry (CB plan executor). Caller owns the device guard;
+// launches on the current stream.
+void rotary_embedding_k_fused_ramp_ptr(
+    uintptr_t key_ptr, at::ScalarType key_dtype, int64_t num_tokens,
+    int64_t old_st, int64_t new_st, int64_t slots, int64_t head_size,
+    int64_t head_stride, int64_t num_kv_heads, uintptr_t cos_sin_cache_ptr,
+    int rot_dim, bool is_neox) {
+  int64_t key_stride = num_kv_heads * head_stride;
+
+  dim3 grid(num_tokens);
+  dim3 block(std::min<int64_t>(num_kv_heads * rot_dim / 2, 512));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  LMC_DISPATCH_FLOATING_TYPES(
+      key_dtype, "rotary_embedding_k_fused_ramp", [&] {
+        auto* key = reinterpret_cast<scalar_t*>(key_ptr);
+        auto* cos_sin = reinterpret_cast<const scalar_t*>(cos_sin_cache_ptr);
+        if (is_neox) {
+          lmc::rotary_embedding_kernel_fused_ramp<scalar_t, true>
+              <<<grid, block, 0, stream>>>(old_st, new_st, slots, key, cos_sin,
+                                           rot_dim, key_stride, num_kv_heads,
+                                           head_size, head_stride);
+        } else {
+          lmc::rotary_embedding_kernel_fused_ramp<scalar_t, false>
+              <<<grid, block, 0, stream>>>(old_st, new_st, slots, key, cos_sin,
+                                           rot_dim, key_stride, num_kv_heads,
+                                           head_size, head_stride);
+        }
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+      });
+}
+
+// Fused ramp entry: one launch, up to MAX_FUSED_TRANSFER_CHUNKS slots.
+void rotary_embedding_k_fused_ramp_multi_ptr(
+    const std::vector<uintptr_t>& key_ptrs, at::ScalarType key_dtype,
+    int64_t num_tokens, const std::vector<int64_t>& old_sts,
+    const std::vector<int64_t>& new_sts, int64_t slots, int64_t head_size,
+    int64_t head_stride, int64_t num_kv_heads, uintptr_t cos_sin_cache_ptr,
+    int rot_dim, bool is_neox) {
+  const int n_chunks = static_cast<int>(key_ptrs.size());
+  TORCH_CHECK(n_chunks >= 1 && n_chunks <= MAX_FUSED_TRANSFER_CHUNKS,
+              "fused rope chunk count out of range: ", n_chunks);
+  TORCH_CHECK(old_sts.size() == key_ptrs.size() &&
+                  new_sts.size() == key_ptrs.size(),
+              "fused rope parameter vectors must be the same length");
+  int64_t key_stride = num_kv_heads * head_stride;
+
+  dim3 grid(num_tokens, n_chunks);
+  dim3 block(std::min<int64_t>(num_kv_heads * rot_dim / 2, 512));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  LMC_DISPATCH_FLOATING_TYPES(
+      key_dtype, "rotary_embedding_k_fused_ramp_multi", [&] {
+        lmc::FusedRopePack<scalar_t> pack{};
+        for (int c = 0; c < n_chunks; ++c) {
+          pack.chunks[c].key = reinterpret_cast<scalar_t*>(key_ptrs[c]);
+          pack.chunks[c].old_st = old_sts[c];
+          pack.chunks[c].new_st = new_sts[c];
+        }
+        auto* cos_sin = reinterpret_cast<const scalar_t*>(cos_sin_cache_ptr);
+        if (is_neox) {
+          lmc::rotary_embedding_kernel_fused_ramp_multi<scalar_t, true>
+              <<<grid, block, 0, stream>>>(pack, slots, cos_sin, rot_dim,
+                                           key_stride, num_kv_heads, head_size,
+                                           head_stride);
+        } else {
+          lmc::rotary_embedding_kernel_fused_ramp_multi<scalar_t, false>
+              <<<grid, block, 0, stream>>>(pack, slots, cos_sin, rot_dim,
+                                           key_stride, num_kv_heads, head_size,
+                                           head_stride);
+        }
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+      });
 }

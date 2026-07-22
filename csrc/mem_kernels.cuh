@@ -15,6 +15,33 @@ void multi_layer_kv_transfer(
     const EngineKVFormat engine_kv_format, const int block_size = 0,
     const int head_size = 0, const int skip_prefix_n_tokens = 0);
 
+// Max chunks per fused launch; the by-value pack must fit the 4 KB
+// kernel-arg buffer.
+constexpr int MAX_FUSED_TRANSFER_CHUNKS = 16;
+
+// Fused transfer: one launch, up to MAX_FUSED_TRANSFER_CHUNKS same-geometry
+// chunks; params ride in the kernel-arg buffer (no device upload).
+void multi_layer_kv_transfer_fused_ptr(
+    const std::vector<uintptr_t>& key_values,
+    const std::vector<uintptr_t>& slot_mappings, const std::vector<int>& n_toks,
+    uintptr_t page_buffer_ptrs, const int num_layers,
+    const int layout_num_tokens, const int num_origin_elements,
+    const int element_size, const torch::Device& paged_memory_device,
+    const int page_buffer_size, const TransferDirection direction,
+    const EngineKVFormat engine_kv_format, const int block_size = 0,
+    const int head_size = 0);
+
+// Raw-pointer transfer entry. layout_num_tokens = buffer token axis (offset
+// math); transfer_num_tokens = tokens moved (grid extent).
+void multi_layer_kv_transfer_ptr(
+    uintptr_t key_value, uintptr_t page_buffer_ptrs, uintptr_t slot_mapping,
+    const int num_layers, const int layout_num_tokens,
+    const int transfer_num_tokens, const int num_origin_elements,
+    const int element_size, const torch::Device& paged_memory_device,
+    const int page_buffer_size, const TransferDirection direction,
+    const EngineKVFormat engine_kv_format, const int block_size = 0,
+    const int head_size = 0, const int skip_prefix_n_tokens = 0);
+
 // collapses to multi_layer_kv_transfer for MLA
 void multi_layer_kv_transfer_unilateral(
     torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,

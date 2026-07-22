@@ -357,11 +357,27 @@ class GPUCacheContext(BaseCacheContext):
         full_sw_kv: bool = False,
     ):
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
+        # Pass each engine group's block size (tokens_per_block) so the format
+        # detector can disambiguate the fused rank-4 packed layout's heads/block
+        # axes, whose order is model-dependent and not reliably given by the
+        # kv_layout hint. Aligned by engine_group_id (as engine_group_layer_indices
+        # is). Without this the server re-detects the packed cache as NHD and the
+        # store kernel launches with a >1024-thread block on models like M3.
+        layer_index_groups = engine_group_layer_indices(engine_group_infos)
+        group_block_sizes: list[int] | None = None
+        if engine_group_infos:
+            bs_by_gid: dict[int, int] = {}
+            for info in engine_group_infos:
+                bs_by_gid.setdefault(info.engine_group_id, info.tokens_per_block)
+            group_block_sizes = [
+                bs_by_gid.get(gid, 0) for gid in range(len(layer_index_groups))
+            ]
         kv_caches_norm, engine_kv_formats = normalize_and_discover_per_layer_formats(
             unwrapped,
-            engine_group_layer_indices(engine_group_infos),
+            layer_index_groups,
             engine_type,
             layout_hints,
+            group_block_sizes=group_block_sizes,
         )
         self.device_ = get_device(kv_caches_norm)
         num_layers_val = len(engine_kv_formats)
