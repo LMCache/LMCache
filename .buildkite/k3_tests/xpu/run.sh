@@ -28,7 +28,6 @@ assert hasattr(torch, "xpu") and torch.xpu.is_available(), "Intel XPU not availa
 print("torch.xpu.is_available() = True")
 PY
 
-export TEST_SELECTOR="${TEST_SELECTOR:-calculate_cdf or get_gpu_pci_bus_id or load_and_reshape_flash}"
 cd "${REPO_ROOT}"
 source "${REPO_ROOT}/.buildkite/k3_harness/setup-lmcache-only-env.sh"
 
