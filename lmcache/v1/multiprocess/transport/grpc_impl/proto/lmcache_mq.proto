@@ -2,30 +2,83 @@
 //
 // Wire format for the LMCache mp-mode message queue over gRPC.
 //
-// The payload frames are opaque bytes on this layer so no server-side
-// business code has to change: the existing msgpack encoded RequestType
-// / request_uid / *payloads tuple travels as a repeated bytes field.
-// A future PR can promote hot RequestTypes to typed proto messages
-// without breaking this envelope.
+// Every request type is a distinct unary rpc method so gRPC handles all
+// dispatch: no request-type frame, no manual routing, no polling loop
+// on the client side. The payload / response are opaque bytes today
+// (msgspec encoded per the corresponding ProtocolDefinition), so a
+// follow-up PR can promote any single rpc to typed messages without
+// changing the service shape or any other rpc.
 
 syntax = "proto3";
 
 package lmcache.mp;
 
-message MqRequest {
-  // opaque frames: [request_uid, request_type, *payloads]
-  repeated bytes frames = 1;
+// Generic wrappers. Kept intentionally minimal -- every field a specific
+// rpc needs today already round-trips inside ``payload`` / ``result``
+// through msgspec, and each rpc will be promoted to a typed message
+// individually in follow-ups.
+message BytesRequest {
+  bytes payload = 1;
 }
 
-message MqResponse {
-  // opaque frames: [request_uid, request_type, *response]
-  repeated bytes frames = 1;
+message BytesResponse {
+  bytes result = 1;
 }
 
+// One rpc per RequestType.  Method names are the CamelCase form of the
+// RequestType enum (STORE -> Store, CB_LOOKUP_PRE_COMPUTED_V2 ->
+// CbLookupPreComputedV2, etc.) so gRPC's built-in method routing takes
+// over the dispatch that the old msgspec envelope did by hand.
 service MessageQueue {
-  // A single long-lived bidirectional stream per client, mirroring
-  // the DEALER-ROUTER pattern one-to-one: each MqRequest maps to
-  // exactly one recv_request() on the server; each MqResponse maps
-  // to exactly one recv_frames() on the client.
-  rpc Exchange(stream MqRequest) returns (stream MqResponse);
+  // Engine operations
+  rpc RegisterKvCache(BytesRequest) returns (BytesResponse);
+  rpc UnregisterKvCache(BytesRequest) returns (BytesResponse);
+  rpc Store(BytesRequest) returns (BytesResponse);
+  rpc Retrieve(BytesRequest) returns (BytesResponse);
+  rpc Lookup(BytesRequest) returns (BytesResponse);
+  rpc QueryPrefetchStatus(BytesRequest) returns (BytesResponse);
+  rpc WaitPrefetchStatus(BytesRequest) returns (BytesResponse);
+  rpc QueryPrefetchLookupHits(BytesRequest) returns (BytesResponse);
+  rpc FreeLookupLocks(BytesRequest) returns (BytesResponse);
+  rpc EndSession(BytesRequest) returns (BytesResponse);
+  rpc RegisterKvCacheEngineDrivenContext(BytesRequest) returns (BytesResponse);
+  rpc UnregisterKvCacheEngineDrivenContext(BytesRequest) returns (BytesResponse);
+  rpc PrepareStore(BytesRequest) returns (BytesResponse);
+  rpc CommitStore(BytesRequest) returns (BytesResponse);
+  rpc PrepareRetrieve(BytesRequest) returns (BytesResponse);
+  rpc CommitRetrieve(BytesRequest) returns (BytesResponse);
+
+  // Controller operations
+  rpc Clear(BytesRequest) returns (BytesResponse);
+  rpc GetChunkSize(BytesRequest) returns (BytesResponse);
+  rpc Ping(BytesRequest) returns (BytesResponse);
+
+  // Observability operations
+  rpc ReportBlockAllocation(BytesRequest) returns (BytesResponse);
+
+  // Debug operations
+  rpc Noop(BytesRequest) returns (BytesResponse);
+
+  // Blend V1
+  rpc CbRegisterKvCache(BytesRequest) returns (BytesResponse);
+  rpc CbUnregisterKvCache(BytesRequest) returns (BytesResponse);
+  rpc CbStorePreComputed(BytesRequest) returns (BytesResponse);
+  rpc CbLookupPreComputed(BytesRequest) returns (BytesResponse);
+  rpc CbRetrievePreComputed(BytesRequest) returns (BytesResponse);
+  rpc CbStoreFinal(BytesRequest) returns (BytesResponse);
+
+  // Blend V2
+  rpc CbLookupPreComputedV2(BytesRequest) returns (BytesResponse);
+  rpc CbRetrievePreComputedV2(BytesRequest) returns (BytesResponse);
+
+  // Blend V3
+  rpc CbRegisterRopeV3(BytesRequest) returns (BytesResponse);
+  rpc CbUnregisterRopeV3(BytesRequest) returns (BytesResponse);
+  rpc CbRetrievePreComputedV3(BytesRequest) returns (BytesResponse);
+  rpc CbUnifiedLookup(BytesRequest) returns (BytesResponse);
+
+  // P2P
+  rpc P2PLookupAndLock(BytesRequest) returns (BytesResponse);
+  rpc P2PQueryLookupResults(BytesRequest) returns (BytesResponse);
+  rpc P2PUnlockObjects(BytesRequest) returns (BytesResponse);
 }
