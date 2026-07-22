@@ -42,3 +42,7 @@ def main() -> None:
     except Exception:  # noqa: BLE001
         logger.exception("Command failed")
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

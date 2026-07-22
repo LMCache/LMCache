@@ -325,7 +325,7 @@ class VLLMPagedMemXPUConnectorV3(GPUConnectorInterface):
     def _initialize_kv_cache_pointers(self):
         if self.init:
             return
-        assert self.metadata.kv_layer_groups_manager.kv_layer_groups
+        assert self.metadata.kv_layer_groups_manager.kernel_groups
         if self.use_gpu:
             # init tmp buffer
             tmp_buf_shapes = self.metadata.get_shapes(self.chunk_size)
@@ -338,7 +338,7 @@ class VLLMPagedMemXPUConnectorV3(GPUConnectorInterface):
                 )
             ]
         self.group_kv_cache_pointers_on_gpu = []
-        for group in self.metadata.kv_layer_groups_manager.kv_layer_groups:
+        for group in self.metadata.kv_layer_groups_manager.kernel_groups:
             # init kv cache pointers
             num_layers = group.num_layers
             kv_cache_pointers = torch.empty(

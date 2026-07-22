@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-13 10:13+0000\n"
+"POT-Creation-Date: 2026-07-20 10:08+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -52,7 +52,7 @@ msgstr "参数"
 #: ../../source/mp/configuration.rst:233 ../../source/mp/configuration.rst:289
 #: ../../source/mp/configuration.rst:311 ../../source/mp/configuration.rst:330
 #: ../../source/mp/configuration.rst:362 ../../source/mp/configuration.rst:436
-#: ../../source/mp/configuration.rst:503
+#: ../../source/mp/configuration.rst:510
 msgid "Default"
 msgstr "默认"
 
@@ -61,7 +61,7 @@ msgstr "默认"
 #: ../../source/mp/configuration.rst:234 ../../source/mp/configuration.rst:290
 #: ../../source/mp/configuration.rst:312 ../../source/mp/configuration.rst:331
 #: ../../source/mp/configuration.rst:363 ../../source/mp/configuration.rst:437
-#: ../../source/mp/configuration.rst:504 ../../source/mp/configuration.rst:551
+#: ../../source/mp/configuration.rst:511 ../../source/mp/configuration.rst:558
 msgid "Description"
 msgstr "描述"
 
@@ -100,7 +100,7 @@ msgstr "绑定 ZMQ 服务器的主机地址。"
 msgid "``--port``"
 msgstr "``--port``"
 
-#: ../../source/mp/configuration.rst:35 ../../source/mp/configuration.rst:519
+#: ../../source/mp/configuration.rst:35 ../../source/mp/configuration.rst:526
 msgid "``5555``"
 msgstr "``5555``"
 
@@ -204,7 +204,7 @@ msgstr ""
 msgid "``--supported-transfer-mode``"
 msgstr "``--supported-transfer-mode``"
 
-#: ../../source/mp/configuration.rst:67 ../../source/mp/configuration.rst:534
+#: ../../source/mp/configuration.rst:67 ../../source/mp/configuration.rst:541
 msgid "``auto``"
 msgstr "``auto``"
 
@@ -919,6 +919,7 @@ msgstr "``--disable-observability``"
 
 #: ../../source/mp/configuration.rst:439 ../../source/mp/configuration.rst:442
 #: ../../source/mp/configuration.rst:445 ../../source/mp/configuration.rst:448
+#: ../../source/mp/configuration.rst:460
 msgid "off"
 msgstr "关闭"
 
@@ -986,17 +987,39 @@ msgstr "``9090``"
 msgid "Port for the Prometheus ``/metrics`` endpoint."
 msgstr "Prometheus ``/metrics`` 端点的端口。"
 
+#: ../../source/mp/configuration.rst:459
+msgid "``--enable-extra-logging``"
+msgstr "``--enable-extra-logging``"
+
 #: ../../source/mp/configuration.rst:461
+msgid ""
+"Periodic INFO logs: per-GPU L0<->L1 transfer stats and L1 memory usage. "
+"See :doc:`observability/logs`."
+msgstr "周期性 INFO 日志：每个 GPU 的 L0<->L1 传输统计和 L1 内存使用情况。请参阅 :doc:`observability/logs`。"
+
+#: ../../source/mp/configuration.rst:463
+msgid "``--extra-logging-interval``"
+msgstr "``--extra-logging-interval``"
+
+#: ../../source/mp/configuration.rst:464 ../../source/mp/configuration.rst:537
+msgid "``10.0``"
+msgstr "``10.0``"
+
+#: ../../source/mp/configuration.rst:465
+msgid "Seconds between extra-logging emissions."
+msgstr "额外日志输出之间的秒数。"
+
+#: ../../source/mp/configuration.rst:468
 msgid "vLLM Client Configuration"
 msgstr "vLLM 客户端配置"
 
-#: ../../source/mp/configuration.rst:463
+#: ../../source/mp/configuration.rst:470
 msgid ""
 "On the vLLM side, specify the LMCache server host and port via the "
 "``kv_connector_extra_config`` parameter:"
 msgstr "在 vLLM 端，通过 ``kv_connector_extra_config`` 参数指定 LMCache 服务器的主机和端口："
 
-#: ../../source/mp/configuration.rst:472
+#: ../../source/mp/configuration.rst:479
 msgid ""
 "To target multiple LMCache servers from a single vLLM deployment, pass a "
 "list (or comma-separated string) of server URLs via "
@@ -1013,35 +1036,35 @@ msgstr ""
 "的世界大小必须能被服务器数量整除，每个工作节点仅连接到其本地分配的服务器（全局排名被切分为连续块，每个服务器一个块）。多服务器模式目前仅支持张量并行"
 " -- 管道并行（``pp_size > 1``）和数据并行（``dp_size > 1``）会被明确拒绝并报错。"
 
-#: ../../source/mp/configuration.rst:489
+#: ../../source/mp/configuration.rst:496
 msgid ""
 "``LMCacheMPConnector`` reads the following keys from "
 "``kv_connector_extra_config``:"
 msgstr "``LMCacheMPConnector`` 从 ``kv_connector_extra_config`` 中读取以下键："
 
-#: ../../source/mp/configuration.rst:493
+#: ../../source/mp/configuration.rst:500
 msgid "Connector ``extra_config`` Keys"
 msgstr "连接器 ``extra_config`` 键"
 
-#: ../../source/mp/configuration.rst:495
+#: ../../source/mp/configuration.rst:502
 msgid ""
 "All connector-level options are passed through "
 "``kv_connector_extra_config`` and use the ``lmcache.mp.`` prefix."
 msgstr "所有连接器级别的选项都通过 ``kv_connector_extra_config`` 传递，并使用 ``lmcache.mp.`` 前缀。"
 
-#: ../../source/mp/configuration.rst:502
+#: ../../source/mp/configuration.rst:509
 msgid "Key"
 msgstr "键"
 
-#: ../../source/mp/configuration.rst:505
+#: ../../source/mp/configuration.rst:512
 msgid "``lmcache.mp.server_urls``"
 msgstr "``lmcache.mp.server_urls``"
 
-#: ../../source/mp/configuration.rst:506
+#: ../../source/mp/configuration.rst:513
 msgid "*(unset)*"
 msgstr "*(未设置)*"
 
-#: ../../source/mp/configuration.rst:507
+#: ../../source/mp/configuration.rst:514
 msgid ""
 "Multi-server deployment: list (or comma-separated string) of "
 "``<transport>://<host>:<port>`` URLs, e.g. "
@@ -1054,15 +1077,15 @@ msgstr ""
 "``\"tcp://host1:6667,tcp://host2:6667\"``。设置后，优先于 ``lmcache.mp.host`` / "
 "``lmcache.mp.port``；vLLM 世界大小必须能被服务器数量整除，每个工作节点连接到其本地分配的服务器。"
 
-#: ../../source/mp/configuration.rst:513
+#: ../../source/mp/configuration.rst:520
 msgid "``lmcache.mp.host``"
 msgstr "``lmcache.mp.host``"
 
-#: ../../source/mp/configuration.rst:514
+#: ../../source/mp/configuration.rst:521
 msgid "``tcp://localhost``"
 msgstr "``tcp://localhost``"
 
-#: ../../source/mp/configuration.rst:515
+#: ../../source/mp/configuration.rst:522
 msgid ""
 "Single-server deployment: host (with ZMQ transport prefix) of the LMCache"
 " MP server. Ignored when ``lmcache.mp.server_urls`` is set."
@@ -1070,11 +1093,11 @@ msgstr ""
 "单服务器部署：LMCache MP 服务器的主机（带有 ZMQ 传输前缀）。当 ``lmcache.mp.server_urls`` "
 "被设置时将被忽略。"
 
-#: ../../source/mp/configuration.rst:518
+#: ../../source/mp/configuration.rst:525
 msgid "``lmcache.mp.port``"
 msgstr "``lmcache.mp.port``"
 
-#: ../../source/mp/configuration.rst:520
+#: ../../source/mp/configuration.rst:527
 msgid ""
 "Single-server deployment: port of the LMCache MP server. Must match the "
 "server's ``--port``. Ignored when ``lmcache.mp.server_urls`` is set."
@@ -1082,15 +1105,15 @@ msgstr ""
 "单服务器部署：LMCache MP 服务器的端口。必须与服务器的 ``--port`` 匹配。当设置了 "
 "``lmcache.mp.server_urls`` 时将被忽略。"
 
-#: ../../source/mp/configuration.rst:523
+#: ../../source/mp/configuration.rst:530
 msgid "``lmcache.mp.mq_timeout``"
 msgstr "``lmcache.mp.mq_timeout``"
 
-#: ../../source/mp/configuration.rst:524
+#: ../../source/mp/configuration.rst:531
 msgid "``300.0``"
 msgstr "``300.0``"
 
-#: ../../source/mp/configuration.rst:525
+#: ../../source/mp/configuration.rst:532
 msgid ""
 "Timeout (seconds) for blocking message-queue requests, including the "
 "initial chunk-size query and KV cache registration/unregistration. If the"
@@ -1100,25 +1123,21 @@ msgstr ""
 "阻塞消息队列请求的超时时间（秒），包括初始块大小查询和 KV Cache 注册/注销。如果服务器在此时间窗口内未响应，连接器将在启动时引发 "
 "``ConnectionError``\\ 。"
 
-#: ../../source/mp/configuration.rst:529
+#: ../../source/mp/configuration.rst:536
 msgid "``lmcache.mp.heartbeat_interval``"
 msgstr "``lmcache.mp.heartbeat_interval``"
 
-#: ../../source/mp/configuration.rst:530
-msgid "``10.0``"
-msgstr "``10.0``"
-
-#: ../../source/mp/configuration.rst:531
+#: ../../source/mp/configuration.rst:538
 msgid ""
 "Interval (seconds) between periodic heartbeat pings sent from the "
 "connector to the server."
 msgstr "连接器向服务器发送周期性心跳 PING 的时间间隔（秒）。"
 
-#: ../../source/mp/configuration.rst:533
+#: ../../source/mp/configuration.rst:540
 msgid "``lmcache.mp.mp_transfer_mode``"
 msgstr "``lmcache.mp.mp_transfer_mode``"
 
-#: ../../source/mp/configuration.rst:535
+#: ../../source/mp/configuration.rst:542
 msgid ""
 "Routing mode for the worker -> server transfer context. One of ``auto`` "
 "(CUDA -> lmcache_driven, others -> engine_driven), ``lmcache_driven`` "
@@ -1132,19 +1151,19 @@ msgstr ""
 "服务器通过设备句柄拉取数据）或 ``engine_driven``（强制使用工作进程端的收集/分散拷贝路径）。当设置时，会覆盖 "
 "``LMCACHE_MP_TRANSFER_MODE`` 环境变量。"
 
-#: ../../source/mp/configuration.rst:544
+#: ../../source/mp/configuration.rst:551
 msgid "Environment Variables"
 msgstr "环境变量"
 
-#: ../../source/mp/configuration.rst:550
+#: ../../source/mp/configuration.rst:557
 msgid "Variable"
 msgstr "变量"
 
-#: ../../source/mp/configuration.rst:552
+#: ../../source/mp/configuration.rst:559
 msgid "``LMCACHE_LOG_LEVEL``"
 msgstr "``LMCACHE_LOG_LEVEL``"
 
-#: ../../source/mp/configuration.rst:553
+#: ../../source/mp/configuration.rst:560
 msgid ""
 "Log level for LMCache (``DEBUG``, ``INFO``, ``WARNING``, ``ERROR``). Set "
 "to ``DEBUG`` to see L2 store activity, prefetch results, etc."
@@ -1152,60 +1171,52 @@ msgstr ""
 "LMCache 的日志级别（\\ ``DEBUG``\\ 、\\ ``INFO``\\ 、\\ ``WARNING``\\ 、\\ "
 "``ERROR``\\ ）。设置为 ``DEBUG`` 以查看 L2 存储活动、预取结果等。"
 
-#: ../../source/mp/configuration.rst:555
+#: ../../source/mp/configuration.rst:562
 msgid "``PYTHONHASHSEED``"
 msgstr "``PYTHONHASHSEED``"
 
-#: ../../source/mp/configuration.rst:556
+#: ../../source/mp/configuration.rst:563
 msgid ""
 "Set to a fixed value for reproducible hashing across processes (relevant "
 "when using ``--hash-algorithm builtin``)."
 msgstr "设置为固定值以实现跨进程的可重复哈希（在使用 ``--hash-algorithm builtin`` 时相关）。"
 
-#: ../../source/mp/configuration.rst:558
+#: ../../source/mp/configuration.rst:565
 msgid "``LMCACHE_TRACK_USAGE``"
 msgstr "``LMCACHE_TRACK_USAGE``"
 
-#: ../../source/mp/configuration.rst:559
+#: ../../source/mp/configuration.rst:566
 msgid "Set to ``false`` to disable anonymous usage statistics (see below)."
 msgstr "设置为 ``false`` 以禁用匿名使用统计（见下文）。"
 
-#: ../../source/mp/configuration.rst:560
+#: ../../source/mp/configuration.rst:567
 msgid "``DO_NOT_TRACK``"
 msgstr "``DO_NOT_TRACK``"
 
-#: ../../source/mp/configuration.rst:561
+#: ../../source/mp/configuration.rst:568
 msgid ""
 "Set to ``1`` to disable anonymous usage statistics (cross-tool "
 "convention)."
 msgstr "设置为 ``1`` 以禁用匿名使用统计信息（跨工具约定）。"
 
-#: ../../source/mp/configuration.rst:565
+#: ../../source/mp/configuration.rst:572
+msgid "Full Example"
+msgstr "完整示例"
+
+#: ../../source/mp/configuration.rst:608
 msgid "Anonymous Usage Statistics"
 msgstr "匿名使用统计"
 
-#: ../../source/mp/configuration.rst:567
+#: ../../source/mp/configuration.rst:610
 msgid ""
-"At startup the MP server sends a one-time anonymous usage report to the "
-"LMCache stats server: an environment snapshot (cloud provider, CPU/GPU, "
-"memory) and a configuration snapshot (chunk size, transfer mode, L1 "
-"size/medium, L2 adapter types, policies). No prompts, keys, KV-cache "
-"data, model names, or the server's ``--instance-id`` are ever sent; "
-"reports are correlated only through random UUIDs. Reporting runs on a "
-"background thread, never delays startup, and a failure anywhere in "
-"reporting never affects serving."
-msgstr "在启动时，MP 服务器会向 LMCache 统计服务器发送一次性的匿名使用报告：环境快照（云提供商、CPU/GPU、内存）和配置快照（块大小、传输模式、L1 大小/中等、L2 适配器类型、策略）。不会发送任何提示、密钥、KV Cache 数据、模型名称或服务器的 ``--instance-id``；报告仅通过随机 UUID 进行关联。报告在后台线程上运行，从不延迟启动，报告中的任何失败都不会影响服务。"
-
-#: ../../source/mp/configuration.rst:576
-msgid ""
-"To opt out, set ``LMCACHE_TRACK_USAGE=false`` or ``DO_NOT_TRACK=1``. See "
-":ref:`usage-stats-collection` for the full list of collected fields and "
-"configuration options."
-msgstr "要选择退出，请设置 ``LMCACHE_TRACK_USAGE=false`` 或 ``DO_NOT_TRACK=1``。有关收集字段和配置选项的完整列表，请参见 :ref:`usage-stats-collection`。"
-
-#: ../../source/mp/configuration.rst:581
-msgid "Full Example"
-msgstr "完整示例"
+"The MP server reports anonymous usage statistics: a one-time "
+"environment/configuration snapshot at startup and interval counters "
+"(tokens retrieved/stored, bytes stored, uptime) every "
+"``LMCACHE_USAGE_TRACK_INTERVAL`` seconds. No prompts, keys, KV-cache "
+"data, model names, or ``--instance-id`` are ever sent, and reporting can "
+"never affect serving. Opt out with ``LMCACHE_TRACK_USAGE=false`` or "
+"``DO_NOT_TRACK=1``; see :ref:`usage-stats-collection` for details."
+msgstr "MP 服务器报告匿名使用统计信息：在启动时进行一次环境/配置快照，并每 ``LMCACHE_USAGE_TRACK_INTERVAL`` 秒报告一次间隔计数器（检索/存储的令牌、存储的字节、正常运行时间）。绝不会发送提示、密钥、KV Cache 数据、模型名称或 ``--instance-id``，并且报告绝不会影响服务。可以通过 ``LMCACHE_TRACK_USAGE=false`` 或 ``DO_NOT_TRACK=1`` 选择退出；有关详细信息，请参见 :ref:`usage-stats-collection`。"
 
 #~ msgid ""
 #~ "Enable or disable lazy allocation for"
@@ -1432,4 +1443,38 @@ msgstr "完整示例"
 #~ "``cudart`` 主机固定内存，因此在非 CUDA 后端（\\ "
 #~ "``lmcache.torch_dev`` 未暴露 ``cudart`` "
 #~ "属性）下，无论标志取值如何，都会自动降级为立即分配并记录警告。"
+
+#~ msgid ""
+#~ "At startup the MP server sends a"
+#~ " one-time anonymous usage report to"
+#~ " the LMCache stats server: an "
+#~ "environment snapshot (cloud provider, CPU/GPU,"
+#~ " memory) and a configuration snapshot "
+#~ "(chunk size, transfer mode, L1 "
+#~ "size/medium, L2 adapter types, policies). "
+#~ "No prompts, keys, KV-cache data, "
+#~ "model names, or the server's "
+#~ "``--instance-id`` are ever sent; reports"
+#~ " are correlated only through random "
+#~ "UUIDs. Reporting runs on a background"
+#~ " thread, never delays startup, and a"
+#~ " failure anywhere in reporting never "
+#~ "affects serving."
+#~ msgstr ""
+#~ "在启动时，MP 服务器会向 LMCache "
+#~ "统计服务器发送一次性的匿名使用报告：环境快照（云提供商、CPU/GPU、内存）和配置快照（块大小、传输模式、L1 "
+#~ "大小/中等、L2 适配器类型、策略）。不会发送任何提示、密钥、KV Cache 数据、模型名称或服务器的"
+#~ " ``--instance-id``；报告仅通过随机 UUID "
+#~ "进行关联。报告在后台线程上运行，从不延迟启动，报告中的任何失败都不会影响服务。"
+
+#~ msgid ""
+#~ "To opt out, set ``LMCACHE_TRACK_USAGE=false``"
+#~ " or ``DO_NOT_TRACK=1``. See :ref:`usage-"
+#~ "stats-collection` for the full list "
+#~ "of collected fields and configuration "
+#~ "options."
+#~ msgstr ""
+#~ "要选择退出，请设置 ``LMCACHE_TRACK_USAGE=false`` 或 "
+#~ "``DO_NOT_TRACK=1``。有关收集字段和配置选项的完整列表，请参见 :ref:`usage-"
+#~ "stats-collection`。"
 
