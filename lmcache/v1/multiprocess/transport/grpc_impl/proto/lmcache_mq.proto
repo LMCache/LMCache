@@ -88,6 +88,86 @@ message LookupRequest {
 
 message LookupResponse {}
 
+// FreeLookupLocks: release the read locks acquired by a Lookup without
+// paying for a full Retrieve.  Same key contract as Lookup so it can
+// reuse the shared IpcCacheServerKey message.
+message FreeLookupLocksRequest {
+  IpcCacheServerKey key = 1;
+  int64 tp_size = 2;
+}
+
+message FreeLookupLocksResponse {}
+
+// EndSession: drop server-side session state for a request id.
+message EndSessionRequest {
+  string request_id = 1;
+}
+
+message EndSessionResponse {}
+
+// UnregisterKvCache / UnregisterKvCacheEngineDrivenContext:
+// symmetric teardown for the two register flavours.  Payload is just
+// the instance id; both handlers return nothing.
+message UnregisterKvCacheRequest {
+  int64 instance_id = 1;
+}
+
+message UnregisterKvCacheResponse {}
+
+message UnregisterKvCacheEngineDrivenContextRequest {
+  int64 instance_id = 1;
+}
+
+message UnregisterKvCacheEngineDrivenContextResponse {}
+
+// QueryPrefetchStatus / WaitPrefetchStatus / QueryPrefetchLookupHits:
+// the three prefetch pollers.  All return ``int | None`` today, so the
+// wire uses optional int64 (absent field == Python ``None``); no
+// magic sentinel value is needed on the wire.
+message QueryPrefetchStatusRequest {
+  string request_id = 1;
+}
+
+message QueryPrefetchStatusResponse {
+  optional int64 chunk_count = 1;
+}
+
+message WaitPrefetchStatusRequest {
+  string request_id = 1;
+  double timeout = 2;
+}
+
+message WaitPrefetchStatusResponse {
+  optional int64 chunk_count = 1;
+}
+
+message QueryPrefetchLookupHitsRequest {
+  string request_id = 1;
+}
+
+message QueryPrefetchLookupHitsResponse {
+  optional int64 chunk_count = 1;
+}
+
+// Clear / GetChunkSize / Noop: controller & debug rpcs with trivial
+// payloads.  Every message keeps its own name so the wire remains
+// self-describing (no shared "EmptyRequest" alias — cheaper to grep).
+message ClearRequest {}
+
+message ClearResponse {}
+
+message GetChunkSizeRequest {}
+
+message GetChunkSizeResponse {
+  int64 chunk_size = 1;
+}
+
+message NoopRequest {}
+
+message NoopResponse {
+  string message = 1;
+}
+
 // -----------------------------------------------------------------------
 // Service.  One rpc per RequestType.  Method names are the CamelCase
 // form of the RequestType enum (STORE -> Store, CB_LOOKUP_PRE_COMPUTED_V2
@@ -98,36 +178,32 @@ message LookupResponse {}
 service MessageQueue {
   // Engine operations
   rpc RegisterKvCache(BytesRequest) returns (BytesResponse);
-  rpc UnregisterKvCache(BytesRequest) returns (BytesResponse);
+  rpc UnregisterKvCache(UnregisterKvCacheRequest) returns (UnregisterKvCacheResponse);
   rpc Store(BytesRequest) returns (BytesResponse);
   rpc Retrieve(BytesRequest) returns (BytesResponse);
-  // TYPED: first consumer of the shared IpcCacheServerKey message.
   rpc Lookup(LookupRequest) returns (LookupResponse);
-  rpc QueryPrefetchStatus(BytesRequest) returns (BytesResponse);
-  rpc WaitPrefetchStatus(BytesRequest) returns (BytesResponse);
-  rpc QueryPrefetchLookupHits(BytesRequest) returns (BytesResponse);
-  rpc FreeLookupLocks(BytesRequest) returns (BytesResponse);
-  rpc EndSession(BytesRequest) returns (BytesResponse);
+  rpc QueryPrefetchStatus(QueryPrefetchStatusRequest) returns (QueryPrefetchStatusResponse);
+  rpc WaitPrefetchStatus(WaitPrefetchStatusRequest) returns (WaitPrefetchStatusResponse);
+  rpc QueryPrefetchLookupHits(QueryPrefetchLookupHitsRequest) returns (QueryPrefetchLookupHitsResponse);
+  rpc FreeLookupLocks(FreeLookupLocksRequest) returns (FreeLookupLocksResponse);
+  rpc EndSession(EndSessionRequest) returns (EndSessionResponse);
   rpc RegisterKvCacheEngineDrivenContext(BytesRequest) returns (BytesResponse);
-  rpc UnregisterKvCacheEngineDrivenContext(BytesRequest) returns (BytesResponse);
+  rpc UnregisterKvCacheEngineDrivenContext(UnregisterKvCacheEngineDrivenContextRequest) returns (UnregisterKvCacheEngineDrivenContextResponse);
   rpc PrepareStore(BytesRequest) returns (BytesResponse);
   rpc CommitStore(BytesRequest) returns (BytesResponse);
   rpc PrepareRetrieve(BytesRequest) returns (BytesResponse);
   rpc CommitRetrieve(BytesRequest) returns (BytesResponse);
 
   // Controller operations
-  rpc Clear(BytesRequest) returns (BytesResponse);
-  rpc GetChunkSize(BytesRequest) returns (BytesResponse);
-  // TYPED: reference impl for the typed-rpc migration path.  All
-  // other rpcs are still on the legacy BytesRequest/BytesResponse
-  // envelope until they get migrated one-by-one.
+  rpc Clear(ClearRequest) returns (ClearResponse);
+  rpc GetChunkSize(GetChunkSizeRequest) returns (GetChunkSizeResponse);
   rpc Ping(PingRequest) returns (PingResponse);
 
   // Observability operations
   rpc ReportBlockAllocation(BytesRequest) returns (BytesResponse);
 
   // Debug operations
-  rpc Noop(BytesRequest) returns (BytesResponse);
+  rpc Noop(NoopRequest) returns (NoopResponse);
 
   // Blend V1
   rpc CbRegisterKvCache(BytesRequest) returns (BytesResponse);

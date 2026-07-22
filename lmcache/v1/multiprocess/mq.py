@@ -187,6 +187,199 @@ def _lookup_response_to_python(resp: "lmcache_mq_pb2.LookupResponse") -> None:
     return None
 
 
+# --- FreeLookupLocks: same shape as Lookup, different rpc name -------
+
+
+def _free_lookup_locks_request_to_python(
+    req: "lmcache_mq_pb2.FreeLookupLocksRequest",
+) -> tuple[Any, ...]:
+    return (_ipc_key_proto_to_python(req.key), req.tp_size)
+
+
+def _free_lookup_locks_python_to_request(
+    key: IPCCacheServerKey, tp_size: int
+) -> "lmcache_mq_pb2.FreeLookupLocksRequest":
+    return lmcache_mq_pb2.FreeLookupLocksRequest(
+        key=_ipc_key_python_to_proto(key), tp_size=tp_size
+    )
+
+
+def _free_lookup_locks_python_to_response(
+    result: Any,
+) -> "lmcache_mq_pb2.FreeLookupLocksResponse":
+    del result
+    return lmcache_mq_pb2.FreeLookupLocksResponse()
+
+
+def _free_lookup_locks_response_to_python(
+    resp: "lmcache_mq_pb2.FreeLookupLocksResponse",
+) -> None:
+    del resp
+    return None
+
+
+# --- EndSession: single-string payload, empty response ---------------
+
+
+def _end_session_request_to_python(
+    req: "lmcache_mq_pb2.EndSessionRequest",
+) -> tuple[Any, ...]:
+    return (req.request_id,)
+
+
+def _end_session_python_to_request(
+    request_id: str,
+) -> "lmcache_mq_pb2.EndSessionRequest":
+    return lmcache_mq_pb2.EndSessionRequest(request_id=request_id)
+
+
+def _end_session_python_to_response(
+    result: Any,
+) -> "lmcache_mq_pb2.EndSessionResponse":
+    del result
+    return lmcache_mq_pb2.EndSessionResponse()
+
+
+def _end_session_response_to_python(
+    resp: "lmcache_mq_pb2.EndSessionResponse",
+) -> None:
+    del resp
+    return None
+
+
+# --- UnregisterKvCache / UnregisterKvCacheEngineDrivenContext:
+#     symmetric [int] -> None rpcs share a single pair of helpers. -----
+
+
+def _instance_id_request_to_python(req: Any) -> tuple[Any, ...]:
+    return (req.instance_id,)
+
+
+def _make_instance_id_python_to_request(
+    message_cls: Any,
+) -> Callable[[int], Any]:
+    def _to_request(instance_id: int) -> Any:
+        return message_cls(instance_id=instance_id)
+
+    return _to_request
+
+
+def _make_empty_python_to_response(
+    message_cls: Any,
+) -> Callable[[Any], Any]:
+    def _to_response(result: Any) -> Any:
+        del result
+        return message_cls()
+
+    return _to_response
+
+
+def _empty_response_to_python(resp: Any) -> None:
+    del resp
+    return None
+
+
+# --- Query/Wait prefetch: request_id [+ timeout] -> optional int -----
+
+
+def _query_prefetch_status_request_to_python(
+    req: "lmcache_mq_pb2.QueryPrefetchStatusRequest",
+) -> tuple[Any, ...]:
+    return (req.request_id,)
+
+
+def _query_prefetch_status_python_to_request(
+    request_id: str,
+) -> "lmcache_mq_pb2.QueryPrefetchStatusRequest":
+    return lmcache_mq_pb2.QueryPrefetchStatusRequest(request_id=request_id)
+
+
+def _wait_prefetch_status_request_to_python(
+    req: "lmcache_mq_pb2.WaitPrefetchStatusRequest",
+) -> tuple[Any, ...]:
+    return (req.request_id, req.timeout)
+
+
+def _wait_prefetch_status_python_to_request(
+    request_id: str, timeout: float
+) -> "lmcache_mq_pb2.WaitPrefetchStatusRequest":
+    return lmcache_mq_pb2.WaitPrefetchStatusRequest(
+        request_id=request_id, timeout=timeout
+    )
+
+
+def _query_prefetch_lookup_hits_request_to_python(
+    req: "lmcache_mq_pb2.QueryPrefetchLookupHitsRequest",
+) -> tuple[Any, ...]:
+    return (req.request_id,)
+
+
+def _query_prefetch_lookup_hits_python_to_request(
+    request_id: str,
+) -> "lmcache_mq_pb2.QueryPrefetchLookupHitsRequest":
+    return lmcache_mq_pb2.QueryPrefetchLookupHitsRequest(request_id=request_id)
+
+
+# ``optional int64 chunk_count = 1`` -- absent == Python ``None``.
+# The three prefetch-status rpcs share this exact shape, so one pair
+# of helpers plus a message-class-bound factory covers all of them.
+
+
+def _make_optional_chunk_count_python_to_response(
+    message_cls: Any,
+) -> Callable[[Any], Any]:
+    def _to_response(result: Any) -> Any:
+        msg = message_cls()
+        if result is not None:
+            msg.chunk_count = int(result)
+        return msg
+
+    return _to_response
+
+
+def _optional_chunk_count_response_to_python(resp: Any) -> Optional[int]:
+    return resp.chunk_count if resp.HasField("chunk_count") else None
+
+
+# --- Clear / GetChunkSize / Noop: empty-payload rpcs -----------------
+
+
+def _empty_request_to_python(req: Any) -> tuple[Any, ...]:
+    del req
+    return ()
+
+
+def _make_empty_python_to_request(
+    message_cls: Any,
+) -> Callable[[], Any]:
+    def _to_request() -> Any:
+        return message_cls()
+
+    return _to_request
+
+
+def _get_chunk_size_python_to_response(
+    result: Any,
+) -> "lmcache_mq_pb2.GetChunkSizeResponse":
+    return lmcache_mq_pb2.GetChunkSizeResponse(chunk_size=int(result))
+
+
+def _get_chunk_size_response_to_python(
+    resp: "lmcache_mq_pb2.GetChunkSizeResponse",
+) -> int:
+    return int(resp.chunk_size)
+
+
+def _noop_python_to_response(result: Any) -> "lmcache_mq_pb2.NoopResponse":
+    return lmcache_mq_pb2.NoopResponse(
+        message=str(result) if result is not None else ""
+    )
+
+
+def _noop_response_to_python(resp: "lmcache_mq_pb2.NoopResponse") -> str:
+    return resp.message
+
+
 # ---------------------------------------------------------------------------
 # msgspec encode / decode helpers (payload bytes wrapped inside proto)
 # ---------------------------------------------------------------------------
@@ -260,6 +453,102 @@ _TYPED_RPCS: dict[RequestType, TypedRpcSpec] = {
         python_to_request=_lookup_python_to_request,
         python_to_response=_lookup_python_to_response,
         response_to_python=_lookup_response_to_python,
+    ),
+    RequestType.FREE_LOOKUP_LOCKS: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.FreeLookupLocksRequest,
+        response_message=lmcache_mq_pb2.FreeLookupLocksResponse,
+        request_to_python=_free_lookup_locks_request_to_python,
+        python_to_request=_free_lookup_locks_python_to_request,
+        python_to_response=_free_lookup_locks_python_to_response,
+        response_to_python=_free_lookup_locks_response_to_python,
+    ),
+    RequestType.END_SESSION: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.EndSessionRequest,
+        response_message=lmcache_mq_pb2.EndSessionResponse,
+        request_to_python=_end_session_request_to_python,
+        python_to_request=_end_session_python_to_request,
+        python_to_response=_end_session_python_to_response,
+        response_to_python=_end_session_response_to_python,
+    ),
+    RequestType.UNREGISTER_KV_CACHE: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.UnregisterKvCacheRequest,
+        response_message=lmcache_mq_pb2.UnregisterKvCacheResponse,
+        request_to_python=_instance_id_request_to_python,
+        python_to_request=_make_instance_id_python_to_request(
+            lmcache_mq_pb2.UnregisterKvCacheRequest
+        ),
+        python_to_response=_make_empty_python_to_response(
+            lmcache_mq_pb2.UnregisterKvCacheResponse
+        ),
+        response_to_python=_empty_response_to_python,
+    ),
+    RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.UnregisterKvCacheEngineDrivenContextRequest,
+        response_message=lmcache_mq_pb2.UnregisterKvCacheEngineDrivenContextResponse,
+        request_to_python=_instance_id_request_to_python,
+        python_to_request=_make_instance_id_python_to_request(
+            lmcache_mq_pb2.UnregisterKvCacheEngineDrivenContextRequest
+        ),
+        python_to_response=_make_empty_python_to_response(
+            lmcache_mq_pb2.UnregisterKvCacheEngineDrivenContextResponse
+        ),
+        response_to_python=_empty_response_to_python,
+    ),
+    RequestType.QUERY_PREFETCH_STATUS: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.QueryPrefetchStatusRequest,
+        response_message=lmcache_mq_pb2.QueryPrefetchStatusResponse,
+        request_to_python=_query_prefetch_status_request_to_python,
+        python_to_request=_query_prefetch_status_python_to_request,
+        python_to_response=_make_optional_chunk_count_python_to_response(
+            lmcache_mq_pb2.QueryPrefetchStatusResponse
+        ),
+        response_to_python=_optional_chunk_count_response_to_python,
+    ),
+    RequestType.WAIT_PREFETCH_STATUS: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.WaitPrefetchStatusRequest,
+        response_message=lmcache_mq_pb2.WaitPrefetchStatusResponse,
+        request_to_python=_wait_prefetch_status_request_to_python,
+        python_to_request=_wait_prefetch_status_python_to_request,
+        python_to_response=_make_optional_chunk_count_python_to_response(
+            lmcache_mq_pb2.WaitPrefetchStatusResponse
+        ),
+        response_to_python=_optional_chunk_count_response_to_python,
+    ),
+    RequestType.QUERY_PREFETCH_LOOKUP_HITS: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.QueryPrefetchLookupHitsRequest,
+        response_message=lmcache_mq_pb2.QueryPrefetchLookupHitsResponse,
+        request_to_python=_query_prefetch_lookup_hits_request_to_python,
+        python_to_request=_query_prefetch_lookup_hits_python_to_request,
+        python_to_response=_make_optional_chunk_count_python_to_response(
+            lmcache_mq_pb2.QueryPrefetchLookupHitsResponse
+        ),
+        response_to_python=_optional_chunk_count_response_to_python,
+    ),
+    RequestType.CLEAR: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.ClearRequest,
+        response_message=lmcache_mq_pb2.ClearResponse,
+        request_to_python=_empty_request_to_python,
+        python_to_request=_make_empty_python_to_request(lmcache_mq_pb2.ClearRequest),
+        python_to_response=_make_empty_python_to_response(lmcache_mq_pb2.ClearResponse),
+        response_to_python=_empty_response_to_python,
+    ),
+    RequestType.GET_CHUNK_SIZE: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.GetChunkSizeRequest,
+        response_message=lmcache_mq_pb2.GetChunkSizeResponse,
+        request_to_python=_empty_request_to_python,
+        python_to_request=_make_empty_python_to_request(
+            lmcache_mq_pb2.GetChunkSizeRequest
+        ),
+        python_to_response=_get_chunk_size_python_to_response,
+        response_to_python=_get_chunk_size_response_to_python,
+    ),
+    RequestType.NOOP: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.NoopRequest,
+        response_message=lmcache_mq_pb2.NoopResponse,
+        request_to_python=_empty_request_to_python,
+        python_to_request=_make_empty_python_to_request(lmcache_mq_pb2.NoopRequest),
+        python_to_response=_noop_python_to_response,
+        response_to_python=_noop_response_to_python,
     ),
 }
 

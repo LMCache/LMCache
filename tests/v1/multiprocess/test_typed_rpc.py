@@ -270,3 +270,139 @@ def test_lookup_typed_roundtrip() -> None:
         client.close()
     finally:
         server.close()
+
+
+# ---------------------------------------------------------------------
+# Wave 2: bulk-migrated trivial rpcs.  One parametrized test covers all
+# ten in the same shape so adding the next wave stays cheap.
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "request_type",
+    [
+        RequestType.FREE_LOOKUP_LOCKS,
+        RequestType.END_SESSION,
+        RequestType.UNREGISTER_KV_CACHE,
+        RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
+        RequestType.QUERY_PREFETCH_STATUS,
+        RequestType.WAIT_PREFETCH_STATUS,
+        RequestType.QUERY_PREFETCH_LOOKUP_HITS,
+        RequestType.CLEAR,
+        RequestType.GET_CHUNK_SIZE,
+        RequestType.NOOP,
+    ],
+)
+def test_wave2_rpc_is_typed(request_type: RequestType) -> None:
+    """Each Wave 2 rpc must be off the msgspec envelope."""
+    assert request_type in _TYPED_RPCS
+    spec = _TYPED_RPCS[request_type]
+    assert spec.request_message is not lmcache_mq_pb2.BytesRequest
+    assert spec.response_message is not lmcache_mq_pb2.BytesResponse
+
+
+def test_optional_chunk_count_none_roundtrip() -> None:
+    """``int | None`` -> ``optional int64`` must preserve None."""
+    for rt in (
+        RequestType.QUERY_PREFETCH_STATUS,
+        RequestType.WAIT_PREFETCH_STATUS,
+        RequestType.QUERY_PREFETCH_LOOKUP_HITS,
+    ):
+        spec = _TYPED_RPCS[rt]
+        for value in (None, 0, 1, 42, 2**31):
+            proto_resp = spec.python_to_response(value)
+            assert spec.response_to_python(proto_resp) == value
+
+
+def test_free_lookup_locks_typed_roundtrip() -> None:
+    """Full gRPC roundtrip on the FreeLookupLocks rpc — proves that
+    IpcCacheServerKey embedded in a second message pair also works."""
+    port = _find_free_port()
+    server_url = f"grpc://127.0.0.1:{port}"
+    seen: list[tuple[IPCCacheServerKey, int]] = []
+
+    def free_locks_handler(key: IPCCacheServerKey, tp_size: int) -> None:
+        seen.append((key, tp_size))
+        return None
+
+    server = MessageQueueServer(server_url)
+    server.add_handler(
+        RequestType.FREE_LOOKUP_LOCKS,
+        get_payload_classes(RequestType.FREE_LOOKUP_LOCKS),
+        HandlerType.BLOCKING,
+        free_locks_handler,
+    )
+    server.add_normal_thread_pool([RequestType.FREE_LOOKUP_LOCKS], max_workers=1)
+    server.start()
+    try:
+        client = MessageQueueClient(server_url)
+        key = _sample_key(cache_salt="wave2")
+        fut: MessagingFuture[None] = client.submit_request(
+            RequestType.FREE_LOOKUP_LOCKS, [key, 2]
+        )
+        assert fut.result(timeout=5.0) is None
+        assert seen == [(key, 2)]
+        client.close()
+    finally:
+        server.close()
+
+
+def test_get_chunk_size_typed_roundtrip() -> None:
+    """Empty-payload rpc with a non-empty response body."""
+    port = _find_free_port()
+    server_url = f"grpc://127.0.0.1:{port}"
+
+    def chunk_size_handler() -> int:
+        return 256
+
+    server = MessageQueueServer(server_url)
+    server.add_handler(
+        RequestType.GET_CHUNK_SIZE,
+        get_payload_classes(RequestType.GET_CHUNK_SIZE),
+        HandlerType.SYNC,
+        chunk_size_handler,
+    )
+    server.start()
+    try:
+        client = MessageQueueClient(server_url)
+        fut: MessagingFuture[int] = client.submit_request(
+            RequestType.GET_CHUNK_SIZE, []
+        )
+        assert fut.result(timeout=5.0) == 256
+        client.close()
+    finally:
+        server.close()
+
+
+def test_query_prefetch_status_typed_roundtrip() -> None:
+    """optional int64 chunk_count comes back as int and as None."""
+    port = _find_free_port()
+    server_url = f"grpc://127.0.0.1:{port}"
+
+    results: dict[str, Optional[int]] = {"req-1": 7, "req-2": None}
+
+    def status_handler(request_id: str) -> Optional[int]:
+        return results[request_id]
+
+    server = MessageQueueServer(server_url)
+    server.add_handler(
+        RequestType.QUERY_PREFETCH_STATUS,
+        get_payload_classes(RequestType.QUERY_PREFETCH_STATUS),
+        HandlerType.BLOCKING,
+        status_handler,
+    )
+    server.add_normal_thread_pool([RequestType.QUERY_PREFETCH_STATUS], max_workers=2)
+    server.start()
+    try:
+        client = MessageQueueClient(server_url)
+        fut1: MessagingFuture[Optional[int]] = client.submit_request(
+            RequestType.QUERY_PREFETCH_STATUS, ["req-1"]
+        )
+        fut2: MessagingFuture[Optional[int]] = client.submit_request(
+            RequestType.QUERY_PREFETCH_STATUS, ["req-2"]
+        )
+        assert fut1.result(timeout=5.0) == 7
+        assert fut2.result(timeout=5.0) is None
+        client.close()
+    finally:
+        server.close()
