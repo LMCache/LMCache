@@ -41,6 +41,9 @@ class RequestType(enum.Enum):
     # Engine operations
     REGISTER_KV_CACHE = enum.auto()
     UNREGISTER_KV_CACHE = enum.auto()
+    REGISTER_Q_CACHE = enum.auto()
+    UNREGISTER_Q_CACHE = enum.auto()
+    STORE_Q = enum.auto()
     STORE = enum.auto()
     RETRIEVE = enum.auto()
     LOOKUP = enum.auto()

@@ -5,7 +5,7 @@
 from lmcache.sdk import batch, context, kvcache, qcache, stream
 from lmcache.sdk.context import LMCacheSDKCacheKind
 
-__all__ = ["batch", "context", "kvcache", "qcache", "stream", "LMCacheSDKacheKind"]
+__all__ = ["batch", "context", "kvcache", "qcache", "stream", "LMCacheSDKCacheKind"]
 
 
 def connect(

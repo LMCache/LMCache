@@ -68,6 +68,16 @@ class LMCacheSDKCacheKind(enum.Enum):
             return f"{model_name}##query"
         return model_name
 
+    def base_model_name(self, model_name: str) -> str:
+        """Remove the kind prefix from a model name for registration.
+
+        Args:
+            model_name: The prefixed model name.
+        """
+        if self is LMCacheSDKCacheKind.QUERY:
+            return model_name.replace("##query", "")
+        return model_name
+
 
 ModifyFnType = Callable[
     [Mapping[LMCacheSDKCacheKind, torch.Tensor], Sequence[int]],
@@ -163,7 +173,7 @@ class LMCacheSDKContext:
         """Register the cache layout for the model with the SDK context."""
         entry = None
         for e in self._cache_context_meta_conf.values():
-            if e.get("model_name") == self._model_name:
+            if e.get("model_name") == self._kind.base_model_name(self._model_name):
                 entry = e
                 break
         if not entry:

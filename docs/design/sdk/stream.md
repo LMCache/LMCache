@@ -1,10 +1,10 @@
 # Stream SDK
 
-> Stateful, single-request orchestration over the [KV Cache SDK](kvcache.md).
+> Stateful, single-request orchestration over the [SDK context](context.md).
 
 ## Goal
 
-`lmcache.sdk.kvcache` is stateless — it moves KV by token ids and forgets. A
+`LMCacheSDKContext` is stateless — its `retrieve`/`store` move KV by token ids and forget. A
 token dropping request spans several passes (prefill, modify the cached KV, 
 decode), which are encoded as different requests. `LMCacheStream` binds all
 request belonging to a request as a stream instead of leaving the management
@@ -16,7 +16,7 @@ import lmcache.sdk.stream as lmc_stream
 
 ctx = lmc_sdk.connect(url=..., http_url=..., model_name="Qwen/Qwen3-8B")
 stream = lmc_stream.create_request(
-    ctx, post_completion, prompt_token_ids=source_tokens
+    [ctx], post_completion, prompt_token_ids=source_tokens  # contexts is an iterable
 )
 
 stream.generate({"max_tokens": 1})    # prefill -> offload the prompt KV
@@ -38,17 +38,17 @@ The full logical sequence is `tokens` + `_suffix_tokens`. The token-bearing
 fields mean different things:
 
 - **`tokens`** — sequence backing the stored KV; sent as the next prompt.
-  Replaced when the KV is modified via `update_kv`.
+  Replaced when the KV is modified via `update`.
 - **`_suffix_tokens`** — tokens *not* in the stored KV: the non-chunk-aligned
   tail left after `modify_kv`. Managed by the next `generate`.
 - **`_decoded` / `_text_parts`** — cumulative generated count / text across all
   `generate`s (`decoded_tokens()`, `output_text()`); unaffected by compaction.
 - **`done`** — True once a `generate` yields `< max_tokens` (EOS). Reset when
-  `update_kv` is called.
+  `update` is called.
 
 ## Suffix contract
 
-`retrieve_kv` returns only a **chunk-aligned** prefix, so after `modify_kv`
+`retrieve` returns only a **chunk-aligned** prefix, so after `modify_kv`
 edits it the remainder (sub-chunk tail + not-yet-offloaded tokens) has no
 stored KV. The stream carries it across the edit:
 
@@ -59,17 +59,18 @@ stored KV. The stream carries it across the edit:
 
 ## Public API
 
-- **`LMCacheStream(ctx, post_completion, prompt_token_ids, cache_salt="")`**
-  or the `create_request()`.
-- **`generate(sampling_params, suffix_tokens=())`** returns `StreamPerfMetrics`
-  the performance metrics of one request
-- **`modify_kv(fn)`**: calls `retrieve_kv`, passing the KV and tokens so far
-  to the function `fn(kv[2,L,T,D], tokens[:cached_len])` which returns the new
-  pair of `(new_kv, new_tokens)`, then replaces the original KV by `update_kv`.
-- **`retrieve_kv(timeout=30, poll_interval=0.2)`** and
-  **`update_kv(kv, tokens)`**: wraps `lmc_sdk.retrieve()` and `lmc_sdk.store()`
-- Accessors: `stream_id()`, `suffix_tokens()`, `decoded_tokens()`,
-  `output_text()`, `output_tokens()`, `is_done()`.
+- **`LMCacheStream(contexts, post_completion, prompt_token_ids, cache_salt="")`**
+  or `create_request(contexts, ...)`; `contexts` is an iterable (e.g. `[kv_ctx]`
+  or `[kv_ctx, q_ctx]`).
+- **`generate(sampling_params, suffix_tokens=())`** returns `StreamPerfMetrics`,
+  the performance metrics of one request.
+- **`modify_kv(fn, timeout=30.0, poll_interval=0.2)`**: calls `retrieve`, passing
+  the KV and tokens so far to `fn(kv[2,L,T,D], tokens[:cached_len])` which returns
+  the new pair `(new_kv, new_tokens)`, then replaces the original KV via `update`.
+- **`retrieve(timeout=30.0, poll_interval=0.2)`** and **`update(kv, tokens)`**:
+  wrap the context's `retrieve()` / `store()`.
+- Accessor **properties**: `stream_id`, `suffix_tokens`, `decoded_tokens`,
+  `output_text`, `output_tokens`, `is_done`.
 - **`StreamPerfMetrics`** (per call metric, times in **seconds**).
 - **`TokenEvent(token_id, text)`**, **`PostCompletion`** (Protocol),
   **`LMCacheStreamError`**.

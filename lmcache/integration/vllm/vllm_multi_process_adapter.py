@@ -3,7 +3,7 @@
 # Standard
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol
+from typing import Any, Callable, NoReturn, Protocol
 import enum
 import os
 import threading
@@ -16,7 +16,11 @@ import zmq
 # First Party
 from lmcache import torch_dev
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
-from lmcache.integration.vllm.utils import vllm_layout_hints
+from lmcache.integration.vllm.utils import (
+    lmcache_get_or_create_config,
+    vllm_layout_hints,
+)
+from lmcache.sdk.qringbuffer import QRingBufferAdapter
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
@@ -36,17 +40,6 @@ from lmcache.v1.multiprocess.transfer_context import (
 )
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
 from lmcache.v1.platform import resolve_kv_wrapper_factory
-
-if TYPE_CHECKING:
-    # First Party
-    from lmcache.sdk.qringbuffer import QRingBufferAdapter
-else:
-    try:
-        # First Party
-        from lmcache.sdk.qringbuffer import QRingBufferAdapter
-    except ImportError:
-        QRingBuffer = None
-        QRingBufferAdapter = None
 
 logger = init_logger(__name__)
 
@@ -73,6 +66,10 @@ class ExtraConfigDefault(enum.Enum):
     # Mirrors the ``LMCACHE_MP_TRANSFER_MODE`` env var; this extra_config
     # key wins when both are set.
     mp_transfer_mode = "auto"
+    # Whether or not to store intermediate tensor (in vLLM side) via
+    # ``lmcache.mp.transfer_intermediate_tensors``. The same flag has to be
+    # set in LMCache server side via ``transfer_intermediate_tensors`` too.
+    transfer_intermediate_tensors = False
 
 
 # Backward-compatible aliases for the legacy `lmcache_mp_connector_0180`
@@ -425,7 +422,7 @@ class HeartbeatThread(PeriodicThread):
         mq_client: MessageQueueClient,
         health_event: threading.Event,
         interval: float = DEFAULT_HEARTBEAT_INTERVAL,
-        instance_ids: list[int] | None = None,
+        instance_id: int | None = None,
     ):
         """
         Args:
@@ -435,7 +432,7 @@ class HeartbeatThread(PeriodicThread):
                 Adapters check this event to decide whether to proceed
                 with operations or enter degraded mode.
             interval: Seconds between heartbeat pings and ping timeout.
-            instance_ids: A list of instance IDs sent with each PING so the
+            instance_id: The worker's instance ID sent with each PING so the
                 server can refresh its liveness, or None for an untracked
                 prober (the scheduler adapter).
         """
@@ -447,7 +444,7 @@ class HeartbeatThread(PeriodicThread):
         self._mq_client = mq_client
         self._health_event = health_event
         self._interval = interval
-        self._instance_ids = instance_ids
+        self._instance_id = instance_id
 
         # Optional callback invoked on the unhealthy->healthy edge,
         # before the health event is set. See register_recover_callback.
@@ -486,18 +483,9 @@ class HeartbeatThread(PeriodicThread):
         UNREGISTER must not re-register a ghost context.
         """
         was_healthy = self._health_event.is_set()
-        healthy = True
-        if self._instance_ids:
-            for instance_id in self._instance_ids:
-                if not send_ping(
-                    self._mq_client, timeout=self._interval, instance_id=instance_id
-                ):
-                    healthy = False
-                    break
-        else:
-            healthy = send_ping(
-                self._mq_client, timeout=self._interval, instance_id=None
-            )
+        healthy = send_ping(
+            self._mq_client, timeout=self._interval, instance_id=self._instance_id
+        )
 
         if self.stop_requested:
             return ThreadRunSummary(
@@ -1105,6 +1093,7 @@ class LMCacheMPWorkerAdapter:
             legacy_block_size,
             mq_timeout,
         )
+        vllm_transfer_intermediate_tensors = False
         if extra_config is not None:
             cfg = _resolve_extra_config(extra_config)
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
@@ -1120,6 +1109,9 @@ class LMCacheMPWorkerAdapter:
                 self._mp_transfer_mode = cfg[ExtraConfigDefault.mp_transfer_mode.name]
             else:
                 self._mp_transfer_mode = None
+            vllm_transfer_intermediate_tensors = cfg[
+                ExtraConfigDefault.transfer_intermediate_tensors.name
+            ]
         else:
             self._mp_transfer_mode = None
         self.mq_client = MessageQueueClient(server_url, context)
@@ -1188,10 +1180,12 @@ class LMCacheMPWorkerAdapter:
 
         # For Query transfer
         self.q_ring_adapter: "QRingBufferAdapter | None" = None
-        if QRingBufferAdapter is not None:
+        if (
+            vllm_transfer_intermediate_tensors
+            and lmcache_get_or_create_config().transfer_intermediate_tensors
+        ):
             self.q_ring_adapter = QRingBufferAdapter(
                 adapter=self,
-                q_instance_id=uuid.uuid4().int & ((1 << 63) - 1),
                 q_model_name=f"{self.model_name}##query",
                 send_lmcache_request=send_lmcache_request,
             )
@@ -1294,59 +1288,6 @@ class LMCacheMPWorkerAdapter:
         self.engine_group_infos = list(engine_group_infos)
         self._send_register_kv_caches_request(kv_caches)
 
-    def register_q_ring(
-        self,
-        num_layers: int,
-        num_q_heads: int,
-        head_size: int,
-        dtype: torch.dtype,
-        num_ring_blocks: int,
-        device: torch.device,
-    ) -> None:
-        """Delegate paged-Q ring allocation to the QRingBufferAdapter.
-        See ``QRingBufferAdapter.register_q_ring``.
-        """
-        if self.q_ring_adapter is None:
-            return
-        self.q_ring_adapter.register_q_ring(
-            num_layers=num_layers,
-            num_q_heads=num_q_heads,
-            head_size=head_size,
-            dtype=dtype,
-            num_ring_blocks=num_ring_blocks,
-            device=device,
-        )
-
-    def scatter_q_layer(
-        self,
-        layer_index: int,
-        query: torch.Tensor,
-        ring_slots: torch.Tensor,
-    ) -> None:
-        """Scatter query tensor to QRingBuffer.
-        See ``QRingBufferAdapter.scatter_q_layer``.
-        """
-        if self.q_ring_adapter is None:
-            return
-        self.q_ring_adapter.scatter_q_layer(layer_index, query, ring_slots)
-
-    def submit_q_store_request(
-        self,
-        request_id: str,
-        op: LoadStoreOp,
-        ring_block_ids: list[int],
-        event: _IpcEvent,
-        cache_salt: str = "",
-    ) -> None:
-        """Delegate a Q-ring store to the QRingBufferAdapter.
-        See ``QRingBufferAdapter.submit_q_store_request``.
-        """
-        if not self.q_ring_adapter:
-            return
-        self.q_ring_adapter.submit_q_store_request(
-            request_id, op, ring_block_ids, event, cache_salt
-        )
-
     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
         return expand_engine_block_ids(self.engine_group_infos, op.block_ids)
 
@@ -1408,14 +1349,11 @@ class LMCacheMPWorkerAdapter:
         with self._heartbeat_lock:
             if self._heartbeat is not None:
                 return
-            instance_ids = [self.instance_id]
-            if self.q_ring_adapter and self.q_ring_adapter.q_ring:
-                instance_ids.append(self.q_ring_adapter.q_instance_id)
             heartbeat = HeartbeatThread(
                 mq_client=self.mq_client,
                 health_event=self._health_event,
                 interval=self._heartbeat_interval,
-                instance_ids=instance_ids,
+                instance_id=self.instance_id,
             )
             heartbeat.register_recover_callback(self._reregister_kv_caches_callback)
             heartbeat.start()
@@ -1690,7 +1628,7 @@ class LMCacheMPWorkerAdapter:
             IDs that have not been returned before.
         """
         if self.q_ring_adapter:
-            self.q_ring_adapter._reclaim_finished_q_stores()
+            self.q_ring_adapter.reclaim_finished_q_stores()
 
         # If unhealthy, drain all pending futures immediately
         if not self.is_healthy:
@@ -1861,7 +1799,7 @@ class LMCacheMPWorkerAdapter:
             )
 
         if self.q_ring_adapter:
-            self.q_ring_adapter._shutdown_q_ring()
+            self.q_ring_adapter.shutdown_q_ring()
 
         if self.transfer_ctx is not None:
             self.transfer_ctx.close()

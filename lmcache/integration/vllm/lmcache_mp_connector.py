@@ -102,15 +102,6 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
-    # First Party
-    from lmcache.sdk.qringbuffer import QRingBufferCapture
-else:
-    try:
-        # First Party
-        from lmcache.sdk.qringbuffer import QRingBufferCapture
-    except ImportError:
-        QRingBufferCapture = None
-
 logger = lmcache_init_logger(__name__)
 
 
@@ -706,10 +697,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
             self.q_ring_capture: "QRingBufferCapture | None" = None
-            if QRingBufferCapture is not None:
-                self.q_ring_capture = QRingBufferCapture(
-                    self.worker_adapter, self.transfer_intermediate_tensors
-                )
+            if self.transfer_intermediate_tensors:
+                self.q_ring_capture = QRingBufferCapture(self.worker_adapter)
         else:
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
 
@@ -762,7 +751,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         cfg = self._vllm_config.kv_transfer_config
         if cfg is None:
             return False
-        return cfg.get_from_extra_config("transfer_intermediate_tensors", False)
+
+        vllm_transfer = cfg.get_from_extra_config(
+            "lmcache.mp.transfer_intermediate_tensors", False
+        )
+        lmcache_config = lmcache_get_or_create_config()
+        lmcache_transfer = lmcache_config.transfer_intermediate_tensors
+
+        return vllm_transfer and lmcache_transfer
 
     # ==============================
     # Worker-side methods
@@ -914,10 +910,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             ops.append(meta.op)
             cache_salts.append(meta.cache_salt)
 
-        # Consume the per-step query capture plan built during save_kv_layer
-        q_step_state = self.q_ring_capture.consume_q_step_state()
-
         if len(request_ids) == 0:
+            if self.q_ring_capture is not None:
+                self.q_ring_capture.batched_submit_qstore_requests(event=None)
             return
 
         with torch_dev.stream(torch_dev.current_stream()):
@@ -927,15 +922,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self.worker_adapter.batched_submit_store_requests(
             request_ids, ops, event, cache_salts=cache_salts
         )
-        if q_step_state is not None:
-            for q_store in q_step_state.stores:
-                self.worker_adapter.submit_q_store_request(
-                    q_store.request_id,
-                    q_store.op,
-                    q_store.ring_block_ids,
-                    event,
-                    cache_salt=q_store.cache_salt,
-                )
+        if self.q_ring_capture is not None:
+            self.q_ring_capture.batched_submit_qstore_requests(event=event)
 
     # TODO: How does lmcache driven path handle preemption?
     # NOTE1: handle_preemptions is called by vllm each step regardless
