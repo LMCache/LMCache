@@ -69,12 +69,6 @@ To bypass the skip and force a full run, add the **`force-ci`** label to the
 PR on GitHub. Buildkite picks up PR labels automatically; when the filter
 sees `force-ci` it runs the full pipeline regardless of which files changed.
 
-If you want a change to be treated as CI-trivial, prefer placing it under one
-of the safe directories above. For example:
-
-- docs edits under `docs/` or `*.md` files are skipped
-- image/logo updates under `asset/` are skipped
-- Buildkite or pipeline changes under `.buildkite/` always run
 
 ### Trigger strategy
 
@@ -86,7 +80,6 @@ Not all tests should run on every push. The general pattern:
 | Heavy (multi-GPU, >30 min) | PR label or main branch only | `build.pull_request.labels includes "full" \|\| build.branch == 'dev'` |
 
 Set **"Rebuild on PR label change"** to `Yes` for label-triggered pipelines so adding a label to an existing PR kicks off the build.
-
 
 ## Adding a New Test
 
