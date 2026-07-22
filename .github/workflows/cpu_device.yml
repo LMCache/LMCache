@@ -60,7 +60,7 @@ jobs:
               - '.github/scripts/install_vllm_cpu.sh'
               - '.github/scripts/install_lmcache_cpu.sh'
               - '.github/scripts/download_model.sh'
-              - '.github/scripts/download_deepseek_v2_lite.sh'
+              - '.github/scripts/download_gh_release_model.sh'
               - '.github/scripts/run-cpu-e2e-validation.sh'
               - '!operator/**'
 
@@ -76,13 +76,17 @@ jobs:
         os: [ubuntu-22.04, macos-latest]
         # Each entry is a self-contained model profile the e2e steps
         # thread through env vars. Adding a new model = adding a new
-        # entry here (plus, if needed, a small prepare script under
-        # .github/scripts/download_<model>.sh). Historical opt-125m
-        # keeps its original prepare script and no HF/load overrides.
+        # entry here. All models share the same downloader
+        # (download_gh_release_model.sh); the per-model fields below
+        # tell it which GitHub Release tarball to pull and how to lay
+        # it out under ~/.cache/huggingface/hub/.
         model:
           - name: opt-125m
             id: facebook/opt-125m
-            prepare_script: download_opt125m_github.sh
+            tarball_url: https://github.com/LMCache/opt-125m/releases/download/v1.0/opt-125m.tar.gz
+            tarball_top_dir: opt-125m
+            hf_snapshot: 27dcfa74d334bc871f3234de431e71c6eeba5dd6
+            cache_marker: pytorch_model.bin
             load_format: ""
             hf_overrides: ""
             trust_remote_code: "0"
@@ -96,12 +100,17 @@ jobs:
           # `get_attn_backend_cls`. We still exercise the DeepSeek
           # architecture (MoE + custom modelling code) on the CPU e2e
           # path; MLA validation is deferred until vLLM CPU supports
-          # it. Weights are random (`--load-format dummy`);
+          # it. Weights are random (`--load-format dummy`) and served
+          # from a weight-less GitHub mirror (opendataio/deepseek_v2_lite
+          # branch `with_out_weight`, GitHub auto-generates the tar.gz).
           # `hf_overrides` shrinks the model to 2 layers / 4 routed
           # experts so CPU runners can host it.
           - name: deepseek-v2-lite
             id: deepseek-ai/DeepSeek-V2-Lite-Chat
-            prepare_script: download_deepseek_v2_lite.sh
+            tarball_url: https://github.com/opendataio/deepseek_v2_lite/archive/refs/heads/with_out_weight.tar.gz
+            tarball_top_dir: deepseek_v2_lite-with_out_weight
+            hf_snapshot: 85864749cd611b4353ce1decdb286193298f64c7
+            cache_marker: config.json
             load_format: dummy
             hf_overrides: >-
               {"num_hidden_layers": 2, "n_routed_experts": 4,
@@ -112,7 +121,6 @@ jobs:
     env:
       # Threaded to run-cpu-e2e-validation.sh; server_bench ignores them.
       VLLM_MODEL_ID: ${{ matrix.model.id }}
-      VLLM_DOWNLOAD_SCRIPT: ${{ matrix.model.prepare_script }}
       VLLM_LOAD_FORMAT: ${{ matrix.model.load_format }}
       VLLM_HF_OVERRIDES: ${{ matrix.model.hf_overrides }}
       VLLM_TRUST_REMOTE_CODE: ${{ matrix.model.trust_remote_code }}
@@ -193,8 +201,12 @@ jobs:
 
       - name: Prepare model — ${{ matrix.model.name }}
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: bash .github/scripts/${{ matrix.model.prepare_script }}
+          MODEL_ID: ${{ matrix.model.id }}
+          TARBALL_URL: ${{ matrix.model.tarball_url }}
+          SNAPSHOT: ${{ matrix.model.hf_snapshot }}
+          TARBALL_TOP_DIR: ${{ matrix.model.tarball_top_dir }}
+          CACHE_MARKER: ${{ matrix.model.cache_marker }}
+        run: bash .github/scripts/download_gh_release_model.sh
 
       - name: vLLM e2e — Engine-driven (pickle)
         env:

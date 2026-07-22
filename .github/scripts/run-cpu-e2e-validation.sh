@@ -41,12 +41,17 @@ VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-120}"
 #                        dummy load to shrink layer/expert counts so large
 #                        MoE models (MLA etc.) fit in CI runners.
 #   VLLM_DOWNLOAD_SCRIPT relative filename under .github/scripts/ that
-#                        prepares the model files locally. "" skips the step
-#                        (needed when weights are random-initialised).
+#                        prepares the model files locally. Defaults to
+#                        the shared GH-Release downloader (which expects
+#                        MODEL_ID/GH_REPO/GH_TAG/SNAPSHOT/TARBALL_NAME/
+#                        TARBALL_TOP_DIR env vars, see the script for
+#                        details). Set to "" to skip the step entirely
+#                        (e.g. when weights are random-initialised and
+#                        no HF metadata is needed).
 VLLM_MODEL_ID="${VLLM_MODEL_ID:-facebook/opt-125m}"
 VLLM_LOAD_FORMAT="${VLLM_LOAD_FORMAT:-}"
 VLLM_HF_OVERRIDES="${VLLM_HF_OVERRIDES:-}"
-VLLM_DOWNLOAD_SCRIPT="${VLLM_DOWNLOAD_SCRIPT:-download_opt125m_github.sh}"
+VLLM_DOWNLOAD_SCRIPT="${VLLM_DOWNLOAD_SCRIPT:-download_gh_release_model.sh}"
 # Transport mode selection:
 #   LMCACHE_MP_TRANSFER_MODE=engine_driven  -> engine-driven data path,
 #       sub-selected by LMCACHE_SHM_NAME:
