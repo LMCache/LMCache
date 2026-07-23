@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Blocks-first, fused-K/V KV layout (GPUKVFormat.NL_X_NB_NH_BS_TWO_HS).
+"""Blocks-first, fused-K/V KV layout (GPUKVFormat.NL_X_NB_NH_BS_CS).
 
 A non-MLA blocks-first attention backend registers its KV cache as the 4D
-``[NB, NH, BS, 2 * HS]`` with K/V fused into the trailing dim (as opposed to
-the 5D K/V-major ``[2, NB, NH, BS, HS]``). Discovery splits the fused axis into
-the canonical 5D ``[NB, NH, BS, 2, HS]`` and classifies it as
-``NL_X_NB_NH_BS_TWO_HS``.
+``[NB, NH, BS, CS]`` with K/V fused into the trailing content dim
+(``CS == 2 * HS``, as opposed to the 5D K/V-major ``[2, NB, NH, BS, HS]``).
+Discovery keeps the tensor raw and classifies it as ``NL_X_NB_NH_BS_CS``.
 
 These tests pin discovery, the format-aware accessors, and the multiprocess
 gather/scatter round-trip for that layout.
@@ -33,7 +32,7 @@ import lmcache.c_ops as lmc_ops
 
 pytestmark = pytest.mark.skipif(
     torch_device_type != "cpu",
-    reason="vLLM blocks-first fused format (Format 10) is strictly CPU-only.",
+    reason="vLLM blocks-first fused format (NL_X_NB_NH_BS_CS) is strictly CPU-only.",
 )
 
 NB, NH, BS, HS, NL = 16, 4, 128, 64, 3
@@ -46,13 +45,13 @@ def _raw_blocks_first_caches() -> list[torch.Tensor]:
     return [torch.randn(NB, NH, BS, 2 * HS) for _ in range(NL)]
 
 
-def test_discovery_splits_fused_axis():
+def test_discovery_keeps_raw_shape():
     fmt, norm = U.normalize_kv_and_discover_format(
         _raw_blocks_first_caches(), EngineType.VLLM, HINTS
     )
-    assert fmt == lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS
-    # 4D [NB, NH, BS, 2*HS] -> canonical 5D [NB, NH, BS, 2, HS]
-    assert tuple(norm[0].shape) == (NB, NH, BS, 2, HS)
+    assert fmt == lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_CS
+    # The raw 4D [NB, NH, BS, CS] registration is kept as-is.
+    assert tuple(norm[0].shape) == (NB, NH, BS, 2 * HS)
 
 
 def test_discovery_rejects_odd_trailing_dim():
@@ -70,7 +69,7 @@ def test_accessors():
     assert U.get_block_size(norm, fmt) == BS
     assert U.get_num_heads(norm, fmt) == NH
     assert U.get_head_size(norm, fmt) == HS * 2
-    assert U.get_hidden_dim_size(norm, fmt) == NH * HS
+    assert U.get_hidden_dim_size(norm, fmt) == NH * HS * 2
     assert U.get_page_buffer_size(norm, fmt) == NB * BS
     assert U.get_tokens_per_layer(norm, fmt) == NB * BS
     assert U.get_elements_per_layer(norm, fmt) == NB * NH * BS * HS * 2
@@ -119,7 +118,6 @@ def test_multi_layer_block_kv_transfer_roundtrip():
     this format, so the fallback must transfer it as a single fused plane
     (kv_size == 1, hs == 2 * head_size).
     """
-    # Use canonical 5D layers so the fallback exercises the fused path.
     fmt, norm = U.normalize_kv_and_discover_format(
         _raw_blocks_first_caches(), EngineType.VLLM, HINTS
     )

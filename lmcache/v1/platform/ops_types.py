@@ -73,17 +73,33 @@ class EngineKVFormat(IntEnum):
     # used by: SGLang MHA via the MP daemon path
     TWO_X_NL_X_NB_BS_NH_HS = 9
 
+    # DEPRECATED: superseded by NL_X_NB_NH_BS_CS; no longer produced by
+    # detection.
     # used by: vLLM non-MLA blocks-first attention with K/V fused into the
     # trailing dim. Per-layer physical shape
     # [num_blocks, num_heads, block_size, 2, head_size] -- the K/V "2" axis is
     # second-to-last, recovered by splitting the fused [..., 2 * head_size].
     NL_X_NB_NH_BS_TWO_HS = 10
 
+    # DEPRECATED: superseded by NL_X_NB_BS_NH_CS; no longer produced by
+    # detection.
     # used by: vLLM non-MLA blocks-first attention (NHD layout) with K/V fused
     # into the trailing dim. Per-layer physical shape
     # [num_blocks, block_size, num_heads, 2, head_size] -- like
     # NL_X_NB_NH_BS_TWO_HS but tokens before heads.
     NL_X_NB_BS_NH_TWO_HS = 11
+
+    # used by: vLLM non-MLA blocks-first attention (HND layout, unified KV
+    # cache) with K/V fused into the trailing content dim. Per-layer physical
+    # shape [num_blocks, num_heads, block_size, content_size], kept raw
+    # (content_size == 2 * head_size).
+    NL_X_NB_NH_BS_CS = 12
+
+    # used by: vLLM non-MLA blocks-first attention (NHD layout, unified KV
+    # cache) with K/V fused into the trailing content dim. Per-layer physical
+    # shape [num_blocks, block_size, num_heads, content_size] -- like
+    # NL_X_NB_NH_BS_CS but tokens before heads.
+    NL_X_NB_BS_NH_CS = 13
 
 
 # Backward-compat alias
