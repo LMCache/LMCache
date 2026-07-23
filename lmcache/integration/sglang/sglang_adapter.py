@@ -11,6 +11,7 @@ import torch.distributed as dist
 
 # First Party
 from lmcache import torch_device_type
+from lmcache.integration.sglang.pd_types import DisaggSpec
 from lmcache.integration.sglang.utils import ENGINE_NAME, lmcache_get_config
 from lmcache.logging import init_logger
 from lmcache.utils import (
@@ -34,6 +35,7 @@ class StoreMetadata:
     kv_indices: torch.Tensor
     offset: int
     request_id: str = ""
+    transfer_spec: Optional[DisaggSpec] = None
 
 
 @dataclass
@@ -183,12 +185,19 @@ class LMCacheConnector:
             raise ValueError("Length of token_ids must match slot_mapping length")
         store_mask = torch.ones_like(token_ids, dtype=torch.bool)
 
+        # ``transfer_spec`` is forwarded to the storage manager, where the PD
+        # backend uses it to push the KV to the decode peer over NIXL. It is
+        # ``None`` for non-PD stores, in which case ``store`` behaves exactly as
+        # before (local CPU/disk/remote offload only). Note: only this
+        # non-layerwise ``engine.store`` path forwards ``transfer_spec`` today;
+        # ``store_layer`` does not, which is why the PD sender uses this path.
         self.lmcache_engine.store(
             token_ids,
             mask=store_mask,
             kvcaches=self.kvcaches,
             slot_mapping=slot_mapping,
             offset=offset,
+            transfer_spec=store_metadata.transfer_spec,
         )
 
     def get_kv_events(self) -> Iterable[CacheStoreEvent]:
@@ -374,3 +383,45 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
                 self.lmcache_engine.lookup_unpin(lookup_id)
             except Exception as unpin_err:
                 logger.error(f"Failed to unpin lookup: {unpin_err}", exc_info=True)
+
+
+class LMCachePDConnector(LMCacheConnector):
+    """Connector for prefill/decode (PD) disaggregation over NIXL.
+
+    A prefill (sender) SGLang instance uses this connector so that, on request
+    completion, the request's KV cache is pushed to the assigned decode
+    (receiver) instance. The push is driven entirely by LMCache's
+    ``PDBackend``: this connector's only job is to forward the per-request
+    :class:`DisaggSpec` into ``engine.store`` as ``transfer_spec``.
+
+    It deliberately extends the non-layerwise :class:`LMCacheConnector` rather
+    than :class:`LMCacheLayerwiseConnector`, because only the non-layerwise
+    ``LMCacheEngine.store`` path forwards ``transfer_spec`` to the storage
+    manager (``store_layer`` does not). The engine must be configured with
+    ``enable_pd: true`` and ``pd_role: sender`` for the transfer to occur; with
+    a ``None`` ``transfer_spec`` (e.g. a request the proxy routed directly to
+    decode) the store falls back to plain local offload.
+    """
+
+    def store_kv(self, store_metadata: StoreMetadata) -> None:
+        """Store this request's KV and, if a :class:`DisaggSpec` is attached,
+        push it to the decode peer over NIXL.
+
+        Args:
+            store_metadata: The store request. ``transfer_spec`` carries the
+                decode-peer routing; when ``None`` this is a plain local store.
+        """
+        if store_metadata.transfer_spec is None:
+            logger.debug(
+                "PD store_kv with no transfer_spec (req_id=%s): storing locally "
+                "only, no peer transfer",
+                store_metadata.request_id,
+            )
+        else:
+            logger.info(
+                "PD store_kv (req_id=%s): pushing %d tokens to receiver %s",
+                store_metadata.request_id,
+                len(store_metadata.token_ids),
+                store_metadata.transfer_spec.receiver_host,
+            )
+        super().store_kv(store_metadata)
