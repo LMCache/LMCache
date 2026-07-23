@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from queue import Empty as QueueEmpty
 from queue import Queue
 from typing import TYPE_CHECKING, Any
-import os
 import threading
 import time
 
@@ -72,11 +71,9 @@ logger = init_logger(__name__)
 
 # Plan-then-execute retrieve: one native call enqueues all fill/rope/scatter
 # in a single GIL release, with the plan encoded as numpy int64 tables (one
-# pybind crossing). The Python wave loop stays as fallback.
-# Kill switch: LMCACHE_CB_NATIVE_RETRIEVE_PLAN=0.
-_CB_NATIVE_RETRIEVE_PLAN = os.environ.get(
-    "LMCACHE_CB_NATIVE_RETRIEVE_PLAN", "1"
-) == "1" and hasattr(lmc_ops, "execute_cb_retrieve_plan_flat")
+# pybind crossing). The Python wave loop stays as fallback for c_ops builds
+# that predate the op (and for inputs the planner declines).
+_HAS_NATIVE_RETRIEVE_PLAN = hasattr(lmc_ops, "execute_cb_retrieve_plan_flat")
 
 # torch dtype -> at::ScalarType (rope dispatch); missing -> Python fallback.
 _TORCH_TO_AT_SCALAR = {
@@ -1842,7 +1839,7 @@ class BlendV3Module(InstanceLivenessTarget):
             ``(group_specs, object_group_buffers, keepalive, num_groups)``,
             or ``None`` -> Python fallback loop.
         """
-        if not _CB_NATIVE_RETRIEVE_PLAN:
+        if not _HAS_NATIVE_RETRIEVE_PLAN:
             return None
         pairs_flat = [pair for run in runs for pair in run]
         if not pairs_flat:
