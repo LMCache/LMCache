@@ -84,7 +84,7 @@ echo "Results dir: $RESULTS_DIR"
 echo ""
 
 # Tests that handle their own server lifecycle (different GPU/model config)
-SELF_CONTAINED_TESTS=" deadlock p2p "
+SELF_CONTAINED_TESTS=" deadlock p2p kimi_linear_tp "
 
 # Tests that compare against a baseline vLLM (no LMCache) on a second GPU.
 # Only these need the baseline server (and thus a 2-GPU pod); everything
@@ -161,6 +161,9 @@ case "$TEST_NAME" in
     p2p)
         exec_script="${SCRIPT_DIR}/run-p2p.sh"
         ;;
+    kimi_linear_tp)
+        exec_script="${SCRIPT_DIR}/run-kimi-linear-tp.sh"
+        ;;
     http_api)
         exec_script="${SCRIPT_DIR}/run-http-api.sh"
         ;;
@@ -169,7 +172,7 @@ case "$TEST_NAME" in
         ;;
     *)
         echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, lm_eval_preemption, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, http_api, gds_smoke_test, p2p"
+        echo "Valid tests: lm_eval, lm_eval_preemption, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, http_api, gds_smoke_test, p2p, kimi_linear_tp"
         exit 1
         ;;
 esac
