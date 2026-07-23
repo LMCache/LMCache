@@ -462,22 +462,19 @@ def test_validate_loaded_entries_iouring_multi_entry_uses_batched_reader(
     assert list(core._index) == [spec.encoded for spec in specs]
 
 
-def test_validate_loaded_entries_uring_cmd_keeps_sequential_reader(
+def test_validate_loaded_entries_uring_cmd_uses_batched_reader(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     specs = [encode_object_key(make_object_key(i)) for i in range(3)]
     core = _make_recovery_core(specs, use_uring_cmd=True)
-    batched_mock = Mock()
+    expected_offsets = [4096, 8192, 12288]
+    batched_mock = Mock(return_value=[(spec.slot_identity, 64) for spec in specs])
     monkeypatch.setattr(core, "_read_slot_headers_batched", batched_mock)
-    read_mock = Mock(side_effect=[(spec.slot_identity, 64) for spec in specs])
+    read_mock = Mock()
     monkeypatch.setattr(core, "_read_slot_header", read_mock)
 
     core._validate_loaded_entries()
 
-    batched_mock.assert_not_called()
-    assert read_mock.call_args_list == [
-        call(4096),
-        call(8192),
-        call(12288),
-    ]
+    batched_mock.assert_called_once_with(expected_offsets)
+    read_mock.assert_not_called()
     assert list(core._index) == [spec.encoded for spec in specs]

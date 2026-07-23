@@ -106,7 +106,6 @@ def build_checkpoint_payload(args: argparse.Namespace, num_slots: int) -> bytes:
 
     state = {
         "version": 1,
-        "device_path": args.device_path,
         "capacity_bytes": args.capacity_bytes,
         "block_align": args.block_align,
         "header_bytes": args.header_bytes,
@@ -119,6 +118,10 @@ def build_checkpoint_payload(args: argparse.Namespace, num_slots: int) -> bytes:
         "free_slots": [],
         "entries": entries,
     }
+    # Benchmark-only fixture detail: omit device_path so the same prepared
+    # checkpoint can be measured through either the block device
+    # (/dev/nvmeXnY) or the io_uring_cmd character device (/dev/ngXnY).
+    # Production checkpoints still include device_path via RawBlockCore.
     return json.dumps(state, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
 
 
@@ -203,14 +206,19 @@ def prepare_fixture(args: argparse.Namespace) -> None:
         os.close(fd)
 
 
-def make_config(args: argparse.Namespace, io_engine: str) -> RawBlockCoreConfig:
+def make_config(
+    args: argparse.Namespace,
+    io_engine: str,
+    use_uring_cmd: bool,
+) -> RawBlockCoreConfig:
+    device_path = args.cmd_device_path if use_uring_cmd else args.device_path
     return RawBlockCoreConfig(
-        device_path=args.device_path,
+        device_path=device_path,
         capacity_bytes=args.capacity_bytes,
         block_align=args.block_align,
         header_bytes=args.header_bytes,
         slot_bytes=args.slot_bytes,
-        use_odirect=args.use_odirect,
+        use_odirect=False if use_uring_cmd else args.use_odirect,
         enable_zero_copy=False,
         meta_total_bytes=args.meta_total_bytes,
         meta_magic=META_MAGIC,
@@ -222,19 +230,22 @@ def make_config(args: argparse.Namespace, io_engine: str) -> RawBlockCoreConfig:
         load_checkpoint_on_init=True,
         io_engine=io_engine,
         iouring_queue_depth=256,
-        use_uring_cmd=False,
+        use_uring_cmd=use_uring_cmd,
     )
 
 
-# A measurement variant: (label, io_engine, recovery_threads).
-Variant = tuple[str, str, int]
+# A measurement variant: (label, io_engine, use_uring_cmd, recovery_threads).
+Variant = tuple[str, str, bool, int]
 
 
 def time_bringup(args: argparse.Namespace, variant: Variant) -> float:
-    label, io_engine, recovery_threads = variant
+    label, io_engine, use_uring_cmd, recovery_threads = variant
     raw_block_core.DEFAULT_RECOVERY_READ_THREADS = recovery_threads
     started = time.perf_counter()
-    core = RawBlockCore(make_config(args, io_engine), key_namespace="object")
+    core = RawBlockCore(
+        make_config(args, io_engine, use_uring_cmd),
+        key_namespace="object",
+    )
     elapsed = time.perf_counter() - started
     status = core.report_status()
     core.close()
@@ -249,16 +260,19 @@ def time_bringup(args: argparse.Namespace, variant: Variant) -> float:
 def build_variants(args: argparse.Namespace) -> list[Variant]:
     """Build measurement variants to compare.
 
-    POSIX is swept over --threads; io_uring uses one batched variant since its
-    recovery reads do not use the POSIX reader thread pool.
+    POSIX is swept over --threads; io_uring and io_uring_cmd each use one
+    batched variant since their recovery reads do not use the POSIX reader
+    thread pool.
     """
     variants: list[Variant] = []
     for io_engine in args.io_engine:
         if io_engine == "io_uring":
-            variants.append(("io_uring/batched", "io_uring", 1))
+            variants.append(("io_uring/batched", "io_uring", False, 1))
+        elif io_engine == "io_uring_cmd":
+            variants.append(("io_uring_cmd/batched", "io_uring", True, 1))
         else:
             for threads in args.threads:
-                variants.append((f"posix/threads={threads}", "posix", threads))
+                variants.append((f"posix/threads={threads}", "posix", False, threads))
     return variants
 
 
@@ -298,6 +312,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--device-path", required=True)
     parser.add_argument(
+        "--cmd-device-path",
+        help=(
+            "NVMe namespace character device path (for example /dev/ng0n1) "
+            "used when measuring --io-engine io_uring_cmd. The prepare step "
+            "always writes through --device-path."
+        ),
+    )
+    parser.add_argument(
         "--cache-space-gb",
         type=float,
         default=100,
@@ -319,11 +341,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--io-engine",
         nargs="+",
-        choices=["posix", "io_uring"],
+        choices=["posix", "io_uring", "io_uring_cmd"],
         default=["posix"],
         help=(
-            "Engines to measure. posix is swept over --threads; io_uring uses a "
-            "single batched-read variant."
+            "Engines to measure. posix is swept over --threads; io_uring and "
+            "io_uring_cmd each use a single batched-read variant."
         ),
     )
     parser.add_argument("--max-entries", type=int)
@@ -336,6 +358,8 @@ def parse_args() -> argparse.Namespace:
     )
     args = parser.parse_args()
     args.capacity_bytes = gib(args.cache_space_gb)
+    if "io_uring_cmd" in args.io_engine and not args.cmd_device_path:
+        raise SystemExit("--cmd-device-path is required with --io-engine io_uring_cmd")
     if not args.prepare and not args.measure:
         args.measure = True
     return args

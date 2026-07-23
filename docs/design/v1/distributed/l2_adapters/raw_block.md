@@ -98,9 +98,10 @@ Rules:
 - optional verification on load
 - recovery by loading the latest durable checkpoint and rebuilding the in-memory
   index
-- POSIX recovery validates per-slot headers with an internal pool of 8 reader
-  threads; `io_uring` keeps the serial validation path until batched header
-  recovery is added there
+- POSIX recovery validates per-slot headers with an internal pool of reader
+  threads; `io_uring` validates headers with batched reads, including
+  `use_uring_cmd` after the passthrough read path is aligned for batched
+  recovery
 
 The on-device format is intentionally unchanged by the MP adapter work.
 

@@ -1868,7 +1868,7 @@ class RawBlockCore:
         headers = self._read_slot_headers(offsets)
         to_drop = [
             encoded_key
-            for (encoded_key, entry), slot_hdr in zip(items, headers, strict=False)
+            for (encoded_key, entry), slot_hdr in zip(items, headers, strict=True)
             if self._is_stale_header(encoded_key, entry, slot_hdr)
         ]
 
@@ -1899,7 +1899,7 @@ class RawBlockCore:
         n = len(offsets)
         if self.io_engine == "posix" and self._recovery_read_threads > 1 and n > 1:
             return self._read_slot_headers_posix_parallel(offsets)
-        if self.io_engine == "io_uring" and not self.use_uring_cmd and n > 1:
+        if self.io_engine == "io_uring" and n > 1:
             return self._read_slot_headers_batched(offsets)
         return [self._read_slot_header(off) for off in offsets]
 
@@ -1965,9 +1965,9 @@ class RawBlockCore:
 
         Allocates a single contiguous pointer-aligned buffer for the batch,
         issues one ``batched_read`` + ``wait_iouring``, and decodes each header
-        independently. Used for the regular io_uring (block) path; NVMe
-        passthrough (``use_uring_cmd``) recovery uses the serial path until its
-        passthrough read is validated separately.
+        independently. Used for both regular io_uring block I/O and NVMe
+        passthrough (``use_uring_cmd``) after the passthrough read path has
+        been validated for aligned batched reads.
 
         Args:
             offsets: Device byte offsets for this batch (non-empty).

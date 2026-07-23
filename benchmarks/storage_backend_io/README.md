@@ -176,8 +176,8 @@ PY
 recovery. The prepare step writes checkpoint metadata and per-slot headers only;
 it does not write full payload contents. Use it to compare checkpoint loading and
 slot-header validation across I/O engines and recovery thread counts. POSIX
-recovery is swept over reader-thread counts; io_uring recovery uses a single
-batched-read variant.
+recovery is swept over reader-thread counts; io_uring and io_uring_cmd recovery
+use a single batched-read variant each.
 
 ```bash
 python benchmarks/storage_backend_io/raw_block_recovery_bringup_bench.py \
@@ -188,12 +188,29 @@ python benchmarks/storage_backend_io/raw_block_recovery_bringup_bench.py \
   --i-understand-this-overwrites-device
 ```
 
+To include NVMe passthrough recovery, prepare the fixture through the block
+device and measure through the NVMe namespace character device:
+
+```bash
+python benchmarks/storage_backend_io/raw_block_recovery_bringup_bench.py \
+  --device-path /dev/nvme1n1 \
+  --cmd-device-path /dev/ng1n1 \
+  --cache-space-gb 250 \
+  --measure \
+  --io-engine posix io_uring io_uring_cmd
+```
+
 Important options:
 - `--cache-space-gb`: Logical cache space to prepare/use, in GiB units.
 - `--slot-bytes`: Slot size, defaulting to 16 MiB.
 - `--io-engine`: Engines to measure, defaulting to `posix`. Pass
-  `--io-engine posix io_uring` to compare the POSIX thread-pool path against the
-  io_uring batched-read path on the same fixture.
+  `--io-engine posix io_uring io_uring_cmd` to compare the POSIX thread-pool
+  path against the io_uring and NVMe passthrough batched-read paths on the same
+  fixture.
+- `--cmd-device-path`: NVMe namespace character device path required when
+  measuring `io_uring_cmd`. The synthetic checkpoint omits `device_path` so one
+  fixture prepared through `/dev/nvmeXnY` can be measured through `/dev/ngXnY`;
+  production raw-block checkpoints still record `device_path`.
 - `--threads`: POSIX recovery thread counts to compare, defaulting to `1 8`.
 - `--use-odirect` / `--no-use-odirect`: Enable or disable O_DIRECT for recovery
   measurement. O_DIRECT is enabled by default.
