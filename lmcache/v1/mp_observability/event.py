@@ -46,9 +46,10 @@ class EventType(Enum):
     L2_PREFETCH_LOOKUP_COMPLETED = "l2.prefetch.lookup.completed"
     L2_PREFETCH_LOAD_SUBMITTED = "l2.prefetch.load.submitted"
     L2_PREFETCH_LOAD_COMPLETED = "l2.prefetch.load.completed"
-    # Per-adapter load task events, for throughput correlation.  Fire once
-    # per (request_id, adapter_index) pair, unlike the request-level
-    # L2_PREFETCH_LOAD_* events above which aggregate across adapters.
+    # Per-adapter load task events, for throughput correlation. Fire once
+    # per physical adapter task; one request can create multiple tasks for
+    # the same adapter when object-group layouts differ. The request-level
+    # L2_PREFETCH_LOAD_* events above aggregate across all physical tasks.
     L2_LOAD_TASK_SUBMITTED = "l2.load_task.submitted"
     L2_LOAD_TASK_COMPLETED = "l2.load_task.completed"
 

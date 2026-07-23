@@ -86,23 +86,30 @@ On the failure path of `L2_STORE_COMPLETED`, `key_count_per_salt` is absent
 
 | EventType | Metadata keys | Types |
 |---|---|---|
-| `L2_PREFETCH_LOOKUP_SUBMITTED` | `request_id`, `key_count`, `adapter_count`, `key_count_per_salt` | `int`, `int`, `int`, `dict[str, int]` |
+| `L2_PREFETCH_LOOKUP_SUBMITTED` | `request_id`, `key_count`, `adapter_count`, `task_count`, `key_count_per_salt` | `int`, `int`, `int`, `int`, `dict[str, int]` |
 | `L2_PREFETCH_LOOKUP_COMPLETED` | `request_id`, `prefix_hit_count` | `int`, `int` |
-| `L2_PREFETCH_LOAD_SUBMITTED` | `request_id`, `key_count`, `adapter_count`, `key_count_per_salt` | `int`, `int`, `int`, `dict[str, int]` |
+| `L2_PREFETCH_LOAD_SUBMITTED` | `request_id`, `key_count`, `adapter_count`, `task_count`, `key_count_per_salt` | `int`, `int`, `int`, `int`, `dict[str, int]` |
 | `L2_PREFETCH_LOAD_COMPLETED` | `request_id`, `loaded_count`, `failed_count`, `key_count_per_salt` | `int`, `int`, `int`, `dict[str, int]` |
 | `L2_LOAD_TASK_SUBMITTED` | `request_id`, `adapter_index`, `task_id`, `l2_name`, `key_count`, `total_bytes` | `int`, `int`, `int`, `str`, `int`, `int` |
 | `L2_LOAD_TASK_COMPLETED` | `request_id`, `adapter_index`, `task_id`, `l2_name` | `int`, `int`, `int`, `str` |
+
+`adapter_count` is the number of distinct adapters selected for a request,
+while `task_count` is the number of physical homogeneous-layout tasks created
+across those adapters. A hybrid request with two object-group layouts routed to
+one adapter therefore reports `adapter_count=1` and `task_count=2`.
 
 `key_count_per_salt` on `L2_PREFETCH_LOOKUP_SUBMITTED`,
 `L2_PREFETCH_LOAD_SUBMITTED`, and `L2_PREFETCH_LOAD_COMPLETED` enables
 per-tenant metric attribution. `key_count_per_salt` on load-completed
 covers only loaded (succeeded) keys.
 
-`L2_LOAD_TASK_*` events fire once per `(request_id, adapter_index)` pair
-— unlike the request-level `L2_PREFETCH_LOAD_*` events above, which
-aggregate across adapters.  Throughput subscribers that need per-adapter
-attribution (e.g. `L2ThroughputSubscriber`) consume these task-level
-events; key-count counters continue to consume the request-level events.
+`L2_LOAD_TASK_*` events fire once per physical `(adapter_index, task_id)`
+pair. Multiple pairs can belong to the same request and adapter when object
+groups require different layouts. Unlike the request-level
+`L2_PREFETCH_LOAD_*` events above, these events expose the physical fanout.
+Throughput subscribers that need per-adapter attribution (e.g.
+`L2ThroughputSubscriber`) consume these task-level events; key-count counters
+continue to consume the request-level events.
 
 ---
 

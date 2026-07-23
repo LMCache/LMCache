@@ -10,8 +10,10 @@ import torch
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     MemoryLayoutDesc,
+    ObjectGroupLayoutDesc,
     ObjectKey,
     PrefetchHandle,
+    PrefetchRequestSpec,
     TrimPolicy,
 )
 from lmcache.v1.mp_observability.trace import codecs
@@ -78,6 +80,54 @@ class TestMemoryLayoutDesc:
         )
         out = _roundtrip(d)
         assert out == d
+
+    def test_object_group_layout_roundtrip(self) -> None:
+        layouts = ObjectGroupLayoutDesc(
+            layouts=(
+                MemoryLayoutDesc(
+                    shapes=[torch.Size([2, 3])],
+                    dtypes=[torch.float16],
+                ),
+                MemoryLayoutDesc(
+                    shapes=[torch.Size([4, 3])],
+                    dtypes=[torch.bfloat16],
+                ),
+            )
+        )
+
+        out = _roundtrip(layouts)
+
+        assert out == layouts
+
+    def test_prefetch_spec_with_object_group_layout_roundtrip(self) -> None:
+        layouts = ObjectGroupLayoutDesc(
+            layouts=(
+                MemoryLayoutDesc(
+                    shapes=[torch.Size([2, 3])],
+                    dtypes=[torch.float16],
+                ),
+                MemoryLayoutDesc(
+                    shapes=[torch.Size([4, 3])],
+                    dtypes=[torch.bfloat16],
+                ),
+            )
+        )
+        spec = PrefetchRequestSpec(
+            keys=[
+                ObjectKey(
+                    chunk_hash=b"a",
+                    model_name="m",
+                    kv_rank=0,
+                    object_group_id=1,
+                )
+            ],
+            layout_desc=layouts,
+            attn_desc=AttnWindowDesc(num_chunks_in_sw=[2, -1]),
+        )
+
+        out = _roundtrip(spec)
+
+        assert out == spec
 
 
 class TestPrefetchHandle:

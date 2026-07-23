@@ -16,6 +16,7 @@ import torch
 # First Party
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
+    ObjectGroupLayoutDesc,
     ObjectKey,
     PrefetchRequestSpec,
 )
@@ -54,11 +55,12 @@ pytestmark = pytest.mark.skipif(
 # =============================================================================
 
 
-def make_object_key(chunk_id: int) -> ObjectKey:
+def make_object_key(chunk_id: int, object_group_id: int = 0) -> ObjectKey:
     return ObjectKey(
         chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
         model_name="test_model",
         kv_rank=0,
+        object_group_id=object_group_id,
     )
 
 
@@ -323,6 +325,54 @@ class TestNumInflightL2Loads:
         )
 
         # Release any read locks so teardown is clean.
+        l1_manager.finish_read(keys)
+        ctrl.stop()
+        adapter.close()
+
+    def test_heterogeneous_groups_count_each_load_subtask(
+        self,
+        l1_manager: L1Manager,
+    ) -> None:
+        """Each homogeneous object-group load is visible as its own task."""
+        adapter = make_adapter(bandwidth_gb=0.001)
+        adapter_index = 0
+        attrs = {"l2_name": "mock", "adapter_index": adapter_index}
+        layouts = ObjectGroupLayoutDesc(
+            layouts=(
+                make_layout(),
+                MemoryLayoutDesc(
+                    shapes=[torch.Size([200, 2, 512])],
+                    dtypes=[torch.bfloat16],
+                ),
+            )
+        )
+        keys = [make_object_key(350, group_id) for group_id in range(2)]
+        for group_id, layout in enumerate(layouts.layouts):
+            store_keys_in_l2(adapter, [keys[group_id]], layout)
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(adapter_index)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+        before_loads = _value_for("lmcache_mp.num_inflight_l2_loads", attrs)
+
+        req_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec(keys=keys, layout_desc=layouts)
+        )
+
+        assert wait_for_condition(
+            lambda: _value_for("lmcache_mp.num_inflight_l2_loads", attrs)
+            == before_loads + 2,
+            timeout=10.0,
+        ), "Both object-group load subtasks were not observed"
+        assert wait_for_condition(
+            lambda: ctrl.query_prefetch_result(req_id) is not None,
+            timeout=10.0,
+        )
+
         l1_manager.finish_read(keys)
         ctrl.stop()
         adapter.close()

@@ -30,6 +30,7 @@ import torch
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     MemoryLayoutDesc,
+    ObjectGroupLayoutDesc,
     ObjectKey,
     PrefetchHandle,
     PrefetchMode,
@@ -199,6 +200,20 @@ def _dec_layout_desc(d: dict[str, Any]) -> MemoryLayoutDesc:
     )
 
 
+def _enc_object_group_layout_desc(
+    d: ObjectGroupLayoutDesc,
+) -> list[dict[str, Any]]:
+    return [encode_value(layout) for layout in d.layouts]
+
+
+def _dec_object_group_layout_desc(
+    layouts: list[dict[str, Any]],
+) -> ObjectGroupLayoutDesc:
+    return ObjectGroupLayoutDesc(
+        layouts=tuple(decode_value(layout) for layout in layouts)
+    )
+
+
 def _enc_prefetch_handle(h: PrefetchHandle) -> dict[str, Any]:
     return {
         "prefetch_request_id": h.prefetch_request_id,
@@ -305,6 +320,14 @@ register_codec(
         tag="MemoryLayoutDesc",
         encode=_enc_layout_desc,
         decode=_dec_layout_desc,
+    ),
+)
+register_codec(
+    ObjectGroupLayoutDesc,
+    TypeCodec(
+        tag="ObjectGroupLayoutDesc",
+        encode=_enc_object_group_layout_desc,
+        decode=_dec_object_group_layout_desc,
     ),
 )
 register_codec(

@@ -11,9 +11,9 @@ Implementation:
   - Store path correlates ``L2_STORE_SUBMITTED`` → ``L2_STORE_COMPLETED``
     by the compound key ``(adapter_index, task_id)``.
   - Load path correlates ``L2_LOAD_TASK_SUBMITTED`` → ``L2_LOAD_TASK_COMPLETED``
-    by ``(request_id, adapter_index)``.  One prefetch request may fan out
-    across multiple adapters, so per-adapter correlation is required to
-    attribute throughput to the right ``l2_name``.
+    by ``(adapter_index, task_id)``. One prefetch request may fan out across
+    adapters and object-group layout shards, so each physical task needs an
+    independent correlation entry.
   - ``total_bytes`` is read from the SUBMITTED event and cached in the
     subscriber's pending dict alongside the start timestamp, so the
     COMPLETED event does not need to carry it.  This keeps the byte
@@ -43,7 +43,7 @@ class L2ThroughputSubscriber(EventSubscriber):
     def __init__(self) -> None:
         # (adapter_index, task_id) -> (t_start, total_bytes).
         self._pending_store: dict[tuple[int, int], tuple[float, int]] = {}
-        # (request_id, adapter_index) -> (t_start, total_bytes).
+        # (adapter_index, task_id) -> (t_start, total_bytes).
         self._pending_load: dict[tuple[int, int], tuple[float, int]] = {}
 
         meter = metrics.get_meter("lmcache_mp.perf")
@@ -61,7 +61,7 @@ class L2ThroughputSubscriber(EventSubscriber):
             "lmcache_mp.l2_load_throughput",
             description=(
                 "Histogram of L2->L1 load throughput in GB/s, measured "
-                "per (request, adapter) pair as total_bytes / "
+                "per physical adapter task as total_bytes / "
                 "(completed_ts - submitted_ts).  Spans adapter queue + "
                 "network/disk I/O."
             ),
@@ -137,15 +137,15 @@ class L2ThroughputSubscriber(EventSubscriber):
 
     @staticmethod
     def _load_key(event: Event) -> tuple[int, int] | None:
-        """Build the ``(request_id, adapter_index)`` correlation key.
+        """Build the ``(adapter_index, task_id)`` correlation key.
 
         Returns ``None`` if either field is missing.
         """
-        request_id = event.metadata.get("request_id")
         adapter_index = event.metadata.get("adapter_index")
-        if request_id is None or adapter_index is None:
+        task_id = event.metadata.get("task_id")
+        if adapter_index is None or task_id is None:
             return None
-        return (int(request_id), int(adapter_index))
+        return (int(adapter_index), int(task_id))
 
     # -- Core computation --------------------------------------------------
 

@@ -188,7 +188,7 @@ L2 Metrics
      - Number of prefix chunks found in L2 lookup.
    * - ``lmcache_mp.l2_prefetch_load_submitted``
      - Counter
-     - Number of L2 prefetch load requests submitted.
+     - Number of physical L2 prefetch load tasks submitted.
    * - ``lmcache_mp.l2_prefetch_load_submitted_objects``
      - Counter (attr: ``cache_salt``)
      - Number of chunks submitted for L2 load, grouped by tenant.
@@ -197,7 +197,7 @@ L2 Metrics
      - Number of chunks successfully loaded from L2, grouped by tenant.
    * - ``lmcache_mp.l2_load_completed``
      - Counter (attr: ``l2_name``)
-     - Number of per-adapter L2 load requests completed, labeled by adapter type.
+     - Number of physical L2 load tasks completed, labeled by adapter type.
    * - ``lmcache_mp.l2_evicted_objects``
      - Counter (attr: ``cache_salt``)
      - Number of chunks evicted from L2, grouped by tenant.
@@ -207,6 +207,12 @@ The ``l2_name``-labeled counters (``l2_store_completed`` and
 demand via ``rate(lmcache_mp_l2_store_completed_requests_total{l2_name="..."}[1m])``
 (and the equivalent for loads).  No separate ``*_iops`` metric is exported;
 keeping the raw counter lets dashboard users pick their own window.
+
+A hybrid request can create multiple physical tasks for one adapter when its
+object groups require different layouts. For example, two layouts routed to
+one adapter report ``adapter_count=1`` and ``task_count=2``. The submitted and
+completed task counters both increase by two; the object counter still
+reflects the number of chunks rather than the fanout.
 
 Failure & Health Counters
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -367,14 +373,14 @@ Prometheus (e.g.
 L1 ↔ L2 Throughput Histograms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Per-request throughput of L1↔L2 transfers via
+Per-task throughput of L1↔L2 transfers via
 ``L2ThroughputSubscriber``. The store path correlates
 ``L2_STORE_SUBMITTED`` → ``L2_STORE_COMPLETED`` by
 ``(adapter_index, task_id)``. The load path correlates the per-adapter
 ``L2_LOAD_TASK_SUBMITTED`` → ``L2_LOAD_TASK_COMPLETED`` events by
-``(request_id, adapter_index)``; the request-level
-``L2_PREFETCH_LOAD_*`` events used by the chunk-count counters aggregate
-across adapters and cannot be attributed to a specific ``l2_name``.
+``(adapter_index, task_id)``; the request-level ``L2_PREFETCH_LOAD_*``
+events used by the chunk-count counters aggregate across adapters and
+object-group layout shards and cannot identify a physical task.
 
 Timestamps span **submit → complete**, so the duration includes adapter
 queue, network, and disk I/O — the value is *bytes / end-to-end
@@ -396,10 +402,10 @@ attribute — the registered adapter type (e.g. ``"fs"``, ``"nixl_store"``,
      - Description
    * - ``lmcache_mp.l2_store_throughput``
      - Histogram
-     - L1→L2 store throughput in GB/s per request.
+     - L1→L2 store throughput in GB/s per physical adapter task.
    * - ``lmcache_mp.l2_load_throughput``
      - Histogram
-     - L2→L1 load throughput in GB/s per (request, adapter) pair.
+     - L2→L1 load throughput in GB/s per physical adapter task.
 
 **PromQL for average throughput (GB/s), per backend:**
 

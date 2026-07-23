@@ -861,10 +861,17 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                 ``_completed_load_tasks``.
         """
         bitmap = Bitmap(len(keys))
-        accessed_keys: list[ObjectKey] = []
+        transferred_positions: list[int] = []
+        handle = None
         try:
-            mem_indices_flat = []
-            storage_indices_flat = []
+            if len(keys) != len(objects):
+                raise ValueError(
+                    "NIXL load requires the same number of keys and objects"
+                )
+
+            mem_indices_flat: list[int] = []
+            storage_indices_flat: list[int] = []
+            candidate_positions: list[int] = []
 
             with self._lock:
                 for i, key in enumerate(keys):
@@ -872,13 +879,29 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                         continue
                     mem_addr = objects[i].meta.address
                     mem_size = objects[i].meta.phy_size
+                    if mem_size != storage_obj.size:
+                        logger.error(
+                            "NIXL load size mismatch for key %s: "
+                            "L1 object has %d bytes, L2 object has %d bytes",
+                            key,
+                            mem_size,
+                            storage_obj.size,
+                        )
+                        continue
                     mem_indices = self.nixl_agent.get_memory_indices(mem_addr, mem_size)
+                    if len(mem_indices) != len(storage_obj.page_indices):
+                        logger.error(
+                            "NIXL load page-count mismatch for key %s: "
+                            "L1 object has %d pages, L2 object has %d pages",
+                            key,
+                            len(mem_indices),
+                            len(storage_obj.page_indices),
+                        )
+                        continue
 
                     mem_indices_flat.extend(mem_indices)
                     storage_indices_flat.extend(storage_obj.page_indices)
-
-                    bitmap.set(i)
-                    accessed_keys.append(key)
+                    candidate_positions.append(i)
 
             if mem_indices_flat:
                 handle = self.nixl_agent.get_storage_to_mem_handle(
@@ -886,10 +909,22 @@ class NixlStoreL2Adapter(L2AdapterInterface):
                     storage_indices_flat,
                 )
                 await self.nixl_agent.post_non_blocking(handle)
-                self.nixl_agent.release_handle(handle)
+                transferred_positions = candidate_positions
         except Exception:
             logger.exception("NIXL load task %d failed", task_id)
+        finally:
+            if handle is not None:
+                try:
+                    self.nixl_agent.release_handle(handle)
+                except Exception:
+                    logger.exception(
+                        "Failed to release NIXL load handle for task %d",
+                        task_id,
+                    )
 
+        accessed_keys = [keys[i] for i in transferred_positions]
+        for position in transferred_positions:
+            bitmap.set(position)
         if accessed_keys:
             self._notify_keys_accessed(accessed_keys)
         with self._lock:

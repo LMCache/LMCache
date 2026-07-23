@@ -249,6 +249,54 @@ class TestLoadThroughput:
         attrs = _attrs_of_nonzero_dps(_LOAD_METRIC)
         assert any(a.get("l2_name") == "mooncake_store" for a in attrs)
 
+    def test_same_request_adapter_tasks_do_not_collide(self) -> None:
+        """Each homogeneous layout shard records its own throughput sample."""
+        subscriber = L2ThroughputSubscriber()
+        callbacks = subscriber.get_subscriptions()
+        on_submitted = callbacks[EventType.L2_LOAD_TASK_SUBMITTED]
+        on_completed = callbacks[EventType.L2_LOAD_TASK_COMPLETED]
+        count_before = _total_count(_LOAD_METRIC)
+        sum_before = _sum(_LOAD_METRIC)
+
+        on_submitted(
+            _load_submitted(
+                request_id=42,
+                task_id=10,
+                t=100.0,
+                adapter_index=1,
+                total_bytes=1_000_000_000,
+            )
+        )
+        on_submitted(
+            _load_submitted(
+                request_id=42,
+                task_id=11,
+                t=200.0,
+                adapter_index=1,
+                total_bytes=2_000_000_000,
+            )
+        )
+        # Complete out of order: task 11 is 5 GB/s, task 10 is 10 GB/s.
+        on_completed(
+            _load_completed(
+                request_id=42,
+                task_id=11,
+                t=200.4,
+                adapter_index=1,
+            )
+        )
+        on_completed(
+            _load_completed(
+                request_id=42,
+                task_id=10,
+                t=100.1,
+                adapter_index=1,
+            )
+        )
+
+        assert _total_count(_LOAD_METRIC) == count_before + 2
+        assert _sum(_LOAD_METRIC) - sum_before == pytest.approx(15.0, rel=1e-6)
+
 
 # ---------------------------------------------------------------------------
 # Edge cases
@@ -332,13 +380,19 @@ class TestEdgeCases:
             _store_submitted(task_id=5, t=0.0, total_bytes=10**9)
         )
         subscriber._on_load_submitted(
-            _load_submitted(request_id=5, t=0.0, adapter_index=0, total_bytes=10**9)
+            _load_submitted(
+                request_id=5,
+                task_id=5,
+                t=0.0,
+                adapter_index=0,
+                total_bytes=10**9,
+            )
         )
 
         subscriber._on_store_completed(_store_completed(task_id=5, t=0.1))
         assert (0, 5) not in subscriber._pending_store
-        # Load pending dict untouched — different key space (request_id).
-        assert (5, 0) in subscriber._pending_load
+        # Load pending dict untouched even though its task key is identical.
+        assert (0, 5) in subscriber._pending_load
 
 
 # ---------------------------------------------------------------------------

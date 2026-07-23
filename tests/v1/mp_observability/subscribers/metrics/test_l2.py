@@ -294,6 +294,34 @@ class TestL2PrefetchMetrics:
         assert delta["lmcache_mp.l2_prefetch_load_submitted"] == 2
         assert delta["lmcache_mp.l2_prefetch_load_submitted_objects"] == 10
 
+    def test_load_submitted_counts_physical_tasks(self) -> None:
+        """One adapter can submit multiple homogeneous layout tasks."""
+        bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
+        subscriber = L2MetricsSubscriber()
+        bus.register_subscriber(subscriber)
+        keys = _make_keys(10)
+        before = _read_counters()
+
+        bus.start()
+        bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_LOAD_SUBMITTED,
+                metadata={
+                    "request_id": 2,
+                    "key_count": 10,
+                    "adapter_count": 1,
+                    "task_count": 2,
+                    "key_count_per_salt": _salt_counts(keys),
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        delta = _counter_delta(before, _read_counters())
+        assert delta["lmcache_mp.l2_prefetch_load_submitted"] == 2
+        assert delta["lmcache_mp.l2_prefetch_load_submitted_objects"] == 10
+
     def test_load_completed_counts(self, bus, subscriber, snapshot):
         bus.start()
         loaded = _make_keys(9)

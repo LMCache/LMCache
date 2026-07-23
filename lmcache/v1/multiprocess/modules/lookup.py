@@ -233,8 +233,11 @@ class LookupModule:
             )
         )
 
-        layout_desc = self._ctx.layout_desc_registry.find(model_name, world_size)
-        if layout_desc is None:
+        layout_descs = self._ctx.layout_desc_registry.find_object_group_layouts(
+            model_name,
+            world_size,
+        )
+        if layout_descs is None:
             logger.error(
                 "No GPU context found for model %s with world size %d during lookup!",
                 model_name,
@@ -257,6 +260,8 @@ class LookupModule:
                 )
             )
             return
+
+        layout_desc = layout_descs.get_layout(0)
 
         extra_count = compute_extra_count(tp_size, world_size)
 
@@ -321,7 +326,7 @@ class LookupModule:
         handle = self._ctx.storage_manager.submit_prefetch_task(
             PrefetchRequestSpec(
                 keys=obj_keys,
-                layout_desc=layout_desc,
+                layout_desc=layout_descs,
                 extra_count=extra_count,
                 attn_desc=attn_desc,
             ),
