@@ -52,6 +52,16 @@ def test_cpu_only_host_raises_actionable_engine_driven_error(
     assert "some-cuda-uuid" in message
     assert "no accelerator devices" in message
     assert "not found in the discovered" not in message
+    # Both supported topologies are offered, so the message never implies a
+    # client-only change is always sufficient.
+    assert "same accelerator devices" in message
+    assert "client performs the device-side copy" in message
+    # This layer is engine-agnostic and role-agnostic: the message must not
+    # name a specific engine, its config keys, or assume a server role
+    # (see reviewer notes on #4202).
+    assert "vLLM" not in message
+    assert "kv_connector_extra_config" not in message
+    assert "LMCache server" not in message
 
 
 def test_unknown_uuid_on_capable_host_raises_generic_error(

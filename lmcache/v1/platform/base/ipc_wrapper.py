@@ -99,28 +99,29 @@ class DeviceIPCWrapper:
 
         Raises:
             RuntimeError: if this process has no accelerator devices available
-                -- e.g. a CPU-only ``lmcache server`` receiving a CUDA worker's
-                IPC handle -- in which case the message points at the
-                ``engine_driven`` transfer mode; or if a device is available
-                but ``device_uuid`` is not among the discovered devices.
+                (e.g. a device-incapable process that received an IPC handle
+                from an accelerator worker); the message points at the two
+                supported topologies -- giving the receiving process visibility
+                of the same devices, or using ``engine_driven`` transfer so the
+                sending client does the device-side copy. Also raised if a
+                device is available but ``device_uuid`` is not among the
+                discovered devices.
         """
-        # A device-incapable process (e.g. a CPU-only lmcache server) can never
-        # resolve a peer's device IPC handle. Fail with actionable guidance
-        # instead of the generic "not found" below, which misleads operators
-        # into checking device visibility when the real fix is the transfer
-        # mode. See issue #4186.
+        # A device-incapable process (e.g. one started without accelerator
+        # visibility) can never resolve a peer's device IPC handle. Fail with
+        # actionable guidance instead of the generic "not found" below, which
+        # misleads operators into checking device visibility when the real fix
+        # may be the transfer mode. This layer is engine-agnostic, so the
+        # message names neither a specific engine, process role, nor config
+        # keys. See #4186.
         if not torch_dev.is_available():
             raise RuntimeError(
-                f"Received an inter-process handle for device {device_uuid}, "
-                "but this process has no accelerator devices available "
-                "(running on a CPU-only host). This usually means a CUDA "
-                "worker registered its KV caches with a CPU-only LMCache "
-                "server using the default 'auto' (lmcache_driven) transfer "
-                "mode, which requires the server to open device IPC handles. "
-                "Set 'lmcache.mp.mp_transfer_mode=engine_driven' in the vLLM "
-                "kv_connector_extra_config (or export "
-                "LMCACHE_MP_TRANSFER_MODE=engine_driven) so the worker performs "
-                "the device-side copy instead."
+                "This process cannot access the accelerator device "
+                f"referenced by this IPC handle (device {device_uuid}); "
+                "no accelerator devices are available. Ensure the receiving "
+                "process can see the same accelerator devices, or configure "
+                "the MP deployment to use engine_driven transfer so the "
+                "sending client performs the device-side copy."
             )
 
         cls._discover_devices()
