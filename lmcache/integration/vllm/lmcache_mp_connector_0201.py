@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import torch
 import zmq
 from lmcache import torch_dev, torch_device_type
-from lmcache.integration.vllm.utils import mla_enabled
+from lmcache.integration.vllm.utils import mla_only
 from lmcache.utils import init_logger as lmcache_init_logger
 from lmcache.utils import check_interprocess_event_support
 
@@ -102,7 +102,7 @@ def build_parallel_strategy(vllm_config: VllmConfig) -> ParallelStrategy:
     """
     pc = vllm_config.parallel_config
     return ParallelStrategy(
-        use_mla=mla_enabled(vllm_config.model_config),
+        mla_only=mla_only(vllm_config.model_config),
         vllm_world_size=pc.world_size,
         vllm_worker_id=pc.rank,
         tp_size=pc.tensor_parallel_size,
