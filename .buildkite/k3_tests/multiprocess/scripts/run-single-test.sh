@@ -59,6 +59,12 @@ elif [ "$TEST_NAME" = "hma_lm_eval_qwen3_5" ]; then
     export BATCH_INVARIANT="${BATCH_INVARIANT:-0}"
     export SCORE_TOLERANCE="${SCORE_TOLERANCE:-0.05}"
     export LIMIT="${LIMIT:-300}"
+elif [ "$TEST_NAME" = "kimi_linear_tp" ]; then
+    # Self-contained test: run-kimi-linear-tp.sh owns the server lifecycle and
+    # all launch flags (TP=2, trust-remote-code, align, chunk/batch sizes). Only
+    # the model name is declared here so the banner and the script's ${MODEL:-}
+    # fallback both resolve to Kimi-Linear rather than the generic default below.
+    export MODEL="${MODEL:-moonshotai/Kimi-Linear-48B-A3B-Instruct}"
 else
     export MODEL="${MODEL:-Qwen/Qwen3-14B}"
 fi

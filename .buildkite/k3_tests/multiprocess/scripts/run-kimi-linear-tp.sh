@@ -56,7 +56,10 @@ LMCACHE_LOG="/tmp/build_${BUILD_ID}_lmcache.log"
 CHUNK_SIZE="${CHUNK_SIZE:-944}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-1500}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
-MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-900}"
+# Readiness timeout per vLLM launch. This is owned by the test (a 48B TP-shard
+# load is slow) and deliberately does NOT reuse MAX_WAIT_SECONDS, which
+# run-single-test.sh pre-exports to 300s -- that would shadow the value here.
+VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-900}"
 # Seconds to wait for vLLM's GPU memory to be released after a restart before
 # relaunching (avoids an OOM racing the dying process).
 GPU_RELEASE_TIMEOUT="${GPU_RELEASE_TIMEOUT:-180}"
@@ -111,6 +114,7 @@ launch_vllm() {
         --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --no-async-scheduling \
         --port "$saved_port" \
+        --block-size 944 \
         --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 30}}" \
         > "$log_file" 2>&1 &
     VLLM_PID=$!
@@ -118,7 +122,7 @@ launch_vllm() {
     export VLLM_PORT="$saved_port"
     echo "vLLM started (PID=$VLLM_PID)"
 
-    if ! wait_for_server "$VLLM_PORT" "$MAX_WAIT_SECONDS" "$log_file"; then
+    if ! wait_for_server "$VLLM_PORT" "$VLLM_READY_TIMEOUT" "$log_file"; then
         echo "vLLM failed to start."
         return 1
     fi
