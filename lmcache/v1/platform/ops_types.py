@@ -91,8 +91,7 @@ class EngineKVFormat(IntEnum):
 
     # used by: vLLM non-MLA blocks-first attention (HND layout, unified KV
     # cache) with K/V fused into the trailing content dim. Per-layer physical
-    # shape [num_blocks, num_heads, block_size, content_size], kept raw
-    # (content_size == 2 * head_size).
+    # shape [num_blocks, num_heads, block_size, content_size].
     NL_X_NB_NH_BS_CS = 12
 
     # used by: vLLM non-MLA blocks-first attention (NHD layout, unified KV

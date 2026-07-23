@@ -11,7 +11,6 @@ gather/scatter round-trip for that layout.
 """
 
 # Third Party
-import pytest
 import torch
 
 # First Party
@@ -30,19 +29,14 @@ from lmcache.v1.platform.torch_ops import (
 )
 import lmcache.c_ops as lmc_ops
 
-pytestmark = pytest.mark.skipif(
-    torch_device_type != "cpu",
-    reason="vLLM blocks-first fused format (NL_X_NB_NH_BS_CS) is strictly CPU-only.",
-)
-
 NB, NH, BS, HS, NL = 16, 4, 128, 64, 3
 HINTS = {"kv_layout": "HND"}
 
 
-def _raw_blocks_first_caches() -> list[torch.Tensor]:
+def _raw_blocks_first_caches(device: str = "cpu") -> list[torch.Tensor]:
     """Per-layer blocks-first tensors as registered: [NB, NH, BS, 2 * HS]."""
     torch.manual_seed(0)
-    return [torch.randn(NB, NH, BS, 2 * HS) for _ in range(NL)]
+    return [torch.randn(NB, NH, BS, 2 * HS, device=device) for _ in range(NL)]
 
 
 def test_discovery_keeps_raw_shape():
@@ -52,12 +46,6 @@ def test_discovery_keeps_raw_shape():
     assert fmt == lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_CS
     # The raw 4D [NB, NH, BS, CS] registration is kept as-is.
     assert tuple(norm[0].shape) == (NB, NH, BS, 2 * HS)
-
-
-def test_discovery_rejects_odd_trailing_dim():
-    bad = [torch.randn(NB, NH, BS, 2 * HS + 1) for _ in range(NL)]
-    with pytest.raises(ValueError):
-        U.normalize_kv_and_discover_format(bad, EngineType.VLLM, HINTS)
 
 
 def test_accessors():
@@ -80,12 +68,14 @@ def test_accessors():
 
 
 def test_mp_gather_scatter_roundtrip():
+    # Paged buffers live on the active device: the MP gather/scatter path
+    # dispatches to the device kernel on GPU hosts and the fallback on CPU.
     blocks_per_chunk = 2
     block_ids = [0, 3, 5, 6]  # 2 chunks
-    raw = _raw_blocks_first_caches()
+    raw = _raw_blocks_first_caches(torch_device_type)
     src = {f"layer_{i}": t for i, t in enumerate(raw)}
     ref = {k: v.clone() for k, v in src.items()}
-    idx = torch.tensor(block_ids)
+    idx = torch.tensor(block_ids, device=raw[0].device)
 
     chunks = gather_paged_kv_to_cpu(
         src, block_ids, blocks_per_chunk, layout_hints=HINTS
@@ -105,7 +95,9 @@ def test_mp_gather_scatter_roundtrip():
         assert torch.equal(dst[k][idx], ref[k][idx])
 
     # Untouched blocks must be left alone.
-    untouched = torch.tensor([b for b in range(NB) if b not in block_ids])
+    untouched = torch.tensor(
+        [b for b in range(NB) if b not in block_ids], device=raw[0].device
+    )
     for k in dst:
         assert torch.equal(dst[k][untouched], ref[k][untouched])
 

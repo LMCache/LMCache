@@ -46,12 +46,6 @@ class VLLM_Detector(EngineDetector):
             and isinstance(kv_caches[0], torch.Tensor)
             and kv_caches[0].dim() == 4
         ):
-            content_size = kv_caches[0].shape[3]
-            if content_size % 2 != 0:
-                raise ValueError(
-                    f"blocks-first fused trailing dim {content_size} is not "
-                    "2 * head_size"
-                )
             if is_hnd:
                 return lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_CS, kv_caches
             return lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_CS, kv_caches

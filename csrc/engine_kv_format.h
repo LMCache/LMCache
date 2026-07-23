@@ -122,7 +122,6 @@ enum class EngineKVFormat : int {
   - vLLM non-MLA blocks-first attention (HND layout) with K/V fused into the
     trailing content dim (unified KV cache)
   physical shape per layer: [num_blocks, num_heads, block_size, content_size]
-  (the raw registered tensor, kept as-is; content_size == 2 * head_size).
   The device transfer kernels treat it as HND with kv_size == 1 and
   hs == content_size.
   */
@@ -133,7 +132,6 @@ enum class EngineKVFormat : int {
   - vLLM non-MLA blocks-first attention (NHD layout) with K/V fused into the
     trailing content dim (unified KV cache)
   physical shape per layer: [num_blocks, block_size, num_heads, content_size]
-  (the raw registered tensor, kept as-is; content_size == 2 * head_size).
   Like NL_X_NB_NH_BS_CS but tokens before heads; the device transfer kernels
   treat it as NHD with kv_size == 1 and hs == content_size.
   */
