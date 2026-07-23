@@ -59,7 +59,7 @@ GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
 # Readiness timeout per vLLM launch. This is owned by the test (a 48B TP-shard
 # load is slow) and deliberately does NOT reuse MAX_WAIT_SECONDS, which
 # run-single-test.sh pre-exports to 300s -- that would shadow the value here.
-VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-900}"
+VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-450}"
 # Seconds to wait for vLLM's GPU memory to be released after a restart before
 # relaunching (avoids an OOM racing the dying process).
 GPU_RELEASE_TIMEOUT="${GPU_RELEASE_TIMEOUT:-180}"
@@ -100,18 +100,16 @@ launch_vllm() {
     local saved_port="$VLLM_PORT"
     unset VLLM_PORT
 
-    VLLM_ENABLE_V1_MULTIPROCESSING=0 \
-    PYTHONHASHSEED=0 \
     vllm serve "$MODEL" \
         --tensor-parallel-size 2 \
         --trust-remote-code \
         --enforce-eager \
+        --no-enable-flashinfer-autotune \
         --enable-prefix-caching \
         --mamba-cache-mode align \
         --max-model-len auto \
         --max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS" \
         --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
-        --no-async-scheduling \
         --port "$saved_port" \
         --block-size 944 \
         --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 30}}" \
