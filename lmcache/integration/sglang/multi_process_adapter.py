@@ -409,7 +409,7 @@ class LMCacheMPConnector:
                 event.ipc_handle(),
                 skip_prefix_n_blocks,
             ],
-        ).to_cuda_future(device=self.device)
+        ).to_device_future(device=self.device)
 
     def retrieve_kv(self, load_metadata: LoadMetadata) -> int:
         """Phase 2 of the two-phase load — fires RETRIEVE only.
@@ -525,7 +525,7 @@ class LMCacheMPConnector:
                     event.ipc_handle(),
                 ],
             )
-            .to_cuda_future(device=self.device)
+            .to_device_future(device=self.device)
             .result(timeout=self._mq_timeout)
         )
         # END_SESSION is owned by ``LMCRadixCache.cache_finished_req`` so

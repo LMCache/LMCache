@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     # First Party
     from lmcache.v1.platform.base.cache_context import BaseCacheContext
     from lmcache.v1.platform.base.device_ops import DeviceOps
+    from lmcache.v1.platform.base.event_ipc import EventIPCBackend
     from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
 
@@ -44,6 +45,8 @@ class CpuDeviceSpec(DeviceSpec):
     :func:`lmcache.v1.platform.cache_context.create_cache_context`).
     """
 
+    _event_backend_cache: "EventIPCBackend | None" = None
+
     @property
     def device_type(self) -> str:
         return "cpu"
@@ -51,6 +54,22 @@ class CpuDeviceSpec(DeviceSpec):
     @property
     def torch_module_name(self) -> str:
         return "cpu"
+
+    @property
+    def event_ipc_backend(self) -> "EventIPCBackend":
+        """Return the stub-backed CPU event IPC backend."""
+        backend = self._event_backend_cache
+        if backend is None:
+            # First Party
+            from lmcache.v1.platform.base.event_ipc import DefaultEventIPCBackend
+            from lmcache.v1.platform.cpu.stub_cpu_device import StubCPUDevice
+
+            backend = DefaultEventIPCBackend(
+                event_module=StubCPUDevice("cpu"),
+                device_type=self.device_type,
+            )
+            self._event_backend_cache = backend
+        return backend
 
     @property
     def ipc_wrapper_cls(self) -> type[DeviceIPCWrapper] | None:
