@@ -12,6 +12,7 @@ import os
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.dram_partition import DramPartitionConfig, DramPartitionCoordinator
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
     L2AdaptersConfig,
@@ -255,6 +256,14 @@ class StorageManagerConfig:
 
     periodic_notifier_interval_ms: int = 5
     """ Interval (ms) for the periodic event notifier heartbeat. """
+
+    dram_partition_config: DramPartitionConfig = field(
+        default_factory=DramPartitionConfig
+    )
+    """ Memory budget coordination config. When enabled, overrides L1/L2 sizes. """
+
+    enable_pressure_eviction: bool = False
+    """ Whether to enable reactive L1 eviction on allocation failures. """
 
     def __post_init__(self) -> None:
         normalize_storage_manager_config(self)
@@ -520,6 +529,50 @@ def add_storage_manager_args(
         help="Interval in ms for the periodic event notifier heartbeat. Default is 5.",
     )
 
+    # Memory Budget Coordination
+    budget_group = parser.add_argument_group(
+        "Memory Budget",
+        "Coordinated L1 + DramL2 sizing from a single DRAM budget. "
+        "When --total-memory-budget-gb is set, it overrides --l1-size-gb "
+        "and the L2 adapter's max_size_gb.",
+    )
+    budget_group.add_argument(
+        "--total-memory-budget-gb",
+        type=float,
+        default=0.0,
+        help="Total DRAM budget in GiB for L1 + DramL2. "
+        "0 means disabled (use manual --l1-size-gb / L2 max_size_gb). "
+        "Default is 0.",
+    )
+    budget_group.add_argument(
+        "--l1-fraction",
+        type=float,
+        default=0.3,
+        help="Fraction of total budget for L1 slab (raw KV hot cache). "
+        "Remainder goes to DramL2 compressed store. Default is 0.3.",
+    )
+    budget_group.add_argument(
+        "--l2-high-watermark",
+        type=float,
+        default=0.8,
+        help="L2 usage fraction triggering eviction (when budget is active). "
+        "Default is 0.8.",
+    )
+    budget_group.add_argument(
+        "--l1-high-watermark",
+        type=float,
+        default=0.8,
+        help="L1 usage fraction triggering eviction (when budget is active). "
+        "Default is 0.8.",
+    )
+    budget_group.add_argument(
+        "--enable-pressure-eviction",
+        action="store_true",
+        default=False,
+        help="Enable reactive L1 eviction on allocation failures "
+        "(L1_ALLOCATION_FAILED event). Default is False.",
+    )
+
     # Adapter config
     add_l2_adapters_args(parser)
     return parser
@@ -600,6 +653,47 @@ def parse_args_to_config(
 
     l2_adapter_config = parse_args_to_l2_adapters_config(args)
 
+    # Memory budget coordination
+    budget_config = DramPartitionConfig(
+        total_memory_budget_gb=getattr(args, "total_memory_budget_gb", 0.0),
+        l1_fraction=getattr(args, "l1_fraction", 0.3),
+        l2_high_watermark=getattr(args, "l2_high_watermark", 0.8),
+        l1_high_watermark=getattr(args, "l1_high_watermark", 0.8),
+    )
+
+    if budget_config.enabled:
+        coordinator = DramPartitionCoordinator(budget_config)
+        alloc = coordinator.allocate()
+        # Override L1 size
+        memory_config.size_in_bytes = alloc.l1_size_bytes
+        memory_config.init_size_in_bytes = min(
+            memory_config.init_size_in_bytes, alloc.l1_size_bytes
+        )
+        # Override L1 eviction watermark
+        eviction_config = EvictionConfig(
+            eviction_policy=eviction_config.eviction_policy,
+            trigger_watermark=alloc.l1_high_watermark,
+            eviction_ratio=eviction_config.eviction_ratio,
+            extra_logging_enabled=eviction_config.extra_logging_enabled,
+            extra_logging_interval=eviction_config.extra_logging_interval,
+        )
+        # Override DramL2 adapter capacity (first dram adapter found)
+        from lmcache.v1.distributed.l2_adapters.dram_l2_adapter import (
+            DramL2AdapterConfig,
+        )
+        for ac in l2_adapter_config.adapters:
+            if isinstance(ac, DramL2AdapterConfig):
+                ac.max_size_gb = alloc.l2_max_bytes / (1 << 30)
+                if ac.eviction_config is not None:
+                    ac.eviction_config = EvictionConfig(
+                        eviction_policy=ac.eviction_config.eviction_policy,
+                        trigger_watermark=alloc.l2_high_watermark,
+                        eviction_ratio=ac.eviction_config.eviction_ratio,
+                    )
+                break
+
+    enable_pressure = getattr(args, "enable_pressure_eviction", False)
+
     config = StorageManagerConfig(
         l1_manager_config=l1_manager_config,
         eviction_config=eviction_config,
@@ -608,6 +702,8 @@ def parse_args_to_config(
         prefetch_policy=args.l2_prefetch_policy,
         prefetch_max_in_flight=args.l2_prefetch_max_in_flight,
         periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
+        dram_partition_config=budget_config,
+        enable_pressure_eviction=enable_pressure,
     )
     return config
 

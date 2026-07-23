@@ -197,6 +197,45 @@ class L1EvictionController(EvictionController):
             logger.error("Treating it as DISCARD.")
             self._l1_manager.delete(action.keys)
 
+    def trigger_pressure_eviction(self) -> int:
+        """Trigger an immediate eviction pass due to memory pressure.
+
+        Called when L1_ALLOCATION_FAILED fires (e.g. during prefetch).
+        Runs the eviction policy once with the configured ratio,
+        regardless of the current watermark.
+
+        Returns:
+            Number of keys evicted.
+        """
+        eviction_ratio = self._eviction_config.eviction_ratio
+        actions = self._eviction_policy.get_eviction_actions(
+            eviction_ratio,
+            key_eligible_filter=self._l1_manager.is_key_evictable,
+        )
+        evicted = 0
+        for action in actions:
+            evicted += len(action.keys)
+            self.execute_eviction_action(action)
+        if evicted:
+            logger.info(
+                "Pressure eviction: evicted %d keys from L1.", evicted
+            )
+        return evicted
+
+    def enable_pressure_eviction(self) -> None:
+        """Subscribe to L1_ALLOCATION_FAILED to trigger immediate eviction.
+
+        Safe to call multiple times (subscribes once).
+        """
+        if getattr(self, "_pressure_subscribed", False):
+            return
+        self._pressure_subscribed = True
+        self._event_bus.subscribe(
+            EventType.L1_ALLOCATION_FAILED,
+            lambda event: self.trigger_pressure_eviction(),
+        )
+        logger.info("L1 pressure eviction enabled (L1_ALLOCATION_FAILED).")
+
 
 class L2AdapterEvictionState:
     """Per-adapter eviction state: its own policy, listener, and config."""

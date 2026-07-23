@@ -74,6 +74,8 @@ class StorageManager:
             l1_manager=self._l1_manager,
             eviction_config=config.eviction_config,
         )
+        if config.enable_pressure_eviction:
+            self._eviction_controller.enable_pressure_eviction()
         self._eviction_controller.start()
 
         # L2 adapters and store controller. When an adapter config carries
