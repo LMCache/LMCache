@@ -231,12 +231,13 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
 
     # Validate and normalise the tensor *before* touching the registry
     # or mutating storage, so a bad input never leaves things half-done.
-    tensor = attempt_permute_to_contiguous_view(tensor)
+    normalized = attempt_permute_to_contiguous_view(tensor)
+    assert isinstance(normalized, torch.Tensor)
     if tensor.device.type != "cpu":
         raise ValueError(
             "migrate_to_shm_and_wrap requires a CPU tensor, got %s" % tensor.device
         )
-    if not tensor.is_contiguous():
+    if not normalized.is_contiguous():
         raise ValueError("migrate_to_shm_and_wrap requires a contiguous tensor")
 
     tid = id(tensor)
@@ -279,9 +280,9 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
         shm_storage = torch.frombuffer(buf, dtype=torch.uint8).untyped_storage()
         tensor.set_(
             shm_storage,
-            tensor.storage_offset(),
-            tensor.shape,
-            tensor.stride(),
+            normalized.storage_offset(),
+            normalized.shape,
+            normalized.stride(),
         )
     except Exception:
         # Make sure the SHM resources don't leak if migration fails
