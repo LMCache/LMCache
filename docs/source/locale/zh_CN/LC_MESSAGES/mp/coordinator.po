@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-13 10:13+0000\n"
+"POT-Creation-Date: 2026-07-20 10:08+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -57,7 +57,13 @@ msgid ""
 ":doc:`/cli/coordinator` for details. Equivalently, the coordinator can "
 "still be launched as a module with ``python3 -m "
 "lmcache.v1.mp_coordinator``."
-msgstr "CLI 接受 ``--host``、``--port``、``--instance-timeout``、``--health-check-interval``、``--eviction-check-interval``、``--eviction-ratio``、``--trigger-watermark``、``--chunk-size``、``--hash-algorithm``、``--blend-probe-stride`` 和 ``--timeout-keep-alive``；任何标志都会覆盖下面匹配的环境变量。有关详细信息，请参见 :doc:`/cli/coordinator`。同样，协调器仍然可以通过 ``python3 -m lmcache.v1.mp_coordinator`` 作为模块启动。"
+msgstr ""
+"CLI 接受 ``--host``、``--port``、``--instance-timeout``、``--health-check-"
+"interval``、``--eviction-check-interval``、``--eviction-ratio"
+"``、``--trigger-watermark``、``--chunk-size``、``--hash-algorithm"
+"``、``--blend-probe-stride`` 和 ``--timeout-keep-"
+"alive``；任何标志都会覆盖下面匹配的环境变量。有关详细信息，请参见 :doc:`/cli/coordinator`。同样，协调器仍然可以通过"
+" ``python3 -m lmcache.v1.mp_coordinator`` 作为模块启动。"
 
 #: ../../source/mp/coordinator.rst:38
 msgid "Configuration"
@@ -186,7 +192,9 @@ msgid ""
 "Tokens per KV chunk: the CacheBlend match unit and the unit used to "
 "resolve pin ``token_ids`` to keys. Must equal the MP servers' ``--chunk-"
 "size``."
-msgstr "每个 KV 块的令牌数：CacheBlend 匹配单元和用于将固定的 ``token_ids`` 解析为键的单元。必须等于 MP 服务器的 ``--chunk-size``。"
+msgstr ""
+"每个 KV 块的令牌数：CacheBlend 匹配单元和用于将固定的 ``token_ids`` 解析为键的单元。必须等于 MP 服务器的 "
+"``--chunk-size``。"
 
 #: ../../source/mp/coordinator.rst:78
 msgid "``LMCACHE_MP_COORDINATOR_HASH_ALGORITHM``"
@@ -201,7 +209,9 @@ msgid ""
 "Token hash algorithm for pin key resolution. Must equal the MP servers' "
 "``--hash-algorithm``. ``blake3`` is self-contained; other algorithms "
 "require vLLM importable in the coordinator process."
-msgstr "用于 pin 密钥解析的令牌哈希算法。必须与 MP 服务器的 ``--hash-algorithm`` 相等。``blake3`` 是自包含的；其他算法需要在协调器进程中可导入的 vLLM。"
+msgstr ""
+"用于 pin 密钥解析的令牌哈希算法。必须与 MP 服务器的 ``--hash-algorithm`` 相等。``blake3`` "
+"是自包含的；其他算法需要在协调器进程中可导入的 vLLM。"
 
 #: ../../source/mp/coordinator.rst:83
 msgid "``LMCACHE_MP_COORDINATOR_BLEND_PROBE_STRIDE``"
@@ -429,8 +439,9 @@ msgstr "**配额、使用情况和逐出** -- ``/quota`` 组：每个租户的�
 #: ../../source/mp/coordinator.rst:171
 msgid ""
 "**Cache control** -- the ``/cache`` group: cache operations dispatched to"
-" a named server (warm prefetch and pin/unpin, with more to come)."
-msgstr "**缓存控制** -- ``/cache`` 组：分派到命名服务器的缓存操作（热预取和固定/取消固定，更多功能即将推出）。"
+" a named server (warm prefetch, pin/unpin, and delete, with more to "
+"come)."
+msgstr "**缓存控制** -- ``/cache`` 组：分派给命名服务器的缓存操作（热预取、固定/解固定和删除，更多功能即将推出）。"
 
 #: ../../source/mp/coordinator.rst:174
 #, python-brace-format
@@ -568,6 +579,7 @@ msgstr "可选（默认 ``0``）。ZMQ 消息队列端口，P2P 对等体发送�
 #: ../../source/mp/coordinator.rst:531 ../../source/mp/coordinator.rst:561
 #: ../../source/mp/coordinator.rst:589 ../../source/mp/coordinator.rst:647
 #: ../../source/mp/coordinator.rst:732 ../../source/mp/coordinator.rst:867
+#: ../../source/mp/coordinator.rst:948
 msgid "**Response** (``200 OK``):"
 msgstr "**响应** (``200 OK``):"
 
@@ -586,7 +598,7 @@ msgstr ""
 #: ../../source/mp/coordinator.rst:540 ../../source/mp/coordinator.rst:571
 #: ../../source/mp/coordinator.rst:603 ../../source/mp/coordinator.rst:655
 #: ../../source/mp/coordinator.rst:748 ../../source/mp/coordinator.rst:811
-#: ../../source/mp/coordinator.rst:876
+#: ../../source/mp/coordinator.rst:876 ../../source/mp/coordinator.rst:962
 msgid "**HTTP status codes:**"
 msgstr "**HTTP 状态码:**"
 
@@ -607,7 +619,7 @@ msgstr "``422``: 请求体未通过字段级验证（例如，空白的 ``ip`` �
 #: ../../source/mp/coordinator.rst:575 ../../source/mp/coordinator.rst:607
 #: ../../source/mp/coordinator.rst:660 ../../source/mp/coordinator.rst:760
 #: ../../source/mp/coordinator.rst:818 ../../source/mp/coordinator.rst:883
-#: ../../source/mp/coordinator.rst:913
+#: ../../source/mp/coordinator.rst:913 ../../source/mp/coordinator.rst:968
 msgid "**Example:**"
 msgstr "**示例：**"
 
@@ -707,7 +719,9 @@ msgid ""
 "wide eviction. (The MP server exposes a node-local ``/quota`` with the "
 "same shape; this is its fleet-wide counterpart.) Use ``_default`` as the "
 "path parameter to target the empty-string salt."
-msgstr "``/quota`` 组拥有每个 ``cache_salt`` 字节预算、其背后的实时使用情况核算，以及驱动全队逐出的使用事件流。 （MP 服务器暴露了一个节点本地的 ``/quota``，形状相同；这是其全队对应的版本。）使用 ``_default`` 作为路径参数以针对空字符串盐。"
+msgstr ""
+"``/quota`` 组拥有每个 ``cache_salt`` 字节预算、其背后的实时使用情况核算，以及驱动全队逐出的使用事件流。 （MP "
+"服务器暴露了一个节点本地的 ``/quota``，形状相同；这是其全队对应的版本。）使用 ``_default`` 作为路径参数以针对空字符串盐。"
 
 #: ../../source/mp/coordinator.rst:365
 msgid ""
@@ -723,7 +737,11 @@ msgid ""
 "— in coordinator-managed deployments, register quotas **only** through "
 "the coordinator's ``/quota`` API and leave the servers' node-local quota "
 "tables untouched."
-msgstr "请勿将 MP 服务器的节点本地 ``/quota`` API 与协调器的 API 一起使用。这两者是独立的、不同步的配额注册表，在 **同一共享 L2** 上强制执行逐出：服务器端的强制执行者（在服务器运行每个盐的逐出策略时处于活动状态）使用严格的白名单语义——任何缺失于 *其自身* 表中的盐都会被完全逐出——并且它永远无法看到在协调器上注册的配额，反之亦然。混合这两者会产生相互竞争的逐出决策：服务器可以删除协调器认为在配额内的数据（或在默认限制生效之前仍然豁免的数据）。每个部署选择一个所有者——在协调器管理的部署中，仅通过协调器的 ``/quota`` API 注册配额，并保持服务器的节点本地配额表不变。"
+msgstr ""
+"请勿将 MP 服务器的节点本地 ``/quota`` API 与协调器的 API 一起使用。这两者是独立的、不同步的配额注册表，在 **同一共享 "
+"L2** 上强制执行逐出：服务器端的强制执行者（在服务器运行每个盐的逐出策略时处于活动状态）使用严格的白名单语义——任何缺失于 *其自身* "
+"表中的盐都会被完全逐出——并且它永远无法看到在协调器上注册的配额，反之亦然。混合这两者会产生相互竞争的逐出决策：服务器可以删除协调器认为在配额内的数据（或在默认限制生效之前仍然豁免的数据）。每个部署选择一个所有者——在协调器管理的部署中，仅通过协调器的"
+" ``/quota`` API 注册配额，并保持服务器的节点本地配额表不变。"
 
 #: ../../source/mp/coordinator.rst:378
 msgid ""
@@ -736,7 +754,11 @@ msgid ""
 "per-salt quota, the controller sets the default to ``0`` — the signal "
 "that arms strict allowlist enforcement (all bytes under unquota'd salts "
 "become evictable on the next cycle):"
-msgstr "没有显式配额的盐由注册表的 **默认限制** (``PUT /quota/config``) 管控。启动时默认值未设置，未配额的盐 **免于** 逐出 — 配额存储在内存中，因此一个新启动的（重新）协调器在外部配额控制器重新同步之前有一个空的配额表，而免配额的默认值防止在这一窗口内大规模逐出未知租户。在重新注册每个盐的配额后，控制器将默认值设置为 ``0`` — 这是启动严格允许列表强制执行的信号（所有未配额盐下的字节将在下一个周期变为可逐出）："
+msgstr ""
+"没有显式配额的盐由注册表的 **默认限制** (``PUT /quota/config``) 管控。启动时默认值未设置，未配额的盐 **免于** "
+"逐出 — "
+"配额存储在内存中，因此一个新启动的（重新）协调器在外部配额控制器重新同步之前有一个空的配额表，而免配额的默认值防止在这一窗口内大规模逐出未知租户。在重新注册每个盐的配额后，控制器将默认值设置为"
+" ``0`` — 这是启动严格允许列表强制执行的信号（所有未配额盐下的字节将在下一个周期变为可逐出）："
 
 #: ../../source/mp/coordinator.rst:400
 msgid ""
@@ -821,7 +843,9 @@ msgid ""
 "arms strict allowlist enforcement (all unquota'd bytes become evictable "
 "next cycle); a positive value grants every unquota'd salt that byte "
 "budget."
-msgstr "``null``（启动默认值）使未配额的盐免于逐出；``0`` 启用严格的白名单执行（所有未配额的字节在下一个周期变为可逐出）；正值为每个未配额的盐提供该字节预算。"
+msgstr ""
+"``null``（启动默认值）使未配额的盐免于逐出；``0`` "
+"启用严格的白名单执行（所有未配额的字节在下一个周期变为可逐出）；正值为每个未配额的盐提供该字节预算。"
 
 #: ../../source/mp/coordinator.rst:451 ../../source/mp/coordinator.rst:493
 #: ../../source/mp/coordinator.rst:636
@@ -1022,9 +1046,9 @@ msgstr "缓存控制"
 #: ../../source/mp/coordinator.rst:680
 msgid ""
 "The ``/cache`` group dispatches cache operations to a named MP server. It"
-" covers **warm prefetch** and **pin/unpin**; further cache-control "
-"operations will be documented as endpoints here as they land."
-msgstr "``/cache`` 组将缓存操作分派到命名的 MP 服务器。它涵盖 **热预取** 和 **固定/解固定**；进一步的缓存控制操作将在此处作为端点进行文档记录。"
+" covers **warm prefetch**, **pin/unpin**, and **delete**; further cache-"
+"control operations will be documented as endpoints here as they land."
+msgstr "``/cache`` 组将缓存操作分派到命名的 MP 服务器。它涵盖 **热预取**、**固定/解固定** 和 **删除**；进一步的缓存控制操作将在此处作为端点记录。"
 
 #: ../../source/mp/coordinator.rst:684
 msgid ""
@@ -1202,7 +1226,11 @@ msgid ""
 "releases them (``DELETE``), excluding pinned keys from quota-based "
 "eviction. L2 pins are fleet-wide (per ``cache_salt``), so no target "
 "instance is named."
-msgstr "**固定/解固定（保护缓存不被逐出）。** 固定一个令牌序列的缓存，以便在解固定之前不会从 L2 中被逐出。协调器将令牌序列解析为其对象键 **本地**（无需 MP 服务器往返），并将其记录在 L2 逐出计划中（``POST``）或释放它们（``DELETE``），将固定的键排除在基于配额的逐出之外。L2 固定是全舰队范围的（按 ``cache_salt``），因此没有指定目标实例。"
+msgstr ""
+"**固定/解固定（保护缓存不被逐出）。** 固定一个令牌序列的缓存，以便在解固定之前不会从 L2 中被逐出。协调器将令牌序列解析为其对象键 "
+"**本地**（无需 MP 服务器往返），并将其记录在 L2 "
+"逐出计划中（``POST``）或释放它们（``DELETE``），将固定的键排除在基于配额的逐出之外。L2 固定是全舰队范围的（按 "
+"``cache_salt``），因此没有指定目标实例。"
 
 #: ../../source/mp/coordinator.rst:832
 msgid ""
@@ -1212,7 +1240,11 @@ msgid ""
 " not match what was stored and the pin protects nothing. It also requires"
 " the MP servers to be launched with ``--no-separate-object-groups`` (the "
 "coordinator resolves keys in a single object group)."
-msgstr "本地解析要求协调器的 ``chunk_size`` 和 ``hash_algorithm``（请参见 `Configuration`_）与 MP 服务器的 ``--chunk-size`` / ``--hash-algorithm`` 匹配；否则解析的键将与存储的键不匹配，且固定不会保护任何内容。它还要求 MP 服务器以 ``--no-separate-object-groups`` 启动（协调器在单个对象组中解析键）。"
+msgstr ""
+"本地解析要求协调器的 ``chunk_size`` 和 ``hash_algorithm``（请参见 `Configuration`_）与 MP "
+"服务器的 ``--chunk-size`` / ``--hash-algorithm`` "
+"匹配；否则解析的键将与存储的键不匹配，且固定不会保护任何内容。它还要求 MP 服务器以 ``--no-separate-object-"
+"groups`` 启动（协调器在单个对象组中解析键）。"
 
 #: ../../source/mp/coordinator.rst:840
 msgid "``POST /cache/pins``"
@@ -1262,10 +1294,11 @@ msgid ""
 "from eviction for a salt it is tracking, which requires the MP servers "
 "started with ``--coordinator-l2-event-reporting`` (see `Connecting MP "
 "servers`_)."
-msgstr "**需要 L2 事件报告。** 协调器只能排除其正在跟踪的盐的键的逐出，这需要 MP 服务器以 ``--coordinator-l2-event-reporting`` 启动（请参见 `连接 MP 服务器`_）。"
+msgstr ""
+"**需要 L2 事件报告。** 协调器只能排除其正在跟踪的盐的键的逐出，这需要 MP 服务器以 ``--coordinator-l2-event-"
+"reporting`` 启动（请参见 `连接 MP 服务器`_）。"
 
 #: ../../source/mp/coordinator.rst:904
-#, python-brace-format
 msgid "``DELETE /cache/pins``"
 msgstr "``DELETE /cache/pins``"
 
@@ -1276,11 +1309,68 @@ msgid ""
 "is the number of keys unpinned), with ``status`` ``\"unpinned\"``. Pins "
 "are reference-counted: a chunk pinned *N* times needs *N* unpins before "
 "it can be evicted."
-msgstr "从 L2 逐出计划中取消一个令牌序列的键。请求体与 ``POST /cache/pins`` 相同。响应与 pin 相似（``affected`` 是取消固定的键的数量），``status`` 为 ``\"unpinned\"``。Pins 是按引用计数的：一个块被固定 *N* 次需要 *N* 次取消固定才能被逐出。"
+msgstr ""
+"从 L2 逐出计划中取消一个令牌序列的键。请求体与 ``POST /cache/pins`` 相同。响应与 pin 相似（``affected``"
+" 是取消固定的键的数量），``status`` 为 ``\"unpinned\"``。Pins 是按引用计数的：一个块被固定 *N* 次需要 "
+"*N* 次取消固定才能被逐出。"
 
 #: ../../source/mp/coordinator.rst:911
 msgid "**HTTP status codes:** same as ``POST /cache/pins``."
 msgstr "**HTTP 状态码:** 与 ``POST /cache/pins`` 相同。"
+
+#: ../../source/mp/coordinator.rst:927
+msgid ""
+"**Delete (removing cache by token sequence).** Delete a token sequence's "
+"cache on one named server, addressed by token ids. The coordinator "
+"resolves the tokens to object keys locally (like pin) and issues a single"
+" key-addressed ``DELETE /cache/objects`` to the named server, which "
+"removes them from the requested tier(s). The ``tier`` field selects the "
+"tier(s): ``l1`` deletes only the named server's L1, ``l2`` only L2, "
+"``all`` both. When the tier includes L2, the coordinator first drops any "
+"key it is protecting with an L2 pin from the delete set unless ``force`` "
+"is set — so a pinned key is retained in every tier the delete would have "
+"touched; ``force`` deletes them and drops those pins."
+msgstr "**删除（通过令牌序列移除缓存）。** 在一个指定的服务器上删除令牌序列的缓存，通过令牌 ID 定址。协调器将令牌解析为本地对象键（如 pin），并向指定服务器发出单个键地址的 ``DELETE /cache/objects`` 请求，从请求的层级中移除它们。``tier`` 字段选择层级：``l1`` 仅删除指定服务器的 L1，``l2`` 仅删除 L2，``all`` 则删除两者。当层级包括 L2 时，协调器首先从删除集合中删除任何受 L2 pin 保护的键，除非设置了 ``force`` — 因此，任何被 pin 的键在删除操作中会保留在每个被触及的层级中；``force`` 会删除它们并移除这些 pins。"
+
+#: ../../source/mp/coordinator.rst:938
+msgid "``POST /cache/delete``"
+msgstr "``POST /cache/delete``"
+
+#: ../../source/mp/coordinator.rst:940
+msgid "Delete a token sequence on one named server."
+msgstr "在一个指定的服务器上删除一个令牌序列。"
+
+#: ../../source/mp/coordinator.rst:942
+msgid ""
+"**Request body:** (``model_name``, ``world_size``, ``token_ids``, "
+"``cache_salt``) plus ``tier`` (``l1`` / ``l2`` / ``all``) and ``force`` "
+"(bool, default ``false``). When ``force`` is ``true``, locked keys are "
+"deleted anyway (L1 read/write locks on the node and the coordinator's L2 "
+"pin set)."
+msgstr "**请求体：** (``model_name``, ``world_size``, ``token_ids``, ``cache_salt``) 以及 ``tier`` (``l1`` / ``l2`` / ``all``) 和 ``force`` (布尔值，默认 ``false``)。当 ``force`` 为 ``true`` 时，锁定的键仍然会被删除（节点上的 L1 读/写锁和协调器的 L2 固定集）。"
+
+#: ../../source/mp/coordinator.rst:954
+msgid ""
+"``requested`` is the number of whole chunks resolved. ``affected`` and "
+"``skipped`` are **totals across the tiers acted on**: ``affected`` counts"
+" L1 keys removed by the node plus L2 keys removed by the coordinator, and"
+" ``skipped`` counts L1 keys the node refused plus L2 keys held back for "
+"an L2 pin (non-force only). A chunk resident in both tiers (``tier=all``)"
+" contributes to both counts, so ``affected`` may be up to ``2 x requested"
+" x world_size``. A sub-chunk sequence returns ``status`` ``\"noop\"``."
+msgstr "``requested`` 是已解析的完整块的数量。 ``affected`` 和 ``skipped`` 是 **作用于的各层的总计**： ``affected`` 计算节点移除的 L1 键加上协调器移除的 L2 键，而 ``skipped`` 计算节点拒绝的 L1 键加上因 L2 钉住而保留的 L2 键（仅限非强制）。同时存在于两个层中的块（``tier=all``）会对两个计数都有贡献，因此 ``affected`` 可能高达 ``2 x requested x world_size``。一个子块序列返回 ``status`` ``\"noop\"``。"
+
+#: ../../source/mp/coordinator.rst:964
+msgid "``200``: deleted (or a ``noop``)."
+msgstr "``200``: 已删除（或为 ``noop``）。"
+
+#: ../../source/mp/coordinator.rst:965
+msgid "``404``: no server is registered under ``instance_id``."
+msgstr "``404``：没有服务器在 ``instance_id`` 下注册。"
+
+#: ../../source/mp/coordinator.rst:966
+msgid "``502``: the target server was unreachable or rejected the delete."
+msgstr "``502``: 目标服务器无法访问或拒绝了删除请求。"
 
 #~ msgid ""
 #~ "**Event ingestion** -- MP servers POST"

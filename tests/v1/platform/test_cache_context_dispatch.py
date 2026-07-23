@@ -5,7 +5,7 @@
 
 The facade routes by the ``torch.device.type`` reported by the
 wrappers' ``to_tensor()`` output and delegates to the matching
-:class:`~lmcache.v1.platform.base_device_spec.DeviceSpec` instance's
+:class:`~lmcache.v1.platform.base.device_spec.DeviceSpec` instance's
 ``create_cache_context`` hook. These tests exercise that dispatch
 without touching CUDA or the real ``GPUCacheContext`` /
 ``CPUCacheContext`` constructors -- they ``monkeypatch`` the hook on
@@ -21,7 +21,7 @@ import torch
 
 # First Party
 from lmcache.v1.platform import get_device_spec
-from lmcache.v1.platform.base_cache_context import BaseCacheContext
+from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.cache_context import create_cache_context
 
 

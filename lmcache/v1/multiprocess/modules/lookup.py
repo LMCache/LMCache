@@ -12,6 +12,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
     ObjectKey,
     PrefetchHandle,
+    PrefetchRequestSpec,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -318,11 +319,13 @@ class LookupModule:
         obj_keys = self._chunk_major_object_keys(key, chunk_hashes)
 
         handle = self._ctx.storage_manager.submit_prefetch_task(
-            obj_keys,
-            layout_desc,
-            extra_count=extra_count,
+            PrefetchRequestSpec(
+                keys=obj_keys,
+                layout_desc=layout_desc,
+                extra_count=extra_count,
+                attn_desc=attn_desc,
+            ),
             external_request_id=key.request_id,
-            attn_desc=attn_desc,
         )
         self._register_prefetch_job(
             _PrefetchJob(
