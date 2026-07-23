@@ -142,25 +142,11 @@ def create_engine_group_infos_from_vllm(
     layer_index_groups = [
         [layer_to_idx[name] for name in group.layer_names] for group in vllm_groups
     ]
-    # The fused/packed rank-4 KV cache stores its two middle axes in a
-    # model-dependent order (heads-first for some archs, block-first for others),
-    # and the kv_layout hint (attention stride order) can be stale for it. Pass
-    # each group's vLLM block size so the format detector identifies the
-    # block-size axis directly rather than trusting the hint -- per-group so a
-    # hybrid model (e.g. MiniMax-M3) with differing block sizes across its
-    # full-attention and sparse-index groups resolves each independently.
-    group_block_sizes = [
-        group.kv_cache_spec.block_size
-        if getattr(group, "kv_cache_spec", None) is not None
-        else 0
-        for group in vllm_groups
-    ]
     normalized_kv_caches, engine_kv_formats = normalize_and_discover_per_layer_formats(
         per_layer_discoverable_kv_caches,
         layer_index_groups,
         EngineType.VLLM,
         layout_hints,
-        group_block_sizes=group_block_sizes or None,
     )
     num_layers = len(engine_kv_formats)
     # Layers absent from every engine group's ``layer_names`` are cross-layer
