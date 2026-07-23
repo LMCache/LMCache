@@ -38,10 +38,7 @@ from lmcache.v1.distributed.api import (
     ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.storage_manager import PrefetchHandle
-from lmcache.v1.gpu_connector.gpu_ops import (
-    build_staging_copies,
-    lmcache_memcpy_async_h2d,
-)
+from lmcache.v1.gpu_connector.gpu_ops import lmcache_memcpy_async_h2d
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.mp_coordinator.blend_client import PENDING
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -74,17 +71,12 @@ import lmcache.c_ops as lmc_ops
 logger = init_logger(__name__)
 
 # Plan-then-execute retrieve: one native call enqueues all fill/rope/scatter
-# in a single GIL release; the Python wave loop stays as fallback.
+# in a single GIL release, with the plan encoded as numpy int64 tables (one
+# pybind crossing). The Python wave loop stays as fallback.
 # Kill switch: LMCACHE_CB_NATIVE_RETRIEVE_PLAN=0.
 _CB_NATIVE_RETRIEVE_PLAN = os.environ.get(
     "LMCACHE_CB_NATIVE_RETRIEVE_PLAN", "1"
-) == "1" and hasattr(lmc_ops, "execute_cb_retrieve_plan")
-
-# Plan as numpy int64 tables (one pybind crossing) instead of ~5 pybind
-# objects per chunk. Kill switch: LMCACHE_CB_FLAT_PLAN=0.
-_CB_FLAT_PLAN = os.environ.get("LMCACHE_CB_FLAT_PLAN", "1") == "1" and hasattr(
-    lmc_ops, "execute_cb_retrieve_plan_flat"
-)
+) == "1" and hasattr(lmc_ops, "execute_cb_retrieve_plan_flat")
 
 # torch dtype -> at::ScalarType (rope dispatch); missing -> Python fallback.
 _TORCH_TO_AT_SCALAR = {
@@ -1723,35 +1715,6 @@ class BlendV3Module(InstanceLivenessTarget):
         ]
         return group_specs, object_group_buffers
 
-    def _build_cb_retrieve_plan(
-        self,
-        gpu_context: BaseCacheContext,
-        rope_state: _CBRopeState,
-        resolved_groups: "list[tuple[torch.Tensor, int]]",
-        runs: "list[list[tuple[CBMatchResult, Any]]]",
-        max_batch: int,
-    ) -> "tuple[list[Any], list[Any], list[torch.Tensor]] | None":
-        """Resolve a whole retrieve into an ``execute_cb_retrieve_plan`` plan
-        (pointers/scalars only, no CUDA work).
-
-        ``keepalive`` holds the device tensors the plan points into; keep it
-        referenced until the native call is submitted (stream ordering covers
-        the async kernels after that).
-
-        Returns:
-            ``(group_specs, steps, keepalive)``, or ``None`` -> Python
-            fallback (old c_ops, non-lazy objects, unsupported layout).
-        """
-        common = self._prepare_cb_plan_common(
-            gpu_context, rope_state, resolved_groups, runs, max_batch
-        )
-        if common is None:
-            return None
-        group_specs, object_group_buffers, keepalive, num_groups = common
-        return self._finish_build_cb_retrieve_plan_steps(
-            runs, max_batch, group_specs, object_group_buffers, keepalive, num_groups
-        )
-
     def _build_cb_retrieve_plan_flat(
         self,
         gpu_context: BaseCacheContext,
@@ -1934,60 +1897,6 @@ class BlendV3Module(InstanceLivenessTarget):
             group_specs[group_idx].slot_mapping_base = slot_mapping.data_ptr()
             group_specs[group_idx].slot_mapping_capacity = slot_mapping.numel()
         return group_specs, object_group_buffers, keepalive, num_groups
-
-    def _finish_build_cb_retrieve_plan_steps(
-        self,
-        runs: "list[list[tuple[CBMatchResult, Any]]]",
-        max_batch: int,
-        group_specs: "list[Any]",
-        object_group_buffers: "list[torch.Tensor]",
-        keepalive: "list[torch.Tensor]",
-        num_groups: int,
-    ) -> "tuple[list[Any], list[Any], list[torch.Tensor]] | None":
-        # Double-buffer contract: steps alternate disjoint slot halves so the
-        # executor can overlap step w's staging with step w-1's kernels
-        # (per-parity events order the w vs w-2 slot reuse). Needs >= 2 slots.
-        if max_batch < 2:
-            return None
-        wave = max_batch // 2
-        steps: list[Any] = []
-        tok_off = 0
-        step_idx = 0
-        for run in runs:
-            for batch_start in range(0, len(run), wave):
-                batch = run[batch_start : batch_start + wave]
-                slot_base = (step_idx % 2) * wave
-                step_idx += 1
-                staging = build_staging_copies(
-                    [memory_obj for _, memory_obj in batch],
-                    object_group_buffers[slot_base : slot_base + len(batch)],
-                    is_h2d=True,
-                )
-                ropes: list[Any] = []
-                scatters: list[Any] = []
-                for i, (r, _) in enumerate(batch):
-                    slot_idx = slot_base + i
-                    n_tok = int(r.cur_ed - r.cur_st)
-                    for group_idx in range(num_groups):
-                        if r.old_st != r.cur_st:
-                            ropes.append(
-                                lmc_ops.CBRopeVar(
-                                    group_idx,
-                                    slot_idx,
-                                    int(r.old_st),
-                                    int(r.cur_st),
-                                )
-                            )
-                        scatters.append(
-                            lmc_ops.CBScatterVar(group_idx, slot_idx, tok_off, n_tok)
-                        )
-                    tok_off += n_tok
-                steps.append(
-                    lmc_ops.CBRetrieveStep(
-                        staging=staging, ropes=ropes, scatters=scatters
-                    )
-                )
-        return group_specs, steps, keepalive
 
     def cb_retrieve_pre_computed(
         self,
@@ -2276,39 +2185,19 @@ class BlendV3Module(InstanceLivenessTarget):
                     max_batch = gpu_context.max_batch_size
 
                     # Fast path: one native call for the whole request; the
-                    # per-wave Python loop is the fallback.
-                    native_flat = (
-                        self._build_cb_retrieve_plan_flat(
-                            gpu_context, rope_state, resolved_groups, runs, max_batch
-                        )
-                        if _CB_FLAT_PLAN
-                        else None
+                    # per-wave Python loop is the fallback (returns None on old
+                    # c_ops, non-lazy objects, max_batch < 2, or size mismatch).
+                    native_flat = self._build_cb_retrieve_plan_flat(
+                        gpu_context, rope_state, resolved_groups, runs, max_batch
                     )
-                    native_plan = (
-                        None
-                        if native_flat is not None
-                        else self._build_cb_retrieve_plan(
-                            gpu_context, rope_state, resolved_groups, runs, max_batch
+                    if native_flat is not None:
+                        plan_group_specs, plan_tables, _plan_keepalive = native_flat
+                        lmc_ops.execute_cb_retrieve_plan_flat(
+                            gpu_context.device,
+                            LazyMemoryAllocator.PIN_CHUNK_SIZE,
+                            plan_group_specs,
+                            *plan_tables,
                         )
-                    )
-                    if native_flat is not None or native_plan is not None:
-                        if native_flat is not None:
-                            plan_group_specs, plan_tables, _plan_keepalive = native_flat
-                            lmc_ops.execute_cb_retrieve_plan_flat(
-                                gpu_context.device,
-                                LazyMemoryAllocator.PIN_CHUNK_SIZE,
-                                plan_group_specs,
-                                *plan_tables,
-                            )
-                        else:
-                            assert native_plan is not None
-                            plan_group_specs, plan_steps, _plan_keepalive = native_plan
-                            lmc_ops.execute_cb_retrieve_plan(
-                                gpu_context.device,
-                                LazyMemoryAllocator.PIN_CHUNK_SIZE,
-                                plan_group_specs,
-                                plan_steps,
-                            )
                         runs = []  # plan covers every wave; skip the loop
 
                     for run in runs:

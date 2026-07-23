@@ -707,7 +707,7 @@ def _build_plan_engine_and_context(
     head_size: int = 8,
     n_heads: int = 2,
 ):
-    """Engine with the real ``_build_cb_retrieve_plan`` bound, a fake GPU
+    """Engine with the real ``_build_cb_retrieve_plan_flat`` bound, a fake GPU
     context with real CPU tensors, and a real ``_CBRopeState``. Kernel
     groups are plain (non-fused) K/V, so hidden_dim = n_heads * head_size."""
     # Third Party
@@ -719,10 +719,8 @@ def _build_plan_engine_and_context(
 
     eng = MagicMock(spec=v3_mod.BlendV3Module)
     for name in (
-        "_build_cb_retrieve_plan",
         "_build_cb_retrieve_plan_flat",
         "_prepare_cb_plan_common",
-        "_finish_build_cb_retrieve_plan_steps",
         "_resolve_cb_plan_invariants",
     ):
         setattr(eng, name, getattr(v3_mod.BlendV3Module, name).__get__(eng))
@@ -788,10 +786,10 @@ def _lazy_memory_obj(obj_bytes: int, address: int):
     return obj
 
 
-def test_native_plan_covers_every_wave_rope_and_scatter():
-    """3 chunks, max_batch=2 → 2 steps; per step: staging per chunk, rope
-    only for shifted chunks (per group), scatter per (chunk, group) with
-    cumulative slot_mapping offsets."""
+def test_native_plan_specs_stamped_and_cached():
+    """3 chunks, max_batch=2: shared pos + one slot-mapping tensor per group
+    stamped into the cached invariant specs; a second build for the same
+    context reuses the same spec objects and re-stamps them."""
     # Third Party
     import torch
 
@@ -810,11 +808,11 @@ def test_native_plan_covers_every_wave_rope_and_scatter():
         (torch.tensor([20, 21, 22], dtype=torch.long), 4),
     ]
 
-    plan = eng._build_cb_retrieve_plan(
+    plan = eng._build_cb_retrieve_plan_flat(
         gpu_context, rope_state, resolved_groups, runs, max_batch=2
     )
     assert plan is not None
-    group_specs, steps, keepalive = plan
+    group_specs, (_staging, _ropes, _scatters, step_offsets), keepalive = plan
 
     assert len(group_specs) == 2
     # keepalive: shared pos + one slot mapping per group.
@@ -827,10 +825,8 @@ def test_native_plan_covers_every_wave_rope_and_scatter():
     assert group_specs[0].slot_mapping_base == sm0.data_ptr()
     assert group_specs[0].slot_mapping_capacity == 12
     assert group_specs[1].slot_mapping_base == sm1.data_ptr()
-
-    # Wave split: max_batch=2 -> double-buffered waves of 1 chunk each,
-    # alternating slot halves.
-    assert len(steps) == 3
+    # Wave split: max_batch=2 -> double-buffered waves of 1 chunk each -> 3 steps.
+    assert step_offsets.shape[0] == 3
 
     # Second build for the same context reuses the cached invariant specs
     # (same objects) and re-stamps them for the new request.
@@ -840,7 +836,7 @@ def test_native_plan_covers_every_wave_rope_and_scatter():
             _lazy_memory_obj(obj_bytes, address=cur_st * 1000),
         )
 
-    plan2 = eng._build_cb_retrieve_plan(
+    plan2 = eng._build_cb_retrieve_plan_flat(
         gpu_context,
         rope_state,
         resolved_groups,
@@ -854,11 +850,11 @@ def test_native_plan_covers_every_wave_rope_and_scatter():
     assert group_specs2[0].slot_mapping_capacity == 4
 
 
-def test_flat_plan_tables_match_object_plan_semantics():
-    """The flat tables encode the same work items as the object plan: one
-    staging row per chunk (dest = its wave slot's buffer), rope rows only for
-    shifted chunks x groups, scatter rows for all chunks x groups with
-    cumulative token offsets, and monotone per-step CSR offsets."""
+def test_flat_plan_tables_encode_every_work_item():
+    """The flat tables encode one staging row per chunk (dest = its wave
+    slot's buffer), rope rows only for shifted chunks x groups, scatter rows
+    for all chunks x groups with cumulative token offsets, and monotone
+    per-step CSR offsets."""
     # Third Party
     import numpy as np
     import torch
@@ -904,58 +900,6 @@ def test_flat_plan_tables_match_object_plan_semantics():
     assert step_offsets[:, 0].tolist() == [1, 2, 3]
     assert step_offsets[:, 2].tolist() == [2, 4, 6]
     assert bool(np.all(np.diff(step_offsets[:, 1]) >= 0))
-
-
-def test_object_steps_alternate_disjoint_slot_halves():
-    """The double-buffer contract the executor's overlap relies on: waves are
-    max_batch//2 chunks, consecutive steps use DISJOINT tmp-slot halves, and
-    steps two apart reuse the same half. If the planner ever broke this,
-    step w's staging (copy stream) could race step w-1's kernels (compute
-    stream) on the same slots."""
-    # Third Party
-    import torch
-
-    # First Party
-    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
-
-    eng, gpu_context, rope_state, obj_bytes = _build_plan_engine_and_context(
-        num_groups=1, max_batch=4
-    )
-    runs = [
-        [
-            (
-                SimpleNamespace(cur_st=i * 4, cur_ed=i * 4 + 4, old_st=i * 4 + 100),
-                _lazy_memory_obj(obj_bytes, address=i * 4),
-            )
-            for i in range(6)
-        ]
-    ]
-    resolved_groups = [(torch.arange(12, dtype=torch.long), 4)]
-
-    step_slots: list[list[int]] = []
-
-    class _RecStep:
-        def __init__(self, staging, ropes, scatters):
-            step_slots.append([s.args[1] for s in scatters])
-
-    class _RecVar:
-        def __init__(self, *args):
-            self.args = args
-
-    with (
-        patch.object(v3_mod.lmc_ops, "CBRetrieveStep", _RecStep),
-        patch.object(v3_mod.lmc_ops, "CBRopeVar", _RecVar),
-        patch.object(v3_mod.lmc_ops, "CBScatterVar", _RecVar),
-    ):
-        plan = eng._build_cb_retrieve_plan(
-            gpu_context, rope_state, resolved_groups, runs, max_batch=4
-        )
-    assert plan is not None
-
-    # 6 chunks, wave = 4//2 = 2 -> 3 steps: slots {0,1}, {2,3}, {0,1}.
-    assert [sorted(set(s)) for s in step_slots] == [[0, 1], [2, 3], [0, 1]]
-    for a, b in zip(step_slots, step_slots[1:], strict=False):
-        assert not (set(a) & set(b)), "consecutive steps must not share slots"
 
 
 def test_flat_tables_alternate_disjoint_slot_halves():
@@ -1011,7 +955,7 @@ def test_native_plan_falls_back_for_non_lazy_objects():
         (torch.tensor([20], dtype=torch.long), 4),
     ]
     assert (
-        eng._build_cb_retrieve_plan(
+        eng._build_cb_retrieve_plan_flat(
             gpu_context, rope_state, resolved_groups, runs, max_batch=2
         )
         is None
@@ -1038,7 +982,7 @@ def test_native_plan_falls_back_for_compressed_group():
         (torch.tensor([20], dtype=torch.long), 4),
     ]
     assert (
-        eng._build_cb_retrieve_plan(
+        eng._build_cb_retrieve_plan_flat(
             gpu_context, rope_state, resolved_groups, runs, max_batch=2
         )
         is None
