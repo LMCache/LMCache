@@ -88,6 +88,7 @@ class RocmProfile(BuildProfile):
             "csrc/pybind_hip.cpp",
             "csrc/mem_kernels.hip",
             "csrc/mp_mem_kernels.hip",
+            "csrc/cb_kernels.hip",
             "csrc/cal_cdf.hip",
             "csrc/ac_enc.hip",
             "csrc/ac_dec.hip",

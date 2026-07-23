@@ -5,6 +5,7 @@
 #include <pybind11/stl.h>
 #include "mem_kernels.cuh"
 #include "mp_mem_kernels.cuh"
+#include "cb_kernels.cuh"
 #include "cachegen_kernels.cuh"
 #include "pos_kernels.cuh"
 #include "mem_alloc.h"
