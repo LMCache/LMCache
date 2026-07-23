@@ -23,6 +23,7 @@ from __future__ import annotations
 # Standard
 from collections import defaultdict
 from typing import Any
+import dataclasses
 import select
 import threading
 
@@ -81,6 +82,16 @@ def _obj_to_memoryview(
     return obj.byte_array  # type: ignore[return-value]
 
 
+@dataclasses.dataclass
+class _PendingStoreTask:
+    """Aggregation state for one store task split into uniform-size
+    sub-batches (see ``submit_store_task``)."""
+
+    remaining: int
+    ok: bool = True
+    bytes_stored: int = 0
+
+
 class NativeConnectorL2Adapter(L2AdapterInterface):
     """
     Wraps a pybind-wrapped C++ IStorageConnector to
@@ -129,6 +140,10 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             int,
             tuple[str, L2TaskId, int, list[ObjectKey] | None],
         ] = {}
+
+        # Store tasks split into uniform-size sub-batches:
+        # task_id → aggregation state across its native futures
+        self._pending_store_tasks: dict[L2TaskId, _PendingStoreTask] = {}
 
         # Completed results (same pattern as MockL2Adapter)
         self._completed_stores: dict[L2TaskId, L2StoreResult] = {}
@@ -195,19 +210,61 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         memviews = [_obj_to_memoryview(obj) for obj in objects]
         per_key_sizes = [obj.get_size() for obj in objects]
 
+        # Native connectors require every buffer in a batch to share one
+        # size: the pybind wrapper takes the first buffer's size as
+        # batch_chunk_num_bytes and the C++ side rejects any other size
+        # ("buffer size mismatch"), failing the whole batch. Real store
+        # batches can mix sizes (e.g. a trailing partial chunk, or
+        # heterogeneous object groups), so group the keys by buffer size
+        # and submit one native batch per size, aggregated under a single
+        # task id.
+        size_groups: dict[int, list[int]] = {}
+        for idx, memview in enumerate(memviews):
+            size_groups.setdefault(memview.nbytes, []).append(idx)
+        # An empty submit keeps its native error behavior via one empty call.
+        index_groups = list(size_groups.values()) or [[]]
+
         # Register pending op BEFORE submit to avoid race
         # with demux thread. The native submit is
         # non-blocking so holding the lock is brief.
         with self._lock:
             task_id = self._get_next_task_id()
-            future_id = int(self._client.submit_batch_set(key_strings, memviews))
-            self._pending_ops[future_id] = (
-                self._OP_STORE,
-                task_id,
-                len(keys),
-                None,
+            self._pending_store_tasks[task_id] = _PendingStoreTask(
+                remaining=len(index_groups)
             )
-            self._pending_store_sizes[future_id] = (list(keys), per_key_sizes)
+            submitted = 0
+            try:
+                for indices in index_groups:
+                    future_id = int(
+                        self._client.submit_batch_set(
+                            [key_strings[i] for i in indices],
+                            [memviews[i] for i in indices],
+                        )
+                    )
+                    self._pending_ops[future_id] = (
+                        self._OP_STORE,
+                        task_id,
+                        len(indices),
+                        None,
+                    )
+                    self._pending_store_sizes[future_id] = (
+                        [keys[i] for i in indices],
+                        [per_key_sizes[i] for i in indices],
+                    )
+                    submitted += 1
+            except Exception:
+                if submitted == 0:
+                    # Nothing in flight: drop the task and let the caller
+                    # see the native error, as before.
+                    self._pending_store_tasks.pop(task_id, None)
+                else:
+                    # Some sub-batches are in flight; shrink the aggregate
+                    # so their completions still close the task, marked
+                    # failed.
+                    state = self._pending_store_tasks[task_id]
+                    state.remaining = submitted
+                    state.ok = False
+                raise
 
         return task_id
 
@@ -451,7 +508,19 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
                     if op_type == self._OP_STORE:
                         store_info = self._pending_store_sizes.pop(fid, None)
-                        task_bytes = 0
+                        state = self._pending_store_tasks.get(task_id)
+                        if state is None:
+                            # Should not happen; recover with a
+                            # single-sub-batch aggregate.
+                            state = _PendingStoreTask(remaining=1)
+                            self._pending_store_tasks[task_id] = state
+                        if not ok:
+                            state.ok = False
+                            logger.warning(
+                                "Native store sub-batch failed (%d keys): %s",
+                                num_keys,
+                                error,
+                            )
                         if ok and store_info is not None:
                             store_keys, sizes = store_info
                             for key, size in zip(store_keys, sizes, strict=True):
@@ -466,12 +535,17 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                                     self._key_sizes[key] = size
                                     keys_stored.append(key)
                                     sizes_stored.append(size)
-                                    task_bytes += size
+                                    state.bytes_stored += size
                                 else:
                                     keys_stored.append(key)
                                     sizes_stored.append(0)
-                        self._completed_stores[task_id] = L2StoreResult(ok, task_bytes)
-                        self._store_efd.notify()
+                        state.remaining -= 1
+                        if state.remaining <= 0:
+                            self._pending_store_tasks.pop(task_id, None)
+                            self._completed_stores[task_id] = L2StoreResult(
+                                state.ok, state.bytes_stored
+                            )
+                            self._store_efd.notify()
 
                     elif op_type == self._OP_LOOKUP:
                         bitmap = Bitmap(num_keys)

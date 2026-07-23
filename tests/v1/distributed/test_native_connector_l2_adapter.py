@@ -491,6 +491,86 @@ class TestStoreInterface:
 
 
 # =============================================================================
+# Uniform-Size Store Sub-Batching Tests
+# =============================================================================
+
+
+class _RecordingConnector(MockNativeConnector):
+    """Mock that records submit_batch_set calls and enforces the native
+    uniform-size contract (mixed sizes fail the whole batch, mirroring
+    csrc/storage_backends/connector_pybind_utils.h)."""
+
+    def __init__(self, fail_sizes: set | None = None):
+        super().__init__()
+        self.set_call_sizes: list[list[int]] = []
+        self._fail_sizes = fail_sizes or set()
+
+    def submit_batch_set(self, keys: list[str], memoryviews: list) -> int:
+        sizes = [mv.nbytes for mv in memoryviews]
+        self.set_call_sizes.append(sizes)
+        if len(set(sizes)) > 1 or (sizes and sizes[0] in self._fail_sizes):
+            with self._lock:
+                fid = self._next_id
+                self._next_id += 1
+            self._push_completion(fid, False, "buffer size mismatch", None)
+            return fid
+        return super().submit_batch_set(keys, memoryviews)
+
+
+class TestUniformSizeSubBatching:
+    def _run_store(self, client, keys, objs):
+        adapter = NativeConnectorL2Adapter(client)
+        try:
+            store_fd = adapter.get_store_event_fd()
+            task_id = adapter.submit_store_task(keys, objs)
+            completed = {}
+            while task_id not in completed:
+                assert wait_for_event_fd(store_fd, timeout=5.0)
+                completed.update(adapter.pop_completed_store_tasks())
+            return completed[task_id]
+        finally:
+            adapter.close()
+
+    def test_mixed_size_batch_splits_into_uniform_sub_batches(self):
+        client = _RecordingConnector()
+        keys = [create_object_key(i) for i in range(4)]
+        objs = [
+            create_memory_obj(size=1024),
+            create_memory_obj(size=256),
+            create_memory_obj(size=1024),
+            create_memory_obj(size=256),
+        ]
+        result = self._run_store(client, keys, objs)
+        assert result.is_successful()
+        # One native call per distinct buffer size, each uniform.
+        assert len(client.set_call_sizes) == 2
+        for sizes in client.set_call_sizes:
+            assert len(set(sizes)) == 1
+        # Every key landed despite the mixed input batch.
+        for key in keys:
+            assert _object_key_to_string(key) in client._store
+
+    def test_uniform_batch_stays_single_native_call(self):
+        client = _RecordingConnector()
+        keys = [create_object_key(i) for i in range(3)]
+        objs = [create_memory_obj(size=512) for _ in range(3)]
+        result = self._run_store(client, keys, objs)
+        assert result.is_successful()
+        assert len(client.set_call_sizes) == 1
+
+    def test_failed_sub_batch_marks_task_failed(self):
+        failing_nbytes = 256 * 4  # float32 elements -> bytes
+        client = _RecordingConnector(fail_sizes={failing_nbytes})
+        keys = [create_object_key(i) for i in range(2)]
+        objs = [create_memory_obj(size=1024), create_memory_obj(size=256)]
+        result = self._run_store(client, keys, objs)
+        assert not result.is_successful()
+        # The healthy sub-batch still landed.
+        assert _object_key_to_string(keys[0]) in client._store
+        assert _object_key_to_string(keys[1]) not in client._store
+
+
+# =============================================================================
 # Lookup and Lock Interface Tests
 # =============================================================================
 
