@@ -12,6 +12,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import asdict
+from typing import TYPE_CHECKING
 import asyncio
 
 # Third Party
@@ -19,16 +20,19 @@ import httpx
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.eviction_policy.isolated_lru import (
     IsolatedLRUEvictionPolicy,
 )
-from lmcache.v1.distributed.quota_manager import QuotaManager
-from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
-from lmcache.v1.mp_coordinator.registry import InstanceRegistry
 from lmcache.v1.multiprocess.cache_control.object_service import (
     MAX_DELETE_BATCH,
 )
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.distributed.api import ObjectKey
+    from lmcache.v1.distributed.quota_manager import QuotaManager
+    from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
+    from lmcache.v1.mp_coordinator.registry import InstanceRegistry
 
 logger = init_logger(__name__)
 
