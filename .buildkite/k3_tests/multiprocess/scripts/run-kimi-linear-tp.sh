@@ -100,7 +100,6 @@ launch_vllm() {
     local saved_port="$VLLM_PORT"
     unset VLLM_PORT
 
-    CUDA_VISIBLE_DEVICES=0,1 \
     VLLM_ENABLE_V1_MULTIPROCESSING=0 \
     PYTHONHASHSEED=0 \
     vllm serve "$MODEL" \
@@ -223,7 +222,6 @@ count_retrieves() {
 
 # ── 1. Launch LMCache MP server (kept alive across the vLLM restart) ──
 echo "=== Launching LMCache MP server (port $LMCACHE_PORT) ==="
-CUDA_VISIBLE_DEVICES=0 \
 lmcache server \
     --host localhost \
     --port "$LMCACHE_PORT" \
