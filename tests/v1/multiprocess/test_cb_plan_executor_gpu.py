@@ -8,7 +8,14 @@ w-2's kernels finished reading the same slot half). These tests drive many
 steps of slot-half reuse where every wave writes DIFFERENT data into the same
 slots — any event-ordering bug surfaces as a bit-exact mismatch against the
 sequential tensor-op reference, not as a flake.
+
+Parameterized over both paged layouts the executor serves: the fused-packed
+HND format (K/V in the trailing 2*HS dim, kv_size 1) and the un-fused
+flash-attention format (separate K/V planes, kv_size 2).
 """
+
+# Standard
+from dataclasses import dataclass
 
 # Third Party
 import pytest
@@ -30,23 +37,58 @@ if not hasattr(lmc_ops, "execute_cb_retrieve_plan"):
     )
 
 _NL, _SPC, _NH, _HS = 4, 8, 2, 16
-_HIDDEN = _NH * 2 * _HS  # fused packed: per-head width 2*HS
 _NB, _BS = 512, 4
-_FMT = lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS
 _DTYPE = torch.bfloat16
 
 
+@dataclass(frozen=True)
+class _FmtCase:
+    """Per-format geometry: chunk plane count, widths, and paged shape."""
+
+    fmt: "lmc_ops.EngineKVFormat"
+    kv_size: int  # chunk leading planes (1 = K/V fused, 2 = split)
+    hidden: int  # per-plane scalars per token
+    head_stride: int  # rope stride between heads in the K plane
+    paged_shape: tuple  # per-layer paged tensor shape
+
+
+_CASES = {
+    # Fused-packed HND: [NB, NH, BS, 2*HS], K is the first HS of each head.
+    "packed": _FmtCase(
+        fmt=lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS,
+        kv_size=1,
+        hidden=_NH * 2 * _HS,
+        head_stride=2 * _HS,
+        paged_shape=(_NB, _NH, _BS, 2 * _HS),
+    ),
+    # Un-fused flash-attention HND: [2, NB, NH, BS, HS], separate K/V planes.
+    "split": _FmtCase(
+        fmt=lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
+        kv_size=2,
+        hidden=_NH * _HS,
+        head_stride=_HS,
+        paged_shape=(2, _NB, _NH, _BS, _HS),
+    ),
+}
+
+
 def _reference_scatter(
-    host_chunks, paged_ptrs, slot_mapping, old_sts, cur_sts, cos_sin
+    case, host_chunks, paged_ptrs, slot_mapping, old_sts, cur_sts, cos_sin
 ):
     """Sequential per-chunk tensor-op reference (rope then scatter)."""
     dev = slot_mapping.device
     ramp = torch.arange(_SPC, device=dev, dtype=torch.long).repeat(_NL)
     for i, host in enumerate(host_chunks):
         buf = host.to(dev)
-        k_view = buf[0].reshape(_NL * _SPC, _NH, 2 * _HS)
+        k_view = buf[0].reshape(_NL * _SPC, _NH, case.head_stride)
         lmc_ops.rotary_embedding_k_fused_strided(
-            old_sts[i] + ramp, cur_sts[i] + ramp, k_view, _HS, 2 * _HS, cos_sin, True
+            old_sts[i] + ramp,
+            cur_sts[i] + ramp,
+            k_view,
+            _HS,
+            case.head_stride,
+            cos_sin,
+            True,
         )
         lmc_ops.multi_layer_kv_transfer(
             buf,
@@ -55,7 +97,7 @@ def _reference_scatter(
             slot_mapping.device,
             _NB * _BS,
             lmc_ops.TransferDirection.H2D,
-            _FMT,
+            case.fmt,
             block_size=_BS,
             head_size=_HS,
         )
@@ -63,6 +105,7 @@ def _reference_scatter(
 
 
 def _run_plan(
+    case,
     n_chunks,
     max_batch,
     host_chunks,
@@ -74,15 +117,15 @@ def _run_plan(
     slots,
 ):
     """Drive the executor with the planner's double-buffer wave layout."""
-    chunk_bytes = _NL * _SPC * _HIDDEN * _DTYPE.itemsize
+    chunk_bytes = case.kv_size * _NL * _SPC * case.hidden * _DTYPE.itemsize
     spec = lmc_ops.CBGroupSpec(
         paged_kv_ptrs=paged_ptrs.data_ptr(),
         temp_buffer_ptrs=[s.data_ptr() for s in slots],
         num_layers=_NL,
         slot_tokens=_SPC,
-        hidden_elems=_HIDDEN,
+        hidden_elems=case.hidden,
         element_size=_DTYPE.itemsize,
-        engine_kv_format=_FMT,
+        engine_kv_format=case.fmt,
         page_buffer_size=_NB * _BS,
         block_size=_BS,
         head_size=_HS,
@@ -92,7 +135,7 @@ def _run_plan(
         rot_dim=_HS,
         rope_num_kv_heads=_NH,
         rope_head_size=_HS,
-        rope_head_stride=2 * _HS,
+        rope_head_stride=case.head_stride,
         key_scalar_type=15,  # at::ScalarType::BFloat16
         is_neox=True,
     )
@@ -118,18 +161,20 @@ def _run_plan(
     torch.cuda.synchronize()
 
 
+@pytest.mark.parametrize("fmt_key", sorted(_CASES))
 @pytest.mark.parametrize("n_chunks,max_batch", [(12, 4), (96, 16), (44, 16)])
-def test_overlap_slot_reuse_is_bit_exact(n_chunks, max_batch):
+def test_overlap_slot_reuse_is_bit_exact(n_chunks, max_batch, fmt_key):
     """Many steps of slot-half reuse, each wave carrying different data into
     the same slots: an ordering violation (staging overwriting a slot still
     being read, or kernels reading a half-staged slot) breaks bit-exactness.
-    Covers full packs, partial tail packs, and deep reuse."""
+    Covers full packs, partial tail packs, and deep reuse, on both the
+    fused-packed and un-fused split-K/V paged layouts."""
+    case = _CASES[fmt_key]
     dev = torch.device("cuda:0")
     torch.manual_seed(n_chunks)
 
     paged_ref = [
-        torch.zeros(_NB, _NH, _BS, 2 * _HS, dtype=_DTYPE, device=dev)
-        for _ in range(_NL)
+        torch.zeros(*case.paged_shape, dtype=_DTYPE, device=dev) for _ in range(_NL)
     ]
     paged_new = [torch.zeros_like(t) for t in paged_ref]
     ptrs_ref = torch.tensor(
@@ -139,11 +184,11 @@ def test_overlap_slot_reuse_is_bit_exact(n_chunks, max_batch):
         [t.data_ptr() for t in paged_new], dtype=torch.long, device=dev
     )
     host_chunks = [
-        torch.randn(1, _NL, _SPC, _HIDDEN, dtype=_DTYPE).pin_memory()
+        torch.randn(case.kv_size, _NL, _SPC, case.hidden, dtype=_DTYPE).pin_memory()
         for _ in range(n_chunks)
     ]
     slots = [
-        torch.zeros(1, _NL, _SPC, _HIDDEN, dtype=_DTYPE, device=dev)
+        torch.zeros(case.kv_size, _NL, _SPC, case.hidden, dtype=_DTYPE, device=dev)
         for _ in range(max_batch)
     ]
     cos_sin = torch.randn(8192, _HS, dtype=_DTYPE, device=dev)
@@ -153,8 +198,11 @@ def test_overlap_slot_reuse_is_bit_exact(n_chunks, max_batch):
     old_sts = [i * _SPC + 512 for i in range(n_chunks)]
     cur_sts = [i * _SPC for i in range(n_chunks)]
 
-    _reference_scatter(host_chunks, ptrs_ref, slot_mapping, old_sts, cur_sts, cos_sin)
+    _reference_scatter(
+        case, host_chunks, ptrs_ref, slot_mapping, old_sts, cur_sts, cos_sin
+    )
     _run_plan(
+        case,
         n_chunks,
         max_batch,
         host_chunks,
@@ -168,5 +216,6 @@ def test_overlap_slot_reuse_is_bit_exact(n_chunks, max_batch):
 
     for layer in range(_NL):
         assert torch.equal(paged_ref[layer], paged_new[layer]), (
-            f"layer {layer} mismatch (n_chunks={n_chunks}, max_batch={max_batch})"
+            f"layer {layer} mismatch "
+            f"(fmt={fmt_key}, n_chunks={n_chunks}, max_batch={max_batch})"
         )

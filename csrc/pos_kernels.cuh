@@ -20,14 +20,6 @@ void rotary_embedding_k_fused_strided(const torch::Tensor& old_positions,
                                       const torch::Tensor& cos_sin_cache,
                                       bool is_neox);
 
-// Raw-pointer CB ramp re-RoPE: positions derived in-kernel as
-// `st + token_idx % slots`. Caller owns the device guard.
-void rotary_embedding_k_fused_ramp_ptr(
-    uintptr_t key_ptr, at::ScalarType key_dtype, int64_t num_tokens,
-    int64_t old_st, int64_t new_st, int64_t slots, int64_t head_size,
-    int64_t head_stride, int64_t num_kv_heads, uintptr_t cos_sin_cache_ptr,
-    int rot_dim, bool is_neox);
-
 // Fused multi-chunk ramp re-RoPE: one launch rotates up to
 // MAX_FUSED_TRANSFER_CHUNKS same-geometry tmp slots.
 void rotary_embedding_k_fused_ramp_multi_ptr(

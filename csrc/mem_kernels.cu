@@ -872,43 +872,6 @@ void multi_layer_kv_transfer_fused_ptr(
 }
 
 /**
- * Raw-pointer entry (CB plan executor); xword dispatch like the tensor entry.
- * @see multi_layer_kv_transfer_ptr_templated for layout vs transfer tokens.
- */
-void multi_layer_kv_transfer_ptr(
-    uintptr_t key_value, uintptr_t page_buffer_ptrs, uintptr_t slot_mapping,
-    const int num_layers, const int layout_num_tokens,
-    const int transfer_num_tokens, const int num_origin_elements,
-    const int element_size, const torch::Device& paged_memory_device,
-    const int page_buffer_size, const TransferDirection direction,
-    const EngineKVFormat engine_kv_format, const int block_size,
-    const int head_size, const int skip_prefix_n_tokens) {
-  int copy_size = num_origin_elements * element_size;
-#ifndef LAUNCH_MULTI_LAYER_KV_TRANSFER_PTR
-  #define LAUNCH_MULTI_LAYER_KV_TRANSFER_PTR(type)                        \
-    do {                                                                  \
-      multi_layer_kv_transfer_ptr_templated<type>(                        \
-          reinterpret_cast<type*>(key_value),                             \
-          reinterpret_cast<type**>(page_buffer_ptrs),                     \
-          reinterpret_cast<const int64_t*>(slot_mapping), num_layers,     \
-          layout_num_tokens, transfer_num_tokens, num_origin_elements,    \
-          element_size, paged_memory_device, page_buffer_size, direction, \
-          engine_kv_format, block_size, head_size, skip_prefix_n_tokens); \
-    } while (0)
-#endif
-  if (copy_size % 8 == 0) {
-    LAUNCH_MULTI_LAYER_KV_TRANSFER_PTR(int64_t);
-  } else if (copy_size % 4 == 0) {
-    LAUNCH_MULTI_LAYER_KV_TRANSFER_PTR(int32_t);
-  } else if (copy_size % 2 == 0) {
-    LAUNCH_MULTI_LAYER_KV_TRANSFER_PTR(int16_t);
-  } else {
-    LAUNCH_MULTI_LAYER_KV_TRANSFER_PTR(int8_t);
-  }
-#undef LAUNCH_MULTI_LAYER_KV_TRANSFER_PTR
-}
-
-/**
  * @see multi_layer_kv_transfer_templated
  */
 void multi_layer_kv_transfer(
