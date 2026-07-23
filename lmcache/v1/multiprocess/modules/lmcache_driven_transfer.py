@@ -235,6 +235,25 @@ def _recalculate_blocks_to_skip(
     return full_windows_to_skip * blocks_per_window + max(0, tail_blocks_to_skip)
 
 
+def _get_window_skip_blocks(
+    sw_size_chunks: int,
+    num_chunks: int,
+    batch_start_chunk: int,
+    batch_size: int,
+    blocks_per_window: int,
+) -> int:
+    """Return the leading blocks outside a kernel group's sliding window."""
+    if sw_size_chunks == -1:
+        return 0
+
+    out_of_window_chunks = max(0, num_chunks - sw_size_chunks)
+    batch_skip_chunks = max(
+        0,
+        min(batch_size, out_of_window_chunks - batch_start_chunk),
+    )
+    return batch_skip_chunks * blocks_per_window
+
+
 def _run_object_group_transfer_plan(
     cache_context: BaseCacheContext,
     block_ids_gpu: list[torch.Tensor],
@@ -340,7 +359,10 @@ def _run_object_group_transfer_plan(
         memory_objs, batch_size, skip_count=num_objects_to_skip
     ):
         if any(mo is None for mo in memory_object_batch):
-            if is_h2d:
+            # Separated SW object groups already trim whole objects above.
+            # A full-attention object group needs this per-kernel fallback
+            # when object-group separation is disabled.
+            if is_h2d and attn_desc.is_full_attention(object_group_id):
                 raise ValueError(
                     "MemoryObj is None for some objects in the batch, cannot "
                     "perform H2D copy. memory_object_batch: "
@@ -381,6 +403,21 @@ def _run_object_group_transfer_plan(
                 blocks_per_window,
                 orig_skip_blocks,
             )
+            # Separated SW object groups already trim whole objects above.
+            # A full-attention object group needs this per-kernel fallback
+            # when object-group separation is disabled.
+            if is_h2d and attn_desc.is_full_attention(object_group_id):
+                window_skip_blocks = _get_window_skip_blocks(
+                    kv_groups_manager.get_sw_size_chunks(kernel_group_id),
+                    len(memory_objs),
+                    start_object_idx,
+                    batch_len,
+                    blocks_per_window,
+                )
+                recalculated_skip_blocks = max(
+                    recalculated_skip_blocks,
+                    window_skip_blocks,
+                )
 
             launches.append(
                 lmc_ops.LaunchVar(
@@ -536,6 +573,18 @@ def transfer_kv_per_object_group(
                 blocks_per_window,
                 orig_skip_blocks,
             )
+            if is_h2d:
+                window_skip_blocks = _get_window_skip_blocks(
+                    kv_groups_manager.get_sw_size_chunks(kernel_group_id),
+                    len(memory_objs),
+                    start_object_idx,
+                    batch_len,
+                    blocks_per_window,
+                )
+                recalculated_skip_blocks = max(
+                    recalculated_skip_blocks,
+                    window_skip_blocks,
+                )
 
             # Launch kernel
             group_kv_pointers = cache_context.get_kernel_group_kv_pointers(

@@ -561,6 +561,25 @@ class KVLayerGroupsManager:
             return self._lmcache_tokens_per_chunk
         return sw_size_tokens
 
+    def get_sw_size_chunks(self, kernel_group_idx: int) -> int:
+        """Return a kernel group's cross-chunk sliding-window size.
+
+        Args:
+            kernel_group_idx: 0-based kernel group index.
+
+        Returns:
+            The sliding-window size measured in LMCache chunks, or ``-1`` when
+            the group should retain full attention across chunks.
+        """
+        if self._full_sw_kv:
+            return -1
+        sw_size_tokens = self._kernel_groups[kernel_group_idx].sw_size_tokens
+        if sw_size_tokens == -1:
+            return -1
+        return (
+            sw_size_tokens + self._lmcache_tokens_per_chunk - 1
+        ) // self._lmcache_tokens_per_chunk
+
     def get_attn_desc(self) -> AttnWindowDesc:
         """Return the cross-chunk attention windows of all object groups.
 
