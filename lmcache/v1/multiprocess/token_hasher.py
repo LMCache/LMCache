@@ -34,6 +34,8 @@ def _make_blake3_hash_func() -> Callable:
     # Third Party
     import blake3 as _blake3
 
+    extended_token_marker = b"LMC-u64"
+
     def blake3_hash(args):
         prefix_hash, tokens, _ = args
         h = _blake3.blake3()
@@ -44,8 +46,16 @@ def _make_blake3_hash_func() -> Callable:
             h.update(prefix_hash.to_bytes(8, byteorder="big", signed=True))
         else:
             h.update(bytes(prefix_hash))
-        # Serialize token IDs in one batch
-        h.update(struct.pack(f">{len(tokens)}I", *tokens))
+        # Preserve the original 32-bit encoding for normal text tokens so
+        # existing text-only cache keys stay stable. Use an explicit marker plus
+        # uint64 packing only when multimodal surrogate ids exceed uint32.
+        if not tokens:
+            h.update(struct.pack(">0I"))
+        elif min(tokens) >= 0 and max(tokens) <= 0xFFFFFFFF:
+            h.update(struct.pack(f">{len(tokens)}I", *tokens))
+        else:
+            h.update(extended_token_marker)
+            h.update(struct.pack(f">{len(tokens)}Q", *tokens))
         return h.digest()  # 32 bytes
 
     return blake3_hash
@@ -180,11 +190,31 @@ class TokenHasher:
         logger.info("Computed NONE_HASH=%s using hash function", none_hash)
         return none_hash
 
+    def ensure_token_ids_supported(self, tokens: list[int]) -> None:
+        """Raise if the configured hash algorithm cannot encode these tokens.
+
+        Args:
+            tokens: Token ids to validate before hashing.
+
+        Raises:
+            ValueError: If the configured hash algorithm cannot safely encode
+                token ids outside the uint32 range.
+        """
+        if self.hash_algorithm_name == "blake3" or not tokens:
+            return
+
+        if min(tokens) < 0 or max(tokens) > 0xFFFFFFFF:
+            raise ValueError(
+                "uint64 token ids require blake3 hash_algorithm; "
+                f"got {self.hash_algorithm_name}"
+            )
+
     def hash_tokens(self, tokens: list[int], prefix_hash: Any = None) -> Any:
         """Hash one chunk with rolling prefix.
 
         Returns int or bytes depending on hash_func.
         """
+        self.ensure_token_ids_supported(tokens)
         if prefix_hash is None:
             prefix_hash = self.none_hash
         return self.hash_func((prefix_hash, tuple(tokens), None))

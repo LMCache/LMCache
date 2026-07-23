@@ -260,7 +260,17 @@ class LookupModule:
 
         extra_count = compute_extra_count(tp_size, world_size)
 
-        chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(list(key.token_ids))
+        try:
+            chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(
+                list(key.token_ids)
+            )
+        except ValueError as exc:
+            logger.warning(
+                "Skipping lookup for request %s: %s",
+                key.request_id,
+                exc,
+            )
+            chunk_hashes = []
         if not chunk_hashes:
             self._register_prefetch_job(
                 _PrefetchJob(
@@ -482,9 +492,17 @@ class LookupModule:
             tp_size: Tensor-parallel size for MLA
                 multi-reader locking.
         """
-        chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(
-            list(key.token_ids), start=key.start, end=key.end
-        )
+        try:
+            chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(
+                list(key.token_ids), start=key.start, end=key.end
+            )
+        except ValueError as exc:
+            logger.warning(
+                "Skipping lookup-lock release for request %s: %s",
+                key.request_id,
+                exc,
+            )
+            return
         if not chunk_hashes:
             return
         # Release across every object group, mirroring lookup, which locks keys

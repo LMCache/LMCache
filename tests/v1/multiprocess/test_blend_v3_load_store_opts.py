@@ -126,6 +126,40 @@ def test_fingerprint_worker_stops_on_signal():
     assert not worker.is_alive()
 
 
+def test_store_skips_uint64_tokens_when_hasher_cannot_hash_them():
+    """Non-blake3 hash configs cannot safely hash VLM uint64 surrogate ids."""
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+    from lmcache.v1.multiprocess.token_hasher import TokenHasher
+
+    hasher = TokenHasher.__new__(TokenHasher)
+    hasher.chunk_size = 4
+    hasher.hash_algorithm_name = "builtin"
+    hasher.hash_func = hash
+    hasher.none_hash = 0
+
+    eng = v3_mod.BlendV3Module.__new__(v3_mod.BlendV3Module)
+    eng._ctx = SimpleNamespace(token_hasher=hasher)
+    eng._transfer_module = MagicMock()
+    eng._transfer_module.store.side_effect = AssertionError(
+        "store should skip before resolving uint64 cache token ids"
+    )
+
+    key = IPCCacheServerKey.from_token_ids(
+        "model",
+        world_size=1,
+        worker_id=0,
+        token_ids=[1, 2**62 + 7, 3, 4],
+        start=0,
+        end=4,
+        request_id="req-vlm",
+    )
+
+    assert eng.store(key, 1, [[1]], b"producer-event") == (b"producer-event", False)
+    eng._transfer_module.store.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # L2: obj_keys cache lifecycle
 # ---------------------------------------------------------------------------

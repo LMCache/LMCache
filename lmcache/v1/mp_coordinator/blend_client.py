@@ -13,7 +13,7 @@ It is **opt-in**: with no coordinator URL configured the blend module receives
 """
 
 # Standard
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from queue import Empty, Queue
@@ -22,7 +22,7 @@ import threading
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.mp_coordinator.schemas import encode_tokens
+from lmcache.v1.mp_coordinator.schemas import encode_tokens_u64
 
 logger = init_logger(__name__)
 
@@ -30,7 +30,7 @@ logger = init_logger(__name__)
 PENDING = object()
 
 # (method, path, json_body) -> json_dict
-_RequestFn = Callable[[str, str, dict], dict]
+_RequestFn = Callable[[str, str, Mapping[str, object]], dict[str, object]]
 
 
 @dataclass
@@ -54,7 +54,7 @@ class _PublishItem:
 
     method: str
     path: str
-    payload: dict
+    payload: dict[str, object]
 
 
 @dataclass
@@ -113,7 +113,9 @@ class BlendCoordinatorClient:
             client = httpx.Client(timeout=request_timeout)
             base = base_url.rstrip("/")
 
-            def _http_request(method: str, path: str, payload: dict) -> dict:
+            def _http_request(
+                method: str, path: str, payload: Mapping[str, object]
+            ) -> dict[str, object]:
                 resp = client.request(method, f"{base}{path}", json=payload)
                 resp.raise_for_status()
                 return resp.json()
@@ -136,7 +138,7 @@ class BlendCoordinatorClient:
         )
         self._worker.start()
 
-    def enqueue_register(self, ranges: list[dict]) -> None:
+    def enqueue_register(self, ranges: list[dict[str, object]]) -> None:
         """Queue a best-effort register of stored ranges.
 
         Args:
@@ -259,7 +261,7 @@ class BlendCoordinatorClient:
                 "/blend/match",
                 {
                     "model_scope": item.model_scope,
-                    "tokens_b64": encode_tokens(item.tokens),
+                    "tokens_u64_b64": encode_tokens_u64(item.tokens),
                 },
             )
             matches = [

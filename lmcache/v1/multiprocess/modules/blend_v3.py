@@ -854,7 +854,17 @@ class BlendV3Module(InstanceLivenessTarget):
             )
             return None, world_size
 
-        chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(list(key.token_ids))
+        try:
+            chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(
+                list(key.token_ids)
+            )
+        except ValueError as exc:
+            logger.warning(
+                "Skipping CacheBlend lookup for request %s: %s",
+                key.request_id,
+                exc,
+            )
+            return None, world_size
         if not chunk_hashes:
             return None, world_size
 
@@ -1234,6 +1244,18 @@ class BlendV3Module(InstanceLivenessTarget):
             tuple[bytes, bool]: The underlying ``LMCacheDrivenTransfer.store`` result
             (event handle, success).
         """
+        try:
+            self._ctx.token_hasher.ensure_token_ids_supported(
+                list(key.token_ids)[key.start : key.end]
+            )
+        except ValueError as exc:
+            logger.warning(
+                "Skipping CacheBlend store for request %s: %s",
+                key.request_id,
+                exc,
+            )
+            return event_ipc_handle, False
+
         result = self._transfer_module.store(
             key, instance_id, gpu_block_ids, event_ipc_handle
         )
@@ -1247,10 +1269,18 @@ class BlendV3Module(InstanceLivenessTarget):
         # not-yet-committed and drop the whole group as stale.
         try:
             session = self._ctx.session_manager.get_or_create(key.request_id)
-            chunk_hashes = [
-                TokenHasher.hash_to_bytes(h)
-                for h in session.get_hashes(key.start, key.end)
-            ]
+            try:
+                chunk_hashes = [
+                    TokenHasher.hash_to_bytes(h)
+                    for h in session.get_hashes(key.start, key.end)
+                ]
+            except ValueError as exc:
+                logger.warning(
+                    "Skipping CacheBlend fingerprint registration for request %s: %s",
+                    key.request_id,
+                    exc,
+                )
+                return result
             if not chunk_hashes:
                 return result
             tokens_in_range = list(key.token_ids)[key.start : key.end]

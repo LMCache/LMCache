@@ -77,6 +77,24 @@ class TestTokenHasher:
         h2 = hasher.hash_tokens([5, 6, 7, 8])
         assert h1 != h2
 
+    def test_hash_tokens_accepts_uint64_token_ids(self, hasher: TokenHasher) -> None:
+        """Multimodal cache surrogate ids can exceed the uint32 token range."""
+        h1 = hasher.hash_tokens([2**32 + 7, 2, 3, 4])
+        h2 = hasher.hash_tokens([2**32 + 8, 2, 3, 4])
+
+        assert isinstance(h1, bytes)
+        assert h1 != h2
+
+    def test_hash_tokens_rejects_uint64_for_non_blake3(self) -> None:
+        hasher = TokenHasher.__new__(TokenHasher)
+        hasher.chunk_size = 4
+        hasher.hash_algorithm_name = "builtin"
+        hasher.hash_func = hash
+        hasher.none_hash = 0
+
+        with pytest.raises(ValueError, match="uint64 token ids require blake3"):
+            hasher.hash_tokens([2**32 + 7, 2, 3, 4])
+
     def test_hash_tokens_with_prefix(self, hasher: TokenHasher) -> None:
         """Rolling hash: same tokens with different prefix produces different hash."""
         h_no_prefix = hasher.hash_tokens([1, 2, 3, 4])

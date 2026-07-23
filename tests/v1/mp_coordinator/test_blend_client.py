@@ -7,7 +7,7 @@ end-to-end against the actual directory without a network or server.
 """
 
 # Standard
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 import time
 
 # Third Party
@@ -22,7 +22,7 @@ from lmcache.v1.mp_coordinator.blend_directory import (
     GlobalBlendMatcher,
     StoreRange,
 )
-from lmcache.v1.mp_coordinator.schemas import decode_tokens
+from lmcache.v1.mp_coordinator.schemas import decode_tokens_u64
 
 CHUNK = 3
 SCOPE = "model-a"
@@ -30,10 +30,12 @@ SCOPE = "model-a"
 
 def _matcher_request(
     matcher: GlobalBlendMatcher,
-) -> Callable[[str, str, dict], dict]:
+) -> Callable[[str, str, Mapping[str, object]], dict[str, object]]:
     """request_fn that drives a real matcher, mirroring the coordinator router."""
 
-    def request(method: str, path: str, payload: dict) -> dict:
+    def request(
+        method: str, path: str, payload: Mapping[str, object]
+    ) -> dict[str, object]:
         if method == "POST" and path == "/blend/fingerprints":
             ranges = [
                 StoreRange(
@@ -50,7 +52,7 @@ def _matcher_request(
             return {"removed": matcher.remove(keys) if keys else 0}
         if method == "POST" and path == "/blend/match":
             matches = matcher.match(
-                payload["model_scope"], decode_tokens(payload["tokens_b64"])
+                payload["model_scope"], decode_tokens_u64(payload["tokens_u64_b64"])
             )
             return {
                 "matches": [
@@ -63,7 +65,23 @@ def _matcher_request(
     return request
 
 
-def _range(prefix: str, tokens: list[int]) -> dict:
+def _recording_matcher_request(
+    matcher: GlobalBlendMatcher,
+    seen_payloads: list[Mapping[str, object]],
+) -> Callable[[str, str, Mapping[str, object]], dict[str, object]]:
+    request = _matcher_request(matcher)
+
+    def recording_request(
+        method: str, path: str, payload: Mapping[str, object]
+    ) -> dict[str, object]:
+        if method == "POST" and path == "/blend/match":
+            seen_payloads.append(payload)
+        return request(method, path, payload)
+
+    return recording_request
+
+
+def _range(prefix: str, tokens: list[int]) -> dict[str, object]:
     n_chunks = len(tokens) // CHUNK
     return {
         "model_scope": SCOPE,
@@ -101,6 +119,28 @@ def test_match_after_register():
             ("K0", 0, 0),
             ("K1", 3, 3),
         ]
+    finally:
+        client.close()
+
+
+def test_match_client_sends_uint64_tokens_b64() -> None:
+    m = GlobalBlendMatcher(chunk_size=CHUNK)
+    doc = [1, 2**40 + 7, 3]
+    m.register([_store_range("K", doc)])
+    seen_payloads: list[Mapping[str, object]] = []
+    client = BlendCoordinatorClient(
+        request_fn=_recording_matcher_request(m, seen_payloads)
+    )
+    try:
+        client.submit_match("r1", SCOPE, doc)
+        _wait_match(client, "r1")
+
+        assert seen_payloads
+        payload = seen_payloads[0]
+        assert "tokens_b64" not in payload
+        assert "tokens_u64_b64" in payload
+        assert isinstance(payload["tokens_u64_b64"], str)
+        assert decode_tokens_u64(payload["tokens_u64_b64"]).tolist() == doc
     finally:
         client.close()
 
