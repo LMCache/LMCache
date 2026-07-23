@@ -76,15 +76,15 @@ def _make_mm_request(
 def test_text_only_request_uses_raw_token_ids():
     prompt = list(range(100, 108))
     tracker = LMCacheMPRequestTracker(_FakeRequest(prompt))
-    assert tracker.get_token_ids_for_keys() == prompt
+    assert tracker.get_token_ids() == prompt
 
 
 def test_text_only_request_returns_mutable_copy():
     prompt = list(range(100, 108))
     tracker = LMCacheMPRequestTracker(_FakeRequest(prompt))
-    token_ids = tracker.get_token_ids_for_keys()
+    token_ids = tracker.get_token_ids()
     token_ids[0] = -1
-    assert tracker.get_token_ids_for_keys() == prompt
+    assert tracker.get_token_ids() == prompt
 
 
 def test_mm_request_overwrites_placeholder_span():
@@ -93,7 +93,7 @@ def test_mm_request_overwrites_placeholder_span():
         _make_mm_request(prompt, identifier="0xabcd", offset=2, length=3)
     )
     fill = hex_hash_to_int16("0xabcd")
-    assert tracker.get_token_ids_for_keys() == [1, 2, fill, fill, fill, 3, 4, 5]
+    assert tracker.get_token_ids() == [1, 2, fill, fill, fill, 3, 4, 5]
 
 
 def test_different_images_produce_different_key_tokens():
@@ -104,7 +104,7 @@ def test_different_images_produce_different_key_tokens():
     tracker_b = LMCacheMPRequestTracker(
         _make_mm_request(prompt, identifier="0xbbbb", offset=2, length=3)
     )
-    assert tracker_a.get_token_ids_for_keys() != tracker_b.get_token_ids_for_keys()
+    assert tracker_a.get_token_ids() != tracker_b.get_token_ids()
 
 
 def test_decode_tokens_appended_unchanged():
@@ -114,7 +114,7 @@ def test_decode_tokens_appended_unchanged():
     request.append_decode_token(500)
     request.append_decode_token(501)
     fill = hex_hash_to_int16("0xabcd")
-    assert tracker.get_token_ids_for_keys() == [1, 2, fill, fill, 3, 500, 501]
+    assert tracker.get_token_ids() == [1, 2, fill, fill, 3, 500, 501]
 
 
 def _prepare_storable_tracker(request: _FakeRequest) -> LMCacheMPRequestTracker:

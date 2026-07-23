@@ -315,7 +315,7 @@ class LMCacheMPRequestTracker:
             for engine_group_idx, blocks in self.allocated_block_ids.items()
         }
 
-    def get_token_ids_for_keys(self) -> list[int]:
+    def get_token_ids(self) -> list[int]:
         """Return the token ids to use for LMCache key derivation."""
         if not self.mm_adjusted_prompt_ids:
             return list(self.all_token_ids)
@@ -423,7 +423,7 @@ class LMCacheMPRequestMetadata:
                 start_token_idx,
                 end_token_idx,
             )
-            token_ids = tracker.get_token_ids_for_keys()
+            token_ids = tracker.get_token_ids()
             op = LoadStoreOp(
                 token_ids=token_ids,
                 block_ids=block_ids,
@@ -490,7 +490,7 @@ class LMCacheMPRequestMetadata:
                 start_token_idx,
                 end_token_idx,
             )
-            token_ids = tracker.get_token_ids_for_keys()
+            token_ids = tracker.get_token_ids()
 
             # Compute how many tokens at the start of the retrieve range
             # overlap with APC-shared blocks. The server must skip writing
@@ -1013,7 +1013,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
-            token_ids=tracker.get_token_ids_for_keys(),
+            token_ids=tracker.get_token_ids(),
             cache_salt=tracker.cache_salt,
         )
 
@@ -1114,7 +1114,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
                 if free_end > 0:
                     self.scheduler_adapter.free_lookup_locks(
-                        token_ids=tracker.get_token_ids_for_keys(),
+                        token_ids=tracker.get_token_ids(),
                         start=0,
                         end=free_end,
                         request_id=request.request_id,
@@ -1378,7 +1378,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 RequestAllocationRecord(
                     req_id=new_request.req_id,
                     new_block_ids=list(primary_block_ids),
-                    new_token_ids=tracker.get_token_ids_for_keys()[:total_tokens],
+                    new_token_ids=tracker.get_token_ids()[:total_tokens],
                 )
             )
 
@@ -1403,7 +1403,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tokens_per_block = self._group_tokens_per_block[0]
             start_token = (total_blocks - num_new_blocks) * tokens_per_block
             end_token = total_blocks * tokens_per_block
-            new_token_ids = tracker.get_token_ids_for_keys()[start_token:end_token]
+            new_token_ids = tracker.get_token_ids()[start_token:end_token]
             records.append(
                 RequestAllocationRecord(
                     req_id=request_id,
