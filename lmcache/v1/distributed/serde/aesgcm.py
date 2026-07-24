@@ -76,7 +76,9 @@ class AesGcmSerializer(Serializer):
         dek = self._keys.get_key(key.cache_salt)
         iv = os.urandom(_IV_LEN)
         ciphertext = AESGCM(dek).encrypt(iv, bytes(src.byte_array), None)
-        out = memoryview(dst.byte_array)
+        # Cast to native "B": MemoryObj.byte_array is a ctypes-backed memoryview
+        # with format "<B", which does not support slice assignment.
+        out = memoryview(dst.byte_array).cast("B")
         out[0:1] = bytes((_VERSION,))
         out[1:_HDR_LEN] = iv
         out[_HDR_LEN : _HDR_LEN + len(ciphertext)] = ciphertext
@@ -118,7 +120,7 @@ class AesGcmDeserializer(Deserializer):
             cryptography.exceptions.InvalidTag: If the ciphertext was tampered
                 with or the wrong key is used (surfaces as a load miss).
         """
-        out = memoryview(dst.byte_array)
+        out = memoryview(dst.byte_array).cast("B")
         plaintext_len = len(out)
         blob = bytes(src.byte_array)
         frame_end = _HDR_LEN + plaintext_len + _TAG_LEN

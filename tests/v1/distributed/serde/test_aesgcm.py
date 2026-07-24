@@ -7,7 +7,7 @@ the public interface.
 """
 
 # Standard
-from dataclasses import dataclass
+import ctypes
 import os
 import tempfile
 
@@ -34,15 +34,24 @@ _MASTER = b"unit-test-master-key-material-32b!!"
 _FRAME_OVERHEAD = 1 + 12 + 16
 
 
-@dataclass
 class _ByteBuf:
-    """Minimal MemoryObj stand-in exposing a mutable ``byte_array``."""
+    """Minimal MemoryObj stand-in exposing a mutable ``byte_array``.
 
-    buf: bytearray
+    Backed by a ctypes ``c_ubyte`` array so ``byte_array`` has the same ``"<B"``
+    memoryview format as the real ``MemoryObj``; a plain ``bytearray`` is format
+    ``"B"`` and would hide format-specific bugs (e.g. slice-assign failures).
+    """
+
+    def __init__(self, data: bytes) -> None:
+        self._arr = (ctypes.c_ubyte * len(data)).from_buffer_copy(bytes(data))
 
     @property
-    def byte_array(self) -> bytearray:
-        return self.buf
+    def byte_array(self) -> memoryview:
+        return memoryview(self._arr)
+
+    @property
+    def buf(self) -> bytes:
+        return bytes(self._arr)
 
 
 def _key(cache_salt: str = "alice") -> ObjectKey:
