@@ -5,7 +5,8 @@
 from lmcache.integration.vllm.experimental.dispatcher import (
     Dispatcher,
     FeatureContext,
+    dispatch,
     init_dispatcher,
 )
 
-__all__ = ["Dispatcher", "FeatureContext", "init_dispatcher"]
+__all__ = ["Dispatcher", "FeatureContext", "dispatch", "init_dispatcher"]
