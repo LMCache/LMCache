@@ -54,7 +54,9 @@ def _key(cache_salt: str = "alice") -> ObjectKey:
 def _serde(
     cache_salt_key_len: int = 16,
 ) -> tuple[AesGcmSerializer, AesGcmDeserializer]:
-    provider = HkdfKeyProvider(_MASTER, key_len=cache_salt_key_len)
+    provider = HkdfKeyProvider(
+        _MASTER, key_len=cache_salt_key_len, info_prefix=b"test-aesgcm"
+    )
     return AesGcmSerializer(provider), AesGcmDeserializer(provider)
 
 

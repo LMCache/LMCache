@@ -37,6 +37,9 @@ _FRAME_OVERHEAD = _HDR_LEN + _TAG_LEN
 
 _SUPPORTED_AES_BITS = (128, 256)
 
+# HKDF ``info`` domain-separation prefix for keys derived for this serde.
+_HKDF_INFO_PREFIX = b"lmcache-l2-aesgcm-v1"
+
 
 def _plaintext_bytes(layout_desc: MemoryLayoutDesc) -> int:
     """Return the total byte size of the KV data described by ``layout_desc``."""
@@ -156,7 +159,9 @@ def _create_aesgcm_serde(kwargs: dict[str, object]) -> SerdeProcessor:
             raise ValueError("aesgcm serde 'hkdf' requires 'master_key_path'")
         with open(master_key_path, "rb") as f:
             master_key = f.read()
-        provider: KeyProvider = HkdfKeyProvider(master_key, key_len=aes_bits // 8)
+        provider: KeyProvider = HkdfKeyProvider(
+            master_key, key_len=aes_bits // 8, info_prefix=_HKDF_INFO_PREFIX
+        )
     else:
         raise ValueError(
             f"unsupported key_provider {provider_name!r} (only 'hkdf' is implemented)"

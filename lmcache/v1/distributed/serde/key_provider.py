@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Key providers for the AES-GCM serde.
+"""Key providers mapping a ``cache_salt`` to AES key bytes.
 
-Maps a ``cache_salt`` (the tenant selector) to the AES key bytes the serde
-encrypts with. See ``docs/design/v1/distributed/serde/aesgcm.md`` for the key
-and trust models.
+A serde selects the key material for a tenant's ``cache_salt`` (the public
+tenant selector) through a ``KeyProvider``. See
+``docs/design/v1/distributed/serde/aesgcm.md`` for the key and trust models.
 """
 
 # Standard
@@ -13,8 +13,6 @@ import threading
 # Third Party
 from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-
-_HKDF_INFO_PREFIX = b"lmcache-l2-aesgcm-v1"
 
 
 class KeyProvider(abc.ABC):
@@ -36,13 +34,17 @@ class HkdfKeyProvider(KeyProvider):
     Args:
         master_key: Secret input key material (any length; keep >= key_len).
         key_len: Derived key length in bytes (16 for AES-128, 32 for AES-256).
+        info_prefix: HKDF ``info`` prefix for domain separation; ``cache_salt``
+            is appended to it. Callers with different schemes must pass distinct
+            prefixes so their derived keys never collide.
     """
 
-    def __init__(self, master_key: bytes, key_len: int) -> None:
+    def __init__(self, master_key: bytes, key_len: int, info_prefix: bytes) -> None:
         if not master_key:
             raise ValueError("master_key must be non-empty")
         self._master_key = master_key
         self._key_len = key_len
+        self._info_prefix = info_prefix
         self._cache: dict[str, bytes] = {}
         self._lock = threading.Lock()
 
@@ -58,7 +60,7 @@ class HkdfKeyProvider(KeyProvider):
                     algorithm=SHA256(),
                     length=self._key_len,
                     salt=None,
-                    info=_HKDF_INFO_PREFIX + cache_salt.encode("utf-8"),
+                    info=self._info_prefix + cache_salt.encode("utf-8"),
                 ).derive(self._master_key)
                 self._cache[cache_salt] = key
             return key
