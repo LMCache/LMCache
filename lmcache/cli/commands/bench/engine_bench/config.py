@@ -119,44 +119,65 @@ def _fetch_lmcache_status(lmcache_url: str) -> dict:
         ) from e
 
 
-def _find_model_meta(
+def _find_model_metas(
     gpu_meta: dict,
     model_name: str,
-) -> dict:
-    """Find the GPU metadata entry matching *model_name*.
+) -> list[dict]:
+    """Find all GPU metadata entries matching *model_name*.
+
+    Every rank of every model replica registers its own entry, so a
+    tensor-parallel model appears once per rank per replica.
 
     Args:
         gpu_meta: The ``cache_context_meta`` dict from ``/status``.
         model_name: Model name to match.
 
     Returns:
-        The matching GPU metadata dict.
+        All matching GPU metadata dicts.
 
     Raises:
         RuntimeError: If no entry matches *model_name*.
     """
-    for meta in gpu_meta.values():
-        if meta.get("model_name") == model_name:
-            return meta
+    metas = [m for m in gpu_meta.values() if m.get("model_name") == model_name]
+    if not metas:
+        available = sorted({m.get("model_name", "?") for m in gpu_meta.values()})
+        raise RuntimeError(
+            f"Model {model_name!r} not found on LMCache server. "
+            f"Available: {', '.join(available)}"
+        )
+    return metas
 
-    available = sorted({m.get("model_name", "?") for m in gpu_meta.values()})
-    raise RuntimeError(
-        f"Model {model_name!r} not found on LMCache server. "
-        f"Available: {', '.join(available)}"
-    )
+
+def _is_all_mla(layout: dict) -> bool:
+    """Whether every kernel group in *layout* uses MLA attention.
+
+    Layouts without kernel-group metadata (e.g. blend deployments)
+    are treated as non-MLA.
+
+    Args:
+        layout: A ``kv_cache_layout`` dict from ``/status``.
+
+    Returns:
+        True if the layout has kernel groups and all of them are MLA.
+    """
+    kernel_groups = layout.get("kernel_groups", [])
+    return bool(kernel_groups) and all(g.get("is_mla") for g in kernel_groups)
 
 
 def resolve_tokens_per_gb(lmcache_url: str, model_name: str) -> int:
     """Query the LMCache server and compute tokens per GB of KV cache.
 
-    Fetches ``/status``, finds the model entry matching
-    *model_name*, and computes::
+    Fetches ``/status``, collects all entries matching *model_name*
+    (one per registered rank, across all replicas), and computes::
 
-        global_bytes_per_token = cache_size_per_token * world_size
+        global_bytes_per_token = mean(rank_sizes) * multiplier
         tokens_per_gb = (1024**3) // global_bytes_per_token
 
-    ``cache_size_per_token`` is rank-local, so it must be multiplied
-    by ``world_size`` for tensor-parallel models.
+    ``multiplier`` is ``world_size`` for tensor-parallel models, since
+    each rank holds only its shard of the KV cache; it is 1 when every
+    kernel group is MLA, because TP ranks then share one identical KV
+    copy. Averaging over all entries keeps multiple replicas of the
+    same model from being counted more than once.
 
     Args:
         lmcache_url: URL of the LMCache HTTP server.
@@ -168,7 +189,8 @@ def resolve_tokens_per_gb(lmcache_url: str, model_name: str) -> int:
 
     Raises:
         RuntimeError: If the server is unreachable, the model is not
-            found, or the layout is missing required fields.
+            found, the layout is missing required fields, or entries
+            report inconsistent world sizes.
     """
     data = _fetch_lmcache_status(lmcache_url)
 
@@ -183,29 +205,44 @@ def resolve_tokens_per_gb(lmcache_url: str, model_name: str) -> int:
             "is the server running with a model loaded?"
         )
 
-    meta = _find_model_meta(gpu_meta, model_name)
-    layout = meta.get("kv_cache_layout")
-    if not layout:
-        raise RuntimeError(f"No kv_cache_layout for model {model_name!r}")
+    metas = _find_model_metas(gpu_meta, model_name)
 
-    cache_size_per_token = layout.get("cache_size_per_token")
-    if cache_size_per_token is None:
+    per_rank_sizes: list[int] = []
+    all_mla = True
+    for meta in metas:
+        layout = meta.get("kv_cache_layout")
+        if not layout:
+            raise RuntimeError(f"No kv_cache_layout for model {model_name!r}")
+
+        cache_size_per_token = layout.get("cache_size_per_token")
+        if cache_size_per_token is None:
+            raise RuntimeError(
+                f"cache_size_per_token not available for model "
+                f"{model_name!r}; is the LMCache server up to date?"
+            )
+        per_rank_sizes.append(cache_size_per_token)
+        all_mla = all_mla and _is_all_mla(layout)
+
+    world_sizes = {m.get("world_size", 1) for m in metas}
+    if len(world_sizes) > 1:
         raise RuntimeError(
-            f"cache_size_per_token not available for model "
-            f"{model_name!r}; is the LMCache server up to date?"
+            f"Inconsistent world_size values {sorted(world_sizes)} for model "
+            f"{model_name!r}; cannot compute a per-replica KV cache size."
         )
+    world_size = world_sizes.pop()
 
-    world_size = meta.get("world_size", 1)
-    global_bytes_per_token = cache_size_per_token * world_size
+    multiplier = 1 if all_mla else world_size
+    global_bytes_per_token = sum(per_rank_sizes) * multiplier // len(per_rank_sizes)
     tokens_per_gb = _GB // global_bytes_per_token
 
     logger.info(
-        "Resolved from LMCache: model=%s, "
-        "cache_size_per_token=%d bytes (rank-local), "
-        "world_size=%d -> %d bytes/token (global) -> %d tokens/GB",
+        "Resolved from LMCache: model=%s, rank_entries=%d, "
+        "world_size=%d, all_mla=%s "
+        "-> %d bytes/token (global) -> %d tokens/GB",
         model_name,
-        cache_size_per_token,
+        len(per_rank_sizes),
         world_size,
+        all_mla,
         global_bytes_per_token,
         tokens_per_gb,
     )
