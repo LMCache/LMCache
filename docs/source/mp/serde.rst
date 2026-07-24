@@ -152,9 +152,8 @@ compliance mandate requires it.
    so this protects against readers of the remote storage, not against a party
    with access to a running server process. It also does not hide object
    *metadata*: the ``cache_salt`` and a content-derived ``chunk_hash`` remain
-   visible in L2 object names. See
-   :doc:`the design doc </design/v1/distributed/serde/aesgcm>` for the full
-   threat model.
+   visible in L2 object names. See the design doc at
+   ``docs/design/v1/distributed/serde/aesgcm.md`` for the full threat model.
 
 .. warning::
 
