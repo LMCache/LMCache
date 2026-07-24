@@ -99,7 +99,7 @@ def _make_worker_adapter(
     network boundary must already be patched (see ``fake_adapter``).
     ``extra_config`` forwards ``lmcache.mp.*`` overrides."""
     parallel_strategy = ParallelStrategy(
-        use_mla=False,
+        mla_only=False,
         vllm_world_size=1,
         vllm_worker_id=0,
         tp_size=1,
@@ -656,7 +656,7 @@ def test_register_uses_local_context_when_self_transfer_ctx_nulled(
     )
 
     parallel_strategy = ParallelStrategy(
-        use_mla=False,
+        mla_only=False,
         vllm_world_size=1,
         vllm_worker_id=0,
         tp_size=1,

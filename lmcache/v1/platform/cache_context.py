@@ -10,11 +10,11 @@ The concrete implementations live in their respective sub-packages:
 
 :func:`create_cache_context` keeps the dispatch out of the call site
 in :mod:`lmcache.v1.multiprocess.server`. Selection is data-driven
-and delegated to the :class:`~lmcache.v1.platform.base_device_spec.
+and delegated to the :class:`~lmcache.v1.platform.base.device_spec.
 DeviceSpec` registry maintained by :mod:`lmcache.v1.platform`: each
 backend sub-package ships a ``DeviceSpec`` subclass whose
 ``create_cache_context`` hook lazy-imports and instantiates the
-matching :class:`~lmcache.v1.platform.base_cache_context.
+matching :class:`~lmcache.v1.platform.base.cache_context.
 BaseCacheContext`. Adding a new accelerator therefore requires
 *zero* edits to this module -- just implement
 ``DeviceSpec.create_cache_context`` in the sub-package's
@@ -34,7 +34,7 @@ from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import KVCache
 from lmcache.v1.platform import get_device_spec
-from lmcache.v1.platform.base_cache_context import BaseCacheContext
+from lmcache.v1.platform.base.cache_context import BaseCacheContext
 
 if TYPE_CHECKING:
     # First Party
