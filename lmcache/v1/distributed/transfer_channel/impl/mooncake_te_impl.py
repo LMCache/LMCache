@@ -165,7 +165,7 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
                 raise KeyError(f"Unknown read task id: {task_id}")
             batch_id, remote_addresses = self._tasks[task_id]
 
-        status = self._ctx._mooncake_te_engine.transfer_check_status(batch_id)
+        status = self._ctx.mooncake_te_engine.transfer_check_status(batch_id)
         if status == 0:
             return TransferChannelReadResult(finished=False, succeeded_mask=[])
 
