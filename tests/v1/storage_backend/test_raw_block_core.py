@@ -84,6 +84,20 @@ class _RecordingRawDevice:
         target[:total_len] = self.read_data[self.read_cursor : end]
         self.read_cursor = end
 
+    def batched_read(
+        self,
+        offsets: list[int],
+        buffers: list[memoryview],
+        lengths: list[int],
+    ) -> int:
+        del offsets
+        for buf, length in zip(buffers, lengths, strict=True):
+            self.read_buffers.append(buf)
+            end = self.read_cursor + length
+            buf[:length] = self.read_data[self.read_cursor : end]
+            self.read_cursor = end
+        return 17
+
 
 def _buffer_address(buf: memoryview) -> int:
     return ctypes.addressof((ctypes.c_byte * 1).from_buffer(buf))

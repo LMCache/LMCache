@@ -1422,6 +1422,15 @@ class RawBlockCore:
     ) -> None:
         """Read buffers as bounded NVMe raw-command chunks.
 
+        Each object is split into ``max_data_transfer_size`` chunks; all of an
+        object's (and all objects') chunk reads are submitted together through
+        ``batched_read()`` + a single ``wait_iouring()``. The chunks are
+        independent reads into non-overlapping destination ranges, so letting
+        the ring pipeline them keeps the device queue busy. The previous
+        implementation issued one chunk per ``read_uring()`` call and blocked
+        on its completion before the next, pinning the device at QD~1 (~1.3 GB/s
+        vs ~5 GB/s single-threaded on a Gen5 drive).
+
         Args:
             offsets: Device offsets for each logical read.
             buffers: Destination buffers.
@@ -1433,7 +1442,12 @@ class RawBlockCore:
             Exception: Propagates Rust raw-device read errors.
         """
         raw_dev = self._rawdev()
-        read_uring = raw_dev.read_uring
+
+        chunk_offsets: list[int] = []
+        chunk_buffers: list[Any] = []
+        chunk_lens: list[int] = []
+        keepalive: list[Any] = []  # hold bounce targets alive until wait returns
+        copybacks: list[tuple[Any, memoryview, int]] = []
 
         for offset, buf, payload_len, total_len in zip(
             offsets, buffers, payload_lens, total_lens, strict=True
@@ -1448,25 +1462,28 @@ class RawBlockCore:
                 if len(dst) < payload_len:
                     raise ValueError("output buffer shorter than payload_len")
                 target = self._allocate_aligned_buffer(total_len)
-                copy_back = True
+                keepalive.append(target)
+                copybacks.append((dst, target, payload_len))
             else:
                 target = dst[:total_len]
-                copy_back = False
 
             cursor = 0
             while cursor < total_len:
                 chunk_len = min(self.max_data_transfer_size, total_len - cursor)
                 self._validate_uring_cmd_chunk(offset + cursor, chunk_len)
-                read_uring(
-                    offset + cursor,
-                    target[cursor : cursor + chunk_len],
-                    chunk_len,
-                    chunk_len,
-                )
+                chunk_offsets.append(offset + cursor)
+                chunk_buffers.append(target[cursor : cursor + chunk_len])
+                chunk_lens.append(chunk_len)
                 cursor += chunk_len
 
-            if copy_back:
-                dst[:payload_len] = target[:payload_len]
+        if not chunk_offsets:
+            return
+
+        batch_id = raw_dev.batched_read(chunk_offsets, chunk_buffers, chunk_lens)
+        raw_dev.wait_iouring(batch_id)
+
+        for dst, target, payload_len in copybacks:
+            dst[:payload_len] = target[:payload_len]
 
     def _write_buffers(
         self,
