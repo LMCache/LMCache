@@ -17,6 +17,7 @@ from lmcache.v1.multiprocess.config import (
 )
 from lmcache.v1.multiprocess.http_server import run_http_server
 from lmcache.v1.multiprocess.modules import p2p_controller
+import lmcache.v1.distributed.transfer_channel as transfer_channel
 
 
 def _parse(argv: list[str]) -> P2PConfig:
@@ -115,7 +116,7 @@ def test_non_verbs_engine_ignores_verbs_specific_options():
     assert config.rdma_queue_depth == 0
 
 
-def test_controller_forwards_verbs_options_only(monkeypatch):
+def test_controller_passes_verbs_p2p_config(monkeypatch):
     initialize = MagicMock()
     periodic = MagicMock()
     monkeypatch.setattr(
@@ -130,7 +131,7 @@ def test_controller_forwards_verbs_options_only(monkeypatch):
         MagicMock(return_value=periodic),
     )
     controller = object.__new__(p2p_controller.P2PController)
-    controller._p2p_config = P2PConfig(
+    config = P2PConfig(
         advertise_url="10.0.0.1:7600",
         transfer_engine="verbs",
         rdma_device="mlx5_0,mlx5_1",
@@ -139,26 +140,20 @@ def test_controller_forwards_verbs_options_only(monkeypatch):
         rdma_queue_depth=2048,
         rdma_handshake_timeout_ms=5000,
     )
+    controller._p2p_config = config
     controller._ctx = MagicMock()
 
     controller._start_orchestration(CoordinatorConfig(url="http://coordinator:9300"))
 
     initialize.assert_called_once_with(
-        "verbs",
+        config,
         controller._ctx.storage_manager.l1_memory_desc,
-        listen_url="10.0.0.1:7600",
-        advertise_url="10.0.0.1:7600",
-        device_name="mlx5_0,mlx5_1",
-        port_num=2,
-        gid_index=-1,
-        gid_indices="3,5",
-        queue_depth=2048,
-        handshake_timeout_ms=5000,
     )
+    assert initialize.call_args.args[0] is config
     periodic.start.assert_called_once_with()
 
 
-def test_controller_keeps_nixl_call_shape(monkeypatch):
+def test_controller_passes_nixl_p2p_config(monkeypatch):
     initialize = MagicMock()
     periodic = MagicMock()
     monkeypatch.setattr(
@@ -173,21 +168,86 @@ def test_controller_keeps_nixl_call_shape(monkeypatch):
         MagicMock(return_value=periodic),
     )
     controller = object.__new__(p2p_controller.P2PController)
-    controller._p2p_config = P2PConfig(
+    config = P2PConfig(
         advertise_url="10.0.0.1:7600",
         transfer_engine="nixl",
         rdma_queue_depth=0,
     )
+    controller._p2p_config = config
     controller._ctx = MagicMock()
 
     controller._start_orchestration(CoordinatorConfig(url="http://coordinator:9300"))
 
     initialize.assert_called_once_with(
-        "nixl",
+        config,
         controller._ctx.storage_manager.l1_memory_desc,
-        listen_url="10.0.0.1:7600",
-        advertise_url="10.0.0.1:7600",
     )
+    assert initialize.call_args.args[0] is config
+
+
+def test_transfer_channel_initializer_unpacks_verbs_config(monkeypatch):
+    context = MagicMock()
+    create = MagicMock(return_value=context)
+    monkeypatch.setattr(transfer_channel, "create_transfer_channel_context", create)
+    config = P2PConfig(
+        listen_url="0.0.0.0:7600",
+        advertise_url="10.0.0.1:7600",
+        transfer_engine="verbs",
+        rdma_device="mlx5_0,mlx5_1",
+        rdma_port=2,
+        rdma_gid_indices="3,5",
+        rdma_queue_depth=2048,
+        rdma_handshake_timeout_ms=5000,
+    )
+    l1_memory_desc = MagicMock()
+
+    try:
+        result = transfer_channel.initialize_transfer_channel_context(
+            config, l1_memory_desc
+        )
+
+        assert result is context
+        create.assert_called_once_with(
+            transfer_channel_type="verbs",
+            l1_memory_desc=l1_memory_desc,
+            listen_url="0.0.0.0:7600",
+            advertise_url="10.0.0.1:7600",
+            device_name="mlx5_0,mlx5_1",
+            port_num=2,
+            gid_index=-1,
+            gid_indices="3,5",
+            queue_depth=2048,
+            handshake_timeout_ms=5000,
+        )
+    finally:
+        transfer_channel.delete_transfer_channel_context()
+
+
+def test_transfer_channel_initializer_keeps_verbs_options_out_of_nixl(monkeypatch):
+    context = MagicMock()
+    create = MagicMock(return_value=context)
+    monkeypatch.setattr(transfer_channel, "create_transfer_channel_context", create)
+    config = P2PConfig(
+        advertise_url="10.0.0.1:7600",
+        transfer_engine="nixl",
+        rdma_queue_depth=0,
+    )
+    l1_memory_desc = MagicMock()
+
+    try:
+        result = transfer_channel.initialize_transfer_channel_context(
+            config, l1_memory_desc
+        )
+
+        assert result is context
+        create.assert_called_once_with(
+            transfer_channel_type="nixl",
+            l1_memory_desc=l1_memory_desc,
+            listen_url="10.0.0.1:7600",
+            advertise_url="10.0.0.1:7600",
+        )
+    finally:
+        transfer_channel.delete_transfer_channel_context()
 
 
 def test_http_server_rejects_lazy_l1_for_native_verbs():
