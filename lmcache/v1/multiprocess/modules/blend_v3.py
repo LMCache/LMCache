@@ -2304,8 +2304,8 @@ class BlendV3Module(InstanceLivenessTarget):
 
         # Record scattered ranges for the repeat-call guard (bounded LRU).
         if applied_now:
-            entry = applied_ranges.setdefault(key.request_id, set())
-            entry.update(applied_now)
+            applied_entry = applied_ranges.setdefault(key.request_id, set())
+            applied_entry.update(applied_now)
             applied_ranges.move_to_end(key.request_id)
             while len(applied_ranges) > 4096:
                 applied_ranges.popitem(last=False)
