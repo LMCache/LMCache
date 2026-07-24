@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#include "cb_kernels.cuh"
+#include "blend_kernels.cuh"
 #include "mem_kernels.cuh"
 #include "pos_kernels.cuh"
 

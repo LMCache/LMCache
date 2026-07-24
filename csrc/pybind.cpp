@@ -5,7 +5,7 @@
 #include <pybind11/stl.h>
 #include "mem_kernels.cuh"
 #include "mp_mem_kernels.cuh"
-#include "cb_kernels.cuh"
+#include "blend_kernels.cuh"
 #include "cachegen_kernels.cuh"
 #include "pos_kernels.cuh"
 #include "mem_alloc.h"
@@ -164,7 +164,7 @@ PYBIND11_MODULE(c_ops, m) {
         py::arg("direction"), py::arg("device"),
         py::arg("host_buffer_alignment"), py::arg("kernel_group_specs"),
         py::arg("batch_steps"), py::call_guard<py::gil_scoped_release>());
-  // CB retrieve plan spec (see cb_kernels.cuh). Built on the Python side
+  // CB retrieve plan spec (see blend_kernels.cuh). Built on the Python side
   // (blend_v3.cb_retrieve_pre_computed) and consumed by
   // execute_cb_retrieve_plan_flat.
   py::class_<CBGroupSpec>(m, "CBGroupSpec")
