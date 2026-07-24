@@ -50,8 +50,9 @@ def start_usage_flush_thread(name: str, flush: Callable[[], None]) -> PeriodicTh
     Args:
         name: Thread name, also the registry key.
         flush: Called on the flush thread every
-            ``LMCACHE_USAGE_TRACK_INTERVAL`` seconds. Must not raise;
-            an exception ends the thread.
+            ``LMCACHE_USAGE_TRACK_INTERVAL`` seconds. Any exception is
+            caught by ``PeriodicThread`` and logged; the thread keeps
+            running.
 
     Returns:
         The started thread; stop it via ``stop()`` on shutdown.
