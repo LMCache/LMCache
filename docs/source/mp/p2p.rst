@@ -53,7 +53,10 @@ Requirements
   start.
 * **An RDMA-capable network** (InfiniBand / RoCE) is strongly recommended for
   production performance. By default P2P uses the ``nixl`` transfer engine,
-  which is shipped with LMCache. On Ubuntu, the optional native ``verbs``
+  which is shipped with LMCache. 
+  which ships as the optional ``lmcache[nixl]`` extra — install it with
+  ``uv pip install lmcache[nixl]`` (or ``pip install lmcache[nixl]``) before
+  enabling P2P and the optional native ``verbs``
   engine requires ``libibverbs-dev`` when LMCache is built and
   ``libibverbs1`` at runtime.
 * **A single, contiguous L1 region.** The transfer channel registers the whole
@@ -134,7 +137,8 @@ selected per server with ``--p2p-transfer-engine``.
    * - Engine
      - Description
    * - ``nixl`` (default)
-     - RDMA-based transport, shipped with LMCache. Runs over InfiniBand / RoCE
+     - RDMA-based transport, shipped as the optional ``lmcache[nixl]`` extra
+       (``uv pip install lmcache[nixl]``). Runs over InfiniBand / RoCE
        fabrics.
    * - ``verbs`` (optional)
      - LMCache-owned host-DRAM transport using one-sided libibverbs RC reads.

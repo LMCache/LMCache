@@ -2,7 +2,8 @@
 
 A coordinator-level capability that lets a CacheBlend lookup on one mp-server
 find and reuse chunk KV cached anywhere in the fleet, fetched from a shared,
-content-addressed L2. Blend servers **publish fingerprints on STORE** and
+content-addressed L2 or directly from a peer's L1 over the P2P transfer
+channel (RDMA). Blend servers **publish fingerprints on STORE** and
 **query on LOOKUP**; the coordinator holds the fleet-wide directory and runs the
 match. It is **opt-in** (enabled only when a coordinator URL is configured) and
 **additive** (the existing local matcher fast path is unchanged).
@@ -46,7 +47,7 @@ LOOKUP (blend server, cb_unified_lookup)
                                    roll hash over tokens, probe every probe_stride
         ◀── matches: [(object_key, old_st, cur_st)] ──
   → non-prefix set (drop prefix-covered, leftmost-greedy overlap dedup)
-  → one sparse prefetch from shared L2 → retrieve + re-RoPE
+  → one sparse prefetch (shared L2 and/or peer L1 via P2P) → retrieve + re-RoPE
 ```
 
 The coordinator owns `chunk_size` (fleet config, must equal the servers'
@@ -166,8 +167,9 @@ a synchronous `httpx.Client` plus a daemon, mirroring the module's existing
     `np.frombuffer` straight to the matcher's array. Register still ships raw
     tokens as JSON (lower frequency).
 
-Opt-in via `LMCACHE_COORDINATOR_URL`; absent → the module receives `None` and
-every publish/query path is skipped (behavior unchanged).
+Opt-in via the coordinator URL (`--coordinator-url`, falling back to
+`LMCACHE_COORDINATOR_URL` at config parsing); unset → the module receives
+`None` and every publish/query path is skipped (behavior unchanged).
 
 ## Lookup flow in `cb_unified_lookup`
 
@@ -193,6 +195,17 @@ With a coordinator:
 Without a coordinator, step 1 instead runs the local matcher and steps 3–4 use
 its matches (already non-overlapping, so the dedup is a no-op).
 
+### Fetch sources: shared L2 and peer L1
+
+The sparse prefetch fans out to **every** registered L2 adapter — P2P peer
+adapters included — so a matched chunk loads from whichever tier holds it:
+shared L2, or a peer's L1 via RDMA. The peer's `p2p_lookup_and_lock` locks
+sparse key sets (gaps allowed), not only the contiguous prefix, and the
+serving side never recurses into its own L2 (`skip_l2` holds for sparse
+lookups too). Fingerprints are published on every blend store regardless of
+L2 offload, so chunks resident only in a storer's L1 are matchable
+fleet-wide.
+
 Fleet matches are `CBMatchResult` (each `hash` is the chunk content hash — the
 coordinator's `object_key` hex — which `ipc_key_to_object_keys` expands to
 per-rank shared-L2 keys), so they ride the **identical** sparse prefetch +
@@ -214,6 +227,7 @@ publish is optional and not required for correctness.)
 | coordinator down | no global leg | HTTP times out → empty result → local-only |
 | poly-hash collision | wasted prefetch | confirmed-miss → recompute |
 | stale entry (evicted) | wasted prefetch | miss → recompute; lazy remove |
+| chunk evicted from peer L1, no L2 copy | wasted prefetch | miss → recompute |
 | cross-salt match, no same-salt copy | wasted prefetch | requester-salt ObjectKey misses → recompute |
 | publish dropped | a chunk unindexed globally | recomputed on a peer until re-published |
 
