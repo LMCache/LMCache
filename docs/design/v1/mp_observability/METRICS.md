@@ -467,6 +467,39 @@ prefetch reservations are crowding out cacheable data.
 
 ---
 
+## L2 Adapter Pending-Entry Gauge
+
+Leak watchdog for `NativeConnectorL2Adapter`.  The adapter tracks every
+native submission in three dicts (`_pending_ops`, `_pending_store_tasks`,
+`_pending_store_sizes`) that are popped when the native connector delivers
+a completion.  If a completion never arrives, or the adapter's demux
+thread dies, those entries stay forever, along with the L1 read locks
+held by the in-flight store.  This gauge makes that state visible.
+
+| OTel metric name | Prometheus name | Type | Source of truth | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.l2_adapter_pending_entries` | `lmcache_mp_l2_adapter_pending_entries` | ObservableGauge (attrs: `l2_name`, `map`) | `NativeConnectorL2Adapter.collect_pending_entries_observations()` | `len()` of each pending dict per live adapter at scrape time |
+
+Attributes:
+
+- `l2_name`: the adapter's registered type name (e.g. `"resp"`,
+  `"mooncake_store"`).  Counts from adapters that share a type name are
+  summed into one series.
+- `map`: the dict the count belongs to (`pending_ops`,
+  `pending_store_tasks`, or `pending_store_sizes`).
+
+Zero counts are reported (unlike the in-flight gauges above), so a
+backlog draining back to zero is observable.  Adapters removed by
+`close()` stop reporting.
+
+**What it answers:** Did every native store/lookup/load submission get its
+completion back? Under load the values move with traffic; a series that
+grows and never returns to zero after traffic stops means a native
+future was lost (worker died, connection never came up) and the paired
+entries plus their L1 read locks leaked.
+
+---
+
 ## Cache Blending (CB) Metrics
 
 Metrics for Cache Blending operations use the `lmcache_blend.` prefix (distinct from the

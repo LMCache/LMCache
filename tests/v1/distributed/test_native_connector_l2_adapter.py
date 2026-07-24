@@ -23,6 +23,7 @@ from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
 )
 from lmcache.v1.memory_management import (
     MemoryFormat,
+    MemoryObj,
     MemoryObjMetadata,
     TensorMemoryObj,
 )
@@ -1438,3 +1439,119 @@ class TestUsageTracking:
         usage = adp.get_usage()
         assert usage.usage_fraction == pytest.approx(0.2)
         assert usage.total_bytes_used == 400
+
+
+# =============================================================================
+# Pending-Entries Gauge Tests
+# =============================================================================
+
+
+class StalledStoreConnector(MockNativeConnector):
+    """Mock whose store submissions stay pending until ``release()``.
+
+    Lets tests observe non-zero pending-map counts deterministically:
+    the base mock pushes its completion inside ``submit_batch_set``, so
+    the demux thread drains it before the test can look.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._held_fids: list[int] = []
+
+    def submit_batch_set(self, keys: list[str], memoryviews: list) -> int:
+        with self._lock:
+            fid = self._next_id
+            self._next_id += 1
+            self._held_fids.append(fid)
+        return fid
+
+    def release(self) -> None:
+        """Push a success completion for every held store submission."""
+        with self._lock:
+            held = list(self._held_fids)
+            self._held_fids.clear()
+        for fid in held:
+            self._push_completion(fid, True, "", None)
+
+
+class TestPendingEntriesGauge:
+    def test_counts_rise_and_drain_to_zero(self):
+        client = StalledStoreConnector()
+        adp = NativeConnectorL2Adapter(client, type_name="stalled")
+        try:
+            keys = [create_object_key(i) for i in range(2)]
+            objs: list[MemoryObj] = [create_memory_obj(size=64) for _ in range(2)]
+            adp.submit_store_task(keys, objs)
+
+            # One uniform-size sub-batch in flight: one entry per map.
+            assert adp.get_pending_entry_counts() == {
+                "pending_ops": 1,
+                "pending_store_tasks": 1,
+                "pending_store_sizes": 1,
+            }
+
+            client.release()
+            assert wait_for_event_fd(adp.get_store_event_fd(), timeout=5.0)
+
+            # Zero counts are still reported so a drain is observable.
+            assert adp.get_pending_entry_counts() == {
+                "pending_ops": 0,
+                "pending_store_tasks": 0,
+                "pending_store_sizes": 0,
+            }
+        finally:
+            adp.close()
+
+    def test_mixed_sizes_count_one_entry_per_sub_batch(self):
+        client = StalledStoreConnector()
+        adp = NativeConnectorL2Adapter(client, type_name="stalled")
+        try:
+            keys = [create_object_key(i) for i in range(3)]
+            objs: list[MemoryObj] = [
+                create_memory_obj(size=64),
+                create_memory_obj(size=64),
+                create_memory_obj(size=16),
+            ]
+            adp.submit_store_task(keys, objs)
+
+            # Two buffer sizes -> two native sub-batches under one task.
+            assert adp.get_pending_entry_counts() == {
+                "pending_ops": 2,
+                "pending_store_tasks": 1,
+                "pending_store_sizes": 2,
+            }
+        finally:
+            adp.close()
+
+    def test_aggregation_sums_same_type_and_skips_closed(self):
+        client_a = StalledStoreConnector()
+        client_b = StalledStoreConnector()
+        adp_a = NativeConnectorL2Adapter(client_a, type_name="stalled")
+        adp_b = NativeConnectorL2Adapter(client_b, type_name="stalled")
+        b_closed = False
+
+        def stalled_totals() -> dict[str, int | float]:
+            return {
+                str(attrs["map"]): count
+                for count, attrs in (
+                    NativeConnectorL2Adapter.collect_pending_entries_observations()
+                )
+                if attrs["l2_name"] == "stalled"
+            }
+
+        try:
+            for adp in (adp_a, adp_b):
+                adp.submit_store_task(
+                    [create_object_key(1)], [create_memory_obj(size=64)]
+                )
+
+            assert stalled_totals()["pending_ops"] == 2
+            assert stalled_totals()["pending_store_tasks"] == 2
+
+            adp_b.close()
+            b_closed = True
+            assert stalled_totals()["pending_ops"] == 1
+        finally:
+            adp_a.close()
+            if not b_closed:
+                adp_b.close()

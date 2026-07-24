@@ -191,7 +191,9 @@ def _create_native_plugin_l2_adapter(
         config.adapter_params,
     )
     return NativeConnectorL2Adapter(
-        native_client, max_capacity_gb=config.max_capacity_gb
+        native_client,
+        max_capacity_gb=config.max_capacity_gb,
+        type_name="native_plugin",
     )
 
 

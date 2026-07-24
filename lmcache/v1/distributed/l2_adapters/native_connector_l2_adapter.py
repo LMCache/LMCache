@@ -26,6 +26,7 @@ from typing import Any
 import dataclasses
 import select
 import threading
+import weakref
 
 # First Party
 from lmcache.logging import init_logger
@@ -37,6 +38,7 @@ from lmcache.v1.distributed.l2_adapters.base import (
     L2TaskId,
 )
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
@@ -113,6 +115,17 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     _OP_LOAD = "load"
     _OP_DELETE = "delete"
 
+    # Process-wide gauge dispatch: the OTel SDK only honors the first registration
+    # of a gauge name, so ``lmcache_mp.l2_adapter_pending_entries`` is registered
+    # once and its callback aggregates over every live adapter tracked here.
+    # ``close()`` is the removal path (the demux thread keeps its adapter alive
+    # until then); the weak references are a backstop for adapters whose thread
+    # already exited without a ``close()`` call.  ``_gauge_lock`` guards the set
+    # and the register-once flag against the OTel scrape thread.
+    _gauge_registered: bool = False
+    _gauge_instances: "weakref.WeakSet[NativeConnectorL2Adapter]" = weakref.WeakSet()
+    _gauge_lock: threading.Lock = threading.Lock()
+
     def __init__(
         self,
         native_client: Any,
@@ -174,6 +187,24 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
         # Lock for all shared state above
         self._lock = threading.Lock()
+
+        # Leak gauge: track this instance and register the process-wide
+        # gauge on first construction.
+        with NativeConnectorL2Adapter._gauge_lock:
+            NativeConnectorL2Adapter._gauge_instances.add(self)
+            if not NativeConnectorL2Adapter._gauge_registered:
+                NativeConnectorL2Adapter._gauge_registered = True
+                register_gauge(
+                    "lmcache.l2_adapter",
+                    "lmcache_mp.l2_adapter_pending_entries",
+                    (
+                        "Entries in each pending-state dict of live native L2 "
+                        "adapters, tagged by ``l2_name`` and ``map``. A series "
+                        "that keeps growing without returning to zero points "
+                        "at a native completion that never arrived."
+                    ),
+                    NativeConnectorL2Adapter.collect_pending_entries_observations,
+                )
 
         # Background demux thread
         self._stop = threading.Event()
@@ -402,6 +433,59 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     # Status Interface
     # ---------------------------------------------------------------
 
+    def get_pending_entry_counts(self) -> dict[str, int]:
+        """Entry counts of the pending-state dicts, keyed by dict name.
+
+        Feeds ``collect_pending_entries_observations`` (the
+        ``lmcache_mp.l2_adapter_pending_entries`` gauge callback).  Zero
+        counts are included so a backlog draining back to zero stays
+        observable.
+
+        ``len()`` on a dict is atomic under the CPython GIL, so reading
+        from the OTel scrape thread without ``_lock`` is safe; the
+        snapshot may be one mutation stale, which is fine at scrape
+        cadence.
+
+        Returns:
+            ``{"pending_ops": <n>, "pending_store_tasks": <n>,
+            "pending_store_sizes": <n>}``.
+        """
+        return {
+            "pending_ops": len(self._pending_ops),
+            "pending_store_tasks": len(self._pending_store_tasks),
+            "pending_store_sizes": len(self._pending_store_sizes),
+        }
+
+    @classmethod
+    def collect_pending_entries_observations(
+        cls,
+    ) -> list[tuple[int | float, dict[str, object]]]:
+        """Aggregate pending-entry counts across live adapters.
+
+        Callback for the ``lmcache_mp.l2_adapter_pending_entries`` gauge.
+        Counts that share the same ``(l2_name, map)`` attribute pair are
+        summed, so two adapters registered under the same type name
+        report one combined series.  Adapters removed by ``close()``
+        report nothing.
+
+        Returns:
+            A list of ``(count, attrs)`` tuples where ``attrs`` is
+            ``{"l2_name": <adapter type name>, "map": <dict name>}``,
+            one per distinct pair over all live adapters.
+        """
+        with cls._gauge_lock:
+            adapters = list(cls._gauge_instances)
+        totals: dict[tuple[str, str], int] = {}
+        for adapter in adapters:
+            for map_name, count in adapter.get_pending_entry_counts().items():
+                pair = (adapter._type_name, map_name)
+                totals[pair] = totals.get(pair, 0) + count
+        observations: list[tuple[int | float, dict[str, object]]] = [
+            (count, {"l2_name": l2_name, "map": map_name})
+            for (l2_name, map_name), count in totals.items()
+        ]
+        return observations
+
     def report_status(self) -> dict[str, Any]:
         """Return a status dict for this native-connector L2 adapter.
 
@@ -426,6 +510,8 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     # ---------------------------------------------------------------
 
     def close(self) -> None:
+        with NativeConnectorL2Adapter._gauge_lock:
+            NativeConnectorL2Adapter._gauge_instances.discard(self)
         self._stop.set()
         self._demux_thread.join(timeout=5)
 
