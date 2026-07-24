@@ -62,9 +62,16 @@ Logs and the generated master key live under
 
 ## What to check
 
-- **Round-trip works.** Step 5 returns the same completion as step 3 and the
-  server log shows an L2 hit — proving encrypt-on-store + decrypt-on-load work
-  on the real MP path.
+- **Round-trip works.** Step 5's server log shows the prompt served from L2
+  (e.g. `Prefetch request completed (L1+L2): 4/4 retained keys (0 L1, 4 L2)`)
+  with **no `InvalidTag`**, and the completion shares step 3's cached prefix —
+  proving encrypt-on-store + decrypt-on-load work on the real MP path. The L2
+  hit plus a clean decrypt is the real proof: AES-GCM is authenticated, so a
+  byte-inexact decrypt cannot pass the tag check. (The two completions may
+  diverge in their freshly generated tail — with async scheduling and
+  floating-point non-associativity, a cached-KV forward pass vs. a full
+  recompute can flip a token under greedy decoding. That is normal vLLM
+  KV-reuse behavior, independent of the serde.)
 - **Data is encrypted at rest.** The files under the disk path begin with the
   `0x01` frame version byte followed by a 12-byte IV, not raw KV (step 3 prints
   the first byte).
