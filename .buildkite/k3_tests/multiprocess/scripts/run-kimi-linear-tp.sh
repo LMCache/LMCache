@@ -59,7 +59,7 @@ GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
 # Readiness timeout per vLLM launch. This is owned by the test (a 48B TP-shard
 # load is slow) and deliberately does NOT reuse MAX_WAIT_SECONDS, which
 # run-single-test.sh pre-exports to 300s -- that would shadow the value here.
-VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-450}"
+VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-900}"
 # Seconds to wait for vLLM's GPU memory to be released after a restart before
 # relaunching (avoids an OOM racing the dying process).
 GPU_RELEASE_TIMEOUT="${GPU_RELEASE_TIMEOUT:-180}"
