@@ -497,17 +497,28 @@ class TestMPContinuous:
             chunk_size=256, sender=sender, max_buffered_samples=2
         )
         bus.register_subscriber(reporter)
-        # 2 store events fill the 2-sample stored-tokens buffer and wake
-        # the flush thread well before the 600 s interval.
+        # The second round of traffic fills a 2-sample buffer and
+        # triggers an early flush well before the 600 s interval.
         publish_mp_traffic(bus)
         publish_mp_traffic(bus)
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline and not sender.sent:
             time.sleep(0.01)
         assert sender.sent, "overflow did not trigger an early flush"
-        payload = sender.sent[0][1]
-        assert payload["interval_num_stored_tokens"] == 2 * 2 * 256
+        # The early flush can race the drain thread and split the samples
+        # across messages; stop() flushes the rest, so assert the totals
+        # across all sent messages.
         bus.stop()
+        assert (
+            sum(
+                int(payload["interval_num_stored_tokens"]) for _, payload in sender.sent
+            )
+            == 2 * 2 * 256
+        )
+        assert (
+            sum(int(payload["interval_num_hit_tokens"]) for _, payload in sender.sent)
+            == 2 * 4 * 256
+        )
 
 
 def publish_l2_traffic(bus: EventBus) -> None:

@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Flush-thread scaffolding shared by the interval usage reporters."""
+"""Flush-thread scaffolding shared by the interval usage reporters.
+
+The flush threads are :mod:`lmcache.v1.periodic_thread` threads,
+registered in the global ``PeriodicThreadRegistry``.
+"""
 
 # Future
 from __future__ import annotations
@@ -7,63 +11,62 @@ from __future__ import annotations
 # Standard
 from typing import Callable
 import os
-import threading
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.periodic_thread import (
+    PeriodicThread,
+    ThreadLevel,
+    ThreadRunSummary,
+    create_periodic_thread,
+)
 
 logger = init_logger(__name__)
 
 
-class UsageFlushThread:
-    """Daemon thread that runs a flush callback once per report interval.
+def usage_flush_interval_seconds() -> float:
+    """Seconds between telemetry flushes, from ``LMCACHE_USAGE_TRACK_INTERVAL``.
 
-    Calls *flush* every ``LMCACHE_USAGE_TRACK_INTERVAL`` seconds
-    (default 600, clamped to >= 1 s; a malformed value falls back to
-    the default instead of disabling telemetry). The thread starts
-    immediately on construction.
+    Returns:
+        The configured interval in seconds (default 600), clamped to
+        >= 1; a malformed value falls back to the default.
     """
+    try:
+        flush_interval = float(os.getenv("LMCACHE_USAGE_TRACK_INTERVAL", "600"))
+    except ValueError:
+        logger.debug("Invalid LMCACHE_USAGE_TRACK_INTERVAL", exc_info=True)
+        flush_interval = 600.0
+    return max(flush_interval, 1.0)
 
-    def __init__(self, flush: Callable[[], None]) -> None:
-        """Start the flush thread.
 
-        Args:
-            flush: Called on the flush thread once per interval. Must
-                not raise — an exception ends the thread (the reporters'
-                flush methods are guarded and never raise).
-        """
-        self._flush = flush
-        # Clamp to >= 1 s: Event.wait(0) would turn the flush loop into
-        # a busy spin.
-        try:
-            flush_interval = float(os.getenv("LMCACHE_USAGE_TRACK_INTERVAL", "600"))
-        except ValueError:
-            logger.debug("Invalid LMCACHE_USAGE_TRACK_INTERVAL", exc_info=True)
-            flush_interval = 600.0
-        self._flush_interval: float = max(flush_interval, 1.0)
-        self._stop_event = threading.Event()
-        self._wake = threading.Event()
-        self._thread = threading.Thread(
-            target=self._run, daemon=True, name="lmcache-usage-report"
-        )
-        self._thread.start()
+def start_usage_flush_thread(name: str, flush: Callable[[], None]) -> PeriodicThread:
+    """Start a ``LOW``-level :class:`PeriodicThread` that runs *flush*.
 
-    def wake(self) -> None:
-        """Trigger one flush now instead of at the next interval tick."""
-        self._wake.set()
+    The thread first runs after one full flush interval and is
+    registered in the global ``PeriodicThreadRegistry``, so *name* must
+    be unique per process.
 
-    def stop(self) -> None:
-        """Stop the thread; it runs no further flushes. Idempotent.
+    Args:
+        name: Thread name, also the registry key.
+        flush: Called on the flush thread every
+            ``LMCACHE_USAGE_TRACK_INTERVAL`` seconds. Must not raise;
+            an exception ends the thread.
 
-        Does not flush — callers send their own final flush on shutdown.
-        """
-        self._stop_event.set()
-        self._wake.set()
+    Returns:
+        The started thread; stop it via ``stop()`` on shutdown.
+    """
+    interval = usage_flush_interval_seconds()
 
-    def _run(self) -> None:
-        while True:
-            self._wake.wait(timeout=self._flush_interval)
-            self._wake.clear()
-            if self._stop_event.is_set():
-                return
-            self._flush()
+    def _execute() -> ThreadRunSummary:
+        flush()
+        return ThreadRunSummary(success=True)
+
+    thread = create_periodic_thread(
+        name=name,
+        interval=interval,
+        execute_fn=_execute,
+        level=ThreadLevel.LOW,
+        init_wait=interval,
+    )
+    thread.start()
+    return thread

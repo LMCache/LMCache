@@ -16,7 +16,7 @@ deployment operators), different transports, and independent opt-outs.
 | `identity.py` | Opt-out gate (`is_usage_tracking_enabled`), `UsageIdentity` (session/machine ids) |
 | `transport.py` | `UsageMessageSender` (HTTP), `build_usage_payload` (identity + schema stamping) |
 | `env_probe.py` | Hardware/platform/cloud detection feeding `EnvMessage` |
-| `flush.py` | `UsageFlushThread` — the flush-thread scaffolding shared by the interval reporters |
+| `flush.py` | `start_usage_flush_thread` — interval parsing + the shared `PeriodicThread` flush scheduling for the interval reporters |
 | `context.py` | `UsageContextBase`, single-process `UsageContext`, `InitializeUsageContext` — the `/context` snapshot reporters |
 | `continuous.py` | `ContinuousUsageContext` interval counters and lifespan histogram |
 | `metric_specs.py` | `MetricSpec` (map-reduce metric contract) and the default metric registry (not re-exported from the package root) |

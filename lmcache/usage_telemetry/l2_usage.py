@@ -26,7 +26,7 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.usage_telemetry.flush import UsageFlushThread
+from lmcache.usage_telemetry.flush import start_usage_flush_thread
 from lmcache.usage_telemetry.guard import swallow_telemetry_errors
 from lmcache.usage_telemetry.identity import (
     get_usage_identity,
@@ -114,7 +114,7 @@ class L2ConnectorUsageReporter(EventSubscriber):
         self._sequence_number = 0
         self._start_monotonic = time.monotonic()
         self._last_flush_monotonic = self._start_monotonic
-        self._flush_thread = UsageFlushThread(self.flush)
+        self._flush_thread = start_usage_flush_thread("lmcache-usage-l2", self.flush)
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         return {

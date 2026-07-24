@@ -28,7 +28,7 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.usage_telemetry.flush import UsageFlushThread
+from lmcache.usage_telemetry.flush import start_usage_flush_thread
 from lmcache.usage_telemetry.guard import swallow_telemetry_errors
 from lmcache.usage_telemetry.identity import (
     get_usage_identity,
@@ -118,7 +118,9 @@ class MPContinuousUsageReporter(EventSubscriber):
         }
         self._sequence_number = 0
         self._start_monotonic = time.monotonic()
-        self._flush_thread = UsageFlushThread(self.flush)
+        self._flush_thread = start_usage_flush_thread(
+            "lmcache-usage-continuous", self.flush
+        )
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         subscriptions: dict[EventType, list[MetricSpec]] = {}
@@ -168,9 +170,9 @@ class MPContinuousUsageReporter(EventSubscriber):
     def _make_callback(self, event_specs: list[MetricSpec]) -> EventCallback:
         """Build the drain-thread callback for one event type.
 
-        The callback only buffers samples; a full buffer wakes the flush
-        thread early so memory stays bounded between flushes (the extra
-        message is harmless — the backend sums interval deltas).
+        The callback only buffers samples; the sample that fills a
+        buffer to ``max_buffered_samples`` triggers an early flush on a
+        one-shot daemon thread.
         """
 
         @swallow_telemetry_errors
@@ -183,10 +185,15 @@ class MPContinuousUsageReporter(EventSubscriber):
                         continue
                     buffer = self._buffers[spec.field]
                     buffer.append(sample)
-                    if len(buffer) >= self._max_buffered_samples:
+                    # Only the sample that fills the buffer to exactly
+                    # max_buffered_samples sets overflow: one buffer fill
+                    # triggers one early flush.
+                    if len(buffer) == self._max_buffered_samples:
                         overflow = True
             if overflow:
-                self._flush_thread.wake()
+                threading.Thread(
+                    target=self.flush, daemon=True, name="lmcache-usage-early-flush"
+                ).start()
 
         return _on_event
 
