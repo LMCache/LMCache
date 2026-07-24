@@ -55,7 +55,7 @@ LMCACHE_LOG="/tmp/build_${BUILD_ID}_lmcache.log"
 # advances exactly one block (one reusable linear-attention snapshot per chunk).
 CHUNK_SIZE="${CHUNK_SIZE:-944}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-1500}"
-GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.8}"
 # Readiness timeout per vLLM launch. This is owned by the test (a 48B TP-shard
 # load is slow) and deliberately does NOT reuse MAX_WAIT_SECONDS, which
 # run-single-test.sh pre-exports to 300s -- that would shadow the value here.
@@ -106,6 +106,7 @@ launch_vllm() {
         --enforce-eager \
         --no-enable-flashinfer-autotune \
         --enable-prefix-caching \
+        --moe-backend triton \
         --mamba-cache-mode align \
         --max-model-len auto \
         --max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS" \
