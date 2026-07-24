@@ -118,12 +118,13 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
         local_ptrs = []
         remote_ptrs = []
         data_lengths = []
-        for a in zip(local_addresses, remote_addresses):
-            local_ptrs.append(a[0].offset + self._ctx._l1_memory_desc.ptr)
+        for a in zip(local_addresses, remote_addresses, strict=True):
+            local_ptrs.append(a[0].offset + self._ctx.l1_memory_desc.ptr)
             remote_ptrs.append(a[1].offset + self._remote_buffer_ptr)
-            assert a[0].size == a[1].size, "local and remote sizes must match"
+            if a[0].size != a[1].size:
+                raise ValueError("local and remote sizes must match")
             data_lengths.append(a[0].size)        
-        batch_id = self._ctx._mooncake_te_engine.batch_transfer_async_read(
+        batch_id = self._ctx.mooncake_te_engine.batch_transfer_async_read(
             self._remote_session_id,
             local_ptrs,
             remote_ptrs,
