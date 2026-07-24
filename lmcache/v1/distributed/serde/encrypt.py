@@ -56,10 +56,6 @@ def _plaintext_bytes(layout_desc: MemoryLayoutDesc) -> int:
 class KeyProvider(abc.ABC):
     """Supplies the AES key for a given ``cache_salt``.
 
-    ``cache_salt`` is the tenant selector, not secret material; implementations
-    map it to key bytes. This is the swap point for the trust model (derived
-    from one master vs. per-tenant provisioned keys).
-
     Implementations must be thread-safe: the serde thread pool may call
     ``get_key`` concurrently.
     """
@@ -72,10 +68,6 @@ class KeyProvider(abc.ABC):
 
 class HkdfKeyProvider(KeyProvider):
     """Derive a per-``cache_salt`` key from one master key via HKDF-SHA256.
-
-    Any holder of the master key can derive every tenant's key, so this is the
-    "fleet vs. outside" trust model: it protects L2 bytes from a party who can
-    read the remote storage, not tenants from one another.
 
     Args:
         master_key: Secret input key material (any length; keep >= key_len).
@@ -160,9 +152,8 @@ class DecryptDeserializer(Deserializer):
     def deserialize(self, src: MemoryObj, dst: MemoryObj, key: ObjectKey) -> None:
         """Decrypt ``src``'s frame into ``dst``'s KV buffer.
 
-        The ciphertext length is derived from ``dst`` (the KV target, whose
-        byte size matches the original plaintext) rather than ``src``, since
-        the load temp buffer may be allocated larger than the stored object.
+        The ciphertext length is taken from ``dst``'s size (the plaintext
+        length), not ``src``, which may be padded larger than the stored frame.
 
         Args:
             src: Source byte buffer holding the stored frame (may be padded).
