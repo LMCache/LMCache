@@ -1538,7 +1538,16 @@ class RdmaContext::Impl
     for (const auto& endpoint : closed) {
       const auto found = std::find(inbound_.begin(), inbound_.end(), endpoint);
       if (found != inbound_.end()) {
-        (*found)->close();
+        try {
+          (*found)->close();
+        } catch (...) {
+          if ((*found)->control_fd >= 0) {
+            ::close((*found)->control_fd);
+            (*found)->control_fd = -1;
+          }
+          // Keep provider resources rooted for Context::close() to retry.
+          continue;
+        }
         inbound_.erase(found);
       }
     }
@@ -1580,7 +1589,6 @@ class RdmaContext::Impl
         // Keep the inbound Endpoint rooted. Context::close() will retry and
         // surface a persistent QP-destroy failure without terminating this
         // noexcept-owned server thread.
-        break;
       }
     }
   }
