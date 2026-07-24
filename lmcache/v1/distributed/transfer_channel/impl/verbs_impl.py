@@ -223,6 +223,23 @@ class VerbsTransferChannelClient(TransferChannelClient):
         local_addresses: list[TransferChannelAddress],
         remote_addresses: list[TransferChannelAddress],
     ) -> int:
+        """Submit a batch of RDMA reads from remote into local L1 memory.
+
+        Args:
+            local_addresses: Local destination addresses in registered L1 memory.
+            remote_addresses: Remote source addresses, one per local address with a
+                matching size.
+
+        Returns:
+            A task ID to pass to ``query_read_status``.
+
+        Raises:
+            RuntimeError: If the client is closed, the connection cannot be
+                recovered, or an RDMA rail rejects the transfer state.
+            ValueError: If the batch or address pairs are invalid or exceed a rail's
+                configured limits.
+            OverflowError: If native byte or task-ID accounting overflows.
+        """
         with self._lock:
             if self._closed:
                 raise RuntimeError("RDMA transfer client is closed")
