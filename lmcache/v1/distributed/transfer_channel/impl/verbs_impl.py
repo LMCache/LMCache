@@ -201,7 +201,11 @@ class VerbsTransferChannelClient(TransferChannelClient):
         self._needs_reconnect |= any(not native.healthy for native in self._natives)
         if not self._needs_reconnect:
             return
-        if self._tasks:
+        has_active_tasks = any(
+            any(not native_task.finished for native_task in task.native_tasks)
+            for task in self._tasks.values()
+        )
+        if has_active_tasks:
             raise RuntimeError("Cannot reconnect RDMA rails with reads in flight")
         close_error = _close_all(self._natives)
         if close_error is not None:

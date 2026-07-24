@@ -165,6 +165,29 @@ def test_failed_completion_reconnects_before_next_read():
     assert client.query_read_status(second).succeeded_mask == [True]
 
 
+def test_submit_failure_reconnects_before_failed_task_is_queried():
+    old = _FakeClient()
+    replacement = _FakeClient()
+    reconnects = []
+
+    def reconnect():
+        reconnects.append(True)
+        return [replacement]
+
+    client = verbs_impl.VerbsTransferChannelClient([old], reconnect=reconnect)
+    first = client.submit_read([_address(0, 8)], [_address(16, 8)])
+    old.submit_error = RuntimeError("injected submit failure")
+
+    with pytest.raises(RuntimeError, match="injected submit failure"):
+        client.submit_read([_address(0, 8)], [_address(16, 8)])
+
+    second = client.submit_read([_address(0, 8)], [_address(16, 8)])
+
+    assert reconnects == [True]
+    assert client.query_read_status(first).succeeded_mask == [False]
+    assert client.query_read_status(second).succeeded_mask == [True]
+
+
 def test_client_close_can_be_retried_after_native_failure():
     native = _FakeClient(close_errors=1)
     client = verbs_impl.VerbsTransferChannelClient([native], reconnect=lambda: [])
