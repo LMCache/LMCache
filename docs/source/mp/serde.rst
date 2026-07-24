@@ -219,6 +219,14 @@ Notes
   upper bound on the actual serialized output — include any safety
   margin directly in the estimate (e.g., the built-in fp8 serializer
   returns ``1.5 * num_elements``).
+- **Raw-byte output.** If your serde writes bytes directly (rather than
+  through ``MemoryObj.tensor`` like the quantizers), reach the buffer via
+  ``MemoryObj.byte_array`` and **cast it to the native format first**:
+  ``memoryview(dst.byte_array).cast("B")``. ``byte_array`` is a
+  ctypes-backed view with format ``"<B"``, and CPython does not support
+  slice assignment into a non-native format (``dst[i:j] = ...`` raises
+  ``NotImplementedError: memoryview: unsupported format <B``). The built-in
+  ``aesgcm`` serde is an example.
 - **Failure handling.** If any step fails (serialize, store, load, or
   deserialize), the whole submitted batch is reported as failed —
   partial success within one batch is not surfaced. Failed keys are

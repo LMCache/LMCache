@@ -85,6 +85,14 @@ classes and register a factory.
 - Must return the number of bytes actually written to `dst`.
 - Must be **deterministic** given the same `src` — the wrapper relies
   on the serialize step being reproducible across retries.
+- **Writing raw bytes into `dst`:** go through `dst.byte_array` and cast
+  it to the native format first — `memoryview(dst.byte_array).cast("B")`.
+  `byte_array` is a ctypes-backed view with format `"<B"`, and CPython
+  does not support slice assignment into a non-native format (a bare
+  `dst[i:j] = ...` raises `NotImplementedError: memoryview: unsupported
+  format <B`). The `aesgcm` serde takes this path; tensor-based serdes
+  (fp8, turboquant) instead write through `dst.tensor` and never touch
+  `byte_array`.
 
 ### `Serializer.estimate_serialized_size(layout_desc) -> int`
 
@@ -105,6 +113,8 @@ classes and register a factory.
   `serialize` above for the per-object rationale).
 - No return value — the caller observes completion via the async
   layer's event fd.
+- Writing raw bytes into `dst` follows the same rule as `serialize`:
+  cast via `memoryview(dst.byte_array).cast("B")`.
 
 ### `SerdeProcessor` (async)
 
