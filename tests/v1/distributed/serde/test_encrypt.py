@@ -24,13 +24,14 @@ from lmcache.v1.distributed.serde import (
     get_registered_serde_types,
 )
 from lmcache.v1.distributed.serde.encrypt import (
-    _FRAME_OVERHEAD,
     DecryptDeserializer,
     EncryptSerializer,
     HkdfKeyProvider,
 )
 
 _MASTER = b"unit-test-master-key-material-32b!!"
+# Public wire contract: [1B version][12B IV][ciphertext || 16B GCM tag].
+_FRAME_OVERHEAD = 1 + 12 + 16
 
 
 @dataclass

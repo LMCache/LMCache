@@ -11,6 +11,7 @@ model, and residual-metadata notes.
 """
 
 # Standard
+import abc
 import os
 import threading
 
@@ -52,14 +53,18 @@ def _plaintext_bytes(layout_desc: MemoryLayoutDesc) -> int:
     return total
 
 
-class KeyProvider:
+class KeyProvider(abc.ABC):
     """Supplies the AES key for a given ``cache_salt``.
 
     ``cache_salt`` is the tenant selector, not secret material; implementations
     map it to key bytes. This is the swap point for the trust model (derived
     from one master vs. per-tenant provisioned keys).
+
+    Implementations must be thread-safe: the serde thread pool may call
+    ``get_key`` concurrently.
     """
 
+    @abc.abstractmethod
     def get_key(self, cache_salt: str) -> bytes:
         """Return the AES key bytes for ``cache_salt`` (16 or 32 bytes)."""
         raise NotImplementedError
@@ -86,7 +91,10 @@ class HkdfKeyProvider(KeyProvider):
         self._lock = threading.Lock()
 
     def get_key(self, cache_salt: str) -> bytes:
-        """Return the derived key for ``cache_salt``, computing once and caching."""
+        """Return the derived key for ``cache_salt``, computing once and caching.
+
+        Thread-safe: the cache is guarded by a lock.
+        """
         with self._lock:
             key = self._cache.get(cache_salt)
             if key is None:
@@ -191,8 +199,9 @@ def _create_encrypt_serde(kwargs: dict[str, object]) -> SerdeProcessor:
         max_workers: Serde thread-pool size (default ``1``).
 
     Raises:
-        ValueError: On an unsupported ``key_provider`` / ``aes_bits``, or a
-            missing / empty ``master_key_path``.
+        ValueError: On an unsupported ``key_provider`` / ``aes_bits``, or an
+            empty ``master_key_path``.
+        OSError: If ``master_key_path`` is set but cannot be read.
     """
     provider_name = str(kwargs.get("key_provider", "hkdf"))
     aes_bits = int(kwargs.get("aes_bits", 128))  # type: ignore[call-overload]
