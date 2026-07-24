@@ -3,7 +3,7 @@
 # Standard
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, NoReturn, Protocol
+from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol
 import enum
 import os
 import threading
@@ -16,11 +16,7 @@ import zmq
 # First Party
 from lmcache import torch_dev
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
-from lmcache.integration.vllm.utils import (
-    lmcache_get_or_create_config,
-    vllm_layout_hints,
-)
-from lmcache.sdk.qringbuffer import QRingBufferAdapter
+from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
@@ -40,6 +36,10 @@ from lmcache.v1.multiprocess.transfer_context import (
 )
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
 from lmcache.v1.platform import resolve_kv_wrapper_factory
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.integration.vllm.experimental import Dispatcher
 
 logger = init_logger(__name__)
 
@@ -246,6 +246,31 @@ def get_lmcache_chunk_size(
     future = send_lmcache_request(mq_client, RequestType.GET_CHUNK_SIZE, [])
     lmcache_tokens_per_chunk = future.result(timeout=timeout)
     return lmcache_tokens_per_chunk
+
+
+def get_experimental(
+    mq_client: MessageQueueClient,
+    timeout: float = DEFAULT_MQ_TIMEOUT,
+) -> set[str]:
+    """Query the experimental capabilities a server advertises.
+
+    Args:
+        mq_client: The LMCache multiprocess mode message queue client.
+        timeout: Seconds to wait for the server's response.
+
+    Returns:
+        Experimental features built into the server (now `transfer_query`).
+    """
+    future = send_lmcache_request(mq_client, RequestType.GET_EXPERIMENTAL, [])
+    try:
+        return set(future.result(timeout=timeout))
+    except TimeoutError:
+        logger.warning(
+            "LMCache server did not answer GET_EXPERIMENTAL within %ss; "
+            "treating it as advertising no experimental capabilities.",
+            timeout,
+        )
+        return set()
 
 
 def _raise_server_unreachable(server_url: str, timeout: float) -> NoReturn:
@@ -1093,7 +1118,6 @@ class LMCacheMPWorkerAdapter:
             legacy_block_size,
             mq_timeout,
         )
-        vllm_transfer_intermediate_tensors = False
         if extra_config is not None:
             cfg = _resolve_extra_config(extra_config)
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
@@ -1109,9 +1133,6 @@ class LMCacheMPWorkerAdapter:
                 self._mp_transfer_mode = cfg[ExtraConfigDefault.mp_transfer_mode.name]
             else:
                 self._mp_transfer_mode = None
-            vllm_transfer_intermediate_tensors = cfg[
-                ExtraConfigDefault.transfer_intermediate_tensors.name
-            ]
         else:
             self._mp_transfer_mode = None
         self.mq_client = MessageQueueClient(server_url, context)
@@ -1178,17 +1199,14 @@ class LMCacheMPWorkerAdapter:
         )
         self.blocks_in_chunk = lmcache_tokens_per_chunk // vllm_block_size
 
-        # For Query transfer
-        self.q_ring_adapter: "QRingBufferAdapter | None" = None
-        if (
-            vllm_transfer_intermediate_tensors
-            and lmcache_get_or_create_config().transfer_intermediate_tensors
-        ):
-            self.q_ring_adapter = QRingBufferAdapter(
-                adapter=self,
-                q_model_name=f"{self.model_name}##query",
-                send_lmcache_request=send_lmcache_request,
-            )
+        # Experimental intermediate tensor transfer
+        # First Party
+        from lmcache.integration.vllm.experimental import Dispatcher
+
+        self.experimental: set[str] = get_experimental(
+            self.mq_client, timeout=self._mq_timeout
+        )
+        self.dispatcher: "Dispatcher" = Dispatcher([])
 
         # Health state (shared with heartbeat thread)
         self._health_event = threading.Event()
@@ -1405,22 +1423,9 @@ class LMCacheMPWorkerAdapter:
             return False
         logger.warning("Finished re-registering KV caches after server recovery")
 
-        if self.q_ring_adapter and self.q_ring_adapter.q_ring:
-            try:
-                self.q_ring_adapter._send_register_q_ring_request()
-            except ConnectionError:
-                logger.exception(
-                    "Failed to re-register Q ring after server recovery; "
-                    "will retry on next heartbeat"
-                )
-                return False
-            except Exception:
-                logger.exception(
-                    "Unexpected error during Q ring re-registration; "
-                    "will retry on next heartbeat"
-                )
-                return False
-            logger.warning("Finished re-registering Q ring after server recovery")
+        q_reregister_success = self.dispatcher.reregister()
+        if not q_reregister_success:
+            return False
 
         return True
 
@@ -1627,8 +1632,7 @@ class LMCacheMPWorkerAdapter:
             take care of deduplicating the request IDs and only return the request
             IDs that have not been returned before.
         """
-        if self.q_ring_adapter:
-            self.q_ring_adapter.reclaim_finished_q_stores()
+        self.dispatcher.reclaim()
 
         # If unhealthy, drain all pending futures immediately
         if not self.is_healthy:
@@ -1798,8 +1802,7 @@ class LMCacheMPWorkerAdapter:
                 self._mq_timeout,
             )
 
-        if self.q_ring_adapter:
-            self.q_ring_adapter.shutdown_q_ring()
+        self.dispatcher.shutdown()
 
         if self.transfer_ctx is not None:
             self.transfer_ctx.close()

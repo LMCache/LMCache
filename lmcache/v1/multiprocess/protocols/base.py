@@ -93,6 +93,9 @@ class RequestType(enum.Enum):
     P2P_QUERY_LOOKUP_RESULTS = enum.auto()
     P2P_UNLOCK_OBJECTS = enum.auto()
 
+    # Experimental transfer intermediate tensor
+    GET_EXPERIMENTAL = enum.auto()
+
 
 @dataclass
 class ProtocolDefinition:
