@@ -110,12 +110,14 @@ __global__ void rotary_embedding_kernel_fused(
       token_idx, key_stride, head_stride);
 }
 
-// One chunk of a fused ramp re-RoPE (by-value pack, see FusedTransferChunk).
+// One chunk of a fused ramp re-RoPE. The whole pack travels by value in the
+// kernel-arg buffer (like FusedTransferChunk in mem_kernels.cu), so a fused
+// launch needs no device-side parameter upload.
 template <typename scalar_t>
 struct FusedRopeChunk {
-  scalar_t* key;
-  int64_t old_st;
-  int64_t new_st;
+  scalar_t* key;   // chunk's K plane base
+  int64_t old_st;  // stored start position (rotate from)
+  int64_t new_st;  // request start position (rotate to)
 };
 
 template <typename scalar_t>
@@ -123,16 +125,18 @@ struct FusedRopePack {
   FusedRopeChunk<scalar_t> chunks[MAX_FUSED_TRANSFER_CHUNKS];
 };
 
-// Fused ramp re-RoPE: positions are `st + (token_idx % slots)`, derived
-// in-kernel so a launch is fully described by scalars -- no position
-// tensors, no torch at enqueue. blockIdx.y selects the chunk; one launch
-// covers up to MAX_FUSED_TRANSFER_CHUNKS same-geometry chunks.
+// Fused ramp variant of rotary_embedding_kernel_fused above: one launch
+// rotates up to MAX_FUSED_TRANSFER_CHUNKS same-geometry chunks. Positions
+// are `st + (token_idx % slots)`, derived in-kernel so a launch is fully
+// described by scalars -- no position tensors, no torch at enqueue.
 template <typename scalar_t, bool IS_NEOX>
 __global__ void rotary_embedding_kernel_fused_ramp_multi(
     const FusedRopePack<scalar_t> pack, const int64_t slots,
-    const scalar_t* __restrict__ cos_sin_cache, const int rot_dim,
-    const int64_t key_stride, const int num_kv_heads, const int head_size,
-    const int64_t head_stride) {
+    const scalar_t* __restrict__ cos_sin_cache,  // [max_position, 2, rot_dim //
+                                                 // 2]
+    const int rot_dim, const int64_t key_stride, const int num_kv_heads,
+    const int head_size, const int64_t head_stride) {
+  // Each thread block is responsible for one token of one chunk.
   const int token_idx = blockIdx.x;
   const FusedRopeChunk<scalar_t>& chunk = pack.chunks[blockIdx.y];
   const int64_t ramp = token_idx % slots;

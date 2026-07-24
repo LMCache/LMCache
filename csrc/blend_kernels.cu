@@ -13,10 +13,11 @@ void execute_cb_retrieve_plan(const torch::Device& device,
                               size_t host_buffer_alignment,
                               const std::vector<CBGroupSpec>& group_specs,
                               const std::vector<CBRetrieveStep>& steps) {
-  // Staging runs on a pool stream, overlapping the previous step's kernels
-  // on the caller's stream; the planner alternates slot halves so step w's
-  // staging only conflicts with step w-2 (ordered by per-parity events).
-  // Kernels stay on the caller's stream -> its completion event covers all.
+  // Set the device guard once for the whole plan. Staging runs on a pool
+  // stream, overlapping the previous step's kernels on the caller's stream;
+  // the planner alternates slot halves so step w's staging only conflicts
+  // with step w-2 (ordered by the per-parity events below). Kernels stay on
+  // the caller's stream, so its completion event covers the whole plan.
   const at::cuda::OptionalCUDAGuard device_guard(device);
   at::cuda::CUDAStream compute_stream = at::cuda::getCurrentCUDAStream();
   at::cuda::CUDAStream copy_stream =
@@ -129,7 +130,9 @@ void execute_cb_retrieve_plan(const torch::Device& device,
                     "CBScatterVar.n_tok (", scatter.n_tok,
                     ") exceeds slot capacity ", group.slot_tokens);
         // Bounds-check the slot_mapping slice before the kernel dereferences
-        // it on device (out-of-range would be a silent bad device read).
+        // it on device: an out-of-range offset/length would otherwise be a
+        // silent out-of-bounds device read (CUDA fault or garbage), not a
+        // clean error.
         TORCH_CHECK(scatter.slot_mapping_offset >= 0 &&
                         scatter.slot_mapping_offset + scatter.n_tok <=
                             group.slot_mapping_capacity,

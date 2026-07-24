@@ -8,12 +8,19 @@
 #include "mp_mem_kernels.cuh"  // StagingCopy
 
 // ---------------------------------------------------------------------------
-// CacheBlend retrieve plan: plan-then-execute like the object-group transfer
-// above, plus K-only re-RoPE and a per-token scatter (CB matches are not
-// block-aligned). One GIL release per request.
+// CacheBlend retrieve plan.
+//
+// A whole CB retrieve (all staging copies + re-RoPE + scatter launches) is
+// described as a plan on the Python side, then executed in a single native
+// call (execute_cb_retrieve_plan) that releases the GIL once for the entire
+// request instead of once per copy/launch. Same plan-then-execute shape as
+// the object-group transfer in mp_mem_kernels.cuh, plus K-only re-RoPE and a
+// per-token scatter (CB matches are not block-aligned). Plans are built in
+// blend_v3.py (cb_retrieve_pre_computed).
 // ---------------------------------------------------------------------------
 
-// Per-kernel-group invariants of a CB retrieve plan.
+// Per-kernel-group invariants, resolved once on the Python side; only the
+// slot-mapping fields are re-stamped per request.
 struct CBGroupSpec {
   uintptr_t paged_kv_ptrs;  // device ptr-array base (per-layer paged ptrs)
   std::vector<int64_t> temp_buffer_ptrs;  // temp GPU buffer base per tmp slot
@@ -66,8 +73,19 @@ struct CBRetrieveStep {
 };
 
 /**
- * Enqueue a whole CB retrieve plan (staging + rope + scatter per step) in one
- * GIL release; staging overlaps the previous step's kernels on a pool stream.
+ * Execute one CB retrieve plan on the caller's current CUDA stream.
+ *
+ * Enqueues every staging copy, re-RoPE, and scatter launch described by
+ * `steps` within a single GIL release (configured at the pybind layer),
+ * eliminating the per-copy/per-launch GIL handoffs of the equivalent Python
+ * loop. Staging runs on a pool stream, overlapping the previous step's
+ * kernels; per-parity CUDA events order tmp-slot reuse across steps.
+ *
+ * @param device                CUDA device of the transfer
+ * @param host_buffer_alignment Host buffer alignment for staging copies
+ *                              (power of two)
+ * @param group_specs           Per-kernel-group invariants
+ * @param steps                 Ordered per-step staging + rope + scatter work
  */
 void execute_cb_retrieve_plan(const torch::Device& device,
                               size_t host_buffer_alignment,

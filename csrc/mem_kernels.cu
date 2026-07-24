@@ -365,15 +365,14 @@ __global__ void single_layer_kv_transfer_sgl_kernel(
   }
 }
 
-/**
- * One chunk of a fused transfer, passed BY VALUE in the kernel-arg buffer
- * (a full pack fits the 4 KB limit -> no device-side parameter upload).
- */
+// One chunk of a fused transfer. The whole pack travels by value in the
+// kernel-arg buffer (a full pack fits the 4 KB limit), so a fused launch
+// needs no device-side parameter upload.
 template <typename scalar_t>
 struct FusedTransferChunk {
-  scalar_t* key_value;
-  const int64_t* slot_mapping;
-  int n_tok;
+  scalar_t* key_value;          // chunk's contiguous temp buffer base
+  const int64_t* slot_mapping;  // device int64*, this chunk's slice
+  int n_tok;                    // tokens to move (0 for unused pack tail)
 };
 
 template <typename scalar_t>
@@ -382,9 +381,14 @@ struct FusedTransferPack {
 };
 
 /**
- * Fused multi-chunk load_and_reshape: one launch, same-geometry chunks.
- * blockIdx.z packs (chunk * k_or_v_size + k_or_v); shorter chunks early-out
- * on grid.x. Replaces the per-chunk launch storm.
+ * Fused multi-chunk variant of load_and_reshape_multi_layer_kernel below:
+ * one launch moves up to MAX_FUSED_TRANSFER_CHUNKS same-geometry chunks,
+ * replacing the per-chunk launch storm.
+ * chunk = pack.chunks[block.z / k_or_v_size], k_or_v = block.z % k_or_v_size
+ * slot_id = chunk.slot_mapping[block.x]
+ * chunk.key_value[k_or_v, block.y, block.x, thread.x] <=>
+ *     ptrs[block.y][k_or_v, slot_id, thread.x]
+ * Chunks shorter than grid.x early-out on their n_tok.
  */
 template <typename scalar_t, bool DIRECTION, EngineKVFormat format>
 __global__ void load_and_reshape_multi_layer_fused_kernel(
