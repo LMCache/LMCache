@@ -179,6 +179,19 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
 
+      # HMA correctness check on Qwen/Qwen3.5-0.8B, a Mamba/GDN + full-attention
+      # hybrid exercising the registration-time cache re-views
+      # (kv_cache_group_edits.py). Same flow as hma_lm_eval_gemma4. The model,
+      # chunk size, mamba cache mode, score tolerance, and sample count defaults
+      # live in run-single-test.sh. Single GPU, no baseline.
+      - label: ":compression: hma_lm_eval_qwen3_5"
+        command: .buildkite/k3_tests/multiprocess/run.sh hma_lm_eval_qwen3_5
+        timeout_in_minutes: 30
+        retry: *flaky-retry
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log"]
+
       - label: ":compression: fault_tolerance"
         command: .buildkite/k3_tests/multiprocess/run.sh fault_tolerance
         timeout_in_minutes: 30

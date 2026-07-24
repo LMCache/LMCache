@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Orchestrator for a single multiprocessing test (native, no Docker).
 # Usage: run-single-test.sh <test_name>
-#   test_name: lm_eval | lm_eval_preemption | hma_lm_eval_gemma4 | vllm_bench
-#              | long_doc_qa | long_doc_qa_l2 | fault_tolerance | deadlock
-#              | restart_recovery | gds_smoke_test
+#   test_name: lm_eval | lm_eval_preemption | hma_lm_eval_gemma4
+#              | hma_lm_eval_qwen3_5 | vllm_bench | long_doc_qa | long_doc_qa_l2
+#              | fault_tolerance | deadlock | restart_recovery | gds_smoke_test
 #
 # Each invocation is self-contained: launches servers, runs one test, cleans up.
 # This mirrors the comprehensive tests' run-single-config.sh pattern.
@@ -169,7 +169,7 @@ case "$TEST_NAME" in
         ;;
     *)
         echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, lm_eval_preemption, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, http_api, gds_smoke_test, p2p"
+        echo "Valid tests: lm_eval, lm_eval_preemption, hma_lm_eval_gemma4, hma_lm_eval_qwen3_5, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, http_api, gds_smoke_test, p2p"
         exit 1
         ;;
 esac
