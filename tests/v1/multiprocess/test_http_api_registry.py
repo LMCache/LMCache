@@ -191,5 +191,11 @@ class TestHTTPAPIRegistry:
     def test_all_expected_routes_present(self, app_with_registry):
         """All four expected routes are registered."""
         routes = set(app_with_registry.openapi()["paths"])
-        expected = {"/", "/healthcheck", "/cache/clear", "/status"}
+        expected = {
+            "/",
+            "/healthcheck",
+            "/cache/clear",
+            "/status",
+            "/status/memory-pressure",
+        }
         assert expected.issubset(routes)
