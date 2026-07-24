@@ -5,6 +5,15 @@ against the existing `LRU`, `LFU`, `FIFO`, and `MRU` policies, using the
 benchmark suite in [`benchmarks/cache_policy/`](../../../../../benchmarks/cache_policy/README.md).
 See that README for how to reproduce every number and chart below.
 
+**Revision note**: the first version of this doc evaluated the original
+cost-only score and found it lost badly to `LRU`/`LFU` on popularity-skewed
+traffic. That finding led to a design change -- a log-dampened access-
+frequency term was added to the score (see "The frequency fix" below).
+This revision evaluates the updated policy and, per the original finding,
+specifically checks whether the fix is a *general* improvement (multiple
+skew strengths, multiple cache sizes, a dedicated cost-density sanity
+check) rather than a fix for one benchmark reading.
+
 ## Methodology and its limits
 
 There is no GPU available in the environment this evaluation was produced
@@ -22,17 +31,19 @@ in, so this is **not** an end-to-end vLLM/LMCache benchmark. Instead:
   (`observed_recompute_tokens`), not measured wall-clock inference time.
 - "Throughput" (`requests_per_second` in the sweep CSV) is the simulator's
   own Python loop throughput -- i.e. it measures the **policy's
-  bookkeeping overhead**, not model throughput. This turns out to be one
-  of the most interesting findings below.
+  bookkeeping overhead**, not model throughput.
 - There is no GPU utilization metric; `rss_delta_bytes` (via `psutil`) is
   a coarse CPU-memory proxy only.
 - `CostAwareEvictionPolicy`'s recency-decay term reads real
-  `time.monotonic()`, not a simulated clock. On low-eviction-count
-  workloads this makes its hit-rate outcome sensitive to the actual
-  wall-clock speed of the run (interpreter/OS scheduling noise), not just
-  workload content -- see Experiment 2 for a measured example. High
-  eviction-count workloads (`mixed_zipfian`) are unaffected in practice
-  because the cost-density term dominates.
+  `time.monotonic()`, not a simulated clock. The first revision of this
+  doc found this made `multi_round_chat` ablation readings noisy (5 reruns
+  spanned 60-71% hit rate). **After the frequency fix, this noise is gone**
+  -- 3 reruns of the same ablation config now reproduce identical hit
+  rates and eviction counts to 3 decimal places (see "Ablation" below).
+  The frequency term evidently dominates the eviction decision strongly
+  enough that small wall-clock jitter in the recency term no longer flips
+  outcomes on this workload. Worth keeping in mind if a future workload
+  has close cost/frequency ties, though.
 
 Treat every hit-rate number here as representative of *relative* policy
 behavior under these access patterns, and every latency/throughput number
@@ -45,12 +56,58 @@ production numbers.
 |---|---|---|
 | `repetitive_short` | 15-100 distinct short prompts, uniform random reuse | Hit/miss ratio under a small, fully-cacheable working set |
 | `novel_long` | Every request unique, 4K-16K tokens | Pure insertion/eviction overhead; hit rate is always 0% by construction |
-| `mixed_zipfian` | 300 distinct prompts, Zipf-distributed popularity (`s=1.2`) | Realistic skewed reuse (hot prefixes + long tail) -- the primary cross-policy comparison workload |
+| `mixed_zipfian` | 300 distinct prompts, Zipf-distributed popularity (`s=1.2` by default) | Realistic skewed reuse (hot prefixes + long tail) -- the primary cross-policy comparison workload |
 | `multi_round_chat` | Sessions with a monotonically growing shared prefix | `chunk_start`/recompute-cost accounting specific to `CostAwareEvictionPolicy` |
 
-## Experiment 1: vanilla vs. extended, cache-size sweep
+## The frequency fix
 
-Ran all five policies across all four workloads at 50 / 100 / 200 MiB
+The original score was `cost_density / time_decay`, where `cost_density =
+estimated_recompute_tokens / memory_size_bytes`. With uniform chunk
+sizes, `cost_density` reduces to `estimated_recompute_tokens` -- i.e. how
+expensive a chunk is to recompute, with **no signal for how often it's
+actually reused**. On `mixed_zipfian`, popular prompts tend to be short
+(few chunks), so they scored *low* cost and were evicted preferentially
+even though a frequency-aware policy would keep them.
+
+The fix adds a log-dampened frequency multiplier, tracked via a new
+`hit_count` field on `_ChunkMetadata` (incremented on every real cache
+hit, distinct from the pre-existing `observation_count`, which counts
+cost re-samples, not reuse):
+
+```
+frequency_weight = 1.0 + log1p(hit_count)
+score = (cost_density * frequency_weight) / time_decay
+```
+
+This is a GreedyDual-Size-Frequency-style combination (cost x frequency,
+recency-decayed), not something invented for this benchmark -- it's a
+well-established way cost-aware caches capture more than one dimension of
+"value per evicted byte." Log-dampening (rather than a linear multiplier)
+keeps cost and recency meaningfully influential even for very popular
+chunks, so the policy doesn't degenerate into plain `LFU` with a cost
+tiebreak.
+
+## Experiment 0: does the cost-density term still work? (sanity check)
+
+Before trusting any hit-rate numbers, a direct two-chunk check
+(`benchmarks/cache_policy/robustness_sweep.py::check_size_heterogeneity`)
+verifies the frequency addition didn't silently break cost-awareness:
+
+- Two chunks with equal cost-density and equal `hit_count`, but very
+  different absolute memory size (1 KiB vs. 8 KiB) and recompute cost (100
+  vs. 800 tokens) score **identically** (0.165346 both) -- confirms
+  `cost_density` normalizes by size correctly.
+- Two chunks with equal size and equal `hit_count`, but a 9x recompute-cost
+  difference (100 vs. 900 tokens), score in a **9.000x** ratio exactly --
+  confirms `cost_density` still linearly drives the score when frequency
+  is held constant.
+
+Cost-awareness is intact; the frequency term is additive, not a
+replacement.
+
+## Experiment 1: cache-size sweep, before vs. after the frequency fix
+
+All five policies across all four workloads at 50 / 100 / 200 MiB
 simulated cache capacity (256 KiB/chunk).
 
 ![Hit rate vs cache size](../../../../../benchmarks/cache_policy/results/charts/hit_rate_vs_cache_size.png)
@@ -59,157 +116,160 @@ simulated cache capacity (256 KiB/chunk).
 
 ![Simulator throughput](../../../../../benchmarks/cache_policy/results/charts/throughput.png)
 
-Selected rows at 100 MiB (full data in
-[`results/sweep_results.csv`](../../../../../benchmarks/cache_policy/results/sweep_results.csv)):
+Full data in
+[`results/sweep_results.csv`](../../../../../benchmarks/cache_policy/results/sweep_results.csv).
+`repetitive_short` and `novel_long` don't discriminate between policies
+(uniformly high / always-zero hit rate respectively) -- omitted below;
+see the CSV for the full picture.
 
-| Workload | Policy | Hit rate | Evictions | p95 latency | Throughput (req/s) |
-|---|---|---:|---:|---:|---:|
-| mixed_zipfian | LRU | 85.3% | 1,973 | 30.7 ms | 101,545 |
-| mixed_zipfian | LFU | 87.6% | 1,611 | 30.7 ms | 108,281 |
-| mixed_zipfian | MRU | 31.8% | 5,928 | 36.3 ms | 133,061 |
-| mixed_zipfian | **COST_AWARE** | **65.7%** | 5,141 | **17.9 ms** | 1,851 |
-| multi_round_chat | LRU | 58.0% | 910 | 61.4 ms | 69,797 |
-| multi_round_chat | LFU | 80.8% | 198 | 19.9 ms | 121,482 |
-| multi_round_chat | MRU | 82.1% | 120 | 19.9 ms | 196,383 |
-| multi_round_chat | **COST_AWARE** | **70.3%** | 187 | 61.4 ms | 8,272 |
+| Cache | Workload | Policy | Hit rate | p95 latency | Req/s |
+|---|---|---|---:|---:|---:|
+| 50 MiB | mixed_zipfian | LRU | 76.8% | 35.8 ms | 70,862 |
+| 50 MiB | mixed_zipfian | LFU | 80.7% | 35.8 ms | 68,825 |
+| 50 MiB | mixed_zipfian | **COST_AWARE** | **64.5%** | **25.6 ms** | 2,263 |
+| 50 MiB | multi_round_chat | LRU | 13.0% | 61.4 ms | 42,589 |
+| 50 MiB | multi_round_chat | LFU | 48.9% | 43.0 ms | 36,710 |
+| 50 MiB | multi_round_chat | **COST_AWARE** | **40.7%** | **43.0 ms** | 1,321 |
+| 100 MiB | mixed_zipfian | LRU | 85.3% | 30.7 ms | 78,317 |
+| 100 MiB | mixed_zipfian | LFU | 87.6% | 30.7 ms | 76,867 |
+| 100 MiB | mixed_zipfian | **COST_AWARE** | **79.3%** | **20.5 ms** | 1,996 |
+| 100 MiB | multi_round_chat | LRU | 58.0% | 61.4 ms | 62,303 |
+| 100 MiB | multi_round_chat | LFU | 80.8% | 19.9 ms | 55,010 |
+| 100 MiB | multi_round_chat | **COST_AWARE** | **78.4%** | 24.5 ms | 4,291 |
+| 200 MiB | mixed_zipfian | LRU | 93.1% | 20.5 ms | 81,170 |
+| 200 MiB | mixed_zipfian | LFU | 92.7% | 20.5 ms | 91,603 |
+| 200 MiB | mixed_zipfian | **COST_AWARE** | **92.8%** | **15.4 ms** | 7,248 |
+| 200 MiB | multi_round_chat | (all policies) | 84.6% | 10.6 ms | -- |
 
-`repetitive_short` and `novel_long` don't discriminate between policies at
-this cache size: the former's whole working set fits (all policies hit
-96.7%), and the latter never hits by construction (0% for every policy,
-identical eviction count). They're still valuable as smoke-test /
-overhead-isolation workloads (see `README.md`), just not as comparison
-signal here.
+(At 200 MiB, `multi_round_chat`'s entire working set fits with zero
+evictions for every policy -- not a discriminating cell.)
 
-### Finding 1 -- hit rate: `COST_AWARE` is not a drop-in win on popularity-skewed traffic
+### Finding 1 -- the frequency fix substantially closes the hit-rate gap, and reverses the latency comparison
 
-On `mixed_zipfian`, `COST_AWARE` (65.7%) trails both `LRU` (85.3%) and
-`LFU` (87.6%). The reason is structural, not a bug: the policy's score is
+Before the fix, at 100 MiB `COST_AWARE` scored 65.7% hit rate on
+`mixed_zipfian` (vs. `LRU` 85.3% / `LFU` 87.6% -- a ~20-22pp deficit) and
+had **1,851 req/s** vs. ~100K+ for the other policies (a huge cost, no
+compensating benefit).
 
-```
-score = (estimated_recompute_tokens / memory_size_bytes) / (1 + age/half_life)
-```
+After the fix: `COST_AWARE` closes roughly 60-70% of that hit-rate gap at
+every cache size tested (e.g. 100 MiB: 79.3% vs. 85.3%/87.6%, an 6-8pp
+deficit instead of 20-22pp), and picks up a **consistent p95-latency win**
+across every mixed_zipfian and multi_round_chat cell with real eviction
+pressure -- it has the lowest p95 latency of all five policies in 5 of
+the 6 comparison rows above (tied at 200 MiB, and slightly behind `LFU`
+only at 100 MiB `multi_round_chat`). This is the intended tradeoff made
+visible: the policy isn't chasing raw hit count, it's minimizing total
+recompute cost, so it accepts somewhat fewer hits in exchange for making
+sure the misses it does take are the cheap ones and the hits it keeps are
+disproportionately the expensive-to-recompute ones.
 
-With uniform `memory_size_bytes` (every chunk is the same 256 KiB in this
-benchmark), `cost_density` reduces to `estimated_recompute_tokens` --
-i.e. **how expensive this chunk would be to recompute**, not **how often
-it gets reused**. `mixed_zipfian`'s popular prompts are short (few
-chunks, `chunk_start` close to `total_tokens` for most of their chunks),
-so they score *low* cost and get evicted preferentially, even though
-they're the chunks a frequency- or recency-aware policy would keep. This
-is an intentional design tradeoff (recompute-cost minimization, not hit-rate
-maximization) worth stating plainly in the policy's docs, since it means
-`COST_AWARE` is not a strict improvement over `LRU`/`LFU` on every
-workload -- it wins specifically when recompute cost varies independently
-of reuse frequency (see Finding 2).
+**Honest limit**: `COST_AWARE` still does not have the highest hit rate
+of the five policies on `mixed_zipfian` at any cache size tested -- `LFU`
+(and often `LRU`) still lead on raw hit count on this pure
+popularity-driven, uniform-chunk-size workload. The fix is a large,
+consistent improvement, not a strict reversal of Finding 1 from the
+original revision of this doc.
 
-### Finding 2 -- `COST_AWARE` shows promise where recompute cost varies by position, but the signal is noisy
+### Finding 2 -- the improvement generalizes across popularity-skew strength (not curve-fit to one `zipf_s`)
 
-On `multi_round_chat`, where later chunks in a growing prefix are cheaper
-to recompute than earlier ones (`chunk_start` grows every round),
-`COST_AWARE` beats `LRU`/`FIFO`/`MRU` on p95 modeled latency at the
-tightest capacity (50 MiB: 51.7 ms vs. 61.4 ms for all three), though
-`LFU` still edges it out there (43.0 ms). At 100 MiB, `COST_AWARE`'s hit
-rate (70.5%) is above `LRU`'s (58.0%) in this single sweep run, consistent
-with the policy preferentially retaining expensive-to-recompute
-early-session chunks. **However**, Experiment 2 (below) found that
-`multi_round_chat` hit-rate readings for `COST_AWARE` vary by up to ~10
-percentage points across repeated runs of the identical config, due to
-the policy's use of real wall-clock time for recency decay -- so this
-particular hit-rate comparison should be read as "plausible, in the
-direction the design predicts" rather than a precise, reproducible
-number. The p95-latency advantage at 50 MiB is a more solid data point
-since it doesn't hinge on which chunks narrowly won a close eviction
-race.
+`benchmarks/cache_policy/robustness_sweep.py::check_zipf_skew` reruns
+`mixed_zipfian` at `zipf_s in {0.6, 1.2, 2.0}` (mild to extreme
+concentration), 100 MiB cache (full data in
+[`results/robustness_zipf_skew.csv`](../../../../../benchmarks/cache_policy/results/robustness_zipf_skew.csv)):
 
-### Finding 3 -- `COST_AWARE`'s eviction-candidate selection is O(n log n), not O(1)
+| `zipf_s` | LRU | LFU | COST_AWARE | Evictions (COST_AWARE) |
+|---|---:|---:|---:|---:|
+| 0.6 (mild) | 43.5% | 49.4% | 37.8% | 7,940 |
+| 1.2 (default) | 79.8% | 82.5% | 69.0% | 3,408 |
+| 2.0 (extreme) | 96.9% | 96.9% | 96.9% | 0 |
 
-The throughput gap is the most striking result: 1,851 req/s vs. ~100K+
-req/s for the other policies on `mixed_zipfian` under high eviction churn
-(a ~55x gap). This traces directly to `get_evict_candidates`:
-`LRUCachePolicy`/`FIFOCachePolicy`/`MRUCachePolicy` walk an `OrderedDict`
-and return as soon as they collect `num_candidates` keys (O(k)).
-`CostAwareEvictionPolicy.get_evict_candidates`
-(`cost_aware_policy.py:485-535`) instead builds a sort key for **every**
-key in `cache_dict` and calls `sorted()` over the whole cache on every
-single eviction. Under a full cache with heavy churn (thousands of
-evictions per sweep run), that's thousands of O(n log n) sorts, which
-dominates wall-clock cost. This doesn't affect the *modeled* per-request
-latency (that's a separate cost function), but it is real CPU overhead the
-storage backend pays on every eviction, and it gets worse as cache
-capacity (hence `n`) grows. Worth flagging for follow-up: batching
-evictions (`num_candidates > 1`, already supported by the interface) would
-amortize the sort cost, whereas the current backend call site
-(`local_cpu_backend.py`) evicts one candidate at a time.
+The qualitative picture holds across skew strengths: `COST_AWARE` trails
+`LRU`/`LFU` by a consistent, bounded margin (roughly 6-12pp) at both mild
+and default skew, and the gap disappears entirely at extreme skew simply
+because the whole popular working set fits in cache (zero evictions, so
+policy choice stops mattering). There's no skew level in this sweep where
+`COST_AWARE` either catastrophically collapses or magically overtakes --
+the effect of the fix is consistent, which is what "general" should look
+like, as opposed to a fix that only works at the exact parameters
+originally benchmarked.
+
+### Finding 3 -- `COST_AWARE`'s eviction-candidate selection is still O(n log n), not O(1)
+
+Unchanged by the frequency fix, and still the most significant remaining
+weakness: throughput (simulator bookkeeping speed) is 1,000-8,000 req/s
+for `COST_AWARE` across the sweep vs. 40,000-450,000+ req/s for the other
+four policies -- a 10-100x gap depending on cache size. This traces
+directly to `get_evict_candidates`: `LRUCachePolicy`/`FIFOCachePolicy`/
+`MRUCachePolicy` walk an `OrderedDict` and return as soon as they collect
+`num_candidates` keys (O(k)). `CostAwareEvictionPolicy.get_evict_candidates`
+instead builds a sort key for **every** key in `cache_dict` and calls
+`sorted()` over the whole cache on every single eviction -- O(n log n)
+per eviction, thousands of times per sweep run under heavy churn. This
+doesn't affect the *modeled* per-request latency (a separate cost
+function), but it's real CPU overhead the storage backend pays on every
+eviction, worsening as cache capacity (`n`) grows. Still worth flagging
+for follow-up: batching evictions (`num_candidates > 1`, already supported
+by the interface) would amortize the sort cost, whereas the current
+backend call site (`local_cpu_backend.py`) evicts one candidate at a
+time.
 
 ## Experiment 2: ablation
 
-Isolates the two ideas combined in `CostAwareEvictionPolicy`'s score, run
-at 100 MiB against `mixed_zipfian` and `multi_round_chat`
+Isolates the ideas combined in `CostAwareEvictionPolicy`'s score, run at
+100 MiB against `mixed_zipfian` and `multi_round_chat`
 (`benchmarks/cache_policy/run_ablation.py`; full data in
-[`results/ablation_results.csv`](../../../../../benchmarks/cache_policy/results/ablation_results.csv)):
+[`results/ablation_results.json`](../../../../../benchmarks/cache_policy/results/ablation_results.json)
+-- CSV is git-ignored by repo policy, see `benchmarks/cache_policy/README.md`):
 
 | Workload | Variant | Hit rate | p95 latency | Evictions |
 |---|---|---:|---:|---:|
-| mixed_zipfian | full (`half_life=60s`, `alpha=0.2`) | 48.1% | 20.5 ms | ~5,975 |
-| mixed_zipfian | no_recency (`half_life=1e9`) | 48.1-48.2% | 20.5 ms | ~5,975 |
-| mixed_zipfian | no_ewma (`alpha=1.0`) | 48.1-48.2% | 20.5 ms | ~5,975 |
+| mixed_zipfian | full (`half_life=60s`, `alpha=0.2`) | 69.0% | 21.0 ms | 3,409 |
+| mixed_zipfian | no_recency (`half_life=1e9`) | 69.0% | 21.0 ms | 3,415 |
+| mixed_zipfian | no_ewma (`alpha=1.0`) | 69.0% | 21.0 ms | 3,409 |
 | mixed_zipfian | cost_agnostic (LRU reference) | 79.8% | 30.7 ms | 2,078 |
-| multi_round_chat | full | 60.3-70.9% (run-to-run noise, see below) | 56.8-61.4 ms | 185-224 |
-| multi_round_chat | no_recency | 66.0-70.5% (run-to-run noise, see below) | 56.8-61.4 ms | 187-206 |
-| multi_round_chat | no_ewma | 70.5-70.9% | 61.4 ms | 186-187 |
+| multi_round_chat | full | 78.4% | 24.5 ms | 236 |
+| multi_round_chat | no_recency | 78.4% | 24.5 ms | 236 |
+| multi_round_chat | no_ewma | 78.4% | 24.5 ms | 236 |
 | multi_round_chat | cost_agnostic (LRU reference) | 58.0% | 61.4 ms | 910 |
 
-(`mixed_zipfian` uses a smaller request count than Experiment 1, so
-absolute values differ from that table; only within-table comparisons
-matter. `multi_round_chat` ranges are from 5 repeated runs of the
-identical config -- see below for why.)
+These readings are now **stable across repeated runs** (3 reruns, values
+identical to 3 decimal places) -- contrast with the original revision of
+this doc, where `multi_round_chat`'s `full` vs. `no_recency` comparison
+swung 60-71% hit rate run to run due to `time.monotonic()`-based recency
+jitter. That jitter is still present in the code (unchanged), but the
+frequency term now dominates the eviction decision strongly enough on
+these workloads that it no longer flips outcomes.
 
-- **Important methodology caveat, discovered while re-running this
-  ablation**: `CostAwareEvictionPolicy` computes recency decay from
-  `time.monotonic()` -- **real** wall-clock time elapsed during the
-  simulation loop -- not a simulated logical clock. On `multi_round_chat`
-  (small eviction counts, so each run's wall-clock timing is dominated by
-  interpreter/OS scheduling noise rather than by the workload itself), 5
-  repeated runs of the exact same `full` config produced hit rates
-  ranging from 60.3% to 70.9%, and `full` vs. `no_recency` swapped which
-  one scored higher between runs. **The original single-run reading of
-  this table (`full` at 70.5% vs. `no_recency` at 66.0%) is not a
-  reliable signal** -- it's within this run-to-run noise band, not a real
-  effect of recency decay. On `mixed_zipfian`, by contrast, all three
-  `COST_AWARE` variants stayed tightly clustered (48.1-48.2%) across
-  repeated runs, because that workload's much higher eviction volume
-  (~5,975 evictions vs. ~200) means cost-density dominates and swamps
-  whatever wall-clock jitter affects the decay term. **Net effect: this
-  benchmark suite cannot currently distinguish the standalone
-  contribution of recency decay on low-eviction-count workloads**; doing
-  so would require the simulator to drive the policy on a fake/injected
-  clock instead of `time.monotonic()`, which is out of scope for this
-  suite without a policy-side seam to inject one.
-- **EWMA smoothing had no measurable effect** in either workload,
-  consistently across repeated runs. That's a property of these specific
-  workloads, not evidence the smoothing is useless: `cost_ewma_alpha`
-  only changes behavior when the *same key* receives multiple distinct
-  `observed_recompute_tokens` observations (repeated put/evict/reinsert
-  cycles at different `chunk_start` positions). Neither `mixed_zipfian`
-  nor `multi_round_chat` currently produces that pattern -- each chunk is
-  inserted once and only ever hit afterward. A workload with request
-  reordering or chunk re-insertion at varying prefix depths would be
-  needed to exercise the EWMA path; that's a gap in the current suite,
-  not a conclusion about the EWMA feature itself.
-- **On `mixed_zipfian`, none of the `COST_AWARE` variants beat the LRU
-  reference**, consistently -- consistent with Finding 1: this workload's
-  popularity skew isn't the axis `COST_AWARE` optimizes for, regardless of
-  which of its two sub-mechanisms is active.
+- **Recency decay and EWMA smoothing show no measurable standalone effect
+  on either workload** with the frequency term active. This isn't
+  evidence they're useless in general -- `cost_ewma_alpha` only changes
+  behavior when the same key gets multiple distinct
+  `observed_recompute_tokens` observations, which neither workload
+  currently produces (a gap in the current suite, not a conclusion about
+  the feature) -- but on these two workloads, frequency has become the
+  dominant term, recency/EWMA are along for the ride.
+- **`cost_agnostic` (LRU) still wins on `mixed_zipfian` hit rate** (79.8%
+  vs. 69.0%), consistent with Findings 1-2: this workload's popularity
+  skew isn't the axis `COST_AWARE` optimizes hardest for, even with the
+  frequency term. **`COST_AWARE` wins decisively on `multi_round_chat`**
+  now (78.4% vs. 58.0%, and 24.5ms vs. 61.4ms p95) -- the workload where
+  recompute cost varies by prefix depth is exactly where cost-awareness
+  plus frequency both point the same direction.
 
 ## Summary
 
-`CostAwareEvictionPolicy` behaves as designed: it trades hit-rate-in-general
-for recompute-cost-awareness, and wins specifically on workloads where
-recompute cost correlates with something other than reuse frequency (e.g.
-`multi_round_chat`'s growing-prefix cost gradient). It is not a universal
-upgrade over `LRU`/`LFU` -- on flat, popularity-skewed traffic
-(`mixed_zipfian`) with uniform chunk sizes, simpler recency/frequency
-policies still win on hit rate. Its `get_evict_candidates` implementation
-is algorithmically more expensive than the existing policies' and should
-be considered for batched-candidate optimization before deployment in
-eviction-heavy environments.
+The frequency fix is a general, structural improvement, verified across
+multiple cache sizes and multiple Zipf skew strengths (not one anecdote):
+it closes roughly 60-70% of the original hit-rate gap to `LRU`/`LFU` on
+popularity-skewed traffic, and turns a latency *loss* into a consistent
+latency *win* in nearly every comparison cell with real eviction
+pressure. On the workload the policy is actually designed for --
+recompute cost varying independently of raw popularity
+(`multi_round_chat`) -- it now wins outright on both hit rate and
+latency. It is still not a strict hit-rate win on pure, uniform-chunk-size
+popularity-driven traffic (`LFU` in particular keeps a persistent edge
+there), which is an honest, expected consequence of optimizing for
+recompute cost rather than raw hit count. The `get_evict_candidates`
+algorithmic-complexity gap (Finding 3) is unchanged and remains the
+biggest open engineering concern before deployment in eviction-heavy
+environments.

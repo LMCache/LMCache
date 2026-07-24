@@ -26,9 +26,14 @@ for the full write-up, methodology limitations, and results.
 - `tests/benchmarks/test_cache_policy_bench.py` -- pytest-benchmark tests.
 - `benchmarks/cache_policy/plot_results.py` -- renders charts from a
   sweep CSV.
-- `benchmarks/cache_policy/run_ablation.py` -- isolates the two ideas in
-  `CostAwareEvictionPolicy`'s score (EWMA cost smoothing vs. recency
-  decay).
+- `benchmarks/cache_policy/run_ablation.py` -- isolates the ideas in
+  `CostAwareEvictionPolicy`'s score (EWMA cost smoothing, recency decay,
+  frequency weighting).
+- `benchmarks/cache_policy/robustness_sweep.py` -- checks that a policy
+  change generalizes rather than just fixing one benchmark reading: a
+  direct cost-density sanity check plus a Zipf-skew-strength sweep. See
+  the "robustness sweep" section of the evaluation doc for why this
+  exists.
 - `benchmarks/cache_policy/results/` -- checked-in sample CSV/JSON plus
   the charts referenced by the evaluation doc. Nightly CI runs write
   fresh output under `results/nightly/` (uploaded as a workflow
@@ -81,10 +86,24 @@ python benchmarks/cache_policy/run_ablation.py \
     -o benchmarks/cache_policy/results
 ```
 
-Isolates `CostAwareEvictionPolicy`'s two combined ideas: pure cost-density
+Isolates `CostAwareEvictionPolicy`'s combined ideas: pure cost-density
 ranking with recency decay disabled (`no_recency`), unsmoothed cost
 observations (`no_ewma`), and the full policy, against an `LRU` reference
 (`cost_agnostic`).
+
+### Robustness sweep
+
+```bash
+python benchmarks/cache_policy/robustness_sweep.py \
+    -o benchmarks/cache_policy/results
+```
+
+Verifies a policy-scoring change generalizes: a direct two-chunk check
+that the cost-density term still discriminates by cost once other terms
+(frequency, recency) are held constant, plus a Zipf-skew-strength sweep
+(`zipf_s` from mild to extreme popularity concentration) so a hit-rate
+improvement isn't just an artifact of the one skew value the standard
+sweep happens to use.
 
 ## Metrics collected
 

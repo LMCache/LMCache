@@ -20,6 +20,7 @@ class _ChunkMetadata:
         "last_access_time",
         "insertion_index",
         "observation_count",
+        "hit_count",
     )
 
     def __init__(
@@ -29,25 +30,44 @@ class _ChunkMetadata:
         last_access_time: float,
         insertion_index: int,
         observation_count: int = 0,
+        hit_count: int = 1,
     ) -> None:
         self.estimated_recompute_tokens = estimated_recompute_tokens
         self.memory_size_bytes = memory_size_bytes
         self.last_access_time = last_access_time
         self.insertion_index = insertion_index
         self.observation_count = observation_count
+        # Number of times this chunk has been used (initial insertion counts
+        # as one use). Distinct from ``observation_count``, which counts
+        # fresh recompute-cost samples, not reuse frequency. Feeds the
+        # frequency term in the eviction score -- see
+        # ``CostAwareEvictionPolicy._score_for_meta``.
+        self.hit_count = hit_count
 
 
 class CostAwareEvictionPolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
     """
-    Compute-Cost-Aware Eviction Policy with Recency Decay for LMCache.
+    Compute-Cost-Aware Eviction Policy with Recency Decay and Frequency
+    Weighting for LMCache.
 
     Calculates chunk eviction score according to:
         1. observed_recompute_tokens = total_request_tokens - chunk_start
         2. estimated_recompute_tokens = EWMA(observed_recompute_tokens, alpha)
         3. cost_density = estimated_recompute_tokens / memory_size_bytes
-        4. score = cost_density / (1.0 + age_seconds / half_life_seconds)
+        4. frequency_weight = 1.0 + log1p(hit_count)
+        5. score = (cost_density * frequency_weight)
+                    / (1.0 + age_seconds / half_life_seconds)
 
     The candidate with the absolute LOWEST score is selected for eviction first.
+
+    The frequency term (step 4) is a GreedyDual-Size-Frequency-style
+    combination of cost and reuse frequency: without it, a chunk that is
+    reused often but cheap to recompute scores identically to one that is
+    never reused, which is backwards for hit-rate-driven workloads with
+    uniform-ish chunk sizes. It is log-dampened (rather than a linear
+    multiplier) so that cost and recency remain meaningfully influential
+    even for very popular chunks, instead of the policy degenerating into
+    plain LFU with a cost tiebreak.
 
     Known Limitations:
     The recomputation estimate is derived from request position, but the policy
@@ -227,6 +247,25 @@ class CostAwareEvictionPolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
                 + (1.0 - self.cost_ewma_alpha) * old_est
             )
 
+    def _score_for_meta(
+        self,
+        meta: _ChunkMetadata,
+        current_time: float,
+    ) -> float:
+        """
+        Compute the cost/frequency/recency eviction score for tracked metadata.
+
+        Shared by :meth:`calculate_score` and :meth:`get_evict_candidates` so
+        the two never diverge. Assumes ``meta.estimated_recompute_tokens``
+        and ``meta.memory_size_bytes`` are not ``None``.
+        """
+        age_seconds = max(0.0, current_time - meta.last_access_time)
+        cost_density = meta.estimated_recompute_tokens / meta.memory_size_bytes
+        frequency_weight = 1.0 + math.log1p(meta.hit_count)
+        time_decay = 1.0 + (age_seconds / self.half_life_seconds)
+
+        return (cost_density * frequency_weight) / time_decay
+
     def calculate_score(
         self,
         key: KeyType,
@@ -247,11 +286,7 @@ class CostAwareEvictionPolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
         if current_time is None:
             current_time = time.monotonic()
 
-        age_seconds = max(0.0, current_time - meta.last_access_time)
-        cost_density = meta.estimated_recompute_tokens / meta.memory_size_bytes
-        time_decay = 1.0 + (age_seconds / self.half_life_seconds)
-
-        return cost_density / time_decay
+        return self._score_for_meta(meta, current_time)
 
     def put(
         self,
@@ -391,6 +426,7 @@ class CostAwareEvictionPolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
                 last_access_time=now,
                 insertion_index=self._next_insertion_index,
                 observation_count=obs_count,
+                hit_count=1,
             )
 
     def update_cost_observation(
@@ -436,7 +472,8 @@ class CostAwareEvictionPolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
         **metadata: Any,
     ) -> None:
         """
-        Record access/hit for a key. Refreshes recency and optional memory size.
+        Record access/hit for a key. Refreshes recency, hit count, and
+        optional memory size.
         Does NOT update estimated_recompute_tokens unless a real observed_recompute_tokens is explicitly provided.
         """
         now = time.monotonic()
@@ -447,6 +484,7 @@ class CostAwareEvictionPolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
         if key in self.metadata:
             meta = self.metadata[key]
             meta.last_access_time = now
+            meta.hit_count += 1
 
             # Refresh memory size if available
             extracted_mem = self._extract_memory_bytes(value=val)
@@ -525,10 +563,7 @@ class CostAwareEvictionPolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
                 return (0, 0.0, last_access, insert_idx)
             else:
                 # Category 1: Valid metadata
-                age_seconds = max(0.0, current_time - meta.last_access_time)
-                cost_density = meta.estimated_recompute_tokens / meta.memory_size_bytes
-                time_decay = 1.0 + (age_seconds / self.half_life_seconds)
-                score = cost_density / time_decay
+                score = self._score_for_meta(meta, current_time)
                 return (1, score, meta.last_access_time, meta.insertion_index)
 
         sorted_candidates = sorted(candidate_keys, key=candidate_sort_key)
