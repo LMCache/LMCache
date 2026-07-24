@@ -217,8 +217,10 @@ class QRingBufferCapture:
     def __init__(
         self,
         worker_adapter: "LMCacheMPWorkerAdapter",
+        q_ring_adapter: "QRingBufferAdapter",
     ) -> None:
         self.worker_adapter = worker_adapter
+        self.q_ring_adapter = q_ring_adapter
         self.q_layer_index: dict[str, int] = {}
         self.q_step_state: _QStepState | None = None
         self.q_step_disabled: bool = False
@@ -235,6 +237,11 @@ class QRingBufferCapture:
 
         Args:
             kv_caches: Registered KV caches.
+            kv_cache_config: vLLM KVCacheConfig, or None.
+            vllm_config: vLLM configuration.
+
+        Raises:
+            ValueError: If the kv_transfer_config is None.
         """
         if not kv_caches:
             logger.warning("No KV caches registered; skipping Q ring setup.")
@@ -279,15 +286,14 @@ class QRingBufferCapture:
             )
             num_ring_blocks = max(1, math.ceil(max_batched / block_size) * depth)
 
-        if self.worker_adapter.q_ring_adapter is not None:
-            self.worker_adapter.q_ring_adapter.register_q_ring(
-                num_layers=num_layers,
-                num_q_heads=num_q_heads,
-                head_size=head_size,
-                dtype=dtype,
-                num_ring_blocks=num_ring_blocks,
-                device=device,
-            )
+        self.q_ring_adapter.register_q_ring(
+            num_layers=num_layers,
+            num_q_heads=num_q_heads,
+            head_size=head_size,
+            dtype=dtype,
+            num_ring_blocks=num_ring_blocks,
+            device=device,
+        )
 
     def save_q_layer(
         self,
@@ -318,10 +324,9 @@ class QRingBufferCapture:
                 self.q_step_disabled = True
                 return
 
-        if self.worker_adapter.q_ring_adapter is not None:
-            self.worker_adapter.q_ring_adapter.scatter_q_layer(
-                layer_index, query, self.q_step_state.ring_slots
-            )
+        self.q_ring_adapter.scatter_q_layer(
+            layer_index, query, self.q_step_state.ring_slots
+        )
 
     def _build_q_step_state(
         self,
@@ -347,10 +352,9 @@ class QRingBufferCapture:
             )
             return None
 
-        q_ring_adapter = self.worker_adapter.q_ring_adapter
-        if q_ring_adapter is None or q_ring_adapter.q_ring is None:
+        q_ring = self.q_ring_adapter.q_ring
+        if q_ring is None:
             return None
-        q_ring = q_ring_adapter.q_ring
         block_size = q_ring.block_size
         num_query_rows = query.shape[0]
         ring_slots = torch.full(
@@ -363,9 +367,6 @@ class QRingBufferCapture:
             op = meta.op
             num_tokens = op.end - op.start
             if num_tokens <= 0:
-                continue
-            if meta.direction != "STORE":
-                row_cursor += num_tokens
                 continue
 
             if row_cursor + num_tokens > num_query_rows:
@@ -422,10 +423,7 @@ class QRingBufferCapture:
 
     def _free_partial_ring_blocks(self, stores: list[_QLayerStore]) -> None:
         """Free allocated ring blocks when a full allocation is unsuccessful"""
-        q_ring_adapter = self.worker_adapter.q_ring_adapter
-        if q_ring_adapter is None or q_ring_adapter.q_ring is None:
-            return
-        q_ring = q_ring_adapter.q_ring
+        q_ring = self.q_ring_adapter.q_ring
         if q_ring is None:
             return
         for store in stores:
@@ -449,12 +447,8 @@ class QRingBufferCapture:
         if state is None or event is None:
             return
 
-        q_ring_adapter = self.worker_adapter.q_ring_adapter
-        if q_ring_adapter is None:
-            return
-
         for q_store in state.stores:
-            q_ring_adapter.submit_q_store_request(
+            self.q_ring_adapter.submit_q_store_request(
                 q_store.request_id,
                 q_store.op,
                 q_store.ring_block_ids,
@@ -567,6 +561,18 @@ class QRingBufferAdapter:
                 f"{self._adapter._mq_timeout}s."
             ) from None
 
+    def reregister_q_ring(self) -> None:
+        """Re-register an already-built Q ring after a server recovery.
+
+        A no-op when the ring was never built (nothing to recover).
+
+        Raises:
+            ConnectionError: if the server does not respond within mq_timeout.
+        """
+        if self.q_ring is None:
+            return
+        self._send_register_q_ring_request()
+
     def scatter_q_layer(
         self,
         layer_index: int,
@@ -609,7 +615,10 @@ class QRingBufferAdapter:
         if not self._adapter.is_healthy:
             self.q_ring.free(ring_block_ids)
             return
-        assert op.token_ids is not None
+        if op.token_ids is None:
+            logger.warning("Skipping Q store for %s: token_ids is None", request_id)
+            self.q_ring.free(ring_block_ids)
+            return
         key = self._adapter._create_key(
             op.token_ids,
             op.start,

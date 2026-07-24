@@ -39,6 +39,11 @@ import zmq
 # First Party
 from lmcache import torch_dev
 from lmcache.banner import print_banner_once
+from lmcache.integration.vllm.experimental import (
+    Dispatcher,
+    FeatureContext,
+    init_dispatcher,
+)
 from lmcache.integration.vllm.kv_cache_group_edits import (
     apply_kv_cache_group_edits,
     validate_kv_cache_groups,
@@ -46,14 +51,10 @@ from lmcache.integration.vllm.kv_cache_group_edits import (
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
 )
-from lmcache.integration.vllm.utils import (
-    lmcache_get_or_create_config,
-    mla_enabled,
-    vllm_layout_hints,
-)
-from lmcache.sdk.qringbuffer import QRingBufferCapture
+from lmcache.integration.vllm.utils import mla_enabled, vllm_layout_hints
 from lmcache.utils import init_logger as lmcache_init_logger
 from lmcache.v1.multiprocess.group_view import slice_block_ids_per_group
+from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
 
 try:
     # First Party
@@ -62,6 +63,7 @@ try:
         LMCacheMPWorkerAdapter,
         LoadStoreOp,
         ParallelStrategy,
+        send_lmcache_request,
     )
 
     try:
@@ -649,6 +651,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             vllm_config, n_servers
         )
 
+        self.dispatcher: Dispatcher = Dispatcher([])
+
         if self.role == KVConnectorRole.SCHEDULER:
             # Banner from the scheduler role only, so tensor-parallel
             # deployments print it once rather than once per worker.
@@ -679,9 +683,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 parallel_strategy=parallel_strategy,
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
-            self.q_ring_capture: "QRingBufferCapture | None" = None
-            if self.transfer_intermediate_tensors:
-                self.q_ring_capture = QRingBufferCapture(self.worker_adapter)
+            ctx = FeatureContext(
+                worker_adapter=self.worker_adapter,
+                send_lmcache_request=send_lmcache_request,
+            )
+            requested = (
+                {TRANSFER_QUERY} if self.transfer_intermediate_tensors else set()
+            )
+            self.dispatcher = init_dispatcher(ctx, requested)
+            self.worker_adapter.dispatcher = self.dispatcher
         else:
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
 
@@ -734,14 +744,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         cfg = self._vllm_config.kv_transfer_config
         if cfg is None:
             return False
-
         vllm_transfer = cfg.get_from_extra_config(
             "lmcache.mp.transfer_intermediate_tensors", False
         )
-        lmcache_config = lmcache_get_or_create_config()
-        lmcache_transfer = lmcache_config.transfer_intermediate_tensors
-
-        return vllm_transfer and lmcache_transfer
+        return vllm_transfer
 
     # ==============================
     # Worker-side methods
@@ -781,10 +787,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self.worker_adapter.register_kv_caches(
             kv_caches, engine_group_infos=engine_group_infos
         )
-        if self.q_ring_capture is not None:
-            self.q_ring_capture.setup_q_ring(
-                kv_caches, kv_cache_config, self._vllm_config
-            )
+        self.dispatcher.register(kv_caches, kv_cache_config, self._vllm_config)
         return
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
@@ -852,10 +855,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         to the connector. This is called from within attention layer to
         enable async copying during execution.
 
-        This is a no-op in MP connector, so is used for scattering this layer's
-        query tensor to the paged-Q ring, before the Q is then saved to LMCache
-        in wait_for_save().
-
         Args:
             layer_name (str): the name of the layer.
             kv_layer (torch.Tensor): the paged KV buffer of the current
@@ -863,10 +862,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
         """
-        if self.q_ring_capture is not None:
-            self.q_ring_capture.save_q_layer(
-                layer_name, self._get_connector_metadata(), **kwargs
-            )
+        self.dispatcher.save_kv_layer(
+            layer_name, self._get_connector_metadata(), **kwargs
+        )
         return
 
     def wait_for_save(self):
@@ -891,8 +889,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             cache_salts.append(meta.cache_salt)
 
         if len(request_ids) == 0:
-            if self.q_ring_capture is not None:
-                self.q_ring_capture.batched_submit_qstore_requests(event=None)
+            self.dispatcher.wait_for_save(None)
             return
 
         with torch_dev.stream(torch_dev.current_stream()):
@@ -902,8 +899,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self.worker_adapter.batched_submit_store_requests(
             request_ids, ops, event, cache_salts=cache_salts
         )
-        if self.q_ring_capture is not None:
-            self.q_ring_capture.batched_submit_qstore_requests(event=event)
+        self.dispatcher.wait_for_save(event)
 
     # TODO: How does lmcache driven path handle preemption?
     # NOTE1: handle_preemptions is called by vllm each step regardless
