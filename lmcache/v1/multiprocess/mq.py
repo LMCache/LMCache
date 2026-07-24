@@ -27,8 +27,10 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.gpu_connector.kv_format.types import LayoutHints
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
@@ -43,6 +45,7 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.futures import (
     MessagingFuture,
 )
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocol import (
     HandlerType,
     RequestType,
@@ -1152,6 +1155,174 @@ def _p2p_unlock_python_to_request(
     )
 
 
+# ---------------------------------------------------------------------
+# Wave 5 helpers.
+# ---------------------------------------------------------------------
+
+
+# DeviceIPCWrapper preserves its concrete subclass via pickle -- the
+# wrapper base class ships Serialize/Deserialize static methods for
+# exactly this reason.  Reusing them keeps the wire format aligned
+# with the on-disk / cross-process behaviour without introducing a
+# second serialization path.
+def _wrapper_python_to_proto(
+    w: DeviceIPCWrapper,
+) -> "lmcache_mq_pb2.DeviceIpcWrapper":
+    return lmcache_mq_pb2.DeviceIpcWrapper(
+        pickled_payload=DeviceIPCWrapper.Serialize(w)
+    )
+
+
+def _wrapper_proto_to_python(
+    msg: "lmcache_mq_pb2.DeviceIpcWrapper",
+) -> DeviceIPCWrapper:
+    return DeviceIPCWrapper.Deserialize(msg.pickled_payload)
+
+
+def _wrappers_python_to_proto(
+    wrappers: list[DeviceIPCWrapper],
+) -> list["lmcache_mq_pb2.DeviceIpcWrapper"]:
+    return [_wrapper_python_to_proto(w) for w in wrappers]
+
+
+def _wrappers_proto_to_python(msgs: Any) -> list[DeviceIPCWrapper]:
+    return [_wrapper_proto_to_python(m) for m in msgs]
+
+
+def _engine_group_info_python_to_proto(
+    info: EngineGroupInfo,
+) -> "lmcache_mq_pb2.EngineGroupInfo":
+    return lmcache_mq_pb2.EngineGroupInfo(
+        engine_group_id=info.engine_group_id,
+        layer_indices=list(info.layer_indices),
+        tokens_per_block=info.tokens_per_block,
+        sw_size_tokens=info.sw_size_tokens,
+    )
+
+
+def _engine_group_info_proto_to_python(
+    msg: "lmcache_mq_pb2.EngineGroupInfo",
+) -> EngineGroupInfo:
+    return EngineGroupInfo(
+        engine_group_id=msg.engine_group_id,
+        layer_indices=tuple(msg.layer_indices),
+        tokens_per_block=msg.tokens_per_block,
+        sw_size_tokens=msg.sw_size_tokens,
+    )
+
+
+# LayoutHints is a TypedDict; empty dict maps to empty bytes on the
+# wire so a fresh caller talking to an older peer still round-trips.
+def _layout_hints_to_bytes(hints: Optional[LayoutHints]) -> bytes:
+    if not hints:
+        return b""
+    return pickle.dumps(dict(hints))
+
+
+def _layout_hints_from_bytes(data: bytes) -> LayoutHints:
+    if not data:
+        return {}
+    return pickle.loads(data)
+
+
+# --- RegisterKvCache -------------------------------------------------
+
+
+def _register_kv_cache_request_to_python(
+    req: "lmcache_mq_pb2.RegisterKvCacheRequest",
+) -> tuple[Any, ...]:
+    return (
+        req.instance_id,
+        _wrappers_proto_to_python(req.kv_cache),
+        req.model_name,
+        req.world_size,
+        EngineType(req.engine_type),
+        _layout_hints_from_bytes(req.pickled_layout_hints),
+        [_engine_group_info_proto_to_python(g) for g in req.engine_group_infos],
+    )
+
+
+def _register_kv_cache_python_to_request(
+    instance_id: int,
+    kv_cache: list[DeviceIPCWrapper],
+    model_name: str,
+    world_size: int,
+    engine_type: EngineType,
+    layout_hints: Optional[LayoutHints],
+    engine_group_infos: list[EngineGroupInfo],
+) -> "lmcache_mq_pb2.RegisterKvCacheRequest":
+    return lmcache_mq_pb2.RegisterKvCacheRequest(
+        instance_id=instance_id,
+        kv_cache=_wrappers_python_to_proto(kv_cache),
+        model_name=model_name,
+        world_size=world_size,
+        engine_type=engine_type.value,
+        pickled_layout_hints=_layout_hints_to_bytes(layout_hints),
+        engine_group_infos=[
+            _engine_group_info_python_to_proto(g) for g in engine_group_infos
+        ],
+    )
+
+
+# --- CbRegisterKvCache ----------------------------------------------
+
+
+def _cb_register_kv_cache_request_to_python(
+    req: "lmcache_mq_pb2.CbRegisterKvCacheRequest",
+) -> tuple[Any, ...]:
+    return (
+        req.instance_id,
+        _wrappers_proto_to_python(req.kv_cache),
+        req.model_name,
+        req.world_size,
+    )
+
+
+def _cb_register_kv_cache_python_to_request(
+    instance_id: int,
+    kv_cache: list[DeviceIPCWrapper],
+    model_name: str,
+    world_size: int,
+) -> "lmcache_mq_pb2.CbRegisterKvCacheRequest":
+    return lmcache_mq_pb2.CbRegisterKvCacheRequest(
+        instance_id=instance_id,
+        kv_cache=_wrappers_python_to_proto(kv_cache),
+        model_name=model_name,
+        world_size=world_size,
+    )
+
+
+# --- CbRegisterRopeV3 -----------------------------------------------
+
+
+def _cb_register_rope_v3_request_to_python(
+    req: "lmcache_mq_pb2.CbRegisterRopeV3Request",
+) -> tuple[Any, ...]:
+    return (
+        req.instance_id,
+        _wrappers_proto_to_python(req.cos_sin_caches_ipc),
+        req.head_size,
+        bool(req.is_neox_style),
+        list(req.group_to_cache),
+    )
+
+
+def _cb_register_rope_v3_python_to_request(
+    instance_id: int,
+    cos_sin_caches_ipc: list[DeviceIPCWrapper],
+    head_size: int,
+    is_neox_style: bool,
+    group_to_cache: list[int],
+) -> "lmcache_mq_pb2.CbRegisterRopeV3Request":
+    return lmcache_mq_pb2.CbRegisterRopeV3Request(
+        instance_id=instance_id,
+        cos_sin_caches_ipc=_wrappers_python_to_proto(cos_sin_caches_ipc),
+        head_size=head_size,
+        is_neox_style=bool(is_neox_style),
+        group_to_cache=list(group_to_cache),
+    )
+
+
 # ---------------------------------------------------------------------------
 # msgspec encode / decode helpers (payload bytes wrapped inside proto)
 # ---------------------------------------------------------------------------
@@ -1513,6 +1684,36 @@ _TYPED_RPCS: dict[RequestType, TypedRpcSpec] = {
         python_to_request=_p2p_unlock_python_to_request,
         python_to_response=_make_empty_python_to_response(
             lmcache_mq_pb2.P2pUnlockObjectsResponse
+        ),
+        response_to_python=_empty_response_to_python,
+    ),
+    RequestType.REGISTER_KV_CACHE: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.RegisterKvCacheRequest,
+        response_message=lmcache_mq_pb2.RegisterKvCacheResponse,
+        request_to_python=_register_kv_cache_request_to_python,
+        python_to_request=_register_kv_cache_python_to_request,
+        python_to_response=_make_empty_python_to_response(
+            lmcache_mq_pb2.RegisterKvCacheResponse
+        ),
+        response_to_python=_empty_response_to_python,
+    ),
+    RequestType.CB_REGISTER_KV_CACHE: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.CbRegisterKvCacheRequest,
+        response_message=lmcache_mq_pb2.CbRegisterKvCacheResponse,
+        request_to_python=_cb_register_kv_cache_request_to_python,
+        python_to_request=_cb_register_kv_cache_python_to_request,
+        python_to_response=_make_empty_python_to_response(
+            lmcache_mq_pb2.CbRegisterKvCacheResponse
+        ),
+        response_to_python=_empty_response_to_python,
+    ),
+    RequestType.CB_REGISTER_ROPE_V3: TypedRpcSpec(
+        request_message=lmcache_mq_pb2.CbRegisterRopeV3Request,
+        response_message=lmcache_mq_pb2.CbRegisterRopeV3Response,
+        request_to_python=_cb_register_rope_v3_request_to_python,
+        python_to_request=_cb_register_rope_v3_python_to_request,
+        python_to_response=_make_empty_python_to_response(
+            lmcache_mq_pb2.CbRegisterRopeV3Response
         ),
         response_to_python=_empty_response_to_python,
     ),

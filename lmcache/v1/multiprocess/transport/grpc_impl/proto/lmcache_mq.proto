@@ -485,6 +485,74 @@ message P2pUnlockObjectsRequest {
 message P2pUnlockObjectsResponse {}
 
 // -----------------------------------------------------------------------
+// Wave 5 messages: the last three Register* rpcs that carry
+// ``DeviceIPCWrapper`` (a pickle-preserved base class chosen so the
+// concrete subclass -- CudaIPCWrapper, RawCudaIPCWrapper,
+// CpuShmTensorWrapper, ... -- travels with the object).  The
+// wrapper's own ``Serialize`` / ``Deserialize`` static methods do the
+// pickle round-trip today, so the wire carries the opaque bytes and
+// this .proto stays free of subclass-specific fields.  A follow-up
+// PR can promote ``DeviceIpcWrapper`` to a ``oneof`` without touching
+// any rpc definition below.
+// -----------------------------------------------------------------------
+message DeviceIpcWrapper {
+  // Subclass identity preserved by ``DeviceIPCWrapper.Serialize``
+  // (pickle under the hood).  Length only bounded by the wire limit.
+  bytes pickled_payload = 1;
+}
+
+// EngineGroupInfo mirrors the ``msgspec.Struct`` field-by-field.
+message EngineGroupInfo {
+  int64 engine_group_id = 1;
+  repeated int64 layer_indices = 2;
+  int64 tokens_per_block = 3;
+  int64 sw_size_tokens = 4;
+}
+
+// RegisterKvCache: the GPU-path registration.  ``engine_type`` is
+// carried as the enum's string value (``"vllm"`` / ``"sglang"`` /
+// ``"trtllm"`` / ``"mock"``) -- matches how msgspec encoded it and
+// keeps forward-compat cheap when new engines land.  ``LayoutHints``
+// is a ``TypedDict``: pickle bytes so the schema layer stays free to
+// evolve without touching the .proto.
+message RegisterKvCacheRequest {
+  int64 instance_id = 1;
+  repeated DeviceIpcWrapper kv_cache = 2;
+  string model_name = 3;
+  int64 world_size = 4;
+  string engine_type = 5;
+  bytes pickled_layout_hints = 6;
+  repeated EngineGroupInfo engine_group_infos = 7;
+}
+
+message RegisterKvCacheResponse {}
+
+// CbRegisterKvCache: the CB-path registration.  Same shape as the
+// GPU path but without the format-detection metadata (CB flow is
+// engine-agnostic once the wrapper list is registered).
+message CbRegisterKvCacheRequest {
+  int64 instance_id = 1;
+  repeated DeviceIpcWrapper kv_cache = 2;
+  string model_name = 3;
+  int64 world_size = 4;
+}
+
+message CbRegisterKvCacheResponse {}
+
+// CbRegisterRopeV3: publish per-engine rope caches (dual-RoPE models
+// send two).  ``group_to_cache`` maps engine group idx -> cache idx;
+// empty means "all groups use cache 0".
+message CbRegisterRopeV3Request {
+  int64 instance_id = 1;
+  repeated DeviceIpcWrapper cos_sin_caches_ipc = 2;
+  int64 head_size = 3;
+  bool is_neox_style = 4;
+  repeated int64 group_to_cache = 5;
+}
+
+message CbRegisterRopeV3Response {}
+
+// -----------------------------------------------------------------------
 // Service.  One rpc per RequestType.  Method names are the CamelCase
 // form of the RequestType enum (STORE -> Store, CB_LOOKUP_PRE_COMPUTED_V2
 // -> CbLookupPreComputedV2, etc.) so gRPC's built-in method routing
@@ -493,7 +561,7 @@ message P2pUnlockObjectsResponse {}
 
 service MessageQueue {
   // Engine operations
-  rpc RegisterKvCache(BytesRequest) returns (BytesResponse);
+  rpc RegisterKvCache(RegisterKvCacheRequest) returns (RegisterKvCacheResponse);
   rpc UnregisterKvCache(UnregisterKvCacheRequest) returns (UnregisterKvCacheResponse);
   rpc Store(StoreRequest) returns (StoreResponse);
   rpc Retrieve(RetrieveRequest) returns (RetrieveResponse);
@@ -522,7 +590,7 @@ service MessageQueue {
   rpc Noop(NoopRequest) returns (NoopResponse);
 
   // Blend V1
-  rpc CbRegisterKvCache(BytesRequest) returns (BytesResponse);
+  rpc CbRegisterKvCache(CbRegisterKvCacheRequest) returns (CbRegisterKvCacheResponse);
   rpc CbUnregisterKvCache(CbUnregisterKvCacheRequest) returns (CbUnregisterKvCacheResponse);
   rpc CbStorePreComputed(CbStorePreComputedRequest) returns (CbStorePreComputedResponse);
   rpc CbLookupPreComputed(CbLookupPreComputedRequest) returns (CbLookupPreComputedResponse);
@@ -534,7 +602,7 @@ service MessageQueue {
   rpc CbRetrievePreComputedV2(CbRetrievePreComputedV2Request) returns (CbRetrievePreComputedV2Response);
 
   // Blend V3
-  rpc CbRegisterRopeV3(BytesRequest) returns (BytesResponse);
+  rpc CbRegisterRopeV3(CbRegisterRopeV3Request) returns (CbRegisterRopeV3Response);
   rpc CbUnregisterRopeV3(CbUnregisterRopeV3Request) returns (CbUnregisterRopeV3Response);
   rpc CbRetrievePreComputedV3(CbRetrievePreComputedV3Request) returns (CbRetrievePreComputedV3Response);
   rpc CbUnifiedLookup(CbUnifiedLookupRequest) returns (CbUnifiedLookupResponse);

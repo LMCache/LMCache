@@ -19,12 +19,14 @@ import threading
 
 # Third Party
 import pytest
+import torch
 
 # First Party
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     CBMatchResult,
     CBUnifiedLookupResult,
+    DeviceIPCWrapper,
     IPCCacheServerKey,
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
@@ -730,3 +732,210 @@ def test_p2p_lookup_and_query_roundtrip() -> None:
     (round_keys,) = unlock.request_to_python(proto_req)
     assert round_keys == keys
     assert unlock.response_to_python(unlock.python_to_response(None)) is None
+
+
+# ---------------------------------------------------------------------
+# Wave 5: Register* rpcs.  DeviceIPCWrapper subclasses are pickle-
+# preserved on the wire, so a bare test double subclass suffices to
+# prove the identity round-trip without touching the CUDA / SHM paths.
+# ---------------------------------------------------------------------
+
+
+class _FakeIPCWrapper(DeviceIPCWrapper):
+    """Minimal wrapper subclass used only by these tests -- exercises
+    the pickle identity guarantee end-to-end without needing a real
+    device."""
+
+    def __init__(self, tag: str = "fake") -> None:
+        self.handle = ("fake-handle", tag)
+        self.dtype = torch.float16
+        self.shape = (2, 4)
+        self.stride = (4, 1)
+        self.storage_offset = 0
+        self.device_uuid = "test-uuid-" + tag
+
+
+@pytest.mark.parametrize(
+    "request_type",
+    [
+        RequestType.REGISTER_KV_CACHE,
+        RequestType.CB_REGISTER_KV_CACHE,
+        RequestType.CB_REGISTER_ROPE_V3,
+    ],
+)
+def test_wave5_rpc_is_typed(request_type: RequestType) -> None:
+    """Wave 5 finishes the migration: 36 / 36 typed rpcs."""
+    assert request_type in _TYPED_RPCS
+    spec = _TYPED_RPCS[request_type]
+    assert spec.request_message is not lmcache_mq_pb2.BytesRequest
+    assert spec.response_message is not lmcache_mq_pb2.BytesResponse
+
+
+def test_typed_rpc_coverage_is_complete() -> None:
+    """Enforce the migration invariant: every RequestType is typed."""
+    missing = [rt.name for rt in RequestType if rt not in _TYPED_RPCS]
+    assert not missing, f"legacy rpcs remain: {missing}"
+
+
+def test_register_kv_cache_roundtrip() -> None:
+    """DeviceIPCWrapper subclass identity + LayoutHints + EngineGroupInfo
+    all survive the wire."""
+    # First Party
+    from lmcache.utils import EngineType
+    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+
+    spec = _TYPED_RPCS[RequestType.REGISTER_KV_CACHE]
+    kv_cache = [_FakeIPCWrapper("a"), _FakeIPCWrapper("b")]
+    hints: dict = {"kv_layout": "NHD", "tokens_per_block": 16}
+    groups = [
+        EngineGroupInfo(
+            engine_group_id=0,
+            layer_indices=(0, 1, 2),
+            tokens_per_block=16,
+            sw_size_tokens=-1,
+        ),
+        EngineGroupInfo(
+            engine_group_id=1,
+            layer_indices=(3, 4),
+            tokens_per_block=16,
+            sw_size_tokens=128,
+        ),
+    ]
+    proto_req = spec.python_to_request(
+        7,
+        kv_cache,
+        "opt-125m",
+        4,
+        EngineType.VLLM,
+        hints,
+        groups,
+    )
+    assert isinstance(proto_req, lmcache_mq_pb2.RegisterKvCacheRequest)
+    (
+        iid,
+        r_kv,
+        model,
+        world,
+        etype,
+        r_hints,
+        r_groups,
+    ) = spec.request_to_python(proto_req)
+    assert iid == 7
+    assert model == "opt-125m"
+    assert world == 4
+    assert etype is EngineType.VLLM
+    assert r_hints == hints
+    assert r_groups == groups
+    # Subclass identity + tags survive.
+    assert len(r_kv) == 2
+    assert all(isinstance(w, _FakeIPCWrapper) for w in r_kv)
+    assert r_kv[0].device_uuid == "test-uuid-a"
+    assert r_kv[1].device_uuid == "test-uuid-b"
+
+    # Empty LayoutHints -> empty wire bytes.
+    proto_req = spec.python_to_request(1, [], "m", 1, EngineType.MOCK, {}, [])
+    assert proto_req.pickled_layout_hints == b""
+
+
+def test_cb_register_kv_cache_roundtrip() -> None:
+    spec = _TYPED_RPCS[RequestType.CB_REGISTER_KV_CACHE]
+    kv_cache = [_FakeIPCWrapper("cb")]
+    proto_req = spec.python_to_request(9, kv_cache, "llama", 2)
+    iid, r_kv, model, world = spec.request_to_python(proto_req)
+    assert (iid, model, world) == (9, "llama", 2)
+    assert isinstance(r_kv[0], _FakeIPCWrapper)
+    assert r_kv[0].device_uuid == "test-uuid-cb"
+
+
+def test_cb_register_rope_v3_roundtrip() -> None:
+    spec = _TYPED_RPCS[RequestType.CB_REGISTER_ROPE_V3]
+    caches = [_FakeIPCWrapper("rope-0"), _FakeIPCWrapper("rope-1")]
+    proto_req = spec.python_to_request(3, caches, 128, True, [0, 1, 0])
+    iid, r_caches, head, neox, mapping = spec.request_to_python(proto_req)
+    assert iid == 3
+    assert head == 128
+    assert neox is True
+    assert mapping == [0, 1, 0]
+    assert [w.device_uuid for w in r_caches] == [
+        "test-uuid-rope-0",
+        "test-uuid-rope-1",
+    ]
+
+
+def test_register_kv_cache_grpc_roundtrip() -> None:
+    """End-to-end gRPC hop for the biggest Wave 5 rpc, proving the
+    pickle-in-proto pattern holds over the real transport."""
+    # First Party
+    from lmcache.utils import EngineType
+    from lmcache.v1.gpu_connector.kv_format.types import LayoutHints
+    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+    from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
+
+    port = _find_free_port()
+    server_url = f"grpc://127.0.0.1:{port}"
+    seen: list[tuple] = []
+
+    def handler(
+        instance_id: int,
+        kv_cache: list[DeviceIPCWrapper],
+        model_name: str,
+        world_size: int,
+        engine_type: EngineType,
+        layout_hints: LayoutHints,
+        engine_group_infos: list[EngineGroupInfo],
+    ) -> None:
+        seen.append(
+            (
+                instance_id,
+                len(kv_cache),
+                model_name,
+                world_size,
+                engine_type,
+                layout_hints,
+                engine_group_infos,
+            )
+        )
+        return None
+
+    server = MessageQueueServer(server_url)
+    server.add_handler(
+        RequestType.REGISTER_KV_CACHE,
+        get_payload_classes(RequestType.REGISTER_KV_CACHE),
+        HandlerType.SYNC,
+        handler,
+    )
+    server.start()
+    try:
+        client = MessageQueueClient(server_url)
+        kv = [_FakeIPCWrapper("e2e")]
+        hints = {"kv_layout": "HND"}
+        groups = [
+            EngineGroupInfo(
+                engine_group_id=0,
+                layer_indices=(0,),
+                tokens_per_block=32,
+                sw_size_tokens=-1,
+            ),
+        ]
+        fut: MessagingFuture = client.submit_request(
+            RequestType.REGISTER_KV_CACHE,
+            [5, kv, "opt-125m", 2, EngineType.VLLM, hints, groups],
+        )
+        assert fut.result(timeout=5.0) is None
+        assert len(seen) == 1
+        (
+            iid,
+            n_kv,
+            model,
+            world,
+            etype,
+            r_hints,
+            r_groups,
+        ) = seen[0]
+        assert (iid, n_kv, model, world) == (5, 1, "opt-125m", 2)
+        assert etype is EngineType.VLLM
+        assert r_hints == hints
+        assert r_groups == groups
+        client.close()
+    finally:
+        server.close()
