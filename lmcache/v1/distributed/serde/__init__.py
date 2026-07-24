@@ -8,6 +8,12 @@ from lmcache.v1.distributed.serde.base import (
     SerdeTaskId,
     Serializer,
 )
+from lmcache.v1.distributed.serde.encrypt import (
+    DecryptDeserializer,
+    EncryptSerializer,
+    HkdfKeyProvider,
+    KeyProvider,
+)
 from lmcache.v1.distributed.serde.factory import (
     create_serde_processor,
     get_registered_serde_types,
@@ -38,9 +44,13 @@ from lmcache.v1.distributed.serde.utils import (
 
 __all__ = [
     "AsyncSerdeProcessor",
+    "DecryptDeserializer",
     "Deserializer",
+    "EncryptSerializer",
     "Fp8QuantizationDeserializer",
     "Fp8QuantizationSerializer",
+    "HkdfKeyProvider",
+    "KeyProvider",
     "LayoutDescGroup",
     "MemoryObjGroup",
     "MultiDeserializer",

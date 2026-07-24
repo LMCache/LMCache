@@ -64,6 +64,12 @@ serde factory.
      - ``preset`` (default ``turboquant_k8v4``), ``head_dim`` (optional,
        default 128), ``block_size`` (default 16), ``max_workers`` (thread
        pool size, default 1)
+   * - ``encrypt``
+     - AES-GCM authenticated encryption of KV bytes at rest in L2, keyed
+       per ``cache_salt``.
+     - ``key_provider`` (default ``hkdf``), ``master_key_path`` (required
+       for ``hkdf``), ``aes_bits`` (``128`` default, or ``256``),
+       ``max_workers`` (thread pool size, default 1)
 
 
 TurboQuant serde
@@ -109,6 +115,52 @@ Supported presets:
    * - ``turboquant_3bit_nc``
      - 3-bit MSE key with norm correction
      - 3-bit value quantization
+
+
+Encryption serde
+----------------
+
+The ``encrypt`` serde encrypts KV bytes with AES-GCM before they land in L2
+and decrypts them on load, so a party who can read the remote storage
+(bucket / disk / RESP) cannot recover cache contents. Each tenant's data is
+encrypted under a distinct key derived from its ``cache_salt``.
+
+.. code-block:: bash
+
+    lmcache server \
+        --l1-size-gb 100 \
+        --eviction-policy LRU \
+        --l2-adapter '{
+            "type": "s3",
+            "bucket": "my-kv-cache",
+            "serde": {
+                "type": "encrypt",
+                "key_provider": "hkdf",
+                "master_key_path": "/etc/lmcache/keys/master"
+            }
+        }'
+
+Provide the master key as a file (e.g. a mounted Kubernetes ``Secret``).
+The ``hkdf`` provider reads it once at startup and derives a per-``cache_salt``
+key via HKDF-SHA256; the master key is never written to L2. ``aes_bits``
+defaults to ``128`` (already unbreakable and slightly faster); set ``256`` if a
+compliance mandate requires it.
+
+.. note::
+
+   Scope is the **L2 tier only** — L1 (host RAM) and L0 (GPU) hold plaintext,
+   so this protects against readers of the remote storage, not against a party
+   with access to a running server process. It also does not hide object
+   *metadata*: the ``cache_salt`` and a content-derived ``chunk_hash`` remain
+   visible in L2 object names. See
+   :doc:`the design doc </design/v1/distributed/serde/encryption>` for the full
+   threat model.
+
+.. warning::
+
+   The ``hkdf`` provider derives every tenant's key from one shared master
+   key, so any server holding the master can decrypt any tenant's data
+   ("fleet vs. outside" trust). It is not per-tenant access isolation.
 
 
 Writing a custom serde
