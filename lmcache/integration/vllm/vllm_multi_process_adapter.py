@@ -66,10 +66,6 @@ class ExtraConfigDefault(enum.Enum):
     # Mirrors the ``LMCACHE_MP_TRANSFER_MODE`` env var; this extra_config
     # key wins when both are set.
     mp_transfer_mode = "auto"
-    # Whether or not to store intermediate tensor (in vLLM side) via
-    # ``lmcache.mp.transfer_intermediate_tensors``. The same flag has to be
-    # set in LMCache server side via ``transfer_intermediate_tensors`` too.
-    transfer_intermediate_tensors = False
 
 
 # Backward-compatible aliases for the legacy `lmcache_mp_connector_0180`
