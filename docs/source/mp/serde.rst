@@ -64,7 +64,7 @@ serde factory.
      - ``preset`` (default ``turboquant_k8v4``), ``head_dim`` (optional,
        default 128), ``block_size`` (default 16), ``max_workers`` (thread
        pool size, default 1)
-   * - ``encrypt``
+   * - ``aesgcm``
      - AES-GCM authenticated encryption of KV bytes at rest in L2, keyed
        per ``cache_salt``.
      - ``key_provider`` (default ``hkdf``), ``master_key_path`` (required
@@ -120,7 +120,7 @@ Supported presets:
 Encryption serde
 ----------------
 
-The ``encrypt`` serde encrypts KV bytes with AES-GCM before they land in L2
+The ``aesgcm`` serde encrypts KV bytes with AES-GCM before they land in L2
 and decrypts them on load, so a party who can read the remote storage
 (bucket / disk / RESP) cannot recover cache contents. Each tenant's data is
 encrypted under a distinct key derived from its ``cache_salt``.
@@ -134,7 +134,7 @@ encrypted under a distinct key derived from its ``cache_salt``.
             "type": "s3",
             "bucket": "my-kv-cache",
             "serde": {
-                "type": "encrypt",
+                "type": "aesgcm",
                 "key_provider": "hkdf",
                 "master_key_path": "/etc/lmcache/keys/master"
             }
@@ -153,7 +153,7 @@ compliance mandate requires it.
    with access to a running server process. It also does not hide object
    *metadata*: the ``cache_salt`` and a content-derived ``chunk_hash`` remain
    visible in L2 object names. See
-   :doc:`the design doc </design/v1/distributed/serde/encryption>` for the full
+   :doc:`the design doc </design/v1/distributed/serde/aesgcm>` for the full
    threat model.
 
 .. warning::
@@ -163,7 +163,7 @@ compliance mandate requires it.
    ("fleet vs. outside" trust). It is not per-tenant access isolation.
 
 A runnable end-to-end example (server + vLLM + store / clear-L1 / decrypt) is at
-:file:`examples/serde/encrypt/`.
+:file:`examples/serde/aesgcm/`.
 
 
 Writing a custom serde

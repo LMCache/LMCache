@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # First Party
+from lmcache.v1.distributed.serde.aesgcm import (
+    AesGcmDeserializer,
+    AesGcmSerializer,
+)
 from lmcache.v1.distributed.serde.async_processor import AsyncSerdeProcessor
 from lmcache.v1.distributed.serde.base import (
     Deserializer,
@@ -7,12 +11,6 @@ from lmcache.v1.distributed.serde.base import (
     SerdeProcessor,
     SerdeTaskId,
     Serializer,
-)
-from lmcache.v1.distributed.serde.encrypt import (
-    DecryptDeserializer,
-    EncryptSerializer,
-    HkdfKeyProvider,
-    KeyProvider,
 )
 from lmcache.v1.distributed.serde.factory import (
     create_serde_processor,
@@ -22,6 +20,10 @@ from lmcache.v1.distributed.serde.factory import (
 from lmcache.v1.distributed.serde.fp8 import (
     Fp8QuantizationDeserializer,
     Fp8QuantizationSerializer,
+)
+from lmcache.v1.distributed.serde.key_provider import (
+    HkdfKeyProvider,
+    KeyProvider,
 )
 from lmcache.v1.distributed.serde.multi import (
     LayoutDescGroup,
@@ -43,10 +45,10 @@ from lmcache.v1.distributed.serde.utils import (
 )
 
 __all__ = [
+    "AesGcmDeserializer",
+    "AesGcmSerializer",
     "AsyncSerdeProcessor",
-    "DecryptDeserializer",
     "Deserializer",
-    "EncryptSerializer",
     "Fp8QuantizationDeserializer",
     "Fp8QuantizationSerializer",
     "HkdfKeyProvider",

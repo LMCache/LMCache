@@ -1,6 +1,6 @@
 # Encryption Serde End-to-End Example
 
-This example demonstrates the `encrypt` serde: the L2 disk adapter encrypts KV
+This example demonstrates the `aesgcm` serde: the L2 disk adapter encrypts KV
 cache with **AES-GCM** before writing to disk, keyed **per `cache_salt`**, and
 decrypts it back on prefetch. It protects KV bytes at rest against anyone who
 can read the L2 storage.
@@ -11,7 +11,7 @@ can read the L2 storage.
 2. Starts an `lmcache server` with:
    - **L1**: 20 GB CPU memory cache, LRU eviction
    - **L2**: filesystem (disk) adapter
-   - **Serde**: `encrypt` (AES-128-GCM), key derived per `cache_salt` via
+   - **Serde**: `aesgcm` (AES-128-GCM), key derived per `cache_salt` via
      HKDF-SHA256 from the master key
 3. Starts vLLM connected via `LMCacheMPConnector`
 4. Sends an inference request **with a `cache_salt`** — KV is computed, written
@@ -23,16 +23,16 @@ can read the L2 storage.
 
 ## Files
 
-- `run_serde_encrypt_example.sh` — full end-to-end: `lmcache server` +
+- `run_serde_aesgcm_example.sh` — full end-to-end: `lmcache server` +
   `vllm serve` + real inference, then clear L1 and re-infer to hit the L2 path.
 
 ## Quick sanity check (no vLLM required)
 
-The pytest suite exercises the encrypt transform (round-trip, per-tenant key
+The pytest suite exercises the aesgcm transform (round-trip, per-tenant key
 isolation, tamper detection) without needing vLLM:
 
 ```bash
-pytest tests/v1/distributed/serde/test_encrypt.py -xvs
+pytest tests/v1/distributed/serde/test_aesgcm.py -xvs
 ```
 
 ## Requirements
@@ -44,7 +44,7 @@ pytest tests/v1/distributed/serde/test_encrypt.py -xvs
 ## Run
 
 ```bash
-./run_serde_encrypt_example.sh
+./run_serde_aesgcm_example.sh
 ```
 
 Override defaults via environment variables:
@@ -54,11 +54,11 @@ MODEL="meta-llama/Llama-3.1-8B-Instruct" \
 GPU_DEVICE=0 \
 CACHE_SALT=tenant-a \
 AES_BITS=128 \
-./run_serde_encrypt_example.sh
+./run_serde_aesgcm_example.sh
 ```
 
 Logs and the generated master key live under
-`/tmp/lmcache_serde_encrypt_example/` (override with `TMP_DIR`).
+`/tmp/lmcache_serde_aesgcm_example/` (override with `TMP_DIR`).
 
 ## What to check
 
@@ -76,7 +76,7 @@ key, then repeat the clear-L1 + re-request steps:
 
 ```bash
 # after step 3 has stored objects:
-truncate -s -1 "$(find /tmp/lmcache_serde_encrypt_example/disk -type f | head -1)"
+truncate -s -1 "$(find /tmp/lmcache_serde_aesgcm_example/disk -type f | head -1)"
 curl -s -X POST localhost:8080/cache/clear
 # re-send the same request
 ```
@@ -94,7 +94,7 @@ JSON:
   "type": "fs",
   "base_path": "/tmp/lmcache_serde_disk",
   "serde": {
-    "type": "encrypt",
+    "type": "aesgcm",
     "key_provider": "hkdf",
     "master_key_path": "/etc/lmcache/keys/master",
     "aes_bits": 128
@@ -112,7 +112,7 @@ empty-salt key). Provide the master key via a file — e.g. a mounted Kubernetes
 - **Scope:** encrypts the **L2 tier only** — L1 (host RAM) and L0 (GPU) hold
   plaintext, so this protects readers of the remote storage, not a party with
   access to a running server. See
-  [`docs/design/v1/distributed/serde/encryption.md`](../../../docs/design/v1/distributed/serde/encryption.md).
+  [`docs/design/v1/distributed/serde/aesgcm.md`](../../../docs/design/v1/distributed/serde/aesgcm.md).
 - **Trust model:** the `hkdf` provider derives every tenant's key from one
   shared master key (any server with the master can decrypt any tenant). It is
   not per-tenant access isolation.

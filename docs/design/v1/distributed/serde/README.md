@@ -34,7 +34,8 @@ lmcache/v1/distributed/serde/
   async_processor.py  # AsyncSerdeProcessor (thread-pool + eventfd wrapper)
   factory.py          # register_serde_factory / create_serde_processor
   fp8.py              # Fp8QuantizationSerializer / Deserializer
-  encrypt.py          # AES-GCM encryption serde (see encryption.md)
+  aesgcm.py           # AES-GCM encryption serde (see aesgcm.md)
+  key_provider.py     # KeyProvider / HkdfKeyProvider for aesgcm
   multi.py            # MultiSerializer / MultiDeserializer (tuple-shaped
                       # extension; see "Multi-output extension" below)
   utils.py            # serialized_layout_desc, make_temp_key

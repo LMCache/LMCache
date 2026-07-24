@@ -1,9 +1,9 @@
-# Encryption serde (`encrypt`)
+# Encryption serde (`aesgcm`)
 
 AES-GCM encryption of KV cache bytes **at rest in the L2 tier**, keyed per
-`cache_salt`. Implemented as a serde (`encrypt.py`), so it plugs into any L2
-adapter through the existing `SerdeL2AdapterWrapper` with no adapter or
-controller changes.
+`cache_salt`. Implemented as a serde (`aesgcm.py`, with key providers in
+`key_provider.py`), so it plugs into any L2 adapter through the existing
+`SerdeL2AdapterWrapper` with no adapter or controller changes.
 
 ## Threat model / scope
 

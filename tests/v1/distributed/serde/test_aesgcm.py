@@ -23,11 +23,11 @@ from lmcache.v1.distributed.serde import (
     create_serde_processor,
     get_registered_serde_types,
 )
-from lmcache.v1.distributed.serde.encrypt import (
-    DecryptDeserializer,
-    EncryptSerializer,
-    HkdfKeyProvider,
+from lmcache.v1.distributed.serde.aesgcm import (
+    AesGcmDeserializer,
+    AesGcmSerializer,
 )
+from lmcache.v1.distributed.serde.key_provider import HkdfKeyProvider
 
 _MASTER = b"unit-test-master-key-material-32b!!"
 # Public wire contract: [1B version][12B IV][ciphertext || 16B GCM tag].
@@ -53,12 +53,12 @@ def _key(cache_salt: str = "alice") -> ObjectKey:
 
 def _serde(
     cache_salt_key_len: int = 16,
-) -> tuple[EncryptSerializer, DecryptDeserializer]:
+) -> tuple[AesGcmSerializer, AesGcmDeserializer]:
     provider = HkdfKeyProvider(_MASTER, key_len=cache_salt_key_len)
-    return EncryptSerializer(provider), DecryptDeserializer(provider)
+    return AesGcmSerializer(provider), AesGcmDeserializer(provider)
 
 
-def _encrypt(serializer: EncryptSerializer, plaintext: bytes, key: ObjectKey) -> bytes:
+def _encrypt(serializer: AesGcmSerializer, plaintext: bytes, key: ObjectKey) -> bytes:
     layout = MemoryLayoutDesc(
         shapes=[torch.Size([len(plaintext)])], dtypes=[torch.uint8]
     )
@@ -187,7 +187,7 @@ def test_aes256_roundtrips():
 
 
 def test_registered():
-    assert "encrypt" in get_registered_serde_types()
+    assert "aesgcm" in get_registered_serde_types()
 
 
 def test_factory_builds_from_config():
@@ -197,7 +197,7 @@ def test_factory_builds_from_config():
     try:
         proc = create_serde_processor(
             SerdeConfig(
-                type="encrypt",
+                type="aesgcm",
                 kwargs={"key_provider": "hkdf", "master_key_path": path},
             )
         )
@@ -208,7 +208,7 @@ def test_factory_builds_from_config():
 
 def test_factory_missing_master_key_path():
     with pytest.raises(ValueError):
-        create_serde_processor(SerdeConfig(type="encrypt", kwargs={}))
+        create_serde_processor(SerdeConfig(type="aesgcm", kwargs={}))
 
 
 def test_factory_bad_aes_bits():
@@ -219,7 +219,7 @@ def test_factory_bad_aes_bits():
         with pytest.raises(ValueError):
             create_serde_processor(
                 SerdeConfig(
-                    type="encrypt",
+                    type="aesgcm",
                     kwargs={"master_key_path": path, "aes_bits": 192},
                 )
             )
@@ -230,5 +230,5 @@ def test_factory_bad_aes_bits():
 def test_factory_unsupported_provider():
     with pytest.raises(ValueError):
         create_serde_processor(
-            SerdeConfig(type="encrypt", kwargs={"key_provider": "keyring"})
+            SerdeConfig(type="aesgcm", kwargs={"key_provider": "keyring"})
         )

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# End-to-end example: LMCache MP server + disk L2 adapter + encrypt serde + vLLM.
+# End-to-end example: LMCache MP server + disk L2 adapter + aesgcm serde + vLLM.
 #
 # Flow:
 #   1. Generate a master key file (AES-128 = 16 bytes)
 #   2. Start `lmcache server` with:
 #        - L1 (CPU) cache enabled
 #        - L2 disk (fs) adapter
-#        - encrypt (AES-GCM) serde on the L2 adapter, keyed per cache_salt
+#        - aesgcm (AES-GCM) serde on the L2 adapter, keyed per cache_salt
 #   3. Start vLLM connected via LMCacheMPConnector
 #   4. Send an inference request WITH a cache_salt (cold path: L1 -> L2 encrypt)
 #   5. Force-clear L1 (CPU) cache via the lmcache HTTP API
@@ -41,7 +41,7 @@ L1_SIZE_GB="${L1_SIZE_GB:-20}"              # CPU cache size
 CACHE_SALT="${CACHE_SALT:-tenant-a}"        # selects the per-tenant key
 AES_BITS="${AES_BITS:-128}"                 # 128 or 256
 
-TMP_DIR="${TMP_DIR:-/tmp/lmcache_serde_encrypt_example}"
+TMP_DIR="${TMP_DIR:-/tmp/lmcache_serde_aesgcm_example}"
 L2_DISK_PATH="${L2_DISK_PATH:-${TMP_DIR}/disk}"
 MASTER_KEY_PATH="${MASTER_KEY_PATH:-${TMP_DIR}/master.key}"
 mkdir -p "$TMP_DIR"
@@ -58,13 +58,13 @@ else
 fi
 chmod 600 "$MASTER_KEY_PATH"
 
-# L2 adapter JSON: disk (fs) backend with the encrypt serde enabled
+# L2 adapter JSON: disk (fs) backend with the aesgcm serde enabled
 L2_ADAPTER_JSON=$(cat <<EOF
 {
   "type": "fs",
   "base_path": "${L2_DISK_PATH}",
   "serde": {
-    "type": "encrypt",
+    "type": "aesgcm",
     "key_provider": "hkdf",
     "master_key_path": "${MASTER_KEY_PATH}",
     "aes_bits": ${AES_BITS}
@@ -108,7 +108,7 @@ echo "=== Step 1: Starting LMCache MP server ==="
 echo "============================================"
 echo "L1 (CPU): ${L1_SIZE_GB} GB"
 echo "L2 (disk): ${L2_DISK_PATH}"
-echo "Serde: encrypt (AES-${AES_BITS}-GCM, key from ${MASTER_KEY_PATH})"
+echo "Serde: aesgcm (AES-${AES_BITS}-GCM, key from ${MASTER_KEY_PATH})"
 
 lmcache server \
     --l1-size-gb "$L1_SIZE_GB" \

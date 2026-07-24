@@ -6,19 +6,15 @@ keyed per ``cache_salt`` so each tenant's ciphertext is distinct. Content is
 treated as an opaque byte blob (not tensor-typed), an exact round-trip.
 
 Scope is the L2 tier only: L1 and L0 hold plaintext. See
-``docs/design/v1/distributed/serde/encryption.md`` for the threat model, key
+``docs/design/v1/distributed/serde/aesgcm.md`` for the threat model, key
 model, and residual-metadata notes.
 """
 
 # Standard
-import abc
 import os
-import threading
 
 # Third Party
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.hashes import SHA256
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 import torch
 
 # First Party
@@ -27,6 +23,7 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.serde.async_processor import AsyncSerdeProcessor
 from lmcache.v1.distributed.serde.base import Deserializer, SerdeProcessor, Serializer
 from lmcache.v1.distributed.serde.factory import register_serde_factory
+from lmcache.v1.distributed.serde.key_provider import HkdfKeyProvider, KeyProvider
 from lmcache.v1.memory_management import MemoryObj
 
 logger = init_logger(__name__)
@@ -38,7 +35,6 @@ _TAG_LEN = 16  # GCM authentication tag
 _HDR_LEN = 1 + _IV_LEN
 _FRAME_OVERHEAD = _HDR_LEN + _TAG_LEN
 
-_HKDF_INFO_PREFIX = b"lmcache-l2-encrypt-v1"
 _SUPPORTED_AES_BITS = (128, 256)
 
 
@@ -53,54 +49,7 @@ def _plaintext_bytes(layout_desc: MemoryLayoutDesc) -> int:
     return total
 
 
-class KeyProvider(abc.ABC):
-    """Supplies the AES key for a given ``cache_salt``.
-
-    Implementations must be thread-safe: the serde thread pool may call
-    ``get_key`` concurrently.
-    """
-
-    @abc.abstractmethod
-    def get_key(self, cache_salt: str) -> bytes:
-        """Return the AES key bytes for ``cache_salt`` (16 or 32 bytes)."""
-        raise NotImplementedError
-
-
-class HkdfKeyProvider(KeyProvider):
-    """Derive a per-``cache_salt`` key from one master key via HKDF-SHA256.
-
-    Args:
-        master_key: Secret input key material (any length; keep >= key_len).
-        key_len: Derived key length in bytes (16 for AES-128, 32 for AES-256).
-    """
-
-    def __init__(self, master_key: bytes, key_len: int) -> None:
-        if not master_key:
-            raise ValueError("master_key must be non-empty")
-        self._master_key = master_key
-        self._key_len = key_len
-        self._cache: dict[str, bytes] = {}
-        self._lock = threading.Lock()
-
-    def get_key(self, cache_salt: str) -> bytes:
-        """Return the derived key for ``cache_salt``, computing once and caching.
-
-        Thread-safe: the cache is guarded by a lock.
-        """
-        with self._lock:
-            key = self._cache.get(cache_salt)
-            if key is None:
-                key = HKDF(
-                    algorithm=SHA256(),
-                    length=self._key_len,
-                    salt=None,
-                    info=_HKDF_INFO_PREFIX + cache_salt.encode("utf-8"),
-                ).derive(self._master_key)
-                self._cache[cache_salt] = key
-            return key
-
-
-class EncryptSerializer(Serializer):
+class AesGcmSerializer(Serializer):
     """Encrypt KV bytes with AES-GCM, keyed per ``cache_salt``.
 
     Args:
@@ -139,8 +88,8 @@ class EncryptSerializer(Serializer):
         return _plaintext_bytes(layout_desc) + _FRAME_OVERHEAD
 
 
-class DecryptDeserializer(Deserializer):
-    """Decrypt AES-GCM ciphertext produced by :class:`EncryptSerializer`.
+class AesGcmDeserializer(Deserializer):
+    """Decrypt AES-GCM ciphertext produced by :class:`AesGcmSerializer`.
 
     Args:
         key_provider: Supplies the AES key for each key's ``cache_salt``.
@@ -171,7 +120,7 @@ class DecryptDeserializer(Deserializer):
         blob = bytes(src.byte_array)
         frame_end = _HDR_LEN + plaintext_len + _TAG_LEN
         if len(blob) < frame_end or blob[0] != _VERSION:
-            raise ValueError("encrypt serde: malformed frame or unknown version")
+            raise ValueError("aesgcm serde: malformed frame or unknown version")
         dek = self._keys.get_key(key.cache_salt)
         plaintext = AESGCM(dek).decrypt(
             blob[1:_HDR_LEN], blob[_HDR_LEN:frame_end], None
@@ -179,8 +128,8 @@ class DecryptDeserializer(Deserializer):
         out[: len(plaintext)] = plaintext
 
 
-def _create_encrypt_serde(kwargs: dict[str, object]) -> SerdeProcessor:
-    """Build the encrypt serde from ``SerdeConfig.kwargs``.
+def _create_aesgcm_serde(kwargs: dict[str, object]) -> SerdeProcessor:
+    """Build the aesgcm serde from ``SerdeConfig.kwargs``.
 
     Kwargs:
         key_provider: ``"hkdf"`` (default). ``"keyring"`` is reserved for
@@ -204,7 +153,7 @@ def _create_encrypt_serde(kwargs: dict[str, object]) -> SerdeProcessor:
     if provider_name == "hkdf":
         master_key_path = str(kwargs.get("master_key_path", ""))
         if not master_key_path:
-            raise ValueError("encrypt serde 'hkdf' requires 'master_key_path'")
+            raise ValueError("aesgcm serde 'hkdf' requires 'master_key_path'")
         with open(master_key_path, "rb") as f:
             master_key = f.read()
         provider: KeyProvider = HkdfKeyProvider(master_key, key_len=aes_bits // 8)
@@ -215,10 +164,10 @@ def _create_encrypt_serde(kwargs: dict[str, object]) -> SerdeProcessor:
 
     max_workers = int(kwargs.get("max_workers", 1))  # type: ignore[call-overload]
     return AsyncSerdeProcessor(
-        EncryptSerializer(provider),
-        DecryptDeserializer(provider),
+        AesGcmSerializer(provider),
+        AesGcmDeserializer(provider),
         max_workers=max_workers,
     )
 
 
-register_serde_factory("encrypt", _create_encrypt_serde)
+register_serde_factory("aesgcm", _create_aesgcm_serde)
