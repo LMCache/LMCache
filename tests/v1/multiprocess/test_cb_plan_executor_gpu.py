@@ -18,6 +18,7 @@ flash-attention format (separate K/V planes, kv_size 2).
 from dataclasses import dataclass
 
 # Third Party
+import numpy as np
 import pytest
 import torch
 
@@ -30,9 +31,9 @@ if not torch.cuda.is_available():
 # First Party
 import lmcache.c_ops as lmc_ops  # noqa: E402
 
-if not hasattr(lmc_ops, "execute_cb_retrieve_plan"):
+if not hasattr(lmc_ops, "execute_cb_retrieve_plan_flat"):
     pytest.skip(
-        "c_ops build lacks execute_cb_retrieve_plan",
+        "c_ops build lacks execute_cb_retrieve_plan_flat",
         allow_module_level=True,
     )
 
@@ -116,7 +117,8 @@ def _run_plan(
     cos_sin,
     slots,
 ):
-    """Drive the executor with the planner's double-buffer wave layout."""
+    """Drive the production flat-table entry point with the planner's
+    double-buffer wave layout."""
     chunk_bytes = case.kv_size * _NL * _SPC * case.hidden * _DTYPE.itemsize
     spec = lmc_ops.CBGroupSpec(
         paged_kv_ptrs=paged_ptrs.data_ptr(),
@@ -134,30 +136,32 @@ def _run_plan(
         cos_sin_cache=cos_sin.data_ptr(),
         rot_dim=_HS,
         rope_num_kv_heads=_NH,
-        rope_head_size=_HS,
         rope_head_stride=case.head_stride,
         key_scalar_type=15,  # at::ScalarType::BFloat16
         is_neox=True,
     )
     wave = max_batch // 2
-    steps = []
+    staging, ropes, scatters, step_offsets = [], [], [], []
     for w0 in range(0, n_chunks, wave):
         step_idx = w0 // wave
         base = (step_idx % 2) * wave
-        staging, ropes, scatters = [], [], []
         for j in range(min(wave, n_chunks - w0)):
             ci, slot = w0 + j, base + j
             staging.append(
-                lmc_ops.StagingCopy(
-                    slots[slot].data_ptr(), host_chunks[ci].data_ptr(), chunk_bytes, 0
-                )
+                (slots[slot].data_ptr(), host_chunks[ci].data_ptr(), chunk_bytes, 0)
             )
-            ropes.append(lmc_ops.CBRopeVar(0, slot, old_sts[ci], cur_sts[ci]))
-            scatters.append(lmc_ops.CBScatterVar(0, slot, ci * _SPC, _SPC))
-        steps.append(
-            lmc_ops.CBRetrieveStep(staging=staging, ropes=ropes, scatters=scatters)
-        )
-    lmc_ops.execute_cb_retrieve_plan(slot_mapping.device, 1 << 26, [spec], steps)
+            ropes.append((0, slot, old_sts[ci], cur_sts[ci]))
+            scatters.append((0, slot, ci * _SPC, _SPC))
+        step_offsets.append((len(staging), len(ropes), len(scatters)))
+    lmc_ops.execute_cb_retrieve_plan_flat(
+        slot_mapping.device,
+        1 << 26,
+        [spec],
+        np.asarray(staging, dtype=np.int64),
+        np.asarray(ropes, dtype=np.int64),
+        np.asarray(scatters, dtype=np.int64),
+        np.asarray(step_offsets, dtype=np.int64),
+    )
     torch.cuda.synchronize()
 
 

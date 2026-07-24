@@ -164,85 +164,48 @@ PYBIND11_MODULE(c_ops, m) {
         py::arg("direction"), py::arg("device"),
         py::arg("host_buffer_alignment"), py::arg("kernel_group_specs"),
         py::arg("batch_steps"), py::call_guard<py::gil_scoped_release>());
-  // CB retrieve plan types (see mp_mem_kernels.cuh). Built on the Python side
+  // CB retrieve plan spec (see cb_kernels.cuh). Built on the Python side
   // (blend_v3.cb_retrieve_pre_computed) and consumed by
-  // execute_cb_retrieve_plan.
+  // execute_cb_retrieve_plan_flat.
   py::class_<CBGroupSpec>(m, "CBGroupSpec")
-      .def(py::init(
-               [](uintptr_t paged_kv_ptrs,
-                  std::vector<int64_t> temp_buffer_ptrs, int num_layers,
-                  int slot_tokens, int hidden_elems, int element_size,
-                  EngineKVFormat engine_kv_format, int page_buffer_size,
-                  int block_size, int head_size, uintptr_t slot_mapping_base,
-                  int64_t slot_mapping_capacity, uintptr_t cos_sin_cache,
-                  int rot_dim, int rope_num_kv_heads, int64_t rope_head_size,
-                  int64_t rope_head_stride, int key_scalar_type, bool is_neox) {
-                 return CBGroupSpec{paged_kv_ptrs,
-                                    std::move(temp_buffer_ptrs),
-                                    num_layers,
-                                    slot_tokens,
-                                    hidden_elems,
-                                    element_size,
-                                    engine_kv_format,
-                                    page_buffer_size,
-                                    block_size,
-                                    head_size,
-                                    slot_mapping_base,
-                                    slot_mapping_capacity,
-                                    cos_sin_cache,
-                                    rot_dim,
-                                    rope_num_kv_heads,
-                                    rope_head_size,
-                                    rope_head_stride,
-                                    key_scalar_type,
-                                    is_neox};
-               }),
-           py::arg("paged_kv_ptrs"), py::arg("temp_buffer_ptrs"),
-           py::arg("num_layers"), py::arg("slot_tokens"),
-           py::arg("hidden_elems"), py::arg("element_size"),
-           py::arg("engine_kv_format"), py::arg("page_buffer_size"),
-           py::arg("block_size"), py::arg("head_size"),
-           py::arg("slot_mapping_base"), py::arg("slot_mapping_capacity"),
-           py::arg("cos_sin_cache"), py::arg("rot_dim"),
-           py::arg("rope_num_kv_heads"), py::arg("rope_head_size"),
-           py::arg("rope_head_stride"), py::arg("key_scalar_type"),
-           py::arg("is_neox"))
+      .def(
+          py::init(
+              [](uintptr_t paged_kv_ptrs, std::vector<int64_t> temp_buffer_ptrs,
+                 int num_layers, int slot_tokens, int hidden_elems,
+                 int element_size, EngineKVFormat engine_kv_format,
+                 int page_buffer_size, int block_size, int head_size,
+                 uintptr_t slot_mapping_base, int64_t slot_mapping_capacity,
+                 uintptr_t cos_sin_cache, int rot_dim, int rope_num_kv_heads,
+                 int64_t rope_head_stride, int key_scalar_type, bool is_neox) {
+                return CBGroupSpec{
+                    paged_kv_ptrs,     std::move(temp_buffer_ptrs),
+                    num_layers,        slot_tokens,
+                    hidden_elems,      element_size,
+                    engine_kv_format,  page_buffer_size,
+                    block_size,        head_size,
+                    slot_mapping_base, slot_mapping_capacity,
+                    cos_sin_cache,     rot_dim,
+                    rope_num_kv_heads, rope_head_stride,
+                    key_scalar_type,   is_neox};
+              }),
+          py::arg("paged_kv_ptrs"), py::arg("temp_buffer_ptrs"),
+          py::arg("num_layers"), py::arg("slot_tokens"),
+          py::arg("hidden_elems"), py::arg("element_size"),
+          py::arg("engine_kv_format"), py::arg("page_buffer_size"),
+          py::arg("block_size"), py::arg("head_size"),
+          py::arg("slot_mapping_base"), py::arg("slot_mapping_capacity"),
+          py::arg("cos_sin_cache"), py::arg("rot_dim"),
+          py::arg("rope_num_kv_heads"), py::arg("rope_head_stride"),
+          py::arg("key_scalar_type"), py::arg("is_neox"))
       // Mutable so the Python planner can cache one spec per (context, group)
       // and re-stamp only the per-request slot-mapping tensor between calls;
       // every other field is invariant for the life of the paged registration.
       .def_readwrite("slot_mapping_base", &CBGroupSpec::slot_mapping_base)
       .def_readwrite("slot_mapping_capacity",
                      &CBGroupSpec::slot_mapping_capacity);
-  py::class_<CBRopeVar>(m, "CBRopeVar")
-      .def(py::init(
-               [](int group_idx, int slot_idx, int64_t old_st, int64_t cur_st) {
-                 return CBRopeVar{group_idx, slot_idx, old_st, cur_st};
-               }),
-           py::arg("group_idx"), py::arg("slot_idx"), py::arg("old_st"),
-           py::arg("cur_st"));
-  py::class_<CBScatterVar>(m, "CBScatterVar")
-      .def(py::init([](int group_idx, int slot_idx, int64_t slot_mapping_offset,
-                       int n_tok) {
-             return CBScatterVar{group_idx, slot_idx, slot_mapping_offset,
-                                 n_tok};
-           }),
-           py::arg("group_idx"), py::arg("slot_idx"),
-           py::arg("slot_mapping_offset"), py::arg("n_tok"));
-  py::class_<CBRetrieveStep>(m, "CBRetrieveStep")
-      .def(py::init([](std::vector<StagingCopy> staging,
-                       std::vector<CBRopeVar> ropes,
-                       std::vector<CBScatterVar> scatters) {
-             return CBRetrieveStep{std::move(staging), std::move(ropes),
-                                   std::move(scatters)};
-           }),
-           py::arg("staging"), py::arg("ropes"), py::arg("scatters"));
-  m.def("execute_cb_retrieve_plan", &execute_cb_retrieve_plan,
-        py::arg("device"), py::arg("host_buffer_alignment"),
-        py::arg("group_specs"), py::arg("steps"),
-        py::call_guard<py::gil_scoped_release>());
-  // Flat-array variant: the whole plan arrives as six int64 numpy tables and
-  // is unpacked into CBRetrieveStep vectors in C++ (microseconds), replacing
-  // ~5 pybind object constructions per chunk on the Python side. Tables:
+  // The whole plan arrives as four int64 numpy tables and is unpacked into
+  // CBRetrieveStep vectors in C++ (microseconds), replacing ~5 pybind object
+  // constructions per chunk on the Python side. Tables:
   //   staging  [n_staging, 4]: dest, src, nbytes, host_offset
   //   ropes    [n_ropes,  4]: group_idx, slot_idx, old_st, cur_st
   //   scatters [n_scatter,4]: group_idx, slot_idx, slot_mapping_offset, n_tok

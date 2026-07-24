@@ -581,21 +581,30 @@ T* get_kernel_ptr(TENSOR_TYPE& tensor) {
                                    head_size_xword, skip_prefix_n_tokens);   \
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-// Pointer/scalar core shared with the CB plan executor. `layout_num_tokens`
-// (buffer token axis, offset math) is separate from `transfer_num_tokens`
-// (tokens moved) so partial buffers stay aligned.
 template <typename T>
-void multi_layer_kv_transfer_ptr_templated(
-    T* key_value_ptr, T** page_buffer_ptrs, const int64_t* slot_mapping_ptr,
-    const int num_layers, const int layout_num_tokens,
-    const int transfer_num_tokens, const int num_origin_elements,
-    const int element_size, const torch::Device& paged_memory_device,
-    const int page_buffer_size, const TransferDirection direction,
-    const EngineKVFormat engine_kv_format, const int block_size,
-    const int head_size, const int skip_prefix_n_tokens) {
-  int num_tokens = layout_num_tokens;
-  int num_transfer_tokens = transfer_num_tokens - skip_prefix_n_tokens;
-  int elements_per_xword = sizeof(T) / element_size;
+void multi_layer_kv_transfer_templated(
+    torch::Tensor&
+        key_value,  // key/value must be on gpu/pinned cpu.
+                    // [2, num_layer, num_tokens, num_heads*head_size] for
+                    // flash_attn.
+                    // [1, num_layer, num_tokens, aligned_head_size]
+                    // for MLA.
+    const torch::Tensor& key_value_ptrs,  // [num_layers]
+    const torch::Tensor& slot_mapping,    // [num_tokens],
+    const torch::Device& paged_memory_device, const int page_buffer_size,
+    const TransferDirection direction, const EngineKVFormat engine_kv_format,
+    const int block_size, const int head_size, const int skip_prefix_n_tokens) {
+  T* key_value_ptr = get_kernel_ptr<T, torch::Tensor>(key_value);
+  T** page_buffer_ptrs =
+      get_kernel_ptr<T*, const torch::Tensor>(key_value_ptrs);
+  const int64_t* slot_mapping_ptr =
+      get_kernel_ptr<const int64_t, const torch::Tensor>(slot_mapping);
+
+  int num_layers = key_value.size(1);
+  int num_tokens = key_value.size(2);
+  int num_transfer_tokens = num_tokens - skip_prefix_n_tokens;
+  int num_origin_elements = key_value.size(3);
+  int elements_per_xword = sizeof(T) / key_value.element_size();
   int num_xwords = num_origin_elements / elements_per_xword;
   // head_size is in element units
   // convert to xword units
@@ -708,32 +717,6 @@ void multi_layer_kv_transfer_ptr_templated(
 }
 
 #undef LAUNCH_KERNEL_WITH_FORMAT
-
-template <typename T>
-void multi_layer_kv_transfer_templated(
-    torch::Tensor&
-        key_value,  // key/value must be on gpu/pinned cpu.
-                    // [2, num_layer, num_tokens, num_heads*head_size] for
-                    // flash_attn.
-                    // [1, num_layer, num_tokens, aligned_head_size]
-                    // for MLA.
-    const torch::Tensor& key_value_ptrs,  // [num_layers]
-    const torch::Tensor& slot_mapping,    // [num_tokens],
-    const torch::Device& paged_memory_device, const int page_buffer_size,
-    const TransferDirection direction, const EngineKVFormat engine_kv_format,
-    const int block_size, const int head_size, const int skip_prefix_n_tokens) {
-  T* key_value_ptr = get_kernel_ptr<T, torch::Tensor>(key_value);
-  T** page_buffer_ptrs =
-      get_kernel_ptr<T*, const torch::Tensor>(key_value_ptrs);
-  const int64_t* slot_mapping_ptr =
-      get_kernel_ptr<const int64_t, const torch::Tensor>(slot_mapping);
-
-  multi_layer_kv_transfer_ptr_templated<T>(
-      key_value_ptr, page_buffer_ptrs, slot_mapping_ptr, key_value.size(1),
-      key_value.size(2), key_value.size(2), key_value.size(3),
-      key_value.element_size(), paged_memory_device, page_buffer_size,
-      direction, engine_kv_format, block_size, head_size, skip_prefix_n_tokens);
-}
 
 template <typename T>
 void multi_layer_kv_transfer_fused_templated(

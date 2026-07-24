@@ -26,12 +26,17 @@ void execute_cb_retrieve_plan(const torch::Device& device,
   at::cuda::CUDAEvent compute_done[2];  // kernels(w) finished, parity w%2
   bool compute_recorded[2] = {false, false};
 
-  const auto group_of = [&](int group_idx) -> const CBGroupSpec& {
-    TORCH_CHECK(
-        group_idx >= 0 && group_idx < static_cast<int>(group_specs.size()),
-        "CB plan group_idx out of range: ", group_idx);
-    return group_specs[group_idx];
-  };
+  // Launch-coalescing buffers, reused across steps and groups (every flush
+  // clears them; a step never leaves entries behind).
+  std::vector<uintptr_t> rope_keys, sc_bufs, sc_maps;
+  std::vector<int64_t> rope_old, rope_new;
+  std::vector<int> sc_toks;
+  rope_keys.reserve(MAX_FUSED_TRANSFER_CHUNKS);
+  rope_old.reserve(MAX_FUSED_TRANSFER_CHUNKS);
+  rope_new.reserve(MAX_FUSED_TRANSFER_CHUNKS);
+  sc_bufs.reserve(MAX_FUSED_TRANSFER_CHUNKS);
+  sc_maps.reserve(MAX_FUSED_TRANSFER_CHUNKS);
+  sc_toks.reserve(MAX_FUSED_TRANSFER_CHUNKS);
 
   size_t step_idx = 0;
   for (const auto& step : steps) {
@@ -62,13 +67,25 @@ void execute_cb_retrieve_plan(const torch::Device& device,
       const CBGroupSpec& group = group_specs[group_idx];
 
       if (group.cos_sin_cache != 0) {
-        std::vector<uintptr_t> rope_keys;
-        std::vector<int64_t> rope_old, rope_new;
+        const auto flush_ropes = [&]() {
+          if (rope_keys.empty()) {
+            return;
+          }
+          rotary_embedding_k_fused_ramp_multi_ptr(
+              rope_keys, static_cast<at::ScalarType>(group.key_scalar_type),
+              static_cast<int64_t>(group.num_layers) * group.slot_tokens,
+              rope_old, rope_new, group.slot_tokens,
+              static_cast<int64_t>(group.head_size), group.rope_head_stride,
+              group.rope_num_kv_heads, group.cos_sin_cache, group.rot_dim,
+              group.is_neox);
+          rope_keys.clear();
+          rope_old.clear();
+          rope_new.clear();
+        };
         for (const auto& rope : step.ropes) {
           if (rope.group_idx != group_idx) {
             continue;
           }
-          group_of(rope.group_idx);  // bounds-check group_idx
           TORCH_CHECK(rope.slot_idx >= 0 &&
                           rope.slot_idx <
                               static_cast<int>(group.temp_buffer_ptrs.size()),
@@ -81,29 +98,12 @@ void execute_cb_retrieve_plan(const torch::Device& device,
           rope_old.push_back(rope.old_st);
           rope_new.push_back(rope.cur_st);
           if (static_cast<int>(rope_keys.size()) == MAX_FUSED_TRANSFER_CHUNKS) {
-            rotary_embedding_k_fused_ramp_multi_ptr(
-                rope_keys, static_cast<at::ScalarType>(group.key_scalar_type),
-                static_cast<int64_t>(group.num_layers) * group.slot_tokens,
-                rope_old, rope_new, group.slot_tokens, group.rope_head_size,
-                group.rope_head_stride, group.rope_num_kv_heads,
-                group.cos_sin_cache, group.rot_dim, group.is_neox);
-            rope_keys.clear();
-            rope_old.clear();
-            rope_new.clear();
+            flush_ropes();
           }
         }
-        if (!rope_keys.empty()) {
-          rotary_embedding_k_fused_ramp_multi_ptr(
-              rope_keys, static_cast<at::ScalarType>(group.key_scalar_type),
-              static_cast<int64_t>(group.num_layers) * group.slot_tokens,
-              rope_old, rope_new, group.slot_tokens, group.rope_head_size,
-              group.rope_head_stride, group.rope_num_kv_heads,
-              group.cos_sin_cache, group.rot_dim, group.is_neox);
-        }
+        flush_ropes();
       }
 
-      std::vector<uintptr_t> sc_bufs, sc_maps;
-      std::vector<int> sc_toks;
       const auto flush_scatters = [&]() {
         if (sc_bufs.empty()) {
           return;

@@ -29,11 +29,11 @@ struct CBGroupSpec {
   int head_size;                  // scatter kernel head_size (element units)
   uintptr_t slot_mapping_base;    // device int64*, whole-request slot mapping
   int64_t slot_mapping_capacity;  // int64 elements behind slot_mapping_base
-  // Re-RoPE (cos_sin_cache == 0 disables rope for this group).
+  // Re-RoPE (cos_sin_cache == 0 disables rope for this group). Rotation
+  // width is `head_size` above (shared with the scatter geometry).
   uintptr_t cos_sin_cache;  // device ptr, [max_position, rot_dim] scalars
   int rot_dim;
   int rope_num_kv_heads;
-  int64_t rope_head_size;
   int64_t rope_head_stride;  // == head_size, or 2*head_size for fused packed
   int key_scalar_type;       // at::ScalarType of the KV data
   bool is_neox;

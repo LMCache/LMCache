@@ -335,6 +335,9 @@ def test_batched_rope_raises_on_compressed_layout():
     gpu_context.kv_layer_groups_manager.kernel_groups = [
         SimpleNamespace(tokens_per_block=8, slots_per_block=4)
     ]
+    gpu_context.get_temp_kernel_group_buffer.return_value = SimpleNamespace(
+        shape=(2, 2, 4, 64)
+    )
     rope_state = SimpleNamespace(
         head_size=32, cos_sin_cache=MagicMock(), is_neox_style=True
     )
@@ -710,6 +713,9 @@ def _build_plan_engine_and_context(
     """Engine with the real ``_build_cb_retrieve_plan_flat`` bound, a fake GPU
     context with real CPU tensors, and a real ``_CBRopeState``. Kernel
     groups are plain (non-fused) K/V, so hidden_dim = n_heads * head_size."""
+    # Standard
+    import weakref
+
     # Third Party
     import torch
 
@@ -720,10 +726,10 @@ def _build_plan_engine_and_context(
     eng = MagicMock(spec=v3_mod.BlendV3Module)
     for name in (
         "_build_cb_retrieve_plan_flat",
-        "_prepare_cb_plan_common",
         "_resolve_cb_plan_invariants",
     ):
         setattr(eng, name, getattr(v3_mod.BlendV3Module, name).__get__(eng))
+    eng._cb_plan_invariants = weakref.WeakKeyDictionary()
 
     hidden_dim = n_heads * head_size
     gpu_context = MagicMock()
@@ -787,9 +793,9 @@ def _lazy_memory_obj(obj_bytes: int, address: int):
 
 
 def test_native_plan_specs_stamped_and_cached():
-    """3 chunks, max_batch=2: shared pos + one slot-mapping tensor per group
-    stamped into the cached invariant specs; a second build for the same
-    context reuses the same spec objects and re-stamps them."""
+    """3 chunks, max_batch=2: one slot-mapping tensor per group stamped into
+    the cached invariant specs; a second build for the same context reuses
+    the same spec objects and re-stamps them."""
     # Third Party
     import torch
 
@@ -815,10 +821,9 @@ def test_native_plan_specs_stamped_and_cached():
     group_specs, (_staging, _ropes, _scatters, step_offsets), keepalive = plan
 
     assert len(group_specs) == 2
-    # keepalive: shared pos + one slot mapping per group.
-    assert len(keepalive) == 3
-    pos, sm0, sm1 = keepalive
-    assert pos.tolist() == list(range(12))
+    # keepalive: one slot-mapping tensor per group.
+    assert len(keepalive) == 2
+    sm0, sm1 = keepalive
     assert sm0.tolist() == [40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51]
     assert sm1.tolist() == [80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91]
     # Each cached spec is stamped with this request's slot-mapping tensor.
@@ -846,7 +851,7 @@ def test_native_plan_specs_stamped_and_cached():
     assert plan2 is not None
     group_specs2, _, keepalive2 = plan2
     assert group_specs2[0] is group_specs[0]  # cached, not rebuilt
-    assert group_specs2[0].slot_mapping_base == keepalive2[1].data_ptr()
+    assert group_specs2[0].slot_mapping_base == keepalive2[0].data_ptr()
     assert group_specs2[0].slot_mapping_capacity == 4
 
 
