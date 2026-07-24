@@ -255,8 +255,8 @@ class MooncakeTeTransferChannelServer(TransferChannelServer):
     def _handle_msg(self, req: HandshakeMsg) -> HandshakeMsg:
         if isinstance(req, InitReq):
             # Learn the connecting peer's agent (idempotent on repeat).
-            logger.info(f"initialized transfer channel server with mooncate transfer engine "
-                         f"{self._ctx._advertise_host}:{self._ctx._mooncake_te_port}")
+            logger.info(f"initialized transfer channel server with mooncake transfer engine "
+                         f"{self._ctx.advertise_host}:{self._ctx.mooncake_te_port}")
             self._ctx.register_client(
                 key=req.advertise_url,
                 client = MooncakeTeTransferChannelClient(
@@ -266,8 +266,8 @@ class MooncakeTeTransferChannelServer(TransferChannelServer):
             )
             return InitResp(
                 advertise_url=self._ctx.advertise_url,
-                buffer_base_ptr=self._ctx._l1_memory_desc.ptr,
-                session_id = f"{self._ctx._advertise_host}:{self._ctx._mooncake_te_port}",
+                buffer_base_ptr=self._ctx.l1_memory_desc.ptr,
+                session_id = f"{self._ctx.advertise_host}:{self._ctx.mooncake_te_port}",
             )
         else:
             raise ValueError(f"Unexpected handshake message: {type(req)}")
