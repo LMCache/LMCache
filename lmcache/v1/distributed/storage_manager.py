@@ -49,6 +49,12 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
     create_store_policy,
 )
+from lmcache.v1.distributed.storage_usage import (
+    StorageHealth,
+    StorageTierUsageSnapshot,
+    StorageUsageSnapshot,
+)
+from lmcache.v1.distributed.tiers import Tier
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -68,6 +74,8 @@ class StorageManager:
     def __init__(self, config: StorageManagerConfig):
         self._l1_manager = L1Manager(config.l1_manager_config)
         self._event_bus = get_event_bus()
+        self._l1_eviction_trigger_watermark = config.eviction_config.trigger_watermark
+        self._l1_eviction_policy = config.eviction_config.eviction_policy
 
         # L1 eviction controller
         self._eviction_controller = L1EvictionController(
@@ -1022,6 +1030,104 @@ class StorageManager:
             "num_l2_adapters": len(adapters),
         }
 
+    def get_memory_usage_snapshot(self) -> StorageUsageSnapshot:
+        """Collect current memory usage and health for every storage tier.
+
+        Each usage and health source is collected independently. A failed
+        source therefore leaves its fields unknown without discarding data
+        collected from the other source or another adapter. L2 adapters are
+        returned individually in stable adapter-id order. Runtime adapter
+        add/delete is serialized until L2 collection finishes so an adapter
+        cannot be closed while this method is reading it.
+
+        Returns:
+            An immutable snapshot containing L1 and per-adapter L2 data.
+        """
+        l1_errors: list[str] = []
+        l1_used_bytes: int | None = None
+        l1_capacity_bytes: int | None = None
+        try:
+            l1_used_bytes, capacity_bytes = self._l1_manager.get_memory_usage()
+            if capacity_bytes > 0:
+                l1_capacity_bytes = capacity_bytes
+        except Exception:
+            logger.exception("Failed to collect L1 memory usage")
+            l1_errors.append("usage_unavailable")
+
+        l1_health = StorageHealth.UNKNOWN
+        try:
+            l1_health = self._health_from_bool(self._l1_manager.memcheck())
+        except Exception:
+            logger.exception("Failed to collect L1 health")
+            l1_errors.append("health_unavailable")
+
+        l1_snapshot = StorageTierUsageSnapshot(
+            tier=Tier.L1,
+            adapter_id=None,
+            backend_type=None,
+            used_bytes=l1_used_bytes,
+            capacity_bytes=l1_capacity_bytes,
+            trigger_watermark=self._l1_eviction_trigger_watermark,
+            eviction_policy=self._l1_eviction_policy,
+            health=l1_health,
+            collection_errors=tuple(l1_errors),
+        )
+
+        l2_snapshots: list[StorageTierUsageSnapshot] = []
+        # Keep runtime deletion from closing an adapter between the reference
+        # snapshot and these synchronous calls. Runtime add/delete already use
+        # lifecycle -> adapters lock order, which _snapshot_adapters follows.
+        with self._lifecycle_lock:
+            for adapter_id, descriptor, adapter in self._snapshot_adapters():
+                l2_errors: list[str] = []
+                l2_used_bytes: int | None = None
+                l2_capacity_bytes: int | None = None
+                try:
+                    usage = adapter.get_usage()
+                    l2_used_bytes = usage.total_bytes_used
+                    if usage.total_capacity_bytes > 0:
+                        l2_capacity_bytes = usage.total_capacity_bytes
+                except Exception:
+                    logger.exception(
+                        "Failed to collect memory usage for L2 adapter %d", adapter_id
+                    )
+                    l2_errors.append("usage_unavailable")
+
+                l2_health = StorageHealth.UNKNOWN
+                try:
+                    status = adapter.report_status()
+                    l2_health = self._health_from_bool(status.get("is_healthy"))
+                except Exception:
+                    logger.exception(
+                        "Failed to collect health for L2 adapter %d", adapter_id
+                    )
+                    l2_errors.append("health_unavailable")
+
+                eviction_config = descriptor.config.eviction_config
+                l2_snapshots.append(
+                    StorageTierUsageSnapshot(
+                        tier=Tier.L2,
+                        adapter_id=adapter_id,
+                        backend_type=descriptor.type_name,
+                        used_bytes=l2_used_bytes,
+                        capacity_bytes=l2_capacity_bytes,
+                        trigger_watermark=(
+                            eviction_config.trigger_watermark
+                            if eviction_config is not None
+                            else None
+                        ),
+                        eviction_policy=(
+                            eviction_config.eviction_policy
+                            if eviction_config is not None
+                            else None
+                        ),
+                        health=l2_health,
+                        collection_errors=tuple(l2_errors),
+                    )
+                )
+
+        return StorageUsageSnapshot(l1=l1_snapshot, l2=tuple(l2_snapshots))
+
     def register_l2_listener(self, listener: L2AdapterListener) -> None:
         """Register a listener on all current and future L2 adapters.
 
@@ -1061,6 +1167,15 @@ class StorageManager:
                 (adapter_id, self._adapter_descriptors[adapter_id], adapter)
                 for adapter_id, adapter in sorted(self._l2_adapters.items())
             ]
+
+    @staticmethod
+    def _health_from_bool(value: object) -> StorageHealth:
+        """Map an exact boolean health value to the snapshot vocabulary."""
+        if value is True:
+            return StorageHealth.OK
+        if value is False:
+            return StorageHealth.FAILED
+        return StorageHealth.UNKNOWN
 
     def _has_l2_adapters(self) -> bool:
         """Return whether any L2 adapter is currently active."""
