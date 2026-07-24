@@ -179,11 +179,13 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
         elif status == -1:
             logger.error(f"Transfer failed {self._remote_session_id} batch_id {batch_id}")
             return TransferChannelReadResult(
-            finished=True, succeeded_mask=[False] * len(remote_addresses))
+                finished=True, succeeded_mask=[False] * len(remote_addresses)
+            )
         elif status == -2:
             logger.error(f"Transfer timed out {self._remote_session_id} batch_id {batch_id}")
             return TransferChannelReadResult(
-            finished=True, succeeded_mask=[False] * len(remote_addresses))
+                finished=True, succeeded_mask=[False] * len(remote_addresses)
+            )
 
         raise RuntimeError(f"unexpected mooncake transfer engine status: {status}")
 
