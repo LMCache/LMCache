@@ -16,6 +16,7 @@ import zmq
 # First Party
 from lmcache import torch_dev
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
+from lmcache.integration.vllm.experimental import dispatch
 from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
@@ -1196,13 +1197,10 @@ class LMCacheMPWorkerAdapter:
         self.blocks_in_chunk = lmcache_tokens_per_chunk // vllm_block_size
 
         # Experimental intermediate tensor transfer
-        # First Party
-        from lmcache.integration.vllm.experimental import Dispatcher
-
         self.experimental: set[str] = get_experimental(
             self.mq_client, timeout=self._mq_timeout
         )
-        self.dispatcher: "Dispatcher" = Dispatcher([])
+        self.dispatcher: "Dispatcher | None" = None
 
         # Health state (shared with heartbeat thread)
         self._health_event = threading.Event()
@@ -1419,9 +1417,7 @@ class LMCacheMPWorkerAdapter:
             return False
         logger.warning("Finished re-registering KV caches after server recovery")
 
-        q_reregister_success = self.dispatcher.reregister()
-        if not q_reregister_success:
-            return False
+        dispatch(self.dispatcher, "reregister")
 
         return True
 
@@ -1628,7 +1624,7 @@ class LMCacheMPWorkerAdapter:
             take care of deduplicating the request IDs and only return the request
             IDs that have not been returned before.
         """
-        self.dispatcher.reclaim()
+        dispatch(self.dispatcher, "reclaim")
 
         # If unhealthy, drain all pending futures immediately
         if not self.is_healthy:
@@ -1798,7 +1794,7 @@ class LMCacheMPWorkerAdapter:
                 self._mq_timeout,
             )
 
-        self.dispatcher.shutdown()
+        dispatch(self.dispatcher, "shutdown")
 
         if self.transfer_ctx is not None:
             self.transfer_ctx.close()

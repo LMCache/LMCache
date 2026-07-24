@@ -138,6 +138,22 @@ def init_dispatcher(
     return Dispatcher(features)
 
 
+def dispatch(
+    dispatcher: Dispatcher | None,
+    fn_name: str,
+    **kwargs: Any,
+) -> None:
+    """Dispatch the given arguments to the dispatcher.
+
+    Args:
+        dispatcher: The dispatcher to dispatch to.
+        **kwargs: The arguments to dispatch.
+    """
+    if dispatcher is not None:
+        for feature in dispatcher._features:
+            getattr(feature, fn_name)(**kwargs)
+
+
 class Dispatcher:
     """Holds the experimental features built into the server and connector, and
     fans out lifecycle hooks to all of them. The connector and adapter doesn't
