@@ -55,7 +55,6 @@ from lmcache.integration.vllm.utils import (
 )
 from lmcache.utils import init_logger as lmcache_init_logger
 from lmcache.v1.multiprocess.group_view import slice_block_ids_per_group
-from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
 
 try:
     # First Party
@@ -707,6 +706,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     FeatureContext,
                     init_dispatcher,
                 )
+                from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
 
                 ctx = FeatureContext(
                     worker_adapter=self.worker_adapter,
