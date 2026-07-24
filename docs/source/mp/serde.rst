@@ -162,6 +162,9 @@ compliance mandate requires it.
    key, so any server holding the master can decrypt any tenant's data
    ("fleet vs. outside" trust). It is not per-tenant access isolation.
 
+A runnable end-to-end example (server + vLLM + store / clear-L1 / decrypt) is at
+:file:`examples/serde/encrypt/`.
+
 
 Writing a custom serde
 ----------------------
