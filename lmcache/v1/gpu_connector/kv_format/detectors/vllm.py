@@ -40,6 +40,9 @@ class VLLM_Detector(EngineDetector):
         # (HND) or BS/NH (NHD) -- indistinguishable from the shape alone, so the
         # resolved kv_layout decides. Split [NB, *, *, 2*HS] into
         # [NB, *, *, 2, HS].
+
+        # TODO(ApostaC): deprecate NL_X_NB_NH_BS_TWO_HS/NL_X_NB_BS_NH_TWO_HS
+        # and introduce more clear formats: NL_X_NB_NH_BS_CS/NL_X_NB_BS_NH_CS
         if (
             isinstance(kv_caches, list)
             and kv_caches

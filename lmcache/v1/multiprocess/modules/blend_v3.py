@@ -31,6 +31,7 @@ from lmcache.logging import init_logger
 from lmcache.utils import check_interprocess_event_support
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
+    PrefetchRequestSpec,
     TrimPolicy,
     ipc_key_to_object_keys,
 )
@@ -61,7 +62,7 @@ from lmcache.v1.multiprocess.token_hasher import (
     rolling_hash_windows_numba,
     update_table_id_numba,
 )
-from lmcache.v1.platform.base_cache_context import BaseCacheContext
+from lmcache.v1.platform.base.cache_context import BaseCacheContext
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
@@ -731,10 +732,12 @@ class BlendV3Module(InstanceLivenessTarget):
             expanded_uidx.append(uidx)
 
         handle: PrefetchHandle = self._ctx.storage_manager.submit_prefetch_task(
-            uniq_keys,
-            layout_desc,
+            PrefetchRequestSpec(
+                keys=uniq_keys,
+                layout_desc=layout_desc,
+                policy=TrimPolicy.SPARSE,
+            ),
             external_request_id=key.request_id,
-            policy=TrimPolicy.SPARSE,
         )
         return handle, per_hash_obj_keys, expanded_uidx
 
@@ -883,11 +886,13 @@ class BlendV3Module(InstanceLivenessTarget):
         extra_count = compute_extra_count(tp_size, world_size)
         obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
         handle = self._ctx.storage_manager.submit_prefetch_task(
-            obj_keys,
-            layout_desc,
-            extra_count=extra_count,
+            PrefetchRequestSpec(
+                keys=obj_keys,
+                layout_desc=layout_desc,
+                extra_count=extra_count,
+                policy=policy,
+            ),
             external_request_id=rid,
-            policy=policy,
         )
         return handle, world_size
 
@@ -920,11 +925,16 @@ class BlendV3Module(InstanceLivenessTarget):
             # NOTE(Kuntai): assumes uniform world size and prefix-ordered keys
             # that break at the first miss.
             leading = bm.count_leading_ones() // ws
-            retained = (
-                sorted({ki // ws for ki in bm.get_indices_list()})
-                if segmented
-                else None
-            )
+            # Retain a chunk only if EVERY rank shard loaded (AND across the ws
+            # shards); a chunk missing any rank's shard is demoted to a gap.
+            if segmented:
+                shard_counts: dict[int, int] = {}
+                for ki in bm.get_indices_list():
+                    c = ki // ws
+                    shard_counts[c] = shard_counts.get(c, 0) + 1
+                retained = sorted(c for c, n in shard_counts.items() if n == ws)
+            else:
+                retained = None
         else:
             # No GPU context / no full chunk: nothing loaded.
             leading, retained = 0, ([] if segmented else None)
@@ -1450,8 +1460,9 @@ class BlendV3Module(InstanceLivenessTarget):
                 ``old_st`` to new position ``cur_st``.
 
         Raises:
-            RuntimeError: On a compressed (compress_ratio != 1) or MLA
-                (kv_size != 2) layout, or a head_size/hidden_dim mismatch.
+            RuntimeError: On a compressed (compress_ratio != 1) layout, a
+                kv_size other than 2 (K/V) or 1 (key-only index), or a
+                head_size/hidden_dim mismatch.
         """
         if not slots_to_rope:
             return
@@ -1472,15 +1483,19 @@ class BlendV3Module(InstanceLivenessTarget):
             kv_size = all_slots[0].shape[0]
             # Fused blocks-first K/V pack K+V into a doubled head dim
             # (kv_size==1); detect so only the K half is re-RoPE'd in place.
+            # kv_size==1 without fused packing is the M3 key-only index side
+            # cache; kv_size==2 is main K/V. In every case only the K plane
+            # (tmp[0]) is re-RoPE'd below.
             _ekf = getattr(group, "engine_kv_format", None)
             fused_packed = _ekf is not None and int(_ekf) in (
                 int(lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
                 int(lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS),
             )
-            if kv_size != 2 and not fused_packed:
+            if kv_size not in (1, 2):
                 raise RuntimeError(
-                    f"CB v3: group {group_idx} has kv_size={kv_size}; only K/V (2) "
-                    "and fused-packed K/V layouts are supported (MLA unsupported)."
+                    f"CB v3: group {group_idx} has kv_size={kv_size}; only K/V "
+                    "(2), fused-packed K/V, and key-only (1) layouts are "
+                    "supported (MLA unsupported)."
                 )
             num_layers, slots, hidden_dim = all_slots[0].shape[1:]
             # Fused-packed: per-head width is 2*head_size; only K is rotated.
@@ -1708,7 +1723,11 @@ class BlendV3Module(InstanceLivenessTarget):
                     all_obj_keys
                 ) as memory_objs:
                     if memory_objs is None:
-                        return event_ipc_handle, False
+                        # Read failed: return a valid server event + False, never
+                        # the client's own handle (self-import raises
+                        # cudaErrorDeviceUninitialized, crashing TP).
+                        event.record()
+                        return event.ipc_handle(), False
 
                     # Per-token scatter handles any cur_st; just bound the
                     # matched range to the allocated slots.
@@ -1858,7 +1877,10 @@ class BlendV3Module(InstanceLivenessTarget):
                         session_id=key.request_id,
                     ),
                 )
-                return event_ipc_handle, False
+                # Valid server event + False (never echo the client handle; see
+                # the memory_objs-None path above).
+                event.record()
+                return event.ipc_handle(), False
 
             event.record()
             self._event_bus.publish_on_stream(

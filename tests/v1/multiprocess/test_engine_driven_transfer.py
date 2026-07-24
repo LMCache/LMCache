@@ -82,7 +82,7 @@ def _make_kv_caches(
     num_heads: int = 2,
     head_size: int = 8,
 ) -> dict[str, torch.Tensor]:
-    """Build per-layer NHD KV tensors for non-CUDA data transfer tests."""
+    """Build per-layer NHD KV tensors for device-agnostic data transfer tests."""
     kv_caches = {}
     for i in range(num_layers):
         kv_caches[f"layer_{i}"] = torch.randn(
@@ -97,7 +97,7 @@ def _make_mla_kv_caches(
     block_size: int = 4,
     hidden_size: int = 16,
 ) -> dict[str, torch.Tensor]:
-    """Build per-layer MLA KV tensors for non-CUDA data transfer tests.
+    """Build per-layer MLA KV tensors for device-agnostic data transfer tests.
 
     Args:
         num_layers: Number of KV layers to generate.
@@ -122,7 +122,7 @@ def _make_hnd_kv_caches(
     num_heads: int = 2,
     head_size: int = 8,
 ) -> dict[str, torch.Tensor]:
-    """Build per-layer HND KV tensors for non-CUDA data transfer tests."""
+    """Build per-layer HND KV tensors for device-agnostic data transfer tests."""
     kv_caches = {}
     for i in range(num_layers):
         kv_caches[f"layer_{i}"] = torch.randn(
@@ -138,7 +138,9 @@ def _make_hnd_flashinfer_kv_caches(
     num_heads: int = 2,
     head_size: int = 8,
 ) -> dict[str, torch.Tensor]:
-    """Build per-layer HND flash-infer KV tensors for non-CUDA data transfer tests."""
+    """Build per-layer HND flash-infer KV tensors for
+    device-agnostic data transfer tests.
+    """
     kv_caches = {}
     for i in range(num_layers):
         kv_caches[f"layer_{i}"] = torch.randn(
@@ -292,7 +294,7 @@ def test_wrap_kv_caches_wraps_all_tensors() -> None:
     assert len(wrapped) == len(kv_caches)
 
 
-def test_create_transfer_context_uses_non_cuda_context_on_cpu() -> None:
+def test_create_transfer_context_uses_default_context_on_cpu() -> None:
     """Ensure factory returns EngineDrivenTransferContext for CPU KV."""
     # First Party
     from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
@@ -705,10 +707,16 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip(
         scatter_cpu_to_paged_kv,
     )
 
+    def _vllm_detector_device_type() -> str:
+        """Keep the detector on the active accelerator, but bypass CPU hosts."""
+
+        return torch_device_type if torch_device_type != "cpu" else "cuda"
+
     # Bypass the CPU-host HND safeguard so the layout hint drives detection
     # regardless of the host running the test.
     monkeypatch.setattr(
-        "lmcache.v1.gpu_connector.kv_format.detectors.vllm.torch_device_type", "cuda"
+        "lmcache.v1.gpu_connector.kv_format.detectors.vllm.torch_device_type",
+        _vllm_detector_device_type(),
     )
 
     source = {k: v.to(torch_device_type) for k, v in builder_fn().items()}
@@ -1125,7 +1133,7 @@ def test_server_register_and_find_non_cuda_context_layout(
     stub_native_storage_ops: Any,
     server_module_factory: ServerModuleFactory,
 ) -> None:
-    """Ensure non-CUDA registration stores metadata and lookup finds layout."""
+    """Ensure backend-agnostic registration stores metadata and lookup finds layout."""
     module, _, _, ctx = server_module_factory(chunk_size=16)
     response = module.register_kv_cache_engine_driven_context(
         _default_register_payload(instance_id=1)
