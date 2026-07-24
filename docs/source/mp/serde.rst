@@ -146,23 +146,12 @@ key via HKDF-SHA256; the master key is never written to L2. ``aes_bits``
 defaults to ``128`` (already unbreakable and slightly faster); set ``256`` if a
 compliance mandate requires it.
 
-.. note::
-
-   Scope is the **L2 tier only** — L1 (host RAM) and L0 (GPU) hold plaintext,
-   so this protects against readers of the remote storage, not against a party
-   with access to a running server process. It also does not hide object
-   *metadata*: the ``cache_salt`` and a content-derived ``chunk_hash`` remain
-   visible in L2 object names. See the design doc at
-   ``docs/design/v1/distributed/serde/aesgcm.md`` for the full threat model.
-
 .. warning::
 
    The ``hkdf`` provider derives every tenant's key from one shared master
    key, so any server holding the master can decrypt any tenant's data
    ("fleet vs. outside" trust). It is not per-tenant access isolation.
 
-A runnable end-to-end example (server + vLLM + store / clear-L1 / decrypt) is at
-:file:`examples/serde/aesgcm/`.
 
 
 Writing a custom serde
