@@ -170,9 +170,8 @@ class MPContinuousUsageReporter(EventSubscriber):
     def _make_callback(self, event_specs: list[MetricSpec]) -> EventCallback:
         """Build the drain-thread callback for one event type.
 
-        The callback only buffers samples; the sample that fills a
-        buffer to ``max_buffered_samples`` triggers an early flush on a
-        one-shot daemon thread.
+        The callback only buffers samples; a full buffer wakes the
+        flush thread early.
         """
 
         @swallow_telemetry_errors
@@ -185,15 +184,10 @@ class MPContinuousUsageReporter(EventSubscriber):
                         continue
                     buffer = self._buffers[spec.field]
                     buffer.append(sample)
-                    # Only the sample that fills the buffer to exactly
-                    # max_buffered_samples sets overflow: one buffer fill
-                    # triggers one early flush.
-                    if len(buffer) == self._max_buffered_samples:
+                    if len(buffer) >= self._max_buffered_samples:
                         overflow = True
             if overflow:
-                threading.Thread(
-                    target=self.flush, daemon=True, name="lmcache-usage-early-flush"
-                ).start()
+                self._flush_thread.wake()
 
         return _on_event
 

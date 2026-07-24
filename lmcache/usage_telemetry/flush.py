@@ -42,9 +42,10 @@ def usage_flush_interval_seconds() -> float:
 def start_usage_flush_thread(name: str, flush: Callable[[], None]) -> PeriodicThread:
     """Start a ``LOW``-level :class:`PeriodicThread` that runs *flush*.
 
-    The thread first runs after one full flush interval and is
-    registered in the global ``PeriodicThreadRegistry``, so *name* must
-    be unique per process.
+    The thread first runs after one full flush interval; ``wake()``
+    requests during that initial wait take effect at the first run.
+    The thread is registered in the global ``PeriodicThreadRegistry``,
+    so *name* must be unique per process.
 
     Args:
         name: Thread name, also the registry key.

@@ -489,7 +489,8 @@ class TestMPContinuous:
         assert payload["interval_num_stored_tokens"] == 4
         assert payload["interval_stored_kv_size"] == 1000  # max, not 2000
 
-    def test_buffer_overflow_triggers_early_flush(self, usage_env):
+    def test_buffer_overflow_triggers_early_flush(self, usage_env, monkeypatch):
+        monkeypatch.setenv("LMCACHE_USAGE_TRACK_INTERVAL", "3")
         sender = RecordingSender()
         bus = EventBus(EventBusConfig(enabled=True))
         bus.start()
@@ -497,14 +498,23 @@ class TestMPContinuous:
             chunk_size=256, sender=sender, max_buffered_samples=2
         )
         bus.register_subscriber(reporter)
-        # The second round of traffic fills a 2-sample buffer and
-        # triggers an early flush well before the 600 s interval.
-        publish_mp_traffic(bus)
-        publish_mp_traffic(bus)
+        # Wake requests during the flush thread's initial wait are
+        # deferred to the first run, so let the first periodic flush
+        # pass before testing the overflow path.
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline and not sender.sent:
             time.sleep(0.01)
-        assert sender.sent, "overflow did not trigger an early flush"
+        assert sender.sent, "no first periodic flush"
+        baseline = len(sender.sent)
+        # The second round of traffic fills a 2-sample buffer and wakes
+        # the flush thread: a new message arrives well before the next
+        # 3 s tick.
+        publish_mp_traffic(bus)
+        publish_mp_traffic(bus)
+        deadline = time.monotonic() + 1.5
+        while time.monotonic() < deadline and len(sender.sent) == baseline:
+            time.sleep(0.01)
+        assert len(sender.sent) > baseline, "overflow did not wake the flush thread"
         # The early flush can race the drain thread and split the samples
         # across messages; stop() flushes the rest, so assert the totals
         # across all sent messages.
