@@ -545,6 +545,10 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             fdp_slot_affinity_enabled=(
                 self.fdp_slot_reuse_policy == _FDP_SLOT_REUSE_POLICY_PID_AFFINITY
             ),
+            # Reuse the existing num_load_workers knob to bound how many objects'
+            # reads load_many_into keeps in flight; serial loading pins the NVMe
+            # passthrough path at QD~1.
+            load_parallelism=self.num_load_workers,
         )
 
 
