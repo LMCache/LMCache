@@ -1,62 +1,51 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Integration tests for the nixl-backed transfer channel implementation.
+Integration tests for the Mooncake Transfer Engine-backed transfer channel
+implementation.
 
 Tests are written against the public contracts documented in
 ``transfer_channel/abstract.py`` and ``transfer_channel/api.py`` (the
 ``TransferChannelContext`` / ``TransferChannelServer`` / ``TransferChannelClient``
 interfaces). They use only public methods and do not access private fields.
 
-These tests require a working nixl runtime (with a UCX backend) and are skipped
-when nixl is unavailable.
+These tests require a working mooncake-transfer-engine runtime and are skipped
+when mooncake-transfer-engine is unavailable.
 
-Most tests share a single module-scoped context-pair to avoid paying the (slow)
-nixl agent initialization for every test. The reads are self-verifying -- each
-reads fresh remote data into its target region and checks that region -- so a
-reused buffer and connection do not affect their outcome. The one test that must
-observe a pristine connection state (the 0 -> 1 connection-count transition)
-uses its own function-scoped pair instead, since there is no public way to reset
-an existing context's connected clients short of closing it.
+Most connection-state-insensitive tests share a module-scoped context pair to avoid
+repeated Mooncake Transfer Engine initialization. Each read verifies that its target
+region matches the requested remote region, so reusing the buffers and established
+connection does not affect the asserted result. Client-management tests that require
+an initially empty client registry use a function-scoped context pair to keep their
+preconditions explicit and independent of test execution order.
 """
 
 # Standard
-from unittest.mock import MagicMock
 import itertools
 import time
+from collections.abc import Generator
+from typing import TypeAlias
+from unittest.mock import MagicMock
 
 # Third Party
 import pytest
 import torch
 
-mooncake_te = pytest.importorskip("lmcache.v1.distributed.transfer_channel.impl.mooncake_te_impl")
-# Nothing
+pytest.importorskip("mooncake.engine", reason="mooncake-transfer-engine is required")
+
 # First Party
 from lmcache.v1.distributed.internal_api import L1MemoryDesc  # noqa: E402
 from lmcache.v1.distributed.transfer_channel.impl.mooncake_te_impl import (  # noqa: E402
     MooncakeTeTransferChannelContext,
 )
 
-# SPDX-License-Identifier: Apache-2.0
-"""Public-contract tests for the Mooncake transfer channel."""
-
-# Standard
-from collections.abc import Generator
-from typing import TypeAlias
-from unittest.mock import MagicMock, patch
-
-# Third Party
-import pytest
-
-# First Party
-from lmcache.v1.distributed.internal_api import L1MemoryDesc
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
-from lmcache.v1.distributed.transfer_channel.impl import mooncake_te_impl
-from lmcache.v1.distributed.transfer_channel.impl.mooncake_te_impl import (
-    MooncakeTeTransferChannelContext,
-)
-
 _ALIGN = 256
 _BUF_SIZE = 4096
+ContextPair: TypeAlias = tuple[
+    MooncakeTeTransferChannelContext,
+    torch.Tensor,
+    MooncakeTeTransferChannelContext,
+    torch.Tensor,
+]
 
 # Each context must bind to a distinct port so multiple pairs can coexist in one
 # process without clashing.
@@ -67,7 +56,7 @@ def _next_url() -> str:
     return f"127.0.0.1:{next(_port_counter)}"
 
 
-def _make_context_pair():
+def _make_context_pair() -> ContextPair:
     """Create two contexts backed by two distinct CPU buffers.
 
     ``buf_b`` holds a known byte pattern so transfers can be content-verified;
@@ -79,13 +68,17 @@ def _make_context_pair():
     desc_b = L1MemoryDesc(ptr=buf_b.data_ptr(), size=buf_b.numel(), align_bytes=_ALIGN)
 
     url_a, url_b = _next_url(), _next_url()
-    ctx_a = MooncakeTeTransferChannelContext(desc_a, listen_url=url_a, advertise_url=url_a)
-    ctx_b = MooncakeTeTransferChannelContext(desc_b, listen_url=url_b, advertise_url=url_b)
+    ctx_a = MooncakeTeTransferChannelContext(
+        desc_a, listen_url=url_a, advertise_url=url_a
+    )
+    ctx_b = MooncakeTeTransferChannelContext(
+        desc_b, listen_url=url_b, advertise_url=url_b
+    )
     return ctx_a, buf_a, ctx_b, buf_b
 
 
 @pytest.fixture(scope="module")
-def shared_contexts():
+def shared_contexts() -> Generator[ContextPair, None, None]:
     """A single context-pair reused across connection-state-insensitive tests."""
     ctx_a, buf_a, ctx_b, buf_b = _make_context_pair()
     try:
@@ -96,7 +89,7 @@ def shared_contexts():
 
 
 @pytest.fixture
-def fresh_contexts():
+def fresh_contexts() -> Generator[ContextPair, None, None]:
     """A brand-new context-pair for tests that need pristine connection state."""
     ctx_a, buf_a, ctx_b, buf_b = _make_context_pair()
     try:

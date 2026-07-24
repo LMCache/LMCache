@@ -8,6 +8,7 @@ import math
 import threading
 import uuid
 from lmcache.logging import init_logger
+
 logger = init_logger(__name__)
 # Third Party
 import msgspec
@@ -41,6 +42,7 @@ _HANDSHAKE_TIMEOUT_MS = 60_000
 
 INVALID_BATCH_ID = (1 << 64) - 1
 
+
 ############################################################
 # Helper functions
 ############################################################
@@ -52,10 +54,17 @@ def _parse_url(url: str) -> tuple[str, int]:
         raise ValueError(f"Invalid transfer channel url: {url!r} (expected host:port)")
     return host, int(port)
 
+
 def collect_env_var() -> tuple[str, str]:
+    """Collect Mooncake Transfer Engine environment variables.
+        By default, the protocol is ``tcp`` and the device ID is empty (CPU).
+    Returns:
+        tuple[str, str]: A tuple containing the protocol and device ID.
+    """
     mc_te_protocol = os.getenv("MC_TE_PROTOCOL", "tcp")
     mc_te_device_id = os.getenv("MC_TE_DEVICE", "")
     return mc_te_protocol, mc_te_device_id
+
 
 ############################################################
 # Handshake messages (msgspec, tagged union)
@@ -69,10 +78,12 @@ class InitReq(HandshakeMsgBase):
     session_id: str
     buffer_base_ptr: int
 
+
 class InitResp(HandshakeMsgBase):
     advertise_url: str
     session_id: str
     buffer_base_ptr: int
+
 
 HandshakeMsg = Union[InitReq, InitResp]
 
@@ -85,7 +96,7 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
         self,
         context: "MooncakeTeTransferChannelContext",
         remote_session_id: str,
-        remote_buffer_ptr: int
+        remote_buffer_ptr: int,
     ):
         self._ctx = context
         self._remote_session_id = remote_session_id
@@ -123,7 +134,7 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
             remote_ptrs.append(a[1].offset + self._remote_buffer_ptr)
             if a[0].size != a[1].size:
                 raise ValueError("local and remote sizes must match")
-            data_lengths.append(a[0].size)        
+            data_lengths.append(a[0].size)
         batch_id = self._ctx.mooncake_te_engine.batch_transfer_async_read(
             self._remote_session_id,
             local_ptrs,
@@ -139,9 +150,7 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
             )
 
         if batch_id < 0 or batch_id >= (1 << 63):
-            raise RuntimeError(
-                f"Invalid batch ID returned: {batch_id}"
-            )
+            raise RuntimeError(f"Invalid batch ID returned: {batch_id}")
 
         with self._lock:
             task_id = self._task_counter
@@ -177,18 +186,21 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
                 finished=True, succeeded_mask=[True] * len(remote_addresses)
             )
         elif status == -1:
-            logger.error(f"Transfer failed {self._remote_session_id} batch_id {batch_id}")
+            logger.error(
+                f"Transfer failed {self._remote_session_id} batch_id {batch_id}"
+            )
             return TransferChannelReadResult(
                 finished=True, succeeded_mask=[False] * len(remote_addresses)
             )
         elif status == -2:
-            logger.error(f"Transfer timed out {self._remote_session_id} batch_id {batch_id}")
+            logger.error(
+                f"Transfer timed out {self._remote_session_id} batch_id {batch_id}"
+            )
             return TransferChannelReadResult(
                 finished=True, succeeded_mask=[False] * len(remote_addresses)
             )
 
         raise RuntimeError(f"unexpected mooncake transfer engine status: {status}")
-
 
     def close(self) -> None:
         """
@@ -255,19 +267,22 @@ class MooncakeTeTransferChannelServer(TransferChannelServer):
     def _handle_msg(self, req: HandshakeMsg) -> HandshakeMsg:
         if isinstance(req, InitReq):
             # Learn the connecting peer's agent (idempotent on repeat).
-            logger.info(f"initialized transfer channel server with mooncake transfer engine "
-                         f"{self._ctx.advertise_host}:{self._ctx.mooncake_te_port}")
+            logger.info(
+                f"initialized transfer channel server with mooncake transfer engine "
+                f"{self._ctx.advertise_host}:{self._ctx.mooncake_te_port}"
+            )
             self._ctx.register_client(
                 key=req.advertise_url,
-                client = MooncakeTeTransferChannelClient(
+                client=MooncakeTeTransferChannelClient(
                     context=self._ctx,
-                    remote_session_id = req.session_id,
-                    remote_buffer_ptr = req.buffer_base_ptr)
+                    remote_session_id=req.session_id,
+                    remote_buffer_ptr=req.buffer_base_ptr,
+                ),
             )
             return InitResp(
                 advertise_url=self._ctx.advertise_url,
                 buffer_base_ptr=self._ctx.l1_memory_desc.ptr,
-                session_id = f"{self._ctx.advertise_host}:{self._ctx.mooncake_te_port}",
+                session_id=f"{self._ctx.advertise_host}:{self._ctx.mooncake_te_port}",
             )
         else:
             raise ValueError(f"Unexpected handshake message: {type(req)}")
@@ -296,7 +311,6 @@ class MooncakeTeTransferChannelContext(TransferChannelContext):
         l1_memory_desc: L1MemoryDesc,
         listen_url: str,
         advertise_url: str,
-        backends: Optional[list[str]] = None,
     ) -> None:
         """
         Creates the transfer channel context using mooncake_te.
@@ -305,7 +319,6 @@ class MooncakeTeTransferChannelContext(TransferChannelContext):
             l1_memory_desc: The description of the local L1 memory buffer to register.
             listen_url: The URL to listen on for incoming connections.
             advertise_url: The URL to advertise to peers for them to connect to us.
-            backends: Optional list of mooncake_te backends to use (e.g., ["UCX"])
         """
         self._l1_memory_desc = l1_memory_desc
         self.listen_url = listen_url
@@ -324,8 +337,10 @@ class MooncakeTeTransferChannelContext(TransferChannelContext):
         )
         if ret != 0:
             raise RuntimeError(f"Failed to initialize mooncake_te engine, ret={ret}")
-        logger.info(f"mooncake_te engine created, mooncake transfer engine port "
-                    f"{self._mooncake_te_engine.get_rpc_port()}, backends: {backends}")
+        logger.info(
+            f"mooncake_te engine created, mooncake transfer engine port "
+            f"{self._mooncake_te_engine.get_rpc_port()}, protocol: {self._protocol}, device: {self._device_id}"
+        )
         self._mooncake_te_port = self._mooncake_te_engine.get_rpc_port()
         # Register the whole L1 buffer once (CPU/DRAM, fixed mooncake_te dev_id=0).
         ptr, size = l1_memory_desc.ptr, l1_memory_desc.size
@@ -346,6 +361,26 @@ class MooncakeTeTransferChannelContext(TransferChannelContext):
             l1_memory_desc=l1_memory_desc,
             context=self,
         )
+
+    @property
+    def advertise_host(self) -> str:
+        """Return the host advertised to transfer-channel peers."""
+        return self._advertise_host
+
+    @property
+    def l1_memory_desc(self) -> L1MemoryDesc:
+        """Return the registered L1 memory-region description."""
+        return self._l1_memory_desc
+
+    @property
+    def mooncake_te_engine(self) -> TransferEngine:
+        """Return the Mooncake Transfer Engine owned by this context."""
+        return self._mooncake_te_engine
+
+    @property
+    def mooncake_te_port(self) -> int:
+        """Return the Mooncake Transfer Engine RPC port."""
+        return self._mooncake_te_port
 
     ############################################################
     # Address translation
@@ -477,9 +512,7 @@ class MooncakeTeTransferChannelContext(TransferChannelContext):
 
         ret = self._mooncake_te_engine.unregister_memory(self._l1_memory_desc.ptr)
         if ret != 0:
-            raise(
-                "Warning: unregister_memory failed."
-            )
+            raise ("Warning: unregister_memory failed.")
         else:
             logger.info(f"Unregistered memory buffer.")
 
@@ -519,13 +552,17 @@ class MooncakeTeTransferChannelContext(TransferChannelContext):
         try:
             # Stage 1: exchange agent metadata.
             session_id = f"{self._advertise_host}:{self._mooncake_te_port}"
-            logger.info("initiate connection to server %s with local session id %s", server_url, session_id)
+            logger.info(
+                "initiate connection to server %s with local session id %s",
+                server_url,
+                session_id,
+            )
             socket.send(
                 msgspec.msgpack.encode(
                     InitReq(
-                        advertise_url = server_url,
-                        session_id = session_id,
-                        buffer_base_ptr = self._l1_memory_desc.ptr,
+                        advertise_url=self.advertise_url,
+                        session_id=session_id,
+                        buffer_base_ptr=self._l1_memory_desc.ptr,
                     )
                 )
             )
@@ -539,8 +576,8 @@ class MooncakeTeTransferChannelContext(TransferChannelContext):
 
         return MooncakeTeTransferChannelClient(
             context=self,
-            remote_session_id = remote_session_id,
-            remote_buffer_ptr = init_resp.buffer_base_ptr
+            remote_session_id=remote_session_id,
+            remote_buffer_ptr=init_resp.buffer_base_ptr,
         )
 
 
@@ -559,8 +596,6 @@ def create_mooncake_te_transfer_channel_context(
         l1_memory_desc: Describes the L1 memory region to register.
         listen_url: ``host:port`` this peer's server binds to.
         advertise_url: ``host:port`` this peer advertises as its identity.
-        **kwargs: Accepts ``backends`` (an optional list of mooncake_te backends,
-            e.g. ``["UCX"]``).
 
     Returns:
         A new ``MooncakeTeTransferChannelContext`` instance.
@@ -570,8 +605,9 @@ def create_mooncake_te_transfer_channel_context(
         l1_memory_desc=l1_memory_desc,
         listen_url=listen_url,
         advertise_url=advertise_url,
-        backends=kwargs.get("backends"),
     )
 
 
-register_transfer_channel_factory("mooncake_te", create_mooncake_te_transfer_channel_context)
+register_transfer_channel_factory(
+    "mooncake_te", create_mooncake_te_transfer_channel_context
+)
