@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Nixl-backed implementation of the transfer channel abstraction."""
+"""Mooncake Transfer Engine-backed implementation of the transfer channel abstraction."""
 
 # Standard
 from typing import TYPE_CHECKING, Optional, Union
