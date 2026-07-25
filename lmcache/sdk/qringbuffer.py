@@ -340,7 +340,9 @@ class QRingBufferCapture:
             return
 
         if self.q_step_state is None:
-            self.q_step_state = self._build_q_step_state(query, metadata)
+            self.q_step_state = self._build_q_step_state(
+                query, metadata, kwargs.get("attn_metadata")
+            )
             if self.q_step_state is None:
                 self.q_step_disabled = True
                 return
@@ -353,52 +355,64 @@ class QRingBufferCapture:
         self,
         query: torch.Tensor,
         metadata: "LMCacheMPConnectorMetadata",
+        attn_metadata: Any = None,
     ) -> "_QStepState | None":
         """Build the per-step query store plan for the current forward step.
         Done only on the first layer's save_kv_layer call of the step.
 
+        Query rows are matched to each store op's tokens through
+        ``attn_metadata.slot_mapping``: row ``r`` writes its KV to GPU slot
+        ``slot_mapping[r]``, and the op's token ``i`` lives in GPU slot
+        ``block_ids[i // block_size] * block_size + i % block_size`` (the op's
+        block list is pre-sliced to its ``[start, end)`` range). Intersecting
+        the two identifies each op's rows regardless of batch composition or
+        ordering, so mixed STORE/RETRIEVE steps and requests whose scheduled
+        token count differs from their store-op token count (chunk-unaligned
+        prompt tails, APC offsets) no longer shift later requests' rows.
+
         Args:
             query: The query tensor of shape [num_tokens, num_q_heads, head_size].
             metadata: The LMCache connector metadata.
+            attn_metadata: The vLLM per-layer attention metadata; must expose
+                ``slot_mapping`` for query capture to run.
 
         Returns:
             _QStepState: the query capture plan (containing ring slot mapping
                             and per-request store ops).
             None if not storing any query tensors.
         """
-        if not (all(meta.direction == "STORE" for meta in metadata.requests)):
-            logger.warning(
-                "Not all requests are STORE. Skip query for requests %s...",
-                [meta.request_id for meta in metadata.requests],
-            )
-            return None
-
         q_ring = self.q_ring_adapter.q_ring
         if q_ring is None:
             return None
         block_size = q_ring.block_size
+
+        slot_mapping = getattr(attn_metadata, "slot_mapping", None)
+        if slot_mapping is None:
+            logger.warning(
+                "Skip query capture for this step: attention metadata does "
+                "not expose slot_mapping, so query rows cannot be attributed "
+                "to tokens."
+            )
+            return None
+
         num_query_rows = query.shape[0]
+        # Rows beyond slot_mapping (CUDA-graph padding) and rows with slot -1
+        # never write KV and are dropped from capture.
+        n_rows = min(num_query_rows, slot_mapping.shape[0])
+        row_slots = slot_mapping[:n_rows].to(device=query.device, dtype=torch.int64)
         ring_slots = torch.full(
             (num_query_rows,), -1, dtype=torch.int64, device=query.device
         )
+        offsets = torch.arange(block_size, device=query.device)
 
         stores: list[_QLayerStore] = []
-        row_cursor = 0
         for meta in metadata.requests:
+            if meta.direction != "STORE":
+                continue
             op = meta.op
             num_tokens = op.end - op.start
             if num_tokens <= 0:
                 continue
-
-            if row_cursor + num_tokens > num_query_rows:
-                logger.warning(
-                    "Skip query for request %s: query rows (%d) < %d tokens",
-                    meta.request_id,
-                    num_query_rows - row_cursor,
-                    num_tokens,
-                )
-                self._free_partial_ring_blocks(stores)
-                return None
 
             if num_tokens % block_size != 0:
                 logger.warning(
@@ -406,8 +420,47 @@ class QRingBufferCapture:
                     meta.request_id,
                     num_tokens,
                 )
-                self._free_partial_ring_blocks(stores)
-                return None
+                continue
+
+            gpu_blocks = self._op_gpu_blocks(op)
+            if gpu_blocks is None or len(gpu_blocks) * block_size != num_tokens:
+                logger.warning(
+                    "Skip query for request %s: op block layout does not "
+                    "cover its token range (%d blocks of %d tokens for %d "
+                    "tokens)",
+                    meta.request_id,
+                    0 if gpu_blocks is None else len(gpu_blocks),
+                    block_size,
+                    num_tokens,
+                )
+                continue
+
+            # GPU KV slot of the op's token i, in token order.
+            block_tensor = torch.tensor(
+                gpu_blocks, dtype=torch.int64, device=query.device
+            )
+            op_slots = (
+                block_tensor[:, None] * block_size + offsets[None, :]
+            ).reshape(-1)
+
+            # Match rows to op tokens through the KV slot each row writes.
+            # Each GPU slot is written by at most one row per step, so a full
+            # match is a bijection between the op's tokens and its rows.
+            sorted_slots, token_order = torch.sort(op_slots)
+            pos = torch.searchsorted(sorted_slots, row_slots)
+            pos_clamped = pos.clamp(max=num_tokens - 1)
+            hit = (row_slots >= 0) & (sorted_slots[pos_clamped] == row_slots)
+            num_matched = int(hit.sum().item())
+            if num_matched != num_tokens:
+                logger.warning(
+                    "Skip query for request %s: only %d of %d op tokens are "
+                    "in this step's batch (tokens computed in an earlier "
+                    "chunked-prefill step have no query rows here)",
+                    meta.request_id,
+                    num_matched,
+                    num_tokens,
+                )
+                continue
 
             n_blocks = num_tokens // block_size
             ring_blocks = q_ring.allocate(n_blocks)
@@ -418,15 +471,16 @@ class QRingBufferCapture:
                     n_blocks,
                     q_ring.num_free_blocks(),
                 )
-                self._free_partial_ring_blocks(stores)
-                return None
+                continue
 
-            block_tensor = torch.tensor(
+            ring_block_tensor = torch.tensor(
                 ring_blocks, dtype=torch.int64, device=query.device
             )
-            rows = torch.arange(num_tokens, device=query.device)
-            slots = block_tensor[rows // block_size] * block_size + (rows % block_size)
-            ring_slots[row_cursor : row_cursor + num_tokens] = slots
+            ring_slot_by_token = (
+                ring_block_tensor[:, None] * block_size + offsets[None, :]
+            ).reshape(-1)
+            matched_token_idx = token_order[pos_clamped[hit]]
+            ring_slots[:n_rows][hit] = ring_slot_by_token[matched_token_idx]
             stores.append(
                 _QLayerStore(
                     request_id=meta.request_id,
@@ -435,20 +489,28 @@ class QRingBufferCapture:
                     cache_salt=meta.cache_salt,
                 )
             )
-            row_cursor += num_tokens
 
         if not stores:
             return None
 
         return _QStepState(ring_slots=ring_slots, stores=stores)
 
-    def _free_partial_ring_blocks(self, stores: list[_QLayerStore]) -> None:
-        """Free allocated ring blocks when a full allocation is unsuccessful"""
-        q_ring = self.q_ring_adapter.q_ring
-        if q_ring is None:
-            return
-        for store in stores:
-            q_ring.free(store.ring_block_ids)
+    @staticmethod
+    def _op_gpu_blocks(op: "LoadStoreOp") -> list[int] | None:
+        """The op's GPU block IDs as a flat list, or None when the layout is
+        not the single-group one query capture supports.
+
+        Handles both the normal ``list[list[int]]`` format and the
+        IPC-flattened ``list[int]`` format (see ``LoadStoreOp.flat_block_ids``).
+        """
+        block_ids = op.block_ids
+        if not block_ids:
+            return None
+        if isinstance(block_ids[0], int):
+            return list(block_ids)  # type: ignore[arg-type]
+        if len(block_ids) == 1:
+            return list(block_ids[0])
+        return None
 
     def batched_submit_qstore_requests(self, event: "_IpcEvent | None") -> None:
         """

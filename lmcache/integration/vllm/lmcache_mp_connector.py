@@ -903,6 +903,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "save_kv_layer",
                 layer_name=layer_name,
                 metadata=self._get_connector_metadata(),
+                attn_metadata=attn_metadata,
                 **kwargs,
             )
         return
