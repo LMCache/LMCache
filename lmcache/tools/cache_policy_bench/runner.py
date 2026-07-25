@@ -68,13 +68,23 @@ class _SimulatedChunkObj:
 
 class _PolicyCache:
     """Minimal capacity-bounded cache wrapper driving a ``BaseCachePolicy``
-    through the same call sequence as ``LocalCPUBackend``."""
+    through the same call sequence as ``LocalCPUBackend``, plus one call
+    ``LocalCPUBackend`` doesn't make yet: ``should_admit`` when the cache is
+    at capacity, so admission-controlled policies (e.g.
+    ``AdmissionControlledPolicy``, selected via ``get_cache_policy`` names
+    prefixed ``ADMISSION_``) are actually exercised by this simulator. See
+    ``docs/design/v1/storage_backend/cache_policy/admission-control-policy.md``
+    for why request-time admission gating isn't wired into any storage
+    backend yet -- this simulator is ahead of production there by design,
+    since exercising the full interface is the point of a benchmark tool.
+    """
 
     def __init__(self, policy: BaseCachePolicy, capacity_chunks: int) -> None:
         self.policy = policy
         self.capacity_chunks = max(1, capacity_chunks)
         self.cache_dict: dict[str, Any] = policy.init_mutable_mapping()
         self.eviction_count = 0
+        self.rejected_admissions = 0
 
     def contains(self, key: str) -> bool:
         return key in self.cache_dict
@@ -85,6 +95,10 @@ class _PolicyCache:
     def put(self, key: str, obj: _SimulatedChunkObj) -> None:
         if key in self.cache_dict:
             return
+        if len(self.cache_dict) >= self.capacity_chunks:
+            if not self.policy.should_admit(key, self.cache_dict):
+                self.rejected_admissions += 1
+                return
         self._ensure_capacity()
         self.cache_dict[key] = obj
         self.policy.update_on_put_with_metadata(
@@ -249,7 +263,10 @@ def run_workload(
         latency_p50_seconds=_percentile(latencies, 50),
         latency_p95_seconds=_percentile(latencies, 95),
         latency_p99_seconds=_percentile(latencies, 99),
-        extra_params=dict(policy_kwargs),
+        extra_params={
+            **policy_kwargs,
+            "rejected_admissions": cache.rejected_admissions,
+        },
     )
 
 

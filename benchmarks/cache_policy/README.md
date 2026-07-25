@@ -194,7 +194,15 @@ rebalancing, TinyLFU-style admission control, two-tier hierarchical
 caching, plus the existing baselines) and a harness that ran all of them
 through both the synthetic suite and real data to find which one is
 actually worth building. See "Direction-finding experiment" in the
-evaluation doc for the result. To reproduce:
+evaluation doc for the result: TinyLFU-style admission control won
+clearly and now ships as a real class,
+`lmcache/v1/storage_backend/cache_policy/admission_control.py`
+(`AdmissionControlledPolicy`, selectable via
+`get_cache_policy("ADMISSION_<INNER>")`, e.g. `"ADMISSION_LRU"`) -- see
+[`docs/design/v1/storage_backend/cache_policy/admission-control-policy.md`](../../docs/design/v1/storage_backend/cache_policy/admission-control-policy.md)
+for its design and a report comparing both directions explored. The
+`experiments/` code below remains as the historical record of how that
+recommendation was reached. To reproduce the comparison:
 
 ```bash
 # Synthetic leg (fast, no corpus needed)

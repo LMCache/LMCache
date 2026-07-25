@@ -34,6 +34,10 @@ from lmcache.tools.cache_policy_bench.workloads import (
 )
 
 POLICIES = ["LRU", "LFU", "FIFO", "MRU", "COST_AWARE"]
+# Smoke-test-only coverage; kept separate from POLICIES since that list
+# also drives test_full_sweep's scope (nightly), which this isn't meant
+# to expand.
+_FAST_TEST_POLICIES = [*POLICIES, "ADMISSION_LRU"]
 
 _SMALL_CACHE_BYTES = 4 * 1024 * 1024  # 4 MiB
 
@@ -51,7 +55,7 @@ def _small_workload(name: str) -> list:
 
 
 @pytest.mark.benchmark(group="cache_policy")
-@pytest.mark.parametrize("policy_name", POLICIES)
+@pytest.mark.parametrize("policy_name", _FAST_TEST_POLICIES)
 @pytest.mark.parametrize("workload_name", list(WORKLOAD_REGISTRY))
 def test_bench_policy_workload(benchmark, policy_name, workload_name):
     """Fast smoke benchmark: one policy x one workload x one cache size.

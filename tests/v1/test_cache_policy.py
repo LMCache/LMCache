@@ -244,3 +244,71 @@ def test_cost_aware_frequency_protects_popular_chunk():
     # Equal cost/near-equal recency, but key1's higher hit count should
     # outweigh key2's marginal recency edge and protect it from eviction.
     assert evict_candidates == [key2], (evict_candidates, [key2])
+
+
+def test_admission_control_delegates_eviction_ranking_to_inner_policy():
+    # With should_admit never consulted, AdmissionControlledPolicy must
+    # behave identically to the inner LRU policy it wraps.
+    policy = get_cache_policy("ADMISSION_LRU")
+    cache_dict = policy.init_mutable_mapping()
+    obj1 = DummyMemoryObj()
+    obj2 = DummyMemoryObj()
+    obj3 = DummyMemoryObj()
+    key1 = dumb_cache_engine_key(1)
+    key2 = dumb_cache_engine_key(2)
+    key3 = dumb_cache_engine_key(3)
+
+    cache_dict[key1] = obj1
+    policy.update_on_put(key1)
+    cache_dict[key2] = obj2
+    policy.update_on_put(key2)
+    cache_dict[key3] = obj3
+    policy.update_on_put(key3)
+
+    policy.update_on_hit(key1, cache_dict)
+    evict_candidates = policy.get_evict_candidates(cache_dict, num_candidates=2)
+    assert evict_candidates == [key2, key3]
+
+
+def test_admission_control_rejects_low_frequency_newcomer():
+    policy = get_cache_policy("ADMISSION_LRU")
+    cache_dict = policy.init_mutable_mapping()
+    popular = dumb_cache_engine_key(1)
+    obj = DummyMemoryObj()
+
+    cache_dict[popular] = obj
+    policy.update_on_put(popular)
+    for _ in range(5):
+        policy.update_on_hit(popular, cache_dict)
+
+    newcomer = dumb_cache_engine_key(2)
+    # A never-before-seen key's estimated frequency (0) is below the only
+    # eviction candidate's (popular, requested 6 times) -> reject.
+    assert policy.should_admit(newcomer, cache_dict) is False
+
+    # Once newcomer has been requested more often than popular, it should
+    # be admitted instead.
+    for _ in range(10):
+        policy.update_on_put(newcomer)
+    assert policy.should_admit(newcomer, cache_dict) is True
+
+
+def test_admission_control_admits_when_cache_empty():
+    policy = get_cache_policy("ADMISSION_LRU")
+    cache_dict = policy.init_mutable_mapping()
+    key = dumb_cache_engine_key(1)
+    # No eviction candidates exist yet -> nothing to weigh against, admit.
+    assert policy.should_admit(key, cache_dict) is True
+
+
+def test_get_cache_policy_admission_prefix_wraps_any_inner_policy():
+    expected_inner_class_names = {
+        "LRU": "LRUCachePolicy",
+        "LFU": "LFUCachePolicy",
+        "FIFO": "FIFOCachePolicy",
+        "MRU": "MRUCachePolicy",
+        "COST_AWARE": "CostAwareEvictionPolicy",
+    }
+    for inner_name, expected_class_name in expected_inner_class_names.items():
+        policy = get_cache_policy(f"ADMISSION_{inner_name}")
+        assert type(policy.inner_policy).__name__ == expected_class_name

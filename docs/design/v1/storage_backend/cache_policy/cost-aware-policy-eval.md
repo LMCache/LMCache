@@ -483,9 +483,15 @@ The other two directions did not pan out as hoped:
   outperformed by the much simpler admission-control filter, so it's not
   the next thing worth building.
 
-**Next step this experiment recommends, not yet done**: port TinyLFU-style
-admission control into a real, tested implementation -- most likely as a
-wrapper usable around any `BaseCachePolicy` (mirroring
-`admission_control.py`'s shape) rather than a `COST_AWARE`-specific
-change, since the win here was orthogonal to cost-awareness. That's a
-deliberate follow-up, not bundled into this investigation.
+**Update**: this recommendation has been carried out. TinyLFU-style
+admission control now ships as a real, tested class,
+`AdmissionControlledPolicy` (`lmcache/v1/storage_backend/cache_policy/admission_control.py`,
+selectable via `get_cache_policy("ADMISSION_<INNER>")`) -- a general
+`BaseCachePolicy` wrapper, not a `COST_AWARE`-specific change, matching
+the recommendation above. See
+[`admission-control-policy.md`](admission-control-policy.md) for the
+class's design, a real bug the productionization process caught (and
+fixed) that the experiment's own simulation loop had masked, and a
+side-by-side report of both directions' outcomes. Backend wiring (making
+the admission-rejection behavior affect real request handling, not just
+benchmarks) remains a deliberate, separate follow-up.

@@ -3,6 +3,9 @@
 from typing import Any, Dict, Type
 
 # First Party
+from lmcache.v1.storage_backend.cache_policy.admission_control import (
+    AdmissionControlledPolicy,
+)
 from lmcache.v1.storage_backend.cache_policy.base_policy import BaseCachePolicy
 from lmcache.v1.storage_backend.cache_policy.cost_aware_policy import (
     CostAwareEvictionPolicy,
@@ -11,6 +14,8 @@ from lmcache.v1.storage_backend.cache_policy.fifo import FIFOCachePolicy
 from lmcache.v1.storage_backend.cache_policy.lfu import LFUCachePolicy
 from lmcache.v1.storage_backend.cache_policy.lru import LRUCachePolicy
 from lmcache.v1.storage_backend.cache_policy.mru import MRUCachePolicy
+
+_ADMISSION_PREFIX = "ADMISSION_"
 
 # Cache policy mapping
 POLICY_MAPPING: Dict[str, Type[BaseCachePolicy]] = {
@@ -32,8 +37,14 @@ def get_cache_policy(
 
     Args:
         policy_name: Name of the cache policy (case-insensitive, e.g., "LRU", "lru").
+            Prefixing any supported name with "ADMISSION_" (e.g.
+            "ADMISSION_LRU", "ADMISSION_COST_AWARE") wraps it in
+            AdmissionControlledPolicy -- the inner name is resolved
+            recursively through this same function, so any current or
+            future policy name can be admission-controlled.
         config: Optional LMCacheEngineConfig instance.
-        kwargs: Optional explicit policy parameters.
+        kwargs: Optional explicit policy parameters, forwarded to the
+            (possibly inner, if admission-controlled) policy's constructor.
 
     Returns:
         Instance of the corresponding cache policy.
@@ -45,6 +56,11 @@ def get_cache_policy(
         raise ValueError("Cache policy name cannot be empty")
 
     upper_policy_name = policy_name.upper()
+
+    if upper_policy_name.startswith(_ADMISSION_PREFIX):
+        inner_name = upper_policy_name[len(_ADMISSION_PREFIX) :]
+        inner_policy = get_cache_policy(inner_name, config=config, **kwargs)
+        return AdmissionControlledPolicy(inner_policy)
 
     if upper_policy_name not in POLICY_MAPPING:
         raise ValueError(
