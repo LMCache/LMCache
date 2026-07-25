@@ -2,7 +2,7 @@
 
 # Standard
 from types import SimpleNamespace
-from typing import Never, cast
+from typing import NoReturn, cast
 import importlib
 
 # Third Party
@@ -348,7 +348,7 @@ def test_musa_ipc_wrapper_does_not_serialize_receiver_owner(
         def close(self) -> None:
             pass
 
-        def __reduce__(self) -> Never:
+        def __reduce__(self) -> NoReturn:
             raise TypeError("receiver owner is process-local")
 
     open_calls = 0
