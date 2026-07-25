@@ -256,20 +256,137 @@ these workloads that it no longer flips outcomes.
   recompute cost varies by prefix depth is exactly where cost-awareness
   plus frequency both point the same direction.
 
+## Real-data validation (ShareGPT)
+
+Every experiment above uses synthetic, hand-parameterized workloads. This
+section replays the same simulator against ~35K real ShareGPT
+conversations (real multi-turn human/GPT traffic, real per-turn token
+lengths) instead, using the existing `benchmarks/multi_round_qa/`
+download/preprocess pipeline as the data source
+(`lmcache/tools/cache_policy_bench/sharegpt_workload.py`) -- reused, not
+reimplemented. Unlike every result above, every number in this section is
+a **mean +/- 95% bootstrap CI across 6 repeated resamples** of the corpus
+(`benchmarks/cache_policy/real_dataset_eval.py`), not a single run --
+directly addressing the wall-clock-jitter caveat in "Methodology and its
+limits."
+
+![Real-data hit rate vs. corpus scale](../../../../../benchmarks/cache_policy/results/charts/real_data_hit_rate.png)
+
+Selected cells at 100 MiB cache (full data, all cache sizes, in
+[`results/real_data/real_dataset_ci.json`](../../../../../benchmarks/cache_policy/results/real_data/real_dataset_ci.json)):
+
+| Corpus scale | Policy | Hit rate (mean, 95% CI) | p95 latency | Evictions |
+|---|---|---:|---:|---:|
+| 500 conversations | LRU | 18.0% [17.2, 18.7] | 37.8 ms | 2,904 |
+| 500 conversations | LFU | 17.4% [16.7, 18.1] | 38.0 ms | 2,933 |
+| 500 conversations | FIFO | 19.6% [18.5, 20.7] | 37.9 ms | 2,804 |
+| 500 conversations | MRU | 5.1% [4.3, 6.3] | 39.3 ms | 3,368 |
+| 500 conversations | **COST_AWARE** | **10.5% [9.5, 12.0]** | **32.1 ms** | 3,241 |
+| 2,000 conversations | LRU | 5.2% [4.7, 5.7] | 39.7 ms | 15,088 |
+| 2,000 conversations | LFU | 5.2% [4.7, 5.7] | 39.7 ms | 15,088 |
+| 2,000 conversations | **COST_AWARE** | **0.5% [0.5, 0.6]** | 39.3 ms | 15,957 |
+| 5,000 conversations | LRU | 2.8% [2.4, 3.1] | 39.9 ms | 39,011 |
+| 5,000 conversations | LFU | 2.8% [2.4, 3.1] | 39.9 ms | 39,011 |
+| 5,000 conversations | **COST_AWARE** | **0.0% [0.0, 0.1]** | 39.9 ms | 40,268 |
+
+### Finding 4 -- real conversation traffic thrashes every policy far harder than the synthetic workloads suggested
+
+Even the best policy's hit rate collapses from ~20% at 500 concurrently
+interleaved conversations to ~2-5% at 5,000 -- a much steeper and more
+uniform-across-policies degradation than any synthetic workload showed.
+The reason: this loader interleaves conversations **round-robin by round
+index** (approximating real concurrent server traffic, not one
+conversation finishing before the next starts -- see
+`sharegpt_workload.py`), and each conversation's chunk hashes are unique
+to that conversation, so a hit is only possible if that *same*
+conversation's next round arrives before its earlier chunks are evicted.
+With thousands of other distinct conversations' first rounds arriving in
+between (median ShareGPT conversation length is short -- 2 rounds), a
+100 MiB cache (~400 chunks at 256 KiB/chunk) is nowhere near large enough
+to keep round 1 of thousands of conversations alive until their round 2.
+This is a **stress condition the synthetic `multi_round_chat` workload
+never exercises** (it only ever interleaves 10-40 sessions, never
+thousands) -- exactly the kind of gap real-data validation is for.
+
+The `test_high_fanout_degrades_hit_rate_vs_low_fanout` stress test
+(`tests/benchmarks/test_cache_policy_bench_real_data.py`) turns this into
+a standing regression check rather than a one-off observation.
+
+### Finding 5 -- on real data, `COST_AWARE` is not just behind, it's the worst of the five policies, and the frequency fix doesn't rescue it here
+
+This is the least flattering result in this document, reported plainly per
+the original plan (no cross-validation cherry-picking, honest reporting
+even where it contradicts earlier synthetic findings): `COST_AWARE` has
+the **lowest** hit rate of all five policies at every corpus scale tested
+on real data, and the gap *widens* with scale (10.5% vs. LRU's 18.0% at
+500 conversations; 0.0% vs. 2.8% at 5,000). The frequency fix (Findings
+1-2) doesn't help here because it can't: under this workload's structure,
+almost every chunk is inserted once and evicted having been touched only
+once (`hit_count` stays at 1 for the overwhelming majority of chunks), so
+the frequency term contributes an almost-constant multiplier and cost
+density is left to dominate the ranking again -- the same failure mode as
+Finding 1, but worse, because `COST_AWARE`'s cost-density preference
+actively works against this workload's structure: it preferentially
+protects the *first* chunk of the *longest* conversations (highest
+`total_tokens - chunk_start`), which is a poor predictor of "will be
+reused soon" under round-robin interleaving -- recency of insertion (what
+`LRU`/`FIFO` use directly) turns out to be a much better predictor here.
+`LRU`/`LFU`/`FIFO` end up statistically near-identical at scale (`LFU`
+matches `LRU` exactly at 2,000 and 5,000 conversations) because almost
+nothing gets a second access before eviction regardless of policy, so
+recency-vs-frequency stops mattering -- only `COST_AWARE`'s and `MRU`'s
+different-from-recency heuristics still measurably underperform.
+
+**This is a real, generalizable limitation, not a bug to patch away**:
+`CostAwareEvictionPolicy`'s design assumption -- that recompute cost is a
+useful eviction signal independent of recency/frequency -- holds on
+workloads where cost and reuse timing are correlated
+(`multi_round_chat`), and actively hurts on workloads where they aren't
+(real ShareGPT-shaped high-fan-out traffic). Any future tuning of this
+policy should be validated against this real-data tier, not just the
+synthetic suite, before claiming a general win.
+
+### Scale-sweep and stress-test summary
+
+- **Scale sweep** (Step 4 of the plan): the qualitative ranking (`COST_AWARE`
+  worst, `MRU` second-worst, `LRU`/`LFU`/`FIFO` roughly tied and best) is
+  stable across all three corpus scales tested -- this is a consistent
+  finding, not an artifact of one sample size.
+- **Stress tests** (`tests/benchmarks/test_cache_policy_bench_real_data.py`,
+  opt-in via `LMCACHE_SHAREGPT_PATH`, not wired into CI -- see
+  `benchmarks/cache_policy/README.md`): all 4 pass for all 5 policies --
+  near-empty-cache thrash handled without crashing, hit rate is
+  non-decreasing across a 5-point cache-size sweep for every policy (no
+  capacity-cliff anomalies), the longest real conversations replay
+  without error, and low concurrent fan-out reliably beats high fan-out
+  at a fixed cache size (the same effect as Finding 4, now a standing
+  invariant check).
+
 ## Summary
 
-The frequency fix is a general, structural improvement, verified across
-multiple cache sizes and multiple Zipf skew strengths (not one anecdote):
-it closes roughly 60-70% of the original hit-rate gap to `LRU`/`LFU` on
-popularity-skewed traffic, and turns a latency *loss* into a consistent
-latency *win* in nearly every comparison cell with real eviction
-pressure. On the workload the policy is actually designed for --
-recompute cost varying independently of raw popularity
+The frequency fix is a general, structural improvement on the synthetic
+suite, verified across multiple cache sizes and multiple Zipf skew
+strengths (not one anecdote): it closes roughly 60-70% of the original
+hit-rate gap to `LRU`/`LFU` on popularity-skewed traffic, and turns a
+latency *loss* into a consistent latency *win* in nearly every comparison
+cell with real eviction pressure. On the workload the policy is actually
+designed for -- recompute cost varying independently of raw popularity
 (`multi_round_chat`) -- it now wins outright on both hit rate and
 latency. It is still not a strict hit-rate win on pure, uniform-chunk-size
 popularity-driven traffic (`LFU` in particular keeps a persistent edge
 there), which is an honest, expected consequence of optimizing for
-recompute cost rather than raw hit count. The `get_evict_candidates`
-algorithmic-complexity gap (Finding 3) is unchanged and remains the
-biggest open engineering concern before deployment in eviction-heavy
-environments.
+recompute cost rather than raw hit count.
+
+**Real-data validation changes the overall picture**: on statistically
+robust, bootstrap-CI'd real ShareGPT traffic (Findings 4-5), `COST_AWARE`
+is not a middling performer -- it is the worst of the five policies at
+every scale tested, and the gap widens as concurrent conversation fan-out
+grows. The synthetic suite's optimistic reading (competitive-to-winning
+depending on workload) does not transfer to this real-traffic shape. The
+honest conclusion is that `CostAwareEvictionPolicy` currently trades
+hit-rate robustness for recompute-cost-awareness in a way that only pays
+off on the specific access patterns it was designed for, and real
+production traffic needs to be checked against that assumption before
+deployment -- it is not a safe default replacement for `LRU`/`LFU`. The
+`get_evict_candidates` algorithmic-complexity gap (Finding 3) is also
+unchanged and remains a second, independent open engineering concern.

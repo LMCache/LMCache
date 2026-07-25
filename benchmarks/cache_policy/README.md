@@ -34,6 +34,20 @@ for the full write-up, methodology limitations, and results.
   direct cost-density sanity check plus a Zipf-skew-strength sweep. See
   the "robustness sweep" section of the evaluation doc for why this
   exists.
+- `lmcache/tools/cache_policy_bench/sharegpt_workload.py` -- adapts the
+  real ShareGPT conversation corpus (via the existing
+  `benchmarks/multi_round_qa/` download/preprocess pipeline) into the same
+  `Request` shape the synthetic generators produce -- a real, not
+  synthetic, data source for the same simulator.
+- `benchmarks/cache_policy/stats.py` -- dependency-free percentile-bootstrap
+  confidence interval helper.
+- `benchmarks/cache_policy/real_dataset_eval.py` -- statistically robust
+  real-data evaluation: repeated bootstrap-resampled runs with confidence
+  intervals, swept across corpus scale and cache size.
+- `tests/benchmarks/test_cache_policy_bench_real_data.py` -- edge-case /
+  adversarial stress tests on real data (near-empty cache, capacity-cliff
+  monotonicity, pathologically long conversations, high concurrent
+  fan-out). Opt-in only -- see "Real-data (ShareGPT) testing" below.
 - `benchmarks/cache_policy/results/` -- checked-in sample CSV/JSON plus
   the charts referenced by the evaluation doc. Nightly CI runs write
   fresh output under `results/nightly/` (uploaded as a workflow
@@ -104,6 +118,67 @@ that the cost-density term still discriminates by cost once other terms
 (`zipf_s` from mild to extreme popularity concentration) so a hit-rate
 improvement isn't just an artifact of the one skew value the standard
 sweep happens to use.
+
+## Real-data (ShareGPT) testing
+
+Everything above is synthetic. This tier replays the same simulator
+against a real corpus of ~35K real multi-turn ShareGPT conversations
+(human/GPT turns with real token-length distributions), reusing the
+existing download/preprocess pipeline in `benchmarks/multi_round_qa/`
+rather than reimplementing dataset fetching.
+
+### 1. Prepare the corpus (one-time, ~650 MB download)
+
+```bash
+curl -L -o benchmarks/multi_round_qa/ShareGPT_V3_unfiltered_cleaned_split.json \
+    https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
+cd benchmarks/multi_round_qa
+python data_preprocessing.py --parse 1.0 --trace ShareGPT_V3_unfiltered_cleaned_split.json
+cd ../..
+```
+
+(`prepare_sharegpt_data.sh` does the same thing via `wget`, if available on
+your system.) This produces `benchmarks/multi_round_qa/ShareGPT.json`
+(~230 MB at `--parse 1.0`, ~35K valid conversations after the script's own
+validity filtering). Both files are large and git-ignored -- see
+`.gitignore`. The tokenizer download requires network access to
+HuggingFace; unauthenticated requests work but are rate-limited (set
+`HF_TOKEN` for faster/higher-limit downloads).
+
+### 2. Statistically robust evaluation (bootstrap CI + scale sweep)
+
+```bash
+python benchmarks/cache_policy/real_dataset_eval.py \
+    --sharegpt-path benchmarks/multi_round_qa/ShareGPT.json \
+    -o benchmarks/cache_policy/results/real_data
+```
+
+Runs every (policy, corpus-scale, cache-size) cell `--repeats` times (default
+6), each with a fresh bootstrap resample of the conversation corpus
+(`--scales`, default `500 2000 5000` conversations), and reports mean +
+95% CI per cell via `benchmarks/cache_policy/stats.py::bootstrap_ci` --
+not single-run point estimates. This directly addresses the wall-clock-
+jitter problem noted in the evaluation doc's methodology section
+(`CostAwareEvictionPolicy` uses real `time.monotonic()` for recency decay).
+Writes both the raw per-repeat rows and the aggregated-with-CI table as
+JSON (and CSV, git-ignored). `COST_AWARE` is significantly slower per run
+than the other policies (see Finding 3 in the evaluation doc) --
+budget more time as `--scales`/`--repeats` grow.
+
+### 3. Edge-case / stress tests
+
+```bash
+LMCACHE_SHAREGPT_PATH=benchmarks/multi_round_qa/ShareGPT.json \
+    pytest tests/benchmarks/test_cache_policy_bench_real_data.py -v
+```
+
+Without `LMCACHE_SHAREGPT_PATH` set, every test in that file is skipped --
+**this tier is not wired into any CI workflow** (large download + tokenizer
+fetch is not something to run on every PR or every nightly build). It is
+local/manual-reproduction only. Covers: a far-too-small cache (thrash,
+no crash), hit-rate monotonicity across a cache-size "capacity cliff",
+replaying only the longest real conversations, and a direct comparison of
+low vs. high concurrent conversation fan-out at a fixed cache size.
 
 ## Metrics collected
 
