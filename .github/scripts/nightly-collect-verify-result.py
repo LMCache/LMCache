@@ -5,6 +5,8 @@
 Reads result metadata from environment variables (set by GHA) and
 writes ``verify_result.json`` to the current directory.
 """
+
+# Standard
 import json
 import os
 
@@ -18,8 +20,7 @@ result = {
     "reason": (
         ""
         if is_ok
-        else "vLLM CPU nightly import verification failed on "
-        + os.environ["MATRIX_OS"]
+        else "vLLM CPU nightly import verification failed on " + os.environ["MATRIX_OS"]
     ),
     "run_id": os.environ["GITHUB_RUN_ID"],
     "run_url": "{}/{}/actions/runs/{}".format(
