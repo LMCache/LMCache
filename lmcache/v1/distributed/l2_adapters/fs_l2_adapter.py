@@ -107,6 +107,10 @@ def _object_key_to_filename(key: ObjectKey) -> str:
 
         <safe_model>@0x<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>.data
 
+    Tagged: zero or more ``@<name>%<value>`` segments are appended
+    before ``.data`` (segments containing ``%`` are always tags), so
+    per-tag identity round-trips through the filesystem.
+
     ``kv_rank`` is written in ``0x`` prefixed hex so each byte
     of the bitmap ``(ws<<24)|(rank<<16)|(local_ws<<8)|local``
     is directly readable. ``object_group_id`` is written in plain hex.
@@ -117,7 +121,9 @@ def _object_key_to_filename(key: ObjectKey) -> str:
         f"{_KEY_SEP}{key.object_group_id:x}{_KEY_SEP}{key.chunk_hash.hex()}"
     )
     if key.cache_salt:
-        return f"{base}{_KEY_SEP}{key.cache_salt}{_FILE_EXT}"
+        base = f"{base}{_KEY_SEP}{key.cache_salt}"
+    for name, value in key.tags:
+        base = f"{base}{_KEY_SEP}{name}%{value}"
     return f"{base}{_FILE_EXT}"
 
 
@@ -126,15 +132,30 @@ def _filename_to_object_key(
 ) -> Optional[ObjectKey]:
     """Reverse ``_object_key_to_filename``.
 
-    Accepts both the 4-field unsalted shape and the 5-field salted
-    shape (trailing ``cache_salt``). Returns ``None`` for anything
-    else. Since ``model_name`` is guaranteed not to contain ``@``,
-    plain ``split`` suffices — no marker, no rsplit.
+    Accepts:
+      * 4-field unsalted, untagged shape,
+      * 5-field salted, untagged shape (trailing ``cache_salt``),
+      * either of the above followed by one or more ``@<name>%<value>``
+        tag segments (segments containing ``%`` are always tags).
+
+    Returns ``None`` for anything else. Since ``model_name``,
+    ``cache_salt``, and tag fields all forbid ``@``, plain ``split``
+    suffices — no marker, no rsplit.
     """
     if not filename.endswith(_FILE_EXT):
         return None
     stem = filename[: -len(_FILE_EXT)]
     parts = stem.split(_KEY_SEP)
+    # Peel off trailing tag segments (those containing '%'). '%' is
+    # forbidden inside model_name / cache_salt / tag name / tag value,
+    # so its presence uniquely identifies tag segments.
+    tag_list: list[tuple[str, str]] = []
+    while len(parts) > 4 and "%" in parts[-1]:
+        seg = parts.pop()
+        name, _, value = seg.partition("%")
+        tag_list.append((name, value))
+    tag_list.reverse()
+    tags = tuple(tag_list)
     if len(parts) == 4:
         safe_model, kv_rank_str, object_group_str, chunk_hash_hex = parts
         cache_salt = ""
@@ -149,16 +170,17 @@ def _filename_to_object_key(
         kv_rank = int(kv_rank_str, 16)
         object_group_id = int(object_group_str, 16)
         # ObjectKey.__post_init__ raises ValueError when the decoded
-        # model_name / cache_salt violate the forbidden-char or length
-        # invariants (e.g. a stray file from another tool on disk).
-        # The contract here is to return None for anything unparsable,
-        # so keep the constructor inside the try block.
+        # model_name / cache_salt / tags violate the forbidden-char or
+        # length invariants (e.g. a stray file from another tool on
+        # disk). The contract here is to return None for anything
+        # unparsable, so keep the constructor inside the try block.
         return ObjectKey(
             chunk_hash=chunk_hash,
             model_name=model_name,
             kv_rank=kv_rank,
             object_group_id=object_group_id,
             cache_salt=cache_salt,
+            tags=tags,
         )
     except ValueError:
         return None

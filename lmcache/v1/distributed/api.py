@@ -120,8 +120,26 @@ class ObjectKey:
     hash, and extension are added.
     """
 
+    tags: tuple[tuple[str, str], ...] = ()
+    """Sorted ``(name, value)`` tag tuple derived from
+    ``IPCCacheServerKey.request_configs`` (only entries with prefix
+    ``lmcache.tag.``). Part of cache identity — two ObjectKeys that
+    differ only in ``tags`` are different keys, giving per-tag cache
+    isolation (e.g. per-lora, per-tenant).
+
+    Empty tuple means no tags, in which case serialized keys and
+    filenames match the pre-tag shape — no migration needed.
+
+    Invariants (per element): tag name and value must not contain
+    ``@``, ``%``, ``/``, ``\\``, or NUL, and each must be at most 128
+    chars. ``%`` is the ``name%value`` separator in the on-disk /
+    on-wire ``@k%v`` suffix, so it must not appear inside a tag.
+    """
+
     _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
     _SALT_MAX_LEN = 128
+    _TAG_FORBIDDEN_CHARS = frozenset("@%/\\\x00")
+    _TAG_MAX_LEN = 128
 
     def __post_init__(self) -> None:
         if "@" in self.model_name:
@@ -142,6 +160,15 @@ class ObjectKey:
                 f"cache_salt exceeds max length {self._SALT_MAX_LEN} "
                 f"(got {len(self.cache_salt)})"
             )
+        for name, value in self.tags:
+            for label, s in (("tag name", name), ("tag value", value)):
+                bad_t = self._TAG_FORBIDDEN_CHARS & set(s)
+                if bad_t:
+                    raise ValueError(f"{label} must not contain {bad_t!r} (got {s!r})")
+                if len(s) > self._TAG_MAX_LEN:
+                    raise ValueError(
+                        f"{label} exceeds max length {self._TAG_MAX_LEN} (got {len(s)})"
+                    )
 
     def to_encoded_object_key(self) -> "EncodedObjectKey":
         """Return the JSON-safe :class:`EncodedObjectKey` projection."""
@@ -151,6 +178,7 @@ class ObjectKey:
             kv_rank=self.kv_rank,
             object_group_id=self.object_group_id,
             cache_salt=self.cache_salt,
+            tags=self.tags,
         )
 
     @staticmethod
@@ -234,6 +262,9 @@ class EncodedObjectKey:
 
     cache_salt: str = ""
 
+    tags: tuple[tuple[str, str], ...] = ()
+    """Identity-participating tag tuple. See :attr:`ObjectKey.tags`."""
+
     def to_object_key(self) -> ObjectKey:
         """Recover the corresponding :class:`ObjectKey`.
 
@@ -247,6 +278,10 @@ class EncodedObjectKey:
             kv_rank=self.kv_rank,
             object_group_id=self.object_group_id,
             cache_salt=self.cache_salt,
+            # JSON/msgspec may reify each tag as a 2-element list; coerce
+            # each pair back to the ``tuple[str, str]`` shape ObjectKey
+            # expects (also handles the pass-through tuple case).
+            tags=tuple((str(name), str(value)) for name, value in self.tags),
         )
 
 
@@ -495,6 +530,11 @@ def ipc_key_to_object_keys(
     duplicating the source of truth would risk silent isolation bugs
     where a caller passes ``ipc_key`` but forgets the salt.
 
+    ``tags`` (derived from ``ipc_key.request_configs``) are also
+    forwarded verbatim so that per-tag isolation (e.g. per-lora,
+    per-tenant) is preserved end-to-end. Same rationale as
+    ``cache_salt``: single source of truth, no separate parameter.
+
     Args:
         ipc_key: The IPC key providing model_name, world_size, worker_id,
             and cache_salt.
@@ -506,6 +546,7 @@ def ipc_key_to_object_keys(
         for ``object_group_ids[i]``.
     """
     cache_salt = ipc_key.cache_salt
+    tags = ipc_key.tags
 
     # The (chunk_hash, kv_rank) expansion is independent of the object group,
     # so compute it once and reuse it for every group.
@@ -540,6 +581,7 @@ def ipc_key_to_object_keys(
                 kv_rank=kv_rank,
                 object_group_id=object_group_id,
                 cache_salt=cache_salt,
+                tags=tags,
             )
             for chunk_hash in chunk_hashes
             for kv_rank in kv_ranks

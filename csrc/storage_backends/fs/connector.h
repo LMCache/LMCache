@@ -54,15 +54,21 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   // Input key (from NativeConnectorL2Adapter._object_key_to_string):
   //   Unsalted: "{model}@{kv_rank:08x}@{hash.hex()}"
   //   Salted  : "{model}@{kv_rank:08x}@{hash.hex()}@{cache_salt}"
+  //   Tagged  : any of the above followed by one or more
+  //             "@{name}%{value}" tag segments (segments containing
+  //             '%' are always tags).
   //
   // Output filename (matching fs_l2_adapter.py._object_key_to_filename):
   //   Unsalted: "{safe_model}@{kv_rank:#010x}@{hash.hex()}.data"
   //   Salted  : "{safe_model}@{kv_rank:#010x}@{hash.hex()}@{cache_salt}.data"
+  //   Tagged  : the above plus trailing "@{name}%{value}" segments
+  //             before ".data" (passed through verbatim).
   //
   // Differences from the input: '/' in model becomes '-SEP-', kv_rank
-  // gains a '0x' prefix, and '.data' is appended. Both model_name and
-  // cache_salt are forbidden from containing '@' (enforced on the
-  // Python side), so the parse is unambiguous.
+  // gains a '0x' prefix, and '.data' is appended. model_name,
+  // cache_salt, and tag fields are all forbidden from containing '@'
+  // (enforced on the Python side), and '%' is forbidden inside those
+  // core fields, so the parse is unambiguous.
   static std::string key_to_filename(const std::string& key);
 
   static std::string replace_all(const std::string& str,

@@ -58,13 +58,20 @@ def _object_key_to_string(key: ObjectKey) -> str:
     Salted (trailing ``cache_salt``)::
 
         <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>
+
+    Tagged: zero or more ``@<name>%<value>`` segments are appended
+    after the base (and after ``cache_salt`` when present); a ``%``
+    inside a segment is the tag-name/value separator (forbidden inside
+    tags and inside ``cache_salt``), so segments are unambiguous.
     """
     base = (
         f"{key.model_name}{_KEY_SEP}{key.kv_rank:08x}"
         f"{_KEY_SEP}{key.object_group_id:x}{_KEY_SEP}{key.chunk_hash.hex()}"
     )
     if key.cache_salt:
-        return f"{base}{_KEY_SEP}{key.cache_salt}"
+        base = f"{base}{_KEY_SEP}{key.cache_salt}"
+    for name, value in key.tags:
+        base = f"{base}{_KEY_SEP}{name}%{value}"
     return base
 
 

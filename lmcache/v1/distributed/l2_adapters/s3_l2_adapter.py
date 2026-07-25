@@ -65,12 +65,29 @@ def _string_to_object_key(name: str) -> ObjectKey:
     """Reverse of :func:`_object_key_to_string`.
 
     Expects
-    ``<model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>[@<cache_salt>]``.
+    ``<model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>``
+    optionally followed by ``@<cache_salt>`` and/or one or more
+    ``@<name>%<value>`` tag segments (tags always come after the salt).
+    Segments containing ``%`` are treated as tags; a single non-tag
+    trailing segment (if any) is ``cache_salt``.
 
     Raises:
         ValueError: ``name`` does not match the expected format.
     """
     parts = name.split("@")
+    if len(parts) < 4:
+        raise ValueError(f"unparsable S3 object name {name!r}: wrong field count")
+    # Peel off tag segments from the tail: an ``@k%v`` segment always
+    # contains ``%``, and ``%`` is forbidden inside model_name /
+    # cache_salt / tag name / tag value — so ``"%" in seg`` uniquely
+    # identifies tag segments regardless of order.
+    tag_list: list[tuple[str, str]] = []
+    while len(parts) > 4 and "%" in parts[-1]:
+        seg = parts.pop()
+        tag_name, _, tag_value = seg.partition("%")
+        tag_list.append((tag_name, tag_value))
+    tag_list.reverse()
+    tags = tuple(tag_list)
     if len(parts) == 4:
         model_name, kv_rank_hex, object_group_id_hex, chunk_hash_hex = parts
         cache_salt = ""
@@ -109,6 +126,7 @@ def _string_to_object_key(name: str) -> ObjectKey:
         kv_rank=kv_rank,
         object_group_id=object_group_id,
         cache_salt=cache_salt,
+        tags=tags,
     )
 
 
@@ -176,15 +194,21 @@ def _object_key_to_string(key: ObjectKey) -> str:
 
         <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>
 
-    ``@`` in ``model_name`` and ``cache_salt`` is rejected by
-    ``ObjectKey.__post_init__``, so the format is unambiguous.
+    Tagged: zero or more ``@<name>%<value>`` segments are appended
+    after the base (and after ``cache_salt`` when present). ``@`` is
+    forbidden inside ``model_name`` / ``cache_salt`` / tag fields, and
+    ``%`` is forbidden inside tag fields, so the tail segments are
+    unambiguously distinguishable from ``cache_salt`` (tag segments
+    contain ``%``, salt segments do not).
     """
     base = (
         f"{key.model_name}@{key.kv_rank:08x}"
         f"@{key.object_group_id:x}@{key.chunk_hash.hex()}"
     )
     if key.cache_salt:
-        return f"{base}@{key.cache_salt}"
+        base = f"{base}@{key.cache_salt}"
+    for name, value in key.tags:
+        base = f"{base}@{name}%{value}"
     return base
 
 

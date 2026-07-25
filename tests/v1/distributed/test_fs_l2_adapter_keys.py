@@ -321,3 +321,101 @@ class TestIPCCacheServerKeyCacheSalt:
         decoded = msgspec.msgpack.decode(wire, type=IPCCacheServerKey)
         assert decoded == k
         assert decoded.cache_salt == "alice"
+
+
+class TestTagsRoundtrip:
+    """Per-tag identity flows from IPCCacheServerKey.request_configs to
+    ObjectKey.tags and survives the filename round-trip."""
+
+    def test_tags_flow_through_ipc_key_to_object_keys(self):
+        # First Party
+        from lmcache.v1.distributed.api import ipc_key_to_object_keys
+        from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+
+        k = IPCCacheServerKey.from_token_ids(
+            model_name="m",
+            world_size=1,
+            worker_id=0,
+            token_ids=[1, 2, 3],
+            request_configs={
+                "lmcache.tag.user": "alice",
+                "lmcache.tag.lora": "v2",
+            },
+        )
+        out = ipc_key_to_object_keys(k, [b"h1", b"h2"], [0])[0]
+        assert len(out) == 2
+        for o in out:
+            assert o.tags == (("lora", "v2"), ("user", "alice"))
+
+    def test_filename_roundtrip_with_tags_only(self):
+        key = ObjectKey(
+            chunk_hash=b"\xde\xad\xbe\xef",
+            model_name="llama",
+            kv_rank=42,
+            object_group_id=0,
+            tags=(("user", "alice"),),
+        )
+        fn = _object_key_to_filename(key)
+        assert fn.endswith("@user%alice.data")
+        assert _filename_to_object_key(fn) == key
+
+    def test_filename_roundtrip_with_salt_and_tags(self):
+        key = ObjectKey(
+            chunk_hash=b"\xde\xad\xbe\xef",
+            model_name="meta-llama/Llama-3",
+            kv_rank=42,
+            object_group_id=1,
+            cache_salt="alice",
+            tags=(("lora", "v2"), ("user", "alice")),
+        )
+        fn = _object_key_to_filename(key)
+        # Salt segment comes before tag segments (order fixed for
+        # bit-compat with pre-tag layouts).
+        assert "@alice@lora%v2@user%alice.data" in fn
+        assert _filename_to_object_key(fn) == key
+
+    def test_tag_isolates_object_key_identity(self):
+        base = ObjectKey(
+            chunk_hash=b"\xaa",
+            model_name="m",
+            kv_rank=1,
+            tags=(("user", "alice"),),
+        )
+        other = ObjectKey(
+            chunk_hash=b"\xaa",
+            model_name="m",
+            kv_rank=1,
+            tags=(("user", "bob"),),
+        )
+        assert base != other
+        assert hash(base) != hash(other)
+
+    def test_untagged_filename_bit_identical_to_pre_tag_shape(self):
+        """Un-tagged, un-salted keys must serialize to the exact
+        pre-tag filename shape so existing on-disk caches remain valid."""
+        key = ObjectKey(
+            chunk_hash=b"\xde\xad\xbe\xef",
+            model_name="llama",
+            kv_rank=42,
+            object_group_id=0,
+        )
+        assert _object_key_to_filename(key) == "llama@0x0000002a@0@deadbeef.data"
+
+    def test_reject_percent_in_tag_field(self):
+        # ``%`` splits tag name/value on wire; it must not appear inside
+        # either field.
+        with pytest.raises(ValueError, match="tag"):
+            ObjectKey(
+                chunk_hash=b"\xaa",
+                model_name="m",
+                kv_rank=1,
+                tags=(("bad%name", "v"),),
+            )
+
+    def test_filename_with_forbidden_tag_returns_none(self):
+        # Simulate a stray file whose "tag" segment decodes into a value
+        # longer than the cap. ``_filename_to_object_key`` returns None
+        # for anything the ObjectKey invariants reject.
+        too_long = "x" * 129
+        fn = f"llama@0x0000002a@0@deadbeef@user%{too_long}.data"
+        assert _filename_to_object_key(fn) is None

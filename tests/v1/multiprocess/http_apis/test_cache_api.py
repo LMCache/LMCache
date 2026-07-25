@@ -354,6 +354,7 @@ class TestListObjectsEndpoint:
                     "kv_rank": 2,
                     "object_group_id": 0,
                     "cache_salt": "alice",
+                    "tags": [],
                 },
                 "size_bytes": 4096,
             }

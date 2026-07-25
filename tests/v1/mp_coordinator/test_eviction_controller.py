@@ -372,6 +372,7 @@ async def test_execute_evictions_dispatches_to_registered_instance():
                 "kv_rank": 0,
                 "object_group_id": 0,
                 "cache_salt": "alice",
+                "tags": [],
             }
         ]
     }

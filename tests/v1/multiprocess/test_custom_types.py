@@ -70,6 +70,148 @@ def test_ipc_cache_engine_key_serialization_with_cache_salt():
     assert decoded_key.cache_salt == "alice"
 
 
+class TestIPCCacheServerKeyRequestConfigs:
+    """``request_configs`` mirrors ``CacheEngineKey.request_configs``:
+    only ``lmcache.tag.<name>`` entries feed into identity via
+    ``tags``; other entries are transport-only metadata."""
+
+    def test_tags_extracted_from_request_configs(self):
+        k = IPCCacheServerKey.from_token_ids(
+            model_name="m",
+            world_size=1,
+            worker_id=0,
+            token_ids=[1, 2, 3],
+            request_configs={
+                "temperature": 0.8,
+                "lmcache.tag.user": "alice",
+                "lmcache.tag.lora": "v2",
+            },
+        )
+        # Sorted by tag name so hashing is order-insensitive.
+        assert k.tags == (("lora", "v2"), ("user", "alice"))
+
+    def test_non_tag_entries_do_not_affect_identity(self):
+        base = IPCCacheServerKey.from_token_ids(
+            model_name="m",
+            world_size=1,
+            worker_id=0,
+            token_ids=[1, 2, 3],
+            request_configs={"lmcache.tag.user": "alice"},
+        )
+        other = IPCCacheServerKey.from_token_ids(
+            model_name="m",
+            world_size=1,
+            worker_id=0,
+            token_ids=[1, 2, 3],
+            request_configs={
+                "temperature": 0.9,  # non-tag, must not participate
+                "lmcache.tag.user": "alice",
+            },
+        )
+        assert base == other
+        assert hash(base) == hash(other)
+
+    def test_different_tag_values_are_different_keys(self):
+        alice = IPCCacheServerKey.from_token_ids(
+            model_name="m",
+            world_size=1,
+            worker_id=0,
+            token_ids=[1, 2, 3],
+            request_configs={"lmcache.tag.user": "alice"},
+        )
+        bob = IPCCacheServerKey.from_token_ids(
+            model_name="m",
+            world_size=1,
+            worker_id=0,
+            token_ids=[1, 2, 3],
+            request_configs={"lmcache.tag.user": "bob"},
+        )
+        assert alice != bob
+
+    def test_tag_order_independent(self):
+        a = IPCCacheServerKey.from_token_ids(
+            model_name="m",
+            world_size=1,
+            worker_id=0,
+            token_ids=[1],
+            request_configs={
+                "lmcache.tag.user": "alice",
+                "lmcache.tag.lora": "v2",
+            },
+        )
+        b = IPCCacheServerKey.from_token_ids(
+            model_name="m",
+            world_size=1,
+            worker_id=0,
+            token_ids=[1],
+            request_configs={
+                "lmcache.tag.lora": "v2",
+                "lmcache.tag.user": "alice",
+            },
+        )
+        assert a == b
+        assert hash(a) == hash(b)
+
+    def test_no_request_configs_yields_empty_tags(self):
+        k = IPCCacheServerKey.from_token_ids(
+            model_name="m",
+            world_size=1,
+            worker_id=0,
+            token_ids=[1],
+        )
+        assert k.tags == ()
+
+    def test_reject_at_in_tag_name(self):
+        with pytest.raises(ValueError, match="tag name"):
+            IPCCacheServerKey.from_token_ids(
+                model_name="m",
+                world_size=1,
+                worker_id=0,
+                token_ids=[1],
+                request_configs={"lmcache.tag.bad@name": "v"},
+            )
+
+    def test_reject_percent_in_tag_value(self):
+        # ``%`` is the on-wire tag-name/value separator so it cannot
+        # appear inside a tag field or the encoding becomes ambiguous.
+        with pytest.raises(ValueError, match="tag value"):
+            IPCCacheServerKey.from_token_ids(
+                model_name="m",
+                world_size=1,
+                worker_id=0,
+                token_ids=[1],
+                request_configs={"lmcache.tag.user": "a%b"},
+            )
+
+    def test_roundtrip_carries_request_configs(self):
+        original = IPCCacheServerKey.from_token_ids(
+            model_name="m",
+            world_size=1,
+            worker_id=0,
+            token_ids=[1, 2, 3],
+            request_configs={
+                "lmcache.tag.user": "alice",
+                "lmcache.tag.lora": "v2",
+            },
+        )
+        encoded = msgspec.msgpack.encode(original)
+        decoded = msgspec.msgpack.decode(encoded, type=IPCCacheServerKey)
+        assert decoded == original
+        assert decoded.tags == original.tags
+
+    def test_no_worker_id_version_preserves_tags(self):
+        k = IPCCacheServerKey.from_token_ids(
+            model_name="m",
+            world_size=4,
+            worker_id=2,
+            token_ids=[1],
+            request_configs={"lmcache.tag.user": "alice"},
+        )
+        k2 = k.no_worker_id_version()
+        assert k2.worker_id is None
+        assert k2.tags == k.tags
+
+
 @pytest.mark.cuda
 @pytest.mark.skipif(
     not (torch_dev.is_available() and torch_device_type == "cuda"),
