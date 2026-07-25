@@ -261,3 +261,121 @@ jobs:
         run: |
           docker push lmcache/standalone:nightly-cu129
           docker push lmcache/standalone:nightly-${{ env.NOW }}-cu129
+
+  nightly-verify-cpu-vllm:
+    name: Verify CPU vLLM (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest]
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements/*.txt
+
+      - name: Install FFmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y ffmpeg
+
+      - name: Install FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            brew install ffmpeg
+          else
+            echo "ffmpeg installed: $(ffmpeg -version | head -n1)"
+          fi
+
+      - name: Install vLLM CPU nightly
+        id: install-vllm
+        env:
+          VLLM_CPU_NIGHTLY_SPEC: >-
+            ${{ runner.os == 'macOS'
+                && 'vllm-cpu-nightly==0.25.2.dev202607230832'
+                || 'vllm-cpu-nightly' }}
+        run: bash .github/scripts/install_vllm_cpu.sh
+
+      - name: Install LMCache CPU
+        id: install-lmcache
+        if: success() || steps.install-vllm.outcome == 'success'
+        run: bash .github/scripts/install_lmcache_cpu.sh
+
+      - name: Verify vLLM + LMCache import
+        id: verify
+        run: |
+          VLLM_VER="$(python -c 'import vllm; print(vllm.__version__)')"
+          python3 -c 'import vllm, lmcache; print("vllm:", vllm.__version__, "lmcache:", lmcache.__version__)'
+          echo "version=${VLLM_VER}" >> "$GITHUB_OUTPUT"
+
+      - name: Collect result
+        id: collect
+        if: always()
+        env:
+          VERIFY_OUTCOME: ${{ steps.verify.outcome }}
+          VERIFY_VERSION: ${{ steps.verify.outputs.version }}
+          MATRIX_OS: ${{ matrix.os }}
+        run: |
+          python3 .github/scripts/nightly-collect-verify-result.py
+
+      - name: Upload verify result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-result-${{ matrix.os }}
+          path: verify_result.json
+
+  nightly-pin-or-report-vllm:
+    name: Pin or report vLLM
+    needs: nightly-verify-cpu-vllm
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Download verify results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: verify-result-*
+          path: verify-results
+
+      - name: Aggregate and pin / report
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PIN_SCRIPT: ${{ github.workspace }}/.buildkite/k3_tests/multiprocess/scripts/pin-tested-vllm.sh
+        run: bash .github/scripts/nightly-aggregate-vllm-verify.sh

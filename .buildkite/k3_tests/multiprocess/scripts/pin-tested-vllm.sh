@@ -1,17 +1,27 @@
 #!/usr/bin/env bash
-# Pin the currently-installed vLLM nightly to the
-# `buildkite_latest_tested_vllm` branch.
+# Pin the currently-installed vLLM nightly to a dedicated tracking branch.
 #
-# Runs ONLY when the canary vllm_bench step has succeeded and
-# VERIFY_AND_PIN_VLLM=true. Records the just-verified vllm wheel version so
-# downstream builds can install the same version deterministically instead
-# of resolving "latest nightly" again.
+# Supports two CI platforms via the CI_PLATFORM env var:
+#   buildkite       -- resolves metadata from BUILDKITE_* env vars
+#   github_actions  -- resolves metadata from GITHUB_* env vars
+#
+# Target branch controlled by PIN_VLLM_BRANCH (defaults below per-platform).
+# Callers that run the script only on success should set
+#   PIN_VLLM_STATUS=tested.
+# Callers that record a failure MUST also set PIN_VLLM_REASON and
+#   PIN_VLLM_STATUS=failed so the CSV row carries a human-readable
+#   reason field.
 #
 # Two files are maintained on the dedicated branch:
 #   tested_vllm_versions.csv  -- JSON Lines, append-only history. Each line
-#                                is one self-contained record.
+#                                is one self-contained record. Now includes
+#                                "status" and "reason" fields.
 #   latest_tested_vllm.txt    -- Plain text, single line: the most recent
-#                                verified version. Overwritten every run.
+#                                *verified* version. Only overwritten when
+#                                PIN_VLLM_STATUS=tested. Consumers that
+#                                just `head -n1` keep working; trailing
+#                                key=value lines let new consumers skip
+#                                the live GitHub API lookup entirely.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
@@ -19,8 +29,25 @@ cd "${REPO_ROOT}"
 
 export GIT_TERMINAL_PROMPT=0
 
-# ── Resolve the version that's actually installed in this pod ───────────
-VLLM_VERSION="$(python -c 'import vllm; print(vllm.__version__)')"
+# ── Resolve CI platform & per-platform defaults ─────────────────────────
+CI_PLATFORM="${CI_PLATFORM:-buildkite}"
+
+case "${CI_PLATFORM}" in
+    buildkite)
+        PIN_VLLM_BRANCH="${PIN_VLLM_BRANCH:-buildkite_latest_tested_vllm}"
+        ;;
+    github_actions)
+        PIN_VLLM_BRANCH="${PIN_VLLM_BRANCH:-github_nightly_tested_vllm}"
+        ;;
+    *)
+        echo "[ERROR] unknown CI_PLATFORM '${CI_PLATFORM}';" \
+             "expected buildkite or github_actions" >&2
+        exit 1
+        ;;
+esac
+
+# ── Resolve the version that's actually installed ────────────────────
+VLLM_VERSION="${VLLM_VERSION:-$(python -c 'import vllm; print(vllm.__version__)')}"
 if [[ -z "${VLLM_VERSION}" ]]; then
     echo "[ERROR] could not read vllm.__version__ from the live env" >&2
     exit 1
@@ -75,7 +102,7 @@ else
 fi
 
 CI_REPO="LMCache/LMCache"
-CI_BRANCH="buildkite_latest_tested_vllm"
+CI_BRANCH="${PIN_VLLM_BRANCH}"
 
 if [[ -n "${GITHUB_TOKEN:-}" ]]; then
     CI_REPO_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${CI_REPO}.git"
@@ -107,9 +134,31 @@ HISTORY_FILE="${WORK_DIR}/tested_vllm_versions.csv"
 LATEST_FILE="${WORK_DIR}/latest_tested_vllm.txt"
 
 TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-BUILD_URL="${BUILDKITE_BUILD_URL:-}"
-BUILD_NUMBER="${BUILDKITE_BUILD_NUMBER:-}"
-COMMIT_SHA="${BUILDKITE_COMMIT:-}"
+
+# ── Resolve CI metadata (build url / number / commit) per platform ──────
+case "${CI_PLATFORM}" in
+    buildkite)
+        BUILD_URL="${BUILD_URL:-${BUILDKITE_BUILD_URL:-}}"
+        BUILD_NUMBER="${BUILD_NUMBER:-${BUILDKITE_BUILD_NUMBER:-}}"
+        COMMIT_SHA="${COMMIT_SHA:-${BUILDKITE_COMMIT:-}}"
+        ;;
+    github_actions)
+        if [[ -n "${GITHUB_RUN_ID:-}" ]]; then
+            BUILD_NUMBER="${BUILD_NUMBER:-${GITHUB_RUN_ID}}"
+            BUILD_URL="${BUILD_URL:-${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}}"
+        fi
+        COMMIT_SHA="${COMMIT_SHA:-${GITHUB_SHA:-}}"
+        ;;
+esac
+
+# Per-platform OS identifier (e.g. ubuntu-22.04, macos-latest, or
+# empty for buildkite which runs on a single OS).
+OS_PLATFORM="${OS_PLATFORM:-}"
+
+# Pin status & reason. Default to "tested" so existing buildkite
+# callers (which only invoke this script on success) stay unchanged.
+PIN_VLLM_STATUS="${PIN_VLLM_STATUS:-tested}"
+PIN_VLLM_REASON="${PIN_VLLM_REASON:-}"
 
 # Append-only history (JSON Lines). Built via python so quoting is safe.
 # Use a quoted heredoc (<<'PY') to disable Bash expansion inside the script,
@@ -123,6 +172,10 @@ VLLM_ARCHIVE_INDEX="${VLLM_ARCHIVE_INDEX}" \
 BUILD_NUMBER="${BUILD_NUMBER}" \
 BUILD_URL="${BUILD_URL}" \
 COMMIT_SHA="${COMMIT_SHA}" \
+PIN_VLLM_STATUS="${PIN_VLLM_STATUS}" \
+PIN_VLLM_REASON="${PIN_VLLM_REASON}" \
+OS_PLATFORM="${OS_PLATFORM}" \
+CI_PLATFORM="${CI_PLATFORM}" \
 python - "$HISTORY_FILE" <<'PY'
 import json, os, sys
 path = sys.argv[1]
@@ -135,32 +188,46 @@ record = {
     "build_number": os.environ.get("BUILD_NUMBER", ""),
     "build_url": os.environ.get("BUILD_URL", ""),
     "commit": os.environ.get("COMMIT_SHA", ""),
+    "status": os.environ.get("PIN_VLLM_STATUS", "tested"),
+    "reason": os.environ.get("PIN_VLLM_REASON", ""),
+    "os_platform": os.environ.get("OS_PLATFORM", ""),
+    "ci_platform": os.environ.get("CI_PLATFORM", "buildkite"),
 }
 with open(path, "a", encoding="utf-8") as f:
     f.write(json.dumps(record) + "\n")
 PY
 
-# Latest pointer. The first line is the bare version so older consumers
-# that just `head -n1` keep working; the trailing key=value lines let new
-# consumers skip the live GitHub API lookup entirely.
-{
-    printf '%s\n' "${VLLM_VERSION}"
-    printf 'short_sha=%s\n' "${VLLM_SHORT_SHA}"
-    printf 'full_sha=%s\n' "${VLLM_FULL_SHA}"
-    printf 'archive_index_url=%s\n' "${VLLM_ARCHIVE_INDEX}"
-} > "${LATEST_FILE}"
+# Latest pointer — only overwritten when the verification actually passed.
+# Consumers that just `head -n1` keep working; trailing key=value lines
+# let new consumers skip the live GitHub API lookup entirely.
+if [[ "${PIN_VLLM_STATUS}" == "tested" ]]; then
+    {
+        printf '%s\n' "${VLLM_VERSION}"
+        printf 'short_sha=%s\n' "${VLLM_SHORT_SHA}"
+        printf 'full_sha=%s\n' "${VLLM_FULL_SHA}"
+        printf 'archive_index_url=%s\n' "${VLLM_ARCHIVE_INDEX}"
+    } > "${LATEST_FILE}"
+    git -C "${WORK_DIR}" add "${LATEST_FILE}"
+fi
 
 # ── Commit + push ───────────────────────────────────────────────────────
 cd "${WORK_DIR}"
-git add tested_vllm_versions.csv latest_tested_vllm.txt
+git add tested_vllm_versions.csv
 
 if git diff --cached --quiet 2>/dev/null; then
     echo "No changes to commit (version unchanged?)."
     exit 0
 fi
 
+COMMIT_MSG="Pin vLLM nightly (${PIN_VLLM_STATUS})"
+if [[ "${PIN_VLLM_STATUS}" != "tested" ]]; then
+    COMMIT_MSG="${COMMIT_MSG}: ${VLLM_VERSION} [${OS_PLATFORM:-unknown}]"
+else
+    COMMIT_MSG="${COMMIT_MSG}: ${VLLM_VERSION}"
+fi
+
 git -c user.email="ci@lmcache.ai" -c user.name="LMCache CI" \
-    commit -m "Pin verified vLLM nightly: ${VLLM_VERSION}"
+    commit -m "${COMMIT_MSG}"
 
 echo "--- Pushing to ${CI_REPO} ${CI_BRANCH}"
 if ! git push origin "HEAD:${CI_BRANCH}" 2>/dev/null; then
