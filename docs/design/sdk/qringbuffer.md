@@ -35,6 +35,24 @@ This is driven by the vLLM MP connector's `QRingBufferCapture` and gated by the
   - `batched_submit_qstore_requests(event)`: at forward exit, consume the
     plan and submit one Q store per request (reset when there is none).
 
+### Row-to-token attribution
+
+Under continuous batching a step's query tensor concatenates rows from many
+requests, and a request's row count is its **scheduled** token count for the
+step — which need not equal its store op's chunk-aligned token count (prompt
+tails past the last chunk boundary still produce rows, and the batch's row
+order need not match the connector metadata's request order). The plan
+therefore never assigns rows positionally. Instead it matches rows to op
+tokens through `attn_metadata.slot_mapping`: row `r` writes its KV to GPU slot
+`slot_mapping[r]`, and op token `i` lives in
+`block_ids[i // block_size] * block_size + i % block_size` (op block lists are
+pre-sliced to `[start, end)`). Each GPU slot is written at most once per step,
+so a full intersection is a bijection between an op's tokens and its rows; an
+op whose tokens are only partially present in the step (e.g. computed in an
+earlier chunked-prefill iteration) is skipped **individually**, without
+affecting other requests in the step, and non-STORE requests are simply
+ignored rather than disabling the whole step's capture.
+
 - **`QRingBufferAdapter`**: owns the ring's interaction with LMCache:
   - `register_q_ring(...)`: allocate the `QRingBuffer` and register it via
     `transfer_ctx.register_q` (`REGISTER_Q_CACHE`) under `q_model_name`.
