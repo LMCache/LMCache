@@ -390,3 +390,102 @@ production traffic needs to be checked against that assumption before
 deployment -- it is not a safe default replacement for `LRU`/`LFU`. The
 `get_evict_candidates` algorithmic-complexity gap (Finding 3) is also
 unchanged and remains a second, independent open engineering concern.
+
+## Direction-finding experiment
+
+Findings 4-5 diagnosed *why* `COST_AWARE` fails on real data: almost every
+chunk is touched once under high conversation fan-out (no signal for the
+frequency term), and cost-density actively misleads eviction (it protects
+"expensive" chunks that are poor predictors of imminent reuse). Four
+candidate directions were built and compared -- as isolated, non-production
+experiments under `benchmarks/cache_policy/experiments/`, never touching
+the shipped `cost_aware_policy.py` or `runner.py` -- to find out which
+actually helps, rather than committing to one blind:
+
+1. **Score rebalancing** (`variant_policies.py`): `freq_first` (drop cost
+   entirely) and `blended` (cost damped to a `**0.25` secondary factor)
+   `CostAwareEvictionPolicy` subclasses.
+2. **Admission control** (`admission_control.py`): a TinyLFU-style filter
+   -- track approximate global request frequency per key (every access
+   attempt, hit or miss), and refuse to admit a new chunk unless its
+   estimated frequency exceeds the eviction victim's. Wraps any base
+   policy; tested around both `LRU` and `COST_AWARE`.
+3. **Hierarchical (two-tier) cache** (`hierarchical_cache.py`): small fast
+   tier1 (20% of budget) + large slow tier2 (80%); tier1 evictions demote
+   into tier2 instead of being dropped, a tier2 hit promotes back to tier1
+   and costs 5x a tier1 hit's modeled latency. Confirmed via code
+   inspection first: LMCache's real multi-tier storage
+   (`storage_manager.py`) is write-through with no promotion/demotion on
+   eviction today, so this models a mechanism that doesn't exist in
+   production yet.
+
+Each direction was run through `compare_directions.py`: the full synthetic
+suite (`mixed_zipfian`, 3 cache sizes) and a time-boxed real-data leg
+(500 and 2,000 ShareGPT conversations, 100 MiB cache, 4 bootstrap-resampled
+repeats with 95% CI).
+
+![Direction comparison](../../../../../benchmarks/cache_policy/results/charts/direction_comparison.png)
+
+Real-data results (100 MiB cache; full data in
+[`results/experiments/real_data_comparison.json`](../../../../../benchmarks/cache_policy/results/experiments/real_data_comparison.json)):
+
+| Direction | 500 conv. hit rate (95% CI) | 2,000 conv. hit rate (95% CI) |
+|---|---:|---:|
+| LRU (baseline) | 18.2% [17.4, 18.9] | 5.1% [4.5, 5.6] |
+| LFU (baseline) | 17.2% [16.8, 17.7] | 5.1% [4.5, 5.6] |
+| COST_AWARE (baseline) | 11.1% [9.8, 12.9] | 0.5% [0.5, 0.7] |
+| freq_first | 17.2% [16.8, 17.7] | 5.1% [4.5, 5.6] |
+| blended | 10.9% [9.3, 12.7] | 1.0% [0.8, 1.2] |
+| admission[LRU] | **23.4% [23.0, 23.9]** | **9.1% [8.9, 9.5]** |
+| admission[COST_AWARE] | 14.5% [13.2, 15.8] | 3.7% [3.5, 3.8] |
+| hier[LRU+LRU] | 18.2% [17.4, 18.9] | 5.1% [4.5, 5.6] |
+| hier[COST_AWARE+LRU] | 14.7% [13.9, 15.6] | 4.4% [3.9, 5.0] |
+
+### Recommendation: admission control is the clear winner -- and it's not specific to `COST_AWARE`
+
+**`admission[LRU]`** -- TinyLFU-style admission control wrapped around
+plain `LRU`, no cost-awareness involved at all -- beats every other
+direction, including both baselines, at both real-data scales, with
+non-overlapping confidence intervals: +29% relative hit rate over `LRU`
+at 500 conversations (18.2%->23.4%), and **+78% relative** at 2,000
+(5.1%->9.1%). It also won or tied for best on the synthetic suite at
+every cache size except 50 MiB (where `LFU` narrowly edged it, 74.0% vs.
+73.0%). This is the most important result of the whole investigation:
+**the biggest lever isn't fixing `COST_AWARE`'s scoring -- it's adding an
+admission filter to whatever policy is already in use.** Admission
+control also substantially rescues `COST_AWARE` itself (0.5%->3.7% at
+2,000 conversations, a 7x relative improvement) without fully closing the
+gap to `admission[LRU]`, confirming the benefit is largely orthogonal to
+*which* eviction policy it wraps.
+
+Why it works: under real high-fan-out traffic, the dominant failure mode
+isn't "wrong eviction ranking," it's "worthless one-shot chunks getting
+admitted at all," each one displacing something that might have been
+reused. Rejecting those admissions outright preserves more of the cache
+for chunks that have already shown *some* signal of reuse -- a cheap,
+general fix that doesn't require reasoning about recompute cost at all.
+
+The other two directions did not pan out as hoped:
+- **Score rebalancing**: `freq_first` reduces to decayed-`LFU` (matches
+  it exactly everywhere tested) -- a real improvement over plain
+  `COST_AWARE` but nothing `LFU` doesn't already provide. `blended`
+  landed close to baseline `COST_AWARE`'s real-data numbers -- damping
+  cost to a `**0.25` exponent wasn't enough to escape Finding 5's failure
+  mode.
+- **Hierarchical caching**: `hier[LRU+LRU]` was statistically
+  indistinguishable from plain `LRU` at every cell tested (the 80%-budget
+  tier2 essentially reproduces single-tier `LRU` behavior on top of a
+  smaller tier1 here); `hier[COST_AWARE+LRU]` helped over baseline
+  `COST_AWARE` but still trailed plain `LRU`. The 20%/80% tier split was
+  not tuned -- a different split might do better -- but as tested, this
+  more architecturally invasive direction (it requires building
+  promotion/demotion machinery that doesn't exist in production) was
+  outperformed by the much simpler admission-control filter, so it's not
+  the next thing worth building.
+
+**Next step this experiment recommends, not yet done**: port TinyLFU-style
+admission control into a real, tested implementation -- most likely as a
+wrapper usable around any `BaseCachePolicy` (mirroring
+`admission_control.py`'s shape) rather than a `COST_AWARE`-specific
+change, since the win here was orthogonal to cost-awareness. That's a
+deliberate follow-up, not bundled into this investigation.

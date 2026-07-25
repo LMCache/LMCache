@@ -48,6 +48,13 @@ for the full write-up, methodology limitations, and results.
   adversarial stress tests on real data (near-empty cache, capacity-cliff
   monotonicity, pathologically long conversations, high concurrent
   fan-out). Opt-in only -- see "Real-data (ShareGPT) testing" below.
+- `benchmarks/cache_policy/experiments/` -- non-production candidate
+  improvements (score rebalancing, TinyLFU-style admission control,
+  two-tier hierarchical caching) and `compare_directions.py`, the harness
+  that ran all of them against both the synthetic suite and real data to
+  find which is worth building for real. See "Direction-finding
+  experiment" in the evaluation doc for the result (admission control
+  won, clearly).
 - `benchmarks/cache_policy/results/` -- checked-in sample CSV/JSON plus
   the charts referenced by the evaluation doc. Nightly CI runs write
   fresh output under `results/nightly/` (uploaded as a workflow
@@ -179,6 +186,34 @@ local/manual-reproduction only. Covers: a far-too-small cache (thrash,
 no crash), hit-rate monotonicity across a cache-size "capacity cliff",
 replaying only the longest real conversations, and a direct comparison of
 low vs. high concurrent conversation fan-out at a fixed cache size.
+
+## Direction-finding experiment
+
+`experiments/` holds four non-production candidate improvements (score
+rebalancing, TinyLFU-style admission control, two-tier hierarchical
+caching, plus the existing baselines) and a harness that ran all of them
+through both the synthetic suite and real data to find which one is
+actually worth building. See "Direction-finding experiment" in the
+evaluation doc for the result. To reproduce:
+
+```bash
+# Synthetic leg (fast, no corpus needed)
+python benchmarks/cache_policy/experiments/compare_directions.py \
+    --synthetic -o benchmarks/cache_policy/results/experiments
+
+# Real-data leg (needs the ShareGPT corpus prepared above; time-boxed --
+# COST_AWARE-derived directions are slow, see Finding 3)
+python benchmarks/cache_policy/experiments/compare_directions.py \
+    --real-data --sharegpt-path benchmarks/multi_round_qa/ShareGPT.json \
+    --scales 500 2000 --cache-sizes-mib 100 --repeats 4 \
+    -o benchmarks/cache_policy/results/experiments
+
+# Chart
+python benchmarks/cache_policy/experiments/plot_comparison.py \
+    --synthetic benchmarks/cache_policy/results/experiments/synthetic_comparison.json \
+    --real-data benchmarks/cache_policy/results/experiments/real_data_comparison.json \
+    -o benchmarks/cache_policy/results/charts/direction_comparison.png
+```
 
 ## Metrics collected
 
