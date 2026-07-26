@@ -1051,3 +1051,43 @@ class TestNixlUseHugepagesDeprecation:
         }
         config.validate()
         assert config.local_cpu_use_hugepages is True
+
+
+class TestConfigAliasResolution:
+    """Deprecated/alternate config names in ``_CONFIG_ALIASES`` must be
+    remapped to their current key names on every public constructor.
+
+    Regression test for the bug where an alias that was *not* also listed in
+    ``_DEPRECATED_CONFIGS`` (which is most of them, e.g. ``enable_xpyd``,
+    ``controller_url``, the ``nixl_*`` P/D names) fell through to the
+    "Unknown configuration key" branch and had its value silently dropped
+    instead of being applied to the current key.
+    """
+
+    def test_non_deprecated_alias_maps_to_current_key_from_dict(self):
+        # enable_xpyd -> enable_pd is an alias that is NOT in _DEPRECATED_CONFIGS.
+        config = LMCacheEngineConfig.from_dict({"enable_xpyd": True})
+        assert config.enable_pd is True
+
+    def test_non_deprecated_alias_maps_to_current_key_from_env(self, monkeypatch):
+        # controller_url -> controller_pull_url is an alias not in
+        # _DEPRECATED_CONFIGS; setting the old env name must populate the new key.
+        monkeypatch.setenv("LMCACHE_CONTROLLER_URL", "tcp://localhost:9000")
+        config = LMCacheEngineConfig.from_env()
+        assert config.controller_pull_url == "tcp://localhost:9000"
+
+    def test_deprecated_alias_still_maps_to_current_key(self):
+        # external_backends -> storage_plugins is BOTH an alias and deprecated;
+        # it must keep working after the fix.
+        config = LMCacheEngineConfig.from_dict(
+            {"external_backends": ["pluginA", "pluginB"]}
+        )
+        assert config.storage_plugins == ["pluginA", "pluginB"]
+
+    def test_alias_colliding_with_real_key_keeps_current_meaning(self):
+        # nixl_buffer_size is listed in _CONFIG_ALIASES (-> pd_buffer_size) but is
+        # also a real current config key. A live key must win over the alias so
+        # its value is not silently redirected to pd_buffer_size.
+        config = LMCacheEngineConfig.from_dict({"nixl_buffer_size": 2**30})
+        assert config.nixl_buffer_size == 2**30
+        assert config.pd_buffer_size is None
