@@ -1821,61 +1821,10 @@ class MessageQueueClient:
         stub_method = getattr(self._stub, method_name)
         future: MessagingFuture[T] = MessagingFuture()
 
-        typed_spec = _TYPED_RPCS.get(request_type)
-        if typed_spec is not None:
-            # Typed path: build the proto request from positional Python
-            # args directly; no msgspec envelope on the wire.
-            proto_request = typed_spec.python_to_request(*request_payloads)
+        typed_spec = _TYPED_RPCS[request_type]
+        proto_request = typed_spec.python_to_request(*request_payloads)
 
-            def _on_done_typed(call: "grpc.Future[Any]") -> None:
-                try:
-                    proto_response = call.result()
-                except grpc.RpcError as exc:
-                    logger.error("gRPC call %s failed: %s", method_name, exc)
-                    future.set_result(None)  # type: ignore[arg-type]
-                    return
-                except Exception:  # defensive
-                    logger.exception("gRPC call %s failed", method_name)
-                    future.set_result(None)  # type: ignore[arg-type]
-                    return
-                try:
-                    decoded = typed_spec.response_to_python(proto_response)
-                except Exception:
-                    logger.exception(
-                        "failed to decode typed response for %s", method_name
-                    )
-                    future.set_result(None)  # type: ignore[arg-type]
-                    return
-                future.set_result(decoded)
-
-            call = stub_method.future(proto_request)
-            call.add_done_callback(_on_done_typed)
-            return future
-
-        # Legacy msgspec-envelope path (to be retired once every rpc
-        # has an entry in ``_TYPED_RPCS``).
-        payload_classes = get_payload_classes(request_type)
-        if len(payload_classes) != len(request_payloads):
-            expected = [cls.__name__ for cls in payload_classes]
-            actual = [type(p).__name__ for p in request_payloads]
-            raise ValueError(
-                "Payload count mismatch for request "
-                f"{request_type}: expected {len(payload_classes)} {expected}, "
-                f"got {len(request_payloads)} {actual}. Likely a version "
-                "skew between the lmcache client and server."
-            )
-        b_payloads = [
-            msgspec_encode(payload, cls=cls)
-            for payload, cls in zip(request_payloads, payload_classes, strict=False)
-        ]
-        # A rpc's request is opaque bytes on the wire so we flatten
-        # any multi-payload request with msgpack (matches the daemon
-        # side's ``unwrap_request_payloads`` reconstruction).
-        wire = msgspec.msgpack.encode(b_payloads)
-        proto_request = lmcache_mq_pb2.BytesRequest(payload=wire)
-        response_type = get_response_class(request_type)
-
-        def _on_done(call: "grpc.Future[lmcache_mq_pb2.BytesResponse]") -> None:
+        def _on_done_typed(call: "grpc.Future[Any]") -> None:
             try:
                 proto_response = call.result()
             except grpc.RpcError as exc:
@@ -1886,19 +1835,16 @@ class MessageQueueClient:
                 logger.exception("gRPC call %s failed", method_name)
                 future.set_result(None)  # type: ignore[arg-type]
                 return
-            if response_type is None or not proto_response.result:
-                future.set_result(None)  # type: ignore[arg-type]
-                return
             try:
-                decoded = msgspec_decode(proto_response.result, cls=response_type)
-            except Exception:  # decoding failed
-                logger.exception("failed to decode response for %s", method_name)
+                decoded = typed_spec.response_to_python(proto_response)
+            except Exception:
+                logger.exception("failed to decode typed response for %s", method_name)
                 future.set_result(None)  # type: ignore[arg-type]
                 return
             future.set_result(decoded)
 
         call = stub_method.future(proto_request)
-        call.add_done_callback(_on_done)
+        call.add_done_callback(_on_done_typed)
         return future
 
     def close(self) -> None:
@@ -2038,30 +1984,6 @@ class _RequestHandlerServicer(lmcache_mq_pb2_grpc.MessageQueueServicer):
             return fut.result()
         raise NotImplementedError(f"handler_type {handler_type} not supported")
 
-    def _dispatch(
-        self,
-        request: lmcache_mq_pb2.BytesRequest,
-        context: "grpc.ServicerContext",
-        request_type: RequestType,
-    ) -> lmcache_mq_pb2.BytesResponse:
-        handler = self._handlers.get(request_type)
-        if handler is None:
-            context.abort(
-                grpc.StatusCode.UNIMPLEMENTED,
-                f"No handler registered for {request_type}",
-            )
-            # ``context.abort`` raises, so this is unreachable; kept as
-            # an explicit fall-through for mypy's control-flow analysis.
-            raise RuntimeError("unreachable")
-        payloads: list[bytes] = msgspec.msgpack.decode(request.payload, type=list)
-        response_cls = handler.get_response_class()
-        result = self._run_handler(request_type, payloads, context.peer())
-
-        if result is None:
-            return lmcache_mq_pb2.BytesResponse(result=b"")
-        b_result = msgspec_encode(result, cls=response_cls)
-        return lmcache_mq_pb2.BytesResponse(result=b_result)
-
     def _dispatch_typed(
         self,
         request: Any,
@@ -2108,41 +2030,23 @@ class _RequestHandlerServicer(lmcache_mq_pb2_grpc.MessageQueueServicer):
 
 
 def _install_servicer_methods() -> None:
-    """Attach one dispatch method per ``RequestType`` to the servicer.
-
-    Typed rpcs get a ``_dispatch_typed`` thunk (proto message in / proto
-    message out); legacy rpcs get the msgspec-envelope ``_dispatch``.
-    """
+    """Attach one typed dispatch method per ``RequestType`` to the servicer."""
     for rt in RequestType:
         method_name = request_type_to_method_name(rt)
-        typed_spec = _TYPED_RPCS.get(rt)
+        typed_spec = _TYPED_RPCS[rt]
         method: Callable[..., Any]
+        _resolved_spec: TypedRpcSpec = typed_spec
 
-        if typed_spec is not None:
-            _resolved_spec: TypedRpcSpec = typed_spec
+        def _typed_method(  # noqa: E501 (captured ``rt`` / ``spec`` via default arg)
+            self: _RequestHandlerServicer,
+            request: Any,
+            context: "grpc.ServicerContext",
+            _rt: RequestType = rt,
+            _spec: TypedRpcSpec = _resolved_spec,
+        ) -> Any:
+            return self._dispatch_typed(request, context, _rt, _spec)
 
-            def _typed_method(  # noqa: E501 (captured ``rt`` / ``spec`` via default arg)
-                self: _RequestHandlerServicer,
-                request: Any,
-                context: "grpc.ServicerContext",
-                _rt: RequestType = rt,
-                _spec: TypedRpcSpec = _resolved_spec,
-            ) -> Any:
-                return self._dispatch_typed(request, context, _rt, _spec)
-
-            method = _typed_method
-        else:
-
-            def _method(  # noqa: E501 (captured ``rt`` via default arg)
-                self: _RequestHandlerServicer,
-                request: lmcache_mq_pb2.BytesRequest,
-                context: "grpc.ServicerContext",
-                _rt: RequestType = rt,
-            ) -> lmcache_mq_pb2.BytesResponse:
-                return self._dispatch(request, context, _rt)
-
-            method = _method
-
+        method = _typed_method
         method.__name__ = method_name
         method.__qualname__ = f"_RequestHandlerServicer.{method_name}"
         setattr(_RequestHandlerServicer, method_name, method)
