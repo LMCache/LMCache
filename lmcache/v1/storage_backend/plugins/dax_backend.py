@@ -5,27 +5,33 @@ from __future__ import annotations
 
 # Standard
 from collections import OrderedDict
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional, Sequence, cast
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence, cast
 import asyncio
 import ctypes
 import os
 import threading
 
-# Third Party
-import torch
-
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import StoragePluginInterface
 from lmcache.v1.storage_backend.dax.core import DaxCore
-from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 import lmcache.c_ops as lmc_ops
+
+if TYPE_CHECKING:
+    # Standard
+    from concurrent.futures import Future
+
+    # Third Party
+    import torch
+
+    # First Party
+    from lmcache.v1.config import LMCacheEngineConfig
+    from lmcache.v1.metadata import LMCacheMetadata
+    from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 logger = init_logger(__name__)
 

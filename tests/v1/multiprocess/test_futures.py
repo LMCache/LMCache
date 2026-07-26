@@ -407,7 +407,7 @@ def test_cuda_messaging_future_result_timeout_reached():
 
     # Try to get result with timeout (result never set)
     with pytest.raises(
-        TimeoutError, match="CUDAMessagingFuture result not available within timeout"
+        TimeoutError, match="DeviceMessagingFuture result not available within timeout"
     ):
         cuda_future.result(timeout=0.2)
 
@@ -521,9 +521,9 @@ def test_cuda_messaging_future_complex_type():
     not torch.cuda.is_available(),
     reason="CUDA is required for CUDAMessagingFuture tests",
 )
-def test_messaging_future_to_cuda_future():
-    """Test converting MessagingFuture to CUDAMessagingFuture
-    using to_cuda_future method.
+def test_messaging_future_to_device_future():
+    """Test converting MessagingFuture to DeviceMessagingFuture
+    using to_device_future method.
     """
     torch.cuda.init()
 
@@ -539,18 +539,18 @@ def test_messaging_future_to_cuda_future():
 
     raw_future = MessagingFuture[tuple[bytes, int]]()
 
-    # Convert to CUDA future
-    cuda_future = raw_future.to_cuda_future()
+    # Convert to device future
+    device_future = raw_future.to_device_future()
 
     # Verify it's a CUDAMessagingFuture instance
-    assert isinstance(cuda_future, CUDAMessagingFuture), (
-        "to_cuda_future should return CUDAMessagingFuture instance"
+    assert isinstance(device_future, CUDAMessagingFuture), (
+        "to_device_future should return DeviceMessagingFuture instance"
     )
 
     # Set result and verify it works
     raw_future.set_result((event_bytes, 999))
 
-    result = cuda_future.result()
+    result = device_future.result()
     assert result == 999, f"Expected result 999, got {result}"
 
 
@@ -584,3 +584,103 @@ def test_cuda_messaging_future_with_explicit_device():
     # Get result
     result = cuda_future.result()
     assert result == "explicit device", f"Expected 'explicit device', got {result}"
+
+
+# ==============================================================================
+# Device-neutral future wiring (no CUDA required)
+# ==============================================================================
+
+
+def test_cuda_future_is_alias_of_device_future():
+    # First Party
+    from lmcache.v1.multiprocess.futures import (
+        CUDAMessagingFuture,
+        DeviceMessagingFuture,
+    )
+
+    assert CUDAMessagingFuture is DeviceMessagingFuture
+
+
+def test_to_cuda_future_returns_device_future_instance():
+    # First Party
+    from lmcache.v1.multiprocess.futures import DeviceMessagingFuture
+
+    raw = MessagingFuture()
+    with pytest.warns(DeprecationWarning, match="to_device_future"):
+        fut = raw.to_cuda_future(device="cpu")
+    assert isinstance(fut, DeviceMessagingFuture)
+
+
+def test_device_future_stub_end_to_end():
+    # First Party
+    from lmcache.v1.multiprocess.futures import DeviceMessagingFuture
+
+    raw = MessagingFuture[tuple[bytes, int]]()
+    fut = DeviceMessagingFuture.FromMessagingFuture(raw, device="cpu")
+    assert not fut.query()
+    raw.set_result((b"stub_ipc_handle", 7))
+    assert fut.wait() is True
+    assert fut.result() == 7
+    assert fut.query() is True
+
+
+def test_device_future_delegates_to_backend(monkeypatch):
+    # First Party
+    from lmcache.v1.multiprocess.futures import DeviceMessagingFuture
+
+    calls = []
+
+    class _FakeBackend:
+        device_type = "fake"
+
+        def check_event_support(self, device):
+            calls.append(("check", device))
+
+        def import_event(self, handle, device):
+            calls.append(("import", handle, device))
+            return "EVT"
+
+        def synchronize_event(self, event, device):
+            calls.append(("sync", event, device))
+
+        def query_event(self, event):
+            calls.append(("query", event))
+            return True
+
+    monkeypatch.setattr(
+        "lmcache.v1.multiprocess.futures.get_event_ipc_backend",
+        lambda device=None: _FakeBackend(),
+    )
+
+    raw = MessagingFuture[tuple[bytes, int]]()
+    fut = DeviceMessagingFuture.FromMessagingFuture(raw, device="dev")
+    raw.set_result((b"h", 99))
+    assert fut.wait() is True
+    assert fut.result() == 99
+    assert ("check", "dev") in calls
+    assert ("import", b"h", "dev") in calls
+    assert any(c[0] == "sync" for c in calls)
+
+
+def test_device_future_checks_backend_support_during_initialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unsupported event IPC fails before the future enters the wait path."""
+    # First Party
+    from lmcache.v1.multiprocess.futures import DeviceMessagingFuture
+
+    class _UnsupportedBackend:
+        device_type = "fake"
+
+        def check_event_support(self, device: object) -> None:
+            raise RuntimeError("event IPC unavailable")
+
+    monkeypatch.setattr(
+        "lmcache.v1.multiprocess.futures.get_event_ipc_backend",
+        lambda device=None: _UnsupportedBackend(),
+    )
+
+    with pytest.raises(RuntimeError, match="event IPC unavailable"):
+        DeviceMessagingFuture.FromMessagingFuture(
+            MessagingFuture[tuple[bytes, int]](), device="dev"
+        )

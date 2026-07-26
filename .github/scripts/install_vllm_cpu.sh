@@ -18,6 +18,11 @@
 #   PIP_BIN="uv pip" install_vllm_cpu.sh
 #                                 # use `uv pip` and pass extra flags
 #                                 # via PIP_INSTALL_EXTRA_ARGS
+#   VLLM_CPU_NIGHTLY_SPEC="vllm-cpu-nightly==0.25.2.dev202607230832" \
+#     install_vllm_cpu.sh         # pin a specific nightly build (used
+#                                 # by the macOS CI leg to dodge a
+#                                 # broken upstream wheel; see the
+#                                 # workflow for context)
 #
 # Idempotent: re-running just rewrites the alias.
 
@@ -25,12 +30,13 @@ set -euo pipefail
 
 PIP_BIN="${PIP_BIN:-pip}"
 PIP_INSTALL_EXTRA_ARGS="${PIP_INSTALL_EXTRA_ARGS:-}"
+VLLM_CPU_NIGHTLY_SPEC="${VLLM_CPU_NIGHTLY_SPEC:-vllm-cpu-nightly}"
 
 # `--extra-index-url` is required because the wheel pins torch==2.11.0
 # which only lives on the pytorch CPU index. Harmless on macOS.
 ${PIP_BIN} install "numpy<2"
 # shellcheck disable=SC2086
-${PIP_BIN} install vllm-cpu-nightly \
+${PIP_BIN} install "${VLLM_CPU_NIGHTLY_SPEC}" \
   --extra-index-url https://download.pytorch.org/whl/cpu \
   ${PIP_INSTALL_EXTRA_ARGS}
 

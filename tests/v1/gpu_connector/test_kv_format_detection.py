@@ -14,7 +14,7 @@ import torch
 
 # First Party
 from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.kv_format import detect_format
+from lmcache.v1.gpu_connector.kv_format import detect_format, extract_kv_cache_shapes
 import lmcache.c_ops as lmc_ops
 
 NB, NL, BS, NH, HS = 7, 5, 3, 2, 4
@@ -30,7 +30,8 @@ def test_vllm_cross_layer():
     kv = _t(NB, NL, 2, BS, NH, HS)
     fmt, out = detect_format(kv, EngineType.VLLM, {"kv_layout": "NHD"})
     assert fmt == F.NB_NL_TWO_BS_NH_HS
-    assert out is kv
+    assert tuple(out.shape) == tuple(kv.shape)
+    assert out.data_ptr() == kv.data_ptr()
 
 
 # The CPU-HND safeguard forces HND regardless of hint when running on a CPU
@@ -124,3 +125,20 @@ def test_unsupported_structure_raises():
     kv = [_t(NB, HS) for _ in range(NL)]
     with pytest.raises(ValueError):
         detect_format(kv, EngineType.VLLM, {"kv_layout": "NHD"})
+
+
+def test_extract_kv_cache_shapes_single_tensor():
+    assert extract_kv_cache_shapes(_t(NB, BS, HS)) == {(NB, BS, HS)}
+
+
+def test_extract_kv_cache_shapes_uniform_list_dedups():
+    kv = [_t(2, NB, BS, NH, HS) for _ in range(NL)]
+    assert extract_kv_cache_shapes(kv) == {(2, NB, BS, NH, HS)}
+
+
+def test_extract_kv_cache_shapes_mixed_nested():
+    kv = [
+        [_t(NB, BS, NH, HS), _t(NB, BS, HS)],
+        [_t(NB, BS, NH, HS)],
+    ]
+    assert extract_kv_cache_shapes(kv) == {(NB, BS, NH, HS), (NB, BS, HS)}
