@@ -64,6 +64,12 @@ serde factory.
      - ``preset`` (default ``turboquant_k8v4``), ``head_dim`` (optional,
        default 128), ``block_size`` (default 16), ``max_workers`` (thread
        pool size, default 1)
+   * - ``aesgcm``
+     - AES-GCM authenticated encryption of KV bytes at rest in L2, keyed
+       per ``cache_salt``.
+     - ``key_provider`` (default ``hkdf``), ``master_key_path`` (required
+       for ``hkdf``), ``aes_bits`` (``128`` default, or ``256``),
+       ``max_workers`` (thread pool size, default 1)
 
 
 TurboQuant serde
@@ -109,6 +115,43 @@ Supported presets:
    * - ``turboquant_3bit_nc``
      - 3-bit MSE key with norm correction
      - 3-bit value quantization
+
+
+Encryption serde
+----------------
+
+The ``aesgcm`` serde encrypts KV bytes with AES-GCM before they land in L2
+and decrypts them on load, so a party who can read the remote storage
+(bucket / disk / RESP) cannot recover cache contents. Each tenant's data is
+encrypted under a distinct key derived from its ``cache_salt``.
+
+.. code-block:: bash
+
+    lmcache server \
+        --l1-size-gb 100 \
+        --eviction-policy LRU \
+        --l2-adapter '{
+            "type": "s3",
+            "bucket": "my-kv-cache",
+            "serde": {
+                "type": "aesgcm",
+                "key_provider": "hkdf",
+                "master_key_path": "/etc/lmcache/keys/master"
+            }
+        }'
+
+Provide the master key as a file (e.g. a mounted Kubernetes ``Secret``).
+The ``hkdf`` provider reads it once at startup and derives a per-``cache_salt``
+key via HKDF-SHA256; the master key is never written to L2. ``aes_bits``
+defaults to ``128`` (already unbreakable and slightly faster); set ``256`` if a
+compliance mandate requires it.
+
+.. warning::
+
+   The ``hkdf`` provider derives every tenant's key from one shared master
+   key, so any server holding the master can decrypt any tenant's data
+   ("fleet vs. outside" trust). It is not per-tenant access isolation.
+
 
 
 Writing a custom serde
@@ -164,6 +207,14 @@ Notes
   upper bound on the actual serialized output — include any safety
   margin directly in the estimate (e.g., the built-in fp8 serializer
   returns ``1.5 * num_elements``).
+- **Raw-byte output.** If your serde writes bytes directly (rather than
+  through ``MemoryObj.tensor`` like the quantizers), reach the buffer via
+  ``MemoryObj.byte_array`` and **cast it to the native format first**:
+  ``memoryview(dst.byte_array).cast("B")``. ``byte_array`` is a
+  ctypes-backed view with format ``"<B"``, and CPython does not support
+  slice assignment into a non-native format (``dst[i:j] = ...`` raises
+  ``NotImplementedError: memoryview: unsupported format <B``). The built-in
+  ``aesgcm`` serde is an example.
 - **Failure handling.** If any step fails (serialize, store, load, or
   deserialize), the whole submitted batch is reported as failed —
   partial success within one batch is not surfaced. Failed keys are
