@@ -174,6 +174,23 @@ jobs:
           key: hf-hub-${{ matrix.model.name }}-v2
 
       - name: Install vLLM CPU (prebuilt nightly from PyPI)
+        env:
+          # Pin the vllm-cpu-nightly wheel on macOS to a build that is
+          # ABI-compatible with the torch it pulls in. The nightly
+          # uploaded on 2026-07-24 08:34 UTC (dev202607240834) declares
+          # `torch==2.13.0` in its metadata but the shipped
+          # `vllm/_C.abi3.so` was compiled against an older libtorch —
+          # loading it on macOS fails with
+          # `Symbol not found: __ZN3c104impl3cow23materialize_cow_storage...`
+          # which then blows up cpu_worker.py at
+          # `torch.ops._C.init_cpu_memory_env(...)`.
+          # Linux dodges this because the pytorch-cpu extra index still
+          # serves `torch-2.11.0+cpu`, matching the wheel's ABI.
+          # Revert this pin once upstream ships a macOS-clean nightly.
+          VLLM_CPU_NIGHTLY_SPEC: >-
+            ${{ runner.os == 'macOS'
+                && 'vllm-cpu-nightly==0.25.2.dev202607230832'
+                || 'vllm-cpu-nightly' }}
         run: bash .github/scripts/install_vllm_cpu.sh
 
       - name: Install lmcache (CPU-only, no vLLM)
