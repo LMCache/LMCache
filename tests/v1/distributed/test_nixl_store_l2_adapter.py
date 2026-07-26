@@ -319,6 +319,108 @@ class TestStoreInterface:
         assert task_id in completed
         assert completed[task_id].is_successful()
 
+    def test_store_fails_atomically_when_batch_exceeds_pool(self, adapter):
+        """Pool exhaustion should roll back every allocation in the batch."""
+        adpt, buf = adapter
+        listener = _RecordingListener()
+        adpt.register_listener(listener)
+        initial_status = adpt.report_status()
+
+        keys = [create_object_key(i) for i in range(POOL_SIZE + 1)]
+        objs = [
+            create_memory_obj(buf, page_index=i % NUM_BUFFER_PAGES)
+            for i in range(POOL_SIZE + 1)
+        ]
+        store_fd = adpt.get_store_event_fd()
+
+        task_id = adpt.submit_store_task(keys, objs)
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+
+        result = adpt.pop_completed_store_tasks()[task_id]
+        assert not result.is_successful()
+        assert result.bytes_transferred() == 0
+        assert (
+            adpt.report_status()["pool_free_slots"] == initial_status["pool_free_slots"]
+        )
+        assert adpt.get_usage().total_bytes_used == 0
+        assert listener.stored == []
+
+        lookup_fd = adpt.get_lookup_and_lock_event_fd()
+        lookup_task_id = adpt.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
+        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        bitmap = adpt.query_lookup_and_lock_result(lookup_task_id)
+        assert bitmap is not None
+        for index in range(len(keys)):
+            assert bitmap.test(index) is False
+
+    def test_store_fails_when_pool_is_full(self, adapter):
+        """Pool exhaustion should preserve existing data and accounting."""
+        adpt, buf = adapter
+        existing_key = create_object_key(1)
+        existing_obj = create_memory_obj(buf, page_index=0, num_pages=POOL_SIZE)
+        store_fd = adpt.get_store_event_fd()
+
+        initial_task_id = adpt.submit_store_task([existing_key], [existing_obj])
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+        initial_result = adpt.pop_completed_store_tasks()[initial_task_id]
+        assert initial_result.is_successful()
+
+        status_before = adpt.report_status()
+        usage_before = adpt.get_usage()
+        new_key = create_object_key(2)
+        new_obj = create_memory_obj(buf, page_index=0)
+
+        task_id = adpt.submit_store_task([new_key], [new_obj])
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+
+        result = adpt.pop_completed_store_tasks()[task_id]
+        assert not result.is_successful()
+        assert result.bytes_transferred() == 0
+        assert (
+            adpt.report_status()["pool_free_slots"] == status_before["pool_free_slots"]
+        )
+        assert adpt.get_usage() == usage_before
+
+        lookup_fd = adpt.get_lookup_and_lock_event_fd()
+        lookup_task_id = adpt.submit_lookup_and_lock_task(
+            [existing_key, new_key], _EMPTY_LAYOUT
+        )
+        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        bitmap = adpt.query_lookup_and_lock_result(lookup_task_id)
+        assert bitmap is not None
+        assert bitmap.test(0) is True
+        assert bitmap.test(1) is False
+        adpt.submit_unlock([existing_key])
+
+    def test_store_existing_keys_succeeds_without_allocating(self, adapter):
+        """A no-op store should succeed without consuming pool slots."""
+        adpt, buf = adapter
+        key = create_object_key(1)
+        obj = create_memory_obj(buf, page_index=0)
+        store_fd = adpt.get_store_event_fd()
+
+        initial_task_id = adpt.submit_store_task([key], [obj])
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+        initial_result = adpt.pop_completed_store_tasks()[initial_task_id]
+        assert initial_result.is_successful()
+
+        listener = _RecordingListener()
+        adpt.register_listener(listener)
+        status_before = adpt.report_status()
+        usage_before = adpt.get_usage()
+
+        task_id = adpt.submit_store_task([key], [obj])
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+
+        result = adpt.pop_completed_store_tasks()[task_id]
+        assert result.is_successful()
+        assert result.bytes_transferred() == 0
+        assert (
+            adpt.report_status()["pool_free_slots"] == status_before["pool_free_slots"]
+        )
+        assert adpt.get_usage() == usage_before
+        assert listener.stored == []
+
 
 # =============================================================================
 # Lookup and Lock Interface Tests
