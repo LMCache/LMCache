@@ -2,16 +2,15 @@
 
 """CPython garbage-collector timing for the MP server process.
 
-A full (generation-2) collection is stop-the-world and walks the whole
-heap, so it lands inside store/retrieve handling as tail latency that
-nothing else in the server accounts for.
+A full (generation-2) collection is stop-the-world and walks the whole heap,
+so it lands inside store/retrieve handling as tail latency that nothing else
+in the server accounts for.  :class:`GCMonitor` times every collection via a
+``gc.callbacks`` hook and logs the slow ones.
 
-:class:`GCMonitor` installs a ``gc.callbacks`` hook that times every
-collection and logs the slow ones, making those pauses attributable
-instead of invisible.  It deliberately stays off the EventBus: the hook
-runs *inside* the collector, on whichever thread triggered it, so it does
-the least work it can and does not couple GC timing to the bus's queue
-depth or drain lag.
+The monitor logs directly rather than publishing to the EventBus: the hook
+runs inside the collector, on whichever thread triggered it, so it does the
+least work it can and GC timing stays decoupled from the bus's queue depth
+and drain lag.
 """
 
 # Future
@@ -34,18 +33,14 @@ class GCMonitorConfig:
     """Configuration for :class:`GCMonitor`.
 
     Attributes:
-        enabled: Master switch.  When ``False`` no hook is installed and the
-            process pays nothing.
-        min_pause_ms: Only collections that took at least this many
-            milliseconds are logged.  ``0.0`` logs every collection, which on
-            a busy server means a line per few hundred allocations -- with
-            the default thresholds CPython runs a gen-0 sweep roughly every
-            700 net container allocations.
-        top_objects: When positive, each logged collection carries a
-            breakdown of the ``N`` most common object types in the generation
-            being collected.  This calls ``gc.get_objects()`` on *every*
-            collection, which is O(heap) and can itself cost hundreds of
-            milliseconds on a large cache -- enable only while debugging.
+        enabled: When ``False`` no hook is installed and the process pays
+            nothing.
+        min_pause_ms: Collections faster than this are not logged.  ``0.0``
+            logs everything, including the sub-millisecond gen-0 sweeps
+            CPython runs roughly every 700 net container allocations.
+        top_objects: When positive, log a breakdown of the ``N`` most common
+            object types in the generation being collected.  Walks the whole
+            generation on *every* collection (O(heap)) -- debugging only.
     """
 
     enabled: bool = False
@@ -62,19 +57,13 @@ class GCMonitorConfig:
 class GCMonitor:
     """Times CPython garbage collections and logs the slow ones.
 
-    Install with :meth:`install` and remove with :meth:`uninstall`; a monitor
-    that is not installed does nothing.  All state is mutated inside the
-    ``gc.callbacks`` hook, and CPython runs at most one collection at a time
-    and never re-enters the collector from a callback, so no locking is
-    needed even though collections fire on arbitrary threads.
+    State is mutated only inside the ``gc.callbacks`` hook.  CPython runs at
+    most one collection at a time and never re-enters the collector from a
+    callback, so no locking is needed even though collections fire on
+    arbitrary threads.
     """
 
     def __init__(self, config: GCMonitorConfig) -> None:
-        """Create a monitor.
-
-        Args:
-            config: Monitor configuration.
-        """
         self._config = config
         self._installed = False
         self._start_ns = 0
@@ -110,16 +99,16 @@ class GCMonitor:
         """Handle one ``gc.callbacks`` invocation.
 
         CPython calls this with *phase* ``"start"`` before a collection and
-        ``"stop"`` after it, passing the generation being collected plus, on
-        stop, the ``collected`` and ``uncollectable`` object counts.  The
-        top-objects scan runs before the start timestamp is taken so this
-        monitor's own cost is never attributed to the collector.
+        ``"stop"`` after it, passing the generation plus, on stop, the
+        ``collected`` and ``uncollectable`` counts.
         """
         generation = info.get("generation")
         if generation is None:
             return
 
         if phase == "start":
+            # Scan before the timestamp so this monitor's own cost is never
+            # attributed to the collector.
             self._top_objects = self._compute_top_objects(generation)
             self._start_ns = time.monotonic_ns()
             return
@@ -142,10 +131,7 @@ class GCMonitor:
         )
 
     def _compute_top_objects(self, generation: int) -> str:
-        """Return a one-line ``type=count`` breakdown, or ``""``.
-
-        Empty unless :attr:`GCMonitorConfig.top_objects` is positive.
-        """
+        """Return a one-line ``type=count`` breakdown, or ``""`` when off."""
         top = self._config.top_objects
         if top <= 0:
             return ""
@@ -160,10 +146,6 @@ def _type_name(obj: object) -> str:
     obj_type = type(obj)
     return f"{obj_type.__module__}.{obj_type.__qualname__}"
 
-
-# ---------------------------------------------------------------------------
-# Process-wide singleton
-# ---------------------------------------------------------------------------
 
 _global_monitor: GCMonitor | None = None
 

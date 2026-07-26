@@ -425,10 +425,11 @@ def run_cache_server(
             time.sleep(1)
     except KeyboardInterrupt:
         logger.info("Shutting down server...")
-        shutdown_gc_monitor()
         event_bus.stop()
         server.close()
         engine.close()
+    finally:
+        shutdown_gc_monitor()
     return None
 
 
