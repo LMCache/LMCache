@@ -9,6 +9,15 @@ types share this backend:
 - ``nixl_store_dynamic`` — opens and registers files per operation, adding
   persist/recover across restarts and removing the open-file-descriptor limit.
 
+.. note::
+
+   Both adapters require the NIXL runtime, which ships as the optional
+   ``lmcache[nixl]`` extra:
+
+   .. code-block:: bash
+
+       uv pip install lmcache[nixl]
+
 Static pool — ``nixl_store``
 ----------------------------
 

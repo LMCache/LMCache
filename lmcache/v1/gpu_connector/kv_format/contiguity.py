@@ -17,6 +17,29 @@ from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
 logger = init_logger(__name__)
 
 
+def _get_expected_shape(stride: tuple[int, ...], num_elems: int) -> tuple[int, ...]:
+    """Return the expected shape for a stride-sorted tensor view.
+
+    The returned shape is the tightest possible (contiguous) layout
+    that preserves the original storage size and stride ordering. For
+    example, a tensor with ``stride=(16, 4, 1)`` has an expected shape
+    of ``(4, 4, 4)``, which is the smallest shape that can be laid out
+    in memory with those strides.
+
+    Args:
+        stride: The stride of the tensor.
+        num_elems: The total number of elements in the tensor.
+
+    Returns:
+        The expected shape for a contiguous layout.
+    """
+    assert len(stride) > 0, "Stride must have at least one dimension"
+    expected_shape = [num_elems // stride[0]]
+    for i in range(0, len(stride) - 1):
+        expected_shape.append(stride[i] // stride[i + 1])
+    return tuple(dim for dim in expected_shape)
+
+
 def attempt_permute_to_contiguous_view(
     kv_caches: DiscoverableKVCache,
 ) -> DiscoverableKVCache:
@@ -50,13 +73,11 @@ def attempt_permute_to_contiguous_view(
     preserved.
     """
     if isinstance(kv_caches, torch.Tensor):
-        if kv_caches.is_contiguous():
-            return kv_caches
         strides = kv_caches.stride()
         perm = sorted(range(kv_caches.ndim), key=lambda i: strides[i], reverse=True)
         result = kv_caches.permute(perm)
         if result.is_contiguous():
-            return result
+            return result.view(_get_expected_shape(result.stride(), result.numel()))
         padding_per_block = _validate_dim0_padded_layout(result)
         logger.debug(
             "attempt_permute_to_contiguous_view: accepting dim-0-padded "

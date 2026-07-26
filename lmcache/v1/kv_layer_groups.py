@@ -13,9 +13,9 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.python_ops_fallback import set_shape_desc_dtype
 from lmcache.utils import lmcache_deprecate
 from lmcache.v1.distributed.api import AttnWindowDesc
+from lmcache.v1.platform.ops_types import set_shape_desc_dtype
 import lmcache.c_ops as lmc_ops
 
 if TYPE_CHECKING:

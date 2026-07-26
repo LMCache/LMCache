@@ -80,8 +80,8 @@ class LMCacheMetadata:
         """Return per-group dtypes, or the legacy single dtype if the
         manager has not been registered yet (e.g. some unit tests)."""
         klg_manager = self.kv_layer_groups_manager
-        if klg_manager is not None and klg_manager.kv_layer_groups:
-            return [group.dtype for group in klg_manager.kv_layer_groups]
+        if klg_manager is not None and klg_manager.kernel_groups:
+            return [group.dtype for group in klg_manager.kernel_groups]
         return [self.kv_dtype]
 
     def get_shapes(self, num_tokens: Optional[int] = None) -> list[torch.Size]:
@@ -89,7 +89,7 @@ class LMCacheMetadata:
         if num_tokens is None:
             num_tokens = self.chunk_size
         klg_manager = self.kv_layer_groups_manager
-        if klg_manager is not None and klg_manager.kv_layer_groups:
+        if klg_manager is not None and klg_manager.kernel_groups:
             # Read kv_size from each group's shape_desc rather than self.use_mla
             # so heterogeneous groups (should any ever co-exist) are handled.
             return [
@@ -101,7 +101,7 @@ class LMCacheMetadata:
                         group.hidden_dim_size,
                     ]
                 )
-                for group in klg_manager.kv_layer_groups
+                for group in klg_manager.kernel_groups
             ]
         return [
             torch.Size(
@@ -116,6 +116,6 @@ class LMCacheMetadata:
 
     def get_num_groups(self) -> int:
         klg_manager = self.kv_layer_groups_manager
-        if klg_manager is not None and klg_manager.kv_layer_groups:
-            return klg_manager.num_groups
+        if klg_manager is not None and klg_manager.kernel_groups:
+            return klg_manager.num_kernel_groups
         return 1

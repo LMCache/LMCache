@@ -28,6 +28,7 @@ class _FakeKVLayerGroupsManager:
 class _FakeGPUContext:
     """Small stand-in for GPUCacheContext used by registration tests."""
 
+    device: torch.device = torch.device("cpu")
     num_layers: int = 2
     kv_layer_groups_manager: _FakeKVLayerGroupsManager = _FakeKVLayerGroupsManager()
 

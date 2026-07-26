@@ -43,6 +43,7 @@ _path_filter_is_trivial() {
         .gitignore|.gitattributes|.editorconfig|.mailmap) return 0 ;;
         CODEOWNERS) return 0 ;;
         docs/*) return 0 ;;
+        asset/*) return 0 ;;
         .github/*) return 0 ;;
     esac
     return 1
