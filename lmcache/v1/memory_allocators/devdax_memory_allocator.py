@@ -792,8 +792,9 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             for arena in self._arenas:
                 address_manager = arena.allocator.address_manager
                 arena_total = address_manager.get_heap_size()
-                dax_total += arena_total
                 dax_used += arena_total - address_manager.get_free_size()
+                if arena.state == DevDaxArenaState.ACTIVE:
+                    dax_total += arena_total
         return local_used + dax_used, local_total + dax_total
 
     def close(self) -> None:

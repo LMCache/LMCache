@@ -206,8 +206,15 @@ whole-arena transfer registration.
 
 ## Capacity
 
-`get_memory_usage()` returns used and total bytes summed across the DRAM local
-allocator and every arena in the pool, computed under `host_mem_lock`.
+`get_memory_usage()` returns used and total bytes computed under
+`host_mem_lock`. Used bytes sum the live allocations of the DRAM local
+allocator and every arena (active and draining). Total bytes sum the DRAM
+allocator and only the *active* arenas: a draining arena accepts no new
+allocations, so its free space is not usable headroom and its capacity is
+excluded. A draining arena still holding live bytes therefore pushes used
+above total (ratio > 1), which is intentional -- it keeps the eviction
+watermark tracking real pressure on the active pool instead of being diluted
+by capacity that is being removed.
 
 ## Verification
 

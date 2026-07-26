@@ -719,6 +719,48 @@ def test_remove_device_drains_until_allocations_freed(tmp_path):
     manager.close()
 
 
+def test_draining_arena_capacity_excluded_from_total(tmp_path):
+    # A draining arena's free space is not usable headroom, so its capacity must
+    # drop out of the total the moment it starts draining; its live bytes still
+    # count as used. Otherwise the eviction watermark (used / total) is diluted
+    # by capacity that is going away and eviction never triggers.
+    primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")
+    manager = _pure_devdax_manager(primary)
+
+    error, first = manager.allocate(_layout(4096), count=1)
+    assert error == L1Error.SUCCESS
+
+    extra = _make_mmap_file(tmp_path, size=8192, name="extra.bin")
+    manager.add_device(extra, 8192)
+    error, second = manager.allocate(_layout(4096), count=1)
+    assert error == L1Error.SUCCESS
+
+    # Both arenas active: total counts all capacity.
+    used, total = manager.get_memory_usage()
+    assert (used, total) == (8192, 12288)
+
+    status = manager.remove_device(extra)
+    assert status.state == DevDaxArenaState.DRAINING
+
+    # Draining: the extra arena's 8192 bytes leave the total, but its live 4096
+    # bytes still count as used, so used now exceeds total (ratio > 1) and the
+    # watermark is satisfied.
+    used, total = manager.get_memory_usage()
+    assert (used, total) == (8192, 4096)
+
+    # Once the draining arena is unmapped, both totals reflect the primary only.
+    manager.free(second)
+    del second
+    gc.collect()
+    used, total = manager.get_memory_usage()
+    assert (used, total) == (4096, 4096)
+
+    manager.free(first)
+    del first
+    gc.collect()
+    manager.close()
+
+
 def test_remove_device_defers_unmap_while_external_views_alive(tmp_path):
     primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")
     manager = _pure_devdax_manager(primary)
