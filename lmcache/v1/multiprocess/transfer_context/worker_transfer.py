@@ -551,16 +551,22 @@ class LMCacheDrivenTransferContext(TransferContext):
         event: IPCEvent,
         _blocks_in_chunk: int,
     ) -> MessagingFuture:
-        if self._mq_client is None or self._send_request is None:
+        if (
+            self._mq_client is None
+            or self._send_request is None
+            or self._device is None
+            or self._event_backend is None
+        ):
             raise RuntimeError(
                 "LMCache-driven transfer context is not registered. "
-                "Call register_q() before submit_q_store()."
+                "Call register() before submit_q_store()."
             )
+        event_ipc_handle = self._event_backend.export_event(event, self._device)
         return self._send_request(
             self._mq_client,
             RequestType.STORE_Q,
-            [key, instance_id, block_ids, event.ipc_handle()],
-        ).to_cuda_future()
+            [key, instance_id, block_ids, event_ipc_handle],
+        ).to_device_future(device=self._device)
 
     def submit_retrieve(
         self,

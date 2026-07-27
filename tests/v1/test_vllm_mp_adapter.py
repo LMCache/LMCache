@@ -152,6 +152,7 @@ def fake_adapter(monkeypatch):
     fake_client = MagicMock(name="mq_client")
     monkeypatch.setattr(adapter_mod, "MessageQueueClient", lambda *a, **kw: fake_client)
     monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
+    monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
 
     future = MagicMock(name="future")
     future.result.return_value = None
@@ -644,6 +645,7 @@ def test_register_uses_local_context_when_self_transfer_ctx_nulled(
     fake_client = MagicMock(name="mq_client")
     monkeypatch.setattr(adapter_mod, "MessageQueueClient", lambda *a, **kw: fake_client)
     monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
+    monkeypatch.setattr(adapter_mod, "get_experimental", lambda *a, **kw: set())
     future = MagicMock(name="future")
     future.result.return_value = None
     monkeypatch.setattr(adapter_mod, "send_lmcache_request", lambda *a, **kw: future)
