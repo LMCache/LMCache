@@ -36,6 +36,18 @@ if importlib.util.find_spec("pytest_benchmark") is None:
     def benchmark():
         pytest.skip("pytest-benchmark is not installed")
 
+
+@pytest.fixture(scope="session", autouse=True)
+def disable_usage_tracking():
+    """Keep the test suite from sending usage telemetry to the stats server.
+
+    Tests that exercise the telemetry itself (tests/test_usage_context.py)
+    re-enable it per-test via monkeypatch with an injected transport.
+    """
+    os.environ["LMCACHE_TRACK_USAGE"] = "false"
+    yield
+
+
 # This is to mock the constructor and destructor of
 # MixedMemoryAllocator and PinMemoryAllocator to
 # use pin_memory=True for their constructors and
@@ -179,6 +191,14 @@ class MockSyncGlideClient:
 
     def exists(self, keys: list[bytes]) -> int:
         return sum(1 for k in keys if k in self._store)
+
+    def delete(self, keys: list[bytes]) -> int:
+        removed = 0
+        for k in keys:
+            if k in self._store:
+                del self._store[k]
+                removed += 1
+        return removed
 
     @classmethod
     def reset_store(cls) -> None:

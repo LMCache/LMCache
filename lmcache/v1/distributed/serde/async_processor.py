@@ -16,7 +16,7 @@ import threading
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.serde.base import (
     Deserializer,
     SerdeProcessor,
@@ -85,6 +85,7 @@ class AsyncSerdeProcessor(SerdeProcessor):
         self,
         src_objs: list[MemoryObj],
         dst_objs: list[MemoryObj],
+        keys: list[ObjectKey],
     ) -> SerdeTaskId:
         """Submit a batch serialize task to the thread pool."""
         task_id = self._alloc_task_id()
@@ -99,6 +100,7 @@ class AsyncSerdeProcessor(SerdeProcessor):
             _TaskType.SERIALIZE,
             src_objs,
             dst_objs,
+            keys,
         )
         return task_id
 
@@ -113,6 +115,7 @@ class AsyncSerdeProcessor(SerdeProcessor):
         self,
         src_objs: list[MemoryObj],
         dst_objs: list[MemoryObj],
+        keys: list[ObjectKey],
     ) -> SerdeTaskId:
         """Submit a batch deserialize task to the thread pool."""
         task_id = self._alloc_task_id()
@@ -127,6 +130,7 @@ class AsyncSerdeProcessor(SerdeProcessor):
             _TaskType.DESERIALIZE,
             src_objs,
             dst_objs,
+            keys,
         )
         return task_id
 
@@ -163,6 +167,7 @@ class AsyncSerdeProcessor(SerdeProcessor):
         task_type: _TaskType,
         src_objs: list[MemoryObj],
         dst_objs: list[MemoryObj],
+        keys: list[ObjectKey],
     ) -> None:
         """Execute a serialize/deserialize task in the thread pool.
 
@@ -172,7 +177,7 @@ class AsyncSerdeProcessor(SerdeProcessor):
         success = True
         try:
             if task_type == _TaskType.SERIALIZE:
-                for src, dst in zip(src_objs, dst_objs, strict=True):
+                for src, dst, key in zip(src_objs, dst_objs, keys, strict=True):
                     # ``serialize`` returns the actual number of bytes
                     # written, which may be smaller than the destination
                     # buffer (since the destination is sized from
@@ -186,12 +191,12 @@ class AsyncSerdeProcessor(SerdeProcessor):
                     # serializer that does not honor the ``-> int``
                     # contract (returns ``None``) is skipped rather than
                     # tripping set_used_size's range check.
-                    n = self._serializer.serialize(src, dst)
+                    n = self._serializer.serialize(src, dst, key)
                     if isinstance(n, int) and hasattr(dst, "set_used_size"):
                         dst.set_used_size(n)
             else:
-                for src, dst in zip(src_objs, dst_objs, strict=True):
-                    self._deserializer.deserialize(src, dst)
+                for src, dst, key in zip(src_objs, dst_objs, keys, strict=True):
+                    self._deserializer.deserialize(src, dst, key)
         except Exception:
             logger.exception(
                 "Serde task %d (%s) failed",

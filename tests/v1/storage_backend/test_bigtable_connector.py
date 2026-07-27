@@ -65,8 +65,15 @@ def fake_client_constructor(*args, **kwargs):
 
 mock_data.BigtableDataClientAsync.side_effect = fake_client_constructor
 
+
+class FakeRowMutationEntry:
+    def __init__(self, row_key, mutations):
+        self.row_key = row_key
+        self.mutations = mutations
+
+
 mock_data.ReadRowsQuery = MagicMock()
-mock_data.RowMutationEntry = MagicMock()
+mock_data.RowMutationEntry = FakeRowMutationEntry
 mock_data.row_filters = mock_row_filters
 
 mock_bigtable = MagicMock(data=mock_data, row_filters=mock_row_filters)
@@ -386,7 +393,12 @@ class TestBigtableConnector:
 
     def test_custom_row_key_template(self, async_loop, local_cpu_backend):
         """Verify substituting {model} and {hash} placeholders flexibly."""
-        config = create_test_config({"bigtable_row_key_template": "{model}#{hash}"})
+        config = create_test_config(
+            {
+                "bigtable_row_key_template": "{model}#{hash}",
+                "bigtable_layer_group_size": 0,
+            }
+        )
         metadata = create_test_metadata()
         backend = RemoteBackend(
             config=config,
@@ -444,14 +456,14 @@ class TestBigtableConnector:
         local_cpu_backend.memory_allocator.close()
 
     def test_get_blocking_hit(self, async_loop, local_cpu_backend):
-        config = create_test_config()
+        config = create_test_config(extra_overrides={"bigtable_layer_group_size": 0})
         metadata = create_test_metadata(kv_shape=(1, 2, 16, 8, 128), chunk_size=16)
         local_cpu_backend.metadata = metadata
 
         memory_obj = create_test_memory_obj()
         expected_bytes = bytes(memory_obj.byte_array)
 
-        mock_cell = MagicMock(value=expected_bytes)
+        mock_cell = MagicMock(value=expected_bytes, timestamp_micros=0)
         mock_row = MagicMock()
         mock_row.cells = {"cf": {b"data": [mock_cell]}}
 
@@ -489,7 +501,7 @@ class TestBigtableConnector:
         self, async_loop, local_cpu_backend
     ):
         """Validate chunk size at write time. Skips > 90MB rather than failing."""
-        config = create_test_config()
+        config = create_test_config(extra_overrides={"bigtable_layer_group_size": 0})
         metadata = create_test_metadata()
 
         mock_client_instance = MagicMock()
@@ -590,7 +602,7 @@ class TestBigtableConnector:
 
     def test_batched_get(self, async_loop, local_cpu_backend):
         """Verify batched_get retrieves multiple memory objects cleanly."""
-        config = create_test_config()
+        config = create_test_config(extra_overrides={"bigtable_layer_group_size": 0})
         metadata = create_test_metadata(kv_shape=(1, 2, 16, 8, 128), chunk_size=16)
         local_cpu_backend.metadata = metadata
 
@@ -622,8 +634,8 @@ class TestBigtableConnector:
         row_key1 = connector.schema.get_row_key(key1)
         row_key2 = connector.schema.get_row_key(key2)
 
-        mock_cell1 = MagicMock(value=bytes1)
-        mock_cell2 = MagicMock(value=bytes2)
+        mock_cell1 = MagicMock(value=bytes1, timestamp_micros=0)
+        mock_cell2 = MagicMock(value=bytes2, timestamp_micros=0)
         mock_row1 = MagicMock(row_key=row_key1)
         mock_row2 = MagicMock(row_key=row_key2)
         mock_row1.cells = {"cf": {b"data": [mock_cell1]}}
@@ -643,10 +655,15 @@ class TestBigtableConnector:
         backend.close()
         local_cpu_backend.memory_allocator.close()
 
-    def test_batched_put(self, async_loop, local_cpu_backend):
+    def test_batched_put(self, async_loop, memory_allocator):
         """Verify batched_put packs mutations and sends bulk mutate rows cleanly."""
         config = create_test_config()
-        metadata = create_test_metadata()
+        metadata = create_test_metadata(kv_shape=(4, 2, 256, 8, 128))
+        local_cpu_backend = LocalCPUBackend(
+            LMCacheEngineConfig.from_legacy(chunk_size=256),
+            metadata,
+            memory_allocator=memory_allocator,
+        )
 
         mock_client_instance = MagicMock()
         mock_client_instance.bulk_mutate_rows = AsyncMock()
@@ -663,8 +680,8 @@ class TestBigtableConnector:
 
         key1 = create_test_key(1)
         key2 = create_test_key(2)
-        memory_obj1 = create_test_memory_obj()
-        memory_obj2 = create_test_memory_obj()
+        memory_obj1 = create_test_memory_obj(shape=metadata.get_shapes()[0])
+        memory_obj2 = create_test_memory_obj(shape=metadata.get_shapes()[0])
 
         asyncio.run_coroutine_threadsafe(
             backend.connection.batched_put([key1, key2], [memory_obj1, memory_obj2]),
@@ -979,3 +996,270 @@ class TestBigtableConnector:
         assert loaded_config.read_timeout_sec == 0.2
         assert loaded_config.write_timeout_sec == 0.5
         assert loaded_config.max_retries == 3
+
+    def test_sharded_put_and_get(self, async_loop, memory_allocator):
+        """Verify sharded writes and reads with layer-group sharding."""
+        config = create_test_config(extra_overrides={"bigtable_layer_group_size": 10})
+        metadata = create_test_metadata(kv_shape=(32, 2, 256, 8, 128))
+        local_cpu_backend = LocalCPUBackend(
+            LMCacheEngineConfig.from_legacy(chunk_size=256),
+            metadata,
+            memory_allocator=memory_allocator,
+        )
+
+        connector = BigtableConnector(async_loop, local_cpu_backend, config)
+
+        memory_obj = create_test_memory_obj(shape=metadata.get_shapes()[0])
+        expected_bytes = bytes(memory_obj.byte_array)
+
+        # Mock SetCell constructor to return a mock with populated properties
+        def fake_set_cell(family, qualifier, value, timestamp_micros=None):
+            cell = MagicMock()
+            cell.family = family
+            cell.qualifier = (
+                qualifier.encode("utf-8") if isinstance(qualifier, str) else qualifier
+            )
+            cell.value = value
+            cell.timestamp_micros = (
+                timestamp_micros if timestamp_micros is not None else 0
+            )
+            return cell
+
+        mock_data.SetCell.side_effect = fake_set_cell
+
+        mock_client_instance = MagicMock()
+        mock_data.BigtableDataClientAsync.return_value = mock_client_instance
+
+        mutations_sent = []
+
+        async def fake_mutate_row(row_key, mutations, **kwargs):
+            mutations_sent.extend(mutations)
+            return MagicMock()
+
+        mock_client_instance.mutate_row = AsyncMock(side_effect=fake_mutate_row)
+
+        key = create_test_key(1)
+        try:
+            asyncio.run_coroutine_threadsafe(
+                connector.put(key, memory_obj),
+                async_loop,
+            ).result()
+
+            assert len(mutations_sent) == 4
+            qualifiers = {m.qualifier.decode("utf-8") for m in mutations_sent}
+            assert qualifiers == {
+                "layers_0_9",
+                "layers_10_19",
+                "layers_20_29",
+                "layers_30_31",
+            }
+
+            mock_row = MagicMock()
+            cells_dict = {}
+            for m in mutations_sent:
+                cells_dict[m.qualifier] = [MagicMock(value=m.value, timestamp_micros=0)]
+            mock_row.cells = {"cf": cells_dict}
+            mock_client_instance.read_row = AsyncMock(return_value=mock_row)
+
+            get_res = asyncio.run_coroutine_threadsafe(
+                connector.get(key),
+                async_loop,
+            ).result()
+
+            assert get_res is not None
+            assert bytes(get_res.byte_array) == expected_bytes
+        finally:
+            mock_data.SetCell.side_effect = None
+
+    def test_layerwise_row_keys_do_not_collide(self, async_loop, memory_allocator):
+        """Verify that layerwise keys generate distinct row keys and write correctly."""
+        # First Party
+        from lmcache.utils import LayerCacheEngineKey
+
+        config = create_test_config()
+        metadata = create_test_metadata(kv_shape=(1, 2, 256, 8, 128))
+        local_cpu_backend = LocalCPUBackend(
+            LMCacheEngineConfig.from_defaults(
+                chunk_size=256,
+                use_layerwise=True,
+                remote_storage_plugins=["bigtable"],
+            ),
+            metadata,
+            memory_allocator=memory_allocator,
+        )
+
+        connector = BigtableConnector(async_loop, local_cpu_backend, config)
+
+        key_l0 = LayerCacheEngineKey(
+            model_name="test_model",
+            world_size=1,
+            worker_id=0,
+            chunk_hash=hash(42),
+            dtype=torch.bfloat16,
+            layer_id=0,
+        )
+        key_l1 = LayerCacheEngineKey(
+            model_name="test_model",
+            world_size=1,
+            worker_id=0,
+            chunk_hash=hash(42),
+            dtype=torch.bfloat16,
+            layer_id=1,
+        )
+
+        row_key_l0 = connector.schema.get_row_key(key_l0)
+        row_key_l1 = connector.schema.get_row_key(key_l1)
+
+        assert row_key_l0 != row_key_l1
+        assert row_key_l0.endswith(b"@layer_0")
+        assert row_key_l1.endswith(b"@layer_1")
+
+        row_keys_written = []
+
+        async def fake_mutate_row(row_key, mutations, **kwargs):
+            row_keys_written.append(row_key)
+            return MagicMock()
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.mutate_row = AsyncMock(side_effect=fake_mutate_row)
+        mock_data.BigtableDataClientAsync.return_value = mock_client_instance
+
+        memory_obj_l0 = create_test_memory_obj(shape=metadata.get_shapes()[0])
+        memory_obj_l1 = create_test_memory_obj(shape=metadata.get_shapes()[0])
+
+        asyncio.run_coroutine_threadsafe(
+            connector.put(key_l0, memory_obj_l0),
+            async_loop,
+        ).result()
+        asyncio.run_coroutine_threadsafe(
+            connector.put(key_l1, memory_obj_l1),
+            async_loop,
+        ).result()
+
+        assert len(row_keys_written) == 2
+        assert row_key_l0 in row_keys_written
+        assert row_key_l1 in row_keys_written
+
+    def test_cell_size_validation_skips_large_writes_sharded(
+        self, async_loop, local_cpu_backend
+    ):
+        """Verify sharded writes skip writing if exceeding 240MB."""
+        config = create_test_config()
+        metadata = create_test_metadata()
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.mutate_row = AsyncMock()
+        mock_data.BigtableDataClientAsync.return_value = mock_client_instance
+
+        backend = RemoteBackend(
+            config=config,
+            metadata=metadata,
+            loop=async_loop,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cpu",
+            plugin_name="bigtable",
+        )
+
+        key = create_test_key(1)
+        large_view = bytearray(245 * 1024 * 1024)
+        mock_memory_obj = MagicMock()
+        mock_memory_obj.byte_array = large_view
+
+        connector = (
+            backend.connection._connector
+            if hasattr(backend.connection, "_connector")
+            else backend.connection
+        )
+        asyncio.run_coroutine_threadsafe(
+            connector._put_internal(key, mock_memory_obj),
+            async_loop,
+        ).result()
+
+        mock_client_instance.mutate_row.assert_not_called()
+
+        backend.close()
+        local_cpu_backend.memory_allocator.close()
+
+    def test_dual_mode_write(self, async_loop, memory_allocator):
+        """Verify dual-mode write in bigtable_connector:
+        - payload < 150MB combines mutations in a single mutate_row.
+        - payload >= 150MB sends separate mutate_row calls concurrently.
+        """
+        config = create_test_config(extra_overrides={"bigtable_layer_group_size": 10})
+        metadata = create_test_metadata(kv_shape=(32, 2, 256, 8, 128))
+        local_cpu_backend = LocalCPUBackend(
+            LMCacheEngineConfig.from_legacy(chunk_size=256),
+            metadata,
+            memory_allocator=memory_allocator,
+        )
+
+        connector = BigtableConnector(async_loop, local_cpu_backend, config)
+        mock_client_instance = MagicMock()
+        mock_data.BigtableDataClientAsync.return_value = mock_client_instance
+
+        # 1. Test Small Write (< 150MB)
+        memory_obj_small = create_test_memory_obj(shape=metadata.get_shapes()[0])
+
+        mutate_row_calls = []
+
+        async def fake_mutate_row(row_key, mutations, **kwargs):
+            mutate_row_calls.append((row_key, mutations))
+            return MagicMock()
+
+        mock_client_instance.mutate_row = AsyncMock(side_effect=fake_mutate_row)
+
+        key_small = create_test_key(1)
+        asyncio.run_coroutine_threadsafe(
+            connector.put(key_small, memory_obj_small),
+            async_loop,
+        ).result()
+
+        # Should make 1 call to mutate_row with all 4 mutations
+        assert len(mutate_row_calls) == 1
+        row_key, mutations = mutate_row_calls[0]
+        assert len(mutations) == 4  # 4 shards
+
+        # 2. Test Large Write (>= 150MB)
+        mutate_row_calls.clear()
+        key_large = create_test_key(2)
+
+        memory_obj_large = MagicMock()
+        fake_blob = bytearray(100)
+        memory_obj_large.byte_array = fake_blob
+
+        # Mock the sharder to return fake shards
+        connector.sharder = MagicMock()
+        connector.sharder.shard.return_value = {
+            "layers_0_9": b"fake_data_1",
+            "layers_10_19": b"fake_data_2",
+            "layers_20_29": b"fake_data_3",
+            "layers_30_31": b"fake_data_4",
+        }
+
+        # Patch len in the connector module to simulate 160MB payload
+        # Standard
+        import builtins
+
+        real_len = builtins.len
+
+        def fake_len(obj):
+            if obj is fake_blob:
+                return 160 * 1024 * 1024
+            return real_len(obj)
+
+        with patch(
+            "lmcache.v1.storage_backend.connector.bigtable_connector.len",
+            side_effect=fake_len,
+        ):
+            asyncio.run_coroutine_threadsafe(
+                connector.put(key_large, memory_obj_large),
+                async_loop,
+            ).result()
+
+        # Should make 4 separate calls to mutate_row, each with 1 mutation
+        assert len(mutate_row_calls) == 4
+        for rk, mutations in mutate_row_calls:
+            assert len(mutations) == 1
+
+        asyncio.run_coroutine_threadsafe(connector.close(), async_loop).result()
+        local_cpu_backend.memory_allocator.close()

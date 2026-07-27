@@ -33,6 +33,7 @@ PYBIND11_MODULE(c_ops, m) {
       .value("NB_NL_TWO_NH_BS_HS", EngineKVFormat::NB_NL_TWO_NH_BS_HS)
       .value("TWO_X_NL_X_NB_BS_NH_HS", EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS)
       .value("NL_X_NB_NH_BS_TWO_HS", EngineKVFormat::NL_X_NB_NH_BS_TWO_HS)
+      .value("NL_X_NB_BS_NH_TWO_HS", EngineKVFormat::NL_X_NB_BS_NH_TWO_HS)
       .export_values();
   // Format classification, shared with the device kernels (engine_kv_format.h).
   m.def(
@@ -73,6 +74,7 @@ PYBIND11_MODULE(c_ops, m) {
   m.def("decode_fast_prefsum", &decode_cuda_prefsum);
   m.def("calculate_cdf", &calculate_cdf);
   m.def("rotary_embedding_k_fused", &rotary_embedding_k_fused);
+  m.def("rotary_embedding_k_fused_strided", &rotary_embedding_k_fused_strided);
   m.def("alloc_pinned_ptr", &alloc_pinned_ptr,
         py::call_guard<py::gil_scoped_release>());
   m.def("free_pinned_ptr", &free_pinned_ptr);

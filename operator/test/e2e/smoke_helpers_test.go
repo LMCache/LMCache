@@ -286,6 +286,57 @@ func firstPodForDeployment(ctx context.Context, ns string, dep *appsv1.Deploymen
 	return nil
 }
 
+// podInitContainer returns the named init container of the pod, or nil.
+func podInitContainer(pod *corev1.Pod, name string) *corev1.Container {
+	for i := range pod.Spec.InitContainers {
+		if pod.Spec.InitContainers[i].Name == name {
+			return &pod.Spec.InitContainers[i]
+		}
+	}
+	return nil
+}
+
+// podContainer returns the named (non-init) container of the pod, or nil.
+func podContainer(pod *corev1.Pod, name string) *corev1.Container {
+	for i := range pod.Spec.Containers {
+		if pod.Spec.Containers[i].Name == name {
+			return &pod.Spec.Containers[i]
+		}
+	}
+	return nil
+}
+
+// containerEnvValue returns the value of env var name on the container, or "".
+func containerEnvValue(c *corev1.Container, name string) string {
+	for _, e := range c.Env {
+		if e.Name == name {
+			return e.Value
+		}
+	}
+	return ""
+}
+
+// containerVolumeMount returns the named volume mount on the container, or nil.
+func containerVolumeMount(c *corev1.Container, name string) *corev1.VolumeMount {
+	for i := range c.VolumeMounts {
+		if c.VolumeMounts[i].Name == name {
+			return &c.VolumeMounts[i]
+		}
+	}
+	return nil
+}
+
+// podHasEmptyDirVolume reports whether the pod carries an emptyDir volume of the
+// given name.
+func podHasEmptyDirVolume(pod *corev1.Pod, name string) bool {
+	for i := range pod.Spec.Volumes {
+		if pod.Spec.Volumes[i].Name == name {
+			return pod.Spec.Volumes[i].EmptyDir != nil
+		}
+	}
+	return false
+}
+
 // vllmContainerArgs returns the args of the vLLM container in the pod (the one
 // named "vllm", falling back to the first container). The mutating webhooks
 // append vLLM flags to this container's args.

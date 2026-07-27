@@ -60,19 +60,76 @@ jobs:
               - '.github/scripts/install_vllm_cpu.sh'
               - '.github/scripts/install_lmcache_cpu.sh'
               - '.github/scripts/download_model.sh'
+              - '.github/scripts/download_gh_release_model.sh'
               - '.github/scripts/run-cpu-e2e-validation.sh'
               - '!operator/**'
 
   cpu-device-test:
     needs: changes
     if: needs.changes.outputs.lmcache == 'true'
-    name: CPU device (${{ matrix.os }})
+    name: CPU device (${{ matrix.os }} / ${{ matrix.model.name }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, macos-latest]
+        # Each entry is a self-contained model profile the e2e steps
+        # thread through env vars. Adding a new model = adding a new
+        # entry here. All models share the same downloader
+        # (download_gh_release_model.sh); the per-model fields below
+        # tell it which GitHub Release tarball to pull and how to lay
+        # it out under ~/.cache/huggingface/hub/.
+        model:
+          - name: opt-125m
+            id: facebook/opt-125m
+            tarball_url: https://github.com/LMCache/opt-125m/releases/download/v1.0/opt-125m.tar.gz
+            cache_marker: pytorch_model.bin
+            load_format: ""
+            hf_overrides: ""
+            trust_remote_code: "0"
+            mla_disable: "0"
+          # DeepSeek-V2-Lite-Chat with MLA DISABLED (vLLM CPU backend
+          # currently raises NotImplementedError for MLA on CPU, see
+          # vllm/platforms/cpu.py:get_attn_backend_cls). MLA is a
+          # runtime attention-backend decision inside vLLM, not a HF
+          # config field, so the only way to short-circuit it is the
+          # `VLLM_MLA_DISABLE=1` env var vLLM checks in
+          # `get_attn_backend_cls`. We still exercise the DeepSeek
+          # architecture (MoE + custom modelling code) on the CPU e2e
+          # path; MLA validation is deferred until vLLM CPU supports
+          # it. Weights are random (`--load-format dummy`) and served
+          # from a weight-less GitHub mirror (opendataio/deepseek_v2_lite
+          # tag `v1.0`, GitHub auto-generates the tar.gz).
+          # `hf_overrides` shrinks the model to 2 layers / 4 routed
+          # experts so CPU runners can host it.
+          - name: deepseek-v2-lite
+            id: deepseek-ai/DeepSeek-V2-Lite-Chat
+            tarball_url: https://github.com/opendataio/deepseek_v2_lite/archive/refs/tags/v1.0.tar.gz
+            cache_marker: config.json
+            load_format: dummy
+            hf_overrides: >-
+              {"num_hidden_layers": 2, "n_routed_experts": 4,
+               "first_k_dense_replace": 0, "num_experts_per_tok": 2}
+            trust_remote_code: "1"
+            mla_disable: "1"
+
+    env:
+      # Threaded to run-cpu-e2e-validation.sh; server_bench ignores them.
+      VLLM_MODEL_ID: ${{ matrix.model.id }}
+      VLLM_LOAD_FORMAT: ${{ matrix.model.load_format }}
+      VLLM_HF_OVERRIDES: ${{ matrix.model.hf_overrides }}
+      VLLM_TRUST_REMOTE_CODE: ${{ matrix.model.trust_remote_code }}
+      # Downloader args, consumed by run-cpu-e2e-validation.sh's
+      # Phase 2 / Step 2 (which re-invokes download_gh_release_model.sh
+      # to be idempotent — the Prepare model step above may have
+      # already populated the cache, in which case this is a no-op).
+      VLLM_TARBALL_URL: ${{ matrix.model.tarball_url }}
+      VLLM_TARBALL_CACHE_MARKER: ${{ matrix.model.cache_marker }}
+      # vLLM's own env: 1 -> force non-MLA attention backend even for
+      # models that would normally route through MLA. Required on CPU
+      # today because vLLM's CPU backend raises for MLA.
+      VLLM_MLA_DISABLE: ${{ matrix.model.mla_disable }}
 
     steps:
       - name: Harden Runner
@@ -94,6 +151,11 @@ jobs:
             pyproject.toml
             requirements/*.txt
 
+      - name: Install FFmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y ffmpeg
+
       - name: Install FFmpeg (macOS)
         if: runner.os == 'macOS'
         run: |
@@ -103,22 +165,45 @@ jobs:
             echo "ffmpeg already installed: $(ffmpeg -version | head -n1)"
           fi
 
-      - name: Cache opt-125m model (GitHub release)
+      # Cache key varies per model so the two matrix legs don't
+      # thrash each other's HF hub directory.
+      - name: Cache HuggingFace hub (${{ matrix.model.name }})
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: opt-125m-gh-v2
+          key: hf-hub-${{ matrix.model.name }}-v2
 
       - name: Install vLLM CPU (prebuilt nightly from PyPI)
+        env:
+          # Pin the vllm-cpu-nightly wheel on macOS to a build that is
+          # ABI-compatible with the torch it pulls in. The nightly
+          # uploaded on 2026-07-24 08:34 UTC (dev202607240834) declares
+          # `torch==2.13.0` in its metadata but the shipped
+          # `vllm/_C.abi3.so` was compiled against an older libtorch —
+          # loading it on macOS fails with
+          # `Symbol not found: __ZN3c104impl3cow23materialize_cow_storage...`
+          # which then blows up cpu_worker.py at
+          # `torch.ops._C.init_cpu_memory_env(...)`.
+          # Linux dodges this because the pytorch-cpu extra index still
+          # serves `torch-2.11.0+cpu`, matching the wheel's ABI.
+          # Revert this pin once upstream ships a macOS-clean nightly.
+          VLLM_CPU_NIGHTLY_SPEC: >-
+            ${{ runner.os == 'macOS'
+                && 'vllm-cpu-nightly==0.25.2.dev202607230832'
+                || 'vllm-cpu-nightly' }}
         run: bash .github/scripts/install_vllm_cpu.sh
 
       - name: Install lmcache (CPU-only, no vLLM)
         run: bash .github/scripts/install_lmcache_cpu.sh
 
-      - name: Download facebook/opt-125m (GitHub release)
-        run: bash .github/scripts/download_opt125m_github.sh
-
+      # server_bench is model-agnostic (cpu_server_bench_test.sh never
+      # touches any model — it only exercises the lmcache server's KV
+      # transfer path via `lmcache bench server`). Gate it on the
+      # opt-125m leg so we run it exactly once per OS instead of once
+      # per (os, model) combo — running it on every leg would just
+      # burn CI minutes on identical work.
       - name: Server bench — LMCache-driven
+        if: matrix.model.name == 'opt-125m'
         run: |
           LMCACHE_BENCH_TRANSFER_MODE=lmcache_driven \
           LMCACHE_HTTP_PORT_BENCH=18080 \
@@ -126,11 +211,19 @@ jobs:
             bash .github/scripts/cpu_device_test.sh server_bench
 
       - name: Server bench — Engine-driven
+        if: matrix.model.name == 'opt-125m'
         run: |
           LMCACHE_BENCH_TRANSFER_MODE=engine_driven \
           LMCACHE_HTTP_PORT_BENCH=18081 \
           LMCACHE_ZMQ_PORT_BENCH=15556 \
             bash .github/scripts/cpu_device_test.sh server_bench
+
+      - name: Prepare model — ${{ matrix.model.name }}
+        env:
+          MODEL_ID: ${{ matrix.model.id }}
+          TARBALL_URL: ${{ matrix.model.tarball_url }}
+          CACHE_MARKER: ${{ matrix.model.cache_marker }}
+        run: bash .github/scripts/download_gh_release_model.sh
 
       - name: vLLM e2e — Engine-driven (pickle)
         env:
@@ -168,7 +261,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: cpu-device-logs-${{ matrix.os }}
+          name: cpu-device-logs-${{ matrix.os }}-${{ matrix.model.name }}
           path: |
             /tmp/cpu_device_*.log
           if-no-files-found: ignore

@@ -300,20 +300,13 @@ class GdsBackend(AllocatorBackendInterface):
             assert self.use_gds
             self.data_suffix = _WEKA_DATA_FILE_SUFFIX
 
-        # Always enable the thread pool for parallel I/O
-        self.use_thread_pool = self.use_gds
-
+        # Always enable the thread pool for parallel I/O.
+        # Set disk_io_threads=0 in extra_config to disable.
+        thread_count = int(
+            config.get_extra_config_value("disk_io_threads", _DEFAULT_THREAD_COUNT)
+        )
+        self.use_thread_pool = thread_count > 0
         if self.use_thread_pool:
-            thread_count = _DEFAULT_THREAD_COUNT
-            if config.extra_config is not None:
-                if "disk_io_threads" in config.extra_config:
-                    thread_count = config.extra_config["disk_io_threads"]
-                elif "gds_io_threads" in config.extra_config:
-                    logger.warning(
-                        "extra_config.gds_io_threads is deprecated; "
-                        "use disk_io_threads instead."
-                    )
-                    thread_count = config.extra_config["gds_io_threads"]
             self._thread_pool = ThreadPoolExecutor(
                 max_workers=thread_count, thread_name_prefix="gds-io"
             )

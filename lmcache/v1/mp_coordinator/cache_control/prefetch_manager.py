@@ -14,14 +14,17 @@ submit and status calls are quick and the client drives completion on demand.
 from __future__ import annotations
 
 # Standard
-from typing import Any
-
-# Third Party
-import httpx
+from typing import TYPE_CHECKING, Any
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.mp_coordinator.registry import MPInstance
+
+if TYPE_CHECKING:
+    # Third Party
+    import httpx
+
+    # First Party
+    from lmcache.v1.mp_coordinator.registry import MPInstance
 
 logger = init_logger(__name__)
 
