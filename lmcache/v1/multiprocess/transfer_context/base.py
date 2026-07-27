@@ -110,14 +110,18 @@ class EngineDrivenContextMetadata:
     """Non-GPU context layout metadata for non-CUDA workers.
 
     Attributes:
-        layout_desc: Memory layout descriptor used to interpret chunk payloads.
+        layout_desc: Memory layout descriptor used to interpret chunk payloads
+            (group 0's layout for multi-group workers).
         block_size: Number of tokens per paged block.
         use_mla: Whether the worker KV format is MLA.
+        group_layouts: Per-LMCache-group layouts for multi-group (hybrid-KV)
+            workers, in protocol group order. ``None`` means single-group.
     """
 
     layout_desc: MemoryLayoutDesc
     block_size: int
     use_mla: bool
+    group_layouts: "list[MemoryLayoutDesc] | None" = None
 
 
 class EngineDrivenContext(ABC):
@@ -188,6 +192,33 @@ class EngineDrivenContext(ABC):
     def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
         """Commit retrieve. Pickle: no-op. Shm: release read locks."""
         ...
+
+    def prepare_store_grouped(
+        self, key: IPCCacheServerKey, instance_id: int
+    ) -> tuple[list[torch.Tensor], list[int], list[int]] | None:
+        """Multi-group store prepare (SHM transport only).
+
+        Returns:
+            Parallel per-slot ``(tensors, chunk_indices, group_ids)`` lists,
+            ``([], [], [])`` when fully cached, or ``None`` on a malformed
+            response.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support multi-group transfers"
+        )
+
+    def prepare_retrieve_grouped(
+        self, key: IPCCacheServerKey, instance_id: int
+    ) -> tuple[list[torch.Tensor], list[int]] | None:
+        """Multi-group retrieve prepare (SHM transport only).
+
+        Returns:
+            Parallel per-slot ``(tensors, group_ids)`` lists, or ``None`` on
+            a miss.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support multi-group transfers"
+        )
 
     @abstractmethod
     def close(self) -> None:

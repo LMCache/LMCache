@@ -184,6 +184,65 @@ class EngineDrivenContextShm(EngineDrivenContext):
         chunk_indices: list[int] = context["chunk_indices"]
         return self._build_slot_tensors(slots), chunk_indices
 
+    def prepare_store_grouped(
+        self, key: IPCCacheServerKey, instance_id: int
+    ) -> tuple[list[torch.Tensor], list[int], list[int]] | None:
+        """Multi-group prepare: per-slot tensors, chunk indices, group ids.
+
+        Returns:
+            ``None`` on a malformed response; ``([], [], [])`` when every
+            chunk is already cached in every group; otherwise three parallel
+            per-slot lists ``(tensors, chunk_indices, group_ids)``.
+        """
+        future = self.mq_client.submit_request(
+            RequestType.PREPARE_STORE,
+            [key, instance_id],
+            get_response_class(RequestType.PREPARE_STORE),
+        )
+        if not future.wait(timeout=self.mq_timeout):
+            raise LMCacheTimeoutError(
+                f"PREPARE_STORE timed out for instance_id={instance_id} "
+                f"after {self.mq_timeout}s",
+                session_id=key.request_id,
+            )
+        response = future.result()
+        context = response.context if isinstance(response.context, dict) else {}
+        slots = context.get("slots")
+        group_ids = context.get("group_ids")
+        if not isinstance(slots, list) or not isinstance(group_ids, list):
+            return None
+        if not slots:
+            return [], [], []
+        chunk_indices: list[int] = context["chunk_indices"]
+        return self._build_slot_tensors(slots), chunk_indices, group_ids
+
+    def prepare_retrieve_grouped(
+        self, key: IPCCacheServerKey, instance_id: int
+    ) -> tuple[list[torch.Tensor], list[int]] | None:
+        """Multi-group retrieve prepare: per-slot tensors + group ids.
+
+        Returns:
+            ``None`` on a miss; otherwise parallel per-slot
+            ``(tensors, group_ids)`` covering every chunk of every group.
+        """
+        future = self.mq_client.submit_request(
+            RequestType.PREPARE_RETRIEVE,
+            [key, instance_id],
+            get_response_class(RequestType.PREPARE_RETRIEVE),
+        )
+        try:
+            response = future.result(timeout=self.mq_timeout)
+        except TimeoutError:
+            return None
+        if not response.success:
+            return None
+        context = response.context if isinstance(response.context, dict) else {}
+        slots = context.get("slots", [])
+        group_ids = context.get("group_ids")
+        if not slots or not isinstance(group_ids, list):
+            return None
+        return self._build_slot_tensors(slots), group_ids
+
     def commit_store(
         self, key: IPCCacheServerKey, instance_id: int, _chunks: list[torch.Tensor]
     ) -> bool:

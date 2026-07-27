@@ -190,6 +190,12 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                 "Engine-driven transfer context is not registered. "
                 "Call register() before submit_store()."
             )
+        if self._group_states:
+            # Multi-group stores take the synchronous per-group path for now;
+            # the wait-for-forward-event + copy-stream pipelining below is
+            # single-group. TODO: pipeline the grouped gather as well.
+            _event.wait()
+            return self._submit_store_multigroup(key, instance_id, kv_caches, block_ids)
         completion: MessagingFuture[bool] = MessagingFuture()
         engine_driven_context = self._engine_driven_context
         commit_executor = self._commit_executor

@@ -92,6 +92,7 @@ class TransferStrategy(abc.ABC):
         instance_id: int,
         context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
+        group_keys: "list[list[ObjectKey]] | None" = None,
     ) -> PrepareStoreResponse:
         """Prepare destination resources for a store request.
 
@@ -100,6 +101,8 @@ class TransferStrategy(abc.ABC):
             instance_id: Worker instance identifier.
             context: Non-GPU transfer metadata for the instance.
             resolve_obj_keys: Callable that resolves object keys from ``key``.
+            group_keys: Group-major object keys for multi-group workers;
+                ``None`` for single-group.
 
         Returns:
             Transport-specific store preparation response.
@@ -133,6 +136,7 @@ class TransferStrategy(abc.ABC):
         key: IPCCacheServerKey,
         instance_id: int,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
+        group_keys: "list[list[ObjectKey]] | None" = None,
     ) -> PrepareRetrieveResponse:
         """Prepare source resources for a retrieve request.
 
@@ -140,6 +144,8 @@ class TransferStrategy(abc.ABC):
             key: Cache key identifying the requested token range.
             instance_id: Worker instance identifier.
             resolve_obj_keys: Callable that resolves object keys from ``key``.
+            group_keys: Group-major object keys for multi-group workers;
+                ``None`` for single-group.
 
         Returns:
             Transport-specific retrieve preparation response.
@@ -188,11 +194,16 @@ class PickleTransferStrategy(TransferStrategy):
         instance_id: int,
         context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
+        group_keys: "list[list[ObjectKey]] | None" = None,
     ) -> PrepareStoreResponse:
         """Return empty store context for pickle mode.
 
         Pickle transport does not pre-allocate SHM slots during prepare.
         """
+        if group_keys is not None and len(group_keys) > 1:
+            raise RuntimeError(
+                "pickle transport does not support multi-group transfers"
+            )
         return PrepareStoreResponse(context={})
 
     def commit_store(
@@ -239,8 +250,13 @@ class PickleTransferStrategy(TransferStrategy):
         key: IPCCacheServerKey,
         instance_id: int,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
+        group_keys: "list[list[ObjectKey]] | None" = None,
     ) -> PrepareRetrieveResponse:
         """Read prefetched objects and return serialized pickle payload."""
+        if group_keys is not None and len(group_keys) > 1:
+            raise RuntimeError(
+                "pickle transport does not support multi-group transfers"
+            )
         obj_keys = resolve_obj_keys(key)
         prefetched_keys: list[ObjectKey] = []
         try:
@@ -315,49 +331,73 @@ class ShmTransferStrategy(TransferStrategy):
         instance_id: int,
         context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
+        group_keys: "list[list[ObjectKey]] | None" = None,
     ) -> PrepareStoreResponse:
         """Reserve SHM-backed objects and return slot descriptors.
 
+        Args:
+            group_keys: Group-major object keys for multi-group workers
+                (``group_keys[g][c]`` is chunk ``c``'s key in group ``g``).
+                ``None`` means single-group via ``resolve_obj_keys``.
+
         Returns:
-            Context with ``slots`` and ``chunk_indices``.
+            Context with ``slots`` and ``chunk_indices``. Multi-group
+            responses additionally carry ``group_ids`` parallel to ``slots``.
         """
-        obj_keys = resolve_obj_keys(key)
-        reserved = self._storage_manager.reserve_write(
-            obj_keys, context.layout_desc, "new"
-        )
+        if group_keys is None:
+            group_layouts = [context.layout_desc]
+            group_keys = [resolve_obj_keys(key)]
+        else:
+            assert context.group_layouts is not None
+            group_layouts = context.group_layouts
+        multi_group = len(group_keys) > 1
+
         slots: list[dict[str, Any]] = []
         chunk_indices: list[int] = []
+        group_ids: list[int] = []
         reserved_keys: list[ObjectKey] = []
-        try:
-            for idx, obj_key in enumerate(obj_keys):
-                memory_obj = reserved.get(obj_key)
-                if memory_obj is None or memory_obj.tensor is None:
-                    continue
-                slots.append(
-                    ShmSlotDescriptor(
-                        offset=memory_obj.shm_offset,
-                        length=memory_obj.shm_byte_length,
-                        shape=list(memory_obj.tensor.shape),
-                        dtype=_dtype_to_name(memory_obj.tensor.dtype),
-                    ).to_dict()
-                )
-                chunk_indices.append(idx)
-                reserved_keys.append(obj_key)
-        finally:
-            reserved_keys_set = set(reserved_keys)
-            unused_keys = [
-                obj_key for obj_key in reserved if obj_key not in reserved_keys_set
-            ]
-            if unused_keys:
-                self._storage_manager.finish_write(unused_keys)
+        for gid, (g_keys, g_layout) in enumerate(
+            zip(group_keys, group_layouts, strict=True)
+        ):
+            reserved = self._storage_manager.reserve_write(g_keys, g_layout, "new")
+            g_reserved: list[ObjectKey] = []
+            try:
+                for idx, obj_key in enumerate(g_keys):
+                    memory_obj = reserved.get(obj_key)
+                    if memory_obj is None or memory_obj.tensor is None:
+                        continue
+                    slots.append(
+                        ShmSlotDescriptor(
+                            offset=memory_obj.shm_offset,
+                            length=memory_obj.shm_byte_length,
+                            shape=list(memory_obj.tensor.shape),
+                            dtype=_dtype_to_name(memory_obj.tensor.dtype),
+                        ).to_dict()
+                    )
+                    chunk_indices.append(idx)
+                    group_ids.append(gid)
+                    g_reserved.append(obj_key)
+            finally:
+                g_reserved_set = set(g_reserved)
+                unused_keys = [
+                    obj_key for obj_key in reserved if obj_key not in g_reserved_set
+                ]
+                if unused_keys:
+                    self._storage_manager.finish_write(unused_keys)
+            reserved_keys.extend(g_reserved)
+
         if not reserved_keys:
-            return PrepareStoreResponse(context={"slots": [], "chunk_indices": []})
+            empty: dict[str, Any] = {"slots": [], "chunk_indices": []}
+            if multi_group:
+                empty["group_ids"] = []
+            return PrepareStoreResponse(context=empty)
         transfer_key = self._transfer_key_factory(key, instance_id)
         with self._pending_lock:
             self._pending_writes[transfer_key] = reserved_keys
-        return PrepareStoreResponse(
-            context={"slots": slots, "chunk_indices": chunk_indices}
-        )
+        ctx: dict[str, Any] = {"slots": slots, "chunk_indices": chunk_indices}
+        if multi_group:
+            ctx["group_ids"] = group_ids
+        return PrepareStoreResponse(context=ctx)
 
     def commit_store(
         self,
@@ -394,37 +434,57 @@ class ShmTransferStrategy(TransferStrategy):
         key: IPCCacheServerKey,
         instance_id: int,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
+        group_keys: "list[list[ObjectKey]] | None" = None,
     ) -> PrepareRetrieveResponse:
-        """Read SHM objects and return slot descriptors for worker access."""
-        obj_keys = resolve_obj_keys(key)
-        shm_prefetched_keys, shm_memory_objs = self._storage_manager.unsafe_read(
-            obj_keys
-        )
-        if (
-            not shm_memory_objs
-            or len(shm_prefetched_keys) != len(obj_keys)
-            or len(shm_memory_objs) != len(obj_keys)
-        ):
-            if shm_prefetched_keys:
-                self._storage_manager.finish_read_prefetched(shm_prefetched_keys)
-            return PrepareRetrieveResponse(success=False, data=b"", context={})
+        """Read SHM objects and return slot descriptors for worker access.
+
+        Args:
+            group_keys: Group-major object keys for multi-group workers.
+                A retrieve is a miss unless EVERY group has every chunk
+                (uniform coverage). ``None`` means single-group.
+        """
+        if group_keys is None:
+            group_keys = [resolve_obj_keys(key)]
+        multi_group = len(group_keys) > 1
+
+        all_prefetched: list[ObjectKey] = []
         slots: list[dict[str, Any]] = []
-        for memory_obj in shm_memory_objs:
-            if memory_obj.tensor is None:
-                self._storage_manager.finish_read_prefetched(shm_prefetched_keys)
-                return PrepareRetrieveResponse(success=False, data=b"", context={})
-            slots.append(
-                ShmSlotDescriptor(
-                    offset=memory_obj.shm_offset,
-                    length=memory_obj.shm_byte_length,
-                    shape=list(memory_obj.tensor.shape),
-                    dtype=_dtype_to_name(memory_obj.tensor.dtype),
-                ).to_dict()
-            )
+        group_ids: list[int] = []
+
+        def _miss() -> PrepareRetrieveResponse:
+            if all_prefetched:
+                self._storage_manager.finish_read_prefetched(all_prefetched)
+            return PrepareRetrieveResponse(success=False, data=b"", context={})
+
+        for gid, g_keys in enumerate(group_keys):
+            prefetched, memory_objs = self._storage_manager.unsafe_read(g_keys)
+            all_prefetched.extend(prefetched)
+            if (
+                not memory_objs
+                or len(prefetched) != len(g_keys)
+                or len(memory_objs) != len(g_keys)
+            ):
+                return _miss()
+            for memory_obj in memory_objs:
+                if memory_obj.tensor is None:
+                    return _miss()
+                slots.append(
+                    ShmSlotDescriptor(
+                        offset=memory_obj.shm_offset,
+                        length=memory_obj.shm_byte_length,
+                        shape=list(memory_obj.tensor.shape),
+                        dtype=_dtype_to_name(memory_obj.tensor.dtype),
+                    ).to_dict()
+                )
+                group_ids.append(gid)
+
         transfer_key = self._transfer_key_factory(key, instance_id)
         with self._pending_lock:
-            self._pending_reads[transfer_key] = shm_prefetched_keys
-        return PrepareRetrieveResponse(success=True, data=b"", context={"slots": slots})
+            self._pending_reads[transfer_key] = all_prefetched
+        ctx: dict[str, Any] = {"slots": slots}
+        if multi_group:
+            ctx["group_ids"] = group_ids
+        return PrepareRetrieveResponse(success=True, data=b"", context=ctx)
 
     def commit_retrieve(
         self,
