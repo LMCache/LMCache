@@ -1490,6 +1490,8 @@ class BlendV3Module(InstanceLivenessTarget):
             fused_packed = _ekf is not None and int(_ekf) in (
                 int(lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
                 int(lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS),
+                int(lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_CS),
+                int(lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_CS),
             )
             if kv_size not in (1, 2):
                 raise RuntimeError(
