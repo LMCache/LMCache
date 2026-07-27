@@ -18,15 +18,20 @@ from lmcache.storage_backend.serde.cachegen_encoder import CacheGenSerializer
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.metadata import LMCacheMetadata
 
-# CacheGen has hand-written CUDA and SYCL kernels only; gate the test on
-# those backends explicitly (whitelist), so HPU / CPU-only CI / future
-# backends without a CacheGen kernel are skipped automatically.
-# torch_device_type is set to "cuda"/"xpu" only after is_available() passes
-# in lmcache.__init__, so no extra availability check is needed here.
-pytestmark = pytest.mark.skipif(
-    torch_device_type not in ("cuda", "xpu"),
-    reason="CacheGen kernels only exist for CUDA and XPU",
+# CacheGen has hand-written accelerator kernels and requires the selected
+# torch runtime to be available.
+TORCH_DEVICE_AVAILABLE = (
+    hasattr(torch, torch_device_type)
+    and getattr(torch, torch_device_type).is_available()
 )
+
+if not TORCH_DEVICE_AVAILABLE:
+    pytest.skip(
+        f"Requires available {torch_device_type} runtime",
+        allow_module_level=True,
+    )
+
+pytestmark = [pytest.mark.gpu, pytest.mark.xpu]
 
 
 def _generate_kv(num_tokens, device):

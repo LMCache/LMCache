@@ -22,12 +22,20 @@ from tests.v1.utils import (
     generate_tokens,
 )
 
+TORCH_DEVICE_AVAILABLE = (
+    hasattr(torch, torch_device_type)
+    and getattr(torch, torch_device_type).is_available()
+)
+
+if not TORCH_DEVICE_AVAILABLE:
+    pytest.skip(
+        f"Requires available {torch_device_type} runtime",
+        allow_module_level=True,
+    )
+
 BACKENDS = ["cpu", "disk"]
 
-pytestmark = pytest.mark.skipif(
-    torch_device_type != "xpu",
-    reason="XPU-only tests",
-)
+pytestmark = pytest.mark.xpu
 
 # Optional override for tempfile root; see tests/v1/test_cache_engine.py
 # for rationale.
