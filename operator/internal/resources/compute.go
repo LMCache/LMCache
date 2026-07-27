@@ -197,7 +197,7 @@ func buildEncryptionSerdeConfig(enc *lmcachev1alpha1.L2EncryptionSpec) map[strin
 	return map[string]any{
 		"type":            "aesgcm",
 		"key_provider":    derefString(enc.KeyProvider, "hkdf"),
-		"master_key_path": L2EncryptionKeyPath,
+		"master_key_path": l2EncryptionKeyPath,
 		"aes_bits":        derefInt32(enc.AESBits, 128),
 	}
 }

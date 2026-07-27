@@ -468,8 +468,8 @@ func TestBuildContainerArgs_L2EncryptionRESP(t *testing.T) {
 	if serde["key_provider"] != "hkdf" {
 		t.Fatalf("expected key_provider=hkdf, got %v", serde["key_provider"])
 	}
-	if serde["master_key_path"] != L2EncryptionKeyPath {
-		t.Fatalf("expected master_key_path=%s, got %v", L2EncryptionKeyPath, serde["master_key_path"])
+	if serde["master_key_path"] != l2EncryptionKeyPath {
+		t.Fatalf("expected master_key_path=%s, got %v", l2EncryptionKeyPath, serde["master_key_path"])
 	}
 	if serde["aes_bits"] != float64(128) {
 		t.Fatalf("expected aes_bits=128, got %v", serde["aes_bits"])

@@ -55,9 +55,9 @@ const (
 	l2EncryptionKeyVolumeName = "l2-master-key"
 )
 
-// L2EncryptionKeyPath is the in-container path of the mounted L2 encryption
+// l2EncryptionKeyPath is the in-container path of the mounted L2 encryption
 // master key, referenced as master_key_path in the serde config.
-const L2EncryptionKeyPath = l2EncryptionKeyMountDir + "/" + l2EncryptionKeyFileName
+const l2EncryptionKeyPath = l2EncryptionKeyMountDir + "/" + l2EncryptionKeyFileName
 
 // L2EncryptionKeyDataKey is the required data key in the user-provided
 // master-key Secret (and the managed copy).
