@@ -441,13 +441,15 @@ func TestBuildContainerArgs_L2Raw(t *testing.T) {
 	}
 }
 
-func TestBuildContainerArgs_L2EncryptionRESP(t *testing.T) {
+func TestBuildContainerArgs_L2SerdeAESGCMRESP(t *testing.T) {
 	spec := &lmcachev1alpha1.LMCacheEngineSpec{
 		L1: lmcachev1alpha1.L1BackendSpec{SizeGB: 10},
 		L2Backend: &lmcachev1alpha1.L2BackendSpec{
 			RESP: &lmcachev1alpha1.RESPL2AdapterSpec{Host: "redis", Port: 6379},
-			Encryption: &lmcachev1alpha1.L2EncryptionSpec{
-				MasterKeySecretRef: lmcachev1alpha1.SecretReference{Name: "l2-master-key"},
+			Serde: &lmcachev1alpha1.L2SerdeSpec{
+				AESGCM: &lmcachev1alpha1.AESGCMSerdeSpec{
+					MasterKeySecretRef: lmcachev1alpha1.SecretReference{Name: "l2-master-key"},
+				},
 			},
 		},
 	}
@@ -476,7 +478,7 @@ func TestBuildContainerArgs_L2EncryptionRESP(t *testing.T) {
 	}
 }
 
-func TestBuildContainerArgs_L2EncryptionRawWithOverrides(t *testing.T) {
+func TestBuildContainerArgs_L2SerdeAESGCMRawWithOverrides(t *testing.T) {
 	spec := &lmcachev1alpha1.LMCacheEngineSpec{
 		L1: lmcachev1alpha1.L1BackendSpec{SizeGB: 10},
 		L2Backend: &lmcachev1alpha1.L2BackendSpec{
@@ -486,9 +488,11 @@ func TestBuildContainerArgs_L2EncryptionRawWithOverrides(t *testing.T) {
 					"base_path": {Raw: []byte(`"/data/l2"`)},
 				},
 			},
-			Encryption: &lmcachev1alpha1.L2EncryptionSpec{
-				MasterKeySecretRef: lmcachev1alpha1.SecretReference{Name: "l2-master-key"},
-				AESBits:            ptr(int32(256)),
+			Serde: &lmcachev1alpha1.L2SerdeSpec{
+				AESGCM: &lmcachev1alpha1.AESGCMSerdeSpec{
+					MasterKeySecretRef: lmcachev1alpha1.SecretReference{Name: "l2-master-key"},
+					AESBits:            ptr(int32(256)),
+				},
 			},
 		},
 	}
@@ -511,7 +515,7 @@ func TestBuildContainerArgs_L2EncryptionRawWithOverrides(t *testing.T) {
 	}
 }
 
-func TestBuildContainerArgs_L2NoEncryptionNoSerde(t *testing.T) {
+func TestBuildContainerArgs_L2NoSerdeConfigured(t *testing.T) {
 	spec := &lmcachev1alpha1.LMCacheEngineSpec{
 		L1: lmcachev1alpha1.L1BackendSpec{SizeGB: 10},
 		L2Backend: &lmcachev1alpha1.L2BackendSpec{
@@ -526,7 +530,7 @@ func TestBuildContainerArgs_L2NoEncryptionNoSerde(t *testing.T) {
 		t.Fatalf("failed to parse L2 JSON: %v", err)
 	}
 	if _, ok := parsed["serde"]; ok {
-		t.Fatal("expected no serde sub-dict without encryption")
+		t.Fatal("expected no serde sub-dict when none is configured")
 	}
 }
 
@@ -884,12 +888,14 @@ func TestBuildDaemonSet_RESPWithAuth(t *testing.T) {
 	}
 }
 
-func TestBuildDaemonSet_L2EncryptionMountsMasterKey(t *testing.T) {
+func TestBuildDaemonSet_L2AESGCMSerdeMountsMasterKey(t *testing.T) {
 	engine := minimalEngine()
 	engine.Spec.L2Backend = &lmcachev1alpha1.L2BackendSpec{
 		RESP: &lmcachev1alpha1.RESPL2AdapterSpec{Host: "redis", Port: 6379},
-		Encryption: &lmcachev1alpha1.L2EncryptionSpec{
-			MasterKeySecretRef: lmcachev1alpha1.SecretReference{Name: "l2-master-key"},
+		Serde: &lmcachev1alpha1.L2SerdeSpec{
+			AESGCM: &lmcachev1alpha1.AESGCMSerdeSpec{
+				MasterKeySecretRef: lmcachev1alpha1.SecretReference{Name: "l2-master-key"},
+			},
 		},
 	}
 
@@ -927,7 +933,7 @@ func TestBuildDaemonSet_L2EncryptionMountsMasterKey(t *testing.T) {
 	}
 }
 
-func TestBuildDaemonSet_NoEncryptionNoMasterKeyMount(t *testing.T) {
+func TestBuildDaemonSet_NoSerdeNoMasterKeyMount(t *testing.T) {
 	engine := minimalEngine()
 	engine.Spec.L2Backend = &lmcachev1alpha1.L2BackendSpec{
 		RESP: &lmcachev1alpha1.RESPL2AdapterSpec{Host: "redis", Port: 6379},
@@ -936,7 +942,7 @@ func TestBuildDaemonSet_NoEncryptionNoMasterKeyMount(t *testing.T) {
 	ds := BuildDaemonSet(engine)
 	for _, v := range ds.Spec.Template.Spec.Volumes {
 		if v.Name == l2EncryptionKeyVolumeName {
-			t.Fatal("unexpected l2-master-key volume without encryption")
+			t.Fatal("unexpected l2-master-key volume without an aesgcm serde")
 		}
 	}
 }

@@ -344,17 +344,19 @@ var _ = Describe("reconcileL2EncryptionSecret", func() {
 		engineName = "test-engine"
 	})
 
-	// withEncryption points the engine at a master-key Secret ref.
-	withEncryption := func(engine *lmcachev1alpha1.LMCacheEngine, name, namespace string) {
+	// withAESGCMSerde points the engine at a master-key Secret ref.
+	withAESGCMSerde := func(engine *lmcachev1alpha1.LMCacheEngine, name, namespace string) {
 		engine.Spec.L2Backend = &lmcachev1alpha1.L2BackendSpec{
 			RESP: &lmcachev1alpha1.RESPL2AdapterSpec{Host: "redis", Port: 6379},
-			Encryption: &lmcachev1alpha1.L2EncryptionSpec{
-				MasterKeySecretRef: lmcachev1alpha1.SecretReference{Name: name, Namespace: namespace},
+			Serde: &lmcachev1alpha1.L2SerdeSpec{
+				AESGCM: &lmcachev1alpha1.AESGCMSerdeSpec{
+					MasterKeySecretRef: lmcachev1alpha1.SecretReference{Name: name, Namespace: namespace},
+				},
 			},
 		}
 	}
 
-	It("no-ops when encryption is nil and cleans up a stale managed secret", func() {
+	It("no-ops when no aesgcm serde is set and cleans up a stale managed secret", func() {
 		engine := newEngine(nsName, engineName)
 		stale := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
@@ -385,7 +387,7 @@ var _ = Describe("reconcileL2EncryptionSecret", func() {
 		Expect(k8sClient.Create(ctx, source)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, source) })
 
-		withEncryption(engine, "l2-master-key", sourceNS)
+		withAESGCMSerde(engine, "l2-master-key", sourceNS)
 		Expect(r.reconcileL2EncryptionSecret(ctx, engine)).To(Succeed())
 
 		got := &corev1.Secret{}
@@ -407,7 +409,7 @@ var _ = Describe("reconcileL2EncryptionSecret", func() {
 		Expect(k8sClient.Create(ctx, source)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, source) })
 
-		withEncryption(engine, "rotate-key", "")
+		withAESGCMSerde(engine, "rotate-key", "")
 		Expect(r.reconcileL2EncryptionSecret(ctx, engine)).To(Succeed())
 
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "rotate-key", Namespace: nsName}, source)).To(Succeed())
@@ -426,7 +428,7 @@ var _ = Describe("reconcileL2EncryptionSecret", func() {
 
 	It("errors when the source secret is missing", func() {
 		engine := newEngine(nsName, engineName)
-		withEncryption(engine, "does-not-exist", "")
+		withAESGCMSerde(engine, "does-not-exist", "")
 		err := r.reconcileL2EncryptionSecret(ctx, engine)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("does-not-exist"))
@@ -441,7 +443,7 @@ var _ = Describe("reconcileL2EncryptionSecret", func() {
 		Expect(k8sClient.Create(ctx, source)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, source) })
 
-		withEncryption(engine, "wrong-keys", "")
+		withAESGCMSerde(engine, "wrong-keys", "")
 		err := r.reconcileL2EncryptionSecret(ctx, engine)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring(resources.L2EncryptionKeyDataKey))

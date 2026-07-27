@@ -138,8 +138,8 @@ func BuildContainerArgs(spec *lmcachev1alpha1.LMCacheEngineSpec) []string {
 // buildL2AdapterJSON serializes an L2BackendSpec into the --l2-adapter JSON string.
 // For RESP adapters with authSecretRef, username/password are set to env var
 // placeholders that get interpolated by the shell wrapper (see BuildShellCommand).
-// When encryption is configured, a "serde" sub-dict is attached to the adapter
-// config so the server wraps the adapter with the aesgcm serde.
+// When a serde is configured, a "serde" sub-dict is attached to the adapter
+// config so the server wraps the adapter with it.
 func buildL2AdapterJSON(backend *lmcachev1alpha1.L2BackendSpec) string {
 	var flat map[string]any
 	switch {
@@ -150,8 +150,8 @@ func buildL2AdapterJSON(backend *lmcachev1alpha1.L2BackendSpec) string {
 	default:
 		return ""
 	}
-	if backend.Encryption != nil {
-		flat["serde"] = buildEncryptionSerdeConfig(backend.Encryption)
+	if serde := buildSerdeConfig(backend.Serde); serde != nil {
+		flat["serde"] = serde
 	}
 	b, err := json.Marshal(flat)
 	if err != nil {
@@ -190,15 +190,19 @@ func buildRawL2Config(raw *lmcachev1alpha1.RawL2AdapterSpec) map[string]any {
 	return flat
 }
 
-// buildEncryptionSerdeConfig renders L2EncryptionSpec into the serde sub-dict
-// consumed by the server's adapter factory. master_key_path points at the
-// file mounted by the DaemonSet builder from the managed master-key Secret.
-func buildEncryptionSerdeConfig(enc *lmcachev1alpha1.L2EncryptionSpec) map[string]any {
+// buildSerdeConfig renders L2SerdeSpec into the serde sub-dict consumed by
+// the server's adapter factory, or nil when no serde is configured. For
+// aesgcm, master_key_path points at the file mounted by the DaemonSet
+// builder from the managed master-key Secret.
+func buildSerdeConfig(serde *lmcachev1alpha1.L2SerdeSpec) map[string]any {
+	if serde == nil || serde.AESGCM == nil {
+		return nil
+	}
 	return map[string]any{
 		"type":            "aesgcm",
-		"key_provider":    derefString(enc.KeyProvider, "hkdf"),
+		"key_provider":    derefString(serde.AESGCM.KeyProvider, "hkdf"),
 		"master_key_path": l2EncryptionKeyPath,
-		"aes_bits":        derefInt32(enc.AESBits, 128),
+		"aes_bits":        derefInt32(serde.AESGCM.AESBits, 128),
 	}
 }
 

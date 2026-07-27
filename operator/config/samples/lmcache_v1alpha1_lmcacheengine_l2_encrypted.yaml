@@ -27,14 +27,15 @@ spec:
     sizeGB: 100
 
   l2Backend:
-    # Encryption applies to whichever adapter is configured (resp or raw).
+    # The serde applies to whichever adapter is configured (resp or raw).
     raw:
       type: fs
       config:
         base_path: /data/lmcache/l2
-    encryption:
-      masterKeySecretRef:
-        name: lmcache-l2-master-key
-        # namespace: secrets    # omit if the Secret is in the same namespace
-      keyProvider: hkdf         # default; derives a per-cache_salt key via HKDF-SHA256
-      aesBits: 128              # default; 256 for compliance mandates
+    serde:
+      aesgcm:
+        masterKeySecretRef:
+          name: lmcache-l2-master-key
+          # namespace: secrets  # omit if the Secret is in the same namespace
+        keyProvider: hkdf       # default; derives a per-cache_salt key via HKDF-SHA256
+        aesBits: 128            # default; 256 for compliance mandates

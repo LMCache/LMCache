@@ -509,7 +509,7 @@ func (r *LMCacheEngineReconciler) deleteRESPAuthSecretIfExists(ctx context.Conte
 
 // reconcileL2EncryptionSecret ensures a local copy of the L2 encryption
 // master-key secret exists in the engine's namespace. It mirrors
-// reconcileRESPAuthSecret: a no-op unless spec.l2Backend.encryption is set,
+// reconcileRESPAuthSecret: a no-op unless spec.l2Backend.serde.aesgcm is set,
 // otherwise it reads the user-created source secret (possibly
 // cross-namespace), validates it, and creates/updates a managed copy owned
 // by the engine. The operator never generates key material.
@@ -517,12 +517,12 @@ func (r *LMCacheEngineReconciler) reconcileL2EncryptionSecret(ctx context.Contex
 	log := logf.FromContext(ctx)
 	spec := &engine.Spec
 
-	// No encryption configured — clean up any stale managed secret.
-	if spec.L2Backend == nil || spec.L2Backend.Encryption == nil {
+	// No aesgcm serde configured — clean up any stale managed secret.
+	if spec.L2Backend == nil || spec.L2Backend.Serde == nil || spec.L2Backend.Serde.AESGCM == nil {
 		return r.deleteL2EncryptionSecretIfExists(ctx, engine)
 	}
 
-	ref := spec.L2Backend.Encryption.MasterKeySecretRef
+	ref := spec.L2Backend.Serde.AESGCM.MasterKeySecretRef
 	sourceNS := ref.Namespace
 	if sourceNS == "" {
 		sourceNS = engine.Namespace

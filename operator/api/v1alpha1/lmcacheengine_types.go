@@ -228,19 +228,26 @@ type L2BackendSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	PrefetchMaxInFlight *int32 `json:"prefetchMaxInFlight,omitempty"`
 
-	// encryption enables at-rest encryption of KV bytes in the L2 tier
-	// via the aesgcm serde, keyed per cache_salt. It applies to whichever
-	// adapter (resp or raw) is configured. L1 (host RAM) and L0 (GPU)
-	// remain plaintext.
+	// serde configures a transform applied to KV bytes on their way to
+	// and from the L2 adapter (whichever of resp or raw is configured).
+	// Exactly one serde type must be set.
 	// +optional
-	Encryption *L2EncryptionSpec `json:"encryption,omitempty"`
+	Serde *L2SerdeSpec `json:"serde,omitempty"`
 }
 
-// L2EncryptionSpec configures at-rest encryption for the L2 backend.
-// It renders to a "serde" sub-dict of the --l2-adapter JSON
-// ({"type": "aesgcm", ...}) and mounts the referenced master-key Secret
-// into the engine pods.
-type L2EncryptionSpec struct {
+// L2SerdeSpec selects and configures the serde for the L2 backend. It
+// renders to the "serde" sub-dict of the --l2-adapter JSON. Exactly one
+// serde type must be set.
+type L2SerdeSpec struct {
+	// aesgcm enables at-rest encryption of KV bytes in the L2 tier,
+	// keyed per cache_salt. L1 (host RAM) and L0 (GPU) remain plaintext.
+	// +optional
+	AESGCM *AESGCMSerdeSpec `json:"aesgcm,omitempty"`
+}
+
+// AESGCMSerdeSpec configures the aesgcm encryption serde. The operator
+// mounts the referenced master-key Secret into the engine pods.
+type AESGCMSerdeSpec struct {
 	// masterKeySecretRef references a user-created Secret holding the
 	// master key under the "master" data key. The Secret may live in a
 	// different namespace; the operator creates a managed copy in the

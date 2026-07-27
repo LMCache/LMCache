@@ -113,20 +113,23 @@ spec:
     raw:
       type: string              # adapter type name (nixl_store, fs, mock, raw_block, etc.)
       config: map[string]any    # type-specific config as free-form map
-    # Optional: at-rest encryption of KV bytes in the L2 tier (aesgcm serde,
-    # keyed per cache_salt). Applies to whichever adapter is configured.
-    # Renders a "serde" sub-dict into the --l2-adapter JSON and mounts the
-    # master-key Secret read-only at /etc/lmcache/keys/master. The operator
-    # copies the referenced Secret into the engine namespace (owner-ref'd for
-    # GC) — it never generates key material; provenance/rotation stay with the
-    # user. See docs/design/v1/distributed/serde/aesgcm.md for the threat and
-    # key models.
-    encryption:
-      masterKeySecretRef:       # REQUIRED, user-created Secret with a "master" data key
-        name: string
-        namespace: string       # optional, defaults to the engine's namespace
-      keyProvider: string       # default: hkdf (only implemented provider)
-      aesBits: int              # default: 128 (or 256)
+    # Optional: serde transform on KV bytes to/from the L2 adapter. Renders
+    # a "serde" sub-dict into the --l2-adapter JSON; applies to whichever
+    # adapter is configured. Exactly one serde type must be set (only aesgcm
+    # today; other server-side serdes like fp8/turboquant can gain typed
+    # fields here later, or be set via raw.config.serde).
+    serde:
+      # aesgcm: at-rest encryption keyed per cache_salt. The operator copies
+      # the referenced Secret into the engine namespace (owner-ref'd for GC)
+      # and mounts it read-only at /etc/lmcache/keys/master — it never
+      # generates key material; provenance/rotation stay with the user. See
+      # docs/design/v1/distributed/serde/aesgcm.md for the threat/key models.
+      aesgcm:
+        masterKeySecretRef:     # REQUIRED, user-created Secret with a "master" data key
+          name: string
+          namespace: string     # optional, defaults to the engine's namespace
+        keyProvider: string     # default: hkdf (only implemented provider)
+        aesBits: int            # default: 128 (or 256)
 
   # -- Connection-injection webhook defaults (optional) --
   # Read by the LMCache mutating webhook for pods bound to this engine. When

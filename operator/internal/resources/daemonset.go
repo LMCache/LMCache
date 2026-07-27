@@ -197,7 +197,7 @@ func buildDaemonSetCore(
 
 	// Mount the L2 encryption master key (managed same-namespace copy created
 	// by the controller) read-only at the path the serde config references.
-	if spec.L2Backend != nil && spec.L2Backend.Encryption != nil {
+	if spec.L2Backend != nil && spec.L2Backend.Serde != nil && spec.L2Backend.Serde.AESGCM != nil {
 		keyMode := int32(0o400)
 		volumes = append(volumes, corev1.Volume{
 			Name: l2EncryptionKeyVolumeName,

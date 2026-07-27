@@ -379,13 +379,15 @@ func TestValidateSpec_L2BothSet(t *testing.T) {
 	}
 }
 
-func TestValidateSpec_L2EncryptionValid(t *testing.T) {
+func TestValidateSpec_L2SerdeAESGCMValid(t *testing.T) {
 	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
 		L1: L1BackendSpec{SizeGB: 10},
 		L2Backend: &L2BackendSpec{
 			RESP: &RESPL2AdapterSpec{Host: "redis", Port: 6379},
-			Encryption: &L2EncryptionSpec{
-				MasterKeySecretRef: SecretReference{Name: "l2-master-key"},
+			Serde: &L2SerdeSpec{
+				AESGCM: &AESGCMSerdeSpec{
+					MasterKeySecretRef: SecretReference{Name: "l2-master-key"},
+				},
 			},
 		},
 	}}
@@ -395,24 +397,41 @@ func TestValidateSpec_L2EncryptionValid(t *testing.T) {
 	}
 }
 
-func TestValidateSpec_L2EncryptionEmptySecretName(t *testing.T) {
+func TestValidateSpec_L2SerdeNoTypeSet(t *testing.T) {
 	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
 		L1: L1BackendSpec{SizeGB: 10},
 		L2Backend: &L2BackendSpec{
-			RESP:       &RESPL2AdapterSpec{Host: "redis", Port: 6379},
-			Encryption: &L2EncryptionSpec{},
+			RESP:  &RESPL2AdapterSpec{Host: "redis", Port: 6379},
+			Serde: &L2SerdeSpec{},
 		},
 	}}
 	errs := e.ValidateSpec()
 	if len(errs) != 1 {
 		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
 	}
-	if errs[0].Field != "spec.l2Backend.encryption.masterKeySecretRef.name" {
-		t.Fatalf("expected field spec.l2Backend.encryption.masterKeySecretRef.name, got %s", errs[0].Field)
+	if errs[0].Field != "spec.l2Backend.serde" {
+		t.Fatalf("expected field spec.l2Backend.serde, got %s", errs[0].Field)
 	}
 }
 
-func TestValidateSpec_L2EncryptionConflictsWithRawSerde(t *testing.T) {
+func TestValidateSpec_L2SerdeAESGCMEmptySecretName(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1: L1BackendSpec{SizeGB: 10},
+		L2Backend: &L2BackendSpec{
+			RESP:  &RESPL2AdapterSpec{Host: "redis", Port: 6379},
+			Serde: &L2SerdeSpec{AESGCM: &AESGCMSerdeSpec{}},
+		},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+	if errs[0].Field != "spec.l2Backend.serde.aesgcm.masterKeySecretRef.name" {
+		t.Fatalf("expected field spec.l2Backend.serde.aesgcm.masterKeySecretRef.name, got %s", errs[0].Field)
+	}
+}
+
+func TestValidateSpec_L2SerdeConflictsWithRawSerde(t *testing.T) {
 	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
 		L1: L1BackendSpec{SizeGB: 10},
 		L2Backend: &L2BackendSpec{
@@ -422,8 +441,10 @@ func TestValidateSpec_L2EncryptionConflictsWithRawSerde(t *testing.T) {
 					"serde": {Raw: []byte(`{"type": "fp8"}`)},
 				},
 			},
-			Encryption: &L2EncryptionSpec{
-				MasterKeySecretRef: SecretReference{Name: "l2-master-key"},
+			Serde: &L2SerdeSpec{
+				AESGCM: &AESGCMSerdeSpec{
+					MasterKeySecretRef: SecretReference{Name: "l2-master-key"},
+				},
 			},
 		},
 	}}
@@ -431,7 +452,7 @@ func TestValidateSpec_L2EncryptionConflictsWithRawSerde(t *testing.T) {
 	if len(errs) != 1 {
 		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
 	}
-	if errs[0].Field != "spec.l2Backend.encryption" {
-		t.Fatalf("expected field spec.l2Backend.encryption, got %s", errs[0].Field)
+	if errs[0].Field != "spec.l2Backend.serde" {
+		t.Fatalf("expected field spec.l2Backend.serde, got %s", errs[0].Field)
 	}
 }
