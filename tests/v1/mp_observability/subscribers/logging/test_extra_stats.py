@@ -11,6 +11,7 @@ import time
 import pytest
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.mp_observability.subscribers.logging.extra_stats import (
@@ -54,7 +55,7 @@ def _start(
     event_type: EventType,
     session: str,
     t: float,
-    device: str = "cuda:0",
+    device: str = f"{torch_device_type}:0",
 ) -> Event:
     return Event(
         event_type=event_type,
@@ -68,7 +69,7 @@ def _end(
     event_type: EventType,
     session: str,
     t: float,
-    device: str = "cuda:0",
+    device: str = f"{torch_device_type}:0",
     total_bytes: int = 0,
     num_tokens: int = 0,
 ) -> Event:
@@ -129,7 +130,7 @@ class TestExtraStatsLoggingSubscriber:
 
         window_lines = [m for m in handler.messages() if "last" in m]
         assert len(window_lines) == 1
-        assert "[cuda:0]" in window_lines[0]
+        assert f"[{torch_device_type}:0]" in window_lines[0]
         assert (
             "store ops=1 tokens=24576 size=5.00GB avg_copy=10.00GB/s" in window_lines[0]
         )
@@ -163,7 +164,7 @@ class TestExtraStatsLoggingSubscriber:
     def test_groups_by_device(self):
         subs = ExtraStatsLoggingSubscriber(_INTERVAL).get_subscriptions()
         with _capture_logs() as handler:
-            for device in ("cuda:0", "cuda:1"):
+            for device in (f"{torch_device_type}:0", f"{torch_device_type}:1"):
                 subs[EventType.MP_STORE_START](
                     _start(EventType.MP_STORE_START, "req-1", 100.0, device=device)
                 )
@@ -181,10 +182,46 @@ class TestExtraStatsLoggingSubscriber:
             subs[EventType.L1_EVICTION_LOOP_TICK](_tick())
 
         messages = handler.messages()
-        assert len([m for m in messages if "[cuda:0]" in m and "last" in m]) == 1
-        assert len([m for m in messages if "[cuda:1]" in m and "last" in m]) == 1
-        assert len([m for m in messages if "[cuda:0]" in m and "cumulative" in m]) == 1
-        assert len([m for m in messages if "[cuda:1]" in m and "cumulative" in m]) == 1
+        assert (
+            len(
+                [
+                    m
+                    for m in messages
+                    if f"[{torch_device_type}:0]" in m and "last" in m
+                ]
+            )
+            == 1
+        )
+        assert (
+            len(
+                [
+                    m
+                    for m in messages
+                    if f"[{torch_device_type}:1]" in m and "last" in m
+                ]
+            )
+            == 1
+        )
+        assert (
+            len(
+                [
+                    m
+                    for m in messages
+                    if f"[{torch_device_type}:0]" in m and "cumulative" in m
+                ]
+            )
+            == 1
+        )
+        assert (
+            len(
+                [
+                    m
+                    for m in messages
+                    if f"[{torch_device_type}:1]" in m and "cumulative" in m
+                ]
+            )
+            == 1
+        )
 
     def test_no_flush_before_interval(self):
         subs = ExtraStatsLoggingSubscriber(60.0).get_subscriptions()

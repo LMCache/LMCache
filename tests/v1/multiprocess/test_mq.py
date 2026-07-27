@@ -12,6 +12,7 @@ import torch
 import zmq
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.utils import EngineType
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
@@ -358,10 +359,7 @@ def test_mq_noop_multiple_clients():
     )
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for REGISTER_KV_CACHE tests",
-)
+@pytest.mark.gpu
 def test_mq_register_kv_cache():
     """
     Test MessageQueue with REGISTER_KV_CACHE request type.
@@ -370,7 +368,7 @@ def test_mq_register_kv_cache():
     # Create test KV cache (list of CudaIPCWrapper objects)
     kv_cache = []
     for _ in range(3):
-        tensor = torch.randn(2, 4, device="cuda")
+        tensor = torch.randn(2, 4, device=torch_device_type)
         wrapper = CudaIPCWrapper(tensor)
         kv_cache.append(wrapper)
 

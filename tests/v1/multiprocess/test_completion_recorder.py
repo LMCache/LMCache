@@ -19,10 +19,8 @@ from lmcache.v1.multiprocess.native_completion import (
 try:
     # Third Party
     import torch  # noqa: F401
-
-    _has_cuda = torch.cuda.is_available()
 except ImportError:
-    _has_cuda = False
+    torch = None
 
 try:
     # First Party
@@ -34,13 +32,13 @@ except ImportError:
     _has_native_op = False
 
 native_only = pytest.mark.skipif(
-    not (_has_cuda and _has_native_op),
-    reason="requires CUDA and native record_completion_on_stream",
+    not _has_native_op,
+    reason="requires native record_completion_on_stream",
 )
 
-if _has_cuda and _has_native_op:
+if _has_native_op:
     # Third Party
-    import cupy  # noqa: E402
+    cupy = pytest.importorskip("cupy", reason="cupy required")  # noqa: E402
 
 
 @pytest.fixture()
