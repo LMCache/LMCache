@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     # First Party
     from lmcache.v1.platform.base.cache_context import BaseCacheContext
     from lmcache.v1.platform.base.device_ops import DeviceOps
+    from lmcache.v1.platform.base.event_ipc import EventIPCBackend
     from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
 # ---------------------------------------------------------------------------
@@ -25,6 +26,8 @@ if TYPE_CHECKING:
 
 class CudaDeviceSpec(DeviceSpec):
     """CUDA device specification for the detection registry."""
+
+    _event_backend_cache: "EventIPCBackend | None" = None
 
     @property
     def device_type(self) -> str:
@@ -40,6 +43,24 @@ class CudaDeviceSpec(DeviceSpec):
         from lmcache.v1.platform.cuda.device_ops import CudaDeviceOps
 
         return CudaDeviceOps
+
+    @property
+    def event_ipc_backend(self) -> "EventIPCBackend":
+        """Return the CUDA event IPC backend."""
+        backend = self._event_backend_cache
+        if backend is None:
+            # Third Party
+            import torch
+
+            # First Party
+            from lmcache.v1.platform.base.event_ipc import DefaultEventIPCBackend
+
+            backend = DefaultEventIPCBackend(
+                event_module=torch.cuda,
+                device_type=self.device_type,
+            )
+            self._event_backend_cache = backend
+        return backend
 
     @property
     def pin_memory_backend(self) -> type[PinMemoryBackend] | None:

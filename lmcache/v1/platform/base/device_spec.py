@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     # First Party
     from lmcache.v1.platform.base.cache_context import BaseCacheContext
     from lmcache.v1.platform.base.device_ops import DeviceOps
+    from lmcache.v1.platform.base.event_ipc import EventIPCBackend
     from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
 
@@ -124,6 +125,18 @@ class DeviceSpec:
         """Return ``True`` when the device is usable for handle transfer."""
         # TODO(chunxiaozheng): implement on subclasses
         return True
+
+    @property
+    def event_ipc_backend(self) -> "EventIPCBackend | None":
+        """Return the device-event IPC backend for this device, if supported.
+
+        Concrete device specifications must explicitly provide an event IPC
+        backend when they support cross-process event synchronization.
+
+        Returns:
+            The device's ``EventIPCBackend``, or ``None`` when unsupported.
+        """
+        return None
 
     @property
     def pin_memory_backend(self) -> type[PinMemoryBackend] | None:

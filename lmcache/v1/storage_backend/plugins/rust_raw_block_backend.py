@@ -5,16 +5,13 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Mapping
-from concurrent.futures import Future
-from typing import Any, Callable, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence
 import asyncio
 import threading
 import time
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey
-from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.storage_backend.abstract_backend import (
     AllocatorBackendInterface,
     StoragePluginInterface,
@@ -30,6 +27,14 @@ from lmcache.v1.storage_backend.raw_block import (
     round_up,
     validate_raw_block_io_options,
 )
+
+if TYPE_CHECKING:
+    # Standard
+    from concurrent.futures import Future
+
+    # First Party
+    from lmcache.utils import CacheEngineKey
+    from lmcache.v1.memory_management import MemoryObj
 
 logger = init_logger(__name__)
 
