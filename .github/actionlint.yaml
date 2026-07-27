@@ -1,0 +1,8 @@
+# actionlint configuration.
+# Declares custom self-hosted runner labels so `runs-on:` referencing them
+# does not trip the runner-label check. `amd-gpu` labels an AMD Instinct
+# (gfx942/gfx950) runner used by the optional on-device ROCm wheel smoke
+# test in build_rocm_artifacts.yml.
+self-hosted-runner:
+  labels:
+    - amd-gpu
