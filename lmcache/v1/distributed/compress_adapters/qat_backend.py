@@ -126,9 +126,23 @@ class QatBackend(AccelCompressBackend):
         if ret != 0:
             raise RuntimeError(f"kv_agent_block_compress failed with code {ret}")
 
-        # Sum actual compressed sizes written by the library
-        total_compressed = sum(out_sizes_arr[i] for i in range(num_blocks))
-        return total_compressed
+        # Pack compressed blocks contiguously in dst.
+        # The library wrote each block at a fixed offset (out_capacity_per_block
+        # apart), but actual compressed sizes are smaller — leaving gaps.
+        # We must compact so the caller can store dst[:total] as one blob.
+        write_offset = 0
+        for i in range(num_blocks):
+            actual_size = out_sizes_arr[i]
+            block_start = i * out_capacity_per_block
+            if block_start != write_offset:
+                ctypes.memmove(
+                    dst_addr + write_offset,
+                    dst_addr + block_start,
+                    actual_size,
+                )
+            write_offset += actual_size
+
+        return write_offset
 
     def decompress(self, src: memoryview, dst: memoryview) -> int:
         """Decompress src into dst using QAT hardware acceleration.
