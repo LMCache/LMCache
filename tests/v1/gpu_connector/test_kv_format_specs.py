@@ -49,6 +49,8 @@ def _build(name: str):
         "NL_X_NBBS_ONE_HS": lambda: [_t(PBS, 1, HS) for _ in range(NL)],
         "NL_X_NB_NH_BS_TWO_HS": lambda: [_t(NB, NH, BS, 2, HS) for _ in range(NL)],
         "NL_X_NB_BS_NH_TWO_HS": lambda: [_t(NB, BS, NH, 2, HS) for _ in range(NL)],
+        "NL_X_NB_NH_BS_CS": lambda: [_t(NB, NH, BS, 2 * HS) for _ in range(NL)],
+        "NL_X_NB_BS_NH_CS": lambda: [_t(NB, BS, NH, 2 * HS) for _ in range(NL)],
     }
     return builders[name]()
 
@@ -213,6 +215,34 @@ GOLDEN = {
         elements_per_layer=NB * BS * NH * HS * 2,
         concrete="5 x [7, 3, 2, 2, 4]",
     ),
+    # CS formats: head_size is the raw trailing content dim (CS == 2 * HS),
+    # so hidden_dim == num_heads * head_size holds.
+    "NL_X_NB_NH_BS_CS": dict(
+        shape_desc="NL x [NB, NH, BS, CS]",
+        num_layers=NL,
+        num_blocks=NB,
+        block_size=BS,
+        page_buffer_size=PBS,
+        num_heads=NH,
+        hidden_dim=NH * HS * 2,
+        head_size=HS * 2,
+        tokens_per_layer=PBS,
+        elements_per_layer=NB * NH * BS * HS * 2,
+        concrete="5 x [7, 2, 3, 8]",
+    ),
+    "NL_X_NB_BS_NH_CS": dict(
+        shape_desc="NL x [NB, BS, NH, CS]",
+        num_layers=NL,
+        num_blocks=NB,
+        block_size=BS,
+        page_buffer_size=PBS,
+        num_heads=NH,
+        hidden_dim=NH * HS * 2,
+        head_size=HS * 2,
+        tokens_per_layer=PBS,
+        elements_per_layer=NB * BS * NH * HS * 2,
+        concrete="5 x [7, 3, 2, 8]",
+    ),
 }
 
 # Only formats the installed extension actually exposes.
@@ -223,6 +253,14 @@ FORMAT_NAMES = [n for n in GOLDEN if hasattr(lmc_ops.EngineKVFormat, n)]
 def case(request):
     name = request.param
     return name, getattr(lmc_ops.EngineKVFormat, name), GOLDEN[name]
+
+
+# Must run before any other test constructs the deprecated specs:
+# lmcache_deprecate warns only on the first call per process.
+def test_deprecated_two_hs_specs_warn():
+    for name in ("NL_X_NB_NH_BS_TWO_HS", "NL_X_NB_BS_NH_TWO_HS"):
+        with pytest.warns(DeprecationWarning, match=name):
+            get_spec(_build(name), getattr(lmc_ops.EngineKVFormat, name))
 
 
 def test_static_metadata(case):

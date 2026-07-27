@@ -34,6 +34,7 @@ _LABELS = {
     "BS": "BS",
     "NH": "NH",
     "HS": "HS",
+    "CS": "CS",
 }
 _ACCESSORS = {
     "NB": "num_blocks",
@@ -41,6 +42,7 @@ _ACCESSORS = {
     "BS": "block_size",
     "NH": "num_heads",
     "HS": "head_size",
+    "CS": "head_size",
     "PBS": "page_buffer_size",
 }
 

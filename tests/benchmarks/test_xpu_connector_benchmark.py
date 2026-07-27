@@ -11,6 +11,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
@@ -21,9 +22,12 @@ from tests.v1.utils import (
     generate_tokens,
 )
 
-DEVICE_PARAMS = ["xpu"]
+pytestmark = pytest.mark.skipif(
+    torch_device_type != "xpu",
+    reason="XPU-only tests",
+)
 BACKENDS = ["cpu", "disk"]
-
+DEVICE = torch.device(torch_device_type)
 # Optional override for tempfile root; see tests/v1/test_cache_engine.py
 # for rationale.
 _TEST_TMPDIR = os.environ.get("LMCACHE_TEST_TMPDIR") or None
@@ -44,12 +48,6 @@ def _skip_if_xpu_without_gpu_buffer(device_type: str, use_gpu: bool) -> None:
             "XPU connector requires use_gpu=True (Level Zero cannot run the "
             "transfer kernel against host memory)"
         )
-
-
-def _device_from_type(device_type: str) -> torch.device:
-    if device_type == "xpu":
-        return torch.device("xpu")
-    raise ValueError(device_type)
 
 
 def generate_random_slot_mapping(
@@ -223,13 +221,11 @@ def _build_engine(
 
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="store-v2")
-@pytest.mark.parametrize("device_type", DEVICE_PARAMS)
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("use_gpu", [False, True])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 def test_store_1gb_v2(
     benchmark,
-    device_type,
     backend,
     use_gpu,
     save_unfull_chunk,
@@ -237,14 +233,13 @@ def test_store_1gb_v2(
     autorelease_v1,
 ):
     _skip_if_no_xpu()
-    _skip_if_xpu_without_gpu_buffer(device_type, use_gpu)
+    _skip_if_xpu_without_gpu_buffer(torch_device_type, use_gpu)
 
     num_heads = 8
     head_dim = 128
     num_layers = 32
     dtype = torch.bfloat16
 
-    device = _device_from_type(device_type)
     num_tokens = 2000
     num_blocks = 1000
     block_size = 16
@@ -254,7 +249,7 @@ def test_store_1gb_v2(
     num_repeats = 10
 
     connector = _create_connector(
-        device,
+        DEVICE,
         hidden_dim=num_heads * head_dim,
         num_layers=num_layers,
         use_gpu=use_gpu,
@@ -265,7 +260,7 @@ def test_store_1gb_v2(
 
     kv_cache = generate_kv_cache_paged_list_tensors(
         num_blocks,
-        device,
+        DEVICE,
         block_size,
         dtype,
         num_layers=num_layers,
@@ -301,9 +296,9 @@ def test_store_1gb_v2(
         _wait_for_store(engine, tokens, expected)
 
     def setup():
-        list_tokens = [generate_tokens(num_tokens, device) for _ in range(num_requests)]
+        list_tokens = [generate_tokens(num_tokens, DEVICE) for _ in range(num_requests)]
         list_slot_mappings = [
-            generate_random_slot_mapping(num_blocks, block_size, num_tokens, device)
+            generate_random_slot_mapping(num_blocks, block_size, num_tokens, DEVICE)
             for _ in range(num_requests)
         ]
         return (list_tokens, list_slot_mappings), {}
@@ -315,13 +310,11 @@ def test_store_1gb_v2(
 
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="retrieve-v2")
-@pytest.mark.parametrize("device_type", DEVICE_PARAMS)
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("use_gpu", [False, True])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 def test_retrieve_1gb_allhit_v2(
     benchmark,
-    device_type,
     backend,
     use_gpu,
     save_unfull_chunk,
@@ -329,14 +322,13 @@ def test_retrieve_1gb_allhit_v2(
     autorelease_v1,
 ):
     _skip_if_no_xpu()
-    _skip_if_xpu_without_gpu_buffer(device_type, use_gpu)
+    _skip_if_xpu_without_gpu_buffer(torch_device_type, use_gpu)
 
     num_heads = 8
     head_dim = 128
     num_layers = 32
     dtype = torch.bfloat16
 
-    device = _device_from_type(device_type)
     num_tokens = 2000
     num_blocks = 1000
     block_size = 16
@@ -346,7 +338,7 @@ def test_retrieve_1gb_allhit_v2(
     num_repeats = 10
 
     connector = _create_connector(
-        device,
+        DEVICE,
         hidden_dim=num_heads * head_dim,
         num_layers=num_layers,
         use_gpu=use_gpu,
@@ -357,16 +349,16 @@ def test_retrieve_1gb_allhit_v2(
 
     kv_cache = generate_kv_cache_paged_list_tensors(
         num_blocks,
-        device,
+        DEVICE,
         block_size,
         dtype,
         num_layers=num_layers,
         head_size=head_dim,
     )
 
-    list_tokens = [generate_tokens(num_tokens, device) for _ in range(num_requests)]
+    list_tokens = [generate_tokens(num_tokens, DEVICE) for _ in range(num_requests)]
     list_slot_mappings = [
-        generate_random_slot_mapping(num_blocks, block_size, num_tokens, device)
+        generate_random_slot_mapping(num_blocks, block_size, num_tokens, DEVICE)
         for _ in range(num_requests)
     ]
 
@@ -410,13 +402,11 @@ def test_retrieve_1gb_allhit_v2(
 
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="lookup-v2")
-@pytest.mark.parametrize("device_type", DEVICE_PARAMS)
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("use_gpu", [False, True])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 def test_lookup_20k_tokens_v2(
     benchmark,
-    device_type,
     backend,
     use_gpu,
     save_unfull_chunk,
@@ -424,14 +414,13 @@ def test_lookup_20k_tokens_v2(
     autorelease_v1,
 ):
     _skip_if_no_xpu()
-    _skip_if_xpu_without_gpu_buffer(device_type, use_gpu)
+    _skip_if_xpu_without_gpu_buffer(torch_device_type, use_gpu)
 
     num_heads = 8
     head_dim = 128
     num_layers = 32
     dtype = torch.bfloat16
 
-    device = _device_from_type(device_type)
     num_tokens = 2000
     num_blocks = 1000
     block_size = 16
@@ -442,7 +431,7 @@ def test_lookup_20k_tokens_v2(
     num_repeats = 10
 
     connector = _create_connector(
-        device,
+        DEVICE,
         hidden_dim=num_heads * head_dim,
         num_layers=num_layers,
         use_gpu=use_gpu,
@@ -453,16 +442,16 @@ def test_lookup_20k_tokens_v2(
 
     kv_cache = generate_kv_cache_paged_list_tensors(
         num_blocks,
-        device,
+        DEVICE,
         block_size,
         dtype,
         num_layers=num_layers,
         head_size=head_dim,
     )
 
-    list_tokens = [generate_tokens(num_tokens, device) for _ in range(num_requests)]
+    list_tokens = [generate_tokens(num_tokens, DEVICE) for _ in range(num_requests)]
     list_slot_mappings = [
-        generate_random_slot_mapping(num_blocks, block_size, num_tokens, device)
+        generate_random_slot_mapping(num_blocks, block_size, num_tokens, DEVICE)
         for _ in range(num_requests)
     ]
 

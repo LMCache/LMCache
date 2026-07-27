@@ -27,7 +27,11 @@ from lmcache.cli.commands.trace._dispatch import (
     build_default_dispatcher,
 )
 from lmcache.cli.commands.trace._driver import StorageReplayDriver
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    ObjectKey,
+    PrefetchRequestSpec,
+)
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -169,7 +173,7 @@ class TestRecordReplayRoundtrip:
         def script(sm: StorageManager) -> None:
             sm.reserve_write(keys, layout, mode="new")
             sm.finish_write(keys)
-            handle = sm.submit_prefetch_task(keys, layout)
+            handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, layout))
             assert handle is not None
             with sm.read_prefetched_results(keys) as objs:
                 assert objs is not None
