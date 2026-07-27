@@ -33,6 +33,9 @@ def _validate_vllm_device_features(config: LMCacheEngineConfig) -> None:
     2. ``config.use_layerwise=True`` on HPU — HPU only ships
        :class:`VLLMPagedMemHPUConnectorV2`; previously, the dispatch silently
        fell through to the CUDA layerwise connector.
+    3. ``config.use_layerwise=True`` on CPU — the CPU connector
+       (:class:`VLLMCPUConnector`) is not layerwise, so the layerwise retrieve
+       path would otherwise fail at runtime.
 
     Args:
         config: The LMCache engine configuration.
@@ -54,6 +57,13 @@ def _validate_vllm_device_features(config: LMCacheEngineConfig) -> None:
             "config.use_layerwise=True is not supported on HPU; LMCache "
             "ships no layerwise HPU connector. Set use_layerwise=False or "
             "run on a CUDA-capable build."
+        )
+
+    if torch_device_type == "cpu" and config.use_layerwise:
+        raise ValueError(
+            "config.use_layerwise=True is not supported on CPU; the CPU "
+            "connector (VLLMCPUConnector) is not layerwise. Set "
+            "use_layerwise=False or run on a CUDA-capable build."
         )
 
 
@@ -228,6 +238,14 @@ def CreateGPUConnector(
             )
 
             return VLLMPagedMemHPUConnectorV2.from_metadata(metadata, use_gpu, device)
+        elif torch_device_type == "cpu":
+            # Pure-torch CPU gather/scatter (no c_ops / CUDA streams).
+            # First Party
+            from lmcache.v1.gpu_connector.cpu_connector import VLLMCPUConnector
+
+            return VLLMCPUConnector.from_metadata(
+                metadata, use_gpu, device, layout_hints=layout_hints
+            )
         else:
             raise RuntimeError(f"No supported {torch_device_type} connector found.")
 
