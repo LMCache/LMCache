@@ -26,6 +26,9 @@ caller-provided load buffers during prefetch.
 - ``load_checkpoint_on_init``: Load an existing on-device metadata checkpoint
   during startup (default ``true``). Set to ``false`` to start with an empty
   in-memory index instead.
+- ``allow_legacy_checkpoint_without_device_id``: Allow loading legacy
+  checkpoints written before ``device_id`` was recorded (default ``false``).
+  Keep this disabled except during checkpoint migration.
 - ``enable_zero_copy``: Try aligned direct-buffer I/O when possible.
 - ``io_engine``: Rust raw-block I/O engine. Valid values are ``"posix"``
   (default synchronous ``pread``/``pwrite`` path), ``"io_uring"`` (direct Rust
@@ -46,8 +49,12 @@ caller-provided load buffers during prefetch.
   per-TP device-path mappings in MP mode.
 - ``raw_block`` remains ``"type": "raw_block"`` for all supported engines.
 - ``raw_block`` owns on-device slot allocation, checkpointing, and recovery
-  through ``RawBlockCore``. Slot reclamation is driven by the shared/global
-  L2 eviction controller or explicit ``delete()`` calls.
+  through ``RawBlockCore``. Checkpoint recovery validates a stable
+  ``device_id`` unless ``allow_legacy_checkpoint_without_device_id`` is enabled
+  for migration of old checkpoints: ``nvme:<wwid>`` for NVMe namespaces or
+  ``file:<st_dev>:<st_ino>:<st_size>`` for regular files. Slot reclamation is
+  driven by the shared/global L2 eviction controller or explicit ``delete()``
+  calls.
 - If ``use_odirect`` is enabled, the server's ``--l1-align-bytes`` should be
   at least ``block_align``.
 - ``persist_enabled`` must remain ``true`` for this adapter.
@@ -58,6 +65,22 @@ caller-provided load buffers during prefetch.
 - ``use_uring_cmd`` requires ``io_engine="io_uring"`` to be set.
 - When ``use_uring_cmd=true``, ``use_odirect`` is ignored for NVMe namespace
   character devices.
+
+**Upgrade from checkpoints without device_id:**
+
+Raw-block checkpoint recovery validates a stable ``device_id`` so that metadata
+from one raw device is not applied to another device. Checkpoints written by
+older versions may not contain this field. When upgrading with an existing
+checkpoint that must be recovered, set
+``allow_legacy_checkpoint_without_device_id=true`` for the first startup only.
+After the legacy checkpoint is loaded and a new checkpoint is written, disable
+the option so future recovery requires stable device identity validation.
+
+If recovery is not required, set ``load_checkpoint_on_init=false`` to start with
+an empty in-memory index instead. The legacy non-MP ``rust_raw_block`` backend
+uses the extra config key
+``rust_raw_block.allow_legacy_checkpoint_without_device_id`` for the same
+migration behavior.
 
 **Configuration examples:**
 

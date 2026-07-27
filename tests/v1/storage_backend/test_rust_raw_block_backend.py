@@ -41,6 +41,7 @@ from lmcache.v1.storage_backend.raw_block import (
     RawBlockCoreConfig,
     RawBlockKeySpec,
     RawBlockPutManyResult,
+    resolve_raw_block_device_id,
 )
 
 
@@ -86,10 +87,12 @@ def _install_fake_raw_block_device(monkeypatch, *, size_bytes: int = 64 * 1024):
     )
 
 
-def _make_raw_block_core(*, use_odirect: bool = False) -> RawBlockCore:
+def _make_raw_block_core(
+    device_path: str, *, use_odirect: bool = False
+) -> RawBlockCore:
     return RawBlockCore(
         RawBlockCoreConfig(
-            device_path="/tmp/raw-block-boundary-test",
+            device_path=device_path,
             capacity_bytes=64 * 1024,
             block_align=4096,
             header_bytes=4096,
@@ -124,7 +127,7 @@ def _make_byte_obj(size: int) -> TensorMemoryObj:
     return TensorMemoryObj(raw_data, metadata, parent_allocator=None)
 
 
-def test_raw_block_core_passes_io_engine_options_to_rust_binding(monkeypatch):
+def test_raw_block_core_passes_io_engine_options_to_rust_binding(monkeypatch, tmp_path):
     calls: list[dict[str, object]] = []
 
     class FakeRawBlockDevice:
@@ -149,10 +152,13 @@ def test_raw_block_core_passes_io_engine_options_to_rust_binding(monkeypatch):
         "lmcache_rust_raw_block_io",
         types.SimpleNamespace(RawBlockDevice=FakeRawBlockDevice),
     )
+    device_path = tmp_path / "raw-block-engine-test"
+    device_path.touch()
+    device_path_str = str(device_path)
 
     core = RawBlockCore(
         RawBlockCoreConfig(
-            device_path="/tmp/raw-block-engine-test",
+            device_path=device_path_str,
             capacity_bytes=0,
             block_align=4096,
             header_bytes=4096,
@@ -175,7 +181,7 @@ def test_raw_block_core_passes_io_engine_options_to_rust_binding(monkeypatch):
     try:
         assert calls == [
             {
-                "path": "/tmp/raw-block-engine-test",
+                "path": device_path_str,
                 "writable": True,
                 "use_odirect": False,
                 "alignment": 4096,
@@ -188,9 +194,13 @@ def test_raw_block_core_passes_io_engine_options_to_rust_binding(monkeypatch):
         core.close()
 
 
-def test_raw_block_core_non_odirect_rejects_payload_over_slot_capacity(monkeypatch):
+def test_raw_block_core_non_odirect_rejects_payload_over_slot_capacity(
+    monkeypatch, tmp_path
+):
     _install_fake_raw_block_device(monkeypatch)
-    core = _make_raw_block_core(use_odirect=False)
+    device_path = tmp_path / "raw-block-boundary-test"
+    device_path.touch()
+    core = _make_raw_block_core(str(device_path), use_odirect=False)
     try:
         payload_capacity = core.slot_bytes - core.header_bytes
         exact_key = RawBlockKeySpec(encoded="exact", slot_identity=1)
@@ -210,9 +220,11 @@ def test_raw_block_core_non_odirect_rejects_payload_over_slot_capacity(monkeypat
         core.close()
 
 
-def test_raw_block_core_odirect_prepare_payload_boundaries(monkeypatch):
+def test_raw_block_core_odirect_prepare_payload_boundaries(monkeypatch, tmp_path):
     _install_fake_raw_block_device(monkeypatch)
-    core = _make_raw_block_core(use_odirect=True)
+    device_path = tmp_path / "raw-block-boundary-test"
+    device_path.touch()
+    core = _make_raw_block_core(str(device_path), use_odirect=True)
     try:
         payload_capacity = core.slot_bytes - core.header_bytes
 
@@ -1455,6 +1467,7 @@ def test_rust_raw_block_backend_skips_invalid_checkpoint_entries(
                     "meta_total_bytes": backend.meta_total_bytes,
                     "meta_magic": backend.meta_magic_text,
                     "meta_version": backend.meta_version,
+                    "device_id": resolve_raw_block_device_id(dev_path),
                     "data_base_offset": backend.data_base_offset,
                     "next_slot": 0,
                     "free_slots": [],
@@ -1531,6 +1544,7 @@ def test_rust_raw_block_backend_recovers_legacy_key_dtype(
                     "meta_total_bytes": backend.meta_total_bytes,
                     "meta_magic": backend.meta_magic_text,
                     "meta_version": backend.meta_version,
+                    "device_id": resolve_raw_block_device_id(dev_path),
                     "data_base_offset": backend.data_base_offset,
                     "next_slot": 1,
                     "free_slots": [],
@@ -2332,7 +2346,7 @@ def _make_raw_block_backend(
 
 
 def test_rust_raw_block_backend_batched_submit_rolls_back_refs_on_dispatch_failure(
-    monkeypatch, memory_allocator, loop_in_thread
+    monkeypatch, memory_allocator, loop_in_thread, tmp_path
 ):
     """A dispatch failure rolls back every ref_count_up and clears put_tasks.
 
@@ -2342,8 +2356,10 @@ def test_rust_raw_block_backend_batched_submit_rolls_back_refs_on_dispatch_failu
     in-flight put-task set so nothing leaks.
     """
     _install_fake_raw_block_device(monkeypatch, size_bytes=64 * 1024 * 1024)
+    device_path = tmp_path / "plugin-rollback"
+    device_path.touch()
     backend = _make_raw_block_backend(
-        "/tmp/plugin-rollback", memory_allocator, loop_in_thread
+        str(device_path), memory_allocator, loop_in_thread
     )
     try:
         allocator = AdHocMemoryAllocator(device="cpu")
@@ -2378,12 +2394,14 @@ def test_rust_raw_block_backend_batched_submit_rolls_back_refs_on_dispatch_failu
 
 
 def test_rust_raw_block_backend_batched_submit_rolls_back_only_unscheduled_refs(
-    monkeypatch, memory_allocator, loop_in_thread
+    monkeypatch, memory_allocator, loop_in_thread, tmp_path
 ):
     """A partial per-key dispatch failure leaves scheduled task cleanup to task."""
     _install_fake_raw_block_device(monkeypatch, size_bytes=64 * 1024 * 1024)
+    device_path = tmp_path / "plugin-partial-rollback"
+    device_path.touch()
     backend = _make_raw_block_backend(
-        "/tmp/plugin-partial-rollback",
+        str(device_path),
         memory_allocator,
         loop_in_thread,
         io_engine="posix",

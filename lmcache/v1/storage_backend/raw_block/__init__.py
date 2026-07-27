@@ -8,6 +8,7 @@ from lmcache.v1.storage_backend.raw_block.core import (
     RawBlockCoreConfig,
     RawBlockPutManyResult,
     normalize_raw_block_io_engine,
+    resolve_raw_block_device_id,
     round_up,
     validate_raw_block_io_options,
 )
@@ -36,6 +37,7 @@ __all__ = [
     "encode_object_key",
     "object_key_to_string",
     "normalize_raw_block_io_engine",
+    "resolve_raw_block_device_id",
     "round_up",
     "slot_identity_from_encoded_key",
     "validate_raw_block_io_options",
