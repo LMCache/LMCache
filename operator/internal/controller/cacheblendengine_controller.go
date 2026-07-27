@@ -76,6 +76,12 @@ func (r *CacheBlendEngineReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, err
 	}
 
+	// 4b. Reconcile L2 encryption master-key secret (cross-namespace copy if needed)
+	if err := r.reconcileL2EncryptionSecret(ctx, engine); err != nil {
+		log.Error(err, "Failed to reconcile L2 encryption secret")
+		return ctrl.Result{}, err
+	}
+
 	// 5. Reconcile DaemonSet
 	if err := r.reconcileDaemonSet(ctx, engine); err != nil {
 		log.Error(err, "Failed to reconcile DaemonSet")

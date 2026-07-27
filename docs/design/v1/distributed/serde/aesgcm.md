@@ -82,6 +82,14 @@ key; secret material comes from a swappable `KeyProvider`:
 The empty `cache_salt` (anonymous traffic) is a valid tenant bucket; HKDF
 accepts an empty `info` and derives a stable key for it.
 
+On Kubernetes, key delivery is wired declaratively by the LMCache operator:
+`spec.l2Backend.encryption` on an `LMCacheEngine`/`CacheBlendEngine` CR
+references a user-created master-key `Secret` (data key `master`); the
+operator copies it into the engine namespace (owner-ref'd for GC), mounts it
+read-only at `/etc/lmcache/keys/master`, and renders the matching `serde`
+sub-dict into `--l2-adapter`. The operator never generates key material —
+provenance and rotation stay with the user (see `operator/DESIGN.md`).
+
 ## Config (`SerdeConfig.kwargs`)
 
 | Key | Default | Meaning |

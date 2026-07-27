@@ -1373,6 +1373,53 @@ spec:
                   l2Backend defines the L2 storage backend.
                   Currently only a single adapter is supported.
                 properties:
+                  encryption:
+                    description: |-
+                      encryption enables at-rest encryption of KV bytes in the L2 tier
+                      via the aesgcm serde, keyed per cache_salt. It applies to whichever
+                      adapter (resp or raw) is configured. L1 (host RAM) and L0 (GPU)
+                      remain plaintext.
+                    properties:
+                      aesBits:
+                        default: 128
+                        description: |-
+                          aesBits selects the AES key size. 128 is the default; 256 is
+                          available for compliance mandates.
+                        enum:
+                        - 128
+                        - 256
+                        format: int32
+                        type: integer
+                      keyProvider:
+                        default: hkdf
+                        description: |-
+                          keyProvider selects how per-cache_salt keys are obtained from the
+                          master key. Only "hkdf" (HKDF-SHA256 derivation) is implemented.
+                        enum:
+                        - hkdf
+                        type: string
+                      masterKeySecretRef:
+                        description: |-
+                          masterKeySecretRef references a user-created Secret holding the
+                          master key under the "master" data key. The Secret may live in a
+                          different namespace; the operator creates a managed copy in the
+                          engine's namespace. The operator never generates the key — key
+                          provenance and rotation belong to the user.
+                        properties:
+                          name:
+                            description: name is the name of the Secret.
+                            type: string
+                          namespace:
+                            description: |-
+                              namespace is the namespace of the Secret.
+                              If empty, defaults to the namespace of the LMCacheEngine resource.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                    required:
+                    - masterKeySecretRef
+                    type: object
                   prefetchMaxInFlight:
                     default: 8
                     description: |-
@@ -1508,11 +1555,7 @@ spec:
                   claiming any via the nvidia.com/gpu device plugin; on many clusters
                   NVIDIA_VISIBLE_DEVICES=all already grants that visibility without it, so it
                   defaults to false. Set it to true only on clusters where the engine cannot
-                  otherwise see the GPUs. For gpuVendor "amd" this is effectively required:
-                  there is no NVIDIA-style RuntimeClass device injection, so privileged mode
-                  is the only way the engine reaches /dev/kfd and /dev/dri. Clusters using Pod
-                  Security Standards must allow the privileged profile for this namespace when
-                  it is enabled. Default: false.
+                  otherwise see the GPUs.
                 type: boolean
               prometheus:
                 description: prometheus defines Prometheus monitoring configuration.

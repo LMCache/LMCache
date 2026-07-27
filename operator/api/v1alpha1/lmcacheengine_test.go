@@ -18,6 +18,8 @@ package v1alpha1
 
 import (
 	"testing"
+
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 )
 
 // --- helpers ---
@@ -374,5 +376,62 @@ func TestValidateSpec_L2BothSet(t *testing.T) {
 	errs := e.ValidateSpec()
 	if len(errs) != 1 {
 		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+}
+
+func TestValidateSpec_L2EncryptionValid(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1: L1BackendSpec{SizeGB: 10},
+		L2Backend: &L2BackendSpec{
+			RESP: &RESPL2AdapterSpec{Host: "redis", Port: 6379},
+			Encryption: &L2EncryptionSpec{
+				MasterKeySecretRef: SecretReference{Name: "l2-master-key"},
+			},
+		},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors, got %v", errs)
+	}
+}
+
+func TestValidateSpec_L2EncryptionEmptySecretName(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1: L1BackendSpec{SizeGB: 10},
+		L2Backend: &L2BackendSpec{
+			RESP:       &RESPL2AdapterSpec{Host: "redis", Port: 6379},
+			Encryption: &L2EncryptionSpec{},
+		},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+	if errs[0].Field != "spec.l2Backend.encryption.masterKeySecretRef.name" {
+		t.Fatalf("expected field spec.l2Backend.encryption.masterKeySecretRef.name, got %s", errs[0].Field)
+	}
+}
+
+func TestValidateSpec_L2EncryptionConflictsWithRawSerde(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1: L1BackendSpec{SizeGB: 10},
+		L2Backend: &L2BackendSpec{
+			Raw: &RawL2AdapterSpec{
+				Type: "fs",
+				Config: map[string]apiextensionsv1.JSON{
+					"serde": {Raw: []byte(`{"type": "fp8"}`)},
+				},
+			},
+			Encryption: &L2EncryptionSpec{
+				MasterKeySecretRef: SecretReference{Name: "l2-master-key"},
+			},
+		},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+	if errs[0].Field != "spec.l2Backend.encryption" {
+		t.Fatalf("expected field spec.l2Backend.encryption, got %s", errs[0].Field)
 	}
 }

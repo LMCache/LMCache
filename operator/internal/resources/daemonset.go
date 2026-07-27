@@ -42,7 +42,26 @@ const (
 	// serverPortName is the name of the engine's serving port on the container
 	// and the node-local Service.
 	serverPortName = "server"
+
+	// l2EncryptionKeyMountDir is where the L2 encryption master-key Secret is
+	// mounted inside the engine container.
+	l2EncryptionKeyMountDir = "/etc/lmcache/keys"
+
+	// l2EncryptionKeyFileName is the data key in the master-key Secret and thus
+	// the file name under the mount dir.
+	l2EncryptionKeyFileName = "master"
+
+	// l2EncryptionKeyVolumeName is the pod volume name for the master-key mount.
+	l2EncryptionKeyVolumeName = "l2-master-key"
 )
+
+// L2EncryptionKeyPath is the in-container path of the mounted L2 encryption
+// master key, referenced as master_key_path in the serde config.
+const L2EncryptionKeyPath = l2EncryptionKeyMountDir + "/" + l2EncryptionKeyFileName
+
+// L2EncryptionKeyDataKey is the required data key in the user-provided
+// master-key Secret (and the managed copy).
+const L2EncryptionKeyDataKey = l2EncryptionKeyFileName
 
 // BuildDaemonSet constructs a DaemonSet for the given LMCacheEngine.
 func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
@@ -175,6 +194,26 @@ func buildDaemonSetCore(
 	// LMCache and vLLM pods (cudaIpcOpenMemHandle requires shared /dev/shm).
 	volumes := append([]corev1.Volume{}, spec.Volumes...)
 	volumeMounts := append([]corev1.VolumeMount{}, spec.VolumeMounts...)
+
+	// Mount the L2 encryption master key (managed same-namespace copy created
+	// by the controller) read-only at the path the serde config references.
+	if spec.L2Backend != nil && spec.L2Backend.Encryption != nil {
+		keyMode := int32(0o400)
+		volumes = append(volumes, corev1.Volume{
+			Name: l2EncryptionKeyVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName:  L2EncryptionSecretName(name),
+					DefaultMode: &keyMode,
+				},
+			},
+		})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      l2EncryptionKeyVolumeName,
+			MountPath: l2EncryptionKeyMountDir,
+			ReadOnly:  true,
+		})
+	}
 
 	// Build container args. Auth credentials are handled via env vars
 	// (LMCACHE_RESP_USERNAME / LMCACHE_RESP_PASSWORD) injected above,

@@ -138,17 +138,29 @@ func BuildContainerArgs(spec *lmcachev1alpha1.LMCacheEngineSpec) []string {
 // buildL2AdapterJSON serializes an L2BackendSpec into the --l2-adapter JSON string.
 // For RESP adapters with authSecretRef, username/password are set to env var
 // placeholders that get interpolated by the shell wrapper (see BuildShellCommand).
+// When encryption is configured, a "serde" sub-dict is attached to the adapter
+// config so the server wraps the adapter with the aesgcm serde.
 func buildL2AdapterJSON(backend *lmcachev1alpha1.L2BackendSpec) string {
-	if backend.RESP != nil {
-		return buildRESPL2JSON(backend.RESP)
+	var flat map[string]any
+	switch {
+	case backend.RESP != nil:
+		flat = buildRESPL2Config(backend.RESP)
+	case backend.Raw != nil:
+		flat = buildRawL2Config(backend.Raw)
+	default:
+		return ""
 	}
-	if backend.Raw != nil {
-		return buildRawL2JSON(backend.Raw)
+	if backend.Encryption != nil {
+		flat["serde"] = buildEncryptionSerdeConfig(backend.Encryption)
 	}
-	return ""
+	b, err := json.Marshal(flat)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
-func buildRESPL2JSON(resp *lmcachev1alpha1.RESPL2AdapterSpec) string {
+func buildRESPL2Config(resp *lmcachev1alpha1.RESPL2AdapterSpec) map[string]any {
 	flat := map[string]any{
 		"type":        "resp",
 		"host":        resp.Host,
@@ -161,14 +173,10 @@ func buildRESPL2JSON(resp *lmcachev1alpha1.RESPL2AdapterSpec) string {
 	// Auth credentials are passed via LMCACHE_RESP_USERNAME /
 	// LMCACHE_RESP_PASSWORD env vars (injected by the DaemonSet builder),
 	// not in the JSON config.
-	b, err := json.Marshal(flat)
-	if err != nil {
-		return ""
-	}
-	return string(b)
+	return flat
 }
 
-func buildRawL2JSON(raw *lmcachev1alpha1.RawL2AdapterSpec) string {
+func buildRawL2Config(raw *lmcachev1alpha1.RawL2AdapterSpec) map[string]any {
 	flat := make(map[string]any)
 	flat["type"] = raw.Type
 	for k, v := range raw.Config {
@@ -179,11 +187,19 @@ func buildRawL2JSON(raw *lmcachev1alpha1.RawL2AdapterSpec) string {
 			flat[k] = parsed
 		}
 	}
-	b, err := json.Marshal(flat)
-	if err != nil {
-		return ""
+	return flat
+}
+
+// buildEncryptionSerdeConfig renders L2EncryptionSpec into the serde sub-dict
+// consumed by the server's adapter factory. master_key_path points at the
+// file mounted by the DaemonSet builder from the managed master-key Secret.
+func buildEncryptionSerdeConfig(enc *lmcachev1alpha1.L2EncryptionSpec) map[string]any {
+	return map[string]any{
+		"type":            "aesgcm",
+		"key_provider":    derefString(enc.KeyProvider, "hkdf"),
+		"master_key_path": L2EncryptionKeyPath,
+		"aes_bits":        derefInt32(enc.AESBits, 128),
 	}
-	return string(b)
 }
 
 func getServerPort(spec *lmcachev1alpha1.LMCacheEngineSpec) *int32 {

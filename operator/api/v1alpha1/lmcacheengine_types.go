@@ -227,6 +227,40 @@ type L2BackendSpec struct {
 	// +kubebuilder:default=8
 	// +kubebuilder:validation:Minimum=1
 	PrefetchMaxInFlight *int32 `json:"prefetchMaxInFlight,omitempty"`
+
+	// encryption enables at-rest encryption of KV bytes in the L2 tier
+	// via the aesgcm serde, keyed per cache_salt. It applies to whichever
+	// adapter (resp or raw) is configured. L1 (host RAM) and L0 (GPU)
+	// remain plaintext.
+	// +optional
+	Encryption *L2EncryptionSpec `json:"encryption,omitempty"`
+}
+
+// L2EncryptionSpec configures at-rest encryption for the L2 backend.
+// It renders to a "serde" sub-dict of the --l2-adapter JSON
+// ({"type": "aesgcm", ...}) and mounts the referenced master-key Secret
+// into the engine pods.
+type L2EncryptionSpec struct {
+	// masterKeySecretRef references a user-created Secret holding the
+	// master key under the "master" data key. The Secret may live in a
+	// different namespace; the operator creates a managed copy in the
+	// engine's namespace. The operator never generates the key — key
+	// provenance and rotation belong to the user.
+	MasterKeySecretRef SecretReference `json:"masterKeySecretRef"`
+
+	// keyProvider selects how per-cache_salt keys are obtained from the
+	// master key. Only "hkdf" (HKDF-SHA256 derivation) is implemented.
+	// +optional
+	// +kubebuilder:default="hkdf"
+	// +kubebuilder:validation:Enum=hkdf
+	KeyProvider *string `json:"keyProvider,omitempty"`
+
+	// aesBits selects the AES key size. 128 is the default; 256 is
+	// available for compliance mandates.
+	// +optional
+	// +kubebuilder:default=128
+	// +kubebuilder:validation:Enum=128;256
+	AESBits *int32 `json:"aesBits,omitempty"`
 }
 
 // RESPL2AdapterSpec configures a RESP (Redis/Valkey) L2 adapter.

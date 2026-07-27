@@ -154,5 +154,21 @@ func validateL2BackendSpec(b *L2BackendSpec) field.ErrorList {
 		}
 	}
 
+	if b.Encryption != nil {
+		encPath := l2Path.Child("encryption")
+		if b.Encryption.MasterKeySecretRef.Name == "" {
+			errs = append(errs, field.Required(encPath.Child("masterKeySecretRef", "name"), "must be non-empty"))
+		}
+		// A raw adapter spec may already carry a hand-written "serde"
+		// config; combining it with the encryption field would silently
+		// overwrite one of the two.
+		if b.Raw != nil {
+			if _, ok := b.Raw.Config["serde"]; ok {
+				errs = append(errs, field.Invalid(encPath, "",
+					"cannot be combined with a raw adapter that sets a 'serde' config key"))
+			}
+		}
+	}
+
 	return errs
 }

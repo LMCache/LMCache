@@ -441,3 +441,91 @@ func (r *CacheBlendEngineReconciler) deleteRESPAuthSecretIfExists(ctx context.Co
 	}
 	return nil
 }
+
+// reconcileL2EncryptionSecret ensures a local copy of the L2 encryption
+// master-key secret exists in the engine's namespace. It mirrors the
+// LMCacheEngine path: a no-op unless spec.l2Backend.encryption is set,
+// otherwise it reads the user-created source secret (possibly
+// cross-namespace), validates it, and creates/updates a managed copy owned
+// by the CR. The operator never generates key material.
+func (r *CacheBlendEngineReconciler) reconcileL2EncryptionSecret(ctx context.Context, engine *lmcachev1alpha1.CacheBlendEngine) error {
+	log := logf.FromContext(ctx)
+	spec := &engine.Spec
+
+	// No encryption configured — clean up any stale managed secret.
+	if spec.L2Backend == nil || spec.L2Backend.Encryption == nil {
+		return r.deleteL2EncryptionSecretIfExists(ctx, engine)
+	}
+
+	ref := spec.L2Backend.Encryption.MasterKeySecretRef
+	sourceNS := ref.Namespace
+	if sourceNS == "" {
+		sourceNS = engine.Namespace
+	}
+	localName := resources.L2EncryptionSecretName(engine.Name)
+
+	// Read the source secret.
+	source := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: sourceNS}, source); err != nil {
+		return fmt.Errorf("failed to read L2 encryption master-key secret %s/%s: %w", sourceNS, ref.Name, err)
+	}
+
+	// Validate that the source secret contains the required master-key data key.
+	masterKey, ok := source.Data[resources.L2EncryptionKeyDataKey]
+	if !ok || len(masterKey) == 0 {
+		return fmt.Errorf("L2 encryption master-key secret %s/%s is missing required %q key",
+			sourceNS, ref.Name, resources.L2EncryptionKeyDataKey)
+	}
+
+	desired := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      localName,
+			Namespace: engine.Namespace,
+			Labels:    resources.StandardLabels(engine.Name),
+		},
+		Data: map[string][]byte{
+			resources.L2EncryptionKeyDataKey: masterKey,
+		},
+	}
+
+	existing := &corev1.Secret{}
+	err := r.Get(ctx, types.NamespacedName{Name: localName, Namespace: engine.Namespace}, existing)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			if err := ctrl.SetControllerReference(engine, desired, r.Scheme); err != nil {
+				return err
+			}
+			log.Info("Creating managed L2 encryption secret", "name", localName, "source", sourceNS+"/"+ref.Name)
+			return r.Create(ctx, desired)
+		}
+		return err
+	}
+
+	// Update existing — apply ownerRef, data, and labels.
+	if err := ctrl.SetControllerReference(engine, existing, r.Scheme); err != nil {
+		return err
+	}
+	patch := client.MergeFrom(existing.DeepCopy())
+	existing.Data = desired.Data
+	existing.Labels = desired.Labels
+	return r.Patch(ctx, existing, patch)
+}
+
+// deleteL2EncryptionSecretIfExists removes the managed L2 encryption secret if
+// it exists (e.g. when encryption is removed from the spec).
+func (r *CacheBlendEngineReconciler) deleteL2EncryptionSecretIfExists(ctx context.Context, engine *lmcachev1alpha1.CacheBlendEngine) error {
+	secret := &corev1.Secret{}
+	name := resources.L2EncryptionSecretName(engine.Name)
+	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: engine.Namespace}, secret)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	// Only delete if we own it.
+	if metav1.IsControlledBy(secret, engine) {
+		return r.Delete(ctx, secret)
+	}
+	return nil
+}

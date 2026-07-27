@@ -441,6 +441,95 @@ func TestBuildContainerArgs_L2Raw(t *testing.T) {
 	}
 }
 
+func TestBuildContainerArgs_L2EncryptionRESP(t *testing.T) {
+	spec := &lmcachev1alpha1.LMCacheEngineSpec{
+		L1: lmcachev1alpha1.L1BackendSpec{SizeGB: 10},
+		L2Backend: &lmcachev1alpha1.L2BackendSpec{
+			RESP: &lmcachev1alpha1.RESPL2AdapterSpec{Host: "redis", Port: 6379},
+			Encryption: &lmcachev1alpha1.L2EncryptionSpec{
+				MasterKeySecretRef: lmcachev1alpha1.SecretReference{Name: "l2-master-key"},
+			},
+		},
+	}
+	args := BuildContainerArgs(spec)
+
+	l2JSON := findArgValue(t, args, "--l2-adapter")
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(l2JSON), &parsed); err != nil {
+		t.Fatalf("failed to parse L2 JSON: %v", err)
+	}
+	serde, ok := parsed["serde"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected serde sub-dict, got %v", parsed["serde"])
+	}
+	if serde["type"] != "aesgcm" {
+		t.Fatalf("expected serde type=aesgcm, got %v", serde["type"])
+	}
+	if serde["key_provider"] != "hkdf" {
+		t.Fatalf("expected key_provider=hkdf, got %v", serde["key_provider"])
+	}
+	if serde["master_key_path"] != L2EncryptionKeyPath {
+		t.Fatalf("expected master_key_path=%s, got %v", L2EncryptionKeyPath, serde["master_key_path"])
+	}
+	if serde["aes_bits"] != float64(128) {
+		t.Fatalf("expected aes_bits=128, got %v", serde["aes_bits"])
+	}
+}
+
+func TestBuildContainerArgs_L2EncryptionRawWithOverrides(t *testing.T) {
+	spec := &lmcachev1alpha1.LMCacheEngineSpec{
+		L1: lmcachev1alpha1.L1BackendSpec{SizeGB: 10},
+		L2Backend: &lmcachev1alpha1.L2BackendSpec{
+			Raw: &lmcachev1alpha1.RawL2AdapterSpec{
+				Type: "fs",
+				Config: map[string]apiextensionsv1.JSON{
+					"base_path": {Raw: []byte(`"/data/l2"`)},
+				},
+			},
+			Encryption: &lmcachev1alpha1.L2EncryptionSpec{
+				MasterKeySecretRef: lmcachev1alpha1.SecretReference{Name: "l2-master-key"},
+				AESBits:            ptr(int32(256)),
+			},
+		},
+	}
+	args := BuildContainerArgs(spec)
+
+	l2JSON := findArgValue(t, args, "--l2-adapter")
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(l2JSON), &parsed); err != nil {
+		t.Fatalf("failed to parse L2 JSON: %v", err)
+	}
+	if parsed["base_path"] != "/data/l2" {
+		t.Fatalf("expected base_path=/data/l2, got %v", parsed["base_path"])
+	}
+	serde, ok := parsed["serde"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected serde sub-dict, got %v", parsed["serde"])
+	}
+	if serde["aes_bits"] != float64(256) {
+		t.Fatalf("expected aes_bits=256, got %v", serde["aes_bits"])
+	}
+}
+
+func TestBuildContainerArgs_L2NoEncryptionNoSerde(t *testing.T) {
+	spec := &lmcachev1alpha1.LMCacheEngineSpec{
+		L1: lmcachev1alpha1.L1BackendSpec{SizeGB: 10},
+		L2Backend: &lmcachev1alpha1.L2BackendSpec{
+			RESP: &lmcachev1alpha1.RESPL2AdapterSpec{Host: "redis", Port: 6379},
+		},
+	}
+	args := BuildContainerArgs(spec)
+
+	l2JSON := findArgValue(t, args, "--l2-adapter")
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(l2JSON), &parsed); err != nil {
+		t.Fatalf("failed to parse L2 JSON: %v", err)
+	}
+	if _, ok := parsed["serde"]; ok {
+		t.Fatal("expected no serde sub-dict without encryption")
+	}
+}
+
 func TestBuildContainerArgs_L2CustomPolicies(t *testing.T) {
 	spec := &lmcachev1alpha1.LMCacheEngineSpec{
 		L1: lmcachev1alpha1.L1BackendSpec{SizeGB: 10},
@@ -792,6 +881,63 @@ func TestBuildDaemonSet_RESPWithAuth(t *testing.T) {
 	}
 	if !foundPass {
 		t.Fatal("missing LMCACHE_RESP_PASSWORD env var")
+	}
+}
+
+func TestBuildDaemonSet_L2EncryptionMountsMasterKey(t *testing.T) {
+	engine := minimalEngine()
+	engine.Spec.L2Backend = &lmcachev1alpha1.L2BackendSpec{
+		RESP: &lmcachev1alpha1.RESPL2AdapterSpec{Host: "redis", Port: 6379},
+		Encryption: &lmcachev1alpha1.L2EncryptionSpec{
+			MasterKeySecretRef: lmcachev1alpha1.SecretReference{Name: "l2-master-key"},
+		},
+	}
+
+	ds := BuildDaemonSet(engine)
+	pod := ds.Spec.Template.Spec
+
+	var vol *corev1.Volume
+	for i := range pod.Volumes {
+		if pod.Volumes[i].Name == l2EncryptionKeyVolumeName {
+			vol = &pod.Volumes[i]
+		}
+	}
+	if vol == nil {
+		t.Fatal("expected l2-master-key volume")
+	}
+	if vol.Secret == nil || vol.Secret.SecretName != L2EncryptionSecretName(testEngineName) {
+		t.Fatalf("expected secret volume %s, got %+v", L2EncryptionSecretName(testEngineName), vol.VolumeSource)
+	}
+	if vol.Secret.DefaultMode == nil || *vol.Secret.DefaultMode != 0o400 {
+		t.Fatalf("expected defaultMode 0400, got %v", vol.Secret.DefaultMode)
+	}
+
+	var mount *corev1.VolumeMount
+	c := pod.Containers[0]
+	for i := range c.VolumeMounts {
+		if c.VolumeMounts[i].Name == l2EncryptionKeyVolumeName {
+			mount = &c.VolumeMounts[i]
+		}
+	}
+	if mount == nil {
+		t.Fatal("expected l2-master-key volume mount")
+	}
+	if mount.MountPath != l2EncryptionKeyMountDir || !mount.ReadOnly {
+		t.Fatalf("expected read-only mount at %s, got %+v", l2EncryptionKeyMountDir, mount)
+	}
+}
+
+func TestBuildDaemonSet_NoEncryptionNoMasterKeyMount(t *testing.T) {
+	engine := minimalEngine()
+	engine.Spec.L2Backend = &lmcachev1alpha1.L2BackendSpec{
+		RESP: &lmcachev1alpha1.RESPL2AdapterSpec{Host: "redis", Port: 6379},
+	}
+
+	ds := BuildDaemonSet(engine)
+	for _, v := range ds.Spec.Template.Spec.Volumes {
+		if v.Name == l2EncryptionKeyVolumeName {
+			t.Fatal("unexpected l2-master-key volume without encryption")
+		}
 	}
 }
 
