@@ -627,3 +627,163 @@ def test_raw_block_l2_adapter_error_bitmaps_keep_submitted_size():
             assert str(load_bitmap) == "00"
         finally:
             adapter.close()
+
+
+@requires_raw_block_ext
+def test_raw_block_l2_adapter_incremental_multi_key_recovery():
+    """End-to-end MP path test for base+delta checkpoint recovery.
+
+    Mirrors the non-MP integration in
+    ``test_rust_raw_block_backend_incremental_multi_key_recovery`` but
+    drives the multi-process L2 adapter so the same incremental code path
+    is verified through the MP wrapper. Stores several keys with explicit
+    checkpoints between puts (triggering delta records after the first
+    full base), then reopens the adapter twice to confirm both the index
+    and on-disk payload bytes survive base+delta replay.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(8 * 1024 * 1024)
+
+        config = RawBlockL2AdapterConfig(
+            device_path=dev_path,
+            slot_bytes=64 * 1024,
+            use_odirect=False,
+            block_align=4096,
+            header_bytes=4096,
+            meta_total_bytes=1 * 1024 * 1024,
+            meta_enable_periodic=False,
+            num_store_workers=2,
+            num_lookup_workers=1,
+            num_load_workers=2,
+            meta_full_checkpoint_max_deltas=1024,
+        )
+
+        keys = [_create_object_key(100 + i) for i in range(5)]
+        objects = [_create_memory_obj(fill_value=float(100 + i)) for i in range(5)]
+        expected_payloads = [bytes(o.byte_array) for o in objects]
+
+        adapter1 = RawBlockL2Adapter(config)
+        try:
+            for key, obj in zip(keys, objects, strict=False):
+                assert _run_store(adapter1, [key], [obj]) is True
+                # One checkpoint per put -> first becomes the full base, the
+                # rest land as delta records.
+                adapter1._core.checkpoint_now()
+            assert adapter1._core._meta_seq >= 1
+            assert adapter1._core._delta_seq >= 1, (
+                "MP adapter must emit delta records after the initial full"
+            )
+        finally:
+            adapter1.close()
+
+        adapter2 = RawBlockL2Adapter(config)
+        try:
+            _, lookup_bitmap = _run_lookup(adapter2, keys)
+            assert lookup_bitmap is not None
+            assert lookup_bitmap.get_indices_list() == list(range(len(keys))), (
+                "every recovered key must be present after delta replay"
+            )
+
+            load_buffers = [_create_memory_obj(fill_value=0.0) for _ in keys]
+            _, load_bitmap = _run_load(adapter2, keys, load_buffers)
+            assert load_bitmap is not None
+            assert load_bitmap.get_indices_list() == list(range(len(keys)))
+            for buf, expected in zip(load_buffers, expected_payloads, strict=False):
+                assert bytes(buf.byte_array) == expected, (
+                    "recovered payload bytes must match the stored bytes"
+                )
+            adapter2.submit_unlock(keys)
+
+            # Add one more key and let close persist it via the trigger logic.
+            extra_key = _create_object_key(900)
+            extra_obj = _create_memory_obj(fill_value=99.0)
+            assert _run_store(adapter2, [extra_key], [extra_obj]) is True
+            expected_extra = bytes(extra_obj.byte_array)
+        finally:
+            adapter2.close()
+
+        adapter3 = RawBlockL2Adapter(config)
+        try:
+            all_keys = keys + [extra_key]
+            _, lookup_bitmap = _run_lookup(adapter3, all_keys)
+            assert lookup_bitmap is not None
+            assert lookup_bitmap.get_indices_list() == list(range(len(all_keys)))
+
+            load_buffers = [_create_memory_obj(fill_value=0.0) for _ in all_keys]
+            _, load_bitmap = _run_load(adapter3, all_keys, load_buffers)
+            assert load_bitmap is not None
+            assert load_bitmap.get_indices_list() == list(range(len(all_keys)))
+            for buf, expected in zip(
+                load_buffers, expected_payloads + [expected_extra], strict=False
+            ):
+                assert bytes(buf.byte_array) == expected
+            adapter3.submit_unlock(all_keys)
+        finally:
+            adapter3.close()
+
+
+@requires_raw_block_ext
+def test_raw_block_l2_adapter_close_flushes_pending_via_delta():
+    """``close()`` on the MP adapter must persist a pending dirty log so the
+    next mount recovers the just-stored key. The trigger logic prefers a
+    delta record when the base+delta layout is active and the dirty log
+    fits in one record.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(8 * 1024 * 1024)
+
+        config = RawBlockL2AdapterConfig(
+            device_path=dev_path,
+            slot_bytes=64 * 1024,
+            use_odirect=False,
+            block_align=4096,
+            header_bytes=4096,
+            meta_total_bytes=1 * 1024 * 1024,
+            meta_enable_periodic=False,
+            num_store_workers=1,
+            num_lookup_workers=1,
+            num_load_workers=1,
+        )
+
+        seed_key = _create_object_key(700)
+        seed_obj = _create_memory_obj(fill_value=7.0)
+        adapter1 = RawBlockL2Adapter(config)
+        try:
+            # First store + explicit checkpoint becomes the full base.
+            assert _run_store(adapter1, [seed_key], [seed_obj]) is True
+            adapter1._core.checkpoint_now()
+            assert adapter1._core._delta_seq == 0
+
+            # Second store stays in the dirty log; close() must flush it.
+            tail_key = _create_object_key(701)
+            tail_obj = _create_memory_obj(fill_value=8.0)
+            expected_tail = bytes(tail_obj.byte_array)
+            assert _run_store(adapter1, [tail_key], [tail_obj]) is True
+        finally:
+            adapter1.close()
+
+        adapter2 = RawBlockL2Adapter(config)
+        try:
+            assert adapter2._core._delta_seq >= 1, (
+                "close() must persist the pending mutation as a delta record"
+            )
+            _, lookup_bitmap = _run_lookup(adapter2, [seed_key, tail_key])
+            assert lookup_bitmap is not None
+            assert lookup_bitmap.get_indices_list() == [0, 1]
+
+            load_buffers = [
+                _create_memory_obj(fill_value=0.0),
+                _create_memory_obj(fill_value=0.0),
+            ]
+            _, load_bitmap = _run_load(adapter2, [seed_key, tail_key], load_buffers)
+            assert load_bitmap is not None
+            assert load_bitmap.get_indices_list() == [0, 1]
+            assert bytes(load_buffers[0].byte_array) == bytes(seed_obj.byte_array)
+            assert bytes(load_buffers[1].byte_array) == expected_tail
+            adapter2.submit_unlock([seed_key, tail_key])
+        finally:
+            adapter2.close()

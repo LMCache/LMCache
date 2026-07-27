@@ -91,6 +91,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         num_store_workers: int = 2,
         num_lookup_workers: int = 1,
         num_load_workers: int = 4,
+        meta_full_checkpoint_interval_sec: int = 600,
+        meta_full_checkpoint_max_deltas: int = 1024,
     ):
         """Initialize raw-block MP adapter configuration.
 
@@ -117,6 +119,10 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             num_store_workers: Number of store worker threads.
             num_lookup_workers: Number of lookup worker threads.
             num_load_workers: Number of load worker threads.
+            meta_full_checkpoint_interval_sec: Force a full base compaction
+                at least this often, regardless of delta volume.
+            meta_full_checkpoint_max_deltas: Force compaction after this many
+                delta records since the last full base.
         """
         super().__init__()
         self.device_path = device_path
@@ -144,6 +150,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         self.num_store_workers = int(num_store_workers)
         self.num_lookup_workers = int(num_lookup_workers)
         self.num_load_workers = int(num_load_workers)
+        self.meta_full_checkpoint_interval_sec = int(meta_full_checkpoint_interval_sec)
+        self.meta_full_checkpoint_max_deltas = int(meta_full_checkpoint_max_deltas)
 
     @classmethod
     def from_dict(cls, d: dict) -> "RawBlockL2AdapterConfig":
@@ -230,6 +238,12 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             num_store_workers=worker_counts["num_store_workers"],
             num_lookup_workers=worker_counts["num_lookup_workers"],
             num_load_workers=worker_counts["num_load_workers"],
+            meta_full_checkpoint_interval_sec=int(
+                d.get("meta_full_checkpoint_interval_sec", 600)
+            ),
+            meta_full_checkpoint_max_deltas=int(
+                d.get("meta_full_checkpoint_max_deltas", 1024)
+            ),
         )
 
     @classmethod
@@ -270,7 +284,11 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             "< 0: auto detect limit splitting)\n"
             "- num_store_workers (int): store worker threads (default 2)\n"
             "- num_lookup_workers (int): lookup worker threads (default 1)\n"
-            "- num_load_workers (int): load worker threads (default 4)"
+            "- num_load_workers (int): load worker threads (default 4)\n"
+            "- meta_full_checkpoint_interval_sec (int): force full compaction "
+            "at least this often (default 600)\n"
+            "- meta_full_checkpoint_max_deltas (int): compact after this many "
+            "delta records (default 1024)"
         )
 
     def to_core_config(self) -> RawBlockCoreConfig:
@@ -295,6 +313,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             iouring_queue_depth=self.iouring_queue_depth,
             use_uring_cmd=self.use_uring_cmd,
             max_data_transfer_size=self.max_data_transfer_size,
+            meta_full_checkpoint_interval_sec=self.meta_full_checkpoint_interval_sec,
+            meta_full_checkpoint_max_deltas=self.meta_full_checkpoint_max_deltas,
         )
 
 
