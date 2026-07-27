@@ -1623,7 +1623,7 @@ class LMCacheMPWorkerAdapter:
             if not s_future.query():
                 continue
 
-            s_result = s_future.result()
+            s_result = s_future.result(timeout=60)
             finished_stores.add(request_id)
 
             if not s_result:
@@ -1637,7 +1637,7 @@ class LMCacheMPWorkerAdapter:
             if not r_future.query():
                 continue
 
-            r_result = r_future.result()
+            r_result = r_future.result(timeout=60)
             finished_retrieves.add(request_id)
 
             if not r_result:
