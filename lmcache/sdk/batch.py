@@ -22,7 +22,7 @@ class LMCacheBatchedStreamError(RuntimeError):
 
 
 class LMCacheBatchedStream:
-    """A collection of LMCacheStreams run together as one batch."""
+    """A collection of LMCacheRequestStreams run together as one batch."""
 
     def __init__(self) -> None:
         """Create a batch.
@@ -32,10 +32,10 @@ class LMCacheBatchedStream:
             perf_metrics: Latest StreamPerfMetrics per stream id, overwritten
                 on each call to run_streams.
         """
-        self.streams: dict[str, lmc_stream.LMCacheStream] = {}
+        self.streams: dict[str, lmc_stream.LMCacheRequestStream] = {}
         self.perf_metrics: dict[str, lmc_stream.StreamPerfMetrics] = {}
 
-    def add(self, stream: lmc_stream.LMCacheStream) -> None:
+    def add(self, stream: lmc_stream.LMCacheRequestStream) -> None:
         """Add a stream to the batch, keyed by its stream id.
 
         Args:
@@ -51,14 +51,14 @@ class LMCacheBatchedStream:
             )
         self.streams[stream.stream_id] = stream
 
-    def get_stream(self, stream_id: str) -> lmc_stream.LMCacheStream:
+    def get_stream(self, stream_id: str) -> lmc_stream.LMCacheRequestStream:
         """Return the stream registered under stream_id.
 
         Args:
             stream_id: The id of the stream to fetch.
 
         Returns:
-            The matching LMCacheStream.
+            The matching LMCacheRequestStream.
 
         Raises:
             LMCacheBatchedStreamError: If no stream has that id.
@@ -127,7 +127,7 @@ class LMCacheBatchedStream:
         Submits stream.modify_kv(fn) on a thread pool (one worker per stream).
 
         Args:
-            fn: KV editor applied to each stream. See LMCacheStream.modify_kv().
+            fn: KV editor applied to each stream. See LMCacheRequestStream.modify_kv().
             stream_ids: Streams to modify. None means all streams in the batch.
             timeout: Max seconds to wait for the cached KV to appear.
             poll_interval: Seconds between retrieve attempts.

@@ -4,7 +4,7 @@
 
 ## Goal
 
-`LMCacheStream` drives one request. `LMCacheBatchedStream` groups many of them
+`LMCacheRequestStream` drives one request. `LMCacheBatchedStream` groups many of them
 and runs each phase — prefill, modify, decode — across the whole batch at once
 (one thread per stream), then aggregates the per-stream `StreamPerfMetrics`
 into a single `Metrics` report.

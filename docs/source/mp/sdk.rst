@@ -56,6 +56,7 @@ To start the LMCache server with shared-memory transfer enabled, pass
 ``--shm-name`` and disable lazy L1 allocation with ``--no-l1-use-lazy``. If
 shared memory is unavailable and these flags are not specified, the SDK falls 
 back to pickle.
+To transfer query tensors, add ``--enable transfer_query`` flag.
 
 .. code-block:: bash
 
@@ -66,7 +67,8 @@ back to pickle.
         --port 6555 \
         --http-port 8080 \
         --shm-name lmcache_kvcache_sdk \
-        --no-l1-use-lazy
+        --no-l1-use-lazy \
+        --enable transfer_query
 
 Then start vLLM with the LMCache MP connector.
 
@@ -86,13 +88,15 @@ Then start vLLM with the LMCache MP connector.
 
 To also send intermediate tensors, add 
 ``"lmcache.mp.transfer_intermediate_tensors": true`` to
-``kv_connector_extra_config`` and set the 
-``LMCACHE_TRANSFER_INTERMEDIATE_TENSORS`` environment variable to ``true``.
+``kv_connector_extra_config``.
+By default, the QRingBuffer, a temporary staging buffer for containing
+query tensor, has the capacity to hold the query tensor of 2 forward
+passes. However, it can also be configured via 
+``"lmcache.mp.q.ring_depth":2``.
 Example:
 
 .. code-block:: bash
 
-    LMCACHE_TRANSFER_INTERMEDIATE_TENSORS=true \
     vllm serve Qwen/Qwen3-8B \
         --port 8000 \
         --enforce-eager \
@@ -102,7 +106,8 @@ Example:
             "kv_role":"kv_both",
             "kv_connector_extra_config":{
                 "lmcache.mp.transfer_intermediate_tensors": true,
-                "lmcache.mp.port":6555
+                "lmcache.mp.port":6555,
+                "lmcache.mp.q.ring_depth":2
             }
         }' \
         --trust-remote-code \
@@ -127,15 +132,15 @@ Each type of tensor (KV, query intermediate) has its own context.
         model_name="Qwen/Qwen3-8B",
         timeout=60,
     )
-	q_ctx = lmc_sdk.qcache.connect(
-		url="tcp://localhost:6555",         # must match --port
-		http_url="http://localhost:8080",   # must match --http-port
-		model_name="Qwen/Qwen3-8B",
-		timeout=60,
-	)
+    q_ctx = lmc_sdk.qcache.connect(
+        url="tcp://localhost:6555",         # must match --port
+        http_url="http://localhost:8080",   # must match --http-port
+        model_name="Qwen/Qwen3-8B",
+        timeout=60,
+    )
     ...
     kv_ctx.close()
-	q_ctx.close()
+    q_ctx.close()
 
 
 Writing a custom edit function
@@ -177,7 +182,7 @@ Modules
    * - ``lmcache.sdk.context``
      - The server-connection context plus the shared cache-kind enum and error type.
    * - ``lmcache.sdk.stream``
-     - Per-request streaming: ``create_request()`` and ``LMCacheStream``.
+     - Per-request streaming: ``create_request()`` and ``LMCacheRequestStream``.
    * - ``lmcache.sdk.batch``
      - Orchestrates many streams together via ``LMCacheBatchedStream``.
    * - ``lmcache.sdk.wrapper.contiguous``
@@ -198,17 +203,17 @@ Classes
    * - ``context.LMCacheSDKContext``
      - A connection to one LMCache server for one model + kind; returned by
        ``connect`` and passed to every other call.
-   * - ``stream.LMCacheStream``
+   * - ``stream.LMCacheRequestStream``
      - One request's lifecycle (prefill / decode / retrieve / modify).
    * - ``batch.LMCacheBatchedStream``
-     - Runs a set of ``LMCacheStream``s together and reports metrics.
+     - Runs a set of ``LMCacheRequestStream``s together and reports metrics.
    * - ``stream.StreamPerfMetrics``
      - Throughput / latency report returned by the batch operations.
    * - ``stream.TokenEvent``
      - One generated-token event passed back through the stream.
    * - ``stream.PostCompletion``
      - Protocol you implement: a callable that submits a request to your engine.
-   * - ``context.LMCacheSDKError`` / ``stream.LMCacheStreamError`` /
+   * - ``context.LMCacheSDKError`` / ``stream.LMCacheRequestStreamError`` /
        ``batch.LMCacheBatchedStreamError``
      - Error types raised by the SDK, streams, and batches respectively.
 

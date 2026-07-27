@@ -4,11 +4,11 @@
 
 ## Goal
 
-`LMCacheSDKContext` is stateless — its `retrieve`/`store` move KV by token ids and forget. A
-token dropping request spans several passes (prefill, modify the cached KV, 
-decode), which are encoded as different requests. `LMCacheStream` binds all
-request belonging to a request as a stream instead of leaving the management
-to the user.
+`LMCacheSDKContext` is stateless — its `retrieve`/`store` move KV by token ids
+and forget. A token dropping request spans several passes (prefill, modify the
+cached KV, decode), which are encoded as different requests. 
+`LMCacheRequestStream` binds all request belonging to a request as a stream
+instead of leaving the management to the user.
 
 ```py
 import lmcache.sdk.kvcache as lmc_sdk
@@ -16,7 +16,7 @@ import lmcache.sdk.stream as lmc_stream
 
 ctx = lmc_sdk.connect(url=..., http_url=..., model_name="Qwen/Qwen3-8B")
 stream = lmc_stream.create_request(
-    [ctx], post_completion, prompt_token_ids=source_tokens  # contexts is an iterable
+    [ctx], post_completion, prompt_token_ids=source_tokens  #contexts: iterable
 )
 
 stream.generate({"max_tokens": 1})    # prefill -> offload the prompt KV
@@ -59,9 +59,9 @@ stored KV. The stream carries it across the edit:
 
 ## Public API
 
-- **`LMCacheStream(contexts, post_completion, prompt_token_ids, cache_salt="")`**
-  or `create_request(contexts, ...)`; `contexts` is an iterable (e.g. `[kv_ctx]`
-  or `[kv_ctx, q_ctx]`).
+- **`LMCacheRequestStream(contexts, post_completion,
+  prompt_token_ids, cache_salt="")`** or `create_request(contexts, ...)`;
+  `contexts` is an iterable (e.g. `[kv_ctx]` or `[kv_ctx, q_ctx]`).
 - **`generate(sampling_params, suffix_tokens=())`** returns `StreamPerfMetrics`,
   the performance metrics of one request.
 - **`modify_kv(fn, timeout=30.0, poll_interval=0.2)`**: calls `retrieve`, passing
@@ -73,4 +73,4 @@ stored KV. The stream carries it across the edit:
   `output_text`, `output_tokens`, `is_done`.
 - **`StreamPerfMetrics`** (per call metric, times in **seconds**).
 - **`TokenEvent(token_id, text)`**, **`PostCompletion`** (Protocol),
-  **`LMCacheStreamError`**.
+  **`LMCacheRequestStreamError`**.

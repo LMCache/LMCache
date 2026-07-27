@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Public API for LMCacheStream, a wrapper of a logical request going through the SDK.
+Public API for LMCacheRequestStream, a wrapper of a logical request going
+through the SDK.
 """
 
 # Future
@@ -27,8 +28,8 @@ from lmcache.sdk.context import (
 logger = init_logger(__name__)
 
 
-class LMCacheStreamError(RuntimeError):
-    """Raised when a LMCacheStream operation fails."""
+class LMCacheRequestStreamError(RuntimeError):
+    """Raised when a LMCacheRequestStream operation fails."""
 
 
 @dataclass(frozen=True)
@@ -94,8 +95,8 @@ def create_request(
     post_completion: PostCompletion,
     prompt_token_ids: Sequence[int],
     cache_salt: str = "",
-) -> LMCacheStream:
-    """Create an LMCacheStream for a new request.
+) -> LMCacheRequestStream:
+    """Create an LMCacheRequestStream for a new request.
 
     Args:
         contexts: The LMCache SDK contexts used for retrieve/store.
@@ -104,9 +105,9 @@ def create_request(
         cache_salt: Per-user isolation salt, or empty string.
 
     Returns:
-        A new LMCacheStream.
+        A new LMCacheRequestStream.
     """
-    return LMCacheStream(
+    return LMCacheRequestStream(
         contexts=contexts,
         post_completion=post_completion,
         prompt_token_ids=prompt_token_ids,
@@ -114,7 +115,7 @@ def create_request(
     )
 
 
-class LMCacheStream:
+class LMCacheRequestStream:
     """Handle for one logical request spanning multiple inference passes.
 
     Args:
@@ -193,7 +194,7 @@ class LMCacheStream:
             throughputs, ttft, tpot — all times in seconds).
 
         Raises:
-            LMCacheStreamError: If post_completion fails mid-stream.
+            LMCacheRequestStreamError: If post_completion fails mid-stream.
         """
         pending = self._suffix_tokens + list(suffix_tokens)
         self._suffix_tokens = []
@@ -215,7 +216,7 @@ class LMCacheStream:
                 time_between_tokens.append(time.perf_counter() - last_token_time)
                 last_token_time = time.perf_counter()
         except Exception as e:
-            raise LMCacheStreamError(
+            raise LMCacheRequestStreamError(
                 f"Stream {self.stream_id} failed during generation: {e}"
             ) from e
         finally:
@@ -259,18 +260,20 @@ class LMCacheStream:
             KV shape is [2, L, T, D]. Q shape is [1, L, T, D].
 
         Raises:
-            LMCacheStreamError: If no cached tensor is available within timeout.
+            LMCacheRequestStreamError: If no cached tensor is available within timeout.
         """
         ctx = self._contexts.get(kind)
         if not ctx:
-            raise LMCacheStreamError(f"no context available for cache kind {kind}")
+            raise LMCacheRequestStreamError(
+                f"no context available for cache kind {kind}"
+            )
         deadline = time.perf_counter() + timeout
         tensor = ctx.retrieve(self.tokens, self.cache_salt)
         while tensor is None and time.perf_counter() < deadline:
             time.sleep(poll_interval)
             tensor = ctx.retrieve(self.tokens, self.cache_salt)
         if tensor is None:
-            raise LMCacheStreamError(
+            raise LMCacheRequestStreamError(
                 f"no cached {kind} for {self.stream_id} after {timeout:.0f}s"
             )
         return tensor
@@ -292,7 +295,9 @@ class LMCacheStream:
         """
         ctx = self._contexts.get(kind)
         if not ctx:
-            raise LMCacheStreamError(f"no context available for cache kind {kind}")
+            raise LMCacheRequestStreamError(
+                f"no context available for cache kind {kind}"
+            )
         if not ctx.store(kv, tokens, self.cache_salt):
             logger.warning(
                 "store reported edited KV already cached for stream %s",
