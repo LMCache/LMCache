@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+import argparse
 import datetime
 
 # Third Party
@@ -111,8 +112,28 @@ def get_lmcache_infos():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description=(
+            "Reference LMCache discovery service. Accepts heartbeats at "
+            "/lmcache_heartbeat and exposes the node list at /lmcache_infos."
+        )
+    )
+    parser.add_argument(
+        "--host",
+        type=str,
+        default="0.0.0.0",
+        help="Bind host address (default: 0.0.0.0, listen on all interfaces).",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=5000,
+        help="Bind port (default: 5000).",
+    )
+    cli_args = parser.parse_args()
+
     # Bind on all interfaces so remote peers (e.g. the MP server running
     # on another host) can report heartbeats. ``debug=False`` avoids
     # spawning Flask's reloader, which can double-launch the process
     # inside containers.
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host=cli_args.host, port=cli_args.port, debug=False)
