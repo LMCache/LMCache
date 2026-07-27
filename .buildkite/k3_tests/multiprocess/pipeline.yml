@@ -69,6 +69,22 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
 
+      # Cross-TP-rank KV correctness for a hybrid MLA + linear-attention model.
+      # Launches Kimi-Linear with TP=2 (both GPUs) + LMCache, sends one long
+      # request to populate LMCache, restarts vLLM (LMCache server kept alive),
+      # re-sends the identical request now served by LMCache, and asserts the
+      # two outputs are byte-identical. A broken cross-rank restore (see
+      # utils.py::mla_only) hands non-zero ranks rank 0's mamba shard and
+      # diverges the output. Two 48B loads (cold + post-restart) need the long
+      # timeout.
+      - label: ":compression: kimi_linear_tp"
+        command: .buildkite/k3_tests/multiprocess/run.sh kimi_linear_tp
+        timeout_in_minutes: 60
+        retry: *flaky-retry
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
+        artifact_paths: ["*.log"]
+
   - group: ":compression: Multiprocess (1-GPU)"
     if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/
     steps:

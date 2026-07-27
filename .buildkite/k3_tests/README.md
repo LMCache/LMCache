@@ -47,10 +47,10 @@ instead of `buildkite-agent pipeline upload` directly. The wrapper
 - **Skips** the build (exits 0 without uploading `pipeline.yml` → build is
   green with just the upload step) when *all* changed files match a "trivial"
   pattern: `*.md`, `LICENSE*`, `NOTICE*`, `.gitignore`, `.gitattributes`,
-  `.editorconfig`, `.mailmap`, `CODEOWNERS`, or anything under `docs/` or
-  `.github/`. (`.github/` is trivial here because k3 tests run on Buildkite,
-  not GitHub Actions, so workflow / CODEOWNERS / template changes do not
-  affect them.)
+  `.editorconfig`, `.mailmap`, `CODEOWNERS`, or anything under `docs/`,
+  `asset/`, or `.github/`. (`.github/` is trivial here
+  because k3 tests run on Buildkite, not GitHub Actions, so workflow /
+  CODEOWNERS / template changes do not affect them.)
 - **Force-runs** the build when any changed file lives under `.buildkite/` —
   those PRs are usually fixing the k3 CI itself, so we want them tested on
   the PR rather than after merge.
@@ -68,6 +68,7 @@ Detection:
 To bypass the skip and force a full run, add the **`force-ci`** label to the
 PR on GitHub. Buildkite picks up PR labels automatically; when the filter
 sees `force-ci` it runs the full pipeline regardless of which files changed.
+
 
 ### Trigger strategy
 
