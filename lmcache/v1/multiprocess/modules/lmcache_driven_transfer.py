@@ -5,6 +5,7 @@
 from dataclasses import dataclass
 from itertools import islice
 from typing import Generator, Sequence
+import functools
 import threading
 import time
 
@@ -54,8 +55,40 @@ from lmcache.v1.platform.base.event_ipc import (
 )
 from lmcache.v1.platform.cache_context import create_cache_context
 import lmcache.c_ops as lmc_ops
+from lmcache.v1.periodic_thread import (
+    PeriodicThread,
+    PeriodicThreadRegistry,
+    ThreadLevel,
+    ThreadRunSummary,
+    create_periodic_thread,
+)
 
 logger = init_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# IPC memory management constants
+# ---------------------------------------------------------------------------
+
+# How often (seconds) the periodic IPC-collection thread runs.  Between
+# cycles, IPC handles orphaned by normal operation (e.g. a worker that
+# crashed before its unregister) accumulate.  This thread reclaims them
+# by calling ``empty_cache()`` + ``ipc_collect()`` so the handles do not
+# pin GPU memory indefinitely.  60 s is a reasonable default: frequent
+# enough to keep handle count bounded, infrequent enough to avoid
+# interfering with active transfers.
+_IPC_COLLECT_INTERVAL_S = 60.0
+
+# Grace period (seconds) before a dead-but-in-use context entry is
+# force-released.  When a worker is reaped/unregistered while a store or
+# retrieve is in-flight, the entry is marked ``dead=True`` and its release
+# is deferred until the transfer finishes and calls ``checkin_context_entry``.
+# If the transfer handler raises before reaching the ``finally`` block
+# (or the worker process is killed mid-transfer), the checkin never
+# happens and the entry -- and its IPC handles -- leak permanently.
+# This timeout is a safety net: after the grace period the entry is
+# force-released regardless, accepting the small risk of unmapping a
+# segment that a zombie CUDA stream might still reference.
+_CHECKIN_TIMEOUT_S = 120.0
 _HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = hasattr(
     lmc_ops, "execute_object_group_transfer"
 )
@@ -576,7 +609,13 @@ def transfer_kv_per_object_group(
                 )
 
 
-@dataclass
+# Hashable by identity: ContextEntry is used as a key in _dead_entries
+# (the dead-entry tracker populated by _retire_entries). A plain @dataclass
+# sets __hash__ = None, which would crash _retire_entries the first time a
+# busy (in_use > 0) entry is retired and added to the tracker. eq=False keeps
+# the default identity-based hash/equality, which is correct here since the
+# tracker keys entries by object identity, not by field value.
+@dataclass(eq=False)
 class ContextEntry:
     """Registered cache context metadata for a single worker instance.
 
@@ -606,6 +645,21 @@ class ContextEntry:
     last_seen: float = 0.0
     has_liveness_signal: bool = False
     event_backend: EventIPCBackend | None = None
+    # Transfer-vs-teardown guard: ``in_use`` counts store/retrieve operations
+    # currently holding this entry's cache_context; ``dead`` marks an entry
+    # removed from the registry (reap / unregister) whose release must wait
+    # for the last such operation. Closing the context mid-copy unmaps the
+    # IPC/SHM segments under an active tensor copy and the server dies with
+    # SIGSEGV in the copy kernel (observed 2026-07-21 on every engine
+    # death/restart under load). Both fields are guarded by the module lock.
+    in_use: int = 0
+    dead: bool = False
+    # Guard against double-release: set to True the first time
+    # _release_entries runs for this entry.  Both checkin_context_entry and
+    # _ipc_collect_cycle can reach _release_entries for the same dead entry;
+    # without this flag, cache_context.close() and layout_desc_registry
+    # .unregister() would be called twice.
+    released: bool = False
 
 
 class LMCacheDrivenTransferModule(InstanceLivenessTarget):
@@ -643,6 +697,22 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         )
         self._device_host_func_dispatcher.start()
 
+        # ------------------------------------------------------------------
+        # Periodic IPC memory management
+        # ------------------------------------------------------------------
+        # Dead entries deferred by _retire_entries (in_use > 0 at reap time)
+        # keyed by the entry itself → monotonic timestamp when marked dead.
+        # The periodic thread scans this dict and force-releases entries
+        # that have been stuck past _CHECKIN_TIMEOUT_S.
+        self._dead_entries: dict[ContextEntry, float] = {}
+        self._ipc_collector: PeriodicThread | None = create_periodic_thread(
+            name="lmcache-ipc-collector",
+            interval=_IPC_COLLECT_INTERVAL_S,
+            execute_fn=self._ipc_collect_cycle,
+            level=ThreadLevel.LOW,
+        )
+        self._ipc_collector.start()
+
     @property
     def context(self) -> MPCacheServerContext:
         """Return the shared engine context. Exposed for testing only."""
@@ -667,6 +737,103 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             if entry is not None:
                 entry.last_seen = now
             return entry
+
+    def checkout_context_entry(self, instance_id: int) -> ContextEntry | None:
+        """Like get_and_touch_context_entry, but pins the entry against release.
+
+        The caller MUST pair this with :meth:`checkin_context_entry` (via
+        try/finally) once its transfer no longer touches the entry's
+        cache_context. While pinned, reap/unregister defer the context
+        close instead of unmapping segments under the caller's copy.
+
+        Args:
+            instance_id: The worker instance ID.
+
+        Returns:
+            The pinned entry, or None if the instance is not tracked.
+        """
+        now = time.monotonic()
+        with self._lock:
+            entry = self._cache_contexts.get(instance_id)
+            if entry is None:
+                return None
+            entry.last_seen = now
+            entry.in_use += 1
+            return entry
+
+    def checkin_context_entry(self, entry: ContextEntry) -> None:
+        """Release a pin taken by :meth:`checkout_context_entry`.
+
+        The last checkin of a dead (reaped/unregistered) entry performs the
+        deferred context release.
+
+        Args:
+            entry: The entry returned by checkout_context_entry.
+        """
+        with self._lock:
+            if entry.released:
+                # Already force-released by the periodic collector's timeout
+                # sweep.  The checkout pin is consumed; don't decrement
+                # in_use (the collector already reset it to 0).
+                return
+            entry.in_use -= 1
+            release_now = entry.dead and entry.in_use <= 0 and not entry.released
+            if release_now:
+                entry.released = True
+                self._dead_entries.pop(entry, None)
+        if not release_now:
+            return
+        logger.info(
+            "Deferred release of instance context (model=%s) after last "
+            "in-flight transfer drained",
+            entry.model_name,
+        )
+        # Hand the sole reference to the release list — a lingering local
+        # binding would keep the entry alive through ipc_collect and the
+        # IPC segments would never unmap (LMCache#4014).
+        to_release = [entry]
+        del entry
+        self._release_entries(to_release)
+
+    def _retire_entries(self, entries: list[ContextEntry]) -> None:
+        """Mark removed entries dead; release the idle ones immediately.
+
+        Busy entries (in_use > 0) are released by the final
+        checkin_context_entry instead — closing them here would unmap
+        IPC/SHM segments under an in-flight tensor copy (SIGSEGV).
+
+        Args:
+            entries: Entries already popped from the registry. The list is
+                cleared before release so no binding pins a released entry.
+        """
+        idle: list[ContextEntry] = []
+        busy_entries: list[ContextEntry] = []
+        with self._lock:
+            for entry in entries:
+                entry.dead = True
+                if entry.in_use <= 0:
+                    idle.append(entry)
+                else:
+                    busy_entries.append(entry)
+            if entries:
+                # Drop the last local binding so the released entry is not
+                # kept alive through ipc_collect (LMCache#4014).
+                del entry
+            entries.clear()
+        if busy_entries:
+            logger.warning(
+                "Deferring release of %d instance context(s) with in-flight "
+                "transfers; they close when the last transfer drains",
+                len(busy_entries),
+            )
+            # Track dead entries so the periodic IPC-collector thread can
+            # force-release them if checkin never happens (handler crash /
+            # worker kill mid-transfer).  Without this, busy dead entries
+            # leak permanently — the store/retrieve finally block never runs.
+            now = time.monotonic()
+            for entry in busy_entries:
+                self._dead_entries[entry] = now
+        self._release_entries(idle)
 
     def context_entries_snapshot(self) -> dict[int, ContextEntry]:
         """Return a shallow copy of the registry for iteration or status.
@@ -742,7 +909,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         if reaped:
             del e  # a bound name would pin the final entry (see _release_entries)
             reaped.clear()
-            self._release_entries(entries)
+            self._retire_entries(entries)
         return reaped_ids
 
     def _release_entries(self, entries: list[ContextEntry]) -> None:
@@ -768,6 +935,74 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         if ipc_collect is not None:
             # Backends without IPC collection omit this optional operation.
             ipc_collect()
+
+    def _ipc_collect_cycle(self) -> ThreadRunSummary:
+        """Periodic IPC handle reclamation and dead-entry timeout sweep.
+
+        Runs every ``_IPC_COLLECT_INTERVAL_S`` seconds.  Two jobs:
+
+        1. **Dead-entry sweep** — force-release context entries that were
+           marked dead by ``_retire_entries`` but never checked in (the
+           store/retrieve handler raised or the worker was killed
+           mid-transfer).  Without this safety net, such entries and
+           their IPC handles leak permanently.
+
+        2. **Global IPC collection** — call ``empty_cache()`` +
+           ``ipc_collect()`` to reclaim any CUDA-IPC-imported segments
+           whose Python references were dropped since the last cycle
+           but whose underlying handles have not yet been collected by
+           the CUDA driver.  This bounds handle growth between explicit
+           release events (reap / unregister / close).
+
+        Returns:
+            A summary recording how many dead entries were force-released.
+        """
+        # 1. Sweep dead entries past the checkin timeout.
+        now = time.monotonic()
+        expired: list[ContextEntry] = []
+        with self._lock:
+            # Snapshot to avoid mutating while iterating; entries to release
+            # are removed from _dead_entries before _release_entries is called
+            # (which itself acquires no lock — leaf-lock invariant).
+            for entry, dead_since in list(self._dead_entries.items()):
+                if now - dead_since > _CHECKIN_TIMEOUT_S:
+                    self._dead_entries.pop(entry, None)
+                    # Force the in_use counter to zero so _release_entries
+                    # proceeds; the transfer that pinned it is certainly dead
+                    # by now (it has been _CHECKIN_TIMEOUT_S seconds).
+                    entry.in_use = 0
+                    entry.released = True
+                    expired.append(entry)
+
+        force_released = 0
+        if expired:
+            logger.warning(
+                "Force-releasing %d dead context entry(s) that exceeded "
+                "checkin timeout of %.0fs",
+                len(expired),
+                _CHECKIN_TIMEOUT_S,
+            )
+            # _release_entries clears the list (drops refs before ipc_collect),
+            # so capture the count before the call.
+            force_released = len(expired)
+            self._release_entries(expired)
+
+        # 2. Global IPC collection (best-effort, never fatal).
+        #    Skip when force_released > 0 because _release_entries already
+        #    ran empty_cache() + ipc_collect() for the expired entries.
+        if force_released == 0:
+            try:
+                torch_dev.empty_cache()
+                ipc_collect = getattr(torch_dev, "ipc_collect", None)
+                if ipc_collect is not None:
+                    ipc_collect()
+            except Exception as e:
+                logger.debug("Periodic ipc_collect failed (non-fatal): %s", e)
+
+        return ThreadRunSummary(
+            success=True,
+            message=f"force_released={force_released}",
+        )
 
     def get_handlers(self) -> list[HandlerSpec]:
         """Return handler specs for all request types this module serves.
@@ -825,6 +1060,15 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
 
     def close(self) -> None:
         """Release GPU resources owned by this module."""
+        # Stop the periodic IPC collector before releasing entries so it
+        # does not race with the final cleanup.
+        if self._ipc_collector is not None:
+            PeriodicThreadRegistry.get_instance().unregister(
+                self._ipc_collector.name
+            )
+            self._ipc_collector.stop()
+            self._ipc_collector = None
+
         # Stop the drain thread before storage_manager.close() so any
         # in-flight completions reach a live storage manager.
         self._device_host_func_dispatcher.stop()
@@ -832,7 +1076,10 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         with self._lock:
             entries = list(self._cache_contexts.values())
             self._cache_contexts.clear()
-        self._release_entries(entries)
+            # Also grab any dead entries that were deferred.
+            entries.extend(self._dead_entries.keys())
+            self._dead_entries.clear()
+        self._retire_entries(entries)
 
     def register_kv_cache(
         self,
@@ -883,6 +1130,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             engine_type=engine_type,
             separate_object_groups=self._ctx.separate_object_groups,
             full_sw_kv=self._ctx.full_sw_kv,
+            max_batch_size=self._ctx.max_batch_size,
         )
         event_backend = get_event_ipc_backend(cache_context.device)
         event_backend.check_event_support(cache_context.device)
@@ -930,17 +1178,43 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             return
 
         # No scalar binding: `popped` must stay the only reference so
-        # _release_entries' reclaim actually unmaps the IPC segments.
-        self._release_entries(popped)
+        # the release's reclaim actually unmaps the IPC segments.
+        self._retire_entries(popped)
         logger.info("Unregistered KV cache for GPU ID %d", instance_id)
 
+    @staticmethod
+    def _pins_context_entry(fn):
+        """Pin the instance's context entry for the duration of ``fn``.
+
+        Reap/unregister during the call then defers the context close to the
+        checkin below instead of unmapping IPC/SHM segments under the
+        operation's tensor copies (SIGSEGV otherwise).
+        """
+
+        @functools.wraps(fn)
+        def wrapper(self, key, instance_id, *args, **kwargs):
+            entry = self.checkout_context_entry(instance_id)
+            if entry is None:
+                raise ValueError(
+                    f"No GPU context registered for instance ID {instance_id}"
+                )
+            try:
+                return fn(self, key, instance_id, *args, _pinned_entry=entry, **kwargs)
+            finally:
+                self.checkin_context_entry(entry)
+
+        return wrapper
+
     @_lmcache_nvtx_annotate
+    @_pins_context_entry
     def store(
         self,
         key: IPCCacheServerKey,
         instance_id: int,
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
+        *,
+        _pinned_entry: ContextEntry | None = None,
     ) -> tuple[bytes, bool]:
         """Store the GPU KV cache blocks to CPU.
 
@@ -973,9 +1247,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         """
         st = time.perf_counter()
 
-        entry = self.get_and_touch_context_entry(instance_id)
-        if entry is None:
-            raise ValueError(f"No GPU context registered for instance ID {instance_id}")
+        entry = _pinned_entry
         cache_context = entry.cache_context
         model_name = entry.model_name
         event_backend = entry.event_backend
@@ -1145,6 +1417,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         )
 
     @_lmcache_nvtx_annotate
+    @_pins_context_entry
     def retrieve(
         self,
         key: IPCCacheServerKey,
@@ -1152,6 +1425,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
         skip_first_n_tokens: int = 0,
+        *,
+        _pinned_entry: ContextEntry | None = None,
     ) -> tuple[bytes, bool]:
         """Retrieve the CPU KV cache and put into GPU blocks.
 
@@ -1178,9 +1453,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         """
         st = time.perf_counter()
 
-        entry = self.get_and_touch_context_entry(instance_id)
-        if entry is None:
-            raise ValueError(f"No GPU context registered for instance ID {instance_id}")
+        entry = _pinned_entry
         cache_context = entry.cache_context
         model_name = entry.model_name
         event_backend = entry.event_backend

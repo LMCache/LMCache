@@ -181,10 +181,12 @@ class MPCacheServerContext:
         hash_algorithm: str = "blake3",
         separate_object_groups: bool = True,
         full_sw_kv: bool = False,
+        max_batch_size: int = 4,
     ) -> None:
         self._chunk_size = chunk_size
         self._separate_object_groups = separate_object_groups
         self._full_sw_kv = full_sw_kv
+        self._max_batch_size = max_batch_size
 
         # Initialize the process-global GDS context.
         # No-op when GDS L1 is disabled (config is None).
@@ -225,6 +227,11 @@ class MPCacheServerContext:
     def full_sw_kv(self) -> bool:
         """Whether sliding-window groups cache full per-chunk KV (no window cutting)."""
         return self._full_sw_kv
+
+    @property
+    def max_batch_size(self) -> int:
+        """Max chunks the GPU staging buffer holds simultaneously."""
+        return self._max_batch_size
 
     @property
     def storage_manager(self) -> StorageManager:

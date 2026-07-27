@@ -67,6 +67,7 @@ def create_cache_context(
     engine_type: EngineType = EngineType.VLLM,
     separate_object_groups: bool = True,
     full_sw_kv: bool = False,
+    max_batch_size: int = 4,
 ) -> BaseCacheContext:
     """Create the appropriate cache context for *kv_caches*.
 
@@ -95,6 +96,11 @@ def create_cache_context(
             per-chunk KV (no sub-chunk window cutting) so chunks stay valid for
             reuse at any position; see
             :meth:`KVLayerGroupsManager.enable_full_sw_kv`.
+        max_batch_size: Maximum number of chunks the temporary GPU staging
+            buffer can hold simultaneously. Each chunk occupies
+            ``chunk_size × hidden_dim × num_layers × dtype_size`` bytes.
+            Reducing this value halves/quarters GPU staging memory at the
+            cost of throughput for batched transfers. Default is 4.
 
     Returns:
         A concrete cache context instance.
@@ -123,4 +129,5 @@ def create_cache_context(
         engine_type,
         separate_object_groups,
         full_sw_kv,
+        max_batch_size,
     )

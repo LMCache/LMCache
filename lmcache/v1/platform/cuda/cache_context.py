@@ -355,6 +355,7 @@ class GPUCacheContext(BaseCacheContext):
         engine_type: EngineType = EngineType.VLLM,
         separate_object_groups: bool = True,
         full_sw_kv: bool = False,
+        max_batch_size: int = 4,
     ):
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
         kv_caches_norm, engine_kv_formats = normalize_and_discover_per_layer_formats(
@@ -407,7 +408,7 @@ class GPUCacheContext(BaseCacheContext):
             kv_layer_groups_manager=self.kv_layer_groups_manager_,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
             device=self.device_,
-            max_batch_size=4,
+            max_batch_size=max_batch_size,
         )
 
         # GPU streams
@@ -434,11 +435,38 @@ class GPUCacheContext(BaseCacheContext):
         )
 
     def close(self) -> None:
+        """Deregister GDS staging buffer and release all IPC tensor references.
+
+        Beyond deregistering the GDS staging buffer, this method explicitly
+        drops references to every object that holds a CUDA-IPC-imported
+        tensor (``kv_caches_``), GPU temporary buffers, and CUDA/CuPy
+        streams.  Without this, CuPy's ``ExternalStream`` creates a
+        reference cycle (stream → context → stream) that prevents CPython's
+        reference-counting from collecting the wrapper, so the IPC handle
+        stays open until the next full GC pass — and if ``py_enable_gc``
+        is ``False`` the handle leaks permanently.
+
+        Called by :meth:`LMCacheDrivenTransferModule._release_entries` when
+        a worker instance is reaped, unregistered, or at server shutdown.
         """
-        Deregister this context's GDS staging buffer (reverse of __init__).
-        """
-        with torch_dev.stream(self.cuda_stream_):
-            get_gds_context().deregister_gpu_buffer(self._temp_buffer.buffer)
+        # 1. Deregister the GDS staging buffer (reverse of __init__).
+        #    Must happen before we drop the stream reference.
+        try:
+            with torch_dev.stream(self.cuda_stream_):
+                get_gds_context().deregister_gpu_buffer(self._temp_buffer.buffer)
+        except Exception as e:
+            logger.warning("GPUCacheContext.close: GDS deregister failed: %s", e)
+
+        # 2. Explicitly release every reference that pins CUDA-IPC-imported
+        #    memory or holds a GPU stream handle.  The CuPy ExternalStream
+        #    creates a reference cycle (cupy_stream_ → cuda_stream_ → self)
+        #    that blocks refcount-based collection; nulling these fields
+        #    breaks the cycle so the IPC handle is freed promptly.
+        self.group_kv_pointers_ = None
+        self.kv_caches_ = None
+        self._temp_buffer = None
+        self.cupy_stream_ = None
+        self.cuda_stream_ = None
 
     @property
     def stream(self) -> Any:
@@ -575,6 +603,19 @@ class PlainGPUCacheContext:
             ),
             logger,
         )
+
+    def close(self) -> None:
+        """Release IPC tensor references and GPU stream handles.
+
+        Mirrors :meth:`GPUCacheContext.close`: nulls every field that
+        pins CUDA-IPC-imported memory or holds a GPU stream, breaking the
+        CuPy ExternalStream reference cycle so IPC handles are freed
+        promptly instead of waiting for a (possibly disabled) GC pass.
+        """
+        self._kv_cache = None
+        self._tmp_gpu_buffer = None
+        self._cupy_stream = None
+        self._cuda_stream = None
 
     def get_kv_buffer_shape(self, num_tokens: int) -> torch.Size:
         """
