@@ -7,11 +7,16 @@ This directory contains the modular protocol definitions for the LMCache multipr
 ```
 protocols/
 ├── README.md           # This file
-├── __init__.py        # Protocol initialization and registration
-├── base.py            # Common types (HandlerType, ProtocolDefinition)
-├── engine.py          # Engine operations (STORE, RETRIEVE, etc.)
-├── controller.py      # Controller operations (CLEAR, GET_CHUNK_SIZE)
-└── debug.py           # Debug operations (NOOP)
+├── __init__.py         # Protocol initialization and registration
+├── base.py             # Common types (HandlerType, ProtocolDefinition, RequestType)
+├── engine.py           # Engine operations (REGISTER/UNREGISTER, STORE, RETRIEVE, LOOKUP, PREPARE/COMMIT, ...)
+├── controller.py       # Controller operations (CLEAR, GET_CHUNK_SIZE, PING)
+├── debug.py            # Debug operations (NOOP)
+├── blend.py            # CacheBlend v1 operations (CB_STORE/RETRIEVE_PRE_COMPUTED, CB_STORE_FINAL, ...)
+├── blend_v2.py         # CacheBlend v2 lookup/retrieve (CB_*_V2)
+├── blend_v3.py         # CacheBlend v3 rope + unified lookup (CB_*_V3, CB_UNIFIED_LOOKUP)
+├── observability.py    # Observability events (REPORT_BLOCK_ALLOCATION)
+└── p2p.py              # Peer-to-peer transfers (P2P_LOOKUP_AND_LOCK, P2P_QUERY_LOOKUP_RESULTS, P2P_UNLOCK_OBJECTS)
 ```
 
 ## Design Overview
@@ -23,7 +28,7 @@ The protocol system is designed to be modular, extensible, and IDE-friendly:
    - All request types visible to static analysis tools
    - Validation ensures enum stays in sync with protocol definitions
 
-2. **Protocol Modules**: Each module (engine, controller, debug) defines:
+2. **Protocol Modules**: Each module (engine, controller, debug, blend, blend_v2, blend_v3, observability, p2p) defines:
    - `REQUEST_NAMES`: List of request type names (for validation)
    - `get_protocol_definitions()`: Returns dict of name → ProtocolDefinition
 
@@ -44,7 +49,7 @@ To add new protocol operations:
 
 ### Option 1: Add to Existing Module
 
-If your operation fits an existing category (engine/controller/debug):
+If your operation fits an existing category (engine / controller / debug / blend / blend_v2 / blend_v3 / observability / p2p):
 
 1. **Add to the enum** in `protocols/base.py`:
    ```python
@@ -123,18 +128,22 @@ If you're adding a new category of operations:
        }
    ```
 
-3. **Register the module** in `__init__.py`:
+3. **Register the module** in `__init__.py` by importing it and adding
+   an entry to the `_PROTOCOL_MODULES` list:
    ```python
    from lmcache.v1.multiprocess.protocols import monitoring  # Import your module
 
-   def initialize_protocols():
-       protocol_modules = [
-           ("engine", engine),
-           ("controller", controller),
-           ("debug", debug),
-           ("monitoring", monitoring),  # Add here
-       ]
-       # ... rest of initialization ...
+   _PROTOCOL_MODULES = [
+       ("engine", engine),
+       ("controller", controller),
+       ("debug", debug),
+       ("blend", blend),
+       ("blend_v2", blend_v2),
+       ("blend_v3", blend_v3),
+       ("observability", observability),
+       ("p2p", p2p),
+       ("monitoring", monitoring),  # Add here
+   ]
    ```
 
 4. **Done!** The new operations are now available as:
@@ -188,23 +197,59 @@ has no corresponding RequestType enum member. Add 'RequestType.NEW_OP' to protoc
 
 ## Current Protocol Groups
 
+The authoritative list of request names is `REQUEST_NAMES` in each module; the
+list below is a snapshot as of this file's last update.
+
 ### Engine Operations (`engine.py`)
-Core KV cache operations:
-- `REGISTER_KV_CACHE`: Register a KV cache instance
-- `UNREGISTER_KV_CACHE`: Unregister a KV cache instance
-- `STORE`: Store KV cache blocks to the server
-- `RETRIEVE`: Retrieve KV cache blocks from the server
-- `LOOKUP`: Check if keys exist in the cache
-- `END_SESSION`: End a session and clean up resources
+Core KV cache operations and their split-phase variants:
+- `REGISTER_KV_CACHE` / `UNREGISTER_KV_CACHE`: Register / unregister the GPU KV cache
+- `REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT` / `UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT`: Register / unregister the non-GPU (engine-driven) KV cache context
+- `STORE` / `RETRIEVE`: Fused store / retrieve
+- `PREPARE_STORE` / `COMMIT_STORE` / `PREPARE_RETRIEVE` / `COMMIT_RETRIEVE`: Split-phase store / retrieve (used by the engine-driven path)
+- `LOOKUP`: Submit a prefix lookup and return a prefetch job id
+- `QUERY_PREFETCH_STATUS` / `WAIT_PREFETCH_STATUS`: Poll / block for a prefetch job's result
+- `QUERY_PREFETCH_LOOKUP_HITS` / `FREE_LOOKUP_LOCKS`: Inspect and release the read locks a lookup took on cached chunks
+- `END_SESSION`: End a session and clean up associated resources
 
 ### Controller Operations (`controller.py`)
 Cache management and configuration:
 - `CLEAR`: Clear all caches in the server
 - `GET_CHUNK_SIZE`: Get the chunk size configuration
+- `PING`: Liveness / worker probe (payload: sender's worker instance id or `None`)
 
 ### Debug Operations (`debug.py`)
 Testing and monitoring:
-- `NOOP`: No-operation command for testing/heartbeat
+- `NOOP`: No-operation command for testing / heartbeat
+
+### CacheBlend v1 (`blend.py`)
+First-generation CacheBlend operations (pre-computed lookup / retrieve, final store, and blend-scoped KV cache registration):
+- `CB_LOOKUP_PRE_COMPUTED`
+- `CB_STORE_PRE_COMPUTED`
+- `CB_RETRIEVE_PRE_COMPUTED`
+- `CB_STORE_FINAL`
+- `CB_REGISTER_KV_CACHE`
+- `CB_UNREGISTER_KV_CACHE`
+
+### CacheBlend v2 (`blend_v2.py`)
+Second-generation CacheBlend lookup + retrieve:
+- `CB_LOOKUP_PRE_COMPUTED_V2`
+- `CB_RETRIEVE_PRE_COMPUTED_V2`
+
+### CacheBlend v3 (`blend_v3.py`)
+Third-generation CacheBlend with rope state and unified lookup:
+- `CB_REGISTER_ROPE_V3` / `CB_UNREGISTER_ROPE_V3`
+- `CB_RETRIEVE_PRE_COMPUTED_V3`
+- `CB_UNIFIED_LOOKUP`
+
+### Observability (`observability.py`)
+Server-side observability events:
+- `REPORT_BLOCK_ALLOCATION`
+
+### P2P (`p2p.py`)
+Peer-to-peer transfer operations:
+- `P2P_LOOKUP_AND_LOCK`
+- `P2P_QUERY_LOOKUP_RESULTS`
+- `P2P_UNLOCK_OBJECTS`
 
 ## Handler Types
 

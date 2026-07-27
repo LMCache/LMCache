@@ -9,13 +9,13 @@
 /lmcache/v1/memory_management.py       @sammshen @deng451e @chunxiaozheng @DongDongJu @ApostaC
 
 # Multiprocess
-/lmcache/v1/multiprocess/              @ApostaC @OasisGit @hlin99
+/lmcache/v1/multiprocess/              @ApostaC @Oasis-git @DongDongJu @hlin99
 /lmcache/v1/multiprocess/protocols/observability.py  @royyhuang @ApostaC
-/lmcache/v1/multiprocess/http_server.py              @royyhuang @ApostaC @OasisGit
-/lmcache/v1/mp_observability/            @yoo-kumaneko @royyhuang @ApostaC @OasisGit @sammshen
+/lmcache/v1/multiprocess/http_server.py              @royyhuang @ApostaC @Oasis-git
+/lmcache/v1/mp_observability/            @yoo-kumaneko @royyhuang @ApostaC @Oasis-git @sammshen
 
 # Distributed / L2
-/lmcache/v1/distributed/               @ApostaC @maobaolong @chunxiaozheng
+/lmcache/v1/distributed/               @ApostaC @maobaolong @chunxiaozheng @DongDongJu
 /lmcache/v1/distributed/eviction.py                              @YaoJiayi @hlin99
 /lmcache/v1/distributed/eviction_policy/                         @YaoJiayi @hlin99
 /lmcache/v1/distributed/storage_controllers/eviction_controller.py @YaoJiayi @hlin99
@@ -51,15 +51,15 @@
 
 # Integration
 /lmcache/integration/vllm/             @sammshen @maobaolong @YaoJiayi @deng451e @hlin99
-/lmcache/integration/sglang/           @OasisGit @DongDongJu @sammshen @Shaoting-Feng
+/lmcache/integration/sglang/           @Oasis-git @DongDongJu @sammshen @Shaoting-Feng
 /lmcache/integration/tensorrt_llm/     @sammshen
 
 # Non-CUDA equivalents
 /lmcache/non_cuda_equivalents.py       @hlin99 @hickeyma
 
 # C extensions
-/csrc/                                 @ApostaC @YaoJiayi @sammshen
-/csrc/storage_backends/                @sammshen @hlin99
+/csrc/                                 @ApostaC @YaoJiayi @sammshen @DongDongJu
+/csrc/storage_backends/                @sammshen @hlin99 @DongDongJu
 
 # Native connector L2 adapters
 /lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py  @sammshen @hlin99
@@ -93,7 +93,7 @@
 /.buildkite/                           @sammshen @ApostaC @deng451e @hickeyma
 
 # Operator
-/operator/                             @royyhuang
+/operator/                             @royyhuang @DongDongJu
 
 # Rust
 /rust/                                 @DongDongJu

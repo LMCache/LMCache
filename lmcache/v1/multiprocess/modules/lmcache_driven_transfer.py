@@ -12,12 +12,11 @@ import time
 import torch
 
 # First Party
-from lmcache import torch_dev, torch_device_type
+from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import (
     EngineType,
     _lmcache_nvtx_annotate,
-    check_interprocess_event_support,
 )
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
@@ -48,15 +47,17 @@ from lmcache.v1.multiprocess.native_completion import (
     submit_callback_to_stream,
 )
 from lmcache.v1.multiprocess.protocols.base import RequestType
-from lmcache.v1.platform.base_cache_context import BaseCacheContext
+from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.platform.base.event_ipc import (
+    EventIPCBackend,
+    get_event_ipc_backend,
+)
 from lmcache.v1.platform.cache_context import create_cache_context
 import lmcache.c_ops as lmc_ops
-import lmcache.python_ops_fallback as _python_ops_fallback
 
 logger = init_logger(__name__)
-_HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = (
-    lmc_ops.execute_object_group_transfer
-    is not _python_ops_fallback.execute_object_group_transfer
+_HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = hasattr(
+    lmc_ops, "execute_object_group_transfer"
 )
 
 
@@ -596,6 +597,7 @@ class ContextEntry:
         has_liveness_signal: True once the instance has sent at least one
             PING. Selects the reap window (timeout vs registration grace).
             Latched only by PING, never by traffic.
+        event_backend: Cached event backend selected for this context's device.
     """
 
     cache_context: BaseCacheContext
@@ -603,6 +605,7 @@ class ContextEntry:
     world_size: int
     last_seen: float = 0.0
     has_liveness_signal: bool = False
+    event_backend: EventIPCBackend | None = None
 
 
 class LMCacheDrivenTransferModule(InstanceLivenessTarget):
@@ -763,7 +766,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         torch_dev.empty_cache()
         ipc_collect = getattr(torch_dev, "ipc_collect", None)
         if ipc_collect is not None:
-            # Non-CUDA device modules (xpu / musa) do not expose ipc_collect.
+            # Backends without IPC collection omit this optional operation.
             ipc_collect()
 
     def get_handlers(self) -> list[HandlerSpec]:
@@ -881,6 +884,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             separate_object_groups=self._ctx.separate_object_groups,
             full_sw_kv=self._ctx.full_sw_kv,
         )
+        event_backend = get_event_ipc_backend(cache_context.device)
+        event_backend.check_event_support(cache_context.device)
         layout_desc = get_layout_desc(
             cache_context, self._ctx.chunk_size, object_group_id=0
         )
@@ -915,6 +920,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 world_size=world_size,
                 last_seen=now,
                 has_liveness_signal=False,
+                event_backend=event_backend,
             )
 
         logger.info(
@@ -990,6 +996,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             raise ValueError(f"No GPU context registered for instance ID {instance_id}")
         cache_context = entry.cache_context
         model_name = entry.model_name
+        event_backend = entry.event_backend
+        if event_backend is None:
+            raise RuntimeError("Registered cache context has no event backend")
 
         num_object_groups = cache_context.kv_layer_groups_manager.num_object_groups
         obj_keys_per_obj_group = self._ctx.resolve_obj_keys(
@@ -1011,8 +1020,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             torch_dev.device(cache_context.device),
             torch_dev.stream(cache_context.stream),
         ):
-            check_interprocess_event_support()
-            event = torch_dev.Event(interprocess=True)
+            event = event_backend.create_event(cache_context.device)
 
             # Fail closed: every LMCache group must have block IDs covering all
             # chunks. A short list (e.g. a caller/protocol bug) would otherwise
@@ -1035,23 +1043,17 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     num_chunks,
                     blocks_per_chunk,
                 )
-                event.record()
-                return event.ipc_handle(), False
+                event_backend.record_event(event, cache_context.stream)
+                return event_backend.export_event(event, cache_context.device), False
 
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
                 cache_context, gpu_block_ids
             )
 
-            if not hasattr(torch_dev.Event, "from_ipc_handle"):
-                raise RuntimeError(
-                    f"Backend '{torch_device_type}' does not support IPC event "
-                    "handles (Event.from_ipc_handle not available). "
-                    "Multiprocess IPC requires CUDA."
-                )
-            vllm_event = torch_dev.Event.from_ipc_handle(
-                cache_context.device, event_ipc_handle
+            producer_event = event_backend.import_event(
+                event_ipc_handle, cache_context.device
             )
-            vllm_event.wait(stream=cache_context.stream)
+            event_backend.wait_event(producer_event, cache_context.stream)
 
             # CPU-synchronous sentinel: a GPU store is about to be enqueued.
             # Must be published via publish() (not publish_on_stream) so the
@@ -1118,9 +1120,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 store_succeeded = True
             except Exception:
                 logger.exception("Cannot store keys due to exception")
-                return event.ipc_handle(), False
             finally:
-                event.record()
+                event_backend.record_event(event, cache_context.stream)
                 # Fail closed: commit the reserved objects only when every chunk
                 # copied successfully; otherwise the whole store is skipped.
                 stored_count = len(all_dict) if store_succeeded else 0
@@ -1156,7 +1157,10 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 num_chunks * self._ctx.chunk_size,
                 ed - st,
             )
-        return event.ipc_handle(), True
+        return (
+            event_backend.export_event(event, cache_context.device),
+            store_succeeded,
+        )
 
     @_lmcache_nvtx_annotate
     def retrieve(
@@ -1188,6 +1192,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
 
         Raises:
             ValueError: If no GPU context is registered for the given instance ID.
+            RuntimeError: If the backend does not support IPC event handles.
         """
         st = time.perf_counter()
 
@@ -1196,6 +1201,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             raise ValueError(f"No GPU context registered for instance ID {instance_id}")
         cache_context = entry.cache_context
         model_name = entry.model_name
+        event_backend = entry.event_backend
+        if event_backend is None:
+            raise RuntimeError("Registered cache context has no event backend")
 
         num_object_groups = cache_context.kv_layer_groups_manager.num_object_groups
         obj_keys_per_obj_group = self._ctx.resolve_obj_keys(
@@ -1238,8 +1246,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             torch_dev.device(cache_context.device),
             torch_dev.stream(cache_context.stream),
         ):
-            check_interprocess_event_support()
-            event = torch_dev.Event(interprocess=True)
+            event = event_backend.create_event(cache_context.device)
 
             # Fail closed: a short block-id list would drive the transfer
             # kernel to write out-of-bounds GPU memory. Checked on the raw
@@ -1260,16 +1267,21 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     num_chunks,
                     blocks_per_chunk,
                 )
-                event.record()
-                return event.ipc_handle(), False
+                event_backend.record_event(event, cache_context.stream)
+                return event_backend.export_event(event, cache_context.device), False
 
             # Cut and stage all block_ids to GPU once before the transfer
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
                 cache_context, gpu_block_ids
             )
+            producer_event = event_backend.import_event(
+                event_ipc_handle, cache_context.device
+            )
+            event_backend.wait_event(producer_event, cache_context.stream)
 
             prefetched_keys: list[ObjectKey] = []
             total_bytes = 0
+            retrieve_succeeded = True
             try:
                 for obj_group_id in range(num_object_groups):
                     obj_keys = obj_keys_per_obj_group[obj_group_id]
@@ -1278,7 +1290,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     ) as memory_objs:
                         if not memory_objs or len(memory_objs) != len(obj_keys):
                             logger.error("Some keys not found during retrieve!")
-                            return event.ipc_handle(), False
+                            retrieve_succeeded = False
+                            break
 
                         total_bytes += sum(mo.get_size() for mo in memory_objs)
 
@@ -1297,9 +1310,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         prefetched_keys.extend(obj_keys)
             except Exception:
                 logger.exception("Cannot retrieve keys due to exception")
-                return event.ipc_handle(), False
+                retrieve_succeeded = False
             finally:
-                event.record()
+                event_backend.record_event(event, cache_context.stream)
                 if prefetched_keys:
                     submit_callback_to_stream(
                         cache_context.cupy_stream,
@@ -1327,12 +1340,16 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         },
                     ),
                 )
-        tokens_retrieved = num_chunks * self._ctx.chunk_size
-        ed = time.perf_counter()
-        logger.info(
-            "Retrieved %d tokens in %.3f seconds",
-            tokens_retrieved,
-            ed - st,
-        )
+        if retrieve_succeeded:
+            tokens_retrieved = num_chunks * self._ctx.chunk_size
+            ed = time.perf_counter()
+            logger.info(
+                "Retrieved %d tokens in %.3f seconds",
+                tokens_retrieved,
+                ed - st,
+            )
 
-        return event.ipc_handle(), True
+        return (
+            event_backend.export_event(event, cache_context.device),
+            retrieve_succeeded,
+        )

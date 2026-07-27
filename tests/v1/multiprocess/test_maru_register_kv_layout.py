@@ -33,7 +33,14 @@ def _bare_module() -> LMCacheDrivenTransferModule:
     return module
 
 
-def _register(module: LMCacheDrivenTransferModule) -> None:
+def _register(module: LMCacheDrivenTransferModule, monkeypatch) -> None:
+    # Stub the event IPC backend lookup (a DeviceSpec registry that rejects
+    # mocked devices), mirroring test_ipc_memory_reclaim.py.
+    monkeypatch.setattr(
+        gpu_mod,
+        "get_event_ipc_backend",
+        lambda device: MagicMock(name="event_backend"),
+    )
     module.register_kv_cache(1, MagicMock(), "model", 1, MagicMock(), MagicMock(), [])
 
 
@@ -47,7 +54,7 @@ def test_hook_forwards_layout_and_raw_engine_format(monkeypatch):
     monkeypatch.setattr(gpu_mod, "get_layout_desc", lambda *a, **kw: layout)
     module = _bare_module()
 
-    _register(module)
+    _register(module, monkeypatch)
 
     cache_ctx.get_engine_kv_format.assert_called_once_with(0)
     call = module._ctx.storage_manager.register_kv_layout.call_args
@@ -69,7 +76,7 @@ def test_hook_failure_closes_context_and_does_not_register(monkeypatch):
     )
 
     with pytest.raises(ValueError, match="single object group"):
-        _register(module)
+        _register(module, monkeypatch)
 
     cache_ctx.close.assert_called_once()
     assert 1 not in module._cache_contexts  # not left half-registered
@@ -89,6 +96,6 @@ def test_hook_is_inert_under_a_fully_mocked_context(monkeypatch):
     monkeypatch.setattr(gpu_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
     module = _bare_module()
 
-    _register(module)  # must not raise
+    _register(module, monkeypatch)  # must not raise
 
     assert 1 in module._cache_contexts

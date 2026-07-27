@@ -22,7 +22,11 @@ import torch
 
 try:
     # First Party
-    from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+    from lmcache.v1.distributed.api import (
+        MemoryLayoutDesc,
+        ObjectKey,
+        PrefetchRequestSpec,
+    )
     from lmcache.v1.distributed.config import (
         EvictionConfig,
         L1ManagerConfig,
@@ -817,7 +821,9 @@ def test_prefetch_hits_l1_resident_keys():
         sm.reserve_write(keys, _LAYOUT, mode="new")
         sm.finish_write(keys)
 
-        handle = sm.submit_prefetch_task(keys, _LAYOUT)
+        handle = sm.submit_prefetch_task(
+            PrefetchRequestSpec(keys=keys, layout_desc=_LAYOUT)
+        )
         assert _wait(lambda: sm.query_prefetch_status(handle) is not None)
         assert sm.query_prefetch_status(handle).count_leading_ones() == len(keys)
     finally:

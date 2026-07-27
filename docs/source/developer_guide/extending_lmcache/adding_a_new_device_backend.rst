@@ -54,7 +54,7 @@ Create ``lmcache/v1/platform/foo/__init__.py``:
     # SPDX-License-Identifier: Apache-2.0
     """foo-specific platform primitives."""
 
-    from lmcache.v1.platform.base_device_spec import DeviceSpec
+    from lmcache.v1.platform.base.device_spec import DeviceSpec
 
 
     class FooDeviceSpec(DeviceSpec):
@@ -281,7 +281,7 @@ checks — both must succeed, otherwise the factory raises
 
 1. Your ``DeviceSpec`` subclass must bind a ``DeviceIPCWrapper``
    subclass (exposing a ``wrap`` classmethod) via
-   :attr:`~lmcache.v1.platform.base_device_spec.DeviceSpec.ipc_wrapper_cls`.
+   :attr:`~lmcache.v1.platform.base.device_spec.DeviceSpec.ipc_wrapper_cls`.
    :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory` reads that
    binding off the registered spec — no separate registry / auto-scan.
 2. ``DeviceSpec.is_handle_transfer_available()`` must return ``True``
@@ -303,6 +303,81 @@ cache layout and pointers used for IPC transfer.
 Host-side pinning via ``pin_memory_backend`` is *optional* and only
 affects staging-buffer performance; it is not required to enable
 LMCache-driven mode.
+
+Event IPC capability
+^^^^^^^^^^^^^^^^^^^^
+
+The LMCache-driven multiprocess handle path also requires a platform
+event-IPC backend.  The capability is declared by
+``DeviceSpec.event_ipc_backend`` and is intentionally separate from
+``DeviceOps`` and ``DeviceIPCWrapper``:
+
+* The base ``DeviceSpec`` returns ``None``.  A concrete device must
+  explicitly opt in.
+* CUDA-style event APIs can use
+  ``DefaultEventIPCBackend(event_module=..., device_type=...)``.
+* Devices with a different event ABI should implement an
+  ``EventIPCBackend`` in their own ``lmcache/v1/platform/foo/`` package.
+* Concrete device specs should cache the backend because request futures
+  may query this property repeatedly.
+
+The backend contract covers event creation, handle export/import, event
+recording, stream wait, query, and synchronization.
+``check_event_support(device)`` must raise ``RuntimeError`` when those
+operations are unavailable for the requested device.  The default backend
+checks for a CUDA-style Event type that accepts ``interprocess=True`` and
+provides ``from_ipc_handle``.  A custom backend should instead validate the
+equivalent prerequisites for its own event ABI.
+
+For a CUDA-style device, bind and cache the default backend as follows:
+
+.. code-block:: python
+
+    from typing import TYPE_CHECKING
+
+    from lmcache.v1.platform.base.device_spec import DeviceSpec
+
+    if TYPE_CHECKING:
+        from lmcache.v1.platform.base.event_ipc import EventIPCBackend
+
+    class FooDeviceSpec(DeviceSpec):
+        _event_backend_cache: "EventIPCBackend | None" = None
+
+        @property
+        def event_ipc_backend(self) -> "EventIPCBackend":
+            backend = self._event_backend_cache
+            if backend is None:
+                import torch
+
+                from lmcache.v1.platform.base.event_ipc import (
+                    DefaultEventIPCBackend,
+                )
+
+                backend = DefaultEventIPCBackend(
+                    event_module=torch.foo,
+                    device_type=self.device_type,
+                )
+                self._event_backend_cache = backend
+            return backend
+
+Event IPC operations must preserve producer/consumer stream ordering without
+adding a device-wide synchronization.  ``query_event`` must remain
+non-blocking so request futures can poll completion safely.
+
+.. note::
+
+   If the device does not support Event IPC, leave the base
+   ``event_ipc_backend`` implementation unchanged so it returns ``None``.
+   Engine-driven mode does not require this capability.  LMCache-driven
+   mode raises an explicit error rather than falling back to CUDA or to the
+   accelerator active in the process.
+
+The capability is checked during worker/server registration and before
+constructing a device-aware completion future.  This keeps unsupported
+platforms from entering an asynchronous transfer path that cannot order
+KV-cache memory safely.  The STORE and RETRIEVE message wire format is
+unchanged: the existing event handle bytes are still carried in the
+request and response payloads.
 
 Override these methods in your ``DeviceSpec``:
 
@@ -358,13 +433,15 @@ References
    * - Topic
      - Path
    * - Device spec base
-     - ``lmcache/v1/platform/base_device_spec.py``
+     - ``lmcache/v1/platform/base/device_spec.py``
+   * - Event IPC base
+     - ``lmcache/v1/platform/base/event_ipc.py``
    * - Backend loading
      - ``lmcache/v1/platform/__init__.py``
    * - Python fallback
      - ``lmcache/python_ops_fallback.py``
    * - Cache context base
-     - ``lmcache/v1/platform/base_cache_context.py``
+     - ``lmcache/v1/platform/base/cache_context.py``
    * - Cache context factory
      - ``lmcache/v1/platform/cache_context.py``
    * - Reference ``DeviceSpec`` (engine-driven baseline)

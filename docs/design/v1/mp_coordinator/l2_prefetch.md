@@ -34,10 +34,11 @@ registry, `POST`s to its `/cache/prefetches`, and relays the server's
 `request_id` back. The client then polls
 `GET /cache/prefetches/{instance_id}/{request_id}` on the coordinator, which proxies
 the server's status. The warm holds **no read-lock** — completion is reported
-reactively and releases nothing; see `docs/design/v1/multiprocess/l2_apis.md`
-for the warm-prefetch lifecycle (retain-permanent, no-lock load). There is no
-background polling on either side: the submit and status calls are quick and
-the client drives completion on demand.
+reactively and releases nothing; see the warm-prefetch endpoint reference in
+`docs/source/mp/http_api.rst` and the coordinator-side flow in
+`docs/source/mp/coordinator.rst` for the retain-permanent, no-lock load
+lifecycle. There is no background polling on either side: the submit and
+status calls are quick and the client drives completion on demand.
 
 ## Components
 
@@ -70,7 +71,7 @@ loops) so request handlers can issue outbound calls.
   503 (`Unavailable`), surfaced to the caller via the 502/proxy path.
 - **Client abandons polling** → the server's job lingers as a small handle
   entry (no lock held, no L1 pinned) until polled or swept — see the no-lock
-  lifecycle in `l2_apis.md`.
+  lifecycle in `docs/source/mp/http_api.rst` (warm-prefetch endpoint).
 
 ## Scope
 

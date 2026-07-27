@@ -14,7 +14,11 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    ObjectKey,
+    PrefetchRequestSpec,
+)
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
@@ -303,7 +307,7 @@ class TestNumInflightL2Loads:
         before_loads = _value_for("lmcache_mp.num_inflight_l2_loads", attrs)
         before_bytes = _value_for("lmcache_mp.inflight_load_memory_usage_bytes", attrs)
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, layout))
 
         # Wait for the request to fully resolve, then the counters should
         # come back to where they started.
@@ -350,7 +354,7 @@ class TestNumInflightL2Loads:
         before_loads = _value_for("lmcache_mp.num_inflight_l2_loads", attrs)
         before_bytes = _value_for("lmcache_mp.inflight_load_memory_usage_bytes", attrs)
 
-        ctrl.submit_prefetch_request(keys, layout)
+        ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, layout))
 
         # Wait until the load is actually in flight on this adapter; only
         # then is ``_cleanup_in_flight_requests`` the path that brings the
