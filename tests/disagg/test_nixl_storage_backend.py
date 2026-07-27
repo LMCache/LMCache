@@ -15,6 +15,7 @@ import torch
 pytest.importorskip("nixl", reason="nixl package is required for nixl tests")
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
@@ -30,6 +31,11 @@ from lmcache.v1.storage_backend.nixl_storage_backend import (
 )
 from lmcache.v1.transfer_channel.transfer_utils import get_correct_device
 
+TORCH_DEVICE_AVAILABLE = (
+    hasattr(torch, torch_device_type)
+    and getattr(torch, torch_device_type).is_available()
+)
+
 logger = init_logger(__name__)
 
 
@@ -39,7 +45,12 @@ def generate_test_data(
     keys = []
     objs = []
     allocator = AdHocMemoryAllocator(
-        device="cuda" if torch.cuda.is_available() else "cpu",
+        device=torch_device_type
+        if (
+            hasattr(torch, torch_device_type)
+            and getattr(torch, torch_device_type).is_available()
+        )
+        else "cpu",
     )
     for i in range(num_objs):
         keys.append(
@@ -66,8 +77,18 @@ def calculate_throughput(total_bytes: int, elapsed_time: float) -> float:
 
 
 def create_test_config(
-    buffer_device: str = "cuda" if torch.cuda.is_available() else "cpu",
-    backend: str = "GDS_MT" if torch.cuda.is_available() else "POSIX",
+    buffer_device: str = torch_device_type
+    if (
+        hasattr(torch, torch_device_type)
+        and getattr(torch, torch_device_type).is_available()
+    )
+    else "cpu",
+    backend: str = "GDS_MT"
+    if (
+        hasattr(torch, torch_device_type)
+        and getattr(torch, torch_device_type).is_available()
+    )
+    else "POSIX",
 ) -> LMCacheEngineConfig:
     """Create a test configuration for NixlStorageBackend"""
     config = LMCacheEngineConfig()
@@ -115,7 +136,7 @@ def test_nixl_storage_config():
     else:
         assert nixl_config.buffer_size == config.nixl_buffer_size
     # buffer_device is normalized to include the worker's device id
-    # (e.g. "cuda" -> "cuda:0"); "cpu" stays "cpu".
+    # (e.g. "cuda" -> f"{torch_device_type}:0"); "cpu" stays "cpu".
     assert nixl_config.buffer_device == get_correct_device(
         config.nixl_buffer_device, metadata.worker_id
     )
@@ -252,7 +273,11 @@ def test_endpoint_list_malformed_url_raises():
 
 
 @pytest.mark.no_shared_allocator
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+@pytest.mark.gpu
+@pytest.mark.skipif(
+    not TORCH_DEVICE_AVAILABLE,
+    reason="Requires available {torch_device_type} runtime",
+)
 def test_nixl_storage_backend_basic():
     """Test basic NixlStorageBackend operations"""
     config = create_test_config()
@@ -306,7 +331,11 @@ def test_nixl_storage_backend_basic():
 
 
 @pytest.mark.no_shared_allocator
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+@pytest.mark.gpu
+@pytest.mark.skipif(
+    not TORCH_DEVICE_AVAILABLE,
+    reason="Requires available {torch_device_type} runtime",
+)
 def test_nixl_storage_backend_put_get():
     """Test put and get operations in NixlStorageBackend"""
     config = create_test_config()
@@ -375,7 +404,11 @@ def test_nixl_storage_backend_put_get():
 
 
 @pytest.mark.no_shared_allocator
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+@pytest.mark.gpu
+@pytest.mark.skipif(
+    not TORCH_DEVICE_AVAILABLE,
+    reason="Requires available {torch_device_type} runtime",
+)
 def test_nixl_storage_backend_different_backends():
     """Test NixlStorageBackend with different backend types"""
     backends = (
@@ -386,7 +419,10 @@ def test_nixl_storage_backend_different_backends():
             ("GDS", "cpu"),
             ("POSIX", "cpu"),
         ]
-        if torch.cuda.is_available()
+        if (
+            hasattr(torch, torch_device_type)
+            and getattr(torch, torch_device_type).is_available()
+        )
         else [
             ("GDS_MT", "cpu"),
             ("GDS", "cpu"),
@@ -445,8 +481,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--device",
         type=str,
-        default="cuda",
-        choices=["cuda", "cpu"],
+        default=torch_device_type,
+        choices=[torch_device_type, "cpu"],
         help="Device to use for buffer",
     )
     parser.add_argument(
