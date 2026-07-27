@@ -13,6 +13,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.usage_telemetry import (
     USAGE_SCHEMA_VERSION,
     ContinuousUsageContext,
@@ -336,7 +337,7 @@ def publish_mp_traffic(bus: EventBus) -> None:
             event_type=EventType.MP_RETRIEVE_END,
             metadata={
                 "retrieved_count": 4,
-                "device": "cuda:0",
+                "device": f"{torch_device_type}:0",
                 "engine_id": 1,
                 "model_name": "test_model",
                 "cache_salt": "",
@@ -349,7 +350,7 @@ def publish_mp_traffic(bus: EventBus) -> None:
             event_type=EventType.MP_STORE_END,
             metadata={
                 "stored_count": 2,
-                "device": "cuda:0",
+                "device": f"{torch_device_type}:0",
                 "engine_id": 1,
                 "model_name": "test_model",
                 "total_bytes": 1000,
