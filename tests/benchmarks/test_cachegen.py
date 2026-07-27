@@ -12,7 +12,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 from lmcache.storage_backend.serde.cachegen_decoder import CacheGenDeserializer
 from lmcache.storage_backend.serde.cachegen_encoder import CacheGenSerializer
 from lmcache.v1.config import LMCacheEngineConfig
@@ -20,12 +20,7 @@ from lmcache.v1.metadata import LMCacheMetadata
 
 # CacheGen has hand-written accelerator kernels and requires the selected
 # torch runtime to be available.
-TORCH_DEVICE_AVAILABLE = (
-    hasattr(torch, torch_device_type)
-    and getattr(torch, torch_device_type).is_available()
-)
-
-if not TORCH_DEVICE_AVAILABLE:
+if not torch_dev.is_available():
     pytest.skip(
         f"Requires available {torch_device_type} runtime",
         allow_module_level=True,

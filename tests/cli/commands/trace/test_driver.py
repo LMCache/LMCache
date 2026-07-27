@@ -18,10 +18,9 @@ import time
 
 # Third Party
 import pytest
-import torch
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev
 from lmcache.cli.commands.trace._dispatch import (
     CallDispatcher,
     ReplayContext,
@@ -53,10 +52,7 @@ import lmcache.v1.mp_observability.event_bus as _bus_module
 def _should_use_lazy() -> bool:
     """Lazy allocator requires CUDA.  CPU-only hosts (our primary replay
     target) must use eager allocation."""
-    return (
-        hasattr(torch, torch_device_type)
-        and getattr(torch, torch_device_type).is_available()
-    )
+    return torch_dev.is_available()
 
 
 def _make_sm_config() -> StorageManagerConfig:

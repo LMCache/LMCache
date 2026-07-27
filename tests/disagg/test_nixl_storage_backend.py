@@ -15,7 +15,7 @@ import torch
 pytest.importorskip("nixl", reason="nixl package is required for nixl tests")
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
@@ -31,11 +31,6 @@ from lmcache.v1.storage_backend.nixl_storage_backend import (
 )
 from lmcache.v1.transfer_channel.transfer_utils import get_correct_device
 
-TORCH_DEVICE_AVAILABLE = (
-    hasattr(torch, torch_device_type)
-    and getattr(torch, torch_device_type).is_available()
-)
-
 logger = init_logger(__name__)
 
 
@@ -45,12 +40,7 @@ def generate_test_data(
     keys = []
     objs = []
     allocator = AdHocMemoryAllocator(
-        device=torch_device_type
-        if (
-            hasattr(torch, torch_device_type)
-            and getattr(torch, torch_device_type).is_available()
-        )
-        else "cpu",
+        device=torch_device_type if torch_dev.is_available() else "cpu",
     )
     for i in range(num_objs):
         keys.append(
@@ -78,16 +68,10 @@ def calculate_throughput(total_bytes: int, elapsed_time: float) -> float:
 
 def create_test_config(
     buffer_device: str = torch_device_type
-    if (
-        hasattr(torch, torch_device_type)
-        and getattr(torch, torch_device_type).is_available()
-    )
+    if torch_dev.is_available()
     else "cpu",
     backend: str = "GDS_MT"
-    if (
-        hasattr(torch, torch_device_type)
-        and getattr(torch, torch_device_type).is_available()
-    )
+    if torch_dev.is_available()
     else "POSIX",
 ) -> LMCacheEngineConfig:
     """Create a test configuration for NixlStorageBackend"""
@@ -275,7 +259,7 @@ def test_endpoint_list_malformed_url_raises():
 @pytest.mark.no_shared_allocator
 @pytest.mark.gpu
 @pytest.mark.skipif(
-    not TORCH_DEVICE_AVAILABLE,
+    not torch_dev.is_available(),
     reason="Requires available {torch_device_type} runtime",
 )
 def test_nixl_storage_backend_basic():
@@ -333,7 +317,7 @@ def test_nixl_storage_backend_basic():
 @pytest.mark.no_shared_allocator
 @pytest.mark.gpu
 @pytest.mark.skipif(
-    not TORCH_DEVICE_AVAILABLE,
+    not torch_dev.is_available(),
     reason="Requires available {torch_device_type} runtime",
 )
 def test_nixl_storage_backend_put_get():
@@ -406,7 +390,7 @@ def test_nixl_storage_backend_put_get():
 @pytest.mark.no_shared_allocator
 @pytest.mark.gpu
 @pytest.mark.skipif(
-    not TORCH_DEVICE_AVAILABLE,
+    not torch_dev.is_available(),
     reason="Requires available {torch_device_type} runtime",
 )
 def test_nixl_storage_backend_different_backends():
@@ -419,10 +403,7 @@ def test_nixl_storage_backend_different_backends():
             ("GDS", "cpu"),
             ("POSIX", "cpu"),
         ]
-        if (
-            hasattr(torch, torch_device_type)
-            and getattr(torch, torch_device_type).is_available()
-        )
+        if torch_dev.is_available()
         else [
             ("GDS_MT", "cpu"),
             ("GDS", "cpu"),

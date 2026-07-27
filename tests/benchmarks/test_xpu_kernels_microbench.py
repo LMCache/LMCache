@@ -13,17 +13,12 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.platform import torch_ops as F
 
-TORCH_DEVICE_AVAILABLE = (
-    hasattr(torch, torch_device_type)
-    and getattr(torch, torch_device_type).is_available()
-)
-
-if not TORCH_DEVICE_AVAILABLE:
+if not (torch_device_type == "xpu" and torch_dev.is_available()):
     pytest.skip(
-        f"Requires available {torch_device_type} runtime",
+        "Requires available xpu runtime",
         allow_module_level=True,
     )
 

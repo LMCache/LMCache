@@ -13,7 +13,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
@@ -27,12 +27,6 @@ from tests.v1.utils import (
 # Optional override for tempfile root; see tests/v1/test_cache_engine.py
 # for rationale.
 _TEST_TMPDIR = os.environ.get("LMCACHE_TEST_TMPDIR") or None
-
-TORCH_DEVICE_AVAILABLE = (
-    hasattr(torch, torch_device_type)
-    and getattr(torch, torch_device_type).is_available()
-)
-
 
 # helper functions
 def generate_random_slot_mapping(num_blocks, block_size, num_tokens, device):
@@ -113,7 +107,7 @@ def create_config():
 @pytest.mark.benchmark(group="store")
 @pytest.mark.gpu
 @pytest.mark.skipif(
-    not TORCH_DEVICE_AVAILABLE,
+    not torch_dev.is_available(),
     reason=f"Requires available {torch_device_type} runtime",
 )
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
@@ -228,7 +222,7 @@ def test_store_1GB(
 @pytest.mark.benchmark(group="retrieve")
 @pytest.mark.gpu
 @pytest.mark.skipif(
-    not TORCH_DEVICE_AVAILABLE,
+    not torch_dev.is_available(),
     reason=f"Requires available {torch_device_type} runtime",
 )
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
@@ -352,7 +346,7 @@ def test_retrieve_1GB_allhit(
 @pytest.mark.benchmark(group="lookup")
 @pytest.mark.gpu
 @pytest.mark.skipif(
-    not TORCH_DEVICE_AVAILABLE,
+    not torch_dev.is_available(),
     reason=f"Requires available {torch_device_type} runtime",
 )
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
