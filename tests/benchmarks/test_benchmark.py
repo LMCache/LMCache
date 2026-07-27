@@ -28,6 +28,7 @@ from tests.v1.utils import (
 # for rationale.
 _TEST_TMPDIR = os.environ.get("LMCACHE_TEST_TMPDIR") or None
 
+
 # helper functions
 def generate_random_slot_mapping(num_blocks, block_size, num_tokens, device):
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)

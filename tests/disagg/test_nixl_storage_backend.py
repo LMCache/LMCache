@@ -67,12 +67,8 @@ def calculate_throughput(total_bytes: int, elapsed_time: float) -> float:
 
 
 def create_test_config(
-    buffer_device: str = torch_device_type
-    if torch_dev.is_available()
-    else "cpu",
-    backend: str = "GDS_MT"
-    if torch_dev.is_available()
-    else "POSIX",
+    buffer_device: str = torch_device_type if torch_dev.is_available() else "cpu",
+    backend: str = "GDS_MT" if torch_dev.is_available() else "POSIX",
 ) -> LMCacheEngineConfig:
     """Create a test configuration for NixlStorageBackend"""
     config = LMCacheEngineConfig()
