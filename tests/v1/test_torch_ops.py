@@ -15,7 +15,7 @@ from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
 )
-import lmcache.python_ops_fallback as _py_ops
+from lmcache.v1.platform import torch_ops as _py_ops
 
 # ==========================================
 # 0. utils functions.
@@ -55,10 +55,10 @@ def _build_backend_params() -> list:
 
     Returns one entry per available backend configuration:
     - cuda_c_ops: uses lmcache.c_ops (requires CUDA and the CUDA extension)
-    - cuda_py_ops: uses lmcache.python_ops_fallback with GPU visible
-    - cpy_py_ops: uses lmcache.python_ops_fallback with GPU mocked away
+    - cuda_py_ops: uses lmcache.v1.platform.torch_ops with GPU visible
+    - cpy_py_ops: uses lmcache.v1.platform.torch_ops with GPU mocked away
     - xpu_sycl_ops: uses lmcache.xpu_ops (requires XPU and the SYCL extension)
-    - xpu_py_ops: uses lmcache.python_ops_fallback with XPU visible
+    - xpu_py_ops: uses lmcache.v1.platform.torch_ops with XPU visible
     """
     params = []
     cuda_available = torch.cuda.is_available()
@@ -2667,6 +2667,16 @@ def scenario_multi_layer_block_kv_transfer(
         (
             "fused_nhd",
             ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS,
+            (num_blocks, block_size, num_heads, fused_hs),
+        ),
+        (
+            "cs_hnd",
+            ops.EngineKVFormat.NL_X_NB_NH_BS_CS,
+            (num_blocks, num_heads, block_size, fused_hs),
+        ),
+        (
+            "cs_nhd",
+            ops.EngineKVFormat.NL_X_NB_BS_NH_CS,
             (num_blocks, block_size, num_heads, fused_hs),
         ),
     ):

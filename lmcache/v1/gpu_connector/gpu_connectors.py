@@ -8,7 +8,6 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.python_ops_fallback import set_shape_desc_dtype
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate
 from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
 from lmcache.v1.gpu_connector.kv_format.contiguity import (
@@ -35,6 +34,7 @@ from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.v1.platform.ops_types import set_shape_desc_dtype
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
@@ -494,7 +494,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         # mismatch surfaces before it turns into a data-corruption bug;
         # the MP path (see ``GPUCacheContext`` / mp server) handles
         # per-group ``bs`` correctly and should be used instead.
-        heterogeneous_bs = {g.shape_desc.bs for g in klg_manager.kv_layer_groups}
+        heterogeneous_bs = {g.shape_desc.bs for g in klg_manager.kernel_groups}
         if len(heterogeneous_bs) > 1:
             logger.warning(
                 "VLLMPagedMemGPUConnectorV3 detected heterogeneous per-group "
@@ -516,7 +516,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
             ]
 
         self.group_kv_cache_pointers_on_gpu = []
-        for group in klg_manager.kv_layer_groups:
+        for group in klg_manager.kernel_groups:
             ptrs = get_group_data_ptrs(
                 self.kvcaches, self.engine_kv_format, group.layer_indices
             )
