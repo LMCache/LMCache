@@ -8,8 +8,10 @@ sharing cache across nodes.
    :maxdepth: 1
 
    bigtable
+   sagemaker_hyperpod
    s3
    hfbucket
    mooncake_store
    resp
+   valkey
    aerospike

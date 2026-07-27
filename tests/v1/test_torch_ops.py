@@ -15,7 +15,7 @@ from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
 )
-import lmcache.python_ops_fallback as _py_ops
+from lmcache.v1.platform import torch_ops as _py_ops
 
 # ==========================================
 # 0. utils functions.
@@ -55,10 +55,10 @@ def _build_backend_params() -> list:
 
     Returns one entry per available backend configuration:
     - cuda_c_ops: uses lmcache.c_ops (requires CUDA and the CUDA extension)
-    - cuda_py_ops: uses lmcache.python_ops_fallback with GPU visible
-    - cpy_py_ops: uses lmcache.python_ops_fallback with GPU mocked away
+    - cuda_py_ops: uses lmcache.v1.platform.torch_ops with GPU visible
+    - cpy_py_ops: uses lmcache.v1.platform.torch_ops with GPU mocked away
     - xpu_sycl_ops: uses lmcache.xpu_ops (requires XPU and the SYCL extension)
-    - xpu_py_ops: uses lmcache.python_ops_fallback with XPU visible
+    - xpu_py_ops: uses lmcache.v1.platform.torch_ops with XPU visible
     """
     params = []
     cuda_available = torch.cuda.is_available()
@@ -2644,6 +2644,90 @@ def scenario_multi_layer_block_kv_transfer(
         assert torch.allclose(orig, recon, atol=1e-6), (
             f"Multi-chunk Layer {i} round-trip mismatch"
         )
+
+    # --- Fused-K/V blocks-first (HND and NHD) ---
+    # kv_size == 1 and hs == 2 * head_size: the K/V pair stays packed inside
+    # each head copy, and the object is a single plane [NL, T, NH * 2 * HS].
+    torch.manual_seed(707)
+    fused_hs = 2 * head_size
+    shape_desc_fused = ops.PageBufferShapeDesc()
+    shape_desc_fused.nl = num_layers
+    shape_desc_fused.nb = num_blocks
+    shape_desc_fused.bs = block_size
+    shape_desc_fused.nh = num_heads
+    shape_desc_fused.hs = fused_hs
+    shape_desc_fused.element_size = dtype.itemsize
+    shape_desc_fused.kv_size = 1
+    for fused_key, fused_fmt, fused_shape in (
+        (
+            "fused_hnd",
+            ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS,
+            (num_blocks, num_heads, block_size, fused_hs),
+        ),
+        (
+            "fused_nhd",
+            ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS,
+            (num_blocks, block_size, num_heads, fused_hs),
+        ),
+    ):
+        paged_fused = [
+            torch.randn(*fused_shape, dtype=dtype).to(device) for _ in range(num_layers)
+        ]
+        d2h_chunks_fused = _alloc_chunks(
+            (num_layers, chunk_tokens, num_heads * fused_hs), num_chunks
+        )
+        ops.multi_layer_block_kv_transfer(
+            paged_fused
+            if use_tensor_list
+            else torch.tensor(
+                [layer.data_ptr() for layer in paged_fused],
+                dtype=torch.uint64,
+                device=device,
+            ),
+            d2h_chunks_fused
+            if use_tensor_list
+            else [c.data_ptr() for c in d2h_chunks_fused],
+            torch.tensor(block_ids, dtype=torch.int64, device=device),
+            torch.device(device),
+            ops.TransferDirection.D2H,
+            shape_desc_fused,
+            chunk_tokens,
+            fused_fmt,
+            0,
+        )
+        paged_fused_h2d = [torch.zeros_like(layer) for layer in paged_fused]
+        ops.multi_layer_block_kv_transfer(
+            paged_fused_h2d
+            if use_tensor_list
+            else torch.tensor(
+                [layer.data_ptr() for layer in paged_fused_h2d],
+                dtype=torch.uint64,
+                device=device,
+            ),
+            d2h_chunks_fused
+            if use_tensor_list
+            else [c.data_ptr() for c in d2h_chunks_fused],
+            torch.tensor(block_ids, dtype=torch.int64, device=device),
+            torch.device(device),
+            ops.TransferDirection.H2D,
+            shape_desc_fused,
+            chunk_tokens,
+            fused_fmt,
+            0,
+        )
+        for i in range(num_layers):
+            orig = paged_fused[i].cpu()
+            recon = paged_fused_h2d[i].cpu()
+            results[f"{fused_key}_l{i}"] = torch.stack([orig, recon])
+            assert torch.allclose(orig, recon, atol=1e-6), (
+                f"{fused_key} layer {i} round-trip mismatch"
+            )
+        # Pin the object byte layout itself: the fallback and the device
+        # kernel must write bit-identical chunks or caches would not be
+        # portable across backends. (The .cpu() reads above synced the
+        # stream, so the pinned chunks are safe to snapshot here.)
+        for c_idx, c in enumerate(d2h_chunks_fused):
+            results[f"{fused_key}_chunk{c_idx}"] = c.clone()
 
     return results
 

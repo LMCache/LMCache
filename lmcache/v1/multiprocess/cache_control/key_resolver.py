@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Resolve a token sequence to the per-rank cache object keys it maps to.
+"""Resolve a token sequence to the cache object keys it maps to.
 
-Several cache-control operations describe content by ``token_ids`` rather than
-by internal :class:`ObjectKey` values, which callers cannot construct. This
-hashes the tokens and expands each chunk into one key per rank, the same fan-out
-the lookup path uses. Failures raise :class:`Unavailable` (the model has not
-allocated KV cache on this node yet) or :class:`InvalidRequest` (an invalid key
-field).
+Cache-control operations describe content by ``token_ids`` rather than internal
+:class:`ObjectKey` values, which callers cannot construct.
+:func:`resolve_object_keys` hashes the tokens and expands each complete chunk
+into one key per rank -- the same fan-out the lookup path uses. It is the single
+resolver shared by the MP server (node) and the coordinator; node callers that
+also need the L1 layout do the readiness lookup themselves before calling it.
 """
 
 # Future
@@ -16,17 +16,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 # First Party
-from lmcache.v1.distributed.api import (
-    MemoryLayoutDesc,
-    ObjectKey,
-    ipc_key_to_object_keys,
-)
-from lmcache.v1.multiprocess.cache_control.errors import InvalidRequest, Unavailable
+from lmcache.v1.distributed.api import ObjectKey, ipc_key_to_object_keys
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.multiprocess.server import MPCacheServer
+    from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 # Hard cap on how many token ids a single token-addressed request may carry.
 # Keeps the request body bounded and the synchronous hashing / key-construction
@@ -34,58 +29,55 @@ if TYPE_CHECKING:
 MAX_TOKEN_IDS = 1_000_000
 
 
-def resolve_l1_keys(
-    engine: MPCacheServer,
+def resolve_object_keys(
+    token_hasher: TokenHasher,
     model_name: str,
     world_size: int,
     token_ids: list[int],
     cache_salt: str,
-) -> tuple[list[ObjectKey], int, MemoryLayoutDesc]:
-    """Resolve a token sequence to the per-rank object keys it maps to.
+) -> tuple[list[ObjectKey], int]:
+    """Resolve a token sequence to the object keys of its complete chunks.
+
+    Hashes ``token_ids`` and expands each complete chunk into one key per rank
+    (a single object group, so MP servers must run with
+    ``--no-separate-object-groups``). The ``token_hasher``
+    must be configured to match the fleet's ``chunk_size`` / ``hash_algorithm``
+    or the resolved keys will not match what the servers stored.
 
     Args:
-        engine: The node's cache engine (its ``context`` carries the token
-            hasher and layout registry).
-        model_name: Model whose layout and rank fan-out to use.
-        world_size: Tensor-parallel world size selecting the layout.
+        token_hasher: Hasher configured to match the fleet's chunk size and
+            hash algorithm.
+        model_name: Model whose rank fan-out to use.
+        world_size: Tensor-parallel world size selecting the per-rank fan-out.
         token_ids: The token sequence to resolve.
         cache_salt: Per-tenant isolation salt.
 
     Returns:
-        ``(obj_keys, chunk_count, layout_desc)``. ``obj_keys`` is empty (and
-        ``chunk_count`` is 0) when the sequence is shorter than one chunk --
-        callers treat that as a no-op.
+        ``(obj_keys, chunk_count)``. ``obj_keys`` holds one key per (chunk, rank)
+        and is empty (with ``chunk_count`` 0) when the sequence is shorter than
+        one chunk.
 
     Raises:
-        Unavailable: No layout is registered for ``(model_name, world_size)``
-            (the model has not allocated KV cache on this node yet).
-        InvalidRequest: A key field (e.g. ``cache_salt``) is invalid.
+        ValueError: ``token_ids`` exceeds the per-request cap, or a key field
+            (e.g. ``cache_salt``) is invalid.
     """
-    ctx = engine.context
-    layout_desc = ctx.layout_desc_registry.find(model_name, world_size)
-    if layout_desc is None:
-        raise Unavailable(
-            f"no layout registered for model_name={model_name!r} "
-            f"world_size={world_size}; the model has not allocated "
-            f"KV cache on this node yet"
+    if len(token_ids) > MAX_TOKEN_IDS:
+        raise ValueError(
+            f"too many token_ids in a single request "
+            f"(limit={MAX_TOKEN_IDS}, got={len(token_ids)})"
         )
-
-    try:
-        ipc_key = IPCCacheServerKey(
-            model_name=model_name,
-            world_size=world_size,
-            worker_id=None,
-            token_ids=tuple(token_ids),
-            start=0,
-            end=len(token_ids),
-            request_id="",
-            cache_salt=cache_salt,
-        )
-    except ValueError as exc:
-        raise InvalidRequest(str(exc)) from None
-
-    chunk_hashes = ctx.token_hasher.compute_chunk_hashes(list(token_ids))
+    ipc_key = IPCCacheServerKey(
+        model_name=model_name,
+        world_size=world_size,
+        worker_id=None,
+        token_ids=tuple(token_ids),
+        start=0,
+        end=len(token_ids),
+        request_id="",
+        cache_salt=cache_salt,
+    )
+    chunk_hashes = token_hasher.compute_chunk_hashes(list(token_ids))
     if not chunk_hashes:
-        return [], 0, layout_desc
+        return [], 0
     obj_keys = ipc_key_to_object_keys(ipc_key, chunk_hashes, [0])[0]
-    return obj_keys, len(chunk_hashes), layout_desc
+    return obj_keys, len(chunk_hashes)

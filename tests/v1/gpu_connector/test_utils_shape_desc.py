@@ -181,13 +181,14 @@ def test_get_group_data_ptrs_cross_layer_returns_single_base():
 
 
 def test_attempt_permute_preserves_bare_tensor():
-    """A bare torch.Tensor input (cross-layer shape) must pass through
-    attempt_permute_to_contiguous_view unchanged — no list wrapping — so the
+    """A bare torch.Tensor input (cross-layer shape) must come back as a bare
+    tensor — no list wrapping, no copy, shape intact — so the
     DiscoverableKVCache recursive union is respected end-to-end."""
     big = torch.empty(32, 80, 2, 16, 8, 64, dtype=torch.bfloat16, device="cuda")
     out = attempt_permute_to_contiguous_view(big)
     assert isinstance(out, torch.Tensor)
-    assert out is big
+    assert tuple(out.shape) == tuple(big.shape)
+    assert out.data_ptr() == big.data_ptr()
 
 
 def test_attempt_permute_recurses_all_shapes():
@@ -219,6 +220,34 @@ def test_attempt_permute_recurses_all_shapes():
     out_nested = attempt_permute_to_contiguous_view([k, v])
     assert isinstance(out_nested, list)
     assert all(t.is_contiguous() for sublist in out_nested for t in sublist)
+
+
+def test_attempt_permute_reorders_misleading_size_one_dims():
+    """A single-head HND-physical tensor exposed as an NHD logical view is
+    torch-contiguous (size-1 dims are stride-exempt), so a plain contiguity
+    check would pass it through with a shape that lies about the physical
+    layout. The stride sort must still reorder it to the stride-truthful
+    HND shape, zero-copy."""
+    phys = torch.empty(2, 32, 1, 16, 64, dtype=torch.bfloat16, device="cuda")
+    logical = phys.permute(0, 1, 3, 2, 4)  # [2, NB, BS, 1, HS]
+    assert logical.is_contiguous()
+
+    out = attempt_permute_to_contiguous_view(logical)
+    assert tuple(out.shape) == (2, 32, 1, 16, 64)
+    assert out.data_ptr() == phys.data_ptr()
+
+
+def test_attempt_permute_reviews_collapsed_size_one_strides():
+    """A contiguous view whose size-1 dims carry collapsed (stride-1) strides
+    hides the true extent of its inner dim; the re-view must recover the
+    tightest shape implied by the strides, zero-copy."""
+    base = torch.empty(8 * 32, dtype=torch.bfloat16, device="cuda")
+    t = base.as_strided((8, 1, 1, 32), (32, 1, 1, 1))
+    assert t.is_contiguous()
+
+    out = attempt_permute_to_contiguous_view(t)
+    assert tuple(out.shape) == (8, 32, 1, 1)
+    assert out.data_ptr() == base.data_ptr()
 
 
 def test_get_device_handles_every_kvcaches_shape():
