@@ -1706,6 +1706,12 @@ class RawBlockCore:
         if checkpoint_device_path and checkpoint_device_path != self.device_path:
             logger.warning("Device metadata device_path mismatch; ignoring metadata")
             return False
+        if int(data.get("block_align", self.block_align)) != self.block_align:
+            logger.warning("Device metadata block_align mismatch; ignoring metadata")
+            return False
+        if int(data.get("header_bytes", self.header_bytes)) != self.header_bytes:
+            logger.warning("Device metadata header_bytes mismatch; ignoring metadata")
+            return False
         if int(data.get("slot_bytes", self.slot_bytes)) != self.slot_bytes:
             logger.warning("Device metadata slot_bytes mismatch; ignoring metadata")
             return False
