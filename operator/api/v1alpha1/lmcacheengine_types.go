@@ -244,8 +244,7 @@ type L2EncryptionSpec struct {
 	// masterKeySecretRef references a user-created Secret holding the
 	// master key under the "master" data key. The Secret may live in a
 	// different namespace; the operator creates a managed copy in the
-	// engine's namespace. The operator never generates the key — key
-	// provenance and rotation belong to the user.
+	// engine's namespace and never generates key material.
 	MasterKeySecretRef SecretReference `json:"masterKeySecretRef"`
 
 	// keyProvider selects how per-cache_salt keys are obtained from the
@@ -255,8 +254,7 @@ type L2EncryptionSpec struct {
 	// +kubebuilder:validation:Enum=hkdf
 	KeyProvider *string `json:"keyProvider,omitempty"`
 
-	// aesBits selects the AES key size. 128 is the default; 256 is
-	// available for compliance mandates.
+	// aesBits selects the AES key size (128 or 256).
 	// +optional
 	// +kubebuilder:default=128
 	// +kubebuilder:validation:Enum=128;256
