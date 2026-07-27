@@ -82,7 +82,9 @@ Source: ``lmcache/v1/multiprocess/config.py``
    * - ``--runtime-plugin-config``
      - ``"{}"``
      - JSON string of extra key-value config forwarded to runtime
-       plugins via ``LMCACHE_RUNTIME_PLUGIN_EXTRA_CONFIG``. Example:
+       plugins as the top-level ``runtime_plugin_extra_config`` key
+       inside the aggregated ``LMCACHE_RUNTIME_PLUGIN_CONFIG`` env var
+       (there is no separate env var). Example:
        ``'{"plugin.frontend.heartbeat_url": "http://localhost:5000/heartbeat"}'``.
    * - ``--script-allowed-imports``
      - ``[]``
