@@ -146,12 +146,6 @@ key via HKDF-SHA256; the master key is never written to L2. ``aes_bits``
 defaults to ``128`` (already unbreakable and slightly faster); set ``256`` if a
 compliance mandate requires it.
 
-On Kubernetes, the LMCache operator can wire all of this declaratively via
-``spec.l2Backend.encryption`` on an ``LMCacheEngine`` / ``CacheBlendEngine``
-CR — it renders the serde config and mounts the referenced master-key
-``Secret`` into the engine pods. See
-:file:`operator/config/samples/lmcache_v1alpha1_lmcacheengine_l2_encrypted.yaml`.
-
 .. warning::
 
    The ``hkdf`` provider derives every tenant's key from one shared master
