@@ -12,7 +12,7 @@ import httpx
 import torch
 
 # First Party
-import lmcache.sdk.stream as lmc_stream
+import lmcache.sdk.request as lmc_request
 
 
 def _rotate_half_neox(x: torch.Tensor) -> torch.Tensor:
@@ -247,8 +247,8 @@ def score_answers(
 
 def make_post_completion(
     vllm_url: str, model_name: str, timeout: float
-) -> lmc_stream.PostCompletion:
-    """Build a streaming post_completion callable for lmcache.sdk.stream.
+) -> lmc_request.PostCompletion:
+    """Build a streaming post_completion callable for lmcache.sdk.request.
 
     Args:
         vllm_url: The URL of the vLLM server.
@@ -289,7 +289,7 @@ def make_post_completion(
                 if not choices:
                     continue
                 choice = choices[0]
-                yield lmc_stream.TokenEvent(
+                yield lmc_request.TokenEvent(
                     token_id=_extract_token_id(choice),
                     text=choice.get("text", ""),
                 )

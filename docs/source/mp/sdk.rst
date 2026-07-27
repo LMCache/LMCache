@@ -146,10 +146,10 @@ Each type of tensor (KV, query intermediate) has its own context.
 Writing a custom edit function
 ------------------------------
 
-An edit function takes the retrieved KV tensor and its token ids and returns the
-edited ``(kv, tokens)``. ``batch.modify(fn)`` applies it to every stream. The
+An edit function takes the Mapping[kind, retrieved tensor] and its token ids and returns the
+edited ``(kv, tokens)``. ``batch.modify(fn)`` applies it for every requests. The
 function should be implemented as if it's only for single request, and the SDK
-will call it in parallel for every stream in the batch.
+will call it in parallel for every requests in the batch.
 
 ``modify`` operates only on the **chunk-aligned** prefix. A trailing partial
 chunk is tracked by the SDK and re-sent on the next ``decode``, so
@@ -160,8 +160,8 @@ API reference
 -------------
 
 The SDK lives under ``lmcache.sdk``. The examples above alias
-``import lmcache.sdk as lmc_sdk`` (and ``lmcache.sdk.stream`` / ``.batch`` as
-``lmc_stream`` / ``lmc_batch``).
+``import lmcache.sdk as lmc_sdk`` (and ``lmcache.sdk.request`` / ``.batch`` as
+``lmc_request`` / ``lmc_batch``).
 
 Modules
 ~~~~~~~
@@ -181,10 +181,10 @@ Modules
      - ``connect()`` for the **query (Q)** cache (model name is ``<model>##query``).
    * - ``lmcache.sdk.context``
      - The server-connection context plus the shared cache-kind enum and error type.
-   * - ``lmcache.sdk.stream``
+   * - ``lmcache.sdk.request``
      - Per-request streaming: ``create_request()`` and ``LMCacheRequestStream``.
    * - ``lmcache.sdk.batch``
-     - Orchestrates many streams together via ``LMCacheBatchedStream``.
+     - Orchestrates many request streams together via ``LMCacheBatchedStream``.
    * - ``lmcache.sdk.wrapper.contiguous``
      - ``ContiguousTransferWrapper`` — the transfer helper the context holds
        (used internally; exposed via ``ctx.transfer_ctx``).
@@ -203,17 +203,26 @@ Classes
    * - ``context.LMCacheSDKContext``
      - A connection to one LMCache server for one model + kind; returned by
        ``connect`` and passed to every other call.
-   * - ``stream.LMCacheRequestStream``
+   * - ``request.LMCacheRequestStream``
      - One request's lifecycle (prefill / decode / retrieve / modify).
    * - ``batch.LMCacheBatchedStream``
-     - Runs a set of ``LMCacheRequestStream``s together and reports metrics.
-   * - ``stream.StreamPerfMetrics``
-     - Throughput / latency report returned by the batch operations.
-   * - ``stream.TokenEvent``
-     - One generated-token event passed back through the stream.
-   * - ``stream.PostCompletion``
+     - Runs a set of ``LMCacheRequestStream`` objects together and reports
+       metrics.
+   * - ``request.StreamPerfMetrics``
+     - Throughput / latency report for a single ``generate()`` call; the batch
+       keeps the latest one per request stream in ``batch.perf_metrics``.
+   * - ``request.TokenEvent``
+     - One generated-token event passed back through the request.
+   * - ``request.PostCompletion``
      - Protocol you implement: a callable that submits a request to your engine.
-   * - ``context.LMCacheSDKError`` / ``stream.LMCacheRequestStreamError`` /
+   * - ``context.ModifyFnType``
+     - Type alias for the edit function you pass to ``modify`` / ``modify_kv``:
+       ``Callable[[Mapping[LMCacheSDKCacheKind, torch.Tensor], Sequence[int]],
+       tuple[torch.Tensor, Sequence[int]]]``.
+   * - ``lmcache.cli.metrics.Metrics``
+     - Aggregated report returned by ``batch.prefill`` / ``modify`` / ``decode``
+       (not an ``lmcache.sdk`` type). Emit it or convert it to a dict.
+   * - ``context.LMCacheSDKError`` / ``request.LMCacheRequestStreamError`` /
        ``batch.LMCacheBatchedStreamError``
      - Error types raised by the SDK, streams, and batches respectively.
 
@@ -231,32 +240,62 @@ Functions and methods
        ``qcache``). Returns an ``LMCacheSDKContext``.
    * - ``kv_ctx = lmc_sdk.kvcache.connect(url, http_url, model_name, timeout=60.0)``
      - Connect for the KV cache directly. Alternatively, use 
-	   ``connect(kind="kv", ...)``.
+       ``connect(kind=LMCacheSDKCacheKind.KV, ...)``.
    * - ``q_ctx = lmc_sdk.qcache.connect(url, http_url, model_name, timeout=60.0)``
      - Connect for the query cache directly (model name is ``<model>##query``).
-	   Alternatively, use ``connect(kind="query", ...)``.
+       Alternatively, use ``connect(kind=LMCacheSDKCacheKind.QUERY, ...)``.
    * - ``ctx.register_caches()``
      - Fetch the server-registered layout for this model + kind (called by
        ``connect``).
    * - ``ctx.retrieve(tokens, cache_salt="")``
      - Pull the cached tensor for a token sequence (``None`` on miss).
+   * - ``ctx.store(kv, tokens, cache_salt="")``
+     - Push a tensor of shape ``[2, L, T, D]`` back to the server for
+       ``tokens`` (``len(tokens)`` must equal ``kv.shape[2]``). Returns ``False``
+       if the server already had it cached.
    * - ``ctx.close()``
      - Release the context's resources when done.
-   * - ``request = lmc_stream.create_request(contexts, post_completion,
+   * - ``request = lmc_request.create_request(contexts, post_completion,
        prompt_token_ids, cache_salt="")``
      - Create one request stream bound to one or more contexts (e.g. KV and Q).
    * - ``batch = lmc_batch.LMCacheBatchedStream()``
      - Create an empty batch.
    * - ``batch.add(request)``
      - Register a request stream to the batch.
+   * - ``batch.get_request_stream(stream_id)``
+     - Fetch a registered request stream by its ``request_stream_id``. Raises
+       ``LMCacheBatchedStreamError`` if the id is unknown.
    * - ``batch.prefill(sampling_params)``
-     - Prefill every stream once (``max_tokens`` forced to 1). Returns
-       ``StreamPerfMetrics``.
+     - Prefill every request stream once (``max_tokens`` forced to 1). Returns
+       ``Metrics``.
    * - ``batch.modify(fn)``
-     - Apply the edit function ``fn`` to every stream's cached KV. Returns
-       ``StreamPerfMetrics``.
+     - Apply the edit function ``fn`` to every request stream's cached KV. Returns
+       ``Metrics``.
    * - ``batch.decode(sampling_params)``
-     - Decode every stream. Returns ``StreamPerfMetrics``.
+     - Decode every request stream. Returns ``Metrics``.
+   * - ``metrics.emit()``
+     - Print the ``Metrics`` report through its registered handlers (a
+       terminal table by default).
+   * - ``metrics.to_dict()``
+     - Return the ``Metrics`` report as a JSON-serialisable dict, keyed by
+       ``"title"`` and ``"metrics"``.
 
-``StreamPerfMetrics`` reports ``input_tokens`` / ``input_tput`` for prefill,
+``Metrics`` reports ``input_tokens`` / ``input_tput`` for prefill,
 ``duration`` for modify, and ``output_tokens`` / ``output_tput`` for decode.
+
+Attributes
+~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Attribute
+     - Description
+   * - ``batch.request_streams``
+     - ``dict`` of every registered ``LMCacheRequestStream``, keyed by
+       ``request_stream_id``. Iterate it to read each request's
+       ``output_text`` / ``output_tokens`` after decode.
+   * - ``batch.perf_metrics``
+     - ``dict`` of the latest ``StreamPerfMetrics`` per ``request_stream_id``.
+       Cleared and repopulated by each ``prefill`` / ``decode``.

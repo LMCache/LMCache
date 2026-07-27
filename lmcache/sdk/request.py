@@ -69,7 +69,7 @@ class TokenEvent:
 
 
 class PostCompletion(Protocol):
-    """Inference function (callable) to be called by stream."""
+    """Inference function (callable) to be called by request stream."""
 
     def __call__(
         self,
@@ -147,13 +147,13 @@ class LMCacheRequestStream:
         self.done: bool = False
         self._decoded: int = 0
         self._text_parts: list[str] = []
-        self._stream_id: str = str(uuid.uuid4())
+        self._request_stream_id: str = str(uuid.uuid4())
         self._suffix_tokens: list[int] = []
 
     @property
-    def stream_id(self) -> str:
+    def request_stream_id(self) -> str:
         """Return the unique stream id."""
-        return self._stream_id
+        return self._request_stream_id
 
     @property
     def suffix_tokens(self) -> list[int]:
@@ -217,7 +217,7 @@ class LMCacheRequestStream:
                 last_token_time = time.perf_counter()
         except Exception as e:
             raise LMCacheRequestStreamError(
-                f"Stream {self.stream_id} failed during generation: {e}"
+                f"Stream {self.request_stream_id} failed during generation: {e}"
             ) from e
         finally:
             self._decoded += len(gen_tokens)
@@ -274,7 +274,7 @@ class LMCacheRequestStream:
             tensor = ctx.retrieve(self.tokens, self.cache_salt)
         if tensor is None:
             raise LMCacheRequestStreamError(
-                f"no cached {kind} for {self.stream_id} after {timeout:.0f}s"
+                f"no cached {kind} for {self.request_stream_id} after {timeout:.0f}s"
             )
         return tensor
 
@@ -301,7 +301,7 @@ class LMCacheRequestStream:
         if not ctx.store(kv, tokens, self.cache_salt):
             logger.warning(
                 "store reported edited KV already cached for stream %s",
-                self.stream_id,
+                self.request_stream_id,
             )
         self.tokens = list(tokens)
         self.done = False
