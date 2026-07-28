@@ -50,13 +50,7 @@ root = Path(".")
 #      are not ready yet.
 #   4. As tests become ready, shrink blocklist until XPU jobs run the full set.
 allowlist = {
-  "tests/benchmarks/test_*.py",
-  "tests/test_*.py",
-  "tests/cli/**/test_*.py",
-  "tests/disagg/test_*.py",
-  "tests/v1/multiprocess/test_engine_driven_transfer.py",
-  "tests/v1/test_xpu_connector.py",
-  "tests/v1/test_torch_ops.py",
+  "tests/v1/multiprocess/test_*.py",
 }
 selected: set[str] = set()
 
@@ -78,7 +72,7 @@ fi
 log "discovered ${#XPU_TEST_FILES[@]} XPU-related test files"
 printf '  %s\n' "${XPU_TEST_FILES[@]}"
 
-PYTEST_ARGS=(-q --maxfail=1 -m "not cuda")
+PYTEST_ARGS=(-q)
 if [ -n "${TEST_SELECTOR:-}" ]; then
   PYTEST_ARGS+=(-k "${TEST_SELECTOR}")
 fi

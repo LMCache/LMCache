@@ -12,6 +12,28 @@ import torch
 from lmcache import torch_device_type
 from lmcache.v1.multiprocess.futures import CUDAMessagingFuture, MessagingFuture
 
+
+def _event_ipc_supported_for_active_device() -> bool:
+    """Return True when the active device runtime supports event IPC."""
+    # First Party
+    from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
+
+    try:
+        backend = get_event_ipc_backend(torch_device_type)
+        backend.check_event_support(0)
+        return True
+    except Exception:
+        return False
+
+
+REQUIRES_EVENT_IPC = pytest.mark.skipif(
+    not _event_ipc_supported_for_active_device(),
+    reason=(
+        "Event IPC is not supported for the active runtime device; "
+        "skip IPC-dependent CUDAMessagingFuture tests."
+    ),
+)
+
 # ==============================================================================
 # Helper Functions for CUDAMessagingFuture Tests
 # ==============================================================================
@@ -180,6 +202,7 @@ def test_messaging_future_complex_type():
 
 
 @pytest.mark.gpu
+@REQUIRES_EVENT_IPC
 def test_cuda_messaging_future_basic_usage():
     """Test basic usage of CUDAMessagingFuture: create, wait, and get result."""
     getattr(torch, torch_device_type).init()
@@ -219,6 +242,7 @@ def test_cuda_messaging_future_basic_usage():
 
 
 @pytest.mark.gpu
+@REQUIRES_EVENT_IPC
 def test_cuda_messaging_future_with_thread():
     """Test CUDAMessagingFuture with result set from another thread."""
     getattr(torch, torch_device_type).init()
@@ -260,6 +284,7 @@ def test_cuda_messaging_future_with_thread():
 
 
 @pytest.mark.gpu
+@REQUIRES_EVENT_IPC
 def test_cuda_messaging_future_wait_no_timeout():
     """Test wait method without timeout (waits indefinitely
     until result is set).
@@ -295,6 +320,7 @@ def test_cuda_messaging_future_wait_no_timeout():
 
 
 @pytest.mark.gpu
+@REQUIRES_EVENT_IPC
 def test_cuda_messaging_future_wait_with_timeout_success():
     """Test that wait method works correctly with timeout when result is available."""
     getattr(torch, torch_device_type).init()
@@ -328,6 +354,7 @@ def test_cuda_messaging_future_wait_with_timeout_success():
 
 
 @pytest.mark.gpu
+@REQUIRES_EVENT_IPC
 def test_cuda_messaging_future_wait_timeout_reached():
     """Test that wait method returns False when timeout is reached."""
     getattr(torch, torch_device_type).init()
@@ -346,6 +373,7 @@ def test_cuda_messaging_future_wait_timeout_reached():
 
 
 @pytest.mark.gpu
+@REQUIRES_EVENT_IPC
 def test_cuda_messaging_future_result_with_timeout_success():
     """Test that result method works correctly with timeout when result is available."""
     getattr(torch, torch_device_type).init()
@@ -378,6 +406,7 @@ def test_cuda_messaging_future_result_with_timeout_success():
 
 
 @pytest.mark.gpu
+@REQUIRES_EVENT_IPC
 def test_cuda_messaging_future_result_timeout_reached():
     """Test that result method raises TimeoutError when timeout is reached."""
     getattr(torch, torch_device_type).init()
@@ -393,6 +422,7 @@ def test_cuda_messaging_future_result_timeout_reached():
 
 
 @pytest.mark.gpu
+@REQUIRES_EVENT_IPC
 def test_cuda_messaging_future_multiple_result_calls():
     """Test that result can be retrieved multiple times after being set."""
     getattr(torch, torch_device_type).init()
@@ -423,6 +453,7 @@ def test_cuda_messaging_future_multiple_result_calls():
 
 
 @pytest.mark.gpu
+@REQUIRES_EVENT_IPC
 def test_cuda_messaging_future_query_before_and_after():
     """Test query method returns False before completion and True after."""
     getattr(torch, torch_device_type).init()
@@ -456,6 +487,7 @@ def test_cuda_messaging_future_query_before_and_after():
 
 
 @pytest.mark.gpu
+@REQUIRES_EVENT_IPC
 def test_cuda_messaging_future_complex_type():
     """Test CUDAMessagingFuture with complex types like lists and dicts."""
     getattr(torch, torch_device_type).init()
@@ -488,10 +520,8 @@ def test_cuda_messaging_future_complex_type():
     thread.join()
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA is required for CUDAMessagingFuture tests",
-)
+@pytest.mark.gpu
+@REQUIRES_EVENT_IPC
 def test_messaging_future_to_device_future():
     """Test converting MessagingFuture to DeviceMessagingFuture
     using to_device_future method.
@@ -526,6 +556,7 @@ def test_messaging_future_to_device_future():
 
 
 @pytest.mark.gpu
+@REQUIRES_EVENT_IPC
 def test_cuda_messaging_future_with_explicit_device():
     """Test CUDAMessagingFuture with explicit device parameter."""
     getattr(torch, torch_device_type).init()
