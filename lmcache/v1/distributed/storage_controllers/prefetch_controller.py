@@ -161,6 +161,12 @@ class InFlightPrefetchRequest:
     pending_lookup_tasks: dict[int, L2TaskId] = field(default_factory=dict)
     # Lookup phase: adapter_idx -> bitmap (populated as results arrive)
     lookup_results: dict[int, Bitmap] = field(default_factory=dict)
+    # Lookup phase: when not None, maps adapter_idx to the global key
+    # indices sent to that adapter for a targeted lookup.  Used to remap
+    # subset lookup bitmaps back to global key indices in
+    # _poll_lookup_results.  None means all keys were sent to all adapters
+    # (default behavior, no remapping needed).
+    lookup_key_indices: dict[int, list[int]] | None = None
 
     # Load phase: adapter_idx -> bitmap of key indices to load
     load_plan: dict[int, Bitmap] = field(default_factory=dict)
@@ -749,8 +755,14 @@ class PrefetchController(StorageControllerInterface):
         request_id: PrefetchRequestId,
         spec: PrefetchRequestSpec,
     ) -> None:
-        """Submit lookup_and_lock to all live (non-draining) adapters for a
-        new request."""
+        """Submit lookup_and_lock tasks for a new request.
+
+        By default every key is sent to every live (non-draining) adapter.
+        When the prefetch policy provides :meth:`select_lookup_targets`,
+        each key is sent only to the adapter(s) the policy designates,
+        avoiding wasted lookups on adapters that cannot have the key
+        (e.g. striped storage where each key lives on exactly one adapter).
+        """
         # Skip adapters being drained so a new request never locks keys on
         # an adapter that is on its way out.
         routing_adapters = {
@@ -762,10 +774,40 @@ class PrefetchController(StorageControllerInterface):
             self._complete_request(request_id, Bitmap(len(spec.keys)))
             return
 
+        routing_descriptors = [
+            desc
+            for adapter_id, desc in self._adapter_descriptors.items()
+            if adapter_id not in self._draining
+        ]
+        lookup_targets = self._policy.select_lookup_targets(
+            spec.keys, routing_descriptors
+        )
+
         pending_lookup_tasks: dict[int, L2TaskId] = {}
-        for adapter_id, adapter in routing_adapters.items():
-            task_id = adapter.submit_lookup_and_lock_task(spec.keys, spec.layout_desc)
-            pending_lookup_tasks[adapter_id] = task_id
+        lookup_key_indices: dict[int, list[int]] | None = None
+
+        if lookup_targets is not None:
+            # Targeted lookup: send only the policy-designated subset of
+            # keys to each adapter.  Store the index mapping so results
+            # can be remapped to global key indices later.
+            lookup_key_indices = {}
+            for adapter_id, indices in lookup_targets.items():
+                if adapter_id not in routing_adapters or not indices:
+                    continue
+                adapter = routing_adapters[adapter_id]
+                subset_keys = [spec.keys[i] for i in indices]
+                task_id = adapter.submit_lookup_and_lock_task(
+                    subset_keys, spec.layout_desc
+                )
+                pending_lookup_tasks[adapter_id] = task_id
+                lookup_key_indices[adapter_id] = indices
+        else:
+            # Default: all keys to all adapters
+            for adapter_id, adapter in routing_adapters.items():
+                task_id = adapter.submit_lookup_and_lock_task(
+                    spec.keys, spec.layout_desc
+                )
+                pending_lookup_tasks[adapter_id] = task_id
 
         request = InFlightPrefetchRequest(
             request_id=request_id,
@@ -777,6 +819,7 @@ class PrefetchController(StorageControllerInterface):
             attn_desc=spec.attn_desc,
             mode=spec.mode,
             pending_lookup_tasks=pending_lookup_tasks,
+            lookup_key_indices=lookup_key_indices,
         )
         self._in_flight_requests[request_id] = request
         self._status_in_flight_count += 1
@@ -1020,7 +1063,16 @@ class PrefetchController(StorageControllerInterface):
         request: InFlightPrefetchRequest,
         signaled_adapters: set[int],
     ) -> None:
-        """Query pending lookup-and-lock results from signaled adapters."""
+        """Query pending lookup-and-lock results from signaled adapters.
+
+        When :attr:`InFlightPrefetchRequest.lookup_key_indices` is set
+        (targeted lookup), each adapter received a *subset* of the request's
+        keys, so the returned bitmap is relative to that subset.  We remap
+        it back to a bitmap over the full key list using the stored index
+        mapping so that downstream consumers (load-plan computation, unlock
+        helpers) always see global bitmaps.
+        """
+        num_keys = len(request.keys)
         for adapter_idx in list(request.pending_lookup_tasks):
             if adapter_idx not in signaled_adapters:
                 continue
@@ -1030,7 +1082,15 @@ class PrefetchController(StorageControllerInterface):
             )
             if result is None:
                 continue
-            request.lookup_results[adapter_idx] = result
+            if request.lookup_key_indices is not None:
+                # Remap subset bitmap to global bitmap
+                indices = request.lookup_key_indices[adapter_idx]
+                global_result = Bitmap(num_keys)
+                for j in result.get_indices_list():
+                    global_result.set(indices[j])
+                request.lookup_results[adapter_idx] = global_result
+            else:
+                request.lookup_results[adapter_idx] = result
             del request.pending_lookup_tasks[adapter_idx]
 
     def _poll_load_results(

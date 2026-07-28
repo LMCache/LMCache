@@ -2,9 +2,16 @@
 """
 Prefetch policy interface and default implementation for L2-to-L1 load decisions.
 
-The prefetch policy decides which L2 adapter should load each key when multiple
-adapters have the same key. It receives lookup results (bitmaps) from all adapters
-and produces a load plan mapping each adapter to the key indices it should load.
+The prefetch policy makes two decisions during an L2 prefetch:
+
+1. *Lookup routing* (:meth:`PrefetchPolicy.select_lookup_targets`): which
+   adapters should be queried for which keys during the lookup_and_lock phase.
+   The default broadcasts all keys to all adapters; a striped policy routes
+   each key only to the adapter that owns it, avoiding N-1 wasted lookups.
+
+2. *Load plan* (:meth:`PrefetchPolicy.select_load_plan`): after lookup results
+   arrive, which adapter should load each key.  The default picks the first
+   adapter (lowest index) that has each key.
 """
 
 # Standard
@@ -15,6 +22,7 @@ from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
+    striped_adapter_index_for_key,
 )
 
 
@@ -49,6 +57,31 @@ class PrefetchPolicy(ABC):
             overlap, and the union of all returned bitmaps should be a subset
             of the union of the input bitmaps.
         """
+
+    def select_lookup_targets(
+        self,
+        keys: list[ObjectKey],
+        adapters: list[AdapterDescriptor],
+    ) -> dict[int, list[int]] | None:
+        """Decide which adapters to query for which keys during the lookup phase.
+
+        Returns ``None`` to indicate "query all adapters for all keys" (default
+        behavior, matching the pre-striping implementation).  A striped policy
+        returns a mapping from adapter index to the list of key indices to
+        look up on that adapter, so the controller only submits lookup tasks
+        for keys that could exist on each adapter — avoiding N-1 wasted
+        lookups per key when each key lives on exactly one adapter.
+
+        Args:
+            keys: Full list of keys being prefetched.
+            adapters: Descriptors of available L2 adapters.
+
+        Returns:
+            ``None`` (query all adapters for all keys), or a mapping from
+            adapter index to the list of key indices (into *keys*) to look
+            up on that adapter.
+        """
+        return None
 
     def select_l1_retentions(
         self,
@@ -189,5 +222,63 @@ class RetainPrefetchPolicy(DefaultPrefetchPolicy):
         return [True] * len(keys)
 
 
+class StripedPrefetchPolicy(DefaultPrefetchPolicy):
+    """Striped prefetch policy: only query the adapter that owns each key.
+
+    When used with
+    :class:`StripedStorePolicy`,
+    each key is stored on exactly one adapter (determined by BLAKE3 hash).  This
+    policy overrides :meth:`select_lookup_targets` to route each key only to
+    its owning adapter during the lookup phase, avoiding N-1 wasted lookups
+    per key.
+
+    :meth:`select_load_plan` is inherited from
+    :class:`DefaultPrefetchPolicy` (first-adapter-wins) — under striped storage
+    exactly one adapter has any given key, so the default load plan is correct
+    without modification.
+
+    Pair with ``--l2-store-policy striped`` and
+    ``--l2-prefetch-policy striped`` to enable.
+    """
+
+    def select_lookup_targets(
+        self,
+        keys: list[ObjectKey],
+        adapters: list[AdapterDescriptor],
+    ) -> dict[int, list[int]] | None:
+        """Route each key to its BLAKE3-determined adapter for lookup.
+
+        Uses the same
+        :func:`striped_adapter_index_for_key`
+        as :class:`StripedStorePolicy`, guaranteeing that the lookup phase
+        queries exactly the adapter that the store phase wrote each key to.
+
+        Args:
+            keys: Full list of keys being prefetched.
+            adapters: Descriptors of available L2 adapters.
+
+        Returns:
+            Mapping from adapter index to the list of key indices (into
+            *keys*) to look up on that adapter.  Each key index appears in
+            exactly one adapter's list.  If *adapters* is empty, returns
+            ``None`` (no targeted routing, controller falls back to
+            all-to-all which is a no-op with zero adapters).
+        """
+        if not adapters:
+            return None
+
+        num_adapters = len(adapters)
+        sorted_adapters = sorted(adapters, key=lambda a: a.index)
+        result: dict[int, list[int]] = {ad.index: [] for ad in sorted_adapters}
+
+        for i, key in enumerate(keys):
+            slot = striped_adapter_index_for_key(key, num_adapters)
+            adapter_id = sorted_adapters[slot].index
+            result[adapter_id].append(i)
+
+        return result
+
+
 register_prefetch_policy("default", DefaultPrefetchPolicy)
 register_prefetch_policy("retain", RetainPrefetchPolicy)
+register_prefetch_policy("striped", StripedPrefetchPolicy)
