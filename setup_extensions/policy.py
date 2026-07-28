@@ -232,7 +232,7 @@ class BuildPolicy:
     def collect_storage_backends(
         extra_cxx_flags: list[str],
     ) -> list:
-        """Discover and build optional backend extensions.
+        """Discover and build optional L2 storage backend extensions.
 
         Each storage backend can be enabled via its ``BUILD_WITH_*``
         env var or auto-detected through its SDK presence.
