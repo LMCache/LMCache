@@ -38,6 +38,9 @@ Recipe pages for the validated hybrid-attention architectures:
    * - Qwen3.5 / Qwen3.6 series
      - Mamba / GDN + full
      - :doc:`/recipes/qwen3_5`
+   * - Kimi-Linear
+     - KDA linear-attention + MLA full
+     - :doc:`/recipes/kimi_linear`
    * - DeepSeek-V4-Flash
      - Sparse-MLA (multiple KV groups)
      - :doc:`/recipes/deepseek_v4_flash`
@@ -56,6 +59,7 @@ Recipe pages for the validated hybrid-attention architectures:
    /recipes/gemma4
    /recipes/gpt_oss
    /recipes/qwen3_5
+   /recipes/kimi_linear
    /recipes/deepseek_v4_flash
    /recipes/glm5_2
    /recipes/minimax_m3
@@ -127,7 +131,9 @@ Mamba / Linear-Attention Hybrids
 
 Models that interleave **Mamba / Gated-DeltaNet (GDN) linear-attention layers**
 with full attention — the Qwen3.5 and Qwen3.6 series (``Qwen/Qwen3.5-0.8B``,
-``Qwen/Qwen3.6-27B``, …), Qwen3-Next, and other GDN hybrids — are supported.
+``Qwen/Qwen3.6-27B``, …), Qwen3-Next, Kimi-Linear
+(``moonshotai/Kimi-Linear-48B-A3B-Instruct``), and other GDN hybrids — are
+supported.
 Unlike a paged key/value cache, their linear-attention layers keep a recurrent
 **state cache** (a convolution + SSM state). LMCache reinterprets that state as
 an opaque page at registration time, so prefix caching and KV reuse work end to
@@ -194,6 +200,9 @@ example:
    * - ``Qwen/Qwen3.5-0.8B``
      - 544
      - 1
+   * - ``moonshotai/Kimi-Linear-48B-A3B-Instruct``
+     - 944
+     - 2
 
 Step 2 — derive the three required flags from ``N``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -245,12 +254,6 @@ Caveats
 
 See the :doc:`Qwen3.5 / Qwen3.6 recipe <../recipes/qwen3_5>` for the validated
 end-to-end commands and the per-model block sizes.
-
-What Is Not Supported Yet
--------------------------
-
-- **DeepSeek-V4-style compressed / indexer caches** are not yet handled by the
-  multiprocess connector.
 
 Verifying Correctness
 ---------------------

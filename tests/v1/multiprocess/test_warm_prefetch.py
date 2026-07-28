@@ -54,9 +54,13 @@ class _FakeStorageManager:
     _polls: int = 0
     _total: int = 0
 
-    def submit_prefetch_task(self, keys, layout_desc, mode=None, policy=None, **_):
-        self._total = len(keys)
-        self.submit_args = {"keys": list(keys), "mode": mode, "policy": policy}
+    def submit_prefetch_task(self, spec):
+        self._total = len(spec.keys)
+        self.submit_args = {
+            "keys": list(spec.keys),
+            "mode": spec.mode,
+            "policy": spec.policy,
+        }
         return _FakeHandle(self._total)
 
     def query_prefetch_status(self, handle):
