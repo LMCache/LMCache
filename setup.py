@@ -8,6 +8,7 @@ zero changes to this file.
 
 # Standard
 from pathlib import Path
+import importlib.util
 import sys
 
 ROOT_DIR = Path(__file__).parent
@@ -36,20 +37,43 @@ def _read_requirements(path: Path) -> list[str]:
 
 
 class _BuildPyWithProtoStubs(_build_py):
-    """Generate gRPC stubs before packaging."""
+    """Generate gRPC stubs before packaging when grpcio-tools is present."""
 
     def run(self) -> None:
-        # First Party
-        from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
-            _generate,
+        # Avoid importing _proto_gen, whose initialization also loads stubs.
+        gen_path = (
+            ROOT_DIR
+            / "lmcache"
+            / "v1"
+            / "multiprocess"
+            / "transport"
+            / "grpc_impl"
+            / "_proto_gen"
+            / "_generate.py"
         )
+        spec = importlib.util.spec_from_file_location(
+            "_lmcache_proto_generate", gen_path
+        )
+        assert spec is not None and spec.loader is not None, f"cannot load {gen_path}"
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
 
-        rc = _generate.main()
-        if rc != 0:
-            raise SystemExit(
-                "failed to generate gRPC stubs during build; install "
-                "'grpcio-tools' matching your grpc runtime"
+        try:
+            # Third Party
+            import grpc_tools.protoc  # noqa: F401
+        except ImportError:
+            print(
+                "warning: grpcio-tools not available at build time; "
+                "skipping gRPC stub generation. Stubs will be produced "
+                "lazily on first import at runtime.",
+                file=sys.stderr,
             )
+        else:
+            rc = module.main()
+            if rc != 0:
+                raise SystemExit(
+                    "failed to generate gRPC stubs during build; check the output above"
+                )
         super().run()
 
 
