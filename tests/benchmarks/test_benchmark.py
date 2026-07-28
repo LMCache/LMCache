@@ -115,7 +115,6 @@ def create_config():
 # test store 10GB data (1GB * 10)
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="store")
-@pytest.mark.gpu
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 def test_store_1GB(
@@ -226,7 +225,6 @@ def test_store_1GB(
 # Test retrieve 10data (10 rounds, each round 1GB, 100% hit)
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="retrieve")
-@pytest.mark.gpu
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 def test_retrieve_1GB_allhit(
@@ -346,7 +344,6 @@ def test_retrieve_1GB_allhit(
 # Test lookup 2K * 10 requests, 100% hit
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="lookup")
-@pytest.mark.gpu
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 def test_lookup_20K_tokens(

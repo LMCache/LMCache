@@ -53,6 +53,8 @@ root = Path("tests")
 allowlist = {
   "tests/benchmarks/test_*.py",
   "tests/test_*.py",
+  "tests/cli/**/test_*.py",
+  "tests/disagg/test_*.py",
   "tests/v1/multiprocess/test_engine_driven_transfer.py",
   "tests/v1/test_python_ops_fallback.py",
   "tests/v1/test_xpu_connector.py",
@@ -81,7 +83,7 @@ fi
 log "discovered ${#XPU_TEST_FILES[@]} XPU-related test files"
 printf '  %s\n' "${XPU_TEST_FILES[@]}"
 
-PYTEST_ARGS=(-q --maxfail=1)
+PYTEST_ARGS=(-q --maxfail=1 -m "xpu or not gpu")
 if [ -n "${TEST_SELECTOR:-}" ]; then
   PYTEST_ARGS+=(-k "${TEST_SELECTOR}")
 fi

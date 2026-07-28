@@ -103,6 +103,7 @@ def create_test_metadata() -> LMCacheMetadata:
 
 
 @pytest.mark.no_shared_allocator
+@pytest.mark.gpu
 def test_nixl_storage_config():
     """Test NixlStorageConfig creation and validation"""
     config = create_test_config()
