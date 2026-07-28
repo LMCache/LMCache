@@ -22,7 +22,7 @@ from lmcache.v1.mp_coordinator.schemas import (
     TokenPlacementLookupRequest,
     TokenPlacementLookupResponse,
 )
-from lmcache.v1.mp_coordinator.utils.cache_utils import resolve_object_keys
+from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
 
 router = APIRouter()
 
