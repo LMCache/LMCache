@@ -58,7 +58,9 @@ def create_runtime_connector(hidden_dim: int, num_layers: int):
         return create_xpu_connector(hidden_dim, num_layers)
     if torch_device_type == "cuda":
         return create_gpu_connector(hidden_dim, num_layers)
-    raise ValueError(f"Unsupported torch_device_type for benchmark: {torch_device_type}")
+    raise ValueError(
+        f"Unsupported torch_device_type for benchmark: {torch_device_type}"
+    )
 
 
 @pytest.fixture
@@ -115,6 +117,10 @@ def create_config():
 # test store 10GB data (1GB * 10)
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="store")
+@pytest.mark.skipif(
+    not torch_dev.is_available(),
+    reason=f"Requires available {torch_device_type} runtime",
+)
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 def test_store_1GB(
@@ -225,6 +231,10 @@ def test_store_1GB(
 # Test retrieve 10data (10 rounds, each round 1GB, 100% hit)
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="retrieve")
+@pytest.mark.skipif(
+    not torch_dev.is_available(),
+    reason=f"Requires available {torch_device_type} runtime",
+)
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 def test_retrieve_1GB_allhit(
@@ -344,6 +354,10 @@ def test_retrieve_1GB_allhit(
 # Test lookup 2K * 10 requests, 100% hit
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="lookup")
+@pytest.mark.skipif(
+    not torch_dev.is_available(),
+    reason=f"Requires available {torch_device_type} runtime",
+)
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 def test_lookup_20K_tokens(

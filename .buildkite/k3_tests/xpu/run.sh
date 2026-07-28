@@ -36,10 +36,9 @@ uv pip install -r requirements/common.txt -r requirements/test.txt
 
 discover_xpu_tests() {
   python - <<'PY'
-from fnmatch import fnmatch
 from pathlib import Path
 
-root = Path("tests")
+root = Path(".")
 # Temporary allowlist of XPU cases that are known to run in the current
 # vLLM-based XPU image.
 #
@@ -62,13 +61,10 @@ allowlist = {
 }
 selected: set[str] = set()
 
-def is_allowlisted(rel: str) -> bool:
-  return any(fnmatch(rel, pattern) for pattern in allowlist)
-
-for path in root.rglob("test_*.py"):
-    rel = path.as_posix()
-    if is_allowlisted(rel):
-      selected.add(rel)
+for pattern in allowlist:
+    for path in root.glob(pattern):
+        if path.is_file():
+            selected.add(path.as_posix())
 
 for rel in sorted(selected):
     print(rel)
