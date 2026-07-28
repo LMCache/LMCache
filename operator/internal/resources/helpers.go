@@ -53,9 +53,3 @@ func derefFloat64(p *float64, def float64) float64 {
 func RESPAuthSecretName(engineName string) string {
 	return engineName + "-resp-auth"
 }
-
-// L2EncryptionSecretName returns the name of the managed local copy of the
-// L2 encryption master-key secret for a given engine.
-func L2EncryptionSecretName(engineName string) string {
-	return engineName + "-l2-master-key"
-}

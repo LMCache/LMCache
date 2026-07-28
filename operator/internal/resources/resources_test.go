@@ -911,8 +911,13 @@ func TestBuildDaemonSet_L2AESGCMSerdeMountsMasterKey(t *testing.T) {
 	if vol == nil {
 		t.Fatal("expected l2-master-key volume")
 	}
-	if vol.Secret == nil || vol.Secret.SecretName != L2EncryptionSecretName(testEngineName) {
-		t.Fatalf("expected secret volume %s, got %+v", L2EncryptionSecretName(testEngineName), vol.VolumeSource)
+	if vol.Secret == nil || vol.Secret.SecretName != "l2-master-key" {
+		t.Fatalf("expected secret volume referencing l2-master-key, got %+v", vol.VolumeSource)
+	}
+	// Only the master data key is projected, regardless of what else the
+	// user's Secret contains.
+	if len(vol.Secret.Items) != 1 || vol.Secret.Items[0].Key != "master" || vol.Secret.Items[0].Path != "master" {
+		t.Fatalf("expected items to project only the master key, got %+v", vol.Secret.Items)
 	}
 	if vol.Secret.DefaultMode == nil || *vol.Secret.DefaultMode != 0o400 {
 		t.Fatalf("expected defaultMode 0400, got %v", vol.Secret.DefaultMode)

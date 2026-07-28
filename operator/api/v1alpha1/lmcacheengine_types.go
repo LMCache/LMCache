@@ -250,9 +250,10 @@ type L2SerdeSpec struct {
 type AESGCMSerdeSpec struct {
 	// masterKeySecretRef names a user-created Secret in the engine's
 	// namespace holding the master key under the "master" data key. The
-	// reference is same-namespace only, so creating an engine CR cannot
-	// be used to read Secrets from other namespaces. The operator
-	// maintains a managed copy and never generates key material.
+	// Secret is mounted directly into the engine pods; the reference is
+	// same-namespace only, so creating an engine CR cannot be used to
+	// read Secrets from other namespaces. The operator never generates
+	// key material.
 	MasterKeySecretRef corev1.LocalObjectReference `json:"masterKeySecretRef"`
 
 	// keyProvider selects how per-cache_salt keys are obtained from the

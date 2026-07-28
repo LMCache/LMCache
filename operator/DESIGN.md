@@ -119,12 +119,13 @@ spec:
     # today; other server-side serdes like fp8/turboquant can gain typed
     # fields here later, or be set via raw.config.serde).
     serde:
-      # aesgcm: at-rest encryption keyed per cache_salt. The operator keeps
-      # an owner-ref'd managed copy of the referenced Secret and mounts it
-      # read-only at /etc/lmcache/keys/master — it never generates key
-      # material; provenance/rotation stay with the user. The reference is
-      # same-namespace only, so CR-create permission cannot be leveraged to
-      # read Secrets from other namespaces (confused deputy). See
+      # aesgcm: at-rest encryption keyed per cache_salt. The referenced
+      # Secret is mounted directly into the engine pods, read-only at
+      # /etc/lmcache/keys/master (only the "master" data key is projected).
+      # The operator never reads or writes the Secret and never generates
+      # key material; provenance/rotation stay with the user. The reference
+      # is same-namespace only, so CR-create permission cannot be leveraged
+      # to read Secrets from other namespaces (confused deputy). See
       # docs/design/v1/distributed/serde/aesgcm.md for the threat/key models.
       aesgcm:
         masterKeySecretRef:     # REQUIRED, user-created Secret with a "master" data key,
@@ -382,8 +383,7 @@ OnEvent(LMCacheEngine create/update/delete):
 
 **Deletion / cleanup**: every child resource the operator creates
 (DaemonSet, lookup Service, metrics Service, connection ConfigMap,
-managed RESP auth Secret, managed L2 encryption master-key Secret,
-optional ServiceMonitor) carries an
+managed RESP auth Secret, optional ServiceMonitor) carries an
 `ownerReference` to the LMCacheEngine, so Kubernetes garbage
 collection cascade-deletes them when the CR goes away. **No finalizer
 is used.** An earlier design added a `lmcache.ai/cleanup` finalizer

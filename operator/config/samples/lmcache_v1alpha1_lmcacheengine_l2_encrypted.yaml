@@ -13,8 +13,10 @@
 #       --from-file=master=master.key
 #
 # The Secret must live in the engine's namespace (the reference is
-# same-namespace only). The operator maintains an owner-ref'd managed copy
-# and mounts it read-only at /etc/lmcache/keys/master in the engine pods.
+# same-namespace only). It is mounted directly into the engine pods,
+# read-only at /etc/lmcache/keys/master; only the "master" data key is
+# projected. A missing Secret or missing key surfaces as a pod mount
+# event and self-heals once the Secret is fixed.
 apiVersion: lmcache.lmcache.ai/v1alpha1
 kind: LMCacheEngine
 metadata:
