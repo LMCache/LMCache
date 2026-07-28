@@ -15,7 +15,8 @@ general handling of Mamba / linear-attention models.
 Validated models
 ----------------
 
-- `moonshotai/Kimi-K3 <https://huggingface.co/moonshotai/Kimi-K3>`_ (8 GPUs)
+- `moonshotai/Kimi-K3 <https://huggingface.co/moonshotai/Kimi-K3>`_
+  (8× NVIDIA B300)
 
 .. tab-set::
    :sync-group: engine
@@ -26,7 +27,7 @@ Validated models
       `Kimi K3 in vLLM supported models
       <https://docs.vllm.ai/en/latest/models/supported_models.html#text-generation>`_.
 
-      **Status:** Validated with LMCache.
+      **Status:** Validated with LMCache. Verified on NVIDIA B300 (8 GPUs).
 
       .. note::
 
