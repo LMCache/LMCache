@@ -68,6 +68,123 @@ Key points:
 - The CPU side maintains its own `KVCacheCoordinator` with a `BlockPool`
   for prefix-cache matching.
 
+### 1.3.1 GPU Block Protection: Touch and Free
+
+The `SimpleCPUOffloadConnector` uses a simple but effective strategy:
+`request_finished()` **always returns `False`**, meaning vLLM immediately
+frees the request's blocks. In-flight DMA copies are protected by
+**explicit `touch()`/`free_blocks()` ref_cnt pairs** managed by the
+connector itself.
+
+#### 1.3.1.1 `request_finished` Always Returns `False`
+
+```python
+# vllm/v1/simple_kv_offload/manager.py — SimpleCPUOffloadScheduler
+def request_finished(self, request, block_ids) -> tuple[bool, dict | None]:
+    """Always returns (False, None). GPU blocks are protected by ref_cnt,
+    so the scheduler can free blocks immediately."""
+    # ... cleanup pending CPU hits and load/store state ...
+    return False, None
+```
+
+This means vLLM's scheduler immediately decrements `ref_cnt` on all the
+request's blocks when it finishes. The connector does **not** hold blocks
+hostage — it relies on its own `touch()` calls to keep in-flight blocks
+alive.
+
+#### 1.3.1.2 How `touch()` and `free_blocks()` Work
+
+The `BlockPool` uses `ref_cnt` to track block liveness:
+
+```python
+# vllm/v1/core/block_pool.py
+def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
+    """Increment ref_cnt; remove from free queue if it was there."""
+    for block in blocks:
+        if block.ref_cnt == 0 and not block.is_null:
+            self.free_block_queue.remove(block)
+        block.ref_cnt += 1
+
+def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
+    """Decrement ref_cnt; return to free queue when it reaches 0."""
+    for block in ordered_blocks:
+        block.ref_cnt -= 1
+        if block.ref_cnt == 0 and not block.is_null:
+            # Blocks with hash go to MRU end (prefix cache candidates)
+            # Blocks without hash go to LRU end (evict first)
+            ...
+    free_block_queue.prepend_n(blocks_without_hash)
+    free_block_queue.append_n(blocks_with_hash)
+```
+
+Key invariant: **A block with `ref_cnt > 0` is never in the free queue
+and cannot be allocated to other requests.**
+
+#### 1.3.1.3 Store Path: Touch on Submit, Free on Completion
+
+When blocks are selected for offloading (both lazy and eager modes),
+the connector **touches** them to prevent eviction during the async DMA:
+
+```python
+# Lazy mode — _prepare_lazy_store_specs()
+if gpu_ids:
+    # Touch GPU blocks to prevent eviction during async copy
+    gpu_pool.touch([gpu_pool.blocks[bid] for bid in gpu_ids])
+
+# Eager mode — _prepare_eager_store_specs()
+if cpu_block_ids:
+    # Touch GPU blocks to prevent freeing during async copy
+    gpu_block_pool.touch([gpu_block_pool.blocks[bid] for bid in gpu_block_ids])
+```
+
+When the DMA completes (reported by worker via `update_connector_output`),
+the connector **frees** the touched blocks:
+
+```python
+# _process_store_completion() — called when store event is fully done
+def _process_store_completion(self, gpu_block_ids, cpu_block_ids):
+    # Register CPU blocks in prefix cache
+    for cpu_block in cpu_blocks:
+        cpu_block_pool.cached_block_hash_to_block.insert(bhash, cpu_block)
+
+    # Free CPU blocks' ref_cnt (they become prefix cache entries)
+    self.cpu_block_pool.free_blocks(cpu_blocks)
+    # Free GPU blocks' ref_cnt (the extra touch ref from submit time)
+    self._gpu_block_pool.free_blocks(
+        self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids
+    )
+```
+
+This creates a **balanced ref_cnt lifecycle**:
+
+```
+[Submit store]  gpu_pool.touch(blocks)     → ref_cnt += 1
+[Request ends]  vLLM scheduler frees       → ref_cnt -= 1  (from request ownership)
+[DMA completes] gpu_pool.free_blocks(...)  → ref_cnt -= 1  (from touch)
+                                             ref_cnt == 0 → block enters free queue
+```
+
+Even if the request finishes before the DMA completes, the block stays
+protected because the connector's `touch()` added an extra ref_cnt.
+
+
+#### 1.3.1.4 Summary: ref_cnt Lifecycle
+
+```
+                    Store (GPU→CPU)                    
+                    ───────────────                    
+Submit:             gpu.touch() [+1]                  
+                    (ESSENTIAL: only protection)       
+
+Request finishes:   vLLM frees request blocks [-1]    
+                    (block still alive: touch ref)    
+                                                       
+
+DMA completes:      gpu.free_blocks() [-1]            
+                    cpu registered in prefix cache    
+                    → block enters free queue          
+```
+
 ### 1.4 Worker-Side: DMA Copy
 
 The worker uses a `DmaCopyBackend` that runs a background thread:
