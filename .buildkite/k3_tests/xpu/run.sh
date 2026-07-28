@@ -36,6 +36,7 @@ uv pip install -r requirements/common.txt -r requirements/test.txt
 
 discover_xpu_tests() {
   python - <<'PY'
+from fnmatch import fnmatch
 from pathlib import Path
 
 root = Path("tests")
@@ -50,19 +51,17 @@ root = Path("tests")
 #      are not ready yet.
 #   4. As tests become ready, shrink blocklist until XPU jobs run the full set.
 allowlist = {
-  "tests/benchmarks/test_cachegen.py",
-  "tests/benchmarks/test_xpu_connector_benchmark.py",
-  "tests/benchmarks/test_xpu_kernels_microbench.py",
-  "tests/benchmarks/test_xpu_layerwise_connector_benchmark.py",
-  "tests/test_serde.py",
+  "tests/benchmarks/test_*.py",
+  "tests/test_*.py",
   "tests/v1/multiprocess/test_engine_driven_transfer.py",
   "tests/v1/test_python_ops_fallback.py",
   "tests/v1/test_xpu_connector.py",
+  "tests/v1/test_torch_ops.py",
 }
 selected: set[str] = set()
 
 def is_allowlisted(rel: str) -> bool:
-  return rel in allowlist
+  return any(fnmatch(rel, pattern) for pattern in allowlist)
 
 for path in root.rglob("test_*.py"):
     rel = path.as_posix()
