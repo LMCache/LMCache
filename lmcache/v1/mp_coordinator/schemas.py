@@ -5,9 +5,14 @@ These Pydantic models are the wire contract between the coordinator and mp
 servers. The coordinator uses them to validate requests and shape responses; an
 mp server (when it registers) imports the same models to build its request
 bodies and parse replies, so both sides agree on the schema in one place.
+
+The cache-event vocabulary (:class:`CacheEventType`,
+:class:`CacheEventEntry`, :class:`CacheEventBatch`) also lives here: both
+the MP-server emitter and the coordinator's key directory speak it.
 """
 
 # Standard
+from dataclasses import dataclass
 from enum import Enum
 from typing import Annotated
 import base64
@@ -245,6 +250,229 @@ class StatusListResponse(BaseModel):
 
     total_gb: float
     by_cache_salt: list[StatusResponse]
+
+
+# -- Key directory -----------------------------------------------------------
+
+
+class CacheEventType(str, Enum):
+    """The kind of cache-state change a :class:`CacheEventBatch` reports.
+
+    ``STORE`` commits placements; ``DELETE`` removes them (owners report
+    evictions as deletes); ``ACCESS`` refreshes recency without changing
+    placement state.
+    """
+
+    STORE = "store"
+    DELETE = "delete"
+    ACCESS = "access"
+
+
+class CacheEventEntry(BaseModel):
+    """One entry inside a :class:`CacheEventBatch`.
+
+    Attributes:
+        key: The object key the change applies to.
+        size_bytes: Bytes committed for the key (``store`` only; ``0``
+            otherwise).
+        content_hash_hex: Hex of the chunk's position-independent content
+            hash; empty when the emitter does not compute it.
+    """
+
+    key: EncodedObjectKey
+    size_bytes: int = Field(default=0, ge=0)
+    content_hash_hex: str = ""
+
+    @field_validator("key")
+    @classmethod
+    def _validate_key(cls, value: EncodedObjectKey) -> EncodedObjectKey:
+        """Reject keys that cannot convert into :class:`ObjectKey`.
+
+        Args:
+            value: The encoded key.
+
+        Returns:
+            The unchanged key once it is confirmed convertible.
+
+        Raises:
+            ValueError: If the key's hex or field invariants are invalid
+                (surfaced by FastAPI as 422).
+        """
+        value.to_object_key()
+        return value
+
+    @field_validator("content_hash_hex")
+    @classmethod
+    def _validate_content_hash_hex(cls, value: str) -> str:
+        """Reject a non-hex ``content_hash_hex``.
+
+        Args:
+            value: The hex string (possibly empty).
+
+        Returns:
+            The unchanged value once it is confirmed decodable.
+
+        Raises:
+            ValueError: If ``value`` is not valid hex (surfaced as 422).
+        """
+        bytes.fromhex(value)
+        return value
+
+
+class CacheEventBatch(BaseModel):
+    """A batch of same-typed cache events from one MP server.
+
+    Attributes:
+        instance_id: The emitting MP server.
+        incarnation: The emitter's restart counter. A higher value fences
+            off all placements reported by lower values of the same
+            ``instance_id``.
+        seq: Per-``(instance_id, incarnation)`` monotonic batch counter,
+            starting at 1.
+        event_type: What happened to every entry in the batch.
+        tier: The cache tier the events apply to (``l1`` or ``l2``).
+        backend: The storage backend within the tier (``"dram"``,
+            ``"cxl"``, ``"fs"``, ``"valkey"``, ...).
+        entries: The affected keys.
+        ts: Emitter wall-clock seconds for the batch (``0.0`` if unknown).
+    """
+
+    instance_id: Annotated[str, StringConstraints(min_length=1)]
+    incarnation: int = Field(ge=0)
+    seq: int = Field(ge=1)
+    event_type: CacheEventType
+    tier: Tier
+    backend: Annotated[str, StringConstraints(min_length=1)]
+    entries: list[CacheEventEntry] = Field(default_factory=list)
+    ts: float = Field(default=0.0, ge=0.0)
+
+    @field_validator("tier")
+    @classmethod
+    def _validate_tier(cls, value: Tier) -> Tier:
+        """Reject any tier other than ``l1`` or ``l2``.
+
+        Args:
+            value: The tier from the wire.
+
+        Returns:
+            The unchanged tier when it is ``l1`` or ``l2``.
+
+        Raises:
+            ValueError: If ``value`` is ``Tier.ALL`` (surfaced as 422).
+        """
+        if value not in (Tier.L1, Tier.L2):
+            raise ValueError(
+                f"cache events must target a concrete tier (got {value.value!r})"
+            )
+        return value
+
+
+class DirectoryEventsRequest(BaseModel):
+    """Body of ``POST /directory/events``.
+
+    Attributes:
+        batches: Event batches to apply, in emission order per instance.
+    """
+
+    batches: list[CacheEventBatch] = Field(default_factory=list)
+
+
+class DirectoryEventsResponse(BaseModel):
+    """Reply to ``POST /directory/events``.
+
+    Attributes:
+        applied: Batches applied to the directory.
+        duplicates: Batches dropped as already-applied replays.
+        stale: Batches dropped for carrying an outdated incarnation.
+    """
+
+    applied: int = 0
+    duplicates: int = 0
+    stale: int = 0
+
+
+@dataclass(frozen=True)
+class Placement:
+    """One live placement of a key, as returned by directory lookups.
+
+    Attributes:
+        instance_id: The MP server holding the bytes.
+        incarnation: That instance's current incarnation.
+        tier: Tier the bytes live on (``l1`` or ``l2``).
+        backend: Backend within the tier.
+        size_bytes: Size the owner reported at store time.
+    """
+
+    instance_id: str
+    incarnation: int
+    tier: Tier
+    backend: str
+    size_bytes: int
+
+
+class DirectoryLookupRequest(BaseModel):
+    """Body of ``POST /directory/lookup``.
+
+    Attributes:
+        keys: The keys to resolve to placements.
+    """
+
+    keys: list[EncodedObjectKey] = Field(default_factory=list)
+
+
+class DirectoryKeyPlacements(BaseModel):
+    """Placements for one requested key.
+
+    Attributes:
+        key: The requested key, echoed back.
+        placements: Known placements; empty when the directory knows
+            nothing about the key.
+    """
+
+    key: EncodedObjectKey
+    placements: list[Placement] = Field(default_factory=list)
+
+
+class DirectoryLookupResponse(BaseModel):
+    """Reply to ``POST /directory/lookup``.
+
+    Attributes:
+        results: One entry per requested key, in request order.
+    """
+
+    results: list[DirectoryKeyPlacements] = Field(default_factory=list)
+
+
+class TokenPlacementLookupRequest(BaseModel):
+    """Body of ``POST /directory/lookup_tokens``.
+
+    Resolves ``token_ids`` to the object keys of their complete chunks
+    (the same fan-out the pin APIs use) and returns each key's placements.
+
+    Attributes:
+        model_name: Model whose rank fan-out to use when resolving keys.
+        world_size: World size selecting the per-rank fan-out.
+        token_ids: The token sequence to resolve.
+        cache_salt: Per-tenant isolation salt applied to the produced keys.
+    """
+
+    model_name: str
+    world_size: int = Field(ge=1)
+    token_ids: list[int] = Field(default_factory=list)
+    cache_salt: str = ""
+
+
+class TokenPlacementLookupResponse(BaseModel):
+    """Reply to ``POST /directory/lookup_tokens``.
+
+    Attributes:
+        chunks: Number of complete chunks the token sequence resolved to.
+        results: One entry per resolved key (``chunks`` x per-rank
+            fan-out), each echoing the key with its known placements.
+    """
+
+    chunks: int = 0
+    results: list[DirectoryKeyPlacements] = Field(default_factory=list)
 
 
 # -- Global CacheBlend fingerprint directory ------------------------------
