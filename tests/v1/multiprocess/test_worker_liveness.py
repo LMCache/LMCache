@@ -72,7 +72,14 @@ def test_gpu_register_inserts_unlatched_entry(monkeypatch) -> None:
     monkeypatch.setattr(
         gpu_mod, "create_cache_context", lambda *a, **kw: MagicMock(num_layers=2)
     )
-    monkeypatch.setattr(gpu_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
+    metadata = MagicMock()
+    metadata.build_attn_desc.return_value = MagicMock()
+    monkeypatch.setattr(
+        gpu_mod, "export_kv_transfer_metadata", lambda *a, **kw: metadata
+    )
+    monkeypatch.setattr(
+        gpu_mod, "build_object_group_layout_desc", lambda *a, **kw: MagicMock()
+    )
     module = _bare_gpu_module()
 
     module.register_kv_cache(1, MagicMock(), "model", 1, MagicMock(), MagicMock(), [])
@@ -88,7 +95,14 @@ def test_gpu_noop_register_refreshes_without_latching(monkeypatch) -> None:
     _stub_gpu_registration_backend(monkeypatch)
     create = MagicMock(return_value=MagicMock(num_layers=2))
     monkeypatch.setattr(gpu_mod, "create_cache_context", create)
-    monkeypatch.setattr(gpu_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
+    metadata = MagicMock()
+    metadata.build_attn_desc.return_value = MagicMock()
+    monkeypatch.setattr(
+        gpu_mod, "export_kv_transfer_metadata", lambda *a, **kw: metadata
+    )
+    monkeypatch.setattr(
+        gpu_mod, "build_object_group_layout_desc", lambda *a, **kw: MagicMock()
+    )
     module = _bare_gpu_module()
     module.register_kv_cache(1, MagicMock(), "model", 1, MagicMock(), MagicMock(), [])
     module._cache_contexts[1].last_seen = 0.0
@@ -103,7 +117,9 @@ def test_gpu_noop_register_refreshes_without_latching(monkeypatch) -> None:
 def test_gpu_touch_latches_get_does_not() -> None:
     """touch_instance marks ping-proven; get_and_touch_context_entry only refreshes."""
     module = _bare_gpu_module()
-    module._cache_contexts[1] = ContextEntry(MagicMock(), "m", 1, last_seen=0.0)
+    module._cache_contexts[1] = ContextEntry(
+        MagicMock(), "m", 1, transfer_metadata=MagicMock(), last_seen=0.0
+    )
 
     module.get_and_touch_context_entry(1)
     assert module._cache_contexts[1].last_seen > 0.0
@@ -119,10 +135,14 @@ def test_gpu_reap_two_tier_windows() -> None:
     until the larger registration grace."""
     module = _bare_gpu_module()
     old = time.monotonic() - 1000.0
-    module._cache_contexts[1] = ContextEntry(MagicMock(), "m", 1, old, True)
-    module._cache_contexts[2] = ContextEntry(MagicMock(), "m", 1, old, False)
+    module._cache_contexts[1] = ContextEntry(
+        MagicMock(), "m", 1, MagicMock(), old, True
+    )
+    module._cache_contexts[2] = ContextEntry(
+        MagicMock(), "m", 1, MagicMock(), old, False
+    )
     module._cache_contexts[3] = ContextEntry(
-        MagicMock(), "m", 1, time.monotonic(), True
+        MagicMock(), "m", 1, MagicMock(), time.monotonic(), True
     )
 
     reaped = module.reap_stale_instances(120.0, 3600.0)
@@ -137,7 +157,9 @@ def test_gpu_reap_two_tier_windows() -> None:
 def test_gpu_unregister_cleans_up() -> None:
     """unregister_kv_cache pops and releases; missing id is a no-op."""
     module = _bare_gpu_module()
-    module._cache_contexts[1] = ContextEntry(MagicMock(), "m", 1, time.monotonic())
+    module._cache_contexts[1] = ContextEntry(
+        MagicMock(), "m", 1, MagicMock(), time.monotonic()
+    )
 
     module.unregister_kv_cache(1)
     assert module.tracked_instance_count() == 0

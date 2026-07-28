@@ -79,6 +79,12 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
     from lmcache.v1.multiprocess.modules import (
         lmcache_driven_transfer as lmcache_driven_transfer_mod,
     )
+    from lmcache.v1.multiprocess.transfer_plan import (
+        KernelGroupTransferMetadata,
+        KVTransferMetadata,
+        ObjectGroupTransferMetadata,
+    )
+    import lmcache.c_ops as lmc_ops
 
     layout_desc = MemoryLayoutDesc(
         shapes=[torch.Size([2, 16, 32])],
@@ -100,13 +106,34 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
         """Return a fake cache context without touching CUDA or wrappers."""
         return _FakeGPUContext()
 
-    def fake_layout_desc(
-        gpu_context: _FakeGPUContext,
-        num_tokens: int,
-        object_group_id: int = 0,
-    ) -> MemoryLayoutDesc:
-        """Return the shared layout descriptor used by both registrations."""
-        return layout_desc
+    transfer_metadata = KVTransferMetadata(
+        num_chunks_in_sw=(-1,),
+        tokens_per_chunk=16,
+        kernel_groups=(
+            KernelGroupTransferMetadata(
+                kernel_group_id=0,
+                engine_group_id=0,
+                layer_indices=(0, 1),
+                blocks_per_chunk=1,
+                blocks_per_window=1,
+                slots_per_chunk_in_window=16,
+                kv_size=2,
+                num_layers=2,
+                hidden_dim_size=32,
+                slots_per_block=16,
+                tokens_per_block=16,
+                dtype=torch.float32,
+                engine_kv_format=lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+            ),
+        ),
+        object_groups=(
+            ObjectGroupTransferMetadata(
+                object_group_id=0,
+                kernel_group_ids=(0,),
+                sw_size_chunks=-1,
+            ),
+        ),
+    )
 
     monkeypatch.setattr(
         lmcache_driven_transfer_mod,
@@ -120,8 +147,13 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
     )
     monkeypatch.setattr(
         lmcache_driven_transfer_mod,
-        "get_layout_desc",
-        fake_layout_desc,
+        "export_kv_transfer_metadata",
+        lambda manager, tokens_per_chunk: transfer_metadata,
+    )
+    monkeypatch.setattr(
+        lmcache_driven_transfer_mod,
+        "build_object_group_layout_desc",
+        lambda metadata, num_tokens, object_group_id: layout_desc,
     )
     monkeypatch.setattr(
         lmcache_driven_transfer_mod.torch_dev,

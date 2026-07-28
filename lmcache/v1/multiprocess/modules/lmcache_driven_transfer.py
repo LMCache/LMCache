@@ -47,9 +47,12 @@ from lmcache.v1.multiprocess.native_completion import (
 )
 from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.transfer_plan import (
+    KVTransferMetadata,
     batched_iteration_with_skip,
+    build_object_group_layout_desc,
     compute_num_objects_to_skip,
     downsample_block_ids,
+    export_kv_transfer_metadata,
     has_sufficient_block_ids,
     recalculate_blocks_to_skip,
 )
@@ -87,18 +90,26 @@ def get_layout_desc(
     Returns:
         MemoryLayoutDesc: The memory layout description containing shapes and
         dtypes, one entry per kernel group in the object group.
+
+    Note:
+        Compatibility adapter for existing call sites. It exports metadata
+        on demand; registration/store/retrieve should use the metadata snapshot
+        cached in :class:`ContextEntry` and avoid this adapter in hot paths.
     """
-    object_group = cache_context.kv_layer_groups_manager.object_groups[object_group_id]
-    shapes_and_dtypes = [
-        cache_context.get_kernel_group_shape_dtype(num_tokens, kernel_group_idx)
-        for kernel_group_idx in object_group.kernel_group_indices
-    ]
-    shapes, dtypes = zip(*shapes_and_dtypes, strict=False)
-    return MemoryLayoutDesc(shapes=list(shapes), dtypes=list(dtypes))
+    transfer_metadata = export_kv_transfer_metadata(
+        cache_context.kv_layer_groups_manager,
+        cache_context.lmcache_tokens_per_chunk,
+    )
+    return build_object_group_layout_desc(
+        transfer_metadata,
+        num_tokens,
+        object_group_id,
+    )
 
 
 def downsample_and_stage_block_ids(
     cache_context: BaseCacheContext,
+    transfer_metadata: KVTransferMetadata,
     block_ids: list[list[int]],
 ) -> list[torch.Tensor]:
     """Cut the block id lists to skip the unneeded blocks in a chunk and
@@ -111,6 +122,7 @@ def downsample_and_stage_block_ids(
 
     Args:
         cache_context: The cache context containing the KV cache information.
+        transfer_metadata: Shared immutable per-group transfer metadata.
         block_ids: The original block id lists, indexed by LMCache KV group index.
 
     Returns:
@@ -140,26 +152,14 @@ def downsample_and_stage_block_ids(
           [13, 14, 17, 18], # swa attention group only needs the last 2 block per chunk
         ]
     """
-    num_kernel_groups = cache_context.kv_layer_groups_manager.num_kernel_groups
-    blocks_per_chunk: list[int] = []
-    blocks_per_window: list[int] = []
-    for kernel_group_id in range(num_kernel_groups):
-        subchunk_sw_size_tokens = (
-            cache_context.kv_layer_groups_manager.get_subchunk_sw_size_tokens(
-                kernel_group_id
-            )
-        )
-        effective_chunk_tokens = min(
-            cache_context.lmcache_tokens_per_chunk, subchunk_sw_size_tokens
-        )
-        blocks_per_window.append(
-            cache_context.calculate_num_blocks(effective_chunk_tokens, kernel_group_id)
-        )
-        blocks_per_chunk.append(
-            cache_context.calculate_num_blocks(
-                cache_context.lmcache_tokens_per_chunk, kernel_group_id
-            )
-        )
+    blocks_per_chunk = [
+        group_metadata.blocks_per_chunk
+        for group_metadata in transfer_metadata.kernel_groups
+    ]
+    blocks_per_window = [
+        group_metadata.blocks_per_window
+        for group_metadata in transfer_metadata.kernel_groups
+    ]
     # Preserve the original list identity for caller-observable in-place behavior.
     block_ids[:] = downsample_block_ids(
         block_ids,
@@ -178,6 +178,7 @@ _recalculate_blocks_to_skip = recalculate_blocks_to_skip
 
 def _run_object_group_transfer_plan(
     cache_context: BaseCacheContext,
+    transfer_metadata: KVTransferMetadata,
     block_ids_gpu: list[torch.Tensor],
     memory_objs: Sequence[MemoryObj | None],
     object_group_id: int,
@@ -199,6 +200,7 @@ def _run_object_group_transfer_plan(
 
     Args:
         cache_context: The GPU cache context containing the KV cache information.
+        transfer_metadata: Shared immutable per-group transfer metadata.
         block_ids_gpu: GPU block IDs, indexed by LMCache KV group index.
         memory_objs: The MemoryObj instances to copy. None entries are only
             valid for D2H (the batch is skipped); H2D raises.
@@ -212,9 +214,8 @@ def _run_object_group_transfer_plan(
             H2D, or if an object's size does not match its GPU staging buffer.
     """
     lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
-    kv_groups_manager = cache_context.kv_layer_groups_manager
-    object_group = kv_groups_manager.object_groups[object_group_id]
-    kernel_group_ids = object_group.kernel_group_indices
+    object_group_metadata = transfer_metadata.object_groups[object_group_id]
+    kernel_group_ids = object_group_metadata.kernel_group_ids
     is_h2d = direction == lmc_ops.TransferDirection.H2D
     max_batch_size = cache_context.max_batch_size
 
@@ -223,19 +224,16 @@ def _run_object_group_transfer_plan(
     spec_index_by_kg: dict[int, int] = {}
     blocks_per_chunk_by_kg: dict[int, int] = {}
     blocks_per_window_by_kg: dict[int, int] = {}
+    slots_per_chunk_in_sw_by_kg: dict[int, int] = {}
     for kernel_group_id in kernel_group_ids:
-        blocks_per_chunk = cache_context.calculate_num_blocks(
-            lmcache_chunk_size, kernel_group_id
-        )
-        tokens_per_window = min(
-            lmcache_chunk_size,
-            kv_groups_manager.get_subchunk_sw_size_tokens(kernel_group_id),
-        )
-        blocks_per_window = cache_context.calculate_num_blocks(
-            tokens_per_window, kernel_group_id
-        )
+        group_metadata = transfer_metadata.kernel_groups[kernel_group_id]
+        blocks_per_chunk = group_metadata.blocks_per_chunk
+        blocks_per_window = group_metadata.blocks_per_window
         blocks_per_chunk_by_kg[kernel_group_id] = blocks_per_chunk
         blocks_per_window_by_kg[kernel_group_id] = blocks_per_window
+        slots_per_chunk_in_sw_by_kg[kernel_group_id] = (
+            group_metadata.slots_per_chunk_in_window
+        )
 
         paged_ptrs = cache_context.get_kernel_group_kv_pointers(kernel_group_id)
         block_ids_tensor = block_ids_gpu[kernel_group_id]
@@ -250,8 +248,8 @@ def _run_object_group_transfer_plan(
                 paged_ptrs.data_ptr(),
                 [buffer.data_ptr() for buffer in temp_buffers],
                 cache_context.get_shape_desc(kernel_group_id),
-                cache_context.get_slots_per_chunk_in_sw(kernel_group_id),
-                cache_context.get_engine_kv_format(kernel_group_id),
+                slots_per_chunk_in_sw_by_kg[kernel_group_id],
+                group_metadata.engine_kv_format,
                 block_ids_tensor.data_ptr(),
                 block_ids_tensor.numel(),
             )
@@ -263,8 +261,7 @@ def _run_object_group_transfer_plan(
         for slot in range(max_batch_size)
     ]
 
-    attn_desc = kv_groups_manager.get_attn_desc()
-    sw_size_chunks = attn_desc.num_chunks_in_sw[object_group_id]
+    sw_size_chunks = object_group_metadata.sw_size_chunks
     num_objects_to_skip = compute_num_objects_to_skip(
         sw_size_chunks, len(memory_objs), is_retrieve=is_h2d
     )
@@ -352,6 +349,7 @@ def _run_object_group_transfer_plan(
 
 def transfer_kv_per_object_group(
     cache_context: BaseCacheContext,
+    transfer_metadata: KVTransferMetadata,
     block_ids_gpu: list[torch.Tensor],
     memory_objs: Sequence[MemoryObj | None],
     object_group_id: int,
@@ -364,6 +362,7 @@ def transfer_kv_per_object_group(
 
     Args:
         cache_context: The GPU cache context containing the KV cache information.
+        transfer_metadata: Shared immutable per-group transfer metadata.
         block_ids_gpu: GPU block IDs to retrieve into, indexed by LMCache KV group
             index. It should satisfy `len(block_ids_gpu[i]) == len(memory_objs) *
             blocks_per_chunk[i]` for each group `i`.
@@ -390,6 +389,7 @@ def transfer_kv_per_object_group(
     ):
         _run_object_group_transfer_plan(
             cache_context,
+            transfer_metadata,
             block_ids_gpu,
             memory_objs,
             object_group_id,
@@ -400,13 +400,11 @@ def transfer_kv_per_object_group(
         return
 
     lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
-    kv_groups_manager = cache_context.kv_layer_groups_manager
-    object_group = kv_groups_manager.object_groups[object_group_id]
-    kernel_group_ids = object_group.kernel_group_indices
+    object_group_metadata = transfer_metadata.object_groups[object_group_id]
+    kernel_group_ids = object_group_metadata.kernel_group_ids
     is_h2d = direction == lmc_ops.TransferDirection.H2D
 
-    attn_desc = kv_groups_manager.get_attn_desc()
-    sw_size_chunks = attn_desc.num_chunks_in_sw[object_group_id]
+    sw_size_chunks = object_group_metadata.sw_size_chunks
     num_objects_to_skip = compute_num_objects_to_skip(
         sw_size_chunks, len(memory_objs), is_retrieve=is_h2d
     )
@@ -454,16 +452,9 @@ def transfer_kv_per_object_group(
 
         # Do paged KV copy
         for kernel_group_id in kernel_group_ids:
-            blocks_per_chunk = cache_context.calculate_num_blocks(
-                lmcache_chunk_size, kernel_group_id
-            )
-            tokens_per_window = min(
-                lmcache_chunk_size,
-                kv_groups_manager.get_subchunk_sw_size_tokens(kernel_group_id),
-            )
-            blocks_per_window = cache_context.calculate_num_blocks(
-                tokens_per_window, kernel_group_id
-            )
+            group_metadata = transfer_metadata.kernel_groups[kernel_group_id]
+            blocks_per_chunk = group_metadata.blocks_per_chunk
+            blocks_per_window = group_metadata.blocks_per_window
 
             # Get the block ids for this chunk
             start_block_pos = start_object_idx * blocks_per_window
@@ -487,9 +478,7 @@ def transfer_kv_per_object_group(
             group_kv_pointers = cache_context.get_kernel_group_kv_pointers(
                 kernel_group_id
             )
-            group_lmcache_chunk_size = cache_context.get_slots_per_chunk_in_sw(
-                kernel_group_id
-            )
+            group_lmcache_chunk_size = group_metadata.slots_per_chunk_in_window
             tmp_gpu_buffers_batched = [
                 cache_context.get_temp_kernel_group_buffer(
                     i, kernel_group_id
@@ -504,7 +493,7 @@ def transfer_kv_per_object_group(
                 direction,
                 cache_context.get_shape_desc(kernel_group_id),
                 group_lmcache_chunk_size,
-                cache_context.get_engine_kv_format(kernel_group_id),
+                group_metadata.engine_kv_format,
                 recalculated_skip_blocks,
             )
 
@@ -547,6 +536,7 @@ class ContextEntry:
     cache_context: BaseCacheContext
     model_name: str
     world_size: int
+    transfer_metadata: KVTransferMetadata
     last_seen: float = 0.0
     has_liveness_signal: bool = False
     event_backend: EventIPCBackend | None = None
@@ -830,11 +820,16 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         )
         event_backend = get_event_ipc_backend(cache_context.device)
         event_backend.check_event_support(cache_context.device)
-        layout_desc = get_layout_desc(
-            cache_context, self._ctx.chunk_size, object_group_id=0
+        transfer_metadata = export_kv_transfer_metadata(
+            cache_context.kv_layer_groups_manager,
+            self._ctx.chunk_size,
         )
-        kv_groups_manager = cache_context.kv_layer_groups_manager
-        attn_desc = kv_groups_manager.get_attn_desc()
+        layout_desc = build_object_group_layout_desc(
+            transfer_metadata,
+            self._ctx.chunk_size,
+            object_group_id=0,
+        )
+        attn_desc = transfer_metadata.build_attn_desc()
         self._ctx.layout_desc_registry.register(
             model_name, world_size, layout_desc, attn_desc
         )
@@ -844,6 +839,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 cache_context=cache_context,
                 model_name=model_name,
                 world_size=world_size,
+                transfer_metadata=transfer_metadata,
                 last_seen=now,
                 has_liveness_signal=False,
                 event_backend=event_backend,
@@ -922,11 +918,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             raise ValueError(f"No GPU context registered for instance ID {instance_id}")
         cache_context = entry.cache_context
         model_name = entry.model_name
+        transfer_metadata = entry.transfer_metadata
         event_backend = entry.event_backend
         if event_backend is None:
             raise RuntimeError("Registered cache context has no event backend")
 
-        num_object_groups = cache_context.kv_layer_groups_manager.num_object_groups
+        num_object_groups = len(transfer_metadata.object_groups)
         obj_keys_per_obj_group = self._ctx.resolve_obj_keys(
             key, list(range(num_object_groups))
         )
@@ -936,10 +933,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         # ``blocks_per_chunk[i]`` is the number of blocks in one chunk for
         # group ``i``.
         blocks_per_chunk = [
-            cache_context.calculate_num_blocks(self._ctx.chunk_size, group_idx)
-            for group_idx in range(
-                cache_context.kv_layer_groups_manager.num_kernel_groups
-            )
+            group_metadata.blocks_per_chunk
+            for group_metadata in transfer_metadata.kernel_groups
         ]
 
         with (
@@ -970,7 +965,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 return event_backend.export_event(event, cache_context.device), False
 
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
-                cache_context, gpu_block_ids
+                cache_context, transfer_metadata, gpu_block_ids
             )
 
             producer_event = event_backend.import_event(
@@ -1009,8 +1004,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             try:
                 for obj_group_id in range(num_object_groups):
                     obj_keys = obj_keys_per_obj_group[obj_group_id]
-                    layout_desc = get_layout_desc(
-                        cache_context,
+                    layout_desc = build_object_group_layout_desc(
+                        transfer_metadata,
                         self._ctx.chunk_size,
                         object_group_id=obj_group_id,
                     )
@@ -1032,6 +1027,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     # NOTE: batch_size must stay 1 for store.
                     transfer_kv_per_object_group(
                         cache_context,
+                        transfer_metadata,
                         block_ids_per_group_gpu,
                         memory_objs,
                         object_group_id=obj_group_id,
@@ -1124,11 +1120,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             raise ValueError(f"No GPU context registered for instance ID {instance_id}")
         cache_context = entry.cache_context
         model_name = entry.model_name
+        transfer_metadata = entry.transfer_metadata
         event_backend = entry.event_backend
         if event_backend is None:
             raise RuntimeError("Registered cache context has no event backend")
 
-        num_object_groups = cache_context.kv_layer_groups_manager.num_object_groups
+        num_object_groups = len(transfer_metadata.object_groups)
         obj_keys_per_obj_group = self._ctx.resolve_obj_keys(
             key, list(range(num_object_groups))
         )
@@ -1159,10 +1156,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         )
 
         blocks_per_chunk = [
-            cache_context.calculate_num_blocks(self._ctx.chunk_size, group_idx)
-            for group_idx in range(
-                cache_context.kv_layer_groups_manager.num_kernel_groups
-            )
+            group_metadata.blocks_per_chunk
+            for group_metadata in transfer_metadata.kernel_groups
         ]
 
         with (
@@ -1192,7 +1187,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
 
             # Cut and stage all block_ids to GPU once before the transfer
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
-                cache_context, gpu_block_ids
+                cache_context, transfer_metadata, gpu_block_ids
             )
             producer_event = event_backend.import_event(
                 event_ipc_handle, cache_context.device
@@ -1217,6 +1212,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
 
                         transfer_kv_per_object_group(
                             cache_context,
+                            transfer_metadata,
                             block_ids_per_group_gpu,
                             memory_objs,
                             object_group_id=obj_group_id,

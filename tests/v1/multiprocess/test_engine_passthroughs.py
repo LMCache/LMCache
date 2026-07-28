@@ -29,8 +29,18 @@ def test_cache_contexts_unwraps_entries_from_gpu_transfer_module() -> None:
     gpu0, gpu1 = MagicMock(name="gpu_ctx_0"), MagicMock(name="gpu_ctx_1")
     gpu_transfer = MagicMock(spec=LMCacheDrivenTransferModule)
     gpu_transfer.context_entries_snapshot.return_value = {
-        0: ContextEntry(cache_context=gpu0, model_name="m", world_size=1),
-        7: ContextEntry(cache_context=gpu1, model_name="m", world_size=1),
+        0: ContextEntry(
+            cache_context=gpu0,
+            model_name="m",
+            world_size=1,
+            transfer_metadata=MagicMock(),
+        ),
+        7: ContextEntry(
+            cache_context=gpu1,
+            model_name="m",
+            world_size=1,
+            transfer_metadata=MagicMock(),
+        ),
     }
 
     engine = MPCacheServer(MagicMock(), modules=[MagicMock(), gpu_transfer])

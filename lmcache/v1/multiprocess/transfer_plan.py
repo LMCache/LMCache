@@ -2,10 +2,304 @@
 """Path-agnostic helpers for multiprocess transfer planning."""
 
 # Standard
+from dataclasses import dataclass
 from itertools import islice
-from typing import Generator, Sequence, TypeVar
+from typing import TYPE_CHECKING, Generator, Sequence, TypeVar
+
+# Third Party
+import torch
+
+# First Party
+from lmcache.v1.distributed.api import AttnWindowDesc, MemoryLayoutDesc
+from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+
+if TYPE_CHECKING:
+    # First Party
+    import lmcache.c_ops as lmc_ops
 
 ItemT = TypeVar("ItemT")
+
+
+@dataclass(frozen=True)
+class KernelGroupTransferMetadata:
+    """Immutable transfer metadata for one kernel group."""
+
+    kernel_group_id: int
+    """Kernel-group index in deterministic manager/kernel-order."""
+    engine_group_id: int
+    """Engine group ID that provides block IDs for this kernel group."""
+    layer_indices: tuple[int, ...]
+    """Layer indices in transfer/kernel order for this group."""
+    blocks_per_chunk: int
+    """Total blocks in one LMCache chunk for this kernel group."""
+    blocks_per_window: int
+    """Retained blocks per chunk after subchunk-window downsampling."""
+    slots_per_chunk_in_window: int
+    """Per-chunk transfer slots in the retained subchunk window."""
+    kv_size: int
+    """KV-plane size (1 for MLA/key-only style, 2 for K/V style)."""
+    num_layers: int
+    """Number of layers covered by this kernel group."""
+    hidden_dim_size: int
+    """Hidden dimension width per slot in this group."""
+    slots_per_block: int
+    """Physical slots represented by one engine block for this group."""
+    tokens_per_block: int
+    """Logical tokens represented by one engine block for this group."""
+    dtype: torch.dtype
+    """Torch dtype for this group's tensors."""
+    engine_kv_format: "lmc_ops.EngineKVFormat"
+    """Engine KV format required by copy-kernel execution."""
+
+    @property
+    def compress_ratio(self) -> int:
+        """Logical tokens represented by one physical slot for this group."""
+        return self.tokens_per_block // self.slots_per_block
+
+
+@dataclass(frozen=True)
+class ObjectGroupTransferMetadata:
+    """Immutable transfer metadata for one object group."""
+
+    object_group_id: int
+    """Object-group index in deterministic manager/object-group order."""
+    kernel_group_ids: tuple[int, ...]
+    """Kernel-group indices packed into this object group's memory object."""
+    sw_size_chunks: int
+    """Cross-chunk attention window in chunks; ``-1`` means full attention."""
+
+
+@dataclass(frozen=True)
+class KVTransferMetadata:
+    """Immutable transfer metadata for all object/kernel groups."""
+
+    num_chunks_in_sw: tuple[int, ...]
+    """Attention-window chunk counts in object-group order."""
+    tokens_per_chunk: int
+    """LMCache chunk size in logical tokens used to derive per-group geometry."""
+    kernel_groups: tuple[KernelGroupTransferMetadata, ...]
+    """Kernel-group metadata in deterministic kernel-group index order."""
+    object_groups: tuple[ObjectGroupTransferMetadata, ...]
+    """Object-group metadata in deterministic object-group index order."""
+
+    def build_attn_desc(self) -> AttnWindowDesc:
+        """Build a defensive AttnWindowDesc copy for external APIs."""
+        return AttnWindowDesc(num_chunks_in_sw=list(self.num_chunks_in_sw))
+
+
+def export_kv_transfer_metadata(
+    manager: KVLayerGroupsManager,
+    tokens_per_chunk: int,
+) -> KVTransferMetadata:
+    """Export a path-agnostic immutable transfer metadata snapshot.
+
+    Args:
+        manager: The KV layer-groups manager.
+        tokens_per_chunk: LMCache chunk size in logical tokens.
+
+    Returns:
+        An immutable transfer metadata snapshot.
+
+    Raises:
+        ValueError: If metadata is inconsistent or invalid.
+    """
+    if tokens_per_chunk < 1:
+        raise ValueError(
+            f"tokens_per_chunk must be at least one, got {tokens_per_chunk}"
+        )
+
+    attn_desc = manager.get_attn_desc()
+    num_chunks_in_sw = tuple(attn_desc.num_chunks_in_sw)
+    kernel_groups: list[KernelGroupTransferMetadata] = []
+    for kernel_group_id, group in enumerate(manager.kernel_groups):
+        if group.engine_kv_format is None:
+            raise ValueError(
+                f"kernel group {kernel_group_id} has no engine_kv_format (got None)"
+            )
+
+        subchunk_sw_size_tokens = manager.get_subchunk_sw_size_tokens(kernel_group_id)
+        if subchunk_sw_size_tokens < 1:
+            raise ValueError(
+                f"kernel group {kernel_group_id} has invalid subchunk window "
+                f"{subchunk_sw_size_tokens}"
+            )
+        tokens_per_window = min(tokens_per_chunk, subchunk_sw_size_tokens)
+        blocks_per_chunk = manager.calculate_num_blocks(
+            kernel_group_id, tokens_per_chunk
+        )
+        blocks_per_window = manager.calculate_num_blocks(
+            kernel_group_id, tokens_per_window
+        )
+        slots_per_chunk_in_window = manager.get_slots_per_chunk_in_sw(kernel_group_id)
+        if blocks_per_chunk < 1:
+            raise ValueError(
+                f"kernel group {kernel_group_id} has invalid blocks_per_chunk "
+                f"{blocks_per_chunk}"
+            )
+        if blocks_per_window < 1 or blocks_per_window > blocks_per_chunk:
+            raise ValueError(
+                f"kernel group {kernel_group_id} has invalid blocks_per_window "
+                f"{blocks_per_window} for blocks_per_chunk {blocks_per_chunk}"
+            )
+        if slots_per_chunk_in_window < 1:
+            raise ValueError(
+                f"kernel group {kernel_group_id} has invalid slots_per_chunk_in_window "
+                f"{slots_per_chunk_in_window}"
+            )
+        if group.tokens_per_block < 1:
+            raise ValueError(
+                f"kernel group {kernel_group_id} has invalid tokens_per_block "
+                f"{group.tokens_per_block}"
+            )
+        if group.slots_per_block < 1:
+            raise ValueError(
+                f"kernel group {kernel_group_id} has invalid slots_per_block "
+                f"{group.slots_per_block}"
+            )
+        if group.tokens_per_block % group.slots_per_block != 0:
+            raise ValueError(
+                f"kernel group {kernel_group_id} has non-integral compress ratio "
+                f"{group.tokens_per_block}/{group.slots_per_block}"
+            )
+
+        kernel_groups.append(
+            KernelGroupTransferMetadata(
+                kernel_group_id=kernel_group_id,
+                engine_group_id=group.engine_group_idx,
+                layer_indices=tuple(group.layer_indices),
+                blocks_per_chunk=blocks_per_chunk,
+                blocks_per_window=blocks_per_window,
+                slots_per_chunk_in_window=slots_per_chunk_in_window,
+                kv_size=group.shape_desc.kv_size,
+                num_layers=group.num_layers,
+                hidden_dim_size=group.hidden_dim_size,
+                slots_per_block=group.slots_per_block,
+                tokens_per_block=group.tokens_per_block,
+                dtype=group.dtype,
+                engine_kv_format=group.engine_kv_format,
+            )
+        )
+
+    if len(num_chunks_in_sw) != len(manager.object_groups):
+        raise ValueError(
+            "attention-window metadata length does not match object-group count"
+        )
+
+    num_kernel_groups = len(kernel_groups)
+    object_groups: list[ObjectGroupTransferMetadata] = []
+    for object_group_id, object_group in enumerate(manager.object_groups):
+        sw_size_chunks = num_chunks_in_sw[object_group_id]
+        if sw_size_chunks == 0 or sw_size_chunks < -1:
+            raise ValueError(
+                f"object group {object_group_id} has invalid sw_size_chunks "
+                f"{sw_size_chunks}"
+            )
+
+        kernel_group_ids = tuple(object_group.kernel_group_indices)
+        if not kernel_group_ids:
+            raise ValueError(f"object group {object_group_id} has no kernel groups")
+        for kernel_group_id in kernel_group_ids:
+            if kernel_group_id < 0 or kernel_group_id >= num_kernel_groups:
+                raise ValueError(
+                    f"object group {object_group_id} references invalid "
+                    f"kernel group {kernel_group_id}"
+                )
+
+        object_groups.append(
+            ObjectGroupTransferMetadata(
+                object_group_id=object_group_id,
+                kernel_group_ids=kernel_group_ids,
+                sw_size_chunks=sw_size_chunks,
+            )
+        )
+
+    return KVTransferMetadata(
+        num_chunks_in_sw=num_chunks_in_sw,
+        tokens_per_chunk=tokens_per_chunk,
+        kernel_groups=tuple(kernel_groups),
+        object_groups=tuple(object_groups),
+    )
+
+
+def build_kernel_group_layout(
+    transfer_metadata: KVTransferMetadata,
+    num_tokens: int,
+    kernel_group_id: int,
+) -> tuple[torch.Size, torch.dtype]:
+    """Build one kernel group's ``(shape, dtype)`` layout for a token count.
+
+    Args:
+        transfer_metadata: Immutable transfer metadata snapshot.
+        num_tokens: Number of logical tokens.
+        kernel_group_id: Kernel group index.
+
+    Returns:
+        A tuple of ``(shape, dtype)`` for that kernel group.
+
+    Raises:
+        ValueError: If arguments are invalid or token alignment is invalid.
+    """
+    if num_tokens < 0:
+        raise ValueError("num_tokens must be non-negative")
+    if kernel_group_id < 0 or kernel_group_id >= len(transfer_metadata.kernel_groups):
+        raise ValueError(f"invalid kernel_group_id {kernel_group_id}")
+
+    group = transfer_metadata.kernel_groups[kernel_group_id]
+    if group.kernel_group_id != kernel_group_id:
+        raise ValueError(
+            "transfer_metadata.kernel_groups ordering does not match kernel_group_id"
+        )
+
+    compress_ratio = group.compress_ratio
+    if num_tokens % compress_ratio != 0:
+        raise ValueError(
+            f"num_tokens ({num_tokens}) is not a multiple of compress_ratio "
+            f"({compress_ratio}) for kernel_group_id {kernel_group_id}"
+        )
+
+    num_slots = num_tokens // compress_ratio
+    shape = torch.Size(
+        (group.kv_size, group.num_layers, num_slots, group.hidden_dim_size)
+    )
+    return shape, group.dtype
+
+
+def build_object_group_layout_desc(
+    transfer_metadata: KVTransferMetadata,
+    num_tokens: int,
+    object_group_id: int,
+) -> MemoryLayoutDesc:
+    """Build one object group's MemoryLayoutDesc in kernel-group layout order.
+
+    Args:
+        transfer_metadata: Immutable transfer metadata snapshot.
+        num_tokens: Number of logical tokens.
+        object_group_id: Object group index.
+
+    Returns:
+        A MemoryLayoutDesc for one object group.
+
+    Raises:
+        ValueError: If inputs are invalid.
+    """
+    if object_group_id < 0 or object_group_id >= len(transfer_metadata.object_groups):
+        raise ValueError(f"invalid object_group_id {object_group_id}")
+
+    object_group = transfer_metadata.object_groups[object_group_id]
+    if object_group.object_group_id != object_group_id:
+        raise ValueError(
+            "transfer_metadata.object_groups ordering does not match object_group_id"
+        )
+
+    if not object_group.kernel_group_ids:
+        raise ValueError(f"object group {object_group_id} has no kernel groups")
+
+    shapes_and_dtypes = [
+        build_kernel_group_layout(transfer_metadata, num_tokens, kernel_group_id)
+        for kernel_group_id in object_group.kernel_group_ids
+    ]
+    shapes, dtypes = zip(*shapes_and_dtypes, strict=True)
+    return MemoryLayoutDesc(shapes=list(shapes), dtypes=list(dtypes))
 
 
 def has_sufficient_block_ids(
