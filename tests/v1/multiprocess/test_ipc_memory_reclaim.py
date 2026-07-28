@@ -76,7 +76,17 @@ def _register(
         "get_event_ipc_backend",
         lambda device: event_backend,
     )
-    monkeypatch.setattr(gpu_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
+    transfer_metadata = MagicMock(name=f"transfer_metadata-{instance_id}")
+    monkeypatch.setattr(
+        gpu_mod,
+        "export_kv_transfer_metadata",
+        lambda *a, **kw: transfer_metadata,
+    )
+    monkeypatch.setattr(
+        gpu_mod,
+        "build_object_group_layout_desc",
+        lambda *a, **kw: MagicMock(name=f"layout_desc-{instance_id}"),
+    )
     real_monotonic = time.monotonic
     if age_s:
         monkeypatch.setattr(gpu_mod.time, "monotonic", lambda: real_monotonic() - age_s)

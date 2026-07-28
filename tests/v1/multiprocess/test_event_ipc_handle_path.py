@@ -218,7 +218,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     monkeypatch.setattr(
         lmcache_driven_transfer,
         "downsample_and_stage_block_ids",
-        lambda cache_context, block_ids: block_ids,
+        lambda cache_context, transfer_metadata, block_ids: block_ids,
     )
     monkeypatch.setattr(
         lmcache_driven_transfer,

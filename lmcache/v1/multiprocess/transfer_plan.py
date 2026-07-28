@@ -250,14 +250,14 @@ def build_kernel_group_layout(
             "transfer_metadata.kernel_groups ordering does not match kernel_group_id"
         )
 
-    compress_ratio = group.compress_ratio
-    if num_tokens % compress_ratio != 0:
+    if num_tokens % transfer_metadata.tokens_per_chunk != 0:
         raise ValueError(
-            f"num_tokens ({num_tokens}) is not a multiple of compress_ratio "
-            f"({compress_ratio}) for kernel_group_id {kernel_group_id}"
+            f"num_tokens ({num_tokens}) must be a multiple of tokens_per_chunk "
+            f"({transfer_metadata.tokens_per_chunk})"
         )
 
-    num_slots = num_tokens // compress_ratio
+    num_chunks = num_tokens // transfer_metadata.tokens_per_chunk
+    num_slots = group.slots_per_chunk_in_window * num_chunks
     shape = torch.Size(
         (group.kv_size, group.num_layers, num_slots, group.hidden_dim_size)
     )

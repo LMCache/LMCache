@@ -314,14 +314,14 @@ def test_build_object_group_layout_desc_preserves_kernel_group_order() -> None:
     )
 
     assert layout_desc.shapes == [
-        torch.Size([1, 1, 8, 128]),
+        torch.Size([1, 1, 4, 128]),
         torch.Size([2, 2, 8, 64]),
     ]
     assert layout_desc.dtypes == [torch.bfloat16, torch.float16]
 
 
 def test_build_kernel_group_layout_invalid_alignment_raises() -> None:
-    """Token counts must align to per-group compress ratio."""
+    """Token counts must align to the LMCache chunk size."""
     # Standard
     from typing import cast
 
@@ -332,7 +332,7 @@ def test_build_kernel_group_layout_invalid_alignment_raises() -> None:
         cast(KVLayerGroupsManager, _fake_manager()),
         tokens_per_chunk=16,
     )
-    with pytest.raises(ValueError, match="multiple of compress_ratio"):
+    with pytest.raises(ValueError, match="multiple of tokens_per_chunk"):
         build_kernel_group_layout(metadata, num_tokens=3, kernel_group_id=0)
 
 
