@@ -234,7 +234,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
     Multi-server deployment:
     - lmcache.mp.server_urls: server URL list or comma-separated string,
-      e.g. "tcp://host1:6667,tcp://host2:6667".
+      e.g. "grpc://host1:6667,grpc://host2:6667".
 
     Single-server deployment:
     - lmcache.mp.host: the host of the LMCache server.
@@ -282,7 +282,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         else:
             # Legacy single-server fallback.
             server_host = vllm_config.kv_transfer_config.get_from_extra_config(
-                "lmcache.mp.host", "tcp://localhost"
+                "lmcache.mp.host", "grpc://localhost"
             )
             server_port = vllm_config.kv_transfer_config.get_from_extra_config(
                 "lmcache.mp.port", 5555

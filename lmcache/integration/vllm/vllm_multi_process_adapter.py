@@ -227,7 +227,7 @@ def _raise_server_unreachable(server_url: str, timeout: float) -> NoReturn:
         '    --kv-transfer-config \'{"kv_connector":'
         '"LMCacheMPConnector","kv_role":"kv_both",'
         '"kv_connector_extra_config":{"lmcache.mp.host":'
-        '"tcp://localhost","lmcache.mp.port":5555}}\'\n'
+        '"grpc://localhost","lmcache.mp.port":5555}}\'\n'
         "See https://docs.lmcache.ai/mp/quickstart.html for details."
     )
     logger.warning(hint)
