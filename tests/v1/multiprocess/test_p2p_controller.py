@@ -138,12 +138,14 @@ def test_transfer_channel_address_validity():
 # ============================================================================
 
 
-def _make_controller() -> tuple[P2PController, MagicMock]:
+def _make_controller(
+    p2p_config: P2PConfig | None = None,
+) -> tuple[P2PController, MagicMock]:
     """Build a P2P-disabled controller (no thread / transfer channel)."""
     ctx = MagicMock()
     controller = P2PController(
         ctx,
-        P2PConfig(),
+        p2p_config or P2PConfig(),
         CoordinatorConfig(),
         instance_id="self",
     )
@@ -329,7 +331,21 @@ def test_reconcile_adds_new_peer():
     assert isinstance(config, P2PL2AdapterConfig)
     assert config.peer_mq_server_url == "tcp://10.0.0.2:5555"
     assert config.peer_transfer_channel_server_url == "tc-host:9"
+    assert config.quiesce_load_timeout is False
     assert controller.report_status()["p2p_peers"] == ["peerA"]
+
+
+def test_reconcile_requires_timeout_quiescence_for_verbs():
+    """A native-verbs peer adapter must quiesce reads before timeout release."""
+    controller, ctx = _make_controller(
+        P2PConfig(transfer_engine="verbs", rdma_device="mlx5_0")
+    )
+    ctx.storage_manager.add_l2_adapter.return_value = 7
+
+    controller._apply_state(_P2PState.REGISTERED, {"peerA": _peer("peerA")})
+
+    config = ctx.storage_manager.add_l2_adapter.call_args.args[0]
+    assert config.quiesce_load_timeout is True
 
 
 def test_reconcile_no_op_when_peer_unchanged():

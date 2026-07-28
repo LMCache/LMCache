@@ -46,7 +46,11 @@ class _FakeFuture:
 
 
 @contextmanager
-def _adapter(lookup_timeout_s: float = 10.0, load_timeout_s: float = 10.0):
+def _adapter(
+    lookup_timeout_s: float = 10.0,
+    load_timeout_s: float = 10.0,
+    quiesce_load_timeout: bool = False,
+):
     mq = MagicMock()
     tc_ctx = MagicMock()
     tc_client = MagicMock()
@@ -67,6 +71,7 @@ def _adapter(lookup_timeout_s: float = 10.0, load_timeout_s: float = 10.0):
             peer_transfer_channel_server_url="peer:7600",
             lookup_timeout_s=lookup_timeout_s,
             load_timeout_s=load_timeout_s,
+            quiesce_load_timeout=quiesce_load_timeout,
         )
         adapter = P2PL2Adapter(config)
         try:
@@ -316,9 +321,31 @@ def test_load_not_finished_returns_none():
         assert adapter.query_load_result(task_id) is None
 
 
-def test_load_deadline_expired_yields_failure():
+def test_load_deadline_expired_preserves_client_by_default():
     keys = [_key(0)]
     with _adapter(load_timeout_s=0.01) as (
+        adapter,
+        _mq,
+        tc_ctx,
+        tc_client,
+        _notifier,
+    ):
+        adapter._remote_addresses[keys[0]] = TransferChannelAddress(offset=100, size=10)
+        tc_client.submit_read.return_value = 1
+        task_id = adapter.submit_load_task(
+            keys, [MagicMock(shm_offset=0, shm_byte_length=10)]
+        )
+        time.sleep(0.02)
+        bitmap = adapter.query_load_result(task_id)
+        assert bitmap is not None
+        assert bitmap.popcount() == 0
+        tc_client.close.assert_not_called()
+        tc_ctx.remove_transfer_channel_client.assert_not_called()
+
+
+def test_load_deadline_expired_quiesces_when_required():
+    keys = [_key(0)]
+    with _adapter(load_timeout_s=0.01, quiesce_load_timeout=True) as (
         adapter,
         _mq,
         tc_ctx,
@@ -340,7 +367,7 @@ def test_load_deadline_expired_yields_failure():
 
 def test_load_timeout_keeps_destination_reserved_when_quiesce_fails():
     keys = [_key(0)]
-    with _adapter(load_timeout_s=0.01) as (
+    with _adapter(load_timeout_s=0.01, quiesce_load_timeout=True) as (
         adapter,
         _mq,
         tc_ctx,
@@ -368,7 +395,7 @@ def test_load_timeout_keeps_destination_reserved_when_quiesce_fails():
 
 def test_load_after_timeout_lazily_reconnects_peer_client():
     keys = [_key(0)]
-    with _adapter(load_timeout_s=0.01) as (
+    with _adapter(load_timeout_s=0.01, quiesce_load_timeout=True) as (
         adapter,
         _mq,
         tc_ctx,

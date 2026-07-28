@@ -72,6 +72,8 @@ class P2PL2AdapterConfig(L2AdapterConfigBase):
     - peer_transfer_channel_server_url: the peer's transfer-channel server url.
     - lookup_timeout_s: deadline for a lookup result before it counts as a miss.
     - load_timeout_s: deadline for a load before it counts as a failure.
+    - quiesce_load_timeout: internal orchestration flag that closes the
+      transfer client before releasing buffers from a timed-out load.
     """
 
     def __init__(
@@ -80,11 +82,14 @@ class P2PL2AdapterConfig(L2AdapterConfigBase):
         peer_transfer_channel_server_url: str,
         lookup_timeout_s: float = 10.0,
         load_timeout_s: float = 10.0,
+        *,
+        quiesce_load_timeout: bool = False,
     ) -> None:
         self.peer_mq_server_url = peer_mq_server_url
         self.peer_transfer_channel_server_url = peer_transfer_channel_server_url
         self.lookup_timeout_s = lookup_timeout_s
         self.load_timeout_s = load_timeout_s
+        self.quiesce_load_timeout = quiesce_load_timeout
 
     @classmethod
     def from_dict(cls, d: dict) -> "P2PL2AdapterConfig":
@@ -142,8 +147,6 @@ class P2PL2Adapter(L2AdapterInterface):
                 config.peer_transfer_channel_server_url
             )
         )
-
-        self._peer_tc_url = config.peer_transfer_channel_server_url
 
         self._store_efd = create_event_notifier()
         self._lookup_efd = create_event_notifier()
@@ -301,13 +304,6 @@ class P2PL2Adapter(L2AdapterInterface):
     # Load Interface
     # --------------------
 
-    def _get_transfer_channel_client(self) -> TransferChannelClient:
-        if self._tc_client is None:
-            self._tc_client = self._tc_context.get_transfer_channel_client(
-                self._peer_tc_url
-            )
-        return self._tc_client
-
     def _quiesce_timed_out_loads(self) -> bool:
         """Stop peer DMA before timed-out destination buffers are released."""
         client = self._tc_client
@@ -319,11 +315,13 @@ class P2PL2Adapter(L2AdapterInterface):
             # returns: the prefetch controller may immediately recycle the
             # destination L1 objects.
             client.close()
-            self._tc_context.remove_transfer_channel_client(self._peer_tc_url)
+            self._tc_context.remove_transfer_channel_client(
+                self._config.peer_transfer_channel_server_url
+            )
         except Exception:  # noqa: BLE001 - keep buffers reserved on failure
             logger.exception(
                 "Failed to quiesce timed-out P2P reads from %s",
-                self._peer_tc_url,
+                self._config.peer_transfer_channel_server_url,
             )
             return False
 
@@ -358,7 +356,13 @@ class P2PL2Adapter(L2AdapterInterface):
         local_addresses = self._tc_context.get_transfer_channel_address(
             [(obj.shm_offset, obj.shm_byte_length) for obj in objects]
         )
-        read_task_id = self._get_transfer_channel_client().submit_read(
+        client = self._tc_client
+        if client is None:
+            client = self._tc_context.get_transfer_channel_client(
+                self._config.peer_transfer_channel_server_url
+            )
+            self._tc_client = client
+        read_task_id = client.submit_read(
             local_addresses,
             remote_addresses,  # type: ignore
         )
@@ -378,15 +382,21 @@ class P2PL2Adapter(L2AdapterInterface):
             del self._load_tasks[task_id]
             return Bitmap(len(task.keys))
         if time.monotonic() > task.deadline:
-            if not self._quiesce_timed_out_loads():
-                # Returning a terminal result would release destination L1
-                # objects while the transfer may still be writing to them.
-                return None
+            if self._config.quiesce_load_timeout:
+                if not self._quiesce_timed_out_loads():
+                    # Returning a terminal result would release destination L1
+                    # objects while the transfer may still be writing to them.
+                    return None
+                logger.warning(
+                    "P2P load task %d timed out; peer reads were quiesced",
+                    task_id,
+                )
+            else:
+                logger.warning(
+                    "P2P load task %d timed out; treating as a failure",
+                    task_id,
+                )
             del self._load_tasks[task_id]
-            logger.warning(
-                "P2P load task %d timed out; peer reads were quiesced",
-                task_id,
-            )
             return Bitmap(len(task.keys))
 
         client = self._tc_client
@@ -420,7 +430,9 @@ class P2PL2Adapter(L2AdapterInterface):
         # Release the peer's transfer-channel client now that this adapter no
         # longer reads from it.
         if self._tc_client is not None:
-            self._tc_context.remove_transfer_channel_client(self._peer_tc_url)
+            self._tc_context.remove_transfer_channel_client(
+                self._config.peer_transfer_channel_server_url
+            )
             self._tc_client = None
         self._mq_client.close()
         self._store_efd.close()

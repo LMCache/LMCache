@@ -523,6 +523,7 @@ class P2PController:
             peer_transfer_channel_server_url=inst.p2p_advertised_url,
             lookup_timeout_s=self._p2p_config.lookup_timeout,
             load_timeout_s=self._p2p_config.load_timeout,
+            quiesce_load_timeout=self._p2p_config.transfer_engine == "verbs",
         )
         try:
             adapter_id = self._ctx.storage_manager.add_l2_adapter(config)
