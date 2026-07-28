@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, Mapping, Sequence
 import math
 
 # Third Party
-from vllm.v1.kv_cache_interface import AttentionSpec
 import torch
 
 # First Party
@@ -206,6 +205,11 @@ def attention_layer_names_from_vllm(
     )
     if not vllm_groups:
         return list(kv_caches.keys())
+
+    # Third party
+    # Third Party
+    from vllm.v1.kv_cache_interface import AttentionSpec
+
     attention_names: set[str] = set()
     for group in vllm_groups:
         if isinstance(group.kv_cache_spec, AttentionSpec):
