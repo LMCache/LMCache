@@ -141,11 +141,6 @@ class KeyDirectory:
         the entries. Entry application is idempotent: re-storing upserts
         the placement, deleting an absent placement is a no-op.
 
-        The directory performs no validation: batches arriving over HTTP
-        are validated by ``schemas.DirectoryEventsRequest``; programmatic
-        callers must satisfy the field constraints documented on
-        :class:`CacheEventBatch`.
-
         Args:
             batch: The event batch to apply.
 
