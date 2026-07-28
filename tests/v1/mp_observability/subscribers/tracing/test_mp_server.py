@@ -13,7 +13,6 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 import pytest
 
 # First Party
-from lmcache import torch_device_type
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.mp_observability.subscribers.tracing import (
@@ -158,7 +157,7 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_STORE_START,
                 session_id=sid,
                 timestamp=now + 0.010,
-                metadata={"device": f"{torch_device_type}:0"},
+                metadata={"device": "cuda:0"},
             )
         )
         bus.publish(
@@ -166,7 +165,7 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_STORE_END,
                 session_id=sid,
                 timestamp=now + 0.050,
-                metadata={"stored_count": 2, "device": f"{torch_device_type}:0"},
+                metadata={"stored_count": 2, "device": "cuda:0"},
             )
         )
         time.sleep(0.15)
@@ -225,7 +224,7 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_STORE_START,
                 session_id=sid,
                 timestamp=now + 0.010,
-                metadata={"device": f"{torch_device_type}:0"},
+                metadata={"device": "cuda:0"},
             )
         )
         bus.publish(
@@ -233,7 +232,7 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_STORE_END,
                 session_id=sid,
                 timestamp=now + 0.030,
-                metadata={"stored_count": 1, "device": f"{torch_device_type}:0"},
+                metadata={"stored_count": 1, "device": "cuda:0"},
             )
         )
         time.sleep(0.15)
@@ -245,7 +244,7 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_STORE_START,
                 session_id=sid,
                 timestamp=now + 0.040,
-                metadata={"device": f"{torch_device_type}:0"},
+                metadata={"device": "cuda:0"},
             )
         )
         bus.publish(
@@ -253,7 +252,7 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_STORE_END,
                 session_id=sid,
                 timestamp=now + 0.060,
-                metadata={"stored_count": 1, "device": f"{torch_device_type}:0"},
+                metadata={"stored_count": 1, "device": "cuda:0"},
             )
         )
         time.sleep(0.15)
@@ -284,7 +283,7 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_STORE_START,
                 session_id=sid,
                 timestamp=now + 0.001,
-                metadata={"device": f"{torch_device_type}:0"},
+                metadata={"device": "cuda:0"},
             )
         )
         time.sleep(0.15)
@@ -296,7 +295,7 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_STORE_END,
                 session_id=sid,
                 timestamp=now + 0.020,
-                metadata={"stored_count": 3, "device": f"{torch_device_type}:0"},
+                metadata={"stored_count": 3, "device": "cuda:0"},
             )
         )
         bus.publish(
@@ -356,7 +355,7 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_RETRIEVE_START,
                 session_id=sid,
                 timestamp=now + 0.010,
-                metadata={"device": f"{torch_device_type}:0"},
+                metadata={"device": "cuda:0"},
             )
         )
         bus.publish(
@@ -364,7 +363,7 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_RETRIEVE_END,
                 session_id=sid,
                 timestamp=now + 0.050,
-                metadata={"retrieved_count": 4, "device": f"{torch_device_type}:0"},
+                metadata={"retrieved_count": 4, "device": "cuda:0"},
             )
         )
         time.sleep(0.15)
@@ -422,7 +421,7 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_STORE_START,
                 session_id=sid,
                 timestamp=now + 0.010,
-                metadata={"device": f"{torch_device_type}:0"},
+                metadata={"device": "cuda:0"},
             )
         )
         bus.publish(
@@ -430,7 +429,7 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_STORE_END,
                 session_id=sid,
                 timestamp=now + 0.030,
-                metadata={"stored_count": 1, "device": f"{torch_device_type}:0"},
+                metadata={"stored_count": 1, "device": "cuda:0"},
             )
         )
         time.sleep(0.15)
@@ -442,7 +441,7 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_RETRIEVE_START,
                 session_id=sid,
                 timestamp=now + 0.040,
-                metadata={"device": f"{torch_device_type}:0"},
+                metadata={"device": "cuda:0"},
             )
         )
         bus.publish(
@@ -450,7 +449,7 @@ class TestMPServerTracingSubscriber:
                 event_type=EventType.MP_RETRIEVE_END,
                 session_id=sid,
                 timestamp=now + 0.060,
-                metadata={"retrieved_count": 2, "device": f"{torch_device_type}:0"},
+                metadata={"retrieved_count": 2, "device": "cuda:0"},
             )
         )
         time.sleep(0.15)
@@ -474,7 +473,7 @@ class TestMPServerTracingSubscriber:
             Event(
                 event_type=EventType.MP_RETRIEVE_START,
                 session_id="req-reg",
-                metadata={"device": f"{torch_device_type}:0"},
+                metadata={"device": "cuda:0"},
             )
         )
         time.sleep(0.15)
@@ -489,14 +488,14 @@ class TestMPServerTracingSubscriber:
             Event(
                 event_type=EventType.MP_RETRIEVE_START,
                 session_id="req-reg2",
-                metadata={"device": f"{torch_device_type}:0"},
+                metadata={"device": "cuda:0"},
             )
         )
         bus.publish(
             Event(
                 event_type=EventType.MP_RETRIEVE_END,
                 session_id="req-reg2",
-                metadata={"device": f"{torch_device_type}:0", "retrieved_count": 1},
+                metadata={"device": "cuda:0", "retrieved_count": 1},
             )
         )
         time.sleep(0.15)
@@ -513,14 +512,14 @@ class TestMPServerTracingSubscriber:
             Event(
                 event_type=EventType.MP_STORE_START,
                 session_id="req-1",
-                metadata={"device": f"{torch_device_type}:0"},
+                metadata={"device": "cuda:0"},
             )
         )
         bus.publish(
             Event(
                 event_type=EventType.MP_STORE_END,
                 session_id="req-1",
-                metadata={"device": f"{torch_device_type}:0", "stored_count": 5},
+                metadata={"device": "cuda:0", "stored_count": 5},
             )
         )
         time.sleep(0.15)
@@ -533,14 +532,14 @@ class TestMPServerTracingSubscriber:
             Event(
                 event_type=EventType.MP_RETRIEVE_START,
                 session_id="req-2",
-                metadata={"device": f"{torch_device_type}:1"},
+                metadata={"device": "cuda:1"},
             )
         )
         bus.publish(
             Event(
                 event_type=EventType.MP_RETRIEVE_END,
                 session_id="req-2",
-                metadata={"device": f"{torch_device_type}:1", "retrieved_count": 3},
+                metadata={"device": "cuda:1", "retrieved_count": 3},
             )
         )
         time.sleep(0.15)
@@ -572,7 +571,7 @@ class TestMPServerTracingSubscriber:
             Event(
                 event_type=EventType.MP_STORE_END,
                 session_id="orphan",
-                metadata={"stored_count": 1, "device": f"{torch_device_type}:0"},
+                metadata={"stored_count": 1, "device": "cuda:0"},
             )
         )
         time.sleep(0.15)
@@ -585,7 +584,7 @@ class TestMPServerTracingSubscriber:
             Event(
                 event_type=EventType.MP_STORE_START,
                 session_id="leaked",
-                metadata={"device": f"{torch_device_type}:0"},
+                metadata={"device": "cuda:0"},
             )
         )
         time.sleep(0.15)
@@ -600,7 +599,7 @@ class TestMPServerTracingSubscriber:
                 Event(
                     event_type=EventType.MP_STORE_START,
                     session_id=f"req-{i}",
-                    metadata={"device": f"{torch_device_type}:0"},
+                    metadata={"device": "cuda:0"},
                 )
             )
         for i in range(5):
@@ -608,7 +607,7 @@ class TestMPServerTracingSubscriber:
                 Event(
                     event_type=EventType.MP_STORE_END,
                     session_id=f"req-{i}",
-                    metadata={"device": f"{torch_device_type}:0", "stored_count": i},
+                    metadata={"device": "cuda:0", "stored_count": i},
                 )
             )
         time.sleep(0.15)
@@ -755,7 +754,7 @@ class TestHitRateAttributes:
                 event_type=EventType.MP_STORE_START,
                 session_id=sid,
                 timestamp=now + 0.001,
-                metadata={"device": f"{torch_device_type}:0"},
+                metadata={"device": "cuda:0"},
             )
         )
         bus.publish(
@@ -763,7 +762,7 @@ class TestHitRateAttributes:
                 event_type=EventType.MP_STORE_END,
                 session_id=sid,
                 timestamp=now + 0.020,
-                metadata={"stored_count": 3, "device": f"{torch_device_type}:0"},
+                metadata={"stored_count": 3, "device": "cuda:0"},
             )
         )
         bus.publish(

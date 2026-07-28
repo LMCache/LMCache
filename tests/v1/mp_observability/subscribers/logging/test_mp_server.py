@@ -9,7 +9,6 @@ import time
 import pytest
 
 # First Party
-from lmcache import torch_device_type
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.mp_observability.subscribers.logging.mp_server import (
@@ -45,7 +44,7 @@ class TestMPServerLoggingSubscriber:
             Event(
                 event_type=EventType.MP_STORE_START,
                 session_id="req-1",
-                metadata={"device": f"{torch_device_type}:0"},
+                metadata={"device": "cuda:0"},
             )
         )
         time.sleep(0.15)
@@ -57,7 +56,7 @@ class TestMPServerLoggingSubscriber:
             Event(
                 event_type=EventType.MP_STORE_END,
                 session_id="req-1",
-                metadata={"device": f"{torch_device_type}:0", "stored_count": 5},
+                metadata={"device": "cuda:0", "stored_count": 5},
             )
         )
         time.sleep(0.15)
@@ -69,7 +68,7 @@ class TestMPServerLoggingSubscriber:
             Event(
                 event_type=EventType.MP_RETRIEVE_START,
                 session_id="req-2",
-                metadata={"device": f"{torch_device_type}:1"},
+                metadata={"device": "cuda:1"},
             )
         )
         time.sleep(0.15)
@@ -81,7 +80,7 @@ class TestMPServerLoggingSubscriber:
             Event(
                 event_type=EventType.MP_RETRIEVE_END,
                 session_id="req-2",
-                metadata={"device": f"{torch_device_type}:1", "retrieved_count": 3},
+                metadata={"device": "cuda:1", "retrieved_count": 3},
             )
         )
         time.sleep(0.15)
@@ -117,14 +116,14 @@ class TestMPServerLoggingSubscriber:
                 Event(
                     event_type=EventType.MP_STORE_START,
                     session_id=f"req-{i}",
-                    metadata={"device": f"{torch_device_type}:0"},
+                    metadata={"device": "cuda:0"},
                 )
             )
             bus.publish(
                 Event(
                     event_type=EventType.MP_STORE_END,
                     session_id=f"req-{i}",
-                    metadata={"device": f"{torch_device_type}:0", "stored_count": i},
+                    metadata={"device": "cuda:0", "stored_count": i},
                 )
             )
         time.sleep(0.15)

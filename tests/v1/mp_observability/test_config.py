@@ -11,7 +11,6 @@ import time
 import pytest
 
 # First Party
-from lmcache import torch_device_type
 from lmcache.v1.mp_observability.config import (
     ObservabilityConfig,
     add_observability_args,
@@ -73,7 +72,7 @@ class TestExtraLoggingRegistration:
                     event_type=EventType.MP_STORE_END,
                     session_id="req-1",
                     metadata={
-                        "device": f"{torch_device_type}:0",
+                        "device": "cuda:0",
                         "total_bytes": 10**9,
                         "num_tokens": 512,
                     },
