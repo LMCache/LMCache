@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Orchestrator for a single multiprocessing test (native, no Docker).
 # Usage: run-single-test.sh <test_name>
-#   test_name: lm_eval | lm_eval_preemption | hma_lm_eval_gemma4 | vllm_bench
+#   test_name: lm_eval | lm_eval_preemption | hma_lm_eval_gemma4
+#              | hma_lm_eval_gemma4_engine_driven | vllm_bench
 #              | long_doc_qa | long_doc_qa_l2 | fault_tolerance | deadlock
 #              | restart_recovery | gds_smoke_test
 #
@@ -41,6 +42,12 @@ if [ "$TEST_NAME" = "hma_lm_eval_gemma4" ]; then
     # pipeline sets ATTENTION_BACKEND=auto; its ~63GB of weights also need a
     # higher GPU_MEMORY_UTILIZATION than the default (all set in pipeline.yml).
     export MODEL="${MODEL:-google/gemma-4-31B-it}"
+elif [ "$TEST_NAME" = "hma_lm_eval_gemma4_engine_driven" ]; then
+    # Same model as hma_lm_eval_gemma4 but forces the Engine-driven multiprocess
+    # transfer path via LMCACHE_MP_TRANSFER_MODE.  This ensures the Engine-driven
+    # code path is exercised end-to-end with per-group HMA KV caches on CUDA.
+    export MODEL="${MODEL:-google/gemma-4-31B-it}"
+    export LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE:-engine_driven}"
 elif [ "$TEST_NAME" = "hma_lm_eval_qwen3_5" ]; then
     # Qwen3.5-0.8B is a Mamba/GDN + full-attention hybrid (caches re-viewed at
     # registration; see lmcache/integration/vllm/kv_cache_group_edits.py).
@@ -140,6 +147,9 @@ case "$TEST_NAME" in
     hma_lm_eval_gemma4)
         exec_script="${SCRIPT_DIR}/run-hma-lm-eval.sh"
         ;;
+    hma_lm_eval_gemma4_engine_driven)
+        exec_script="${SCRIPT_DIR}/run-hma-lm-eval-engine-driven.sh"
+        ;;
     hma_lm_eval_qwen3_5)
         exec_script="${SCRIPT_DIR}/run-hma-lm-eval.sh"
         ;;
@@ -178,7 +188,7 @@ case "$TEST_NAME" in
         ;;
     *)
         echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, lm_eval_preemption, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, http_api, gds_smoke_test, p2p, kimi_linear_tp"
+        echo "Valid tests: lm_eval, lm_eval_preemption, hma_lm_eval_gemma4, hma_lm_eval_gemma4_engine_driven, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, http_api, gds_smoke_test, p2p, kimi_linear_tp"
         exit 1
         ;;
 esac
