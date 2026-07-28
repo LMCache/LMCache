@@ -8,11 +8,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 # First Party
-from lmcache.v1.platform.base_device_spec import DeviceSpec
+from lmcache.v1.platform.base.device_spec import DeviceSpec
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
+    from lmcache.v1.platform.base.device_ops import DeviceOps
+    from lmcache.v1.platform.base.event_ipc import EventIPCBackend
+    from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
 # ---------------------------------------------------------------------------
 # Device detection registry entry
@@ -21,6 +23,8 @@ if TYPE_CHECKING:
 
 class MusaDeviceSpec(DeviceSpec):
     """MUSA device specification for the detection registry."""
+
+    _event_backend_cache: "EventIPCBackend | None" = None
 
     @property
     def device_type(self) -> str:
@@ -31,8 +35,11 @@ class MusaDeviceSpec(DeviceSpec):
         return "musa"
 
     @property
-    def ops_module(self) -> str | None:
-        return "lmcache.v1.platform.musa.ops"
+    def ops_cls(self) -> type[DeviceOps]:
+        # First Party
+        from lmcache.v1.platform.musa.device_ops import MusaDeviceOps
+
+        return MusaDeviceOps
 
     @property
     def ipc_wrapper_cls(self) -> type[DeviceIPCWrapper] | None:
@@ -58,3 +65,15 @@ class MusaDeviceSpec(DeviceSpec):
         )
 
         return is_musa_handle_transfer_available()
+
+    @property
+    def event_ipc_backend(self) -> "EventIPCBackend":
+        """Return the TorchMUSA event IPC backend."""
+        backend = self._event_backend_cache
+        if backend is None:
+            # First Party
+            from lmcache.v1.platform.musa.event_ipc import MusaEventIPCBackend
+
+            backend = MusaEventIPCBackend()
+            self._event_backend_cache = backend
+        return backend

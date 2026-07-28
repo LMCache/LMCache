@@ -29,7 +29,7 @@ decompressed back into the original LMCache KV tensor layout.
 
 ```text
 MemoryObj(KV tensor)
-  -> TurboQuantSerializer.serialize(src, dst)
+  -> TurboQuantSerializer.serialize(src, dst, key)
   -> TurboQuant store Triton kernel
   -> MemoryObj(uint8 compressed bytes)
   -> inner L2 adapter store
@@ -40,7 +40,7 @@ MemoryObj(KV tensor)
 ```text
 inner L2 adapter load
   -> MemoryObj(uint8 compressed bytes)
-  -> TurboQuantDeserializer.deserialize(src, dst)
+  -> TurboQuantDeserializer.deserialize(src, dst, key)
   -> TurboQuant decode Triton kernel
   -> MemoryObj(restored KV tensor)
 ```
@@ -54,9 +54,9 @@ handled by SerdeL2AdapterWrapper and AsyncSerdeProcessor.
 TurboQuant serde provides the synchronous serde interfaces required by the
 generic serde framework:
 
-* `TurboQuantSerializer.serialize(src, dst) -> int`
+* `TurboQuantSerializer.serialize(src, dst, key) -> int`
 * `TurboQuantSerializer.estimate_serialized_size(layout_desc) -> int`
-* `TurboQuantDeserializer.deserialize(src, dst) -> None`
+* `TurboQuantDeserializer.deserialize(src, dst, key) -> None`
 
 It is registered under the serde type name:
 

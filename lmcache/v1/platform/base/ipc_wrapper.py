@@ -41,8 +41,8 @@ class DeviceIPCWrapper:
     tensor) and ``to_tensor`` (reconstruct the tensor from the handle).
 
     The default wrapper for each device is bound to that device's
-    :class:`~lmcache.v1.platform.base_device_spec.DeviceSpec` via
-    :attr:`~lmcache.v1.platform.base_device_spec.DeviceSpec.ipc_wrapper_cls`;
+    :class:`~lmcache.v1.platform.base.device_spec.DeviceSpec` via
+    :attr:`~lmcache.v1.platform.base.device_spec.DeviceSpec.ipc_wrapper_cls`;
     :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory` reads that
     binding and returns the wrapper's ``wrap`` classmethod so callers can
     dispatch by ``tensor.device.type`` without any if/elif chain.

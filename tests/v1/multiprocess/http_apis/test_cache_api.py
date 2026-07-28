@@ -444,11 +444,9 @@ class _PrefetchBitmap:
 class _PrefetchStorageManager:
     submit_calls: list[dict] = field(default_factory=list)
 
-    def submit_prefetch_task(
-        self, keys, layout_desc, mode=None, **_
-    ) -> _PrefetchHandle:
-        self.submit_calls.append({"keys": list(keys), "mode": mode})
-        return _PrefetchHandle(len(keys))
+    def submit_prefetch_task(self, spec, **_) -> _PrefetchHandle:
+        self.submit_calls.append({"keys": list(spec.keys), "mode": spec.mode})
+        return _PrefetchHandle(len(spec.keys))
 
     def query_prefetch_status(self, handle) -> _PrefetchBitmap:
         return _PrefetchBitmap(handle.total_requested_keys)
