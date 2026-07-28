@@ -127,6 +127,14 @@ class LogCaptureHandler(logging.Handler):
         self.stream = StringIO()
 
     def emit(self, record):
+        # Render the message eagerly so `record.msg` holds the fully
+        # interpolated text. The audit connector logs with lazy %-style
+        # formatting (ruff G004), where `record.msg` is only the template
+        # (e.g. "...Cost:%.6fms") and the values live in `record.args`.
+        # Capturing the rendered message keeps the assertions below
+        # independent of eager vs lazy formatting.
+        record.msg = record.getMessage()
+        record.args = None
         self.records.append(record)
         msg = self.format(record)
         self.stream.write(msg + "\n")
