@@ -6,6 +6,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.gpu_connector.kv_format.detectors import vllm as vllm_detector
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.transfer_plan import (
     build_object_group_layout_desc,
@@ -33,12 +34,15 @@ class _TensorWrapper(DeviceIPCWrapper):
 def test_sliding_window_staging_matches_registered_layout(
     full_sw_kv: bool,
     expected_slots: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """CPU staging buffers must match the registered transfer layout."""
-    tensor = torch.empty(2, 4, 16, 2, 8, dtype=torch.float32)
+    monkeypatch.setattr(vllm_detector, "torch_device_type", "cpu")
+    tensor = torch.empty(2, 4, 2, 16, 8, dtype=torch.float32)
     context = CPUCacheContext(
         [_TensorWrapper(tensor)],
         lmcache_tokens_per_chunk=256,
+        layout_hints={"kv_layout": "HND"},
         engine_group_infos=[
             EngineGroupInfo(
                 engine_group_id=0,
