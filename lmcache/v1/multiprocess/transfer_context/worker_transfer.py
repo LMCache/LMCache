@@ -15,6 +15,7 @@ import torch
 from lmcache import torch_dev
 from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import (
+    DEFAULT_ATTN_WINDOW_DESC,
     AttnWindowDesc,
     MemoryLayoutDesc,
 )
@@ -755,6 +756,19 @@ class EngineDrivenTransferContext(TransferContext):
             block_size,
             layout_hints,
         )
+
+        # Keep the established single-object-group protocol until the
+        # multi-object-group transfer path is implemented. The metadata parser
+        # still handles multiple groups, but only that path carries the new
+        # wire fields and reaches the not-yet-supported hybrid transfer code.
+        if len(object_group_layout_descs) == 1:
+            wire_engine_group_infos = []
+            wire_obj_shapes = []
+            wire_obj_dtype_strs = []
+            wire_num_chunks_in_sw = []
+            object_group_layout_descs = []
+            attn_desc = DEFAULT_ATTN_WINDOW_DESC
+            transfer_metadata = None
 
         # Convert KVTransferMetadata to a structured msgspec wire DTO so the
         # server can reconstruct it without pickle.

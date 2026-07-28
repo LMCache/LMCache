@@ -2860,7 +2860,7 @@ def test_build_multi_group_wire_fields_legacy_returns_none_transfer_metadata(
 def test_worker_register_multi_group_stores_transfer_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Worker register() stores KVTransferMetadata in EngineDrivenContextMetadata."""
+    """Single-object-group registration keeps the legacy context metadata."""
     # First Party
     from lmcache.v1.distributed.api import DEFAULT_ATTN_WINDOW_DESC, MemoryLayoutDesc
     from lmcache.v1.multiprocess.group_view import EngineGroupInfo
@@ -2868,7 +2868,6 @@ def test_worker_register_multi_group_stores_transfer_metadata(
         EngineDrivenTransferContext,
         worker_transfer,
     )
-    from lmcache.v1.multiprocess.transfer_plan import KVTransferMetadata
     import lmcache.c_ops as lmc_ops
 
     fake_tm = _make_fake_transfer_metadata()
@@ -2930,20 +2929,17 @@ def test_worker_register_multi_group_stores_transfer_metadata(
     assert len(captured_metadata) == 1
     meta = captured_metadata[0]
     assert isinstance(meta, EngineDrivenContextMetadata)
-    assert isinstance(meta.transfer_metadata, KVTransferMetadata)
-    assert meta.transfer_metadata is fake_tm
+    assert meta.transfer_metadata is None
+    assert meta.object_group_layout_descs == []
 
 
 def test_worker_register_sends_transfer_metadata_wire(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Worker register() converts transfer_metadata to a wire DTO in the payload."""
+    """Single-object-group registration keeps the legacy wire payload."""
     # First Party
     from lmcache.v1.distributed.api import DEFAULT_ATTN_WINDOW_DESC, MemoryLayoutDesc
-    from lmcache.v1.multiprocess.custom_types import (
-        KVTransferMetadataWire,
-        RegisterEngineDrivenContextPayload,
-    )
+    from lmcache.v1.multiprocess.custom_types import RegisterEngineDrivenContextPayload
     from lmcache.v1.multiprocess.group_view import EngineGroupInfo
     from lmcache.v1.multiprocess.transfer_context import (
         EngineDrivenTransferContext,
@@ -3009,11 +3005,9 @@ def test_worker_register_sends_transfer_metadata_wire(
     assert len(captured_payloads) == 1
     payload = captured_payloads[0]
     assert isinstance(payload, RegisterEngineDrivenContextPayload)
-    assert isinstance(payload.transfer_metadata_wire, KVTransferMetadataWire)
-    assert payload.transfer_metadata_wire.tokens_per_chunk == fake_tm.tokens_per_chunk
-    assert payload.transfer_metadata_wire.num_chunks_in_sw == list(
-        fake_tm.num_chunks_in_sw
-    )
+    assert payload.transfer_metadata_wire is None
+    assert payload.engine_group_infos == []
+    assert payload.object_group_layout_shapes == []
 
 
 def test_server_register_stores_transfer_metadata_from_payload(
