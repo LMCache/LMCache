@@ -142,14 +142,18 @@ class VerbsTransferChannelClient(TransferChannelClient):
         self,
         native_clients: list[Any],
         reconnect: Callable[[], list[Any]],
+        queue_depth: int = _MAX_QUEUE_DEPTH,
     ) -> None:
         if not native_clients:
             raise ValueError("RDMA client requires at least one rail")
         self._natives = native_clients
         self._reconnect = reconnect
+        self._queue_depth = queue_depth
+        self._outstanding_chunks = [0] * len(native_clients)
         self._tasks: dict[int, _ReadTask] = {}
         self._next_task_id = 1
         self._needs_reconnect = False
+        self._teardown_pending = False
         self._closed = False
         self._lock = threading.Lock()
 
@@ -197,7 +201,27 @@ class VerbsTransferChannelClient(TransferChannelClient):
             object_rails,
         )
 
+    def _fail_all_tasks(self) -> None:
+        for task in self._tasks.values():
+            for native_task in task.native_tasks:
+                native_task.finished = True
+                native_task.succeeded = False
+        self._outstanding_chunks = [0] * len(self._natives)
+
+    def _retry_pending_teardown(self) -> Exception | None:
+        close_error = _close_all(self._natives)
+        if close_error is not None:
+            return close_error
+        self._fail_all_tasks()
+        self._teardown_pending = False
+        self._needs_reconnect = True
+        return None
+
     def _recover_if_needed(self) -> None:
+        if self._teardown_pending:
+            close_error = self._retry_pending_teardown()
+            if close_error is not None:
+                raise close_error
         self._needs_reconnect |= any(not native.healthy for native in self._natives)
         if not self._needs_reconnect:
             return
@@ -216,6 +240,7 @@ class VerbsTransferChannelClient(TransferChannelClient):
             _close_all(replacement)
             raise RuntimeError("RDMA reconnect changed the rail count")
         self._natives = replacement
+        self._outstanding_chunks = [0] * rail_count
         self._needs_reconnect = False
 
     def submit_read(
@@ -232,6 +257,8 @@ class VerbsTransferChannelClient(TransferChannelClient):
 
         Returns:
             A task ID to pass to ``query_read_status``.
+            If a partial submit cannot be quiesced immediately, its task stays
+            nonterminal until teardown succeeds, then completes as failed.
 
         Raises:
             RuntimeError: If the client is closed, the connection cannot be
@@ -245,7 +272,17 @@ class VerbsTransferChannelClient(TransferChannelClient):
                 raise RuntimeError("RDMA transfer client is closed")
             self._recover_if_needed()
             batches, object_rails = self._stripe(local_addresses, remote_addresses)
+            for rail_index, (_, _, sizes) in enumerate(batches):
+                if (
+                    self._outstanding_chunks[rail_index] + len(sizes)
+                    > self._queue_depth
+                ):
+                    raise RuntimeError("RDMA send queue is full")
+
             native_tasks: list[_NativeTask] = []
+            task_id = self._next_task_id
+            self._next_task_id += 1
+            self._tasks[task_id] = _ReadTask(object_rails, native_tasks)
             try:
                 for rail_index, (local_offsets, remote_offsets, sizes) in enumerate(
                     batches
@@ -262,20 +299,24 @@ class VerbsTransferChannelClient(TransferChannelClient):
                             len(sizes),
                         )
                     )
+                    self._outstanding_chunks[rail_index] += len(sizes)
             except Exception as error:
                 close_error = _close_all(self._natives)
                 self._needs_reconnect = True
-                for task in self._tasks.values():
-                    for native_task in task.native_tasks:
-                        native_task.finished = True
-                        native_task.succeeded = False
                 if close_error is not None:
-                    raise close_error from error
+                    self._teardown_pending = True
+                    logger.error(
+                        "Native RDMA submit failed (%s) and teardown remains "
+                        "pending: %s",
+                        error,
+                        close_error,
+                        exc_info=True,
+                    )
+                    return task_id
+                self._fail_all_tasks()
+                del self._tasks[task_id]
                 raise
 
-            task_id = self._next_task_id
-            self._next_task_id += 1
-            self._tasks[task_id] = _ReadTask(object_rails, native_tasks)
             return task_id
 
     def query_read_status(self, task_id: int) -> TransferChannelReadResult:
@@ -285,6 +326,10 @@ class VerbsTransferChannelClient(TransferChannelClient):
             task = self._tasks.get(task_id)
             if task is None:
                 raise KeyError(f"Unknown RDMA read task id: {task_id}")
+            if self._teardown_pending:
+                close_error = self._retry_pending_teardown()
+                if close_error is not None:
+                    return TransferChannelReadResult(finished=False)
             for native_task in task.native_tasks:
                 if native_task.finished:
                     continue
@@ -293,6 +338,9 @@ class VerbsTransferChannelClient(TransferChannelClient):
                 ].query_read_status(native_task.task_id)
                 if finished:
                     native_task.finished = True
+                    self._outstanding_chunks[native_task.rail_index] -= (
+                        native_task.chunk_count
+                    )
                     native_task.succeeded = bool(succeeded) and (
                         int(count) == native_task.chunk_count
                     )
@@ -321,8 +369,11 @@ class VerbsTransferChannelClient(TransferChannelClient):
             error = _close_all(self._natives)
             if error is not None:
                 self._needs_reconnect = True
+                self._teardown_pending = True
                 raise error
             self._tasks.clear()
+            self._outstanding_chunks = [0] * len(self._natives)
+            self._teardown_pending = False
             self._closed = True
 
 
@@ -365,6 +416,7 @@ class VerbsTransferChannelContext(TransferChannelContext):
             )
 
         self._l1_memory_desc = l1_memory_desc
+        self._queue_depth = queue_depth
         self._listen_urls = [
             _offset_url_port(listen_url, rail) for rail in range(len(devices))
         ]
@@ -447,6 +499,7 @@ class VerbsTransferChannelContext(TransferChannelContext):
                 client = VerbsTransferChannelClient(
                     native_clients,
                     reconnect=lambda: self._reconnect(peer_advertise_url),
+                    queue_depth=self._queue_depth,
                 )
             except Exception:
                 _close_all(native_clients)

@@ -165,6 +165,57 @@ def test_failed_completion_reconnects_before_next_read():
     assert client.query_read_status(second).succeeded_mask == [True]
 
 
+def test_unhealthy_rail_waits_for_active_read_before_reconnect():
+    old = _FakeClient(statuses=[(True, True, 1)])
+    replacement = _FakeClient()
+    reconnects = []
+
+    def reconnect():
+        reconnects.append(True)
+        return [replacement]
+
+    client = verbs_impl.VerbsTransferChannelClient([old], reconnect=reconnect)
+    first = client.submit_read([_address(0, 8)], [_address(16, 8)])
+    old.healthy = False
+
+    with pytest.raises(RuntimeError, match="reads in flight"):
+        client.submit_read([_address(32, 8)], [_address(48, 8)])
+
+    assert reconnects == []
+    assert not old.closed
+    assert client.query_read_status(first).succeeded_mask == [True]
+
+    second = client.submit_read([_address(32, 8)], [_address(48, 8)])
+    assert reconnects == [True]
+    assert old.closed
+    assert client.query_read_status(second).succeeded_mask == [True]
+
+
+def test_queue_depth_rejection_does_not_fail_active_read():
+    rail0 = _FakeClient(statuses=[(True, True, 1)])
+    rail1 = _FakeClient(statuses=[(False, False, 1), (True, True, 1)])
+    client = verbs_impl.VerbsTransferChannelClient(
+        [rail0, rail1],
+        reconnect=lambda: [],
+        queue_depth=1,
+    )
+    first = client.submit_read([_address(0, 2)], [_address(16, 2)])
+    assert not client.query_read_status(first).finished
+
+    with pytest.raises(RuntimeError, match="send queue is full"):
+        client.submit_read([_address(32, 2)], [_address(48, 2)])
+
+    assert len(rail0.submissions) == 1
+    assert len(rail1.submissions) == 1
+    assert not rail0.closed
+    assert not rail1.closed
+    assert client.query_read_status(first).succeeded_mask == [True]
+
+    client.submit_read([_address(32, 2)], [_address(48, 2)])
+    assert len(rail0.submissions) == 2
+    assert len(rail1.submissions) == 2
+
+
 def test_submit_failure_reconnects_before_failed_task_is_queried():
     old = _FakeClient()
     replacement = _FakeClient()
@@ -188,9 +239,59 @@ def test_submit_failure_reconnects_before_failed_task_is_queried():
     assert client.query_read_status(second).succeeded_mask == [True]
 
 
+def test_partial_submit_close_failure_stays_nonterminal_until_quiesced():
+    rail0 = _FakeClient(close_errors=3)
+    rail1 = _FakeClient()
+    replacement0 = _FakeClient()
+    replacement1 = _FakeClient()
+    reconnects = []
+
+    def reconnect():
+        reconnects.append(True)
+        return [replacement0, replacement1]
+
+    client = verbs_impl.VerbsTransferChannelClient(
+        [rail0, rail1],
+        reconnect=reconnect,
+        queue_depth=4,
+    )
+    first = client.submit_read(
+        [_address(0, 2)],
+        [_address(16, 2)],
+    )
+    rail1.submit_error = RuntimeError("injected submit failure")
+
+    poisoned = client.submit_read(
+        [_address(32, 2)],
+        [_address(48, 2)],
+    )
+
+    assert poisoned != first
+    assert not client.query_read_status(first).finished
+
+    with pytest.raises(RuntimeError, match="injected close failure"):
+        client.submit_read(
+            [_address(64, 2)],
+            [_address(80, 2)],
+        )
+    assert len(rail0.submissions) == 2
+    assert len(rail1.submissions) == 1
+
+    assert client.query_read_status(poisoned).succeeded_mask == [False]
+    assert client.query_read_status(first).succeeded_mask == [False]
+
+    recovered = client.submit_read(
+        [_address(64, 2)],
+        [_address(80, 2)],
+    )
+    assert reconnects == [True]
+    assert client.query_read_status(recovered).succeeded_mask == [True]
+
+
 def test_client_close_can_be_retried_after_native_failure():
     native = _FakeClient(close_errors=1)
     client = verbs_impl.VerbsTransferChannelClient([native], reconnect=lambda: [])
+    client.submit_read([_address(0, 8)], [_address(16, 8)])
 
     with pytest.raises(RuntimeError, match="injected close"):
         client.close()
@@ -199,6 +300,8 @@ def test_client_close_can_be_retried_after_native_failure():
     client.close()
     assert client._closed
     assert native.closed
+    with pytest.raises(RuntimeError, match="client is closed"):
+        client.submit_read([_address(32, 8)], [_address(48, 8)])
 
 
 @pytest.mark.parametrize(
