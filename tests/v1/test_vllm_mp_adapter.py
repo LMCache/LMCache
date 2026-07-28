@@ -18,6 +18,7 @@ import torch
 
 # First Party
 from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod
+from lmcache.integration.vllm.experimental.dispatcher import Dispatcher
 from lmcache.integration.vllm.vllm_multi_process_adapter import (
     HeartbeatThread,
     LMCacheMPWorkerAdapter,
@@ -750,3 +751,36 @@ def test_recover_callback_rebuilds_transfer_ctx_without_closing_previous(
     assert len(contexts) == 3
     assert adapter.transfer_ctx is contexts[2]
     contexts[1].close.assert_not_called()
+
+
+# For the experimental dispatcher
+def test_enabled_feature_receives_reclaim_and_shutdown(fake_adapter):
+    """get_finished reclaims ring blocks and shutdown unregisters the ring."""
+    adapter, _, _ = fake_adapter
+    assert adapter.dispatcher is None
+
+    dispatcher = MagicMock(spec=Dispatcher)
+    adapter.dispatcher = dispatcher
+
+    adapter.get_finished(set())
+    adapter.shutdown()
+
+    dispatcher.reclaim.assert_called_once_with()
+    dispatcher.shutdown.assert_called_once_with()
+
+
+@pytest.mark.parametrize("ring_ok", [True, False])
+def test_recovery_reports_the_ring_re_registration_result(fake_adapter, ring_ok):
+    """A worker whose Q ring failed to re-register must not be reported
+    healthy: the server would have no Q context, so every later STORE_Q would
+    raise. The success path must still report healthy so the health event can
+    be set."""
+    adapter, _, _ = fake_adapter
+    dispatcher = MagicMock(spec=Dispatcher)
+    dispatcher.reregister.return_value = ring_ok
+    adapter.dispatcher = dispatcher
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    adapter.register_kv_caches({"layer.0": fake_tensor})
+
+    assert adapter._reregister_kv_caches_callback() is ring_ok

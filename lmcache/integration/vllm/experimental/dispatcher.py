@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 
 # First Party
+from lmcache.sdk.cache_kind import LMCacheSDKCacheKind
 from lmcache.sdk.qringbuffer import QRingBufferAdapter, QRingBufferCapture
 from lmcache.utils import init_logger
 from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
@@ -42,7 +43,9 @@ class QTensorFeature:
     def __init__(self, ctx: FeatureContext) -> None:
         self._q_ring_adapter = QRingBufferAdapter(
             adapter=ctx.worker_adapter,
-            q_model_name=f"{ctx.worker_adapter.model_name}##query",
+            q_model_name=LMCacheSDKCacheKind.QUERY.server_model_name(
+                ctx.worker_adapter.model_name
+            ),
             send_lmcache_request=ctx.send_lmcache_request,
         )
         self._capture = QRingBufferCapture(ctx.worker_adapter, self._q_ring_adapter)
@@ -149,9 +152,9 @@ def dispatch(
         dispatcher: The dispatcher to dispatch to.
         **kwargs: The arguments to dispatch.
     """
-    if dispatcher is not None:
-        for feature in dispatcher._features:
-            getattr(feature, fn_name)(**kwargs)
+    if dispatcher is None:
+        return
+    getattr(dispatcher, fn_name)(**kwargs)
 
 
 class Dispatcher:

@@ -1418,7 +1418,12 @@ class LMCacheMPWorkerAdapter:
         logger.warning("Finished re-registering KV caches after server recovery")
 
         if self.dispatcher is not None:
-            dispatch(self.dispatcher, "reregister")
+            if not self.dispatcher.reregister():
+                logger.warning(
+                    "Failed to re-register dispatcher after server recovery; "
+                    "will retry on next heartbeat"
+                )
+                return False
 
         return True
 

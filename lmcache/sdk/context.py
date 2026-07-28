@@ -8,7 +8,6 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Callable, Mapping, Sequence
-import enum
 import time
 import uuid
 
@@ -19,6 +18,7 @@ import zmq
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.sdk.cache_kind import LMCacheSDKCacheKind
 from lmcache.sdk.wrapper.contiguous import ContiguousTransferWrapper
 from lmcache.v1.gpu_connector.utils import (
     DiscoverableKVCache,
@@ -40,43 +40,6 @@ logger = init_logger(__name__)
 
 class LMCacheSDKError(RuntimeError):
     """Raised when an SDK KV-cache operation fails."""
-
-
-class LMCacheSDKCacheKind(enum.Enum):
-    """A cacheable tensor family that LMCache exports.
-
-    Each kind is stored under its own namespaced model name and may or may
-    not be writable through the SDK. This is a pure value type -- it holds
-    no runtime state and never references a live context.
-    """
-
-    KV = "kv"
-    QUERY = "query"
-
-    def server_model_name(self, model_name: str) -> str:
-        """Replace model name with a prefixed model name for this kind.
-        Saving between different kinds is differentiated by the model name
-        prefix (see vllm_multi_process_adapter.py).
-
-        Args:
-            model_name: The original model name.
-
-        Returns:
-            The prefixed model name for this kind.
-        """
-        if self is LMCacheSDKCacheKind.QUERY:
-            return f"{model_name}##query"
-        return model_name
-
-    def base_model_name(self, model_name: str) -> str:
-        """Remove the kind prefix from a model name for registration.
-
-        Args:
-            model_name: The prefixed model name.
-        """
-        if self is LMCacheSDKCacheKind.QUERY:
-            return model_name.replace("##query", "")
-        return model_name
 
 
 ModifyFnType = Callable[

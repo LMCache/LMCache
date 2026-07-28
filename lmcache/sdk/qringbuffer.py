@@ -135,8 +135,25 @@ class QRingBuffer:
         return reserved
 
     def free(self, block_ids: list[int]) -> None:
-        """Free the given block IDs back to the ring buffer."""
-        self._free_blocks.extend(block_ids)
+        """Free the given block IDs back to the ring buffer.
+        Drop invalid or already freed block IDs with a warning."""
+        free_blocks = set(self._free_blocks)
+        for block_id in block_ids:
+            if block_id < 0 or block_id >= self.num_blocks:
+                logger.warning(
+                    "free() called with invalid block_id %d (valid [0, %d))",
+                    block_id,
+                    self.num_blocks,
+                )
+                continue
+            if block_id in free_blocks:
+                logger.warning(
+                    "free() called with already freed block_id %d",
+                    block_id,
+                )
+                continue
+            free_blocks.add(block_id)
+            self._free_blocks.append(block_id)
 
     def scatter(
         self,

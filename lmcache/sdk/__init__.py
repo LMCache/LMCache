@@ -3,7 +3,7 @@
 
 # First Party
 from lmcache.sdk import batch, context, kvcache, qcache, request
-from lmcache.sdk.context import LMCacheSDKCacheKind
+from lmcache.sdk.cache_kind import LMCacheSDKCacheKind
 
 __all__ = ["batch", "context", "kvcache", "qcache", "request", "LMCacheSDKCacheKind"]
 
