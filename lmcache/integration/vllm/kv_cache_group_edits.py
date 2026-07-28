@@ -368,6 +368,11 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
         return kv_cache.view(num_blocks, 2, logical_block_size, num_heads, head_size)
 
 
+######################
+# vLLM 0.26.0 or later
+######################
+
+
 class _MambaUnifiedViewEdit(KVCacheGroupEdit):
     """Re-view mamba's unified state as a single attention tensor
 
@@ -419,10 +424,82 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
             )
 
 
+class _SubpagedMLAAttentionViewEdit(KVCacheGroupEdit):
+    """Re-view a kernel-paged attention tensor as logical-block pages.
+
+    For vLLM 0.26 or later
+
+    Example on Kimi K3 , where 768 is the block size
+    - Input: [N * 12, 64, 576]
+    - Output: [N, 768, 576] (where 768 = 12 * 64)
+    """
+
+    name = "subpaged-mla-attention-view"
+
+    def matches(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> bool:
+        return (
+            get_kv_cache_spec_kind(spec) == KVCacheSpecKind.MLA_ATTENTION
+            and not _declares_slot_compression(spec)
+            and isinstance(kv_cache, torch.Tensor)
+            and kv_cache.ndim == 3
+            and kv_cache.shape[1] != spec.block_size
+        )
+
+    def apply(
+        self,
+        spec: KVCacheSpec,
+        kv_cache: RegisteredKVCache,
+        _layout_hints: LayoutHints,
+    ) -> torch.Tensor:
+        """Re-view ``kv_cache`` at logical-block granularity.
+
+        The tensor is kernel-paged as ``(num_kernel_pages, 2,
+        kernel_block_size, num_kv_heads, head_size)``; the result is
+        ``(num_logical_blocks, 2, spec.block_size, num_heads, head_size)``
+        over the same storage.
+
+        Raises:
+            ValueError: If the layout is not the expected kernel-paged shape,
+                the sizes do not divide evenly, or the kernel pages of one
+                logical block do not tile its page bytes exactly (which would
+                indicate an undeclared packed layout that must not be edited).
+        """
+        assert isinstance(kv_cache, torch.Tensor)
+        logical_block_size = spec.block_size
+        kernel_block_size = kv_cache.shape[1]
+        if logical_block_size % kernel_block_size != 0:
+            raise ValueError(
+                f"logical block size {logical_block_size} is not a multiple of "
+                f"kernel block size {kernel_block_size}"
+            )
+        ratio = logical_block_size // kernel_block_size
+
+        num_kernel_pages = kv_cache.shape[0]
+        if num_kernel_pages % ratio != 0:
+            raise ValueError(
+                f"kernel page count {num_kernel_pages} is not a multiple of "
+                f"the logical/kernel block ratio {ratio}"
+            )
+        kernel_page_bytes = kv_cache.shape[1:].numel() * kv_cache.element_size()
+        if kernel_page_bytes * ratio != spec.page_size_bytes:
+            raise ValueError(
+                f"{ratio} kernel pages ({kernel_page_bytes * ratio} bytes) do "
+                f"not tile the logical page ({spec.page_size_bytes} bytes)"
+            )
+        if not kv_cache.is_contiguous():
+            raise ValueError(
+                "kernel-paged attention KV tensor must be contiguous to "
+                "re-view as logical pages"
+            )
+
+        return kv_cache.view(num_kernel_pages // ratio, logical_block_size, -1)
+
+
 # Rule registry, in match priority order.
 _EDITS: tuple[KVCacheGroupEdit, ...] = (
     _MambaUnifiedViewEdit(),
     _MambaPageViewEdit(),
+    _SubpagedMLAAttentionViewEdit(),
     _SubpagedAttentionViewEdit(),
 )
 
