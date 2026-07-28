@@ -19,6 +19,7 @@ from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from tests.v1.utils import (
     create_gpu_connector,
+    create_xpu_connector,
     dumb_metadata,
     generate_kv_cache_paged_list_tensors,
     generate_tokens,
@@ -50,6 +51,14 @@ def get_expected_count(token_len, save_unfull_chunk, chunk_size):
     if save_unfull_chunk:
         return token_len
     return (token_len // chunk_size) * chunk_size
+
+
+def create_runtime_connector(hidden_dim: int, num_layers: int):
+    if torch_device_type == "xpu":
+        return create_xpu_connector(hidden_dim, num_layers)
+    if torch_device_type == "cuda":
+        return create_gpu_connector(hidden_dim, num_layers)
+    raise ValueError(f"Unsupported torch_device_type for benchmark: {torch_device_type}")
 
 
 @pytest.fixture
@@ -107,10 +116,6 @@ def create_config():
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="store")
 @pytest.mark.gpu
-@pytest.mark.skipif(
-    not torch_dev.is_available(),
-    reason=f"Requires available {torch_device_type} runtime",
-)
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 def test_store_1GB(
@@ -164,7 +169,7 @@ def test_store_1GB(
     num_repeats = 10
 
     # Initialize related modules
-    connector = create_gpu_connector(num_heads * head_dim, num_layers)
+    connector = create_runtime_connector(num_heads * head_dim, num_layers)
     kv_cache = generate_kv_cache_paged_list_tensors(
         num_blocks, device, block_size, dtype
     )
@@ -222,10 +227,6 @@ def test_store_1GB(
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="retrieve")
 @pytest.mark.gpu
-@pytest.mark.skipif(
-    not torch_dev.is_available(),
-    reason=f"Requires available {torch_device_type} runtime",
-)
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 def test_retrieve_1GB_allhit(
@@ -279,7 +280,7 @@ def test_retrieve_1GB_allhit(
     num_repeats = 10
 
     # Initialize related modules
-    connector = create_gpu_connector(num_heads * head_dim, num_layers)
+    connector = create_runtime_connector(num_heads * head_dim, num_layers)
     kv_cache = generate_kv_cache_paged_list_tensors(
         num_blocks, device, block_size, dtype
     )
@@ -346,10 +347,6 @@ def test_retrieve_1GB_allhit(
 @pytest.mark.no_shared_allocator
 @pytest.mark.benchmark(group="lookup")
 @pytest.mark.gpu
-@pytest.mark.skipif(
-    not torch_dev.is_available(),
-    reason=f"Requires available {torch_device_type} runtime",
-)
 @pytest.mark.parametrize("backend", ["cpu", "disk", "fsconnector"])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 def test_lookup_20K_tokens(
@@ -397,7 +394,7 @@ def test_lookup_20K_tokens(
     num_repeats = 10
 
     # Initialize related modules
-    connector = create_gpu_connector(num_heads * head_dim, num_layers)
+    connector = create_runtime_connector(num_heads * head_dim, num_layers)
     kv_cache = generate_kv_cache_paged_list_tensors(
         num_blocks, device, block_size, dtype
     )
