@@ -398,6 +398,26 @@ def _normalize_adapter_init_args(
     return int(legacy_block_size), strategy, mq_timeout
 
 
+def _normalize_server_urls(server_urls: Sequence[str] | str) -> list[str]:
+    """Normalize the server URL argument from old and new vLLM connectors.
+
+    Current connectors pass a sequence of server URLs. Older ones pass a
+    single URL as a bare string; ``list()`` would split that into one
+    character per element and hand each character to
+    :class:`MessageQueueClient` as if it were a URL, which surfaces as an
+    opaque ``ZMQError: Invalid argument (addr='t')``.
+
+    Args:
+        server_urls: A sequence of server URLs, or a single URL string.
+
+    Returns:
+        The server URLs as a list.
+    """
+    if isinstance(server_urls, str):
+        return [server_urls]
+    return list(server_urls)
+
+
 class HeartbeatThread(PeriodicThread):
     """Periodically checks server health via PING.
 
@@ -562,7 +582,7 @@ LookupResult = int
 class LMCacheMPSchedulerAdapter:
     def __init__(
         self,
-        server_urls: list[str],
+        server_urls: Sequence[str] | str,
         context: zmq.Context,
         model_name: str,
         vllm_block_size: int,
@@ -575,7 +595,8 @@ class LMCacheMPSchedulerAdapter:
     ):
         """
         Args:
-            server_urls: The servers URL for the LMCache message queue
+            server_urls: The server URLs for the LMCache message queue.
+                Older vLLM connectors pass a single URL string.
             context: The ZMQ context
             model_name: The model name used for LMCache keys
             vllm_block_size: The block size used in vLLM
@@ -599,8 +620,9 @@ class LMCacheMPSchedulerAdapter:
             legacy_block_size,
             mq_timeout,
         )
+        server_urls = _normalize_server_urls(server_urls)
         assert len(server_urls) >= 1, "At least one server url required"
-        self._server_urls: list[str] = list(server_urls)
+        self._server_urls: list[str] = server_urls
         self.mq_clients: dict[str, MessageQueueClient] = {
             url: MessageQueueClient(url, context) for url in self._server_urls
         }
