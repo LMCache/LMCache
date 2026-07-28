@@ -923,11 +923,16 @@ class PrefetchController(StorageControllerInterface):
             return
 
         ## Step 7: submit load tasks per adapter
+        adapter_split_log: list[str] = []
         for adapter_idx, bitmap in trimmed_plan.items():
             per_adapter_keys = bitmap.gather(request.keys)
             per_adapter_objs = [
                 request.write_reserved_objs[key] for key in per_adapter_keys
             ]
+            adapter_split_log.append(
+                f"{adapter_idx}:{self._adapter_descriptors[adapter_idx].type_name}="
+                f"{len(per_adapter_keys)}"
+            )
             task_id = self._l2_adapters[adapter_idx].submit_load_task(
                 per_adapter_keys, per_adapter_objs
             )
@@ -986,6 +991,11 @@ class PrefetchController(StorageControllerInterface):
             request.request_id,
             len(trimmed_plan),
             len(reserved_key_set),
+        )
+        logger.info(
+            "Prefetch request %d L2 load split: %s",
+            request.request_id,
+            ", ".join(adapter_split_log),
         )
 
     def _update_lookup_results(
