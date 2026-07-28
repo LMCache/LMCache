@@ -18,6 +18,7 @@ if str(ROOT_DIR) not in sys.path:
 
 # Third Party
 from setuptools import find_packages, setup  # noqa: E402
+from setuptools.command.build_py import build_py as _build_py  # noqa: E402
 
 # First Party
 from setup_extensions import BuildPolicy, BuildProfile  # noqa: E402
@@ -34,10 +35,29 @@ def _read_requirements(path: Path) -> list[str]:
     return reqs
 
 
+class _BuildPyWithProtoStubs(_build_py):
+    """Generate gRPC stubs before packaging."""
+
+    def run(self) -> None:
+        # First Party
+        from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
+            _generate,
+        )
+
+        rc = _generate.main()
+        if rc != 0:
+            raise SystemExit(
+                "failed to generate gRPC stubs during build; install "
+                "'grpcio-tools' matching your grpc runtime"
+            )
+        super().run()
+
+
 if __name__ == "__main__":
     policy = BuildPolicy()
     profile = policy.resolve_profile()
     ext_modules, cmdclass, req_file = policy.collect_extensions(profile)
+    cmdclass["build_py"] = _BuildPyWithProtoStubs
 
     install_requires = _read_requirements(ROOT_DIR / "requirements" / "common.txt")
     extras_require: dict[str, list[str]] = {}

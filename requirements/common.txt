@@ -25,6 +25,7 @@ py-cpuinfo
 pytest
 pyyaml
 pyzmq >= 25.0.0
+grpcio>=1.62
 redis
 safetensors
 setuptools>=77.0.3,<81.0.0

@@ -160,3 +160,7 @@ docs/source/locale/**/*.mo
 
 # CodeBuddy
 .codebuddy
+
+# gRPC stubs generated from lmcache_mq.proto at build time; never checked in.
+lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/*_pb2.py
+lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/*_pb2_grpc.py

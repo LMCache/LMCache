@@ -12,6 +12,7 @@ requires = [
     "packaging>=24.2",
     "setuptools>=77.0.3,<81.0.0",
     "setuptools_scm>=8",
+    "grpcio-tools>=1.62",
     "torch==2.13.0",
     "wheel",
 ]
