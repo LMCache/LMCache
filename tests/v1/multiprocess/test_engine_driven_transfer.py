@@ -262,8 +262,8 @@ def _default_key(tokens: int = 8) -> "IPCCacheServerKey":
 def test_wrap_kv_caches_wraps_all_tensors() -> None:
     """Verify wrap_kv_caches wraps all provided KV tensors."""
     # First Party
-    from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod
     from lmcache.v1.platform import get_device_spec
+    from lmcache.v1.platform.kv_wrap import wrap_kv_caches
 
     kv_caches = _make_kv_caches()
 
@@ -289,7 +289,7 @@ def test_wrap_kv_caches_wraps_all_tensors() -> None:
                     return_value=_FakeWrapper,
                 )
             )
-        wrapped = adapter_mod.wrap_kv_caches(kv_caches)
+        wrapped = wrap_kv_caches(kv_caches)
 
     assert len(wrapped) == len(kv_caches)
 

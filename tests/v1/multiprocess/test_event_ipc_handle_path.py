@@ -109,7 +109,6 @@ def test_worker_exports_events_through_platform_backend(
 ) -> None:
     """Store and retrieve send backend-exported handles and keep device context."""
     # First Party
-    from lmcache.integration.vllm import vllm_multi_process_adapter
     from lmcache.v1.multiprocess.transfer_context import worker_transfer
 
     backend = _FakeEventBackend()
@@ -119,7 +118,7 @@ def test_worker_exports_events_through_platform_backend(
         lambda device: backend,
     )
     monkeypatch.setattr(
-        vllm_multi_process_adapter,
+        worker_transfer,
         "wrap_kv_caches",
         lambda kv_caches: list(kv_caches.values()),
     )
