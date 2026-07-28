@@ -119,15 +119,16 @@ spec:
     # today; other server-side serdes like fp8/turboquant can gain typed
     # fields here later, or be set via raw.config.serde).
     serde:
-      # aesgcm: at-rest encryption keyed per cache_salt. The operator copies
-      # the referenced Secret into the engine namespace (owner-ref'd for GC)
-      # and mounts it read-only at /etc/lmcache/keys/master — it never
-      # generates key material; provenance/rotation stay with the user. See
+      # aesgcm: at-rest encryption keyed per cache_salt. The operator keeps
+      # an owner-ref'd managed copy of the referenced Secret and mounts it
+      # read-only at /etc/lmcache/keys/master — it never generates key
+      # material; provenance/rotation stay with the user. The reference is
+      # same-namespace only, so CR-create permission cannot be leveraged to
+      # read Secrets from other namespaces (confused deputy). See
       # docs/design/v1/distributed/serde/aesgcm.md for the threat/key models.
       aesgcm:
-        masterKeySecretRef:     # REQUIRED, user-created Secret with a "master" data key
-          name: string
-          namespace: string     # optional, defaults to the engine's namespace
+        masterKeySecretRef:     # REQUIRED, user-created Secret with a "master" data key,
+          name: string          # in the engine's namespace (same-namespace only)
         keyProvider: string     # default: hkdf (only implemented provider)
         aesBits: int            # default: 128 (or 256)
 

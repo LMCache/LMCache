@@ -448,7 +448,7 @@ func TestBuildContainerArgs_L2SerdeAESGCMRESP(t *testing.T) {
 			RESP: &lmcachev1alpha1.RESPL2AdapterSpec{Host: "redis", Port: 6379},
 			Serde: &lmcachev1alpha1.L2SerdeSpec{
 				AESGCM: &lmcachev1alpha1.AESGCMSerdeSpec{
-					MasterKeySecretRef: lmcachev1alpha1.SecretReference{Name: "l2-master-key"},
+					MasterKeySecretRef: corev1.LocalObjectReference{Name: "l2-master-key"},
 				},
 			},
 		},
@@ -490,7 +490,7 @@ func TestBuildContainerArgs_L2SerdeAESGCMRawWithOverrides(t *testing.T) {
 			},
 			Serde: &lmcachev1alpha1.L2SerdeSpec{
 				AESGCM: &lmcachev1alpha1.AESGCMSerdeSpec{
-					MasterKeySecretRef: lmcachev1alpha1.SecretReference{Name: "l2-master-key"},
+					MasterKeySecretRef: corev1.LocalObjectReference{Name: "l2-master-key"},
 					AESBits:            ptr(int32(256)),
 				},
 			},
@@ -894,7 +894,7 @@ func TestBuildDaemonSet_L2AESGCMSerdeMountsMasterKey(t *testing.T) {
 		RESP: &lmcachev1alpha1.RESPL2AdapterSpec{Host: "redis", Port: 6379},
 		Serde: &lmcachev1alpha1.L2SerdeSpec{
 			AESGCM: &lmcachev1alpha1.AESGCMSerdeSpec{
-				MasterKeySecretRef: lmcachev1alpha1.SecretReference{Name: "l2-master-key"},
+				MasterKeySecretRef: corev1.LocalObjectReference{Name: "l2-master-key"},
 			},
 		},
 	}

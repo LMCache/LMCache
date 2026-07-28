@@ -445,9 +445,11 @@ func (r *CacheBlendEngineReconciler) deleteRESPAuthSecretIfExists(ctx context.Co
 // reconcileL2EncryptionSecret ensures a local copy of the L2 encryption
 // master-key secret exists in the engine's namespace. It mirrors the
 // LMCacheEngine path: a no-op unless spec.l2Backend.serde.aesgcm is set,
-// otherwise it reads the user-created source secret (possibly
-// cross-namespace), validates it, and creates/updates a managed copy owned
-// by the CR. The operator never generates key material.
+// otherwise it reads the user-created source secret, validates it, and
+// creates/updates a managed copy owned by the CR. The reference is
+// same-namespace only — the operator must not read Secrets on behalf of a CR
+// author who could not read them (confused deputy). The operator never
+// generates key material.
 func (r *CacheBlendEngineReconciler) reconcileL2EncryptionSecret(ctx context.Context, engine *lmcachev1alpha1.CacheBlendEngine) error {
 	log := logf.FromContext(ctx)
 	spec := &engine.Spec
@@ -458,10 +460,7 @@ func (r *CacheBlendEngineReconciler) reconcileL2EncryptionSecret(ctx context.Con
 	}
 
 	ref := spec.L2Backend.Serde.AESGCM.MasterKeySecretRef
-	sourceNS := ref.Namespace
-	if sourceNS == "" {
-		sourceNS = engine.Namespace
-	}
+	sourceNS := engine.Namespace
 	localName := resources.L2EncryptionSecretName(engine.Name)
 
 	// Read the source secret.

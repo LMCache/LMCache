@@ -1490,22 +1490,23 @@ spec:
                             type: string
                           masterKeySecretRef:
                             description: |-
-                              masterKeySecretRef references a user-created Secret holding the
-                              master key under the "master" data key. The Secret may live in a
-                              different namespace; the operator creates a managed copy in the
-                              engine's namespace and never generates key material.
+                              masterKeySecretRef names a user-created Secret in the engine's
+                              namespace holding the master key under the "master" data key. The
+                              reference is same-namespace only, so creating an engine CR cannot
+                              be used to read Secrets from other namespaces. The operator
+                              maintains a managed copy and never generates key material.
                             properties:
                               name:
-                                description: name is the name of the Secret.
-                                type: string
-                              namespace:
+                                default: ""
                                 description: |-
-                                  namespace is the namespace of the Secret.
-                                  If empty, defaults to the namespace of the LMCacheEngine resource.
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
                                 type: string
-                            required:
-                            - name
                             type: object
+                            x-kubernetes-map-type: atomic
                         required:
                         - masterKeySecretRef
                         type: object

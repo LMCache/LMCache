@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"errors"
 	"fmt"
 	"sync/atomic"
 
@@ -344,13 +345,14 @@ var _ = Describe("reconcileL2EncryptionSecret", func() {
 		engineName = "test-engine"
 	})
 
-	// withAESGCMSerde points the engine at a master-key Secret ref.
-	withAESGCMSerde := func(engine *lmcachev1alpha1.LMCacheEngine, name, namespace string) {
+	// withAESGCMSerde points the engine at a master-key Secret ref
+	// (same-namespace by design).
+	withAESGCMSerde := func(engine *lmcachev1alpha1.LMCacheEngine, name string) {
 		engine.Spec.L2Backend = &lmcachev1alpha1.L2BackendSpec{
 			RESP: &lmcachev1alpha1.RESPL2AdapterSpec{Host: "redis", Port: 6379},
 			Serde: &lmcachev1alpha1.L2SerdeSpec{
 				AESGCM: &lmcachev1alpha1.AESGCMSerdeSpec{
-					MasterKeySecretRef: lmcachev1alpha1.SecretReference{Name: name, Namespace: namespace},
+					MasterKeySecretRef: corev1.LocalObjectReference{Name: name},
 				},
 			},
 		}
@@ -374,11 +376,10 @@ var _ = Describe("reconcileL2EncryptionSecret", func() {
 		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "expected stale managed secret to be deleted, got err=%v", err)
 	})
 
-	It("creates a managed copy from a cross-namespace source", func() {
-		sourceNS := mustCreateNS(uniqueNS("l2-enc-src"))
+	It("creates a managed copy from a same-namespace source", func() {
 		engine := newEngine(nsName, engineName)
 		source := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: "l2-master-key", Namespace: sourceNS},
+			ObjectMeta: metav1.ObjectMeta{Name: "l2-master-key", Namespace: nsName},
 			Data: map[string][]byte{
 				resources.L2EncryptionKeyDataKey: []byte("0123456789abcdef"),
 				"extra":                          []byte("ignored"),
@@ -387,17 +388,45 @@ var _ = Describe("reconcileL2EncryptionSecret", func() {
 		Expect(k8sClient.Create(ctx, source)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, source) })
 
-		withAESGCMSerde(engine, "l2-master-key", sourceNS)
+		withAESGCMSerde(engine, "l2-master-key")
 		Expect(r.reconcileL2EncryptionSecret(ctx, engine)).To(Succeed())
 
 		got := &corev1.Secret{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{
 			Name:      resources.L2EncryptionSecretName(engineName),
-			Namespace: nsName, // mirror lands in the engine's namespace
+			Namespace: nsName,
 		}, got)).To(Succeed())
 		Expect(got.Data).To(HaveKeyWithValue(resources.L2EncryptionKeyDataKey, []byte("0123456789abcdef")))
 		Expect(got.Data).NotTo(HaveKey("extra"), "only the master-key data key is mirrored")
 		Expect(metav1.IsControlledBy(got, engine)).To(BeTrue(), "managed secret must be owned by the engine")
+	})
+
+	It("does not read a same-name secret from another namespace", func() {
+		// The reference is same-namespace only: a Secret that exists ONLY
+		// in a foreign namespace must not be readable through the engine
+		// CR (confused-deputy guard). The reconcile errors as if the
+		// secret were missing.
+		otherNS := mustCreateNS(uniqueNS("l2-enc-other"))
+		engine := newEngine(nsName, engineName)
+		foreign := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "victim-key", Namespace: otherNS},
+			Data:       map[string][]byte{resources.L2EncryptionKeyDataKey: []byte("victim")},
+		}
+		Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, foreign) })
+
+		withAESGCMSerde(engine, "victim-key")
+		err := r.reconcileL2EncryptionSecret(ctx, engine)
+		Expect(err).To(HaveOccurred())
+		Expect(apierrors.IsNotFound(errors.Unwrap(err))).To(BeTrue(), "expected NotFound in engine namespace, got %v", err)
+
+		// No managed copy of the foreign secret's data may appear.
+		got := &corev1.Secret{}
+		gerr := k8sClient.Get(ctx, types.NamespacedName{
+			Name:      resources.L2EncryptionSecretName(engineName),
+			Namespace: nsName,
+		}, got)
+		Expect(apierrors.IsNotFound(gerr)).To(BeTrue(), "expected no managed secret, got %v", gerr)
 	})
 
 	It("updates the managed copy when the source key rotates", func() {
@@ -409,7 +438,7 @@ var _ = Describe("reconcileL2EncryptionSecret", func() {
 		Expect(k8sClient.Create(ctx, source)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, source) })
 
-		withAESGCMSerde(engine, "rotate-key", "")
+		withAESGCMSerde(engine, "rotate-key")
 		Expect(r.reconcileL2EncryptionSecret(ctx, engine)).To(Succeed())
 
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "rotate-key", Namespace: nsName}, source)).To(Succeed())
@@ -428,7 +457,7 @@ var _ = Describe("reconcileL2EncryptionSecret", func() {
 
 	It("errors when the source secret is missing", func() {
 		engine := newEngine(nsName, engineName)
-		withAESGCMSerde(engine, "does-not-exist", "")
+		withAESGCMSerde(engine, "does-not-exist")
 		err := r.reconcileL2EncryptionSecret(ctx, engine)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("does-not-exist"))
@@ -443,7 +472,7 @@ var _ = Describe("reconcileL2EncryptionSecret", func() {
 		Expect(k8sClient.Create(ctx, source)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, source) })
 
-		withAESGCMSerde(engine, "wrong-keys", "")
+		withAESGCMSerde(engine, "wrong-keys")
 		err := r.reconcileL2EncryptionSecret(ctx, engine)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring(resources.L2EncryptionKeyDataKey))

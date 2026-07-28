@@ -248,11 +248,12 @@ type L2SerdeSpec struct {
 // AESGCMSerdeSpec configures the aesgcm encryption serde. The operator
 // mounts the referenced master-key Secret into the engine pods.
 type AESGCMSerdeSpec struct {
-	// masterKeySecretRef references a user-created Secret holding the
-	// master key under the "master" data key. The Secret may live in a
-	// different namespace; the operator creates a managed copy in the
-	// engine's namespace and never generates key material.
-	MasterKeySecretRef SecretReference `json:"masterKeySecretRef"`
+	// masterKeySecretRef names a user-created Secret in the engine's
+	// namespace holding the master key under the "master" data key. The
+	// reference is same-namespace only, so creating an engine CR cannot
+	// be used to read Secrets from other namespaces. The operator
+	// maintains a managed copy and never generates key material.
+	MasterKeySecretRef corev1.LocalObjectReference `json:"masterKeySecretRef"`
 
 	// keyProvider selects how per-cache_salt keys are obtained from the
 	// master key. Only "hkdf" (HKDF-SHA256 derivation) is implemented.

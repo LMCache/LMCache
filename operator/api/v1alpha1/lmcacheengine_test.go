@@ -19,6 +19,7 @@ package v1alpha1
 import (
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 )
 
@@ -386,7 +387,7 @@ func TestValidateSpec_L2SerdeAESGCMValid(t *testing.T) {
 			RESP: &RESPL2AdapterSpec{Host: "redis", Port: 6379},
 			Serde: &L2SerdeSpec{
 				AESGCM: &AESGCMSerdeSpec{
-					MasterKeySecretRef: SecretReference{Name: "l2-master-key"},
+					MasterKeySecretRef: corev1.LocalObjectReference{Name: "l2-master-key"},
 				},
 			},
 		},
@@ -443,7 +444,7 @@ func TestValidateSpec_L2SerdeConflictsWithRawSerde(t *testing.T) {
 			},
 			Serde: &L2SerdeSpec{
 				AESGCM: &AESGCMSerdeSpec{
-					MasterKeySecretRef: SecretReference{Name: "l2-master-key"},
+					MasterKeySecretRef: corev1.LocalObjectReference{Name: "l2-master-key"},
 				},
 			},
 		},

@@ -12,7 +12,8 @@
 #   kubectl create secret generic lmcache-l2-master-key \
 #       --from-file=master=master.key
 #
-# The operator copies the Secret into the engine's namespace (owner-ref'd)
+# The Secret must live in the engine's namespace (the reference is
+# same-namespace only). The operator maintains an owner-ref'd managed copy
 # and mounts it read-only at /etc/lmcache/keys/master in the engine pods.
 apiVersion: lmcache.lmcache.ai/v1alpha1
 kind: LMCacheEngine
@@ -35,7 +36,6 @@ spec:
     serde:
       aesgcm:
         masterKeySecretRef:
-          name: lmcache-l2-master-key
-          # namespace: secrets  # omit if the Secret is in the same namespace
+          name: lmcache-l2-master-key   # must be in the engine's namespace
         keyProvider: hkdf       # default; derives a per-cache_salt key via HKDF-SHA256
         aesBits: 128            # default; 256 for compliance mandates
