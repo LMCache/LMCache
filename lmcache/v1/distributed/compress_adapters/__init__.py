@@ -24,6 +24,7 @@ Config example:
     }
 """
 
+# First Party
 from lmcache.v1.distributed.compress_adapters.backend import AccelCompressBackend
 from lmcache.v1.distributed.compress_adapters.serde import (
     AccelCompressDeserializer,
@@ -39,16 +40,16 @@ def _create_backend(kwargs: dict[str, object]) -> AccelCompressBackend:
     backend_name = str(kwargs.get("backend", "qat")).lower()
 
     if backend_name == "qat":
+        # First Party
         from lmcache.v1.distributed.compress_adapters.qat_backend import (
             QatBackend,
         )
 
         lib_path = kwargs.get("lib_path")
-        return QatBackend(lib_path=lib_path)
+        return QatBackend(lib_path=lib_path if isinstance(lib_path, str) else None)
     else:
         raise ValueError(
-            f"Unknown accel_kv_compress backend: {backend_name!r}. "
-            f"Supported: 'qat'"
+            f"Unknown accel_kv_compress backend: {backend_name!r}. Supported: 'qat'"
         )
 
 
@@ -57,9 +58,9 @@ def _create_accel_kv_compress(kwargs: dict[str, object]) -> SerdeProcessor:
     backend = _create_backend(kwargs)
 
     byte_reorder = bool(kwargs.get("byte_reorder", False))
-    truncate_bits = int(kwargs.get("truncate_bits", 0))
-    element_size = int(kwargs.get("element_size", 2))
-    max_workers = int(kwargs.get("max_workers", 1))
+    truncate_bits = int(kwargs.get("truncate_bits", 0))  # type: ignore[call-overload]
+    element_size = int(kwargs.get("element_size", 2))  # type: ignore[call-overload]
+    max_workers = int(kwargs.get("max_workers", 1))  # type: ignore[call-overload]
 
     serializer = AccelCompressSerializer(
         backend=backend,

@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for Phase 2 — Memory Budget Coordination."""
 
+# Third Party
 import pytest
 
+# First Party
 from lmcache.v1.distributed.dram_partition import (
-    DramAllocation,
     DramPartitionConfig,
     DramPartitionCoordinator,
     StagingParams,
@@ -35,13 +36,9 @@ class TestDramPartitionConfig:
 
     def test_invalid_watermarks_raise(self):
         with pytest.raises(ValueError, match="l2_high_watermark"):
-            DramPartitionConfig(
-                total_memory_budget_gb=16.0, l2_high_watermark=0.0
-            )
+            DramPartitionConfig(total_memory_budget_gb=16.0, l2_high_watermark=0.0)
         with pytest.raises(ValueError, match="l1_high_watermark"):
-            DramPartitionConfig(
-                total_memory_budget_gb=16.0, l1_high_watermark=1.1
-            )
+            DramPartitionConfig(total_memory_budget_gb=16.0, l1_high_watermark=1.1)
 
 
 class TestDramPartitionCoordinator:
@@ -70,7 +67,10 @@ class TestDramPartitionCoordinator:
             max_write_in_flight=1,
         )
         alloc = coord.allocate(staging_params=params)
-        assert alloc.l1_staging_min_bytes == int(8 * 2.5 * 5 * 1024 * 1024) + 5 * 1024 * 1024
+        assert (
+            alloc.l1_staging_min_bytes
+            == int(8 * 2.5 * 5 * 1024 * 1024) + 5 * 1024 * 1024
+        )
 
     def test_staging_validation_fails(self):
         # Tiny budget with large chunk → should fail
@@ -117,31 +117,49 @@ class TestCliParsing:
     """Test that budget CLI args flow into StorageManagerConfig."""
 
     def test_budget_disabled_by_default(self):
+        # First Party
         from lmcache.v1.distributed.config import parse_args
 
-        config = parse_args([
-            "--l1-size-gb", "4",
-            "--l1-use-lazy",
-            "--eviction-policy", "LRU",
-            "--l2-adapter", '{"type":"dram","max_size_gb":8.0}',
-        ])
+        config = parse_args(
+            [
+                "--l1-size-gb",
+                "4",
+                "--l1-use-lazy",
+                "--eviction-policy",
+                "LRU",
+                "--l2-adapter",
+                '{"type":"dram","max_size_gb":8.0}',
+            ]
+        )
         assert not config.dram_partition_config.enabled
         # L1 size should be unmodified
-        assert config.l1_manager_config.memory_config.size_in_bytes == int(4 * (1 << 30))
+        assert config.l1_manager_config.memory_config.size_in_bytes == int(
+            4 * (1 << 30)
+        )
 
     def test_budget_overrides_sizes(self):
+        # First Party
         from lmcache.v1.distributed.config import parse_args
 
-        config = parse_args([
-            "--l1-size-gb", "4",  # will be overridden
-            "--l1-use-lazy",
-            "--eviction-policy", "LRU",
-            "--l2-adapter", '{"type":"dram","max_size_gb":1.0}',
-            "--total-memory-budget-gb", "16.0",
-            "--l1-fraction", "0.25",
-            "--l1-high-watermark", "0.9",
-            "--l2-high-watermark", "0.7",
-        ])
+        config = parse_args(
+            [
+                "--l1-size-gb",
+                "4",  # will be overridden
+                "--l1-use-lazy",
+                "--eviction-policy",
+                "LRU",
+                "--l2-adapter",
+                '{"type":"dram","max_size_gb":1.0}',
+                "--total-memory-budget-gb",
+                "16.0",
+                "--l1-fraction",
+                "0.25",
+                "--l1-high-watermark",
+                "0.9",
+                "--l2-high-watermark",
+                "0.7",
+            ]
+        )
         assert config.dram_partition_config.enabled
         total = int(16.0 * (1 << 30))
         expected_l1 = int(total * 0.25)
@@ -149,14 +167,19 @@ class TestCliParsing:
         assert config.eviction_config.trigger_watermark == 0.9
 
     def test_pressure_eviction_flag(self):
+        # First Party
         from lmcache.v1.distributed.config import parse_args
 
-        config = parse_args([
-            "--l1-size-gb", "4",
-            "--l1-use-lazy",
-            "--eviction-policy", "LRU",
-            "--enable-pressure-eviction",
-        ])
+        config = parse_args(
+            [
+                "--l1-size-gb",
+                "4",
+                "--l1-use-lazy",
+                "--eviction-policy",
+                "LRU",
+                "--enable-pressure-eviction",
+            ]
+        )
         assert config.enable_pressure_eviction
 
 

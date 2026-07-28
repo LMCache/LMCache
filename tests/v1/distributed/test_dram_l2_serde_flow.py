@@ -11,11 +11,10 @@ import select
 import zlib
 
 # Third Party
-import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.compress_adapters.backend import AccelCompressBackend
 from lmcache.v1.distributed.compress_adapters.serde import (
     AccelCompressDeserializer,
@@ -32,7 +31,6 @@ from lmcache.v1.memory_management import (
 )
 from lmcache.v1.platform import consume_fd
 
-
 # =============================================================================
 # Mock zlib backend (no QAT hardware needed)
 # =============================================================================
@@ -43,14 +41,14 @@ class ZlibBackend(AccelCompressBackend):
 
     def compress(self, src: memoryview, dst: memoryview) -> int:
         compressed = zlib.compress(bytes(src), level=1)
-        dst_cast = dst.cast('B') if dst.format != 'B' else dst
-        dst_cast[:len(compressed)] = compressed
+        dst_cast = dst.cast("B") if dst.format != "B" else dst
+        dst_cast[: len(compressed)] = compressed
         return len(compressed)
 
     def decompress(self, src: memoryview, dst: memoryview) -> int:
         decompressed = zlib.decompress(bytes(src))
-        dst_cast = dst.cast('B') if dst.format != 'B' else dst
-        dst_cast[:len(decompressed)] = decompressed
+        dst_cast = dst.cast("B") if dst.format != "B" else dst
+        dst_cast[: len(decompressed)] = decompressed
         return len(decompressed)
 
     def max_compressed_length(self, src_size: int) -> int:
@@ -115,9 +113,7 @@ class TestSerdeRoundtrip:
         serializer = AccelCompressSerializer(
             backend=backend, byte_reorder=False, truncate_bits=0
         )
-        deserializer = AccelCompressDeserializer(
-            backend=backend, byte_reorder=False
-        )
+        deserializer = AccelCompressDeserializer(backend=backend, byte_reorder=False)
 
         # Source: random-ish KV data
         src = create_memory_obj(size=4096, fill_value=0)
@@ -173,13 +169,11 @@ class TestSerdeRoundtrip:
         serializer = AccelCompressSerializer(
             backend=backend, byte_reorder=False, truncate_bits=4, element_size=1
         )
-        deserializer = AccelCompressDeserializer(
-            backend=backend, byte_reorder=False
-        )
+        deserializer = AccelCompressDeserializer(backend=backend, byte_reorder=False)
 
         src = create_memory_obj(size=1024)
         src.raw_data[:] = torch.randint(0, 256, (1024,), dtype=torch.uint8)
-        original = bytes(src.byte_array)
+        _original = bytes(src.byte_array)  # noqa: F841
 
         max_compressed = backend.max_compressed_length(1024)
         compressed_buf = create_memory_obj(size=max_compressed)
@@ -207,9 +201,7 @@ class TestSerdeWithDramL2:
         serializer = AccelCompressSerializer(
             backend=backend, byte_reorder=False, truncate_bits=0
         )
-        deserializer = AccelCompressDeserializer(
-            backend=backend, byte_reorder=False
-        )
+        deserializer = AccelCompressDeserializer(backend=backend, byte_reorder=False)
 
         # Setup DramL2Adapter
         config = DramL2AdapterConfig(max_size_gb=0.001)
@@ -267,9 +259,7 @@ class TestSerdeWithDramL2:
         serializer = AccelCompressSerializer(
             backend=backend, byte_reorder=False, truncate_bits=0
         )
-        deserializer = AccelCompressDeserializer(
-            backend=backend, byte_reorder=False
-        )
+        deserializer = AccelCompressDeserializer(backend=backend, byte_reorder=False)
 
         config = DramL2AdapterConfig(max_size_gb=0.01)
         adapter = DramL2Adapter(config)

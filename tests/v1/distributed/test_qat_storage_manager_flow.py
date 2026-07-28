@@ -187,7 +187,8 @@ class TestStorageManagerQatFlow:
             ok = _wait_for_condition(
                 lambda: (
                     sm.report_status()["store_controller"]["in_flight_task_count"] == 0
-                    and sm.report_status()["store_controller"]["pending_keys_count"] == 0
+                    and sm.report_status()["store_controller"]["pending_keys_count"]
+                    == 0
                     and sm.report_status()["l1_manager"]["write_locked_count"] == 0
                     and sm.report_status()["l1_manager"]["read_locked_count"] == 0
                     and sm.report_status()["l1_manager"]["temporary_count"] == 0
@@ -205,8 +206,7 @@ class TestStorageManagerQatFlow:
                 timeout=10.0,
             )
             assert ok, (
-                f"L1 not cleared by skip_l1 policy: "
-                f"{sm.report_status()['l1_manager']}"
+                f"L1 not cleared by skip_l1 policy: {sm.report_status()['l1_manager']}"
             )
 
             # Step 4: Prefetch from DramL2 (decompress)
@@ -230,7 +230,8 @@ class TestStorageManagerQatFlow:
                     # roundtrip should be bit-exact
                     assert torch.equal(recovered, original), (
                         f"Data mismatch for key {key}!\n"
-                        f"Max diff: {(recovered.float() - original.float()).abs().max().item()}"
+                        f"Max diff: "
+                        f"{(recovered.float() - original.float()).abs().max().item()}"
                     )
 
             _finish_read_until_clean(sm, keys)
@@ -276,7 +277,8 @@ class TestStorageManagerQatFlow:
                 obj = ret[key]
                 torch.manual_seed(100 + i)
                 data = torch.randn(
-                    obj.tensor.shape, dtype=obj.tensor.dtype,
+                    obj.tensor.shape,
+                    dtype=obj.tensor.dtype,
                     device=obj.tensor.device,
                 )
                 obj.tensor.copy_(data)
@@ -304,11 +306,13 @@ class TestStorageManagerQatFlow:
                     original = original_by_key[key].float().flatten()
 
                     # Lossy: correlation should be high but not bit-exact
-                    corr = torch.corrcoef(torch.stack([original, recovered]))[0, 1].item()
+                    corr = torch.corrcoef(torch.stack([original, recovered]))[
+                        0, 1
+                    ].item()
                     assert corr > 0.95, f"Low correlation {corr} for key {key}"
 
             _finish_read_until_clean(sm, keys)
-            print(f"\n  Lossy (truncate_bits=2): correlation > 0.95 PASS")
+            print("\n  Lossy (truncate_bits=2): correlation > 0.95 PASS")
 
         finally:
             sm.close()
@@ -319,28 +323,37 @@ class TestCliConfigParsing:
 
     def test_cli_json_parses_to_correct_config(self):
         """--l2-adapter JSON + --l2-store-policy skip_l1 parse correctly."""
+        # Standard
         import json
+
+        # First Party
         from lmcache.v1.distributed.config import get_arg_parser
         from lmcache.v1.distributed.l2_adapters.config import (
             parse_args_to_l2_adapters_config,
         )
 
         cli_args = [
-            "--l1-size-gb", "1.0",
-            "--eviction-policy", "LRU",
-            "--l2-adapter", json.dumps({
-                "type": "dram",
-                "max_size_gb": 8.0,
-                "serde": {
-                    "type": "accel_kv_compress",
-                    "backend": "qat",
-                    "byte_reorder": True,
-                    "truncate_bits": 2,
-                    "element_size": 2,
-                    "max_workers": 4,
-                },
-            }),
-            "--l2-store-policy", "skip_l1",
+            "--l1-size-gb",
+            "1.0",
+            "--eviction-policy",
+            "LRU",
+            "--l2-adapter",
+            json.dumps(
+                {
+                    "type": "dram",
+                    "max_size_gb": 8.0,
+                    "serde": {
+                        "type": "accel_kv_compress",
+                        "backend": "qat",
+                        "byte_reorder": True,
+                        "truncate_bits": 2,
+                        "element_size": 2,
+                        "max_workers": 4,
+                    },
+                }
+            ),
+            "--l2-store-policy",
+            "skip_l1",
         ]
 
         parser = get_arg_parser()

@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """QAT compression backend using KVCacheClip's libkvclip_qzip.so via ctypes."""
 
+# Standard
 import ctypes
 import os
 
+# First Party
 from lmcache.v1.distributed.compress_adapters.backend import AccelCompressBackend
 
 # The QZIP_SPLIT_BUF_SIZE from qzip.h (max single-block input size)
@@ -35,9 +37,9 @@ def _load_qzip_library(lib_path: str | None = None) -> ctypes.CDLL:
     lib.kv_agent_block_compress.argtypes = [
         ctypes.POINTER(ctypes.c_char_p),  # inputs[]
         ctypes.POINTER(ctypes.c_char_p),  # outputs[]
-        ctypes.POINTER(ctypes.c_int),     # in_data_sizes[]
-        ctypes.POINTER(ctypes.c_int),     # out_data_sizes[]
-        ctypes.c_int,                     # num
+        ctypes.POINTER(ctypes.c_int),  # in_data_sizes[]
+        ctypes.POINTER(ctypes.c_int),  # out_data_sizes[]
+        ctypes.c_int,  # num
     ]
     lib.kv_agent_block_compress.restype = ctypes.c_int
 
@@ -112,15 +114,16 @@ class QatBackend(AccelCompressBackend):
             outputs_arr[i] = _addr_to_c_char_p(dst_addr + out_offset)
             in_sizes_arr[i] = block_size
             out_sizes_arr[i] = (
-                out_capacity_per_block
-                if i < num_blocks - 1
-                else (dst_len - out_offset)
+                out_capacity_per_block if i < num_blocks - 1 else (dst_len - out_offset)
             )
             offset += block_size
             out_offset += out_capacity_per_block
 
         ret = self._lib.kv_agent_block_compress(
-            inputs_arr, outputs_arr, in_sizes_arr, out_sizes_arr,
+            inputs_arr,
+            outputs_arr,
+            in_sizes_arr,
+            out_sizes_arr,
             ctypes.c_int(num_blocks),
         )
         if ret != 0:
@@ -164,13 +167,14 @@ class QatBackend(AccelCompressBackend):
         out_sizes_arr = (ctypes.c_int * 1)(dst_len)
 
         ret = self._lib.kv_agent_block_decompress(
-            inputs_arr, outputs_arr, in_sizes_arr, out_sizes_arr,
+            inputs_arr,
+            outputs_arr,
+            in_sizes_arr,
+            out_sizes_arr,
             ctypes.c_int(1),
         )
         if ret != 0:
-            raise RuntimeError(
-                f"kv_agent_block_decompress failed with code {ret}"
-            )
+            raise RuntimeError(f"kv_agent_block_decompress failed with code {ret}")
 
         return out_sizes_arr[0]
 

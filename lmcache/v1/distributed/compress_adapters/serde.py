@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Serializer/Deserializer implementations for accelerated KV compression."""
 
-import torch
+# Standard
+from typing import cast
 
-from lmcache.v1.distributed.api import MemoryLayoutDesc
+# First Party
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.compress_adapters.backend import AccelCompressBackend
 from lmcache.v1.distributed.compress_adapters.preprocessing import (
     data_shuffle,
@@ -44,14 +46,14 @@ class AccelCompressSerializer(Serializer):
         self._truncate_bits = truncate_bits
         self._element_size = element_size
 
-    def serialize(self, src: MemoryObj, dst: MemoryObj) -> int:
+    def serialize(self, src: MemoryObj, dst: MemoryObj, key: ObjectKey) -> int:
         """Apply preprocessing then compress src into dst.
 
         Returns:
             Number of bytes written to dst.
         """
-        src_buf = src.byte_array  # memoryview
-        dst_buf = dst.byte_array  # memoryview
+        src_buf = cast(memoryview, src.byte_array)
+        dst_buf = cast(memoryview, dst.byte_array)
 
         # Preprocessing (in-place on src -- lossy for trunc)
         if self._truncate_bits > 0:
@@ -67,7 +69,7 @@ class AccelCompressSerializer(Serializer):
         """Upper bound on compressed output size."""
         # Compute raw size from layout
         raw_size = 0
-        for shape, dtype in zip(layout_desc.shapes, layout_desc.dtypes):
+        for shape, dtype in zip(layout_desc.shapes, layout_desc.dtypes, strict=False):
             numel = 1
             for dim in shape:
                 numel *= dim
@@ -98,10 +100,10 @@ class AccelCompressDeserializer(Deserializer):
         self._byte_reorder = byte_reorder
         self._element_size = element_size
 
-    def deserialize(self, src: MemoryObj, dst: MemoryObj) -> None:
+    def deserialize(self, src: MemoryObj, dst: MemoryObj, key: ObjectKey) -> None:
         """Decompress src into dst, then reverse byte reorder if needed."""
-        src_buf = src.byte_array  # memoryview (compressed data)
-        dst_buf = dst.byte_array  # memoryview (output KV data)
+        src_buf = cast(memoryview, src.byte_array)
+        dst_buf = cast(memoryview, dst.byte_array)
 
         # Decompress
         self._backend.decompress(src_buf, dst_buf)

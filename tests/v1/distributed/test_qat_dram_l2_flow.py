@@ -115,7 +115,7 @@ class TestQatBackendDirect:
 
     def test_roundtrip_constant_data(self, qat_backend):
         """Constant data should compress well and roundtrip exactly."""
-        src = memoryview(bytearray(b"\xAB" * 8192))
+        src = memoryview(bytearray(b"\xab" * 8192))
         dst = memoryview(bytearray(qat_backend.max_compressed_length(8192)))
         n = qat_backend.compress(src, dst)
         assert 0 < n < 8192  # should compress significantly
@@ -126,6 +126,7 @@ class TestQatBackendDirect:
 
     def test_roundtrip_random_data(self, qat_backend):
         """Random data roundtrips correctly (may not compress well)."""
+        # Standard
         import random
 
         random.seed(42)
@@ -191,11 +192,15 @@ class TestQatSerde:
     def test_serialize_with_shuffle(self, qat_backend):
         """byte_reorder (data_shuffle) + QAT should roundtrip."""
         serializer = AccelCompressSerializer(
-            backend=qat_backend, byte_reorder=True, truncate_bits=0,
+            backend=qat_backend,
+            byte_reorder=True,
+            truncate_bits=0,
             element_size=2,
         )
         deserializer = AccelCompressDeserializer(
-            backend=qat_backend, byte_reorder=True, element_size=2,
+            backend=qat_backend,
+            byte_reorder=True,
+            element_size=2,
         )
 
         src = create_memory_obj(size=8192)
@@ -219,7 +224,9 @@ class TestQatSerde:
 
         # Without truncation
         ser_no_trunc = AccelCompressSerializer(
-            backend=qat_backend, byte_reorder=False, truncate_bits=0,
+            backend=qat_backend,
+            byte_reorder=False,
+            truncate_bits=0,
             element_size=1,
         )
         src1 = create_memory_obj(size=8192)
@@ -230,7 +237,9 @@ class TestQatSerde:
 
         # With 4-bit truncation
         ser_trunc = AccelCompressSerializer(
-            backend=qat_backend, byte_reorder=False, truncate_bits=4,
+            backend=qat_backend,
+            byte_reorder=False,
+            truncate_bits=4,
             element_size=1,
         )
         src2 = create_memory_obj(size=8192)
@@ -253,10 +262,13 @@ class TestQatDramL2Flow:
     def test_full_roundtrip(self, qat_backend, adapter):
         """Single key: compress, store, load, decompress, verify."""
         serializer = AccelCompressSerializer(
-            backend=qat_backend, byte_reorder=False, truncate_bits=0,
+            backend=qat_backend,
+            byte_reorder=False,
+            truncate_bits=0,
         )
         deserializer = AccelCompressDeserializer(
-            backend=qat_backend, byte_reorder=False,
+            backend=qat_backend,
+            byte_reorder=False,
         )
         store_fd = adapter.get_store_event_fd()
         load_fd = adapter.get_load_event_fd()
@@ -296,11 +308,15 @@ class TestQatDramL2Flow:
     def test_multiple_keys_roundtrip(self, qat_backend, adapter):
         """Multiple keys with different data, all roundtrip correctly."""
         serializer = AccelCompressSerializer(
-            backend=qat_backend, byte_reorder=True, truncate_bits=0,
+            backend=qat_backend,
+            byte_reorder=True,
+            truncate_bits=0,
             element_size=2,
         )
         deserializer = AccelCompressDeserializer(
-            backend=qat_backend, byte_reorder=True, element_size=2,
+            backend=qat_backend,
+            byte_reorder=True,
+            element_size=2,
         )
         store_fd = adapter.get_store_event_fd()
         load_fd = adapter.get_load_event_fd()
@@ -338,7 +354,9 @@ class TestQatDramL2Flow:
     def test_compression_ratio_report(self, qat_backend, adapter):
         """Print compression stats for visibility (always passes)."""
         serializer = AccelCompressSerializer(
-            backend=qat_backend, byte_reorder=True, truncate_bits=2,
+            backend=qat_backend,
+            byte_reorder=True,
+            truncate_bits=2,
             element_size=2,
         )
 
@@ -348,9 +366,7 @@ class TestQatDramL2Flow:
         size = len(raw_bytes)
 
         src = create_memory_obj(size=size)
-        src.raw_data[:size] = torch.frombuffer(
-            bytearray(raw_bytes), dtype=torch.uint8
-        )
+        src.raw_data[:size] = torch.frombuffer(bytearray(raw_bytes), dtype=torch.uint8)
 
         max_c = qat_backend.max_compressed_length(size)
         c_buf = create_memory_obj(size=max_c)

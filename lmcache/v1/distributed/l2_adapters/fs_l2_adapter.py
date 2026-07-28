@@ -727,9 +727,7 @@ class FSL2Adapter(L2AdapterInterface):
                         dst_buf,
                     )
                     if num_read is None or num_read == 0:
-                        logger.warning(
-                            "Empty O_DIRECT read for %s", file_path.name
-                        )
+                        logger.warning("Empty O_DIRECT read for %s", file_path.name)
                         continue
                     if num_read < expected:
                         if not self._variable_size:
@@ -737,7 +735,9 @@ class FSL2Adapter(L2AdapterInterface):
                                 "Incomplete O_DIRECT read for %s: "
                                 "expected %d, got %d (no serde, "
                                 "possible corruption)",
-                                file_path.name, expected, num_read,
+                                file_path.name,
+                                expected,
+                                num_read,
                             )
                             continue
                         objects[i].set_used_size(num_read)
@@ -770,9 +770,7 @@ class FSL2Adapter(L2AdapterInterface):
                             num_read = n_head
 
                     if num_read is None or num_read == 0:
-                        logger.warning(
-                            "Empty read for %s", file_path.name
-                        )
+                        logger.warning("Empty read for %s", file_path.name)
                         continue
                     if num_read < expected:
                         if not self._variable_size:
@@ -780,7 +778,9 @@ class FSL2Adapter(L2AdapterInterface):
                                 "Incomplete read for %s: expected "
                                 "%d, got %d (no serde, possible "
                                 "corruption)",
-                                file_path.name, expected, num_read,
+                                file_path.name,
+                                expected,
+                                num_read,
                             )
                             continue
                         objects[i].set_used_size(num_read)

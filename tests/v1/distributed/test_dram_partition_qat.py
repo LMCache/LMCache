@@ -3,20 +3,24 @@
 
 Run on SPR QAT machine:
     cd /home/xuezhan/LMCache_QAT/LMCache
-    KVCLIP_QZIP_LIB_PATH=/home/xuezhan/LMCache_QAT/KVCacheClip/kvclip/lib/libkvclip_qzip.so \
-    LD_LIBRARY_PATH=/home/xuezhan/LMCache_QAT/KVCacheClip/kvclip/infra/qat:$LD_LIBRARY_PATH \
+    KVCLIP_QZIP_LIB_PATH=.../kvclip/lib/libkvclip_qzip.so \
+    LD_LIBRARY_PATH=.../kvclip/infra/qat:$LD_LIBRARY_PATH \
     python -m pytest tests/v1/distributed/test_dram_partition_qat.py -v
 """
 
+# Standard
 import os
-import time
 
+# Third Party
 import pytest
+
 
 # Skip if QAT library not available
 def _has_native_ops() -> bool:
     try:
+        # First Party
         import lmcache.native_storage_ops  # noqa: F401
+
         return True
     except (ImportError, ModuleNotFoundError):
         return False
@@ -34,8 +38,9 @@ pytestmark = [
 ]
 
 
-from lmcache.v1.distributed.config import parse_args
-from lmcache.v1.distributed.dram_partition import (
+# First Party
+from lmcache.v1.distributed.config import parse_args  # noqa: E402
+from lmcache.v1.distributed.dram_partition import (  # noqa: E402
     DramPartitionConfig,
     DramPartitionCoordinator,
     StagingParams,
@@ -47,18 +52,28 @@ class TestBudgetWithQatCli:
 
     def test_budget_splits_l1_and_dram_l2(self):
         """--total-memory-budget-gb splits correctly with QAT serde."""
-        config = parse_args([
-            "--l1-size-gb", "1",  # will be overridden
-            "--no-l1-use-lazy",
-            "--eviction-policy", "LRU",
-            "--l2-adapter", '{"type":"dram","max_size_gb":1.0,"serde":{"type":"accel_kv_compress","kwargs":{"element_size":2,"truncate_bits":2}}}',
-            "--l2-store-policy", "skip_l1",
-            "--total-memory-budget-gb", "4.0",
-            "--l1-fraction", "0.3",
-            "--enable-pressure-eviction",
-        ])
+        config = parse_args(
+            [
+                "--l1-size-gb",
+                "1",  # will be overridden
+                "--no-l1-use-lazy",
+                "--eviction-policy",
+                "LRU",
+                "--l2-adapter",
+                '{"type":"dram","max_size_gb":1.0,"serde":{"type":"accel_kv_compress","kwargs":{"element_size":2,"truncate_bits":2}}}',
+                "--l2-store-policy",
+                "skip_l1",
+                "--total-memory-budget-gb",
+                "4.0",
+                "--l1-fraction",
+                "0.3",
+                "--enable-pressure-eviction",
+            ]
+        )
         # L1 = 4.0 * 0.3 = 1.2 GiB
-        assert config.l1_manager_config.memory_config.size_in_bytes == int(4.0 * 0.3 * (1 << 30))
+        assert config.l1_manager_config.memory_config.size_in_bytes == int(
+            4.0 * 0.3 * (1 << 30)
+        )
         assert config.enable_pressure_eviction is True
         assert config.dram_partition_config.enabled
 
@@ -82,9 +97,9 @@ class TestBudgetWithQatCli:
         # staging_min = 8 * 2.5 * 8MB + 1 * 8MB = 168 MB
         # L1 = 4.0 * 0.3 = 1.2 GiB >> 168 MB → should pass
         assert alloc.l1_size_bytes > alloc.l1_staging_min_bytes
-        print(f"  L1: {alloc.l1_size_bytes / (1<<20):.0f} MiB")
-        print(f"  L2: {alloc.l2_max_bytes / (1<<20):.0f} MiB")
-        print(f"  Staging min: {alloc.l1_staging_min_bytes / (1<<20):.0f} MiB")
+        print(f"  L1: {alloc.l1_size_bytes / (1 << 20):.0f} MiB")
+        print(f"  L2: {alloc.l2_max_bytes / (1 << 20):.0f} MiB")
+        print(f"  Staging min: {alloc.l1_staging_min_bytes / (1 << 20):.0f} MiB")
 
 
 class TestPressureEvictionWithQat:
@@ -92,19 +107,20 @@ class TestPressureEvictionWithQat:
 
     def test_pressure_eviction_fires_on_l1_oom(self):
         """Create a small L1, fill it, verify pressure eviction frees space."""
+        # Third Party
+        import torch
+
+        # First Party
+        from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
         from lmcache.v1.distributed.config import (
             EvictionConfig,
             L1ManagerConfig,
             L1MemoryManagerConfig,
-            StorageManagerConfig,
         )
-        from lmcache.v1.distributed.dram_partition import DramPartitionConfig
         from lmcache.v1.distributed.l1_manager import L1Manager
         from lmcache.v1.distributed.storage_controllers.eviction_controller import (
             L1EvictionController,
         )
-        from lmcache.v1.distributed.api import ObjectKey, MemoryLayoutDesc
-        import torch
 
         # Tiny L1: 4 MB (fits ~4 x 1MB objects)
         l1_size = 4 * 1024 * 1024
@@ -137,7 +153,7 @@ class TestPressureEvictionWithQat:
         keys = []
         for i in range(2):
             key = ObjectKey(
-                chunk_hash=f"pressure_test_{i}".encode().ljust(32, b'\0'),
+                chunk_hash=f"pressure_test_{i}".encode().ljust(32, b"\0"),
                 model_name="test",
                 kv_rank=0,
             )
@@ -152,11 +168,11 @@ class TestPressureEvictionWithQat:
 
         # Verify usage is near capacity
         used, total = l1_manager.get_memory_usage()
-        print(f"  L1 usage before pressure: {used}/{total} ({used/total*100:.0f}%)")
+        print(f"  L1 usage before pressure: {used}/{total} ({used / total * 100:.0f}%)")
 
         # Try to write a 4th object — should fail (OOM)
         key4 = ObjectKey(
-            chunk_hash=b"pressure_test_overflow".ljust(32, b'\0'),
+            chunk_hash=b"pressure_test_overflow".ljust(32, b"\0"),
             model_name="test",
             kv_rank=0,
         )

@@ -39,13 +39,13 @@ from lmcache.v1.distributed.serde.turboquant import (
     TurboQuantSerdeConfig,
     TurboQuantSerializer,
 )
-
-# Import compress_adapters to register "accel_kv_compress" serde type
-import lmcache.v1.distributed.compress_adapters  # noqa: F401
 from lmcache.v1.distributed.serde.utils import (
     make_temp_key,
     serialized_layout_desc,
 )
+
+# Import compress_adapters to register "accel_kv_compress" serde type
+import lmcache.v1.distributed.compress_adapters  # noqa: F401
 
 __all__ = [
     "AesGcmDeserializer",

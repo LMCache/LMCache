@@ -217,9 +217,7 @@ class L1EvictionController(EvictionController):
             evicted += len(action.keys)
             self.execute_eviction_action(action)
         if evicted:
-            logger.info(
-                "Pressure eviction: evicted %d keys from L1.", evicted
-            )
+            logger.info("Pressure eviction: evicted %d keys from L1.", evicted)
         return evicted
 
     def enable_pressure_eviction(self) -> None:
@@ -232,7 +230,7 @@ class L1EvictionController(EvictionController):
         self._pressure_subscribed = True
         self._event_bus.subscribe(
             EventType.L1_ALLOCATION_FAILED,
-            lambda event: self.trigger_pressure_eviction(),
+            lambda event: self.trigger_pressure_eviction() and None,  # type: ignore[arg-type]
         )
         logger.info("L1 pressure eviction enabled (L1_ALLOCATION_FAILED).")
 

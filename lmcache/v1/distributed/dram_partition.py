@@ -7,10 +7,12 @@ required for concurrent prefetch operations, and exposes the computed
 byte-level allocations for config construction.
 """
 
+# Future
 from __future__ import annotations
 
+# Standard
+from dataclasses import dataclass
 import logging
-from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
@@ -42,12 +44,11 @@ class DramPartitionConfig:
     def __post_init__(self):
         if self.total_memory_budget_gb < 0:
             raise ValueError(
-                f"total_memory_budget_gb must be >= 0, got {self.total_memory_budget_gb}"
+                f"total_memory_budget_gb must be >= 0, "
+                f"got {self.total_memory_budget_gb}"
             )
         if not 0.0 < self.l1_fraction < 1.0:
-            raise ValueError(
-                f"l1_fraction must be in (0, 1), got {self.l1_fraction}"
-            )
+            raise ValueError(f"l1_fraction must be in (0, 1), got {self.l1_fraction}")
         if not 0.0 < self.l2_high_watermark <= 1.0:
             raise ValueError(
                 f"l2_high_watermark must be in (0, 1], got {self.l2_high_watermark}"
@@ -120,7 +121,9 @@ class DramPartitionCoordinator:
 
         config = DramPartitionConfig(total_memory_budget_gb=16.0, l1_fraction=0.3)
         coordinator = DramPartitionCoordinator(config)
-        alloc = coordinator.allocate(staging_params=StagingParams(chunk_size_bytes=5_242_880))
+        alloc = coordinator.allocate(
+            staging_params=StagingParams(chunk_size_bytes=5_242_880)
+        )
         # alloc.l1_size_bytes → L1MemoryManagerConfig.size_in_bytes
         # alloc.l2_max_bytes → DramL2AdapterConfig.max_size_gb
     """
@@ -136,9 +139,7 @@ class DramPartitionCoordinator:
     def config(self) -> DramPartitionConfig:
         return self._config
 
-    def allocate(
-        self, staging_params: StagingParams | None = None
-    ) -> DramAllocation:
+    def allocate(self, staging_params: StagingParams | None = None) -> DramAllocation:
         """Compute the byte-level allocation.
 
         Args:

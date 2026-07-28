@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING
 import threading
 
 if TYPE_CHECKING:
-    from lmcache.v1.distributed.api import KeyListPage, MemoryLayoutDesc
+    from lmcache.v1.distributed.api import KeyEntry, KeyListPage, MemoryLayoutDesc
 
 # First Party
 from lmcache.logging import init_logger
@@ -151,8 +151,7 @@ class DramL2Adapter(L2AdapterInterface):
                 # Skip if over capacity
                 if (
                     self._max_capacity_bytes > 0
-                    and self._current_size_bytes + obj_size
-                    > self._max_capacity_bytes
+                    and self._current_size_bytes + obj_size > self._max_capacity_bytes
                 ):
                     logger.warning(
                         "DramL2Adapter: capacity exceeded, skipping key %s "
@@ -245,11 +244,11 @@ class DramL2Adapter(L2AdapterInterface):
                 # Copy stored bytes into the provided MemoryObj buffer.
                 # byte_array returns a ctypes memoryview with format '<B';
                 # cast to 'B' so slice assignment from bytes works.
-                dst = obj.byte_array.cast('B')
-                dst[:len(data)] = data
+                dst = obj.byte_array.cast("B")  # type: ignore[attr-defined]
+                dst[: len(data)] = data
                 # Narrow the MemoryObj's logical size so downstream
                 # consumers (e.g. deserializer) see only valid bytes.
-                if hasattr(obj, 'set_used_size'):
+                if hasattr(obj, "set_used_size"):
                     obj.set_used_size(len(data))
 
                 bitmap.set(i)
@@ -296,6 +295,7 @@ class DramL2Adapter(L2AdapterInterface):
         page_size: int = 500,
         cursor: str | None = None,
     ) -> "KeyListPage":
+        # First Party
         from lmcache.v1.distributed.api import KeyListPage
 
         with self._lock:
@@ -307,9 +307,17 @@ class DramL2Adapter(L2AdapterInterface):
         # Simple cursor-based pagination using integer offset
         start = int(cursor) if cursor else 0
         page = all_keys[start : start + page_size]
-        next_cursor = str(start + page_size) if start + page_size < len(all_keys) else None
+        next_cursor = (
+            str(start + page_size) if start + page_size < len(all_keys) else None
+        )
 
-        return KeyListPage(keys=page, cursor=next_cursor)
+        entries = tuple(
+            KeyEntry(
+                key=k.to_encoded_object_key(), size_bytes=len(self._data.get(k, b""))
+            )
+            for k in page
+        )
+        return KeyListPage(entries=entries, next_page_token=next_cursor)
 
     # ------------------------------------------------------------------
     # Cleanup

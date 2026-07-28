@@ -12,7 +12,10 @@ import os
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.dram_partition import DramPartitionConfig, DramPartitionCoordinator
+from lmcache.v1.distributed.dram_partition import (
+    DramPartitionConfig,
+    DramPartitionCoordinator,
+)
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
     L2AdaptersConfig,
@@ -678,9 +681,11 @@ def parse_args_to_config(
             extra_logging_interval=eviction_config.extra_logging_interval,
         )
         # Override DramL2 adapter capacity (first dram adapter found)
+        # First Party
         from lmcache.v1.distributed.l2_adapters.dram_l2_adapter import (
             DramL2AdapterConfig,
         )
+
         for ac in l2_adapter_config.adapters:
             if isinstance(ac, DramL2AdapterConfig):
                 ac.max_size_gb = alloc.l2_max_bytes / (1 << 30)
