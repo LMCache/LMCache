@@ -53,11 +53,10 @@ Requirements
   start.
 * **An RDMA-capable network** (InfiniBand / RoCE) is strongly recommended for
   production performance. By default P2P uses the ``nixl`` transfer engine,
-  which is shipped with LMCache. 
-  which ships as the optional ``lmcache[nixl]`` extra — install it with
+  which ships as the optional ``lmcache[nixl]`` extra. Install it with
   ``uv pip install lmcache[nixl]`` (or ``pip install lmcache[nixl]``) before
-  enabling P2P and the optional native ``verbs``
-  engine requires ``libibverbs-dev`` when LMCache is built and
+  enabling NIXL. On Ubuntu, the optional native ``verbs`` engine requires
+  ``libibverbs-dev`` when LMCache is built and
   ``libibverbs1`` at runtime.
 * **A single, contiguous L1 region.** The transfer channel registers the whole
   L1 buffer for RDMA, so P2P is incompatible with the GDS L1 tier
@@ -87,10 +86,7 @@ P2P is enabled per server by the ``--p2p-advertise-url`` flag. The relevant
      - Deadline for a peer lookup before it counts as a miss (default ``30``).
    * - ``--p2p-load-timeout SECONDS``
      - Deadline for a peer KV read before it counts as a failure
-       (default ``30``). A timeout closes that peer connection and fails all
-       sibling reads on it before their destination buffers can be reused; the
-       next load reconnects lazily. If close cannot be confirmed, the buffers
-       remain reserved and the load remains nonterminal.
+       (default ``30``).
    * - ``--p2p-transfer-engine ENGINE``
      - Transfer-channel implementation (default ``nixl``).
    * - ``--p2p-rdma-device DEVICES``
@@ -165,6 +161,11 @@ device and GID values for each host):
 Native verbs currently requires lazy L1 allocation to be disabled. Registering
 the final L1 range while its pages are still being pinned in the background is
 not a supported configuration.
+
+When a native-verbs load times out, LMCache closes the peer connection and
+fails its sibling reads before releasing their destination buffers. The next
+load reconnects lazily. If closing the connection cannot be confirmed, the
+buffers remain reserved and the load remains nonterminal.
 
 The first HCA listens at ``--p2p-listen-url``. Each additional HCA uses the
 next TCP control port, so reserve and expose every consecutive port in
