@@ -568,14 +568,14 @@ def run_server_bench(
         # kv_size == 1 spec => MLA; only rank 0 is a KV writer. Non-MLA
         # (or heterogeneous "mixed") lets every rank write, matching
         # ``ParallelStrategy.is_kv_writer`` in the vLLM adapter.
-        mla_run = kv_size_disp == 1
+        use_mla = kv_size_disp == 1
         # ``ParallelStrategy.kv_world_size`` folds all TP ranks into a
         # single kv_worker under MLA; non-MLA keeps one kv_worker per
         # rank. Bench mirrors that so ``IPCCacheServerKey.worker_id``
         # and ``.world_size`` line up with what LMCacheMPWorkerAdapter
         # produces in a real deployment (otherwise LOOKUP expands to
         # kv_ranks the STORE side never wrote).
-        kv_world_size = 1 if mla_run else tp_size
+        kv_world_size = 1 if use_mla else tp_size
         shm_names: list[str] = []
         workers: list[WorkerContext] = []
         registered_instance_ids: list[int] = []
@@ -584,7 +584,7 @@ def run_server_bench(
             instance_id = _INSTANCE_ID_BASE + rank
             # MLA: every vLLM rank folds into kv_worker_id 0.
             # Non-MLA: kv_worker_id == vLLM rank.
-            kv_worker_id = 0 if mla_run else rank
+            kv_worker_id = 0 if use_mla else rank
             if use_gpu:
                 # First Party
                 from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
@@ -654,7 +654,7 @@ def run_server_bench(
                     client_tensors=None if use_handle else client_kv_tensors,
                     server_pool=rank_server_pool,
                     # MLA: only rank 0 stores; non-MLA: every rank stores.
-                    is_kv_writer=(rank == 0) if mla_run else True,
+                    is_kv_writer=(rank == 0) if use_mla else True,
                 )
             )
         log("")
