@@ -6,13 +6,10 @@ servers. The coordinator uses them to validate requests and shape responses; an
 mp server (when it registers) imports the same models to build its request
 bodies and parse replies, so both sides agree on the schema in one place.
 
-The cache-event vocabulary (:class:`CacheEventType`,
-:class:`CacheEventEntry`, :class:`CacheEventBatch`) also lives here: both
-the MP-server emitter and the coordinator's key directory speak it.
+This module holds HTTP models only.
 """
 
 # Standard
-from dataclasses import dataclass
 from enum import Enum
 from typing import Annotated
 import base64
@@ -24,6 +21,8 @@ import numpy as np
 # First Party
 from lmcache.v1.distributed.api import EncodedObjectKey  # noqa: F401  re-exported
 from lmcache.v1.distributed.tiers import Tier
+from lmcache.v1.mp_coordinator.api import CacheEventBatch
+from lmcache.v1.mp_coordinator.key_directory import Placement
 
 
 def encode_tokens(tokens: "list[int] | np.ndarray") -> str:
@@ -255,118 +254,6 @@ class StatusListResponse(BaseModel):
 # -- Key directory -----------------------------------------------------------
 
 
-class CacheEventType(str, Enum):
-    """The kind of cache-state change a :class:`CacheEventBatch` reports.
-
-    ``STORE`` commits placements; ``DELETE`` removes them (owners report
-    evictions as deletes); ``ACCESS`` refreshes recency without changing
-    placement state.
-    """
-
-    STORE = "store"
-    DELETE = "delete"
-    ACCESS = "access"
-
-
-class CacheEventEntry(BaseModel):
-    """One entry inside a :class:`CacheEventBatch`.
-
-    Attributes:
-        key: The object key the change applies to.
-        size_bytes: Bytes committed for the key (``store`` only; ``0``
-            otherwise).
-        content_hash_hex: Hex of the chunk's position-independent content
-            hash; empty when the emitter does not compute it.
-    """
-
-    key: EncodedObjectKey
-    size_bytes: int = Field(default=0, ge=0)
-    content_hash_hex: str = ""
-
-    @field_validator("key")
-    @classmethod
-    def _validate_key(cls, value: EncodedObjectKey) -> EncodedObjectKey:
-        """Reject keys that cannot convert into :class:`ObjectKey`.
-
-        Args:
-            value: The encoded key.
-
-        Returns:
-            The unchanged key once it is confirmed convertible.
-
-        Raises:
-            ValueError: If the key's hex or field invariants are invalid
-                (surfaced by FastAPI as 422).
-        """
-        value.to_object_key()
-        return value
-
-    @field_validator("content_hash_hex")
-    @classmethod
-    def _validate_content_hash_hex(cls, value: str) -> str:
-        """Reject a non-hex ``content_hash_hex``.
-
-        Args:
-            value: The hex string (possibly empty).
-
-        Returns:
-            The unchanged value once it is confirmed decodable.
-
-        Raises:
-            ValueError: If ``value`` is not valid hex (surfaced as 422).
-        """
-        bytes.fromhex(value)
-        return value
-
-
-class CacheEventBatch(BaseModel):
-    """A batch of same-typed cache events from one MP server.
-
-    Attributes:
-        instance_id: The emitting MP server.
-        incarnation: The emitter's restart counter. A higher value fences
-            off all placements reported by lower values of the same
-            ``instance_id``.
-        seq: Per-``(instance_id, incarnation)`` monotonic batch counter,
-            starting at 1.
-        event_type: What happened to every entry in the batch.
-        tier: The cache tier the events apply to (``l1`` or ``l2``).
-        backend: The storage backend within the tier (``"dram"``,
-            ``"cxl"``, ``"fs"``, ``"valkey"``, ...).
-        entries: The affected keys.
-        ts: Emitter wall-clock seconds for the batch (``0.0`` if unknown).
-    """
-
-    instance_id: Annotated[str, StringConstraints(min_length=1)]
-    incarnation: int = Field(ge=0)
-    seq: int = Field(ge=1)
-    event_type: CacheEventType
-    tier: Tier
-    backend: Annotated[str, StringConstraints(min_length=1)]
-    entries: list[CacheEventEntry] = Field(default_factory=list)
-    ts: float = Field(default=0.0, ge=0.0)
-
-    @field_validator("tier")
-    @classmethod
-    def _validate_tier(cls, value: Tier) -> Tier:
-        """Reject any tier other than ``l1`` or ``l2``.
-
-        Args:
-            value: The tier from the wire.
-
-        Returns:
-            The unchanged tier when it is ``l1`` or ``l2``.
-
-        Raises:
-            ValueError: If ``value`` is ``Tier.ALL`` (surfaced as 422).
-        """
-        if value not in (Tier.L1, Tier.L2):
-            raise ValueError(
-                f"cache events must target a concrete tier (got {value.value!r})"
-            )
-        return value
-
-
 class DirectoryEventsRequest(BaseModel):
     """Body of ``POST /directory/events``.
 
@@ -375,6 +262,28 @@ class DirectoryEventsRequest(BaseModel):
     """
 
     batches: list[CacheEventBatch] = Field(default_factory=list)
+
+    @field_validator("batches")
+    @classmethod
+    def _validate_batches(cls, value: list[CacheEventBatch]) -> list[CacheEventBatch]:
+        """Enforce encoding-level constraints on every entry.
+
+        Args:
+            value: The hydrated batches.
+
+        Returns:
+            The unchanged batches once every constraint holds.
+
+        Raises:
+            ValueError: If an entry's key cannot convert into an
+                ``ObjectKey`` or its ``content_hash_hex`` is not valid
+                hex (surfaced as 422).
+        """
+        for batch in value:
+            for entry in batch.entries:
+                entry.key.to_object_key()
+                bytes.fromhex(entry.content_hash_hex)
+        return value
 
 
 class DirectoryEventsResponse(BaseModel):
@@ -389,25 +298,6 @@ class DirectoryEventsResponse(BaseModel):
     applied: int = 0
     duplicates: int = 0
     stale: int = 0
-
-
-@dataclass(frozen=True)
-class Placement:
-    """One live placement of a key, as returned by directory lookups.
-
-    Attributes:
-        instance_id: The MP server holding the bytes.
-        incarnation: That instance's current incarnation.
-        tier: Tier the bytes live on (``l1`` or ``l2``).
-        backend: Backend within the tier.
-        size_bytes: Size the owner reported at store time.
-    """
-
-    instance_id: str
-    incarnation: int
-    tier: Tier
-    backend: str
-    size_bytes: int
 
 
 class DirectoryLookupRequest(BaseModel):

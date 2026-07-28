@@ -4,18 +4,17 @@ semantics (seq dedup, gap detection, incarnation fencing), lookup, and
 instance cleanup."""
 
 # Third Party
-from pydantic import ValidationError
 import pytest
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.tiers import Tier
-from lmcache.v1.mp_coordinator.key_directory import ApplyOutcome, KeyDirectory
-from lmcache.v1.mp_coordinator.schemas import (
+from lmcache.v1.mp_coordinator.api import (
     CacheEventBatch,
     CacheEventEntry,
     CacheEventType,
 )
+from lmcache.v1.mp_coordinator.key_directory import ApplyResult, KeyDirectory
 
 
 def _key(hash_byte: int) -> ObjectKey:
@@ -54,7 +53,7 @@ def _batch(
 
 def test_store_then_lookup():
     directory = KeyDirectory()
-    assert directory.apply_batch(_batch(keys=[_key(1)])) == ApplyOutcome.APPLIED
+    assert directory.apply_batch(_batch(keys=[_key(1)])) == ApplyResult.APPLIED
 
     [placements] = directory.lookup([_key(1)])
     assert len(placements) == 1
@@ -120,7 +119,7 @@ def test_delete_drops_placement_and_empty_record():
         _batch(seq=2, event_type=CacheEventType.DELETE, keys=[_key(1)])
     )
 
-    assert outcome == ApplyOutcome.APPLIED
+    assert outcome == ApplyResult.APPLIED
     assert directory.lookup([_key(1)]) == [[]]
     stats = directory.stats()
     assert stats.num_keys == 0
@@ -147,7 +146,7 @@ def test_removal_of_unknown_key_is_noop():
     outcome = directory.apply_batch(
         _batch(event_type=CacheEventType.DELETE, keys=[_key(7)])
     )
-    assert outcome == ApplyOutcome.APPLIED
+    assert outcome == ApplyResult.APPLIED
     assert directory.stats().num_keys == 0
 
 
@@ -159,7 +158,7 @@ def test_access_does_not_create_records():
     outcome = directory.apply_batch(
         _batch(event_type=CacheEventType.ACCESS, keys=[_key(1)])
     )
-    assert outcome == ApplyOutcome.APPLIED
+    assert outcome == ApplyResult.APPLIED
     assert directory.stats().num_keys == 0
 
 
@@ -171,7 +170,7 @@ def test_duplicate_seq_is_dropped():
     directory.apply_batch(_batch(seq=1, keys=[_key(1)], size_bytes=100))
     outcome = directory.apply_batch(_batch(seq=1, keys=[_key(1)], size_bytes=999))
 
-    assert outcome == ApplyOutcome.DUPLICATE
+    assert outcome == ApplyResult.DUPLICATE
     [placements] = directory.lookup([_key(1)])
     assert placements[0].size_bytes == 100
 
@@ -184,7 +183,7 @@ def test_replayed_older_seq_is_dropped():
     )
     outcome = directory.apply_batch(_batch(seq=1, keys=[_key(1)]))
 
-    assert outcome == ApplyOutcome.DUPLICATE
+    assert outcome == ApplyResult.DUPLICATE
     assert directory.lookup([_key(1)]) == [[]]
 
 
@@ -193,7 +192,7 @@ def test_seq_gap_sets_resync_flag_but_applies():
     directory.apply_batch(_batch(seq=1, keys=[_key(1)]))
     outcome = directory.apply_batch(_batch(seq=5, keys=[_key(2)]))
 
-    assert outcome == ApplyOutcome.APPLIED
+    assert outcome == ApplyResult.APPLIED
     info = directory.stats().instances["node-a"]
     assert info.gap_detected is True
     assert info.last_seq == 5
@@ -215,7 +214,7 @@ def test_new_incarnation_fences_old_placements():
     directory.apply_batch(_batch(incarnation=1, seq=1, keys=[_key(1), _key(2)]))
     outcome = directory.apply_batch(_batch(incarnation=2, seq=1, keys=[_key(3)]))
 
-    assert outcome == ApplyOutcome.APPLIED
+    assert outcome == ApplyResult.APPLIED
     assert directory.lookup([_key(1)]) == [[]]
     assert directory.lookup([_key(2)]) == [[]]
     [placements] = directory.lookup([_key(3)])
@@ -240,7 +239,7 @@ def test_stale_incarnation_batch_is_dropped():
     directory.apply_batch(_batch(incarnation=2, seq=1, keys=[_key(1)]))
     outcome = directory.apply_batch(_batch(incarnation=1, seq=99, keys=[_key(2)]))
 
-    assert outcome == ApplyOutcome.STALE_INCARNATION
+    assert outcome == ApplyResult.STALE_INCARNATION
     assert directory.lookup([_key(2)]) == [[]]
 
 
@@ -266,17 +265,22 @@ def test_drop_unknown_instance_returns_zero():
     assert directory.drop_instance("ghost") == 0
 
 
-# -- Validation --------------------------------------------------------------
+# -- Intrinsic invariants ------------------------------------------------------
 
 
-def test_tier_all_is_rejected():
-    with pytest.raises(ValidationError, match="concrete tier"):
+def test_tier_all_is_unconstructible():
+    with pytest.raises(ValueError, match="concrete tier"):
         _batch(tier=Tier.ALL)
 
 
-def test_seq_below_one_is_rejected():
-    with pytest.raises(ValidationError):
+def test_seq_below_one_is_unconstructible():
+    with pytest.raises(ValueError, match="seq"):
         _batch(seq=0)
+
+
+def test_negative_size_is_unconstructible():
+    with pytest.raises(ValueError, match="size_bytes"):
+        CacheEventEntry(key=_key(1).to_encoded_object_key(), size_bytes=-1)
 
 
 # -- Stats -------------------------------------------------------------------

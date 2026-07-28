@@ -26,17 +26,35 @@ import threading
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.tiers import Tier
-from lmcache.v1.mp_coordinator.schemas import (
+from lmcache.v1.mp_coordinator.api import (
     CacheEventBatch,
     CacheEventEntry,
     CacheEventType,
-    Placement,
 )
 
 logger = init_logger(__name__)
 
 
-class ApplyOutcome(str, Enum):
+@dataclass(frozen=True)
+class Placement:
+    """One live placement of a key, as returned by directory lookups.
+
+    Attributes:
+        instance_id: The MP server holding the bytes.
+        incarnation: That instance's current incarnation.
+        tier: Tier the bytes live on (``l1`` or ``l2``).
+        backend: Backend within the tier.
+        size_bytes: Size the owner reported at store time.
+    """
+
+    instance_id: str
+    incarnation: int
+    tier: Tier
+    backend: str
+    size_bytes: int
+
+
+class ApplyResult(str, Enum):
     """Result of applying one :class:`CacheEventBatch` to the directory.
 
     ``APPLIED`` — the batch was applied.
@@ -85,20 +103,11 @@ class DirectoryStats:
     instances: dict[str, InstanceDirectoryStats]
 
 
-@dataclass(frozen=True)
-class _PlacementLocation:
-    """Identity of a placement: where the bytes live."""
-
-    instance_id: str
-    tier: Tier
-    backend: str
-
-
 @dataclass
 class _KeyRecord:
     """Directory value for one key: its placements plus recency."""
 
-    placements: dict[_PlacementLocation, Placement] = field(default_factory=dict)
+    placements: list[Placement] = field(default_factory=list)
     content_hash_hex: str = ""
     last_access: float = 0.0
 
@@ -125,15 +134,20 @@ class KeyDirectory:
         self._records: dict[ObjectKey, _KeyRecord] = {}
         self._instances: dict[str, _InstanceState] = {}
 
-    def apply_batch(self, batch: CacheEventBatch) -> ApplyOutcome:
+    def apply_batch(self, batch: CacheEventBatch) -> ApplyResult:
         """Apply one event batch to the directory.
 
         Applies incarnation fencing, seq dedup, and gap detection, then
         the entries. Entry application is idempotent: re-storing upserts
         the placement, deleting an absent placement is a no-op.
 
+        The directory performs no validation: batches arriving over HTTP
+        are validated by ``schemas.DirectoryEventsRequest``; programmatic
+        callers must satisfy the field constraints documented on
+        :class:`CacheEventBatch`.
+
         Args:
-            batch: The event batch to apply (validated at construction).
+            batch: The event batch to apply.
 
         Returns:
             Whether the batch was applied, or why it was dropped.
@@ -144,14 +158,14 @@ class KeyDirectory:
                 state = _InstanceState(incarnation=batch.incarnation)
                 self._instances[batch.instance_id] = state
             elif batch.incarnation < state.incarnation:
-                return ApplyOutcome.STALE_INCARNATION
+                return ApplyResult.STALE_INCARNATION
             elif batch.incarnation > state.incarnation:
                 # Restart: fence out the previous incarnation's placements.
                 self._drop_instance_locked(batch.instance_id)
                 state = _InstanceState(incarnation=batch.incarnation)
                 self._instances[batch.instance_id] = state
             elif batch.seq <= state.last_seq:
-                return ApplyOutcome.DUPLICATE
+                return ApplyResult.DUPLICATE
 
             if batch.seq > state.last_seq + 1 and not state.gap_detected:
                 state.gap_detected = True
@@ -167,7 +181,7 @@ class KeyDirectory:
 
             for entry in batch.entries:
                 self._apply_entry_locked(state, batch, entry)
-            return ApplyOutcome.APPLIED
+            return ApplyResult.APPLIED
 
     def lookup(self, keys: list[ObjectKey]) -> list[list[Placement]]:
         """Return the known placements for each requested key.
@@ -189,7 +203,7 @@ class KeyDirectory:
                     continue
                 results.append(
                     sorted(
-                        record.placements.values(),
+                        record.placements,
                         key=lambda p: (p.instance_id, p.tier.value, p.backend),
                     )
                 )
@@ -248,21 +262,23 @@ class KeyDirectory:
     ) -> None:
         """Apply one entry of ``batch`` under the directory lock."""
         key = entry.key.to_object_key()
-        location = _PlacementLocation(
-            instance_id=batch.instance_id, tier=batch.tier, backend=batch.backend
-        )
         if batch.event_type == CacheEventType.STORE:
             record = self._records.get(key)
             if record is None:
                 record = _KeyRecord()
                 self._records[key] = record
-            record.placements[location] = Placement(
+            placement = Placement(
                 instance_id=batch.instance_id,
                 incarnation=batch.incarnation,
                 tier=batch.tier,
                 backend=batch.backend,
                 size_bytes=entry.size_bytes,
             )
+            index = self._find_placement(record.placements, batch)
+            if index is None:
+                record.placements.append(placement)
+            else:
+                record.placements[index] = placement
             if entry.content_hash_hex:
                 record.content_hash_hex = entry.content_hash_hex
             record.last_access = max(record.last_access, batch.ts)
@@ -271,17 +287,32 @@ class KeyDirectory:
             record = self._records.get(key)
             if record is None:
                 return
-            record.placements.pop(location, None)
+            index = self._find_placement(record.placements, batch)
+            if index is not None:
+                record.placements.pop(index)
             if not record.placements:
                 del self._records[key]
-            if not any(
-                loc.instance_id == batch.instance_id for loc in record.placements
-            ):
+            if not any(p.instance_id == batch.instance_id for p in record.placements):
                 state.keys.discard(key)
         elif batch.event_type == CacheEventType.ACCESS:
             record = self._records.get(key)
             if record is not None:
                 record.last_access = max(record.last_access, batch.ts)
+
+    @staticmethod
+    def _find_placement(
+        placements: list[Placement], batch: CacheEventBatch
+    ) -> int | None:
+        """Return the index of the placement whose ``(instance_id, tier,
+        backend)`` identity matches ``batch``, or ``None`` if absent."""
+        for index, placement in enumerate(placements):
+            if (
+                placement.instance_id == batch.instance_id
+                and placement.tier == batch.tier
+                and placement.backend == batch.backend
+            ):
+                return index
+        return None
 
     def _drop_instance_locked(self, instance_id: str) -> int:
         """Remove all placements from ``instance_id``; return the count."""
@@ -293,11 +324,11 @@ class KeyDirectory:
             record = self._records.get(key)
             if record is None:
                 continue
-            stale = [loc for loc in record.placements if loc.instance_id == instance_id]
-            for loc in stale:
-                del record.placements[loc]
-                removed += 1
-            if not record.placements:
+            kept = [p for p in record.placements if p.instance_id != instance_id]
+            removed += len(record.placements) - len(kept)
+            if kept:
+                record.placements = kept
+            else:
                 del self._records[key]
         state.keys.clear()
         return removed

@@ -1,6 +1,7 @@
 # Key directory
 
 Module: `lmcache/v1/mp_coordinator/key_directory.py`
+Contract vocabulary: `lmcache/v1/mp_coordinator/api.py`
 HTTP surface: `lmcache/v1/mp_coordinator/http_apis/directory_api.py` (`/directory/*`)
 
 This is the first milestone (M1) of the control-plane RFC
@@ -51,7 +52,7 @@ across instances.
 
 ```
 ObjectKey → _KeyRecord {
-    placements: {(instance_id, tier, backend) → Placement},
+    placements: list[Placement],   # ≤1 per (instance_id, tier, backend)
     content_hash_hex, last_access
 }
 instance_id → _InstanceState { incarnation, last_seq, gap_detected, keys }
@@ -83,14 +84,17 @@ Position-independent token matching arrives with the content index (M2).
 state (`incarnation`, `last_seq`, `gap_detected`) for observability and
 the future resync trigger.
 
-The cache-event vocabulary (`CacheEventType`, `CacheEventEntry`,
-`CacheEventBatch`) and the `Placement` result type live in `schemas.py` —
-the two-sided contract module the MP-server emitter imports (the same
-pattern as today's `L2EventListener`). There is no separate domain/wire
-split: the validated pydantic events are what `apply_batch` consumes, and
-lookup responses embed the `Placement` dataclass directly (the
-`EncodedObjectKey` pattern). Malformed keys, non-hex content hashes, and
-the `all` pseudo-tier are rejected at validation (422).
+Type placement:
+
+- **`api.py`** — the cache-event vocabulary (`CacheEventType`,
+`CacheEventEntry`, `CacheEventBatch`): the contract between the
+MP-server emitter and the directory. Plain dataclasses with intrinsic
+invariants in `__post_init__` (the `ObjectKey` pattern: `seq >= 1`,
+concrete tier, non-empty ids are unconstructible anywhere).
+- **`key_directory.py`** — the engine plus everything the directory
+itself produces (`Placement`, `ApplyResult`, stats) and its private
+records.
+- **`schemas.py`** — HTTP models only. 
 
 ## Deliberately out of scope (follow-ups)
 

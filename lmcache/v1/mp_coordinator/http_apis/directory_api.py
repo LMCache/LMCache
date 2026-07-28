@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 # First Party
 from lmcache.v1.mp_coordinator.http_apis.dependencies import get_context
-from lmcache.v1.mp_coordinator.key_directory import ApplyOutcome, DirectoryStats
+from lmcache.v1.mp_coordinator.key_directory import ApplyResult, DirectoryStats
 from lmcache.v1.mp_coordinator.schemas import (
     DirectoryEventsRequest,
     DirectoryEventsResponse,
@@ -46,10 +46,10 @@ async def report_cache_events(
     directory = get_context(request).key_directory
     response = DirectoryEventsResponse()
     for batch in body.batches:
-        outcome = directory.apply_batch(batch)
-        if outcome == ApplyOutcome.APPLIED:
+        result = directory.apply_batch(batch)
+        if result == ApplyResult.APPLIED:
             response.applied += 1
-        elif outcome == ApplyOutcome.DUPLICATE:
+        elif result == ApplyResult.DUPLICATE:
             response.duplicates += 1
         else:
             response.stale += 1
