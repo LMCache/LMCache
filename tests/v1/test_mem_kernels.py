@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import List
+import ctypes
 import random
 
 # Third Party
@@ -841,6 +842,60 @@ def test_lmcache_memcpy_async():
     ptr = big_cpu_tensor.data_ptr()
     for i in range(num_chunks):
         rt.cudaHostUnregister(ptr + i * chunk_size)
+
+
+@pytest.mark.parametrize("host_buffer_alignments", [0, 3])
+def test_lmcache_memcpy_async_rejects_invalid_alignment(
+    host_buffer_alignments: int,
+) -> None:
+    with pytest.raises(RuntimeError, match="must be power of two"):
+        lmc_ops.lmcache_memcpy_async(
+            0,
+            0,
+            1,
+            lmc_ops.TransferDirection.H2D,
+            0,
+            host_buffer_alignments,
+        )
+
+
+def test_lmcache_memcpy_async_rejects_host_range_overflow() -> None:
+    size_t_max = ctypes.c_size_t(-1).value
+
+    with pytest.raises(RuntimeError, match="must not overflow size_t"):
+        lmc_ops.lmcache_memcpy_async(
+            0,
+            0,
+            2,
+            lmc_ops.TransferDirection.H2D,
+            size_t_max - 1,
+            64,
+        )
+
+
+def test_lmcache_memcpy_async_handles_size_t_boundary_without_overcopy() -> None:
+    size_t_max = ctypes.c_size_t(-1).value
+    cpu_tensor = torch.tensor(
+        [0xA5, 0x5A],
+        dtype=torch.uint8,
+        pin_memory=True,
+    )
+    gpu_tensor = torch.zeros(2, dtype=torch.uint8, device="cuda")
+
+    lmc_ops.lmcache_memcpy_async(
+        gpu_tensor.data_ptr(),
+        cpu_tensor.data_ptr(),
+        1,
+        lmc_ops.TransferDirection.H2D,
+        size_t_max - 1,
+        4,
+    )
+    torch.cuda.synchronize()
+
+    assert torch.equal(
+        gpu_tensor.cpu(),
+        torch.tensor([0xA5, 0], dtype=torch.uint8),
+    )
 
 
 def test_lmcache_memcpy_async_int8_hidden132():

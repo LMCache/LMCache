@@ -6,6 +6,7 @@
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <algorithm>
+#include <limits>
 #ifdef USE_ROCM
   #include <hip/hip_fp8.h>
 #else
@@ -1104,8 +1105,11 @@ void lmcache_memcpy_async(uintptr_t dest, uintptr_t src, size_t nbytes,
                           size_t host_buffer_offset,
                           size_t host_buffer_alignments) {
   // Check that host_buffer_alignments is power of two
-  TORCH_CHECK((host_buffer_alignments & (host_buffer_alignments - 1)) == 0,
+  TORCH_CHECK(host_buffer_alignments != 0 &&
+                  (host_buffer_alignments & (host_buffer_alignments - 1)) == 0,
               "host_buffer_alignments must be power of two");
+  TORCH_CHECK(nbytes <= std::numeric_limits<size_t>::max() - host_buffer_offset,
+              "host_buffer_offset + nbytes must not overflow size_t");
 
   size_t offset = 0;
   const size_t mask = host_buffer_alignments - 1;
@@ -1118,13 +1122,12 @@ void lmcache_memcpy_async(uintptr_t dest, uintptr_t src, size_t nbytes,
     size_t current_src = src + offset;
     size_t current_dest = dest + offset;
 
-    size_t aligned_area_end =
-        ((offset + host_buffer_offset) & ~mask) + host_buffer_alignments;
+    const size_t position = host_buffer_offset + offset;
+    const size_t bytes_to_boundary = host_buffer_alignments - (position & mask);
     // Use std::min<size_t> so HIP's overload set cannot silently narrow
     // these values to int and produce a garbage length past the 2 GB mark.
-    size_t real_end =
-        std::min<size_t>(host_buffer_offset + nbytes, aligned_area_end);
-    size_t max_nbytes = real_end - offset - host_buffer_offset;
+    const size_t max_nbytes =
+        std::min<size_t>(nbytes - offset, bytes_to_boundary);
 
     CHECK_CUDA_CALL(cudaMemcpyAsync(reinterpret_cast<void*>(current_dest),
                                     reinterpret_cast<const void*>(current_src),
