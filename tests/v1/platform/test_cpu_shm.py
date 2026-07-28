@@ -236,10 +236,10 @@ def test_wrap_kv_caches_unlinks_partial_batch_on_failure(monkeypatch):
     the failed batch.
     """
     # First Party
-    from lmcache.integration.vllm import vllm_multi_process_adapter as adapter
+    from lmcache.v1.platform import kv_wrap
     from lmcache.v1.platform.cpu.shm import shm_map_readwrite
 
-    real_wrap = adapter.wrap_one_kv_cache
+    real_wrap = kv_wrap.wrap_one_kv_cache
     state = {"n": 0, "first_name": None}
 
     def flaky_wrap(tensor):
@@ -250,12 +250,12 @@ def test_wrap_kv_caches_unlinks_partial_batch_on_failure(monkeypatch):
         state["first_name"] = w.shm_name
         return w
 
-    monkeypatch.setattr(adapter, "wrap_one_kv_cache", flaky_wrap)
+    monkeypatch.setattr(kv_wrap, "wrap_one_kv_cache", flaky_wrap)
 
     t1 = torch.zeros((2, 2), dtype=torch.float32)
     t2 = torch.zeros((2, 2), dtype=torch.float32)
     with pytest.raises(RuntimeError, match="simulated migration failure"):
-        adapter.wrap_kv_caches({"a": t1, "b": t2})
+        kv_wrap.wrap_kv_caches({"a": t1, "b": t2})
 
     # The first iteration's SHM segment must no longer be openable.
     nbytes = t1.numel() * t1.element_size()

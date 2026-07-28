@@ -99,7 +99,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             slot_bytes: Fixed data-slot size in bytes.
             capacity_bytes: Optional cap on usable bytes; zero uses device size.
             use_odirect: Whether to open the raw path with O_DIRECT.
-            block_align: Required block alignment in bytes.
+            block_align: Required power-of-two block alignment in bytes.
             header_bytes: Per-slot header reservation in bytes.
             meta_total_bytes: Reserved metadata checkpoint region size.
             meta_magic: Eight-byte ASCII metadata checkpoint magic.
@@ -177,8 +177,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         use_uring_cmd = bool(d.get("use_uring_cmd", False))
         max_data_transfer_size = int(d.get("max_data_transfer_size", 0))
 
-        if block_align <= 0:
-            raise ValueError("block_align must be > 0")
+        if block_align <= 0 or (block_align & (block_align - 1)) != 0:
+            raise ValueError(f"block_align must be a power of 2, got {block_align}")
         if slot_bytes % block_align != 0:
             raise ValueError("slot_bytes must be a multiple of block_align")
         if header_bytes % block_align != 0:
@@ -243,7 +243,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             "- capacity_bytes (int): optional usable capacity cap "
             "(default 0 = device size)\n"
             "- use_odirect (bool): enable O_DIRECT raw I/O (default true)\n"
-            "- block_align (int): required block alignment in bytes (default 4096)\n"
+            "- block_align (int): required power-of-two block alignment in "
+            "bytes (default 4096)\n"
             "- header_bytes (int): per-slot header reservation (default 4096)\n"
             "- meta_total_bytes (int): reserved metadata checkpoint region "
             "(default 256MiB)\n"

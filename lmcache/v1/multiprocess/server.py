@@ -4,6 +4,7 @@
 # Standard
 import argparse
 import shutil
+import signal
 import sys
 import time
 
@@ -442,6 +443,7 @@ def parse_args():
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
     args = parse_args()
     mp_config = parse_args_to_mp_server_config(args)
     storage_manager_config = parse_args_to_config(args)

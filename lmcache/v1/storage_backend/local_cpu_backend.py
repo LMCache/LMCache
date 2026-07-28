@@ -616,8 +616,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
         rust_block_align = int(extra.get("rust_raw_block.block_align", 4096))
         if not self._is_power_of_two(rust_block_align):
             raise ValueError(
-                "extra_config['rust_raw_block.block_align'] must be a positive "
-                "power of two when O_DIRECT or io_uring alignment is enabled"
+                "extra_config['rust_raw_block.block_align'] must be a power "
+                "of two when O_DIRECT or io_uring alignment is enabled"
             )
         return rust_block_align
 
