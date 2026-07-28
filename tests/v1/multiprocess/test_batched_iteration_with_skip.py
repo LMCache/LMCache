@@ -5,9 +5,7 @@
 import pytest
 
 # First Party
-from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
-    batched_iteration_with_skip,
-)
+from lmcache.v1.multiprocess.transfer_plan import batched_iteration_with_skip
 
 
 def test_basic_batching_with_skip():
