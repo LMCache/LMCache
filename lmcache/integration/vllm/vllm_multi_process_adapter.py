@@ -1682,6 +1682,7 @@ class LMCacheMPWorkerAdapter:
                 kv_rank=self.worker_id,
             )
 
+        ret_stores -= finished_retrieves
         return ret_stores, finished_retrieves
 
     def num_blocks_per_chunk(self) -> int:
