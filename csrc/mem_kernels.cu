@@ -284,10 +284,8 @@ __device__ __forceinline__ int64_t page_buffer_offset(
            k_or_v * num_heads * block_size * head_size +
            head_idx * block_size * head_size + block_offset * head_size +
            head_offset;
-  }
-  // Fused-K/V HND: [NB, NH, BS, 2*HS]. HND addressing like NL_X_TWO_NB_NH_BS_HS
-  // but no K/V plane (k_or_v == 0) and per-head width 2*head_size (K+V packed).
-  else if constexpr (format == EngineKVFormat::NL_X_NB_NH_BS_TWO_HS) {
+  } else if constexpr (format == EngineKVFormat::NL_X_NB_NH_BS_TWO_HS ||
+                       format == EngineKVFormat::NL_X_NB_NH_BS_CS) {
     const int hs2 = 2 * head_size;  // packed K+V width per head (xword units)
     const int block_idx = token_idx / block_size;
     const int block_offset = token_idx % block_size;
@@ -296,10 +294,8 @@ __device__ __forceinline__ int64_t page_buffer_offset(
     const int num_heads = scalars_per_token / hs2;
     return block_idx * num_heads * block_size * hs2 +
            head_idx * block_size * hs2 + block_offset * hs2 + head_offset;
-  }
-  // Fused-K/V NHD: [NB, BS, NH, 2*HS]. token_idx already encodes the slot, so
-  // the packed per-token stride lands directly on it (k_or_v == 0).
-  else if constexpr (format == EngineKVFormat::NL_X_NB_BS_NH_TWO_HS) {
+  } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_NH_TWO_HS ||
+                       format == EngineKVFormat::NL_X_NB_BS_NH_CS) {
     return token_idx * scalars_per_token + scalar_offset;
   }
 }
@@ -606,6 +602,12 @@ void multi_layer_kv_transfer_templated(
         LAUNCH_KERNEL_WITH_FORMAT(T, false,
                                   EngineKVFormat::NL_X_NB_BS_NH_TWO_HS);
         break;
+      case EngineKVFormat::NL_X_NB_NH_BS_CS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, false, EngineKVFormat::NL_X_NB_NH_BS_CS);
+        break;
+      case EngineKVFormat::NL_X_NB_BS_NH_CS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, false, EngineKVFormat::NL_X_NB_BS_NH_CS);
+        break;
       default:
         throw std::runtime_error("Unsupported EngineKVFormat");
     }
@@ -643,6 +645,12 @@ void multi_layer_kv_transfer_templated(
       case EngineKVFormat::NL_X_NB_BS_NH_TWO_HS:
         LAUNCH_KERNEL_WITH_FORMAT(T, true,
                                   EngineKVFormat::NL_X_NB_BS_NH_TWO_HS);
+        break;
+      case EngineKVFormat::NL_X_NB_NH_BS_CS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, true, EngineKVFormat::NL_X_NB_NH_BS_CS);
+        break;
+      case EngineKVFormat::NL_X_NB_BS_NH_CS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, true, EngineKVFormat::NL_X_NB_BS_NH_CS);
         break;
       default:
         throw std::runtime_error("Unsupported EngineKVFormat");

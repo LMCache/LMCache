@@ -12,6 +12,7 @@ any initial blind spots.
 from __future__ import annotations
 
 # Standard
+from typing import TYPE_CHECKING
 import asyncio
 
 # Third Party
@@ -20,9 +21,14 @@ import httpx
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import EncodedObjectKey
-from lmcache.v1.mp_coordinator.cache_control.eviction_manager import L2EvictionManager
-from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
-from lmcache.v1.mp_coordinator.registry import InstanceRegistry, MPInstance
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.mp_coordinator.cache_control.eviction_manager import (
+        L2EvictionManager,
+    )
+    from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
+    from lmcache.v1.mp_coordinator.registry import InstanceRegistry, MPInstance
 
 logger = init_logger(__name__)
 

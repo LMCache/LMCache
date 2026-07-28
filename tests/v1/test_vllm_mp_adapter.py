@@ -99,7 +99,7 @@ def _make_worker_adapter(
     network boundary must already be patched (see ``fake_adapter``).
     ``extra_config`` forwards ``lmcache.mp.*`` overrides."""
     parallel_strategy = ParallelStrategy(
-        use_mla=False,
+        mla_only=False,
         vllm_world_size=1,
         vllm_worker_id=0,
         tp_size=1,
@@ -163,7 +163,14 @@ def fake_adapter(monkeypatch):
     monkeypatch.setattr(adapter_mod, "HeartbeatThread", FakeHeartbeatThread)
 
     # KV-cache wrapping pulls in CUDA IPC; bypass for unit tests.
-    monkeypatch.setattr(adapter_mod, "wrap_kv_caches", lambda kv: list(kv.values()))
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+
+    monkeypatch.setattr(
+        worker_transfer,
+        "wrap_kv_caches",
+        lambda kv: list(kv.values()),
+    )
     # ``vllm_layout_hints`` returns a ``LayoutHints`` (TypedDict / dict at
     # runtime); stub it with an empty dict.
     monkeypatch.setattr(
@@ -648,7 +655,14 @@ def test_register_uses_local_context_when_self_transfer_ctx_nulled(
     future.result.return_value = None
     monkeypatch.setattr(adapter_mod, "send_lmcache_request", lambda *a, **kw: future)
     monkeypatch.setattr(adapter_mod, "HeartbeatThread", FakeHeartbeatThread)
-    monkeypatch.setattr(adapter_mod, "wrap_kv_caches", lambda kv: list(kv.values()))
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+
+    monkeypatch.setattr(
+        worker_transfer,
+        "wrap_kv_caches",
+        lambda kv: list(kv.values()),
+    )
     monkeypatch.setattr("lmcache.integration.vllm.utils.vllm_layout_hints", lambda: {})
     local_ctx = MagicMock(name="local_transfer_ctx")
     monkeypatch.setattr(
@@ -656,7 +670,7 @@ def test_register_uses_local_context_when_self_transfer_ctx_nulled(
     )
 
     parallel_strategy = ParallelStrategy(
-        use_mla=False,
+        mla_only=False,
         vllm_world_size=1,
         vllm_worker_id=0,
         tp_size=1,
