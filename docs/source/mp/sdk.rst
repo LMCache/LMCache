@@ -198,7 +198,7 @@ Classes
 
    * - Class
      - Purpose
-   * - ``context.LMCacheSDKCacheKind``
+   * - ``cache_kind.LMCacheSDKCacheKind``
      - Enum selecting the cache: ``KV`` or ``QUERY``.
    * - ``context.LMCacheSDKContext``
      - A connection to one LMCache server for one model + kind; returned by
