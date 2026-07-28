@@ -33,6 +33,7 @@ from lmcache.v1.gpu_connector.gds_context import (
     get_gds_context,
     initialize_gds_context,
 )
+from lmcache.v1.memory_management import GDSMemoryObject
 
 
 def _fake_stream(handle: int):
@@ -345,6 +346,7 @@ def test_gds_write_read_roundtrip(gds_slab_dir: Path):
         )
         assert err == L1Error.SUCCESS
         mem_obj = objs[0]
+        assert isinstance(mem_obj, GDSMemoryObject)
 
         buf.fill_(0xAB)
         torch.cuda.synchronize()
@@ -383,6 +385,7 @@ def test_gds_chunk_larger_than_region_roundtrip(gds_slab_dir: Path):
         )
         assert err == L1Error.SUCCESS
         mem_obj = objs[0]
+        assert isinstance(mem_obj, GDSMemoryObject)
 
         # Position-dependent pattern: a mis-offset or swapped segment (e.g. the
         # second segment using the wrong slab offset) would corrupt the bytes
