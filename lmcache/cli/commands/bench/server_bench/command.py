@@ -17,17 +17,14 @@ The command exercises the full store / retrieve data path:
 Usage examples::
 
     # GPU mode: real CUDA tensors + IPC
-    lmcache bench server --rpc-url tcp://localhost:5555 \\
+    lmcache bench server --rpc-url grpc://localhost:5555 \\
         --num-tokens 512 --start 0 --end 3
 
     # Custom KV cache shape (multi-group spec)
-    lmcache bench server --rpc-url tcp://localhost:5555 \\
+    lmcache bench server --rpc-url grpc://localhost:5555 \\
         --kvcache-shape-spec '(2,32,1024,8,128):float16:32'
 
     # Run forever starting from sequence 0
-    lmcache bench server --rpc-url tcp://localhost:5555
-
-    # Benchmark the gRPC transport (compare against tcp:// zmq)
     lmcache bench server --rpc-url grpc://localhost:5555
 """
 
@@ -103,12 +100,11 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
 
     parser.add_argument(
         "--rpc-url",
-        default="tcp://localhost:5555",
+        default="grpc://localhost:5555",
         help=(
             "RPC endpoint of the MP server. Supported schemes: "
-            "tcp://host:port and ipc:///path (ZMQ, default), "
-            "grpc://host:port and grpc+unix:///path (gRPC). "
-            "Default: tcp://localhost:5555."
+            "grpc://host:port and grpc+unix:///path. "
+            "Default: grpc://localhost:5555."
         ),
     )
     parser.add_argument(

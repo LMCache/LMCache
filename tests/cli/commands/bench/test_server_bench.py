@@ -126,7 +126,7 @@ class TestCommandArguments:
         parser: argparse.ArgumentParser,
     ) -> None:
         args = parser.parse_args(["bench", "server"])
-        assert args.rpc_url == "tcp://localhost:5555"
+        assert args.rpc_url == "grpc://localhost:5555"
         assert args.mode == "gpu"
         assert args.num_tokens == 512
         assert args.num_blocks == 1024
@@ -146,7 +146,7 @@ class TestCommandArguments:
                 "bench",
                 "server",
                 "--rpc-url",
-                "tcp://host:9999",
+                "grpc://host:9999",
                 "--num-tokens",
                 "256",
                 "--num-blocks",
@@ -163,7 +163,7 @@ class TestCommandArguments:
                 "http://other:9090",
             ],
         )
-        assert args.rpc_url == "tcp://host:9999"
+        assert args.rpc_url == "grpc://host:9999"
         assert args.num_tokens == 256
         assert args.num_blocks == 512
         assert args.block_size == 8
