@@ -104,6 +104,9 @@ def wait_for_event_fd(event_fd: int, timeout: float = 2.0) -> bool:
 # =============================================================================
 
 
+_DUMMY_KEY = ObjectKey(chunk_hash=b"test", model_name="m", kv_rank=0)
+
+
 class TestSerdeRoundtrip:
     """Test Serializer/Deserializer with mock zlib backend directly."""
 
@@ -123,7 +126,7 @@ class TestSerdeRoundtrip:
         # Compress: src → compressed_buf
         max_compressed = backend.max_compressed_length(4096)
         compressed_buf = create_memory_obj(size=max_compressed)
-        compressed_size = serializer.serialize(src, compressed_buf)
+        compressed_size = serializer.serialize(src, compressed_buf, _DUMMY_KEY)
         assert 0 < compressed_size <= max_compressed
 
         # Prepare a compressed MemoryObj with exact size for decompress
@@ -132,7 +135,7 @@ class TestSerdeRoundtrip:
 
         # Decompress: compressed_exact → output
         output = create_memory_obj(size=4096)
-        deserializer.deserialize(compressed_exact, output)
+        deserializer.deserialize(compressed_exact, output, _DUMMY_KEY)
 
         assert bytes(output.byte_array) == original
 
@@ -153,13 +156,13 @@ class TestSerdeRoundtrip:
 
         max_compressed = backend.max_compressed_length(4096)
         compressed_buf = create_memory_obj(size=max_compressed)
-        compressed_size = serializer.serialize(src, compressed_buf)
+        compressed_size = serializer.serialize(src, compressed_buf, _DUMMY_KEY)
 
         compressed_exact = create_memory_obj(size=compressed_size)
         compressed_exact.raw_data[:] = compressed_buf.raw_data[:compressed_size]
 
         output = create_memory_obj(size=4096)
-        deserializer.deserialize(compressed_exact, output)
+        deserializer.deserialize(compressed_exact, output, _DUMMY_KEY)
 
         assert bytes(output.byte_array) == original
 
@@ -177,13 +180,13 @@ class TestSerdeRoundtrip:
 
         max_compressed = backend.max_compressed_length(1024)
         compressed_buf = create_memory_obj(size=max_compressed)
-        compressed_size = serializer.serialize(src, compressed_buf)
+        compressed_size = serializer.serialize(src, compressed_buf, _DUMMY_KEY)
 
         compressed_exact = create_memory_obj(size=compressed_size)
         compressed_exact.raw_data[:] = compressed_buf.raw_data[:compressed_size]
 
         output = create_memory_obj(size=1024)
-        deserializer.deserialize(compressed_exact, output)
+        deserializer.deserialize(compressed_exact, output, _DUMMY_KEY)
 
         # Truncation is lossy — output should differ from original
         # but each byte should have lower 4 bits zeroed
@@ -218,7 +221,7 @@ class TestSerdeWithDramL2:
             # Step 1: Serialize (compress)
             max_compressed = backend.max_compressed_length(8192)
             compressed_buf = create_memory_obj(size=max_compressed)
-            compressed_size = serializer.serialize(src, compressed_buf)
+            compressed_size = serializer.serialize(src, compressed_buf, _DUMMY_KEY)
 
             # Create exact-size MemoryObj for store
             compressed_obj = create_memory_obj(size=compressed_size)
@@ -244,7 +247,7 @@ class TestSerdeWithDramL2:
 
             # Step 4: Deserialize (decompress)
             output = create_memory_obj(size=8192)
-            deserializer.deserialize(loaded_buf, output)
+            deserializer.deserialize(loaded_buf, output, _DUMMY_KEY)
 
             # Verify roundtrip
             assert bytes(output.byte_array) == original
@@ -278,7 +281,7 @@ class TestSerdeWithDramL2:
 
                 max_c = backend.max_compressed_length(2048)
                 c_buf = create_memory_obj(size=max_c)
-                c_size = serializer.serialize(src, c_buf)
+                c_size = serializer.serialize(src, c_buf, _DUMMY_KEY)
                 compressed_sizes[i] = c_size
 
                 c_obj = create_memory_obj(size=c_size)
@@ -296,7 +299,7 @@ class TestSerdeWithDramL2:
                 wait_for_event_fd(load_fd)
 
                 output = create_memory_obj(size=2048)
-                deserializer.deserialize(loaded, output)
+                deserializer.deserialize(loaded, output, _DUMMY_KEY)
                 assert bytes(output.byte_array) == originals[i], f"Key {i} mismatch"
 
         finally:
