@@ -298,8 +298,11 @@ def send_ping(
 
 @dataclass
 class ParallelStrategy:
-    use_mla: bool
-    """Whether to use the MLA."""
+    mla_only: bool
+    """
+    True only for pure-MLA models. This flag indicates whether the KV cache
+    tensor is replicated across TP ranks.
+    """
 
     vllm_world_size: int
     """Number of workers managed by one vLLM scheduler (TP × PP; excludes DP).
@@ -323,7 +326,7 @@ class ParallelStrategy:
     def kv_world_size(self) -> int:
         """Number of pieces a single token chunk's KV cache is split into
         on the LMCache server storage."""
-        if self.use_mla:
+        if self.mla_only:
             # In this PR we do not support PP + TP + MLA in multi-server mode.
             # A precondition check enforces pp_size == 1, so kv_world_size for
             # MLA can be derived as world_size / tp_size.
@@ -335,7 +338,7 @@ class ParallelStrategy:
         """Index of the piece of a single token chunk's KV cache
         that the current worker is responsible for,
         in ``[0, kv_world_size)``."""
-        if self.use_mla:
+        if self.mla_only:
             return self.vllm_worker_id // self.tp_size
         return self.vllm_worker_id % (self.vllm_world_size // self.n_servers)
 
@@ -347,9 +350,9 @@ class ParallelStrategy:
     @property
     def is_kv_writer(self) -> bool:
         """Whether this rank is responsible for storing KV."""
-        if not self.use_mla:
+        if not self.mla_only:
             return True
-        # MLA: only first rank per node is a writer.
+        # MLA-only: only first rank per node is a writer.
         return self.vllm_worker_id % (self.tp_size // self.n_servers) == 0
 
 
@@ -388,7 +391,7 @@ def _normalize_adapter_init_args(
     kv_world_size = int(vllm_block_size)
     kv_worker_id = int(parallel_strategy)
     strategy = ParallelStrategy(
-        use_mla=False,
+        mla_only=False,
         vllm_world_size=kv_world_size,
         vllm_worker_id=kv_worker_id,
         tp_size=kv_world_size,
@@ -580,7 +583,7 @@ class LMCacheMPSchedulerAdapter:
             model_name: The model name used for LMCache keys
             vllm_block_size: The block size used in vLLM
             parallel_strategy:
-                The parallel strategy, which includes `use_mla`,
+                The parallel strategy, which includes `mla_only`,
                 `kv_world_size`, `kv_worker_id` and so on. Older vLLM
                 connectors pass the KV worker id here.
             legacy_block_size: The vLLM block size passed positionally by

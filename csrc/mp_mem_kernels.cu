@@ -72,6 +72,14 @@ __device__ inline size_t calculate_engine_global_offset(
     // NL_X_NB_NH_BS_TWO_HS (kv_size == 1, hs == 2 * head_size), tokens
     // before heads within a block.
     return engine_block_idx * scalars_per_block;
+  } else if constexpr (format == EngineKVFormat::NL_X_NB_NH_BS_CS) {
+    // Content-size HND: L tensors [NB, NH, BS, CS]; same empty K/V axis as
+    // NL_X_NB_NH_BS_TWO_HS (kv_size == 1, hs == content_size).
+    return engine_block_idx * scalars_per_block;
+  } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_NH_CS) {
+    // Content-size NHD: L tensors [NB, BS, NH, CS]; same empty K/V axis as
+    // NL_X_NB_NH_BS_CS, tokens before heads within a block.
+    return engine_block_idx * scalars_per_block;
   } else if constexpr (format == EngineKVFormat::NB_NL_TWO_NH_BS_HS) {
     // TRT-LLM cross-layer HND: single tensor [NB, NL, 2, NH, BS, HS]
     // same block-level strides as NB_NL_TWO_BS_NH_HS
@@ -95,7 +103,8 @@ __device__ inline size_t calculate_engine_local_offset(
   if constexpr (format == EngineKVFormat::NB_NL_TWO_NH_BS_HS ||
                 format == EngineKVFormat::NL_X_TWO_NB_NH_BS_HS ||
                 format == EngineKVFormat::NL_X_NB_TWO_NH_BS_HS ||
-                format == EngineKVFormat::NL_X_NB_NH_BS_TWO_HS) {
+                format == EngineKVFormat::NL_X_NB_NH_BS_TWO_HS ||
+                format == EngineKVFormat::NL_X_NB_NH_BS_CS) {
     // HND: [NH, BS, HS] — heads are outermost within a block
     size_t scalars_per_head_block =
         shape_desc.bs * scalars_per_head;  // BS * HS
@@ -308,6 +317,12 @@ __global__ void multi_layer_block_transfer_kernel(
       break;                                                            \
     case EngineKVFormat::NL_X_NB_BS_NH_TWO_HS:                          \
       LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_NH_TWO_HS);   \
+      break;                                                            \
+    case EngineKVFormat::NL_X_NB_NH_BS_CS:                              \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_NH_BS_CS);       \
+      break;                                                            \
+    case EngineKVFormat::NL_X_NB_BS_NH_CS:                              \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_NH_CS);       \
       break;                                                            \
     default:                                                            \
       TORCH_CHECK(false, "Unsupported EngineKVFormat: ",                \

@@ -457,12 +457,14 @@ def test_turboquant_direct_roundtrip_cuda(
     written = serializer.serialize(
         cast(MemoryObj, _FakeMemoryObj(original)),
         cast(MemoryObj, _FakeMemoryObj(compressed)),
+        _make_turboquant_object_key(0),
     )
     assert written == n_bytes
 
     deserializer.deserialize(
         cast(MemoryObj, _FakeMemoryObj(compressed)),
         cast(MemoryObj, _FakeMemoryObj(recovered)),
+        _make_turboquant_object_key(0),
     )
 
     orig_f = original.float().flatten()

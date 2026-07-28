@@ -925,11 +925,16 @@ class BlendV3Module(InstanceLivenessTarget):
             # NOTE(Kuntai): assumes uniform world size and prefix-ordered keys
             # that break at the first miss.
             leading = bm.count_leading_ones() // ws
-            retained = (
-                sorted({ki // ws for ki in bm.get_indices_list()})
-                if segmented
-                else None
-            )
+            # Retain a chunk only if EVERY rank shard loaded (AND across the ws
+            # shards); a chunk missing any rank's shard is demoted to a gap.
+            if segmented:
+                shard_counts: dict[int, int] = {}
+                for ki in bm.get_indices_list():
+                    c = ki // ws
+                    shard_counts[c] = shard_counts.get(c, 0) + 1
+                retained = sorted(c for c, n in shard_counts.items() if n == ws)
+            else:
+                retained = None
         else:
             # No GPU context / no full chunk: nothing loaded.
             leading, retained = 0, ([] if segmented else None)
@@ -1485,6 +1490,8 @@ class BlendV3Module(InstanceLivenessTarget):
             fused_packed = _ekf is not None and int(_ekf) in (
                 int(lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
                 int(lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS),
+                int(lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_CS),
+                int(lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_CS),
             )
             if kv_size not in (1, 2):
                 raise RuntimeError(
@@ -1718,7 +1725,11 @@ class BlendV3Module(InstanceLivenessTarget):
                     all_obj_keys
                 ) as memory_objs:
                     if memory_objs is None:
-                        return event_ipc_handle, False
+                        # Read failed: return a valid server event + False, never
+                        # the client's own handle (self-import raises
+                        # cudaErrorDeviceUninitialized, crashing TP).
+                        event.record()
+                        return event.ipc_handle(), False
 
                     # Per-token scatter handles any cur_st; just bound the
                     # matched range to the allocated slots.
@@ -1868,7 +1879,10 @@ class BlendV3Module(InstanceLivenessTarget):
                         session_id=key.request_id,
                     ),
                 )
-                return event_ipc_handle, False
+                # Valid server event + False (never echo the client handle; see
+                # the memory_objs-None path above).
+                event.record()
+                return event.ipc_handle(), False
 
             event.record()
             self._event_bus.publish_on_stream(
