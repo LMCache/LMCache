@@ -1417,7 +1417,8 @@ class LMCacheMPWorkerAdapter:
             return False
         logger.warning("Finished re-registering KV caches after server recovery")
 
-        dispatch(self.dispatcher, "reregister")
+        if self.dispatcher is not None:
+            dispatch(self.dispatcher, "reregister")
 
         return True
 
@@ -1624,7 +1625,8 @@ class LMCacheMPWorkerAdapter:
             take care of deduplicating the request IDs and only return the request
             IDs that have not been returned before.
         """
-        dispatch(self.dispatcher, "reclaim")
+        if self.dispatcher is not None:
+            dispatch(self.dispatcher, "reclaim")
 
         # If unhealthy, drain all pending futures immediately
         if not self.is_healthy:
@@ -1794,7 +1796,8 @@ class LMCacheMPWorkerAdapter:
                 self._mq_timeout,
             )
 
-        dispatch(self.dispatcher, "shutdown")
+        if self.dispatcher is not None:
+            dispatch(self.dispatcher, "shutdown")
 
         if self.transfer_ctx is not None:
             self.transfer_ctx.close()

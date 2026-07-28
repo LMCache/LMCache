@@ -815,13 +815,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self.worker_adapter.register_kv_caches(
             kv_caches, engine_group_infos=engine_group_infos
         )
-        dispatch(
-            self.dispatcher,
-            "register",
-            kv_caches=kv_caches,
-            kv_cache_config=kv_cache_config,
-            vllm_config=self._vllm_config,
-        )
+        if self.dispatcher is not None:
+            dispatch(
+                self.dispatcher,
+                "register",
+                kv_caches=kv_caches,
+                kv_cache_config=kv_cache_config,
+                vllm_config=self._vllm_config,
+            )
         return
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
@@ -896,13 +897,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
         """
-        dispatch(
-            self.dispatcher,
-            "save_kv_layer",
-            layer_name=layer_name,
-            metadata=self._get_connector_metadata(),
-            **kwargs,
-        )
+        if self.dispatcher is not None:
+            dispatch(
+                self.dispatcher,
+                "save_kv_layer",
+                layer_name=layer_name,
+                metadata=self._get_connector_metadata(),
+                **kwargs,
+            )
         return
 
     def wait_for_save(self):
@@ -927,7 +929,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             cache_salts.append(meta.cache_salt)
 
         if len(request_ids) == 0:
-            dispatch(self.dispatcher, "wait_for_save", event=None)
+            if self.dispatcher is not None:
+                dispatch(self.dispatcher, "wait_for_save", event=None)
             return
 
         with torch_dev.stream(torch_dev.current_stream()):
@@ -937,7 +940,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self.worker_adapter.batched_submit_store_requests(
             request_ids, ops, event, cache_salts=cache_salts
         )
-        dispatch(self.dispatcher, "wait_for_save", event=event)
+        if self.dispatcher is not None:
+            dispatch(self.dispatcher, "wait_for_save", event=event)
 
     # TODO: How does lmcache driven path handle preemption?
     # NOTE1: handle_preemptions is called by vllm each step regardless
