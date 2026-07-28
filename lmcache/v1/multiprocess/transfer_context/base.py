@@ -17,7 +17,7 @@ from __future__ import annotations
 
 # Standard
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 import inspect
 
@@ -29,13 +29,18 @@ import torch
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
-from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.distributed.api import (
+    DEFAULT_ATTN_WINDOW_DESC,
+    AttnWindowDesc,
+    MemoryLayoutDesc,
+)
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.v1.multiprocess.transfer_plan import KVTransferMetadata
     import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
@@ -110,14 +115,27 @@ class EngineDrivenContextMetadata:
     """Non-GPU context layout metadata for non-CUDA workers.
 
     Attributes:
-        layout_desc: Memory layout descriptor used to interpret chunk payloads.
+        layout_desc: Memory layout descriptor for object group 0. Used for
+            legacy single-group mode and backward-compatible path.
         block_size: Number of tokens per paged block.
         use_mla: Whether the worker KV format is MLA.
+        object_group_layout_descs: Per-object-group layout descriptors in
+            object-group order. Empty list means single-group (legacy) mode;
+            callers should fall back to ``layout_desc``.
+        attn_desc: Cross-chunk attention windows for all object groups. Defaults
+            to single full-attention group matching legacy behaviour.
+        transfer_metadata: Full shared KV transfer metadata snapshot containing
+            kernel-group geometry, engine-group mapping, and object-group
+            metadata required by downstream transfer planning (Step 4+). ``None``
+            in legacy single-group mode.
     """
 
     layout_desc: MemoryLayoutDesc
     block_size: int
     use_mla: bool
+    object_group_layout_descs: list[MemoryLayoutDesc] = field(default_factory=list)
+    attn_desc: AttnWindowDesc = field(default_factory=lambda: DEFAULT_ATTN_WINDOW_DESC)
+    transfer_metadata: "KVTransferMetadata | None" = None
 
 
 class EngineDrivenContext(ABC):

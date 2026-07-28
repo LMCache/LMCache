@@ -8,6 +8,7 @@ import msgspec
 import torch
 
 # First Party
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.platform.base.ipc_wrapper import (  # noqa: E402,F401
     DeviceIPCWrapper,
 )
@@ -120,6 +121,88 @@ class IPCCacheServerKey:
 KVCache = list[DeviceIPCWrapper]
 
 
+class KernelGroupTransferMetadataWire(msgspec.Struct):
+    """Msgspec-compatible wire DTO for one kernel group's transfer metadata.
+
+    All fields use primitive types so the struct is serializable by any msgspec
+    codec without custom hooks.  Mirrors
+    :class:`~lmcache.v1.multiprocess.transfer_plan.KernelGroupTransferMetadata`
+    but replaces non-primitive types:
+
+    * ``dtype`` → ``dtype_str`` (e.g. ``"float16"``)
+    * ``engine_kv_format`` → ``engine_kv_format_int`` (integer value of the
+      :class:`~lmcache.v1.platform.ops_types.EngineKVFormat` enum)
+
+    Attributes:
+        kernel_group_id: Kernel-group index in deterministic manager order.
+        engine_group_id: Engine group providing block IDs for this kernel group.
+        layer_indices: Layer indices in transfer/kernel order for this group.
+        blocks_per_chunk: Total blocks in one LMCache chunk for this group.
+        blocks_per_window: Retained blocks per chunk after subchunk-window downsampling.
+        slots_per_chunk_in_window: Per-chunk transfer slots in the retained window.
+        kv_size: KV-plane size (1 for MLA/key-only, 2 for K/V).
+        num_layers: Number of layers covered by this kernel group.
+        hidden_dim_size: Hidden dimension width per slot.
+        slots_per_block: Physical slots per engine block.
+        tokens_per_block: Logical tokens per engine block.
+        dtype_str: Torch dtype name (e.g. ``"float16"``).
+        engine_kv_format_int: Integer value of ``EngineKVFormat`` enum.
+    """
+
+    kernel_group_id: int
+    engine_group_id: int
+    layer_indices: list[int]
+    blocks_per_chunk: int
+    blocks_per_window: int
+    slots_per_chunk_in_window: int
+    kv_size: int
+    num_layers: int
+    hidden_dim_size: int
+    slots_per_block: int
+    tokens_per_block: int
+    dtype_str: str
+    engine_kv_format_int: int
+
+
+class ObjectGroupTransferMetadataWire(msgspec.Struct):
+    """Msgspec-compatible wire DTO for one object group's transfer metadata.
+
+    Mirrors :class:`~lmcache.v1.multiprocess.transfer_plan.ObjectGroupTransferMetadata`
+    with all-primitive types.
+
+    Attributes:
+        object_group_id: Object-group index in deterministic object-group order.
+        kernel_group_ids: Kernel-group indices packed into this object group.
+        sw_size_chunks: Cross-chunk attention window in chunks; ``-1`` = full
+            attention.
+    """
+
+    object_group_id: int
+    kernel_group_ids: list[int]
+    sw_size_chunks: int
+
+
+class KVTransferMetadataWire(msgspec.Struct):
+    """Msgspec-compatible wire DTO for the full KV transfer metadata snapshot.
+
+    Replaces pickle serialization of
+    :class:`~lmcache.v1.multiprocess.transfer_plan.KVTransferMetadata` with a
+    structured, forward-compatible representation that can be encoded/decoded by
+    any msgspec codec without custom extension hooks.
+
+    Attributes:
+        num_chunks_in_sw: Attention-window chunk counts in object-group order.
+        tokens_per_chunk: LMCache chunk size in logical tokens.
+        kernel_groups: Kernel-group metadata in deterministic kernel-group order.
+        object_groups: Object-group metadata in deterministic object-group order.
+    """
+
+    num_chunks_in_sw: list[int]
+    tokens_per_chunk: int
+    kernel_groups: list[KernelGroupTransferMetadataWire]
+    object_groups: list[ObjectGroupTransferMetadataWire]
+
+
 class RegisterEngineDrivenContextPayload(msgspec.Struct):
     """Payload for the REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT protocol message.
 
@@ -127,11 +210,25 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
         instance_id: Worker instance identifier (typically PID).
         model_name: Model name associated with this worker.
         world_size: Worker world size used in cache keys.
-        block_size: Tokens per paged block.
-        num_layers: Number of model layers.
-        hidden_dim_size: Flattened hidden dimension per token.
-        dtype_str: Torch dtype name (e.g. ``"float16"``).
-        use_mla: Whether the worker KV format is MLA.
+        block_size: Tokens per paged block (from kernel group 0 for multi-group).
+        num_layers: Number of model layers (legacy single-group; total for multi-group).
+        hidden_dim_size: Flattened hidden dimension per token (kernel group 0).
+        dtype_str: Torch dtype name (e.g. ``"float16"``; kernel group 0).
+        use_mla: Whether the worker KV format is MLA (kernel group 0).
+        engine_group_infos: Engine-neutral KV cache group metadata in
+            kernel-group order. Empty for single-group (legacy) registrations.
+        object_group_layout_shapes: Per-object-group, per-kernel-group tensor
+            shapes as ``list[int]``. Outer index: object group; middle index:
+            kernel group; inner: shape dimensions. Empty for legacy mode.
+        object_group_layout_dtype_strs: Per-object-group, per-kernel-group torch
+            dtype strings (e.g. ``"float16"``). Parallel to
+            ``object_group_layout_shapes``. Empty for legacy mode.
+        num_chunks_in_sw: Attention-window size in LMCache chunks for each
+            object group (``-1`` = full attention). Empty for legacy mode.
+        transfer_metadata_wire: Structured
+            :class:`KVTransferMetadataWire` snapshot containing kernel-group
+            geometry, engine-group mapping, and object-group metadata. ``None``
+            in legacy single-group mode. Replaces pickle-based serialization.
     """
 
     instance_id: int
@@ -142,6 +239,12 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
     hidden_dim_size: int
     dtype_str: str
     use_mla: bool
+    # Step 3: multi-group fields (empty/None = legacy single-group mode)
+    engine_group_infos: list[EngineGroupInfo] = []
+    object_group_layout_shapes: list[list[list[int]]] = []
+    object_group_layout_dtype_strs: list[list[str]] = []
+    num_chunks_in_sw: list[int] = []
+    transfer_metadata_wire: KVTransferMetadataWire | None = None
 
 
 @dataclass
