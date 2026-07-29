@@ -21,47 +21,15 @@ from lmcache import torch_dev
 _FP8_E4B15: dict[int, int] = {}
 
 
-def _extract_compute_capability(cap: Any) -> tuple[int, int] | None:
-    """Best-effort parse of compute capability major/minor."""
-    if isinstance(cap, (tuple, list)) and len(cap) >= 2:
-        try:
-            return int(cap[0]), int(cap[1])
-        except (TypeError, ValueError):
-            return None
-
-    if isinstance(cap, dict):
-        major = cap.get("major")
-        minor = cap.get("minor")
-        if major is not None and minor is not None:
-            try:
-                return int(major), int(minor)
-            except (TypeError, ValueError):
-                return None
-
-        sm = cap.get("sm")
-        if isinstance(sm, int):
-            return sm // 10, sm % 10
-
-        cc = cap.get("compute_capability")
-        if isinstance(cc, (tuple, list)) and len(cc) >= 2:
-            try:
-                return int(cc[0]), int(cc[1])
-            except (TypeError, ValueError):
-                return None
-
-    return None
-
-
 def _use_fp8_e4b15(device: int = 0) -> int:
     """Return 1 if device needs fp8e4b15 (Ampere/Ada, SM < 8.9), else 0."""
     if device not in _FP8_E4B15:
         cap = torch_dev.get_device_capability(device)
-        parsed = _extract_compute_capability(cap)
-        # Non-CUDA backends may return backend-specific capability objects.
-        _FP8_E4B15[device] = 1 if parsed is not None and parsed < (8, 9) else 0
+        # CUDA returns (major, minor) tuple; other backends (e.g. XPU) return
+        # a dict. fp8e4b15 is NVIDIA Ampere/Ada specific, so non-tuple caps
+        # always use e4nv (0).
+        _FP8_E4B15[device] = 1 if isinstance(cap, tuple) and cap < (8, 9) else 0
     return _FP8_E4B15[device]
-
-
 # ---------------------------------------------------------------------------
 # Pre-dequant kernel: Bulk dequant K (MSE+norms) and V to fp16
 # ---------------------------------------------------------------------------
