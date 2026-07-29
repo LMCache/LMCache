@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from typing import TYPE_CHECKING, Any, Callable, Protocol
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 import os
 import pickle
 import sys
@@ -82,7 +82,7 @@ def _make_kv_caches(
     num_heads: int = 2,
     head_size: int = 8,
 ) -> dict[str, torch.Tensor]:
-    """Build per-layer NHD KV tensors for non-CUDA data transfer tests."""
+    """Build per-layer NHD KV tensors for device-agnostic data transfer tests."""
     kv_caches = {}
     for i in range(num_layers):
         kv_caches[f"layer_{i}"] = torch.randn(
@@ -97,7 +97,7 @@ def _make_mla_kv_caches(
     block_size: int = 4,
     hidden_size: int = 16,
 ) -> dict[str, torch.Tensor]:
-    """Build per-layer MLA KV tensors for non-CUDA data transfer tests.
+    """Build per-layer MLA KV tensors for device-agnostic data transfer tests.
 
     Args:
         num_layers: Number of KV layers to generate.
@@ -122,7 +122,7 @@ def _make_hnd_kv_caches(
     num_heads: int = 2,
     head_size: int = 8,
 ) -> dict[str, torch.Tensor]:
-    """Build per-layer HND KV tensors for non-CUDA data transfer tests."""
+    """Build per-layer HND KV tensors for device-agnostic data transfer tests."""
     kv_caches = {}
     for i in range(num_layers):
         kv_caches[f"layer_{i}"] = torch.randn(
@@ -138,11 +138,45 @@ def _make_hnd_flashinfer_kv_caches(
     num_heads: int = 2,
     head_size: int = 8,
 ) -> dict[str, torch.Tensor]:
-    """Build per-layer HND flash-infer KV tensors for non-CUDA data transfer tests."""
+    """Build per-layer HND flash-infer KV tensors for
+    device-agnostic data transfer tests.
+    """
     kv_caches = {}
     for i in range(num_layers):
         kv_caches[f"layer_{i}"] = torch.randn(
             num_blocks, 2, num_heads, block_size, head_size
+        )
+    return kv_caches
+
+
+def _make_fused_hnd_kv_caches(
+    num_layers: int = 2,
+    num_blocks: int = 6,
+    block_size: int = 4,
+    num_heads: int = 2,
+    head_size: int = 8,
+) -> dict[str, torch.Tensor]:
+    """Build per-layer blocks-first fused-K/V HND tensors ([NB, NH, BS, 2*HS])."""
+    kv_caches = {}
+    for i in range(num_layers):
+        kv_caches[f"layer_{i}"] = torch.randn(
+            num_blocks, num_heads, block_size, 2 * head_size
+        )
+    return kv_caches
+
+
+def _make_fused_nhd_kv_caches(
+    num_layers: int = 2,
+    num_blocks: int = 6,
+    block_size: int = 4,
+    num_heads: int = 2,
+    head_size: int = 8,
+) -> dict[str, torch.Tensor]:
+    """Build per-layer blocks-first fused-K/V NHD tensors ([NB, BS, NH, 2*HS])."""
+    kv_caches = {}
+    for i in range(num_layers):
+        kv_caches[f"layer_{i}"] = torch.randn(
+            num_blocks, block_size, num_heads, 2 * head_size
         )
     return kv_caches
 
@@ -228,31 +262,39 @@ def _default_key(tokens: int = 8) -> "IPCCacheServerKey":
 def test_wrap_kv_caches_wraps_all_tensors() -> None:
     """Verify wrap_kv_caches wraps all provided KV tensors."""
     # First Party
-    from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod
-    from lmcache.v1.platform import _registry as platform_registry
+    from lmcache.v1.platform import get_device_spec
+    from lmcache.v1.platform.kv_wrap import wrap_kv_caches
 
     kv_caches = _make_kv_caches()
-    # ``wrap_kv_caches`` dispatches through ``platform_registry``: each
-    # accelerator self-registers a wrapper factory keyed by
-    # ``tensor.device.type``. Override the relevant entries through the
-    # registry's documented API (snapshot + register + restore on
-    # teardown) instead of poking the adapter's private helper.
-    saved = platform_registry.snapshot()
 
-    def _fake_factory(tensor: Any) -> tuple[str, Any]:
-        return ("wrapped", tensor)
+    # ``wrap_kv_caches`` dispatches through
+    # :func:`resolve_kv_wrapper_factory`, which reads
+    # ``DeviceSpec.ipc_wrapper_cls`` for each device. Substitute a fake
+    # wrapper class per relevant spec so the test doesn't require the
+    # real IPC-backed factories to be usable in the harness.
+    class _FakeWrapper:
+        @classmethod
+        def wrap(cls, tensor: Any) -> tuple[str, Any]:
+            return ("wrapped", tensor)
 
-    try:
+    with ExitStack() as stack:
         for device_type in {t.device.type for t in kv_caches.values()}:
-            platform_registry.register_kv_wrapper(device_type, _fake_factory)
-        wrapped = adapter_mod.wrap_kv_caches(kv_caches)
-    finally:
-        platform_registry.restore(saved)
+            spec = get_device_spec(device_type)
+            assert spec is not None, "no DeviceSpec registered for %r" % device_type
+            stack.enter_context(
+                patch.object(
+                    type(spec),
+                    "ipc_wrapper_cls",
+                    new_callable=PropertyMock,
+                    return_value=_FakeWrapper,
+                )
+            )
+        wrapped = wrap_kv_caches(kv_caches)
 
     assert len(wrapped) == len(kv_caches)
 
 
-def test_create_transfer_context_uses_non_cuda_context_on_cpu() -> None:
+def test_create_transfer_context_uses_default_context_on_cpu() -> None:
     """Ensure factory returns EngineDrivenTransferContext for CPU KV."""
     # First Party
     from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
@@ -377,23 +419,19 @@ def test_create_transfer_context_handle_mode_unsupported_device_raises(
     for the device."""
     # First Party
     from lmcache.v1.multiprocess.transfer_context import create_transfer_context
-    from lmcache.v1.platform import _registry as platform_registry
+    from lmcache.v1.platform import get_device_spec
 
-    snapshot = platform_registry.snapshot()
-    try:
-        # Drop every registered factory so 'cpu' can never be resolved.
-        # Pass ``discovered=True`` so the lazy discovery pass does not
-        # immediately re-register the auto-discovered backends and
-        # defeat the empty-table fixture.
-        platform_registry.restore(
-            {"kv_wrapper": {}, "availability": {}, "discovered": True}
-        )
-        with pytest.raises(ValueError, match="not supported for device type"):
-            create_transfer_context(
-                {"layer_0": torch.randn(2, 2)}, mode="lmcache_driven"
-            )
-    finally:
-        platform_registry.restore(snapshot)
+    cpu_spec = get_device_spec("cpu")
+    assert cpu_spec is not None
+    # Strip the wrapper binding so ``resolve_kv_wrapper_factory('cpu')``
+    # raises, mirroring the historical "empty registry" fixture.
+    monkeypatch.setattr(
+        type(cpu_spec),
+        "ipc_wrapper_cls",
+        property(lambda self: None),
+    )
+    with pytest.raises(ValueError, match="not supported for device type"):
+        create_transfer_context({"layer_0": torch.randn(2, 2)}, mode="lmcache_driven")
 
 
 def test_musa_data_context_keeps_layout_validation_device_agnostic(
@@ -409,13 +447,14 @@ def test_musa_data_context_keeps_layout_validation_device_agnostic(
 
     def _fake_compute_kv_layout(
         *_args: Any, **_kwargs: Any
-    ) -> tuple[int, int, int, str, Any]:
+    ) -> tuple[int, int, int, str, Any, int]:
         return (
             4,
             2,
             16,
             "float32",
             lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
+            2,
         )
 
     monkeypatch.setattr(worker_transfer, "compute_kv_layout", _fake_compute_kv_layout)
@@ -473,6 +512,7 @@ def test_musa_data_context_store_uses_device_agnostic_gather(
             16,
             "float32",
             lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+            2,
         ),
     )
     monkeypatch.setattr(
@@ -545,6 +585,7 @@ def test_musa_data_context_retrieve_uses_device_agnostic_scatter(
             16,
             "float32",
             lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+            2,
         ),
     )
     monkeypatch.setattr(
@@ -631,6 +672,24 @@ def test_create_transfer_context_env_var_overrides_default(
             None,
             id="mla",
         ),
+        pytest.param(
+            lambda: _make_fused_hnd_kv_caches(
+                num_layers=2, num_blocks=8, block_size=4, num_heads=2, head_size=8
+            ),
+            4,
+            32,
+            {"kv_layout": "HND"},
+            id="fused_hnd",
+        ),
+        pytest.param(
+            lambda: _make_fused_nhd_kv_caches(
+                num_layers=2, num_blocks=8, block_size=4, num_heads=2, head_size=8
+            ),
+            4,
+            32,
+            {"kv_layout": "NHD"},
+            id="fused_nhd",
+        ),
     ],
 )
 def test_compute_kv_layout_and_gather_scatter_roundtrip(
@@ -638,6 +697,7 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip(
     expected_block_size: int,
     expected_hidden_dim: int,
     layout_hints: "LayoutHints | None",
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Validate layout extraction and gather/scatter round-trip on CPU tensors."""
     # First Party
@@ -647,6 +707,18 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip(
         scatter_cpu_to_paged_kv,
     )
 
+    def _vllm_detector_device_type() -> str:
+        """Keep the detector on the active accelerator, but bypass CPU hosts."""
+
+        return torch_device_type if torch_device_type != "cpu" else "cuda"
+
+    # Bypass the CPU-host HND safeguard so the layout hint drives detection
+    # regardless of the host running the test.
+    monkeypatch.setattr(
+        "lmcache.v1.gpu_connector.kv_format.detectors.vllm.torch_device_type",
+        _vllm_detector_device_type(),
+    )
+
     source = {k: v.to(torch_device_type) for k, v in builder_fn().items()}
     (
         block_size,
@@ -654,6 +726,7 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip(
         hidden_dim,
         dtype_str,
         detected_kv_format,
+        kv_size,
     ) = compute_kv_layout(source, layout_hints=layout_hints)
     assert block_size == expected_block_size
     assert num_layers == 2
@@ -662,9 +735,22 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip(
     assert detected_kv_format is not None
 
     blocks_per_chunk = 2
-    gathered = gather_paged_kv_to_cpu(source, [0, 1], blocks_per_chunk)
+    gathered = gather_paged_kv_to_cpu(
+        source, [0, 1], blocks_per_chunk, layout_hints=layout_hints
+    )
+    # The gathered chunk shape must equal the layout the worker registers with
+    # the server (register() builds it from kv_size and hidden_dim), or the
+    # server-side commit_store shape check rejects every chunk.
+    expected_chunk_shape = (
+        (num_layers, blocks_per_chunk * block_size, hidden_dim)
+        if kv_size == 1
+        else (2, num_layers, blocks_per_chunk * block_size, hidden_dim)
+    )
+    assert tuple(gathered[0].shape) == expected_chunk_shape
     destination = {name: torch.zeros_like(tensor) for name, tensor in source.items()}
-    scatter_cpu_to_paged_kv(destination, [4, 5], gathered, blocks_per_chunk)
+    scatter_cpu_to_paged_kv(
+        destination, [4, 5], gathered, blocks_per_chunk, layout_hints=layout_hints
+    )
 
     for name in source:
         if source[name].dim() == 5:
@@ -703,6 +789,7 @@ def test_gather_scatter_roundtrip_hnd_layout(
         hidden_dim,
         dtype_str,
         detected_kv_format,
+        _kv_size,
     ) = compute_kv_layout(source, layout_hints=layout_hints)
     assert block_size == 4
     assert num_layers == 2
@@ -1026,15 +1113,8 @@ def test_engine_context_shm_pool_info(
     from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 
     with patch(
-        "lmcache.v1.distributed.config.torch_dev",
-        type(
-            "TorchDevStub",
-            (),
-            {
-                "cudart": object(),
-                "ext": type("_Ext", (), {"is_pin_supported": True})(),
-            },
-        )(),
+        "lmcache.v1.distributed.config.current_device_spec",
+        MagicMock(is_pin_supported=True),
     ):
         config = _make_storage_manager_config(**config_kwargs)
 
@@ -1053,7 +1133,7 @@ def test_server_register_and_find_non_cuda_context_layout(
     stub_native_storage_ops: Any,
     server_module_factory: ServerModuleFactory,
 ) -> None:
-    """Ensure non-CUDA registration stores metadata and lookup finds layout."""
+    """Ensure backend-agnostic registration stores metadata and lookup finds layout."""
     module, _, _, ctx = server_module_factory(chunk_size=16)
     response = module.register_kv_cache_engine_driven_context(
         _default_register_payload(instance_id=1)

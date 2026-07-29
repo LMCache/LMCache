@@ -7,7 +7,7 @@ Could be implemented by native code in the future
 """
 
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 import enum
 
@@ -314,6 +314,35 @@ class AttnWindowDesc:
 DEFAULT_ATTN_WINDOW_DESC = AttnWindowDesc(num_chunks_in_sw=[-1])
 """A single full-attention object group; the default when no per-object-group
 windows are supplied."""
+
+
+@dataclass(frozen=True)
+class PrefetchRequestSpec:
+    """Immutable inputs of a single L2 prefetch request.
+
+    Bundles the caller-supplied arguments that travel together into the
+    prefetch controller's submission queue. See
+    ``PrefetchController._start_lookup_phase`` for per-field semantics.
+
+    Attributes:
+        keys: Object keys to prefetch; order defines the prefix.
+        layout_desc: Memory layout for L1 write-buffer allocation.
+        extra_count: Extra read locks per key beyond the default 1.
+        policy: Retained-subset policy (see :class:`TrimPolicy`).
+        attn_desc: Cross-chunk attention windows, in object-group order.
+        group_layout_descs: Maps object_group_id to that group's layout
+            (each group is a separate keyed allocation, possibly with
+            different tensor shapes); empty when all share ``layout_desc``.
+        mode: Prefetch intent (see :class:`PrefetchMode`).
+    """
+
+    keys: list[ObjectKey]
+    layout_desc: MemoryLayoutDesc
+    extra_count: int = 0
+    policy: TrimPolicy = TrimPolicy.PREFIX
+    attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
+    group_layout_descs: dict[int, MemoryLayoutDesc] = field(default_factory=dict)
+    mode: PrefetchMode = PrefetchMode.LOOKUP
 
 
 @dataclass(frozen=True)

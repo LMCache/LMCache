@@ -205,23 +205,22 @@ class BlendCoordinatorClient:
             self._client.close()
 
     @classmethod
-    def maybe_from_env(cls) -> "BlendCoordinatorClient | None":
-        """Build a client from ``LMCACHE_COORDINATOR_*`` env vars if configured.
+    def maybe_create(cls, url: str | None) -> "BlendCoordinatorClient | None":
+        """Build a started client for ``url``; an empty URL returns ``None``.
 
-        Reads ``LMCACHE_COORDINATOR_URL`` (required to enable) and
-        ``LMCACHE_COORDINATOR_BLEND_TIMEOUT`` (default 1.0s). This timeout is the
-        wall-clock budget on the optional global leg: the blend module polls
-        until the match resolves (matches, or ``[]`` on failure) but gives up
-        once the budget elapses, so it bounds how long the critical path waits
-        -- including time queued behind other match queries -- before proceeding
-        local-only. It is used both as the per-request HTTP timeout and as the
-        module's per-lookup deadline. Keep it small.
+        Timing knobs are read from the environment:
+        ``LMCACHE_COORDINATOR_BLEND_TIMEOUT`` (seconds, default 1.0; used as
+        both the per-request HTTP timeout and the per-lookup match budget) and
+        ``LMCACHE_COORDINATOR_BLEND_MATCH_CONCURRENCY`` (default 8).
+
+        Args:
+            url: Coordinator base URL; empty or ``None`` disables the client.
 
         Returns:
-            A started client, or ``None`` when no coordinator URL is configured
-            (the blend module then runs purely local).
+            A started client, or ``None`` when ``url`` is empty (the blend
+            module then runs purely local).
         """
-        url = os.getenv("LMCACHE_COORDINATOR_URL", "").strip()
+        url = (url or "").strip()
         if not url:
             return None
         concurrency = int(os.getenv("LMCACHE_COORDINATOR_BLEND_MATCH_CONCURRENCY", "8"))
@@ -271,9 +270,9 @@ class BlendCoordinatorClient:
                 )
                 for m in body.get("matches", [])
             ]
-        except Exception:
+        except Exception as e:
             # Best-effort: a failed query degrades to local-only (empty result).
-            logger.warning("Blend coordinator match failed for %s", item.rid)
+            logger.warning("Blend coordinator match failed for %s: %r", item.rid, e)
         with self._results_lock:
             # Only fill if still awaited (not taken/cleared meanwhile).
             if self._results.get(item.rid) is PENDING:
@@ -283,5 +282,7 @@ class BlendCoordinatorClient:
         """Send a best-effort register/evict; failures are logged and dropped."""
         try:
             self._request(item.method, item.path, item.payload)
-        except Exception:
-            logger.warning("Blend coordinator %s %s failed", item.method, item.path)
+        except Exception as e:
+            logger.warning(
+                "Blend coordinator %s %s failed: %r", item.method, item.path, e
+            )

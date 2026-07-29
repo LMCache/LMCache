@@ -44,12 +44,12 @@ def test_musa_handle_transfer_disabled_by_default(
 ) -> None:
     """Stage4 MUSA handle transfer is opt-in and unavailable by default."""
     # First Party
-    from lmcache.v1.platform.musa import ipc
+    from lmcache.v1.platform.musa import ipc_wrapper
 
-    monkeypatch.delenv(ipc.ENV_MUSA_HANDLE_TRANSFER, raising=False)
+    monkeypatch.delenv(ipc_wrapper.ENV_MUSA_HANDLE_TRANSFER, raising=False)
 
-    assert ipc.is_musa_handle_transfer_enabled() is False
-    assert ipc.is_musa_handle_transfer_available() is False
+    assert ipc_wrapper.is_musa_handle_transfer_enabled() is False
+    assert ipc_wrapper.is_musa_handle_transfer_available() is False
 
 
 def test_musa_handle_transfer_requires_torch_musa(
@@ -57,12 +57,12 @@ def test_musa_handle_transfer_requires_torch_musa(
 ) -> None:
     """Opt-in alone is not enough without a visible TorchMUSA runtime."""
     # First Party
-    from lmcache.v1.platform.musa import ipc
+    from lmcache.v1.platform.musa import ipc_wrapper
 
-    monkeypatch.setenv(ipc.ENV_MUSA_HANDLE_TRANSFER, "1")
-    monkeypatch.setattr(ipc, "is_torch_musa_available", lambda: False)
+    monkeypatch.setenv(ipc_wrapper.ENV_MUSA_HANDLE_TRANSFER, "1")
+    monkeypatch.setattr(ipc_wrapper, "is_torch_musa_available", lambda: False)
 
-    assert ipc.is_musa_handle_transfer_available() is False
+    assert ipc_wrapper.is_musa_handle_transfer_available() is False
 
 
 def test_get_torch_musa_module_imports_torch_musa_registration(
@@ -70,7 +70,7 @@ def test_get_torch_musa_module_imports_torch_musa_registration(
 ) -> None:
     """TorchMUSA may register ``torch.musa`` only after ``torch_musa`` import."""
     # First Party
-    from lmcache.v1.platform.musa import ipc
+    from lmcache.v1.platform.musa import ipc_wrapper
 
     fake_torch = SimpleNamespace()
     torch_musa = SimpleNamespace(is_available=lambda: True)
@@ -80,11 +80,11 @@ def test_get_torch_musa_module_imports_torch_musa_registration(
         fake_torch.musa = torch_musa
         return SimpleNamespace()
 
-    monkeypatch.setattr(ipc, "torch", fake_torch)
-    monkeypatch.setattr(ipc.importlib, "import_module", import_module)
+    monkeypatch.setattr(ipc_wrapper, "torch", fake_torch)
+    monkeypatch.setattr(ipc_wrapper.importlib, "import_module", import_module)
 
-    assert ipc.get_torch_musa_module() is torch_musa
-    assert ipc.is_torch_musa_available() is True
+    assert ipc_wrapper.get_torch_musa_module() is torch_musa
+    assert ipc_wrapper.is_torch_musa_available() is True
 
 
 def test_musa_handle_transfer_requires_event_and_block_transfer_capabilities(
@@ -92,7 +92,7 @@ def test_musa_handle_transfer_requires_event_and_block_transfer_capabilities(
 ) -> None:
     """Memory IPC alone is not enough to enable the MUSA handle path."""
     # First Party
-    from lmcache.v1.platform.musa import ipc
+    from lmcache.v1.platform.musa import ipc_wrapper
 
     torch_musa = SimpleNamespace(
         ipc_get_mem_handle=lambda _tensor: b"handle",
@@ -102,13 +102,13 @@ def test_musa_handle_transfer_requires_event_and_block_transfer_capabilities(
         ),
     )
 
-    monkeypatch.setenv(ipc.ENV_MUSA_HANDLE_TRANSFER, "1")
-    monkeypatch.setattr(ipc, "is_torch_musa_available", lambda: True)
-    monkeypatch.setattr(ipc, "get_torch_musa_module", lambda: torch_musa)
+    monkeypatch.setenv(ipc_wrapper.ENV_MUSA_HANDLE_TRANSFER, "1")
+    monkeypatch.setattr(ipc_wrapper, "is_torch_musa_available", lambda: True)
+    monkeypatch.setattr(ipc_wrapper, "get_torch_musa_module", lambda: torch_musa)
 
-    assert ipc.check_torch_musa_ipc_support(torch_musa) is True
-    assert ipc.check_torch_musa_event_support(torch_musa) is False
-    assert ipc.is_musa_handle_transfer_available() is False
+    assert ipc_wrapper.check_torch_musa_ipc_support(torch_musa) is True
+    assert ipc_wrapper.check_torch_musa_event_support(torch_musa) is False
+    assert ipc_wrapper.is_musa_handle_transfer_available() is False
 
 
 def test_musa_handle_transfer_available_when_all_capabilities_present(
@@ -116,7 +116,7 @@ def test_musa_handle_transfer_available_when_all_capabilities_present(
 ) -> None:
     """Forced MUSA handle mode is available only after all gates pass."""
     # First Party
-    from lmcache.v1.platform.musa import ipc
+    from lmcache.v1.platform.musa import ipc_wrapper
 
     torch_musa = SimpleNamespace(
         ipc_get_mem_handle=lambda _tensor: b"handle",
@@ -127,48 +127,42 @@ def test_musa_handle_transfer_available_when_all_capabilities_present(
         Event=_FakeMusaEvent,
     )
 
-    monkeypatch.setenv(ipc.ENV_MUSA_HANDLE_TRANSFER, "1")
-    monkeypatch.setattr(ipc, "is_torch_musa_available", lambda: True)
-    monkeypatch.setattr(ipc, "get_torch_musa_module", lambda: torch_musa)
-    monkeypatch.setattr(ipc, "is_musa_block_transfer_available", lambda: True)
+    monkeypatch.setenv(ipc_wrapper.ENV_MUSA_HANDLE_TRANSFER, "1")
+    monkeypatch.setattr(ipc_wrapper, "is_torch_musa_available", lambda: True)
+    monkeypatch.setattr(ipc_wrapper, "get_torch_musa_module", lambda: torch_musa)
+    monkeypatch.setattr(ipc_wrapper, "is_musa_block_transfer_available", lambda: True)
 
-    assert ipc.check_torch_musa_ipc_support(torch_musa) is True
-    assert ipc.check_torch_musa_event_support(torch_musa) is True
-    assert ipc.is_musa_handle_transfer_available() is True
+    assert ipc_wrapper.check_torch_musa_ipc_support(torch_musa) is True
+    assert ipc_wrapper.check_torch_musa_event_support(torch_musa) is True
+    assert ipc_wrapper.is_musa_handle_transfer_available() is True
 
 
 def test_musa_handle_transfer_rejects_incomplete_torch_musa_runtime() -> None:
     """Missing TorchMUSA IPC symbols keep Stage4 handle mode disabled."""
     # First Party
-    from lmcache.v1.platform.musa import ipc
+    from lmcache.v1.platform.musa import ipc_wrapper
 
     torch_musa = SimpleNamespace(ipc_get_mem_handle=lambda _tensor: b"handle")
 
-    assert ipc.check_torch_musa_ipc_support(torch_musa) is False
+    assert ipc_wrapper.check_torch_musa_ipc_support(torch_musa) is False
 
 
 def test_musa_platform_discovers_factory_and_registers_capability_predicate() -> None:
     """The MUSA wrapper is auto-discovered while availability stays explicit."""
     # First Party
-    from lmcache.v1.platform import _registry as platform_registry
-    from lmcache.v1.platform import get_device_info
+    from lmcache.v1.platform import get_device_spec, resolve_kv_wrapper_factory
     import lmcache.v1.platform.musa as musa_platform
 
-    snapshot = platform_registry.snapshot()
-    try:
-        platform_registry.reset_for_tests()
-        importlib.reload(musa_platform)
+    importlib.reload(musa_platform)
 
-        factory = platform_registry.get_kv_wrapper_factory("musa")
+    factory = resolve_kv_wrapper_factory("musa")
 
-        device_info = get_device_info("musa")
-        assert device_info is not None
-        assert device_info.is_handle_transfer_available() is False
-        assert callable(factory)
-        with pytest.raises(ValueError, match="expected a MUSA tensor"):
-            factory(torch.empty(1))
-    finally:
-        platform_registry.restore(snapshot)
+    device_spec = get_device_spec("musa")
+    assert device_spec is not None
+    assert device_spec.is_handle_transfer_available() is False
+    assert callable(factory)
+    with pytest.raises(ValueError, match="expected a MUSA tensor"):
+        factory(torch.empty(1))
 
 
 def test_create_transfer_context_auto_keeps_musa_on_data_path() -> None:
@@ -202,22 +196,18 @@ def test_create_transfer_context_musa_handle_allowed_when_available(
         LMCacheDrivenTransferContext,
         create_transfer_context,
     )
-    from lmcache.v1.platform import _registry as platform_registry
-    from lmcache.v1.platform import get_device_info
+    from lmcache.v1.platform import get_device_spec
 
-    snapshot = platform_registry.snapshot()
-    try:
-        platform_registry.register_kv_wrapper("musa", lambda tensor: tensor)
-        musa_info = get_device_info("musa")
-        if musa_info:
-            monkeypatch.setattr(musa_info, "is_handle_transfer_available", lambda: True)
+    musa_spec = get_device_spec("musa")
+    assert musa_spec is not None
+    # Force the transport-capability gate open without touching
+    # ``ipc_wrapper_cls`` -- the real MusaIPCWrapper already binds it.
+    monkeypatch.setattr(musa_spec, "is_handle_transfer_available", lambda: True)
 
-        context = create_transfer_context(
-            _fake_musa_kv_caches(),
-            mode="lmcache_driven",
-        )
-    finally:
-        platform_registry.restore(snapshot)
+    context = create_transfer_context(
+        _fake_musa_kv_caches(),
+        mode="lmcache_driven",
+    )
 
     assert isinstance(context, LMCacheDrivenTransferContext)
 
@@ -225,7 +215,7 @@ def test_create_transfer_context_musa_handle_allowed_when_available(
 def test_musa_ipc_wrapper_rejects_non_musa_tensor() -> None:
     """The MUSA IPC wrapper never accepts CPU tensors by accident."""
     # First Party
-    from lmcache.v1.platform.musa.ipc import MusaIPCWrapper
+    from lmcache.v1.platform.musa.ipc_wrapper import MusaIPCWrapper
 
     with pytest.raises(ValueError, match="expected a MUSA tensor"):
         MusaIPCWrapper(torch.empty(4))
@@ -236,7 +226,7 @@ def test_musa_ipc_wrapper_uses_device_agnostic_wire_base() -> None:
     # First Party
     from lmcache.v1.multiprocess.custom_types import DeviceIPCWrapper, KVCache
     from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
-    from lmcache.v1.platform.musa.ipc import MusaIPCWrapper
+    from lmcache.v1.platform.musa.ipc_wrapper import MusaIPCWrapper
 
     assert issubclass(MusaIPCWrapper, DeviceIPCWrapper)
     assert not issubclass(MusaIPCWrapper, CudaIPCWrapper)

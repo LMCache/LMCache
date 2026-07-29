@@ -212,10 +212,12 @@ class MPCacheServerContext:
         hash_algorithm: str = "blake3",
         separate_object_groups: bool = False,
         force_retrieve_full_kv_benchmark_only: bool = False,
+        full_sw_kv: bool = False,
     ) -> None:
         self._chunk_size = chunk_size
         self._separate_object_groups = separate_object_groups
         self._force_retrieve_full_kv = force_retrieve_full_kv_benchmark_only
+        self._full_sw_kv = full_sw_kv
 
         # Initialize the process-global GDS context.
         # No-op when GDS L1 is disabled (config is None).
@@ -253,6 +255,11 @@ class MPCacheServerContext:
     def separate_object_groups(self) -> bool:
         """Whether to split kernel groups into per-sliding-window object groups."""
         return self._separate_object_groups
+
+    @property
+    def full_sw_kv(self) -> bool:
+        """Whether sliding-window groups cache full per-chunk KV (no window cutting)."""
+        return self._full_sw_kv
 
     @property
     def storage_manager(self) -> StorageManager:

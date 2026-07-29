@@ -100,6 +100,10 @@ class MPServerConfig:
     sent a PING (model warmup, or death before its first request). Must be
     >= worker_reap_timeout_seconds."""
 
+    enable: list[str] = field(default_factory=list)
+    """List of experimental transfer modules to enable. Options: transfer_query
+    (see lmcache.v1.multiprocess.modules.experimental.__init___.py)."""
+
     def __post_init__(self) -> None:
         """Validate the worker-reaping timeouts.
 
@@ -386,6 +390,15 @@ def add_mp_server_args(
         "ignoring per-group sliding-window sizes. Every prefix chunk is "
         "prefetched regardless of sliding-window bounds.",
     )
+    mp_group.add_argument(
+        "--enable",
+        type=str,
+        nargs="*",
+        default=[],
+        help="List of experimental transfer modules to enable. "
+        "Options: transfer_query (see lmcache.v1.multiprocess.modules."
+        "experimental.__init___.py).",
+    )
     return parser
 
 
@@ -433,6 +446,7 @@ def parse_args_to_mp_server_config(
         script_allowed_imports=args.script_allowed_imports or [],
         worker_reap_timeout_seconds=args.worker_reap_timeout_seconds,
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
+        enable=args.enable or [],
     )
 
 

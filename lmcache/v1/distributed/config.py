@@ -11,7 +11,6 @@ import argparse
 import os
 
 # First Party
-from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
@@ -20,6 +19,7 @@ from lmcache.v1.distributed.l2_adapters.config import (
     get_type_name_for_config,
     parse_args_to_l2_adapters_config,
 )
+from lmcache.v1.platform import current_device_spec
 
 logger = init_logger(__name__)
 
@@ -151,7 +151,7 @@ class L1MemoryManagerConfig:
 
         # LazyMemoryAllocator requires pinned memory support.
         # Auto-disable on platforms that don't support it to avoid a RuntimeError.
-        if self.use_lazy and not torch_dev.ext.is_pin_supported:
+        if self.use_lazy and not current_device_spec.is_pin_supported:
             logger.warning(
                 "LazyMemoryAllocator requires memory pinning which is not "
                 "supported on the current backend. Disabling l1-use-lazy."
@@ -219,6 +219,12 @@ class EvictionConfig:
 
     eviction_ratio: float = field(default=0.2)
     """ The fraction of *allocated* memory to evict when triggered (0.0 to 1.0). """
+
+    extra_logging_enabled: bool = field(default=False)
+    """ Whether the eviction loop periodically logs L1 memory usage at INFO. """
+
+    extra_logging_interval: float = field(default=10.0)
+    """ Seconds between L1 memory usage log lines when extra logging is enabled. """
 
 
 @dataclass
@@ -588,6 +594,8 @@ def parse_args_to_config(
         eviction_policy=args.eviction_policy,
         trigger_watermark=args.eviction_trigger_watermark,
         eviction_ratio=args.eviction_ratio,
+        extra_logging_enabled=getattr(args, "enable_extra_logging", False),
+        extra_logging_interval=getattr(args, "extra_logging_interval", 10.0),
     )
 
     l2_adapter_config = parse_args_to_l2_adapters_config(args)

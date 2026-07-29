@@ -17,6 +17,7 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
+from lmcache.v1.platform import current_device_spec
 from lmcache.v1.system_detection import NUMAMapping
 import lmcache.c_ops as lmc_ops
 
@@ -91,7 +92,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         self._final_size = align_to(final_size, self.PIN_CHUNK_SIZE)
         # Underlying buffer for the memory allocation
         self._buffer: torch.Tensor
-        if not torch_dev.ext.is_pin_supported:
+        if not current_device_spec.is_pin_supported:
             raise RuntimeError(
                 f"Backend '{torch_device_type}' does not support memory "
                 "pinning. LazyMemoryAllocator requires pinned memory."
@@ -233,7 +234,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
 
         # Unpin all pinned memory chunks
         for ptr, size in self._pin_record:
-            torch_dev.ext.unpin_memory(ptr)
+            current_device_spec.unpin_memory(ptr)
         self._pin_record.clear()
 
         # Free the underlying buffer if using NUMA allocation
@@ -275,7 +276,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
 
         ptr = self._buffer.data_ptr() + offset
         # Use flag: cudaHostRegisterMapped (0x02)
-        if not torch_dev.ext.pin_memory(ptr, size, 2):
+        if not current_device_spec.pin_memory(ptr, size, 2):
             logger.warning(
                 "pin_memory failed for chunk at ptr=%#x size=%d; "
                 "DMA performance may be degraded",

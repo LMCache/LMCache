@@ -5,6 +5,7 @@ Distributed multi-tier storage manager for MP mode
 
 # Standard
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import Iterator, Literal, Optional
 import threading
 import time
@@ -13,12 +14,11 @@ import time
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap, PeriodicEventNotifier
 from lmcache.v1.distributed.api import (
-    DEFAULT_ATTN_WINDOW_DESC,
-    AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
     PrefetchMode,
+    PrefetchRequestSpec,
     TrimPolicy,
 )
 from lmcache.v1.distributed.bitmap_ops import fold_unfold_ranked
@@ -399,54 +399,30 @@ class StorageManager:
     @enable_tracing()
     def submit_prefetch_task(
         self,
-        keys: list[ObjectKey],
-        layout_desc: MemoryLayoutDesc,
-        extra_count: int = 0,
+        spec: PrefetchRequestSpec,
         external_request_id: str = "",
-        policy: TrimPolicy = TrimPolicy.PREFIX,
-        attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
         skip_l2: bool = False,
-        group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
-        mode: PrefetchMode = PrefetchMode.LOOKUP,
     ) -> PrefetchHandle:
         """Prefetch objects into L1 asynchronously.
 
         Args:
-            keys: Object keys to prefetch.
-            layout_desc: Memory layout description.
-            extra_count: Extra workers (on top of the default
-                1) that will independently retrieve the same
-                key.  Total locks = 1 + extra_count.
-            external_request_id: Request ID from the caller
-                for end-to-end log tracing.
-            policy: Which retained-subset policy to apply (see
-                :class:`TrimPolicy`).  ``PREFIX`` keeps the contiguous prefix;
-                ``SPARSE`` keeps every found key (gap-tolerant).
-            attn_desc: Cross-chunk attention windows of all object groups, in
-                object-group order.
+            spec: The L2-fetch request inputs (see :class:`PrefetchRequestSpec`).
+            external_request_id: Caller id for end-to-end log tracing.
             skip_l2: If True, do not load from L2. For ``LOOKUP`` only
                 already-resident L1 keys are returned; for ``WARM`` nothing is
                 loaded and an empty handle is returned.
-            group_layout_descs: Maps object_group_id to that group's layout
-                (each group is a separate keyed allocation, possibly with
-                different tensor shapes); ``None`` when all share ``layout_desc``.
-            mode: The prefetch intent (see :class:`PrefetchMode`).  ``WARM``
-                retains loaded keys and pins none; ``LOOKUP`` (default) pins
-                them for an imminent reader and follows the policy.
 
         Returns:
             PrefetchHandle to track the task.
         """
-        if mode is PrefetchMode.WARM:
+        keys = spec.keys
+
+        if spec.mode is PrefetchMode.WARM:
             # Warm path: load all keys, pin none. skip_l2 makes it a no-op.
             prefetch_request_id = -1
             if not skip_l2 and keys and self._l2_adapters:
                 prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
-                    keys,
-                    layout_desc,
-                    extra_count=extra_count,
-                    policy=policy,
-                    mode=mode,
+                    spec
                 )
             return PrefetchHandle(
                 prefetch_request_id=prefetch_request_id,
@@ -463,9 +439,11 @@ class StorageManager:
         # NOTE: now we only have L1, so the prefetch is essentially checking how many
         # objects are already in L1, and adding read locks to them.
 
-        l1_read_result = self._l1_manager.reserve_read(keys, extra_count=extra_count)
+        l1_read_result = self._l1_manager.reserve_read(
+            keys, extra_count=spec.extra_count
+        )
 
-        if policy is TrimPolicy.SPARSE:
+        if spec.policy is TrimPolicy.SPARSE:
             # SPARSE: retain a read lock on every L1 hit (not just the leading
             # prefix) and send all L1 misses to L2 as one coalesced request.
             # reserve_read locks only SUCCESS keys, so the found-set already
@@ -494,15 +472,9 @@ class StorageManager:
             )
 
             prefetch_request_id = -1
-            if remaining_keys and self._has_l2_adapters():
+            if not skip_l2 and remaining_keys and self._has_l2_adapters():
                 prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
-                    remaining_keys,
-                    layout_desc,
-                    extra_count=extra_count,
-                    policy=policy,
-                    attn_desc=attn_desc,
-                    group_layout_descs=group_layout_descs,
-                    mode=mode,
+                    replace(spec, keys=remaining_keys)
                 )
             return PrefetchHandle(
                 prefetch_request_id=prefetch_request_id,
@@ -511,65 +483,51 @@ class StorageManager:
                 l1_hit_chunks=0,
                 total_requested_keys=len(keys),
                 submit_time=time.monotonic(),
-                l2_orig_indices=tuple(sparse_l2_indices),
+                l2_orig_indices=(
+                    tuple(sparse_l2_indices) if prefetch_request_id != -1 else ()
+                ),
             )
 
         # PREFIX: fold the per-(group, chunk, rank) L1 presence into the
         # model-wide hit and the per-object-group retain set (sliding-window
         # aware). All-full-attention reduces to the contiguous leading-ones
         # prefix. Keys past the L1 hit are sent to L2.
-        if policy is TrimPolicy.PREFIX:
+        if spec.policy is TrimPolicy.PREFIX:
             return self._submit_prefix_fold(
-                keys,
+                spec,
                 l1_read_result,
-                attn_desc,
-                extra_count,
                 external_request_id,
-                layout_desc,
                 skip_l2,
-                policy=policy,
-                group_layout_descs=group_layout_descs,
-                mode=mode,
             )
 
-        raise ValueError(f"Unsupported trim policy: {policy}")
+        raise ValueError(f"Unsupported trim policy: {spec.policy}")
 
     def _submit_prefix_fold(
         self,
-        keys: list[ObjectKey],
+        spec: PrefetchRequestSpec,
         l1_read_result: dict[ObjectKey, tuple[L1Error, "MemoryObj | None"]],
-        attn_desc: AttnWindowDesc,
-        extra_count: int,
         external_request_id: str,
-        layout_desc: MemoryLayoutDesc,
         skip_l2: bool,
-        policy: TrimPolicy = TrimPolicy.PREFIX,
-        group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
-        mode: PrefetchMode = PrefetchMode.LOOKUP,
     ) -> PrefetchHandle:
         """PREFIX path: fold L1 presence, retain in-window keys, submit rest to L2.
 
         Args:
-            keys: All requested keys, chunk-major, in prefix order.
+            spec: The L2-fetch request inputs (see
+                :class:`PrefetchRequestSpec`); the dispatcher only routes
+                ``PREFIX``-policy specs here.
             l1_read_result: Per-key ``reserve_read`` results from the L1
                 probe; SUCCESS entries count as L1-present and stay
                 read-locked until the fold releases the out-of-window ones.
-            attn_desc: Cross-chunk attention windows of all object groups.
-            extra_count: Extra read locks per key (one per extra TP worker).
             external_request_id: Engine-side request id, for logging/trace.
-            layout_desc: Memory layout for the L1 write buffers of L2 loads.
             skip_l2: When True, serve from L1 only (no L2 prefetch).
-            policy: Trim policy forwarded to the L2 prefetch; the dispatcher
-                only routes ``PREFIX`` here.
-            group_layout_descs: Maps object_group_id to that group's layout;
-                ``None`` when all keys share ``layout_desc``.
-            mode: The prefetch intent (see :class:`PrefetchMode`).
 
         Returns:
             A :class:`PrefetchHandle` carrying the L1 hit (retained indices
             and hit chunks) and the pending L2 prefetch request id (``-1``
             when nothing was submitted to L2).
         """
+        keys = spec.keys
+        attn_desc = spec.attn_desc
         num_object_groups = attn_desc.num_object_groups
         stride = num_object_groups * attn_desc.world_size
         num_chunks = len(keys) // stride
@@ -594,7 +552,7 @@ class StorageManager:
         released_bitmap = l1_presence & (~retain)
         released = released_bitmap.gather(keys)
         if released:
-            self._l1_manager.finish_read(released, extra_count=extra_count)
+            self._l1_manager.finish_read(released, extra_count=spec.extra_count)
 
         # Keys from chunk l1_hit_chunks onwards are candidates for L2.
         l1_key_boundary = l1_hit_chunks * stride
@@ -616,13 +574,7 @@ class StorageManager:
 
         if not l1_only and remaining_keys:
             prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
-                remaining_keys,
-                layout_desc,
-                extra_count=extra_count,
-                attn_desc=attn_desc,
-                policy=policy,
-                group_layout_descs=group_layout_descs,
-                mode=mode,
+                replace(spec, keys=remaining_keys)
             )
             l2_orig_indices = tuple(range(l1_key_boundary, len(keys)))
 
@@ -787,6 +739,26 @@ class StorageManager:
             keys (list[ObjectKey]): List of object keys to touch.
         """
         self._l1_manager.touch_keys(keys)
+
+    def delete_l1_keys(
+        self, keys: list[ObjectKey], force: bool = False
+    ) -> tuple[int, int]:
+        """Delete the given keys from L1.
+
+        Args:
+            keys (list[ObjectKey]): List of object keys to delete.
+            force (bool): When True, delete even read/write-locked keys; else
+                skip them.
+
+        Returns:
+            tuple[int, int]: ``(deleted, skipped)`` -- the number of keys removed
+                and the number refused because they were locked (non-force only).
+                Missing keys are a no-op, so the operation is idempotent.
+        """
+        results = self._l1_manager.delete(keys, force=force)
+        deleted = sum(1 for err in results.values() if err == L1Error.SUCCESS)
+        skipped = sum(1 for err in results.values() if err == L1Error.KEY_IS_LOCKED)
+        return deleted, skipped
 
     def unsafe_read(
         self, keys: list[ObjectKey]

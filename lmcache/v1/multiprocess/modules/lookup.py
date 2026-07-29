@@ -14,6 +14,7 @@ from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     ObjectKey,
     PrefetchHandle,
+    PrefetchRequestSpec,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_ranked
@@ -290,12 +291,14 @@ class LookupModule:
             model_name, world_size
         )
         handle = self._ctx.storage_manager.submit_prefetch_task(
-            obj_keys,
-            layout_desc,
-            extra_count=extra_count,
+            PrefetchRequestSpec(
+                keys=obj_keys,
+                layout_desc=layout_desc,
+                extra_count=extra_count,
+                attn_desc=attn_desc,
+                group_layout_descs=group_layout_descs or {},
+            ),
             external_request_id=key.request_id,
-            attn_desc=attn_desc,
-            group_layout_descs=group_layout_descs,
         )
         self._register_prefetch_job(
             _PrefetchJob(

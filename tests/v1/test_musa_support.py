@@ -114,7 +114,7 @@ class _StubTorch:
 def _detect_with_stub(stub: _StubTorch) -> tuple[Any, str]:
     """Run ``_detect_device`` with ``torch`` swapped for the stub."""
     # First Party
-    from lmcache.v1.platform import _detect_device
+    from lmcache.v1.platform._device_detect import _detect_device
 
     with patch.dict("sys.modules", {"torch": stub}):
         return _detect_device()

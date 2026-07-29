@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence
 import asyncio
@@ -82,7 +82,7 @@ class LocalDiskWorker:
             if key in self.put_tasks:
                 self.put_tasks.remove(key)
             else:
-                logger.warning(f"Key {key} not found in put tasks.")
+                logger.warning("Key %s not found in put tasks.", key)
 
     def insert_put_task(self, key: CacheEngineKey):
         with self.put_lock:
@@ -158,6 +158,16 @@ class LocalDiskBackend(StorageBackendInterface):
             "disk_io_threads", _DEFAULT_THREAD_COUNT
         )
         self.disk_worker = LocalDiskWorker(loop, max_workers=thread_count)
+
+        # Plain ThreadPoolExecutor for batched_get_blocking (concurrent
+        # synchronous reads).  The existing AsyncPQThreadPoolExecutor in
+        # disk_worker is async/priority-queue based and only serves writes
+        # and prefetches; a simple pool is a better fit for the blocking
+        # read path where we want ThreadPoolExecutor.map() semantics.
+        self._read_thread_pool = ThreadPoolExecutor(
+            max_workers=thread_count,
+            thread_name_prefix="disk-read",
+        )
 
         # TODO(Jiayi): We need a disk space allocator to avoid fragmentation
         # and hide the following details away from the backend.
@@ -323,7 +333,7 @@ class LocalDiskBackend(StorageBackendInterface):
 
         # skip repeated save
         if self.exists_in_put_tasks(key):
-            logger.debug(f"Put task for {key} is already in progress.")
+            logger.debug("Put task for %s is already in progress.", key)
             return None
 
         self.disk_worker.insert_put_task(key)
@@ -431,13 +441,99 @@ class LocalDiskBackend(StorageBackendInterface):
         if memory_obj is not None:
             # Re-acquire the lock to update the eviction policy.  The key
             # membership check guards against the entry being evicted between
-            # the two lock regions — in that case the policy state is already
+            # the two lock regions � in that case the policy state is already
             # consistent and no update is needed.
             with self.disk_lock:
                 if key in self.dict:
                     self.cache_policy.update_on_hit(key, self.dict)
 
         return memory_obj
+
+    def batched_get_blocking(
+        self,
+        keys: List[CacheEngineKey],
+    ) -> List[Optional[MemoryObj]]:
+        """Load multiple KV chunks from disk with concurrent I/O.
+
+        Metadata lookup and memory allocation are performed sequentially
+        under the disk lock, then all file reads are dispatched to a
+        ``ThreadPoolExecutor`` so they run in parallel.  The GIL is
+        released during the underlying ``readinto`` syscall, so threads
+        achieve true I/O parallelism.
+
+        :param keys: Cache keys identifying the KV chunks to load.
+        :returns: A list of ``MemoryObj`` (or ``None`` for missing keys),
+            in the same order as *keys*.
+        """
+        if len(keys) <= 1:
+            return [self.get_blocking(k) for k in keys]
+
+        # --- 1. Batch metadata lookup (single lock acquisition) -----------
+        with self.disk_lock:
+            metas = [self.dict.get(key) for key in keys]
+
+        # --- 2. Pre-allocate staging buffers (sequential) -----------------
+        memory_objs = [
+            self.local_cpu_backend.allocate(m.shape, m.dtype, m.fmt)
+            if m is not None
+            else None
+            for m in metas
+        ]
+
+        # --- 3. Concurrent file reads via thread pool ---------------------
+        paths = [m.path if m is not None else None for m in metas]
+        results: List[Optional[MemoryObj]] = list(
+            self._read_thread_pool.map(
+                self._load_chunk_into_memory, keys, paths, memory_objs
+            )
+        )
+
+        # --- 4. Update cache policy for successful loads ------------------
+        with self.disk_lock:
+            for key, mem_obj in zip(keys, results, strict=True):
+                if mem_obj is not None and key in self.dict:
+                    self.cache_policy.update_on_hit(key, self.dict)
+
+        return results
+
+    def _load_chunk_into_memory(
+        self,
+        key: CacheEngineKey,
+        path: Optional[str],
+        memory_obj: Optional[MemoryObj],
+    ) -> Optional[MemoryObj]:
+        """Read a single chunk from disk into a pre-allocated ``MemoryObj``.
+
+        Designed to be called from a thread pool — each invocation is
+        independent and performs a single blocking ``readinto`` syscall.
+
+        :param key: Cache key (used for metadata recovery and error logging).
+        :param path: File path to read from, or ``None`` if the key was not
+            found during the metadata lookup phase.
+        :param memory_obj: Pre-allocated staging buffer, or ``None`` if
+            allocation failed.
+        :returns: The populated ``MemoryObj``, or ``None`` on any failure.
+        """
+        if path is None or memory_obj is None:
+            return None
+
+        try:
+            buffer = memory_obj.byte_array
+            self.read_file(key, buffer, path)
+
+            # Recover metadata (mirrors load_bytes_from_disk).
+            with self.disk_lock:
+                disk_meta = self.dict.get(key)
+                if disk_meta is None:
+                    memory_obj.ref_count_down()
+                    return None
+                memory_obj.metadata.cached_positions = disk_meta.cached_positions
+
+            return memory_obj
+        except Exception as e:
+            logger.error("Failed to load chunk from disk for key %s: %s", key, e)
+            memory_obj.ref_count_down()
+            return None
 
     async def batched_get_non_blocking(
         self,
@@ -448,7 +544,9 @@ class LocalDiskBackend(StorageBackendInterface):
         mem_objs: list[MemoryObj] = []
         paths: list[str] = []
 
-        logger.debug(f"lookup_id: {lookup_id}; Prefetching {len(keys)} keys from disk.")
+        logger.debug(
+            "lookup_id: %s; Prefetching %s keys from disk.", lookup_id, len(keys)
+        )
         for key in keys:
             self.disk_lock.acquire()
             assert key in self.dict, f"Key {key} not found in disk cache after pinning"
@@ -487,7 +585,7 @@ class LocalDiskBackend(StorageBackendInterface):
             self.cache_policy.update_on_hit(key, self.dict)
 
             self.disk_lock.release()
-            logger.debug(f"Prefetching {key} from disk.")
+            logger.debug("Prefetching %s from disk.", key)
             memory_obj.pin()
             mem_objs.append(memory_obj)
             paths.append(path)
@@ -566,7 +664,7 @@ class LocalDiskBackend(StorageBackendInterface):
             try:
                 on_complete_callback(key)
             except Exception as e:
-                logger.warning(f"on_complete_callback failed for key {key}: {e}")
+                logger.warning("on_complete_callback failed for key %s: %s", key, e)
 
     @_lmcache_nvtx_annotate
     def batched_async_load_bytes_from_disk(
@@ -632,10 +730,14 @@ class LocalDiskBackend(StorageBackendInterface):
             os.write(fd, buffer)
             os.close(fd)
         disk_write_time = time.time() - start_time
-        logger.debug(
-            f"Disk write size: {size} bytes, "
-            f"Bandwidth: {size / disk_write_time / 1e6:.2f} MB/s"
-        )
+        if disk_write_time > 0:
+            logger.debug(
+                "Disk write size: %s bytes, Bandwidth: %.2f MB/s",
+                size,
+                size / disk_write_time / 1e6,
+            )
+        else:
+            logger.debug("Disk write size: %s bytes", size)
 
     @_lmcache_nvtx_annotate
     def read_file(self, key, buffer, path):
@@ -657,16 +759,20 @@ class LocalDiskBackend(StorageBackendInterface):
                 with os.fdopen(fd, "rb", buffering=0) as fdo:
                     fdo.readinto(buffer)
         except FileNotFoundError:
-            logger.warning(f"File not found on disk: {path}")
+            logger.warning("File not found on disk: %s", path)
             if self.dict.get(key, None):
                 self.dict.pop(key)
             return
 
         disk_read_time = time.time() - start_time
-        logger.debug(
-            f"Disk read size: {size} bytes, "
-            f"Bandwidth: {size / disk_read_time / 1e6:.2f} MB/s"
-        )
+        if disk_read_time > 0:
+            logger.debug(
+                "Disk read size: %s bytes, Bandwidth: %.2f MB/s",
+                size,
+                size / disk_read_time / 1e6,
+            )
+        else:
+            logger.debug("Disk read size: %s bytes", size)
 
     def get_allocator_backend(self) -> LocalCPUBackend:
         return self.local_cpu_backend
@@ -674,4 +780,5 @@ class LocalDiskBackend(StorageBackendInterface):
     def close(self) -> None:
         if self.batched_msg_sender is not None:
             self.batched_msg_sender.close()
+        self._read_thread_pool.shutdown(wait=True)
         self.disk_worker.close()

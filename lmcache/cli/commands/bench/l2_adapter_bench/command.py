@@ -133,13 +133,13 @@ def add_l2_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--flamegraph-mode",
-        choices=["on-cpu", "off-cpu"],
         default="on-cpu",
+        metavar="MODE[,MODE...]",
         help=(
-            "Flame-graph mode if enabled flame graph profiling. 'on-cpu' (perf "
-            "record) shows where CPU time goes; 'off-cpu' (perf off-CPU "
-            "via offcputime-bpfcc) shows time blocked on I/O / locks and "
-            "is best for I/O-bound adapters. Default: on-cpu."
+            "What to sample when profiling is on (default: on-cpu). Pass "
+            "several comma-separated to profile one benchmark run per mode. "
+            "Modes: on-cpu, off-cpu, wakeup, offwake (perf/bcc), wall, gil "
+            "(py-spy). See the 'lmcache tool flamegraph' docs for detail."
         ),
     )
     parser.add_argument(
@@ -152,13 +152,14 @@ def add_l2_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
-        "--flamegraph-dir",
+        "--flamegraph-scripts-dir",
         default="",
         metavar="DIR",
         help=(
             "Directory with the FlameGraph scripts (flamegraph.pl, "
-            "stackcollapse-perf.pl). Default: $FLAMEGRAPH_DIR or "
-            "~/FlameGraph, else auto-cloned into a temp directory."
+            "stackcollapse-perf.pl); default ~/FlameGraph (cloned there on "
+            "first use). Unused by --flamegraph-mode wall / gil, which "
+            "render their own SVG."
         ),
     )
 
@@ -186,17 +187,18 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         make_object_keys,
         verify_round_trip,
     )
-    from lmcache.cli.commands.bench.l2_adapter_bench.profiling import (
+    from lmcache.cli.commands.bench.l2_adapter_bench.runner import (
+        bench_load,
+        bench_lookup,
+        bench_store,
+    )
+    from lmcache.cli.profiling import (
+        PY_SPY_MODES,
         FlameProfiler,
         ProfileError,
         check_profiling_deps,
         default_output_path,
         resolve_flamegraph_dir,
-    )
-    from lmcache.cli.commands.bench.l2_adapter_bench.runner import (
-        bench_load,
-        bench_lookup,
-        bench_store,
     )
     from lmcache.v1.distributed.l2_adapters import create_l2_adapter
     from lmcache.v1.distributed.l2_adapters.config import (
@@ -281,7 +283,12 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
     if flamegraph_on:
         try:
             check_profiling_deps(args.flamegraph_mode)
-            flamegraph_dir = resolve_flamegraph_dir(args.flamegraph_dir, log)
+            # py-spy renders its own SVG; only the perf/bcc modes need
+            # the FlameGraph scripts, so do not clone them otherwise.
+            if args.flamegraph_mode not in PY_SPY_MODES:
+                flamegraph_dir = resolve_flamegraph_dir(
+                    args.flamegraph_scripts_dir, log
+                )
         except ProfileError as e:
             print(
                 "Error: --flamegraph on was requested but the profiling "

@@ -114,6 +114,21 @@ spec:
       type: string              # adapter type name (nixl_store, fs, mock, raw_block, etc.)
       config: map[string]any    # type-specific config as free-form map
 
+  # -- Connection-injection webhook defaults (optional) --
+  # Read by the LMCache mutating webhook for pods bound to this engine. When
+  # unset, the webhook wires only the connection (--kv-transfer-config, hostIPC,
+  # PYTHONHASHSEED). Set injection.payloadImage to ALSO stage an lmcache code
+  # tree into the vLLM container (emptyDir + init container + readOnly mount +
+  # PYTHONPATH=/lmcache-payload), reusing the CacheBlend payload-staging
+  # mechanism so the vLLM client and the engine server run one lmcache build.
+  injection:
+    payloadImage:               # SEPARATE image: ships lmcache under /payload
+      repository: string        # REQUIRED (no valid default)
+      tag: string               # default: latest
+      pullPolicy: string        # default: IfNotPresent
+    imagePullSecrets: []LocalObjectReference  # for a private payload image
+    targetContainer: string     # default: first container
+
   # -- Resources (auto-computed, no user input needed) --
   # The operator derives resource requests/limits from l1.sizeGB:
   #   memoryRequest = ceil(l1.sizeGB + 5) Gi
@@ -459,6 +474,16 @@ container that does not exist on the pod (`target-container-not-found`). It does
 when the engine comes up. Args are emitted in two-token form
 (`--attention-backend CUSTOM`); the replace-not-duplicate dedup still recognizes a
 user-supplied `--flag=value`.
+
+> **Shared with the LMCache injector.** The emptyDir + payload init container +
+> readOnly mount + `PYTHONPATH` staging (rows 2–3 above) is generic — the standard
+> `LMCacheEngine` injector (`/mutate-lmcache--v1-pod`) reuses it (under
+> `internal/webhook/payload_staging.go`) to optionally stage an `lmcache` build
+> when `LMCacheEngine.spec.injection.payloadImage` is set. There the staging is
+> **additive and optional**: the connection wiring always runs, and an unset (or
+> absent) `injection.payloadImage` simply stages nothing — it never skips the
+> whole injection. The LMCache staging uses its own names (`lmcache-payload`
+> volume, `/lmcache-payload` mount) so both injectors can fire on one pod.
 
 ### Prerequisites
 
