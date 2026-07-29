@@ -307,20 +307,19 @@ jobs:
 
       - name: Install vLLM CPU nightly
         id: install-vllm
-        env:
-          VLLM_CPU_NIGHTLY_SPEC: >-
-            ${{ runner.os == 'macOS'
-                && 'vllm-cpu-nightly==0.25.2.dev202607230832'
-                || 'vllm-cpu-nightly' }}
+        continue-on-error: true
         run: bash .github/scripts/install_vllm_cpu.sh
 
       - name: Install LMCache CPU
         id: install-lmcache
-        if: success() || steps.install-vllm.outcome == 'success'
+        if: steps.install-vllm.outcome == 'success'
+        continue-on-error: true
         run: bash .github/scripts/install_lmcache_cpu.sh
 
       - name: Verify vLLM + LMCache import
         id: verify
+        if: steps.install-lmcache.outcome == 'success'
+        continue-on-error: true
         run: |
           VLLM_VER="$(python -c 'import vllm; print(vllm.__version__)')"
           python3 -c 'import vllm, lmcache; print("vllm:", vllm.__version__, "lmcache:", lmcache.__version__)'
@@ -330,6 +329,8 @@ jobs:
         id: collect
         if: always()
         env:
+          INSTALL_VLLM_OUTCOME: ${{ steps.install-vllm.outcome }}
+          INSTALL_LMC_OUTCOME: ${{ steps.install-lmcache.outcome }}
           VERIFY_OUTCOME: ${{ steps.verify.outcome }}
           VERIFY_VERSION: ${{ steps.verify.outputs.version }}
           MATRIX_OS: ${{ matrix.os }}

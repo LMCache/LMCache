@@ -10,18 +10,27 @@ writes ``verify_result.json`` to the current directory.
 import json
 import os
 
-is_ok = os.environ.get("VERIFY_OUTCOME", "success") == "success"
+INSTALL_VLLM = os.environ.get("INSTALL_VLLM_OUTCOME", "")
+INSTALL_LMC = os.environ.get("INSTALL_LMC_OUTCOME", "")
+VERIFY = os.environ.get("VERIFY_OUTCOME", "")
+
+is_ok = VERIFY == "success"
 version = os.environ.get("VERIFY_VERSION", "")
+
+if is_ok:
+    reason = ""
+elif INSTALL_VLLM != "success":
+    reason = "vLLM CPU nightly install failed on " + os.environ["MATRIX_OS"]
+elif INSTALL_LMC != "success":
+    reason = "LMCache CPU install failed on " + os.environ["MATRIX_OS"]
+else:
+    reason = "vLLM + LMCache import verification failed on " + os.environ["MATRIX_OS"]
 
 result = {
     "os": os.environ["MATRIX_OS"],
     "status": "ok" if is_ok else "failed",
     "vllm_version": version if is_ok else "",
-    "reason": (
-        ""
-        if is_ok
-        else "vLLM CPU nightly import verification failed on " + os.environ["MATRIX_OS"]
-    ),
+    "reason": reason,
     "run_id": os.environ["GITHUB_RUN_ID"],
     "run_url": "{}/{}/actions/runs/{}".format(
         os.environ["GITHUB_SERVER_URL"],
