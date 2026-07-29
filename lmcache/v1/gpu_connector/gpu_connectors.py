@@ -282,7 +282,10 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         :raises AssertionError: If the memory object does not have a tensor.
         :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
-        assert memory_obj.tensor is not None
+        tensor = memory_obj.tensor
+        if tensor is None:
+            logger.debug("LMCache Warning: memory_obj.tensor is None. Skipping.")
+            return
 
         self.initialize_kvcaches_ptr(**kwargs)
 
@@ -317,7 +320,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         skip_prefix_n_tokens = min(end - start, max(0, vllm_cached - start))
 
         lmc_ops.multi_layer_kv_transfer(
-            memory_obj.tensor,
+            tensor,
             kv_cache_pointers,
             slot_mapping[start:end],
             self.device,
@@ -348,7 +351,10 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         :raises AssertionError: If the memory object does not have a tensor.
         :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
-        assert memory_obj.tensor is not None
+        tensor = memory_obj.tensor
+        if tensor is None:
+            logger.debug("LMCache Warning: memory_obj.tensor is None. Skipping.")
+            return
 
         self.initialize_kvcaches_ptr(**kwargs)
         assert self.kvcaches is not None, (
@@ -365,7 +371,7 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         with torch.cuda.stream(self.store_stream):
             if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
                 lmc_ops.multi_layer_kv_transfer(
-                    memory_obj.tensor,
+                    tensor,
                     kv_cache_pointers,
                     slot_mapping[start:end],
                     self.kvcaches[0].device,
@@ -390,9 +396,9 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
                     block_size=self.block_size,
                     head_size=self.head_size,
                 )
-                memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
+                tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
-        if not memory_obj.tensor.is_cuda:
+        if not tensor.is_cuda:
             # Force a synchronize if the target buffer is NOT CUDA device
             # NOTE: for better performance, we may not want to sync for every
             # memory object
@@ -531,7 +537,10 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
 
     @_lmcache_nvtx_annotate
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
-        assert memory_obj.raw_tensor is not None
+        raw_tensor = memory_obj.raw_tensor
+        if raw_tensor is None:
+            logger.debug("LMCache Warning: memory_obj.raw_tensor is None. Skipping.")
+            return
         assert "slot_mapping" in kwargs
         if self.use_mla:
             assert memory_obj.metadata.fmt == MemoryFormat.KV_MLA_FMT
@@ -545,6 +554,15 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         self._initialize_kv_cache_pointers()
         assert self.group_kv_cache_pointers_on_gpu is not None
 
+        # Resolve all group tensors up-front
+        num_groups = len(self.group_kv_cache_pointers_on_gpu)
+        group_tensors = []
+        for idx in range(num_groups):
+            t = memory_obj.get_tensor(idx)
+            if t is None:
+                raise AssertionError(f"Group tensor {idx} is None")
+            group_tensors.append(t)
+
         # avoid read/write stream race condition for shared block
         # this will only be potentially non-zero for the first
         # block lmcache is transferring back
@@ -552,8 +570,7 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         skip_prefix_n_tokens = min(end - start, max(0, vllm_cached - start))
 
         for i, kv_cache_pointer in enumerate(self.group_kv_cache_pointers_on_gpu):
-            memory_obj_tensor = memory_obj.get_tensor(i)
-            assert memory_obj_tensor is not None
+            memory_obj_tensor = group_tensors[i]
             lmc_ops.multi_layer_kv_transfer(
                 memory_obj_tensor,
                 kv_cache_pointer,
@@ -569,7 +586,8 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
 
     @_lmcache_nvtx_annotate
     def from_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
-        assert memory_obj.raw_tensor is not None
+        raw_tensor = memory_obj.raw_tensor
+        assert raw_tensor is not None
         assert "slot_mapping" in kwargs
 
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
@@ -578,13 +596,21 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         assert self.kvcaches[0].device == self.device
         self._initialize_kv_cache_pointers()
         assert self.group_kv_cache_pointers_on_gpu is not None
+
+        # Resolve all group tensors up-front
+        num_groups = len(self.group_kv_cache_pointers_on_gpu)
+        group_tensors = []
+        for idx in range(num_groups):
+            t = memory_obj.get_tensor(idx)
+            assert t is not None
+            group_tensors.append(t)
+
         with torch.cuda.stream(self.store_stream):
             if not self.use_gpu or end - start != self.chunk_size:
                 for i, kv_cache_pointer in enumerate(
                     self.group_kv_cache_pointers_on_gpu
                 ):
-                    memory_obj_tensor = memory_obj.get_tensor(i)
-                    assert memory_obj_tensor is not None
+                    memory_obj_tensor = group_tensors[i]
                     lmc_ops.multi_layer_kv_transfer(
                         memory_obj_tensor,
                         kv_cache_pointer,
@@ -614,11 +640,10 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                         block_size=self.block_size,
                         head_size=self.head_size,
                     )
-                    memory_obj_tensor = memory_obj.get_tensor(i)
-                    assert memory_obj_tensor is not None
+                    memory_obj_tensor = group_tensors[i]
                     memory_obj_tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
-        if not memory_obj.raw_tensor.is_cuda:
+        if not raw_tensor.is_cuda:
             # Force a synchronize if the target buffer is NOT CUDA device
             # NOTE: for better performance, we may not want to sync for every
             # memory object
@@ -910,13 +935,15 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
                     ):
                         assert memory_obj.metadata.fmt == MemoryFormat.KV_2TD
                         assert load_gpu_buffer_obj.tensor is not None
+                        tensor = memory_obj.tensor
+                        assert tensor is not None
                         load_gpu_buffer_obj.tensor[0][
                             start - buf_offset : end - buf_offset
-                        ].copy_(memory_obj.tensor[0], non_blocking=True)
+                        ].copy_(tensor[0], non_blocking=True)
 
                         load_gpu_buffer_obj.tensor[1][
                             start - buf_offset : end - buf_offset
-                        ].copy_(memory_obj.tensor[1], non_blocking=True)
+                        ].copy_(tensor[1], non_blocking=True)
 
                         if self.cache_positions and layer_id == 0:
                             old_positions_full[
@@ -1035,12 +1062,13 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
                     old_positions_chunks,
                     strict=False,
                 ):
-                    assert memory_obj.tensor is not None
-                    memory_obj.tensor[0].copy_(
+                    tensor = memory_obj.tensor
+                    assert tensor is not None
+                    tensor[0].copy_(
                         tmp_gpu_buffer_obj.tensor[0][buf_start:buf_end],
                         non_blocking=True,
                     )
-                    memory_obj.tensor[1].copy_(
+                    tensor[1].copy_(
                         tmp_gpu_buffer_obj.tensor[1][buf_start:buf_end],
                         non_blocking=True,
                     )
@@ -1269,13 +1297,15 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                             f"Expected memory format {MemoryFormat.KV_T2D}, "
                             f"got {memory_obj.metadata.fmt}"
                         )
+                    tensor = memory_obj.tensor
+                    assert tensor is not None
                     if self.use_gpu:
                         tmp_gpu_buffer_obj.tensor[start - offset : end - offset].copy_(
-                            memory_obj.tensor, non_blocking=True
+                            tensor, non_blocking=True
                         )
                     else:
                         lmc_ops.single_layer_kv_transfer(
-                            memory_obj.tensor,
+                            tensor,
                             self.kvcaches[layer_id],
                             slot_mapping_full,
                             lmc_ops.TransferDirection.H2D,
@@ -1395,15 +1425,16 @@ class VLLMPagedMemLayerwiseGPUConnector(GPUConnectorInterface):
                 for start, end, memory_obj in zip(
                     starts, ends, memory_objs_layer, strict=False
                 ):
-                    assert memory_obj.tensor is not None
+                    tensor = memory_obj.tensor
+                    assert tensor is not None
                     if self.use_gpu:
-                        memory_obj.tensor.copy_(
+                        tensor.copy_(
                             tmp_gpu_buffer_obj.tensor[start - offset : end - offset],
                             non_blocking=True,
                         )
                     else:
                         lmc_ops.single_layer_kv_transfer(
-                            memory_obj.tensor,
+                            tensor,
                             self.kvcaches[layer_id],
                             slot_mapping[start:end],
                             lmc_ops.TransferDirection.D2H,
@@ -1523,7 +1554,10 @@ class SGLangGPUConnector(GPUConnectorInterface):
         :raises AssertionError: If the memory object does not have a tensor.
         :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
-        assert memory_obj.tensor is not None
+        tensor = memory_obj.tensor
+        if tensor is None:
+            logger.debug("LMCache Warning: memory_obj.tensor is None. Skipping.")
+            return
 
         if self.use_mla:
             if memory_obj.metadata.fmt != MemoryFormat.KV_MLA_FMT:
@@ -1551,7 +1585,7 @@ class SGLangGPUConnector(GPUConnectorInterface):
 
         kv_cache_pointers = self._initialize_pointers(kvcaches)
         lmc_ops.multi_layer_kv_transfer_unilateral(
-            memory_obj.tensor,
+            tensor,
             kv_cache_pointers,
             slot_mapping[start - offset : end - offset],
             get_device(kvcaches),
@@ -1579,7 +1613,10 @@ class SGLangGPUConnector(GPUConnectorInterface):
         :raises AssertionError: If the memory object does not have a tensor.
         :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
-        assert memory_obj.tensor is not None
+        tensor = memory_obj.tensor
+        if tensor is None:
+            logger.debug("LMCache Warning: memory_obj.tensor is None. Skipping.")
+            return
 
         if "kvcaches" not in kwargs:
             raise ValueError("'kvcaches' should be provided in kwargs.")
@@ -1594,7 +1631,7 @@ class SGLangGPUConnector(GPUConnectorInterface):
 
         if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
             lmc_ops.multi_layer_kv_transfer_unilateral(
-                memory_obj.tensor,
+                tensor,
                 kv_cache_pointers,
                 slot_mapping[start:end],
                 get_device(kvcaches),
@@ -1615,9 +1652,9 @@ class SGLangGPUConnector(GPUConnectorInterface):
                 lmc_ops.TransferDirection.D2H,
                 self.engine_kv_format,
             )
-            memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
+            tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
-        if not memory_obj.tensor.is_cuda:
+        if not tensor.is_cuda:
             # Force a synchronize if the target buffer is NOT CUDA device
             # NOTE: for better performance, we may not want to sync for every
             # memory object
@@ -1787,13 +1824,15 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                 starts, ends, memory_objs_layer, strict=False
             ):
                 assert memory_obj.metadata.fmt == MemoryFormat.KV_T2D
+                tensor = memory_obj.tensor
+                assert tensor is not None
                 if self.use_gpu:
                     tmp_gpu_buffer_obj.tensor[start - offset : end - offset].copy_(
-                        memory_obj.tensor, non_blocking=True
+                        tensor, non_blocking=True
                     )
                 else:
                     lmc_ops.single_layer_kv_transfer_sgl(
-                        memory_obj.tensor,
+                        tensor,
                         self.kvcaches[0][layer_id],
                         self.kvcaches[1][layer_id],
                         slot_mapping[start:end],
@@ -1908,17 +1947,18 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
             for start, end, memory_obj in zip(
                 starts, ends, memory_objs_layer, strict=False
             ):
-                assert memory_obj.tensor is not None
+                tensor = memory_obj.tensor
+                assert tensor is not None
                 if self.use_gpu:
-                    chunk_len = memory_obj.tensor.shape[0]
-                    memory_obj.tensor.copy_(
+                    chunk_len = tensor.shape[0]
+                    tensor.copy_(
                         tmp_gpu_buffer_obj.tensor[start_idx : start_idx + chunk_len],
                         non_blocking=True,
                     )
                     start_idx += chunk_len
                 else:
                     lmc_ops.single_layer_kv_transfer_sgl(
-                        memory_obj.tensor,
+                        tensor,
                         self.kvcaches[0][layer_id],
                         self.kvcaches[1][layer_id],
                         slot_mapping[start:end],
@@ -2126,10 +2166,13 @@ class TRTLLMGPUConnector(GPUConnectorInterface):
         if self.kv_cache_tensor is None:
             raise RuntimeError("register_kv_caches must be called before to_gpu")
         chunk_blocks = self._get_chunk_block_ids(kwargs.get("block_ids", []), start)
-        if chunk_blocks is None or memory_obj.tensor is None:
+        if chunk_blocks is None:
+            return
+        tensor = memory_obj.tensor
+        if tensor is None:
             return
         self._transfer(
-            memory_obj.tensor.data_ptr(),
+            tensor.data_ptr(),
             chunk_blocks,
             lmc_ops.TransferDirection.H2D,
             self.load_stream,
@@ -2139,10 +2182,13 @@ class TRTLLMGPUConnector(GPUConnectorInterface):
         if self.kv_cache_tensor is None:
             raise RuntimeError("register_kv_caches must be called before from_gpu")
         chunk_blocks = self._get_chunk_block_ids(kwargs.get("block_ids", []), start)
-        if chunk_blocks is None or memory_obj.tensor is None:
+        if chunk_blocks is None:
+            return
+        tensor = memory_obj.tensor
+        if tensor is None:
             return
         self._transfer(
-            memory_obj.tensor.data_ptr(),
+            tensor.data_ptr(),
             chunk_blocks,
             lmc_ops.TransferDirection.D2H,
             self.store_stream,
@@ -2156,22 +2202,25 @@ class TRTLLMGPUConnector(GPUConnectorInterface):
         direction: "lmc_ops.TransferDirection",
         stream: torch.cuda.Stream,
     ) -> None:
-        valid: List[Tuple[MemoryObj, List[int]]] = []
+        valid: List[Tuple[torch.Tensor, List[int]]] = []
         for memory_obj, start in zip(memory_objs, starts, strict=False):
-            if isinstance(memory_obj, list) or memory_obj.tensor is None:
+            if isinstance(memory_obj, list):
+                continue
+            tensor = memory_obj.tensor
+            if tensor is None:
                 continue
             chunk_blocks = self._get_chunk_block_ids(block_ids, start)
             if chunk_blocks is not None:
-                valid.append((memory_obj, chunk_blocks))
+                valid.append((tensor, chunk_blocks))
 
         with torch.cuda.stream(stream):
             for i in range(0, len(valid), self._batch_size):
                 batch = valid[i : i + self._batch_size]
                 all_block_ids: List[int] = []
                 ptrs: List[int] = []
-                for mo, blocks in batch:
+                for tensor, blocks in batch:
                     all_block_ids.extend(blocks)
-                    ptrs.append(mo.tensor.data_ptr())  # type: ignore[union-attr]
+                    ptrs.append(tensor.data_ptr())
                 block_ids_gpu = self._stage_block_ids(all_block_ids)
                 lmc_ops.multi_layer_block_kv_transfer(
                     self.paged_buffer_ptrs,

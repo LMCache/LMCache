@@ -100,7 +100,8 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
         :raises AssertionError: If the memory object does not have a tensor.
         :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
-        assert memory_obj.tensor is not None
+        tensor = memory_obj.tensor
+        assert tensor is not None
 
         self.initialize_kvcaches_ptr(**kwargs)
 
@@ -123,7 +124,7 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
         htorch.core.mark_step()
 
         if self.use_mla:
-            tmp = memory_obj.tensor[0].to(slot_mapping.device)
+            tmp = tensor[0].to(slot_mapping.device)
             total_blocks = self.num_blocks * self.block_size
             for i, kvcache in enumerate(self.kvcaches):
                 kvcache.view(total_blocks, self.head_size).index_copy_(
@@ -131,8 +132,8 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
                 )
                 htorch.core.mark_step()
         else:
-            tmp_k = memory_obj.tensor[0].to(slot_mapping.device)
-            tmp_v = memory_obj.tensor[1].to(slot_mapping.device)
+            tmp_k = tensor[0].to(slot_mapping.device)
+            tmp_v = tensor[1].to(slot_mapping.device)
             total_blocks = self.num_blocks * self.block_size
             d = self.num_heads * self.head_size
             for i, (kcache, vcache) in enumerate(self.kvcaches):
@@ -161,7 +162,8 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
         :raises AssertionError: If the memory object does not have a tensor.
         :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
-        assert memory_obj.tensor is not None
+        tensor = memory_obj.tensor
+        assert tensor is not None
 
         self.initialize_kvcaches_ptr(**kwargs)
         assert self.kvcaches is not None, (
@@ -202,7 +204,7 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
                 ]
             )
             tmp = torch.stack([tmp_k, tmp_v])
-        memory_obj.tensor.copy_(tmp, non_blocking=True)
+        tensor.copy_(tmp, non_blocking=True)
 
         htorch.core.mark_step()
         torch.hpu.synchronize()
