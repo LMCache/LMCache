@@ -211,6 +211,43 @@ def test_register_kv_caches_raises_connection_error_on_timeout(fake_adapter):
         adapter.register_kv_caches({"layer.0": fake_tensor})
 
 
+def test_register_timeout_rolls_back_and_closes_unregistered_ctx(
+    fake_adapter, monkeypatch
+):
+    """A failed re-registration closes the never-registered context and
+    keeps the previous context current (the next successful recovery
+    displaces and closes it through the normal path)."""
+    adapter, _send_mock, future = fake_adapter
+    contexts = _patch_transfer_context_factory(monkeypatch)
+
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    adapter.register_kv_caches({"layer.0": fake_tensor})  # contexts[0]
+    assert adapter.transfer_ctx is contexts[0]
+
+    # The factory mints mock contexts, so the timeout must come from the
+    # next context's own register.
+    def _create_timing_out_ctx(
+        kv_caches: dict[str, torch.Tensor], mode: str
+    ) -> MagicMock:
+        ctx = MagicMock(name=f"transfer_ctx_{len(contexts)}")
+        ctx.register.side_effect = TimeoutError("server down")
+        contexts.append(ctx)
+        return ctx
+
+    monkeypatch.setattr(
+        adapter_mod, "create_transfer_context", _create_timing_out_ctx
+    )
+    with pytest.raises(ConnectionError, match="did not respond"):
+        adapter.register_kv_caches({"layer.0": fake_tensor})  # contexts[1]
+
+    assert len(contexts) == 2
+    # Old context stays current and open; the unregistered one is closed.
+    assert adapter.transfer_ctx is contexts[0]
+    contexts[0].close.assert_not_called()
+    contexts[1].close.assert_called_once()
+
+
 def test_register_kv_caches_cpu_submits_engine_driven_context_registration(
     fake_adapter, monkeypatch
 ):
@@ -731,12 +768,14 @@ def test_startup_does_not_warn_for_default_heartbeat_interval(
     assert not any("reap" in msg for msg in warnings)
 
 
-def test_recover_callback_rebuilds_transfer_ctx_without_closing_previous(
+def test_recover_callback_rebuilds_and_closes_previous_transfer_ctx(
     fake_adapter, monkeypatch
 ) -> None:
-    """Pin current behavior: every recover-callback invocation rebuilds
-    ``transfer_ctx`` without closing the previous context (known IPC leak;
-    in-flight submissions may still hold a reference to the old context)."""
+    """Every recover-callback invocation rebuilds ``transfer_ctx`` and closes
+    the displaced context deterministically. Closing is safe now that
+    ``close()`` drains in-flight transfers before releasing resources
+    (transfer guard); this replaces the previously pinned behavior of
+    abandoning the old context to GC timing (a known IPC leak)."""
     adapter, _send_mock, _ = fake_adapter
     contexts = _patch_transfer_context_factory(monkeypatch)
 
@@ -750,15 +789,14 @@ def test_recover_callback_rebuilds_transfer_ctx_without_closing_previous(
     assert len(contexts) == 1
     assert adapter.transfer_ctx is contexts[0]
 
-    # Each recover-callback invocation rebuilds transfer_ctx without closing
-    # the previous context (known IPC leak; in-flight submissions may still
-    # hold a reference to the old context).
     assert heartbeat.recover_callback() is True
     assert len(contexts) == 2
     assert adapter.transfer_ctx is contexts[1]
-    contexts[0].close.assert_not_called()
+    contexts[0].close.assert_called_once()
+    contexts[1].close.assert_not_called()
 
     assert heartbeat.recover_callback() is True
     assert len(contexts) == 3
     assert adapter.transfer_ctx is contexts[2]
-    contexts[1].close.assert_not_called()
+    contexts[1].close.assert_called_once()
+    contexts[2].close.assert_not_called()
