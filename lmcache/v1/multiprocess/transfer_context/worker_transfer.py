@@ -980,10 +980,11 @@ class EngineDrivenTransferContext(TransferContext):
     ) -> None:
         """Register KV caches with the non-GPU context server.
 
-        When ``engine_group_infos`` describes more than one object group, the
-        registration exports deterministic transfer metadata used by both
-        pickle and SHM transports. Single dense object-group registrations
-        retain the legacy wire format and data path.
+        ``engine_group_infos`` and ``engine_type`` are accepted to satisfy
+        the base interface but are currently a no-op: the non-GPU transfer
+        path does not support hybrid KV cache groups and rejects multi-
+        group transfers at store / retrieve time (see
+        ``_single_group_block_ids``).
         """
         # TODO: per-group compression (EngineGroupInfo.tokens_per_block vs
         # the tensor-detected slot count, e.g. DeepSeek V4) is only handled
