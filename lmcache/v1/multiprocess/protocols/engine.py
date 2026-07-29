@@ -60,6 +60,9 @@ class RegisterEngineDrivenContextResponse:
 REQUEST_NAMES = [
     "REGISTER_KV_CACHE",
     "UNREGISTER_KV_CACHE",
+    "REGISTER_Q_CACHE",
+    "UNREGISTER_Q_CACHE",
+    "STORE_Q",
     "STORE",
     "RETRIEVE",
     "LOOKUP",
@@ -121,6 +124,40 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             payload_classes=[int],
             response_class=None,
             handler_type=HandlerType.SYNC,
+        ),
+        # Register QRingBuffer.
+        # Same as REGISTER_KV_CACHE: the Q ring reuses worker's instance_id
+        # registered in REGISTER_KV_CACHE, keyed by a distinct model_name, so
+        # STORE can serve it via the existing transfer path with no separate
+        # instance id.
+        "REGISTER_Q_CACHE": ProtocolDefinition(
+            payload_classes=[
+                int,
+                KVCache,
+                str,
+                int,
+                EngineType,
+                LayoutHints,
+                list[EngineGroupInfo],
+            ],
+            response_class=None,
+            handler_type=HandlerType.SYNC,
+        ),
+        # Unregister the paged Q ring buffer.
+        # Same as UNREGISTER_KV_CACHE.
+        # Returns: None
+        "UNREGISTER_Q_CACHE": ProtocolDefinition(
+            payload_classes=[int],
+            response_class=None,
+            handler_type=HandlerType.SYNC,
+        ),
+        # Store paged Q ring blocks (served by QStoreModule).
+        # Same as STORE.
+        # Returns: tuple[bytes, bool] - (CUDA event handle, success flag)
+        "STORE_Q": ProtocolDefinition(
+            payload_classes=[KeyType, int, list[list[int]], bytes],
+            response_class=tuple[bytes, bool],
+            handler_type=HandlerType.BLOCKING,
         ),
         # Store KV cache blocks
         # Payload:
