@@ -26,6 +26,7 @@ from lmcache.v1.multiprocess.transfer_plan import compute_num_objects_to_skip
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.distributed.storage_manager import StorageManager
+    from lmcache.v1.memory_management import MemoryObj
 
 logger = init_logger(__name__)
 
@@ -36,6 +37,36 @@ PicklePayload: TypeAlias = list[torch.Tensor] | list[list[PickleChunk]]
 def _dtype_to_name(dtype: torch.dtype) -> str:
     """Return a stable torch dtype name without module prefix."""
     return str(dtype).split(".")[-1]
+
+
+def _make_shm_slot_descriptor(
+    memory_obj: "MemoryObj", tensor: torch.Tensor
+) -> ShmSlotDescriptor:
+    """Describe one contiguous tensor within a shared-memory memory object.
+
+    Args:
+        memory_obj: The SHM-backed storage object containing ``tensor``.
+        tensor: One contiguous tensor view owned by ``memory_obj``.
+
+    Returns:
+        A slot descriptor whose offset and length identify exactly ``tensor``.
+
+    Raises:
+        ValueError: If the tensor is not a contiguous in-bounds view of the
+            memory object.
+    """
+    if not tensor.is_contiguous():
+        raise ValueError("SHM slot tensor must be contiguous")
+    tensor_offset = tensor.data_ptr() - memory_obj.data_ptr
+    tensor_length = tensor.numel() * tensor.element_size()
+    if tensor_offset < 0 or tensor_offset + tensor_length > memory_obj.shm_byte_length:
+        raise ValueError("SHM slot tensor is outside its memory object")
+    return ShmSlotDescriptor(
+        offset=memory_obj.shm_offset + tensor_offset,
+        length=tensor_length,
+        shape=list(tensor.shape),
+        dtype=_dtype_to_name(tensor.dtype),
+    )
 
 
 def create_transfer_strategy(
@@ -130,6 +161,14 @@ class TransferStrategy(abc.ABC):
         Returns:
             ``True`` when the strategy successfully commits the store request.
         """
+
+    @abc.abstractmethod
+    def abort_store(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+    ) -> bool:
+        """Abort an unfinished store and release transport-side resources."""
 
     @abc.abstractmethod
     def prepare_retrieve(
@@ -277,6 +316,14 @@ class PickleTransferStrategy(TransferStrategy):
             if reserved_keys:
                 self._storage_manager.finish_write(reserved_keys)
 
+        return True
+
+    def abort_store(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+    ) -> bool:
+        """Return success because pickle stores allocate only during commit."""
         return True
 
     def prepare_retrieve(
@@ -507,8 +554,17 @@ class ShmTransferStrategy(TransferStrategy):
         """Reserve SHM-backed objects and return slot descriptors.
 
         Returns:
-            Context with ``slots`` and ``chunk_indices``.
+            Legacy registrations receive a flat ``slots`` / ``chunk_indices``
+            context. Multi-object-group registrations receive an
+            ``object_groups`` context ordered by object group, chunk, and
+            kernel-group tensor.
         """
+        if context.object_group_layout_descs:
+            return self._prepare_multi_group_store(
+                key, instance_id, context, resolve_obj_keys
+            )
+
+        self.abort_store(key, instance_id)
         obj_keys = resolve_obj_keys(key)[0]
         reserved = self._storage_manager.reserve_write(
             obj_keys, context.layout_desc, "new"
@@ -537,12 +593,12 @@ class ShmTransferStrategy(TransferStrategy):
                 obj_key for obj_key in reserved if obj_key not in reserved_keys_set
             ]
             if unused_keys:
-                self._storage_manager.finish_write(unused_keys)
-        if not reserved_keys:
-            return PrepareStoreResponse(context={"slots": [], "chunk_indices": []})
+                self._abort_write_reservations(unused_keys)
         transfer_key = self._transfer_key_factory(key, instance_id)
-        with self._pending_lock:
-            self._pending_writes[transfer_key] = reserved_keys
+        if not reserved_keys:
+            self._replace_pending_write(transfer_key, [])
+            return PrepareStoreResponse(context={"slots": [], "chunk_indices": []})
+        self._replace_pending_write(transfer_key, reserved_keys)
         return PrepareStoreResponse(
             context={"slots": slots, "chunk_indices": chunk_indices}
         )
@@ -560,21 +616,44 @@ class ShmTransferStrategy(TransferStrategy):
         Returns:
             ``True`` when pending SHM reservation is committed successfully.
         """
-        if cpu_data != b"":
-            return self._fallback_strategy.commit_store(
-                key=key,
-                instance_id=instance_id,
-                cpu_data=cpu_data,
-                context=context,
-                resolve_obj_keys=resolve_obj_keys,
-            )
         transfer_key = self._transfer_key_factory(key, instance_id)
-        with self._pending_lock:
-            reserved_keys = self._pending_writes.pop(transfer_key, None)
+        if cpu_data != b"":
+            # A worker that prepared direct SHM slots must never commit an
+            # inline payload over those reservations. Drop the uncommitted
+            # objects before attempting the compatibility fallback so malformed
+            # payloads cannot leave a lock or a partially initialized cache key.
+            pending_keys = self._take_pending_write(transfer_key)
+            if pending_keys:
+                self._abort_write_reservations(pending_keys)
+            try:
+                return self._fallback_strategy.commit_store(
+                    key=key,
+                    instance_id=instance_id,
+                    cpu_data=cpu_data,
+                    context=context,
+                    resolve_obj_keys=resolve_obj_keys,
+                )
+            except Exception:
+                logger.exception("Malformed inline SHM store commit")
+                return False
+
+        reserved_keys = self._take_pending_write(transfer_key)
         if reserved_keys is None:
             return False
         if reserved_keys:
             self._storage_manager.finish_write(reserved_keys)
+        return True
+
+    def abort_store(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+    ) -> bool:
+        """Discard pending SHM writes without publishing partial contents."""
+        transfer_key = self._transfer_key_factory(key, instance_id)
+        pending_keys = self._take_pending_write(transfer_key)
+        if pending_keys:
+            self._abort_write_reservations(pending_keys)
         return True
 
     def prepare_retrieve(
@@ -585,6 +664,11 @@ class ShmTransferStrategy(TransferStrategy):
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[list[ObjectKey]]],
     ) -> PrepareRetrieveResponse:
         """Read SHM objects and return slot descriptors for worker access."""
+        if context.object_group_layout_descs:
+            return self._prepare_multi_group_retrieve(
+                key, instance_id, context, resolve_obj_keys
+            )
+
         obj_keys = resolve_obj_keys(key)[0]
         shm_prefetched_keys, shm_memory_objs = self._storage_manager.unsafe_read(
             obj_keys
@@ -611,8 +695,7 @@ class ShmTransferStrategy(TransferStrategy):
                 ).to_dict()
             )
         transfer_key = self._transfer_key_factory(key, instance_id)
-        with self._pending_lock:
-            self._pending_reads[transfer_key] = shm_prefetched_keys
+        self._replace_pending_read(transfer_key, shm_prefetched_keys)
         return PrepareRetrieveResponse(success=True, data=b"", context={"slots": slots})
 
     def commit_retrieve(
@@ -622,8 +705,225 @@ class ShmTransferStrategy(TransferStrategy):
     ) -> bool:
         """Release pending SHM read locks for the completed retrieve request."""
         transfer_key = self._transfer_key_factory(key, instance_id)
-        with self._pending_lock:
-            prefetched_keys = self._pending_reads.pop(transfer_key, [])
+        prefetched_keys = self._take_pending_read(transfer_key)
         if prefetched_keys:
             self._storage_manager.finish_read_prefetched(prefetched_keys)
         return True
+
+    def _prepare_multi_group_store(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        context: EngineDrivenContextMetadata,
+        resolve_obj_keys: Callable[[IPCCacheServerKey], list[list[ObjectKey]]],
+    ) -> PrepareStoreResponse:
+        """Reserve all multi-group store slots before publishing any of them."""
+        self.abort_store(key, instance_id)
+        obj_keys_by_group = resolve_obj_keys(key)
+        layouts = context.object_group_layout_descs
+        if len(obj_keys_by_group) != len(layouts):
+            raise ValueError(
+                "multi-group SHM object-key count does not match registration"
+            )
+
+        reserved_keys: list[ObjectKey] = []
+        object_groups: list[dict[str, Any]] = []
+        try:
+            for object_group_id, (obj_keys, layout) in enumerate(
+                zip(obj_keys_by_group, layouts, strict=True)
+            ):
+                reserved = self._storage_manager.reserve_write(obj_keys, layout, "new")
+                unexpected_keys = [
+                    obj_key for obj_key in reserved if obj_key not in obj_keys
+                ]
+                if unexpected_keys:
+                    reserved_keys.extend(reserved)
+                    raise ValueError(
+                        f"SHM reserve returned unknown object keys for group "
+                        f"{object_group_id}"
+                    )
+
+                group_slots: list[list[dict[str, Any]]] = []
+                chunk_indices: list[int] = []
+                for chunk_idx, obj_key in enumerate(obj_keys):
+                    memory_obj = reserved.get(obj_key)
+                    if memory_obj is None:
+                        continue
+                    # Add the key before validating the object so every
+                    # reservation is aborted if one descriptor is malformed.
+                    reserved_keys.append(obj_key)
+                    slot_chunk: list[dict[str, Any]] = []
+                    for tensor_idx, (shape, dtype) in enumerate(
+                        zip(layout.shapes, layout.dtypes, strict=True)
+                    ):
+                        tensor = memory_obj.get_tensor(tensor_idx)
+                        if (
+                            tensor is None
+                            or tensor.shape != shape
+                            or tensor.dtype != dtype
+                        ):
+                            raise ValueError(
+                                f"SHM object group {object_group_id}, chunk "
+                                f"{chunk_idx}, tensor {tensor_idx} does not match "
+                                "the registered layout"
+                            )
+                        slot_chunk.append(
+                            _make_shm_slot_descriptor(memory_obj, tensor).to_dict()
+                        )
+                    chunk_indices.append(chunk_idx)
+                    group_slots.append(slot_chunk)
+                object_groups.append(
+                    {
+                        "object_group_id": object_group_id,
+                        "chunk_indices": chunk_indices,
+                        "slots": group_slots,
+                    }
+                )
+        except Exception:
+            if reserved_keys:
+                self._abort_write_reservations(reserved_keys)
+            raise
+
+        transfer_key = self._transfer_key_factory(key, instance_id)
+        self._replace_pending_write(transfer_key, reserved_keys)
+        return PrepareStoreResponse(context={"object_groups": object_groups})
+
+    def _prepare_multi_group_retrieve(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        context: EngineDrivenContextMetadata,
+        resolve_obj_keys: Callable[[IPCCacheServerKey], list[list[ObjectKey]]],
+    ) -> PrepareRetrieveResponse:
+        """Build an all-or-nothing ordered multi-group SHM read response."""
+        obj_keys_by_group = resolve_obj_keys(key)
+        layouts = context.object_group_layout_descs
+        if len(obj_keys_by_group) != len(layouts):
+            raise ValueError(
+                "multi-group SHM object-key count does not match registration"
+            )
+        if len(context.attn_desc.num_chunks_in_sw) != len(layouts):
+            raise ValueError(
+                "multi-group SHM attention-window count does not match registration"
+            )
+
+        prefetched_keys: list[ObjectKey] = []
+        object_groups: list[dict[str, Any]] = []
+        try:
+            for object_group_id, (obj_keys, layout) in enumerate(
+                zip(obj_keys_by_group, layouts, strict=True)
+            ):
+                num_to_skip = compute_num_objects_to_skip(
+                    context.attn_desc.num_chunks_in_sw[object_group_id],
+                    len(obj_keys),
+                    is_retrieve=True,
+                )
+                selected_keys = obj_keys[num_to_skip:]
+                group_prefetched_keys, memory_objs = self._storage_manager.unsafe_read(
+                    selected_keys
+                )
+                if (
+                    not memory_objs
+                    or len(group_prefetched_keys) != len(selected_keys)
+                    or len(memory_objs) != len(selected_keys)
+                ):
+                    if group_prefetched_keys:
+                        self._storage_manager.finish_read_prefetched(
+                            group_prefetched_keys
+                        )
+                    raise ValueError(
+                        f"SHM object group {object_group_id} is not fully readable"
+                    )
+                # Record locks before validating descriptors so a malformed
+                # memory object follows the same all-or-nothing cleanup path.
+                prefetched_keys.extend(group_prefetched_keys)
+
+                group_slots: list[list[dict[str, Any]]] = []
+                for chunk_idx, memory_obj in enumerate(memory_objs):
+                    slot_chunk: list[dict[str, Any]] = []
+                    for tensor_idx, (shape, dtype) in enumerate(
+                        zip(layout.shapes, layout.dtypes, strict=True)
+                    ):
+                        tensor = memory_obj.get_tensor(tensor_idx)
+                        if (
+                            tensor is None
+                            or tensor.shape != shape
+                            or tensor.dtype != dtype
+                        ):
+                            raise ValueError(
+                                f"SHM object group {object_group_id}, chunk "
+                                f"{chunk_idx + num_to_skip}, tensor {tensor_idx} "
+                                "does not match the registered layout"
+                            )
+                        slot_chunk.append(
+                            _make_shm_slot_descriptor(memory_obj, tensor).to_dict()
+                        )
+                    group_slots.append(slot_chunk)
+                object_groups.append(
+                    {
+                        "object_group_id": object_group_id,
+                        "chunk_indices": list(range(num_to_skip, len(obj_keys))),
+                        "slots": group_slots,
+                    }
+                )
+        except ValueError as exc:
+            if prefetched_keys:
+                self._storage_manager.finish_read_prefetched(prefetched_keys)
+            logger.debug("Multi-group SHM retrieve unavailable: %s", exc)
+            return PrepareRetrieveResponse(success=False, data=b"", context={})
+        except Exception:
+            if prefetched_keys:
+                self._storage_manager.finish_read_prefetched(prefetched_keys)
+            logger.exception("Failed to prepare multi-group SHM retrieve")
+            return PrepareRetrieveResponse(success=False, data=b"", context={})
+
+        transfer_key = self._transfer_key_factory(key, instance_id)
+        self._replace_pending_read(transfer_key, prefetched_keys)
+        return PrepareRetrieveResponse(
+            success=True, data=b"", context={"object_groups": object_groups}
+        )
+
+    def _abort_write_reservations(self, object_keys: list[ObjectKey]) -> None:
+        """Discard uncommitted SHM objects without publishing their contents."""
+        if object_keys:
+            self._storage_manager.delete_l1_keys(object_keys, force=True)
+
+    def _replace_pending_write(
+        self,
+        transfer_key: tuple[int, IPCCacheServerKey],
+        object_keys: list[ObjectKey],
+    ) -> None:
+        """Atomically replace a pending write and discard its stale reservation."""
+        with self._pending_lock:
+            stale_keys = self._pending_writes.pop(transfer_key, [])
+            if object_keys:
+                self._pending_writes[transfer_key] = object_keys
+        if stale_keys:
+            self._abort_write_reservations(stale_keys)
+
+    def _replace_pending_read(
+        self,
+        transfer_key: tuple[int, IPCCacheServerKey],
+        object_keys: list[ObjectKey],
+    ) -> None:
+        """Atomically replace a pending read and release its stale read locks."""
+        with self._pending_lock:
+            stale_keys = self._pending_reads.pop(transfer_key, [])
+            if object_keys:
+                self._pending_reads[transfer_key] = object_keys
+        if stale_keys:
+            self._storage_manager.finish_read_prefetched(stale_keys)
+
+    def _take_pending_write(
+        self, transfer_key: tuple[int, IPCCacheServerKey]
+    ) -> list[ObjectKey] | None:
+        """Remove and return one pending write reservation."""
+        with self._pending_lock:
+            return self._pending_writes.pop(transfer_key, None)
+
+    def _take_pending_read(
+        self, transfer_key: tuple[int, IPCCacheServerKey]
+    ) -> list[ObjectKey]:
+        """Remove and return one pending read reservation."""
+        with self._pending_lock:
+            return self._pending_reads.pop(transfer_key, [])

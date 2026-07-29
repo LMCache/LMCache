@@ -448,6 +448,11 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 ThreadPoolType.AFFINITY,
             ),
             HandlerSpec(
+                RequestType.ABORT_STORE,
+                self.abort_store,
+                ThreadPoolType.AFFINITY,
+            ),
+            HandlerSpec(
                 RequestType.PREPARE_RETRIEVE,
                 self.prepare_retrieve,
                 ThreadPoolType.AFFINITY,
@@ -488,8 +493,11 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
     def close(self) -> None:
         """Release resources owned by this module."""
         with self._lock:
+            entries = list(self._engine_driven_contexts.items())
             self._engine_driven_contexts.clear()
             self._strategies.clear()
+        for instance_id, entry in entries:
+            self._release_entry(instance_id, entry)
 
     def touch_instance(self, instance_id: int) -> None:
         """Refresh the worker's last-seen time and mark it ping-proven.
@@ -601,7 +609,10 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
 
         for obj_keys in write_obj_keys:
             if obj_keys:
-                self._ctx.storage_manager.finish_write(obj_keys)
+                # These stores never reached COMMIT_STORE, so publishing their
+                # contents would expose partially written SHM data. Force-delete
+                # the write-locked allocations instead of finishing the write.
+                self._ctx.storage_manager.delete_l1_keys(obj_keys, force=True)
         for obj_keys in read_obj_keys:
             if obj_keys:
                 self._ctx.storage_manager.finish_read_prefetched(obj_keys)
@@ -731,12 +742,6 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 object_group_layout_descs,
                 self._ctx.chunk_size,
             )
-        if transfer_metadata is not None and shm_name and pool_size > 0:
-            raise ValueError(
-                "engine-driven hybrid KV cache transfer is not supported with "
-                "the configured SHM transport"
-            )
-
         # Primary layout is object group 0.
         primary_layout_desc = (
             object_group_layout_descs[0]
@@ -886,6 +891,30 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 time.perf_counter() - st,
             )
         return result
+
+    @_lmcache_nvtx_annotate
+    def abort_store(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+    ) -> bool:
+        """Abort an unfinished engine-driven store.
+
+        Args:
+            key: Cache key for the token range being stored.
+            instance_id: Worker instance identifier.
+
+        Returns:
+            ``True`` after the strategy releases any pending store resources.
+
+        Raises:
+            ValueError: If no non-GPU context is registered for the given
+                instance ID.
+        """
+        _, strategy = self._resolve_for_transfer(instance_id)
+        session = self._ctx.session_manager.get_or_create(key.request_id)
+        session.extras.pop("store_start_time", None)
+        return strategy.abort_store(key=key, instance_id=instance_id)
 
     @_lmcache_nvtx_annotate
     def prepare_retrieve(

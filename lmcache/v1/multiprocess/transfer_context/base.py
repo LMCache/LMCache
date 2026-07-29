@@ -45,8 +45,15 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-EngineDrivenChunk: TypeAlias = torch.Tensor | list[torch.Tensor]
-EngineDrivenPayload: TypeAlias = list[torch.Tensor] | list[list[EngineDrivenChunk]]
+EngineDrivenSingleGroupPayload: TypeAlias = list[torch.Tensor]
+EngineDrivenMultiGroupPayload: TypeAlias = list[list[list[torch.Tensor]]]
+EngineDrivenPayload: TypeAlias = (
+    EngineDrivenSingleGroupPayload | EngineDrivenMultiGroupPayload
+)
+EngineDrivenStoreChunkIndices: TypeAlias = list[int] | list[list[int]]
+EngineDrivenStorePreparation: TypeAlias = tuple[
+    EngineDrivenPayload, EngineDrivenStoreChunkIndices
+]
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +179,7 @@ class EngineDrivenContext(ABC):
     @abstractmethod
     def prepare_store(
         self, key: IPCCacheServerKey, instance_id: int
-    ) -> tuple[list[torch.Tensor], list[int]] | None:
+    ) -> EngineDrivenStorePreparation | None:
         """Prepare SHM buffers for a store operation.
 
         Returns:
@@ -188,6 +195,11 @@ class EngineDrivenContext(ABC):
                   need writing; chunk 1 is already cached).
                 Caller gathers only these chunks into the provided tensors,
                 then calls commit_store with empty payload.
+            (grouped_tensors, grouped_chunk_indices): Multi-object-group SHM
+                mode. ``grouped_tensors[group][chunk][tensor]`` is in
+                deterministic object-group, chunk, then kernel-group order.
+                ``grouped_chunk_indices[group][chunk]`` identifies each
+                sparse writable chunk's position in that object group.
         """
         ...
 
@@ -199,6 +211,11 @@ class EngineDrivenContext(ABC):
         chunks: EngineDrivenPayload,
     ) -> bool:
         """Commit store. Pickle: serialize and send. Shm: notify server."""
+        ...
+
+    @abstractmethod
+    def abort_store(self, key: IPCCacheServerKey, instance_id: int) -> bool:
+        """Abort an unfinished store and release any transport-side resources."""
         ...
 
     @abstractmethod

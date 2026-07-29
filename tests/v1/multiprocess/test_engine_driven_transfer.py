@@ -4,6 +4,7 @@ from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 from unittest.mock import MagicMock, PropertyMock, patch
+import gc
 import os
 import pickle
 import sys
@@ -1260,7 +1261,7 @@ def test_server_prepare_store_releases_unused_reserved_write_locks(
     assert isinstance(prepare_response, PrepareStoreResponse)
     assert prepare_response.context == {"slots": [], "chunk_indices": []}
     reserved_keys = mock_storage.reserve_write.call_args[0][0]
-    mock_storage.finish_write.assert_called_once_with(reserved_keys)
+    mock_storage.delete_l1_keys.assert_called_once_with(reserved_keys, force=True)
 
 
 def test_server_shm_transport_uses_engine_level_config(
@@ -1354,7 +1355,7 @@ def test_server_unregister_engine_driven_context_releases_pending_shm_locks(
 
     module.unregister_kv_cache(4)
 
-    mock_storage.finish_write.assert_called_once()
+    mock_storage.delete_l1_keys.assert_called_once()
     mock_storage.finish_read_prefetched.assert_called_once()
 
 
@@ -1567,6 +1568,7 @@ def test_engine_driven_context_shm_store_retrieve_flow_with_mocked_mq() -> None:
         store_result = context.prepare_store(key=key, instance_id=1)
         assert store_result is not None
         store_views, _ = store_result
+        assert isinstance(store_views[0], torch.Tensor)
         store_views[0].copy_(
             torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32)
         )
@@ -3367,23 +3369,24 @@ def test_server_pickle_multi_group_rejects_partial_payload_before_reservation(
     mock_storage.reserve_write.assert_not_called()
 
 
-def test_server_rejects_hybrid_registration_with_shm_transport(
+def test_server_registers_hybrid_context_with_shm_transport(
     stub_native_storage_ops: Any,
     server_module_factory: ServerModuleFactory,
 ) -> None:
-    """Hybrid registration fails before creating SHM transfer state."""
+    """Hybrid registration accepts the engine-level SHM transport."""
     module, _, _, ctx = server_module_factory(
         chunk_size=8,
         storage_manager_config=_make_storage_manager_config(
             shm_name="lmcache_test_pool", pool_size=4096
         ),
     )
-    with pytest.raises(ValueError, match="not supported with.*SHM"):
-        module.register_kv_cache_engine_driven_context(
-            _make_multi_group_payload(instance_id=53, chunk_size=8)
-        )
-    assert module.tracked_instance_count() == 0
-    assert ctx.layout_desc_registry.find("m", 1) is None
+    response = module.register_kv_cache_engine_driven_context(
+        _make_multi_group_payload(instance_id=53, chunk_size=8)
+    )
+    assert response.shm_name == "lmcache_l1_pool_lmcache_test_pool"
+    assert response.pool_size == 4096
+    assert module.tracked_instance_count() == 1
+    assert ctx.layout_desc_registry.find("m", 1) is not None
 
 
 def test_server_pickle_multi_group_releases_all_reservations_on_copy_failure(
@@ -3478,3 +3481,523 @@ def test_hybrid_subchunk_retrieve_recalculates_prefix_skip(
         layout_hints=None,
     )
     assert captured_skip_tokens == [0]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 5: Engine-driven multi-object-group SHM transfers
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class _MultiGroupShmMemoryObj:
+    """Minimal SHM-backed memory object used to exercise slot descriptors."""
+
+    def __init__(
+        self,
+        buffer: Any,
+        offset: int,
+        layout: MemoryLayoutDesc,
+    ) -> None:
+        byte_length = sum(
+            shape.numel() * dtype.itemsize
+            for shape, dtype in zip(layout.shapes, layout.dtypes, strict=True)
+        )
+        self._raw = torch.frombuffer(
+            buffer, dtype=torch.uint8, count=byte_length, offset=offset
+        )
+        self.shm_offset = offset
+        self.shm_byte_length = byte_length
+        self.data_ptr = self._raw.data_ptr()
+        self._tensors: list[torch.Tensor] = []
+        tensor_offset = 0
+        for shape, dtype in zip(layout.shapes, layout.dtypes, strict=True):
+            tensor_length = shape.numel() * dtype.itemsize
+            self._tensors.append(
+                self._raw[tensor_offset : tensor_offset + tensor_length]
+                .view(dtype)
+                .view(shape)
+            )
+            tensor_offset += tensor_length
+
+    def get_tensor(self, tensor_index: int) -> torch.Tensor:
+        """Return one object-group tensor in registered layout order."""
+        return self._tensors[tensor_index]
+
+
+def test_server_shm_multi_group_slots_skip_cache_and_round_trip(
+    stub_native_storage_ops: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """SHM preserves object-group/chunk order across sparse store and retrieve."""
+    shape = torch.Size([2, 2, 8, 16])
+    layout = MemoryLayoutDesc(shapes=[shape], dtypes=[torch.float32])
+    shm_name = f"lmcache_test_multigroup_shm_{os.getpid()}"
+    addr = _create_shm_segment(shm_name, 16384)
+    owner_buffer = shm_open_pool_as_mmap(shm_name, 16384)
+    context: EngineDrivenContextShm | None = None
+    try:
+        object_keys = [["g0-c0", "g0-c1"], ["g1-c0", "g1-c1"]]
+        memory_objects = {
+            object_key: _MultiGroupShmMemoryObj(
+                owner_buffer,
+                object_index * shape.numel() * torch.float32.itemsize,
+                layout,
+            )
+            for object_index, object_key in enumerate(
+                [key for group in object_keys for key in group]
+            )
+        }
+        for value, object_key in enumerate(
+            [key for group in object_keys for key in group], start=10
+        ):
+            memory_objects[object_key].get_tensor(0).fill_(value)
+
+        writable_keys = {"g0-c1", "g1-c0"}
+        mock_storage = MagicMock()
+        mock_storage.reserve_write.side_effect = lambda keys, *_args: {
+            object_key: memory_objects[object_key]
+            for object_key in keys
+            if object_key in writable_keys
+        }
+        mock_storage.unsafe_read.side_effect = lambda keys: (
+            list(keys),
+            [memory_objects[object_key] for object_key in keys],
+        )
+        mock_session = MagicMock()
+        mock_session.get_hashes.return_value = [b"h0", b"h1"]
+        module, _, _, _ = server_module_factory(
+            chunk_size=8,
+            object_keys=object_keys,
+            mock_storage=mock_storage,
+            mock_session=mock_session,
+            storage_manager_config=_make_storage_manager_config(
+                shm_name="lmcache_test_pool", pool_size=16384
+            ),
+        )
+        module.register_kv_cache_engine_driven_context(
+            _make_multi_group_payload(instance_id=55, chunk_size=8)
+        )
+
+        def _submit_request(
+            request_type: RequestType,
+            payload: list[Any],
+            _response_type: Any,
+        ) -> _CompletedFuture:
+            if request_type == RequestType.PREPARE_STORE:
+                return _CompletedFuture(module.prepare_store(*payload))
+            if request_type == RequestType.COMMIT_STORE:
+                return _CompletedFuture(module.commit_store(*payload))
+            if request_type == RequestType.PREPARE_RETRIEVE:
+                return _CompletedFuture(module.prepare_retrieve(*payload))
+            if request_type == RequestType.COMMIT_RETRIEVE:
+                return _CompletedFuture(module.commit_retrieve(*payload))
+            raise AssertionError(f"Unexpected request type: {request_type}")
+
+        mq_client = MagicMock()
+        mq_client.submit_request.side_effect = _submit_request
+        context = EngineDrivenContextShm(
+            metadata=EngineDrivenContextMetadata(
+                layout_desc=layout,
+                block_size=4,
+                use_mla=False,
+                object_group_layout_descs=[layout, layout],
+            ),
+            mq_client=mq_client,
+            mq_timeout=1.0,
+            shm_name=shm_name,
+            pool_size=16384,
+        )
+        key = _default_key(tokens=16)
+
+        store_result = context.prepare_store(key, 55)
+        assert store_result is not None
+        store_slots, store_indices = store_result
+        assert store_indices == [[1], [0]]
+        assert len(store_slots) == 2
+        assert len(store_slots[0]) == 1
+        assert len(store_slots[1]) == 1
+        store_slots[0][0][0].fill_(101)
+        store_slots[1][0][0].fill_(202)
+        assert context.commit_store(key, 55, store_slots)
+        assert memory_objects["g0-c1"].get_tensor(0).eq(101).all()
+        assert memory_objects["g1-c0"].get_tensor(0).eq(202).all()
+        mock_storage.finish_write.assert_called_once_with(["g0-c1", "g1-c0"])
+
+        retrieve_slots = context.prepare_retrieve(key, 55)
+        assert retrieve_slots is not None
+        assert len(retrieve_slots) == 2
+        assert torch.equal(
+            retrieve_slots[0][0][0], memory_objects["g0-c0"].get_tensor(0)
+        )
+        assert retrieve_slots[0][1][0].eq(101).all()
+        assert retrieve_slots[1][0][0].eq(202).all()
+        assert torch.equal(
+            retrieve_slots[1][1][0], memory_objects["g1-c1"].get_tensor(0)
+        )
+        assert context.commit_retrieve(key, 55)
+        mock_storage.finish_read_prefetched.assert_called_once_with(
+            ["g0-c0", "g0-c1", "g1-c0", "g1-c1"]
+        )
+    finally:
+        del context
+        gc.collect()
+        owner_buffer.close()
+        shm_munmap(addr, 16384)
+        shm_unlink(shm_name)
+
+
+def test_server_shm_multi_group_malformed_commit_aborts_all_reservations(
+    stub_native_storage_ops: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """Malformed SHM commits discard every pending multi-group write."""
+    shape = torch.Size([2, 2, 8, 16])
+    mock_storage = MagicMock()
+
+    def _reserve_write(
+        object_keys: list[str], _layout: MemoryLayoutDesc, _mode: str
+    ) -> dict[str, MagicMock]:
+        reserved: dict[str, MagicMock] = {}
+        for object_key in object_keys:
+            tensor = torch.zeros(shape)
+            memory_obj = MagicMock()
+            memory_obj.shm_offset = 0
+            memory_obj.shm_byte_length = tensor.numel() * tensor.element_size()
+            memory_obj.data_ptr = tensor.data_ptr()
+            memory_obj.get_tensor.return_value = tensor
+            reserved[object_key] = memory_obj
+        return reserved
+
+    mock_storage.reserve_write.side_effect = _reserve_write
+    mock_session = MagicMock()
+    mock_session.get_hashes.return_value = [b"h0"]
+    module, _, _, _ = server_module_factory(
+        chunk_size=8,
+        object_keys=[["g0-c0"], ["g1-c0"]],
+        mock_storage=mock_storage,
+        mock_session=mock_session,
+        storage_manager_config=_make_storage_manager_config(
+            shm_name="lmcache_test_pool", pool_size=8192
+        ),
+    )
+    module.register_kv_cache_engine_driven_context(
+        _make_multi_group_payload(instance_id=56, chunk_size=8)
+    )
+    key = _default_key()
+    assert module.prepare_store(key, 56).context["object_groups"]
+    assert module.commit_store(key, 56, b"not a pickle") is False
+    mock_storage.delete_l1_keys.assert_called_once_with(["g0-c0", "g1-c0"], force=True)
+
+
+def test_server_shm_multi_group_unregister_discards_pending_writes(
+    stub_native_storage_ops: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """Unregister drops every uncommitted multi-group SHM allocation."""
+    shape = torch.Size([2, 2, 8, 16])
+    mock_storage = MagicMock()
+
+    def _reserve_write(
+        object_keys: list[str], _layout: MemoryLayoutDesc, _mode: str
+    ) -> dict[str, MagicMock]:
+        reserved: dict[str, MagicMock] = {}
+        for object_key in object_keys:
+            tensor = torch.zeros(shape)
+            memory_obj = MagicMock()
+            memory_obj.shm_offset = 0
+            memory_obj.shm_byte_length = tensor.numel() * tensor.element_size()
+            memory_obj.data_ptr = tensor.data_ptr()
+            memory_obj.get_tensor.return_value = tensor
+            reserved[object_key] = memory_obj
+        return reserved
+
+    mock_storage.reserve_write.side_effect = _reserve_write
+    mock_session = MagicMock()
+    mock_session.get_hashes.return_value = [b"h0"]
+    module, _, _, _ = server_module_factory(
+        chunk_size=8,
+        object_keys=[["g0-c0"], ["g1-c0"]],
+        mock_storage=mock_storage,
+        mock_session=mock_session,
+        storage_manager_config=_make_storage_manager_config(
+            shm_name="lmcache_test_pool", pool_size=8192
+        ),
+    )
+    module.register_kv_cache_engine_driven_context(
+        _make_multi_group_payload(instance_id=57, chunk_size=8)
+    )
+    key = _default_key()
+    assert module.prepare_store(key, 57).context["object_groups"]
+
+    module.unregister_kv_cache(57)
+
+    mock_storage.delete_l1_keys.assert_called_once_with(["g0-c0", "g1-c0"], force=True)
+
+
+def test_server_shm_multi_group_preserves_kernel_tensor_order(
+    stub_native_storage_ops: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """SHM slots retain per-object-group kernel tensor order and layouts."""
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import (
+        ObjectGroupTransferMetadataWire,
+        RegisterEngineDrivenContextPayload,
+    )
+    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+
+    first_shape = torch.Size([2, 2, 8, 16])
+    second_shape = torch.Size([2, 2, 8, 16])
+    wire = _make_multi_group_wire_dto(
+        num_object_groups=2,
+        chunk_size=8,
+        block_size=4,
+        hidden_dim_size=16,
+        dtype_strs=["float32", "float16"],
+        num_chunks_in_sw_list=[-1, -1],
+    )
+    wire = type(wire)(
+        num_chunks_in_sw=[-1],
+        tokens_per_chunk=wire.tokens_per_chunk,
+        kernel_groups=wire.kernel_groups,
+        object_groups=[
+            ObjectGroupTransferMetadataWire(
+                object_group_id=0,
+                kernel_group_ids=[0, 1],
+                sw_size_chunks=-1,
+            )
+        ],
+    )
+    payload = RegisterEngineDrivenContextPayload(
+        instance_id=58,
+        model_name="m",
+        world_size=1,
+        block_size=4,
+        num_layers=4,
+        hidden_dim_size=16,
+        dtype_str="float32",
+        use_mla=False,
+        engine_group_infos=[
+            EngineGroupInfo(engine_group_id=0, layer_indices=(0, 1)),
+            EngineGroupInfo(engine_group_id=0, layer_indices=(2, 3)),
+        ],
+        object_group_layout_shapes=[
+            [list(first_shape), list(second_shape)],
+        ],
+        object_group_layout_dtype_strs=[["float32", "float16"]],
+        num_chunks_in_sw=[-1],
+        transfer_metadata_wire=wire,
+    )
+    raw = torch.empty(
+        first_shape.numel() * torch.float32.itemsize
+        + second_shape.numel() * torch.float16.itemsize,
+        dtype=torch.uint8,
+    )
+    first_tensor = (
+        raw[: first_shape.numel() * torch.float32.itemsize]
+        .view(torch.float32)
+        .view(first_shape)
+    )
+    second_tensor = (
+        raw[first_shape.numel() * torch.float32.itemsize :]
+        .view(torch.float16)
+        .view(second_shape)
+    )
+    memory_obj = MagicMock()
+    memory_obj.data_ptr = raw.data_ptr()
+    memory_obj.shm_offset = 64
+    memory_obj.shm_byte_length = raw.numel()
+    memory_obj.get_tensor.side_effect = [first_tensor, second_tensor]
+
+    mock_storage = MagicMock()
+    mock_storage.reserve_write.return_value = {"g0-c0": memory_obj}
+    mock_session = MagicMock()
+    mock_session.get_hashes.return_value = [b"h0"]
+    module, _, _, _ = server_module_factory(
+        chunk_size=8,
+        object_keys=[["g0-c0"]],
+        mock_storage=mock_storage,
+        mock_session=mock_session,
+        storage_manager_config=_make_storage_manager_config(
+            shm_name="lmcache_test_pool", pool_size=8192
+        ),
+    )
+    module.register_kv_cache_engine_driven_context(payload)
+
+    response = module.prepare_store(_default_key(), 58)
+
+    assert response.context == {
+        "object_groups": [
+            {
+                "object_group_id": 0,
+                "chunk_indices": [0],
+                "slots": [
+                    [
+                        {
+                            "offset": 64,
+                            "length": first_shape.numel() * torch.float32.itemsize,
+                            "shape": list(first_shape),
+                            "dtype": "float32",
+                        },
+                        {
+                            "offset": 64 + first_shape.numel() * torch.float32.itemsize,
+                            "length": second_shape.numel() * torch.float16.itemsize,
+                            "shape": list(second_shape),
+                            "dtype": "float16",
+                        },
+                    ]
+                ],
+            }
+        ]
+    }
+
+
+def test_server_shm_multi_group_retries_after_pool_exhaustion(
+    stub_native_storage_ops: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """A later prepare succeeds after an exhausted multi-group SHM pool recovers."""
+    shape = torch.Size([2, 2, 8, 16])
+    memory_objects: dict[str, MagicMock] = {}
+    for object_key in ["g0-c0", "g1-c0"]:
+        tensor = torch.zeros(shape)
+        memory_obj = MagicMock()
+        memory_obj.data_ptr = tensor.data_ptr()
+        memory_obj.shm_offset = 0
+        memory_obj.shm_byte_length = tensor.numel() * tensor.element_size()
+        memory_obj.get_tensor.return_value = tensor
+        memory_objects[object_key] = memory_obj
+    mock_storage = MagicMock()
+    mock_storage.reserve_write.side_effect = [
+        {},
+        {},
+        {"g0-c0": memory_objects["g0-c0"]},
+        {"g1-c0": memory_objects["g1-c0"]},
+    ]
+    mock_session = MagicMock()
+    mock_session.get_hashes.return_value = [b"h0"]
+    module, _, _, _ = server_module_factory(
+        chunk_size=8,
+        object_keys=[["g0-c0"], ["g1-c0"]],
+        mock_storage=mock_storage,
+        mock_session=mock_session,
+        storage_manager_config=_make_storage_manager_config(
+            shm_name="lmcache_test_pool", pool_size=8192
+        ),
+    )
+    module.register_kv_cache_engine_driven_context(
+        _make_multi_group_payload(instance_id=59, chunk_size=8)
+    )
+    key = _default_key()
+
+    exhausted = module.prepare_store(key, 59)
+    recovered = module.prepare_store(key, 59)
+
+    assert [group["chunk_indices"] for group in exhausted.context["object_groups"]] == [
+        [],
+        [],
+    ]
+    assert [group["chunk_indices"] for group in recovered.context["object_groups"]] == [
+        [0],
+        [0],
+    ]
+    assert module.commit_store(key, 59, b"") is True
+    mock_storage.finish_write.assert_called_once_with(["g0-c0", "g1-c0"])
+
+
+def test_server_shm_multi_group_abort_releases_reservations_before_retry(
+    stub_native_storage_ops: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """Aborting a prepared multi-group store lets its retry allocate every slot."""
+    shape = torch.Size([2, 2, 8, 16])
+    memory_objects: dict[str, MagicMock] = {}
+    for object_key in ["g0-c0", "g1-c0"]:
+        tensor = torch.zeros(shape)
+        memory_obj = MagicMock()
+        memory_obj.data_ptr = tensor.data_ptr()
+        memory_obj.shm_offset = 0
+        memory_obj.shm_byte_length = tensor.numel() * tensor.element_size()
+        memory_obj.get_tensor.return_value = tensor
+        memory_objects[object_key] = memory_obj
+    mock_storage = MagicMock()
+    mock_storage.reserve_write.side_effect = [
+        {"g0-c0": memory_objects["g0-c0"]},
+        {"g1-c0": memory_objects["g1-c0"]},
+        {"g0-c0": memory_objects["g0-c0"]},
+        {"g1-c0": memory_objects["g1-c0"]},
+    ]
+    mock_session = MagicMock()
+    mock_session.get_hashes.return_value = [b"h0"]
+    module, _, _, _ = server_module_factory(
+        chunk_size=8,
+        object_keys=[["g0-c0"], ["g1-c0"]],
+        mock_storage=mock_storage,
+        mock_session=mock_session,
+        storage_manager_config=_make_storage_manager_config(
+            shm_name="lmcache_test_pool", pool_size=8192
+        ),
+    )
+    module.register_kv_cache_engine_driven_context(
+        _make_multi_group_payload(instance_id=61, chunk_size=8)
+    )
+    key = _default_key()
+
+    assert module.prepare_store(key, 61).context["object_groups"]
+    assert module.abort_store(key, 61) is True
+    retry = module.prepare_store(key, 61)
+
+    assert [group["chunk_indices"] for group in retry.context["object_groups"]] == [
+        [0],
+        [0],
+    ]
+    mock_storage.delete_l1_keys.assert_called_once_with(["g0-c0", "g1-c0"], force=True)
+
+
+def test_server_shm_multi_group_reaper_discards_pending_writes(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_native_storage_ops: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """Reaping a silent worker discards every unfinished multi-group SHM write."""
+    # First Party
+    from lmcache.v1.multiprocess.modules import engine_driven_transfer as module_impl
+
+    shape = torch.Size([2, 2, 8, 16])
+    mock_storage = MagicMock()
+
+    def _reserve_write(
+        object_keys: list[str], _layout: MemoryLayoutDesc, _mode: str
+    ) -> dict[str, MagicMock]:
+        reservations: dict[str, MagicMock] = {}
+        for object_key in object_keys:
+            tensor = torch.zeros(shape)
+            memory_obj = MagicMock()
+            memory_obj.shm_offset = 0
+            memory_obj.shm_byte_length = tensor.numel() * tensor.element_size()
+            memory_obj.data_ptr = tensor.data_ptr()
+            memory_obj.get_tensor.return_value = tensor
+            reservations[object_key] = memory_obj
+        return reservations
+
+    mock_storage.reserve_write.side_effect = _reserve_write
+    mock_session = MagicMock()
+    mock_session.get_hashes.return_value = [b"h0"]
+    module, _, _, _ = server_module_factory(
+        chunk_size=8,
+        object_keys=[["g0-c0"], ["g1-c0"]],
+        mock_storage=mock_storage,
+        mock_session=mock_session,
+        storage_manager_config=_make_storage_manager_config(
+            shm_name="lmcache_test_pool", pool_size=8192
+        ),
+    )
+    monkeypatch.setattr(module_impl.time, "monotonic", lambda: 0.0)
+    module.register_kv_cache_engine_driven_context(
+        _make_multi_group_payload(instance_id=60, chunk_size=8)
+    )
+    assert module.prepare_store(_default_key(), 60).context["object_groups"]
+
+    monkeypatch.setattr(module_impl.time, "monotonic", lambda: 2.0)
+    assert module.reap_stale_instances(1.0, 1.0) == [60]
+
+    mock_storage.delete_l1_keys.assert_called_once_with(["g0-c0", "g1-c0"], force=True)

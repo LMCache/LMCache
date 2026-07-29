@@ -72,6 +72,10 @@ class EngineDrivenContextPickle(EngineDrivenContext):
         except TimeoutError:
             return False
 
+    def abort_store(self, key: IPCCacheServerKey, instance_id: int) -> bool:
+        """Abort a pickle store, which has no prepare-time resources."""
+        return True
+
     def prepare_retrieve(
         self, key: IPCCacheServerKey, instance_id: int
     ) -> EngineDrivenPayload | None:

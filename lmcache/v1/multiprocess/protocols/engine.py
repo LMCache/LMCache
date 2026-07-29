@@ -72,6 +72,7 @@ REQUEST_NAMES = [
     "UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT",
     "PREPARE_STORE",
     "COMMIT_STORE",
+    "ABORT_STORE",
     "PREPARE_RETRIEVE",
     "COMMIT_RETRIEVE",
 ]
@@ -235,6 +236,11 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         ),
         "COMMIT_STORE": ProtocolDefinition(
             payload_classes=[KeyType, int, bytes],
+            response_class=bool,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        "ABORT_STORE": ProtocolDefinition(
+            payload_classes=[KeyType, int],
             response_class=bool,
             handler_type=HandlerType.BLOCKING,
         ),

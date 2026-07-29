@@ -458,3 +458,50 @@ def test_prepare_store_runs_on_background_thread_not_forward_thread(
     prepare_gate.set()
     t.join(timeout=1)
     ctx.close()
+
+
+def test_hybrid_pickle_store_runs_on_background_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hybrid stores must not fall back to the synchronous forward path."""
+    gather_gate = threading.Event()
+    gather_started = threading.Event()
+
+    def _gather_multi_group(
+        _kv_caches: dict[str, torch.Tensor],
+        _transfer_metadata: object,
+        _block_ids: list[list[int]],
+        _layout_hints: object,
+    ) -> list[list[list[torch.Tensor]]]:
+        gather_started.set()
+        gather_gate.wait(timeout=2)
+        return [[[torch.ones(1)]]]
+
+    monkeypatch.setattr(async_engine_driven, "torch_dev", _FakeTorchDev(gather_gate))
+    monkeypatch.setattr(
+        async_engine_driven,
+        "_gather_multi_group_pickle_payload",
+        _gather_multi_group,
+    )
+    ctx = AsyncEngineDrivenTransferContext(commit_workers=1)
+    ctx._engine_driven_context = _FakeStoreContext(  # type: ignore[assignment]
+        commit_impl=lambda _chunks: True
+    )
+    ctx._transfer_metadata = MagicMock()
+
+    future = ctx.submit_store(
+        "r1",
+        object(),
+        1,
+        {"attention": torch.zeros(1), "linear": torch.zeros(1)},
+        [[0], [0]],
+        _FakeEvent(gather_gate),
+        1,
+    )
+
+    assert not future.query()
+    assert gather_started.wait(timeout=1)
+    assert not future.query()
+    gather_gate.set()
+    assert future.result(timeout=1) is True
+    ctx.close()

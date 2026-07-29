@@ -5,7 +5,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from enum import Enum
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Protocol, TypeGuard
 import os
 
 # Third Party
@@ -34,6 +34,7 @@ from lmcache.v1.multiprocess.protocols.engine import RegisterEngineDrivenContext
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
+    EngineDrivenStorePreparation,
     compute_kv_layout,
     create_engine_driven_context,
     gather_paged_kv_to_cpu,
@@ -441,6 +442,120 @@ def _gather_multi_group_pickle_payload(
             ]
         )
     return payload
+
+
+def _gather_multi_group_shm_payload(
+    kv_caches: dict[str, torch.Tensor],
+    transfer_metadata: KVTransferMetadata,
+    block_ids_by_engine_group: list[list[int]],
+    out: list[list[list[torch.Tensor]]],
+    chunk_indices_by_object_group: list[list[int]],
+    layout_hints: LayoutHints | None,
+) -> list[list[list[torch.Tensor]]]:
+    """Gather sparse multi-group chunks directly into ordered SHM slots.
+
+    Args:
+        kv_caches: Worker KV caches keyed by layer name.
+        transfer_metadata: Immutable object/kernel-group transfer plan.
+        block_ids_by_engine_group: Source block IDs indexed by engine group.
+        out: SHM-backed tensors in object-group, chunk, kernel-group order.
+        chunk_indices_by_object_group: Sparse source chunk positions parallel
+            to ``out`` for every object group.
+        layout_hints: Optional engine-provided KV layout metadata.
+
+    Returns:
+        The same nested ``out`` list after in-place gather.
+
+    Raises:
+        ValueError: If the server slot plan does not match the registered
+            metadata or has invalid sparse chunk ordering.
+    """
+    block_ids_by_kernel_group, num_chunks = _multi_group_block_ids(
+        transfer_metadata, block_ids_by_engine_group
+    )
+    object_groups = transfer_metadata.object_groups
+    if len(out) != len(object_groups) or len(chunk_indices_by_object_group) != len(
+        object_groups
+    ):
+        raise ValueError("SHM slot plan object-group count does not match registration")
+
+    for object_group in object_groups:
+        object_group_id = object_group.object_group_id
+        group_out = out[object_group_id]
+        chunk_indices = chunk_indices_by_object_group[object_group_id]
+        if len(group_out) != len(chunk_indices):
+            raise ValueError(
+                f"SHM object group {object_group_id} has {len(group_out)} slot "
+                f"chunks but {len(chunk_indices)} chunk indices"
+            )
+        if any(
+            chunk_index < 0 or chunk_index >= num_chunks
+            for chunk_index in chunk_indices
+        ) or chunk_indices != sorted(set(chunk_indices)):
+            raise ValueError(
+                f"SHM object group {object_group_id} has invalid chunk ordering"
+            )
+        for tensor_idx, kernel_group_id in enumerate(object_group.kernel_group_ids):
+            if any(
+                len(chunk) != len(object_group.kernel_group_ids) for chunk in group_out
+            ):
+                raise ValueError(
+                    f"SHM object group {object_group_id} has malformed "
+                    "kernel-group slot ordering"
+                )
+            kernel_group = transfer_metadata.kernel_groups[kernel_group_id]
+            gather_paged_kv_to_cpu(
+                _kernel_group_kv_caches(kv_caches, kernel_group.layer_indices),
+                block_ids_by_kernel_group[kernel_group_id],
+                kernel_group.blocks_per_window,
+                layout_hints=layout_hints,
+                engine_kv_format=kernel_group.engine_kv_format,
+                out=[chunk[tensor_idx] for chunk in group_out],
+                chunk_indices=chunk_indices,
+            )
+    return out
+
+
+def _is_legacy_shm_store_preparation(
+    preparation: object,
+) -> TypeGuard[tuple[list[torch.Tensor], list[int]]]:
+    """Return whether a SHM preparation contains legacy flat slot buffers."""
+    if not isinstance(preparation, tuple) or len(preparation) != 2:
+        return False
+    slot_buffers, chunk_indices = preparation
+    return (
+        isinstance(slot_buffers, list)
+        and all(isinstance(buffer, torch.Tensor) for buffer in slot_buffers)
+        and isinstance(chunk_indices, list)
+        and all(isinstance(chunk_index, int) for chunk_index in chunk_indices)
+    )
+
+
+def _is_multi_group_shm_store_preparation(
+    preparation: object,
+) -> TypeGuard[tuple[list[list[list[torch.Tensor]]], list[list[int]]]]:
+    """Return whether a SHM preparation contains ordered multi-group slots."""
+    if not isinstance(preparation, tuple) or len(preparation) != 2:
+        return False
+    grouped_slot_buffers, grouped_chunk_indices = preparation
+    return (
+        isinstance(grouped_slot_buffers, list)
+        and all(
+            isinstance(group_slots, list)
+            and all(
+                isinstance(slot_buffers, list)
+                and all(isinstance(buffer, torch.Tensor) for buffer in slot_buffers)
+                for slot_buffers in group_slots
+            )
+            for group_slots in grouped_slot_buffers
+        )
+        and isinstance(grouped_chunk_indices, list)
+        and all(
+            isinstance(group_indices, list)
+            and all(isinstance(chunk_index, int) for chunk_index in group_indices)
+            for group_indices in grouped_chunk_indices
+        )
+    )
 
 
 def _scatter_multi_group_pickle_payload(
@@ -865,11 +980,10 @@ class EngineDrivenTransferContext(TransferContext):
     ) -> None:
         """Register KV caches with the non-GPU context server.
 
-        ``engine_group_infos`` and ``engine_type`` are accepted to satisfy
-        the base interface but are currently a no-op: the non-GPU transfer
-        path does not support hybrid KV cache groups and rejects multi-
-        group transfers at store / retrieve time (see
-        ``_single_group_block_ids``).
+        When ``engine_group_infos`` describes more than one object group, the
+        registration exports deterministic transfer metadata used by both
+        pickle and SHM transports. Single dense object-group registrations
+        retain the legacy wire format and data path.
         """
         # TODO: per-group compression (EngineGroupInfo.tokens_per_block vs
         # the tensor-detected slot count, e.g. DeepSeek V4) is only handled
@@ -1017,36 +1131,80 @@ class EngineDrivenTransferContext(TransferContext):
 
         torch_dev.synchronize()
         result = self._engine_driven_context.prepare_store(key, instance_id)
-        out_buffers, chunk_indices = result if result is not None else (None, None)
         transfer_metadata = self._transfer_metadata
-        # All chunks already in cache — nothing to gather or commit.
-        if chunk_indices is not None and len(chunk_indices) == 0:
-            future: MessagingFuture[bool] = MessagingFuture()
-            future.set_result(True)
-            return future
         if transfer_metadata is None:
-            cpu_chunks: list[torch.Tensor] | list[list[list[torch.Tensor]]] = (
-                gather_paged_kv_to_cpu(
-                    kv_caches,
-                    _single_group_block_ids(block_ids),
-                    blocks_in_chunk,
-                    layout_hints=self._layout_hints,
-                    engine_kv_format=self._engine_kv_format,
-                    out=out_buffers,
-                    chunk_indices=chunk_indices,
+            if result is not None and not _is_legacy_shm_store_preparation(result):
+                self._abort_shm_store(key, instance_id, result)
+                raise ValueError("legacy SHM store returned an invalid slot plan")
+            out_buffers, chunk_indices = result if result is not None else (None, None)
+            if chunk_indices is not None and len(chunk_indices) == 0:
+                # All chunks already in cache — nothing to gather or commit.
+                future: MessagingFuture[bool] = MessagingFuture()
+                future.set_result(True)
+                return future
+            try:
+                cpu_chunks: list[torch.Tensor] | list[list[list[torch.Tensor]]] = (
+                    gather_paged_kv_to_cpu(
+                        kv_caches,
+                        _single_group_block_ids(block_ids),
+                        blocks_in_chunk,
+                        layout_hints=self._layout_hints,
+                        engine_kv_format=self._engine_kv_format,
+                        out=out_buffers,
+                        chunk_indices=chunk_indices,
+                    )
                 )
-            )
+            except (RuntimeError, ValueError, TypeError, IndexError):
+                self._abort_shm_store(key, instance_id, result)
+                raise
         else:
-            cpu_chunks = _gather_multi_group_pickle_payload(
-                kv_caches,
-                transfer_metadata,
-                block_ids,
-                self._layout_hints,
-            )
-        if out_buffers is not None:
+            if result is None:
+                cpu_chunks = _gather_multi_group_pickle_payload(
+                    kv_caches,
+                    transfer_metadata,
+                    block_ids,
+                    self._layout_hints,
+                )
+                used_shm = False
+            else:
+                if not _is_multi_group_shm_store_preparation(result):
+                    self._abort_shm_store(key, instance_id, result)
+                    raise ValueError(
+                        "multi-group SHM store returned an invalid slot plan"
+                    )
+                grouped_out_buffers, grouped_chunk_indices = result
+                if all(
+                    len(group_indices) == 0 for group_indices in grouped_chunk_indices
+                ):
+                    # Every object group was already cached.
+                    future = MessagingFuture()
+                    future.set_result(True)
+                    return future
+                try:
+                    cpu_chunks = _gather_multi_group_shm_payload(
+                        kv_caches,
+                        transfer_metadata,
+                        block_ids,
+                        grouped_out_buffers,
+                        grouped_chunk_indices,
+                        self._layout_hints,
+                    )
+                except (RuntimeError, ValueError, TypeError, IndexError):
+                    self._abort_shm_store(key, instance_id, result)
+                    raise
+                used_shm = True
+        if transfer_metadata is None:
+            used_shm = out_buffers is not None
+        if used_shm:
             # SHM path uses async device->CPU copies; complete them before commit.
-            torch_dev.synchronize()
+            try:
+                torch_dev.synchronize()
+            except RuntimeError:
+                self._abort_shm_store(key, instance_id, result)
+                raise
         ok = self._engine_driven_context.commit_store(key, instance_id, cpu_chunks)
+        if not ok:
+            self._abort_shm_store(key, instance_id, result)
 
         future = MessagingFuture()
         future.set_result(ok)
@@ -1089,7 +1247,7 @@ class EngineDrivenTransferContext(TransferContext):
                         src_buffers and not isinstance(src_buffers[0], list)
                     ):
                         raise ValueError(
-                            "hybrid pickle retrieve returned a legacy flat payload"
+                            "multi-group retrieve returned a legacy flat payload"
                         )
                     _scatter_multi_group_pickle_payload(
                         kv_caches,
@@ -1119,6 +1277,27 @@ class EngineDrivenTransferContext(TransferContext):
 
     def flush_inflight_stores(self) -> None:
         pass
+
+    def _abort_shm_store(
+        self,
+        key: Any,
+        instance_id: int,
+        preparation: EngineDrivenStorePreparation | None,
+    ) -> None:
+        """Abort a prepared SHM store while preserving the original failure.
+
+        Args:
+            key: Cache key for the failed store.
+            instance_id: Worker instance identifier.
+            preparation: Result returned from ``prepare_store``.
+        """
+        if preparation is None or self._engine_driven_context is None:
+            return
+        if not self._engine_driven_context.abort_store(key, instance_id):
+            logger.error(
+                "Failed to abort prepared SHM store for instance_id=%d",
+                instance_id,
+            )
 
 
 def create_transfer_context(

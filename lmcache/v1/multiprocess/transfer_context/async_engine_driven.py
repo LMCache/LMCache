@@ -13,10 +13,17 @@ import torch
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.transfer_context.base import gather_paged_kv_to_cpu
+from lmcache.v1.multiprocess.transfer_context.base import (
+    EngineDrivenStorePreparation,
+    gather_paged_kv_to_cpu,
+)
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     EngineDrivenTransferContext,
     IPCEvent,
+    _gather_multi_group_pickle_payload,
+    _gather_multi_group_shm_payload,
+    _is_legacy_shm_store_preparation,
+    _is_multi_group_shm_store_preparation,
     _single_group_block_ids,
 )
 
@@ -190,23 +197,10 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                 "Engine-driven transfer context is not registered. "
                 "Call register() before submit_store()."
             )
-        if self._transfer_metadata is not None:
-            # Hybrid pickle payloads contain heterogeneous kernel-group
-            # tensors, so they cannot use the dense staging-buffer pool.
-            # Reuse the synchronous metadata-driven implementation until the
-            # async executor is migrated in the later planner work.
-            return super().submit_store(
-                _request_id,
-                key,
-                instance_id,
-                kv_caches,
-                block_ids,
-                _event,
-                blocks_in_chunk,
-            )
         completion: MessagingFuture[bool] = MessagingFuture()
         engine_driven_context = self._engine_driven_context
         commit_executor = self._commit_executor
+        transfer_metadata = self._transfer_metadata
 
         # Signals when this task has recorded its CUDA event (or exited early),
         # allowing flush_inflight_stores to safely proceed.
@@ -218,71 +212,118 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                     return completion
                 self._pending_stores.add(gather_launched)
 
-            full_block_ids = _single_group_block_ids(block_ids)
+            full_block_ids = (
+                _single_group_block_ids(block_ids) if transfer_metadata is None else []
+            )
 
             def _prepare_gather_and_commit() -> None:
                 gather_done: Any | None = None
                 ok = False
+                preparation: EngineDrivenStorePreparation | None = None
                 # Whether we gathered directly into SHM views (True) or into
                 # pinned staging buffers that need to be released later (False).
                 used_shm_direct = False
                 staged_chunks: list[torch.Tensor] = []
+                multi_group_chunks: list[list[list[torch.Tensor]]] | None = None
                 try:
                     # --- Phase 1: prepare_store ---
                     # In pickle mode this is the costliest step (sync RPC
                     # round-trip).  Running it here keeps the forward thread free.
-                    result = engine_driven_context.prepare_store(key, instance_id)
-                    out_buffers, chunk_indices = (
-                        result if result is not None else (None, None)
-                    )
-
-                    if chunk_indices is not None and len(chunk_indices) == 0:
-                        # All chunks are already in cache: no gather, no commit.
-                        ok = True
-                        return
-
-                    num_chunks = (
-                        len(chunk_indices)
-                        if chunk_indices is not None
-                        else len(full_block_ids) // blocks_in_chunk
-                    )
-
-                    # Determine gather target:
-                    # - SHM path (out_buffers available): gather into SHM views
-                    # - Pickle path (no out_buffers): gather into pinned staging
-                    if out_buffers is not None:
-                        gather_target = out_buffers
-                        used_shm_direct = True
-                    else:
-                        layout_desc = engine_driven_context.layout_desc
-                        if not layout_desc.shapes:
-                            raise RuntimeError(
-                                "engine-driven layout_desc.shapes is empty"
-                            )
-                        if not layout_desc.dtypes:
-                            raise RuntimeError(
-                                "engine-driven layout_desc.dtypes is empty"
-                            )
-                        staged_chunks = self._alloc_pinned_staging(
-                            layout_desc.shapes[0],
-                            layout_desc.dtypes[0],
-                            num_chunks,
+                    with self._commit_lock:
+                        preparation = engine_driven_context.prepare_store(
+                            key, instance_id
                         )
-                        gather_target = staged_chunks
+
+                    if transfer_metadata is None:
+                        if (
+                            preparation is not None
+                            and not _is_legacy_shm_store_preparation(preparation)
+                        ):
+                            raise ValueError(
+                                "legacy SHM store returned an invalid slot plan"
+                            )
+                        out_buffers, chunk_indices = (
+                            preparation if preparation is not None else (None, None)
+                        )
+                        if chunk_indices is not None and len(chunk_indices) == 0:
+                            # All chunks already in cache — nothing to gather or commit.
+                            ok = True
+                            return
+
+                        num_chunks = (
+                            len(chunk_indices)
+                            if chunk_indices is not None
+                            else len(full_block_ids) // blocks_in_chunk
+                        )
+
+                        # Determine gather target:
+                        # - SHM path (out_buffers available): gather into SHM views
+                        # - Pickle path (no out_buffers): gather into pinned staging
+                        if out_buffers is not None:
+                            gather_target = out_buffers
+                            used_shm_direct = True
+                        else:
+                            layout_desc = engine_driven_context.layout_desc
+                            if not layout_desc.shapes:
+                                raise RuntimeError(
+                                    "engine-driven layout_desc.shapes is empty"
+                                )
+                            if not layout_desc.dtypes:
+                                raise RuntimeError(
+                                    "engine-driven layout_desc.dtypes is empty"
+                                )
+                            staged_chunks = self._alloc_pinned_staging(
+                                layout_desc.shapes[0],
+                                layout_desc.dtypes[0],
+                                num_chunks,
+                            )
+                            gather_target = staged_chunks
+                    else:
+                        if preparation is not None:
+                            if not _is_multi_group_shm_store_preparation(preparation):
+                                raise ValueError(
+                                    "multi-group SHM store returned an invalid "
+                                    "slot plan"
+                                )
+                            grouped_out_buffers, grouped_chunk_indices = preparation
+                            if all(
+                                len(group_indices) == 0
+                                for group_indices in grouped_chunk_indices
+                            ):
+                                # Every object group was already cached.
+                                ok = True
+                                return
 
                     # --- Phase 2: gather (GPU->CPU copy on copy stream) ---
                     with torch.inference_mode(), torch_dev.stream(self._copy_stream):
                         _event.wait(stream=self._copy_stream)
-
-                        gather_paged_kv_to_cpu(
-                            kv_caches,
-                            full_block_ids,
-                            blocks_in_chunk,
-                            layout_hints=self._layout_hints,
-                            engine_kv_format=self._engine_kv_format,
-                            out=gather_target,
-                            chunk_indices=chunk_indices,
-                        )
+                        if transfer_metadata is None:
+                            gather_paged_kv_to_cpu(
+                                kv_caches,
+                                full_block_ids,
+                                blocks_in_chunk,
+                                layout_hints=self._layout_hints,
+                                engine_kv_format=self._engine_kv_format,
+                                out=gather_target,
+                                chunk_indices=chunk_indices,
+                            )
+                        elif preparation is None:
+                            multi_group_chunks = _gather_multi_group_pickle_payload(
+                                kv_caches,
+                                transfer_metadata,
+                                block_ids,
+                                self._layout_hints,
+                            )
+                        else:
+                            multi_group_chunks = _gather_multi_group_shm_payload(
+                                kv_caches,
+                                transfer_metadata,
+                                block_ids,
+                                grouped_out_buffers,
+                                grouped_chunk_indices,
+                                self._layout_hints,
+                            )
+                            used_shm_direct = True
 
                         gather_done = torch_dev.Event()
                         gather_done.record(self._copy_stream)
@@ -298,9 +339,18 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
 
                     # --- Phase 3: commit ---
                     with self._commit_lock:
-                        ok = engine_driven_context.commit_store(
-                            key, instance_id, gather_target
-                        )
+                        if transfer_metadata is None:
+                            ok = engine_driven_context.commit_store(
+                                key, instance_id, gather_target
+                            )
+                        elif multi_group_chunks is not None:
+                            ok = engine_driven_context.commit_store(
+                                key, instance_id, multi_group_chunks
+                            )
+                        else:
+                            raise RuntimeError(
+                                "multi-group gather completed without a payload"
+                            )
 
                     if not ok:
                         logger.error(
@@ -314,6 +364,9 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                     )
                     ok = False
                 finally:
+                    if not ok and preparation is not None:
+                        with self._commit_lock:
+                            self._abort_shm_store(key, instance_id, preparation)
                     if not used_shm_direct:
                         self._release_staging(staged_chunks)
                     with self._inflight_lock:

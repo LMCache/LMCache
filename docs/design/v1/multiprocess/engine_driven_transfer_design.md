@@ -217,7 +217,7 @@ It also computes `shm_pool_info` once from `StorageManagerConfig`:
 
 ### 3.1 MQ Request Types Used by Engine-Driven Path
 
-The engine-driven path uses five request types:
+The engine-driven path uses six request types:
 
 1. `REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT`  
    Worker registers engine-driven KV layout metadata. Server then:
@@ -232,10 +232,14 @@ The engine-driven path uses five request types:
 3. `COMMIT_STORE`  
    Worker commits store data so server can persist it into storage.
 
-4. `PREPARE_RETRIEVE`  
+4. `ABORT_STORE`
+   Worker cancels a store after SHM preparation fails locally. The server discards
+   pending write reservations rather than publishing partial contents.
+
+5. `PREPARE_RETRIEVE`
    Worker asks server to prepare retrieval payload/state for a key.
 
-5. `COMMIT_RETRIEVE`  
+6. `COMMIT_RETRIEVE`
    Worker acknowledges retrieval completion so transport state can be finalized.
 
 ### 3.2 Data Flow: Pickle Path
@@ -271,13 +275,21 @@ Worker: commit_retrieve --> Server
 ### 3.3 Data Flow: SHM Path
 
 Store:
-1. Worker `prepare_store` gets `slots` and `chunk_indices`.
+1. Worker `prepare_store` gets slots and chunk indices.
 2. Server includes only chunks that still need writes (already-cached chunks are skipped).
 3. Worker gathers only `chunk_indices` into SHM-backed buffers.
 4. Worker `commit_store` notifies server to finalize reserved write locks.
 
 If all chunks are already cached, server returns empty `slots/chunk_indices` and
 worker short-circuits store as success (no gather, no commit payload).
+
+Legacy dense registrations use the original flat
+`{"slots": [...], "chunk_indices": [...]}` response. Multi-object-group
+registrations use `{"object_groups": [...]}`. Entries are always in
+object-group order; within an entry, `slots[chunk][tensor]` is ordered by
+ascending chunk index and then kernel-group layout order. This lets a partial
+cache hit skip each object group's cached chunks independently without
+reordering the worker's gather/scatter plan.
 
 Retrieve:
 1. Worker `prepare_retrieve` asks server to populate SHM.
@@ -288,3 +300,7 @@ Retrieve:
 Notes:
 - SHM pool metadata is computed once in `MPCacheServerContext` init, not per registration.
 - `chunk_indices` optimization reduces unnecessary gather/copy work on partial cache hits.
+- A multi-group prepare is all-or-nothing: any malformed slot or unavailable
+  group releases all reservations acquired for that prepare. Pending writes are
+  discarded on malformed commits, unregister, and worker reaping rather than
+  publishing incomplete SHM contents.

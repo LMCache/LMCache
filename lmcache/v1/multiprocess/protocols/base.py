@@ -53,6 +53,7 @@ class RequestType(enum.Enum):
     UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT = enum.auto()
     PREPARE_STORE = enum.auto()
     COMMIT_STORE = enum.auto()
+    ABORT_STORE = enum.auto()
     PREPARE_RETRIEVE = enum.auto()
     COMMIT_RETRIEVE = enum.auto()
 
