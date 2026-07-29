@@ -55,7 +55,6 @@ allowlist = {
   "tests/cli/**/test_*.py",
   "tests/disagg/test_*.py",
   "tests/v1/multiprocess/test_engine_driven_transfer.py",
-  "tests/v1/test_python_ops_fallback.py",
   "tests/v1/test_xpu_connector.py",
   "tests/v1/test_torch_ops.py",
 }
