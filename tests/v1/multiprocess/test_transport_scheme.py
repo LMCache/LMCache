@@ -14,13 +14,20 @@ LMCache mp-mode server and the vLLM connector rely on:
 # Third Party
 import pytest
 
+pytest.importorskip(
+    "vllm",
+    reason="mp-mode connector imports vLLM at module top",
+)
+
 # First Party
-from lmcache.integration.vllm.lmcache_mp_connector import (
+from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
     _ensure_transport_scheme,
 )
-from lmcache.v1.multiprocess.mq import request_type_to_method_name
-from lmcache.v1.multiprocess.protocol import RequestType
-from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
+from lmcache.v1.multiprocess.mq import (  # noqa: E402
+    request_type_to_method_name,
+)
+from lmcache.v1.multiprocess.protocol import RequestType  # noqa: E402
+from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (  # noqa: E402
     lmcache_mq_pb2_grpc,
 )
 
