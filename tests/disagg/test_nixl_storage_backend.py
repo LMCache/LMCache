@@ -103,7 +103,7 @@ def create_test_metadata() -> LMCacheMetadata:
 
 
 @pytest.mark.no_shared_allocator
-@pytest.mark.gpu
+@pytest.mark.cuda
 def test_nixl_storage_config():
     """Test NixlStorageConfig creation and validation"""
     config = create_test_config()
@@ -254,7 +254,7 @@ def test_endpoint_list_malformed_url_raises():
 
 
 @pytest.mark.no_shared_allocator
-@pytest.mark.gpu
+@pytest.mark.cuda
 @pytest.mark.skipif(
     not torch_dev.is_available(),
     reason="Requires available {torch_device_type} runtime",
@@ -312,7 +312,7 @@ def test_nixl_storage_backend_basic():
 
 
 @pytest.mark.no_shared_allocator
-@pytest.mark.gpu
+@pytest.mark.cuda
 @pytest.mark.skipif(
     not torch_dev.is_available(),
     reason="Requires available {torch_device_type} runtime",
@@ -385,7 +385,7 @@ def test_nixl_storage_backend_put_get():
 
 
 @pytest.mark.no_shared_allocator
-@pytest.mark.gpu
+@pytest.mark.cuda
 @pytest.mark.skipif(
     not torch_dev.is_available(),
     reason="Requires available {torch_device_type} runtime",

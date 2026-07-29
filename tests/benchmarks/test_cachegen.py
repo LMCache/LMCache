@@ -26,8 +26,6 @@ if not torch_dev.is_available():
         allow_module_level=True,
     )
 
-pytestmark = [pytest.mark.gpu, pytest.mark.xpu]
-
 
 def _generate_kv(num_tokens, device):
     num_layers, num_heads, head_size = 32, 8, 128
