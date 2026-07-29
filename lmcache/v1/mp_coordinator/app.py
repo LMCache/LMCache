@@ -39,6 +39,7 @@ from lmcache.v1.mp_coordinator.cache_control.resync_manager import L2ResyncManag
 from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.http_apis.dependencies import CoordinatorContext
+from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.utils.router_discovery import discover_api_routers
@@ -73,8 +74,8 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     Returns:
         A configured FastAPI application. ``app.state`` carries the shared
         collaborators (``config``, ``registry``, ``quota_manager``,
-        ``usage_manager``, ``blend_directory``); all ``http_apis`` routers are
-        registered.
+        ``usage_manager``, ``key_directory``, ``blend_directory``); all
+        ``http_apis`` routers are registered.
     """
     registry = InstanceRegistry()
     quota_manager = QuotaManager()
@@ -99,6 +100,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     blend_directory = GlobalBlendMatcher(
         chunk_size=config.chunk_size, probe_stride=config.blend_probe_stride
     )
+    key_directory = KeyDirectory()
     # Typed context the cache handlers resolve via ``get_context``;
     # ``outbound_client`` is filled in by the lifespan (bound to the loop).
     ctx = CoordinatorContext(
@@ -108,6 +110,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         eviction_manager=eviction_manager,
         prefetch_manager=prefetch_manager,
         token_hasher=token_hasher,
+        key_directory=key_directory,
     )
 
     async def _health_loop() -> None:

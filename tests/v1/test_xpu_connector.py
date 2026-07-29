@@ -647,7 +647,12 @@ def test_batched_layerwise_vllm_paged_connector_with_gpu(use_gpu):
     allocator.close()
 
 
-@pytest.mark.skip(reason="This test is skipped due to vllm dependency")
+@pytest.mark.skip(
+    reason=(
+        "Requires vLLM blending runtime with a registered blender instance "
+        "for 'vllm-instance' (LMCBlenderBuilder)."
+    )
+)
 @pytest.mark.parametrize("use_gpu", [True])
 def test_layerwise_vllm_buffer_connector_with_gpu(use_gpu):
     num_blocks = 100

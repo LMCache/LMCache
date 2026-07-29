@@ -35,6 +35,7 @@ from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
     get_event_ipc_backend,
 )
+from lmcache.v1.platform.kv_wrap import wrap_kv_caches
 
 logger = init_logger(__name__)
 
@@ -221,6 +222,7 @@ class TransferContext(ABC):
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
+        engine_type: EngineType = EngineType.VLLM,
     ) -> None:
         """Register KV caches with the server and wait for ACK.
 
@@ -235,6 +237,11 @@ class TransferContext(ABC):
             send_request: Request sender callable used to issue MQ requests.
             layout_hints: Optional inference-engine-provided layout hints.
             engine_group_infos: LMCache-owned engine KV cache group metadata.
+            engine_type: Serving engine that produced the caches. Only
+                consumed by the handle path; adapters should pass their
+                own :class:`EngineType` so this transport stays engine-
+                neutral. Defaults to :attr:`EngineType.VLLM` for
+                backwards compatibility.
 
         Raises:
             TimeoutError: If server registration does not complete before
@@ -417,6 +424,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
+        engine_type: EngineType = EngineType.VLLM,
     ) -> None:
         """Register the worker KV cache with the LMCache server.
 
@@ -431,14 +439,12 @@ class LMCacheDrivenTransferContext(TransferContext):
             send_request: Request sender used by this context.
             layout_hints: Optional KV-layout metadata.
             engine_group_infos: Optional engine KV-group metadata.
+            engine_type: Serving engine that produced the caches.
 
         Raises:
             RuntimeError: If event IPC is unsupported for the KV-cache device.
             ValueError: If ``kv_caches`` is empty.
         """
-        # First Party
-        from lmcache.integration.vllm.vllm_multi_process_adapter import wrap_kv_caches
-
         device = _get_kv_device(kv_caches)
         event_backend = get_event_ipc_backend(device)
         event_backend.check_event_support(device)
@@ -453,7 +459,7 @@ class LMCacheDrivenTransferContext(TransferContext):
                 wrap_kv_caches(kv_caches),
                 model_name,
                 world_size,
-                EngineType.VLLM,
+                engine_type,
                 layout_hints,
                 list(engine_group_infos),
             ],
@@ -667,14 +673,17 @@ class EngineDrivenTransferContext(TransferContext):
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
+        engine_type: EngineType = EngineType.VLLM,
     ) -> None:
         """Register KV caches with the non-GPU context server.
 
-        ``engine_group_infos`` is accepted to satisfy the base interface but
-        is currently a no-op: the non-GPU transfer path does not support
-        hybrid KV cache groups and rejects multi-group transfers at store /
-        retrieve time (see ``_single_group_block_ids``).
+        ``engine_group_infos`` and ``engine_type`` are accepted to satisfy
+        the base interface but are currently a no-op: the non-GPU transfer
+        path does not support hybrid KV cache groups and rejects multi-
+        group transfers at store / retrieve time (see
+        ``_single_group_block_ids``).
         """
+        del engine_type  # unused on the engine-driven path
         # TODO: per-group compression (EngineGroupInfo.tokens_per_block vs
         # the tensor-detected slot count, e.g. DeepSeek V4) is only handled
         # on the CUDA path. The non-CUDA path is yet to be implemented.
