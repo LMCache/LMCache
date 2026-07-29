@@ -14,7 +14,7 @@ See ``docs/design/v1/encoder-cache.md`` for the broader design.
 from __future__ import annotations
 
 # Standard
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 import hashlib
 
 # Third Party
@@ -23,11 +23,14 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager
 from lmcache.v1.memory_management import MemoryFormat
-from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.storage_manager import StorageManager
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.config import LMCacheEngineConfig
+    from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 
