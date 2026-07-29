@@ -813,6 +813,12 @@ void multi_layer_kv_transfer_fused_templated(
         LAUNCH_FUSED_WITH_FORMAT(T_, DIR,                                     \
                                  EngineKVFormat::NL_X_NB_BS_NH_TWO_HS)        \
         break;                                                                \
+      case EngineKVFormat::NL_X_NB_NH_BS_CS:                                  \
+        LAUNCH_FUSED_WITH_FORMAT(T_, DIR, EngineKVFormat::NL_X_NB_NH_BS_CS)   \
+        break;                                                                \
+      case EngineKVFormat::NL_X_NB_BS_NH_CS:                                  \
+        LAUNCH_FUSED_WITH_FORMAT(T_, DIR, EngineKVFormat::NL_X_NB_BS_NH_CS)   \
+        break;                                                                \
       default:                                                                \
         throw std::runtime_error("Unsupported EngineKVFormat");               \
     }
