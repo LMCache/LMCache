@@ -874,6 +874,18 @@ class EngineDrivenTransferContext(TransferContext):
         # TODO: per-group compression (EngineGroupInfo.tokens_per_block vs
         # the tensor-detected slot count, e.g. DeepSeek V4) is only handled
         # on the CUDA path. The non-CUDA path is yet to be implemented.
+        # Hybrid KV groups can use different packed widths. The legacy flat
+        # layout is only a compatibility fallback once multi-group metadata is
+        # present, so discover it from one representative tensor instead of
+        # asking the vLLM detector to reshape heterogeneous tensors together.
+        layout_source = kv_caches
+        tensor_layouts = {
+            (tuple(tensor.shape), tensor.dtype) for tensor in kv_caches.values()
+        }
+        if len(tensor_layouts) > 1:
+            first_layer, first_tensor = next(iter(kv_caches.items()))
+            layout_source = {first_layer: first_tensor}
+
         (
             block_size,
             num_layers,
@@ -881,7 +893,7 @@ class EngineDrivenTransferContext(TransferContext):
             dtype_str,
             engine_kv_format,
             kv_size,
-        ) = compute_kv_layout(kv_caches, layout_hints=layout_hints)
+        ) = compute_kv_layout(layout_source, layout_hints=layout_hints)
         self._layout_hints = layout_hints
         self._engine_kv_format = engine_kv_format
 

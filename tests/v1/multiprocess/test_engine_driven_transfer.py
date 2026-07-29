@@ -2938,6 +2938,75 @@ def test_worker_register_multi_group_stores_transfer_metadata(
     assert meta.object_group_layout_descs == []
 
 
+def test_worker_register_uses_representative_layout_for_heterogeneous_kv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hybrid registration avoids jointly normalizing incompatible KV tensors."""
+    # First Party
+    from lmcache.v1.distributed.api import DEFAULT_ATTN_WINDOW_DESC, MemoryLayoutDesc
+    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+    from lmcache.v1.multiprocess.transfer_context import (
+        EngineDrivenTransferContext,
+        worker_transfer,
+    )
+    import lmcache.c_ops as lmc_ops
+
+    kv_caches = {
+        "attention": torch.zeros(4, 2, 4, 512),
+        "linear": torch.zeros(4, 2, 4, 1024),
+    }
+    layout_inputs: list[dict[str, torch.Tensor]] = []
+
+    def _fake_compute(
+        source: dict[str, torch.Tensor], **_kwargs: Any
+    ) -> tuple[int, int, int, str, Any, int]:
+        layout_inputs.append(source)
+        return (
+            4,
+            1,
+            256,
+            "float32",
+            lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS,
+            1,
+        )
+
+    monkeypatch.setattr(worker_transfer, "compute_kv_layout", _fake_compute)
+    monkeypatch.setattr(worker_transfer, "create_engine_driven_context", MagicMock())
+    fixed_layout = MemoryLayoutDesc(
+        shapes=[torch.Size([2, 1, 8, 256])], dtypes=[torch.float32]
+    )
+    group_info = EngineGroupInfo(engine_group_id=0, layer_indices=(0,))
+    monkeypatch.setattr(
+        worker_transfer,
+        "_build_multi_group_wire_fields",
+        lambda *_a, **_kw: (
+            [group_info],
+            [[[2, 1, 8, 256]]],
+            [["float32"]],
+            [-1],
+            [fixed_layout],
+            DEFAULT_ATTN_WINDOW_DESC,
+            _make_fake_transfer_metadata(),
+        ),
+    )
+    future = MagicMock()
+    future.result.return_value = RegisterEngineDrivenContextResponse()
+
+    EngineDrivenTransferContext().register(
+        instance_id=1,
+        kv_caches=kv_caches,
+        model_name="m",
+        world_size=1,
+        blocks_in_chunk=2,
+        mq_client=MagicMock(),
+        mq_timeout=1.0,
+        send_request=MagicMock(return_value=future),
+        engine_group_infos=[group_info],
+    )
+
+    assert layout_inputs == [{"attention": kv_caches["attention"]}]
+
+
 def test_worker_register_sends_transfer_metadata_wire(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
