@@ -18,9 +18,14 @@ on:
 
 env:
     LC_ALL: en_US.UTF-8
-    # Pinned to match the upstream vllm/vllm-openai-rocm image.
+    # Version pins that define the wheel's ABI target, consolidated here as the
+    # single place to update. The wheel links torch and the ROCm runtime as
+    # *external* (auditwheel-excluded) libraries, so compatibility is tied to
+    # the torch MINOR version (2.11), not to any specific vLLM/SGLang image —
+    # it loads in any ROCm image shipping torch 2.11 (cp3x). Bump these
+    # together when the upstream ROCm images move to a new torch/ROCm minor;
+    # this mirrors how the cu129/cu130 wheels are pinned to a CUDA+torch pair.
     ROCM_IMAGE: rocm/dev-ubuntu-22.04:7.2.3-complete
-    VLLM_ROCM_IMAGE: vllm/vllm-openai-rocm:v0.25.0
     TORCH_ROCM_SPEC: torch==2.11.0+rocm7.2
     TORCH_ROCM_INDEX: https://download.pytorch.org/whl/rocm7.2
     PYTORCH_ROCM_ARCH: gfx942;gfx950
@@ -98,33 +103,10 @@ jobs:
                 name: release-rocm-artifacts
                 path: dist/
 
-    # Gate the release on proof the wheel loads AND runs kernels inside the
-    # actual upstream vllm/vllm-openai-rocm image. Import alone is not enough:
-    # a passing import proves ABI load; we also launch a real KV-transfer
-    # kernel to prove the gfx code objects execute. Requires a self-hosted
-    # AMD Instinct (gfx942 or gfx950) runner.
-    smoke-test-rocm-image:
-        name: Smoke test ROCm wheel in vLLM image (GPU)
-        needs: build-rocm-artifacts
-        # Only runs where a labelled AMD GPU runner is registered; skipped
-        # cleanly elsewhere so fork PRs / CPU-only orgs don't hard-fail.
-        runs-on: [self-hosted, amd-gpu]
-        if: vars.HAS_AMD_GPU_RUNNER == 'true'
-        steps:
-            - name: Checkout code
-              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-
-            - name: Fetch ROCm wheel
-              uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
-              with:
-                name: release-rocm-artifacts
-                path: dist
-
-            - name: Install wheel into vLLM ROCm image and run kernel test on GPU
-              run: |
-                docker run --rm \
-                  --device /dev/kfd --device /dev/dri --group-add video \
-                  --security-opt seccomp=unconfined \
-                  -v "${PWD}:/work/LMCache" \
-                  --entrypoint bash "${VLLM_ROCM_IMAGE}" \
-                  /work/LMCache/.github/scripts/smoke_test_rocm_wheel.sh
+# On-device validation (loading the compiled c_ops and running the real
+# KV-transfer kernels on gfx942/gfx950) requires AMD Instinct hardware, which
+# GitHub-hosted runners do not provide and LMCache does not maintain a
+# self-hosted runner for. It is therefore run manually on AMD hardware via
+# .github/scripts/smoke_test_rocm_wheel.sh (installs the wheel into the
+# upstream vllm/vllm-openai-rocm image and runs tests/v1/test_mem_kernels.py);
+# see the PR description for recorded gfx942 + gfx950 results.

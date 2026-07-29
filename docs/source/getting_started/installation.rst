@@ -77,7 +77,7 @@ Install LMCache
                                 --group-add video --security-opt seccomp=unconfined \
                                 --entrypoint bash vllm/vllm-openai-rocm:v0.25.0
 
-                            VERSION=0.4.3  # replace with target release
+                            VERSION=0.5.3  # replace with target release
                             pip install lmcache==${VERSION} --no-deps \
                                 --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-rocm
 
