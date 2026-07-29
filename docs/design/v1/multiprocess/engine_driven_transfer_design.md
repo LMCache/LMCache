@@ -213,6 +213,20 @@ It also computes `shm_pool_info` once from `StorageManagerConfig`:
 - `lmcache/v1/multiprocess/transfer_context/pickle.py`: `EngineDrivenContextPickle`
 - `lmcache/v1/multiprocess/transfer_context/shm.py`: `EngineDrivenContextShm`
 
+### 2.6 Logical Transfer Planning
+
+`transfer_plan.py` owns immutable, transport-independent transfer metadata and
+the CPU-only `build_transfer_plan()` planner. Given per-engine-group block IDs,
+chunk count, direction, and an optional retrieve prefix, it produces ordered
+`TransferPlan` → `ObjectGroupPlan` → `KernelGroupPlan` records.
+
+The planner centralizes engine-group expansion, subchunk block selection,
+cross-chunk sliding-window omission, prefix skip conversion, and deterministic
+object/kernel ordering. Plans deliberately exclude device pointers, CUDA
+resources, SHM addresses, serialized payloads, storage keys, and locks.
+Subsequent executors bind these logical operations to LMCache-driven IPC or
+Engine-driven pickle/SHM resources.
+
 ## 3. Protocol & Data Flow
 
 ### 3.1 MQ Request Types Used by Engine-Driven Path

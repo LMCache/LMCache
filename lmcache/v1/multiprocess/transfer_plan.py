@@ -3,8 +3,9 @@
 
 # Standard
 from dataclasses import dataclass
+from enum import Enum
 from itertools import islice
-from typing import TYPE_CHECKING, Generator, Sequence, TypeVar
+from typing import TYPE_CHECKING, Generator, Mapping, Sequence, TypeVar
 
 # Third Party
 import torch
@@ -85,6 +86,216 @@ class KVTransferMetadata:
     def build_attn_desc(self) -> AttnWindowDesc:
         """Build a defensive AttnWindowDesc copy for external APIs."""
         return AttnWindowDesc(num_chunks_in_sw=list(self.num_chunks_in_sw))
+
+
+class TransferPlanDirection(str, Enum):
+    """Logical direction for a planned KV transfer."""
+
+    STORE = "store"
+    """Copy paged engine KV into LMCache objects."""
+    RETRIEVE = "retrieve"
+    """Copy LMCache objects into paged engine KV."""
+
+
+@dataclass(frozen=True)
+class KernelGroupPlan:
+    """Logical transfer work for one kernel group in one object group."""
+
+    kernel_group_id: int
+    """Kernel-group index in the enclosing object's declared order."""
+    engine_group_id: int
+    """Engine group that supplied ``block_ids``."""
+    block_ids: tuple[int, ...]
+    """Selected and downsampled block IDs in enclosing ``chunk_indices`` order."""
+    blocks_per_chunk: int
+    """Total source blocks in one LMCache chunk."""
+    blocks_per_window: int
+    """Transferred blocks retained from each LMCache chunk."""
+    skip_first_n_blocks: int
+    """Blocks to skip in the first planned chunk after window downsampling."""
+
+
+@dataclass(frozen=True)
+class ObjectGroupPlan:
+    """Logical transfer work for one ordered LMCache object group."""
+
+    object_group_id: int
+    """Object-group index in deterministic object-group order."""
+    chunk_indices: tuple[int, ...]
+    """Original chunk indices included in this group's transfer, in order."""
+    skip_first_n_tokens: int
+    """Token prefix to skip within the first planned chunk."""
+    kernel_groups: tuple[KernelGroupPlan, ...]
+    """Kernel-group work in the object's declared kernel-group order."""
+
+
+@dataclass(frozen=True)
+class TransferPlan:
+    """Transport- and device-independent logical KV transfer schedule."""
+
+    direction: TransferPlanDirection
+    """Logical transfer direction."""
+    num_chunks: int
+    """Number of source chunks before attention-window or prefix skipping."""
+    object_groups: tuple[ObjectGroupPlan, ...]
+    """Object-group operations in deterministic object-group order."""
+
+
+def build_transfer_plan(
+    transfer_metadata: KVTransferMetadata,
+    block_ids_by_engine_group: Mapping[int, Sequence[int]],
+    num_chunks: int,
+    direction: TransferPlanDirection,
+    skip_first_n_tokens: int = 0,
+) -> TransferPlan:
+    """Build a logical transfer schedule from immutable KV metadata.
+
+    The returned plan contains no device pointers, transport buffers, storage
+    keys, locks, or serialized data.  It expands each kernel group's engine
+    block IDs, applies subchunk-window downsampling, skips stale objects on
+    retrieve, and preserves object/kernel ordering from ``transfer_metadata``.
+    Executors bind the plan to their own device or transport resources.
+
+    Args:
+        transfer_metadata: Immutable kernel- and object-group geometry.
+        block_ids_by_engine_group: Source block IDs keyed by engine group ID.
+            Each referenced engine group must contain at least
+            ``num_chunks * blocks_per_chunk`` IDs for every kernel group using it.
+        num_chunks: Number of source LMCache chunks to plan.
+        direction: Whether this plan stores or retrieves KV.
+        skip_first_n_tokens: Retrieve prefix to preserve without overwriting.
+            Non-block-aligned values are rounded down at each kernel group's
+            block geometry, matching the existing transfer behavior.
+
+    Returns:
+        An immutable, ordered logical transfer plan.
+
+    Raises:
+        ValueError: If the metadata ordering is invalid, an engine group is
+            missing or has insufficient IDs, or a count is negative.
+    """
+    if num_chunks < 0:
+        raise ValueError("num_chunks must be non-negative")
+    if skip_first_n_tokens < 0:
+        raise ValueError("skip_first_n_tokens must be non-negative")
+    if transfer_metadata.tokens_per_chunk < 1:
+        raise ValueError("transfer_metadata.tokens_per_chunk must be at least one")
+
+    kernel_groups_by_id = _validate_transfer_metadata_order(transfer_metadata)
+    retrieve_prefix_tokens = (
+        skip_first_n_tokens if direction == TransferPlanDirection.RETRIEVE else 0
+    )
+    object_group_plans: list[ObjectGroupPlan] = []
+    full_chunk_indices = tuple(range(num_chunks))
+    for object_group in transfer_metadata.object_groups:
+        object_group_skip = compute_num_objects_to_skip(
+            object_group.sw_size_chunks,
+            num_chunks,
+            is_retrieve=direction == TransferPlanDirection.RETRIEVE,
+        )
+        prefix_chunk_skip = min(
+            num_chunks,
+            retrieve_prefix_tokens // transfer_metadata.tokens_per_chunk,
+        )
+        first_chunk_idx = max(object_group_skip, prefix_chunk_skip)
+        chunk_indices = full_chunk_indices[first_chunk_idx:]
+        skip_tokens_in_first_chunk = max(
+            0,
+            retrieve_prefix_tokens
+            - first_chunk_idx * transfer_metadata.tokens_per_chunk,
+        )
+
+        kernel_group_plans: list[KernelGroupPlan] = []
+        for kernel_group_id in object_group.kernel_group_ids:
+            kernel_group = kernel_groups_by_id[kernel_group_id]
+            engine_block_ids = block_ids_by_engine_group.get(
+                kernel_group.engine_group_id
+            )
+            if engine_block_ids is None:
+                raise ValueError(
+                    f"missing block IDs for engine group {kernel_group.engine_group_id}"
+                )
+            required_block_count = num_chunks * kernel_group.blocks_per_chunk
+            if len(engine_block_ids) < required_block_count:
+                raise ValueError(
+                    f"engine group {kernel_group.engine_group_id} has "
+                    f"{len(engine_block_ids)} block IDs, but kernel group "
+                    f"{kernel_group_id} requires {required_block_count}"
+                )
+
+            selected_block_ids = select_block_ids_for_window(
+                engine_block_ids[:required_block_count],
+                kernel_group.blocks_per_chunk,
+                kernel_group.blocks_per_window,
+            )
+            planned_block_ids = tuple(
+                block_id
+                for chunk_idx in chunk_indices
+                for block_id in selected_block_ids[
+                    chunk_idx * kernel_group.blocks_per_window : (chunk_idx + 1)
+                    * kernel_group.blocks_per_window
+                ]
+            )
+            skipped_source_blocks = (
+                skip_tokens_in_first_chunk * kernel_group.blocks_per_chunk
+            ) // transfer_metadata.tokens_per_chunk
+            kernel_group_plans.append(
+                KernelGroupPlan(
+                    kernel_group_id=kernel_group_id,
+                    engine_group_id=kernel_group.engine_group_id,
+                    block_ids=planned_block_ids,
+                    blocks_per_chunk=kernel_group.blocks_per_chunk,
+                    blocks_per_window=kernel_group.blocks_per_window,
+                    skip_first_n_blocks=recalculate_blocks_to_skip(
+                        kernel_group.blocks_per_chunk,
+                        kernel_group.blocks_per_window,
+                        skipped_source_blocks,
+                    ),
+                )
+            )
+
+        object_group_plans.append(
+            ObjectGroupPlan(
+                object_group_id=object_group.object_group_id,
+                chunk_indices=chunk_indices,
+                skip_first_n_tokens=skip_tokens_in_first_chunk,
+                kernel_groups=tuple(kernel_group_plans),
+            )
+        )
+
+    return TransferPlan(
+        direction=direction,
+        num_chunks=num_chunks,
+        object_groups=tuple(object_group_plans),
+    )
+
+
+def _validate_transfer_metadata_order(
+    transfer_metadata: KVTransferMetadata,
+) -> dict[int, KernelGroupTransferMetadata]:
+    """Validate deterministic metadata ordering and return groups by ID."""
+    kernel_groups_by_id: dict[int, KernelGroupTransferMetadata] = {}
+    for kernel_group_id, kernel_group in enumerate(transfer_metadata.kernel_groups):
+        if kernel_group.kernel_group_id != kernel_group_id:
+            raise ValueError(
+                "transfer_metadata.kernel_groups ordering does not match "
+                "kernel_group_id"
+            )
+        kernel_groups_by_id[kernel_group_id] = kernel_group
+
+    for object_group_id, object_group in enumerate(transfer_metadata.object_groups):
+        if object_group.object_group_id != object_group_id:
+            raise ValueError(
+                "transfer_metadata.object_groups ordering does not match "
+                "object_group_id"
+            )
+        for kernel_group_id in object_group.kernel_group_ids:
+            if kernel_group_id not in kernel_groups_by_id:
+                raise ValueError(
+                    f"object group {object_group_id} references invalid "
+                    f"kernel group {kernel_group_id}"
+                )
+    return kernel_groups_by_id
 
 
 def export_kv_transfer_metadata(

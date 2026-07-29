@@ -11,10 +11,12 @@ import torch
 # First Party
 from lmcache.v1.distributed.api import AttnWindowDesc
 from lmcache.v1.multiprocess.transfer_plan import (
+    TransferPlanDirection,
     batched_iteration_with_skip,
     build_engine_driven_object_group_layout_desc,
     build_kernel_group_layout,
     build_object_group_layout_desc,
+    build_transfer_plan,
     compute_num_objects_to_skip,
     downsample_block_ids,
     export_kv_transfer_metadata,
@@ -495,3 +497,153 @@ def test_recalculate_blocks_to_skip_invalid_inputs_raise() -> None:
         recalculate_blocks_to_skip(2, 3, 0)
     with pytest.raises(ValueError, match="non-negative"):
         recalculate_blocks_to_skip(4, 2, -1)
+
+
+def test_build_transfer_plan_preserves_group_order_and_expands_engine_ids() -> None:
+    """Planner expands engine IDs and retains declared object/kernel ordering."""
+    # Standard
+    from typing import cast
+
+    # First Party
+    from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+
+    metadata = export_kv_transfer_metadata(
+        cast(KVLayerGroupsManager, _fake_manager()),
+        tokens_per_chunk=16,
+    )
+
+    plan = build_transfer_plan(
+        metadata,
+        block_ids_by_engine_group={
+            2: list(range(100, 108)),
+            7: list(range(200, 204)),
+        },
+        num_chunks=2,
+        direction=TransferPlanDirection.STORE,
+    )
+
+    assert [group.object_group_id for group in plan.object_groups] == [0, 1]
+    assert plan.object_groups[0].chunk_indices == (0, 1)
+    assert [group.kernel_group_id for group in plan.object_groups[0].kernel_groups] == [
+        1,
+        0,
+    ]
+    assert plan.object_groups[0].kernel_groups[0].block_ids == (201, 203)
+    assert plan.object_groups[0].kernel_groups[1].block_ids == tuple(range(100, 108))
+
+
+def test_build_transfer_plan_retrieve_applies_window_and_prefix_skip() -> None:
+    """Retrieve plans skip stale sliding-window chunks and a partial prefix."""
+    # Standard
+    from typing import cast
+
+    # First Party
+    from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+
+    metadata = export_kv_transfer_metadata(
+        cast(KVLayerGroupsManager, _fake_manager()),
+        tokens_per_chunk=16,
+    )
+    plan = build_transfer_plan(
+        metadata,
+        block_ids_by_engine_group={
+            2: list(range(100, 116)),
+            7: list(range(200, 208)),
+        },
+        num_chunks=4,
+        direction=TransferPlanDirection.RETRIEVE,
+        skip_first_n_tokens=18,
+    )
+
+    sliding_group, full_attention_group = plan.object_groups
+    assert sliding_group.chunk_indices == (2, 3)
+    assert sliding_group.skip_first_n_tokens == 0
+    assert full_attention_group.chunk_indices == (1, 2, 3)
+    assert full_attention_group.skip_first_n_tokens == 2
+    assert full_attention_group.kernel_groups[0].skip_first_n_blocks == 0
+    assert full_attention_group.kernel_groups[0].block_ids == tuple(range(104, 116))
+
+
+def test_build_transfer_plan_store_does_not_apply_retrieve_prefix_skip() -> None:
+    """Store plans retain every chunk because prefix preservation is retrieve-only."""
+    # Standard
+    from typing import cast
+
+    # First Party
+    from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+
+    metadata = export_kv_transfer_metadata(
+        cast(KVLayerGroupsManager, _fake_manager()),
+        tokens_per_chunk=16,
+    )
+    plan = build_transfer_plan(
+        metadata,
+        block_ids_by_engine_group={
+            2: list(range(100, 108)),
+            7: list(range(200, 204)),
+        },
+        num_chunks=2,
+        direction=TransferPlanDirection.STORE,
+        skip_first_n_tokens=16,
+    )
+
+    assert [group.chunk_indices for group in plan.object_groups] == [(0, 1), (0, 1)]
+    assert all(group.skip_first_n_tokens == 0 for group in plan.object_groups)
+
+
+def test_build_transfer_plan_subchunk_prefix_skip_is_recalculated() -> None:
+    """Planner converts full-chunk skip geometry to subchunk-window geometry."""
+    # Standard
+    from typing import cast
+
+    # First Party
+    from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+
+    metadata = export_kv_transfer_metadata(
+        cast(KVLayerGroupsManager, _fake_manager()),
+        tokens_per_chunk=16,
+    )
+    plan = build_transfer_plan(
+        metadata,
+        block_ids_by_engine_group={
+            2: list(range(100, 104)),
+            7: list(range(200, 202)),
+        },
+        num_chunks=1,
+        direction=TransferPlanDirection.RETRIEVE,
+        skip_first_n_tokens=12,
+    )
+
+    assert plan.object_groups[0].kernel_groups[0].skip_first_n_blocks == 0
+    assert plan.object_groups[1].kernel_groups[0].skip_first_n_blocks == 3
+
+
+@pytest.mark.parametrize(
+    ("block_ids_by_engine_group", "message"),
+    [
+        ({2: [1, 2, 3, 4]}, "missing block IDs for engine group 7"),
+        ({2: [1, 2, 3, 4], 7: [1]}, "requires 2"),
+    ],
+)
+def test_build_transfer_plan_rejects_missing_or_insufficient_block_ids(
+    block_ids_by_engine_group: dict[int, list[int]],
+    message: str,
+) -> None:
+    """Planner rejects invalid engine-group block-ID input before execution."""
+    # Standard
+    from typing import cast
+
+    # First Party
+    from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+
+    metadata = export_kv_transfer_metadata(
+        cast(KVLayerGroupsManager, _fake_manager()),
+        tokens_per_chunk=16,
+    )
+    with pytest.raises(ValueError, match=message):
+        build_transfer_plan(
+            metadata,
+            block_ids_by_engine_group,
+            num_chunks=1,
+            direction=TransferPlanDirection.STORE,
+        )
