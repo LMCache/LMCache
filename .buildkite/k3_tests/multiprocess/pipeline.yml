@@ -209,8 +209,7 @@ steps:
           ATTENTION_BACKEND: "auto"
           GPU_MEMORY_UTILIZATION: "0.85"
           MAX_WAIT_SECONDS: "600"
-          NUM_CONCURRENT: "1"
-          LIMIT: "10"
+          LIMIT: "100"
           L1_USE_LAZY: "false"
           CPU_BUFFER_SIZE: "80"
           # Force Engine-driven transfer path; also picked up by the script.
