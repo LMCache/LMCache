@@ -22,7 +22,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -36,11 +36,6 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.memory_management import MemoryFormat
-
-TORCH_DEVICE_AVAILABLE = (
-    hasattr(torch, torch_device_type)
-    and getattr(torch, torch_device_type).is_available()
-)
 
 # ==============================================================================
 # Test Fixtures
@@ -153,9 +148,9 @@ def create_interleaved_lookup_keys(
 # ==============================================================================
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not TORCH_DEVICE_AVAILABLE,
+    not torch_dev.is_available(),
     reason="Requires torch_device_type",
 )
 class TestStorageManagerTPLookup:
@@ -431,9 +426,9 @@ class TestStorageManagerTPLookup:
 # ==============================================================================
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not TORCH_DEVICE_AVAILABLE,
+    not torch_dev.is_available(),
     reason="Requires torch_device_type",
 )
 class TestStorageManagerTPStoreRetrieve:
@@ -519,9 +514,9 @@ class TestStorageManagerTPStoreRetrieve:
 # ==============================================================================
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not TORCH_DEVICE_AVAILABLE,
+    not torch_dev.is_available(),
     reason="Requires torch_device_type",
 )
 class TestTPEdgeCases:
@@ -650,9 +645,9 @@ class TestTPEdgeCases:
 # ==============================================================================
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not TORCH_DEVICE_AVAILABLE,
+    not torch_dev.is_available(),
     reason="Requires torch_device_type",
 )
 class TestTPIntegration:

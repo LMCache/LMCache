@@ -49,7 +49,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     L1ManagerConfig,
@@ -66,22 +66,17 @@ except ImportError:
         "Skipping because L1 manager cannot be imported", allow_module_level=True
     )
 
-TORCH_DEVICE_AVAILABLE = (
-    hasattr(torch, torch_device_type)
-    and getattr(torch, torch_device_type).is_available()
-)
-
-if not TORCH_DEVICE_AVAILABLE:
+if not torch_dev.is_available():
     pytest.skip(
         f"Requires available {torch_device_type} runtime",
         allow_module_level=True,
     )
 
 # Skip all tests in this module if CUDA is not available
-pytestmark = pytest.mark.gpu
+pytestmark = pytest.mark.cuda
 def should_use_lazy_alloc() -> bool:
     """Determine if lazy allocation should be used based on CUDA availability."""
-    return (hasattr(torch, torch_device_type) and getattr(torch, torch_device_type).is_available())
+    return torch_dev.is_available()
 
 
 # =============================================================================

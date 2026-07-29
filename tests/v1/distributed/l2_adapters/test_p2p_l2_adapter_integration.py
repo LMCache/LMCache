@@ -20,21 +20,16 @@ import time
 import pytest
 import torch
 
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 
-TORCH_DEVICE_AVAILABLE = (
-    hasattr(torch, torch_device_type)
-    and getattr(torch, torch_device_type).is_available()
-)
-
-if not TORCH_DEVICE_AVAILABLE:
+if not torch_dev.is_available():
     pytest.skip(
         f"Requires available {torch_device_type} runtime",
         allow_module_level=True,
     )
 
 nixl = pytest.importorskip("nixl")
-pytestmark = pytest.mark.gpu
+pytestmark = pytest.mark.cuda
 # Third Party
 import zmq  # noqa: E402
 
