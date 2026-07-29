@@ -70,6 +70,10 @@ import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
+#: Distinct no-op-success reasons already reported (bounded: a fixed set of
+#: call sites), so the log costs nothing after the first occurrence of each.
+_NOOP_REASONS_SEEN: set[str] = set()
+
 # Plan-then-execute retrieve: one native call enqueues all fill/rope/scatter
 # in a single GIL release, with the plan encoded as numpy int64 tables (one
 # pybind crossing). The Python wave loop stays as fallback for c_ops builds
@@ -475,8 +479,10 @@ class BlendV3Module(InstanceLivenessTarget):
 
         # vLLM may call retrieve twice per request (partial- then full-block
         # alloc): ranges already scattered, so the repeat call skips them.
-        # Bounded LRU keyed by request id.
-        self._cb_applied_match_ranges: "OrderedDict[str, set[tuple[bytes, int, int]]]" = OrderedDict()  # noqa: E501
+        # Bounded LRU keyed by (request id, WORKER id) -- at TP>1 each worker
+        # issues its own retrieve and scatters into its own KV buffers, so the
+        # key must include the worker or later ranks skip work they never did.
+        self._cb_applied_match_ranges: "OrderedDict[tuple[str, int | None], set[tuple[bytes, int, int]]]" = OrderedDict()  # noqa: E501
 
         # Request-invariant retrieve-plan specs per GPU context (entries die
         # with the context). The cached tuple holds the rope_state it was
@@ -1981,11 +1987,27 @@ class BlendV3Module(InstanceLivenessTarget):
 
         _retrieve_t0 = time.perf_counter()
 
-        def _noop_success() -> tuple[bytes, bool]:
+        def _noop_success(reason: str = "?") -> tuple[bytes, bool]:
             """Zero-work success return: must export a fresh recorded event
             from THIS process -- echoing the caller's own handle back makes
             the worker re-import it (CUDA "invalid device context").
+
+            ``reason`` is logged once per distinct value. Every one of these
+            paths silently turns a matched request into a full recompute --
+            recall stays correct, only the speedup vanishes -- so a run that
+            drops all its matches is otherwise indistinguishable from a
+            working one except by its TTFT. Logging the reason is what makes
+            "CB engaged but was not faster" diagnosable.
             """
+            if reason not in _NOOP_REASONS_SEEN:
+                _NOOP_REASONS_SEEN.add(reason)
+                logger.info(
+                    "CB v3 retrieve: no-op success (%s) — %d match(es) dropped, "
+                    "request falls back to full recompute. Logged once per "
+                    "distinct reason.",
+                    reason,
+                    len(cb_match_result),
+                )
             with (
                 torch_dev.device(gpu_context.device),
                 torch_dev.stream(gpu_context.stream),
@@ -2007,7 +2029,8 @@ class BlendV3Module(InstanceLivenessTarget):
         # ranges already scattered (blocks never move mid-prefill), returning
         # before the obj-key/prefetched-read machinery (~7-20 ms).
         applied_ranges = self._cb_applied_match_ranges
-        prior_applied = applied_ranges.get(key.request_id)
+        applied_key = (key.request_id, key.worker_id)
+        prior_applied = applied_ranges.get(applied_key)
         if prior_applied:
             cb_match_result = [
                 r
@@ -2015,7 +2038,7 @@ class BlendV3Module(InstanceLivenessTarget):
                 if (r.hash, r.cur_st, r.cur_ed) not in prior_applied
             ]
             if not cb_match_result:
-                return _noop_success()
+                return _noop_success("all ranges already applied for this worker")
         applied_now: "set[tuple[bytes, int, int]]" = set()
         # Partial-alloc first call: every match can be beyond the allocated
         # slots -> return before the obj-key machinery. Read locks stay held
@@ -2031,7 +2054,7 @@ class BlendV3Module(InstanceLivenessTarget):
             if slot_bound is not None and all(
                 r.cur_ed > slot_bound for r in cb_match_result
             ):
-                return _noop_success()
+                return _noop_success(f"every match beyond slot_bound={slot_bound}")
         # L2 opt: reuse lookup's obj_keys cache; fall back to re-resolve.
         with self._lookup_obj_keys_lock:
             cached = self._lookup_obj_keys_cache.pop(key.request_id, None)
@@ -2073,7 +2096,7 @@ class BlendV3Module(InstanceLivenessTarget):
         if not all_obj_keys:
             # Same latent hazard as the guards above: this used to echo the
             # caller's own event handle back.
-            return _noop_success()
+            return _noop_success("no object keys resolved for the matches")
 
         logger.debug("CB V3 retrieving object keys: %s", all_obj_keys)
 
@@ -2304,9 +2327,9 @@ class BlendV3Module(InstanceLivenessTarget):
 
         # Record scattered ranges for the repeat-call guard (bounded LRU).
         if applied_now:
-            applied_entry = applied_ranges.setdefault(key.request_id, set())
+            applied_entry = applied_ranges.setdefault(applied_key, set())
             applied_entry.update(applied_now)
-            applied_ranges.move_to_end(key.request_id)
+            applied_ranges.move_to_end(applied_key)
             while len(applied_ranges) > 4096:
                 applied_ranges.popitem(last=False)
 
