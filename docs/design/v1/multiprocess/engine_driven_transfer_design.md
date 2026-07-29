@@ -227,6 +227,12 @@ resources, SHM addresses, serialized payloads, storage keys, and locks.
 Subsequent executors bind these logical operations to LMCache-driven IPC or
 Engine-driven pickle/SHM resources.
 
+The LMCache-driven executor builds this plan once per store or retrieve request,
+then stages each `ObjectGroupPlan`'s selected IDs and maps its `chunk_indices`
+to the corresponding memory objects. Both its native object-group fast path
+and per-kernel fallback consume that bound plan; neither recalculates window
+selection, object omission, or retrieve-prefix skip geometry.
+
 ## 3. Protocol & Data Flow
 
 ### 3.1 MQ Request Types Used by Engine-Driven Path
