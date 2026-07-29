@@ -9,7 +9,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
@@ -63,7 +63,11 @@ def test_ipc_cache_engine_key_serialization_with_cache_salt():
     assert decoded_key.cache_salt == "alice"
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda
+@pytest.mark.skipif(
+    not torch_dev.is_available(),
+    reason=f"requires available {torch_device_type} runtime",
+)
 def test_cudaipc_wrapper_serialization():
     """Test custom encoder/decoder for single CudaIPCWrapper object."""
     encoder = get_customized_encoder(type=CudaIPCWrapper)
@@ -86,7 +90,11 @@ def test_cudaipc_wrapper_serialization():
     )
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda
+@pytest.mark.skipif(
+    not torch_dev.is_available(),
+    reason=f"requires available {torch_device_type} runtime",
+)
 def test_cudaipc_wrapper_list_serialization():
     """Test custom encoder/decoder for list of CudaIPCWrapper objects."""
     wrappers = []
@@ -121,7 +129,7 @@ def _worker_process_deserialize_and_reconstruct(
     """
     try:
         # Decode the list of wrappers
-        getattr(torch, torch_device_type).init()
+        torch_dev.init()
         decoder = get_customized_decoder(type=list[CudaIPCWrapper])
         decoded_wrappers = decoder.decode(encoded_data)
 
@@ -143,7 +151,11 @@ def _worker_process_deserialize_and_reconstruct(
         result_queue.put(("error", str(e), None))
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda
+@pytest.mark.skipif(
+    not torch_dev.is_available(),
+    reason=f"requires available {torch_device_type} runtime",
+)
 def test_cudaipc_wrapper_multiprocess_serialization():
     """
     Test CudaIPCWrapper serialization across processes using spawn method.
@@ -239,7 +251,7 @@ def _worker_reconstruct_offset_tensor(encoded_data: bytes, result_queue: Queue):
     """Worker: decode a single CudaIPCWrapper and reconstruct its tensor,
     reporting the layout metadata and a checksum back to the parent."""
     try:
-        getattr(torch, torch_device_type).init()
+        torch_dev.init()
         decoder = get_customized_decoder(type=CudaIPCWrapper)
         wrapper = decoder.decode(encoded_data)
         tensor = wrapper.to_tensor()
@@ -256,7 +268,11 @@ def _worker_reconstruct_offset_tensor(encoded_data: bytes, result_queue: Queue):
         result_queue.put(("error", str(e), None, None, None))
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda
+@pytest.mark.skipif(
+    not torch_dev.is_available(),
+    reason=f"requires available {torch_device_type} runtime",
+)
 def test_cudaipc_wrapper_nonzero_storage_offset():
     """CudaIPCWrapper must round-trip a slice/narrow view with
     ``storage_offset > 0`` bit-identically across processes.

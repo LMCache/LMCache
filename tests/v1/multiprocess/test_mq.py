@@ -12,7 +12,7 @@ import torch
 import zmq
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 from lmcache.utils import EngineType
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
@@ -359,7 +359,11 @@ def test_mq_noop_multiple_clients():
     )
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda
+@pytest.mark.skipif(
+    not torch_dev.is_available(),
+    reason=f"requires available {torch_device_type} runtime",
+)
 def test_mq_register_kv_cache():
     """
     Test MessageQueue with REGISTER_KV_CACHE request type.

@@ -17,6 +17,7 @@ import time
 import pytest
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -27,7 +28,13 @@ from lmcache.v1.mp_observability.config import DEFAULT_OBSERVABILITY_CONFIG
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.server import run_cache_server
 
-pytestmark = pytest.mark.gpu
+pytestmark = pytest.mark.cuda
+
+if not torch_dev.is_available():
+    pytest.skip(
+        f"requires available {torch_device_type} runtime",
+        allow_module_level=True,
+    )
 
 SERVER_PORT = 15599
 STARTUP_TIMEOUT_SECONDS = 90.0

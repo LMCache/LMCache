@@ -11,34 +11,34 @@ import msgspec
 import pytest
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
 )
 
-try:
-    # Third Party
-    import torch  # noqa: F401
-except ImportError:
-    torch = None
+if not torch_dev.is_available():
+    pytest.skip(
+        f"requires available {torch_device_type} runtime",
+        allow_module_level=True,
+    )
 
 try:
     # First Party
     import lmcache.c_ops as lmc_ops
-
-    _has_native_op = hasattr(lmc_ops, "record_completion_on_stream")
 except ImportError:
-    lmc_ops = None
-    _has_native_op = False
+    pytest.skip(
+        "requires lmcache.c_ops",
+        allow_module_level=True,
+    )
 
-native_only = pytest.mark.skipif(
-    not _has_native_op,
-    reason="requires native record_completion_on_stream",
-)
+if not hasattr(lmc_ops, "record_completion_on_stream"):
+    pytest.skip(
+        "requires native record_completion_on_stream",
+        allow_module_level=True,
+    )
 
-if _has_native_op:
-    # Third Party
-    cupy = pytest.importorskip("cupy", reason="cupy required")  # noqa: E402
+cupy = pytest.importorskip("cupy", reason="requires cupy")
 
 
 @pytest.fixture()
@@ -56,7 +56,6 @@ def dispatcher():
     d.stop()
 
 
-@native_only
 class TestRecordAndDrain:
     """Low-level tests on lmc_ops.record_completion_on_stream / drain."""
 
@@ -95,7 +94,6 @@ class TestRecordAndDrain:
             assert msgspec.msgpack.decode(payload, type=int) == idx
 
 
-@native_only
 class TestDispatcher:
     """Integration tests for DeviceHostFuncDispatcher (drain + dispatch)."""
 
@@ -150,7 +148,6 @@ class TestDispatcher:
         assert seen == [(42, "hello")]
 
 
-@native_only
 class TestDeadlockRegression:
     """Regression for the GIL deadlock: the legacy
     ``stream.launch_host_func(python_fn, ...)`` path stalls; the C++
