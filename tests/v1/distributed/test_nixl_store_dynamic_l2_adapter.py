@@ -69,7 +69,13 @@ MAX_CAPACITY_GB = 0.001  # ~1 MB
 
 if torch_device_type == "xpu":
     pytest.skip(
-        "Skip on XPU, NIXL dynamic store backends are unavailable at runtime (including POSIX), adapter init can fail with NIXL_ERR_NOT_FOUND, so this suite is not runnable on XPU in the current test environment.",
+        (
+            "Skip on XPU: in vllm/vllm-openai-xpu:v0.26.0, "
+            "NIXL dynamic store backends are unavailable at runtime "
+            "(including POSIX), adapter init can fail with "
+            "NIXL_ERR_NOT_FOUND, so this suite is not runnable "
+            "on XPU in the current test environment."
+        ),
         allow_module_level=True,
     )
 

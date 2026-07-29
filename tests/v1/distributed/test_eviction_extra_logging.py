@@ -9,10 +9,9 @@ import time
 
 # Third Party
 import pytest
-import torch
 
 # First Party
-from lmcache import torch_dev, torch_device_type
+from lmcache import torch_dev
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,

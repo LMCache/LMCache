@@ -39,6 +39,7 @@ if not torch_dev.is_available():
         allow_module_level=True,
     )
 
+
 def should_use_lazy_alloc() -> bool:
     return torch_dev.is_available()
 

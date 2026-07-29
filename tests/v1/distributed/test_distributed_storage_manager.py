@@ -47,6 +47,7 @@ except ImportError:
         "Skipping because StorageManager cannot be imported", allow_module_level=True
     )
 
+
 def should_use_lazy_alloc() -> bool:
     """Determine if lazy allocation should be used based on CUDA availability."""
     return torch_dev.is_available()
