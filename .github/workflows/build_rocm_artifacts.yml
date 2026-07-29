@@ -106,7 +106,6 @@ jobs:
 # On-device validation (loading the compiled c_ops and running the real
 # KV-transfer kernels on gfx942/gfx950) requires AMD Instinct hardware, which
 # GitHub-hosted runners do not provide and LMCache does not maintain a
-# self-hosted runner for. It is therefore run manually on AMD hardware via
-# .github/scripts/smoke_test_rocm_wheel.sh (installs the wheel into the
-# upstream vllm/vllm-openai-rocm image and runs tests/v1/test_mem_kernels.py);
-# see the PR description for recorded gfx942 + gfx950 results.
+# self-hosted runner for. It is therefore run manually on AMD hardware:
+# install the built wheel into the upstream vllm/vllm-openai-rocm image and run
+# tests/v1/test_mem_kernels.py. Recorded gfx942 + gfx950 results are in the PR.
