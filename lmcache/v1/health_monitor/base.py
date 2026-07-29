@@ -243,15 +243,16 @@ class HealthMonitor(PeriodicThread):
             try:
                 instances = cls.create(self._manager)
             except Exception as e:
-                logger.warning(f"Failed to create health check {cls.__name__}: {e}")
+                logger.warning("Failed to create health check %s: %s", cls.__name__, e)
                 continue
             for instance in instances:
                 self._health_checks.append(instance)
                 # Initialize previous status as healthy
                 self._previous_check_status[instance.name()] = True
                 logger.info(
-                    f"Registered health check: {instance.name()} "
-                    f"with fallback_policy: {instance.fallback_policy}"
+                    "Registered health check: %s with fallback_policy: %s",
+                    instance.name(),
+                    instance.fallback_policy,
                 )
 
     def get_health_checks(self) -> List[HealthCheck]:
@@ -323,8 +324,9 @@ class HealthMonitor(PeriodicThread):
         backend_name = check.get_bypass_backend_name()
         if backend_name is None:
             logger.warning(
-                f"Health check {check.name()} has LOCAL_CPU fallback but "
-                "get_bypass_backend_name() returned None"
+                "Health check %s has LOCAL_CPU fallback but "
+                "get_bypass_backend_name() returned None",
+                check.name(),
             )
             return
 
@@ -355,16 +357,17 @@ class HealthMonitor(PeriodicThread):
             if local_cpu is not None:
                 local_cpu.use_hot = True
                 logger.info(
-                    f"Enabled hot_cache for LocalCPUBackend due to "
-                    f"{check.name()} failure"
+                    "Enabled hot_cache for LocalCPUBackend due to %s failure",
+                    check.name(),
                 )
 
             # Record this backend as bypassed
             self._bypassed_backends[backend_name] = check.name()
 
             logger.info(
-                f"Applied LOCAL_CPU fallback for {check.name()}: "
-                f"bypassing {backend_name}"
+                "Applied LOCAL_CPU fallback for %s: bypassing %s",
+                check.name(),
+                backend_name,
             )
 
     def _recover_from_local_cpu_fallback(self, check: HealthCheck) -> None:
@@ -406,8 +409,9 @@ class HealthMonitor(PeriodicThread):
             del self._bypassed_backends[backend_name]
 
             logger.info(
-                f"Recovered from LOCAL_CPU fallback for {check.name()}: "
-                f"restored {backend_name}"
+                "Recovered from LOCAL_CPU fallback for %s: restored %s",
+                check.name(),
+                backend_name,
             )
 
             # Only restore hot_cache when ALL backends have recovered
@@ -418,8 +422,9 @@ class HealthMonitor(PeriodicThread):
                     # This prevents new data from being written during clear()
                     local_cpu.use_hot = self._original_hot_cache
                     logger.info(
-                        f"Restored hot_cache setting to {self._original_hot_cache} "
-                        f"for LocalCPUBackend (all backends restored)"
+                        "Restored hot_cache setting to %s for LocalCPUBackend "
+                        "(all backends restored)",
+                        self._original_hot_cache,
                     )
 
                     # Then, clear hot_cache if it was originally disabled
@@ -457,10 +462,12 @@ class HealthMonitor(PeriodicThread):
             try:
                 is_healthy = check.check()
             except IrrecoverableException:
-                logger.error(f"Health check {check_name} raised IrrecoverableException")
+                logger.error(
+                    "Health check %s raised IrrecoverableException", check_name
+                )
                 raise
             except Exception as e:
-                logger.error(f"Health check {check_name} raised exception: {e}")
+                logger.error("Health check %s raised exception: %s", check_name, e)
                 is_healthy = False
 
             # Update previous status
@@ -469,13 +476,13 @@ class HealthMonitor(PeriodicThread):
             if is_healthy:
                 # Check recovered
                 if not was_healthy:
-                    logger.info(f"Health check {check_name} recovered")
+                    logger.info("Health check %s recovered", check_name)
                     # If this check was using LOCAL_CPU fallback, recover
                     if check.fallback_policy == FallbackPolicy.LOCAL_CPU:
                         self._recover_from_local_cpu_fallback(check)
             else:
                 # Check failed
-                logger.warning(f"Health check failed: {check_name}")
+                logger.warning("Health check failed: %s", check_name)
 
                 if check.fallback_policy == FallbackPolicy.RECOMPUTE:
                     # RECOMPUTE policy: mark as unhealthy
@@ -516,9 +523,9 @@ class HealthMonitor(PeriodicThread):
         thread = super().start()
         if thread is not None:
             logger.info(
-                f"Started health monitor thread with "
-                f"{len(active_checks)} active checks, "
-                f"interval: {self._ping_interval}s"
+                "Started health monitor thread with %s active checks, interval: %ss",
+                len(active_checks),
+                self._ping_interval,
             )
         return thread
 
@@ -562,7 +569,7 @@ class HealthMonitor(PeriodicThread):
                 },
             )
         except IrrecoverableException as e:
-            logger.error(f"Irrecoverable error in health monitor: {e}")
+            logger.error("Irrecoverable error in health monitor: %s", e)
             self._set_healthy(False)
             # Re-raise to stop the thread
             raise
