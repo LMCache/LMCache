@@ -46,6 +46,14 @@ class AccelCompressBackend(abc.ABC):
         """
         raise NotImplementedError
 
+    def data_shuffle(self, buf: memoryview, element_size: int) -> None:  # noqa: B027
+        """Byte-lane shuffle (self-inverse, in-place). No-op by default."""
+
+    def quant_trunc(  # noqa: B027
+        self, buf: memoryview, element_size: int, truncate_bits: int
+    ) -> None:
+        """Zero LSBs of each element (lossy, in-place). No-op by default."""
+
     @abc.abstractmethod
     def close(self) -> None:
         """Release any resources held by the backend."""

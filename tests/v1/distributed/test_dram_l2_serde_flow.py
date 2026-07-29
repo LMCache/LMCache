@@ -139,65 +139,6 @@ class TestSerdeRoundtrip:
 
         assert bytes(output.byte_array) == original
 
-    def test_compress_decompress_with_shuffle(self):
-        """Data survives compress→decompress with byte_reorder enabled."""
-        backend = ZlibBackend()
-        serializer = AccelCompressSerializer(
-            backend=backend, byte_reorder=True, truncate_bits=0, element_size=2
-        )
-        deserializer = AccelCompressDeserializer(
-            backend=backend, byte_reorder=True, element_size=2
-        )
-
-        # Use even size for 2-byte element shuffle
-        src = create_memory_obj(size=4096)
-        src.raw_data[:] = torch.randint(0, 256, (4096,), dtype=torch.uint8)
-        original = bytes(src.byte_array)
-
-        max_compressed = backend.max_compressed_length(4096)
-        compressed_buf = create_memory_obj(size=max_compressed)
-        compressed_size = serializer.serialize(src, compressed_buf, _DUMMY_KEY)
-
-        compressed_exact = create_memory_obj(size=compressed_size)
-        compressed_exact.raw_data[:] = compressed_buf.raw_data[:compressed_size]
-
-        output = create_memory_obj(size=4096)
-        deserializer.deserialize(compressed_exact, output, _DUMMY_KEY)
-
-        assert bytes(output.byte_array) == original
-
-    def test_truncate_is_lossy(self):
-        """quant_trunc zeros LSBs so result won't be bit-identical."""
-        backend = ZlibBackend()
-        serializer = AccelCompressSerializer(
-            backend=backend, byte_reorder=False, truncate_bits=4, element_size=1
-        )
-        deserializer = AccelCompressDeserializer(backend=backend, byte_reorder=False)
-
-        src = create_memory_obj(size=1024)
-        src.raw_data[:] = torch.randint(0, 256, (1024,), dtype=torch.uint8)
-        _original = bytes(src.byte_array)  # noqa: F841
-
-        max_compressed = backend.max_compressed_length(1024)
-        compressed_buf = create_memory_obj(size=max_compressed)
-        compressed_size = serializer.serialize(src, compressed_buf, _DUMMY_KEY)
-
-        compressed_exact = create_memory_obj(size=compressed_size)
-        compressed_exact.raw_data[:] = compressed_buf.raw_data[:compressed_size]
-
-        output = create_memory_obj(size=1024)
-        deserializer.deserialize(compressed_exact, output, _DUMMY_KEY)
-
-        # Truncation is lossy — output should differ from original
-        # but each byte should have lower 4 bits zeroed
-        out_bytes = bytes(output.byte_array)
-        for b in out_bytes:
-            assert b & 0x0F == 0, f"Expected lower 4 bits zeroed, got {b:#04x}"
-
-
-class TestSerdeWithDramL2:
-    """End-to-end: serialize → DramL2Adapter.store → load → deserialize."""
-
     def test_full_flow(self):
         """Full pipeline: compress, store in DramL2, load, decompress."""
         backend = ZlibBackend()

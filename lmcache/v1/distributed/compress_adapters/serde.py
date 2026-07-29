@@ -7,10 +7,6 @@ from typing import cast
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.compress_adapters.backend import AccelCompressBackend
-from lmcache.v1.distributed.compress_adapters.preprocessing import (
-    data_shuffle,
-    quant_trunc,
-)
 from lmcache.v1.distributed.serde.base import Deserializer, Serializer
 from lmcache.v1.memory_management import MemoryObj
 
@@ -57,9 +53,9 @@ class AccelCompressSerializer(Serializer):
 
         # Preprocessing (in-place on src -- lossy for trunc)
         if self._truncate_bits > 0:
-            quant_trunc(src_buf, self._element_size, self._truncate_bits)
+            self._backend.quant_trunc(src_buf, self._element_size, self._truncate_bits)
         if self._byte_reorder:
-            data_shuffle(src_buf, self._element_size)
+            self._backend.data_shuffle(src_buf, self._element_size)
 
         # Compress
         compressed_size = self._backend.compress(src_buf, dst_buf)
@@ -110,4 +106,4 @@ class AccelCompressDeserializer(Deserializer):
 
         # Reverse preprocessing (data_shuffle is self-inverse)
         if self._byte_reorder:
-            data_shuffle(dst_buf, self._element_size)
+            self._backend.data_shuffle(dst_buf, self._element_size)

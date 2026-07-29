@@ -53,6 +53,24 @@ def _load_qzip_library(lib_path: str | None = None) -> ctypes.CDLL:
     ]
     lib.kv_agent_block_decompress.restype = ctypes.c_int
 
+    # void kvclip_data_shuffle(char *data, size_t size, int is_bf16)
+    lib.kvclip_data_shuffle.argtypes = [
+        ctypes.c_char_p,  # data
+        ctypes.c_size_t,  # size
+        ctypes.c_int,  # is_bf16
+    ]
+    lib.kvclip_data_shuffle.restype = None
+
+    # void kvclip_quant_trunc(char *data, size_t size, int element_size,
+    #                         int truncate_bits)
+    lib.kvclip_quant_trunc.argtypes = [
+        ctypes.c_char_p,  # data
+        ctypes.c_size_t,  # size
+        ctypes.c_int,  # element_size
+        ctypes.c_int,  # truncate_bits
+    ]
+    lib.kvclip_quant_trunc.restype = None
+
     return lib
 
 
@@ -177,6 +195,33 @@ class QatBackend(AccelCompressBackend):
             raise RuntimeError(f"kv_agent_block_decompress failed with code {ret}")
 
         return out_sizes_arr[0]
+
+    def data_shuffle(self, buf: memoryview, element_size: int) -> None:
+        """Byte-lane shuffle via C (self-inverse, in-place)."""
+        if element_size != 2:
+            return
+        size = len(buf)
+        c_buf = (ctypes.c_char * size).from_buffer(buf)
+        self._lib.kvclip_data_shuffle(
+            ctypes.cast(c_buf, ctypes.c_char_p),
+            ctypes.c_size_t(size),
+            ctypes.c_int(1),  # is_bf16
+        )
+
+    def quant_trunc(
+        self, buf: memoryview, element_size: int, truncate_bits: int
+    ) -> None:
+        """Zero LSBs of each element via C (lossy, in-place)."""
+        if truncate_bits <= 0:
+            return
+        size = len(buf)
+        c_buf = (ctypes.c_char * size).from_buffer(buf)
+        self._lib.kvclip_quant_trunc(
+            ctypes.cast(c_buf, ctypes.c_char_p),
+            ctypes.c_size_t(size),
+            ctypes.c_int(element_size),
+            ctypes.c_int(truncate_bits),
+        )
 
     def max_compressed_length(self, src_size: int) -> int:
         """Return worst-case compressed size (150% of input, matching KVCacheClip)."""
