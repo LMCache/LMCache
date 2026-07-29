@@ -879,6 +879,21 @@ class TestReserveWrite:
 
         manager.close()
 
+    def test_reserve_write_rejects_duplicate_keys_before_allocating(
+        self, basic_l1_config, basic_layout
+    ):
+        """Duplicate keys must not mutate L1 state or consume an allocation."""
+        manager = L1Manager(basic_l1_config)
+        key = make_object_key(12345)
+
+        with pytest.raises(ValueError, match="keys must be unique"):
+            manager.reserve_write([key, key], [False, False], basic_layout)
+
+        assert manager.get_object_state(key) is None
+        assert manager.get_memory_usage()[0] == 0
+
+        manager.close()
+
     def test_reserve_write_out_of_memory(self, small_l1_config, large_layout):
         """Test that reserve_write returns OUT_OF_MEMORY when allocation fails."""
         manager = L1Manager(small_l1_config)

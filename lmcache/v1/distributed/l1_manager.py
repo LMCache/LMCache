@@ -462,7 +462,13 @@ class L1Manager:
         Errors:
             KEY_NOT_WRITABLE: The key exists but is not writable.
             OUT_OF_MEMORY: Not enough memory to allocate for the object.
+
+        Raises:
+            ValueError: If ``keys`` contains the same object key more than once.
         """
+        if len(keys) != len(set(keys)):
+            raise ValueError("keys must be unique when reserving L1 writes")
+
         need_to_allocate: list[tuple[ObjectKey, bool]] = []
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
