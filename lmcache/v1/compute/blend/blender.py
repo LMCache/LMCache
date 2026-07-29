@@ -41,6 +41,13 @@ class LMCBlender:
         # TODO: remove this hardcode
         self.num_layers = len(vllm_model.model.layers)
 
+        if not config.blend_check_layers or not config.blend_recompute_ratios:
+            raise ValueError(
+                "blend_check_layers and blend_recompute_ratios must be set "
+                "and non-empty when enable_blending is True. "
+                "Example: blend_check_layers=[1], blend_recompute_ratios=[0.15]"
+            )
+
         # TODO(Jiayi): support threshold-based blending
         # TODO(Jiayi): support different ratios for different layers
         # TODO(Jiayi): support "skipping blending if hit too short"

@@ -1,17 +1,17 @@
 # Examples vLLM + LMCache w. CacheBlend
 LMCache should be able to reduce the generation time of the second and following calls (even though the reused KV cache is not a prefix).
 
-## Some ad-hoc changes needed in vLLM
-- In `vllm/vllm/v1/worker/gpu_worker.py`, comment out `ensure_kv_transfer_initialized(vllm_config)` in function `def init_worker_distributed_environment`.
-- In the same file, add 
+## Requirements
+When using CacheBlend, you must provide the following configuration:
+- `blend_check_layers`: List of layer indices to check for blending (e.g., `[1]`)
+- `blend_recompute_ratios`: List of ratios for recomputation (e.g., `[0.15]`)
+
+Example config:
+```yaml
+enable_blending: true
+blend_check_layers: [1]
+blend_recompute_ratios: [0.15]
 ```
-from lmcache.v1.compute.models.utils import VLLMModelTracker
-from lmcache.integration.vllm.utils import ENGINE_NAME
-        
-VLLMModelTracker.register_model(ENGINE_NAME, self.model_runner.model)
-ensure_kv_transfer_initialized(self.vllm_config)
-```
-at the end of the function `def load_model`.
 
 ## CPU offloading
 - `python blend.py` - CacheBlend with CPU as backend
