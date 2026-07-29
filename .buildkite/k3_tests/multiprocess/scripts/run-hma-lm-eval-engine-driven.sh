@@ -29,8 +29,8 @@
 #   6. Assert LMCache actually served retrieves in the retrieve run (non-vacuous).
 #
 # The reset endpoint requires VLLM_SERVER_DEV_MODE=1 (set by launch-processes.sh).
-# The LMCACHE_MP_TRANSFER_MODE must be set *before* launching the servers
-# (already done by the pipeline env block).
+# The LMCACHE_MP_TRANSFER_MODE and ENGINE_DRIVEN_TRANSPORT must be set before
+# launching the servers (already done by the pipeline matrix command).
 set -e
 set -o pipefail
 
@@ -52,6 +52,14 @@ LMCACHE_LOG="${LMCACHE_LOG:-/tmp/build_${BUILD_ID}_lmcache.log}"
 
 # Must be set: Engine-driven transfer path override.
 LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE:-engine_driven}"
+ENGINE_DRIVEN_TRANSPORT="${ENGINE_DRIVEN_TRANSPORT:-pickle}"
+case "$ENGINE_DRIVEN_TRANSPORT" in
+    pickle|shm) ;;
+    *)
+        echo "ERROR: ENGINE_DRIVEN_TRANSPORT must be 'pickle' or 'shm', got '$ENGINE_DRIVEN_TRANSPORT'"
+        exit 1
+        ;;
+esac
 
 HMA_ED_DIR="$RESULTS_DIR/hma_lm_eval_engine_driven"
 VLLM_RUN_DIR="$HMA_ED_DIR/vllm_run"
@@ -60,6 +68,7 @@ RETRIEVE_RUN_DIR="$HMA_ED_DIR/retrieve_run"
 echo "=== Engine-driven HMA lm_eval correctness test ==="
 echo "Model: $MODEL"
 echo "Transfer mode: $LMCACHE_MP_TRANSFER_MODE"
+echo "Engine-driven transport: $ENGINE_DRIVEN_TRANSPORT"
 echo "vLLM (LMCache) port: $VLLM_PORT"
 echo "Concurrent requests: $NUM_CONCURRENT"
 echo "Limit: $LIMIT"
@@ -70,20 +79,23 @@ echo ""
 mkdir -p "$VLLM_RUN_DIR" "$RETRIEVE_RUN_DIR"
 
 # ---------------------------------------------------------------------------
-# Verify Engine-driven context was actually created.
+# Verify Engine-driven context selected the expected transport.
 #
-# LMCache logs "EngineDrivenTransferModule" (or "engine_driven") when the
-# Engine-driven path initialises.  Fail fast so the rest of the test does not
-# produce a vacuous pass disguised as LMCache-driven behaviour.
+# The strategy is selected while registering the Engine-driven context. Fail
+# fast so the matrix cannot pass with the wrong transport.
 # ---------------------------------------------------------------------------
-assert_engine_driven_active() {
-    echo "=== Asserting Engine-driven transfer context is active ==="
-    local marker="engine_driven"
+assert_engine_driven_transport_active() {
+    echo "=== Asserting Engine-driven $ENGINE_DRIVEN_TRANSPORT transport is active ==="
+    local marker
+    case "$ENGINE_DRIVEN_TRANSPORT" in
+        pickle) marker="Using pickle non-GPU transfer strategy" ;;
+        shm) marker="Using shm non-GPU transfer strategy" ;;
+    esac
     local max_wait=30
     local elapsed=0
     while [ "$elapsed" -lt "$max_wait" ]; do
         if [ -f "$LMCACHE_LOG" ] && grep -qi "$marker" "$LMCACHE_LOG" 2>/dev/null; then
-            echo "Engine-driven context confirmed in LMCache log."
+            echo "Engine-driven $ENGINE_DRIVEN_TRANSPORT transport confirmed in LMCache log."
             return 0
         fi
         sleep 2
@@ -91,8 +103,8 @@ assert_engine_driven_active() {
     done
     echo ""
     echo "ERROR: LMCache log did not contain '$marker' after ${max_wait}s."
-    echo "       Ensure LMCACHE_MP_TRANSFER_MODE=engine_driven is set and the"
-    echo "       server was restarted after the environment variable change."
+    echo "       Ensure LMCACHE_MP_TRANSFER_MODE=engine_driven and"
+    echo "       ENGINE_DRIVEN_TRANSPORT=$ENGINE_DRIVEN_TRANSPORT are set before startup."
     echo "       Log tail (last 20 lines):"
     tail -20 "$LMCACHE_LOG" 2>/dev/null || true
     return 1
@@ -137,7 +149,7 @@ count_retrieves() {
 }
 
 # ── 0. Assert Engine-driven is active before any evaluation ─
-assert_engine_driven_active
+assert_engine_driven_transport_active
 
 # ── 1. vLLM run: compute from scratch, populating LMCache ───
 run_lm_eval "$VLLM_PORT" "$VLLM_RUN_DIR" "vLLM run (Engine-driven)"
