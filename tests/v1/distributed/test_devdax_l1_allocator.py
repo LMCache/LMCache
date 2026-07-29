@@ -990,6 +990,8 @@ def test_allocator_batched_allocation_spans_arenas(tmp_path):
     del objs
     gc.collect()
     allocator.close()
+
+
 def test_hybrid_allocator_reports_per_object_medium(tmp_path):
     """DRAM fills first; overflow objects land in (and report) the DAX
     arena, so per-key medium attribution is exact."""
