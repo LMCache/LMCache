@@ -3,6 +3,7 @@ aiofiles
 blake3
 aiohttp
 awscrt
+cryptography
 cufile-python
 fastapi
 httpx
