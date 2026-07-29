@@ -368,6 +368,27 @@ jobs:
                 docker push lmcache/vllm-openai:latest
                 docker push lmcache/vllm-openai:${{ env.LATEST_TAG }}
 
+            # Payload (docker/Dockerfile.payload) extracts lmcache from the cu13
+            # image just pushed above — still local, and dropped by the prune
+            # below, so build here.
+            - name: Build lmcache/lmcache-payload image
+              run: |
+                docker build \
+                --build-arg SOURCE_IMAGE=lmcache/vllm-openai:${{ env.LATEST_TAG }} \
+                --tag lmcache/lmcache-payload:latest --tag lmcache/lmcache-payload:${{ env.LATEST_TAG }} \
+                --file docker/Dockerfile.payload .
+
+            # Run the ENTRYPOINT copy; assert the lmcache tree lands.
+            - name: Smoke test lmcache/lmcache-payload
+              run: |
+                docker run --rm -e SHARED_DIR=/out -v "$PWD/payload-out:/out" lmcache/lmcache-payload:${{ env.LATEST_TAG }}
+                test -f payload-out/lmcache/__init__.py
+
+            - name: Push lmcache/lmcache-payload image to DockerHub
+              run: |
+                docker push lmcache/lmcache-payload:latest
+                docker push lmcache/lmcache-payload:${{ env.LATEST_TAG }}
+
             - name: Clean up Docker layers and cache
               run: |
                 docker system prune -f --all
@@ -441,6 +462,29 @@ jobs:
               run: |
                 docker push lmcache/vllm-openai:latest-cu129
                 docker push lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu129
+
+            # Payload extracts lmcache from the cu129 image just pushed above —
+            # still local, and dropped by the prune below, so build here.
+            - name: Build lmcache/lmcache-payload image (cu129)
+              if: needs.publish-cu129-github-release.result == 'success'
+              run: |
+                docker build \
+                --build-arg SOURCE_IMAGE=lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu129 \
+                --tag lmcache/lmcache-payload:latest-cu129 --tag lmcache/lmcache-payload:${{ env.LATEST_TAG }}-cu129 \
+                --file docker/Dockerfile.payload .
+
+            # Run the ENTRYPOINT copy; assert the lmcache tree lands.
+            - name: Smoke test lmcache/lmcache-payload (cu129)
+              if: needs.publish-cu129-github-release.result == 'success'
+              run: |
+                docker run --rm -e SHARED_DIR=/out -v "$PWD/payload-out-cu129:/out" lmcache/lmcache-payload:${{ env.LATEST_TAG }}-cu129
+                test -f payload-out-cu129/lmcache/__init__.py
+
+            - name: Push lmcache/lmcache-payload cu129 image to DockerHub
+              if: needs.publish-cu129-github-release.result == 'success'
+              run: |
+                docker push lmcache/lmcache-payload:latest-cu129
+                docker push lmcache/lmcache-payload:${{ env.LATEST_TAG }}-cu129
 
             - name: Clean up Docker layers and cache
               run: |

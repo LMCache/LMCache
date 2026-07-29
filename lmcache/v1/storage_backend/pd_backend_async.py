@@ -1305,6 +1305,22 @@ class PDBackendAsync(AllocatorBackendInterface):
                     f"Receiver requires total_chunks > 0 for req {req_id}. "
                     f"Legacy senders (total_chunks=0) are no longer supported."
                 )
+            # Fail fast: a request whose KV needs more chunks than the entire
+            # buffer holds can never be admitted, no matter how much the buffer
+            # drains. Without this guard admission blocks for the full
+            # pd_allocation_timeout_sec and then fails with a misleading
+            # "over-subscribed" timeout, tearing down the transfer mid-flight.
+            buffer_total_chunks = self._recv_reservation_mgr.get_total_chunks()
+            if alloc_request.total_chunks > buffer_total_chunks:
+                raise RuntimeError(
+                    f"PD receiver buffer too small for req {req_id}: the request "
+                    f"needs {alloc_request.total_chunks} chunks but the buffer "
+                    f"holds only {buffer_total_chunks} chunks "
+                    f"(pd_buffer_size={self._aligned_buffer_size} bytes). This "
+                    f"prefill can never be admitted; increase pd_buffer_size to "
+                    f"hold at least {alloc_request.total_chunks} chunks or reduce "
+                    f"the prefill length."
+                )
             admitted = await self._recv_reservation_mgr.async_try_admit(
                 req_id, alloc_request.total_chunks
             )
