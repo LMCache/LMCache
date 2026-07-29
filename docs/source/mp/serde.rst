@@ -52,6 +52,11 @@ serde factory.
    * - ``type``
      - Description
      - Config fields
+   * - ``cachegen``
+     - Encode KV tensors with CacheGen's variable-size bytestream format;
+       decode back to the configured KV dtype on load.
+     - ``model_name``, ``chunk_size``, ``dtype``, ``num_heads``,
+       ``head_size``; optional ``max_workers``.
    * - ``fp8``
      - Quantize each element to 8-bit float; dequantize on load.
        Lossy but highly compressible.

@@ -44,10 +44,39 @@ from lmcache.v1.distributed.serde.utils import (
     serialized_layout_desc,
 )
 
+
+def _create_cachegen_serde(kwargs: dict[str, object]) -> SerdeProcessor:
+    # First Party
+    from lmcache.v1.distributed.serde.cachegen import (  # noqa: PLC0415
+        _create_cachegen_serde as create_cachegen_serde,
+    )
+
+    return create_cachegen_serde(kwargs)
+
+
+register_serde_factory("cachegen", _create_cachegen_serde)
+
+
+def __getattr__(name: str) -> object:
+    if name in {"CacheGenMpDeserializer", "CacheGenMpSerializer"}:
+        # First Party
+        from lmcache.v1.distributed.serde.cachegen import (  # noqa: PLC0415
+            CacheGenMpDeserializer,
+            CacheGenMpSerializer,
+        )
+
+        globals()["CacheGenMpDeserializer"] = CacheGenMpDeserializer
+        globals()["CacheGenMpSerializer"] = CacheGenMpSerializer
+        return globals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 __all__ = [
     "AesGcmDeserializer",
     "AesGcmSerializer",
     "AsyncSerdeProcessor",
+    "CacheGenMpDeserializer",
+    "CacheGenMpSerializer",
     "Deserializer",
     "Fp8QuantizationDeserializer",
     "Fp8QuantizationSerializer",
