@@ -149,9 +149,8 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
             "MLA mode: fold all TP ranks into a single kv_worker "
             "so only rank 0 writes KV and every rank retrieves "
             "the shared KV object (default: False). "
-            "When the kvcache-shape-spec declares kv_size=1, "
-            "this flag is implied automatically unless "
-            "overridden by --no-use-mla (not implemented)."
+            "Also implied when --kvcache-shape-spec declares "
+            "kv_size=1."
         ),
     )
     parser.add_argument(
@@ -578,10 +577,9 @@ def run_server_bench(
         # rank's per-layer SHM segments for a best-effort cleanup on
         # shutdown.
         tp_size = max(1, int(getattr(args, "tp_size", 1)))
-        mla_flag = bool(getattr(args, "use_mla", False))
-        # Explicit --use-mla overrides auto-detection; otherwise infer
-        # from shape spec (kv_size == 1 marks an MLA single-plane group).
-        use_mla = mla_flag or kv_size_disp == 1
+        # Explicit --use-mla wins; otherwise infer MLA from the shape
+        # spec (kv_size == 1 marks an MLA single-plane group).
+        use_mla = bool(getattr(args, "use_mla", False)) or kv_size_disp == 1
         # ``ParallelStrategy.kv_world_size`` folds all TP ranks into a
         # single kv_worker under MLA; non-MLA keeps one kv_worker per
         # rank. Bench mirrors that so ``IPCCacheServerKey.worker_id``
