@@ -270,6 +270,181 @@ def build_transfer_plan(
     )
 
 
+def map_kernel_group_block_ids_to_engine_groups(
+    transfer_metadata: KVTransferMetadata,
+    block_ids_by_kernel_group: Sequence[Sequence[int]],
+) -> dict[int, Sequence[int]]:
+    """Map request block IDs from kernel-group to engine-group order.
+
+    Serving-engine requests retain one block-ID sequence for every kernel
+    group, while :func:`build_transfer_plan` consumes one sequence for each
+    distinct engine block address space. Kernel groups sharing an engine group
+    must therefore provide identical sequences.
+
+    Args:
+        transfer_metadata: Immutable metadata mapping kernel groups to engine
+            groups.
+        block_ids_by_kernel_group: Request block-ID sequences in kernel-group
+            order.
+
+    Returns:
+        Block IDs keyed by engine-group ID.
+
+    Raises:
+        ValueError: If the request group count differs from the metadata or
+            repeated kernel groups for one engine group disagree.
+    """
+    if len(block_ids_by_kernel_group) != len(transfer_metadata.kernel_groups):
+        raise ValueError(
+            "block ID group count does not match transfer metadata: "
+            f"got {len(block_ids_by_kernel_group)}, expected "
+            f"{len(transfer_metadata.kernel_groups)}"
+        )
+
+    result: dict[int, Sequence[int]] = {}
+    for kernel_group, group_block_ids in zip(
+        transfer_metadata.kernel_groups,
+        block_ids_by_kernel_group,
+        strict=True,
+    ):
+        existing = result.get(kernel_group.engine_group_id)
+        if existing is not None and tuple(existing) != tuple(group_block_ids):
+            raise ValueError(
+                "conflicting block IDs for engine group "
+                f"{kernel_group.engine_group_id} from repeated kernel groups"
+            )
+        result[kernel_group.engine_group_id] = group_block_ids
+    return result
+
+
+def infer_num_chunks(
+    transfer_metadata: KVTransferMetadata,
+    block_ids_by_engine_group: Mapping[int, Sequence[int]],
+) -> int:
+    """Infer and validate a common complete chunk count from request block IDs.
+
+    This helper is intentionally part of the logical planner boundary. It
+    validates the complete-chunk and common-range requirements before callers
+    bind a plan to device buffers, storage objects, or transports.
+
+    Args:
+        transfer_metadata: Immutable kernel-group geometry.
+        block_ids_by_engine_group: Request block IDs keyed by engine-group ID.
+
+    Returns:
+        The common number of complete LMCache chunks represented by all kernel
+        groups, or zero when the metadata contains no kernel groups.
+
+    Raises:
+        ValueError: If a referenced engine group is missing, an ID sequence
+            ends mid-chunk, or kernel groups cover different chunk counts.
+    """
+    num_chunks: int | None = None
+    for kernel_group in transfer_metadata.kernel_groups:
+        engine_block_ids = block_ids_by_engine_group.get(kernel_group.engine_group_id)
+        if engine_block_ids is None:
+            raise ValueError(
+                f"missing block IDs for engine group {kernel_group.engine_group_id}"
+            )
+        if len(engine_block_ids) % kernel_group.blocks_per_chunk != 0:
+            raise ValueError(
+                f"engine group {kernel_group.engine_group_id} has "
+                f"{len(engine_block_ids)} block IDs, which does not form "
+                "complete LMCache chunks"
+            )
+        group_num_chunks = len(engine_block_ids) // kernel_group.blocks_per_chunk
+        if num_chunks is None:
+            num_chunks = group_num_chunks
+        elif group_num_chunks != num_chunks:
+            raise ValueError("kernel groups cover different numbers of LMCache chunks")
+    return num_chunks or 0
+
+
+def build_transfer_plan_from_kernel_group_block_ids(
+    transfer_metadata: KVTransferMetadata,
+    block_ids_by_kernel_group: Sequence[Sequence[int]],
+    direction: TransferPlanDirection,
+    skip_first_n_tokens: int = 0,
+) -> TransferPlan:
+    """Build a transfer plan directly from protocol-order request block IDs.
+
+    The helper is a compatibility adapter for engines whose requests carry
+    block IDs in kernel-group order. It normalizes repeated engine groups and
+    derives the common complete chunk count before calling
+    :func:`build_transfer_plan`.
+
+    Args:
+        transfer_metadata: Immutable transfer metadata snapshot.
+        block_ids_by_kernel_group: Request block IDs in kernel-group order.
+        direction: Whether this plan stores or retrieves KV.
+        skip_first_n_tokens: Retrieve prefix to preserve without overwriting.
+
+    Returns:
+        An immutable, ordered logical transfer plan.
+
+    Raises:
+        ValueError: If request block IDs cannot be normalized into one
+            complete logical transfer range.
+    """
+    engine_group_block_ids = map_kernel_group_block_ids_to_engine_groups(
+        transfer_metadata, block_ids_by_kernel_group
+    )
+    return build_transfer_plan(
+        transfer_metadata,
+        engine_group_block_ids,
+        infer_num_chunks(transfer_metadata, engine_group_block_ids),
+        direction,
+        skip_first_n_tokens,
+    )
+
+
+def build_transfer_plan_without_block_ids(
+    transfer_metadata: KVTransferMetadata,
+    num_chunks: int,
+    direction: TransferPlanDirection,
+    skip_first_n_tokens: int = 0,
+) -> TransferPlan:
+    """Build a logical schedule for executors that do not access engine blocks.
+
+    Storage and transport executors bind object keys, locks, and buffers to
+    the same logical object-group schedule as the worker copy executor, but
+    never read or write the plan's block IDs. This helper supplies placeholder
+    IDs solely to satisfy the planner's block-ID contract; callers must not
+    use those IDs as engine resources.
+
+    Args:
+        transfer_metadata: Immutable transfer metadata snapshot.
+        num_chunks: Number of source LMCache chunks.
+        direction: Whether this plan stores or retrieves KV.
+        skip_first_n_tokens: Retrieve prefix to preserve without overwriting.
+
+    Returns:
+        An immutable, ordered logical transfer plan.
+
+    Raises:
+        ValueError: If ``num_chunks`` is negative or the transfer metadata is
+            invalid.
+    """
+    if num_chunks < 0:
+        raise ValueError("num_chunks must be non-negative")
+    required_blocks_by_engine_group: dict[int, int] = {}
+    for kernel_group in transfer_metadata.kernel_groups:
+        required_blocks_by_engine_group[kernel_group.engine_group_id] = max(
+            required_blocks_by_engine_group.get(kernel_group.engine_group_id, 0),
+            num_chunks * kernel_group.blocks_per_chunk,
+        )
+    return build_transfer_plan(
+        transfer_metadata,
+        {
+            engine_group_id: tuple(range(block_count))
+            for engine_group_id, block_count in required_blocks_by_engine_group.items()
+        },
+        num_chunks,
+        direction,
+        skip_first_n_tokens,
+    )
+
+
 def _validate_transfer_metadata_order(
     transfer_metadata: KVTransferMetadata,
 ) -> dict[int, KernelGroupTransferMetadata]:

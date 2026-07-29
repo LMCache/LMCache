@@ -20,12 +20,14 @@ from lmcache.v1.multiprocess.transfer_context.base import (
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     EngineDrivenTransferContext,
     IPCEvent,
-    _gather_multi_group_pickle_payload,
-    _gather_multi_group_shm_payload,
+    _gather_multi_group_pickle_payload_for_plan,
+    _gather_multi_group_shm_payload_for_plan,
     _is_legacy_shm_store_preparation,
     _is_multi_group_shm_store_preparation,
+    _plan_engine_driven_request,
     _single_group_block_ids,
 )
+from lmcache.v1.multiprocess.transfer_plan import TransferPlanDirection
 
 logger = init_logger(__name__)
 
@@ -226,6 +228,15 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                 staged_chunks: list[torch.Tensor] = []
                 multi_group_chunks: list[list[list[torch.Tensor]]] | None = None
                 try:
+                    transfer_plan = (
+                        _plan_engine_driven_request(
+                            transfer_metadata,
+                            block_ids,
+                            TransferPlanDirection.STORE,
+                        )
+                        if transfer_metadata is not None
+                        else None
+                    )
                     # --- Phase 1: prepare_store ---
                     # In pickle mode this is the costliest step (sync RPC
                     # round-trip).  Running it here keeps the forward thread free.
@@ -279,6 +290,10 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                             )
                             gather_target = staged_chunks
                     else:
+                        if transfer_plan is None:
+                            raise RuntimeError(
+                                "multi-group async store has no transfer plan"
+                            )
                         if preparation is not None:
                             if not _is_multi_group_shm_store_preparation(preparation):
                                 raise ValueError(
@@ -308,20 +323,32 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                                 chunk_indices=chunk_indices,
                             )
                         elif preparation is None:
-                            multi_group_chunks = _gather_multi_group_pickle_payload(
-                                kv_caches,
-                                transfer_metadata,
-                                block_ids,
-                                self._layout_hints,
+                            if transfer_plan is None:
+                                raise RuntimeError(
+                                    "multi-group async store has no transfer plan"
+                                )
+                            multi_group_chunks = (
+                                _gather_multi_group_pickle_payload_for_plan(
+                                    kv_caches,
+                                    transfer_metadata,
+                                    transfer_plan,
+                                    self._layout_hints,
+                                )
                             )
                         else:
-                            multi_group_chunks = _gather_multi_group_shm_payload(
-                                kv_caches,
-                                transfer_metadata,
-                                block_ids,
-                                grouped_out_buffers,
-                                grouped_chunk_indices,
-                                self._layout_hints,
+                            if transfer_plan is None:
+                                raise RuntimeError(
+                                    "multi-group async store has no transfer plan"
+                                )
+                            multi_group_chunks = (
+                                _gather_multi_group_shm_payload_for_plan(
+                                    kv_caches,
+                                    transfer_metadata,
+                                    transfer_plan,
+                                    grouped_out_buffers,
+                                    grouped_chunk_indices,
+                                    self._layout_hints,
+                                )
                             )
                             used_shm_direct = True
 

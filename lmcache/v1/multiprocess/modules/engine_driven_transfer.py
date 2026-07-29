@@ -41,7 +41,10 @@ from lmcache.v1.multiprocess.transfer_plan import (
     KernelGroupTransferMetadata,
     KVTransferMetadata,
     ObjectGroupTransferMetadata,
+    TransferPlan,
+    TransferPlanDirection,
     build_engine_driven_object_group_layout_desc,
+    build_transfer_plan_without_block_ids,
 )
 
 # Local
@@ -650,6 +653,59 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             ],
         )
 
+    def _resolve_transfer_plan_and_object_keys(
+        self,
+        key: IPCCacheServerKey,
+        metadata: EngineDrivenContextMetadata,
+        direction: TransferPlanDirection,
+        skip_first_n_tokens: int = 0,
+    ) -> tuple[TransferPlan | None, list[list[ObjectKey]]]:
+        """Resolve storage keys and bind a shared plan for one server transfer.
+
+        The server owns storage resources rather than engine block IDs. For
+        multi-group registrations it therefore asks the shared planner for the
+        same object-group schedule using placeholder IDs, then passes that plan
+        to the selected pickle or SHM strategy. The placeholder block IDs are
+        never exposed to storage code.
+
+        Args:
+            key: Cache key for the requested token range.
+            metadata: Registered engine-driven transfer metadata.
+            direction: Store or retrieve direction for the logical plan.
+            skip_first_n_tokens: Retrieve prefix to preserve without overwriting.
+
+        Returns:
+            A tuple of the multi-group plan (or ``None`` for legacy mode) and
+            resolved object keys in original source-chunk order.
+
+        Raises:
+            ValueError: If registered object groups resolve to unequal chunk
+                ranges or the immutable transfer metadata is invalid.
+        """
+        object_keys_by_group = self._resolve_obj_keys(key, metadata)
+        if metadata.transfer_metadata is None:
+            return None, object_keys_by_group
+        if len(object_keys_by_group) != len(metadata.transfer_metadata.object_groups):
+            raise ValueError(
+                "resolved object-group count does not match transfer metadata"
+            )
+        if not object_keys_by_group:
+            raise ValueError("multi-group transfer resolved no object-key groups")
+        num_chunks = len(object_keys_by_group[0])
+        if any(len(object_keys) != num_chunks for object_keys in object_keys_by_group):
+            raise ValueError(
+                "object groups resolve to different numbers of source chunks"
+            )
+        return (
+            build_transfer_plan_without_block_ids(
+                metadata.transfer_metadata,
+                num_chunks,
+                direction,
+                skip_first_n_tokens,
+            ),
+            object_keys_by_group,
+        )
+
     def register_kv_cache_engine_driven_context(
         self,
         payload: RegisterEngineDrivenContextPayload,
@@ -832,13 +888,19 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             PrepareStoreResponse with empty slots for pickle mode.
         """
         entry, strategy = self._resolve_for_transfer(instance_id)
+        transfer_plan, object_keys_by_group = (
+            self._resolve_transfer_plan_and_object_keys(
+                key,
+                entry.metadata,
+                TransferPlanDirection.STORE,
+            )
+        )
         response = strategy.prepare_store(
             key=key,
             instance_id=instance_id,
             context=entry.metadata,
-            resolve_obj_keys=lambda transfer_key: self._resolve_obj_keys(
-                transfer_key, entry.metadata
-            ),
+            resolve_obj_keys=lambda _transfer_key: object_keys_by_group,
+            transfer_plan=transfer_plan,
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
         session.extras["store_start_time"] = time.perf_counter()
@@ -866,6 +928,13 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 instance ID.
         """
         entry, strategy = self._resolve_for_transfer(instance_id)
+        transfer_plan, object_keys_by_group = (
+            self._resolve_transfer_plan_and_object_keys(
+                key,
+                entry.metadata,
+                TransferPlanDirection.STORE,
+            )
+        )
         session = self._ctx.session_manager.get_or_create(key.request_id)
         st = session.extras.pop("store_start_time", None)
         result = strategy.commit_store(
@@ -873,9 +942,8 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             instance_id=instance_id,
             cpu_data=cpu_data,
             context=entry.metadata,
-            resolve_obj_keys=lambda transfer_key: self._resolve_obj_keys(
-                transfer_key, entry.metadata
-            ),
+            resolve_obj_keys=lambda _transfer_key: object_keys_by_group,
+            transfer_plan=transfer_plan,
         )
         if st is not None and result:
             num_tokens = (
@@ -921,12 +989,15 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         self,
         key: IPCCacheServerKey,
         instance_id: int,
+        skip_first_n_tokens: int = 0,
     ) -> PrepareRetrieveResponse:
         """Retrieve prefetched chunks and return serialized CPU tensors.
 
         Args:
             key: Cache key for the token range to retrieve.
             instance_id: Worker instance identifier.
+            skip_first_n_tokens: Prefix that must not be overwritten by the
+                worker-side scatter.
 
         Returns:
             PrepareRetrieveResponse with serialized data on hit.
@@ -936,13 +1007,20 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 instance ID.
         """
         entry, strategy = self._resolve_for_transfer(instance_id)
+        transfer_plan, object_keys_by_group = (
+            self._resolve_transfer_plan_and_object_keys(
+                key,
+                entry.metadata,
+                TransferPlanDirection.RETRIEVE,
+                skip_first_n_tokens,
+            )
+        )
         response = strategy.prepare_retrieve(
             key=key,
             instance_id=instance_id,
             context=entry.metadata,
-            resolve_obj_keys=lambda transfer_key: self._resolve_obj_keys(
-                transfer_key, entry.metadata
-            ),
+            resolve_obj_keys=lambda _transfer_key: object_keys_by_group,
+            transfer_plan=transfer_plan,
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
         session.extras["retrieve_start_time"] = time.perf_counter()

@@ -783,7 +783,11 @@ def _send_retrieve(
         return "retrieved" if result[1] else "retrieve_failed"
 
     # CPU mode: PREPARE_RETRIEVE -> COMMIT_RETRIEVE
-    prep = _call(client, RequestType.PREPARE_RETRIEVE, [key, _INSTANCE_ID])
+    prep = _call(
+        client,
+        RequestType.PREPARE_RETRIEVE,
+        [key, _INSTANCE_ID, 0],
+    )
     if prep is _TIMEOUT:
         return "timeout"
     if not prep.success:

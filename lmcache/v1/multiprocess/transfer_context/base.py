@@ -40,7 +40,10 @@ from lmcache.v1.multiprocess.mq import MessageQueueClient
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.multiprocess.transfer_plan import KVTransferMetadata
+    from lmcache.v1.multiprocess.transfer_plan import (
+        KVTransferMetadata,
+        TransferPlan,
+    )
     import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
@@ -264,9 +267,26 @@ class EngineDrivenContext(ABC):
 
     @abstractmethod
     def prepare_retrieve(
-        self, key: IPCCacheServerKey, instance_id: int
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        skip_first_n_tokens: int = 0,
+        transfer_plan: "TransferPlan | None" = None,
     ) -> EngineDrivenPayload | None:
-        """Prepare retrieve. Returns chunks or shm views, or None on miss."""
+        """Prepare retrieve resources or payload data.
+
+        Args:
+            key: Cache key for the requested token range.
+            instance_id: Worker instance identifier.
+            skip_first_n_tokens: Retrieve prefix the server must preserve when
+                it binds storage objects to a multi-group transfer plan.
+            transfer_plan: Worker-built logical plan used to validate
+                transport-specific multi-group resource ordering. ``None`` for
+                legacy single-group callers.
+
+        Returns:
+            Chunks or SHM views on a cache hit, or ``None`` on a miss.
+        """
         ...
 
     @abstractmethod

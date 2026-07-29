@@ -233,6 +233,32 @@ to the corresponding memory objects. Both its native object-group fast path
 and per-kernel fallback consume that bound plan; neither recalculates window
 selection, object omission, or retrieve-prefix skip geometry.
 
+Engine-driven execution uses the same boundary:
+
+- The worker adapts its protocol-order (kernel-group) block-ID lists with
+  `build_transfer_plan_from_kernel_group_block_ids()`. The planner validates
+  repeated engine-group IDs, complete/common chunk coverage, subchunk
+  downsampling, sliding-window omission, and prefix skips. The synchronous and
+  asynchronous gather paths only bind each `KernelGroupPlan` to paged KV,
+  pickle tensors, or sparse SHM slots; retrieve scatter uses the plan's block
+  IDs and `skip_first_n_blocks`.
+- The server has storage keys rather than engine block IDs. For each
+  multi-group operation, `EngineDrivenTransferModule` creates the equivalent
+  plan with `build_transfer_plan_without_block_ids()` and binds the plan's
+  `chunk_indices` to resolved object keys. Its placeholder IDs are never used
+  as storage or device resources. `PickleTransferStrategy` and
+  `ShmTransferStrategy` receive that bound plan, so they do not recalculate
+  attention-window skipping, prefix skipping, source-chunk order, or
+  object/kernel order.
+- `PREPARE_RETRIEVE` carries `skip_first_n_tokens` so the worker and server
+  build matching retrieve schedules. Existing dense single-group
+  registrations remain compatibility paths with their established flat
+  payload and SHM-slot shapes.
+
+Thus `transfer_plan.py` owns all logical geometry. Worker and server
+executors own only resource binding, serialization, locking, and lifecycle
+handling.
+
 ## 3. Protocol & Data Flow
 
 ### 3.1 MQ Request Types Used by Engine-Driven Path

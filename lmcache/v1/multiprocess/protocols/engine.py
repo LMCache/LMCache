@@ -245,7 +245,12 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             handler_type=HandlerType.BLOCKING,
         ),
         "PREPARE_RETRIEVE": ProtocolDefinition(
-            payload_classes=[KeyType, int],
+            # Payload:
+            #   - key: Cache key for the requested token range.
+            #   - instance_id: Worker instance identifier.
+            #   - skip_first_n_tokens: Prefix that the server must preserve
+            #     while binding its object keys to the shared retrieve plan.
+            payload_classes=[KeyType, int, int],
             response_class=PrepareRetrieveResponse,
             handler_type=HandlerType.BLOCKING,
         ),

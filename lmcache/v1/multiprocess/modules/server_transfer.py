@@ -21,7 +21,7 @@ from lmcache.v1.multiprocess.protocols.engine import (
 )
 from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContextMetadata
 from lmcache.v1.multiprocess.transfer_context.shm import ShmSlotDescriptor
-from lmcache.v1.multiprocess.transfer_plan import compute_num_objects_to_skip
+from lmcache.v1.multiprocess.transfer_plan import TransferPlan
 
 if TYPE_CHECKING:
     # First Party
@@ -67,6 +67,63 @@ def _make_shm_slot_descriptor(
         shape=list(tensor.shape),
         dtype=_dtype_to_name(tensor.dtype),
     )
+
+
+def _object_keys_bound_to_plan(
+    context: EngineDrivenContextMetadata,
+    transfer_plan: TransferPlan | None,
+    resolve_obj_keys: Callable[[IPCCacheServerKey], list[list[ObjectKey]]],
+    key: IPCCacheServerKey,
+) -> list[list[ObjectKey]]:
+    """Bind resolved storage object keys to a shared logical transfer plan.
+
+    Legacy dense contexts have no transfer metadata or plan, so their single
+    object-key group is returned unchanged. Multi-group plans select the
+    requested source chunks in the plan's object-group order.
+
+    Args:
+        context: Registered engine-driven context metadata.
+        transfer_plan: Shared logical plan, or ``None`` for legacy mode.
+        resolve_obj_keys: Resolver returning keys in original object-group and
+            source-chunk order.
+        key: Cache key whose storage objects are resolved.
+
+    Returns:
+        Object keys in plan object-group and plan chunk order.
+
+    Raises:
+        ValueError: If a multi-group transfer has no plan, plan ordering does
+            not match registration, or a plan chunk cannot bind to an object.
+    """
+    object_keys_by_group = resolve_obj_keys(key)
+    if not context.object_group_layout_descs:
+        return object_keys_by_group
+    if transfer_plan is None:
+        raise ValueError("multi-group storage transfer requires a transfer plan")
+    if len(object_keys_by_group) != len(transfer_plan.object_groups):
+        raise ValueError("multi-group object-key count does not match transfer plan")
+
+    planned_object_keys: list[list[ObjectKey]] = []
+    for object_group_plan, object_keys in zip(
+        transfer_plan.object_groups, object_keys_by_group, strict=True
+    ):
+        object_group_id = object_group_plan.object_group_id
+        if object_group_id >= len(context.object_group_layout_descs):
+            raise ValueError(
+                f"transfer plan references unregistered object group {object_group_id}"
+            )
+        try:
+            planned_object_keys.append(
+                [
+                    object_keys[chunk_index]
+                    for chunk_index in object_group_plan.chunk_indices
+                ]
+            )
+        except IndexError as exc:
+            raise ValueError(
+                f"object group {object_group_id} has fewer keys than its transfer plan"
+            ) from exc
+    return planned_object_keys
 
 
 def create_transfer_strategy(
@@ -127,6 +184,7 @@ class TransferStrategy(abc.ABC):
         instance_id: int,
         context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[list[ObjectKey]]],
+        transfer_plan: TransferPlan | None,
     ) -> PrepareStoreResponse:
         """Prepare destination resources for a store request.
 
@@ -135,6 +193,8 @@ class TransferStrategy(abc.ABC):
             instance_id: Worker instance identifier.
             context: Non-GPU transfer metadata for the instance.
             resolve_obj_keys: Callable that resolves object keys from ``key``.
+            transfer_plan: Shared store plan that binds object-key order for
+                multi-group registrations; ``None`` for legacy mode.
 
         Returns:
             Transport-specific store preparation response.
@@ -148,6 +208,7 @@ class TransferStrategy(abc.ABC):
         cpu_data: bytes,
         context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[list[ObjectKey]]],
+        transfer_plan: TransferPlan | None,
     ) -> bool:
         """Finalize a store request.
 
@@ -157,6 +218,8 @@ class TransferStrategy(abc.ABC):
             cpu_data: Serialized payload from the worker.
             context: Non-GPU transfer metadata for the instance.
             resolve_obj_keys: Callable that resolves object keys from ``key``.
+            transfer_plan: Shared store plan that binds object-key order for
+                multi-group registrations; ``None`` for legacy mode.
 
         Returns:
             ``True`` when the strategy successfully commits the store request.
@@ -177,13 +240,17 @@ class TransferStrategy(abc.ABC):
         instance_id: int,
         context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[list[ObjectKey]]],
+        transfer_plan: TransferPlan | None,
     ) -> PrepareRetrieveResponse:
         """Prepare source resources for a retrieve request.
 
         Args:
             key: Cache key identifying the requested token range.
             instance_id: Worker instance identifier.
+            context: Non-GPU transfer metadata for the instance.
             resolve_obj_keys: Callable that resolves object keys from ``key``.
+            transfer_plan: Shared retrieve plan that binds object-key order
+                for multi-group registrations; ``None`` for legacy mode.
 
         Returns:
             Transport-specific retrieve preparation response.
@@ -232,6 +299,7 @@ class PickleTransferStrategy(TransferStrategy):
         instance_id: int,
         context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[list[ObjectKey]]],
+        transfer_plan: TransferPlan | None,
     ) -> PrepareStoreResponse:
         """Return empty store context for pickle mode.
 
@@ -246,13 +314,16 @@ class PickleTransferStrategy(TransferStrategy):
         cpu_data: bytes,
         context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[list[ObjectKey]]],
+        transfer_plan: TransferPlan | None,
     ) -> bool:
         """Deserialize and write pickled chunks into reserved objects.
 
         Returns:
             ``True`` when every reserved object is written successfully.
         """
-        obj_keys_by_group = resolve_obj_keys(key)
+        obj_keys_by_group = _object_keys_bound_to_plan(
+            context, transfer_plan, resolve_obj_keys, key
+        )
         payload: PicklePayload = pickle.loads(cpu_data)
         if len(obj_keys_by_group) == 1 and not context.object_group_layout_descs:
             return self._commit_single_group_store(
@@ -263,6 +334,7 @@ class PickleTransferStrategy(TransferStrategy):
             payload, obj_keys_by_group, context
         )
         reserved_objects: list[tuple[int, list[ObjectKey], dict[ObjectKey, Any]]] = []
+        write_succeeded = False
         try:
             for object_group_id, obj_keys in enumerate(obj_keys_by_group):
                 reserved_dict = self._storage_manager.reserve_write(
@@ -307,6 +379,7 @@ class PickleTransferStrategy(TransferStrategy):
                                 f"chunk {chunk_idx}, tensor {tensor_idx} is unavailable"
                             )
                         target.copy_(chunk_part)
+            write_succeeded = True
         finally:
             reserved_keys = [
                 obj_key
@@ -314,7 +387,10 @@ class PickleTransferStrategy(TransferStrategy):
                 for obj_key in reserved_dict
             ]
             if reserved_keys:
-                self._storage_manager.finish_write(reserved_keys)
+                if write_succeeded:
+                    self._storage_manager.finish_write(reserved_keys)
+                else:
+                    self._storage_manager.delete_l1_keys(reserved_keys, force=True)
 
         return True
 
@@ -332,9 +408,12 @@ class PickleTransferStrategy(TransferStrategy):
         instance_id: int,
         context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[list[ObjectKey]]],
+        transfer_plan: TransferPlan | None,
     ) -> PrepareRetrieveResponse:
         """Read prefetched objects and return serialized pickle payload."""
-        obj_keys_by_group = resolve_obj_keys(key)
+        obj_keys_by_group = _object_keys_bound_to_plan(
+            context, transfer_plan, resolve_obj_keys, key
+        )
         if len(obj_keys_by_group) == 1 and not context.object_group_layout_descs:
             return self._prepare_single_group_retrieve(obj_keys_by_group[0])
 
@@ -342,21 +421,13 @@ class PickleTransferStrategy(TransferStrategy):
         try:
             chunks_by_group: list[list[list[torch.Tensor]]] = []
             for object_group_id, obj_keys in enumerate(obj_keys_by_group):
-                num_to_skip = compute_num_objects_to_skip(
-                    context.attn_desc.num_chunks_in_sw[object_group_id],
-                    len(obj_keys),
-                    is_retrieve=True,
-                )
-                selected_keys = obj_keys[num_to_skip:]
-                read_ctx = self._storage_manager.read_prefetched_results(selected_keys)
+                read_ctx = self._storage_manager.read_prefetched_results(obj_keys)
                 with read_ctx as maybe_memory_objs:
-                    if not maybe_memory_objs or len(maybe_memory_objs) != len(
-                        selected_keys
-                    ):
+                    if not maybe_memory_objs or len(maybe_memory_objs) != len(obj_keys):
                         return PrepareRetrieveResponse(
                             success=False, data=b"", context={}
                         )
-                    prefetched_keys.extend(selected_keys)
+                    prefetched_keys.extend(obj_keys)
                     group_chunks: list[list[torch.Tensor]] = []
                     for memory_obj in maybe_memory_objs:
                         chunk_parts: list[torch.Tensor] = []
@@ -550,6 +621,7 @@ class ShmTransferStrategy(TransferStrategy):
         instance_id: int,
         context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[list[ObjectKey]]],
+        transfer_plan: TransferPlan | None,
     ) -> PrepareStoreResponse:
         """Reserve SHM-backed objects and return slot descriptors.
 
@@ -561,7 +633,7 @@ class ShmTransferStrategy(TransferStrategy):
         """
         if context.object_group_layout_descs:
             return self._prepare_multi_group_store(
-                key, instance_id, context, resolve_obj_keys
+                key, instance_id, context, resolve_obj_keys, transfer_plan
             )
 
         self.abort_store(key, instance_id)
@@ -610,6 +682,7 @@ class ShmTransferStrategy(TransferStrategy):
         cpu_data: bytes,
         context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[list[ObjectKey]]],
+        transfer_plan: TransferPlan | None,
     ) -> bool:
         """Finalize SHM store write locks or fallback to pickle commit.
 
@@ -632,6 +705,7 @@ class ShmTransferStrategy(TransferStrategy):
                     cpu_data=cpu_data,
                     context=context,
                     resolve_obj_keys=resolve_obj_keys,
+                    transfer_plan=transfer_plan,
                 )
             except Exception:
                 logger.exception("Malformed inline SHM store commit")
@@ -662,11 +736,12 @@ class ShmTransferStrategy(TransferStrategy):
         instance_id: int,
         context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[list[ObjectKey]]],
+        transfer_plan: TransferPlan | None,
     ) -> PrepareRetrieveResponse:
         """Read SHM objects and return slot descriptors for worker access."""
         if context.object_group_layout_descs:
             return self._prepare_multi_group_retrieve(
-                key, instance_id, context, resolve_obj_keys
+                key, instance_id, context, resolve_obj_keys, transfer_plan
             )
 
         obj_keys = resolve_obj_keys(key)[0]
@@ -716,10 +791,15 @@ class ShmTransferStrategy(TransferStrategy):
         instance_id: int,
         context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[list[ObjectKey]]],
+        transfer_plan: TransferPlan | None,
     ) -> PrepareStoreResponse:
         """Reserve all multi-group store slots before publishing any of them."""
         self.abort_store(key, instance_id)
-        obj_keys_by_group = resolve_obj_keys(key)
+        if transfer_plan is None:
+            raise ValueError("multi-group SHM store has no transfer plan")
+        obj_keys_by_group = _object_keys_bound_to_plan(
+            context, transfer_plan, resolve_obj_keys, key
+        )
         layouts = context.object_group_layout_descs
         if len(obj_keys_by_group) != len(layouts):
             raise ValueError(
@@ -729,9 +809,13 @@ class ShmTransferStrategy(TransferStrategy):
         reserved_keys: list[ObjectKey] = []
         object_groups: list[dict[str, Any]] = []
         try:
-            for object_group_id, (obj_keys, layout) in enumerate(
-                zip(obj_keys_by_group, layouts, strict=True)
+            for object_group_plan, obj_keys, layout in zip(
+                transfer_plan.object_groups,
+                obj_keys_by_group,
+                layouts,
+                strict=True,
             ):
+                object_group_id = object_group_plan.object_group_id
                 reserved = self._storage_manager.reserve_write(obj_keys, layout, "new")
                 unexpected_keys = [
                     obj_key for obj_key in reserved if obj_key not in obj_keys
@@ -745,7 +829,9 @@ class ShmTransferStrategy(TransferStrategy):
 
                 group_slots: list[list[dict[str, Any]]] = []
                 chunk_indices: list[int] = []
-                for chunk_idx, obj_key in enumerate(obj_keys):
+                for chunk_idx, obj_key in zip(
+                    object_group_plan.chunk_indices, obj_keys, strict=True
+                ):
                     memory_obj = reserved.get(obj_key)
                     if memory_obj is None:
                         continue
@@ -794,38 +880,37 @@ class ShmTransferStrategy(TransferStrategy):
         instance_id: int,
         context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[list[ObjectKey]]],
+        transfer_plan: TransferPlan | None,
     ) -> PrepareRetrieveResponse:
         """Build an all-or-nothing ordered multi-group SHM read response."""
-        obj_keys_by_group = resolve_obj_keys(key)
+        obj_keys_by_group = _object_keys_bound_to_plan(
+            context, transfer_plan, resolve_obj_keys, key
+        )
         layouts = context.object_group_layout_descs
         if len(obj_keys_by_group) != len(layouts):
             raise ValueError(
                 "multi-group SHM object-key count does not match registration"
             )
-        if len(context.attn_desc.num_chunks_in_sw) != len(layouts):
-            raise ValueError(
-                "multi-group SHM attention-window count does not match registration"
-            )
+        if transfer_plan is None:
+            raise ValueError("multi-group SHM retrieve has no transfer plan")
 
         prefetched_keys: list[ObjectKey] = []
         object_groups: list[dict[str, Any]] = []
         try:
-            for object_group_id, (obj_keys, layout) in enumerate(
-                zip(obj_keys_by_group, layouts, strict=True)
+            for object_group_plan, obj_keys, layout in zip(
+                transfer_plan.object_groups,
+                obj_keys_by_group,
+                layouts,
+                strict=True,
             ):
-                num_to_skip = compute_num_objects_to_skip(
-                    context.attn_desc.num_chunks_in_sw[object_group_id],
-                    len(obj_keys),
-                    is_retrieve=True,
-                )
-                selected_keys = obj_keys[num_to_skip:]
+                object_group_id = object_group_plan.object_group_id
                 group_prefetched_keys, memory_objs = self._storage_manager.unsafe_read(
-                    selected_keys
+                    obj_keys
                 )
                 if (
                     not memory_objs
-                    or len(group_prefetched_keys) != len(selected_keys)
-                    or len(memory_objs) != len(selected_keys)
+                    or len(group_prefetched_keys) != len(obj_keys)
+                    or len(memory_objs) != len(obj_keys)
                 ):
                     if group_prefetched_keys:
                         self._storage_manager.finish_read_prefetched(
@@ -839,7 +924,9 @@ class ShmTransferStrategy(TransferStrategy):
                 prefetched_keys.extend(group_prefetched_keys)
 
                 group_slots: list[list[dict[str, Any]]] = []
-                for chunk_idx, memory_obj in enumerate(memory_objs):
+                for chunk_idx, memory_obj in zip(
+                    object_group_plan.chunk_indices, memory_objs, strict=True
+                ):
                     slot_chunk: list[dict[str, Any]] = []
                     for tensor_idx, (shape, dtype) in enumerate(
                         zip(layout.shapes, layout.dtypes, strict=True)
@@ -852,7 +939,7 @@ class ShmTransferStrategy(TransferStrategy):
                         ):
                             raise ValueError(
                                 f"SHM object group {object_group_id}, chunk "
-                                f"{chunk_idx + num_to_skip}, tensor {tensor_idx} "
+                                f"{chunk_idx}, tensor {tensor_idx} "
                                 "does not match the registered layout"
                             )
                         slot_chunk.append(
@@ -862,7 +949,7 @@ class ShmTransferStrategy(TransferStrategy):
                 object_groups.append(
                     {
                         "object_group_id": object_group_id,
-                        "chunk_indices": list(range(num_to_skip, len(obj_keys))),
+                        "chunk_indices": list(object_group_plan.chunk_indices),
                         "slots": group_slots,
                     }
                 )

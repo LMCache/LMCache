@@ -470,7 +470,7 @@ def test_hybrid_pickle_store_runs_on_background_thread(
     def _gather_multi_group(
         _kv_caches: dict[str, torch.Tensor],
         _transfer_metadata: object,
-        _block_ids: list[list[int]],
+        _transfer_plan: object,
         _layout_hints: object,
     ) -> list[list[list[torch.Tensor]]]:
         gather_started.set()
@@ -480,8 +480,13 @@ def test_hybrid_pickle_store_runs_on_background_thread(
     monkeypatch.setattr(async_engine_driven, "torch_dev", _FakeTorchDev(gather_gate))
     monkeypatch.setattr(
         async_engine_driven,
-        "_gather_multi_group_pickle_payload",
+        "_gather_multi_group_pickle_payload_for_plan",
         _gather_multi_group,
+    )
+    monkeypatch.setattr(
+        async_engine_driven,
+        "_plan_engine_driven_request",
+        lambda *_args: MagicMock(),
     )
     ctx = AsyncEngineDrivenTransferContext(commit_workers=1)
     ctx._engine_driven_context = _FakeStoreContext(  # type: ignore[assignment]

@@ -24,6 +24,7 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenPayload,
     EngineDrivenStorePreparation,
 )
+from lmcache.v1.multiprocess.transfer_plan import TransferPlan
 from lmcache.v1.platform import current_device_spec
 
 logger = init_logger(__name__)
@@ -322,12 +323,28 @@ class EngineDrivenContextShm(EngineDrivenContext):
             return False
 
     def prepare_retrieve(
-        self, key: IPCCacheServerKey, instance_id: int
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        skip_first_n_tokens: int = 0,
+        transfer_plan: TransferPlan | None = None,
     ) -> EngineDrivenPayload | None:
-        """Request readable SHM slots for one retrieve operation."""
+        """Request readable SHM slots for one retrieve operation.
+
+        Args:
+            key: Cache key for the requested token range.
+            instance_id: Worker instance identifier.
+            skip_first_n_tokens: Retrieve prefix forwarded so the server binds
+                its multi-group slots to the matching logical plan.
+            transfer_plan: Worker-built plan used to verify multi-group SHM
+                slot indices before scatter.
+
+        Returns:
+            SHM tensor views on a cache hit, or ``None`` on a miss.
+        """
         future = self.mq_client.submit_request(
             RequestType.PREPARE_RETRIEVE,
-            [key, instance_id],
+            [key, instance_id, skip_first_n_tokens],
             get_response_class(RequestType.PREPARE_RETRIEVE),
         )
         try:
@@ -336,18 +353,36 @@ class EngineDrivenContextShm(EngineDrivenContext):
             return None
         if not response.success:
             return None
-        context = response.context if isinstance(response.context, dict) else {}
-        if self.metadata.object_group_layout_descs:
-            object_groups = context.get("object_groups")
-            if not isinstance(object_groups, list):
-                raise ValueError(
-                    "Multi-group SHM retrieve response has no object_groups"
+        try:
+            context = response.context if isinstance(response.context, dict) else {}
+            if self.metadata.object_group_layout_descs:
+                object_groups = context.get("object_groups")
+                if not isinstance(object_groups, list):
+                    raise ValueError(
+                        "Multi-group SHM retrieve response has no object_groups"
+                    )
+                grouped_tensors, grouped_chunk_indices = (
+                    self._build_multi_group_slot_tensors(object_groups)
                 )
-            grouped_tensors, _ = self._build_multi_group_slot_tensors(object_groups)
-            return grouped_tensors
+                if transfer_plan is not None and grouped_chunk_indices != [
+                    list(object_group_plan.chunk_indices)
+                    for object_group_plan in transfer_plan.object_groups
+                ]:
+                    raise ValueError(
+                        "multi-group SHM retrieve slots do not match transfer plan"
+                    )
+                return grouped_tensors
 
-        slots = context.get("slots", [])
-        return self._build_slot_tensors(slots) if slots else None
+            slots = context.get("slots", [])
+            return self._build_slot_tensors(slots) if slots else None
+        except (IndexError, KeyError, TypeError, ValueError):
+            if not self.commit_retrieve(key, instance_id):
+                logger.error(
+                    "Failed to release SHM retrieve reservation after slot validation "
+                    "failed for instance_id=%d",
+                    instance_id,
+                )
+            raise
 
     def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
         future = self.mq_client.submit_request(

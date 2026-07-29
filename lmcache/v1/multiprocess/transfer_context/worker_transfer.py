@@ -41,12 +41,14 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     scatter_cpu_to_paged_kv,
 )
 from lmcache.v1.multiprocess.transfer_plan import (
+    KernelGroupPlan,
+    KernelGroupTransferMetadata,
     KVTransferMetadata,
+    TransferPlan,
+    TransferPlanDirection,
     build_engine_driven_object_group_layout_desc,
-    compute_num_objects_to_skip,
+    build_transfer_plan_from_kernel_group_block_ids,
     export_kv_transfer_metadata,
-    recalculate_blocks_to_skip,
-    select_block_ids_for_window,
 )
 from lmcache.v1.platform import get_device_spec, resolve_kv_wrapper_factory
 from lmcache.v1.platform.base.event_ipc import (
@@ -372,42 +374,50 @@ def _kernel_group_kv_caches(
         ) from exc
 
 
-def _multi_group_block_ids(
+def _plan_engine_driven_request(
     transfer_metadata: KVTransferMetadata,
-    block_ids_by_engine_group: list[list[int]],
-) -> tuple[list[list[int]], int]:
-    """Resolve and downsample kernel-group block IDs from shared metadata.
+    block_ids_by_kernel_group: list[list[int]],
+    direction: TransferPlanDirection,
+    skip_first_n_tokens: int = 0,
+) -> TransferPlan:
+    """Build the shared logical plan for one engine-driven request.
 
-    Returns block IDs in kernel-group order and the common number of complete
-    chunks. Every kernel group must cover the same logical chunk range.
+    Args:
+        transfer_metadata: Immutable registered kernel and object-group metadata.
+        block_ids_by_kernel_group: Request block IDs in protocol kernel-group
+            order.
+        direction: Whether the worker gathers for store or scatters for
+            retrieve.
+        skip_first_n_tokens: Retrieve prefix to preserve without overwriting.
+
+    Returns:
+        The ordered, transport-independent work plan to bind to worker buffers.
     """
-    selected_by_kernel_group: list[list[int]] = []
-    num_chunks: int | None = None
-    for kernel_group in transfer_metadata.kernel_groups:
-        if kernel_group.engine_group_id >= len(block_ids_by_engine_group):
-            raise ValueError(
-                f"missing block IDs for engine group {kernel_group.engine_group_id}"
-            )
-        engine_block_ids = block_ids_by_engine_group[kernel_group.engine_group_id]
-        if len(engine_block_ids) % kernel_group.blocks_per_chunk != 0:
-            raise ValueError(
-                f"engine group {kernel_group.engine_group_id} has "
-                f"{len(engine_block_ids)} "
-                "block IDs, which does not form complete LMCache chunks"
-            )
-        group_num_chunks = len(engine_block_ids) // kernel_group.blocks_per_chunk
-        if num_chunks is None:
-            num_chunks = group_num_chunks
-        elif num_chunks != group_num_chunks:
-            raise ValueError("kernel groups cover different numbers of LMCache chunks")
-        selected_by_kernel_group.append(
-            select_block_ids_for_window(
-                engine_block_ids,
-                kernel_group.blocks_per_chunk,
-                kernel_group.blocks_per_window,
-            )
+    return build_transfer_plan_from_kernel_group_block_ids(
+        transfer_metadata,
+        block_ids_by_kernel_group,
+        direction,
+        skip_first_n_tokens,
+    )
+
+
+def _kernel_group_metadata_for_plan(
+    transfer_metadata: KVTransferMetadata,
+    kernel_group_plan: KernelGroupPlan,
+) -> KernelGroupTransferMetadata:
+    """Return metadata for a plan group after checking its stable identity."""
+    kernel_group_id = kernel_group_plan.kernel_group_id
+    if kernel_group_id < 0 or kernel_group_id >= len(transfer_metadata.kernel_groups):
+        raise ValueError(f"invalid kernel_group_id {kernel_group_id} in transfer plan")
+    kernel_group = transfer_metadata.kernel_groups[kernel_group_id]
+    if (
+        kernel_group.kernel_group_id != kernel_group_id
+        or kernel_group.engine_group_id != kernel_group_plan.engine_group_id
+    ):
+        raise ValueError(
+            f"transfer plan kernel group {kernel_group_id} does not match metadata"
         )
-    return selected_by_kernel_group, num_chunks or 0
+    return kernel_group
 
 
 def _gather_multi_group_pickle_payload(
@@ -416,31 +426,58 @@ def _gather_multi_group_pickle_payload(
     block_ids_by_engine_group: list[list[int]],
     layout_hints: LayoutHints | None,
 ) -> list[list[list[torch.Tensor]]]:
-    """Gather ordered pickle objects for every object and kernel group."""
-    block_ids_by_kernel_group, num_chunks = _multi_group_block_ids(
-        transfer_metadata, block_ids_by_engine_group
+    """Compatibility wrapper that plans and gathers a pickle payload."""
+    transfer_plan = _plan_engine_driven_request(
+        transfer_metadata,
+        block_ids_by_engine_group,
+        TransferPlanDirection.STORE,
     )
-    gathered_by_kernel_group: list[list[torch.Tensor]] = []
-    for kernel_group in transfer_metadata.kernel_groups:
-        gathered_by_kernel_group.append(
-            gather_paged_kv_to_cpu(
-                _kernel_group_kv_caches(kv_caches, kernel_group.layer_indices),
-                block_ids_by_kernel_group[kernel_group.kernel_group_id],
-                kernel_group.blocks_per_window,
-                layout_hints=layout_hints,
-                engine_kv_format=kernel_group.engine_kv_format,
-            )
-        )
+    return _gather_multi_group_pickle_payload_for_plan(
+        kv_caches, transfer_metadata, transfer_plan, layout_hints
+    )
 
+
+def _gather_multi_group_pickle_payload_for_plan(
+    kv_caches: dict[str, torch.Tensor],
+    transfer_metadata: KVTransferMetadata,
+    transfer_plan: TransferPlan,
+    layout_hints: LayoutHints | None,
+) -> list[list[list[torch.Tensor]]]:
+    """Bind a store plan to CPU pickle payload tensors.
+
+    Args:
+        kv_caches: Worker KV caches keyed by layer name.
+        transfer_metadata: Immutable registration metadata.
+        transfer_plan: Shared store plan whose object and kernel order defines
+            the payload.
+        layout_hints: Optional engine-provided KV layout metadata.
+
+    Returns:
+        CPU tensors ordered by object group, plan chunk, and kernel group.
+    """
     payload: list[list[list[torch.Tensor]]] = []
-    for object_group in transfer_metadata.object_groups:
+    for object_group_plan in transfer_plan.object_groups:
+        gathered_by_kernel_group: list[list[torch.Tensor]] = []
+        for kernel_group_plan in object_group_plan.kernel_groups:
+            kernel_group = _kernel_group_metadata_for_plan(
+                transfer_metadata, kernel_group_plan
+            )
+            gathered_by_kernel_group.append(
+                gather_paged_kv_to_cpu(
+                    _kernel_group_kv_caches(kv_caches, kernel_group.layer_indices),
+                    list(kernel_group_plan.block_ids),
+                    kernel_group_plan.blocks_per_window,
+                    layout_hints=layout_hints,
+                    engine_kv_format=kernel_group.engine_kv_format,
+                )
+            )
         payload.append(
             [
                 [
-                    gathered_by_kernel_group[kernel_group_id][chunk_idx]
-                    for kernel_group_id in object_group.kernel_group_ids
+                    gathered_by_kernel_group[tensor_idx][chunk_idx]
+                    for tensor_idx in range(len(object_group_plan.kernel_groups))
                 ]
-                for chunk_idx in range(num_chunks)
+                for chunk_idx in range(len(object_group_plan.chunk_indices))
             ]
         )
     return payload
@@ -454,66 +491,102 @@ def _gather_multi_group_shm_payload(
     chunk_indices_by_object_group: list[list[int]],
     layout_hints: LayoutHints | None,
 ) -> list[list[list[torch.Tensor]]]:
-    """Gather sparse multi-group chunks directly into ordered SHM slots.
+    """Compatibility wrapper that plans and gathers into SHM slots."""
+    transfer_plan = _plan_engine_driven_request(
+        transfer_metadata,
+        block_ids_by_engine_group,
+        TransferPlanDirection.STORE,
+    )
+    return _gather_multi_group_shm_payload_for_plan(
+        kv_caches,
+        transfer_metadata,
+        transfer_plan,
+        out,
+        chunk_indices_by_object_group,
+        layout_hints,
+    )
+
+
+def _gather_multi_group_shm_payload_for_plan(
+    kv_caches: dict[str, torch.Tensor],
+    transfer_metadata: KVTransferMetadata,
+    transfer_plan: TransferPlan,
+    out: list[list[list[torch.Tensor]]],
+    chunk_indices_by_object_group: list[list[int]],
+    layout_hints: LayoutHints | None,
+) -> list[list[list[torch.Tensor]]]:
+    """Bind a store plan to sparse shared-memory slot buffers.
 
     Args:
         kv_caches: Worker KV caches keyed by layer name.
-        transfer_metadata: Immutable object/kernel-group transfer plan.
-        block_ids_by_engine_group: Source block IDs indexed by engine group.
-        out: SHM-backed tensors in object-group, chunk, kernel-group order.
-        chunk_indices_by_object_group: Sparse source chunk positions parallel
-            to ``out`` for every object group.
+        transfer_metadata: Immutable registration metadata.
+        transfer_plan: Shared store plan defining source chunk and tensor order.
+        out: SHM-backed tensors in object-group, sparse-chunk, kernel order.
+        chunk_indices_by_object_group: Original source chunk positions for
+            every sparse SHM slot.
         layout_hints: Optional engine-provided KV layout metadata.
 
     Returns:
         The same nested ``out`` list after in-place gather.
 
     Raises:
-        ValueError: If the server slot plan does not match the registered
-            metadata or has invalid sparse chunk ordering.
+        ValueError: If server-provided slots cannot bind to the shared plan.
     """
-    block_ids_by_kernel_group, num_chunks = _multi_group_block_ids(
-        transfer_metadata, block_ids_by_engine_group
-    )
-    object_groups = transfer_metadata.object_groups
-    if len(out) != len(object_groups) or len(chunk_indices_by_object_group) != len(
-        object_groups
-    ):
-        raise ValueError("SHM slot plan object-group count does not match registration")
+    if len(out) != len(transfer_plan.object_groups) or len(
+        chunk_indices_by_object_group
+    ) != len(transfer_plan.object_groups):
+        raise ValueError(
+            "SHM slot plan object-group count does not match transfer plan"
+        )
 
-    for object_group in object_groups:
-        object_group_id = object_group.object_group_id
-        group_out = out[object_group_id]
-        chunk_indices = chunk_indices_by_object_group[object_group_id]
+    for object_group_plan, group_out, chunk_indices in zip(
+        transfer_plan.object_groups,
+        out,
+        chunk_indices_by_object_group,
+        strict=True,
+    ):
+        object_group_id = object_group_plan.object_group_id
         if len(group_out) != len(chunk_indices):
             raise ValueError(
                 f"SHM object group {object_group_id} has {len(group_out)} slot "
                 f"chunks but {len(chunk_indices)} chunk indices"
             )
-        if any(
-            chunk_index < 0 or chunk_index >= num_chunks
-            for chunk_index in chunk_indices
-        ) or chunk_indices != sorted(set(chunk_indices)):
+        if chunk_indices != sorted(set(chunk_indices)):
             raise ValueError(
                 f"SHM object group {object_group_id} has invalid chunk ordering"
             )
-        for tensor_idx, kernel_group_id in enumerate(object_group.kernel_group_ids):
-            if any(
-                len(chunk) != len(object_group.kernel_group_ids) for chunk in group_out
-            ):
-                raise ValueError(
-                    f"SHM object group {object_group_id} has malformed "
-                    "kernel-group slot ordering"
-                )
-            kernel_group = transfer_metadata.kernel_groups[kernel_group_id]
+        plan_positions = {
+            chunk_index: position
+            for position, chunk_index in enumerate(object_group_plan.chunk_indices)
+        }
+        try:
+            planned_positions = [
+                plan_positions[chunk_index] for chunk_index in chunk_indices
+            ]
+        except KeyError as exc:
+            raise ValueError(
+                f"SHM object group {object_group_id} references a chunk "
+                "outside the transfer plan"
+            ) from exc
+        if any(
+            len(chunk) != len(object_group_plan.kernel_groups) for chunk in group_out
+        ):
+            raise ValueError(
+                f"SHM object group {object_group_id} has malformed "
+                "kernel-group slot ordering"
+            )
+        for tensor_idx, kernel_group_plan in enumerate(object_group_plan.kernel_groups):
+            kernel_group = _kernel_group_metadata_for_plan(
+                transfer_metadata, kernel_group_plan
+            )
             gather_paged_kv_to_cpu(
                 _kernel_group_kv_caches(kv_caches, kernel_group.layer_indices),
-                block_ids_by_kernel_group[kernel_group_id],
-                kernel_group.blocks_per_window,
+                list(kernel_group_plan.block_ids),
+                kernel_group_plan.blocks_per_window,
                 layout_hints=layout_hints,
                 engine_kv_format=kernel_group.engine_kv_format,
                 out=[chunk[tensor_idx] for chunk in group_out],
-                chunk_indices=chunk_indices,
+                chunk_indices=planned_positions,
             )
     return out
 
@@ -568,59 +641,79 @@ def _scatter_multi_group_pickle_payload(
     skip_first_n_tokens: int,
     layout_hints: LayoutHints | None,
 ) -> None:
-    """Scatter deterministic object-group pickle payload back into paged KV."""
-    block_ids_by_kernel_group, num_chunks = _multi_group_block_ids(
-        transfer_metadata, block_ids_by_engine_group
+    """Compatibility wrapper that plans and scatters a pickle payload."""
+    transfer_plan = _plan_engine_driven_request(
+        transfer_metadata,
+        block_ids_by_engine_group,
+        TransferPlanDirection.RETRIEVE,
+        skip_first_n_tokens,
     )
-    if len(payload) != len(transfer_metadata.object_groups):
+    _scatter_multi_group_pickle_payload_for_plan(
+        kv_caches,
+        transfer_metadata,
+        transfer_plan,
+        payload,
+        layout_hints,
+    )
+
+
+def _scatter_multi_group_pickle_payload_for_plan(
+    kv_caches: dict[str, torch.Tensor],
+    transfer_metadata: KVTransferMetadata,
+    transfer_plan: TransferPlan,
+    payload: list[list[list[torch.Tensor]]],
+    layout_hints: LayoutHints | None,
+) -> None:
+    """Bind a retrieve plan to an ordered pickle or SHM payload.
+
+    Args:
+        kv_caches: Worker KV caches keyed by layer name.
+        transfer_metadata: Immutable registration metadata.
+        transfer_plan: Shared retrieve plan defining block, object, and prefix
+            skip order.
+        payload: CPU tensors in object-group, plan chunk, and kernel-group
+            order.
+        layout_hints: Optional engine-provided KV layout metadata.
+
+    Raises:
+        ValueError: If the payload does not exactly bind to the shared plan.
+    """
+    if len(payload) != len(transfer_plan.object_groups):
         raise ValueError(
-            "pickle payload object-group count does not match registration"
+            "pickle payload object-group count does not match transfer plan"
         )
 
-    for object_group in transfer_metadata.object_groups:
-        object_group_payload = payload[object_group.object_group_id]
-        skipped_objects = compute_num_objects_to_skip(
-            object_group.sw_size_chunks, num_chunks, is_retrieve=True
-        )
-        expected_chunks = num_chunks - skipped_objects
-        if len(object_group_payload) != expected_chunks:
+    for object_group_plan, object_group_payload in zip(
+        transfer_plan.object_groups, payload, strict=True
+    ):
+        object_group_id = object_group_plan.object_group_id
+        if len(object_group_payload) != len(object_group_plan.chunk_indices):
             raise ValueError(
-                f"object group {object_group.object_group_id} has "
-                f"{len(object_group_payload)} chunks; expected {expected_chunks}"
+                f"object group {object_group_id} has "
+                f"{len(object_group_payload)} chunks; expected "
+                f"{len(object_group_plan.chunk_indices)}"
             )
-        for tensor_idx, kernel_group_id in enumerate(object_group.kernel_group_ids):
-            kernel_group = transfer_metadata.kernel_groups[kernel_group_id]
+        if any(
+            len(chunk) != len(object_group_plan.kernel_groups)
+            for chunk in object_group_payload
+        ):
+            raise ValueError(
+                f"object group {object_group_id} has malformed "
+                "kernel-group payload ordering"
+            )
+        for tensor_idx, kernel_group_plan in enumerate(object_group_plan.kernel_groups):
+            kernel_group = _kernel_group_metadata_for_plan(
+                transfer_metadata, kernel_group_plan
+            )
             chunks = [chunk[tensor_idx] for chunk in object_group_payload]
-            if any(
-                len(chunk) != len(object_group.kernel_group_ids)
-                for chunk in object_group_payload
-            ):
-                raise ValueError(
-                    f"object group {object_group.object_group_id} has malformed "
-                    "kernel-group payload ordering"
-                )
-            group_block_ids = block_ids_by_kernel_group[kernel_group_id]
-            start = skipped_objects * kernel_group.blocks_per_window
-            effective_skip_tokens = max(
-                0,
-                skip_first_n_tokens
-                - skipped_objects * transfer_metadata.tokens_per_chunk,
-            )
-            original_skip_blocks = (
-                effective_skip_tokens // kernel_group.tokens_per_block
-            )
-            window_skip_blocks = recalculate_blocks_to_skip(
-                kernel_group.blocks_per_chunk,
-                kernel_group.blocks_per_window,
-                original_skip_blocks,
-            )
             scatter_cpu_to_paged_kv(
                 _kernel_group_kv_caches(kv_caches, kernel_group.layer_indices),
-                group_block_ids[start:],
+                list(kernel_group_plan.block_ids),
                 chunks,
-                kernel_group.blocks_per_window,
+                kernel_group_plan.blocks_per_window,
                 skip_first_n_tokens=(
-                    window_skip_blocks * kernel_group.tokens_per_block
+                    kernel_group_plan.skip_first_n_blocks
+                    * kernel_group.tokens_per_block
                 ),
                 layout_hints=layout_hints,
                 engine_kv_format=kernel_group.engine_kv_format,
@@ -982,11 +1075,9 @@ class EngineDrivenTransferContext(TransferContext):
     ) -> None:
         """Register KV caches with the non-GPU context server.
 
-        ``engine_group_infos`` and ``engine_type`` are accepted to satisfy
-        the base interface but are currently a no-op: the non-GPU transfer
-        path does not support hybrid KV cache groups and rejects multi-
-        group transfers at store / retrieve time (see
-        ``_single_group_block_ids``).
+        Legacy dense registrations retain their single-group layout. Hybrid
+        registrations export immutable transfer metadata so the worker and
+        server can bind the same shared logical transfer plan.
         """
         # TODO: per-group compression (EngineGroupInfo.tokens_per_block vs
         # the tensor-detected slot count, e.g. DeepSeek V4) is only handled
@@ -1132,9 +1223,18 @@ class EngineDrivenTransferContext(TransferContext):
                 "Call register() before submit_store()."
             )
 
+        transfer_metadata = self._transfer_metadata
+        transfer_plan = (
+            _plan_engine_driven_request(
+                transfer_metadata,
+                block_ids,
+                TransferPlanDirection.STORE,
+            )
+            if transfer_metadata is not None
+            else None
+        )
         torch_dev.synchronize()
         result = self._engine_driven_context.prepare_store(key, instance_id)
-        transfer_metadata = self._transfer_metadata
         if transfer_metadata is None:
             if result is not None and not _is_legacy_shm_store_preparation(result):
                 self._abort_shm_store(key, instance_id, result)
@@ -1161,11 +1261,13 @@ class EngineDrivenTransferContext(TransferContext):
                 self._abort_shm_store(key, instance_id, result)
                 raise
         else:
+            if transfer_plan is None:
+                raise RuntimeError("multi-group store has no transfer plan")
             if result is None:
-                cpu_chunks = _gather_multi_group_pickle_payload(
+                cpu_chunks = _gather_multi_group_pickle_payload_for_plan(
                     kv_caches,
                     transfer_metadata,
-                    block_ids,
+                    transfer_plan,
                     self._layout_hints,
                 )
                 used_shm = False
@@ -1184,10 +1286,10 @@ class EngineDrivenTransferContext(TransferContext):
                     future.set_result(True)
                     return future
                 try:
-                    cpu_chunks = _gather_multi_group_shm_payload(
+                    cpu_chunks = _gather_multi_group_shm_payload_for_plan(
                         kv_caches,
                         transfer_metadata,
-                        block_ids,
+                        transfer_plan,
                         grouped_out_buffers,
                         grouped_chunk_indices,
                         self._layout_hints,
@@ -1230,11 +1332,26 @@ class EngineDrivenTransferContext(TransferContext):
                 "Call register() before submit_retrieve()."
             )
 
-        src_buffers = self._engine_driven_context.prepare_retrieve(key, instance_id)
+        transfer_metadata = self._transfer_metadata
+        transfer_plan = (
+            _plan_engine_driven_request(
+                transfer_metadata,
+                block_ids,
+                TransferPlanDirection.RETRIEVE,
+                skip_first_n_tokens,
+            )
+            if transfer_metadata is not None
+            else None
+        )
+        src_buffers = self._engine_driven_context.prepare_retrieve(
+            key,
+            instance_id,
+            skip_first_n_tokens,
+            transfer_plan,
+        )
         ok = src_buffers is not None
         if src_buffers is not None:
             try:
-                transfer_metadata = self._transfer_metadata
                 if transfer_metadata is None:
                     scatter_cpu_to_paged_kv(
                         kv_caches,
@@ -1246,18 +1363,19 @@ class EngineDrivenTransferContext(TransferContext):
                         engine_kv_format=self._engine_kv_format,
                     )
                 else:
+                    if transfer_plan is None:
+                        raise RuntimeError("multi-group retrieve has no transfer plan")
                     if not isinstance(src_buffers, list) or (
                         src_buffers and not isinstance(src_buffers[0], list)
                     ):
                         raise ValueError(
                             "multi-group retrieve returned a legacy flat payload"
                         )
-                    _scatter_multi_group_pickle_payload(
+                    _scatter_multi_group_pickle_payload_for_plan(
                         kv_caches,
                         transfer_metadata,
-                        block_ids,
+                        transfer_plan,
                         src_buffers,
-                        skip_first_n_tokens,
                         self._layout_hints,
                     )
             except (RuntimeError, ValueError, TypeError, IndexError):

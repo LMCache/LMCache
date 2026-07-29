@@ -3423,7 +3423,8 @@ def test_server_pickle_multi_group_releases_all_reservations_on_copy_failure(
 
     with pytest.raises(ValueError, match="does not match"):
         module.commit_store(_default_key(), 54, pickle.dumps(payload))
-    mock_storage.finish_write.assert_called_once_with(["g0-c0", "g1-c0"])
+    mock_storage.finish_write.assert_not_called()
+    mock_storage.delete_l1_keys.assert_called_once_with(["g0-c0", "g1-c0"], force=True)
 
 
 def test_hybrid_subchunk_retrieve_recalculates_prefix_skip(

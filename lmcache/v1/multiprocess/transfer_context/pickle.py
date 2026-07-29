@@ -16,6 +16,7 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContextMetadata,
     EngineDrivenPayload,
 )
+from lmcache.v1.multiprocess.transfer_plan import TransferPlan
 
 
 class EngineDrivenContextPickle(EngineDrivenContext):
@@ -77,16 +78,29 @@ class EngineDrivenContextPickle(EngineDrivenContext):
         return True
 
     def prepare_retrieve(
-        self, key: IPCCacheServerKey, instance_id: int
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        skip_first_n_tokens: int = 0,
+        transfer_plan: TransferPlan | None = None,
     ) -> EngineDrivenPayload | None:
         """Send PREPARE_RETRIEVE and deserialize the response data.
+
+        Args:
+            key: Cache key for the requested token range.
+            instance_id: Worker instance identifier.
+            skip_first_n_tokens: Retrieve prefix forwarded so the server binds
+                its multi-group storage payload to the matching logical plan.
+            transfer_plan: Worker-built plan. Pickle payload ordering is
+                validated by the worker scatter executor after deserialization.
 
         Returns:
             Chunks on hit, or None on miss/timeout.
         """
+        del transfer_plan
         future = self.mq_client.submit_request(
             RequestType.PREPARE_RETRIEVE,
-            [key, instance_id],
+            [key, instance_id, skip_first_n_tokens],
             get_response_class(RequestType.PREPARE_RETRIEVE),
         )
         try:

@@ -56,6 +56,7 @@ from lmcache.v1.multiprocess.transfer_plan import (
     build_object_group_layout_desc,
     build_transfer_plan,
     export_kv_transfer_metadata,
+    map_kernel_group_block_ids_to_engine_groups,
 )
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
@@ -112,44 +113,10 @@ def _block_ids_by_engine_group(
     transfer_metadata: KVTransferMetadata,
     block_ids_by_kernel_group: Sequence[Sequence[int]],
 ) -> dict[int, Sequence[int]]:
-    """Normalize request block IDs from kernel-group to engine-group keys.
-
-    LMCache-driven requests retain their established wire format: one block-ID
-    sequence per kernel group.  The shared planner consumes the engine-group
-    form because multiple kernel groups can address the same engine block
-    space.  Such repeated entries must agree exactly.
-
-    Args:
-        transfer_metadata: Immutable metadata mapping kernel groups to engine
-            groups.
-        block_ids_by_kernel_group: Request block IDs in kernel-group order.
-
-    Returns:
-        Block IDs keyed by engine group ID.
-
-    Raises:
-        ValueError: If the request group count differs from metadata or
-            repeated kernel groups for one engine group disagree.
-    """
-    if len(block_ids_by_kernel_group) != len(transfer_metadata.kernel_groups):
-        raise ValueError(
-            "block ID group count does not match transfer metadata: "
-            f"got {len(block_ids_by_kernel_group)}, expected "
-            f"{len(transfer_metadata.kernel_groups)}"
-        )
-
-    result: dict[int, Sequence[int]] = {}
-    for kernel_group, block_ids in zip(
-        transfer_metadata.kernel_groups, block_ids_by_kernel_group, strict=True
-    ):
-        existing = result.get(kernel_group.engine_group_id)
-        if existing is not None and existing != block_ids:
-            raise ValueError(
-                "conflicting block IDs for engine group "
-                f"{kernel_group.engine_group_id} from repeated kernel groups"
-            )
-        result[kernel_group.engine_group_id] = block_ids
-    return result
+    """Compatibility wrapper around the shared block-ID normalizer."""
+    return map_kernel_group_block_ids_to_engine_groups(
+        transfer_metadata, block_ids_by_kernel_group
+    )
 
 
 def _stage_object_group_plan_block_ids(
