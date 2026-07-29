@@ -190,6 +190,20 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                 "Engine-driven transfer context is not registered. "
                 "Call register() before submit_store()."
             )
+        if self._transfer_metadata is not None:
+            # Hybrid pickle payloads contain heterogeneous kernel-group
+            # tensors, so they cannot use the dense staging-buffer pool.
+            # Reuse the synchronous metadata-driven implementation until the
+            # async executor is migrated in the later planner work.
+            return super().submit_store(
+                _request_id,
+                key,
+                instance_id,
+                kv_caches,
+                block_ids,
+                _event,
+                blocks_in_chunk,
+            )
         completion: MessagingFuture[bool] = MessagingFuture()
         engine_driven_context = self._engine_driven_context
         commit_executor = self._commit_executor

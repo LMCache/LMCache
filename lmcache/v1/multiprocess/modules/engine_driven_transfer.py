@@ -614,10 +614,30 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
     ) -> tuple[int, IPCCacheServerKey]:
         return (instance_id, key)
 
-    def _resolve_single_group_obj_keys(self, key: IPCCacheServerKey) -> list[ObjectKey]:
-        """Resolve object keys for the single object group used by
-        non-GPU transfers."""
-        return self._ctx.resolve_obj_keys(key, [0])[0]
+    def _resolve_obj_keys(
+        self,
+        key: IPCCacheServerKey,
+        metadata: EngineDrivenContextMetadata,
+    ) -> list[list[ObjectKey]]:
+        """Resolve deterministic object-group keys for one transfer.
+
+        Args:
+            key: Cache key for the requested token range.
+            metadata: Registered context metadata describing object groups.
+
+        Returns:
+            Object keys in object-group order, then chunk order. Legacy
+            registrations return a single inner list for object group zero.
+        """
+        if metadata.transfer_metadata is None:
+            return self._ctx.resolve_obj_keys(key, [0])
+        return self._ctx.resolve_obj_keys(
+            key,
+            [
+                object_group.object_group_id
+                for object_group in metadata.transfer_metadata.object_groups
+            ],
+        )
 
     def register_kv_cache_engine_driven_context(
         self,
@@ -710,6 +730,11 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 list(payload.engine_group_infos),
                 object_group_layout_descs,
                 self._ctx.chunk_size,
+            )
+        if transfer_metadata is not None and shm_name and pool_size > 0:
+            raise ValueError(
+                "engine-driven hybrid KV cache transfer is not supported with "
+                "the configured SHM transport"
             )
 
         # Primary layout is object group 0.
@@ -806,7 +831,9 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             key=key,
             instance_id=instance_id,
             context=entry.metadata,
-            resolve_obj_keys=self._resolve_single_group_obj_keys,
+            resolve_obj_keys=lambda transfer_key: self._resolve_obj_keys(
+                transfer_key, entry.metadata
+            ),
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
         session.extras["store_start_time"] = time.perf_counter()
@@ -841,11 +868,17 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             instance_id=instance_id,
             cpu_data=cpu_data,
             context=entry.metadata,
-            resolve_obj_keys=self._resolve_single_group_obj_keys,
+            resolve_obj_keys=lambda transfer_key: self._resolve_obj_keys(
+                transfer_key, entry.metadata
+            ),
         )
         if st is not None and result:
             num_tokens = (
-                len(self._resolve_single_group_obj_keys(key)) * self._ctx.chunk_size
+                sum(
+                    len(object_keys)
+                    for object_keys in self._resolve_obj_keys(key, entry.metadata)
+                )
+                * self._ctx.chunk_size
             )
             logger.info(
                 "Stored %d tokens in %.3f seconds",
@@ -873,11 +906,14 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             ValueError: If no non-GPU context is registered for the given
                 instance ID.
         """
-        _, strategy = self._resolve_for_transfer(instance_id)
+        entry, strategy = self._resolve_for_transfer(instance_id)
         response = strategy.prepare_retrieve(
             key=key,
             instance_id=instance_id,
-            resolve_obj_keys=self._resolve_single_group_obj_keys,
+            context=entry.metadata,
+            resolve_obj_keys=lambda transfer_key: self._resolve_obj_keys(
+                transfer_key, entry.metadata
+            ),
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
         session.extras["retrieve_start_time"] = time.perf_counter()
@@ -898,13 +934,17 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         Returns:
             Always ``True``.
         """
-        _, strategy = self._resolve_for_transfer(instance_id)
+        entry, strategy = self._resolve_for_transfer(instance_id)
         session = self._ctx.session_manager.get_or_create(key.request_id)
         st = session.extras.pop("retrieve_start_time", None)
         result = strategy.commit_retrieve(key=key, instance_id=instance_id)
         if st is not None:
             num_tokens = (
-                len(self._resolve_single_group_obj_keys(key)) * self._ctx.chunk_size
+                sum(
+                    len(object_keys)
+                    for object_keys in self._resolve_obj_keys(key, entry.metadata)
+                )
+                * self._ctx.chunk_size
             )
             logger.info(
                 "Retrieved %d tokens in %.3f seconds",

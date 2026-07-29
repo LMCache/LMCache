@@ -18,7 +18,7 @@ from __future__ import annotations
 # Standard
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeAlias
 import inspect
 
 # Third Party
@@ -44,6 +44,9 @@ if TYPE_CHECKING:
     import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
+
+EngineDrivenChunk: TypeAlias = torch.Tensor | list[torch.Tensor]
+EngineDrivenPayload: TypeAlias = list[torch.Tensor] | list[list[EngineDrivenChunk]]
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +193,10 @@ class EngineDrivenContext(ABC):
 
     @abstractmethod
     def commit_store(
-        self, key: IPCCacheServerKey, instance_id: int, chunks: list[torch.Tensor]
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        chunks: EngineDrivenPayload,
     ) -> bool:
         """Commit store. Pickle: serialize and send. Shm: notify server."""
         ...
@@ -198,7 +204,7 @@ class EngineDrivenContext(ABC):
     @abstractmethod
     def prepare_retrieve(
         self, key: IPCCacheServerKey, instance_id: int
-    ) -> list[torch.Tensor] | None:
+    ) -> EngineDrivenPayload | None:
         """Prepare retrieve. Returns chunks or shm views, or None on miss."""
         ...
 

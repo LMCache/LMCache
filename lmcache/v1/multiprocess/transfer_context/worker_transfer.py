@@ -42,7 +42,10 @@ from lmcache.v1.multiprocess.transfer_context.base import (
 from lmcache.v1.multiprocess.transfer_plan import (
     KVTransferMetadata,
     build_object_group_layout_desc,
+    compute_num_objects_to_skip,
     export_kv_transfer_metadata,
+    recalculate_blocks_to_skip,
+    select_block_ids_for_window,
 )
 from lmcache.v1.platform import get_device_spec, resolve_kv_wrapper_factory
 from lmcache.v1.platform.base.event_ipc import (
@@ -350,6 +353,161 @@ def _single_group_block_ids(block_ids: list[list[int]]) -> list[int]:
             "engine-driven transfer does not support hybrid KV cache groups"
         )
     return block_ids[0]
+
+
+def _kernel_group_kv_caches(
+    kv_caches: dict[str, torch.Tensor],
+    layer_indices: tuple[int, ...],
+) -> dict[str, torch.Tensor]:
+    """Select one kernel group's KV tensors in declared layer order."""
+    layer_items = list(kv_caches.items())
+    try:
+        return {layer_items[index][0]: layer_items[index][1] for index in layer_indices}
+    except IndexError as exc:
+        raise ValueError(
+            f"kernel group references layer outside {len(layer_items)} KV tensors"
+        ) from exc
+
+
+def _multi_group_block_ids(
+    transfer_metadata: KVTransferMetadata,
+    block_ids_by_engine_group: list[list[int]],
+) -> tuple[list[list[int]], int]:
+    """Resolve and downsample kernel-group block IDs from shared metadata.
+
+    Returns block IDs in kernel-group order and the common number of complete
+    chunks. Every kernel group must cover the same logical chunk range.
+    """
+    selected_by_kernel_group: list[list[int]] = []
+    num_chunks: int | None = None
+    for kernel_group in transfer_metadata.kernel_groups:
+        if kernel_group.engine_group_id >= len(block_ids_by_engine_group):
+            raise ValueError(
+                f"missing block IDs for engine group {kernel_group.engine_group_id}"
+            )
+        engine_block_ids = block_ids_by_engine_group[kernel_group.engine_group_id]
+        if len(engine_block_ids) % kernel_group.blocks_per_chunk != 0:
+            raise ValueError(
+                f"engine group {kernel_group.engine_group_id} has "
+                f"{len(engine_block_ids)} "
+                "block IDs, which does not form complete LMCache chunks"
+            )
+        group_num_chunks = len(engine_block_ids) // kernel_group.blocks_per_chunk
+        if num_chunks is None:
+            num_chunks = group_num_chunks
+        elif num_chunks != group_num_chunks:
+            raise ValueError("kernel groups cover different numbers of LMCache chunks")
+        selected_by_kernel_group.append(
+            select_block_ids_for_window(
+                engine_block_ids,
+                kernel_group.blocks_per_chunk,
+                kernel_group.blocks_per_window,
+            )
+        )
+    return selected_by_kernel_group, num_chunks or 0
+
+
+def _gather_multi_group_pickle_payload(
+    kv_caches: dict[str, torch.Tensor],
+    transfer_metadata: KVTransferMetadata,
+    block_ids_by_engine_group: list[list[int]],
+    layout_hints: LayoutHints | None,
+) -> list[list[list[torch.Tensor]]]:
+    """Gather ordered pickle objects for every object and kernel group."""
+    block_ids_by_kernel_group, num_chunks = _multi_group_block_ids(
+        transfer_metadata, block_ids_by_engine_group
+    )
+    gathered_by_kernel_group: list[list[torch.Tensor]] = []
+    for kernel_group in transfer_metadata.kernel_groups:
+        gathered_by_kernel_group.append(
+            gather_paged_kv_to_cpu(
+                _kernel_group_kv_caches(kv_caches, kernel_group.layer_indices),
+                block_ids_by_kernel_group[kernel_group.kernel_group_id],
+                kernel_group.blocks_per_window,
+                layout_hints=layout_hints,
+                engine_kv_format=kernel_group.engine_kv_format,
+            )
+        )
+
+    payload: list[list[list[torch.Tensor]]] = []
+    for object_group in transfer_metadata.object_groups:
+        payload.append(
+            [
+                [
+                    gathered_by_kernel_group[kernel_group_id][chunk_idx]
+                    for kernel_group_id in object_group.kernel_group_ids
+                ]
+                for chunk_idx in range(num_chunks)
+            ]
+        )
+    return payload
+
+
+def _scatter_multi_group_pickle_payload(
+    kv_caches: dict[str, torch.Tensor],
+    transfer_metadata: KVTransferMetadata,
+    block_ids_by_engine_group: list[list[int]],
+    payload: list[list[list[torch.Tensor]]],
+    skip_first_n_tokens: int,
+    layout_hints: LayoutHints | None,
+) -> None:
+    """Scatter deterministic object-group pickle payload back into paged KV."""
+    block_ids_by_kernel_group, num_chunks = _multi_group_block_ids(
+        transfer_metadata, block_ids_by_engine_group
+    )
+    if len(payload) != len(transfer_metadata.object_groups):
+        raise ValueError(
+            "pickle payload object-group count does not match registration"
+        )
+
+    for object_group in transfer_metadata.object_groups:
+        object_group_payload = payload[object_group.object_group_id]
+        skipped_objects = compute_num_objects_to_skip(
+            object_group.sw_size_chunks, num_chunks, is_retrieve=True
+        )
+        expected_chunks = num_chunks - skipped_objects
+        if len(object_group_payload) != expected_chunks:
+            raise ValueError(
+                f"object group {object_group.object_group_id} has "
+                f"{len(object_group_payload)} chunks; expected {expected_chunks}"
+            )
+        for tensor_idx, kernel_group_id in enumerate(object_group.kernel_group_ids):
+            kernel_group = transfer_metadata.kernel_groups[kernel_group_id]
+            chunks = [chunk[tensor_idx] for chunk in object_group_payload]
+            if any(
+                len(chunk) != len(object_group.kernel_group_ids)
+                for chunk in object_group_payload
+            ):
+                raise ValueError(
+                    f"object group {object_group.object_group_id} has malformed "
+                    "kernel-group payload ordering"
+                )
+            group_block_ids = block_ids_by_kernel_group[kernel_group_id]
+            start = skipped_objects * kernel_group.blocks_per_window
+            effective_skip_tokens = max(
+                0,
+                skip_first_n_tokens
+                - skipped_objects * transfer_metadata.tokens_per_chunk,
+            )
+            original_skip_blocks = (
+                effective_skip_tokens // kernel_group.tokens_per_block
+            )
+            window_skip_blocks = recalculate_blocks_to_skip(
+                kernel_group.blocks_per_chunk,
+                kernel_group.blocks_per_window,
+                original_skip_blocks,
+            )
+            scatter_cpu_to_paged_kv(
+                _kernel_group_kv_caches(kv_caches, kernel_group.layer_indices),
+                group_block_ids[start:],
+                chunks,
+                kernel_group.blocks_per_window,
+                skip_first_n_tokens=(
+                    window_skip_blocks * kernel_group.tokens_per_block
+                ),
+                layout_hints=layout_hints,
+                engine_kv_format=kernel_group.engine_kv_format,
+            )
 
 
 def _get_kv_device(kv_caches: dict[str, torch.Tensor]) -> torch.device:
@@ -677,6 +835,7 @@ class EngineDrivenTransferContext(TransferContext):
         self._engine_driven_context: EngineDrivenContext | None = None
         self._layout_hints: LayoutHints | None = None
         self._engine_kv_format: Any = None
+        self._transfer_metadata: KVTransferMetadata | None = None
 
     @property
     def engine_driven_context(self) -> EngineDrivenContext:
@@ -706,10 +865,11 @@ class EngineDrivenTransferContext(TransferContext):
     ) -> None:
         """Register KV caches with the non-GPU context server.
 
-        ``engine_group_infos`` is accepted to satisfy the base interface but
-        is currently a no-op: the non-GPU transfer path does not support
-        hybrid KV cache groups and rejects multi-group transfers at store /
-        retrieve time (see ``_single_group_block_ids``).
+        ``engine_group_infos`` and ``engine_type`` are accepted to satisfy
+        the base interface but are currently a no-op: the non-GPU transfer
+        path does not support hybrid KV cache groups and rejects multi-
+        group transfers at store / retrieve time (see
+        ``_single_group_block_ids``).
         """
         # TODO: per-group compression (EngineGroupInfo.tokens_per_block vs
         # the tensor-detected slot count, e.g. DeepSeek V4) is only handled
@@ -757,10 +917,8 @@ class EngineDrivenTransferContext(TransferContext):
             layout_hints,
         )
 
-        # Keep the established single-object-group protocol until the
-        # multi-object-group transfer path is implemented. The metadata parser
-        # still handles multiple groups, but only that path carries the new
-        # wire fields and reaches the not-yet-supported hybrid transfer code.
+        # Preserve legacy registration for dense layouts. Hybrid layouts carry
+        # their complete immutable metadata to the server.
         if len(object_group_layout_descs) == 1:
             wire_engine_group_infos = []
             wire_obj_shapes = []
@@ -814,6 +972,7 @@ class EngineDrivenTransferContext(TransferContext):
             attn_desc=attn_desc,
             transfer_metadata=transfer_metadata,
         )
+        self._transfer_metadata = transfer_metadata
         self._engine_driven_context = create_engine_driven_context(
             metadata,
             mq_client,
@@ -847,20 +1006,31 @@ class EngineDrivenTransferContext(TransferContext):
         torch_dev.synchronize()
         result = self._engine_driven_context.prepare_store(key, instance_id)
         out_buffers, chunk_indices = result if result is not None else (None, None)
+        transfer_metadata = self._transfer_metadata
         # All chunks already in cache — nothing to gather or commit.
         if chunk_indices is not None and len(chunk_indices) == 0:
             future: MessagingFuture[bool] = MessagingFuture()
             future.set_result(True)
             return future
-        cpu_chunks = gather_paged_kv_to_cpu(
-            kv_caches,
-            _single_group_block_ids(block_ids),
-            blocks_in_chunk,
-            layout_hints=self._layout_hints,
-            engine_kv_format=self._engine_kv_format,
-            out=out_buffers,
-            chunk_indices=chunk_indices,
-        )
+        if transfer_metadata is None:
+            cpu_chunks: list[torch.Tensor] | list[list[list[torch.Tensor]]] = (
+                gather_paged_kv_to_cpu(
+                    kv_caches,
+                    _single_group_block_ids(block_ids),
+                    blocks_in_chunk,
+                    layout_hints=self._layout_hints,
+                    engine_kv_format=self._engine_kv_format,
+                    out=out_buffers,
+                    chunk_indices=chunk_indices,
+                )
+            )
+        else:
+            cpu_chunks = _gather_multi_group_pickle_payload(
+                kv_caches,
+                transfer_metadata,
+                block_ids,
+                self._layout_hints,
+            )
         if out_buffers is not None:
             # SHM path uses async device->CPU copies; complete them before commit.
             torch_dev.synchronize()
@@ -891,15 +1061,32 @@ class EngineDrivenTransferContext(TransferContext):
         ok = src_buffers is not None
         if src_buffers is not None:
             try:
-                scatter_cpu_to_paged_kv(
-                    kv_caches,
-                    _single_group_block_ids(block_ids),
-                    src_buffers,
-                    blocks_in_chunk,
-                    skip_first_n_tokens=skip_first_n_tokens,
-                    layout_hints=self._layout_hints,
-                    engine_kv_format=self._engine_kv_format,
-                )
+                transfer_metadata = self._transfer_metadata
+                if transfer_metadata is None:
+                    scatter_cpu_to_paged_kv(
+                        kv_caches,
+                        _single_group_block_ids(block_ids),
+                        src_buffers,
+                        blocks_in_chunk,
+                        skip_first_n_tokens=skip_first_n_tokens,
+                        layout_hints=self._layout_hints,
+                        engine_kv_format=self._engine_kv_format,
+                    )
+                else:
+                    if not isinstance(src_buffers, list) or (
+                        src_buffers and not isinstance(src_buffers[0], list)
+                    ):
+                        raise ValueError(
+                            "hybrid pickle retrieve returned a legacy flat payload"
+                        )
+                    _scatter_multi_group_pickle_payload(
+                        kv_caches,
+                        transfer_metadata,
+                        block_ids,
+                        src_buffers,
+                        skip_first_n_tokens,
+                        self._layout_hints,
+                    )
             except (RuntimeError, ValueError, TypeError, IndexError):
                 logger.exception("Failed to scatter retrieved CPU context chunks")
                 ok = False
@@ -916,6 +1103,7 @@ class EngineDrivenTransferContext(TransferContext):
         if self._engine_driven_context is not None:
             self._engine_driven_context.close()
             self._engine_driven_context = None
+        self._transfer_metadata = None
 
     def flush_inflight_stores(self) -> None:
         pass

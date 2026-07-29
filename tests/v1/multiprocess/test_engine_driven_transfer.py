@@ -67,7 +67,7 @@ class ServerModuleFactory(Protocol):
         *,
         storage_manager_config: "StorageManagerConfig | None" = None,
         chunk_size: int = 8,
-        object_keys: list[str] | None = None,
+        object_keys: "list[str] | list[list[str]] | None" = None,
         mock_storage: MagicMock | None = None,
         mock_session: MagicMock | None = None,
     ) -> tuple[
@@ -1058,10 +1058,15 @@ def server_module_factory(
         stack.enter_context(
             patch("lmcache.v1.multiprocess.engine_context.get_event_bus")
         )
+        resolved_object_keys = (
+            object_keys
+            if object_keys and isinstance(object_keys[0], list)
+            else [object_keys or ["obj"]]
+        )
         stack.enter_context(
             patch(
                 "lmcache.v1.multiprocess.engine_context.ipc_key_to_object_keys",
-                return_value=[object_keys or ["obj"]],
+                return_value=resolved_object_keys,
             )
         )
 
@@ -3195,3 +3200,212 @@ def test_server_register_rejects_swapped_layer_membership(
     )
     with pytest.raises(ValueError, match="layer_indices"):
         module.register_kv_cache_engine_driven_context(payload)
+
+
+def test_server_pickle_multi_group_store_and_retrieve_round_trip(
+    stub_native_storage_ops: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """Hybrid pickle transfers preserve object, chunk, and kernel-group order."""
+    keys_by_group = [["g0-c0", "g0-c1"], ["g1-c0", "g1-c1"]]
+    stored: dict[str, list[torch.Tensor]] = {}
+    mock_storage = MagicMock()
+
+    def _reserve_write(
+        object_keys: list[str], layout_desc: MemoryLayoutDesc, _mode: str
+    ) -> dict[str, MagicMock]:
+        reserved: dict[str, MagicMock] = {}
+        for object_key in object_keys:
+            targets = [
+                torch.zeros(shape, dtype=dtype)
+                for shape, dtype in zip(
+                    layout_desc.shapes, layout_desc.dtypes, strict=True
+                )
+            ]
+            memory_obj = MagicMock()
+            memory_obj.get_tensor.side_effect = targets.__getitem__
+            reserved[object_key] = memory_obj
+            stored[object_key] = targets
+        return reserved
+
+    @contextmanager
+    def _read_prefetched_results(object_keys: list[str]) -> Iterator[list[MagicMock]]:
+        memory_objs: list[MagicMock] = []
+        for object_key in object_keys:
+            memory_obj = MagicMock()
+            memory_obj.get_tensor.side_effect = stored[object_key].__getitem__
+            memory_objs.append(memory_obj)
+        yield memory_objs
+
+    mock_storage.reserve_write.side_effect = _reserve_write
+    mock_storage.read_prefetched_results.side_effect = _read_prefetched_results
+    mock_session = MagicMock()
+    mock_session.get_hashes.return_value = [b"h0", b"h1"]
+    module, _, _, _ = server_module_factory(
+        chunk_size=8,
+        object_keys=keys_by_group,
+        mock_storage=mock_storage,
+        mock_session=mock_session,
+    )
+    module.register_kv_cache_engine_driven_context(
+        _make_multi_group_payload(instance_id=51, chunk_size=8)
+    )
+
+    shape = torch.Size([2, 2, 8, 16])
+    payload = [
+        [[torch.full(shape, 10.0)], [torch.full(shape, 11.0)]],
+        [[torch.full(shape, 20.0)], [torch.full(shape, 21.0)]],
+    ]
+    key = _default_key(tokens=16)
+    assert module.commit_store(key, 51, pickle.dumps(payload)) is True
+    response = module.prepare_retrieve(key, 51)
+    assert module.commit_retrieve(key, 51) is True
+
+    assert response.success is True
+    recovered = pickle.loads(response.data)
+    assert len(recovered) == 2
+    assert torch.equal(recovered[0][0][0], payload[0][0][0])
+    assert torch.equal(recovered[0][1][0], payload[0][1][0])
+    assert torch.equal(recovered[1][0][0], payload[1][0][0])
+    assert torch.equal(recovered[1][1][0], payload[1][1][0])
+
+
+def test_server_pickle_multi_group_rejects_partial_payload_before_reservation(
+    stub_native_storage_ops: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """Malformed hybrid pickle data must not reserve or commit partial objects."""
+    keys_by_group = [["g0-c0"], ["g1-c0"]]
+    mock_storage = MagicMock()
+    mock_session = MagicMock()
+    mock_session.get_hashes.return_value = [b"h0"]
+    module, _, _, _ = server_module_factory(
+        chunk_size=8,
+        object_keys=keys_by_group,
+        mock_storage=mock_storage,
+        mock_session=mock_session,
+    )
+    module.register_kv_cache_engine_driven_context(
+        _make_multi_group_payload(instance_id=52, chunk_size=8)
+    )
+
+    with pytest.raises(ValueError, match="unexpected object-group count"):
+        module.commit_store(
+            _default_key(),
+            52,
+            pickle.dumps([[[torch.zeros(2, 2, 8, 16)]]]),
+        )
+    mock_storage.reserve_write.assert_not_called()
+
+
+def test_server_rejects_hybrid_registration_with_shm_transport(
+    stub_native_storage_ops: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """Hybrid registration fails before creating SHM transfer state."""
+    module, _, _, ctx = server_module_factory(
+        chunk_size=8,
+        storage_manager_config=_make_storage_manager_config(
+            shm_name="lmcache_test_pool", pool_size=4096
+        ),
+    )
+    with pytest.raises(ValueError, match="not supported with.*SHM"):
+        module.register_kv_cache_engine_driven_context(
+            _make_multi_group_payload(instance_id=53, chunk_size=8)
+        )
+    assert module.tracked_instance_count() == 0
+    assert ctx.layout_desc_registry.find("m", 1) is None
+
+
+def test_server_pickle_multi_group_releases_all_reservations_on_copy_failure(
+    stub_native_storage_ops: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """A failed multi-group write releases every reservation acquired so far."""
+    keys_by_group = [["g0-c0"], ["g1-c0"]]
+    mock_storage = MagicMock()
+    mock_session = MagicMock()
+    mock_session.get_hashes.return_value = [b"h0"]
+
+    def _reserve_write(
+        object_keys: list[str], _layout_desc: MemoryLayoutDesc, _mode: str
+    ) -> dict[str, MagicMock]:
+        memory_obj = MagicMock()
+        memory_obj.get_tensor.return_value = None
+        return {object_key: memory_obj for object_key in object_keys}
+
+    mock_storage.reserve_write.side_effect = _reserve_write
+    module, _, _, ctx = server_module_factory(
+        chunk_size=8,
+        object_keys=keys_by_group,
+        mock_storage=mock_storage,
+        mock_session=mock_session,
+    )
+    module.register_kv_cache_engine_driven_context(
+        _make_multi_group_payload(instance_id=54, chunk_size=8)
+    )
+    payload = [
+        [[torch.zeros(2, 2, 8, 16)]],
+        [[torch.zeros(2, 2, 8, 16)]],
+    ]
+
+    with pytest.raises(ValueError, match="does not match"):
+        module.commit_store(_default_key(), 54, pickle.dumps(payload))
+    mock_storage.finish_write.assert_called_once_with(["g0-c0", "g1-c0"])
+
+
+def test_hybrid_subchunk_retrieve_recalculates_prefix_skip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Subchunk retrieval maps full-chunk prefix skips into window coordinates."""
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+    from lmcache.v1.multiprocess.transfer_plan import (
+        KernelGroupTransferMetadata,
+        KVTransferMetadata,
+        ObjectGroupTransferMetadata,
+    )
+    import lmcache.c_ops as lmc_ops
+
+    captured_skip_tokens: list[int] = []
+
+    def _scatter(*_args: Any, **kwargs: Any) -> None:
+        captured_skip_tokens.append(kwargs["skip_first_n_tokens"])
+
+    monkeypatch.setattr(worker_transfer, "scatter_cpu_to_paged_kv", _scatter)
+    metadata = KVTransferMetadata(
+        num_chunks_in_sw=(-1,),
+        tokens_per_chunk=16,
+        kernel_groups=(
+            KernelGroupTransferMetadata(
+                kernel_group_id=0,
+                engine_group_id=0,
+                layer_indices=(0,),
+                blocks_per_chunk=4,
+                blocks_per_window=2,
+                slots_per_chunk_in_window=8,
+                kv_size=2,
+                num_layers=1,
+                hidden_dim_size=1,
+                slots_per_block=4,
+                tokens_per_block=4,
+                dtype=torch.float32,
+                engine_kv_format=lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+            ),
+        ),
+        object_groups=(
+            ObjectGroupTransferMetadata(
+                object_group_id=0, kernel_group_ids=(0,), sw_size_chunks=-1
+            ),
+        ),
+    )
+
+    worker_transfer._scatter_multi_group_pickle_payload(
+        {"layer_0": torch.zeros(2, 4, 4, 1, 1)},
+        metadata,
+        [[0, 1, 2, 3]],
+        [[[torch.zeros(2, 1, 8, 1)]]],
+        skip_first_n_tokens=8,
+        layout_hints=None,
+    )
+    assert captured_skip_tokens == [0]

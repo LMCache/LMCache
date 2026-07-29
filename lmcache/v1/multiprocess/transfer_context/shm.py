@@ -21,6 +21,7 @@ from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
+    EngineDrivenPayload,
 )
 from lmcache.v1.platform import current_device_spec
 
@@ -185,7 +186,7 @@ class EngineDrivenContextShm(EngineDrivenContext):
         return self._build_slot_tensors(slots), chunk_indices
 
     def commit_store(
-        self, key: IPCCacheServerKey, instance_id: int, _chunks: list[torch.Tensor]
+        self, key: IPCCacheServerKey, instance_id: int, _chunks: EngineDrivenPayload
     ) -> bool:
         future = self.mq_client.submit_request(
             RequestType.COMMIT_STORE,
@@ -199,7 +200,7 @@ class EngineDrivenContextShm(EngineDrivenContext):
 
     def prepare_retrieve(
         self, key: IPCCacheServerKey, instance_id: int
-    ) -> list[torch.Tensor] | None:
+    ) -> EngineDrivenPayload | None:
         future = self.mq_client.submit_request(
             RequestType.PREPARE_RETRIEVE,
             [key, instance_id],
