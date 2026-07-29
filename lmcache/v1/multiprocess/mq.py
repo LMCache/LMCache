@@ -58,9 +58,17 @@ from lmcache.v1.multiprocess.protocols.engine import (
     RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
-    lmcache_mq_pb2,
-    lmcache_mq_pb2_grpc,
+    lmcache_mq_pb2 as _pb2_typed,
 )
+from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
+    lmcache_mq_pb2_grpc as _pb2_grpc_typed,
+)
+
+# Message classes come out of the protobuf descriptor pool at runtime
+# and are invisible to static analysis; rebind through Any so mypy
+# does not chase every attribute lookup.
+lmcache_mq_pb2: Any = _pb2_typed
+lmcache_mq_pb2_grpc: Any = _pb2_grpc_typed
 
 logger = init_logger(__name__)
 

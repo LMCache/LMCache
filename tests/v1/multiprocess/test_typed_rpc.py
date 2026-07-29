@@ -13,7 +13,7 @@ the invariants that:
 """
 
 # Standard
-from typing import Optional
+from typing import Any, Optional
 import socket
 import threading
 
@@ -44,8 +44,12 @@ from lmcache.v1.multiprocess.protocol import (
     get_response_class,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
-    lmcache_mq_pb2,
+    lmcache_mq_pb2 as _pb2_typed,
 )
+
+# See mq.py: message classes are dynamic; rebind through Any so
+# static analysis stops complaining about attribute lookups.
+lmcache_mq_pb2: Any = _pb2_typed
 
 
 def _find_free_port() -> int:

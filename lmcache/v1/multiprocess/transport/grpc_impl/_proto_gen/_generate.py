@@ -3,17 +3,18 @@
 
 The ``.proto`` source lives under ``../proto/`` (checked into git);
 the emitted ``*_pb2.py`` / ``*_pb2_grpc.py`` files land right next to
-this module and are intentionally *not* committed -- ``_proto_gen``'s
-``__init__.py`` runs this generator on first import when they are
-missing.
+this module and are checked into git as well so runtime users do not
+need ``grpcio-tools`` on the install path.
 
 Run as a module so relative paths resolve correctly::
 
     python -m lmcache.v1.multiprocess.transport.grpc_impl._proto_gen._generate
 
-Requires the ``grpcio-tools`` package.  The generated files are then
-patched so their internal import uses the full package path (grpc's
-generator emits a flat ``import lmcache_mq_pb2`` by default).
+Requires the ``grpcio-tools`` package (dev-only).  The generated
+files are then patched so their internal import uses the full
+package path (grpc's generator emits a flat
+``import lmcache_mq_pb2`` by default) and so mypy skips them
+(message classes come out of the descriptor pool at runtime).
 """
 
 # Standard
@@ -34,12 +35,19 @@ FQ_IMPORT = (
     "import lmcache_mq_pb2 as lmcache__mq__pb2"
 )
 SPDX_HEADER = "# SPDX-License-Identifier: Apache-2.0\n"
+MYPY_IGNORE = "# mypy: ignore-errors\n"
 
 
-def _ensure_spdx(path: Path) -> None:
+def _ensure_headers(path: Path) -> None:
+    """Prepend SPDX + mypy markers if they are not already present."""
     text = path.read_text()
+    prefix = ""
     if not text.startswith(SPDX_HEADER):
-        path.write_text(SPDX_HEADER + text)
+        prefix += SPDX_HEADER
+    if MYPY_IGNORE not in text.splitlines()[:5]:
+        prefix += MYPY_IGNORE
+    if prefix:
+        path.write_text(prefix + text)
 
 
 def main() -> int:
@@ -79,9 +87,10 @@ def main() -> int:
         PB2_GRPC.write_text(text)
 
     # Keep the SPDX license header pre-commit expects at the top of
-    # every source file, otherwise regenerating breaks the check.
-    _ensure_spdx(PB2)
-    _ensure_spdx(PB2_GRPC)
+    # every source file, plus a mypy marker so static analysis skips
+    # the dynamically generated message classes.
+    _ensure_headers(PB2)
+    _ensure_headers(PB2_GRPC)
 
     # Health-check the freshly generated stubs in a subprocess so we do
     # not pollute the caller's sys.modules and can cleanly detect the
