@@ -140,7 +140,7 @@ def _make_url_factories() -> dict[str, Callable[[], str]]:
     # Note: the ipc:// factory returns a fresh unique path every time it is
     # invoked so successive runs of the same bench do not collide.
     return {
-        "ipc": lambda: "ipc://" + tempfile.mktemp(prefix="mq-bench-"),
+        "ipc": lambda: "ipc://" + tempfile.mkdtemp(prefix="mq-bench-") + "/sock",
         "tcp": lambda: "tcp://127.0.0.1:" + str(_pick_free_port()),
         "grpc": lambda: "grpc://127.0.0.1:" + str(_pick_free_port()),
         "grpc-gzip": (
