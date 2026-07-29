@@ -28,8 +28,6 @@ from lmcache.v1.mp_observability.config import DEFAULT_OBSERVABILITY_CONFIG
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.server import run_cache_server
 
-pytestmark = pytest.mark.cuda
-
 if not torch_dev.is_available():
     pytest.skip(
         f"requires available {torch_device_type} runtime",
