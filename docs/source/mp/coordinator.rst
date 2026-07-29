@@ -176,6 +176,16 @@ The coordinator's HTTP surface (base URL ``http://localhost:9300``) groups into:
 - **CacheBlend fingerprint directory** -- the ``/blend`` group: the fleet-wide
   fingerprint index blend-enabled MP servers publish to on STORE and query on
   LOOKUP. Server-to-coordinator only; not usually called by hand.
+- **Key directory** -- the ``/directory`` group: a fleet-wide, eventually
+  consistent directory of key placements built from cache events emitted by
+  MP servers (``POST /directory/events``). Consumers resolve placements by
+  key (``POST /directory/lookup``) or by token sequence
+  (``POST /directory/lookup_tokens``); ``GET /directory/stats`` exposes
+  key/placement counts and per-instance stream state. Every lookup returns a
+  hint that must be validate-on-use at the owning MP server; never on the
+  serving hot path. See the design doc at
+  ``docs/design/v1/mp_coordinator/key_directory.md`` for event-application
+  semantics (incarnation fencing, seq dedup, gap detection).
 
 Each endpoint is documented below. Success is ``200`` unless noted, and
 ``{cache_salt}`` uses the ``_default`` sentinel for the empty salt. The wire
