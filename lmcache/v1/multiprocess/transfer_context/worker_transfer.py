@@ -42,7 +42,7 @@ from lmcache.v1.multiprocess.transfer_context.base import (
 )
 from lmcache.v1.multiprocess.transfer_plan import (
     KVTransferMetadata,
-    build_object_group_layout_desc,
+    build_engine_driven_object_group_layout_desc,
     compute_num_objects_to_skip,
     export_kv_transfer_metadata,
     recalculate_blocks_to_skip,
@@ -258,7 +258,9 @@ def _build_multi_group_wire_fields(
 
     num_object_groups = len(transfer_metadata.object_groups)
     object_group_layout_descs: list[MemoryLayoutDesc] = [
-        build_object_group_layout_desc(transfer_metadata, tokens_per_chunk, og_id)
+        build_engine_driven_object_group_layout_desc(
+            transfer_metadata, tokens_per_chunk, og_id
+        )
         for og_id in range(num_object_groups)
     ]
     wire_shapes: list[list[list[int]]] = [

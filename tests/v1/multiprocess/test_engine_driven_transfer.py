@@ -2743,7 +2743,7 @@ def test_build_multi_group_wire_fields_returns_transfer_metadata(
     )
     monkeypatch.setattr(
         worker_transfer,
-        "build_object_group_layout_desc",
+        "build_engine_driven_object_group_layout_desc",
         lambda *_a, **_kw: fake_layout,
     )
 
@@ -2804,7 +2804,7 @@ def test_build_multi_group_wire_fields_calls_engine_group_layer_indices(
     )
     monkeypatch.setattr(
         worker_transfer,
-        "build_object_group_layout_desc",
+        "build_engine_driven_object_group_layout_desc",
         lambda *_a, **_kw: fake_layout,
     )
 

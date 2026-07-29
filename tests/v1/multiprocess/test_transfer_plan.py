@@ -12,6 +12,7 @@ import torch
 from lmcache.v1.distributed.api import AttnWindowDesc
 from lmcache.v1.multiprocess.transfer_plan import (
     batched_iteration_with_skip,
+    build_engine_driven_object_group_layout_desc,
     build_kernel_group_layout,
     build_object_group_layout_desc,
     compute_num_objects_to_skip,
@@ -315,6 +316,29 @@ def test_build_object_group_layout_desc_preserves_kernel_group_order() -> None:
 
     assert layout_desc.shapes == [
         torch.Size([1, 1, 4, 128]),
+        torch.Size([2, 2, 8, 64]),
+    ]
+    assert layout_desc.dtypes == [torch.bfloat16, torch.float16]
+
+
+def test_engine_driven_layout_omits_single_plane_axis() -> None:
+    """Engine-driven layout matches the serialized single-plane payload shape."""
+    # Standard
+    from typing import cast
+
+    # First Party
+    from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+
+    metadata = export_kv_transfer_metadata(
+        cast(KVLayerGroupsManager, _fake_manager()),
+        tokens_per_chunk=16,
+    )
+    layout_desc = build_engine_driven_object_group_layout_desc(
+        metadata, num_tokens=16, object_group_id=0
+    )
+
+    assert layout_desc.shapes == [
+        torch.Size([1, 4, 128]),
         torch.Size([2, 2, 8, 64]),
     ]
     assert layout_desc.dtypes == [torch.bfloat16, torch.float16]

@@ -302,6 +302,41 @@ def build_object_group_layout_desc(
     return MemoryLayoutDesc(shapes=list(shapes), dtypes=list(dtypes))
 
 
+def build_engine_driven_object_group_layout_desc(
+    transfer_metadata: KVTransferMetadata,
+    num_tokens: int,
+    object_group_id: int,
+) -> MemoryLayoutDesc:
+    """Build an Engine-driven pickle/SHM payload layout for one object group.
+
+    Engine-driven transfer serializes single-plane (MLA or fused K/V) chunks
+    without a leading singleton KV-plane dimension, unlike the native
+    LMCache-driven buffer layout.
+
+    Args:
+        transfer_metadata: Immutable transfer metadata snapshot.
+        num_tokens: Number of logical tokens.
+        object_group_id: Object group index.
+
+    Returns:
+        A MemoryLayoutDesc matching the tensors returned by
+        ``gather_paged_kv_to_cpu`` for this object group.
+    """
+    native_layout = build_object_group_layout_desc(
+        transfer_metadata, num_tokens, object_group_id
+    )
+    object_group = transfer_metadata.object_groups[object_group_id]
+    shapes = [
+        shape[1:]
+        if transfer_metadata.kernel_groups[kernel_group_id].kv_size == 1
+        else shape
+        for shape, kernel_group_id in zip(
+            native_layout.shapes, object_group.kernel_group_ids, strict=True
+        )
+    ]
+    return MemoryLayoutDesc(shapes=shapes, dtypes=native_layout.dtypes)
+
+
 def has_sufficient_block_ids(
     block_ids: Sequence[Sequence[int]],
     blocks_per_chunk: Sequence[int],

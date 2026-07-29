@@ -41,7 +41,7 @@ from lmcache.v1.multiprocess.transfer_plan import (
     KernelGroupTransferMetadata,
     KVTransferMetadata,
     ObjectGroupTransferMetadata,
-    build_object_group_layout_desc,
+    build_engine_driven_object_group_layout_desc,
 )
 
 # Local
@@ -237,7 +237,7 @@ def _validate_transfer_metadata_consistency(
     6. ``engine_group_infos`` and kernel groups describe the same engine groups
        and layer ordering.  Multiple kernel groups may represent one engine
        group when that engine group is split by transfer identity.
-    7. Layouts rebuilt from ``build_object_group_layout_desc`` match
+    7. Layouts rebuilt from ``build_engine_driven_object_group_layout_desc`` match
        ``object_group_layout_descs`` element-by-element.
 
     Args:
@@ -349,7 +349,7 @@ def _validate_transfer_metadata_consistency(
                 f"entries but transfer_metadata has {num_object_groups} object groups"
             )
         for og_id, payload_desc in enumerate(object_group_layout_descs):
-            rebuilt = build_object_group_layout_desc(
+            rebuilt = build_engine_driven_object_group_layout_desc(
                 transfer_metadata, chunk_size, og_id
             )
             shapes_match = rebuilt.shapes == payload_desc.shapes
