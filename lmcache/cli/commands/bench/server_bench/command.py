@@ -580,6 +580,15 @@ def run_server_bench(
         # Explicit --use-mla wins; otherwise infer MLA from the shape
         # spec (kv_size == 1 marks an MLA single-plane group).
         use_mla = bool(getattr(args, "use_mla", False)) or kv_size_disp == 1
+        # Fail fast when --use-mla is set but the shape spec still
+        # declares a two-plane KV group: allocation would build rank-5
+        # classical tensors while the server expects the MLA single-
+        # plane layout, and the mismatch only surfaces mid-run.
+        if use_mla and kv_size_disp not in (1, "mixed"):
+            raise ValueError(
+                "--use-mla requires --kvcache-shape-spec with kv_size=1 "
+                "(single-plane MLA group), got kv_size=%s" % kv_size_disp
+            )
         # ``ParallelStrategy.kv_world_size`` folds all TP ranks into a
         # single kv_worker under MLA; non-MLA keeps one kv_worker per
         # rank. Bench mirrors that so ``IPCCacheServerKey.worker_id``
