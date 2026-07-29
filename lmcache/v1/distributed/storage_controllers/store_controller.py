@@ -45,6 +45,9 @@ logger = init_logger(__name__)
 # Poll timeout in milliseconds for the store loop
 STORE_LOOP_POLL_TIMEOUT_MS = 500
 
+# Bounded retries for reserve_read when keys are briefly unreadable.
+RESERVE_READ_MAX_RETRIES = 3
+
 
 def _group_keys_by_shape(
     keys: list[ObjectKey],
@@ -261,7 +264,6 @@ class StoreController(StorageControllerInterface):
 
         # Shadow counter for status reporting (updated in background loop)
         self._status_in_flight_count: int = 0
-
         StoreController._gauge_target = self
         if not StoreController._gauge_registered:
             StoreController._gauge_registered = True
@@ -596,32 +598,50 @@ class StoreController(StorageControllerInterface):
                 )
                 continue
 
-            # Reserve read to get MemoryObj references and hold read locks
-            read_results = l1_mgr.reserve_read(target_keys)
-
             successful_keys = []
             successful_objs = []
             not_found_keys: list[ObjectKey] = []
             write_locked_keys: list[ObjectKey] = []
-            for key in target_keys:
-                result = read_results.get(key)
-                if result is None:
-                    continue
-                err, obj = result
-                if err != L1Error.SUCCESS or obj is None:
+            pending_keys = list(target_keys)
+            for attempt in range(RESERVE_READ_MAX_RETRIES + 1):
+                if not pending_keys:
+                    break
+
+                # Reserve read to get MemoryObj references and hold read locks.
+                read_results = l1_mgr.reserve_read(pending_keys)
+
+                retry_candidates: list[ObjectKey] = []
+                for key in pending_keys:
+                    result = read_results.get(key)
+                    if result is None:
+                        continue
+                    err, obj = result
+                    if err == L1Error.SUCCESS and obj is not None:
+                        successful_keys.append(key)
+                        successful_objs.append(obj)
+                        continue
+
                     if err == L1Error.KEY_NOT_EXIST:
                         not_found_keys.append(key)
                     elif err == L1Error.KEY_NOT_READABLE:
-                        write_locked_keys.append(key)
+                        retry_candidates.append(key)
+
                     logger.debug(
                         "Skipping key %s for L2 store (adapter %d): %s",
                         key,
                         adapter_index,
                         err,
                     )
+
+                if not retry_candidates:
+                    break
+
+                if attempt < RESERVE_READ_MAX_RETRIES:
+                    pending_keys = retry_candidates
                     continue
-                successful_keys.append(key)
-                successful_objs.append(obj)
+
+                write_locked_keys.extend(retry_candidates)
+                break
 
             # L1 read-failure anomaly reporting: target_keys come from an
             # L1_WRITE_FINISHED notification, so failing to reserve_read them
