@@ -156,15 +156,15 @@ warn_return_any = false
 follow_imports = "silent"
 
 # Auto-generated protobuf / gRPC modules: message classes come out of
-# the descriptor pool at runtime, invisible to static analysis. Tell
-# mypy to treat every attribute access as Any.
+# the descriptor pool at runtime, invisible to static analysis. mypy
+# should treat every attribute access as Any. Callers should also
+# rebind through Any at import site (see mq.py) as a safety net.
 [[tool.mypy.overrides]]
 module = [
     "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.lmcache_mq_pb2",
     "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.lmcache_mq_pb2_grpc",
 ]
 ignore_errors = true
-ignore_missing_imports = true
 follow_imports = "skip"
 
 [tool.codespell]
