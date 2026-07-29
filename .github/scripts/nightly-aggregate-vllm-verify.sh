@@ -68,6 +68,12 @@ if [ "$passed" -eq "$total" ]; then
         [ -n "$VLLM_VER" ] && break
     done
 
+    if [ "${DRY_RUN:-0}" = "1" ]; then
+        printf '::notice::[DRY-RUN] Would pin vLLM %s as tested\n' \
+            "${VLLM_VER}"
+        exit 0
+    fi
+
     export CI_PLATFORM=github_actions
     export PIN_VLLM_STATUS=tested
     export VLLM_VERSION="${VLLM_VER}"
@@ -90,14 +96,6 @@ fi
 # ── Some platforms failed: record + issue ───────────────────────────
 echo "Some platforms FAILED — recording failure rows."
 
-for os in $failed_oss; do
-    export CI_PLATFORM=github_actions
-    export PIN_VLLM_STATUS=failed
-    export OS_PLATFORM="$os"
-    export PIN_VLLM_REASON="${OS_REASON[$os]}"
-    bash "${PIN_SCRIPT}"
-done
-
 BODY="One or more CPU platforms failed the nightly vLLM verification"
 BODY="$BODY on **$NOW**.\n\n"
 BODY="$BODY**Run:** $GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
@@ -118,6 +116,20 @@ done
 BODY="$BODY\n---\n"
 BODY="$BODY*This issue was auto-created by the nightly vLLM CPU"
 BODY="$BODY verification workflow.*"
+
+if [ "${DRY_RUN:-0}" = "1" ]; then
+    echo "::notice::[DRY-RUN] Would record failures and create issue:"
+    printf '%b\n' "$BODY"
+    exit 0
+fi
+
+for os in $failed_oss; do
+    export CI_PLATFORM=github_actions
+    export PIN_VLLM_STATUS=failed
+    export OS_PLATFORM="$os"
+    export PIN_VLLM_REASON="${OS_REASON[$os]}"
+    bash "${PIN_SCRIPT}"
+done
 
 ISSUE_TITLE="Nightly CPU vLLM verify FAILED — $NOW"
 EXISTING="$(gh issue list --repo "$GITHUB_REPOSITORY" \
