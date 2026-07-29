@@ -73,7 +73,7 @@ def _query_lookup_hits_handler(request_id: str) -> int | None:
 
 def test_mq_query_prefetch_lookup_hits():
     """Test MessageQueue with QUERY_PREFETCH_LOOKUP_HITS request type."""
-    helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5575")
+    helper = MessageQueueTestHelper(server_url="grpc://127.0.0.1:5575")
     helper.register_handler(
         RequestType.QUERY_PREFETCH_LOOKUP_HITS, _query_lookup_hits_handler
     )
@@ -94,7 +94,7 @@ def _query_lookup_hits_none_handler(request_id: str) -> int | None:
 
 def test_mq_query_prefetch_lookup_hits_none_response():
     """Test MessageQueue returns None when lookup is still in progress."""
-    helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5576")
+    helper = MessageQueueTestHelper(server_url="grpc://127.0.0.1:5576")
     helper.register_handler(
         RequestType.QUERY_PREFETCH_LOOKUP_HITS, _query_lookup_hits_none_handler
     )

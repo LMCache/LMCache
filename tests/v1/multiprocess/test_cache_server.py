@@ -35,7 +35,7 @@ from lmcache.v1.multiprocess.server import run_cache_server
 # Configuration constants
 SERVER_HOST = "localhost"
 SERVER_PORT = 5599
-SERVER_URL = f"tcp://{SERVER_HOST}:{SERVER_PORT}"
+SERVER_URL = f"grpc://{SERVER_HOST}:{SERVER_PORT}"
 CHUNK_SIZE = 256
 CPU_BUFFER_SIZE = 5.0
 DEFAULT_TIMEOUT = 20.0

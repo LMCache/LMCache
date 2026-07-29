@@ -70,7 +70,7 @@ def test_mq_free_locks():
     """
     key = create_cache_key(0)
 
-    helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5570")
+    helper = MessageQueueTestHelper(server_url="grpc://127.0.0.1:5570")
     helper.register_handler(
         RequestType.FREE_LOOKUP_LOCKS, test_mq_handler_helpers.free_locks_handler
     )
