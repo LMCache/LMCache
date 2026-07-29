@@ -439,9 +439,9 @@ class QRingBufferCapture:
             block_tensor = torch.tensor(
                 gpu_blocks, dtype=torch.int64, device=query.device
             )
-            op_slots = (
-                block_tensor[:, None] * block_size + offsets[None, :]
-            ).reshape(-1)
+            op_slots = (block_tensor[:, None] * block_size + offsets[None, :]).reshape(
+                -1
+            )
 
             # Match rows to op tokens through the KV slot each row writes.
             # Each GPU slot is written by at most one row per step, so a full
