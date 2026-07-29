@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 import enum
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import L1Backend, ObjectKey
 
 
 @dataclass(frozen=True)
@@ -21,6 +21,19 @@ class L1MemoryDesc:
     ptr: int
     size: int
     align_bytes: int
+
+
+@dataclass(frozen=True)
+class L1ObjectMeta:
+    """Per-object metadata reported alongside keys in L1 listener callbacks.
+
+    Attributes:
+        size_bytes: Logical byte size of the object.
+        backend: The storage medium backing the object.
+    """
+
+    size_bytes: int
+    backend: L1Backend
 
 
 class EventListener(ABC):  # noqa: B024
@@ -64,17 +77,23 @@ class L1ManagerListener(EventListener):
         pass
 
     @abstractmethod
-    def on_l1_keys_write_finished(self, keys: list[ObjectKey]):
+    def on_l1_keys_write_finished(
+        self, keys: list[ObjectKey], metadata: list[L1ObjectMeta]
+    ):
         """
         Notify the listener that keys have been finished for writing on L1.
 
         Args:
             keys (list[ObjectKey]): The keys that have been successfully written
+            metadata (list[L1ObjectMeta]): Size and backing medium of each
+                written object, parallel to ``keys``
         """
         pass
 
     @abstractmethod
-    def on_l1_keys_finish_write_and_reserve_read(self, keys: list[ObjectKey]):
+    def on_l1_keys_finish_write_and_reserve_read(
+        self, keys: list[ObjectKey], metadata: list[L1ObjectMeta]
+    ):
         """
         Notify the listener that keys have been finished for writing
         and reserved for read on L1.
@@ -84,18 +103,25 @@ class L1ManagerListener(EventListener):
         Args:
             keys (list[ObjectKey]): The keys that have been successfully
                 finished for writing and reserved for read
+            metadata (list[L1ObjectMeta]): Size and backing medium of each
+                written object, parallel to ``keys``
         """
         # NOTE (ApostaC): may consider renaming this to `on_l1_keys_finish_prefetch`
         # for better clarity
         pass
 
     @abstractmethod
-    def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]):
+    def on_l1_keys_deleted_by_manager(
+        self, keys: list[ObjectKey], metadata: list[L1ObjectMeta]
+    ):
         """
         Notify the listener that keys have been deleted from L1.
 
         Args:
             keys (list[ObjectKey]): The keys that have been deleted
+            metadata (list[L1ObjectMeta]): Size and backing medium of each
+                deleted object, parallel to ``keys`` (so a placement delete
+                targets the same identity its store reported)
         """
         pass
 

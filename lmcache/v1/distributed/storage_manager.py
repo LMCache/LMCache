@@ -23,7 +23,11 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.config import EvictionConfig, StorageManagerConfig
 from lmcache.v1.distributed.error import L1Error, strerror
-from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2AdapterListener
+from lmcache.v1.distributed.internal_api import (
+    L1ManagerListener,
+    L1MemoryDesc,
+    L2AdapterListener,
+)
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
@@ -995,6 +999,14 @@ class StorageManager:
             "l2_adapters": adapters,
             "num_l2_adapters": len(adapters),
         }
+
+    def register_l1_listener(self, listener: L1ManagerListener) -> None:
+        """Register a listener for L1 manager events.
+
+        Args:
+            listener: The listener to register.
+        """
+        self._l1_manager.register_listener(listener)
 
     def register_l2_listener(self, listener: L2AdapterListener) -> None:
         """Register a listener on all current and future L2 adapters.

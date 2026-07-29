@@ -14,7 +14,7 @@ from lmcache.native_storage_ops import TTLLock
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.internal_api import L1ManagerListener
+from lmcache.v1.distributed.internal_api import L1ManagerListener, L1ObjectMeta
 from lmcache.v1.distributed.memory_manager import (
     GDSL1MemoryManager,
     L1ManagerProtocol,
@@ -414,11 +414,12 @@ class L1Manager:
             ret[key] = L1Error.SUCCESS
             successful_keys.append(key)
 
+        freed_meta = [self._object_meta(obj) for obj in need_to_free]
         self._memory_manager.free(need_to_free)
 
         for listener in self._registered_listeners:
             listener.on_l1_keys_read_finished(successful_keys)
-            listener.on_l1_keys_deleted_by_manager(need_to_free_keys)
+            listener.on_l1_keys_deleted_by_manager(need_to_free_keys, freed_meta)
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_READ_FINISHED,
@@ -551,6 +552,7 @@ class L1Manager:
         """
         ret: dict[ObjectKey, L1Error] = {}
         successful_keys: list[ObjectKey] = []
+        successful_keys_meta: list[L1ObjectMeta] = []
 
         for key in keys:
             entry = self._objects.get(key, None)
@@ -579,9 +581,10 @@ class L1Manager:
             entry.write_lock.unlock()
             ret[key] = L1Error.SUCCESS
             successful_keys.append(key)
+            successful_keys_meta.append(self._object_meta(entry.memory_obj))
 
         for listener in self._registered_listeners:
-            listener.on_l1_keys_write_finished(successful_keys)
+            listener.on_l1_keys_write_finished(successful_keys, successful_keys_meta)
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_WRITE_FINISHED,
@@ -623,6 +626,7 @@ class L1Manager:
         total = 1 + extra_count
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
+        successful_keys_meta: list[L1ObjectMeta] = []
 
         for key in keys:
             entry = self._objects.get(key, None)
@@ -652,9 +656,12 @@ class L1Manager:
                 entry.read_lock.lock()
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
             successful_keys.append(key)
+            successful_keys_meta.append(self._object_meta(entry.memory_obj))
 
         for listener in self._registered_listeners:
-            listener.on_l1_keys_finish_write_and_reserve_read(successful_keys)
+            listener.on_l1_keys_finish_write_and_reserve_read(
+                successful_keys, successful_keys_meta
+            )
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_WRITE_FINISHED_AND_READ_RESERVED,
@@ -705,10 +712,11 @@ class L1Manager:
             ret[key] = L1Error.SUCCESS
             successful_keys.append(key)
 
+        freed_meta = [self._object_meta(obj) for obj in need_to_free]
         self._memory_manager.free(need_to_free)
 
         for listener in self._registered_listeners:
-            listener.on_l1_keys_deleted_by_manager(successful_keys)
+            listener.on_l1_keys_deleted_by_manager(successful_keys, freed_meta)
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_KEYS_EVICTED,
@@ -745,10 +753,11 @@ class L1Manager:
             )
             all_keys = list(self._objects.keys())
             all_memory_objs = [entry.memory_obj for entry in self._objects.values()]
+            all_meta = [self._object_meta(obj) for obj in all_memory_objs]
             self._memory_manager.free(all_memory_objs)
             self._objects.clear()
             for listener in self._registered_listeners:
-                listener.on_l1_keys_deleted_by_manager(all_keys)
+                listener.on_l1_keys_deleted_by_manager(all_keys, all_meta)
             self._event_bus.publish(
                 Event(
                     event_type=EventType.L1_KEYS_EVICTED,
@@ -775,11 +784,12 @@ class L1Manager:
         for key in keys_to_clear:
             del self._objects[key]
 
+        cleared_meta = [self._object_meta(obj) for obj in objs_to_free]
         self._memory_manager.free(objs_to_free)
 
         if keys_to_clear:
             for listener in self._registered_listeners:
-                listener.on_l1_keys_deleted_by_manager(keys_to_clear)
+                listener.on_l1_keys_deleted_by_manager(keys_to_clear, cleared_meta)
             self._event_bus.publish(
                 Event(
                     event_type=EventType.L1_KEYS_EVICTED,
@@ -900,3 +910,10 @@ class L1Manager:
             num_read_locked,
         )
         return mem_check_result
+
+    def _object_meta(self, memory_obj: MemoryObj) -> L1ObjectMeta:
+        """Build the listener-facing metadata for one resident object."""
+        return L1ObjectMeta(
+            size_bytes=memory_obj.get_size(),
+            backend=self._memory_manager.get_backend(memory_obj),
+        )

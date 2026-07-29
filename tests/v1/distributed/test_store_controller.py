@@ -18,11 +18,12 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import L1Backend, MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.eviction_policy.noop import (
     NoOpEvictionPolicy,
 )
+from lmcache.v1.distributed.internal_api import L1ObjectMeta
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
@@ -48,6 +49,9 @@ pytestmark = pytest.mark.skipif(
 # =============================================================================
 # Helpers
 # =============================================================================
+
+
+_META = L1ObjectMeta(size_bytes=64, backend=L1Backend.DRAM)
 
 
 def make_object_key(chunk_id: int) -> ObjectKey:
@@ -181,7 +185,7 @@ class TestStoreListener:
         listener = StoreListener()
         keys = [make_object_key(i) for i in range(3)]
 
-        listener.on_l1_keys_write_finished(keys)
+        listener.on_l1_keys_write_finished(keys, [_META] * len(keys))
         popped = listener.pop_pending_keys()
 
         assert popped == keys
@@ -190,7 +194,7 @@ class TestStoreListener:
     def test_pop_pending_keys_clears_queue(self):
         """pop_pending_keys should drain the queue."""
         listener = StoreListener()
-        listener.on_l1_keys_write_finished([make_object_key(0)])
+        listener.on_l1_keys_write_finished([make_object_key(0)], [_META])
         listener.pop_pending_keys()
 
         assert listener.pop_pending_keys() == []
@@ -203,7 +207,7 @@ class TestStoreListener:
         poller = select.poll()
         poller.register(efd, select.POLLIN)
 
-        listener.on_l1_keys_write_finished([make_object_key(0)])
+        listener.on_l1_keys_write_finished([make_object_key(0)], [_META])
 
         events = poller.poll(1000)
         assert len(events) > 0
@@ -212,8 +216,10 @@ class TestStoreListener:
     def test_multiple_writes_accumulate(self):
         """Multiple on_l1_keys_write_finished calls should accumulate keys."""
         listener = StoreListener()
-        listener.on_l1_keys_write_finished([make_object_key(0)])
-        listener.on_l1_keys_write_finished([make_object_key(1), make_object_key(2)])
+        listener.on_l1_keys_write_finished([make_object_key(0)], [_META])
+        listener.on_l1_keys_write_finished(
+            [make_object_key(1), make_object_key(2)], [_META, _META]
+        )
 
         popped = listener.pop_pending_keys()
         assert len(popped) == 3
@@ -224,7 +230,7 @@ class TestStoreListener:
         listener = StoreListener()
         keys = [make_object_key(i) for i in range(3)]
 
-        listener.on_l1_keys_finish_write_and_reserve_read(keys)
+        listener.on_l1_keys_finish_write_and_reserve_read(keys, [_META] * len(keys))
 
         assert listener.pop_pending_keys() == []
         assert listener.pending_count() == 0
@@ -343,13 +349,15 @@ class TestStoreControllerSingleAdapter:
 
         # Verify read lock is released: the key should be updatable
         ok = wait_for_condition(
-            lambda: l1_manager.reserve_write(
-                keys=keys,
-                is_temporary=[False],
-                layout_desc=layout,
-                mode="update",
-            )[keys[0]][1]
-            is not None,
+            lambda: (
+                l1_manager.reserve_write(
+                    keys=keys,
+                    is_temporary=[False],
+                    layout_desc=layout,
+                    mode="update",
+                )[keys[0]][1]
+                is not None
+            ),
             timeout=5.0,
         )
         assert ok, "Key should be updatable after store controller releases read lock"
@@ -467,13 +475,15 @@ class TestStoreControllerMultipleAdapters:
         assert ok
 
         ok = wait_for_condition(
-            lambda: l1_manager.reserve_write(
-                keys=keys,
-                is_temporary=[False],
-                layout_desc=layout,
-                mode="update",
-            )[keys[0]][1]
-            is not None,
+            lambda: (
+                l1_manager.reserve_write(
+                    keys=keys,
+                    is_temporary=[False],
+                    layout_desc=layout,
+                    mode="update",
+                )[keys[0]][1]
+                is not None
+            ),
             timeout=5.0,
         )
         assert ok, "Key should be updatable after all adapter stores complete"
@@ -587,13 +597,15 @@ class TestStoreControllerCustomPolicy:
 
         # After deletion, reserve_write with mode="new" should succeed
         ok = wait_for_condition(
-            lambda: l1_manager.reserve_write(
-                keys=keys,
-                is_temporary=[False],
-                layout_desc=layout,
-                mode="new",
-            )[keys[0]][1]
-            is not None,
+            lambda: (
+                l1_manager.reserve_write(
+                    keys=keys,
+                    is_temporary=[False],
+                    layout_desc=layout,
+                    mode="new",
+                )[keys[0]][1]
+                is not None
+            ),
             timeout=5.0,
         )
         assert ok, "Key should be re-creatable after L1 deletion by policy"

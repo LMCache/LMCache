@@ -15,8 +15,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 # First Party
-from lmcache.v1.distributed.api import EncodedObjectKey
-from lmcache.v1.distributed.tiers import Tier
+from lmcache.v1.distributed.api import EncodedObjectKey, Tier
 
 
 class CacheEventType(str, Enum):

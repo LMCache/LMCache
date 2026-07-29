@@ -24,6 +24,32 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+class Tier(str, enum.Enum):
+    """A cache tier.
+
+    Subclasses ``str`` so it validates from / compares equal to the bare wire
+    value (``Tier.L2 == "l2"``) and serializes as that value. ``ALL`` is only
+    valid for operations that explicitly support multiple tiers.
+    """
+
+    L1 = "l1"
+    L2 = "l2"
+    ALL = "all"
+
+
+class L1Backend(str, enum.Enum):
+    """The storage medium backing the L1 tier (a closed set, unlike L2
+    backends, which are an open adapter-type registry).
+
+    Subclasses ``str`` so it compares equal to and serializes as the bare
+    wire value (``L1Backend.DRAM == "dram"``).
+    """
+
+    DRAM = "dram"
+    DEVDAX = "devdax"
+    GDS = "gds"
+
+
 class TrimPolicy(enum.Enum):
     """How to pick the retained subset of found keys for a prefetch.
 

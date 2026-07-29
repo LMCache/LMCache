@@ -96,12 +96,12 @@ itself produces (`Placement`, `ApplyResult`, stats) and its private
 records.
 - **`schemas.py`** — HTTP models only. 
 
-## Deliberately out of scope (follow-ups)
+MP-server emission of the `CacheEvent` stream (L1 + L2, `incarnation` =
+server start time) is implemented — see
+[cache_events.md](cache_events.md). Re-basing the legacy
+`/quota/events` stream on the same emitter is still open.
 
-- **MP-server emission** of the generalized `CacheEvent` stream (extending
-today's `L2EventListener`, which still feeds `/quota/events` with the
-legacy schema) — including where `incarnation` comes from (server start
-time) and L1 store/evict hooks.
+## Deliberately out of scope (follow-ups)
 - **Resync integration**: acting on `gap_detected` (digest/resync
 backstop, `UNCONFIRMED` placement decay) — extends today's
 `L2ResyncManager` pattern to L1.

@@ -157,7 +157,7 @@ The StoreController's background thread polls on:
 L1 finish_write()
   │
   ▼ (L1Manager listener callback, inside L1 lock — must be non-blocking)
-StoreListener.on_l1_keys_write_finished(keys)
+StoreListener.on_l1_keys_write_finished(keys, metadata)
   │  appends keys + signals eventfd
   ▼
 _store_loop: poll wakes up
