@@ -44,6 +44,8 @@ class ManagementModule:
             0 disables reaping (no thread is started).
         worker_registration_grace_seconds: Silence budget for a worker that
             registered but never pinged.
+        experimental_transfer: Types of experimental intermediate tensor
+            transfer built in the server.
     """
 
     def __init__(
@@ -52,12 +54,14 @@ class ManagementModule:
         liveness_targets: Sequence[InstanceLivenessTarget] = (),
         worker_reap_timeout_seconds: float = 0.0,
         worker_registration_grace_seconds: float = 0.0,
+        experimental_transfer: Sequence[str] = (),
     ) -> None:
         self._ctx = ctx
         self._clear_lock = threading.Lock()
         self._liveness_targets = tuple(liveness_targets)
         self._reap_timeout = worker_reap_timeout_seconds
         self._reap_grace = worker_registration_grace_seconds
+        self._experimental_transfer = tuple(experimental_transfer)
 
         # Periodic reaper, started only when reaping is enabled and there is
         # something to scan. Scans every reap_timeout/4, so an instance is
@@ -90,6 +94,11 @@ class ManagementModule:
             HandlerSpec(
                 RequestType.GET_CHUNK_SIZE,
                 self.get_chunk_size,
+                ThreadPoolType.SYNC,
+            ),
+            HandlerSpec(
+                RequestType.GET_EXPERIMENTAL,
+                self.get_experimental,
                 ThreadPoolType.SYNC,
             ),
             HandlerSpec(RequestType.PING, self.ping, ThreadPoolType.NORMAL),
@@ -167,6 +176,16 @@ class ManagementModule:
             The chunk size.
         """
         return self._ctx.chunk_size
+
+    def get_experimental(self) -> list[str]:
+        """Return the experimental intermediate tensor transfer built in the
+        server.
+
+        Returns:
+            The enabled experimental intermediate tensor transfer types.
+            See ``lmcache.v1.multiprocess.modules.experimental.__init__``.
+        """
+        return list(self._experimental_transfer)
 
     def clear(self) -> None:
         """Clear all stored KV cache data from the storage manager."""

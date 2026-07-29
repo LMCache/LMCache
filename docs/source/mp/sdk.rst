@@ -5,8 +5,8 @@ The LMCache **SDK** lets you retrieve a request's KV cache from a LMCache
 server, transform it on the CPU, and store it back. This can be used for KV
 cache transformations, such as token dropping. In the example: we prefill a
 batch of long prompts, drop half of each request's KV chunks, and show the
-decode-throughput gain. The full runnable notebook lives at
-`examples/token_dropping/token_dropping.ipynb
+decode-throughput gain. The SDK API is meant for offline setup.
+The full runnable notebook lives at `examples/token_dropping
 <https://github.com/LMCache/LMCache/tree/dev/examples/token_dropping>`_.
 
 .. contents::
@@ -20,11 +20,18 @@ Why KV Cache SDK
 - **Improving Decode Throughput** when shrinking KV cache using token dropping.
   Token dropping reduces the KV cache size, allowing more requests to fit in a
   batch, improving decode throughput.
+  Doing so will affect the accuracy minimally, as we demonstrated with the
+  SnapKV example in the `examples/token_dropping/snapkv_token_dropping.ipynb
+  <https://github.com/LMCache/LMCache/tree/dev/examples/token_dropping/snapkv_token_dropping.ipynb>`_.
 
-The SDK gives you the hooks to retrieve a request's KV, supply your own 
-function to edit the KV, and store the edited KV back. The SDK also provides a
-batched-stream API to prefill, modify, and store the cache back before
-decoding continues.
+The SDK gives you the hooks to retrieve a request's KV and other intermediate
+tensors (currently only query tensors), supply your function to edit the KV,
+and store the edited KV back. The SDK also provides a batched-stream API to 
+prefill, modify, and store the cache back before decoding continues.
+
+Since many token dropping algorithms rely on the intermediate tensors, we also
+provided a flag to transfer the intermediate tensors from vLLM to LMCache.
+Currently, the SDK only supports transferring query intermediate tensors.
 
 
 How it works
@@ -77,31 +84,67 @@ Then start vLLM with the LMCache MP connector.
         --trust-remote-code \
         --return-tokens-as-token-ids
 
+To also send intermediate tensors, add 
+``"lmcache.mp.transfer_intermediate_tensors": true`` to
+``kv_connector_extra_config`` and set the 
+``LMCACHE_TRANSFER_INTERMEDIATE_TENSORS`` environment variable to ``true``.
+Example:
+
+.. code-block:: bash
+
+    LMCACHE_TRANSFER_INTERMEDIATE_TENSORS=true \
+    vllm serve Qwen/Qwen3-8B \
+        --port 8000 \
+        --enforce-eager \
+        --gpu-memory-utilization 0.65 \
+        --kv-transfer-config '{
+            "kv_connector":"LMCacheMPConnector",
+            "kv_role":"kv_both",
+            "kv_connector_extra_config":{
+                "lmcache.mp.transfer_intermediate_tensors": true,
+                "lmcache.mp.port":6555
+            }
+        }' \
+        --trust-remote-code \
+        --return-tokens-as-token-ids
+
 The SDK keys the KV cache by token ids: ``create_request`` takes the prompt as
 token ids, and every ``post_completion`` must report a ``token_id`` for each
 generated token. The example gets these ids straight from vLLM by passing
 ``--return-tokens-as-token-ids``. Otherwise, if vLLM returns only text, the
 ``post_completion`` must tokenize each generated token back into a token id.
 
+Here's an example of creating a context and connecting to the LMCache server.
+Each type of tensor (KV, query intermediate) has its own context.
+
 .. code-block:: python
 
-    import lmcache.sdk.kvcache as lmc_sdk
+    import lmcache.sdk as lmc_sdk
 
-    ctx = lmc_sdk.connect(
+    kv_ctx = lmc_sdk.kvcache.connect(
         url="tcp://localhost:6555",         # must match --port
         http_url="http://localhost:8080",   # must match --http-port
         model_name="Qwen/Qwen3-8B",
         timeout=60,
     )
+	q_ctx = lmc_sdk.qcache.connect(
+		url="tcp://localhost:6555",         # must match --port
+		http_url="http://localhost:8080",   # must match --http-port
+		model_name="Qwen/Qwen3-8B",
+		timeout=60,
+	)
     ...
-    lmc_sdk.close(ctx)
+    kv_ctx.close()
+	q_ctx.close()
 
 
 Writing a custom edit function
 ------------------------------
 
 An edit function takes the retrieved KV tensor and its token ids and returns the
-edited ``(kv, tokens)``. ``batch.modify(fn)`` applies it to every stream.
+edited ``(kv, tokens)``. ``batch.modify(fn)`` applies it to every stream. The
+function should be implemented as if it's only for single request, and the SDK
+will call it in parallel for every stream in the batch.
 
 ``modify`` operates only on the **chunk-aligned** prefix. A trailing partial
 chunk is tracked by the SDK and re-sent on the next ``decode``, so
@@ -111,32 +154,104 @@ chunk is tracked by the SDK and re-sent on the next ``decode``, so
 API reference
 -------------
 
+The SDK lives under ``lmcache.sdk``. The examples above alias
+``import lmcache.sdk as lmc_sdk`` (and ``lmcache.sdk.stream`` / ``.batch`` as
+``lmc_stream`` / ``lmc_batch``).
+
+Modules
+~~~~~~~
+
 .. list-table::
    :header-rows: 1
-   :widths: 45 55
+   :widths: 32 68
+
+   * - Module
+     - Purpose
+   * - ``lmcache.sdk``
+     - Package entry point; ``connect(kind, ...)`` dispatcher and re-exports of
+       the submodules below.
+   * - ``lmcache.sdk.kvcache``
+     - ``connect()`` for the **KV** cache.
+   * - ``lmcache.sdk.qcache``
+     - ``connect()`` for the **query (Q)** cache (model name is ``<model>##query``).
+   * - ``lmcache.sdk.context``
+     - The server-connection context plus the shared cache-kind enum and error type.
+   * - ``lmcache.sdk.stream``
+     - Per-request streaming: ``create_request()`` and ``LMCacheStream``.
+   * - ``lmcache.sdk.batch``
+     - Orchestrates many streams together via ``LMCacheBatchedStream``.
+   * - ``lmcache.sdk.wrapper.contiguous``
+     - ``ContiguousTransferWrapper`` — the transfer helper the context holds
+       (used internally; exposed via ``ctx.transfer_ctx``).
+
+Classes
+~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 32 68
+
+   * - Class
+     - Purpose
+   * - ``context.LMCacheSDKCacheKind``
+     - Enum selecting the cache: ``KV`` or ``QUERY``.
+   * - ``context.LMCacheSDKContext``
+     - A connection to one LMCache server for one model + kind; returned by
+       ``connect`` and passed to every other call.
+   * - ``stream.LMCacheStream``
+     - One request's lifecycle (prefill / decode / retrieve / modify).
+   * - ``batch.LMCacheBatchedStream``
+     - Runs a set of ``LMCacheStream``s together and reports metrics.
+   * - ``stream.StreamPerfMetrics``
+     - Throughput / latency report returned by the batch operations.
+   * - ``stream.TokenEvent``
+     - One generated-token event passed back through the stream.
+   * - ``stream.PostCompletion``
+     - Protocol you implement: a callable that submits a request to your engine.
+   * - ``context.LMCacheSDKError`` / ``stream.LMCacheStreamError`` /
+       ``batch.LMCacheBatchedStreamError``
+     - Error types raised by the SDK, streams, and batches respectively.
+
+Functions and methods
+~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
 
    * - Function / method
      - Description
-   * - ``lmc_sdk.connect(url, http_url, model_name, timeout=60.0)``
-     - Create an SDK context and register the transfer context, pass it to
-       every other call.
-   * - ``lmc_sdk.close(ctx)``
-     - Close the context and release resources. Called when done with the SDK.
-   * - ``lmc_stream.create_request(ctx, post_completion,
+   * - ``ctx = lmc_sdk.connect(kind, url, http_url, model_name, timeout=60.0)``
+     - Connect and register caches for ``kind`` (dispatches to ``kvcache`` /
+       ``qcache``). Returns an ``LMCacheSDKContext``.
+   * - ``kv_ctx = lmc_sdk.kvcache.connect(url, http_url, model_name, timeout=60.0)``
+     - Connect for the KV cache directly. Alternatively, use 
+	   ``connect(kind="kv", ...)``.
+   * - ``q_ctx = lmc_sdk.qcache.connect(url, http_url, model_name, timeout=60.0)``
+     - Connect for the query cache directly (model name is ``<model>##query``).
+	   Alternatively, use ``connect(kind="query", ...)``.
+   * - ``ctx.register_caches()``
+     - Fetch the server-registered layout for this model + kind (called by
+       ``connect``).
+   * - ``ctx.retrieve(tokens, cache_salt="")``
+     - Pull the cached tensor for a token sequence (``None`` on miss).
+   * - ``ctx.close()``
+     - Release the context's resources when done.
+   * - ``request = lmc_stream.create_request(contexts, post_completion,
        prompt_token_ids, cache_salt="")``
-     - Create one request stream to add to a batch.
-   * - ``lmc_batch.LMCacheBatchedStream()``
+     - Create one request stream bound to one or more contexts (e.g. KV and Q).
+   * - ``batch = lmc_batch.LMCacheBatchedStream()``
      - Create an empty batch.
-   * - ``batch.add(stream)``
-     - Register a stream to the batch.
+   * - ``batch.add(request)``
+     - Register a request stream to the batch.
    * - ``batch.prefill(sampling_params)``
-     - Prefill every stream once (``max_tokens`` forced to 1). Returns a
-       ``Metrics`` report.
+     - Prefill every stream once (``max_tokens`` forced to 1). Returns
+       ``StreamPerfMetrics``.
    * - ``batch.modify(fn)``
-     - Apply the edit function ``fn`` to every stream's cached KV. Returns a
-       ``Metrics`` report.
+     - Apply the edit function ``fn`` to every stream's cached KV. Returns
+       ``StreamPerfMetrics``.
    * - ``batch.decode(sampling_params)``
-     - Decode every stream. Returns a ``Metrics`` report.
+     - Decode every stream. Returns ``StreamPerfMetrics``.
 
-```Metrics`` returns ``input_tokens``, ``input_tput`` for prefill, ``duration``
-for modify, and ``output_tokens``, ``output_tput`` for decode.
+``StreamPerfMetrics`` reports ``input_tokens`` / ``input_tput`` for prefill,
+``duration`` for modify, and ``output_tokens`` / ``output_tput`` for decode.
