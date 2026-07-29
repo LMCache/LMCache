@@ -18,7 +18,7 @@ from __future__ import annotations
 # Standard
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, TypeAlias
+from typing import TYPE_CHECKING, Protocol, TypeAlias, TypeGuard
 import inspect
 
 # Third Party
@@ -54,6 +54,50 @@ EngineDrivenStoreChunkIndices: TypeAlias = list[int] | list[list[int]]
 EngineDrivenStorePreparation: TypeAlias = tuple[
     EngineDrivenPayload, EngineDrivenStoreChunkIndices
 ]
+
+
+class SingleGroupEngineDrivenContext(Protocol):
+    """Engine-driven context contract for a single KV object group."""
+
+    def prepare_store(
+        self, key: IPCCacheServerKey, instance_id: int
+    ) -> tuple[EngineDrivenSingleGroupPayload, list[int]] | None:
+        """Prepare single-group SHM buffers for a store operation."""
+        ...
+
+    def commit_store(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        chunks: EngineDrivenSingleGroupPayload,
+    ) -> bool:
+        """Commit a single-group store operation."""
+        ...
+
+    def prepare_retrieve(
+        self, key: IPCCacheServerKey, instance_id: int
+    ) -> EngineDrivenSingleGroupPayload | None:
+        """Prepare a single-group retrieve operation."""
+        ...
+
+    def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
+        """Commit a single-group retrieve operation."""
+        ...
+
+
+def is_single_group_engine_driven_context(
+    context: "EngineDrivenContext",
+) -> TypeGuard[SingleGroupEngineDrivenContext]:
+    """Return whether an engine-driven context has a single object group.
+
+    Args:
+        context: Engine-driven context whose registered layout is inspected.
+
+    Returns:
+        ``True`` when the context uses the legacy single-group layout, for
+        which prepare operations return flat tensor and chunk-index lists.
+    """
+    return not context.metadata.object_group_layout_descs
 
 
 # ---------------------------------------------------------------------------

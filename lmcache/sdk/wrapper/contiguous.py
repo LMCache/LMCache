@@ -9,7 +9,7 @@ import torch
 
 # First Party
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContext
+from lmcache.v1.multiprocess.transfer_context.base import SingleGroupEngineDrivenContext
 
 
 class ContiguousTransferWrapper:
@@ -20,7 +20,9 @@ class ContiguousTransferWrapper:
         chunk_size: Number of tokens per LMCache chunk.
     """
 
-    def __init__(self, context: EngineDrivenContext, chunk_size: int) -> None:
+    def __init__(
+        self, context: SingleGroupEngineDrivenContext, chunk_size: int
+    ) -> None:
         self._context = context
         self._chunk_size = chunk_size
 
