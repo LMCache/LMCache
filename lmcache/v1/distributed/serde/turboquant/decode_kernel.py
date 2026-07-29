@@ -24,7 +24,10 @@ def _use_fp8_e4b15(device: int = 0) -> int:
     """Return 1 if device needs fp8e4b15 (Ampere/Ada, SM < 8.9), else 0."""
     if device not in _FP8_E4B15:
         cap = torch_dev.get_device_capability(device)
-        _FP8_E4B15[device] = 1 if cap < (8, 9) else 0
+        # CUDA returns (major, minor) tuple; other backends (e.g. XPU) return
+        # a dict. fp8e4b15 is NVIDIA Ampere/Ada specific, so non-tuple caps
+        # always use e4nv (0).
+        _FP8_E4B15[device] = 1 if isinstance(cap, tuple) and cap < (8, 9) else 0
     return _FP8_E4B15[device]
 
 
