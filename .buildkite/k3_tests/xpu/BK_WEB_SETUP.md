@@ -10,6 +10,26 @@
 This pipeline now has a single step: it runs the XPU smoke test directly in a
 prebuilt public vLLM image and installs LMCache from source inside the job pod.
 
+### Trigger strategy
+
+The XPU pipeline is intentionally lightweight, so it is label/branch gated:
+
+| Condition | Result |
+|-----------|--------|
+| PR label includes `full` | upload the XPU pipeline |
+| branch is `dev` | upload the XPU pipeline |
+| any docs/asset-only change | path filter skips upload |
+| any change under `.buildkite/` | path filter forces upload |
+
+The path filter treats the following as trivial for the k3 test harness:
+
+- `*.md`, `LICENSE*`, `NOTICE*`
+- `.gitignore`, `.gitattributes`, `.editorconfig`, `.mailmap`, `CODEOWNERS`
+- anything under `docs/`, `asset/`, or `.github/`
+
+If you need the XPU pipeline to run for a docs/asset-only PR, add the
+`force-ci` label.
+
 
 ## Required host setup
 
@@ -43,7 +63,7 @@ steps:
 
 - Enable vLLM/LMCache nightly build to catch up latest code changes
 
-- Design XPU path filter to precisely trigger `k3s-xpu-test` 
+- Refine the XPU path filter if additional XPU-only subtrees need to be excluded
 
 - Refactor unit tests targeting multiple devices.
 

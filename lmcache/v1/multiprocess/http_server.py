@@ -67,7 +67,7 @@ async def lifespan(app: FastAPI):
     Manage the lifecycle of the LMCache HTTP server.
 
     On startup: Initialize ZMQ server and cache engine.
-    On shutdown: Clean up ZMQ server resources.
+    On shutdown: Clean up ZMQ server and cache engine resources.
     """
     # Startup
     logger.info(
@@ -190,6 +190,7 @@ async def lifespan(app: FastAPI):
     get_event_bus().stop()
     if hasattr(app.state, "zmq_server") and app.state.zmq_server is not None:
         app.state.zmq_server.close()
+    engine.close()
     logger.info("LMCache HTTP server stopped")
 
 

@@ -15,7 +15,7 @@ The controller runs a background thread with an event-driven loop that:
 # Standard
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 import enum
 import select
 import threading
@@ -29,6 +29,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchMode,
+    PrefetchRequestSpec,
     TrimPolicy,
 )
 from lmcache.v1.distributed.error import L1Error
@@ -45,7 +46,6 @@ from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
 )
-from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
@@ -53,6 +53,10 @@ from lmcache.v1.platform import (
     consume_fd,
     create_event_notifier,
 )
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.memory_management import MemoryObj
 
 logger = init_logger(__name__)
 
@@ -169,7 +173,7 @@ class InFlightPrefetchRequest:
     load_results: dict[int, Bitmap] = field(default_factory=dict)
     # Load phase: keys that were write-reserved in L1
     write_reserved_keys: list[ObjectKey] = field(default_factory=list)
-    write_reserved_objs: dict[ObjectKey, MemoryObj] = field(default_factory=dict)
+    write_reserved_objs: dict[ObjectKey, "MemoryObj"] = field(default_factory=dict)
 
     def all_lookups_done(self) -> bool:
         return len(self.pending_lookup_tasks) == 0
@@ -236,17 +240,7 @@ class PrefetchController(StorageControllerInterface):
 
         # In-flight request tracking (background thread only)
         self._in_flight_requests: dict[PrefetchRequestId, InFlightPrefetchRequest] = {}
-        self._pending_queue: list[
-            tuple[
-                PrefetchRequestId,
-                list[ObjectKey],
-                MemoryLayoutDesc,
-                int,
-                TrimPolicy,
-                AttnWindowDesc,
-                PrefetchMode,
-            ]
-        ] = []
+        self._pending_queue: list[tuple[PrefetchRequestId, PrefetchRequestSpec]] = []
 
         # Shadow counters for status reporting (updated in background loop)
         self._status_in_flight_count: int = 0
@@ -256,17 +250,7 @@ class PrefetchController(StorageControllerInterface):
 
         # Thread-safe submission queue (external -> background)
         self._submission_lock = threading.Lock()
-        self._submission_queue: list[
-            tuple[
-                PrefetchRequestId,
-                list[ObjectKey],
-                MemoryLayoutDesc,
-                int,
-                TrimPolicy,
-                AttnWindowDesc,
-                PrefetchMode,
-            ]
-        ] = []
+        self._submission_queue: list[tuple[PrefetchRequestId, PrefetchRequestSpec]] = []
         self._next_request_id: PrefetchRequestId = 0
         self._submission_efd = create_event_notifier()
 
@@ -344,19 +328,14 @@ class PrefetchController(StorageControllerInterface):
 
     def submit_prefetch_request(
         self,
-        keys: list[ObjectKey],
-        layout_desc: MemoryLayoutDesc,
-        extra_count: int = 0,
-        policy: TrimPolicy = TrimPolicy.PREFIX,
-        attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
-        mode: PrefetchMode = PrefetchMode.LOOKUP,
+        spec: PrefetchRequestSpec,
     ) -> PrefetchRequestId:
         """
-        Submit a prefetch request for the given keys.
+        Submit a prefetch request.
 
         Thread-safe. Can be called from any thread.
 
-        The retained subset of found keys is chosen by ``policy`` (see
+        The retained subset of found keys is chosen by ``spec.policy`` (see
         :class:`TrimPolicy`).  With the default ``PREFIX`` policy, only the
         **contiguous prefix** of found keys is loaded from L2: if L2 has keys
         {0, 1, 3, 4} but not key 2, only keys {0, 1} are loaded because the gap
@@ -366,22 +345,7 @@ class PrefetchController(StorageControllerInterface):
         request completes.
 
         Args:
-            keys: List of object keys to prefetch from L2 into L1.
-                The ordering defines the prefix: index 0 is the first key.
-            layout_desc: Memory layout for L1 write buffer allocation.
-            extra_count: Extra read locks per key (on top of the default 1)
-                to acquire when transitioning loaded keys from write-locked
-                to read-locked.  Must match the ``extra_count`` used in the
-                corresponding ``submit_prefetch_task`` call so that all TP
-                workers can each consume one read lock.
-            policy: Which retained-subset policy to apply (see
-                :class:`TrimPolicy`).  Defaults to ``PREFIX``.
-            attn_desc: Cross-chunk attention windows of all object groups, in
-                object-group order.
-            mode: The prefetch intent (see :class:`PrefetchMode`).  ``WARM``
-                forces every loaded key permanent and acquires no read lock;
-                ``LOOKUP`` defers retention to the configured
-                :class:`PrefetchPolicy` and read-locks loaded keys.
+            spec: The prefetch request inputs (see :class:`PrefetchRequestSpec`).
 
         Returns:
             A request ID for tracking via query_prefetch_result.
@@ -389,9 +353,7 @@ class PrefetchController(StorageControllerInterface):
         with self._submission_lock:
             request_id = self._next_request_id
             self._next_request_id += 1
-            self._submission_queue.append(
-                (request_id, keys, layout_desc, extra_count, policy, attn_desc, mode)
-            )
+            self._submission_queue.append((request_id, spec))
         self._submission_efd.notify()
         return request_id
 
@@ -774,13 +736,9 @@ class PrefetchController(StorageControllerInterface):
         while (
             self._pending_queue and len(self._in_flight_requests) < self._max_in_flight
         ):
-            request_id, keys, layout_desc, extra_count, policy, attn_desc, mode = (
-                self._pending_queue.pop(0)
-            )
+            request_id, spec = self._pending_queue.pop(0)
             self._status_pending_count -= 1
-            self._start_lookup_phase(
-                request_id, keys, layout_desc, extra_count, policy, attn_desc, mode
-            )
+            self._start_lookup_phase(request_id, spec)
 
     # =========================================================================
     # Lookup phase
@@ -789,12 +747,7 @@ class PrefetchController(StorageControllerInterface):
     def _start_lookup_phase(
         self,
         request_id: PrefetchRequestId,
-        keys: list[ObjectKey],
-        layout_desc: MemoryLayoutDesc,
-        extra_count: int = 0,
-        policy: TrimPolicy = TrimPolicy.PREFIX,
-        attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
-        mode: PrefetchMode = PrefetchMode.LOOKUP,
+        spec: PrefetchRequestSpec,
     ) -> None:
         """Submit lookup_and_lock to all live (non-draining) adapters for a
         new request."""
@@ -806,23 +759,23 @@ class PrefetchController(StorageControllerInterface):
             if adapter_id not in self._draining
         }
         if not routing_adapters:
-            self._complete_request(request_id, Bitmap(len(keys)))
+            self._complete_request(request_id, Bitmap(len(spec.keys)))
             return
 
         pending_lookup_tasks: dict[int, L2TaskId] = {}
         for adapter_id, adapter in routing_adapters.items():
-            task_id = adapter.submit_lookup_and_lock_task(keys, layout_desc)
+            task_id = adapter.submit_lookup_and_lock_task(spec.keys, spec.layout_desc)
             pending_lookup_tasks[adapter_id] = task_id
 
         request = InFlightPrefetchRequest(
             request_id=request_id,
-            keys=keys,
-            layout_desc=layout_desc,
+            keys=spec.keys,
+            layout_desc=spec.layout_desc,
             phase=PrefetchPhase.LOOKUP,
-            extra_count=extra_count,
-            policy=policy,
-            attn_desc=attn_desc,
-            mode=mode,
+            extra_count=spec.extra_count,
+            policy=spec.policy,
+            attn_desc=spec.attn_desc,
+            mode=spec.mode,
             pending_lookup_tasks=pending_lookup_tasks,
         )
         self._in_flight_requests[request_id] = request
@@ -834,9 +787,9 @@ class PrefetchController(StorageControllerInterface):
                 event_type=EventType.L2_PREFETCH_LOOKUP_SUBMITTED,
                 metadata={
                     "request_id": request_id,
-                    "key_count": len(keys),
+                    "key_count": len(spec.keys),
                     "adapter_count": len(pending_lookup_tasks),
-                    "key_count_per_salt": Counter(k.cache_salt for k in keys),
+                    "key_count_per_salt": Counter(k.cache_salt for k in spec.keys),
                 },
             )
         )

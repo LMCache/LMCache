@@ -34,6 +34,7 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     KVCache,
 )
+from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
@@ -60,6 +61,28 @@ def _wrap_sglang_kv_caches(
     wrapped.extend(CudaIPCWrapper(tensor) for tensor in k_pool)
     wrapped.extend(CudaIPCWrapper(tensor) for tensor in v_pool)
     return wrapped
+
+
+def _completed_future(result: bool) -> MessagingFuture[bool]:
+    """Return an already-completed future resolving to ``result``.
+
+    Used by :meth:`LMCacheMPConnector.store_kv_async` for the paths that
+    perform no wire send, so every return value is a pollable future and
+    callers never have to special-case ``None``. ``result`` carries the
+    store outcome for that path: ``False`` when the connector is
+    unhealthy (nothing was stored), ``True`` when there was simply no
+    chunk-aligned range to store (a no-op success).
+
+    Args:
+        result: the success value the returned future resolves to.
+
+    Returns:
+        A ``MessagingFuture`` whose ``result()`` is immediately
+        ``result``.
+    """
+    future: MessagingFuture[bool] = MessagingFuture()
+    future.set_result(result)
+    return future
 
 
 @dataclass
@@ -409,7 +432,7 @@ class LMCacheMPConnector:
                 event.ipc_handle(),
                 skip_prefix_n_blocks,
             ],
-        ).to_cuda_future(device=self.device)
+        ).to_device_future(device=self.device)
 
     def retrieve_kv(self, load_metadata: LoadMetadata) -> int:
         """Phase 2 of the two-phase load — fires RETRIEVE only.
@@ -491,6 +514,76 @@ class LMCacheMPConnector:
                     self._pending_lookups[request_id].locks_held = False
         return retrieve_token_num - offset
 
+    def store_kv_async(self, store_metadata: StoreMetadata) -> MessagingFuture[bool]:
+        """Submit a STORE and return its completion future without waiting.
+
+        Fires the STORE request for the chunk-aligned prefix of
+        ``store_metadata`` and returns immediately with a future the
+        caller can poll (``query`` / ``wait``) or block on (``result``)
+        at a later, deferred checkpoint. The future resolves to a
+        ``bool`` success flag once the daemon finishes copying the KV
+        slots GPU → warehouse.
+
+        The KV slots referenced by ``store_metadata`` must remain pinned
+        (not evicted or reused) until the returned future reports done;
+        the caller owns that lifetime. Paths that perform no wire send
+        return an already-completed future so callers never special-case
+        ``None``: an unhealthy connector resolves to ``False`` (nothing
+        was stored), and no chunk-aligned range resolves to ``True`` (a
+        no-op success).
+
+        END_SESSION is owned by ``LMCRadixCache.cache_finished_req``
+        (see :meth:`end_session`); it is not fired here.
+
+        Args:
+            store_metadata: tokens, request id, and KV slot indices for
+                the finished request.
+
+        Returns:
+            A future resolving to ``True`` when the store completes
+            successfully (or there was nothing to store), or ``False``
+            on daemon-side failure or an unhealthy connector.
+        """
+        if not self.is_healthy:
+            return _completed_future(False)
+
+        aligned_end = (len(store_metadata.token_ids) // self._lmcache_chunk_size) * (
+            self._lmcache_chunk_size
+        )
+        if aligned_end == 0:
+            return _completed_future(True)
+
+        request_id = store_metadata.request_id
+        block_ids = self._slot_mapping_to_block_ids(
+            store_metadata.kv_indices[:aligned_end]
+        )
+        event = torch_dev.Event(interprocess=True)
+        event.record(torch_dev.current_stream())
+        future = send_lmcache_request(
+            self.mq_client,
+            RequestType.STORE,
+            [
+                self._create_key(
+                    store_metadata.token_ids,
+                    start=0,
+                    end=aligned_end,
+                    request_id=request_id,
+                ),
+                self.instance_id,
+                # STORE takes per-group block IDs (list[list[int]]); SGLang is
+                # non-hybrid, so wrap the flat list as a single group.
+                [block_ids],
+                event.ipc_handle(),
+            ],
+        ).to_cuda_future(device=self.device)
+        # Keep the exporting CUDA event alive until the caller releases the
+        # future. Since we return without blocking, the local ``event`` would
+        # otherwise be garbage-collected immediately, destroying the underlying
+        # CUDA event before the daemon imports its IPC handle and waits on it.
+        # (Dynamic keepalive attribute; the future type doesn't declare it.)
+        future._export_event = event  # type: ignore[attr-defined]
+        return future
+
     def store_kv(self, store_metadata: StoreMetadata) -> None:
         if not self.is_healthy:
             return
@@ -525,7 +618,7 @@ class LMCacheMPConnector:
                     event.ipc_handle(),
                 ],
             )
-            .to_cuda_future(device=self.device)
+            .to_device_future(device=self.device)
             .result(timeout=self._mq_timeout)
         )
         # END_SESSION is owned by ``LMCRadixCache.cache_finished_req`` so
