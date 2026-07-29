@@ -4,8 +4,8 @@
 #   - pod hostIPC=true
 #   - --kv-transfer-config <MultiConnector JSON from the engine ConfigMap>
 #   - PYTHONHASHSEED=0
-#   - VLLM_NIXL_SIDE_CHANNEL_HOST (downward API, pod's node IP)
-#   - VLLM_NIXL_SIDE_CHANNEL_PORT (from the engine ConfigMap)
+#   - VLLM_NIXL_SIDE_CHANNEL_HOST (downward API, pod's own IP via status.podIP)
+#   - VLLM_NIXL_SIDE_CHANNEL_PORT (from spec.pd.nixlSideChannelPort on the engine CR)
 #
 # PREREQUISITES:
 #   1. LMCacheEngine "prefiller-cache" (pd.role=prefiller, port 5557) is Ready.

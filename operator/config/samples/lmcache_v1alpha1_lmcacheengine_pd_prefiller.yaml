@@ -7,7 +7,7 @@
 #     └── LMCacheMPConnector(kv_both)  — node-local KV cache (prefix reuse)
 #
 # The webhook also injects into opted-in vLLM pods:
-#   VLLM_NIXL_SIDE_CHANNEL_HOST = pod's node IP (downward API status.hostIP)
+#   VLLM_NIXL_SIDE_CHANNEL_HOST = pod's own IP (downward API status.podIP)
 #   VLLM_NIXL_SIDE_CHANNEL_PORT = spec.pd.nixlSideChannelPort (5557 here)
 #
 # PREREQUISITES:

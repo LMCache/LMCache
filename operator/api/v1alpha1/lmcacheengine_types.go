@@ -365,9 +365,9 @@ type PDSpec struct {
 
 	// enforceHandshakeCompat, when set, is forwarded to the NixlConnector as
 	// kv_connector_extra_config["enforce_handshake_compat"]. Set to false to
-	// disable strict NIXL version negotiation — required when the CacheBlend
-	// prefiller and decoder run different vLLM builds. When nil the key is
-	// omitted and NixlConnector uses its own default.
+	// disable strict NIXL version negotiation — useful when prefiller and
+	// decoder run different vLLM builds. When nil the key is omitted and
+	// NixlConnector uses its own default.
 	// +optional
 	EnforceHandshakeCompat *bool `json:"enforceHandshakeCompat,omitempty"`
 }

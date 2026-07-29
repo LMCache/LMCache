@@ -168,12 +168,6 @@ func (p *CacheBlendPodInjector) Handle(ctx context.Context, req admission.Reques
 	// M4: PYTHONPATH on the target container.
 	target.Env = BuildCBPodEnv(target.Env)
 
-	// PD disaggregation: inject NIXL side-channel env vars when the engine is
-	// configured for PD mode.
-	if engine.Spec.PD != nil {
-		target.Env = BuildPDEnv(target.Env, engine.Spec.PD)
-	}
-
 	// M5: required vLLM args. Pass "" for the kv-transfer-config JSON when the
 	// user already supplies one so BuildCBArgs leaves their value untouched.
 	kvForArgs := kvTransferConfigJSON

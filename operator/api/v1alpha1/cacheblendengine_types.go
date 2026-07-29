@@ -211,12 +211,6 @@ type CacheBlendEngineSpec struct {
 	// +optional
 	ExtraArgs []string `json:"extraArgs,omitempty"`
 
-	// pd enables PD (Prefill-Decode) disaggregation for the CacheBlend
-	// prefiller role. When set the connection ConfigMap emits a MultiConnector
-	// wrapping NixlConnector + CBKVConnector, and the webhook injects the NIXL
-	// side-channel env vars into opted-in vLLM pods.
-	// +optional
-	PD *PDSpec `json:"pd,omitempty"`
 }
 
 // CacheBlendEngineStatus defines the observed state of CacheBlendEngine.
