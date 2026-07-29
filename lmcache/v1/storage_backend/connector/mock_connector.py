@@ -123,14 +123,14 @@ class PressureManager:
 
     async def on_exists(self):
         # exists latency will delay everyone
-        logger.debug(f"waiting {self.peeking_latency} seconds to peek")
+        logger.debug("waiting %s seconds to peek", self.peeking_latency)
         if self.peeking_latency > 0:
             await asyncio.sleep(self.peeking_latency)
 
     async def on_put(self, mock_obj: MockMemoryObj):
         total_wait_time = self.write_latency_per_byte * mock_obj.num_bytes
         logger.debug(
-            f"waiting {total_wait_time} seconds to put {mock_obj.num_bytes} bytes"
+            "waiting %s seconds to put %s bytes", total_wait_time, mock_obj.num_bytes
         )
         async with self.write_lock:
             await asyncio.sleep(total_wait_time)
@@ -138,7 +138,7 @@ class PressureManager:
     async def on_get(self, mock_obj: MockMemoryObj):
         total_wait_time = self.read_latency_per_byte * mock_obj.num_bytes
         logger.debug(
-            f"waiting {total_wait_time} seconds to get {mock_obj.num_bytes} bytes"
+            "waiting %s seconds to get %s bytes", total_wait_time, mock_obj.num_bytes
         )
         async with self.read_lock:
             await asyncio.sleep(total_wait_time)
@@ -150,7 +150,7 @@ class PressureManager:
                 continue
             total_bytes += mock_obj.num_bytes
         total_wait_time = self.read_latency_per_byte * total_bytes
-        logger.debug(f"waiting {total_wait_time} seconds to get {total_bytes} bytes")
+        logger.debug("waiting %s seconds to get %s bytes", total_wait_time, total_bytes)
         async with self.read_lock:
             await asyncio.sleep(total_wait_time)
 
@@ -264,7 +264,8 @@ class MockConnector(RemoteConnector):
         for i, mock_obj in enumerate(mock_objs):
             if mock_obj is None:
                 logger.warning(
-                    f"Mock object is None on {i}",
+                    "Mock object is None on %s",
+                    i,
                     f" out of {len(mock_objs)} objects",
                 )
                 break
