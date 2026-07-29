@@ -869,7 +869,7 @@ def test_register_kv_cache_grpc_roundtrip() -> None:
     from lmcache.utils import EngineType
     from lmcache.v1.gpu_connector.kv_format.types import LayoutHints
     from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-    from lmcache.v1.platform.base_ipc_wrapper import DeviceIPCWrapper
+    from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
     port = _find_free_port()
     server_url = f"grpc://127.0.0.1:{port}"
