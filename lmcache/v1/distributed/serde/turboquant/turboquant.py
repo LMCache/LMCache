@@ -26,7 +26,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.serde.async_processor import AsyncSerdeProcessor
 from lmcache.v1.distributed.serde.base import Deserializer, SerdeProcessor, Serializer
 from lmcache.v1.distributed.serde.factory import register_serde_factory
@@ -527,7 +527,7 @@ class TurboQuantSerializer(Serializer):
     def __init__(self, cfg: TurboQuantSerdeConfig):
         self._cfg = cfg
 
-    def serialize(self, src: MemoryObj, dst: MemoryObj) -> int:
+    def serialize(self, src: MemoryObj, dst: MemoryObj, key: ObjectKey) -> int:
         """Serialize a KV tensor into a TurboQuant-compressed byte buffer.
 
         Args:
@@ -535,6 +535,8 @@ class TurboQuantSerializer(Serializer):
                 ``[2, num_layers, num_tokens, hidden_dim]``.
             dst: Destination memory object containing a ``torch.uint8`` tensor
                 used as the serialized byte buffer.
+            key: Object key for this pair (unused: TurboQuant is
+                content-agnostic).
 
         Returns:
             The number of serialized bytes written to ``dst``.
@@ -625,7 +627,7 @@ class TurboQuantSerializer(Serializer):
             # LMCache layout: [2, L, T, hidden_dim]
             # Kernel input layout per layer: key/value [T, H, D]
             for compressed_idx, layer_idx in enumerate(range(quant_start, quant_end)):
-                key = (
+                k_tensor = (
                     src_work[0, layer_idx]
                     .view(num_tokens, num_heads, head_dim)
                     .contiguous()
@@ -639,7 +641,7 @@ class TurboQuantSerializer(Serializer):
                     cfg, layer_idx, cuda_device
                 )
                 triton_turboquant_store(
-                    key,
+                    k_tensor,
                     value,
                     dst_view[compressed_idx],
                     slot_mapping,
@@ -674,7 +676,7 @@ class TurboQuantDeserializer(Deserializer):
     def __init__(self, cfg: TurboQuantSerdeConfig):
         self._cfg = cfg
 
-    def deserialize(self, src: MemoryObj, dst: MemoryObj) -> None:
+    def deserialize(self, src: MemoryObj, dst: MemoryObj, key: ObjectKey) -> None:
         """Deserialize a TurboQuant byte buffer into a destination KV tensor.
 
         Args:
@@ -682,6 +684,8 @@ class TurboQuantDeserializer(Deserializer):
                 byte buffer as a ``torch.uint8`` tensor.
             dst: Destination memory object containing the reconstructed KV
                 tensor with shape ``[2, num_layers, num_tokens, hidden_dim]``.
+            key: Object key for this pair (unused: TurboQuant is
+                content-agnostic).
 
         Raises:
             ValueError: If source or destination tensors are missing, if the
@@ -836,14 +840,14 @@ class TurboQuantDeserializer(Deserializer):
                     k_layer = torch.matmul(
                         k_layer.to(torch.float32), pi_t.T.contiguous()
                     ).to(k_out.dtype)
-                key = k_layer.contiguous().view(num_tokens, hidden_dim)
+                k_tensor = k_layer.contiguous().view(num_tokens, hidden_dim)
                 value = (
                     v_out[0, :, :num_tokens, :]
                     .transpose(0, 1)
                     .contiguous()
                     .view(num_tokens, hidden_dim)
                 )
-                dst_work[0, layer_idx].copy_(key.to(dst_work.dtype))
+                dst_work[0, layer_idx].copy_(k_tensor.to(dst_work.dtype))
                 dst_work[1, layer_idx].copy_(value.to(dst_work.dtype))
             offset += compressed_bytes
 

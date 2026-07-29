@@ -199,7 +199,7 @@ def store_keys(
             [key, instance_id, [block_ids], event.ipc_handle()],
             get_response_class(RequestType.STORE),
         )
-        result = future.to_cuda_future().result(timeout=timeout)
+        result = future.to_device_future().result(timeout=timeout)
         assert result is True, f"Store should succeed for key {i}"
 
 
@@ -222,7 +222,7 @@ def retrieve_keys(
             [key, instance_id, [block_ids], event.ipc_handle(), 0],
             get_response_class(RequestType.RETRIEVE),
         )
-        result = future.to_cuda_future().result(timeout=timeout)
+        result = future.to_device_future().result(timeout=timeout)
         results.append(result)
     return results
 
@@ -487,7 +487,7 @@ def test_store_fails_closed_on_incomplete_block_ids(
             ],
             get_response_class(RequestType.STORE),
         )
-        .to_cuda_future()
+        .to_device_future()
         .result(timeout=DEFAULT_TIMEOUT)
     )
     assert result is False, "Store should fail closed (skip) on a short list"

@@ -28,14 +28,65 @@ assert hasattr(torch, "xpu") and torch.xpu.is_available(), "Intel XPU not availa
 print("torch.xpu.is_available() = True")
 PY
 
-export TEST_SELECTOR="${TEST_SELECTOR:-calculate_cdf or get_gpu_pci_bus_id or load_and_reshape_flash}"
 cd "${REPO_ROOT}"
 source "${REPO_ROOT}/.buildkite/k3_harness/setup-lmcache-only-env.sh"
 
 log "installing job dependencies"
 uv pip install -r requirements/common.txt -r requirements/test.txt
 
-log "running XPU smoke tests"
-pytest -q tests/v1/test_torch_ops.py \
-  -k "${TEST_SELECTOR}" --maxfail=1
+discover_xpu_tests() {
+  python - <<'PY'
+from fnmatch import fnmatch
+from pathlib import Path
+
+root = Path("tests")
+# Temporary allowlist of XPU cases that are known to run in the current
+# vLLM-based XPU image.
+#
+# Future plan:
+#   1. Replace this allowlist with denylist + blocklist and run full test
+#      discovery by default.
+#   2. denylist: CUDA-only tests that should never run in XPU jobs.
+#   3. blocklist: tests that are expected to fail on current XPU runtime and
+#      are not ready yet.
+#   4. As tests become ready, shrink blocklist until XPU jobs run the full set.
+allowlist = {
+  "tests/benchmarks/test_*.py",
+  "tests/test_*.py",
+  "tests/v1/multiprocess/test_engine_driven_transfer.py",
+  "tests/v1/test_python_ops_fallback.py",
+  "tests/v1/test_xpu_connector.py",
+  "tests/v1/test_torch_ops.py",
+}
+selected: set[str] = set()
+
+def is_allowlisted(rel: str) -> bool:
+  return any(fnmatch(rel, pattern) for pattern in allowlist)
+
+for path in root.rglob("test_*.py"):
+    rel = path.as_posix()
+    if is_allowlisted(rel):
+      selected.add(rel)
+
+for rel in sorted(selected):
+    print(rel)
+PY
+}
+
+mapfile -t XPU_TEST_FILES < <(discover_xpu_tests)
+if [ "${#XPU_TEST_FILES[@]}" -eq 0 ]; then
+  fail "no XPU-related test files found under tests"
+fi
+
+log "discovered ${#XPU_TEST_FILES[@]} XPU-related test files"
+printf '  %s\n' "${XPU_TEST_FILES[@]}"
+
+PYTEST_ARGS=(-q --maxfail=1)
+if [ -n "${TEST_SELECTOR:-}" ]; then
+  PYTEST_ARGS+=(-k "${TEST_SELECTOR}")
+fi
+
+log "running XPU-related tests"
+pytest "${PYTEST_ARGS[@]}" "${XPU_TEST_FILES[@]}"
 log "xpu smoke test finished successfully"
+
