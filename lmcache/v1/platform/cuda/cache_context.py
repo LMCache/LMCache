@@ -434,11 +434,19 @@ class GPUCacheContext(BaseCacheContext):
         )
 
     def close(self) -> None:
-        """
-        Deregister this context's GDS staging buffer (reverse of __init__).
-        """
+        """Release GPU resources owned by this context."""
+        if not hasattr(self, "_temp_buffer"):
+            return
+
         with torch_dev.stream(self.cuda_stream_):
             get_gds_context().deregister_gpu_buffer(self._temp_buffer.buffer)
+
+        del self._temp_buffer
+        del self.group_kv_pointers_
+        del self.block_ids_buffer_
+        del self.kv_caches_
+        del self.cupy_stream_
+        del self.cuda_stream_
 
     @property
     def stream(self) -> Any:

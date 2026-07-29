@@ -20,6 +20,8 @@ Two layers are exercised:
 
 # Standard
 from collections.abc import Sequence
+import gc
+import weakref
 
 # Third Party
 import pytest
@@ -456,6 +458,21 @@ class TestGPUCacheContextBuffers:
         shape, dtype = ctx.get_kernel_group_shape_dtype(256, 0)
         assert shape == _expected_kernel_group_shape(manager, 256, 0)
         assert dtype == manager.kernel_groups[0].dtype
+
+    def test_close_releases_device_tensor_ownership(self) -> None:
+        ctx = _make_context(_SINGLE_GROUP)
+        refs = [
+            weakref.ref(ctx._temp_buffer.buffer),
+            weakref.ref(ctx.block_ids_buffer_),
+            *[weakref.ref(pointer) for pointer in ctx.group_kv_pointers_],
+            *[weakref.ref(kv_cache) for kv_cache in ctx.kv_caches_],
+        ]
+
+        ctx.close()
+        ctx.close()
+        gc.collect()
+
+        assert all(ref() is None for ref in refs)
 
 
 class TestGPUCacheContextPointers:
