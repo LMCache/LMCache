@@ -9,6 +9,7 @@ Covers:
 
 # Standard
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import cast
 import argparse
 import json
 import threading
@@ -20,12 +21,19 @@ import torch
 import zmq
 
 # First Party
+from lmcache.cli.commands.base import BaseCommand
 from lmcache.cli.commands.bench import BenchCommand
+from lmcache.cli.commands.bench.server_bench import command as sv_cmd
+from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
 from lmcache.cli.commands.bench.server_bench.helpers import (
+    RequestResult,
+    ServerTaintedError,
+    ServerTaintedInterrupt,
     _allocate_kv_cache,
     _build_token_ids,
     _make_key,
     _poll_prefetch_status,
+    _process_request,
     _query_checksum,
     _send_lookup,
     _send_unregister_kv_cache,
@@ -623,3 +631,502 @@ class TestUnregisterKVCache:
             client.close()
         finally:
             router.stop()
+
+
+# ------------------------------------------------------------------ #
+#  _process_request fail-close lifecycle (mocked RPC layer)            #
+# ------------------------------------------------------------------ #
+
+# Stand-in client: every RPC is injected by patching ``sv_helpers._call``,
+# so nothing is ever called on the client object itself.
+_DUMMY_CLIENT = cast(MessageQueueClient, object())
+
+
+def _dispatching_call(behavior, calls=None):
+    """Build a ``_call`` replacement that dispatches on request type.
+
+    ``behavior`` maps ``RequestType`` -> value | callable(payloads) -> value.
+    A callable may raise to inject an exception / Ctrl-C at the real RPC wait
+    point. The sentinel ``sv_helpers._TIMEOUT`` simulates an RPC timeout;
+    unlisted types reply void (``None``). Every request type is appended to
+    ``calls`` (when given) for issued-operation assertions.
+    """
+
+    def _fake_call(client, request_type, payloads, timeout_s=10.0):
+        if calls is not None:
+            calls.append(request_type)
+        action = behavior.get(request_type)
+        if callable(action):
+            return action(payloads)
+        return action
+
+    return _fake_call
+
+
+def _pair_kwargs(**overrides):
+    """Baseline kwargs driving _process_request as a handle-mode pair request.
+
+    511 + 1 seq token = 512 tokens = 2 chunks of 256, so a poll hit of 1
+    exercises both the RETRIEVE (hit) and the STORE (miss) leg.
+    """
+    base = dict(
+        num_tokens=511,
+        chunk_size=256,
+        pass_label="cold",
+        http_base="",
+        block_size=16,
+        total_blocks=1024,
+        num_engine_group_infos=1,
+        use_gpu=False,
+        use_handle=True,
+        client_tensors=None,
+        server_pool=None,
+    )
+    base.update(overrides)
+    return base
+
+
+def _success_behavior():
+    """A fully successful handle-mode pair request; rows override one stage."""
+    return {
+        RequestType.LOOKUP: None,
+        RequestType.QUERY_PREFETCH_STATUS: 1,
+        RequestType.RETRIEVE: (0, True),
+        RequestType.STORE: (0, True),
+        RequestType.END_SESSION: None,
+    }
+
+
+def _raise(exc_type):
+    """A ``_call`` action that raises *exc_type* at the RPC wait point."""
+
+    def _action(_payloads):
+        raise exc_type
+
+    return _action
+
+
+class TestProcessRequestFailClose:
+    """The single-request contract: never a confident-but-wrong result.
+
+    Every stateful RPC is submit-then-unknown, so a failure after LOOKUP is
+    submitted invalidates the run (``failure`` set) and, when the server may
+    hold indeterminate state, taints it (``server_tainted``); a body error or
+    a cleanup that cannot be acknowledged is raised as ``ServerTaintedError``
+    / ``ServerTaintedInterrupt``. ``None`` is returned only for a legal skip
+    before any RPC is submitted.
+    """
+
+    def test_success_is_valid_and_untainted(self, monkeypatch) -> None:
+        calls: list = []
+        monkeypatch.setattr(
+            sv_helpers, "_call", _dispatching_call(_success_behavior(), calls)
+        )
+        result = _process_request(_DUMMY_CLIENT, 0, **_pair_kwargs())
+        assert result is not None
+        assert result.failure == ""
+        assert result.server_tainted is False
+        assert RequestType.RETRIEVE in calls
+        assert RequestType.STORE in calls
+        assert RequestType.END_SESSION in calls
+
+    def test_sub_chunk_request_is_legal_skip(self, monkeypatch) -> None:
+        calls: list = []
+        monkeypatch.setattr(sv_helpers, "_call", _dispatching_call({}, calls))
+        # 0 tokens -> a single seq token -> fewer than one full chunk.
+        result = _process_request(_DUMMY_CLIENT, 0, **_pair_kwargs(num_tokens=0))
+        assert result is None
+        assert calls == []
+
+    @pytest.mark.parametrize(
+        "inject, failure_substr, tainted",
+        [
+            ({RequestType.LOOKUP: sv_helpers._TIMEOUT}, "LOOKUP timeout", True),
+            (
+                {RequestType.QUERY_PREFETCH_STATUS: sv_helpers._TIMEOUT},
+                "prefetch status poll failed",
+                True,
+            ),
+            ({RequestType.RETRIEVE: (0, False)}, "RETRIEVE retrieve_failed", False),
+            ({RequestType.STORE: (0, False)}, "STORE store_failed", False),
+            ({RequestType.RETRIEVE: sv_helpers._TIMEOUT}, "RETRIEVE timeout", True),
+            ({RequestType.STORE: sv_helpers._TIMEOUT}, "STORE timeout", True),
+            (
+                {RequestType.END_SESSION: sv_helpers._TIMEOUT},
+                "END_SESSION timeout",
+                True,
+            ),
+        ],
+        ids=[
+            "lookup_timeout",
+            "poll_failure",
+            "retrieve_failure",
+            "store_failure",
+            "retrieve_timeout",
+            "store_timeout",
+            "end_session_timeout",
+        ],
+    )
+    def test_failure_rows_invalidate_and_maybe_taint(
+        self, monkeypatch, inject, failure_substr, tainted
+    ) -> None:
+        calls: list = []
+        behavior = _success_behavior()
+        behavior.update(inject)
+        monkeypatch.setattr(sv_helpers, "_call", _dispatching_call(behavior, calls))
+        result = _process_request(_DUMMY_CLIENT, 0, **_pair_kwargs())
+        # A post-LOOKUP failure is a RequestResult with a reason, never a bare
+        # None and never a silent success.
+        assert result is not None
+        assert failure_substr in result.failure
+        assert result.server_tainted is tainted
+        # END_SESSION cleanup is attempted on every post-LOOKUP exit.
+        assert RequestType.END_SESSION in calls
+
+    @pytest.mark.parametrize(
+        "body_end_session, exc_type, cause_type",
+        [
+            (_raise(RuntimeError), ServerTaintedError, RuntimeError),
+            (_raise(KeyboardInterrupt), ServerTaintedInterrupt, KeyboardInterrupt),
+        ],
+        ids=["end_session_exception", "end_session_ctrl_c"],
+    )
+    def test_cleanup_failure_after_success_raises_taint(
+        self, monkeypatch, body_end_session, exc_type, cause_type
+    ) -> None:
+        # The body succeeds, then END_SESSION raises: the run is tainted via a
+        # raise (Ctrl-C keeps interrupt semantics), chaining the cleanup error.
+        behavior = _success_behavior()
+        behavior[RequestType.END_SESSION] = body_end_session
+        monkeypatch.setattr(sv_helpers, "_call", _dispatching_call(behavior))
+        with pytest.raises(exc_type) as ei:
+            _process_request(_DUMMY_CLIENT, 0, **_pair_kwargs())
+        assert isinstance(ei.value.__cause__, cause_type)
+
+    @pytest.mark.parametrize(
+        "body_call, end_session, exc_type, cause_type",
+        [
+            (
+                _raise(KeyboardInterrupt),
+                _raise(RuntimeError),
+                ServerTaintedInterrupt,
+                KeyboardInterrupt,
+            ),
+            (
+                _raise(KeyboardInterrupt),
+                sv_helpers._TIMEOUT,
+                ServerTaintedInterrupt,
+                KeyboardInterrupt,
+            ),
+            (
+                _raise(RuntimeError),
+                _raise(RuntimeError),
+                ServerTaintedError,
+                RuntimeError,
+            ),
+        ],
+        ids=[
+            "body_ki+cleanup_error",
+            "body_ki+cleanup_timeout",
+            "body_error+cleanup_error",
+        ],
+    )
+    def test_body_and_cleanup_failure_combos(
+        self, monkeypatch, body_call, end_session, exc_type, cause_type
+    ) -> None:
+        # The body raises during the poll; END_SESSION then times out or
+        # raises. A cleanup failure must not mask the body cause nor downgrade
+        # a Ctrl-C (interrupt semantics + body cause are both preserved).
+        behavior = {
+            RequestType.LOOKUP: None,
+            RequestType.QUERY_PREFETCH_STATUS: body_call,
+            RequestType.END_SESSION: end_session,
+        }
+        monkeypatch.setattr(sv_helpers, "_call", _dispatching_call(behavior))
+        with pytest.raises(exc_type) as ei:
+            _process_request(_DUMMY_CLIENT, 0, **_pair_kwargs())
+        assert isinstance(ei.value.__cause__, cause_type)
+
+
+# ------------------------------------------------------------------ #
+#  Summary emission: valid vs invalid (performance suppression)        #
+# ------------------------------------------------------------------ #
+
+
+class _FakeSection:
+    def __init__(self) -> None:
+        self.values: dict = {}
+
+    def add(self, key, label, value) -> None:
+        self.values[key] = value
+
+
+class _FakeMetrics:
+    def __init__(self) -> None:
+        self.sections: dict = {}
+        self.emitted = False
+
+    def add_section(self, section_id, title) -> "_FakeSection":
+        section = _FakeSection()
+        self.sections[section_id] = section
+        return section
+
+    def emit(self) -> None:
+        self.emitted = True
+
+
+class _CapturingCommand:
+    def __init__(self) -> None:
+        self.metrics = _FakeMetrics()
+
+    def create_metrics(self, title, args, width=64) -> "_FakeMetrics":
+        return self.metrics
+
+
+def _bench_args(**overrides) -> argparse.Namespace:
+    ns = argparse.Namespace(
+        rpc_url="ipc:///tmp/x",
+        mode="cpu",
+        transfer_mode="auto",
+        num_tokens=511,
+        interval=0.0,
+    )
+    for key, value in overrides.items():
+        setattr(ns, key, value)
+    return ns
+
+
+class TestEmitSummaryValidity:
+    """An invalid run must not present a trustworthy-looking summary."""
+
+    def test_valid_run_emits_performance_sections(self) -> None:
+        cmd = _CapturingCommand()
+        sv_cmd._emit_server_bench_metrics(
+            command=cast(BaseCommand, cmd),
+            args=_bench_args(),
+            total_requests=3,
+            total_checksum_ok=3,
+            total_checksum_fail=0,
+            valid=True,
+            server_reuse_safe=True,
+            cold_lookup_ms=[1.0, 2.0],
+            warm_retrieve_ms=[3.0],
+        )
+        results = cmd.metrics.sections["results"].values
+        assert cmd.metrics.emitted
+        assert results["valid"] == "yes"
+        assert results["server_reuse_safe"] == "yes"
+        assert "pass_rate" in results
+        # Latency sections are present for a valid run.
+        assert "cold_lookup" in cmd.metrics.sections
+        assert "warm_retrieve" in cmd.metrics.sections
+
+    def test_invalid_run_suppresses_performance_sections(self) -> None:
+        cmd = _CapturingCommand()
+        sv_cmd._emit_server_bench_metrics(
+            command=cast(BaseCommand, cmd),
+            args=_bench_args(),
+            total_requests=1,
+            total_checksum_ok=0,
+            total_checksum_fail=0,
+            valid=False,
+            server_reuse_safe=False,
+            run_error="seq 0 cold: LOOKUP timeout",
+            cold_lookup_ms=[1.0],
+            warm_retrieve_ms=[2.0],
+        )
+        results = cmd.metrics.sections["results"].values
+        assert cmd.metrics.emitted
+        assert results["valid"] == "no"
+        assert results["server_reuse_safe"] == "no"
+        assert results["error"] == "seq 0 cold: LOOKUP timeout"
+        # No performance numbers are presented for an invalid run.
+        assert "pass_rate" not in results
+        assert "cold_lookup" not in cmd.metrics.sections
+        assert "warm_retrieve" not in cmd.metrics.sections
+
+
+# ------------------------------------------------------------------ #
+#  run_server_bench() setup / teardown fail-close wiring               #
+# ------------------------------------------------------------------ #
+
+
+class _FakeMQClient:
+    """Stand-in MP client: created but never used (RPC helpers patched)."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def _ok_pair_result(pass_label: str) -> RequestResult:
+    """A clean cold / warm pair result (full hit on warm, matching digest)."""
+    if pass_label == "cold":
+        return RequestResult(
+            checksums=["a", "b"],
+            lookup_ms=1.0,
+            store_ms=2.0,
+            hit_chunks=0,
+            total_chunks=2,
+        )
+    return RequestResult(
+        checksums=["a", "b"],
+        lookup_ms=1.0,
+        retrieve_ms=2.0,
+        hit_chunks=2,
+        total_chunks=2,
+    )
+
+
+def _run_args(**overrides) -> argparse.Namespace:
+    ns = argparse.Namespace(
+        rpc_url="tcp://localhost:5555",
+        mode="cpu",
+        transfer_mode="lmcache_driven",  # handle mode -> no server SHM pool
+        quiet=True,
+        kvcache_shape_spec=sv_cmd._DEFAULT_SHAPE_SPEC,
+        num_blocks=1024,
+        block_size=16,
+        num_tokens=511,
+        start=0,
+        end=2,
+        interval=0.0,
+        url="http://localhost:8080",  # http_base set -> checksum expected
+        flamegraph=False,
+    )
+    for key, value in overrides.items():
+        setattr(ns, key, value)
+    return ns
+
+
+class TestRunServerBenchContract:
+    """End-to-end fail-close wiring in ``run_server_bench``: the setup and
+    teardown ends the ``_process_request`` unit tests cannot reach.
+
+    The MP client and RPC helpers are patched, so no real server is needed;
+    the drive loop, verdict, and teardown run against injected outcomes.
+    """
+
+    def _patch(
+        self,
+        monkeypatch,
+        *,
+        register=True,
+        unregister=True,
+        process=_ok_pair_result,
+        recorder=None,
+    ) -> None:
+        monkeypatch.setattr(
+            "lmcache.v1.multiprocess.mq.MessageQueueClient", _FakeMQClient
+        )
+        monkeypatch.setattr(sv_cmd, "_build_server_profiler", lambda args, log: None)
+        monkeypatch.setattr(sv_cmd, "_get_chunk_size", lambda client: 256)
+        monkeypatch.setattr(
+            sv_cmd,
+            "_allocate_cpu_shm_kv_cache",
+            lambda **kw: ([object()], [object()], []),
+        )
+
+        def _register(*a, **k):
+            if recorder is not None:
+                recorder.append("register")
+            return register
+
+        def _unregister(*a, **k):
+            if recorder is not None:
+                recorder.append("unregister")
+            return unregister
+
+        def _process(client, seq_no, num_tokens, chunk_size, pass_label, **k):
+            if recorder is not None:
+                recorder.append("process:%s" % pass_label)
+            return process(pass_label)
+
+        monkeypatch.setattr(sv_cmd, "_send_register_kv_cache", _register)
+        monkeypatch.setattr(sv_cmd, "_send_unregister_kv_cache", _unregister)
+        monkeypatch.setattr(sv_cmd, "_process_request", _process)
+
+    def test_success_run_is_valid(self, monkeypatch) -> None:
+        cmd = _CapturingCommand()
+        self._patch(monkeypatch)
+        # A clean run returns normally (no SystemExit).
+        sv_cmd.run_server_bench(cast(BaseCommand, cmd), _run_args())
+        results = cmd.metrics.sections["results"].values
+        assert results["valid"] == "yes"
+        assert results["server_reuse_safe"] == "yes"
+
+    def test_register_timeout_fails_close(self, monkeypatch) -> None:
+        cmd = _CapturingCommand()
+        recorder: list = []
+        self._patch(monkeypatch, register=False, recorder=recorder)
+        with pytest.raises(SystemExit) as ei:
+            sv_cmd.run_server_bench(cast(BaseCommand, cmd), _run_args())
+        assert ei.value.code == 1
+        results = cmd.metrics.sections["results"].values
+        assert results["valid"] == "no"
+        assert results["server_reuse_safe"] == "no"
+        # Workload never started, but teardown still attempted UNREGISTER.
+        assert not any(e.startswith("process:") for e in recorder)
+        assert "unregister" in recorder
+
+    def test_unregister_timeout_invalidates_and_flags_unsafe(self, monkeypatch) -> None:
+        cmd = _CapturingCommand()
+        self._patch(monkeypatch, unregister=False)
+        with pytest.raises(SystemExit) as ei:
+            sv_cmd.run_server_bench(cast(BaseCommand, cmd), _run_args())
+        assert ei.value.code == 1
+        results = cmd.metrics.sections["results"].values
+        # An unconfirmed cleanup invalidates the run AND flags the server, and
+        # the performance summary is suppressed.
+        assert results["valid"] == "no"
+        assert results["server_reuse_safe"] == "no"
+        assert "cold_lookup" not in cmd.metrics.sections
+
+    def test_missing_checksum_invalidates(self, monkeypatch) -> None:
+        cmd = _CapturingCommand()
+
+        def _no_checksum(pass_label: str) -> RequestResult:
+            result = _ok_pair_result(pass_label)
+            result.checksums = None  # endpoint / hashing unavailable
+            return result
+
+        self._patch(monkeypatch, process=_no_checksum)
+        with pytest.raises(SystemExit) as ei:
+            sv_cmd.run_server_bench(cast(BaseCommand, cmd), _run_args())
+        assert ei.value.code == 1
+        results = cmd.metrics.sections["results"].values
+        assert results["valid"] == "no"
+        # "unable to verify" is not "verified": no performance summary.
+        assert "cold_lookup" not in cmd.metrics.sections
+
+    def test_zero_request_range_is_invalid(self, monkeypatch) -> None:
+        cmd = _CapturingCommand()
+        self._patch(monkeypatch)
+        with pytest.raises(SystemExit) as ei:
+            sv_cmd.run_server_bench(cast(BaseCommand, cmd), _run_args(start=5, end=5))
+        assert ei.value.code == 1
+        results = cmd.metrics.sections["results"].values
+        assert results["valid"] == "no"
+
+    def test_transfer_timeout_flags_server_unsafe(self, monkeypatch) -> None:
+        # A STORE / RETRIEVE timeout is submit-then-unknown: invalid AND the
+        # server is unsafe to reuse (unlike a definite store/retrieve_failed).
+        def _timeout(pass_label: str) -> RequestResult:
+            if pass_label == "cold":
+                return RequestResult(
+                    total_chunks=2,
+                    failure="STORE timeout (seq 0, cold pass)",
+                    server_tainted=True,
+                )
+            return _ok_pair_result(pass_label)
+
+        cmd = _CapturingCommand()
+        self._patch(monkeypatch, process=_timeout)
+        with pytest.raises(SystemExit) as ei:
+            sv_cmd.run_server_bench(cast(BaseCommand, cmd), _run_args())
+        assert ei.value.code == 1
+        results = cmd.metrics.sections["results"].values
+        assert results["valid"] == "no"
+        assert results["server_reuse_safe"] == "no"

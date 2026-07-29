@@ -700,6 +700,24 @@ mismatch between producer and consumer surfaces as a loud
 ``CHECKSUM MISMATCH`` log line.
 
 
+Run validity and failure handling
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The benchmark is *fail-close*: it never reports latency for a run it cannot
+vouch for. A successful run prints its usual per-operation summary with
+``Valid: yes`` and exits ``0``. Otherwise:
+
+* A ``LOOKUP`` / prefetch-poll / ``STORE`` / ``RETRIEVE`` failure or timeout,
+  or a checksum mismatch, marks the run **invalid**: the performance summary
+  is suppressed (``Valid: no``) and the command exits non-zero, so a broken
+  run is never mistaken for a fast one.
+* If a cleanup RPC cannot be confirmed -- an unacknowledged ``END_SESSION`` or
+  ``UNREGISTER_KV_CACHE`` -- the run additionally reports
+  ``Server reuse safe: no``: the dedicated server may still hold residual
+  state and should be restarted before the next run.
+* ``Ctrl-C`` stops the run, tears the session down, and exits ``130``.
+
+
 Quick start
 ~~~~~~~~~~~
 
