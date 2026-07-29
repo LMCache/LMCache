@@ -47,8 +47,6 @@ except ImportError:
         "Skipping because StorageManager cannot be imported", allow_module_level=True
     )
 
-# Skip all tests in this module if CUDA is not available
-pytestmark = pytest.mark.cuda
 def should_use_lazy_alloc() -> bool:
     """Determine if lazy allocation should be used based on CUDA availability."""
     return torch_dev.is_available()

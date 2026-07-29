@@ -39,8 +39,6 @@ if not torch_dev.is_available():
         allow_module_level=True,
     )
 
-# Skip all tests in this module if CUDA is not available
-pytestmark = pytest.mark.cuda
 def should_use_lazy_alloc() -> bool:
     return torch_dev.is_available()
 

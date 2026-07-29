@@ -29,7 +29,6 @@ if not torch_dev.is_available():
     )
 
 nixl = pytest.importorskip("nixl")
-pytestmark = pytest.mark.cuda
 # Third Party
 import zmq  # noqa: E402
 

@@ -148,7 +148,6 @@ def create_interleaved_lookup_keys(
 # ==============================================================================
 
 
-@pytest.mark.cuda
 @pytest.mark.skipif(
     not torch_dev.is_available(),
     reason="Requires torch_device_type",
@@ -426,7 +425,6 @@ class TestStorageManagerTPLookup:
 # ==============================================================================
 
 
-@pytest.mark.cuda
 @pytest.mark.skipif(
     not torch_dev.is_available(),
     reason="Requires torch_device_type",
@@ -514,7 +512,6 @@ class TestStorageManagerTPStoreRetrieve:
 # ==============================================================================
 
 
-@pytest.mark.cuda
 @pytest.mark.skipif(
     not torch_dev.is_available(),
     reason="Requires torch_device_type",
@@ -645,7 +642,6 @@ class TestTPEdgeCases:
 # ==============================================================================
 
 
-@pytest.mark.cuda
 @pytest.mark.skipif(
     not torch_dev.is_available(),
     reason="Requires torch_device_type",
