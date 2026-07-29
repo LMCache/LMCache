@@ -66,6 +66,15 @@ logger = init_logger(__name__)
 
 T = TypeVar("T")
 
+# gRPC channel/server options. LMCache multiprocess is a loopback
+# (localhost TCP or unix socket) IPC boundary carrying KV cache
+# payloads that routinely exceed the 4 MiB default; disable both
+# caps so registers/stores never trip on message size.
+_GRPC_UNLIMITED_MSG_OPTS: list[tuple[str, int]] = [
+    ("grpc.max_send_message_length", -1),
+    ("grpc.max_receive_message_length", -1),
+]
+
 
 # ---------------------------------------------------------------------------
 # Typed rpc registry (proto messages as first-class citizens).
@@ -1795,7 +1804,7 @@ class MessageQueueClient:
         del context, transport  # legacy positional slots, no longer used
         target = _parse_grpc_url(server_url)
         self._server_url = server_url
-        self._channel = grpc.insecure_channel(target)
+        self._channel = grpc.insecure_channel(target, options=_GRPC_UNLIMITED_MSG_OPTS)
         self._stub = lmcache_mq_pb2_grpc.MessageQueueStub(self._channel)
 
     def submit_request(
@@ -2306,7 +2315,8 @@ class MessageQueueServer:
             ThreadPoolExecutor(
                 max_workers=self._grpc_max_workers,
                 thread_name_prefix="mq-grpc-server",
-            )
+            ),
+            options=_GRPC_UNLIMITED_MSG_OPTS,
         )
         servicer = _RequestHandlerServicer(self.handlers)
         lmcache_mq_pb2_grpc.add_MessageQueueServicer_to_server(servicer, server)
