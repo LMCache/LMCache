@@ -209,7 +209,8 @@ steps:
           ATTENTION_BACKEND: "auto"
           GPU_MEMORY_UTILIZATION: "0.85"
           MAX_WAIT_SECONDS: "600"
-          LIMIT: "100"
+          NUM_CONCURRENT: "1"
+          LIMIT: "10"
           CPU_BUFFER_SIZE: "200"
           # Force Engine-driven transfer path; also picked up by the script.
           LMCACHE_MP_TRANSFER_MODE: "engine_driven"
