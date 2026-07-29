@@ -173,7 +173,10 @@ def test_cudaipc_wrapper_multiprocess_serialization():
     for i in range(num_tensors):
         # Create a tensor with known values
         tensor = torch.full(
-            (2, 3), fill_value=float(i + 1), dtype=torch.float32, device=torch_device_type
+            (2, 3),
+            fill_value=float(i + 1),
+            dtype=torch.float32,
+            device=torch_device_type,
         )
         tensors.append(tensor)
         wrapper = CudaIPCWrapper(tensor)

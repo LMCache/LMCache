@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Generator
+from typing import Any, Generator
 import multiprocessing as mp
 import os
 import time
@@ -44,11 +44,6 @@ pytestmark = pytest.mark.cuda
 
 
 def _has_working_new_shared_cuda() -> bool:
-    if not torch_dev.is_available():
-        print(
-            f"{torch_device_type.upper()} is not available, skipping tests that require shared storage"
-        )
-        return False
     try:
         buf = torch.empty(1024, device=torch_device_type)
         share_fn = getattr(buf.untyped_storage(), f"_share_{torch_device_type}_", None)
@@ -60,9 +55,19 @@ def _has_working_new_shared_cuda() -> bool:
         return False
 
 
+if not torch_dev.is_available():
+    pytest.skip(
+        f"requires available {torch_device_type} runtime",
+        allow_module_level=True,
+    )
+
+
 if not _has_working_new_shared_cuda():
     pytest.skip(
-        f"new_shared_{torch_device_type} is not available or not working on this system",
+        (
+            f"new_shared_{torch_device_type} is not available or not "
+            "working on this system"
+        ),
         allow_module_level=True,
     )
 
@@ -192,7 +197,7 @@ def store_keys(
     keys: list[IPCCacheServerKey],
     instance_id: int,
     gpu_block_ids: list[int],
-    event: object,
+    event: Any,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> None:
     """Store keys one at a time using the single-key API."""
@@ -214,7 +219,7 @@ def retrieve_keys(
     keys: list[IPCCacheServerKey],
     instance_id: int,
     gpu_block_ids: list[int],
-    event: object,
+    event: Any,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> list[bool]:
     """Retrieve keys one at a time using the single-key API."""
