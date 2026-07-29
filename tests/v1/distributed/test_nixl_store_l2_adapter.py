@@ -66,6 +66,40 @@ PAGE_SIZE = 4096  # 4 KB per page
 NUM_BUFFER_PAGES = 20  # pages in the registered memory buffer
 POOL_SIZE = 20  # number of storage descriptors to pre-allocate
 
+
+def _has_posix_runtime_backend() -> bool:
+    tmp_dir = tempfile.mkdtemp(prefix="nixl_l2_probe_")
+    buffer = torch.empty(PAGE_SIZE, dtype=torch.uint8, device="cpu")
+    l1_memory = L1MemoryDesc(
+        ptr=buffer.data_ptr(),
+        size=buffer.numel(),
+        align_bytes=PAGE_SIZE,
+    )
+    config = NixlStoreL2AdapterConfig(
+        backend="POSIX",
+        backend_params={"file_path": tmp_dir, "use_direct_io": "false"},
+        pool_size=1,
+    )
+    adpt = None
+    try:
+        adpt = NixlStoreL2Adapter(config, l1_memory)
+        return True
+    except Exception as exc:
+        if "NIXL_ERR_NOT_FOUND" in str(exc):
+            return False
+        raise
+    finally:
+        if adpt is not None:
+            adpt.close()
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+if not _has_posix_runtime_backend():
+    pytest.skip(
+        "NIXL POSIX backend not available in this environment",
+        allow_module_level=True,
+    )
+
 # =============================================================================
 # Test Helpers
 # =============================================================================
