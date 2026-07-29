@@ -19,7 +19,7 @@ if not hasattr(lmc_ops, "record_event_on_stream"):
 cupy = pytest.importorskip("cupy", reason="cupy required")  # noqa: E402
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_device_type  # noqa: E402
 from lmcache.v1.mp_observability.event import Event, EventType  # noqa: E402
 from lmcache.v1.mp_observability.event_bus import (  # noqa: E402
     EventBus,

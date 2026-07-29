@@ -391,7 +391,6 @@ class TestEventBusIntegration:
         assert _total_count(_STORE_METRIC) == count_before + 1
         attrs = _attrs_of_nonzero_dps(_STORE_METRIC)
         assert any(
-            a.get("engine_id") == "9"
-            and a.get("device") == f"{torch_device_type}:1"
+            a.get("engine_id") == "9" and a.get("device") == f"{torch_device_type}:1"
             for a in attrs
         )

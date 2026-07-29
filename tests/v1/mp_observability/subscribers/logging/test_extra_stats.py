@@ -184,21 +184,13 @@ class TestExtraStatsLoggingSubscriber:
         messages = handler.messages()
         assert (
             len(
-                [
-                    m
-                    for m in messages
-                    if f"[{torch_device_type}:0]" in m and "last" in m
-                ]
+                [m for m in messages if f"[{torch_device_type}:0]" in m and "last" in m]
             )
             == 1
         )
         assert (
             len(
-                [
-                    m
-                    for m in messages
-                    if f"[{torch_device_type}:1]" in m and "last" in m
-                ]
+                [m for m in messages if f"[{torch_device_type}:1]" in m and "last" in m]
             )
             == 1
         )
