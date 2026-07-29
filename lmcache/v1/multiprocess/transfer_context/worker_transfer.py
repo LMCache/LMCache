@@ -476,7 +476,9 @@ class LMCacheDrivenTransferContext(TransferContext):
         engine_group_infos: Sequence[EngineGroupInfo] = (),
     ) -> None:
         # First Party
-        from lmcache.integration.vllm.vllm_multi_process_adapter import wrap_kv_caches
+        from lmcache.integration.vllm.vllm_multi_process_adapter import (  # type: ignore[attr-defined]
+            wrap_kv_caches,
+        )
 
         self._mq_client = mq_client
         self._send_request = send_request

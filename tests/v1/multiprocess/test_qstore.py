@@ -15,6 +15,9 @@ import time
 import pytest
 
 # First Party
+from lmcache.v1.multiprocess import server as server_mod
+from lmcache.v1.multiprocess.config import MPServerConfig
+from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
 from lmcache.v1.multiprocess.modules.experimental import qstore as qstore_mod
 from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import ContextEntry
@@ -215,3 +218,82 @@ def test_store_q_block_id_underflow_fails_closed(stub_device) -> None:
     assert stub_device[0].records == 1
     cast(MagicMock, ctx.storage_manager.reserve_write).assert_not_called()
     cast(MagicMock, ctx.event_bus.publish).assert_not_called()
+
+
+class _FakeLMCacheDriven:
+    def __init__(self, ctx) -> None:
+        self.ctx = ctx
+
+
+class _FakeEngineDriven:
+    def __init__(self, ctx) -> None:
+        self.ctx = ctx
+
+
+class _FakeQStore:
+    def __init__(self, ctx) -> None:
+        self.ctx = ctx
+
+
+@pytest.fixture
+def stub_server_modules(monkeypatch):
+    """Stub the server's module constructors. Returns the ManagementModule mock.
+    The transfer modules stay real classes: _build_modules isinstance-checks
+    them to pick liveness targets and the lmcache-driven module."""
+    monkeypatch.setattr(server_mod, "LookupModule", lambda ctx: MagicMock())
+    monkeypatch.setattr(server_mod, "P2PController", lambda *a, **kw: MagicMock())
+    monkeypatch.setattr(server_mod, "LMCacheDrivenTransferModule", _FakeLMCacheDriven)
+    monkeypatch.setattr(server_mod, "EngineDrivenTransferModule", _FakeEngineDriven)
+    monkeypatch.setattr(server_mod, "QStoreModule", _FakeQStore)
+    management = MagicMock(name="ManagementModule")
+    monkeypatch.setattr(server_mod, "ManagementModule", management)
+    return management
+
+
+def _build(stub_server_modules, **config) -> list:
+    return server_mod._build_modules(
+        MagicMock(name="ctx"), MPServerConfig(**config), MagicMock(url="")
+    )
+
+
+def test_server_rejects_an_unknown_experimental_module(stub_server_modules) -> None:
+    """Check that the server rejects an unknown experimental module.
+    Only 'transfer_query' is supported right now."""
+    with pytest.raises(ValueError, match="Unknown --enable"):
+        _build(stub_server_modules, enable=["query"])
+
+
+def test_server_requires_lmcache_driven_transfer(stub_server_modules) -> None:
+    """Check that the server rejects a request to enable transfer_query when the
+    transfer mode is not lmcache-driven."""
+    with pytest.raises(ValueError, match="lmcache_driven"):
+        _build(
+            stub_server_modules,
+            enable=[TRANSFER_QUERY],
+            supported_transfer_mode="engine_driven",
+        )
+
+
+def test_server_builds_q_store_module(stub_server_modules) -> None:
+    """Check that the server builds the Q store module and puts it to the
+    ManagementModule."""
+    modules = _build(
+        stub_server_modules,
+        enable=[TRANSFER_QUERY],
+        supported_transfer_mode="lmcache_driven",
+    )
+
+    assert any(isinstance(m, _FakeQStore) for m in modules)
+    kwargs = stub_server_modules.call_args.kwargs
+    assert kwargs["experimental_transfer"] == [TRANSFER_QUERY]
+    assert any(isinstance(t, _FakeQStore) for t in kwargs["liveness_targets"])
+
+
+def test_server_builds_nothing_when_no_feature_is_enabled(
+    stub_server_modules,
+) -> None:
+    """Check that the server builds nothing when no feature is enabled."""
+    modules = _build(stub_server_modules)
+
+    assert not any(isinstance(m, _FakeQStore) for m in modules)
+    assert stub_server_modules.call_args.kwargs["experimental_transfer"] == []
