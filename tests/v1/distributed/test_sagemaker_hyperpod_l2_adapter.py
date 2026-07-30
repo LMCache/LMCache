@@ -745,3 +745,88 @@ def test_copy_discards_result_when_lease_expires_mid_copy(
     finally:
         shm.close()
         shm.unlink()
+
+
+def test_client_attach_does_not_unlink_segment_on_process_exit() -> None:
+    """Attach-only clients must never delete the daemon-owned segment.
+
+    CPython's multiprocessing resource tracker registers even attach-only
+    shared-memory segments and unlinks them at interpreter shutdown.
+    Against ai-toolkit's host-owned arena that deletes the node-local
+    cache for every client on the node (reproduced on HyperPod under
+    ``hostIPC``). The client therefore attaches via a plain read-only
+    ``mmap``, which involves no tracker: a client process exiting —
+    even without calling ``close()`` — must leave the segment intact.
+    """
+    # Standard
+    import os
+    import subprocess
+    import sys
+
+    if not os.path.isdir("/dev/shm"):
+        pytest.skip("requires /dev/shm (Linux)")
+
+    shm = shared_memory.SharedMemory(create=True, size=4096)
+    try:
+        shm.buf[:5] = b"hello"
+        script = (
+            "from lmcache.v1.distributed.l2_adapters.sagemaker_hyperpod_client "
+            "import SageMakerHyperPodClient\n"
+            "client = SageMakerHyperPodClient(\n"
+            f"    url='sagemaker-hyperpod://127.0.0.1:1',\n"
+            f"    shared_memory_name={shm.name!r},\n"
+            ")\n"
+            "assert client.report_status()['shared_memory_current'] is True\n"
+            "# exit WITHOUT close(): the worst case for tracker cleanup\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert result.returncode == 0, result.stderr
+        path = os.path.join("/dev/shm", shm.name.lstrip("/"))
+        assert os.path.exists(path), (
+            "client process exit deleted the daemon-owned segment "
+            "(resource tracker regression)"
+        )
+    finally:
+        shm.close()
+        shm.unlink()
+
+
+def test_client_arena_mapping_is_read_only_on_linux() -> None:
+    """On Linux the segment mapping must be read-only: the client never
+    writes to daemon-owned memory (writes go through the daemon's HTTP
+    API).
+
+    The read-only property is a memory-protection guarantee with no
+    public write path by design, so this test exercises the mapping
+    helper directly.
+    """
+    # Standard
+    import os
+
+    # First Party
+    from lmcache.v1.distributed.l2_adapters.sagemaker_hyperpod_client import (
+        _ReadOnlySharedMemoryMapping,
+    )
+
+    if not os.path.isdir("/dev/shm"):
+        pytest.skip("requires /dev/shm (Linux)")
+
+    shm = shared_memory.SharedMemory(create=True, size=64)
+    try:
+        shm.buf[:5] = b"hello"
+        mapping = _ReadOnlySharedMemoryMapping(shm.name)
+        try:
+            assert mapping.size == 64
+            assert bytes(mapping.buf[:5]) == b"hello"
+            with pytest.raises(TypeError):
+                mapping.buf[0:1] = b"x"
+        finally:
+            mapping.close()
+    finally:
+        shm.close()
+        shm.unlink()

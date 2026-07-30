@@ -55,6 +55,7 @@ from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
     get_event_ipc_backend,
 )
+from lmcache.v1.platform.kv_wrap import wrap_kv_caches
 
 logger = init_logger(__name__)
 
@@ -759,6 +760,7 @@ class TransferContext(ABC):
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
+        engine_type: EngineType = EngineType.VLLM,
     ) -> None:
         """Register KV caches with the server and wait for ACK.
 
@@ -773,12 +775,89 @@ class TransferContext(ABC):
             send_request: Request sender callable used to issue MQ requests.
             layout_hints: Optional inference-engine-provided layout hints.
             engine_group_infos: LMCache-owned engine KV cache group metadata.
+            engine_type: Serving engine that produced the caches. Only
+                consumed by the handle path; adapters should pass their
+                own :class:`EngineType` so this transport stays engine-
+                neutral. Defaults to :attr:`EngineType.VLLM` for
+                backwards compatibility.
 
         Raises:
             TimeoutError: If server registration does not complete before
                 ``mq_timeout``.
             RuntimeError: If a concrete context cannot initialize.
         """
+
+    def register_q(
+        self,
+        instance_id: int,
+        q_caches: dict[str, torch.Tensor],
+        model_name: str,
+        world_size: int,
+        blocks_in_chunk: int,
+        mq_client: MessageQueueClient,
+        mq_timeout: float,
+        send_request: SendRequest,
+        layout_hints: LayoutHints | None = None,
+        engine_group_infos: Sequence[EngineGroupInfo] = (),
+    ) -> None:
+        """Register the paged Q ring with the server under the same worker
+        instance_id but different model_name (model_name##query).
+
+        Args:
+            instance_id: Worker process instance identifier.
+            q_caches: Worker Q cache tensors keyed by layer name.
+            model_name: Model name used by cache keys (model_name##query).
+            world_size: KV world size.
+            blocks_in_chunk: Number of Q ring blocks per LMCache chunk.
+            mq_client: Message queue client used to communicate with server.
+            mq_timeout: Timeout in seconds for synchronous request wait.
+            send_request: Request sender callable used to issue MQ requests.
+            layout_hints: Optional inference-engine-provided layout hints.
+            engine_group_infos: LMCache-owned engine KV cache group metadata.
+
+        Raises:
+            NotImplementedError: If the concrete transport does not support the
+                Q ring (now only lmcache-driven).
+            TimeoutError: If server registration does not complete before
+                ``mq_timeout``.
+            RuntimeError: If a concrete context cannot initialize.
+        """
+        raise NotImplementedError(
+            "Q ring registration is not supported by this transfer context"
+        )
+
+    def submit_q_store(
+        self,
+        request_id: str,
+        key: Any,
+        instance_id: int,
+        q_caches: dict[str, torch.Tensor],
+        block_ids: list[list[int]],
+        event: IPCEvent,
+        blocks_in_chunk: int,
+    ) -> MessagingFuture:
+        """Submit a Q ring store request and return a completion future.
+
+        Args:
+            request_id: External request identifier.
+            key: LMCache key for the Q store range (query-specific model_name).
+            instance_id: Worker process instance identifier (shared with KV).
+            q_caches: Q ring tensors keyed by layer name.
+            block_ids: Q ring block IDs to store, indexed by LMCache KV group id.
+            event: Synchronization event object.
+            blocks_in_chunk: Number of Q ring blocks per LMCache chunk.
+
+        Returns:
+            A future compatible with adapter-side ``query()``/``result()`` flow.
+
+        Raises:
+            NotImplementedError: If the concrete transport does not support the
+                Q ring (only the lmcache-driven path does).
+            RuntimeError: If register_q() was not called first.
+        """
+        raise NotImplementedError(
+            "Q ring store is not supported by this transfer context"
+        )
 
     @abstractmethod
     def submit_store(
@@ -883,6 +962,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
+        engine_type: EngineType = EngineType.VLLM,
     ) -> None:
         """Register the worker KV cache with the LMCache server.
 
@@ -897,14 +977,12 @@ class LMCacheDrivenTransferContext(TransferContext):
             send_request: Request sender used by this context.
             layout_hints: Optional KV-layout metadata.
             engine_group_infos: Optional engine KV-group metadata.
+            engine_type: Serving engine that produced the caches.
 
         Raises:
             RuntimeError: If event IPC is unsupported for the KV-cache device.
             ValueError: If ``kv_caches`` is empty.
         """
-        # First Party
-        from lmcache.integration.vllm.vllm_multi_process_adapter import wrap_kv_caches
-
         device = _get_kv_device(kv_caches)
         event_backend = get_event_ipc_backend(device)
         event_backend.check_event_support(device)
@@ -919,7 +997,7 @@ class LMCacheDrivenTransferContext(TransferContext):
                 wrap_kv_caches(kv_caches),
                 model_name,
                 world_size,
-                EngineType.VLLM,
+                engine_type,
                 layout_hints,
                 list(engine_group_infos),
             ],
@@ -927,6 +1005,41 @@ class LMCacheDrivenTransferContext(TransferContext):
         future.result(timeout=mq_timeout)
         self._device = device
         self._event_backend = event_backend
+
+    def register_q(
+        self,
+        instance_id: int,
+        q_caches: dict[str, torch.Tensor],
+        model_name: str,
+        world_size: int,
+        _blocks_in_chunk: int,
+        mq_client: MessageQueueClient,
+        mq_timeout: float,
+        send_request: SendRequest,
+        layout_hints: LayoutHints | None = None,
+        engine_group_infos: Sequence[EngineGroupInfo] = (),
+    ) -> None:
+        # First Party
+        from lmcache.integration.vllm.vllm_multi_process_adapter import (  # type: ignore[attr-defined]
+            wrap_kv_caches,
+        )
+
+        self._mq_client = mq_client
+        self._send_request = send_request
+        future = send_request(
+            mq_client,
+            RequestType.REGISTER_Q_CACHE,
+            [
+                instance_id,
+                wrap_kv_caches(q_caches),
+                model_name,
+                world_size,
+                EngineType.VLLM,
+                layout_hints,
+                list(engine_group_infos),
+            ],
+        )
+        future.result(timeout=mq_timeout)
 
     def submit_store(
         self,
@@ -971,6 +1084,33 @@ class LMCacheDrivenTransferContext(TransferContext):
         return self._send_request(
             self._mq_client,
             RequestType.STORE,
+            [key, instance_id, block_ids, event_ipc_handle],
+        ).to_device_future(device=self._device)
+
+    def submit_q_store(
+        self,
+        _request_id: str,
+        key: Any,
+        instance_id: int,
+        _q_caches: dict[str, torch.Tensor],
+        block_ids: list[list[int]],
+        event: IPCEvent,
+        _blocks_in_chunk: int,
+    ) -> MessagingFuture:
+        if (
+            self._mq_client is None
+            or self._send_request is None
+            or self._device is None
+            or self._event_backend is None
+        ):
+            raise RuntimeError(
+                "LMCache-driven transfer context is not registered. "
+                "Call register() before submit_q_store()."
+            )
+        event_ipc_handle = self._event_backend.export_event(event, self._device)
+        return self._send_request(
+            self._mq_client,
+            RequestType.STORE_Q,
             [key, instance_id, block_ids, event_ipc_handle],
         ).to_device_future(device=self._device)
 
@@ -1072,6 +1212,7 @@ class EngineDrivenTransferContext(TransferContext):
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
+        engine_type: EngineType = EngineType.VLLM,
     ) -> None:
         """Register KV caches with the non-GPU context server.
 

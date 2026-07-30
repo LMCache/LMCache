@@ -40,6 +40,12 @@ import torch  # noqa: F401 — must be imported before lmcache.c_ops
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.periodic_thread import (
+    PeriodicThread,
+    PeriodicThreadRegistry,
+    ThreadLevel,
+    ThreadRunSummary,
+)
 import lmcache.c_ops as _lmc_ops
 
 logger = init_logger(__name__)
@@ -53,60 +59,57 @@ class _Registration(msgspec.Struct):
     decoder: msgspec.msgpack.Decoder
 
 
-class DeviceHostFuncDispatcher:
+class DeviceHostFuncDispatcher(PeriodicThread):
     """Drain buffered C++ completions and dispatch each payload to the handler
     registered for its ``kind``. One instance per process; owned by
     ``MPCacheServer``."""
 
     def __init__(self, drain_interval_seconds: float = 0.005) -> None:
+        super().__init__(
+            name="DeviceHostFuncDispatcher",
+            interval=drain_interval_seconds,
+            level=ThreadLevel.HIGH,
+            init_wait=0.0,
+        )
         self._registry: dict[str, _Registration] = {}
-        self._lock = threading.Lock()
-        self._stop_flag = threading.Event()
-        self._wake = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._drain_interval = drain_interval_seconds
+        self._registry_lock = threading.Lock()
         self._dispatched_count = 0
         self._exception_counts: dict[str, int] = {}
+        PeriodicThreadRegistry.get_instance().register(self)
 
     def register(self, kind: str, handler: DeviceHostFunc, payload_type: Any) -> None:
         """Register *handler* for *kind*. ``payload_type`` is the msgspec
         decode type for the whole payload (e.g. ``list[ObjectKey]``)."""
-        with self._lock:
+        with self._registry_lock:
             self._registry[kind] = _Registration(
                 handler=handler,
                 decoder=msgspec.msgpack.Decoder(type=payload_type),
             )
 
-    def start(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
+    def start(self) -> None:  # type: ignore[override]
+        if self.is_running:
             return
-        self._stop_flag.clear()
-        self._thread = threading.Thread(
-            target=self._run,
-            daemon=True,
-            name="DeviceHostFuncDispatcher",
-        )
-        self._thread.start()
+        super().start()
 
-    def stop(self) -> None:
-        self._stop_flag.set()
-        self._wake.set()
-        if self._thread is not None and self._thread.is_alive():
-            self._thread.join()
+    def stop(self, timeout: float = 5.0) -> None:
+        super().stop(timeout=timeout)
+        PeriodicThreadRegistry.get_instance().unregister(self.name)
         self._drain_once()
 
     def dispatched_count(self) -> int:
         return self._dispatched_count  # single-writer; read is GIL-atomic
 
     def handler_exception_counts(self) -> dict[str, int]:
-        with self._lock:
+        with self._registry_lock:
             return dict(self._exception_counts)
 
-    def _run(self) -> None:
-        while not self._stop_flag.is_set():
-            self._wake.wait(timeout=self._drain_interval)
-            self._wake.clear()
-            self._drain_once()
+    def _execute(self) -> ThreadRunSummary:
+        before = self._dispatched_count
+        self._drain_once()
+        return ThreadRunSummary(
+            success=True,
+            message="dispatched=%d" % (self._dispatched_count - before),
+        )
 
     def _drain_once(self) -> None:
         # Broad except keeps the drain thread alive across native/handler errors.
@@ -117,7 +120,7 @@ class DeviceHostFuncDispatcher:
             return
         if not completions:
             return
-        with self._lock:
+        with self._registry_lock:
             registry = dict(self._registry)
         for kind, encoded_payload in completions:
             reg = registry.get(kind)
@@ -132,7 +135,7 @@ class DeviceHostFuncDispatcher:
                 reg.handler(decoded)
                 self._dispatched_count += 1
             except Exception:
-                with self._lock:
+                with self._registry_lock:
                     self._exception_counts[kind] = (
                         self._exception_counts.get(kind, 0) + 1
                     )

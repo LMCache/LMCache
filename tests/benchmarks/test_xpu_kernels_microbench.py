@@ -13,13 +13,16 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.platform import torch_ops as F
 
-pytestmark = pytest.mark.skipif(
-    torch_device_type != "xpu",
-    reason="Intel XPU not available",
-)
+if not (torch_device_type == "xpu" and torch_dev.is_available()):
+    pytest.skip(
+        "Requires available xpu runtime",
+        allow_module_level=True,
+    )
+
+pytestmark = pytest.mark.xpu
 
 
 @pytest.fixture(scope="module")
