@@ -37,12 +37,12 @@ class Tier(str, enum.Enum):
     ALL = "all"
 
 
-class L1Backend(str, enum.Enum):
+class L1BackendType(str, enum.Enum):
     """The storage medium backing the L1 tier (a closed set, unlike L2
     backends, which are an open adapter-type registry).
 
     Subclasses ``str`` so it compares equal to and serializes as the bare
-    wire value (``L1Backend.DRAM == "dram"``).
+    wire value (``L1BackendType.DRAM == "dram"``).
     """
 
     DRAM = "dram"

@@ -12,7 +12,6 @@ import os
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import L1Backend
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
     L2AdaptersConfig,
@@ -204,25 +203,6 @@ class L1ManagerConfig:
 
     read_ttl_seconds: int = field(default=300)
     """ Time to live for each object's read lock. Default is 300s (5 minutes). """
-
-
-def l1_primary_backend(config: L1ManagerConfig) -> L1Backend:
-    """Return the primary storage medium of the configured L1 tier.
-
-    Hybrid DRAM+DAX reports ``DEVDAX``; per-object attribution comes
-    from ``L1ManagerProtocol.get_backend`` at runtime.
-
-    Args:
-        config: The L1 manager configuration.
-
-    Returns:
-        The configured primary medium.
-    """
-    if config.gds_l1_config is not None:
-        return L1Backend.GDS
-    if config.memory_config.devdax_path:
-        return L1Backend.DEVDAX
-    return L1Backend.DRAM
 
 
 @dataclass

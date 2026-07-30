@@ -76,25 +76,31 @@ listener plumbing or a dedicated flush task:
 
 - **Producers.** `L1Manager` publishes `l1.write.finished`,
   `l1.write_finished_and_read_reserved`, `l1.keys.evicted` (all delete
-  paths), `l1.read.finished`, and the new `l1.keys.accessed`
-  (`touch_keys`). The placement-bearing events carry
-  `meta: list[L1ObjectMeta]` — each object's `size_bytes`
-  (`MemoryObj.get_size()`) and its `L1Backend` medium from
-  `L1ManagerProtocol.get_backend()` (the Device-DAX tier resolves it per
-  object via `DevDaxMemoryAllocator.is_devdax_obj`, i.e.
-  `MemoryObj.parent()`) — so a hybrid DRAM+DAX L1 reports exactly where
-  each object landed, and deletes target the same placement identity
-  `(instance, tier, backend)` their store reported. The L2 base
-  adapter's listener-notify funnel publishes the new `l2.keys.stored`
+  paths), and the new `l1.keys.accessed` (`touch_keys` — the MP request
+  end's unified touch of a request's retrieved and stored keys; the
+  subscriber deliberately does **not** consume `l1.read.finished`,
+  which would duplicate those accesses). The placement-bearing events
+  (stores and evictions) carry `meta: list[L1ObjectMeta]` — each
+  object's `size_bytes` (`MemoryObj.get_size()`) and its
+  `L1BackendType` medium from `L1ManagerProtocol.get_backend()` (the
+  Device-DAX tier resolves it per object via
+  `DevDaxMemoryAllocator.is_devdax_obj`, i.e. `MemoryObj.parent()`) —
+  so a hybrid DRAM+DAX L1 reports exactly where each object landed,
+  and deletes target the same placement identity `(instance, tier,
+  backend)` their store reported. The L2 base adapter's
+  listener-notify funnel publishes the new `l2.keys.stored`
   (`keys`+`sizes`+`backend`), `l2.keys.accessed`, and `l2.keys.deleted`
   events; the backend name is the registered adapter type, stamped by
   the storage manager via `set_backend_name` at build time — so
   **runtime-added adapters emit automatically**.
 - **`CacheEventSubscriber`** maps those events onto the directory
-  vocabulary (writes → `STORE` split per L1 medium, evictions/deletes →
-  `DELETE`, reads/touches → `ACCESS` under the primary medium from
-  `l1_primary_backend` — recency never creates placements, so that
-  label is cosmetic).
+  vocabulary (writes → `STORE`, evictions/deletes → `DELETE`, split per
+  actual L1 medium from the event metadata; touches → `ACCESS`).
+  `ACCESS` batches carry an **empty backend**: the directory only
+  refreshes key-level recency on access, so there is no placement
+  identity to name — the vocabulary requires a non-empty backend for
+  `store`/`delete` only. The subscriber is single-threaded by design —
+  everything runs on the bus's drain thread, so it needs no locking.
 - **Threading.** The bus dispatches on one drain thread, which is
   exactly the per-instance FIFO the directory needs. The subscriber
   self-paces delivery: recording flushes when `flush_interval` has
@@ -115,7 +121,7 @@ listener plumbing or a dedicated flush task:
 
 ## L1 media
 
-L1 media are a closed set, hence the `L1Backend` enum
+L1 media are a closed set, hence the `L1BackendType` enum
 (`distributed/api.py`: `DRAM`, `DEVDAX`, `GDS`); L2 backends stay
 strings because adapter types are an open registry (plugins register
 new type names).

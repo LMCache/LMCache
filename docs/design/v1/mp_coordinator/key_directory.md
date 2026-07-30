@@ -45,8 +45,9 @@ index (I2) deletes O(1) once I2 lands (M2).
 deletes too). Removing an absent placement/key is a no-op. A key with no
 remaining placements is dropped from the directory.
 - `ACCESS` — refresh the key's `last_access` recency (max of batch `ts`);
-never creates records. `ts` is emitter wall-clock and is never compared
-across instances.
+never creates records, and carries no placement identity — its
+`backend` may be empty (`tier`/`backend` are ignored on apply). `ts` is
+emitter wall-clock and is never compared across instances.
 
 ## Structures
 

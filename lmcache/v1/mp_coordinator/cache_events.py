@@ -13,7 +13,6 @@ emission thread or task. See
 # Standard
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-import threading
 import time
 
 # Third Party
@@ -21,7 +20,7 @@ import httpx
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import L1Backend, ObjectKey, Tier
+from lmcache.v1.distributed.api import L1BackendType, ObjectKey, Tier
 from lmcache.v1.distributed.internal_api import L1ObjectMeta
 from lmcache.v1.mp_coordinator.api import (
     CacheEventBatch,
@@ -126,14 +125,15 @@ class _PendingBatch:
 class CacheEventSubscriber(EventSubscriber):
     """Event-bus subscriber that emits the fleet cache-event stream.
 
+    Not thread-safe by design: every method runs on the bus's single
+    drain thread (``EventBus.stop()`` invokes :meth:`shutdown` only
+    after that thread has been joined), so no locking is needed.
+
     Args:
         sink: Transport that delivers flushed batches.
         instance_id: This MP server's id (sent with every batch).
         incarnation: This server process's incarnation (its start time);
             fences out placements reported before a restart.
-        access_backend: Label for L1 ``ACCESS`` batches (recency never
-            creates placements, so the label is cosmetic; see
-            ``l1_primary_backend``).
         flush_interval: Minimum seconds between event-driven flushes
             (must be >= 0).
 
@@ -146,7 +146,6 @@ class CacheEventSubscriber(EventSubscriber):
         sink: CacheEventSink,
         instance_id: str,
         incarnation: int,
-        access_backend: L1Backend,
         flush_interval: float = _DEFAULT_FLUSH_INTERVAL,
     ) -> None:
         if flush_interval < 0:
@@ -154,11 +153,9 @@ class CacheEventSubscriber(EventSubscriber):
         self._sink = sink
         self._instance_id = instance_id
         self._incarnation = incarnation
-        self._access_backend = access_backend.value
         self._flush_interval = flush_interval
         self._last_flush = time.monotonic()
         self._seq = 0
-        self._lock = threading.Lock()
         # Consecutive same-identity entries append to the last pending
         # batch; an identity change starts a new one (order-preserving).
         self._pending_batches: list[_PendingBatch] = []
@@ -169,7 +166,6 @@ class CacheEventSubscriber(EventSubscriber):
             EventType.L1_WRITE_FINISHED: self._on_l1_store,
             EventType.L1_WRITE_FINISHED_AND_READ_RESERVED: self._on_l1_store,
             EventType.L1_KEYS_EVICTED: self._on_l1_delete,
-            EventType.L1_READ_FINISHED: self._on_l1_access,
             EventType.L1_KEYS_ACCESSED: self._on_l1_access,
             EventType.L2_KEYS_STORED: self._on_l2_store,
             EventType.L2_KEYS_DELETED: self._on_l2_delete,
@@ -185,26 +181,25 @@ class CacheEventSubscriber(EventSubscriber):
 
         Publish failures are logged and the drained list is dropped.
         """
-        with self._lock:
-            if not self._pending_batches:
-                return
-            pending_batches = self._pending_batches
-            self._pending_batches = []
-            ts = time.time()
-            batches = [
-                CacheEventBatch(
-                    instance_id=self._instance_id,
-                    incarnation=self._incarnation,
-                    seq=self._seq + offset + 1,
-                    event_type=pending.event_type,
-                    tier=pending.tier,
-                    backend=pending.backend,
-                    entries=pending.entries,
-                    ts=ts,
-                )
-                for offset, pending in enumerate(pending_batches)
-            ]
-            self._seq += len(pending_batches)
+        if not self._pending_batches:
+            return
+        pending_batches = self._pending_batches
+        self._pending_batches = []
+        ts = time.time()
+        batches = [
+            CacheEventBatch(
+                instance_id=self._instance_id,
+                incarnation=self._incarnation,
+                seq=self._seq + offset + 1,
+                event_type=pending.event_type,
+                tier=pending.tier,
+                backend=pending.backend,
+                entries=pending.entries,
+                ts=ts,
+            )
+            for offset, pending in enumerate(pending_batches)
+        ]
+        self._seq += len(pending_batches)
         try:
             self._sink.publish(batches)
         except CacheEventPublishError as e:
@@ -234,10 +229,12 @@ class CacheEventSubscriber(EventSubscriber):
 
     def _on_l1_access(self, event: Event) -> None:
         keys: list[ObjectKey] = event.metadata["keys"]
+        # ACCESS refreshes key-level recency only; it carries no
+        # placement identity, so the backend is empty by contract.
         self._record(
             CacheEventType.ACCESS,
             Tier.L1,
-            self._access_backend,
+            "",
             [CacheEventEntry(key=key.to_encoded_object_key()) for key in keys],
         )
 
@@ -267,7 +264,7 @@ class CacheEventSubscriber(EventSubscriber):
         event's ``meta`` list (parallel to ``keys``)."""
         keys: list[ObjectKey] = event.metadata["keys"]
         metadata: list[L1ObjectMeta] = event.metadata["meta"]
-        by_backend: dict[L1Backend, list[CacheEventEntry]] = {}
+        by_backend: dict[L1BackendType, list[CacheEventEntry]] = {}
         for key, meta in zip(keys, metadata, strict=True):
             by_backend.setdefault(meta.backend, []).append(
                 CacheEventEntry(
@@ -300,24 +297,23 @@ class CacheEventSubscriber(EventSubscriber):
         """Buffer ``entries``, then flush if the flush interval elapsed."""
         if not entries:
             return
-        with self._lock:
-            last = self._pending_batches[-1] if self._pending_batches else None
-            if (
-                last is not None
-                and last.event_type == event_type
-                and last.tier == tier
-                and last.backend == backend
-            ):
-                last.entries.extend(entries)
-            else:
-                self._pending_batches.append(
-                    _PendingBatch(
-                        event_type=event_type,
-                        tier=tier,
-                        backend=backend,
-                        entries=list(entries),
-                    )
+        last = self._pending_batches[-1] if self._pending_batches else None
+        if (
+            last is not None
+            and last.event_type == event_type
+            and last.tier == tier
+            and last.backend == backend
+        ):
+            last.entries.extend(entries)
+        else:
+            self._pending_batches.append(
+                _PendingBatch(
+                    event_type=event_type,
+                    tier=tier,
+                    backend=backend,
+                    entries=list(entries),
                 )
+            )
         self._flush_if_due()
 
     def _flush_if_due(self) -> None:

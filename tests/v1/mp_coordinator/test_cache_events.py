@@ -14,13 +14,7 @@ import httpx
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import L1Backend, ObjectKey, Tier
-from lmcache.v1.distributed.config import (
-    GdsL1Config,
-    L1ManagerConfig,
-    L1MemoryManagerConfig,
-    l1_primary_backend,
-)
+from lmcache.v1.distributed.api import L1BackendType, ObjectKey, Tier
 from lmcache.v1.distributed.internal_api import L1ObjectMeta
 from lmcache.v1.mp_coordinator.api import (
     CacheEventBatch,
@@ -49,7 +43,9 @@ def _entry(hash_byte: int, size_bytes: int = 0) -> CacheEventEntry:
     )
 
 
-def _meta(size_bytes: int = 0, backend: L1Backend = L1Backend.DRAM) -> L1ObjectMeta:
+def _meta(
+    size_bytes: int = 0, backend: L1BackendType = L1BackendType.DRAM
+) -> L1ObjectMeta:
     return L1ObjectMeta(size_bytes=size_bytes, backend=backend)
 
 
@@ -82,7 +78,6 @@ def _subscriber(
         sink=sink,
         instance_id="node-a",
         incarnation=incarnation,
-        access_backend=L1Backend.DRAM,
         flush_interval=flush_interval,
     )
 
@@ -112,7 +107,7 @@ def test_l1_store_access_delete_events_map_to_batches():
             metadata={"keys": [_key(3)], "meta": [_meta(300)]},
         ),
         Event(
-            event_type=EventType.L1_READ_FINISHED,
+            event_type=EventType.L1_KEYS_ACCESSED,
             metadata={"keys": [_key(1)]},
         ),
         Event(
@@ -137,9 +132,12 @@ def test_l1_store_access_delete_events_map_to_batches():
     store, access, delete = batches
     assert [e.size_bytes for e in store.entries] == [100, 200, 300]
     assert len(access.entries) == 2
+    assert all(e.size_bytes == 0 for e in access.entries)  # ACCESS never sizes
+    assert access.backend == ""  # ACCESS carries no placement identity
     assert delete.entries[0].key == _key(3).to_encoded_object_key()
     assert delete.entries[0].size_bytes == 0
-    assert all(b.tier == Tier.L1 and b.backend == "dram" for b in batches)
+    assert all(b.tier == Tier.L1 for b in batches)
+    assert store.backend == "dram" and delete.backend == "dram"
     assert [b.seq for b in batches] == [1, 2, 3]
     assert all(b.instance_id == "node-a" and b.incarnation == 7 for b in batches)
 
@@ -157,15 +155,15 @@ def test_l1_events_split_batches_by_medium():
             metadata={
                 "keys": [_key(1), _key(2), _key(3)],
                 "meta": [
-                    _meta(100, L1Backend.DRAM),
-                    _meta(200, L1Backend.DEVDAX),
-                    _meta(300, L1Backend.DRAM),
+                    _meta(100, L1BackendType.DRAM),
+                    _meta(200, L1BackendType.DEVDAX),
+                    _meta(300, L1BackendType.DRAM),
                 ],
             },
         ),
         Event(
             event_type=EventType.L1_KEYS_EVICTED,
-            metadata={"keys": [_key(2)], "meta": [_meta(200, L1Backend.DEVDAX)]},
+            metadata={"keys": [_key(2)], "meta": [_meta(200, L1BackendType.DEVDAX)]},
         ),
     )
     subscriber.flush()
@@ -180,6 +178,33 @@ def test_l1_events_split_batches_by_medium():
     assert [e.size_bytes for e in dram_store.entries] == [100, 300]
     assert [e.size_bytes for e in devdax_store.entries] == [200]
     assert devdax_delete.entries[0].key == _key(2).to_encoded_object_key()
+
+
+def test_l1_access_batches_have_empty_backend():
+    """ACCESS refreshes key-level recency only, so its batches carry no
+    placement identity: the backend is empty by contract."""
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.L1_KEYS_ACCESSED,
+            metadata={"keys": [_key(1), _key(2)]},
+        ),
+    )
+    subscriber.flush()
+    [[batch]] = sink.published
+    assert batch.event_type == CacheEventType.ACCESS
+    assert batch.tier == Tier.L1
+    assert batch.backend == ""
+    assert all(e.size_bytes == 0 for e in batch.entries)
+
+
+def test_read_finished_is_not_consumed():
+    """L1_READ_FINISHED is covered by the request-end unified touch
+    (L1_KEYS_ACCESSED); consuming both would duplicate ACCESS events."""
+    subscriber = _subscriber(_RecordingSink())
+    assert EventType.L1_READ_FINISHED not in subscriber.get_subscriptions()
 
 
 def test_l2_events_map_with_backend_and_sizes():
@@ -408,34 +433,6 @@ def test_bus_stop_flushes_buffered_events():
     bus.stop()
     assert len(sink.published) == 1
     assert sink.closed is True
-
-
-# -- l1_backend_name -----------------------------------------------------------
-
-
-def test_l1_primary_backend_by_medium():
-    memory_config = L1MemoryManagerConfig(size_in_bytes=1 << 20, use_lazy=False)
-    assert l1_primary_backend(L1ManagerConfig(memory_config=memory_config)) == (
-        L1Backend.DRAM
-    )
-
-    devdax_config = L1MemoryManagerConfig(
-        size_in_bytes=1 << 20,
-        use_lazy=False,
-        devdax_path="/dev/dax0.0",
-        shm_name="",
-    )
-    assert l1_primary_backend(L1ManagerConfig(memory_config=devdax_config)) == (
-        L1Backend.DEVDAX
-    )
-
-    gds = GdsL1Config(file_location="/tmp/gds", size_in_bytes=1 << 20)
-    assert (
-        l1_primary_backend(
-            L1ManagerConfig(memory_config=memory_config, gds_l1_config=gds)
-        )
-        == L1Backend.GDS
-    )
 
 
 # -- HTTP sink end-to-end -------------------------------------------------------

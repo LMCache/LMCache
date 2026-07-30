@@ -18,7 +18,6 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     add_storage_manager_args,
     l1_exposes_single_memory_region,
-    l1_primary_backend,
     parse_args_to_config,
 )
 from lmcache.v1.mp_coordinator.cache_control.event_listener import L2EventListener
@@ -179,9 +178,6 @@ async def lifespan(app: FastAPI):
                 # Server start time: fences out placements this instance
                 # reported before a restart (its pools restarted empty).
                 incarnation=int(time.time()),
-                access_backend=l1_primary_backend(
-                    _configs["storage_manager"].l1_manager_config
-                ),
                 flush_interval=coordinator_config.event_flush_interval,
             )
         )

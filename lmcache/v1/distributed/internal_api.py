@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 import enum
 
 # First Party
-from lmcache.v1.distributed.api import L1Backend, ObjectKey
+from lmcache.v1.distributed.api import L1BackendType, ObjectKey
 
 
 @dataclass(frozen=True)
@@ -33,7 +33,7 @@ class L1ObjectMeta:
     """
 
     size_bytes: int
-    backend: L1Backend
+    backend: L1BackendType
 
 
 class EventListener(ABC):  # noqa: B024

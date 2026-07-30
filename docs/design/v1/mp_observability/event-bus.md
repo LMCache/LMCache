@@ -189,9 +189,10 @@ The bus additionally carries the **cache-event stream** for the coordinator's
 key directory (`mp_coordinator/cache_events.py`): eventually-consistent
 placement hints that tolerate loss by design (a dropped event surfaces as a
 ``seq`` gap and a resync flag), so bus semantics fit.  For that consumer the
-L1 store/evict events carry a ``meta`` list (``L1ObjectMeta``: per-object size
-and backing medium, parallel to ``keys``), ``touch_keys`` publishes
-``l1.keys.accessed``, and the L2 base adapter's listener-notify funnel
+L1 store/evict events carry a ``meta`` list (``L1ObjectMeta``: per-object
+size and backing medium, parallel to ``keys``), ``touch_keys`` publishes
+``l1.keys.accessed`` with keys only, and the L2 base adapter's
+listener-notify funnel
 publishes ``l2.keys.stored`` / ``l2.keys.accessed`` / ``l2.keys.deleted``
 (``keys`` + ``backend`` [adapter type name] + ``sizes`` for stores).  The
 subscriber batches inside its event callbacks on the drain thread and

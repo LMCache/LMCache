@@ -18,7 +18,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import L1Backend, MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -1017,7 +1017,7 @@ def test_hybrid_allocator_reports_per_object_medium(tmp_path):
 
 def test_hybrid_manager_get_backend_reports_per_object_medium(tmp_path):
     """DevDaxL1MemoryManager.get_backend maps the allocator's answer onto
-    the L1Backend enum for hybrid DRAM+DAX."""
+    the L1BackendType enum for hybrid DRAM+DAX."""
     path = _make_mmap_file(tmp_path)
     config = L1MemoryManagerConfig(
         size_in_bytes=2 * 4096,  # DRAM pool fits exactly two objects
@@ -1032,10 +1032,10 @@ def test_hybrid_manager_get_backend_reports_per_object_medium(tmp_path):
         assert err == L1Error.SUCCESS
         backends = [manager.get_backend(obj) for obj in objs]
         assert backends == [
-            L1Backend.DRAM,
-            L1Backend.DRAM,
-            L1Backend.DEVDAX,
-            L1Backend.DEVDAX,
+            L1BackendType.DRAM,
+            L1BackendType.DRAM,
+            L1BackendType.DEVDAX,
+            L1BackendType.DEVDAX,
         ]
         manager.free(objs)
         del objs
