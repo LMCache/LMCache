@@ -424,6 +424,8 @@ def assert_is_vllm_flash_attn_or_flash_infer(
         # share this transfer path even though they are not literally flash-*.
         lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS,
         lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS,
+        lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_CS,
+        lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_CS,
     )
 
 
