@@ -62,3 +62,23 @@ def test_vllm_heterogeneous_groups(monkeypatch):
     assert len(normalized) == 5
     assert formats[:3] == [F.NL_X_TWO_NB_BS_NH_HS] * 3
     assert formats[3:] == [F.NL_X_NB_BS_HS] * 2
+
+
+def test_vllm_mixed_rank4_fused_groups(monkeypatch):
+    # Regression for #4263: blocks-first fused rank-4 groups whose trailing
+    # dims differ (hybrid sliding + full attention under the vLLM 0.26 V2
+    # model runner). v0.5.2's whole-set detection applied the first tensor's
+    # fused_dim to every layer and died in reshape; mixed-shape sets must be
+    # detected per shape bucket instead, each layer keeping its own raw
+    # [NB, BS, NH, CS] tensor and reporting the fused CS format.
+    monkeypatch.setattr(_VLLM_DEV, "cuda")
+    kv = [_t(NB, BS, NH, 2 * HS) for _ in range(3)] + [
+        _t(NB, BS, NH, 4 * HS) for _ in range(2)
+    ]
+    normalized, formats = normalize_and_discover_per_layer_formats(
+        kv, [[0, 1, 2], [3, 4]], EngineType.VLLM, {"kv_layout": "NHD"}
+    )
+    assert len(normalized) == 5
+    assert tuple(normalized[0].shape) == (NB, BS, NH, 2 * HS)
+    assert tuple(normalized[3].shape) == (NB, BS, NH, 4 * HS)
+    assert formats == [F.NL_X_NB_BS_NH_CS] * 5
