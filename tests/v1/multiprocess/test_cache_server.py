@@ -45,19 +45,16 @@ pytestmark = pytest.mark.cuda
 
 def _has_working_new_shared_cuda() -> bool:
     try:
-        buf = torch.empty(1024, device=torch_device_type)
-        share_fn = getattr(buf.untyped_storage(), f"_share_{torch_device_type}_", None)
-        if share_fn is None:
-            return False
-        shared = share_fn()
+        buf = torch.empty(1024, device="cuda")
+        shared = buf.untyped_storage()._share_cuda_()
         return shared is not None
     except Exception:
         return False
 
 
-if not torch_dev.is_available():
+if not torch.cuda.is_available():
     pytest.skip(
-        f"requires available {torch_device_type} runtime",
+        "requires available CUDA runtime",
         allow_module_level=True,
     )
 
@@ -65,8 +62,7 @@ if not torch_dev.is_available():
 if not _has_working_new_shared_cuda():
     pytest.skip(
         (
-            f"new_shared_{torch_device_type} is not available or not "
-            "working on this system"
+            "new_shared_cuda is not available or not working on this system"
         ),
         allow_module_level=True,
     )

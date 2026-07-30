@@ -9,7 +9,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_dev, torch_device_type
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
@@ -65,8 +64,8 @@ def test_ipc_cache_engine_key_serialization_with_cache_salt():
 
 @pytest.mark.cuda
 @pytest.mark.skipif(
-    not torch_dev.is_available(),
-    reason=f"requires available {torch_device_type} runtime",
+    not torch.cuda.is_available(),
+    reason="requires available CUDA runtime",
 )
 def test_cudaipc_wrapper_serialization():
     """Test custom encoder/decoder for single CudaIPCWrapper object."""
@@ -74,7 +73,7 @@ def test_cudaipc_wrapper_serialization():
     decoder = get_customized_decoder(type=CudaIPCWrapper)
 
     # Create a sample tensor
-    original_tensor = torch.randn(3, 4, device=torch_device_type)
+    original_tensor = torch.randn(3, 4, device="cuda")
     wrapper = CudaIPCWrapper(original_tensor)
 
     # Encode the wrapper
@@ -92,14 +91,14 @@ def test_cudaipc_wrapper_serialization():
 
 @pytest.mark.cuda
 @pytest.mark.skipif(
-    not torch_dev.is_available(),
-    reason=f"requires available {torch_device_type} runtime",
+    not torch.cuda.is_available(),
+    reason="requires available CUDA runtime",
 )
 def test_cudaipc_wrapper_list_serialization():
     """Test custom encoder/decoder for list of CudaIPCWrapper objects."""
     wrappers = []
     for _ in range(5):
-        tensor = torch.randn(2, 2, device=torch_device_type)
+        tensor = torch.randn(2, 2, device="cuda")
         wrapper = CudaIPCWrapper(tensor)
         wrappers.append(wrapper)
 
@@ -129,7 +128,7 @@ def _worker_process_deserialize_and_reconstruct(
     """
     try:
         # Decode the list of wrappers
-        torch_dev.init()
+        torch.cuda.init()
         decoder = get_customized_decoder(type=list[CudaIPCWrapper])
         decoded_wrappers = decoder.decode(encoded_data)
 
@@ -153,8 +152,8 @@ def _worker_process_deserialize_and_reconstruct(
 
 @pytest.mark.cuda
 @pytest.mark.skipif(
-    not torch_dev.is_available(),
-    reason=f"requires available {torch_device_type} runtime",
+    not torch.cuda.is_available(),
+    reason="requires available CUDA runtime",
 )
 def test_cudaipc_wrapper_multiprocess_serialization():
     """
@@ -176,7 +175,7 @@ def test_cudaipc_wrapper_multiprocess_serialization():
             (2, 3),
             fill_value=float(i + 1),
             dtype=torch.float32,
-            device=torch_device_type,
+            device="cuda",
         )
         tensors.append(tensor)
         wrapper = CudaIPCWrapper(tensor)
@@ -254,7 +253,7 @@ def _worker_reconstruct_offset_tensor(encoded_data: bytes, result_queue: Queue):
     """Worker: decode a single CudaIPCWrapper and reconstruct its tensor,
     reporting the layout metadata and a checksum back to the parent."""
     try:
-        torch_dev.init()
+        torch.cuda.init()
         decoder = get_customized_decoder(type=CudaIPCWrapper)
         wrapper = decoder.decode(encoded_data)
         tensor = wrapper.to_tensor()
@@ -273,8 +272,8 @@ def _worker_reconstruct_offset_tensor(encoded_data: bytes, result_queue: Queue):
 
 @pytest.mark.cuda
 @pytest.mark.skipif(
-    not torch_dev.is_available(),
-    reason=f"requires available {torch_device_type} runtime",
+    not torch.cuda.is_available(),
+    reason="requires available CUDA runtime",
 )
 def test_cudaipc_wrapper_nonzero_storage_offset():
     """CudaIPCWrapper must round-trip a slice/narrow view with
@@ -293,7 +292,7 @@ def test_cudaipc_wrapper_nonzero_storage_offset():
 
     # arange so each element's value equals its flat storage index -- the
     # checksum then pins down exactly which storage positions were read.
-    base = torch.arange(64, dtype=torch.float32, device=torch_device_type)
+    base = torch.arange(64, dtype=torch.float32, device="cuda")
     # dim-0-padded view: shape (3, 2, 4), per-block stride 12 > prod(shape[1:])=8
     # (4 elements of padding per block), shifted by storage_offset=8.
     view = base.as_strided((3, 2, 4), (12, 4, 1), storage_offset=8)
