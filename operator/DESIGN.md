@@ -113,6 +113,25 @@ spec:
     raw:
       type: string              # adapter type name (nixl_store, fs, mock, raw_block, etc.)
       config: map[string]any    # type-specific config as free-form map
+    # Optional: serde transform on KV bytes to/from the L2 adapter. Renders
+    # a "serde" sub-dict into the --l2-adapter JSON; applies to whichever
+    # adapter is configured. Exactly one serde type must be set (only aesgcm
+    # today; other server-side serdes like fp8/turboquant can gain typed
+    # fields here later, or be set via raw.config.serde).
+    serde:
+      # aesgcm: at-rest encryption keyed per cache_salt. The referenced
+      # Secret is mounted directly into the engine pods, read-only at
+      # /etc/lmcache/keys/master (only the "master" data key is projected).
+      # The operator never reads or writes the Secret and never generates
+      # key material; provenance/rotation stay with the user. The reference
+      # is same-namespace only, so CR-create permission cannot be leveraged
+      # to read Secrets from other namespaces (confused deputy). See
+      # docs/design/v1/distributed/serde/aesgcm.md for the threat/key models.
+      aesgcm:
+        masterKeySecretRef:     # REQUIRED, user-created Secret with a "master" data key,
+          name: string          # in the engine's namespace (same-namespace only)
+        keyProvider: string     # default: hkdf (only implemented provider)
+        aesBits: int            # default: 128 (or 256)
 
   # -- Connection-injection webhook defaults (optional) --
   # Read by the LMCache mutating webhook for pods bound to this engine. When
