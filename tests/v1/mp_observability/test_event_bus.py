@@ -4,6 +4,7 @@
 
 # Standard
 from unittest.mock import MagicMock, patch
+import threading
 import time
 
 # Third Party
@@ -454,6 +455,59 @@ class TestGlobalSingleton:
         bus = init_event_bus()
         assert bus._config.enabled is True
         assert bus._config.max_queue_size == 10_000
+
+    def test_init_stops_replaced_bus(self):
+        """Replacing a started bus must not leave its drain thread running."""
+        old = init_event_bus(EventBusConfig(enabled=True, max_queue_size=100))
+        sub = _RecordingSubscriber()
+        old.register_subscriber(sub)
+        old.start()
+        old_thread = old._thread
+        assert old_thread is not None and old_thread.is_alive()
+
+        init_event_bus(EventBusConfig(enabled=False))
+
+        old_thread.join(timeout=5)
+        assert not old_thread.is_alive(), (
+            "replacing the global bus left the previous drain thread alive"
+        )
+        assert sub.shutdown_called, (
+            "replaced bus did not run its subscriber shutdown hooks"
+        )
+
+    def test_repeated_init_does_not_accumulate_threads(self):
+        """Repeated initialization in one process must not grow thread count."""
+
+        def live_event_bus_threads() -> int:
+            return sum(
+                thread.name == "EventBus" and thread.is_alive()
+                for thread in threading.enumerate()
+            )
+
+        baseline = live_event_bus_threads()
+        for _ in range(5):
+            bus = init_event_bus(EventBusConfig(enabled=True, max_queue_size=100))
+            bus.start()
+            init_event_bus(EventBusConfig(enabled=False))
+
+        assert live_event_bus_threads() == baseline
+
+    def test_init_survives_a_failing_subscriber_shutdown(self):
+        """A subscriber that raises on shutdown must not break the swap."""
+
+        class _ExplodingSubscriber(EventSubscriber):
+            def get_subscriptions(self):
+                return {}
+
+            def shutdown(self) -> None:
+                raise RuntimeError("boom")
+
+        old = init_event_bus(EventBusConfig(enabled=True, max_queue_size=100))
+        old.register_subscriber(_ExplodingSubscriber())
+        old.start()
+
+        new = init_event_bus(EventBusConfig(enabled=False))
+        assert get_event_bus() is new
 
 
 # ---------------------------------------------------------------------------

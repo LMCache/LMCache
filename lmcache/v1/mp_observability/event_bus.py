@@ -379,9 +379,23 @@ def get_event_bus() -> EventBus:
 def init_event_bus(config: EventBusConfig | None = None) -> EventBus:
     """Replace the global singleton with a new EventBus built from *config*.
 
+    The bus being replaced is stopped after the swap, so its drain thread
+    exits and its subscribers run their shutdown hooks rather than being left
+    running for the lifetime of the process.
+
     Returns the newly created bus.
     """
     global _global_bus, _observability_enabled
+    previous_bus = _global_bus
     _global_bus = EventBus(config)
     _observability_enabled = config.enabled if config else True
+
+    # Stop the old bus only after the swap, so publishers move to the new bus
+    # before the old one performs its final drain.
+    if previous_bus is not None:
+        try:
+            previous_bus.stop()
+        except Exception:
+            logger.exception("EventBus: error stopping the replaced event bus")
+
     return _global_bus
