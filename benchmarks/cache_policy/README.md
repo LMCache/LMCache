@@ -291,3 +291,29 @@ cache-size) combination:
 `results/sample/` contains a small pre-generated `sweep_results.csv` and
 `sweep_results.json` (from a `--quick` run) so you can see the schema
 without running anything.
+
+## PDF report
+
+`report/` contains the evaluation report deliverable
+(`report/cache_policy_evaluation_report.pdf`) plus the scripts that
+generate it end to end from the committed result artifacts under
+`results/`:
+
+```bash
+# Reproducibility environment (CPU-only; see environment.yml for scope)
+conda env create -f benchmarks/cache_policy/environment.yml
+conda activate lmcache-cache-policy-bench
+pip install -e . --no-deps
+
+python benchmarks/cache_policy/report/generate_figures.py \
+    -o benchmarks/cache_policy/report/figures
+python benchmarks/cache_policy/report/build_report.py \
+    -o benchmarks/cache_policy/report/cache_policy_evaluation_report.pdf
+```
+
+`generate_figures.py` reads only already-committed JSON result files
+(plus one cheap one-off replay for the freeze-illustration figure) -- it
+does not re-run any of the sweeps above, so it's fast and deterministic.
+Re-run the sweep/ablation/robustness/real-data scripts documented above
+first if you want the report to reflect a fresh benchmark run rather than
+the committed results.
