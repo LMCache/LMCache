@@ -15,7 +15,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
@@ -42,11 +42,6 @@ from lmcache.v1.distributed.serde.turboquant import (
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.memory_management import MemoryObj
-
-TORCH_DEVICE_AVAILABLE = (
-    hasattr(torch, torch_device_type)
-    and getattr(torch, torch_device_type).is_available()
-)
 
 
 def test_turboquant_registered() -> None:
@@ -282,10 +277,7 @@ def _make_turboquant_storage_manager(preset: str) -> StorageManager:
         l1_manager_config=L1ManagerConfig(
             memory_config=L1MemoryManagerConfig(
                 size_in_bytes=256 * 1024 * 1024,
-                use_lazy=(
-                    hasattr(torch, torch_device_type)
-                    and getattr(torch, torch_device_type).is_available()
-                ),
+                use_lazy=(torch_dev.is_available()),
                 init_size_in_bytes=64 * 1024 * 1024,
             ),
         ),
@@ -295,9 +287,9 @@ def _make_turboquant_storage_manager(preset: str) -> StorageManager:
     return StorageManager(cfg)
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not TORCH_DEVICE_AVAILABLE,
+    not torch_dev.is_available(),
     reason="Requires torch_device_type",
 )
 @pytest.mark.parametrize(
@@ -417,9 +409,9 @@ class _FakeMemoryObj:
         self.tensor = tensor
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not TORCH_DEVICE_AVAILABLE,
+    not torch_dev.is_available(),
     reason="Requires torch_device_type",
 )
 @pytest.mark.parametrize(
@@ -528,10 +520,7 @@ def _make_turboquant_fs_storage_manager(
         l1_manager_config=L1ManagerConfig(
             memory_config=L1MemoryManagerConfig(
                 size_in_bytes=256 * 1024 * 1024,
-                use_lazy=(
-                    hasattr(torch, torch_device_type)
-                    and getattr(torch, torch_device_type).is_available()
-                ),
+                use_lazy=(torch_dev.is_available()),
                 init_size_in_bytes=64 * 1024 * 1024,
             ),
         ),
@@ -541,9 +530,9 @@ def _make_turboquant_fs_storage_manager(
     return StorageManager(cfg)
 
 
-@pytest.mark.gpu
+@pytest.mark.cuda
 @pytest.mark.skipif(
-    not TORCH_DEVICE_AVAILABLE,
+    not torch_dev.is_available(),
     reason="Requires torch_device_type",
 )
 @pytest.mark.parametrize(
