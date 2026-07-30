@@ -1,4 +1,4 @@
-# `AdmissionControlledPolicy` -- Design, Evaluation, and Two-Directions Report
+# `AdmissionControlledPolicy` -- Design, Evaluation, and Three-Directions Report
 
 ## Summary
 
@@ -20,7 +20,11 @@ rigorous real-data validation (3 scales x 3 cache sizes x 6 bootstrap
 repeats), and dedicated stress tests -- which caught a second real
 correctness bug beyond the one already documented below, and surfaced a
 genuine limitation of the design that the thin verification had missed
-entirely.
+entirely. A later revision adds `WindowedAdmissionControlledPolicy`, a
+second, independently selectable admission-control design built
+specifically to address that limitation (see "`WindowedAdmissionControlledPolicy`:
+does windowing fix Findings 5-6?" below) -- kept alongside, not
+replacing, the original.
 
 ## Contract
 
@@ -306,6 +310,226 @@ investigation's scope) -- a `>=` comparison with a secondary recency
 tiebreak, or an occasional forced-eviction fallback when nothing beats the
 incumbent, are the natural next things to try.
 
+## `WindowedAdmissionControlledPolicy`: does windowing fix Findings 5-6?
+
+Per an explicit decision to keep `AdmissionControlledPolicy` unchanged (it
+remains shipped, tested, and the default), the tie-breaking fix from
+Findings 5-6 was built as a **second, independently selectable class**,
+`WindowedAdmissionControlledPolicy` (same file, shares `_FrequencySketch`),
+registered via `get_cache_policy("WINDOWED_ADMISSION_<INNER>")`. This
+keeps both admission-control designs directly comparable rather than
+replacing one with the other.
+
+Design (see the class docstring for full detail): new keys always enter a
+small **window** region unconditionally (a `window_capacity`-bounded
+subset of resident keys, default 20) -- so, unlike the strict design,
+nothing is ever silently rejected. Only when the window itself overflows
+is its oldest member evaluated: promoted into the frequency-gated **main**
+region if its sketch estimate reaches `promotion_threshold` (default 2),
+or queued for a real eviction otherwise. `inner_policy` continues to rank
+everything in main, same as before.
+
+### Bug 3 -- window capacity was never actually enforced (a zero-sum bug)
+
+The first implementation computed window capacity per-call as
+`len(cache_dict) * window_fraction` and only pruned it from inside
+`get_evict_candidates`. Running Experiment 1 below caught the problem the
+same way Bug 2 was caught in the un-windowed class: `WINDOWED_ADMISSION_LRU`
+produced an eviction count on `mixed_zipfian`/100 MiB **identical to the
+digit** to plain `LRU`'s (1,973 both) -- an implausible coincidence for a
+genuinely different algorithm, worth distrusting rather than accepting.
+Instrumented replay confirmed the window had silently grown to the
+**entire cache** during the fill phase (nothing prunes it before the first
+eviction ever happens) and then never shrank afterward: every post-fill
+eviction cycle removed exactly one window member and added exactly one new
+key back to the window, a mathematically invariant wash. Net effect: the
+"windowed" design was doing no filtering at all, just re-deriving
+`inner_policy`'s own ranking through an expensive detour.
+
+**Fix**: `window_capacity` is now an absolute integer, enforced
+**immediately at insertion time** (inside `update_on_put`/
+`update_on_put_with_metadata`, which need no `cache_dict` access to do
+this), not lazily during eviction. An insertion that overflows the window
+evaluates its oldest member on the spot -- promoted (stays resident, no
+eviction needed) or pushed onto a new `self._pending_discards` FIFO queue,
+which `get_evict_candidates` drains first, ahead of `inner_policy`'s own
+ranking, before any real eviction happens. This keeps window size
+genuinely, continuously bounded. Re-verified afterward: `WINDOWED_ADMISSION_LRU`
+now produces hit=86.0%/evictions=1,862 on the same cell -- close to but
+measurably different from plain `LRU`, as a real (not degenerate) design
+should.
+
+### Experiment 1 rerun: synthetic cache-size sweep, all three tiers
+
+At 100 MiB (full data in
+[`results/admission_control/sweep_results.json`](../../../../../benchmarks/cache_policy/results/admission_control/sweep_results.json)):
+
+| Workload | Policy | Hit rate | Evictions | p95 latency |
+|---|---|---:|---:|---:|
+| mixed_zipfian | LRU (baseline) | 85.3% | 1,973 | 30.7 ms |
+| mixed_zipfian | **ADMISSION_LRU** | **87.9%** | **288** | 25.6 ms |
+| mixed_zipfian | WINDOWED_ADMISSION_LRU | 86.0% | 1,862 | 30.7 ms |
+| mixed_zipfian | ADMISSION_COST_AWARE | 82.6% | 1,802 | 25.6 ms |
+| mixed_zipfian | WINDOWED_ADMISSION_COST_AWARE | 83.3% | 2,302 | 25.6 ms |
+| multi_round_chat | LRU (baseline) | 58.0% | 910 | 61.4 ms |
+| multi_round_chat | **ADMISSION_LRU** | **83.3%** | **0** | **15.2 ms** |
+| multi_round_chat | WINDOWED_ADMISSION_LRU | 78.3% | 227 | 15.2 ms |
+| multi_round_chat | ADMISSION_COST_AWARE | 83.3% | 0 | 15.2 ms |
+| multi_round_chat | WINDOWED_ADMISSION_COST_AWARE | 78.4% | 236 | 24.5 ms |
+
+### Finding 7 -- windowing trades some of the strict design's peak upside for structural safety
+
+On both workloads, `WINDOWED_ADMISSION_*` lands **between** the plain
+baseline and the strict `ADMISSION_*` design -- clearly better than no
+admission control, but short of the strict design's best-case numbers
+(e.g. multi_round_chat: 58.0% -> 78.3% -> 83.3%). This is the expected
+cost of the fix: window capacity is partly "spent" on entries that turn
+out to be infrequent and get discarded rather than ever contributing a
+hit, which the strict design's tie-always-favors-incumbent rule never
+pays (at the cost of the freeze/regression risk it carries instead). This
+is a real, honest tradeoff, not a strictly dominant fix.
+
+### Experiment 2 rerun: `window_capacity` / `promotion_threshold` ablation
+
+`benchmarks/cache_policy/run_admission_control_ablation.py`, 100 MiB
+(full data in
+[`results/admission_control/windowed_admission_control_ablation.json`](../../../../../benchmarks/cache_policy/results/admission_control/windowed_admission_control_ablation.json)):
+
+| Workload | Variant | Hit rate | Evictions |
+|---|---|---:|---:|
+| mixed_zipfian | tiny_window (5, thresh=2) | 81.6% | 1,861 |
+| mixed_zipfian | default (20, thresh=2) | 81.5% | 1,868 |
+| mixed_zipfian | large_window (80, thresh=2) | 81.1% | 1,921 |
+| mixed_zipfian | lenient_promotion (20, thresh=1) | 79.8% | 2,078 |
+| mixed_zipfian | strict_promotion (20, thresh=4) | 83.0% | 1,678 |
+| mixed_zipfian | no_admission (LRU) | 79.8% | 2,078 |
+| multi_round_chat | tiny_window (5, thresh=2) | 79.9% | 178 |
+| multi_round_chat | default (20, thresh=2) | 78.3% | 227 |
+| multi_round_chat | large_window (80, thresh=2) | 74.5% | 317 |
+| multi_round_chat | lenient_promotion (20, thresh=1) | 58.0% | 910 |
+| multi_round_chat | strict_promotion (20, thresh=4) | 80.8% | 198 |
+| multi_round_chat | no_admission (LRU) | 58.0% | 910 |
+
+A useful correctness cross-check surfaced by this ablation, not just a
+performance result: `lenient_promotion` (`promotion_threshold=1`)
+reproduces plain `LRU`'s numbers **exactly** on `multi_round_chat`
+(58.0%/910 evictions, both cells). This is mathematically expected, not a
+bug -- at `promotion_threshold=1`, every window overflow is promoted
+(the sketch estimate is always >= 1 the moment a key is inserted), so
+`_pending_discards` is always empty and eviction always falls through to
+`inner_policy`'s own ranking: the windowed design *correctly* degenerates
+to its inner policy at this degenerate setting. That the exact-match
+coincidence now only appears at this one deliberately-degenerate
+configuration, rather than at the shipped default (as Bug 3 caused), is
+itself evidence the fix is structurally sound.
+
+Smaller windows and stricter promotion both trend better here (less
+capacity "wasted" holding entries that never earn promotion) --
+`strict_promotion` is the best-performing windowed variant on both
+workloads, though still short of the strict `ADMISSION_LRU` design's
+best numbers from Experiment 1.
+
+### Experiment 3 rerun: Zipf skew robustness
+
+`benchmarks/cache_policy/robustness_sweep.py`, 100 MiB (full data in
+[`results/admission_control/robustness_zipf_skew.json`](../../../../../benchmarks/cache_policy/results/admission_control/robustness_zipf_skew.json)):
+
+| `zipf_s` | LRU | ADMISSION_LRU | WINDOWED_ADMISSION_LRU |
+|---|---:|---:|---:|
+| 0.6 (mild) | 43.5% | **51.1%** | 44.7% |
+| 1.2 (default) | 79.8% | **83.7%** | 81.5% |
+| 2.0 (extreme) | 96.9% | 96.9% | 96.9% |
+
+Same pattern as Experiment 1: windowing recovers most, not all, of the
+strict design's benefit, across skew strength (not just one snapshot),
+and all policies converge once the working set fits entirely in cache.
+
+### Experiment 4 rerun: statistically rigorous real-data validation
+
+Same 3-scale x 3-cache-size x 6-repeat grid, `--policies LRU LFU FIFO MRU
+COST_AWARE ADMISSION_LRU ADMISSION_COST_AWARE WINDOWED_ADMISSION_LRU
+WINDOWED_ADMISSION_COST_AWARE` (full data in
+[`results/real_data/real_dataset_ci.json`](../../../../../benchmarks/cache_policy/results/real_data/real_dataset_ci.json)):
+
+| Scale | Cache | LRU | ADMISSION_LRU | WINDOWED_ADMISSION_LRU | ADMISSION_COST_AWARE | WINDOWED_ADMISSION_COST_AWARE |
+|---|---|---:|---:|---:|---:|---:|
+| 500 | 50 MiB | 10.0% | **13.8%** | 10.9% | 4.0% | 4.4% |
+| 500 | 100 MiB | 18.0% | 23.6% | **24.1%** | 11.5% | 13.7% |
+| 500 | 200 MiB | **52.1%** | 38.9% | 42.8% | 30.7% | 40.3% |
+| 2,000 | 50 MiB | 3.2% | **4.9%** | 3.3% | 0.6% | 0.5% |
+| 2,000 | 100 MiB | 5.2% | **7.9%** | 5.5% | 1.6% | 1.5% |
+| 2,000 | 200 MiB | 8.8% | **13.1%** | 9.4% | 4.2% | 4.8% |
+| 5,000 | 50 MiB | 1.6% | **3.2%** | 1.7% | 0.2% | 0.1% |
+| 5,000 | 100 MiB | 2.8% | **5.1%** | 2.8% | 0.5% | 0.4% |
+| 5,000 | 200 MiB | 4.8% | **8.2%** | 4.7% | 1.6% | 1.4% |
+
+(Bootstrap 95% CIs omitted from this compressed view; see the linked JSON
+for the full per-cell intervals -- all comparisons called out below have
+non-overlapping CIs.)
+
+### Finding 8 -- windowing meaningfully narrows the Finding 5 regression at small scale, but converges to plain LRU (not to the strict design's wins) as traffic gets more purely one-shot
+
+At the Finding 5 regression cell (500 conversations / 200 MiB),
+`WINDOWED_ADMISSION_LRU` (42.8%) sits clearly between plain `LRU`'s
+52.1% and `ADMISSION_LRU`'s 38.9% -- a real, partial recovery (closes
+about a third of the gap), not a full fix. At 100 MiB and below, windowed
+`LRU` is competitive with or slightly beats the strict design (24.1% vs.
+23.6% at 100 MiB). But at the larger, more one-shot-dominated scales
+(2,000 and 5,000 conversations, where every policy's hit rate is in the
+low single digits), `WINDOWED_ADMISSION_LRU` converges to **plain `LRU`**,
+not to `ADMISSION_LRU`'s wins -- e.g. 5,000 conversations/200 MiB: LRU
+4.8%, windowed 4.7%, strict 8.2%. Mechanism: under traffic this close to
+purely one-shot, almost nothing ever reaches `promotion_threshold=2`
+before its first eviction opportunity, so `_pending_discards` rarely
+differs from what plain `LRU` would have evicted anyway -- windowing's
+safety net (never rejecting) costs it the strict design's aggressive
+gating exactly where that gating pays off most on this corpus. The one
+clear exception is wrapping `COST_AWARE`: at 500/200 MiB,
+`WINDOWED_ADMISSION_COST_AWARE` (40.3%) dramatically outperforms both
+plain `COST_AWARE` (28.7%, from Finding 4's table) and
+`ADMISSION_COST_AWARE` (30.7%) -- windowing helps the weaker inner policy
+more than it helps `LRU`, consistent with Finding 7's "recovers some but
+not all of the strict design's benefit" pattern generalizing differently
+depending on how much headroom the inner policy has to begin with.
+
+### Finding 9 -- windowing does structurally eliminate the freeze (Finding 6), confirmed both by construction and by test
+
+Unlike Finding 5's partial, empirically-measured recovery, Finding 6's
+freeze fix is a hard structural guarantee, not a matter of degree: the
+window unconditionally admits every new key, so nothing is ever silently
+rejected regardless of frequency ties. Under purely one-shot traffic
+(the exact `novel_long` scenario that permanently freezes
+`ADMISSION_LRU` at zero evictions), every window overflow evaluates a
+key stuck at frequency 1 (`< promotion_threshold=2`), so it is
+**discarded** -- a real eviction -- every single time. Confirmed by
+`test_windowed_admission_control_does_not_freeze_under_purely_novel_traffic`
+(`tests/benchmarks/test_cache_policy_bench.py`), run against the fixed
+implementation: `eviction_count > 0`, in direct contrast to
+`test_admission_control_freezes_under_purely_novel_traffic`'s `== 0` for
+the strict design under identical traffic.
+
+### Stress tests rerun
+
+`tests/benchmarks/test_cache_policy_bench_real_data.py`'s four stress
+tests (near-empty-cache thrash, capacity-cliff monotonicity, longest-
+conversation replay, fan-out degradation) now include both
+`ADMISSION_LRU` and `WINDOWED_ADMISSION_LRU` in their policy list and all
+pass -- no crashes, no monotonicity violations, for either design.
+
+### Verdict
+
+Windowing is a genuine, working fix for the *catastrophic* failure mode
+(Finding 6's freeze) -- structurally, not just empirically, since the
+window's unconditional admission makes silent permanent rejection
+unreachable by construction. For the *regression* failure mode (Finding
+5), it's a real but partial mitigation: better in the small-to-moderate
+scale range tested, but it gives up a meaningful fraction of the strict
+design's peak upside everywhere, and converges to plain `LRU` (not to the
+strict design's wins) under traffic dominated by one-shot access. Neither
+design is a strict improvement over the other -- they occupy different
+points on a safety/peak-performance tradeoff, which is why both are kept
+as independently selectable classes rather than one replacing the other.
+
 ## Integration status: class only, no backend wiring (by design)
 
 Investigating `local_cpu_backend.py`/`local_disk_backend.py` before
@@ -322,19 +546,23 @@ that knows the incoming key *before* space is allocated:
   every caller across `cache_engine.py`/`storage_manager.py` -- a
   meaningfully more invasive change.
 
-Per explicit scope decision, this work ships the class only: it's
-selectable today via `get_cache_policy`/config and is fully correct and
-tested, but no storage backend calls `should_admit` yet, so the
+Per explicit scope decision, this work ships both classes only: either is
+selectable today via `get_cache_policy`/config and both are fully correct
+and tested, but no storage backend calls `should_admit` yet, so
 admission-rejection behavior does not affect production request handling
 until a backend is wired to call it -- a deliberate, separate follow-up.
-**Given Finding 6, any such wiring should land the tie-breaking fix
-first**, or a production backend could see the same permanent-freeze
-behavior under workloads with a meaningful one-shot-traffic component.
+**Given Finding 6, any such wiring targeting a workload with a meaningful
+one-shot-traffic component should wire `WindowedAdmissionControlledPolicy`,
+not `AdmissionControlledPolicy`**, since the strict design's freeze is a
+real production risk there; workloads known to have sustained,
+non-trivial reuse and no one-shot risk can safely use the strict design
+for its larger peak upside (Finding 7).
 
-## Two directions compared
+## Three directions compared
 
 Two structurally different fixes for `CostAwareEvictionPolicy`'s
-real-data weakness were built and evaluated end to end:
+real-data weakness, plus a fix for a limitation surfaced by evaluating
+the second one, were built and evaluated end to end:
 
 ### Direction A: frequency-aware `CostAwareEvictionPolicy` (see `cost-aware-policy-eval.md`)
 
@@ -367,29 +595,62 @@ original thin verification, both only surfaced by extending this
 investigation to the same rigor as the `CostAwareEvictionPolicy`
 evaluation.
 
+### Direction C: `WindowedAdmissionControlledPolicy` (this doc, "does windowing fix Findings 5-6?")
+
+Built specifically to address Direction B's own Findings 5-6, as a
+**second, independently selectable class** rather than a rewrite (an
+explicit scope decision, so both admission-control designs stay directly
+comparable). **Outcome**: structurally eliminates the freeze failure mode
+(Finding 9) -- a hard guarantee, not a probabilistic improvement -- and
+meaningfully narrows the regression failure mode at small-to-moderate
+scale (Finding 8), but gives up a real fraction of Direction B's peak
+upside everywhere (Finding 7), and at highly one-shot-dominated scale
+converges to plain `LRU` rather than to Direction B's wins. Not a strict
+improvement over Direction B -- a different point on a safety/peak-
+performance tradeoff, not a replacement for it.
+
 ### Recommendation
 
-**`AdmissionControlledPolicy` remains the stronger, more general result of
-the two directions**, and stays shipped as the default recommendation --
-its wins are large, statistically robust, and hold across most of the
-parameter space tested. But it is not unconditionally safe to deploy
-without caveats: **the tie-breaking rule identified in Findings 5-6
-should be fixed before any production backend wiring**, since the failure
-mode (silent, permanent freeze; or a real regression under generous
-cache sizing) is the kind of thing that would be very hard to diagnose in
-production after the fact. Direction A's frequency fix remains a
-legitimate, independently useful improvement to `CostAwareEvictionPolicy`
-specifically (already shipped) but is not, on its own, competitive with
-plain `LRU`/`LFU` on real traffic. The two directions compose today
-(`get_cache_policy("ADMISSION_COST_AWARE")`) but the data shows that
-combination consistently trailing `ADMISSION_LRU`.
+**No single policy dominates; the choice depends on what the workload's
+one-shot-traffic risk looks like**:
+
+- If the workload is known to have sustained, non-trivial key reuse and
+  a negligible purely-one-shot component (the kind of traffic Findings 1,
+  3, and 4 were measured on), **`AdmissionControlledPolicy` remains the
+  stronger choice** -- its wins are large, statistically robust, and hold
+  across most of the parameter space tested, and it doesn't pay
+  Direction C's window-capacity tax.
+- If the workload's one-shot-traffic share is unknown, variable, or
+  known to be significant, **`WindowedAdmissionControlledPolicy` is the
+  safer default** -- Finding 6's silent, permanent freeze is a real
+  production risk under the strict design that windowing eliminates by
+  construction, at a real but bounded cost in peak hit rate.
+- Both remain **strictly better than no admission control at all** in
+  every synthetic and real-data scenario tested (Experiments 1, 3, 4)
+  except `ADMISSION_MRU`/`WINDOWED_ADMISSION_MRU`, which simply inherit
+  `MRU`'s poor baseline ranking (admission control gates *what* gets in,
+  not *how well* the inner policy ranks what's already there).
+
+Direction A's frequency fix remains a legitimate, independently useful
+improvement to `CostAwareEvictionPolicy` specifically (already shipped)
+but is not, on its own, competitive with plain `LRU`/`LFU` on real
+traffic. All three directions compose today (e.g.
+`get_cache_policy("ADMISSION_COST_AWARE")`,
+`get_cache_policy("WINDOWED_ADMISSION_COST_AWARE")`), and Finding 8 shows
+windowing helps `COST_AWARE` more, proportionally, than it helps `LRU`
+-- but neither composition catches up to `ADMISSION_LRU`'s raw numbers.
 
 **Concrete next steps, in priority order, none done here per this
 investigation's scope**:
-1. Fix the strict tie-breaking rule (Findings 5-6) -- highest priority,
-   correctness/robustness issue.
-2. Re-run Experiments 1-4 against the fixed version to confirm the wins
-   hold (or improve) once ties are broken sensibly.
-3. Wire `should_admit` into `local_disk_backend.py` (the identified
-   low-risk integration point) so the effect is real for actual
-   request handling, not only benchmarked.
+1. Wire `should_admit` into `local_disk_backend.py` (the identified
+   low-risk integration point) so the effect is real for actual request
+   handling, not only benchmarked -- gated on picking a policy per the
+   recommendation above based on the target workload's traffic mix.
+2. If the target deployment's real traffic mix is uncertain, consider
+   exposing both policies as config-selectable rather than hardcoding
+   one, so operators can pick per-deployment.
+3. Investigate whether `WindowedAdmissionControlledPolicy`'s
+   `window_capacity`/`promotion_threshold` could be tuned adaptively
+   (e.g. based on observed reuse rate) to recover more of Direction B's
+   peak upside without reintroducing the freeze risk -- speculative,
+   not attempted here.

@@ -41,7 +41,15 @@ pytestmark = pytest.mark.skipif(
     reason="LMCACHE_SHAREGPT_PATH not set -- real-data tests are opt-in local-only",
 )
 
-POLICIES = ["LRU", "LFU", "FIFO", "MRU", "COST_AWARE", "ADMISSION_LRU"]
+POLICIES = [
+    "LRU",
+    "LFU",
+    "FIFO",
+    "MRU",
+    "COST_AWARE",
+    "ADMISSION_LRU",
+    "WINDOWED_ADMISSION_LRU",
+]
 _MIB = 2**20
 
 
