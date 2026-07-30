@@ -5,8 +5,6 @@
 #   - google/gemma-4-31B-it: sliding-window + full-attention hybrid whose full
 #     layers have a larger head_dim, so vLLM gives the KV cache groups
 #     different block sizes -- exercising per-group HMA store/retrieve.
-#   - Qwen/Qwen3.5-0.8B: Mamba/GDN + full-attention hybrid, exercising the
-#     registration-time cache re-views (kv_cache_group_edits.py).
 #
 # Flow (single GPU, no baseline server):
 #   1. vLLM run: lm_eval (gsm8k) against vLLM+LMCache, populating LMCache.
