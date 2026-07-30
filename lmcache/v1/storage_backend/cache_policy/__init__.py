@@ -5,6 +5,7 @@ from typing import Any, Dict, Type
 # First Party
 from lmcache.v1.storage_backend.cache_policy.admission_control import (
     AdmissionControlledPolicy,
+    WindowedAdmissionControlledPolicy,
 )
 from lmcache.v1.storage_backend.cache_policy.base_policy import BaseCachePolicy
 from lmcache.v1.storage_backend.cache_policy.cost_aware_policy import (
@@ -15,6 +16,10 @@ from lmcache.v1.storage_backend.cache_policy.lfu import LFUCachePolicy
 from lmcache.v1.storage_backend.cache_policy.lru import LRUCachePolicy
 from lmcache.v1.storage_backend.cache_policy.mru import MRUCachePolicy
 
+# Checked before _ADMISSION_PREFIX -- "WINDOWED_ADMISSION_LRU" does not
+# start with "ADMISSION_", so order between the two doesn't actually
+# matter, but keeping the more specific prefix first reads clearer.
+_WINDOWED_ADMISSION_PREFIX = "WINDOWED_ADMISSION_"
 _ADMISSION_PREFIX = "ADMISSION_"
 
 # Cache policy mapping
@@ -39,15 +44,22 @@ def get_cache_policy(
         policy_name: Name of the cache policy (case-insensitive, e.g., "LRU", "lru").
             Prefixing any supported name with "ADMISSION_" (e.g.
             "ADMISSION_LRU", "ADMISSION_COST_AWARE") wraps it in
-            AdmissionControlledPolicy -- the inner name is resolved
-            recursively through this same function, so any current or
-            future policy name can be admission-controlled.
+            AdmissionControlledPolicy; prefixing with "WINDOWED_ADMISSION_"
+            (e.g. "WINDOWED_ADMISSION_LRU") wraps it in
+            WindowedAdmissionControlledPolicy instead -- a second, separate
+            admission-control design (see that class's docstring for how
+            it differs). Either way the inner name is resolved recursively
+            through this same function, so any current or future policy
+            name can be wrapped.
         config: Optional LMCacheEngineConfig instance.
         kwargs: Optional explicit policy parameters, forwarded to the
             (possibly inner, if admission-controlled) policy's constructor.
             For "ADMISSION_<INNER>" names, ``halve_every`` is instead
             forwarded to ``AdmissionControlledPolicy`` itself (the
-            frequency-sketch decay window), not to the inner policy.
+            frequency-sketch decay window), not to the inner policy. For
+            "WINDOWED_ADMISSION_<INNER>" names, ``halve_every``,
+            ``window_capacity``, and ``promotion_threshold`` are similarly
+            forwarded to ``WindowedAdmissionControlledPolicy`` itself.
 
     Returns:
         Instance of the corresponding cache policy.
@@ -59,6 +71,16 @@ def get_cache_policy(
         raise ValueError("Cache policy name cannot be empty")
 
     upper_policy_name = policy_name.upper()
+
+    if upper_policy_name.startswith(_WINDOWED_ADMISSION_PREFIX):
+        inner_name = upper_policy_name[len(_WINDOWED_ADMISSION_PREFIX) :]
+        remaining_kwargs = dict(kwargs)
+        windowed_kwargs: Dict[str, Any] = {}
+        for param in ("halve_every", "window_capacity", "promotion_threshold"):
+            if param in remaining_kwargs:
+                windowed_kwargs[param] = remaining_kwargs.pop(param)
+        inner_policy = get_cache_policy(inner_name, config=config, **remaining_kwargs)
+        return WindowedAdmissionControlledPolicy(inner_policy, **windowed_kwargs)
 
     if upper_policy_name.startswith(_ADMISSION_PREFIX):
         inner_name = upper_policy_name[len(_ADMISSION_PREFIX) :]

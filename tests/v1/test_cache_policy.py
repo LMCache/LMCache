@@ -1,4 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# Third Party
+import pytest
+
 # First Party
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
 
@@ -322,3 +325,106 @@ def test_get_cache_policy_admission_prefix_forwards_halve_every():
 
     default_policy = get_cache_policy("ADMISSION_LRU")
     assert default_policy.halve_every == 20_000
+
+
+def test_windowed_admission_control_always_admits():
+    # should_admit is unconditional for the windowed design -- gating
+    # happens at window-overflow time in get_evict_candidates instead.
+    # See admission-control-policy.md for why (Findings 5-6: a strict
+    # comparison, as AdmissionControlledPolicy uses, can freeze
+    # permanently under uniform-frequency traffic).
+    policy = get_cache_policy("WINDOWED_ADMISSION_LRU")
+    cache_dict = policy.init_mutable_mapping()
+    key1, key2 = dumb_cache_engine_key(1), dumb_cache_engine_key(2)
+    cache_dict[key1] = DummyMemoryObj()
+    policy.update_on_put(key1)
+
+    assert policy.should_admit(key2, cache_dict) is True
+    assert policy.should_admit(key1, cache_dict) is True  # even re-checking a resident
+
+
+def test_windowed_admission_control_discards_infrequent_window_overflow():
+    # window_capacity=1: putting a 2nd key immediately overflows the
+    # window, evaluating key1 (still at frequency 1) for promotion.
+    policy = get_cache_policy(
+        "WINDOWED_ADMISSION_LRU", window_capacity=1, promotion_threshold=2
+    )
+    cache_dict = policy.init_mutable_mapping()
+    key1, key2 = dumb_cache_engine_key(1), dumb_cache_engine_key(2)
+
+    cache_dict[key1] = DummyMemoryObj()
+    policy.update_on_put(key1)  # frequency 1, never touched again
+    cache_dict[key2] = DummyMemoryObj()
+    policy.update_on_put(key2)  # overflows the window -> key1 evaluated
+
+    # key1 never earned a 2nd observation, so it's below
+    # promotion_threshold: queued for a real discard at the next
+    # eviction opportunity, drained ahead of the inner policy's own
+    # ranking.
+    evict_candidates = policy.get_evict_candidates(cache_dict, num_candidates=1)
+    assert evict_candidates == [key1], evict_candidates
+
+
+def test_windowed_admission_control_promotes_frequent_window_overflow():
+    # MRU as the inner policy so its own eviction choice (most-recently-
+    # inserted) diverges from key1, making a genuine promotion (the
+    # frequent window victim is kept, a *different* key is evicted in
+    # its place) observable.
+    policy = get_cache_policy(
+        "WINDOWED_ADMISSION_MRU", window_capacity=1, promotion_threshold=2
+    )
+    cache_dict = policy.init_mutable_mapping()
+    key1, key2 = dumb_cache_engine_key(1), dumb_cache_engine_key(2)
+
+    cache_dict[key1] = DummyMemoryObj()
+    policy.update_on_put(key1)
+    policy.update_on_hit(key1, cache_dict)
+    policy.update_on_hit(key1, cache_dict)  # key1 frequency = 3
+    cache_dict[key2] = DummyMemoryObj()
+    policy.update_on_put(key2)  # overflows the window -> key1 promoted
+
+    # key1 meets promotion_threshold: it stays resident (now implicitly
+    # main) and is untracked from the window with no pending discard.
+    # Eviction falls through to MRU's own ranking over cache_dict, whose
+    # most-recently-inserted key is key2.
+    evict_candidates = policy.get_evict_candidates(cache_dict, num_candidates=1)
+    assert evict_candidates == [key2], evict_candidates
+
+
+def test_get_cache_policy_windowed_admission_prefix_wraps_any_inner_policy():
+    expected_inner_class_names = {
+        "LRU": "LRUCachePolicy",
+        "LFU": "LFUCachePolicy",
+        "FIFO": "FIFOCachePolicy",
+        "MRU": "MRUCachePolicy",
+        "COST_AWARE": "CostAwareEvictionPolicy",
+    }
+    for inner_name, expected_class_name in expected_inner_class_names.items():
+        policy = get_cache_policy(f"WINDOWED_ADMISSION_{inner_name}")
+        assert type(policy.inner_policy).__name__ == expected_class_name
+
+
+def test_get_cache_policy_windowed_admission_prefix_forwards_kwargs():
+    policy = get_cache_policy(
+        "WINDOWED_ADMISSION_LRU",
+        halve_every=500,
+        window_capacity=8,
+        promotion_threshold=5,
+    )
+    assert policy.halve_every == 500
+    assert policy.window_capacity == 8
+    assert policy.promotion_threshold == 5
+
+    default_policy = get_cache_policy("WINDOWED_ADMISSION_LRU")
+    assert default_policy.halve_every == 20_000
+    assert default_policy.window_capacity == 20
+    assert default_policy.promotion_threshold == 2
+
+
+def test_windowed_admission_control_rejects_invalid_construction():
+    with pytest.raises(ValueError):
+        get_cache_policy("WINDOWED_ADMISSION_LRU", window_capacity=0)
+    with pytest.raises(ValueError):
+        get_cache_policy("WINDOWED_ADMISSION_LRU", window_capacity=-1)
+    with pytest.raises(ValueError):
+        get_cache_policy("WINDOWED_ADMISSION_LRU", promotion_threshold=0)

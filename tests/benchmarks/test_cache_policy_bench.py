@@ -37,7 +37,7 @@ POLICIES = ["LRU", "LFU", "FIFO", "MRU", "COST_AWARE"]
 # Smoke-test-only coverage; kept separate from POLICIES since that list
 # also drives test_full_sweep's scope (nightly), which this isn't meant
 # to expand.
-_FAST_TEST_POLICIES = [*POLICIES, "ADMISSION_LRU"]
+_FAST_TEST_POLICIES = [*POLICIES, "ADMISSION_LRU", "WINDOWED_ADMISSION_LRU"]
 
 _SMALL_CACHE_BYTES = 4 * 1024 * 1024  # 4 MiB
 
@@ -161,3 +161,35 @@ def test_admission_control_freezes_under_purely_novel_traffic():
     # normally under the same traffic -- this is specific to admission
     # control's tie-breaking rule, not a general property of the workload.
     assert lru_result.eviction_count > 0
+
+
+def test_windowed_admission_control_does_not_freeze_under_purely_novel_traffic():
+    """
+    Demonstrates the fix for the freeze documented in
+    ``test_admission_control_freezes_under_purely_novel_traffic`` above:
+    ``WindowedAdmissionControlledPolicy`` (see
+    docs/design/v1/storage_backend/cache_policy/admission-control-policy.md,
+    "Does windowing fix Findings 5-6?") always admits new keys into its
+    window unconditionally, and an unpromoted window overflow is a real
+    eviction, not a silent rejection -- so under the exact same purely
+    one-shot traffic that permanently freezes ``ADMISSION_LRU``, this
+    class keeps evicting/rotating normally instead.
+    """
+    requests = novel_long(500, min_tokens=2048, max_tokens=4096, chunk_size=256, seed=0)
+    cost_model = CostModel(CostModelConfig())
+    small_cache_bytes = 2 * 1024 * 1024
+
+    result = run_workload(
+        "WINDOWED_ADMISSION_LRU",
+        requests,
+        small_cache_bytes,
+        DEFAULT_KV_BYTES_PER_CHUNK,
+        cost_model,
+        workload_name="freeze_check",
+    )
+
+    assert result.eviction_count > 0, (
+        "expected WindowedAdmissionControlledPolicy to keep evicting "
+        f"(not freeze) under purely novel traffic, got "
+        f"{result.eviction_count} evictions"
+    )
