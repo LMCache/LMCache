@@ -312,6 +312,20 @@ def _build_modules(
     ]
 
 
+def _validate_shared_l1_runtime_config(
+    mp_config: MPServerConfig,
+    storage_manager_config: StorageManagerConfig,
+) -> None:
+    """Reject transfer paths that the minimal shared-L1 addon does not support."""
+    shared_config = storage_manager_config.l1_manager_config.shared_l1_config
+    if shared_config is None:
+        return
+    if mp_config.supported_transfer_mode != "lmcache_driven":
+        raise ValueError("shared L1 requires supported_transfer_mode='lmcache_driven'")
+    if mp_config.p2p_config.enabled:
+        raise ValueError("shared L1 cannot be combined with P2P")
+
+
 def run_cache_server(
     mp_config: MPServerConfig,
     storage_manager_config: StorageManagerConfig,
@@ -339,6 +353,8 @@ def run_cache_server(
         If return_engine is True: tuple of (MessageQueueServer, MPCacheServer).
         If return_engine is False: None (blocks until interrupted).
     """
+    _validate_shared_l1_runtime_config(mp_config, storage_manager_config)
+
     # mp_config.instance_id is this server's single source of identity (set via
     # --instance-id, else a random UUID v4). Project it onto the OTel
     # service.instance.id unless observability set that attribute explicitly, so

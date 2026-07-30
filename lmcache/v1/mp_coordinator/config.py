@@ -58,6 +58,13 @@ class MPCoordinatorConfig:
         timeout_keep_alive: Seconds the HTTP server keeps idle connections
             open before closing them. Must be greater than the heartbeat
             interval of MP servers to avoid race-condition disconnects.
+        shared_l1_host: Host the shared-L1 manager binds to.
+        shared_l1_port: Port the shared-L1 manager binds to. ``0`` disables it.
+        shared_l1_authkey_file: Absolute path to the manager authentication key.
+        shared_l1_region_id: Stable identity of the shared payload region.
+        shared_l1_capacity_bytes: Logical shared-region capacity in bytes.
+        shared_l1_alignment_bytes: Allocation alignment in bytes.
+        shared_l1_layout_id: Operator-supplied physical-layout fingerprint.
     """
 
     host: str = "0.0.0.0"
@@ -75,6 +82,13 @@ class MPCoordinatorConfig:
     resync_max_wait: float = 60.0
     resync_page_size: int = 1000
     timeout_keep_alive: int = 10
+    shared_l1_host: str = "127.0.0.1"
+    shared_l1_port: int = 0
+    shared_l1_authkey_file: str = ""
+    shared_l1_region_id: str = ""
+    shared_l1_capacity_bytes: int = 0
+    shared_l1_alignment_bytes: int = 4096
+    shared_l1_layout_id: str = ""
 
     def __post_init__(self) -> None:
         """Validate timing parameters.
@@ -108,6 +122,24 @@ class MPCoordinatorConfig:
             raise ValueError("blend_probe_stride must be positive")
         if self.timeout_keep_alive <= 0:
             raise ValueError("timeout_keep_alive must be positive")
+        if not 0 <= self.shared_l1_port <= 65535:
+            raise ValueError("shared_l1_port must be between 0 and 65535")
+        if self.shared_l1_port > 0:
+            if not self.shared_l1_host.strip():
+                raise ValueError("shared_l1_host must not be empty")
+            if not os.path.isabs(self.shared_l1_authkey_file):
+                raise ValueError("shared_l1_authkey_file must be an absolute path")
+            if not self.shared_l1_region_id.strip():
+                raise ValueError("shared_l1_region_id must not be empty")
+            if self.shared_l1_capacity_bytes <= 0:
+                raise ValueError("shared_l1_capacity_bytes must be positive")
+            alignment = self.shared_l1_alignment_bytes
+            if alignment <= 0 or alignment & (alignment - 1):
+                raise ValueError(
+                    "shared_l1_alignment_bytes must be a positive power of two"
+                )
+            if not self.shared_l1_layout_id.strip():
+                raise ValueError("shared_l1_layout_id must not be empty")
 
     @classmethod
     def from_env(cls) -> "MPCoordinatorConfig":
@@ -168,4 +200,26 @@ class MPCoordinatorConfig:
             timeout_keep_alive=int(
                 _num("TIMEOUT_KEEP_ALIVE", cls.timeout_keep_alive, int)
             ),
+            shared_l1_host=_str("SHARED_L1_HOST", cls.shared_l1_host),
+            shared_l1_port=int(_num("SHARED_L1_PORT", cls.shared_l1_port, int)),
+            shared_l1_authkey_file=_str(
+                "SHARED_L1_AUTHKEY_FILE",
+                cls.shared_l1_authkey_file,
+            ),
+            shared_l1_region_id=_str("SHARED_L1_REGION_ID", cls.shared_l1_region_id),
+            shared_l1_capacity_bytes=int(
+                _num(
+                    "SHARED_L1_CAPACITY_BYTES",
+                    cls.shared_l1_capacity_bytes,
+                    int,
+                )
+            ),
+            shared_l1_alignment_bytes=int(
+                _num(
+                    "SHARED_L1_ALIGNMENT_BYTES",
+                    cls.shared_l1_alignment_bytes,
+                    int,
+                )
+            ),
+            shared_l1_layout_id=_str("SHARED_L1_LAYOUT_ID", cls.shared_l1_layout_id),
         )
