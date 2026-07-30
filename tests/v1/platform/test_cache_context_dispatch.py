@@ -73,7 +73,7 @@ class _FakeContext(BaseCacheContext):
         layout_hints: Any,
         engine_group_infos: Any,
         engine_type: Any,
-        separate_object_groups: bool = False,
+        separate_object_groups: bool = True,
         full_sw_kv: bool = False,
     ) -> None:
         # Skip ``BaseCacheContext.__init__`` -- it requires real

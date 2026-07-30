@@ -110,19 +110,19 @@ Object-group separation
 
 At KV-cache registration LMCache buckets a hybrid model's layers into **object
 groups** — the unit it stores and retrieves as one object. By default
-(``--no-separate-object-groups``, off) every layer stays in a single
-full-attention object group. Pass ``--separate-object-groups`` to give each
-distinct cross-chunk attention window its own object group: full-attention
-layers form one group, and each sliding-window size forms another. Layers
-that are neither (mamba / GDN recurrent state) are treated as full attention.
+(``--separate-object-groups``, on) each distinct cross-chunk attention window
+becomes its own object group: full-attention layers form one group, and each
+sliding-window size (mamba / GDN included) forms another. Pass
+``--no-separate-object-groups`` to keep every layer in a single full-attention
+object group instead (the previous behavior).
 
 .. code-block:: bash
 
-   # default: a single full-attention object group for all layers
+   # default: one object group per attention window
    lmcache server --chunk-size 256 --l1-size-gb 100
 
-   # opt in: one object group per attention window
-   lmcache server --chunk-size 256 --l1-size-gb 100 --separate-object-groups
+   # opt out: a single full-attention object group for all layers
+   lmcache server --chunk-size 256 --l1-size-gb 100 --no-separate-object-groups
 
 The flag is transparent to correctness — prefix caching and KV reuse behave the
 same either way, and a non-hybrid model (a single attention behavior) always

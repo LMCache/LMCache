@@ -33,7 +33,9 @@ def _resolve_per_layer_sw_sizes(
     layer_to_idx: Mapping[str, int],
     num_layers: int,
 ) -> list[int]:
-    """Per-layer window size in tokens: -1 (full attention) or positive (SW).
+    """Resolve the sliding window size in tokens for each registered KV tensor.
+
+    Will resolve -1 for non-sliding-window layers.
 
     Args:
         vllm_groups: vLLM ``KVCacheGroupSpec`` instances.
@@ -41,7 +43,9 @@ def _resolve_per_layer_sw_sizes(
         num_layers: Number of registered KV tensors.
 
     Returns:
-        List of length ``num_layers`` with per-tensor window sizes.
+        A list of length ``num_layers`` mapping each registered tensor index
+        to its sliding window size in tokens, or ``-1`` for
+        non-sliding-window layers.
     """
     per_layer_sw_size = [-1] * num_layers
     for group in vllm_groups:

@@ -74,10 +74,6 @@ if [ -n "${CHUNK_SIZE:-}" ]; then
     CHUNK_SIZE_ARG="--chunk-size ${CHUNK_SIZE}"
 fi
 
-# Extra LMCache MP server flags, e.g. "--separate-object-groups" to make the
-# per-object-group / sliding-window path explicit. Empty -> server defaults.
-EXTRA_LMCACHE_ARGS="${EXTRA_LMCACHE_ARGS:-}"
-
 # vLLM batch-invariant mode. On by default; GDN/Mamba backends do not support it.
 BATCH_INVARIANT="${BATCH_INVARIANT:-1}"
 
@@ -130,7 +126,6 @@ lmcache server \
     --port "$LMCACHE_PORT" \
     ${GDS_L1_ARG} \
     ${L1_LAZY_ARG} \
-    ${EXTRA_LMCACHE_ARGS} \
     > "/tmp/build_${BUILD_ID}_lmcache.log" 2>&1 &
 
 LMCACHE_PID=$!

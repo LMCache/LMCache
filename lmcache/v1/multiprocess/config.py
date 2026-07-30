@@ -45,8 +45,8 @@ class MPServerConfig:
     ('default' for standard prefix caching, 'blend' when cacheblend is enabled).
     """
 
-    separate_object_groups: bool = False
-    """When True, split kernel groups into one object group per
+    separate_object_groups: bool = True
+    """When True (default), split kernel groups into one object group per
     sliding-window size at KV-cache registration (hybrid models). When False,
     all kernel groups share a single full-attention object group."""
 
@@ -351,9 +351,9 @@ def add_mp_server_args(
     mp_group.add_argument(
         "--separate-object-groups",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="Split kernel groups into one object group per sliding-window size "
-        "at KV-cache registration (for hybrid models). (Default is False)",
+        "at KV-cache registration (for hybrid models). (Default is True)",
     )
     mp_group.add_argument(
         "--worker-reap-timeout-seconds",
