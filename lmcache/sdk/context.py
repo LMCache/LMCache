@@ -29,6 +29,9 @@ from lmcache.v1.gpu_connector.utils import (
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+from lmcache.v1.multiprocess.transfer_context.base import (
+    is_single_group_engine_driven_context,
+)
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     EngineDrivenTransferContext,
     create_transfer_context,
@@ -245,8 +248,13 @@ class LMCacheSDKContext:
                 "SDK requires an engine-driven transfer context, got "
                 f"{type(transfer_ctx).__name__}."
             )
+        engine_driven_context = transfer_ctx.engine_driven_context
+        if not is_single_group_engine_driven_context(engine_driven_context):
+            raise LMCacheSDKError(
+                "SDK requires a single-group engine-driven transfer context."
+            )
         self._transfer_ctx = ContiguousTransferWrapper(
-            transfer_ctx.engine_driven_context, self._chunk_size
+            engine_driven_context, self._chunk_size
         )
 
     @property

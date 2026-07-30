@@ -33,12 +33,17 @@ from lmcache.v1.multiprocess.engine_module import (
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     ContextEntry,
-    downsample_and_stage_block_ids,
-    get_layout_desc,
     transfer_kv_per_object_group,
 )
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
 from lmcache.v1.multiprocess.protocols.base import RequestType
+from lmcache.v1.multiprocess.transfer_plan import (
+    TransferPlanDirection,
+    build_object_group_layout_desc,
+    build_transfer_plan,
+    export_kv_transfer_metadata,
+    map_kernel_group_block_ids_to_engine_groups,
+)
 from lmcache.v1.platform.cache_context import create_cache_context
 import lmcache.c_ops as lmc_ops
 
@@ -297,11 +302,16 @@ class QStoreModule(InstanceLivenessTarget):
             separate_object_groups=self._ctx.separate_object_groups,
             full_sw_kv=self._ctx.full_sw_kv,
         )
-        layout_desc = get_layout_desc(
-            cache_context, self._ctx.chunk_size, object_group_id=0
+        transfer_metadata = export_kv_transfer_metadata(
+            cache_context.kv_layer_groups_manager,
+            self._ctx.chunk_size,
         )
-        kv_groups_manager = cache_context.kv_layer_groups_manager
-        attn_desc = kv_groups_manager.get_attn_desc()
+        layout_desc = build_object_group_layout_desc(
+            transfer_metadata,
+            self._ctx.chunk_size,
+            object_group_id=0,
+        )
+        attn_desc = transfer_metadata.build_attn_desc()
         self._ctx.layout_desc_registry.register(
             model_name, world_size, layout_desc, attn_desc
         )
@@ -311,6 +321,7 @@ class QStoreModule(InstanceLivenessTarget):
                 cache_context=cache_context,
                 model_name=model_name,
                 world_size=world_size,
+                transfer_metadata=transfer_metadata,
                 last_seen=now,
                 has_liveness_signal=False,
             )
@@ -384,22 +395,13 @@ class QStoreModule(InstanceLivenessTarget):
             raise ValueError(f"No Q ring registered for instance ID {instance_id}")
         cache_context = entry.cache_context
         model_name = entry.model_name
+        transfer_metadata = entry.transfer_metadata
 
-        num_object_groups = cache_context.kv_layer_groups_manager.num_object_groups
+        num_object_groups = len(transfer_metadata.object_groups)
         obj_keys_per_obj_group = self._ctx.resolve_obj_keys(
             key, list(range(num_object_groups))
         )
         num_chunks = len(obj_keys_per_obj_group[0])
-
-        # NOTE: different engine groups may have different block sizes, so
-        # ``blocks_per_chunk[i]`` is the number of blocks in one chunk for
-        # group ``i``.
-        blocks_per_chunk = [
-            cache_context.calculate_num_blocks(self._ctx.chunk_size, group_idx)
-            for group_idx in range(
-                cache_context.kv_layer_groups_manager.num_kernel_groups
-            )
-        ]
 
         with (
             torch_dev.device(cache_context.device),
@@ -408,33 +410,24 @@ class QStoreModule(InstanceLivenessTarget):
             check_interprocess_event_support()
             event = torch_dev.Event(interprocess=True)
 
-            # Fail closed: every LMCache group must have block IDs covering all
-            # chunks. A short list (e.g. a caller/protocol bug) would otherwise
-            # drive the transfer kernel to read out-of-bounds GPU memory, so skip
-            # the whole store and commit nothing rather than caching a partial or
-            # garbage entry. A later request can store it once the block IDs are
-            # complete. Checked on the raw block ids, before cutting drops the
-            # per-chunk blocks that sliding-window groups do not need.
-            if any(
-                len(group_block_ids) < num_chunks * bpc
-                for group_block_ids, bpc in zip(
-                    gpu_block_ids, blocks_per_chunk, strict=True
-                )
-            ):
-                logger.warning(
-                    "STORE_Q block ID underflow for request_id=%s: each group needs "
-                    "num_chunks * blocks_per_chunk block IDs for %d chunks "
-                    "(per-group blocks_per_chunk=%s); skipping the store.",
-                    key.request_id,
+            try:
+                transfer_plan = build_transfer_plan(
+                    transfer_metadata,
+                    map_kernel_group_block_ids_to_engine_groups(
+                        transfer_metadata, gpu_block_ids
+                    ),
                     num_chunks,
-                    blocks_per_chunk,
+                    TransferPlanDirection.STORE,
+                )
+            except ValueError as exc:
+                logger.warning(
+                    "Invalid STORE_Q block IDs for request_id=%s; "
+                    "skipping the store: %s",
+                    key.request_id,
+                    exc,
                 )
                 event.record()
                 return event.ipc_handle(), False
-
-            block_ids_per_group_gpu = downsample_and_stage_block_ids(
-                cache_context, gpu_block_ids
-            )
 
             if not hasattr(torch_dev.Event, "from_ipc_handle"):
                 raise RuntimeError(
@@ -476,10 +469,14 @@ class QStoreModule(InstanceLivenessTarget):
             total_bytes: int = 0
             store_succeeded = False
             try:
-                for obj_group_id in range(num_object_groups):
-                    obj_keys = obj_keys_per_obj_group[obj_group_id]
-                    layout_desc = get_layout_desc(
-                        cache_context,
+                for object_group_plan, obj_keys in zip(
+                    transfer_plan.object_groups,
+                    obj_keys_per_obj_group,
+                    strict=True,
+                ):
+                    obj_group_id = object_group_plan.object_group_id
+                    layout_desc = build_object_group_layout_desc(
+                        transfer_metadata,
                         self._ctx.chunk_size,
                         object_group_id=obj_group_id,
                     )
@@ -498,16 +495,28 @@ class QStoreModule(InstanceLivenessTarget):
                         reserved_dict.get(obj_key) for obj_key in obj_keys
                     ]
 
-                    # NOTE: batch_size must stay 1 for store.
-                    transfer_kv_per_object_group(
-                        cache_context,
-                        block_ids_per_group_gpu,
-                        memory_objs,
-                        object_group_id=obj_group_id,
-                        batch_size=1,
-                        skip_first_n_tokens=0,
-                        direction=lmc_ops.TransferDirection.D2H,
-                    )
+                    planned_memory_objs = [
+                        memory_objs[chunk_idx]
+                        for chunk_idx in object_group_plan.chunk_indices
+                    ]
+                    if planned_memory_objs:
+                        # batch_size must stay 1 for store.
+                        transfer_kv_per_object_group(
+                            cache_context,
+                            transfer_metadata,
+                            object_group_plan,
+                            cache_context.stage_block_ids(
+                                [
+                                    list(kernel_group_plan.block_ids)
+                                    for kernel_group_plan in (
+                                        object_group_plan.kernel_groups
+                                    )
+                                ]
+                            ),
+                            planned_memory_objs,
+                            batch_size=1,
+                            direction=lmc_ops.TransferDirection.D2H,
+                        )
 
                 store_succeeded = True
             except Exception:

@@ -21,8 +21,62 @@ from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
 from lmcache.v1.multiprocess.modules.experimental import qstore as qstore_mod
 from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import ContextEntry
+from lmcache.v1.multiprocess.transfer_plan import (
+    KernelGroupTransferMetadata,
+    KVTransferMetadata,
+    ObjectGroupTransferMetadata,
+)
 
 REGISTER_ARGS = ("model##query", 2)
+
+
+def _transfer_metadata() -> KVTransferMetadata:
+    """Create one full-attention Q kernel group for store-plan tests."""
+    return KVTransferMetadata(
+        num_chunks_in_sw=(-1,),
+        tokens_per_chunk=256,
+        kernel_groups=(
+            KernelGroupTransferMetadata(
+                kernel_group_id=0,
+                engine_group_id=0,
+                layer_indices=(0,),
+                blocks_per_chunk=2,
+                blocks_per_window=2,
+                slots_per_chunk_in_window=256,
+                kv_size=1,
+                num_layers=1,
+                hidden_dim_size=1,
+                slots_per_block=128,
+                tokens_per_block=128,
+                dtype=MagicMock(),
+                engine_kv_format=MagicMock(),
+            ),
+        ),
+        object_groups=(
+            ObjectGroupTransferMetadata(
+                object_group_id=0,
+                kernel_group_ids=(0,),
+                sw_size_chunks=-1,
+            ),
+        ),
+    )
+
+
+def _context_entry(
+    cache_context: MagicMock,
+    last_seen: float,
+    has_liveness_signal: bool = False,
+    transfer_metadata: KVTransferMetadata | MagicMock | None = None,
+) -> ContextEntry:
+    """Create a Q context entry with explicit transfer-plan metadata."""
+    return ContextEntry(
+        cache_context=cache_context,
+        model_name=REGISTER_ARGS[0],
+        world_size=REGISTER_ARGS[1],
+        transfer_metadata=transfer_metadata or MagicMock(),
+        last_seen=last_seen,
+        has_liveness_signal=has_liveness_signal,
+    )
 
 
 def _ctx() -> MagicMock:
@@ -44,7 +98,13 @@ def _stub_registration(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     register_q_cache()."""
     create = MagicMock(return_value=MagicMock(num_layers=2))
     monkeypatch.setattr(qstore_mod, "create_cache_context", create)
-    monkeypatch.setattr(qstore_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
+    metadata = _transfer_metadata()
+    monkeypatch.setattr(
+        qstore_mod, "export_kv_transfer_metadata", lambda *a, **kw: metadata
+    )
+    monkeypatch.setattr(
+        qstore_mod, "build_object_group_layout_desc", lambda *a, **kw: MagicMock()
+    )
     return create
 
 
@@ -93,9 +153,9 @@ def test_reap_uses_two_tier_windows() -> None:
     old = time.monotonic() - 1000.0
     module._q_contexts.update(
         {
-            1: ContextEntry(MagicMock(), *REGISTER_ARGS, old, True),
-            2: ContextEntry(MagicMock(), *REGISTER_ARGS, old, False),
-            3: ContextEntry(MagicMock(), *REGISTER_ARGS, time.monotonic(), True),
+            1: _context_entry(MagicMock(), old, True),
+            2: _context_entry(MagicMock(), old, False),
+            3: _context_entry(MagicMock(), time.monotonic(), True),
         }
     )
 
@@ -121,7 +181,7 @@ def test_unregister_releases_context_and_layout(monkeypatch) -> None:
     module = _module()
     context = MagicMock()
     context.close.side_effect = lambda: calls.append("close")
-    module._q_contexts[1] = ContextEntry(context, *REGISTER_ARGS, time.monotonic())
+    module._q_contexts[1] = _context_entry(context, time.monotonic())
 
     module.unregister_q_cache(1)
 
@@ -142,7 +202,7 @@ def test_release_tolerates_backends_without_ipc_collect(monkeypatch) -> None:
         qstore_mod, "torch_dev", SimpleNamespace(empty_cache=lambda: None)
     )
     module = _module()
-    module._q_contexts[1] = ContextEntry(MagicMock(), *REGISTER_ARGS, time.monotonic())
+    module._q_contexts[1] = _context_entry(MagicMock(), time.monotonic())
 
     module.unregister_q_cache(1)
 
@@ -207,8 +267,8 @@ def test_store_q_block_id_underflow_fails_closed(stub_device) -> None:
     cache_context.kv_layer_groups_manager.num_object_groups = 1
     cache_context.kv_layer_groups_manager.num_kernel_groups = 1
     cache_context.calculate_num_blocks.return_value = 2  # 2 chunks * 2 = 4 needed
-    module._q_contexts[1] = ContextEntry(
-        cache_context, *REGISTER_ARGS, time.monotonic()
+    module._q_contexts[1] = _context_entry(
+        cache_context, time.monotonic(), transfer_metadata=_transfer_metadata()
     )
 
     handle, ok = module.store_q(MagicMock(), 1, [[0, 1, 2]], b"peer-handle")
