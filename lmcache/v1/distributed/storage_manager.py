@@ -100,15 +100,16 @@ class StorageManager:
         self._registered_l2_listeners: list[L2AdapterListener] = []
         self._l2_adapters: dict[int, L2AdapterInterface] = {}
         self._adapter_descriptors: dict[int, AdapterDescriptor] = {}
-        for ac in config.l2_adapter_config.adapters:
-            adapter_id, adapter, descriptor = self._build_l2_adapter(ac)
-            self._l2_adapters[adapter_id] = adapter
-            self._adapter_descriptors[adapter_id] = descriptor
 
         PeriodicEventNotifier.create(
             interval_ms=config.periodic_notifier_interval_ms,
             use_eventfd=HAS_EVENTFD,
         )
+
+        for ac in config.l2_adapter_config.adapters:
+            adapter_id, adapter, descriptor = self._build_l2_adapter(ac)
+            self._l2_adapters[adapter_id] = adapter
+            self._adapter_descriptors[adapter_id] = descriptor
 
         # Per-cache_salt quota registry. Shared across the L2 eviction
         # controller (reads quotas each cycle) and the HTTP quota
@@ -1118,10 +1119,10 @@ class StorageManager:
         self._eviction_controller.stop()
         self._l2_eviction_controller.stop()
 
-        PeriodicEventNotifier.shutdown()
-
         for adapter in self._l2_adapters.values():
             adapter.close()
+
+        PeriodicEventNotifier.shutdown()
 
         self._l1_manager.close()
 
