@@ -6,7 +6,6 @@ import time
 
 # Third Party
 import pytest
-import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
@@ -619,7 +618,7 @@ def test_cuda_messaging_future_with_explicit_device():
     event_bytes = event_queue.get(timeout=30)
     process.join(timeout=2)
 
-    device = torch.cuda.current_device()
+    device = torch_dev.current_device()
     raw_future = MessagingFuture[tuple[bytes, str]]()
 
     # Create CUDA future with explicit device

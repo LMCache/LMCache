@@ -45,14 +45,14 @@ pytestmark = pytest.mark.cuda
 
 def _has_working_new_shared_cuda() -> bool:
     try:
-        buf = torch.empty(1024, device="cuda")
+        buf = torch.empty(1024, device=torch_device_type)
         shared = buf.untyped_storage()._share_cuda_()
         return shared is not None
     except Exception:
         return False
 
 
-if not torch.cuda.is_available():
+if not (torch_dev.is_available() and torch_device_type == "cuda"):
     pytest.skip(
         "requires available CUDA runtime",
         allow_module_level=True,
@@ -61,9 +61,7 @@ if not torch.cuda.is_available():
 
 if not _has_working_new_shared_cuda():
     pytest.skip(
-        (
-            "new_shared_cuda is not available or not working on this system"
-        ),
+        ("new_shared_cuda is not available or not working on this system"),
         allow_module_level=True,
     )
 
@@ -320,7 +318,7 @@ def client_context() -> Generator[ClientContext, None, None]:
 
     # Cleanup GPU memory
     del ctx.gpu_kv_caches
-    torch.cuda.empty_cache()
+    torch_dev.empty_cache()
 
 
 @pytest.fixture(scope="function")

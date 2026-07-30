@@ -9,9 +9,9 @@ import time
 # Third Party
 import msgspec
 import pytest
-import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
@@ -20,7 +20,7 @@ from lmcache.v1.multiprocess.native_completion import (
 pytestmark = pytest.mark.cuda
 
 
-if not torch.cuda.is_available():
+if not (torch_dev.is_available() and torch_device_type == "cuda"):
     pytest.skip(
         "requires available CUDA runtime",
         allow_module_level=True,
