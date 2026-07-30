@@ -549,6 +549,62 @@ class TestLoadInterface:
         # Data should be copied
         assert torch.all(load_obj.raw_data == 42.0)
 
+    def test_load_size_mismatch_is_reported_as_failure(
+        self,
+        adapter: tuple[NixlStoreL2Adapter, torch.Tensor],
+    ) -> None:
+        """A differently sized L1 object must not be marked as loaded."""
+        adpt, buf = adapter
+        key = create_object_key(1)
+        store_obj = create_memory_obj(buf, page_index=0, num_pages=2)
+        adpt.submit_store_task([key], [store_obj])
+        assert wait_for_event_fd(adpt.get_store_event_fd(), timeout=5.0)
+        adpt.pop_completed_store_tasks()
+
+        listener = _RecordingListener()
+        adpt.register_listener(listener)
+        load_obj = create_memory_obj(
+            buf,
+            page_index=3,
+            fill_value=0.0,
+            num_pages=1,
+        )
+        task_id = adpt.submit_load_task([key], [load_obj])
+        assert wait_for_event_fd(adpt.get_load_event_fd(), timeout=5.0)
+
+        bitmap = adpt.query_load_result(task_id)
+        assert bitmap is not None
+        assert bitmap.test(0) is False
+        assert listener.accessed == []
+
+    def test_failed_transfer_is_not_reported_as_loaded(
+        self,
+        adapter: tuple[NixlStoreL2Adapter, torch.Tensor],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A NIXL transfer exception leaves the completion bitmap unset."""
+        adpt, buf = adapter
+        key = create_object_key(1)
+        store_obj = create_memory_obj(buf, page_index=0, fill_value=42.0)
+        adpt.submit_store_task([key], [store_obj])
+        assert wait_for_event_fd(adpt.get_store_event_fd(), timeout=5.0)
+        adpt.pop_completed_store_tasks()
+
+        async def fail_transfer(handle: object) -> None:
+            raise RuntimeError("injected NIXL transfer failure")
+
+        monkeypatch.setattr(adpt.nixl_agent, "post_non_blocking", fail_transfer)
+        listener = _RecordingListener()
+        adpt.register_listener(listener)
+        load_obj = create_memory_obj(buf, page_index=1, fill_value=0.0)
+        task_id = adpt.submit_load_task([key], [load_obj])
+        assert wait_for_event_fd(adpt.get_load_event_fd(), timeout=5.0)
+
+        bitmap = adpt.query_load_result(task_id)
+        assert bitmap is not None
+        assert bitmap.test(0) is False
+        assert listener.accessed == []
+
     def test_query_load_result_returns_none_for_unknown_task(self, adapter):
         """Querying an unknown task ID should return None."""
         adpt, _ = adapter

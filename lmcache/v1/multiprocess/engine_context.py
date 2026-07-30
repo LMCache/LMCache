@@ -12,6 +12,7 @@ from lmcache.v1.distributed.api import (
     DEFAULT_ATTN_WINDOW_DESC,
     AttnWindowDesc,
     MemoryLayoutDesc,
+    ObjectGroupLayoutDesc,
     ObjectKey,
     ipc_key_to_object_keys,
 )
@@ -40,7 +41,7 @@ class ShmPoolInfo(TypedDict):
 class _LayoutDescEntry:
     """Stored layout descriptor and its active registration count."""
 
-    layout_desc: MemoryLayoutDesc
+    layout_desc: ObjectGroupLayoutDesc
     ref_count: int
     attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
     """Cross-chunk attention windows of all object groups, in object-group
@@ -48,7 +49,7 @@ class _LayoutDescEntry:
 
 
 class LayoutDescRegistry:
-    """Thread-safe registry mapping (model_name, world_size) to MemoryLayoutDesc.
+    """Thread-safe registry of per-object-group memory layouts.
 
     Modules write to this registry when KV caches are registered.
     Consumers (e.g. LookupModule) read from it to find layout descriptors
@@ -66,7 +67,7 @@ class LayoutDescRegistry:
         self,
         model_name: str,
         world_size: int,
-        layout_desc: MemoryLayoutDesc,
+        layout_desc: MemoryLayoutDesc | ObjectGroupLayoutDesc,
         attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
     ) -> None:
         """Register a layout descriptor for a (model_name, world_size) pair.
@@ -77,22 +78,40 @@ class LayoutDescRegistry:
         Args:
             model_name: The model name.
             world_size: The world size.
-            layout_desc: The memory layout descriptor.
+            layout_desc: The memory layout descriptor. A singular descriptor
+                is applied uniformly to every object group in ``attn_desc``.
             attn_desc: Cross-chunk attention windows of all object groups, in
                 object-group order. Defaults to a single full-attention group.
+
+        Raises:
+            ValueError: If ``attn_desc`` has no object groups, or if an
+                object-group layout and ``attn_desc`` cover different numbers
+                of groups.
         """
         key = (model_name, world_size)
+        if isinstance(layout_desc, MemoryLayoutDesc):
+            object_group_layouts = ObjectGroupLayoutDesc.from_uniform_layout(
+                layout_desc,
+                attn_desc.num_object_groups,
+            )
+        else:
+            object_group_layouts = layout_desc
+            if object_group_layouts.num_object_groups != attn_desc.num_object_groups:
+                raise ValueError(
+                    "LayoutDescRegistry: layout and attention descriptors "
+                    "must cover the same number of object groups"
+                )
         with self._lock:
             entry = self._registry.get(key)
             if entry is None:
                 self._registry[key] = _LayoutDescEntry(
-                    layout_desc=layout_desc,
+                    layout_desc=object_group_layouts,
                     ref_count=1,
                     attn_desc=attn_desc,
                 )
                 return
 
-            entry.layout_desc = layout_desc
+            entry.layout_desc = object_group_layouts
             entry.attn_desc = attn_desc
             entry.ref_count += 1
 
@@ -119,14 +138,39 @@ class LayoutDescRegistry:
             entry.ref_count -= 1
 
     def find(self, model_name: str, world_size: int) -> MemoryLayoutDesc | None:
-        """Look up a layout descriptor by (model_name, world_size).
+        """Look up the legacy group-0 layout for a registered model.
 
         Args:
             model_name: The model name.
             world_size: The world size.
 
         Returns:
-            The layout descriptor if found, otherwise None.
+            The first object group's layout if found, otherwise ``None``.
+
+        Note:
+            This compatibility view is suitable only for single-group callers.
+            Consumers that handle separate object groups must call
+            :meth:`find_object_group_layouts`.
+        """
+        with self._lock:
+            entry = self._registry.get((model_name, world_size))
+            if entry is None:
+                return None
+            return entry.layout_desc.get_layout(0)
+
+    def find_object_group_layouts(
+        self,
+        model_name: str,
+        world_size: int,
+    ) -> ObjectGroupLayoutDesc | None:
+        """Look up all object-group layouts for a registered model.
+
+        Args:
+            model_name: The model name.
+            world_size: The world size.
+
+        Returns:
+            The object-group layouts if registered, otherwise ``None``.
         """
         with self._lock:
             entry = self._registry.get((model_name, world_size))

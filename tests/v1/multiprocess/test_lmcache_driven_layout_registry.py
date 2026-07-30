@@ -13,16 +13,16 @@ import torch
 
 
 class _FakeKVLayerGroupsManager:
-    """Minimal manager stub: one full-attention object group."""
+    """Minimal manager stub with two hybrid object groups."""
 
-    num_object_groups: int = 1
+    num_object_groups: int = 2
 
     def get_attn_desc(self) -> Any:
-        """One full-attention object group."""
+        """One full-attention group and one sliding-window group."""
         # First Party
         from lmcache.v1.distributed.api import AttnWindowDesc
 
-        return AttnWindowDesc(num_chunks_in_sw=[-1])
+        return AttnWindowDesc(num_chunks_in_sw=[-1, 2])
 
 
 class _FakeGPUContext:
@@ -87,6 +87,7 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
     ctx = MagicMock()
     ctx.chunk_size = 16
     ctx.layout_desc_registry = LayoutDescRegistry()
+    requested_object_groups: list[int] = []
 
     def fake_create_cache_context(
         kv_caches: object,
@@ -106,6 +107,7 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
         object_group_id: int = 0,
     ) -> MemoryLayoutDesc:
         """Return the shared layout descriptor used by both registrations."""
+        requested_object_groups.append(object_group_id)
         return layout_desc
 
     monkeypatch.setattr(
@@ -133,6 +135,7 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
     module = lmcache_driven_transfer_mod.LMCacheDrivenTransferModule(ctx)
     module.register_kv_cache(1, [], "shared-model", 1, EngineType.VLLM, {}, [])
     module.register_kv_cache(2, [], "shared-model", 1, EngineType.VLLM, {}, [])
+    assert requested_object_groups == [0, 1, 0, 1]
     assert ctx.layout_desc_registry.find("shared-model", 1) is layout_desc
 
     module.unregister_kv_cache(1)
@@ -163,6 +166,104 @@ def test_registry_attn_desc_roundtrip() -> None:
     )
 
     assert registry.find_attn_desc("m", 2).num_chunks_in_sw == [-1, 2]
+
+
+def test_registry_object_group_layouts_roundtrip() -> None:
+    """Each object group's distinct layout remains available to lookup."""
+    # First Party
+    from lmcache.v1.distributed.api import (
+        AttnWindowDesc,
+        MemoryLayoutDesc,
+        ObjectGroupLayoutDesc,
+    )
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    layouts = ObjectGroupLayoutDesc(
+        layouts=(
+            MemoryLayoutDesc(
+                shapes=[torch.Size([2, 4])],
+                dtypes=[torch.float16],
+            ),
+            MemoryLayoutDesc(
+                shapes=[torch.Size([4, 4])],
+                dtypes=[torch.float16],
+            ),
+        )
+    )
+    registry = LayoutDescRegistry()
+    registry.register(
+        "hybrid",
+        1,
+        layouts,
+        attn_desc=AttnWindowDesc(num_chunks_in_sw=[2, -1]),
+    )
+
+    assert registry.find_object_group_layouts("hybrid", 1) is layouts
+    assert registry.find("hybrid", 1) is layouts.layouts[0]
+
+
+def test_registry_expands_uniform_layout_for_attention_groups() -> None:
+    """A singular layout remains compatible with multi-group registrations."""
+    # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    layout = _layout()
+    registry = LayoutDescRegistry()
+    registry.register(
+        "hybrid",
+        1,
+        layout,
+        attn_desc=AttnWindowDesc(num_chunks_in_sw=[2, -1]),
+    )
+
+    layouts = registry.find_object_group_layouts("hybrid", 1)
+    assert layouts is not None
+    assert layouts.num_object_groups == 2
+    assert layouts.get_layout(0) is layout
+    assert layouts.get_layout(1) is layout
+
+
+def test_registry_rejects_mismatched_groups_without_mutation() -> None:
+    """A rejected registration must not leave a partial registry entry."""
+    # First Party
+    from lmcache.v1.distributed.api import (
+        AttnWindowDesc,
+        ObjectGroupLayoutDesc,
+    )
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    layouts = ObjectGroupLayoutDesc(layouts=(_layout(), _layout()))
+    registry = LayoutDescRegistry()
+
+    with pytest.raises(ValueError, match="same number of object groups"):
+        registry.register(
+            "hybrid",
+            1,
+            layouts,
+            attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1]),
+        )
+
+    assert registry.find_object_group_layouts("hybrid", 1) is None
+
+
+def test_registry_rejects_empty_attention_groups_for_uniform_layout() -> None:
+    """A uniform layout still requires at least one object group."""
+    # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    registry = LayoutDescRegistry()
+
+    with pytest.raises(ValueError, match="num_object_groups must be positive"):
+        registry.register(
+            "hybrid",
+            1,
+            _layout(),
+            attn_desc=AttnWindowDesc(num_chunks_in_sw=[]),
+        )
+
+    assert registry.find_object_group_layouts("hybrid", 1) is None
 
 
 def test_registry_attn_desc_raises_when_unregistered() -> None:

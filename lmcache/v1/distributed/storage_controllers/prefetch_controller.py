@@ -27,6 +27,7 @@ from lmcache.v1.distributed.api import (
     DEFAULT_ATTN_WINDOW_DESC,
     AttnWindowDesc,
     MemoryLayoutDesc,
+    ObjectGroupLayoutDesc,
     ObjectKey,
     PrefetchMode,
     PrefetchRequestSpec,
@@ -133,13 +134,62 @@ class PrefetchPhase(enum.Enum):
     PLAN_AND_LOAD = enum.auto()
 
 
+@dataclass(frozen=True)
+class _LayoutShard:
+    """Global key indices that share one memory layout."""
+
+    layout_desc: MemoryLayoutDesc
+    key_indices: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class _PendingSubtask:
+    """Global positions and reserved bytes associated with an L2 subtask."""
+
+    key_indices: tuple[int, ...]
+    reserved_bytes: int = 0
+
+
+def _build_layout_shards(
+    keys: list[ObjectKey],
+    layout_desc: MemoryLayoutDesc | ObjectGroupLayoutDesc,
+    key_indices: Iterable[int] | None = None,
+) -> list[_LayoutShard]:
+    """Partition selected keys into homogeneous object-group layout shards.
+
+    A singular :class:`MemoryLayoutDesc` retains the legacy behavior of one
+    task for all keys. An :class:`ObjectGroupLayoutDesc` creates one shard per
+    object group while preserving the relative order of that group's keys.
+    """
+    indices = tuple(range(len(keys)) if key_indices is None else key_indices)
+    if not indices:
+        return []
+    if isinstance(layout_desc, MemoryLayoutDesc):
+        return [_LayoutShard(layout_desc=layout_desc, key_indices=indices)]
+
+    indices_by_group: dict[int, list[int]] = {}
+    for index in indices:
+        object_group_id = keys[index].object_group_id
+        # Validate every referenced group before any adapter task is submitted.
+        layout_desc.get_layout(object_group_id)
+        indices_by_group.setdefault(object_group_id, []).append(index)
+
+    return [
+        _LayoutShard(
+            layout_desc=layout_desc.get_layout(object_group_id),
+            key_indices=tuple(group_indices),
+        )
+        for object_group_id, group_indices in indices_by_group.items()
+    ]
+
+
 @dataclass
 class InFlightPrefetchRequest:
     """Tracks a single prefetch request across its lifecycle phases."""
 
     request_id: PrefetchRequestId
     keys: list[ObjectKey]
-    layout_desc: MemoryLayoutDesc
+    layout_desc: MemoryLayoutDesc | ObjectGroupLayoutDesc
     phase: PrefetchPhase
     extra_count: int = 0
     """Extra read locks per key (on top of the default 1) to acquire when
@@ -157,19 +207,23 @@ class InFlightPrefetchRequest:
     loaded keys permanent and acquires no read lock; ``LOOKUP`` defers
     retention to the policy and read-locks loaded keys."""
 
-    # Lookup phase: adapter_idx -> task_id (removed as results arrive)
-    pending_lookup_tasks: dict[int, L2TaskId] = field(default_factory=dict)
-    # Lookup phase: adapter_idx -> bitmap (populated as results arrive)
+    # Lookup phase: (adapter_idx, task_id) -> subtask metadata
+    pending_lookup_tasks: dict[tuple[int, L2TaskId], _PendingSubtask] = field(
+        default_factory=dict
+    )
+    # Lookup phase: adapter_idx -> globally indexed aggregate bitmap
     lookup_results: dict[int, Bitmap] = field(default_factory=dict)
 
     # Load phase: adapter_idx -> bitmap of key indices to load
     load_plan: dict[int, Bitmap] = field(default_factory=dict)
-    # Load phase: adapter_idx -> task_id (removed as results arrive)
-    pending_load_tasks: dict[int, L2TaskId] = field(default_factory=dict)
+    # Load phase: (adapter_idx, task_id) -> subtask metadata
+    pending_load_tasks: dict[tuple[int, L2TaskId], _PendingSubtask] = field(
+        default_factory=dict
+    )
     # Load phase: adapter_idx -> L1 bytes reserved for that adapter's
     # in-flight load.  Read by the inflight_load_memory_usage_bytes gauge.
     load_bytes_by_adapter: dict[int, int] = field(default_factory=dict)
-    # Load phase: adapter_idx -> bitmap (populated as results arrive)
+    # Load phase: adapter_idx -> globally indexed aggregate bitmap
     load_results: dict[int, Bitmap] = field(default_factory=dict)
     # Load phase: keys that were write-reserved in L1
     write_reserved_keys: list[ObjectKey] = field(default_factory=list)
@@ -473,10 +527,12 @@ class PrefetchController(StorageControllerInterface):
         counts: dict[int, int] = defaultdict(int)
         bytes_by_adapter: dict[int, int] = defaultdict(int)
         for request in self._in_flight_requests.copy().values():
+            for adapter_idx, _ in request.pending_load_tasks.copy():
+                counts[adapter_idx] += 1
             for idx, reserved in request.load_bytes_by_adapter.copy().items():
-                counts[idx] += 1
                 bytes_by_adapter[idx] += reserved
-        return {idx: (counts[idx], bytes_by_adapter[idx]) for idx in counts}
+        adapter_indices = counts.keys() | bytes_by_adapter.keys()
+        return {idx: (counts[idx], bytes_by_adapter[idx]) for idx in adapter_indices}
 
     def get_inflight_loads_observations(
         self,
@@ -694,8 +750,8 @@ class PrefetchController(StorageControllerInterface):
         """True if any in-flight request still references ``adapter_id``."""
         for request in self._in_flight_requests.values():
             if (
-                adapter_id in request.pending_lookup_tasks
-                or adapter_id in request.pending_load_tasks
+                any(idx == adapter_id for idx, _ in request.pending_lookup_tasks)
+                or any(idx == adapter_id for idx, _ in request.pending_load_tasks)
                 or adapter_id in request.load_plan
                 or adapter_id in request.lookup_results
             ):
@@ -761,11 +817,24 @@ class PrefetchController(StorageControllerInterface):
         if not routing_adapters:
             self._complete_request(request_id, Bitmap(len(spec.keys)))
             return
+        if not spec.keys:
+            self._complete_request(request_id, Bitmap(0))
+            return
 
-        pending_lookup_tasks: dict[int, L2TaskId] = {}
+        shards = _build_layout_shards(spec.keys, spec.layout_desc)
+        pending_lookup_tasks: dict[tuple[int, L2TaskId], _PendingSubtask] = {}
+        lookup_results: dict[int, Bitmap] = {}
         for adapter_id, adapter in routing_adapters.items():
-            task_id = adapter.submit_lookup_and_lock_task(spec.keys, spec.layout_desc)
-            pending_lookup_tasks[adapter_id] = task_id
+            lookup_results[adapter_id] = Bitmap(len(spec.keys))
+            for shard in shards:
+                shard_keys = [spec.keys[index] for index in shard.key_indices]
+                task_id = adapter.submit_lookup_and_lock_task(
+                    shard_keys,
+                    shard.layout_desc,
+                )
+                pending_lookup_tasks[(adapter_id, task_id)] = _PendingSubtask(
+                    key_indices=shard.key_indices
+                )
 
         request = InFlightPrefetchRequest(
             request_id=request_id,
@@ -777,6 +846,7 @@ class PrefetchController(StorageControllerInterface):
             attn_desc=spec.attn_desc,
             mode=spec.mode,
             pending_lookup_tasks=pending_lookup_tasks,
+            lookup_results=lookup_results,
         )
         self._in_flight_requests[request_id] = request
         self._status_in_flight_count += 1
@@ -788,7 +858,8 @@ class PrefetchController(StorageControllerInterface):
                 metadata={
                     "request_id": request_id,
                     "key_count": len(spec.keys),
-                    "adapter_count": len(pending_lookup_tasks),
+                    "adapter_count": len(routing_adapters),
+                    "task_count": len(pending_lookup_tasks),
                     "key_count_per_salt": Counter(k.cache_salt for k in spec.keys),
                 },
             )
@@ -852,17 +923,32 @@ class PrefetchController(StorageControllerInterface):
             retentions = self._policy.select_l1_retentions(
                 keys_to_reserve,
             )
-        write_results = l1_mgr.reserve_write(
-            keys=keys_to_reserve,
-            is_temporary=[not r for r in retentions],
-            layout_desc=request.layout_desc,
-            mode="new",
-        )
+        is_temporary_by_key = {
+            key: not retention
+            for key, retention in zip(keys_to_reserve, retentions, strict=True)
+        }
+        write_results: dict[ObjectKey, tuple[L1Error, MemoryObj | None]] = {}
+        reserve_indices = merged_bitmap.get_indices_list()
+        for shard in _build_layout_shards(
+            request.keys,
+            request.layout_desc,
+            reserve_indices,
+        ):
+            shard_keys = [request.keys[index] for index in shard.key_indices]
+            write_results.update(
+                l1_mgr.reserve_write(
+                    keys=shard_keys,
+                    is_temporary=[is_temporary_by_key[key] for key in shard_keys],
+                    layout_desc=shard.layout_desc,
+                    mode="new",
+                )
+            )
 
         # Step 4: filter to successfully reserved keys
         reserved_key_set: set[ObjectKey] = set()
         oom_keys: list[ObjectKey] = []
-        for key, (err, mem_obj) in write_results.items():
+        for key in keys_to_reserve:
+            err, mem_obj = write_results[key]
             if err == L1Error.SUCCESS and mem_obj is not None:
                 request.write_reserved_keys.append(key)
                 request.write_reserved_objs[key] = mem_obj
@@ -922,38 +1008,44 @@ class PrefetchController(StorageControllerInterface):
             self._complete_request(request.request_id, Bitmap(num_keys))
             return
 
-        ## Step 7: submit load tasks per adapter
+        ## Step 7: submit homogeneous load tasks per adapter and object group
+        load_task_count = 0
         for adapter_idx, bitmap in trimmed_plan.items():
-            per_adapter_keys = bitmap.gather(request.keys)
-            per_adapter_objs = [
-                request.write_reserved_objs[key] for key in per_adapter_keys
-            ]
-            task_id = self._l2_adapters[adapter_idx].submit_load_task(
-                per_adapter_keys, per_adapter_objs
-            )
-            request.pending_load_tasks[adapter_idx] = task_id
-            # Per-adapter byte accounting for L2_LOAD_TASK_* throughput
-            # events.  Uniform layout per chunk -> size * count.
-            total_bytes = (
-                per_adapter_objs[0].get_size() * len(per_adapter_objs)
-                if per_adapter_objs
-                else 0
-            )
-            request.load_bytes_by_adapter[adapter_idx] = total_bytes
-
-            self._event_bus.publish(
-                Event(
-                    event_type=EventType.L2_LOAD_TASK_SUBMITTED,
-                    metadata={
-                        "request_id": request.request_id,
-                        "adapter_index": adapter_idx,
-                        "task_id": task_id,
-                        "l2_name": self._adapter_descriptors[adapter_idx].type_name,
-                        "key_count": len(per_adapter_keys),
-                        "total_bytes": total_bytes,
-                    },
+            request.load_results[adapter_idx] = Bitmap(num_keys)
+            for shard in _build_layout_shards(
+                request.keys,
+                request.layout_desc,
+                bitmap.get_indices_list(),
+            ):
+                shard_keys = [request.keys[index] for index in shard.key_indices]
+                shard_objs = [request.write_reserved_objs[key] for key in shard_keys]
+                task_id = self._l2_adapters[adapter_idx].submit_load_task(
+                    shard_keys,
+                    shard_objs,
                 )
-            )
+                total_bytes = sum(obj.get_size() for obj in shard_objs)
+                request.pending_load_tasks[(adapter_idx, task_id)] = _PendingSubtask(
+                    key_indices=shard.key_indices,
+                    reserved_bytes=total_bytes,
+                )
+                request.load_bytes_by_adapter[adapter_idx] = (
+                    request.load_bytes_by_adapter.get(adapter_idx, 0) + total_bytes
+                )
+                load_task_count += 1
+
+                self._event_bus.publish(
+                    Event(
+                        event_type=EventType.L2_LOAD_TASK_SUBMITTED,
+                        metadata={
+                            "request_id": request.request_id,
+                            "adapter_index": adapter_idx,
+                            "task_id": task_id,
+                            "l2_name": self._adapter_descriptors[adapter_idx].type_name,
+                            "key_count": len(shard_keys),
+                            "total_bytes": total_bytes,
+                        },
+                    )
+                )
 
         ## Step 8: update the lookup result based on the final load plan
         self._update_lookup_results(request.request_id, retained.count_leading_ones())
@@ -974,6 +1066,7 @@ class PrefetchController(StorageControllerInterface):
                     "request_id": request.request_id,
                     "key_count": len(reserved_key_set),
                     "adapter_count": len(trimmed_plan),
+                    "task_count": load_task_count,
                     "key_count_per_salt": Counter(
                         k.cache_salt for k in reserved_key_set
                     ),
@@ -1021,17 +1114,19 @@ class PrefetchController(StorageControllerInterface):
         signaled_adapters: set[int],
     ) -> None:
         """Query pending lookup-and-lock results from signaled adapters."""
-        for adapter_idx in list(request.pending_lookup_tasks):
+        for adapter_idx, task_id in list(request.pending_lookup_tasks):
             if adapter_idx not in signaled_adapters:
                 continue
-            task_id = request.pending_lookup_tasks[adapter_idx]
+            subtask = request.pending_lookup_tasks[(adapter_idx, task_id)]
             result = self._l2_adapters[adapter_idx].query_lookup_and_lock_result(
                 task_id
             )
             if result is None:
                 continue
-            request.lookup_results[adapter_idx] = result
-            del request.pending_lookup_tasks[adapter_idx]
+            aggregate = request.lookup_results[adapter_idx]
+            for global_index in result.gather(list(subtask.key_indices)):
+                aggregate.set(global_index)
+            del request.pending_lookup_tasks[(adapter_idx, task_id)]
 
     def _poll_load_results(
         self,
@@ -1039,16 +1134,24 @@ class PrefetchController(StorageControllerInterface):
         signaled_adapters: set[int],
     ) -> None:
         """Query pending load results from signaled adapters."""
-        for adapter_idx in list(request.pending_load_tasks):
+        for adapter_idx, task_id in list(request.pending_load_tasks):
             if adapter_idx not in signaled_adapters:
                 continue
-            task_id = request.pending_load_tasks[adapter_idx]
+            subtask = request.pending_load_tasks[(adapter_idx, task_id)]
             result = self._l2_adapters[adapter_idx].query_load_result(task_id)
             if result is None:
                 continue
-            request.load_results[adapter_idx] = result
-            del request.pending_load_tasks[adapter_idx]
-            request.load_bytes_by_adapter.pop(adapter_idx, None)
+            aggregate = request.load_results[adapter_idx]
+            for global_index in result.gather(list(subtask.key_indices)):
+                aggregate.set(global_index)
+            del request.pending_load_tasks[(adapter_idx, task_id)]
+            remaining_bytes = (
+                request.load_bytes_by_adapter[adapter_idx] - subtask.reserved_bytes
+            )
+            if remaining_bytes > 0:
+                request.load_bytes_by_adapter[adapter_idx] = remaining_bytes
+            else:
+                request.load_bytes_by_adapter.pop(adapter_idx, None)
 
             self._event_bus.publish(
                 Event(
@@ -1073,18 +1176,8 @@ class PrefetchController(StorageControllerInterface):
         """
         num_keys = len(request.keys)
 
-        # Scatter per-adapter local load results into global positions.
-        # Each adapter's load bitmap is locally indexed (size == adapter's
-        # key count).  The plan bitmap maps local → global indices via
-        # get_indices_list().
-        result_bitmap = Bitmap(num_keys)
-        for adapter_idx, plan_bitmap in request.load_plan.items():
-            load_bitmap = request.load_results.get(adapter_idx)
-            if load_bitmap is None:
-                continue
-            plan_indices = plan_bitmap.get_indices_list()
-            for global_i in load_bitmap.gather(plan_indices):
-                result_bitmap.set(global_i)
+        # Subtask results are scattered to global positions while polling.
+        result_bitmap = merge_bitmaps(request.load_results.values(), num_keys)
 
         # Separate loaded vs. failed among write-reserved keys
         loaded_keys: list[ObjectKey] = result_bitmap.gather(request.keys)

@@ -21,6 +21,7 @@ import torch
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
+    ObjectGroupLayoutDesc,
     ObjectKey,
     PrefetchMode,
     PrefetchRequestSpec,
@@ -60,12 +61,13 @@ pytestmark = pytest.mark.skipif(
 # =============================================================================
 
 
-def make_object_key(chunk_id: int) -> ObjectKey:
-    """Create a test ObjectKey with the given chunk ID."""
+def make_object_key(chunk_id: int, object_group_id: int = 0) -> ObjectKey:
+    """Create a test ObjectKey with the given chunk and object-group IDs."""
     return ObjectKey(
         chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
         model_name="test_model",
         kv_rank=0,
+        object_group_id=object_group_id,
     )
 
 
@@ -74,6 +76,22 @@ def make_layout() -> MemoryLayoutDesc:
     return MemoryLayoutDesc(
         shapes=[torch.Size([100, 2, 512])],
         dtypes=[torch.bfloat16],
+    )
+
+
+def make_heterogeneous_layouts() -> ObjectGroupLayoutDesc:
+    """Create two object-group layouts with different object sizes."""
+    return ObjectGroupLayoutDesc(
+        layouts=(
+            MemoryLayoutDesc(
+                shapes=[torch.Size([32, 2, 64])],
+                dtypes=[torch.bfloat16],
+            ),
+            MemoryLayoutDesc(
+                shapes=[torch.Size([64, 2, 64])],
+                dtypes=[torch.bfloat16],
+            ),
+        )
     )
 
 
@@ -280,6 +298,97 @@ class TestSingleAdapterPrefetch:
         # Cleanup: release read locks
         l1_manager.finish_read(keys)
 
+        ctrl.stop()
+        adapter.close()
+
+    def test_heterogeneous_object_group_layouts(
+        self,
+        l1_manager: L1Manager,
+    ) -> None:
+        """Chunk-major hybrid keys use the correct layout for each group."""
+        adapter = make_adapter()
+        layouts = make_heterogeneous_layouts()
+        keys = [
+            make_object_key(chunk_id, object_group_id)
+            for chunk_id in range(2)
+            for object_group_id in range(2)
+        ]
+        for object_group_id, layout in enumerate(layouts.layouts):
+            group_keys = [key for key in keys if key.object_group_id == object_group_id]
+            store_keys_in_l2(adapter, group_keys, layout)
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec(keys=keys, layout_desc=layouts)
+        )
+        retained = wait_for_prefetch_result_bitmap(ctrl, req_id)
+
+        assert retained is not None
+        assert retained.get_indices_list() == list(range(len(keys)))
+        read_results = l1_manager.unsafe_read(keys)
+        for key in keys:
+            error, obj = read_results[key]
+            assert error == L1Error.SUCCESS
+            assert obj is not None
+            expected = layouts.get_layout(key.object_group_id)
+            assert obj.meta.shape == expected.shapes[0]
+            assert obj.meta.dtype == expected.dtypes[0]
+
+        l1_manager.finish_read(keys)
+        ctrl.stop()
+        adapter.close()
+
+    def test_heterogeneous_lookup_scatter_preserves_prefix(
+        self,
+        l1_manager: L1Manager,
+    ) -> None:
+        """Per-group lookup results scatter back into chunk-major order."""
+        adapter = make_adapter()
+        layouts = make_heterogeneous_layouts()
+        keys = [
+            make_object_key(chunk_id, object_group_id)
+            for chunk_id in range(2)
+            for object_group_id in range(2)
+        ]
+        # Chunk-major presence is [1, 1, 0, 1]. The missing group-0 object in
+        # chunk 1 must truncate PREFIX before the later group-1 hit.
+        store_keys_in_l2(adapter, [keys[0]], layouts.get_layout(0))
+        store_keys_in_l2(adapter, [keys[1], keys[3]], layouts.get_layout(1))
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec(keys=keys, layout_desc=layouts)
+        )
+        retained = wait_for_prefetch_result_bitmap(ctrl, req_id)
+
+        assert retained is not None
+        assert retained.get_indices_list() == [0, 1]
+        read_results = l1_manager.unsafe_read(keys[:2])
+        assert all(result[0] == L1Error.SUCCESS for result in read_results.values())
+        absent_results = l1_manager.reserve_read(keys[2:])
+        assert all(
+            result[0] == L1Error.KEY_NOT_EXIST for result in absent_results.values()
+        )
+        assert wait_for_condition(
+            lambda: adapter.debug_get_locked_key_count() == 0,
+            timeout=5.0,
+        )
+
+        l1_manager.finish_read(keys[:2])
         ctrl.stop()
         adapter.close()
 

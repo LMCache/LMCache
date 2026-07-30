@@ -8,10 +8,16 @@ protocol definition, message-queue round-trip, and server handler.
 from unittest.mock import MagicMock
 import time
 
+# Third Party
+import torch
+
 # First Party
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
+    MemoryLayoutDesc,
+    ObjectGroupLayoutDesc,
     ObjectKey,
+    PrefetchRequestSpec,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.storage_manager import PrefetchHandle
@@ -247,10 +253,10 @@ def _lookup_key(world_size: int) -> IPCCacheServerKey:
     )
 
 
-def _captured_lookup_object_keys(
+def _captured_lookup_spec(
     world_size: int, num_groups: int, chunk_hashes: list[bytes]
-) -> list[ObjectKey]:
-    """Drive the public ``lookup()`` and return the object keys it submits.
+) -> PrefetchRequestSpec:
+    """Drive the public ``lookup()`` and return the submitted prefetch spec.
 
     The engine context is mocked so ``lookup()`` runs end-to-end; the
     chunk-major key list it builds is recovered from the ``submit_prefetch_task``
@@ -259,7 +265,16 @@ def _captured_lookup_object_keys(
     ctx = MagicMock()
     ctx.chunk_size = 16
     ctx.event_bus.has_subscribers.return_value = False
-    ctx.layout_desc_registry.find.return_value = MagicMock()  # non-None layout
+    layouts = ObjectGroupLayoutDesc(
+        layouts=tuple(
+            MemoryLayoutDesc(
+                shapes=[torch.Size([group_id + 1, 4])],
+                dtypes=[torch.float16],
+            )
+            for group_id in range(num_groups)
+        )
+    )
+    ctx.layout_desc_registry.find_object_group_layouts.return_value = layouts
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=[-1] * num_groups
     )
@@ -269,7 +284,14 @@ def _captured_lookup_object_keys(
     module.lookup(_lookup_key(world_size=world_size), tp_size=1)
 
     ctx.storage_manager.submit_prefetch_task.assert_called_once()
-    return ctx.storage_manager.submit_prefetch_task.call_args.args[0].keys
+    return ctx.storage_manager.submit_prefetch_task.call_args.args[0]
+
+
+def _captured_lookup_object_keys(
+    world_size: int, num_groups: int, chunk_hashes: list[bytes]
+) -> list[ObjectKey]:
+    """Drive ``lookup()`` and return its chunk-major object keys."""
+    return _captured_lookup_spec(world_size, num_groups, chunk_hashes).keys
 
 
 def test_lookup_lays_keys_out_chunk_then_group_then_rank():
@@ -303,3 +325,17 @@ def test_lookup_single_group_matches_single_group_layout():
 
     expected = ipc_key_to_object_keys(_lookup_key(world_size=2), chunk_hashes, [0])[0]
     assert keys == expected
+
+
+def test_lookup_submits_all_object_group_layouts() -> None:
+    """The lookup request carries each hybrid object's registered layout."""
+    spec = _captured_lookup_spec(
+        world_size=1,
+        num_groups=2,
+        chunk_hashes=[b"c0"],
+    )
+
+    assert isinstance(spec.layout_desc, ObjectGroupLayoutDesc)
+    assert spec.layout_desc.num_object_groups == 2
+    assert spec.layout_desc.get_layout(0).shapes == [torch.Size([1, 4])]
+    assert spec.layout_desc.get_layout(1).shapes == [torch.Size([2, 4])]

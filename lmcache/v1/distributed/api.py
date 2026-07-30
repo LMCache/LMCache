@@ -262,6 +262,77 @@ class MemoryLayoutDesc:
 
 
 @dataclass(frozen=True)
+class ObjectGroupLayoutDesc:
+    """Memory layouts indexed by object group.
+
+    Hybrid models can store a different number of tokens, layers, or tensor
+    elements in each object group.  Such groups therefore cannot safely share
+    one :class:`MemoryLayoutDesc` when L1 buffers or L2 transfer batches are
+    constructed.
+    """
+
+    layouts: tuple[MemoryLayoutDesc, ...]
+
+    def __post_init__(self) -> None:
+        if not self.layouts:
+            raise ValueError("ObjectGroupLayoutDesc: at least one layout is required")
+
+    @property
+    def num_object_groups(self) -> int:
+        """Return the number of object groups covered by this descriptor.
+
+        Returns:
+            The number of layouts in object-group order.
+        """
+        return len(self.layouts)
+
+    def get_layout(self, object_group_id: int) -> MemoryLayoutDesc:
+        """Return the layout for ``object_group_id``.
+
+        Args:
+            object_group_id: Zero-based object-group ID.
+
+        Returns:
+            The memory layout registered for the object group.
+
+        Raises:
+            ValueError: If the object-group ID is not covered by this
+                descriptor.
+        """
+        if object_group_id < 0 or object_group_id >= len(self.layouts):
+            raise ValueError(
+                "ObjectGroupLayoutDesc: object group "
+                f"{object_group_id} is outside [0, {len(self.layouts)})"
+            )
+        return self.layouts[object_group_id]
+
+    @classmethod
+    def from_uniform_layout(
+        cls,
+        layout_desc: MemoryLayoutDesc,
+        num_object_groups: int,
+    ) -> "ObjectGroupLayoutDesc":
+        """Build a descriptor when every object group has one layout.
+
+        Args:
+            layout_desc: Layout shared by every object group.
+            num_object_groups: Number of object groups the descriptor covers.
+
+        Returns:
+            An object-group descriptor containing ``num_object_groups``
+            references to ``layout_desc``.
+
+        Raises:
+            ValueError: If ``num_object_groups`` is not positive.
+        """
+        if num_object_groups <= 0:
+            raise ValueError(
+                "ObjectGroupLayoutDesc: num_object_groups must be positive"
+            )
+        return cls(layouts=(layout_desc,) * num_object_groups)
+
+
+@dataclass(frozen=True)
 class AttnWindowDesc:
     """Per-object-group cross-chunk attention windows, in LMCache chunks.
 
@@ -314,7 +385,9 @@ class PrefetchRequestSpec:
 
     Attributes:
         keys: Object keys to prefetch; order defines the prefix.
-        layout_desc: Memory layout for L1 write-buffer allocation.
+        layout_desc: Memory layout(s) for L1 write-buffer allocation. A
+            :class:`MemoryLayoutDesc` applies uniformly to all object groups;
+            :class:`ObjectGroupLayoutDesc` describes each group explicitly.
         extra_count: Extra read locks per key beyond the default 1.
         policy: Retained-subset policy (see :class:`TrimPolicy`).
         attn_desc: Cross-chunk attention windows, in object-group order.
@@ -322,7 +395,7 @@ class PrefetchRequestSpec:
     """
 
     keys: list[ObjectKey]
-    layout_desc: MemoryLayoutDesc
+    layout_desc: MemoryLayoutDesc | ObjectGroupLayoutDesc
     extra_count: int = 0
     policy: TrimPolicy = TrimPolicy.PREFIX
     attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC

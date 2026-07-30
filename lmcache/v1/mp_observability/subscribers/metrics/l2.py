@@ -104,7 +104,7 @@ class L2MetricsSubscriber(EventSubscriber):
         # Prefetch load counters
         self._prefetch_load_submitted = meter.create_counter(
             "lmcache_mp.l2_prefetch_load_submitted",
-            description="Total L2 prefetch load requests submitted (per-adapter)",
+            description="Total physical L2 prefetch load tasks submitted",
             unit="requests",
         )
         self._prefetch_load_submitted_objects = meter.create_counter(
@@ -166,7 +166,13 @@ class L2MetricsSubscriber(EventSubscriber):
         self._prefetch_lookup_hit.add(event.metadata["prefix_hit_count"])
 
     def _on_load_submitted(self, event: Event) -> None:
-        self._prefetch_load_submitted.add(event.metadata["adapter_count"])
+        # Older recorded events predate physical layout shards and only carry
+        # adapter_count, which was also the physical task count at that time.
+        task_count = event.metadata.get(
+            "task_count",
+            event.metadata["adapter_count"],
+        )
+        self._prefetch_load_submitted.add(task_count)
         emit_salt_counts(
             self._prefetch_load_submitted_objects,
             event.metadata.get("key_count_per_salt", {}),

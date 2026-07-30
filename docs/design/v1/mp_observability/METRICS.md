@@ -161,7 +161,7 @@ contribute to histograms; counters above always count all events.
 | `lmcache_mp.l2_prefetch_lookup` | `lmcache_mp_l2_prefetch_lookup_requests_total` | Counter | `L2_PREFETCH_LOOKUP_SUBMITTED` | +1 per event |
 | `lmcache_mp.l2_prefetch_lookup_objects` | `lmcache_mp_l2_prefetch_lookup_objects_chunks_total` | Counter (attr: `cache_salt`) | `L2_PREFETCH_LOOKUP_SUBMITTED` | `+count` per `cache_salt` via `key_count_per_salt` |
 | `lmcache_mp.l2_prefetch_hit` | `lmcache_mp_l2_prefetch_hit_chunks_total` | Counter | `L2_PREFETCH_LOOKUP_COMPLETED` | `+prefix_hit_count` |
-| `lmcache_mp.l2_prefetch_load_submitted` | `lmcache_mp_l2_prefetch_load_submitted_requests_total` | Counter | `L2_PREFETCH_LOAD_SUBMITTED` | `+adapter_count` (per-adapter task count) |
+| `lmcache_mp.l2_prefetch_load_submitted` | `lmcache_mp_l2_prefetch_load_submitted_requests_total` | Counter | `L2_PREFETCH_LOAD_SUBMITTED` | `+task_count` (physical task count; falls back to `adapter_count` for legacy events) |
 | `lmcache_mp.l2_prefetch_load_submitted_objects` | `lmcache_mp_l2_prefetch_load_submitted_objects_chunks_total` | Counter (attr: `cache_salt`) | `L2_PREFETCH_LOAD_SUBMITTED` | `+count` per `cache_salt` via `key_count_per_salt` |
 | `lmcache_mp.l2_prefetch_load_completed` | `lmcache_mp_l2_prefetch_load_completed_chunks_total` | Counter (attr: `cache_salt`) | `L2_PREFETCH_LOAD_COMPLETED` | `+count` per `cache_salt` via `key_count_per_salt` |
 | `lmcache_mp.l2_load_completed` | `lmcache_mp_l2_load_completed_requests_total` | Counter (attr: `l2_name`) | `L2_LOAD_TASK_COMPLETED` | +1 per event |
@@ -290,11 +290,16 @@ Are some workers or GPUs underperforming?
 Per-task throughput of L1↔L2 transfers via
 `L2ThroughputSubscriber`. The store path correlates `L2_STORE_SUBMITTED` →
 `L2_STORE_COMPLETED` by `(adapter_index, task_id)`. The load path
-correlates the new per-adapter `L2_LOAD_TASK_SUBMITTED` →
-`L2_LOAD_TASK_COMPLETED` events by `(request_id, adapter_index)`; the
-pre-existing request-level `L2_PREFETCH_LOAD_*` events aggregate across
-adapters and cannot attribute throughput to a specific `l2_name`.
-Every task contributes one sample (no sampling).
+correlates `L2_LOAD_TASK_SUBMITTED` → `L2_LOAD_TASK_COMPLETED` events by
+`(adapter_index, task_id)`; the request-level `L2_PREFETCH_LOAD_*` events
+aggregate across adapters and object-group layout shards and cannot attribute
+throughput to a specific physical task. Every task contributes one sample (no
+sampling).
+
+A hybrid request may split into multiple physical tasks for one adapter when
+its object groups require different layouts. For example, two layouts routed
+to one adapter produce `adapter_count=1`, `task_count=2`, and two load
+throughput samples.
 
 Unlike the L0↔L1 histograms, these timestamps span **submit → complete**,
 so `(end_ts - start_ts)` includes adapter queue, network, and disk I/O
@@ -321,7 +326,7 @@ entirely. The load path continues to use the submitted `total_bytes`.
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
 | `lmcache_mp.l2_store_throughput` | `lmcache_mp_l2_store_throughput_GBs` | Histogram | `L2_STORE_SUBMITTED` → `L2_STORE_COMPLETED` | `bytes_transferred / (completed_ts - submitted_ts) / 1e9` per task. `bytes_transferred` is read from the `L2_STORE_COMPLETED` event (populated from the `L2StoreResult` returned by `pop_completed_store_tasks()`); samples where `bytes_transferred <= 0` (e.g. duplicate-key fast paths that skip the write) are dropped, so the histogram reflects real work, not submitted-but-skipped bytes. |
-| `lmcache_mp.l2_load_throughput` | `lmcache_mp_l2_load_throughput_GBs` | Histogram | `L2_LOAD_TASK_SUBMITTED` → `L2_LOAD_TASK_COMPLETED` | `total_bytes / (completed_ts - submitted_ts) / 1e9` per (request, adapter) pair. The load path still uses submitted `total_bytes`; per-task real-bytes accounting only applies to the store path. |
+| `lmcache_mp.l2_load_throughput` | `lmcache_mp_l2_load_throughput_GBs` | Histogram | `L2_LOAD_TASK_SUBMITTED` → `L2_LOAD_TASK_COMPLETED` | `total_bytes / (completed_ts - submitted_ts) / 1e9` per physical adapter task. The load path still uses submitted `total_bytes`; per-task real-bytes accounting only applies to the store path. |
 
 **What it answers:** What end-to-end throughput is each L2 adapter
 delivering? Which backends are keeping up with demand, and which are
