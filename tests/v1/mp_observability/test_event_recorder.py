@@ -8,11 +8,13 @@ import time
 # Third Party
 import pytest
 
-torch = pytest.importorskip("torch", reason="torch required")
+# First Party
+from lmcache import torch_dev, torch_device_type
+
 pytestmark = pytest.mark.cuda
 
-if not torch.cuda.is_available():
-    pytest.skip("CUDA is not available", allow_module_level=True)
+if torch_device_type != "cuda" or not torch_dev.is_available():
+    pytest.skip("requires available CUDA runtime", allow_module_level=True)
 
 lmc_ops = pytest.importorskip("lmcache.c_ops", reason="lmcache.c_ops not built")
 if not hasattr(lmc_ops, "record_event_on_stream"):
@@ -22,7 +24,6 @@ if not hasattr(lmc_ops, "record_event_on_stream"):
 cupy = pytest.importorskip("cupy", reason="cupy required")  # noqa: E402
 
 # First Party
-from lmcache import torch_device_type  # noqa: E402
 from lmcache.v1.mp_observability.event import Event, EventType  # noqa: E402
 from lmcache.v1.mp_observability.event_bus import (  # noqa: E402
     EventBus,
