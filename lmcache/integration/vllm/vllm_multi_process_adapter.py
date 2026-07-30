@@ -3,7 +3,7 @@
 # Standard
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, NoReturn, Protocol
+from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol
 import enum
 import os
 import threading
@@ -16,6 +16,7 @@ import zmq
 # First Party
 from lmcache import torch_dev
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
+from lmcache.integration.vllm.experimental import dispatch
 from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
@@ -34,6 +35,10 @@ from lmcache.v1.multiprocess.transfer_context import (
     create_transfer_context,
 )
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.integration.vllm.experimental import Dispatcher
 
 logger = init_logger(__name__)
 
@@ -172,6 +177,31 @@ def get_lmcache_chunk_size(
     future = send_lmcache_request(mq_client, RequestType.GET_CHUNK_SIZE, [])
     lmcache_tokens_per_chunk = future.result(timeout=timeout)
     return lmcache_tokens_per_chunk
+
+
+def get_experimental(
+    mq_client: MessageQueueClient,
+    timeout: float = DEFAULT_MQ_TIMEOUT,
+) -> set[str]:
+    """Query the experimental capabilities a server advertises.
+
+    Args:
+        mq_client: The LMCache multiprocess mode message queue client.
+        timeout: Seconds to wait for the server's response.
+
+    Returns:
+        Experimental features built into the server (now `transfer_query`).
+    """
+    future = send_lmcache_request(mq_client, RequestType.GET_EXPERIMENTAL, [])
+    try:
+        return set(future.result(timeout=timeout))
+    except TimeoutError:
+        logger.warning(
+            "LMCache server did not answer GET_EXPERIMENTAL within %ss; "
+            "treating it as advertising no experimental capabilities.",
+            timeout,
+        )
+        return set()
 
 
 def _raise_server_unreachable(server_url: str, timeout: float) -> NoReturn:
@@ -1100,6 +1130,12 @@ class LMCacheMPWorkerAdapter:
         )
         self.blocks_in_chunk = lmcache_tokens_per_chunk // vllm_block_size
 
+        # Experimental intermediate tensor transfer
+        self.experimental: set[str] = get_experimental(
+            self.mq_client, timeout=self._mq_timeout
+        )
+        self.dispatcher: "Dispatcher | None" = None
+
         # Health state (shared with heartbeat thread)
         self._health_event = threading.Event()
         self._health_event.set()
@@ -1315,6 +1351,15 @@ class LMCacheMPWorkerAdapter:
             )
             return False
         logger.warning("Finished re-registering KV caches after server recovery")
+
+        if self.dispatcher is not None:
+            if not self.dispatcher.reregister():
+                logger.warning(
+                    "Failed to re-register dispatcher after server recovery; "
+                    "will retry on next heartbeat"
+                )
+                return False
+
         return True
 
     @_lmcache_nvtx_annotate
@@ -1520,6 +1565,9 @@ class LMCacheMPWorkerAdapter:
             take care of deduplicating the request IDs and only return the request
             IDs that have not been returned before.
         """
+        if self.dispatcher is not None:
+            dispatch(self.dispatcher, "reclaim")
+
         # If unhealthy, drain all pending futures immediately
         if not self.is_healthy:
             finished_stores = set(self.store_futures.keys())
@@ -1687,6 +1735,9 @@ class LMCacheMPWorkerAdapter:
                 "Proceeding with shutdown.",
                 self._mq_timeout,
             )
+
+        if self.dispatcher is not None:
+            dispatch(self.dispatcher, "shutdown")
 
         if self.transfer_ctx is not None:
             self.transfer_ctx.close()
