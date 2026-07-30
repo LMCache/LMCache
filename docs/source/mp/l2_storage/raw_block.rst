@@ -61,6 +61,8 @@ caller-provided load buffers during prefetch.
   device node (e.g., ``/dev/ng0n1``) instead of the block device node
   (``/dev/nvme0n1``). The character device provides direct NVMe
   command passthrough.
+- For ``use_uring_cmd=true``, ``block_align`` must be a multiple of the NVMe
+  namespace LBA size. An incompatible value is rejected when the device opens.
 - ``use_uring_cmd`` requires ``io_engine="io_uring"`` to be set.
 - When ``use_uring_cmd=true``, ``use_odirect`` is ignored for NVMe namespace
   character devices.
