@@ -25,7 +25,7 @@ class L1MemoryDesc:
 
 @dataclass(frozen=True)
 class L1ObjectMeta:
-    """Per-object metadata reported alongside keys in L1 listener callbacks.
+    """Per-object metadata published alongside keys in L1 cache events.
 
     Attributes:
         size_bytes: Logical byte size of the object.
@@ -77,23 +77,17 @@ class L1ManagerListener(EventListener):
         pass
 
     @abstractmethod
-    def on_l1_keys_write_finished(
-        self, keys: list[ObjectKey], metadata: list[L1ObjectMeta]
-    ):
+    def on_l1_keys_write_finished(self, keys: list[ObjectKey]):
         """
         Notify the listener that keys have been finished for writing on L1.
 
         Args:
             keys (list[ObjectKey]): The keys that have been successfully written
-            metadata (list[L1ObjectMeta]): Size and backing medium of each
-                written object, parallel to ``keys``
         """
         pass
 
     @abstractmethod
-    def on_l1_keys_finish_write_and_reserve_read(
-        self, keys: list[ObjectKey], metadata: list[L1ObjectMeta]
-    ):
+    def on_l1_keys_finish_write_and_reserve_read(self, keys: list[ObjectKey]):
         """
         Notify the listener that keys have been finished for writing
         and reserved for read on L1.
@@ -103,25 +97,18 @@ class L1ManagerListener(EventListener):
         Args:
             keys (list[ObjectKey]): The keys that have been successfully
                 finished for writing and reserved for read
-            metadata (list[L1ObjectMeta]): Size and backing medium of each
-                written object, parallel to ``keys``
         """
         # NOTE (ApostaC): may consider renaming this to `on_l1_keys_finish_prefetch`
         # for better clarity
         pass
 
     @abstractmethod
-    def on_l1_keys_deleted_by_manager(
-        self, keys: list[ObjectKey], metadata: list[L1ObjectMeta]
-    ):
+    def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]):
         """
         Notify the listener that keys have been deleted from L1.
 
         Args:
             keys (list[ObjectKey]): The keys that have been deleted
-            metadata (list[L1ObjectMeta]): Size and backing medium of each
-                deleted object, parallel to ``keys`` (so a placement delete
-                targets the same identity its store reported)
         """
         pass
 

@@ -17,8 +17,9 @@ another message queue. The design isolates that choice behind one
 interface so nothing else changes:
 
 ```
-storage listeners ──► CacheEventEmitter ──► CacheEventSink ──► directory
-   (what happened)     (seq, batching)       (transport)
+storage layer ──► EventBus ──► CacheEventSubscriber ──► CacheEventSink ──► directory
+ (publishes)      (drain      (event → vocabulary,        (transport)
+                  thread)      seq, batching)
 ```
 
 - **`CacheEventSink`** — `publish(batches)` with **at-least-once**
@@ -36,23 +37,24 @@ storage listeners ──► CacheEventEmitter ──► CacheEventSink ──►
   to `instance_id`, so one partition carries one instance's stream —
   partition FIFO is exactly the per-instance FIFO the directory needs.
   The coordinator side gains a consumer that feeds
-  `KeyDirectory.apply_batch`; the emitter and listeners are untouched.
+  `KeyDirectory.apply_batch`; the subscriber and producers are
+  untouched.
 
-## CacheEventEmitter
+## Batching and sequencing (inside the subscriber)
 
-One emitter per MP-server process. Producers call
-`record(event_type, tier, backend, entries)` from arbitrary threads; a
-single asyncio task flushes on a timer (`run()`), so flushes are
-naturally serialized.
+One `CacheEventSubscriber` per MP-server process owns the buffer, the
+`seq` counter, and the sink:
 
-- **Order-preserving batching.** The buffer is a list of *runs*:
-  consecutive records with the same `(event_type, tier, backend)`
-  identity coalesce into one pending batch; an identity change starts a
-  new run. Flushing emits one `CacheEventBatch` per run, so the batch
-  sequence preserves the total order of recorded events — a store
-  followed by a delete of the same key can never be reordered into
-  "delete, then store". (Grouping by type across the whole window would
-  break exactly that case.)
+- **Order-preserving batching.** The buffer is a list of *pending
+  batches*: consecutive records with the same `(event_type, tier,
+  backend)` identity append to the last pending batch; an identity
+  change starts a new one (never merged backwards). Flushing emits one
+  `CacheEventBatch` per pending batch, so the batch sequence preserves
+  the total order of recorded events — a store followed by a delete of
+  the same key can never be reordered into "delete, then store".
+  Alternating identities therefore produce multiple pending batches of
+  the same identity; that is intentional (extra batch headers, never
+  reordering).
 - **`seq` is consumed even when publish fails.** A failed flush drops
   the drained list (bounding memory while the coordinator is down) but
   keeps the `seq` numbers it assigned. The directory sees a gap and
@@ -65,62 +67,74 @@ naturally serialized.
   placement its previous incarnation reported, matching the fact that
   its pools restarted empty.
 
-## Listeners
+## Event flow (the observability bus)
 
-`L2CacheEventListener` implements `L2AdapterListener` and forwards
-stored/accessed/deleted callbacks as `STORE`/`ACCESS`/`DELETE` events at
-`tier=l2`. The listener callbacks do not identify the emitting adapter,
-so the HTTP-server lifespan registers **one listener per adapter**,
-each bound to that adapter's backend name (`AdapterDescriptor.type_name`
-via `StorageManager.l2_adapters()`).
+The storage layer already publishes key-level events to the
+observability `EventBus` (`mp_observability/event_bus.py`);
+cache-event emission rides the same bus instead of adding parallel
+listener plumbing or a dedicated flush task:
 
-`L1CacheEventListener` implements `L1ManagerListener` (registered via
-`StorageManager.register_l1_listener`) and maps at `tier=l1`:
+- **Producers.** `L1Manager` publishes `l1.write.finished`,
+  `l1.write_finished_and_read_reserved`, `l1.keys.evicted` (all delete
+  paths), `l1.read.finished`, and the new `l1.keys.accessed`
+  (`touch_keys`). The placement-bearing events carry
+  `meta: list[L1ObjectMeta]` — each object's `size_bytes`
+  (`MemoryObj.get_size()`) and its `L1Backend` medium from
+  `L1ManagerProtocol.get_backend()` (the Device-DAX tier resolves it per
+  object via `DevDaxMemoryAllocator.is_devdax_obj`, i.e.
+  `MemoryObj.parent()`) — so a hybrid DRAM+DAX L1 reports exactly where
+  each object landed, and deletes target the same placement identity
+  `(instance, tier, backend)` their store reported. The L2 base
+  adapter's listener-notify funnel publishes the new `l2.keys.stored`
+  (`keys`+`sizes`+`backend`), `l2.keys.accessed`, and `l2.keys.deleted`
+  events; the backend name is the registered adapter type, stamped by
+  the storage manager via `set_backend_name` at build time — so
+  **runtime-added adapters emit automatically**.
+- **`CacheEventSubscriber`** maps those events onto the directory
+  vocabulary (writes → `STORE` split per L1 medium, evictions/deletes →
+  `DELETE`, reads/touches → `ACCESS` under the primary medium from
+  `l1_primary_backend` — recency never creates placements, so that
+  label is cosmetic).
+- **Threading.** The bus dispatches on one drain thread, which is
+  exactly the per-instance FIFO the directory needs. The subscriber
+  self-paces delivery: recording flushes when `flush_interval` has
+  elapsed since the last flush, bounding the sink-publish rate under
+  load. There is no timer of its own — the subscriber additionally
+  subscribes to `l1.eviction.loop_tick` (published continuously by the
+  L1 eviction loop) as a flush pump, so a burst-ending tail (e.g. L2
+  store completions) is delivered within one tick of the interval
+  elapsing instead of waiting for the next request. The sink posts
+  synchronously with a short timeout (a slow coordinator briefly
+  stalls the drain, bounded by the timeout; overflow beyond the bus's
+  bounded queue is dropped and surfaces as a `seq` gap → resync).
+- **Coupling.** The stream requires the bus: enabling
+  `--coordinator-event-reporting` together with
+  `--disable-observability` is rejected at startup. Bus-level drops
+  under overload are acceptable by the same argument as transport loss —
+  the directory is eventually consistent soft state.
 
-| callback | event |
-| --- | --- |
-| `on_l1_keys_write_finished`, `on_l1_keys_finish_write_and_reserve_read` (prefetch) | `STORE` |
-| `on_l1_keys_deleted_by_manager` (evictions included) | `DELETE` |
-| `on_l1_keys_read_finished`, `on_l1_keys_accessed` | `ACCESS` |
-| `on_l1_keys_reserved_read` / `on_l1_keys_reserved_write` | ignored (reservations are not state changes) |
+## L1 media
 
-The placement-bearing L1 callbacks (write finished, prefetch finished,
-deleted) carry `metadata: list[L1ObjectMeta]` — each object's
-`size_bytes` (`MemoryObj.get_size()`) and its backing medium. The
-medium is the `L1Backend` enum (`distributed/api.py`: `DRAM`, `DEVDAX`,
-`GDS`); L1 media are a closed set, hence the enum, while L2 backends
-stay strings because adapter types are an open registry (plugins
-register new type names).
-
-**Per-key medium attribution**: the medium comes from
-`L1ManagerProtocol.get_backend(memory_obj)` — constant for the DRAM and
-GDS tiers; the Device-DAX tier asks its allocator
-(`DevDaxMemoryAllocator.is_devdax_obj`, i.e. `MemoryObj.parent()`),
-so a hybrid DRAM+DAX L1 reports exactly where each object landed. The
-listener splits entries into per-medium `record()` calls, and deletes
-carry the same medium their store reported, so placement identity
-`(instance, tier, backend)` always matches. `ACCESS` events use the
-configured primary medium (`l1_backend_name`) — recency never creates
-placements, so that label is cosmetic.
+L1 media are a closed set, hence the `L1Backend` enum
+(`distributed/api.py`: `DRAM`, `DEVDAX`, `GDS`); L2 backends stay
+strings because adapter types are an open registry (plugins register
+new type names).
 
 ## Wiring and configuration
 
 Enabled in the MP HTTP server lifespan when a coordinator URL is set
 and `--coordinator-event-reporting` (or
 `LMCACHE_COORDINATOR_EVENT_REPORTING`) is on;
-`--coordinator-event-flush-interval` tunes the flush timer (default
-1s). The same flag also gates the legacy quota stream
-(`/quota/events`), which keeps its own schema and listener until the
-two streams are unified.
+`--coordinator-event-flush-interval` paces the subscriber's
+event-driven flushes (default 1s). The same flags also gate the
+legacy quota stream (`/quota/events`), which keeps its own schema and
+listener until the two streams are unified.
 
 ## Known limitations (follow-ups)
 
-- **Runtime-added L2 adapters** (`add_l2_adapter`) do not get a
-  directory listener; their placements are invisible until a
-  listener-factory registration or the resync backstop exists.
-- **No final flush on shutdown**: buffered events at shutdown are
-  lost; deregistration's `drop_instance` and incarnation fencing on
-  restart make this benign.
+- **Bus overflow drops events silently** (bounded queue, rate-limited
+  warning); the resulting `seq` gap flags the instance for resync, but
+  the resync backstop itself is future work.
 - The legacy quota stream (`/quota/events`) can be re-based on this
   stream: route directory-applied `l2` batches into the usage/eviction
   consumers on the coordinator, then delete the `L2EventListener`

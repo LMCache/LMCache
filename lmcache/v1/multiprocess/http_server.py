@@ -18,15 +18,13 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     add_storage_manager_args,
     l1_exposes_single_memory_region,
+    l1_primary_backend,
     parse_args_to_config,
 )
 from lmcache.v1.mp_coordinator.cache_control.event_listener import L2EventListener
 from lmcache.v1.mp_coordinator.cache_events import (
-    CacheEventEmitter,
+    CacheEventSubscriber,
     HttpCacheEventSink,
-    L1CacheEventListener,
-    L2CacheEventListener,
-    l1_backend_name,
 )
 from lmcache.v1.mp_coordinator.registrar import keep_registered
 from lmcache.v1.mp_observability.config import (
@@ -168,44 +166,29 @@ async def lifespan(app: FastAPI):
             coordinator_l2_event_client.run()
         )
 
-    # Key-directory stream: an L1 listener plus one listener per L2
-    # adapter tag events with their tier and backend name; a shared
-    # emitter sequences and flushes them through the transport sink
-    # (HTTP today; a message-queue sink can replace it without touching
-    # the listeners).
-    coordinator_event_task = None
+    # Coordinator event stream
     if (
         coordinator_client is not None
         and coordinator_config.url
         and coordinator_config.event_reporting
     ):
-        emitter = CacheEventEmitter(
-            sink=HttpCacheEventSink(coordinator_client, coordinator_config.url),
-            instance_id=mp_config.instance_id,
-            # Server start time: fences out placements this instance
-            # reported before a restart (its pools restarted empty).
-            incarnation=int(time.time()),
-            flush_interval=coordinator_config.event_flush_interval,
-        )
-        if engine.storage_manager is not None:
-            engine.storage_manager.register_l1_listener(
-                L1CacheEventListener(
-                    emitter,
-                    access_backend=l1_backend_name(
-                        _configs["storage_manager"].l1_manager_config
-                    ),
-                )
+        get_event_bus().register_subscriber(
+            CacheEventSubscriber(
+                sink=HttpCacheEventSink(coordinator_config.url),
+                instance_id=mp_config.instance_id,
+                # Server start time: fences out placements this instance
+                # reported before a restart (its pools restarted empty).
+                incarnation=int(time.time()),
+                access_backend=l1_primary_backend(
+                    _configs["storage_manager"].l1_manager_config
+                ),
+                flush_interval=coordinator_config.event_flush_interval,
             )
-            for descriptor, adapter in engine.storage_manager.l2_adapters():
-                adapter.register_listener(
-                    L2CacheEventListener(emitter, backend=descriptor.type_name)
-                )
-        coordinator_event_task = asyncio.create_task(emitter.run())
+        )
 
     app.state.coordinator_client = coordinator_client
     app.state.coordinator_registration_task = coordinator_registration_task
     app.state.coordinator_l2_event_task = coordinator_l2_event_task
-    app.state.coordinator_event_task = coordinator_event_task
 
     logger.info("LMCache HTTP server initialized")
 
@@ -213,11 +196,6 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("Shutting down LMCache HTTP server...")
-    coordinator_event_task = getattr(app.state, "coordinator_event_task", None)
-    if coordinator_event_task is not None:
-        coordinator_event_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await coordinator_event_task
     coordinator_l2_event_task = getattr(app.state, "coordinator_l2_event_task", None)
     if coordinator_l2_event_task is not None:
         coordinator_l2_event_task.cancel()
@@ -274,7 +252,9 @@ def run_http_server(
 
     Raises:
         ValueError: If P2P is enabled without a coordinator URL, or with an L1
-            tier that is not a single registerable memory region.
+            tier that is not a single registerable memory region; or if
+            coordinator event reporting is enabled with observability
+            disabled (the cache-event stream rides the event bus).
     """
     if mp_config.p2p_config.enabled:
         if not coordinator_config.url:
@@ -289,6 +269,11 @@ def run_http_server(
                 "can register; it is incompatible with GDS L1 (--gds-l1-path) "
                 "and Device-DAX L1 (--l1-devdax-path)."
             )
+    if coordinator_config.event_reporting and not obs_config.enabled:
+        raise ValueError(
+            "--coordinator-event-reporting rides the observability event "
+            "bus: remove --disable-observability to report cache events."
+        )
     _configs["mp"] = mp_config
     _configs["storage_manager"] = storage_manager_config
     _configs["observability"] = obs_config

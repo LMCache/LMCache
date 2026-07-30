@@ -20,7 +20,7 @@ import threading
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.internal_api import L1ManagerListener, L1ObjectMeta
+from lmcache.v1.distributed.internal_api import L1ManagerListener
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.storage_controller import StorageControllerInterface
@@ -118,9 +118,7 @@ class StoreListener(L1ManagerListener):
 
     # L1ManagerListener implementation
 
-    def on_l1_keys_write_finished(
-        self, keys: list[ObjectKey], metadata: list[L1ObjectMeta]
-    ) -> None:
+    def on_l1_keys_write_finished(self, keys: list[ObjectKey]) -> None:
         """
         Enqueue keys and signal the notifier.
 
@@ -129,8 +127,6 @@ class StoreListener(L1ManagerListener):
 
         Args:
             keys (list[ObjectKey]): Keys that finished writing.
-            metadata (list[L1ObjectMeta]): Per-object size and backing
-                medium (unused here).
         """
         with self._lock:
             self._pending_keys.extend(keys)
@@ -145,14 +141,10 @@ class StoreListener(L1ManagerListener):
     def on_l1_keys_reserved_write(self, keys: list[ObjectKey]) -> None:
         pass
 
-    def on_l1_keys_deleted_by_manager(
-        self, keys: list[ObjectKey], metadata: list[L1ObjectMeta]
-    ) -> None:
+    def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]) -> None:
         pass
 
-    def on_l1_keys_finish_write_and_reserve_read(
-        self, keys: list[ObjectKey], metadata: list[L1ObjectMeta]
-    ) -> None:
+    def on_l1_keys_finish_write_and_reserve_read(self, keys: list[ObjectKey]) -> None:
         # No op here because we don't want to trigger store when the
         # objects are prefetched to L1.
         pass

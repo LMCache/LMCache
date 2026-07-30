@@ -419,7 +419,7 @@ class L1Manager:
 
         for listener in self._registered_listeners:
             listener.on_l1_keys_read_finished(successful_keys)
-            listener.on_l1_keys_deleted_by_manager(need_to_free_keys, freed_meta)
+            listener.on_l1_keys_deleted_by_manager(need_to_free_keys)
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_READ_FINISHED,
@@ -429,7 +429,7 @@ class L1Manager:
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_KEYS_EVICTED,
-                metadata={"keys": need_to_free_keys},
+                metadata={"keys": need_to_free_keys, "meta": freed_meta},
             )
         )
 
@@ -584,11 +584,11 @@ class L1Manager:
             successful_keys_meta.append(self._object_meta(entry.memory_obj))
 
         for listener in self._registered_listeners:
-            listener.on_l1_keys_write_finished(successful_keys, successful_keys_meta)
+            listener.on_l1_keys_write_finished(successful_keys)
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_WRITE_FINISHED,
-                metadata={"keys": successful_keys},
+                metadata={"keys": successful_keys, "meta": successful_keys_meta},
             )
         )
         return ret
@@ -659,13 +659,11 @@ class L1Manager:
             successful_keys_meta.append(self._object_meta(entry.memory_obj))
 
         for listener in self._registered_listeners:
-            listener.on_l1_keys_finish_write_and_reserve_read(
-                successful_keys, successful_keys_meta
-            )
+            listener.on_l1_keys_finish_write_and_reserve_read(successful_keys)
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_WRITE_FINISHED_AND_READ_RESERVED,
-                metadata={"keys": successful_keys},
+                metadata={"keys": successful_keys, "meta": successful_keys_meta},
             )
         )
         return ret
@@ -716,11 +714,11 @@ class L1Manager:
         self._memory_manager.free(need_to_free)
 
         for listener in self._registered_listeners:
-            listener.on_l1_keys_deleted_by_manager(successful_keys, freed_meta)
+            listener.on_l1_keys_deleted_by_manager(successful_keys)
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_KEYS_EVICTED,
-                metadata={"keys": successful_keys},
+                metadata={"keys": successful_keys, "meta": freed_meta},
             )
         )
         return ret
@@ -733,6 +731,13 @@ class L1Manager:
         """
         for listener in self._registered_listeners:
             listener.on_l1_keys_accessed(keys)
+        if self._event_bus.has_subscribers(EventType.L1_KEYS_ACCESSED):
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_KEYS_ACCESSED,
+                    metadata={"keys": keys},
+                )
+            )
 
     @l1_mgr_synchronized
     def clear(self, force: bool = False) -> None:
@@ -757,11 +762,11 @@ class L1Manager:
             self._memory_manager.free(all_memory_objs)
             self._objects.clear()
             for listener in self._registered_listeners:
-                listener.on_l1_keys_deleted_by_manager(all_keys, all_meta)
+                listener.on_l1_keys_deleted_by_manager(all_keys)
             self._event_bus.publish(
                 Event(
                     event_type=EventType.L1_KEYS_EVICTED,
-                    metadata={"keys": all_keys},
+                    metadata={"keys": all_keys, "meta": all_meta},
                 )
             )
             logger.info(
@@ -789,11 +794,11 @@ class L1Manager:
 
         if keys_to_clear:
             for listener in self._registered_listeners:
-                listener.on_l1_keys_deleted_by_manager(keys_to_clear, cleared_meta)
+                listener.on_l1_keys_deleted_by_manager(keys_to_clear)
             self._event_bus.publish(
                 Event(
                     event_type=EventType.L1_KEYS_EVICTED,
-                    metadata={"keys": keys_to_clear},
+                    metadata={"keys": keys_to_clear, "meta": cleared_meta},
                 )
             )
 

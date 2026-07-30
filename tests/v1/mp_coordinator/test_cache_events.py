@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for MP-server-side cache-event emission: emitter batching and
-ordering, sequence/gap semantics on publish failure, the per-adapter L2
-listener, and the HTTP sink end-to-end against a coordinator app."""
+"""Tests for MP-server-side cache-event emission: the event-bus
+subscriber's event mapping, batching/ordering, seq/gap semantics on
+publish failure, and the HTTP sink end-to-end against a coordinator
+app."""
 
 # Standard
 from dataclasses import asdict
 import asyncio
+import threading
 
 # Third Party
 import httpx
@@ -17,6 +19,7 @@ from lmcache.v1.distributed.config import (
     GdsL1Config,
     L1ManagerConfig,
     L1MemoryManagerConfig,
+    l1_primary_backend,
 )
 from lmcache.v1.distributed.internal_api import L1ObjectMeta
 from lmcache.v1.mp_coordinator.api import (
@@ -26,15 +29,14 @@ from lmcache.v1.mp_coordinator.api import (
 )
 from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.cache_events import (
-    CacheEventEmitter,
     CacheEventPublishError,
     CacheEventSink,
+    CacheEventSubscriber,
     HttpCacheEventSink,
-    L1CacheEventListener,
-    L2CacheEventListener,
-    l1_backend_name,
 )
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 
 
 def _key(hash_byte: int) -> ObjectKey:
@@ -47,143 +49,159 @@ def _entry(hash_byte: int, size_bytes: int = 0) -> CacheEventEntry:
     )
 
 
+def _meta(size_bytes: int = 0, backend: L1Backend = L1Backend.DRAM) -> L1ObjectMeta:
+    return L1ObjectMeta(size_bytes=size_bytes, backend=backend)
+
+
 class _RecordingSink(CacheEventSink):
     """Sink that records every published list; optionally fails."""
 
     def __init__(self) -> None:
         self.published: list[list[CacheEventBatch]] = []
         self.fail_next = False
+        self.closed = False
 
-    async def publish(self, batches: list[CacheEventBatch]) -> None:
+    def publish(self, batches: list[CacheEventBatch]) -> None:
         if self.fail_next:
             self.fail_next = False
             raise CacheEventPublishError("injected failure")
         self.published.append(batches)
 
-
-def _emitter(sink: CacheEventSink, incarnation: int = 7) -> CacheEventEmitter:
-    return CacheEventEmitter(sink=sink, instance_id="node-a", incarnation=incarnation)
-
-
-# -- Emitter batching and ordering -------------------------------------------
+    def close(self) -> None:
+        self.closed = True
 
 
-def test_flush_emits_one_batch_per_run_with_sequential_seqs():
+def _subscriber(
+    sink: CacheEventSink,
+    incarnation: int = 7,
+    flush_interval: float = 3600.0,
+) -> CacheEventSubscriber:
+    """Build a subscriber whose default interval never auto-flushes in a
+    test, so batching assertions drive ``flush()`` explicitly."""
+    return CacheEventSubscriber(
+        sink=sink,
+        instance_id="node-a",
+        incarnation=incarnation,
+        access_backend=L1Backend.DRAM,
+        flush_interval=flush_interval,
+    )
+
+
+def _dispatch(subscriber: CacheEventSubscriber, *events: Event) -> None:
+    """Deliver events to the subscriber the way the bus drain thread does."""
+    subscriptions = subscriber.get_subscriptions()
+    for event in events:
+        subscriptions[event.event_type](event)
+
+
+# -- Subscriber event mapping -------------------------------------------------
+
+
+def test_l1_store_access_delete_events_map_to_batches():
     sink = _RecordingSink()
-    emitter = _emitter(sink)
-    emitter.record(CacheEventType.STORE, Tier.L2, "fs", [_entry(1, 100)])
-    emitter.record(CacheEventType.DELETE, Tier.L2, "fs", [_entry(1)])
-    asyncio.run(emitter.flush())
+    subscriber = _subscriber(sink)
+
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.L1_WRITE_FINISHED,
+            metadata={"keys": [_key(1), _key(2)], "meta": [_meta(100), _meta(200)]},
+        ),
+        Event(
+            event_type=EventType.L1_WRITE_FINISHED_AND_READ_RESERVED,
+            metadata={"keys": [_key(3)], "meta": [_meta(300)]},
+        ),
+        Event(
+            event_type=EventType.L1_READ_FINISHED,
+            metadata={"keys": [_key(1)]},
+        ),
+        Event(
+            event_type=EventType.L1_KEYS_ACCESSED,
+            metadata={"keys": [_key(2)]},
+        ),
+        Event(
+            event_type=EventType.L1_KEYS_EVICTED,
+            metadata={"keys": [_key(3)], "meta": [_meta(300)]},
+        ),
+    )
+    subscriber.flush()
 
     [batches] = sink.published
+    # Consecutive same-identity records coalesce across events: the two
+    # store events form one batch, the two access events form one batch.
     assert [b.event_type for b in batches] == [
         CacheEventType.STORE,
+        CacheEventType.ACCESS,
         CacheEventType.DELETE,
     ]
-    assert [b.seq for b in batches] == [1, 2]
-    assert all(b.instance_id == "node-a" for b in batches)
-    assert all(b.incarnation == 7 for b in batches)
-    assert all(b.tier == Tier.L2 for b in batches)
-    assert all(b.backend == "fs" for b in batches)
-    assert all(b.ts > 0 for b in batches)
-
-
-def test_consecutive_same_identity_records_coalesce_into_one_batch():
-    sink = _RecordingSink()
-    emitter = _emitter(sink)
-    emitter.record(CacheEventType.STORE, Tier.L2, "fs", [_entry(1, 100)])
-    emitter.record(CacheEventType.STORE, Tier.L2, "fs", [_entry(2, 200)])
-    asyncio.run(emitter.flush())
-
-    [[batch]] = sink.published
-    assert batch.seq == 1
-    assert [e.size_bytes for e in batch.entries] == [100, 200]
-
-
-def test_interleaved_event_types_preserve_total_order():
-    # store k1, delete k1, store k1 again: the re-store must not be
-    # reordered before the delete, or the directory ends up empty.
-    sink = _RecordingSink()
-    emitter = _emitter(sink)
-    emitter.record(CacheEventType.STORE, Tier.L2, "fs", [_entry(1, 100)])
-    emitter.record(CacheEventType.DELETE, Tier.L2, "fs", [_entry(1)])
-    emitter.record(CacheEventType.STORE, Tier.L2, "fs", [_entry(1, 150)])
-    asyncio.run(emitter.flush())
-
-    [batches] = sink.published
-    assert [b.event_type for b in batches] == [
-        CacheEventType.STORE,
-        CacheEventType.DELETE,
-        CacheEventType.STORE,
-    ]
+    store, access, delete = batches
+    assert [e.size_bytes for e in store.entries] == [100, 200, 300]
+    assert len(access.entries) == 2
+    assert delete.entries[0].key == _key(3).to_encoded_object_key()
+    assert delete.entries[0].size_bytes == 0
+    assert all(b.tier == Tier.L1 and b.backend == "dram" for b in batches)
     assert [b.seq for b in batches] == [1, 2, 3]
+    assert all(b.instance_id == "node-a" and b.incarnation == 7 for b in batches)
 
 
-def test_backend_change_starts_a_new_batch():
+def test_l1_events_split_batches_by_medium():
+    """A hybrid DRAM+DAX store emits one batch per medium, and deletes
+    target the same per-medium identity the stores reported."""
     sink = _RecordingSink()
-    emitter = _emitter(sink)
-    emitter.record(CacheEventType.STORE, Tier.L2, "fs", [_entry(1, 100)])
-    emitter.record(CacheEventType.STORE, Tier.L2, "valkey", [_entry(1, 100)])
-    asyncio.run(emitter.flush())
+    subscriber = _subscriber(sink)
+
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.L1_WRITE_FINISHED,
+            metadata={
+                "keys": [_key(1), _key(2), _key(3)],
+                "meta": [
+                    _meta(100, L1Backend.DRAM),
+                    _meta(200, L1Backend.DEVDAX),
+                    _meta(300, L1Backend.DRAM),
+                ],
+            },
+        ),
+        Event(
+            event_type=EventType.L1_KEYS_EVICTED,
+            metadata={"keys": [_key(2)], "meta": [_meta(200, L1Backend.DEVDAX)]},
+        ),
+    )
+    subscriber.flush()
 
     [batches] = sink.published
-    assert [b.backend for b in batches] == ["fs", "valkey"]
+    assert [(b.event_type, b.backend) for b in batches] == [
+        (CacheEventType.STORE, "dram"),
+        (CacheEventType.STORE, "devdax"),
+        (CacheEventType.DELETE, "devdax"),
+    ]
+    dram_store, devdax_store, devdax_delete = batches
+    assert [e.size_bytes for e in dram_store.entries] == [100, 300]
+    assert [e.size_bytes for e in devdax_store.entries] == [200]
+    assert devdax_delete.entries[0].key == _key(2).to_encoded_object_key()
 
 
-def test_flush_with_empty_buffer_publishes_nothing():
+def test_l2_events_map_with_backend_and_sizes():
     sink = _RecordingSink()
-    emitter = _emitter(sink)
-    asyncio.run(emitter.flush())
-    assert sink.published == []
+    subscriber = _subscriber(sink)
 
-
-def test_empty_record_is_a_noop():
-    sink = _RecordingSink()
-    emitter = _emitter(sink)
-    emitter.record(CacheEventType.STORE, Tier.L2, "fs", [])
-    asyncio.run(emitter.flush())
-    assert sink.published == []
-
-
-def test_publish_failure_drops_batches_and_leaves_a_seq_gap():
-    # Failed flushes consume their seq numbers so the directory sees a
-    # gap and can flag the instance for resync.
-    sink = _RecordingSink()
-    emitter = _emitter(sink)
-
-    emitter.record(CacheEventType.STORE, Tier.L2, "fs", [_entry(1, 100)])
-    sink.fail_next = True
-    asyncio.run(emitter.flush())
-    assert sink.published == []
-
-    emitter.record(CacheEventType.STORE, Tier.L2, "fs", [_entry(2, 200)])
-    asyncio.run(emitter.flush())
-    [[batch]] = sink.published
-    assert batch.seq == 2
-
-
-def test_flushes_do_not_rebatch_dropped_entries():
-    sink = _RecordingSink()
-    emitter = _emitter(sink)
-    sink.fail_next = True
-    emitter.record(CacheEventType.STORE, Tier.L2, "fs", [_entry(1, 100)])
-    asyncio.run(emitter.flush())
-    asyncio.run(emitter.flush())
-    assert sink.published == []
-
-
-# -- L2 listener mapping ------------------------------------------------------
-
-
-def test_l2_listener_maps_callbacks_to_events():
-    sink = _RecordingSink()
-    emitter = _emitter(sink)
-    listener = L2CacheEventListener(emitter, backend="fs")
-
-    listener.on_l2_keys_stored([_key(1), _key(2)], [100, 200])
-    listener.on_l2_keys_accessed([_key(1)])
-    listener.on_l2_keys_deleted([_key(2)])
-    asyncio.run(emitter.flush())
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.L2_KEYS_STORED,
+            metadata={"keys": [_key(1), _key(2)], "sizes": [100, 200], "backend": "fs"},
+        ),
+        Event(
+            event_type=EventType.L2_KEYS_ACCESSED,
+            metadata={"keys": [_key(1)], "backend": "fs"},
+        ),
+        Event(
+            event_type=EventType.L2_KEYS_DELETED,
+            metadata={"keys": [_key(2)], "backend": "fs"},
+        ),
+    )
+    subscriber.flush()
 
     [batches] = sink.published
     assert [b.event_type for b in batches] == [
@@ -198,36 +216,276 @@ def test_l2_listener_maps_callbacks_to_events():
     assert all(b.tier == Tier.L2 and b.backend == "fs" for b in batches)
 
 
-def test_l2_listener_rejects_mismatched_sizes():
-    listener = L2CacheEventListener(_emitter(_RecordingSink()), backend="fs")
+def test_interleaved_events_preserve_total_order():
+    # store k1, delete k1, re-store k1: the re-store must not be
+    # reordered before the delete, or the directory ends up empty.
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.L2_KEYS_STORED,
+            metadata={"keys": [_key(1)], "sizes": [100], "backend": "fs"},
+        ),
+        Event(
+            event_type=EventType.L2_KEYS_DELETED,
+            metadata={"keys": [_key(1)], "backend": "fs"},
+        ),
+        Event(
+            event_type=EventType.L2_KEYS_STORED,
+            metadata={"keys": [_key(1)], "sizes": [150], "backend": "fs"},
+        ),
+    )
+    subscriber.flush()
+
+    [batches] = sink.published
+    assert [b.event_type for b in batches] == [
+        CacheEventType.STORE,
+        CacheEventType.DELETE,
+        CacheEventType.STORE,
+    ]
+    assert [b.seq for b in batches] == [1, 2, 3]
+
+
+def test_mismatched_l1_meta_raises():
+    subscriber = _subscriber(_RecordingSink())
     with pytest.raises(ValueError):
-        listener.on_l2_keys_stored([_key(1), _key(2)], [100])
+        _dispatch(
+            subscriber,
+            Event(
+                event_type=EventType.L1_WRITE_FINISHED,
+                metadata={"keys": [_key(1), _key(2)], "meta": [_meta(100)]},
+            ),
+        )
 
 
-# -- HTTP sink end-to-end -----------------------------------------------------
+# -- Emitter flush / seq semantics --------------------------------------------
 
 
-def _coordinator_transport() -> httpx.ASGITransport:
-    config = MPCoordinatorConfig(health_check_interval=0.0, eviction_check_interval=0.0)
-    return httpx.ASGITransport(app=create_app(config))
+def test_flush_with_empty_buffer_publishes_nothing():
+    sink = _RecordingSink()
+    _subscriber(sink).flush()
+    assert sink.published == []
+
+
+def test_publish_failure_drops_batches_and_leaves_a_seq_gap():
+    # Failed flushes consume their seq numbers so the directory sees a
+    # gap and can flag the instance for resync.
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.L2_KEYS_STORED,
+            metadata={"keys": [_key(1)], "sizes": [100], "backend": "fs"},
+        ),
+    )
+    sink.fail_next = True
+    subscriber.flush()
+    assert sink.published == []
+
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.L2_KEYS_STORED,
+            metadata={"keys": [_key(2)], "sizes": [200], "backend": "fs"},
+        ),
+    )
+    subscriber.flush()
+    [[batch]] = sink.published
+    assert batch.seq == 2
+
+
+def test_negative_flush_interval_rejected():
+    with pytest.raises(ValueError):
+        _subscriber(_RecordingSink(), flush_interval=-1.0)
+
+
+def test_events_self_pace_flushing():
+    """With interval 0 every event flushes; a long interval holds events
+    back until an explicit flush."""
+    store_event = Event(
+        event_type=EventType.L2_KEYS_STORED,
+        metadata={"keys": [_key(1)], "sizes": [100], "backend": "fs"},
+    )
+    eager_sink = _RecordingSink()
+    _dispatch(_subscriber(eager_sink, flush_interval=0.0), store_event, store_event)
+    assert len(eager_sink.published) == 2
+
+    lazy_sink = _RecordingSink()
+    _dispatch(_subscriber(lazy_sink), store_event)
+    assert lazy_sink.published == []
+
+
+def test_eviction_tick_flushes_buffered_tail():
+    """A buffered tail (burst-ending events) is flushed by the eviction
+    loop's tick once the flush interval elapses, without new cache
+    events."""
+    # Standard
+    import time as _time
+
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink, flush_interval=0.05)
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.L2_KEYS_STORED,
+            metadata={"keys": [_key(1)], "sizes": [100], "backend": "fs"},
+        ),
+    )
+    assert sink.published == []  # interval not yet elapsed: tail buffered
+    _time.sleep(0.06)
+    _dispatch(
+        subscriber,
+        Event(event_type=EventType.L1_EVICTION_LOOP_TICK, metadata={"usage": 0.0}),
+    )
+    assert len(sink.published) == 1
+
+
+def test_shutdown_flushes_and_closes_sink():
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.L2_KEYS_STORED,
+            metadata={"keys": [_key(1)], "sizes": [100], "backend": "fs"},
+        ),
+    )
+    subscriber.shutdown()
+    assert len(sink.published) == 1
+    assert sink.closed is True
+
+
+# -- Bus integration -----------------------------------------------------------
+
+
+def test_subscriber_on_a_real_bus_flushes_on_events():
+    """End-to-end through a real EventBus: published events reach the
+    sink via the drain thread's event callbacks, with no dedicated
+    emission thread."""
+    sink = _RecordingSink()
+    bus = EventBus(EventBusConfig(enabled=True))
+    bus.register_subscriber(_subscriber(sink, flush_interval=0.0))
+    bus.start()
+    try:
+        bus.publish(
+            Event(
+                event_type=EventType.L1_WRITE_FINISHED,
+                metadata={"keys": [_key(1)], "meta": [_meta(100)]},
+            )
+        )
+        waiter = threading.Event()
+        for _ in range(100):
+            if sink.published:
+                break
+            waiter.wait(0.05)
+        assert sink.published, "event-driven flush never delivered the batch"
+        [[batch]] = sink.published
+        assert batch.event_type == CacheEventType.STORE
+        assert batch.entries[0].size_bytes == 100
+    finally:
+        bus.stop()
+    # Shutdown closed the sink via the subscriber hook.
+    assert sink.closed is True
+
+
+def test_bus_stop_flushes_buffered_events():
+    """Events recorded but not yet flushed are delivered by the
+    subscriber's shutdown hook during ``EventBus.stop()``."""
+    sink = _RecordingSink()
+    bus = EventBus(EventBusConfig(enabled=True))
+    bus.register_subscriber(_subscriber(sink))
+    bus.start()
+    bus.publish(
+        Event(
+            event_type=EventType.L2_KEYS_STORED,
+            metadata={"keys": [_key(1)], "sizes": [64], "backend": "fs"},
+        )
+    )
+    bus.stop()
+    assert len(sink.published) == 1
+    assert sink.closed is True
+
+
+# -- l1_backend_name -----------------------------------------------------------
+
+
+def test_l1_primary_backend_by_medium():
+    memory_config = L1MemoryManagerConfig(size_in_bytes=1 << 20, use_lazy=False)
+    assert l1_primary_backend(L1ManagerConfig(memory_config=memory_config)) == (
+        L1Backend.DRAM
+    )
+
+    devdax_config = L1MemoryManagerConfig(
+        size_in_bytes=1 << 20,
+        use_lazy=False,
+        devdax_path="/dev/dax0.0",
+        shm_name="",
+    )
+    assert l1_primary_backend(L1ManagerConfig(memory_config=devdax_config)) == (
+        L1Backend.DEVDAX
+    )
+
+    gds = GdsL1Config(file_location="/tmp/gds", size_in_bytes=1 << 20)
+    assert (
+        l1_primary_backend(
+            L1ManagerConfig(memory_config=memory_config, gds_l1_config=gds)
+        )
+        == L1Backend.GDS
+    )
+
+
+# -- HTTP sink end-to-end -------------------------------------------------------
+
+
+class _SyncASGITransport(httpx.BaseTransport):
+    """Bridge httpx's sync client onto an in-process ASGI app."""
+
+    def __init__(self, asgi: httpx.ASGITransport) -> None:
+        self._asgi = asgi
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        async def _roundtrip() -> tuple[int, httpx.Headers, bytes]:
+            response = await self._asgi.handle_async_request(request)
+            content = await response.aread()
+            return response.status_code, response.headers, content
+
+        status_code, headers, content = asyncio.run(_roundtrip())
+        return httpx.Response(status_code=status_code, headers=headers, content=content)
 
 
 def test_http_sink_feeds_the_directory_end_to_end():
-    async def run() -> None:
-        transport = _coordinator_transport()
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://coordinator"
-        ) as client:
-            emitter = CacheEventEmitter(
-                sink=HttpCacheEventSink(client, "http://coordinator"),
-                instance_id="node-a",
-                incarnation=3,
-            )
-            listener = L2CacheEventListener(emitter, backend="fs")
-            listener.on_l2_keys_stored([_key(1), _key(2)], [100, 200])
-            listener.on_l2_keys_deleted([_key(2)])
-            await emitter.flush()
+    """Subscriber events -> emitter -> HTTP sink -> coordinator app ->
+    directory lookup, all with the synchronous sink."""
+    config = MPCoordinatorConfig(health_check_interval=0.0, eviction_check_interval=0.0)
+    asgi = httpx.ASGITransport(app=create_app(config))
 
+    sink = HttpCacheEventSink("http://coordinator")
+    # Point the sink's client at the in-process app (same public API).
+    sink._client = httpx.Client(  # noqa: SLF001 — test-only transport swap
+        transport=_SyncASGITransport(asgi), base_url="http://coordinator"
+    )
+    subscriber = _subscriber(sink, incarnation=3)
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.L2_KEYS_STORED,
+            metadata={"keys": [_key(1), _key(2)], "sizes": [100, 200], "backend": "fs"},
+        ),
+        Event(
+            event_type=EventType.L2_KEYS_DELETED,
+            metadata={"keys": [_key(2)], "backend": "fs"},
+        ),
+    )
+    subscriber.flush()
+
+    async def _verify() -> None:
+        async with httpx.AsyncClient(
+            transport=asgi, base_url="http://coordinator"
+        ) as client:
             resp = await client.post(
                 "/directory/lookup",
                 json={
@@ -252,136 +510,20 @@ def test_http_sink_feeds_the_directory_end_to_end():
             assert instance["last_seq"] == 2
             assert instance["gap_detected"] is False
 
-    asyncio.run(run())
+    asyncio.run(_verify())
 
 
-def test_http_sink_raises_publish_error_on_connect_failure():
-    async def run() -> None:
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(
-                lambda request: httpx.Response(503, text="down")
-            )
-        ) as client:
-            sink = HttpCacheEventSink(client, "http://coordinator")
-            batch = CacheEventBatch(
-                instance_id="node-a",
-                incarnation=1,
-                seq=1,
-                event_type=CacheEventType.STORE,
-                tier=Tier.L2,
-                backend="fs",
-                entries=[_entry(1, 100)],
-            )
-            with pytest.raises(CacheEventPublishError):
-                await sink.publish([batch])
-
-    asyncio.run(run())
-
-
-# -- L1 listener mapping ------------------------------------------------------
-
-
-def _meta(size_bytes: int = 0, backend: L1Backend = L1Backend.DRAM) -> L1ObjectMeta:
-    return L1ObjectMeta(size_bytes=size_bytes, backend=backend)
-
-
-def test_l1_listener_maps_callbacks_to_events():
-    sink = _RecordingSink()
-    emitter = _emitter(sink)
-    listener = L1CacheEventListener(emitter, access_backend=L1Backend.DRAM)
-
-    listener.on_l1_keys_write_finished([_key(1), _key(2)], [_meta(100), _meta(200)])
-    listener.on_l1_keys_finish_write_and_reserve_read([_key(3)], [_meta(300)])
-    listener.on_l1_keys_read_finished([_key(1)])
-    listener.on_l1_keys_accessed([_key(2)])
-    listener.on_l1_keys_deleted_by_manager([_key(3)], [_meta(300)])
-    asyncio.run(emitter.flush())
-
-    [batches] = sink.published
-    # The two store-side callbacks are consecutive STOREs, so they
-    # coalesce; the two access-side callbacks likewise.
-    assert [b.event_type for b in batches] == [
-        CacheEventType.STORE,
-        CacheEventType.ACCESS,
-        CacheEventType.DELETE,
-    ]
-    store, access, delete = batches
-    assert [e.size_bytes for e in store.entries] == [100, 200, 300]
-    assert len(access.entries) == 2
-    assert delete.entries[0].key == _key(3).to_encoded_object_key()
-    assert all(b.tier == Tier.L1 and b.backend == "dram" for b in batches)
-
-
-def test_l1_listener_ignores_reservations():
-    sink = _RecordingSink()
-    emitter = _emitter(sink)
-    listener = L1CacheEventListener(emitter, access_backend=L1Backend.DRAM)
-
-    listener.on_l1_keys_reserved_read([_key(1)])
-    listener.on_l1_keys_reserved_write([_key(2)])
-    asyncio.run(emitter.flush())
-
-    assert sink.published == []
-
-
-def test_l1_listener_rejects_mismatched_metadata():
-    listener = L1CacheEventListener(
-        _emitter(_RecordingSink()), access_backend=L1Backend.DRAM
+def test_http_sink_raises_publish_error_on_http_failure():
+    sink = HttpCacheEventSink("http://127.0.0.1:1")  # nothing listens here
+    batch = CacheEventBatch(
+        instance_id="node-a",
+        incarnation=1,
+        seq=1,
+        event_type=CacheEventType.STORE,
+        tier=Tier.L2,
+        backend="fs",
+        entries=[_entry(1, 100)],
     )
-    with pytest.raises(ValueError):
-        listener.on_l1_keys_write_finished([_key(1), _key(2)], [_meta(100)])
-
-
-def test_l1_listener_splits_batches_by_medium():
-    """A hybrid DRAM+DAX store emits one batch per medium, and deletes
-    target the same per-medium identity the stores reported."""
-    sink = _RecordingSink()
-    emitter = _emitter(sink)
-    listener = L1CacheEventListener(emitter, access_backend=L1Backend.DRAM)
-
-    listener.on_l1_keys_write_finished(
-        [_key(1), _key(2), _key(3)],
-        [
-            _meta(100, L1Backend.DRAM),
-            _meta(200, L1Backend.DEVDAX),
-            _meta(300, L1Backend.DRAM),
-        ],
-    )
-    listener.on_l1_keys_deleted_by_manager([_key(2)], [_meta(200, L1Backend.DEVDAX)])
-    asyncio.run(emitter.flush())
-
-    [batches] = sink.published
-    assert [(b.event_type, b.backend) for b in batches] == [
-        (CacheEventType.STORE, "dram"),
-        (CacheEventType.STORE, "devdax"),
-        (CacheEventType.DELETE, "devdax"),
-    ]
-    dram_store, devdax_store, devdax_delete = batches
-    assert [e.size_bytes for e in dram_store.entries] == [100, 300]
-    assert [e.size_bytes for e in devdax_store.entries] == [200]
-    assert devdax_delete.entries[0].key == _key(2).to_encoded_object_key()
-    assert devdax_delete.entries[0].size_bytes == 0
-    assert all(b.tier == Tier.L1 for b in batches)
-
-
-def test_l1_backend_name_by_medium():
-    memory_config = L1MemoryManagerConfig(size_in_bytes=1 << 20, use_lazy=False)
-    assert l1_backend_name(L1ManagerConfig(memory_config=memory_config)) == (
-        L1Backend.DRAM
-    )
-
-    devdax_config = L1MemoryManagerConfig(
-        size_in_bytes=1 << 20,
-        use_lazy=False,
-        devdax_path="/dev/dax0.0",
-        shm_name="",
-    )
-    assert l1_backend_name(L1ManagerConfig(memory_config=devdax_config)) == (
-        L1Backend.DEVDAX
-    )
-
-    gds = GdsL1Config(file_location="/tmp/gds", size_in_bytes=1 << 20)
-    assert (
-        l1_backend_name(L1ManagerConfig(memory_config=memory_config, gds_l1_config=gds))
-        == L1Backend.GDS
-    )
+    with pytest.raises(CacheEventPublishError):
+        sink.publish([batch])
+    sink.close()
