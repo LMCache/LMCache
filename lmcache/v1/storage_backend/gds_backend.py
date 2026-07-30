@@ -2,11 +2,13 @@
 # Standard
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 import asyncio
+import contextlib
 import ctypes
 import ctypes.util
 import errno
+import functools
 import json
 import os
 import struct
@@ -20,6 +22,7 @@ import aiofile
 import torch
 
 # First Party
+from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import (
     CacheEngineKey,
@@ -59,6 +62,16 @@ _DEFAULT_THREAD_COUNT = 4
 # importable on platforms without O_DIRECT (e.g. macOS), where it resolves to 0.
 _DIRECT_IO_ALIGN = 4096
 _O_DIRECT_FLAG = getattr(os, "O_DIRECT", 0)
+
+# Errnos that mean "this filesystem will never accept O_DIRECT", as opposed to
+# a transient failure.  Seeing one of these latches O_DIRECT off for the rest of
+# the backend's life rather than retrying on every I/O.  EINVAL alone is not
+# enough: several of the parallel/network filesystems this fallback exists for
+# (and FUSE-backed mounts generally) report EOPNOTSUPP/ENOTSUP or EPERM instead,
+# and without them the open would raise straight through the fallback.
+_DIRECT_IO_UNSUPPORTED_ERRNOS = frozenset(
+    {errno.EINVAL, errno.EOPNOTSUPP, errno.ENOTSUP, errno.EPERM}
+)
 
 
 class UnsupportedMetadataVersion(Exception):
@@ -288,12 +301,13 @@ class GdsBackend(AllocatorBackendInterface):
         user_set_keys: set[str] = getattr(config, "_user_set_keys", set())
         use_gds_explicitly_set = "use_gds" in user_set_keys
 
-        # Now initialize the memory allocator
-        self.memory_allocator = self.initialize_allocator(config, metadata)
-
         self.data_suffix = _DATA_FILE_SUFFIX
         self._thread_pool = None
 
+        # Resolve the *effective* use_gds before anything consults it. The
+        # allocator choice below depends on it: with GDS disabled we must use a
+        # plain GPU allocator rather than the cuFile/hipFile one, and on the
+        # auto-disable path the cuFile library may not even be loadable.
         if self.fstype in ["tmpfs", "overlayfs"]:
             # TODO: we can replace the auto-detection of unsupported GDS
             # file systems by doing a small GDS API test on them. If a
@@ -308,15 +322,39 @@ class GdsBackend(AllocatorBackendInterface):
             assert self.use_gds
             self.data_suffix = _WEKA_DATA_FILE_SUFFIX
 
+        # Now initialize the memory allocator (reads the resolved self.use_gds)
+        self.memory_allocator = self.initialize_allocator(config, metadata)
+
         # Always enable the thread pool for parallel I/O.
         # Set disk_io_threads=0 in extra_config to disable.
         thread_count = int(
             config.get_extra_config_value("disk_io_threads", _DEFAULT_THREAD_COUNT)
         )
+        # Resolve dst_device to a concrete index once, here on the constructing
+        # thread.  set_device() rejects an index-less device such as plain
+        # "cuda" ("Expected a torch.device with a specified index or an
+        # integer"), and dst_device defaults to exactly that -- so passing it
+        # through unresolved would break the pool for any caller using the
+        # default.  current_device() is read here, where the correct device is
+        # already selected, rather than inside the worker.
+        _dst = torch.device(dst_device)
+        self._dst_device_index = (
+            _dst.index if _dst.index is not None else torch_dev.current_device()
+        )
+
         self.use_thread_pool = thread_count > 0
         if self.use_thread_pool:
             self._thread_pool = ThreadPoolExecutor(
-                max_workers=thread_count, thread_name_prefix="gds-io"
+                max_workers=thread_count,
+                thread_name_prefix="gds-io",
+                # Each worker starts with this backend's device current.
+                # PyTorch's current device is thread-local and defaults to
+                # index 0, so without this every I/O thread would create a
+                # primary CUDA context on device 0 regardless of which GPU this
+                # rank owns.
+                initializer=functools.partial(
+                    torch_dev.set_device, self._dst_device_index
+                ),
             )
 
         # POSIX-fallback load-phase instrumentation. Summed (across chunks/
@@ -335,11 +373,14 @@ class GdsBackend(AllocatorBackendInterface):
         # pinned memory lets cudaMemcpy/hipMemcpy run as a full-bandwidth DMA
         # (pageable memory forces the driver to stage through its own internal
         # pinned buffer first).  Allocating pinned memory is expensive, so we
-        # reuse per thread rather than per read.  _pinned_buffers tracks every
-        # live buffer under _pinned_lock so close() can release them after the
-        # thread pool has shut down.
+        # reuse per thread rather than per read.  _pinned_buffers maps thread
+        # id -> that thread's live buffer, under _pinned_lock, so close() can
+        # release them after the thread pool has shut down.  It is keyed by
+        # thread id rather than being a list because removing a tensor from a
+        # list uses ``==``, which on tensors yields a tensor and then raises
+        # RuntimeError from bool() -- see _get_pinned_buffer.
         self._pinned_tls = threading.local()
-        self._pinned_buffers: List[torch.Tensor] = []
+        self._pinned_buffers: Dict[int, torch.Tensor] = {}
         self._pinned_lock = threading.Lock()
         if self.use_gds:
             logger.info("Using GDS backend '%s'", self.gds_backend)
@@ -1078,7 +1119,7 @@ class GdsBackend(AllocatorBackendInterface):
                 # (fast pinned DMA), then persist [metadata | KV bytes] with a
                 # single buffered (or O_DIRECT) write.  We deliberately avoid a
                 # writable MAP_SHARED mmap here: parallel / network filesystems
-                # (e.g. the ufs64 PFS) reject shared writable mappings with
+                # (and FUSE-backed mounts) reject shared writable mappings with
                 # EOPNOTSUPP ([Errno 95]).  Staging the header + data in one
                 # aligned pinned buffer lets O_DIRECT (use_direct_io) issue a
                 # single aligned write that bypasses the page cache.
@@ -1097,12 +1138,16 @@ class GdsBackend(AllocatorBackendInterface):
                 # Copy the KV bytes right after the header. Use the resolved
                 # dev_offset (0 when base_pointer is None, since addr already
                 # points at this chunk) — not the raw parameter.
-                res = self._gpu_memcpy(
-                    ctypes.c_void_p(host_buf.data_ptr() + offset),
-                    ctypes.c_void_p(int(addr.value) + dev_offset),
-                    ctypes.c_size_t(nbytes),
-                    ctypes.c_int(2),
-                )
+                # Run in this backend's device context: the calling thread
+                # (asyncio's default executor here) may have a different device
+                # current, which would put the copy on the wrong context.
+                with torch_dev.device(self._dst_device_index):
+                    res = self._gpu_memcpy(
+                        ctypes.c_void_p(host_buf.data_ptr() + offset),
+                        ctypes.c_void_p(int(addr.value) + dev_offset),
+                        ctypes.c_size_t(nbytes),
+                        ctypes.c_int(2),
+                    )
                 if res:
                     raise RuntimeError(f"GPU memcpy (DeviceToHost) failed {res}")
                 out = hb_mv[:total]
@@ -1115,12 +1160,30 @@ class GdsBackend(AllocatorBackendInterface):
                 try:
                     written = 0
                     while written < total:
-                        written += os.pwrite(fd, out[written:], written)
+                        n = os.pwrite(fd, out[written:], written)
+                        if n <= 0:
+                            raise OSError(
+                                f"pwrite made no progress at offset {written} "
+                                f"of {total} for {tmp_path}"
+                            )
+                        written += n
                 finally:
                     os.close(fd)
+            else:
+                # Mirrors the guard in _load_gds.  Without this the function
+                # would write nothing and then fail in os.rename() below with a
+                # confusing FileNotFoundError for a temp file never created,
+                # after the caller was told the chunk had been persisted.
+                raise RuntimeError(
+                    "GDS save invoked with neither a GDS module nor a GPU "
+                    "memcpy function available"
+                )
 
         except Exception as e:
             logger.error(f"Error saving {tmp_path}: {e}", exc_info=True)
+            # Don't leave a partial temp file behind; nothing else reaps these.
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path)
             raise e
         os.rename(tmp_path, path)
         return metadata
@@ -1142,21 +1205,49 @@ class GdsBackend(AllocatorBackendInterface):
             ``>= size_in_bytes``.  The buffer is owned by the backend; callers
             must not free it and must treat bytes past ``size_in_bytes`` as
             undefined.
+
+        The returned buffer is always ``_DIRECT_IO_ALIGN``-aligned, which is a
+        precondition for the O_DIRECT path: ``torch.empty(pin_memory=True)``
+        does *not* guarantee page alignment, because the caching pinned
+        allocator sub-allocates -- once it has served an unaligned-sized
+        request, later pointers come back offset (observed: 2048, 2560).  An
+        unaligned buffer makes ``_direct_io_aligned`` reject every transfer, so
+        O_DIRECT would silently degrade to buffered I/O depending on nothing
+        more than allocation history.  We therefore over-allocate by one
+        alignment unit and return an aligned view; the view keeps the base
+        tensor alive, so nothing else is needed to manage its lifetime.
+
+        Note:
+            There is exactly one buffer per thread, so the returned tensor is
+            only valid until the *same* thread calls this method again.  A
+            caller must not hold it across a nested call, and must not hand it
+            to another thread.  Today ``_save_gds`` and ``_load_gds`` each
+            acquire it and use it without yielding, which is what makes the
+            single-buffer-per-thread scheme safe.
         """
         buf = getattr(self._pinned_tls, "buffer", None)
         if buf is not None and buf.numel() >= size_in_bytes:
             return buf
-        new_buf = torch.empty(size_in_bytes, dtype=torch.uint8, pin_memory=True)
+        # Pin on *this backend's* device, not whatever device the calling
+        # thread happens to have current.  PyTorch's current device is
+        # thread-local and defaults to index 0 for freshly created threads, so
+        # without this a rank that owns e.g. cuda:3 would create a primary CUDA
+        # context on cuda:0 from every I/O thread.
+        with torch_dev.device(self._dst_device_index):
+            raw = torch.empty(
+                size_in_bytes + _DIRECT_IO_ALIGN, dtype=torch.uint8, pin_memory=True
+            )
+        align_offset = (-raw.data_ptr()) % _DIRECT_IO_ALIGN
+        new_buf = raw[align_offset : align_offset + size_in_bytes]
         self._pinned_tls.buffer = new_buf
         with self._pinned_lock:
-            # Replace this thread's previous (too-small) buffer in the tracking
-            # list so close() releases exactly the live buffers.
-            if buf is not None:
-                try:
-                    self._pinned_buffers.remove(buf)
-                except ValueError:
-                    pass
-            self._pinned_buffers.append(new_buf)
+            # Keyed by thread id, so replacing this thread's previous (too
+            # small) buffer is a plain dict assignment.  Do NOT hold these in a
+            # list and call list.remove(buf): list.remove compares with ``==``,
+            # which for tensors returns a tensor and then raises RuntimeError
+            # (not ValueError) from bool() as soon as any other thread's buffer
+            # precedes this one.
+            self._pinned_buffers[threading.get_ident()] = new_buf
         return new_buf
 
     def _direct_io_aligned(self, *values: int) -> bool:
@@ -1206,12 +1297,13 @@ class GdsBackend(AllocatorBackendInterface):
             try:
                 return os.open(path, flags | _O_DIRECT_FLAG, mode), True
             except OSError as e:
-                if e.errno != errno.EINVAL:
+                if e.errno not in _DIRECT_IO_UNSUPPORTED_ERRNOS:
                     raise
                 self._direct_io_supported = False
                 logger.warning(
-                    "O_DIRECT rejected (EINVAL) on %s; falling back to buffered "
+                    "O_DIRECT rejected (%s) on %s; falling back to buffered "
                     "I/O for the POSIX GDS path",
+                    errno.errorcode.get(e.errno, e.errno),
                     path,
                 )
         return os.open(path, flags, mode), False
@@ -1294,14 +1386,17 @@ class GdsBackend(AllocatorBackendInterface):
                     )
                     return -1
 
-                # kind=1 -> HostToDevice (identical enum on CUDA and HIP)
+                # kind=1 -> HostToDevice (identical enum on CUDA and HIP).
+                # As in _save_gds, pin the copy to this backend's device rather
+                # than the I/O thread's current one.
                 h2d_t0 = time.perf_counter_ns()
-                res = self._gpu_memcpy(
-                    ctypes.c_void_p(int(gpu_pointer.value) + dev_offset),
-                    ctypes.c_void_p(host_buf.data_ptr()),
-                    ctypes.c_size_t(size_in_bytes),
-                    ctypes.c_int(1),
-                )
+                with torch_dev.device(self._dst_device_index):
+                    res = self._gpu_memcpy(
+                        ctypes.c_void_p(int(gpu_pointer.value) + dev_offset),
+                        ctypes.c_void_p(host_buf.data_ptr()),
+                        ctypes.c_size_t(size_in_bytes),
+                        ctypes.c_int(1),
+                    )
                 h2d_ns = time.perf_counter_ns() - h2d_t0
 
                 if res != 0:
@@ -1347,7 +1442,12 @@ class GdsBackend(AllocatorBackendInterface):
         # cuFile/hipFile buffer registration is needed. Use a plain GPU
         # allocator to avoid depending on the cufile/hipfile libraries on this
         # path (they may be unavailable, e.g. libcufile on ROCm).
-        if not config.use_gds:
+        #
+        # This reads the *resolved* self.use_gds, not config.use_gds: the
+        # fstype-based auto-disable (tmpfs/overlayfs) can turn GDS off even
+        # though the config asked for it, and on that path cuFile is exactly
+        # what may be missing.
+        if not self.use_gds:
             return GPUMemoryAllocator(size_bytes, align_bytes=4096)
         allocator_cls = (
             HipFileMemoryAllocator

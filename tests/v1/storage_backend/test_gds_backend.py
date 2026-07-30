@@ -2,6 +2,7 @@
 # Standard
 from unittest import mock
 import asyncio
+import errno
 import os
 import shutil
 import sys
@@ -1216,3 +1217,269 @@ def test_direct_io_alignment_and_open_fallback(temp_gds_path, async_loop):
         assert is_direct is False
     finally:
         backend.close()
+
+
+def test_pinned_buffer_growth_across_threads():
+    """Growing the pinned buffer must not raise when other threads hold buffers.
+
+    Regression test. The tracking structure used to be a ``list[torch.Tensor]``
+    and growth did ``list.remove(old_buf)``. ``list.remove`` compares elements
+    with ``==``; on tensors that yields a *tensor*, and ``bool()`` of it raises
+    ``RuntimeError`` ("Boolean value of Tensor ... is ambiguous", or a size
+    mismatch) — which the surrounding ``except ValueError`` could not catch,
+    because ``RuntimeError`` is not a ``ValueError``. It fired as soon as any
+    other thread's buffer preceded this one in the list.
+
+    In ``_load_gds`` that exception was converted to ``return -1``, which makes
+    the caller evict the entry — i.e. silent cache loss rather than a visible
+    error. So this is exercised directly rather than through the public API:
+    the failure is a crash inside a helper whose exception is swallowed
+    upstream, and reproducing it end-to-end would depend on thread-scheduling
+    order and would be flaky.
+    """
+    backend = GdsBackend.__new__(GdsBackend)
+    backend._pinned_tls = threading.local()
+    backend._pinned_buffers = {}
+    backend._pinned_lock = threading.Lock()
+    backend._dst_device_index = torch.cuda.current_device()
+
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(4)
+
+    def grow(base: int) -> None:
+        try:
+            backend._get_pinned_buffer(base)
+            # Wait until every thread owns a buffer, so the dict/list is
+            # populated with other threads' tensors before anyone grows.
+            barrier.wait(timeout=30)
+            backend._get_pinned_buffer(base * 2)
+        except BaseException as exc:  # noqa: BLE001 - recorded and re-raised
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=grow, args=(4096 * (i + 1),), name=f"io-{i}")
+        for i in range(4)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+
+    assert not errors, f"growing the pinned buffer raised: {errors!r}"
+    # One live buffer per thread, each grown to the larger size.
+    assert len(backend._pinned_buffers) == 4
+    for buf in backend._pinned_buffers.values():
+        assert buf.is_pinned()
+        # O_DIRECT needs a page-aligned buffer address. torch's caching pinned
+        # allocator does not guarantee this once it has served an
+        # unaligned-sized request, so _get_pinned_buffer over-allocates and
+        # returns an aligned view; without that, O_DIRECT silently degrades to
+        # buffered I/O depending only on allocation history.
+        assert buf.data_ptr() % 4096 == 0, (
+            f"pinned buffer not 4096-aligned (offset {buf.data_ptr() % 4096})"
+        )
+
+
+def test_use_gds_false_odirect_aligned_roundtrip(temp_gds_path, async_loop):
+    """An aligned chunk round-trips through the POSIX fallback using O_DIRECT.
+
+    ``test_use_gds_false_save_load_roundtrip`` uses a 2048-byte chunk, so the
+    transfer length is not a multiple of 4096 and every I/O silently takes the
+    *buffered* branch — leaving the O_DIRECT path untested. Here the chunk is
+    sized to 32 KiB so the length, the file offset (the metadata header is
+    exactly ``_METADATA_MAX_SIZE`` = 4096 bytes) and the page-aligned pinned
+    buffer all satisfy O_DIRECT's constraints.
+
+    Asserts both that O_DIRECT was actually requested and that the data survives
+    the round trip byte-for-byte.
+    """
+    config = create_test_config(temp_gds_path)
+    config.use_gds = False
+    metadata = create_test_metadata()
+    backend = GdsBackend(
+        config=config, loop=async_loop, metadata=metadata, dst_device="cuda:0"
+    )
+    try:
+        # 2*64*8*16 = 16384 elements * 2 bytes (bf16) = 32768 B = 8 * 4096.
+        shape = torch.Size([2, 64, 8, 16])
+        dtype = torch.bfloat16
+        nbytes = 1
+        for dim in shape:
+            nbytes *= dim
+        nbytes *= torch.finfo(dtype).bits // 8
+        assert nbytes % 4096 == 0, "test chunk must be O_DIRECT aligned"
+
+        key = create_test_key(900)
+        obj = backend.allocate(shape, dtype)
+        assert obj is not None
+        ref = (torch.rand(tuple(shape), device="cuda") * 100).to(dtype)
+        obj.tensor.copy_(ref)
+
+        seen_flags: list[int] = []
+        real_open = os.open
+
+        def recording_open(path, flags, *args, **kwargs):
+            seen_flags.append(flags)
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch(
+            "lmcache.v1.storage_backend.gds_backend.os.open",
+            side_effect=recording_open,
+        ):
+            backend.submit_put_task(key, obj).result(timeout=15)
+            assert backend.contains(key)
+            loaded = backend.batched_get_blocking([key])
+
+        assert len(loaded) == 1 and loaded[0] is not None
+        assert torch.equal(loaded[0].tensor.to(ref.dtype), ref)
+
+        odirect = getattr(os, "O_DIRECT", 0)
+        if odirect:
+            assert any(f & odirect for f in seen_flags), (
+                "expected at least one O_DIRECT open for an aligned chunk; "
+                f"flags seen: {[hex(f) for f in seen_flags]}"
+            )
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("err", [errno.EOPNOTSUPP, errno.EPERM, errno.EINVAL])
+def test_odirect_open_falls_back_on_unsupported_errno(temp_gds_path, async_loop, err):
+    """A filesystem refusing O_DIRECT degrades to buffered I/O, not an exception.
+
+    Only ``EINVAL`` used to be treated as "this filesystem cannot do O_DIRECT".
+    The parallel/network filesystems this fallback exists for (and FUSE mounts
+    generally) refuse it with ``EOPNOTSUPP``/``ENOTSUP`` or ``EPERM`` instead,
+    which escaped the handler and propagated out of ``_save_gds``/``_load_gds``
+    -- turning the intended graceful degradation into a hard failure in exactly
+    the environment the POSIX path is meant to support.
+    """
+    config = create_test_config(temp_gds_path)
+    config.use_gds = False
+    backend = GdsBackend(
+        config=config,
+        loop=async_loop,
+        metadata=create_test_metadata(),
+        dst_device="cuda:0",
+    )
+    try:
+        probe = os.path.join(temp_gds_path, f"odirect_probe_{err}")
+        real_open = os.open
+        odirect = getattr(os, "O_DIRECT", 0)
+
+        def refuse_odirect(path, flags, *args, **kwargs):
+            if odirect and (flags & odirect):
+                raise OSError(err, os.strerror(err))
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch(
+            "lmcache.v1.storage_backend.gds_backend.os.open",
+            side_effect=refuse_odirect,
+        ):
+            fd, is_direct = backend._os_open_maybe_direct(
+                probe, os.O_WRONLY | os.O_CREAT, True
+            )
+            os.close(fd)
+            assert is_direct is False, "should have degraded to a buffered open"
+
+            # The refusal is latched: a second request must not retry O_DIRECT.
+            fd, is_direct = backend._os_open_maybe_direct(probe, os.O_RDONLY, True)
+            os.close(fd)
+            assert is_direct is False
+    finally:
+        backend.close()
+
+
+def test_fstype_auto_disable_uses_plain_gpu_allocator(temp_gds_path, async_loop):
+    """Auto-disabling GDS by fstype must also switch to the plain GPU allocator.
+
+    On tmpfs/overlayfs the backend turns GDS off by itself even though the
+    config left ``use_gds`` at its default of True. ``initialize_allocator``
+    used to read ``config.use_gds`` and ran *before* that auto-disable, so this
+    path built a ``CuFileMemoryAllocator`` -- requiring libcufile -- while the
+    rest of the backend ran the POSIX fallback. It must use the plain
+    ``GPUMemoryAllocator`` instead, exactly as an explicit ``use_gds: false``
+    does.
+    """
+    # First Party
+    from lmcache.v1.memory_allocators.gpu_memory_allocator import (
+        GPUMemoryAllocator,
+    )
+
+    config = create_test_config(temp_gds_path)
+    # Deliberately do NOT touch config.use_gds: it must stay at its default so
+    # the auto-disable path is the one under test.
+    assert config.use_gds is True
+
+    with mock.patch(
+        "lmcache.v1.storage_backend.gds_backend.get_fstype", return_value="tmpfs"
+    ):
+        backend = GdsBackend(
+            config=config,
+            loop=async_loop,
+            metadata=create_test_metadata(),
+            dst_device="cuda:0",
+        )
+    try:
+        assert backend.use_gds is False, "tmpfs should auto-disable GDS"
+        assert backend.gds_module is None
+        assert isinstance(backend.memory_allocator, GPUMemoryAllocator)
+    finally:
+        backend.close()
+
+
+def test_posix_fallback_pins_pool_threads_to_dst_device(temp_gds_path, async_loop):
+    """I/O threads must start on the backend's device, not thread-default 0.
+
+    PyTorch's current device is thread-local and defaults to index 0 for a
+    freshly created thread, and the ``gds-io`` pool never selected one. A rank
+    owning e.g. ``cuda:3`` would therefore create a primary CUDA context on
+    ``cuda:0`` from every I/O thread -- wasting VRAM on the wrong GPU and
+    risking an OOM on rank 0's device.
+
+    Also covers the index resolution: ``set_device`` rejects an index-less
+    device such as plain ``"cuda"``, which is ``dst_device``'s default, so the
+    backend must resolve it to a concrete index before handing it to the pool.
+
+    The pinned allocation and both memcpys are additionally wrapped in a
+    ``torch_dev.device(...)`` context; that is not asserted here because
+    spying on ``torch_dev.device`` replaces the class and breaks the
+    ``isinstance`` checks inside torch, and a single-GPU host cannot tell the
+    devices apart anyway.
+    """
+    # First Party
+    from lmcache.v1.storage_backend import gds_backend as gds_mod
+
+    for dst_device in ("cuda:0", "cuda"):
+        config = create_test_config(temp_gds_path)
+        config.use_gds = False
+        real_set_device = gds_mod.torch_dev.set_device
+
+        with mock.patch.object(
+            gds_mod.torch_dev, "set_device", wraps=real_set_device
+        ) as spy_set_device:
+            backend = GdsBackend(
+                config=config,
+                loop=async_loop,
+                metadata=create_test_metadata(),
+                dst_device=dst_device,
+            )
+            try:
+                assert backend._thread_pool is not None
+                # Force a worker to spin up so its initializer runs. This also
+                # fails loudly (BrokenThreadPool) if the initializer raised.
+                backend._thread_pool.submit(lambda: None).result(timeout=15)
+
+                assert spy_set_device.call_args_list, (
+                    f"pool initializer never selected a device "
+                    f"(dst_device={dst_device!r})"
+                )
+                expected = torch.cuda.current_device()
+                for call in spy_set_device.call_args_list:
+                    got = call.args[0]
+                    assert got == expected, (
+                        f"pool initialized on device {got!r}, expected "
+                        f"{expected!r} for dst_device={dst_device!r}"
+                    )
+            finally:
+                backend.close()
