@@ -42,6 +42,7 @@ from lmcache.v1.distributed.serde.turboquant import (
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.platform import current_device_spec
 
 
 def test_turboquant_registered() -> None:
@@ -277,7 +278,7 @@ def _make_turboquant_storage_manager(preset: str) -> StorageManager:
         l1_manager_config=L1ManagerConfig(
             memory_config=L1MemoryManagerConfig(
                 size_in_bytes=256 * 1024 * 1024,
-                use_lazy=(torch_dev.is_available()),
+                use_lazy=current_device_spec.is_pin_supported,
                 init_size_in_bytes=64 * 1024 * 1024,
             ),
         ),
@@ -287,7 +288,6 @@ def _make_turboquant_storage_manager(preset: str) -> StorageManager:
     return StorageManager(cfg)
 
 
-@pytest.mark.cuda
 @pytest.mark.skipif(
     not torch_dev.is_available(),
     reason="Requires torch_device_type",
@@ -409,7 +409,6 @@ class _FakeMemoryObj:
         self.tensor = tensor
 
 
-@pytest.mark.cuda
 @pytest.mark.skipif(
     not torch_dev.is_available(),
     reason="Requires torch_device_type",
@@ -520,7 +519,7 @@ def _make_turboquant_fs_storage_manager(
         l1_manager_config=L1ManagerConfig(
             memory_config=L1MemoryManagerConfig(
                 size_in_bytes=256 * 1024 * 1024,
-                use_lazy=(torch_dev.is_available()),
+                use_lazy=current_device_spec.is_pin_supported,
                 init_size_in_bytes=64 * 1024 * 1024,
             ),
         ),
@@ -530,7 +529,6 @@ def _make_turboquant_fs_storage_manager(
     return StorageManager(cfg)
 
 
-@pytest.mark.cuda
 @pytest.mark.skipif(
     not torch_dev.is_available(),
     reason="Requires torch_device_type",

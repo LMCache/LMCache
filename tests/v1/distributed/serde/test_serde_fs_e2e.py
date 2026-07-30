@@ -35,6 +35,7 @@ from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import FSL2AdapterConfig
 from lmcache.v1.distributed.serde import SerdeConfig
 from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.platform import current_device_spec
 
 if not torch_dev.is_available():
     pytest.skip(
@@ -42,7 +43,6 @@ if not torch_dev.is_available():
         allow_module_level=True,
     )
 
-pytestmark = pytest.mark.cuda
 # =============================================================================
 # Helpers
 # =============================================================================
@@ -126,7 +126,7 @@ class TestFp8SerdeFsRoundTrip:
             l1_manager_config=L1ManagerConfig(
                 memory_config=L1MemoryManagerConfig(
                     size_in_bytes=4 << 30,
-                    use_lazy=True,
+                    use_lazy=current_device_spec.is_pin_supported,
                     init_size_in_bytes=1 << 30,
                 ),
             ),
