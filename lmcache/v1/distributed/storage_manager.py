@@ -492,7 +492,7 @@ class StorageManager:
         # model-wide hit and the per-object-group retain set (sliding-window
         # aware). All-full-attention reduces to the contiguous leading-ones
         # prefix. Keys past the L1 hit are sent to L2.
-        if spec.policy is TrimPolicy.PREFIX:
+        elif spec.policy is TrimPolicy.PREFIX:
             return self._submit_prefix_fold(
                 spec,
                 l1_read_result,

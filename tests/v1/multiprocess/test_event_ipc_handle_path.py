@@ -13,7 +13,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import DEFAULT_ATTN_WINDOW_DESC
 from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType
 
@@ -256,7 +255,6 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         kv_layer_groups_manager=SimpleNamespace(
             num_object_groups=1,
             num_kernel_groups=1,
-            get_attn_desc=lambda: DEFAULT_ATTN_WINDOW_DESC,
         ),
         calculate_num_blocks=lambda chunk_size, group_idx: 1,
     )

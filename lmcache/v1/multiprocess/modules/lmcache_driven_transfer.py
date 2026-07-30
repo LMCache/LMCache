@@ -465,12 +465,6 @@ def transfer_kv_per_object_group(
     is_h2d = direction == lmc_ops.TransferDirection.H2D
 
     attn_desc = kv_groups_manager.get_attn_desc()
-    # TODO(sliding-window): hoist num_objects_to_skip into a parameter and let
-    # the caller pass it in. The H2D caller (retrieve) already computes the
-    # same value to slice its read-locks; recomputing here from
-    # len(memory_objs) only agrees with it because the caller pads the dropped
-    # prefix with None. If the caller stops padding, this recomputes as 0 and
-    # H2D writes the trailing window into the leading chunks' GPU blocks.
     num_objects_to_skip = 0
     if not attn_desc.is_full_attention(object_group_id) and is_h2d:
         sw_size_chunks = attn_desc.num_chunks_in_sw[object_group_id]
@@ -1280,44 +1274,21 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
             event_backend.wait_event(producer_event, cache_context.stream)
 
-            # A windowed group only retains its trailing window of chunks in
-            # L1; read-lock that same subset (matching the prefetch path and
-            # transfer_kv_per_object_group's skip). Reading the dropped prefix
-            # would hit KEY_NOT_READABLE on chunks left unlocked.
-            # TODO(sliding-window): this window-skip computation duplicates
-            # transfer_kv_per_object_group's; deduplicate by hoisting the
-            # skip into a parameter (see the TODO in that helper).
-            attn_desc = cache_context.kv_layer_groups_manager.get_attn_desc()
-
             prefetched_keys: list[ObjectKey] = []
             total_bytes = 0
             retrieve_succeeded = True
             try:
                 for obj_group_id in range(num_object_groups):
                     obj_keys = obj_keys_per_obj_group[obj_group_id]
-                    if attn_desc.is_full_attention(obj_group_id):
-                        num_skip = 0
-                    else:
-                        sw_size_chunks = attn_desc.num_chunks_in_sw[obj_group_id]
-                        num_skip = max(0, len(obj_keys) - sw_size_chunks)
-                    in_window_keys = obj_keys[num_skip:]
-
                     with self._ctx.storage_manager.read_prefetched_results(
-                        in_window_keys
-                    ) as in_window_objs:
-                        if not in_window_objs or len(in_window_objs) != len(
-                            in_window_keys
-                        ):
+                        obj_keys
+                    ) as memory_objs:
+                        if not memory_objs or len(memory_objs) != len(obj_keys):
                             logger.error("Some keys not found during retrieve!")
                             retrieve_succeeded = False
                             break
 
-                        total_bytes += sum(mo.get_size() for mo in in_window_objs)
-
-                        # Pad the dropped prefix with None: the transfer skips
-                        # it but indexes block ids by full-list position.
-                        memory_objs: list[MemoryObj | None] = [None] * num_skip
-                        memory_objs.extend(in_window_objs)
+                        total_bytes += sum(mo.get_size() for mo in memory_objs)
 
                         transfer_kv_per_object_group(
                             cache_context,
@@ -1331,7 +1302,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         # Extend only after the copy is enqueued: on exception,
                         # read_prefetched_results releases this group's locks
                         # itself, and a key must not be released twice.
-                        prefetched_keys.extend(in_window_keys)
+                        prefetched_keys.extend(obj_keys)
             except Exception:
                 logger.exception("Cannot retrieve keys due to exception")
                 retrieve_succeeded = False
@@ -1343,11 +1314,10 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         "finish_read_prefetched",
                         prefetched_keys,
                     )
-                # Windowed groups retrieve only their trailing window, so a
-                # full-key count check would undercount; retrieve_succeeded
-                # already reflects whether every group transferred.
                 num_tokens = (
-                    num_chunks * self._ctx.chunk_size if retrieve_succeeded else 0
+                    num_chunks * self._ctx.chunk_size
+                    if len(prefetched_keys) == num_chunks * num_object_groups
+                    else 0
                 )
                 self._ctx.event_bus.publish_on_stream(
                     cache_context.cupy_stream,
