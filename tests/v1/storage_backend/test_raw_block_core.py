@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 # Standard
+import dataclasses
 import stat
 import sys
 import types
@@ -305,6 +306,7 @@ def _make_fake_io_uring_core(
     use_uring_cmd: bool = False,
     max_data_transfer_size: int = 0,
     meta_checkpoint_placement_id: int | None = None,
+    fdp_slot_affinity_enabled: bool = False,
 ) -> tuple[RawBlockCore, _FakeRawDevice]:
     raw_devices: list[_FakeRawDevice] = []
 
@@ -349,6 +351,7 @@ def _make_fake_io_uring_core(
             use_uring_cmd=use_uring_cmd,
             max_data_transfer_size=max_data_transfer_size,
             meta_checkpoint_placement_id=meta_checkpoint_placement_id,
+            fdp_slot_affinity_enabled=fdp_slot_affinity_enabled,
         ),
         key_namespace="object",
     )
@@ -475,3 +478,194 @@ def test_raw_block_core_put_many_chunks_uring_cmd_with_placement_ids(
         assert placement_ids == [7, 7, 7]
     finally:
         core.close()
+
+
+def test_raw_block_core_reuses_free_slot_with_matching_placement_id(
+    tmp_path, monkeypatch
+):
+    core, _ = _make_fake_io_uring_core(
+        tmp_path,
+        monkeypatch,
+        fdp_slot_affinity_enabled=True,
+    )
+    first, second, replacement = [
+        encode_object_key(make_object_key(600 + i)) for i in range(3)
+    ]
+
+    try:
+        assert core.put_many(
+            [first, second],
+            [make_memory_obj(b"a"), make_memory_obj(b"b")],
+            placement_ids=[1, 7],
+        ).results == [True, True]
+        first_offset = core.entry_offset(first.encoded)
+        second_offset = core.entry_offset(second.encoded)
+        assert first_offset is not None
+        assert second_offset is not None
+        assert first_offset != second_offset
+
+        assert core.delete_many([first.encoded, second.encoded]) == [True, True]
+        assert core.put_many(
+            [replacement],
+            [make_memory_obj(b"c")],
+            placement_ids=[1],
+        ).results == [True]
+
+        assert core.entry_offset(replacement.encoded) == first_offset
+        status = core.report_status()
+        assert status["fdp_slot_affinity_hit_count"] == 1
+        assert status["fdp_slot_affinity_fallback_count"] == 0
+    finally:
+        core.close()
+
+
+def test_raw_block_core_falls_back_and_rebinds_slot_placement_id(tmp_path, monkeypatch):
+    core, _ = _make_fake_io_uring_core(
+        tmp_path,
+        monkeypatch,
+        fdp_slot_affinity_enabled=True,
+    )
+    first, second, fallback, replacement = [
+        encode_object_key(make_object_key(610 + i)) for i in range(4)
+    ]
+
+    try:
+        assert core.put_many(
+            [first, second],
+            [make_memory_obj(b"a"), make_memory_obj(b"b")],
+            placement_ids=[1, 7],
+        ).results == [True, True]
+        second_offset = core.entry_offset(second.encoded)
+        assert second_offset is not None
+
+        assert core.delete_many([first.encoded, second.encoded]) == [True, True]
+        assert core.put_many(
+            [fallback],
+            [make_memory_obj(b"c")],
+            placement_ids=[9],
+        ).results == [True]
+        assert core.entry_offset(fallback.encoded) == second_offset
+
+        assert core.delete_many([fallback.encoded]) == [True]
+        assert core.put_many(
+            [replacement],
+            [make_memory_obj(b"d")],
+            placement_ids=[9],
+        ).results == [True]
+        assert core.entry_offset(replacement.encoded) == second_offset
+
+        status = core.report_status()
+        assert status["fdp_slot_affinity_hit_count"] == 1
+        assert status["fdp_slot_affinity_fallback_count"] == 1
+    finally:
+        core.close()
+
+
+def test_raw_block_core_slot_affinity_none_preserves_global_lifo(tmp_path, monkeypatch):
+    core, _ = _make_fake_io_uring_core(tmp_path, monkeypatch)
+    first, second, replacement = [
+        encode_object_key(make_object_key(620 + i)) for i in range(3)
+    ]
+
+    try:
+        assert core.put_many(
+            [first, second],
+            [make_memory_obj(b"a"), make_memory_obj(b"b")],
+            placement_ids=[1, 7],
+        ).results == [True, True]
+        second_offset = core.entry_offset(second.encoded)
+        assert second_offset is not None
+
+        assert core.delete_many([first.encoded, second.encoded]) == [True, True]
+        assert core.put_many(
+            [replacement],
+            [make_memory_obj(b"c")],
+            placement_ids=[1],
+        ).results == [True]
+
+        assert core.entry_offset(replacement.encoded) == second_offset
+        status = core.report_status()
+        assert status["fdp_slot_affinity_enabled"] is False
+        assert status["fdp_slot_affinity_hit_count"] == 0
+        assert status["fdp_slot_affinity_fallback_count"] == 0
+    finally:
+        core.close()
+
+
+def test_raw_block_core_omitted_placement_clears_previous_affinity(
+    tmp_path, monkeypatch
+):
+    core, _ = _make_fake_io_uring_core(
+        tmp_path,
+        monkeypatch,
+        fdp_slot_affinity_enabled=True,
+    )
+    first, second, unplaced, replacement = [
+        encode_object_key(make_object_key(630 + i)) for i in range(4)
+    ]
+
+    try:
+        assert core.put_many(
+            [first, second],
+            [make_memory_obj(b"a"), make_memory_obj(b"b")],
+            placement_ids=[7, 1],
+        ).results == [True, True]
+        second_offset = core.entry_offset(second.encoded)
+        assert second_offset is not None
+
+        assert core.delete_many([first.encoded, second.encoded]) == [True, True]
+        assert core.put_many([unplaced], [make_memory_obj(b"c")]).results == [True]
+        assert core.entry_offset(unplaced.encoded) == second_offset
+        assert core.delete_many([unplaced.encoded]) == [True]
+
+        assert core.put_many(
+            [replacement],
+            [make_memory_obj(b"d")],
+            placement_ids=[1],
+        ).results == [True]
+        assert core.entry_offset(replacement.encoded) == second_offset
+
+        status = core.report_status()
+        assert status["fdp_slot_affinity_hit_count"] == 0
+        assert status["fdp_slot_affinity_fallback_count"] == 1
+    finally:
+        core.close()
+
+
+def test_raw_block_core_does_not_restore_slot_affinity_from_checkpoint(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    config = dataclasses.replace(
+        make_raw_block_core_config(path),
+        fdp_slot_affinity_enabled=True,
+    )
+    original = encode_object_key(make_object_key(640))
+    replacement = encode_object_key(make_object_key(641))
+
+    core = RawBlockCore(config, key_namespace="object")
+    try:
+        assert core.put_many(
+            [original],
+            [make_memory_obj(b"before-restart")],
+            placement_ids=[7],
+        ).results == [True]
+        original_offset = core.entry_offset(original.encoded)
+        assert original_offset is not None
+        core.checkpoint_now()
+    finally:
+        core.close()
+
+    recovered = RawBlockCore(config, key_namespace="object")
+    try:
+        assert recovered.delete_many([original.encoded]) == [True]
+        assert recovered.put_many(
+            [replacement],
+            [make_memory_obj(b"after-restart")],
+            placement_ids=[7],
+        ).results == [True]
+        assert recovered.entry_offset(replacement.encoded) == original_offset
+
+        status = recovered.report_status()
+        assert status["fdp_slot_affinity_hit_count"] == 0
+        assert status["fdp_slot_affinity_fallback_count"] == 1
+    finally:
+        recovered.close()

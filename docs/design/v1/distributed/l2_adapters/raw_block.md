@@ -72,6 +72,15 @@ defaulting to no directive when unset. User-facing FDP configuration rules live 
 `docs/source/mp/l2_storage/raw_block.rst`; low-level NVMe command encoding
 details live in `rust/raw_block/README.md`.
 
+When `pid_affinity` slot reuse is enabled, `RawBlockCore` tracks each free
+slot's latest placement identifier in memory and prefers a matching slot during
+reuse. If no matching slot is available, it falls back to another free slot or
+allocates a new slot.
+
+Slot affinity is not checkpointed because FDP placement assignments are
+process-local. After recovery, free slots have no recorded affinity until they
+are reused.
+
 ## Key Design Choice
 
 The implementation is split into:

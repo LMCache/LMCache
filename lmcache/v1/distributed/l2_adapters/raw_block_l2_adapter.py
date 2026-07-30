@@ -67,6 +67,14 @@ _FDP_DATA_PLACEMENT_POLICIES = frozenset(
         _FDP_DATA_PLACEMENT_POLICY_CACHE_SALT_RANK,
     }
 )
+_FDP_SLOT_REUSE_POLICY_NONE = "none"
+_FDP_SLOT_REUSE_POLICY_PID_AFFINITY = "pid_affinity"
+_FDP_SLOT_REUSE_POLICIES = frozenset(
+    {
+        _FDP_SLOT_REUSE_POLICY_NONE,
+        _FDP_SLOT_REUSE_POLICY_PID_AFFINITY,
+    }
+)
 _FDP_CACHE_SALT_BUCKET_SEPARATOR = ":"
 _FDP_CACHE_SALT_FALLBACK_BUCKET_SAMPLE_LIMIT = 64
 
@@ -151,6 +159,26 @@ def _normalize_fdp_data_placement_policy(
     return normalized
 
 
+def _normalize_fdp_slot_reuse_policy(
+    policy: Any,
+    *,
+    fdp_enabled: bool,
+) -> str:
+    """Normalize the FDP free-slot reuse policy."""
+    if policy is None or policy == "":
+        if fdp_enabled:
+            return _FDP_SLOT_REUSE_POLICY_PID_AFFINITY
+        return _FDP_SLOT_REUSE_POLICY_NONE
+
+    normalized = str(policy).lower()
+    if normalized not in _FDP_SLOT_REUSE_POLICIES:
+        allowed = ", ".join(sorted(_FDP_SLOT_REUSE_POLICIES))
+        raise ValueError(f"fdp_slot_reuse_policy must be one of: {allowed}")
+    if normalized != _FDP_SLOT_REUSE_POLICY_NONE and not fdp_enabled:
+        raise ValueError("fdp_slot_reuse_policy requires fdp_enabled=true")
+    return normalized
+
+
 def _cache_salt_to_fdp_bucket(cache_salt: str) -> str | None:
     """Return the case-insensitive FDP bucket name for a cache salt."""
     if not cache_salt or _FDP_CACHE_SALT_BUCKET_SEPARATOR not in cache_salt:
@@ -210,6 +238,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         fdp_enabled: bool = False,
         fdp_placement_ids: Optional[list[int]] = None,
         fdp_data_placement_policy: str | None = None,
+        fdp_slot_reuse_policy: str | None = None,
         meta_checkpoint_placement_id: int | None = None,
         num_store_workers: int = 2,
         num_lookup_workers: int = 1,
@@ -247,6 +276,11 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             fdp_data_placement_policy: KV data FDP placement policy. ``None``
                 defaults to ``"cache_salt_prefix"`` when FDP is enabled and
                 ``"none"`` otherwise.
+            fdp_slot_reuse_policy: Evicted-slot reuse policy. ``"pid_affinity"``
+                prefers a slot last assigned to the same placement identifier
+                before falling back to the global free-slot pool. ``None``
+                defaults to ``"pid_affinity"`` when FDP is enabled and ``"none"``
+                otherwise.
             meta_checkpoint_placement_id: Optional non-zero placement identifier
                 for metadata checkpoint writes.
             num_store_workers: Number of store worker threads.
@@ -290,6 +324,10 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         )
         self.fdp_data_placement_policy = _normalize_fdp_data_placement_policy(
             fdp_data_placement_policy,
+            fdp_enabled=self.fdp_enabled,
+        )
+        self.fdp_slot_reuse_policy = _normalize_fdp_slot_reuse_policy(
+            fdp_slot_reuse_policy,
             fdp_enabled=self.fdp_enabled,
         )
         if meta_checkpoint_placement_id is not None and (
@@ -352,6 +390,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             raise ValueError("fdp_placement_ids must be a list")
         fdp_placement_ids = raw_fdp_placement_ids if fdp_enabled else None
         fdp_data_placement_policy = d.get("fdp_data_placement_policy")
+        fdp_slot_reuse_policy = d.get("fdp_slot_reuse_policy")
 
         if block_align <= 0 or (block_align & (block_align - 1)) != 0:
             raise ValueError(f"block_align must be a power of 2, got {block_align}")
@@ -417,6 +456,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             fdp_enabled=fdp_enabled,
             fdp_placement_ids=fdp_placement_ids,
             fdp_data_placement_policy=fdp_data_placement_policy,
+            fdp_slot_reuse_policy=fdp_slot_reuse_policy,
             meta_checkpoint_placement_id=meta_checkpoint_placement_id,
             num_store_workers=worker_counts["num_store_workers"],
             num_lookup_workers=worker_counts["num_lookup_workers"],
@@ -470,6 +510,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             "- fdp_data_placement_policy (str): none, cache_salt_prefix, or "
             "cache_salt_rank; defaults to cache_salt_prefix when "
             "fdp_enabled=true\n"
+            "- fdp_slot_reuse_policy (str): none or pid_affinity; defaults to "
+            "pid_affinity when fdp_enabled=true\n"
             "- meta_checkpoint_placement_id (int): non-zero FDP placement "
             "identifier for metadata checkpoints; requires io_uring_cmd\n"
             "- num_store_workers (int): store worker threads (default 2)\n"
@@ -500,6 +542,9 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             use_uring_cmd=self.use_uring_cmd,
             max_data_transfer_size=self.max_data_transfer_size,
             meta_checkpoint_placement_id=self.meta_checkpoint_placement_id,
+            fdp_slot_affinity_enabled=(
+                self.fdp_slot_reuse_policy == _FDP_SLOT_REUSE_POLICY_PID_AFFINITY
+            ),
         )
 
 
@@ -548,6 +593,7 @@ class RawBlockL2Adapter(L2AdapterInterface):
         self._load_pool: ThreadPoolExecutor
         self._fdp_lock = threading.Lock()
         self._fdp_data_placement_policy = config.fdp_data_placement_policy
+        self._fdp_slot_reuse_policy = config.fdp_slot_reuse_policy
         self._fdp_cache_salt_bucket_placements: dict[str, int] = {}
         self._fdp_cache_salt_rank_placements: dict[str, dict[int, int]] = {}
         self._fdp_cache_salt_rank_fallback_buckets: set[str] = set()
@@ -837,6 +883,7 @@ class RawBlockL2Adapter(L2AdapterInterface):
                 "fdp_discovered_status": list(self._fdp_discovered_status),
                 "fdp_placement_ids": list(self._fdp_placement_ids),
                 "fdp_data_placement_policy": self._fdp_data_placement_policy,
+                "fdp_slot_reuse_policy": self._fdp_slot_reuse_policy,
                 "fdp_cache_salt_bucket_separator": _FDP_CACHE_SALT_BUCKET_SEPARATOR,
                 "fdp_cache_salt_bucket_placements": (fdp_cache_salt_bucket_placements),
                 "fdp_cache_salt_rank_placements": fdp_cache_salt_rank_placements,

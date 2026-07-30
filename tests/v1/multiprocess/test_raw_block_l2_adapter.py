@@ -164,6 +164,7 @@ def _make_fdp_config(
     *,
     placement_ids: list[int] | None = None,
     data_placement_policy: str | None = None,
+    slot_reuse_policy: str | None = None,
     meta_checkpoint_placement_id: int | None = None,
 ) -> RawBlockL2AdapterConfig:
     return RawBlockL2AdapterConfig(
@@ -183,6 +184,7 @@ def _make_fdp_config(
         fdp_enabled=True,
         fdp_placement_ids=placement_ids,
         fdp_data_placement_policy=data_placement_policy,
+        fdp_slot_reuse_policy=slot_reuse_policy,
         meta_checkpoint_placement_id=meta_checkpoint_placement_id,
         num_store_workers=1,
         num_lookup_workers=1,
@@ -264,6 +266,8 @@ def test_raw_block_fdp_disabled_ignores_placement_ids() -> None:
     assert config.fdp_enabled is False
     assert config.fdp_placement_ids is None
     assert config.fdp_data_placement_policy == "none"
+    assert config.fdp_slot_reuse_policy == "none"
+    assert config.to_core_config().fdp_slot_affinity_enabled is False
 
 
 def test_raw_block_fdp_data_placement_policy_requires_fdp_enabled() -> None:
@@ -279,6 +283,51 @@ def test_raw_block_fdp_data_placement_policy_requires_fdp_enabled() -> None:
 def test_raw_block_fdp_data_placement_policy_rejects_unknown_value() -> None:
     with pytest.raises(ValueError, match="fdp_data_placement_policy"):
         _make_fdp_config(data_placement_policy="bucket_shuffle")
+
+
+def test_raw_block_fdp_slot_reuse_policy_defaults_to_pid_affinity() -> None:
+    config = _make_fdp_config()
+
+    assert config.fdp_slot_reuse_policy == "pid_affinity"
+    assert config.to_core_config().fdp_slot_affinity_enabled is True
+
+
+def test_raw_block_fdp_slot_reuse_policy_can_be_disabled() -> None:
+    config = _make_fdp_config(slot_reuse_policy="none")
+
+    assert config.fdp_slot_reuse_policy == "none"
+    assert config.to_core_config().fdp_slot_affinity_enabled is False
+
+
+def test_raw_block_fdp_slot_reuse_policy_requires_fdp_enabled() -> None:
+    with pytest.raises(ValueError, match="requires fdp_enabled=true"):
+        RawBlockL2AdapterConfig(
+            device_path="/tmp/raw-block",
+            slot_bytes=RAW_BLOCK_CI_SLOT_BYTES,
+            fdp_enabled=False,
+            fdp_slot_reuse_policy="pid_affinity",
+        )
+
+
+def test_raw_block_fdp_slot_reuse_policy_rejects_unknown_value() -> None:
+    with pytest.raises(ValueError, match="fdp_slot_reuse_policy"):
+        _make_fdp_config(slot_reuse_policy="pid_strict")
+
+
+def test_raw_block_fdp_slot_reuse_policy_from_dict_reaches_core() -> None:
+    config = RawBlockL2AdapterConfig.from_dict(
+        {
+            "device_path": "/dev/ng0n1",
+            "slot_bytes": RAW_BLOCK_CI_SLOT_BYTES,
+            "io_engine": "io_uring",
+            "use_uring_cmd": True,
+            "fdp_enabled": True,
+            "fdp_slot_reuse_policy": "none",
+        }
+    )
+
+    assert config.fdp_slot_reuse_policy == "none"
+    assert config.to_core_config().fdp_slot_affinity_enabled is False
 
 
 def test_raw_block_fdp_from_dict_validates_enabled_id_elements() -> None:
@@ -311,6 +360,7 @@ def test_raw_block_fdp_status_reports_registered_nonzero_ids() -> None:
         assert status["fdp_enabled"] is True
         assert status["fdp_discovered_status"] == [(0, 10), (1, 11), (7, 17)]
         assert status["fdp_placement_ids"] == [1, 7]
+        assert status["fdp_slot_reuse_policy"] == "pid_affinity"
     finally:
         adapter.close()
 

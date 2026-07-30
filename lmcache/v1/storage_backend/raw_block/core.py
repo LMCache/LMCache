@@ -197,6 +197,7 @@ class RawBlockCoreConfig:
     iouring_queue_depth: int = DEFAULT_IOURING_QUEUE_DEPTH
     use_uring_cmd: bool = False
     meta_checkpoint_placement_id: PlacementId = None
+    fdp_slot_affinity_enabled: bool = False
 
 
 @dataclass
@@ -270,6 +271,7 @@ class RawBlockCore:
         self.io_engine = normalize_raw_block_io_engine(config.io_engine)
         self.iouring_queue_depth = int(config.iouring_queue_depth)
         self.use_uring_cmd = bool(config.use_uring_cmd)
+        self.fdp_slot_affinity_enabled = bool(config.fdp_slot_affinity_enabled)
         self.meta_checkpoint_placement_id = normalize_raw_block_placement_ids(
             [config.meta_checkpoint_placement_id],
             1,
@@ -368,7 +370,11 @@ class RawBlockCore:
         self._inflight: dict[str, _Inflight] = {}
 
         self._next_slot: int = 0
-        self._free_slots: list[int] = []
+        self._free_slots: dict[int, None] = {}
+        self._free_slots_by_placement_id: dict[int, dict[int, None]] = {}
+        self._slot_placement_ids: dict[int, int] = {}
+        self._fdp_slot_affinity_hit_count: int = 0
+        self._fdp_slot_affinity_fallback_count: int = 0
         self._max_slots: int = 0
         self._effective_capacity_bytes: int = 0
         self._data_base_offset: int = 0
@@ -738,7 +744,7 @@ class RawBlockCore:
                     continue
 
                 try:
-                    offset = self._allocate_slot_locked()
+                    offset = self._allocate_slot_locked(placement_id)
                 except RuntimeError:
                     logger.warning(
                         "RawBlockCore: no free slot available for key %s",
@@ -1019,6 +1025,11 @@ class RawBlockCore:
                 "io_engine": self.io_engine,
                 "iouring_queue_depth": self.iouring_queue_depth,
                 "use_uring_cmd": self.use_uring_cmd,
+                "fdp_slot_affinity_enabled": self.fdp_slot_affinity_enabled,
+                "fdp_slot_affinity_hit_count": (self._fdp_slot_affinity_hit_count),
+                "fdp_slot_affinity_fallback_count": (
+                    self._fdp_slot_affinity_fallback_count
+                ),
             }
 
     def close(self) -> None:
@@ -1595,14 +1606,33 @@ class RawBlockCore:
         """Convert a data-slot byte offset to its slot index."""
         return (offset - self._data_base_offset) // self.slot_bytes
 
-    def _allocate_slot_locked(self) -> int:
+    def _allocate_slot_locked(self, placement_id: PlacementId = None) -> int:
         """Allocate a slot offset while ``self._lock`` is held."""
         self._ensure_capacity_and_layout()
+
+        if self.fdp_slot_affinity_enabled and placement_id is not None:
+            affinity_slots = self._free_slots_by_placement_id.get(placement_id)
+            if affinity_slots:
+                slot, _ = affinity_slots.popitem()
+                if not affinity_slots:
+                    self._free_slots_by_placement_id.pop(placement_id, None)
+                self._free_slots.pop(slot, None)
+                self._fdp_slot_affinity_hit_count += 1
+                self._set_slot_placement_id_locked(slot, placement_id)
+                return self._slot_to_offset(slot)
+
         if self._free_slots:
-            return self._slot_to_offset(self._free_slots.pop())
+            slot, _ = self._free_slots.popitem()
+            self._remove_slot_from_affinity_pool_locked(slot)
+            if self.fdp_slot_affinity_enabled and placement_id is not None:
+                self._fdp_slot_affinity_fallback_count += 1
+            self._set_slot_placement_id_locked(slot, placement_id)
+            return self._slot_to_offset(slot)
+
         if self._next_slot < self._max_slots:
             slot = self._next_slot
             self._next_slot += 1
+            self._set_slot_placement_id_locked(slot, placement_id)
             return self._slot_to_offset(slot)
         raise RuntimeError("No free slots available")
 
@@ -1612,7 +1642,35 @@ class RawBlockCore:
             return
         if slot in self._free_slots:
             return
-        self._free_slots.append(slot)
+        self._free_slots[slot] = None
+        if not self.fdp_slot_affinity_enabled:
+            return
+        placement_id = self._slot_placement_ids.get(slot)
+        if placement_id is not None:
+            self._free_slots_by_placement_id.setdefault(placement_id, {})[slot] = None
+
+    def _remove_slot_from_affinity_pool_locked(self, slot: int) -> None:
+        """Remove an allocated slot from its PID-specific free-slot pool."""
+        placement_id = self._slot_placement_ids.get(slot)
+        if placement_id is None:
+            return
+        affinity_slots = self._free_slots_by_placement_id.get(placement_id)
+        if affinity_slots is None:
+            return
+        affinity_slots.pop(slot, None)
+        if not affinity_slots:
+            self._free_slots_by_placement_id.pop(placement_id, None)
+
+    def _set_slot_placement_id_locked(
+        self,
+        slot: int,
+        placement_id: PlacementId,
+    ) -> None:
+        """Record the latest runtime-only placement identifier for a slot."""
+        if not self.fdp_slot_affinity_enabled or placement_id is None:
+            self._slot_placement_ids.pop(slot, None)
+            return
+        self._slot_placement_ids[slot] = placement_id
 
     def _checkpoint_loop(self) -> None:
         """Periodically checkpoint dirty metadata until shutdown."""
@@ -1877,7 +1935,9 @@ class RawBlockCore:
 
         with self._lock:
             self._next_slot = next_slot
-            self._free_slots = []
+            self._free_slots = {}
+            self._free_slots_by_placement_id.clear()
+            self._slot_placement_ids.clear()
             self._index.clear()
             self._lock_refcnt.clear()
 
@@ -1936,9 +1996,9 @@ class RawBlockCore:
             # Rebuild from committed entries instead of trusting checkpoint
             # free_slots. A crash-time checkpoint can otherwise preserve a slot
             # reserved by an uncommitted in-flight write as neither used nor free.
-            self._free_slots = [
-                slot for slot in range(self._next_slot) if slot not in used_slots
-            ]
+            self._free_slots = {
+                slot: None for slot in range(self._next_slot) if slot not in used_slots
+            }
 
             self._meta_dirty_total = 0
             self._meta_persisted = 0
