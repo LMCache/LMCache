@@ -154,7 +154,7 @@ class _DynamicNixlFileStorage(_DynamicNixlStorageBackend):
 
     def get_new_object_context(
         self, key: ObjectKey, obj_size: int, create: bool
-    ) -> dict[str, str]:
+    ) -> dict[str, any]:
         # Implementation for file-based storage backend
 
         result = {}
@@ -241,17 +241,18 @@ class _DynamicNixlFileStorage(_DynamicNixlStorageBackend):
                     )
 
 class _DynamicNixlObjectStorage(_DynamicNixlStorageBackend):
-    def __init__(self):
+    def __init__(self, nixl_agent: NixlAgent):
         super().__init__()
         self.obj_size = 0
         self.dev_id = 0
+        self.nixl_agent = nixl_agent
 
     def get_mem_type(self) -> str:
         return "OBJ"
 
     def get_new_object_context(
         self, key: ObjectKey, obj_size: int, create: bool
-    ) -> dict[str, str]:
+    ) -> dict[str, any]:
         if self.obj_size < obj_size:
             self.obj_size = obj_size
         self.dev_id = self.dev_id + 1
@@ -271,7 +272,13 @@ class _DynamicNixlObjectStorage(_DynamicNixlStorageBackend):
 
     def get_object_size(self, key: ObjectKey) -> int | None:
         """Get the size of a stored object."""
-        return self.obj_size
+        object_name = _object_key_to_filename(key)
+        reg_list = [(0, 0, 0, object_name)]
+        resp = self.nixl_agent.query_memory(reg_list, "OBJ", mem_type="OBJ")
+
+        if resp and resp[0] is not None:
+            return self.obj_size
+        return None
 
     def cleanup(self) -> None:
         """Clean up any temporary or orphaned files in the backend."""
@@ -344,7 +351,9 @@ class DynamicNixlStorageAgent:
         )
 
         if backend == "OBJ":
-            self.storage_backend = _DynamicNixlObjectStorage()
+            self.storage_backend = _DynamicNixlObjectStorage(
+                self.nixl_agent
+            )
         else:
             self.storage_backend = _DynamicNixlFileStorage(
                 self.file_path, self.use_direct_io
