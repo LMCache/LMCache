@@ -215,6 +215,8 @@ steps:
               # concurrency so queued payloads do not exhaust the RPC budget;
               # the SHM matrix entry retains the regular 50-way stress load.
               export NUM_CONCURRENT="4"
+              export LIMIT="30"
+              export STORE_DRAIN_SECONDS="180"
               export LMCACHE_MQ_TIMEOUT="300"
               ;;
             shm)
