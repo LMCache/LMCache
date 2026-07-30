@@ -39,6 +39,7 @@ import zmq
 # First Party
 from lmcache import torch_dev
 from lmcache.banner import print_banner_once
+from lmcache.integration.vllm.experimental import dispatch
 from lmcache.integration.vllm.kv_cache_group_edits import (
     apply_kv_cache_group_edits,
     validate_kv_cache_groups,
@@ -62,6 +63,7 @@ try:
         LMCacheMPWorkerAdapter,
         LoadStoreOp,
         ParallelStrategy,
+        send_lmcache_request,
     )
 
     try:
@@ -666,6 +668,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             vllm_config, n_servers
         )
 
+        self.dispatcher = None
+
         if self.role == KVConnectorRole.SCHEDULER:
             # Banner from the scheduler role only, so tensor-parallel
             # deployments print it once rather than once per worker.
@@ -696,6 +700,23 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 parallel_strategy=parallel_strategy,
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
+            if self.transfer_intermediate_tensors:
+                # First Party
+                from lmcache.integration.vllm.experimental import (
+                    FeatureContext,
+                    init_dispatcher,
+                )
+                from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
+
+                ctx = FeatureContext(
+                    worker_adapter=self.worker_adapter,
+                    send_lmcache_request=send_lmcache_request,
+                )
+                requested = (
+                    {TRANSFER_QUERY} if self.transfer_intermediate_tensors else set()
+                )
+                self.dispatcher = init_dispatcher(ctx, requested)
+                self.worker_adapter.dispatcher = self.dispatcher
         else:
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
 
@@ -743,6 +764,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     def role(self) -> KVConnectorRole:
         return self._role
 
+    @property
+    def transfer_intermediate_tensors(self) -> bool:
+        cfg = self._vllm_config.kv_transfer_config
+        if cfg is None:
+            return False
+        vllm_transfer = cfg.get_from_extra_config(
+            "lmcache.mp.transfer_intermediate_tensors", False
+        )
+        return vllm_transfer
+
     # ==============================
     # Worker-side methods
     # ==============================
@@ -784,6 +815,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self.worker_adapter.register_kv_caches(
             kv_caches, engine_group_infos=engine_group_infos
         )
+        if self.dispatcher is not None:
+            dispatch(
+                self.dispatcher,
+                "register",
+                kv_caches=kv_caches,
+                kv_cache_config=kv_cache_config,
+                vllm_config=self._vllm_config,
+            )
         return
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
@@ -857,6 +896,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
         """
+        if self.dispatcher is not None:
+            dispatch(
+                self.dispatcher,
+                "save_kv_layer",
+                layer_name=layer_name,
+                metadata=self._get_connector_metadata(),
+                attn_metadata=attn_metadata,
+                **kwargs,
+            )
         return
 
     def wait_for_save(self):
@@ -881,6 +929,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             cache_salts.append(meta.cache_salt)
 
         if len(request_ids) == 0:
+            if self.dispatcher is not None:
+                dispatch(self.dispatcher, "wait_for_save", event=None)
             return
 
         event = torch_dev.Event(interprocess=True)
@@ -889,6 +939,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self.worker_adapter.batched_submit_store_requests(
             request_ids, ops, event, cache_salts=cache_salts
         )
+        if self.dispatcher is not None:
+            dispatch(self.dispatcher, "wait_for_save", event=event)
 
     # TODO: How does lmcache driven path handle preemption?
     # NOTE1: handle_preemptions is called by vllm each step regardless
