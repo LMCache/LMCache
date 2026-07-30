@@ -34,6 +34,10 @@ PickleChunk: TypeAlias = torch.Tensor | list[torch.Tensor]
 PicklePayload: TypeAlias = list[torch.Tensor] | list[list[PickleChunk]]
 
 
+class _PostPrefetchValidationError(Exception):
+    """Signal invalid prefetched data so the read context releases its locks."""
+
+
 def _dtype_to_name(dtype: torch.dtype) -> str:
     """Return a stable torch dtype name without module prefix."""
     return str(dtype).split(".")[-1]
@@ -324,7 +328,11 @@ class PickleTransferStrategy(TransferStrategy):
         obj_keys_by_group = _object_keys_bound_to_plan(
             context, transfer_plan, resolve_obj_keys, key
         )
-        payload: PicklePayload = pickle.loads(cpu_data)
+        try:
+            payload: PicklePayload = pickle.loads(cpu_data)
+        except (pickle.UnpicklingError, EOFError, ImportError, IndexError) as exc:
+            logger.warning("Rejected invalid pickle store payload: %s", exc)
+            return False
         if len(obj_keys_by_group) == 1 and not context.object_group_layout_descs:
             return self._commit_single_group_store(
                 obj_keys_by_group[0], payload, context.layout_desc
@@ -424,10 +432,10 @@ class PickleTransferStrategy(TransferStrategy):
                 read_ctx = self._storage_manager.read_prefetched_results(obj_keys)
                 with read_ctx as maybe_memory_objs:
                     if not maybe_memory_objs or len(maybe_memory_objs) != len(obj_keys):
-                        return PrepareRetrieveResponse(
-                            success=False, data=b"", context={}
+                        raise _PostPrefetchValidationError(
+                            f"prefetch count mismatch for object group "
+                            f"{object_group_id}"
                         )
-                    prefetched_keys.extend(obj_keys)
                     group_chunks: list[list[torch.Tensor]] = []
                     for memory_obj in maybe_memory_objs:
                         chunk_parts: list[torch.Tensor] = []
@@ -440,15 +448,19 @@ class PickleTransferStrategy(TransferStrategy):
                         ):
                             tensor = memory_obj.get_tensor(tensor_idx)
                             if tensor is None:
-                                return PrepareRetrieveResponse(
-                                    success=False, data=b"", context={}
+                                raise _PostPrefetchValidationError(
+                                    f"missing tensor component {tensor_idx} in "
+                                    f"object group {object_group_id}"
                                 )
                             chunk_parts.append(tensor.cpu().clone())
                         group_chunks.append(chunk_parts)
-                    chunks_by_group.append(group_chunks)
+                prefetched_keys.extend(obj_keys)
+                chunks_by_group.append(group_chunks)
             return PrepareRetrieveResponse(
                 success=True, data=pickle.dumps(chunks_by_group), context={}
             )
+        except _PostPrefetchValidationError:
+            return PrepareRetrieveResponse(success=False, data=b"", context={})
         finally:
             if prefetched_keys:
                 self._storage_manager.finish_read_prefetched(prefetched_keys)
@@ -501,18 +513,18 @@ class PickleTransferStrategy(TransferStrategy):
             read_ctx = self._storage_manager.read_prefetched_results(obj_keys)
             with read_ctx as maybe_memory_objs:
                 if not maybe_memory_objs or len(maybe_memory_objs) != len(obj_keys):
-                    return PrepareRetrieveResponse(success=False, data=b"", context={})
-                prefetched_keys = obj_keys[: len(maybe_memory_objs)]
+                    raise _PostPrefetchValidationError("prefetch count mismatch")
                 chunks: list[torch.Tensor] = []
                 for memory_obj in maybe_memory_objs:
                     if memory_obj.tensor is None:
-                        return PrepareRetrieveResponse(
-                            success=False, data=b"", context={}
-                        )
+                        raise _PostPrefetchValidationError("missing tensor component")
                     chunks.append(memory_obj.tensor.cpu().clone())
-                return PrepareRetrieveResponse(
-                    success=True, data=pickle.dumps(chunks), context={}
-                )
+            prefetched_keys = obj_keys
+            return PrepareRetrieveResponse(
+                success=True, data=pickle.dumps(chunks), context={}
+            )
+        except _PostPrefetchValidationError:
+            return PrepareRetrieveResponse(success=False, data=b"", context={})
         finally:
             if prefetched_keys:
                 self._storage_manager.finish_read_prefetched(prefetched_keys)

@@ -266,6 +266,49 @@ def test_sync_engine_driven_context_returns_resolved_future(
     ctx.close()
 
 
+def test_sync_engine_driven_context_finishes_gather_before_pickle_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pickle commit must wait until the gathered CPU buffers are complete."""
+
+    class _OrderedTorchDev:
+        def __init__(self) -> None:
+            self.synchronize_calls = 0
+            self.gather_complete = False
+
+        def synchronize(self) -> None:
+            self.synchronize_calls += 1
+            if self.synchronize_calls == 2:
+                self.gather_complete = True
+
+    fake = _OrderedTorchDev()
+    monkeypatch.setattr(worker_transfer, "torch_dev", fake)
+    _install_fake_gather(monkeypatch)
+    ctx = EngineDrivenTransferContext()
+
+    def _commit(_chunks: list[torch.Tensor]) -> bool:
+        assert fake.gather_complete
+        return True
+
+    ctx._engine_driven_context = (
+        _FakeStoreContext(commit_impl=_commit)  # type: ignore[assignment]
+    )
+
+    future = ctx.submit_store(
+        "r1",
+        object(),
+        1,
+        {"k": torch.zeros(1)},
+        [[0]],
+        _FakeEvent(threading.Event()),
+        1,
+    )
+
+    assert future.result(timeout=1) is True
+    assert fake.synchronize_calls == 2
+    ctx.close()
+
+
 def test_sync_engine_driven_context_has_no_async_resources() -> None:
     ctx = EngineDrivenTransferContext()
     assert not hasattr(ctx, "_copy_stream")

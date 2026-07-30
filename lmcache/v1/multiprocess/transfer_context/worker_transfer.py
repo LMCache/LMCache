@@ -1411,7 +1411,6 @@ class EngineDrivenTransferContext(TransferContext):
                     transfer_plan,
                     self._layout_hints,
                 )
-                used_shm = False
             else:
                 if not _is_multi_group_shm_store_preparation(result):
                     self._abort_shm_store(key, instance_id, result)
@@ -1438,16 +1437,14 @@ class EngineDrivenTransferContext(TransferContext):
                 except (RuntimeError, ValueError, TypeError, IndexError):
                     self._abort_shm_store(key, instance_id, result)
                     raise
-                used_shm = True
-        if transfer_metadata is None:
-            used_shm = out_buffers is not None
-        if used_shm:
-            # SHM path uses async device->CPU copies; complete them before commit.
-            try:
-                torch_dev.synchronize()
-            except RuntimeError:
-                self._abort_shm_store(key, instance_id, result)
-                raise
+        # gather_paged_kv_to_cpu may return before its D2H copies finish. Both
+        # pickle serialization and SHM commit consume those CPU buffers
+        # immediately, so publish only after the gather is complete.
+        try:
+            torch_dev.synchronize()
+        except RuntimeError:
+            self._abort_shm_store(key, instance_id, result)
+            raise
         ok = self._engine_driven_context.commit_store(key, instance_id, cpu_chunks)
         if not ok:
             self._abort_shm_store(key, instance_id, result)
