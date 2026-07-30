@@ -39,6 +39,7 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     DefaultStorePolicy,
     StorePolicy,
 )
+from tests.v1.distributed.utils import should_use_lazy_alloc
 
 if not torch_dev.is_available():
     pytest.skip(
@@ -66,11 +67,6 @@ def make_layout() -> MemoryLayoutDesc:
         shapes=[torch.Size([100, 2, 512])],
         dtypes=[torch.bfloat16],
     )
-
-
-def should_use_lazy_alloc() -> bool:
-    """Determine if lazy allocation should be used based on CUDA availability."""
-    return torch_dev.is_available()
 
 
 def wait_for_condition(

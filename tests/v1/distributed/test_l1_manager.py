@@ -56,6 +56,7 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
 )
 from lmcache.v1.distributed.error import L1Error
+from tests.v1.distributed.utils import should_use_lazy_alloc
 
 try:
     # First Party
@@ -71,11 +72,6 @@ if not torch_dev.is_available():
         f"Requires available {torch_device_type} runtime",
         allow_module_level=True,
     )
-
-
-def should_use_lazy_alloc() -> bool:
-    """Determine if lazy allocation should be used based on CUDA availability."""
-    return torch_dev.is_available()
 
 
 # =============================================================================

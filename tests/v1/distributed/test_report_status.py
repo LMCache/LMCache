@@ -24,6 +24,7 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2AdapterConfig,
 )
+from tests.v1.distributed.utils import should_use_lazy_alloc
 
 try:
     # First Party
@@ -38,10 +39,6 @@ if not torch_dev.is_available():
         f"Requires available {torch_device_type} runtime",
         allow_module_level=True,
     )
-
-
-def should_use_lazy_alloc() -> bool:
-    return torch_dev.is_available()
 
 
 # =============================================================================
