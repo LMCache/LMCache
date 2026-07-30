@@ -67,13 +67,29 @@ class AdmissionControlledPolicy(BaseCachePolicy[KeyType, MapType]):
     policy unchanged, and adds one new capability: `should_admit`, which
     tracks an approximate global request-frequency estimate per key and
     refuses to admit a new key unless its estimated frequency exceeds the
-    inner policy's current top eviction candidate. This targets a
-    different failure mode than eviction *ranking* does -- under
+    *coldest currently-resident key's*, by that same estimate. This
+    targets a different failure mode than eviction *ranking* does -- under
     high-fan-out, mostly-one-shot traffic, the dominant cost is admitting
     low-value entries at all, each displacing something that might have
     been reused (see
     ``docs/design/v1/storage_backend/cache_policy/admission-control-policy.md``
     for the evaluation that motivated this).
+
+    `should_admit` deliberately does **not** ask the inner policy for its
+    eviction candidate to compare against, even though that would seem
+    like the more natural "would you evict this key" question to ask.
+    `get_evict_candidates` is documented and used everywhere else in this
+    codebase as a call that's always immediately followed by actually
+    evicting the returned key(s) -- some implementations (e.g.
+    `LFUCachePolicy`) rely on that and mutate their own bookkeeping
+    (`key_to_freq`/`freq_to_keys`) as a side effect of the call itself, not
+    of a separate evict step. Calling it speculatively, as this class's
+    first version did, silently corrupts that policy's internal state
+    whenever `should_admit` decides to reject: the peeked key is purged
+    from the inner policy's bookkeeping but never actually removed from
+    `cache_dict`, so a later hit on it crashes with a `KeyError`. Comparing
+    against our own frequency sketch instead is a purely additive,
+    side-effect-free read that never touches the inner policy.
 
     Integration status: this class is a complete, correct
     ``BaseCachePolicy`` implementation usable today via
@@ -101,6 +117,7 @@ class AdmissionControlledPolicy(BaseCachePolicy[KeyType, MapType]):
             halve_every: Passed through to the internal frequency sketch.
         """
         self.inner_policy = inner_policy
+        self.halve_every = halve_every
         self._sketch = _FrequencySketch(halve_every=halve_every)
 
         logger.info(
@@ -223,17 +240,23 @@ class AdmissionControlledPolicy(BaseCachePolicy[KeyType, MapType]):
         rejected key never reaches `update_on_put_with_metadata`, the
         only other place frequency is recorded on the miss path).
 
+        Deliberately does not call `get_evict_candidates` -- see the class
+        docstring for why that would be unsafe for inner policies (e.g.
+        `LFUCachePolicy`) whose eviction-candidate lookup mutates their own
+        state as a side effect. Instead compares against the coldest
+        currently-resident key by this class's own frequency estimate.
+
         Input:
             key: an object of KeyType for the candidate new entry
             cache_dict: a dict consists of current cache
 
         Return:
-            True if there is no eviction candidate (nothing to displace),
-            or if key's estimated request frequency exceeds the inner
-            policy's top eviction candidate's; False otherwise.
+            True if `cache_dict` is empty (nothing to displace), or if
+            key's estimated request frequency exceeds the coldest
+            resident key's; False otherwise.
         """
         self._sketch.increment(key)
-        victims = self.inner_policy.get_evict_candidates(cache_dict, num_candidates=1)
-        if not victims:
+        if not cache_dict:
             return True
-        return self._sketch.estimate(key) > self._sketch.estimate(victims[0])
+        coldest_estimate = min(self._sketch.estimate(k) for k in cache_dict)
+        return self._sketch.estimate(key) > coldest_estimate

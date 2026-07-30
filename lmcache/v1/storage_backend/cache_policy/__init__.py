@@ -45,6 +45,9 @@ def get_cache_policy(
         config: Optional LMCacheEngineConfig instance.
         kwargs: Optional explicit policy parameters, forwarded to the
             (possibly inner, if admission-controlled) policy's constructor.
+            For "ADMISSION_<INNER>" names, ``halve_every`` is instead
+            forwarded to ``AdmissionControlledPolicy`` itself (the
+            frequency-sketch decay window), not to the inner policy.
 
     Returns:
         Instance of the corresponding cache policy.
@@ -59,8 +62,12 @@ def get_cache_policy(
 
     if upper_policy_name.startswith(_ADMISSION_PREFIX):
         inner_name = upper_policy_name[len(_ADMISSION_PREFIX) :]
-        inner_policy = get_cache_policy(inner_name, config=config, **kwargs)
-        return AdmissionControlledPolicy(inner_policy)
+        remaining_kwargs = dict(kwargs)
+        admission_kwargs: Dict[str, Any] = {}
+        if "halve_every" in remaining_kwargs:
+            admission_kwargs["halve_every"] = remaining_kwargs.pop("halve_every")
+        inner_policy = get_cache_policy(inner_name, config=config, **remaining_kwargs)
+        return AdmissionControlledPolicy(inner_policy, **admission_kwargs)
 
     if upper_policy_name not in POLICY_MAPPING:
         raise ValueError(

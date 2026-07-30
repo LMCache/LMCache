@@ -490,8 +490,13 @@ selectable via `get_cache_policy("ADMISSION_<INNER>")`) -- a general
 `BaseCachePolicy` wrapper, not a `COST_AWARE`-specific change, matching
 the recommendation above. See
 [`admission-control-policy.md`](admission-control-policy.md) for the
-class's design, a real bug the productionization process caught (and
-fixed) that the experiment's own simulation loop had masked, and a
-side-by-side report of both directions' outcomes. Backend wiring (making
+class's design, two real bugs the full evaluation caught and fixed (one
+a lockout bug the experiment's own simulation loop had masked, one an
+`LFUCachePolicy` state-corruption bug only found by sweeping every
+registered inner policy), a full statistical evaluation matching this
+doc's rigor (which also found a real limitation: strict tie-breaking
+causes a regression under generously-sized caches and a silent permanent
+freeze under purely one-shot traffic), and a side-by-side report of both
+directions' outcomes. Backend wiring (making
 the admission-rejection behavior affect real request handling, not just
 benchmarks) remains a deliberate, separate follow-up.

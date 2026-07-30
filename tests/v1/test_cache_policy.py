@@ -312,3 +312,13 @@ def test_get_cache_policy_admission_prefix_wraps_any_inner_policy():
     for inner_name, expected_class_name in expected_inner_class_names.items():
         policy = get_cache_policy(f"ADMISSION_{inner_name}")
         assert type(policy.inner_policy).__name__ == expected_class_name
+
+
+def test_get_cache_policy_admission_prefix_forwards_halve_every():
+    # halve_every must reach AdmissionControlledPolicy itself, not be
+    # mistaken for an inner-policy constructor kwarg (LRU takes none).
+    policy = get_cache_policy("ADMISSION_LRU", halve_every=500)
+    assert policy.halve_every == 500
+
+    default_policy = get_cache_policy("ADMISSION_LRU")
+    assert default_policy.halve_every == 20_000

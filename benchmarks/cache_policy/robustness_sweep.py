@@ -47,7 +47,7 @@ from lmcache.v1.storage_backend.cache_policy.cost_aware_policy import (
 )
 
 _MIB = 2**20
-POLICIES = ["LRU", "LFU", "FIFO", "MRU", "COST_AWARE"]
+POLICIES = ["LRU", "LFU", "FIFO", "MRU", "COST_AWARE", "ADMISSION_LRU"]
 
 
 def check_zipf_skew(cache_mib: float = 100.0) -> list:

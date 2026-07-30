@@ -29,6 +29,9 @@ for the full write-up, methodology limitations, and results.
 - `benchmarks/cache_policy/run_ablation.py` -- isolates the ideas in
   `CostAwareEvictionPolicy`'s score (EWMA cost smoothing, recency decay,
   frequency weighting).
+- `benchmarks/cache_policy/run_admission_control_ablation.py` -- isolates
+  `AdmissionControlledPolicy`'s one tunable parameter, `halve_every` (the
+  frequency sketch's decay window).
 - `benchmarks/cache_policy/robustness_sweep.py` -- checks that a policy
   change generalizes rather than just fixing one benchmark reading: a
   direct cost-density sanity check plus a Zipf-skew-strength sweep. See
@@ -221,6 +224,49 @@ python benchmarks/cache_policy/experiments/plot_comparison.py \
     --synthetic benchmarks/cache_policy/results/experiments/synthetic_comparison.json \
     --real-data benchmarks/cache_policy/results/experiments/real_data_comparison.json \
     -o benchmarks/cache_policy/results/charts/direction_comparison.png
+```
+
+## Full `AdmissionControlledPolicy` evaluation
+
+Since `AdmissionControlledPolicy` is a real, registered policy
+(`get_cache_policy("ADMISSION_<INNER>")`), the *existing* CLI-driven
+scripts above evaluate it directly -- just pass `ADMISSION_*` names, no
+new tooling needed for the synthetic sweep, robustness sweep, or
+real-data validation. Only the `halve_every` ablation needed a new small
+script, `run_admission_control_ablation.py`. See "Experiments 1-4" in
+[`admission-control-policy.md`](../../docs/design/v1/storage_backend/cache_policy/admission-control-policy.md)
+for the full results, including two real bugs this evaluation caught and
+a genuine limitation (strict tie-breaking under low eviction pressure /
+purely one-shot traffic) that the original thin verification missed.
+
+```bash
+# Synthetic sweep (reuses runner.py --sweep with an expanded --policies list)
+python -m lmcache.tools.cache_policy_bench.runner --sweep \
+    --policies LRU LFU FIFO MRU COST_AWARE ADMISSION_LRU ADMISSION_LFU ADMISSION_FIFO ADMISSION_MRU ADMISSION_COST_AWARE \
+    -o benchmarks/cache_policy/results/admission_control
+python benchmarks/cache_policy/plot_results.py \
+    -i benchmarks/cache_policy/results/admission_control/sweep_results.csv \
+    -o benchmarks/cache_policy/results/charts/admission_control
+
+# halve_every ablation (new script)
+python benchmarks/cache_policy/run_admission_control_ablation.py \
+    -o benchmarks/cache_policy/results/admission_control
+
+# Zipf-skew robustness (reuses robustness_sweep.py; ADMISSION_LRU already in its POLICIES list)
+python benchmarks/cache_policy/robustness_sweep.py \
+    -o benchmarks/cache_policy/results/admission_control
+
+# Full real-data statistical validation (reuses real_dataset_eval.py --policies)
+python benchmarks/cache_policy/real_dataset_eval.py \
+    --sharegpt-path benchmarks/multi_round_qa/ShareGPT.json \
+    --policies LRU LFU COST_AWARE ADMISSION_LRU ADMISSION_COST_AWARE \
+    --scales 500 2000 5000 --cache-sizes-mib 50 100 200 --repeats 6 \
+    -o benchmarks/cache_policy/results/admission_control/real_data
+
+# Stress tests (ADMISSION_LRU already in POLICIES lists in both files)
+LMCACHE_SHAREGPT_PATH=benchmarks/multi_round_qa/ShareGPT.json \
+    pytest tests/benchmarks/test_cache_policy_bench_real_data.py -v
+pytest tests/benchmarks/test_cache_policy_bench.py -k freeze -v
 ```
 
 ## Metrics collected

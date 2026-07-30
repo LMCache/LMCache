@@ -110,3 +110,54 @@ def test_full_sweep(tmp_path: Path):
     to_json(results, tmp_path / "sweep_results.json")
     assert (tmp_path / "sweep_results.csv").exists()
     assert (tmp_path / "sweep_results.json").exists()
+
+
+def test_admission_control_freezes_under_purely_novel_traffic():
+    """
+    Documents a real, known limitation of ``AdmissionControlledPolicy``
+    (see the "should_admit uses strict '>'" finding in
+    docs/design/v1/storage_backend/cache_policy/admission-control-policy.md):
+    under traffic where every chunk is touched exactly once and never
+    reused (``novel_long`` -- e.g. a corpus of one-shot unique documents),
+    every newcomer's freshly-incremented frequency estimate (1) never
+    *strictly* exceeds an already-resident incumbent's, so once the cache
+    fills, `should_admit` rejects everything forever: the cache freezes
+    at its first fill and stops caching entirely, silently.
+
+    This is a regression-locking test, not a "must not freeze" assertion
+    -- if a future change to the tie-breaking rule alters this behavior,
+    this test should fail and force a deliberate update to the design doc
+    rather than a silent behavior change either way.
+    """
+    requests = novel_long(500, min_tokens=2048, max_tokens=4096, chunk_size=256, seed=0)
+    cost_model = CostModel(CostModelConfig())
+    small_cache_bytes = 2 * 1024 * 1024  # far smaller than the full working set
+
+    result = run_workload(
+        "ADMISSION_LRU",
+        requests,
+        small_cache_bytes,
+        DEFAULT_KV_BYTES_PER_CHUNK,
+        cost_model,
+        workload_name="freeze_check",
+    )
+    lru_result = run_workload(
+        "LRU",
+        requests,
+        small_cache_bytes,
+        DEFAULT_KV_BYTES_PER_CHUNK,
+        cost_model,
+        workload_name="freeze_check",
+    )
+
+    assert result.eviction_count == 0, (
+        "expected AdmissionControlledPolicy to freeze (zero evictions) "
+        f"under purely novel traffic, got {result.eviction_count}"
+    )
+    assert result.extra_params.get("rejected_admissions", 0) > 0, (
+        "expected rejected admissions once the cache filled"
+    )
+    # Contrast: plain LRU (no admission gating) keeps evicting/rotating
+    # normally under the same traffic -- this is specific to admission
+    # control's tie-breaking rule, not a general property of the workload.
+    assert lru_result.eviction_count > 0
