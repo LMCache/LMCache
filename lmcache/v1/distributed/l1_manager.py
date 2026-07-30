@@ -920,5 +920,5 @@ class L1Manager:
         """Build the listener-facing metadata for one resident object."""
         return L1ObjectMeta(
             size_bytes=memory_obj.get_size(),
-            backend=self._memory_manager.get_backend(memory_obj),
+            backend=self._memory_manager.get_backend_type(memory_obj),
         )

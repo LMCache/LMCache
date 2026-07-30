@@ -34,7 +34,7 @@ class L1ManagerProtocol(Protocol):
         """Return ``(used_bytes, total_bytes)``."""
         ...
 
-    def get_backend(self, memory_obj: MemoryObj) -> L1BackendType:
+    def get_backend_type(self, memory_obj: MemoryObj) -> L1BackendType:
         """Return the storage medium backing ``memory_obj``."""
         ...
 

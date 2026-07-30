@@ -1015,8 +1015,8 @@ def test_hybrid_allocator_reports_per_object_medium(tmp_path):
         allocator.close()
 
 
-def test_hybrid_manager_get_backend_reports_per_object_medium(tmp_path):
-    """DevDaxL1MemoryManager.get_backend maps the allocator's answer onto
+def test_hybrid_manager_get_backend_type_reports_per_object_medium(tmp_path):
+    """DevDaxL1MemoryManager.get_backend_type maps the allocator's answer onto
     the L1BackendType enum for hybrid DRAM+DAX."""
     path = _make_mmap_file(tmp_path)
     config = L1MemoryManagerConfig(
@@ -1030,7 +1030,7 @@ def test_hybrid_manager_get_backend_reports_per_object_medium(tmp_path):
     try:
         err, objs = manager.allocate(_layout(4096), 4)
         assert err == L1Error.SUCCESS
-        backends = [manager.get_backend(obj) for obj in objs]
+        backends = [manager.get_backend_type(obj) for obj in objs]
         assert backends == [
             L1BackendType.DRAM,
             L1BackendType.DRAM,

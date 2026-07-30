@@ -170,9 +170,9 @@ class CacheEventSubscriber(EventSubscriber):
             EventType.L2_KEYS_STORED: self._on_l2_store,
             EventType.L2_KEYS_DELETED: self._on_l2_delete,
             EventType.L2_KEYS_ACCESSED: self._on_l2_access,
-            # Flush pump: the L1 eviction loop ticks continuously, so a
-            # buffered tail is flushed within one tick of the interval
-            # elapsing even when no cache events arrive.
+            # TODO: decouple the flush tick from the eviction loop (e.g. a
+            # bus-owned periodic hook) so cache-event freshness does not
+            # silently depend on the eviction loop's cadence.
             EventType.L1_EVICTION_LOOP_TICK: self._on_tick,
         }
 

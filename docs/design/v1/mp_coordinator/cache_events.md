@@ -82,7 +82,7 @@ listener plumbing or a dedicated flush task:
   which would duplicate those accesses). The placement-bearing events
   (stores and evictions) carry `meta: list[L1ObjectMeta]` — each
   object's `size_bytes` (`MemoryObj.get_size()`) and its
-  `L1BackendType` medium from `L1ManagerProtocol.get_backend()` (the
+  `L1BackendType` medium from `L1ManagerProtocol.get_backend_type()` (the
   Device-DAX tier resolves it per object via
   `DevDaxMemoryAllocator.is_devdax_obj`, i.e. `MemoryObj.parent()`) —
   so a hybrid DRAM+DAX L1 reports exactly where each object landed,
@@ -141,6 +141,9 @@ listener until the two streams are unified.
 - **Bus overflow drops events silently** (bounded queue, rate-limited
   warning); the resulting `seq` gap flags the instance for resync, but
   the resync backstop itself is future work.
+- **The flush pump is coupled to the eviction loop's tick** — decouple
+  it (e.g. a bus-owned periodic hook) so tail freshness does not depend
+  on that loop's cadence.
 - The legacy quota stream (`/quota/events`) can be re-based on this
   stream: route directory-applied `l2` batches into the usage/eviction
   consumers on the coordinator, then delete the `L2EventListener`

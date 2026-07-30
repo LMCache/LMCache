@@ -66,7 +66,7 @@ class DevDaxL1MemoryManager(L1MemoryManager):
         self._size_in_bytes = config.size_in_bytes
         self._align_bytes = config.align_bytes
 
-    def get_backend(self, memory_obj: MemoryObj) -> L1BackendType:
+    def get_backend_type(self, memory_obj: MemoryObj) -> L1BackendType:
         """Return the storage medium backing ``memory_obj``.
 
         Args:

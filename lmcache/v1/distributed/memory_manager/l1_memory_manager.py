@@ -145,7 +145,7 @@ class L1MemoryManager:
         self._allocator.batched_free(mem_objs)
         return L1Error.SUCCESS
 
-    def get_backend(self, memory_obj: MemoryObj) -> L1BackendType:
+    def get_backend_type(self, memory_obj: MemoryObj) -> L1BackendType:
         """Return the storage medium backing ``memory_obj``.
 
         Args:
