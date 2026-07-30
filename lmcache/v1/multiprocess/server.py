@@ -52,6 +52,8 @@ from lmcache.v1.multiprocess.engine_module import (
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
 )
+from lmcache.v1.multiprocess.modules.experimental import EXPERIMENTAL_TRANSFER
+from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
@@ -269,11 +271,35 @@ def _build_modules(
         # notify it via drop_instance_state when an instance is reaped.
         liveness_targets.append(blend_v3)
 
+    # Experimental intermediate tensor transfer modules
+    lmcache_driven_module = next(
+        (m for m in transfer_modules if isinstance(m, LMCacheDrivenTransferModule)),
+        None,
+    )
+    enabled_modules = set(mp_config.enable)
+    experimental_transfer: list[str] = []
+    experimental_modules: list[EngineModule] = []
+    for enabled_module in enabled_modules:
+        if enabled_module not in EXPERIMENTAL_TRANSFER:
+            raise ValueError(
+                f"Unknown --enable experimental module '{enabled_module}'."
+            )
+        if lmcache_driven_module is None:
+            raise ValueError(
+                f"Experimental module '{enabled_module}' requires "
+                "supported_transfer_mode='lmcache_driven' or 'auto'."
+            )
+        module = QStoreModule(ctx)
+        experimental_modules.append(module)
+        liveness_targets.append(module)
+        experimental_transfer.append(enabled_module)
+
     management = ManagementModule(
         ctx,
         liveness_targets=liveness_targets,
         worker_reap_timeout_seconds=mp_config.worker_reap_timeout_seconds,
         worker_registration_grace_seconds=mp_config.worker_registration_grace_seconds,
+        experimental_transfer=experimental_transfer,
     )
 
     # ManagementModule precedes the transfer/blend modules so close() stops
@@ -285,6 +311,7 @@ def _build_modules(
         p2p_controller,
         management,
         *transfer_modules,
+        *experimental_modules,
         *blend_modules,
     ]
 

@@ -1,21 +1,21 @@
 # Batched Stream SDK
 
-> Wrapper over the [Stream SDK](stream.md) for batching many requests
+> Wrapper over the [Request Stream SDK](request.md) for batching many requests
 
 ## Goal
 
-`LMCacheStream` drives one request. `LMCacheBatchedStream` groups many of them
-and runs each phase — prefill, modify, decode — across the whole batch at once
-(one thread per stream), then aggregates the per-stream `StreamPerfMetrics`
-into a single `Metrics` report.
+`LMCacheRequestStream` drives one request. `LMCacheBatchedStream` groups many
+of them and runs each phase — prefill, modify, decode — across the whole batch
+at once (one thread per stream), then aggregates the per-stream 
+`StreamPerfMetrics` into a single `Metrics` report.
 
 ```py
-import lmcache.sdk.stream as lmc_stream
-import lmcache.sdk.batch as lmc_batch
+import lmcache.sdk as lmc_sdk
 
-batch = lmc_batch.LMCacheBatchedStream()
+batch = lmc_sdk.batch.LMCacheBatchedStream()
 for toks in prompts:
-    batch.add(lmc_stream.create_request(ctx, post_completion, toks))
+    # contexts is an iterable, e.g. [kv_ctx] or [kv_ctx, q_ctx]
+    batch.add(lmc_sdk.request.create_request([ctx], post_completion, toks))
 
 batch.prefill({"temperature": 1.0}) # max_tokens forced to 1
 batch.modify(drop_tokens) # edit every stream's KV concurrently
@@ -33,20 +33,20 @@ The three high-level methods mirror the stream phases and each return a
 
 - **`prefill(sampling_params, fmt="terminal", width=80, stream_ids=None)`**:
   forces `max_tokens=1`, runs every stream, reports prefill metrics.
-- **`modify(fn, fmt="terminal", width=80, stream_ids=None)`**: applies
-  `fn` to every stream's KV (`modify_kv`). Only reports duration (s).
+- **`modify(fn, fmt="terminal", width=80, timeout=30.0, poll_interval=0.2)`**: applies
+  `fn` to every stream's KV (`modify_kv`), polling until done. Only reports duration (s).
 - **`decode(sampling_params, fmt="terminal", width=80, stream_ids=None)`**:
   runs every stream and reports decode metrics.
 
 Lower-level pieces:
 
-- **`add(stream)`** / **`get_stream(stream_id)`**: register / fetch a stream
-  (keyed by `stream.stream_id()`).
-- **`run_streams(sampling_params, stream_ids=None)`** returns duration (s).
-  Batches `stream.generate(sampling_params)` across thread pool and stores each
+- **`add(request_stream)`** / **`get_request_stream(stream_id)`**: register / fetch a request stream
+  (keyed by `request_stream.request_stream_id`).
+- **`run_request_streams(sampling_params, stream_ids=None)`** returns duration (s).
+  Batches `request_stream.generate(sampling_params)` across thread pool and stores each
   result in `perf_metrics`. Used by `prefill`/`decode`.
-- **`modify_stream(fn, stream_ids=None)`** returns duration (s). Batches
-  `stream.modify_kv(fn)` across thread pool.
+- **`modify_request_streams(fn, stream_ids=None, timeout=30.0, poll_interval=0.2`** returns duration
+  (s). Batches `request_stream.modify_kv(fn)` across the thread pool.
 - **`get_perf_metrics(duration, fmt, width, mode, stream_ids=None)`** returns
   the aggregated Metrics. `mode` can be `"prefill"` or `"decode"`.
 
