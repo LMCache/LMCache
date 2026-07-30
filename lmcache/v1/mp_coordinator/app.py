@@ -41,6 +41,10 @@ from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.http_apis.dependencies import CoordinatorContext
 from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry
+from lmcache.v1.mp_coordinator.shared_l1_service import (
+    read_shared_l1_authkey,
+    start_shared_l1_manager,
+)
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.utils.router_discovery import discover_api_routers
 
@@ -164,16 +168,36 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         logger.info(
             "MP coordinator listening on http://%s:%d", config.host, config.port
         )
+        shared_l1_manager = None
         try:
+            if config.shared_l1_port > 0:
+                shared_l1_manager = start_shared_l1_manager(
+                    host=config.shared_l1_host,
+                    port=config.shared_l1_port,
+                    authkey=read_shared_l1_authkey(config.shared_l1_authkey_file),
+                    region_id=config.shared_l1_region_id,
+                    capacity=config.shared_l1_capacity_bytes,
+                    alignment=config.shared_l1_alignment_bytes,
+                    layout_id=config.shared_l1_layout_id,
+                )
+                logger.info(
+                    "Shared-L1 metadata manager listening on %s:%d",
+                    config.shared_l1_host,
+                    config.shared_l1_port,
+                )
             yield
         finally:
-            for task in (health_task, eviction_task, resync_task):
-                if task is not None:
-                    task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await task
-            await eviction_manager.wait_for_in_flight_dispatches()
-            await outbound_client.aclose()
+            try:
+                for task in (health_task, eviction_task, resync_task):
+                    if task is not None:
+                        task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await task
+                await eviction_manager.wait_for_in_flight_dispatches()
+                await outbound_client.aclose()
+            finally:
+                if shared_l1_manager is not None:
+                    shared_l1_manager.shutdown()
 
     app = FastAPI(title="LMCache MP Coordinator", version="1.0.0", lifespan=lifespan)
     # The typed context carries the cache collaborators handlers compose from

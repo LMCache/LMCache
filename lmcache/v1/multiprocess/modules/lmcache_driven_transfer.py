@@ -755,6 +755,10 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         if not entries:
             return
         for entry in entries:
+            if self._ctx.storage_manager.uses_shared_l1:
+                # Every registered GPU owns a distinct transfer stream. Drain
+                # each one before shared DAX can be unregistered or unmapped.
+                entry.cache_context.stream.synchronize()
             entry.cache_context.close()
             self._ctx.layout_desc_registry.unregister(
                 entry.model_name, entry.world_size
@@ -825,14 +829,14 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
 
     def close(self) -> None:
         """Release GPU resources owned by this module."""
-        # Stop the drain thread before storage_manager.close() so any
-        # in-flight completions reach a live storage manager.
-        self._device_host_func_dispatcher.stop()
-
         with self._lock:
             entries = list(self._cache_contexts.values())
             self._cache_contexts.clear()
+        # Synchronize every shared-DAX transfer stream while the completion
+        # dispatcher is still live, then perform its final drain before
+        # storage_manager.close() can unpin or unmap the region.
         self._release_entries(entries)
+        self._device_host_func_dispatcher.stop()
 
     def register_kv_cache(
         self,
@@ -1103,17 +1107,45 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             except Exception:
                 logger.exception("Cannot store keys due to exception")
             finally:
-                event_backend.record_event(event, cache_context.stream)
                 # Fail closed: commit the reserved objects only when every chunk
                 # copied successfully; otherwise the whole store is skipped.
                 stored_count = len(all_dict) if store_succeeded else 0
-                if stored_count:
+                uses_shared_l1 = self._ctx.storage_manager.uses_shared_l1
+                if stored_count and uses_shared_l1:
+                    # A shared object must not become observable until all D2H
+                    # writes are complete and the exact mapped range has been
+                    # published. The normal host callback is intentionally
+                    # asynchronous to the returned event, so use a synchronous
+                    # completion boundary for this minimal functional path.
+                    try:
+                        event_backend.record_event(event, cache_context.stream)
+                        event_backend.synchronize_event(
+                            event,
+                            cache_context.device,
+                        )
+                        self._ctx.storage_manager.finish_write(list(all_dict.keys()))
+                    except Exception:
+                        logger.exception(
+                            "Cannot publish shared-L1 keys after D2H completion"
+                        )
+                        store_succeeded = False
+                        stored_count = 0
+                else:
+                    event_backend.record_event(event, cache_context.stream)
+                if uses_shared_l1 and not stored_count and all_dict:
+                    try:
+                        self._ctx.storage_manager.abort_write(list(all_dict.keys()))
+                    except Exception:
+                        logger.exception(
+                            "Cannot abort shared-L1 reservations after failed store"
+                        )
+                if stored_count and not uses_shared_l1:
                     submit_callback_to_stream(
                         cache_context.cupy_stream,
                         "finish_write",
                         list(all_dict.keys()),
                     )
-                else:
+                if not stored_count:
                     total_bytes = 0
                 num_tokens = num_chunks * self._ctx.chunk_size if stored_count else 0
                 self._ctx.event_bus.publish_on_stream(
