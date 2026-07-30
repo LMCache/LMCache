@@ -17,9 +17,6 @@ if not torch_dev.is_available():
         allow_module_level=True,
     )
 
-# CacheGen tests apply to accelerator backends (CUDA/XPU).
-pytestmark = [pytest.mark.gpu, pytest.mark.xpu]
-
 
 def generate_kv_cache(num_tokens, device):
     ret = []

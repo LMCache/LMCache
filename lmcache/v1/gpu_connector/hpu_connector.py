@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # Standard
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 # Third Party
 import habana_frameworks.torch as htorch
@@ -37,7 +37,10 @@ from lmcache.v1.gpu_connector.utils import (
     normalize_kv_and_discover_format,
 )
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-from lmcache.v1.metadata import LMCacheMetadata
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 
@@ -64,7 +67,7 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
     @classmethod
     def from_metadata(
         cls,
-        metadata: LMCacheMetadata,
+        metadata: "LMCacheMetadata",
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
     ) -> "VLLMPagedMemHPUConnectorV2":
