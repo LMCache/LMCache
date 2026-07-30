@@ -4,6 +4,7 @@
 #include <cerrno>
 #include <stdexcept>
 #include <string_view>
+#include <system_error>
 
 namespace lmcache {
 namespace connector {
@@ -15,7 +16,8 @@ void WorkerConn::connect(const std::string& h, int p) {
   // 1. create socket
   fd = socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0) {
-    throw std::runtime_error("failed to create socket");
+    throw std::runtime_error("failed to create socket: " +
+                             std::system_category().message(errno));
   }
 
   // 2. resolve host
@@ -34,9 +36,12 @@ void WorkerConn::connect(const std::string& h, int p) {
 
   // 3. connect to host
   if (::connect(fd, result->ai_addr, result->ai_addrlen) < 0) {
+    // capture errno before freeaddrinfo/close can overwrite it
+    const int connect_errno = errno;
     freeaddrinfo(result);
     ::close(fd);
-    throw std::runtime_error("connection failed");
+    throw std::runtime_error("connection failed: " +
+                             std::system_category().message(connect_errno));
   }
 
   freeaddrinfo(result);
@@ -52,7 +57,8 @@ void WorkerConn::send_all(const void* data, size_t len) {
       if (errno == EINTR) {
         continue;  // retry on EINTR
       }
-      throw std::runtime_error("socket send failed");
+      throw std::runtime_error("socket send failed: " +
+                               std::system_category().message(errno));
     }
     if (n == 0) {
       throw std::runtime_error("socket send failed: connection closed");
@@ -86,7 +92,8 @@ void WorkerConn::send_multipart(
       if (errno == EINTR) {
         continue;
       }
-      throw std::runtime_error("socket writev failed");
+      throw std::runtime_error("socket writev failed: " +
+                               std::system_category().message(errno));
     }
     if (n == 0) {
       throw std::runtime_error("socket writev failed: connection closed");
@@ -119,7 +126,8 @@ void WorkerConn::recv_exactly(void* buf, size_t len) {
       if (errno == EINTR) {
         continue;
       }
-      throw std::runtime_error("socket recv failed");
+      throw std::runtime_error("socket recv failed: " +
+                               std::system_category().message(errno));
     }
     if (n == 0) {
       throw std::runtime_error("socket recv failed: connection closed");
