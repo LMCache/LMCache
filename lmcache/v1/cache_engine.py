@@ -13,7 +13,9 @@ from typing import (
 )
 import asyncio
 import gc
+import logging
 import multiprocessing
+import os
 import time
 
 # Third Party
@@ -667,11 +669,24 @@ class LMCacheEngine:
             # Transpose the keys into layer major format
             keys_layer_major = [list(row) for row in zip(*keys, strict=False)]
 
-            # get_generator = self.storage_manager.layerwise_batched_get(
-            #     keys_layer_major,
-            #     location=location,
-            # )
-            get_generator = self.storage_manager.layerwise_batched_get_sync(keys_layer_major)
+            # Fix A (LMCACHE_ASYNC_LAYER_FETCH=1): use the NON-BLOCKING layerwise
+            # loader so layer L+1's fetch is issued to the background async event
+            # loop while layer L is still being copied to the GPU. Because the N
+            # per-request retrieve_layer generators are stepped in lockstep by the
+            # deferred blend driver, their loads are all submitted to that shared
+            # loop and overlap across requests too (this is the practical Fix B2 —
+            # cross-request concurrency — without a coalesced multi-request call).
+            # Falls back to the blocking loader if the async serializer isn't wired
+            # (post_init only builds it when use_layerwise/async), so a misconfig
+            # degrades silently to today's behaviour rather than crashing.
+            _use_async_fetch = (
+                os.environ.get("LMCACHE_ASYNC_LAYER_FETCH", "0") == "1"
+                and getattr(self.storage_manager, "async_serializer", None) is not None
+            )
+            if _use_async_fetch:
+                get_generator = self.storage_manager.layerwise_batched_get(keys_layer_major)
+            else:
+                get_generator = self.storage_manager.layerwise_batched_get_sync(keys_layer_major)
 
             assert isinstance(
                 self.gpu_connector,
@@ -685,10 +700,22 @@ class LMCacheEngine:
             next(mem_obj_consumer)
 
             to_count_down = []
+            # Per-layer load timing costs a BLOCKING layer_end_event.synchronize()
+            # on every one of the num_layers sends (see _send_layer below), which
+            # stops layer L+1's copy from being enqueued while L is still in
+            # flight -- i.e. it serialises the whole fetch phase. Its only consumer
+            # is a logger.debug() line that is not emitted at INFO, so keep it OFF
+            # by default. Set LMCACHE_LAYER_LOAD_TIMING=1 (or enable DEBUG logging)
+            # to restore the old always-sync behaviour, which is what the A/B
+            # control run needs.
             per_layer_timing = (
                 torch.cuda.is_available()
                 and self.gpu_connector is not None
                 and hasattr(self.gpu_connector, "load_stream")
+                and (
+                    logger.isEnabledFor(logging.DEBUG)
+                    or os.environ.get("LMCACHE_LAYER_LOAD_TIMING", "0") == "1"
+                )
             )
             load_stream = (
                 self.gpu_connector.load_stream
@@ -696,19 +723,10 @@ class LMCacheEngine:
                 else torch.cuda.current_stream()
             )
 
-            for layer_id in range(self.num_layers):
-                task = next(get_generator)
-
-                assert task is not None
-
-                if layer_id == 0:
-                    # NOTE(Yuwei): For sglang integration we need to provide retrieved
-                    # tokens number in the first layer loading since there is no lookup
-                    yield torch.sum(ret_mask)
-                else:
-                    yield None
-
-                mem_objs_layer = task
+            # Send one layer's KV to the GPU (with optional per-layer timing).
+            # Shared by the sync and async-prefetch loops below so the send/timing
+            # logic stays identical between them.
+            def _send_layer(layer_id, mem_objs_layer):
                 if per_layer_timing:
                     layer_start_event = torch.cuda.Event(enable_timing=True)
                     layer_end_event = torch.cuda.Event(enable_timing=True)
@@ -741,7 +759,48 @@ class LMCacheEngine:
                     )
                 else:
                     mem_obj_consumer.send(mem_objs_layer)
-                to_count_down.extend(mem_objs_layer)
+
+            if _use_async_fetch:
+                # Fix A: one-ahead prefetch. `layerwise_batched_get` yields a
+                # concurrent.futures.Future per layer (the load runs on the shared
+                # background event loop). Hold the NEXT layer's in-flight future
+                # while resolving+sending the CURRENT layer, so the fetch of L+1
+                # overlaps the GPU copy of L. next()-count and yield-count are
+                # IDENTICAL to the sync loop (num_layers each) so wait_for_layer_load
+                # cadence is unchanged.
+                pending = next(get_generator)
+                for layer_id in range(self.num_layers):
+                    cur = pending
+                    assert cur is not None
+                    # issue the next layer's fetch before we block on the current
+                    pending = (
+                        next(get_generator)
+                        if layer_id < self.num_layers - 1
+                        else None
+                    )
+                    if layer_id == 0:
+                        yield torch.sum(ret_mask)
+                    else:
+                        yield None
+                    mem_objs_layer = cur.result()  # Future -> resolved mem_objs
+                    _send_layer(layer_id, mem_objs_layer)
+                    to_count_down.extend(mem_objs_layer)
+            else:
+                for layer_id in range(self.num_layers):
+                    task = next(get_generator)
+
+                    assert task is not None
+
+                    if layer_id == 0:
+                        # NOTE(Yuwei): For sglang integration we need to provide retrieved
+                        # tokens number in the first layer loading since there is no lookup
+                        yield torch.sum(ret_mask)
+                    else:
+                        yield None
+
+                    mem_objs_layer = task
+                    _send_layer(layer_id, mem_objs_layer)
+                    to_count_down.extend(mem_objs_layer)
 
             for mem_obj in to_count_down:
                 if mem_obj is not None:
@@ -774,6 +833,268 @@ class LMCacheEngine:
         )
 
         yield ret_mask
+
+    # ------------------------------------------------------------------
+    # B1: coalesced multi-request layerwise fetch (LMCACHE_COALESCED_FETCH=1,
+    # default OFF). Correctness gated (jobs 15005761 + 15005982); measured
+    # no latency benefit at N=8 (see BLEND_OPT_IMPLEMENTATION.md).
+    # ------------------------------------------------------------------
+    @_lmcache_nvtx_annotate
+    @torch.inference_mode()
+    def retrieve_layer_multi(
+        self,
+        tokens_list: List[Union[torch.Tensor, list]],
+        masks_list: List[Optional[torch.Tensor]],
+        slot_mappings: List[torch.Tensor],
+        **kwargs,
+    ) -> Generator[Optional[List[torch.Tensor]], None, None]:
+        """
+        Multi-request counterpart of `retrieve_layer`. Gathers every request's
+        keys and issues ONE `layerwise_batched_get_sync` call, driving ONE
+        `batched_to_gpu_multi` connector generator instead of N per-request
+        `batched_to_gpu` generators -- collapsing `fetch_syncs = num_layers *
+        N` to `num_layers` (see `gpu_connector.py` `_coalesced_layout` /
+        `batched_to_gpu_multi`).
+
+        `tokens_list[r]` / `masks_list[r]` / `slot_mappings[r]` are request
+        r's own tokens / mask / slot mapping -- exactly what a lone
+        `retrieve_layer` call would receive as `tokens` / `mask` /
+        `kwargs["slot_mapping"]`. `kwargs` (e.g. `kvcaches`) is shared across
+        all requests. Every request must contribute at least one retrievable
+        chunk -- callers (the adapter) must apply the existing per-request
+        gates (e.g. `_bail` in `_batched_blend_load_kv`) BEFORE calling this,
+        exactly as they do today before the per-request `retrieve_layer` loop;
+        this generator has no per-request fallback path once it starts.
+
+        Yields `num_layers + 2` times total (NOT once per request) -- the
+        whole point is replacing N generators that each yield `num_layers + 2`
+        times with ONE generator yielding `num_layers + 2` times overall. The
+        first layer's yield carries a list of per-request retrieved-token
+        counts (mirroring `retrieve_layer`'s single count); the final yield
+        carries a list of per-request `ret_mask` tensors, one per request in
+        `tokens_list` order -- what N separate `retrieve_layer` calls would
+        each have produced.
+
+        Only wraps `layerwise_batched_get_sync` (Fix A's async loader was
+        found to be a dead end -- see BLEND_OPT_IMPLEMENTATION.md -- so B1
+        does not carry that complexity forward).
+        """
+        assert self.gpu_connector is not None, (
+            "gpu_connector is required for retrieve_layer_multi operation"
+        )
+        assert isinstance(self.gpu_connector, VLLMBufferLayerwiseGPUConnector), (
+            "retrieve_layer_multi requires VLLMBufferLayerwiseGPUConnector "
+            "(the coalesced buffer layout is specific to it)."
+        )
+        n_reqs = len(tokens_list)
+        assert n_reqs > 0, "retrieve_layer_multi requires at least one request."
+        assert n_reqs == len(masks_list) == len(slot_mappings), (
+            "retrieve_layer_multi: tokens_list/masks_list/slot_mappings must "
+            "be parallel lists, one entry per request."
+        )
+
+        gpu_start_event = None
+        gpu_end_event = None
+        timing_stream = None
+        if torch.cuda.is_available():
+            gpu_start_event = torch.cuda.Event(enable_timing=True)
+            gpu_end_event = torch.cuda.Event(enable_timing=True)
+            timing_stream = self.gpu_connector.load_stream
+            gpu_start_event.record(timing_stream)
+
+        request_configs = kwargs.get("request_configs")
+        if request_configs is not None and len(request_configs) != 0:
+            assert isinstance(request_configs, dict)
+
+        ret_masks = [
+            torch.zeros(len(tokens), dtype=torch.bool, device="cpu")
+            for tokens in tokens_list
+        ]
+
+        req_starts: List[List[int]] = []
+        req_ends: List[List[int]] = []
+        keys_layer_major_per_request: List[List[List[CacheEngineKey]]] = []
+        num_required_tokens_total = 0
+
+        for r in range(n_reqs):
+            tokens = tokens_list[r]
+            mask = masks_list[r]
+            if mask is not None:
+                num_required_tokens_total += torch.sum(mask).item()
+            else:
+                num_required_tokens_total += len(tokens)
+
+            starts: List[int] = []
+            ends: List[int] = []
+            keys: List[List[CacheEngineKey]] = []
+            location = None
+            for start, end, key in self.token_database.process_tokens(
+                tokens=tokens,
+                mask=mask,
+                request_configs=request_configs,
+            ):
+                assert isinstance(key, CacheEngineKey)
+
+                keys_multi_layer = key.split_layers(self.num_layers)
+
+                # Same "all layers same location" invariant as retrieve_layer.
+                current_location = None
+                all_layers_found = True
+                for key_single_layer in keys_multi_layer:
+                    found_location = self.storage_manager.contains(key_single_layer)
+                    if not found_location:
+                        all_layers_found = False
+                        break
+                    if current_location is None:
+                        current_location = found_location
+                    elif current_location != found_location:
+                        all_layers_found = False
+                        break
+                if not all_layers_found or current_location is None:
+                    break
+                if location is None:
+                    location = current_location
+                else:
+                    assert location == current_location, (
+                        "All retrieved keys should be from the same location "
+                        "when use layerwise retrieval."
+                        "Please support multi-location retrieval in the future."
+                    )
+
+                starts.append(start)
+                ends.append(end)
+                keys.append(keys_multi_layer)
+
+                ret_masks[r][start:end] = True
+
+            assert starts, (
+                f"retrieve_layer_multi: request {r} contributed zero "
+                "retrievable chunks -- caller must filter these out (via the "
+                "existing per-request gates) before coalescing."
+            )
+
+            req_starts.append(starts)
+            req_ends.append(ends)
+            keys_layer_major_per_request.append(
+                [list(row) for row in zip(*keys, strict=False)]
+            )
+
+        monitor_req_id = self.stats_monitor.on_retrieve_request(
+            num_required_tokens_total
+        )
+
+        # Flatten per-request per-layer keys into one list per layer, in
+        # EXACTLY the order `_coalesced_layout` uses for `chunk_slices`
+        # (request-major, then chunk order within a request) --
+        # `layerwise_batched_get_sync` returns one memory object per key, in
+        # the same order as the keys given for that layer.
+        keys_layer_major_all: List[List[CacheEngineKey]] = [
+            [
+                key
+                for per_request in keys_layer_major_per_request
+                for key in per_request[layer_id]
+            ]
+            for layer_id in range(self.num_layers)
+        ]
+
+        get_generator = self.storage_manager.layerwise_batched_get_sync(
+            keys_layer_major_all
+        )
+
+        mem_obj_consumer = self.gpu_connector.batched_to_gpu_multi(
+            req_starts, req_ends, slot_mappings, **kwargs
+        )
+        next(mem_obj_consumer)
+
+        # Same D-controlled per-layer timing sync as retrieve_layer, kept
+        # symmetric so a coalesced-vs-baseline comparison isn't confounded by
+        # a NEW timing asymmetry (this project has been bitten by exactly that
+        # shape of bug three times already -- see BLEND_OPT_IMPLEMENTATION.md).
+        per_layer_timing = (
+            torch.cuda.is_available()
+            and hasattr(self.gpu_connector, "load_stream")
+            and (
+                logger.isEnabledFor(logging.DEBUG)
+                or os.environ.get("LMCACHE_LAYER_LOAD_TIMING", "0") == "1"
+            )
+        )
+        load_stream = (
+            self.gpu_connector.load_stream
+            if per_layer_timing
+            else torch.cuda.current_stream()
+        )
+
+        to_count_down = []
+        for layer_id in range(self.num_layers):
+            task = next(get_generator)
+            assert task is not None
+
+            if layer_id == 0:
+                yield [torch.sum(m) for m in ret_masks]
+            else:
+                yield None
+
+            mem_objs_layer = task
+            if per_layer_timing:
+                layer_start_event = torch.cuda.Event(enable_timing=True)
+                layer_end_event = torch.cuda.Event(enable_timing=True)
+                layer_start_event.record(load_stream)
+                mem_obj_consumer.send(mem_objs_layer)
+                layer_end_event.record(load_stream)
+                layer_end_event.synchronize()
+                layer_elapsed_ms = layer_start_event.elapsed_time(layer_end_event)
+                logger.debug(
+                    "Layer %d load-to-gpu (coalesced, %d reqs) cost %.3f ms",
+                    layer_id, n_reqs, layer_elapsed_ms,
+                )
+            else:
+                mem_obj_consumer.send(mem_objs_layer)
+            to_count_down.extend(mem_objs_layer)
+
+        for mem_obj in to_count_down:
+            if mem_obj is not None:
+                mem_obj.ref_count_down()
+
+        # Per-request gap positions, sliced back out of the coalesced tensor
+        # into each request's own local coordinates -- mirrors what a lone
+        # `retrieve_layer` call would leave on `current_gap_positions` for
+        # ITS request. `_compute_hit_indices` (blender.py) reads that
+        # attribute per request, so the adapter swaps this list in, one
+        # entry at a time, before selecting each request. Recomputing
+        # `_coalesced_layout` here is cheap (pure index arithmetic, no CUDA)
+        # and avoids plumbing `segments` out of `batched_to_gpu_multi` itself.
+        _, segments, _, _ = VLLMBufferLayerwiseGPUConnector._coalesced_layout(
+            req_starts, req_ends
+        )
+        coalesced_gaps = self.gpu_connector.current_gap_positions
+        per_request_gaps = []
+        for buf_off, _src_start, n_r in segments:
+            local = coalesced_gaps[
+                (coalesced_gaps >= buf_off) & (coalesced_gaps < buf_off + n_r)
+            ] - buf_off
+            per_request_gaps.append(local)
+        self.gpu_connector.current_gap_positions_per_request = per_request_gaps
+
+        yield None
+
+        # synchronize the last layer
+        next(mem_obj_consumer)
+
+        total_retrieved = sum(int(torch.sum(m)) for m in ret_masks)
+        self.stats_monitor.on_retrieve_finished(monitor_req_id, total_retrieved)
+        elapsed_ms = None
+        if gpu_start_event is not None and gpu_end_event is not None:
+            assert timing_stream is not None
+            gpu_end_event.record(timing_stream)
+            gpu_end_event.synchronize()
+            elapsed_ms = gpu_start_event.elapsed_time(gpu_end_event)
+        logger.info(
+            f"retrieve_layer_multi: retrieved {total_retrieved} "
+            f"out of {num_required_tokens_total} tokens across {n_reqs} "
+            f"requests. gpu cost {elapsed_ms:.3f} ms"
+        )
+
+        yield ret_masks
 
     @_lmcache_nvtx_annotate
     def lookup(

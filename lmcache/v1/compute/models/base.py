@@ -383,20 +383,33 @@ class LMCBaseModel(nn.Module, ABC):
 
         for layer_idx, layer in enumerate(self.layers[self.start_layer:self.end_layer]):
             global_layer = self.start_layer + layer_idx
+            # NVTX only -- no CUDA events / no torch.cuda.synchronize() here, so
+            # (unlike LMCACHE_LAYER_LOAD_TIMING on the fetch side) this cannot
+            # reintroduce a per-layer device sync. push/pop are non-blocking
+            # markers nsys reads off the existing timeline; safe to leave in
+            # unconditionally, matching how _lmcache_nvtx_annotate is already
+            # applied unconditionally elsewhere (utils.py).
+            torch.cuda.nvtx.range_push(f"recompute_layer_{global_layer}")
 
+            torch.cuda.nvtx.range_push("ln1")
             if residual is None:
                 residual = hidden_states
                 hidden_states = layer.input_layernorm(hidden_states)
             else:
                 hidden_states, residual = layer.input_layernorm(hidden_states, residual)
+            torch.cuda.nvtx.range_pop()
 
+            torch.cuda.nvtx.range_push("qkv_proj")
             q, k, v = self._project_qkv(layer, hidden_states)
             q, k, v = self._process_qkv(q, k, v, layer)
+            torch.cuda.nvtx.range_pop()
 
             # Blender owns RoPE + per-request KV gather/scatter/concat.
+            torch.cuda.nvtx.range_push("rope_gather_scatter")
             q, old_k, old_v, attn_metadata = self.blender.process_qkv_batched(
                 q, k, v, global_layer, req_meta, kvcaches, cu_q,
             )
+            torch.cuda.nvtx.range_pop()
 
             attn_core = self.vllm_attn_layers[global_layer]
             num_heads = _pick(attn_core, "num_heads")
@@ -408,16 +421,21 @@ class LMCBaseModel(nn.Module, ABC):
             old_v = old_v.view(-1, num_kv_heads, head_size)
             attn_output = torch.zeros_like(q)
 
+            torch.cuda.nvtx.range_push("attention")
             attn_output = self.lmc_attn_layers[global_layer].forward_contiguous(
                 q, old_k, old_v, attn_output, attn_metadata
             )
+            torch.cuda.nvtx.range_pop()
             attn_output = attn_output.view(-1, num_heads * head_size)
 
+            torch.cuda.nvtx.range_push("post_attn")
             hidden_states, _ = layer.self_attn.o_proj(attn_output)
             hidden_states, residual = layer.post_attention_layernorm(
                 hidden_states, residual
             )
+            torch.cuda.nvtx.range_pop()
 
+            torch.cuda.nvtx.range_push("ffn")
             skip_ffn = bool(getattr(self.blender, "skip_ffn", False))
             if skip_ffn and bool(getattr(self.blender, "skip_ffn_only_codecsight", True)):
                 skip_ffn = getattr(self.blender, "blend_mode", "") in ("codecsight",)
@@ -425,5 +443,7 @@ class LMCBaseModel(nn.Module, ABC):
                 hidden_states = torch.zeros_like(hidden_states)
             else:
                 hidden_states = layer.mlp(hidden_states)
+            torch.cuda.nvtx.range_pop()
 
+            torch.cuda.nvtx.range_pop()  # recompute_layer_{global_layer}
             yield

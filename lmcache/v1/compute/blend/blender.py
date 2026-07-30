@@ -848,7 +848,8 @@ class LMCBlender:
         )
         return q, packed_old_k, packed_old_v, attn_metadata
 
-    def blend_batched(self, requests: list, kvcaches):
+    def blend_batched(self, requests: list, kvcaches, fetch_gens=None,
+                      defer=False):
         """Orchestrate batched selective recompute for N requests in one forward.
 
         `requests`: list of per-request dicts, each with:
@@ -856,13 +857,24 @@ class LMCBlender:
           - 'positions':      anchor RoPE positions, [A] or [3, A]
           - 'slot_full':       paged-cache flat slots for all S cached tokens, [S]
           - 'anchor_local':    anchor indices within 0..S, [A]
-        Phase-1 (load + RoPE-correct each request's full cached KV into the paged
-        cache) must already have run -- this drives only the packed recompute.
-        Drains the compute fully (eager); returns None.
+
+        Eager (defer=False): Phase-1 (load + RoPE-correct each request's full
+        cached KV into the paged cache) must already have run -- this drives only
+        the packed recompute to completion and returns None.
+
+        Deferred (defer=True, Tier-2 Level-2): `fetch_gens` are the per-request
+        retrieve_layer generators, each already primed ONCE (warmup -> gap
+        positions set + layer-0 loaded, not yet sent). Returns a generator that
+        `wait_for_layer_load` steps once per decoder layer: each step sends the
+        current layer's KV for every request then recomputes that layer's packed
+        anchors. Cadence mirrors ``blend_layer``: one post-warmup yield, then one
+        yield per layer, then a final fetch-drain yield (num_layers + 2 yields,
+        matching the 2x prime + num_layers wait_for_layer_load calls).
         """
-        logger.info("blend_batched: packing %d request(s), total anchors=%d",
+        logger.info("blend_batched: packing %d request(s), total anchors=%d%s",
                     len(requests),
-                    sum(int(r["anchor_local"].numel()) for r in requests))
+                    sum(int(r["anchor_local"].numel()) for r in requests),
+                    " [deferred/overlap]" if defer else "")
         packed_embeds = torch.cat([r["anchor_embeds"] for r in requests], dim=0)
         req_meta = [
             {"positions": r["positions"],
@@ -873,9 +885,62 @@ class LMCBlender:
         gen = self.layerwise_model.compute_layer_batched(
             packed_embeds, req_meta, kvcaches,
         )
-        for _ in range(self.num_layers):
-            next(gen)
-        return None
+        if not defer:
+            for _ in range(self.num_layers):
+                next(gen)
+            return None
+
+        num_layers = self.num_layers
+        fetch_gens = list(fetch_gens or [])
+
+        # PHASE FIX (2026-07-27, LMCACHE_DEFER_PHASE_FIX=0 restores the old, WRONG
+        # phasing for A/B). The old driver was OFF BY ONE against the connector's
+        # 3-stage pipeline and that is why the deferred path produced different
+        # output from eager (7/18 keys, 0.45-1.81 nats, one answer flip; jobs
+        # 15001729 / 15002005 / 15002109 / 15002110 / 15002139 -- the last of those
+        # ran the deferred CODE with EAGER TIMING and still failed, proving the bug
+        # is here and not in the interleaving).
+        #
+        # Why off by one: gpu_connector.batched_to_gpu stores layer i-2 at iteration
+        # i (`single_layer_kv_transfer(buffer_mapping[i-2] -> kvcaches[i-2])`), and
+        # retrieve_layer yields BEFORE _send_layer. So the fetch gen's (L+2)th next
+        # performs send(L), after which the PAGED cache holds only layers 0..L-1.
+        # The old loop then recomputed layer L against a layer that had not been
+        # written yet. Eager never hit this because it drains every layer before
+        # blend_batched runs.
+        #
+        # Fix = re-phase, not extra work: advance the fetch gens ONE extra time
+        # before the loop and drop the trailing drain. Totals are unchanged --
+        # fetch gens still get 1 (caller warmup) + 1 + num_layers = num_layers + 2
+        # nexts, and the driver still yields num_layers + 2 times, so
+        # wait_for_layer_load's cadence is untouched. Now at loop step L the gens
+        # have had L+3 nexts -> send(L+1) done -> paged holds 0..L -> the recompute
+        # of layer L reads a layer that is actually there.
+        _phase_fix = os.environ.get("LMCACHE_DEFER_PHASE_FIX", "1") == "1"
+
+        def _driver():
+            # Post-warmup handshake (mirrors blend_layer's first yield). Fetches
+            # are already warmed up by the caller; nothing to send yet.
+            yield
+            if _phase_fix:
+                # Extra prime: push the store stage one layer ahead of the recompute.
+                for fg in fetch_gens:
+                    next(fg)
+            for _ in range(num_layers):
+                for fg in fetch_gens:
+                    next(fg)
+                next(gen)
+                yield
+            if not _phase_fix:
+                # Old trailing drain (each gen's (num_layers+2)th next).
+                for fg in fetch_gens:
+                    next(fg)
+            yield
+
+        d = _driver()
+        next(d)  # prime 1: advance past the post-warmup handshake
+        next(d)  # prime 2: run layer 0 (stay one layer ahead of prefill)
+        return d
 
     # NOTE(Jiayi): Exposing this `blend_layer` interface as we might
     # want to orchestrate the blending process elsewhere

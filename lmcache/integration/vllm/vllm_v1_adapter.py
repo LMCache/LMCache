@@ -708,6 +708,75 @@ class LMCacheConnectorV1Impl:
         self._batched_blend = (
             os.environ.get("LMCACHE_BATCHED_BLEND", "0") == "1"
         )
+        # Tier-2 Level-2 (LMCACHE_BATCHED_BLEND_OVERLAP=1): overlap the BATCHED
+        # blend with prefill. Defers the batched fetch+recompute into a per-layer
+        # generator stepped by wait_for_layer_load on the side stream -- the same
+        # pipelining the serial path uses -- WITHOUT routing into the per-request
+        # serial path. Requires _batched_blend. Default off => batched path stays
+        # eager/blocking (unchanged). See codecsight-bench/TIER2_BATCHED_BLEND.md.
+        self._batched_overlap = (
+            os.environ.get("LMCACHE_BATCHED_BLEND_OVERLAP", "0") == "1"
+            and self._batched_blend
+        )
+        if self._batched_overlap:
+            # Turn on side-stream stepping in wait_for_layer_load, but do NOT set
+            # _codecsight_pipeline: that flag routes to the serial path and would
+            # disable the batched path (see the gate in start_load_kv). Placed
+            # AFTER the _async_overlap->_codecsight_pipeline coupling above so it
+            # enables overlap without the coupling.
+            self._async_overlap = True
+        # Fix C-fix (2026-07-27): latch set when a deferred blend driver could not
+        # be finished cleanly. Once set, _batched_blend_load_kv falls back to the
+        # eager (blocking, always-correct) path for the rest of the process, so a
+        # single stalled generator degrades performance instead of deadlocking the
+        # engine. Cleared only by a restart.
+        self._overlap_degraded = False
+        # Per-driver count of next() calls made by wait_for_layer_load, keyed by
+        # id(driver). The blend_batched contract (blender.py:869-872) is
+        # num_layers + 2 yields = 2 primes at creation + num_layers drives from
+        # the forward. So a HEALTHY driver has had exactly num_layers drives and
+        # is still un-exhausted -- next() on it would do work it should not do.
+        self._blender_steps: dict[int, int] = {}
+
+        # Hang diagnostics (LMCACHE_HANG_DUMP_S=<seconds>, default off).
+        # The deferred/overlap path wedges BOTH TP workers with no traceback: the
+        # last log line is blend_batched's "packing ..." and then silence until
+        # vLLM's 5-minute RPC timeout kills the engine (jobs 15000264, 15001730).
+        # faulthandler on a repeating timer dumps every thread's Python stack to
+        # stderr -> the server log, so the wedged frame is identifiable instead of
+        # guessed at. Fires unconditionally on the timer (it is a timer, not a hang
+        # detector), so the useful dump is the one AFTER the last blend line.
+        _hang_dump = os.environ.get("LMCACHE_HANG_DUMP_S", "")
+        if _hang_dump:
+            import faulthandler
+            faulthandler.enable()
+            faulthandler.dump_traceback_later(
+                float(_hang_dump), repeat=True, exit=False
+            )
+            logger.warning(
+                "LMCACHE_HANG_DUMP_S=%s: dumping all thread stacks every %ss",
+                _hang_dump, _hang_dump,
+            )
+        # Per-phase blend timing (LMCACHE_BLEND_TIMING=1). Times each phase of the
+        # batched blend path (embed reconstruct / KV fetch / selection / recompute)
+        # with CUDA events and logs one summary line per step, so the fetch-vs-
+        # recompute split is measurable. Events don't barrier the device (only a
+        # single sync at the end to read them back), so this is non-perturbing --
+        # but still off by default; enable only for measurement runs.
+        self._blend_timing = (
+            os.environ.get("LMCACHE_BLEND_TIMING", "0") == "1"
+        )
+        # Packing census (LMCACHE_BLEND_PACK_DEBUG=1, implied by BLEND_TIMING).
+        # Logs how many requests the scheduler put in each step vs how many
+        # actually reached the packer, and names the gate whenever the batched
+        # path aborts to serial. Those aborts are otherwise SILENT -- the step
+        # emits no [blend-timing] line at all -- which makes "N=1" and "batched
+        # path never ran" indistinguishable in a log. Pure logging, no device
+        # work, so it is safe to leave on with timing.
+        self._blend_pack_debug = (
+            os.environ.get("LMCACHE_BLEND_PACK_DEBUG",
+                           os.environ.get("LMCACHE_BLEND_TIMING", "0")) == "1"
+        )
         self._blend_stream = None  # lazily created (needs CUDA device)
         self._stats_monitor = LMCStatsMonitor.GetOrCreate()
         if role == KVConnectorRole.SCHEDULER:
@@ -1209,39 +1278,77 @@ class LMCacheConnectorV1Impl:
         if blender is None:
             return False
 
+        # Per-phase GPU timing via CUDA events (see self._blend_timing).
+        # event.record() only enqueues a timestamp marker on the current stream;
+        # unlike a host-side torch.cuda.synchronize() at each boundary it does
+        # NOT barrier the device, so the phases run back-to-back exactly as they
+        # do with timing off -- no wall-time perturbation. We pay a SINGLE sync
+        # at the very end to make the recorded events readable. Events measure
+        # GPU-timeline time (what fetch/recompute are dominated by); a mostly-CPU
+        # phase (select) is under-counted but negligible here. Each phase collects
+        # (start, end) event pairs across the per-request loop; elapsed_time()
+        # returns milliseconds.
+        timing = self._blend_timing
+        spans = {"embed": [], "fetch": [], "select": []}
+
+        def _evt():
+            e = torch.cuda.Event(enable_timing=True)
+            e.record()
+            return e
+
+        # Measurement: snapshot the connector's global-barrier counter so we can
+        # report how many device syncs the fetch phase costs (serial fetch =>
+        # N*num_layers; a coalesced fetch would collapse this to num_layers).
+        gconn = getattr(self.lmcache_engine, "gpu_connector", None)
+        sync0 = getattr(gconn, "global_sync_count", 0) if timing else 0
+
+        # --- packing census (LMCACHE_BLEND_PACK_DEBUG) ------------------------
+        # The batch size N the packer finally sees is decided HERE, not in
+        # blend_batched: N = however many of this step's scheduled requests
+        # survive the gates below. Measurements to date show N=1 even under
+        # confirmed request-level concurrency, and the gates are silent, so
+        # there is no way to tell "the scheduler only gave us one request" from
+        # "several arrived but one tripped a gate and aborted the whole batch".
+        # Note the asymmetry: a missing load_spec SKIPS that request, but every
+        # other gate `return False`s, discarding the requests already collected
+        # and dropping the whole step to the serial path. One bad request in a
+        # step therefore costs batching for all of them.
+        pack_dbg = self._blend_pack_debug
+        n_sched = len(metadata.requests)
+        n_no_loadspec = 0
+
+        def _bail(reason: str, req_idx: int) -> bool:
+            """Uniform abort: log why the whole step left the batched path."""
+            if pack_dbg:
+                logger.info(
+                    "[blend-pack] ABORT to serial: scheduled=%d no_load_spec=%d "
+                    "collected=%d, request #%d hit gate '%s'",
+                    n_sched, n_no_loadspec, len(requests_info), req_idx, reason,
+                )
+            return False
+
         requests_info = []
         chunk = self._lmcache_chunk_size
-        for request in metadata.requests:
-            if request.load_spec is None:
-                continue
-            tokens = request.token_ids
-            slot_mapping = request.slot_mapping.cuda()
-            if len(tokens) != len(slot_mapping):
-                return False
-            c = min(request.load_spec.lmcache_cached_tokens, len(tokens))
-            if c < 128:  # _MIN_BLEND_TOKENS: too short to blend -> fall back
-                return False
 
-            token_mask = torch.ones(len(tokens), dtype=torch.bool)
-            masked = request.load_spec.vllm_cached_tokens // chunk * chunk
-            token_mask[:masked] = False
-
-            embeds, _deepstack = self._reconstruct_inputs_embeds(
-                tokens, request.mm_hashes, request.mm_positions, c,
-            )
-            if embeds is None:
-                return False  # encoder cache unavailable -> serial fallback
-
-            # Phase 1: plain retrieve -> paged cache (load + RoPE-correct),
-            # synchronous so gap_positions + paged KV are ready before selection.
+        def _fallback_fetch_and_select(request, tokens, c, token_mask, slot_mapping, embeds) -> bool:
+            """Per-request eager fetch+select, used ONLY as the coalesced-fetch
+            overflow fallback (see the token-budget pre-check in Pass 1.5) --
+            always eager (coalesced_fetch requires overlap=False), so unlike
+            the Pass-1 inline branch this never needs the overlap/fetch_gens
+            case. Returns False (no append) when selection finds 0 anchors,
+            mirroring the `_bail` trigger condition used elsewhere.
+            """
+            _s = _evt() if timing else None
             retr = self.lmcache_engine.retrieve_layer(
                 tokens[:c], token_mask[:c], kvcaches=kvcaches,
                 slot_mapping=slot_mapping[:c], sync=True,
             )
             for _ in retr:
                 pass
+            if timing:
+                spans["fetch"].append((_s, _evt()))
 
-            # Selection: install this request's metadata, run codec I-frame pick.
+            _s = _evt() if timing else None
             md = LMCBlendMetadata(imp_indices=None, attn_mask=None, positions=None)
             md.tokens_per_frame = int(request.tokens_per_frame or 0)
             md.mm_positions = request.mm_positions
@@ -1267,12 +1374,358 @@ class LMCacheConnectorV1Impl:
                 "slot_full": slot_mapping[:c],
                 "anchor_local": anchor_local,
             })
+            if timing:
+                spans["select"].append((_s, _evt()))
+            return True
+        # Level-2 overlap: collect per-request fetch generators (warmed up, not
+        # drained) so the deferred driver can step them per-layer. The side
+        # stream must exist before we prime fetches on it (mirrors serial path).
+        # Fix C-fix: once a deferred driver has failed to finish cleanly we stop
+        # using the overlap path entirely. Eager is slower but always correct and
+        # cannot wedge the engine.
+        overlap = self._batched_overlap and not self._overlap_degraded
+
+        # Fix C-fix (2): BUFFER-POOL ADMISSION CONTROL -- the actual deadlock cause.
+        # gpu_connector.batched_to_gpu allocates TWO staging buffers per generator
+        # and only releases them at the very END of the generator
+        # (load/compute_gpu_buffer_obj.ref_count_down()). Eager drains the generator
+        # inside one call, so exactly one is ever live. Overlap keeps generators
+        # alive ACROSS engine steps, so buffers accumulate at 2 per in-flight blend.
+        # The pool is one layer of the whole KV cache (76,992 tokens here), so with
+        # p95 windows of ~14,160 tokens only floor(76992 / (2*14160)) = 2 fit and the
+        # THIRD blend exhausts it -- which is exactly where jobs 15000264 and
+        # 15001730 both wedged (3rd deferred blend, both TP ranks, no traceback).
+        # Cap the number of concurrent deferred drivers and send the overflow down
+        # the eager path: correctness is identical either way, and the eager path
+        # frees its buffers immediately.
+        if overlap:
+            cap = int(os.environ.get("LMCACHE_MAX_DEFERRED_BLENDS", "2"))
+            if cap >= 0 and len(self.layerwise_blenders) >= cap:
+                logger.info(
+                    "[blend-pack] %d deferred blend(s) already in flight (cap=%d); "
+                    "using the eager path for this step to stay inside the GPU "
+                    "staging-buffer pool.",
+                    len(self.layerwise_blenders), cap,
+                )
+                overlap = False
+        fetch_gens: list = []
+        if overlap and self._blend_stream is None:
+            self._blend_stream = torch.cuda.Stream()
+
+        # B1 (4/4): coalesced multi-request fetch. Only wired for the EAGER
+        # path -- overlap/deferred (C) is a separate, currently-deadlocking
+        # optimization and is not built on top of here. IMPORTANT: when this
+        # is off (default), the loop below is BYTE-IDENTICAL in structure to
+        # before -- fetch and select stay inline, back-to-back, per request --
+        # because `_compute_hit_indices` (blender.py) reads gap positions off
+        # a single shared mutable `self.gpu_connector.current_gap_positions`
+        # that each request's fetch overwrites; splitting fetch and select
+        # into two full passes over ALL requests would make every selection
+        # read the LAST request's gap positions instead of its own. Only the
+        # coalesced branch defers selection to Pass 2, and only it needs to
+        # slice the coalesced gap positions back into each request's own
+        # local coordinates first (done below via
+        # `current_gap_positions_per_request`).
+        coalesced_fetch = (
+            not overlap
+            and os.environ.get("LMCACHE_COALESCED_FETCH", "0") == "1"
+        )
+
+        pending: list = []
+        for req_idx, request in enumerate(metadata.requests):
+            if request.load_spec is None:
+                n_no_loadspec += 1
+                continue
+            tokens = request.token_ids
+            slot_mapping = request.slot_mapping.cuda()
+            if len(tokens) != len(slot_mapping):
+                return _bail("len(tokens) != len(slot_mapping)", req_idx)
+            c = min(request.load_spec.lmcache_cached_tokens, len(tokens))
+            if c < 128:  # _MIN_BLEND_TOKENS: too short to blend -> fall back
+                return _bail(f"cached_tokens {c} < 128", req_idx)
+
+            token_mask = torch.ones(len(tokens), dtype=torch.bool)
+            masked = request.load_spec.vllm_cached_tokens // chunk * chunk
+            token_mask[:masked] = False
+
+            _s = _evt() if timing else None
+            embeds, _deepstack = self._reconstruct_inputs_embeds(
+                tokens, request.mm_hashes, request.mm_positions, c,
+            )
+            if timing:
+                spans["embed"].append((_s, _evt()))
+            if embeds is None:
+                # encoder cache unavailable -> serial fallback
+                return _bail("encoder cache miss (embeds is None)", req_idx)
+
+            if coalesced_fetch:
+                # Fetch AND select are both deferred -- see Pass 1.5 / Pass 2
+                # below. Nothing else about this request's gating changes.
+                pending.append({
+                    "request": request, "tokens": tokens, "c": c,
+                    "token_mask": token_mask, "slot_mapping": slot_mapping,
+                    "embeds": embeds, "req_idx": req_idx,
+                })
+                continue
+
+            # Phase 1: plain retrieve -> paged cache (load + RoPE-correct).
+            # gap_positions are set on the connector at the FIRST next (warmup),
+            # before any layer is sent, so selection below is correct after a
+            # single prime. Eager mode drains fully here (blocking). Overlap mode
+            # primes ONCE (warmup) on the side stream and KEEPS the generator so
+            # wait_for_layer_load can drain it per-layer, overlapped with prefill.
+            _s = _evt() if timing else None
+            retr = self.lmcache_engine.retrieve_layer(
+                tokens[:c], token_mask[:c], kvcaches=kvcaches,
+                slot_mapping=slot_mapping[:c], sync=not overlap,
+            )
+            if overlap:
+                with torch.cuda.stream(self._blend_stream):
+                    next(retr)  # warmup: sets gap_positions, loads layer 0
+                fetch_gens.append(retr)
+            else:
+                for _ in retr:
+                    pass
+            if timing:
+                spans["fetch"].append((_s, _evt()))
+
+            # Selection: install this request's metadata, run codec I-frame pick.
+            _s = _evt() if timing else None
+            md = LMCBlendMetadata(imp_indices=None, attn_mask=None, positions=None)
+            md.tokens_per_frame = int(request.tokens_per_frame or 0)
+            md.mm_positions = request.mm_positions
+            md.image_grid_thw = request.image_grid_thw
+            md.input_ids = list(tokens[:c])
+            blender._active_metadata = md
+
+            dev = slot_mapping.device
+            hit = blender._compute_hit_indices(c, dev)
+            anchor_local = blender._codecsight_select(hit, c, dev)
+            if anchor_local.numel() == 0:
+                return _bail("codecsight selected 0 anchors", req_idx)
+
+            if blender.is_mrope and blender._mrope_model_config is not None:
+                positions_full = blender._compute_mrope_positions(c, dev)
+                positions = positions_full[:, anchor_local]
+            else:
+                positions = torch.arange(c, device=dev, dtype=torch.int64)[anchor_local]
+
+            requests_info.append({
+                "anchor_embeds": embeds[anchor_local],
+                "positions": positions,
+                "slot_full": slot_mapping[:c],
+                "anchor_local": anchor_local,
+            })
+            if timing:
+                spans["select"].append((_s, _evt()))
+
+        # Pass 1.5 (coalesced_fetch only): the ONE fetch across every request
+        # collected above. `pending` is empty here whenever coalesced_fetch is
+        # off, since every request took the inline branch above instead.
+        per_request_gaps = None
+        if coalesced_fetch and pending:
+            # DEFENSE-IN-DEPTH (added after job 15005984): batched_to_gpu_multi
+            # needs TWO staging buffers alive at once, each sized to the SUM of
+            # every pending request's tokens -- unlike the per-request path,
+            # which only ever holds one small, single-request-sized buffer
+            # pair. A burst of large windows packed together can need more
+            # than the pool holds; that job hit exactly this
+            # (AssertionError: Failed to allocate GPU buffer -> EngineDeadError
+            # -> every later request failed). LMCACHE_COALESCED_BUFFER_MULT
+            # (gpu_connector.py) sizes the pool for a KNOWN worst case, but
+            # that's an assumption about window sizes, not a guarantee -- so
+            # check the ACTUAL pending group against the pool's own advertised
+            # budget and fall back to the old per-request path (still correct,
+            # just not coalesced) instead of trusting the assumption blindly.
+            # `gconn` is the same gpu_connector fetched at the top of this
+            # function (for the fetch_syncs telemetry).
+            if getattr(gconn, "gpu_buffer_allocator", None) is None:
+                # First coalesced call in this server's lifetime -- the pool
+                # doesn't exist yet (it's created lazily on first use), so
+                # max_coalesced_tokens isn't set either. Initialize it now
+                # (idempotent, cheap) so the check below has a real budget to
+                # compare against instead of skipping unchecked.
+                gconn._lazy_initialize_buffer(kvcaches)
+            max_safe = getattr(gconn, "max_coalesced_tokens", None)
+            est_tokens = sum(int(p["token_mask"][: p["c"]].sum()) for p in pending)
+
+            if max_safe is not None and est_tokens > max_safe:
+                if pack_dbg:
+                    logger.info(
+                        "[blend-pack] coalesced fetch needs ~%d tokens > pool "
+                        "budget %d; falling back to per-request fetch for "
+                        "this step's %d pending request(s).",
+                        est_tokens, max_safe, len(pending),
+                    )
+                for p in pending:
+                    if not _fallback_fetch_and_select(
+                        p["request"], p["tokens"], p["c"], p["token_mask"],
+                        p["slot_mapping"], p["embeds"],
+                    ):
+                        return _bail(
+                            "coalesced-fallback: codecsight selected 0 anchors",
+                            p["req_idx"],
+                        )
+                pending = []  # handled inline above; Pass 2 below is then a no-op
+            else:
+                _s = _evt() if timing else None
+                retr_multi = self.lmcache_engine.retrieve_layer_multi(
+                    [p["tokens"][: p["c"]] for p in pending],
+                    [p["token_mask"][: p["c"]] for p in pending],
+                    [p["slot_mapping"][: p["c"]] for p in pending],
+                    kvcaches=kvcaches,
+                )
+                for _ in retr_multi:
+                    pass
+                if timing:
+                    spans["fetch"].append((_s, _evt()))
+                per_request_gaps = getattr(
+                    gconn, "current_gap_positions_per_request", None,
+                )
+                assert per_request_gaps is not None and len(per_request_gaps) == len(pending), (
+                    "retrieve_layer_multi did not populate "
+                    "current_gap_positions_per_request for every pending request."
+                )
+
+        # Pass 2 (coalesced_fetch only): selection, per request, deferred from
+        # above because it needed the coalesced fetch to finish first. Same
+        # selection logic as the inline branch; the only difference is that
+        # `current_gap_positions` is swapped in per request from the sliced
+        # coalesced result instead of having just been set by that request's
+        # own retrieve_layer call.
+        for i, p in enumerate(pending):
+            request, tokens, c, slot_mapping, embeds, req_idx = (
+                p["request"], p["tokens"], p["c"], p["slot_mapping"],
+                p["embeds"], p["req_idx"],
+            )
+
+            self.lmcache_engine.gpu_connector.current_gap_positions = (
+                per_request_gaps[i]
+            )
+
+            _s = _evt() if timing else None
+            md = LMCBlendMetadata(imp_indices=None, attn_mask=None, positions=None)
+            md.tokens_per_frame = int(request.tokens_per_frame or 0)
+            md.mm_positions = request.mm_positions
+            md.image_grid_thw = request.image_grid_thw
+            md.input_ids = list(tokens[:c])
+            blender._active_metadata = md
+
+            dev = slot_mapping.device
+            hit = blender._compute_hit_indices(c, dev)
+            anchor_local = blender._codecsight_select(hit, c, dev)
+            if anchor_local.numel() == 0:
+                return _bail("codecsight selected 0 anchors", req_idx)
+
+            if blender.is_mrope and blender._mrope_model_config is not None:
+                positions_full = blender._compute_mrope_positions(c, dev)
+                positions = positions_full[:, anchor_local]
+            else:
+                positions = torch.arange(c, device=dev, dtype=torch.int64)[anchor_local]
+
+            requests_info.append({
+                "anchor_embeds": embeds[anchor_local],
+                "positions": positions,
+                "slot_full": slot_mapping[:c],
+                "anchor_local": anchor_local,
+            })
+            if timing:
+                spans["select"].append((_s, _evt()))
 
         if not requests_info:
+            if pack_dbg:
+                logger.info(
+                    "[blend-pack] no blendable requests: scheduled=%d "
+                    "no_load_spec=%d -> serial path", n_sched, n_no_loadspec,
+                )
             return False
 
-        # Phase 2: one packed forward for all requests.
+        # The answer to "why is N always 1": if scheduled==1 the scheduler never
+        # co-located two blendable requests in a step (a stagger/admission
+        # problem, upstream of this code); if scheduled>1 but packed==1 the loss
+        # is here in the gates above.
+        if pack_dbg:
+            logger.info(
+                "[blend-pack] scheduled=%d no_load_spec=%d -> packed N=%d "
+                "(anchors=%d) mode=%s",
+                n_sched, n_no_loadspec, len(requests_info),
+                sum(int(r["anchor_local"].numel()) for r in requests_info),
+                "deferred/overlap" if overlap else "eager",
+            )
+
+        if overlap:
+            # Level-2: defer the packed recompute + per-layer fetch into a driver
+            # generator driven by wait_for_layer_load on the side stream, so the
+            # batched blend overlaps prefill instead of blocking start_load_kv.
+            # Priming happens on the side stream (mirrors the serial path). No
+            # [blend-timing] line here: the work runs later, during the forward.
+            with torch.cuda.stream(self._blend_stream):
+                driver = blender.blend_batched(
+                    requests_info, kvcaches,
+                    fetch_gens=fetch_gens, defer=True,
+                )
+            # ISOLATION EXPERIMENT (LMCACHE_DEFER_DRAIN_EAGER=1): run the DEFERRED
+            # code path with EAGER timing -- build the defer=True driver exactly as
+            # normal, then drain it right here instead of handing it to
+            # wait_for_layer_load. This splits the two candidate causes of the
+            # overlap path's wrong output (7/18 keys, deltas 0.45-1.81 nats, one
+            # answer flip; jobs 15001729/15002005/15002109/15002110):
+            #   PASS -> the deferred computation is correct, the bug is in the
+            #           per-layer interleaving with prefill.
+            #   FAIL -> the bug is inside blend_batched(defer=True) itself and the
+            #           interleaving is innocent.
+            # Creation already consumed 2 primes, so num_layers more next() calls
+            # complete the cadence and one further call runs the epilogue.
+            if os.environ.get("LMCACHE_DEFER_DRAIN_EAGER", "0") == "1":
+                logger.info(
+                    "[blend-pack] LMCACHE_DEFER_DRAIN_EAGER=1: draining the deferred "
+                    "driver in place (deferred code path, eager timing)."
+                )
+                with torch.cuda.stream(self._blend_stream):
+                    for _ in range(self.num_layers):
+                        next(driver)
+                    try:
+                        next(driver)
+                    except StopIteration:
+                        pass
+                if self._blend_stream is not None:
+                    torch.cuda.current_stream().wait_stream(self._blend_stream)
+                return True
+
+            self.layerwise_blenders.append(driver)
+            return True
+
+        # Phase 2 (eager): one packed forward for all requests (KV REFRESH).
+        _s = _evt() if timing else None
         blender.blend_batched(requests_info, kvcaches)
+        if timing:
+            _e = _evt()
+            # The ONLY device sync: makes every recorded event complete so
+            # elapsed_time() can read it. Runs AFTER all measured work, so it
+            # does not serialize the phases being timed.
+            torch.cuda.synchronize()
+
+            def _sum(key):  # ms; elapsed_time already returns milliseconds
+                return sum(a.elapsed_time(b) for a, b in spans[key])
+
+            t_embed = _sum("embed")
+            t_fetch = _sum("fetch")
+            t_select = _sum("select")
+            t_recompute = _s.elapsed_time(_e)
+            n = len(requests_info)
+            total = t_embed + t_fetch + t_select + t_recompute
+            anchors = sum(int(r["anchor_local"].numel()) for r in requests_info)
+            n_sync = getattr(gconn, "global_sync_count", 0) - sync0
+            logger.info(
+                "[blend-timing] batched N=%d anchors=%d | embed=%.2fms "
+                "fetch=%.2fms select=%.2fms recompute=%.2fms | total=%.2fms "
+                "(fetch=%.0f%% recompute=%.0f%%) fetch_syncs=%d",
+                n, anchors, t_embed, t_fetch, t_select,
+                t_recompute, total,
+                100.0 * t_fetch / total if total else 0.0,
+                100.0 * t_recompute / total if total else 0.0,
+                n_sync,
+            )
         return True
 
     @_lmcache_nvtx_annotate
@@ -1309,7 +1762,10 @@ class LMCacheConnectorV1Impl:
         self.lmcache_engine.post_init(kvcaches=kvcaches)
 
         self.layerwise_retrievers = []
-        self.layerwise_blenders = []
+        # Fix C-fix: NEVER drop deferred blend drivers on the floor. See
+        # _drain_layerwise_blenders for why the old bare reassignment deadlocked
+        # the engine at N>=4 (job 15000264).
+        self._drain_layerwise_blenders("new engine step")
 
         # Tier-2: batched selective recompute. Eligible only for the eager
         # codecsight blend path (the validated batch-safe mode). Falls through
@@ -1596,6 +2052,173 @@ class LMCacheConnectorV1Impl:
         return missing_blocks
 
     @_lmcache_nvtx_annotate
+    def _step_blenders(self, blenders: list) -> list:
+        """Advance each deferred blend driver one layer; return those still alive.
+
+        The old code did a bare ``next(b)`` over the list. A driver that reached its
+        natural end raised StopIteration straight out of ``wait_for_layer_load`` and
+        into vLLM's forward. Retiring exhausted drivers here also means a driver is
+        never advanced past its cadence, which is what let the abandoned-generator
+        state build up in the first place.
+        """
+        alive = []
+        for blender in blenders:
+            try:
+                next(blender)
+                self._blender_steps[id(blender)] = (
+                    self._blender_steps.get(id(blender), 0) + 1
+                )
+                alive.append(blender)
+            except StopIteration:
+                self._blender_steps.pop(id(blender), None)
+                # Finished cleanly: drop it, do NOT keep stepping it.
+                try:
+                    blender.close()
+                except Exception:
+                    logger.exception("Error closing finished blend driver")
+            except Exception:
+                logger.exception(
+                    "Deferred blend driver raised mid-layer; disabling overlap and "
+                    "continuing eagerly rather than killing the engine."
+                )
+                self._overlap_degraded = True
+                self._blender_steps.pop(id(blender), None)
+                try:
+                    blender.close()
+                except Exception:
+                    pass
+        return alive
+
+    def _drain_layerwise_blenders(self, reason: str) -> None:
+        """Finish (or safely discard) deferred blend drivers left from a prior step.
+
+        THE BUG THIS FIXES (job 15000264, engine dead at N>=4):
+        a driver is built in ``start_load_kv`` and expects to be advanced once per
+        layer by ``wait_for_layer_load``. If a step does not drive it to completion
+        -- chunked prefill splitting the request across steps, preemption, or simply
+        the next ``start_load_kv`` arriving first -- the old code dropped it by
+        reassigning ``self.layerwise_blenders = []``. The abandoned generator keeps
+        half-finished work queued on ``self._blend_stream``, and the NEXT step's
+        ``cur.wait_stream(self._blend_stream)`` then waits on work whose remainder
+        nobody will ever enqueue: ``execute_model`` hangs, the RPC times out, and the
+        engine dies. Observed exactly that way -- two deferred blends 0.64 s apart,
+        then Running:0/Waiting:0 forever.
+
+        Policy, in order of preference:
+        1. Drive each leftover to completion on the blend stream (correct: the blend
+           it was created for actually happens), then synchronize so nothing dangles.
+        2. On ANY failure, close the generator, synchronize the stream anyway, and
+           latch ``_overlap_degraded`` so every later step takes the eager path.
+        Either way the stream is left clean, which is what stops the deadlock.
+        """
+        leftover = self.layerwise_blenders
+        self.layerwise_blenders = []
+        if not leftover:
+            return
+
+        # NOT a warning: the common case is a driver that completed its whole
+        # num_layers contract and is merely un-exhausted. Only the genuinely-short
+        # case below warrants a warning.
+        #
+        # INFO, not debug (promoted 2026-07-27). This used to be logger.debug, which
+        # is not emitted at INFO, so NO run on record could show whether the drain
+        # engaged at all -- and that is precisely the question the v1->v2->v3 drain
+        # rewrites turn on. The per-driver driven counts are included because
+        # "healthy (driven == num_layers) vs genuinely short" is the distinction that
+        # decides which drain branch runs. Volume is ~1 line per deferred blend,
+        # comparable to the existing [blend-pack] line.
+        driven = [self._blender_steps.get(id(d), 0) for d in leftover]
+        logger.info(
+            "[blend-drain] retiring %d deferred blend driver(s) (%s); "
+            "driven=%s of num_layers=%d%s",
+            len(leftover),
+            reason,
+            driven,
+            self.num_layers,
+            "" if all(n >= self.num_layers for n in driven) else " SHORT",
+        )
+        stream_ctx = (
+            torch.cuda.stream(self._blend_stream)
+            if self._blend_stream is not None
+            else contextlib.nullcontext()
+        )
+        for driver in leftover:
+            done = self._blender_steps.pop(id(driver), 0)
+            remaining = self.num_layers - done
+            if remaining <= 0:
+                # Healthy: the forward already drove it num_layers times, which is
+                # its whole contract, leaving it at the last yield but NOT exhausted.
+                # v1 drove it up to num_layers+2 MORE times -> ran work it must not
+                # run -> corrupted 7/18 outputs (15001729).
+                # v2 called close() instead -> GeneratorExit at the last yield skips
+                # the epilogue, and the epilogue is where batched_to_gpu does
+                # load/compute_gpu_buffer_obj.ref_count_down() -> the two GPU staging
+                # buffers LEAK, the pool drains, and the run dies even sooner
+                # (15002006 died after only 1 deferred blend vs 3 in 15001730 --
+                # both TP ranks log [blend-pack], so halve the grep count).
+                # CAVEAT (2026-07-27): a 1-blend death is NOT quantitatively
+                # explained by that leak (2 x 14,160 << the 76,992-token pool) and
+                # 15002006 CRASHED rather than hung. See BLEND_OPT_IMPLEMENTATION.md
+                # "C's LIVENESS IS STILL UNTESTED" -- re-run the N=4 repro on v3.
+                # v3: advance EXACTLY ONCE. That runs the epilogue (freeing the
+                # buffers) and raises StopIteration. It performs no extra blend work
+                # -- all num_layers+2 yields are already consumed.
+                try:
+                    next(driver)
+                except StopIteration:
+                    continue          # correct, buffers released
+                except Exception:
+                    logger.exception("Blend driver epilogue failed")
+                    self._overlap_degraded = True
+                    continue
+                logger.error(
+                    "Blend driver yielded again after its full cadence; closing and "
+                    "disabling overlap."
+                )
+                self._overlap_degraded = True
+                try:
+                    driver.close()
+                except Exception:
+                    pass
+                continue
+            logger.warning(
+                "Deferred blend driver is genuinely short by %d layer(s) "
+                "(%d/%d driven); completing it before reset.",
+                remaining, done, self.num_layers,
+            )
+            finished = False
+            try:
+                with stream_ctx:
+                    for _ in range(remaining):
+                        next(driver)
+                finished = True
+            except StopIteration:
+                finished = True
+            except Exception:
+                logger.exception(
+                    "Deferred blend driver failed while draining; falling back to "
+                    "the eager blend path for the rest of this process."
+                )
+                self._overlap_degraded = True
+                finished = True
+            if not finished:
+                # Ran the full bound without StopIteration -> the generator is not
+                # following the expected cadence. Do not trust the overlap path.
+                logger.error(
+                    "Deferred blend driver did not finish within num_layers+2 "
+                    "steps; discarding it and disabling overlap."
+                )
+                self._overlap_degraded = True
+            try:
+                driver.close()
+            except Exception:
+                logger.exception("Error closing deferred blend driver")
+
+        # Leave no work in flight on the side stream: the next step's
+        # cur.wait_stream(self._blend_stream) must not inherit a partial blend.
+        if self._blend_stream is not None:
+            self._blend_stream.synchronize()
+
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Blocking until the KV for a specific layer is loaded into vLLM's
         paged buffer.
@@ -1627,11 +2250,11 @@ class LMCacheConnectorV1Impl:
             cur = torch.cuda.current_stream()
             cur.wait_stream(self._blend_stream)
             with torch.cuda.stream(self._blend_stream):
-                for layerwise_blender in self.layerwise_blenders:
-                    next(layerwise_blender)
+                self.layerwise_blenders = self._step_blenders(
+                    self.layerwise_blenders
+                )
         else:
-            for layerwise_blender in self.layerwise_blenders:
-                next(layerwise_blender)
+            self.layerwise_blenders = self._step_blenders(self.layerwise_blenders)
 
         return
 
