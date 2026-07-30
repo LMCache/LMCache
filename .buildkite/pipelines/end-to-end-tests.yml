@@ -13,7 +13,11 @@ steps:
       uv pip install -e . --no-build-isolation
       uv pip install matplotlib
       uv pip install pandas
-      uv pip install -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
+      # ">=0.0.0.dev0" opts vllm (and only vllm) into pre-releases so the
+      # nightly dev wheel resolves. A global --pre would also pull NVIDIA
+      # placeholder packages (cuda-tile etc.) onto brand-new rc versions
+      # whose real wheels may not be on pypi.nvidia.com yet.
+      uv pip install -U "vllm>=0.0.0.dev0" --extra-index-url https://wheels.vllm.ai/nightly
       uv pip freeze
 
 

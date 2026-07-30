@@ -112,10 +112,22 @@ if [[ -n "${PINNED_VLLM_VERSION:-}" ]]; then
         PINNED_VLLM_INDEX_ARGS+=(--extra-index-url "${archive_url}")
     fi
 else
-    VLLM_INSTALL_SPEC="vllm[runai,tensorizer,flashinfer]"
+    # ">=0.0.0.dev0" is an explicit pre-release specifier: under uv's
+    # default if-necessary-or-explicit strategy it opts vllm (and only
+    # vllm) into pre-releases, which is required to pick up nightly dev
+    # wheels. The pinned branch above needs nothing extra -- an exact ==
+    # pin to a dev/rc version is itself an explicit pre-release specifier.
+    #
+    # Do NOT add a global --pre to the install below: it drags every
+    # transitive dep onto pre-releases too. NVIDIA placeholder packages
+    # (e.g. cuda-tile, via vllm -> flashinfer-python) publish their PyPI
+    # stub sdist before the real wheels finish uploading to
+    # pypi.nvidia.com, and any install during that window dies with
+    # "Didn't find wheel for cuda-tile X.Y.ZrcN" (build #3805).
+    VLLM_INSTALL_SPEC="vllm[runai,tensorizer,flashinfer]>=0.0.0.dev0"
     echo "Installing latest vLLM nightly (no pin)"
 fi
-uv pip install -U "${VLLM_INSTALL_SPEC}" --pre \
+uv pip install -U "${VLLM_INSTALL_SPEC}" \
     --reinstall-package transformers \
     --reinstall-package tokenizers \
     --reinstall-package huggingface-hub \
