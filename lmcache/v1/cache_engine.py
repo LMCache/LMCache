@@ -1105,13 +1105,14 @@ class LMCacheEngine:
         # synchronize the last layer
         next(mem_obj_consumer)
 
-        # Unpin any disk-loaded staging objects now that the device-side sync
-        # has been enqueued (mem_obj_consumer advanced past its sync point).
-        # Without this, pin_count stays at 1 forever and the CPU staging pool
-        # fills up, causing the next retrieve to deadlock inside allocate().
-        for mem_obj in to_count_down:
-            if mem_obj.is_pinned:
-                mem_obj.unpin()
+        # LocalCPUBackend returns the same objects pinned by lookup(pin=True);
+        # lookup_unpin() owns those pins. Other backends may return temporary
+        # pinned staging objects that must be released after the device-side
+        # sync has been enqueued.
+        if location != "LocalCPUBackend":
+            for mem_obj in to_count_down:
+                if mem_obj.is_pinned:
+                    mem_obj.unpin()
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
