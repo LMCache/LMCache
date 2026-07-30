@@ -5,7 +5,7 @@
 from typing import Optional, Protocol, runtime_checkable
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.memory_management import MemoryObj
@@ -32,6 +32,10 @@ class L1ManagerProtocol(Protocol):
 
     def get_memory_usage(self) -> tuple[int, int]:
         """Return ``(used_bytes, total_bytes)``."""
+        ...
+
+    def get_backend_type(self, memory_obj: MemoryObj) -> L1BackendType:
+        """Return the storage medium backing ``memory_obj``."""
         ...
 
     def get_l1_memory_desc(self) -> Optional[L1MemoryDesc]:
