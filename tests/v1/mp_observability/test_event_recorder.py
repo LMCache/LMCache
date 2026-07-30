@@ -9,7 +9,10 @@ import time
 import pytest
 
 torch = pytest.importorskip("torch", reason="torch required")
-pytestmark = pytest.mark.gpu
+pytestmark = pytest.mark.cuda
+
+if not torch.cuda.is_available():
+    pytest.skip("CUDA is not available", allow_module_level=True)
 
 lmc_ops = pytest.importorskip("lmcache.c_ops", reason="lmcache.c_ops not built")
 if not hasattr(lmc_ops, "record_event_on_stream"):
