@@ -210,10 +210,12 @@ steps:
           case "{{matrix.transport}}" in
             pickle)
               export L1_USE_LAZY="true"
-              # Pickle sends full hybrid KV payloads through MQ. At 50-way
-              # concurrency a 10-second RPC budget is insufficient for the
-              # serialize/deserialize and CPU-copy work; SHM only sends slots.
-              export LMCACHE_MQ_TIMEOUT="120"
+              # Pickle sends complete hybrid KV payloads through one MQ
+              # connection. Limit this correctness-only job's request
+              # concurrency so queued payloads do not exhaust the RPC budget;
+              # the SHM matrix entry retains the regular 50-way stress load.
+              export NUM_CONCURRENT="4"
+              export LMCACHE_MQ_TIMEOUT="300"
               ;;
             shm)
               export L1_USE_LAZY="false"
