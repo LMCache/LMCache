@@ -817,57 +817,6 @@ class TestStorageManagerL2Prefetch:
         sm.finish_read_prefetched(retained_keys)
         sm.close()
 
-    def test_prefetch_l2_force_retrieve_full_kv(
-        self, l2_storage_manager_config, basic_layout
-    ):
-        """force_retrieve_full_kv_benchmark_only overrides sliding windows:
-        all keys retained."""
-        sm = StorageManager(l2_storage_manager_config)
-
-        # Same setup as test_prefetch_l2_with_sliding_window:
-        # 2 object groups (full_attn + sw=2), 1 rank, 4 chunks = 8 keys
-        num_chunks = 4
-        num_groups = 2
-        num_keys = num_chunks * num_groups
-        attn_desc = AttnWindowDesc(
-            num_chunks_in_sw=[-1, 2], force_retrieve_full_kv_benchmark_only=True
-        )
-
-        all_keys = [make_object_key(i) for i in range(num_keys)]
-
-        # Write all 8 keys → L2
-        self._write_keys_and_wait_for_l2(sm, all_keys, basic_layout)
-
-        # Clear L1 so everything comes from L2
-        time.sleep(0.05)
-        sm.clear()
-
-        handle = sm.submit_prefetch_task(
-            PrefetchRequestSpec(all_keys, basic_layout, attn_desc=attn_desc)
-        )
-
-        deadline = time.monotonic() + 10.0
-        result = None
-        while time.monotonic() < deadline:
-            result = sm.query_prefetch_status(handle)
-            if result is not None:
-                break
-            time.sleep(0.05)
-        assert result is not None, "L2 prefetch should complete"
-
-        indices = set(result.get_indices_list())
-        # With force_retrieve_full_kv_benchmark_only, ALL keys should be retained —
-        # the SW group's out-of-window chunks (indices 1, 3) are kept
-        # unlike the non-forced test where they are trimmed.
-        assert indices == set(range(num_keys)), (
-            f"force_retrieve_full_kv_benchmark_only should retain all {num_keys} keys, "
-            f"got {sorted(indices)}"
-        )
-
-        retained_keys = [all_keys[i] for i in sorted(indices)]
-        sm.finish_read_prefetched(retained_keys)
-        sm.close()
-
     def test_prefetch_l1_plus_l2_sliding_window(
         self, l2_storage_manager_config, basic_layout
     ):

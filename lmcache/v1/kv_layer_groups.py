@@ -262,7 +262,7 @@ class ObjectGroupInfo:
     An object group contains one or more kernel groups whose
     KV caches will be stored in the same memory object.
 
-    This will be useful for dealing with sliding window or mamba
+    This will be useful for dealing with sliding window
     KV caches that needs a different prefix matching logic from
     the full attention KV caches.
     """
@@ -559,9 +559,6 @@ class KVLayerGroupsManager:
             return self._lmcache_tokens_per_chunk
         if sw_size_tokens == -1 or sw_size_tokens >= self._lmcache_tokens_per_chunk:
             return self._lmcache_tokens_per_chunk
-        # Mamba layers: recurrent state is fully summarized by one chunk.
-        elif sw_size_tokens == 0:
-            return self._lmcache_tokens_per_chunk
         return sw_size_tokens
 
     def get_attn_desc(self) -> AttnWindowDesc:
@@ -637,9 +634,6 @@ class KVLayerGroupsManager:
         for kernel_group_idx, group in enumerate(self._kernel_groups):
             if group.sw_size_tokens == -1:
                 sw_size_chunks = -1
-            # Mamba layers: recurrent state needs only the most recent chunk.
-            elif group.sw_size_tokens == 0:
-                sw_size_chunks = 1
             else:
                 sw_size_chunks = (group.sw_size_tokens + chunk_size - 1) // chunk_size
             groups_by_sw_size[sw_size_chunks].append(kernel_group_idx)

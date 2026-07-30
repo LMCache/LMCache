@@ -180,8 +180,7 @@ steps:
       # Runs gsm8k, resets vLLM's prefix cache (LMCache preserved), reruns
       # served by LMCache, and asserts the two runs' scores match. Single GPU,
       # no baseline. EXTRA_LMCACHE_ARGS makes the separate-object-group path
-      # explicit; per-group sliding-window trimming is active because
-      # --force-retrieve-full-kvcache-benchmark-only is left off (its default).
+      # explicit; per-group sliding-window trimming is always active.
       - label: ":compression: hma_lm_eval_gemma4"
         command: .buildkite/k3_tests/multiprocess/run.sh hma_lm_eval_gemma4
         timeout_in_minutes: 60
@@ -209,8 +208,7 @@ steps:
       # Model-specific config (chunk size, mamba cache mode, tolerance, limit)
       # is defaulted in run-single-test.sh's hma_lm_eval_qwen3_5 branch.
       # EXTRA_LMCACHE_ARGS makes the separate-object-group path explicit;
-      # per-group sliding-window trimming is active because
-      # --force-retrieve-full-kvcache-benchmark-only is left off (its default).
+      # per-group sliding-window trimming is always active.
       - label: ":compression: hma_lm_eval_qwen3_5"
         command: .buildkite/k3_tests/multiprocess/run.sh hma_lm_eval_qwen3_5
         timeout_in_minutes: 60

@@ -268,16 +268,13 @@ class AttnWindowDesc:
     ``num_chunks_in_sw[g]`` is the number of trailing prefix chunks that must
     be present for object group ``g`` to serve a cache hit. ``-1`` means full
     attention (the whole prefix); ``w >= 1`` is a sliding window of ``w``
-    chunks (mamba is ``1``).
+    chunks.
     """
 
     num_chunks_in_sw: list[int]
 
     world_size: int = 1
     """Number of kv_rank shards per chunk (tensor-parallel world size)."""
-
-    force_retrieve_full_kv_benchmark_only: bool = False
-    """When True, treat every object group as full-attention during prefetch."""
 
     def __post_init__(self) -> None:
         if self.world_size < 1:
@@ -306,8 +303,6 @@ class AttnWindowDesc:
             True if the group attends to the whole prefix, False if it uses a
             bounded sliding window.
         """
-        if self.force_retrieve_full_kv_benchmark_only:
-            return True
         return self.num_chunks_in_sw[object_group_idx] < 0
 
 

@@ -54,7 +54,7 @@ def test_unfold_full_attention_needs_whole_prefix():
 def test_unfold_window_needs_only_last_w():
     assert unfold_range(4, 2) == (2, 4)
     assert unfold_range(1, 2) == (0, 1)  # window larger than prefix
-    assert unfold_range(5, 1) == (4, 5)  # mamba: last chunk only
+    assert unfold_range(5, 1) == (4, 5)  # w=1: last chunk only
 
 
 def test_unfold_empty_prefix():
@@ -115,14 +115,14 @@ def test_sliding_window_does_not_block_long_prefix_when_tail_present():
     assert mask.get_indices_list() == [0, 2, 4, 6, 8, 9, 10, 11]
 
 
-def test_mamba_window_one():
-    # mamba == window 1: only the last chunk of the prefix is needed.
+def test_window_one():
+    # window 1: only the last chunk of the prefix is needed.
     num_chunks = 4
     found = _make_presence(num_chunks, [[0, 1, 2, 3], [3]])
     hit, mask = fold_unfold(found, num_chunks, [FULL_ATTENTION_WINDOW, 1])
     assert hit == 4
     # chunk-major (2 groups): bit j*2 + g.
-    # full 0..3 -> {0,2,4,6}; mamba (w=1) chunk 3 -> {7}
+    # full 0..3 -> {0,2,4,6}; w=1 chunk 3 -> {7}
     assert mask.get_indices_list() == [0, 2, 4, 6, 7]
 
 
@@ -516,7 +516,7 @@ class TestEndToEndAgainstVllmStyleReference:
             ],
         )
 
-    def test_mamba_window_one(self):
+    def test_window_one(self):
         self._run(
             num_chunks=4,
             num_ranks=1,
@@ -540,12 +540,12 @@ class TestEndToEndAgainstVllmStyleReference:
         # mid-window sliding-window gap, with decoy later gaps a wrong algorithm
         # might trip on. 300 chunks x 4 ranks x 5 groups.
         #
-        # windows: [full, full, SW8, SW32, mamba]
+        # windows: [full, full, SW8, SW32, SW1]
         #   - g0 full: gap at chunk 150          -> full prefix capped at 150
         #   - g1 full: one rank of chunk 220 gone -> chunk 220 absent (rank test)
         #   - g2 SW8:  gaps at 10,11,12 (old)     -> must NOT affect a hit > 20
         #   - g3 SW32: gap at chunk 130           -> lengths 131..162 unservable
-        #   - g4 mamba: fully present
+        #   - g4 SW1:  fully present
         # The only length servable by all groups and <= 150 is 130 (g3's gap at
         # 130 blocks 131..162; g3 is servable again only at >= 163, beyond g0's
         # 150 cap). So the model-wide hit is exactly 130.

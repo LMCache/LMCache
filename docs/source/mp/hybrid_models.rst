@@ -113,8 +113,8 @@ groups** — the unit it stores and retrieves as one object. By default
 (``--no-separate-object-groups``, off) every layer stays in a single
 full-attention object group. Pass ``--separate-object-groups`` to give each
 distinct cross-chunk attention window its own object group: full-attention
-layers form one group, and each sliding-window size (mamba / GDN included)
-forms another.
+layers form one group, and each sliding-window size forms another. Layers
+that are neither (mamba / GDN recurrent state) are treated as full attention.
 
 .. code-block:: bash
 

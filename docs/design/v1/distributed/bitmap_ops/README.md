@@ -2,7 +2,7 @@
 
 Bitmap operators for computing a **cross-object-group prefix-cache hit**. A
 hybrid model splits one request across several object groups (full attention,
-sliding window, mamba) with different rules: full attention can serve a prefix
+sliding window) with different rules: full attention can serve a prefix
 of length `L` only if chunks `[0, L)` are present; a sliding window of `w` chunks
 needs only the last `min(w, L)`. Given each group's per-chunk presence, these
 operators produce the longest length **every** group can serve and the concrete

@@ -538,14 +538,11 @@ class StorageManager:
             if ent is not None and ent[0] == L1Error.SUCCESS and ent[1] is not None:
                 l1_presence.set(i)
 
-        windows = attn_desc.num_chunks_in_sw
-        if attn_desc.force_retrieve_full_kv_benchmark_only:
-            windows = [-1] * attn_desc.num_object_groups
         l1_hit_chunks, retain = fold_unfold_ranked(
             l1_presence,
             num_chunks,
             attn_desc.world_size,
-            windows,
+            attn_desc.num_chunks_in_sw,
         )
         retained_indices = retain.get_indices_list()
 

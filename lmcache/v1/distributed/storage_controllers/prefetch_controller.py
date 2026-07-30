@@ -140,15 +140,11 @@ def build_trim_mask(
     stride = attn_desc.num_object_groups * attn_desc.world_size
     if policy is TrimPolicy.PREFIX:
         num_chunks = num_keys // stride
-        windows = attn_desc.num_chunks_in_sw
-        # Benchmarking flag: treat every group as full-attention.
-        if attn_desc.force_retrieve_full_kv_benchmark_only:
-            windows = [-1] * attn_desc.num_object_groups
         hit_length, retain = fold_unfold_ranked(
             found,
             num_chunks,
             attn_desc.world_size,
-            windows,
+            attn_desc.num_chunks_in_sw,
         )
         return hit_length, retain
     if policy in (TrimPolicy.SEGMENTED_PREFIX, TrimPolicy.SPARSE):

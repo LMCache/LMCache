@@ -28,17 +28,12 @@ def _is_sliding_window_spec(spec: Any) -> bool:
     return any(cls.__name__ == "SlidingWindowSpec" for cls in type(spec).__mro__)
 
 
-def _is_mamba_spec(spec: Any) -> bool:
-    """Return whether the KV cache spec is a vLLM Mamba spec."""
-    return any(cls.__name__ == "MambaSpec" for cls in type(spec).__mro__)
-
-
 def _resolve_per_layer_sw_sizes(
     vllm_groups: Sequence[Any],
     layer_to_idx: Mapping[str, int],
     num_layers: int,
 ) -> list[int]:
-    """Per-layer window size in tokens: -1 (full), 0 (Mamba), or positive (SW).
+    """Per-layer window size in tokens: -1 (full attention) or positive (SW).
 
     Args:
         vllm_groups: vLLM ``KVCacheGroupSpec`` instances.
@@ -60,8 +55,6 @@ def _resolve_per_layer_sw_sizes(
             layer_spec = per_layer_specs[name] if per_layer_specs else spec
             if _is_sliding_window_spec(layer_spec):
                 per_layer_sw_size[layer_to_idx[name]] = layer_spec.sliding_window
-            elif _is_mamba_spec(layer_spec):
-                per_layer_sw_size[layer_to_idx[name]] = 0
     return per_layer_sw_size
 
 

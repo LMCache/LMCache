@@ -261,9 +261,6 @@ def _enc_attn_window(d: AttnWindowDesc) -> dict[str, object]:
     return {
         "num_chunks_in_sw": list(d.num_chunks_in_sw),
         "world_size": d.world_size,
-        "force_retrieve_full_kv_benchmark_only": (
-            d.force_retrieve_full_kv_benchmark_only
-        ),
     }
 
 
@@ -273,9 +270,6 @@ def _dec_attn_window(raw: dict[str, Any] | list[int]) -> AttnWindowDesc:
     return AttnWindowDesc(
         num_chunks_in_sw=list(raw["num_chunks_in_sw"]),
         world_size=raw.get("world_size", 1),
-        force_retrieve_full_kv_benchmark_only=raw.get(
-            "force_retrieve_full_kv_benchmark_only", False
-        ),
     )
 
 
