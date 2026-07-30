@@ -231,5 +231,107 @@ class DeviceMessagingFuture(MessagingFuture[T]):
         return DeviceMessagingFuture(raw_future, device)
 
 
+
+class LayerwiseDeviceMessagingFuture(MessagingFuture[T]):
+    """Future that carries per-layer IPC events for layerwise KV loading.
+
+    The raw future result is ``(list[bytes], T)`` where each bytes element
+    is a serialized IPC event handle for one layer.  The ``wait_for_layer``
+    method synchronises the current stream with a specific layer's event,
+    allowing per-layer overlap of H2D transfer and GPU compute.
+
+    ``query()`` and ``wait()`` check the LAST layer's event, i.e. the
+    entire transfer is complete.
+    """
+
+    def __init__(
+        self,
+        raw_future: MessagingFuture[tuple[list[bytes], T]],
+        device: Any | None = None,
+    ) -> None:
+        super().__init__()
+        self.raw_future_ = raw_future
+        self.layer_events_: list[Any] = []
+        self.result_: T | None = None
+        self.device_ = device if device is not None else torch_dev.current_device()
+        self._event_backend = get_event_ipc_backend(self.device_)
+        self._event_backend.check_event_support(self.device_)
+        self._resolved = False
+
+    def _on_raw_future_complete(self) -> None:
+        if self._resolved:
+            return
+        event_bytes_list, result = self.raw_future_.result()
+        self.result_ = result
+        self.layer_events_ = [
+            self._event_backend.import_event(eb, self.device_)
+            for eb in event_bytes_list
+        ]
+        self._resolved = True
+
+    def wait_for_layer(self, layer_idx: int) -> None:
+        """Block until a specific layer's H2D transfer is complete.
+
+        This waits on the MQ response first (if not yet received), then
+        synchronises the current CUDA/SYCL stream with the event for
+        ``layer_idx``.
+
+        Args:
+            layer_idx: Global layer index (0-based).
+        """
+        if not self._resolved:
+            self.raw_future_.wait()
+            self._on_raw_future_complete()
+        if layer_idx < len(self.layer_events_):
+            self._event_backend.synchronize_event(
+                self.layer_events_[layer_idx], self.device_
+            )
+
+    def wait(self, timeout: Optional[float] = None) -> bool:
+        if self.layer_events_:
+            # Already resolved — wait on the last event (all layers done)
+            self._event_backend.synchronize_event(
+                self.layer_events_[-1], self.device_
+            )
+            return True
+        flag = self.raw_future_.wait(timeout)
+        if not flag:
+            return False
+        self._on_raw_future_complete()
+        if self.layer_events_:
+            self._event_backend.synchronize_event(
+                self.layer_events_[-1], self.device_
+            )
+        return True
+
+    def result(self, timeout: Optional[float] = None) -> T:
+        flag = self.wait(timeout)
+        if not flag:
+            raise LMCacheTimeoutError(
+                "LayerwiseDeviceMessagingFuture result not available "
+                "within timeout"
+            )
+        assert self.result_ is not None
+        return self.result_
+
+    def query(self) -> bool:
+        if self.layer_events_:
+            return self._event_backend.query_event(self.layer_events_[-1])
+        if self.raw_future_.query():
+            self._on_raw_future_complete()
+            if self.layer_events_:
+                return self._event_backend.query_event(self.layer_events_[-1])
+            return True
+        return False
+
+    def set_result(self, result: T) -> None:
+        raise NotImplementedError(
+            "LayerwiseDeviceMessagingFuture does not support set_result"
+        )
+
+    @property
+    def num_layers(self) -> int:
+        return len(self.layer_events_)
+
 # Backward-compatible alias for existing imports.
 CUDAMessagingFuture = DeviceMessagingFuture

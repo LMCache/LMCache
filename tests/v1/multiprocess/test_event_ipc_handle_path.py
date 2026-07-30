@@ -176,7 +176,7 @@ def test_worker_exports_events_through_platform_backend(
     )
     assert sent[2] == (
         RequestType.RETRIEVE,
-        ["key", 1, [[0]], b"completion-handle", 2],
+        ["key", 1, [[0]], b"completion-handle", 2, False],
     )
     assert [call[0] for call in backend.calls] == [
         "check",
@@ -258,6 +258,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
             num_kernel_groups=1,
             object_groups=[SimpleNamespace(kernel_group_indices=[0])],
             get_attn_desc=lambda: SimpleNamespace(num_chunks_in_sw=[-1]),
+            kernel_groups=[SimpleNamespace(num_layers=1)],
         ),
         calculate_num_blocks=lambda chunk_size, group_idx: 1,
     )

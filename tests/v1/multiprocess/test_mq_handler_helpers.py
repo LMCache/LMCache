@@ -149,7 +149,8 @@ def retrieve_handler(
     gpu_block_ids: list[list[int]],
     event_handler: bytes,
     skip_first_n_tokens: int = 0,
-) -> tuple[bytes, bool]:
+    layerwise: bool = False,
+) -> tuple[bytes | list[bytes], bool]:
     """
     Dummy handler for RETRIEVE requests.
 

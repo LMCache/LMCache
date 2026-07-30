@@ -553,7 +553,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         Args:
             layer_name: the name of that layer
         """
-        return
+        self.worker_adapter.wait_for_layer_load(layer_name)
 
     def save_kv_layer(
         self,

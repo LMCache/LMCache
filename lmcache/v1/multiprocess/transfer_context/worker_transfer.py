@@ -17,7 +17,10 @@ from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import RegisterEngineDrivenContextPayload
-from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.futures import (
+    LayerwiseDeviceMessagingFuture,
+    MessagingFuture,
+)
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType
@@ -581,6 +584,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         event: IPCEvent,
         _blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
+        layerwise: bool = False,
     ) -> MessagingFuture:
         """Submit a handle-based retrieve ordered by ``event``.
 
@@ -613,11 +617,17 @@ class LMCacheDrivenTransferContext(TransferContext):
                 "Call register() before submit_retrieve()."
             )
         event_ipc_handle = self._event_backend.export_event(event, self._device)
-        return self._send_request(
+        raw_future = self._send_request(
             self._mq_client,
             RequestType.RETRIEVE,
-            [key, instance_id, block_ids, event_ipc_handle, skip_first_n_tokens],
-        ).to_device_future(device=self._device)
+            [key, instance_id, block_ids, event_ipc_handle, skip_first_n_tokens,
+             layerwise],
+        )
+        if layerwise:
+            return LayerwiseDeviceMessagingFuture(
+                raw_future, device=self._device
+            )
+        return raw_future.to_device_future(device=self._device)
 
     def close(self) -> None:
         """Release the message queue and cached event-backend state."""

@@ -225,7 +225,7 @@ def retrieve_keys(
         block_ids = gpu_block_ids[start:end]
         future = client.submit_request(
             RequestType.RETRIEVE,
-            [key, instance_id, [block_ids], event.ipc_handle(), 0],
+            [key, instance_id, [block_ids], event.ipc_handle(), 0, False],
             get_response_class(RequestType.RETRIEVE),
         )
         result = future.to_device_future().result(timeout=timeout)
