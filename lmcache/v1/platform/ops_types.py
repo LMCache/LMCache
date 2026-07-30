@@ -100,6 +100,10 @@ class EngineKVFormat(IntEnum):
     # NL_X_NB_NH_BS_CS but tokens before heads.
     NL_X_NB_BS_NH_CS = 13
 
+    # vLLM DSA indexer k-cache [NB,BS,132] u8, paged [BSxvals][BSxscales];
+    # c_ops only (no pure-torch transfer path)
+    NL_X_NB_BSV_BSS = 14
+
 
 # Backward-compat alias
 GPUKVFormat = EngineKVFormat

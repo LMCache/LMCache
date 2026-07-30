@@ -8,7 +8,7 @@ retrieve scatters into the request's paged blocks.
 
 # Standard
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from queue import Empty as QueueEmpty
 from queue import Queue
 from typing import TYPE_CHECKING, Any
@@ -88,6 +88,11 @@ _TORCH_TO_AT_SCALAR = {
 }
 
 
+# Default for cb_register_rope's wire-typed group_rot parameter (legacy: no
+# declared windows). Never mutated — the handler only iterates it.
+_EMPTY_GROUP_ROT: list[list[int]] = []
+
+
 @dataclass
 class _CBRopeState:
     """Per-instance RoPE state IPC-shared from vLLM; dangles on reallocate.
@@ -101,6 +106,45 @@ class _CBRopeState:
     is_neox_style: bool  # NeoX = contiguous halves; else GPT-J.
     cos_sin_caches: list[torch.Tensor]
     group_to_cache: list[int]  # engine group idx -> cache idx; empty = cache 0
+    # Per-group rotation window ``(offset_elems, width_elems)``; ``None``
+    # skips re-RoPE for the group, empty list = legacy inferred geometry.
+    # Required for MLA: inference would rotate the latent's content dims.
+    group_rot: "list[tuple[int, int] | None]" = field(default_factory=list)
+
+    def rot_for_group(
+        self, engine_group_idx: int, dtype: "torch.dtype | None" = None
+    ) -> "tuple[int, int] | None":
+        """The rotation window for one kernel group.
+
+        Args:
+            engine_group_idx: The kernel group's engine group index.
+            dtype: The kernel group's buffer dtype, when known. One engine
+                group can hold several *kernel* groups (GLM: the bf16 latent
+                and the uint8 fp8 index cache both sit in engine group 0), so
+                under a DECLARED map a non-float kernel group is skipped —
+                the rope kernel cannot rotate quantized rows, and the
+                declared window describes the family's float plane. Legacy
+                registrations keep today's behavior (no dtype-based skip).
+
+        Returns:
+            ``(offset_elems, width_elems)``, or ``None`` when the group's
+            re-RoPE is skipped (declared ``[]``, or non-float under a
+            declared map). Legacy registrations (empty ``group_rot``) get
+            ``(0, head_size)``.
+
+        Raises:
+            RuntimeError: If ``engine_group_idx`` is outside a non-empty map.
+        """
+        if not self.group_rot:
+            return (0, self.head_size)
+        if dtype is not None and not dtype.is_floating_point:
+            return None
+        if engine_group_idx >= len(self.group_rot):
+            raise RuntimeError(
+                f"CB re-RoPE: engine group {engine_group_idx} has no rope "
+                f"geometry (map covers {len(self.group_rot)} groups)."
+            )
+        return self.group_rot[engine_group_idx]
 
     def cache_for_group(self, engine_group_idx: int) -> torch.Tensor:
         """The cos/sin cache for one engine group.
@@ -394,8 +438,13 @@ def _group_slot_mappings(
 
 
 def _cb_group_rope_geometry(
-    group: Any, kv_size: int, hidden_dim: int, head_size: int, group_idx: int
-) -> "tuple[bool, int, int]":
+    group: Any,
+    kv_size: int,
+    hidden_dim: int,
+    head_size: int,
+    group_idx: int,
+    rot: "tuple[int, int] | None" = None,
+) -> "tuple[bool, int, int, int]":
     """Per-group re-RoPE geometry rules, shared by the batched rope path and
     the retrieve-plan builder so they cannot drift.
 
@@ -404,14 +453,23 @@ def _cb_group_rope_geometry(
     fused packing is the M3 key-only index side cache; kv_size==2 is main
     K/V. In every case only the K plane is rotated.
 
+    ``rot`` is the declared ``(offset_elems, width_elems)`` rotation window;
+    offset > 0 means MLA (rope dims trail the row) — the row is one "head"
+    and only ``[offset, offset + width)`` rotates. MLA groups must arrive
+    with ``rot`` set: undeclared, a 576-wide latent passes the inference
+    checks below as 9 x 64 heads and its content dims get rotated.
+
     Returns:
-        ``(fused_packed, per_head, n_heads)`` — per-head width is
-        ``2 * head_size`` for fused-packed layouts.
+        ``(fused_packed, per_head, n_heads, rot_offset)`` — per-head width is
+        ``2 * head_size`` for fused-packed layouts; ``rot_offset`` is the
+        element offset of the rotation window within each per-head row (0
+        for every non-MLA layout).
 
     Raises:
         RuntimeError: On a compressed (compress_ratio != 1) layout, a
-            kv_size other than 2 (K/V) or 1 (key-only index), or a
-            head_size/hidden_dim mismatch.
+            kv_size other than 2 (K/V) or 1 (key-only index), a
+            head_size/hidden_dim mismatch, or a declared window that does
+            not fit the row.
     """
     if group.tokens_per_block != group.slots_per_block:
         raise RuntimeError(
@@ -420,11 +478,26 @@ def _cb_group_rope_geometry(
             f"slots_per_block={group.slots_per_block}); "
             f"compressed layouts unsupported."
         )
+    if rot is not None and rot[0] > 0:
+        rot_offset, rot_width = rot
+        if kv_size != 1:
+            raise RuntimeError(
+                f"CB v3: group {group_idx} declares an MLA rope window "
+                f"{rot} but has kv_size={kv_size}; MLA latents are a "
+                "single plane (kv_size 1)."
+            )
+        if rot_offset + rot_width != hidden_dim:
+            raise RuntimeError(
+                f"CB v3: group {group_idx} rope window {rot} does not end "
+                f"the row (hidden_dim={hidden_dim}); MLA latents are "
+                "[content | rope]."
+            )
+        return False, hidden_dim, 1, rot_offset
     if kv_size not in (1, 2):
         raise RuntimeError(
             f"CB v3: group {group_idx} has kv_size={kv_size}; only K/V "
-            "(2), fused-packed K/V, and key-only (1) layouts are "
-            "supported (MLA unsupported)."
+            "(2), fused-packed K/V, key-only (1), and declared-MLA "
+            "layouts are supported."
         )
     _ekf = getattr(group, "engine_kv_format", None)
     # Both spellings of blocks-first fused K/V must be recognised. The vLLM
@@ -445,7 +518,7 @@ def _cb_group_rope_geometry(
             f"CB rope: group {group_idx} hidden_dim ({hidden_dim}) not a "
             f"multiple of per-head width ({per_head}; fused={fused_packed})."
         )
-    return fused_packed, per_head, n_heads
+    return fused_packed, per_head, n_heads, 0
 
 
 class BlendV3Module(InstanceLivenessTarget):
@@ -584,6 +657,11 @@ class BlendV3Module(InstanceLivenessTarget):
         head_size: int,
         is_neox_style: bool,
         group_to_cache: list[int],
+        # Annotation must equal the protocol payload class exactly — the MQ
+        # server's add_handler signature check (mq.py same_type) is strict.
+        # Direct (non-wire) callers may still pass tuples/None entries; the
+        # normalization below accepts them.
+        group_rot: list[list[int]] = _EMPTY_GROUP_ROT,
     ) -> None:
         """Bolt CB re-RoPE state onto an already-registered KV-cache instance.
 
@@ -600,12 +678,20 @@ class BlendV3Module(InstanceLivenessTarget):
             is_neox_style (bool): True for NeoX (contiguous halves), else GPT-J.
             group_to_cache (list[int]): Per-engine-group index into the
                 caches list; empty means every group uses cache 0.
+            group_rot: Per-engine-group rotation window ``(offset_elems,
+                width_elems)`` into each token row, or ``None`` per entry to
+                skip that group's re-RoPE. Empty/omitted = legacy inference
+                (rotate ``head_size`` dims at offset 0). MLA models must
+                declare this — e.g. GLM/DeepSeek latents are
+                ``(kv_lora_rank, qk_rope_head_dim)`` — because a single-plane
+                MLA row is indistinguishable from a key-only cache to the
+                legacy inference and would get its content dims rotated.
 
         Raises:
             ValueError: If ``instance_id`` has no registered KV cache, the
-                cache list is empty, or ``group_to_cache`` references a
-                missing cache or does not cover every engine group of the
-                registered model.
+                cache list is empty, ``group_to_cache`` references a missing
+                cache or does not cover every engine group of the registered
+                model, or a ``group_rot`` entry is malformed.
         """
         entry = self._transfer_module.get_and_touch_context_entry(instance_id)
         if entry is None:
@@ -639,6 +725,22 @@ class BlendV3Module(InstanceLivenessTarget):
                     f"to index {max_eg_idx}."
                 )
 
+        # Normalize declared rope windows (serialization turns tuples into
+        # lists); validate here so a bad registration fails loudly instead of
+        # mid-retrieve.
+        norm_rot: "list[tuple[int, int] | None]" = []
+        for eg_idx, rot_entry in enumerate(group_rot or []):
+            if rot_entry is None or len(rot_entry) == 0:
+                # None (direct call) / [] (wire encoding): skip this group.
+                norm_rot.append(None)
+                continue
+            if len(rot_entry) != 2 or int(rot_entry[0]) < 0 or int(rot_entry[1]) <= 0:
+                raise ValueError(
+                    f"group_rot[{eg_idx}] = {rot_entry!r}: expected "
+                    "(offset >= 0, width > 0) or None."
+                )
+            norm_rot.append((int(rot_entry[0]), int(rot_entry[1])))
+
         cos_sin_caches: list[torch.Tensor] = []
         for cache_idx, cache_ipc in enumerate(cos_sin_caches_ipc):
             cos_sin_cache = cache_ipc.to_tensor()
@@ -665,12 +767,13 @@ class BlendV3Module(InstanceLivenessTarget):
             is_neox_style=is_neox_style,
             cos_sin_caches=cos_sin_caches,
             group_to_cache=list(group_to_cache),
+            group_rot=norm_rot,
         )
 
         logger.info(
             "Registered CB rope state for instance %d "
             "(%d cache(s), shapes=%s dtype=%s, head_size=%d, is_neox=%s, "
-            "group_map=%s)",
+            "group_map=%s, group_rot=%s)",
             instance_id,
             len(cos_sin_caches),
             [tuple(c.shape) for c in cos_sin_caches],
@@ -678,6 +781,7 @@ class BlendV3Module(InstanceLivenessTarget):
             head_size,
             is_neox_style,
             "uniform" if not group_to_cache else str(group_to_cache),
+            "legacy" if not norm_rot else str(norm_rot),
         )
 
     def cb_unregister_rope(self, instance_id: int) -> None:
@@ -1580,17 +1684,29 @@ class BlendV3Module(InstanceLivenessTarget):
                 gpu_context.get_temp_kernel_group_buffer(slot_idx, group_idx)
                 for slot_idx in range(batch_len)
             ]
+            rot = rope_state.rot_for_group(group.engine_group_idx, all_slots[0].dtype)
+            if rot is None:
+                # Skipped group (declared [], or quantized under a declared
+                # map): scattered as-is, positions left stale.
+                continue
             num_layers, slots, hidden_dim = all_slots[0].shape[1:]
-            fused_packed, per_head, n_heads = _cb_group_rope_geometry(
+            fused_packed, per_head, n_heads, rot_offset = _cb_group_rope_geometry(
                 group,
                 int(all_slots[0].shape[0]),
                 int(hidden_dim),
                 rope_state.head_size,
                 group_idx,
+                rot,
             )
             # Per-group rope cache: dual-RoPE models rotate each
             # kernel group with its own theta's cos/sin.
             group_cos_sin = rope_state.cache_for_group(group.engine_group_idx)
+            if rot_offset > 0 and int(group_cos_sin.shape[1]) != rot[1]:
+                raise RuntimeError(
+                    f"CB re-RoPE: group {group_idx} declares rope width "
+                    f"{rot[1]} but the cos/sin cache has rot_dim "
+                    f"{int(group_cos_sin.shape[1])}."
+                )
             # slot ramp tiled across layers is invariant per (num_layers,
             # slots) — cache it; each shifted slot then just adds its offset.
             device = all_slots[0].device
@@ -1610,7 +1726,23 @@ class BlendV3Module(InstanceLivenessTarget):
                 k_view = all_slots[slot_idx][0].reshape(
                     num_layers * slots, n_heads, per_head
                 )
-                if fused_packed:
+                if rot_offset > 0:
+                    # MLA latent: rotate only the trailing rope window. The
+                    # slice advances data_ptr to the window start; the kernel
+                    # addresses rows via the explicit head_stride (the full
+                    # row width), so the non-contiguous view is safe. It then
+                    # rotates rot_dim (= window width) dims from that base —
+                    # the content dims [0, rot_offset) are never touched.
+                    lmc_ops.rotary_embedding_k_fused_strided(
+                        old_st + slot_positions_rep,
+                        cur_st + slot_positions_rep,
+                        k_view[..., rot_offset:],
+                        per_head - rot_offset,  # window width
+                        per_head,  # head_stride: the full latent row
+                        group_cos_sin,
+                        rope_state.is_neox_style,
+                    )
+                elif fused_packed:
                     # Strided kernel rotates only the K half of each slot.
                     lmc_ops.rotary_embedding_k_fused_strided(
                         old_st + slot_positions_rep,
@@ -1717,6 +1849,45 @@ class BlendV3Module(InstanceLivenessTarget):
                 int(buf0.shape[2]),
                 int(buf0.shape[3]),
             )
+            group_bs = group.tokens_per_block
+            spec_common = dict(
+                paged_kv_ptrs=gpu_context.get_kernel_group_kv_pointers(
+                    group_idx
+                ).data_ptr(),
+                temp_buffer_ptrs=[
+                    gpu_context.get_temp_kernel_group_buffer(slot, group_idx).data_ptr()
+                    for slot in range(max_batch)
+                ],
+                num_layers=num_layers,
+                slot_tokens=slot_tokens,
+                hidden_elems=hidden_dim,
+                element_size=buf0.element_size(),
+                engine_kv_format=gpu_context.get_engine_kv_format(group_idx),
+                page_buffer_size=group.shape_desc.nb * group_bs,
+                block_size=group_bs,
+                head_size=rope_state.head_size,
+                slot_mapping_base=0,
+                slot_mapping_capacity=0,
+                is_neox=rope_state.is_neox_style,
+            )
+            rot = rope_state.rot_for_group(group.engine_group_idx, buf0.dtype)
+            if rot is None:
+                # Skipped group (declared [] or quantized): staging + scatter
+                # only. cos_sin_cache == 0 disables native rope, so the
+                # rope-only fields are never read and the dtype gate below
+                # must not run (a uint8 group would knock every group off
+                # the native plan).
+                group_specs.append(
+                    lmc_ops.CBGroupSpec(
+                        cos_sin_cache=0,
+                        rot_dim=0,
+                        rope_num_kv_heads=1,
+                        rope_head_stride=hidden_dim,
+                        key_scalar_type=0,
+                        **spec_common,
+                    )
+                )
+                continue
             at_scalar = _TORCH_TO_AT_SCALAR.get(buf0.dtype)
             if at_scalar is None:
                 return None
@@ -1724,45 +1895,29 @@ class BlendV3Module(InstanceLivenessTarget):
                 # Same rules as _apply_cb_rope_batched (shared helper); the
                 # planner declines instead of raising -- the Python fallback
                 # handles (or reports) the layout.
-                _fused, per_head, n_heads = _cb_group_rope_geometry(
+                _fused, per_head, n_heads, rot_offset = _cb_group_rope_geometry(
                     group,
                     int(buf0.shape[0]),
                     hidden_dim,
                     rope_state.head_size,
                     group_idx,
+                    rot,
                 )
             except RuntimeError:
                 return None
             group_cos_sin = rope_state.cache_for_group(group.engine_group_idx)
-            group_bs = group.tokens_per_block
+            if rot_offset > 0 and int(group_cos_sin.shape[1]) != rot[1]:
+                return None
 
             group_specs.append(
                 lmc_ops.CBGroupSpec(
-                    paged_kv_ptrs=gpu_context.get_kernel_group_kv_pointers(
-                        group_idx
-                    ).data_ptr(),
-                    temp_buffer_ptrs=[
-                        gpu_context.get_temp_kernel_group_buffer(
-                            slot, group_idx
-                        ).data_ptr()
-                        for slot in range(max_batch)
-                    ],
-                    num_layers=num_layers,
-                    slot_tokens=slot_tokens,
-                    hidden_elems=hidden_dim,
-                    element_size=buf0.element_size(),
-                    engine_kv_format=gpu_context.get_engine_kv_format(group_idx),
-                    page_buffer_size=group.shape_desc.nb * group_bs,
-                    block_size=group_bs,
-                    head_size=rope_state.head_size,
-                    slot_mapping_base=0,
-                    slot_mapping_capacity=0,
                     cos_sin_cache=group_cos_sin.data_ptr(),
                     rot_dim=int(group_cos_sin.shape[1]),
                     rope_num_kv_heads=n_heads,
                     rope_head_stride=per_head,
                     key_scalar_type=at_scalar,
-                    is_neox=rope_state.is_neox_style,
+                    rope_base_offset=rot_offset * buf0.element_size(),
+                    **spec_common,
                 )
             )
         object_group_buffers = [
@@ -2169,10 +2324,16 @@ class BlendV3Module(InstanceLivenessTarget):
             )
             vllm_event.wait(stream=gpu_context.stream)
 
+            # Stage marks for the scatter_ms log line (CPU enqueue wall time):
+            # fetch = L1 prefetched read, plan = flat-plan table build,
+            # exec = native kernel enqueue (H2D + re-RoPE + scatter).
+            _stage_ms: dict[str, float] = {}
+            _stage_t = time.perf_counter()
             try:
                 with self._ctx.storage_manager.read_prefetched_results(
                     all_obj_keys
                 ) as memory_objs:
+                    _stage_ms["fetch"] = (time.perf_counter() - _stage_t) * 1000
                     if memory_objs is None:
                         # Read failed: return a valid server event + False, never
                         # the client's own handle (self-import raises
@@ -2239,17 +2400,21 @@ class BlendV3Module(InstanceLivenessTarget):
                     # Fast path: one native call for the whole request; the
                     # per-wave Python loop is the fallback (returns None on old
                     # c_ops, non-lazy objects, max_batch < 2, or size mismatch).
+                    _stage_t = time.perf_counter()
                     native_flat = self._build_cb_retrieve_plan_flat(
                         gpu_context, rope_state, resolved_groups, runs, max_batch
                     )
+                    _stage_ms["plan"] = (time.perf_counter() - _stage_t) * 1000
                     if native_flat is not None:
                         plan_group_specs, plan_tables, _plan_keepalive = native_flat
+                        _stage_t = time.perf_counter()
                         lmc_ops.execute_cb_retrieve_plan_flat(
                             gpu_context.device,
                             LazyMemoryAllocator.PIN_CHUNK_SIZE,
                             plan_group_specs,
                             *plan_tables,
                         )
+                        _stage_ms["exec"] = (time.perf_counter() - _stage_t) * 1000
                         runs = []  # plan covers every wave; skip the loop
 
                     for run in runs:
@@ -2336,12 +2501,14 @@ class BlendV3Module(InstanceLivenessTarget):
         _scatter_ms = (time.perf_counter() - _retrieve_t0) * 1000
         logger.info(
             "Retrieved pre-computed for %d match results into request %s "
-            "paged blocks (scatter_ms=%.2f, non_shifted=%d shifted=%d)",
+            "paged blocks (scatter_ms=%.2f, non_shifted=%d shifted=%d, "
+            "stages_ms=%s)",
             len(cb_match_result),
             key.request_id,
             _scatter_ms,
             n_non_shifted,
             n_shifted,
+            {k: round(v, 1) for k, v in _stage_ms.items()},
         )
         self._event_bus.publish_on_stream(
             gpu_context.cupy_stream,

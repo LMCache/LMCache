@@ -65,6 +65,8 @@ class VLLM_Detector(EngineDetector):
                 if is_hnd:
                     return lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS, kv_caches
                 return lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS, kv_caches
-        if list_depth == 1 and tensor_ndim == 3:  # MLA
+        if list_depth == 1 and tensor_ndim == 3:  # MLA (or DSA indexer cache)
+            if first_tensor.dtype == torch.uint8 and int(first_tensor.shape[-1]) == 132:
+                return lmc_ops.EngineKVFormat.NL_X_NB_BSV_BSS, kv_caches
             return lmc_ops.EngineKVFormat.NL_X_NB_BS_HS, kv_caches
         return None, kv_caches

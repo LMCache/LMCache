@@ -15,6 +15,7 @@ import time
 
 # Third Party
 import pytest
+import torch
 
 # ---------------------------------------------------------------------------
 # S1: async fingerprint registration
@@ -214,6 +215,8 @@ class _FakeTensor:
     def __init__(self, shape):
         self.shape = shape
         self.device = "cpu"
+        # rot_for_group takes the buffer dtype (declared-map quant skip).
+        self.dtype = torch.bfloat16
 
     def __getitem__(self, idx):
         # tmp[0] selects K from the (2, num_layers, slots, hidden_dim) tensor.
@@ -333,13 +336,18 @@ def test_batched_rope_raises_on_compressed_layout():
     gpu_context = MagicMock()
     gpu_context.kv_layer_groups_manager.num_kernel_groups = 1
     gpu_context.kv_layer_groups_manager.kernel_groups = [
-        SimpleNamespace(tokens_per_block=8, slots_per_block=4)
+        SimpleNamespace(tokens_per_block=8, slots_per_block=4, engine_group_idx=0)
     ]
     gpu_context.get_temp_kernel_group_buffer.return_value = SimpleNamespace(
-        shape=(2, 2, 4, 64)
+        shape=(2, 2, 4, 64), dtype=torch.bfloat16
     )
-    rope_state = SimpleNamespace(
-        head_size=32, cos_sin_cache=MagicMock(), is_neox_style=True
+    # Real rope state: the batched path resolves the group's rot window
+    # (rot_for_group) before the geometry check that this test targets.
+    rope_state = v3_mod._CBRopeState(
+        head_size=32,
+        is_neox_style=True,
+        cos_sin_caches=[MagicMock()],
+        group_to_cache=[],
     )
 
     eng = MagicMock(spec=v3_mod.BlendV3Module)
