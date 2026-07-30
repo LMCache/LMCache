@@ -609,3 +609,104 @@ class TestBatchedGetBlocking:
         results = local_disk_backend.batched_get_blocking([])
         assert results == []
         local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_read_failure_returns_none_without_crash(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """A read failure for one key yields None for that key, not the batch."""
+        good_key = create_test_key(260)
+        bad_key = create_test_key(261)
+        expected = self._write_key(local_disk_backend, good_key)
+        self._write_key(local_disk_backend, bad_key)
+
+        original_read_file = local_disk_backend.read_file
+
+        def failing_read_file(key, buffer, path):
+            if key == bad_key:
+                raise OSError("Simulated disk error")
+            return original_read_file(key, buffer, path)
+
+        with patch.object(
+            local_disk_backend, "read_file", side_effect=failing_read_file
+        ):
+            results = local_disk_backend.batched_get_blocking([good_key, bad_key])
+
+        assert len(results) == 2
+        assert results[0] is not None
+        assert bytes(results[0].byte_array) == expected
+        assert results[1] is None
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_incomplete_metadata_treated_as_miss(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """Metadata without shape/dtype/fmt is a miss, not an allocate(None) call.
+
+        ``DiskCacheMetadata`` declares ``shape``/``dtype``/``fmt`` as optional, so
+        an entry can exist without the fields needed to size a staging buffer.
+        Such a key must be reported as a miss and must not reach the allocator.
+        """
+        good_key = create_test_key(270)
+        incomplete_key = create_test_key(271)
+        expected = self._write_key(local_disk_backend, good_key)
+
+        # Register an entry that carries only path/size -- no shape/dtype/fmt.
+        path = local_disk_backend._key_to_path(incomplete_key)
+        with open(path, "wb") as f:
+            f.write(b"\x00" * 16)
+        with local_disk_backend.disk_lock:
+            local_disk_backend.dict[incomplete_key] = DiskCacheMetadata(
+                path=path, size=16
+            )
+
+        with patch.object(
+            local_disk_backend.local_cpu_backend,
+            "allocate",
+            wraps=local_disk_backend.local_cpu_backend.allocate,
+        ) as spy_allocate:
+            results = local_disk_backend.batched_get_blocking(
+                [good_key, incomplete_key]
+            )
+
+        assert len(results) == 2
+        assert results[0] is not None
+        assert bytes(results[0].byte_array) == expected
+        assert results[1] is None
+        # Only the complete key should have been allocated for.
+        assert spy_allocate.call_count == 1
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_allocation_failure_returns_none(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """A failed staging allocation yields None for that key without crashing.
+
+        Exhausting the pinned CPU staging pool makes ``allocate()`` return None.
+        That must surface as a miss rather than propagating None into the read
+        path.
+        """
+        keys = [create_test_key(i) for i in range(280, 283)]
+        for key in keys:
+            self._write_key(local_disk_backend, key)
+
+        original_allocate = local_disk_backend.local_cpu_backend.allocate
+        calls = {"n": 0}
+
+        def failing_allocate(shape, dtype, fmt=None, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                return None
+            return original_allocate(shape, dtype, fmt, **kwargs)
+
+        with patch.object(
+            local_disk_backend.local_cpu_backend,
+            "allocate",
+            side_effect=failing_allocate,
+        ):
+            results = local_disk_backend.batched_get_blocking(keys)
+
+        assert len(results) == len(keys)
+        assert results[1] is None, "key with a failed allocation must be a miss"
+        assert results[0] is not None
+        assert results[2] is not None
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
