@@ -384,9 +384,7 @@ class ShmTransferStrategy(TransferStrategy):
                 finally:
                     g_reserved_set = set(g_reserved)
                     unused_keys = [
-                        obj_key
-                        for obj_key in reserved
-                        if obj_key not in g_reserved_set
+                        obj_key for obj_key in reserved if obj_key not in g_reserved_set
                     ]
                     if unused_keys:
                         self._storage_manager.finish_write(unused_keys)
