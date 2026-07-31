@@ -23,6 +23,21 @@ class _FakeMusaEvent:
         """Reconstruct an event from an IPC handle."""
         return cls(interprocess=True)
 
+    def ipc_handle(self) -> bytes:
+        return b"event-handle"
+
+    def record(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+    def wait(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+    def query(self) -> bool:
+        return True
+
+    def synchronize(self) -> None:
+        return None
+
 
 class _FakeDevice:
     """Minimal device object exposing only ``type`` for factory routing tests."""
@@ -97,10 +112,12 @@ def test_musa_handle_transfer_requires_event_and_block_transfer_capabilities(
     from lmcache.v1.platform.musa import ipc_wrapper
 
     torch_musa = SimpleNamespace(
-        ipc_get_mem_handle=lambda _tensor: b"handle",
-        ipc_open_mem_handle=lambda _handle, nbytes, _device: torch.empty(
-            nbytes,
-            dtype=torch.uint8,
+        ipc=SimpleNamespace(
+            export_tensor=lambda _tensor: b"handle",
+            open_tensor=lambda _handle, **_kwargs: SimpleNamespace(
+                tensor=torch.empty(1, dtype=torch.uint8),
+                close=lambda: None,
+            ),
         ),
     )
 
@@ -121,10 +138,12 @@ def test_musa_handle_transfer_available_when_all_capabilities_present(
     from lmcache.v1.platform.musa import ipc_wrapper
 
     torch_musa = SimpleNamespace(
-        ipc_get_mem_handle=lambda _tensor: b"handle",
-        ipc_open_mem_handle=lambda _handle, nbytes, _device: torch.empty(
-            nbytes,
-            dtype=torch.uint8,
+        ipc=SimpleNamespace(
+            export_tensor=lambda _tensor: b"handle",
+            open_tensor=lambda _handle, **_kwargs: SimpleNamespace(
+                tensor=torch.empty(1, dtype=torch.uint8),
+                close=lambda: None,
+            ),
         ),
         Event=_FakeMusaEvent,
     )
@@ -144,7 +163,9 @@ def test_musa_handle_transfer_rejects_incomplete_torch_musa_runtime() -> None:
     # First Party
     from lmcache.v1.platform.musa import ipc_wrapper
 
-    torch_musa = SimpleNamespace(ipc_get_mem_handle=lambda _tensor: b"handle")
+    torch_musa = SimpleNamespace(
+        ipc=SimpleNamespace(export_tensor=lambda _tensor: b"handle")
+    )
 
     assert ipc_wrapper.check_torch_musa_ipc_support(torch_musa) is False
 

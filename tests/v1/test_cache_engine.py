@@ -15,7 +15,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 from lmcache.utils import (
     CacheEngineKey,
     mock_up_broadcast_fn,
@@ -43,6 +43,12 @@ from .utils import (
 # unset and tempfile falls back to its default. Direct-I/O-backed paths are
 # required for GDS tests (cuFile err=5027 on overlayfs/tmpfs).
 _TEST_TMPDIR = os.environ.get("LMCACHE_TEST_TMPDIR") or None
+
+# These tests exercise CUDA-only connector/runtime behavior.
+pytestmark = pytest.mark.skipif(
+    not (torch_dev.is_available() and torch_device_type == "cuda"),
+    reason="Requires CUDA backend",
+)
 
 
 def get_expected_count(token_len, save_unfull_chunk, chunk_size):

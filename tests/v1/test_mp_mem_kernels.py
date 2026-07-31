@@ -2,7 +2,7 @@
 
 # Standard
 import random
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 
 # Third Party
 import pytest
@@ -16,8 +16,19 @@ pytest.importorskip(
 # First Party
 import lmcache.c_ops as lmc_ops
 
-# Skip all tests if cuda is unavailable
-pytestmark = pytest.mark.cuda
+# Skip all tests unless the active backend is CUDA.
+pytestmark = [
+    pytest.mark.cuda,
+    pytest.mark.skipif(
+        not (torch_dev.is_available() and torch_device_type == "cuda"),
+        reason="Requires CUDA backend",
+    ),
+]
+
+
+def _to_signed_int64(ptr: int) -> int:
+    """Convert an address-like integer to signed int64 representation."""
+    return ptr - (1 << 64) if ptr >= (1 << 63) else ptr
 # ---------------------------------------------------------------------------
 # Tensor factories (ported from kernel harness)
 # ---------------------------------------------------------------------------
@@ -254,9 +265,9 @@ def call_block_kernel(
     shape_desc.hs = hs
     shape_desc.element_size = vllm_tensors[0].element_size()
 
-    ptrs = [t.data_ptr() for t in vllm_tensors]
+    ptrs = [_to_signed_int64(t.data_ptr()) for t in vllm_tensors]
     paged_buffer_ptrs_tensor = torch.tensor(ptrs, dtype=torch.int64, device=device)
-    lmcache_objects_ptrs = [m.data_ptr() for m in mem_objects]
+    lmcache_objects_ptrs = [_to_signed_int64(m.data_ptr()) for m in mem_objects]
 
     block_ids_gpu = torch.tensor(block_ids, dtype=torch.int64, device=device)
     lmc_ops.multi_layer_block_kv_transfer(

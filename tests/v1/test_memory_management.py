@@ -8,6 +8,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.observability import LMCStatsMonitor
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
@@ -609,6 +610,10 @@ def test_tensor_memory_obj_pin_monitor_integration():
 
 
 @pytest.mark.cuda
+@pytest.mark.skipif(
+    not (torch_dev.is_available() and torch_device_type == "cuda"),
+    reason="Requires CUDA backend",
+)
 class TestLazyMemoryAllocator:
     """
     Test suite for LazyMemoryAllocator.

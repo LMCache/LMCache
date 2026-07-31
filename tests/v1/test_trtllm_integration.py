@@ -13,7 +13,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_device_type
+from lmcache import torch_dev, torch_device_type
 from lmcache.utils import EngineType
 
 # Skip all tests if cuda is unavailable
@@ -30,7 +30,7 @@ def _has_lmc_ops() -> bool:
 
 
 def _has_cuda() -> bool:
-    return (hasattr(torch, torch_device_type) and getattr(torch, torch_device_type).is_available())
+    return torch_dev.is_available() and torch_device_type == "cuda"
 
 
 class TestEngineType:
