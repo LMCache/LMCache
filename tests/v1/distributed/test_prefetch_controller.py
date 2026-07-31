@@ -1759,7 +1759,7 @@ class TestSlidingWindowClaims:
     the retained set, so a prefetch must leave them evictable.
     """
 
-    def test_dead_sw_chunks_released_at_pin_time(self, l1_manager):
+    def test_dead_sw_chunks_released_at_lock_time(self, l1_manager):
         """Out-of-window SW chunks are locked by the lock pass, released in
         that same pass (before the L2 lookup) once the L1-only fold rules them
         out, so they stay evictable and never enter the result."""

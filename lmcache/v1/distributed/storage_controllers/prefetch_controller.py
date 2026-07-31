@@ -235,11 +235,8 @@ class InFlightPrefetchRequest:
     l1_readlocks: Bitmap = field(default_factory=lambda: Bitmap(0))
 
     group_layout_descs: dict[int, MemoryLayoutDesc] = field(default_factory=dict)
-    """Maps object_group_id to that group's layout. Each object group is a
-    separate keyed L1 allocation, so each needs its own descriptor (one
-    ``MemoryLayoutDesc`` describes a single group's MemoryObj). Normalized
-    at request construction to cover every object group, so this is the
-    only layout source for the load phase."""
+    """Maps object_group_id to that group's layout (one ``MemoryLayoutDesc``
+    describes a single group's MemoryObj). Covers every object group."""
 
     def all_lookups_done(self) -> bool:
         return len(self.pending_lookup_tasks) == 0
@@ -256,10 +253,8 @@ class PrefetchController(StorageControllerInterface):
     1. Accepts prefetch requests via submit_prefetch_request (thread-safe).
     2. Runs a background thread that read-locks L1-resident keys
        and submits lookup_and_lock to all adapters.
-    3. Computes the load plan based on the found keys in L1 and L2. L1
-       keys locked in step 2 that serve neither the plan nor the L1-only
-       fallback hit are unlocked here; every remaining unneeded lock is
-       released when the request finishes.
+    3. Computes the load plan based on the found keys in L1 and L2;
+       unlocks L1 keys that fall outside the plan.
     4. Reserves L1 write buffers (all-or-nothing) and submits load tasks.
     5. On completion, loaded keys become read-locked for the retriever.
     6. Reports the L1+L2 hit length via query_lookup_result and the
@@ -844,12 +839,10 @@ class PrefetchController(StorageControllerInterface):
         only.
 
         Args:
-            keys: The request's object keys, in prefix order, chunk-major:
-                every object group and kv_rank of chunk 0, then of chunk 1,
-                and so on. StorageManager already served and capped away the
-                leading L1 prefix hit before submitting, so these keys start
-                past that boundary and L1 hits here are keys that (re)appear
-                behind or beyond it.
+            keys: The request's object keys in chunk-major prefix order
+                (chunk 0's object groups x kv_ranks, then chunk 1's, ...).
+                StorageManager has already capped away its own L1 prefix
+                hit, so these keys start past it.
             extra_count: Extra read locks per locked key.
             policy: The request's retained-subset policy.
             attn_desc: Per-group cross-chunk attention windows.
@@ -891,9 +884,8 @@ class PrefetchController(StorageControllerInterface):
         l1_readlocks = self._lock_l1_keys(
             spec.keys, spec.extra_count, spec.policy, spec.attn_desc
         )
-        # Normalize to one layout per object group: groups the spec does not
-        # map explicitly use ``spec.layout_desc``, so the load phase reads
-        # layouts from this map alone.
+        # One layout per object group; groups not in spec.group_layout_descs
+        # use spec.layout_desc.
         group_layout_descs = {
             gid: spec.layout_desc for gid in range(spec.attn_desc.num_object_groups)
         }
@@ -1051,8 +1043,8 @@ class PrefetchController(StorageControllerInterface):
         """Reserve L1 write buffers for the keys to load from L2.
 
         The keys sit in the loading segment — in L2, not in L1, inside the
-        final window (keys already in L1 are not reserved here; they were
-        read-locked at request start by ``_lock_l1_keys``)::
+        final window (keys already in L1 were read-locked by
+        ``_lock_l1_keys`` and are not reserved here)::
 
             |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
                                           ^ L1 hit length               ^ L1+L2 hit
@@ -1128,11 +1120,8 @@ class PrefetchController(StorageControllerInterface):
                 )
             )
         if contended_keys:
-            # The key appeared in L1 (write-locked by a concurrent request)
-            # after the L1 lock pass. This request cannot load it, so the
-            # caller falls back to the L1-only hit (all-or-nothing); the
-            # event records why a key expected from L2 was not loaded. A
-            # later request finds the key in L1 through its own lock pass.
+            # The key was write-locked by a concurrent request after the L1
+            # lock pass; the caller falls back to the L1-only hit.
             self._event_bus.publish(
                 Event(
                     event_type=EventType.L2_PREFETCH_FAILED,
