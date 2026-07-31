@@ -27,6 +27,8 @@ _COORD_ENV = (
     "LMCACHE_COORDINATOR_URL",
     "LMCACHE_COORDINATOR_ADVERTISE_IP",
     "LMCACHE_COORDINATOR_HEARTBEAT_INTERVAL",
+    "LMCACHE_COORDINATOR_EVENT_REPORTING",
+    "LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL",
 )
 
 
@@ -127,3 +129,37 @@ def test_instance_id_defaults_are_distinct():
 def test_instance_id_dataclass_default_is_distinct():
     # Direct construction (no CLI) also mints a fresh id per instance.
     assert MPServerConfig().instance_id != MPServerConfig().instance_id
+
+
+# -- Event reporting ----------------------------------------------------------
+
+
+def test_event_reporting_defaults_are_disabled():
+    config = _parse([])
+    assert config.event_reporting is False
+    assert config.event_flush_interval == 1.0
+
+
+def test_event_reporting_flags_are_parsed():
+    config = _parse(
+        [
+            "--coordinator-event-reporting",
+            "--coordinator-event-flush-interval",
+            "0.5",
+        ]
+    )
+    assert config.event_reporting is True
+    assert config.event_flush_interval == 0.5
+
+
+def test_event_reporting_env_fallback(monkeypatch):
+    monkeypatch.setenv("LMCACHE_COORDINATOR_EVENT_REPORTING", "true")
+    monkeypatch.setenv("LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL", "2.5")
+    config = _parse([])
+    assert config.event_reporting is True
+    assert config.event_flush_interval == 2.5
+
+
+def test_event_flush_interval_rejects_nonpositive():
+    with pytest.raises(ValueError):
+        _parse(["--coordinator-event-flush-interval", "0"])

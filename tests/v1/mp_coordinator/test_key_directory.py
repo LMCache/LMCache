@@ -7,8 +7,7 @@ instance cleanup."""
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.distributed.tiers import Tier
+from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.mp_coordinator.api import (
     CacheEventBatch,
     CacheEventEntry,
@@ -160,6 +159,26 @@ def test_access_does_not_create_records():
     )
     assert outcome == ApplyResult.APPLIED
     assert directory.stats().num_keys == 0
+
+
+def test_access_batch_allows_empty_backend():
+    """ACCESS carries no placement identity, so ``backend`` may be empty;
+    applying it refreshes recency without touching placements."""
+    directory = KeyDirectory()
+    directory.apply_batch(_batch(seq=1, keys=[_key(1)], size_bytes=100))
+    outcome = directory.apply_batch(
+        _batch(seq=2, event_type=CacheEventType.ACCESS, keys=[_key(1)], backend="")
+    )
+    assert outcome == ApplyResult.APPLIED
+    [placements] = directory.lookup([_key(1)])
+    assert len(placements) == 1  # placement identity untouched
+
+
+def test_placement_bearing_batches_require_backend():
+    with pytest.raises(ValueError):
+        _batch(event_type=CacheEventType.STORE, keys=[_key(1)], backend="")
+    with pytest.raises(ValueError):
+        _batch(event_type=CacheEventType.DELETE, keys=[_key(1)], backend="")
 
 
 # -- Seq handling ------------------------------------------------------------

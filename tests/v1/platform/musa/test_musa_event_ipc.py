@@ -13,7 +13,7 @@ from lmcache.v1.platform.musa.event_ipc import MusaEventIPCBackend
 
 
 class _UnavailableIPC:
-    def is_musa_handle_transfer_available(self) -> bool:
+    def is_musa_event_ipc_available(self) -> bool:
         return False
 
 
@@ -24,7 +24,7 @@ class _AvailableIPC:
         self.calls: list[tuple[Any, ...]] = []
         self.torch_musa_module_calls = 0
 
-    def is_musa_handle_transfer_available(self) -> bool:
+    def is_musa_event_ipc_available(self) -> bool:
         return True
 
     def get_torch_musa_module(self) -> object:
@@ -84,7 +84,7 @@ def test_musa_backend_is_event_ipc_backend() -> None:
 
 
 def test_check_event_support_fails_closed_when_unavailable() -> None:
-    """Unavailable MUSA handle transfer fails before event creation."""
+    """Unavailable MUSA event IPC fails before event creation."""
     backend = MusaEventIPCBackend(ipc_module=_UnavailableIPC())
     with pytest.raises(RuntimeError, match="musa"):
         backend.check_event_support(_Device("musa", 0))
@@ -94,7 +94,7 @@ def test_check_event_support_fails_closed_when_module_missing() -> None:
     """A missing TorchMUSA module fails the capability check."""
 
     class _AvailableWithoutModule:
-        def is_musa_handle_transfer_available(self) -> bool:
+        def is_musa_event_ipc_available(self) -> bool:
             return True
 
     backend = MusaEventIPCBackend(ipc_module=_AvailableWithoutModule())
@@ -137,8 +137,8 @@ def test_default_backend_loads_ipc_wrapper(
     ipc = _AvailableIPC()
     monkeypatch.setattr(
         ipc_wrapper,
-        "is_musa_handle_transfer_available",
-        ipc.is_musa_handle_transfer_available,
+        "is_musa_event_ipc_available",
+        ipc.is_musa_event_ipc_available,
     )
     monkeypatch.setattr(
         ipc_wrapper,
