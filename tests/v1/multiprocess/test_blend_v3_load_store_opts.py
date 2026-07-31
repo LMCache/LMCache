@@ -702,6 +702,20 @@ def test_scatter_narrows_partial_chunk_and_keeps_alignment():
 # ---------------------------------------------------------------------------
 
 
+def _native_retrieve_plan_available() -> bool:
+    """Return whether the C++ native retrieve-plan interfaces are available."""
+    # First Party
+    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+
+    return v3_mod._HAS_NATIVE_RETRIEVE_PLAN and hasattr(v3_mod.lmc_ops, "CBGroupSpec")
+
+
+native_retrieve_plan_required = pytest.mark.skipif(
+    not _native_retrieve_plan_available(),
+    reason="requires native CacheBlend retrieve-plan C++ support",
+)
+
+
 def _build_plan_engine_and_context(
     num_groups: int = 2,
     max_batch: int = 2,
@@ -792,6 +806,7 @@ def _lazy_memory_obj(obj_bytes: int, address: int):
     return obj
 
 
+@native_retrieve_plan_required
 def test_native_plan_specs_stamped_and_cached():
     """3 chunks, max_batch=2: one slot-mapping tensor per group stamped into
     the cached invariant specs; a second build for the same context reuses
@@ -855,6 +870,7 @@ def test_native_plan_specs_stamped_and_cached():
     assert group_specs2[0].slot_mapping_capacity == 4
 
 
+@native_retrieve_plan_required
 def test_flat_plan_tables_encode_every_work_item():
     """The flat tables encode one staging row per chunk (dest = its wave
     slot's buffer), rope rows only for shifted chunks x groups, scatter rows
@@ -907,6 +923,7 @@ def test_flat_plan_tables_encode_every_work_item():
     assert bool(np.all(np.diff(step_offsets[:, 1]) >= 0))
 
 
+@native_retrieve_plan_required
 def test_flat_tables_alternate_disjoint_slot_halves():
     """Same double-buffer contract, asserted on the flat-table encoding."""
     # Third Party
@@ -946,6 +963,7 @@ def test_flat_tables_alternate_disjoint_slot_halves():
         c0 = c1
 
 
+@native_retrieve_plan_required
 def test_native_plan_falls_back_for_non_lazy_objects():
     """A non-lazy-allocator memory object disables the native plan."""
     # Third Party
@@ -967,6 +985,7 @@ def test_native_plan_falls_back_for_non_lazy_objects():
     )
 
 
+@native_retrieve_plan_required
 def test_native_plan_falls_back_for_compressed_group():
     """A compressed group (tokens != slots per block) disables the plan."""
     # Third Party

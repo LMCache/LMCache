@@ -13,7 +13,9 @@ import time
 
 # Third Party
 import pytest
-import torch
+
+# First Party
+from lmcache import torch_dev, torch_device_type
 
 PROJECT_ROOT = Path(__file__).parents[3]
 STARTUP_TIMEOUT_SECONDS = 90.0
@@ -21,7 +23,8 @@ SHUTDOWN_TIMEOUT_SECONDS = 60.0
 SHM_SIZE_BYTES = 64 << 20
 
 pytestmark = pytest.mark.skipif(
-    not sys.platform.startswith("linux") or not torch.cuda.is_available(),
+    not sys.platform.startswith("linux")
+    or not (torch_dev.is_available() and torch_device_type == "cuda"),
     reason="Mixed-allocator POSIX SHM requires Linux and an accelerator device",
 )
 
