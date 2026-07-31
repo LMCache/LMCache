@@ -5,7 +5,7 @@ from __future__ import annotations
 
 # Standard
 from concurrent.futures import Future
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 import asyncio
 import os
@@ -146,8 +146,9 @@ def _install_deferred_batched_reads(
         ):
             out[:total_len] = device._data[offset : offset + total_len]
 
-    device.batched_read = batched_read
-    device.wait_iouring = wait_iouring
+    untyped_device = cast(Any, device)
+    untyped_device.batched_read = batched_read
+    untyped_device.wait_iouring = wait_iouring
     return trace
 
 

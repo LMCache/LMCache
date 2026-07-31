@@ -2,6 +2,7 @@
 """CPU-only tests for StorageManager's fused raw-block restore path."""
 
 # Standard
+from typing import cast
 from unittest.mock import MagicMock, call, create_autospec, patch
 import threading
 
@@ -231,7 +232,7 @@ def test_pipelined_restore_error_preserves_handed_prefix_for_stream_cleanup(
     keys = [_make_key(i) for i in range(3)]
     objects = _make_objects(len(keys))
     adapter = _make_raw_adapter()
-    adapter.lookup_and_lock_sync.return_value = [True, True, True]
+    cast(MagicMock, adapter.lookup_and_lock_sync).return_value = [True, True, True]
     manager, l1_manager = _make_manager([adapter])
     l1_manager.reserve_write.return_value = _successful_reservations(keys, objects)
     handed_keys: list[ObjectKey] = []
@@ -256,7 +257,7 @@ def test_pipelined_restore_error_preserves_handed_prefix_for_stream_cleanup(
         kwargs["on_batch_loaded"](0, 1)
         raise RuntimeError("later read failed")
 
-    adapter.load_sync.side_effect = load_sync
+    cast(MagicMock, adapter.load_sync).side_effect = load_sync
     expected_error = (
         "CUDA enqueue failed" if failure_source == "callback" else "later read failed"
     )
@@ -272,7 +273,7 @@ def test_pipelined_restore_error_preserves_handed_prefix_for_stream_cleanup(
     assert handed_objects == objects[:1]
     l1_manager.finish_write.assert_called_once_with(keys[1:])
     l1_manager.delete.assert_called_once_with(keys[1:], force=True)
-    adapter.submit_unlock.assert_called_once_with(keys)
+    cast(MagicMock, adapter.submit_unlock).assert_called_once_with(keys)
     assert manager._adapter_lease_counts == {}
 
     manager.finish_raw_block_restore(handed_keys)

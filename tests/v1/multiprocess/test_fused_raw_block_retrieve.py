@@ -4,6 +4,7 @@
 # Standard
 from contextlib import nullcontext
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, call, patch
 import threading
 
@@ -12,16 +13,15 @@ import pytest
 import torch
 
 # First Party
-import lmcache.c_ops as lmc_ops
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_module import ThreadPoolType
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     ContextEntry,
     LMCacheDrivenTransferModule,
+    _fused_event_session_resource_key,
     _FusedDrainEvent,
     _FusedDrainState,
-    _fused_event_session_resource_key,
     _launch_staged_h2d_batch,
 )
 from lmcache.v1.multiprocess.modules.management import ManagementModule
@@ -34,6 +34,7 @@ from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
 from lmcache.v1.multiprocess.protocols.engine import (
     FUSED_RAW_BLOCK_RETRIEVE_CAPABILITY,
 )
+import lmcache.c_ops as lmc_ops
 
 
 def _make_key() -> IPCCacheServerKey:
@@ -113,7 +114,11 @@ def _invoke(
     *,
     callback_side_effect: Exception | None = None,
 ) -> tuple[bytes, tuple[int, bool]]:
-    module.context.storage_manager.load_raw_block_prefix.return_value = loaded
+    load_raw_block_prefix = cast(
+        MagicMock,
+        module.context.storage_manager.load_raw_block_prefix,
+    )
+    load_raw_block_prefix.return_value = loaded
     with (
         patch(
             "lmcache.v1.multiprocess.modules.lmcache_driven_transfer.torch_dev.device",

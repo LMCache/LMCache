@@ -6,7 +6,7 @@ Distributed multi-tier storage manager for MP mode
 # Standard
 from contextlib import contextmanager
 from dataclasses import replace
-from typing import Callable, Iterator, Literal, Optional
+from typing import Any, Callable, Iterator, Literal, Optional
 import threading
 import time
 
@@ -404,7 +404,7 @@ class StorageManager:
                         batch_objects,
                     )
 
-                load_kwargs = {}
+                load_kwargs: dict[str, Any] = {}
                 if on_batch_loaded is not None:
                     load_kwargs = {
                         "completion_batch_size": completion_batch_size,

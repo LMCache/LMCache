@@ -7,6 +7,7 @@ returns a pollable future -- an already-completed one on the no-op paths
 completion future on the happy path -- and never blocks on the result."""
 
 # Standard
+from typing import cast
 import threading
 
 # Third Party
@@ -25,6 +26,7 @@ from lmcache.integration.sglang.multi_process_adapter import (
 )
 from lmcache.integration.sglang.sglang_adapter import StoreMetadata
 from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.platform.base.event_ipc import EventIPCBackend
 
 _CHUNK_SIZE = 256
 
@@ -41,7 +43,7 @@ def _make_connector(healthy: bool = True) -> LMCacheMPConnector:
         conn._health_event.set()
     conn._lmcache_chunk_size = _CHUNK_SIZE
     conn._mq_timeout = 5.0
-    conn._event_backend = _FakeEventBackend()
+    conn._event_backend = cast(EventIPCBackend, _FakeEventBackend())
     conn._daemon_session_ids = set()
     conn._pending_lookups_lock = threading.Lock()
     conn._fused_final_events = {}
