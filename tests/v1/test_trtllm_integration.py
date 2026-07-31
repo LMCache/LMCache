@@ -16,8 +16,14 @@ import torch
 from lmcache import torch_dev, torch_device_type
 from lmcache.utils import EngineType
 
-# Skip all tests if cuda is unavailable
-pytestmark = pytest.mark.cuda
+# TRT-LLM connector path is CUDA-only.
+pytestmark = [
+    pytest.mark.cuda,
+    pytest.mark.skipif(
+        not (torch_dev.is_available() and torch_device_type == "cuda"),
+        reason="Requires CUDA backend",
+    ),
+]
 
 def _has_lmc_ops() -> bool:
     try:

@@ -81,7 +81,7 @@ fi
 log "discovered ${#XPU_TEST_FILES[@]} XPU-related test files"
 printf '  %s\n' "${XPU_TEST_FILES[@]}"
 
-PYTEST_ARGS=(-q --maxfail=1 -m "not cuda and not sglang and not musa")
+PYTEST_ARGS=(-q --maxfail=1 -m "not cuda")
 if [ -n "${TEST_SELECTOR:-}" ]; then
   PYTEST_ARGS+=(-k "${TEST_SELECTOR}")
 fi

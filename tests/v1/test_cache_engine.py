@@ -44,7 +44,6 @@ from .utils import (
 # required for GDS tests (cuFile err=5027 on overlayfs/tmpfs).
 _TEST_TMPDIR = os.environ.get("LMCACHE_TEST_TMPDIR") or None
 
-# These tests exercise CUDA-only connector/runtime behavior.
 pytestmark = pytest.mark.skipif(
     not (torch_dev.is_available() and torch_device_type == "cuda"),
     reason="Requires CUDA backend",

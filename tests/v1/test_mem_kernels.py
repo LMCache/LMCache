@@ -11,7 +11,13 @@ import torch
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.memory_allocators.pin_memory_allocator import PinMemoryAllocator
 
-pytestmark = pytest.mark.cuda
+pytestmark = [
+    pytest.mark.cuda,
+    pytest.mark.skipif(
+        not (torch_dev.is_available() and torch_device_type == "cuda"),
+        reason="Requires CUDA backend",
+    ),
+]
 
 # First Party
 if (hasattr(torch, torch_device_type) and getattr(torch, torch_device_type).is_available()):
@@ -51,11 +57,6 @@ from .utils import (
     generate_kv_cache_paged,
     generate_kv_cache_paged_list_tensors,
 )
-
-
-def _to_signed_int64(ptr: int) -> int:
-    """Convert an address-like integer to signed int64 representation."""
-    return ptr - (1 << 64) if ptr >= (1 << 63) else ptr
 
 
 def _tuple_kv_to_blob(
@@ -267,7 +268,7 @@ def test_multi_layer_kernel(num_tokens, engine_kv_format):
         num_layers, dtype=torch.int64, device="cpu", pin_memory=True
     )
     for i in range(num_layers):
-        kv_cache_pointers[i] = _to_signed_int64(kv_cache[i].data_ptr())
+        kv_cache_pointers[i] = kv_cache[i].data_ptr()
 
     memory_obj_new_list = []
     start_event = getattr(torch, torch_device_type).Event(enable_timing=True)
@@ -312,7 +313,7 @@ def test_multi_layer_kernel(num_tokens, engine_kv_format):
         num_layers, dtype=torch.int64, device="cpu", pin_memory=True
     )
     for i in range(num_layers):
-        kv_cache_pointers_new[i] = _to_signed_int64(kv_cache_new[i].data_ptr())
+        kv_cache_pointers_new[i] = kv_cache_new[i].data_ptr()
 
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
         memory_obj_new = memory_obj_new_list[chunk_id]
@@ -400,7 +401,7 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size, engine_kv_format):
         num_layers, dtype=torch.int64, device="cpu", pin_memory=True
     )
     for i in range(num_layers):
-        kv_cache_pointers[i] = _to_signed_int64(kv_cache[i].data_ptr())
+        kv_cache_pointers[i] = kv_cache[i].data_ptr()
 
     memory_obj_new_list = []
     start_event = getattr(torch, torch_device_type).Event(enable_timing=True)
@@ -455,7 +456,7 @@ def test_multi_layer_kernel_use_mla(num_tokens, head_size, engine_kv_format):
         num_layers, dtype=torch.int64, device="cpu", pin_memory=True
     )
     for i in range(num_layers):
-        kv_cache_pointers_new[i] = _to_signed_int64(kv_cache_new[i].data_ptr())
+        kv_cache_pointers_new[i] = kv_cache_new[i].data_ptr()
 
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
         memory_obj_new = memory_obj_new_list[chunk_id]
@@ -557,10 +558,6 @@ def test_single_layer_kernel(num_tokens, token_major, engine_kv_format):
         lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,  # vllm HND flash infer
     ],
 )
-@pytest.mark.skipif(
-    not (torch_dev.is_available() and torch_device_type == "cuda"),
-    reason="HND kernel transfer requires CUDA backend support",
-)
 def test_multi_layer_kernel_hnd(num_tokens, engine_kv_format):
     """Round-trip test for HND multi-layer kernel: D2H then H2D."""
     device = torch_device_type
@@ -595,7 +592,7 @@ def test_multi_layer_kernel_hnd(num_tokens, engine_kv_format):
         num_layers, dtype=torch.int64, device="cpu", pin_memory=True
     )
     for i in range(num_layers):
-        kv_cache_pointers[i] = _to_signed_int64(kv_cache[i].data_ptr())
+        kv_cache_pointers[i] = kv_cache[i].data_ptr()
 
     memory_obj_list = []
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
@@ -632,7 +629,7 @@ def test_multi_layer_kernel_hnd(num_tokens, engine_kv_format):
         num_layers, dtype=torch.int64, device="cpu", pin_memory=True
     )
     for i in range(num_layers):
-        kv_cache_pointers_new[i] = _to_signed_int64(kv_cache_new[i].data_ptr())
+        kv_cache_pointers_new[i] = kv_cache_new[i].data_ptr()
 
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
         lmc_ops.multi_layer_kv_transfer(
@@ -665,10 +662,6 @@ def test_multi_layer_kernel_hnd(num_tokens, engine_kv_format):
         lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,  # vllm HND flash attention
         lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,  # vllm HND flash infer
     ],
-)
-@pytest.mark.skipif(
-    not (torch_dev.is_available() and torch_device_type == "cuda"),
-    reason="HND kernel transfer requires CUDA backend support",
 )
 def test_single_layer_kernel_hnd(num_tokens, token_major, engine_kv_format):
     """Round-trip test for HND single-layer kernel: D2H then H2D per layer."""
