@@ -460,6 +460,16 @@ class BlendV3Module(InstanceLivenessTarget):
         coordinator: "BlendCoordinatorClient | None" = None,
         enable_segmented_prefix: bool = False,
     ):
+        # CacheBlend assumes every chunk lives in one object per rank; a
+        # separated-group layout would silently mismatch its fingerprint and
+        # retrieve paths, so refuse it outright.
+        # TODO(Weishu): support separate object groups in CacheBlend.
+        if ctx.separate_object_groups:
+            raise RuntimeError(
+                "CacheBlend only supports the single-object-group layout; "
+                "run without --separate-object-groups (it is off by default)."
+            )
+
         self._ctx = ctx
         self._transfer_module = lmcache_driven_transfer
         # Server config (--enable-segmented-prefix): retain the gapped prefix on

@@ -39,8 +39,8 @@ def resolve_object_keys(
     """Resolve a token sequence to the object keys of its complete chunks.
 
     Hashes ``token_ids`` and expands each complete chunk into one key per rank
-    (a single object group, so MP servers must run with
-    ``--no-separate-object-groups``). The ``token_hasher``
+    (a single object group — the default; MP servers must not enable
+    ``--separate-object-groups``). The ``token_hasher``
     must be configured to match the fleet's ``chunk_size`` / ``hash_algorithm``
     or the resolved keys will not match what the servers stored.
 

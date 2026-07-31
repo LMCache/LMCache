@@ -190,7 +190,8 @@ class MPCacheServerContext:
         chunk_size: Chunk size for KV cache operations.
         hash_algorithm: Hash algorithm for token hashing.
         separate_object_groups: Whether to split kernel groups into one object
-            group per sliding-window size at KV-cache registration. Default True.
+            group per sliding-window size at KV-cache registration. Default
+            False.
     """
 
     def __init__(
@@ -198,7 +199,7 @@ class MPCacheServerContext:
         storage_manager_config: StorageManagerConfig,
         chunk_size: int = 256,
         hash_algorithm: str = "blake3",
-        separate_object_groups: bool = True,
+        separate_object_groups: bool = False,
         full_sw_kv: bool = False,
     ) -> None:
         self._chunk_size = chunk_size

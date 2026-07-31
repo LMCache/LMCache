@@ -383,15 +383,10 @@ def run_cache_server(
                 )
                 mem_cfg.shm_name = ""
 
-    # blend engine: single object group + full per-chunk SWA KV
+    # blend engine: full per-chunk SWA KV. It also requires the
+    # single-object-group layout; BlendV3Module enforces that at
+    # construction (RuntimeError unless --no-separate-object-groups).
     is_blend = mp_config.engine_type == "blend"
-    # TODO(Weishu): support separate object groups in the blend engine, then
-    # make --no-separate-object-groups the default instead of requiring it.
-    if is_blend and mp_config.separate_object_groups:
-        raise RuntimeError(
-            "The blend engine only supports the single-object-group layout; "
-            "run with --no-separate-object-groups."
-        )
 
     ctx = MPCacheServerContext(
         storage_manager_config=storage_manager_config,
