@@ -2,6 +2,7 @@
 
 # Standard
 import random
+from lmcache import torch_device_type
 
 # Third Party
 import pytest
@@ -16,11 +17,7 @@ pytest.importorskip(
 import lmcache.c_ops as lmc_ops
 
 # Skip all tests if cuda is unavailable
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.device_count() == 0,
-    reason="No CUDA GPU present",
-)
-
+pytestmark = pytest.mark.cuda
 # ---------------------------------------------------------------------------
 # Tensor factories (ported from kernel harness)
 # ---------------------------------------------------------------------------
@@ -308,7 +305,7 @@ TOTAL_BLOCKS = NUM_MEMORY_OBJECTS * BLOCKS_PER_OBJECT  # 64
 @pytest.mark.parametrize(
     "dtype", [torch.bfloat16, torch.float8_e4m3fn], ids=["bf16", "fp8"]
 )
-@pytest.mark.parametrize("mem_device", ["cuda", "cpu"], ids=["mem_gpu", "mem_cpu"])
+@pytest.mark.parametrize("mem_device", [torch_device_type, "cpu"], ids=["mem_gpu", "mem_cpu"])
 def test_block_transfer_roundtrip(
     engine_kv_format, nl, nh, hs, is_mla, dtype, mem_device
 ):
@@ -316,7 +313,7 @@ def test_block_transfer_roundtrip(
     D2H -> H2D roundtrip with different block IDs proves data flows through
     memory objects.
     """
-    device = torch.device("cuda")
+    device = torch.device(torch_device_type)
     mem_dev = torch.device(mem_device)
     kv_dim = 1 if is_mla else 2
     hidden_dim = nh * hs
@@ -361,7 +358,7 @@ def test_block_transfer_roundtrip(
         is_mla,
         TOKENS_PER_OBJECT,
     )
-    torch.cuda.synchronize()
+    getattr(torch, torch_device_type).synchronize()
 
     # H2D: mem_objects -> target
     call_block_kernel(
@@ -378,7 +375,7 @@ def test_block_transfer_roundtrip(
         is_mla,
         TOKENS_PER_OBJECT,
     )
-    torch.cuda.synchronize()
+    getattr(torch, torch_device_type).synchronize()
 
     # Verify: target[h2d_block] == source[d2h_block]
     for i in range(TOTAL_BLOCKS):
@@ -415,7 +412,7 @@ def test_block_transfer_roundtrip(
 @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=["bf16"])
 def test_block_transfer_skip_prefix(engine_kv_format, nl, nh, hs, is_mla, dtype):
     """Verify skip_prefix_n_blocks=4 skips the first 4 blocks globally."""
-    device = torch.device("cuda")
+    device = torch.device(torch_device_type)
     kv_dim = 1 if is_mla else 2
     hidden_dim = nh * hs
     skip = 4
@@ -459,7 +456,7 @@ def test_block_transfer_skip_prefix(engine_kv_format, nl, nh, hs, is_mla, dtype)
         TOKENS_PER_OBJECT,
         skip_prefix_n_blocks=skip,
     )
-    torch.cuda.synchronize()
+    getattr(torch, torch_device_type).synchronize()
 
     # H2D with skip
     call_block_kernel(
@@ -477,7 +474,7 @@ def test_block_transfer_skip_prefix(engine_kv_format, nl, nh, hs, is_mla, dtype)
         TOKENS_PER_OBJECT,
         skip_prefix_n_blocks=skip,
     )
-    torch.cuda.synchronize()
+    getattr(torch, torch_device_type).synchronize()
 
     # Non-skipped blocks should match
     for i in range(skip, TOTAL_BLOCKS):

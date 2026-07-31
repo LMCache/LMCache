@@ -8,6 +8,7 @@ import os
 import pytest
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.v1.config import LMCacheEngineConfig, load_ec_engine_config
 from lmcache.v1.config_base import apply_remote_configs, validate_and_set_config_value
 
@@ -917,13 +918,13 @@ class TestNixlBufferDeviceCpuValidation:
         config.validate()  # Should not raise
 
     def test_gpu_mode_still_requires_nixl_buffer_size(self):
-        config = self._nixl_cpu_defaults(nixl_buffer_device="cuda")
+        config = self._nixl_cpu_defaults(nixl_buffer_device=torch_device_type)
         with pytest.raises(AssertionError):
             config.validate()
 
     def test_gpu_mode_accepts_nixl_buffer_size(self):
         config = self._nixl_cpu_defaults(
-            nixl_buffer_device="cuda", nixl_buffer_size=2**30
+            nixl_buffer_device=torch_device_type, nixl_buffer_size=2**30
         )
         config.validate()  # Should not raise
 
@@ -952,7 +953,7 @@ class TestNixlBufferDeviceCpuValidation:
         """The P2P + NIXL storage combo is only rejected in CPU mode; the
         GPU-mode path doesn't touch LocalCPUBackend's allocator."""
         config = self._nixl_cpu_defaults(
-            nixl_buffer_device="cuda", nixl_buffer_size=2**30
+            nixl_buffer_device=torch_device_type, nixl_buffer_size=2**30
         )
         config.enable_p2p = True
         config.enable_controller = True
@@ -1031,7 +1032,7 @@ class TestNixlUseHugepagesDeprecation:
         (LocalCPUBackend's hugepages should not be toggled by a NIXL knob in
         a GPU-only deployment). Just drop it with a warning."""
         config = self._nixl_cpu_defaults(
-            nixl_buffer_device="cuda", nixl_buffer_size=2**30
+            nixl_buffer_device=torch_device_type, nixl_buffer_size=2**30
         )
         config.extra_config["nixl_use_hugepages"] = True
         config.validate()

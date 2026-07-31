@@ -24,10 +24,7 @@ from tests.v1.utils import (
     generate_sglang_kv_cache_paged_list_tensors,
 )
 
-pytestmark = pytest.mark.skipif(
-    torch_device_type != "xpu",
-    reason="XPU-only tests",
-)
+pytestmark = [pytest.mark.xpu, pytest.mark.sglang]
 
 
 def _current_xpu_device() -> torch.device:

@@ -15,6 +15,7 @@ import torch
 
 # The adapter imports ``sglang`` at module load; skip cleanly where it's absent
 # (sglang is an optional integration, not a hard LMCache dependency).
+pytestmark = pytest.mark.sglang
 pytest.importorskip("sglang")
 
 # First Party

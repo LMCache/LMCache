@@ -18,6 +18,7 @@ import uuid
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector.gpu_connectors import VLLMPagedMemGPUConnectorV2
@@ -29,7 +30,7 @@ from lmcache.v1.memory_management import (
 from lmcache.v1.metadata import LMCacheMetadata
 
 # Conditional import for CUDA-only operations
-if torch.cuda.is_available() or torch.xpu.is_available():
+if (hasattr(torch, torch_device_type) and getattr(torch, torch_device_type).is_available()) or torch.xpu.is_available():
     try:
         # First Party
         import lmcache.c_ops as lmc_ops
@@ -341,7 +342,7 @@ def generate_sglang_kv_cache_paged_list_tensors(
     num_heads,
     head_size,
     use_mla=False,
-    device="cuda",
+    device=torch_device_type,
     dtype=torch.bfloat16,
 ):
     """

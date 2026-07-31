@@ -20,12 +20,7 @@ from lmcache.v1.kv_layer_groups import (
     parse_kvcache_shape_spec,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="PageBufferShapeDesc requires CUDA build"
-)
-
-
+pytestmark = pytest.mark.cuda
 def _build_manager(
     tensors: list[torch.Tensor],
     *,

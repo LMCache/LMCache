@@ -9,6 +9,8 @@ from typing import Any, cast
 import pytest
 import torch
 
+pytestmark = pytest.mark.musa
+
 # First Party
 from lmcache.v1.gpu_connector.musa_connectors import (
     VLLMPagedMemLayerwiseMUSAConnector,

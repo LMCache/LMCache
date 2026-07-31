@@ -608,10 +608,7 @@ def test_tensor_memory_obj_pin_monitor_integration():
 # =============================================================================
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="LazyMemoryAllocator requires CUDA for memory pinning",
-)
+@pytest.mark.cuda
 class TestLazyMemoryAllocator:
     """
     Test suite for LazyMemoryAllocator.

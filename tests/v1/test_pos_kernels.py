@@ -18,10 +18,7 @@ except ImportError:
     set_current_vllm_config = None
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non CUDA implementations for CUDA enhanced functions",
-)
+@pytest.mark.cuda
 def test_rope():
     head_dim = 128
     max_position_embeddings = 8192

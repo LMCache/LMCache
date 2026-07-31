@@ -13,8 +13,11 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.utils import EngineType
 
+# Skip all tests if cuda is unavailable
+pytestmark = pytest.mark.cuda
 
 def _has_lmc_ops() -> bool:
     try:
@@ -27,7 +30,7 @@ def _has_lmc_ops() -> bool:
 
 
 def _has_cuda() -> bool:
-    return torch.cuda.is_available()
+    return (hasattr(torch, torch_device_type) and getattr(torch, torch_device_type).is_available())
 
 
 class TestEngineType:
@@ -278,7 +281,7 @@ class TestTRTLLMGPUConnector:
         # First Party
         from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
 
-        device = torch.device("cuda:0")
+        device = torch.device(torch_device_type)
         c = TRTLLMGPUConnector(
             num_kv_heads=2,
             head_dim=64,
@@ -296,7 +299,7 @@ class TestTRTLLMGPUConnector:
         # First Party
         from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
 
-        device = torch.device("cuda:0")
+        device = torch.device(torch_device_type)
         c = TRTLLMGPUConnector(
             num_kv_heads=2,
             head_dim=64,
@@ -313,7 +316,7 @@ class TestTRTLLMGPUConnector:
         # First Party
         from lmcache.v1.gpu_connector.gpu_connectors import TRTLLMGPUConnector
 
-        device = torch.device("cuda:0")
+        device = torch.device(torch_device_type)
         nh, bs, hs = 2, 16, 64
         nb, nl, kv = 4, 4, 2
         flat = nh * bs * hs
