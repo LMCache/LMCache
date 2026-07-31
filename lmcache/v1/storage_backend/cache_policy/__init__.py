@@ -59,7 +59,14 @@ def get_cache_policy(
             frequency-sketch decay window), not to the inner policy. For
             "WINDOWED_ADMISSION_<INNER>" names, ``halve_every``,
             ``window_capacity``, and ``promotion_threshold`` are similarly
-            forwarded to ``WindowedAdmissionControlledPolicy`` itself.
+            forwarded to ``WindowedAdmissionControlledPolicy`` itself. For
+            "COST_AWARE" (including as an inner policy under either
+            admission prefix), ``clock`` is forwarded to
+            ``CostAwareEvictionPolicy`` -- callers driving it through a
+            deterministic simulation (see
+            ``lmcache.tools.cache_policy_bench.runner``) should pass a
+            logical clock here instead of relying on the real-time
+            default.
 
     Returns:
         Instance of the corresponding cache policy.
@@ -100,6 +107,7 @@ def get_cache_policy(
     if upper_policy_name == "COST_AWARE":
         half_life = kwargs.get("half_life_seconds")
         alpha = kwargs.get("cost_ewma_alpha")
+        clock = kwargs.get("clock")
         if config is not None:
             if half_life is None:
                 half_life = getattr(config, "cost_aware_half_life_seconds", None)
@@ -119,6 +127,8 @@ def get_cache_policy(
             policy_kwargs["half_life_seconds"] = float(half_life)
         if alpha is not None:
             policy_kwargs["cost_ewma_alpha"] = float(alpha)
+        if clock is not None:
+            policy_kwargs["clock"] = clock
 
         return CostAwareEvictionPolicy(**policy_kwargs)
 

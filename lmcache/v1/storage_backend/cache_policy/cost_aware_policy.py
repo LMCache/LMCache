@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import math
 import time
 
@@ -79,13 +79,33 @@ class CostAwareEvictionPolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
         self,
         half_life_seconds: float = 60.0,
         cost_ewma_alpha: float = 0.2,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         """
         Initialize CostAwareEvictionPolicy.
 
         Args:
-            half_life_seconds: Time in seconds after which cost density decays by half.
+            half_life_seconds: Time in the units returned by ``clock``
+                after which cost density decays by half. With the
+                default real-time clock this is real seconds; with an
+                injected logical clock (see ``clock`` below) it is
+                whatever unit that clock counts in.
             cost_ewma_alpha: EWMA smoothing factor for updating recompute estimates (0 < alpha <= 1).
+            clock: Zero-argument callable returning the current time as a
+                float, used for every recency computation in this class
+                (``update_on_put_with_metadata``, ``access``,
+                ``get_evict_candidates``, and ``calculate_score`` when its
+                own ``current_time`` argument is omitted). Defaults to
+                ``time.monotonic`` for real backend use. Benchmark/test
+                callers should inject a deterministic logical clock (e.g.
+                a request counter) instead: a wall-clock default makes
+                the recency term's *actual* effect invisible and
+                irreproducible in a simulator whose entire run completes
+                in far less than one ``half_life_seconds`` -- age_seconds
+                stays near zero regardless of access order, so
+                ``time_decay`` in the score formula is always
+                approximately 1.0 and the recency term never
+                discriminates between candidates.
 
         Raises:
             ValueError: If parameters are non-positive, out of range, or non-finite.
@@ -112,6 +132,7 @@ class CostAwareEvictionPolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
 
         self.half_life_seconds = float(half_life_seconds)
         self.cost_ewma_alpha = float(cost_ewma_alpha)
+        self._clock = clock
 
         self.metadata: Dict[KeyType, _ChunkMetadata] = {}
         self._next_insertion_index: int = 0
@@ -284,7 +305,7 @@ class CostAwareEvictionPolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
             return float("-inf")
 
         if current_time is None:
-            current_time = time.monotonic()
+            current_time = self._clock()
 
         return self._score_for_meta(meta, current_time)
 
@@ -326,7 +347,7 @@ class CostAwareEvictionPolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
         """
         Update internal policy metadata when a cache object is stored.
         """
-        now = time.monotonic()
+        now = self._clock()
 
         # Validate explicit position parameters if provided
         total_req = metadata.get("total_request_tokens")
@@ -476,7 +497,7 @@ class CostAwareEvictionPolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
         optional memory size.
         Does NOT update estimated_recompute_tokens unless a real observed_recompute_tokens is explicitly provided.
         """
-        now = time.monotonic()
+        now = self._clock()
         val = cache_obj
         if val is None and isinstance(cache_dict, dict):
             val = cache_dict.get(key)
@@ -548,7 +569,7 @@ class CostAwareEvictionPolicy(BaseCachePolicy[KeyType, dict[KeyType, Any]]):
         if not candidate_keys:
             return []
 
-        current_time = time.monotonic()
+        current_time = self._clock()
 
         def candidate_sort_key(k: KeyType) -> Tuple[int, float, float, int]:
             meta = self.metadata.get(k)

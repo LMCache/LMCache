@@ -93,9 +93,10 @@ def load_sharegpt_conversations(sharegpt_json_path: Path) -> list[dict[str, Any]
     Parse a preprocessed ShareGPT corpus file into raw conversation dicts.
 
     Split out from :func:`requests_from_conversations` so callers that need
-    many resampled request sequences from the same corpus (e.g. repeated
-    bootstrap runs in ``benchmarks/cache_policy/real_dataset_eval.py``) pay
-    the file-read/JSON-parse cost once instead of once per repeat.
+    many resampled request sequences from the same corpus (e.g. the
+    repeated-subsample runs in
+    ``benchmarks/cache_policy/real_dataset_eval.py``) pay the
+    file-read/JSON-parse cost once instead of once per repeat.
 
     Args:
         sharegpt_json_path: Path to a ``ShareGPT.json`` produced by
@@ -133,9 +134,18 @@ def requests_from_conversations(
         chunk_size: Tokens per chunk; rounds whose cumulative prefix is
             shorter than one chunk are skipped (nothing to cache yet).
         max_conversations: If given and smaller than the corpus, a random
-            subsample of this many conversations is used (see ``seed``).
+            subsample of this many conversations is drawn *without*
+            replacement (``random.sample``) -- see ``seed``. This is
+            subsampling, not a corpus bootstrap (which would sample the
+            full corpus size *with* replacement); callers computing
+            confidence intervals across repeats should account for that
+            distinction rather than describing the result as bootstrapped.
         seed: RNG seed for the conversation subsample -- vary this across
-            repeats to bootstrap-resample the corpus.
+            repeats to draw a different subsample. Note that at a fixed
+            ``seed``, every caller (e.g. every policy compared in the
+            same repeat of ``real_dataset_eval.py``) gets the identical
+            subsample -- repeats are paired across policies, not
+            independent.
 
     Returns:
         Requests interleaved round-robin across the (sub-sampled)

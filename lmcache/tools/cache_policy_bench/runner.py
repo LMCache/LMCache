@@ -48,6 +48,40 @@ DEFAULT_CACHE_SIZES_MIB: list[float] = [50.0, 100.0, 200.0]
 DEFAULT_KV_BYTES_PER_CHUNK = 256 * 1024  # 256 KiB/chunk, a typical KV-chunk size
 
 
+class _LogicalClock:
+    """
+    Deterministic, monotonically increasing stand-in for wall-clock time,
+    injected into ``CostAwareEvictionPolicy`` (via its ``clock``
+    constructor parameter) instead of the real ``time.monotonic()``
+    default.
+
+    A benchmark run replays its entire request sequence in well under a
+    second of real time, while ``CostAwareEvictionPolicy``'s default
+    ``half_life_seconds`` is 60.0 -- with the real clock, every
+    ``age_seconds`` observed during a run is therefore always
+    approximately zero, so the score's recency term is always
+    approximately 1.0 regardless of access order: the recency component
+    is silently inert, and whatever small effect it does have depends on
+    the host machine's execution speed, making runs irreproducible
+    across machines. Advancing this clock by one logical tick per
+    request instead makes ``age_seconds`` mean "requests since last
+    access," fully deterministic and portable, and large enough relative
+    to the default half-life to actually exercise the decay term within
+    the request counts this suite's workloads use.
+    """
+
+    def __init__(self) -> None:
+        self._now = 0.0
+
+    def now(self) -> float:
+        """Callable suitable for ``CostAwareEvictionPolicy(clock=...)``."""
+        return self._now
+
+    def tick(self, step: float = 1.0) -> None:
+        """Advance the logical clock by ``step`` (default: one request)."""
+        self._now += step
+
+
 class _SimulatedChunkObj:
     """Stand-in for a ``MemoryObj``, exposing only what cache policies read."""
 
@@ -186,6 +220,11 @@ def run_workload(
         **policy_kwargs: Extra constructor kwargs forwarded to
             ``get_cache_policy`` (e.g. ``half_life_seconds`` for
             ``COST_AWARE``; ignored by policies that don't accept them).
+            If ``policy_name`` resolves to (or wraps) ``COST_AWARE`` and
+            no explicit ``clock`` is given here, a deterministic
+            :class:`_LogicalClock` is injected automatically (see its
+            docstring for why the real-time default is unsuitable for a
+            simulator) -- pass ``clock=`` explicitly to override this.
 
     Returns:
         Aggregated :class:`BenchResult` for this run.
@@ -197,7 +236,10 @@ def run_workload(
     if cache_capacity_bytes <= 0 or kv_bytes_per_chunk <= 0:
         raise ValueError("cache_capacity_bytes and kv_bytes_per_chunk must be positive")
 
-    policy = get_cache_policy(policy_name, **policy_kwargs)
+    logical_clock = _LogicalClock()
+    effective_policy_kwargs = dict(policy_kwargs)
+    effective_policy_kwargs.setdefault("clock", logical_clock.now)
+    policy = get_cache_policy(policy_name, **effective_policy_kwargs)
     capacity_chunks = max(1, cache_capacity_bytes // kv_bytes_per_chunk)
     cache = _PolicyCache(policy, capacity_chunks)
 
@@ -209,6 +251,7 @@ def run_workload(
     wall_start = time.perf_counter()
 
     for req in requests:
+        logical_clock.tick()
         hit_prefix = 0
         for h in req.chunk_hashes:
             if cache.contains(h):
@@ -246,6 +289,20 @@ def run_workload(
     n = len(latencies)
     latency_mean = sum(latencies) / n if n else 0.0
 
+    extra_params: dict[str, Any] = {
+        **policy_kwargs,
+        "rejected_admissions": cache.rejected_admissions,
+    }
+    # Diagnostic-only fields some policies expose (e.g. both
+    # admission-control designs' frequency sketches) -- included whenever
+    # present so a reader can verify a given halve_every setting actually
+    # triggered a meaningful number of halving passes during this run,
+    # rather than assuming it did from the setting alone.
+    if hasattr(policy, "sketch_halvings_triggered"):
+        extra_params["sketch_halvings_triggered"] = policy.sketch_halvings_triggered
+    if hasattr(policy, "sketch_increments_recorded"):
+        extra_params["sketch_increments_recorded"] = policy.sketch_increments_recorded
+
     return BenchResult(
         policy_name=policy_name,
         workload_name=workload_name,
@@ -263,10 +320,7 @@ def run_workload(
         latency_p50_seconds=_percentile(latencies, 50),
         latency_p95_seconds=_percentile(latencies, 95),
         latency_p99_seconds=_percentile(latencies, 99),
-        extra_params={
-            **policy_kwargs,
-            "rejected_admissions": cache.rejected_admissions,
-        },
+        extra_params=extra_params,
     )
 
 
@@ -309,15 +363,29 @@ def run_sweep(
 
 
 def to_csv(results: list[BenchResult], path: Path) -> None:
-    """Write ``results`` to a CSV file, creating parent directories as needed."""
+    """Write ``results`` to a CSV file, creating parent directories as needed.
+
+    Different policies can populate different ``extra_params`` keys (e.g.
+    only admission-control policies report ``sketch_halvings_triggered``),
+    so the column set is the union across all rows, in first-seen order --
+    not just the first row's keys, which would raise on any later row
+    with a key the first row didn't have. Rows missing a given column
+    leave it blank.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = [r.to_dict() for r in results]
     if not rows:
         path.write_text("")
         return
-    fieldnames = list(rows[0].keys())
+    fieldnames: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        for key in row:
+            if key not in seen:
+                seen.add(key)
+                fieldnames.append(key)
     with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, restval="")
         writer.writeheader()
         writer.writerows(rows)
 

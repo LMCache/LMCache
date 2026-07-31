@@ -1,5 +1,36 @@
 # `AdmissionControlledPolicy` -- Design, Evaluation, and Three-Directions Report
 
+> **Errata (superseded numbers below).** An external review of this
+> investigation found five methodological problems that affect every
+> `ADMISSION_*` number in this document: (1) `should_admit` incremented
+> the frequency sketch once, then the caller's follow-up
+> `update_on_put_with_metadata` call incremented it again for the same
+> admitted request -- every admitted key's frequency was double-counted
+> relative to a rejected key or a fill-phase insertion, artificially
+> strengthening incumbent protection; (2) the `halve_every` ablation's
+> workloads produced too few total frequency-sketch increments for any
+> variant tested, including the shipped 20,000 default, to trigger even
+> one halving pass -- "fast/default/slow" were indistinguishable by
+> construction, not by finding; (3) headline synthetic numbers came from
+> a single workload instance each, not a distribution -- no CI, no
+> significance claim was actually supported; (4) the ShareGPT statistical
+> comparison bootstrapped each policy's repeat values independently and
+> compared confidence intervals for overlap, discarding the fact that
+> every policy at a given repeat replays the identical corpus subsample
+> (a paired sampling design) -- fixed by a paired bootstrap of the
+> per-repeat differences plus an exact sign test; (5) design docs and the
+> project's PDF report described the recency-decay formula and the
+> ShareGPT sampling method (subsampling without replacement, not a
+> bootstrap) inconsistently across documents. All five are fixed in code
+> and re-evaluated in
+> **`benchmarks/cache_policy/report/cache_policy_evaluation_report.pdf`**,
+> which is now the authoritative source for every number and
+> significance claim about this policy -- treat the tables and findings
+> below as historical narrative (the bugs found and *why* they were
+> fixed are still accurate and instructive) rather than current results.
+> Where this document's prose makes a claim that contradicts the PDF,
+> the PDF is correct.
+
 ## Summary
 
 `lmcache/v1/storage_backend/cache_policy/admission_control.py` ships

@@ -6,6 +6,15 @@ except a small one-off replay for the freeze-illustration figure --
 cheap enough to redo on every report build rather than caching another
 result file for one plot).
 
+Uses the multi-seed/paired-comparison result files as the source for any
+figure that supports a statistical claim (see
+``benchmarks/cache_policy/main_sweep_multiseed.py`` and
+``benchmarks/cache_policy/real_dataset_eval.py``) -- single-run sweep
+data is used only for figures that are explicitly illustrative
+(mechanism figures, not "policy X beats policy Y" claims), and is
+labeled as such in its own caption text here rather than left for the
+report prose to clarify.
+
 Usage::
 
     python benchmarks/cache_policy/report/generate_figures.py \\
@@ -87,87 +96,105 @@ def _cache_mib(row: dict) -> float:
     return int(row["cache_capacity_bytes"]) / _MIB
 
 
-def fig_hit_rate_vs_cache_size(rows: list[dict], out: Path) -> None:
-    workloads = ["repetitive_short", "novel_long", "mixed_zipfian", "multi_round_chat"]
-    fig, axes = plt.subplots(2, 2, figsize=(10, 8), sharey=True)
-    for ax, workload in zip(axes.flat, workloads, strict=False):
-        for policy in _LINE_POLICIES:
-            pts = sorted(
-                (
-                    (_cache_mib(r), float(r["token_hit_rate"]))
-                    for r in rows
-                    if r["workload_name"] == workload and r["policy_name"] == policy
-                ),
-                key=lambda t: t[0],
-            )
-            if not pts:
-                continue
-            xs, ys = zip(*pts, strict=False)
-            ax.plot(
-                xs,
-                [y * 100 for y in ys],
-                marker=_MARKERS[policy],
-                color=_COLORS[policy],
-                label=policy,
-                linewidth=1.8,
-            )
-        ax.set_title(workload)
-        ax.set_xlabel("Cache size (MiB)")
-        ax.set_xticks([50, 100, 200])
-        ax.grid(alpha=0.3)
-    axes[0, 0].set_ylabel("Token hit rate (%)")
-    axes[1, 0].set_ylabel("Token hit rate (%)")
-    handles, labels = axes[0, 0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="lower center", ncol=5, bbox_to_anchor=(0.5, -0.02))
-    fig.suptitle("Hit rate vs. cache size, by workload (synthetic sweep)")
-    fig.tight_layout(rect=(0, 0.04, 1, 0.97))
-    fig.savefig(out / "fig1_hit_rate_vs_cache_size.png")
-    plt.close(fig)
-
-
-def fig_latency_vs_cache_size(rows: list[dict], out: Path) -> None:
-    workloads = ["mixed_zipfian", "multi_round_chat"]
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4.2))
+def fig_hit_rate_vs_cache_size_multiseed(ci_rows: list[dict], out: Path) -> None:
+    """Mean hit rate +/- 95% CI across 10 seeds, seed-capable workloads only."""
+    workloads = ["repetitive_short", "novel_long", "mixed_zipfian"]
+    fig, axes = plt.subplots(1, 3, figsize=(13, 4.3), sharey=True)
     for ax, workload in zip(axes, workloads, strict=False):
         for policy in _LINE_POLICIES:
             pts = sorted(
                 (
-                    (_cache_mib(r), float(r["latency_p95_seconds"]) * 1000)
-                    for r in rows
+                    (
+                        _cache_mib(r),
+                        float(r["hit_rate_mean"]),
+                        float(r["hit_rate_mean"]) - float(r["hit_rate_ci_lo"]),
+                        float(r["hit_rate_ci_hi"]) - float(r["hit_rate_mean"]),
+                    )
+                    for r in ci_rows
                     if r["workload_name"] == workload and r["policy_name"] == policy
                 ),
                 key=lambda t: t[0],
             )
             if not pts:
                 continue
-            xs, ys = zip(*pts, strict=False)
-            ax.plot(
-                xs, ys, marker=_MARKERS[policy], color=_COLORS[policy],
-                label=policy, linewidth=1.8,
+            xs = [p[0] for p in pts]
+            ys = [p[1] * 100 for p in pts]
+            lo = [p[2] * 100 for p in pts]
+            hi = [p[3] * 100 for p in pts]
+            ax.errorbar(
+                xs,
+                ys,
+                yerr=[lo, hi],
+                marker=_MARKERS[policy],
+                color=_COLORS[policy],
+                label=policy,
+                linewidth=1.6,
+                capsize=3,
+                elinewidth=1,
             )
         ax.set_title(workload)
         ax.set_xlabel("Cache size (MiB)")
-        ax.set_ylabel("Modeled p95 latency (ms)")
         ax.set_xticks([50, 100, 200])
         ax.grid(alpha=0.3)
+    axes[0].set_ylabel("Token hit rate (%)")
     handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="lower center", ncol=5, bbox_to_anchor=(0.5, -0.06))
-    fig.suptitle("Modeled p95 latency vs. cache size")
-    fig.tight_layout(rect=(0, 0.1, 1, 0.95))
-    fig.savefig(out / "fig2_latency_p95_vs_cache_size.png")
+    fig.legend(handles, labels, loc="lower center", ncol=5, bbox_to_anchor=(0.5, -0.05))
+    fig.suptitle("Hit rate vs. cache size, mean +/- 95% CI across 10 independent seeds")
+    fig.tight_layout(rect=(0, 0.08, 1, 0.94))
+    fig.savefig(out / "fig1_hit_rate_vs_cache_size_multiseed.png")
+    plt.close(fig)
+
+
+def fig_latency_vs_cache_size_multiseed(ci_rows: list[dict], out: Path) -> None:
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    for policy in _LINE_POLICIES:
+        pts = sorted(
+            (
+                (_cache_mib(r), float(r["latency_p95_mean_seconds"]) * 1000)
+                for r in ci_rows
+                if r["workload_name"] == "mixed_zipfian" and r["policy_name"] == policy
+            ),
+            key=lambda t: t[0],
+        )
+        if not pts:
+            continue
+        xs, ys = zip(*pts, strict=False)
+        ax.plot(
+            xs,
+            ys,
+            marker=_MARKERS[policy],
+            color=_COLORS[policy],
+            label=policy,
+            linewidth=1.8,
+        )
+    ax.set_xlabel("Cache size (MiB)")
+    ax.set_ylabel("Mean modeled p95 latency (ms), across 10 seeds")
+    ax.set_title("Modeled p95 latency vs. cache size (mixed_zipfian)")
+    ax.set_xticks([50, 100, 200])
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out / "fig2_latency_p95_vs_cache_size_multiseed.png")
     plt.close(fig)
 
 
 def fig_eviction_and_rejections(rows: list[dict], out: Path) -> None:
+    """Single-run illustration of the eviction/rejection mechanism."""
     policies = [
-        "LRU", "LFU", "FIFO", "MRU", "COST_AWARE",
-        "ADMISSION_LRU", "WINDOWED_ADMISSION_LRU",
+        "LRU",
+        "LFU",
+        "FIFO",
+        "MRU",
+        "COST_AWARE",
+        "ADMISSION_LRU",
+        "WINDOWED_ADMISSION_LRU",
     ]
     target = 100 * _MIB
     evictions, rejections = [], []
     for p in policies:
         match = [
-            r for r in rows
+            r
+            for r in rows
             if r["workload_name"] == "mixed_zipfian"
             and r["policy_name"] == p
             and int(r["cache_capacity_bytes"]) == target
@@ -180,17 +207,26 @@ def fig_eviction_and_rejections(rows: list[dict], out: Path) -> None:
     x = range(len(policies))
     width = 0.38
     ax.bar(
-        [i - width / 2 for i in x], evictions, width, label="Evictions",
+        [i - width / 2 for i in x],
+        evictions,
+        width,
+        label="Evictions",
         color="#1f77b4",
     )
     ax.bar(
-        [i + width / 2 for i in x], rejections, width, label="Rejected admissions",
+        [i + width / 2 for i in x],
+        rejections,
+        width,
+        label="Rejected admissions",
         color="#d62728",
     )
     ax.set_xticks(list(x))
     ax.set_xticklabels(policies, rotation=20, ha="right")
-    ax.set_ylabel("Count over 3,000 requests")
-    ax.set_title("Evictions vs. rejected admissions -- mixed_zipfian, 100 MiB")
+    ax.set_ylabel("Count over one run (3,000 requests)")
+    ax.set_title(
+        "Evictions vs. rejected admissions -- mixed_zipfian, 100 MiB\n"
+        "(single run; see Figure 1 for the CI'd hit-rate effect)"
+    )
     ax.legend()
     ax.grid(alpha=0.3, axis="y")
     fig.tight_layout()
@@ -198,58 +234,63 @@ def fig_eviction_and_rejections(rows: list[dict], out: Path) -> None:
     plt.close(fig)
 
 
-def fig_real_data_ci(ci_rows: list[dict], out: Path) -> None:
+def fig_real_data_paired_diff(paired_rows: list[dict], out: Path) -> None:
+    """Paired hit-rate difference vs. LRU, with 95% CI, at 200 MiB across scales."""
     scales = ["500", "2000", "5000"]
-    policies_lru = ["LRU", "ADMISSION_LRU", "WINDOWED_ADMISSION_LRU"]
-    policies_cost = [
-        "COST_AWARE", "ADMISSION_COST_AWARE", "WINDOWED_ADMISSION_COST_AWARE",
+    policies = [
+        "LFU",
+        "FIFO",
+        "MRU",
+        "COST_AWARE",
+        "ADMISSION_LRU",
+        "ADMISSION_COST_AWARE",
+        "WINDOWED_ADMISSION_LRU",
+        "WINDOWED_ADMISSION_COST_AWARE",
     ]
-
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5), sharex=True)
-    titles = ["LRU family", "COST_AWARE family"]
-    for ax, policies, title in zip(
-        axes, [policies_lru, policies_cost], titles, strict=False
-    ):
-        width = 0.8 / len(policies)
-        for i, p in enumerate(policies):
-            means, los, his, xs = [], [], [], []
-            for si, scale in enumerate(scales):
-                match = [
-                    r for r in ci_rows
-                    if r["policy_name"] == p
-                    and r["max_conversations"] == scale
-                    and int(r["cache_capacity_bytes"]) == 200 * _MIB
-                ]
-                if not match:
-                    continue
-                m = match[0]
-                means.append(float(m["hit_rate_mean"]) * 100)
-                los.append(
-                    (float(m["hit_rate_mean"]) - float(m["hit_rate_ci_lo"])) * 100
-                )
-                his.append(
-                    (float(m["hit_rate_ci_hi"]) - float(m["hit_rate_mean"])) * 100
-                )
-                xs.append(si + i * width)
-            ax.bar(
-                xs, means, width, yerr=[los, his], capsize=3,
-                label=p, color=_COLORS[p],
-            )
-        ax.set_xticks([i + width for i in range(len(scales))])
-        ax.set_xticklabels([f"{s} conv." for s in scales])
-        ax.set_title(f"{title} -- 200 MiB cache")
-        ax.set_ylabel("Token hit rate (%)")
-        ax.legend(fontsize=8)
-        ax.grid(alpha=0.3, axis="y")
-    fig.suptitle(
-        "Real ShareGPT data: hit rate with 95% bootstrap CI (6 repeats), 200 MiB"
+    present = sorted(
+        {r["policy_name"] for r in paired_rows if r["policy_name"] in policies},
+        key=lambda p: policies.index(p),
     )
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
-    fig.savefig(out / "fig4_real_data_ci_200mib.png")
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+    width = 0.8 / max(1, len(present))
+    for i, p in enumerate(present):
+        means, los, his, xs = [], [], [], []
+        for si, scale in enumerate(scales):
+            match = [
+                r
+                for r in paired_rows
+                if r["policy_name"] == p
+                and r["max_conversations"] == scale
+                and int(r["cache_capacity_bytes"]) == 200 * _MIB
+            ]
+            if not match:
+                continue
+            m = match[0]
+            diff_mean = float(m["hit_rate_diff_mean"]) * 100
+            means.append(diff_mean)
+            los.append(diff_mean - float(m["hit_rate_diff_ci_lo"]) * 100)
+            his.append(float(m["hit_rate_diff_ci_hi"]) * 100 - diff_mean)
+            xs.append(si + i * width)
+        color = _COLORS.get(p, None)
+        ax.bar(xs, means, width, yerr=[los, his], capsize=2, label=p, color=color)
+    ax.axhline(0, color="black", linewidth=0.8)
+    ax.set_xticks([i + width * (len(present) - 1) / 2 for i in range(len(scales))])
+    ax.set_xticklabels([f"{s} conv." for s in scales])
+    ax.set_ylabel("Paired hit-rate difference vs. LRU (percentage points)")
+    ax.set_title(
+        "Real ShareGPT: paired hit-rate diff vs. LRU, 95% CI (6 repeats), 200 MiB\n"
+        "Bars whose error bars exclude zero are a statistically supported difference"
+    )
+    ax.legend(fontsize=7, ncol=4, loc="upper center", bbox_to_anchor=(0.5, -0.12))
+    ax.grid(alpha=0.3, axis="y")
+    fig.tight_layout()
+    fig.savefig(out / "fig4_real_data_paired_diff_200mib.png")
     plt.close(fig)
 
 
 def fig_zipf_robustness(rows: list[dict], out: Path) -> None:
+    """Single-run-per-point sweep across Zipf skew (illustrative, not a CI'd claim)."""
     policies = ["LRU", "LFU", "COST_AWARE", "ADMISSION_LRU", "WINDOWED_ADMISSION_LRU"]
     fig, ax = plt.subplots(figsize=(7, 4.5))
     for p in policies:
@@ -257,7 +298,6 @@ def fig_zipf_robustness(rows: list[dict], out: Path) -> None:
         for r in rows:
             if r["policy_name"] != p:
                 continue
-            # workload_name looks like "mixed_zipfian[zipf_s=1.2]"
             tag = r["workload_name"]
             if "zipf_s=" not in tag:
                 continue
@@ -269,7 +309,7 @@ def fig_zipf_robustness(rows: list[dict], out: Path) -> None:
         xs, ys = zip(*pts, strict=False)
         ax.plot(xs, ys, marker=_MARKERS[p], color=_COLORS[p], label=p, linewidth=1.8)
     ax.set_xlabel("Zipf skew parameter (zipf_s)")
-    ax.set_ylabel("Token hit rate (%)")
+    ax.set_ylabel("Token hit rate (%), single run per point")
     ax.set_title("Hit rate vs. Zipf skew strength (mixed_zipfian, 100 MiB)")
     ax.legend()
     ax.grid(alpha=0.3)
@@ -281,25 +321,36 @@ def fig_zipf_robustness(rows: list[dict], out: Path) -> None:
 def fig_ablation(
     admission_rows: list[dict], windowed_rows: list[dict], out: Path
 ) -> None:
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
     ax = axes[0]
     variants = ["fast_decay", "default", "slow_decay"]
     workloads = ["mixed_zipfian", "multi_round_chat"]
     width = 0.35
     for wi, workload in enumerate(workloads):
-        ys = []
+        ys, halvings = [], []
         for v in variants:
             match = [
-                r for r in admission_rows
-                if r["workload_name"] == f"{workload}[{v}]"
+                r for r in admission_rows if r["workload_name"] == f"{workload}[{v}]"
             ]
             ys.append(float(match[0]["token_hit_rate"]) * 100 if match else 0.0)
+            halvings.append(
+                match[0].get("param_sketch_halvings_triggered", "?") if match else "?"
+            )
         xs = [i + wi * width for i in range(len(variants))]
-        ax.bar(xs, ys, width, label=workload)
+        bars = ax.bar(xs, ys, width, label=workload)
+        for bar, h in zip(bars, halvings, strict=False):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height(),
+                f"h={h}",
+                ha="center",
+                va="bottom",
+                fontsize=7,
+            )
     ax.set_xticks([i + width / 2 for i in range(len(variants))])
-    ax.set_xticklabels(["fast\n(2k)", "default\n(20k)", "slow\n(200k)"])
-    ax.set_xlabel("halve_every")
+    ax.set_xticklabels(["fast\n(5k)", "default\n(20k)", "slow\n(80k)"])
+    ax.set_xlabel("halve_every  (h=actual halving passes triggered)")
     ax.set_ylabel("Token hit rate (%)")
     ax.set_title("ADMISSION_LRU: halve_every ablation")
     ax.legend(fontsize=8)
@@ -307,18 +358,25 @@ def fig_ablation(
 
     ax = axes[1]
     variants = [
-        "tiny_window", "default", "large_window",
-        "lenient_promotion", "strict_promotion",
+        "tiny_window",
+        "default",
+        "large_window",
+        "lenient_promotion",
+        "strict_promotion",
     ]
     labels = [
-        "tiny\nwin=5", "default\nwin=20,t=2", "large\nwin=80",
-        "lenient\nt=1", "strict\nt=4",
+        "tiny\nwin=5",
+        "default\nwin=20,t=2",
+        "large\nwin=80",
+        "lenient\nt=1",
+        "strict\nt=4",
     ]
     for wi, workload in enumerate(workloads):
         ys = []
         for v in variants:
             match = [
-                r for r in windowed_rows
+                r
+                for r in windowed_rows
                 if r["workload_name"] == f"{workload}[windowed_{v}]"
             ]
             ys.append(float(match[0]["token_hit_rate"]) * 100 if match else 0.0)
@@ -338,6 +396,47 @@ def fig_ablation(
     plt.close(fig)
 
 
+def fig_multi_round_chat_case_study(rows: list[dict], out: Path) -> None:
+    """Deterministic case study across structural parameters (not stats evidence)."""
+    variants = ["default", "fewer_longer_sessions", "more_shorter_sessions"]
+    fig, axes = plt.subplots(1, 3, figsize=(13, 4.3), sharey=True)
+    for ax, variant in zip(axes, variants, strict=False):
+        for policy in _LINE_POLICIES:
+            pts = sorted(
+                (
+                    (_cache_mib(r), float(r["token_hit_rate"]) * 100)
+                    for r in rows
+                    if r["variant"] == variant and r["policy_name"] == policy
+                ),
+                key=lambda t: t[0],
+            )
+            if not pts:
+                continue
+            xs, ys = zip(*pts, strict=False)
+            ax.plot(
+                xs,
+                ys,
+                marker=_MARKERS[policy],
+                color=_COLORS[policy],
+                label=policy,
+                linewidth=1.6,
+            )
+        ax.set_title(variant, fontsize=10)
+        ax.set_xlabel("Cache size (MiB)")
+        ax.set_xticks([50, 100, 200])
+        ax.grid(alpha=0.3)
+    axes[0].set_ylabel("Token hit rate (%)")
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="lower center", ncol=5, bbox_to_anchor=(0.5, -0.05))
+    fig.suptitle(
+        "multi_round_chat deterministic case study "
+        "(single run per point -- not statistical evidence)"
+    )
+    fig.tight_layout(rect=(0, 0.08, 1, 0.92))
+    fig.savefig(out / "fig9_multi_round_chat_case_study.png")
+    plt.close(fig)
+
+
 def fig_freeze_illustration(out: Path) -> None:
     requests = novel_long(500, min_tokens=2048, max_tokens=4096, chunk_size=256, seed=0)
     cost_model = CostModel(CostModelConfig())
@@ -346,7 +445,11 @@ def fig_freeze_illustration(out: Path) -> None:
     evictions = []
     for p in policies:
         result = run_workload(
-            p, requests, small_cache_bytes, DEFAULT_KV_BYTES_PER_CHUNK, cost_model,
+            p,
+            requests,
+            small_cache_bytes,
+            DEFAULT_KV_BYTES_PER_CHUNK,
+            cost_model,
             workload_name="freeze_check",
         )
         evictions.append(result.eviction_count)
@@ -355,8 +458,12 @@ def fig_freeze_illustration(out: Path) -> None:
     bars = ax.bar(policies, evictions, color=[_COLORS[p] for p in policies])
     for bar, v in zip(bars, evictions, strict=False):
         ax.text(
-            bar.get_x() + bar.get_width() / 2, bar.get_height(), str(v),
-            ha="center", va="bottom", fontsize=10,
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height(),
+            str(v),
+            ha="center",
+            va="bottom",
+            fontsize=10,
         )
     ax.set_xticks(range(len(policies)))
     ax.set_xticklabels(policies, rotation=15, ha="right", fontsize=9)
@@ -389,7 +496,7 @@ def fig_latency_distribution(raw_rows: list[dict], out: Path) -> None:
         patch.set_alpha(0.6)
     ax.set_ylabel("Modeled p95 latency (ms)")
     ax.set_title(
-        "Distribution of p95 latency across 6 bootstrap repeats\n"
+        "Distribution of p95 latency across 6 paired repeats\n"
         "(real ShareGPT, 500 conversations, 100 MiB)"
     )
     ax.grid(alpha=0.3, axis="y")
@@ -408,22 +515,25 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     sweep_rows = _load(_AC_RESULTS / "sweep_results.json")
+    multiseed_ci = _load(_AC_RESULTS / "multiseed_sweep_ci.json")
+    chat_case_study = _load(_AC_RESULTS / "multi_round_chat_case_study.json")
     zipf_rows = _load(_AC_RESULTS / "robustness_zipf_skew.json")
     admission_ablation = _load(_AC_RESULTS / "admission_control_ablation.json")
     windowed_ablation = _load(_AC_RESULTS / "windowed_admission_control_ablation.json")
-    real_ci = _load(_REAL_DATA / "real_dataset_ci.json")
+    real_paired = _load(_REAL_DATA / "real_dataset_paired_diff.json")
     real_raw = _load(_REAL_DATA / "real_dataset_raw.json")
 
-    fig_hit_rate_vs_cache_size(sweep_rows, out)
-    fig_latency_vs_cache_size(sweep_rows, out)
+    fig_hit_rate_vs_cache_size_multiseed(multiseed_ci, out)
+    fig_latency_vs_cache_size_multiseed(multiseed_ci, out)
     fig_eviction_and_rejections(sweep_rows, out)
-    fig_real_data_ci(real_ci, out)
+    fig_real_data_paired_diff(real_paired, out)
     fig_zipf_robustness(zipf_rows, out)
     fig_ablation(admission_ablation, windowed_ablation, out)
+    fig_multi_round_chat_case_study(chat_case_study, out)
     fig_freeze_illustration(out)
     fig_latency_distribution(real_raw, out)
 
-    print(f"Wrote 8 figures to {out}")
+    print(f"Wrote 9 figures to {out}")
 
 
 if __name__ == "__main__":

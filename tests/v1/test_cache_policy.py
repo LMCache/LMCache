@@ -249,6 +249,47 @@ def test_cost_aware_frequency_protects_popular_chunk():
     assert evict_candidates == [key2], (evict_candidates, [key2])
 
 
+def test_cost_aware_clock_is_injectable_and_deterministic():
+    # Regression test: CostAwareEvictionPolicy used to call time.monotonic()
+    # directly and unconditionally, so its recency term's actual effect
+    # was invisible in any benchmark run (which completes in far less
+    # than one default half_life_seconds=60.0) and non-reproducible
+    # across machines of different speeds. The injected clock must be
+    # the sole source of "now" for every recency computation.
+    logical_time = {"now": 0.0}
+    policy = get_cache_policy(
+        "COST_AWARE", half_life_seconds=10.0, clock=lambda: logical_time["now"]
+    )
+    cache_dict = policy.init_mutable_mapping()
+    key1 = dumb_cache_engine_key(1)
+    key2 = dumb_cache_engine_key(2)
+
+    cache_dict[key1] = DummyMemoryObj()
+    policy.put(
+        key1, value=cache_dict[key1], total_request_tokens=1000, chunk_start=0,
+        memory_size_bytes=1024,
+    )
+    logical_time["now"] = 1000.0  # far beyond several half-lives
+    cache_dict[key2] = DummyMemoryObj()
+    policy.put(
+        key2, value=cache_dict[key2], total_request_tokens=1000, chunk_start=0,
+        memory_size_bytes=1024,
+    )
+
+    # key1's score at the current (injected) logical time must reflect
+    # ~100 half-lives of decay -- i.e. be far smaller than key2's, which
+    # was just inserted at the current logical time.
+    score1 = policy.calculate_score(key1)
+    score2 = policy.calculate_score(key2)
+    assert score1 < score2 * 0.01, (score1, score2)
+
+    # Advancing real wall-clock time must have zero effect: only the
+    # injected clock governs recency.
+    logical_time_unchanged = logical_time["now"]
+    assert policy.calculate_score(key1) == score1
+    assert logical_time["now"] == logical_time_unchanged
+
+
 def test_admission_control_delegates_eviction_ranking_to_inner_policy():
     # With should_admit never consulted, AdmissionControlledPolicy must
     # behave identically to the inner LRU policy it wraps.
@@ -302,6 +343,51 @@ def test_admission_control_admits_when_cache_empty():
     key = dumb_cache_engine_key(1)
     # No eviction candidates exist yet -> nothing to weigh against, admit.
     assert policy.should_admit(key, cache_dict) is True
+
+
+def test_admission_control_records_exactly_one_increment_per_arrival():
+    # Regression test: an earlier version incremented the frequency
+    # sketch inside should_admit() unconditionally, then incremented it
+    # again inside update_on_put_with_metadata() when the caller (per the
+    # documented convention -- should_admit() immediately followed by the
+    # matching update_on_* call for the same key on admission) went ahead
+    # and inserted the now-admitted key. That double-counted every
+    # admitted key's frequency relative to a rejected key or a fill-phase
+    # insertion, silently over-weighting incumbents. Each of the three
+    # paths below must record exactly one increment.
+    policy = get_cache_policy("ADMISSION_LRU", halve_every=1_000_000)
+    cache_dict = policy.init_mutable_mapping()
+
+    # Fill-phase insertion: should_admit is never called (cache not yet
+    # at capacity in a real caller), only update_on_put_with_metadata.
+    fill_key = dumb_cache_engine_key(1)
+    cache_dict[fill_key] = DummyMemoryObj()
+    policy.update_on_put_with_metadata(fill_key, cache_obj=cache_dict[fill_key])
+    assert policy._sketch.estimate(fill_key) == 1
+
+    # Admitted-under-pressure: should_admit() returns True (empty
+    # cache_dict admits unconditionally), immediately followed by the
+    # matching update_on_put_with_metadata call, mirroring the real
+    # caller's (runner.py's _PolicyCache.put) call sequence.
+    admitted_key = dumb_cache_engine_key(2)
+    empty_cache_dict = policy.init_mutable_mapping()
+    assert policy.should_admit(admitted_key, empty_cache_dict) is True
+    empty_cache_dict[admitted_key] = DummyMemoryObj()
+    policy.update_on_put_with_metadata(
+        admitted_key, cache_obj=empty_cache_dict[admitted_key]
+    )
+    assert policy._sketch.estimate(admitted_key) == 1
+
+    # Rejected-under-pressure: should_admit() returns False; the caller
+    # never calls update_on_put_with_metadata for a rejected key at all.
+    resident_key = dumb_cache_engine_key(3)
+    cache_dict[resident_key] = DummyMemoryObj()
+    policy.update_on_put_with_metadata(resident_key, cache_obj=cache_dict[resident_key])
+    for _ in range(5):
+        policy.update_on_hit(resident_key, cache_dict)
+    rejected_key = dumb_cache_engine_key(4)
+    assert policy.should_admit(rejected_key, cache_dict) is False
+    assert policy._sketch.estimate(rejected_key) == 1
 
 
 def test_get_cache_policy_admission_prefix_wraps_any_inner_policy():

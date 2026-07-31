@@ -1,5 +1,26 @@
 # `CostAwareEvictionPolicy` -- Performance Evaluation
 
+> **Errata (superseded numbers below).** Every `COST_AWARE` number in
+> this document was produced while `CostAwareEvictionPolicy` called
+> `time.monotonic()` directly and unconditionally for its recency term.
+> A benchmark run replays its entire request sequence in far less than
+> one default `half_life_seconds=60.0`, so the observed `age_seconds`
+> was always approximately zero regardless of access order: the
+> recency term's real effect was invisible in every result below, and
+> what small effect it did have depended on host machine speed rather
+> than being reproducible. The policy now accepts an injected `clock`
+> (see its docstring), and the benchmark simulator
+> (`lmcache.tools.cache_policy_bench.runner`) injects a deterministic
+> logical clock automatically. Also note: the score's recency term
+> below is correctly described as `1 / (1 + age_seconds/half_life_seconds)`
+> -- a reciprocal (hyperbolic) decay -- not "exponential"; an early
+> draft of the project's PDF report mislabeled it and has since been
+> corrected. **`benchmarks/cache_policy/report/cache_policy_evaluation_report.pdf`**
+> is now the authoritative source for every `COST_AWARE` number; treat
+> the tables and findings below as historical narrative rather than
+> current results. Where this document's prose contradicts the PDF, the
+> PDF is correct.
+
 This doc evaluates `lmcache/v1/storage_backend/cache_policy/cost_aware_policy.py`
 against the existing `LRU`, `LFU`, `FIFO`, and `MRU` policies, using the
 benchmark suite in [`benchmarks/cache_policy/`](../../../../../benchmarks/cache_policy/README.md).

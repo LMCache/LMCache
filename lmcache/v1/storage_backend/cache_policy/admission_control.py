@@ -58,6 +58,22 @@ class _FrequencySketch:
         """Return the current approximate request-frequency count for key."""
         return self._counts.get(key, 0)
 
+    def increments_recorded(self) -> int:
+        """Total number of ``increment()`` calls observed so far."""
+        return self._increments
+
+    def halvings_triggered(self) -> int:
+        """
+        Total number of periodic halving passes triggered so far.
+
+        Exposed for diagnostics: a ``halve_every`` setting that never
+        triggers a halving pass during a given run is indistinguishable
+        from no decay at all for that run, which is easy to miss without
+        checking this directly (two settings can look identical in
+        results while one has decayed several times and the other zero).
+        """
+        return self._increments // self._halve_every
+
 
 class AdmissionControlledPolicy(BaseCachePolicy[KeyType, MapType]):
     """
@@ -120,6 +136,13 @@ class AdmissionControlledPolicy(BaseCachePolicy[KeyType, MapType]):
         self.inner_policy = inner_policy
         self.halve_every = halve_every
         self._sketch = _FrequencySketch(halve_every=halve_every)
+        # Set by should_admit() to the key it just recorded an increment
+        # for, so update_on_put/update_on_put_with_metadata (called next,
+        # by the caller's own convention, iff should_admit returned True)
+        # can skip re-incrementing the same observed request -- see
+        # should_admit's docstring for the double-counting bug this
+        # prevents.
+        self._pending_admitted_key: Optional[KeyType] = None
 
         logger.info(
             "Initializing AdmissionControlledPolicy(inner=%s)",
@@ -155,12 +178,14 @@ class AdmissionControlledPolicy(BaseCachePolicy[KeyType, MapType]):
         key: KeyType,
     ) -> None:
         """
-        Record the observed request and delegate to the inner policy.
+        Record the observed request (unless already recorded by a
+        preceding should_admit call for this same key -- see
+        should_admit's docstring) and delegate to the inner policy.
 
         Input:
             key: an object of KeyType
         """
-        self._sketch.increment(key)
+        self._record_put_observation(key)
         self.inner_policy.update_on_put(key)
 
     def update_on_put_with_metadata(
@@ -170,15 +195,40 @@ class AdmissionControlledPolicy(BaseCachePolicy[KeyType, MapType]):
         **metadata: Any,
     ) -> None:
         """
-        Record the observed request and delegate to the inner policy.
+        Record the observed request (unless already recorded by a
+        preceding should_admit call for this same key -- see
+        should_admit's docstring) and delegate to the inner policy.
 
         Input:
             key: an object of KeyType
             cache_obj: optional cache object (e.g. MemoryObj)
             metadata: additional metadata key-value pairs
         """
-        self._sketch.increment(key)
+        self._record_put_observation(key)
         self.inner_policy.update_on_put_with_metadata(key, cache_obj, **metadata)
+
+    def _record_put_observation(self, key: KeyType) -> None:
+        """
+        Increment the frequency sketch for key exactly once per logical
+        arrival, whether that arrival went through should_admit or not.
+
+        During cache fill (below capacity), should_admit is never called
+        (the caller's documented convention -- see BaseCachePolicy.
+        should_admit), so this always increments directly. Under
+        capacity pressure, should_admit is called first and always
+        increments the key itself, then, only if it admitted the key,
+        marks it as pending here; this method then consumes that marker
+        instead of incrementing again, since re-incrementing would count
+        one arrival twice (previously a real bug -- an admitted key
+        under pressure received two increments for a single request,
+        while a rejected key or a fill-phase insertion received exactly
+        one, silently biasing the estimate in favor of already-resident
+        keys beyond what the design intends).
+        """
+        if self._pending_admitted_key == key:
+            self._pending_admitted_key = None
+        else:
+            self._sketch.increment(key)
 
     def update_cost_observation(
         self,
@@ -241,6 +291,22 @@ class AdmissionControlledPolicy(BaseCachePolicy[KeyType, MapType]):
         rejected key never reaches `update_on_put_with_metadata`, the
         only other place frequency is recorded on the miss path).
 
+        If this call admits the key, it marks the key as "pending" so
+        that the caller's next call -- `update_on_put` or
+        `update_on_put_with_metadata` for this same key, which every
+        caller in this codebase makes immediately afterward when
+        admission succeeds -- skips its own increment instead of
+        recording the same arrival a second time. Without this, an
+        admitted key received two frequency increments for one request
+        (once here, once in the follow-up call) while a rejected key or a
+        fill-phase insertion (which never goes through `should_admit` at
+        all) received exactly one -- silently and asymmetrically
+        strengthening incumbent protection beyond what the design
+        intends. Relies on that call-ordering convention; a caller that
+        invoked `should_admit` without immediately following an admitted
+        result with the matching `update_on_*` call for the same key
+        would under-count that key by one instead.
+
         Deliberately does not call `get_evict_candidates` -- see the class
         docstring for why that would be unsafe for inner policies (e.g.
         `LFUCachePolicy`) whose eviction-candidate lookup mutates their own
@@ -258,9 +324,29 @@ class AdmissionControlledPolicy(BaseCachePolicy[KeyType, MapType]):
         """
         self._sketch.increment(key)
         if not cache_dict:
+            self._pending_admitted_key = key
             return True
         coldest_estimate = min(self._sketch.estimate(k) for k in cache_dict)
-        return self._sketch.estimate(key) > coldest_estimate
+        admitted = self._sketch.estimate(key) > coldest_estimate
+        if admitted:
+            self._pending_admitted_key = key
+        return admitted
+
+    @property
+    def sketch_halvings_triggered(self) -> int:
+        """
+        Number of periodic frequency-sketch halving passes triggered so
+        far. Diagnostic only (not consulted by ``should_admit`` itself)
+        -- lets a caller (e.g. an ablation script) verify a given
+        ``halve_every`` setting actually decayed at least once during a
+        run, rather than assuming it did from the setting alone.
+        """
+        return self._sketch.halvings_triggered()
+
+    @property
+    def sketch_increments_recorded(self) -> int:
+        """Total number of frequency-sketch increments recorded so far."""
+        return self._sketch.increments_recorded()
 
 
 class WindowedAdmissionControlledPolicy(BaseCachePolicy[KeyType, MapType]):
@@ -593,3 +679,17 @@ class WindowedAdmissionControlledPolicy(BaseCachePolicy[KeyType, MapType]):
             Always ``True``.
         """
         return True
+
+    @property
+    def sketch_halvings_triggered(self) -> int:
+        """
+        Number of periodic frequency-sketch halving passes triggered so
+        far. Diagnostic only -- see
+        ``AdmissionControlledPolicy.sketch_halvings_triggered``.
+        """
+        return self._sketch.halvings_triggered()
+
+    @property
+    def sketch_increments_recorded(self) -> int:
+        """Total number of frequency-sketch increments recorded so far."""
+        return self._sketch.increments_recorded()
