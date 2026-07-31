@@ -48,6 +48,7 @@ FMT_CROSS_LAYER = lmc_ops.EngineKVFormat.NB_NL_TWO_BS_NH_HS
 FMT_FLASH_INFER = lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS
 FMT_MLA = lmc_ops.EngineKVFormat.NL_X_NB_BS_HS
 FMT_SGLANG_MHA = lmc_ops.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS
+FMT_SGLANG_MP_MHA = lmc_ops.EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS
 FMT_SGLANG_MLA = lmc_ops.EngineKVFormat.NL_X_NBBS_ONE_HS
 FMT_NORMAL_HND = lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS
 FMT_FLASH_INFER_HND = lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS
@@ -67,6 +68,7 @@ FORMAT_PARAMS = [
     (FMT_FLASH_INFER, 4, 8, 128, False),
     (FMT_MLA, 4, 1, 576, True),
     (FMT_SGLANG_MHA, 4, 8, 128, False),
+    (FMT_SGLANG_MP_MHA, 4, 8, 128, False),
     (FMT_SGLANG_MLA, 4, 1, 576, True),
     (FMT_NORMAL_HND, 4, 8, 128, False),
     (FMT_FLASH_INFER_HND, 4, 8, 128, False),
@@ -115,6 +117,9 @@ def create_vllm_tensors(
     elif engine_kv_format == FMT_SGLANG_MHA:
         shape = [nbbs, nh, hs]
         return [_create_random_tensor(shape, dtype, device) for _ in range(2 * nl)]
+    elif engine_kv_format == FMT_SGLANG_MP_MHA:
+        shape = [nb, bs, nh, hs]
+        return [_create_random_tensor(shape, dtype, device) for _ in range(2 * nl)]
     elif engine_kv_format == FMT_SGLANG_MLA:
         shape = [nbbs, 1, hs]
         return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
@@ -158,6 +163,9 @@ def create_zero_vllm_tensors(
         return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
     elif engine_kv_format == FMT_SGLANG_MHA:
         shape = [nbbs, nh, hs]
+        return [_create_zero_tensor(shape, dtype, device) for _ in range(2 * nl)]
+    elif engine_kv_format == FMT_SGLANG_MP_MHA:
+        shape = [nb, bs, nh, hs]
         return [_create_zero_tensor(shape, dtype, device) for _ in range(2 * nl)]
     elif engine_kv_format == FMT_SGLANG_MLA:
         shape = [nbbs, 1, hs]
@@ -219,6 +227,10 @@ def get_block_data(
             ts, ed = block_idx * bs, (block_idx + 1) * bs
             k = vllm_tensors[layer_idx][ts:ed, :, :].clone()
             v = vllm_tensors[nl + layer_idx][ts:ed, :, :].clone()
+            results.append(torch.stack([k, v], dim=0))
+        elif engine_kv_format == FMT_SGLANG_MP_MHA:
+            k = vllm_tensors[layer_idx][block_idx, :, :, :].clone()
+            v = vllm_tensors[nl + layer_idx][block_idx, :, :, :].clone()
             results.append(torch.stack([k, v], dim=0))
         elif engine_kv_format == FMT_SGLANG_MLA:
             ts, ed = block_idx * bs, (block_idx + 1) * bs
@@ -296,6 +308,7 @@ TOTAL_BLOCKS = NUM_MEMORY_OBJECTS * BLOCKS_PER_OBJECT  # 64
         "flash_infer",
         "mla",
         "sglang_mha",
+        "sglang_mp_mha",
         "sglang_mla",
         "normal_hnd",
         "flash_infer_hnd",
@@ -403,6 +416,7 @@ def test_block_transfer_roundtrip(
         "flash_infer",
         "mla",
         "sglang_mha",
+        "sglang_mp_mha",
         "sglang_mla",
         "normal_hnd",
         "flash_infer_hnd",

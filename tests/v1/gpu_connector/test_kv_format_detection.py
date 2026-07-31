@@ -15,6 +15,8 @@ import torch
 # First Party
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.kv_format import detect_format, extract_kv_cache_shapes
+from lmcache.v1.gpu_connector.utils import normalize_and_discover_per_layer_formats
+from lmcache.v1.kv_layer_groups import group_layers_by_identity
 import lmcache.c_ops as lmc_ops
 
 NB, NL, BS, NH, HS = 7, 5, 3, 2, 4
@@ -111,6 +113,36 @@ def test_sglang_mha_mp_reshape():
     # Canonical depth-2 [K_layers, V_layers], inner reshaped to 4-D.
     assert len(out) == 2 and len(out[0]) == NL
     assert tuple(out[0][0].shape) == (NB, BS, NH, HS)
+
+
+def test_sglang_mha_mp_one_head_registration_geometry():
+    # At TP == total KV heads, each rank has one head. The tokens_per_block
+    # hint still identifies the flat MP K/V wire layout, so NH == 1 must not
+    # be mistaken for SGLang's depth-1 fused MLA layout.
+    if not hasattr(F, "TWO_X_NL_X_NB_BS_NH_HS"):
+        pytest.skip("extension lacks TWO_X_NL_X_NB_BS_NH_HS")
+    flat = [_t(NB * BS, 1, HS) for _ in range(2 * NL)]
+
+    normalized, formats = normalize_and_discover_per_layer_formats(
+        flat,
+        layer_index_groups=[],
+        serving_engine=EngineType.SGLANG,
+        layout_hints={"tokens_per_block": BS},
+    )
+
+    assert formats == [F.TWO_X_NL_X_NB_BS_NH_HS] * NL
+    assert len(normalized) == 2 and len(normalized[0]) == NL
+    assert tuple(normalized[0][0].shape) == (NB, BS, 1, HS)
+
+    groups = group_layers_by_identity(normalized, formats)
+    assert len(groups) == 1
+    identity, layer_indices = groups[0]
+    assert identity.kv_size == 2
+    assert identity.num_heads == 1
+    assert identity.head_size == HS
+    assert identity.block_size == BS
+    assert identity.engine_kv_format == F.TWO_X_NL_X_NB_BS_NH_HS
+    assert layer_indices == list(range(NL))
 
 
 def test_trtllm_cross_layer_6d():

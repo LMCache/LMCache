@@ -33,7 +33,6 @@ class SGLANG_Detector(EngineDetector):
             and len(kv_caches) % 2 == 0
             and isinstance(kv_caches[0], torch.Tensor)
             and kv_caches[0].dim() == 3
-            and kv_caches[0].shape[1] > 1
             and "tokens_per_block" in layout_hints
         ):
             block_size = layout_hints["tokens_per_block"]
