@@ -15,8 +15,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 # First Party
-from lmcache.v1.distributed.api import EncodedObjectKey
-from lmcache.v1.distributed.tiers import Tier
+from lmcache.v1.distributed.api import EncodedObjectKey, Tier
 
 
 class CacheEventType(str, Enum):
@@ -73,7 +72,10 @@ class CacheEventBatch:
         tier: The cache tier the events apply to (``l1`` or ``l2``;
             never ``all``).
         backend: The storage backend within the tier (``"dram"``,
-            ``"cxl"``, ``"fs"``, ``"valkey"``, ...; non-empty).
+            ``"cxl"``, ``"fs"``, ``"valkey"``, ...). Required non-empty
+            for ``store``/``delete`` (it is part of the placement
+            identity); empty for ``access``, which only refreshes
+            key-level recency and carries no placement identity.
         entries: The affected keys.
         ts: Emitter wall-clock seconds for the batch (``0.0`` if unknown).
     """
@@ -91,14 +93,17 @@ class CacheEventBatch:
         """Enforce intrinsic invariants.
 
         Raises:
-            ValueError: If ``instance_id`` or ``backend`` is empty,
+            ValueError: If ``instance_id`` is empty, ``backend`` is empty
+                on a placement-bearing batch (``store``/``delete``),
                 ``incarnation`` or ``ts`` is negative, ``seq`` < 1, or
                 ``tier`` is not a concrete tier (``l1``/``l2``).
         """
         if not self.instance_id:
             raise ValueError("instance_id must be non-empty")
-        if not self.backend:
-            raise ValueError("backend must be non-empty")
+        if not self.backend and self.event_type != CacheEventType.ACCESS:
+            raise ValueError(
+                f"backend must be non-empty for {self.event_type.value} batches"
+            )
         if self.incarnation < 0:
             raise ValueError(f"incarnation must be >= 0 (got {self.incarnation})")
         if self.seq < 1:
