@@ -213,6 +213,22 @@ fn round_up(x: usize, align: usize) -> usize {
     (x + align - 1) / align * align
 }
 
+fn registered_buffer_index(
+    buffers: &HashMap<usize, (u16, usize)>,
+    ptr: usize,
+    len: usize,
+) -> Option<u16> {
+    let end = ptr.checked_add(len)?;
+    buffers.iter().find_map(|(base, (index, size))| {
+        let registered_end = base.checked_add(*size)?;
+        if ptr >= *base && end <= registered_end {
+            Some(*index)
+        } else {
+            None
+        }
+    })
+}
+
 // Fetch errno for the last libc call on this thread.
 fn errno() -> i32 {
     // SAFETY: libc call.
@@ -895,11 +911,15 @@ struct RawBlockDevice {
     worker: Option<thread::JoinHandle<()>>,
     // Shutdown signal for worker thread
     shutdown: Option<Arc<AtomicBool>>,
-    // Map from buffer pointer address to registered fixed buffer index
-    // Used for zero-copy I/O with pre-registered buffers
+    // Map from registered buffer base address to (index, size).
+    // Individual I/O buffers may be subranges of these persistent regions.
     fixed_buffer_map: Arc<Mutex<HashMap<usize, (u16, usize)>>>,
     // Flag indicating if fixed buffers have been registered
     fixed_buffers_registered: Arc<AtomicBool>,
+    // Monotonic counts of regular ReadFixed and Read SQEs built by the
+    // io_uring worker. UringCmd80 operations are intentionally excluded.
+    fixed_read_submission_count: Arc<AtomicU64>,
+    nonfixed_read_submission_count: Arc<AtomicU64>,
     // Count of currently in-flight I/O operations (global)
     // Used for shutdown and cleanup
     in_flight_count: Arc<AtomicU64>,
@@ -1040,6 +1060,8 @@ impl RawBlockDevice {
             fd_size_bytes(fd)?
         };
 
+        let fixed_read_submission_count = Arc::new(AtomicU64::new(0));
+        let nonfixed_read_submission_count = Arc::new(AtomicU64::new(0));
         let (
             ring_opt,
             queue_opt,
@@ -1128,6 +1150,8 @@ impl RawBlockDevice {
             let in_flight_count_clone = Arc::clone(&in_flight_count);
             let in_flight_cvar_clone = Arc::clone(&in_flight_cvar);
             let batch_in_flight_clone = Arc::clone(&batch_in_flight);
+            let fixed_read_submission_count_clone = Arc::clone(&fixed_read_submission_count);
+            let nonfixed_read_submission_count_clone = Arc::clone(&nonfixed_read_submission_count);
             let ring_size = iouring_queue_depth;
 
             // Helper function to copy data from bounce buffer to original buffer
@@ -1241,8 +1265,12 @@ impl RawBlockDevice {
                 ring: &IoUringWrapper,
                 sub: &IoSubmission,
                 user_data: u64,
+                fixed_read_submission_count: &AtomicU64,
+                nonfixed_read_submission_count: &AtomicU64,
             ) -> Result<(), PyErr> {
                 let ptr = sub.ptr_addr as *mut u8;
+                let regular_read_uses_fixed_buffer = (sub.nvme_cmd_data.is_none() && !sub.is_write)
+                    .then_some(sub.fixed_buffer_idx.is_some());
 
                 // Check if this is an io_uring_cmd submission
                 if let Some(nvme_data) = &sub.nvme_cmd_data {
@@ -1334,6 +1362,14 @@ impl RawBlockDevice {
                         }
                     }
                 }
+                if let Some(uses_fixed_buffer) = regular_read_uses_fixed_buffer {
+                    let counter = if uses_fixed_buffer {
+                        fixed_read_submission_count
+                    } else {
+                        nonfixed_read_submission_count
+                    };
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
                 Ok(())
             }
 
@@ -1421,8 +1457,13 @@ impl RawBlockDevice {
                                             // Don't decrement in_flight_count since we're resubmitting
                                             in_flight.insert(user_data, sub.clone());
                                             // Push a new SQE for the remaining data
-                                            let _ =
-                                                build_and_submit_sqe(&ring_clone, &sub, user_data);
+                                            let _ = build_and_submit_sqe(
+                                                &ring_clone,
+                                                &sub,
+                                                user_data,
+                                                &fixed_read_submission_count_clone,
+                                                &nonfixed_read_submission_count_clone,
+                                            );
                                             let _ = match &ring_clone {
                                                 IoUringWrapper::Standard(ring) => {
                                                     let ring = ring.lock().unwrap();
@@ -1502,8 +1543,13 @@ impl RawBlockDevice {
                                             // Don't decrement in_flight_count since we're resubmitting
                                             in_flight.insert(user_data, sub.clone());
                                             // Push a new SQE for the remaining data
-                                            let _ =
-                                                build_and_submit_sqe(&ring_clone, &sub, user_data);
+                                            let _ = build_and_submit_sqe(
+                                                &ring_clone,
+                                                &sub,
+                                                user_data,
+                                                &fixed_read_submission_count_clone,
+                                                &nonfixed_read_submission_count_clone,
+                                            );
                                             let _ = match &ring_clone {
                                                 IoUringWrapper::Standard(ring) => {
                                                     let ring = ring.lock().unwrap();
@@ -1585,7 +1631,13 @@ impl RawBlockDevice {
                             for sub in batch.iter().take(to_submit_count) {
                                 let user_data = next_user_data;
                                 next_user_data = next_user_data.wrapping_add(1);
-                                match build_and_submit_sqe(&ring_clone, sub, user_data) {
+                                match build_and_submit_sqe(
+                                    &ring_clone,
+                                    sub,
+                                    user_data,
+                                    &fixed_read_submission_count_clone,
+                                    &nonfixed_read_submission_count_clone,
+                                ) {
                                     Ok(()) => {
                                         user_data_list.push(user_data);
                                         built_submissions.push(sub.clone());
@@ -1813,6 +1865,8 @@ impl RawBlockDevice {
             shutdown: shutdown_opt,
             fixed_buffer_map: Arc::new(Mutex::new(HashMap::new())),
             fixed_buffers_registered: Arc::new(AtomicBool::new(false)),
+            fixed_read_submission_count,
+            nonfixed_read_submission_count,
             in_flight_count: in_flight_count_opt.unwrap_or_else(|| Arc::new(AtomicU64::new(0))),
             in_flight_cvar: in_flight_cvar_opt.unwrap_or_else(|| Arc::new(Condvar::new())),
             batch_ready: batch_ready_opt,
@@ -1888,6 +1942,16 @@ impl RawBlockDevice {
         Ok(self.size)
     }
 
+    /// Number of regular io_uring ReadFixed SQEs submitted.
+    fn fixed_read_submission_count(&self) -> u64 {
+        self.fixed_read_submission_count.load(Ordering::Relaxed)
+    }
+
+    /// Number of regular io_uring Read SQEs submitted.
+    fn nonfixed_read_submission_count(&self) -> u64 {
+        self.nonfixed_read_submission_count.load(Ordering::Relaxed)
+    }
+
     /// Get NVMe namespace ID (only available when use_uring_cmd=true)
     fn nvme_nsid(&self) -> PyResult<u32> {
         self.nvme_nsid.ok_or_else(|| {
@@ -1909,15 +1973,13 @@ impl RawBlockDevice {
         })
     }
 
-    /// Register fixed buffers for zero-copy io_uring operations.
+    /// Register fixed buffers for io_uring operations.
     ///
     /// - Pre-registering memory buffers with the kernel
     /// - Using indexed descriptors (instead of pointers) in I/O operations
-    /// - The kernel then does DMA directly from/to the registered buffers
+    /// - Reusing the same pinned page mappings across I/O operations
     ///
-    /// This is more efficient than regular I/O because:
-    /// - No buffer copying between user space and kernel
-    /// - The kernel can pin the memory pages for the duration of I/O
+    /// This avoids importing and pinning the same pages for every request.
     ///
     /// Registration must happen BEFORE any I/O using these buffers.
     /// The buffers must remain valid (not freed) until unregistered.
@@ -1940,47 +2002,68 @@ impl RawBlockDevice {
                 "at least one buffer must be provided",
             ));
         }
-
-        {
-            let mut map = self.fixed_buffer_map.lock().unwrap();
-            map.clear();
-            for (idx, (ptr, size)) in buffer_ptrs.iter().zip(buffer_sizes.iter()).enumerate() {
-                map.insert(*ptr, (idx as u16, *size));
-            }
+        if self.closed.load(Ordering::Relaxed) {
+            return Err(PyRuntimeError::new_err("device is closed"));
+        }
+        if self.fixed_buffers_registered.load(Ordering::Acquire) {
+            return Err(PyRuntimeError::new_err(
+                "fixed buffers are already registered",
+            ));
+        }
+        if buffer_ptrs.len() > usize::from(u16::MAX) + 1 {
+            return Err(PyValueError::new_err("too many fixed buffers"));
         }
 
-        if let Some(ring) = &self.ring {
-            let mut iovecs: Vec<libc::iovec> = Vec::new();
-            for (ptr, size) in buffer_ptrs.iter().zip(buffer_sizes.iter()) {
-                iovecs.push(libc::iovec {
-                    iov_base: *ptr as *mut libc::c_void,
-                    iov_len: *size,
-                });
+        let mut new_map = HashMap::with_capacity(buffer_ptrs.len());
+        let mut ranges = Vec::with_capacity(buffer_ptrs.len());
+        for (idx, (ptr, size)) in buffer_ptrs.iter().zip(buffer_sizes.iter()).enumerate() {
+            if *ptr == 0 || *size == 0 {
+                return Err(PyValueError::new_err(
+                    "fixed-buffer pointers and sizes must be non-zero",
+                ));
             }
-            unsafe {
-                let result = match ring {
-                    IoUringWrapper::Standard(ring) => {
-                        let ring = ring.lock().unwrap();
-                        ring.submitter().register_buffers(&iovecs)
-                    }
-                    IoUringWrapper::Big(ring) => {
-                        let ring = ring.lock().unwrap();
-                        ring.submitter().register_buffers(&iovecs)
-                    }
-                };
-                match result {
-                    Ok(_) => {
-                        self.fixed_buffers_registered.store(true, Ordering::Relaxed);
-                    }
-                    Err(e) => {
-                        return Err(PyRuntimeError::new_err(format!(
-                            "register_buffers failed: {}",
-                            e
-                        )))
-                    }
+            let end = ptr
+                .checked_add(*size)
+                .ok_or_else(|| PyValueError::new_err("fixed-buffer range overflow"))?;
+            new_map.insert(*ptr, (idx as u16, *size));
+            ranges.push((*ptr, end));
+        }
+        ranges.sort_unstable_by_key(|(start, _)| *start);
+        if ranges.windows(2).any(|pair| pair[0].1 > pair[1].0) {
+            return Err(PyValueError::new_err(
+                "fixed-buffer ranges must not overlap",
+            ));
+        }
+
+        let ring = self
+            .ring
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("io_uring not initialized"))?;
+        let iovecs: Vec<libc::iovec> = buffer_ptrs
+            .iter()
+            .zip(buffer_sizes.iter())
+            .map(|(ptr, size)| libc::iovec {
+                iov_base: *ptr as *mut libc::c_void,
+                iov_len: *size,
+            })
+            .collect();
+        unsafe {
+            let result = match ring {
+                IoUringWrapper::Standard(ring) => {
+                    let ring = ring.lock().unwrap();
+                    ring.submitter().register_buffers(&iovecs)
                 }
-            }
+                IoUringWrapper::Big(ring) => {
+                    let ring = ring.lock().unwrap();
+                    ring.submitter().register_buffers(&iovecs)
+                }
+            };
+            result
+                .map_err(|e| PyRuntimeError::new_err(format!("register_buffers failed: {}", e)))?;
         }
+
+        *self.fixed_buffer_map.lock().unwrap() = new_map;
+        self.fixed_buffers_registered.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -2063,7 +2146,7 @@ impl RawBlockDevice {
         let use_odirect = self.use_odirect;
         let alignment = self.alignment;
         let use_uring_cmd = self.use_uring_cmd;
-        let fixed_buffers_registered = self.fixed_buffers_registered.load(Ordering::Relaxed);
+        let fixed_buffers_registered = self.fixed_buffers_registered.load(Ordering::Acquire);
         // Clone the fixed buffer map before releasing GIL to avoid lock contention
         let fixed_buffer_map: HashMap<usize, (u16, usize)> = if fixed_buffers_registered {
             let map = self.fixed_buffer_map.lock().unwrap();
@@ -2104,8 +2187,8 @@ impl RawBlockDevice {
 
                 let comp = Arc::new(IoCompletion::new());
 
-                // Fixed buffers are pre-registered with io_uring, enabling true zero-copy I/O
-                let fixed_idx = fixed_buffer_map.get(&ptrs[i]).map(|(idx, _)| *idx);
+                // Use the persistent registration when this I/O fits one range.
+                let fixed_idx = registered_buffer_index(&fixed_buffer_map, ptrs[i], total_len);
 
                 if use_odirect {
                     #[allow(clippy::manual_is_multiple_of)]
@@ -2370,12 +2453,12 @@ impl RawBlockDevice {
             true
         };
 
-        // Fixed buffers are pre-registered with io_uring, enabling true zero-copy I/O
-        let use_fixed = self.fixed_buffers_registered.load(Ordering::Relaxed);
+        // Use the persistent registration when this I/O fits one range.
+        let use_fixed = self.fixed_buffers_registered.load(Ordering::Acquire);
         let fixed_idx = if use_fixed && ptr_aligned {
             let map = self.fixed_buffer_map.lock().unwrap();
             let ptr_addr = ptr as usize;
-            map.get(&ptr_addr).map(|(idx, _)| *idx)
+            registered_buffer_index(&map, ptr_addr, total_len)
         } else {
             None
         };
@@ -2505,12 +2588,12 @@ impl RawBlockDevice {
             true
         };
 
-        // Fixed buffers are pre-registered with io_uring, enabling true zero-copy I/O
-        let use_fixed = self.fixed_buffers_registered.load(Ordering::Relaxed);
+        // Use the persistent registration when this I/O fits one range.
+        let use_fixed = self.fixed_buffers_registered.load(Ordering::Acquire);
         let fixed_idx = if use_fixed && ptr_aligned {
             let map = self.fixed_buffer_map.lock().unwrap();
             let ptr_addr = ptr as usize;
-            map.get(&ptr_addr).map(|(idx, _)| *idx)
+            registered_buffer_index(&map, ptr_addr, total_len)
         } else {
             None
         };
@@ -2673,7 +2756,7 @@ impl RawBlockDevice {
         let fd = self.fd;
         let use_odirect = self.use_odirect;
         let alignment = self.alignment;
-        let fixed_buffers_registered = self.fixed_buffers_registered.load(Ordering::Relaxed);
+        let fixed_buffers_registered = self.fixed_buffers_registered.load(Ordering::Acquire);
         // Clone the fixed buffer map before releasing GIL to avoid lock contention
         let fixed_buffer_map: HashMap<usize, (u16, usize)> = if fixed_buffers_registered {
             let map = self.fixed_buffer_map.lock().unwrap();
@@ -2729,8 +2812,8 @@ impl RawBlockDevice {
 
                 let comp = Arc::new(IoCompletion::new());
 
-                // Fixed buffers are pre-registered with io_uring, enabling true zero-copy I/O
-                let fixed_idx = fixed_buffer_map.get(&ptrs[i]).map(|(idx, _)| *idx);
+                // Use the persistent registration when this I/O fits one range.
+                let fixed_idx = registered_buffer_index(&fixed_buffer_map, ptrs[i], total_len);
 
                 let sub = IoSubmission {
                     fd,
@@ -2750,32 +2833,32 @@ impl RawBlockDevice {
                 submissions.push((sub, comp));
             }
 
-            // Queue all submissions atomically. At this point no further errors can
-            // occur during queuing.
-            for (sub, comp) in submissions {
-                in_flight_count.fetch_add(1, Ordering::Relaxed);
-
-                // Increment per-batch in-flight count
-                {
-                    let batch_map = batch_in_flight.lock().unwrap();
-                    if let Some((batch_count, _)) = batch_map.get(&batch_id) {
-                        batch_count.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-
-                {
-                    let mut q = queue.lock().unwrap();
-                    q.push(sub);
-                }
-                batch_ready.signal_producer();
-
-                // Store completion for error checking in wait_iouring
-                {
-                    let mut completions = batched_completions.lock().unwrap();
-                    let batch_completions = completions.entry(batch_id).or_default();
-                    batch_completions.push(comp);
+            // Register the entire batch before exposing any submissions to the
+            // worker, which may complete requests as soon as the queue is unlocked.
+            let submission_count = submissions.len() as u64;
+            in_flight_count.fetch_add(submission_count, Ordering::Relaxed);
+            {
+                let batch_map = batch_in_flight.lock().unwrap();
+                if let Some((batch_count, _)) = batch_map.get(&batch_id) {
+                    batch_count.fetch_add(submission_count, Ordering::Relaxed);
                 }
             }
+            {
+                let mut completions = batched_completions.lock().unwrap();
+                let batch_completions = completions.entry(batch_id).or_default();
+                batch_completions.extend(
+                    submissions
+                        .iter()
+                        .map(|(_, completion)| Arc::clone(completion)),
+                );
+            }
+
+            // Queue the batch atomically and notify the worker once.
+            {
+                let mut q = queue.lock().unwrap();
+                q.extend(submissions.into_iter().map(|(submission, _)| submission));
+            }
+            batch_ready.signal_producer();
             Ok::<(), PyErr>(())
         });
 
@@ -3080,7 +3163,7 @@ impl RawBlockDevice {
                 guard = g;
             }
 
-            if self.fixed_buffers_registered.load(Ordering::Relaxed) {
+            if self.fixed_buffers_registered.load(Ordering::Acquire) {
                 if let Some(ring) = &self.ring {
                     let _ = match ring {
                         IoUringWrapper::Standard(ring) => {
@@ -3094,7 +3177,7 @@ impl RawBlockDevice {
                     };
                 }
                 self.fixed_buffers_registered
-                    .store(false, Ordering::Relaxed);
+                    .store(false, Ordering::Release);
                 self.fixed_buffer_map.lock().unwrap().clear();
             }
         }
@@ -3124,6 +3207,30 @@ impl Drop for RawBlockDevice {
         if !self.closed.load(Ordering::Relaxed) {
             let _ = self.do_close();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::registered_buffer_index;
+    use std::collections::HashMap;
+
+    #[test]
+    fn registered_buffer_index_accepts_contained_ranges() {
+        let buffers = HashMap::from([(0x10000, (7, 0x4000))]);
+
+        assert_eq!(registered_buffer_index(&buffers, 0x10000, 0x1000), Some(7));
+        assert_eq!(registered_buffer_index(&buffers, 0x12000, 0x1000), Some(7));
+        assert_eq!(registered_buffer_index(&buffers, 0x13000, 0x1000), Some(7));
+    }
+
+    #[test]
+    fn registered_buffer_index_rejects_out_of_range_and_overflow() {
+        let buffers = HashMap::from([(0x10000, (7, 0x4000))]);
+
+        assert_eq!(registered_buffer_index(&buffers, 0x0fff0, 0x1000), None);
+        assert_eq!(registered_buffer_index(&buffers, 0x13000, 0x1001), None);
+        assert_eq!(registered_buffer_index(&buffers, usize::MAX - 1, 4), None);
     }
 }
 

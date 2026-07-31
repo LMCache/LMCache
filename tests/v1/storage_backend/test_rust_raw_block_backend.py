@@ -58,6 +58,11 @@ class _FakeRawBlockDevice:
     def __init__(self, path: str, *, size_bytes: int, **kwargs):
         del path, kwargs
         self._data = bytearray(size_bytes)
+        self.batched_read_calls: list[tuple[list[int], list[int]]] = []
+        self.wait_iouring_calls: list[int] = []
+        self.register_fixed_buffer_calls: list[tuple[list[int], list[int]]] = []
+        self._fixed_read_submission_count = 0
+        self._nonfixed_read_submission_count = 0
 
     def size_bytes(self):
         return len(self._data)
@@ -66,27 +71,107 @@ class _FakeRawBlockDevice:
         del total_len
         out[:payload_len] = self._data[offset : offset + payload_len]
 
+    def read_uring(self, offset, out, payload_len, total_len=None):
+        self.pread_into(offset, out, payload_len, total_len)
+
+    def batched_read(self, offsets, buffers, total_lens):
+        self.batched_read_calls.append((list(offsets), list(total_lens)))
+        for offset, out, total_len in zip(offsets, buffers, total_lens, strict=False):
+            out[:total_len] = self._data[offset : offset + total_len]
+        return len(self.batched_read_calls)
+
+    def wait_iouring(self, batch_id):
+        self.wait_iouring_calls.append(batch_id)
+
+    def register_fixed_buffers(self, buffer_ptrs, buffer_sizes):
+        self.register_fixed_buffer_calls.append((list(buffer_ptrs), list(buffer_sizes)))
+
+    def fixed_read_submission_count(self):
+        return self._fixed_read_submission_count
+
+    def nonfixed_read_submission_count(self):
+        return self._nonfixed_read_submission_count
+
     def pwrite_from_buffer(self, offset, data, payload_len=None, total_len=None):
         del total_len
         length = len(data) if payload_len is None else payload_len
         self._data[offset : offset + length] = bytes(memoryview(data)[:length])
 
+    def write_uring(self, offset, data, payload_len, total_len=None):
+        self.pwrite_from_buffer(offset, data, payload_len, total_len)
+
+    def batched_write(self, offsets, buffers, total_lens):
+        for offset, data, total_len in zip(offsets, buffers, total_lens, strict=False):
+            self._data[offset : offset + total_len] = bytes(
+                memoryview(data)[:total_len]
+            )
+        return 1
+
     def close(self):
         return None
 
 
-def _install_fake_raw_block_device(monkeypatch, *, size_bytes: int = 64 * 1024):
+def _install_deferred_batched_reads(
+    device: _FakeRawBlockDevice,
+    *,
+    wait_error_batch_id: int | None = None,
+) -> list[tuple]:
+    """Delay fake reads until wait_iouring to expose pipeline ordering."""
+    trace: list[tuple] = []
+    pending: dict[int, tuple[list[int], list[Any], list[int]]] = {}
+    next_batch_id = 1
+
+    def batched_read(offsets, buffers, total_lens):
+        nonlocal next_batch_id
+        batch_id = next_batch_id
+        next_batch_id += 1
+        pending[batch_id] = (
+            list(offsets),
+            list(buffers),
+            list(total_lens),
+        )
+        trace.append(("submit", batch_id))
+        return batch_id
+
+    def wait_iouring(batch_id):
+        trace.append(("wait", batch_id))
+        offsets, buffers, total_lens = pending.pop(batch_id)
+        if batch_id == wait_error_batch_id:
+            raise RuntimeError(f"wait failed for batch {batch_id}")
+        for offset, out, total_len in zip(
+            offsets,
+            buffers,
+            total_lens,
+            strict=True,
+        ):
+            out[:total_len] = device._data[offset : offset + total_len]
+
+    device.batched_read = batched_read
+    device.wait_iouring = wait_iouring
+    return trace
+
+
+def _install_fake_raw_block_device(
+    monkeypatch, *, size_bytes: int = 64 * 1024
+) -> list[_FakeRawBlockDevice]:
+    devices: list[_FakeRawBlockDevice] = []
+
     def create_fake_device(path: str, **kwargs):
-        return _FakeRawBlockDevice(path, size_bytes=size_bytes, **kwargs)
+        device = _FakeRawBlockDevice(path, size_bytes=size_bytes, **kwargs)
+        devices.append(device)
+        return device
 
     monkeypatch.setitem(
         sys.modules,
         "lmcache_rust_raw_block_io",
         types.SimpleNamespace(RawBlockDevice=create_fake_device),
     )
+    return devices
 
 
-def _make_raw_block_core(*, use_odirect: bool = False) -> RawBlockCore:
+def _make_raw_block_core(
+    *, use_odirect: bool = False, io_engine: str = "posix"
+) -> RawBlockCore:
     return RawBlockCore(
         RawBlockCoreConfig(
             device_path="/tmp/raw-block-boundary-test",
@@ -104,7 +189,7 @@ def _make_raw_block_core(*, use_odirect: bool = False) -> RawBlockCore:
             meta_enable_periodic=False,
             load_checkpoint_on_init=True,
             meta_verify_on_load=True,
-            io_engine="posix",
+            io_engine=io_engine,
             iouring_queue_depth=256,
         ),
         key_namespace="object",
@@ -234,6 +319,293 @@ def test_raw_block_core_non_odirect_rejects_payload_over_slot_capacity(monkeypat
         )
         assert too_large.results == [False]
         assert core.contains_key("too-large") is False
+    finally:
+        core.close()
+
+
+def test_raw_block_core_batches_only_explicit_batched_loads(monkeypatch):
+    """The new MP loader coalesces reads without changing the legacy loader."""
+    devices = _install_fake_raw_block_device(monkeypatch)
+    core = _make_raw_block_core(io_engine="io_uring")
+    try:
+        keys = [
+            RawBlockKeySpec(encoded="first", slot_identity=1),
+            RawBlockKeySpec(encoded="second", slot_identity=2),
+        ]
+        stored = [_make_byte_obj(4096), _make_byte_obj(4096)]
+        stored[0].tensor.fill_(17)
+        stored[1].tensor.fill_(23)
+        assert core.put_many(keys, stored).results == [True, True]
+
+        device = devices[0]
+        device.batched_read_calls.clear()
+        device.wait_iouring_calls.clear()
+
+        legacy_loaded = [_make_byte_obj(4096), _make_byte_obj(4096)]
+        assert core.load_many_into(["first", "second"], legacy_loaded) == [True, True]
+        assert len(device.batched_read_calls) == 2
+        assert all(len(offsets) == 1 for offsets, _ in device.batched_read_calls)
+        assert core.report_status()["batched_load_count"] == 0
+
+        device.batched_read_calls.clear()
+        device.wait_iouring_calls.clear()
+        batched_loaded = [_make_byte_obj(4096), _make_byte_obj(4096)]
+        assert core.load_many_into_batched(["first", "second"], batched_loaded) == [
+            True,
+            True,
+        ]
+
+        first_offset = core.entry_offset("first")
+        second_offset = core.entry_offset("second")
+        assert first_offset is not None
+        assert second_offset is not None
+        assert device.batched_read_calls == [
+            ([first_offset + 4096, second_offset + 4096], [4096, 4096])
+        ]
+        assert len(device.wait_iouring_calls) == 1
+        assert bytes(batched_loaded[0].byte_array) == bytes(stored[0].byte_array)
+        assert bytes(batched_loaded[1].byte_array) == bytes(stored[1].byte_array)
+        status = core.report_status()
+        assert status["batched_load_count"] == 1
+        assert status["batched_load_fallback_count"] == 0
+    finally:
+        core.close()
+
+
+def test_raw_block_core_pipeline_submits_all_reads_before_wait(monkeypatch):
+    devices = _install_fake_raw_block_device(monkeypatch)
+    core = _make_raw_block_core(io_engine="io_uring")
+    try:
+        key_specs = [
+            RawBlockKeySpec(encoded=f"key-{index}", slot_identity=index + 1)
+            for index in range(3)
+        ]
+        stored = [_make_byte_obj(4096) for _ in key_specs]
+        for index, memory_obj in enumerate(stored):
+            memory_obj.tensor.fill_(17 + index)
+        assert core.put_many(key_specs, stored).results == [True, True, True]
+
+        loaded = [_make_byte_obj(4096) for _ in key_specs]
+        trace = _install_deferred_batched_reads(devices[0])
+
+        def on_batch_loaded(start: int, end: int) -> None:
+            assert end == start + 1
+            assert bytes(loaded[start].byte_array) == bytes(stored[start].byte_array)
+            trace.append(("callback", start, end))
+
+        assert core.load_many_into_batched(
+            [key.encoded for key in key_specs],
+            loaded,
+            completion_batch_size=1,
+            on_batch_loaded=on_batch_loaded,
+        ) == [True, True, True]
+        assert trace == [
+            ("submit", 1),
+            ("submit", 2),
+            ("submit", 3),
+            ("wait", 1),
+            ("callback", 0, 1),
+            ("wait", 2),
+            ("callback", 1, 2),
+            ("wait", 3),
+            ("callback", 2, 3),
+        ]
+        assert core.report_status()["batched_load_count"] == 1
+    finally:
+        core.close()
+
+
+def test_raw_block_core_pipeline_callback_error_drains_without_retry(monkeypatch):
+    devices = _install_fake_raw_block_device(monkeypatch)
+    core = _make_raw_block_core(io_engine="io_uring")
+    try:
+        key_specs = [
+            RawBlockKeySpec(encoded=f"key-{index}", slot_identity=index + 1)
+            for index in range(3)
+        ]
+        stored = [_make_byte_obj(4096) for _ in key_specs]
+        assert core.put_many(key_specs, stored).results == [True, True, True]
+
+        loaded = [_make_byte_obj(4096) for _ in key_specs]
+        device = devices[0]
+        trace = _install_deferred_batched_reads(device)
+        retry_calls = 0
+
+        def reject_retry(*args, **kwargs):
+            nonlocal retry_calls
+            del args, kwargs
+            retry_calls += 1
+            raise AssertionError("pipeline callback errors must not retry reads")
+
+        def fail_first_callback(start: int, end: int) -> None:
+            trace.append(("callback", start, end))
+            raise RuntimeError("consumer enqueue failed")
+
+        device.pread_into = reject_retry
+        with pytest.raises(RuntimeError, match="consumer enqueue failed"):
+            core.load_many_into_batched(
+                [key.encoded for key in key_specs],
+                loaded,
+                completion_batch_size=1,
+                on_batch_loaded=fail_first_callback,
+            )
+
+        assert trace == [
+            ("submit", 1),
+            ("submit", 2),
+            ("submit", 3),
+            ("wait", 1),
+            ("callback", 0, 1),
+            ("wait", 2),
+            ("wait", 3),
+        ]
+        assert retry_calls == 0
+        status = core.report_status()
+        assert status["inflight_io_count"] == 0
+        assert status["batched_load_fallback_count"] == 0
+    finally:
+        core.close()
+
+
+def test_raw_block_core_pipeline_wait_error_drains_remaining_batches(monkeypatch):
+    devices = _install_fake_raw_block_device(monkeypatch)
+    core = _make_raw_block_core(io_engine="io_uring")
+    try:
+        key_specs = [
+            RawBlockKeySpec(encoded=f"key-{index}", slot_identity=index + 1)
+            for index in range(3)
+        ]
+        stored = [_make_byte_obj(4096) for _ in key_specs]
+        assert core.put_many(key_specs, stored).results == [True, True, True]
+
+        loaded = [_make_byte_obj(4096) for _ in key_specs]
+        device = devices[0]
+        trace = _install_deferred_batched_reads(
+            device,
+            wait_error_batch_id=2,
+        )
+        retry_calls = 0
+
+        def reject_retry(*args, **kwargs):
+            nonlocal retry_calls
+            del args, kwargs
+            retry_calls += 1
+            raise AssertionError("pipeline wait errors must not retry reads")
+
+        def on_batch_loaded(start: int, end: int) -> None:
+            trace.append(("callback", start, end))
+
+        device.pread_into = reject_retry
+        with pytest.raises(RuntimeError, match="wait failed for batch 2"):
+            core.load_many_into_batched(
+                [key.encoded for key in key_specs],
+                loaded,
+                completion_batch_size=1,
+                on_batch_loaded=on_batch_loaded,
+            )
+
+        assert trace == [
+            ("submit", 1),
+            ("submit", 2),
+            ("submit", 3),
+            ("wait", 1),
+            ("callback", 0, 1),
+            ("wait", 2),
+            ("wait", 3),
+        ]
+        assert retry_calls == 0
+        status = core.report_status()
+        assert status["inflight_io_count"] == 0
+        assert status["batched_load_fallback_count"] == 0
+    finally:
+        core.close()
+
+
+def test_raw_block_core_batched_load_failure_falls_back(monkeypatch):
+    """A failed io_uring batch retries safely and remains observable in status."""
+    devices = _install_fake_raw_block_device(monkeypatch)
+    core = _make_raw_block_core(io_engine="io_uring")
+    try:
+        keys = [
+            RawBlockKeySpec(encoded="first", slot_identity=1),
+            RawBlockKeySpec(encoded="second", slot_identity=2),
+        ]
+        stored = [_make_byte_obj(4096), _make_byte_obj(4096)]
+        assert core.put_many(keys, stored).results == [True, True]
+
+        def fail_batched_read(offsets, buffers, total_lens):
+            del offsets, buffers, total_lens
+            raise RuntimeError("batch unavailable")
+
+        devices[0].batched_read = fail_batched_read
+        loaded = [_make_byte_obj(4096), _make_byte_obj(4096)]
+
+        assert core.load_many_into_batched(["first", "second"], loaded) == [
+            True,
+            True,
+        ]
+        status = core.report_status()
+        assert status["batched_load_count"] == 1
+        assert status["batched_load_fallback_count"] == 1
+    finally:
+        core.close()
+
+
+def test_raw_block_core_registers_stable_l1_as_one_gib_fixed_buffers(monkeypatch):
+    """A stable L1 prefix is split into kernel-compatible fixed-buffer entries."""
+    devices = _install_fake_raw_block_device(monkeypatch)
+    core = _make_raw_block_core(use_odirect=True, io_engine="io_uring")
+    try:
+        base = 0x1000_0000
+        size = 4 << 30
+
+        assert core.register_l1_fixed_buffers(base, size) is True
+        assert devices[0].register_fixed_buffer_calls == [
+            (
+                [base + index * (1 << 30) for index in range(4)],
+                [1 << 30] * 4,
+            )
+        ]
+        status = core.report_status()
+        assert status["fixed_buffer_count"] == 4
+        assert status["fixed_buffer_bytes"] == size
+    finally:
+        core.close()
+
+
+def test_raw_block_core_fixed_buffer_registration_failure_falls_back(monkeypatch):
+    """Registration errors preserve startup and leave ordinary reads enabled."""
+    devices = _install_fake_raw_block_device(monkeypatch)
+    core = _make_raw_block_core(use_odirect=True, io_engine="io_uring")
+    try:
+
+        def fail_registration(buffer_ptrs, buffer_sizes):
+            del buffer_ptrs, buffer_sizes
+            raise RuntimeError("fixed buffers unsupported")
+
+        devices[0].register_fixed_buffers = fail_registration
+
+        assert core.register_l1_fixed_buffers(0x1000_0000, 1 << 30) is False
+        status = core.report_status()
+        assert status["fixed_buffer_count"] == 0
+        assert status["fixed_buffer_bytes"] == 0
+    finally:
+        core.close()
+
+
+def test_raw_block_core_reports_fixed_and_nonfixed_read_submissions(monkeypatch):
+    """Status exposes worker submission counters for benchmark phase deltas."""
+    devices = _install_fake_raw_block_device(monkeypatch)
+    core = _make_raw_block_core(io_engine="io_uring")
+    try:
+        device = core.raw_device()
+        assert device is devices[0]
+        device._fixed_read_submission_count = 7
+        device._nonfixed_read_submission_count = 3
+
+        status = core.report_status()
+        assert status["fixed_read_submission_count"] == 7
+        assert status["nonfixed_read_submission_count"] == 3
     finally:
         core.close()
 

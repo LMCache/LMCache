@@ -6,7 +6,7 @@ from __future__ import annotations
 # Standard
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 import ctypes
 import json
 import os
@@ -43,6 +43,7 @@ _DEFAULT_META_VERSION = 1
 _META_HEADER_STRUCT = struct.Struct("<8sIQQI")
 RAW_BLOCK_IO_ENGINES = frozenset({"posix", "io_uring"})
 DEFAULT_IOURING_QUEUE_DEPTH = 256
+IOURING_FIXED_BUFFER_MAX_BYTES = 1 << 30
 
 
 def round_up(x: int, align: int) -> int:
@@ -314,6 +315,10 @@ class RawBlockCore:
         self._data_base_offset: int = 0
 
         self._raw = None
+        self._fixed_buffer_count = 0
+        self._fixed_buffer_bytes = 0
+        self._batched_load_count = 0
+        self._batched_load_fallback_count = 0
         self._closed = False
 
         self._meta_seq: int = 0
@@ -446,6 +451,63 @@ class RawBlockCore:
         """
         self._raw = raw_device
 
+    def register_l1_fixed_buffers(self, ptr: int, size: int) -> bool:
+        """Register a stable L1 prefix with the io_uring device.
+
+        Linux limits each fixed-buffer entry to 1 GiB. Requests that cross an
+        entry boundary remain valid and use the ordinary io_uring path.
+        Registration is an optional startup optimization: unsupported kernels,
+        extensions, and resource limits leave ordinary reads enabled.
+
+        Args:
+            ptr: Base address of the stable L1 memory region.
+            size: Stable byte length starting at ``ptr``.
+
+        Returns:
+            True when all fixed-buffer entries were registered, otherwise false.
+        """
+        if (
+            self.io_engine != "io_uring"
+            or not self.use_odirect
+            or not self.enable_zero_copy
+            or size <= 0
+        ):
+            return False
+
+        ptr = int(ptr)
+        size = int(size)
+        size -= size % self.block_align
+        if ptr <= 0 or ptr % self.block_align != 0 or size <= 0:
+            logger.warning(
+                "RawBlockCore: skipping io_uring fixed-buffer registration "
+                "because the stable L1 range is not block aligned"
+            )
+            return False
+
+        buffer_ptrs: list[int] = []
+        buffer_sizes: list[int] = []
+        offset = 0
+        while offset < size:
+            chunk_size = min(IOURING_FIXED_BUFFER_MAX_BYTES, size - offset)
+            buffer_ptrs.append(ptr + offset)
+            buffer_sizes.append(chunk_size)
+            offset += chunk_size
+
+        try:
+            self._rawdev().register_fixed_buffers(buffer_ptrs, buffer_sizes)
+        except Exception as e:
+            logger.warning(
+                "RawBlockCore: io_uring fixed-buffer registration unavailable; "
+                "using ordinary reads: %s",
+                e,
+            )
+            return False
+
+        with self._lock:
+            self._fixed_buffer_count = len(buffer_ptrs)
+            self._fixed_buffer_bytes = size
+        return True
+
     def register_fixed_buffers_from_allocator(self, memory_allocator: Any) -> None:
         """Register allocator pages with io_uring when the allocator exposes them.
 
@@ -475,6 +537,9 @@ class RawBlockCore:
         buffer_ptrs = [buf.data_ptr() for buf in buffers]
         buffer_sizes = [buf.numel() * buf.element_size() for buf in buffers]
         self._rawdev().register_fixed_buffers(buffer_ptrs, buffer_sizes)
+        with self._lock:
+            self._fixed_buffer_count = len(buffer_ptrs)
+            self._fixed_buffer_bytes = sum(buffer_sizes)
         logger.info(
             "RawBlockCore: registered %d paged buffers for io_uring fixed I/O",
             len(buffers),
@@ -820,6 +885,233 @@ class RawBlockCore:
                 self._last_io_ts = time.monotonic()
         return results
 
+    def load_many_into_batched(
+        self,
+        encoded_keys: Sequence[str],
+        objs: Sequence[MemoryObj],
+        *,
+        raise_on_error: bool = False,
+        completion_batch_size: int | None = None,
+        on_batch_loaded: Callable[[int, int], None] | None = None,
+    ) -> list[bool]:
+        """Load eligible io_uring reads in one batch.
+
+        This method is reserved for synchronous MP retrieval. Unlike
+        :meth:`load_many_into`, it prepares all eligible destination buffers
+        before issuing one ``_read_buffers`` call. Buffers that require bounce
+        handling retain the existing one-at-a-time path.
+
+        Args:
+            encoded_keys: Ordered encoded raw-block keys to load.
+            objs: Destination memory objects. Buffers must remain valid until
+                this method returns.
+            raise_on_error: If true, re-raise the first load exception instead
+                of logging it and returning false for that key.
+            completion_batch_size: Number of logical objects whose completed
+                reads trigger one callback. Used only with ``on_batch_loaded``.
+            on_batch_loaded: Optional callback invoked with a half-open range
+                after that range's reads complete successfully. All groups are
+                submitted before the first wait so later I/O can overlap work
+                enqueued by the callback.
+
+        Returns:
+            A list of per-key load success booleans aligned with
+            ``encoded_keys``.
+
+        Raises:
+            ValueError: If either sequence is empty or the sequence lengths do
+                not match.
+            Exception: Re-raises load errors when ``raise_on_error`` is true.
+        """
+        if not encoded_keys or not objs:
+            raise ValueError("encoded_keys and objs must be non-empty")
+        if len(encoded_keys) != len(objs):
+            raise ValueError("encoded_keys and objs must have the same length")
+        if on_batch_loaded is not None and (
+            completion_batch_size is None or completion_batch_size <= 0
+        ):
+            raise ValueError(
+                "completion_batch_size must be positive with on_batch_loaded"
+            )
+
+        with self._lock:
+            items = [
+                (encoded_key, self._index.get(encoded_key))
+                for encoded_key in encoded_keys
+            ]
+            self._inflight_io_count += 1
+
+        results = [False] * len(encoded_keys)
+        batched_reads: list[tuple[int, str, _Entry, Any, int]] = []
+        fallback_reads: list[tuple[int, str, _Entry, Any, int, int]] = []
+        try:
+            for i, (encoded_key, entry) in enumerate(items):
+                if entry is None:
+                    continue
+                try:
+                    payload_len = int(entry.size)
+                    total_len = (
+                        round_up(payload_len, self.block_align)
+                        if self._requires_transfer_alignment
+                        else payload_len
+                    )
+                    buf = memoryview(objs[i].byte_array)
+                    try:
+                        buf = buf.cast("B")
+                    except Exception:
+                        pass
+
+                    direct_view = self._build_direct_odirect_view(
+                        memory_obj=objs[i],
+                        payload_len=payload_len,
+                        total_len=total_len,
+                        buffer_len=len(buf),
+                        zero_tail=False,
+                    )
+
+                    batch_buffer: Any | None = None
+                    if self.io_engine == "io_uring" and not self.use_uring_cmd:
+                        if self.use_odirect:
+                            if (
+                                direct_view is not None
+                                and len(direct_view) >= total_len
+                            ):
+                                batch_buffer = direct_view
+                        elif len(buf) >= total_len:
+                            batch_buffer = buf
+
+                    if batch_buffer is not None:
+                        batched_reads.append(
+                            (i, encoded_key, entry, batch_buffer, total_len)
+                        )
+                        continue
+
+                    read_buffer = direct_view if direct_view is not None else buf
+                    read_payload_len = (
+                        total_len
+                        if direct_view is not None and len(direct_view) >= total_len
+                        else payload_len
+                    )
+                    fallback_reads.append(
+                        (
+                            i,
+                            encoded_key,
+                            entry,
+                            read_buffer,
+                            read_payload_len,
+                            total_len,
+                        )
+                    )
+                except Exception as e:
+                    if raise_on_error:
+                        raise
+                    logger.error("RawBlockCore load failed for %s: %s", encoded_key, e)
+
+            pipeline_eligible = (
+                on_batch_loaded is not None
+                and len(batched_reads) == len(encoded_keys)
+                and not fallback_reads
+                and [item[0] for item in batched_reads]
+                == list(range(len(encoded_keys)))
+            )
+            if pipeline_eligible:
+                assert completion_batch_size is not None
+                with self._lock:
+                    self._batched_load_count += 1
+
+                def mark_batch_loaded(start: int, end: int) -> None:
+                    for position in range(start, end):
+                        i, _, entry, _, _ = batched_reads[position]
+                        objs[i].metadata.cached_positions = entry.meta.cached_positions
+                        results[i] = True
+                    assert on_batch_loaded is not None
+                    on_batch_loaded(start, end)
+
+                self._read_buffers_pipelined(
+                    [
+                        entry.offset + self.header_bytes
+                        for _, _, entry, _, _ in batched_reads
+                    ],
+                    [buf for _, _, _, buf, _ in batched_reads],
+                    [total_len for _, _, _, _, total_len in batched_reads],
+                    completion_batch_size=completion_batch_size,
+                    on_batch_loaded=mark_batch_loaded,
+                )
+                return results
+
+            if batched_reads:
+                with self._lock:
+                    self._batched_load_count += 1
+                try:
+                    self._read_buffers(
+                        [
+                            entry.offset + self.header_bytes
+                            for _, _, entry, _, _ in batched_reads
+                        ],
+                        [buf for _, _, _, buf, _ in batched_reads],
+                        [total_len for _, _, _, _, total_len in batched_reads],
+                        [total_len for _, _, _, _, total_len in batched_reads],
+                    )
+                    for i, _, entry, _, _ in batched_reads:
+                        objs[i].metadata.cached_positions = entry.meta.cached_positions
+                        results[i] = True
+                except Exception as e:
+                    if raise_on_error:
+                        raise
+                    with self._lock:
+                        self._batched_load_fallback_count += 1
+                    logger.warning(
+                        "RawBlockCore batched load failed; retrying reads "
+                        "one by one: %s",
+                        e,
+                    )
+                    raw_dev = self._rawdev()
+                    for i, encoded_key, entry, buf, total_len in batched_reads:
+                        try:
+                            raw_dev.pread_into(
+                                entry.offset + self.header_bytes,
+                                buf,
+                                total_len,
+                                total_len,
+                            )
+                            objs[
+                                i
+                            ].metadata.cached_positions = entry.meta.cached_positions
+                            results[i] = True
+                        except Exception as retry_error:
+                            logger.error(
+                                "RawBlockCore load failed for %s: %s",
+                                encoded_key,
+                                retry_error,
+                            )
+
+            for (
+                i,
+                encoded_key,
+                entry,
+                buf,
+                payload_len,
+                total_len,
+            ) in fallback_reads:
+                try:
+                    self._read_buffers(
+                        [entry.offset + self.header_bytes],
+                        [buf],
+                        [payload_len],
+                        [total_len],
+                    )
+                    objs[i].metadata.cached_positions = entry.meta.cached_positions
+                    results[i] = True
+                except Exception as e:
+                    if raise_on_error:
+                        raise
+                    logger.error("RawBlockCore load failed for %s: %s", encoded_key, e)
+        finally:
+            with self._lock:
+                self._inflight_io_count -= 1
+                self._last_io_ts = time.monotonic()
+        return results
+
     def unlock_many(self, encoded_keys: Sequence[str]) -> None:
         """Release L2 lock references for encoded keys.
 
@@ -908,6 +1200,19 @@ class RawBlockCore:
     def report_status(self) -> dict:
         """Return raw-block health, layout, metadata, and in-flight counters."""
         with self._lock:
+            fixed_read_submission_count = 0
+            nonfixed_read_submission_count = 0
+            if self._raw is not None:
+                fixed_read_counter = getattr(
+                    self._raw, "fixed_read_submission_count", None
+                )
+                nonfixed_read_counter = getattr(
+                    self._raw, "nonfixed_read_submission_count", None
+                )
+                if callable(fixed_read_counter):
+                    fixed_read_submission_count = int(fixed_read_counter())
+                if callable(nonfixed_read_counter):
+                    nonfixed_read_submission_count = int(nonfixed_read_counter())
             return {
                 "is_healthy": not self._closed,
                 "type": "RawBlockCore",
@@ -935,6 +1240,12 @@ class RawBlockCore:
                 "io_engine": self.io_engine,
                 "iouring_queue_depth": self.iouring_queue_depth,
                 "use_uring_cmd": self.use_uring_cmd,
+                "fixed_buffer_count": self._fixed_buffer_count,
+                "fixed_buffer_bytes": self._fixed_buffer_bytes,
+                "fixed_read_submission_count": fixed_read_submission_count,
+                "nonfixed_read_submission_count": nonfixed_read_submission_count,
+                "batched_load_count": self._batched_load_count,
+                "batched_load_fallback_count": self._batched_load_fallback_count,
             }
 
     def close(self) -> None:
@@ -1298,6 +1609,55 @@ class RawBlockCore:
         ):
             raw_dev.write_uring(int(offset), buf, int(payload_len), int(total_len))
 
+    def _read_buffers_pipelined(
+        self,
+        offsets: Sequence[int],
+        buffers: Sequence[Any],
+        total_lens: Sequence[int],
+        *,
+        completion_batch_size: int,
+        on_batch_loaded: Callable[[int, int], None],
+    ) -> None:
+        """Submit every read group, then publish completed groups in order."""
+        raw_dev = self._rawdev()
+        submissions: list[tuple[int, int, int]] = []
+        first_error: Exception | None = None
+        for start in range(0, len(offsets), completion_batch_size):
+            end = min(start + completion_batch_size, len(offsets))
+            try:
+                batch_offsets = [int(offset) for offset in offsets[start:end]]
+                batch_buffers = list(buffers[start:end])
+                batch_total_lens = [
+                    int(total_len) for total_len in total_lens[start:end]
+                ]
+                if not all(self._is_buffer_aligned(buf) for buf in batch_buffers):
+                    raise ValueError("Pipelined O_DIRECT reads require aligned buffers")
+                batch_id = raw_dev.batched_read(
+                    batch_offsets,
+                    batch_buffers,
+                    batch_total_lens,
+                )
+                submissions.append((batch_id, start, end))
+            except Exception as error:
+                first_error = error
+                break
+
+        for batch_id, start, end in submissions:
+            try:
+                raw_dev.wait_iouring(batch_id)
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+            else:
+                if first_error is None:
+                    try:
+                        on_batch_loaded(start, end)
+                    except Exception as error:
+                        first_error = error
+
+        if first_error is not None:
+            raise first_error
+
     def _read_buffers(
         self,
         offsets: Sequence[int],
@@ -1333,13 +1693,16 @@ class RawBlockCore:
             int(payload_len) == int(total_len)
             for payload_len, total_len in zip(payload_lens, total_lens, strict=True)
         )
+        batch_offsets = [int(offset) for offset in offsets]
+        batch_buffers = list(buffers)
+        batch_total_lens = [int(total_len) for total_len in total_lens]
         # batched_read requires aligned buffers when O_DIRECT is enabled
         # Check alignment before using batched_read
-        if can_batch and all(self._is_buffer_aligned(buf) for buf in buffers):
+        if can_batch and all(self._is_buffer_aligned(buf) for buf in batch_buffers):
             batch_id = raw_dev.batched_read(
-                [int(offset) for offset in offsets],
-                list(buffers),
-                [int(total_len) for total_len in total_lens],
+                batch_offsets,
+                batch_buffers,
+                batch_total_lens,
             )
             raw_dev.wait_iouring(batch_id)
             return

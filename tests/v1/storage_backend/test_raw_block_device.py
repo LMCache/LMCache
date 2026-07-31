@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 # Standard
+import ctypes
 import errno
+import mmap
 import os
 import platform
 
@@ -119,6 +121,104 @@ def test_raw_block_device_iouring_best_effort_roundtrip(tmp_path):
     finally:
         if dev is not None:
             dev.close()
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="O_DIRECT is Linux only")
+def test_raw_block_device_fixed_buffer_read_accepts_registered_subrange(tmp_path):
+    """A real O_DIRECT ReadFixed may target an aligned registered subrange."""
+    path = make_raw_block_file(tmp_path)
+    payload = bytes(index % 251 for index in range(RAW_BLOCK_CI_BLOCK_ALIGN))
+    with path.open("r+b", buffering=0) as f:
+        f.seek(RAW_BLOCK_CI_BLOCK_ALIGN)
+        f.write(payload)
+        f.flush()
+        os.fsync(f.fileno())
+
+    region = mmap.mmap(-1, 2 * RAW_BLOCK_CI_BLOCK_ALIGN)
+    output = memoryview(region)[RAW_BLOCK_CI_BLOCK_ALIGN : 2 * RAW_BLOCK_CI_BLOCK_ALIGN]
+    base = ctypes.addressof(ctypes.c_char.from_buffer(region))
+    dev = None
+    try:
+        assert base % RAW_BLOCK_CI_BLOCK_ALIGN == 0
+        dev = RawBlockDevice(
+            str(path),
+            writable=False,
+            use_odirect=True,
+            alignment=RAW_BLOCK_CI_BLOCK_ALIGN,
+            io_engine="io_uring",
+            iouring_queue_depth=8,
+        )
+        dev.register_fixed_buffers([base], [len(region)])
+        assert dev.fixed_read_submission_count() == 0
+        assert dev.nonfixed_read_submission_count() == 0
+        batch_id = dev.batched_read(
+            [RAW_BLOCK_CI_BLOCK_ALIGN],
+            [output],
+            [RAW_BLOCK_CI_BLOCK_ALIGN],
+        )
+        dev.wait_iouring(batch_id)
+        assert bytes(output) == payload
+        assert dev.fixed_read_submission_count() == 1
+        assert dev.nonfixed_read_submission_count() == 0
+    except Exception as e:
+        if _is_skip_safe_io_error(e):
+            pytest.skip(f"O_DIRECT io_uring is unavailable on this runner: {e}")
+        raise
+    finally:
+        if dev is not None:
+            dev.close()
+        output.release()
+        region.close()
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="O_DIRECT is Linux only")
+def test_raw_block_device_nonfixed_read_submission_is_observable(tmp_path):
+    """A batched O_DIRECT read without registration uses an ordinary Read SQE."""
+    path = make_raw_block_file(tmp_path)
+    payload = bytes(index % 251 for index in range(RAW_BLOCK_CI_BLOCK_ALIGN))
+    with path.open("r+b", buffering=0) as f:
+        f.seek(RAW_BLOCK_CI_BLOCK_ALIGN)
+        f.write(payload)
+        f.flush()
+        os.fsync(f.fileno())
+
+    region = mmap.mmap(-1, RAW_BLOCK_CI_BLOCK_ALIGN)
+    output = memoryview(region)
+    dev = None
+    try:
+        assert (
+            ctypes.addressof(ctypes.c_char.from_buffer(region))
+            % (RAW_BLOCK_CI_BLOCK_ALIGN)
+            == 0
+        )
+        dev = RawBlockDevice(
+            str(path),
+            writable=False,
+            use_odirect=True,
+            alignment=RAW_BLOCK_CI_BLOCK_ALIGN,
+            io_engine="io_uring",
+            iouring_queue_depth=8,
+        )
+        assert dev.fixed_read_submission_count() == 0
+        assert dev.nonfixed_read_submission_count() == 0
+        batch_id = dev.batched_read(
+            [RAW_BLOCK_CI_BLOCK_ALIGN],
+            [output],
+            [RAW_BLOCK_CI_BLOCK_ALIGN],
+        )
+        dev.wait_iouring(batch_id)
+        assert bytes(output) == payload
+        assert dev.fixed_read_submission_count() == 0
+        assert dev.nonfixed_read_submission_count() == 1
+    except Exception as e:
+        if _is_skip_safe_io_error(e):
+            pytest.skip(f"O_DIRECT io_uring is unavailable on this runner: {e}")
+        raise
+    finally:
+        if dev is not None:
+            dev.close()
+        output.release()
+        region.close()
 
 
 @pytest.mark.skipif(
