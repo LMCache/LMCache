@@ -247,6 +247,10 @@ class P2PController:
         handle = self._ctx.storage_manager.submit_prefetch_task(
             PrefetchRequestSpec(
                 keys=keys,
+                # TODO(KuntaiDu): pass per-group layout descs once L2
+                # adapters' submit_lookup_and_lock_task takes them (see the
+                # matching TODO in prefetch_controller._start_lookup_phase).
+                # Follow-up immediately after this PR.
                 group_layout_descs={0: layout_desc},
                 policy=TrimPolicy.SPARSE,
             ),

@@ -289,7 +289,33 @@ class LookupModule:
 
         group_layout_descs = self._ctx.layout_desc_registry.find_group_layout_descs(
             model_name, world_size
-        ) or {gid: layout_desc for gid in range(attn_desc.num_object_groups)}
+        )
+        if not group_layout_descs:
+            logger.error(
+                "No group layout descs found for model %s with world size %d "
+                "during lookup!",
+                model_name,
+                world_size,
+            )
+            self._register_prefetch_job(
+                _PrefetchJob(
+                    handle=PrefetchHandle(
+                        prefetch_request_id=-1,
+                        external_request_id=key.request_id,
+                        l1_found_indices=(),
+                        l1_hit_chunks=0,
+                        total_requested_keys=0,
+                        submit_time=time.monotonic(),
+                    ),
+                    world_size=1,
+                    request_id=key.request_id,
+                    requested_tokens=0,
+                    model_name=model_name,
+                    cache_salt=key.cache_salt,
+                )
+            )
+            return
+
         handle = self._ctx.storage_manager.submit_prefetch_task(
             PrefetchRequestSpec(
                 keys=obj_keys,

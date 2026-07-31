@@ -385,12 +385,19 @@ def run_cache_server(
 
     # blend engine: single object group + full per-chunk SWA KV
     is_blend = mp_config.engine_type == "blend"
+    # TODO(Weishu): support separate object groups in the blend engine, then
+    # make --no-separate-object-groups the default instead of requiring it.
+    if is_blend and mp_config.separate_object_groups:
+        raise RuntimeError(
+            "The blend engine only supports the single-object-group layout; "
+            "run with --no-separate-object-groups."
+        )
 
     ctx = MPCacheServerContext(
         storage_manager_config=storage_manager_config,
         chunk_size=mp_config.chunk_size,
         hash_algorithm=mp_config.hash_algorithm,
-        separate_object_groups=mp_config.separate_object_groups and not is_blend,
+        separate_object_groups=mp_config.separate_object_groups,
         full_sw_kv=is_blend,
     )
 

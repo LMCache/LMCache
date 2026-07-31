@@ -911,6 +911,9 @@ class PrefetchController(StorageControllerInterface):
         for adapter_id, adapter in routing_adapters.items():
             # The layout is an advisory hint (see L2AdapterInterface); pass
             # group 0's.
+            # TODO(KuntaiDu): update L2 adapters' submit_lookup_and_lock_task
+            # to take per-group layout descs (only the P2P adapter uses the
+            # layout today). Follow-up immediately after this PR.
             task_id = adapter.submit_lookup_and_lock_task(
                 spec.keys, spec.group_layout_descs[0]
             )

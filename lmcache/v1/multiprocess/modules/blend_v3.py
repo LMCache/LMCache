@@ -841,6 +841,10 @@ class BlendV3Module(InstanceLivenessTarget):
         handle: PrefetchHandle = self._ctx.storage_manager.submit_prefetch_task(
             PrefetchRequestSpec(
                 keys=uniq_keys,
+                # TODO(Weishu): cacheblend assumes the single-object-group
+                # layout (enforced at server startup by requiring
+                # --no-separate-object-groups); support separate object
+                # groups here.
                 group_layout_descs={0: layout_desc},
                 policy=TrimPolicy.SPARSE,
             ),
