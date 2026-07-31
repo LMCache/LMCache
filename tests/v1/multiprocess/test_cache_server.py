@@ -31,7 +31,6 @@ from lmcache.v1.multiprocess.protocol import (
     get_response_class,
 )
 from lmcache.v1.multiprocess.server import run_cache_server
-from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
 
 # Configuration constants
 SERVER_HOST = "localhost"
@@ -58,6 +57,8 @@ if not (torch_dev.is_available() and torch_device_type == "cuda"):
         allow_module_level=True,
     )
 
+# First Party
+from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper  # noqa: E402
 
 if not _has_working_new_shared_cuda():
     pytest.skip(

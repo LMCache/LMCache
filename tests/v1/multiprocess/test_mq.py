@@ -29,7 +29,6 @@ from lmcache.v1.multiprocess.protocol import (
     get_payload_classes,
 )
 from lmcache.v1.multiprocess.server import add_handler_helper
-from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
 
 # Test helpers
 from tests.v1.multiprocess import test_mq_handler_helpers
@@ -369,6 +368,9 @@ def test_mq_register_kv_cache():
     Test MessageQueue with REGISTER_KV_CACHE request type.
     REGISTER_KV_CACHE takes (gpu_id: int, kv_cache: KVCache) and returns None.
     """
+    # First Party
+    from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
+
     # Create test KV cache (list of CudaIPCWrapper objects)
     kv_cache = []
     for _ in range(3):
