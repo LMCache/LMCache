@@ -864,8 +864,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if any(new_block_ids):
             tracker.append_block_ids(tuple(new_block_ids))
 
-        # Update the state of the tracker
-        condition = tracker.needs_retrieve()
+        # Update the state of the tracker.
+        #
+        # num_external_tokens == 0 means MultiConnector picked a different
+        # sub-connector as the winner for this request. Retrieving anyway
+        # double-reports it through get_finished and crashes EngineCore (see
+        # tests/v1/test_mp_connector_multi_connector_selection.py).
+        condition = tracker.needs_retrieve() and num_external_tokens > 0
         if tracker.state == LMCacheMPRequestState.PREFETCHING:
             # If need to retrieve, change to WAITING_FOR_LOAD
             # Otherwise, change to READY
