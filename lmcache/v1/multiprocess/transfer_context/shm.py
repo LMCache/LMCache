@@ -213,7 +213,13 @@ class EngineDrivenContextShm(EngineDrivenContext):
             return None
         if not slots:
             return [], [], []
-        chunk_indices: list[int] = context["chunk_indices"]
+        chunk_indices = context.get("chunk_indices")
+        if (
+            not isinstance(chunk_indices, list)
+            or len(chunk_indices) != len(slots)
+            or len(group_ids) != len(slots)
+        ):
+            return None
         return self._build_slot_tensors(slots), chunk_indices, group_ids
 
     def prepare_retrieve_grouped(
@@ -239,7 +245,7 @@ class EngineDrivenContextShm(EngineDrivenContext):
         context = response.context if isinstance(response.context, dict) else {}
         slots = context.get("slots", [])
         group_ids = context.get("group_ids")
-        if not slots or not isinstance(group_ids, list):
+        if not slots or not isinstance(group_ids, list) or len(group_ids) != len(slots):
             return None
         return self._build_slot_tensors(slots), group_ids
 

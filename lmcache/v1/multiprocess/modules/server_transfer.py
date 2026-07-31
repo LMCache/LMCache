@@ -348,7 +348,10 @@ class ShmTransferStrategy(TransferStrategy):
             group_layouts = [context.layout_desc]
             group_keys = [resolve_obj_keys(key)]
         else:
-            assert context.group_layouts is not None
+            if context.group_layouts is None:
+                raise ValueError(
+                    "group_keys given but the instance context has no group_layouts"
+                )
             group_layouts = context.group_layouts
         multi_group = len(group_keys) > 1
 
@@ -356,35 +359,45 @@ class ShmTransferStrategy(TransferStrategy):
         chunk_indices: list[int] = []
         group_ids: list[int] = []
         reserved_keys: list[ObjectKey] = []
-        for gid, (g_keys, g_layout) in enumerate(
-            zip(group_keys, group_layouts, strict=True)
-        ):
-            reserved = self._storage_manager.reserve_write(g_keys, g_layout, "new")
-            g_reserved: list[ObjectKey] = []
-            try:
-                for idx, obj_key in enumerate(g_keys):
-                    memory_obj = reserved.get(obj_key)
-                    if memory_obj is None or memory_obj.tensor is None:
-                        continue
-                    slots.append(
-                        ShmSlotDescriptor(
-                            offset=memory_obj.shm_offset,
-                            length=memory_obj.shm_byte_length,
-                            shape=list(memory_obj.tensor.shape),
-                            dtype=_dtype_to_name(memory_obj.tensor.dtype),
-                        ).to_dict()
-                    )
-                    chunk_indices.append(idx)
-                    group_ids.append(gid)
-                    g_reserved.append(obj_key)
-            finally:
-                g_reserved_set = set(g_reserved)
-                unused_keys = [
-                    obj_key for obj_key in reserved if obj_key not in g_reserved_set
-                ]
-                if unused_keys:
-                    self._storage_manager.finish_write(unused_keys)
-            reserved_keys.extend(g_reserved)
+        try:
+            for gid, (g_keys, g_layout) in enumerate(
+                zip(group_keys, group_layouts, strict=True)
+            ):
+                reserved = self._storage_manager.reserve_write(g_keys, g_layout, "new")
+                g_reserved: list[ObjectKey] = []
+                try:
+                    for idx, obj_key in enumerate(g_keys):
+                        memory_obj = reserved.get(obj_key)
+                        if memory_obj is None or memory_obj.tensor is None:
+                            continue
+                        slots.append(
+                            ShmSlotDescriptor(
+                                offset=memory_obj.shm_offset,
+                                length=memory_obj.shm_byte_length,
+                                shape=list(memory_obj.tensor.shape),
+                                dtype=_dtype_to_name(memory_obj.tensor.dtype),
+                            ).to_dict()
+                        )
+                        chunk_indices.append(idx)
+                        group_ids.append(gid)
+                        g_reserved.append(obj_key)
+                finally:
+                    g_reserved_set = set(g_reserved)
+                    unused_keys = [
+                        obj_key
+                        for obj_key in reserved
+                        if obj_key not in g_reserved_set
+                    ]
+                    if unused_keys:
+                        self._storage_manager.finish_write(unused_keys)
+                    # Track claimed keys BEFORE any raise can escape the group
+                    # loop, so the except below releases every write lock taken
+                    # so far (earlier groups + this one).
+                    reserved_keys.extend(g_reserved)
+        except BaseException:
+            if reserved_keys:
+                self._storage_manager.finish_write(reserved_keys)
+            raise
 
         if not reserved_keys:
             empty: dict[str, Any] = {"slots": [], "chunk_indices": []}
@@ -456,27 +469,34 @@ class ShmTransferStrategy(TransferStrategy):
                 self._storage_manager.finish_read_prefetched(all_prefetched)
             return PrepareRetrieveResponse(success=False, data=b"", context={})
 
-        for gid, g_keys in enumerate(group_keys):
-            prefetched, memory_objs = self._storage_manager.unsafe_read(g_keys)
-            all_prefetched.extend(prefetched)
-            if (
-                not memory_objs
-                or len(prefetched) != len(g_keys)
-                or len(memory_objs) != len(g_keys)
-            ):
-                return _miss()
-            for memory_obj in memory_objs:
-                if memory_obj.tensor is None:
+        try:
+            for gid, g_keys in enumerate(group_keys):
+                prefetched, memory_objs = self._storage_manager.unsafe_read(g_keys)
+                all_prefetched.extend(prefetched)
+                if (
+                    not memory_objs
+                    or len(prefetched) != len(g_keys)
+                    or len(memory_objs) != len(g_keys)
+                ):
                     return _miss()
-                slots.append(
-                    ShmSlotDescriptor(
-                        offset=memory_obj.shm_offset,
-                        length=memory_obj.shm_byte_length,
-                        shape=list(memory_obj.tensor.shape),
-                        dtype=_dtype_to_name(memory_obj.tensor.dtype),
-                    ).to_dict()
-                )
-                group_ids.append(gid)
+                for memory_obj in memory_objs:
+                    if memory_obj.tensor is None:
+                        return _miss()
+                    slots.append(
+                        ShmSlotDescriptor(
+                            offset=memory_obj.shm_offset,
+                            length=memory_obj.shm_byte_length,
+                            shape=list(memory_obj.tensor.shape),
+                            dtype=_dtype_to_name(memory_obj.tensor.dtype),
+                        ).to_dict()
+                    )
+                    group_ids.append(gid)
+        except BaseException:
+            # _miss() covers coverage misses; this covers exceptions — the
+            # read locks in all_prefetched must never outlive a failed prepare.
+            if all_prefetched:
+                self._storage_manager.finish_read_prefetched(all_prefetched)
+            raise
 
         transfer_key = self._transfer_key_factory(key, instance_id)
         with self._pending_lock:

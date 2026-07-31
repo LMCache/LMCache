@@ -894,6 +894,8 @@ class EngineDrivenTransferContext(TransferContext):
             try:
                 for gid, state in enumerate(self._group_states):
                     src_g, _ = self._group_slots(tensors, group_ids, gid)
+                    if not src_g:
+                        continue
                     scatter_cpu_to_paged_kv(
                         {name: kv_caches[name] for name in state.layer_names},
                         block_ids[gid],
