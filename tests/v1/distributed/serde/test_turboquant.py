@@ -361,7 +361,7 @@ def test_turboquant_storage_manager_roundtrip(
         )
         assert ok, f"L1 not cleared: {sm.report_status()['l1_manager']}"
 
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, layout))
+        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: layout}))
         hit_bitmap = _wait_for_prefetch_status(sm, handle, timeout=120.0)
         assert hit_bitmap is not None
         hits = hit_bitmap.count_leading_ones()
@@ -593,7 +593,7 @@ def test_turboquant_fs_storage_manager_roundtrip(
         )
         assert ok, f"L1 not cleared: {sm.report_status()['l1_manager']}"
 
-        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, layout))
+        handle = sm.submit_prefetch_task(PrefetchRequestSpec(keys, {0: layout}))
         hit_bitmap = _wait_for_prefetch_status(sm, handle, timeout=120.0)
         assert hit_bitmap is not None
         hits = hit_bitmap.count_leading_ones()

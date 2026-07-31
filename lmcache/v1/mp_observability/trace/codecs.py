@@ -278,7 +278,6 @@ def _enc_prefetch_request_spec(s: PrefetchRequestSpec) -> dict[str, Any]:
     # component-type changes (keys/layout/policy/attn/mode all have codecs).
     return {
         "keys": [encode_value(k) for k in s.keys],
-        "layout_desc": encode_value(s.layout_desc),
         "extra_count": s.extra_count,
         "policy": encode_value(s.policy),
         "attn_desc": encode_value(s.attn_desc),
@@ -290,16 +289,19 @@ def _enc_prefetch_request_spec(s: PrefetchRequestSpec) -> dict[str, Any]:
 
 
 def _dec_prefetch_request_spec(d: dict[str, Any]) -> PrefetchRequestSpec:
+    group_layout_descs = {
+        int(gid): decode_value(ld)
+        for gid, ld in d.get("group_layout_descs", {}).items()
+    }
+    # Traces recorded before group_layout_descs carry a single layout_desc.
+    if not group_layout_descs and "layout_desc" in d:
+        group_layout_descs = {0: decode_value(d["layout_desc"])}
     return PrefetchRequestSpec(
         keys=[decode_value(k) for k in d["keys"]],
-        layout_desc=decode_value(d["layout_desc"]),
+        group_layout_descs=group_layout_descs,
         extra_count=d["extra_count"],
         policy=decode_value(d["policy"]),
         attn_desc=decode_value(d["attn_desc"]),
-        group_layout_descs={
-            int(gid): decode_value(ld)
-            for gid, ld in d.get("group_layout_descs", {}).items()
-        },
         mode=decode_value(d["mode"]),
     )
 

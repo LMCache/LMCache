@@ -884,12 +884,6 @@ class PrefetchController(StorageControllerInterface):
         l1_readlocks = self._lock_l1_keys(
             spec.keys, spec.extra_count, spec.policy, spec.attn_desc
         )
-        # One layout per object group; groups not in spec.group_layout_descs
-        # use spec.layout_desc.
-        group_layout_descs = {
-            gid: spec.layout_desc for gid in range(spec.attn_desc.num_object_groups)
-        }
-        group_layout_descs.update(spec.group_layout_descs)
         request = InFlightPrefetchRequest(
             request_id=request_id,
             keys=spec.keys,
@@ -898,7 +892,7 @@ class PrefetchController(StorageControllerInterface):
             policy=spec.policy,
             attn_desc=spec.attn_desc,
             mode=spec.mode,
-            group_layout_descs=group_layout_descs,
+            group_layout_descs=spec.group_layout_descs,
             l1_readlocks=l1_readlocks,
         )
 
@@ -915,7 +909,11 @@ class PrefetchController(StorageControllerInterface):
             return
 
         for adapter_id, adapter in routing_adapters.items():
-            task_id = adapter.submit_lookup_and_lock_task(spec.keys, spec.layout_desc)
+            # The layout is an advisory hint (see L2AdapterInterface); pass
+            # group 0's.
+            task_id = adapter.submit_lookup_and_lock_task(
+                spec.keys, spec.group_layout_descs[0]
+            )
             request.pending_lookup_tasks[adapter_id] = task_id
         self._in_flight_requests[request_id] = request
         self._status_in_flight_count += 1

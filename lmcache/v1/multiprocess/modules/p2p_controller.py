@@ -246,7 +246,9 @@ class P2PController:
         # NOTE: skip_l2=True -- only objects already resident in L1 are locked.
         handle = self._ctx.storage_manager.submit_prefetch_task(
             PrefetchRequestSpec(
-                keys=keys, layout_desc=layout_desc, policy=TrimPolicy.SPARSE
+                keys=keys,
+                group_layout_descs={0: layout_desc},
+                policy=TrimPolicy.SPARSE,
             ),
             external_request_id=f"p2p-{task_id}",
             skip_l2=True,

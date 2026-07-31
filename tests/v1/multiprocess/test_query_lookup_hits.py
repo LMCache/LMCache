@@ -261,6 +261,7 @@ def _captured_lookup_object_keys(
     ctx.chunk_size = 16
     ctx.event_bus.has_subscribers.return_value = False
     ctx.layout_desc_registry.find.return_value = MagicMock()  # non-None layout
+    ctx.layout_desc_registry.find_group_layout_descs.return_value = None
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=[-1] * num_groups
     )

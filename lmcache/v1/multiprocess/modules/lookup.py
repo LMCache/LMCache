@@ -289,14 +289,13 @@ class LookupModule:
 
         group_layout_descs = self._ctx.layout_desc_registry.find_group_layout_descs(
             model_name, world_size
-        )
+        ) or {gid: layout_desc for gid in range(attn_desc.num_object_groups)}
         handle = self._ctx.storage_manager.submit_prefetch_task(
             PrefetchRequestSpec(
                 keys=obj_keys,
-                layout_desc=layout_desc,
+                group_layout_descs=group_layout_descs,
                 extra_count=extra_count,
                 attn_desc=attn_desc,
-                group_layout_descs=group_layout_descs or {},
             ),
             external_request_id=key.request_id,
         )

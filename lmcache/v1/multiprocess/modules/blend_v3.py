@@ -841,7 +841,7 @@ class BlendV3Module(InstanceLivenessTarget):
         handle: PrefetchHandle = self._ctx.storage_manager.submit_prefetch_task(
             PrefetchRequestSpec(
                 keys=uniq_keys,
-                layout_desc=layout_desc,
+                group_layout_descs={0: layout_desc},
                 policy=TrimPolicy.SPARSE,
             ),
             external_request_id=key.request_id,
@@ -995,7 +995,7 @@ class BlendV3Module(InstanceLivenessTarget):
         handle = self._ctx.storage_manager.submit_prefetch_task(
             PrefetchRequestSpec(
                 keys=obj_keys,
-                layout_desc=layout_desc,
+                group_layout_descs={0: layout_desc},
                 extra_count=extra_count,
                 policy=policy,
             ),

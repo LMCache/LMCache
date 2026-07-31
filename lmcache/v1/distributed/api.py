@@ -7,7 +7,7 @@ Could be implemented by native code in the future
 """
 
 # Standard
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 import enum
 
@@ -66,12 +66,12 @@ class TrimPolicy(enum.Enum):
 class PrefetchMode(enum.Enum):
     """The intent of a prefetch request.
 
-    ``LOOKUP`` -- prefetch for an imminent reader: loaded keys are pinned for
-    the requesting workers, and whether they persist or are dropped after use
-    follows the configured prefetch policy.
+    ``LOOKUP`` -- prefetch for an imminent reader: loaded keys are read-locked
+    for the requesting workers, and whether they persist or are dropped after
+    use follows the configured prefetch policy.
 
     ``WARM`` -- speculative pre-warm with no imminent reader: loaded keys are
-    retained and left unpinned (immediately resident and evictable), so a later
+    retained and left unlocked (immediately resident and evictable), so a later
     lookup can hit them.
     """
 
@@ -347,23 +347,30 @@ class PrefetchRequestSpec:
 
     Attributes:
         keys: Object keys to prefetch; order defines the prefix.
-        layout_desc: Memory layout for L1 write-buffer allocation.
+        group_layout_descs: Maps object_group_id to that group's memory
+            layout for L1 write-buffer allocation; one entry per object
+            group in ``attn_desc``.
         extra_count: Extra read locks per key beyond the default 1.
         policy: Retained-subset policy (see :class:`TrimPolicy`).
         attn_desc: Cross-chunk attention windows, in object-group order.
-        group_layout_descs: Maps object_group_id to that group's layout
-            (each group is a separate keyed allocation, possibly with
-            different tensor shapes); empty when all share ``layout_desc``.
         mode: Prefetch intent (see :class:`PrefetchMode`).
     """
 
     keys: list[ObjectKey]
-    layout_desc: MemoryLayoutDesc
+    group_layout_descs: dict[int, MemoryLayoutDesc]
     extra_count: int = 0
     policy: TrimPolicy = TrimPolicy.PREFIX
     attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
-    group_layout_descs: dict[int, MemoryLayoutDesc] = field(default_factory=dict)
     mode: PrefetchMode = PrefetchMode.LOOKUP
+
+    def __post_init__(self) -> None:
+        expected = set(range(self.attn_desc.num_object_groups))
+        if set(self.group_layout_descs) != expected:
+            raise ValueError(
+                "PrefetchRequestSpec: group_layout_descs must map exactly the "
+                f"object groups {sorted(expected)}, got "
+                f"{sorted(self.group_layout_descs)}"
+            )
 
 
 @dataclass(frozen=True)
