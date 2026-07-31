@@ -20,7 +20,7 @@ import torch
 # First Party
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import (
-    AttnWindowDesc,
+    AttnDesc,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchMode,
@@ -54,6 +54,9 @@ from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA is not available"
 )
+
+# A single full-attention object group (the non-hybrid default).
+_FULL_ATTN_1G = {0: AttnDesc(num_chunks_in_sw=-1)}
 
 
 # =============================================================================
@@ -1284,19 +1287,21 @@ class TestBuildTrimMask:
 
     def test_prefix_trims_at_first_gap(self):
         found = self._bm(5, [0, 1, 3, 4])  # gap at index 2
-        _hit, retained = build_trim_mask(found, 5, TrimPolicy.PREFIX)
+        _hit, retained = build_trim_mask(found, 5, _FULL_ATTN_1G, TrimPolicy.PREFIX)
         assert retained.get_indices_list() == [0, 1]
 
     def test_segmented_prefix_keeps_gaps(self):
         # Models an L2 hit whose L1 load failed mid-prefix (e.g. OOM at index
         # 2): the keys that did load are kept, not trimmed to the first gap.
         found = self._bm(5, [0, 1, 3, 4])
-        _hit, retained = build_trim_mask(found, 5, TrimPolicy.SEGMENTED_PREFIX)
+        _hit, retained = build_trim_mask(
+            found, 5, _FULL_ATTN_1G, TrimPolicy.SEGMENTED_PREFIX
+        )
         assert retained.get_indices_list() == [0, 1, 3, 4]
 
     def test_sparse_keeps_all_found(self):
         found = self._bm(5, [0, 2, 4])
-        _hit, retained = build_trim_mask(found, 5, TrimPolicy.SPARSE)
+        _hit, retained = build_trim_mask(found, 5, _FULL_ATTN_1G, TrimPolicy.SPARSE)
         assert retained.get_indices_list() == [0, 2, 4]
 
     def test_prefix_sliding_window_retains_window(self):
@@ -1305,14 +1310,17 @@ class TestBuildTrimMask:
         # 2 groups (full_attn=-1, sw=2), 1 rank, 4 chunks
         # chunk-major layout: g0c0, g1c0, g0c1, g1c1, g0c2, g1c2, g0c3, g1c3
         num_keys = 8
-        attn_desc = AttnWindowDesc(num_chunks_in_sw=[-1, 2])
+        group_attn_descs = {
+            0: AttnDesc(num_chunks_in_sw=-1),
+            1: AttnDesc(num_chunks_in_sw=2),
+        }
         # All present
         found = self._bm(num_keys, range(num_keys))
         hit_length, retained = build_trim_mask(
             found,
             num_keys,
+            group_attn_descs,
             TrimPolicy.PREFIX,
-            attn_desc,
         )
         indices = retained.get_indices_list()
         # full-attn group (even indices): all 4 chunks retained
@@ -1326,13 +1334,13 @@ class TestBuildTrimMask:
 
     def test_prefix_full_attention_only_matches_leading_ones(self):
         """With all-full-attention groups, fold reduces to count_leading_ones."""
-        attn_desc = AttnWindowDesc(num_chunks_in_sw=[-1])
+        group_attn_descs = {0: AttnDesc(num_chunks_in_sw=-1)}
         found = self._bm(5, [0, 1, 3, 4])  # gap at index 2
         hit_length, retained = build_trim_mask(
             found,
             5,
+            group_attn_descs,
             TrimPolicy.PREFIX,
-            attn_desc,
         )
         assert retained.get_indices_list() == [0, 1]
         assert hit_length == 2
@@ -1342,7 +1350,10 @@ class TestBuildTrimMask:
         including sliding-window groups."""
         # 2 groups (full=-1, sw=2), 1 rank, 3 chunks
         # Layout: g0c0, g1c0, g0c1, g1c1, g0c2, g1c2
-        attn_desc = AttnWindowDesc(num_chunks_in_sw=[-1, 2])
+        group_attn_descs = {
+            0: AttnDesc(num_chunks_in_sw=-1),
+            1: AttnDesc(num_chunks_in_sw=2),
+        }
         # Full-attn group: chunks 0, 2 present (gap at chunk 1)
         # SW group: all chunks present
         # Chunk-major: g0c0=1, g1c0=1, g0c1=0, g1c1=1, g0c2=1, g1c2=1
@@ -1350,8 +1361,8 @@ class TestBuildTrimMask:
         hit_length, retained = build_trim_mask(
             found,
             6,
+            group_attn_descs,
             TrimPolicy.PREFIX,
-            attn_desc,
         )
         # Full-attn gap at chunk 1 means hit_length=1
         # Only chunk 0 retained: g0c0 and g1c0
@@ -1773,7 +1784,10 @@ class TestSlidingWindowClaims:
         out, so they stay evictable and never enter the result."""
         adapter = make_adapter()
         layout = make_layout()
-        attn_desc = AttnWindowDesc(num_chunks_in_sw=[-1, 2])
+        group_attn_descs = {
+            0: AttnDesc(num_chunks_in_sw=-1),
+            1: AttnDesc(num_chunks_in_sw=2),
+        }
         keys = [make_object_key(i) for i in range(8)]
 
         # All keys resident in L1, unlocked; L2 has nothing.
@@ -1795,7 +1809,9 @@ class TestSlidingWindowClaims:
         ctrl.start()
 
         req_id = ctrl.submit_prefetch_request(
-            PrefetchRequestSpec(keys, {0: layout, 1: layout}, attn_desc=attn_desc)
+            PrefetchRequestSpec(
+                keys, {0: layout, 1: layout}, group_attn_descs=group_attn_descs
+            )
         )
         # query_prefetch_result pops the lookup result, so read the hit first.
         hit = wait_for_lookup_result(ctrl, req_id)
@@ -1840,7 +1856,10 @@ class TestSlidingWindowClaims:
         """
         adapter = make_adapter()
         layout = make_layout()
-        attn_desc = AttnWindowDesc(num_chunks_in_sw=[-1, 2])
+        group_attn_descs = {
+            0: AttnDesc(num_chunks_in_sw=-1),
+            1: AttnDesc(num_chunks_in_sw=2),
+        }
         keys = [make_object_key(100 + i) for i in range(12)]
 
         # L1: chunks 0-1, both groups (indices 0-3), unlocked.
@@ -1871,7 +1890,9 @@ class TestSlidingWindowClaims:
         ctrl.start()
 
         req_id = ctrl.submit_prefetch_request(
-            PrefetchRequestSpec(keys, {0: layout, 1: layout}, attn_desc=attn_desc)
+            PrefetchRequestSpec(
+                keys, {0: layout, 1: layout}, group_attn_descs=group_attn_descs
+            )
         )
         hit = wait_for_lookup_result(ctrl, req_id)
         result = wait_for_prefetch_result_bitmap(ctrl, req_id)

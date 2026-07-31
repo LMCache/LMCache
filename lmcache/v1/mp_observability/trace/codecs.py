@@ -29,6 +29,7 @@ import torch
 # First Party
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
+    AttnDesc,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
@@ -280,7 +281,10 @@ def _enc_prefetch_request_spec(s: PrefetchRequestSpec) -> dict[str, Any]:
         "keys": [encode_value(k) for k in s.keys],
         "extra_count": s.extra_count,
         "policy": encode_value(s.policy),
-        "attn_desc": encode_value(s.attn_desc),
+        "group_attn_descs": {
+            str(gid): gad.num_chunks_in_sw for gid, gad in s.group_attn_descs.items()
+        },
+        "world_size": s.world_size,
         "group_layout_descs": {
             str(gid): encode_value(ld) for gid, ld in s.group_layout_descs.items()
         },
@@ -296,12 +300,24 @@ def _dec_prefetch_request_spec(d: dict[str, Any]) -> PrefetchRequestSpec:
     # Traces recorded before group_layout_descs carry a single layout_desc.
     if not group_layout_descs and "layout_desc" in d:
         group_layout_descs = {0: decode_value(d["layout_desc"])}
+    if "group_attn_descs" in d:
+        group_attn_descs = {
+            int(gid): AttnDesc(num_chunks_in_sw=w)
+            for gid, w in d["group_attn_descs"].items()
+        }
+        world_size = d.get("world_size", 1)
+    else:
+        # Traces recorded before the rename carry an AttnWindowDesc.
+        attn_desc = decode_value(d["attn_desc"])
+        group_attn_descs = attn_desc.to_group_attn_descs()
+        world_size = attn_desc.world_size
     return PrefetchRequestSpec(
         keys=[decode_value(k) for k in d["keys"]],
         group_layout_descs=group_layout_descs,
         extra_count=d["extra_count"],
         policy=decode_value(d["policy"]),
-        attn_desc=decode_value(d["attn_desc"]),
+        group_attn_descs=group_attn_descs,
+        world_size=world_size,
         mode=decode_value(d["mode"]),
     )
 

@@ -59,13 +59,13 @@ import threading
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import (
-    DEFAULT_ATTN_WINDOW_DESC,
-    AttnWindowDesc,
+    AttnDesc,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchMode,
     PrefetchRequestSpec,
     TrimPolicy,
+    group_windows_vector,
 )
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_ranked
 from lmcache.v1.distributed.error import L1Error
@@ -113,8 +113,9 @@ def merge_bitmaps(bitmaps: Iterable[Bitmap], num_keys: int) -> Bitmap:
 def build_trim_mask(
     found: Bitmap,
     num_keys: int,
+    group_attn_descs: dict[int, AttnDesc],
     policy: TrimPolicy = TrimPolicy.PREFIX,
-    attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
+    world_size: int = 1,
 ) -> tuple[int, Bitmap]:
     """Subset of ``found`` to keep (load + read-lock + report); the rest is
     released.
@@ -127,9 +128,10 @@ def build_trim_mask(
     Args:
         found: Bitmap of found keys, over key indices ``0..num_keys-1``.
         num_keys: Total number of requested keys.
+        group_attn_descs: Maps object_group_id to that group's cross-chunk
+            attention desc.
         policy: Trim policy to apply (see :class:`TrimPolicy`).
-        attn_desc: Cross-chunk attention windows of all object groups, in
-            object-group order.
+        world_size: Number of kv_rank shards per chunk.
 
     Returns:
         ``(hit_length, retain_mask)`` — prefix hit in chunks and retained bitmap.
@@ -137,14 +139,14 @@ def build_trim_mask(
     Raises:
         ValueError: If ``policy`` is not a known :class:`TrimPolicy`.
     """
-    stride = attn_desc.num_object_groups * attn_desc.world_size
+    stride = len(group_attn_descs) * world_size
     if policy is TrimPolicy.PREFIX:
         num_chunks = num_keys // stride
         hit_length, retain = fold_unfold_ranked(
             found,
             num_chunks,
-            attn_desc.world_size,
-            attn_desc.num_chunks_in_sw,
+            world_size,
+            group_windows_vector(group_attn_descs),
         )
         return hit_length, retain
     if policy in (TrimPolicy.SEGMENTED_PREFIX, TrimPolicy.SPARSE):
@@ -201,9 +203,12 @@ class InFlightPrefetchRequest:
     policy: TrimPolicy = TrimPolicy.PREFIX
     """Which retained-subset policy to apply (see :class:`TrimPolicy`)."""
 
-    attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
-    """Cross-chunk attention windows of all object groups, in object-group
-    order."""
+    group_attn_descs: dict[int, AttnDesc] = field(
+        default_factory=lambda: {0: AttnDesc(num_chunks_in_sw=-1)}
+    )
+    """Maps object_group_id to that group's cross-chunk attention desc."""
+    world_size: int = 1
+    """Number of kv_rank shards per chunk (tensor-parallel world size)."""
     mode: PrefetchMode = PrefetchMode.LOOKUP
     """The prefetch intent (see :class:`PrefetchMode`).  ``WARM`` forces all
     loaded keys permanent and acquires no read lock; ``LOOKUP`` defers
@@ -828,7 +833,8 @@ class PrefetchController(StorageControllerInterface):
         keys: list[ObjectKey],
         extra_count: int,
         policy: TrimPolicy,
-        attn_desc: AttnWindowDesc,
+        group_attn_descs: dict[int, AttnDesc],
+        world_size: int,
     ) -> Bitmap:
         """Read-lock the L1-resident keys the request will hold.
 
@@ -845,7 +851,9 @@ class PrefetchController(StorageControllerInterface):
                 hit, so these keys start past it.
             extra_count: Extra read locks per locked key.
             policy: The request's retained-subset policy.
-            attn_desc: Per-group cross-chunk attention windows.
+            group_attn_descs: Maps object_group_id to that group's
+                cross-chunk attention desc.
+            world_size: Number of kv_rank shards per chunk.
 
         Returns:
             Bitmap of the key indices read-locked in L1, after releasing
@@ -860,9 +868,9 @@ class PrefetchController(StorageControllerInterface):
         if policy is not TrimPolicy.PREFIX:
             return l1_readlocks
         hit_length, l1_window = build_trim_mask(
-            l1_readlocks, len(keys), policy, attn_desc
+            l1_readlocks, len(keys), group_attn_descs, policy, world_size
         )
-        stride = attn_desc.num_object_groups * attn_desc.world_size
+        stride = len(group_attn_descs) * world_size
         within_l1_hit = Bitmap(len(keys), hit_length * stride)
         # evictable: locked SW chunks behind the window, within the L1 prefix
         # hit -- won't be read again, so release their locks.
@@ -882,7 +890,11 @@ class PrefetchController(StorageControllerInterface):
         """Read-lock L1-resident keys, then submit lookup_and_lock to all
         live (non-draining) adapters for a new request."""
         l1_readlocks = self._lock_l1_keys(
-            spec.keys, spec.extra_count, spec.policy, spec.attn_desc
+            spec.keys,
+            spec.extra_count,
+            spec.policy,
+            spec.group_attn_descs,
+            spec.world_size,
         )
         request = InFlightPrefetchRequest(
             request_id=request_id,
@@ -890,7 +902,8 @@ class PrefetchController(StorageControllerInterface):
             phase=PrefetchPhase.LOOKUP,
             extra_count=spec.extra_count,
             policy=spec.policy,
-            attn_desc=spec.attn_desc,
+            group_attn_descs=spec.group_attn_descs,
+            world_size=spec.world_size,
             mode=spec.mode,
             group_layout_descs=spec.group_layout_descs,
             l1_readlocks=l1_readlocks,
@@ -973,8 +986,9 @@ class PrefetchController(StorageControllerInterface):
         hit_length, retained = build_trim_mask(
             union_bitmap,
             num_keys,
+            request.group_attn_descs,
             request.policy,
-            request.attn_desc,
+            request.world_size,
         )
         trimmed_plan = trim_load_plan_with_mask(load_plan, retained)
 
@@ -994,8 +1008,9 @@ class PrefetchController(StorageControllerInterface):
         _l1_hit, l1_fallback_retain = build_trim_mask(
             request.l1_readlocks,
             num_keys,
+            request.group_attn_descs,
             request.policy,
-            request.attn_desc,
+            request.world_size,
         )
         stale = request.l1_readlocks & (~retained) & (~l1_fallback_retain)
         if stale.popcount() > 0:
@@ -1392,8 +1407,9 @@ class PrefetchController(StorageControllerInterface):
         hit_length, retained = build_trim_mask(
             result_bitmap,
             num_keys,
+            request.group_attn_descs,
             request.policy,
-            request.attn_desc,
+            request.world_size,
         )
         if request.mode is PrefetchMode.WARM:
             if request.l1_readlocks.popcount() > 0:
