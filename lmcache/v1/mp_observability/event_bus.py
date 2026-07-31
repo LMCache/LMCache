@@ -114,6 +114,7 @@ class EventBus:
         self._stop_flag = threading.Event()
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
+        self._stopped: bool = False
         self._registered_subscribers: list[EventSubscriber] = []
         self._discard_count: int = 0
         self._last_discard_warning: float = 0.0
@@ -229,6 +230,10 @@ class EventBus:
             return
 
         self._stop_flag.clear()
+        # Re-arm stop() so a bus that is started again can run its shutdown
+        # once more; without this a stop -> start -> stop cycle would skip the
+        # second cleanup.
+        self._stopped = False
         self._thread = threading.Thread(
             target=self._run,
             daemon=True,
@@ -239,7 +244,15 @@ class EventBus:
 
     def stop(self) -> None:
         """Stop the drain thread, flush remaining events, and shut down
-        all registered subscribers.  Safe to call when not started."""
+        all registered subscribers.  Safe to call when not started, and
+        idempotent: repeated calls after the first (until the bus is started
+        again) are no-ops, so each subscriber's ``shutdown()`` runs at most
+        once per start cycle."""
+        with self._lock:
+            if self._stopped:
+                return
+            self._stopped = True
+
         self._stop_flag.set()
         self._wake.set()
         if self._thread is not None and self._thread.is_alive():

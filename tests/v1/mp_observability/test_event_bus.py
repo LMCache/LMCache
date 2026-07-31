@@ -43,6 +43,7 @@ class _RecordingSubscriber(EventSubscriber):
         self._event_types = event_types
         self.events: list[Event] = []
         self.shutdown_called = False
+        self.shutdown_count = 0
 
     def get_subscriptions(self):
         return {et: self._on_event for et in self._event_types}
@@ -52,6 +53,7 @@ class _RecordingSubscriber(EventSubscriber):
 
     def shutdown(self) -> None:
         self.shutdown_called = True
+        self.shutdown_count += 1
 
 
 # ---------------------------------------------------------------------------
@@ -492,21 +494,56 @@ class TestGlobalSingleton:
 
         assert live_event_bus_threads() == baseline
 
-    def test_init_survives_a_failing_subscriber_shutdown(self):
-        """A subscriber that raises on shutdown must not break the swap."""
+    def test_stop_is_idempotent(self):
+        """Repeated stop() must run each subscriber's shutdown at most once.
 
-        class _ExplodingSubscriber(EventSubscriber):
-            def get_subscriptions(self):
-                return {}
+        ``init_event_bus`` stops the replaced bus, and process teardown may
+        stop it again; the subscriber shutdown hook is not required to be
+        idempotent, so the bus must guard against running it twice.
+        """
+        bus = init_event_bus(EventBusConfig(enabled=True, max_queue_size=100))
+        sub = _RecordingSubscriber()
+        bus.register_subscriber(sub)
+        bus.start()
 
-            def shutdown(self) -> None:
-                raise RuntimeError("boom")
+        bus.stop()
+        bus.stop()
 
+        assert sub.shutdown_count == 1, (
+            "subscriber shutdown ran %d times; stop() is not idempotent"
+            % sub.shutdown_count
+        )
+
+    def test_stop_runs_again_after_restart(self):
+        """A bus that is started again re-arms stop() for another cleanup."""
+        bus = init_event_bus(EventBusConfig(enabled=True, max_queue_size=100))
+        sub = _RecordingSubscriber()
+        bus.register_subscriber(sub)
+
+        bus.start()
+        bus.stop()
+        bus.start()
+        bus.stop()
+
+        assert sub.shutdown_count == 2, (
+            "restarting the bus should allow shutdown to run again"
+        )
+
+    def test_init_survives_a_failing_stop(self):
+        """A replaced bus whose stop() raises must not break the swap.
+
+        This exercises the outer ``try/except`` in ``init_event_bus``. The
+        previous test relied on a subscriber raising during shutdown, but
+        ``EventBus.stop()`` already catches subscriber exceptions internally,
+        so that never reached the outer guard.
+        """
         old = init_event_bus(EventBusConfig(enabled=True, max_queue_size=100))
-        old.register_subscriber(_ExplodingSubscriber())
         old.start()
+        old.stop = MagicMock(side_effect=RuntimeError("boom"))
 
         new = init_event_bus(EventBusConfig(enabled=False))
+
+        old.stop.assert_called_once()
         assert get_event_bus() is new
 
 
