@@ -60,6 +60,33 @@ Install LMCache
                             ``--extra-index-url https://download.pytorch.org/whl/cu129`` ensures the CUDA 12.9
                             build of PyTorch is resolved. Without it, pip may select a mismatched CUDA variant.
 
+                    .. tab-item:: ROCm
+
+                        The ROCm wheel targets AMD Instinct **gfx942** (MI300X / MI325X) and
+                        **gfx950** (MI350X / MI355X) in one fat binary, and is ABI-matched to the
+                        upstream ``vllm/vllm-openai-rocm`` image (torch 2.11, ROCm 7.2, Python 3.12).
+                        It is published to a dedicated
+                        `GitHub Release <https://github.com/LMCache/LMCache/releases>`__ rather than PyPI.
+
+                        Install directly inside an upstream vLLM ROCm container — torch and the
+                        ROCm runtime are already present, so ``--no-deps`` binds against them:
+
+                        .. code-block:: bash
+
+                            docker run -it --device /dev/kfd --device /dev/dri \
+                                --group-add video --security-opt seccomp=unconfined \
+                                --entrypoint bash vllm/vllm-openai-rocm:v0.25.0
+
+                            VERSION=0.5.3  # replace with target release
+                            pip install lmcache==${VERSION} --no-deps \
+                                --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-rocm
+
+                        .. note::
+
+                            The wheel excludes torch and the ROCm runtime libraries (they bind to the
+                            host image at runtime). Match the wheel's minor torch/ROCm version to your
+                            container; for other bases, use the **From Source** tab.
+
             .. tab-item:: Nightly
 
                 Nightly wheels are built from the latest ``dev`` branch each day at 07:30 UTC
@@ -145,8 +172,9 @@ Install LMCache
                             # Need to install these packages manually to avoid build isolation
                             uv pip install -r requirements/build.txt
 
-                            # Install torch from the ROCm wheel index
-                            uv pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.0
+                            # Install torch from the ROCm wheel index. Use the rocm7.2 index to
+                            # match the upstream vllm/vllm-openai-rocm image (torch 2.11, ROCm 7.2).
+                            uv pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.2
 
                             # Build LMCache. BUILD_WITH_HIP=1 makes setup.py pick cupy-rocm-7-0 automatically.
                             # PYTORCH_ROCM_ARCH selects the target GPU(s):
