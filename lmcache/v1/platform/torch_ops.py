@@ -53,8 +53,7 @@ def _get_copy_lib() -> Optional[ctypes.CDLL]:
     """Lazily load and cache the CUDA/ROCm runtime library, or None for CPU fallback."""
     global _copy_lib
     if _copy_lib is _copy_lib_NOT_LOADED:
-        # Try to load GPU runtime libraries in priority order: CUDA first,
-        # then ROCm.
+        # Try to load GPU runtime libraries in priority order: CUDA first, then ROCm
         # TODO: ROCm path to be validated on real device
         for name, fallback in [
             ("cudart", "libcudart.so"),  # NVIDIA CUDA Runtime
@@ -101,7 +100,7 @@ def _tensor_from_ptr(
         For CPU: always zero-copy via ctypes + torch.frombuffer.
         For CUDA: zero-copy via torch._C._construct_storage_from_data_pointer
                   (PyTorch >= 2.0) or __cuda_array_interface__, with a
-                  runtime D2D memcpy fallback.
+                  cudaMemcpy D2D fallback.
         For MUSA: a non-owning view created from external device storage.
 
     Raises:
@@ -149,7 +148,7 @@ def _tensor_from_ptr(
     # MUSA path                                                          #
     # ------------------------------------------------------------------ #
     if device.type == "musa":
-        return _tensor_from_musa_ptr(ptr, shape, dtype, device, numel, total_bytes)
+        return _tensor_from_musa_ptr(ptr, shape, dtype, device, total_bytes)
 
     raise ValueError(
         f"Unsupported device type: {device.type!r}. Expected 'cpu', 'cuda', or 'musa'."
@@ -270,7 +269,6 @@ def _tensor_from_musa_ptr(
     shape: tuple[int, ...],
     dtype: torch.dtype,
     device: torch.device,
-    numel: int,
     total_bytes: int,
 ) -> torch.Tensor:
     """Create a non-owning MUSA tensor from a raw device pointer.
