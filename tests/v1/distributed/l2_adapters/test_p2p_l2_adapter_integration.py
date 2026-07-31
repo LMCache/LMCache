@@ -20,12 +20,16 @@ import time
 import pytest
 import torch
 
+# First Party
+from lmcache import torch_dev, torch_device_type
+
+if not torch_dev.is_available():
+    pytest.skip(
+        f"Requires available {torch_device_type} runtime",
+        allow_module_level=True,
+    )
+
 nixl = pytest.importorskip("nixl")
-
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA is not available"
-)
-
 # Third Party
 import zmq  # noqa: E402
 

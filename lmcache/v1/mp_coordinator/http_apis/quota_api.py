@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 # First Party
-from lmcache.v1.distributed.tiers import Tier
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.mp_coordinator.http_apis.dependencies import get_context
 from lmcache.v1.mp_coordinator.schemas import (
     EventType,

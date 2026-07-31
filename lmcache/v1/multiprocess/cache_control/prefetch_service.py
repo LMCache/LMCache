@@ -12,7 +12,7 @@ status codes. It owns the node's :class:`WarmPrefetchJobs` table.
 from typing import Any
 
 # First Party
-from lmcache.v1.distributed.tiers import Tier
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.multiprocess.cache_control.errors import (
     InvalidRequest,
     NotFound,
