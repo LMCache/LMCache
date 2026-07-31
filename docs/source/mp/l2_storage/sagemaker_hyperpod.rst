@@ -62,7 +62,29 @@ address:
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 SageMaker Hyperpod requires /dev/shm for high-performance shared memory
-operations:
+operations. The right configuration depends on whether the LMCache server
+runs in the same pod as the inference engine or in a separate pod.
+
+**Separate pods (Recommended) — LMCache server in its own pod**
+
+GPU IPC between the inference engine and the LMCache server requires a
+shared IPC namespace; across pods this is only possible through the host.
+Set ``hostIPC: true`` on **both** pods:
+
+.. code-block:: yaml
+
+   spec:
+     hostIPC: true
+
+With ``hostIPC: true`` the pod's ``/dev/shm`` *is* the host's, so the
+daemon's segment is already visible — do not add the ``subPath`` mount in
+this case (the host IPC namespace shadows it).
+
+**Same pod (LMCache server and inference engine as containers in one pod)**
+
+The pod-shared IPC namespace already covers the GPU IPC between the engine
+and the LMCache server, so only the daemon's shared-memory segment needs to
+be exposed. Mount it from the host with ``subPath``:
 
 .. code-block:: yaml
 

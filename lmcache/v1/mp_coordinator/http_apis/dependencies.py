@@ -20,6 +20,7 @@ from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.mp_coordinator.cache_control.eviction_manager import L2EvictionManager
 from lmcache.v1.mp_coordinator.cache_control.prefetch_manager import PrefetchManager
 from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
+from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
@@ -37,6 +38,8 @@ class CoordinatorContext:
         prefetch_manager: Warm-prefetch proxy to MP servers.
         token_hasher: Resolves a pin request's ``token_ids`` to object keys
             (configured to match the fleet's ``chunk_size`` / ``hash_algorithm``).
+        key_directory: Fleet-wide key → placements directory built from
+            MP-server cache events (eventually consistent).
         outbound_client: Shared async client for coordinator -> MP calls. Set by
             the lifespan (bound to the running loop); ``None`` until then.
     """
@@ -47,6 +50,7 @@ class CoordinatorContext:
     eviction_manager: L2EvictionManager
     prefetch_manager: PrefetchManager
     token_hasher: TokenHasher
+    key_directory: KeyDirectory
     outbound_client: httpx.AsyncClient | None = None
 
 

@@ -95,6 +95,10 @@ class MPServerConfig:
     sent a PING (model warmup, or death before its first request). Must be
     >= worker_reap_timeout_seconds."""
 
+    enable: list[str] = field(default_factory=list)
+    """List of experimental transfer modules to enable. Options: transfer_query
+    (see lmcache.v1.multiprocess.modules.experimental.__init___.py)."""
+
     def __post_init__(self) -> None:
         """Validate the worker-reaping timeouts.
 
@@ -209,12 +213,13 @@ class CoordinatorConfig:
     """Seconds between heartbeats. Must be strictly positive and kept well below
     the coordinator's ``INSTANCE_TIMEOUT``."""
 
-    l2_event_reporting: bool = False
-    """When ``True``, report L2 store/lookup events to the coordinator for
-    fleet-wide usage tracking and eviction."""
+    event_reporting: bool = False
+    """When ``True``, report cache events to the coordinator: the key
+    directory's store/access/delete stream (fleet-wide placement tracking)
+    and the L2 usage stream (quota tracking and eviction)."""
 
-    l2_event_flush_interval: float = 1.0
-    """Seconds between L2 event flush attempts to the coordinator."""
+    event_flush_interval: float = 1.0
+    """Seconds between cache-event flush attempts to the coordinator."""
 
 
 DEFAULT_COORDINATOR_CONFIG = CoordinatorConfig()
@@ -374,6 +379,15 @@ def add_mp_server_args(
         "retrieve failure, retain the gapped prefix so post-gap chunks stay "
         "L1-resident instead of truncating at the gap. No effect otherwise.",
     )
+    mp_group.add_argument(
+        "--enable",
+        type=str,
+        nargs="*",
+        default=[],
+        help="List of experimental transfer modules to enable. "
+        "Options: transfer_query (see lmcache.v1.multiprocess.modules."
+        "experimental.__init___.py).",
+    )
     return parser
 
 
@@ -418,6 +432,7 @@ def parse_args_to_mp_server_config(
         script_allowed_imports=args.script_allowed_imports or [],
         worker_reap_timeout_seconds=args.worker_reap_timeout_seconds,
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
+        enable=args.enable or [],
     )
 
 
@@ -579,19 +594,20 @@ def add_coordinator_args(
         "LMCACHE_COORDINATOR_HEARTBEAT_INTERVAL, then 5.0.",
     )
     group.add_argument(
-        "--coordinator-l2-event-reporting",
+        "--coordinator-event-reporting",
         action="store_true",
         default=None,
-        help="Report L2 store/lookup events to the coordinator for "
-        "fleet-wide usage tracking and eviction. Defaults to "
-        "LMCACHE_COORDINATOR_L2_EVENT_REPORTING; unset disables.",
+        help="Report cache events to the coordinator: the key directory's "
+        "store/access/delete stream (placement tracking) and the L2 usage "
+        "stream (quota tracking and eviction). Defaults to "
+        "LMCACHE_COORDINATOR_EVENT_REPORTING; unset disables.",
     )
     group.add_argument(
-        "--coordinator-l2-event-flush-interval",
+        "--coordinator-event-flush-interval",
         type=float,
         default=None,
-        help="Seconds between L2 event flush attempts (must be > 0). "
-        "Defaults to LMCACHE_COORDINATOR_L2_EVENT_FLUSH_INTERVAL, then 1.0.",
+        help="Seconds between cache-event flush attempts (must be > 0). "
+        "Defaults to LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL, then 1.0.",
     )
     return parser
 
@@ -612,7 +628,8 @@ def parse_args_to_coordinator_config(
         The configuration object.
 
     Raises:
-        ValueError: If the heartbeat interval is not a positive number.
+        ValueError: If the heartbeat interval or the event flush interval
+            is not a positive finite number.
     """
     url = (
         args.coordinator_url
@@ -644,37 +661,36 @@ def parse_args_to_coordinator_config(
             "coordinator heartbeat interval must be a finite number > 0, "
             "got %s" % heartbeat_interval
         )
-    if args.coordinator_l2_event_reporting is not None:
-        l2_event_reporting = args.coordinator_l2_event_reporting
+    if args.coordinator_event_reporting is not None:
+        event_reporting = args.coordinator_event_reporting
     else:
-        l2_event_reporting = os.getenv(
-            "LMCACHE_COORDINATOR_L2_EVENT_REPORTING", ""
+        event_reporting = os.getenv(
+            "LMCACHE_COORDINATOR_EVENT_REPORTING", ""
         ).lower() in ("1", "true", "yes")
 
-    if args.coordinator_l2_event_flush_interval is not None:
-        l2_event_flush_interval = args.coordinator_l2_event_flush_interval
+    if args.coordinator_event_flush_interval is not None:
+        event_flush_interval = args.coordinator_event_flush_interval
     else:
-        raw = os.getenv("LMCACHE_COORDINATOR_L2_EVENT_FLUSH_INTERVAL")
+        raw = os.getenv("LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL")
         if raw:
             try:
-                l2_event_flush_interval = float(raw)
+                event_flush_interval = float(raw)
             except ValueError as exc:
                 raise ValueError(
-                    "LMCACHE_COORDINATOR_L2_EVENT_FLUSH_INTERVAL is not a number: %r"
-                    % raw
+                    "LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL is not a number: %r" % raw
                 ) from exc
         else:
-            l2_event_flush_interval = 1.0
-    if not math.isfinite(l2_event_flush_interval) or l2_event_flush_interval <= 0:
+            event_flush_interval = 1.0
+    if not math.isfinite(event_flush_interval) or event_flush_interval <= 0:
         raise ValueError(
-            "coordinator L2 event flush interval must be a finite number > 0, "
-            "got %s" % l2_event_flush_interval
+            "coordinator event flush interval must be a finite number > 0, "
+            "got %s" % event_flush_interval
         )
 
     return CoordinatorConfig(
         url=url,
         advertise_ip=advertise_ip,
         heartbeat_interval=heartbeat_interval,
-        l2_event_reporting=l2_event_reporting,
-        l2_event_flush_interval=l2_event_flush_interval,
+        event_reporting=event_reporting,
+        event_flush_interval=event_flush_interval,
     )

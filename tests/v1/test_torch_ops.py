@@ -2669,6 +2669,16 @@ def scenario_multi_layer_block_kv_transfer(
             ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS,
             (num_blocks, block_size, num_heads, fused_hs),
         ),
+        (
+            "cs_hnd",
+            ops.EngineKVFormat.NL_X_NB_NH_BS_CS,
+            (num_blocks, num_heads, block_size, fused_hs),
+        ),
+        (
+            "cs_nhd",
+            ops.EngineKVFormat.NL_X_NB_BS_NH_CS,
+            (num_blocks, block_size, num_heads, fused_hs),
+        ),
     ):
         paged_fused = [
             torch.randn(*fused_shape, dtype=dtype).to(device) for _ in range(num_layers)

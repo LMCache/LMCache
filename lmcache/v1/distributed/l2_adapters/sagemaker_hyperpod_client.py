@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from multiprocessing import shared_memory
 from typing import AsyncIterator
 import asyncio
+import mmap
 import os
 import threading
 import time
@@ -28,6 +29,91 @@ _DEFAULT_STREAM_CHUNK_BYTES = 64 * 1024
 #: Client-side margin over the daemon's lease wait, so a miss 504 arrives
 #: before the client aborts the connection.
 _LEASE_WAIT_TIMEOUT_MARGIN_MS = 500
+
+#: Filesystem root of named POSIX shared-memory segments on Linux.
+_SHM_DIR = "/dev/shm"
+
+
+def _shm_segment_path(name: str) -> str:
+    """Return the filesystem path of a named POSIX shared-memory segment."""
+    return os.path.join(_SHM_DIR, name.lstrip("/"))
+
+
+class _ReadOnlySharedMemoryMapping:
+    """A read-only, untracked mapping of an existing shared-memory segment.
+
+    The ai-toolkit daemon owns the segment; this class only maps it. It
+    deliberately avoids :class:`multiprocessing.shared_memory.SharedMemory`
+    on Linux for two reasons:
+
+    - **Untracked.** CPython's resource tracker registers even attach-only
+      ``SharedMemory`` handles and unlinks them *from the host* at
+      interpreter exit. When this process shares the host's ``/dev/shm``
+      view (e.g. ``hostIPC`` pods), that cleanup deletes the daemon's
+      node-local cache for every client on the node. A plain ``mmap``
+      never touches the tracker. (``SharedMemory(track=False)`` on
+      Python 3.13+ would also avoid the tracker, but maps writable and
+      is unavailable on 3.12.)
+    - **Read-only.** The client only reads cache bytes from the segment
+      (writes go through the daemon's HTTP API), so pages are mapped
+      ``PROT_READ`` and cannot be corrupted from this process.
+
+    On platforms without ``/dev/shm`` (non-Linux development machines) it
+    falls back to plain ``SharedMemory`` — tracked and writable, which is
+    acceptable because the daemon and its host-owned segment only exist
+    on Linux.
+
+    Raises:
+        FileNotFoundError: If the segment does not exist, or exists but is
+            still empty (a transient state while the daemon recreates it).
+    """
+
+    def __init__(self, name: str) -> None:
+        self._mmap: mmap.mmap | None = None
+        self._shm: shared_memory.SharedMemory | None = None
+        if os.path.isdir(_SHM_DIR):
+            try:
+                fd = os.open(_shm_segment_path(name), os.O_RDONLY)
+                try:
+                    # length=0 maps the whole file as of this call, avoiding a
+                    # stat-then-map race with daemon recreation.
+                    self._mmap = mmap.mmap(fd, 0, prot=mmap.PROT_READ)
+                finally:
+                    os.close(fd)
+            except (OSError, ValueError) as exc:
+                raise FileNotFoundError(
+                    f"shared-memory segment {name!r} cannot be opened or mapped"
+                ) from exc
+            self._size = len(self._mmap)
+            self._buf = memoryview(self._mmap)
+        else:
+            self._shm = shared_memory.SharedMemory(name=name, create=False)
+            self._size = self._shm.size
+            self._buf = memoryview(self._shm.buf)
+
+    @property
+    def buf(self) -> memoryview:
+        """The mapped segment bytes (read-only on Linux)."""
+        return self._buf
+
+    @property
+    def size(self) -> int:
+        """The mapped size in bytes."""
+        return self._size
+
+    def close(self) -> None:
+        """Release the memoryview and unmap the segment. Idempotent.
+
+        Never deletes the segment itself: its lifecycle belongs to the
+        daemon.
+        """
+        self._buf.release()
+        if self._mmap is not None:
+            self._mmap.close()
+            self._mmap = None
+        if self._shm is not None:
+            self._shm.close()
+            self._shm = None
 
 
 @dataclass(frozen=True)
@@ -134,15 +220,12 @@ class SageMakerHyperPodClient:
         self._shared_memory_name = shared_memory_name
         self._shared_memory_lock = threading.Lock()
         try:
-            self._shared_memory = shared_memory.SharedMemory(
-                name=shared_memory_name,
-                create=False,
-            )
+            self._shared_memory = _ReadOnlySharedMemoryMapping(shared_memory_name)
         except FileNotFoundError as exc:
             raise RuntimeError(
                 f"ai-toolkit shared-memory segment {shared_memory_name!r} not found"
             ) from exc
-        self._shared_memory_view = memoryview(self._shared_memory.buf)
+        self._shared_memory_view = self._shared_memory.buf
         self._shared_memory_identity = self._segment_identity()
         self._closed = False
         logger.info(
@@ -365,7 +448,7 @@ class SageMakerHyperPodClient:
             current_identity = self._segment_identity()
             shared_memory_current = not self._closed and (
                 current_identity == self._shared_memory_identity
-                if os.path.isdir("/dev/shm")
+                if os.path.isdir(_SHM_DIR)
                 else True
             )
         return {
@@ -381,7 +464,7 @@ class SageMakerHyperPodClient:
 
     def _segment_identity(self) -> tuple[int, int] | None:
         """Return the current Linux POSIX shared-memory device/inode identity."""
-        path = os.path.join("/dev/shm", self._shared_memory_name.lstrip("/"))
+        path = _shm_segment_path(self._shared_memory_name)
         try:
             stat = os.stat(path)
         except OSError:
@@ -401,17 +484,14 @@ class SageMakerHyperPodClient:
             return True
 
         try:
-            replacement = shared_memory.SharedMemory(
-                name=self._shared_memory_name,
-                create=False,
-            )
+            replacement = _ReadOnlySharedMemoryMapping(self._shared_memory_name)
         except FileNotFoundError:
             return False
 
         old_view = self._shared_memory_view
         old_shared_memory = self._shared_memory
         self._shared_memory = replacement
-        self._shared_memory_view = memoryview(replacement.buf)
+        self._shared_memory_view = replacement.buf
         self._shared_memory_identity = current_identity
         old_view.release()
         old_shared_memory.close()

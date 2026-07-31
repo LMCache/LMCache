@@ -722,6 +722,8 @@ def is_layer_list(engine_kv_format: EngineKVFormat) -> bool:
         int(EngineKVFormat.NL_X_NB_TWO_NH_BS_HS),
         int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
         int(EngineKVFormat.NL_X_NB_BS_NH_TWO_HS),
+        int(EngineKVFormat.NL_X_NB_NH_BS_CS),
+        int(EngineKVFormat.NL_X_NB_BS_NH_CS),
     )
 
 
@@ -757,6 +759,8 @@ def _is_fused_kv_format(engine_kv_format: EngineKVFormat) -> bool:
     return int(engine_kv_format) in (
         int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
         int(EngineKVFormat.NL_X_NB_BS_NH_TWO_HS),
+        int(EngineKVFormat.NL_X_NB_NH_BS_CS),
+        int(EngineKVFormat.NL_X_NB_BS_NH_CS),
     )
 
 
@@ -815,11 +819,17 @@ def _per_layer_paged_shape(
         return (2, nb, nh, bs, hs)
     if fmt == int(EngineKVFormat.NL_X_NB_TWO_NH_BS_HS):
         return (nb, 2, nh, bs, hs)
-    if fmt == int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS):
+    if fmt in (
+        int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
+        int(EngineKVFormat.NL_X_NB_NH_BS_CS),
+    ):
         # Blocks-first fused KV (HND): the desc's hs is the packed
         # 2 * head_size, so each layer is the raw [NB, NH, BS, 2 * HS].
         return (nb, nh, bs, hs)
-    if fmt == int(EngineKVFormat.NL_X_NB_BS_NH_TWO_HS):
+    if fmt in (
+        int(EngineKVFormat.NL_X_NB_BS_NH_TWO_HS),
+        int(EngineKVFormat.NL_X_NB_BS_NH_CS),
+    ):
         # Blocks-first fused KV (NHD): tokens before heads.
         return (nb, bs, nh, hs)
     if fmt == int(EngineKVFormat.NL_X_TWO_NB_BS_NH_HS):
@@ -1643,7 +1653,10 @@ def _transfer_per_layer_fused(
         layer.reshape(*layer.shape[:3], -1) if layer.dim() == 5 else layer
         for layer in layer_tensors
     ]
-    is_hnd = int(engine_kv_format) == int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS)
+    is_hnd = int(engine_kv_format) in (
+        int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
+        int(EngineKVFormat.NL_X_NB_NH_BS_CS),
+    )
     first = layers[0]
     if is_hnd:
         _nb0, nh0, _bs0, hs0 = first.shape

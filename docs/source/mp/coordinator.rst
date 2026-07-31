@@ -145,13 +145,15 @@ Kubernetes downward API); an explicit flag wins over the env var.
      - ``LMCACHE_COORDINATOR_HEARTBEAT_INTERVAL``
      - Seconds between heartbeats (must be ``> 0``, default ``5``). Keep it well
        below the coordinator's ``INSTANCE_TIMEOUT``.
-   * - ``--coordinator-l2-event-reporting``
-     - ``LMCACHE_COORDINATOR_L2_EVENT_REPORTING``
-     - Enable reporting L2 store/lookup events to the coordinator for
-       fleet-wide usage tracking and quota-based eviction.
-   * - ``--coordinator-l2-event-flush-interval``
-     - ``LMCACHE_COORDINATOR_L2_EVENT_FLUSH_INTERVAL``
-     - Seconds between L2 event batch flushes (must be ``> 0``, default ``1``).
+   * - ``--coordinator-event-reporting``
+     - ``LMCACHE_COORDINATOR_EVENT_REPORTING``
+     - Enable reporting cache events to the coordinator: the key
+       directory's store/access/delete stream (fleet-wide placement
+       tracking) and the L2 usage stream (quota tracking and eviction).
+   * - ``--coordinator-event-flush-interval``
+     - ``LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL``
+     - Seconds between cache-event batch flushes (must be ``> 0``, default
+       ``1``).
 
 The server registers under its stable identity (``--instance-id`` / OTel
 ``service.instance.id``); if the flag is not passed, the server mints a
@@ -403,7 +405,7 @@ cycle):
         -H 'Content-Type: application/json' -d '{"default_limit_gb": 0}'
     # -> {"default_limit_gb": 0.0}
 
-When MP servers enable ``--coordinator-l2-event-reporting``, they stream L2
+When MP servers enable ``--coordinator-event-reporting``, they stream L2
 ``store``, ``lookup``, and ``delete`` events to the coordinator, which aggregates
 per-``cache_salt`` usage, enforces quotas, and selects LRU keys to evict. Each
 batch carries the server's ``instance_id`` and a monotonically increasing
@@ -902,9 +904,9 @@ of L2 keys pinned (chunks times the per-rank fan-out).
 
 .. note::
 
-   **Requires L2 event reporting.** The coordinator can only exclude keys from
+   **Requires event reporting.** The coordinator can only exclude keys from
    eviction for a salt it is tracking, which requires the MP servers started with
-   ``--coordinator-l2-event-reporting`` (see `Connecting MP servers`_).
+   ``--coordinator-event-reporting`` (see `Connecting MP servers`_).
 
 ``DELETE /cache/pins``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
