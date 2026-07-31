@@ -82,8 +82,22 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         Args:
             init_size (int): Initial size of the memory allocation in bytes.
             final_size (int): Final size of the memory allocation in bytes.
-            align_bytes (int, optional): Alignment in for the underlying allocations
+            align_bytes (int, optional): Alignment for the underlying allocations.
+                Must be a positive power of two. The buffer's base address is
+                aligned to this value, not merely the offsets within it, because
+                consumers reached via ``get_l1_memory_desc()`` rely on the
+                absolute alignment of the pointers they receive.
+
+        Raises:
+            ValueError: If ``align_bytes`` is not a positive power of two.
+            RuntimeError: If the platform does not support memory pinning, or if
+                the allocated buffer could not be aligned to ``align_bytes``.
         """
+        # Same requirement, and same wording, as DevDaxMemoryAllocator: the
+        # base-alignment arithmetic below assumes a positive power of two.
+        if align_bytes <= 0 or align_bytes & (align_bytes - 1) != 0:
+            raise ValueError("align_bytes must be a positive power of two")
+
         # Whether using NUMA allocation
         self._use_numa = numa_mapping is not None
         # Currently pinned size, only accessed by the expansion thread
@@ -109,8 +123,42 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
             buf = arr_type.from_address(ptr)
             self._buffer = torch.frombuffer(buf, dtype=torch.uint8)
         else:
-            self._buffer = torch.empty(
-                self._final_size, dtype=torch.uint8, device="cpu", pin_memory=False
+            # torch.empty() guarantees only 64-byte alignment (c10::alloc_cpu
+            # calls posix_memalign(&p, 64, n)), but TensorMemoryAllocator hands
+            # out objects at `base + k * align_bytes`, so what every consumer
+            # actually observes is the alignment of this base.  Over-allocate
+            # and slice to an aligned offset, the same technique as
+            # _alloc_page_aligned_pinned_view in lmcache/v1/platform/torch_ops.py.
+            #
+            # This matters because get_l1_memory_desc() advertises align_bytes
+            # to consumers that require it for correctness, not just speed:
+            # O_DIRECT rejects an unaligned buffer address with EINVAL, and
+            # cudaHostRegister (used by _pin_memory_chunk below, which derives
+            # its pointer from this buffer) wants page alignment too.  Without
+            # this, a 4096-byte promise was delivered as a 64-byte-aligned
+            # pointer and the promise silently did not hold.
+            backing = torch.empty(
+                self._final_size + align_bytes - 1,
+                dtype=torch.uint8,
+                device="cpu",
+                pin_memory=False,
+            )
+            # Distance from the backing pointer to the next aligned boundary.
+            offset = (-backing.data_ptr()) % align_bytes
+            # The slice shares storage with `backing`, so holding the slice keeps
+            # the allocation alive; no separate reference is needed.
+            self._buffer = backing[offset : offset + self._final_size]
+
+        # The alignment contract is load-bearing for O_DIRECT and for RDMA/GDS
+        # consumers, and a violation is otherwise invisible until a transfer
+        # fails, so check it here rather than letting it surface as EINVAL.
+        base_ptr = self._buffer.data_ptr()
+        if base_ptr % align_bytes != 0:
+            raise RuntimeError(
+                f"LazyMemoryAllocator buffer base {base_ptr:#x} is not aligned to "
+                f"align_bytes={align_bytes} (remainder "
+                f"{base_ptr % align_bytes}). Consumers that require this "
+                f"alignment, such as O_DIRECT file I/O, would fail with EINVAL."
             )
 
         # Pin the first `curr_size` bytes (aligned to the internal chunk size)
