@@ -43,6 +43,7 @@ class Session:
     lookup_ipc_key: Optional[IPCCacheServerKey] = None
     extras: dict[str, Any] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _resource_owners: set[int] = field(default_factory=set, repr=False)
 
     def set_tokens(self, full_token_ids: list[int]) -> None:
         """Update the token sequence (idempotent, replaces not extends).
@@ -52,6 +53,73 @@ class Session:
         """
         with self._lock:
             self.token_ids = full_token_ids
+
+    def retain_resources(
+        self,
+        resource_key: str,
+        resources: list[Any],
+        *,
+        owner_id: int | None = None,
+    ) -> None:
+        """Keep request-scoped resources alive until the session is removed.
+
+        Args:
+            resource_key: Namespace used to group related resources.
+            resources: Strong references to append to that namespace.
+            owner_id: Optional rank-local owner. Sessions with owners are
+                removed only after one END_SESSION call per distinct owner.
+
+        Raises:
+            TypeError: If ``resource_key`` is already used for non-list data.
+        """
+        if not resources:
+            return
+        with self._lock:
+            retained = self.extras.setdefault(resource_key, [])
+            if not isinstance(retained, list):
+                raise TypeError(
+                    f"Session extra {resource_key!r} is not a resource list"
+                )
+            retained.extend(resources)
+            if owner_id is not None:
+                self._resource_owners.add(owner_id)
+
+    def release_one_resource_owner(self) -> bool:
+        """Consume one rank's END_SESSION and report whether owners remain.
+
+        Returns:
+            ``True`` when at least one retained-resource owner still needs to
+            end the shared session. ``False`` when the session can be removed.
+        """
+        with self._lock:
+            if not self._resource_owners:
+                return False
+            self._resource_owners.pop()
+            return bool(self._resource_owners)
+
+    def get_retained_resources(self, resource_key: str) -> list[Any]:
+        """Return a stable snapshot of one retained-resource namespace."""
+        with self._lock:
+            retained = self.extras.get(resource_key, [])
+            if not isinstance(retained, list):
+                raise TypeError(
+                    f"Session extra {resource_key!r} is not a resource list"
+                )
+            return list(retained)
+
+    def get_retained_resources_by_prefix(self, resource_prefix: str) -> list[Any]:
+        """Return retained resources from matching namespaces."""
+        resources: list[Any] = []
+        with self._lock:
+            for resource_key, retained in self.extras.items():
+                if not resource_key.startswith(resource_prefix):
+                    continue
+                if not isinstance(retained, list):
+                    raise TypeError(
+                        f"Session extra {resource_key!r} is not a resource list"
+                    )
+                resources.extend(retained)
+        return resources
 
     @overload
     def get_hashes(self, start: int, end: int) -> list: ...
@@ -179,6 +247,44 @@ class SessionManager:
                 logger.debug("Removed session for request_id=%s", request_id)
                 return session
             return None
+
+    def get(self, request_id: str) -> Optional[Session]:
+        """Return an active session without creating it."""
+        with self._lock:
+            return self._sessions.get(request_id)
+
+    def sessions_snapshot(self) -> list[Session]:
+        """Return strong references to every currently active session."""
+        with self._lock:
+            return list(self._sessions.values())
+
+    def release_for_end_session(
+        self,
+        request_id: str,
+    ) -> tuple[Optional[Session], bool]:
+        """Release one END_SESSION participant atomically.
+
+        A fused TP request stores exporter events from every worker in one
+        request-id Session. The first workers to finish must not remove that
+        shared owner. Ordinary sessions have no resource-owner count and retain
+        the historical remove-on-first-END behavior.
+
+        Args:
+            request_id: Unique request identifier.
+
+        Returns:
+            ``(removed_session, waiting_for_more_owners)``. While the second
+            value is ``True``, the session and its resources remain managed.
+        """
+        with self._lock:
+            session = self._sessions.get(request_id)
+            if session is None:
+                return None, False
+            if session.release_one_resource_owner():
+                return None, True
+            del self._sessions[request_id]
+            logger.debug("Removed session for request_id=%s", request_id)
+            return session, False
 
     def cleanup_expired(self) -> int:
         """Remove sessions that have exceeded their TTL.

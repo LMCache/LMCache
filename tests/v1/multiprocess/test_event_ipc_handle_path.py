@@ -84,6 +84,9 @@ class _FakeStorageManager:
     def finish_read_prefetched(self, keys: list[object]) -> None:
         return None
 
+    def finish_raw_block_restore(self, keys: list[object]) -> None:
+        return None
+
     def reserve_write(
         self,
         keys: list[object],

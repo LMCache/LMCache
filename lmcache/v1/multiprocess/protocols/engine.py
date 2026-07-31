@@ -27,6 +27,8 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
 
+FUSED_RAW_BLOCK_RETRIEVE_CAPABILITY = "lmcache.fused_raw_block_restore.v1"
+
 
 @dataclass
 class PrepareStoreResponse:
@@ -65,6 +67,8 @@ REQUEST_NAMES = [
     "STORE_Q",
     "STORE",
     "RETRIEVE",
+    "FUSED_RAW_BLOCK_RETRIEVE",
+    "FUSED_RAW_BLOCK_DRAIN",
     "LOOKUP",
     "QUERY_PREFETCH_STATUS",
     "WAIT_PREFETCH_STATUS",
@@ -185,6 +189,22 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         "RETRIEVE": ProtocolDefinition(
             payload_classes=[KeyType, int, list[list[int]], bytes, int],
             response_class=tuple[bytes, bool],
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Load a contiguous raw-block prefix and restore it into GPU KV.
+        # This request is sent only after GET_EXPERIMENTAL advertises the
+        # exact paired protocol capability above.
+        # Returns: tuple[final event handle, (retrieved tokens, success)]
+        "FUSED_RAW_BLOCK_RETRIEVE": ProtocolDefinition(
+            payload_classes=[KeyType, int, list[list[int]], bytes, int],
+            response_class=tuple[bytes, tuple[int, bool]],
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Synchronize a rank's retained final event when the fused response
+        # could not deliver/import its IPC handle.
+        "FUSED_RAW_BLOCK_DRAIN": ProtocolDefinition(
+            payload_classes=[str, int],
+            response_class=bool,
             handler_type=HandlerType.BLOCKING,
         ),
         # Submit a prefix lookup; job is tracked server-side by request_id

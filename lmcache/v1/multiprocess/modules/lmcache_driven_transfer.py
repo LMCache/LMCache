@@ -2,7 +2,7 @@
 """LMCache-driven KV cache transfer operations for the MPCacheServer."""
 
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import islice
 from typing import Generator, Sequence
 import threading
@@ -59,6 +59,44 @@ logger = init_logger(__name__)
 _HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = hasattr(
     lmc_ops, "execute_object_group_transfer"
 )
+_FUSED_EVENT_SESSION_RESOURCE_KEY = "fused_raw_block_export_events"
+
+
+@dataclass(frozen=True)
+class _FusedDrainEvent:
+    """Server-side final event retained for a rank-specific drain RPC."""
+
+    backend: EventIPCBackend
+    event: object
+    device: object
+
+
+@dataclass
+class _FusedDrainState:
+    """Request state retained before a fused handler can enqueue writes."""
+
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    final_event: _FusedDrainEvent | None = None
+    terminal_safe: bool = False
+
+    def publish_final(self, final_event: _FusedDrainEvent) -> None:
+        """Publish the recorded final event for a later drain request."""
+        with self._lock:
+            self.final_event = final_event
+
+    def mark_terminal_safe(self) -> None:
+        """Record that the handler fenced any writes without an IPC event."""
+        with self._lock:
+            self.terminal_safe = True
+
+    def snapshot(self) -> tuple[_FusedDrainEvent | None, bool]:
+        """Return the final event and terminal-safety flag atomically."""
+        with self._lock:
+            return self.final_event, self.terminal_safe
+
+
+def _fused_event_session_resource_key(worker_id: int) -> str:
+    return f"{_FUSED_EVENT_SESSION_RESOURCE_KEY}.{worker_id}"
 
 
 def get_layout_desc(
@@ -576,6 +614,67 @@ def transfer_kv_per_object_group(
                 )
 
 
+def _launch_staged_h2d_batch(
+    cache_context: BaseCacheContext,
+    block_ids_gpu: list[torch.Tensor],
+    *,
+    object_group_id: int,
+    batch_len: int,
+    skip_first_n_tokens: int,
+) -> None:
+    """Launch paged KV copies for buffers whose H2D staging is already queued."""
+    if batch_len <= 0:
+        return
+    lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
+    batch_end_token = batch_len * lmcache_chunk_size
+    if skip_first_n_tokens >= batch_end_token:
+        return
+
+    kv_groups_manager = cache_context.kv_layer_groups_manager
+    object_group = kv_groups_manager.object_groups[object_group_id]
+    skip_tokens = max(skip_first_n_tokens, 0)
+    for kernel_group_id in object_group.kernel_group_indices:
+        blocks_per_chunk = cache_context.calculate_num_blocks(
+            lmcache_chunk_size,
+            kernel_group_id,
+        )
+        tokens_per_window = min(
+            lmcache_chunk_size,
+            kv_groups_manager.get_subchunk_sw_size_tokens(kernel_group_id),
+        )
+        blocks_per_window = cache_context.calculate_num_blocks(
+            tokens_per_window,
+            kernel_group_id,
+        )
+        block_count = batch_len * blocks_per_window
+        orig_skip_blocks = cache_context.calculate_num_blocks(
+            skip_tokens,
+            kernel_group_id,
+        )
+        recalculated_skip_blocks = _recalculate_blocks_to_skip(
+            blocks_per_chunk,
+            blocks_per_window,
+            orig_skip_blocks,
+        )
+        lmc_ops.multi_layer_block_kv_transfer(
+            cache_context.get_kernel_group_kv_pointers(kernel_group_id),
+            [
+                cache_context.get_temp_kernel_group_buffer(
+                    slot,
+                    kernel_group_id,
+                ).data_ptr()
+                for slot in range(batch_len)
+            ],
+            block_ids_gpu[kernel_group_id].narrow(0, 0, block_count),
+            cache_context.device,
+            lmc_ops.TransferDirection.H2D,
+            cache_context.get_shape_desc(kernel_group_id),
+            cache_context.get_slots_per_chunk_in_sw(kernel_group_id),
+            cache_context.get_engine_kv_format(kernel_group_id),
+            recalculated_skip_blocks,
+        )
+
+
 @dataclass
 class ContextEntry:
     """Registered cache context metadata for a single worker instance.
@@ -618,8 +717,14 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         ctx: The shared engine context.
     """
 
-    def __init__(self, ctx: MPCacheServerContext) -> None:
+    def __init__(
+        self,
+        ctx: MPCacheServerContext,
+        affinity_worker_count: int | None = None,
+    ) -> None:
         self._ctx = ctx
+        self._affinity_worker_count = affinity_worker_count
+        self._warned_affinity_world_sizes: set[int] = set()
         self._cache_contexts: dict[int, ContextEntry] = {}
         # Guards all reads/writes of _cache_contexts. The reaper mutates it
         # off the MQ main loop, so register/unregister/store/retrieve and
@@ -627,6 +732,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         # ops -- never across context creation, layout-registry calls, or
         # empty_cache (leaf-lock invariant: no thread holds two locks).
         self._lock = threading.Lock()
+        self._fused_counter_lock = threading.Lock()
+        self._fused_success_count = 0
+        self._fused_pipelined_count = 0
+        self._fused_staged_fallback_count = 0
+        self._fused_failure_count = 0
 
         # Route finish_write / finish_read_prefetched through a C++ host
         # callback so the driver thread doesn't acquire the GIL.
@@ -639,6 +749,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         self._device_host_func_dispatcher.register(
             "finish_read_prefetched",
             self._ctx.storage_manager.finish_read_prefetched,
+            payload_type=list[ObjectKey],
+        )
+        self._device_host_func_dispatcher.register(
+            "finish_raw_block_restore",
+            self._ctx.storage_manager.finish_raw_block_restore,
             payload_type=list[ObjectKey],
         )
         self._device_host_func_dispatcher.start()
@@ -797,6 +912,19 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 self.retrieve,
                 ThreadPoolType.AFFINITY,
             ),
+            HandlerSpec(
+                RequestType.FUSED_RAW_BLOCK_RETRIEVE,
+                self.fused_raw_block_retrieve,
+                ThreadPoolType.AFFINITY,
+            ),
+            HandlerSpec(
+                RequestType.FUSED_RAW_BLOCK_DRAIN,
+                self.fused_raw_block_drain,
+                # The same client identity routes this behind its fused
+                # retrieve on one FIFO affinity queue. The final event is
+                # therefore retained before this handler can inspect it.
+                ThreadPoolType.AFFINITY,
+            ),
         ]
 
     def report_status(self) -> dict:
@@ -818,21 +946,77 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 "kv_cache_layout": ctx.report_status(),
             }
 
+        with self._fused_counter_lock:
+            fused_status = {
+                "success_count": self._fused_success_count,
+                "pipelined_count": self._fused_pipelined_count,
+                "staged_fallback_count": self._fused_staged_fallback_count,
+                "failure_count": self._fused_failure_count,
+            }
+        affinity_worker_count = getattr(
+            self,
+            "_affinity_worker_count",
+            None,
+        )
+        max_registered_world_size = max(
+            (entry.world_size for entry in self.context_entries_snapshot().values()),
+            default=0,
+        )
         return {
             "registered_gpu_ids": registered_gpu_ids,
             "cache_context_meta": cache_context_meta,
+            "fused_raw_block_retrieve": fused_status,
+            "affinity_pool": {
+                "worker_count": affinity_worker_count,
+                "max_registered_world_size": max_registered_world_size,
+                "undersubscribed": (
+                    affinity_worker_count is not None
+                    and max_registered_world_size > affinity_worker_count
+                ),
+            },
         }
 
     def close(self) -> None:
         """Release GPU resources owned by this module."""
-        # Stop the drain thread before storage_manager.close() so any
-        # in-flight completions reach a live storage manager.
+        with self._lock:
+            entries = list(self._cache_contexts.values())
+
+        # A fused response can outlive its handler while H2D work and the
+        # stream-ordered L1 cleanup remain pending. Fence retained final events,
+        # then each context stream, before stopping the dispatcher. Its final
+        # drain therefore observes every cleanup callback before StorageManager
+        # releases the registered L1 arena.
+        self._synchronize_retained_fused_events()
+        for entry in entries:
+            entry.cache_context.stream.synchronize()
         self._device_host_func_dispatcher.stop()
 
         with self._lock:
-            entries = list(self._cache_contexts.values())
             self._cache_contexts.clear()
         self._release_entries(entries)
+
+    def _synchronize_retained_fused_events(self) -> None:
+        """Fence fused final events still owned by active sessions."""
+        sessions = self._ctx.session_manager.sessions_snapshot()
+        for session in sessions:
+            resources = session.get_retained_resources_by_prefix(
+                f"{_FUSED_EVENT_SESSION_RESOURCE_KEY}."
+            )
+            for resource in resources:
+                if not isinstance(resource, _FusedDrainState):
+                    continue
+                drain_event, terminal_safe = resource.snapshot()
+                if drain_event is None:
+                    if not terminal_safe:
+                        raise RuntimeError(
+                            "Cannot close with an unfenced fused raw-block restore"
+                        )
+                    continue
+                with torch_dev.device(drain_event.device):
+                    drain_event.backend.synchronize_event(
+                        drain_event.event,
+                        drain_event.device,
+                    )
 
     def register_kv_cache(
         self,
@@ -903,6 +1087,22 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 last_seen=now,
                 has_liveness_signal=False,
                 event_backend=event_backend,
+            )
+
+        affinity_worker_count = getattr(self, "_affinity_worker_count", None)
+        if (
+            affinity_worker_count is not None
+            and world_size > affinity_worker_count
+            and world_size not in getattr(self, "_warned_affinity_world_sizes", set())
+        ):
+            self._warned_affinity_world_sizes.add(world_size)
+            logger.warning(
+                "Registered TP world_size=%d with only %d GPU affinity "
+                "workers; fused rank transfers will serialize. Start the "
+                "daemon with --max-gpu-workers=%d for rank-parallel reads.",
+                world_size,
+                affinity_worker_count,
+                world_size,
             )
 
         logger.info(
@@ -1145,6 +1345,430 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         )
 
     @_lmcache_nvtx_annotate
+    def fused_raw_block_drain(self, request_id: str, worker_id: int) -> bool:
+        """Synchronize retained final events for one fused TP worker."""
+        session = self._ctx.session_manager.get(request_id)
+        if session is None:
+            return False
+        resources = session.get_retained_resources(
+            _fused_event_session_resource_key(worker_id)
+        )
+        drain_states = [
+            resource for resource in resources if isinstance(resource, _FusedDrainState)
+        ]
+        if not drain_states:
+            return False
+        for drain_state in drain_states:
+            drain_event, terminal_safe = drain_state.snapshot()
+            if drain_event is None:
+                if not terminal_safe:
+                    return False
+                continue
+            with torch_dev.device(drain_event.device):
+                drain_event.backend.synchronize_event(
+                    drain_event.event,
+                    drain_event.device,
+                )
+        return True
+
+    @_lmcache_nvtx_annotate
+    def fused_raw_block_retrieve(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        gpu_block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+        skip_first_n_tokens: int = 0,
+    ) -> tuple[bytes, tuple[int, bool]]:
+        """Load a raw-block prefix and restore it directly into engine KV.
+
+        This SGLang MP path replaces the asynchronous L2-prefetch round trip
+        with one synchronous raw-block load into temporary L1 objects. It
+        submits every direct-I/O read before waiting, overlaps completed reads
+        with host-to-device staging, then launches the existing all-layer KV
+        transfer kernel.
+
+        Args:
+            key: Worker-specific key and chunk-aligned token range.
+            instance_id: Registered engine KV-cache instance.
+            gpu_block_ids: Destination block IDs indexed by engine group.
+            event_ipc_handle: Producer event that orders destination writes.
+            skip_first_n_tokens: Leading APC-shared tokens not to overwrite.
+
+        Returns:
+            A final completion-event handle and
+            ``(retrieved_tokens, success)``. A clean cache miss returns
+            ``(0, True)``.
+
+        Raises:
+            ValueError: If the registered instance no longer exists.
+            RuntimeError: If its event backend is unavailable.
+        """
+        if key.worker_id is None:
+            raise ValueError("Fused raw-block retrieve requires a worker ID")
+
+        # Establish the rank-specific drain state before fallible preflight or
+        # stream work. Both
+        # this request and FUSED_RAW_BLOCK_DRAIN use the same client-identity
+        # affinity FIFO, so the drain handler observes this state only after
+        # this handler has either published a recorded final event or fenced
+        # the stream and marked the state terminal-safe.
+        drain_state = _FusedDrainState()
+        self._ctx.session_manager.get_or_create(key.request_id).retain_resources(
+            _fused_event_session_resource_key(key.worker_id),
+            [drain_state],
+            owner_id=key.worker_id,
+        )
+        try:
+            entry = self.get_and_touch_context_entry(instance_id)
+            if entry is None:
+                raise ValueError(
+                    f"No GPU context registered for instance ID {instance_id}"
+                )
+            cache_context = entry.cache_context
+            event_backend = entry.event_backend
+            if event_backend is None:
+                raise RuntimeError("Registered cache context has no event backend")
+        except Exception:
+            # No device work can precede this point. Publishing terminal safety
+            # lets a same-affinity drain prove that destination slots are idle
+            # even though the failed handler cannot return a final event.
+            drain_state.mark_terminal_safe()
+            raise
+
+        restored_keys: list[ObjectKey] = []
+        retrieved_tokens = 0
+        retrieve_succeeded = False
+        total_bytes = 0
+        used_pipelined_staging = False
+        used_staged_fallback = False
+        final_event: object | None = None
+        final_recorded = False
+        cleanup_callback_submitted = False
+
+        try:
+            self._ctx.event_bus.publish(
+                Event(
+                    event_type=EventType.MP_RETRIEVE_SUBMITTED,
+                    session_id=key.request_id,
+                    metadata={"device": str(cache_context.device)},
+                )
+            )
+
+            with (
+                torch_dev.device(cache_context.device),
+                torch_dev.stream(cache_context.stream),
+            ):
+                final_event = event_backend.create_event(cache_context.device)
+                self._ctx.event_bus.publish_on_stream(
+                    cache_context.cupy_stream,
+                    Event(
+                        event_type=EventType.MP_RETRIEVE_START,
+                        session_id=key.request_id,
+                        metadata={
+                            "device": str(cache_context.device),
+                            "engine_id": instance_id,
+                            "model_name": entry.model_name,
+                        },
+                    ),
+                )
+                try:
+                    producer_event = event_backend.import_event(
+                        event_ipc_handle, cache_context.device
+                    )
+                    event_backend.wait_event(producer_event, cache_context.stream)
+
+                    if (
+                        key.start < 0
+                        or key.end <= key.start
+                        or key.end > len(key.token_ids)
+                        or key.start % self._ctx.chunk_size != 0
+                        or key.end % self._ctx.chunk_size != 0
+                    ):
+                        raise ValueError(
+                            "Invalid fused raw-block range "
+                            f"[{key.start}, {key.end}) for "
+                            f"{len(key.token_ids)} tokens"
+                        )
+                    if skip_first_n_tokens < 0:
+                        raise ValueError(
+                            "skip_first_n_tokens must be non-negative, got "
+                            f"{skip_first_n_tokens}"
+                        )
+
+                    groups = cache_context.kv_layer_groups_manager
+                    if groups.num_object_groups != 1 or groups.num_kernel_groups != 1:
+                        raise ValueError(
+                            "Fused raw-block retrieve requires one object and "
+                            "kernel group"
+                        )
+
+                    obj_keys = self._ctx.resolve_obj_keys(key, [0])[0]
+                    blocks_per_chunk = cache_context.calculate_num_blocks(
+                        self._ctx.chunk_size,
+                        0,
+                    )
+                    pipelined_block_ids_gpu: list[torch.Tensor] | None = None
+                    staged_window_start = 0
+                    staged_window_objects: list[MemoryObj] = []
+                    if obj_keys:
+                        candidate_required_blocks = len(obj_keys) * blocks_per_chunk
+                        if len(gpu_block_ids) != 1:
+                            raise ValueError(
+                                "Fused raw-block retrieve requires one block-ID group"
+                            )
+                        if len(gpu_block_ids[0]) < candidate_required_blocks:
+                            raise ValueError(
+                                "Fused raw-block retrieve needs "
+                                f"{candidate_required_blocks} candidate block "
+                                f"IDs, got {len(gpu_block_ids[0])}"
+                            )
+                        pipelined_block_ids_gpu = downsample_and_stage_block_ids(
+                            cache_context,
+                            [gpu_block_ids[0][:candidate_required_blocks]],
+                        )
+
+                    def flush_staged_window() -> None:
+                        nonlocal staged_window_start
+                        if not staged_window_objects:
+                            return
+                        assert pipelined_block_ids_gpu is not None
+                        batch_len = len(staged_window_objects)
+                        block_begin = staged_window_start * blocks_per_chunk
+                        block_count = batch_len * blocks_per_chunk
+                        batch_skip_tokens = min(
+                            max(
+                                skip_first_n_tokens
+                                - staged_window_start * self._ctx.chunk_size,
+                                0,
+                            ),
+                            batch_len * self._ctx.chunk_size,
+                        )
+                        _launch_staged_h2d_batch(
+                            cache_context,
+                            [
+                                pipelined_block_ids_gpu[0].narrow(
+                                    0,
+                                    block_begin,
+                                    block_count,
+                                )
+                            ],
+                            object_group_id=0,
+                            batch_len=batch_len,
+                            skip_first_n_tokens=batch_skip_tokens,
+                        )
+                        staged_window_start += batch_len
+                        staged_window_objects.clear()
+
+                    def enqueue_loaded_batch(
+                        start: int,
+                        end: int,
+                        batch_keys: list[ObjectKey],
+                        batch_objects: list[MemoryObj],
+                    ) -> None:
+                        nonlocal staged_window_start
+                        assert pipelined_block_ids_gpu is not None
+                        # Take ownership before CUDA enqueue can fail. The
+                        # final event then fences both successful and partial
+                        # batch writes before these objects are reclaimed.
+                        restored_keys.extend(batch_keys)
+                        if not staged_window_objects:
+                            staged_window_start = start
+                        for object_index, memory_obj in enumerate(
+                            batch_objects,
+                            start=start,
+                        ):
+                            object_skip_tokens = min(
+                                max(
+                                    skip_first_n_tokens
+                                    - object_index * self._ctx.chunk_size,
+                                    0,
+                                ),
+                                self._ctx.chunk_size,
+                            )
+                            if object_skip_tokens < self._ctx.chunk_size:
+                                lmcache_memcpy_async_h2d(
+                                    memory_obj,
+                                    cache_context.get_temp_object_group_buffer(
+                                        len(staged_window_objects),
+                                        0,
+                                    ),
+                                )
+                            staged_window_objects.append(memory_obj)
+                            if (
+                                len(staged_window_objects)
+                                == cache_context.max_batch_size
+                            ):
+                                flush_staged_window()
+
+                    loaded = self._ctx.storage_manager.load_raw_block_prefix(
+                        obj_keys,
+                        get_layout_desc(
+                            cache_context,
+                            object_group_id=0,
+                            num_tokens=self._ctx.chunk_size,
+                        ),
+                        completion_batch_size=(
+                            1 if pipelined_block_ids_gpu is not None else None
+                        ),
+                        on_batch_loaded=(
+                            enqueue_loaded_batch
+                            if pipelined_block_ids_gpu is not None
+                            else None
+                        ),
+                    )
+                    if loaded is None:
+                        # Capability discovery is cached while L2 adapters can
+                        # be deleted at runtime. No raw load means no writes.
+                        loaded = ([], [])
+
+                    loaded_keys, memory_objs = loaded
+                    loaded_keys = list(loaded_keys)
+                    memory_objs = list(memory_objs)
+                    if (
+                        len(loaded_keys) != len(memory_objs)
+                        or len(loaded_keys) > len(obj_keys)
+                        or loaded_keys != obj_keys[: len(loaded_keys)]
+                    ):
+                        raise RuntimeError(
+                            "Raw-block restore returned a non-prefix result"
+                        )
+                    pipeline_applied = bool(restored_keys)
+                    if pipeline_applied and restored_keys != loaded_keys:
+                        raise RuntimeError(
+                            "Pipelined raw-block handoff differs from the loaded prefix"
+                        )
+                    restored_keys = loaded_keys
+
+                    if not restored_keys:
+                        retrieve_succeeded = True
+                    else:
+                        required_blocks = len(restored_keys) * blocks_per_chunk
+                        if len(gpu_block_ids) != 1:
+                            raise ValueError(
+                                "Fused raw-block retrieve requires one block-ID group"
+                            )
+                        if len(gpu_block_ids[0]) < required_blocks:
+                            raise ValueError(
+                                "Fused raw-block retrieve needs "
+                                f"{required_blocks} block IDs, got "
+                                f"{len(gpu_block_ids[0])}"
+                            )
+
+                        if pipeline_applied:
+                            flush_staged_window()
+                            used_pipelined_staging = True
+                        else:
+                            assert pipelined_block_ids_gpu is not None
+                            block_ids_gpu = [
+                                pipelined_block_ids_gpu[0].narrow(
+                                    0,
+                                    0,
+                                    required_blocks,
+                                )
+                            ]
+                            transfer_kv_per_object_group(
+                                cache_context,
+                                block_ids_gpu,
+                                memory_objs,
+                                object_group_id=0,
+                                batch_size=cache_context.max_batch_size,
+                                skip_first_n_tokens=skip_first_n_tokens,
+                                direction=lmc_ops.TransferDirection.H2D,
+                            )
+                            used_staged_fallback = True
+
+                        retrieved_tokens = min(
+                            len(restored_keys) * self._ctx.chunk_size,
+                            key.end - key.start,
+                        )
+                        total_bytes = sum(
+                            memory_obj.get_size() for memory_obj in memory_objs
+                        )
+                        retrieve_succeeded = True
+                except Exception:
+                    logger.exception(
+                        "Cannot perform fused raw-block retrieve for request_id=%s",
+                        key.request_id,
+                    )
+                finally:
+                    event_backend.record_event(
+                        final_event,
+                        cache_context.stream,
+                    )
+                    final_recorded = True
+                    drain_state.publish_final(
+                        _FusedDrainEvent(
+                            backend=event_backend,
+                            event=final_event,
+                            device=cache_context.device,
+                        )
+                    )
+
+            final_event_handle = event_backend.export_event(
+                final_event, cache_context.device
+            )
+            self._ctx.event_bus.publish_on_stream(
+                cache_context.cupy_stream,
+                Event(
+                    event_type=EventType.MP_RETRIEVE_END,
+                    session_id=key.request_id,
+                    metadata={
+                        "retrieved_count": (
+                            len(restored_keys) if retrieve_succeeded else 0
+                        ),
+                        "device": str(cache_context.device),
+                        "engine_id": instance_id,
+                        "model_name": entry.model_name,
+                        "cache_salt": key.cache_salt,
+                        "total_bytes": total_bytes,
+                        "num_tokens": (retrieved_tokens if retrieve_succeeded else 0),
+                    },
+                ),
+            )
+            if restored_keys:
+                submit_callback_to_stream(
+                    cache_context.cupy_stream,
+                    "finish_raw_block_restore",
+                    restored_keys,
+                )
+                cleanup_callback_submitted = True
+
+            self._record_fused_result(
+                succeeded=retrieve_succeeded,
+                pipelined=used_pipelined_staging,
+                staged_fallback=used_staged_fallback,
+            )
+            return (
+                final_event_handle,
+                (retrieved_tokens, retrieve_succeeded),
+            )
+        except Exception:
+            # No response can safely authorize slot reuse. Fence every
+            # possible write and synchronously release temporary L1 objects if
+            # their callback was not successfully submitted.
+            if cleanup_callback_submitted:
+                cache_context.stream.synchronize()
+            elif final_recorded:
+                assert final_event is not None
+                event_backend.synchronize_event(
+                    final_event,
+                    cache_context.device,
+                )
+            elif final_event is not None:
+                cache_context.stream.synchronize()
+
+            if restored_keys and not cleanup_callback_submitted:
+                self._ctx.storage_manager.finish_raw_block_restore(restored_keys)
+            drain_state.mark_terminal_safe()
+            self._record_fused_result(
+                succeeded=False,
+                pipelined=used_pipelined_staging,
+                staged_fallback=used_staged_fallback,
+            )
+            raise
+
+    @_lmcache_nvtx_annotate
     def retrieve(
         self,
         key: IPCCacheServerKey,
@@ -1335,3 +1959,21 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             event_backend.export_event(event, cache_context.device),
             retrieve_succeeded,
         )
+
+    def _record_fused_result(
+        self,
+        *,
+        succeeded: bool,
+        pipelined: bool,
+        staged_fallback: bool,
+    ) -> None:
+        """Update cheap monotonic fused-path counters."""
+        with self._fused_counter_lock:
+            if succeeded:
+                self._fused_success_count += 1
+            else:
+                self._fused_failure_count += 1
+            if pipelined:
+                self._fused_pipelined_count += 1
+            if staged_fallback:
+                self._fused_staged_fallback_count += 1

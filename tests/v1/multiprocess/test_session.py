@@ -2,8 +2,10 @@
 """Tests for Session and SessionManager."""
 
 # Standard
+import gc
 import threading
 import time
+import weakref
 
 # Third Party
 import pytest
@@ -99,6 +101,44 @@ class TestSession:
         assert store_hashes == all_hashes[1:]
         assert session.num_chunks_processed == 3  # no extra computation
 
+    def test_retain_resources_holds_strong_references_until_session_drop(
+        self,
+        session_manager: SessionManager,
+    ) -> None:
+        """Exporter-side IPC resources live for the request session."""
+
+        class _Resource:
+            pass
+
+        session = session_manager.get_or_create("req-resource")
+        resource = _Resource()
+        resource_ref = weakref.ref(resource)
+        session.retain_resources("ipc_events", [resource])
+
+        del resource
+        gc.collect()
+        assert resource_ref() is not None
+
+        removed = session_manager.remove("req-resource")
+        assert removed is session
+        del removed
+        del session
+        gc.collect()
+        assert resource_ref() is None
+
+    def test_retained_resource_prefix_snapshot(self, session: Session) -> None:
+        first = object()
+        second = object()
+        unrelated = object()
+        session.retain_resources("fused_events.0", [first])
+        session.retain_resources("fused_events.1", [second])
+        session.retain_resources("other", [unrelated])
+
+        assert session.get_retained_resources_by_prefix("fused_events.") == [
+            first,
+            second,
+        ]
+
 
 class TestSessionManager:
     def test_get_or_create_new(self, session_manager: SessionManager) -> None:
@@ -115,6 +155,15 @@ class TestSessionManager:
         s2 = session_manager.get_or_create("req-2")
         assert s1 is not s2
 
+    def test_sessions_snapshot_keeps_active_sessions(
+        self,
+        session_manager: SessionManager,
+    ) -> None:
+        first = session_manager.get_or_create("req-1")
+        second = session_manager.get_or_create("req-2")
+
+        assert session_manager.sessions_snapshot() == [first, second]
+
     def test_remove(self, session_manager: SessionManager) -> None:
         session_manager.get_or_create("req-1")
         removed = session_manager.remove("req-1")
@@ -128,6 +177,51 @@ class TestSessionManager:
         """Removing a non-existent session should return None."""
         result = session_manager.remove("does-not-exist")
         assert result is None
+
+    def test_fused_tp_resources_release_only_after_every_rank_ends(
+        self,
+        session_manager: SessionManager,
+    ) -> None:
+        """The first of N TP END_SESSION calls keeps all exporters alive."""
+
+        class _ExporterEvent:
+            pass
+
+        session = session_manager.get_or_create("req-tp")
+        rank_0_event = _ExporterEvent()
+        rank_1_event = _ExporterEvent()
+        rank_0_ref = weakref.ref(rank_0_event)
+        rank_1_ref = weakref.ref(rank_1_event)
+        session.retain_resources(
+            "fused_events",
+            [rank_0_event],
+            owner_id=0,
+        )
+        session.retain_resources(
+            "fused_events",
+            [rank_1_event],
+            owner_id=1,
+        )
+        del rank_0_event
+        del rank_1_event
+
+        removed, waiting = session_manager.release_for_end_session("req-tp")
+        assert removed is None
+        assert waiting is True
+        assert session_manager.active_count() == 1
+        gc.collect()
+        assert rank_0_ref() is not None
+        assert rank_1_ref() is not None
+
+        removed, waiting = session_manager.release_for_end_session("req-tp")
+        assert removed is session
+        assert waiting is False
+        assert session_manager.active_count() == 0
+        del removed
+        del session
+        gc.collect()
+        assert rank_0_ref() is None
+        assert rank_1_ref() is None
 
     def test_cleanup_expired(self, session_manager: SessionManager) -> None:
         """Sessions older than TTL should be cleaned up."""

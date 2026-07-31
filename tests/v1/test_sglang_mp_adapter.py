@@ -41,6 +41,11 @@ def _make_connector(healthy: bool = True) -> LMCacheMPConnector:
         conn._health_event.set()
     conn._lmcache_chunk_size = _CHUNK_SIZE
     conn._mq_timeout = 5.0
+    conn._event_backend = _FakeEventBackend()
+    conn._daemon_session_ids = set()
+    conn._pending_lookups_lock = threading.Lock()
+    conn._fused_final_events = {}
+    conn._undrained_fused_requests = set()
     return conn
 
 
@@ -76,6 +81,9 @@ class _FakeRaw:
     def to_cuda_future(self, device=None) -> MessagingFuture:
         return self._future
 
+    def to_device_future(self, device=None) -> MessagingFuture:
+        return self._future
+
 
 class _FakeEvent:
     def __init__(self, interprocess: bool = False) -> None:
@@ -94,6 +102,17 @@ class _FakeTorchDev:
     @staticmethod
     def current_stream():
         return object()
+
+
+class _FakeEventBackend:
+    def create_event(self, device):
+        return _FakeEvent(interprocess=True)
+
+    def record_event(self, event, stream) -> None:
+        event.record(stream)
+
+    def export_event(self, event, device) -> bytes:
+        return event.ipc_handle()
 
 
 def test_completed_future_resolves_to_given_result() -> None:

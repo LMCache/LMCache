@@ -203,11 +203,21 @@ def _build_modules(
     # the InstanceLivenessTargets the reaper scans.
     transfer_modules: list[EngineModule] = []
     if mp_config.supported_transfer_mode == "lmcache_driven":
-        transfer_modules.append(LMCacheDrivenTransferModule(ctx))
+        transfer_modules.append(
+            LMCacheDrivenTransferModule(
+                ctx,
+                affinity_worker_count=mp_config.max_gpu_workers,
+            )
+        )
     elif mp_config.supported_transfer_mode == "engine_driven":
         transfer_modules.append(EngineDrivenTransferModule(ctx))
     elif mp_config.supported_transfer_mode == "auto":
-        transfer_modules.append(LMCacheDrivenTransferModule(ctx))
+        transfer_modules.append(
+            LMCacheDrivenTransferModule(
+                ctx,
+                affinity_worker_count=mp_config.max_gpu_workers,
+            )
+        )
         transfer_modules.append(EngineDrivenTransferModule(ctx))
     else:
         raise ValueError(

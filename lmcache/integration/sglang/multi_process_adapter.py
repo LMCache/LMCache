@@ -24,6 +24,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     DEFAULT_HEARTBEAT_INTERVAL,
     DEFAULT_MQ_TIMEOUT,
     HeartbeatThread,
+    get_experimental,
     get_lmcache_chunk_size,
     send_lmcache_request,
 )
@@ -37,6 +38,13 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.multiprocess.protocols.engine import (
+    FUSED_RAW_BLOCK_RETRIEVE_CAPABILITY,
+)
+from lmcache.v1.platform.base.event_ipc import (
+    EventIPCBackend,
+    get_event_ipc_backend,
+)
 from lmcache.v1.platform.cuda.ipc_wrapper import CudaIPCWrapper
 
 logger = init_logger(__name__)
@@ -44,6 +52,42 @@ logger = init_logger(__name__)
 # Extra seconds the WAIT_PREFETCH_STATUS response is allowed beyond the daemon's
 # own blocking-wait budget, to cover the request/response round trip.
 _WAIT_LOOKUP_RESPONSE_BUFFER_S = 5.0
+
+
+class CompletionEvent:
+    """Backend-neutral imported event retained by the SGLang connector.
+
+    Args:
+        event_backend: Backend that imported and owns ``event``.
+        event: Backend-native imported event.
+        device: Device that owns the event.
+    """
+
+    def __init__(
+        self,
+        event_backend: EventIPCBackend,
+        event: object,
+        device: object,
+    ) -> None:
+        self._event_backend = event_backend
+        self._event = event
+        self._device = device
+
+    def wait_on_stream(self, stream: object) -> None:
+        """Order ``stream`` after this completion event.
+
+        Args:
+            stream: Backend-native consumer stream.
+        """
+        self._event_backend.wait_event(self._event, stream)
+
+    def synchronize(self) -> None:
+        """Block the host until this completion event finishes."""
+        self._event_backend.synchronize_event(self._event, self._device)
+
+
+class FusedRestoreUndrainedError(RuntimeError):
+    """A fused restore may still be writing its destination KV slots."""
 
 
 def _wrap_sglang_kv_caches(
@@ -124,6 +168,8 @@ class LMCacheMPConnector:
       read-lock reservations.
     """
 
+    undrained_error_type = FusedRestoreUndrainedError
+
     def __init__(
         self,
         sgl_config: ModelConfig,
@@ -153,12 +199,37 @@ class LMCacheMPConnector:
         self._health_event = threading.Event()
         self._health_event.set()
         self._pending_lookups: dict[str, _PendingLookup] = {}
+        self._daemon_session_ids: set[str] = set()
         self._pending_lookups_lock = threading.Lock()
+        self._fused_final_events: dict[str, list[CompletionEvent]] = {}
+        self._undrained_fused_requests: set[str] = set()
 
         self.context = zmq.Context.instance()
         self.mq_client = MessageQueueClient(f"tcp://{host}:{port}", self.context)
 
         self._lmcache_chunk_size = get_lmcache_chunk_size(self.mq_client)
+        self._event_backend = get_event_ipc_backend(self.device)
+        self._event_backend.check_event_support(self.device)
+        try:
+            capabilities = get_experimental(
+                self.mq_client,
+                timeout=self._mq_timeout,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to query LMCache MP capabilities; using generic "
+                "LOOKUP/RETRIEVE",
+                exc_info=True,
+            )
+            capabilities = set()
+        local_supports_fused_raw_block_retrieve = (
+            FUSED_RAW_BLOCK_RETRIEVE_CAPABILITY in capabilities
+        )
+        self._supports_fused_raw_block_retrieve = (
+            self._agree_fused_raw_block_capability(
+                local_supports_fused_raw_block_retrieve
+            )
+        )
         if self._lmcache_chunk_size % self.page_size != 0:
             raise ValueError(
                 "LMCache chunk size must be a multiple of SGLang page size, got "
@@ -209,6 +280,27 @@ class LMCacheMPConnector:
     def chunk_size(self) -> int:
         return self._lmcache_chunk_size
 
+    def supports_fused_raw_block_retrieve(self) -> bool:
+        """Return whether the paired daemon advertised fused raw restore."""
+        return self._supports_fused_raw_block_retrieve
+
+    @torch.no_grad()
+    def _agree_fused_raw_block_capability(self, local_supported: bool) -> bool:
+        """Require every TP rank to select the same fused request sequence."""
+        if self.tp_size == 1:
+            return local_supported
+        supported = torch.tensor(
+            [int(local_supported)],
+            dtype=torch.int32,
+            device=self.device,
+        )
+        dist.all_reduce(
+            supported,
+            op=dist.ReduceOp.MIN,
+            group=self.tp_group,
+        )
+        return bool(supported.item())
+
     @torch.no_grad()
     def _global_min_tokens(self, local_tokens: int) -> int:
         if self.tp_size == 1:
@@ -216,6 +308,25 @@ class LMCacheMPConnector:
         t = torch.tensor([local_tokens], dtype=torch.int32, device=self.device)
         dist.all_reduce(t, op=dist.ReduceOp.MIN, group=self.tp_group)
         return int(t.item())
+
+    @torch.no_grad()
+    def _global_fused_result(
+        self,
+        local_succeeded: bool,
+        local_tokens: int,
+    ) -> tuple[bool, int]:
+        """Agree on success and the exact token count across TP ranks."""
+        if self.tp_size == 1:
+            return local_succeeded, local_tokens
+        result = torch.tensor(
+            [int(local_succeeded), local_tokens, -local_tokens],
+            dtype=torch.int32,
+            device=self.device,
+        )
+        dist.all_reduce(result, op=dist.ReduceOp.MIN, group=self.tp_group)
+        min_tokens = int(result[1].item())
+        max_tokens = -int(result[2].item())
+        return bool(result[0].item()) and min_tokens == max_tokens, min_tokens
 
     def _create_key(
         self,
@@ -388,17 +499,44 @@ class LMCacheMPConnector:
         not bundled into ``store_kv``. Skipped (no wire send) for ids
         we never fired a LOOKUP for, so warmup and short-prompt
         requests don't trigger the daemon's "Session not found,
-        skipping touch" warning. Frees any still-held read locks
-        before sending END_SESSION (covers failure paths where
-        retrieve_kv didn't consume the locks).
+        skipping touch" warning. Fused restores and stores also create daemon
+        hash sessions without pending lookup locks, so their ids are tracked
+        separately. Frees any still-held read locks before sending END_SESSION
+        (covers failure paths where retrieve_kv didn't consume the locks).
         """
+        # Keep every imported final event alive by request id and
+        # host-synchronize it on this cold teardown path before END_SESSION
+        # releases the server-side exporter.
+        with self._pending_lookups_lock:
+            needs_server_drain = request_id in self._undrained_fused_requests
+        if needs_server_drain:
+            try:
+                self._drain_fused_raw_block_retrieve(request_id)
+            except Exception as error:
+                raise FusedRestoreUndrainedError(
+                    "LMCache could not prove fused writes completed before "
+                    f"ending request_id={request_id}"
+                ) from error
+            with self._pending_lookups_lock:
+                self._undrained_fused_requests.discard(request_id)
+
+        with self._pending_lookups_lock:
+            final_events = tuple(self._fused_final_events.get(request_id, ()))
+        for final_event in final_events:
+            final_event.synchronize()
+
         if not self.is_healthy:
+            with self._pending_lookups_lock:
+                self._fused_final_events.pop(request_id, None)
             return
         with self._pending_lookups_lock:
             pending = self._pending_lookups.pop(request_id, None)
-        if pending is None:
+            daemon_session_exists = request_id in self._daemon_session_ids
+            self._daemon_session_ids.discard(request_id)
+            self._fused_final_events.pop(request_id, None)
+        if pending is None and not daemon_session_exists and not final_events:
             return
-        if pending.locks_held and pending.matched_token_num > 0:
+        if pending is not None and pending.locks_held and pending.matched_token_num > 0:
             self._free_lookup_locks(
                 pending.token_ids, 0, pending.matched_token_num, request_id
             )
@@ -411,11 +549,10 @@ class LMCacheMPConnector:
         offset: int,
         matched_end: int,
         block_ids: list[int],
-        skip_prefix_n_blocks: int = 0,
-    ):
-        event = torch_dev.Event(interprocess=True)
-        event.record(torch_dev.current_stream())
-        return send_lmcache_request(
+        skip_first_n_tokens: int = 0,
+    ) -> MessagingFuture[bool]:
+        event, event_handle = self._create_producer_event()
+        future = send_lmcache_request(
             self.mq_client,
             RequestType.RETRIEVE,
             [
@@ -429,35 +566,224 @@ class LMCacheMPConnector:
                 # RETRIEVE takes per-group block IDs (list[list[int]]); SGLang is
                 # non-hybrid, so wrap the flat list as a single group.
                 [block_ids],
-                event.ipc_handle(),
-                skip_prefix_n_blocks,
+                event_handle,
+                skip_first_n_tokens,
             ],
         ).to_device_future(device=self.device)
+        future._export_event = event  # type: ignore[attr-defined]
+        return future
+
+    def _submit_fused_raw_block_retrieve(
+        self,
+        request_id: str,
+        token_ids: list[int],
+        offset: int,
+        aligned_end: int,
+        block_ids: list[int],
+        prefix_pad: int,
+    ) -> MessagingFuture[tuple[bytes, tuple[int, bool]]]:
+        """Submit fused restore while retaining its producer IPC event."""
+        event, event_handle = self._create_producer_event()
+        with self._pending_lookups_lock:
+            self._daemon_session_ids.add(request_id)
+        future = send_lmcache_request(
+            self.mq_client,
+            RequestType.FUSED_RAW_BLOCK_RETRIEVE,
+            [
+                self._create_key(
+                    token_ids,
+                    start=offset,
+                    end=aligned_end,
+                    request_id=request_id,
+                ),
+                self.instance_id,
+                [block_ids],
+                event_handle,
+                prefix_pad,
+            ],
+        )
+        # The daemon may not have imported the handle when this helper returns.
+        future._export_event = event  # type: ignore[attr-defined]
+        return future
+
+    def _drain_fused_raw_block_retrieve(self, request_id: str) -> None:
+        """Synchronize daemon writes when no final IPC event was importable."""
+        drained = send_lmcache_request(
+            self.mq_client,
+            RequestType.FUSED_RAW_BLOCK_DRAIN,
+            [request_id, self.worker_id],
+        ).result(timeout=self._mq_timeout)
+        if not drained:
+            raise RuntimeError(
+                "LMCache daemon could not find a final event to drain for "
+                f"request_id={request_id}, worker_id={self.worker_id}"
+            )
+
+    def _retrieve_fused_raw_block(self, load_metadata: LoadMetadata) -> int:
+        """Run a fused restore and order the load stream after its final event."""
+        local_succeeded = False
+        local_tokens = 0
+        local_error: Exception | None = None
+        final_event: CompletionEvent | None = None
+        fused_submitted = False
+
+        if not self.is_healthy:
+            local_error = RuntimeError(
+                "LMCache fused raw-block retrieve skipped on an unhealthy "
+                f"rank for request_id={load_metadata.request_id}"
+            )
+        else:
+            try:
+                token_ids = load_metadata.token_ids
+                offset = load_metadata.offset
+                aligned_end = (len(token_ids) // self._lmcache_chunk_size) * (
+                    self._lmcache_chunk_size
+                )
+                if aligned_end <= offset:
+                    local_succeeded = True
+                else:
+                    prefix_pad = load_metadata.prefix_pad
+                    fresh_start = offset + prefix_pad
+                    prefix_pad_pages = prefix_pad // self.page_size
+                    fresh_block_ids = self._slot_mapping_to_block_ids(
+                        load_metadata.slot_mapping[fresh_start:aligned_end]
+                    )
+                    block_ids = [0] * prefix_pad_pages + fresh_block_ids
+
+                    future = self._submit_fused_raw_block_retrieve(
+                        request_id=load_metadata.request_id,
+                        token_ids=token_ids,
+                        offset=offset,
+                        aligned_end=aligned_end,
+                        block_ids=block_ids,
+                        prefix_pad=prefix_pad,
+                    )
+                    fused_submitted = True
+                    response: tuple[bytes, tuple[int, bool]] | None
+                    try:
+                        response = future.result(timeout=self._mq_timeout)
+                    except Exception as error:
+                        local_error = error
+                        # Do not wait forever on the original RPC. A
+                        # rank-specific drain request is queued behind it on
+                        # the same client-identity affinity FIFO.
+                        response = None
+
+                    if response is not None:
+                        final_handle, result = response
+                        final_event = self._import_completion_event(final_handle)
+                        if local_error is None:
+                            local_tokens, local_succeeded = result
+                            max_tokens = aligned_end - offset
+                            if (
+                                local_tokens < 0
+                                or local_tokens > max_tokens
+                                or local_tokens % self._lmcache_chunk_size != 0
+                            ):
+                                local_error = RuntimeError(
+                                    "LMCache fused raw-block retrieve returned "
+                                    f"invalid token count {local_tokens}"
+                                )
+                                local_succeeded = False
+                    if not local_succeeded and local_error is None:
+                        local_error = RuntimeError(
+                            "LMCache fused raw-block retrieve failed for "
+                            f"request_id={load_metadata.request_id}"
+                        )
+            except Exception as error:
+                if local_error is None:
+                    local_error = error
+
+        if fused_submitted and final_event is None:
+            try:
+                self._drain_fused_raw_block_retrieve(load_metadata.request_id)
+                with self._pending_lookups_lock:
+                    self._undrained_fused_requests.discard(load_metadata.request_id)
+            except Exception as drain_error:
+                original_error = local_error
+                local_error = FusedRestoreUndrainedError(
+                    "LMCache fused raw-block retrieve failed before importing "
+                    "its final event, and the server-side drain failed for "
+                    f"request_id={load_metadata.request_id}"
+                )
+                local_error.__cause__ = drain_error
+                if original_error is not None:
+                    local_error.add_note(f"Original fused error: {original_error}")
+                with self._pending_lookups_lock:
+                    self._undrained_fused_requests.add(load_metadata.request_id)
+
+        collective_error: Exception | None = None
+        try:
+            global_succeeded, global_tokens = self._global_fused_result(
+                local_succeeded,
+                local_tokens,
+            )
+        except Exception as error:
+            collective_error = error
+            global_succeeded, global_tokens = False, 0
+
+        if (
+            local_error is not None
+            or collective_error is not None
+            or not global_succeeded
+        ):
+            if final_event is not None:
+                final_event.synchronize()
+        if local_error is not None:
+            raise local_error
+        if collective_error is not None:
+            raise collective_error
+        if not global_succeeded:
+            raise RuntimeError(
+                "LMCache fused raw-block retrieve failed on another TP rank for "
+                f"request_id={load_metadata.request_id}"
+            )
+
+        if final_event is None:
+            # No wire operation is possible only for an empty aligned range.
+            return global_tokens
+        with self._pending_lookups_lock:
+            self._fused_final_events.setdefault(
+                load_metadata.request_id,
+                [],
+            ).append(final_event)
+        final_event.wait_on_stream(torch_dev.current_stream())
+        return global_tokens
+
+    def _create_producer_event(self) -> tuple[object, bytes]:
+        """Record and export an event on the active SGLang stream."""
+        event = self._event_backend.create_event(self.device)
+        self._event_backend.record_event(event, torch_dev.current_stream())
+        return event, self._event_backend.export_event(event, self.device)
+
+    def _import_completion_event(self, handle: bytes) -> CompletionEvent:
+        """Import one daemon event through the selected platform backend."""
+        event = self._event_backend.import_event(handle, self.device)
+        return CompletionEvent(self._event_backend, event, self.device)
 
     def retrieve_kv(self, load_metadata: LoadMetadata) -> int:
-        """Phase 2 of the two-phase load — fires RETRIEVE only.
+        """Restore matched KV into SGLang's allocated accelerator slots.
 
-        Reuses the matched-token count cached by a prior ``lookup_kv``
-        for the same ``request_id`` (no second LOOKUP wire call). The
-        daemon's RETRIEVE handler copies L1 (DRAM) → GPU KV pool slots
-        in a single ``multi_layer_block_kv_transfer`` launch and
-        consumes the held read locks via ``finish_read_prefetched`` —
-        we don't separately free them on the success path.
+        The fused path resolves the actual contiguous raw-block prefix during
+        restore and returns one final completion event. The generic path reuses
+        the matched-token count cached by a prior ``lookup_kv``.
 
         Failure paths free the still-held trailing read locks
         explicitly to avoid leaking them in the daemon.
 
-        Returns ``matched - offset`` (tokens covered by the chunks
-        whose RETRIEVE was issued, equivalent to the legacy
-        ``start_load_kv`` return). Caller subtracts ``prefix_pad`` to
-        compute "newly added to radix".
-        """
-        if not self.is_healthy:
-            return 0
+        Args:
+            load_metadata: Token range, destination slots, and request id.
 
+        Returns:
+            Tokens covered from the chunk-aligned restore offset.
+        """
         request_id = load_metadata.request_id
         with self._pending_lookups_lock:
             pending = self._pending_lookups.get(request_id)
+        if pending is None and self._supports_fused_raw_block_retrieve:
+            return self._retrieve_fused_raw_block(load_metadata)
+        if not self.is_healthy:
+            return 0
         if pending is None or not pending.locks_held:
             raise RuntimeError(
                 f"retrieve_kv called for {request_id} without a pending lookup_kv"
@@ -470,10 +796,10 @@ class LMCacheMPConnector:
         # ``slot_mapping[offset : offset + prefix_pad)`` is sentinel ``-1`` —
         # those tokens already live in the engine's radix tree and must not
         # be overwritten. We still RETRIEVE the full chunk-aligned range
-        # (LMCache stores at chunk granularity), but tell the daemon to skip
-        # the leading ``prefix_pad // page_size`` blocks. Real block_ids are
-        # computed only from the freshly-allocated slot range; the skipped
-        # blocks get harmless placeholder ids the kernel never dereferences.
+        # (LMCache stores at chunk granularity), but pass ``prefix_pad`` in
+        # token units as required by the protocol. Real block_ids are computed
+        # only from the freshly-allocated slot range; skipped pages get
+        # harmless placeholder ids the kernel never dereferences.
         prefix_pad = load_metadata.prefix_pad
         fresh_start = offset + prefix_pad
         prefix_pad_pages = prefix_pad // self.page_size
@@ -497,7 +823,7 @@ class LMCacheMPConnector:
                 offset=offset,
                 matched_end=retrieve_token_num,
                 block_ids=block_ids,
-                skip_prefix_n_blocks=prefix_pad_pages,
+                skip_first_n_tokens=prefix_pad,
             )
             if not future.result(timeout=self._mq_timeout):
                 raise RuntimeError(
@@ -557,8 +883,9 @@ class LMCacheMPConnector:
         block_ids = self._slot_mapping_to_block_ids(
             store_metadata.kv_indices[:aligned_end]
         )
-        event = torch_dev.Event(interprocess=True)
-        event.record(torch_dev.current_stream())
+        event, event_handle = self._create_producer_event()
+        with self._pending_lookups_lock:
+            self._daemon_session_ids.add(request_id)
         future = send_lmcache_request(
             self.mq_client,
             RequestType.STORE,
@@ -573,13 +900,13 @@ class LMCacheMPConnector:
                 # STORE takes per-group block IDs (list[list[int]]); SGLang is
                 # non-hybrid, so wrap the flat list as a single group.
                 [block_ids],
-                event.ipc_handle(),
+                event_handle,
             ],
-        ).to_cuda_future(device=self.device)
-        # Keep the exporting CUDA event alive until the caller releases the
-        # future. Since we return without blocking, the local ``event`` would
+        ).to_device_future(device=self.device)
+        # Keep the exporting device event alive until the caller releases the
+        # future. Since we return without blocking, the local event would
         # otherwise be garbage-collected immediately, destroying the underlying
-        # CUDA event before the daemon imports its IPC handle and waits on it.
+        # event before the daemon imports its IPC handle and waits on it.
         # (Dynamic keepalive attribute; the future type doesn't declare it.)
         future._export_event = event  # type: ignore[attr-defined]
         return future
@@ -598,8 +925,9 @@ class LMCacheMPConnector:
         block_ids = self._slot_mapping_to_block_ids(
             store_metadata.kv_indices[:aligned_end]
         )
-        event = torch_dev.Event(interprocess=True)
-        event.record(torch_dev.current_stream())
+        event, event_handle = self._create_producer_event()
+        with self._pending_lookups_lock:
+            self._daemon_session_ids.add(request_id)
         success = (
             send_lmcache_request(
                 self.mq_client,
@@ -615,7 +943,7 @@ class LMCacheMPConnector:
                     # STORE takes per-group block IDs (list[list[int]]); SGLang is
                     # non-hybrid, so wrap the flat list as a single group.
                     [block_ids],
-                    event.ipc_handle(),
+                    event_handle,
                 ],
             )
             .to_device_future(device=self.device)
@@ -628,7 +956,21 @@ class LMCacheMPConnector:
             raise RuntimeError("LMCache MP store failed")
 
     def reset(self) -> None:
-        pass
+        """Drain and release every request-scoped daemon resource."""
+        with self._pending_lookups_lock:
+            request_ids = sorted(
+                set(self._pending_lookups)
+                | self._daemon_session_ids
+                | set(self._fused_final_events)
+                | self._undrained_fused_requests
+            )
+        for request_id in request_ids:
+            self.end_session(request_id)
+        with self._pending_lookups_lock:
+            self._pending_lookups.clear()
+            self._daemon_session_ids.clear()
+            self._fused_final_events.clear()
+            self._undrained_fused_requests.clear()
 
     def close(self) -> None:
         self.reset()

@@ -516,18 +516,29 @@ class LookupModule:
                 metadata={"request_id": request_id},
             )
         )
-        session = self._ctx.session_manager.remove(request_id)
+        session, waiting_for_resource_owners = (
+            self._ctx.session_manager.release_for_end_session(request_id)
+        )
         self._ctx.event_bus.publish(
             Event(
                 event_type=EventType.MP_REQUEST_END,
                 session_id=request_id,
             )
         )
+        if waiting_for_resource_owners:
+            logger.debug(
+                "Session %s retains exporter events for other TP workers",
+                request_id,
+            )
+            return
         if session is None:
             logger.warning("Session %s not found, skipping touch", request_id)
             return
         if session.lookup_ipc_key is None:
-            logger.warning(
+            # STORE-only and fused raw-block sessions intentionally have no
+            # LOOKUP key. They still use END_SESSION to release request-scoped
+            # resources, so this is a normal no-touch path.
+            logger.debug(
                 "Session %s has no lookup ipc key, skipping touch",
                 request_id,
             )

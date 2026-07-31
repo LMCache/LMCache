@@ -16,6 +16,9 @@ from lmcache.v1.multiprocess.engine_module import (
     ThreadPoolType,
 )
 from lmcache.v1.multiprocess.protocols.base import RequestType
+from lmcache.v1.multiprocess.protocols.engine import (
+    FUSED_RAW_BLOCK_RETRIEVE_CAPABILITY,
+)
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
     ThreadLevel,
@@ -182,10 +185,19 @@ class ManagementModule:
         server.
 
         Returns:
-            The enabled experimental intermediate tensor transfer types.
-            See ``lmcache.v1.multiprocess.modules.experimental.__init__``.
+            The enabled experimental intermediate tensor transfer types plus
+            exact versioned protocol capabilities supported by this server.
+            Unknown entries are safe for older clients to ignore.
         """
-        return list(self._experimental_transfer)
+        capabilities = list(self._experimental_transfer)
+        supports_fused = getattr(
+            self._ctx.storage_manager,
+            "supports_fused_raw_block_retrieve",
+            None,
+        )
+        if callable(supports_fused) and supports_fused() is True:
+            capabilities.append(FUSED_RAW_BLOCK_RETRIEVE_CAPABILITY)
+        return capabilities
 
     def clear(self) -> None:
         """Clear all stored KV cache data from the storage manager."""

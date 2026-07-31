@@ -96,6 +96,10 @@ class RequestType(enum.Enum):
     # Experimental transfer intermediate tensor
     GET_EXPERIMENTAL = enum.auto()
 
+    # Appended to preserve every existing numeric wire value.
+    FUSED_RAW_BLOCK_RETRIEVE = enum.auto()
+    FUSED_RAW_BLOCK_DRAIN = enum.auto()
+
 
 @dataclass
 class ProtocolDefinition:

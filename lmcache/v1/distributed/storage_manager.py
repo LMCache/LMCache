@@ -6,7 +6,7 @@ Distributed multi-tier storage manager for MP mode
 # Standard
 from contextlib import contextmanager
 from dataclasses import replace
-from typing import Iterator, Literal, Optional
+from typing import Callable, Iterator, Literal, Optional
 import threading
 import time
 
@@ -28,6 +28,9 @@ from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.config import L2AdapterConfigBase
+from lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter import (
+    RawBlockL2Adapter,
+)
 from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2ReconfigurableAdapter,
     L2ReconfigureError,
@@ -68,6 +71,7 @@ class StorageManager:
     def __init__(self, config: StorageManagerConfig):
         self._l1_manager = L1Manager(config.l1_manager_config)
         self._event_bus = get_event_bus()
+        self._store_policy_name = config.store_policy
 
         # L1 eviction controller
         self._eviction_controller = L1EvictionController(
@@ -84,6 +88,13 @@ class StorageManager:
         self._next_adapter_id = 0
         # Serializes add_l2_adapter / delete_l2_adapter against each other.
         self._lifecycle_lock = threading.Lock()
+        # Fused synchronous raw-block operations take a short lease while
+        # holding _lifecycle_lock, then release that global lock for disk I/O.
+        # Adapter deletion/close marks ids draining and waits here until every
+        # lookup-through-unlock lease has finished.
+        self._adapter_lease_condition = threading.Condition()
+        self._adapter_lease_counts: dict[int, int] = {}
+        self._draining_adapter_ids: set[int] = set()
         # Guards the _l2_adapters and _adapter_descriptors dicts.
         self._adapters_lock = threading.Lock()
         self._registered_l2_listeners: list[L2AdapterListener] = []
@@ -249,6 +260,223 @@ class StorageManager:
         )
 
         # TODO: global key states update
+
+    def supports_fused_raw_block_retrieve(self) -> bool:
+        """Return whether synchronous fused raw-block restore is available.
+
+        Returns:
+            ``True`` only for the explicit ``skip_l1`` store policy when the
+            active topology contains exactly one unwrapped raw-block adapter.
+
+        Notes:
+            Adapter lifecycle serialization makes this an instantaneous
+            capability check. The load operation revalidates the topology
+            under the same lock before using the adapter.
+        """
+        with self._lifecycle_lock:
+            entry = self._get_fused_raw_block_adapter()
+            if entry is None:
+                return False
+            adapter_id, _adapter = entry
+            with self._adapter_lease_condition:
+                return adapter_id not in self._draining_adapter_ids
+
+    def load_raw_block_prefix(
+        self,
+        keys: list[ObjectKey],
+        layout_desc: MemoryLayoutDesc,
+        *,
+        completion_batch_size: int | None = None,
+        on_batch_loaded: (
+            Callable[
+                [int, int, list[ObjectKey], list[MemoryObj]],
+                None,
+            ]
+            | None
+        ) = None,
+    ) -> tuple[list[ObjectKey], list[MemoryObj]] | None:
+        """Load the longest raw-block prefix into temporary L1 objects.
+
+        The returned objects remain write-locked so an accelerator transfer
+        can read them directly. The caller must invoke
+        :meth:`finish_raw_block_restore` after its final stream operation.
+
+        Args:
+            keys: Ordered object keys whose longest contiguous L2 prefix is
+                requested.
+            layout_desc: Layout used for temporary aligned L1 allocations.
+            completion_batch_size: Optional number of logical objects per
+                completion callback.
+            on_batch_loaded: Optional callback that takes ownership of each
+                successfully loaded range before it enqueues accelerator work.
+
+        Returns:
+            ``None`` when the active L2 topology is unsupported. Otherwise,
+            the successfully loaded prefix keys and their temporary objects;
+            both lists are empty for a clean miss.
+
+        Notes:
+            Adapter selection takes a short operation lease. Runtime deletion
+            marks the adapter draining and waits for every lease to cover the
+            full lookup-through-unlock operation before closing it, while
+            concurrent restores can perform disk I/O in parallel.
+        """
+        leased_adapter = self._acquire_fused_raw_block_adapter()
+        if leased_adapter is None:
+            return None
+        adapter_id, adapter = leased_adapter
+        try:
+            if not keys:
+                return [], []
+
+            reserved_keys: list[ObjectKey] = []
+            handed_prefix_len = 0
+            operation_failed = False
+
+            try:
+                lookup_results = adapter.lookup_and_lock_sync(keys)
+                lookup_prefix_len = 0
+                for found in lookup_results[: len(keys)]:
+                    if not found:
+                        break
+                    lookup_prefix_len += 1
+                if lookup_prefix_len == 0:
+                    return [], []
+
+                prefix_keys = keys[:lookup_prefix_len]
+                reserve_results = self._l1_manager.reserve_write(
+                    keys=prefix_keys,
+                    is_temporary=[True] * len(prefix_keys),
+                    layout_desc=layout_desc,
+                    mode="new",
+                )
+                reserved_objects = {
+                    key: memory_obj
+                    for key in prefix_keys
+                    if (
+                        (result := reserve_results.get(key)) is not None
+                        and result[0] == L1Error.SUCCESS
+                        and (memory_obj := result[1]) is not None
+                    )
+                }
+                reserved_keys = list(reserved_objects)
+
+                load_keys: list[ObjectKey] = []
+                load_objects: list[MemoryObj] = []
+                for key in prefix_keys:
+                    memory_obj = reserved_objects.get(key)
+                    if memory_obj is None:
+                        break
+                    load_keys.append(key)
+                    load_objects.append(memory_obj)
+
+                non_prefix_reservations = reserved_keys[len(load_keys) :]
+                if non_prefix_reservations:
+                    self.finish_raw_block_restore(non_prefix_reservations)
+                reserved_keys = load_keys
+                if not load_keys:
+                    return [], []
+
+                def hand_loaded_batch(start: int, end: int) -> None:
+                    nonlocal handed_prefix_len
+                    if on_batch_loaded is None:
+                        return
+                    if (
+                        start != handed_prefix_len
+                        or start < 0
+                        or end <= start
+                        or end > len(load_keys)
+                    ):
+                        raise RuntimeError(
+                            "Raw-block completion callbacks must hand off one "
+                            "contiguous prefix"
+                        )
+                    batch_keys = load_keys[start:end]
+                    batch_objects = load_objects[start:end]
+                    # Ownership transfers before the callback can enqueue work
+                    # or raise. The final accelerator event now governs when
+                    # these temporary objects may be reclaimed.
+                    handed_prefix_len = end
+                    on_batch_loaded(
+                        start,
+                        end,
+                        batch_keys,
+                        batch_objects,
+                    )
+
+                load_kwargs = {}
+                if on_batch_loaded is not None:
+                    load_kwargs = {
+                        "completion_batch_size": completion_batch_size,
+                        "on_batch_loaded": hand_loaded_batch,
+                    }
+                load_results = adapter.load_sync(
+                    load_keys,
+                    load_objects,
+                    **load_kwargs,
+                )
+                loaded_prefix_len = 0
+                for loaded in load_results[: len(load_keys)]:
+                    if not loaded:
+                        break
+                    loaded_prefix_len += 1
+
+                failed_keys = load_keys[loaded_prefix_len:]
+                if failed_keys:
+                    self.finish_raw_block_restore(failed_keys)
+
+                successful_keys = load_keys[:loaded_prefix_len]
+                successful_objects = load_objects[:loaded_prefix_len]
+                reserved_keys = successful_keys
+                return successful_keys, successful_objects
+            except Exception:
+                operation_failed = True
+                cleanup_keys = reserved_keys[handed_prefix_len:]
+                if cleanup_keys:
+                    try:
+                        self.finish_raw_block_restore(cleanup_keys)
+                    except Exception:
+                        logger.exception(
+                            "Failed cleaning fused raw-block L1 reservations"
+                        )
+                raise
+            finally:
+                try:
+                    adapter.submit_unlock(keys)
+                except Exception:
+                    if not operation_failed:
+                        cleanup_keys = reserved_keys[handed_prefix_len:]
+                        if cleanup_keys:
+                            try:
+                                self.finish_raw_block_restore(cleanup_keys)
+                            except Exception:
+                                logger.exception(
+                                    "Failed cleaning fused raw-block L1 "
+                                    "reservations after unlock error"
+                                )
+                        raise
+                    logger.exception(
+                        "Failed unlocking raw-block keys after restore error"
+                    )
+        finally:
+            self._release_adapter_lease(adapter_id)
+
+    def finish_raw_block_restore(self, keys: list[ObjectKey]) -> None:
+        """Release temporary L1 objects after a fused accelerator restore.
+
+        Args:
+            keys: Write-locked temporary keys returned by
+                :meth:`load_raw_block_prefix`.
+        """
+        if not keys:
+            return
+        try:
+            self.finish_write(keys)
+        finally:
+            # The final accelerator event has completed before this callback.
+            # Force deletion also reclaims an object if finish_write itself
+            # failed and left its write lock held.
+            self.delete_l1_keys(keys, force=True)
 
     @contextmanager
     def read_prefetched_results(
@@ -915,6 +1143,8 @@ class StorageManager:
                 raise ValueError(f"No L2 adapter with id {adapter_id}")
 
             deadline = time.monotonic() + timeout
+            with self._adapter_lease_condition:
+                self._draining_adapter_ids.add(adapter_id)
             store_done = self._store_controller.request_remove_adapter(adapter_id)
             prefetch_done = self._prefetch_controller.request_remove_adapter(adapter_id)
             if not store_done.wait(timeout=max(0.0, deadline - time.monotonic())):
@@ -925,12 +1155,24 @@ class StorageManager:
                 raise LMCacheTimeoutError(
                     f"Timed out draining adapter {adapter_id} from prefetch controller"
                 )
+            with self._adapter_lease_condition:
+                while self._adapter_lease_counts.get(adapter_id, 0) > 0:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise LMCacheTimeoutError(
+                            f"Timed out waiting for adapter {adapter_id} "
+                            "operation leases"
+                        )
+                    self._adapter_lease_condition.wait(timeout=remaining)
 
             self._l2_eviction_controller.remove_adapter_state(adapter_id)
             with self._adapters_lock:
                 adapter = self._l2_adapters.pop(adapter_id)
                 self._adapter_descriptors.pop(adapter_id, None)
             adapter.close()
+            with self._adapter_lease_condition:
+                self._adapter_lease_counts.pop(adapter_id, None)
+                self._draining_adapter_ids.discard(adapter_id)
             logger.info("Deleted L2 adapter %d", adapter_id)
 
     def l2_adapters(self) -> list[tuple[AdapterDescriptor, L2AdapterInterface]]:
@@ -964,17 +1206,29 @@ class StorageManager:
         """
         Close the storage manager and release all resources.
         """
-        self._prefetch_controller.stop()
-        self._store_controller.stop()
-        self._eviction_controller.stop()
-        self._l2_eviction_controller.stop()
+        with self._lifecycle_lock:
+            adapter_ids = list(self._l2_adapters)
+            with self._adapter_lease_condition:
+                self._draining_adapter_ids.update(adapter_ids)
 
-        PeriodicEventNotifier.shutdown()
+            self._prefetch_controller.stop()
+            self._store_controller.stop()
+            self._eviction_controller.stop()
+            self._l2_eviction_controller.stop()
 
-        for adapter in self._l2_adapters.values():
-            adapter.close()
+            PeriodicEventNotifier.shutdown()
 
-        self._l1_manager.close()
+            with self._adapter_lease_condition:
+                while any(
+                    self._adapter_lease_counts.get(adapter_id, 0) > 0
+                    for adapter_id in adapter_ids
+                ):
+                    self._adapter_lease_condition.wait()
+
+            for adapter in self._l2_adapters.values():
+                adapter.close()
+
+            self._l1_manager.close()
 
     def report_status(self) -> dict:
         """Return a status dict aggregating all sub-component statuses."""
@@ -987,6 +1241,7 @@ class StorageManager:
         children = [l1, store, prefetch, l1_eviction, l2_eviction] + adapters
         return {
             "is_healthy": all(c["is_healthy"] for c in children),
+            "store_policy": self._store_policy_name,
             "l1_manager": l1,
             "store_controller": store,
             "prefetch_controller": prefetch,
@@ -1040,6 +1295,49 @@ class StorageManager:
         """Return whether any L2 adapter is currently active."""
         with self._adapters_lock:
             return bool(self._l2_adapters)
+
+    def _get_fused_raw_block_adapter(
+        self,
+    ) -> tuple[int, RawBlockL2Adapter] | None:
+        """Return the sole raw adapter for an explicit pure-L2 store policy."""
+        if self._store_policy_name != "skip_l1":
+            return None
+        adapters = self._snapshot_adapters()
+        if len(adapters) != 1:
+            return None
+        adapter_id, _descriptor, adapter = adapters[0]
+        if not isinstance(adapter, RawBlockL2Adapter):
+            return None
+        return adapter_id, adapter
+
+    def _acquire_fused_raw_block_adapter(
+        self,
+    ) -> tuple[int, RawBlockL2Adapter] | None:
+        """Lease the sole raw adapter without holding the lock during I/O."""
+        with self._lifecycle_lock:
+            entry = self._get_fused_raw_block_adapter()
+            if entry is None:
+                return None
+            adapter_id, adapter = entry
+            with self._adapter_lease_condition:
+                if adapter_id in self._draining_adapter_ids:
+                    return None
+                self._adapter_lease_counts[adapter_id] = (
+                    self._adapter_lease_counts.get(adapter_id, 0) + 1
+                )
+            return adapter_id, adapter
+
+    def _release_adapter_lease(self, adapter_id: int) -> None:
+        """Release one fused raw-adapter operation lease."""
+        with self._adapter_lease_condition:
+            lease_count = self._adapter_lease_counts.get(adapter_id, 0)
+            if lease_count <= 0:
+                raise RuntimeError(f"Adapter {adapter_id} operation lease is not held")
+            if lease_count == 1:
+                self._adapter_lease_counts.pop(adapter_id)
+            else:
+                self._adapter_lease_counts[adapter_id] = lease_count - 1
+            self._adapter_lease_condition.notify_all()
 
     def _build_l2_adapter(
         self,
