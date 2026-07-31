@@ -1750,7 +1750,7 @@ class TestConcurrentEvictionRace:
 
 
 class TestSlidingWindowClaims:
-    """The pin pass must release out-of-window sliding-window chunks.
+    """The lock pass must release out-of-window sliding-window chunks.
 
     Layout (chunk-major, groups [full=-1, sw=2], 4 chunks, 8 keys): even
     indices are the full-attention group, odd indices the sliding-window
@@ -1760,7 +1760,7 @@ class TestSlidingWindowClaims:
     """
 
     def test_dead_sw_chunks_released_at_pin_time(self, l1_manager):
-        """Out-of-window SW chunks are pinned by the pin pass, released in
+        """Out-of-window SW chunks are locked by the lock pass, released in
         that same pass (before the L2 lookup) once the L1-only fold rules them
         out, so they stay evictable and never enter the result."""
         adapter = make_adapter()
@@ -1796,7 +1796,7 @@ class TestSlidingWindowClaims:
         ctrl.stop()
         adapter.close()
 
-        # The evictable chunk is pinned by the pin pass (first eviction
+        # The evictable chunk is locked by the lock pass (first eviction
         # attempt bounces), then released in that same pass (a later
         # attempt succeeds).
         assert racing_l1.eviction_attempts
@@ -1813,7 +1813,7 @@ class TestSlidingWindowClaims:
         for key in retained_keys:
             assert read_results[key][0] == L1Error.SUCCESS
 
-        # The other evictable SW chunk is released in the pin pass too: it
+        # The other evictable SW chunk is released in the lock pass too: it
         # is deletable the moment the request completes.
         assert l1_manager.delete([keys[3]])[keys[3]] == L1Error.SUCCESS
 
@@ -1821,7 +1821,7 @@ class TestSlidingWindowClaims:
 
     def test_load_abort_falls_back_to_l1_hit_window(self, l1_manager):
         """If the L2 load aborts, finish falls back to the L1 hit — so the
-        L1 hit's own SW window must stay pinned even though the union fold
+        L1 hit's own SW window must stay locked even though the union fold
         placed the final window past it.
 
         Layout (chunk-major, groups [full=-1, sw=2], 6 chunks): L1 holds
@@ -1871,7 +1871,7 @@ class TestSlidingWindowClaims:
         ctrl.stop()
         adapter.close()
 
-        # Fallback: the intact L1 hit with its window still pinned.
+        # Fallback: the intact L1 hit with its window still locked.
         assert hit == 2
         assert result is not None
         assert result.get_indices_list() == [0, 1, 2, 3]

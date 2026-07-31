@@ -4,7 +4,7 @@ Prefetch Controller: asynchronously prefetches data from L2 adapters into L1.
 
 The controller runs a background thread with an event-driven loop that:
 1. Accepts prefetch requests from external threads via submit_prefetch_request.
-2. Pins L1-resident keys (read locks) so they extend the hit and cannot be
+2. Read-locks L1-resident keys so they extend the hit and cannot be
    evicted mid-request, then submits lookup_and_lock tasks to all L2 adapters.
 3. Computes a load plan over the L1 ∪ L2 union, keeping the keys retained by
    the TrimPolicy (PREFIX, SEGMENTED_PREFIX, or SPARSE).
@@ -18,7 +18,7 @@ there is never an observed-but-unlocked instant.
 
 Key intervals, sliding-window (SW) view — for full attention every in-L1
 key inside the hit is needed (no out-of-window segments); see
-docs/design/v1/distributed/storage_controllers/prefetch_l1_pin_pass.md::
+docs/design/v1/distributed/storage_controllers/prefetch_l1_lock_pass.md::
 
     SW-group keys, chunk order:
 
@@ -38,7 +38,7 @@ docs/design/v1/distributed/storage_controllers/prefetch_l1_pin_pass.md::
 
 Each step in the load phase repeats this figure with its per-segment
 actions aligned below it.
-Vocabulary: pin = take an L1 read lock; unpin = return the read lock;
+Vocabulary: lock = take an L1 read lock; unlock = return the read lock;
 loading = L1 write reservation carrying an L2 lookup lock. Locking never
 refreshes eviction recency: _finish_request explicitly touches the
 retained keys (L1Manager.touch_keys), the ones the request actually
@@ -192,7 +192,6 @@ class InFlightPrefetchRequest:
 
     request_id: PrefetchRequestId
     keys: list[ObjectKey]
-    layout_desc: MemoryLayoutDesc
     phase: PrefetchPhase
     extra_count: int = 0
     """Extra read locks per key (on top of the default 1) to acquire when
@@ -238,8 +237,9 @@ class InFlightPrefetchRequest:
     group_layout_descs: dict[int, MemoryLayoutDesc] = field(default_factory=dict)
     """Maps object_group_id to that group's layout. Each object group is a
     separate keyed L1 allocation, so each needs its own descriptor (one
-    ``MemoryLayoutDesc`` describes a single group's MemoryObj). Groups
-    missing from the map fall back to ``layout_desc``."""
+    ``MemoryLayoutDesc`` describes a single group's MemoryObj). Normalized
+    at request construction to cover every object group, so this is the
+    only layout source for the load phase."""
 
     def all_lookups_done(self) -> bool:
         return len(self.pending_lookup_tasks) == 0
@@ -252,14 +252,16 @@ class PrefetchController(StorageControllerInterface):
     """
     Asynchronously prefetches data from L2 adapters into L1 memory.
 
-    The controller (terms as in the module-docstring interval figure):
+    The controller:
     1. Accepts prefetch requests via submit_prefetch_request (thread-safe).
-    2. Runs a background thread that pins L1-resident keys (read locks)
+    2. Runs a background thread that read-locks L1-resident keys
        and submits lookup_and_lock to all adapters.
-    3. Computes the load plan from the L1 ∪ L2 union fold: keys in L2 and
-       not in L1 inside the final window; pinned keys are never transferred.
+    3. Computes the load plan based on the found keys in L1 and L2. L1
+       keys locked in step 2 that serve neither the plan nor the L1-only
+       fallback hit are unlocked here; every remaining unneeded lock is
+       released when the request finishes.
     4. Reserves L1 write buffers (all-or-nothing) and submits load tasks.
-    5. On completion, loaded keys become pinned for the retriever.
+    5. On completion, loaded keys become read-locked for the retriever.
     6. Reports the L1+L2 hit length via query_lookup_result and the
        retained-key bitmap via query_prefetch_result.
 
@@ -410,9 +412,9 @@ class PrefetchController(StorageControllerInterface):
 
             |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
                                           ^ L1 hit length               ^ L1+L2 hit
-            |      unpin     |   pinned*  |     unpin      |   pinned   |   unpin    |
+            |     unlock     |   locked*  |     unlock     |   locked   |   unlock   |
 
-        pinned keys are read-locked for the retriever until it consumes
+        locked keys stay read-locked for the retriever until it consumes
         them; keys in L2 but not in L1 inside the final window are loaded
         first. (*) the final window when the L2 load lands, else the L1
         hit's own window.
@@ -826,7 +828,7 @@ class PrefetchController(StorageControllerInterface):
     # Lookup phase
     # =========================================================================
 
-    def _pin_l1_keys(
+    def _lock_l1_keys(
         self,
         keys: list[ObjectKey],
         extra_count: int,
@@ -835,15 +837,20 @@ class PrefetchController(StorageControllerInterface):
     ) -> Bitmap:
         """Read-lock the L1-resident keys the request will hold.
 
-        Pins every key readable in L1, then, for windowed ``PREFIX``
+        Locks every key readable in L1, then, for windowed ``PREFIX``
         retention, releases the read locks on sliding-window chunks behind
-        the L1 hit's own window. Pinning does not refresh eviction recency;
+        the L1 hit's own window. Locking does not refresh eviction recency;
         the LRU signal is sent by ``_finish_request`` for the retained keys
         only.
 
         Args:
-            keys: The request's object keys, in prefix order.
-            extra_count: Extra read locks per pinned key.
+            keys: The request's object keys, in prefix order, chunk-major:
+                every object group and kv_rank of chunk 0, then of chunk 1,
+                and so on. StorageManager already served and capped away the
+                leading L1 prefix hit before submitting, so these keys start
+                past that boundary and L1 hits here are keys that (re)appear
+                behind or beyond it.
+            extra_count: Extra read locks per locked key.
             policy: The request's retained-subset policy.
             attn_desc: Per-group cross-chunk attention windows.
 
@@ -851,10 +858,10 @@ class PrefetchController(StorageControllerInterface):
             Bitmap of the key indices read-locked in L1, after releasing
             out-of-window sliding-window chunks.
         """
-        pin_results = self._l1_manager.reserve_read(keys, extra_count=extra_count)
+        lock_results = self._l1_manager.reserve_read(keys, extra_count=extra_count)
         l1_readlocks = Bitmap(len(keys))
         for i, key in enumerate(keys):
-            err, _obj = pin_results[key]
+            err, _obj = lock_results[key]
             if err == L1Error.SUCCESS:
                 l1_readlocks.set(i)
         if policy is not TrimPolicy.PREFIX:
@@ -864,7 +871,7 @@ class PrefetchController(StorageControllerInterface):
         )
         stride = attn_desc.num_object_groups * attn_desc.world_size
         within_l1_hit = Bitmap(len(keys), hit_length * stride)
-        # evictable: pinned SW chunks behind the window, within the L1 prefix
+        # evictable: locked SW chunks behind the window, within the L1 prefix
         # hit -- won't be read again, so release their locks.
         evictable = l1_readlocks & ~l1_window & within_l1_hit
         if evictable.popcount() > 0:
@@ -879,21 +886,27 @@ class PrefetchController(StorageControllerInterface):
         request_id: PrefetchRequestId,
         spec: PrefetchRequestSpec,
     ) -> None:
-        """Pin L1-resident keys, then submit lookup_and_lock to all live
-        (non-draining) adapters for a new request."""
-        l1_readlocks = self._pin_l1_keys(
+        """Read-lock L1-resident keys, then submit lookup_and_lock to all
+        live (non-draining) adapters for a new request."""
+        l1_readlocks = self._lock_l1_keys(
             spec.keys, spec.extra_count, spec.policy, spec.attn_desc
         )
+        # Normalize to one layout per object group: groups the spec does not
+        # map explicitly use ``spec.layout_desc``, so the load phase reads
+        # layouts from this map alone.
+        group_layout_descs = {
+            gid: spec.layout_desc for gid in range(spec.attn_desc.num_object_groups)
+        }
+        group_layout_descs.update(spec.group_layout_descs)
         request = InFlightPrefetchRequest(
             request_id=request_id,
             keys=spec.keys,
-            layout_desc=spec.layout_desc,
             phase=PrefetchPhase.LOOKUP,
             extra_count=spec.extra_count,
             policy=spec.policy,
             attn_desc=spec.attn_desc,
             mode=spec.mode,
-            group_layout_descs=spec.group_layout_descs,
+            group_layout_descs=group_layout_descs,
             l1_readlocks=l1_readlocks,
         )
 
@@ -981,11 +994,11 @@ class PrefetchController(StorageControllerInterface):
             self._finish_request(request)
             return
 
-        # Unpin the keys based on the following figure.
+        # Unlock the keys based on the following figure.
         # SW keys in L1:
         # |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
         #                               ^ L1 hit length               ^ L1+L2 hit length
-        # |     unpin      | keep pin*  |     unpin      |  keep pin  |   unpin    |
+        # |     unlock     | keep lock* |     unlock     | keep lock  |   unlock   |
         # (*) the L1 hit's own window: kept even when outside the final
         # window, as the fallback promise if the L2 load never lands.
         _l1_hit, l1_fallback_retain = build_trim_mask(
@@ -1038,7 +1051,8 @@ class PrefetchController(StorageControllerInterface):
         """Reserve L1 write buffers for the keys to load from L2.
 
         The keys sit in the loading segment — in L2, not in L1, inside the
-        final window::
+        final window (keys already in L1 are not reserved here; they were
+        read-locked at request start by ``_lock_l1_keys``)::
 
             |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
                                           ^ L1 hit length               ^ L1+L2 hit
@@ -1047,9 +1061,7 @@ class PrefetchController(StorageControllerInterface):
         Successful reservations are recorded on
         ``request.write_reserved_keys`` / ``request.write_reserved_objs``.
         Failures publish an ``L2_PREFETCH_FAILED`` event; the caller
-        abandons the L2 load if any key failed (all-or-nothing). No lock is
-        ever acquired through a failure result, so a concurrent eviction
-        between manager calls cannot invalidate the reported hit.
+        abandons the L2 load if any key failed (all-or-nothing).
 
         Args:
             request: The in-flight request the buffers belong to.
@@ -1068,13 +1080,12 @@ class PrefetchController(StorageControllerInterface):
         retention_map = dict(zip(keys_to_reserve, retentions, strict=True))
 
         # Batch reserve_write by object_group_id so each group uses its own
-        # tensor shapes (groups missing from group_layout_descs fall back to
-        # layout_desc).
+        # tensor shapes.
         write_results: dict[ObjectKey, tuple[L1Error, MemoryObj | None]] = {}
         by_group = sorted(keys_to_reserve, key=attrgetter("object_group_id"))
         for gid, group_iter in groupby(by_group, key=attrgetter("object_group_id")):
             group_keys = list(group_iter)
-            gld = request.group_layout_descs.get(gid, request.layout_desc)
+            gld = request.group_layout_descs[gid]
             gr = self._l1_manager.reserve_write(
                 keys=group_keys,
                 is_temporary=[not retention_map[k] for k in group_keys],
@@ -1117,9 +1128,11 @@ class PrefetchController(StorageControllerInterface):
                 )
             )
         if contended_keys:
-            # The key appeared in L1 after the pin pass (e.g. a
-            # concurrent request is loading it). Dropped rather than
-            # promoted; a later request finds it through its L1 pin pass.
+            # The key appeared in L1 (write-locked by a concurrent request)
+            # after the L1 lock pass. This request cannot load it, so the
+            # caller falls back to the L1-only hit (all-or-nothing); the
+            # event records why a key expected from L2 was not loaded. A
+            # later request finds the key in L1 through its own lock pass.
             self._event_bus.publish(
                 Event(
                     event_type=EventType.L2_PREFETCH_FAILED,
@@ -1294,19 +1307,19 @@ class PrefetchController(StorageControllerInterface):
 
         1. Collect per-adapter load results; split loaded vs failed keys.
         2. Return every L2 read lock still held.
-        3. Loaded keys become pinned for the retriever (WARM: unlocked);
-           failed keys' buffers are deleted.
-        4. Fold loaded ∪ pinned keys to the final hit length / retained set.
-        5. Unpin everything outside the retained set (e.g. out of the final
-           sliding window).
+        3. Loaded keys become read-locked for the retriever (WARM:
+           unlocked); failed keys' buffers are deleted.
+        4. Fold loaded ∪ locked keys to the final hit length / retained set.
+        5. Unlock everything outside the retained set (e.g. out of the
+           final sliding window).
         6. Report the hit if no earlier step did, then the retained bitmap.
 
         End state (sliding-window view; loaded keys in the in L2-hit sw
-        segment, pins elsewhere)::
+        segment, L1 locks elsewhere)::
 
             |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
                                           ^ L1 hit length               ^ L1+L2 hit
-            |     unpin      |   unpin    |     unpin      |   pinned   |   unpin    |
+            |     unlock     |   unlock   |     unlock     |   locked   |   unlock   |
         """
         num_keys = len(request.keys)
 
@@ -1338,12 +1351,12 @@ class PrefetchController(StorageControllerInterface):
         # SW keys in L2 (and not in L1):
         # |out of L1-hit sw|in L1-hit sw|out of L2-hit sw|in L2-hit sw| remaining  |
         #                               ^ L1 hit length               ^ L1+L2 hit length
-        # |       -        |     -      |       -        |load→pinned |     -      |
+        # |       -        |     -      |       -        |load→locked |     -      |
         # SW keys in L1:
-        # |     unpin      |   unpin    |     unpin      |   pinned   |   unpin    |
+        # |     unlock     |   unlock   |     unlock     |   locked   |   unlock   |
         if loaded_keys:
             if request.mode is PrefetchMode.WARM:
-                # Warm: make ready, pin nothing.
+                # Warm: make ready, lock nothing.
                 l1_mgr.finish_write(loaded_keys)
             else:
                 # write-locked -> read-locked; extra_count so each TP worker
@@ -1382,8 +1395,8 @@ class PrefetchController(StorageControllerInterface):
                 )
             )
 
-        # Include keys served from L1 (pinned when the request started) so
-        # the fold sees all object groups.
+        # Include keys served from L1 (read-locked when the request started)
+        # so the fold sees all object groups.
         result_bitmap = result_bitmap | request.l1_readlocks
 
         # Release read locks for any key outside the retained set (partial

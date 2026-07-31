@@ -418,7 +418,7 @@ class StorageManager:
         keys = spec.keys
 
         if spec.mode is PrefetchMode.WARM:
-            # Warm path: load all keys, pin none. skip_l2 makes it a no-op.
+            # Warm path: load all keys, lock none. skip_l2 makes it a no-op.
             prefetch_request_id = -1
             if not skip_l2 and keys and self._l2_adapters:
                 prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
