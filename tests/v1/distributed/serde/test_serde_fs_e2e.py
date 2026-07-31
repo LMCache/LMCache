@@ -19,7 +19,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -35,13 +34,11 @@ from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import FSL2AdapterConfig
 from lmcache.v1.distributed.serde import SerdeConfig
 from lmcache.v1.distributed.storage_manager import StorageManager
-from lmcache.v1.platform import current_device_spec
 
-if not torch_dev.is_available():
-    pytest.skip(
-        f"Requires available {torch_device_type} runtime",
-        allow_module_level=True,
-    )
+pytestmark = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA is not available"
+)
+
 
 # =============================================================================
 # Helpers
@@ -126,7 +123,7 @@ class TestFp8SerdeFsRoundTrip:
             l1_manager_config=L1ManagerConfig(
                 memory_config=L1MemoryManagerConfig(
                     size_in_bytes=4 << 30,
-                    use_lazy=current_device_spec.is_pin_supported,
+                    use_lazy=True,
                     init_size_in_bytes=1 << 30,
                 ),
             ),
