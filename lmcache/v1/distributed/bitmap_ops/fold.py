@@ -31,13 +31,24 @@ chunk ``j`` is available for object group ``g`` (single-rank), or
 """
 
 # Standard
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 
 # First Party
 from lmcache.native_storage_ops import Bitmap
-from lmcache.native_storage_ops import fold as _native_fold
-from lmcache.native_storage_ops import unfold as _native_unfold
 from lmcache.v1.distributed.api import TrimPolicy
+
+# Lightweight installs (e.g. lmcache-cli) ship a native_storage_ops without
+# the fold kernels; this module must stay importable there because CLI
+# argument registration reaches it via the storage_controllers package.
+# Calling fold()/unfold() without the kernels raises ImportError.
+_native_fold: "Callable[..., Bitmap] | None"
+_native_unfold: "Callable[..., Bitmap] | None"
+try:
+    from lmcache.native_storage_ops import fold as _native_fold
+    from lmcache.native_storage_ops import unfold as _native_unfold
+except ImportError:
+    _native_fold = None
+    _native_unfold = None
 
 FULL_ATTENTION_WINDOW = -1
 """Sentinel ``group_windows`` value marking a full-attention object group
@@ -96,7 +107,14 @@ def fold(
     Raises:
         ValueError: If ``group_windows`` is empty, ``num_chunks`` is negative,
             or ``num_ranks`` is not positive.
+        ImportError: If the installed ``lmcache.native_storage_ops`` does not
+            provide the fold kernel (lightweight install).
     """
+    if _native_fold is None:
+        raise ImportError(
+            "lmcache.native_storage_ops lacks the fold kernel; install or "
+            "build the full lmcache package"
+        )
     if num_ranks < 1:
         raise ValueError(f"num_ranks must be >= 1 (got {num_ranks})")
     if not group_windows:
@@ -153,7 +171,14 @@ def unfold(
     Raises:
         ValueError: If ``group_windows`` is empty, ``num_chunks`` is negative,
             or ``num_ranks`` is not positive.
+        ImportError: If the installed ``lmcache.native_storage_ops`` does not
+            provide the unfold kernel (lightweight install).
     """
+    if _native_unfold is None:
+        raise ImportError(
+            "lmcache.native_storage_ops lacks the unfold kernel; install or "
+            "build the full lmcache package"
+        )
     if num_ranks < 1:
         raise ValueError(f"num_ranks must be >= 1 (got {num_ranks})")
     if not group_windows:
