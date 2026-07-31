@@ -100,6 +100,18 @@ class VllmServiceFactory(BaseServiceFactory):
         chunk_size = self.lmcache_config.chunk_size
         num_kv_head = model_config.get_num_kv_heads(parallel_config)
         head_size = model_config.get_head_size()
+        if use_mla:
+            from lmcache import torch_device_type
+            if torch_device_type == "npu":
+                # vLLM-Ascend caches only the compressed MLA latent
+                # (kv_lora_rank); size the pool to it so it matches the
+                # on-device KV cache tensor.
+                for _cfg in (getattr(model_config, "hf_text_config", None),
+                             getattr(model_config, "hf_config", None)):
+                    _lora = getattr(_cfg, "kv_lora_rank", None)
+                    if _lora:
+                        head_size = _lora
+                        break
         kv_shape = (
             num_layer,
             1 if use_mla else 2,

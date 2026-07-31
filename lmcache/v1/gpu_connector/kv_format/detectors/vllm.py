@@ -67,4 +67,15 @@ class VLLM_Detector(EngineDetector):
                 return lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS, kv_caches
         if list_depth == 1 and tensor_ndim == 3:  # MLA
             return lmc_ops.EngineKVFormat.NL_X_NB_BS_HS, kv_caches
+        # Ascend vLLM MLA: a depth-2 list whose leaves are rank-4
+        # [num_blocks, block_size, num_kv_head=1, head_size] latent caches.
+        # Take each layer's first leaf (mirrors the connector's _mla_latent)
+        # and drop the singleton head axis so it matches the canonical
+        # rank-3 MLA layout (NL_X_NB_BS_HS). Flattening every leaf would
+        # inflate the layer count when a layer exposes >1 cache tensor.
+        if list_depth == 2 and tensor_ndim == 4 and first_tensor.shape[2] == 1:
+            latents = [sub[0] if isinstance(sub, (list, tuple)) else sub
+                       for sub in kv_caches]
+            reshaped = [t.reshape(t.shape[0], t.shape[1], t.shape[3]) for t in latents]
+            return lmc_ops.EngineKVFormat.NL_X_NB_BS_HS, reshaped
         return None, kv_caches

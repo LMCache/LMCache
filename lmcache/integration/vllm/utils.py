@@ -275,6 +275,18 @@ def create_lmcache_metadata(
     chunk_size = config.chunk_size
     num_kv_head = model_cfg.get_num_kv_heads(parallel_cfg)
     head_size = model_cfg.get_head_size()
+    if use_mla:
+        from lmcache import torch_device_type
+        if torch_device_type == "npu":
+            # vLLM-Ascend caches only the compressed MLA latent
+            # (kv_lora_rank); size the pool to it so it matches the
+            # on-device KV cache tensor.
+            for _cfg in (getattr(model_cfg, "hf_text_config", None),
+                         getattr(model_cfg, "hf_config", None)):
+                _lora = getattr(_cfg, "kv_lora_rank", None)
+                if _lora:
+                    head_size = _lora
+                    break
     kv_shape = (num_layer, 1 if use_mla else 2, chunk_size, num_kv_head, head_size)
 
     # Extract engine_id and kv_connector_extra_config from vllm_config if available
