@@ -9,7 +9,6 @@ import torch
 # First Party
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
-    AttnDesc,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
@@ -114,15 +113,6 @@ class TestAttnWindowDesc:
         assert out.is_full_attention(0)
         assert not out.is_full_attention(1)
         assert out.num_object_groups == 3
-        # Per-group access is keyed by object_group_id, like group_layout_descs.
-        assert out[0].is_full_attention
-        assert out[1].num_chunks_in_sw == 4
-        assert out[2].num_chunks_in_sw == 1
-        assert out.to_group_attn_descs() == {
-            0: AttnDesc(num_chunks_in_sw=-1),
-            1: AttnDesc(num_chunks_in_sw=4),
-            2: AttnDesc(num_chunks_in_sw=1),
-        }
 
     def test_world_size_roundtrip(self):
         out = _roundtrip(AttnWindowDesc(num_chunks_in_sw=[-1, 4], world_size=4))

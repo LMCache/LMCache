@@ -2,7 +2,7 @@
 """LookupModule: lookup, prefetch polling, and session lifecycle."""
 
 # Standard
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import partial
 import threading
 import time
@@ -10,11 +10,11 @@ import time
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
-    AttnDesc,
+    DEFAULT_ATTN_WINDOW_DESC,
+    AttnWindowDesc,
     ObjectKey,
     PrefetchHandle,
     PrefetchRequestSpec,
-    group_windows_vector,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_ranked
@@ -84,9 +84,7 @@ class _PrefetchJob:
     # emission time in ``query_prefetch_status``.
     requested_tokens: int
     num_object_groups: int = 1
-    group_attn_descs: dict[int, AttnDesc] = field(
-        default_factory=lambda: {0: AttnDesc(num_chunks_in_sw=-1)}
-    )
+    attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
     # Captured at lookup time so the ``MP_LOOKUP_PREFETCH_END`` event can
     # carry them as labels.  ``model_name`` lets dashboards slice hit rate
     # per model in multi-model deployments; ``cache_salt`` slices per
@@ -287,19 +285,17 @@ class LookupModule:
         attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
             model_name, world_size
         )
-        group_attn_descs = attn_desc.to_group_attn_descs()
         obj_keys = self._chunk_major_object_keys(key, chunk_hashes)
 
         group_layout_descs = self._ctx.layout_desc_registry.find_group_layout_descs(
             model_name, world_size
-        ) or {gid: layout_desc for gid in range(len(group_attn_descs))}
+        ) or {gid: layout_desc for gid in range(attn_desc.num_object_groups)}
         handle = self._ctx.storage_manager.submit_prefetch_task(
             PrefetchRequestSpec(
                 keys=obj_keys,
                 group_layout_descs=group_layout_descs,
                 extra_count=extra_count,
-                group_attn_descs=group_attn_descs,
-                world_size=attn_desc.world_size,
+                attn_desc=attn_desc,
             ),
             external_request_id=key.request_id,
         )
@@ -309,8 +305,8 @@ class LookupModule:
                 world_size=key.world_size,
                 request_id=key.request_id,
                 requested_tokens=requested_tokens,
-                num_object_groups=len(group_attn_descs),
-                group_attn_descs=group_attn_descs,
+                num_object_groups=attn_desc.num_object_groups,
+                attn_desc=attn_desc,
                 model_name=model_name,
                 cache_salt=key.cache_salt,
             )
@@ -375,13 +371,13 @@ class LookupModule:
         if found is None:
             return None
 
-        stride = len(job.group_attn_descs) * job.world_size
+        stride = job.attn_desc.num_object_groups * job.world_size
         num_chunks = job.handle.total_requested_keys // stride
         found_count, _retain = fold_unfold_ranked(
             found,
             num_chunks,
             job.world_size,
-            group_windows_vector(job.group_attn_descs),
+            job.attn_desc.num_chunks_in_sw,
         )
 
         self._ctx.event_bus.publish(

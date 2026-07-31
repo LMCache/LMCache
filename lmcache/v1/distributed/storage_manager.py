@@ -20,7 +20,6 @@ from lmcache.v1.distributed.api import (
     PrefetchMode,
     PrefetchRequestSpec,
     TrimPolicy,
-    group_windows_vector,
 )
 from lmcache.v1.distributed.bitmap_ops import fold_unfold_ranked
 from lmcache.v1.distributed.config import EvictionConfig, StorageManagerConfig
@@ -528,9 +527,9 @@ class StorageManager:
             when nothing was submitted to L2).
         """
         keys = spec.keys
-        group_attn_descs = spec.group_attn_descs
-        num_object_groups = len(group_attn_descs)
-        stride = num_object_groups * spec.world_size
+        attn_desc = spec.attn_desc
+        num_object_groups = attn_desc.num_object_groups
+        stride = num_object_groups * attn_desc.world_size
         num_chunks = len(keys) // stride
 
         l1_presence = Bitmap(len(keys))
@@ -542,8 +541,8 @@ class StorageManager:
         l1_hit_chunks, retain = fold_unfold_ranked(
             l1_presence,
             num_chunks,
-            spec.world_size,
-            group_windows_vector(group_attn_descs),
+            attn_desc.world_size,
+            attn_desc.num_chunks_in_sw,
         )
         retained_indices = retain.get_indices_list()
 

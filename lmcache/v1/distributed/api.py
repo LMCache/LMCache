@@ -7,7 +7,7 @@ Could be implemented by native code in the future
 """
 
 # Standard
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 import enum
 
@@ -288,35 +288,13 @@ class MemoryLayoutDesc:
 
 
 @dataclass(frozen=True)
-class AttnDesc:
-    """Cross-chunk attention of a single object group."""
-
-    num_chunks_in_sw: int
-    """``-1`` for full attention (the group needs the whole prefix);
-    otherwise the sliding window size in LMCache chunks (``>= 1``)."""
-
-    def __post_init__(self) -> None:
-        if self.num_chunks_in_sw == 0 or self.num_chunks_in_sw < -1:
-            raise ValueError(
-                "AttnDesc: num_chunks_in_sw must be -1 (full attention) "
-                f"or >= 1 chunk, got {self.num_chunks_in_sw}"
-            )
-
-    @property
-    def is_full_attention(self) -> bool:
-        """Whether the group attends to the whole prefix."""
-        return self.num_chunks_in_sw < 0
-
-
-@dataclass(frozen=True)
 class AttnWindowDesc:
     """Per-object-group cross-chunk attention windows, in LMCache chunks.
 
     ``num_chunks_in_sw[g]`` is the number of trailing prefix chunks that must
     be present for object group ``g`` to serve a cache hit. ``-1`` means full
     attention (the whole prefix); ``w >= 1`` is a sliding window of ``w``
-    chunks. Indexing (``desc[gid]``) returns the group's
-    :class:`AttnDesc`.
+    chunks.
     """
 
     num_chunks_in_sw: list[int]
@@ -341,26 +319,6 @@ class AttnWindowDesc:
         """Number of object groups this descriptor covers."""
         return len(self.num_chunks_in_sw)
 
-    def __getitem__(self, object_group_idx: int) -> AttnDesc:
-        """Attention desc of one object group, keyed by object_group_id
-        (the same key as ``PrefetchRequestSpec.group_layout_descs``).
-
-        Args:
-            object_group_idx: 0-based object group index.
-
-        Returns:
-            The group's :class:`AttnDesc`.
-        """
-        return AttnDesc(num_chunks_in_sw=self.num_chunks_in_sw[object_group_idx])
-
-    def to_group_attn_descs(self) -> dict[int, AttnDesc]:
-        """Per-group attention descs keyed by object_group_id.
-
-        Returns:
-            One :class:`AttnDesc` per object group, keyed ``0..N-1``.
-        """
-        return {gid: self[gid] for gid in range(self.num_object_groups)}
-
     def is_full_attention(self, object_group_idx: int) -> bool:
         """Whether the object group depends on the entire prefix.
 
@@ -371,22 +329,7 @@ class AttnWindowDesc:
             True if the group attends to the whole prefix, False if it uses a
             bounded sliding window.
         """
-        return self[object_group_idx].is_full_attention
-
-
-def group_windows_vector(group_attn_descs: dict[int, AttnDesc]) -> list[int]:
-    """Dense per-group window vector for the fold operators.
-
-    Args:
-        group_attn_descs: Maps object_group_id to that group's attention
-            desc; keys must be exactly ``0..len-1``.
-
-    Returns:
-        ``num_chunks_in_sw`` per group, indexed by object_group_id.
-    """
-    return [
-        group_attn_descs[gid].num_chunks_in_sw for gid in range(len(group_attn_descs))
-    ]
+        return self.num_chunks_in_sw[object_group_idx] < 0
 
 
 DEFAULT_ATTN_WINDOW_DESC = AttnWindowDesc(num_chunks_in_sw=[-1])
@@ -406,13 +349,10 @@ class PrefetchRequestSpec:
         keys: Object keys to prefetch; order defines the prefix.
         group_layout_descs: Maps object_group_id to that group's memory
             layout for L1 write-buffer allocation; one entry per object
-            group.
+            group in ``attn_desc``.
         extra_count: Extra read locks per key beyond the default 1.
         policy: Retained-subset policy (see :class:`TrimPolicy`).
-        group_attn_descs: Maps object_group_id to that group's cross-chunk
-            attention desc; same keys as ``group_layout_descs``.
-        world_size: Number of kv_rank shards per chunk (tensor-parallel
-            world size).
+        attn_desc: Cross-chunk attention windows, in object-group order.
         mode: Prefetch intent (see :class:`PrefetchMode`).
     """
 
@@ -420,23 +360,11 @@ class PrefetchRequestSpec:
     group_layout_descs: dict[int, MemoryLayoutDesc]
     extra_count: int = 0
     policy: TrimPolicy = TrimPolicy.PREFIX
-    group_attn_descs: dict[int, AttnDesc] = field(
-        default_factory=lambda: {0: AttnDesc(num_chunks_in_sw=-1)}
-    )
-    world_size: int = 1
+    attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
     mode: PrefetchMode = PrefetchMode.LOOKUP
 
     def __post_init__(self) -> None:
-        if self.world_size < 1:
-            raise ValueError(
-                f"PrefetchRequestSpec: world_size must be >= 1, got {self.world_size}"
-            )
-        expected = set(range(len(self.group_attn_descs)))
-        if set(self.group_attn_descs) != expected:
-            raise ValueError(
-                "PrefetchRequestSpec: group_attn_descs keys must be exactly "
-                f"{sorted(expected)}, got {sorted(self.group_attn_descs)}"
-            )
+        expected = set(range(self.attn_desc.num_object_groups))
         if set(self.group_layout_descs) != expected:
             raise ValueError(
                 "PrefetchRequestSpec: group_layout_descs must map exactly the "

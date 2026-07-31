@@ -12,7 +12,7 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import (
-    AttnDesc,
+    AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchMode,
@@ -781,10 +781,7 @@ class TestStorageManagerL2Prefetch:
         num_chunks = 4
         num_groups = 2
         num_keys = num_chunks * num_groups
-        group_attn_descs = {
-            0: AttnDesc(num_chunks_in_sw=-1),
-            1: AttnDesc(num_chunks_in_sw=2),
-        }
+        attn_desc = AttnWindowDesc(num_chunks_in_sw=[-1, 2])
 
         all_keys = [make_object_key(i) for i in range(num_keys)]
 
@@ -799,7 +796,7 @@ class TestStorageManagerL2Prefetch:
             PrefetchRequestSpec(
                 all_keys,
                 {0: basic_layout, 1: basic_layout},
-                group_attn_descs=group_attn_descs,
+                attn_desc=attn_desc,
             )
         )
 
@@ -840,10 +837,7 @@ class TestStorageManagerL2Prefetch:
         num_chunks = 4
         num_groups = 2
         num_keys = num_chunks * num_groups
-        group_attn_descs = {
-            0: AttnDesc(num_chunks_in_sw=-1),
-            1: AttnDesc(num_chunks_in_sw=2),
-        }
+        attn_desc = AttnWindowDesc(num_chunks_in_sw=[-1, 2])
 
         all_keys = [make_object_key(i) for i in range(num_keys)]
 
@@ -858,7 +852,7 @@ class TestStorageManagerL2Prefetch:
             PrefetchRequestSpec(
                 all_keys,
                 {0: basic_layout, 1: basic_layout},
-                group_attn_descs=group_attn_descs,
+                attn_desc=attn_desc,
             )
         )
 
