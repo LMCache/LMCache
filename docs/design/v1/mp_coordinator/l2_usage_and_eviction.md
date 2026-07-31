@@ -5,7 +5,7 @@ L2 cache usage and enforces per-``cache_salt`` byte quotas via LRU eviction.
 MP servers **report store/lookup events** to the coordinator; the coordinator
 aggregates usage, manages quotas, and periodically selects LRU keys to evict
 when a tenant exceeds its quota. It is **opt-in** (gated by
-``l2_event_reporting`` in ``CoordinatorConfig``) and **additive** (the existing
+``event_reporting`` in ``CoordinatorConfig``, shared with the key-directory stream) and **additive** (the existing
 per-server eviction is unchanged).
 
 Code: `lmcache/v1/mp_coordinator/cache_control/` (coordinator side),
@@ -31,7 +31,7 @@ MP server (store/lookup)
         ▼
   L2EventListener (L2AdapterListener)
     converts ObjectKey → EncodedObjectKey, buffers UsageEvents
-        │  flush every l2_event_flush_interval (default 1s)
+        │  flush every event_flush_interval (default 1s)
         │
         ▼
   POST /quota/events ──▶ Coordinator
@@ -165,7 +165,7 @@ on all L2 adapters via ``StorageManager.register_l2_listener()``. It:
    ``chunk_hash``).
 3. Buffers ``UsageEvent``s under a lock.
 4. Flushes the buffer to ``POST /quota/events`` on a timer
-   (``l2_event_flush_interval``, default 1s). Failures are logged and the
+   (``event_flush_interval``, default 1s). Failures are logged and the
    batch is dropped to prevent unbounded growth.
 
 ``on_l2_keys_deleted`` buffers a ``DELETE`` event so the coordinator can drop
@@ -185,11 +185,11 @@ the key from its usage accounting and LRU tracking.
 
 | Field | Default | Env var | Description |
 | --- | --- | --- | --- |
-| ``l2_event_reporting`` | ``False`` | ``LMCACHE_COORDINATOR_L2_EVENT_REPORTING`` | Enable event reporting |
-| ``l2_event_flush_interval`` | ``1.0`` | ``LMCACHE_COORDINATOR_L2_EVENT_FLUSH_INTERVAL`` | Seconds between flushes |
+| ``event_reporting`` | ``False`` | ``LMCACHE_COORDINATOR_EVENT_REPORTING`` | Enable event reporting (also gates the key-directory stream) |
+| ``event_flush_interval`` | ``1.0`` | ``LMCACHE_COORDINATOR_EVENT_FLUSH_INTERVAL`` | Seconds between flushes |
 
-Both also accept CLI flags (``--coordinator-l2-event-reporting``,
-``--coordinator-l2-event-flush-interval``).
+Both also accept CLI flags (``--coordinator-event-reporting``,
+``--coordinator-event-flush-interval``).
 
 ## Failure modes
 

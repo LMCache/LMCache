@@ -13,8 +13,7 @@ from typing import Any
 import asyncio
 
 # First Party
-from lmcache.v1.distributed.api import EncodedObjectKey
-from lmcache.v1.distributed.tiers import Tier
+from lmcache.v1.distributed.api import EncodedObjectKey, Tier
 from lmcache.v1.multiprocess.cache_control.errors import (
     InvalidRequest,
     NotFound,
