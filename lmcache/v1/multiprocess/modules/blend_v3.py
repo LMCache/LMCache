@@ -54,10 +54,15 @@ from lmcache.v1.multiprocess.engine_module import (
     InstanceLivenessTarget,
     ThreadPoolType,
 )
+
+# NOTE (Jiayi): qwen35 modification starts
+from lmcache.v1.multiprocess.modules.aux_store import AuxBlobStore
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.modules.lookup import compute_extra_count
+
+# NOTE (Jiayi): qwen35 modification ends
 from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.token_hasher import (
     TokenHasher,
@@ -473,6 +478,12 @@ class BlendV3Module(InstanceLivenessTarget):
         self._event_bus = ctx.event_bus
         self._cb_rope_state: dict[int, _CBRopeState] = {}
 
+        # NOTE (Jiayi): qwen35 modification starts
+        # Generic opaque per-chunk aux-blob store (SVD-compressed GDN
+        # projections etc.); fully data-type agnostic, see aux_store.py.
+        self._aux_store = AuxBlobStore(ctx)
+        # NOTE (Jiayi): qwen35 modification ends
+
         # L2 opt: cache TP-expanded obj_keys at lookup, pop at retrieve.
         self._lookup_obj_keys_cache: dict[str, dict[bytes, list]] = {}
         self._lookup_obj_keys_lock = threading.Lock()
@@ -548,6 +559,14 @@ class BlendV3Module(InstanceLivenessTarget):
                 self.cb_retrieve_pre_computed,
                 ThreadPoolType.AFFINITY,
             ),
+            # NOTE (Jiayi): qwen35 modification starts
+            HandlerSpec(RequestType.AUX_PUT, self.store_aux, ThreadPoolType.AFFINITY),
+            HandlerSpec(
+                RequestType.AUX_GET_BY_HASH_IPC,
+                self.retrieve_aux_by_hashes_ipc,
+                ThreadPoolType.AFFINITY,
+            ),
+            # NOTE (Jiayi): qwen35 modification ends
         ]
 
     def report_status(self) -> dict:
@@ -727,6 +746,14 @@ class BlendV3Module(InstanceLivenessTarget):
                     chunk_hashes,
                     start_chunk_idx=start_chunk_idx,
                     position_offset=position_offset,
+                )
+                # NOTE (Jiayi): instrumentation — confirm fingerprint registration
+                logger.debug(
+                    "CB fp-register: ntok=%d nhashes=%d skip=%d pos_off=%d",
+                    len(tokens_in_range),
+                    len(chunk_hashes),
+                    start_chunk_idx,
+                    position_offset,
                 )
             except Exception:
                 logger.exception("CB fingerprint registration failed (sync drain)")
@@ -1123,6 +1150,13 @@ class BlendV3Module(InstanceLivenessTarget):
                     )
                 )
                 matches = self._match_fingerprints(key)
+                # NOTE (Jiayi): instrumentation — confirm CB unified lookup match
+                logger.debug(
+                    "CB unified_lookup rid=%s ntok=%d local_matches=%d",
+                    rid,
+                    len(key.token_ids),
+                    len(matches),
+                )
                 self._event_bus.publish(
                     Event(
                         event_type=EventType.CB_FINGERPRINT_MATCH_END,
@@ -1362,6 +1396,16 @@ class BlendV3Module(InstanceLivenessTarget):
                 return result
             tokens_in_range = list(key.token_ids)[key.start : key.end]
             start_chunk_idx = 1 if key.start == 0 else 0
+            # NOTE (Jiayi): instrumentation — confirm fingerprint enqueue on store
+            logger.debug(
+                "CB store fp-enqueue rid=%s wid=%s start=%d end=%d nhashes=%d skip=%d",
+                key.request_id,
+                key.worker_id,
+                key.start,
+                key.end,
+                len(chunk_hashes),
+                start_chunk_idx,
+            )
             job = (tokens_in_range, chunk_hashes, start_chunk_idx, key.start)
             with self._pending_fp_lock:
                 self._pending_fp_hashes.update(chunk_hashes[start_chunk_idx:])
@@ -1384,6 +1428,95 @@ class BlendV3Module(InstanceLivenessTarget):
             self._publish_fingerprints(key, chunk_hashes, tokens_in_range)
 
         return result
+
+    # NOTE (Jiayi): qwen35 modification starts
+    def store_aux(
+        self,
+        key: IPCCacheServerKey,
+        group: int,
+        sizes: list[int],
+        blob_ipc: DeviceIPCWrapper,
+    ) -> bool:
+        """AUX_PUT handler: store the caller's per-chunk blobs (see AuxBlobStore).
+
+        Args:
+            key (IPCCacheServerKey): Store key for the range being cached.
+            group (int): Object-group id for this aux stream.
+            sizes (list[int]): Per-chunk blob byte lengths (chunk order).
+            blob_ipc (DeviceIPCWrapper): IPC handle to the concatenated
+                per-chunk blob payload.
+
+        Returns:
+            bool: Result of :meth:`AuxBlobStore.store`.
+        """
+        blob = blob_ipc.to_tensor().reshape(-1).view(torch.uint8)
+        return self._aux_store.store(key, group, sizes, blob)
+
+    def retrieve_aux_by_hashes_ipc(
+        self,
+        key: IPCCacheServerKey,
+        group: int,
+        chunk_hashes: list[bytes],
+        sizes: list[int],
+        dst_ipc: DeviceIPCWrapper,
+        instance_id: int,
+        event_ipc_handle: bytes,
+    ) -> tuple[bytes, bool]:
+        """AUX_GET_BY_HASH_IPC handler: copy matched chunks straight into the
+        worker's IPC-mapped GPU receive buffer (no D2H / ZMQ bytes / H2D),
+        gated by CUDA IPC events. Mirrors :meth:`cb_retrieve_pre_computed`.
+
+        Maps the worker buffer (``dst_ipc.to_tensor``), orders the copies after
+        the worker's forward (waits ``event_ipc_handle`` on the instance's
+        stream), copies each prefetched L1 chunk into ``dst`` on that stream,
+        and records a completion event the worker waits on. The data never
+        leaves the (shared) GPU.
+
+        Args:
+            key (IPCCacheServerKey): Carries model/world_size/worker_id/salt.
+            group (int): Object-group id for this aux stream.
+            chunk_hashes (list[bytes]): Stored per-chunk hashes, one per chunk.
+            sizes (list[int]): Per-chunk blob byte lengths (aligned to hashes).
+            dst_ipc (DeviceIPCWrapper): IPC handle of the worker's GPU receive
+                buffer (>= ``sum(sizes)`` bytes, uint8).
+            instance_id (int): Registered KV-cache instance (for the GPU
+                context's device + stream).
+            event_ipc_handle (bytes): The worker's forward-fence CUDA event.
+
+        Returns:
+            tuple[bytes, bool]: ``(completion_event_ipc_handle, ok)`` — ``ok``
+            is ``False`` on a miss/size-mismatch so the worker recomputes.
+
+        Raises:
+            ValueError: If ``instance_id`` has no registered KV cache.
+        """
+        entry = self._transfer_module.get_and_touch_context_entry(instance_id)
+        if entry is None:
+            raise ValueError(
+                f"Instance {instance_id} not registered for paged KV cache"
+            )
+        gpu_context = entry.cache_context
+        obj_keys = ipc_key_to_object_keys(key, list(chunk_hashes), [group])[0]
+        with (
+            torch_dev.device(gpu_context.device),
+            torch_dev.stream(gpu_context.stream),
+        ):
+            check_interprocess_event_support()
+            event = torch_dev.Event(interprocess=True)
+            # Map the worker's receive buffer into this process (same physical
+            # GPU -> zero-copy view), exactly as store_aux maps the PUT blob.
+            dst = dst_ipc.to_tensor().reshape(-1).view(torch.uint8)
+            # Order the copies AFTER the worker's outstanding forward work.
+            if hasattr(torch_dev.Event, "from_ipc_handle"):
+                vllm_event = torch_dev.Event.from_ipc_handle(
+                    gpu_context.device, event_ipc_handle
+                )
+                vllm_event.wait(stream=gpu_context.stream)
+            ok = self._aux_store.fetch_into_ipc(obj_keys, sizes, dst)
+            event.record()
+        return event.ipc_handle(), ok
+
+    # NOTE (Jiayi): qwen35 modification ends
 
     def _publish_fingerprints(
         self,

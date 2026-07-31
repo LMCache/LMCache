@@ -139,6 +139,15 @@ def create_engine_group_infos_from_vllm(
         else ()
     )
 
+    # NOTE (Jiayi): qwen35 modification starts
+    # CacheBlend-on-GDN (gated): serve only full-attention groups; GDN/Mamba
+    # groups' layers then fall through to EXCLUDED_ENGINE_GROUP below.
+    # First Party
+    from lmcache.integration.vllm.kv_cache_group_edits import cb_skip_mamba_groups
+
+    vllm_groups = cb_skip_mamba_groups(vllm_groups)
+    # NOTE (Jiayi): qwen35 modification ends
+
     layer_index_groups = [
         [layer_to_idx[name] for name in group.layer_names] for group in vllm_groups
     ]
