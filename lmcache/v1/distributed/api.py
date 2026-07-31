@@ -120,6 +120,11 @@ class ObjectKey:
     hash, and extension are added.
     """
 
+    layer_id: int = -1
+    """ Layer index for per-layer storage. ``-1`` means all layers
+    (backward compatible with pre-per-layer code). ``>= 0`` identifies
+    a specific layer within the object group. """
+
     _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
     _SALT_MAX_LEN = 128
 
@@ -143,6 +148,21 @@ class ObjectKey:
                 f"(got {len(self.cache_salt)})"
             )
 
+    def split_layers(self, num_layers: int) -> list["ObjectKey"]:
+        """Split into per-layer keys. Returns num_layers ObjectKeys with
+        layer_id set to 0..num_layers-1."""
+        return [
+            ObjectKey(
+                chunk_hash=self.chunk_hash,
+                model_name=self.model_name,
+                kv_rank=self.kv_rank,
+                object_group_id=self.object_group_id,
+                cache_salt=self.cache_salt,
+                layer_id=i,
+            )
+            for i in range(num_layers)
+        ]
+
     def to_encoded_object_key(self) -> "EncodedObjectKey":
         """Return the JSON-safe :class:`EncodedObjectKey` projection."""
         return EncodedObjectKey(
@@ -151,6 +171,7 @@ class ObjectKey:
             kv_rank=self.kv_rank,
             object_group_id=self.object_group_id,
             cache_salt=self.cache_salt,
+            layer_id=self.layer_id,
         )
 
     @staticmethod
@@ -234,6 +255,10 @@ class EncodedObjectKey:
 
     cache_salt: str = ""
 
+    layer_id: int = -1
+    """``-1`` for all-layer keys (default, backward compatible).
+    ``>= 0`` for per-layer keys."""
+
     def to_object_key(self) -> ObjectKey:
         """Recover the corresponding :class:`ObjectKey`.
 
@@ -247,6 +272,7 @@ class EncodedObjectKey:
             kv_rank=self.kv_rank,
             object_group_id=self.object_group_id,
             cache_salt=self.cache_salt,
+            layer_id=self.layer_id,
         )
 
 

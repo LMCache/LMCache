@@ -116,6 +116,8 @@ def _object_key_to_filename(key: ObjectKey) -> str:
         f"{safe_model}{_KEY_SEP}{key.kv_rank:#010x}"
         f"{_KEY_SEP}{key.object_group_id:x}{_KEY_SEP}{key.chunk_hash.hex()}"
     )
+    if key.layer_id >= 0:
+        base = f"{base}{_KEY_SEP}L{key.layer_id}"
     if key.cache_salt:
         return f"{base}{_KEY_SEP}{key.cache_salt}{_FILE_EXT}"
     return f"{base}{_FILE_EXT}"
@@ -135,11 +137,22 @@ def _filename_to_object_key(
         return None
     stem = filename[: -len(_FILE_EXT)]
     parts = stem.split(_KEY_SEP)
+    layer_id = -1
+    cache_salt = ""
     if len(parts) == 4:
         safe_model, kv_rank_str, object_group_str, chunk_hash_hex = parts
-        cache_salt = ""
     elif len(parts) == 5:
-        safe_model, kv_rank_str, object_group_str, chunk_hash_hex, cache_salt = parts
+        safe_model, kv_rank_str, object_group_str, chunk_hash_hex, fifth = parts
+        if fifth.startswith("L") and fifth[1:].isdigit():
+            layer_id = int(fifth[1:])
+        else:
+            cache_salt = fifth
+    elif len(parts) == 6:
+        safe_model, kv_rank_str, object_group_str, chunk_hash_hex, layer_field, cache_salt = parts
+        if layer_field.startswith("L") and layer_field[1:].isdigit():
+            layer_id = int(layer_field[1:])
+        else:
+            return None
     else:
         return None
 
@@ -148,17 +161,13 @@ def _filename_to_object_key(
         chunk_hash = bytes.fromhex(chunk_hash_hex)
         kv_rank = int(kv_rank_str, 16)
         object_group_id = int(object_group_str, 16)
-        # ObjectKey.__post_init__ raises ValueError when the decoded
-        # model_name / cache_salt violate the forbidden-char or length
-        # invariants (e.g. a stray file from another tool on disk).
-        # The contract here is to return None for anything unparsable,
-        # so keep the constructor inside the try block.
         return ObjectKey(
             chunk_hash=chunk_hash,
             model_name=model_name,
             kv_rank=kv_rank,
             object_group_id=object_group_id,
             cache_salt=cache_salt,
+            layer_id=layer_id,
         )
     except ValueError:
         return None

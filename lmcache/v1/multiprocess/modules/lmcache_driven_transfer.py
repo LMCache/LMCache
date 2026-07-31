@@ -92,6 +92,32 @@ def get_layout_desc(
     return MemoryLayoutDesc(shapes=list(shapes), dtypes=list(dtypes))
 
 
+def get_single_layer_layout_desc(
+    cache_context: BaseCacheContext,
+    num_tokens: int,
+    object_group_id: int,
+) -> MemoryLayoutDesc:
+    """Get a single-layer memory layout description for per-layer storage.
+
+    Like ``get_layout_desc`` but with ``num_layers=1`` in each shape,
+    describing the layout of a per-layer MemoryObj.
+    """
+    object_group = cache_context.kv_layer_groups_manager.object_groups[object_group_id]
+    shapes_and_dtypes = [
+        cache_context.get_kernel_group_shape_dtype(num_tokens, kernel_group_idx)
+        for kernel_group_idx in object_group.kernel_group_indices
+    ]
+    shapes = []
+    dtypes = []
+    for shape, dtype in shapes_and_dtypes:
+        # shape is (kv_size, num_layers, num_slots, hidden_dim)
+        # Replace num_layers with 1
+        single_layer_shape = torch.Size((shape[0], 1, shape[2], shape[3]))
+        shapes.append(single_layer_shape)
+        dtypes.append(dtype)
+    return MemoryLayoutDesc(shapes=shapes, dtypes=dtypes)
+
+
 def batched_iteration_with_skip(
     lst: Sequence,
     batch_size: int,
@@ -683,6 +709,76 @@ def _h2d_layer_slice(
         # for the non-lazy path. For now, fall back to full-chunk H2D.
         raise NotImplementedError(
             "Per-layer H2D for non-LazyMemoryAllocator not yet implemented. "
+            "Use LazyMemoryAllocator for per-layer transfer."
+        )
+
+
+def _d2h_layer_slice(
+    gpu_buffer_data_ptr: int,
+    memory_obj: MemoryObj,
+    kg_byte_offset_in_obj: int,
+    layer_local_idx: int,
+    num_layers_in_kg: int,
+    per_kv_bytes: int,
+):
+    """D2H one layer's K and V data from GPU temp buffer to a per-layer MemoryObj.
+
+    The GPU temp buffer layout per kernel group is:
+        [K_layer0, K_layer1, ..., K_layerN, V_layer0, ..., V_layerN]
+
+    The per-layer MemoryObj layout is:
+        [K_data, V_data]  — 2 * per_kv_bytes total
+
+    Args:
+        gpu_buffer_data_ptr: GPU temp buffer data_ptr for the kernel group.
+        memory_obj: Destination per-layer CPU MemoryObj.
+        kg_byte_offset_in_obj: Byte offset of this kernel group within the MemoryObj.
+        layer_local_idx: Index of the layer within the kernel group.
+        num_layers_in_kg: Total number of layers in the kernel group.
+        per_kv_bytes: Bytes for a single K (or V) slice for one layer.
+    """
+    # GPU source offsets within the kernel group buffer
+    k_gpu_src = gpu_buffer_data_ptr + layer_local_idx * per_kv_bytes
+    v_gpu_src = gpu_buffer_data_ptr + (num_layers_in_kg + layer_local_idx) * per_kv_bytes
+
+    # CPU destination offsets within the per-layer MemoryObj
+    # Layout: [K_data | V_data] with optional kg_byte_offset prefix
+    k_cpu_dst = memory_obj.data_ptr + kg_byte_offset_in_obj
+    v_cpu_dst = memory_obj.data_ptr + kg_byte_offset_in_obj + per_kv_bytes
+
+    if isinstance(memory_obj.parent(), LazyMemoryAllocator):
+        lmc_ops.lmcache_memcpy_async(
+            k_cpu_dst, k_gpu_src, per_kv_bytes,
+            lmc_ops.TransferDirection.D2H,
+            memory_obj.meta.address,
+            LazyMemoryAllocator.PIN_CHUNK_SIZE,
+        )
+        lmc_ops.lmcache_memcpy_async(
+            v_cpu_dst, v_gpu_src, per_kv_bytes,
+            lmc_ops.TransferDirection.D2H,
+            memory_obj.meta.address,
+            LazyMemoryAllocator.PIN_CHUNK_SIZE,
+        )
+    else:
+        import ctypes
+        # Non-lazy path: use raw tensor copy
+        dst_tensor = memory_obj.raw_tensor
+        if dst_tensor is None:
+            raise ValueError(
+                "memory_obj.raw_tensor is None in _d2h_layer_slice"
+            )
+        raw_dst = dst_tensor.view(torch.uint8)
+        # Create GPU source views and copy
+        # K slice
+        k_gpu_tensor = torch.empty(
+            per_kv_bytes, dtype=torch.uint8, device="cuda"
+        )
+        k_gpu_tensor.data = torch.UntypedStorage(per_kv_bytes, device="cuda")
+        # Use the simpler approach: create a view into the existing GPU buffer
+        # via torch internal storage at the correct pointer offset
+        # This is complex; for now raise NotImplementedError for non-lazy
+        raise NotImplementedError(
+            "Per-layer D2H for non-LazyMemoryAllocator not yet implemented. "
             "Use LazyMemoryAllocator for per-layer transfer."
         )
 
@@ -1496,6 +1592,280 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             logger.info(
                 "Stored %d tokens in %.3f seconds",
                 num_chunks * self._ctx.chunk_size,
+                ed - st,
+            )
+        return (
+            event_backend.export_event(event, cache_context.device),
+            store_succeeded,
+        )
+
+    @_lmcache_nvtx_annotate
+    def store_layerwise(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        gpu_block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+    ) -> tuple[bytes, bool]:
+        """Store the GPU KV cache to CPU as per-layer MemoryObjs.
+
+        Like ``store()`` but creates one MemoryObj per (chunk, layer) pair
+        instead of one MemoryObj per chunk with all layers. Each per-layer
+        MemoryObj contains contiguous [K, V] data for a single layer,
+        enabling single-memcpy H2D during per-layer retrieve.
+
+        Same args/returns as ``store()``.
+        """
+        st = time.perf_counter()
+
+        entry = self.get_and_touch_context_entry(instance_id)
+        if entry is None:
+            raise ValueError(f"No GPU context registered for instance ID {instance_id}")
+        cache_context = entry.cache_context
+        model_name = entry.model_name
+        event_backend = entry.event_backend
+        if event_backend is None:
+            raise RuntimeError("Registered cache context has no event backend")
+
+        num_object_groups = cache_context.kv_layer_groups_manager.num_object_groups
+        obj_keys_per_obj_group = self._ctx.resolve_obj_keys(
+            key, list(range(num_object_groups))
+        )
+        num_chunks = len(obj_keys_per_obj_group[0])
+
+        blocks_per_chunk = [
+            cache_context.calculate_num_blocks(self._ctx.chunk_size, group_idx)
+            for group_idx in range(
+                cache_context.kv_layer_groups_manager.num_kernel_groups
+            )
+        ]
+
+        with (
+            torch_dev.device(cache_context.device),
+            torch_dev.stream(cache_context.stream),
+        ):
+            event = event_backend.create_event(cache_context.device)
+
+            if any(
+                len(group_block_ids) < num_chunks * bpc
+                for group_block_ids, bpc in zip(
+                    gpu_block_ids, blocks_per_chunk, strict=True
+                )
+            ):
+                logger.warning(
+                    "STORE_LAYERWISE block ID underflow for request_id=%s; skipping.",
+                    key.request_id,
+                )
+                event_backend.record_event(event, cache_context.stream)
+                return event_backend.export_event(event, cache_context.device), False
+
+            block_ids_per_group_gpu = downsample_and_stage_block_ids(
+                cache_context, gpu_block_ids
+            )
+
+            producer_event = event_backend.import_event(
+                event_ipc_handle, cache_context.device
+            )
+            event_backend.wait_event(producer_event, cache_context.stream)
+
+            self._ctx.event_bus.publish(
+                Event(
+                    event_type=EventType.MP_STORE_SUBMITTED,
+                    session_id=key.request_id,
+                    metadata={"device": str(cache_context.device)},
+                )
+            )
+            self._ctx.event_bus.publish_on_stream(
+                cache_context.cupy_stream,
+                Event(
+                    event_type=EventType.MP_STORE_START,
+                    session_id=key.request_id,
+                    metadata={
+                        "device": str(cache_context.device),
+                        "engine_id": instance_id,
+                        "model_name": model_name,
+                    },
+                ),
+            )
+
+            all_reserved: dict[ObjectKey, MemoryObj] = {}
+            total_bytes: int = 0
+            store_succeeded = False
+            try:
+                for obj_group_id in range(num_object_groups):
+                    obj_keys = obj_keys_per_obj_group[obj_group_id]
+                    object_group = cache_context.kv_layer_groups_manager.object_groups[obj_group_id]
+                    kernel_group_ids = object_group.kernel_group_indices
+
+                    # Get single-layer layout for reserve_write
+                    single_layer_layout = get_single_layer_layout_desc(
+                        cache_context, self._ctx.chunk_size, obj_group_id
+                    )
+
+                    # Compute per-kernel-group info for layer slicing
+                    kg_infos = []
+                    for kernel_group_id in kernel_group_ids:
+                        kg = cache_context.kv_layer_groups_manager.kernel_groups[kernel_group_id]
+                        sd = kg.shape_desc
+                        slots_per_chunk = cache_context.get_slots_per_chunk_in_sw(kernel_group_id)
+                        per_kv_bytes = slots_per_chunk * kg.hidden_dim_size * sd.element_size
+
+                        # Byte offset of this kernel group within the object group
+                        kg_abs_offset = cache_context._temp_buffer._offset_map.get(
+                            (0, obj_group_id, kernel_group_id)
+                        )
+                        obj_group_abs_offset = cache_context._temp_buffer._offset_map_object_group_only.get(
+                            (0, obj_group_id)
+                        )
+                        if kg_abs_offset is None or obj_group_abs_offset is None:
+                            raise ValueError(
+                                f"Cannot find temp buffer offset for kg={kernel_group_id}, og={obj_group_id}"
+                            )
+                        kg_byte_offset_in_obj = kg_abs_offset[0] - obj_group_abs_offset[0]
+
+                        # Single-layer size for this kernel group
+                    single_layer_kg_bytes = sd.kv_size * per_kv_bytes
+                    kg_infos.append({
+                            "kernel_group_id": kernel_group_id,
+                            "kg": kg,
+                            "per_kv_bytes": per_kv_bytes,
+                            "kg_byte_offset_in_obj": kg_byte_offset_in_obj,
+                            "single_layer_kg_bytes": single_layer_kg_bytes,
+                        })
+
+                    # For each chunk: GPU kernel (all layers) → D2H per-layer
+                    for chunk_idx, obj_key in enumerate(obj_keys):
+                        # Split into per-layer keys
+                        num_total_layers = sum(
+                            info["kg"].num_layers for info in kg_infos
+                        )
+                        per_layer_keys = obj_key.split_layers(num_total_layers)
+
+                        # Reserve per-layer MemoryObjs
+                        reserved = self._ctx.storage_manager.reserve_write(
+                            per_layer_keys, single_layer_layout, "new"
+                        )
+                        all_reserved.update(reserved)
+                        if reserved:
+                            total_bytes += next(
+                                iter(reserved.values())
+                            ).get_size() * len(reserved)
+
+                        if not reserved:
+                            continue
+
+                        # GPU kernel: gather all layers from paged GPU → temp buffer
+                        lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
+
+                        # Stage block IDs for this single chunk
+                        for kernel_group_id in kernel_group_ids:
+                            blocks_per_chunk_kg = cache_context.calculate_num_blocks(
+                                lmcache_chunk_size, kernel_group_id
+                            )
+                            tokens_per_window = min(
+                                lmcache_chunk_size,
+                                cache_context.kv_layer_groups_manager.get_subchunk_sw_size_tokens(kernel_group_id),
+                            )
+                            blocks_per_window = cache_context.calculate_num_blocks(
+                                tokens_per_window, kernel_group_id
+                            )
+
+                            start_block_pos = chunk_idx * blocks_per_window
+                            end_block_pos = (chunk_idx + 1) * blocks_per_window
+                            block_ids_curr = block_ids_per_group_gpu[kernel_group_id][
+                                start_block_pos:end_block_pos
+                            ]
+
+                            group_kv_pointers = cache_context.get_kernel_group_kv_pointers(
+                                kernel_group_id
+                            )
+                            group_lmcache_chunk_size = cache_context.get_slots_per_chunk_in_sw(
+                                kernel_group_id
+                            )
+
+                            lmc_ops.multi_layer_block_kv_transfer(
+                                group_kv_pointers,
+                                [cache_context.get_temp_kernel_group_buffer(
+                                    0, kernel_group_id
+                                ).data_ptr()],
+                                block_ids_curr,
+                                cache_context.device,
+                                lmc_ops.TransferDirection.D2H,
+                                cache_context.get_shape_desc(kernel_group_id),
+                                group_lmcache_chunk_size,
+                                cache_context.get_engine_kv_format(kernel_group_id),
+                                0,  # skip_prefix_n_blocks
+                            )
+
+                        # D2H per-layer: copy each layer's K+V from GPU temp buffer
+                        # to its per-layer MemoryObj
+                        global_layer_idx = 0
+                        sl_kg_offset = 0  # byte offset within single-layer MemObj
+                        for info in kg_infos:
+                            kernel_group_id = info["kernel_group_id"]
+                            kg = info["kg"]
+                            per_kv_bytes = info["per_kv_bytes"]
+                            kg_byte_offset_in_obj = info["kg_byte_offset_in_obj"]
+
+                            gpu_kg_buffer = cache_context.get_temp_kernel_group_buffer(
+                                0, kernel_group_id
+                            )
+
+                            for layer_local_idx in range(kg.num_layers):
+                                layer_key = per_layer_keys[global_layer_idx]
+                                layer_memobj = reserved.get(layer_key)
+                                if layer_memobj is None:
+                                    global_layer_idx += 1
+                                    continue
+
+                                _d2h_layer_slice(
+                                    gpu_kg_buffer.data_ptr(),
+                                    layer_memobj,
+                                    sl_kg_offset,
+                                    layer_local_idx,
+                                    kg.num_layers,
+                                    per_kv_bytes,
+                                )
+                                global_layer_idx += 1
+                            sl_kg_offset += info["single_layer_kg_bytes"]
+
+                store_succeeded = True
+            except Exception:
+                logger.exception("Cannot store_layerwise keys due to exception")
+            finally:
+                event_backend.record_event(event, cache_context.stream)
+                stored_count = len(all_reserved) if store_succeeded else 0
+                if stored_count:
+                    submit_callback_to_stream(
+                        cache_context.cupy_stream,
+                        "finish_write",
+                        list(all_reserved.keys()),
+                    )
+                else:
+                    total_bytes = 0
+                num_tokens = num_chunks * self._ctx.chunk_size if stored_count else 0
+                self._ctx.event_bus.publish_on_stream(
+                    cache_context.cupy_stream,
+                    Event(
+                        event_type=EventType.MP_STORE_END,
+                        session_id=key.request_id,
+                        metadata={
+                            "stored_count": stored_count,
+                            "device": str(cache_context.device),
+                            "engine_id": instance_id,
+                            "model_name": model_name,
+                            "total_bytes": total_bytes,
+                            "num_tokens": num_tokens,
+                        },
+                    ),
+                )
+
+        ed = time.perf_counter()
+        if stored_count:
+            logger.info(
+                "Stored layerwise %d tokens (%d per-layer objects) in %.3f seconds",
+                num_chunks * self._ctx.chunk_size,
+                stored_count,
                 ed - st,
             )
         return (

@@ -63,6 +63,8 @@ def _object_key_to_string(key: ObjectKey) -> str:
         f"{key.model_name}{_KEY_SEP}{key.kv_rank:08x}"
         f"{_KEY_SEP}{key.object_group_id:x}{_KEY_SEP}{key.chunk_hash.hex()}"
     )
+    if key.layer_id >= 0:
+        base = f"{base}{_KEY_SEP}L{key.layer_id}"
     if key.cache_salt:
         return f"{base}{_KEY_SEP}{key.cache_salt}"
     return base

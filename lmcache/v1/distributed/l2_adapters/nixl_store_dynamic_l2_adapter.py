@@ -73,9 +73,10 @@ def _object_key_to_filename(key: ObjectKey) -> str:
     """
     safe_model_name = key.model_name.replace("/", "--")
     chunk_hex = key.chunk_hash.hex()
-    return (
-        f"{safe_model_name}_{key.kv_rank:08x}_{key.object_group_id:x}_{chunk_hex}.bin"
-    )
+    base = f"{safe_model_name}_{key.kv_rank:08x}_{key.object_group_id:x}_{chunk_hex}"
+    if key.layer_id >= 0:
+        base = f"{base}_L{key.layer_id}"
+    return f"{base}.bin"
 
 
 def _object_key_to_relpath(key: ObjectKey) -> str:
