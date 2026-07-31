@@ -18,11 +18,13 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchMode,
+    PrefetchRequestSpec,
     TrimPolicy,
 )
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
@@ -47,12 +49,13 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
 )
 from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
+from tests.v1.distributed.utils import should_use_lazy_alloc
 
-# Skip all tests in this module if CUDA is not available
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA is not available"
-)
-
+if not torch_dev.is_available():
+    pytest.skip(
+        f"Requires available {torch_device_type} runtime",
+        allow_module_level=True,
+    )
 
 # =============================================================================
 # Helpers
@@ -74,10 +77,6 @@ def make_layout() -> MemoryLayoutDesc:
         shapes=[torch.Size([100, 2, 512])],
         dtypes=[torch.bfloat16],
     )
-
-
-def should_use_lazy_alloc() -> bool:
-    return torch.cuda.is_available()
 
 
 def wait_for_condition(
@@ -266,7 +265,7 @@ class TestSingleAdapterPrefetch:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, layout))
         result = wait_for_prefetch_result(ctrl, req_id)
 
         assert result == 5, f"Expected 5 prefix hits, got {result}"
@@ -299,7 +298,7 @@ class TestSingleAdapterPrefetch:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(all_keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(all_keys, layout))
         result = wait_for_prefetch_result(ctrl, req_id)
 
         assert result == 2, f"Expected 2 prefix hits (gap at index 2), got {result}"
@@ -342,7 +341,7 @@ class TestSingleAdapterPrefetch:
         ctrl.start()
 
         req_id = ctrl.submit_prefetch_request(
-            all_keys, layout, policy=TrimPolicy.SEGMENTED_PREFIX
+            PrefetchRequestSpec(all_keys, layout, policy=TrimPolicy.SEGMENTED_PREFIX)
         )
         retained = wait_for_prefetch_result_bitmap(ctrl, req_id)
         assert retained is not None
@@ -389,7 +388,9 @@ class TestSingleAdapterPrefetch:
                 policy=DefaultPrefetchPolicy(),
             )
             ctrl.start()
-            req_id = ctrl.submit_prefetch_request(keys, layout, policy=trim)
+            req_id = ctrl.submit_prefetch_request(
+                PrefetchRequestSpec(keys, layout, policy=trim)
+            )
             retained = wait_for_prefetch_result_bitmap(ctrl, req_id)
             assert retained is not None
             assert retained.get_indices_list() == expected, (
@@ -419,7 +420,7 @@ class TestSingleAdapterPrefetch:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(all_keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(all_keys, layout))
         result = wait_for_prefetch_result(ctrl, req_id)
 
         assert result == 0, f"Expected 0 prefix hits (key 0 missing), got {result}"
@@ -459,7 +460,7 @@ class TestMultiAdapterPrefetch:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, layout))
         result = wait_for_prefetch_result(ctrl, req_id)
 
         assert result == 4, f"Expected 4 prefix hits, got {result}"
@@ -492,7 +493,7 @@ class TestMultiAdapterPrefetch:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, layout))
         result = wait_for_prefetch_result(ctrl, req_id)
 
         assert result == 3, f"Expected 3 prefix hits, got {result}"
@@ -530,7 +531,7 @@ class TestNoHits:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, layout))
         result = wait_for_prefetch_result(ctrl, req_id)
 
         assert result == 0, f"Expected 0 prefix hits, got {result}"
@@ -551,7 +552,7 @@ class TestNoHits:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, layout))
         result = wait_for_prefetch_result(ctrl, req_id)
 
         assert result == 0, f"Expected 0 prefix hits, got {result}"
@@ -582,7 +583,7 @@ class TestQueryResult:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, layout))
         result = wait_for_prefetch_result(ctrl, req_id)
 
         assert result == 2
@@ -631,7 +632,7 @@ class TestPrefetchL2LockRelease:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, layout))
         result = wait_for_prefetch_result(ctrl, req_id)
         assert result == 3
 
@@ -663,7 +664,7 @@ class TestPrefetchL2LockRelease:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(all_keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(all_keys, layout))
         result = wait_for_prefetch_result(ctrl, req_id)
         assert result == 2
 
@@ -693,7 +694,7 @@ class TestPrefetchL2LockRelease:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, layout))
         result = wait_for_prefetch_result(ctrl, req_id)
         assert result == 0
 
@@ -725,7 +726,7 @@ class TestPrefetchL2LockRelease:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, layout))
         result = wait_for_prefetch_result(ctrl, req_id)
         assert result == 3
 
@@ -773,7 +774,9 @@ class TestMaxInFlight:
         req_ids = []
         for i in range(4):
             batch_keys = all_keys[i * 2 : (i + 1) * 2]
-            req_id = ctrl.submit_prefetch_request(batch_keys, layout)
+            req_id = ctrl.submit_prefetch_request(
+                PrefetchRequestSpec(batch_keys, layout)
+            )
             req_ids.append(req_id)
 
         # All 4 requests should eventually complete
@@ -818,11 +821,11 @@ class TestMultipleRequests:
         )
         ctrl.start()
 
-        req1 = ctrl.submit_prefetch_request(keys1, layout)
+        req1 = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys1, layout))
         result1 = wait_for_prefetch_result(ctrl, req1)
         assert result1 == 3
 
-        req2 = ctrl.submit_prefetch_request(keys2, layout)
+        req2 = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys2, layout))
         result2 = wait_for_prefetch_result(ctrl, req2)
         assert result2 == 4
 
@@ -870,7 +873,9 @@ class TestExtraCountPrefetch:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout, extra_count=0)
+        req_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec(keys, layout, extra_count=0)
+        )
         result = wait_for_prefetch_result(ctrl, req_id)
         assert result == 3
 
@@ -904,7 +909,9 @@ class TestExtraCountPrefetch:
         ctrl.start()
 
         # extra_count=1 → 2 read locks per key
-        req_id = ctrl.submit_prefetch_request(keys, layout, extra_count=1)
+        req_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec(keys, layout, extra_count=1)
+        )
         result = wait_for_prefetch_result(ctrl, req_id)
         assert result == 3
 
@@ -950,7 +957,9 @@ class TestExtraCountPrefetch:
         ctrl.start()
 
         # extra_count=3 → 4 read locks per key
-        req_id = ctrl.submit_prefetch_request(keys, layout, extra_count=3)
+        req_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec(keys, layout, extra_count=3)
+        )
         result = wait_for_prefetch_result(ctrl, req_id)
         assert result == 2
 
@@ -994,7 +1003,9 @@ class TestExtraCountPrefetch:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(all_keys, layout, extra_count=1)
+        req_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec(all_keys, layout, extra_count=1)
+        )
         result = wait_for_prefetch_result(ctrl, req_id)
         assert result == 2, f"Expected 2 prefix hits (gap at index 2), got {result}"
 
@@ -1061,7 +1072,9 @@ class TestExtraCountPrefetch:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout, extra_count=1)
+        req_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec(keys, layout, extra_count=1)
+        )
         result = wait_for_prefetch_result(ctrl, req_id)
         # Only key 0 is in the prefix (key 1 reservation failed → gap)
         assert result == 1, f"Expected 1 prefix hit, got {result}"
@@ -1112,7 +1125,7 @@ class TestQueryLookupResult:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, layout))
 
         # Lookup result should be available before or at the same time as
         # the full prefetch result.
@@ -1144,7 +1157,7 @@ class TestQueryLookupResult:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, layout))
         lookup_hits = wait_for_lookup_result(ctrl, req_id)
         assert lookup_hits is not None
         # Only key 0 is in the prefix (gap at key 1 breaks it)
@@ -1172,7 +1185,7 @@ class TestQueryLookupResult:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, layout))
         lookup_hits = wait_for_lookup_result(ctrl, req_id)
         assert lookup_hits is not None
         assert lookup_hits == 0
@@ -1198,7 +1211,7 @@ class TestQueryLookupResult:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, layout))
         lookup_hits = wait_for_lookup_result(ctrl, req_id)
         assert lookup_hits == 2
 
@@ -1227,7 +1240,7 @@ class TestQueryLookupResult:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, layout))
         lookup_hits = wait_for_lookup_result(ctrl, req_id)
         assert lookup_hits == 2
 
@@ -1339,7 +1352,7 @@ class TestWaitPrefetchResult:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, layout))
         # Blocks until the background thread publishes the result.
         assert ctrl.wait_prefetch_result(req_id, timeout=10.0) is True
         # wait_prefetch_result must not consume the result.
@@ -1400,7 +1413,9 @@ class TestPrefetchMode:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout, mode=PrefetchMode.WARM)
+        req_id = ctrl.submit_prefetch_request(
+            PrefetchRequestSpec(keys, layout, mode=PrefetchMode.WARM)
+        )
         result = wait_for_prefetch_result(ctrl, req_id)
         assert result == 3
 
@@ -1450,10 +1465,12 @@ class TestPrefetchMode:
         ctrl.start()
 
         req_id = ctrl.submit_prefetch_request(
-            keys,
-            layout,
-            policy=TrimPolicy.SPARSE,
-            mode=PrefetchMode.WARM,
+            PrefetchRequestSpec(
+                keys,
+                layout,
+                policy=TrimPolicy.SPARSE,
+                mode=PrefetchMode.WARM,
+            )
         )
         result = wait_for_prefetch_result_bitmap(ctrl, req_id)
         assert result is not None
@@ -1485,7 +1502,7 @@ class TestPrefetchMode:
         )
         ctrl.start()
 
-        req_id = ctrl.submit_prefetch_request(keys, layout)
+        req_id = ctrl.submit_prefetch_request(PrefetchRequestSpec(keys, layout))
         result = wait_for_prefetch_result(ctrl, req_id)
         assert result == 3
 

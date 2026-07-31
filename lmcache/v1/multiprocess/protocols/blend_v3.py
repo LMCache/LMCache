@@ -22,10 +22,13 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
     """Return V3 blend protocol definitions."""
     return {
         # Register rope state on a previously-registered instance.
-        # Payload: (instance_id, cos_sin_cache_ipc, head_size, is_neox_style).
-        # Returns: None.
+        # Payload: (instance_id, cos_sin_caches_ipc, head_size, is_neox_style,
+        #           group_to_cache).
+        # cos_sin_caches_ipc: one IPC handle per distinct rope (dual-RoPE
+        # models send two); group_to_cache maps engine group
+        # idx -> cache idx (empty = all groups use cache 0). Returns: None.
         "CB_REGISTER_ROPE_V3": ProtocolDefinition(
-            payload_classes=[int, DeviceIPCWrapper, int, bool],
+            payload_classes=[int, list[DeviceIPCWrapper], int, bool, list[int]],
             response_class=None,
             handler_type=HandlerType.SYNC,
         ),
@@ -39,12 +42,12 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Retrieve pre-computed chunks into the request's paged blocks.
         # Payload: (key, cb_match_result, gpu_block_ids, instance_id,
         #           event_ipc_handle).
-        # Returns: (event_ipc_handle: bytes, success: bool).
+        # gpu_block_ids is per engine group (list[list[int]]).
         "CB_RETRIEVE_PRE_COMPUTED_V3": ProtocolDefinition(
             payload_classes=[
                 IPCCacheServerKey,
                 list[CBMatchResult],
-                list[int],
+                list[list[int]],
                 int,
                 bytes,
             ],

@@ -291,6 +291,81 @@ With ``failurePolicy: Ignore`` a webhook / cert problem also leaves the pod
 un-mutated silently -- confirm the operator pod is ``Running`` and the
 ``MutatingWebhookConfiguration`` exists.
 
+Using the Latest (or a Pinned) lmcache
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+By default a vLLM pod runs whatever ``lmcache`` is baked into its image.  To run
+a **different** lmcache build instead -- e.g. ship the latest lmcache onto an
+older, stable vLLM image, or keep the vLLM client on the exact build its
+``LMCacheEngine`` server runs -- set ``spec.injection.payloadImage`` on the
+engine.  The webhook then additionally stages that image's ``lmcache`` tree into
+each opted-in pod: an ``emptyDir`` + an init container that copies the tree in, a
+read-only mount, and ``PYTHONPATH=/lmcache-payload`` so vLLM imports the staged
+``lmcache`` instead of the baked-in one.  No vLLM image rebuild.
+
+**1. Build the payload image.** It ships the unpacked ``lmcache`` tree under
+``/payload`` and copies it to ``$SHARED_DIR`` on start.  ``docker/Dockerfile.payload``
+builds it by extracting an ABI-matched ``lmcache`` from an lmcache image (the
+``SOURCE_IMAGE`` build-arg selects the version):
+
+.. code-block:: bash
+
+    docker build -f docker/Dockerfile.payload \
+      --build-arg SOURCE_IMAGE=lmcache/vllm-openai:latest-nightly \
+      -t <registry>/lmcache-payload:latest .
+    docker push <registry>/lmcache-payload:latest
+
+**2. Point the engine at it.** ``payloadImage.repository`` has no valid default
+(the inherited image default is not a payload), so set it explicitly; leaving
+``injection`` unset keeps connection-only wiring.
+
+.. code-block:: yaml
+
+    apiVersion: lmcache.lmcache.ai/v1alpha1
+    kind: LMCacheEngine
+    metadata:
+      name: my-cache-versioned
+    spec:
+      l1:
+        sizeGB: 60
+      injection:
+        payloadImage:
+          repository: <registry>/lmcache-payload
+          tag: latest
+          pullPolicy: Always          # :latest moves -- re-pull for the current build
+        # imagePullSecrets:            # private payload registry only
+        #   - name: my-registry-secret
+
+Opted-in pods bound to this engine (label + annotation as above) need no
+changes -- the webhook stages the payload automatically.  Ready-to-apply
+samples: ``config/samples/lmcache_v1alpha1_lmcacheengine_injection.yaml`` and
+``config/samples/vllm_lmcache_injection_deployment.yaml``.
+
+.. note::
+   The payload's ``lmcache`` must be **ABI-compatible** (same Python minor
+   version and a compatible torch) with the vLLM image that imports it -- it
+   ships compiled extensions.  If they differ, ``import lmcache`` fails with an
+   ``undefined symbol`` error in the vLLM pod.  Building the payload from an
+   lmcache image close to your vLLM image keeps them compatible.
+
+**3. Verify the swap** on a running pod -- contrast the normal import with one
+that ignores the injected ``PYTHONPATH``:
+
+.. code-block:: bash
+
+    POD=$(kubectl get pod -l app=vllm-lmcache-versioned -o name | head -1)
+
+    # imports the STAGED build (from /lmcache-payload):
+    kubectl exec $POD -c vllm -- python3 -c \
+      "import lmcache; print(lmcache.__version__, lmcache.__file__)"
+
+    # PYTHONPATH stripped -> the image's baked-in build (site-packages):
+    kubectl exec $POD -c vllm -- env -u PYTHONPATH python3 -c \
+      "import lmcache; print(lmcache.__version__, lmcache.__file__)"
+
+Two different sources for the same module confirms the swap.  If nothing was
+staged, check ``lmcache.ai/lmcache-skip-reason`` on the pod.
+
 Verifying the Deployment
 ------------------------
 
@@ -444,6 +519,28 @@ L2 Storage
      - --
      - List of L2 backends (``type`` + ``config``).
        See :doc:`l2_storage/index`.
+   * - ``l2Backend.serde``
+     - --
+     - Optional serde transform on KV bytes to/from the L2 adapter
+       (rendered as the ``serde`` sub-dict of ``--l2-adapter``). Exactly
+       one serde type must be set. See :doc:`serde`.
+   * - ``l2Backend.serde.aesgcm``
+     - --
+     - At-rest encryption of L2 KV bytes (AES-GCM, keyed per
+       ``cache_salt``). L1 (host RAM) and L0 (GPU) remain plaintext.
+   * - ``l2Backend.serde.aesgcm.masterKeySecretRef.name``
+     - --
+     - Required. User-created Secret in the engine's namespace holding
+       the master key under the ``master`` data key; mounted read-only
+       into the engine pods at ``/etc/lmcache/keys/master``. The
+       operator never generates key material.
+   * - ``l2Backend.serde.aesgcm.keyProvider``
+     - ``hkdf``
+     - How per-``cache_salt`` keys are derived from the master key.
+       Only ``hkdf`` (HKDF-SHA256) is implemented.
+   * - ``l2Backend.serde.aesgcm.aesBits``
+     - ``128``
+     - AES key size: ``128`` or ``256``.
 
 GPU & Security
 ~~~~~~~~~~~~~~
@@ -644,6 +741,13 @@ The operator validates the CR spec at apply time:
      - Must be in (0.0, 1.0].
    * - ``server.port``
      - Must be in [1024, 65535].
+   * - ``l2Backend.serde``
+     - Exactly one serde type must be set (only ``aesgcm`` today).
+   * - ``l2Backend.serde.aesgcm.masterKeySecretRef.name``
+     - Required, must be non-empty.
+   * - ``l2Backend.serde`` + ``l2Backend.raw``
+     - Rejected if the raw adapter config already sets a ``serde`` key
+       (one would silently overwrite the other).
 
 Examples
 --------
@@ -689,6 +793,43 @@ If the default port (5555) conflicts with other services:
 
 The connection ConfigMap updates automatically -- vLLM pods pick up the new
 port on restart.
+
+Encrypted L2 Backend
+~~~~~~~~~~~~~~~~~~~~
+
+Encrypt KV bytes at rest in the L2 tier with the ``aesgcm`` serde. Create
+the master-key Secret first, in the engine's namespace (the operator never
+generates keys):
+
+.. code-block:: bash
+
+    head -c 16 /dev/urandom > master.key   # 16 bytes for AES-128, 32 for AES-256
+    kubectl create secret generic lmcache-l2-master-key \
+        --from-file=master=master.key
+
+.. code-block:: yaml
+
+    apiVersion: lmcache.lmcache.ai/v1alpha1
+    kind: LMCacheEngine
+    metadata:
+      name: my-cache
+    spec:
+      l1:
+        sizeGB: 60
+      l2Backend:
+        raw:
+          type: fs
+          config:
+            base_path: /data/lmcache/l2
+        serde:
+          aesgcm:
+            masterKeySecretRef:
+              name: lmcache-l2-master-key
+
+The Secret is mounted directly into the engine pods (read-only, only the
+``master`` data key). A missing Secret or missing key surfaces as a pod
+mount event and self-heals once the Secret is fixed. See :doc:`serde` for
+the key model and threat model.
 
 Production with Prometheus Monitoring
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

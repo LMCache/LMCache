@@ -5,6 +5,8 @@
 # Standard
 from unittest.mock import MagicMock, patch
 import asyncio
+import mmap
+import multiprocessing
 import os
 
 # Third Party
@@ -53,6 +55,43 @@ def _has_ext() -> bool:
         return True
     except Exception:
         return False
+
+
+def _run_uring_cmd_build_error_probe(device_path: str) -> None:
+    """Verify that a middle SQE build failure completes without hanging."""
+    # Third Party
+    from lmcache_rust_raw_block_io import RawBlockDevice
+
+    raw_device = RawBlockDevice(
+        device_path,
+        writable=False,
+        use_odirect=False,
+        alignment=4096,
+        io_engine="io_uring",
+        iouring_queue_depth=256,
+        use_uring_cmd=True,
+    )
+    buffers: list[mmap.mmap] = []
+    try:
+        lba_size = raw_device.nvme_lba_size()
+        buffers = [mmap.mmap(-1, lba_size) for _ in range(3)]
+        batch_id = raw_device.batched_read(
+            [0, 1, lba_size],
+            buffers,
+            [lba_size] * len(buffers),
+        )
+
+        try:
+            raw_device.wait_iouring(batch_id)
+        except ValueError as error:
+            if "offset must be aligned to LBA size" not in str(error):
+                raise
+        else:
+            raise AssertionError("expected the unaligned middle SQE build to fail")
+    finally:
+        raw_device.close()
+        for buffer in buffers:
+            buffer.close()
 
 
 # Skip all tests in this file if the Rust extension is not available
@@ -227,6 +266,68 @@ def test_uring_cmd_get_nvme_info(loop_in_thread):
         pytest.fail(f"Failed to get NVMe info: {e}")
 
 
+def test_uring_cmd_rejects_alignment_smaller_than_lba():
+    """A 4Kn namespace must reject a 512-byte transfer alignment."""
+    device_path = TEST_DEVICES["char_device"]
+    if not os.path.exists(device_path):
+        pytest.skip(f"Test device {device_path} not found.")
+
+    lba_path = os.path.join(
+        _get_sysfs_path(device_path),
+        "queue",
+        "logical_block_size",
+    )
+    try:
+        with open(lba_path, encoding="utf-8") as file:
+            lba_size = int(file.read().strip())
+    except (OSError, ValueError):
+        pytest.skip(f"Cannot determine the namespace LBA size from {lba_path}.")
+
+    if lba_size <= 512:
+        pytest.skip(
+            "Test requires an NVMe namespace with an LBA larger than 512 bytes."
+        )
+
+    # Third Party
+    from lmcache_rust_raw_block_io import RawBlockDevice
+
+    expected_error = (
+        rf"alignment \(512\) must be a non-zero multiple of "
+        rf"NVMe LBA size \({lba_size}\)"
+    )
+    with pytest.raises(ValueError, match=expected_error):
+        RawBlockDevice(
+            device_path,
+            writable=False,
+            use_odirect=False,
+            alignment=512,
+            io_engine="io_uring",
+            iouring_queue_depth=256,
+            use_uring_cmd=True,
+        )
+
+
+def test_uring_cmd_middle_build_error_does_not_hang():
+    """A rejected middle SQE must complete its batch with an error."""
+    device_path = TEST_DEVICES["char_device"]
+    if not os.path.exists(device_path):
+        pytest.skip(f"Test device {device_path} not found.")
+
+    context = multiprocessing.get_context("spawn")
+    process = context.Process(
+        target=_run_uring_cmd_build_error_probe,
+        args=(device_path,),
+    )
+    process.start()
+    process.join(timeout=10)
+    if process.is_alive():
+        process.terminate()
+        process.join()
+        pytest.fail("wait_iouring hung after a middle SQE build error")
+
+    assert process.exitcode == 0
+
+
 def test_uring_cmd_disabled(loop_in_thread):
     """Test that NVMe methods are not available when use_uring_cmd is disabled."""
     config = MockConfig(device_path=TEST_DEVICES["null_device"], use_uring_cmd=False)
@@ -308,7 +409,7 @@ def test_uring_cmd_explicit_transfer_limit_must_be_block_aligned():
     with pytest.raises(
         ValueError,
         match=r"max_data_transfer_size \(5000\) must be a multiple of "
-        "block_align \(4096\)",
+        r"block_align \(4096\)",
     ):
         _build_transfer_limit_backend(
             TEST_DEVICES["char_device"], max_data_transfer_size=5000

@@ -54,8 +54,10 @@ class TestCoordinatorCommandArguments:
                 "0.5",
                 "--trigger-watermark",
                 "0.9",
-                "--blend-chunk-size",
+                "--chunk-size",
                 "512",
+                "--hash-algorithm",
+                "sha256",
                 "--blend-probe-stride",
                 "2",
                 "--timeout-keep-alive",
@@ -64,21 +66,23 @@ class TestCoordinatorCommandArguments:
         )
         assert args.host == "127.0.0.1"
         assert args.port == 9999
-        assert args.blend_chunk_size == 512
+        assert args.chunk_size == 512
+        assert args.hash_algorithm == "sha256"
         assert args.blend_probe_stride == 2
         assert args.timeout_keep_alive == 15
 
     def test_flags_default_to_none(self, parser):
         """Unset flags default to None so env/config defaults win."""
         args = parser.parse_args(["coordinator"])
-        assert args.blend_chunk_size is None
+        assert args.chunk_size is None
+        assert args.hash_algorithm is None
         assert args.blend_probe_stride is None
         assert args.timeout_keep_alive is None
 
 
 class TestCoordinatorCommandExecute:
-    def test_blend_overrides_applied(self, cmd):
-        """blend_chunk_size/blend_probe_stride flags override the config."""
+    def test_overrides_applied(self, cmd):
+        """chunk_size/hash_algorithm/blend_probe_stride flags override the config."""
         # First Party
         from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 
@@ -90,7 +94,8 @@ class TestCoordinatorCommandExecute:
             eviction_check_interval=None,
             eviction_ratio=None,
             trigger_watermark=None,
-            blend_chunk_size=512,
+            chunk_size=512,
+            hash_algorithm="sha256",
             blend_probe_stride=2,
             timeout_keep_alive=None,
         )
@@ -110,5 +115,6 @@ class TestCoordinatorCommandExecute:
         ):
             cmd.execute(args)
 
-        assert captured["config"].blend_chunk_size == 512
+        assert captured["config"].chunk_size == 512
+        assert captured["config"].hash_algorithm == "sha256"
         assert captured["config"].blend_probe_stride == 2

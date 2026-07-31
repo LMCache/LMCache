@@ -51,8 +51,15 @@ FMT_SGLANG_MHA = lmc_ops.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS
 FMT_SGLANG_MLA = lmc_ops.EngineKVFormat.NL_X_NBBS_ONE_HS
 FMT_NORMAL_HND = lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS
 FMT_FLASH_INFER_HND = lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS
+FMT_VLLM_FUSED_HND = lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS
+FMT_VLLM_FUSED_NHD = lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS
+FMT_VLLM_CS_HND = lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_CS
+FMT_VLLM_CS_NHD = lmc_ops.EngineKVFormat.NL_X_NB_BS_NH_CS
 
 # Format parameters: (engine_kv_format, num_layers, num_heads, head_size, is_mla)
+# The is_mla column really means "kv_size == 1": the fused-K/V and content-size
+# formats are not MLA but transfer with kv_size == 1 and hs already doubled
+# (kv-packed D).
 # Use small layer counts to keep GPU memory usage low in CI
 FORMAT_PARAMS = [
     (FMT_NORMAL, 4, 8, 128, False),
@@ -63,6 +70,10 @@ FORMAT_PARAMS = [
     (FMT_SGLANG_MLA, 4, 1, 576, True),
     (FMT_NORMAL_HND, 4, 8, 128, False),
     (FMT_FLASH_INFER_HND, 4, 8, 128, False),
+    (FMT_VLLM_FUSED_HND, 4, 8, 256, True),
+    (FMT_VLLM_FUSED_NHD, 4, 8, 256, True),
+    (FMT_VLLM_CS_HND, 4, 8, 256, True),
+    (FMT_VLLM_CS_NHD, 4, 8, 256, True),
 ]
 
 
@@ -91,6 +102,12 @@ def create_vllm_tensors(
         return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
     elif engine_kv_format == FMT_FLASH_INFER_HND:
         shape = [nb, 2, nh, bs, hs]
+        return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
+    elif engine_kv_format in (FMT_VLLM_FUSED_HND, FMT_VLLM_CS_HND):
+        shape = [nb, nh, bs, hs]  # hs is the fused 2 * head_size
+        return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
+    elif engine_kv_format in (FMT_VLLM_FUSED_NHD, FMT_VLLM_CS_NHD):
+        shape = [nb, bs, nh, hs]  # hs is the fused 2 * head_size
         return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
     elif engine_kv_format == FMT_MLA:
         shape = [nb, bs, hs]
@@ -129,6 +146,12 @@ def create_zero_vllm_tensors(
         return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
     elif engine_kv_format == FMT_FLASH_INFER_HND:
         shape = [nb, 2, nh, bs, hs]
+        return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
+    elif engine_kv_format in (FMT_VLLM_FUSED_HND, FMT_VLLM_CS_HND):
+        shape = [nb, nh, bs, hs]  # hs is the fused 2 * head_size
+        return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
+    elif engine_kv_format in (FMT_VLLM_FUSED_NHD, FMT_VLLM_CS_NHD):
+        shape = [nb, bs, nh, hs]  # hs is the fused 2 * head_size
         return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
     elif engine_kv_format == FMT_MLA:
         shape = [nb, bs, hs]
@@ -186,6 +209,10 @@ def get_block_data(
             results.append(vllm_tensors[layer_idx][block_idx, :, :, :, :].clone())
         elif engine_kv_format == FMT_FLASH_INFER_HND:
             results.append(vllm_tensors[layer_idx][block_idx, :, :, :, :].clone())
+        elif engine_kv_format in (FMT_VLLM_FUSED_HND, FMT_VLLM_CS_HND):
+            results.append(vllm_tensors[layer_idx][block_idx, :, :, :].clone())
+        elif engine_kv_format in (FMT_VLLM_FUSED_NHD, FMT_VLLM_CS_NHD):
+            results.append(vllm_tensors[layer_idx][block_idx, :, :, :].clone())
         elif engine_kv_format == FMT_MLA:
             results.append(vllm_tensors[layer_idx][block_idx, :, :].clone())
         elif engine_kv_format == FMT_SGLANG_MHA:
@@ -272,6 +299,10 @@ TOTAL_BLOCKS = NUM_MEMORY_OBJECTS * BLOCKS_PER_OBJECT  # 64
         "sglang_mla",
         "normal_hnd",
         "flash_infer_hnd",
+        "vllm_fused_hnd",
+        "vllm_fused_nhd",
+        "vllm_cs_hnd",
+        "vllm_cs_nhd",
     ],
 )
 @pytest.mark.parametrize(
@@ -375,6 +406,10 @@ def test_block_transfer_roundtrip(
         "sglang_mla",
         "normal_hnd",
         "flash_infer_hnd",
+        "vllm_fused_hnd",
+        "vllm_fused_nhd",
+        "vllm_cs_hnd",
+        "vllm_cs_nhd",
     ],
 )
 @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=["bf16"])

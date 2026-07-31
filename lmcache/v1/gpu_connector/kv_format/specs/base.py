@@ -34,6 +34,7 @@ _LABELS = {
     "BS": "BS",
     "NH": "NH",
     "HS": "HS",
+    "CS": "CS",
 }
 _ACCESSORS = {
     "NB": "num_blocks",
@@ -41,6 +42,7 @@ _ACCESSORS = {
     "BS": "block_size",
     "NH": "num_heads",
     "HS": "head_size",
+    "CS": "head_size",
     "PBS": "page_buffer_size",
 }
 
@@ -130,6 +132,12 @@ class KVFormatSpec(ABC):
         """Return ``num_blocks * block_size`` (or the fused PBS axis).
 
         Non-MP only (see the class docstring).
+        """
+
+    @abstractmethod
+    def kv_size(self) -> int:
+        """Return the number of dimensions for "KV". For normal specs, it's 2.
+        Some specs has a fused KV (e.g., MLA, or new vLLM format), so it's 1.
         """
 
     @abstractmethod

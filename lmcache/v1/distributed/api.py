@@ -24,6 +24,32 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+class Tier(str, enum.Enum):
+    """A cache tier.
+
+    Subclasses ``str`` so it validates from / compares equal to the bare wire
+    value (``Tier.L2 == "l2"``) and serializes as that value. ``ALL`` is only
+    valid for operations that explicitly support multiple tiers.
+    """
+
+    L1 = "l1"
+    L2 = "l2"
+    ALL = "all"
+
+
+class L1BackendType(str, enum.Enum):
+    """The storage medium backing the L1 tier (a closed set, unlike L2
+    backends, which are an open adapter-type registry).
+
+    Subclasses ``str`` so it compares equal to and serializes as the bare
+    wire value (``L1BackendType.DRAM == "dram"``).
+    """
+
+    DRAM = "dram"
+    DEVDAX = "devdax"
+    GDS = "gds"
+
+
 class TrimPolicy(enum.Enum):
     """How to pick the retained subset of found keys for a prefetch.
 
@@ -302,6 +328,31 @@ class AttnWindowDesc:
 DEFAULT_ATTN_WINDOW_DESC = AttnWindowDesc(num_chunks_in_sw=[-1])
 """A single full-attention object group; the default when no per-object-group
 windows are supplied."""
+
+
+@dataclass(frozen=True)
+class PrefetchRequestSpec:
+    """Immutable inputs of a single L2 prefetch request.
+
+    Bundles the caller-supplied arguments that travel together into the
+    prefetch controller's submission queue. See
+    ``PrefetchController._start_lookup_phase`` for per-field semantics.
+
+    Attributes:
+        keys: Object keys to prefetch; order defines the prefix.
+        layout_desc: Memory layout for L1 write-buffer allocation.
+        extra_count: Extra read locks per key beyond the default 1.
+        policy: Retained-subset policy (see :class:`TrimPolicy`).
+        attn_desc: Cross-chunk attention windows, in object-group order.
+        mode: Prefetch intent (see :class:`PrefetchMode`).
+    """
+
+    keys: list[ObjectKey]
+    layout_desc: MemoryLayoutDesc
+    extra_count: int = 0
+    policy: TrimPolicy = TrimPolicy.PREFIX
+    attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
+    mode: PrefetchMode = PrefetchMode.LOOKUP
 
 
 @dataclass(frozen=True)

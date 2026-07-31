@@ -15,7 +15,11 @@ import torch
 
 # First Party
 from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    ObjectKey,
+    PrefetchRequestSpec,
+)
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -39,8 +43,8 @@ from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2ReconfigureError,
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
 from lmcache.v1.memory_management import (
-    AdHocMemoryAllocator,
     MemoryFormat,
     MemoryObj,
 )
@@ -800,7 +804,7 @@ def test_storage_manager_dax_adapter_roundtrip(tmp_path):
             timeout=5.0,
         )
 
-        handle = sm.submit_prefetch_task([key], layout)
+        handle = sm.submit_prefetch_task(PrefetchRequestSpec([key], layout))
         assert wait_for_condition(
             lambda: sm.query_prefetch_lookup_hits(handle) is not None,
             timeout=5.0,

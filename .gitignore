@@ -113,6 +113,9 @@ lmcache/experimental/tests
 # PyCharm
 .idea/
 
+# JetBrains run configurations
+.run/
+
 # VSCode
 .vscode/
 

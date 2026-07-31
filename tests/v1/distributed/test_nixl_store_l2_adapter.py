@@ -7,6 +7,9 @@ Tests only use public methods and do not access private fields.
 """
 
 # Standard
+from unittest.mock import call, patch
+import errno
+import os
 import select
 import shutil
 import tempfile
@@ -16,8 +19,21 @@ import time
 import pytest
 import torch
 
-nixl = pytest.importorskip("nixl")
+# First Party
+from lmcache import torch_device_type
 
+nixl = pytest.importorskip("nixl")
+if torch_device_type == "xpu":
+    pytest.skip(
+        (
+            "Skip on XPU: in vllm/vllm-openai-xpu:v0.26.0, "
+            "NIXL dynamic store backends are unavailable at runtime "
+            "(including POSIX), adapter init can fail with "
+            "NIXL_ERR_NOT_FOUND, so this suite is not runnable "
+            "on XPU in the current test environment."
+        ),
+        allow_module_level=True,
+    )
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey  # noqa: E402
 from lmcache.v1.distributed.internal_api import (  # noqa: E402
@@ -702,6 +718,55 @@ class TestEndToEndWorkflow:
 class TestCloseInterface:
     """Test the close operation."""
 
+    def test_close_releases_nixl_resources(self, tmp_path):
+        """close() should release NIXL handles, registrations, and storage FDs."""
+        buffer = torch.empty(
+            PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8, device="cpu"
+        )
+        l1_memory = L1MemoryDesc(
+            ptr=buffer.data_ptr(),
+            size=buffer.numel(),
+            align_bytes=PAGE_SIZE,
+        )
+        config = NixlStoreL2AdapterConfig(
+            backend="POSIX",
+            backend_params={
+                "file_path": str(tmp_path),
+                "use_direct_io": "false",
+            },
+            pool_size=POOL_SIZE,
+        )
+        adpt = NixlStoreL2Adapter(config, l1_memory)
+        storage_agent = adpt.nixl_agent
+        storage_fds = list(storage_agent.storage_fds)
+
+        with (
+            patch.object(
+                storage_agent.nixl_agent,
+                "release_dlist_handle",
+                wraps=storage_agent.nixl_agent.release_dlist_handle,
+            ) as release_dlist_handle,
+            patch.object(
+                storage_agent.nixl_agent,
+                "deregister_memory",
+                wraps=storage_agent.nixl_agent.deregister_memory,
+            ) as deregister_memory,
+        ):
+            adpt.close()
+
+        assert release_dlist_handle.call_args_list == [
+            call(storage_agent.storage_xfer_handler),
+            call(storage_agent.mem_xfer_handler),
+        ]
+        assert deregister_memory.call_args_list == [
+            call(storage_agent.storage_reg_descs),
+            call(storage_agent.mem_reg_descs),
+        ]
+        for fd in storage_fds:
+            with pytest.raises(OSError) as exc_info:
+                os.fstat(fd)
+            assert exc_info.value.errno == errno.EBADF
+
     def test_close_does_not_raise(self):
         """close() should not raise an exception."""
         tmp_dir = tempfile.mkdtemp(prefix="nixl_l2_close_test_")
@@ -847,10 +912,6 @@ def _store_and_wait(adpt, key, obj):
     adpt.pop_completed_store_tasks()
 
 
-@pytest.mark.skip(
-    reason="Leaks file descriptors — "
-    "NixlStorageAgent.close() does not close os.open() FDs"
-)
 class TestEvictionInterface:
     """Tests for delete(), get_usage(), and listener notifications."""
 
@@ -882,31 +943,30 @@ class TestEvictionInterface:
         obj = create_memory_obj(buf, page_index=0)
 
         _store_and_wait(adpt, key, obj)
-        usage_after_store, _ = adpt.get_usage()
-        assert usage_after_store > 0.0
+        free_slots_after_store = adpt.report_status()["pool_free_slots"]
 
         adpt.delete([key])
 
-        usage_after_delete, _ = adpt.get_usage()
-        assert usage_after_delete < usage_after_store
+        free_slots_after_delete = adpt.report_status()["pool_free_slots"]
+        assert free_slots_after_delete == free_slots_after_store + 1
 
     def test_get_usage_empty_adapter_is_zero(self, adapter):
-        """get_usage() on a fresh adapter should return (0.0, 0.0)."""
+        """get_usage() on a fresh adapter should report no used bytes."""
         adpt, _ = adapter
-        current, projected = adpt.get_usage()
-        assert current == 0.0
-        assert projected == 0.0
+        usage = adpt.get_usage()
+        assert usage.total_bytes_used == 0
+        assert usage.usage_fraction == 0.0
 
     def test_get_usage_increases_after_store(self, adapter):
-        """get_usage() current value should be > 0 after storing an object."""
+        """get_usage() should report positive utilization after a store."""
         adpt, buf = adapter
         key = create_object_key(1)
         obj = create_memory_obj(buf, page_index=0)
         _store_and_wait(adpt, key, obj)
 
-        current, _ = adpt.get_usage()
-        assert current > 0.0
-        assert current <= 1.0
+        usage = adpt.get_usage()
+        assert usage.usage_fraction > 0.0
+        assert usage.usage_fraction <= 1.0
 
     def test_get_usage_reflects_multiple_stores(self, adapter):
         """get_usage() should increase monotonically as more objects are stored."""
@@ -919,9 +979,9 @@ class TestEvictionInterface:
         assert wait_for_event_fd(store_fd, timeout=5.0)
         adpt.pop_completed_store_tasks()
 
-        current, _ = adpt.get_usage()
+        usage = adpt.get_usage()
         # 3 out of POOL_SIZE slots used
-        assert current == pytest.approx(3 / POOL_SIZE)
+        assert usage.usage_fraction == pytest.approx(3 / POOL_SIZE)
 
     def test_delete_pinned_key_is_skipped(self, adapter):
         """delete() should skip a key that is pinned by an in-flight lookup."""
