@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 import enum
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import L1BackendType, ObjectKey
 
 
 @dataclass(frozen=True)
@@ -21,6 +21,19 @@ class L1MemoryDesc:
     ptr: int
     size: int
     align_bytes: int
+
+
+@dataclass(frozen=True)
+class L1ObjectMeta:
+    """Per-object metadata published alongside keys in L1 cache events.
+
+    Attributes:
+        size_bytes: Logical byte size of the object.
+        backend: The storage medium backing the object.
+    """
+
+    size_bytes: int
+    backend: L1BackendType
 
 
 class EventListener(ABC):  # noqa: B024

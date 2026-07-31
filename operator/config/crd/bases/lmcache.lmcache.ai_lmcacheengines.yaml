@@ -1435,6 +1435,58 @@ spec:
                     - host
                     - port
                     type: object
+                  serde:
+                    description: |-
+                      serde configures a transform applied to KV bytes on their way to
+                      and from the L2 adapter (whichever of resp or raw is configured).
+                      Exactly one serde type must be set.
+                    properties:
+                      aesgcm:
+                        description: |-
+                          aesgcm enables at-rest encryption of KV bytes in the L2 tier,
+                          keyed per cache_salt. L1 (host RAM) and L0 (GPU) remain plaintext.
+                        properties:
+                          aesBits:
+                            default: 128
+                            description: aesBits selects the AES key size (128 or
+                              256).
+                            enum:
+                            - 128
+                            - 256
+                            format: int32
+                            type: integer
+                          keyProvider:
+                            default: hkdf
+                            description: |-
+                              keyProvider selects how per-cache_salt keys are obtained from the
+                              master key. Only "hkdf" (HKDF-SHA256 derivation) is implemented.
+                            enum:
+                            - hkdf
+                            type: string
+                          masterKeySecretRef:
+                            description: |-
+                              masterKeySecretRef names a user-created Secret in the engine's
+                              namespace holding the master key under the "master" data key. The
+                              Secret is mounted directly into the engine pods; the reference is
+                              same-namespace only, so creating an engine CR cannot be used to
+                              read Secrets from other namespaces. The operator never generates
+                              key material.
+                            properties:
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
+                            type: object
+                            x-kubernetes-map-type: atomic
+                        required:
+                        - masterKeySecretRef
+                        type: object
+                    type: object
                   storePolicy:
                     default: default
                     description: |-
@@ -1481,12 +1533,7 @@ spec:
                   this is required for the engine to see all node GPUs (for CUDA IPC) without
                   claiming any via the nvidia.com/gpu device plugin; on many clusters
                   NVIDIA_VISIBLE_DEVICES=all already grants that visibility without it, so it
-                  defaults to false. Set it to true only on clusters where the engine cannot
-                  otherwise see the GPUs. For gpuVendor "amd" this is effectively required:
-                  there is no NVIDIA-style RuntimeClass device injection, so privileged mode
-                  is the only way the engine reaches /dev/kfd and /dev/dri. Clusters using Pod
-                  Security Standards must allow the privileged profile for this namespace when
-                  it is enabled. Default: false.
+                  defaults to false.
                 type: boolean
               prometheus:
                 description: prometheus defines Prometheus monitoring configuration.

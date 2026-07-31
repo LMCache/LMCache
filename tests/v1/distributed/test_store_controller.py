@@ -343,13 +343,15 @@ class TestStoreControllerSingleAdapter:
 
         # Verify read lock is released: the key should be updatable
         ok = wait_for_condition(
-            lambda: l1_manager.reserve_write(
-                keys=keys,
-                is_temporary=[False],
-                layout_desc=layout,
-                mode="update",
-            )[keys[0]][1]
-            is not None,
+            lambda: (
+                l1_manager.reserve_write(
+                    keys=keys,
+                    is_temporary=[False],
+                    layout_desc=layout,
+                    mode="update",
+                )[keys[0]][1]
+                is not None
+            ),
             timeout=5.0,
         )
         assert ok, "Key should be updatable after store controller releases read lock"
@@ -467,13 +469,15 @@ class TestStoreControllerMultipleAdapters:
         assert ok
 
         ok = wait_for_condition(
-            lambda: l1_manager.reserve_write(
-                keys=keys,
-                is_temporary=[False],
-                layout_desc=layout,
-                mode="update",
-            )[keys[0]][1]
-            is not None,
+            lambda: (
+                l1_manager.reserve_write(
+                    keys=keys,
+                    is_temporary=[False],
+                    layout_desc=layout,
+                    mode="update",
+                )[keys[0]][1]
+                is not None
+            ),
             timeout=5.0,
         )
         assert ok, "Key should be updatable after all adapter stores complete"
@@ -587,13 +591,15 @@ class TestStoreControllerCustomPolicy:
 
         # After deletion, reserve_write with mode="new" should succeed
         ok = wait_for_condition(
-            lambda: l1_manager.reserve_write(
-                keys=keys,
-                is_temporary=[False],
-                layout_desc=layout,
-                mode="new",
-            )[keys[0]][1]
-            is not None,
+            lambda: (
+                l1_manager.reserve_write(
+                    keys=keys,
+                    is_temporary=[False],
+                    layout_desc=layout,
+                    mode="new",
+                )[keys[0]][1]
+                is not None
+            ),
             timeout=5.0,
         )
         assert ok, "Key should be re-creatable after L1 deletion by policy"
