@@ -24,12 +24,9 @@ from collections.abc import Sequence
 # Third Party
 import pytest
 import torch
-
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA not available"
-)
-
+pytestmark = pytest.mark.cuda
 # First Party
+from lmcache import torch_device_type
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager  # noqa: E402
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo  # noqa: E402
 from lmcache.v1.platform.cuda.cache_context import (  # noqa: E402
@@ -38,7 +35,7 @@ from lmcache.v1.platform.cuda.cache_context import (  # noqa: E402
 )
 import lmcache.c_ops as lmc_ops  # noqa: E402
 
-_DEVICE = torch.device("cuda")
+_DEVICE = torch.device(torch_device_type)
 
 
 # ---------------------------------------------------------------------------

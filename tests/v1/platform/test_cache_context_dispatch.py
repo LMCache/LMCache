@@ -166,11 +166,10 @@ def test_dispatches_by_cpu_device_type(monkeypatch: pytest.MonkeyPatch) -> None:
     assert ctx.kv_caches is wrappers
 
 
+@pytest.mark.cuda
 def test_dispatches_by_cuda_device_type(monkeypatch: pytest.MonkeyPatch) -> None:
     """Wrappers reporting a non-cpu device type must route to the
     matching registered class -- no isinstance branching."""
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
     _patch_hook(monkeypatch, "cuda", _FakeCUDAContext)
 
     wrappers = [_FakeWrapper("cuda")]
@@ -185,10 +184,9 @@ def test_empty_kv_caches_raises() -> None:
         create_cache_context([])
 
 
+@pytest.mark.cuda
 def test_mixed_device_types_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """Cross-device batches are unsupported and must fail loudly."""
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
     _patch_hook(monkeypatch, "cpu", _FakeCPUContext)
     _patch_hook(monkeypatch, "cuda", _FakeCUDAContext)
 

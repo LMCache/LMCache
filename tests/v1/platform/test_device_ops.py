@@ -91,6 +91,7 @@ def test_cpu_inherits_baseline_verbatim() -> None:
         assert getattr(CpuDeviceOps, name) is getattr(DeviceOps, name), name
 
 
+@pytest.mark.musa
 def test_musa_overrides_only_one_op() -> None:
     """MusaDeviceOps overrides exactly one hot op; the rest inherit base."""
     musa_mod = pytest.importorskip(
@@ -105,6 +106,7 @@ def test_musa_overrides_only_one_op() -> None:
     assert overridden == ["multi_layer_block_kv_transfer"]
 
 
+@pytest.mark.musa
 def test_musa_override_dispatches_native_first(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -11,6 +11,7 @@ import tempfile
 import pytest
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.v1.storage_backend.path_sharder import PathSharder
 
 
@@ -20,7 +21,7 @@ class TestPathSharder:
     def test_single_path(self):
         d = tempfile.mkdtemp()
         try:
-            s = PathSharder(d, strategy="by_gpu", dst_device="cuda:0")
+            s = PathSharder(d, strategy="by_gpu", dst_device=f"{torch_device_type}:0")
             assert s.selected == d
             assert s.all_paths == [d]
             assert s.strategy == "by_gpu"
@@ -32,7 +33,11 @@ class TestPathSharder:
         try:
             csv = ",".join(dirs)
             for i, d in enumerate(dirs):
-                s = PathSharder(csv, strategy="by_gpu", dst_device=f"cuda:{i}")
+                s = PathSharder(
+                    csv,
+                    strategy="by_gpu",
+                    dst_device=f"{torch_device_type}:{i}",
+                )
                 assert s.selected == d
         finally:
             for d in dirs:
@@ -42,7 +47,11 @@ class TestPathSharder:
         dirs = [tempfile.mkdtemp() for _ in range(2)]
         try:
             csv = ",".join(dirs)
-            s = PathSharder(csv, strategy="by_gpu", dst_device="cuda:4")
+            s = PathSharder(
+                csv,
+                strategy="by_gpu",
+                dst_device=f"{torch_device_type}:4",
+            )
             # 4 % 2 == 0
             assert s.selected == dirs[0]
         finally:
@@ -54,7 +63,7 @@ class TestPathSharder:
         try:
             paths = [os.path.join(base, f"nvme{i}") for i in range(3)]
             csv = ",".join(paths)
-            PathSharder(csv, strategy="by_gpu", dst_device="cuda:0", create_dirs=True)
+            PathSharder(csv, strategy="by_gpu", dst_device=f"{torch_device_type}:0", create_dirs=True)
             for p in paths:
                 assert os.path.isdir(p)
         finally:
@@ -64,24 +73,24 @@ class TestPathSharder:
         base = tempfile.mkdtemp()
         try:
             new_dir = os.path.join(base, "should_not_exist")
-            PathSharder(new_dir, strategy="by_gpu", dst_device="cuda:0")
+            PathSharder(new_dir, strategy="by_gpu", dst_device=f"{torch_device_type}:0")
             assert not os.path.exists(new_dir)
         finally:
             shutil.rmtree(base, ignore_errors=True)
 
     def test_empty_csv_raises(self):
         with pytest.raises(ValueError, match="At least one path"):
-            PathSharder("", strategy="by_gpu", dst_device="cuda:0")
+            PathSharder("", strategy="by_gpu", dst_device=f"{torch_device_type}:0")
 
     def test_whitespace_only_raises(self):
         with pytest.raises(ValueError, match="At least one path"):
-            PathSharder("  , ,  ", strategy="by_gpu", dst_device="cuda:0")
+            PathSharder("  , ,  ", strategy="by_gpu", dst_device=f"{torch_device_type}:0")
 
     def test_unsupported_strategy_raises(self):
         d = tempfile.mkdtemp()
         try:
             with pytest.raises(ValueError, match="Unsupported path sharding"):
-                PathSharder(d, strategy="round_robin", dst_device="cuda:0")
+                PathSharder(d, strategy="round_robin", dst_device=f"{torch_device_type}:0")
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
@@ -89,7 +98,7 @@ class TestPathSharder:
         dirs = [tempfile.mkdtemp() for _ in range(2)]
         try:
             csv = f"  {dirs[0]}  ,  {dirs[1]}  "
-            s = PathSharder(csv, strategy="by_gpu", dst_device="cuda:0")
+            s = PathSharder(csv, strategy="by_gpu", dst_device=f"{torch_device_type}:0")
             assert s.all_paths == dirs
         finally:
             for d in dirs:
@@ -112,7 +121,7 @@ class TestPathSharder:
     def test_all_paths_returns_copy(self):
         d = tempfile.mkdtemp()
         try:
-            s = PathSharder(d, strategy="by_gpu", dst_device="cuda:0")
+            s = PathSharder(d, strategy="by_gpu", dst_device=f"{torch_device_type}:0")
             paths = s.all_paths
             paths.append("/rogue")
             assert "/rogue" not in s.all_paths
@@ -134,7 +143,7 @@ class TestPathSharder:
         dirs = [tempfile.mkdtemp() for _ in range(3)]
         try:
             csv = ",".join(dirs)
-            s = PathSharder(csv, strategy="by_gpu", dst_device="cuda")
+            s = PathSharder(csv, strategy="by_gpu", dst_device=torch_device_type)
             assert s.selected == dirs[1]
         finally:
             for d in dirs:
@@ -149,7 +158,7 @@ class TestPathSharder:
         dirs = [tempfile.mkdtemp() for _ in range(3)]
         try:
             csv = ",".join(dirs)
-            s = PathSharder(csv, strategy="by_gpu", dst_device="cuda")
+            s = PathSharder(csv, strategy="by_gpu", dst_device=torch_device_type)
             assert s.selected == dirs[0]
         finally:
             for d in dirs:
