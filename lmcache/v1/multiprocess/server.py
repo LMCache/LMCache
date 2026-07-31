@@ -28,6 +28,10 @@ from lmcache.v1.mp_observability.config import (
     init_observability,
     parse_args_to_observability_config,
 )
+from lmcache.v1.mp_observability.gc_monitor import (
+    init_gc_monitor,
+    shutdown_gc_monitor,
+)
 from lmcache.v1.mp_observability.trace import maybe_initialize_trace_recorder
 from lmcache.v1.multiprocess.config import (
     DEFAULT_COORDINATOR_CONFIG,
@@ -350,6 +354,8 @@ def run_cache_server(
         obs_config, start_prometheus_http_server=start_prometheus_http_server
     )
 
+    init_gc_monitor(obs_config.gc_monitor)
+
     maybe_initialize_trace_recorder(event_bus, obs_config, storage_manager_config)
 
     # When the engine-driven path is loaded (auto or engine_driven):
@@ -450,6 +456,8 @@ def run_cache_server(
         event_bus.stop()
         server.close()
         engine.close()
+    finally:
+        shutdown_gc_monitor()
     return None
 
 
