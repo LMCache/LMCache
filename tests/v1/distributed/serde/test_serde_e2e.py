@@ -40,14 +40,13 @@ from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
 from lmcache.v1.distributed.serde import SerdeConfig
 from lmcache.v1.distributed.storage_manager import StorageManager
-from tests.v1.distributed.utils import should_use_lazy_alloc
+from lmcache.v1.platform import current_device_spec
 
 if not torch_dev.is_available():
     pytest.skip(
         f"Requires available {torch_device_type} runtime",
         allow_module_level=True,
     )
-
 
 # =============================================================================
 # Helpers
@@ -124,7 +123,7 @@ def make_storage_manager_config(
         l1_manager_config=L1ManagerConfig(
             memory_config=L1MemoryManagerConfig(
                 size_in_bytes=l1_size_mb * 1024 * 1024,
-                use_lazy=should_use_lazy_alloc(),
+                use_lazy=current_device_spec.is_pin_supported,
                 init_size_in_bytes=min(l1_size_mb, 64) * 1024 * 1024,
             ),
         ),
