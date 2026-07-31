@@ -338,11 +338,12 @@ class FSL2Adapter(L2AdapterInterface):
         logger.info(
             "Initialized FSL2Adapter with base_path=%s, "
             "relative_tmp_dir=%s, "
-            "read_ahead_size=%s, use_odirect=%s",
+            "read_ahead_size=%s, use_odirect=%s, io_concurrency=%d",
             self._base_path,
             self._relative_tmp_dir,
             self._read_ahead_size,
             self._use_odirect,
+            self._io_concurrency,
         )
 
     # ------------------------------------------------------------------
