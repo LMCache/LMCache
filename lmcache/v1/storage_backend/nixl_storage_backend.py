@@ -30,6 +30,8 @@ from typing import (
 )
 from urllib.parse import quote as url_quote
 import asyncio
+import contextlib
+import errno
 import hashlib
 import os
 import threading
@@ -93,6 +95,21 @@ logger = init_logger(__name__)
 # POSIX permission mode for files created via ``os.open()`` with ``O_CREAT``.
 # 0o644 = rw-r--r-- (owner read/write, group/others read-only).
 DEFAULT_FILE_CREATE_MODE = 0o644
+
+# Errnos treated as "this filesystem will not accept O_DIRECT", as opposed to a
+# transient failure.  Seeing one of these latches O_DIRECT off for the pool
+# rather than retrying it for every remaining slot.
+#
+# This set is deliberately wider than EINVAL: open(O_DIRECT) is documented to
+# fail with EINVAL where the flag is unsupported, but a filesystem is free to
+# report EOPNOTSUPP/ENOTSUP, and EPERM is possible where a policy blocks it.
+# Note this is defensive breadth rather than an observed failure -- on the
+# kernels tested here (6.x/7.x) xfs, ext4, tmpfs, overlayfs and FUSE all accept
+# the flag, so none of them exercises this path.  It exists because the
+# alternative is an unhandled OSError that aborts pool construction.
+_DIRECT_IO_UNSUPPORTED_ERRNOS = frozenset(
+    {errno.EINVAL, errno.EOPNOTSUPP, errno.ENOTSUP, errno.EPERM}
+)
 
 # Max concurrency for parallel S3 HEAD requests in batched_contains().
 _CONTAINS_BATCH_SIZE = 16
@@ -299,10 +316,11 @@ class NixlFilePool(NixlDescPool):
         super().__init__(size)
         self.fds: List[int] = []
 
-        flags = os.O_CREAT | os.O_RDWR
+        base_flags = os.O_CREAT | os.O_RDWR
+        want_direct = False
         if use_direct_io:
             if hasattr(os, "O_DIRECT"):
-                flags |= os.O_DIRECT
+                want_direct = True
             else:
                 logger.warning(
                     "use_direct_io is True, but O_DIRECT is not available on "
@@ -310,18 +328,58 @@ class NixlFilePool(NixlDescPool):
                 )
         base_path = sharder.selected
 
-        for i in reversed(range(size)):
-            filename = f"obj_{i}_{uuid.uuid4().hex[0:4]}.bin"
-            tmp_path = os.path.join(base_path, filename)
-            fd = os.open(tmp_path, flags)
-            self.fds.append(fd)
+        try:
+            for i in reversed(range(size)):
+                filename = f"obj_{i}_{uuid.uuid4().hex[0:4]}.bin"
+                tmp_path = os.path.join(base_path, filename)
+                if want_direct:
+                    try:
+                        self.fds.append(
+                            os.open(
+                                tmp_path,
+                                base_flags | os.O_DIRECT,
+                                DEFAULT_FILE_CREATE_MODE,
+                            )
+                        )
+                        continue
+                    except OSError as e:
+                        if e.errno not in _DIRECT_IO_UNSUPPORTED_ERRNOS:
+                            raise
+                        # ``base_path`` is resolved once, so every slot in this
+                        # pool lives on the same filesystem: a refusal here
+                        # applies to all remaining slots.  Latch it off rather
+                        # than issuing (and logging) `size` failing opens.
+                        want_direct = False
+                        logger.warning(
+                            "O_DIRECT rejected (%s) on %s; falling back to "
+                            "buffered I/O for the NIXL POSIX file pool",
+                            errno.errorcode.get(e.errno, e.errno),
+                            base_path,
+                        )
+                self.fds.append(os.open(tmp_path, base_flags, DEFAULT_FILE_CREATE_MODE))
+        except BaseException:
+            # __init__ is propagating, so this object is never constructed and
+            # close() will never run -- the fds opened so far would leak for the
+            # lifetime of the process.  Release them before re-raising.
+            self._close_fds()
+            raise
 
     def close(self):
         # TODO: do we need to delete the files?
         with self.lock:
-            assert len(self.fds) == self.size
-            for fd in self.fds:
+            self._close_fds()
+
+    def _close_fds(self) -> None:
+        """Close every fd opened so far and clear the list.
+
+        Safe to call on a partially built pool (``__init__`` failure path) and
+        idempotent, so a second ``close()`` is a no-op rather than an
+        ``EBADF``.
+        """
+        for fd in self.fds:
+            with contextlib.suppress(OSError):
                 os.close(fd)
+        self.fds.clear()
 
 
 class NixlObjectPool(NixlDescPool):
