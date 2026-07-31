@@ -147,7 +147,7 @@ def build_trim_mask(
             attn_desc.num_chunks_in_sw,
         )
         return hit_length, retain
-    if policy in (TrimPolicy.SEGMENTED_PREFIX, TrimPolicy.SPARSE):
+    elif policy in (TrimPolicy.SEGMENTED_PREFIX, TrimPolicy.SPARSE):
         hit_chunks = found.count_leading_ones() // stride
         return hit_chunks, found
     raise ValueError(f"Unknown TrimPolicy: {policy!r}")
