@@ -563,6 +563,11 @@ class BlendV3Module(InstanceLivenessTarget):
         self._cb_plan_invariants: "weakref.WeakKeyDictionary[Any, tuple]" = (
             weakref.WeakKeyDictionary()
         )
+        # Persistent pinned + device slot-mapping staging per GPU context,
+        # grown on demand (see _cb_slot_buffers).
+        self._cb_slot_staging: "weakref.WeakKeyDictionary[Any, tuple]" = (
+            weakref.WeakKeyDictionary()
+        )
 
         # Non-blocking cb_unified_lookup poll state (submit-once, poll-on-recall)
         # so the handler never holds a worker thread across the L2->L1 loads.
@@ -784,6 +789,30 @@ class BlendV3Module(InstanceLivenessTarget):
             "legacy" if not norm_rot else str(norm_rot),
         )
 
+        # Pre-warm the retrieve-plan invariants + slot-mapping staging for
+        # this instance, off the retrieve critical path.
+        try:
+            entry = self._transfer_module.get_and_touch_context_entry(instance_id)
+            ctx = entry.cache_context if entry is not None else None
+            if ctx is not None:
+                self._cb_slot_buffers(
+                    ctx, ctx.kv_layer_groups_manager.num_kernel_groups, 1 << 16
+                )
+                rope_state = self._cb_rope_state[instance_id]
+                max_batch = ctx.max_batch_size
+                if self._cb_plan_invariants.get(ctx) is None:
+                    resolved = self._resolve_cb_plan_invariants(
+                        ctx, rope_state, max_batch
+                    )
+                    if resolved is not None:
+                        self._cb_plan_invariants[ctx] = (
+                            rope_state,
+                            max_batch,
+                            resolved,
+                        )
+        except Exception:
+            logger.debug("CB plan pre-warm skipped", exc_info=True)
+
     def cb_unregister_rope(self, instance_id: int) -> None:
         """Drop the instance's CB rope state; the paged KV cache is left intact.
 
@@ -985,6 +1014,16 @@ class BlendV3Module(InstanceLivenessTarget):
                 found_cb_match_result.append(r)
             else:
                 stale_hashes.append(r.hash)
+        # Stale drops silently shrink coverage (a fully-stale classify turns a
+        # matched request into a full recompute) — log so it is diagnosable.
+        if stale_hashes:
+            logger.warning(
+                "CB sparse classify for %s: %d found, %d stale of %d submitted",
+                key.request_id,
+                len(found_cb_match_result),
+                len(stale_hashes),
+                len(matches),
+            )
 
         # Reset strikes for confirmed hashes.
         if found_cb_match_result:
@@ -1826,6 +1865,29 @@ class BlendV3Module(InstanceLivenessTarget):
                 )
                 tok_off += n_tok
 
+    def _cb_slot_buffers(
+        self, gpu_context: BaseCacheContext, num_groups: int, n_pos: int
+    ) -> "tuple[torch.Tensor, Any, torch.Tensor]":
+        """Return ``(pinned, pinned_np, device)`` slot-mapping staging of at
+        least ``(num_groups, n_pos)``, reused across requests per context."""
+        entry = self._cb_slot_staging.get(gpu_context)
+        if entry is None or entry[0].shape[0] < num_groups or entry[0].shape[1] < n_pos:
+            cap = max(n_pos, 1 << 16)
+            if entry is not None:
+                cap = max(cap, int(entry[0].shape[1]))
+            # Pin only for CUDA contexts (CPU-device unit tests have no CUDA).
+            pinned = torch.empty(
+                (num_groups, cap),
+                dtype=torch.int64,
+                pin_memory=(gpu_context.device.type == "cuda"),
+            )
+            dev = torch.empty(
+                (num_groups, cap), dtype=torch.int64, device=gpu_context.device
+            )
+            entry = (pinned, pinned.numpy(), dev)
+            self._cb_slot_staging[gpu_context] = entry
+        return entry
+
     def _resolve_cb_plan_invariants(
         self,
         gpu_context: BaseCacheContext,
@@ -1930,7 +1992,7 @@ class BlendV3Module(InstanceLivenessTarget):
         self,
         gpu_context: BaseCacheContext,
         rope_state: _CBRopeState,
-        resolved_groups: "list[tuple[torch.Tensor, int]]",
+        cpu_block_tables: "list[tuple[np.ndarray, int]]",
         runs: "list[list[tuple[CBMatchResult, Any]]]",
         max_batch: int,
     ) -> "tuple[list[Any], tuple[Any, Any, Any, Any], list[torch.Tensor]] | None":
@@ -2006,24 +2068,47 @@ class BlendV3Module(InstanceLivenessTarget):
             # Size mismatch: the fallback path raises the descriptive error.
             return None
 
-        # Shared logical positions, one arange per (consecutive) run --
-        # dispatch count is the cost that matters under the shared GIL.
-        device = gpu_context.device
-        run_pos = [
-            torch.arange(
-                run[0][0].cur_st, run[-1][0].cur_ed, device=device, dtype=torch.long
+        # Shared logical positions + per-group slot mappings, in numpy on
+        # pinned staging with one async H2D per group (persistent buffers).
+        # The old device-side arange/div/mod chain cost 25-160 ms per request
+        # in CUDA alloc/sync contention with the engine context; this path is
+        # sub-ms CPU math + copies that ride the ambient stream (FIFO before
+        # the native exec's kernels).
+        run_iter = [run for run in runs if run]
+        if len(run_iter) == 1:
+            pos_np = np.arange(
+                run_iter[0][0][0].cur_st, run_iter[0][-1][0].cur_ed, dtype=np.int64
             )
-            for run in runs
-            if run
-        ]
-        pos = run_pos[0] if len(run_pos) == 1 else torch.cat(run_pos)
-        # The stamped slot-mapping tensors must outlive the native call.
-        keepalive = _group_slot_mappings(resolved_groups, pos)
-        for spec, slot_mapping in zip(group_specs, keepalive, strict=True):
+        else:
+            pos_np = np.concatenate(
+                [
+                    np.arange(run[0][0].cur_st, run[-1][0].cur_ed, dtype=np.int64)
+                    for run in run_iter
+                ]
+            )
+        n_pos = int(pos_np.shape[0])
+        pinned, pinned_np, dev_buf = self._cb_slot_buffers(
+            gpu_context, num_groups, n_pos
+        )
+        div_mod: "dict[int, tuple[np.ndarray, np.ndarray]]" = {}
+        for gi, ((block_ids_np, group_bs), spec) in enumerate(
+            zip(cpu_block_tables, group_specs, strict=True)
+        ):
+            pair = div_mod.get(group_bs)
+            if pair is None:
+                pair = np.divmod(pos_np, group_bs)
+                div_mod[group_bs] = pair
+            q, rem = pair
+            out = pinned_np[gi, :n_pos]
+            np.multiply(block_ids_np[q], group_bs, out=out)
+            out += rem
+            dev_buf[gi, :n_pos].copy_(pinned[gi, :n_pos], non_blocking=True)
             # Safe to mutate: one handler per context, and the native call
             # copies spec contents at call time.
-            spec.slot_mapping_base = slot_mapping.data_ptr()
-            spec.slot_mapping_capacity = slot_mapping.numel()
+            spec.slot_mapping_base = int(dev_buf[gi].data_ptr())
+            spec.slot_mapping_capacity = n_pos
+        # The device staging must outlive the native call.
+        keepalive = [dev_buf]
 
         # Waves of `wave` chunks per run, alternating slot halves.
         slot_of = np.empty(n, dtype=np.int64)
@@ -2280,8 +2365,12 @@ class BlendV3Module(InstanceLivenessTarget):
 
             # Resolve each kernel group's block table + block size once. Select
             # by engine_group_idx (kernel groups may share one, e.g. MiniMax-M3).
+            # The CPU (numpy) tables feed the native plan's slot-mapping math;
+            # the GPU tensors feed the Python fallback loop.
             kgm = gpu_context.kv_layer_groups_manager
+            block_ids_np = [np.asarray(b, dtype=np.int64) for b in gpu_block_ids]
             resolved_groups: list[tuple[torch.Tensor, int]] = []
+            cpu_block_tables: "list[tuple[np.ndarray, int]]" = []
             for group_idx in range(num_groups):
                 eg_idx = kgm.kernel_groups[group_idx].engine_group_idx
                 if eg_idx >= len(block_ids_per_group_gpu):
@@ -2294,12 +2383,9 @@ class BlendV3Module(InstanceLivenessTarget):
                         f"{len(block_ids_per_group_gpu)} block table(s) were "
                         "provided."
                     )
-                resolved_groups.append(
-                    (
-                        block_ids_per_group_gpu[eg_idx],
-                        kgm.kernel_groups[group_idx].tokens_per_block,
-                    )
-                )
+                group_bs = kgm.kernel_groups[group_idx].tokens_per_block
+                resolved_groups.append((block_ids_per_group_gpu[eg_idx], group_bs))
+                cpu_block_tables.append((block_ids_np[eg_idx], group_bs))
 
             self._event_bus.publish_on_stream(
                 gpu_context.cupy_stream,
@@ -2402,7 +2488,7 @@ class BlendV3Module(InstanceLivenessTarget):
                     # c_ops, non-lazy objects, max_batch < 2, or size mismatch).
                     _stage_t = time.perf_counter()
                     native_flat = self._build_cb_retrieve_plan_flat(
-                        gpu_context, rope_state, resolved_groups, runs, max_batch
+                        gpu_context, rope_state, cpu_block_tables, runs, max_batch
                     )
                     _stage_ms["plan"] = (time.perf_counter() - _stage_t) * 1000
                     if native_flat is not None:
