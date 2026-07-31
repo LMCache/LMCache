@@ -167,6 +167,25 @@ def test_registry_attn_desc_roundtrip() -> None:
     assert desc.world_size == 2
 
 
+def test_registry_derives_group_layout_descs_when_not_given() -> None:
+    """A registration without group_layout_descs (engine-driven, blend,
+    qstore) still yields one shared-layout entry per object group, so
+    lookups never hit the missing-group-layouts error path."""
+    # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    registry = LayoutDescRegistry()
+    layout = _layout()
+    registry.register("m", 1, layout)
+    assert registry.find_group_layout_descs("m", 1) == {0: layout}
+
+    registry.register(
+        "m2", 1, layout, attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1, 2])
+    )
+    assert registry.find_group_layout_descs("m2", 1) == {0: layout, 1: layout}
+
+
 def test_registry_attn_desc_raises_when_unregistered() -> None:
     """find_attn_desc raises for an unknown (model, world_size) pair."""
     # First Party

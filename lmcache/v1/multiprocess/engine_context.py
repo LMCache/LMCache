@@ -84,11 +84,16 @@ class LayoutDescRegistry:
             attn_desc: Cross-chunk attention windows of all object groups, in
                 object-group order. Defaults to a single full-attention group.
             group_layout_descs: Maps object_group_id to that group's layout
-                (each group is a separate keyed allocation); ``None`` when all
-                groups share ``layout_desc``.
+                (each group is a separate keyed allocation); ``None`` derives
+                one entry per object group in ``attn_desc``, all sharing
+                ``layout_desc``.
         """
         key = (model_name, world_size)
         attn_desc = replace(attn_desc, world_size=world_size)
+        if group_layout_descs is None:
+            group_layout_descs = {
+                gid: layout_desc for gid in range(attn_desc.num_object_groups)
+            }
         with self._lock:
             entry = self._registry.get(key)
             if entry is None:
