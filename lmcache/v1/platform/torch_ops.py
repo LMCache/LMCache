@@ -54,12 +54,11 @@ def _get_copy_lib() -> Optional[ctypes.CDLL]:
     global _copy_lib
     if _copy_lib is _copy_lib_NOT_LOADED:
         # Try to load GPU runtime libraries in priority order: CUDA first,
-        # then ROCm, then MUSA.
+        # then ROCm.
         # TODO: ROCm path to be validated on real device
         for name, fallback in [
             ("cudart", "libcudart.so"),  # NVIDIA CUDA Runtime
             ("amdhip64", "libamdhip64.so"),  # AMD ROCm HIP Runtime
-            ("musa", "libmusa.so"),  # MUSA Runtime
         ]:
             try:
                 path = ctypes.util.find_library(name)
@@ -100,12 +99,14 @@ def _tensor_from_ptr(
     Returns:
         A tensor that shares memory with the original pointer.
         For CPU: always zero-copy via ctypes + torch.frombuffer.
-        For CUDA/MUSA: zero-copy via torch._C._construct_storage_from_data_pointer
+        For CUDA: zero-copy via torch._C._construct_storage_from_data_pointer
                   (PyTorch >= 2.0) or __cuda_array_interface__, with a
                   runtime D2D memcpy fallback.
+        For MUSA: a non-owning view created from external device storage.
 
     Raises:
         ValueError: if ptr is 0.
+        RuntimeError: If MUSA cannot construct a non-owning view for ``ptr``.
 
     Warning:
         The caller is responsible for keeping the underlying memory alive
@@ -256,6 +257,14 @@ def _tensor_from_cuda_ptr(
 # ====================================================================== #
 #  MUSA implementation                                                   #
 # ====================================================================== #
+def _contiguous_element_strides(shape: tuple[int, ...]) -> tuple[int, ...]:
+    """Return contiguous element strides for ``shape``."""
+    strides = [1] * len(shape)
+    for index in range(len(shape) - 2, -1, -1):
+        strides[index] = strides[index + 1] * int(shape[index + 1])
+    return tuple(strides)
+
+
 def _tensor_from_musa_ptr(
     ptr: int,
     shape: tuple[int, ...],
@@ -264,42 +273,25 @@ def _tensor_from_musa_ptr(
     numel: int,
     total_bytes: int,
 ) -> torch.Tensor:
-    """Create a MUSA tensor from a raw device pointer."""
+    """Create a non-owning MUSA tensor from a raw device pointer.
 
+    The returned tensor aliases ``ptr``. A copy fallback is intentionally not
+    provided because writes through a copied tensor would not update the
+    original paged buffer.
+    """
     try:
         storage = torch._C._construct_storage_from_data_pointer(
             ptr,
             device,
             total_bytes,
         )
-        t = torch.empty((), dtype=dtype, device=device)
-        t.set_(storage, 0, shape)
-        return t
-    except Exception:
-        pass
-
-    libmusa = _get_copy_lib()
-    if libmusa is None or not hasattr(libmusa, "muMemcpy"):
-        raise RuntimeError("Failed to load libmusa or muMemcpy")
-
-    muMemcpy = libmusa.muMemcpy
-    muMemcpy.restype = ctypes.c_int
-    muMemcpy.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_size_t,
-    ]
-
-    dst = torch.empty(numel, dtype=dtype, device=device)
-    err = muMemcpy(
-        ctypes.c_void_p(dst.data_ptr()),
-        ctypes.c_void_p(ptr),
-        ctypes.c_size_t(total_bytes),
-    )
-    if err != 0:
-        raise RuntimeError(f"muMemcpy failed with error code {err}.")
-
-    return dst.view(*shape)
+        tensor = torch.empty(0, dtype=dtype, device=storage.device)
+        tensor.set_(storage, 0, shape, _contiguous_element_strides(shape))
+        return tensor
+    except Exception as exc:
+        raise RuntimeError(
+            "TorchMUSA failed to construct a non-owning tensor from a device pointer"
+        ) from exc
 
 
 def _copy_bytes_with_tensor(dst: int, src: int, num_bytes: int) -> None:
