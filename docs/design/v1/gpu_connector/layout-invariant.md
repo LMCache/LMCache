@@ -142,7 +142,10 @@ an `EngineKVFormat`. Nothing else may index raw shapes.
 | `TWO_X_NL_X_NBBS_NH_HS` | SGLang MHA | NHD | `[K_list, V_list]`, each `NL × [PBS, NH, HS]` |
 | `TWO_X_NL_X_NB_BS_NH_HS` | SGLang MHA via MP daemon | NHD | `[K_list, V_list]`, each `NL × [NB, BS, NH, HS]` |
 | `NL_X_NBBS_ONE_HS` | SGLang MLA | — | `NL × [PBS, 1, HS]` |
-| `NL_X_NB_NH_BS_TWO_HS` | vLLM blocks-first fused (CPU) | HND | `NL × [NB, NH, BS, 2, HS]`, split from raw `[NB, NH, BS, 2·HS]` |
+| `NL_X_NB_NH_BS_TWO_HS` | vLLM blocks-first fused (CPU) | HND | DEPRECATED (use `NL_X_NB_NH_BS_CS`): `NL × [NB, NH, BS, 2, HS]`, split from raw `[NB, NH, BS, 2·HS]` |
+| `NL_X_NB_BS_NH_TWO_HS` | vLLM blocks-first fused | NHD | DEPRECATED (use `NL_X_NB_BS_NH_CS`): `NL × [NB, BS, NH, 2, HS]`, split from raw `[NB, BS, NH, 2·HS]` |
+| `NL_X_NB_NH_BS_CS` | vLLM blocks-first fused (unified KV cache) | HND | `NL × [NB, NH, BS, CS]`, raw registration; CS = content size = 2·HS (K/V packed) |
+| `NL_X_NB_BS_NH_CS` | vLLM blocks-first fused (unified KV cache) | NHD | `NL × [NB, BS, NH, CS]`, raw registration; CS = content size = 2·HS (K/V packed) |
 
 The two cross-layer formats (`NB_NL_TWO_*`) share a single base
 pointer, the kernel walks layers internally via `shape_desc.nl`. Use

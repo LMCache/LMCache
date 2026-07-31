@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Per-layer, HND, blocks-first with fused K/V: ``NL x [NB, NH, BS, 2, HS]``.
 
+DEPRECATED: superseded by ``NL_X_NB_NH_BS_CS``, which keeps the raw 4-D
+``[NB, NH, BS, 2*HS]`` registration instead of splitting it into this
+canonical 5-D shape. Detection no longer produces this format.
+
 A ``list[NL]`` of a 5-D tensor whose K/V (size-2) axis is second-to-last.
-The engine registers it raw as 4-D ``[NB, NH, BS, 2*HS]`` (K/V fused into the
-trailing dim); detection splits that into this canonical 5-D shape. Produced
-by vLLM's non-MLA blocks-first CPU attention backend.
+Produced by vLLM's non-MLA blocks-first CPU attention backend.
 """
 
 # Each spec indexes ``kv_caches`` (Tensor | nested list) per its format, so the
@@ -17,13 +19,22 @@ from typing import cast
 import torch
 
 # First Party
+from lmcache.utils import lmcache_deprecate
 from lmcache.v1.gpu_connector.kv_format.specs.base import KVFormatSpec
+from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
 import lmcache.c_ops as lmc_ops
 
 
 class NL_X_NB_NH_BS_TWO_HS_Spec(KVFormatSpec):
     engine_kv_format = lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS
     attention_backends = ("vLLM non-MLA blocks-first, fused K/V",)
+
+    @lmcache_deprecate(
+        "NL_X_NB_NH_BS_TWO_HS is superseded by NL_X_NB_NH_BS_CS "
+        "(raw 4-D content-size layout)"
+    )
+    def __init__(self, kv_caches: DiscoverableKVCache) -> None:
+        super().__init__(kv_caches)
 
     def num_layers(self) -> int:
         return len(self.kv_caches)
