@@ -210,7 +210,6 @@ type CacheBlendEngineSpec struct {
 	// They are appended last and can override any auto-generated flag.
 	// +optional
 	ExtraArgs []string `json:"extraArgs,omitempty"`
-
 }
 
 // CacheBlendEngineStatus defines the observed state of CacheBlendEngine.

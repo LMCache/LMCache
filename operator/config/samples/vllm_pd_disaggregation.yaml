@@ -14,27 +14,27 @@
 #   4. This namespace is labeled pod-security.kubernetes.io/enforce=privileged.
 #
 # After creation, verify injection on a pod:
-#   kubectl get pod -l app=vllm-prefiller -o yaml | \
+#   kubectl get pod -l app=pd-prefiller -o yaml | \
 #     grep -E "hostIPC|kv-transfer-config|NIXL|lmcache-injected"
 #
-# Then deploy the vllm-router pointing --prefill and --decode at the Services
-# below (vllm-prefiller:8001, vllm-decoder:8002).
+# Then deploy the pd-router pointing --prefill and --decode at the Services
+# below (pd-prefiller:8001, pd-decoder:8002).
 ---
 # ── Prefiller vLLM ──────────────────────────────────────────────────────────
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: vllm-prefiller
+  name: pd-prefiller
   namespace: default
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: vllm-prefiller
+      app: pd-prefiller
   template:
     metadata:
       labels:
-        app: vllm-prefiller
+        app: pd-prefiller
         # Opt in to the LMCache webhook.
         lmcache.ai/lmcache-inject: "true"
       annotations:
@@ -77,11 +77,11 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: vllm-prefiller
+  name: pd-prefiller
   namespace: default
 spec:
   selector:
-    app: vllm-prefiller
+    app: pd-prefiller
   ports:
     - name: http
       port: 8001
@@ -91,17 +91,17 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: vllm-decoder
+  name: pd-decoder
   namespace: default
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: vllm-decoder
+      app: pd-decoder
   template:
     metadata:
       labels:
-        app: vllm-decoder
+        app: pd-decoder
         lmcache.ai/lmcache-inject: "true"
       annotations:
         lmcache.ai/lmcache-engine: "decoder-cache"
@@ -138,32 +138,32 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: vllm-decoder
+  name: pd-decoder
   namespace: default
 spec:
   selector:
-    app: vllm-decoder
+    app: pd-decoder
   ports:
     - name: http
       port: 8002
       targetPort: 8002
 ---
 # ── vLLM Router ─────────────────────────────────────────────────────────────
-# Runs vllm-router in PD disaggregation mode. Adjust image/version as needed.
+# Runs pd-router in PD disaggregation mode. Adjust image/version as needed.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: vllm-router
+  name: pd-router
   namespace: default
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: vllm-router
+      app: pd-router
   template:
     metadata:
       labels:
-        app: vllm-router
+        app: pd-router
     spec:
       containers:
         - name: router
@@ -175,9 +175,9 @@ spec:
             - "round_robin"
             - "--vllm-pd-disaggregation"
             - "--prefill"
-            - "http://vllm-prefiller:8001"
+            - "http://pd-prefiller:8001"
             - "--decode"
-            - "http://vllm-decoder:8002"
+            - "http://pd-decoder:8002"
             - "--host"
             - "0.0.0.0"
             - "--port"
@@ -191,11 +191,11 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: vllm-router
+  name: pd-router
   namespace: default
 spec:
   selector:
-    app: vllm-router
+    app: pd-router
   ports:
     - name: http
       port: 30000

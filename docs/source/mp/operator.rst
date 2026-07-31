@@ -994,6 +994,172 @@ Spec Reference above) and adds:
 ``server.chunkSize`` defaults to ``256`` and must equal 256 (the blend matcher
 requires ``chunk_size == vLLM --block-size * 4``).
 
+.. _mp-operator-pd-disaggregation:
+
+PD Disaggregation
+-----------------
+
+The operator has first-class support for PD (Prefill-Decode) disaggregation.
+Adding a ``pd`` block to an ``LMCacheEngine`` spec switches the engine's
+connection ConfigMap from a bare ``LMCacheMPConnector`` to a ``MultiConnector``
+wrapping ``NixlConnector`` + ``LMCacheMPConnector``, and tells the webhook to
+inject the NIXL side-channel environment variables into opted-in vLLM pods
+automatically.
+
+See :ref:`mp_disaggregated_prefill` for background on what PD disaggregation is
+and how the pieces fit together.
+
+.. note::
+   PD disaggregation requires NIXL in the vLLM environment (``lmcache[nixl]``
+   extra) and `vllm-project/vllm#46865
+   <https://github.com/vllm-project/vllm/pull/46865>`_ merged.
+
+How it works
+~~~~~~~~~~~~
+
+Deploy **two** ``LMCacheEngine`` CRs -- one with ``pd.role: prefiller`` and one
+with ``pd.role: decoder``.  The operator:
+
+1. **Builds a MultiConnector ConfigMap** -- the ``<engine>-connection`` ConfigMap
+   emits the ``MultiConnector`` JSON (``NixlConnector`` + ``LMCacheMPConnector``)
+   vLLM needs for ``--kv-transfer-config``.  The prefiller uses ``kv_producer``;
+   the decoder uses ``kv_consumer``.
+
+2. **Injects NIXL env vars via the webhook** -- opted-in vLLM pods bound to a PD
+   engine receive two extra env vars injected at admission time:
+
+   - ``VLLM_NIXL_SIDE_CHANNEL_HOST`` -- set to the pod's own IP via the downward
+     API (``status.podIP``).  No ``hostPort`` or ``hostNetwork`` needed; pod IPs
+     are routable between nodes on a standard CNI setup.
+   - ``VLLM_NIXL_SIDE_CHANNEL_PORT`` -- the value of ``spec.pd.nixlSideChannelPort``
+     on the engine.  Use distinct values for prefiller and decoder when both
+     roles might land on the same node.
+
+PDSpec Fields
+~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 15 50
+
+   * - Field
+     - Default
+     - Description
+   * - ``pd.role``
+     - *required*
+     - ``prefiller`` (``kv_producer``) or ``decoder`` (``kv_consumer``).
+   * - ``pd.nixlSideChannelPort``
+     - ``5558``
+     - Port the NIXL agent advertises for handshake negotiation.  Use distinct
+       values for prefiller and decoder when both may run on the same node.
+   * - ``pd.nixlLoadFailurePolicy``
+     - ``fail``
+     - ``fail`` -- abort the request if the NIXL transfer fails.
+       ``ignore`` -- fall back to local prefill on failure.
+   * - ``pd.enforceHandshakeCompat``
+     - *(omitted)*
+     - When set to ``false``, disables strict NIXL version negotiation -- useful
+       when prefiller and decoder run different vLLM builds.  When omitted the
+       key is not sent and NIXL uses its own default.
+
+Deploying PD Engines
+~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: yaml
+
+    # prefiller-engine.yaml
+    apiVersion: lmcache.lmcache.ai/v1alpha1
+    kind: LMCacheEngine
+    metadata:
+      name: prefiller-cache
+    spec:
+      l1:
+        sizeGB: 100
+      server:
+        port: 5555
+        chunkSize: 256
+      pd:
+        role: prefiller
+        nixlSideChannelPort: 5557
+        nixlLoadFailurePolicy: fail
+
+.. code-block:: yaml
+
+    # decoder-engine.yaml
+    apiVersion: lmcache.lmcache.ai/v1alpha1
+    kind: LMCacheEngine
+    metadata:
+      name: decoder-cache
+    spec:
+      l1:
+        sizeGB: 100
+      server:
+        port: 5555
+        chunkSize: 256
+      pd:
+        role: decoder
+        nixlSideChannelPort: 5558
+        nixlLoadFailurePolicy: fail
+
+.. code-block:: bash
+
+    kubectl apply -f prefiller-engine.yaml
+    kubectl apply -f decoder-engine.yaml
+    kubectl get lmc
+
+Opting vLLM Pods In
+~~~~~~~~~~~~~~~~~~~~
+
+Use the same label + annotation pattern as standard LMCache injection (see
+:ref:`mp-operator-connection-injection`), binding each vLLM Deployment to its
+own engine:
+
+.. code-block:: yaml
+
+    # prefiller vLLM pod template
+    metadata:
+      labels:
+        lmcache.ai/lmcache-inject: "true"
+      annotations:
+        lmcache.ai/lmcache-engine: "prefiller-cache"
+
+    # decoder vLLM pod template
+    metadata:
+      labels:
+        lmcache.ai/lmcache-inject: "true"
+      annotations:
+        lmcache.ai/lmcache-engine: "decoder-cache"
+
+The webhook injects ``--kv-transfer-config`` (the MultiConnector JSON),
+``hostIPC: true``, ``PYTHONHASHSEED=0``, ``VLLM_NIXL_SIDE_CHANNEL_HOST``, and
+``VLLM_NIXL_SIDE_CHANNEL_PORT`` into each opted-in pod.  Do **not** set these
+env vars or mount the ConfigMap yourself -- the webhook handles it.
+
+Router
+~~~~~~
+
+The ``vllm-router`` is **not** managed by the operator.  Deploy it as a plain
+Kubernetes ``Deployment`` pointing at the prefiller and decoder vLLM Services:
+
+.. code-block:: bash
+
+    vllm-router \
+        --policy round_robin \
+        --vllm-pd-disaggregation \
+        --prefill http://pd-prefiller.<namespace>.svc.cluster.local:8001 \
+        --decode  http://pd-decoder.<namespace>.svc.cluster.local:8002 \
+        --host 0.0.0.0 --port 30000
+
+A ready-to-edit manifest is at
+``operator/config/samples/vllm_pd_disaggregation.yaml``.
+
+.. note::
+   Name your prefiller and decoder vLLM Services with a prefix other than
+   ``vllm-`` (e.g., ``pd-prefiller``, ``pd-decoder``).  Kubernetes injects
+   ``<SERVICE_NAME>_*`` env vars into every pod in the namespace; a ``vllm-``
+   prefix generates ``VLLM_*`` vars that vLLM's env-var validator flags as
+   unknown.
+
 LMCacheCoordinator
 ------------------
 
