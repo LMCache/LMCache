@@ -409,6 +409,7 @@ class TestGetL1MemoryDesc:
 
         assert desc.size == basic_config.size_in_bytes
         assert desc.align_bytes == basic_config.align_bytes
+        assert desc.fixed_buffer_registration_size == 0
 
         manager.close()
 
@@ -422,6 +423,17 @@ class TestGetL1MemoryDesc:
         assert isinstance(desc, L1MemoryDesc)
         assert desc.ptr != 0
         assert desc.size == non_lazy_config.size_in_bytes
+        assert desc.fixed_buffer_registration_size == non_lazy_config.size_in_bytes
+
+        manager.close()
+
+    def test_fully_initialized_lazy_l1_is_safe_to_register(self, small_config):
+        """A lazy pool is stable when its initial size already equals its final size."""
+        manager = L1MemoryManager(small_config)
+
+        desc = manager.get_l1_memory_desc()
+
+        assert desc.fixed_buffer_registration_size == small_config.size_in_bytes
 
         manager.close()
 

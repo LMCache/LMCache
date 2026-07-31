@@ -5,6 +5,7 @@ from unittest.mock import patch
 import os
 import select
 import tempfile
+import threading
 
 # Third Party
 import pytest
@@ -13,7 +14,7 @@ import torch
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import EvictionConfig
-from lmcache.v1.distributed.internal_api import L2AdapterListener
+from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2AdapterListener
 from lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter import (
     RawBlockL2Adapter,
     RawBlockL2AdapterConfig,
@@ -204,6 +205,117 @@ def test_raw_block_l2_adapter_config_validates_iouring_queue_depth():
         RawBlockL2AdapterConfig.from_dict(_config_dict(iouring_queue_depth=0))
 
 
+def test_raw_block_l2_adapter_registers_stable_l1_fixed_buffers():
+    """Adapter startup offers only the descriptor's stable prefix to the core."""
+    config = RawBlockL2AdapterConfig.from_dict(
+        _config_dict(
+            use_odirect=True,
+            io_engine="io_uring",
+        )
+    )
+    l1_memory_desc = L1MemoryDesc(
+        ptr=0x1000_0000,
+        size=4 << 30,
+        align_bytes=4096,
+        fixed_buffer_registration_size=4 << 30,
+    )
+
+    with patch(
+        "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter.RawBlockCore"
+    ) as core_cls:
+        core = core_cls.return_value
+        core.report_status.return_value = {"usable_capacity_bytes": 0}
+        core.snapshot_indexed_keys.return_value = []
+
+        adapter = RawBlockL2Adapter(config, l1_memory_desc)
+        try:
+            core.register_l1_fixed_buffers.assert_called_once_with(
+                l1_memory_desc.ptr,
+                l1_memory_desc.fixed_buffer_registration_size,
+            )
+        finally:
+            adapter.close()
+
+
+def test_raw_block_sync_loads_run_concurrently_and_close_waits():
+    """Synchronous MP reads do not serialize, and close waits for their buffers."""
+    config = RawBlockL2AdapterConfig.from_dict(_config_dict())
+    entered_lock = threading.Lock()
+    both_entered = threading.Event()
+    release_loads = threading.Event()
+    core_closed = threading.Event()
+    errors: list[BaseException] = []
+    entered = 0
+
+    def load_many_into_batched(
+        keys,
+        objects,
+        *,
+        completion_batch_size=None,
+        on_batch_loaded=None,
+    ):
+        nonlocal entered
+        del keys, objects
+        assert completion_batch_size is None
+        assert on_batch_loaded is None
+        with entered_lock:
+            entered += 1
+            if entered == 2:
+                both_entered.set()
+        if not release_loads.wait(timeout=5):
+            raise TimeoutError("test did not release synchronous loads")
+        return [False]
+
+    with patch(
+        "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter.RawBlockCore"
+    ) as core_cls:
+        core = core_cls.return_value
+        core.report_status.return_value = {"usable_capacity_bytes": 0}
+        core.snapshot_indexed_keys.return_value = []
+        core.load_many_into_batched.side_effect = load_many_into_batched
+        core.close.side_effect = core_closed.set
+        adapter = RawBlockL2Adapter(config)
+
+        def run_load(chunk_id: int) -> None:
+            try:
+                adapter.load_sync(
+                    [_create_object_key(chunk_id)],
+                    [_create_memory_obj()],
+                )
+            except BaseException as error:
+                errors.append(error)
+
+        load_threads = [
+            threading.Thread(target=run_load, args=(chunk_id,)) for chunk_id in (1, 2)
+        ]
+        for thread in load_threads:
+            thread.start()
+
+        close_thread: threading.Thread | None = None
+        try:
+            assert both_entered.wait(timeout=2), (
+                "adapter mutex serialized synchronous disk reads"
+            )
+            close_thread = threading.Thread(target=adapter.close)
+            close_thread.start()
+            assert not core_closed.wait(timeout=0.2), (
+                "adapter closed fixed buffers while a synchronous read was active"
+            )
+        finally:
+            release_loads.set()
+            for thread in load_threads:
+                thread.join(timeout=5)
+            if close_thread is not None:
+                close_thread.join(timeout=5)
+            else:
+                adapter.close()
+
+        assert not errors
+        assert core_closed.is_set()
+        assert all(not thread.is_alive() for thread in load_threads)
+        assert close_thread is None or not close_thread.is_alive()
+
+
 @pytest.mark.parametrize("block_align", [0, -1, 3, 4095])
 def test_raw_block_l2_adapter_config_rejects_non_power_of_2_block_align(
     block_align: int,
@@ -272,6 +384,35 @@ def test_raw_block_l2_adapter_uring_cmd_rejects_regular_file():
                     use_uring_cmd=True,
                 )
             )
+
+
+@requires_raw_block_ext
+def test_raw_block_l2_adapter_synchronous_lookup_load_roundtrip():
+    """The synchronous MP API locks hits and loads them into caller buffers."""
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(8 * 1024 * 1024)
+
+        adapter = RawBlockL2Adapter(_make_config(dev_path))
+        try:
+            hit_key = _create_object_key(1)
+            miss_key = _create_object_key(2)
+            stored = _create_memory_obj(fill_value=7.0)
+            assert _run_store(adapter, [hit_key], [stored]) is True
+
+            assert adapter.lookup_and_lock_sync([hit_key, miss_key]) == [True, False]
+
+            loaded = [
+                _create_memory_obj(fill_value=0.0),
+                _create_memory_obj(fill_value=0.0),
+            ]
+            assert adapter.load_sync([hit_key, miss_key], loaded) == [True, False]
+            assert torch.equal(loaded[0].tensor, stored.tensor)
+            assert torch.count_nonzero(loaded[1].tensor) == 0
+            adapter.submit_unlock([hit_key, miss_key])
+        finally:
+            adapter.close()
 
 
 @requires_raw_block_ext

@@ -123,6 +123,7 @@ class TestStorageManagerReportStatus:
 
         # Top-level keys
         assert "is_healthy" in status
+        assert status["store_policy"] == "default"
         assert "l1_manager" in status
         assert "store_controller" in status
         assert "prefetch_controller" in status
@@ -146,6 +147,18 @@ class TestStorageManagerReportStatus:
         assert adapter_status["type"] == "MockL2Adapter"
         assert "stored_object_count" in adapter_status
         assert "max_capacity_bytes" in adapter_status
+
+    def test_report_status_exposes_configured_store_policy(self, basic_l1_config):
+        config = StorageManagerConfig(
+            l1_manager_config=basic_l1_config,
+            eviction_config=EvictionConfig(eviction_policy="LRU"),
+            store_policy="skip_l1",
+        )
+        storage_manager = StorageManager(config)
+        try:
+            assert storage_manager.report_status()["store_policy"] == "skip_l1"
+        finally:
+            storage_manager.close()
 
     def test_l1_manager_status_shape(self, storage_manager_no_l2):
         l1 = storage_manager_no_l2.report_status()["l1_manager"]

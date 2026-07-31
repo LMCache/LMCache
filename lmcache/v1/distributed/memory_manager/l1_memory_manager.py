@@ -102,6 +102,11 @@ class L1MemoryManager:
         self._allocator = create_memory_allocator(config)
         self._size_in_bytes = config.size_in_bytes
         self._align_bytes = config.align_bytes
+        self._fixed_buffer_registration_size = (
+            config.size_in_bytes
+            if not config.use_lazy or config.init_size_in_bytes >= config.size_in_bytes
+            else 0
+        )
 
     def allocate(
         self, layout_desc: MemoryLayoutDesc, count: int
@@ -214,6 +219,7 @@ class L1MemoryManager:
             ptr=buffer.data_ptr(),
             size=self._size_in_bytes,
             align_bytes=self._align_bytes,
+            fixed_buffer_registration_size=self._fixed_buffer_registration_size,
         )
 
     def close(self) -> None:

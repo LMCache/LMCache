@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from unittest.mock import MagicMock
 import threading
 import time
 
@@ -30,6 +31,34 @@ from lmcache.v1.memory_management import (
 from lmcache.v1.pin_monitor import PinMonitor
 
 HUGEPAGE_SIZE = 2 * 1024 * 1024  # MAP_HUGE_2MB
+
+
+def test_lazy_allocator_pins_chunks_as_portable_mapped(monkeypatch):
+    # First Party
+    from lmcache.v1.memory_allocators import lazy_memory_allocator as lazy_mod
+
+    allocator = object.__new__(lazy_mod.LazyMemoryAllocator)
+    allocator._buffer = MagicMock()
+    allocator._buffer.data_ptr.return_value = 0x10000000
+    allocator._final_size = lazy_mod.LazyMemoryAllocator.PIN_CHUNK_SIZE
+    allocator._pin_record = []
+    device_spec = MagicMock()
+    device_spec.pin_memory.return_value = True
+    monkeypatch.setattr(lazy_mod, "current_device_spec", device_spec)
+
+    allocator._pin_memory_chunk(
+        0,
+        lazy_mod.LazyMemoryAllocator.PIN_CHUNK_SIZE,
+    )
+
+    device_spec.pin_memory.assert_called_once_with(
+        0x10000000,
+        lazy_mod.LazyMemoryAllocator.PIN_CHUNK_SIZE,
+        0x01 | 0x02,
+    )
+    assert allocator._pin_record == [
+        (0x10000000, lazy_mod.LazyMemoryAllocator.PIN_CHUNK_SIZE)
+    ]
 
 
 def check_allocator(allocator, max_size):
@@ -660,6 +689,27 @@ class TestLazyMemoryAllocator:
         assert memory_obj.tensor.dtype == dtype
 
         allocator.close()
+
+    def test_underlying_buffer_honors_allocation_alignment(self, lazy_allocator_cls):
+        """The stable lazy arena and its allocations honor the requested alignment."""
+        alignment = 4096
+        allocator = lazy_allocator_cls(
+            init_size=self.INIT_SIZE,
+            final_size=self.FINAL_SIZE,
+            align_bytes=alignment,
+        )
+        try:
+            assert allocator.get_underlying_buffer().data_ptr() % alignment == 0
+
+            memory_objs = allocator.batched_allocate(
+                torch.Size([4096]),
+                torch.uint8,
+                batch_size=3,
+            )
+            assert memory_objs is not None
+            assert all(obj.data_ptr % alignment == 0 for obj in memory_objs)
+        finally:
+            allocator.close()
 
     def test_allocate_with_format(self, lazy_allocator_cls):
         """Test allocation with explicit memory format."""

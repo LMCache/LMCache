@@ -103,15 +103,21 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
 
         # Detect numa mapping
         if numa_mapping is not None:
+            self._base_buffer = None
             numa_id = get_numa_id(numa_mapping)
             ptr = lmc_ops.alloc_numa_ptr(self._final_size, numa_id)
             arr_type = ctypes.c_uint8 * self._final_size
             buf = arr_type.from_address(ptr)
             self._buffer = torch.frombuffer(buf, dtype=torch.uint8)
         else:
-            self._buffer = torch.empty(
-                self._final_size, dtype=torch.uint8, device="cpu", pin_memory=False
+            self._base_buffer = torch.empty(
+                self._final_size + align_bytes - 1,
+                dtype=torch.uint8,
+                device="cpu",
+                pin_memory=False,
             )
+            offset = (-self._base_buffer.data_ptr()) % align_bytes
+            self._buffer = self._base_buffer[offset : offset + self._final_size]
 
         # Pin the first `curr_size` bytes (aligned to the internal chunk size)
         self._pin_memory_chunk(0, self._curr_size)
@@ -275,8 +281,10 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         assert offset + size <= self._final_size, "Pinning exceeds buffer size"
 
         ptr = self._buffer.data_ptr() + offset
-        # Use flag: cudaHostRegisterMapped (0x02)
-        if not current_device_spec.pin_memory(ptr, size, 2):
+        # cudaHostRegisterPortable | cudaHostRegisterMapped. The daemon may
+        # serve TP workers whose CUDA contexts target different devices, so a
+        # mapped L1 allocation must be portable across every such context.
+        if not current_device_spec.pin_memory(ptr, size, 0x01 | 0x02):
             logger.warning(
                 "pin_memory failed for chunk at ptr=%#x size=%d; "
                 "DMA performance may be degraded",

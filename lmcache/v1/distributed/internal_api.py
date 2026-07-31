@@ -14,13 +14,21 @@ from lmcache.v1.distributed.api import L1BackendType, ObjectKey
 
 @dataclass(frozen=True)
 class L1MemoryDesc:
-    """
-    Describes the L1 memory buffer registered with an external backend (e.g. Nixl).
+    """Describe the contiguous L1 allocation exposed to external backends.
+
+    Attributes:
+        ptr: Base address of the allocation.
+        size: Total allocation size in bytes.
+        align_bytes: Allocation alignment in bytes.
+        fixed_buffer_registration_size: Stable prefix that a backend may
+            register for the descriptor's full lifetime. Zero disables
+            persistent registration.
     """
 
     ptr: int
     size: int
     align_bytes: int
+    fixed_buffer_registration_size: int = 0
 
 
 @dataclass(frozen=True)

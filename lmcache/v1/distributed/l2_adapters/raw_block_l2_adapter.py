@@ -13,7 +13,7 @@ from __future__ import annotations
 # Standard
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import partial
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 import threading
 
 if TYPE_CHECKING:
@@ -311,8 +311,9 @@ class RawBlockL2Adapter(L2AdapterInterface):
 
         Args:
             config: Validated raw-block adapter configuration.
-            l1_memory_desc: Optional L1 allocation descriptor used to validate
-                O_DIRECT alignment compatibility.
+            l1_memory_desc: Optional L1 allocation descriptor used for
+                O_DIRECT alignment validation and persistent io_uring
+                fixed-buffer registration.
 
         Raises:
             ValueError: If O_DIRECT is enabled and L1 alignment is insufficient.
@@ -345,11 +346,10 @@ class RawBlockL2Adapter(L2AdapterInterface):
 
         try:
             self._core = RawBlockCore(config.to_core_config(), key_namespace="object")
-            if config.io_engine == "io_uring":
-                logger.warning(
-                    "RawBlockL2Adapter: MP raw_block uses io_uring without "
-                    "fixed-buffer registration; zero-copy fixed buffers are "
-                    "disabled unless registered by a future MP allocator path"
+            if l1_memory_desc is not None:
+                self._core.register_l1_fixed_buffers(
+                    l1_memory_desc.ptr,
+                    l1_memory_desc.fixed_buffer_registration_size,
                 )
             self._max_capacity_bytes = int(
                 self._core.report_status().get("usable_capacity_bytes", 0)
@@ -377,6 +377,7 @@ class RawBlockL2Adapter(L2AdapterInterface):
             raise
 
         self._lock = threading.Lock()
+        self._sync_load_cv = threading.Condition(self._lock)
         self._next_task_id: L2TaskId = 0
 
         self._completed_store_tasks: dict[L2TaskId, L2StoreResult] = {}
@@ -386,6 +387,7 @@ class RawBlockL2Adapter(L2AdapterInterface):
         self._store_inflight_tasks: int = 0
         self._lookup_inflight_tasks: int = 0
         self._load_inflight_tasks: int = 0
+        self._sync_load_inflight: int = 0
 
     def get_store_event_fd(self) -> int:
         """Return the eventfd signaled when store tasks complete."""
@@ -404,6 +406,98 @@ class RawBlockL2Adapter(L2AdapterInterface):
         if self._load_efd is None:
             return -1
         return self._load_efd.fileno()
+
+    def lookup_and_lock_sync(self, keys: list[ObjectKey]) -> list[bool]:
+        """Synchronously look up and lock raw-block objects.
+
+        This MP fast path avoids worker-pool and eventfd round trips when the
+        caller will immediately load the same objects synchronously.
+
+        Args:
+            keys: Object keys to look up and lock.
+
+        Returns:
+            One boolean per key. True means the object exists and remains
+            locked until ``submit_unlock`` is called.
+
+        Raises:
+            RuntimeError: If the adapter is closed.
+        """
+        if not keys:
+            return []
+        specs = [encode_object_key(key) for key in keys]
+        with self._lock:
+            self._raise_if_closed_locked()
+            return self._core.exists_many(
+                [spec.encoded for spec in specs],
+                lock=True,
+            )
+
+    def load_sync(
+        self,
+        keys: list[ObjectKey],
+        objects: list[MemoryObj],
+        *,
+        completion_batch_size: int | None = None,
+        on_batch_loaded: Callable[[int, int], None] | None = None,
+    ) -> list[bool]:
+        """Synchronously batch-load raw-block objects into L1 buffers.
+
+        Args:
+            keys: Object keys to load.
+            objects: Destination memory objects aligned one-to-one with
+                ``keys``.
+            completion_batch_size: Optional logical read completion group size.
+            on_batch_loaded: Optional callback for successfully loaded
+                half-open object ranges.
+
+        Returns:
+            One boolean per key indicating whether its payload was loaded.
+
+        Raises:
+            ValueError: If only one sequence is empty or their lengths differ.
+            RuntimeError: If the adapter is closed.
+        """
+        if not keys and not objects:
+            return []
+        if not keys or not objects:
+            raise ValueError("keys and objects must be non-empty")
+        if len(keys) != len(objects):
+            raise ValueError("keys and objects must have the same length")
+
+        specs = [encode_object_key(key) for key in keys]
+        with self._lock:
+            self._raise_if_closed_locked()
+            self._sync_load_inflight += 1
+        try:
+            load_kwargs: dict[str, Any] = {}
+            if on_batch_loaded is not None:
+                load_kwargs = {
+                    "completion_batch_size": completion_batch_size,
+                    "on_batch_loaded": on_batch_loaded,
+                }
+            results = self._core.load_many_into_batched(
+                [spec.encoded for spec in specs],
+                objects,
+                **load_kwargs,
+            )
+        finally:
+            with self._lock:
+                self._sync_load_inflight -= 1
+                if self._sync_load_inflight == 0:
+                    self._sync_load_cv.notify_all()
+        accessed_keys = [
+            key for key, loaded in zip(keys, results, strict=False) if loaded
+        ]
+        if accessed_keys:
+            try:
+                self._notify_keys_accessed(accessed_keys)
+            except Exception as e:
+                logger.warning(
+                    "RawBlockL2Adapter synchronous access notification failed: %s",
+                    e,
+                )
+        return results
 
     def submit_store_task(
         self,
@@ -487,7 +581,9 @@ class RawBlockL2Adapter(L2AdapterInterface):
     def submit_unlock(self, keys: list[ObjectKey]) -> None:
         """Release L2 locks acquired by lookup-and-lock."""
         encoded_keys = [encode_object_key(key).encoded for key in keys]
-        self._core.unlock_many(encoded_keys)
+        with self._lock:
+            self._raise_if_closed_locked()
+            self._core.unlock_many(encoded_keys)
 
     def submit_load_task(
         self,
@@ -569,6 +665,8 @@ class RawBlockL2Adapter(L2AdapterInterface):
             if self._closed:
                 return
             self._closed = True
+            while self._sync_load_inflight:
+                self._sync_load_cv.wait()
 
         self._store_pool.shutdown(wait=True)
         self._lookup_pool.shutdown(wait=True)
@@ -601,6 +699,7 @@ class RawBlockL2Adapter(L2AdapterInterface):
                 "store_inflight_task_count": self._store_inflight_tasks,
                 "lookup_inflight_task_count": self._lookup_inflight_tasks,
                 "load_inflight_task_count": self._load_inflight_tasks,
+                "sync_load_inflight_count": self._sync_load_inflight,
                 "completed_store_task_count": len(self._completed_store_tasks),
                 "completed_lookup_task_count": len(self._completed_lookup_tasks),
                 "completed_load_task_count": len(self._completed_load_tasks),
