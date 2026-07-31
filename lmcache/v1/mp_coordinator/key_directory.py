@@ -1,15 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """Fleet-wide key directory for the MP coordinator.
 
-Maps each :class:`ObjectKey` to its known placements across the fleet
-(instance, tier, backend, size), built from :class:`CacheEventBatch`
-streams emitted by MP servers. The directory is eventually consistent:
-lookup answers are hints that consumers validate at the owning MP server
-before use.
+Maps each :class:`ObjectKey` to its placements (instance, tier, backend,
+size) across the fleet, using :class:`CacheEventBatch` streams from MP
+servers. The directory is eventually consistent: lookups are hints to be
+validated at the owner.
 
-Event streams are ordered per instance by ``seq`` (duplicates dropped,
-gaps flagged for resync) and fenced by ``incarnation`` (a newer
-incarnation drops all placements reported by older ones).
+Events are processed in order per instance and only the latest L1
+placements for each incarnation are kept. L2 placements persist across
+restarts.
+
+Views like per-``cache_salt`` L2 usage are maintained separately from
+the same event stream.
 
 See ``docs/design/v1/mp_coordinator/key_directory.md``.
 """
@@ -39,11 +41,13 @@ class Placement:
     """One live placement of a key, as returned by directory lookups.
 
     Attributes:
-        instance_id: The MP server holding the bytes.
-        incarnation: That instance's current incarnation.
+        instance_id: The emitter that most recently reported the placement.
+        incarnation: The reporting instance's incarnation at report time.
         tier: Tier the bytes live on (``l1`` or ``l2``).
         backend: Backend within the tier.
         size_bytes: Size the owner reported at store time.
+        shared: ``True`` when the backend is a fleet-shared pool (see
+            :class:`CacheEventBatch`).
     """
 
     instance_id: str
@@ -51,6 +55,7 @@ class Placement:
     tier: Tier
     backend: str
     size_bytes: int
+    shared: bool = False
 
 
 class ApplyResult(str, Enum):
@@ -77,14 +82,21 @@ class InstanceDirectoryStats:
         last_seq: Highest batch ``seq`` applied for that incarnation.
         gap_detected: ``True`` if a ``seq`` gap was observed for the
             instance's stream.
-        num_keys: Number of keys with at least one placement on the
-            instance.
+        num_l1_keys: Number of keys the stream has reported L1
+            placements for (the fencing index). Approximate for shared
+            pools: a counted placement may since have been deleted or
+            re-reported by another emitter.
+        num_l2_keys: Number of keys currently holding an L2 placement
+            whose last reporter is this instance (computed from the
+            placements at read time; L2 is not fenced, so this survives
+            the stream's restarts).
     """
 
     incarnation: int
     last_seq: int
     gap_detected: bool
-    num_keys: int
+    num_l1_keys: int
+    num_l2_keys: int
 
 
 @dataclass(frozen=True)
@@ -165,7 +177,7 @@ class KeyDirectory:
                 state.gap_detected = True
                 logger.warning(
                     "Event gap for instance %s (incarnation %d): "
-                    "seq jumped %d -> %d; slice needs resync",
+                    "seq jumped %d -> %d; slice needs replay",
                     batch.instance_id,
                     batch.incarnation,
                     state.last_seq,
@@ -204,7 +216,7 @@ class KeyDirectory:
             return results
 
     def drop_instance(self, instance_id: str) -> int:
-        """Remove every placement reported by ``instance_id``.
+        """Remove every **L1** placement reported by ``instance_id``.
 
         The instance's stream cursor is removed too, so a later reconnect
         starts fresh with any incarnation.
@@ -220,6 +232,20 @@ class KeyDirectory:
             self._instances.pop(instance_id, None)
             return removed
 
+    def reconcile(self, batch: CacheEventBatch) -> None:
+        """Apply ``batch``'s entries without stream-cursor bookkeeping.
+
+        Args:
+            batch: The synthesized batch to apply.
+        """
+        with self._lock:
+            state = self._instances.get(batch.instance_id)
+            if state is None:
+                state = _InstanceState(incarnation=batch.incarnation)
+                self._instances[batch.instance_id] = state
+            for entry in batch.entries:
+                self._apply_entry_locked(state, batch, entry)
+
     def stats(self) -> DirectoryStats:
         """Return a point-in-time summary of directory contents.
 
@@ -228,15 +254,23 @@ class KeyDirectory:
             ``instance_id``.
         """
         with self._lock:
-            num_placements = sum(
-                len(record.placements) for record in self._records.values()
-            )
+            num_placements = 0
+            l2_keys_by_instance: dict[str, int] = {}
+            for record in self._records.values():
+                num_placements += len(record.placements)
+                for reporter in {
+                    p.instance_id for p in record.placements if p.tier == Tier.L2
+                }:
+                    l2_keys_by_instance[reporter] = (
+                        l2_keys_by_instance.get(reporter, 0) + 1
+                    )
             instances = {
                 instance_id: InstanceDirectoryStats(
                     incarnation=state.incarnation,
                     last_seq=state.last_seq,
                     gap_detected=state.gap_detected,
-                    num_keys=len(state.keys),
+                    num_l1_keys=len(state.keys),
+                    num_l2_keys=l2_keys_by_instance.get(instance_id, 0),
                 )
                 for instance_id, state in self._instances.items()
             }
@@ -267,6 +301,7 @@ class KeyDirectory:
                 tier=batch.tier,
                 backend=batch.backend,
                 size_bytes=entry.size_bytes,
+                shared=batch.shared,
             )
             index = self._find_placement(record.placements, batch)
             if index is None:
@@ -276,7 +311,8 @@ class KeyDirectory:
             if entry.content_hash_hex:
                 record.content_hash_hex = entry.content_hash_hex
             record.last_access = max(record.last_access, batch.ts)
-            state.keys.add(key)
+            if batch.tier == Tier.L1:
+                state.keys.add(key)
         elif batch.event_type == CacheEventType.DELETE:
             record = self._records.get(key)
             if record is None:
@@ -286,7 +322,10 @@ class KeyDirectory:
                 record.placements.pop(index)
             if not record.placements:
                 del self._records[key]
-            if not any(p.instance_id == batch.instance_id for p in record.placements):
+            if batch.tier == Tier.L1 and not any(
+                p.tier == Tier.L1 and p.instance_id == batch.instance_id
+                for p in record.placements
+            ):
                 state.keys.discard(key)
         elif batch.event_type == CacheEventType.ACCESS:
             record = self._records.get(key)
@@ -297,11 +336,12 @@ class KeyDirectory:
     def _find_placement(
         placements: list[Placement], batch: CacheEventBatch
     ) -> int | None:
-        """Return the index of the placement whose ``(instance_id, tier,
-        backend)`` identity matches ``batch``, or ``None`` if absent."""
+        """Return the index of the placement whose identity matches
+        ``batch``, or ``None`` if absent."""
         for index, placement in enumerate(placements):
             if (
-                placement.instance_id == batch.instance_id
+                placement.shared == batch.shared
+                and (batch.shared or placement.instance_id == batch.instance_id)
                 and placement.tier == batch.tier
                 and placement.backend == batch.backend
             ):
@@ -309,7 +349,9 @@ class KeyDirectory:
         return None
 
     def _drop_instance_locked(self, instance_id: str) -> int:
-        """Remove all placements from ``instance_id``; return the count."""
+        """Remove the **L1** placements ``instance_id`` reported; return
+        the count. L2 placements survive: their bytes persist across the
+        reporter's restarts and leave only via ``DELETE`` events."""
         state = self._instances.get(instance_id)
         if state is None:
             return 0
@@ -318,7 +360,11 @@ class KeyDirectory:
             record = self._records.get(key)
             if record is None:
                 continue
-            kept = [p for p in record.placements if p.instance_id != instance_id]
+            kept = [
+                p
+                for p in record.placements
+                if p.tier != Tier.L1 or p.instance_id != instance_id
+            ]
             removed += len(record.placements) - len(kept)
             if kept:
                 record.placements = kept

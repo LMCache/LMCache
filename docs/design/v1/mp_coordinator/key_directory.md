@@ -18,7 +18,10 @@ serving hot path**:
 - It is built purely from `CacheEvent` batches emitted by MP servers. It
 never mutates memory and never grants access to bytes.
 - Every answer is a **hint**. Consumers (P2P discovery, cache control, prefetch planning) must validate at the owning MP server before touching bytes (validate-on-use). Stale state costs a wasted probe or a missed reuse.
-- All state is reconstructible from event replay plus per-instance resync; nothing is persisted at the moment.
+- All state is reconstructible by replaying the event stream (with a
+durable transport such as a message queue, replay from retention also
+covers coordinator restarts and detected gaps); nothing is persisted
+at the moment.
 
 ## Event application semantics
 
@@ -27,9 +30,9 @@ One batch = `(instance_id, incarnation, seq, event_type, tier, backend, entries[
 
 | mechanism           | rule                                                                                                                                                                   | why                                                                                                                                         |
 | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| Incarnation fencing | `incarnation <` current → drop batch (`STALE_INCARNATION`). `incarnation >` current → drop **all** placements the old incarnation reported, then start a fresh cursor. | An MP-server restart empties its pools; no placement may survive the pool it lived in.                                                      |
+| Incarnation fencing | `incarnation <` current → drop batch (`STALE_INCARNATION`). `incarnation >` current → drop the **L1** placements the old incarnation reported, then start a fresh cursor. | A restart empties the reporter's *memory* — its L1 placements must not survive. L2 bytes persist on disk across restarts, so L2 placements are deliberately not fenced. |
 | Seq dedup           | `seq <=` last applied (same incarnation) → drop batch (`DUPLICATE`).                                                                                                   | Replays (retry, event-bus redelivery) must be idempotent.                                                                                   |
-| Gap detection       | `seq >` last applied `+ 1` → set the instance's `gap_detected` flag (visible in stats), apply anyway.                                                                  | Events may be lost; the flag marks the instance's slice as needing resync. Entry application is idempotent, so applying past a gap is safe. |
+| Gap detection       | `seq >` last applied `+ 1` → set the instance's `gap_detected` flag (visible in stats), apply anyway.                                                                  | Events may be lost; the flag marks the instance's slice as stale until the stream is replayed (durable-transport retention). Entry application is idempotent, so applying past a gap is safe. |
 
 
 Per-instance FIFO by `seq` is the **only** ordering the design needs: each
@@ -38,7 +41,9 @@ and no cross-instance arbitration.
 
 Entry semantics by event type:
 
-- `STORE` — upsert the placement at identity `(instance_id, tier, backend)`; re-store replaces the size. Records the entry's
+- `STORE` — upsert the placement at its identity: fleet-scoped
+`(tier, backend)` when the batch is `shared`, else
+`(instance, tier, backend)`; re-store replaces the size. Records the entry's
 `content_hash` (when present) as the back-pointer that will keep content
 index (I2) deletes O(1) once I2 lands (M2).
 - `DELETE` — remove that placement identity (owners report evictions as
@@ -49,11 +54,55 @@ never creates records, and carries no placement identity — its
 `backend` may be empty (`tier`/`backend` are ignored on apply). `ts` is
 emitter wall-clock and is never compared across instances.
 
+## Shared pools
+
+Storage media shared by several instances — one S3 bucket, a shared
+filesystem, and soon shared L1 (e.g. a CXL pool) — carry the
+operator-configured `shared` flag, and the **backend type name
+identifies the pool** fleet-wide — deployments must keep one pool per
+backend type (mounting two distinct pools under one type name would
+merge them in the directory). Reporting is per **emitter stream**: in a
+controllerless pool the mounting instances report the operations they
+perform; a pool with its own allocation controller has the controller
+report all pool placements on its stream (stores at reservation,
+deletes at reclaim — the writing instance's id can ride the event as
+payload the directory does not act on), making it the pool's sole
+reporter:
+
+- **Identity**: placement identity is `(tier, backend)` fleet-scoped
+  when shared (vs `(instance, tier, backend)` private) — stores of one
+  key into one shared pool by N instances upsert a single placement (no
+  double counting), and any mounting instance's reported delete removes
+  it.
+- **Lifecycle**: uniform with private placements — fencing is by the
+  *stream that reported it*, scoped to **L1**. A shared-L1 pool (e.g.
+  CXL) whose controller is its sole reporter is therefore cleared by
+  the controller's restart, exactly matching a pool reset; shared-L2
+  pools (S3, NFS) survive any reporter's restart because the bytes do.
+  A shared placement re-reported by a later emitter survives the
+  original reporter's restart (the fence matches each placement's
+  recorded reporter).
+- **Ordering caveat**: shared pools have multiple writers with no
+  cross-stream order, so a late-arriving report can briefly resurrect or
+  miss a placement — within the validate-on-use contract, and repaired
+  by event replay. When shared-medium controllers hand out a monotone
+  allocation generation with each reservation, attaching it to entries
+  would make cross-reporter conflicts deterministic (future work).
+- `Placement.instance_id` is the **last reporter** for shared
+  placements, not an owner; any instance mounting the pool can serve
+  the bytes.
+- **Controller-emitted batches**: the pool's own controller (which
+  drives its allocations and evictions) reports to the coordinator
+  directly. `instance_id` is really the *emitter stream id* — the
+  controller sends under its own stable id and gets an ordinary
+  seq-deduplicated, incarnation-fenced stream, with no special-casing
+  anywhere in the directory.
+
 ## Structures
 
 ```
 ObjectKey → _KeyRecord {
-    placements: list[Placement],   # ≤1 per (instance_id, tier, backend)
+    placements: list[Placement],   # ≤1 per placement identity (see STORE)
     content_hash_hex, last_access
 }
 instance_id → _InstanceState { incarnation, last_seq, gap_detected, keys }
@@ -64,7 +113,7 @@ and `drop_instance` (deregistration cleanup) proportional to the
 instance's own keys instead of a full directory scan.
 
 The Python-phase directory is keyed by `ObjectKey` directly (hashable
-frozen dataclass, same as the L2 usage manager). The RFC's 16-byte
+frozen dataclass). The RFC's 16-byte
 `key_hash` with interned `model_id`/`salt_id` is a memory/native-port
 optimization (M6), not a semantic change.
 
@@ -82,8 +131,10 @@ APIs do; requires `model_name` / `world_size` / `cache_salt` since key
 identity includes them) and return each key's placements.
 Position-independent token matching arrives with the content index (M2).
 - `GET /directory/stats` — key/placement counts plus per-instance stream
-state (`incarnation`, `last_seq`, `gap_detected`) for observability and
-the future resync trigger.
+state (`incarnation`, `last_seq`, `gap_detected`, and per-tier key
+counts: `num_l1_keys` from the fencing index, `num_l2_keys` computed
+from the placements at read time), for observability and the future
+replay trigger.
 
 Type placement:
 
@@ -99,13 +150,18 @@ records.
 
 MP-server emission of the `CacheEvent` stream (L1 + L2, `incarnation` =
 server start time) is implemented — see
-[cache_events.md](cache_events.md). Re-basing the legacy
-`/quota/events` stream on the same emitter is still open.
+[cache_events.md](cache_events.md). It is the fleet's single event
+stream: `/directory/events` ingestion fans applied batches out to the
+router's registered consumers (`CacheEventRouter`) — derived views such
+as the per-salt L2 usage view and the eviction LRU (see
+[l2_usage_and_eviction.md](l2_usage_and_eviction.md)).
 
 ## Deliberately out of scope (follow-ups)
-- **Resync integration**: acting on `gap_detected` (digest/resync
-backstop, `UNCONFIRMED` placement decay) — extends today's
-`L2ResyncManager` pattern to L1.
+- **Replay integration**: acting on `gap_detected` by replaying the
+instance's stream from the durable transport's retention (supersedes
+the earlier storage-scan resync idea).
+- **Allocation generations** for shared pools (deterministic
+cross-reporter conflict resolution; see Shared pools above).
 - **Registry integration**: calling `drop_instance` from deregistration /
 heartbeat-timeout eviction (the method exists and is tested).
 - **Content index (I2)**, blend rewiring, checkpointing, and the

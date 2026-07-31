@@ -35,7 +35,8 @@ async def report_cache_events(
 
     Batches are applied in list order; per instance they must be sent in
     emission order. Duplicate and stale-incarnation batches are dropped
-    and counted, not errors.
+    and counted, not errors. Applied batches also fan out to the
+    usage/eviction consumers via the context's event router.
 
     Args:
         body: The event batches to apply.
@@ -43,11 +44,12 @@ async def report_cache_events(
     Returns:
         Counts of applied and dropped batches.
     """
-    directory = get_context(request).key_directory
+    ctx = get_context(request)
     response = DirectoryEventsResponse()
     for batch in body.batches:
-        result = directory.apply_batch(batch)
+        result = ctx.key_directory.apply_batch(batch)
         if result == ApplyResult.APPLIED:
+            ctx.event_router.route(batch)
             response.applied += 1
         elif result == ApplyResult.DUPLICATE:
             response.duplicates += 1

@@ -165,15 +165,20 @@ def test_stats_reports_counts_and_gap_flag():
     with _client() as client:
         _post_events(client, [_batch(seq=1)])
         _post_events(client, [_batch(seq=5, entries=[{"key": _key(h="bb")}])])
+        _post_events(
+            client,
+            [_batch(seq=6, tier="l2", backend="fs", entries=[{"key": _key(h="bb")}])],
+        )
 
         data = client.get("/directory/stats").json()
         assert data["num_keys"] == 2
-        assert data["num_placements"] == 2
+        assert data["num_placements"] == 3
         instance = data["instances"]["node-a"]
         assert instance["incarnation"] == 1
-        assert instance["last_seq"] == 5
+        assert instance["last_seq"] == 6
         assert instance["gap_detected"] is True
-        assert instance["num_keys"] == 2
+        assert instance["num_l1_keys"] == 2
+        assert instance["num_l2_keys"] == 1
 
 
 # -- Request validation ------------------------------------------------------

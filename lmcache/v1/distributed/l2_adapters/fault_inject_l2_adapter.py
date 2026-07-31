@@ -384,10 +384,10 @@ class FaultInjectL2Adapter(L2AdapterInterface):
         """Forward the listener registration to the inner adapter."""
         self._inner.register_listener(listener)
 
-    def set_backend_name(self, name: str) -> None:
-        """Forward the backend name to the inner adapter (which owns the
-        listener-notify funnel that tags cache events)."""
-        self._inner.set_backend_name(name)
+    def set_backend_name(self, name: str, shared: bool = False) -> None:
+        """Forward the event-tagging identity to the inner adapter (which
+        owns the listener-notify funnel that tags cache events)."""
+        self._inner.set_backend_name(name, shared)
 
     def delete(self, keys: list[ObjectKey]) -> None:
         """Delegate the delete to the inner adapter."""

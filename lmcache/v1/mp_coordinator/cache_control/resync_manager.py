@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Coordinator-side L2 resync.
 
-On boot, paginates an MP server's ``GET /cache/objects`` and seeds the
-coordinator's usage + eviction trackers so quota enforcement starts
-from a representative baseline rather than zero. Best-effort: failures
-are logged and the manager gives up; the ongoing event stream corrects
-any initial blind spots.
+On boot, paginates an MP server's ``GET /cache/objects``, synthesizes
+``STORE`` batches, and feeds them to the key directory (placements) and
+— through the ``CacheEventRouter`` — to every registered consumer (the
+usage view, the eviction LRU), so quota enforcement starts from a
+representative baseline rather than zero. The directory side goes
+through :meth:`KeyDirectory.reconcile` — no stream-cursor bookkeeping —
+so a backfill cannot disturb, or be rejected by, the instance's live
+event stream. Best-effort: failures are logged and the manager gives
+up; the ongoing event stream corrects any initial blind spots.
 """
 
 # Future
@@ -20,14 +24,19 @@ import httpx
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import EncodedObjectKey
+from lmcache.v1.distributed.api import EncodedObjectKey, Tier
+from lmcache.v1.mp_coordinator.api import (
+    CacheEventBatch,
+    CacheEventEntry,
+    CacheEventType,
+)
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.mp_coordinator.cache_control.eviction_manager import (
-        L2EvictionManager,
+    from lmcache.v1.mp_coordinator.cache_control.event_router import (
+        CacheEventRouter,
     )
-    from lmcache.v1.mp_coordinator.cache_control.usage_manager import L2UsageManager
+    from lmcache.v1.mp_coordinator.key_directory import KeyDirectory
     from lmcache.v1.mp_coordinator.registry import InstanceRegistry, MPInstance
 
 logger = init_logger(__name__)
@@ -38,22 +47,24 @@ class L2ResyncManager:
     actual L2 contents. Best-effort; not snapshot-isolated.
 
     Args:
-        usage_manager: Shared usage manager.
-        eviction_manager: Shared eviction manager.
+        key_directory: The fleet key directory; backfilled via its
+            gate-bypassing :meth:`KeyDirectory.reconcile`.
+        event_router: The applied-batch fan-out; every synthesized
+            batch is routed to the registered consumers.
         page_size: ``page_size`` forwarded to the MP server's
             ``/cache/objects`` endpoint.
     """
 
     def __init__(
         self,
-        usage_manager: L2UsageManager,
-        eviction_manager: L2EvictionManager,
+        key_directory: KeyDirectory,
+        event_router: CacheEventRouter,
         page_size: int = 1000,
     ) -> None:
         if page_size <= 0:
             raise ValueError(f"page_size must be positive (got {page_size})")
-        self._usage_manager = usage_manager
-        self._eviction_manager = eviction_manager
+        self._key_directory = key_directory
+        self._event_router = event_router
         self._page_size = page_size
 
     async def resync_from(
@@ -91,6 +102,7 @@ class L2ResyncManager:
                 )
                 return total
             pages += 1
+            batch_entries: list[CacheEventEntry] = []
             for entry in body.get("entries", []):
                 try:
                     key = entry["key"]
@@ -101,14 +113,31 @@ class L2ResyncManager:
                         object_group_id=key.get("object_group_id", 0),
                         cache_salt=key.get("cache_salt", ""),
                     )
-                    obj_key = encoded.to_object_key()
+                    encoded.to_object_key()  # validates key invariants
                     size_bytes = int(entry["size_bytes"])
                 except (KeyError, TypeError, ValueError) as exc:
                     logger.debug("Skipping unparsable resync entry %r: %s", entry, exc)
                     continue
-                self._usage_manager.record_stored(obj_key, size_bytes)
-                self._eviction_manager.on_store(obj_key)
+                batch_entries.append(
+                    CacheEventEntry(key=encoded, size_bytes=size_bytes)
+                )
                 total += 1
+            if batch_entries:
+                # Placement identity must match the live event stream's
+                # (backend = adapter type name, plus the shared flag) so
+                # later DELETE events remove the backfilled placements.
+                batch = CacheEventBatch(
+                    instance_id=instance.instance_id,
+                    incarnation=0,
+                    seq=pages,
+                    event_type=CacheEventType.STORE,
+                    tier=Tier.L2,
+                    backend=str(body.get("adapter", "")) or "unknown",
+                    shared=bool(body.get("shared", False)),
+                    entries=batch_entries,
+                )
+                self._key_directory.reconcile(batch)
+                self._event_router.route(batch)
             page_token = body.get("next_page_token")
             if page_token is None:
                 break
