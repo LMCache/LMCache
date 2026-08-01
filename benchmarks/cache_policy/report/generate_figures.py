@@ -139,7 +139,7 @@ def fig_hit_rate_vs_cache_size_multiseed(ci_rows: list[dict], out: Path) -> None
     axes[0].set_ylabel("Token hit rate (%)")
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=5, bbox_to_anchor=(0.5, -0.05))
-    fig.suptitle("Hit rate vs. cache size, mean +/- 95% CI across 10 independent seeds")
+    fig.suptitle("Mean token hit rate with 95% bootstrap CI across 10 independent seeds")
     fig.tight_layout(rect=(0, 0.08, 1, 0.94))
     fig.savefig(out / "fig1_hit_rate_vs_cache_size_multiseed.png")
     plt.close(fig)
@@ -168,8 +168,8 @@ def fig_latency_vs_cache_size_multiseed(ci_rows: list[dict], out: Path) -> None:
             linewidth=1.8,
         )
     ax.set_xlabel("Cache size (MiB)")
-    ax.set_ylabel("Mean modeled p95 latency (ms), across 10 seeds")
-    ax.set_title("Modeled p95 latency vs. cache size (mixed_zipfian)")
+    ax.set_ylabel("Mean analytical p95 estimate (ms), across 10 seeds")
+    ax.set_title("Analytical recomputation-latency estimate vs. cache size (mixed_zipfian)")
     ax.set_xticks([50, 100, 200])
     ax.legend(fontsize=8)
     ax.grid(alpha=0.3)
@@ -222,7 +222,7 @@ def fig_eviction_and_rejections(rows: list[dict], out: Path) -> None:
     )
     ax.set_xticks(list(x))
     ax.set_xticklabels(policies, rotation=20, ha="right")
-    ax.set_ylabel("Count over one run (3,000 requests)")
+    ax.set_ylabel("Chunk-level events over 3,000 requests")
     ax.set_title(
         "Evictions vs. rejected admissions -- mixed_zipfian, 100 MiB\n"
         "(single run; see Figure 1 for the CI'd hit-rate effect)"
@@ -239,13 +239,9 @@ def fig_real_data_paired_diff(paired_rows: list[dict], out: Path) -> None:
     scales = ["500", "2000", "5000"]
     policies = [
         "LFU",
-        "FIFO",
-        "MRU",
         "COST_AWARE",
         "ADMISSION_LRU",
-        "ADMISSION_COST_AWARE",
         "WINDOWED_ADMISSION_LRU",
-        "WINDOWED_ADMISSION_COST_AWARE",
     ]
     present = sorted(
         {r["policy_name"] for r in paired_rows if r["policy_name"] in policies},
@@ -279,8 +275,8 @@ def fig_real_data_paired_diff(paired_rows: list[dict], out: Path) -> None:
     ax.set_xticklabels([f"{s} conv." for s in scales])
     ax.set_ylabel("Paired hit-rate difference vs. LRU (percentage points)")
     ax.set_title(
-        "Real ShareGPT: paired hit-rate diff vs. LRU, 95% CI (6 repeats), 200 MiB\n"
-        "Bars whose error bars exclude zero are a statistically supported difference"
+        "ShareGPT-derived round-robin replay: paired hit-rate difference vs. LRU\n"
+        "95% paired-bootstrap CI across 6 matched subsamples"
     )
     ax.legend(fontsize=7, ncol=4, loc="upper center", bbox_to_anchor=(0.5, -0.12))
     ax.grid(alpha=0.3, axis="y")
@@ -310,7 +306,7 @@ def fig_zipf_robustness(rows: list[dict], out: Path) -> None:
         ax.plot(xs, ys, marker=_MARKERS[p], color=_COLORS[p], label=p, linewidth=1.8)
     ax.set_xlabel("Zipf skew parameter (zipf_s)")
     ax.set_ylabel("Token hit rate (%), single run per point")
-    ax.set_title("Hit rate vs. Zipf skew strength (mixed_zipfian, 100 MiB)")
+    ax.set_title("Single-run sensitivity to Zipf skew (mixed_zipfian, 100 MiB)")
     ax.legend()
     ax.grid(alpha=0.3)
     fig.tight_layout()
@@ -325,8 +321,8 @@ def fig_ablation(
 
     ax = axes[0]
     variants = ["fast_decay", "default", "slow_decay"]
-    workloads = ["mixed_zipfian", "multi_round_chat"]
-    width = 0.35
+    workloads = ["mixed_zipfian"]
+    width = 0.55
     for wi, workload in enumerate(workloads):
         ys, halvings = [], []
         for v in variants:
@@ -352,7 +348,7 @@ def fig_ablation(
     ax.set_xticklabels(["fast\n(5k)", "default\n(20k)", "slow\n(80k)"])
     ax.set_xlabel("halve_every  (h=actual halving passes triggered)")
     ax.set_ylabel("Token hit rate (%)")
-    ax.set_title("ADMISSION_LRU: halve_every ablation")
+    ax.set_title("ADMISSION_LRU: halve_every sensitivity (single run)")
     ax.legend(fontsize=8)
     ax.grid(alpha=0.3, axis="y")
 
@@ -386,7 +382,7 @@ def fig_ablation(
     ax.set_xticklabels(labels, fontsize=8)
     ax.set_ylabel("Token hit rate (%)")
     ax.set_title(
-        "WINDOWED_ADMISSION_LRU: window_capacity / promotion_threshold ablation"
+        "WINDOWED_ADMISSION_LRU: parameter sensitivity (single run)"
     )
     ax.legend(fontsize=8)
     ax.grid(alpha=0.3, axis="y")
@@ -438,42 +434,78 @@ def fig_multi_round_chat_case_study(rows: list[dict], out: Path) -> None:
 
 
 def fig_freeze_illustration(out: Path) -> None:
-    requests = novel_long(500, min_tokens=2048, max_tokens=4096, chunk_size=256, seed=0)
+    """Deterministic one-shot stress test showing turnover and rejection."""
+    requests = novel_long(
+        500,
+        min_tokens=2048,
+        max_tokens=4096,
+        chunk_size=256,
+        seed=0,
+    )
     cost_model = CostModel(CostModelConfig())
     small_cache_bytes = 2 * 1024 * 1024
-    policies = ["LRU", "ADMISSION_LRU", "WINDOWED_ADMISSION_LRU"]
-    evictions = []
-    for p in policies:
+
+    policies = [
+        "LRU",
+        "ADMISSION_LRU",
+        "WINDOWED_ADMISSION_LRU",
+    ]
+
+    evictions: list[int] = []
+    rejections: list[int] = []
+
+    for policy_name in policies:
         result = run_workload(
-            p,
+            policy_name,
             requests,
             small_cache_bytes,
             DEFAULT_KV_BYTES_PER_CHUNK,
             cost_model,
             workload_name="freeze_check",
         )
-        evictions.append(result.eviction_count)
 
-    fig, ax = plt.subplots(figsize=(6.5, 4.6))
-    bars = ax.bar(policies, evictions, color=[_COLORS[p] for p in policies])
-    for bar, v in zip(bars, evictions, strict=False):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height(),
-            str(v),
-            ha="center",
-            va="bottom",
-            fontsize=10,
+        evictions.append(int(result.eviction_count))
+        rejections.append(
+            int(result.extra_params.get("rejected_admissions", 0))
         )
-    ax.set_xticks(range(len(policies)))
-    ax.set_xticklabels(policies, rotation=15, ha="right", fontsize=9)
-    ax.set_ylabel("Eviction count over the run")
-    ax.set_title("Purely one-shot traffic (novel_long): freeze illustration")
+
+    fig, ax = plt.subplots(figsize=(7.5, 4.8))
+
+    x = list(range(len(policies)))
+    width = 0.36
+
+    eviction_bars = ax.bar(
+        [i - width / 2 for i in x],
+        evictions,
+        width,
+        label="Evictions",
+        color="#1f77b4",
+    )
+
+    rejection_bars = ax.bar(
+        [i + width / 2 for i in x],
+        rejections,
+        width,
+        label="Rejected admissions",
+        color="#d62728",
+    )
+
+    ax.bar_label(eviction_bars, padding=3, fontsize=9)
+    ax.bar_label(rejection_bars, padding=3, fontsize=9)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(policies, rotation=12, ha="right", fontsize=9)
+    ax.set_ylabel("Chunk-level events over 500 requests")
+    ax.set_title(
+        "One-shot traffic: cache turnover vs. admission rejection\n"
+        "(novel_long, deterministic stress test)"
+    )
+    ax.legend()
     ax.grid(alpha=0.3, axis="y")
+
     fig.tight_layout()
     fig.savefig(out / "fig7_freeze_illustration.png")
     plt.close(fig)
-
 
 def fig_latency_distribution(raw_rows: list[dict], out: Path) -> None:
     policies = ["LRU", "ADMISSION_LRU", "WINDOWED_ADMISSION_LRU"]
@@ -494,10 +526,10 @@ def fig_latency_distribution(raw_rows: list[dict], out: Path) -> None:
     for patch, p in zip(bp["boxes"], policies, strict=False):
         patch.set_facecolor(_COLORS[p])
         patch.set_alpha(0.6)
-    ax.set_ylabel("Modeled p95 latency (ms)")
+    ax.set_ylabel("Analytical p95 estimate (ms)")
     ax.set_title(
-        "Distribution of p95 latency across 6 paired repeats\n"
-        "(real ShareGPT, 500 conversations, 100 MiB)"
+        "Per-subsample analytical p95 estimates across 6 matched replays\n"
+        "(ShareGPT-derived round-robin replay, 500 conversations, 100 MiB)"
     )
     ax.grid(alpha=0.3, axis="y")
     fig.tight_layout()

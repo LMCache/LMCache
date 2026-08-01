@@ -21,7 +21,7 @@
     "hit_rate_diff_ci_lo": -0.0024239898296009982,
     "hit_rate_diff_ci_hi": -0.00039273659075046247,
     "sign_test_p_value": 0.0625,
-    "significant_at_p05": true
+    "significant_at_p05": false
   },
   {
     "policy_name": "MRU",
@@ -45,7 +45,7 @@
     "hit_rate_diff_ci_lo": -0.012622811871726652,
     "hit_rate_diff_ci_hi": -0.0033250899812928883,
     "sign_test_p_value": 0.21875,
-    "significant_at_p05": true
+    "significant_at_p05": false
   },
   {
     "policy_name": "ADMISSION_LRU",
@@ -105,7 +105,7 @@
     "hit_rate_diff_ci_lo": -0.010872701943876064,
     "hit_rate_diff_ci_hi": -0.001116844063469578,
     "sign_test_p_value": 0.21875,
-    "significant_at_p05": true
+    "significant_at_p05": false
   },
   {
     "policy_name": "FIFO",
@@ -117,7 +117,7 @@
     "hit_rate_diff_ci_lo": 0.0026210880428020242,
     "hit_rate_diff_ci_hi": 0.029676179876896542,
     "sign_test_p_value": 0.6875,
-    "significant_at_p05": true
+    "significant_at_p05": false
   },
   {
     "policy_name": "MRU",
@@ -309,7 +309,7 @@
     "hit_rate_diff_ci_lo": -0.0014083468264644444,
     "hit_rate_diff_ci_hi": -0.0005566076944921467,
     "sign_test_p_value": 0.0625,
-    "significant_at_p05": true
+    "significant_at_p05": false
   },
   {
     "policy_name": "MRU",
@@ -465,7 +465,7 @@
     "hit_rate_diff_ci_lo": 0.0011967138686905822,
     "hit_rate_diff_ci_hi": 0.005649525550285055,
     "sign_test_p_value": 0.21875,
-    "significant_at_p05": true
+    "significant_at_p05": false
   },
   {
     "policy_name": "WINDOWED_ADMISSION_COST_AWARE",
@@ -813,7 +813,7 @@
     "hit_rate_diff_ci_lo": -0.003720763745179429,
     "hit_rate_diff_ci_hi": -7.996558650247287e-05,
     "sign_test_p_value": 0.6875,
-    "significant_at_p05": true
+    "significant_at_p05": false
   },
   {
     "policy_name": "ADMISSION_LRU",
@@ -861,6 +861,6 @@
     "hit_rate_diff_ci_lo": -0.004112400518604825,
     "hit_rate_diff_ci_hi": -0.00014979990582892713,
     "sign_test_p_value": 1.0,
-    "significant_at_p05": true
+    "significant_at_p05": false
   }
 ]

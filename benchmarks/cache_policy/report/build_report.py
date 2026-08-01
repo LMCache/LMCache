@@ -21,7 +21,7 @@ from fpdf import FPDF
 _HERE = Path(__file__).parent
 _FIGS = _HERE / "figures"
 
-_FONT_DIR = Path(r"C:\Windows\Fonts")
+_FONT_DIR = Path("/mnt/c/Windows/Fonts")
 _PAGE_W = 210
 _MARGIN = 18
 _CONTENT_W = _PAGE_W - 2 * _MARGIN

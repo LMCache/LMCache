@@ -69,7 +69,7 @@
     "hit_rate_diff_ci_lo": -0.005692955704033309,
     "hit_rate_diff_ci_hi": -0.0017126790190798657,
     "sign_test_p_value": 0.109375,
-    "significant_at_p05": true
+    "significant_at_p05": false
   },
   {
     "policy_name": "ADMISSION_LRU",

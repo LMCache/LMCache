@@ -248,7 +248,7 @@ def run_repeated(
                     sign_p = paired_sign_test(
                         per_policy_hit_rates[policy_name], baseline_hit_rates
                     )
-                    significant = diff_lo > 0 or diff_hi < 0
+                    significant = (diff_lo > 0 or diff_hi < 0) and sign_p < 0.05
                     paired_comparisons.append(
                         PairedComparison(
                             policy_name=policy_name,

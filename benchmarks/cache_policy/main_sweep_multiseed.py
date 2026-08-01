@@ -155,7 +155,7 @@ def compute_paired_comparisons(
                     hit_rate_diff_ci_lo=lo,
                     hit_rate_diff_ci_hi=hi,
                     sign_test_p_value=sign_p,
-                    significant_at_p05=(lo > 0 or hi < 0),
+                    significant_at_p05=(lo > 0 or hi < 0) and sign_p < 0.05,
                 )
             )
     return comparisons
