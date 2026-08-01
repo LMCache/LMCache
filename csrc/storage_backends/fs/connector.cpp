@@ -2,12 +2,88 @@
 
 #include "connector.h"
 #include <cerrno>
+#include <cstdint>
 #include <cstdio>
 #include <stdexcept>
 #include <string>
 
 namespace lmcache {
 namespace connector {
+
+namespace {
+
+// Carries the errno alongside the message. A caller cannot classify an
+// O_DIRECT refusal from strerror text alone.
+struct IoError : std::runtime_error {
+  IoError(const std::string& what, int errnum)
+      : std::runtime_error(what), err(errnum) {}
+  int err;
+};
+
+// Errnos meaning this file or filesystem will not serve direct I/O.
+// open() is documented to answer EINVAL, a filesystem may answer
+// EOPNOTSUPP, and EPERM is reachable under policy. None of them says the
+// data is unavailable, so each should degrade to buffered I/O rather than
+// fail the request.
+bool is_direct_io_refusal(int err) {
+  if (err == EINVAL || err == EPERM) return true;
+#ifdef EOPNOTSUPP
+  if (err == EOPNOTSUPP) return true;
+#endif
+#ifdef ENOTSUP
+  if (err == ENOTSUP) return true;
+#endif
+  return false;
+}
+
+// O_DIRECT constrains the file offset, the transfer length and the buffer
+// address. Every transfer here starts at offset zero, so the other two are
+// checked. Length alone is not enough, because a pinned host allocator can
+// return a block sized region at an address that is not block aligned.
+bool odirect_alignment_ok(size_t block_size, size_t len, const void* buf) {
+  if (block_size == 0) return false;
+  if (len % block_size != 0) return false;
+  return reinterpret_cast<uintptr_t>(buf) % block_size == 0;
+}
+
+// Opens with O_DIRECT when asked, and falls back to a buffered open when the
+// flag is refused. Reports which one the caller got, since that decides
+// whether the transfer has to stay aligned.
+int open_maybe_direct(const char* path, int flags, mode_t mode,
+                      bool want_direct, bool* opened_direct) {
+  *opened_direct = false;
+#ifdef O_DIRECT
+  if (want_direct) {
+    int fd = ::open(path, flags | O_DIRECT, mode);
+    if (fd >= 0) {
+      *opened_direct = true;
+      return fd;
+    }
+    if (!is_direct_io_refusal(errno)) {
+      return -1;
+    }
+  }
+#else
+  (void)want_direct;
+#endif
+  return ::open(path, flags, mode);
+}
+
+bool odirect_already_refused(const WorkerFSConn& conn) {
+  return conn.odirect_refused != nullptr &&
+         conn.odirect_refused->load(std::memory_order_relaxed);
+}
+
+void note_odirect_refused(WorkerFSConn& conn) {
+  if (conn.odirect_refused == nullptr) return;
+  if (!conn.odirect_refused->exchange(true, std::memory_order_relaxed)) {
+    fprintf(stderr,
+            "[LMCache FS] O_DIRECT refused on this path, continuing with "
+            "buffered I/O\n");
+  }
+}
+
+}  // namespace
 
 // ---------------------------------------------------------------
 // Helpers
@@ -95,7 +171,7 @@ static void write_all(int fd, const void* data, size_t len) {
     ssize_t n = ::write(fd, ptr + written, len - written);
     if (n < 0) {
       if (errno == EINTR) continue;
-      throw std::runtime_error("write failed: " + std::string(strerror(errno)));
+      throw IoError("write failed: " + std::string(strerror(errno)), errno);
     }
     if (n == 0) {
       throw std::runtime_error("write returned 0");
@@ -111,12 +187,39 @@ static size_t read_all(int fd, void* buf, size_t len) {
     ssize_t n = ::read(fd, ptr + total, len - total);
     if (n < 0) {
       if (errno == EINTR) continue;
-      throw std::runtime_error("read failed: " + std::string(strerror(errno)));
+      throw IoError("read failed: " + std::string(strerror(errno)), errno);
     }
     if (n == 0) break;  // EOF
     total += static_cast<size_t>(n);
   }
   return total;
+}
+
+// Reads exactly len bytes, optionally issuing a small leading read first so
+// the filesystem starts reading ahead. Shared by the direct and the buffered
+// attempt so both paths behave identically.
+static void read_whole_file(int fd, void* buf, size_t len,
+                            size_t read_ahead_size,
+                            const std::string& file_path) {
+  size_t n;
+  if (read_ahead_size > 0 && len > read_ahead_size) {
+    size_t n_head = read_all(fd, buf, read_ahead_size);
+    if (n_head < read_ahead_size) {
+      n = n_head;  // short read on the head, treat as incomplete
+    } else {
+      size_t n_tail =
+          read_all(fd, static_cast<char*>(buf) + read_ahead_size,
+                   len - read_ahead_size);
+      n = n_head + n_tail;
+    }
+  } else {
+    n = read_all(fd, buf, len);
+  }
+  if (n != len) {
+    throw std::runtime_error("incomplete read for " + file_path + ": expected " +
+                             std::to_string(len) + ", got " +
+                             std::to_string(n));
+  }
 }
 
 // ---------------------------------------------------------------
@@ -163,6 +266,7 @@ WorkerFSConn FSConnector::create_connection() {
   conn.use_odirect = use_odirect_;
   conn.disk_block_size = disk_block_size_;
   conn.read_ahead_size = read_ahead_size_;
+  conn.odirect_refused = &odirect_refused_;
   return conn;
 }
 
@@ -171,48 +275,45 @@ void FSConnector::do_single_get(WorkerFSConn& conn, const std::string& key,
   std::string filename = key_to_filename(key);
   auto file_path = conn.base_path / filename;
 
-  int flags = O_RDONLY;
-  bool do_odirect = conn.use_odirect;
-  if (do_odirect) {
-    bool aligned = conn.disk_block_size > 0 && len % conn.disk_block_size == 0;
-    if (aligned) {
-#ifdef O_DIRECT
-      flags |= O_DIRECT;
-#endif
-    } else {
-      do_odirect = false;
-    }
-  }
+  const int flags = O_RDONLY;
+  bool want_odirect =
+      conn.use_odirect && !odirect_already_refused(conn) &&
+      odirect_alignment_ok(conn.disk_block_size, len, buf);
 
-  int fd = ::open(file_path.c_str(), flags);
+  bool opened_direct = false;
+  int fd = open_maybe_direct(file_path.c_str(), flags, 0, want_odirect,
+                             &opened_direct);
   if (fd < 0) {
     throw std::runtime_error("open for read failed: " + file_path.string() +
                              ": " + strerror(errno));
   }
+  if (want_odirect && !opened_direct) {
+    note_odirect_refused(conn);
+  }
 
   try {
-    size_t n;
-    if (conn.read_ahead_size > 0 && len > conn.read_ahead_size) {
-      // Trigger filesystem readahead with a small initial
-      // read, then read the remainder.
-      size_t ra = conn.read_ahead_size;
-      size_t n_head = read_all(fd, buf, ra);
-      if (n_head < ra) {
-        // Short read on the head portion — treat as
-        // incomplete
-        n = n_head;
-      } else {
-        size_t n_tail = read_all(fd, static_cast<char*>(buf) + ra, len - ra);
-        n = n_head + n_tail;
-      }
-    } else {
-      n = read_all(fd, buf, len);
+    read_whole_file(fd, buf, len, conn.read_ahead_size, file_path.string());
+  } catch (const IoError& e) {
+    ::close(fd);
+    // O_DIRECT accepted at open() and refused at read() is reachable on
+    // mainstream filesystems, so retry buffered once before failing the key.
+    if (!opened_direct || !is_direct_io_refusal(e.err)) {
+      throw;
     }
-    if (n != len) {
-      throw std::runtime_error("incomplete read for " + file_path.string() +
-                               ": expected " + std::to_string(len) + ", got " +
-                               std::to_string(n));
+    note_odirect_refused(conn);
+    fd = ::open(file_path.c_str(), flags);
+    if (fd < 0) {
+      throw std::runtime_error("open for buffered read failed: " +
+                               file_path.string() + ": " + strerror(errno));
     }
+    try {
+      read_whole_file(fd, buf, len, conn.read_ahead_size, file_path.string());
+    } catch (...) {
+      ::close(fd);
+      throw;
+    }
+    ::close(fd);
+    return;
   } catch (...) {
     ::close(fd);
     throw;
@@ -240,27 +341,47 @@ void FSConnector::do_single_set(WorkerFSConn& conn, const std::string& key,
     tmp_path.replace_extension(TMP_EXT);
   }
 
-  int flags = O_CREAT | O_WRONLY | O_TRUNC;
-  bool do_odirect = conn.use_odirect;
-  if (do_odirect) {
-    bool aligned = conn.disk_block_size > 0 && len % conn.disk_block_size == 0;
-    if (aligned) {
-#ifdef O_DIRECT
-      flags |= O_DIRECT;
-#endif
-    } else {
-      do_odirect = false;
-    }
-  }
+  const int flags = O_CREAT | O_WRONLY | O_TRUNC;
+  bool want_odirect = conn.use_odirect && !odirect_already_refused(conn) &&
+                      odirect_alignment_ok(conn.disk_block_size, len, buf);
 
-  int fd = ::open(tmp_path.c_str(), flags, 0644);
+  bool opened_direct = false;
+  int fd = open_maybe_direct(tmp_path.c_str(), flags, 0644, want_odirect,
+                             &opened_direct);
   if (fd < 0) {
     throw std::runtime_error("open for write failed: " + tmp_path.string() +
                              ": " + strerror(errno));
   }
+  if (want_odirect && !opened_direct) {
+    note_odirect_refused(conn);
+  }
 
   try {
     write_all(fd, buf, len);
+  } catch (const IoError& e) {
+    ::close(fd);
+    // O_DIRECT accepted at open() and refused at write() is the live failure
+    // on XFS with a host buffer that is length aligned but not address
+    // aligned. Without this branch every store fails and the tier stays empty
+    // while reporting healthy, so retry buffered once before giving up.
+    if (!opened_direct || !is_direct_io_refusal(e.err)) {
+      std::filesystem::remove(tmp_path);
+      throw;
+    }
+    note_odirect_refused(conn);
+    fd = ::open(tmp_path.c_str(), flags, 0644);
+    if (fd < 0) {
+      std::filesystem::remove(tmp_path);
+      throw std::runtime_error("open for buffered write failed: " +
+                               tmp_path.string() + ": " + strerror(errno));
+    }
+    try {
+      write_all(fd, buf, len);
+    } catch (...) {
+      ::close(fd);
+      std::filesystem::remove(tmp_path);
+      throw;
+    }
   } catch (...) {
     ::close(fd);
     // Clean up temp file on failure
